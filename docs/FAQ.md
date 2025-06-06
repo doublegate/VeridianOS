@@ -137,8 +137,8 @@ Helpful skills:
 
 ```bash
 # Clone repository
-git clone https://github.com/veridian-os/veridian
-cd veridian
+git clone https://github.com/doublegate/VeridianOS
+cd VeridianOS
 
 # Install dependencies
 ./scripts/install-deps.sh

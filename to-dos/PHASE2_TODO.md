@@ -1,0 +1,289 @@
+# Phase 2: User Space Foundation TODO
+
+**Phase Duration**: 3-4 months  
+**Status**: NOT STARTED  
+**Dependencies**: Phase 1 completion
+
+## Overview
+
+Phase 2 establishes the user-space foundation including init system, basic drivers, VFS, and core system services.
+
+## 🎯 Goals
+
+- [ ] Implement user-space runtime
+- [ ] Create driver framework
+- [ ] Build virtual filesystem
+- [ ] Establish core system services
+- [ ] Enable basic user applications
+
+## 📋 Core Tasks
+
+### 1. User-Space Runtime
+
+#### Process Management
+- [ ] Process server implementation
+  - [ ] Process creation
+  - [ ] Process termination
+  - [ ] Process enumeration
+  - [ ] Resource limits
+- [ ] ELF loader
+  - [ ] ELF64 parsing
+  - [ ] Dynamic linking support
+  - [ ] Relocation handling
+  - [ ] Symbol resolution
+
+#### Thread Management
+- [ ] Thread creation API
+- [ ] Thread local storage (TLS)
+- [ ] Thread synchronization primitives
+- [ ] Thread scheduling hints
+
+#### Standard Library Foundation
+- [ ] Core runtime support
+  - [ ] Heap allocator interface
+  - [ ] Panic handler
+  - [ ] Error handling
+- [ ] Basic collections
+  - [ ] Vec implementation
+  - [ ] HashMap implementation
+  - [ ] String handling
+- [ ] Synchronization primitives
+  - [ ] Mutex
+  - [ ] Semaphore
+  - [ ] Condition variables
+
+### 2. Driver Framework
+
+#### Driver Model
+- [ ] Driver registration system
+- [ ] Device enumeration
+- [ ] Driver-device binding
+- [ ] Hot-plug support
+
+#### Driver SDK
+- [ ] Common driver interfaces
+- [ ] DMA buffer management
+- [ ] Interrupt handling framework
+- [ ] MMIO access utilities
+
+#### Bus Drivers
+- [ ] PCI/PCIe driver
+  - [ ] Configuration space access
+  - [ ] BAR mapping
+  - [ ] MSI/MSI-X support
+- [ ] USB controller driver
+  - [ ] XHCI implementation
+  - [ ] Device enumeration
+  - [ ] Transfer management
+- [ ] Device tree support (ARM/RISC-V)
+
+### 3. Core Drivers
+
+#### Storage Drivers
+- [ ] AHCI driver (SATA)
+  - [ ] Controller initialization
+  - [ ] Command submission
+  - [ ] Interrupt handling
+- [ ] NVMe driver
+  - [ ] Queue pair management
+  - [ ] Command submission
+  - [ ] Completion handling
+- [ ] virtio-blk driver (QEMU)
+
+#### Network Drivers
+- [ ] Intel E1000 driver
+  - [ ] Ring buffer management
+  - [ ] Packet transmission
+  - [ ] Packet reception
+- [ ] virtio-net driver (QEMU)
+- [ ] Generic NIC framework
+
+#### Input Drivers
+- [ ] PS/2 keyboard driver
+- [ ] PS/2 mouse driver
+- [ ] USB HID driver
+- [ ] virtio-input driver
+
+### 4. Virtual Filesystem (VFS)
+
+#### VFS Core
+- [ ] VFS architecture
+  - [ ] Inode abstraction
+  - [ ] Dentry cache
+  - [ ] Mount points
+  - [ ] Path resolution
+- [ ] File operations
+  - [ ] open/close
+  - [ ] read/write
+  - [ ] seek/stat
+  - [ ] directory operations
+
+#### Filesystem Support
+- [ ] InitRD filesystem
+  - [ ] Read-only support
+  - [ ] Boot file loading
+- [ ] TempFS (RAM filesystem)
+  - [ ] Dynamic allocation
+  - [ ] Full read/write
+- [ ] DevFS (device filesystem)
+  - [ ] Device node creation
+  - [ ] Major/minor numbers
+
+#### VFS Services
+- [ ] File descriptor management
+- [ ] Path lookup service
+- [ ] Mount service
+- [ ] File locking
+
+### 5. Init System
+
+#### Init Process
+- [ ] PID 1 implementation
+- [ ] Service management
+- [ ] Dependency resolution
+- [ ] Service supervision
+
+#### Service Configuration
+- [ ] Service definition format
+- [ ] Dependency specification
+- [ ] Resource limits
+- [ ] Capability grants
+
+#### Boot Sequence
+- [ ] Early boot services
+- [ ] Driver initialization order
+- [ ] Service startup order
+- [ ] Multi-user targets
+
+### 6. Core System Services
+
+#### Memory Service
+- [ ] Anonymous memory allocation
+- [ ] Memory sharing
+- [ ] Copy-on-write support
+- [ ] Memory statistics
+
+#### Time Service
+- [ ] System time management
+- [ ] Timer creation
+- [ ] Alarm service
+- [ ] NTP client (basic)
+
+#### Log Service
+- [ ] Kernel log collection
+- [ ] Service log aggregation
+- [ ] Log rotation
+- [ ] Remote logging
+
+#### Device Manager
+- [ ] Device discovery
+- [ ] Driver loading
+- [ ] Device permissions
+- [ ] Hotplug events
+
+### 7. IPC Framework
+
+#### High-Level IPC
+- [ ] RPC framework
+  - [ ] IDL compiler
+  - [ ] Stub generation
+  - [ ] Marshalling
+- [ ] Message bus
+  - [ ] Named endpoints
+  - [ ] Broadcast support
+  - [ ] Service discovery
+
+#### Async I/O
+- [ ] Event loop implementation
+- [ ] Async IPC wrappers
+- [ ] Future/Promise support
+- [ ] io_uring-like interface
+
+### 8. Basic Shell
+
+#### Command Shell
+- [ ] Command parsing
+- [ ] Built-in commands
+- [ ] Process execution
+- [ ] Job control
+- [ ] Environment variables
+
+#### Shell Utilities
+- [ ] ls - List files
+- [ ] cat - Display files
+- [ ] echo - Print text
+- [ ] ps - Process list
+- [ ] kill - Send signals
+
+## 🔧 Technical Specifications
+
+### Driver Architecture
+```rust
+trait Driver {
+    fn probe(&mut self, device: &Device) -> Result<()>;
+    fn attach(&mut self, device: &Device) -> Result<()>;
+    fn detach(&mut self);
+}
+```
+
+### VFS Interface
+```rust
+trait FileSystem {
+    fn mount(&self, source: &str, flags: MountFlags) -> Result<()>;
+    fn unmount(&self) -> Result<()>;
+    fn statfs(&self) -> Result<StatFs>;
+}
+```
+
+## 📁 Deliverables
+
+- [ ] Working user-space environment
+- [ ] Basic driver framework
+- [ ] Functional VFS
+- [ ] Core system services
+- [ ] Simple shell environment
+
+## 🧪 Validation Criteria
+
+- [ ] Can load and execute ELF binaries
+- [ ] Drivers detect and initialize hardware
+- [ ] Files can be created/read/written
+- [ ] Services start and communicate
+- [ ] Shell commands execute properly
+
+## 🚨 Blockers & Risks
+
+- **Risk**: Driver compatibility issues
+  - **Mitigation**: Focus on common hardware first
+- **Risk**: VFS performance
+  - **Mitigation**: Careful cache design
+- **Risk**: Service deadlocks
+  - **Mitigation**: Dependency cycle detection
+
+## 📊 Progress Tracking
+
+| Component | Design | Implementation | Testing | Complete |
+|-----------|--------|----------------|---------|----------|
+| Runtime | ⚪ | ⚪ | ⚪ | ⚪ |
+| Drivers | ⚪ | ⚪ | ⚪ | ⚪ |
+| VFS | ⚪ | ⚪ | ⚪ | ⚪ |
+| Services | ⚪ | ⚪ | ⚪ | ⚪ |
+| Shell | ⚪ | ⚪ | ⚪ | ⚪ |
+
+## 📅 Timeline
+
+- **Month 1**: User-space runtime and driver framework
+- **Month 2**: Core drivers and VFS
+- **Month 3**: System services and init
+- **Month 4**: Integration and testing
+
+## 🔗 References
+
+- [Linux Device Drivers](https://lwn.net/Kernel/LDD3/)
+- [VFS Documentation](https://www.kernel.org/doc/html/latest/filesystems/vfs.html)
+- [systemd Design](https://systemd.io/DESIGN-DOCUMENT/)
+
+---
+
+**Previous Phase**: [Phase 1 - Microkernel Core](PHASE1_TODO.md)  
+**Next Phase**: [Phase 3 - Security Hardening](PHASE3_TODO.md)

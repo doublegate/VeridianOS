@@ -73,3 +73,9 @@ CLAUDE.local.md
 # Cargo/Rust user directories
 .cargo/
 .rustup/
+
+# User configuration directories
+.claude/
+.config/
+.npm/
+.claude.json

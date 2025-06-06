@@ -22,12 +22,12 @@ This project and everyone participating in it is governed by our [Code of Conduc
 1. **Fork the repository** on GitHub
 2. **Clone your fork** locally:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/veridian.git
-   cd veridian
+   git clone https://github.com/YOUR_USERNAME/VeridianOS.git
+   cd VeridianOS
    ```
 3. **Add upstream remote**:
    ```bash
-   git remote add upstream https://github.com/veridian-os/veridian.git
+   git remote add upstream https://github.com/doublegate/VeridianOS.git
    ```
 4. **Set up development environment** following [DEVELOPMENT-GUIDE.md](docs/DEVELOPMENT-GUIDE.md)
 

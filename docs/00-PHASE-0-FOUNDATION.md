@@ -225,7 +225,7 @@ version = "0.1.0"
 authors = ["VeridianOS Contributors"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/veridian-os/veridian"
+repository = "https://github.com/doublegate/VeridianOS"
 
 [workspace.dependencies]
 # Core dependencies

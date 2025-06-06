@@ -9,8 +9,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/veridian-os/veridian/actions"><img src="https://github.com/veridian-os/veridian/workflows/CI/badge.svg" alt="CI Status"></a>
-  <a href="https://codecov.io/gh/veridian-os/veridian"><img src="https://codecov.io/gh/veridian-os/veridian/branch/main/graph/badge.svg" alt="Coverage"></a>
+  <a href="https://github.com/doublegate/VeridianOS/actions"><img src="https://github.com/doublegate/VeridianOS/workflows/CI/badge.svg" alt="CI Status"></a>
+  <a href="https://codecov.io/gh/doublegate/VeridianOS"><img src="https://codecov.io/gh/doublegate/VeridianOS/branch/main/graph/badge.svg" alt="Coverage"></a>
   <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="LICENSE-APACHE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
   <a href="https://discord.gg/veridian"><img src="https://img.shields.io/discord/123456789?label=Discord&logo=discord" alt="Discord"></a>
@@ -44,8 +44,8 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 
 ```bash
 # Clone the repository
-git clone https://github.com/veridian-os/veridian.git
-cd veridian
+git clone https://github.com/doublegate/VeridianOS.git
+cd VeridianOS
 
 # Install dependencies (Ubuntu/Debian)
 ./scripts/install-deps.sh
@@ -80,7 +80,12 @@ The project follows a phased development approach:
 
 **Current Phase**: Documentation Complete, Ready for Phase 0 Implementation
 
-See [PROJECT-STATUS.md](docs/PROJECT-STATUS.md) for detailed status information.
+- ✅ Complete project structure created
+- ✅ Comprehensive documentation for all phases
+- ✅ TODO tracking system established
+- ⏳ Phase 0: Foundation and tooling (next step)
+
+See [PROJECT-STATUS.md](docs/PROJECT-STATUS.md) for detailed status information and [Master TODO](to-dos/MASTER_TODO.md) for task tracking.
 
 ## Contributing
 
@@ -99,11 +104,11 @@ VeridianOS uses a microkernel architecture with the following key components:
 ┌─────────────────────────────────────────────────────────────┐
 │                    User Applications                        │
 ├─────────────────────────────────────────────────────────────┤
-│   System Services (VFS, Network, Display, Audio)           │
+│   System Services (VFS, Network, Display, Audio)            │
 ├─────────────────────────────────────────────────────────────┤
-│   User-Space Drivers (Block, Network, GPU, USB)            │
+│   User-Space Drivers (Block, Network, GPU, USB)             │
 ├─────────────────────────────────────────────────────────────┤
-│   Microkernel (Memory, Scheduling, IPC, Capabilities)      │
+│   Microkernel (Memory, Scheduling, IPC, Capabilities)       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -148,7 +153,7 @@ Security is a fundamental design principle:
 
 - 💬 [Discord Server](https://discord.gg/veridian) - Real-time chat
 - 📧 [Mailing List](https://lists.veridian-os.org) - Development discussions
-- 🐛 [Issue Tracker](https://github.com/veridian-os/veridian/issues) - Bug reports and features
+- 🐛 [Issue Tracker](https://github.com/doublegate/VeridianOS/issues) - Bug reports and features
 - 📝 [Forum](https://forum.veridian-os.org) - Long-form discussions
 
 ## License

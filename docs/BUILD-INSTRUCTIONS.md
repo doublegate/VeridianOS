@@ -4,8 +4,8 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/veridian-os/veridian.git
-cd veridian
+git clone https://github.com/doublegate/VeridianOS.git
+cd VeridianOS
 
 # Install dependencies (Ubuntu/Debian)
 ./scripts/install-deps.sh
