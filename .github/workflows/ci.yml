@@ -83,14 +83,14 @@ jobs:
           sudo apt-get install -y qemu-system-x86
       
       - name: Check
-        run: cargo check --target targets/${{ matrix.target }}.json -p veridian-kernel
+        run: cargo check --target targets/${{ matrix.target }}.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
       
       - name: Build
-        run: cargo build --release --target targets/${{ matrix.target }}.json -p veridian-kernel
+        run: cargo build --release --target targets/${{ matrix.target }}.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
       
       - name: Test (x86_64 only)
         if: matrix.target == 'x86_64-veridian'
-        run: cargo test --target targets/${{ matrix.target }}.json -p veridian-kernel
+        run: cargo test --target targets/${{ matrix.target }}.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
       
       - name: Upload artifact
         uses: actions/upload-artifact@v4

@@ -17,7 +17,6 @@ Thumbs.db
 
 # Build artifacts
 target/
-Cargo.lock
 *.o
 *.a
 *.so
