@@ -69,3 +69,7 @@ venv/
 
 # Local memory file (contains project-specific state)
 CLAUDE.local.md
+
+# Cargo/Rust user directories
+.cargo/
+.rustup/
