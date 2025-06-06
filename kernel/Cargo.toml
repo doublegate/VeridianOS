@@ -1,0 +1,37 @@
+[package]
+name = "veridian-kernel"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+spin.workspace = true
+linked_list_allocator.workspace = true
+lazy_static.workspace = true
+bitflags.workspace = true
+log.workspace = true
+volatile = "0.5"
+
+# Architecture-specific dependencies
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+x86_64.workspace = true
+bootloader = "0.9"
+uart_16550 = "0.3"
+pic8259 = "0.10"
+pc-keyboard = "0.7"
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+cortex-a.workspace = true
+
+[target.'cfg(target_arch = "riscv64")'.dependencies]
+riscv.workspace = true
+
+[build-dependencies]
+cc = "1.0"
+
+[[bin]]
+name = "veridian-kernel"
+test = false
+bench = false

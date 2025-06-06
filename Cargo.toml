@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = [
+    "kernel",
+    "drivers/*",
+    "services/*",
+    "libs/*",
+    "userland/*",
+    "tools/*",
+]
+
+[workspace.package]
+version = "0.0.1"
+authors = ["VeridianOS Contributors"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/doublegate/VeridianOS"
+homepage = "https://github.com/doublegate/VeridianOS"
+
+[workspace.dependencies]
+# Core dependencies
+spin = "0.9"
+linked_list_allocator = "0.10"
+lazy_static = { version = "1.4", features = ["spin_no_std"] }
+bitflags = "2.4"
+log = { version = "0.4", default-features = false }
+
+# Architecture-specific
+x86_64 = "0.15"
+cortex-a = "8.1"
+riscv = "0.11"
+
+# Testing and development
+proptest = { version = "1.4", optional = true }
+criterion = { version = "0.5", optional = true }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+missing_safety_doc = "deny"
+undocumented_unsafe_blocks = "deny"
+
+# Profile settings for OS development
+[profile.dev]
+panic = "abort"
+overflow-checks = true
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.test]
+panic = "abort"

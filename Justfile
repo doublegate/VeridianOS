@@ -6,12 +6,24 @@ default: build
 # Build the kernel
 build:
     @echo "Building VeridianOS..."
-    cargo build --release
+    cargo build --release --target targets/x86_64-veridian.json -p veridian-kernel
 
 # Build for specific architecture
 build-arch ARCH:
     @echo "Building for {{ARCH}}..."
-    cargo build --release --target={{ARCH}}-unknown-none
+    cargo build --release --target targets/{{ARCH}}-veridian.json -p veridian-kernel
+
+# Build for x86_64
+build-x86_64:
+    cargo build --release --target targets/x86_64-veridian.json -p veridian-kernel
+
+# Build for aarch64
+build-aarch64:
+    cargo build --release --target targets/aarch64-veridian.json -p veridian-kernel
+
+# Build for riscv64
+build-riscv64:
+    cargo build --release --target targets/riscv64gc-veridian.json -p veridian-kernel
 
 # Run in QEMU
 run: build
@@ -140,7 +152,10 @@ gen-targets:
 # Install development tools
 install-tools:
     @echo "Installing development tools..."
-    cargo install cargo-binutils cargo-xbuild cargo-watch cargo-expand cargo-audit cargo-outdated
+    rustup toolchain install nightly-2025-01-15
+    rustup component add rust-src llvm-tools-preview rustfmt clippy --toolchain nightly-2025-01-15
+    rustup override set nightly-2025-01-15
+    cargo install bootimage cargo-xbuild cargo-binutils cargo-watch cargo-expand cargo-audit cargo-outdated
 
 # Print system info
 info:

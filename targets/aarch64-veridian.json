@@ -1,0 +1,24 @@
+{
+  "llvm-target": "aarch64-unknown-none-softfloat",
+  "data-layout": "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32",
+  "arch": "aarch64",
+  "target-endian": "little",
+  "target-pointer-width": "64",
+  "target-c-int-width": "32",
+  "os": "none",
+  "executables": true,
+  "linker-flavor": "ld.lld",
+  "linker": "rust-lld",
+  "panic-strategy": "abort",
+  "features": "+neon,+fp-armv8,+reserve-x18",
+  "relocation-model": "static",
+  "code-model": "small",
+  "disable-redzone": true,
+  "max-atomic-width": 128,
+  "pre-link-args": {
+    "ld.lld": [
+      "--script=kernel/src/arch/aarch64/link.ld",
+      "--gc-sections"
+    ]
+  }
+}
