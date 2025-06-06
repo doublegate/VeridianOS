@@ -1,28 +1,16 @@
 # Clippy configuration
 
-# Warn on all lints by default
-warn-by-default = true
-
 # Maximum cognitive complexity
 cognitive-complexity-threshold = 30
 
 # Maximum number of lines in a function
 too-many-lines-threshold = 100
 
-# Maximum number of arguments
+# Maximum number of arguments  
 too-many-arguments-threshold = 7
 
 # Maximum single literal prefix for type complexity
 type-complexity-threshold = 250
 
-# Allow certain lints in tests
-allow-expect-in-tests = true
-allow-unwrap-in-tests = true
-allow-dbg-in-tests = true
-allow-print-in-tests = true
-
-# Documentation requirements
-missing-docs-in-crate-items = true
-
 # Enforce MSRV
-msrv = "1.77.0"
+msrv = "1.80.0"

@@ -18,10 +18,12 @@ pub fn halt() -> ! {
     }
 }
 
+#[allow(dead_code)]
 pub fn enable_interrupts() {
     x86_64::instructions::interrupts::enable();
 }
 
+#[allow(dead_code)]
 pub fn disable_interrupts() {
     x86_64::instructions::interrupts::disable();
 }
