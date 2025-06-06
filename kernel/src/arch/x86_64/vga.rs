@@ -1,7 +1,7 @@
-use core::fmt;
+use core::{fmt, ptr::write_volatile};
+
 use lazy_static::lazy_static;
 use spin::Mutex;
-use volatile::Volatile;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +47,7 @@ const BUFFER_WIDTH: usize = 80;
 
 #[repr(transparent)]
 struct Buffer {
-    chars: [[Volatile<ScreenChar>; BUFFER_WIDTH]; BUFFER_HEIGHT],
+    chars: [[ScreenChar; BUFFER_WIDTH]; BUFFER_HEIGHT],
 }
 
 pub struct Writer {
@@ -69,10 +69,15 @@ impl Writer {
                 let col = self.column_position;
 
                 let color_code = self.color_code;
-                self.buffer.chars[row][col].write(ScreenChar {
-                    ascii_character: byte,
-                    color_code,
-                });
+                unsafe {
+                    write_volatile(
+                        &mut self.buffer.chars[row][col],
+                        ScreenChar {
+                            ascii_character: byte,
+                            color_code,
+                        },
+                    );
+                }
                 self.column_position += 1;
             }
         }
@@ -81,8 +86,10 @@ impl Writer {
     fn new_line(&mut self) {
         for row in 1..BUFFER_HEIGHT {
             for col in 0..BUFFER_WIDTH {
-                let character = self.buffer.chars[row][col].read();
-                self.buffer.chars[row - 1][col].write(character);
+                let character = unsafe { core::ptr::read_volatile(&self.buffer.chars[row][col]) };
+                unsafe {
+                    write_volatile(&mut self.buffer.chars[row - 1][col], character);
+                }
             }
         }
         self.clear_row(BUFFER_HEIGHT - 1);
@@ -95,7 +102,9 @@ impl Writer {
             color_code: self.color_code,
         };
         for col in 0..BUFFER_WIDTH {
-            self.buffer.chars[row][col].write(blank);
+            unsafe {
+                write_volatile(&mut self.buffer.chars[row][col], blank);
+            }
         }
     }
 
@@ -127,6 +136,7 @@ lazy_static! {
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
+
     use x86_64::instructions::interrupts;
 
     interrupts::without_interrupts(|| {

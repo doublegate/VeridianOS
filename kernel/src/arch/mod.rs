@@ -15,11 +15,3 @@ pub mod riscv64;
 
 #[cfg(target_arch = "riscv64")]
 pub use riscv64::*;
-
-pub trait Architecture {
-    fn init();
-    fn halt() -> !;
-    fn enable_interrupts();
-    fn disable_interrupts();
-    fn idle();
-}

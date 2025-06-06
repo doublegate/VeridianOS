@@ -45,6 +45,5 @@ group_imports = "StdExternalCrate"
 error_on_line_overflow = false
 error_on_unformatted = false
 
-# Report formatting errors
-report_todo = "Always"
-report_fixme = "Always"
+# Report formatting errors  
+# Note: report_todo and report_fixme were removed in newer rustfmt versions

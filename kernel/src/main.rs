@@ -1,24 +1,26 @@
 #![no_std]
 #![no_main]
 #![feature(custom_test_frameworks)]
+#![feature(abi_x86_interrupt)]
 #![test_runner(crate::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
 
+#[macro_use]
+mod print;
+
 mod arch;
-mod mm;
-mod sched;
 mod cap;
 mod ipc;
+mod mm;
+mod sched;
 
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     println!("[KERNEL PANIC] {}", info);
-    loop {
-        x86_64::instructions::hlt();
-    }
+    arch::halt();
 }
 
 #[cfg(test)]
@@ -32,27 +34,27 @@ fn panic(info: &PanicInfo) -> ! {
 pub extern "C" fn _start() -> ! {
     println!("VeridianOS v{}", env!("CARGO_PKG_VERSION"));
     println!("Initializing microkernel...");
-    
+
     // Initialize architecture-specific features
     arch::init();
-    
+
     // Initialize memory management
     mm::init();
-    
+
     // Initialize capability system
     cap::init();
-    
+
     // Initialize scheduler
     sched::init();
-    
+
     // Initialize IPC
     ipc::init();
-    
+
     #[cfg(test)]
     test_main();
-    
+
     println!("VeridianOS initialized successfully!");
-    
+
     // Enter scheduler main loop
     sched::run();
 }
@@ -94,7 +96,7 @@ pub enum QemuExitCode {
 #[cfg(test)]
 pub fn exit_qemu(exit_code: QemuExitCode) -> ! {
     use x86_64::instructions::port::Port;
-    
+
     unsafe {
         let mut port = Port::new(0xf4);
         port.write(exit_code as u32);

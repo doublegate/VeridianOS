@@ -12,7 +12,6 @@ linked_list_allocator.workspace = true
 lazy_static.workspace = true
 bitflags.workspace = true
 log.workspace = true
-volatile = "0.5"
 
 # Architecture-specific dependencies
 [target.'cfg(target_arch = "x86_64")'.dependencies]
