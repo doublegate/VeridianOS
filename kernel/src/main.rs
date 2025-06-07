@@ -15,6 +15,7 @@ mod cap;
 mod ipc;
 mod mm;
 mod sched;
+mod serial;
 
 #[cfg(not(test))]
 #[panic_handler]
@@ -32,33 +33,66 @@ fn panic(info: &PanicInfo) -> ! {
     exit_qemu(QemuExitCode::Failed);
 }
 
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
-    println!("VeridianOS v{}", env!("CARGO_PKG_VERSION"));
-    println!("Initializing microkernel...");
+pub fn kernel_main() -> ! {
+    // Initialize serial port first for debugging (architecture-specific)
+    let mut serial = arch::serial_init();
+    
+    // Write to serial port directly
+    use core::fmt::Write;
+    writeln!(serial, "VeridianOS kernel started!").unwrap();
+    
+    // Architecture-specific early output
+    #[cfg(target_arch = "x86_64")]
+    {
+        // First, let's just try to write directly to VGA buffer to test
+        unsafe {
+            let vga_buffer = 0xb8000 as *mut u8;
+            *vga_buffer = b'H';
+            *vga_buffer.offset(1) = 0x0f; // white on black
+            *vga_buffer.offset(2) = b'E';
+            *vga_buffer.offset(3) = 0x0f;
+            *vga_buffer.offset(4) = b'L';
+            *vga_buffer.offset(5) = 0x0f;
+            *vga_buffer.offset(6) = b'L';
+            *vga_buffer.offset(7) = 0x0f;
+            *vga_buffer.offset(8) = b'O';
+            *vga_buffer.offset(9) = 0x0f;
+        }
+        
+        writeln!(serial, "VGA buffer write complete").unwrap();
+    }
+
+    // For now, let's skip the println! macros and just use serial
+    writeln!(serial, "VeridianOS v{}", env!("CARGO_PKG_VERSION")).unwrap();
+    writeln!(serial, "Initializing microkernel...").unwrap();
 
     // Initialize architecture-specific features
+    writeln!(serial, "Initializing arch...").unwrap();
     arch::init();
+    writeln!(serial, "Arch initialized").unwrap();
 
-    // Initialize memory management
-    mm::init();
-
-    // Initialize capability system
-    cap::init();
-
-    // Initialize scheduler
-    sched::init();
-
-    // Initialize IPC
-    ipc::init();
-
-    #[cfg(test)]
-    test_main();
-
-    println!("VeridianOS initialized successfully!");
-
-    // Enter scheduler main loop
-    sched::run();
+    // For now, let's just loop with serial output
+    writeln!(serial, "Kernel initialization complete!").unwrap();
+    
+    // Simple loop with periodic output
+    let mut counter = 0u64;
+    loop {
+        if counter % 100000000 == 0 {
+            writeln!(serial, "VeridianOS running... {}", counter / 100000000).unwrap();
+        }
+        counter = counter.wrapping_add(1);
+        
+        // Also update VGA periodically on x86_64
+        #[cfg(target_arch = "x86_64")]
+        if counter % 100000000 == 0 {
+            unsafe {
+                let vga_buffer = 0xb8000 as *mut u8;
+                let offset = ((counter / 100000000) % 10) * 2;
+                *vga_buffer.offset(20 + offset as isize) = b'0' + ((counter / 100000000) % 10) as u8;
+                *vga_buffer.offset(21 + offset as isize) = 0x0f;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

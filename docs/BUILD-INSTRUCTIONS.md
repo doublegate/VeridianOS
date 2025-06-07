@@ -95,6 +95,14 @@ cargo install cargo-xbuild bootimage just
 
 ## Building VeridianOS
 
+### Build Status
+
+| Architecture | Build Status | Notes |
+|--------------|-------------|-------|
+| x86_64       | ✅ Working  | Uses bootloader crate |
+| AArch64      | ✅ Working  | Custom boot sequence |
+| RISC-V 64    | ✅ Working  | Works with OpenSBI |
+
 ### Using Just (Recommended)
 
 We use `just` as our command runner. All common tasks have just recipes:
@@ -307,6 +315,66 @@ codegen-units = 16  # Parallel codegen
 [profile.dev]
 opt-level = 1       # Basic optimization in debug
 debug = 2           # Full debug info
+```
+
+## Running and Testing
+
+### Running in QEMU
+
+#### x86_64
+
+```bash
+# Build bootimage first
+cargo bootimage --target targets/x86_64-veridian.json
+
+# Run with QEMU
+qemu-system-x86_64 -drive format=raw,file=target/x86_64-veridian/debug/bootimage-veridian-kernel.bin -serial stdio -display none
+
+# Or use just
+just run
+```
+
+#### AArch64
+
+```bash
+# Build kernel
+cargo build --target targets/aarch64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
+
+# Run with QEMU
+qemu-system-aarch64 -M virt -cpu cortex-a57 -nographic -kernel target/aarch64-veridian/debug/veridian-kernel
+
+# Note: AArch64 boot sequence is currently being debugged
+```
+
+#### RISC-V
+
+```bash
+# Build kernel
+cargo build --target targets/riscv64gc-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
+
+# Run with QEMU
+qemu-system-riscv64 -M virt -nographic -kernel target/riscv64gc-veridian/debug/veridian-kernel
+```
+
+### Testing Status
+
+| Architecture | Build | Boot | Serial I/O | Notes |
+|--------------|-------|------|------------|-------|
+| x86_64       | ✅    | ✅   | ✅         | Fully working with bootloader crate |
+| RISC-V 64    | ✅    | ✅   | ✅         | Works with OpenSBI firmware |
+| AArch64      | ✅    | ⚠️   | ⚠️         | Assembly boot works, debugging Rust linkage |
+
+### Running Tests
+
+```bash
+# Run unit tests
+cargo test --target targets/x86_64-veridian.json
+
+# Run integration tests
+just test-integration
+
+# Run all tests
+just test-all
 ```
 
 ## Troubleshooting

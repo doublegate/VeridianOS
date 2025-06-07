@@ -6,5 +6,5 @@ entry_point!(kernel_main);
 
 fn kernel_main(_boot_info: &'static BootInfo) -> ! {
     // Jump to the main kernel entry
-    crate::_start()
+    crate::kernel_main()
 }

@@ -6,6 +6,12 @@
 
 As of today, VeridianOS has completed its comprehensive documentation phase and established full project infrastructure. The project has successfully begun Phase 0 implementation with ~50% completion, including a fully operational CI/CD pipeline with all checks passing and basic kernel structure for all three target architectures.
 
+### Latest Progress
+- ✅ QEMU testing infrastructure fully operational
+- ✅ Kernel successfully boots on x86_64 and RISC-V architectures
+- ✅ Serial I/O working on x86_64 and RISC-V
+- 🔄 Debugging AArch64 boot sequence (assembly works, Rust linkage issue)
+
 ## Documentation Completed
 
 ### Phase Implementation Guides
@@ -122,11 +128,11 @@ The project has achieved:
 5. ✅ Create initial documentation
 
 ### Phase 0 Remaining Tasks
-1. 🔴 Implement proper bootloader integration
-2. 🔴 Create linker scripts for aarch64 and riscv64
+1. ⚠️ Complete bootloader integration (x86_64 ✅, RISC-V ✅, AArch64 🔄)
+2. ✅ Create linker scripts (all architectures complete)
 3. 🔴 Set up GDB debugging infrastructure
 4. 🔴 Implement basic memory initialization
-5. 🔴 Get kernel booting in QEMU with output
+5. ✅ Get kernel booting in QEMU with output (x86_64 ✅, RISC-V ✅, AArch64 partial)
 
 ### Key Decisions Needed
 1. **Hosting**: ✅ GitHub selected (https://github.com/doublegate/VeridianOS)

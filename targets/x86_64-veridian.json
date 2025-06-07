@@ -14,11 +14,5 @@
   "features": "-mmx,-sse,+soft-float",
   "relocation-model": "static",
   "code-model": "kernel",
-  "max-atomic-width": 64,
-  "pre-link-args": {
-    "ld.lld": [
-      "--script=kernel/src/arch/x86_64/link.ld",
-      "--gc-sections"
-    ]
-  }
+  "max-atomic-width": 64
 }

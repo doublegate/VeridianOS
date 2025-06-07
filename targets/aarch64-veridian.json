@@ -17,8 +17,7 @@
   "max-atomic-width": 128,
   "pre-link-args": {
     "ld.lld": [
-      "--script=kernel/src/arch/aarch64/link.ld",
-      "--gc-sections"
+      "--script=kernel/src/arch/aarch64/link.ld"
     ]
   }
 }

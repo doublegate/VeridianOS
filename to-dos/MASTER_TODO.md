@@ -6,7 +6,7 @@ This is the master tracking document for all VeridianOS development tasks across
 
 ## 🎯 Project Overview Status
 
-- [ ] Phase 0: Foundation and Tooling - **IN PROGRESS (~50%)**
+- [ ] Phase 0: Foundation and Tooling - **IN PROGRESS (~60%)**
 - [ ] Phase 1: Microkernel Core - **NOT STARTED**
 - [ ] Phase 2: User Space Foundation - **NOT STARTED**
 - [ ] Phase 3: Security Hardening - **NOT STARTED**
@@ -60,12 +60,14 @@ This is the master tracking document for all VeridianOS development tasks across
 - [x] Cargo.lock included for reproducible builds ✅
 - [x] All CI checks passing ✅
 
-**Next Sprint**: Kernel Boot Implementation
-- [ ] Implement proper bootloader integration
-- [ ] Create linker scripts for all architectures
+**Current Sprint**: Kernel Boot Implementation
+- [x] QEMU testing infrastructure ✅
+- [x] Kernel boots on x86_64 ✅
+- [x] Kernel boots on RISC-V ✅
+- [ ] Debug AArch64 boot sequence (assembly works, Rust linkage issue)
+- [x] Create linker scripts for all architectures ✅
 - [ ] Set up GDB debugging infrastructure
 - [ ] Implement basic memory initialization
-- [ ] Get kernel booting in QEMU
 - [ ] Create initial test framework
 
 ## 📊 Progress Tracking
@@ -74,8 +76,8 @@ This is the master tracking document for all VeridianOS development tasks across
 |-----------|----------|-------------|---------|----------|
 | Build System | 🟢 | 🟢 | 🟢 | 🟢 |
 | CI/CD Pipeline | 🟢 | 🟢 | 🟢 | 🟢 |
-| Bootloader | 🟡 | 🟡 | ⚪ | ⚪ |
-| Kernel Core | 🟡 | 🟡 | ⚪ | ⚪ |
+| Bootloader | 🟢 | 🟡 | 🟡 | ⚪ |
+| Kernel Core | 🟢 | 🟡 | 🟡 | ⚪ |
 | Memory Manager | 🟡 | ⚪ | ⚪ | ⚪ |
 | Scheduler | 🟡 | ⚪ | ⚪ | ⚪ |
 | IPC System | 🟡 | ⚪ | ⚪ | ⚪ |

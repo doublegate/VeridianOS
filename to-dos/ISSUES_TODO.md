@@ -41,7 +41,25 @@ Currently no high priority issues.
 
 ## 🟡 Medium Priority Issues (P2)
 
-Currently no medium priority issues.
+### ISSUE-0004: AArch64 Boot Sequence Not Reaching Rust Code
+- **Status**: Open/In Progress
+- **Component**: Kernel/Boot
+- **Reported**: 2025-06-06
+- **Reporter**: QEMU Testing
+- **Assignee**: TBD
+- **Description**: AArch64 kernel builds successfully but cannot branch from assembly to Rust code
+- **Impact**: AArch64 architecture cannot boot to kernel main
+- **Symptoms**: 
+  - Assembly boot code executes (outputs 'ABC')
+  - Can call assembly functions within boot.S
+  - Cannot branch to _start_rust or any Rust functions
+  - Getting unused function warnings because kernel_main() never runs
+- **Workaround**: None currently
+- **Investigation**:
+  - Tried multiple branch instructions (bl, blr, b)
+  - Tried both PIC and static relocation models
+  - Symbol exists at correct address (0x400005e4)
+  - Possible GOT/PLT initialization issue
 
 ## 🟢 Low Priority Issues (P3)
 
@@ -85,8 +103,8 @@ Currently no low priority issues.
 ## 📊 Issue Statistics
 
 ### Overall Status
-- **Total Issues**: 3
-- **Open Issues**: 0
+- **Total Issues**: 4
+- **Open Issues**: 1
 - **In Progress**: 0
 - **Fixed**: 3
 - **Verified**: 3
@@ -95,7 +113,7 @@ Currently no low priority issues.
 ### By Component
 | Component | Open | In Progress | Fixed | Total |
 |-----------|------|-------------|-------|-------|
-| Kernel | 0 | 0 | 0 | 0 |
+| Kernel | 1 | 0 | 0 | 1 |
 | Drivers | 0 | 0 | 0 | 0 |
 | Services | 0 | 0 | 0 | 0 |
 | Libraries | 0 | 0 | 0 | 0 |

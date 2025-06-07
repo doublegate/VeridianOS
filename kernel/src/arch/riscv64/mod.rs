@@ -1,5 +1,7 @@
 // RISC-V 64 architecture support (stub)
 
+pub mod boot;
+
 pub fn init() {
     // TODO: Initialize RISC-V 64-specific features
 }
@@ -24,4 +26,11 @@ pub fn disable_interrupts() {
 pub fn idle() {
     // TODO: Implement idle for RISC-V
     unsafe { core::arch::asm!("wfi") };
+}
+
+pub fn serial_init() -> crate::serial::Uart16550Compat {
+    // QEMU virt machine places 16550 UART at 0x10000000
+    let mut uart = crate::serial::Uart16550Compat::new(0x1000_0000);
+    uart.init();
+    uart
 }

@@ -19,8 +19,7 @@
   "atomic-cas": true,
   "pre-link-args": {
     "ld.lld": [
-      "--script=kernel/src/arch/riscv64/link.ld",
-      "--gc-sections"
+      "--script=kernel/src/arch/riscv64/link.ld"
     ]
   }
 }

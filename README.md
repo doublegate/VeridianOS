@@ -31,6 +31,25 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 - 📦 **Modern package management** - Source and binary package support
 - 🖥️ **Wayland compositor** - Modern display server with GPU acceleration
 
+## Project Status
+
+🚧 **Phase 0: Foundation** (~50% Complete)
+
+- ✅ Development environment setup
+- ✅ CI/CD pipeline (GitHub Actions)
+- ✅ Custom target specifications for all architectures
+- ✅ Basic kernel structure with modular architecture
+- ✅ QEMU testing infrastructure
+- 🔄 Bootloader integration (working on x86_64 and RISC-V, debugging AArch64)
+
+### Architecture Support Status
+
+| Architecture | Build | Boot | Serial I/O | Status |
+|--------------|-------|------|------------|---------|
+| x86_64       | ✅    | ✅   | ✅         | **Fully Working** |
+| RISC-V 64    | ✅    | ✅   | ✅         | **Fully Working** |
+| AArch64      | ✅    | ⚠️   | ⚠️         | **Debugging boot sequence** |
+
 ## Quick Start
 
 ### Prerequisites
@@ -53,8 +72,15 @@ cd VeridianOS
 # Build and run in QEMU
 just run
 
-# Or build manually with custom targets
+# Or build manually for specific architectures
 cargo build --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
+
+# Run in QEMU (x86_64)
+cargo bootimage --target targets/x86_64-veridian.json
+qemu-system-x86_64 -drive format=raw,file=target/x86_64-veridian/debug/bootimage-veridian-kernel.bin -serial stdio -display none
+
+# Run in QEMU (RISC-V)
+qemu-system-riscv64 -M virt -nographic -kernel target/riscv64gc-veridian/debug/veridian-kernel
 ```
 
 For detailed build instructions, see [BUILD-INSTRUCTIONS.md](docs/BUILD-INSTRUCTIONS.md).
@@ -78,20 +104,6 @@ The project follows a phased development approach:
 5. [Phase 4: Package Ecosystem](docs/04-PHASE-4-PACKAGE-ECOSYSTEM.md) - Package management
 6. [Phase 5: Performance Optimization](docs/05-PHASE-5-PERFORMANCE-OPTIMIZATION.md) - Performance tuning
 7. [Phase 6: Advanced Features](docs/06-PHASE-6-ADVANCED-FEATURES.md) - GUI and advanced features
-
-## Project Status
-
-**Current Phase**: Phase 0 Implementation (~50% Complete)
-
-- ✅ Complete project structure created
-- ✅ Comprehensive documentation for all phases
-- ✅ TODO tracking system established
-- ✅ CI/CD pipeline fully operational (GitHub Actions)
-- ✅ Custom target specifications for x86_64, AArch64, RISC-V
-- ✅ Basic kernel structure with architecture abstractions
-- ✅ All architectures building successfully with -Zbuild-std
-- ✅ Cargo.lock included for reproducible builds
-- 🚧 Phase 0: Foundation and tooling (IN PROGRESS)
 
 See [PROJECT-STATUS.md](docs/PROJECT-STATUS.md) for detailed status information and [Master TODO](to-dos/MASTER_TODO.md) for task tracking.
 
