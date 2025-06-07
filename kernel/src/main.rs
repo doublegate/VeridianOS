@@ -21,7 +21,7 @@ mod sched;
 fn panic(_info: &PanicInfo) -> ! {
     #[cfg(target_arch = "x86_64")]
     println!("[KERNEL PANIC] {}", _info);
-    
+
     arch::halt();
 }
 
