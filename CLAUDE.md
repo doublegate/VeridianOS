@@ -130,10 +130,11 @@ Currently implementing in phases:
 - **Documentation**: Complete (25+ comprehensive guides)
 - **Infrastructure**: Directory structure, TODO system, and GitHub setup complete
 - **CI/CD**: ✅ GitHub Actions workflow passing all checks (optimized pipeline)
-- **Current Phase**: Phase 0 (Foundation) - ~45% complete
+- **Current Phase**: Phase 0 (Foundation) - ~65% complete
 - **Build Status**: ✅ Compiling successfully for all target architectures
+- **Boot Status**: ✅ All architectures (x86_64, RISC-V, AArch64) boot successfully!
 - **Code Quality**: ✅ All format and clippy checks passing
-- **Next Milestone**: Boot kernel in QEMU with basic output
+- **Next Milestone**: Implement basic memory initialization and GDB debugging
 
 ## Critical Implementation Notes
 
@@ -174,6 +175,13 @@ Currently implementing in phases:
 - Check serial output for panic messages
 - Use `addr2line` for stack trace analysis
 
+### AArch64-Specific Notes
+- Iterator-based code causes hangs on bare metal - use direct memory writes only
+- Keep boot code extremely simple to avoid issues
+- Working implementations preserved in `kernel/src/arch/aarch64/working-simple/`
+- UART at 0x09000000 for QEMU virt machine
+- Stack at 0x80000 works reliably
+
 ## TODO System
 
 Comprehensive task tracking is maintained in the `to-dos/` directory:
@@ -184,3 +192,28 @@ Comprehensive task tracking is maintained in the `to-dos/` directory:
 - **RELEASE_TODO.md**: Release planning and version milestones
 
 Check these files regularly to track progress and identify next tasks.
+
+## VeridianOS-Specific Development Patterns
+
+### Build System Configuration
+- Use `-Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem` for all builds
+- Custom target JSONs in `targets/` directory for each architecture
+- Workspace structure with kernel as main crate
+- Cargo.lock committed for reproducible builds
+
+### Architecture-Specific Details
+- **x86_64**: Uses bootloader crate, VGA text output, GDT/IDT setup
+- **AArch64**: Custom boot sequence, PL011 UART at 0x09000000, stack at 0x80000
+- **RISC-V**: OpenSBI integration, UART at 0x10000000
+
+### CI/CD Configuration
+- GitHub Actions with job consolidation for efficiency
+- Caching of cargo registry and target directories
+- Security audit with rustsec/audit-check action
+- RUSTFLAGS="-D warnings" for strict checking
+
+### Development Workflow in Distrobox
+- Working directory: `/var/home/parobek/Code/VeridianOS`
+- User memory location: `.claude/CLAUDE.md` (project-local)
+- Install git and gh in Ubuntu containers
+- Use project-local paths for all file operations

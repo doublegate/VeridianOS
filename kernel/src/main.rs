@@ -31,7 +31,7 @@ fn panic(_info: &PanicInfo) -> ! {
         core::ptr::write_volatile(uart, b'C');
         core::ptr::write_volatile(uart, b'\n');
     }
-    
+
     #[cfg(target_arch = "x86_64")]
     println!("[KERNEL PANIC] {}", _info);
 
@@ -52,13 +52,13 @@ fn panic(_info: &PanicInfo) -> ! {
         core::ptr::write_volatile(uart, b'C');
         core::ptr::write_volatile(uart, b'\n');
     }
-    
+
     #[cfg(not(target_arch = "aarch64"))]
     {
         serial_println!("[KERNEL PANIC] {}", _info);
         exit_qemu(QemuExitCode::Failed);
     }
-    
+
     #[cfg(target_arch = "aarch64")]
     loop {
         core::hint::spin_loop();
@@ -87,26 +87,24 @@ pub extern "C" fn kernel_main() -> ! {
             *uart = b'N';
             *uart = b'\n';
         }
-        
+
         // Simple loop
         loop {
-            unsafe { core::arch::asm!("wfe"); }
+            unsafe {
+                core::arch::asm!("wfe");
+            }
         }
     }
-    
+
     #[cfg(not(target_arch = "aarch64"))]
     {
         // Initialize serial port first for debugging (architecture-specific)
-        let mut serial = arch::serial_init();
+        let mut serial_port = arch::serial_init();
 
         // Write to serial port directly
         use core::fmt::Write;
-        writeln!(serial, "VeridianOS kernel started!").unwrap();
-    }
+        writeln!(serial_port, "VeridianOS kernel started!").unwrap();
 
-    // Only do the rest for non-AArch64
-    #[cfg(not(target_arch = "aarch64"))]
-    {
         // Architecture-specific early output
         #[cfg(target_arch = "x86_64")]
         {
@@ -125,26 +123,26 @@ pub extern "C" fn kernel_main() -> ! {
                 *vga_buffer.offset(9) = 0x0f;
             }
 
-            writeln!(serial, "VGA buffer write complete").unwrap();
+            writeln!(serial_port, "VGA buffer write complete").unwrap();
         }
 
         // For now, let's skip the println! macros and just use serial
-        writeln!(serial, "VeridianOS v{}", env!("CARGO_PKG_VERSION")).unwrap();
-        writeln!(serial, "Initializing microkernel...").unwrap();
+        writeln!(serial_port, "VeridianOS v{}", env!("CARGO_PKG_VERSION")).unwrap();
+        writeln!(serial_port, "Initializing microkernel...").unwrap();
 
         // Initialize architecture-specific features
-        writeln!(serial, "Initializing arch...").unwrap();
+        writeln!(serial_port, "Initializing arch...").unwrap();
         arch::init();
-        writeln!(serial, "Arch initialized").unwrap();
+        writeln!(serial_port, "Arch initialized").unwrap();
 
         // For now, let's just loop with serial output
-        writeln!(serial, "Kernel initialization complete!").unwrap();
+        writeln!(serial_port, "Kernel initialization complete!").unwrap();
 
         // Simple loop with periodic output
         let mut counter = 0u64;
         loop {
             if counter % 100000000 == 0 {
-                writeln!(serial, "VeridianOS running... {}", counter / 100000000).unwrap();
+                writeln!(serial_port, "VeridianOS running... {}", counter / 100000000).unwrap();
             }
             counter = counter.wrapping_add(1);
 

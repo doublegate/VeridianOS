@@ -19,7 +19,7 @@ pub unsafe extern "C" fn _start_rust() -> ! {
     *uart = b'S';
     *uart = b'T';
     *uart = b'\n';
-    
+
     // Call kernel_main
     kernel_main()
 }
