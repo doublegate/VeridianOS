@@ -11,10 +11,12 @@ pub fn halt() -> ! {
     }
 }
 
+#[allow(dead_code)]
 pub fn enable_interrupts() {
     // TODO: Enable interrupts on RISC-V
 }
 
+#[allow(dead_code)]
 pub fn disable_interrupts() {
     // TODO: Disable interrupts on RISC-V
 }
