@@ -22,6 +22,9 @@ rustup component add rust-src
 # Solution: Ensure correct target and rust-src
 rustup target add x86_64-unknown-none
 rustup component add rust-src
+
+# For custom targets, use -Zbuild-std:
+cargo build --target targets/x86_64-veridian.json -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
 ```
 
 ### Linker Errors

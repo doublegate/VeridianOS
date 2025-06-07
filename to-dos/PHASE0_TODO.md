@@ -1,7 +1,7 @@
 # Phase 0: Foundation and Tooling TODO
 
 **Phase Duration**: 2-3 months  
-**Status**: IN PROGRESS (~45% Complete)  
+**Status**: IN PROGRESS (~50% Complete)  
 **Priority**: CRITICAL - Blocks all other phases  
 **Last Updated**: 2025-06-06
 
@@ -83,15 +83,18 @@ Phase 0 establishes the development environment, build system, and foundational 
 
 ### 6. CI/CD Pipeline
 - [x] GitHub Actions workflow for:
-  - [x] Building all targets
+  - [x] Building all targets (with -Zbuild-std)
   - [x] Running tests
   - [x] Code formatting checks
   - [x] Clippy lints
-  - [x] Security audits
+  - [x] Security audits (audit-check with Cargo.lock)
 - [x] Artifact generation:
   - [x] Kernel images
   - [ ] Debug symbols
   - [ ] Documentation
+- [x] Cargo.lock included for reproducible builds
+- [x] All CI checks passing (Quick Checks, Build & Test, Security Audit)
+- [x] Fixed target specifications (llvm-target, llvm-abiname)
 
 ### 7. Documentation Setup
 - [ ] Configure rustdoc for OS code
@@ -137,19 +140,19 @@ proptest = "1.0"
 
 ## 📁 Deliverables
 
-- [ ] Working build system
-- [ ] All target specifications
-- [ ] Development environment setup guide
-- [ ] CI/CD pipeline operational
+- [x] Working build system
+- [x] All target specifications
+- [x] Development environment setup guide
+- [x] CI/CD pipeline operational
 - [ ] Initial test suite
 - [ ] Documentation framework
 
 ## 🧪 Validation Criteria
 
-- [ ] Can build for all three architectures
+- [x] Can build for all three architectures
 - [ ] Can run "Hello World" in QEMU
 - [ ] Can debug with GDB
-- [ ] All CI checks pass
+- [x] All CI checks pass
 - [ ] Documentation builds successfully
 
 ## 🚨 Blockers & Risks
@@ -165,13 +168,13 @@ proptest = "1.0"
 
 | Task Category | Progress | Notes |
 |---------------|----------|-------|
-| Rust Setup | 0% | Not started |
-| Build System | 0% | Not started |
-| Targets | 0% | Not started |
-| Dev Environment | 0% | Not started |
-| Testing | 0% | Not started |
-| CI/CD | 0% | Not started |
-| Documentation | 70% | Guides written |
+| Rust Setup | 100% | Complete with toolchain |
+| Build System | 100% | Workspace and Just configured |
+| Targets | 100% | All 3 architectures working |
+| Dev Environment | 20% | Basic setup, needs GDB/QEMU |
+| Testing | 0% | Framework not yet created |
+| CI/CD | 100% | Fully operational on GitHub |
+| Documentation | 70% | Guides written, needs updates |
 
 ## 📅 Timeline
 

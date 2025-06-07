@@ -1,7 +1,7 @@
 # Issues and Bug Tracking TODO
 
 **Purpose**: Central tracking for all bugs, issues, and defects  
-**Last Updated**: 2025-01-06
+**Last Updated**: 2025-06-06
 
 ## 🐛 Issue Categories
 
@@ -47,14 +47,49 @@ Currently no medium priority issues.
 
 Currently no low priority issues.
 
+## ✅ Recently Resolved Issues
+
+### ISSUE-0001: CI Build Failures for Custom Targets
+- **Status**: Fixed/Verified
+- **Component**: Build System/CI
+- **Reported**: 2025-06-06
+- **Reporter**: CI Pipeline
+- **Assignee**: Claude
+- **Description**: CI builds failing with "can't find crate for core" error
+- **Impact**: All architecture builds failing in CI
+- **Root Cause**: Custom targets require -Zbuild-std to build core library from source
+- **Fix**: Updated CI workflow to use -Zbuild-std flags (commit: 8790414)
+
+### ISSUE-0002: RISC-V Target Specification Invalid ABI
+- **Status**: Fixed/Verified
+- **Component**: Build System
+- **Reported**: 2025-06-06
+- **Reporter**: CI Pipeline
+- **Assignee**: Claude
+- **Description**: RISC-V builds failing with "invalid RISC-V ABI name" error
+- **Impact**: RISC-V architecture builds failing
+- **Root Cause**: Missing llvm-abiname field in target specification
+- **Fix**: Added llvm-abiname and corrected llvm-target (commit: f49cc2f)
+
+### ISSUE-0003: Security Audit Job Missing Cargo.lock
+- **Status**: Fixed/Verified
+- **Component**: CI/Security
+- **Reported**: 2025-06-06
+- **Reporter**: CI Pipeline
+- **Assignee**: Claude
+- **Description**: cargo-audit failing with "Couldn't load ./Cargo.lock"
+- **Impact**: Security audit CI job failing
+- **Root Cause**: Cargo.lock was in .gitignore
+- **Fix**: Removed Cargo.lock from .gitignore and committed it (commit: 8790414)
+
 ## 📊 Issue Statistics
 
 ### Overall Status
-- **Total Issues**: 0
+- **Total Issues**: 3
 - **Open Issues**: 0
 - **In Progress**: 0
-- **Fixed**: 0
-- **Verified**: 0
+- **Fixed**: 3
+- **Verified**: 3
 - **Closed**: 0
 
 ### By Component
@@ -66,6 +101,8 @@ Currently no low priority issues.
 | Libraries | 0 | 0 | 0 | 0 |
 | Tools | 0 | 0 | 0 | 0 |
 | Documentation | 0 | 0 | 0 | 0 |
+| Build System | 0 | 0 | 2 | 2 |
+| CI/Security | 0 | 0 | 1 | 1 |
 
 ### By Type
 | Type | Count | Percentage |

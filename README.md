@@ -52,6 +52,9 @@ cd VeridianOS
 
 # Build and run in QEMU
 just run
+
+# Or build manually with custom targets
+cargo build --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
 ```
 
 For detailed build instructions, see [BUILD-INSTRUCTIONS.md](docs/BUILD-INSTRUCTIONS.md).
@@ -78,12 +81,17 @@ The project follows a phased development approach:
 
 ## Project Status
 
-**Current Phase**: Documentation Complete, Ready for Phase 0 Implementation
+**Current Phase**: Phase 0 Implementation (~50% Complete)
 
 - ✅ Complete project structure created
 - ✅ Comprehensive documentation for all phases
 - ✅ TODO tracking system established
-- ⏳ Phase 0: Foundation and tooling (next step)
+- ✅ CI/CD pipeline fully operational (GitHub Actions)
+- ✅ Custom target specifications for x86_64, AArch64, RISC-V
+- ✅ Basic kernel structure with architecture abstractions
+- ✅ All architectures building successfully with -Zbuild-std
+- ✅ Cargo.lock included for reproducible builds
+- 🚧 Phase 0: Foundation and tooling (IN PROGRESS)
 
 See [PROJECT-STATUS.md](docs/PROJECT-STATUS.md) for detailed status information and [Master TODO](to-dos/MASTER_TODO.md) for task tracking.
 

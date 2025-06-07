@@ -93,6 +93,9 @@ just build
 just build-arch x86_64
 just build-arch aarch64
 just build-arch riscv64
+
+# Or manually with -Zbuild-std for custom targets
+cargo build --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
 ```
 
 ### Testing

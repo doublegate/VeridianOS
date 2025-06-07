@@ -122,18 +122,20 @@ just clean
 
 #### Building the Kernel
 
+**Important**: Custom targets require building the core library from source using `-Zbuild-std`:
+
 ```bash
 # Build for x86_64
-cargo build --target targets/x86_64-veridian.json
+cargo build --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
 
 # Build for AArch64
-cargo build --target targets/aarch64-veridian.json
+cargo build --target targets/aarch64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
 
 # Build for RISC-V
-cargo build --target targets/riscv64-veridian.json
+cargo build --target targets/riscv64gc-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
 
 # Release build
-cargo build --release --target targets/x86_64-veridian.json
+cargo build --release --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
 ```
 
 #### Creating Bootable Image
@@ -313,9 +315,13 @@ debug = 2           # Full debug info
 
 #### "can't find crate for `core`"
 
-This means the rust-src component is missing:
+This means the rust-src component is missing or you need to use `-Zbuild-std`:
 ```bash
+# Install rust-src
 rustup component add rust-src
+
+# When building custom targets, use -Zbuild-std:
+cargo build --target targets/x86_64-veridian.json -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
 ```
 
 #### "error: linker `rust-lld` not found"
@@ -381,27 +387,46 @@ wsl --install -d Ubuntu
 
 ### GitHub Actions
 
-Our CI builds on every commit:
+Our CI builds on every commit and is **fully operational**:
 
 ```yaml
-# .github/workflows/build.yml
-name: Build
+# .github/workflows/ci.yml
+name: CI
 
 on: [push, pull_request]
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        target: [x86_64, aarch64, riscv64]
+  quick-checks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2025-01-15
-          components: rust-src, llvm-tools-preview
-      - run: just build-${{ matrix.target }}
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all -- -D warnings
+
+  build-and-test:
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64, riscv64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2025-01-15
+          components: rust-src, llvm-tools
+      - run: cargo build --target targets/${{ matrix.arch }}-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
+
+  security-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
 ### Local CI Testing
