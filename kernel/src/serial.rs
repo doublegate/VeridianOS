@@ -40,7 +40,7 @@ impl Pl011Uart {
     pub const fn new(base_addr: usize) -> Self {
         Self { base_addr }
     }
-    
+
     pub fn init(&mut self) {
         // Simple PL011 initialization for QEMU
         // For QEMU virt machine, the UART is already initialized by firmware
@@ -53,11 +53,14 @@ impl fmt::Write for Pl011Uart {
         const UARTDR: usize = 0x000; // Data register
         const UARTFR: usize = 0x018; // Flag register
         const UARTFR_TXFF: u32 = 1 << 5; // Transmit FIFO full
-        
+
         for byte in s.bytes() {
             unsafe {
                 // Wait for FIFO to not be full
-                while (core::ptr::read_volatile((self.base_addr + UARTFR) as *const u32) & UARTFR_TXFF) != 0 {
+                while (core::ptr::read_volatile((self.base_addr + UARTFR) as *const u32)
+                    & UARTFR_TXFF)
+                    != 0
+                {
                     core::hint::spin_loop();
                 }
                 // Write byte
@@ -78,7 +81,7 @@ impl Uart16550Compat {
     pub const fn new(base_addr: usize) -> Self {
         Self { base_addr }
     }
-    
+
     pub fn init(&mut self) {
         // TODO: Initialize UART
     }
@@ -90,11 +93,13 @@ impl fmt::Write for Uart16550Compat {
         const THR: usize = 0x00; // Transmitter Holding Register
         const LSR: usize = 0x05; // Line Status Register
         const LSR_THRE: u8 = 1 << 5; // Transmitter Holding Register Empty
-        
+
         for byte in s.bytes() {
             unsafe {
                 // Wait for transmitter to be ready
-                while (core::ptr::read_volatile((self.base_addr + LSR) as *const u8) & LSR_THRE) == 0 {
+                while (core::ptr::read_volatile((self.base_addr + LSR) as *const u8) & LSR_THRE)
+                    == 0
+                {
                     core::hint::spin_loop();
                 }
                 // Write byte
@@ -110,12 +115,12 @@ impl SerialPort {
     pub fn from_inner(inner: uart_16550::SerialPort) -> Self {
         Self { inner }
     }
-    
+
     #[cfg(target_arch = "aarch64")]
     pub fn from_inner(inner: Pl011Uart) -> Self {
         Self { inner }
     }
-    
+
     #[cfg(target_arch = "riscv64")]
     pub fn from_inner(inner: Uart16550Compat) -> Self {
         Self { inner }

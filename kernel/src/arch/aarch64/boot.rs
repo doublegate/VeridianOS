@@ -12,7 +12,7 @@ pub extern "C" fn _start_rust() -> ! {
         let uart = 0x0900_0000 as *mut u8;
         core::ptr::write_volatile(uart, b'D');
     }
-    
+
     // Jump to the main kernel entry
     crate::kernel_main()
 }

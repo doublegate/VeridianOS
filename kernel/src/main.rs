@@ -36,11 +36,11 @@ fn panic(info: &PanicInfo) -> ! {
 pub fn kernel_main() -> ! {
     // Initialize serial port first for debugging (architecture-specific)
     let mut serial = arch::serial_init();
-    
+
     // Write to serial port directly
     use core::fmt::Write;
     writeln!(serial, "VeridianOS kernel started!").unwrap();
-    
+
     // Architecture-specific early output
     #[cfg(target_arch = "x86_64")]
     {
@@ -58,7 +58,7 @@ pub fn kernel_main() -> ! {
             *vga_buffer.offset(8) = b'O';
             *vga_buffer.offset(9) = 0x0f;
         }
-        
+
         writeln!(serial, "VGA buffer write complete").unwrap();
     }
 
@@ -73,7 +73,7 @@ pub fn kernel_main() -> ! {
 
     // For now, let's just loop with serial output
     writeln!(serial, "Kernel initialization complete!").unwrap();
-    
+
     // Simple loop with periodic output
     let mut counter = 0u64;
     loop {
@@ -81,14 +81,15 @@ pub fn kernel_main() -> ! {
             writeln!(serial, "VeridianOS running... {}", counter / 100000000).unwrap();
         }
         counter = counter.wrapping_add(1);
-        
+
         // Also update VGA periodically on x86_64
         #[cfg(target_arch = "x86_64")]
         if counter % 100000000 == 0 {
             unsafe {
                 let vga_buffer = 0xb8000 as *mut u8;
                 let offset = ((counter / 100000000) % 10) * 2;
-                *vga_buffer.offset(20 + offset as isize) = b'0' + ((counter / 100000000) % 10) as u8;
+                *vga_buffer.offset(20 + offset as isize) =
+                    b'0' + ((counter / 100000000) % 10) as u8;
                 *vga_buffer.offset(21 + offset as isize) = 0x0f;
             }
         }
