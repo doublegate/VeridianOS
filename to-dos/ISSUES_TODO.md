@@ -124,14 +124,30 @@ Currently no low priority issues.
   - Files renamed to match x86_64/riscv64 pattern
   - **Result: AArch64 now boots successfully to kernel_main!** 🎉
 
+### ISSUE-0007: GDB break-boot command "No symbol" errors
+- **Type**: Tool/Debugging
+- **Severity**: P2
+- **Status**: FIXED
+- **Reporter**: parobek
+- **Assignee**: claude
+- **Created**: 2025-06-07
+- **Components**: GDB scripts, debugging infrastructure
+- **Description**: GDB architecture-specific scripts failed with "No symbol 'aarch64' in current context" errors
+- **Root Cause**: Unquoted string arguments in GDB break-boot commands were interpreted as symbols
+- **Fix**: (2025-06-07)
+  - Added quotes around architecture strings in all GDB scripts
+  - Changed `break-boot aarch64` to `break-boot "aarch64"`
+  - Applied same fix to x86_64 and riscv64 scripts
+  - **Result: All architectures now work with GDB debugging!**
+
 ## 📊 Issue Statistics
 
 ### Overall Status
-- **Total Issues**: 6
+- **Total Issues**: 7
 - **Open Issues**: 0
 - **In Progress**: 0
-- **Fixed**: 6
-- **Verified**: 6 ✅
+- **Fixed**: 7
+- **Verified**: 7 ✅
 - **Closed**: 0
 
 ### By Component
@@ -141,7 +157,7 @@ Currently no low priority issues.
 | Drivers | 0 | 0 | 0 | 0 |
 | Services | 0 | 0 | 0 | 0 |
 | Libraries | 0 | 0 | 0 | 0 |
-| Tools | 0 | 0 | 0 | 0 |
+| Tools | 0 | 0 | 1 | 1 |
 | Documentation | 0 | 0 | 0 | 0 |
 | Build System | 0 | 0 | 2 | 2 |
 | CI/Security | 0 | 0 | 1 | 1 |

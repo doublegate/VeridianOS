@@ -40,7 +40,7 @@ Phase 0 establishes the development environment, build system, and foundational 
   - [x] build - Build kernel
   - [x] run - Run in QEMU
   - [x] test - Run tests
-  - [ ] debug - Debug with GDB
+  - [x] debug - Debug with GDB
   - [x] clean - Clean artifacts
 - [x] Create build configuration for:
   - [x] Debug builds
@@ -68,10 +68,10 @@ Phase 0 establishes the development environment, build system, and foundational 
   - [x] qemu-system-x86_64
   - [x] qemu-system-aarch64
   - [x] qemu-system-riscv64
-- [ ] Configure GDB for kernel debugging:
-  - [ ] GDB scripts
-  - [ ] Symbol loading
-  - [ ] Remote debugging setup
+- [x] Configure GDB for kernel debugging:
+  - [x] GDB scripts
+  - [x] Symbol loading
+  - [x] Remote debugging setup
 - [ ] Set up development tools:
   - [ ] rust-analyzer configuration
   - [ ] VS Code tasks and launch configs
@@ -156,7 +156,7 @@ proptest = "1.0"
 
 - [x] Can build for all three architectures
 - [x] Can run "Hello World" in QEMU (x86_64 ✅, RISC-V ✅, AArch64 ✅)
-- [ ] Can debug with GDB
+- [x] Can debug with GDB
 - [x] **All CI checks pass 100%** ✅ 🎉
 - [ ] Documentation builds successfully
 

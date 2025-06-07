@@ -33,7 +33,7 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 
 ## Project Status
 
-🚧 **Phase 0: Foundation** (~60% Complete)
+🚧 **Phase 0: Foundation** (~70% Complete)
 
 - ✅ Development environment setup
 - ✅ **CI/CD pipeline (GitHub Actions) - 100% PASSING!** 🎉
@@ -42,6 +42,7 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 - ✅ All formatting and clippy checks passing with zero warnings
 - ✅ QEMU testing infrastructure
 - ✅ Bootloader integration (working on all architectures!)
+- ✅ GDB debugging infrastructure for all architectures
 
 ### Architecture Support Status
 

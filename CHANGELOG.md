@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - VGA text output for x86_64
 - GDT and IDT initialization for x86_64
 - Architecture stubs for all supported platforms
+- GDB debugging infrastructure with architecture-specific scripts
+- Comprehensive debugging documentation and workflows
 
 ### Fixed
 - Clippy warnings for unused imports and dead code (ISSUE-0005) - **RESOLVED 2025-06-06**
@@ -40,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fixed assembly-to-Rust calling convention issues
   - Created working-simple/ directory for known-good implementations
   - AArch64 now successfully boots to kernel_main
+- GDB debugging scripts string quoting issues - **RESOLVED 2025-06-07**
+  - Fixed "No symbol" errors in architecture-specific GDB scripts
+  - Added quotes around architecture strings in break-boot commands
+  - All architectures now work with GDB remote debugging
 
 ### Documentation
 - Phase 0: Foundation and tooling setup guide
