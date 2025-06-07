@@ -217,3 +217,10 @@ Check these files regularly to track progress and identify next tasks.
 - User memory location: `.claude/CLAUDE.md` (project-local)
 - Install git and gh in Ubuntu containers
 - Use project-local paths for all file operations
+
+### GDB Debugging Setup
+- Debug scripts: `scripts/debug-<arch>.sh` for each architecture
+- GDB configurations in `scripts/gdb/` directory
+- Use `just debug-<arch>` commands for easy debugging
+- Custom GDB commands for kernel inspection
+- Documentation: `docs/GDB-DEBUGGING.md`

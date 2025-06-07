@@ -7,7 +7,7 @@ source scripts/gdb/kernel.gdb
 set-arch-aarch64
 
 # AArch64 specific settings
-set arm abi AAPCS64
+# Note: arm abi command may not be available in all GDB versions
 
 # Connect to QEMU gdbserver
 target remote localhost:1234
@@ -103,7 +103,7 @@ echo [GDB] AArch64-specific configuration loaded\n
 echo [GDB] Additional commands: dump-regs, dump-system-regs, dump-uart-pl011, examine-boot-area\n
 
 # Set initial breakpoints
-break-boot aarch64
+break-boot "aarch64"
 break-panic
 
 # Also break on our known working entry points

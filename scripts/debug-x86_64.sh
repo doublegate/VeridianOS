@@ -26,6 +26,15 @@ fi
 
 echo -e "${GREEN}Build successful!${NC}"
 
+# Build bootimage for x86_64
+echo -e "${YELLOW}Creating bootimage...${NC}"
+cargo bootimage --target targets/x86_64-veridian.json
+
+if [ $? -ne 0 ]; then
+    echo -e "${RED}Bootimage creation failed!${NC}"
+    exit 1
+fi
+
 # Start QEMU in the background with GDB server
 echo -e "${YELLOW}Starting QEMU with GDB server on port 1234...${NC}"
 qemu-system-x86_64 \

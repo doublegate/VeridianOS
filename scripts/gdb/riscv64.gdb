@@ -150,7 +150,7 @@ echo [GDB] RISC-V 64-specific configuration loaded\n
 echo [GDB] Additional commands: dump-regs, dump-csr, dump-uart-8250, examine-opensbi, analyze-trap\n
 
 # Set initial breakpoints
-break-boot riscv64
+break-boot "riscv64"
 break-panic
 
 echo [GDB] Ready to debug RISC-V kernel. Use 'continue' to start.\n

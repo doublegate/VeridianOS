@@ -79,7 +79,7 @@ echo [GDB] x86_64-specific configuration loaded\n
 echo [GDB] Additional commands: dump-gdt, dump-idt, dump-cr, dump-vga, walk-page-table\n
 
 # Set initial breakpoints
-break-boot x86_64
+break-boot "x86_64"
 break-panic
 
 echo [GDB] Ready to debug x86_64 kernel. Use 'continue' to start.\n
