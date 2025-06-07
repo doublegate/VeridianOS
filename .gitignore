@@ -81,3 +81,9 @@ CLAUDE.local.md
 
 # Backup archives
 /backups/
+
+# GDB history
+.gdb_history
+
+# Local user data
+.local/

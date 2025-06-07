@@ -1,12 +1,16 @@
 # Phase 0: Foundation and Tooling TODO
 
 **Phase Duration**: 2-3 months  
-**Status**: IN PROGRESS (~65% Complete)  
+**Status**: IN PROGRESS (~70% Complete)  
 **Priority**: CRITICAL - Blocks all other phases  
 **Last Updated**: 2025-06-07 ✨
 **Major Milestones**: 
 - CI/CD Pipeline 100% Passing! 🎉
 - All architectures booting successfully! 🚀
+- GDB debugging infrastructure complete! 🔧
+
+**AI-Recommended Completion Timeline**: 1-2 weeks
+**Next Priority**: Testing infrastructure (enables Phase 1)
 
 ## Overview
 
@@ -77,12 +81,27 @@ Phase 0 establishes the development environment, build system, and foundational 
   - [ ] VS Code tasks and launch configs
   - [ ] objdump and readelf scripts
 
-### 5. Testing Infrastructure
-- [ ] Create test framework structure
-- [ ] Set up unit test harness
-- [ ] Configure integration test runner
-- [ ] Create QEMU test scripts
-- [ ] Set up test coverage tracking
+### 5. Testing Infrastructure 🔴 HIGH PRIORITY (AI Consensus)
+- [ ] Create no-std test framework structure:
+  - [ ] Custom test harness in kernel/tests/
+  - [ ] Test runner that outputs to serial port
+  - [ ] Exit QEMU on test completion
+- [ ] Set up unit test harness for kernel code:
+  - [ ] Mock allocator for testing
+  - [ ] Test utilities for kernel subsystems
+- [ ] Configure QEMU-based integration test runner:
+  - [ ] QEMU exit device configuration
+  - [ ] Serial output capture and parsing
+  - [ ] Test timeout handling
+- [ ] Create automated test scripts for all architectures:
+  - [ ] test-x86_64.sh
+  - [ ] test-aarch64.sh  
+  - [ ] test-riscv64.sh
+- [ ] Set up test coverage tracking with tarpaulin
+- [ ] Add benchmark tests for performance metrics:
+  - [ ] IPC latency baseline (target: < 5μs)
+  - [ ] Context switch time (target: < 10μs)
+  - [ ] Memory allocation speed (target: < 1μs)
 
 ### 6. CI/CD Pipeline ✅ COMPLETE!
 - [x] GitHub Actions workflow for:
@@ -115,6 +134,12 @@ Phase 0 establishes the development environment, build system, and foundational 
   - [ ] Test execution
 - [ ] Set up branch protection
 - [ ] Create PR templates
+
+### 9. Phase 1 Preparation (AI Recommendation)
+- [ ] Define IPC interface specifications
+- [ ] Create memory allocator design document
+- [ ] Plan capability system architecture
+- [ ] Set performance measurement baselines
 
 ## 🔧 Technical Specifications
 
@@ -176,7 +201,7 @@ proptest = "1.0"
 | Rust Setup | 100% | Complete with toolchain |
 | Build System | 100% | Workspace and Just configured |
 | Targets | 100% | All 3 architectures building |
-| Dev Environment | 60% | QEMU working, needs GDB |
+| Dev Environment | 90% | QEMU and GDB working |
 | Testing | 20% | Basic boot tests working |
 | CI/CD | 100% ✅ | **100% PASSING!** All checks green! 🎉 |
 | Documentation | 85% | Updated with CI success |

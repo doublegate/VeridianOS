@@ -95,6 +95,14 @@ For detailed build instructions, see [BUILD-INSTRUCTIONS.md](docs/BUILD-INSTRUCT
 - 🧪 [Testing Strategy](docs/TESTING-STRATEGY.md) - Testing approach and guidelines
 - 🔍 [Troubleshooting](docs/TROUBLESHOOTING.md) - Common issues and solutions
 
+### Implementation Guides
+
+- 🗺️ [Implementation Roadmap](docs/IMPLEMENTATION-ROADMAP.md) - Detailed 42-month development plan
+- 🔄 [Software Porting Guide](docs/SOFTWARE-PORTING-GUIDE.md) - How to port Linux software to VeridianOS
+- 🔧 [Compiler Toolchain Guide](docs/COMPILER-TOOLCHAIN-GUIDE.md) - Native compiler integration strategy
+- ✅ [Phase 0 Completion Checklist](docs/PHASE0-COMPLETION-CHECKLIST.md) - Remaining tasks for foundation phase
+- 🚀 [Future Development Insights](docs/FUTURE-DEVELOPMENT-INSIGHTS.md) - AI-assisted analysis and recommendations
+
 ### Development Phases
 
 The project follows a phased development approach:
@@ -143,6 +151,19 @@ VeridianOS targets high-performance scenarios with:
 - Zero-copy IPC for efficient communication
 - NUMA-aware memory allocation
 - io_uring for high-performance I/O
+
+### Performance Targets (AI-Enhanced)
+
+**Phase 1 Goals**:
+- IPC Latency: < 5μs
+- Context Switch: < 10μs
+- Microkernel Size: < 15,000 lines of code
+
+**Phase 5 Goals**:
+- IPC Latency: < 1μs
+- Memory Allocation: < 1μs
+- System Call Overhead: < 100ns
+- Support for 1000+ concurrent processes
 
 ## Security
 
@@ -197,25 +218,40 @@ VeridianOS builds upon ideas from many excellent operating systems:
 - FreeBSD - Driver framework inspiration
 - Linux - Hardware support reference
 
-## Roadmap
+## Technical Roadmap (AI-Enhanced)
 
 ### Near-term (2025)
-- [ ] Complete Phase 0 implementation
-- [ ] Basic x86_64 boot and initialization
-- [ ] Core memory management
-- [ ] Initial IPC implementation
+- [ ] Complete Phase 0 (1-2 weeks)
+- [ ] Phase 1: Microkernel Core (4-5 months)
+  - [ ] IPC implementation first (< 5μs latency target)
+  - [ ] Thread management and scheduling
+  - [ ] Memory management (hybrid buddy + bitmap)
+  - [ ] Capability system foundation
+- [ ] Phase 2: User Space Foundation (5-6 months)
+  - [ ] Three-layer POSIX architecture
+  - [ ] Init system and shell
+  - [ ] Basic driver framework
 
 ### Mid-term (2026)
-- [ ] User-space driver framework
-- [ ] Basic POSIX compatibility
-- [ ] Network stack
-- [ ] Package manager
+- [ ] Phase 3: Security Hardening (5-6 months)
+  - [ ] SELinux policies
+  - [ ] Secure boot implementation
+  - [ ] Audit framework
+- [ ] Phase 4: Package Ecosystem & Self-Hosting (5-6 months)
+  - [ ] 15-month self-hosting roadmap
+  - [ ] Ports system with 50+ packages
+  - [ ] LLVM toolchain priority
 
 ### Long-term (2027+)
-- [ ] GUI desktop environment
-- [ ] Cloud-native features
-- [ ] Production deployments
-- [ ] Security certifications
+- [ ] Phase 5: Performance Optimization (5-6 months)
+  - [ ] < 1μs IPC latency
+  - [ ] Lock-free kernel paths
+  - [ ] DPDK networking
+- [ ] Phase 6: Advanced Features (8-9 months)
+  - [ ] Wayland compositor
+  - [ ] Desktop environment
+  - [ ] Cloud-native features
+  - [ ] Production certifications
 
 ---
 

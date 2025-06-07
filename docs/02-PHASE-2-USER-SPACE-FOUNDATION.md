@@ -10,8 +10,58 @@ Phase 2 establishes the user space environment, creating essential system servic
 2. **Device Driver Framework**: User-space driver infrastructure
 3. **Virtual File System**: Unified file system interface
 4. **Network Stack**: Basic TCP/IP implementation
-5. **Standard Library**: POSIX-compatible C library
+5. **Standard Library**: POSIX-compatible C library (Rust-based for safety)
 6. **Basic Utilities**: Shell and core system tools
+
+## POSIX Compatibility Strategy
+
+**Three-Layer Architecture** (AI Recommendation):
+1. **POSIX API Layer**: Standard POSIX functions (open, read, write, etc.)
+2. **Translation Layer**: Convert POSIX semantics to capabilities
+3. **Native IPC Layer**: VeridianOS zero-copy IPC
+
+**Implementation Priority**:
+1. Memory allocation (malloc/free)
+2. Basic I/O (open/read/write/close)
+3. Process management (spawn, not fork initially)
+4. Threading (pthreads)
+5. Networking (BSD sockets)
+
+**libc Choice**: Port musl libc with VeridianOS syscall backend
+- Musl is MIT-licensed and standards-compliant
+- Implement `src/internal/syscall_arch.h` for VeridianOS
+- Replace Linux-specific code with capability-based operations
+
+## Implementation Details
+
+### Process Creation Model
+
+VeridianOS uses **spawn** instead of fork for security:
+```c
+// Instead of fork/exec pattern:
+pid_t pid = fork();
+if (pid == 0) {
+    execve(path, argv, envp);
+}
+
+// VeridianOS pattern:
+pid_t pid;
+posix_spawn(&pid, path, NULL, NULL, argv, envp);
+```
+
+### File Descriptor Translation
+
+Each POSIX fd maps to a capability:
+```
+POSIX Layer: fd (int) → Translation Table → VeridianOS: capability_t
+```
+
+### Signal Handling
+
+Signals implemented via user-space daemon:
+- Kernel sends IPC to signal daemon
+- Daemon injects signal handlers into target process
+- Async-signal-safe functions use capability-protected shared memory
 
 ## Architecture Components
 

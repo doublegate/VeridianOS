@@ -4,13 +4,22 @@
 
 VeridianOS is designed as a modern microkernel operating system with a focus on security, modularity, and performance. This document provides a comprehensive overview of the system architecture.
 
+**Architecture Goals** (Enhanced by AI Analysis):
+- Microkernel size: < 15,000 lines of code
+- Sub-microsecond IPC latency (< 5μs Phase 1, < 1μs Phase 5)
+- Support for 1000+ concurrent processes
+- Zero-copy design throughout
+- Capability-based security with fast lookups
+
 ## Core Design Principles
 
-1. **Microkernel Architecture**: Minimal kernel with services in user space
+1. **Microkernel Architecture**: Minimal kernel with services in user space (< 15K LOC)
 2. **Capability-Based Security**: Unforgeable tokens for all resource access
 3. **Memory Safety**: Written entirely in Rust with minimal unsafe code
 4. **Zero-Copy Design**: Efficient data sharing without copying
 5. **Hardware Abstraction**: Clean separation between architecture-specific and generic code
+6. **Performance First**: Design decisions prioritize sub-microsecond operations
+7. **POSIX Compatibility**: Three-layer architecture for Linux software support
 
 ## System Layers
 
@@ -44,11 +53,12 @@ VeridianOS is designed as a modern microkernel operating system with a focus on 
 
 The memory management subsystem provides:
 
-- **Physical Memory Management**: Hybrid buddy/bitmap allocator
+- **Physical Memory Management**: Hybrid buddy/bitmap allocator (< 1μs latency)
 - **Virtual Memory Management**: 4-level/3-level page tables
-- **NUMA Support**: Non-uniform memory access optimization
-- **Huge Pages**: 2MB and 1GB page support
+- **NUMA Support**: Non-uniform memory access optimization from inception
+- **Huge Pages**: 2MB and 1GB page support with auto-promotion
 - **Memory Protection**: W^X enforcement, ASLR, guard pages
+- **Hardware Features**: CXL memory, Intel LAM, ARM MTE support
 
 ### 2. Task Scheduling
 
@@ -59,15 +69,19 @@ The scheduler implements:
 - **Cache-Aware Scheduling**: Minimizes cache misses
 - **Real-Time Support**: Priority-based preemptive scheduling
 - **Power Management**: CPU frequency scaling integration
+- **Performance Target**: < 10μs context switch time
+- **Scalability**: Support for 1000+ concurrent processes
 
 ### 3. Inter-Process Communication
 
 IPC mechanisms include:
 
-- **Synchronous Message Passing**: Direct handoff between processes
-- **Asynchronous Channels**: Buffered message queues
-- **Shared Memory**: Zero-copy data sharing
+- **Synchronous Message Passing**: Direct handoff between processes (< 5μs latency)
+- **Asynchronous Channels**: Lock-free buffered message queues
+- **Shared Memory**: Zero-copy data sharing with ring buffers
 - **Capability Passing**: Secure transfer of access rights
+- **Three-Layer POSIX**: API → Translation → Native IPC
+- **Fast Path**: Register-based transfer for small messages
 
 ### 4. Capability System
 

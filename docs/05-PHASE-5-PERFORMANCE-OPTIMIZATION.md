@@ -4,6 +4,16 @@
 
 Phase 5 focuses on systematic performance optimization across all layers of VeridianOS, from kernel-level optimizations to application performance tools. This phase transforms the functional OS into a high-performance system capable of competing with established operating systems.
 
+## Performance Targets
+
+**Final Optimization Goals** (AI Consensus):
+- **IPC Latency**: < 1μs (from ~5μs in Phase 1)
+- **Memory Allocation**: < 1μs latency
+- **Context Switch**: < 5μs (from < 10μs)
+- **System Call Overhead**: < 100ns for fast path
+- **Network Throughput**: Line-rate for 10GbE+
+- **Storage IOPS**: 1M+ for NVMe devices
+
 ## Objectives
 
 1. **Kernel Performance**: Lock-free algorithms, cache optimization, NUMA awareness
@@ -12,6 +22,26 @@ Phase 5 focuses on systematic performance optimization across all layers of Veri
 4. **Network Optimization**: DPDK integration, kernel bypass, packet processing
 5. **Storage Performance**: NVMe optimization, I/O scheduling, caching layers
 6. **Profiling Tools**: System-wide profiling, performance analysis framework
+
+## Critical Optimization Areas
+
+### IPC Fast Path (Priority 1)
+- Fast-path caching for capability lookups
+- Lock-free message queues
+- CPU-local optimization
+- System call batching
+
+### Memory Subsystem
+- Per-CPU memory pools
+- NUMA-aware allocation
+- Huge page auto-promotion
+- Slab allocator optimization
+
+### Scheduler Enhancements
+- Cache-aware scheduling
+- Work stealing for load balance
+- Interrupt steering
+- Real-time priority support
 
 ## Architecture Components
 

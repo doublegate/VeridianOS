@@ -4,6 +4,19 @@
 
 Phase 1 implements the core microkernel functionality, establishing the foundation for all system services. This phase focuses on memory management, process scheduling, inter-process communication (IPC), and the capability system that forms the security backbone of VeridianOS.
 
+**Target Metrics** (Based on AI Analysis):
+- Kernel size: < 15,000 lines of code
+- IPC latency: < 5μs (targeting < 1μs by Phase 5)
+  - Fast path (register-based): < 1μs for messages <= 64 bytes
+  - Shared memory path: < 5μs for larger transfers
+- Context switch time: < 10μs including capability validation
+- Memory management latency: < 1μs
+  - Single frame allocation: < 500ns (bitmap)
+  - Large allocation: < 1μs (buddy system)
+- Process support: 1000+ concurrent processes
+- System calls: ~50 minimal API calls
+- Capability lookup: < 100ns with caching
+
 ## Objectives
 
 1. **Memory Management**: Physical and virtual memory management with NUMA support
@@ -12,6 +25,53 @@ Phase 1 implements the core microkernel functionality, establishing the foundati
 4. **Capability System**: Unforgeable tokens for resource access control
 5. **Interrupt Handling**: Efficient interrupt routing and handling
 6. **System Call Interface**: Minimal, secure system call API
+
+## Implementation Timeline
+
+- **Weeks 1-6**: IPC Foundation (Priority 1)
+- **Weeks 7-10**: Thread Management
+- **Weeks 11-15**: Address Space Management
+- **Weeks 16-18**: Capability System Integration
+- **Weeks 19-22**: System Call Interface
+- **Weeks 23-24**: Integration and Testing
+
+## Implementation Strategy Details
+
+### Memory Management Design Philosophy
+
+The hybrid allocator approach balances efficiency and fragmentation:
+- **Buddy System**: Handles allocations >= 2MB, uses power-of-2 blocks
+- **Bitmap Allocator**: Optimized for single frame allocations
+- **Automatic Selection**: Allocator chosen based on request size
+- **NUMA Awareness**: Per-node allocator instances for local allocation
+
+### IPC Fast Path Architecture
+
+Three-layer design for compatibility and performance:
+```
+Application Layer: POSIX APIs (read/write/send/recv)
+       ↓
+Translation Layer: Maps file descriptors to capabilities
+       ↓
+Native IPC Layer: Zero-copy, capability-protected transfers
+```
+
+Fast path optimizations:
+- Messages <= 64 bytes use register passing (no memory access)
+- Direct context switch from sender to receiver
+- Lock-free message queues for async channels
+- Shared memory regions for bulk data transfer
+
+### Capability Token Structure
+
+64-bit unforgeable tokens with built-in metadata:
+```
+Bits 63-48: Object Type (16 bits)
+Bits 47-16: Object ID (32 bits)  
+Bits 15-0:  Access Rights (16 bits)
+```
+
+Additional security through generation counters prevent reuse attacks.
 
 ## Architecture Components
 
@@ -62,15 +122,26 @@ impl FrameAllocator {
         // Try bitmap first for single frames
         if let Some(frame) = self.bitmap.allocate() {
             self.stats.allocated += 1;
+            self.stats.bitmap_hits += 1;
             return Some(frame);
         }
         
         // Fall back to buddy allocator
+        self.stats.buddy_fallbacks += 1;
         self.buddy.allocate_order(0)
     }
     
-    /// Allocate contiguous frames
+    /// Allocate contiguous frames with smart selection
     pub fn allocate_contiguous(&mut self, count: usize) -> Option<PhysAddr> {
+        // Use bitmap for small allocations (< 512 frames)
+        if count < 512 {
+            if let Some(region) = self.bitmap.find_contiguous(count) {
+                self.stats.bitmap_hits += 1;
+                return Some(region);
+            }
+        }
+        
+        // Use buddy for large allocations
         let order = count.next_power_of_two().trailing_zeros() as usize;
         self.buddy.allocate_order(order)
     }
@@ -626,9 +697,18 @@ pub struct Message {
     /// Message header
     pub header: MessageHeader,
     /// Message payload
-    pub data: Vec<u8>,
+    pub data: MessageData,
     /// Capabilities being transferred
     pub capabilities: Vec<CapabilityId>,
+}
+
+/// Message data optimized for size
+#[derive(Debug, Clone)]
+pub enum MessageData {
+    /// Small messages (fast path)
+    Small([u8; 64]),
+    /// Large messages (heap allocated)
+    Large(Vec<u8>),
 }
 
 #[derive(Debug, Clone, Copy)]

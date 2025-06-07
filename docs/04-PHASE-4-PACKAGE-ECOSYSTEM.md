@@ -1,8 +1,8 @@
-# Phase 4: Package Ecosystem (Months 22-27)
+# Phase 4: Package Ecosystem and Self-Hosting (Months 22-27)
 
 ## Overview
 
-Phase 4 establishes a comprehensive package management ecosystem for VeridianOS, including source-based ports, binary packages, development tools, and a secure software distribution infrastructure. This phase enables third-party software development and creates a sustainable ecosystem.
+Phase 4 establishes a comprehensive package management ecosystem for VeridianOS, including source-based ports, binary packages, development tools, and a secure software distribution infrastructure. This phase enables third-party software development and creates a sustainable ecosystem, culminating in self-hosting capability.
 
 ## Objectives
 
@@ -12,6 +12,39 @@ Phase 4 establishes a comprehensive package management ecosystem for VeridianOS,
 4. **Development Tools**: Compilers, debuggers, and build systems
 5. **Package Repository**: Secure package hosting and distribution
 6. **SDK and APIs**: Developer tools and documentation
+7. **Self-Hosting**: Native compilation of VeridianOS on VeridianOS
+
+## Self-Hosting Roadmap (15-Month Plan)
+
+### Phase 4A: Cross-Compilation Foundation (Months 1-3)
+- LLVM/GCC target implementation for VeridianOS
+- Custom target triples: `{x86_64,aarch64,riscv64}-unknown-veridian`
+- CMake toolchain files and build system support
+
+### Phase 4B: Bootstrap Environment (Months 4-6)
+- Port binutils (as, ld, ar, etc.)
+- Minimal C compiler (GCC or Clang)
+- Essential build tools (make, pkg-config)
+
+### Phase 4C: Development Platform (Months 7-9)
+- Full compiler suite (C, C++, Rust, Go via gccgo)
+- Debuggers (GDB with ptrace support)
+- Modern build systems (CMake, Meson, Cargo)
+
+### Phase 4D: Full Self-Hosting (Months 10-15)
+- Native VeridianOS compilation
+- Package building on VeridianOS
+- CI/CD running on VeridianOS
+- SDK and developer documentation
+
+## Compiler Toolchain Strategy
+
+**Priority Order** (AI Recommendation):
+1. **LLVM/Clang**: Unified backend for C/C++/Rust
+2. **Rust**: Native target with std library support
+3. **GCC**: Alternative C/C++ compiler
+4. **Go**: Via gccgo initially, native runtime later
+5. **Python**: CPython port with essential modules
 
 ## Architecture Components
 
