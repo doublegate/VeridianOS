@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GDT and IDT initialization for x86_64
 - Architecture stubs for all supported platforms
 
+### Fixed
+- Clippy warnings for unused imports and dead code (ISSUE-0005)
+  - Removed unused `core::fmt::Write` import in serial.rs
+  - Added `#[allow(dead_code)]` attributes to placeholder functions
+
 ### Documentation
 - Phase 0: Foundation and tooling setup guide
 - Phase 1: Microkernel core implementation guide

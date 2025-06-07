@@ -1,5 +1,6 @@
 // Scheduler module
 
+#[allow(dead_code)]
 pub fn init() {
     println!("[SCHED] Initializing scheduler...");
     // TODO: Initialize task structures
@@ -8,6 +9,7 @@ pub fn init() {
     println!("[SCHED] Scheduler initialized");
 }
 
+#[allow(dead_code)]
 pub fn run() -> ! {
     println!("[SCHED] Entering scheduler main loop");
     loop {

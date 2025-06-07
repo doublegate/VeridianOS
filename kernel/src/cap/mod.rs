@@ -1,5 +1,6 @@
 // Capability system module
 
+#[allow(dead_code)]
 pub fn init() {
     println!("[CAP] Initializing capability system...");
     // TODO: Initialize capability table

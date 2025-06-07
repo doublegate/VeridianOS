@@ -15,7 +15,6 @@ impl fmt::Write for SerialPort {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         #[cfg(target_arch = "x86_64")]
         {
-            use core::fmt::Write;
             self.inner.write_str(s)
         }
         #[cfg(target_arch = "aarch64")]

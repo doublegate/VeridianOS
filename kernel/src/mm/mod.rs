@@ -1,5 +1,6 @@
 // Memory management module
 
+#[allow(dead_code)]
 pub fn init() {
     println!("[MM] Initializing memory management...");
     // TODO: Initialize frame allocator

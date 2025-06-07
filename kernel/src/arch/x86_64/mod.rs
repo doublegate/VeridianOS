@@ -28,6 +28,7 @@ pub fn disable_interrupts() {
     x86_64::instructions::interrupts::disable();
 }
 
+#[allow(dead_code)]
 pub fn idle() {
     x86_64::instructions::hlt();
 }

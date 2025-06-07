@@ -100,20 +100,40 @@ Currently no low priority issues.
 - **Root Cause**: Cargo.lock was in .gitignore
 - **Fix**: Removed Cargo.lock from .gitignore and committed it (commit: 8790414)
 
+### ISSUE-0005: Clippy warnings for unused code
+- **Status**: Fixed
+- **Component**: Kernel
+- **Reported**: 2025-06-06
+- **Reporter**: CI/Clippy
+- **Assignee**: Claude
+- **Description**: Clippy reported unused import and dead code warnings
+- **Impact**: CI would fail with -D warnings flag
+- **Workaround**: None needed
+- **Root Cause**: Stub implementations for future phases were not marked as allowed dead code
+- **Fix**: 
+  - Removed unused `core::fmt::Write` import in serial.rs:18
+  - Added `#[allow(dead_code)]` to placeholder functions in:
+    - arch/x86_64/mod.rs:31 (idle)
+    - cap/mod.rs:3 (init)
+    - ipc/mod.rs:3 (init) 
+    - mm/mod.rs:3 (init)
+    - sched/mod.rs:3 (init)
+    - sched/mod.rs:11 (run)
+
 ## 📊 Issue Statistics
 
 ### Overall Status
-- **Total Issues**: 4
+- **Total Issues**: 5
 - **Open Issues**: 1
 - **In Progress**: 0
-- **Fixed**: 3
+- **Fixed**: 4
 - **Verified**: 3
 - **Closed**: 0
 
 ### By Component
 | Component | Open | In Progress | Fixed | Total |
 |-----------|------|-------------|-------|-------|
-| Kernel | 1 | 0 | 0 | 1 |
+| Kernel | 1 | 0 | 1 | 2 |
 | Drivers | 0 | 0 | 0 | 0 |
 | Services | 0 | 0 | 0 | 0 |
 | Libraries | 0 | 0 | 0 | 0 |
