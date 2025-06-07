@@ -25,6 +25,7 @@ pub fn idle() {
 }
 
 // Simple serial initialization for compatibility
+#[allow(dead_code)]
 pub fn serial_init() -> crate::serial::Pl011Uart {
     crate::serial::Pl011Uart::new(0x0900_0000)
 }

@@ -17,6 +17,7 @@ pub mod riscv64;
 pub use riscv64::*;
 
 // Wrapper for serial_init to return common type
+#[allow(dead_code)]
 pub fn serial_init() -> crate::serial::SerialPort {
     #[cfg(target_arch = "x86_64")]
     {

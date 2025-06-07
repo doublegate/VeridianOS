@@ -35,25 +35,23 @@ run: build
         -serial stdio \
         -kernel target/x86_64-unknown-none/release/veridian_kernel
 
-# Run with debugging
-debug: build
-    @echo "Running with GDB debugging..."
-    qemu-system-x86_64 \
-        -enable-kvm \
-        -m 2G \
-        -smp 4 \
-        -serial stdio \
-        -s -S \
-        -kernel target/x86_64-unknown-none/release/veridian_kernel &
-    gdb target/x86_64-unknown-none/release/veridian_kernel \
-        -ex "target remote :1234" \
-        -ex "break kernel_main" \
-        -ex "continue"
+# Debug x86_64 kernel
+debug-x86_64:
+    @echo "Starting x86_64 debug session..."
+    ./scripts/debug-x86_64.sh
 
-# Run with GDB
-gdb: build
-    @echo "Starting GDB session..."
-    rust-gdb target/x86_64-unknown-none/release/veridian_kernel
+# Debug AArch64 kernel
+debug-aarch64:
+    @echo "Starting AArch64 debug session..."
+    ./scripts/debug-aarch64.sh
+
+# Debug RISC-V kernel
+debug-riscv64:
+    @echo "Starting RISC-V debug session..."
+    ./scripts/debug-riscv64.sh
+
+# Generic debug command (defaults to x86_64)
+debug: debug-x86_64
 
 # Run tests
 test:
@@ -173,7 +171,10 @@ help:
     @echo ""
     @echo "  just build          - Build the kernel"
     @echo "  just run            - Run in QEMU"
-    @echo "  just debug          - Run with GDB debugging"
+    @echo "  just debug          - Debug with GDB (x86_64)"
+    @echo "  just debug-x86_64   - Debug x86_64 kernel"
+    @echo "  just debug-aarch64  - Debug AArch64 kernel"
+    @echo "  just debug-riscv64  - Debug RISC-V kernel"
     @echo "  just test           - Run tests"
     @echo "  just fmt            - Format code"
     @echo "  just clippy         - Run linter"

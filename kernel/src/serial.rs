@@ -36,10 +36,12 @@ pub struct Pl011Uart {
 
 #[cfg(target_arch = "aarch64")]
 impl Pl011Uart {
+    #[allow(dead_code)]
     pub const fn new(base_addr: usize) -> Self {
         Self { base_addr }
     }
 
+    #[allow(dead_code)]
     pub fn init(&mut self) {
         // Simple PL011 initialization for QEMU
         // For QEMU virt machine, the UART is already initialized by firmware
@@ -111,16 +113,19 @@ impl fmt::Write for Uart16550Compat {
 
 impl SerialPort {
     #[cfg(target_arch = "x86_64")]
+    #[allow(dead_code)]
     pub fn from_inner(inner: uart_16550::SerialPort) -> Self {
         Self { inner }
     }
 
     #[cfg(target_arch = "aarch64")]
+    #[allow(dead_code)]
     pub fn from_inner(inner: Pl011Uart) -> Self {
         Self { inner }
     }
 
     #[cfg(target_arch = "riscv64")]
+    #[allow(dead_code)]
     pub fn from_inner(inner: Uart16550Compat) -> Self {
         Self { inner }
     }
