@@ -1,12 +1,12 @@
 # VeridianOS Master TODO List
 
-**Last Updated**: 2025-06-06 ✨
+**Last Updated**: 2025-06-07 ✨
 
 This is the master tracking document for all VeridianOS development tasks across all phases and aspects of the project.
 
 ## 🎯 Project Overview Status
 
-- [ ] Phase 0: Foundation and Tooling - **IN PROGRESS (~60%)**
+- [ ] Phase 0: Foundation and Tooling - **IN PROGRESS (~65%)**
 - [ ] Phase 1: Microkernel Core - **NOT STARTED**
 - [ ] Phase 2: User Space Foundation - **NOT STARTED**
 - [ ] Phase 3: Security Hardening - **NOT STARTED**
@@ -64,7 +64,7 @@ This is the master tracking document for all VeridianOS development tasks across
 - [x] QEMU testing infrastructure ✅
 - [x] Kernel boots on x86_64 ✅
 - [x] Kernel boots on RISC-V ✅
-- [ ] Debug AArch64 boot sequence (assembly works, Rust linkage issue)
+- [x] Kernel boots on AArch64 ✅ (Fixed 2025-06-07! 🎉)
 - [x] Create linker scripts for all architectures ✅
 - [ ] Set up GDB debugging infrastructure
 - [ ] Implement basic memory initialization
@@ -76,7 +76,7 @@ This is the master tracking document for all VeridianOS development tasks across
 |-----------|----------|-------------|---------|----------|
 | Build System | 🟢 | 🟢 | 🟢 | 🟢 |
 | CI/CD Pipeline | 🟢 | 🟢 | 🟢 | 🟢 |
-| Bootloader | 🟢 | 🟡 | 🟡 | ⚪ |
+| Bootloader | 🟢 | 🟢 | 🟢 | 🟢 |
 | Kernel Core | 🟢 | 🟡 | 🟡 | ⚪ |
 | Memory Manager | 🟡 | ⚪ | ⚪ | ⚪ |
 | Scheduler | 🟡 | ⚪ | ⚪ | ⚪ |

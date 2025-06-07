@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fixed formatting issues in multiple files to pass `cargo fmt` checks
   - Resolved all clippy warnings across the codebase
   - **CI/CD pipeline now 100% passing all checks!** 🎉
+- AArch64 boot sequence issues (ISSUE-0006) - **RESOLVED 2025-06-07**
+  - Discovered iterator-based code causes hangs on bare metal AArch64
+  - Simplified boot sequence to use direct memory writes
+  - Fixed assembly-to-Rust calling convention issues
+  - Created working-simple/ directory for known-good implementations
+  - AArch64 now successfully boots to kernel_main
 
 ### Documentation
 - Phase 0: Foundation and tooling setup guide
@@ -68,9 +74,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - QEMU testing infrastructure operational
 - x86_64 kernel boots successfully with serial I/O
 - RISC-V kernel boots successfully with OpenSBI
-- AArch64 kernel builds but has boot sequence issues (debugging in progress)
+- AArch64 kernel boots successfully with serial I/O (Fixed 2025-06-07)
 - Generic serial port abstraction for all architectures
 - Architecture-specific boot sequences implemented
+- All three architectures now boot to kernel_main successfully
 
 ## [0.0.1] - TBD
 

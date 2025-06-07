@@ -1,37 +1,30 @@
-// AArch64 architecture support (stub)
+// AArch64 architecture support
 
+// Include the boot module
 pub mod boot;
-pub mod test;
 
+#[allow(dead_code)]
 pub fn init() {
-    // TODO: Initialize AArch64-specific features
+    // Architecture-specific initialization
+    // This will be expanded later
 }
 
 pub fn halt() -> ! {
     loop {
-        // TODO: Implement WFI (Wait For Interrupt)
-        unsafe { core::arch::asm!("wfi") };
+        unsafe {
+            core::arch::asm!("wfe");
+        }
     }
 }
 
 #[allow(dead_code)]
-pub fn enable_interrupts() {
-    // TODO: Enable interrupts on AArch64
-}
-
-#[allow(dead_code)]
-pub fn disable_interrupts() {
-    // TODO: Disable interrupts on AArch64
-}
-
 pub fn idle() {
-    // TODO: Implement idle for AArch64
-    unsafe { core::arch::asm!("wfi") };
+    unsafe {
+        core::arch::asm!("wfe");
+    }
 }
 
+// Simple serial initialization for compatibility
 pub fn serial_init() -> crate::serial::Pl011Uart {
-    // QEMU virt machine places PL011 UART at 0x09000000
-    let mut uart = crate::serial::Pl011Uart::new(0x0900_0000);
-    uart.init();
-    uart
+    crate::serial::Pl011Uart::new(0x0900_0000)
 }

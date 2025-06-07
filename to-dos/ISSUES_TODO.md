@@ -1,7 +1,7 @@
 # Issues and Bug Tracking TODO
 
 **Purpose**: Central tracking for all bugs, issues, and defects  
-**Last Updated**: 2025-06-06
+**Last Updated**: 2025-06-07
 
 ## 🐛 Issue Categories
 
@@ -41,25 +41,7 @@ Currently no high priority issues.
 
 ## 🟡 Medium Priority Issues (P2)
 
-### ISSUE-0004: AArch64 Boot Sequence Not Reaching Rust Code
-- **Status**: Open/In Progress
-- **Component**: Kernel/Boot
-- **Reported**: 2025-06-06
-- **Reporter**: QEMU Testing
-- **Assignee**: TBD
-- **Description**: AArch64 kernel builds successfully but cannot branch from assembly to Rust code
-- **Impact**: AArch64 architecture cannot boot to kernel main
-- **Symptoms**: 
-  - Assembly boot code executes (outputs 'ABC')
-  - Can call assembly functions within boot.S
-  - Cannot branch to _start_rust or any Rust functions
-  - Getting unused function warnings because kernel_main() never runs
-- **Workaround**: None currently
-- **Investigation**:
-  - Tried multiple branch instructions (bl, blr, b)
-  - Tried both PIC and static relocation models
-  - Symbol exists at correct address (0x400005e4)
-  - Possible GOT/PLT initialization issue
+Currently no medium priority issues.
 
 ## 🟢 Low Priority Issues (P3)
 
@@ -122,20 +104,40 @@ Currently no low priority issues.
   - Fixed all formatting issues with `cargo fmt`
   - **Result: CI/CD pipeline now 100% passing all checks!** 🎉
 
+### ISSUE-0006: AArch64 Boot Sequence Not Reaching Rust Code
+- **Status**: Fixed/Verified ✅
+- **Component**: Kernel/Boot
+- **Reported**: 2025-06-06
+- **Reporter**: QEMU Testing
+- **Assignee**: Claude
+- **Description**: AArch64 kernel builds successfully but cannot branch from assembly to Rust code
+- **Impact**: AArch64 architecture cannot boot to kernel main
+- **Symptoms**: 
+  - Assembly boot code executes
+  - Cannot branch to _start_rust or any Rust functions
+  - Iterator-based code causes hangs on bare metal
+- **Root Cause**: Complex Rust code (iterators, formatting) causes issues on bare metal AArch64
+- **Fix**: (2025-06-07)
+  - Simplified boot sequence to use direct memory writes only
+  - Removed all iterator usage in AArch64 boot path
+  - Created working-simple/ directory for known-good implementations
+  - Files renamed to match x86_64/riscv64 pattern
+  - **Result: AArch64 now boots successfully to kernel_main!** 🎉
+
 ## 📊 Issue Statistics
 
 ### Overall Status
-- **Total Issues**: 5
-- **Open Issues**: 1
+- **Total Issues**: 6
+- **Open Issues**: 0
 - **In Progress**: 0
-- **Fixed**: 4
-- **Verified**: 4 ✅
+- **Fixed**: 6
+- **Verified**: 6 ✅
 - **Closed**: 0
 
 ### By Component
 | Component | Open | In Progress | Fixed | Total |
 |-----------|------|-------------|-------|-------|
-| Kernel | 1 | 0 | 1 | 2 |
+| Kernel | 0 | 0 | 3 | 3 |
 | Drivers | 0 | 0 | 0 | 0 |
 | Services | 0 | 0 | 0 | 0 |
 | Libraries | 0 | 0 | 0 | 0 |

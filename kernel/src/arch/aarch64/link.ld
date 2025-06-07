@@ -2,32 +2,34 @@ ENTRY(_start)
 
 SECTIONS
 {
-    . = 0x40000000;
+    /* QEMU loads the kernel at 0x40080000 for -machine virt */
+    . = 0x40080000;
     
-    .text : {
+    .text : ALIGN(4K) {
         KEEP(*(.text.boot))
         *(.text .text.*)
     }
     
-    .rodata : {
+    .rodata : ALIGN(4K) {
         *(.rodata .rodata.*)
     }
     
-    .data : {
+    .data : ALIGN(4K) {
         *(.data .data.*)
     }
     
-    .bss : {
-        . = ALIGN(16);
+    .bss : ALIGN(4K) {
         __bss_start = .;
+        *(.bss.stack)
         *(.bss .bss.*)
         *(COMMON)
-        . = ALIGN(16);
         __bss_end = .;
     }
     
+    /* Discard unwanted sections */
     /DISCARD/ : {
         *(.comment)
+        *(.gnu*)
         *(.note*)
         *(.eh_frame*)
     }
