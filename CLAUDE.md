@@ -10,10 +10,10 @@ VeridianOS is a next-generation microkernel operating system written entirely in
 
 ### Building the Kernel
 ```bash
-# Build for specific architectures
-cargo build --target x86_64-unknown-none
-cargo build --target aarch64-unknown-none
-cargo build --target riscv64gc-unknown-none-elf
+# Build for specific architectures (requires -Zbuild-std for custom targets)
+cargo build --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
+cargo build --target targets/aarch64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
+cargo build --target targets/riscv64gc-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
 
 # Build all targets
 just build-all
@@ -22,7 +22,7 @@ just build-all
 cargo bootimage
 
 # Run with QEMU
-cargo run --target x86_64-unknown-none -- -serial stdio -display none
+cargo run --target targets/x86_64-veridian.json -p veridian-kernel -- -serial stdio -display none
 ```
 
 ### Testing
@@ -129,7 +129,11 @@ Currently implementing in phases:
 - **Repository**: https://github.com/doublegate/VeridianOS
 - **Documentation**: Complete (25+ comprehensive guides)
 - **Infrastructure**: Directory structure, TODO system, and GitHub setup complete
-- **Current Focus**: Ready to begin Phase 0 implementation
+- **CI/CD**: ✅ GitHub Actions workflow passing all checks (optimized pipeline)
+- **Current Phase**: Phase 0 (Foundation) - ~45% complete
+- **Build Status**: ✅ Compiling successfully for all target architectures
+- **Code Quality**: ✅ All format and clippy checks passing
+- **Next Milestone**: Boot kernel in QEMU with basic output
 
 ## Critical Implementation Notes
 

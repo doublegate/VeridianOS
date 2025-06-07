@@ -1,11 +1,12 @@
 {
-  "llvm-target": "riscv64gc-unknown-none-elf",
+  "llvm-target": "riscv64",
   "data-layout": "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128",
   "arch": "riscv64",
   "target-endian": "little",
   "target-pointer-width": "64",
   "target-c-int-width": "32",
   "os": "none",
+  "llvm-abiname": "lp64d",
   "executables": true,
   "linker-flavor": "ld.lld",
   "linker": "rust-lld",

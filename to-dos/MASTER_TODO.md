@@ -1,12 +1,12 @@
 # VeridianOS Master TODO List
 
-**Last Updated**: 2025-01-06
+**Last Updated**: 2025-06-06
 
 This is the master tracking document for all VeridianOS development tasks across all phases and aspects of the project.
 
 ## 🎯 Project Overview Status
 
-- [ ] Phase 0: Foundation and Tooling - **IN PLANNING**
+- [ ] Phase 0: Foundation and Tooling - **IN PROGRESS (~45%)**
 - [ ] Phase 1: Microkernel Core - **NOT STARTED**
 - [ ] Phase 2: User Space Foundation - **NOT STARTED**
 - [ ] Phase 3: Security Hardening - **NOT STARTED**
@@ -17,9 +17,9 @@ This is the master tracking document for all VeridianOS development tasks across
 ## 📋 High-Level Milestones
 
 ### Q1 2025
-- [ ] Complete Phase 0 implementation
+- [ ] Complete Phase 0 implementation (IN PROGRESS)
 - [ ] Begin Phase 1 development
-- [ ] Establish CI/CD pipeline
+- [x] Establish CI/CD pipeline ✅
 - [ ] Create initial test framework
 
 ### Q2 2025
@@ -48,25 +48,34 @@ This is the master tracking document for all VeridianOS development tasks across
 
 ## 🚀 Current Sprint Focus
 
-**Sprint**: Foundation Setup (Jan 2025)
-- [x] Project structure created
-- [x] Documentation framework established
-- [ ] Rust toolchain configuration
-- [ ] Build system setup
-- [ ] Custom target specifications
-- [ ] Basic CI/CD pipeline
+**Completed Sprint**: Foundation Setup (June 2025)
+- [x] Project structure created ✅
+- [x] Documentation framework established ✅
+- [x] Rust toolchain configuration ✅
+- [x] Build system setup ✅
+- [x] Custom target specifications ✅
+- [x] Basic CI/CD pipeline ✅
+
+**Next Sprint**: Kernel Boot Implementation
+- [ ] Implement proper bootloader integration
+- [ ] Create linker scripts for all architectures
+- [ ] Set up GDB debugging infrastructure
+- [ ] Implement basic memory initialization
+- [ ] Get kernel booting in QEMU
+- [ ] Create initial test framework
 
 ## 📊 Progress Tracking
 
 | Component | Planning | Development | Testing | Complete |
 |-----------|----------|-------------|---------|----------|
-| Build System | 🟡 | ⚪ | ⚪ | ⚪ |
-| Bootloader | ⚪ | ⚪ | ⚪ | ⚪ |
-| Kernel Core | ⚪ | ⚪ | ⚪ | ⚪ |
-| Memory Manager | ⚪ | ⚪ | ⚪ | ⚪ |
-| Scheduler | ⚪ | ⚪ | ⚪ | ⚪ |
-| IPC System | ⚪ | ⚪ | ⚪ | ⚪ |
-| Capability System | ⚪ | ⚪ | ⚪ | ⚪ |
+| Build System | 🟢 | 🟢 | 🟢 | 🟢 |
+| CI/CD Pipeline | 🟢 | 🟢 | 🟢 | 🟢 |
+| Bootloader | 🟡 | 🟡 | ⚪ | ⚪ |
+| Kernel Core | 🟡 | 🟡 | ⚪ | ⚪ |
+| Memory Manager | 🟡 | ⚪ | ⚪ | ⚪ |
+| Scheduler | 🟡 | ⚪ | ⚪ | ⚪ |
+| IPC System | 🟡 | ⚪ | ⚪ | ⚪ |
+| Capability System | 🟡 | ⚪ | ⚪ | ⚪ |
 | Driver Framework | ⚪ | ⚪ | ⚪ | ⚪ |
 | Filesystem | ⚪ | ⚪ | ⚪ | ⚪ |
 | Network Stack | ⚪ | ⚪ | ⚪ | ⚪ |
