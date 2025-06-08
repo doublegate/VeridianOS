@@ -1,0 +1,50 @@
+<!-- Custom CSS for VeridianOS documentation -->
+<link rel="icon" type="image/x-icon" href="https://raw.githubusercontent.com/doublegate/VeridianOS/main/images/veridian_os.ico">
+<style>
+    /* VeridianOS color scheme */
+    :root {
+        --veridian-primary: #00695c;
+        --veridian-secondary: #004d40;
+        --veridian-accent: #00897b;
+        --veridian-light: #4db6ac;
+        --veridian-dark: #00251a;
+    }
+
+    /* Override rustdoc theme colors */
+    body.theme--dark {
+        --main-background-color: #1a1a1a;
+        --main-color: #e0e0e0;
+        --link-color: var(--veridian-light);
+        --sidebar-background-color: var(--veridian-dark);
+    }
+
+    /* Custom header styling */
+    .main-heading h1 {
+        color: var(--veridian-accent);
+    }
+
+    /* Code block enhancements */
+    pre.rust {
+        border-left: 3px solid var(--veridian-accent);
+    }
+
+    /* Navigation improvements */
+    .sidebar .current {
+        background-color: var(--veridian-secondary);
+    }
+
+    /* Warning/safety badges */
+    .stab.unsafe {
+        background-color: #d32f2f;
+        color: white;
+        padding: 3px 6px;
+        border-radius: 3px;
+    }
+
+    .stab.no-std {
+        background-color: var(--veridian-primary);
+        color: white;
+        padding: 3px 6px;
+        border-radius: 3px;
+    }
+</style>

@@ -1,0 +1,46 @@
+[book]
+title = "VeridianOS Developer Guide"
+authors = ["VeridianOS Contributors"]
+description = "Comprehensive guide to VeridianOS development"
+language = "en"
+multilingual = false
+src = "docs/book"
+
+[build]
+build-dir = "target/book"
+create-missing = true
+
+[preprocessor.index]
+
+[preprocessor.links]
+
+[output.html]
+theme = "docs/book-theme"
+default-theme = "navy"
+preferred-dark-theme = "navy"
+curly-quotes = true
+mathjax-support = false
+copy-fonts = true
+additional-css = ["docs/book-theme/veridian.css"]
+additional-js = []
+no-section-label = false
+git-repository-url = "https://github.com/doublegate/VeridianOS"
+git-repository-icon = "fa-github"
+site-url = "/VeridianOS/"
+
+[output.html.playground]
+editable = false
+copyable = true
+copy-js = true
+line-numbers = true
+
+[output.html.search]
+enable = true
+limit-results = 30
+teaser-word-count = 30
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 1
+boost-paragraph = 1
+expand = true
+heading-split-level = 3

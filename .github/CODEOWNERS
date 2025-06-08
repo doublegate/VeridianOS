@@ -1,0 +1,91 @@
+# VeridianOS Code Ownership
+# 
+# These owners will be the default owners for everything in the repo.
+# They will be requested for review when someone opens a pull request.
+#
+# Format: <pattern> <owner>
+# Order matters - last matching pattern takes precedence
+
+# Global owners - review all changes
+* @doublegate
+
+# Documentation
+/docs/ @doublegate
+/README.md @doublegate
+/CONTRIBUTING.md @doublegate
+*.md @doublegate
+
+# Kernel core components
+/kernel/src/main.rs @doublegate
+/kernel/src/lib.rs @doublegate
+/kernel/src/panic.rs @doublegate
+
+# Architecture-specific code
+/kernel/src/arch/ @doublegate
+/kernel/src/arch/x86_64/ @doublegate
+/kernel/src/arch/aarch64/ @doublegate
+/kernel/src/arch/riscv64/ @doublegate
+
+# Memory management
+/kernel/src/mm/ @doublegate
+
+# Scheduler
+/kernel/src/sched/ @doublegate
+
+# Inter-process communication
+/kernel/src/ipc/ @doublegate
+
+# Capability system
+/kernel/src/cap/ @doublegate
+
+# Build configuration
+/Cargo.toml @doublegate
+/Cargo.lock @doublegate
+/Justfile @doublegate
+/.cargo/ @doublegate
+/targets/ @doublegate
+
+# CI/CD
+/.github/workflows/ @doublegate
+/.github/actions/ @doublegate
+
+# Scripts and tools
+/scripts/ @doublegate
+/tools/ @doublegate
+
+# Test infrastructure
+/kernel/tests/ @doublegate
+/kernel/benches/ @doublegate
+**/test_*.rs @doublegate
+**/tests.rs @doublegate
+
+# Security-sensitive files
+/kernel/src/cap/ @doublegate
+/kernel/src/crypto/ @doublegate
+**/security*.rs @doublegate
+
+# Boot and initialization
+/kernel/src/boot/ @doublegate
+**/boot.S @doublegate
+**/boot.rs @doublegate
+
+# Device drivers (future)
+/drivers/ @doublegate
+
+# System services (future)
+/services/ @doublegate
+
+# Git configuration
+/.gitignore @doublegate
+/.gitattributes @doublegate
+/.githooks/ @doublegate
+
+# Project configuration
+/rustfmt.toml @doublegate
+/.clippy.toml @doublegate
+/.editorconfig @doublegate
+/rust-toolchain.toml @doublegate
+
+# Legal
+/LICENSE @doublegate
+/NOTICE @doublegate

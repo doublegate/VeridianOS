@@ -1,7 +1,8 @@
 # Release Management TODO
 
 **Purpose**: Track release planning, milestones, and deployment tasks  
-**Last Updated**: 2025-01-06
+**Last Updated**: 2025-06-07  
+**Current Status**: Phase 0 complete! Ready for v0.1.0 milestone work.
 
 ## 🎯 Release Strategy
 
@@ -26,11 +27,13 @@ Following Semantic Versioning (SemVer):
 **Target Date**: Q2 2025  
 **Phase**: 0-1  
 **Goals**:
-- [ ] Basic boot on x86_64
-- [ ] Minimal kernel functionality
-- [ ] Build system complete
-- [ ] Serial console output
-- [ ] Basic memory detection
+- [x] Basic boot on x86_64 ✅
+- [x] Basic boot on AArch64 ✅
+- [x] Basic boot on RISC-V ✅
+- [x] Build system complete ✅
+- [x] Serial console output ✅
+- [ ] Minimal kernel functionality (Phase 1)
+- [ ] Basic memory detection (Phase 1)
 
 #### v0.2.0 - Core Kernel
 **Target Date**: Q3 2025  
@@ -45,9 +48,10 @@ Following Semantic Versioning (SemVer):
 **Target Date**: Q4 2025  
 **Phase**: 1-2  
 **Goals**:
-- [ ] ARM64 boot support
-- [ ] RISC-V boot support
-- [ ] Cross-platform abstractions
+- [x] ARM64 boot support ✅ (Already complete!)
+- [x] RISC-V boot support ✅ (Already complete!)
+- [x] Cross-platform abstractions ✅ (Already complete!)
+- [ ] Advanced architecture features (Phase 2)
 - [ ] Unified build system
 
 #### v0.4.0 - User Space

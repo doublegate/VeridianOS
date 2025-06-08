@@ -1,0 +1,22 @@
+<!-- Header content for all documentation pages -->
+<div class="veridian-header">
+    <div class="warning-banner">
+        <strong>⚠️ VeridianOS Kernel Documentation</strong> - 
+        This is low-level kernel code. All functions are unsafe unless explicitly marked otherwise.
+        <span class="stab no-std">no_std</span>
+    </div>
+</div>
+
+<script>
+// Add no_std badge to all module pages
+document.addEventListener('DOMContentLoaded', function() {
+    const heading = document.querySelector('.main-heading h1');
+    if (heading && !heading.querySelector('.stab')) {
+        const badge = document.createElement('span');
+        badge.className = 'stab no-std';
+        badge.textContent = 'no_std';
+        heading.appendChild(document.createTextNode(' '));
+        heading.appendChild(badge);
+    }
+});
+</script>

@@ -1,0 +1,35 @@
+# Rustdoc configuration for VeridianOS
+
+# Enable unstable features for better documentation
+unstable-features = true
+
+# Enable index page generation
+enable-index-page = true
+
+# Set default theme
+default-theme = "dark"
+
+# Document private items (important for kernel internals)
+document-private-items = true
+
+# Document hidden items
+document-hidden-items = true
+
+# Passes to rustdoc
+passes = ["strip-hidden", "strip-private"]
+
+# External HTML files
+html-in-header = "docs/assets/header.html"
+html-before-content = "docs/assets/before.html"
+html-after-content = "docs/assets/after.html"
+
+# Playground settings (disabled for kernel code)
+playground = { editable = false, copyable = false }
+
+# Search settings
+search = { enable = true }
+
+# Generate source links
+[source]
+git-repository = "https://github.com/doublegate/VeridianOS"
+git-branch = "main"

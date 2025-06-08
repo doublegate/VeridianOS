@@ -3,6 +3,27 @@
 # Default target
 default: build
 
+# Setup development environment
+setup:
+    @echo "Setting up development environment..."
+    @bash scripts/setup-dev.sh
+
+# Install git hooks
+install-hooks:
+    @echo "Installing git hooks..."
+    @bash scripts/install-hooks.sh
+
+# Run pre-commit checks manually
+pre-commit:
+    @echo "Running pre-commit checks..."
+    @bash .githooks/pre-commit
+
+# Validate commit message
+check-commit-msg MSG:
+    @echo "{{MSG}}" > .tmp-commit-msg
+    @bash .githooks/commit-msg .tmp-commit-msg || true
+    @rm -f .tmp-commit-msg
+
 # Build the kernel
 build:
     @echo "Building VeridianOS..."
@@ -53,19 +74,63 @@ debug-riscv64:
 # Generic debug command (defaults to x86_64)
 debug: debug-x86_64
 
-# Run tests
-test:
-    @echo "Running tests..."
-    cargo test --all
+# Run tests for x86_64
+test-x86_64:
+    @echo "Running x86_64 tests..."
+    ./scripts/test-x86_64.sh
+
+# Run tests for AArch64
+test-aarch64:
+    @echo "Running AArch64 tests..."
+    ./scripts/test-aarch64.sh
+
+# Run tests for RISC-V
+test-riscv64:
+    @echo "Running RISC-V tests..."
+    ./scripts/test-riscv64.sh
+
+# Run tests for all architectures
+test-all: test-x86_64 test-aarch64 test-riscv64
+    @echo "All architecture tests complete!"
+
+# Run tests (defaults to x86_64)
+test: test-x86_64
 
 # Run tests with output
 test-verbose:
     cargo test --all -- --nocapture
 
-# Run benchmarks
-bench:
-    @echo "Running benchmarks..."
-    cargo bench --all
+# Run benchmarks for x86_64
+bench-x86_64:
+    @echo "Running x86_64 benchmarks..."
+    ./scripts/benchmark.sh -a x86_64
+
+# Run benchmarks for AArch64
+bench-aarch64:
+    @echo "Running AArch64 benchmarks..."
+    ./scripts/benchmark.sh -a aarch64
+
+# Run benchmarks for RISC-V
+bench-riscv64:
+    @echo "Running RISC-V benchmarks..."
+    ./scripts/benchmark.sh -a riscv64
+
+# Run benchmarks for all architectures
+bench-all: bench-x86_64 bench-aarch64 bench-riscv64
+    @echo "All benchmarks complete!"
+
+# Run benchmarks (defaults to x86_64)
+bench: bench-x86_64
+
+# Run specific benchmark
+bench-ipc:
+    ./scripts/benchmark.sh -b ipc
+
+bench-context:
+    ./scripts/benchmark.sh -b context
+
+bench-memory:
+    ./scripts/benchmark.sh -b memory
 
 # Format code
 fmt:

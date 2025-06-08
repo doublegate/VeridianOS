@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# Pre-commit hook for VeridianOS
+# Ensures code formatting and basic checks before commit
+
+set -e
+
+echo "🔍 Running pre-commit checks..."
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Check if we're in the right directory
+if [ ! -f "Cargo.toml" ]; then
+    echo -e "${RED}Error: Not in VeridianOS root directory${NC}"
+    exit 1
+fi
+
+# Function to check if command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# 1. Check Rust formatting
+echo "📝 Checking Rust code formatting..."
+if command_exists rustfmt; then
+    # Get list of staged Rust files
+    RUST_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.rs$' || true)
+    
+    if [ -n "$RUST_FILES" ]; then
+        # Check formatting
+        if ! cargo fmt -- --check; then
+            echo -e "${YELLOW}Warning: Code formatting issues detected${NC}"
+            echo "Running cargo fmt to fix formatting..."
+            cargo fmt
+            echo -e "${GREEN}✓ Code formatted${NC}"
+            echo ""
+            echo -e "${YELLOW}Please stage the formatting changes and commit again:${NC}"
+            echo "  git add -u"
+            echo "  git commit"
+            exit 1
+        else
+            echo -e "${GREEN}✓ Rust code formatting OK${NC}"
+        fi
+    else
+        echo "  No Rust files to check"
+    fi
+else
+    echo -e "${YELLOW}Warning: rustfmt not found, skipping format check${NC}"
+fi
+
+# 2. Check for debug prints
+echo "🐛 Checking for debug prints..."
+DEBUG_PATTERNS=(
+    "dbg!"
+    "println!"
+    "eprintln!"
+    "print!"
+    "eprint!"
+    "todo!()"
+    "unimplemented!()"
+    "FIXME"
+    "XXX"
+    "HACK"
+)
+
+FOUND_DEBUG=0
+for pattern in "${DEBUG_PATTERNS[@]}"; do
+    if git diff --cached --name-only --diff-filter=ACM | xargs grep -l "$pattern" 2>/dev/null; then
+        echo -e "${YELLOW}Warning: Found '$pattern' in staged files${NC}"
+        FOUND_DEBUG=1
+    fi
+done
+
+if [ $FOUND_DEBUG -eq 1 ]; then
+    echo -e "${YELLOW}Consider removing debug statements before committing${NC}"
+    echo -e "${YELLOW}Use 'git commit --no-verify' to bypass this check if intentional${NC}"
+fi
+
+# 3. Check for large files
+echo "📦 Checking file sizes..."
+MAX_SIZE=5242880  # 5MB in bytes
+LARGE_FILES=$(git diff --cached --name-only --diff-filter=ACM | while read file; do
+    if [ -f "$file" ]; then
+        size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null)
+        if [ "$size" -gt "$MAX_SIZE" ]; then
+            echo "$file ($(( size / 1024 / 1024 ))MB)"
+        fi
+    fi
+done)
+
+if [ -n "$LARGE_FILES" ]; then
+    echo -e "${RED}Error: Large files detected:${NC}"
+    echo "$LARGE_FILES"
+    echo "Consider using Git LFS for large files"
+    exit 1
+else
+    echo -e "${GREEN}✓ No large files${NC}"
+fi
+
+# 4. Check for merge conflict markers
+echo "🔀 Checking for merge conflicts..."
+CONFLICT_MARKERS=$(git diff --cached --name-only --diff-filter=ACM | xargs grep -E '^(<<<<<<<|=======|>>>>>>>)' 2>/dev/null || true)
+if [ -n "$CONFLICT_MARKERS" ]; then
+    echo -e "${RED}Error: Merge conflict markers found${NC}"
+    echo "$CONFLICT_MARKERS"
+    exit 1
+else
+    echo -e "${GREEN}✓ No merge conflicts${NC}"
+fi
+
+# 5. Run clippy on staged files (optional, can be slow)
+if [ "${RUN_CLIPPY_PRECOMMIT:-0}" = "1" ]; then
+    echo "📎 Running clippy..."
+    if command_exists cargo-clippy; then
+        if ! cargo clippy -- -D warnings 2>/dev/null; then
+            echo -e "${RED}Error: Clippy warnings found${NC}"
+            echo "Fix clippy warnings or set RUN_CLIPPY_PRECOMMIT=0 to skip"
+            exit 1
+        else
+            echo -e "${GREEN}✓ Clippy checks passed${NC}"
+        fi
+    fi
+fi
+
+# 6. Check documentation
+echo "📚 Checking documentation..."
+DOC_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(md|rst|txt)$' || true)
+if [ -n "$DOC_FILES" ]; then
+    # Check for common documentation issues
+    ISSUES=0
+    while IFS= read -r file; do
+        # Check for trailing whitespace
+        if grep -q '[[:space:]]$' "$file"; then
+            echo -e "${YELLOW}Warning: Trailing whitespace in $file${NC}"
+            ISSUES=1
+        fi
+        # Check for tabs in markdown (spaces preferred)
+        if [[ "$file" == *.md ]] && grep -q $'\t' "$file"; then
+            echo -e "${YELLOW}Warning: Tabs found in $file (use spaces)${NC}"
+            ISSUES=1
+        fi
+    done <<< "$DOC_FILES"
+    
+    if [ $ISSUES -eq 0 ]; then
+        echo -e "${GREEN}✓ Documentation OK${NC}"
+    fi
+fi
+
+# 7. Ensure Cargo.lock is committed (for reproducible builds)
+if git diff --cached --name-only | grep -q "Cargo.toml"; then
+    if ! git diff --cached --name-only | grep -q "Cargo.lock"; then
+        echo -e "${YELLOW}Warning: Cargo.toml modified but Cargo.lock not staged${NC}"
+        echo "Consider running 'cargo check' and staging Cargo.lock"
+    fi
+fi
+
+echo ""
+echo -e "${GREEN}✅ Pre-commit checks completed${NC}"
+echo ""
+
+# Success
+exit 0

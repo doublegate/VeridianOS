@@ -26,7 +26,7 @@ Key differentiators:
 
 ### What's the project status?
 
-VeridianOS is in early development (Phase 0). We have comprehensive documentation and are beginning kernel implementation. See [PROJECT-STATUS.md](PROJECT-STATUS.md) for details.
+VeridianOS has completed Phase 0 (Foundation) and is now starting Phase 1 (Microkernel Core). All foundation infrastructure is in place and development is proceeding to kernel implementation. See [PROJECT-STATUS.md](PROJECT-STATUS.md) for details.
 
 ### When will it be ready for production use?
 

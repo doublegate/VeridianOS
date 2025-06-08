@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = ["alloc"]
+alloc = []
+
 [dependencies]
 spin.workspace = true
 linked_list_allocator.workspace = true
@@ -30,7 +34,31 @@ riscv.workspace = true
 [build-dependencies]
 cc = "1.0"
 
+[lib]
+name = "veridian_kernel"
+path = "src/lib.rs"
+test = true
+
 [[bin]]
 name = "veridian-kernel"
+path = "src/main.rs"
 test = false
 bench = false
+
+# Integration tests
+[[test]]
+name = "basic_boot"
+harness = false
+
+# Benchmarks
+[[bench]]
+name = "ipc_latency"
+harness = false
+
+[[bench]]
+name = "context_switch"
+harness = false
+
+[[bench]]
+name = "memory_allocation"
+harness = false
