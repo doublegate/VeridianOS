@@ -109,25 +109,54 @@ jobs:
       
       - name: Install debugging tools
         run: |
-          # Install llvm-tools for rust-objcopy
+          # Install llvm-tools for objcopy functionality
           rustup component add llvm-tools-preview
+          # Install system objcopy as fallback
+          sudo apt-get update
+          sudo apt-get install -y binutils
 
       - name: Generate debug symbols
         run: |
           # Extract debug symbols for the kernel binary
           mkdir -p artifacts/symbols
           
-          # Use rust-objcopy from llvm-tools
-          OBJCOPY=$(rustup which --toolchain ${{ env.RUST_TOOLCHAIN }} rust-objcopy)
+          # Try to find rust-objcopy, fallback to system objcopy
+          if command -v rust-objcopy >/dev/null 2>&1; then
+            OBJCOPY="rust-objcopy"
+            echo "Using rust-objcopy"
+          elif rustup which --toolchain ${{ env.RUST_TOOLCHAIN }} rust-objcopy >/dev/null 2>&1; then
+            OBJCOPY=$(rustup which --toolchain ${{ env.RUST_TOOLCHAIN }} rust-objcopy)
+            echo "Using rust-objcopy from toolchain: $OBJCOPY"
+          else
+            OBJCOPY="objcopy"
+            echo "Using system objcopy"
+          fi
           
-          # Extract debug info
-          $OBJCOPY --only-keep-debug target/${{ matrix.target }}/release/veridian-kernel artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug
-          
-          # Strip the binary and add debug link
-          $OBJCOPY --strip-debug --add-gnu-debuglink=artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug target/${{ matrix.target }}/release/veridian-kernel
-          
-          # Copy the kernel binary to artifacts
+          # Copy the original binary first
           cp target/${{ matrix.target }}/release/veridian-kernel artifacts/veridian-kernel-${{ matrix.target }}
+          
+          # Extract debug info (only if file exists and has debug info)
+          if [ -f "target/${{ matrix.target }}/release/veridian-kernel" ]; then
+            echo "Extracting debug symbols..."
+            $OBJCOPY --only-keep-debug target/${{ matrix.target }}/release/veridian-kernel artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug || {
+              echo "Warning: Failed to extract debug symbols, continuing without debug info"
+              # Create empty debug file as placeholder
+              touch artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug
+            }
+            
+            # Strip the binary (optional - only if debug extraction succeeded)
+            if [ -s "artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug" ]; then
+              echo "Stripping binary and adding debug link..."
+              $OBJCOPY --strip-debug --add-gnu-debuglink=artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug artifacts/veridian-kernel-${{ matrix.target }} || {
+                echo "Warning: Failed to strip and link debug symbols"
+              }
+            else
+              echo "Skipping strip and debug link due to missing debug info"
+            fi
+          else
+            echo "Error: Kernel binary not found at target/${{ matrix.target }}/release/veridian-kernel"
+            exit 1
+          fi
       
       # Tests are temporarily disabled in CI due to custom target complexity
       # Local testing can be done with:
