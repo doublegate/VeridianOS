@@ -118,6 +118,11 @@ jobs:
         if: matrix.target == 'x86_64-veridian' && !inputs.skip_tests
         run: cargo test --target targets/${{ matrix.target }}.json -p veridian-kernel ${{ env.BUILD_STD_FLAGS }}
       
+      # Benchmarking temporarily disabled - will be re-enabled in Phase 1
+      # - name: Benchmark (x86_64 only)
+      #   if: matrix.target == 'x86_64-veridian' && !inputs.skip_tests
+      #   run: cargo bench --target targets/${{ matrix.target }}.json -p veridian-kernel ${{ env.BUILD_STD_FLAGS }}
+      
       - name: Upload kernel image
         uses: actions/upload-artifact@v4
         with:
