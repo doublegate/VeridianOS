@@ -107,14 +107,25 @@ jobs:
       - name: Build
         run: cargo build --release --target targets/${{ matrix.target }}.json -p veridian-kernel ${{ env.BUILD_STD_FLAGS }}
       
+      - name: Install debugging tools
+        run: |
+          # Install llvm-tools for rust-objcopy
+          rustup component add llvm-tools-preview
+
       - name: Generate debug symbols
         run: |
           # Extract debug symbols for the kernel binary
           mkdir -p artifacts/symbols
-          # Using objcopy to extract debug info
-          rust-objcopy --only-keep-debug target/${{ matrix.target }}/release/veridian-kernel artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug
+          
+          # Use rust-objcopy from llvm-tools
+          OBJCOPY=$(rustup which --toolchain ${{ env.RUST_TOOLCHAIN }} rust-objcopy)
+          
+          # Extract debug info
+          $OBJCOPY --only-keep-debug target/${{ matrix.target }}/release/veridian-kernel artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug
+          
           # Strip the binary and add debug link
-          rust-objcopy --strip-debug --add-gnu-debuglink=artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug target/${{ matrix.target }}/release/veridian-kernel
+          $OBJCOPY --strip-debug --add-gnu-debuglink=artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug target/${{ matrix.target }}/release/veridian-kernel
+          
           # Copy the kernel binary to artifacts
           cp target/${{ matrix.target }}/release/veridian-kernel artifacts/veridian-kernel-${{ matrix.target }}
       
@@ -430,16 +441,33 @@ jobs:
           path: docs-deploy
       
       - name: Setup Pages
+        id: setup-pages
         uses: actions/configure-pages@v4
+        continue-on-error: true
+        with:
+          enablement: true
       
       - name: Upload to Pages
+        if: steps.setup-pages.outcome == 'success'
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs-deploy
       
       - name: Deploy to GitHub Pages
+        if: steps.setup-pages.outcome == 'success'
         id: deployment
         uses: actions/deploy-pages@v4
+      
+      - name: Pages deployment status
+        run: |
+          if [ "${{ steps.setup-pages.outcome }}" = "success" ]; then
+            echo "✅ Documentation deployed to GitHub Pages"
+            echo "📖 Pages URL: ${{ steps.deployment.outputs.page_url }}"
+          else
+            echo "⚠️  GitHub Pages not configured for this repository"
+            echo "📋 Documentation artifacts are still available for download"
+            echo "🔧 To enable Pages: Repository Settings → Pages → Deploy from GitHub Actions"
+          fi
   
   # Summary job for branch protection
   ci-summary:
