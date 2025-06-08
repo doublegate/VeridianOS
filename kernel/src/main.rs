@@ -3,7 +3,7 @@
 //! A next-generation microkernel operating system written in Rust.
 //!
 //! ## Architecture Support
-//! 
+//!
 //! - x86_64 - Full support with UEFI/BIOS boot
 //! - AArch64 - Full support with device tree
 //! - RISC-V - Full support with OpenSBI
@@ -34,16 +34,21 @@
 
 use core::panic::PanicInfo;
 
+use linked_list_allocator::LockedHeap;
+
+#[global_allocator]
+static ALLOCATOR: LockedHeap = LockedHeap::empty();
+
 #[macro_use]
 mod print;
 
 mod arch;
+mod bench;
 mod cap;
 mod ipc;
 mod mm;
 mod sched;
 mod serial;
-mod bench;
 
 #[cfg(test)]
 mod test_framework;
@@ -172,51 +177,9 @@ pub extern "C" fn kernel_main() -> ! {
 }
 
 #[cfg(test)]
+use test_framework::{exit_qemu, QemuExitCode, Testable};
+
+#[cfg(test)]
 fn test_runner(tests: &[&dyn Testable]) {
-    serial_println!("Running {} tests", tests.len());
-    for test in tests {
-        test.run();
-    }
-    exit_qemu(QemuExitCode::Success);
-}
-
-#[cfg(test)]
-trait Testable {
-    fn run(&self) -> ();
-}
-
-#[cfg(test)]
-impl<T> Testable for T
-where
-    T: Fn(),
-{
-    fn run(&self) {
-        serial_print!("{}...\t", core::any::type_name::<T>());
-        self();
-        serial_println!("[ok]");
-    }
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum QemuExitCode {
-    Success = 0x10,
-    Failed = 0x11,
-}
-
-#[cfg(test)]
-pub fn exit_qemu(exit_code: QemuExitCode) -> ! {
-    use x86_64::instructions::port::Port;
-
-    unsafe {
-        let mut port = Port::new(0xf4);
-        port.write(exit_code as u32);
-    }
-    unreachable!();
-}
-
-#[cfg(test)]
-fn test_runner(tests: &[&dyn test_framework::Testable]) {
     test_framework::test_runner(tests)
 }

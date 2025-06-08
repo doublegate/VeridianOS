@@ -9,8 +9,8 @@
 extern crate alloc;
 
 use core::panic::PanicInfo;
-use veridian_kernel::{benchmark, serial_println};
-use veridian_kernel::bench::{BenchmarkResult, cycles_to_ns, read_timestamp};
+
+use veridian_kernel::{bench::BenchmarkResult, benchmark, serial_println};
 
 const CONTEXT_SWITCH_TARGET_NS: u64 = 10000; // 10μs target
 const ITERATIONS: u64 = 1000;
@@ -19,28 +19,32 @@ const ITERATIONS: u64 = 1000;
 pub extern "C" fn _start() -> ! {
     serial_println!("Context Switch Benchmark");
     serial_println!("========================");
-    serial_println!("Target: < {} ns ({}μs)", CONTEXT_SWITCH_TARGET_NS, CONTEXT_SWITCH_TARGET_NS / 1000);
+    serial_println!(
+        "Target: < {} ns ({}μs)",
+        CONTEXT_SWITCH_TARGET_NS,
+        CONTEXT_SWITCH_TARGET_NS / 1000
+    );
     serial_println!();
-    
+
     // Run different context switch scenarios
     let minimal_result = benchmark_minimal_context_switch();
     let full_result = benchmark_full_context_switch();
     let fpu_result = benchmark_fpu_context_switch();
-    
+
     // Print results
     serial_println!("\nResults:");
     serial_println!("--------");
     print_result("Minimal Switch", &minimal_result);
     print_result("Full Switch", &full_result);
     print_result("FPU Switch", &fpu_result);
-    
+
     // Check if we meet targets
     serial_println!("\nTarget Analysis:");
     serial_println!("----------------");
     check_target("Minimal", &minimal_result, CONTEXT_SWITCH_TARGET_NS);
     check_target("Full", &full_result, CONTEXT_SWITCH_TARGET_NS);
     check_target("FPU", &fpu_result, CONTEXT_SWITCH_TARGET_NS);
-    
+
     // Exit with success
     veridian_kernel::exit_qemu(veridian_kernel::QemuExitCode::Success);
 }
@@ -66,10 +70,10 @@ fn benchmark_minimal_context_switch() -> BenchmarkResult {
                 "push r13",
                 "push r14",
                 "push r15",
-                
+
                 // Simulate switching to new context
                 "mov rax, 0xDEADBEEF",
-                
+
                 // Restore registers
                 "pop r15",
                 "pop r14",
@@ -96,13 +100,13 @@ fn benchmark_full_context_switch() -> BenchmarkResult {
     // Simulate full context switch including segment registers
     benchmark!("Full Context Switch", ITERATIONS, {
         let mut context = ProcessContext::default();
-        
+
         // Save context
         save_context(&mut context);
-        
+
         // Simulate switching page tables
         switch_page_tables();
-        
+
         // Restore context
         restore_context(&context);
     })
@@ -118,10 +122,10 @@ fn benchmark_fpu_context_switch() -> BenchmarkResult {
                 "fxsave [{}]",
                 in(reg) &mut [0u8; 512],
             );
-            
+
             // Switch context
             core::arch::asm!("nop");
-            
+
             // Restore FPU state
             #[cfg(target_arch = "x86_64")]
             core::arch::asm!(
@@ -196,14 +200,24 @@ fn print_result(name: &str, result: &BenchmarkResult) {
 
 fn check_target(name: &str, result: &BenchmarkResult, target_ns: u64) {
     if result.meets_target(target_ns) {
-        serial_println!("{:<20} ✓ PASS ({}ns < {}ns)", name, result.avg_time_ns, target_ns);
+        serial_println!(
+            "{:<20} ✓ PASS ({}ns < {}ns)",
+            name,
+            result.avg_time_ns,
+            target_ns
+        );
     } else {
-        serial_println!("{:<20} ✗ FAIL ({}ns > {}ns)", name, result.avg_time_ns, target_ns);
+        serial_println!(
+            "{:<20} ✗ FAIL ({}ns > {}ns)",
+            name,
+            result.avg_time_ns,
+            target_ns
+        );
     }
 }
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     serial_println!("Benchmark panic: {}", info);
-    veridian_kernel::exit_qemu(veridian_kernel::QemuExitCode::Failed);
+    veridian_kernel::exit_qemu(veridian_kernel::QemuExitCode::Failed)
 }

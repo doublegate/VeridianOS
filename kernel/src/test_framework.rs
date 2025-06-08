@@ -1,18 +1,23 @@
 //! No-std test framework for VeridianOS kernel
 //!
-//! This module provides testing infrastructure that works in a no_std environment
-//! by using serial output and QEMU exit codes to report test results.
+//! This module provides testing infrastructure that works in a no_std
+//! environment by using serial output and QEMU exit codes to report test
+//! results.
 
-#![cfg(test)]
-
-use crate::serial_print;
-use crate::serial_println;
-use crate::QemuExitCode;
 use core::panic::PanicInfo;
+
+use crate::{serial_print, serial_println};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum QemuExitCode {
+    Success = 0x10,
+    Failed = 0x11,
+}
 
 /// Trait that all testable functions must implement
 pub trait Testable {
-    fn run(&self) -> ();
+    fn run(&self);
 }
 
 impl<T> Testable for T
@@ -27,6 +32,7 @@ where
 }
 
 /// Custom test runner for kernel tests
+#[allow(dead_code)]
 pub fn test_runner(tests: &[&dyn Testable]) {
     serial_println!("Running {} tests", tests.len());
     for test in tests {
@@ -40,16 +46,48 @@ pub fn test_panic_handler(info: &PanicInfo) -> ! {
     serial_println!("[failed]\n");
     serial_println!("Error: {}\n", info);
     exit_qemu(QemuExitCode::Failed);
-    
-    // This should never be reached, but just in case
-    loop {
-        core::hint::spin_loop();
-    }
 }
 
 /// Exit QEMU with a specific exit code
-pub fn exit_qemu(exit_code: QemuExitCode) {
-    crate::exit_qemu(exit_code)
+pub fn exit_qemu(exit_code: QemuExitCode) -> ! {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use x86_64::instructions::port::Port;
+        unsafe {
+            let mut port = Port::new(0xf4);
+            port.write(exit_code as u32);
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Use PSCI SYSTEM_OFF for AArch64
+        unsafe {
+            core::arch::asm!(
+                "mov w0, #0x84000008", // PSCI SYSTEM_OFF
+                "hvc #0",
+                options(noreturn)
+            );
+        }
+    }
+
+    #[cfg(target_arch = "riscv64")]
+    {
+        // Use SBI shutdown call
+        const SBI_SHUTDOWN: usize = 8;
+        unsafe {
+            core::arch::asm!(
+                "li a7, {sbi_shutdown}",
+                "ecall",
+                sbi_shutdown = const SBI_SHUTDOWN,
+                options(noreturn)
+            );
+        }
+    }
+
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 /// Helper macro for creating test modules
@@ -59,7 +97,7 @@ macro_rules! test_module {
         #[cfg(test)]
         mod $name {
             use super::*;
-            
+
             #[test_case]
             $(
                 fn $test() {

@@ -2,17 +2,16 @@
 //!
 //! Provides performance measurement capabilities for kernel subsystems
 
-#![cfg_attr(not(test), no_std)]
+#![allow(dead_code)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
-
 
 /// Trait for benchmarkable operations
 pub trait Benchmark {
     /// Run the benchmark and return the result
     fn run(&mut self) -> BenchmarkResult;
-    
+
     /// Get the name of this benchmark
     fn name(&self) -> &str;
 }
@@ -40,7 +39,7 @@ impl BenchmarkResult {
         let avg_time_ns = total_time_ns / iterations;
         let min_time_ns = *times.iter().min().unwrap_or(&0);
         let max_time_ns = *times.iter().max().unwrap_or(&0);
-        
+
         Self {
             name,
             iterations,
@@ -50,7 +49,7 @@ impl BenchmarkResult {
             max_time_ns,
         }
     }
-    
+
     /// Check if this benchmark meets a target latency
     pub fn meets_target(&self, target_ns: u64) -> bool {
         self.avg_time_ns <= target_ns
@@ -60,9 +59,7 @@ impl BenchmarkResult {
 /// Architecture-specific timestamp counter
 #[cfg(target_arch = "x86_64")]
 pub fn read_timestamp() -> u64 {
-    unsafe {
-        core::arch::x86_64::_rdtsc()
-    }
+    unsafe { core::arch::x86_64::_rdtsc() }
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -103,16 +100,15 @@ where
     F: FnMut(),
 {
     extern crate alloc;
-    use alloc::vec::Vec;
-    use alloc::string::ToString;
-    
+    use alloc::{string::ToString, vec::Vec};
+
     let mut times = Vec::with_capacity(iterations as usize);
-    
+
     // Warmup
     for _ in 0..10 {
         f();
     }
-    
+
     // Actual benchmark
     for _ in 0..iterations {
         let start = read_timestamp();
@@ -121,7 +117,7 @@ where
         let elapsed_cycles = end.saturating_sub(start);
         times.push(cycles_to_ns(elapsed_cycles));
     }
-    
+
     BenchmarkResult::new(name.to_string(), &times)
 }
 
@@ -132,38 +128,45 @@ pub struct BenchmarkHarness {
 }
 
 #[cfg(feature = "alloc")]
+impl Default for BenchmarkHarness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "alloc")]
 impl BenchmarkHarness {
     pub fn new() -> Self {
         Self {
             benchmarks: alloc::vec::Vec::new(),
         }
     }
-    
+
     pub fn add_benchmark(&mut self, bench: alloc::boxed::Box<dyn Benchmark>) {
         self.benchmarks.push(bench);
     }
-    
+
     pub fn run_all(&mut self) -> alloc::vec::Vec<BenchmarkResult> {
         use crate::serial_println;
-        
+
         serial_println!("Running {} benchmarks...", self.benchmarks.len());
-        
+
         let mut results = alloc::vec::Vec::new();
-        
+
         for bench in &mut self.benchmarks {
             serial_println!("Running benchmark: {}", bench.name());
             let result = bench.run();
-            
+
             serial_println!(
                 "  Avg: {} ns, Min: {} ns, Max: {} ns",
                 result.avg_time_ns,
                 result.min_time_ns,
                 result.max_time_ns
             );
-            
+
             results.push(result);
         }
-        
+
         results
     }
 }

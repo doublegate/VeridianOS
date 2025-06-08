@@ -16,6 +16,7 @@ lazy_static! {
     };
 }
 
+#[allow(dead_code)]
 pub fn init() {
     IDT.load();
 }

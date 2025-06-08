@@ -43,12 +43,14 @@ lazy_static! {
     };
 }
 
+#[allow(dead_code)]
 struct Selectors {
     code_selector: SegmentSelector,
     data_selector: SegmentSelector,
     tss_selector: SegmentSelector,
 }
 
+#[allow(dead_code)]
 pub fn init() {
     use x86_64::instructions::{
         segmentation::{Segment, CS, DS},

@@ -150,24 +150,24 @@ macro_rules! serial_println {
 #[doc(hidden)]
 pub fn _serial_print(args: fmt::Arguments) {
     use core::fmt::Write;
-    
+
     #[cfg(target_arch = "x86_64")]
     {
         use uart_16550::SerialPort;
         use x86_64::instructions::interrupts;
-        
+
         interrupts::without_interrupts(|| {
             let mut port = unsafe { SerialPort::new(0x3F8) };
             port.write_fmt(args).unwrap();
         });
     }
-    
+
     #[cfg(target_arch = "aarch64")]
     {
         let mut uart = Pl011Uart::new(0x0900_0000);
         uart.write_fmt(args).unwrap();
     }
-    
+
     #[cfg(target_arch = "riscv64")]
     {
         let mut uart = Uart16550Compat::new(0x1000_0000);

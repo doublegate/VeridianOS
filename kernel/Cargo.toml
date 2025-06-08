@@ -9,6 +9,7 @@ repository.workspace = true
 [features]
 default = ["alloc"]
 alloc = []
+testing = []
 
 [dependencies]
 spin.workspace = true

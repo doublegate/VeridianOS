@@ -3,17 +3,15 @@
 #![no_std]
 #![no_main]
 #![feature(custom_test_frameworks)]
-#![test_runner(crate::test_runner)]
+#![test_runner(test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
-use veridian_kernel::{serial_print, serial_println};
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     test_main();
-
-    loop {}
+    veridian_kernel::exit_qemu(veridian_kernel::QemuExitCode::Success)
 }
 
 #[panic_handler]
