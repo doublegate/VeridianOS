@@ -9,6 +9,7 @@ pub fn init() {
     // This will be expanded later
 }
 
+#[allow(dead_code)]
 pub fn halt() -> ! {
     loop {
         unsafe {

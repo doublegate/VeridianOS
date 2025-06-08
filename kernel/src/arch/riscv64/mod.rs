@@ -2,10 +2,12 @@
 
 pub mod boot;
 
+#[allow(dead_code)]
 pub fn init() {
     // TODO: Initialize RISC-V 64-specific features
 }
 
+#[allow(dead_code)]
 pub fn halt() -> ! {
     loop {
         // TODO: Implement WFI (Wait For Interrupt)
@@ -23,6 +25,7 @@ pub fn disable_interrupts() {
     // TODO: Disable interrupts on RISC-V
 }
 
+#[allow(dead_code)]
 pub fn idle() {
     // TODO: Implement idle for RISC-V
     unsafe { core::arch::asm!("wfi") };

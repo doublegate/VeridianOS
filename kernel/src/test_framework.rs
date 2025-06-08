@@ -49,14 +49,13 @@ pub fn test_panic_handler(info: &PanicInfo) -> ! {
 }
 
 /// Exit QEMU with a specific exit code
-pub fn exit_qemu(exit_code: QemuExitCode) -> ! {
+pub fn exit_qemu(_exit_code: QemuExitCode) -> ! {
     #[cfg(target_arch = "x86_64")]
-    {
+    unsafe {
         use x86_64::instructions::port::Port;
-        unsafe {
-            let mut port = Port::new(0xf4);
-            port.write(exit_code as u32);
-        }
+        let mut port = Port::new(0xf4);
+        port.write(_exit_code as u32);
+        core::hint::unreachable_unchecked();
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -85,6 +84,7 @@ pub fn exit_qemu(exit_code: QemuExitCode) -> ! {
         }
     }
 
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
     loop {
         core::hint::spin_loop();
     }

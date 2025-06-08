@@ -4,7 +4,7 @@ authors = ["VeridianOS Contributors"]
 description = "Comprehensive guide to VeridianOS development"
 language = "en"
 multilingual = false
-src = "docs/book"
+src = "docs/book/src"
 
 [build]
 build-dir = "target/book"
@@ -18,7 +18,7 @@ create-missing = true
 theme = "docs/book-theme"
 default-theme = "navy"
 preferred-dark-theme = "navy"
-curly-quotes = true
+smart-punctuation = true
 mathjax-support = false
 copy-fonts = true
 additional-css = ["docs/book-theme/veridian.css"]
