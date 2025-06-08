@@ -11,6 +11,7 @@ extern crate alloc;
 use core::panic::PanicInfo;
 
 use veridian_kernel::{bench::BenchmarkResult, benchmark, serial_println};
+use veridian_kernel::ipc::{Message, SmallMessage, IpcCapability, IpcPermissions};
 
 const IPC_TARGET_NS: u64 = 5000; // 5μs target
 const ITERATIONS: u64 = 1000;
@@ -50,57 +51,73 @@ pub extern "C" fn _start() -> ! {
 }
 
 fn benchmark_small_message_ipc() -> BenchmarkResult {
-    // Simulate small message IPC (≤64 bytes)
+    // Benchmark small message IPC (≤64 bytes)
     benchmark!("Small Message IPC", ITERATIONS, {
-        // In Phase 0, we just measure the overhead of the measurement itself
-        // This establishes a baseline for Phase 1
-        unsafe {
-            // Simulate register-based message passing
-            core::arch::asm!(
-                "mov rax, 0x1234",
-                "mov rbx, 0x5678",
-                "mov rcx, 0x9ABC",
-                "mov rdx, 0xDEF0",
-                out("rax") _,
-                out("rcx") _,
-                out("rdx") _,
-            );
+        // Create a small message with our actual IPC types
+        let msg = SmallMessage::new(0x1234, 42)
+            .with_flags(0x01) // URGENT flag
+            .with_data(0, 100)
+            .with_data(1, 200)
+            .with_data(2, 300)
+            .with_data(3, 400);
+        
+        // Convert to Message enum
+        let message = Message::Small(msg);
+        
+        // Simulate message dispatch
+        match message {
+            Message::Small(sm) => {
+                let _ = sm.capability;
+                let _ = sm.opcode;
+                let _ = sm.data[0];
+            },
+            Message::Large(_) => unreachable!(),
         }
     })
 }
 
 fn benchmark_large_message_ipc() -> BenchmarkResult {
-    // Simulate large message IPC (>64 bytes)
+    // Benchmark large message IPC (>64 bytes)
+    use veridian_kernel::ipc::shared_memory::MemoryRegion;
+    
     benchmark!("Large Message IPC", ITERATIONS, {
-        // Simulate memory-based message passing
-        let mut buffer = [0u8; 256];
-        unsafe {
-            // Simulate copying data
-            let src = 0x1000 as *const u8;
-            let dst = buffer.as_mut_ptr();
-
-            // Small memcpy simulation
-            for i in 0..8 {
-                *dst.add(i) = *src.add(i);
-            }
+        // Create a memory region descriptor
+        let region = MemoryRegion::new(0x100000, 4096)
+            .with_permissions(0x03) // READ | WRITE
+            .with_cache_policy(0); // WRITE_BACK
+        
+        // Create a large message
+        let large_msg = Message::large(0x5678, 84, region);
+        
+        // Simulate message handling
+        match large_msg {
+            Message::Large(lm) => {
+                let _ = lm.header.capability;
+                let _ = lm.header.total_size;
+                let _ = lm.memory_region.size;
+            },
+            Message::Small(_) => unreachable!(),
         }
     })
 }
 
 fn benchmark_capability_passing() -> BenchmarkResult {
-    // Simulate capability token passing
+    // Benchmark actual capability operations
     benchmark!("Capability Passing", ITERATIONS, {
-        // Simulate capability lookup and validation
-        let cap_id = 0x1234u64;
-        let _validated = validate_capability(cap_id);
+        // Create a capability
+        let cap = IpcCapability::new(42, IpcPermissions::all());
+        
+        // Validate capability operations
+        let id = cap.id();
+        let has_send = cap.has_permission(veridian_kernel::ipc::capability::Permission::Send);
+        let has_recv = cap.has_permission(veridian_kernel::ipc::capability::Permission::Receive);
+        
+        // Simulate capability derivation
+        let derived = cap.derive(IpcPermissions::send_only());
+        
+        // Use results to prevent optimization
+        let _ = (id, has_send, has_recv, derived);
     })
-}
-
-#[inline(never)]
-fn validate_capability(cap_id: u64) -> bool {
-    // Simulate O(1) capability lookup
-    // In real implementation, this would check a capability table
-    cap_id != 0
 }
 
 fn print_result(name: &str, result: &BenchmarkResult) {
