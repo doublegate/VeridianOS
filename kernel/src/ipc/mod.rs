@@ -11,6 +11,9 @@ pub mod channel;
 pub mod shared_memory;
 pub mod capability;
 pub mod error;
+pub mod fast_path;
+pub mod zero_copy;
+pub mod sync;
 
 #[cfg(test)]
 mod tests;

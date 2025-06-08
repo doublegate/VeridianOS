@@ -13,8 +13,7 @@ use alloc::collections::VecDeque;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-// TODO: Import from sched module when available
-pub type ProcessId = u64;
+use crate::sched::ProcessId;
 
 /// Maximum number of queued messages per channel
 pub const MAX_CHANNEL_QUEUE_SIZE: usize = 1024;

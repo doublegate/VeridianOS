@@ -2,6 +2,7 @@ pub mod boot;
 pub mod gdt;
 pub mod idt;
 pub mod serial;
+pub mod syscall;
 pub mod vga;
 
 #[allow(dead_code)]

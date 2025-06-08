@@ -13,29 +13,8 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use alloc::collections::BTreeMap;
 
-// TODO: Import from mm module when available
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PhysicalAddress(u64);
-impl PhysicalAddress {
-    pub fn new(addr: u64) -> Self { Self(addr) }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VirtualAddress(u64);
-impl VirtualAddress {
-    pub fn new(addr: u64) -> Self { Self(addr) }
-    pub fn as_u64(&self) -> u64 { self.0 }
-}
-
-#[repr(usize)]
-pub enum PageSize {
-    Small = 4096,
-    Large = 2 * 1024 * 1024,
-    Huge = 1024 * 1024 * 1024,
-}
-
-// TODO: Import from sched module when available
-pub type ProcessId = u64;
+use crate::mm::{PhysicalAddress, VirtualAddress, PageSize};
+use crate::sched::ProcessId;
 
 /// Shared memory region ID generator
 static REGION_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -88,7 +67,7 @@ pub enum CachePolicy {
 }
 
 /// Shared memory region descriptor
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SharedRegion {
     /// Unique region ID
     id: u64,
