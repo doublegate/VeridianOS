@@ -1,10 +1,12 @@
 # VeridianOS Project Status
 
-## Current Status: Phase 0 Complete! 🎉
+## Current Status: Phase 0 Complete! 🎉 v0.1.0 Released!
 
-**Last Updated**: 2025-06-07
+**Last Updated**: 2025-06-07  
+**Release**: v0.1.0 - Foundation & Tooling  
+**Milestone**: Complete development infrastructure ready for microkernel implementation
 
-As of today, VeridianOS has successfully completed Phase 0 (Foundation and Tooling)! This marks a major milestone in the project's development. All foundation infrastructure is now in place: the CI/CD pipeline is 100% operational, all three target architectures boot successfully, comprehensive testing infrastructure is ready, documentation framework is established, and version control setup is complete.
+As of today, VeridianOS has successfully completed Phase 0 (Foundation and Tooling) and released v0.1.0! This marks a major milestone in the project's development. All foundation infrastructure is now in place: the CI/CD pipeline is 100% operational across all architectures, all three target platforms boot successfully, comprehensive testing infrastructure is ready, documentation framework is established, and complete version control workflow is operational.
 
 ### Phase 0 Achievements
 - ✅ QEMU testing infrastructure fully operational

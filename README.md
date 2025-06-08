@@ -33,21 +33,28 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 
 ## Project Status
 
-✅ **Phase 0: Foundation** (100% Complete!) 🎉
+### 🎉 **Phase 0: Foundation & Tooling** (100% Complete! - v0.1.0)
 
-- ✅ Development environment setup
-- ✅ **CI/CD pipeline (GitHub Actions) - 100% PASSING!**
-- ✅ Custom target specifications for all architectures
-- ✅ Basic kernel structure with modular architecture
-- ✅ All formatting and clippy checks passing with zero warnings
-- ✅ QEMU testing infrastructure
-- ✅ Bootloader integration (working on all architectures!)
-- ✅ GDB debugging infrastructure for all architectures
-- ✅ Test framework foundation established
-- ✅ Documentation framework (rustdoc) configured
-- ✅ Version control hooks and git configuration
+**Released**: June 7, 2025  
+**Milestone**: Complete development infrastructure ready for microkernel implementation
+
+- ✅ Development environment setup and automation
+- ✅ **CI/CD pipeline (GitHub Actions) - 100% PASSING across all architectures!**
+- ✅ Custom target specifications for x86_64, AArch64, and RISC-V
+- ✅ Basic kernel structure with modular architecture design
+- ✅ Code quality enforcement: formatting, linting, zero warnings policy
+- ✅ QEMU testing infrastructure with automated debugging
+- ✅ Bootloader integration (working on all three architectures!)
+- ✅ GDB debugging infrastructure with custom commands
+- ✅ Test framework foundation with no_std support
+- ✅ Documentation framework (rustdoc + mdBook) fully configured
+- ✅ Version control hooks and automated quality checks
 - ✅ Development tool integrations (VS Code, rust-analyzer)
-- ✅ Comprehensive technical documentation created
+- ✅ Comprehensive technical documentation (25+ documents)
+- ✅ GitHub Pages documentation deployment
+- ✅ Release automation and artifact generation
+
+🚀 **Next**: Phase 1 - Microkernel Core Implementation (Memory Management, IPC, Scheduling)
 
 ### Architecture Support Status
 

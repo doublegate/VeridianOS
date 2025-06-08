@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Phase 0 Completion - 2025-06-07 🎉
+## [0.1.0] - 2025-06-07
+
+### Phase 0 Completion - Foundation & Tooling 🎉
 **Phase 0: Foundation is now 100% complete!** This marks a major milestone in VeridianOS development. All foundational infrastructure is in place and operational.
 
 ### Added

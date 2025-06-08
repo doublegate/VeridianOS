@@ -1,9 +1,10 @@
 # Phase 0: Foundation and Tooling TODO
 
 **Phase Duration**: 2-3 months  
-**Status**: COMPLETE! 🎉 (100%)  
+**Status**: COMPLETE! 🎉 (100%) - Released as v0.1.0  
 **Priority**: CRITICAL - Blocks all other phases  
-**Last Updated**: 2025-06-07 ✨
+**Release Date**: 2025-06-07  
+**Version**: v0.1.0 - Foundation & Tooling ✨
 **Major Milestones**: 
 - CI/CD Pipeline 100% Passing! 🎉
 - All architectures booting successfully! 🚀

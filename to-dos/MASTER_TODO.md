@@ -8,8 +8,9 @@ This is the master tracking document for all VeridianOS development tasks across
 
 ## 🎯 Project Overview Status
 
-- [x] Phase 0: Foundation and Tooling - **COMPLETE (100%)** ✅ 🎉
+- [x] Phase 0: Foundation and Tooling - **COMPLETE (100%)** ✅ 🎉 **v0.1.0 Released!**
   - All infrastructure and tooling in place
+  - CI/CD pipeline 100% passing across all architectures
   - Ready to begin Phase 1 development
 - [ ] Phase 1: Microkernel Core - **NEXT PRIORITY** (4-5 months)
   - Start with IPC implementation (Weeks 1-6)
@@ -30,8 +31,8 @@ This is the master tracking document for all VeridianOS development tasks across
 
 ## 📋 High-Level Milestones
 
-### Q1 2025
-- [x] Complete Phase 0 implementation - **COMPLETE!** ✅ 🎉
+### Q2 2025 (June 2025)
+- [x] Complete Phase 0 implementation - **COMPLETE!** ✅ 🎉 **v0.1.0 Released June 7, 2025**
   - [x] Testing infrastructure ✅
   - [x] Documentation framework ✅
   - [x] Development tool configs ✅
