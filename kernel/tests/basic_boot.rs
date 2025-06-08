@@ -2,38 +2,37 @@
 
 #![no_std]
 #![no_main]
-#![feature(custom_test_frameworks)]
-#![test_runner(test_runner)]
-#![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
 
+use veridian_kernel::{exit_qemu, serial_println, test_panic_handler, QemuExitCode};
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    test_main();
-    veridian_kernel::exit_qemu(veridian_kernel::QemuExitCode::Success)
+    serial_println!("Starting basic boot tests...");
+
+    test_println();
+    test_simple_assertion();
+    test_kernel_alive();
+
+    serial_println!("All tests passed!");
+    exit_qemu(QemuExitCode::Success)
 }
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    veridian_kernel::test_panic_handler(info)
+    test_panic_handler(info)
 }
 
-fn test_runner(tests: &[&dyn veridian_kernel::Testable]) {
-    veridian_kernel::test_runner(tests)
-}
-
-#[test_case]
 fn test_println() {
     serial_println!("test_println output");
 }
 
-#[test_case]
 fn test_simple_assertion() {
-    assert_eq!(1, 1);
+    let x = 2 + 2;
+    assert_eq!(x, 4);
 }
 
-#[test_case]
 fn test_kernel_alive() {
     // If we get here, the kernel booted successfully
     serial_println!("Kernel is alive and running tests!");

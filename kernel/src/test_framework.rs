@@ -84,7 +84,11 @@ pub fn exit_qemu(_exit_code: QemuExitCode) -> ! {
         }
     }
 
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )))]
     loop {
         core::hint::spin_loop();
     }
