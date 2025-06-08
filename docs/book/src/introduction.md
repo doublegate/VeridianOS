@@ -1,47 +1,85 @@
 # Introduction
 
-Welcome to the VeridianOS Developer Guide!
+<p align="center">
+  <img src="../../../images/VeridianOS_Logo-Only.png" alt="VeridianOS Logo" width="200">
+</p>
 
-## What is VeridianOS?
+<p align="center">
+  <strong>A next-generation microkernel operating system built with Rust</strong>
+</p>
 
-VeridianOS is a next-generation microkernel operating system written entirely in Rust. It emphasizes:
+## Welcome to VeridianOS
 
-- **Security**: Capability-based access control for all resources
-- **Reliability**: Memory safety through Rust's type system
-- **Performance**: Designed for modern hardware with < 10μs context switches
-- **Modularity**: True microkernel with drivers in user space
+VeridianOS is a modern microkernel operating system written entirely in Rust, emphasizing security, modularity, and performance. This book serves as the comprehensive guide for understanding, building, and contributing to VeridianOS.
 
 ## Key Features
 
-- **Multi-Architecture Support**: x86_64, AArch64, and RISC-V
-- **Zero-Copy IPC**: Efficient message passing between processes
-- **Hardware Security**: Support for Intel TDX, AMD SEV-SNP, ARM CCA
-- **Formal Verification**: Critical components mathematically verified
-- **POSIX Compatibility**: Through optional compatibility layer
+- 🛡️ **Capability-based security** - Unforgeable tokens for all resource access
+- 🚀 **Microkernel architecture** - Minimal kernel with services in user space
+- 🦀 **Written in Rust** - Memory safety without garbage collection
+- ⚡ **High performance** - Lock-free algorithms, zero-copy IPC
+- 🔧 **Multi-architecture** - x86_64, AArch64, and RISC-V support
+- 🔒 **Security focused** - Mandatory access control, secure boot, hardware security
+- 📦 **Modern package management** - Source and binary package support
+- 🖥️ **Wayland compositor** - Modern display server with GPU acceleration
 
-## Design Philosophy
+## Why VeridianOS?
+
+Traditional monolithic kernels face challenges in security, reliability, and maintainability. VeridianOS addresses these challenges through:
+
+1. **Microkernel Design**: Only essential services run in kernel space, minimizing the attack surface
+2. **Capability-Based Security**: Fine-grained access control with unforgeable capability tokens
+3. **Memory Safety**: Rust's ownership system prevents entire classes of vulnerabilities
+4. **Modern Architecture**: Designed for contemporary hardware with multi-core, NUMA, and heterogeneous computing support
+
+## Project Philosophy
 
 VeridianOS follows these core principles:
 
-1. **Minimal Kernel**: Only essential services in kernel space
-2. **Capability Security**: Unforgeable tokens for all access control
-3. **Fault Isolation**: Drivers and services isolated in user space
-4. **Verifiable Design**: Built for formal verification from the start
+- **Security First**: Every design decision prioritizes security
+- **Correctness Over Performance**: We optimize only after proving correctness
+- **Modularity**: Components are loosely coupled and independently updatable
+- **Transparency**: All development happens in the open with clear documentation
 
-## Project Status
+## Current Status
 
-VeridianOS is currently in active development:
+### 🎉 **Phase 0: Foundation & Tooling** (100% Complete! - v0.1.0)
 
-- **Phase 0**: Foundation (100% complete!) ✅
-- **Phase 1**: Microkernel Core (Starting now)
-- **Phase 2-6**: Future development
+**Released**: June 7, 2025  
+**Milestone**: Complete development infrastructure ready for microkernel implementation
 
-## Getting Help
+- ✅ Development environment setup and automation
+- ✅ CI/CD pipeline (GitHub Actions) - 100% PASSING across all architectures!
+- ✅ Custom target specifications for x86_64, AArch64, and RISC-V
+- ✅ Basic kernel structure with modular architecture design
+- ✅ All architectures booting successfully with serial output
+- ✅ Comprehensive documentation (25+ technical guides)
+- ✅ Release automation with artifact generation
 
-- [GitHub Issues](https://github.com/doublegate/VeridianOS/issues)
-- [Contributing Guide](./contributing/how-to.md)
-- [Architecture Overview](./architecture/overview.md)
+🚀 **Next**: Phase 1 - Microkernel Core Implementation (Memory Management, IPC, Scheduling)
+
+## What This Book Covers
+
+This book is organized into several sections:
+
+- **Getting Started**: Prerequisites, building, and running VeridianOS
+- **Architecture**: Deep dive into the system design and components
+- **Development Guide**: How to contribute code and work with the codebase
+- **Platform Support**: Architecture-specific implementation details
+- **API Reference**: Complete system call and kernel API documentation
+- **Design Documents**: Detailed specifications for major subsystems
+- **Development Phases**: Roadmap and implementation timeline
+
+## Join the Community
+
+VeridianOS is an open-source project welcoming contributions from developers worldwide. Whether you're interested in kernel development, system programming, or just learning about operating systems, there's a place for you in our community.
+
+- **GitHub**: [github.com/doublegate/VeridianOS](https://github.com/doublegate/VeridianOS)
+- **Discord**: [discord.gg/veridian](https://discord.gg/veridian)
+- **Documentation**: [doublegate.github.io/VeridianOS](https://doublegate.github.io/VeridianOS)
 
 ## License
 
-VeridianOS is licensed under the MIT License. See the LICENSE file for details.
+VeridianOS is dual-licensed under MIT and Apache 2.0 licenses. See the LICENSE files for details.
+
+Let's build the future of operating systems together!

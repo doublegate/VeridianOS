@@ -54,6 +54,38 @@
 - [Code Review Process](./contributing/review.md)
 - [Documentation](./contributing/docs.md)
 
+# Design Documents
+
+- [Memory Allocator Design](./design/memory-allocator.md)
+- [IPC System Design](./design/ipc-system.md)
+- [Scheduler Design](./design/scheduler.md)
+- [Capability System Design](./design/capability-system.md)
+
+# Development Phases
+
+- [Phase 0: Foundation](./phases/phase0-foundation.md)
+- [Phase 1: Microkernel Core](./phases/phase1-microkernel.md)
+- [Phase 2: User Space](./phases/phase2-userspace.md)
+- [Phase 3: Security](./phases/phase3-security.md)
+- [Phase 4: Package Ecosystem](./phases/phase4-packages.md)
+- [Phase 5: Performance](./phases/phase5-performance.md)
+- [Phase 6: Advanced Features](./phases/phase6-advanced.md)
+
+# Project Information
+
+- [Project Status](./project/status.md)
+- [Roadmap](./project/roadmap.md)
+- [FAQ](./project/faq.md)
+- [Troubleshooting](./project/troubleshooting.md)
+- [Performance Baselines](./project/performance-baselines.md)
+
+# Advanced Topics
+
+- [Software Porting Guide](./advanced/software-porting.md)
+- [Compiler Toolchain](./advanced/compiler-toolchain.md)
+- [Formal Verification](./advanced/formal-verification.md)
+
 ---
 
-[Under Construction](./under-construction.md)
+[Changelog](./changelog.md)
+[Security Policy](./security.md)

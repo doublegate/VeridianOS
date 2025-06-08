@@ -127,18 +127,22 @@ Currently implementing in phases:
 ## Project Status
 
 - **Repository**: https://github.com/doublegate/VeridianOS
-- **Documentation**: Complete (25+ comprehensive guides)
+- **Documentation**: Complete (25+ comprehensive guides) + GitHub Pages deployment
 - **Infrastructure**: Directory structure, TODO system, and GitHub setup complete
-- **CI/CD**: ✅ GitHub Actions workflow passing all checks (optimized pipeline)
+- **CI/CD**: ✅ GitHub Actions workflow passing all checks (100% success rate)
 - **Current Phase**: Phase 0 (Foundation) - 100% COMPLETE! 🎉
+- **Latest Release**: v0.1.0 (June 7, 2025) - Foundation & Tooling
+  - Release includes kernel binaries for all three architectures
+  - Debug symbols available for x86_64 (AArch64/RISC-V pending)
+  - All release artifacts automatically built by CI
 - **Build Status**: ✅ Compiling successfully for all target architectures
 - **Boot Status**: ✅ All architectures (x86_64, RISC-V, AArch64) boot successfully!
-- **Code Quality**: ✅ All format and clippy checks passing
-- **Debugging**: ✅ GDB infrastructure operational for all architectures
+- **Code Quality**: ✅ All format and clippy checks passing with zero warnings
+- **Debugging**: ✅ GDB infrastructure operational with custom commands
 - **Testing**: ✅ No-std test framework and benchmarks implemented
-- **Documentation**: ✅ Rustdoc and mdBook configured with custom themes
-- **Version Control**: ✅ Git hooks and PR templates ready
-- **Next Milestone**: Begin Phase 1 - Microkernel Core (Memory Management)
+- **Documentation**: ✅ Rustdoc and mdBook configured with automatic deployment
+- **Version Control**: ✅ Git hooks, PR templates, and release automation ready
+- **Next Milestone**: Phase 1 - Microkernel Core (Memory Management → IPC → Scheduling)
 
 ## Critical Implementation Notes
 
@@ -248,3 +252,18 @@ Check these files regularly to track progress and identify next tasks.
   - Context Switch: < 10μs
   - Memory Allocation: < 1μs
   - Capability Lookup: O(1)
+
+### mdBook Documentation
+- **Documentation Site**: GitHub Pages at https://doublegate.github.io/VeridianOS/
+- **Book Source**: `docs/book/src/` directory
+- **Building**: Run `mdbook build` in `docs/book/` directory
+- **Content Sources**: Integrated from phase docs, design docs, and technical specs
+- **Key Sections**:
+  - Introduction and project overview
+  - Architecture guide with microkernel design details
+  - Development setup and toolchain requirements  
+  - Phase documentation for all 7 development phases
+  - Technical specifications and performance targets
+  - Troubleshooting guide based on resolved issues
+  - Comprehensive glossary of terms
+- **Content Strategy**: Consolidate technical details from reference docs into cohesive guide
