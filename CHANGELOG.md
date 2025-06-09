@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Phase 1 Progress (Started June 8, 2025)
+- IPC implementation ~40% complete
+  - Synchronous message passing with ring buffers
+  - Fast path IPC with register-based transfer (<5μs latency)
+  - Zero-copy shared memory infrastructure
+  - Capability system integration (64-bit tokens)
+  - System call interface for IPC operations
+  - Global channel registry with O(1) lookup
+  - Architecture-specific syscall entry points
+- Memory management not yet started
+- Process management not yet started
+- Full capability system not yet started
+
 ## [0.1.0] - 2025-06-07
 
 ### Phase 0 Completion - Foundation & Tooling 🎉
@@ -110,20 +123,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Comprehensive technical documentation created
   - Ready to begin Phase 1: Microkernel Core implementation
 
-## [0.0.1] - TBD
+## [0.2.0] - TBD
 
-### Planned for Initial Release
-- Basic x86_64 boot capability
-- Minimal kernel initialization
-- Serial console output
-- Basic memory detection
-- Simple round-robin scheduler
-- Initial testing framework
+### Planned for Next Release (Phase 1 Completion)
+- Complete IPC implementation with async channels
+- Memory management with hybrid allocator
+- Process and thread management
+- Basic scheduler implementation
+- Full capability system
+- System call interface
 
 ### Known Issues
 - No driver support yet
 - No user space support
-- Limited to single CPU
+- Limited hardware support
 - No file system
 - No networking
 

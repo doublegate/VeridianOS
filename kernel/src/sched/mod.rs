@@ -1,9 +1,11 @@
 //! Process and thread scheduling module
-//! 
+//!
 //! This is a placeholder implementation that provides the minimal interface
 //! needed for IPC integration. Full implementation will come in Phase 1.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+#![allow(dead_code)]
+
+use core::sync::atomic::AtomicU64;
 
 /// Process ID type
 pub type ProcessId = u64;
@@ -47,7 +49,10 @@ pub fn current_process() -> &'static mut Process {
         state: ProcessState::Running,
         blocked_on: None,
     };
-    unsafe { &mut DUMMY_PROCESS }
+    unsafe {
+        let ptr = &raw mut DUMMY_PROCESS;
+        &mut *ptr
+    }
 }
 
 /// Switch to another process (placeholder)

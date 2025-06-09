@@ -1,8 +1,9 @@
 # Release Management TODO
 
 **Purpose**: Track release planning, milestones, and deployment tasks  
-**Last Updated**: 2025-06-07  
-**Current Status**: Phase 0 complete! Ready for v0.1.0 milestone work.
+**Last Updated**: 2025-06-08  
+**Current Version**: v0.1.0 (Released June 7, 2025)  
+**Current Status**: Working on v0.2.0 (Phase 1 - IPC implementation in progress)
 
 ## 🎯 Release Strategy
 
@@ -23,26 +24,35 @@ Following Semantic Versioning (SemVer):
 
 ### Pre-1.0 Releases (Development)
 
-#### v0.1.0 - Foundation
-**Target Date**: Q2 2025  
-**Phase**: 0-1  
-**Goals**:
+#### v0.1.0 - Foundation ✅ RELEASED!
+**Released**: June 7, 2025  
+**Phase**: 0 (Complete)  
+**Achievements**:
 - [x] Basic boot on x86_64 ✅
 - [x] Basic boot on AArch64 ✅
 - [x] Basic boot on RISC-V ✅
 - [x] Build system complete ✅
 - [x] Serial console output ✅
-- [ ] Minimal kernel functionality (Phase 1)
-- [ ] Basic memory detection (Phase 1)
+- [x] CI/CD pipeline 100% operational ✅
+- [x] GDB debugging infrastructure ✅
+- [x] Test framework foundation ✅
+- [x] Documentation framework ✅
+- [x] Version control hooks ✅
 
-#### v0.2.0 - Core Kernel
+#### v0.2.0 - Core Kernel (IN PROGRESS)
 **Target Date**: Q3 2025  
 **Phase**: 1  
+**Status**: IPC ~40% complete (Started June 8, 2025)
 **Goals**:
+- [~] IPC implementation (40% complete)
+  - [x] Synchronous message passing ✅
+  - [x] Fast path optimization ✅
+  - [x] Zero-copy transfers ✅
+  - [ ] Asynchronous channels
+  - [ ] Performance benchmarks
 - [ ] Memory management working
 - [ ] Basic scheduler operational
-- [ ] Simple IPC implementation
-- [ ] Capability system foundation
+- [ ] Full capability system
 
 #### v0.3.0 - Multi-Architecture
 **Target Date**: Q4 2025  

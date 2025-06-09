@@ -1,0 +1,86 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Custom test runner for kernel tests"><title>test_runner in veridian_kernel - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2" crossorigin href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-46132b98.css"><script id="default-settings" 
+data-use_system_theme="false"
+data-theme="dark"></script><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="veridian_kernel" data-themes="" data-resource-suffix="" data-rustdoc-version="1.86.0-nightly (8361aef0d 2025-01-14)" data-channel="nightly" data-search-js="search-75f5ac3e.js" data-settings-js="settings-0f613d39.js" ><script src="../static.files/storage-59e33391.js"></script><script defer src="sidebar-items.js"></script><script defer src="../static.files/main-5f194d8c.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-893ab5e7.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-6580c154.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"><!-- Custom CSS for VeridianOS documentation -->
+<link rel="icon" type="image/x-icon" href="https://raw.githubusercontent.com/doublegate/VeridianOS/main/images/veridian_os.ico">
+<style>
+    /* VeridianOS color scheme */
+    :root {
+        --veridian-primary: #00695c;
+        --veridian-secondary: #004d40;
+        --veridian-accent: #00897b;
+        --veridian-light: #4db6ac;
+        --veridian-dark: #00251a;
+    }
+
+    /* Override rustdoc theme colors */
+    body.theme--dark {
+        --main-background-color: #1a1a1a;
+        --main-color: #e0e0e0;
+        --link-color: var(--veridian-light);
+        --sidebar-background-color: var(--veridian-dark);
+    }
+
+    /* Custom header styling */
+    .main-heading h1 {
+        color: var(--veridian-accent);
+    }
+
+    /* Code block enhancements */
+    pre.rust {
+        border-left: 3px solid var(--veridian-accent);
+    }
+
+    /* Navigation improvements */
+    .sidebar .current {
+        background-color: var(--veridian-secondary);
+    }
+
+    /* Warning/safety badges */
+    .stab.unsafe {
+        background-color: #d32f2f;
+        color: white;
+        padding: 3px 6px;
+        border-radius: 3px;
+    }
+
+    .stab.no-std {
+        background-color: var(--veridian-primary);
+        color: white;
+        padding: 3px 6px;
+        border-radius: 3px;
+    }
+</style>
+</head><body class="rustdoc fn"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><!-- Header content for all documentation pages -->
+<div class="veridian-header">
+    <div class="warning-banner">
+        <strong>⚠️ VeridianOS Kernel Documentation</strong> - 
+        This is low-level kernel code. All functions are unsafe unless explicitly marked otherwise.
+        <span class="stab no-std">no_std</span>
+    </div>
+</div>
+
+<script>
+// Add no_std badge to all module pages
+document.addEventListener('DOMContentLoaded', function() {
+    const heading = document.querySelector('.main-heading h1');
+    if (heading && !heading.querySelector('.stab')) {
+        const badge = document.createElement('span');
+        badge.className = 'stab no-std';
+        badge.textContent = 'no_std';
+        heading.appendChild(document.createTextNode(' '));
+        heading.appendChild(badge);
+    }
+});
+</script>
+<nav class="mobile-topbar"><button class="sidebar-menu-toggle" title="show sidebar"></button></nav><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../veridian_kernel/index.html">veridian_<wbr>kernel</a><span class="version">0.0.1</span></h2></div><div class="sidebar-elems"><div id="rustdoc-modnav"></div></div></nav><div class="sidebar-resizer"></div><main><div class="width-limiter"><rustdoc-search></rustdoc-search><section id="main-content" class="content"><div class="main-heading"><span class="rustdoc-breadcrumbs"><a href="index.html">veridian_kernel</a></span><h1>Function <span class="fn">test_runner</span><button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/veridian_kernel/test_framework.rs.html#36-42">Source</a> </span></div><pre class="rust item-decl"><code>pub fn test_runner(tests: &amp;[&amp;dyn <a class="trait" href="trait.Testable.html" title="trait veridian_kernel::Testable">Testable</a>])</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Custom test runner for kernel tests</p>
+</div></details></section></div></main><!-- Footer content for all documentation pages -->
+<footer class="veridian-footer">
+    <hr>
+    <p>
+        <strong>VeridianOS</strong> - A next-generation microkernel operating system<br>
+        <a href="https://github.com/doublegate/VeridianOS">GitHub</a> |
+        <a href="/docs/architecture/">Architecture Guide</a> |
+        <a href="/docs/contributing/">Contributing</a>
+    </p>
+</footer>
+</body></html>

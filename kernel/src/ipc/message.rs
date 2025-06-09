@@ -1,8 +1,10 @@
 //! IPC message format definitions
-//! 
+//!
 //! This module defines the message structures used for IPC communication.
 //! Small messages (≤64 bytes) are passed via registers for optimal performance,
 //! while large messages use shared memory for zero-copy transfers.
+
+#![allow(dead_code)]
 
 use core::mem::size_of;
 
@@ -13,7 +15,7 @@ pub const SMALL_MESSAGE_MAX_SIZE: usize = 64;
 pub const DATA_REGISTERS: usize = 4;
 
 /// Small message for register-based transfers (≤64 bytes)
-/// 
+///
 /// This structure is optimized for fast register-based IPC where the entire
 /// message can be passed in CPU registers without memory access.
 #[repr(C)]
@@ -131,7 +133,7 @@ impl MemoryRegion {
 }
 
 /// Large message for memory-based transfers
-/// 
+///
 /// Used when message size exceeds register capacity or when zero-copy
 /// semantics are required for performance.
 #[repr(C)]
@@ -239,7 +241,7 @@ pub mod cache_policy {
     pub const WRITE_COMBINING: u32 = 3;
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use super::*;
 

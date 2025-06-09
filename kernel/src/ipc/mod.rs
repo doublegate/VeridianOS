@@ -1,29 +1,26 @@
 //! Inter-Process Communication (IPC) subsystem for VeridianOS
-//! 
+//!
 //! This module implements high-performance IPC mechanisms including:
 //! - Synchronous message passing with < 5μs latency
 //! - Asynchronous channels for streaming
 //! - Zero-copy shared memory transfers
 //! - Capability-based security integration
 
-pub mod message;
-pub mod channel;
-pub mod shared_memory;
 pub mod capability;
+pub mod channel;
 pub mod error;
 pub mod fast_path;
-pub mod zero_copy;
+pub mod message;
+pub mod shared_memory;
 pub mod sync;
+pub mod zero_copy;
 
 #[cfg(test)]
 mod tests;
 
 // Re-export core types
-pub use message::{SmallMessage, LargeMessage, Message};
-pub use channel::{Channel, Endpoint};
-pub use shared_memory::{SharedRegion, MemoryRegion};
-pub use capability::{IpcCapability, IpcPermissions, CapabilityType};
-pub use error::{IpcError, Result};
+pub use error::IpcError;
+pub use message::{Message, SmallMessage};
 
 /// IPC system initialization
 #[allow(dead_code)]

@@ -28,8 +28,8 @@ mod cap;
 mod ipc;
 mod mm;
 mod sched;
-mod syscall;
 pub mod serial;
+mod syscall;
 
 mod test_framework;
 

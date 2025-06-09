@@ -1,18 +1,25 @@
 //! IPC channel implementation for message passing
-//! 
+//!
 //! Provides both synchronous (blocking) and asynchronous (non-blocking)
 //! communication channels between processes.
 
-use super::{Message, SmallMessage, IpcError};
-use super::error::Result;
-use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
-use spin::Mutex;
+#![allow(dead_code)]
+
+#[cfg(feature = "alloc")]
+extern crate alloc;
 
 #[cfg(feature = "alloc")]
 use alloc::collections::VecDeque;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use spin::Mutex;
+
+use super::{
+    error::{IpcError, Result},
+    Message, SmallMessage,
+};
 use crate::sched::ProcessId;
 
 /// Maximum number of queued messages per channel
@@ -96,15 +103,15 @@ impl Endpoint {
         if let Some(_receiver) = receivers.pop() {
             // Direct handoff to waiting receiver
             drop(receivers); // Release lock before context switch
-            
+
             // TODO: Perform context switch to receiver
             // TODO: Copy message to receiver's buffer
             // This is where we'd achieve < 5μs latency
-            
+
             Ok(())
         } else {
             drop(receivers);
-            
+
             // No waiting receiver, queue the message
             let mut queue = self.receive_queue.lock();
             if queue.len() >= MAX_CHANNEL_QUEUE_SIZE {
@@ -125,6 +132,7 @@ impl Endpoint {
     }
 
     /// Receive a message from this endpoint (synchronous)
+    #[cfg(feature = "alloc")]
     pub fn receive_sync(&self, receiver: ProcessId) -> Result<Message> {
         if !self.active.load(Ordering::Acquire) {
             return Err(IpcError::EndpointNotFound);
@@ -148,11 +156,21 @@ impl Endpoint {
 
         // TODO: Block current process and yield CPU
         // TODO: Wake up when message arrives
-        
+
         Err(IpcError::WouldBlock) // Placeholder
     }
 
+    #[cfg(not(feature = "alloc"))]
+    pub fn receive_sync(&self, _receiver: ProcessId) -> Result<Message> {
+        if !self.active.load(Ordering::Acquire) {
+            return Err(IpcError::EndpointNotFound);
+        }
+        // Without alloc, we can't queue messages
+        Err(IpcError::WouldBlock)
+    }
+
     /// Send without blocking
+    #[cfg(feature = "alloc")]
     pub fn send_async(&self, msg: Message) -> Result<()> {
         if !self.active.load(Ordering::Acquire) {
             return Err(IpcError::EndpointNotFound);
@@ -163,13 +181,23 @@ impl Endpoint {
             return Err(IpcError::ChannelFull);
         }
         queue.push_back(msg);
-        
+
         // TODO: Wake up any waiting receivers
-        
+
         Ok(())
     }
 
+    #[cfg(not(feature = "alloc"))]
+    pub fn send_async(&self, _msg: Message) -> Result<()> {
+        if !self.active.load(Ordering::Acquire) {
+            return Err(IpcError::EndpointNotFound);
+        }
+        // Without alloc, we can't queue messages
+        Err(IpcError::WouldBlock)
+    }
+
     /// Try to receive without blocking
+    #[cfg(feature = "alloc")]
     pub fn try_receive(&self) -> Result<Message> {
         if !self.active.load(Ordering::Acquire) {
             return Err(IpcError::EndpointNotFound);
@@ -179,10 +207,19 @@ impl Endpoint {
         queue.pop_front().ok_or(IpcError::ChannelEmpty)
     }
 
+    #[cfg(not(feature = "alloc"))]
+    pub fn try_receive(&self) -> Result<Message> {
+        if !self.active.load(Ordering::Acquire) {
+            return Err(IpcError::EndpointNotFound);
+        }
+        // Without alloc, we can't queue messages
+        Err(IpcError::ChannelEmpty)
+    }
+
     /// Close the endpoint
     pub fn close(&self) {
         self.active.store(false, Ordering::Release);
-        
+
         // TODO: Wake up all waiting processes with error
         // TODO: Clean up resources
     }
@@ -236,39 +273,38 @@ impl Channel {
 }
 
 /// Fast-path IPC for small messages
-/// 
+///
 /// This function implements the register-based fast path for messages
 /// that fit entirely in CPU registers.
 #[inline(always)]
-pub fn fast_ipc_send(msg: &SmallMessage, target: ProcessId) -> Result<()> {
+pub fn fast_ipc_send(msg: &SmallMessage, _target: ProcessId) -> Result<()> {
     // TODO: Implement fast path that:
     // 1. Validates capability in O(1) time
     // 2. Directly switches to target process
     // 3. Copies registers without touching memory
     // 4. Returns immediately
-    
+
     // Placeholder implementation
     if msg.capability == 0 {
         return Err(IpcError::InvalidCapability);
     }
-    
+
     Ok(())
 }
 
 /// IPC call with reply (RPC-style)
-pub fn call_reply(request: Message, target: ProcessId) -> Result<Message> {
+pub fn call_reply(_request: Message, _target: ProcessId) -> Result<Message> {
     // TODO: Implement call/reply semantics
     // 1. Send request
     // 2. Block waiting for reply
     // 3. Return reply message
-    
+
     Err(IpcError::WouldBlock) // Placeholder
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use super::*;
-    use crate::ipc::message::SmallMessage;
 
     #[test]
     fn test_endpoint_creation() {
@@ -287,9 +323,9 @@ mod tests {
     fn test_async_send_receive() {
         let endpoint = Endpoint::new(1);
         let msg = Message::small(0x1234, 42);
-        
+
         assert!(endpoint.send_async(msg).is_ok());
-        
+
         let received = endpoint.try_receive();
         assert!(received.is_ok());
         assert_eq!(received.unwrap().capability(), 0x1234);

@@ -1,7 +1,8 @@
 //! IPC capability management
-//! 
+//!
 //! Capabilities are unforgeable tokens that grant specific permissions
 //! for IPC operations. They are the foundation of VeridianOS security model.
+#![allow(dead_code)]
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -15,7 +16,7 @@ pub type ProcessId = u64;
 pub type EndpointId = u64;
 
 /// IPC capability structure
-/// 
+///
 /// 64-bit capability token format:
 /// - Bits 63-48: Generation counter (for revocation)
 /// - Bits 47-32: Capability type
@@ -39,9 +40,9 @@ impl IpcCapability {
         let id = CAPABILITY_COUNTER.fetch_add(1, Ordering::Relaxed);
         let generation = 0u64; // Start with generation 0
         let cap_type = CapabilityType::Endpoint as u64;
-        
+
         let value = (generation << 48) | (cap_type << 32) | (id & 0xFFFFFFFF);
-        
+
         Self {
             value,
             target,
@@ -232,7 +233,7 @@ impl IpcLimits {
 }
 
 /// Capability lookup table for O(1) access
-/// 
+///
 /// This will be expanded to use perfect hashing in production
 pub struct CapabilityTable {
     // Placeholder - will implement proper lookup structure
@@ -263,7 +264,7 @@ impl CapabilityTable {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use super::*;
 
@@ -288,7 +289,7 @@ mod tests {
         let cap = IpcCapability::new(1, IpcPermissions::all());
         let derived = cap.derive(IpcPermissions::send_only());
         assert!(derived.is_some());
-        
+
         let restricted = IpcCapability::new(1, IpcPermissions::send_only());
         let invalid_derive = restricted.derive(IpcPermissions::all());
         assert!(invalid_derive.is_none());

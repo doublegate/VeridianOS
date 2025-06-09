@@ -1,16 +1,26 @@
 //! Synchronous IPC implementation
-//! 
-//! Provides blocking send/receive operations with direct handoff between processes.
+//!
+//! Provides blocking send/receive operations with direct handoff between
+//! processes.
 
-use super::{Message, SmallMessage, LargeMessage, IpcError, Result};
-use super::capability::{IpcCapability, IpcPermissions};
-use super::fast_path::{fast_send, fast_receive};
-use crate::sched::{current_process, find_process, block_on_ipc, wake_up_process, ProcessState};
-use core::sync::atomic::{AtomicU64, Ordering};
-use spin::Mutex;
+#![allow(dead_code)]
+
+#[cfg(feature = "alloc")]
+extern crate alloc;
 
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(feature = "alloc")]
+use spin::Mutex;
+
+use super::{
+    error::{IpcError, Result},
+    fast_path::{fast_receive, fast_send},
+    message::Message,
+};
+use crate::sched::{block_on_ipc, current_process, find_process, wake_up_process, ProcessState};
 
 /// Statistics for synchronous IPC
 pub struct SyncIpcStats {
@@ -30,12 +40,12 @@ static SYNC_STATS: SyncIpcStats = SyncIpcStats {
 };
 
 /// Synchronous message send
-/// 
+///
 /// Blocks until message is delivered to receiver.
 pub fn sync_send(msg: Message, target_endpoint: u64) -> Result<()> {
     let start = read_timestamp();
     SYNC_STATS.send_count.fetch_add(1, Ordering::Relaxed);
-    
+
     match msg {
         Message::Small(small_msg) => {
             // Try fast path first
@@ -66,12 +76,12 @@ pub fn sync_send(msg: Message, target_endpoint: u64) -> Result<()> {
 }
 
 /// Synchronous message receive
-/// 
+///
 /// Blocks until a message is available.
 pub fn sync_receive(endpoint: u64) -> Result<Message> {
     let start = read_timestamp();
     SYNC_STATS.receive_count.fetch_add(1, Ordering::Relaxed);
-    
+
     // Try fast path for small messages
     match fast_receive(endpoint, None) {
         Ok(small_msg) => {
@@ -94,11 +104,11 @@ pub fn sync_receive(endpoint: u64) -> Result<Message> {
 pub fn sync_call(request: Message, target: u64) -> Result<Message> {
     // Send request
     sync_send(request, target)?;
-    
+
     // Mark ourselves as waiting for reply
     let current = current_process();
     current.state = ProcessState::ReplyBlocked;
-    
+
     // Wait for reply
     sync_receive(current.pid)
 }
@@ -106,14 +116,13 @@ pub fn sync_call(request: Message, target: u64) -> Result<Message> {
 /// Reply to a previous call
 pub fn sync_reply(reply: Message, caller: u64) -> Result<()> {
     // Find caller process
-    let caller_process = find_process(caller)
-        .ok_or(IpcError::ProcessNotFound)?;
-    
+    let caller_process = find_process(caller).ok_or(IpcError::ProcessNotFound)?;
+
     // Verify caller is waiting for reply
     if caller_process.state != ProcessState::ReplyBlocked {
         return Err(IpcError::InvalidMessage);
     }
-    
+
     // Send reply directly
     sync_send(reply, caller)
 }
@@ -122,8 +131,8 @@ pub fn sync_reply(reply: Message, caller: u64) -> Result<()> {
 fn sync_send_slow_path(msg: Message, target_endpoint: u64) -> Result<()> {
     // Find target endpoint and validate capability
     let endpoint = find_endpoint(target_endpoint)?;
-    validate_send_capability(&msg, &endpoint)?;
-    
+    validate_send_capability(&msg, endpoint)?;
+
     // Check if receiver is waiting
     if let Some(receiver_pid) = endpoint.get_waiting_receiver() {
         // Direct handoff
@@ -140,61 +149,61 @@ fn sync_send_slow_path(msg: Message, target_endpoint: u64) -> Result<()> {
 /// Slow path for synchronous receive
 fn sync_receive_slow_path(endpoint: u64) -> Result<Message> {
     let ep = find_endpoint(endpoint)?;
-    
+
     // Check for queued messages
     if let Some(msg) = ep.dequeue_message() {
         return Ok(msg);
     }
-    
+
     // No messages, block current process
     let current = current_process();
     ep.add_waiting_receiver(current.pid);
     block_on_ipc(endpoint);
-    
+
     // When we wake up, message should be available
-    ep.dequeue_message()
-        .ok_or(IpcError::InvalidMessage)
+    ep.dequeue_message().ok_or(IpcError::InvalidMessage)
 }
 
 /// Deliver message directly to a process
-fn deliver_message_to_process(msg: Message, pid: u64) -> Result<()> {
-    let process = find_process(pid)
-        .ok_or(IpcError::ProcessNotFound)?;
-    
+fn deliver_message_to_process(_msg: Message, pid: u64) -> Result<()> {
+    let _process = find_process(pid).ok_or(IpcError::ProcessNotFound)?;
+
     // TODO: Copy message to process's address space
     // For now, this is a placeholder
-    
+
     Ok(())
 }
 
 /// Validate send capability
-fn validate_send_capability(msg: &Message, endpoint: &Endpoint) -> Result<()> {
+fn validate_send_capability(msg: &Message, _endpoint: &Endpoint) -> Result<()> {
     let cap_id = msg.capability();
-    
+
     // TODO: Lookup capability in capability table
     // For now, basic validation
     if cap_id == 0 || cap_id > 0x10000 {
         return Err(IpcError::InvalidCapability);
     }
-    
+
     Ok(())
 }
 
 /// Update latency statistics
 fn update_latency_stats(start_cycles: u64) {
     let elapsed = read_timestamp() - start_cycles;
-    let count = SYNC_STATS.send_count.load(Ordering::Relaxed) + 
-                SYNC_STATS.receive_count.load(Ordering::Relaxed);
+    let count = SYNC_STATS.send_count.load(Ordering::Relaxed)
+        + SYNC_STATS.receive_count.load(Ordering::Relaxed);
     let current_avg = SYNC_STATS.avg_latency_cycles.load(Ordering::Relaxed);
-    
+
     // Calculate new average
     let new_avg = if count > 1 {
         (current_avg * (count - 1) + elapsed) / count
     } else {
         elapsed
     };
-    
-    SYNC_STATS.avg_latency_cycles.store(new_avg, Ordering::Relaxed);
+
+    SYNC_STATS
+        .avg_latency_cycles
+        .store(new_avg, Ordering::Relaxed);
 }
 
 /// Get synchronous IPC statistics
@@ -240,22 +249,22 @@ impl Endpoint {
     fn get_waiting_receiver(&self) -> Option<u64> {
         self.waiting_receivers.lock().pop()
     }
-    
+
     #[cfg(not(feature = "alloc"))]
     fn get_waiting_receiver(&self) -> Option<u64> {
         None
     }
-    
+
     #[cfg(feature = "alloc")]
     fn add_waiting_receiver(&self, pid: u64) {
         self.waiting_receivers.lock().push(pid);
     }
-    
+
     #[cfg(not(feature = "alloc"))]
     fn add_waiting_receiver(&self, _pid: u64) {
         // Without alloc, we can't queue receivers
     }
-    
+
     #[cfg(feature = "alloc")]
     fn queue_message(&self, msg: Message) -> Result<()> {
         let mut queue = self.message_queue.lock();
@@ -265,17 +274,17 @@ impl Endpoint {
         queue.push(msg);
         Ok(())
     }
-    
+
     #[cfg(not(feature = "alloc"))]
     fn queue_message(&self, _msg: Message) -> Result<()> {
         Err(IpcError::OutOfMemory)
     }
-    
+
     #[cfg(feature = "alloc")]
     fn dequeue_message(&self) -> Option<Message> {
         self.message_queue.lock().pop()
     }
-    
+
     #[cfg(not(feature = "alloc"))]
     fn dequeue_message(&self) -> Option<Message> {
         None
@@ -293,12 +302,14 @@ fn read_timestamp() -> u64 {
 }
 
 #[cfg(not(target_arch = "x86_64"))]
-fn read_timestamp() -> u64 { 0 }
+fn read_timestamp() -> u64 {
+    0
+}
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_sync_stats() {
         let stats = get_sync_stats();

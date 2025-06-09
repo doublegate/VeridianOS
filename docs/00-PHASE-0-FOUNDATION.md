@@ -1,6 +1,6 @@
 # Phase 0: Foundation and Tooling Setup (Months 1-3)
 
-**Current Status**: COMPLETE (100%) - All foundation infrastructure established!
+**Status**: COMPLETE (100%) - Released as v0.1.0 on June 7, 2025!
 
 ## Overview
 

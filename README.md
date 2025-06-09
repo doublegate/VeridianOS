@@ -36,10 +36,21 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 ### 🎉 **Phase 0: Foundation & Tooling** (100% Complete! - v0.1.0)
 
 **Released**: June 7, 2025  
-**Milestone**: Complete development infrastructure ready for microkernel implementation
+**Status**: COMPLETE - v0.1.0 Released 🎉
 
+### 🚀 **Phase 1: Microkernel Core** (In Progress)
+
+**Started**: June 8, 2025  
+**Status**: IPC implementation ~40% complete  
+**Components**:
+- IPC System: ~40% complete (core infrastructure implemented)
+- Memory Management: Not started
+- Process Management: Not started  
+- Capability System: Not started
+
+**Phase 0 Achievements**:
 - ✅ Development environment setup and automation
-- ✅ **CI/CD pipeline (GitHub Actions) - 100% PASSING across all architectures!**
+- ✅ CI/CD pipeline (GitHub Actions) - 100% PASSING across all architectures!
 - ✅ Custom target specifications for x86_64, AArch64, and RISC-V
 - ✅ Basic kernel structure with modular architecture design
 - ✅ Code quality enforcement: formatting, linting, zero warnings policy
@@ -53,8 +64,6 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 - ✅ Comprehensive technical documentation (25+ documents)
 - ✅ GitHub Pages documentation deployment
 - ✅ Release automation and artifact generation
-
-🚀 **Next**: Phase 1 - Microkernel Core Implementation (Memory Management, IPC, Scheduling)
 
 ### Architecture Support Status
 
@@ -234,8 +243,8 @@ VeridianOS builds upon ideas from many excellent operating systems:
 
 ### Near-term (2025)
 - [x] Complete Phase 0 (Foundation) - **DONE 2025-06-07!** ✅
-- [ ] Phase 1: Microkernel Core (4-5 months)
-  - [ ] IPC implementation first (< 5μs latency target)
+- [ ] Phase 1: Microkernel Core (4-5 months) - **IN PROGRESS**
+  - [~] IPC implementation first (< 5μs latency target) - ~40% complete
   - [ ] Thread management and scheduling
   - [ ] Memory management (hybrid buddy + bitmap)
   - [ ] Capability system foundation

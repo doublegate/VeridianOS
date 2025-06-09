@@ -26,7 +26,7 @@ Key differentiators:
 
 ### What's the project status?
 
-VeridianOS has completed Phase 0 (Foundation) and is now starting Phase 1 (Microkernel Core). All foundation infrastructure is in place and development is proceeding to kernel implementation. See [PROJECT-STATUS.md](PROJECT-STATUS.md) for details.
+VeridianOS released v0.1.0 on June 7, 2025, marking the completion of Phase 0 (Foundation). The project is now in Phase 1 (Microkernel Core) with IPC implementation ~40% complete. All foundation infrastructure is operational and development is actively progressing. See [PROJECT-STATUS.md](PROJECT-STATUS.md) for details.
 
 ### When will it be ready for production use?
 

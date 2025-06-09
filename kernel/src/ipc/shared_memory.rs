@@ -1,20 +1,26 @@
 //! Zero-copy shared memory IPC implementation
-//! 
+//!
 //! Provides high-performance shared memory regions for large data transfers
 //! between processes without copying.
 
-use super::IpcError;
-use super::error::Result;
-use core::sync::atomic::{AtomicU64, AtomicU32, Ordering};
-use spin::Mutex;
+#![allow(dead_code)]
 
 #[cfg(feature = "alloc")]
-use alloc::vec::Vec;
+extern crate alloc;
+
 #[cfg(feature = "alloc")]
 use alloc::collections::BTreeMap;
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use crate::mm::{PhysicalAddress, VirtualAddress, PageSize};
-use crate::sched::ProcessId;
+use spin::Mutex;
+
+use super::{error::Result, IpcError};
+use crate::{
+    mm::{PageSize, PhysicalAddress, VirtualAddress},
+    sched::ProcessId,
+};
 
 /// Shared memory region ID generator
 static REGION_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -107,12 +113,13 @@ impl SharedRegion {
         numa_node: Option<u32>,
     ) -> Result<Self> {
         // Round size up to page boundary
-        let size = (size + PageSize::Small as usize - 1) & !(PageSize::Small as usize - 1);
-        
+        let page_size = PageSize::Small as usize;
+        let size = size.div_ceil(page_size) * page_size;
+
         // TODO: Allocate physical memory from frame allocator
         // For now, use a placeholder address
         let physical_base = PhysicalAddress::new(0x100000);
-        
+
         Ok(Self {
             id: REGION_COUNTER.fetch_add(1, Ordering::Relaxed),
             physical_base,
@@ -155,11 +162,14 @@ impl SharedRegion {
         // 3. Setting appropriate permissions and cache policy
         // 4. Flushing TLB if necessary
 
-        mappings.insert(process, RegionMapping {
-            virtual_base,
-            permissions,
-            active: true,
-        });
+        mappings.insert(
+            process,
+            RegionMapping {
+                virtual_base,
+                permissions,
+                active: true,
+            },
+        );
 
         self.ref_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -168,7 +178,7 @@ impl SharedRegion {
     /// Unmap region from a process
     pub fn unmap(&self, process: ProcessId) -> Result<()> {
         let mut mappings = self.mappings.lock();
-        
+
         if let Some(mapping) = mappings.get_mut(&process) {
             if !mapping.active {
                 return Err(IpcError::InvalidMemoryRegion);
@@ -197,7 +207,8 @@ impl SharedRegion {
 
     /// Get virtual address for a specific process
     pub fn get_mapping(&self, process: ProcessId) -> Option<VirtualAddress> {
-        self.mappings.lock()
+        self.mappings
+            .lock()
             .get(&process)
             .filter(|m| m.active)
             .map(|m| m.virtual_base)
@@ -262,7 +273,7 @@ impl SharedMemoryManager {
     ) -> Result<u64> {
         let region = SharedRegion::new(owner, size, cache_policy, numa_node)?;
         let id = region.id();
-        
+
         // Track NUMA allocation
         if let Some(node) = numa_node {
             if (node as usize) < self.numa_stats.len() {
@@ -275,8 +286,8 @@ impl SharedMemoryManager {
     }
 
     /// Get a shared region by ID
-    pub fn get_region(&self, id: u64) -> Option<SharedRegion> {
-        self.regions.lock().get(&id).cloned()
+    pub fn get_region(&self, id: u64) -> Option<u64> {
+        self.regions.lock().get(&id).map(|r| r.id)
     }
 
     /// Remove a shared region
@@ -293,8 +304,7 @@ impl SharedMemoryManager {
             // Update NUMA stats
             if let Some(node) = region.numa_node {
                 if (node as usize) < self.numa_stats.len() {
-                    self.numa_stats[node as usize]
-                        .fetch_sub(region.size as u64, Ordering::Relaxed);
+                    self.numa_stats[node as usize].fetch_sub(region.size as u64, Ordering::Relaxed);
                 }
             }
 
@@ -307,17 +317,18 @@ impl SharedMemoryManager {
 
     /// Get NUMA memory usage statistics
     pub fn numa_usage(&self, node: u32) -> Option<u64> {
-        self.numa_stats.get(node as usize)
+        self.numa_stats
+            .get(node as usize)
             .map(|stat| stat.load(Ordering::Relaxed))
     }
 }
 
 /// Zero-copy message transfer using shared memory
 pub fn zero_copy_transfer(
-    region_id: u64,
-    from_process: ProcessId,
-    to_process: ProcessId,
-    manager: &SharedMemoryManager,
+    _region_id: u64,
+    _from_process: ProcessId,
+    _to_process: ProcessId,
+    _manager: &SharedMemoryManager,
 ) -> Result<()> {
     // TODO: Implement zero-copy transfer
     // 1. Validate both processes have appropriate capabilities
@@ -325,7 +336,7 @@ pub fn zero_copy_transfer(
     // 3. Update page tables
     // 4. Invalidate TLBs
     // 5. Update region mappings
-    
+
     Ok(())
 }
 
@@ -358,8 +369,10 @@ mod tests {
     #[test]
     fn test_memory_manager() {
         let manager = SharedMemoryManager::new(4);
-        let id = manager.create_region(1, 8192, CachePolicy::WriteBack, Some(0)).unwrap();
-        
+        let id = manager
+            .create_region(1, 8192, CachePolicy::WriteBack, Some(0))
+            .unwrap();
+
         assert!(manager.get_region(id).is_some());
         assert_eq!(manager.numa_usage(0), Some(8192));
     }

@@ -1,50 +1,58 @@
 //! Fast path IPC implementation for register-based messages
-//! 
-//! Achieves < 5μs latency by minimizing memory access and using direct register transfers.
+//!
+//! Achieves < 5μs latency by minimizing memory access and using direct register
+//! transfers.
 
-use super::{SmallMessage, IpcCapability, IpcError, Result};
-use crate::sched::{current_process, switch_to_process, ProcessState};
+#![allow(dead_code)]
+
 use core::sync::atomic::{AtomicU64, Ordering};
+
+use super::{
+    error::{IpcError, Result},
+    SmallMessage,
+};
+use crate::sched::{current_process, ProcessState};
 
 /// Performance counter for fast path operations
 static FAST_PATH_COUNT: AtomicU64 = AtomicU64::new(0);
 static FAST_PATH_CYCLES: AtomicU64 = AtomicU64::new(0);
 
 /// Fast path IPC send for small messages
-/// 
+///
 /// This function is designed to be inlined and optimized for minimum latency.
 /// It performs direct register transfer without touching memory when possible.
 #[inline(always)]
 pub fn fast_send(msg: &SmallMessage, target_pid: u64) -> Result<()> {
     let start = read_timestamp();
-    
+
     // Quick capability validation (should be cached)
     if !validate_capability_fast(msg.capability) {
         return Err(IpcError::InvalidCapability);
     }
-    
+
     // Find target process (O(1) lookup)
     let target = match find_process_fast(target_pid) {
         Some(p) => p,
         None => return Err(IpcError::ProcessNotFound),
     };
-    
+
     // Check if target is waiting for message
     if target.state == ProcessState::ReceiveBlocked {
         // Direct transfer path - this is the fast case
         unsafe {
             transfer_registers(msg, target);
         }
-        
+
         // Wake up receiver and switch to it
         target.state = ProcessState::Ready;
-        switch_to_process(target);
-        
+        // TODO: switch_to_process requires actual sched::Process
+        // switch_to_process(&*target);
+
         // Update performance counters
         let elapsed = read_timestamp() - start;
         FAST_PATH_COUNT.fetch_add(1, Ordering::Relaxed);
         FAST_PATH_CYCLES.fetch_add(elapsed, Ordering::Relaxed);
-        
+
         Ok(())
     } else {
         // Target not ready, fall back to queuing
@@ -56,19 +64,19 @@ pub fn fast_send(msg: &SmallMessage, target_pid: u64) -> Result<()> {
 #[inline(always)]
 pub fn fast_receive(endpoint: u64, timeout: Option<u64>) -> Result<SmallMessage> {
     let current = current_process();
-    
+
     // Check if message already waiting
     if let Some(msg) = check_pending_message(endpoint) {
         return Ok(msg);
     }
-    
+
     // Block current process
     current.state = ProcessState::ReceiveBlocked;
     current.blocked_on = Some(endpoint);
-    
+
     // Yield CPU and wait for message
     yield_and_wait(timeout)?;
-    
+
     // When we wake up, message should be in registers
     Ok(read_message_from_registers())
 }
@@ -83,7 +91,7 @@ fn validate_capability_fast(cap: u64) -> bool {
 
 /// Fast process lookup
 #[inline(always)]
-fn find_process_fast(pid: u64) -> Option<&'static mut Process> {
+fn find_process_fast(_pid: u64) -> Option<&'static mut Process> {
     // TODO: Implement O(1) process table lookup
     // This would use a direct array index or hash table
     None
@@ -98,7 +106,7 @@ unsafe fn transfer_registers<P: ProcessExt>(msg: &SmallMessage, target: &mut P) 
     // RSI = opcode
     // RDX = flags
     // RCX, R8, R9, R10, R11 = data[0..4]
-    
+
     let ctx = target.get_context_mut();
     ctx.rdi = msg.capability;
     ctx.rsi = msg.opcode as u64;
@@ -147,12 +155,7 @@ fn read_message_from_registers() -> SmallMessage {
         capability: ctx.rdi,
         opcode: ctx.rsi as u32,
         flags: ctx.rdx as u32,
-        data: [
-            ctx.rcx,
-            ctx.r8,
-            ctx.r9,
-            ctx.r10,
-        ],
+        data: [ctx.rcx, ctx.r8, ctx.r9, ctx.r10],
     }
 }
 
@@ -178,9 +181,7 @@ fn yield_and_wait(_timeout: Option<u64>) -> Result<()> {
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn read_timestamp() -> u64 {
-    unsafe {
-        core::arch::x86_64::_rdtsc()
-    }
+    unsafe { core::arch::x86_64::_rdtsc() }
 }
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -229,7 +230,7 @@ impl ProcessExt for crate::sched::Process {
             r9: 0,
             #[cfg(target_arch = "x86_64")]
             r10: 0,
-            
+
             #[cfg(target_arch = "aarch64")]
             x0: 0,
             #[cfg(target_arch = "aarch64")]
@@ -244,7 +245,7 @@ impl ProcessExt for crate::sched::Process {
             x5: 0,
             #[cfg(target_arch = "aarch64")]
             x6: 0,
-            
+
             #[cfg(target_arch = "riscv64")]
             a0: 0,
             #[cfg(target_arch = "riscv64")]
@@ -260,7 +261,10 @@ impl ProcessExt for crate::sched::Process {
             #[cfg(target_arch = "riscv64")]
             a6: 0,
         };
-        unsafe { &mut DUMMY_CONTEXT }
+        unsafe {
+            let ptr = &raw mut DUMMY_CONTEXT;
+            &mut *ptr
+        }
     }
 }
 
@@ -280,7 +284,7 @@ struct ProcessContext {
     r9: u64,
     #[cfg(target_arch = "x86_64")]
     r10: u64,
-    
+
     #[cfg(target_arch = "aarch64")]
     x0: u64,
     #[cfg(target_arch = "aarch64")]
@@ -295,7 +299,7 @@ struct ProcessContext {
     x5: u64,
     #[cfg(target_arch = "aarch64")]
     x6: u64,
-    
+
     #[cfg(target_arch = "riscv64")]
     a0: u64,
     #[cfg(target_arch = "riscv64")]
@@ -320,10 +324,10 @@ pub fn get_fast_path_stats() -> (u64, u64) {
     (count, avg_cycles)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_fast_path_stats() {
         let (count, avg) = get_fast_path_stats();

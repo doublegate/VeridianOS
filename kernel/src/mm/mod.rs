@@ -1,8 +1,8 @@
 //! Memory management module
-//! 
+//!
 //! Placeholder implementation providing types needed by IPC module.
 
-use core::fmt;
+#![allow(dead_code)]
 
 /// Physical memory address
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -12,7 +12,7 @@ impl PhysicalAddress {
     pub fn new(addr: u64) -> Self {
         Self(addr)
     }
-    
+
     pub fn as_u64(&self) -> u64 {
         self.0
     }
@@ -26,11 +26,11 @@ impl VirtualAddress {
     pub fn new(addr: u64) -> Self {
         Self(addr)
     }
-    
+
     pub fn as_u64(&self) -> u64 {
         self.0
     }
-    
+
     pub fn add(&self, offset: usize) -> Self {
         Self(self.0 + offset as u64)
     }
@@ -72,7 +72,7 @@ impl PageFlags {
 
 impl core::ops::BitOr for PageFlags {
     type Output = Self;
-    
+
     fn bitor(self, rhs: Self) -> Self::Output {
         Self(self.0 | rhs.0)
     }

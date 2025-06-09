@@ -130,7 +130,12 @@ Currently implementing in phases:
 - **Documentation**: Complete (25+ comprehensive guides) + GitHub Pages deployment
 - **Infrastructure**: Directory structure, TODO system, and GitHub setup complete
 - **CI/CD**: ✅ GitHub Actions workflow passing all checks (100% success rate)
-- **Current Phase**: Phase 0 (Foundation) - 100% COMPLETE! 🎉
+- **Current Phase**: Phase 1 (Microkernel Core) - IN PROGRESS
+  - Phase 0 (Foundation) - 100% COMPLETE! 🎉
+  - IPC System: ~25% complete (synchronous channels implemented)
+  - Memory Management: Not started
+  - Process Management: Not started
+  - Capability System: Not started
 - **Latest Release**: v0.1.0 (June 7, 2025) - Foundation & Tooling
   - Release includes kernel binaries for all three architectures
   - Debug symbols available for x86_64 (AArch64/RISC-V pending)
@@ -142,7 +147,7 @@ Currently implementing in phases:
 - **Testing**: ✅ No-std test framework and benchmarks implemented
 - **Documentation**: ✅ Rustdoc and mdBook configured with automatic deployment
 - **Version Control**: ✅ Git hooks, PR templates, and release automation ready
-- **Next Milestone**: Phase 1 - Microkernel Core (Memory Management → IPC → Scheduling)
+- **Current Work**: Implementing IPC system with zero-copy message passing
 
 ## Critical Implementation Notes
 
@@ -152,10 +157,28 @@ Currently implementing in phases:
 - Support for CXL memory and hardware memory tagging (Intel LAM, ARM MTE)
 
 ### IPC Implementation
-- Synchronous message passing for small messages
-- Asynchronous channels for streaming data
-- Zero-copy transfers using shared memory mappings
-- Capability passing integrated into IPC
+- Synchronous message passing for small messages (✅ Implemented)
+  - Ring buffer with 64 slots per channel
+  - 4KB message size limit
+  - Zero-copy design using shared buffers
+- Asynchronous channels for streaming data (🔲 Next priority)
+- Zero-copy transfers using shared memory mappings (✅ Infrastructure complete)
+  - SharedRegion management with permissions
+  - NUMA-aware allocation support
+  - Three transfer modes: Move, Share, Copy-on-write
+- Capability passing integrated into IPC (✅ Full implementation)
+  - 64-bit tokens with generation counters
+  - O(1) validation for fast path
+  - Permission and rate limiting
+- Fast path IPC for register-based messages (✅ Implemented)
+  - Architecture-specific register transfer
+  - <5μs latency target
+  - Performance counter tracking
+- System call interface (✅ Complete)
+  - Full syscall handler with all IPC operations
+  - Architecture-specific entry points
+- Global channel registry with O(1) lookup (✅ Implemented)
+- Comprehensive error handling (✅ All error cases covered)
 
 ### Driver Framework
 - Drivers run as separate user processes
@@ -210,6 +233,23 @@ Check these files regularly to track progress and identify next tasks.
 - Custom target JSONs in `targets/` directory for each architecture
 - Workspace structure with kernel as main crate
 - Cargo.lock committed for reproducible builds
+- Feature flags for conditional compilation:
+  - `alloc` feature for heap-dependent code
+  - Use `#[cfg(feature = "alloc")]` for optional allocator support
+  - Conditional imports: `#[cfg(feature = "alloc")] use alloc::vec::Vec;`
+  - Use extern crate alloc when needed
+
+### IPC Development Patterns
+- **Message Types**: SmallMessage (≤64 bytes) for fast path, LargeMessage for bulk data
+- **Fast Path Design**: Use register-based transfer for <5μs latency
+- **Architecture Abstraction**: Separate register mappings for x86_64, AArch64, RISC-V
+- **Capability Tokens**: 64-bit format with generation counter for revocation
+- **Error Handling**: Use Result<T> with IpcError for all fallible operations
+- **Performance Tracking**: CPU timestamp counters for latency measurement
+- **Process Integration**: Extension traits for accessing process context
+- **Zero-Copy Design**: SharedRegion with page remapping for large transfers
+- **Type Aliases**: Use ProcessId = u64 for clarity
+- **Result Imports**: Import from error module: `use super::error::Result;`
 
 ### Architecture-Specific Details
 - **x86_64**: Uses bootloader crate, VGA text output, GDT/IDT setup
@@ -238,9 +278,24 @@ Check these files regularly to track progress and identify next tasks.
 - Use `just debug-<arch>` commands for easy debugging
 - Documentation: `docs/GDB-DEBUGGING.md`
 
-### Phase 1 Starting Point
+### Phase 1 Implementation Progress
 - **Phase 0 Status**: 100% COMPLETE! 🎉
 - **Phase 1 Focus**: Memory Management → Process Management → IPC → Capabilities
+- **Current Progress**:
+  - IPC System: ~40% complete
+    - ✅ Synchronous channels with ring buffers
+    - ✅ Message types (SmallMessage ≤64 bytes, LargeMessage)
+    - ✅ Fast path IPC with register-based transfer
+    - ✅ Zero-copy shared memory infrastructure
+    - ✅ Capability system with 64-bit tokens
+    - ✅ System call interface for all IPC operations
+    - ✅ Global channel registry
+    - ✅ Error handling framework
+    - ✅ Process integration hooks
+    - 🔲 Asynchronous channels
+    - 🔲 Performance benchmarks
+    - 🔲 Integration tests
+    - 🔲 Actual context switching (needs scheduler)
 - **Key Documents**: 
   - `docs/PHASE0-COMPLETION-SUMMARY.md` - Phase 0 achievements
   - `docs/design/MEMORY-ALLOCATOR-DESIGN.md` - Memory allocator implementation guide

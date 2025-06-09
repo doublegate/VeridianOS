@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["bench_function","cycles_to_ns","read_timestamp"],"struct":["BenchmarkHarness","BenchmarkResult"],"trait":["Benchmark"]};

@@ -1,8 +1,11 @@
 //! System call interface for VeridianOS
-//! 
-//! Provides the kernel-side implementation of system calls including IPC operations.
+//!
+//! Provides the kernel-side implementation of system calls including IPC
+//! operations.
 
-use crate::ipc::{Message, SmallMessage, IpcError};
+#![allow(dead_code)]
+
+use crate::ipc::{IpcError, SmallMessage};
 
 /// System call numbers
 #[repr(usize)]
@@ -17,15 +20,15 @@ pub enum Syscall {
     IpcBindEndpoint = 5,
     IpcShareMemory = 6,
     IpcMapMemory = 7,
-    
+
     // Process management
     ProcessYield = 10,
     ProcessExit = 11,
-    
+
     // Memory management
     MemoryMap = 20,
     MemoryUnmap = 21,
-    
+
     // Capability management
     CapabilityGrant = 30,
     CapabilityRevoke = 31,
@@ -75,7 +78,7 @@ pub extern "C" fn syscall_handler(
         Ok(syscall) => handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5),
         Err(_) => Err(SyscallError::InvalidSyscall),
     };
-    
+
     match result {
         Ok(value) => value as isize,
         Err(error) => error as i32 as isize,
@@ -89,12 +92,12 @@ fn handle_syscall(
     arg2: usize,
     arg3: usize,
     arg4: usize,
-    arg5: usize,
+    _arg5: usize,
 ) -> SyscallResult {
     match syscall {
         Syscall::IpcSend => sys_ipc_send(arg1, arg2, arg3, arg4),
         Syscall::IpcReceive => sys_ipc_receive(arg1, arg2),
-        Syscall::IpcCall => sys_ipc_call(arg1, arg2, arg3, arg4, arg5),
+        Syscall::IpcCall => sys_ipc_call(arg1, arg2, arg3, arg4, _arg5),
         Syscall::IpcReply => sys_ipc_reply(arg1, arg2, arg3),
         Syscall::ProcessYield => sys_yield(),
         _ => Err(SyscallError::InvalidSyscall),
@@ -102,23 +105,28 @@ fn handle_syscall(
 }
 
 /// IPC send system call
-/// 
+///
 /// # Arguments
 /// - capability: Capability token for the endpoint
 /// - msg_ptr: Pointer to message structure
 /// - msg_size: Size of message
 /// - flags: Send flags
-fn sys_ipc_send(capability: usize, msg_ptr: usize, msg_size: usize, flags: usize) -> SyscallResult {
+fn sys_ipc_send(
+    _capability: usize,
+    msg_ptr: usize,
+    msg_size: usize,
+    _flags: usize,
+) -> SyscallResult {
     // Validate arguments
     if msg_ptr == 0 || msg_size == 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    
+
     // Check if this is a small message (fast path)
     if msg_size <= core::mem::size_of::<SmallMessage>() {
         // Fast path for small messages
         unsafe {
-            let msg = *(msg_ptr as *const SmallMessage);
+            let _msg = *(msg_ptr as *const SmallMessage);
             // TODO: Perform actual IPC send
             // This would involve:
             // 1. Validate capability
@@ -130,52 +138,52 @@ fn sys_ipc_send(capability: usize, msg_ptr: usize, msg_size: usize, flags: usize
         // Large message path
         // TODO: Handle large messages with shared memory
     }
-    
+
     Ok(0)
 }
 
 /// IPC receive system call
-/// 
+///
 /// # Arguments
 /// - endpoint: Endpoint to receive from
 /// - buffer: Buffer to receive message into
-fn sys_ipc_receive(endpoint: usize, buffer: usize) -> SyscallResult {
+fn sys_ipc_receive(_endpoint: usize, buffer: usize) -> SyscallResult {
     if buffer == 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    
+
     // TODO: Implement receive
     // 1. Find endpoint
     // 2. Check for waiting messages
     // 3. If none, block current process
     // 4. Copy message to buffer when available
-    
+
     Ok(0)
 }
 
 /// IPC call (send and wait for reply)
 fn sys_ipc_call(
-    capability: usize,
-    send_msg: usize,
-    send_size: usize,
-    recv_buf: usize,
-    recv_size: usize,
+    _capability: usize,
+    _send_msg: usize,
+    _send_size: usize,
+    _recv_buf: usize,
+    _recv_size: usize,
 ) -> SyscallResult {
     // TODO: Implement call semantics
     // 1. Send message
     // 2. Block waiting for reply
     // 3. Return reply in recv_buf
-    
+
     Ok(0)
 }
 
 /// IPC reply to a previous call
-fn sys_ipc_reply(caller: usize, msg_ptr: usize, msg_size: usize) -> SyscallResult {
+fn sys_ipc_reply(_caller: usize, _msg_ptr: usize, _msg_size: usize) -> SyscallResult {
     // TODO: Implement reply
     // 1. Validate caller is waiting for reply
     // 2. Copy reply message
     // 3. Wake up caller
-    
+
     Ok(0)
 }
 
@@ -187,7 +195,7 @@ fn sys_yield() -> SyscallResult {
 
 impl TryFrom<usize> for Syscall {
     type Error = ();
-    
+
     fn try_from(value: usize) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(Syscall::IpcSend),

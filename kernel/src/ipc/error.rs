@@ -7,6 +7,7 @@ pub type Result<T> = core::result::Result<T, IpcError>;
 
 /// IPC error types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum IpcError {
     /// Invalid or revoked capability
     InvalidCapability,
@@ -42,6 +43,7 @@ pub enum IpcError {
 
 impl IpcError {
     /// Get a static string description of the error
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::InvalidCapability => "Invalid or revoked capability",
@@ -63,7 +65,8 @@ impl IpcError {
     }
 
     /// Convert error to a numeric code for system calls
-    pub fn to_errno(&self) -> i32 {
+    #[allow(dead_code)]
+    pub fn to_errno(self) -> i32 {
         match self {
             Self::InvalidCapability => -1,
             Self::ProcessNotFound => -2,

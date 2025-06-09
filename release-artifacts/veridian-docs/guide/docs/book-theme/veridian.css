@@ -1,0 +1,175 @@
+/* VeridianOS mdBook Theme Customizations */
+
+:root {
+    --veridian-primary: #00695c;
+    --veridian-secondary: #004d40;
+    --veridian-accent: #00897b;
+    --veridian-light: #4db6ac;
+    --veridian-dark: #00251a;
+}
+
+/* Navy theme overrides */
+.navy {
+    --bg: #161923;
+    --fg: #e0e0e0;
+    
+    --sidebar-bg: var(--veridian-dark);
+    --sidebar-fg: #c5c5c5;
+    --sidebar-active: var(--veridian-accent);
+    
+    --scrollbar: var(--veridian-secondary);
+    
+    --icons: #737480;
+    --icons-hover: #b7b9bd;
+    
+    --links: var(--veridian-light);
+    
+    --inline-code-color: #c5c8c6;
+    
+    --theme-popup-bg: #1f2430;
+    --theme-popup-border: #5c6773;
+    --theme-hover: #334455;
+    
+    --quote-bg: hsl(226, 15%, 17%);
+    --quote-border: hsl(226, 15%, 22%);
+    
+    --table-border-color: hsl(210, 25%, 13%);
+    --table-header-bg: hsl(210, 25%, 28%);
+    --table-alternate-bg: hsl(210, 25%, 11%);
+    
+    --searchbar-border-color: #848484;
+    --searchbar-bg: #424242;
+    --searchbar-fg: #fff;
+    --searchbar-shadow-color: #d4c89f;
+    --searchresults-header-fg: #666;
+    --searchresults-border-color: #888;
+    --searchresults-li-bg: #252932;
+    --search-mark-bg: var(--veridian-accent);
+}
+
+/* Headers with Veridian accent */
+.content h1, .content h2, .content h3 {
+    color: var(--veridian-accent);
+}
+
+/* Code blocks with Veridian border */
+pre {
+    border-left: 4px solid var(--veridian-accent) !important;
+}
+
+/* Sidebar improvements */
+.sidebar {
+    scrollbar-color: var(--veridian-secondary) transparent;
+}
+
+.sidebar .sidebar-scrollbox {
+    padding: 10px 10px 10px 20px;
+}
+
+.chapter li.chapter-item strong {
+    color: var(--veridian-light);
+}
+
+/* Active chapter highlighting */
+.chapter li.active > a {
+    color: var(--veridian-light) !important;
+    background-color: var(--veridian-secondary);
+    border-radius: 4px;
+    padding: 3px 5px;
+}
+
+/* Navigation buttons */
+.nav-wrapper {
+    border-top: 2px solid var(--veridian-secondary);
+    margin-top: 50px;
+    padding-top: 20px;
+}
+
+/* Improve tables */
+table {
+    border-collapse: collapse;
+    width: 100%;
+}
+
+table thead tr {
+    background-color: var(--veridian-secondary) !important;
+}
+
+table tbody tr:hover {
+    background-color: rgba(0, 137, 123, 0.1);
+}
+
+/* Warning boxes */
+.warning {
+    background-color: rgba(255, 152, 0, 0.1);
+    border-left: 4px solid #ff9800;
+    padding: 10px 15px;
+    margin: 20px 0;
+}
+
+/* Info boxes */
+.info {
+    background-color: rgba(33, 150, 243, 0.1);
+    border-left: 4px solid #2196f3;
+    padding: 10px 15px;
+    margin: 20px 0;
+}
+
+/* Success boxes */
+.success {
+    background-color: rgba(76, 175, 80, 0.1);
+    border-left: 4px solid #4caf50;
+    padding: 10px 15px;
+    margin: 20px 0;
+}
+
+/* Architecture diagrams */
+pre.diagram {
+    background-color: var(--quote-bg);
+    border: 1px solid var(--quote-border);
+    border-left: 4px solid var(--veridian-accent);
+    font-family: monospace;
+    line-height: 1.4;
+    overflow-x: auto;
+}
+
+/* Performance metrics tables */
+table.metrics {
+    font-size: 0.9em;
+}
+
+table.metrics td:nth-child(2),
+table.metrics td:nth-child(3) {
+    text-align: right;
+    font-family: monospace;
+}
+
+/* Inline code improvements */
+code {
+    background-color: rgba(0, 137, 123, 0.15);
+    padding: 2px 4px;
+    border-radius: 3px;
+}
+
+/* Search results */
+.searchresults-outer {
+    border-color: var(--veridian-secondary);
+}
+
+.searchresults-header {
+    background-color: var(--veridian-dark);
+    color: var(--fg);
+}
+
+/* Print styles */
+@media print {
+    .nav-wrapper,
+    #menu-bar,
+    .nav-chapters {
+        display: none;
+    }
+    
+    .content {
+        max-width: 100%;
+    }
+}

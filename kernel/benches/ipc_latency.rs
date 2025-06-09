@@ -10,8 +10,12 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 
-use veridian_kernel::{bench::BenchmarkResult, benchmark, serial_println};
-use veridian_kernel::ipc::{Message, SmallMessage, IpcCapability, IpcPermissions};
+use veridian_kernel::{
+    bench::BenchmarkResult,
+    benchmark,
+    ipc::{IpcCapability, IpcPermissions, Message, SmallMessage},
+    serial_println,
+};
 
 const IPC_TARGET_NS: u64 = 5000; // 5μs target
 const ITERATIONS: u64 = 1000;
@@ -60,17 +64,17 @@ fn benchmark_small_message_ipc() -> BenchmarkResult {
             .with_data(1, 200)
             .with_data(2, 300)
             .with_data(3, 400);
-        
+
         // Convert to Message enum
         let message = Message::Small(msg);
-        
+
         // Simulate message dispatch
         match message {
             Message::Small(sm) => {
                 let _ = sm.capability;
                 let _ = sm.opcode;
                 let _ = sm.data[0];
-            },
+            }
             Message::Large(_) => unreachable!(),
         }
     })
@@ -79,23 +83,23 @@ fn benchmark_small_message_ipc() -> BenchmarkResult {
 fn benchmark_large_message_ipc() -> BenchmarkResult {
     // Benchmark large message IPC (>64 bytes)
     use veridian_kernel::ipc::shared_memory::MemoryRegion;
-    
+
     benchmark!("Large Message IPC", ITERATIONS, {
         // Create a memory region descriptor
         let region = MemoryRegion::new(0x100000, 4096)
             .with_permissions(0x03) // READ | WRITE
             .with_cache_policy(0); // WRITE_BACK
-        
+
         // Create a large message
         let large_msg = Message::large(0x5678, 84, region);
-        
+
         // Simulate message handling
         match large_msg {
             Message::Large(lm) => {
                 let _ = lm.header.capability;
                 let _ = lm.header.total_size;
                 let _ = lm.memory_region.size;
-            },
+            }
             Message::Small(_) => unreachable!(),
         }
     })
@@ -106,15 +110,15 @@ fn benchmark_capability_passing() -> BenchmarkResult {
     benchmark!("Capability Passing", ITERATIONS, {
         // Create a capability
         let cap = IpcCapability::new(42, IpcPermissions::all());
-        
+
         // Validate capability operations
         let id = cap.id();
         let has_send = cap.has_permission(veridian_kernel::ipc::capability::Permission::Send);
         let has_recv = cap.has_permission(veridian_kernel::ipc::capability::Permission::Receive);
-        
+
         // Simulate capability derivation
         let derived = cap.derive(IpcPermissions::send_only());
-        
+
         // Use results to prevent optimization
         let _ = (id, has_send, has_recv, derived);
     })

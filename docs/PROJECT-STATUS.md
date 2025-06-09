@@ -1,12 +1,13 @@
 # VeridianOS Project Status
 
-## Current Status: Phase 0 Complete! 🎉 v0.1.0 Released!
+## Current Status: Phase 1 In Progress - IPC Implementation
 
-**Last Updated**: 2025-06-07  
-**Release**: v0.1.0 - Foundation & Tooling  
-**Milestone**: Complete development infrastructure ready for microkernel implementation
+**Last Updated**: 2025-06-08  
+**Current Version**: v0.1.0 (Released June 7, 2025)  
+**Current Phase**: Phase 1 - Microkernel Core (Started June 8, 2025)  
+**Phase 1 Progress**: IPC System ~40% complete
 
-As of today, VeridianOS has successfully completed Phase 0 (Foundation and Tooling) and released v0.1.0! This marks a major milestone in the project's development. All foundation infrastructure is now in place: the CI/CD pipeline is 100% operational across all architectures, all three target platforms boot successfully, comprehensive testing infrastructure is ready, documentation framework is established, and complete version control workflow is operational.
+VeridianOS has successfully completed Phase 0 (Foundation and Tooling) and released v0.1.0! The project is now actively developing the microkernel core, starting with the IPC (Inter-Process Communication) system. The foundation infrastructure is fully operational: CI/CD pipeline is 100% passing across all architectures, all three target platforms boot successfully, comprehensive testing infrastructure is ready, documentation framework is established, and complete version control workflow is operational.
 
 ### Phase 0 Achievements
 - ✅ QEMU testing infrastructure fully operational
@@ -143,12 +144,32 @@ The project has achieved:
 9. ✅ Implement basic memory initialization
 10. ✅ Get kernel booting in QEMU with output (all architectures working!)
 
-### Phase 1 Next Steps (Microkernel Core)
+### Phase 1 Progress (Microkernel Core)
+
+**IPC System (~40% Complete)**:
+- ✅ Synchronous message passing with ring buffers
+- ✅ Message types (SmallMessage ≤64 bytes, LargeMessage)  
+- ✅ Fast path IPC with register-based transfer
+- ✅ Zero-copy shared memory infrastructure
+- ✅ Capability system with 64-bit tokens
+- ✅ System call interface for all IPC operations
+- ✅ Global channel registry with O(1) lookup
+- ✅ Comprehensive error handling framework
+- 🔴 Asynchronous channels (next priority)
+- 🔴 Performance benchmarks
+- 🔴 Integration tests with real processes
+
+**Memory Management (Not Started)**:
 1. 🔴 Implement frame allocator for physical memory management
 2. 🔴 Create page table management for virtual memory
 3. 🔴 Implement basic heap allocator
+
+**Process Management (Not Started)**:
 4. 🔴 Create process and thread structures
 5. 🔴 Implement context switching
+
+**Capability System (Not Started)**:
+6. 🔴 Full capability implementation beyond IPC tokens
 
 ### Key Decisions Needed
 1. **Hosting**: ✅ GitHub selected (https://github.com/doublegate/VeridianOS)
@@ -218,8 +239,8 @@ The journey from concept to implementation begins now. With clear documentation,
 
 ---
 
-**Document Version**: 2.0  
-**Last Updated**: 2025-06-07  
-**Status**: Phase 0 Complete (100%) - Phase 1 Starting  
+**Document Version**: 2.1  
+**Last Updated**: 2025-06-08  
+**Status**: Phase 1 In Progress (IPC ~40% complete)  
 **Repository**: https://github.com/doublegate/VeridianOS  
 **CI Status**: ✅ **100% PASSING** - All checks green (Quick Checks, Build & Test, Security Audit) 🎉
