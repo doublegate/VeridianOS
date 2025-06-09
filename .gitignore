@@ -87,3 +87,6 @@ CLAUDE.local.md
 
 # CI artifacts (downloaded from GitHub Actions)
 /release-artifacts/
+
+# Cache directories
+.cache/

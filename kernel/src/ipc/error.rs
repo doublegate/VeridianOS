@@ -39,6 +39,8 @@ pub enum IpcError {
     InvalidMemoryRegion,
     /// Resource temporarily unavailable
     ResourceBusy,
+    /// IPC system not initialized
+    NotInitialized,
 }
 
 impl IpcError {
@@ -61,6 +63,7 @@ impl IpcError {
             Self::EndpointBusy => "Endpoint is busy",
             Self::InvalidMemoryRegion => "Invalid memory region",
             Self::ResourceBusy => "Resource temporarily unavailable",
+            Self::NotInitialized => "IPC system not initialized",
         }
     }
 
@@ -83,6 +86,7 @@ impl IpcError {
             Self::EndpointBusy => -13,
             Self::InvalidMemoryRegion => -14,
             Self::ResourceBusy => -15,
+            Self::NotInitialized => -16,
         }
     }
 }

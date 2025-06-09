@@ -149,23 +149,35 @@ Phase 1 implements the core microkernel functionality including boot process, me
 - [ ] CPU hotplug support
 - [ ] Load balancing
 
-### 4. Inter-Process Communication
+### 4. Inter-Process Communication (~40% complete)
 
 #### Synchronous IPC
-- [ ] Endpoint implementation
-- [ ] Message passing
-- [ ] Call/reply semantics
-- [ ] Fast path optimization
+- [x] Endpoint implementation
+- [x] Message passing
+- [x] Call/reply semantics
+- [x] Fast path optimization
 
-#### Notification System
-- [ ] Asynchronous notifications
-- [ ] Signal bit management
-- [ ] Interrupt forwarding
+#### Asynchronous IPC
+- [x] Async channel implementation
+- [x] Lock-free ring buffers
+- [x] Event notification framework
+- [ ] Integration with scheduler for wakeups
 
 #### Shared Memory
-- [ ] Shared region creation
-- [ ] Permission management
-- [ ] Cache coherency
+- [x] Shared region creation
+- [x] Permission management
+- [x] Zero-copy infrastructure
+- [ ] Physical memory mapping (needs memory manager)
+- [ ] Cache coherency implementation
+
+#### IPC Infrastructure
+- [x] Global registry with O(1) lookup
+- [x] Capability integration
+- [x] Rate limiting implementation
+- [x] Performance tracking and benchmarks
+- [x] Integration tests
+- [ ] Context switching integration (needs scheduler)
+- [ ] Process table integration (needs process manager)
 
 ### 5. Capability System
 

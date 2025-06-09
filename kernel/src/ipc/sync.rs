@@ -204,6 +204,11 @@ fn update_latency_stats(start_cycles: u64) {
     SYNC_STATS
         .avg_latency_cycles
         .store(new_avg, Ordering::Relaxed);
+
+    // Also record in global performance stats
+    let is_fast_path = SYNC_STATS.fast_path_count.load(Ordering::Relaxed)
+        > SYNC_STATS.slow_path_count.load(Ordering::Relaxed);
+    crate::ipc::perf::IPC_PERF_STATS.record_operation(elapsed, is_fast_path);
 }
 
 /// Get synchronous IPC statistics

@@ -1,7 +1,18 @@
-//! IPC subsystem tests
+//! IPC integration tests
+//!
+//! Tests for the IPC subsystem to ensure correct operation
+//! across all components.
+
+#![cfg(all(test, not(target_os = "none")))]
 
 use super::*;
-use crate::ipc::message::{flags, permissions, LargeMessage, SmallMessage};
+use crate::ipc::{
+    capability::{IpcCapability, IpcPermissions, Permission},
+    channel::{Channel, Endpoint},
+    message::{flags, permissions, LargeMessage, SmallMessage},
+    shared_memory::{CachePolicy, SharedRegion, VirtualAddress},
+    zero_copy::Permission as ZeroPermission,
+};
 
 #[test]
 fn test_small_message_creation() {
@@ -23,8 +34,8 @@ fn test_message_enum() {
     assert_eq!(small.capability(), 0x1000);
     assert_eq!(small.opcode(), 1);
 
-    let region =
-        MemoryRegion::new(0x2000, 4096).with_permissions(permissions::READ | permissions::WRITE);
+    let region = message::MemoryRegion::new(0x2000, 4096)
+        .with_permissions(permissions::READ | permissions::WRITE);
     let large = Message::large(0x2000, 2, region);
     assert_eq!(large.capability(), 0x2000);
     assert_eq!(large.opcode(), 2);
@@ -120,22 +131,22 @@ fn test_shared_region_mapping() {
 
     // Map to process 2
     let vaddr = VirtualAddress::new(0x1000_0000);
-    assert!(region.map(2, vaddr, Permission::Read).is_ok());
+    assert!(region.map(2, vaddr, ZeroPermission::Read).is_ok());
 
     // Should be able to get mapping
     assert_eq!(region.get_mapping(2), Some(vaddr));
 
     // Can't map same process twice
     let vaddr2 = VirtualAddress::new(0x2000_0000);
-    assert!(region.map(2, vaddr2, Permission::Write).is_err());
+    assert!(region.map(2, vaddr2, ZeroPermission::Write).is_err());
 }
 
 #[test]
 fn test_memory_region_permissions() {
-    assert_eq!(Permission::Read as u32, 0b001);
-    assert_eq!(Permission::Write as u32, 0b011);
-    assert_eq!(Permission::Execute as u32, 0b100);
-    assert_eq!(Permission::ReadWriteExecute as u32, 0b111);
+    assert_eq!(ZeroPermission::Read as u32, 0b001);
+    assert_eq!(ZeroPermission::Write as u32, 0b011);
+    assert_eq!(ZeroPermission::Execute as u32, 0b100);
+    assert_eq!(ZeroPermission::ReadWriteExecute as u32, 0b111);
 }
 
 #[test]

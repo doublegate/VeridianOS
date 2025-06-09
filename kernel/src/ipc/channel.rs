@@ -33,7 +33,7 @@ pub struct Endpoint {
     /// Unique endpoint ID
     id: u64,
     /// Owner process ID
-    owner: ProcessId,
+    pub owner: ProcessId,
     /// Bound process ID (if connected)
     bound_to: Mutex<Option<ProcessId>>,
     /// Incoming message queue
