@@ -14,10 +14,10 @@ use alloc::vec::Vec;
 
 use veridian_kernel::{
     ipc::{
-        self, create_channel, create_endpoint, get_registry_stats, validate_capability,
-        AsyncChannel, EndpointId, IpcCapability, IpcPermissions, Message, Permissions, RateLimits,
-        SharedRegion, TransferMode, IPC_PERF_STATS, RATE_LIMITER, read_timestamp, cycles_to_ns,
-        measure_ipc_operation,
+        self, create_channel, create_endpoint, cycles_to_ns, get_registry_stats,
+        measure_ipc_operation, read_timestamp, validate_capability, AsyncChannel, EndpointId,
+        IpcCapability, IpcPermissions, Message, Permissions, RateLimits, SharedRegion,
+        TransferMode, IPC_PERF_STATS, RATE_LIMITER,
     },
     serial_print, serial_println,
 };

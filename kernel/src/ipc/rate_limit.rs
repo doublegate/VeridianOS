@@ -228,6 +228,12 @@ impl RateLimiter {
     }
 }
 
+impl Default for RateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Rate limit configuration
 #[derive(Debug, Clone, Copy)]
 pub struct RateLimits {

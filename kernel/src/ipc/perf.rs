@@ -110,6 +110,12 @@ impl IpcPerfStats {
     }
 }
 
+impl Default for IpcPerfStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Global IPC performance statistics instance
 pub static IPC_PERF_STATS: IpcPerfStats = IpcPerfStats::new();
 

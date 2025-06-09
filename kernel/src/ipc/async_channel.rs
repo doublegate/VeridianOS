@@ -355,6 +355,12 @@ impl MessageBatch {
     }
 }
 
+impl Default for MessageBatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // Placeholder functions for process management
 fn wake_process(_pid: ProcessId) {
     // TODO: Implement process wakeup

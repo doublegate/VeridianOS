@@ -200,6 +200,12 @@ impl Bencher {
     }
 }
 
+impl Default for Bencher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Black box to prevent compiler optimizations
 #[inline]
 pub fn black_box<T>(x: T) -> T {

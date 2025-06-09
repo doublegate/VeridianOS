@@ -81,6 +81,7 @@ pub struct MemoryRegion {
 }
 
 /// Initialize the memory management subsystem
+#[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
 pub fn init(memory_map: &[MemoryRegion]) {
     println!("[MM] Initializing memory management...");
 
@@ -102,11 +103,8 @@ pub fn init(memory_map: &[MemoryRegion]) {
             // Use region index as NUMA node for now
             let numa_node = idx.min(7); // Max 8 NUMA nodes
 
-            if let Err(e) = allocator.init_numa_node(numa_node, start_frame, frame_count) {
-                println!(
-                    "[MM] Warning: Failed to initialize memory region {}: {:?}",
-                    idx, e
-                );
+            if let Err(_e) = allocator.init_numa_node(numa_node, start_frame, frame_count) {
+                println!("[MM] Warning: Failed to initialize memory region {}", idx);
             } else {
                 println!(
                     "[MM] Initialized {} MB at 0x{:x} (NUMA node {})",

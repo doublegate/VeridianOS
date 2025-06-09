@@ -490,11 +490,9 @@ impl FrameAllocator {
         }
 
         // Try all nodes
-        for allocator in &self.bitmap_allocators {
-            if let Some(ref allocator) = allocator {
-                if let Ok(frame) = allocator.allocate(count) {
-                    return Ok(frame);
-                }
+        for allocator in self.bitmap_allocators.iter().flatten() {
+            if let Ok(frame) = allocator.allocate(count) {
+                return Ok(frame);
             }
         }
 
@@ -515,11 +513,9 @@ impl FrameAllocator {
         }
 
         // Try all nodes
-        for allocator in &self.buddy_allocators {
-            if let Some(ref allocator) = allocator {
-                if let Ok(frame) = allocator.allocate(count) {
-                    return Ok(frame);
-                }
+        for allocator in self.buddy_allocators.iter().flatten() {
+            if let Ok(frame) = allocator.allocate(count) {
+                return Ok(frame);
             }
         }
 
@@ -534,20 +530,16 @@ impl FrameAllocator {
 
         if count < BITMAP_BUDDY_THRESHOLD {
             // Try bitmap allocators
-            for allocator in &self.bitmap_allocators {
-                if let Some(ref allocator) = allocator {
-                    if allocator.free(frame, count).is_ok() {
-                        return Ok(());
-                    }
+            for allocator in self.bitmap_allocators.iter().flatten() {
+                if allocator.free(frame, count).is_ok() {
+                    return Ok(());
                 }
             }
         } else {
             // Try buddy allocators
-            for allocator in &self.buddy_allocators {
-                if let Some(ref allocator) = allocator {
-                    if allocator.free(frame, count).is_ok() {
-                        return Ok(());
-                    }
+            for allocator in self.buddy_allocators.iter().flatten() {
+                if allocator.free(frame, count).is_ok() {
+                    return Ok(());
                 }
             }
         }
@@ -559,16 +551,12 @@ impl FrameAllocator {
     pub fn get_stats(&self) -> FrameAllocatorStats {
         let mut free_frames = 0;
 
-        for allocator in &self.bitmap_allocators {
-            if let Some(ref allocator) = allocator {
-                free_frames += allocator.free_count() as u64;
-            }
+        for allocator in self.bitmap_allocators.iter().flatten() {
+            free_frames += allocator.free_count() as u64;
         }
 
-        for allocator in &self.buddy_allocators {
-            if let Some(ref allocator) = allocator {
-                free_frames += allocator.free_count() as u64;
-            }
+        for allocator in self.buddy_allocators.iter().flatten() {
+            free_frames += allocator.free_count() as u64;
         }
 
         let stats = self.stats.lock();
@@ -579,6 +567,12 @@ impl FrameAllocator {
             buddy_allocations: stats.buddy_allocations,
             allocation_time_ns: stats.allocation_time_ns,
         }
+    }
+}
+
+impl Default for FrameAllocator {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

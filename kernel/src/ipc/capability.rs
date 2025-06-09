@@ -71,7 +71,7 @@ impl IpcCapability {
     pub fn target(&self) -> EndpointId {
         self.target
     }
-    
+
     /// Get the owner (same as target for compatibility)
     pub fn owner(&self) -> ProcessId {
         self.target
@@ -266,6 +266,12 @@ impl CapabilityTable {
     pub fn remove(&mut self, _id: u64) -> Option<IpcCapability> {
         // TODO: Implement removal
         None
+    }
+}
+
+impl Default for CapabilityTable {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
