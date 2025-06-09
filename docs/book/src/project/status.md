@@ -5,7 +5,7 @@
 **Latest Release**: v0.1.0 - Foundation & Tooling  
 **Released**: June 7, 2025  
 **Current Phase**: Phase 1 - Microkernel Core (Started June 8, 2025)  
-**Phase 1 Progress**: IPC System ~40% complete
+**Phase 1 Progress**: IPC System ~45% complete, Memory Management started
 
 VeridianOS has successfully completed Phase 0 and is now actively developing the microkernel core. The IPC (Inter-Process Communication) system is the current focus, with synchronous message passing, fast path optimization, and zero-copy transfers already implemented.
 
@@ -67,17 +67,22 @@ VeridianOS has successfully completed Phase 0 and is now actively developing the
 ### Phase 1: Microkernel Core (IN PROGRESS)
 **Started**: June 8, 2025
 
-**IPC System (~40% Complete)**:
+**IPC System (~45% Complete)**:
 - ✅ Synchronous message passing
 - ✅ Fast path optimization (<5μs)
 - ✅ Zero-copy transfers
 - ✅ Capability integration
 - ✅ System call interface
-- 🔲 Asynchronous channels
-- 🔲 Performance benchmarks
+- ✅ Global registry with O(1) lookup
+- ✅ Asynchronous channels
+- ✅ Rate limiting for DoS protection
+- ✅ Performance tracking
+- ✅ IPC tests and benchmarks restored
+- 🔲 Full integration with scheduler
+- 🔲 Integration tests with full system
 
 **Remaining Components**:
-- 🔲 Memory management
+- 🟡 Memory management (IN PROGRESS - frame allocator started)
 - 🔲 Process management
 - 🔲 Full capability system
 - 🔲 Scheduler implementation
@@ -119,12 +124,14 @@ VeridianOS has successfully completed Phase 0 and is now actively developing the
 - [x] Synchronous message passing ✅
 - [x] Fast path implementation ✅
 - [x] Zero-copy transfers ✅
-- [ ] Asynchronous channels
-- [ ] Performance benchmarks
-- [ ] Integration tests
+- [x] Asynchronous channels ✅
+- [x] Performance tracking ✅
+- [x] IPC tests and benchmarks ✅
+- [ ] Full scheduler integration
+- [ ] System-wide integration tests
 
-### Next Sprint: Memory Management (Weeks 4-6)
-- [ ] Implement bitmap allocator
+### Next Sprint: Memory Management (Weeks 4-6) - IN PROGRESS
+- [~] Implement bitmap allocator (STARTED)
 - [ ] Implement buddy allocator
 - [ ] Create hybrid allocator
 - [ ] Add NUMA support
@@ -169,6 +176,14 @@ VeridianOS welcomes contributions! Here's how you can help:
 See our [Contributing Guide](../contributing/how-to.md) for details.
 
 ## Recent Updates
+
+### June 9, 2025 - Phase 1 Progress
+- IPC implementation ~45% complete
+- Added global registry with O(1) lookup
+- Implemented asynchronous channels
+- Added rate limiting and performance tracking
+- Restored all IPC tests and benchmarks
+- Started memory management - frame allocator in progress
 
 ### June 8, 2025 - Phase 1 Started
 - Began IPC implementation

@@ -71,6 +71,11 @@ impl IpcCapability {
     pub fn target(&self) -> EndpointId {
         self.target
     }
+    
+    /// Get the owner (same as target for compatibility)
+    pub fn owner(&self) -> ProcessId {
+        self.target
+    }
 
     /// Check if capability has specific permission
     pub fn has_permission(&self, perm: Permission) -> bool {

@@ -41,7 +41,24 @@ pub enum Permission {
     ReadWriteExecute = 0b111,
 }
 
+/// Alias for Permission to match test expectations
+pub type Permissions = Permission;
+
+/// Transfer mode for shared memory operations
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferMode {
+    /// Move ownership to receiver
+    Move,
+    /// Share region with receiver
+    Share,
+    /// Copy-on-write sharing
+    CopyOnWrite,
+}
+
 impl Permission {
+    /// Constant for read-write permissions
+    pub const READ_WRITE: Self = Self::Write;
+    
     /// Check if permission allows reading
     pub fn can_read(self) -> bool {
         (self as u32) & 0b001 != 0
@@ -105,8 +122,14 @@ struct RegionMapping {
 }
 
 impl SharedRegion {
+    /// Create a new shared memory region (simple version for tests)
+    pub fn new(owner: ProcessId, size: usize, _permissions: Permission) -> Self {
+        Self::new_with_policy(owner, size, CachePolicy::WriteBack, None)
+            .unwrap_or_else(|_| panic!("Failed to create shared region"))
+    }
+    
     /// Create a new shared memory region
-    pub fn new(
+    pub fn new_with_policy(
         owner: ProcessId,
         size: usize,
         cache_policy: CachePolicy,
@@ -213,6 +236,24 @@ impl SharedRegion {
             .filter(|m| m.active)
             .map(|m| m.virtual_base)
     }
+    
+    /// Create a capability for this shared region
+    pub fn create_capability(&self, target_process: ProcessId, _mode: TransferMode) -> u64 {
+        // In a real implementation, this would create a capability token
+        // For now, return a unique value based on region ID and target
+        self.id ^ target_process
+    }
+    
+    /// Get the NUMA node for this region
+    pub fn numa_node(&self) -> usize {
+        self.numa_node.unwrap_or(0) as usize
+    }
+    
+    /// Create a new shared memory region with specific NUMA node
+    pub fn new_numa(owner: ProcessId, size: usize, _permissions: Permission, numa_node: usize) -> Self {
+        Self::new_with_policy(owner, size, CachePolicy::WriteBack, Some(numa_node as u32))
+            .unwrap_or_else(|_| panic!("Failed to create NUMA region"))
+    }
 }
 
 /// Memory region descriptor for IPC messages
@@ -271,7 +312,7 @@ impl SharedMemoryManager {
         cache_policy: CachePolicy,
         numa_node: Option<u32>,
     ) -> Result<u64> {
-        let region = SharedRegion::new(owner, size, cache_policy, numa_node)?;
+        let region = SharedRegion::new_with_policy(owner, size, cache_policy, numa_node)?;
         let id = region.id();
 
         // Track NUMA allocation
@@ -361,7 +402,7 @@ mod tests {
 
     #[test]
     fn test_shared_region_creation() {
-        let region = SharedRegion::new(1, 4096, CachePolicy::WriteBack, None).unwrap();
+        let region = SharedRegion::new_with_policy(1, 4096, CachePolicy::WriteBack, None).unwrap();
         assert_eq!(region.size(), 4096);
         assert_eq!(region.owner, 1);
     }

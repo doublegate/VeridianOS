@@ -39,6 +39,12 @@ static SYNC_STATS: SyncIpcStats = SyncIpcStats {
     avg_latency_cycles: AtomicU64::new(0),
 };
 
+/// Simple send message function for tests
+#[cfg(test)]
+pub fn send_message(msg: Message, target_endpoint: u64) -> Result<()> {
+    sync_send(msg, target_endpoint)
+}
+
 /// Synchronous message send
 ///
 /// Blocks until message is delivered to receiver.

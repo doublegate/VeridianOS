@@ -177,3 +177,37 @@ macro_rules! benchmark {
         $crate::bench::bench_function($name, $iterations, || $code)
     }};
 }
+
+/// Simple bencher for benchmark tests
+pub struct Bencher {
+    iterations: u64,
+}
+
+impl Bencher {
+    pub fn new() -> Self {
+        Self { iterations: 100 }
+    }
+
+    pub fn iter<F>(&mut self, mut f: F)
+    where
+        F: FnMut(),
+    {
+        // Simple iteration - in real benchmarking framework
+        // this would do more sophisticated timing
+        for _ in 0..self.iterations {
+            f();
+        }
+    }
+}
+
+/// Black box to prevent compiler optimizations
+#[inline]
+pub fn black_box<T>(x: T) -> T {
+    // This is a simple implementation that prevents the compiler
+    // from optimizing away the value
+    unsafe {
+        let ret = core::ptr::read_volatile(&x);
+        core::mem::forget(x);
+        ret
+    }
+}

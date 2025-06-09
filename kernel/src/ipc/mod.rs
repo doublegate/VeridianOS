@@ -23,8 +23,21 @@ pub mod zero_copy;
 mod tests;
 
 // Re-export core types
-pub use error::IpcError;
-pub use message::{Message, SmallMessage};
+pub use async_channel::AsyncChannel;
+pub use capability::{EndpointId, IpcCapability, IpcPermissions, Permission, ProcessId};
+pub use channel::{Channel, Endpoint};
+pub use error::{IpcError, Result};
+pub use message::{LargeMessage, Message, SmallMessage};
+pub use perf::{cycles_to_ns, measure_ipc_operation, read_timestamp, IPC_PERF_STATS};
+pub use rate_limit::{RateLimits, RATE_LIMITER};
+pub use registry::{create_channel, create_endpoint, get_registry_stats, validate_capability};
+pub use shared_memory::{Permissions, SharedRegion, TransferMode};
+
+// Re-export internal functions for tests
+#[cfg(test)]
+pub use registry::lookup_endpoint;
+#[cfg(test)]
+pub use sync::send_message;
 
 /// IPC system initialization
 #[allow(dead_code)]

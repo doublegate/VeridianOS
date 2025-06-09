@@ -25,8 +25,8 @@ mod print;
 
 mod arch;
 mod cap;
-mod ipc;
-mod mm;
+pub mod ipc;
+pub mod mm;
 mod sched;
 pub mod serial;
 mod syscall;
@@ -36,6 +36,8 @@ mod test_framework;
 pub mod bench;
 
 // Re-export for tests and benchmarks
+// Re-export memory management for tests
+pub use mm::{FrameNumber, MemoryRegion, FRAME_SIZE};
 pub use test_framework::{exit_qemu, test_panic_handler, test_runner, QemuExitCode, Testable};
 
 #[cfg(test)]

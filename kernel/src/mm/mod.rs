@@ -1,22 +1,16 @@
-//! Memory management module
+//! Memory management subsystem
 //!
-//! Placeholder implementation providing types needed by IPC module.
+//! This module handles physical and virtual memory management,
+//! including page tables, allocators, and memory protection.
 
 #![allow(dead_code)]
 
-/// Physical memory address
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PhysicalAddress(pub u64);
+pub mod frame_allocator;
 
-impl PhysicalAddress {
-    pub fn new(addr: u64) -> Self {
-        Self(addr)
-    }
-
-    pub fn as_u64(&self) -> u64 {
-        self.0
-    }
-}
+// Re-export PhysicalAddress from frame_allocator to avoid conflicts
+pub use frame_allocator::{
+    FrameAllocatorError, FrameNumber, PhysicalAddress, FRAME_ALLOCATOR, FRAME_SIZE,
+};
 
 /// Virtual memory address
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -78,12 +72,110 @@ impl core::ops::BitOr for PageFlags {
     }
 }
 
-/// Initialize memory management
-#[allow(dead_code)]
-pub fn init() {
-    println!("[MM] Initializing memory management...");
-    // TODO: Initialize frame allocator
-    // TODO: Initialize page tables
-    // TODO: Set up kernel heap
-    println!("[MM] Memory management initialized");
+/// Memory region from bootloader/firmware
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryRegion {
+    pub start: u64,
+    pub size: u64,
+    pub usable: bool,
 }
+
+/// Initialize the memory management subsystem
+pub fn init(memory_map: &[MemoryRegion]) {
+    println!("[MM] Initializing memory management...");
+
+    // Initialize frame allocator with available memory regions
+    let mut allocator = FRAME_ALLOCATOR.lock();
+
+    let mut total_memory = 0u64;
+    let mut usable_memory = 0u64;
+
+    for (idx, region) in memory_map.iter().enumerate() {
+        total_memory += region.size;
+
+        if region.usable {
+            usable_memory += region.size;
+
+            let start_frame = FrameNumber::new(region.start / FRAME_SIZE as u64);
+            let frame_count = region.size as usize / FRAME_SIZE;
+
+            // Use region index as NUMA node for now
+            let numa_node = idx.min(7); // Max 8 NUMA nodes
+
+            if let Err(e) = allocator.init_numa_node(numa_node, start_frame, frame_count) {
+                println!(
+                    "[MM] Warning: Failed to initialize memory region {}: {:?}",
+                    idx, e
+                );
+            } else {
+                println!(
+                    "[MM] Initialized {} MB at 0x{:x} (NUMA node {})",
+                    region.size / (1024 * 1024),
+                    region.start,
+                    numa_node
+                );
+            }
+        }
+    }
+
+    drop(allocator); // Release lock before getting stats
+
+    let stats = FRAME_ALLOCATOR.lock().get_stats();
+    println!(
+        "[MM] Memory initialized: {} MB total, {} MB usable, {} MB available",
+        total_memory / (1024 * 1024),
+        usable_memory / (1024 * 1024),
+        (stats.free_frames * FRAME_SIZE as u64) / (1024 * 1024)
+    );
+}
+
+/// Initialize with default memory map for testing
+pub fn init_default() {
+    // Default memory map for testing (128MB starting at 1MB)
+    let default_map = [MemoryRegion {
+        start: 0x100000,         // 1MB
+        size: 128 * 1024 * 1024, // 128MB
+        usable: true,
+    }];
+
+    init(&default_map);
+}
+
+/// Placeholder types for IPC integration
+pub type PagePermissions = PageFlags;
+pub type PhysicalPage = FrameNumber;
+
+/// Allocate physical pages
+pub fn allocate_pages(
+    count: usize,
+    numa_node: Option<usize>,
+) -> Result<Vec<PhysicalPage>, FrameAllocatorError> {
+    let frame = FRAME_ALLOCATOR.lock().allocate_frames(count, numa_node)?;
+
+    // Return a vector of consecutive frame numbers
+    let mut pages = Vec::with_capacity(count);
+    for i in 0..count {
+        pages.push(FrameNumber::new(frame.as_u64() + i as u64));
+    }
+
+    Ok(pages)
+}
+
+/// Free physical pages
+pub fn free_pages(pages: &[PhysicalPage]) -> Result<(), FrameAllocatorError> {
+    if pages.is_empty() {
+        return Ok(());
+    }
+
+    // Assume pages are contiguous for now
+    let first_frame = pages[0];
+    let count = pages.len();
+
+    FRAME_ALLOCATOR.lock().free_frames(first_frame, count)
+}
+
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;

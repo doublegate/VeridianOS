@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Phase 1 Progress (Started June 8, 2025)
-- IPC implementation ~40% complete
+- IPC implementation ~45% complete
   - Synchronous message passing with ring buffers
   - Fast path IPC with register-based transfer (<5μs latency)
   - Zero-copy shared memory infrastructure
@@ -16,7 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - System call interface for IPC operations
   - Global channel registry with O(1) lookup
   - Architecture-specific syscall entry points
-- Memory management not yet started
+  - Asynchronous channels implemented
+  - Performance tracking and rate limiting added
+  - IPC tests and benchmarks restored
+- Memory management started - frame allocator implementation in progress
 - Process management not yet started
 - Full capability system not yet started
 

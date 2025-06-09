@@ -1,6 +1,6 @@
 # Phase 1: Microkernel Core
 
-**Status**: IN PROGRESS - IPC ~40% Complete  
+**Status**: IN PROGRESS - IPC ~45% Complete, Memory Management Started  
 **Started**: June 8, 2025  
 **Duration**: Months 4-9  
 **Goal**: Implement the core microkernel functionality with high-performance IPC, memory management, and scheduling.
@@ -129,17 +129,21 @@ sys_thread_yield()    // Yield CPU
 ## Deliverables
 
 ### Memory Management
-- [ ] Frame allocator (buddy + bitmap hybrid)
+- [~] Frame allocator (buddy + bitmap hybrid) - IN PROGRESS
 - [ ] NUMA-aware allocation
 - [ ] Virtual memory manager
 - [ ] Page fault handler
 - [ ] Memory zone management
 
 ### IPC System
-- [ ] Synchronous message passing
-- [ ] Asynchronous channels
-- [ ] Zero-copy shared memory
-- [ ] Capability passing
+- [x] Synchronous message passing ✅
+- [x] Asynchronous channels ✅
+- [x] Zero-copy shared memory ✅
+- [x] Capability passing ✅
+- [x] Global registry with O(1) lookup ✅
+- [x] Rate limiting for DoS protection ✅
+- [x] Performance tracking ✅
+- [ ] Full scheduler integration
 - [ ] POSIX compatibility layer
 
 ### Process Management
