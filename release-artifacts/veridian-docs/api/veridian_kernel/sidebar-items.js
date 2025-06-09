@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["QemuExitCode"],"fn":["exit_qemu","kernel_main","test_panic_handler","test_runner"],"macro":["benchmark","kernel_assert","kernel_assert_eq","kernel_assert_ne","print","println","serial_print","serial_println","test_module"],"mod":["bench","serial"],"trait":["Testable"]};

@@ -29,24 +29,21 @@ target/
 *.dSYM/
 *.pdb
 
-# Backup files
-*.bak
-*.backup
-*.old
+# Test artifacts
+**/*.rs.bk
+*.orig
 
-# Temporary files
-*.tmp
-*.temp
-.tmp/
-.temp/
+# IDE
+.vscode/
+.idea/
 
-# Log files
-*.log
-logs/
+# Kernel images
+*.bin
+*.img
+*.iso
 
-# Cache directories
-.cache/
-cache/
+# QEMU
+*.qcow2
 
 # Coverage reports
 coverage/
@@ -87,3 +84,6 @@ CLAUDE.local.md
 
 # Local user data
 .local/
+
+# CI artifacts (downloaded from GitHub Actions)
+/release-artifacts/
