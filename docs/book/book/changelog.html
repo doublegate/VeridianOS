@@ -1,0 +1,322 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Changelog</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title"></h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="changelog"><a class="header" href="#changelog">Changelog</a></h1>
+<p>All notable changes to VeridianOS are documented here. This project follows <a href="https://semver.org/spec/v2.0.0.html">Semantic Versioning</a>.</p>
+<h2 id="010---2025-06-07"><a class="header" href="#010---2025-06-07"><a href="https://github.com/doublegate/VeridianOS/releases/tag/v0.1.0">0.1.0</a> - 2025-06-07</a></h2>
+<h3 id="-phase-0-complete-foundation--tooling"><a class="header" href="#-phase-0-complete-foundation--tooling">🎉 Phase 0 Complete: Foundation &amp; Tooling</a></h3>
+<p><strong>Phase 0 is now 100% complete!</strong> This release marks the successful establishment of all foundational infrastructure for VeridianOS development.</p>
+<h3 id="major-achievements"><a class="header" href="#major-achievements">Major Achievements</a></h3>
+<h4 id="infrastructure"><a class="header" href="#infrastructure">Infrastructure</a></h4>
+<ul>
+<li><strong>Build System</strong>: Complete Cargo workspace with custom target specifications</li>
+<li><strong>CI/CD Pipeline</strong>: GitHub Actions workflow 100% operational</li>
+<li><strong>Documentation</strong>: 25+ comprehensive technical guides</li>
+<li><strong>Testing Framework</strong>: No-std test infrastructure with benchmarks</li>
+<li><strong>Version Control</strong>: Git hooks, PR templates, and release automation</li>
+</ul>
+<h4 id="technical-milestones"><a class="header" href="#technical-milestones">Technical Milestones</a></h4>
+<ul>
+<li><strong>Multi-Architecture Boot</strong>: All three architectures (x86_64, AArch64, RISC-V) boot successfully</li>
+<li><strong>Serial I/O</strong>: Working debug output on all platforms</li>
+<li><strong>GDB Debugging</strong>: Full remote debugging support with custom commands</li>
+<li><strong>Code Quality</strong>: Zero warnings policy enforced with automated checks</li>
+</ul>
+<h4 id="architecture-support"><a class="header" href="#architecture-support">Architecture Support</a></h4>
+<div class="table-wrapper"><table><thead><tr><th>Platform</th><th>Build</th><th>Boot</th><th>Serial</th><th>Debug</th></tr></thead><tbody>
+<tr><td>x86_64</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>AArch64</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>RISC-V</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+</tbody></table>
+</div>
+<h3 id="added"><a class="header" href="#added">Added</a></h3>
+<ul>
+<li>Comprehensive project structure with modular kernel design</li>
+<li>Custom target specifications for bare metal development</li>
+<li>Architecture abstraction layer for platform independence</li>
+<li>VGA text output for x86_64 debugging</li>
+<li>PL011 UART driver for AArch64</li>
+<li>SBI console support for RISC-V</li>
+<li>Automated build system using Justfile</li>
+<li>Integration test framework with QEMU</li>
+<li>Performance benchmarking infrastructure</li>
+<li>Developer documentation with mdBook</li>
+<li>API documentation with rustdoc</li>
+<li>10+ TODO tracking documents</li>
+<li>GitHub Pages deployment</li>
+</ul>
+<h3 id="fixed"><a class="header" href="#fixed">Fixed</a></h3>
+<ul>
+<li><strong>ISSUE-0001</strong>: CI build failures for custom targets (added -Zbuild-std)</li>
+<li><strong>ISSUE-0002</strong>: RISC-V target missing llvm-abiname field</li>
+<li><strong>ISSUE-0003</strong>: Incorrect llvm-target specifications</li>
+<li><strong>ISSUE-0004</strong>: Cargo.lock missing from repository</li>
+<li><strong>ISSUE-0005</strong>: Clippy warnings and dead code</li>
+<li><strong>ISSUE-0006</strong>: AArch64 boot sequence hanging</li>
+<li><strong>ISSUE-0007</strong>: GDB script string quoting errors</li>
+</ul>
+<h3 id="technical-details"><a class="header" href="#technical-details">Technical Details</a></h3>
+<h4 id="build-system"><a class="header" href="#build-system">Build System</a></h4>
+<ul>
+<li>Rust nightly-2025-01-15 with custom targets</li>
+<li>Requires <code>-Zbuild-std=core,compiler_builtins,alloc</code></li>
+<li>Automated dependency installation</li>
+<li>Cross-compilation support</li>
+</ul>
+<h4 id="kernel-features"><a class="header" href="#kernel-features">Kernel Features</a></h4>
+<ul>
+<li>Panic handler with serial output</li>
+<li>Global allocator stub</li>
+<li>Architecture-specific entry points</li>
+<li>Modular subsystem organization</li>
+</ul>
+<h4 id="development-tools"><a class="header" href="#development-tools">Development Tools</a></h4>
+<ul>
+<li>GDB scripts for kernel debugging</li>
+<li>QEMU integration for testing</li>
+<li>Code formatting enforcement</li>
+<li>Security vulnerability scanning</li>
+</ul>
+<h3 id="documentation"><a class="header" href="#documentation">Documentation</a></h3>
+<p>All documentation is available in the repository:</p>
+<ul>
+<li>Architecture overview and design principles</li>
+<li>Development setup and build instructions</li>
+<li>API reference structure</li>
+<li>Contributing guidelines</li>
+<li>Testing strategy</li>
+<li>Phase implementation guides</li>
+<li>Troubleshooting guide</li>
+</ul>
+<h3 id="next-phase-1"><a class="header" href="#next-phase-1">Next: Phase 1</a></h3>
+<p>With Phase 0 complete, development moves to Phase 1: Microkernel Core</p>
+<ul>
+<li>Memory management implementation</li>
+<li>Process and thread management</li>
+<li>Inter-process communication</li>
+<li>Capability system</li>
+<li>System call interface</li>
+</ul>
+<hr />
+<h2 id="version-history"><a class="header" href="#version-history">Version History</a></h2>
+<ul>
+<li><strong>0.1.0</strong> (2025-06-07): Phase 0 - Foundation &amp; Tooling ✅</li>
+<li><strong>0.0.1</strong> (2025-01-06): Initial repository creation</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="advanced/formal-verification.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="security.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="advanced/formal-verification.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="security.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

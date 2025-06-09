@@ -1,0 +1,717 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Phase 5: Performance</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title"></h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="phase-5-performance-optimization"><a class="header" href="#phase-5-performance-optimization">Phase 5: Performance Optimization</a></h1>
+<p>Phase 5 (Months 28-33) transforms VeridianOS from a functional operating system into a high-performance platform through systematic optimization across all layers, from kernel-level improvements to application performance tools.</p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p>This phase focuses on achieving competitive performance through:</p>
+<ul>
+<li><strong>Lock-Free Algorithms</strong>: Eliminating contention in critical paths</li>
+<li><strong>Cache-Aware Scheduling</strong>: Optimizing for modern CPU architectures</li>
+<li><strong>Zero-Copy I/O</strong>: io_uring and buffer management</li>
+<li><strong>DPDK Integration</strong>: Line-rate network packet processing</li>
+<li><strong>Memory Optimization</strong>: Huge pages and NUMA awareness</li>
+<li><strong>Profiling Infrastructure</strong>: System-wide performance analysis</li>
+</ul>
+<h2 id="performance-targets"><a class="header" href="#performance-targets">Performance Targets</a></h2>
+<h3 id="final-optimization-goals"><a class="header" href="#final-optimization-goals">Final Optimization Goals</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Component</th><th>Baseline</th><th>Target</th><th>Improvement</th></tr></thead><tbody>
+<tr><td>IPC Latency</td><td>~5μs</td><td>&lt;1μs</td><td>5x</td></tr>
+<tr><td>Memory Allocation</td><td>~5μs</td><td>&lt;1μs</td><td>5x</td></tr>
+<tr><td>Context Switch</td><td>&lt;10μs</td><td>&lt;5μs</td><td>2x</td></tr>
+<tr><td>System Call</td><td>~500ns</td><td>&lt;100ns</td><td>5x</td></tr>
+<tr><td>Network (10GbE)</td><td>50%</td><td>Line-rate</td><td>2x</td></tr>
+<tr><td>Storage IOPS</td><td>100K</td><td>1M+</td><td>10x</td></tr>
+</tbody></table>
+</div>
+<h2 id="lock-free-data-structures"><a class="header" href="#lock-free-data-structures">Lock-Free Data Structures</a></h2>
+<h3 id="michael--scott-queue"><a class="header" href="#michael--scott-queue">Michael &amp; Scott Queue</a></h3>
+<p>High-performance lock-free queue implementation:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct LockFreeQueue&lt;T&gt; {
+    head: CachePadded&lt;AtomicPtr&lt;Node&lt;T&gt;&gt;&gt;,
+    tail: CachePadded&lt;AtomicPtr&lt;Node&lt;T&gt;&gt;&gt;,
+    size: CachePadded&lt;AtomicUsize&gt;,
+}
+
+impl&lt;T&gt; LockFreeQueue&lt;T&gt; {
+    pub fn enqueue(&amp;self, value: T) {
+        let new_node = Box::into_raw(Box::new(Node {
+            data: MaybeUninit::new(value),
+            next: AtomicPtr::new(null_mut()),
+        }));
+        
+        loop {
+            let tail = self.tail.load(Ordering::Acquire);
+            let tail_node = unsafe { &amp;*tail };
+            let next = tail_node.next.load(Ordering::Acquire);
+            
+            if tail == self.tail.load(Ordering::Acquire) {
+                if next.is_null() {
+                    // Try to link new node
+                    match tail_node.next.compare_exchange_weak(
+                        next, new_node,
+                        Ordering::Release, Ordering::Relaxed,
+                    ) {
+                        Ok(_) =&gt; {
+                            // Success, try to swing tail
+                            let _ = self.tail.compare_exchange_weak(
+                                tail, new_node,
+                                Ordering::Release, Ordering::Relaxed,
+                            );
+                            break;
+                        }
+                        Err(_) =&gt; continue,
+                    }
+                }
+            }
+        }
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="rcu-read-copy-update"><a class="header" href="#rcu-read-copy-update">RCU (Read-Copy-Update)</a></h3>
+<p>Efficient reader-writer synchronization:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct RcuData&lt;T&gt; {
+    current: AtomicPtr&lt;T&gt;,
+    grace_period: AtomicU64,
+    readers: ReaderRegistry,
+}
+
+impl&lt;T&gt; RcuData&lt;T&gt; {
+    pub fn read&lt;F, R&gt;(&amp;self, f: F) -&gt; R
+    where F: FnOnce(&amp;T) -&gt; R
+    {
+        let guard = self.readers.register();
+        let ptr = self.current.load(Ordering::Acquire);
+        let data = unsafe { &amp;*ptr };
+        f(data) // Guard ensures data stays valid
+    }
+    
+    pub fn update&lt;F&gt;(&amp;self, updater: F) -&gt; Result&lt;(), Error&gt;
+    where F: FnOnce(&amp;T) -&gt; T
+    {
+        let old_ptr = self.current.load(Ordering::Acquire);
+        let new_data = updater(unsafe { &amp;*old_ptr });
+        let new_ptr = Box::into_raw(Box::new(new_data));
+        
+        self.current.store(new_ptr, Ordering::Release);
+        self.wait_for_readers();
+        unsafe { Box::from_raw(old_ptr); } // Safe to free
+        
+        Ok(())
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="cache-aware-scheduling"><a class="header" href="#cache-aware-scheduling">Cache-Aware Scheduling</a></h2>
+<h3 id="numa-aware-thread-placement"><a class="header" href="#numa-aware-thread-placement">NUMA-Aware Thread Placement</a></h3>
+<p>Optimizing thread placement for memory locality:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct CacheAwareScheduler {
+    cpu_queues: Vec&lt;CpuQueue&gt;,
+    numa_topology: NumaTopology,
+    cache_stats: CacheStatistics,
+    migration_policy: MigrationPolicy,
+}
+
+impl CacheAwareScheduler {
+    pub fn pick_next_thread(&amp;mut self, cpu: CpuId) -&gt; Option&lt;ThreadId&gt; {
+        let queue = &amp;mut self.cpu_queues[cpu.0];
+        
+        // First, try cache-hot threads
+        if let Some(&amp;tid) = queue.cache_hot.iter().next() {
+            queue.cache_hot.remove(&amp;tid);
+            return Some(tid);
+        }
+        
+        // Check threads with data on this NUMA node
+        if let Some(tid) = self.find_numa_local_thread(cpu) {
+            return Some(tid);
+        }
+        
+        // Try work stealing from same cache domain
+        if let Some(tid) = self.steal_from_cache_domain(cpu) {
+            return Some(tid);
+        }
+        
+        queue.ready.pop_front()
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="memory-access-optimization"><a class="header" href="#memory-access-optimization">Memory Access Optimization</a></h3>
+<p>Automatic page placement based on access patterns:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct MemoryAccessOptimizer {
+    page_access: PageAccessTracker,
+    numa_balancer: NumaBalancer,
+    huge_pages: HugePageManager,
+}
+
+impl MemoryAccessOptimizer {
+    pub fn optimize_placement(&amp;mut self, process: &amp;Process) -&gt; Result&lt;(), Error&gt; {
+        let access_stats = self.page_access.analyze(process)?;
+        
+        // Migrate hot pages to local NUMA node
+        for (page, stats) in access_stats.hot_pages() {
+            let preferred_node = stats.most_accessed_node();
+            if preferred_node != page.current_node() {
+                self.numa_balancer.migrate_page(page, preferred_node)?;
+            }
+        }
+        
+        // Promote frequently accessed pages to huge pages
+        let candidates = access_stats.huge_page_candidates();
+        for candidate in candidates {
+            self.huge_pages.promote_to_huge_page(candidate)?;
+        }
+        
+        Ok(())
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="io-performance"><a class="header" href="#io-performance">I/O Performance</a></h2>
+<h3 id="io_uring-integration"><a class="header" href="#io_uring-integration">io_uring Integration</a></h3>
+<p>Zero-copy asynchronous I/O:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct IoUring {
+    sq: SubmissionQueue,
+    cq: CompletionQueue,
+    rings: MmapRegion,
+    buffers: RegisteredBuffers,
+}
+
+impl IoUring {
+    pub fn submit_read_fixed(
+        &amp;mut self,
+        fd: RawFd,
+        buf_index: u16,
+        offset: u64,
+        len: u32,
+    ) -&gt; Result&lt;(), Error&gt; {
+        let sqe = self.get_next_sqe()?;
+        
+        sqe.opcode = IORING_OP_READ_FIXED;
+        sqe.fd = fd;
+        sqe.off = offset;
+        sqe.buf_index = buf_index;
+        sqe.len = len;
+        
+        self.sq.advance_tail();
+        Ok(())
+    }
+    
+    pub fn submit_and_wait(&amp;mut self, wait_nr: u32) -&gt; Result&lt;u32, Error&gt; {
+        fence(Ordering::SeqCst);
+        
+        let submitted = unsafe {
+            syscall!(
+                IO_URING_ENTER,
+                self.ring_fd,
+                self.sq.pending(),
+                wait_nr,
+                IORING_ENTER_GETEVENTS,
+            )
+        }?;
+        
+        Ok(submitted as u32)
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="zero-copy-buffer-pool"><a class="header" href="#zero-copy-buffer-pool">Zero-Copy Buffer Pool</a></h3>
+<p>Pre-allocated aligned buffers for DMA:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>#[repr(align(4096))]
+struct AlignedBuffer {
+    data: [u8; BUFFER_SIZE],
+}
+
+pub struct ZeroCopyBufferPool {
+    buffers: Vec&lt;AlignedBuffer&gt;,
+    free_list: LockFreeStack&lt;usize&gt;,
+}
+
+impl ZeroCopyBufferPool {
+    pub fn allocate(&amp;self) -&gt; Option&lt;BufferHandle&gt; {
+        let index = self.free_list.pop()?;
+        Some(BufferHandle {
+            pool: self,
+            index,
+            ptr: unsafe { self.buffers[index].data.as_ptr() },
+            len: BUFFER_SIZE,
+        })
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="network-performance"><a class="header" href="#network-performance">Network Performance</a></h2>
+<h3 id="dpdk-integration"><a class="header" href="#dpdk-integration">DPDK Integration</a></h3>
+<p>Kernel-bypass networking for maximum throughput:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct DpdkNetworkDriver {
+    ctx: DpdkContext,
+    queues: Vec&lt;DpdkQueue&gt;,
+    mempools: Vec&lt;DpdkMempool&gt;,
+    flow_rules: FlowRuleTable,
+}
+
+impl DpdkNetworkDriver {
+    pub fn rx_burst(&amp;mut self, queue_id: u16, packets: &amp;mut [Packet]) -&gt; u16 {
+        unsafe {
+            let nb_rx = rte_eth_rx_burst(
+                queue.port_id,
+                queue.queue_id,
+                packets.as_mut_ptr() as *mut *mut rte_mbuf,
+                packets.len() as u16,
+            );
+            
+            // Prefetch packet data
+            for i in 0..nb_rx as usize {
+                let mbuf = packets[i].mbuf;
+                rte_prefetch0((*mbuf).buf_addr);
+            }
+            
+            nb_rx
+        }
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="simd-packet-processing"><a class="header" href="#simd-packet-processing">SIMD Packet Processing</a></h3>
+<p>Vectorized operations for packet header processing:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub fn process_packets_simd(&amp;mut self, packets: &amp;mut [Packet]) {
+    use core::arch::x86_64::*;
+    
+    unsafe {
+        // Process 4 packets at a time with AVX2
+        for chunk in packets.chunks_exact_mut(4) {
+            // Load packet headers
+            let hdrs = _mm256_loadu_si256(chunk.as_ptr() as *const __m256i);
+            
+            // Vectorized header validation
+            let valid_mask = self.validate_headers_simd(hdrs);
+            
+            // Extract flow keys
+            let flow_keys = self.extract_flow_keys_simd(hdrs);
+            
+            // Lookup flow rules
+            let actions = self.lookup_flows_simd(flow_keys);
+            
+            // Apply actions
+            self.apply_actions_simd(chunk, actions, valid_mask);
+        }
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="memory-performance"><a class="header" href="#memory-performance">Memory Performance</a></h2>
+<h3 id="huge-page-management"><a class="header" href="#huge-page-management">Huge Page Management</a></h3>
+<p>Transparent huge page support with defragmentation:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct HugePageManager {
+    free_huge_pages: Vec&lt;HugePageFrame&gt;,
+    allocator: BuddyAllocator,
+    defrag: DefragEngine,
+    stats: HugePageStats,
+}
+
+impl HugePageManager {
+    pub fn promote_to_huge_page(
+        &amp;mut self,
+        vma: &amp;VirtualMemoryArea,
+        addr: VirtAddr,
+    ) -&gt; Result&lt;(), Error&gt; {
+        // Check alignment and presence
+        if !addr.is_huge_page_aligned() {
+            return Err(Error::UnalignedAddress);
+        }
+        
+        // Allocate huge page
+        let huge_frame = self.allocate_huge_page(vma.numa_node())?;
+        
+        // Copy data
+        unsafe {
+            let src = addr.as_ptr::&lt;u8&gt;();
+            let dst = huge_frame.as_ptr::&lt;u8&gt;();
+            copy_nonoverlapping(src, dst, HUGE_PAGE_SIZE);
+        }
+        
+        // Update page tables atomically
+        vma.replace_with_huge_page(addr, huge_frame)?;
+        
+        self.stats.promotions += 1;
+        Ok(())
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="storage-performance"><a class="header" href="#storage-performance">Storage Performance</a></h2>
+<h3 id="nvme-optimization"><a class="header" href="#nvme-optimization">NVMe Optimization</a></h3>
+<p>High-performance storage with io_uring:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct OptimizedNvmeDriver {
+    controller: NvmeController,
+    sq: Vec&lt;SubmissionQueue&gt;,
+    cq: Vec&lt;CompletionQueue&gt;,
+    io_rings: Vec&lt;IoUring&gt;,
+}
+
+impl OptimizedNvmeDriver {
+    pub async fn submit_batch(&amp;mut self, requests: Vec&lt;IoRequest&gt;) -&gt; Result&lt;(), Error&gt; {
+        // Group by queue for better locality
+        let mut by_queue: BTreeMap&lt;usize, Vec&lt;IoRequest&gt;&gt; = BTreeMap::new();
+        
+        for req in requests {
+            let queue_id = self.select_queue(req.cpu_hint);
+            by_queue.entry(queue_id).or_default().push(req);
+        }
+        
+        // Submit to each queue
+        for (queue_id, batch) in by_queue {
+            let io_ring = &amp;mut self.io_rings[queue_id];
+            
+            // Prepare all commands
+            for req in batch {
+                let cmd = self.build_command(req)?;
+                io_ring.prepare_nvme_cmd(cmd)?;
+            }
+            
+            // Single syscall for entire batch
+            io_ring.submit_and_wait(0)?;
+        }
+        
+        Ok(())
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="profiling-infrastructure"><a class="header" href="#profiling-infrastructure">Profiling Infrastructure</a></h2>
+<h3 id="system-wide-profiler"><a class="header" href="#system-wide-profiler">System-Wide Profiler</a></h3>
+<p>Comprehensive performance analysis with minimal overhead:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct SystemProfiler {
+    perf_events: PerfEventGroup,
+    ebpf: EbpfManager,
+    aggregator: DataAggregator,
+    visualizer: Visualizer,
+}
+
+impl SystemProfiler {
+    pub async fn start_profiling(&amp;mut self, config: ProfileConfig) -&gt; Result&lt;SessionId, Error&gt; {
+        // Configure perf events
+        for event in &amp;config.events {
+            self.perf_events.add_event(event)?;
+        }
+        
+        // Load eBPF programs for tracing
+        if config.enable_ebpf {
+            self.load_ebpf_programs(&amp;config.ebpf_programs)?;
+        }
+        
+        // Start data collection
+        self.perf_events.enable()?;
+        
+        Ok(SessionId::new())
+    }
+    
+    pub async fn generate_flame_graph(&amp;self, session_id: SessionId) -&gt; Result&lt;FlameGraph, Error&gt; {
+        let samples = self.aggregator.get_stack_samples(session_id)?;
+        let mut flame_graph = FlameGraph::new();
+        
+        for sample in samples {
+            let stack = self.symbolize_stack(&amp;sample.stack)?;
+            flame_graph.add_sample(stack, sample.count);
+        }
+        
+        Ok(flame_graph)
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="implementation-timeline"><a class="header" href="#implementation-timeline">Implementation Timeline</a></h2>
+<h3 id="month-28-29-kernel-optimizations"><a class="header" href="#month-28-29-kernel-optimizations">Month 28-29: Kernel Optimizations</a></h3>
+<ul>
+<li>Lock-free data structures</li>
+<li>Cache-aware scheduling</li>
+<li>RCU implementation</li>
+<li>NUMA optimizations</li>
+</ul>
+<h3 id="month-30-io-performance"><a class="header" href="#month-30-io-performance">Month 30: I/O Performance</a></h3>
+<ul>
+<li>io_uring integration</li>
+<li>Zero-copy buffer management</li>
+</ul>
+<h3 id="month-31-memory-performance"><a class="header" href="#month-31-memory-performance">Month 31: Memory Performance</a></h3>
+<ul>
+<li>Huge page support</li>
+<li>Memory defragmentation</li>
+</ul>
+<h3 id="month-32-network--storage"><a class="header" href="#month-32-network--storage">Month 32: Network &amp; Storage</a></h3>
+<ul>
+<li>DPDK integration</li>
+<li>NVMe optimizations</li>
+</ul>
+<h3 id="month-33-profiling-tools"><a class="header" href="#month-33-profiling-tools">Month 33: Profiling Tools</a></h3>
+<ul>
+<li>System profiler</li>
+<li>Analysis tools and dashboard</li>
+</ul>
+<h2 id="testing-strategy"><a class="header" href="#testing-strategy">Testing Strategy</a></h2>
+<h3 id="microbenchmarks"><a class="header" href="#microbenchmarks">Microbenchmarks</a></h3>
+<ul>
+<li>Individual optimization validation</li>
+<li>Regression detection</li>
+<li>Performance baselines</li>
+</ul>
+<h3 id="system-benchmarks"><a class="header" href="#system-benchmarks">System Benchmarks</a></h3>
+<ul>
+<li>Real-world workloads</li>
+<li>Database performance</li>
+<li>Web server throughput</li>
+<li>Scientific computing</li>
+</ul>
+<h3 id="profiling-validation"><a class="header" href="#profiling-validation">Profiling Validation</a></h3>
+<ul>
+<li>Overhead measurement (&lt;5%)</li>
+<li>Accuracy verification</li>
+<li>Scalability testing</li>
+</ul>
+<h2 id="success-criteria"><a class="header" href="#success-criteria">Success Criteria</a></h2>
+<ol>
+<li><strong>IPC Performance</strong>: &lt;1μs latency for small messages</li>
+<li><strong>Memory Operations</strong>: &lt;1μs allocation latency</li>
+<li><strong>Context Switching</strong>: &lt;5μs with cache preservation</li>
+<li><strong>Network Performance</strong>: Line-rate packet processing</li>
+<li><strong>Storage Performance</strong>: 1M+ IOPS with NVMe</li>
+<li><strong>Profiling Overhead</strong>: &lt;5% for system-wide profiling</li>
+</ol>
+<h2 id="next-phase-dependencies"><a class="header" href="#next-phase-dependencies">Next Phase Dependencies</a></h2>
+<p>Phase 6 (Advanced Features) requires:</p>
+<ul>
+<li>Optimized kernel infrastructure</li>
+<li>High-performance I/O stack</li>
+<li>Profiling and analysis tools</li>
+<li>Performance regression framework</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../phases/phase4-packages.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../phases/phase6-advanced.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../phases/phase4-packages.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../phases/phase6-advanced.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

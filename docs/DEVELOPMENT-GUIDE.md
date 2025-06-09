@@ -1,5 +1,7 @@
 # VeridianOS Development Guide
 
+**Last Updated**: January 9, 2025
+
 ## Getting Started
 
 This guide covers everything you need to know to start developing VeridianOS, from setting up your environment to submitting your first contribution.

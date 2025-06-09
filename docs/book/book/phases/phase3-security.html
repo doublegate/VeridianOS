@@ -1,0 +1,654 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Phase 3: Security</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title"></h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="phase-3-security-hardening"><a class="header" href="#phase-3-security-hardening">Phase 3: Security Hardening</a></h1>
+<p>Phase 3 (Months 16-21) transforms VeridianOS into a security-focused system suitable for high-assurance environments through comprehensive security hardening, defense-in-depth strategies, and advanced security features.</p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p>This phase implements multiple layers of security:</p>
+<ul>
+<li><strong>Mandatory Access Control (MAC)</strong>: SELinux-style policy enforcement</li>
+<li><strong>Secure Boot</strong>: Complete chain of trust from firmware to applications</li>
+<li><strong>Cryptographic Services</strong>: System-wide encryption and key management</li>
+<li><strong>Security Monitoring</strong>: Audit system and intrusion detection</li>
+<li><strong>Application Sandboxing</strong>: Container-based isolation</li>
+<li><strong>Hardware Security</strong>: TPM, HSM, and TEE integration</li>
+</ul>
+<h2 id="mandatory-access-control"><a class="header" href="#mandatory-access-control">Mandatory Access Control</a></h2>
+<h3 id="security-architecture"><a class="header" href="#security-architecture">Security Architecture</a></h3>
+<p>VeridianOS implements a comprehensive MAC system similar to SELinux:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct SecurityContext {
+    user: UserId,           // Security user
+    role: RoleId,          // Security role
+    type_id: TypeId,       // Type/domain
+    mls_range: MlsRange,   // Multi-level security
+}
+
+// Example policy rule
+allow init_t self:process { fork sigchld };
+allow init_t console_device_t:chr_file { read write };
+<span class="boring">}</span></code></pre></pre>
+<h3 id="policy-language"><a class="header" href="#policy-language">Policy Language</a></h3>
+<p>Security policies are written in a high-level language and compiled:</p>
+<pre><code># Define types
+type init_t;
+type user_t;
+type system_file_t;
+
+# Define roles
+role system_r types { init_t };
+role user_r types { user_t };
+
+# Access rules
+allow init_t system_file_t:file { read execute };
+allow user_t user_home_t:file { read write create };
+
+# Type transitions
+type_transition init_t user_exec_t:process user_t;
+</code></pre>
+<h3 id="access-decision-process"><a class="header" href="#access-decision-process">Access Decision Process</a></h3>
+<pre><code>┌─────────────────┐
+│ Access Request  │
+└────────┬────────┘
+         ↓
+┌─────────────────┐
+│ Check AVC Cache │ → Hit → Allow/Deny
+└────────┬────────┘
+         ↓ Miss
+┌─────────────────┐
+│ Type Enforcement│
+└────────┬────────┘
+         ↓
+┌─────────────────┐
+│ Role-Based AC   │
+└────────┬────────┘
+         ↓
+┌─────────────────┐
+│ MLS Constraints │
+└────────┬────────┘
+         ↓
+┌─────────────────┐
+│ Cache &amp; Return  │
+└─────────────────┘
+</code></pre>
+<h2 id="secure-boot-implementation"><a class="header" href="#secure-boot-implementation">Secure Boot Implementation</a></h2>
+<h3 id="boot-chain-verification"><a class="header" href="#boot-chain-verification">Boot Chain Verification</a></h3>
+<p>Every component in the boot chain is cryptographically verified:</p>
+<pre><code>┌──────────────┐
+│ Hardware RoT │ Immutable root of trust
+└──────┬───────┘
+       ↓ Measures &amp; Verifies
+┌──────────────┐
+│ UEFI Secure  │ Checks signatures
+│    Boot      │
+└──────┬───────┘
+       ↓ Loads &amp; Verifies
+┌──────────────┐
+│ VeridianOS   │ Verifies kernel
+│ Bootloader   │
+└──────┬───────┘
+       ↓ Loads &amp; Measures
+┌──────────────┐
+│   Kernel     │ Verifies drivers
+└──────────────┘
+</code></pre>
+<h3 id="tpm-integration"><a class="header" href="#tpm-integration">TPM Integration</a></h3>
+<p>Platform measurements are extended into TPM PCRs:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Extend PCR with component measurement
+pub fn measure_component(component: &amp;[u8], pcr: u8) -&gt; Result&lt;(), Error&gt; {
+    let digest = Sha256::digest(component);
+    tpm.extend_pcr(pcr, &amp;digest)?;
+    
+    // Log measurement
+    event_log.add(Event {
+        pcr_index: pcr,
+        digest,
+        description: "Component measurement",
+    });
+    
+    Ok(())
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="verified-boot-policy"><a class="header" href="#verified-boot-policy">Verified Boot Policy</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct BootPolicy {
+    min_security_version: u32,
+    required_capabilities: BootCapabilities,
+    trusted_measurements: Vec&lt;TrustedConfig&gt;,
+    rollback_protection: bool,
+}
+
+// Evaluate boot measurements
+let decision = policy.evaluate(measurements)?;
+if !decision.allowed {
+    panic!("Boot policy violation");
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="cryptographic-services"><a class="header" href="#cryptographic-services">Cryptographic Services</a></h2>
+<h3 id="key-management-service-kms"><a class="header" href="#key-management-service-kms">Key Management Service (KMS)</a></h3>
+<p>Hierarchical key management with hardware backing:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct KeyHierarchy {
+    root_key: TpmHandle,        // In TPM/HSM
+    domain_keys: BTreeMap&lt;DomainId, DomainKey&gt;,
+    service_keys: BTreeMap&lt;ServiceId, ServiceKey&gt;,
+}
+
+// Generate domain-specific key
+let key = kms.generate_key(KeyGenRequest {
+    algorithm: KeyAlgorithm::Aes256,
+    domain: DomainId::UserData,
+    attributes: KeyAttributes::NonExportable,
+})?;
+<span class="boring">}</span></code></pre></pre>
+<h3 id="post-quantum-cryptography"><a class="header" href="#post-quantum-cryptography">Post-Quantum Cryptography</a></h3>
+<p>Hybrid classical/post-quantum algorithms:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub enum CryptoAlgorithm {
+    // Classical
+    AesGcm256,
+    ChaCha20Poly1305,
+    
+    // Post-quantum
+    MlKem768,      // Key encapsulation
+    MlDsa65,       // Digital signatures
+    
+    // Hybrid
+    HybridKem(ClassicalKem, PostQuantumKem),
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="hardware-security-module-support"><a class="header" href="#hardware-security-module-support">Hardware Security Module Support</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub trait HsmInterface {
+    /// Generate key in HSM
+    fn generate_key(&amp;self, spec: KeySpec) -&gt; Result&lt;KeyHandle, Error&gt;;
+    
+    /// Sign data using HSM key
+    fn sign(&amp;self, key: KeyHandle, data: &amp;[u8]) -&gt; Result&lt;Signature, Error&gt;;
+    
+    /// Decrypt using HSM key
+    fn decrypt(&amp;self, key: KeyHandle, ciphertext: &amp;[u8]) -&gt; Result&lt;Vec&lt;u8&gt;, Error&gt;;
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="security-monitoring"><a class="header" href="#security-monitoring">Security Monitoring</a></h2>
+<h3 id="audit-system-architecture"><a class="header" href="#audit-system-architecture">Audit System Architecture</a></h3>
+<p>Comprehensive logging of security-relevant events:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct AuditEvent {
+    timestamp: u64,
+    event_type: AuditEventType,
+    subject: Subject,          // Who
+    object: Option&lt;Object&gt;,    // What
+    action: Action,           // Did what
+    result: ActionResult,     // Success/Failure
+    context: SecurityContext, // MAC context
+}
+
+// Real-time event processing
+audit_daemon.process_event(AuditEvent {
+    event_type: AuditEventType::FileAccess,
+    subject: current_process(),
+    object: Some(file_object),
+    action: Action::Read,
+    result: ActionResult::Success,
+    context: current_context(),
+});
+<span class="boring">}</span></code></pre></pre>
+<h3 id="intrusion-detection-system"><a class="header" href="#intrusion-detection-system">Intrusion Detection System</a></h3>
+<p>Multi-layer threat detection:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct IntrusionDetection {
+    network_ids: NetworkIDS,     // Network-based
+    host_ids: HostIDS,          // Host-based
+    correlation: CorrelationEngine,
+    threat_intel: ThreatIntelligence,
+}
+
+// Behavioral anomaly detection
+if let Some(anomaly) = ids.detect_anomaly(event) {
+    match anomaly.severity {
+        Severity::Critical =&gt; immediate_response(anomaly),
+        Severity::High =&gt; alert_security_team(anomaly),
+        Severity::Medium =&gt; log_for_analysis(anomaly),
+        Severity::Low =&gt; update_statistics(anomaly),
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="security-analytics"><a class="header" href="#security-analytics">Security Analytics</a></h3>
+<p>Machine learning for threat detection:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct SecurityAnalytics {
+    /// Anomaly detection model
+    anomaly_model: IsolationForest,
+    
+    /// Pattern recognition
+    pattern_matcher: PatternEngine,
+    
+    /// Baseline behavior
+    baseline: BehaviorProfile,
+}
+
+// Detect unusual behavior
+let score = analytics.anomaly_score(&amp;event);
+if score &gt; THRESHOLD {
+    trigger_investigation(event);
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="application-sandboxing"><a class="header" href="#application-sandboxing">Application Sandboxing</a></h2>
+<h3 id="container-security"><a class="header" href="#container-security">Container Security</a></h3>
+<p>Secure container runtime with defense-in-depth:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct SecureContainer {
+    // Namespace isolation
+    namespaces: Namespaces {
+        pid: Isolated,
+        net: Isolated,
+        mnt: Isolated,
+        user: Isolated,
+    },
+    
+    // Capability restrictions
+    capabilities: CapabilitySet::minimal(),
+    
+    // System call filtering
+    seccomp: SeccompFilter::strict(),
+    
+    // MAC policy
+    security_context: SecurityContext,
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="seccomp-filtering"><a class="header" href="#seccomp-filtering">Seccomp Filtering</a></h3>
+<p>Fine-grained system call control:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let filter = SeccompFilter::new(SeccompAction::Kill);
+
+// Allow only essential syscalls
+for syscall in MINIMAL_SYSCALLS {
+    filter.add_rule(SeccompAction::Allow, syscall)?;
+}
+
+// Apply filter to process
+filter.apply()?;
+<span class="boring">}</span></code></pre></pre>
+<h3 id="resource-isolation"><a class="header" href="#resource-isolation">Resource Isolation</a></h3>
+<p>cgroups for resource limits:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct ResourceLimits {
+    cpu: CpuLimit { quota: 50_000, period: 100_000 },
+    memory: MemoryLimit { max: 512 * MB, swap: 0 },
+    io: IoLimit { read_bps: 10 * MB, write_bps: 10 * MB },
+    pids: PidLimit { max: 100 },
+}
+
+cgroups.apply_limits(container_id, limits)?;
+<span class="boring">}</span></code></pre></pre>
+<h2 id="hardware-security-features"><a class="header" href="#hardware-security-features">Hardware Security Features</a></h2>
+<h3 id="trusted-platform-module-tpm-20"><a class="header" href="#trusted-platform-module-tpm-20">Trusted Platform Module (TPM) 2.0</a></h3>
+<p>Full TPM integration for:</p>
+<ul>
+<li>Secure key storage</li>
+<li>Platform attestation</li>
+<li>Sealed secrets</li>
+<li>Measured boot</li>
+</ul>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Seal secret to current platform state
+let sealed = tpm.seal(
+    secret_data,
+    PcrPolicy {
+        pcrs: vec![0, 1, 4, 7],  // Platform config
+        auth: auth_value,
+    }
+)?;
+
+// Unseal only if platform state matches
+let unsealed = tpm.unseal(sealed)?;
+<span class="boring">}</span></code></pre></pre>
+<h3 id="intel-tdx-support"><a class="header" href="#intel-tdx-support">Intel TDX Support</a></h3>
+<p>Confidential computing with hardware isolation:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Create trusted domain
+let td = TrustedDomain::create(TdConfig {
+    memory: 4 * GB,
+    vcpus: 4,
+    attestation: true,
+})?;
+
+// Generate attestation report
+let report = td.attestation_report(user_data)?;
+
+// Verify remotely
+let verification = verify_tdx_quote(report)?;
+<span class="boring">}</span></code></pre></pre>
+<h3 id="arm-trustzone"><a class="header" href="#arm-trustzone">ARM TrustZone</a></h3>
+<p>Secure world integration:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub trait TrustZoneService {
+    /// Execute in secure world
+    fn secure_call(&amp;self, cmd: SecureCommand) -&gt; Result&lt;SecureResponse, Error&gt;;
+    
+    /// Store in secure storage
+    fn secure_store(&amp;self, key: &amp;str, data: &amp;[u8]) -&gt; Result&lt;(), Error&gt;;
+    
+    /// Secure cryptographic operation
+    fn secure_crypto(&amp;self, op: CryptoOp) -&gt; Result&lt;Vec&lt;u8&gt;, Error&gt;;
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="implementation-timeline"><a class="header" href="#implementation-timeline">Implementation Timeline</a></h2>
+<h3 id="month-16-17-mac-system"><a class="header" href="#month-16-17-mac-system">Month 16-17: MAC System</a></h3>
+<ul>
+<li>Security server core</li>
+<li>Policy compiler</li>
+<li>Kernel enforcement</li>
+<li>Policy tools</li>
+</ul>
+<h3 id="month-18-secure-boot"><a class="header" href="#month-18-secure-boot">Month 18: Secure Boot</a></h3>
+<ul>
+<li>UEFI integration</li>
+<li>Measurement chain</li>
+<li>Verified boot</li>
+<li>Rollback protection</li>
+</ul>
+<h3 id="month-19-cryptography"><a class="header" href="#month-19-cryptography">Month 19: Cryptography</a></h3>
+<ul>
+<li>Key management</li>
+<li>Hardware crypto</li>
+<li>Post-quantum algorithms</li>
+<li>Certificate management</li>
+</ul>
+<h3 id="month-20-monitoring"><a class="header" href="#month-20-monitoring">Month 20: Monitoring</a></h3>
+<ul>
+<li>Audit framework</li>
+<li>IDS/IPS system</li>
+<li>Log analysis</li>
+<li>Threat detection</li>
+</ul>
+<h3 id="month-21-sandboxing"><a class="header" href="#month-21-sandboxing">Month 21: Sandboxing</a></h3>
+<ul>
+<li>Container runtime</li>
+<li>Seccomp filters</li>
+<li>Hardware security</li>
+<li>Integration testing</li>
+</ul>
+<h2 id="performance-targets"><a class="header" href="#performance-targets">Performance Targets</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Component</th><th>Metric</th><th>Target</th></tr></thead><tbody>
+<tr><td>MAC decision</td><td>Cached lookup</td><td>&lt;100ns</td></tr>
+<tr><td>MAC decision</td><td>Full evaluation</td><td>&lt;1μs</td></tr>
+<tr><td>Crypto operation</td><td>AES-256-GCM</td><td>&gt;1GB/s</td></tr>
+<tr><td>Audit overhead</td><td>Normal load</td><td>&lt;5%</td></tr>
+<tr><td>Container startup</td><td>Minimal container</td><td>&lt;50ms</td></tr>
+<tr><td>TPM operation</td><td>Seal/unseal</td><td>&lt;10ms</td></tr>
+</tbody></table>
+</div>
+<h2 id="testing-requirements"><a class="header" href="#testing-requirements">Testing Requirements</a></h2>
+<h3 id="security-testing"><a class="header" href="#security-testing">Security Testing</a></h3>
+<ul>
+<li>Penetration testing by external team</li>
+<li>Fuzzing all security interfaces</li>
+<li>Formal verification of critical components</li>
+<li>Side-channel analysis</li>
+</ul>
+<h3 id="compliance-validation"><a class="header" href="#compliance-validation">Compliance Validation</a></h3>
+<ul>
+<li>Common Criteria evaluation</li>
+<li>FIPS 140-3 certification</li>
+<li>NIST SP 800-53 controls</li>
+<li>CIS benchmarks</li>
+</ul>
+<h3 id="performance-testing"><a class="header" href="#performance-testing">Performance Testing</a></h3>
+<ul>
+<li>Security overhead measurement</li>
+<li>Crypto performance benchmarks</li>
+<li>Audit system stress testing</li>
+<li>Container isolation verification</li>
+</ul>
+<h2 id="success-criteria"><a class="header" href="#success-criteria">Success Criteria</a></h2>
+<ol>
+<li><strong>Complete MAC</strong>: All system operations under mandatory access control</li>
+<li><strong>Verified Boot</strong>: No unsigned code execution</li>
+<li><strong>Hardware Security</strong>: TPM/HSM integration operational</li>
+<li><strong>Audit Coverage</strong>: All security events logged</li>
+<li><strong>Container Isolation</strong>: No breakout vulnerabilities</li>
+<li><strong>Performance</strong>: Security overhead within targets</li>
+</ol>
+<h2 id="next-phase-dependencies"><a class="header" href="#next-phase-dependencies">Next Phase Dependencies</a></h2>
+<p>Phase 4 (Package Management) requires:</p>
+<ul>
+<li>Secure package signing infrastructure</li>
+<li>Policy for package installation</li>
+<li>Audit trail for package operations</li>
+<li>Sandboxed package builds</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../phases/phase2-userspace.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../phases/phase4-packages.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../phases/phase2-userspace.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../phases/phase4-packages.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

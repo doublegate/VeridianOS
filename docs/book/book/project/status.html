@@ -1,0 +1,465 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Project Status</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title"></h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="project-status"><a class="header" href="#project-status">Project Status</a></h1>
+<h2 id="current-status-phase-1-in-progress"><a class="header" href="#current-status-phase-1-in-progress">Current Status: Phase 1 In Progress</a></h2>
+<p><strong>Latest Release</strong>: v0.1.0 - Foundation &amp; Tooling<br />
+<strong>Released</strong>: June 7, 2025<br />
+<strong>Current Phase</strong>: Phase 1 - Microkernel Core (Started June 8, 2025)<br />
+<strong>Phase 1 Progress</strong>: IPC System ~45% complete, Memory Management started</p>
+<p>VeridianOS has successfully completed Phase 0 and is now actively developing the microkernel core. The IPC (Inter-Process Communication) system is the current focus, with synchronous message passing, fast path optimization, and zero-copy transfers already implemented.</p>
+<h2 id="phase-0-achievements"><a class="header" href="#phase-0-achievements">Phase 0 Achievements</a></h2>
+<h3 id="infrastructure-"><a class="header" href="#infrastructure-">Infrastructure ✅</a></h3>
+<ul>
+<li><strong>Build System</strong>: Cargo workspace with custom targets</li>
+<li><strong>CI/CD Pipeline</strong>: GitHub Actions 100% passing</li>
+<li><strong>Documentation</strong>: 25+ comprehensive guides</li>
+<li><strong>Testing Framework</strong>: No-std tests with benchmarks</li>
+<li><strong>Version Control</strong>: Git hooks and PR templates</li>
+</ul>
+<h3 id="technical-milestones-"><a class="header" href="#technical-milestones-">Technical Milestones ✅</a></h3>
+<ul>
+<li><strong>Multi-Architecture Support</strong>: x86_64, AArch64, RISC-V</li>
+<li><strong>Boot Success</strong>: All architectures boot to kernel_main</li>
+<li><strong>Serial I/O</strong>: Working on all platforms</li>
+<li><strong>GDB Debugging</strong>: Full remote debugging support</li>
+<li><strong>Code Quality</strong>: Zero warnings, all checks passing</li>
+</ul>
+<h3 id="release-artifacts-"><a class="header" href="#release-artifacts-">Release Artifacts ✅</a></h3>
+<ul>
+<li>Kernel binaries for all architectures</li>
+<li>Debug symbols for x86_64</li>
+<li>Automated release process</li>
+<li>GitHub Pages documentation</li>
+</ul>
+<h2 id="architecture-support-matrix"><a class="header" href="#architecture-support-matrix">Architecture Support Matrix</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Component</th><th>x86_64</th><th>AArch64</th><th>RISC-V</th></tr></thead><tbody>
+<tr><td>Build</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Boot</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Serial Output</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>GDB Debug</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Tests</td><td>✅</td><td>✅</td><td>✅</td></tr>
+</tbody></table>
+</div>
+<h2 id="development-metrics"><a class="header" href="#development-metrics">Development Metrics</a></h2>
+<h3 id="code-quality"><a class="header" href="#code-quality">Code Quality</a></h3>
+<ul>
+<li><strong>Format Check</strong>: ✅ Passing</li>
+<li><strong>Clippy Lints</strong>: ✅ Zero warnings</li>
+<li><strong>Security Audit</strong>: ✅ No vulnerabilities</li>
+<li><strong>Documentation</strong>: ✅ 100% public API</li>
+</ul>
+<h3 id="build-performance"><a class="header" href="#build-performance">Build Performance</a></h3>
+<ul>
+<li><strong>Clean Build</strong>: ~2 minutes</li>
+<li><strong>Incremental Build</strong>: &lt; 30 seconds</li>
+<li><strong>CI Pipeline</strong>: ~5 minutes total</li>
+<li><strong>Artifact Size</strong>: &lt; 10MB per architecture</li>
+</ul>
+<h2 id="phase-timeline"><a class="header" href="#phase-timeline">Phase Timeline</a></h2>
+<h3 id="phase-0-foundation-complete-"><a class="header" href="#phase-0-foundation-complete-">Phase 0: Foundation (Complete) ✅</a></h3>
+<ul>
+<li>Development environment</li>
+<li>Build infrastructure</li>
+<li>CI/CD pipeline</li>
+<li>Documentation framework</li>
+<li>Testing foundation</li>
+</ul>
+<h3 id="phase-1-microkernel-core-in-progress"><a class="header" href="#phase-1-microkernel-core-in-progress">Phase 1: Microkernel Core (IN PROGRESS)</a></h3>
+<p><strong>Started</strong>: June 8, 2025</p>
+<p><strong>IPC System (~45% Complete)</strong>:</p>
+<ul>
+<li>✅ Synchronous message passing</li>
+<li>✅ Fast path optimization (&lt;5μs)</li>
+<li>✅ Zero-copy transfers</li>
+<li>✅ Capability integration</li>
+<li>✅ System call interface</li>
+<li>✅ Global registry with O(1) lookup</li>
+<li>✅ Asynchronous channels</li>
+<li>✅ Rate limiting for DoS protection</li>
+<li>✅ Performance tracking</li>
+<li>✅ IPC tests and benchmarks restored</li>
+<li>🔲 Full integration with scheduler</li>
+<li>🔲 Integration tests with full system</li>
+</ul>
+<p><strong>Memory Management (~20% Complete)</strong>:</p>
+<ul>
+<li>✅ Hybrid frame allocator (bitmap + buddy system)</li>
+<li>✅ NUMA-aware allocation support</li>
+<li>✅ Performance statistics tracking</li>
+<li>🔲 Virtual memory manager</li>
+<li>🔲 Kernel heap allocator</li>
+</ul>
+<p><strong>Remaining Components</strong>:</p>
+<ul>
+<li>🔲 Process management</li>
+<li>🔲 Full capability system</li>
+<li>🔲 Scheduler implementation</li>
+</ul>
+<h3 id="phase-2-user-space-foundation"><a class="header" href="#phase-2-user-space-foundation">Phase 2: User Space Foundation</a></h3>
+<ul>
+<li>Init system</li>
+<li>Device drivers</li>
+<li>File system</li>
+<li>Network stack</li>
+<li>POSIX compatibility</li>
+</ul>
+<h3 id="phase-3-security-hardening"><a class="header" href="#phase-3-security-hardening">Phase 3: Security Hardening</a></h3>
+<ul>
+<li>Mandatory access control</li>
+<li>Secure boot</li>
+<li>Cryptographic services</li>
+<li>Hardware security</li>
+</ul>
+<h3 id="phase-4-package-ecosystem"><a class="header" href="#phase-4-package-ecosystem">Phase 4: Package Ecosystem</a></h3>
+<ul>
+<li>Package manager</li>
+<li>Ports system</li>
+<li>Binary packages</li>
+<li>Repository infrastructure</li>
+</ul>
+<h3 id="phase-5-performance-optimization"><a class="header" href="#phase-5-performance-optimization">Phase 5: Performance Optimization</a></h3>
+<ul>
+<li>Kernel optimizations</li>
+<li>I/O performance</li>
+<li>Memory performance</li>
+<li>Profiling tools</li>
+</ul>
+<h3 id="phase-6-advanced-features"><a class="header" href="#phase-6-advanced-features">Phase 6: Advanced Features</a></h3>
+<ul>
+<li>GUI support</li>
+<li>Desktop environment</li>
+<li>Virtualization</li>
+<li>Cloud native features</li>
+</ul>
+<h2 id="next-immediate-tasks"><a class="header" href="#next-immediate-tasks">Next Immediate Tasks</a></h2>
+<h3 id="current-sprint-ipc-completion-weeks-1-3"><a class="header" href="#current-sprint-ipc-completion-weeks-1-3">Current Sprint: IPC Completion (Weeks 1-3)</a></h3>
+<ul>
+<li><input disabled="" type="checkbox" checked=""/>
+Synchronous message passing ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Fast path implementation ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Zero-copy transfers ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Asynchronous channels ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Performance tracking ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+IPC tests and benchmarks ✅</li>
+<li><input disabled="" type="checkbox"/>
+Full scheduler integration</li>
+<li><input disabled="" type="checkbox"/>
+System-wide integration tests</li>
+</ul>
+<h3 id="next-sprint-memory-management-weeks-4-6---in-progress"><a class="header" href="#next-sprint-memory-management-weeks-4-6---in-progress">Next Sprint: Memory Management (Weeks 4-6) - IN PROGRESS</a></h3>
+<ul>
+<li><input disabled="" type="checkbox" checked=""/>
+Implement bitmap allocator ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Implement buddy allocator ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Create hybrid allocator ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Add NUMA support ✅</li>
+<li><input disabled="" type="checkbox"/>
+Virtual memory management</li>
+<li><input disabled="" type="checkbox"/>
+Kernel heap allocator</li>
+</ul>
+<h3 id="following-sprint-process-management-weeks-7-9"><a class="header" href="#following-sprint-process-management-weeks-7-9">Following Sprint: Process Management (Weeks 7-9)</a></h3>
+<ul>
+<li><input disabled="" type="checkbox"/>
+Process creation</li>
+<li><input disabled="" type="checkbox"/>
+Thread support</li>
+<li><input disabled="" type="checkbox"/>
+Context switching</li>
+<li><input disabled="" type="checkbox"/>
+Process termination</li>
+</ul>
+<h3 id="final-sprint-integration-weeks-10-12"><a class="header" href="#final-sprint-integration-weeks-10-12">Final Sprint: Integration (Weeks 10-12)</a></h3>
+<ul>
+<li><input disabled="" type="checkbox"/>
+Full capability system</li>
+<li><input disabled="" type="checkbox"/>
+Scheduler integration</li>
+<li><input disabled="" type="checkbox"/>
+System call refinement</li>
+<li><input disabled="" type="checkbox"/>
+Performance optimization</li>
+</ul>
+<h2 id="project-resources"><a class="header" href="#project-resources">Project Resources</a></h2>
+<h3 id="documentation"><a class="header" href="#documentation">Documentation</a></h3>
+<ul>
+<li><a href="../architecture/overview.html">Architecture Overview</a></li>
+<li><a href="../development/organization.html">Development Guide</a></li>
+<li><a href="../api/kernel.html">API Reference</a></li>
+<li><a href="../contributing/how-to.html">Contributing Guide</a></li>
+</ul>
+<h3 id="communication"><a class="header" href="#communication">Communication</a></h3>
+<ul>
+<li><strong>GitHub</strong>: <a href="https://github.com/doublegate/VeridianOS">github.com/doublegate/VeridianOS</a></li>
+<li><strong>Issues</strong>: <a href="https://github.com/doublegate/VeridianOS/issues">GitHub Issues</a></li>
+<li><strong>Discord</strong>: <a href="https://discord.gg/veridian">discord.gg/veridian</a></li>
+<li><strong>Documentation</strong>: <a href="https://doublegate.github.io/VeridianOS">doublegate.github.io/VeridianOS</a></li>
+</ul>
+<h2 id="how-to-get-involved"><a class="header" href="#how-to-get-involved">How to Get Involved</a></h2>
+<p>VeridianOS welcomes contributions! Here's how you can help:</p>
+<ol>
+<li><strong>Code Contributions</strong>: Pick an issue labeled "good first issue"</li>
+<li><strong>Documentation</strong>: Help improve our guides and API docs</li>
+<li><strong>Testing</strong>: Write tests and improve coverage</li>
+<li><strong>Bug Reports</strong>: Report issues you encounter</li>
+<li><strong>Feature Ideas</strong>: Suggest improvements</li>
+</ol>
+<p>See our <a href="../contributing/how-to.html">Contributing Guide</a> for details.</p>
+<h2 id="recent-updates"><a class="header" href="#recent-updates">Recent Updates</a></h2>
+<h3 id="june-9-2025---phase-1-progress"><a class="header" href="#june-9-2025---phase-1-progress">June 9, 2025 - Phase 1 Progress</a></h3>
+<ul>
+<li>IPC implementation ~45% complete</li>
+<li>Added global registry with O(1) lookup</li>
+<li>Implemented asynchronous channels</li>
+<li>Added rate limiting and performance tracking</li>
+<li>Restored all IPC tests and benchmarks</li>
+<li>Started memory management - frame allocator in progress</li>
+</ul>
+<h3 id="june-8-2025---phase-1-started"><a class="header" href="#june-8-2025---phase-1-started">June 8, 2025 - Phase 1 Started</a></h3>
+<ul>
+<li>Began IPC implementation</li>
+<li>Completed synchronous message passing</li>
+<li>Implemented fast path with &lt;5μs latency</li>
+<li>Added zero-copy transfer support</li>
+<li>Integrated capability system for IPC</li>
+</ul>
+<h3 id="june-7-2025---v010-release"><a class="header" href="#june-7-2025---v010-release">June 7, 2025 - v0.1.0 Release</a></h3>
+<ul>
+<li>Completed Phase 0 with 100% of goals achieved</li>
+<li>Fixed final CI/CD issues across all architectures</li>
+<li>Released first version with build artifacts</li>
+<li>Deployed documentation to GitHub Pages</li>
+</ul>
+<h3 id="june-6-2025"><a class="header" href="#june-6-2025">June 6, 2025</a></h3>
+<ul>
+<li>Fixed AArch64 boot sequence</li>
+<li>Implemented GDB debugging infrastructure</li>
+<li>Completed test framework</li>
+<li>Set up documentation pipeline</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../phases/phase6-advanced.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../project/roadmap.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../phases/phase6-advanced.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../project/roadmap.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

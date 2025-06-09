@@ -1,7 +1,7 @@
 # VeridianOS IPC Design Document
 
-**Version**: 1.2  
-**Date**: 2025-06-09  
+**Version**: 1.3  
+**Date**: 2025-01-09  
 **Status**: Implementation In Progress (~45% complete)
 
 ## Executive Summary

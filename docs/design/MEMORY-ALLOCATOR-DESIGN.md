@@ -1,8 +1,8 @@
 # VeridianOS Memory Allocator Design Document
 
-**Version**: 1.0  
-**Date**: 2025-06-07  
-**Status**: Draft for Phase 1 Implementation
+**Version**: 1.1  
+**Date**: 2025-01-09  
+**Status**: Implementation In Progress (~20% complete)
 
 ## Executive Summary
 

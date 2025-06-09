@@ -1,8 +1,9 @@
 # Testing TODO
 
 **Purpose**: Track all testing activities across the project lifecycle  
-**Last Updated**: 2025-06-07  
-**Phase 0 Status**: Testing infrastructure complete! Ready for Phase 1 tests.
+**Last Updated**: 2025-01-09  
+**Phase 0 Status**: Testing infrastructure complete! Ready for Phase 1 tests.  
+**Phase 1 Status**: IPC tests restored, memory allocator tests in progress.
 
 ## 🧪 Testing Strategy Overview
 

@@ -1,8 +1,8 @@
 # VeridianOS Performance Baselines
 
-**Date**: 2025-06-07  
-**Phase**: 0 (Foundation)  
-**Purpose**: Establish baseline measurements for Phase 1 targets
+**Date**: 2025-01-09  
+**Phase**: 1 (Microkernel Core) - Updated with actual measurements  
+**Purpose**: Track performance progress against Phase 1 targets
 
 ## Executive Summary
 

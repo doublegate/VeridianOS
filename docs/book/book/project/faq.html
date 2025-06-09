@@ -1,0 +1,419 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>FAQ</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title"></h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="frequently-asked-questions"><a class="header" href="#frequently-asked-questions">Frequently Asked Questions</a></h1>
+<h2 id="general-questions"><a class="header" href="#general-questions">General Questions</a></h2>
+<h3 id="what-is-veridianos"><a class="header" href="#what-is-veridianos">What is VeridianOS?</a></h3>
+<p>VeridianOS is a next-generation microkernel operating system written entirely in Rust. It emphasizes security, modularity, and performance through a capability-based security model and modern OS design principles.</p>
+<h3 id="why-another-operating-system"><a class="header" href="#why-another-operating-system">Why another operating system?</a></h3>
+<p>VeridianOS addresses several limitations in existing systems:</p>
+<ul>
+<li><strong>Security</strong>: Capability-based security from the ground up</li>
+<li><strong>Safety</strong>: Rust's memory safety eliminates entire classes of bugs</li>
+<li><strong>Modularity</strong>: True microkernel design with isolated services</li>
+<li><strong>Performance</strong>: Modern algorithms and zero-copy IPC</li>
+<li><strong>Simplicity</strong>: Clean codebase without decades of legacy</li>
+</ul>
+<h3 id="what-makes-veridianos-different"><a class="header" href="#what-makes-veridianos-different">What makes VeridianOS different?</a></h3>
+<p>Key differentiators:</p>
+<ol>
+<li>Written entirely in Rust (no C/C++ in kernel)</li>
+<li>Capability-based security model throughout</li>
+<li>Designed for modern hardware (64-bit only)</li>
+<li>Native support for virtualization and containers</li>
+<li>Post-quantum cryptography ready</li>
+<li>Formal verification of critical components</li>
+</ol>
+<h3 id="whats-the-project-status"><a class="header" href="#whats-the-project-status">What's the project status?</a></h3>
+<p>VeridianOS has completed Phase 0 (Foundation) as of v0.1.0 (June 2025) and is now starting Phase 1 (Microkernel Core). All foundation infrastructure is in place and development is proceeding to kernel implementation.</p>
+<h3 id="when-will-it-be-ready-for-daily-use"><a class="header" href="#when-will-it-be-ready-for-daily-use">When will it be ready for daily use?</a></h3>
+<p>Our timeline targets:</p>
+<ul>
+<li><strong>2025</strong>: Core kernel functionality (Phase 1)</li>
+<li><strong>2026</strong>: Basic usability with drivers and userspace (Phase 2-3)</li>
+<li><strong>2027</strong>: Production readiness for specific use cases (Phase 4-5)</li>
+<li><strong>2028</strong>: Desktop and general use (Phase 6)</li>
+</ul>
+<h2 id="technical-questions"><a class="header" href="#technical-questions">Technical Questions</a></h2>
+<h3 id="what-architectures-are-supported"><a class="header" href="#what-architectures-are-supported">What architectures are supported?</a></h3>
+<p>Current support:</p>
+<ul>
+<li><strong>x86_64</strong>: Full support, primary platform</li>
+<li><strong>AArch64</strong>: Full support, including Apple Silicon</li>
+<li><strong>RISC-V (RV64GC)</strong>: Experimental support</li>
+</ul>
+<p>All architectures require:</p>
+<ul>
+<li>64-bit CPUs with MMU</li>
+<li>4KB page size support</li>
+<li>Atomic operations</li>
+</ul>
+<h3 id="whats-a-microkernel"><a class="header" href="#whats-a-microkernel">What's a microkernel?</a></h3>
+<p>A microkernel runs minimal code in privileged mode:</p>
+<ul>
+<li>Memory management</li>
+<li>CPU scheduling</li>
+<li>Inter-process communication (IPC)</li>
+<li>Capability management</li>
+</ul>
+<p>Everything else runs in user space:</p>
+<ul>
+<li>Device drivers</li>
+<li>File systems</li>
+<li>Network stack</li>
+<li>System services</li>
+</ul>
+<p>Benefits include better security, reliability, and modularity.</p>
+<h3 id="what-are-capabilities"><a class="header" href="#what-are-capabilities">What are capabilities?</a></h3>
+<p>Capabilities are unforgeable tokens that grant specific permissions:</p>
+<ul>
+<li><strong>Not "who you are"</strong>: No user IDs or access control lists</li>
+<li><strong>But "what you can do"</strong>: Hold a capability = have permission</li>
+<li><strong>Composable</strong>: Combine capabilities for complex permissions</li>
+<li><strong>Revocable</strong>: Invalidate capabilities to revoke access</li>
+</ul>
+<p>Example:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// A capability to read from a file
+let read_cap: Capability&lt;FileRead&gt; = file.get_read_capability()?;
+
+// Use the capability
+let data = read_cap.read(buffer)?;
+
+// Delegate to another process
+other_process.send_capability(read_cap)?;
+<span class="boring">}</span></code></pre></pre>
+<h3 id="why-rust"><a class="header" href="#why-rust">Why Rust?</a></h3>
+<p>Rust provides unique advantages for OS development:</p>
+<ul>
+<li><strong>Memory Safety</strong>: No buffer overflows, use-after-free, etc.</li>
+<li><strong>Zero-Cost Abstractions</strong>: High-level code with no overhead</li>
+<li><strong>No Garbage Collection</strong>: Predictable performance</li>
+<li><strong>Excellent Tooling</strong>: Cargo, rustfmt, clippy</li>
+<li><strong>Strong Type System</strong>: Catch bugs at compile time</li>
+<li><strong>Active Community</strong>: Growing ecosystem</li>
+</ul>
+<h3 id="will-it-run-linux-applications"><a class="header" href="#will-it-run-linux-applications">Will it run Linux applications?</a></h3>
+<p>Yes, through multiple compatibility layers:</p>
+<ol>
+<li><strong>POSIX Layer</strong>: For portable Unix applications</li>
+<li><strong>Linux ABI</strong>: Binary compatibility for Linux executables</li>
+<li><strong>Containers</strong>: Run full Linux environments</li>
+<li><strong>Wine-like Layer</strong>: For complex applications</li>
+</ol>
+<p>Native VeridianOS applications will have better:</p>
+<ul>
+<li>Performance (direct capability use)</li>
+<li>Security (fine-grained permissions)</li>
+<li>Integration (native IPC)</li>
+</ul>
+<h3 id="how-fast-is-the-ipc"><a class="header" href="#how-fast-is-the-ipc">How fast is the IPC?</a></h3>
+<p>Performance targets:</p>
+<ul>
+<li><strong>Small messages (≤64 bytes)</strong>: &lt; 1μs latency</li>
+<li><strong>Large transfers</strong>: Zero-copy via shared memory</li>
+<li><strong>Throughput</strong>: &gt; 1M messages/second</li>
+<li><strong>Scalability</strong>: Lock-free for multiple cores</li>
+</ul>
+<h3 id="what-about-real-time-support"><a class="header" href="#what-about-real-time-support">What about real-time support?</a></h3>
+<p>VeridianOS will support soft real-time with:</p>
+<ul>
+<li>Priority-based preemptive scheduling</li>
+<li>Bounded interrupt latency</li>
+<li>Reserved CPU cores</li>
+<li>Deadline scheduling (future)</li>
+</ul>
+<p>Hard real-time may be added in later phases.</p>
+<h2 id="development-questions"><a class="header" href="#development-questions">Development Questions</a></h2>
+<h3 id="how-can-i-contribute"><a class="header" href="#how-can-i-contribute">How can I contribute?</a></h3>
+<p>Many ways to help:</p>
+<ol>
+<li><strong>Code</strong>: Pick issues labeled "good first issue"</li>
+<li><strong>Documentation</strong>: Improve guides and examples</li>
+<li><strong>Testing</strong>: Write tests, report bugs</li>
+<li><strong>Ideas</strong>: Suggest features and improvements</li>
+<li><strong>Advocacy</strong>: Spread the word</li>
+</ol>
+<p>See our <a href="../contributing/how-to.html">Contributing Guide</a>.</p>
+<h3 id="whats-the-development-process"><a class="header" href="#whats-the-development-process">What's the development process?</a></h3>
+<ol>
+<li>Discussion in GitHub issues</li>
+<li>Design documents for major features</li>
+<li>Implementation with tests</li>
+<li>Code review by maintainers</li>
+<li>CI/CD validation</li>
+<li>Merge to main branch</li>
+</ol>
+<h3 id="what-languages-can-i-use"><a class="header" href="#what-languages-can-i-use">What languages can I use?</a></h3>
+<ul>
+<li><strong>Kernel</strong>: Rust only (with minimal assembly)</li>
+<li><strong>Drivers</strong>: Rust strongly preferred</li>
+<li><strong>Applications</strong>: Any language with VeridianOS bindings</li>
+<li><strong>Tools</strong>: Rust, Python, or shell scripts</li>
+</ul>
+<h3 id="how-do-i-set-up-the-development-environment"><a class="header" href="#how-do-i-set-up-the-development-environment">How do I set up the development environment?</a></h3>
+<p>See our <a href="../getting-started/dev-setup.html">Development Setup Guide</a>. Basic steps:</p>
+<ol>
+<li>Install Rust nightly</li>
+<li>Install QEMU</li>
+<li>Clone repository</li>
+<li>Run <code>just build</code></li>
+</ol>
+<h3 id="where-can-i-get-help"><a class="header" href="#where-can-i-get-help">Where can I get help?</a></h3>
+<ul>
+<li><strong>Documentation</strong>: This book and GitHub docs</li>
+<li><strong>GitHub Issues</strong>: For bugs and features</li>
+<li><strong>Discord</strong>: <a href="https://discord.gg/veridian">discord.gg/veridian</a></li>
+<li><strong>Mailing List</strong>: dev@veridian-os.org</li>
+</ul>
+<h2 id="philosophy-questions"><a class="header" href="#philosophy-questions">Philosophy Questions</a></h2>
+<h3 id="what-are-the-design-principles"><a class="header" href="#what-are-the-design-principles">What are the design principles?</a></h3>
+<ol>
+<li><strong>Security First</strong>: Every decision considers security</li>
+<li><strong>Simplicity</strong>: Prefer simple, correct solutions</li>
+<li><strong>Performance</strong>: But not at the cost of security</li>
+<li><strong>Modularity</strong>: Components should be independent</li>
+<li><strong>Transparency</strong>: Open development and documentation</li>
+</ol>
+<h3 id="why-capability-based-security"><a class="header" href="#why-capability-based-security">Why capability-based security?</a></h3>
+<p>Capabilities solve many security problems:</p>
+<ul>
+<li><strong>Ambient Authority</strong>: No more confused deputy</li>
+<li><strong>Least Privilege</strong>: Natural, fine-grained permissions</li>
+<li><strong>Delegation</strong>: Easy, safe permission sharing</li>
+<li><strong>Revocation</strong>: Clean permission removal</li>
+</ul>
+<h3 id="will-veridianos-be-free-software"><a class="header" href="#will-veridianos-be-free-software">Will VeridianOS be free software?</a></h3>
+<p>Yes! VeridianOS is dual-licensed under:</p>
+<ul>
+<li>MIT License</li>
+<li>Apache License 2.0</li>
+</ul>
+<p>This allows maximum compatibility with other projects.</p>
+<h3 id="whats-the-long-term-vision"><a class="header" href="#whats-the-long-term-vision">What's the long-term vision?</a></h3>
+<p>VeridianOS aims to be:</p>
+<ul>
+<li>A secure foundation for critical systems</li>
+<li>A research platform for OS innovation</li>
+<li>A practical alternative to existing systems</li>
+<li>A teaching tool for OS concepts</li>
+</ul>
+<p>We believe operating systems can be both secure and usable!</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../project/roadmap.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../project/troubleshooting.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../project/roadmap.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../project/troubleshooting.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

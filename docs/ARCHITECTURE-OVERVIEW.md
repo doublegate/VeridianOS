@@ -1,5 +1,7 @@
 # VeridianOS Architecture Overview
 
+**Last Updated**: January 9, 2025
+
 ## System Architecture
 
 VeridianOS is designed as a modern microkernel operating system with a focus on security, modularity, and performance. This document provides a comprehensive overview of the system architecture.
