@@ -36,7 +36,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 #[bench]
 fn bench_small_message_creation(b: &mut Bencher) {
     b.iter(|| {
-        let msg = Message::small(b"test");
+        let msg = Message::small(0, 1);
         core::hint::black_box(msg);
     });
 }
@@ -44,8 +44,9 @@ fn bench_small_message_creation(b: &mut Bencher) {
 #[bench]
 fn bench_large_message_creation(b: &mut Bencher) {
     let data = [0u8; 1024];
+    let region = veridian_kernel::ipc::message::MemoryRegion::new(0, data.len() as u64);
     b.iter(|| {
-        let msg = Message::large(&data);
+        let msg = Message::large(0, 1, region);
         core::hint::black_box(msg);
     });
 }
@@ -79,7 +80,7 @@ fn bench_channel_creation(b: &mut Bencher) {
 fn bench_async_channel_send_receive(b: &mut Bencher) {
     ipc::init();
     let channel = AsyncChannel::new(1, 1000);
-    let msg = Message::small(b"bench");
+    let msg = Message::small(0, 1);
 
     b.iter(|| {
         channel.send(msg.clone()).expect("Send failed");
@@ -93,18 +94,18 @@ fn bench_async_channel_throughput(b: &mut Bencher) {
     ipc::init();
     let channel = AsyncChannel::new(1, 10000);
     let messages: Vec<_> = (0..1000)
-        .map(|i| Message::small(&i.to_ne_bytes()))
+        .map(|i| Message::small(0, i as u32))
         .collect();
 
     b.iter(|| {
         // Send all messages
         for msg in &messages {
-            channel.send(msg.clone()).expect("Send failed");
+            channel.send_async(msg.clone()).expect("Send failed");
         }
 
         // Receive all messages
         let mut count = 0;
-        while let Ok(Some(_)) = channel.receive() {
+        while let Ok(_) = channel.receive_async() {
             count += 1;
             if count >= messages.len() {
                 break;
@@ -141,17 +142,17 @@ fn bench_capability_creation(b: &mut Bencher) {
 #[bench]
 fn bench_fast_path_message_creation(b: &mut Bencher) {
     // Benchmark small message creation which would use fast path
-    let data = [1u8, 2, 3, 4, 5, 6, 7, 8];
+    let _data = [1u8, 2, 3, 4, 5, 6, 7, 8];
 
     b.iter(|| {
-        let msg = Message::small(&data);
+        let msg = Message::small(0, 1);
         core::hint::black_box(msg);
     });
 }
 
 #[bench]
 fn bench_message_clone(b: &mut Bencher) {
-    let small_msg = Message::small(b"test");
+    let small_msg = Message::small(0, 1);
 
     b.iter(|| {
         let cloned = small_msg.clone();
@@ -206,7 +207,8 @@ fn bench_zero_copy_vs_regular_copy(b: &mut Bencher) {
     let mut copy_results = Vec::new();
     for _ in 0..10 {
         let start = read_timestamp();
-        let msg = Message::large(&data);
+        let region = veridian_kernel::ipc::message::MemoryRegion::new(0, data.len() as u64);
+        let msg = Message::large(0, 1, region);
         let _cloned = msg.clone();
         let elapsed = read_timestamp() - start;
         copy_results.push(elapsed);
@@ -247,7 +249,7 @@ fn bench_ipc_latency_targets(b: &mut Bencher) {
     serial_println!("\nMeasuring IPC operation latencies...");
 
     // Small message latency
-    let small_msg = Message::small(b"test");
+    let small_msg = Message::small(0, 1);
     let (_, small_cycles) = measure_ipc_operation(|| {
         let _ = small_msg.clone();
     });
@@ -256,7 +258,8 @@ fn bench_ipc_latency_targets(b: &mut Bencher) {
 
     // Large message latency
     let large_data = [0u8; 1024];
-    let large_msg = Message::large(&large_data);
+    let region = veridian_kernel::ipc::message::MemoryRegion::new(0, large_data.len() as u64);
+    let large_msg = Message::large(0, 1, region);
     let (_, large_cycles) = measure_ipc_operation(|| {
         let _ = large_msg.clone();
     });

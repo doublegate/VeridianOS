@@ -334,9 +334,9 @@ fn cleanup_process(process: &Process) {
     #[cfg(feature = "alloc")]
     {
         let endpoints = process.ipc_endpoints.lock();
-        for (endpoint_id, _) in endpoints.iter() {
+        for (_endpoint_id, _) in endpoints.iter() {
             // TODO: Close endpoint
-            println!("[PROCESS] Closing IPC endpoint {}", endpoint_id);
+            println!("[PROCESS] Closing IPC endpoint {}", _endpoint_id);
         }
     }
 

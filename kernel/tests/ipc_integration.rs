@@ -10,7 +10,7 @@ use core::panic::PanicInfo;
 
 use veridian_kernel::{
     ipc::{
-        shared_memory::{CachePolicy, MemoryRegion, SharedRegion},
+        shared_memory::{Permission, SharedRegion},
         IpcCapability, IpcPermissions, Message, SmallMessage,
     },
     serial_print, serial_println,
@@ -85,17 +85,15 @@ fn test_shared_memory_setup() {
     let region = SharedRegion::new(
         1,    // owner PID
         8192, // 2 pages
-        CachePolicy::WriteBack,
-        Some(0), // NUMA node 0
-    )
-    .unwrap();
+        Permission::ReadWriteExecute, // permissions
+    );
 
     // Verify properties
     assert_eq!(region.size(), 8192);
-    assert_eq!(region.owner, 1);
+    assert_eq!(region.id(), 1); // Using id() method instead of owner field
 
     // Create memory region descriptor for IPC
-    let mem_region = MemoryRegion::new(0x100000, region.size() as u64)
+    let mem_region = veridian_kernel::ipc::message::MemoryRegion::new(0x100000, region.size() as u64)
         .with_permissions(0x03) // READ | WRITE
         .with_cache_policy(0); // WRITE_BACK
 

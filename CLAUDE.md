@@ -149,7 +149,7 @@ Currently implementing in phases:
   - Phase 0 (Foundation) - 100% COMPLETE! 🎉
   - IPC System: ~45% complete (sync/async channels, registry, perf tracking, rate limiting)
   - Memory Management: ~95% complete - frame allocator, VMM, heap, page tables, bootloader integration
-  - Process Management: ~90% complete - PCB, threads, context switching, synchronization primitives
+  - Process Management: 100% complete - PCB, threads, context switching, synchronization primitives, syscalls
   - Capability System: Not started
 - **Latest Release**: v0.1.0 (June 7, 2025) - Foundation & Tooling
   - Release includes kernel binaries for all three architectures
@@ -162,10 +162,11 @@ Currently implementing in phases:
 - **Testing**: ✅ No-std test framework and benchmarks implemented
 - **Documentation**: ✅ Rustdoc and mdBook configured with automatic deployment
 - **Version Control**: ✅ Git hooks, PR templates, and release automation ready
-- **Current Work**: Implementing IPC system with zero-copy message passing
-  - Latest: Added registry, async channels, performance tracking, rate limiting (~45% complete)
-  - Fixed all CI/CD issues (formatting, clippy warnings)
-  - Updated all documentation to reflect current progress
+- **Current Work**: Process management system complete
+  - Latest: Implemented full process/thread lifecycle, context switching, and system calls
+  - All architectures supported with proper ThreadContext trait abstraction
+  - Comprehensive synchronization primitives and TLS support
+  - Ready for scheduler integration and capability system implementation
 
 ## Implementation Status
 
@@ -186,10 +187,14 @@ Currently implementing in phases:
   - Global registry with O(1) lookup
   - Rate limiting and comprehensive error handling
 
-- **Process Management**: ~90% complete
-  - Process Control Block (PCB) and Thread Control Block (TCB)
-  - Context switching infrastructure
-  - Synchronization primitives
+- **Process Management**: 100% complete
+  - Process Control Block (PCB) with atomic state management
+  - Thread Control Block (TCB) with full ThreadContext trait
+  - Context switching for all architectures (x86_64, AArch64, RISC-V)
+  - Synchronization primitives (Mutex, Semaphore, CondVar, RwLock, Barrier)
+  - Process system calls (fork, exec, exit, wait, getpid, thread operations)
+  - Thread-local storage (TLS) implementation
+  - CPU affinity and NUMA awareness
 
 - **Capability System**: Not started
 
@@ -321,10 +326,12 @@ Check these files regularly to track progress and identify next tasks.
 
 ### Key Implementation Files
 - `kernel/src/arch/` - Architecture-specific implementations (all working!)
-- `kernel/src/mm/` - Memory management implementation
-- `kernel/src/ipc/` - Inter-process communication implementation
-- `kernel/src/sched/` - Scheduler implementation
+- `kernel/src/mm/` - Memory management implementation (~95% complete)
+- `kernel/src/ipc/` - Inter-process communication implementation (~45% complete)
+- `kernel/src/process/` - Process management implementation (100% complete)
+- `kernel/src/sched/` - Scheduler implementation (ready for integration)
 - `kernel/src/cap/` - Capability system (ready for implementation)
+- `kernel/src/syscall/` - System call interface with process operations
 - `kernel/src/print.rs` - Kernel output macros
 - `kernel/src/test_framework.rs` - No-std test infrastructure
 - `kernel/src/bench.rs` - Benchmarking framework

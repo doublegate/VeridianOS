@@ -9,8 +9,8 @@
 extern crate alloc;
 
 use veridian_kernel::{
-    mm::{self, FrameNumber, MemoryRegion, FRAME_SIZE},
-    serial_print, serial_println,
+    mm::{self, MemoryRegion, FRAME_SIZE},
+    serial_println,
 };
 
 #[no_mangle]
@@ -54,7 +54,7 @@ fn test_small_allocation() {
     mm::init_default();
 
     // Test single frame allocation
-    let frame = mm::FRAME_ALLOCATOR
+    let _frame = mm::FRAME_ALLOCATOR
         .lock()
         .allocate_frames(1, None)
         .expect("Failed to allocate single frame");

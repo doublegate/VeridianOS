@@ -120,7 +120,7 @@ fn test_capability_derivation() {
 
 #[test_case]
 fn test_message_enum() {
-    use veridian_kernel::ipc::shared_memory::MemoryRegion;
+    // Removed unused import
 
     serial_print!("test_message_enum... ");
 
@@ -130,7 +130,7 @@ fn test_message_enum() {
     assert_eq!(small.opcode(), 10);
 
     // Test large message
-    let region = MemoryRegion::new(0x200000, 8192);
+    let region = veridian_kernel::ipc::message::MemoryRegion::new(0x200000, 8192);
     let large = Message::large(0x2222, 20, region);
     assert_eq!(large.capability(), 0x2222);
     assert_eq!(large.opcode(), 20);

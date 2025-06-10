@@ -204,10 +204,10 @@ impl CpuTopology {
             core::arch::asm!("mrs {}, MPIDR_EL1", out(reg) mpidr);
 
             // Extract affinity levels
-            let aff0 = (mpidr & 0xFF) as u8; // Thread
-            let aff1 = ((mpidr >> 8) & 0xFF) as u8; // Core
-            let aff2 = ((mpidr >> 16) & 0xFF) as u8; // Cluster
-            let aff3 = ((mpidr >> 32) & 0xFF) as u8; // Socket
+            let _aff0 = (mpidr & 0xFF) as u8; // Thread
+            let _aff1 = ((mpidr >> 8) & 0xFF) as u8; // Core
+            let _aff2 = ((mpidr >> 16) & 0xFF) as u8; // Cluster
+            let _aff3 = ((mpidr >> 32) & 0xFF) as u8; // Socket
 
             // This is simplified - real detection would probe all CPUs
             self.threads_per_core = 1; // SMT not common on ARM

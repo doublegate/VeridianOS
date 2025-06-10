@@ -66,7 +66,9 @@ pub fn init() {
     {
         use alloc::string::String;
         match lifecycle::create_process(String::from("init"), 0) {
-            Ok(pid) => println!("[PROCESS] Created init process with PID {}", pid.0),
+            Ok(_pid) => {
+                println!("[PROCESS] Created init process with PID {}", _pid.0);
+            }
             Err(e) => panic!("[PROCESS] Failed to create init process: {}", e),
         }
     }
@@ -111,10 +113,10 @@ pub fn yield_thread() {
 
 /// Exit current thread
 pub fn exit_thread(exit_code: i32) {
-    if let Some(thread) = current_thread() {
+    if let Some(_thread) = current_thread() {
         println!(
             "[PROCESS] Thread {} exiting with code {}",
-            thread.tid.0, exit_code
+            _thread.tid.0, exit_code
         );
 
         // Mark thread as exited
@@ -134,9 +136,9 @@ pub fn block_thread() {
 }
 
 /// Wake up a thread
-pub fn wake_thread(tid: ThreadId) {
+pub fn wake_thread(_tid: ThreadId) {
     // TODO: Find thread and wake it up
-    println!("[PROCESS] Waking thread {}", tid.0);
+    println!("[PROCESS] Waking thread {}", _tid.0);
 }
 
 /// Create a new thread in the current process
