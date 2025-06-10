@@ -148,6 +148,9 @@ Currently implementing in phases:
 - **Documentation**: ✅ Rustdoc and mdBook configured with automatic deployment
 - **Version Control**: ✅ Git hooks, PR templates, and release automation ready
 - **Current Work**: Implementing IPC system with zero-copy message passing
+  - Latest: Added registry, async channels, performance tracking, rate limiting (~45% complete)
+  - Fixed all CI/CD issues (formatting, clippy warnings)
+  - Updated all documentation to reflect current progress
 
 ## Critical Implementation Notes
 
@@ -155,6 +158,8 @@ Currently implementing in phases:
 - Hybrid frame allocator: Buddy system for large allocations, bitmap for single frames
 - NUMA-aware from the start
 - Support for CXL memory and hardware memory tagging (Intel LAM, ARM MTE)
+- Reserved memory tracking: BIOS regions, kernel code/data, boot-time allocations
+- Physical memory zones: DMA (0-16MB), Normal, High (32-bit only)
 
 ### IPC Implementation
 - Synchronous message passing for small messages (✅ Implemented)
@@ -271,7 +276,7 @@ Check these files regularly to track progress and identify next tasks.
 
 ### Development Workflow in Distrobox
 - Working directory: `/var/home/parobek/Code/VeridianOS`
-- User memory location: `.claude/CLAUDE.md` (project-local)
+- User memory location: `/home/parobek/.claude/CLAUDE.md` (global user memory)
 - Install git and gh in Ubuntu containers
 - Use project-local paths for all file operations
 

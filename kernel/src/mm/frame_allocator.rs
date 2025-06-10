@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+use core::ops::Range;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use spin::Mutex;
@@ -14,6 +15,9 @@ extern crate alloc;
 
 #[cfg(feature = "alloc")]
 use alloc::boxed::Box;
+
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
 
 /// Size of a physical frame (4KB)
 pub const FRAME_SIZE: usize = 4096;
@@ -90,6 +94,19 @@ pub enum FrameAllocatorError {
     InvalidSize,
     /// NUMA node not available
     InvalidNumaNode,
+    /// Region overlaps with reserved memory
+    ReservedMemoryConflict,
+}
+
+/// Reserved memory region
+#[derive(Debug, Clone, Copy)]
+pub struct ReservedRegion {
+    /// Start frame number
+    pub start: FrameNumber,
+    /// End frame number (exclusive)
+    pub end: FrameNumber,
+    /// Description of what this region is reserved for
+    pub description: &'static str,
 }
 
 /// Statistics for frame allocator
@@ -399,6 +416,9 @@ pub struct FrameAllocator {
     stats: Mutex<FrameAllocatorStats>,
     /// Allocation counter
     allocation_count: AtomicU64,
+    /// Reserved memory regions
+    #[cfg(feature = "alloc")]
+    reserved_regions: Mutex<Vec<ReservedRegion>>,
 }
 
 impl FrameAllocator {
@@ -418,7 +438,53 @@ impl FrameAllocator {
                 allocation_time_ns: 0,
             }),
             allocation_count: AtomicU64::new(0),
+            #[cfg(feature = "alloc")]
+            reserved_regions: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Add a reserved memory region
+    #[cfg(feature = "alloc")]
+    pub fn add_reserved_region(&self, region: ReservedRegion) -> Result<()> {
+        let mut reserved = self.reserved_regions.lock();
+        
+        // Check for overlaps with existing reserved regions
+        for existing in reserved.iter() {
+            if region.start < existing.end && region.end > existing.start {
+                return Err(FrameAllocatorError::ReservedMemoryConflict);
+            }
+        }
+        
+        reserved.push(region);
+        Ok(())
+    }
+    
+    /// Check if a frame range is reserved
+    #[cfg(feature = "alloc")]
+    pub fn is_reserved(&self, start: FrameNumber, count: usize) -> bool {
+        let end = FrameNumber::new(start.as_u64() + count as u64);
+        let reserved = self.reserved_regions.lock();
+        
+        for region in reserved.iter() {
+            if start < region.end && end > region.start {
+                return true;
+            }
+        }
+        
+        false
+    }
+    
+    /// Mark standard reserved regions (e.g., BIOS, kernel, boot data)
+    #[cfg(feature = "alloc")]
+    pub fn mark_standard_reserved_regions(&self) {
+        // Reserve first 1MB for BIOS and legacy devices
+        let _ = self.add_reserved_region(ReservedRegion {
+            start: FrameNumber::new(0),
+            end: FrameNumber::new(256), // 1MB / 4KB
+            description: "BIOS and legacy devices",
+        });
+        
+        // Note: Kernel and boot data regions should be marked by the bootloader
     }
 
     /// Initialize a NUMA node with memory range
@@ -483,6 +549,15 @@ impl FrameAllocator {
             if node < MAX_NUMA_NODES {
                 if let Some(ref allocator) = self.bitmap_allocators[node] {
                     if let Ok(frame) = allocator.allocate(count) {
+                        // Check if allocated frames are reserved
+                        #[cfg(feature = "alloc")]
+                        if self.is_reserved(frame, count) {
+                            // Try to free and continue searching
+                            let _ = allocator.free(frame, count);
+                        } else {
+                            return Ok(frame);
+                        }
+                        #[cfg(not(feature = "alloc"))]
                         return Ok(frame);
                     }
                 }
@@ -492,6 +567,13 @@ impl FrameAllocator {
         // Try all nodes
         for allocator in self.bitmap_allocators.iter().flatten() {
             if let Ok(frame) = allocator.allocate(count) {
+                // Check if allocated frames are reserved
+                #[cfg(feature = "alloc")]
+                if self.is_reserved(frame, count) {
+                    // Try to free and continue searching
+                    let _ = allocator.free(frame, count);
+                    continue;
+                }
                 return Ok(frame);
             }
         }
@@ -506,6 +588,15 @@ impl FrameAllocator {
             if node < MAX_NUMA_NODES {
                 if let Some(ref allocator) = self.buddy_allocators[node] {
                     if let Ok(frame) = allocator.allocate(count) {
+                        // Check if allocated frames are reserved
+                        #[cfg(feature = "alloc")]
+                        if self.is_reserved(frame, count) {
+                            // Try to free and continue searching
+                            let _ = allocator.free(frame, count);
+                        } else {
+                            return Ok(frame);
+                        }
+                        #[cfg(not(feature = "alloc"))]
                         return Ok(frame);
                     }
                 }
@@ -515,6 +606,13 @@ impl FrameAllocator {
         // Try all nodes
         for allocator in self.buddy_allocators.iter().flatten() {
             if let Ok(frame) = allocator.allocate(count) {
+                // Check if allocated frames are reserved
+                #[cfg(feature = "alloc")]
+                if self.is_reserved(frame, count) {
+                    // Try to free and continue searching
+                    let _ = allocator.free(frame, count);
+                    continue;
+                }
                 return Ok(frame);
             }
         }

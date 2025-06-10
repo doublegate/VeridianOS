@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Phase 1 Progress (Started June 8, 2025) - Updated January 9, 2025
+
 - Phase 1 ~10% overall complete
 - IPC implementation ~45% complete
   - ✅ Synchronous message passing with ring buffers
@@ -33,9 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - 2025-06-07
 
 ### Phase 0 Completion - Foundation & Tooling 🎉
-**Phase 0: Foundation is now 100% complete!** This marks a major milestone in VeridianOS development. All foundational infrastructure is in place and operational.
+
+**Phase 0: Foundation is now 100% complete!** This marks a major milestone in VeridianOS
+development. All foundational infrastructure is in place and operational.
 
 ### Added
+
 - Initial project structure with complete directory hierarchy
 - Comprehensive documentation for all development phases
 - Architecture overview and design principles
@@ -63,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Phase 0 completion with all infrastructure ready for Phase 1
 
 ### Fixed
+
 - Clippy warnings for unused imports and dead code (ISSUE-0005) - **RESOLVED 2025-06-06**
   - Removed unused `core::fmt::Write` import in serial.rs
   - Added `#[allow(dead_code)]` attributes to placeholder functions
@@ -81,6 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - All architectures now work with GDB remote debugging
 
 ### Documentation
+
 - Phase 0: Foundation and tooling setup guide
 - Phase 1: Microkernel core implementation guide
 - Phase 2: User space foundation guide
@@ -93,6 +99,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Meeting notes and decision tracking templates
 
 ### Project Setup
+
 - Complete project directory structure (kernel/, drivers/, services/, libs/, etc.)
 - GitHub repository initialization and remote setup
 - Development tool configurations (Justfile, install scripts)
@@ -101,6 +108,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MIT and Apache 2.0 dual licensing
 
 ### Technical Progress
+
 - Rust toolchain configuration (nightly-2025-01-15)
 - Build system using Just with automated commands
 - Cargo.lock included for reproducible builds
@@ -119,6 +127,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - All three architectures now boot to kernel_main successfully
 
 ### Completed
+
 - **Phase 0: Foundation (100% Complete - 2025-06-07)**
   - All development environment setup complete
   - CI/CD pipeline fully operational and passing all checks
@@ -136,6 +145,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.0] - TBD
 
 ### Planned for Next Release (Phase 1 Completion)
+
 - Complete IPC implementation with async channels
 - Memory management with hybrid allocator
 - Process and thread management
@@ -144,6 +154,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - System call interface
 
 ### Known Issues
+
 - No driver support yet
 - No user space support
 - Limited hardware support
@@ -155,12 +166,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 VeridianOS follows Semantic Versioning:
 
 - **MAJOR** version (X.0.0): Incompatible API changes
-- **MINOR** version (0.X.0): Backwards-compatible functionality additions  
+- **MINOR** version (0.X.0): Backwards-compatible functionality additions
 - **PATCH** version (0.0.X): Backwards-compatible bug fixes
 
 ### Pre-1.0 Versioning
 
 While in pre-1.0 development:
+
 - Minor version bumps may include breaking changes
 - Patch versions are for bug fixes only
 - API stability not guaranteed until 1.0.0

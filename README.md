@@ -1,20 +1,14 @@
 # VeridianOS
 
-<p align="center">
-  <img src="images/VeridianOS_Logo-Only.png" alt="VeridianOS Logo" width="200">
-</p>
+![VeridianOS Logo](images/VeridianOS_Logo-Only.png)
 
-<p align="center">
-  <strong>A next-generation microkernel operating system built with Rust</strong>
-</p>
+## A next-generation microkernel operating system built with Rust
 
-<p align="center">
-  <a href="https://github.com/doublegate/VeridianOS/actions"><img src="https://github.com/doublegate/VeridianOS/workflows/CI/badge.svg" alt="CI Status"></a>
-  <a href="https://codecov.io/gh/doublegate/VeridianOS"><img src="https://codecov.io/gh/doublegate/VeridianOS/branch/main/graph/badge.svg" alt="Coverage"></a>
-  <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
-  <a href="LICENSE-APACHE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
-  <a href="https://discord.gg/veridian"><img src="https://img.shields.io/discord/123456789?label=Discord&logo=discord" alt="Discord"></a>
-</p>
+[![CI Status](https://github.com/doublegate/VeridianOS/workflows/CI/badge.svg)](https://github.com/doublegate/VeridianOS/actions)
+[![Coverage](https://codecov.io/gh/doublegate/VeridianOS/branch/main/graph/badge.svg)](https://codecov.io/gh/doublegate/VeridianOS)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE-MIT)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE-APACHE)
+[![Discord](https://img.shields.io/discord/123456789?label=Discord&logo=discord)](https://discord.gg/veridian)
 
 ## Overview
 
@@ -33,22 +27,25 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 
 ## Project Status
 
-### 🎉 **Phase 0: Foundation & Tooling** (100% Complete! - v0.1.0)
+### 🎉 Phase 0: Foundation & Tooling (100% Complete! - v0.1.0)
 
-**Released**: June 7, 2025  
+**Released**: June 7, 2025
 **Status**: COMPLETE - v0.1.0 Released 🎉
 
-### 🚀 **Phase 1: Microkernel Core** (In Progress)
+### 🚀 Phase 1: Microkernel Core (In Progress)
 
-**Started**: June 8, 2025  
-**Status**: ~10% overall progress  
+**Started**: June 8, 2025
+**Status**: ~10% overall progress
+
 **Components**:
+
 - IPC System: ~45% complete (sync/async channels, registry, perf tracking, rate limiting done)
 - Memory Management: ~20% complete (frame allocator implemented, VM pending)
-- Process Management: Not started  
+- Process Management: Not started
 - Capability System: Not started
 
 **Phase 0 Achievements**:
+
 - ✅ Development environment setup and automation
 - ✅ CI/CD pipeline (GitHub Actions) - 100% PASSING across all architectures!
 - ✅ Custom target specifications for x86_64, AArch64, and RISC-V
@@ -96,14 +93,23 @@ cd VeridianOS
 just run
 
 # Or build manually for specific architectures
-cargo build --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
+cargo build --target targets/x86_64-veridian.json \
+    -p veridian-kernel \
+    -Zbuild-std=core,compiler_builtins,alloc \
+    -Zbuild-std-features=compiler-builtins-mem
 
 # Run in QEMU (x86_64)
 cargo bootimage --target targets/x86_64-veridian.json
-qemu-system-x86_64 -drive format=raw,file=target/x86_64-veridian/debug/bootimage-veridian-kernel.bin -serial stdio -display none
+qemu-system-x86_64 \
+    -drive format=raw,file=target/x86_64-veridian/debug/bootimage-veridian-kernel.bin \
+    -serial stdio \
+    -display none
 
 # Run in QEMU (RISC-V)
-qemu-system-riscv64 -M virt -nographic -kernel target/riscv64gc-veridian/debug/veridian-kernel
+qemu-system-riscv64 \
+    -M virt \
+    -nographic \
+    -kernel target/riscv64gc-veridian/debug/veridian-kernel
 ```
 
 For detailed build instructions, see [BUILD-INSTRUCTIONS.md](docs/BUILD-INSTRUCTIONS.md).
@@ -151,16 +157,16 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 VeridianOS uses a microkernel architecture with the following key components:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    User Applications                        │
-├─────────────────────────────────────────────────────────────┤
-│   System Services (VFS, Network, Display, Audio)            │
-├─────────────────────────────────────────────────────────────┤
-│   User-Space Drivers (Block, Network, GPU, USB)             │
-├─────────────────────────────────────────────────────────────┤
-│   Microkernel (Memory, Scheduling, IPC, Capabilities)       │
-└─────────────────────────────────────────────────────────────┘
+```ascii
+┌─────────────────────────────────────────────┐
+│              User Applications              │
+├─────────────────────────────────────────────┤
+│    System Services (VFS, Network, etc.)     │
+├─────────────────────────────────────────────┤
+│    User-Space Drivers (Block, Network)      │
+├─────────────────────────────────────────────┤
+│    Microkernel (Memory, Scheduling, IPC)    │
+└─────────────────────────────────────────────┘
 ```
 
 ## Performance
@@ -176,11 +182,13 @@ VeridianOS targets high-performance scenarios with:
 ### Performance Targets (AI-Enhanced)
 
 **Phase 1 Goals**:
+
 - IPC Latency: < 5μs
 - Context Switch: < 10μs
 - Microkernel Size: < 15,000 lines of code
 
 **Phase 5 Goals**:
+
 - IPC Latency: < 1μs
 - Memory Allocation: < 1μs
 - System Call Overhead: < 100ns
@@ -199,16 +207,19 @@ Security is a fundamental design principle:
 ## Supported Platforms
 
 ### Architectures
+
 - x86_64 (full support)
 - AArch64 (full support)
 - RISC-V (RV64GC) (experimental)
 
 ### Minimum Requirements
+
 - 64-bit CPU with MMU
 - 256MB RAM
 - 1GB storage
 
 ### Recommended Requirements
+
 - Multi-core CPU with virtualization
 - 4GB+ RAM
 - NVMe storage
@@ -242,6 +253,7 @@ VeridianOS builds upon ideas from many excellent operating systems:
 ## Technical Roadmap (AI-Enhanced)
 
 ### Near-term (2025)
+
 - [x] Complete Phase 0 (Foundation) - **DONE 2025-06-07!** ✅
 - [ ] Phase 1: Microkernel Core (4-5 months) - **IN PROGRESS**
   - [~] IPC implementation first (< 5μs latency target) - ~45% complete
@@ -254,6 +266,7 @@ VeridianOS builds upon ideas from many excellent operating systems:
   - [ ] Basic driver framework
 
 ### Mid-term (2026)
+
 - [ ] Phase 3: Security Hardening (5-6 months)
   - [ ] SELinux policies
   - [ ] Secure boot implementation
@@ -264,6 +277,7 @@ VeridianOS builds upon ideas from many excellent operating systems:
   - [ ] LLVM toolchain priority
 
 ### Long-term (2027+)
+
 - [ ] Phase 5: Performance Optimization (5-6 months)
   - [ ] < 1μs IPC latency
   - [ ] Lock-free kernel paths
@@ -276,10 +290,6 @@ VeridianOS builds upon ideas from many excellent operating systems:
 
 ---
 
-<p align="center">
-  <img src="images/VeridianOS_Full-Logo.png" alt="VeridianOS" width="300">
-</p>
+![VeridianOS](images/VeridianOS_Full-Logo.png)
 
-<p align="center">
-  <strong>Building the future of operating systems, one commit at a time.</strong>
-</p>
+**Building the future of operating systems, one commit at a time.**

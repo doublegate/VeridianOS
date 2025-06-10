@@ -1,553 +1,433 @@
 name: CI
 
 on:
-  push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main, develop ]
-  workflow_dispatch:
-    inputs:
-      skip_tests:
-        description: 'Skip tests'
-        required: false
-        default: false
-        type: boolean
+    push:
+        branches: [main, develop]
+    pull_request:
+        branches: [main, develop]
+    workflow_dispatch:
+        inputs:
+            skip_tests:
+                description: "Skip tests"
+                required: false
+                default: false
+                type: boolean
 
+# Common environment variables and configurations
 env:
-  RUST_BACKTRACE: 1
-  CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
-  RUSTFLAGS: "-D warnings"
-  RUST_TOOLCHAIN: nightly-2025-01-15
-  # Common build flags for reuse
-  BUILD_STD_FLAGS: "-Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem"
+    RUST_BACKTRACE: 1
+    CARGO_TERM_COLOR: always
+    CARGO_INCREMENTAL: 0
+    RUSTFLAGS: "-D warnings"
+    RUST_TOOLCHAIN: nightly-2025-01-15
+    BUILD_STD_FLAGS: "-Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem"
 
 # Cancel in-progress runs on same branch
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
 
 jobs:
-  # Quick checks that should fail fast
-  quick-checks:
-    name: Quick Checks
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: rustfmt, clippy
-      
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-      
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      
-      - name: Run clippy
-        run: |
-          # Run clippy on lib and bin targets only
-          # Note: Tests and benchmarks are excluded because they require custom targets with -Zbuild-std
-          cargo clippy --lib --all-features -- -D warnings
-          cargo clippy --bins --all-features -- -D warnings
+    # Quick checks that should fail fast
+    quick-checks:
+        name: Quick Checks
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@nightly
+              with:
+                  toolchain: ${{ env.RUST_TOOLCHAIN }}
+                  components: rustfmt, clippy
+            - name: Cache dependencies
+              uses: actions/cache@v4
+              with:
+                  path: |
+                      ~/.cargo/bin/
+                      ~/.cargo/registry/index/
+                      ~/.cargo/registry/cache/
+                      ~/.cargo/git/db/
+                      target/
+                  key: ubuntu-cargo-${{ hashFiles('**/Cargo.lock') }}
+                  restore-keys: |
+                      ubuntu-cargo-
+            - name: Check formatting
+              run: cargo fmt --all -- --check
+            - name: Run clippy
+              run: |
+                  cargo clippy --lib --all-features -- -D warnings
+                  cargo clippy --bins --all-features -- -D warnings
 
-  # Build and test for all architectures
-  build-and-test:
-    name: Build & Test
-    runs-on: ubuntu-latest
-    needs: quick-checks
-    strategy:
-      matrix:
-        target: [x86_64-veridian, aarch64-veridian, riscv64gc-veridian]
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: rust-src, llvm-tools-preview
-      
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.target }}-
-            ${{ runner.os }}-cargo-
-      
-      - name: Install QEMU (x86_64 only)
-        if: matrix.target == 'x86_64-veridian'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-system-x86
-      
-      - name: Check
-        run: cargo check --target targets/${{ matrix.target }}.json -p veridian-kernel ${{ env.BUILD_STD_FLAGS }}
-      
-      - name: Build
-        run: cargo build --release --target targets/${{ matrix.target }}.json -p veridian-kernel ${{ env.BUILD_STD_FLAGS }}
-      
-      - name: Install debugging tools
-        run: |
-          # Install llvm-tools for objcopy functionality
-          rustup component add llvm-tools-preview
-          # Install system objcopy as fallback
-          sudo apt-get update
-          sudo apt-get install -y binutils
+    # Build and test for all architectures
+    build-and-test:
+        name: Build & Test
+        runs-on: ubuntu-latest
+        needs: quick-checks
+        strategy:
+            matrix:
+                target: [x86_64-veridian, aarch64-veridian, riscv64gc-veridian]
+        steps:
+            - uses: actions/checkout@v4
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@nightly
+              with:
+                  toolchain: ${{ env.RUST_TOOLCHAIN }}
+                  components: rust-src, llvm-tools-preview
+            - name: Cache dependencies
+              uses: actions/cache@v4
+              with:
+                  path: |
+                      ~/.cargo/bin/
+                      ~/.cargo/registry/index/
+                      ~/.cargo/registry/cache/
+                      ~/.cargo/git/db/
+                      target/
+                  key: ubuntu-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+                  restore-keys: |
+                      ubuntu-cargo-${{ matrix.target }}-
+                      ubuntu-cargo-
+            - name: Install QEMU (x86_64 only)
+              if: matrix.target == 'x86_64-veridian'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y qemu-system-x86
+            - name: Build kernel
+              run: |
+                  cargo check --target targets/${{ matrix.target }}.json -p veridian-kernel ${{ env.BUILD_STD_FLAGS }}
+                  cargo build --release --target targets/${{ matrix.target }}.json -p veridian-kernel ${{ env.BUILD_STD_FLAGS }}
+            - name: Install debugging tools
+              run: |
+                  rustup component add llvm-tools-preview
+                  sudo apt-get update
+                  sudo apt-get install -y binutils
+            - name: Generate debug symbols
+              run: |
+                  mkdir -p artifacts/symbols
+                  if command -v rust-objcopy >/dev/null 2>&1; then
+                    OBJCOPY="rust-objcopy"
+                  elif rustup which --toolchain ${{ env.RUST_TOOLCHAIN }} rust-objcopy >/dev/null 2>&1; then
+                    OBJCOPY=$(rustup which --toolchain ${{ env.RUST_TOOLCHAIN }} rust-objcopy)
+                  else
+                    OBJCOPY="objcopy"
+                  fi
+                  cp target/${{ matrix.target }}/release/veridian-kernel artifacts/veridian-kernel-${{ matrix.target }}
+                  if [ -f "target/${{ matrix.target }}/release/veridian-kernel" ]; then
+                    $OBJCOPY --only-keep-debug target/${{ matrix.target }}/release/veridian-kernel \
+                      artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug || {
+                      echo "Warning: Failed to extract debug symbols"
+                      touch artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug
+                    }
+                    if [ -s "artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug" ]; then
+                      $OBJCOPY --strip-debug \
+                        --add-gnu-debuglink=artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug \
+                        artifacts/veridian-kernel-${{ matrix.target }} || {
+                        echo "Warning: Failed to strip and link debug symbols"
+                      }
+                    fi
+                  else
+                    echo "Error: Kernel binary not found"
+                    exit 1
+                  fi
+            - name: Upload artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                  name: veridian-kernel-${{ matrix.target }}
+                  path: artifacts/veridian-kernel-${{ matrix.target }}
+                  retention-days: 7
+            - name: Upload debug symbols
+              uses: actions/upload-artifact@v4
+              with:
+                  name: veridian-symbols-${{ matrix.target }}
+                  path: artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug
+                  retention-days: 30
 
-      - name: Generate debug symbols
-        run: |
-          # Extract debug symbols for the kernel binary
-          mkdir -p artifacts/symbols
-          
-          # Try to find rust-objcopy, fallback to system objcopy
-          if command -v rust-objcopy >/dev/null 2>&1; then
-            OBJCOPY="rust-objcopy"
-            echo "Using rust-objcopy"
-          elif rustup which --toolchain ${{ env.RUST_TOOLCHAIN }} rust-objcopy >/dev/null 2>&1; then
-            OBJCOPY=$(rustup which --toolchain ${{ env.RUST_TOOLCHAIN }} rust-objcopy)
-            echo "Using rust-objcopy from toolchain: $OBJCOPY"
-          else
-            OBJCOPY="objcopy"
-            echo "Using system objcopy"
-          fi
-          
-          # Copy the original binary first
-          cp target/${{ matrix.target }}/release/veridian-kernel artifacts/veridian-kernel-${{ matrix.target }}
-          
-          # Extract debug info (only if file exists and has debug info)
-          if [ -f "target/${{ matrix.target }}/release/veridian-kernel" ]; then
-            echo "Extracting debug symbols..."
-            $OBJCOPY --only-keep-debug target/${{ matrix.target }}/release/veridian-kernel artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug || {
-              echo "Warning: Failed to extract debug symbols, continuing without debug info"
-              # Create empty debug file as placeholder
-              touch artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug
-            }
-            
-            # Strip the binary (optional - only if debug extraction succeeded)
-            if [ -s "artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug" ]; then
-              echo "Stripping binary and adding debug link..."
-              $OBJCOPY --strip-debug --add-gnu-debuglink=artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug artifacts/veridian-kernel-${{ matrix.target }} || {
-                echo "Warning: Failed to strip and link debug symbols"
-              }
-            else
-              echo "Skipping strip and debug link due to missing debug info"
-            fi
-          else
-            echo "Error: Kernel binary not found at target/${{ matrix.target }}/release/veridian-kernel"
-            exit 1
-          fi
-      
-      # Tests are temporarily disabled in CI due to custom target complexity
-      # Local testing can be done with:
-      # cargo test --lib --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=...
-      # - name: Test (x86_64 only)
-      #   if: matrix.target == 'x86_64-veridian' && !inputs.skip_tests
-      #   run: |
-      #     cargo test --lib --target targets/${{ matrix.target }}.json -p veridian-kernel ${{ env.BUILD_STD_FLAGS }}
-      
-      # Benchmarking temporarily disabled - will be re-enabled in Phase 1
-      # - name: Benchmark (x86_64 only)
-      #   if: matrix.target == 'x86_64-veridian' && !inputs.skip_tests
-      #   run: cargo bench --target targets/${{ matrix.target }}.json -p veridian-kernel ${{ env.BUILD_STD_FLAGS }}
-      
-      - name: Upload kernel image
-        uses: actions/upload-artifact@v4
-        with:
-          name: veridian-kernel-${{ matrix.target }}
-          path: artifacts/veridian-kernel-${{ matrix.target }}
-          retention-days: 7
-      
-      - name: Upload debug symbols
-        uses: actions/upload-artifact@v4
-        with:
-          name: veridian-symbols-${{ matrix.target }}
-          path: artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug
-          retention-days: 30
+    # Documentation generation
+    documentation:
+        name: Generate Documentation
+        runs-on: ubuntu-latest
+        needs: quick-checks
+        steps:
+            - uses: actions/checkout@v4
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@nightly
+              with:
+                  toolchain: ${{ env.RUST_TOOLCHAIN }}
+                  components: rust-src
+            - name: Cache dependencies
+              uses: actions/cache@v4
+              with:
+                  path: |
+                      ~/.cargo/bin/
+                      ~/.cargo/registry/index/
+                      ~/.cargo/registry/cache/
+                      ~/.cargo/git/db/
+                      target/
+                  key: ubuntu-cargo-docs-${{ hashFiles('**/Cargo.lock') }}
+                  restore-keys: |
+                      ubuntu-cargo-docs-
+                      ubuntu-cargo-
+            - name: Install mdBook
+              run: |
+                  if ! command -v mdbook &> /dev/null; then
+                    cargo install mdbook --version 0.4.37
+                  fi
+            - name: Generate documentation
+              run: |
+                  export RUSTDOCFLAGS="--enable-index-page -Zunstable-options \
+                    --default-theme=dark \
+                    --html-in-header=docs/assets/header.html \
+                    --html-before-content=docs/assets/before.html \
+                    --html-after-content=docs/assets/after.html"
+                  cargo doc --no-deps --all-features \
+                    --target targets/x86_64-veridian.json \
+                    -p veridian-kernel ${{ env.BUILD_STD_FLAGS }}
+                  mkdir -p artifacts/docs/api
+                  cp -r target/x86_64-veridian/doc/* artifacts/docs/api/
+                  cat > artifacts/docs/api/index.html << 'EOF'
+                  <!DOCTYPE html>
+                  <html>
+                  <head>
+                      <meta charset="utf-8">
+                      <meta http-equiv="refresh" content="0; url=veridian_kernel/index.html">
+                      <title>VeridianOS API Documentation</title>
+                  </head>
+                  <body>
+                      <p>Redirecting to <a href="veridian_kernel/index.html">VeridianOS Kernel Documentation</a>...</p>
+                  </body>
+                  </html>
+                  EOF
+                  mdbook build
+                  cp -r target/book artifacts/docs/guide
+                  cat > artifacts/docs/index.html << 'EOF'
+                  <!DOCTYPE html>
+                  <html>
+                  <head>
+                      <meta charset="utf-8">
+                      <title>VeridianOS Documentation</title>
+                      <link rel="icon" type="image/x-icon" href="https://raw.githubusercontent.com/doublegate/VeridianOS/main/images/veridian_os.ico">
+                      <style>
+                          body { font-family: sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+                          h1 { color: #00897b; }
+                          .doc-links { display: flex; gap: 20px; margin-top: 30px; }
+                          .doc-card { flex: 1; border: 1px solid #ddd; padding: 20px; border-radius: 8px; }
+                          .doc-card h2 { color: #00695c; margin-top: 0; }
+                          a { color: #00897b; text-decoration: none; }
+                          a:hover { text-decoration: underline; }
+                      </style>
+                  </head>
+                  <body>
+                      <h1>VeridianOS Documentation</h1>
+                      <p>Welcome to the VeridianOS documentation portal.</p>
+                      <div class="doc-links">
+                          <div class="doc-card">
+                              <h2>Developer Guide</h2>
+                              <p>Comprehensive guide for VeridianOS development.</p>
+                              <p><a href="guide/index.html">Open Developer Guide →</a></p>
+                          </div>
+                          <div class="doc-card">
+                              <h2>API Documentation</h2>
+                              <p>Detailed API reference for the VeridianOS kernel.</p>
+                              <p><a href="api/index.html">Open API Reference →</a></p>
+                          </div>
+                      </div>
+                      <h2>Quick Links</h2>
+                      <ul>
+                          <li><a href="https://github.com/doublegate/VeridianOS">GitHub Repository</a></li>
+                          <li><a href="https://github.com/doublegate/VeridianOS/issues">Issue Tracker</a></li>
+                          <li><a href="guide/contributing/how-to.html">Contributing Guide</a></li>
+                      </ul>
+                  </body>
+                  </html>
+                  EOF
+            - name: Upload documentation
+              uses: actions/upload-artifact@v4
+              with:
+                  name: veridian-docs
+                  path: artifacts/docs
+                  retention-days: 30
 
-  # Documentation generation
-  documentation:
-    name: Generate Documentation
-    runs-on: ubuntu-latest
-    needs: quick-checks
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: rust-src
-      
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-docs-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-docs-
-            ${{ runner.os }}-cargo-
-      
-      - name: Install mdBook
-        run: |
-          # Check if mdBook is already installed
-          if ! command -v mdbook &> /dev/null; then
-            cargo install mdbook --version 0.4.37
-          fi
-      
-      - name: Generate rustdoc
-        run: |
-          # Set up custom rustdoc flags with our theme
-          export RUSTDOCFLAGS="--enable-index-page -Zunstable-options --default-theme=dark --html-in-header=docs/assets/header.html --html-before-content=docs/assets/before.html --html-after-content=docs/assets/after.html"
-          
-          # Generate documentation for the primary architecture
-          cargo doc --no-deps --all-features --target targets/x86_64-veridian.json -p veridian-kernel ${{ env.BUILD_STD_FLAGS }}
-          
-          # Create a documentation package
-          mkdir -p artifacts/docs/api
-          cp -r target/x86_64-veridian/doc/* artifacts/docs/api/
-          
-          # Add an index.html redirect to the main crate
-          cat > artifacts/docs/api/index.html << 'EOF'
-          <!DOCTYPE html>
-          <html>
-          <head>
-              <meta charset="utf-8">
-              <meta http-equiv="refresh" content="0; url=veridian_kernel/index.html">
-              <title>VeridianOS API Documentation</title>
-          </head>
-          <body>
-              <p>Redirecting to <a href="veridian_kernel/index.html">VeridianOS Kernel Documentation</a>...</p>
-          </body>
-          </html>
-          EOF
-      
-      - name: Build mdBook
-        run: |
-          # Build the developer guide
-          mdbook build
-          
-          # Copy to artifacts
-          cp -r target/book artifacts/docs/guide
-      
-      - name: Create documentation index
-        run: |
-          # Create a main index page
-          cat > artifacts/docs/index.html << 'EOF'
-          <!DOCTYPE html>
-          <html>
-          <head>
-              <meta charset="utf-8">
-              <title>VeridianOS Documentation</title>
-              <link rel="icon" type="image/x-icon" href="https://raw.githubusercontent.com/doublegate/VeridianOS/main/images/veridian_os.ico">
-              <style>
-                  body { font-family: sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-                  h1 { color: #00897b; }
-                  .doc-links { display: flex; gap: 20px; margin-top: 30px; }
-                  .doc-card { flex: 1; border: 1px solid #ddd; padding: 20px; border-radius: 8px; }
-                  .doc-card h2 { color: #00695c; margin-top: 0; }
-                  a { color: #00897b; text-decoration: none; }
-                  a:hover { text-decoration: underline; }
-              </style>
-          </head>
-          <body>
-              <h1>VeridianOS Documentation</h1>
-              <p>Welcome to the VeridianOS documentation portal.</p>
-              
-              <div class="doc-links">
-                  <div class="doc-card">
-                      <h2>Developer Guide</h2>
-                      <p>Comprehensive guide for VeridianOS development, including architecture overview, build instructions, and platform details.</p>
-                      <p><a href="guide/index.html">Open Developer Guide →</a></p>
-                  </div>
-                  
-                  <div class="doc-card">
-                      <h2>API Documentation</h2>
-                      <p>Detailed API reference for the VeridianOS kernel, including all public interfaces, modules, and functions.</p>
-                      <p><a href="api/index.html">Open API Reference →</a></p>
-                  </div>
-              </div>
-              
-              <h2>Quick Links</h2>
-              <ul>
-                  <li><a href="https://github.com/doublegate/VeridianOS">GitHub Repository</a></li>
-                  <li><a href="https://github.com/doublegate/VeridianOS/issues">Issue Tracker</a></li>
-                  <li><a href="guide/contributing/how-to.html">Contributing Guide</a></li>
-              </ul>
-          </body>
-          </html>
-          EOF
-      
-      - name: Upload documentation
-        uses: actions/upload-artifact@v4
-        with:
-          name: veridian-docs
-          path: artifacts/docs
-          retention-days: 30
+    # Security audit (can run in parallel)
+    security:
+        name: Security Audit
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - name: Run cargo-audit
+              uses: rustsec/audit-check@v2
+              with:
+                  token: ${{ secrets.GITHUB_TOKEN }}
 
-  # Security audit (can run in parallel)
-  security:
-    name: Security Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Run cargo-audit
-        uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-  
-  # Create combined release artifacts
-  release-artifacts:
-    name: Create Release Artifacts
-    runs-on: ubuntu-latest
-    needs: [build-and-test, documentation, security]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: downloads
-      
-      - name: Create release package
-        run: |
-          # Create release directory structure
-          mkdir -p release/{kernel,symbols,docs}
-          
-          # Copy kernel images with proper naming
-          for arch in x86_64 aarch64 riscv64gc; do
-            mkdir -p release/kernel/${arch%-*}
-            if [ -f "downloads/veridian-kernel-${arch}-veridian/veridian-kernel-${arch}-veridian" ]; then
-              cp "downloads/veridian-kernel-${arch}-veridian/veridian-kernel-${arch}-veridian" \
-                 "release/kernel/${arch%-*}/veridian-kernel"
-            fi
-          done
-          
-          # Copy debug symbols
-          for arch in x86_64 aarch64 riscv64gc; do
-            mkdir -p release/symbols/${arch%-*}
-            if [ -f "downloads/veridian-symbols-${arch}-veridian/veridian-kernel-${arch}-veridian.debug" ]; then
-              cp "downloads/veridian-symbols-${arch}-veridian/veridian-kernel-${arch}-veridian.debug" \
-                 "release/symbols/${arch%-*}/veridian-kernel.debug"
-            fi
-          done
-          
-          # Copy documentation
-          cp -r downloads/veridian-docs/* release/docs/
-          
-          # Create version info
-          cat > release/VERSION << EOF
-          VERSION=$(cat Cargo.toml | grep '^version' | head -1 | cut -d'"' -f2)
-          GIT_SHA=${{ github.sha }}
-          GIT_REF=${{ github.ref }}
-          BUILD_DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          RUST_VERSION=${{ env.RUST_TOOLCHAIN }}
-          EOF
-          
-          # Create comprehensive README
-          cat > release/README.md << 'EOF'
-          # VeridianOS Release Artifacts
-          
-          This package contains the official VeridianOS release artifacts.
-          
-          ## 📦 Package Contents
-          
-          ### Kernel Images (`kernel/`)
-          - `x86_64/veridian-kernel` - Intel/AMD 64-bit kernel
-          - `aarch64/veridian-kernel` - ARM 64-bit kernel
-          - `riscv64gc/veridian-kernel` - RISC-V 64-bit kernel with G+C extensions
-          
-          ### Debug Symbols (`symbols/`)
-          Matching debug symbols for each kernel image, useful for:
-          - GDB debugging
-          - Crash analysis
-          - Performance profiling
-          
-          ### Documentation (`docs/`)
-          - `index.html` - Documentation portal
-          - `api/` - Rust API documentation
-          - `guide/` - Developer guide (mdBook)
-          
-          ## 🚀 Quick Start
-          
-          ### Running with QEMU
-          ```bash
-          # x86_64
-          qemu-system-x86_64 -kernel kernel/x86_64/veridian-kernel -serial stdio
-          
-          # AArch64
-          qemu-system-aarch64 -M virt -cpu cortex-a72 -kernel kernel/aarch64/veridian-kernel -serial stdio
-          
-          # RISC-V
-          qemu-system-riscv64 -M virt -kernel kernel/riscv64gc/veridian-kernel -serial stdio
-          ```
-          
-          ### Debugging
-          ```bash
-          # Start QEMU with GDB server
-          qemu-system-x86_64 -kernel kernel/x86_64/veridian-kernel -s -S
-          
-          # In another terminal
-          gdb kernel/x86_64/veridian-kernel
-          (gdb) target remote :1234
-          (gdb) continue
-          ```
-          
-          ## 📋 Build Information
-          - **Git SHA**: ${{ github.sha }}
-          - **Git Ref**: ${{ github.ref }}
-          - **Build Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          - **Rust Version**: ${{ env.RUST_TOOLCHAIN }}
-          
-          ## 📚 Resources
-          - [GitHub Repository](https://github.com/doublegate/VeridianOS)
-          - [Issue Tracker](https://github.com/doublegate/VeridianOS/issues)
-          - [Documentation](https://doublegate.github.io/VeridianOS/)
-          
-          ## ⚖️ License
-          VeridianOS is licensed under the MIT License.
-          EOF
-          
-          # Create both compressed archives
-          tar czf veridian-release-${{ github.sha }}.tar.gz -C release .
-          cd release && zip -r ../veridian-release-${{ github.sha }}.zip . && cd ..
-      
-      - name: Upload release tarball
-        uses: actions/upload-artifact@v4
-        with:
-          name: veridian-release-${{ github.sha }}-tar
-          path: veridian-release-${{ github.sha }}.tar.gz
-          retention-days: 90
-      
-      - name: Upload release zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: veridian-release-${{ github.sha }}-zip
-          path: veridian-release-${{ github.sha }}.zip
-          retention-days: 90
-  
-  # Deploy documentation to GitHub Pages (optional)
-  deploy-docs:
-    name: Deploy Documentation
-    runs-on: ubuntu-latest
-    needs: [documentation]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    permissions:
-      pages: write
-      id-token: write
-    steps:
-      - name: Download documentation
-        uses: actions/download-artifact@v4
-        with:
-          name: veridian-docs
-          path: docs-deploy
-      
-      - name: Setup Pages
-        id: setup-pages
-        uses: actions/configure-pages@v4
-        continue-on-error: true
-        with:
-          enablement: true
-      
-      - name: Upload to Pages
-        if: steps.setup-pages.outcome == 'success'
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: docs-deploy
-      
-      - name: Deploy to GitHub Pages
-        if: steps.setup-pages.outcome == 'success'
-        id: deployment
-        uses: actions/deploy-pages@v4
-      
-      - name: Pages deployment status
-        run: |
-          if [ "${{ steps.setup-pages.outcome }}" = "success" ]; then
-            echo "✅ Documentation deployed to GitHub Pages"
-            echo "📖 Pages URL: ${{ steps.deployment.outputs.page_url }}"
-          else
-            echo "⚠️  GitHub Pages not configured for this repository"
-            echo "📋 Documentation artifacts are still available for download"
-            echo "🔧 To enable Pages: Repository Settings → Pages → Deploy from GitHub Actions"
-          fi
-  
-  # Summary job for branch protection
-  ci-summary:
-    name: CI Summary
-    runs-on: ubuntu-latest
-    needs: [quick-checks, build-and-test, documentation, security]
-    if: always()
-    steps:
-      - name: Check job results
-        run: |
-          echo "## CI Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          # Check quick-checks
-          if [ "${{ needs.quick-checks.result }}" == "success" ]; then
-            echo "✅ **Quick Checks**: Passed" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ **Quick Checks**: Failed" >> $GITHUB_STEP_SUMMARY
-          fi
-          
-          # Check build-and-test
-          if [ "${{ needs.build-and-test.result }}" == "success" ]; then
-            echo "✅ **Build & Test**: All architectures built successfully" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ **Build & Test**: Build or test failures" >> $GITHUB_STEP_SUMMARY
-          fi
-          
-          # Check documentation
-          if [ "${{ needs.documentation.result }}" == "success" ]; then
-            echo "✅ **Documentation**: Generated successfully" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ **Documentation**: Generation failed" >> $GITHUB_STEP_SUMMARY
-          fi
-          
-          # Check security
-          if [ "${{ needs.security.result }}" == "success" ]; then
-            echo "✅ **Security Audit**: No vulnerabilities found" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ **Security Audit**: Issues detected" >> $GITHUB_STEP_SUMMARY
-          fi
-          
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Build Information" >> $GITHUB_STEP_SUMMARY
-          echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Workflow**: ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
-          
-          # Exit with failure if any job failed
-          if [ "${{ needs.quick-checks.result }}" != "success" ] || \
-             [ "${{ needs.build-and-test.result }}" != "success" ] || \
-             [ "${{ needs.documentation.result }}" != "success" ] || \
-             [ "${{ needs.security.result }}" != "success" ]; then
-            exit 1
-          fi
+    # Create combined release artifacts
+    release-artifacts:
+        name: Create Release Artifacts
+        runs-on: ubuntu-latest
+        needs: [build-and-test, documentation, security]
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        steps:
+            - uses: actions/checkout@v4
+            - name: Download artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  path: downloads
+            - name: Create release package
+              run: |
+                  mkdir -p release/{kernel,symbols,docs}
+                  for arch in x86_64 aarch64 riscv64gc; do
+                    mkdir -p release/kernel/${arch%-*}
+                    if [ -f "downloads/veridian-kernel-${arch}-veridian/veridian-kernel-${arch}-veridian" ]; then
+                      cp "downloads/veridian-kernel-${arch}-veridian/veridian-kernel-${arch}-veridian" \
+                         "release/kernel/${arch%-*}/veridian-kernel"
+                    fi
+                  done
+                  for arch in x86_64 aarch64 riscv64gc; do
+                    mkdir -p release/symbols/${arch%-*}
+                    if [ -f "downloads/veridian-symbols-${arch}-veridian/veridian-kernel-${arch}-veridian.debug" ]; then
+                      cp "downloads/veridian-symbols-${arch}-veridian/veridian-kernel-${arch}-veridian.debug" \
+                         "release/symbols/${arch%-*}/veridian-kernel.debug"
+                    fi
+                  done
+                  cp -r downloads/veridian-docs/* release/docs/
+                  cat > release/VERSION << EOF
+                  VERSION=$(cat Cargo.toml | grep '^version' | head -1 | cut -d'"' -f2)
+                  GIT_SHA=${{ github.sha }}
+                  GIT_REF=${{ github.ref }}
+                  BUILD_DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+                  RUST_VERSION=${{ env.RUST_TOOLCHAIN }}
+                  EOF
+                  cat > release/README.md << 'EOF'
+                  # VeridianOS Release Artifacts
+                  This package contains the official VeridianOS release artifacts.
+                  ## 📦 Package Contents
+                  ### Kernel Images (`kernel/`)
+                  - `x86_64/veridian-kernel` - Intel/AMD 64-bit kernel
+                  - `aarch64/veridian-kernel` - ARM 64-bit kernel
+                  - `riscv64gc/veridian-kernel` - RISC-V 64-bit kernel with G+C extensions
+                  ### Debug Symbols (`symbols/`)
+                  Matching debug symbols for each kernel image.
+                  ### Documentation (`docs/`)
+                  - `index.html` - Documentation portal
+                  - `api/` - Rust API documentation
+                  - `guide/` - Developer guide (mdBook)
+                  ## 🚀 Quick Start
+                  ### Running with QEMU
+                  ```bash
+                  # x86_64
+                  qemu-system-x86_64 -kernel kernel/x86_64/veridian-kernel -serial stdio
+                  # AArch64
+                  qemu-system-aarch64 -M virt -cpu cortex-a72 -kernel kernel/aarch64/veridian-kernel -serial stdio
+                  # RISC-V
+                  qemu-system-riscv64 -M virt -kernel kernel/riscv64gc/veridian-kernel -serial stdio
+                  ```
+                  ### Debugging
+                  ```bash
+                  # Start QEMU with GDB server
+                  qemu-system-x86_64 -kernel kernel/x86_64/veridian-kernel -s -S
+                  # In another terminal
+                  gdb kernel/x86_64/veridian-kernel
+                  (gdb) target remote :1234
+                  (gdb) continue
+                  ```
+                  ## 📋 Build Information
+                  - **Git SHA**: ${{ github.sha }}
+                  - **Git Ref**: ${{ github.ref }}
+                  - **Build Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+                  - **Rust Version**: ${{ env.RUST_TOOLCHAIN }}
+                  ## 📚 Resources
+                  - [GitHub Repository](https://github.com/doublegate/VeridianOS)
+                  - [Issue Tracker](https://github.com/doublegate/VeridianOS/issues)
+                  - [Documentation](https://doublegate.github.io/VeridianOS/)
+                  ## ⚖️ License
+                  VeridianOS is licensed under the MIT License.
+                  EOF
+                  tar czf veridian-release-${{ github.sha }}.tar.gz -C release .
+                  cd release && zip -r ../veridian-release-${{ github.sha }}.zip . && cd ..
+            - name: Upload release archives
+              uses: actions/upload-artifact@v4
+              with:
+                  name: veridian-release-${{ github.sha }}
+                  path: |
+                      veridian-release-${{ github.sha }}.tar.gz
+                      veridian-release-${{ github.sha }}.zip
+                  retention-days: 90
+
+    # Deploy documentation to GitHub Pages
+    deploy-docs:
+        name: Deploy Documentation
+        runs-on: ubuntu-latest
+        needs: [documentation]
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        permissions:
+            pages: write
+            id-token: write
+        steps:
+            - name: Download documentation
+              uses: actions/download-artifact@v4
+              with:
+                  name: veridian-docs
+                  path: docs-deploy
+            - name: Setup Pages
+              id: setup-pages
+              uses: actions/configure-pages@v4
+              continue-on-error: true
+            - name: Upload to Pages
+              if: steps.setup-pages.outcome == 'success'
+              uses: actions/upload-pages-artifact@v3
+              with:
+                  path: docs-deploy
+            - name: Deploy to GitHub Pages
+              if: steps.setup-pages.outcome == 'success'
+              id: deployment
+              uses: actions/deploy-pages@v4
+            - name: Pages deployment status
+              run: |
+                  if [ "${{ steps.setup-pages.outcome }}" = "success" ]; then
+                    echo "✅ Documentation deployed to GitHub Pages"
+                    echo "📖 Pages URL: ${{ steps.deployment.outputs.page_url }}"
+                  else
+                    echo "⚠️  GitHub Pages not configured for this repository"
+                    echo "📋 Documentation artifacts are still available for download"
+                    echo "🔧 To enable Pages: Repository Settings → Pages → Deploy from GitHub Actions"
+                  fi
+
+    # Summary job for branch protection
+    ci-summary:
+        name: CI Summary
+        runs-on: ubuntu-latest
+        needs: [quick-checks, build-and-test, documentation, security]
+        if: always()
+        steps:
+            - name: Check job results
+              run: |
+                  echo "## CI Summary" >> $GITHUB_STEP_SUMMARY
+                  echo "" >> $GITHUB_STEP_SUMMARY
+                  if [ "${{ needs.quick-checks.result }}" == "success" ]; then
+                    echo "✅ **Quick Checks**: Passed" >> $GITHUB_STEP_SUMMARY
+                  else
+                    echo "❌ **Quick Checks**: Failed" >> $GITHUB_STEP_SUMMARY
+                  fi
+                  if [ "${{ needs.build-and-test.result }}" == "success" ]; then
+                    echo "✅ **Build & Test**: All architectures built successfully" >> $GITHUB_STEP_SUMMARY
+                  else
+                    echo "❌ **Build & Test**: Build or test failures" >> $GITHUB_STEP_SUMMARY
+                  fi
+                  if [ "${{ needs.documentation.result }}" == "success" ]; then
+                    echo "✅ **Documentation**: Generated successfully" >> $GITHUB_STEP_SUMMARY
+                  else
+                    echo "❌ **Documentation**: Generation failed" >> $GITHUB_STEP_SUMMARY
+                  fi
+                  if [ "${{ needs.security.result }}" == "success" ]; then
+                    echo "✅ **Security Audit**: No vulnerabilities found" >> $GITHUB_STEP_SUMMARY
+                  else
+                    echo "❌ **Security Audit**: Issues detected" >> $GITHUB_STEP_SUMMARY
+                  fi
+                  echo "" >> $GITHUB_STEP_SUMMARY
+                  echo "### Build Information" >> $GITHUB_STEP_SUMMARY
+                  echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+                  echo "- **Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+                  echo "- **Workflow**: ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+                  if [ "${{ needs.quick-checks.result }}" != "success" ] || \
+                     [ "${{ needs.build-and-test.result }}" != "success" ] || \
+                     [ "${{ needs.documentation.result }}" != "success" ] || \
+                     [ "${{ needs.security.result }}" != "success" ]; then
+                    exit 1
+                  fi
