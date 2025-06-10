@@ -1,8 +1,8 @@
 # VeridianOS Scheduler Design Document
 
-**Version**: 1.0  
-**Date**: 2025-06-07  
-**Status**: Draft for Phase 1 Implementation
+**Version**: 1.1  
+**Date**: 2025-06-10  
+**Status**: Phase 1 Implementation In Progress (~25% Complete)
 
 ## Executive Summary
 
@@ -510,17 +510,37 @@ pub struct PerThreadStats {
 
 ## Implementation Phases
 
-### Phase 1 (Basic Scheduler)
-1. Simple round-robin scheduler
-2. Basic context switching
-3. Single run queue
-4. < 10μs context switch
+### Phase 1 (Basic Scheduler) - IN PROGRESS (~25% Complete)
+1. ✅ Simple round-robin scheduler - IMPLEMENTED
+2. ✅ Basic context switching - IMPLEMENTED (all architectures)
+3. ✅ Single run queue - IMPLEMENTED
+4. < 10μs context switch - PENDING MEASUREMENT
+5. ✅ Idle task creation and management - IMPLEMENTED
+6. ✅ Timer interrupts (10ms tick) - IMPLEMENTED (all architectures)
+7. ✅ Process/Thread to Task integration - IMPLEMENTED
+8. ✅ Basic SMP support structures - IMPLEMENTED
+
+### Phase 1 Completed Features:
+- Core scheduler structure with round-robin algorithm
+- Idle task for BSP (Bootstrap Processor)
+- Timer setup for preemptive multitasking
+- Integration with process management subsystem
+- Per-CPU data structures foundation
+- CPU affinity support in task creation
+- Basic load balancing framework
+
+### Phase 1 Remaining Work:
+- Priority-based scheduling algorithm
+- Full task migration between CPUs
+- Performance measurement and optimization
+- Integration tests with multiple processes
+- Context switch latency benchmarks
 
 ### Phase 2 (Multi-core)
 1. Per-CPU run queues
-2. Basic load balancing
-3. CPU affinity support
-4. Migration infrastructure
+2. Advanced load balancing
+3. Full CPU affinity support
+4. Task migration infrastructure
 
 ### Phase 3 (Advanced Features)
 1. Multiple scheduling classes

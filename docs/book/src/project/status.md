@@ -5,9 +5,9 @@
 **Latest Release**: v0.1.0 - Foundation & Tooling  
 **Released**: June 7, 2025  
 **Current Phase**: Phase 1 - Microkernel Core (Started June 8, 2025)  
-**Phase 1 Progress**: ~35% Overall - IPC System ~45% complete, Memory Management ~95% complete, Process Management ~90% complete
+**Phase 1 Progress**: ~40% Overall - IPC System ~45% complete, Memory Management ~95% complete, Process Management ~85% complete, Scheduler ~25% complete
 
-VeridianOS has successfully completed Phase 0 and is now actively developing the microkernel core. Major progress has been made on the IPC (Inter-Process Communication) system, Memory Management subsystem, and Process Management. Virtual memory, heap allocation, TLB management, process control blocks, thread management, and context switching are now fully implemented.
+VeridianOS has successfully completed Phase 0 and is now actively developing the microkernel core. Major progress has been made on the IPC (Inter-Process Communication) system, Memory Management subsystem, Process Management, and now the Scheduler. Virtual memory, heap allocation, TLB management, process control blocks, thread management, context switching, and basic round-robin scheduling are now implemented.
 
 ## Phase 0 Achievements
 
@@ -93,7 +93,7 @@ VeridianOS has successfully completed Phase 0 and is now actively developing the
 - ✅ Reserved memory region tracking
 - ✅ Bootloader memory map integration
 
-**Process Management (~90% Complete)**:
+**Process Management (~85% Complete)**:
 - ✅ Process Control Block (PCB) implementation
 - ✅ Thread management with ThreadContext trait
 - ✅ Context switching for all architectures
@@ -102,12 +102,26 @@ VeridianOS has successfully completed Phase 0 and is now actively developing the
 - ✅ Synchronization primitives (Mutex, Semaphore, CondVar, RwLock, Barrier)
 - ✅ Memory management integration
 - ✅ IPC integration hooks
-- 🔲 Process system calls
-- 🔲 Integration testing with scheduler and IPC
+- ✅ Process system calls (create, exit, wait, exec, fork, kill)
+- 🔲 Priority inheritance for mutexes (deferred)
+- 🔲 Signal handling subsystem (deferred)
+- 🔲 Process groups and sessions (deferred)
+
+**Scheduler (~25% Complete)**:
+- ✅ Core scheduler structure with round-robin algorithm
+- ✅ Idle task creation and management
+- ✅ Timer setup for all architectures (10ms tick)
+- ✅ Process/Thread to Task integration
+- ✅ Basic SMP support with per-CPU data
+- ✅ CPU affinity support in scheduling
+- ✅ Load balancing framework (basic)
+- 🔲 Priority-based scheduling
+- 🔲 CFS (Completely Fair Scheduler)
+- 🔲 Real-time scheduling classes
+- 🔲 Full task migration between CPUs
 
 **Remaining Components**:
 - 🔲 Full capability system
-- 🔲 Scheduler implementation
 
 ### Phase 2: User Space Foundation
 - Init system
@@ -202,6 +216,21 @@ VeridianOS welcomes contributions! Here's how you can help:
 See our [Contributing Guide](../contributing/how-to.md) for details.
 
 ## Recent Updates
+
+### June 10, 2025 - Scheduler Implementation Started
+- Implemented core scheduler with round-robin algorithm
+- Created idle task for BSP (Bootstrap Processor)
+- Set up timer interrupts for all architectures (10ms tick)
+- Integrated scheduler with process/thread management
+- Added basic SMP support and CPU affinity
+- Implemented load balancing framework
+- Phase 1 overall progress now at ~40%
+
+### June 10, 2025 - Process Management Completion
+- Completed process management implementation (85% - core features done)
+- Implemented all process system calls
+- Fixed CI failures across all architectures
+- Updated documentation to track deferred items
 
 ### June 9, 2025 - Major Memory Management Progress
 - Memory management now ~95% complete

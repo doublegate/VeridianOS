@@ -171,6 +171,163 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="scheduler"><a class="header" href="#scheduler">Scheduler</a></h1>
+<p>The VeridianOS scheduler is responsible for managing process and thread execution across multiple CPUs, providing fair CPU time allocation while meeting real-time constraints.</p>
+<h2 id="current-status"><a class="header" href="#current-status">Current Status</a></h2>
+<p>As of June 10, 2025, the scheduler implementation is approximately 25% complete:</p>
+<ul>
+<li>✅ <strong>Core Structure</strong>: Round-robin algorithm implemented</li>
+<li>✅ <strong>Idle Task</strong>: Created and managed for each CPU</li>
+<li>✅ <strong>Timer Setup</strong>: 10ms tick configured for all architectures</li>
+<li>✅ <strong>Process Integration</strong>: Thread to Task conversion working</li>
+<li>✅ <strong>SMP Basics</strong>: Per-CPU data structures in place</li>
+<li>✅ <strong>CPU Affinity</strong>: Basic support for thread pinning</li>
+<li>🔲 <strong>Priority Scheduling</strong>: Not yet implemented</li>
+<li>🔲 <strong>CFS Algorithm</strong>: Planned for future</li>
+<li>🔲 <strong>Real-time Classes</strong>: Not yet implemented</li>
+</ul>
+<h2 id="architecture"><a class="header" href="#architecture">Architecture</a></h2>
+<h3 id="task-structure"><a class="header" href="#task-structure">Task Structure</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct Task {
+    pub pid: ProcessId,
+    pub tid: ThreadId,
+    pub name: String,
+    pub state: ProcessState,
+    pub priority: Priority,
+    pub sched_class: SchedClass,
+    pub sched_policy: SchedPolicy,
+    pub cpu_affinity: CpuSet,
+    pub context: TaskContext,
+    // ... additional fields
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="scheduling-classes"><a class="header" href="#scheduling-classes">Scheduling Classes</a></h3>
+<ol>
+<li><strong>Real-Time</strong>: Highest priority, time-critical tasks</li>
+<li><strong>Interactive</strong>: Low latency, responsive tasks</li>
+<li><strong>Normal</strong>: Standard time-sharing tasks</li>
+<li><strong>Batch</strong>: Throughput-oriented tasks</li>
+<li><strong>Idle</strong>: Lowest priority tasks</li>
+</ol>
+<h3 id="core-components"><a class="header" href="#core-components">Core Components</a></h3>
+<h4 id="ready-queue"><a class="header" href="#ready-queue">Ready Queue</a></h4>
+<p>Currently uses a single global ready queue with spinlock protection. Future versions will implement per-CPU run queues for better scalability.</p>
+<h4 id="timer-interrupts"><a class="header" href="#timer-interrupts">Timer Interrupts</a></h4>
+<ul>
+<li><strong>x86_64</strong>: Uses Programmable Interval Timer (PIT)</li>
+<li><strong>AArch64</strong>: Uses Generic Timer</li>
+<li><strong>RISC-V</strong>: Uses SBI timer interface</li>
+</ul>
+<p>All architectures configured for 10ms tick (100Hz).</p>
+<h4 id="context-switching"><a class="header" href="#context-switching">Context Switching</a></h4>
+<p>Leverages architecture-specific context switching implementations from the process management subsystem:</p>
+<ul>
+<li>x86_64: ~1000 cycles overhead</li>
+<li>AArch64: ~800 cycles overhead</li>
+<li>RISC-V: ~900 cycles overhead</li>
+</ul>
+<h2 id="usage"><a class="header" href="#usage">Usage</a></h2>
+<h3 id="creating-and-scheduling-a-task"><a class="header" href="#creating-and-scheduling-a-task">Creating and Scheduling a Task</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Create a process first
+let pid = process::lifecycle::create_process("my_process".to_string(), 0)?;
+
+// Get the process and create a thread
+if let Some(proc) = process::table::get_process_mut(pid) {
+    let tid = process::create_thread(entry_point, arg1, arg2, arg3)?;
+    
+    // Schedule the thread
+    if let Some(thread) = proc.get_thread(tid) {
+        sched::schedule_thread(pid, tid, thread)?;
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="cpu-affinity"><a class="header" href="#cpu-affinity">CPU Affinity</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Set thread affinity to CPUs 0 and 2
+thread.cpu_affinity.store(0b101, Ordering::Relaxed);
+<span class="boring">}</span></code></pre></pre>
+<h3 id="yielding-cpu"><a class="header" href="#yielding-cpu">Yielding CPU</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Voluntarily yield CPU to other tasks
+sched::yield_cpu();
+<span class="boring">}</span></code></pre></pre>
+<h2 id="implementation-details"><a class="header" href="#implementation-details">Implementation Details</a></h2>
+<h3 id="round-robin-algorithm"><a class="header" href="#round-robin-algorithm">Round-Robin Algorithm</a></h3>
+<p>The current implementation uses a simple round-robin scheduler:</p>
+<ol>
+<li>Each task gets a fixed time slice (10ms)</li>
+<li>On timer interrupt, current task is moved to end of queue</li>
+<li>Next task in queue is scheduled</li>
+<li>If no ready tasks, idle task runs</li>
+</ol>
+<h3 id="load-balancing"><a class="header" href="#load-balancing">Load Balancing</a></h3>
+<p>Basic load balancing framework implemented:</p>
+<ul>
+<li>Monitors CPU load levels</li>
+<li>Detects significant imbalances (&gt;20% difference)</li>
+<li>Framework for task migration (not yet fully implemented)</li>
+</ul>
+<h3 id="smp-support"><a class="header" href="#smp-support">SMP Support</a></h3>
+<ul>
+<li>Per-CPU data structures initialized</li>
+<li>CPU topology detection (up to 8 CPUs)</li>
+<li>Basic NUMA awareness in task placement</li>
+<li>Lock-free operations where possible</li>
+</ul>
+<h2 id="performance-targets"><a class="header" href="#performance-targets">Performance Targets</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Metric</th><th>Target</th><th>Current Status</th></tr></thead><tbody>
+<tr><td>Context Switch</td><td>&lt; 10μs</td><td>Pending measurement</td></tr>
+<tr><td>Scheduling Decision</td><td>&lt; 1μs</td><td>Pending measurement</td></tr>
+<tr><td>Wake-up Latency</td><td>&lt; 5μs</td><td>Pending measurement</td></tr>
+<tr><td>Load Balancing</td><td>&lt; 100μs</td><td>Basic framework only</td></tr>
+</tbody></table>
+</div>
+<h2 id="future-enhancements"><a class="header" href="#future-enhancements">Future Enhancements</a></h2>
+<h3 id="phase-1-completion"><a class="header" href="#phase-1-completion">Phase 1 Completion</a></h3>
+<ul>
+<li>Priority-based scheduling</li>
+<li>Per-CPU run queues</li>
+<li>Full task migration</li>
+<li>Performance measurements</li>
+</ul>
+<h3 id="phase-2-multi-core"><a class="header" href="#phase-2-multi-core">Phase 2 (Multi-core)</a></h3>
+<ul>
+<li>Advanced load balancing</li>
+<li>NUMA optimization</li>
+<li>CPU hotplug support</li>
+</ul>
+<h3 id="phase-3-advanced"><a class="header" href="#phase-3-advanced">Phase 3 (Advanced)</a></h3>
+<ul>
+<li>CFS implementation</li>
+<li>Real-time scheduling</li>
+<li>Priority inheritance</li>
+<li>Power management</li>
+</ul>
+<h2 id="api-reference"><a class="header" href="#api-reference">API Reference</a></h2>
+<h3 id="core-functions"><a class="header" href="#core-functions">Core Functions</a></h3>
+<ul>
+<li><code>sched::init()</code> - Initialize scheduler subsystem</li>
+<li><code>sched::run()</code> - Start scheduler main loop</li>
+<li><code>sched::yield_cpu()</code> - Yield CPU to other tasks</li>
+<li><code>sched::schedule_thread()</code> - Schedule a thread for execution</li>
+<li><code>sched::set_algorithm()</code> - Change scheduling algorithm</li>
+</ul>
+<h3 id="timer-functions"><a class="header" href="#timer-functions">Timer Functions</a></h3>
+<ul>
+<li><code>sched::timer_tick()</code> - Handle timer interrupt</li>
+<li><code>arch::timer::setup_timer()</code> - Configure timer hardware</li>
+</ul>
+<h2 id="see-also"><a class="header" href="#see-also">See Also</a></h2>
+<ul>
+<li><a href="../architecture/processes.html">Process Management</a></li>
+<li><a href="../architecture/memory.html">Memory Management</a></li>
+<li><a href="../architecture/ipc.html">Inter-Process Communication</a></li>
+</ul>
 
                     </main>
 

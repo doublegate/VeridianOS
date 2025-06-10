@@ -175,8 +175,8 @@
 <p><strong>Latest Release</strong>: v0.1.0 - Foundation &amp; Tooling<br />
 <strong>Released</strong>: June 7, 2025<br />
 <strong>Current Phase</strong>: Phase 1 - Microkernel Core (Started June 8, 2025)<br />
-<strong>Phase 1 Progress</strong>: ~35% Overall - IPC System ~45% complete, Memory Management ~95% complete</p>
-<p>VeridianOS has successfully completed Phase 0 and is now actively developing the microkernel core. Major progress has been made on both the IPC (Inter-Process Communication) system and Memory Management subsystem, with virtual memory, heap allocation, and TLB management now fully implemented.</p>
+<strong>Phase 1 Progress</strong>: ~40% Overall - IPC System ~45% complete, Memory Management ~95% complete, Process Management ~85% complete, Scheduler ~25% complete</p>
+<p>VeridianOS has successfully completed Phase 0 and is now actively developing the microkernel core. Major progress has been made on the IPC (Inter-Process Communication) system, Memory Management subsystem, Process Management, and now the Scheduler. Virtual memory, heap allocation, TLB management, process control blocks, thread management, context switching, and basic round-robin scheduling are now implemented.</p>
 <h2 id="phase-0-achievements"><a class="header" href="#phase-0-achievements">Phase 0 Achievements</a></h2>
 <h3 id="infrastructure-"><a class="header" href="#infrastructure-">Infrastructure ✅</a></h3>
 <ul>
@@ -264,11 +264,38 @@
 <li>✅ Reserved memory region tracking</li>
 <li>✅ Bootloader memory map integration</li>
 </ul>
+<p><strong>Process Management (~85% Complete)</strong>:</p>
+<ul>
+<li>✅ Process Control Block (PCB) implementation</li>
+<li>✅ Thread management with ThreadContext trait</li>
+<li>✅ Context switching for all architectures</li>
+<li>✅ Process lifecycle management</li>
+<li>✅ Global process table with O(1) lookup</li>
+<li>✅ Synchronization primitives (Mutex, Semaphore, CondVar, RwLock, Barrier)</li>
+<li>✅ Memory management integration</li>
+<li>✅ IPC integration hooks</li>
+<li>✅ Process system calls (create, exit, wait, exec, fork, kill)</li>
+<li>🔲 Priority inheritance for mutexes (deferred)</li>
+<li>🔲 Signal handling subsystem (deferred)</li>
+<li>🔲 Process groups and sessions (deferred)</li>
+</ul>
+<p><strong>Scheduler (~25% Complete)</strong>:</p>
+<ul>
+<li>✅ Core scheduler structure with round-robin algorithm</li>
+<li>✅ Idle task creation and management</li>
+<li>✅ Timer setup for all architectures (10ms tick)</li>
+<li>✅ Process/Thread to Task integration</li>
+<li>✅ Basic SMP support with per-CPU data</li>
+<li>✅ CPU affinity support in scheduling</li>
+<li>✅ Load balancing framework (basic)</li>
+<li>🔲 Priority-based scheduling</li>
+<li>🔲 CFS (Completely Fair Scheduler)</li>
+<li>🔲 Real-time scheduling classes</li>
+<li>🔲 Full task migration between CPUs</li>
+</ul>
 <p><strong>Remaining Components</strong>:</p>
 <ul>
-<li>🔲 Process management</li>
 <li>🔲 Full capability system</li>
-<li>🔲 Scheduler implementation</li>
 </ul>
 <h3 id="phase-2-user-space-foundation"><a class="header" href="#phase-2-user-space-foundation">Phase 2: User Space Foundation</a></h3>
 <ul>
@@ -395,6 +422,23 @@ Performance optimization</li>
 </ol>
 <p>See our <a href="../contributing/how-to.html">Contributing Guide</a> for details.</p>
 <h2 id="recent-updates"><a class="header" href="#recent-updates">Recent Updates</a></h2>
+<h3 id="june-10-2025---scheduler-implementation-started"><a class="header" href="#june-10-2025---scheduler-implementation-started">June 10, 2025 - Scheduler Implementation Started</a></h3>
+<ul>
+<li>Implemented core scheduler with round-robin algorithm</li>
+<li>Created idle task for BSP (Bootstrap Processor)</li>
+<li>Set up timer interrupts for all architectures (10ms tick)</li>
+<li>Integrated scheduler with process/thread management</li>
+<li>Added basic SMP support and CPU affinity</li>
+<li>Implemented load balancing framework</li>
+<li>Phase 1 overall progress now at ~40%</li>
+</ul>
+<h3 id="june-10-2025---process-management-completion"><a class="header" href="#june-10-2025---process-management-completion">June 10, 2025 - Process Management Completion</a></h3>
+<ul>
+<li>Completed process management implementation (85% - core features done)</li>
+<li>Implemented all process system calls</li>
+<li>Fixed CI failures across all architectures</li>
+<li>Updated documentation to track deferred items</li>
+</ul>
 <h3 id="june-9-2025---major-memory-management-progress"><a class="header" href="#june-9-2025---major-memory-management-progress">June 9, 2025 - Major Memory Management Progress</a></h3>
 <ul>
 <li>Memory management now ~95% complete</li>

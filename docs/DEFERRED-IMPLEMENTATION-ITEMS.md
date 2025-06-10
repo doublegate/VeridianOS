@@ -2,7 +2,7 @@
 
 This document tracks features, code, and functionality that were removed, disabled, or marked as TODO during the Process Management implementation session (June 10, 2025) that need to be reimplemented or re-added in future work.
 
-**Last Updated**: June 10, 2025 (Second Session)
+**Last Updated**: June 10, 2025 (Evening - Scheduler Implementation)
 
 ## Process Management
 
@@ -458,3 +458,237 @@ let kernel_stack_size = 64 * 1024; // 64KB
 - argv/envp parameters not processed
 - No environment storage in process
 - No way to pass environment to new processes
+
+---
+
+## Scheduler Implementation Deferred Items (June 10, 2025 - Evening)
+
+### 1. Per-CPU Run Queues
+**Location**: `kernel/src/sched/scheduler.rs`
+**Status**: Single global ready queue only
+**Details**:
+- Currently uses single READY_QUEUE with spinlock
+- Need per-CPU queues for scalability
+- Requires migration between queues
+- Better cache locality with per-CPU design
+
+### 2. Priority Scheduling Algorithm
+**Location**: `kernel/src/sched/scheduler.rs`
+**Status**: Round-robin only
+**Details**:
+- Priority field exists but not used in scheduling decisions
+- Need priority queues or heap-based ready queue
+- Priority inheritance not implemented
+- Real-time priorities not enforced
+
+### 3. CFS (Completely Fair Scheduler)
+**Location**: `kernel/src/sched/mod.rs`
+**Status**: Not implemented
+**Details**:
+- Red-black tree for virtual runtime tracking
+- Fair time slice calculation
+- Nice value support
+- Load weight calculations
+
+### 4. Task Migration Implementation
+**Location**: `kernel/src/sched/mod.rs:425-466`
+**Status**: Framework only, no actual migration
+```rust
+fn balance_load() {
+    // TODO: Implement task migration
+    // For now, just log the imbalance
+}
+```
+**Details**:
+- Load detection works but no task movement
+- Need safe task migration between CPUs
+- Handle CPU affinity constraints
+- Update per-CPU statistics
+
+### 5. Context Switch Measurement
+**Location**: `kernel/src/sched/scheduler.rs`
+**Status**: No timing implemented
+**Details**:
+- Target < 10μs not measured
+- Need CPU cycle counters
+- Performance tracking infrastructure exists but unused
+- Scheduling latency not tracked
+
+### 6. Real-time Scheduling Classes
+**Location**: `kernel/src/sched/task.rs`
+**Status**: Enums defined but not implemented
+**Details**:
+- SchedClass::RealTime exists but treated same as Normal
+- No deadline tracking
+- No admission control
+- No priority ceiling protocol
+
+### 7. Idle Task Stack Allocation
+**Location**: `kernel/src/sched/mod.rs:171-172`
+**Status**: Uses Box::leak for stack
+```rust
+let idle_stack = Box::leak(Box::new([0u8; IDLE_STACK_SIZE]));
+```
+**Details**:
+- Memory leaked intentionally but not tracked
+- Should use proper kernel stack allocation
+- No guard pages for stack overflow detection
+
+### 8. CPU Hotplug Support
+**Location**: Throughout scheduler
+**Status**: Explicitly deferred to Phase 2
+**Details**:
+- No CPU online/offline handling
+- Per-CPU structures assume fixed CPU count
+- No task migration on CPU removal
+- No rebalancing on CPU addition
+
+### 9. NUMA Optimization
+**Location**: `kernel/src/sched/smp.rs`
+**Status**: Basic NUMA node tracking only
+**Details**:
+- NUMA node field exists but not used
+- No memory locality consideration
+- No NUMA-aware task placement
+- No cross-node migration penalties
+
+### 10. Power Management
+**Location**: Not implemented
+**Status**: No power awareness
+**Details**:
+- No CPU frequency scaling integration
+- No idle state management
+- No power-aware scheduling
+- No thermal throttling support
+
+### 11. Scheduler Statistics
+**Location**: `kernel/src/sched/smp.rs`
+**Status**: Structure exists, not updated
+```rust
+pub struct SchedulerStats {
+    pub context_switches: AtomicU64,
+    pub total_runtime: AtomicU64,
+    pub idle_time: AtomicU64,
+}
+```
+**Details**:
+- Statistics never incremented
+- No per-task statistics
+- No scheduling latency tracking
+- No load average calculation
+
+### 12. Test Tasks Memory Leak
+**Location**: `kernel/src/main.rs:285-328`
+**Status**: Test tasks marked with #[allow(dead_code)]
+**Details**:
+- test_task_1 and test_task_2 create serial ports repeatedly
+- No proper cleanup
+- Infinite loops without proper exit
+- Should be moved to tests directory
+
+### 13. Yield Implementation
+**Location**: `kernel/src/sched/mod.rs:123`
+**Status**: Minimal implementation
+```rust
+pub fn yield_cpu() {
+    SCHEDULER.lock().schedule();
+}
+```
+**Details**:
+- Doesn't mark task as voluntarily yielding
+- No yield statistics
+- Could be optimized to avoid scheduler overhead
+
+### 14. Timer Tick Handling
+**Location**: Architecture-specific timer modules
+**Status**: Basic integration only
+**Details**:
+- Fixed 10ms tick hardcoded
+- No dynamic tick (tickless) support
+- No high-resolution timers
+- Timer interrupt overhead not measured
+
+### 15. SMP Initialization
+**Location**: `kernel/src/sched/smp.rs`
+**Status**: Hardcoded for 8 CPUs
+```rust
+pub const MAX_CPUS: usize = 8;
+```
+**Details**:
+- Should detect actual CPU count
+- Per-CPU data pre-allocated for MAX_CPUS
+- No support for >8 CPUs
+- CPU topology detection incomplete
+
+### 16. Process to Task Integration Issues
+**Location**: `kernel/src/sched/mod.rs:321-382`
+**Status**: Complex conversion with raw pointers
+**Details**:
+- Uses Box::leak for task allocation
+- No proper lifetime management
+- Task cleanup on process exit incomplete
+- Memory potentially leaked on task termination
+
+### 17. Scheduler Lock Contention
+**Location**: `kernel/src/sched/scheduler.rs`
+**Status**: Single global SCHEDULER lock
+**Details**:
+- All scheduling decisions serialized
+- High contention on many-core systems
+- Need lock-free algorithms where possible
+- Per-CPU scheduler instances planned but not implemented
+
+### 18. Wake-up Lists
+**Location**: Not implemented
+**Status**: No wake-up optimization
+**Details**:
+- No tracking of which tasks to wake
+- No thundering herd prevention
+- No priority wake-up ordering
+- Required for efficient IPC/mutex implementation
+
+### 19. CPU Affinity Enforcement
+**Location**: `kernel/src/sched/mod.rs:393-418`
+**Status**: Basic support only
+**Details**:
+- Checks affinity but doesn't enforce during migration
+- No automatic rebalancing with affinity constraints
+- No soft vs hard affinity distinction
+- No CPU set inheritance
+
+### 20. Scheduling Domains
+**Location**: Not implemented
+**Status**: No hierarchical scheduling
+**Details**:
+- No concept of scheduling domains
+- No cache-aware scheduling
+- No package-level load balancing
+- Flat SMP model only
+
+---
+
+## Priority for Scheduler Completion
+
+1. **Critical** (Needed for basic functionality):
+   - Per-CPU run queues
+   - Proper context switch timing
+   - Task cleanup on exit
+   - Basic priority scheduling
+
+2. **Important** (Significant functionality):
+   - Task migration implementation
+   - Wake-up list optimization
+   - Scheduler statistics
+   - Load balancing completion
+
+3. **Enhancement** (Performance/Advanced features):
+   - CFS implementation
+   - Real-time scheduling
+   - NUMA optimization
+   - Power management
+
+4. **Future** (Phase 2+):
+   - CPU hotplug
+   - Scheduling domains
+   - Dynamic tick support
+   - Advanced load balancing

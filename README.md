@@ -35,13 +35,14 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 ### 🚀 Phase 1: Microkernel Core (In Progress)
 
 **Started**: June 8, 2025
-**Status**: ~35% overall progress
+**Status**: ~40% overall progress
 
 **Components**:
 
 - IPC System: ~45% complete (sync/async channels, registry, perf tracking, rate limiting done)
 - Memory Management: ~95% complete (frame allocator, virtual memory, page tables, bootloader integration complete)
-- Process Management: 100% complete (PCB, threads, context switching, synchronization primitives, syscalls done)
+- Process Management: 85% complete (PCB, threads, context switching, synchronization primitives, syscalls done)
+- Scheduler: ~25% complete (round-robin algorithm, idle task, timer setup, basic SMP support done)
 - Capability System: Not started
 
 **Phase 0 Achievements**:
@@ -257,8 +258,9 @@ VeridianOS builds upon ideas from many excellent operating systems:
 - [x] Complete Phase 0 (Foundation) - **DONE 2025-06-07!** ✅
 - [ ] Phase 1: Microkernel Core (4-5 months) - **IN PROGRESS**
   - [~] IPC implementation first (< 5μs latency target) - ~45% complete
-  - [~] Memory management (hybrid buddy + bitmap) - ~20% complete
-  - [ ] Thread management and scheduling
+  - [~] Memory management (hybrid buddy + bitmap) - ~95% complete
+  - [~] Process/Thread management - ~85% complete
+  - [~] Scheduler implementation - ~25% complete (round-robin working)
   - [ ] Capability system foundation
 - [ ] Phase 2: User Space Foundation (5-6 months)
   - [ ] Three-layer POSIX architecture

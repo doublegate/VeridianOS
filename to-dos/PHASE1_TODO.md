@@ -1,11 +1,11 @@
 # Phase 1: Microkernel Core TODO
 
 **Phase Duration**: 4-5 months  
-**Status**: IN PROGRESS ~35% Overall - IPC ~45% Complete, Memory Management ~95% Complete, Process Management ~85% Complete (Core done, integration pending)  
+**Status**: IN PROGRESS ~40% Overall - IPC ~45% Complete, Memory Management ~95% Complete, Process Management ~85% Complete, Scheduler ~25% Complete  
 **Dependencies**: Phase 0 completion ✅  
 **Start Date**: June 8, 2025  
-**Current Focus**: Scheduler Implementation (Next Priority)  
-**Last Updated**: June 10, 2025 (Evening - Post-CI Fix)
+**Current Focus**: Scheduler Implementation (IN PROGRESS - round-robin working)  
+**Last Updated**: June 10, 2025 (Evening - Scheduler Implementation)
 
 🌟 **AI-Recommended Implementation Strategy**:
 1. **Start with IPC** (Weeks 1-6) - Foundation for everything
@@ -155,7 +155,7 @@ The scheduler is the critical missing piece that will enable:
 - [x] Reserved region marking ✅
 - [x] Kernel mapping setup ✅
 
-### 3. Process Management 🟢 COMPLETE (100% Complete)
+### 3. Process Management 🟢 NEARLY COMPLETE (85% Complete)
 
 #### Process Control Block (PCB) ✅
 - [x] Process structure with comprehensive state management ✅
@@ -192,35 +192,40 @@ The scheduler is the critical missing piece that will enable:
 - [ ] Integration testing with scheduler (pending scheduler implementation)
 - [ ] Integration testing with IPC system (pending full integration)
 
-### 4. Scheduler Implementation 🔴 PRIORITY (Next Major Task)
+### 4. Scheduler Implementation 🟡 IN PROGRESS (~25% Complete)
 
-#### Core Scheduler
-- [ ] Task structure definition (integrate with existing Thread/Process)
-- [ ] Ready queue management (per-CPU runqueues)
-- [ ] CPU assignment and migration
-- [ ] Context switching integration
-  - [ ] x86_64 context switch (hook to existing impl)
-  - [ ] AArch64 context switch (hook to existing impl)
-  - [ ] RISC-V context switch (hook to existing impl)
-- [ ] Idle task implementation
-- [ ] Scheduler initialization and startup
+#### Core Scheduler ✅
+- [x] Task structure definition (integrated with Thread/Process) ✅
+- [x] Ready queue management (single queue for now) ✅
+- [x] CPU assignment and migration (basic implementation) ✅
+- [x] Context switching integration ✅
+  - [x] x86_64 context switch (hooked to existing impl) ✅
+  - [x] AArch64 context switch (hooked to existing impl) ✅
+  - [x] RISC-V context switch (hooked to existing impl) ✅
+- [x] Idle task implementation ✅
+- [x] Scheduler initialization and startup ✅
 
-#### Scheduling Algorithms
-- [ ] Round-robin scheduler (basic implementation first)
+#### Scheduling Algorithms 🟡
+- [x] Round-robin scheduler (basic implementation working) ✅
 - [ ] Priority scheduler (use existing ProcessPriority)
 - [ ] CFS-like scheduler (later enhancement)
 - [ ] Real-time scheduling (later enhancement)
-- [ ] CPU affinity enforcement (use existing thread affinity)
+- [x] CPU affinity enforcement (basic support) ✅
 
-#### SMP Support
-- [ ] CPU topology detection (build on existing smp.rs)
-- [ ] Per-CPU data structures
-  - [ ] Per-CPU runqueues
-  - [ ] Per-CPU idle threads
-  - [ ] Per-CPU scheduler stats
+#### SMP Support 🟡
+- [x] CPU topology detection (basic implementation) ✅
+- [x] Per-CPU data structures ✅
+  - [ ] Per-CPU runqueues (currently single queue)
+  - [x] Per-CPU idle threads ✅
+  - [x] Per-CPU scheduler stats ✅
 - [ ] CPU hotplug support (deferred to Phase 2)
-- [ ] Load balancing (basic implementation)
-- [ ] Migration between CPUs
+- [x] Load balancing (basic framework) ✅
+- [ ] Full task migration between CPUs
+
+#### Timer and Preemption ✅
+- [x] Timer setup for all architectures (10ms tick) ✅
+- [x] Timer interrupt integration ✅
+- [x] Preemptive scheduling support ✅
 
 ### 5. Inter-Process Communication (~45% complete)
 

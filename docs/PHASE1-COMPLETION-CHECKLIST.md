@@ -4,11 +4,11 @@
 
 This document tracks the specific tasks required to complete Phase 1 (Microkernel Core). Phase 1 establishes the fundamental OS services: memory management, process management, IPC, and capability-based security.
 
-**Current Status**: ~35% Complete  
+**Current Status**: ~40% Complete  
 **Started**: June 8, 2025  
 **Target Completion**: November 2025 (6 months)  
 **Last Updated**: June 10, 2025  
-**Critical Path**: Memory Management → Process Management → IPC → Capabilities
+**Critical Path**: Memory Management → Process Management → Scheduler → IPC → Capabilities
 
 ## Technical Tasks
 
@@ -48,7 +48,7 @@ This document tracks the specific tasks required to complete Phase 1 (Microkerne
   - [x] High memory support (32-bit)
   - [x] Zone balancing
 
-### 2. Process Management (100% Complete)
+### 2. Process Management (85% Complete)
 
 **Why Critical**: Processes are the unit of isolation and resource management. Required for IPC and capabilities.
 
@@ -93,7 +93,7 @@ This document tracks the specific tasks required to complete Phase 1 (Microkerne
   - [x] Zombie process cleanup
 
 - [x] **Synchronization Primitives**
-  - [x] Mutex implementation with priority inheritance
+  - [x] Mutex implementation (priority inheritance deferred)
   - [x] Semaphore with counting support
   - [x] Condition variables
   - [x] Read-write locks
@@ -102,8 +102,14 @@ This document tracks the specific tasks required to complete Phase 1 (Microkerne
 - [x] **System Integration**
   - [x] Process system calls (create, fork, exec, exit, wait, kill)
   - [x] Architecture-specific context switching fully implemented
-  - [ ] Integration with scheduler (pending scheduler implementation)
+  - [ ] Integration with scheduler (partial - needs completion)
   - [ ] Integration with IPC system (pending full integration)
+
+**Deferred to Later Phases**:
+- [ ] Priority inheritance for mutexes
+- [ ] Signal handling subsystem
+- [ ] Process groups and sessions
+- [ ] Advanced thread features (thread cancellation, thread-specific data)
 
 ### 3. Inter-Process Communication (~45% Complete)
 
@@ -166,27 +172,40 @@ This document tracks the specific tasks required to complete Phase 1 (Microkerne
   - [ ] Process capabilities
   - [ ] Hardware access capabilities
 
-### 5. Basic Scheduler (0% Complete)
+### 5. Basic Scheduler (~25% Complete)
 
 **Why Critical**: Required for process switching and IPC blocking operations.
 
-- [ ] **Scheduler Core**
-  - [ ] Round-robin scheduling
-  - [ ] Priority levels (at least 3)
-  - [ ] Multi-core support
-  - [ ] Load balancing
+- [x] **Scheduler Core**
+  - [x] Round-robin scheduling (basic implementation)
+  - [ ] Priority levels (structure exists, not enforced)
+  - [x] Multi-core support (basic SMP structures)
+  - [x] Load balancing (framework only)
 
-- [ ] **Scheduling Operations**
-  - [ ] yield() system call
-  - [ ] Block/wake operations
-  - [ ] Timer interrupts
-  - [ ] Idle process
+- [x] **Scheduling Operations**
+  - [x] yield() system call
+  - [ ] Block/wake operations (partial)
+  - [x] Timer interrupts (10ms tick)
+  - [x] Idle process
 
 - [ ] **Performance Targets**
-  - [ ] Context switch < 10μs
-  - [ ] Scheduling decision < 1μs
-  - [ ] Fair CPU distribution
-  - [ ] Low scheduling overhead
+  - [ ] Context switch < 10μs (not measured)
+  - [ ] Scheduling decision < 1μs (not measured)
+  - [ ] Fair CPU distribution (round-robin only)
+  - [x] Low scheduling overhead (simple algorithm)
+
+- [x] **Timer Infrastructure**
+  - [x] x86_64 PIT timer setup
+  - [x] AArch64 generic timer
+  - [x] RISC-V SBI timer
+  - [x] Preemptive scheduling support
+
+**Remaining Work**:
+- [ ] Priority-based scheduling
+- [ ] Per-CPU run queues
+- [ ] Full task migration
+- [ ] Context switch measurement
+- [ ] CFS or advanced algorithms
 
 ## Integration Testing
 

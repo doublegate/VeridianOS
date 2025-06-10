@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Phase 1 Progress (Started June 8, 2025) - Updated June 10, 2025
 
-- Phase 1 ~35% overall complete
+- Phase 1 ~40% overall complete
 - IPC implementation ~45% complete
   - ✅ Synchronous message passing with ring buffers
   - ✅ Fast path IPC with register-based transfer (<1μs latency achieved)
@@ -45,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Kernel code/data regions reserved
     - Boot information structures preserved
   - 🔲 Memory zones (DMA, Normal, High) pending
-- Process management 100% complete
+- Process management 85% complete
   - ✅ Process Control Block (PCB) with comprehensive state management
   - ✅ Thread management with full ThreadContext trait implementation
   - ✅ Context switching for all architectures (x86_64, AArch64, RISC-V)
@@ -56,6 +56,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - ✅ IPC integration hooks
   - ✅ Process system calls integration (create, exit, wait, exec, fork, kill)
   - ✅ Architecture-specific context switching fully implemented
+  - 🔲 Deferred: Priority inheritance for mutexes
+  - 🔲 Deferred: Signal handling subsystem
+  - 🔲 Deferred: Process groups and sessions
+- Scheduler ~25% complete
+  - ✅ Core scheduler structure with round-robin algorithm
+  - ✅ Idle task creation and management
+  - ✅ Timer setup for all architectures (10ms tick)
+  - ✅ Process/Thread to Task integration
+  - ✅ Basic SMP support with per-CPU data structures
+  - ✅ CPU affinity support in task scheduling
+  - ✅ Load balancing framework (basic implementation)
+  - 🔲 Priority scheduler implementation pending
+  - 🔲 CFS scheduler implementation pending
+  - 🔲 Real-time scheduling classes pending
+  - 🔲 Full task migration between CPUs pending
 - Full capability system not yet started
 
 ## [0.1.0] - 2025-06-07
