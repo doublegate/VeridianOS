@@ -279,6 +279,7 @@ pub fn init_fpu() {
 }
 
 /// Check if CPU supports F extension
+#[allow(dead_code)]
 pub fn has_f_extension() -> bool {
     // Check misa register
     unsafe {
@@ -289,6 +290,7 @@ pub fn has_f_extension() -> bool {
 }
 
 /// Check if CPU supports D extension
+#[allow(dead_code)]
 pub fn has_d_extension() -> bool {
     // Check misa register
     unsafe {

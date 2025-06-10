@@ -162,10 +162,10 @@ Currently implementing in phases:
 - **Testing**: ✅ No-std test framework and benchmarks implemented
 - **Documentation**: ✅ Rustdoc and mdBook configured with automatic deployment
 - **Version Control**: ✅ Git hooks, PR templates, and release automation ready
-- **Current Work**: Process management system complete
-  - Latest: Implemented full process/thread lifecycle, context switching, and system calls
-  - All architectures supported with proper ThreadContext trait abstraction
-  - Comprehensive synchronization primitives and TLS support
+- **Current Work**: AArch64 build fixes and API migration complete
+  - Latest: Fixed all AArch64 compilation errors and updated test/benchmark APIs
+  - All architectures building successfully with clean CI/CD pipeline
+  - Complete IPC API migration in tests and benchmarks
   - Ready for scheduler integration and capability system implementation
 
 ## Implementation Status

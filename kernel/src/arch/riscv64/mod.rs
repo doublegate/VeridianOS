@@ -3,6 +3,7 @@
 pub mod boot;
 
 // Re-export context and timer from parent riscv module
+#[allow(unused_imports)]
 pub use super::riscv::{context, timer};
 
 #[allow(dead_code)]
