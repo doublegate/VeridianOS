@@ -1,11 +1,11 @@
 # Phase 1: Microkernel Core TODO
 
 **Phase Duration**: 4-5 months  
-**Status**: IN PROGRESS ~35% Overall - IPC ~45% Complete, Memory Management ~95% Complete, Process Management 100% Complete  
+**Status**: IN PROGRESS ~35% Overall - IPC ~45% Complete, Memory Management ~95% Complete, Process Management ~85% Complete (Core done, integration pending)  
 **Dependencies**: Phase 0 completion ✅  
 **Start Date**: June 8, 2025  
-**Current Focus**: Process Management Implementation  
-**Last Updated**: June 10, 2025
+**Current Focus**: Scheduler Implementation (Next Priority)  
+**Last Updated**: June 10, 2025 (Evening - Post-CI Fix)
 
 🌟 **AI-Recommended Implementation Strategy**:
 1. **Start with IPC** (Weeks 1-6) - Foundation for everything
@@ -24,6 +24,22 @@
 ## Overview
 
 Phase 1 implements the core microkernel functionality including boot process, memory management, scheduling, IPC, and capability system.
+
+## 🎯 Next Implementation Priority: Scheduler
+
+The scheduler is the critical missing piece that will enable:
+1. **Process/Thread Execution**: Actually run the processes we can now create
+2. **IPC Blocking**: Allow processes to block on IPC operations
+3. **Context Switching**: Use the implemented architecture-specific code
+4. **System Integration**: Connect all subsystems together
+
+**Recommended Approach**:
+1. Start with simple round-robin scheduler
+2. Integrate with existing Thread/Process structures
+3. Hook up context switching implementations
+4. Add IPC blocking/waking support
+5. Implement basic priority scheduling
+6. Add SMP support incrementally
 
 ## 🎯 Goals
 
@@ -176,28 +192,35 @@ Phase 1 implements the core microkernel functionality including boot process, me
 - [ ] Integration testing with scheduler (pending scheduler implementation)
 - [ ] Integration testing with IPC system (pending full integration)
 
-### 4. Scheduler Implementation
+### 4. Scheduler Implementation 🔴 PRIORITY (Next Major Task)
 
 #### Core Scheduler
-- [ ] Task structure definition
-- [ ] Ready queue management
-- [ ] CPU assignment
-- [ ] Context switching
-  - [ ] x86_64 context switch
-  - [ ] AArch64 context switch
-  - [ ] RISC-V context switch
+- [ ] Task structure definition (integrate with existing Thread/Process)
+- [ ] Ready queue management (per-CPU runqueues)
+- [ ] CPU assignment and migration
+- [ ] Context switching integration
+  - [ ] x86_64 context switch (hook to existing impl)
+  - [ ] AArch64 context switch (hook to existing impl)
+  - [ ] RISC-V context switch (hook to existing impl)
+- [ ] Idle task implementation
+- [ ] Scheduler initialization and startup
 
 #### Scheduling Algorithms
-- [ ] Round-robin scheduler
-- [ ] Priority scheduler
-- [ ] CFS-like scheduler
-- [ ] Real-time scheduling
+- [ ] Round-robin scheduler (basic implementation first)
+- [ ] Priority scheduler (use existing ProcessPriority)
+- [ ] CFS-like scheduler (later enhancement)
+- [ ] Real-time scheduling (later enhancement)
+- [ ] CPU affinity enforcement (use existing thread affinity)
 
 #### SMP Support
-- [ ] CPU topology detection
+- [ ] CPU topology detection (build on existing smp.rs)
 - [ ] Per-CPU data structures
-- [ ] CPU hotplug support
-- [ ] Load balancing
+  - [ ] Per-CPU runqueues
+  - [ ] Per-CPU idle threads
+  - [ ] Per-CPU scheduler stats
+- [ ] CPU hotplug support (deferred to Phase 2)
+- [ ] Load balancing (basic implementation)
+- [ ] Migration between CPUs
 
 ### 5. Inter-Process Communication (~45% complete)
 
@@ -229,13 +252,17 @@ Phase 1 implements the core microkernel functionality including boot process, me
 - [ ] Context switching integration (needs scheduler)
 - [ ] Process table integration (needs process manager)
 
-### 6. Capability System
+### 6. Capability System 🟡 (Started - Needs Full Implementation)
 
 #### Capability Implementation
-- [ ] CSpace (capability space) structure
+- [x] Basic CapabilitySpace structure (stub exists)
+- [ ] CSpace (capability space) full implementation
+  - [ ] Replace stub insert/remove/lookup methods
+  - [ ] Actual capability storage (HashMap or BTreeMap)
+  - [ ] Capability validation and checking
 - [ ] CNode (capability node) management
 - [ ] Capability types:
-  - [ ] Endpoint caps
+  - [x] IPC Endpoint caps (basic structure)
   - [ ] Notification caps
   - [ ] Memory caps
   - [ ] Thread caps
@@ -245,9 +272,11 @@ Phase 1 implements the core microkernel functionality including boot process, me
 #### Capability Operations
 - [ ] Grant operation
 - [ ] Copy operation
-- [ ] Mint operation
-- [ ] Revoke operation
+- [ ] Mint operation (with rights restriction)
+- [ ] Revoke operation (with cascading revocation)
 - [ ] Delete operation
+- [ ] Capability inheritance on fork
+- [ ] Capability passing in IPC (hooks exist)
 
 #### Capability Derivation
 - [ ] Rights restriction
@@ -280,14 +309,26 @@ Phase 1 implements the core microkernel functionality including boot process, me
 - [ ] Time keeping
 - [ ] Tickless operation
 
-### 9. System Calls
-- [ ] System call interface design
-- [ ] Architecture-specific entry:
-  - [ ] x86_64 SYSCALL instruction
+### 9. System Calls 🟡 (Partially Complete)
+- [x] System call interface design (basic structure)
+- [x] Architecture-specific entry:
+  - [x] x86_64 SYSCALL instruction (basic)
   - [ ] AArch64 SVC instruction
   - [ ] RISC-V ECALL instruction
 - [ ] Parameter validation
-- [ ] Capability checking
+  - [ ] User space pointer validation
+  - [ ] Safe memory copying from/to user
+  - [ ] String validation and copying
+- [ ] Capability checking (integrate with cap system)
+- [x] Process syscalls (stubs implemented):
+  - [ ] sys_fork - needs proper memory COW
+  - [ ] sys_exec - needs file loading, argv/envp
+  - [ ] sys_exit - needs proper cleanup
+  - [ ] sys_wait - needs actual blocking
+  - [ ] sys_kill - needs signal delivery
+- [x] IPC syscalls (basic implementation):
+  - [ ] Integrate with scheduler for blocking
+  - [ ] Capability validation
 
 ## 🔧 Technical Specifications
 
@@ -325,6 +366,41 @@ Phase 1 implements the core microkernel functionality including boot process, me
 - [ ] No memory leaks detected
 - [ ] Stress tests pass
 
+## 🔧 Deferred Implementation Items (From Process Management)
+
+These items were identified during process management implementation and need to be addressed:
+
+### High Priority (Required for Phase 1 Completion)
+- [ ] **Scheduler Integration**: Complete context switching with scheduler
+- [ ] **Process Exit Cleanup**: Proper resource deallocation, zombie reaping
+- [ ] **User Space Memory Validation**: Safe pointer access from syscalls
+- [ ] **Thread Argument Passing**: Architecture-specific register setup
+- [ ] **Kernel Stack Management**: Proper TSS/thread-local storage setup
+- [ ] **Virtual Address Space Operations**: Actual page table updates in map/unmap
+- [ ] **IPC Blocking/Waking**: Integration with scheduler for blocking operations
+
+### Medium Priority (Can be partial for Phase 1)
+- [ ] **Copy-on-Write (COW)**: Page fault handling for fork optimization
+- [ ] **Memory Statistics Tracking**: Update stats on allocation/deallocation
+- [ ] **FPU State Management**: Save/restore on context switch
+- [ ] **Process State Machine**: Complete state transition validation
+- [ ] **Basic Signal Handling**: At least SIGKILL, SIGTERM
+- [ ] **Stack Allocation**: Proper allocation from memory manager (not hardcoded)
+
+### Low Priority (Can defer to Phase 2)
+- [ ] **Process Groups/Sessions**: Terminal control, job control
+- [ ] **Advanced Signals**: Full signal delivery mechanism
+- [ ] **Resource Limits**: RLIMIT enforcement
+- [ ] **Environment Variables**: argv/envp handling in exec
+- [ ] **File Descriptors**: Basic stdin/stdout/stderr
+- [ ] **Performance Optimizations**: Lock-free structures, per-CPU caching
+
+### Test Infrastructure Needed
+- [ ] Process lifecycle integration tests
+- [ ] Context switch benchmarks
+- [ ] System call test suite
+- [ ] Stress tests with many processes/threads
+
 ## 🚨 Blockers & Risks
 
 - **Risk**: Hardware compatibility issues
@@ -339,11 +415,12 @@ Phase 1 implements the core microkernel functionality including boot process, me
 | Component | Design | Implementation | Testing | Complete |
 |-----------|--------|----------------|---------|----------|
 | Boot Process | 🟢 | 🟢 | 🟢 | 🟢 |
-| Memory Manager | 🟢 | 🟢 | 🟡 | 🟡 |
-| Process Manager | 🟢 | 🟢 (100%) | 🟢 | 🟢 |
-| Scheduler | 🟢 | ⚪ | ⚪ | ⚪ |
+| Memory Manager | 🟢 | 🟢 (~95%) | 🟡 | 🟡 |
+| Process Manager | 🟢 | 🟡 (~85%) | 🟡 | 🟡 |
+| Scheduler | 🟢 | 🔴 (Priority) | ⚪ | ⚪ |
 | IPC | 🟢 | 🟡 (~45%) | 🟡 | ⚪ |
-| Capabilities | 🟢 | 🟡 (IPC only) | 🟡 | ⚪ |
+| Capabilities | 🟢 | 🟡 (Started) | ⚪ | ⚪ |
+| System Calls | 🟢 | 🟡 (Stubs) | ⚪ | ⚪ |
 
 ### IPC Implementation Progress (Started 2025-06-08)
 - ✅ Message format types (SmallMessage, LargeMessage)
@@ -397,15 +474,29 @@ Phase 1 implements the core microkernel functionality including boot process, me
 - 🔴 Integration testing with scheduler (awaiting scheduler)
 - 🔴 Integration testing with IPC (awaiting full system)
 
-## 📅 Timeline
+## 📅 Timeline (Updated)
 
-- **Week 1-2**: IPC core implementation (IN PROGRESS - Started June 8, 2025)
-- **Week 3-4**: IPC benchmarking and optimization
-- **Week 5-6**: Complete IPC with async channels
-- **Month 2**: Memory management implementation
-- **Month 3**: Scheduler and process management
-- **Month 4**: Full capability system integration
-- **Month 5**: Integration, testing, and optimization
+- **Week 1-2**: IPC core implementation ✅ (Completed June 9, 2025)
+- **Week 3**: Process Management implementation ✅ (Completed June 10, 2025)
+- **Week 4-5**: Scheduler implementation 🔴 (NEXT PRIORITY)
+  - Basic round-robin scheduler
+  - Integration with process/thread management
+  - Context switching hookup
+  - IPC blocking/waking
+- **Week 6-7**: Integration and fixes for deferred items
+  - User space memory validation
+  - Process exit cleanup
+  - Stack allocation from memory manager
+  - Basic signal handling
+- **Week 8-9**: Capability system full implementation
+  - Replace stub implementations
+  - Integrate with all subsystems
+  - Permission enforcement
+- **Week 10-12**: System integration and testing
+  - Complete system call implementations
+  - Integration testing
+  - Performance optimization
+  - Bug fixes and stabilization
 
 ## 🔗 References
 

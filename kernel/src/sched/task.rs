@@ -75,6 +75,11 @@ impl CpuSet {
         Self { mask: 1u64 << cpu }
     }
 
+    /// Create from raw mask
+    pub fn from_mask(mask: u64) -> Self {
+        Self { mask }
+    }
+
     /// Check if CPU is in set
     pub fn contains(&self, cpu: u8) -> bool {
         (self.mask & (1u64 << cpu)) != 0

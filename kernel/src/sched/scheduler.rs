@@ -384,26 +384,41 @@ fn load_context(_context: &super::task::TaskContext) {
 
 /// Get current CPU ID
 fn current_cpu() -> u8 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        // TODO: Read from per-CPU data
-        0
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // TODO: Read from TPIDR_EL1
-        0
-    }
-
-    #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-    {
-        crate::arch::riscv::context::hart_id() as u8
-    }
+    super::smp::current_cpu_id()
 }
 
 /// Default time slice
 const DEFAULT_TIME_SLICE: u32 = 10;
 
-/// Global scheduler instance
+/// Global scheduler instance (for BSP/CPU0)
 pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
+
+/// Get scheduler for current CPU
+pub fn current_scheduler() -> &'static Mutex<Scheduler> {
+    let cpu_id = current_cpu();
+
+    // Try to get per-CPU scheduler
+    if let Some(_cpu_data) = super::smp::per_cpu(cpu_id) {
+        // For now, return global scheduler
+        // TODO: Return &cpu_data.cpu_info.scheduler once we fix lifetime issues
+        &SCHEDULER
+    } else {
+        // Fallback to global scheduler
+        &SCHEDULER
+    }
+}
+
+/// Schedule on specific CPU
+pub fn schedule_on_cpu(cpu_id: u8, task: NonNull<Task>) {
+    if let Some(cpu_data) = super::smp::per_cpu(cpu_id) {
+        // Add to per-CPU ready queue
+        cpu_data.cpu_info.ready_queue.lock().enqueue(task);
+        cpu_data.cpu_info.nr_running.fetch_add(1, Ordering::Relaxed);
+        cpu_data.cpu_info.update_load();
+
+        // Send IPI if needed
+        if cpu_data.cpu_info.is_idle() {
+            super::smp::send_ipi(cpu_id, 0); // Wake up CPU
+        }
+    }
+}

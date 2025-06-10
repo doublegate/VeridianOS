@@ -45,6 +45,42 @@ impl VirtualAddress {
     }
 }
 
+/// Get kernel page table base address
+pub fn get_kernel_page_table() -> usize {
+    // Return the kernel page table base address
+    // This would be architecture-specific
+    #[cfg(target_arch = "x86_64")]
+    {
+        // CR3 holds the page table base
+        let cr3: u64;
+        unsafe {
+            core::arch::asm!("mov {}, cr3", out(reg) cr3);
+        }
+        cr3 as usize
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        // TTBR0_EL1 holds the page table base
+        let ttbr0: u64;
+        unsafe {
+            core::arch::asm!("mrs {}, TTBR0_EL1", out(reg) ttbr0);
+        }
+        ttbr0 as usize
+    }
+
+    #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+    {
+        // SATP holds the page table base
+        let satp: usize;
+        unsafe {
+            core::arch::asm!("csrr {}, satp", out(reg) satp);
+        }
+        // Extract PPN field (bits 43:0 on RV64)
+        (satp & 0xFFF_FFFFFFFF) << 12
+    }
+}
+
 /// Page size options
 #[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

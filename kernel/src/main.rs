@@ -174,28 +174,155 @@ pub extern "C" fn kernel_main() -> ! {
             }
         }
 
+        // Initialize IPC
+        writeln!(serial_port, "Initializing IPC...").unwrap();
+        ipc::init();
+        writeln!(serial_port, "IPC initialized").unwrap();
+
+        // Initialize process management
+        writeln!(serial_port, "Initializing process management...").unwrap();
+        process::init();
+        writeln!(serial_port, "Process management initialized").unwrap();
+
+        // Initialize scheduler
+        writeln!(serial_port, "Initializing scheduler...").unwrap();
+        sched::init();
+        writeln!(serial_port, "Scheduler initialized").unwrap();
+
+        // Create test processes
+        #[cfg(feature = "alloc")]
+        {
+            extern crate alloc;
+            use alloc::string::ToString;
+
+            writeln!(serial_port, "Creating test processes...").unwrap();
+
+            // Create first test process
+            match process::lifecycle::create_process("test_process_1".to_string(), 0) {
+                Ok(pid1) => {
+                    writeln!(serial_port, "Created test process 1 with PID {}", pid1.0).unwrap();
+
+                    // Create a thread for it
+                    if let Some(proc) = process::table::get_process_mut(pid1) {
+                        let entry = test_task_1 as usize;
+                        match process::create_thread(entry, 0, 0, 0) {
+                            Ok(tid) => {
+                                writeln!(
+                                    serial_port,
+                                    "Created thread {} for process {}",
+                                    tid.0, pid1.0
+                                )
+                                .unwrap();
+
+                                // Schedule the thread
+                                if let Some(thread) = proc.get_thread(tid) {
+                                    if let Err(e) = sched::schedule_thread(pid1, tid, thread) {
+                                        writeln!(serial_port, "Failed to schedule thread: {}", e)
+                                            .unwrap();
+                                    } else {
+                                        writeln!(serial_port, "Thread scheduled successfully")
+                                            .unwrap();
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                writeln!(serial_port, "Failed to create thread: {}", e).unwrap()
+                            }
+                        }
+                    }
+                }
+                Err(e) => writeln!(serial_port, "Failed to create process 1: {}", e).unwrap(),
+            }
+
+            // Create second test process
+            match process::lifecycle::create_process("test_process_2".to_string(), 0) {
+                Ok(pid2) => {
+                    writeln!(serial_port, "Created test process 2 with PID {}", pid2.0).unwrap();
+
+                    // Create a thread for it
+                    if let Some(proc) = process::table::get_process_mut(pid2) {
+                        let entry = test_task_2 as usize;
+                        match process::create_thread(entry, 0, 0, 0) {
+                            Ok(tid) => {
+                                writeln!(
+                                    serial_port,
+                                    "Created thread {} for process {}",
+                                    tid.0, pid2.0
+                                )
+                                .unwrap();
+
+                                // Schedule the thread
+                                if let Some(thread) = proc.get_thread(tid) {
+                                    if let Err(e) = sched::schedule_thread(pid2, tid, thread) {
+                                        writeln!(serial_port, "Failed to schedule thread: {}", e)
+                                            .unwrap();
+                                    } else {
+                                        writeln!(serial_port, "Thread scheduled successfully")
+                                            .unwrap();
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                writeln!(serial_port, "Failed to create thread: {}", e).unwrap()
+                            }
+                        }
+                    }
+                }
+                Err(e) => writeln!(serial_port, "Failed to create process 2: {}", e).unwrap(),
+            }
+        }
+
         // For now, let's just loop with serial output
         writeln!(serial_port, "Kernel initialization complete!").unwrap();
 
-        // Simple loop with periodic output
-        let mut counter = 0u64;
-        loop {
-            if counter % 100000000 == 0 {
-                writeln!(serial_port, "VeridianOS running... {}", counter / 100000000).unwrap();
-            }
-            counter = counter.wrapping_add(1);
+        // Start scheduler - this will run the idle task
+        writeln!(serial_port, "Starting scheduler...").unwrap();
+        sched::run();
+    }
+}
 
-            // Also update VGA periodically on x86_64
-            #[cfg(target_arch = "x86_64")]
-            if counter % 100000000 == 0 {
-                unsafe {
-                    let vga_buffer = 0xb8000 as *mut u8;
-                    let offset = ((counter / 100000000) % 10) * 2;
-                    *vga_buffer.offset(20 + offset as isize) =
-                        b'0' + ((counter / 100000000) % 10) as u8;
-                    *vga_buffer.offset(21 + offset as isize) = 0x0f;
-                }
-            }
+// Test task 1
+#[cfg(feature = "alloc")]
+#[allow(dead_code)]
+extern "C" fn test_task_1() {
+    use core::fmt::Write;
+
+    // Use architecture-specific serial port initialization
+    let mut serial_port = arch::serial_init();
+    let mut counter = 0;
+
+    loop {
+        if counter % 1000 == 0 {
+            writeln!(serial_port, "[Task 1] Running... count={}", counter).unwrap();
+        }
+        counter += 1;
+
+        // Yield to other tasks
+        if counter % 100 == 0 {
+            sched::yield_cpu();
+        }
+    }
+}
+
+// Test task 2
+#[cfg(feature = "alloc")]
+#[allow(dead_code)]
+extern "C" fn test_task_2() {
+    use core::fmt::Write;
+
+    // Use architecture-specific serial port initialization
+    let mut serial_port = arch::serial_init();
+    let mut counter = 0;
+
+    loop {
+        if counter % 1000 == 0 {
+            writeln!(serial_port, "[Task 2] Running... count={}", counter).unwrap();
+        }
+        counter += 1;
+
+        // Yield to other tasks
+        if counter % 150 == 0 {
+            sched::yield_cpu();
         }
     }
 }

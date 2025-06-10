@@ -140,14 +140,30 @@ Currently no low priority issues.
   - Applied same fix to x86_64 and riscv64 scripts
   - **Result: All architectures now work with GDB debugging!**
 
+### ISSUE-0008: AArch64 Dead Code Warnings
+- **Type**: Kernel/Build
+- **Severity**: P2
+- **Status**: FIXED
+- **Reporter**: CI Pipeline
+- **Assignee**: claude
+- **Created**: 2025-06-10
+- **Components**: Kernel/AArch64
+- **Description**: CI build failed with dead code warnings for AArch64 functions
+- **Root Cause**: Functions for future features (SVE, exception levels) not yet used
+- **Fix**: (2025-06-10, commit fa74131)
+  - Added #[allow(dead_code)] to has_sve(), enable_sve()
+  - Added #[allow(dead_code)] to current_el()
+  - Added #[allow(dead_code)] to timer tick()
+  - **Result: All architectures building cleanly!**
+
 ## 📊 Issue Statistics
 
 ### Overall Status
-- **Total Issues**: 7
+- **Total Issues**: 8
 - **Open Issues**: 0
 - **In Progress**: 0
-- **Fixed**: 7
-- **Verified**: 7 ✅
+- **Fixed**: 8
+- **Verified**: 8 ✅
 - **Closed**: 0
 
 **Note**: Memory management implementation completed with no outstanding issues!
@@ -155,7 +171,7 @@ Currently no low priority issues.
 ### By Component
 | Component | Open | In Progress | Fixed | Total |
 |-----------|------|-------------|-------|-------|
-| Kernel | 0 | 0 | 3 | 3 |
+| Kernel | 0 | 0 | 4 | 4 |
 | Drivers | 0 | 0 | 0 | 0 |
 | Services | 0 | 0 | 0 | 0 |
 | Libraries | 0 | 0 | 0 | 0 |

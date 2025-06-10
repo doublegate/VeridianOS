@@ -301,6 +301,7 @@ pub fn has_d_extension() -> bool {
 }
 
 /// Get current hart (hardware thread) ID
+#[allow(dead_code)]
 pub fn hart_id() -> usize {
     unsafe {
         let id: usize;
