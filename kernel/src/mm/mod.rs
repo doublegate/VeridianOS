@@ -15,6 +15,7 @@ pub mod vmm;
 pub use frame_allocator::{
     FrameAllocatorError, FrameNumber, PhysicalAddress, FRAME_ALLOCATOR, FRAME_SIZE,
 };
+#[allow(unused_imports)]
 pub use heap::init as init_heap;
 
 /// Virtual memory address

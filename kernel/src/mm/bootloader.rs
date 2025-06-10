@@ -216,12 +216,21 @@ pub fn process_memory_map(regions: &[BootloaderMemoryRegion]) -> Result<(), &'st
 
     drop(allocator);
 
+    #[cfg(target_arch = "x86_64")]
     println!(
         "[BOOT] Memory map processed: {} MB total, {} MB usable, {} reserved regions",
         total_memory / (1024 * 1024),
         usable_memory / (1024 * 1024),
         reserved_count
     );
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = total_memory;
+        let _ = usable_memory;
+        let _ = reserved_count;
+        println!("[BOOT] Memory map processed");
+    }
 
     Ok(())
 }

@@ -148,6 +148,7 @@ impl VirtualMemoryManager {
     }
 
     /// Map a 2MB large page
+    #[allow(unused_variables)]
     fn map_large_page(
         &mut self,
         virt: VirtualAddress,
@@ -182,6 +183,7 @@ impl VirtualMemoryManager {
     }
 
     /// Map a 1GB huge page
+    #[allow(unused_variables)]
     fn map_huge_page(
         &mut self,
         virt: VirtualAddress,
