@@ -171,6 +171,669 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="compiler-toolchain"><a class="header" href="#compiler-toolchain">Compiler Toolchain</a></h1>
+<p>VeridianOS provides a complete native compiler toolchain supporting C, C++, Rust, Go, Python, and Assembly across all target architectures (x86_64, AArch64, RISC-V). This chapter covers the toolchain architecture, implementation strategy, and development workflow.</p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<h3 id="design-philosophy"><a class="header" href="#design-philosophy">Design Philosophy</a></h3>
+<p>VeridianOS employs a <strong>unified LLVM-based approach</strong> for maximum consistency and maintainability:</p>
+<ol>
+<li><strong>LLVM Backend</strong>: Single backend for multiple language frontends</li>
+<li><strong>Cross-Platform</strong>: Native support for all target architectures</li>
+<li><strong>Self-Hosting</strong>: Complete native compilation capability</li>
+<li><strong>Capability-Aware</strong>: Integrated with VeridianOS security model</li>
+<li><strong>Modern Standards</strong>: Latest language standards and optimization techniques</li>
+</ol>
+<h3 id="toolchain-architecture"><a class="header" href="#toolchain-architecture">Toolchain Architecture</a></h3>
+<pre><code>┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+│   Clang     │  │    Rust     │  │     Go      │  │   Python    │
+│ (C/C++/ObjC)│  │  Frontend   │  │  Frontend   │  │  Frontend   │
+└──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘
+       │                 │                 │                 │
+       └─────────────────┴─────────────────┴─────────────────┘
+                                   │
+                             ┌─────▼─────┐
+                             │   LLVM    │
+                             │    IR     │
+                             └─────┬─────┘
+                                   │
+                  ┌────────────────┼────────────────┐
+                  │                │                │
+            ┌─────▼─────┐   ┌─────▼─────┐   ┌─────▼─────┐
+            │  x86_64   │   │  AArch64  │   │  RISC-V   │
+            │  Backend  │   │  Backend  │   │  Backend  │
+            └───────────┘   └───────────┘   └───────────┘
+</code></pre>
+<h2 id="language-support"><a class="header" href="#language-support">Language Support</a></h2>
+<h3 id="cc-compilation"><a class="header" href="#cc-compilation">C/C++ Compilation</a></h3>
+<p>VeridianOS uses <strong>Clang/LLVM</strong> as the primary C/C++ compiler with custom VeridianOS target support:</p>
+<pre><code class="language-bash"># Native compilation
+clang hello.c -o hello
+
+# Cross-compilation
+clang --target=aarch64-unknown-veridian hello.c -o hello-arm64
+
+# C++ with full standard library
+clang++ -std=c++20 app.cpp -o app -lstdc++
+</code></pre>
+<h4 id="veridianos-specific-extensions"><a class="header" href="#veridianos-specific-extensions">VeridianOS-Specific Extensions</a></h4>
+<pre><code class="language-c">// veridian/capability.h - Capability system integration
+#include &lt;veridian/capability.h&gt;
+
+int main() {
+    // Get file system capability
+    capability_t fs_cap = veridian_get_capability("vfs");
+    
+    // Open file using capability
+    int fd = veridian_open(fs_cap, "/etc/config", O_RDONLY);
+    
+    return 0;
+}
+</code></pre>
+<h4 id="standard-library-support"><a class="header" href="#standard-library-support">Standard Library Support</a></h4>
+<p><strong>C Standard Library (libc)</strong>:</p>
+<ul>
+<li>Based on <strong>musl libc</strong> for small size and security</li>
+<li>VeridianOS-specific syscall implementations</li>
+<li>Full C17 standard compliance</li>
+<li>Thread-safe and reentrant design</li>
+</ul>
+<p><strong>C++ Standard Library (libstdc++)</strong>:</p>
+<ul>
+<li>LLVM’s <strong>libc++</strong> implementation</li>
+<li>Full C++20 standard support</li>
+<li>STL containers, algorithms, and utilities</li>
+<li>Exception handling and RTTI support</li>
+</ul>
+<pre><code class="language-cpp">// Modern C++20 features supported
+#include &lt;ranges&gt;
+#include &lt;concepts&gt;
+#include &lt;coroutine&gt;
+
+std::vector&lt;int&gt; numbers = {1, 2, 3, 4, 5};
+auto even_squares = numbers 
+    | std::views::filter([](int n) { return n % 2 == 0; })
+    | std::views::transform([](int n) { return n * n; });
+</code></pre>
+<h3 id="rust-compilation"><a class="header" href="#rust-compilation">Rust Compilation</a></h3>
+<p>Rust enjoys <strong>first-class support</strong> in VeridianOS with a complete standard library implementation:</p>
+<pre><code class="language-toml"># Cargo.toml - Native VeridianOS Rust project
+[package]
+name = "veridian-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+veridian-std = "1.0"      # VeridianOS standard library extensions
+tokio = "1.0"             # Async runtime
+serde = "1.0"             # Serialization
+</code></pre>
+<h4 id="rust-standard-library"><a class="header" href="#rust-standard-library">Rust Standard Library</a></h4>
+<p>VeridianOS provides a <strong>complete Rust standard library</strong> with capability-based abstractions:</p>
+<pre><pre class="playground"><code class="language-rust">// std::fs with capability integration
+use std::fs::File;
+use std::io::prelude::*;
+
+fn main() -&gt; std::io::Result&lt;()&gt; {
+    // File operations automatically use capabilities
+    let mut file = File::create("hello.txt")?;
+    file.write_all(b"Hello, VeridianOS!")?;
+    
+    // Network operations
+    let listener = std::net::TcpListener::bind("127.0.0.1:8080")?;
+    
+    Ok(())
+}</code></pre></pre>
+<h4 id="asyncawait-support"><a class="header" href="#asyncawait-support">Async/Await Support</a></h4>
+<pre><pre class="playground"><code class="language-rust">// Full async ecosystem support
+use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+#[tokio::main]
+async fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+    let listener = TcpListener::bind("0.0.0.0:8080").await?;
+    
+    loop {
+        let (mut socket, _) = listener.accept().await?;
+        
+        tokio::spawn(async move {
+            let mut buf = [0; 1024];
+            let n = socket.read(&amp;mut buf).await.unwrap();
+            socket.write_all(&amp;buf[0..n]).await.unwrap();
+        });
+    }
+}</code></pre></pre>
+<h3 id="go-support"><a class="header" href="#go-support">Go Support</a></h3>
+<p>Go compilation uses <strong>gccgo</strong> initially, with plans for native Go runtime support:</p>
+<pre><code class="language-go">// hello.go - Basic Go program
+package main
+
+import (
+    "fmt"
+    "veridian/capability"
+)
+
+func main() {
+    // Access VeridianOS capabilities
+    cap, err := capability.Get("network")
+    if err != nil {
+        panic(err)
+    }
+    
+    fmt.Println("Hello from Go on VeridianOS!")
+    fmt.Printf("Network capability: %v\n", cap)
+}
+</code></pre>
+<h4 id="go-runtime-integration"><a class="header" href="#go-runtime-integration">Go Runtime Integration</a></h4>
+<pre><code class="language-go">// VeridianOS-specific runtime features
+package main
+
+import (
+    "runtime"
+    "veridian/ipc"
+)
+
+func main() {
+    // Goroutines work seamlessly
+    go func() {
+        // IPC communication
+        ch := ipc.NewChannel("service.example")
+        ch.Send([]byte("Hello, service!"))
+    }()
+    
+    runtime.Gosched() // Yield to VeridianOS scheduler
+}
+</code></pre>
+<h3 id="python-support"><a class="header" href="#python-support">Python Support</a></h3>
+<p>Python 3.12+ with <strong>CPython</strong> implementation and VeridianOS-specific modules:</p>
+<pre><code class="language-python"># Python with VeridianOS integration
+import veridian
+import asyncio
+
+# Access capabilities from Python
+def main():
+    # Get filesystem capability
+    fs_cap = veridian.get_capability('vfs')
+    
+    # Open file using capability
+    with veridian.open(fs_cap, '/etc/config', 'r') as f:
+        config = f.read()
+    
+    print(f"Config: {config}")
+
+# Async/await support
+async def async_example():
+    # Async I/O with VeridianOS
+    async with veridian.aio.open('/large/file') as f:
+        data = await f.read()
+    
+    return data
+
+if __name__ == "__main__":
+    main()
+    asyncio.run(async_example())
+</code></pre>
+<h4 id="python-package-management"><a class="header" href="#python-package-management">Python Package Management</a></h4>
+<pre><code class="language-bash"># VeridianOS Python package manager
+vpip install numpy pandas flask
+
+# Install packages for specific capability domains
+vpip install --domain=network requests urllib3
+vpip install --domain=graphics pillow matplotlib
+</code></pre>
+<h3 id="assembly-language"><a class="header" href="#assembly-language">Assembly Language</a></h3>
+<p>Multi-architecture assembler with <strong>unified syntax</strong> support:</p>
+<pre><code class="language-assembly"># hello.s - VeridianOS assembly program
+.section .text
+.global _start
+
+_start:
+    # Write system call (architecture-agnostic)
+    mov $STDOUT_FILENO, %rdi    # fd
+    mov $message, %rsi          # buffer
+    mov $message_len, %rdx      # count
+    mov $SYS_write, %rax        # syscall number
+    syscall
+    
+    # Exit system call
+    mov $0, %rdi                # exit code
+    mov $SYS_exit, %rax
+    syscall
+
+.section .data
+message:
+    .ascii "Hello, VeridianOS!\n"
+message_len = . - message
+</code></pre>
+<h2 id="build-systems"><a class="header" href="#build-systems">Build Systems</a></h2>
+<h3 id="cmake-integration"><a class="header" href="#cmake-integration">CMake Integration</a></h3>
+<p>VeridianOS provides <strong>first-class CMake support</strong> with target-specific toolchain files:</p>
+<pre><code class="language-cmake"># CMakeLists.txt - VeridianOS project
+cmake_minimum_required(VERSION 3.25)
+project(MyApp LANGUAGES C CXX)
+
+# VeridianOS automatically provides toolchain
+set(CMAKE_C_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
+
+# Find VeridianOS-specific libraries
+find_package(VeridianOS REQUIRED COMPONENTS Capability IPC)
+
+add_executable(myapp
+    src/main.cpp
+    src/app.cpp
+)
+
+target_link_libraries(myapp 
+    VeridianOS::Capability
+    VeridianOS::IPC
+)
+
+# Install with proper capabilities
+install(TARGETS myapp
+    RUNTIME DESTINATION bin
+    CAPABILITIES "vfs:read,network:connect"
+)
+</code></pre>
+<h3 id="autotools-support"><a class="header" href="#autotools-support">Autotools Support</a></h3>
+<pre><code class="language-bash"># Configure script with VeridianOS detection
+./configure --host=x86_64-unknown-veridian \
+           --with-veridian-capabilities \
+           --enable-ipc-integration
+
+make &amp;&amp; make install
+</code></pre>
+<h3 id="meson-build-system"><a class="header" href="#meson-build-system">Meson Build System</a></h3>
+<pre><code class="language-meson"># meson.build - VeridianOS project
+project('myapp', 'cpp',
+  version : '1.0.0',
+  default_options : ['cpp_std=c++20']
+)
+
+# VeridianOS dependencies
+veridian_dep = dependency('veridian-core')
+capability_dep = dependency('veridian-capability')
+
+executable('myapp',
+  'src/main.cpp',
+  dependencies : [veridian_dep, capability_dep],
+  install : true,
+  install_capabilities : ['vfs:read', 'network:connect']
+)
+</code></pre>
+<h2 id="cross-compilation"><a class="header" href="#cross-compilation">Cross-Compilation</a></h2>
+<h3 id="target-architecture-matrix"><a class="header" href="#target-architecture-matrix">Target Architecture Matrix</a></h3>
+<p>VeridianOS supports <strong>full cross-compilation</strong> between all supported architectures:</p>
+<div class="table-wrapper"><table><thead><tr><th>Host → Target</th><th>x86_64</th><th>AArch64</th><th>RISC-V</th></tr></thead><tbody>
+<tr><td><strong>x86_64</strong></td><td>Native</td><td>Cross</td><td>Cross</td></tr>
+<tr><td><strong>AArch64</strong></td><td>Cross</td><td>Native</td><td>Cross</td></tr>
+<tr><td><strong>RISC-V</strong></td><td>Cross</td><td>Cross</td><td>Native</td></tr>
+</tbody></table>
+</div>
+<h3 id="cross-compilation-commands"><a class="header" href="#cross-compilation-commands">Cross-Compilation Commands</a></h3>
+<pre><code class="language-bash"># Cross-compile C/C++ for different architectures
+clang --target=aarch64-unknown-veridian hello.c -o hello-arm64
+clang --target=riscv64-unknown-veridian hello.c -o hello-riscv
+
+# Cross-compile Rust
+cargo build --target aarch64-unknown-veridian
+cargo build --target riscv64gc-unknown-veridian
+
+# Cross-compile Go
+GOOS=veridian GOARCH=arm64 go build hello.go
+GOOS=veridian GOARCH=riscv64 go build hello.go
+</code></pre>
+<h3 id="sysroot-management"><a class="header" href="#sysroot-management">Sysroot Management</a></h3>
+<pre><code class="language-bash"># Sysroot organization
+/usr/lib/veridian-sysroots/
+├── x86_64-veridian/
+│   ├── usr/include/          # Headers
+│   ├── usr/lib/              # Libraries
+│   └── usr/bin/              # Tools
+├── aarch64-veridian/
+└── riscv64-veridian/
+
+# Use specific sysroot
+export VERIDIAN_SYSROOT=/usr/lib/veridian-sysroots/aarch64-veridian
+clang --sysroot=$VERIDIAN_SYSROOT hello.c -o hello
+</code></pre>
+<h2 id="performance-optimization"><a class="header" href="#performance-optimization">Performance Optimization</a></h2>
+<h3 id="compiler-optimization-levels"><a class="header" href="#compiler-optimization-levels">Compiler Optimization Levels</a></h3>
+<pre><code class="language-bash"># Standard optimization levels
+-O0                    # No optimization (debug)
+-O1                    # Basic optimization
+-O2                    # Standard optimization (default)
+-O3                    # Aggressive optimization
+-Os                    # Size optimization
+-Oz                    # Extreme size optimization
+
+# VeridianOS-specific optimizations
+-fveridian-ipc         # Optimize IPC calls
+-fcapability-inline    # Inline capability checks
+-fno-fork              # Disable fork() (not supported)
+</code></pre>
+<h3 id="link-time-optimization-lto"><a class="header" href="#link-time-optimization-lto">Link-Time Optimization (LTO)</a></h3>
+<pre><code class="language-bash"># Enable LTO for better optimization
+clang -flto=thin -O3 *.c -o optimized-app
+
+# LTO with specific targets
+clang -flto=thin --target=aarch64-unknown-veridian -O3 app.c -o app
+</code></pre>
+<h3 id="profile-guided-optimization-pgo"><a class="header" href="#profile-guided-optimization-pgo">Profile-Guided Optimization (PGO)</a></h3>
+<pre><code class="language-bash"># 1. Build instrumented binary
+clang -fprofile-instr-generate app.c -o app-instrumented
+
+# 2. Run with representative workload
+./app-instrumented &lt; test-input
+llvm-profdata merge default.profraw -o app.profdata
+
+# 3. Build optimized binary
+clang -fprofile-instr-use=app.profdata -O3 app.c -o app-optimized
+</code></pre>
+<h2 id="debugging-and-development"><a class="header" href="#debugging-and-development">Debugging and Development</a></h2>
+<h3 id="gdb-integration"><a class="header" href="#gdb-integration">GDB Integration</a></h3>
+<p>VeridianOS provides enhanced GDB support with capability and IPC awareness:</p>
+<pre><code class="language-gdb"># VeridianOS-specific GDB commands
+(gdb) info capabilities              # List process capabilities
+(gdb) watch capability 0x12345      # Watch capability usage
+(gdb) trace ipc-send                # Trace IPC operations
+(gdb) break capability-fault        # Break on capability violations
+
+# Pretty-printing for VeridianOS types
+(gdb) print my_capability
+Capability {
+  type: FileSystem,
+  rights: Read | Write,
+  object_id: 42,
+  generation: 1
+}
+</code></pre>
+<h3 id="lldb-support"><a class="header" href="#lldb-support">LLDB Support</a></h3>
+<pre><code class="language-lldb"># LLDB with VeridianOS extensions
+(lldb) plugin load VeridianOSDebugger
+(lldb) capability list
+(lldb) ipc trace enable
+(lldb) memory region --capabilities
+</code></pre>
+<h3 id="profiling-tools"><a class="header" href="#profiling-tools">Profiling Tools</a></h3>
+<pre><code class="language-bash"># Performance profiling
+perf record ./myapp
+perf report
+
+# Memory profiling
+valgrind --tool=memcheck ./myapp
+
+# VeridianOS-specific profilers
+veridian-prof --capabilities ./myapp    # Profile capability usage
+veridian-prof --ipc ./myapp             # Profile IPC performance
+</code></pre>
+<h2 id="ide-and-editor-support"><a class="header" href="#ide-and-editor-support">IDE and Editor Support</a></h2>
+<h3 id="visual-studio-code"><a class="header" href="#visual-studio-code">Visual Studio Code</a></h3>
+<pre><code class="language-json">// .vscode/c_cpp_properties.json
+{
+    "configurations": [{
+        "name": "VeridianOS",
+        "compilerPath": "/usr/bin/clang",
+        "compilerArgs": [
+            "--target=x86_64-unknown-veridian",
+            "-isystem/usr/include/veridian"
+        ],
+        "intelliSenseMode": "clang-x64",
+        "cStandard": "c17",
+        "cppStandard": "c++20",
+        "defines": ["__VERIDIAN__=1"]
+    }]
+}
+</code></pre>
+<h3 id="rust-analyzer"><a class="header" href="#rust-analyzer">Rust Analyzer</a></h3>
+<pre><code class="language-toml"># .cargo/config.toml
+[target.x86_64-unknown-veridian]
+linker = "veridian-ld"
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[build]
+target = "x86_64-unknown-veridian"
+</code></pre>
+<h3 id="clionintellij"><a class="header" href="#clionintellij">CLion/IntelliJ</a></h3>
+<pre><code class="language-cmake"># CMakePresets.json for CLion
+{
+    "version": 3,
+    "configurePresets": [{
+        "name": "veridian-debug",
+        "displayName": "VeridianOS Debug",
+        "toolchainFile": "/usr/share/cmake/VeridianOSToolchain.cmake",
+        "cacheVariables": {
+            "CMAKE_BUILD_TYPE": "Debug",
+            "VERIDIAN_TARGET_ARCH": "x86_64"
+        }
+    }]
+}
+</code></pre>
+<h2 id="package-management"><a class="header" href="#package-management">Package Management</a></h2>
+<h3 id="development-packages"><a class="header" href="#development-packages">Development Packages</a></h3>
+<pre><code class="language-bash"># Install base development tools
+vpkg install build-essential
+
+# Language-specific development environments
+vpkg install rust-dev          # Rust toolchain
+vpkg install python3-dev       # Python development
+vpkg install go-dev            # Go toolchain
+vpkg install nodejs-dev       # Node.js development
+
+# Cross-compilation toolchains
+vpkg install cross-aarch64     # ARM64 cross-compiler
+vpkg install cross-riscv64     # RISC-V cross-compiler
+</code></pre>
+<h3 id="library-development"><a class="header" href="#library-development">Library Development</a></h3>
+<pre><code class="language-toml"># Library package manifest
+[package]
+name = "libexample"
+version = "1.0.0"
+type = "library"
+
+[build]
+languages = ["c", "cpp", "rust"]
+targets = ["x86_64", "aarch64", "riscv64"]
+
+[exports]
+headers = ["include/example.h"]
+libraries = ["lib/libexample.a", "lib/libexample.so"]
+pkg-config = ["example.pc"]
+</code></pre>
+<h2 id="testing-framework"><a class="header" href="#testing-framework">Testing Framework</a></h2>
+<h3 id="unit-testing"><a class="header" href="#unit-testing">Unit Testing</a></h3>
+<pre><code class="language-c">// test_example.c - Unit testing with VeridianOS
+#include &lt;veridian/test.h&gt;
+
+VERIDIAN_TEST(test_basic_functionality) {
+    int result = my_function(42);
+    VERIDIAN_ASSERT_EQ(result, 84);
+}
+
+VERIDIAN_TEST(test_capability_access) {
+    capability_t cap = veridian_get_capability("test");
+    VERIDIAN_ASSERT_VALID_CAPABILITY(cap);
+}
+
+int main() {
+    return veridian_run_tests();
+}
+</code></pre>
+<h3 id="integration-testing"><a class="header" href="#integration-testing">Integration Testing</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// tests/integration.rs - Rust integration tests
+#[cfg(test)]
+mod tests {
+    use veridian_std::capability::Capability;
+    
+    #[test]
+    fn test_file_operations() {
+        let fs_cap = Capability::get("vfs").unwrap();
+        let file = fs_cap.open("/tmp/test", "w").unwrap();
+        file.write("test data").unwrap();
+    }
+    
+    #[test]
+    fn test_ipc_communication() {
+        let channel = veridian_std::ipc::Channel::new("test.service").unwrap();
+        channel.send(b"ping").unwrap();
+        let response = channel.receive().unwrap();
+        assert_eq!(response, b"pong");
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="benchmarking"><a class="header" href="#benchmarking">Benchmarking</a></h3>
+<pre><code class="language-cpp">// benchmark.cpp - Performance benchmarking
+#include &lt;veridian/benchmark.h&gt;
+
+VERIDIAN_BENCHMARK(ipc_latency) {
+    auto channel = veridian::ipc::Channel::create("benchmark");
+    
+    for (auto _ : state) {
+        channel.send("ping");
+        auto response = channel.receive();
+        veridian::benchmark::do_not_optimize(response);
+    }
+}
+
+VERIDIAN_BENCHMARK_MAIN();
+</code></pre>
+<h2 id="advanced-features"><a class="header" href="#advanced-features">Advanced Features</a></h2>
+<h3 id="custom-language-support"><a class="header" href="#custom-language-support">Custom Language Support</a></h3>
+<p>VeridianOS provides infrastructure for adding <strong>new programming languages</strong>:</p>
+<pre><code class="language-yaml"># lang_config.yaml - Language configuration
+language:
+  name: "mylang"
+  version: "1.0"
+  
+frontend:
+  type: "llvm"
+  source_extensions: [".ml"]
+  
+backend:
+  targets: ["x86_64", "aarch64", "riscv64"]
+  
+runtime:
+  garbage_collector: true
+  async_support: true
+  
+integration:
+  capability_aware: true
+  ipc_support: true
+</code></pre>
+<h3 id="compiler-plugins"><a class="header" href="#compiler-plugins">Compiler Plugins</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// compiler_plugin.rs - Extend compiler functionality
+use veridian_compiler_api::*;
+
+#[plugin]
+pub struct CapabilityChecker;
+
+impl CompilerPlugin for CapabilityChecker {
+    fn check_capability_usage(&amp;self, ast: &amp;AST) -&gt; Result&lt;(), CompilerError&gt; {
+        // Verify capability usage at compile time
+        for node in ast.nodes() {
+            if let ASTNode::CapabilityCall(call) = node {
+                self.validate_capability_call(call)?;
+            }
+        }
+        Ok(())
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="distributed-compilation"><a class="header" href="#distributed-compilation">Distributed Compilation</a></h3>
+<pre><code class="language-bash"># VeridianOS distributed build system
+veridian-distcc --nodes=build1,build2,build3 make -j12
+
+# Capability-secured build farm
+veridian-build-farm --submit project.tar.gz --targets=all-archs
+</code></pre>
+<h2 id="troubleshooting"><a class="header" href="#troubleshooting">Troubleshooting</a></h2>
+<h3 id="common-issues"><a class="header" href="#common-issues">Common Issues</a></h3>
+<p><strong>1. Missing Standard Library</strong></p>
+<pre><code class="language-bash"># Problem: "fatal error: 'stdio.h' file not found"
+# Solution: Install development headers
+vpkg install libc-dev
+
+# Verify installation
+ls /usr/include/stdio.h
+</code></pre>
+<p><strong>2. Cross-Compilation Failures</strong></p>
+<pre><code class="language-bash"># Problem: "cannot find crt0.o for target"
+# Solution: Install target-specific runtime
+vpkg install cross-aarch64-runtime
+
+# Set proper sysroot
+export VERIDIAN_SYSROOT=/usr/lib/veridian-sysroots/aarch64-veridian
+</code></pre>
+<p><strong>3. Capability Compilation Errors</strong></p>
+<pre><code class="language-c">// Problem: Capability functions not found
+// Solution: Include capability headers and link library
+#include &lt;veridian/capability.h&gt;
+// Compile with: clang app.c -lcapability
+</code></pre>
+<h3 id="debugging-compilation-issues"><a class="header" href="#debugging-compilation-issues">Debugging Compilation Issues</a></h3>
+<pre><code class="language-bash"># Verbose compilation
+clang -v hello.c -o hello
+
+# Show all search paths
+clang -print-search-dirs
+
+# Show target information
+clang --target=aarch64-unknown-veridian -print-targets
+
+# Debug linking
+clang -Wl,--verbose hello.c -o hello
+</code></pre>
+<h2 id="performance-tuning"><a class="header" href="#performance-tuning">Performance Tuning</a></h2>
+<h3 id="compilation-performance"><a class="header" href="#compilation-performance">Compilation Performance</a></h3>
+<pre><code class="language-bash"># Parallel compilation
+make -j$(nproc)               # Use all CPU cores
+ninja -j$(nproc)              # Ninja build system
+
+# Compilation caching
+export CCACHE_DIR=/var/cache/ccache
+ccache clang hello.c -o hello
+
+# Distributed compilation
+export DISTCC_HOSTS="localhost build1 build2"
+distcc clang hello.c -o hello
+</code></pre>
+<h3 id="runtime-performance"><a class="header" href="#runtime-performance">Runtime Performance</a></h3>
+<pre><code class="language-bash"># CPU-specific optimizations
+clang -march=native -mtune=native -O3 app.c -o app
+
+# Architecture-specific flags
+clang --target=aarch64-unknown-veridian -mcpu=cortex-a72 app.c -o app
+clang --target=riscv64-unknown-veridian -mcpu=rocket app.c -o app
+
+# Memory optimization
+clang -Os -flto=thin app.c -o app    # Optimize for size
+</code></pre>
+<h2 id="future-roadmap"><a class="header" href="#future-roadmap">Future Roadmap</a></h2>
+<h3 id="planned-enhancements"><a class="header" href="#planned-enhancements">Planned Enhancements</a></h3>
+<p><strong>Phase 5 (Performance &amp; Optimization)</strong>:</p>
+<ul>
+<li>Advanced PGO integration</li>
+<li>Automatic vectorization improvements</li>
+<li>JIT compilation support</li>
+<li>GPU compute integration</li>
+</ul>
+<p><strong>Phase 6 (Advanced Features)</strong>:</p>
+<ul>
+<li>Quantum computing language support</li>
+<li>WebAssembly native compilation</li>
+<li>Machine learning model compilation</li>
+<li>Real-time constraint verification</li>
+</ul>
+<h3 id="research-areas"><a class="header" href="#research-areas">Research Areas</a></h3>
+<ol>
+<li><strong>AI-Assisted Compilation</strong>: Machine learning for optimization decisions</li>
+<li><strong>Formal Verification</strong>: Mathematical proof of program correctness</li>
+<li><strong>Energy-Aware Compilation</strong>: Optimize for power consumption</li>
+<li><strong>Security Hardening</strong>: Automatic exploit mitigation insertion</li>
+</ol>
+<p>This comprehensive compiler toolchain provides VeridianOS with world-class development capabilities while maintaining the system’s security and performance principles.</p>
 
                     </main>
 

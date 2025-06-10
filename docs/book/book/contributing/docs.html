@@ -171,6 +171,665 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="documentation"><a class="header" href="#documentation">Documentation</a></h1>
+<p>This guide covers contributing to VeridianOS documentation, including writing standards, review processes, and maintenance procedures. Good documentation is essential for a successful open-source project, and we welcome contributions from developers, technical writers, and users.</p>
+<h2 id="documentation-architecture"><a class="header" href="#documentation-architecture">Documentation Architecture</a></h2>
+<h3 id="documentation-structure"><a class="header" href="#documentation-structure">Documentation Structure</a></h3>
+<p>VeridianOS uses a multi-layered documentation approach:</p>
+<pre><code>docs/
+├── book/                    # mdBook user documentation
+│   ├── src/                # Markdown source files
+│   └── book.toml           # mdBook configuration
+├── api/                    # API reference documentation
+├── design/                 # Design documents and specifications
+├── tutorials/              # Step-by-step guides
+├── rfcs/                   # Request for Comments (design proposals)
+└── internal/               # Internal development documentation
+</code></pre>
+<h3 id="documentation-types"><a class="header" href="#documentation-types">Documentation Types</a></h3>
+<p><strong>1. User Documentation (mdBook)</strong></p>
+<ul>
+<li>Getting started guides</li>
+<li>Architecture explanations</li>
+<li>API usage examples</li>
+<li>Troubleshooting guides</li>
+</ul>
+<p><strong>2. API Documentation (Rustdoc)</strong></p>
+<ul>
+<li>Automatically generated from code comments</li>
+<li>Function signatures and usage</li>
+<li>Examples and safety notes</li>
+</ul>
+<p><strong>3. Design Documents</strong></p>
+<ul>
+<li>System architecture specifications</li>
+<li>Implementation plans</li>
+<li>Decision records</li>
+</ul>
+<p><strong>4. Tutorials and Guides</strong></p>
+<ul>
+<li>Hands-on learning materials</li>
+<li>Best practices</li>
+<li>Common workflows</li>
+</ul>
+<h2 id="writing-standards"><a class="header" href="#writing-standards">Writing Standards</a></h2>
+<h3 id="markdown-style-guide"><a class="header" href="#markdown-style-guide">Markdown Style Guide</a></h3>
+<p>Follow these conventions for consistent documentation:</p>
+<h4 id="headers"><a class="header" href="#headers">Headers</a></h4>
+<pre><code class="language-markdown"># Main Title (H1) - Only one per document
+## Section (H2) - Main sections
+### Subsection (H3) - Detailed topics
+#### Sub-subsection (H4) - Specific details
+</code></pre>
+<h4 id="code-blocks"><a class="header" href="#code-blocks">Code Blocks</a></h4>
+<p>Always specify the language for syntax highlighting:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Rust code example
+fn example_function() -&gt; Result&lt;(), Error&gt; {
+    // Implementation
+    Ok(())
+}
+<span class="boring">}</span></code></pre></pre>
+<pre><code class="language-bash"># Shell commands
+cargo build --target x86_64-unknown-veridian
+</code></pre>
+<pre><code class="language-c">// C code for compatibility examples
+int main() {
+    printf("Hello, VeridianOS!\n");
+    return 0;
+}
+</code></pre>
+<h4 id="links-and-references"><a class="header" href="#links-and-references">Links and References</a></h4>
+<p>Use descriptive link text:</p>
+<pre><code class="language-markdown">&lt;!-- Good --&gt;
+See the [memory management design](../design/MEMORY-ALLOCATOR-DESIGN.md) for details.
+
+&lt;!-- Avoid --&gt;
+See [here](../design/MEMORY-ALLOCATOR-DESIGN.md) for details.
+</code></pre>
+<h4 id="tables"><a class="header" href="#tables">Tables</a></h4>
+<p>Use tables for structured information:</p>
+<pre><code class="language-markdown">| Feature | Status | Target |
+|---------|--------|--------|
+| **Memory Management** | ✅ Complete | Phase 1 |
+| **Process Management** | 🔄 In Progress | Phase 1 |
+| **IPC System** | ✅ Complete | Phase 1 |
+</code></pre>
+<h3 id="technical-writing-best-practices"><a class="header" href="#technical-writing-best-practices">Technical Writing Best Practices</a></h3>
+<h4 id="clarity-and-concision"><a class="header" href="#clarity-and-concision">Clarity and Concision</a></h4>
+<ul>
+<li>Use clear, direct language</li>
+<li>Avoid jargon when possible</li>
+<li>Define technical terms on first use</li>
+<li>Keep sentences concise</li>
+</ul>
+<h4 id="structure-and-organization"><a class="header" href="#structure-and-organization">Structure and Organization</a></h4>
+<ul>
+<li>Use hierarchical organization</li>
+<li>Include table of contents for long documents</li>
+<li>Group related information together</li>
+<li>Provide clear section breaks</li>
+</ul>
+<h4 id="code-examples"><a class="header" href="#code-examples">Code Examples</a></h4>
+<p>Always include complete, runnable examples:</p>
+<pre><pre class="playground"><code class="language-rust">// Complete example showing context
+use veridian_std::capability::Capability;
+use veridian_std::fs::File;
+
+fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+    // Get filesystem capability
+    let fs_cap = Capability::get("vfs")?;
+    
+    // Open file with capability
+    let file = File::open_with_capability(fs_cap, "/etc/config")?;
+    
+    // Read contents
+    let contents = file.read_to_string()?;
+    println!("Config: {}", contents);
+    
+    Ok(())
+}</code></pre></pre>
+<h4 id="error-handling-in-examples"><a class="header" href="#error-handling-in-examples">Error Handling in Examples</a></h4>
+<p>Show proper error handling:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Good: Shows error handling
+match veridian_operation() {
+    Ok(result) =&gt; {
+        // Handle success
+        println!("Operation succeeded: {:?}", result);
+    }
+    Err(e) =&gt; {
+        // Handle error appropriately
+        eprintln!("Operation failed: {}", e);
+        return Err(e.into());
+    }
+}
+
+// Avoid: Unwrapping without explanation
+let result = veridian_operation().unwrap(); // Don't do this in docs
+<span class="boring">}</span></code></pre></pre>
+<h2 id="api-documentation"><a class="header" href="#api-documentation">API Documentation</a></h2>
+<h3 id="rustdoc-standards"><a class="header" href="#rustdoc-standards">Rustdoc Standards</a></h3>
+<p>Follow these conventions for inline documentation:</p>
+<h4 id="module-documentation"><a class="header" href="#module-documentation">Module Documentation</a></h4>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>//! This module provides capability-based file system operations.
+//!
+//! VeridianOS uses capabilities to control access to file system resources,
+//! providing fine-grained security while maintaining POSIX compatibility.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use veridian_fs::{Capability, File};
+//!
+//! let fs_cap = Capability::get("vfs")?;
+//! let file = File::open_with_capability(fs_cap, "/etc/config")?;
+//! ```
+//!
+//! # Security Considerations
+//!
+//! All file operations require appropriate capabilities. See the
+//! [capability system documentation](../capability/index.html) for details.
+
+use crate::capability::Capability;
+<span class="boring">}</span></code></pre></pre>
+<h4 id="function-documentation"><a class="header" href="#function-documentation">Function Documentation</a></h4>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>/// Opens a file using the specified capability.
+///
+/// This function provides capability-based file access, ensuring that
+/// only processes with appropriate capabilities can access files.
+///
+/// # Arguments
+///
+/// * `capability` - The filesystem capability token
+/// * `path` - The path to the file to open
+/// * `flags` - File access flags (read, write, etc.)
+///
+/// # Returns
+///
+/// Returns a `File` handle on success, or an error if the operation fails.
+///
+/// # Errors
+///
+/// This function will return an error if:
+/// - The capability is invalid or insufficient
+/// - The file does not exist (when not creating)
+/// - Permission is denied by the capability system
+///
+/// # Examples
+///
+/// ```rust
+/// use veridian_fs::{Capability, File, OpenFlags};
+///
+/// let fs_cap = Capability::get("vfs")?;
+/// let file = File::open_with_capability(
+///     fs_cap,
+///     "/etc/config",
+///     OpenFlags::READ_ONLY
+/// )?;
+/// ```
+///
+/// # Safety
+///
+/// This function is safe to call from any context. All safety guarantees
+/// are provided by the capability system.
+pub fn open_with_capability(
+    capability: Capability,
+    path: &amp;str,
+    flags: OpenFlags,
+) -&gt; Result&lt;File, FileError&gt; {
+    // Implementation
+}
+<span class="boring">}</span></code></pre></pre>
+<h4 id="type-documentation"><a class="header" href="#type-documentation">Type Documentation</a></h4>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>/// A capability token that grants access to specific system resources.
+///
+/// Capabilities in VeridianOS are unforgeable tokens that represent
+/// the authority to perform specific operations on system resources.
+/// They provide fine-grained access control and are the foundation
+/// of VeridianOS's security model.
+///
+/// # Design
+///
+/// Capabilities are 64-bit tokens with the following structure:
+/// - Bits 0-31: Object ID (identifies the resource)
+/// - Bits 32-47: Generation counter (for revocation)
+/// - Bits 48-63: Rights bits (specific permissions)
+///
+/// # Examples
+///
+/// ```rust
+/// // Request a capability from the system
+/// let fs_cap = Capability::get("vfs")?;
+///
+/// // Derive a restricted capability
+/// let readonly_cap = fs_cap.derive(Rights::READ_ONLY)?;
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Capability {
+    token: u64,
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="documentation-testing"><a class="header" href="#documentation-testing">Documentation Testing</a></h3>
+<p>Ensure all code examples in documentation are tested:</p>
+<pre><pre class="playground"><code class="language-rust">/// # Examples
+///
+/// ```rust
+/// # use veridian_fs::*;
+/// # fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+/// let cap = Capability::get("vfs")?;
+/// let file = File::open_with_capability(cap, "/test", OpenFlags::READ_ONLY)?;
+/// # Ok(())
+/// # }
+/// ```</code></pre></pre>
+<p>Run documentation tests with:</p>
+<pre><code class="language-bash">cargo test --doc
+</code></pre>
+<h2 id="mdbook-documentation"><a class="header" href="#mdbook-documentation">mdBook Documentation</a></h2>
+<h3 id="book-structure"><a class="header" href="#book-structure">Book Structure</a></h3>
+<p>The main documentation book follows this structure:</p>
+<pre><code>src/
+├── introduction.md         # Project overview
+├── getting-started/        # Initial setup guides
+├── architecture/           # System design
+├── api/                   # API guides
+├── development/           # Development guides
+├── advanced/              # Advanced topics
+└── contributing/          # Contribution guides
+</code></pre>
+<h3 id="cross-references"><a class="header" href="#cross-references">Cross-References</a></h3>
+<p>Use relative links for internal references:</p>
+<pre><code class="language-markdown">&lt;!-- Reference to another chapter --&gt;
+For implementation details, see [Memory Management](../architecture/memory.md).
+
+&lt;!-- Reference to a specific section --&gt;
+The [IPC design](../architecture/ipc.md#zero-copy-implementation) explains
+the zero-copy mechanism.
+
+&lt;!-- Reference to API documentation --&gt;
+See the [`Capability`](../../api/capability/struct.Capability.html) API
+for usage details.
+</code></pre>
+<h3 id="building-the-book"><a class="header" href="#building-the-book">Building the Book</a></h3>
+<pre><code class="language-bash"># Install mdBook
+cargo install mdbook
+
+# Build the documentation
+cd docs/book
+mdbook build
+
+# Serve locally for development
+mdbook serve --open
+</code></pre>
+<h3 id="book-configuration"><a class="header" href="#book-configuration">Book Configuration</a></h3>
+<p>Configure <code>book.toml</code> for optimal presentation:</p>
+<pre><code class="language-toml">[book]
+title = "VeridianOS Documentation"
+authors = ["VeridianOS Team"]
+description = "Comprehensive documentation for VeridianOS"
+src = "src"
+language = "en"
+
+[output.html]
+theme = "theme"
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/doublegate/VeridianOS"
+edit-url-template = "https://github.com/doublegate/VeridianOS/edit/main/docs/book/{path}"
+
+[output.html.search]
+enable = true
+limit-results = 30
+teaser-word-count = 30
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 1
+boost-paragraph = 1
+expand = true
+heading-split-level = 3
+
+[output.html.print]
+enable = true
+</code></pre>
+<h2 id="contribution-workflow"><a class="header" href="#contribution-workflow">Contribution Workflow</a></h2>
+<h3 id="getting-started"><a class="header" href="#getting-started">Getting Started</a></h3>
+<ol>
+<li>
+<p><strong>Fork the Repository</strong></p>
+<pre><code class="language-bash">git clone https://github.com/your-username/VeridianOS.git
+cd VeridianOS
+</code></pre>
+</li>
+<li>
+<p><strong>Create Documentation Branch</strong></p>
+<pre><code class="language-bash">git checkout -b docs/your-improvement
+</code></pre>
+</li>
+<li>
+<p><strong>Make Changes</strong></p>
+<ul>
+<li>Edit documentation files</li>
+<li>Add new content</li>
+<li>Update existing content</li>
+</ul>
+</li>
+<li>
+<p><strong>Test Locally</strong></p>
+<pre><code class="language-bash"># Test mdBook
+cd docs/book &amp;&amp; mdbook serve
+
+# Test API docs
+cargo doc --open
+
+# Test code examples
+cargo test --doc
+</code></pre>
+</li>
+</ol>
+<h3 id="review-process"><a class="header" href="#review-process">Review Process</a></h3>
+<h4 id="self-review-checklist"><a class="header" href="#self-review-checklist">Self-Review Checklist</a></h4>
+<p>Before submitting, verify:</p>
+<ul>
+<li><input disabled="" type="checkbox"/>
+<strong>Accuracy</strong>: All technical information is correct</li>
+<li><input disabled="" type="checkbox"/>
+<strong>Completeness</strong>: No important information is missing</li>
+<li><input disabled="" type="checkbox"/>
+<strong>Clarity</strong>: Content is understandable by target audience</li>
+<li><input disabled="" type="checkbox"/>
+<strong>Examples</strong>: Code examples work and are tested</li>
+<li><input disabled="" type="checkbox"/>
+<strong>Links</strong>: All internal and external links work</li>
+<li><input disabled="" type="checkbox"/>
+<strong>Grammar</strong>: Proper spelling and grammar</li>
+<li><input disabled="" type="checkbox"/>
+<strong>Formatting</strong>: Consistent markdown formatting</li>
+<li><input disabled="" type="checkbox"/>
+<strong>Images</strong>: All images have alt text and are properly sized</li>
+</ul>
+<h4 id="submission"><a class="header" href="#submission">Submission</a></h4>
+<pre><code class="language-bash"># Commit changes
+git add docs/
+git commit -m "docs: improve capability system documentation
+
+- Add comprehensive examples for capability derivation
+- Clarify security implications
+- Update API reference links"
+
+# Push and create pull request
+git push origin docs/your-improvement
+</code></pre>
+<h4 id="pull-request-template"><a class="header" href="#pull-request-template">Pull Request Template</a></h4>
+<p>Use this template for documentation PRs:</p>
+<pre><code class="language-markdown">## Documentation Changes
+
+### Summary
+Brief description of what documentation was changed and why.
+
+### Changes Made
+- [ ] New documentation added
+- [ ] Existing documentation updated
+- [ ] Dead links fixed
+- [ ] Examples added/updated
+- [ ] API documentation improved
+
+### Target Audience
+Who is the primary audience for these changes?
+- [ ] New users
+- [ ] Experienced developers
+- [ ] API consumers
+- [ ] Contributors
+
+### Testing
+- [ ] All code examples tested
+- [ ] Links verified
+- [ ] mdBook builds successfully
+- [ ] Spell check completed
+
+### Related Issues
+Closes #XXX (if applicable)
+</code></pre>
+<h2 id="maintenance-and-updates"><a class="header" href="#maintenance-and-updates">Maintenance and Updates</a></h2>
+<h3 id="regular-maintenance-tasks"><a class="header" href="#regular-maintenance-tasks">Regular Maintenance Tasks</a></h3>
+<h4 id="monthly-reviews"><a class="header" href="#monthly-reviews">Monthly Reviews</a></h4>
+<ul>
+<li><strong>Link Checking</strong>: Verify all external links still work</li>
+<li><strong>Content Freshness</strong>: Update version numbers and dates</li>
+<li><strong>Example Validation</strong>: Ensure all examples still compile</li>
+<li><strong>Screenshot Updates</strong>: Update UI screenshots if changed</li>
+</ul>
+<h4 id="quarterly-audits"><a class="header" href="#quarterly-audits">Quarterly Audits</a></h4>
+<ul>
+<li><strong>Completeness Review</strong>: Identify missing documentation</li>
+<li><strong>User Feedback</strong>: Review GitHub issues for documentation requests</li>
+<li><strong>Metrics Analysis</strong>: Check documentation usage statistics</li>
+<li><strong>Reorganization</strong>: Improve structure based on usage patterns</li>
+</ul>
+<h3 id="version-management"><a class="header" href="#version-management">Version Management</a></h3>
+<h4 id="release-documentation"><a class="header" href="#release-documentation">Release Documentation</a></h4>
+<p>For each release, update:</p>
+<pre><code class="language-bash"># Update version references
+find docs/ -name "*.md" -exec sed -i 's/v0\.1\.0/v0.2.0/g' {} +
+
+# Update changelog
+echo "## Version 0.2.0" &gt;&gt; docs/CHANGELOG.md
+
+# Tag documentation
+git tag -a docs-v0.2.0 -m "Documentation for VeridianOS v0.2.0"
+</code></pre>
+<h4 id="deprecation-notices"><a class="header" href="#deprecation-notices">Deprecation Notices</a></h4>
+<p>Mark deprecated APIs clearly:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>/// # Deprecated
+///
+/// This function is deprecated since version 0.2.0. Use
+/// [`new_function`](fn.new_function.html) instead.
+///
+/// This function will be removed in version 1.0.0.
+#[deprecated(since = "0.2.0", note = "use `new_function` instead")]
+pub fn old_function() {
+    // Implementation
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="internationalization"><a class="header" href="#internationalization">Internationalization</a></h3>
+<h4 id="translation-framework"><a class="header" href="#translation-framework">Translation Framework</a></h4>
+<p>Prepare for future translations:</p>
+<pre><code class="language-markdown">&lt;!-- Use translation-friendly constructs --&gt;
+The system provides [security](security.md) through capabilities.
+
+&lt;!-- Avoid embedded screenshots with text --&gt;
+&lt;!-- Use diagrams that can be easily translated --&gt;
+</code></pre>
+<h4 id="content-organization"><a class="header" href="#content-organization">Content Organization</a></h4>
+<p>Structure content for translation:</p>
+<ul>
+<li>Keep sentences simple and direct</li>
+<li>Avoid idioms and cultural references</li>
+<li>Use consistent terminology</li>
+<li>Provide glossaries for technical terms</li>
+</ul>
+<h2 id="tools-and-automation"><a class="header" href="#tools-and-automation">Tools and Automation</a></h2>
+<h3 id="documentation-tools"><a class="header" href="#documentation-tools">Documentation Tools</a></h3>
+<p><strong>mdBook</strong>: Primary documentation platform</p>
+<pre><code class="language-bash">cargo install mdbook
+cargo install mdbook-toc          # Table of contents
+cargo install mdbook-linkcheck    # Link validation
+</code></pre>
+<p><strong>Rust Documentation</strong>: API documentation</p>
+<pre><code class="language-bash">cargo doc --workspace --no-deps --open
+</code></pre>
+<p><strong>Link Checking</strong>: Automated link validation</p>
+<pre><code class="language-bash"># Install link checker
+cargo install lychee
+
+# Check all documentation
+lychee docs/**/*.md
+</code></pre>
+<h3 id="automation-scripts"><a class="header" href="#automation-scripts">Automation Scripts</a></h3>
+<h4 id="document-generation-script"><a class="header" href="#document-generation-script">Document Generation Script</a></h4>
+<pre><code class="language-bash">#!/bin/bash
+# scripts/generate-docs.sh
+
+set -e
+
+echo "Generating VeridianOS documentation..."
+
+# Build API documentation
+echo "Building API documentation..."
+cargo doc --workspace --no-deps
+
+# Build user documentation
+echo "Building user guide..."
+cd docs/book
+mdbook build
+
+# Build design documents index
+echo "Generating design document index..."
+cd ../design
+find . -name "*.md" | sort &gt; index.txt
+
+echo "Documentation generation complete!"
+</code></pre>
+<h4 id="documentation-testing-1"><a class="header" href="#documentation-testing-1">Documentation Testing</a></h4>
+<pre><code class="language-bash">#!/bin/bash
+# scripts/test-docs.sh
+
+set -e
+
+echo "Testing documentation..."
+
+# Test code examples in docs
+cargo test --doc
+
+# Test mdBook builds
+cd docs/book
+mdbook test
+
+# Check links
+lychee --offline docs/**/*.md
+
+# Spell check (if available)
+if command -v aspell &amp;&gt; /dev/null; then
+    find docs/ -name "*.md" -exec aspell check {} \;
+fi
+
+echo "Documentation tests passed!"
+</code></pre>
+<h3 id="continuous-integration"><a class="header" href="#continuous-integration">Continuous Integration</a></h3>
+<p>Add documentation checks to CI:</p>
+<pre><code class="language-yaml"># .github/workflows/docs.yml
+name: Documentation
+
+on:
+  push:
+    paths: ['docs/**', '*.md']
+  pull_request:
+    paths: ['docs/**', '*.md']
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install mdBook
+        run: |
+          curl -L https://github.com/rust-lang/mdBook/releases/latest/download/mdbook-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          echo "$PWD" &gt;&gt; $GITHUB_PATH
+          
+      - name: Build documentation
+        run: |
+          # Build user guide
+          cd docs/book &amp;&amp; mdbook build
+          
+          # Build API documentation
+          cargo doc --workspace --no-deps
+          
+      - name: Check links
+        run: |
+          cargo install lychee
+          lychee --offline docs/**/*.md
+          
+      - name: Deploy to GitHub Pages
+        if: github.ref == 'refs/heads/main'
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./docs/book/book
+</code></pre>
+<h2 id="style-and-conventions"><a class="header" href="#style-and-conventions">Style and Conventions</a></h2>
+<h3 id="terminology"><a class="header" href="#terminology">Terminology</a></h3>
+<p>Use consistent terminology throughout documentation:</p>
+<div class="table-wrapper"><table><thead><tr><th>Preferred</th><th>Avoid</th></tr></thead><tbody>
+<tr><td><strong>VeridianOS</strong></td><td>Veridian OS, VeridianOS</td></tr>
+<tr><td><strong>capability</strong></td><td>cap, permission</td></tr>
+<tr><td><strong>microkernel</strong></td><td>micro kernel, μkernel</td></tr>
+<tr><td><strong>user space</strong></td><td>userspace, user-space</td></tr>
+<tr><td><strong>zero-copy</strong></td><td>zerocopy, zero copy</td></tr>
+</tbody></table>
+</div>
+<h3 id="voice-and-tone"><a class="header" href="#voice-and-tone">Voice and Tone</a></h3>
+<ul>
+<li><strong>Active Voice</strong>: “The system allocates memory” not “Memory is allocated”</li>
+<li><strong>Present Tense</strong>: “The function returns…” not “The function will return…”</li>
+<li><strong>Second Person</strong>: “You can configure…” not “One can configure…”</li>
+<li><strong>Confident</strong>: “This approach provides…” not “This approach should provide…”</li>
+</ul>
+<h3 id="code-style"><a class="header" href="#code-style">Code Style</a></h3>
+<p>Use consistent code formatting in examples:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Good: Consistent style
+pub struct Example {
+    field: u32,
+}
+
+impl Example {
+    pub fn new() -&gt; Self {
+        Self { field: 0 }
+    }
+}
+
+// Avoid: Inconsistent formatting
+pub struct Example{
+    field:u32,
+}
+impl Example{
+    pub fn new()-&gt;Self{
+        Self{field:0}
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="getting-help"><a class="header" href="#getting-help">Getting Help</a></h2>
+<h3 id="resources"><a class="header" href="#resources">Resources</a></h3>
+<ul>
+<li><strong>Matrix Chat</strong>: Join #veridian-docs:matrix.org for real-time help</li>
+<li><strong>GitHub Discussions</strong>: Ask questions in the documentation category</li>
+<li><strong>Documentation Issues</strong>: Report problems at https://github.com/doublegate/VeridianOS/issues</li>
+</ul>
+<h3 id="mentorship"><a class="header" href="#mentorship">Mentorship</a></h3>
+<p>New contributors can request documentation mentorship:</p>
+<ol>
+<li>Comment on a “good first issue” in the documentation category</li>
+<li>Mention your interest in learning technical writing</li>
+<li>A maintainer will provide guidance and review</li>
+</ol>
+<h3 id="style-questions"><a class="header" href="#style-questions">Style Questions</a></h3>
+<p>When in doubt about style or conventions:</p>
+<ol>
+<li>Check existing documentation for precedents</li>
+<li>Ask in the documentation chat channel</li>
+<li>Follow the principle of consistency over personal preference</li>
+</ol>
+<p>Contributing to VeridianOS documentation helps make the project accessible to users and developers worldwide. Your contributions, whether fixing typos or writing comprehensive guides, are valuable and appreciated!</p>
 
                     </main>
 

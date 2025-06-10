@@ -171,6 +171,486 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="driver-api"><a class="header" href="#driver-api">Driver API</a></h1>
+<p>VeridianOS implements a user-space driver model with capability-based access control and isolation. This API reference covers the framework for developing secure, high-performance drivers.</p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<h3 id="design-principles"><a class="header" href="#design-principles">Design Principles</a></h3>
+<ol>
+<li><strong>User-Space Isolation</strong>: Drivers run in separate processes for fault tolerance</li>
+<li><strong>Capability-Based Access</strong>: Hardware access requires explicit capabilities</li>
+<li><strong>Zero-Copy I/O</strong>: Minimize data movement for optimal performance</li>
+<li><strong>Async-First</strong>: Built on Rust’s async ecosystem</li>
+<li><strong>Hot-Plug Support</strong>: Dynamic device addition and removal</li>
+</ol>
+<h3 id="driver-architecture"><a class="header" href="#driver-architecture">Driver Architecture</a></h3>
+<pre><code>┌─────────────────────────────────────────────────────────┐
+│                    Applications                          │
+├─────────────────────────────────────────────────────────┤
+│                   Device Manager                         │
+├─────────────────────────────────────────────────────────┤
+│    Block Driver │ Network Driver │ Graphics Driver      │
+├─────────────────────────────────────────────────────────┤
+│              Driver Framework Library                    │
+├─────────────────────────────────────────────────────────┤
+│          Hardware Abstraction Layer (HAL)               │
+├─────────────────────────────────────────────────────────┤
+│    Capability System │ IPC │ Memory Management          │
+├─────────────────────────────────────────────────────────┤
+│                    Microkernel                          │
+└─────────────────────────────────────────────────────────┘
+</code></pre>
+<h2 id="core-driver-framework"><a class="header" href="#core-driver-framework">Core Driver Framework</a></h2>
+<h3 id="base-driver-trait"><a class="header" href="#base-driver-trait">Base Driver Trait</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>/// Core driver interface that all drivers must implement
+#[async_trait]
+pub trait Driver: Send + Sync {
+    /// Driver name and version information
+    fn info(&amp;self) -&gt; DriverInfo;
+    
+    /// Initialize the driver with hardware capabilities
+    async fn init(&amp;mut self, caps: HardwareCapabilities) -&gt; Result&lt;()&gt;;
+    
+    /// Start driver operations
+    async fn start(&amp;mut self) -&gt; Result&lt;()&gt;;
+    
+    /// Stop driver operations gracefully
+    async fn stop(&amp;mut self) -&gt; Result&lt;()&gt;;
+    
+    /// Handle power management events
+    async fn power_event(&amp;mut self, event: PowerEvent) -&gt; Result&lt;()&gt;;
+    
+    /// Handle hot-plug events
+    async fn device_event(&amp;mut self, event: DeviceEvent) -&gt; Result&lt;()&gt;;
+}
+
+/// Driver metadata
+pub struct DriverInfo {
+    pub name: &amp;'static str,
+    pub version: Version,
+    pub vendor: &amp;'static str,
+    pub device_types: &amp;'static [DeviceType],
+    pub capabilities_required: &amp;'static [CapabilityType],
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="hardware-capabilities"><a class="header" href="#hardware-capabilities">Hardware Capabilities</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>/// Hardware access capabilities
+pub struct HardwareCapabilities {
+    /// Memory-mapped I/O regions
+    pub mmio_regions: Vec&lt;MmioRegion&gt;,
+    
+    /// Port I/O access (x86 only)
+    pub port_ranges: Vec&lt;PortRange&gt;,
+    
+    /// Interrupt vectors
+    pub interrupts: Vec&lt;InterruptLine&gt;,
+    
+    /// DMA capabilities
+    pub dma_capability: Option&lt;DmaCapability&gt;,
+    
+    /// PCI configuration access
+    pub pci_access: Option&lt;PciCapability&gt;,
+}
+
+/// Memory-mapped I/O region
+pub struct MmioRegion {
+    pub base: PhysAddr,
+    pub size: usize,
+    pub access: MmioAccess,
+    pub cacheable: bool,
+}
+
+/// Port I/O range (x86)
+pub struct PortRange {
+    pub base: u16,
+    pub size: u16,
+    pub access: PortAccess,
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="device-types"><a class="header" href="#device-types">Device Types</a></h2>
+<h3 id="block-device-interface"><a class="header" href="#block-device-interface">Block Device Interface</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>/// Block device driver interface
+#[async_trait]
+pub trait BlockDevice: Driver {
+    /// Get device geometry
+    fn geometry(&amp;self) -&gt; BlockGeometry;
+    
+    /// Read blocks asynchronously
+    async fn read_blocks(
+        &amp;self,
+        start_lba: u64,
+        buffer: DmaBuffer,
+        count: u32,
+    ) -&gt; Result&lt;()&gt;;
+    
+    /// Write blocks asynchronously
+    async fn write_blocks(
+        &amp;self,
+        start_lba: u64,
+        buffer: DmaBuffer,
+        count: u32,
+    ) -&gt; Result&lt;()&gt;;
+    
+    /// Flush write cache
+    async fn flush(&amp;self) -&gt; Result&lt;()&gt;;
+    
+    /// Get device status
+    fn status(&amp;self) -&gt; DeviceStatus;
+}
+
+/// Block device geometry
+pub struct BlockGeometry {
+    pub block_size: u32,
+    pub total_blocks: u64,
+    pub max_transfer_blocks: u32,
+    pub alignment: u32,
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="network-device-interface"><a class="header" href="#network-device-interface">Network Device Interface</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>/// Network device driver interface
+#[async_trait]
+pub trait NetworkDevice: Driver {
+    /// Get MAC address
+    fn mac_address(&amp;self) -&gt; MacAddress;
+    
+    /// Get link status
+    fn link_status(&amp;self) -&gt; LinkStatus;
+    
+    /// Set promiscuous mode
+    async fn set_promiscuous(&amp;mut self, enable: bool) -&gt; Result&lt;()&gt;;
+    
+    /// Send packet
+    async fn send_packet(&amp;self, packet: NetworkPacket) -&gt; Result&lt;()&gt;;
+    
+    /// Receive packet (called by framework)
+    async fn packet_received(&amp;mut self, packet: NetworkPacket) -&gt; Result&lt;()&gt;;
+    
+    /// Get statistics
+    fn statistics(&amp;self) -&gt; NetworkStatistics;
+}
+
+/// Network packet representation
+pub struct NetworkPacket {
+    pub buffer: DmaBuffer,
+    pub length: usize,
+    pub timestamp: Instant,
+    pub flags: PacketFlags,
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="memory-management"><a class="header" href="#memory-management">Memory Management</a></h2>
+<h3 id="dma-operations"><a class="header" href="#dma-operations">DMA Operations</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>/// DMA buffer management
+pub struct DmaBuffer {
+    virtual_addr: VirtAddr,
+    physical_addr: PhysAddr,
+    size: usize,
+    direction: DmaDirection,
+}
+
+impl DmaBuffer {
+    /// Allocate DMA-coherent buffer
+    pub fn alloc_coherent(size: usize, direction: DmaDirection) -&gt; Result&lt;Self&gt;;
+    
+    /// Map existing memory for DMA
+    pub fn map_memory(
+        buffer: &amp;[u8],
+        direction: DmaDirection,
+    ) -&gt; Result&lt;Self&gt;;
+    
+    /// Synchronize buffer (for non-coherent DMA)
+    pub fn sync(&amp;self, sync_type: DmaSyncType);
+    
+    /// Get physical address for hardware
+    pub fn physical_addr(&amp;self) -&gt; PhysAddr;
+    
+    /// Get virtual address for CPU access
+    pub fn as_slice(&amp;self) -&gt; &amp;[u8];
+    
+    /// Get mutable slice (write/bidirectional only)
+    pub fn as_mut_slice(&amp;mut self) -&gt; Option&lt;&amp;mut [u8]&gt;;
+}
+
+/// DMA direction
+#[derive(Clone, Copy)]
+pub enum DmaDirection {
+    ToDevice,
+    FromDevice,
+    Bidirectional,
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="interrupt-handling"><a class="header" href="#interrupt-handling">Interrupt Handling</a></h2>
+<h3 id="interrupt-management"><a class="header" href="#interrupt-management">Interrupt Management</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>/// Interrupt handler interface
+#[async_trait]
+pub trait InterruptHandler: Send + Sync {
+    /// Handle interrupt
+    async fn handle_interrupt(&amp;self, vector: u32) -&gt; Result&lt;()&gt;;
+}
+
+/// Register interrupt handler
+pub async fn register_interrupt_handler(
+    vector: u32,
+    handler: Box&lt;dyn InterruptHandler&gt;,
+    flags: InterruptFlags,
+) -&gt; Result&lt;InterruptHandle&gt;;
+
+/// Interrupt registration flags
+#[derive(Clone, Copy)]
+pub struct InterruptFlags {
+    pub shared: bool,
+    pub edge_triggered: bool,
+    pub active_low: bool,
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="bus-interfaces"><a class="header" href="#bus-interfaces">Bus Interfaces</a></h2>
+<h3 id="pci-device-access"><a class="header" href="#pci-device-access">PCI Device Access</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>/// PCI device interface
+pub struct PciDevice {
+    pub bus: u8,
+    pub device: u8,
+    pub function: u8,
+    capability: PciCapability,
+}
+
+impl PciDevice {
+    /// Read PCI configuration space
+    pub fn config_read_u32(&amp;self, offset: u8) -&gt; Result&lt;u32&gt;;
+    
+    /// Write PCI configuration space
+    pub fn config_write_u32(&amp;self, offset: u8, value: u32) -&gt; Result&lt;()&gt;;
+    
+    /// Enable bus mastering
+    pub fn enable_bus_mastering(&amp;self) -&gt; Result&lt;()&gt;;
+    
+    /// Get BAR information
+    pub fn get_bar(&amp;self, bar: u8) -&gt; Result&lt;PciBar&gt;;
+    
+    /// Find capability
+    pub fn find_capability(&amp;self, cap_id: u8) -&gt; Option&lt;u8&gt;;
+}
+
+/// PCI Base Address Register
+pub enum PciBar {
+    Memory {
+        base: PhysAddr,
+        size: usize,
+        prefetchable: bool,
+        address_64bit: bool,
+    },
+    Io {
+        base: u16,
+        size: u16,
+    },
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="driver-registration"><a class="header" href="#driver-registration">Driver Registration</a></h2>
+<h3 id="device-manager-integration"><a class="header" href="#device-manager-integration">Device Manager Integration</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>/// Register a driver with the device manager
+pub async fn register_driver(
+    driver: Box&lt;dyn Driver&gt;,
+    device_matcher: DeviceMatcher,
+) -&gt; Result&lt;DriverHandle&gt;;
+
+/// Device matching criteria
+pub struct DeviceMatcher {
+    pub vendor_id: Option&lt;u16&gt;,
+    pub device_id: Option&lt;u16&gt;,
+    pub class_code: Option&lt;u8&gt;,
+    pub subclass: Option&lt;u8&gt;,
+    pub interface: Option&lt;u8&gt;,
+    pub custom_match: Option&lt;Box&lt;dyn Fn(&amp;DeviceInfo) -&gt; bool&gt;&gt;,
+}
+
+/// Driver handle for management
+pub struct DriverHandle {
+    id: DriverId,
+    // Internal management fields
+}
+
+impl DriverHandle {
+    /// Unregister the driver
+    pub async fn unregister(self) -&gt; Result&lt;()&gt;;
+    
+    /// Get driver statistics
+    pub fn statistics(&amp;self) -&gt; DriverStatistics;
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="error-handling"><a class="header" href="#error-handling">Error Handling</a></h2>
+<h3 id="driver-error-types"><a class="header" href="#driver-error-types">Driver Error Types</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>/// Comprehensive driver error types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriverError {
+    /// Hardware not found or not responding
+    HardwareNotFound,
+    
+    /// Insufficient capabilities
+    InsufficientCapabilities,
+    
+    /// Hardware initialization failed
+    InitializationFailed,
+    
+    /// Operation timeout
+    Timeout,
+    
+    /// DMA operation failed
+    DmaError,
+    
+    /// Interrupt registration failed
+    InterruptError,
+    
+    /// Device is busy
+    DeviceBusy,
+    
+    /// Invalid parameter
+    InvalidParameter,
+    
+    /// Resource exhaustion
+    OutOfResources,
+    
+    /// Hardware error
+    HardwareError,
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="performance-optimization"><a class="header" href="#performance-optimization">Performance Optimization</a></h2>
+<h3 id="best-practices"><a class="header" href="#best-practices">Best Practices</a></h3>
+<ol>
+<li><strong>Use Zero-Copy I/O</strong>: Leverage DMA buffers for large transfers</li>
+<li><strong>Batch Operations</strong>: Group small operations when possible</li>
+<li><strong>Async Design</strong>: Use async/await for non-blocking operations</li>
+<li><strong>Interrupt Coalescing</strong>: Reduce interrupt frequency for bulk operations</li>
+<li><strong>Memory Locality</strong>: Keep frequently accessed data in cache-friendly layouts</li>
+</ol>
+<h3 id="performance-monitoring"><a class="header" href="#performance-monitoring">Performance Monitoring</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>/// Driver performance metrics
+pub struct DriverStatistics {
+    pub operations_completed: u64,
+    pub bytes_transferred: u64,
+    pub errors_encountered: u64,
+    pub average_latency_ns: u64,
+    pub peak_bandwidth_mbps: u32,
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="example-implementation"><a class="header" href="#example-implementation">Example Implementation</a></h2>
+<h3 id="simple-block-driver"><a class="header" href="#simple-block-driver">Simple Block Driver</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use veridian_driver_framework::*;
+
+pub struct RamDiskDriver {
+    storage: Vec&lt;u8&gt;,
+    block_size: u32,
+    total_blocks: u64,
+}
+
+#[async_trait]
+impl Driver for RamDiskDriver {
+    fn info(&amp;self) -&gt; DriverInfo {
+        DriverInfo {
+            name: "RAM Disk Driver",
+            version: Version::new(1, 0, 0),
+            vendor: "VeridianOS",
+            device_types: &amp;[DeviceType::Block],
+            capabilities_required: &amp;[CapabilityType::Memory],
+        }
+    }
+    
+    async fn init(&amp;mut self, caps: HardwareCapabilities) -&gt; Result&lt;()&gt; {
+        // Initialize RAM disk
+        self.storage = vec![0; (self.total_blocks * self.block_size as u64) as usize];
+        Ok(())
+    }
+    
+    async fn start(&amp;mut self) -&gt; Result&lt;()&gt; {
+        // Register with block device manager
+        Ok(())
+    }
+    
+    async fn stop(&amp;mut self) -&gt; Result&lt;()&gt; {
+        // Clean shutdown
+        Ok(())
+    }
+    
+    async fn power_event(&amp;mut self, event: PowerEvent) -&gt; Result&lt;()&gt; {
+        // Handle power management
+        Ok(())
+    }
+    
+    async fn device_event(&amp;mut self, event: DeviceEvent) -&gt; Result&lt;()&gt; {
+        // Handle hot-plug events
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl BlockDevice for RamDiskDriver {
+    fn geometry(&amp;self) -&gt; BlockGeometry {
+        BlockGeometry {
+            block_size: self.block_size,
+            total_blocks: self.total_blocks,
+            max_transfer_blocks: 256,
+            alignment: 1,
+        }
+    }
+    
+    async fn read_blocks(
+        &amp;self,
+        start_lba: u64,
+        buffer: DmaBuffer,
+        count: u32,
+    ) -&gt; Result&lt;()&gt; {
+        let start_offset = (start_lba * self.block_size as u64) as usize;
+        let size = (count * self.block_size) as usize;
+        
+        let data = &amp;self.storage[start_offset..start_offset + size];
+        buffer.as_mut_slice().unwrap().copy_from_slice(data);
+        
+        Ok(())
+    }
+    
+    async fn write_blocks(
+        &amp;self,
+        start_lba: u64,
+        buffer: DmaBuffer,
+        count: u32,
+    ) -&gt; Result&lt;()&gt; {
+        let start_offset = (start_lba * self.block_size as u64) as usize;
+        let size = (count * self.block_size) as usize;
+        
+        self.storage[start_offset..start_offset + size]
+            .copy_from_slice(buffer.as_slice());
+        
+        Ok(())
+    }
+    
+    async fn flush(&amp;self) -&gt; Result&lt;()&gt; {
+        // No-op for RAM disk
+        Ok(())
+    }
+    
+    fn status(&amp;self) -&gt; DeviceStatus {
+        DeviceStatus::Ready
+    }
+}
+<span class="boring">}</span></code></pre></pre>
+<p>This driver API provides a comprehensive framework for developing secure, high-performance drivers in VeridianOS while maintaining the safety and isolation guarantees of the microkernel architecture.</p>
 
                     </main>
 

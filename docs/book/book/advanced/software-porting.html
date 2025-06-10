@@ -171,6 +171,589 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="software-porting-guide"><a class="header" href="#software-porting-guide">Software Porting Guide</a></h1>
+<p>This comprehensive guide covers porting existing Linux/POSIX software to VeridianOS. Despite being a microkernel OS with capability-based security, VeridianOS provides extensive POSIX compatibility to minimize porting effort while taking advantage of enhanced security features.</p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<h3 id="porting-philosophy"><a class="header" href="#porting-philosophy">Porting Philosophy</a></h3>
+<p>VeridianOS takes a <strong>pragmatic approach</strong> to software compatibility:</p>
+<ol>
+<li><strong>POSIX Compatibility Layer</strong>: Full POSIX API implementation for existing software</li>
+<li><strong>Capability Translation</strong>: Automatic translation from POSIX permissions to capabilities</li>
+<li><strong>Minimal Changes</strong>: Most software ports with little to no modification</li>
+<li><strong>Enhanced Security</strong>: Ported software benefits from capability-based isolation</li>
+<li><strong>Performance</strong>: Native APIs available for performance-critical applications</li>
+</ol>
+<h3 id="architecture-compatibility"><a class="header" href="#architecture-compatibility">Architecture Compatibility</a></h3>
+<p>VeridianOS supports software for all target architectures:</p>
+<div class="table-wrapper"><table><thead><tr><th>Architecture</th><th>Status</th><th>Target Triple</th></tr></thead><tbody>
+<tr><td><strong>x86_64</strong></td><td>✅ Full Support</td><td><code>x86_64-unknown-veridian</code></td></tr>
+<tr><td><strong>AArch64</strong></td><td>✅ Full Support</td><td><code>aarch64-unknown-veridian</code></td></tr>
+<tr><td><strong>RISC-V</strong></td><td>✅ Full Support</td><td><code>riscv64gc-unknown-veridian</code></td></tr>
+</tbody></table>
+</div>
+<h2 id="cross-compilation-setup"><a class="header" href="#cross-compilation-setup">Cross-Compilation Setup</a></h2>
+<h3 id="toolchain-installation"><a class="header" href="#toolchain-installation">Toolchain Installation</a></h3>
+<p>Install the VeridianOS cross-compilation toolchain:</p>
+<pre><code class="language-bash"># Download pre-built toolchain (recommended)
+curl -O https://releases.veridian-os.org/toolchain/veridian-toolchain-latest.tar.xz
+sudo tar -xf veridian-toolchain-latest.tar.xz -C /opt/
+
+# Add to PATH
+export PATH="/opt/veridian-toolchain/bin:$PATH"
+
+# Verify installation
+x86_64-unknown-veridian-gcc --version
+</code></pre>
+<h3 id="sysroot-configuration"><a class="header" href="#sysroot-configuration">Sysroot Configuration</a></h3>
+<p>Set up the target system root:</p>
+<pre><code class="language-bash"># Download VeridianOS sysroot
+curl -O https://releases.veridian-os.org/sysroot/veridian-sysroot-latest.tar.xz
+sudo mkdir -p /opt/veridian-sysroot
+sudo tar -xf veridian-sysroot-latest.tar.xz -C /opt/veridian-sysroot/
+
+# Set environment variables
+export VERIDIAN_SYSROOT="/opt/veridian-sysroot"
+export PKG_CONFIG_SYSROOT_DIR="$VERIDIAN_SYSROOT"
+export PKG_CONFIG_PATH="$VERIDIAN_SYSROOT/usr/lib/pkgconfig"
+</code></pre>
+<h3 id="build-environment"><a class="header" href="#build-environment">Build Environment</a></h3>
+<p>Configure your build environment for cross-compilation:</p>
+<pre><code class="language-bash"># Create build script
+cat &gt; build-for-veridian.sh &lt;&lt; 'EOF'
+#!/bin/bash
+export CC="x86_64-unknown-veridian-gcc"
+export CXX="x86_64-unknown-veridian-g++"
+export AR="x86_64-unknown-veridian-ar"
+export STRIP="x86_64-unknown-veridian-strip"
+export RANLIB="x86_64-unknown-veridian-ranlib"
+
+export CFLAGS="-O2 -pipe"
+export CXXFLAGS="$CFLAGS"
+export LDFLAGS="-static"  # Use static linking initially
+
+exec "$@"
+EOF
+chmod +x build-for-veridian.sh
+</code></pre>
+<h2 id="posix-compatibility-layer"><a class="header" href="#posix-compatibility-layer">POSIX Compatibility Layer</a></h2>
+<h3 id="three-layer-architecture"><a class="header" href="#three-layer-architecture">Three-Layer Architecture</a></h3>
+<p>VeridianOS implements POSIX compatibility through a sophisticated layered approach:</p>
+<pre><code>┌─────────────────────────────────────────────────────────────┐
+│                    POSIX Application                        │
+├─────────────────────────────────────────────────────────────┤
+│ POSIX API Layer      │ open(), read(), write(), socket()    │
+├─────────────────────────────────────────────────────────────┤
+│ Translation Layer    │ POSIX → Capability mapping          │
+├─────────────────────────────────────────────────────────────┤
+│ Native IPC Layer     │ Zero-copy, capability-protected IPC  │
+└─────────────────────────────────────────────────────────────┘
+</code></pre>
+<h3 id="file-system-operations"><a class="header" href="#file-system-operations">File System Operations</a></h3>
+<p>POSIX file operations are automatically translated to capability-based operations:</p>
+<pre><code class="language-c">// POSIX API (application code unchanged)
+int fd = open("/etc/config", O_RDONLY);
+char buffer[1024];
+ssize_t bytes = read(fd, buffer, sizeof(buffer));
+close(fd);
+
+// Internal translation (transparent to application)
+capability_t vfs_cap = veridian_get_capability("vfs");
+capability_t file_cap = veridian_vfs_open(vfs_cap, "/etc/config", O_RDONLY);
+ssize_t bytes = veridian_file_read(file_cap, buffer, sizeof(buffer));
+veridian_capability_close(file_cap);
+</code></pre>
+<h3 id="network-operations"><a class="header" href="#network-operations">Network Operations</a></h3>
+<p>Socket operations work transparently with automatic capability management:</p>
+<pre><code class="language-c">// Standard POSIX networking
+int sock = socket(AF_INET, SOCK_STREAM, 0);
+struct sockaddr_in addr = {
+    .sin_family = AF_INET,
+    .sin_port = htons(80),
+    .sin_addr.s_addr = inet_addr("192.168.1.1")
+};
+connect(sock, (struct sockaddr*)&amp;addr, sizeof(addr));
+
+// Internally mapped to capability-based network access
+capability_t net_cap = veridian_get_capability("network");
+capability_t sock_cap = veridian_net_socket(net_cap, AF_INET, SOCK_STREAM, 0);
+veridian_net_connect(sock_cap, &amp;addr, sizeof(addr));
+</code></pre>
+<h2 id="common-porting-scenarios"><a class="header" href="#common-porting-scenarios">Common Porting Scenarios</a></h2>
+<h3 id="system-utilities"><a class="header" href="#system-utilities">System Utilities</a></h3>
+<p>Most UNIX utilities compile with minimal or no changes:</p>
+<pre><code class="language-bash"># Example: Porting GNU Coreutils
+cd coreutils-9.4
+./configure --host=x86_64-unknown-veridian \
+           --prefix=/usr \
+           --disable-nls \
+           --enable-static-link
+make -j$(nproc)
+make DESTDIR=$VERIDIAN_SYSROOT install
+</code></pre>
+<p><strong>Success Rate</strong>: ~95% of coreutils work without modification</p>
+<h3 id="text-editors-and-development-tools"><a class="header" href="#text-editors-and-development-tools">Text Editors and Development Tools</a></h3>
+<pre><code class="language-bash"># Vim
+cd vim-9.0
+./configure --host=x86_64-unknown-veridian \
+           --with-features=huge \
+           --disable-gui \
+           --enable-static-link
+make -j$(nproc)
+
+# GCC (as a cross-compiler)
+cd gcc-13.2.0
+mkdir build &amp;&amp; cd build
+../configure --target=x86_64-unknown-veridian \
+           --prefix=/usr \
+           --enable-languages=c,c++ \
+           --disable-multilib
+make -j$(nproc)
+</code></pre>
+<h3 id="network-applications"><a class="header" href="#network-applications">Network Applications</a></h3>
+<pre><code class="language-bash"># cURL
+cd curl-8.4.0
+./configure --host=x86_64-unknown-veridian \
+           --prefix=/usr \
+           --with-ssl \
+           --disable-shared \
+           --enable-static
+make -j$(nproc)
+
+# OpenSSH
+cd openssh-9.5p1
+./configure --host=x86_64-unknown-veridian \
+           --prefix=/usr \
+           --disable-strip \
+           --with-sandbox=no
+make -j$(nproc)
+</code></pre>
+<h3 id="programming-language-interpreters"><a class="header" href="#programming-language-interpreters">Programming Language Interpreters</a></h3>
+<h4 id="python"><a class="header" href="#python">Python</a></h4>
+<pre><code class="language-bash">cd Python-3.12.0
+./configure --host=x86_64-unknown-veridian \
+           --build=x86_64-linux-gnu \
+           --prefix=/usr \
+           --disable-shared \
+           --with-system-ffi=no \
+           ac_cv_file__dev_ptmx=no \
+           ac_cv_file__dev_ptc=no \
+           ac_cv_working_tzset=yes
+make -j$(nproc)
+</code></pre>
+<h4 id="nodejs"><a class="header" href="#nodejs">Node.js</a></h4>
+<pre><code class="language-bash">cd node-v20.9.0
+./configure --dest-cpu=x64 \
+           --dest-os=veridian \
+           --cross-compiling \
+           --without-npm
+make -j$(nproc)
+</code></pre>
+<h4 id="go-compiler"><a class="header" href="#go-compiler">Go Compiler</a></h4>
+<pre><code class="language-bash">cd go1.21.3/src
+GOOS=veridian GOARCH=amd64 ./make.bash
+</code></pre>
+<h3 id="databases"><a class="header" href="#databases">Databases</a></h3>
+<pre><code class="language-bash"># SQLite
+cd sqlite-autoconf-3430200
+./configure --host=x86_64-unknown-veridian \
+           --prefix=/usr \
+           --enable-static \
+           --disable-shared
+make -j$(nproc)
+
+# PostgreSQL (client libraries)
+cd postgresql-16.0
+./configure --host=x86_64-unknown-veridian \
+           --prefix=/usr \
+           --without-readline \
+           --disable-shared
+make -C src/interfaces/libpq -j$(nproc)
+</code></pre>
+<h2 id="veridianos-specific-adaptations"><a class="header" href="#veridianos-specific-adaptations">VeridianOS-Specific Adaptations</a></h2>
+<h3 id="process-creation"><a class="header" href="#process-creation">Process Creation</a></h3>
+<p>VeridianOS doesn’t support <code>fork()</code> for security reasons. Use <code>posix_spawn()</code> instead:</p>
+<pre><code class="language-c">// Traditional approach (not supported)
+#if 0
+pid_t pid = fork();
+if (pid == 0) {
+    execve(program, argv, envp);
+    _exit(1);
+} else if (pid &gt; 0) {
+    waitpid(pid, &amp;status, 0);
+}
+#endif
+
+// VeridianOS approach
+pid_t pid;
+posix_spawnattr_t attr;
+posix_spawnattr_init(&amp;attr);
+
+int result = posix_spawn(&amp;pid, program, NULL, &amp;attr, argv, envp);
+if (result == 0) {
+    waitpid(pid, &amp;status, 0);
+}
+posix_spawnattr_destroy(&amp;attr);
+</code></pre>
+<h3 id="memory-management"><a class="header" href="#memory-management">Memory Management</a></h3>
+<p>VeridianOS provides enhanced memory management with capability-based access:</p>
+<pre><code class="language-c">// Standard POSIX (works unchanged)
+void *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, 
+                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+// Enhanced VeridianOS API (optional, for better performance)
+capability_t mem_cap = veridian_get_capability("memory");
+void *ptr = veridian_mmap(mem_cap, NULL, size, 
+                         VERIDIAN_PROT_READ | VERIDIAN_PROT_WRITE,
+                         VERIDIAN_MAP_PRIVATE);
+</code></pre>
+<h3 id="signal-handling"><a class="header" href="#signal-handling">Signal Handling</a></h3>
+<p>Signals work through a user-space signal daemon:</p>
+<pre><code class="language-c">// Standard signal handling (works with slight latency)
+void signal_handler(int sig) {
+    printf("Received signal %d\n", sig);
+}
+
+signal(SIGINT, signal_handler);  // Works via signal daemon
+sigaction(SIGTERM, &amp;action, NULL);  // Preferred for precise control
+
+// VeridianOS async notification (optional, for low latency)
+veridian_async_notify_t notify;
+veridian_async_notify_init(&amp;notify, VERIDIAN_NOTIFY_INTERRUPT);
+veridian_async_notify_register(&amp;notify, interrupt_handler);
+</code></pre>
+<h3 id="device-access"><a class="header" href="#device-access">Device Access</a></h3>
+<p>Device access requires capabilities but POSIX APIs work transparently:</p>
+<pre><code class="language-c">// Standard POSIX (automatic capability management)
+int fd = open("/dev/ttyS0", O_RDWR);
+write(fd, "Hello", 5);
+
+// Native VeridianOS (explicit capability management)
+capability_t serial_cap = veridian_request_capability("serial.ttyS0");
+veridian_device_write(serial_cap, "Hello", 5);
+</code></pre>
+<h2 id="build-system-integration"><a class="header" href="#build-system-integration">Build System Integration</a></h2>
+<h3 id="autotools-support"><a class="header" href="#autotools-support">Autotools Support</a></h3>
+<p>Create a cache file for autotools projects:</p>
+<pre><code class="language-bash"># veridian-config.cache
+ac_cv_func_fork=no
+ac_cv_func_fork_works=no
+ac_cv_func_vfork=no
+ac_cv_func_vfork_works=no
+ac_cv_func_epoll_create=no
+ac_cv_func_epoll_ctl=no
+ac_cv_func_epoll_wait=no
+ac_cv_func_kqueue=no
+ac_cv_func_sendfile=no
+ac_cv_header_sys_epoll_h=no
+ac_cv_header_sys_event_h=no
+ac_cv_working_fork=no
+ac_cv_working_vfork=no
+</code></pre>
+<p>Update <code>config.sub</code> to recognize VeridianOS:</p>
+<pre><code class="language-bash"># Add to config.sub after other OS patterns
+*-veridian*)
+    os=-veridian
+    ;;
+</code></pre>
+<h3 id="cmake-support"><a class="header" href="#cmake-support">CMake Support</a></h3>
+<p>Create <code>VeridianOSToolchain.cmake</code>:</p>
+<pre><code class="language-cmake">set(CMAKE_SYSTEM_NAME VeridianOS)
+set(CMAKE_SYSTEM_VERSION 1.0)
+set(CMAKE_SYSTEM_PROCESSOR x86_64)
+
+set(CMAKE_C_COMPILER x86_64-unknown-veridian-gcc)
+set(CMAKE_CXX_COMPILER x86_64-unknown-veridian-g++)
+set(CMAKE_ASM_COMPILER x86_64-unknown-veridian-gcc)
+
+set(CMAKE_FIND_ROOT_PATH ${VERIDIAN_SYSROOT})
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+
+# VeridianOS-specific compile flags
+set(CMAKE_C_FLAGS_INIT "-static")
+set(CMAKE_CXX_FLAGS_INIT "-static")
+
+# Disable tests that won't work in cross-compilation
+set(CMAKE_CROSSCOMPILING_EMULATOR "")
+</code></pre>
+<p>Use with: <code>cmake -DCMAKE_TOOLCHAIN_FILE=VeridianOSToolchain.cmake</code></p>
+<h3 id="meson-support"><a class="header" href="#meson-support">Meson Support</a></h3>
+<p>Create <code>veridian-cross.txt</code>:</p>
+<pre><code class="language-ini">[binaries]
+c = 'x86_64-unknown-veridian-gcc'
+cpp = 'x86_64-unknown-veridian-g++'
+ar = 'x86_64-unknown-veridian-ar'
+strip = 'x86_64-unknown-veridian-strip'
+pkgconfig = 'x86_64-unknown-veridian-pkg-config'
+
+[host_machine]
+system = 'veridian'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+
+[properties]
+sys_root = '/opt/veridian-sysroot'
+</code></pre>
+<p>Use with: <code>meson setup builddir --cross-file veridian-cross.txt</code></p>
+<h2 id="advanced-porting-techniques"><a class="header" href="#advanced-porting-techniques">Advanced Porting Techniques</a></h2>
+<h3 id="conditional-compilation"><a class="header" href="#conditional-compilation">Conditional Compilation</a></h3>
+<p>Use preprocessor macros for VeridianOS-specific code:</p>
+<pre><code class="language-c">#ifdef __VERIDIAN__
+    // VeridianOS-specific implementation
+    capability_t cap = veridian_get_capability("network");
+    result = veridian_net_operation(cap, data);
+#else
+    // Standard POSIX implementation
+    result = standard_operation(data);
+#endif
+</code></pre>
+<h3 id="runtime-feature-detection"><a class="header" href="#runtime-feature-detection">Runtime Feature Detection</a></h3>
+<p>Detect VeridianOS features at runtime:</p>
+<pre><code class="language-c">int has_veridian_features(void) {
+    return access("/proc/veridian", F_OK) == 0;
+}
+
+void optimized_operation(void) {
+    if (has_veridian_features()) {
+        // Use VeridianOS-optimized path
+        veridian_zero_copy_operation();
+    } else {
+        // Fallback to standard implementation
+        standard_operation();
+    }
+}
+</code></pre>
+<h3 id="library-compatibility"><a class="header" href="#library-compatibility">Library Compatibility</a></h3>
+<p>Create wrapper libraries for complex dependencies:</p>
+<pre><code class="language-c">// libcompat-veridian.c - Compatibility layer
+#include &lt;errno.h&gt;
+
+// Stub out unavailable functions
+int epoll_create(int size) {
+    errno = ENOSYS;
+    return -1;
+}
+
+int inotify_init(void) {
+    errno = ENOSYS;
+    return -1;
+}
+
+// Provide alternatives using VeridianOS APIs
+int veridian_poll(struct pollfd *fds, nfds_t nfds, int timeout) {
+    // Implement using VeridianOS async notification
+    return -1;  // Placeholder
+}
+</code></pre>
+<h2 id="performance-optimization"><a class="header" href="#performance-optimization">Performance Optimization</a></h2>
+<h3 id="zero-copy-operations"><a class="header" href="#zero-copy-operations">Zero-Copy Operations</a></h3>
+<p>Take advantage of VeridianOS zero-copy capabilities:</p>
+<pre><code class="language-c">// Standard approach (copy-based)
+char buffer[8192];
+ssize_t bytes = read(fd, buffer, sizeof(buffer));
+write(output_fd, buffer, bytes);
+
+// VeridianOS zero-copy (when both fds support it)
+if (veridian_supports_zero_copy(fd, output_fd)) {
+    veridian_zero_copy_transfer(fd, output_fd, bytes);
+} else {
+    // Fallback to standard approach
+}
+</code></pre>
+<h3 id="async-io"><a class="header" href="#async-io">Async I/O</a></h3>
+<p>Use VeridianOS async I/O for better performance:</p>
+<pre><code class="language-c">// Traditional blocking I/O
+for (int i = 0; i &lt; num_files; i++) {
+    process_file(files[i]);
+}
+
+// VeridianOS async I/O
+veridian_async_context_t ctx;
+veridian_async_init(&amp;ctx);
+
+for (int i = 0; i &lt; num_files; i++) {
+    veridian_async_submit(&amp;ctx, process_file_async, files[i]);
+}
+
+veridian_async_wait_all(&amp;ctx);
+</code></pre>
+<h3 id="capability-caching"><a class="header" href="#capability-caching">Capability Caching</a></h3>
+<p>Cache capabilities for frequently accessed resources:</p>
+<pre><code class="language-c">static capability_t cached_vfs_cap = VERIDIAN_INVALID_CAPABILITY;
+
+capability_t get_vfs_capability(void) {
+    if (cached_vfs_cap == VERIDIAN_INVALID_CAPABILITY) {
+        cached_vfs_cap = veridian_get_capability("vfs");
+    }
+    return cached_vfs_cap;
+}
+</code></pre>
+<h2 id="testing-and-validation"><a class="header" href="#testing-and-validation">Testing and Validation</a></h2>
+<h3 id="basic-functionality-testing"><a class="header" href="#basic-functionality-testing">Basic Functionality Testing</a></h3>
+<pre><code class="language-bash"># Test basic operation
+./ported-application --version
+./ported-application --help
+
+# Test with sample data
+echo "test input" | ./ported-application
+./ported-application &lt; test-input.txt &gt; test-output.txt
+</code></pre>
+<h3 id="stress-testing"><a class="header" href="#stress-testing">Stress Testing</a></h3>
+<pre><code class="language-bash"># Test concurrent operation
+for i in {1..10}; do
+    ./ported-application &amp;
+done
+wait
+
+# Test memory usage
+./ported-application &amp;
+PID=$!
+while kill -0 $PID 2&gt;/dev/null; do
+    ps -o pid,vsz,rss $PID
+    sleep 1
+done
+</code></pre>
+<h3 id="capability-verification"><a class="header" href="#capability-verification">Capability Verification</a></h3>
+<pre><code class="language-bash"># Verify capability usage
+veridian-capability-trace ./ported-application
+# Should show only necessary capabilities are requested
+
+# Test with restricted capabilities
+veridian-sandbox --capabilities=minimal ./ported-application
+</code></pre>
+<h2 id="packaging-and-distribution"><a class="header" href="#packaging-and-distribution">Packaging and Distribution</a></h2>
+<h3 id="port-recipes"><a class="header" href="#port-recipes">Port Recipes</a></h3>
+<p>Create standardized port recipes for the VeridianOS package system:</p>
+<pre><code class="language-toml"># ports/editors/vim/port.toml
+[package]
+name = "vim"
+version = "9.0"
+description = "Vi IMproved text editor"
+source = "https://github.com/vim/vim/archive/v9.0.tar.gz"
+sha256 = "..."
+
+[build]
+system = "autotools"
+configure_args = [
+    "--host=x86_64-unknown-veridian",
+    "--with-features=huge",
+    "--disable-gui",
+    "--enable-static-link"
+]
+
+[dependencies]
+build = ["gcc", "make", "ncurses-dev"]
+runtime = ["ncurses"]
+
+[capabilities]
+required = ["vfs:read,write", "terminal:access"]
+optional = ["network:connect"]  # For plugin downloads
+
+[patches]
+files = ["vim-veridian.patch", "disable-fork.patch"]
+</code></pre>
+<h3 id="package-metadata"><a class="header" href="#package-metadata">Package Metadata</a></h3>
+<p>Include VeridianOS-specific metadata:</p>
+<pre><code class="language-yaml"># .veridian-package.yaml
+name: vim
+version: 9.0-veridian1
+architecture: [x86_64, aarch64, riscv64]
+categories: [editor, development]
+
+capabilities:
+  required:
+    - vfs:read,write
+    - terminal:access
+  optional:
+    - network:connect
+
+compatibility:
+  posix_compliance: 95%
+  veridian_native: false
+  zero_copy_io: false
+
+performance:
+  startup_time: "&lt; 100ms"
+  memory_usage: "&lt; 10MB"
+</code></pre>
+<h2 id="troubleshooting"><a class="header" href="#troubleshooting">Troubleshooting</a></h2>
+<h3 id="common-issues"><a class="header" href="#common-issues">Common Issues</a></h3>
+<p><strong>1. Undefined References</strong></p>
+<pre><code class="language-bash"># Problem: undefined reference to `fork`
+# Solution: Use posix_spawn or disable fork-dependent features
+CFLAGS="-DNO_FORK" ./configure --host=x86_64-unknown-veridian
+</code></pre>
+<p><strong>2. Missing Headers</strong></p>
+<pre><code class="language-bash"># Problem: sys/epoll.h: No such file or directory
+# Solution: Use select() or poll() instead, or disable feature
+CFLAGS="-DNO_EPOLL" ./configure
+</code></pre>
+<p><strong>3. Runtime Capability Errors</strong></p>
+<pre><code class="language-bash"># Problem: Permission denied accessing /dev/random
+# Solution: Request entropy capability
+veridian-capability-request entropy ./application
+</code></pre>
+<h3 id="debugging-techniques"><a class="header" href="#debugging-techniques">Debugging Techniques</a></h3>
+<pre><code class="language-bash"># Check for undefined symbols
+x86_64-unknown-veridian-nm -u binary | grep -v "^ *U _"
+
+# Verify library dependencies
+x86_64-unknown-veridian-ldd binary
+
+# Trace system calls during execution
+veridian-strace ./binary
+
+# Monitor capability usage
+veridian-capability-monitor ./binary
+</code></pre>
+<h3 id="performance-analysis"><a class="header" href="#performance-analysis">Performance Analysis</a></h3>
+<pre><code class="language-bash"># Profile application performance
+veridian-perf record ./binary
+veridian-perf report
+
+# Analyze IPC usage
+veridian-ipc-trace ./binary
+
+# Monitor memory allocation
+veridian-malloc-trace ./binary
+</code></pre>
+<h2 id="contributing-ports"><a class="header" href="#contributing-ports">Contributing Ports</a></h2>
+<h3 id="submission-process"><a class="header" href="#submission-process">Submission Process</a></h3>
+<ol>
+<li><strong>Create Port Recipe</strong>: Follow the template format</li>
+<li><strong>Test Thoroughly</strong>: Ensure functionality and performance</li>
+<li><strong>Document Changes</strong>: Explain any VeridianOS-specific modifications</li>
+<li><strong>Submit Pull Request</strong>: To the VeridianOS ports repository</li>
+</ol>
+<h3 id="quality-guidelines"><a class="header" href="#quality-guidelines">Quality Guidelines</a></h3>
+<ul>
+<li><strong>Minimal Patches</strong>: Prefer runtime detection over compile-time patches</li>
+<li><strong>Performance</strong>: Measure and optimize for VeridianOS features</li>
+<li><strong>Security</strong>: Verify capability usage is minimal and appropriate</li>
+<li><strong>Documentation</strong>: Include usage examples and troubleshooting</li>
+</ul>
+<h2 id="future-enhancements"><a class="header" href="#future-enhancements">Future Enhancements</a></h2>
+<h3 id="planned-improvements"><a class="header" href="#planned-improvements">Planned Improvements</a></h3>
+<p><strong>Phase 5: Enhanced Compatibility</strong></p>
+<ul>
+<li>Dynamic linking support</li>
+<li>Container compatibility layer</li>
+<li>Graphics acceleration APIs</li>
+</ul>
+<p><strong>Phase 6: Native Integration</strong></p>
+<ul>
+<li>VeridianOS-native GUI toolkit</li>
+<li>Zero-copy graphics pipeline</li>
+<li>Hardware acceleration APIs</li>
+</ul>
+<h3 id="research-areas"><a class="header" href="#research-areas">Research Areas</a></h3>
+<ol>
+<li><strong>Automatic Port Generation</strong>: AI-assisted porting from source analysis</li>
+<li><strong>Binary Translation</strong>: Run Linux binaries directly with capability translation</li>
+<li><strong>Just-in-Time Capabilities</strong>: Dynamic capability request during execution</li>
+</ol>
+<p>This comprehensive porting guide enables developers to bring existing software to VeridianOS while taking advantage of its enhanced security and performance features.</p>
 
                     </main>
 
