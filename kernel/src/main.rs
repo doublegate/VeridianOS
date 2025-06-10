@@ -150,6 +150,28 @@ pub extern "C" fn kernel_main() -> ! {
         arch::init();
         writeln!(serial_port, "Arch initialized").unwrap();
 
+        // Initialize memory management
+        writeln!(serial_port, "Initializing memory management...").unwrap();
+        mm::init_default();
+        writeln!(serial_port, "Memory management initialized").unwrap();
+
+        // Initialize kernel heap
+        writeln!(serial_port, "Initializing kernel heap...").unwrap();
+        if let Err(e) = mm::init_heap() {
+            writeln!(serial_port, "Failed to initialize heap: {}", e).unwrap();
+        } else {
+            writeln!(serial_port, "Kernel heap initialized").unwrap();
+
+            // Test heap allocation
+            #[cfg(feature = "alloc")]
+            {
+                extern crate alloc;
+                use alloc::boxed::Box;
+                let test_box = Box::new(42);
+                writeln!(serial_port, "Heap test: Box::new(42) = {}", *test_box).unwrap();
+            }
+        }
+
         // For now, let's just loop with serial output
         writeln!(serial_port, "Kernel initialization complete!").unwrap();
 

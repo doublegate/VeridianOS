@@ -6,11 +6,15 @@
 #![allow(dead_code)]
 
 pub mod frame_allocator;
+pub mod heap;
+pub mod vmm;
 
-// Re-export PhysicalAddress from frame_allocator to avoid conflicts
+// Re-export commonly used types
 pub use frame_allocator::{
-    FrameAllocatorError, FrameNumber, PhysicalAddress, FRAME_ALLOCATOR, FRAME_SIZE,
+    FrameAllocatorError, FrameNumber, MemoryZone, PhysicalAddress, FRAME_ALLOCATOR, FRAME_SIZE,
 };
+pub use heap::{init as init_heap, HEAP_SIZE, HEAP_START};
+pub use vmm::VirtualMemoryManager;
 
 /// Virtual memory address
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -40,11 +44,6 @@ pub enum PageSize {
     Large = 2 * 1024 * 1024,
     /// 1 GiB pages (x86_64) / 1 GiB (AArch64)
     Huge = 1024 * 1024 * 1024,
-}
-
-/// Page table structure (placeholder)
-pub struct PageTable {
-    pub root_phys: PhysicalAddress,
 }
 
 /// Page flags

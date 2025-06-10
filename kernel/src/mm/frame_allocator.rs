@@ -27,6 +27,65 @@ const BITMAP_BUDDY_THRESHOLD: usize = 512;
 /// Maximum number of NUMA nodes supported
 const MAX_NUMA_NODES: usize = 8;
 
+/// Memory zone for frame allocation
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryZone {
+    /// DMA zone (0-16MB on x86)
+    Dma,
+    /// Normal zone (16MB-4GB on 32-bit, all memory on 64-bit)
+    Normal,
+    /// High memory zone (>4GB on 32-bit, unused on 64-bit)
+    High,
+}
+
+impl MemoryZone {
+    /// Get the frame range for this zone on the current architecture
+    pub fn frame_range(&self) -> (FrameNumber, FrameNumber) {
+        match self {
+            MemoryZone::Dma => (FrameNumber::new(0), FrameNumber::new(4096)), // 0-16MB
+            MemoryZone::Normal => {
+                #[cfg(target_pointer_width = "32")]
+                {
+                    (FrameNumber::new(4096), FrameNumber::new(1048576)) // 16MB-4GB
+                }
+                #[cfg(target_pointer_width = "64")]
+                {
+                    (FrameNumber::new(4096), FrameNumber::new(u64::MAX >> 12)) // 16MB-MAX
+                }
+            }
+            MemoryZone::High => {
+                #[cfg(target_pointer_width = "32")]
+                {
+                    (FrameNumber::new(1048576), FrameNumber::new(u64::MAX >> 12))
+                    // 4GB-MAX
+                }
+                #[cfg(target_pointer_width = "64")]
+                {
+                    // High zone not used on 64-bit
+                    (FrameNumber::new(0), FrameNumber::new(0))
+                }
+            }
+        }
+    }
+
+    /// Check if a frame belongs to this zone
+    pub fn contains(&self, frame: FrameNumber) -> bool {
+        let (start, end) = self.frame_range();
+        frame >= start && frame < end
+    }
+
+    /// Get the appropriate zone for a frame number
+    pub fn for_frame(frame: FrameNumber) -> Self {
+        if MemoryZone::Dma.contains(frame) {
+            MemoryZone::Dma
+        } else if MemoryZone::High.contains(frame) && cfg!(target_pointer_width = "32") {
+            MemoryZone::High
+        } else {
+            MemoryZone::Normal
+        }
+    }
+}
+
 /// Physical frame number
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FrameNumber(u64);
@@ -65,17 +124,6 @@ impl PhysicalAddress {
     pub const fn offset(&self, offset: u64) -> Self {
         Self::new(self.0 + offset)
     }
-}
-
-/// Memory zone type
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemoryZone {
-    /// DMA zone (0-16MB)
-    Dma,
-    /// Normal zone (16MB - end)
-    Normal,
-    /// High memory (32-bit systems only)
-    High,
 }
 
 /// Frame allocation result
@@ -520,14 +568,24 @@ impl FrameAllocator {
 
     /// Allocate frames from a specific NUMA node
     pub fn allocate_frames(&self, count: usize, numa_node: Option<usize>) -> Result<FrameNumber> {
+        self.allocate_frames_in_zone(count, numa_node, None)
+    }
+
+    /// Allocate frames from a specific NUMA node and memory zone
+    pub fn allocate_frames_in_zone(
+        &self,
+        count: usize,
+        numa_node: Option<usize>,
+        zone: Option<MemoryZone>,
+    ) -> Result<FrameNumber> {
         let start_time = crate::bench::read_timestamp();
 
         let result = if count < BITMAP_BUDDY_THRESHOLD {
             // Use bitmap allocator
-            self.allocate_bitmap(count, numa_node)
+            self.allocate_bitmap_with_zone(count, numa_node, zone)
         } else {
             // Use buddy allocator
-            self.allocate_buddy(count, numa_node)
+            self.allocate_buddy_with_zone(count, numa_node, zone)
         };
 
         let elapsed = crate::bench::read_timestamp() - start_time;
@@ -540,13 +598,56 @@ impl FrameAllocator {
         result
     }
 
+    /// Allocate using bitmap allocator with zone constraint
+    fn allocate_bitmap_with_zone(
+        &self,
+        count: usize,
+        numa_node: Option<usize>,
+        zone: Option<MemoryZone>,
+    ) -> Result<FrameNumber> {
+        // Try with zone constraint first
+        if let Ok(frame) = self.allocate_bitmap_internal(count, numa_node, zone) {
+            return Ok(frame);
+        }
+
+        // If zone was specified but allocation failed, try zone fallback
+        if zone.is_some() {
+            // For DMA zone, don't fallback
+            if zone == Some(MemoryZone::Dma) {
+                return Err(FrameAllocatorError::OutOfMemory);
+            }
+            // For other zones, try without zone constraint
+            self.allocate_bitmap_internal(count, numa_node, None)
+        } else {
+            Err(FrameAllocatorError::OutOfMemory)
+        }
+    }
+
     /// Allocate using bitmap allocator
     fn allocate_bitmap(&self, count: usize, numa_node: Option<usize>) -> Result<FrameNumber> {
+        self.allocate_bitmap_internal(count, numa_node, None)
+    }
+
+    /// Internal bitmap allocation with optional zone checking
+    fn allocate_bitmap_internal(
+        &self,
+        count: usize,
+        numa_node: Option<usize>,
+        zone: Option<MemoryZone>,
+    ) -> Result<FrameNumber> {
         if let Some(node) = numa_node {
             // Try specified node first
             if node < MAX_NUMA_NODES {
                 if let Some(ref allocator) = self.bitmap_allocators[node] {
                     if let Ok(frame) = allocator.allocate(count) {
+                        // Check zone constraint
+                        if let Some(z) = zone {
+                            if !z.contains(frame) {
+                                let _ = allocator.free(frame, count);
+                                return Err(FrameAllocatorError::OutOfMemory);
+                            }
+                        }
+
                         // Check if allocated frames are reserved
                         #[cfg(feature = "alloc")]
                         if self.is_reserved(frame, count) {
@@ -579,13 +680,56 @@ impl FrameAllocator {
         Err(FrameAllocatorError::OutOfMemory)
     }
 
+    /// Allocate using buddy allocator with zone constraint
+    fn allocate_buddy_with_zone(
+        &self,
+        count: usize,
+        numa_node: Option<usize>,
+        zone: Option<MemoryZone>,
+    ) -> Result<FrameNumber> {
+        // Try with zone constraint first
+        if let Ok(frame) = self.allocate_buddy_internal(count, numa_node, zone) {
+            return Ok(frame);
+        }
+
+        // If zone was specified but allocation failed, try zone fallback
+        if zone.is_some() {
+            // For DMA zone, don't fallback
+            if zone == Some(MemoryZone::Dma) {
+                return Err(FrameAllocatorError::OutOfMemory);
+            }
+            // For other zones, try without zone constraint
+            self.allocate_buddy_internal(count, numa_node, None)
+        } else {
+            Err(FrameAllocatorError::OutOfMemory)
+        }
+    }
+
     /// Allocate using buddy allocator
     fn allocate_buddy(&self, count: usize, numa_node: Option<usize>) -> Result<FrameNumber> {
+        self.allocate_buddy_internal(count, numa_node, None)
+    }
+
+    /// Internal buddy allocation with optional zone checking
+    fn allocate_buddy_internal(
+        &self,
+        count: usize,
+        numa_node: Option<usize>,
+        zone: Option<MemoryZone>,
+    ) -> Result<FrameNumber> {
         if let Some(node) = numa_node {
             // Try specified node first
             if node < MAX_NUMA_NODES {
                 if let Some(ref allocator) = self.buddy_allocators[node] {
                     if let Ok(frame) = allocator.allocate(count) {
+                        // Check zone constraint
+                        if let Some(z) = zone {
+                            if !z.contains(frame) {
+                                let _ = allocator.free(frame, count);
+                                return Err(FrameAllocatorError::OutOfMemory);
+                            }
+                        }
+
                         // Check if allocated frames are reserved
                         #[cfg(feature = "alloc")]
                         if self.is_reserved(frame, count) {

@@ -7,10 +7,9 @@
 #![cfg_attr(test, no_main)]
 #![feature(custom_test_frameworks)]
 #![feature(abi_x86_interrupt)]
+#![feature(alloc_error_handler)]
 #![test_runner(crate::test_runner)]
 #![reexport_test_harness_main = "test_main"]
-// Enable alloc for IPC module
-#![cfg_attr(feature = "alloc", feature(alloc_error_handler))]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -69,4 +68,10 @@ pub fn kernel_main() -> ! {
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     test_framework::test_panic_handler(info)
+}
+
+/// Heap allocation error handler
+#[alloc_error_handler]
+fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
+    panic!("Allocation error: {:?}", layout);
 }

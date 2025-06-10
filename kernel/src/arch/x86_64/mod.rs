@@ -1,6 +1,7 @@
 pub mod boot;
 pub mod gdt;
 pub mod idt;
+pub mod mmu;
 pub mod serial;
 pub mod syscall;
 pub mod vga;
@@ -9,6 +10,7 @@ pub mod vga;
 pub fn init() {
     gdt::init();
     idt::init();
+    mmu::init();
     unsafe { interrupts::enable() };
 }
 

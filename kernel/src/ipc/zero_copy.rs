@@ -16,7 +16,20 @@ use super::{
     error::{IpcError, Result},
     shared_memory::{Permission, SharedRegion},
 };
-use crate::mm::{PageFlags, PageTable, PhysicalAddress, VirtualAddress};
+use crate::mm::{PageFlags, PhysicalAddress, VirtualAddress};
+
+/// Simple page table placeholder for IPC
+struct PageTable {
+    root: PhysicalAddress,
+}
+
+impl PageTable {
+    fn new() -> Self {
+        Self {
+            root: PhysicalAddress::new(0),
+        }
+    }
+}
 
 /// Statistics for zero-copy operations
 pub struct ZeroCopyStats {
@@ -309,9 +322,8 @@ fn validate_transfer_capability(_from: u64, _to: u64, _region: u64) -> bool {
     true
 }
 fn get_page_table(_pid: u64) -> Result<PageTable> {
-    Ok(PageTable {
-        root_phys: PhysicalAddress::new(0),
-    })
+    // TODO: Get from process table
+    Ok(PageTable::new())
 }
 fn allocate_virtual_range(_pt: &mut PageTable, _size: usize) -> Result<VirtualAddress> {
     Ok(VirtualAddress::new(0x200000))
