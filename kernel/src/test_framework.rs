@@ -61,10 +61,12 @@ pub fn exit_qemu(_exit_code: QemuExitCode) -> ! {
     #[cfg(target_arch = "aarch64")]
     {
         // Use PSCI SYSTEM_OFF for AArch64
+        const PSCI_SYSTEM_OFF: u32 = 0x84000008;
         unsafe {
             core::arch::asm!(
-                "mov w0, #0x84000008", // PSCI SYSTEM_OFF
+                "mov w0, {psci_off:w}",
                 "hvc #0",
+                psci_off = in(reg) PSCI_SYSTEM_OFF,
                 options(noreturn)
             );
         }

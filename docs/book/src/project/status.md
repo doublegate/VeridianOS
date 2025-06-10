@@ -5,9 +5,9 @@
 **Latest Release**: v0.1.0 - Foundation & Tooling  
 **Released**: June 7, 2025  
 **Current Phase**: Phase 1 - Microkernel Core (Started June 8, 2025)  
-**Phase 1 Progress**: ~35% Overall - IPC System ~45% complete, Memory Management ~95% complete
+**Phase 1 Progress**: ~35% Overall - IPC System ~45% complete, Memory Management ~95% complete, Process Management ~90% complete
 
-VeridianOS has successfully completed Phase 0 and is now actively developing the microkernel core. Major progress has been made on both the IPC (Inter-Process Communication) system and Memory Management subsystem, with virtual memory, heap allocation, and TLB management now fully implemented.
+VeridianOS has successfully completed Phase 0 and is now actively developing the microkernel core. Major progress has been made on the IPC (Inter-Process Communication) system, Memory Management subsystem, and Process Management. Virtual memory, heap allocation, TLB management, process control blocks, thread management, and context switching are now fully implemented.
 
 ## Phase 0 Achievements
 
@@ -93,8 +93,19 @@ VeridianOS has successfully completed Phase 0 and is now actively developing the
 - ✅ Reserved memory region tracking
 - ✅ Bootloader memory map integration
 
+**Process Management (~90% Complete)**:
+- ✅ Process Control Block (PCB) implementation
+- ✅ Thread management with ThreadContext trait
+- ✅ Context switching for all architectures
+- ✅ Process lifecycle management
+- ✅ Global process table with O(1) lookup
+- ✅ Synchronization primitives (Mutex, Semaphore, CondVar, RwLock, Barrier)
+- ✅ Memory management integration
+- ✅ IPC integration hooks
+- 🔲 Process system calls
+- 🔲 Integration testing with scheduler and IPC
+
 **Remaining Components**:
-- 🔲 Process management
 - 🔲 Full capability system
 - 🔲 Scheduler implementation
 

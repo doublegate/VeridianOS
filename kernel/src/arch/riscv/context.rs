@@ -1,11 +1,12 @@
 //! RISC-V context switching implementation
 
 use core::arch::asm;
+use crate::sched::task::TaskContext;
 
 /// RISC-V CPU context
 #[repr(C)]
 #[derive(Debug, Clone)]
-pub struct Context {
+pub struct RiscVContext {
     /// Return address
     pub ra: usize,
     /// Stack pointer
@@ -69,6 +70,7 @@ pub struct Context {
 /// RISC-V FPU state (F/D extensions)
 #[repr(C, align(16))]
 #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+#[derive(Debug, Clone)]
 pub struct FpuState {
     /// Floating-point registers (f0-f31)
     pub f: [f64; 32],
@@ -76,7 +78,7 @@ pub struct FpuState {
     pub fcsr: u32,
 }
 
-impl Context {
+impl RiscVContext {
     /// Create new context for a task
     pub fn new(entry_point: usize, stack_pointer: usize) -> Self {
         Self {
@@ -138,14 +140,87 @@ impl Context {
     }
 }
 
+impl crate::arch::context::ThreadContext for RiscVContext {
+    fn new() -> Self {
+        Self {
+            ra: 0, sp: 0, gp: 0, tp: 0,
+            t0: 0, t1: 0, t2: 0,
+            s0: 0, s1: 0, s2: 0, s3: 0, s4: 0, s5: 0, s6: 0, s7: 0, s8: 0, s9: 0, s10: 0, s11: 0,
+            a0: 0, a1: 0, a2: 0, a3: 0, a4: 0, a5: 0, a6: 0, a7: 0,
+            t3: 0, t4: 0, t5: 0, t6: 0,
+            pc: 0,
+            sstatus: 0x120,
+            sepc: 0,
+            stvec: 0,
+            satp: 0,
+            #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+            fp_regs: FpuState {
+                f: [0.0; 32],
+                fcsr: 0,
+            },
+        }
+    }
+    
+    fn init(&mut self, entry_point: usize, stack_pointer: usize, _kernel_stack: usize) {
+        self.pc = entry_point;
+        self.sepc = entry_point;
+        self.sp = stack_pointer;
+    }
+    
+    fn get_instruction_pointer(&self) -> usize {
+        self.pc
+    }
+    
+    fn set_instruction_pointer(&mut self, ip: usize) {
+        self.pc = ip;
+        self.sepc = ip;
+    }
+    
+    fn get_stack_pointer(&self) -> usize {
+        self.sp
+    }
+    
+    fn set_stack_pointer(&mut self, sp: usize) {
+        self.sp = sp;
+    }
+    
+    fn get_kernel_stack(&self) -> usize {
+        // TODO: Return from thread pointer
+        0
+    }
+    
+    fn set_kernel_stack(&mut self, _sp: usize) {
+        // TODO: Set in thread pointer
+    }
+    
+    fn set_return_value(&mut self, value: usize) {
+        self.a0 = value; // a0 is return register
+    }
+    
+    fn clone_from(&mut self, other: &Self) {
+        *self = other.clone();
+    }
+    
+    fn to_task_context(&self) -> TaskContext {
+        TaskContext::RiscV(self.clone())
+    }
+}
+
+/// Switch context using the ThreadContext interface
+pub fn switch_context(from: &mut RiscVContext, to: &RiscVContext) {
+    unsafe {
+        context_switch(from as *mut _, to as *const _);
+    }
+}
+
 /// Switch from current context to new context
 ///
 /// # Safety
 /// This function manipulates CPU state directly and must be called
 /// with interrupts disabled.
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
 #[no_mangle]
-pub unsafe extern "C" fn context_switch(current: *mut Context, next: *const Context) {
+pub unsafe extern "C" fn context_switch(current: *mut RiscVContext, next: *const RiscVContext) {
     // Note: This is a simplified implementation
     // Real implementation would need proper register saving/restoring
 

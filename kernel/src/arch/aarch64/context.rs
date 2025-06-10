@@ -1,11 +1,12 @@
 //! AArch64 context switching implementation
 
 use core::arch::asm;
+use crate::sched::task::TaskContext;
 
 /// AArch64 CPU context
 #[repr(C)]
 #[derive(Debug, Clone)]
-pub struct Context {
+pub struct AArch64Context {
     /// General purpose registers (x0-x30)
     pub x: [u64; 31],
 
@@ -34,6 +35,7 @@ pub struct Context {
 
 /// AArch64 FPU state (NEON/SVE)
 #[repr(C, align(16))]
+#[derive(Debug, Clone)]
 pub struct FpuState {
     /// SIMD&FP registers (v0-v31)
     pub v: [[u64; 2]; 32],
@@ -43,7 +45,7 @@ pub struct FpuState {
     pub fpsr: u32,
 }
 
-impl Context {
+impl AArch64Context {
     /// Create new context for a task
     pub fn new(entry_point: usize, stack_pointer: usize) -> Self {
         Self {
@@ -79,13 +81,84 @@ impl Context {
     }
 }
 
+impl crate::arch::context::ThreadContext for AArch64Context {
+    fn new() -> Self {
+        Self {
+            x: [0; 31],
+            sp: 0,
+            pc: 0,
+            spsr: 0x3c5,
+            elr: 0,
+            tpidr_el0: 0,
+            tpidr_el1: 0,
+            ttbr0_el1: 0,
+            fp_regs: FpuState {
+                v: [[0; 2]; 32],
+                fpcr: 0,
+                fpsr: 0,
+            },
+        }
+    }
+    
+    fn init(&mut self, entry_point: usize, stack_pointer: usize, _kernel_stack: usize) {
+        self.pc = entry_point as u64;
+        self.elr = entry_point as u64;
+        self.sp = stack_pointer as u64;
+    }
+    
+    fn get_instruction_pointer(&self) -> usize {
+        self.pc as usize
+    }
+    
+    fn set_instruction_pointer(&mut self, ip: usize) {
+        self.pc = ip as u64;
+        self.elr = ip as u64;
+    }
+    
+    fn get_stack_pointer(&self) -> usize {
+        self.sp as usize
+    }
+    
+    fn set_stack_pointer(&mut self, sp: usize) {
+        self.sp = sp as u64;
+    }
+    
+    fn get_kernel_stack(&self) -> usize {
+        // TODO: Return from thread-local storage
+        0
+    }
+    
+    fn set_kernel_stack(&mut self, _sp: usize) {
+        // TODO: Set in thread-local storage
+    }
+    
+    fn set_return_value(&mut self, value: usize) {
+        self.x[0] = value as u64; // x0 is return register
+    }
+    
+    fn clone_from(&mut self, other: &Self) {
+        *self = other.clone();
+    }
+    
+    fn to_task_context(&self) -> TaskContext {
+        TaskContext::AArch64(self.clone())
+    }
+}
+
+/// Switch context using the ThreadContext interface
+pub fn switch_context(from: &mut AArch64Context, to: &AArch64Context) {
+    unsafe {
+        context_switch(from as *mut _, to as *const _);
+    }
+}
+
 /// Switch from current context to new context
 ///
 /// # Safety
 /// This function manipulates CPU state directly and must be called
 /// with interrupts disabled.
 #[no_mangle]
-pub unsafe extern "C" fn context_switch(current: *mut Context, next: *const Context) {
+pub unsafe extern "C" fn context_switch(current: *mut AArch64Context, next: *const AArch64Context) {
     // Note: This is a simplified implementation
     // Real implementation would need proper register saving/restoring
 

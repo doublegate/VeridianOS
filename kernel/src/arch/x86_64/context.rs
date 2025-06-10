@@ -1,11 +1,12 @@
 //! x86_64 context switching implementation
 
 use core::arch::asm;
+use crate::sched::task::TaskContext;
 
 /// x86_64 CPU context
 #[repr(C)]
 #[derive(Debug, Clone)]
-pub struct Context {
+pub struct X86_64Context {
     /// General purpose registers
     pub r15: u64,
     pub r14: u64,
@@ -56,7 +57,7 @@ pub struct FpuState {
     pub xsave: [u8; 2048],
 }
 
-impl Context {
+impl X86_64Context {
     /// Create new context for a task
     pub fn new(entry_point: usize, stack_pointer: usize) -> Self {
         Self {
@@ -103,13 +104,68 @@ impl Context {
     }
 }
 
+impl crate::arch::context::ThreadContext for X86_64Context {
+    fn new() -> Self {
+        Self {
+            r15: 0, r14: 0, r13: 0, r12: 0, r11: 0, r10: 0, r9: 0, r8: 0,
+            rdi: 0, rsi: 0, rbp: 0, rbx: 0, rdx: 0, rcx: 0, rax: 0,
+            rsp: 0, rip: 0, rflags: 0x202,
+            cs: 0x08, ss: 0x10, ds: 0x10, es: 0x10, fs: 0x00, gs: 0x00,
+            cr3: 0, fpu_state: core::ptr::null_mut(),
+        }
+    }
+    
+    fn init(&mut self, entry_point: usize, stack_pointer: usize, _kernel_stack: usize) {
+        self.rip = entry_point as u64;
+        self.rsp = stack_pointer as u64;
+        // TODO: Set up kernel stack in TSS
+    }
+    
+    fn get_instruction_pointer(&self) -> usize {
+        self.rip as usize
+    }
+    
+    fn set_instruction_pointer(&mut self, ip: usize) {
+        self.rip = ip as u64;
+    }
+    
+    fn get_stack_pointer(&self) -> usize {
+        self.rsp as usize
+    }
+    
+    fn set_stack_pointer(&mut self, sp: usize) {
+        self.rsp = sp as u64;
+    }
+    
+    fn get_kernel_stack(&self) -> usize {
+        // TODO: Return from TSS
+        0
+    }
+    
+    fn set_kernel_stack(&mut self, _sp: usize) {
+        // TODO: Set in TSS
+    }
+    
+    fn set_return_value(&mut self, value: usize) {
+        self.rax = value as u64;
+    }
+    
+    fn clone_from(&mut self, other: &Self) {
+        *self = other.clone();
+    }
+    
+    fn to_task_context(&self) -> TaskContext {
+        TaskContext::X86_64(self.clone())
+    }
+}
+
 /// Switch from current context to new context
 ///
 /// # Safety
 /// This function manipulates CPU state directly and must be called
 /// with interrupts disabled.
 #[no_mangle]
-pub unsafe extern "C" fn context_switch(current: *mut Context, next: *const Context) {
+pub unsafe extern "C" fn context_switch(current: *mut X86_64Context, next: *const X86_64Context) {
     // Save current context
     asm!(
         // Save general purpose registers
@@ -152,8 +208,8 @@ pub unsafe extern "C" fn context_switch(current: *mut Context, next: *const Cont
     asm!(
         // Load new CR3 if different
         "mov rax, [rsi + 0xB0]",
-        "mov rbx, cr3",
-        "cmp rax, rbx",
+        "mov rcx, cr3",
+        "cmp rax, rcx",
         "je 2f",
         "mov cr3, rax",
         "2:",
@@ -204,6 +260,14 @@ pub unsafe extern "C" fn context_switch(current: *mut Context, next: *const Cont
         lateout("r14") _,
         lateout("r15") _,
     );
+}
+
+/// Switch context using the ThreadContext interface
+#[allow(dead_code)]
+pub fn switch_context(from: &mut X86_64Context, to: &X86_64Context) {
+    unsafe {
+        context_switch(from as *mut _, to as *const _);
+    }
 }
 
 /// Save FPU state

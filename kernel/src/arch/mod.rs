@@ -22,6 +22,9 @@ pub use riscv64::*;
 // Common timer module
 pub mod timer;
 
+// Common context module
+pub mod context;
+
 // Wrapper for serial_init to return common type
 #[allow(dead_code)]
 pub fn serial_init() -> crate::serial::SerialPort {

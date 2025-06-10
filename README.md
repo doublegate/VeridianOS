@@ -41,7 +41,7 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 
 - IPC System: ~45% complete (sync/async channels, registry, perf tracking, rate limiting done)
 - Memory Management: ~95% complete (frame allocator, virtual memory, page tables, bootloader integration complete)
-- Process Management: Not started
+- Process Management: ~90% complete (PCB, threads, context switching, synchronization primitives done)
 - Capability System: Not started
 
 **Phase 0 Achievements**:

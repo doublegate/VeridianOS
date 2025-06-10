@@ -122,15 +122,15 @@ pub struct TaskStats {
 pub enum TaskContext {
     /// x86_64 task context
     #[cfg(target_arch = "x86_64")]
-    X86_64(crate::arch::x86_64::context::Context),
+    X86_64(crate::arch::x86_64::context::X86_64Context),
 
     /// AArch64 task context
     #[cfg(target_arch = "aarch64")]
-    AArch64(crate::arch::aarch64::context::Context),
+    AArch64(crate::arch::aarch64::context::AArch64Context),
 
     /// RISC-V task context
     #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-    RiscV(crate::arch::riscv::context::Context),
+    RiscV(crate::arch::riscv::context::RiscVContext),
 }
 
 /// Task Control Block (TCB)
@@ -266,7 +266,7 @@ impl TaskContext {
     /// Create new task context for entry point
     #[cfg(target_arch = "x86_64")]
     pub fn new(entry_point: usize, stack_base: usize) -> Self {
-        TaskContext::X86_64(crate::arch::x86_64::context::Context::new(
+        TaskContext::X86_64(crate::arch::x86_64::context::X86_64Context::new(
             entry_point,
             stack_base,
         ))
@@ -274,7 +274,7 @@ impl TaskContext {
 
     #[cfg(target_arch = "aarch64")]
     pub fn new(entry_point: usize, stack_base: usize) -> Self {
-        TaskContext::AArch64(crate::arch::aarch64::context::Context::new(
+        TaskContext::AArch64(crate::arch::aarch64::context::AArch64Context::new(
             entry_point,
             stack_base,
         ))
@@ -282,7 +282,7 @@ impl TaskContext {
 
     #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
     pub fn new(entry_point: usize, stack_base: usize) -> Self {
-        TaskContext::RiscV(crate::arch::riscv::context::Context::new(
+        TaskContext::RiscV(crate::arch::riscv::context::RiscVContext::new(
             entry_point,
             stack_base,
         ))

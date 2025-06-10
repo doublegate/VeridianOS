@@ -2,6 +2,21 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 🔒 RULE #1 - ALWAYS CHECK AND READ BEFORE WRITING
+**CRITICAL**: ALWAYS check for existence and read from existing files BEFORE attempting to update or write to them. This prevents file corruption, data loss, and wasted time.
+
+**Implementation Protocol**:
+1. **Check Existence**: Use `Read`, `Glob`, or `LS` tools to verify file exists
+2. **Read Current Content**: Always read the existing file content first
+3. **Analyze Structure**: Understand current format, sections, and organization
+4. **Plan Changes**: Determine what needs to be modified, added, or updated
+5. **Execute Update**: Use `Edit` or `MultiEdit` for modifications, or `Write` only after reading
+
+**Tools Usage Priority**:
+- ✅ **ALWAYS**: `Read` → `Edit`/`MultiEdit` (for existing files)
+- ✅ **CONDITIONAL**: `Read` → `Write` (only if complete rewrite needed after reading)
+- ❌ **NEVER**: Direct `Write` without prior `Read` (unless explicitly creating new file)
+
 ## VeridianOS Overview
 
 VeridianOS is a next-generation microkernel operating system written entirely in Rust, emphasizing security, modularity, and formal verification. It uses capability-based security and runs all drivers in user space for maximum isolation.
@@ -134,7 +149,7 @@ Currently implementing in phases:
   - Phase 0 (Foundation) - 100% COMPLETE! 🎉
   - IPC System: ~45% complete (sync/async channels, registry, perf tracking, rate limiting)
   - Memory Management: ~95% complete - frame allocator, VMM, heap, page tables, bootloader integration
-  - Process Management: Not started
+  - Process Management: ~90% complete - PCB, threads, context switching, synchronization primitives
   - Capability System: Not started
 - **Latest Release**: v0.1.0 (June 7, 2025) - Foundation & Tooling
   - Release includes kernel binaries for all three architectures
@@ -152,51 +167,31 @@ Currently implementing in phases:
   - Fixed all CI/CD issues (formatting, clippy warnings)
   - Updated all documentation to reflect current progress
 
-## Critical Implementation Notes
+## Implementation Status
 
-### Memory Management (✅ ~95% Complete)
-- ✅ Hybrid frame allocator: Buddy system for large allocations, bitmap for single frames
-- ✅ NUMA-aware from the start with per-node allocators
-- ✅ Support for CXL memory and hardware memory tagging (Intel LAM, ARM MTE) infrastructure
-- ✅ Reserved memory tracking: BIOS regions, kernel code/data, boot-time allocations
-- ✅ Physical memory zones: DMA (0-16MB), Normal, High (32-bit only)
-- ✅ Virtual Memory Manager with 4-level page tables
-- ✅ Kernel heap allocator with slab design (10 size classes)
-- ✅ Page table management with recursive mapping support
-- ✅ TLB flush operations for x86_64, AArch64, and RISC-V
-- ✅ Bootloader memory map integration (E820, UEFI)
-- ✅ Architecture-specific MMU operations (CR3, TTBR0, SATP)
+### Phase 1 Progress (~35% overall)
+- **Memory Management**: ~95% complete
+  - Hybrid frame allocator (bitmap + buddy system)
+  - NUMA-aware allocation with per-node allocators
+  - Virtual memory manager with 4-level page tables
+  - Kernel heap allocator with slab design
+  - Reserved memory tracking and zone management
+  - Architecture-specific MMU operations (CR3, TTBR0, SATP)
 
-### IPC Implementation
-- Synchronous message passing for small messages (✅ Implemented)
-  - Ring buffer with 64 slots per channel
-  - 4KB message size limit
-  - Zero-copy design using shared buffers
-- Asynchronous channels for streaming data (✅ Implemented)
-  - Lock-free ring buffer implementation
-  - High throughput for bulk data transfer
-- Zero-copy transfers using shared memory mappings (✅ Infrastructure complete)
-  - SharedRegion management with permissions
-  - NUMA-aware allocation support
-  - Three transfer modes: Move, Share, Copy-on-write
-- Capability passing integrated into IPC (✅ Full implementation)
-  - 64-bit tokens with generation counters
-  - O(1) validation for fast path
-  - Permission and rate limiting
-- Fast path IPC for register-based messages (✅ Implemented)
-  - Architecture-specific register transfer
-  - <1μs latency achieved (exceeds <5μs target)
-  - Performance counter tracking
-- System call interface (✅ Complete)
-  - Full syscall handler with all IPC operations
-  - Architecture-specific entry points
-- Global channel registry with O(1) lookup (✅ Implemented)
-- Performance measurement infrastructure (✅ Implemented)
-  - CPU cycle tracking for all operations
-  - Automated performance validation
-- Rate limiting for DoS protection (✅ Implemented)
-  - Token bucket algorithm per process
-- Comprehensive error handling (✅ All error cases covered)
+- **IPC System**: ~45% complete
+  - Synchronous/asynchronous channels with ring buffers
+  - Zero-copy transfers with shared memory mappings
+  - Fast path IPC with register-based transfer (<1μs achieved)
+  - Capability passing with 64-bit tokens
+  - Global registry with O(1) lookup
+  - Rate limiting and comprehensive error handling
+
+- **Process Management**: ~90% complete
+  - Process Control Block (PCB) and Thread Control Block (TCB)
+  - Context switching infrastructure
+  - Synchronization primitives
+
+- **Capability System**: Not started
 
 ### Driver Framework
 - Drivers run as separate user processes
@@ -296,60 +291,40 @@ Check these files regularly to track progress and identify next tasks.
 - Use `just debug-<arch>` commands for easy debugging
 - Documentation: `docs/GDB-DEBUGGING.md`
 
-### Phase 1 Implementation Progress
-- **Phase 0 Status**: 100% COMPLETE! 🎉
-- **Phase 1 Focus**: Memory Management → Process Management → IPC → Capabilities
-- **Current Progress**:
-  - IPC System: ~45% complete
-    - ✅ Synchronous channels with ring buffers
-    - ✅ Message types (SmallMessage ≤64 bytes, LargeMessage)
-    - ✅ Fast path IPC with register-based transfer (<1μs achieved)
-    - ✅ Zero-copy shared memory infrastructure
-    - ✅ Capability system with 64-bit tokens
-    - ✅ System call interface for all IPC operations
-    - ✅ Global channel registry with O(1) lookup
-    - ✅ Error handling framework
-    - ✅ Process integration hooks
-    - ✅ Asynchronous channels with lock-free buffers
-    - ✅ Performance tracking (<1μs small, <5μs large)
-    - ✅ Rate limiting for DoS protection
-    - 🔲 Integration tests (need scheduler)
-    - 🔲 Actual context switching (needs scheduler)
-  - Memory Management: ~95% complete
-    - ✅ Hybrid frame allocator (bitmap + buddy)
-    - ✅ NUMA-aware allocation
-    - ✅ Performance statistics tracking
-    - ✅ Virtual memory manager with page tables
-    - ✅ Kernel heap allocator (slab design)
-    - ✅ Memory zones (DMA, Normal, High)
-    - ✅ Reserved memory region tracking
-    - ✅ Page table management (4-level)
-    - ✅ TLB management
-    - ✅ Bootloader memory map integration
-    - 🔲 Full page fault handling (needs scheduler)
-- **Key Documents**: 
-  - `docs/PHASE0-COMPLETION-SUMMARY.md` - Phase 0 achievements
-  - `docs/design/MEMORY-ALLOCATOR-DESIGN.md` - Memory allocator implementation guide
-  - `docs/design/IPC-DESIGN.md` - IPC system architecture
-  - `docs/design/SCHEDULER-DESIGN.md` - Scheduler implementation
-  - `docs/design/CAPABILITY-SYSTEM-DESIGN.md` - Capability system design
-- **Performance Targets**:
-  - IPC: < 1μs (small), < 5μs (large)
-  - Context Switch: < 10μs
-  - Memory Allocation: < 1μs
-  - Capability Lookup: O(1)
+### Key Design Documents
+- `docs/design/MEMORY-ALLOCATOR-DESIGN.md` - Memory allocator implementation guide
+- `docs/design/IPC-DESIGN.md` - IPC system architecture
+- `docs/design/SCHEDULER-DESIGN.md` - Scheduler implementation
+- `docs/design/CAPABILITY-SYSTEM-DESIGN.md` - Capability system design
+- `docs/PHASE0-COMPLETION-SUMMARY.md` - Phase 0 achievements
+- `docs/PHASE1-COMPLETION-CHECKLIST.md` - Phase 1 task tracking
 
-### mdBook Documentation
-- **Documentation Site**: GitHub Pages at https://doublegate.github.io/VeridianOS/
-- **Book Source**: `docs/book/src/` directory
+### Performance Targets
+- **IPC**: < 1μs (small messages), < 5μs (large transfers)
+- **Context Switch**: < 10μs
+- **Memory Allocation**: < 1μs
+- **Capability Lookup**: O(1)
+- **Process Support**: 1000+ concurrent processes
+- **Kernel Size**: < 15,000 lines of code
+
+### Documentation Organization
+- **GitHub Pages**: https://doublegate.github.io/VeridianOS/
+- **mdBook Source**: `docs/book/src/` directory
 - **Building**: Run `mdbook build` in `docs/book/` directory
 - **Content Sources**: Integrated from phase docs, design docs, and technical specs
-- **Key Sections**:
-  - Introduction and project overview
-  - Architecture guide with microkernel design details
-  - Development setup and toolchain requirements  
-  - Phase documentation for all 7 development phases
-  - Technical specifications and performance targets
-  - Troubleshooting guide based on resolved issues
-  - Comprehensive glossary of terms
-- **Content Strategy**: Consolidate technical details from reference docs into cohesive guide
+- **TODO System**: Comprehensive task tracking in `to-dos/` directory
+  - `MASTER_TODO.md`: Overall project status and quick links
+  - `PHASE[0-6]_TODO.md`: Detailed tasks for each development phase
+  - `TESTING_TODO.md`: Testing strategy and test tracking
+  - `ISSUES_TODO.md`: Bug tracking and known issues
+  - `RELEASE_TODO.md`: Release planning and version milestones
+
+### Key Implementation Files
+- `kernel/src/arch/` - Architecture-specific implementations (all working!)
+- `kernel/src/mm/` - Memory management implementation
+- `kernel/src/ipc/` - Inter-process communication implementation
+- `kernel/src/sched/` - Scheduler implementation
+- `kernel/src/cap/` - Capability system (ready for implementation)
+- `kernel/src/print.rs` - Kernel output macros
+- `kernel/src/test_framework.rs` - No-std test infrastructure
+- `kernel/src/bench.rs` - Benchmarking framework

@@ -14,7 +14,7 @@ use alloc::string::String;
 use spin::Mutex;
 
 use super::ProcessId;
-use crate::arch::context::ThreadContext;
+use crate::arch::context::{ArchThreadContext, ThreadContext};
 
 /// Thread ID type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -88,7 +88,7 @@ pub struct Thread {
     pub state: AtomicU32,
     
     /// CPU context (registers, etc.)
-    pub context: Mutex<ThreadContext>,
+    pub context: Mutex<ArchThreadContext>,
     
     /// User stack
     pub user_stack: Stack,
@@ -184,7 +184,7 @@ impl Thread {
             process,
             name,
             state: AtomicU32::new(ThreadState::Creating as u32),
-            context: Mutex::new(ThreadContext::new()),
+            context: Mutex::new(ArchThreadContext::new()),
             user_stack: Stack::new(user_stack_base, user_stack_size),
             kernel_stack: Stack::new(kernel_stack_base, kernel_stack_size),
             tls: Mutex::new(ThreadLocalStorage::new()),
