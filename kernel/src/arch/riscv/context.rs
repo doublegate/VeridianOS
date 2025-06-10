@@ -247,9 +247,10 @@ pub fn switch_context(from: &mut RiscVContext, to: &RiscVContext) {
 /// This function manipulates CPU state directly and must be called
 /// with interrupts disabled.
 #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-#[naked]
 #[no_mangle]
-pub unsafe extern "C" fn context_switch(_current: *mut RiscVContext, _next: *const RiscVContext) {
+pub unsafe extern "C" fn context_switch(current: *mut RiscVContext, next: *const RiscVContext) {
+    // Cannot use naked functions with asm! macro in current Rust version
+    // Using inline assembly in regular function
     asm!(
         // a0 = current context pointer
         // a1 = next context pointer
@@ -356,6 +357,8 @@ pub unsafe extern "C" fn context_switch(_current: *mut RiscVContext, _next: *con
         "ld a1, 160(a1)",
         // Return to new context
         "ret",
+        in("a0") current,
+        in("a1") next,
         options(noreturn)
     );
 }
@@ -410,9 +413,10 @@ pub fn hart_id() -> usize {
 /// This function manipulates CPU state directly and must be called
 /// with interrupts disabled.
 #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-#[naked]
 #[no_mangle]
-pub unsafe extern "C" fn load_context(_context: *const RiscVContext) {
+pub unsafe extern "C" fn load_context(context: *const RiscVContext) {
+    // Cannot use naked functions with asm! macro in current Rust version
+    // Using inline assembly in regular function
     asm!(
         // a0 = context pointer
 
@@ -466,6 +470,7 @@ pub unsafe extern "C" fn load_context(_context: *const RiscVContext) {
         "ld a0, 152(a0)",
         // Return to loaded context via supervisor return
         "sret",
+        in("a0") context,
         options(noreturn)
     );
 }

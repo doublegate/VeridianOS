@@ -473,11 +473,13 @@ fn load_context(context: &super::task::TaskContext) {
 fn load_context(context: &super::task::TaskContext) {
     use crate::arch::aarch64::context::AArch64Context;
 
-    if let super::task::TaskContext::AArch64(ctx) = context {
-        unsafe {
+    match context {
+        super::task::TaskContext::AArch64(ctx) => unsafe {
             // Load the initial context
             crate::arch::aarch64::context::load_context(ctx as *const AArch64Context);
-        }
+        },
+        #[allow(unreachable_patterns)]
+        _ => unreachable!("Invalid context type for AArch64"),
     }
 }
 
@@ -485,11 +487,13 @@ fn load_context(context: &super::task::TaskContext) {
 fn load_context(context: &super::task::TaskContext) {
     use crate::arch::riscv::context::RiscVContext;
 
-    if let super::task::TaskContext::RiscV(ctx) = context {
-        unsafe {
+    match context {
+        super::task::TaskContext::RiscV(ctx) => unsafe {
             // Load the initial context
             crate::arch::riscv::context::load_context(ctx as *const RiscVContext);
-        }
+        },
+        #[allow(unreachable_patterns)]
+        _ => unreachable!("Invalid context type for RISC-V"),
     }
 }
 

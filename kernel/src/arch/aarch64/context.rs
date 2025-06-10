@@ -159,12 +159,10 @@ pub fn switch_context(from: &mut AArch64Context, to: &AArch64Context) {
 /// # Safety
 /// This function manipulates CPU state directly and must be called
 /// with interrupts disabled.
-#[naked]
 #[no_mangle]
-pub unsafe extern "C" fn context_switch(
-    _current: *mut AArch64Context,
-    _next: *const AArch64Context,
-) {
+pub unsafe extern "C" fn context_switch(current: *mut AArch64Context, next: *const AArch64Context) {
+    // Cannot use naked functions with asm! macro in current Rust version
+    // Using inline assembly in regular function
     asm!(
         // Save current context
         // x0 = current context pointer
@@ -241,6 +239,8 @@ pub unsafe extern "C" fn context_switch(
         "ldp x0, x1, [x1, #0]",
         // Return to new context
         "ret",
+        in("x0") current,
+        in("x1") next,
         options(noreturn)
     );
 }
@@ -300,9 +300,10 @@ pub fn current_el() -> u8 {
 /// # Safety
 /// This function manipulates CPU state directly and must be called
 /// with interrupts disabled.
-#[naked]
 #[no_mangle]
-pub unsafe extern "C" fn load_context(_context: *const AArch64Context) {
+pub unsafe extern "C" fn load_context(context: *const AArch64Context) {
+    // Cannot use naked functions with asm! macro in current Rust version
+    // Using inline assembly in regular function
     asm!(
         // x0 = context pointer
 
@@ -341,6 +342,7 @@ pub unsafe extern "C" fn load_context(_context: *const AArch64Context) {
         "ldp x0, x1, [x0, #0]",
         // Return to loaded context via exception return
         "eret",
+        in("x0") context,
         options(noreturn)
     );
 }
