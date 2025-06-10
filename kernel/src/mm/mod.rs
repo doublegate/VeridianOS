@@ -5,8 +5,10 @@
 
 #![allow(dead_code)]
 
+pub mod bootloader;
 pub mod frame_allocator;
 pub mod heap;
+pub mod page_table;
 pub mod vmm;
 
 // Re-export commonly used types
