@@ -67,6 +67,12 @@ pub struct HeapStats {
 /// Size classes for slab allocator (in bytes)
 const SIZE_CLASSES: [usize; 10] = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
 
+impl Default for SlabAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SlabAllocator {
     /// Create a new slab allocator
     pub const fn new() -> Self {
@@ -85,6 +91,13 @@ impl SlabAllocator {
     }
 
     /// Initialize the slab allocator with heap memory
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that:
+    /// - The heap_start address is valid and properly aligned
+    /// - The heap_size bytes starting at heap_start are available for use
+    /// - This function is called only once
     pub unsafe fn init(&self, heap_start: usize, heap_size: usize) {
         // Reserve some memory for slab metadata
         let metadata_size = heap_size / 16; // 1/16 of heap for metadata
@@ -99,7 +112,7 @@ impl SlabAllocator {
         let mut current_addr = heap_start + metadata_size;
         let slab_size = slab_area_size / SIZE_CLASSES.len();
 
-        for (_i, &size) in SIZE_CLASSES.iter().enumerate() {
+        for &size in SIZE_CLASSES.iter() {
             if current_addr + slab_size > heap_start + heap_size {
                 break;
             }
@@ -145,7 +158,7 @@ impl SlabAllocator {
         let size = layout.size().max(layout.align());
 
         // Find appropriate size class
-        for (_i, &class_size) in SIZE_CLASSES.iter().enumerate() {
+        for &class_size in SIZE_CLASSES.iter() {
             if size <= class_size {
                 // Try to allocate from this slab
                 // In real implementation, would need proper synchronization
@@ -172,7 +185,7 @@ impl SlabAllocator {
         let size = layout.size().max(layout.align());
 
         // Find appropriate size class
-        for (_i, &class_size) in SIZE_CLASSES.iter().enumerate() {
+        for &class_size in SIZE_CLASSES.iter() {
             if size <= class_size {
                 // Return to slab
                 // In real implementation, would need proper synchronization
@@ -199,7 +212,7 @@ impl SlabAllocator {
     }
 }
 
-/// Global slab allocator instance (not used for now)
+// Global slab allocator instance (not used for now)
 // static SLAB_ALLOCATOR: SlabAllocator = SlabAllocator::new();
 
 /// Initialize the kernel heap
@@ -239,8 +252,7 @@ pub fn init() -> Result<(), &'static str> {
     Ok(())
 }
 
-
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use alloc::{boxed::Box, vec::Vec};
 

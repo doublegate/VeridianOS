@@ -11,10 +11,9 @@ pub mod vmm;
 
 // Re-export commonly used types
 pub use frame_allocator::{
-    FrameAllocatorError, FrameNumber, MemoryZone, PhysicalAddress, FRAME_ALLOCATOR, FRAME_SIZE,
+    FrameAllocatorError, FrameNumber, PhysicalAddress, FRAME_ALLOCATOR, FRAME_SIZE,
 };
-pub use heap::{init as init_heap, HEAP_SIZE, HEAP_START};
-pub use vmm::VirtualMemoryManager;
+pub use heap::init as init_heap;
 
 /// Virtual memory address
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
