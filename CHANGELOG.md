@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Phase 1 Progress (Started June 8, 2025) - Updated January 9, 2025
+### Phase 1 Progress (Started June 8, 2025) - Updated June 9, 2025
 
-- Phase 1 ~10% overall complete
+- Phase 1 ~35% overall complete
 - IPC implementation ~45% complete
   - ✅ Synchronous message passing with ring buffers
   - ✅ Fast path IPC with register-based transfer (<1μs latency achieved)
@@ -22,12 +22,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - ✅ Performance tracking infrastructure (<1μs average)
   - ✅ Rate limiting with token bucket algorithm
   - ✅ IPC tests and benchmarks restored
-- Memory management ~20% complete
+- Memory management ~95% complete
   - ✅ Hybrid frame allocator (bitmap + buddy system)
   - ✅ NUMA-aware allocation support
   - ✅ Performance statistics tracking
-  - 🔲 Virtual memory manager pending
-  - 🔲 Kernel heap allocator pending
+  - ✅ Virtual memory manager implemented (commits e6a482c, 6efe6c9)
+    - 4-level page table management for x86_64
+    - Full page mapping/unmapping support
+    - TLB invalidation for all architectures
+    - Page fault handler integration
+    - Support for 4KB, 2MB, and 1GB pages
+  - ✅ Kernel heap allocator implemented
+    - Linked list allocator with 8-byte alignment
+    - Dynamic heap growth support
+    - Global allocator integration
+  - ✅ Bootloader integration complete
+    - Memory map parsing from bootloader
+    - Reserved region tracking (BIOS, kernel, boot info)
+    - Automatic frame allocator initialization
+  - ✅ Reserved memory handling
+    - BIOS regions (0-1MB) protected
+    - Kernel code/data regions reserved
+    - Boot information structures preserved
+  - 🔲 Memory zones (DMA, Normal, High) pending
 - Process management not yet started
 - Full capability system not yet started
 

@@ -167,10 +167,10 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="phase-1-microkernel-core"><a class="header" href="#phase-1-microkernel-core">Phase 1: Microkernel Core</a></h1>
-<p><strong>Status</strong>: IN PROGRESS ~10% Overall - IPC ~45% Complete, Memory Management ~20% Complete<br />
+<p><strong>Status</strong>: IN PROGRESS ~35% Overall - IPC ~45% Complete, Memory Management ~95% Complete<br />
 <strong>Started</strong>: June 8, 2025<br />
 <strong>Duration</strong>: Months 4-9<br />
-<strong>Last Updated</strong>: January 9, 2025<br />
+<strong>Last Updated</strong>: June 9, 2025<br />
 <strong>Goal</strong>: Implement the core microkernel functionality with high-performance IPC, memory management, and scheduling.</p>
 <h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
 <p>Phase 1 focuses on implementing the essential microkernel components that must run in privileged mode. This includes memory management, inter-process communication, process scheduling, and the capability system that underpins all security in VeridianOS.</p>
@@ -299,15 +299,24 @@ sys_thread_yield()    // Yield CPU
 <h2 id="deliverables"><a class="header" href="#deliverables">Deliverables</a></h2>
 <h3 id="memory-management"><a class="header" href="#memory-management">Memory Management</a></h3>
 <ul>
-<li>[~] Frame allocator (buddy + bitmap hybrid) - IN PROGRESS</li>
-<li><input disabled="" type="checkbox"/>
-NUMA-aware allocation</li>
-<li><input disabled="" type="checkbox"/>
-Virtual memory manager</li>
-<li><input disabled="" type="checkbox"/>
-Page fault handler</li>
-<li><input disabled="" type="checkbox"/>
-Memory zone management</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Frame allocator (buddy + bitmap hybrid) ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+NUMA-aware allocation ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Virtual memory manager ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Page fault handler ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Memory zone management ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+TLB shootdown for multi-core ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Kernel heap allocator (slab + linked list) ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Reserved memory handling ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Bootloader integration ✅</li>
 </ul>
 <h3 id="ipc-system"><a class="header" href="#ipc-system">IPC System</a></h3>
 <ul>

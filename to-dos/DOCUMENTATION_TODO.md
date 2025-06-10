@@ -217,10 +217,14 @@ Common issues and solutions.
 - [ ] CI/CD documentation
 
 ### Phase 1 Documentation
-- [ ] Boot process documentation
-- [ ] Memory management guide
+- [x] Boot process documentation ✅
+- [x] Memory management guide ✅
+  - [x] Frame allocator documentation ✅
+  - [x] Virtual memory documentation ✅
+  - [x] Kernel heap documentation ✅
+  - [x] Memory zones documentation ✅
 - [ ] Scheduler documentation
-- [ ] IPC reference
+- [~] IPC reference (partially complete)
 - [ ] Capability system guide
 
 ### Phase 2 Documentation

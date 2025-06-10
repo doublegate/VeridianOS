@@ -4,6 +4,9 @@ This glossary defines key terms and concepts used throughout the VeridianOS docu
 
 ## A
 
+**Address Space**
+: Complete range of memory addresses available to a process, including code, data, heap, and stack.
+
 **ASLR (Address Space Layout Randomization)**
 : Security technique that randomizes memory addresses to prevent exploitation.
 
@@ -12,6 +15,9 @@ This glossary defines key terms and concepts used throughout the VeridianOS docu
 
 **Allocator**
 : Component responsible for managing memory allocation and deallocation. VeridianOS uses a hybrid buddy/bitmap allocator.
+
+**Anonymous Memory**
+: Memory not backed by a file, typically used for program heap and stack.
 
 **Atomic Operation**
 : Operation that completes entirely or not at all, without interruption from other threads.
@@ -46,14 +52,20 @@ This glossary defines key terms and concepts used throughout the VeridianOS docu
 
 ## D
 
+**Demand Paging**
+: Memory management technique where pages are loaded only when accessed.
+
 **DMA (Direct Memory Access)**
 : Hardware feature allowing devices to access memory without CPU involvement.
+
+**DMA Zone**
+: Low memory region (0-16MB) reserved for devices that can only access limited address ranges.
 
 **DPDK (Data Plane Development Kit)**
 : Framework for fast packet processing, bypassing the kernel network stack.
 
-**Demand Paging**
-: Memory management technique where pages are loaded only when accessed.
+**Dirty Page**
+: Memory page that has been modified since it was loaded from disk or created.
 
 ## E
 
@@ -160,14 +172,29 @@ This glossary defines key terms and concepts used throughout the VeridianOS docu
 **Page**
 : Unit of virtual memory, typically 4KB in size.
 
+**Page Fault**
+: Exception raised when accessing unmapped or invalid memory, handled by the kernel.
+
+**Page Frame**
+: Physical memory page that can be mapped to virtual addresses.
+
+**Page Mapper**
+: Kernel component that manages virtual-to-physical page mappings.
+
 **Page Table**
 : Data structure mapping virtual addresses to physical addresses.
+
+**Page Table Entry (PTE)**
+: Individual entry in a page table containing physical address and permission bits.
 
 **PCB (Process Control Block)**
 : Data structure containing information about a process.
 
 **PCR (Platform Configuration Register)**
 : TPM register storing measurements for secure boot.
+
+**PML4 (Page Map Level 4)**
+: Top-level page table structure in x86_64 architecture.
 
 **POSIX (Portable Operating System Interface)**
 : Standards defining API for Unix-like operating systems.
@@ -208,8 +235,14 @@ This glossary defines key terms and concepts used throughout the VeridianOS docu
 **SIMD (Single Instruction, Multiple Data)**
 : CPU instructions operating on multiple data points simultaneously.
 
+**Slab Allocator**
+: Memory allocator that pre-allocates objects of specific sizes to reduce fragmentation.
+
 **SR-IOV (Single Root I/O Virtualization)**
 : Technology allowing single PCIe device to appear as multiple devices.
+
+**Swap**
+: Process of moving memory pages between RAM and disk storage.
 
 **Syscall (System Call)**
 : Interface for user programs to request kernel services.
@@ -247,11 +280,17 @@ This glossary defines key terms and concepts used throughout the VeridianOS docu
 **VFIO (Virtual Function I/O)**
 : Framework for secure device access from user space.
 
-**VMX (Virtual Machine Extensions)**
-: Intel CPU virtualization technology.
+**Virtual Address**
+: Memory address in a process's virtual address space, translated to physical address by MMU.
+
+**Virtual Memory**
+: Memory management technique providing each process with its own address space.
 
 **VMA (Virtual Memory Area)**
 : Contiguous range of virtual addresses with same permissions.
+
+**VMX (Virtual Machine Extensions)**
+: Intel CPU virtualization technology.
 
 ## W
 

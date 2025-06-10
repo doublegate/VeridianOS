@@ -322,6 +322,70 @@ let page = PAGE_ALLOCATOR.lock().allocate()?;
 page_table.map(page, frame, PageFlags::WRITABLE)?;
 ```
 
+### Virtual Memory Management
+
+#### Page Mapper
+```rust
+use veridian_kernel::mm::{PageMapper, Page, PhysFrame, PageFlags};
+
+let mut mapper = PageMapper::new(&mut page_table, &mut frame_allocator);
+
+// Map a page
+mapper.map_page(
+    Page::containing_address(VirtAddr::new(0x1000)),
+    PhysFrame::containing_address(PhysAddr::new(0x2000)),
+    PageFlags::PRESENT | PageFlags::WRITABLE,
+)?;
+
+// Unmap a page
+let (frame, flush) = mapper.unmap_page(page)?;
+flush.flush(); // Flush TLB
+```
+
+#### TLB Management
+```rust
+use veridian_kernel::mm::tlb::{TlbShootdown, flush, flush_all};
+
+// Flush single page
+unsafe { flush(VirtAddr::new(0x1000)); }
+
+// Flush all TLB entries
+unsafe { flush_all(); }
+
+// Multi-core TLB shootdown
+let mut shootdown = TlbShootdown::new();
+shootdown.flush_pages(cpu_mask, &[page1, page2]);
+```
+
+#### Kernel Heap
+```rust
+use alloc::{vec::Vec, boxed::Box};
+
+// Now available after heap initialization
+let mut vec = Vec::new();
+vec.push(42);
+
+let boxed = Box::new(ComplexStruct::new());
+```
+
+#### Memory Zones
+```rust
+use veridian_kernel::mm::{ZoneAllocator, ZoneType, AllocationConstraints};
+
+let mut zones = ZONE_ALLOCATOR.lock();
+
+// Allocate from DMA zone
+let frame = zones.allocate_from_zone(ZoneType::DMA, 1)?;
+
+// Allocate with constraints
+let constraints = AllocationConstraints {
+    preferred_zone: ZoneType::Normal,
+    fallback_allowed: true,
+    node_id: Some(0), // NUMA node
+};
+let frame = zones.allocate_pages(16, constraints)?;
+```
+
 ### Synchronization Primitives
 
 #### Mutex
