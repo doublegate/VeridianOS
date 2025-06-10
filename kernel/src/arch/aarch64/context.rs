@@ -193,6 +193,7 @@ pub fn init_fpu() {
 }
 
 /// Check if CPU supports SVE
+#[allow(dead_code)]
 pub fn has_sve() -> bool {
     unsafe {
         let mut id_aa64pfr0: u64;
@@ -202,6 +203,7 @@ pub fn has_sve() -> bool {
 }
 
 /// Enable SVE if supported
+#[allow(dead_code)]
 pub fn enable_sve() {
     if has_sve() {
         unsafe {
@@ -217,6 +219,7 @@ pub fn enable_sve() {
 }
 
 /// Get current exception level
+#[allow(dead_code)]
 pub fn current_el() -> u8 {
     unsafe {
         let mut current_el: u64;
