@@ -2,6 +2,8 @@
 
 // Include the boot module
 pub mod boot;
+pub mod context;
+pub mod timer;
 
 #[allow(dead_code)]
 pub fn init() {
@@ -22,6 +24,32 @@ pub fn halt() -> ! {
 pub fn idle() {
     unsafe {
         core::arch::asm!("wfe");
+    }
+}
+
+#[allow(dead_code)]
+pub fn disable_interrupts() -> impl Drop {
+    struct InterruptGuard {
+        was_enabled: bool,
+    }
+
+    impl Drop for InterruptGuard {
+        fn drop(&mut self) {
+            if self.was_enabled {
+                unsafe {
+                    core::arch::asm!("msr daifclr, #2");
+                }
+            }
+        }
+    }
+
+    let mut daif: u64;
+    unsafe {
+        core::arch::asm!("mrs {}, daif", out(reg) daif);
+        core::arch::asm!("msr daifset, #2");
+    }
+    InterruptGuard {
+        was_enabled: (daif & 0x80) == 0,
     }
 }
 

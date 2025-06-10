@@ -1,9 +1,11 @@
 pub mod boot;
+pub mod context;
 pub mod gdt;
 pub mod idt;
 pub mod mmu;
 pub mod serial;
 pub mod syscall;
+pub mod timer;
 pub mod vga;
 
 #[allow(dead_code)]
@@ -29,8 +31,22 @@ pub fn enable_interrupts() {
 }
 
 #[allow(dead_code)]
-pub fn disable_interrupts() {
+pub fn disable_interrupts() -> impl Drop {
+    struct InterruptGuard {
+        was_enabled: bool,
+    }
+
+    impl Drop for InterruptGuard {
+        fn drop(&mut self) {
+            if self.was_enabled {
+                x86_64::instructions::interrupts::enable();
+            }
+        }
+    }
+
+    let was_enabled = x86_64::instructions::interrupts::are_enabled();
     x86_64::instructions::interrupts::disable();
+    InterruptGuard { was_enabled }
 }
 
 #[allow(dead_code)]

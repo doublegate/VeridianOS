@@ -10,6 +10,7 @@ repository.workspace = true
 default = ["alloc"]
 alloc = []
 testing = []
+smp = []
 
 [dependencies]
 spin.workspace = true

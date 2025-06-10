@@ -1,6 +1,9 @@
-// RISC-V 64 architecture support (stub)
+// RISC-V 64 architecture support
 
 pub mod boot;
+
+// Re-export context and timer from parent riscv module
+pub use super::riscv::{context, timer};
 
 #[allow(dead_code)]
 pub fn init() {
@@ -10,24 +13,45 @@ pub fn init() {
 #[allow(dead_code)]
 pub fn halt() -> ! {
     loop {
-        // TODO: Implement WFI (Wait For Interrupt)
         unsafe { core::arch::asm!("wfi") };
     }
 }
 
 #[allow(dead_code)]
 pub fn enable_interrupts() {
-    // TODO: Enable interrupts on RISC-V
+    unsafe {
+        core::arch::asm!("csrsi sstatus, 2");
+    }
 }
 
 #[allow(dead_code)]
-pub fn disable_interrupts() {
-    // TODO: Disable interrupts on RISC-V
+pub fn disable_interrupts() -> impl Drop {
+    struct InterruptGuard {
+        was_enabled: bool,
+    }
+
+    impl Drop for InterruptGuard {
+        fn drop(&mut self) {
+            if self.was_enabled {
+                unsafe {
+                    core::arch::asm!("csrsi sstatus, 2");
+                }
+            }
+        }
+    }
+
+    let mut sstatus: usize;
+    unsafe {
+        core::arch::asm!("csrr {}, sstatus", out(reg) sstatus);
+        core::arch::asm!("csrci sstatus, 2");
+    }
+    InterruptGuard {
+        was_enabled: (sstatus & 0x2) != 0,
+    }
 }
 
 #[allow(dead_code)]
 pub fn idle() {
-    // TODO: Implement idle for RISC-V
     unsafe { core::arch::asm!("wfi") };
 }
 
