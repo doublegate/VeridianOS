@@ -3,7 +3,40 @@
 //! This module handles the integration between processes and the memory management
 //! subsystem, including virtual address space management and memory mapping.
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
+
 use crate::mm::{self, PhysicalAddress, VirtualAddress, PageFlags, PAGE_SIZE};
+
+/// Memory layout constants for user processes
+pub mod layout {
+    /// User space start
+    pub const USER_SPACE_START: usize = 0x0000_0000_0001_0000;
+    
+    /// User space end
+    pub const USER_SPACE_END: usize = 0x0000_7FFF_FFFF_0000;
+    
+    /// Default code segment start
+    pub const CODE_START: usize = 0x0000_0000_0040_0000;
+    
+    /// Default data segment start
+    pub const DATA_START: usize = 0x0000_0000_0080_0000;
+    
+    /// Default heap start
+    pub const HEAP_START: usize = 0x0000_0000_1000_0000;
+    
+    /// Maximum heap size (1GB)
+    pub const MAX_HEAP_SIZE: usize = 1024 * 1024 * 1024;
+    
+    /// Stack end address (grows down from here)
+    pub const STACK_END: usize = 0x0000_7FFF_0000_0000;
+    
+    /// Default stack size (8MB)
+    pub const DEFAULT_STACK_SIZE: usize = 8 * 1024 * 1024;
+}
 
 /// Process memory region types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +71,7 @@ pub struct MemoryRegion {
     /// Access permissions
     pub flags: PageFlags,
     /// Physical pages backing this region (if any)
+    #[cfg(feature = "alloc")]
     pub physical_pages: Option<Vec<PhysicalAddress>>,
     /// File mapping info (if mapped file)
     pub file_mapping: Option<FileMapping>,
@@ -64,7 +98,7 @@ impl MemoryRegion {
     ) -> Self {
         Self {
             start,
-            end: VirtualAddress::new(start.as_usize() + size),
+            end: VirtualAddress::new((start.as_u64() + size as u64)),
             region_type,
             flags,
             physical_pages: None,
@@ -86,35 +120,6 @@ impl MemoryRegion {
     pub fn overlaps(&self, other: &MemoryRegion) -> bool {
         self.start < other.end && other.start < self.end
     }
-}
-
-/// Memory layout constants
-pub mod layout {
-    use super::*;
-    
-    /// User space start
-    pub const USER_SPACE_START: usize = 0x0000_0000_0001_0000;
-    
-    /// User space end
-    pub const USER_SPACE_END: usize = 0x0000_7FFF_FFFF_0000;
-    
-    /// Default code segment start
-    pub const CODE_START: usize = 0x0000_0000_0040_0000;
-    
-    /// Default data segment start
-    pub const DATA_START: usize = 0x0000_0000_0080_0000;
-    
-    /// Default heap start
-    pub const HEAP_START: usize = 0x0000_0000_1000_0000;
-    
-    /// Default stack end (stacks grow down)
-    pub const STACK_END: usize = 0x0000_7FFF_FF00_0000;
-    
-    /// Default stack size
-    pub const DEFAULT_STACK_SIZE: usize = 8 * 1024 * 1024; // 8MB
-    
-    /// Maximum heap size
-    pub const MAX_HEAP_SIZE: usize = 1024 * 1024 * 1024; // 1GB
 }
 
 /// Process memory operations
@@ -172,8 +177,8 @@ impl ThreadStack {
         }
         
         // Allocate virtual address range for stack
-        let bottom = VirtualAddress::new(layout::STACK_END - size);
-        let top = VirtualAddress::new(layout::STACK_END);
+        let bottom = VirtualAddress::new((layout::STACK_END - size) as u64);
+        let top = VirtualAddress::new(layout::STACK_END as u64);
         
         Ok(Self {
             bottom,
@@ -195,7 +200,7 @@ impl ThreadStack {
     
     /// Check if address is in guard page
     pub fn in_guard_page(&self, addr: VirtualAddress) -> bool {
-        addr >= self.bottom && addr < VirtualAddress::new(self.bottom.as_usize() + self.guard_size)
+        addr >= self.bottom && addr < VirtualAddress::new(self.bottom.as_u64() + self.guard_size as u64)
     }
 }
 
@@ -213,8 +218,8 @@ impl ProcessHeap {
     /// Create a new process heap
     pub fn new() -> Self {
         Self {
-            brk: VirtualAddress::new(layout::HEAP_START),
-            start: VirtualAddress::new(layout::HEAP_START),
+            brk: VirtualAddress::new(layout::HEAP_START as u64),
+            start: VirtualAddress::new(layout::HEAP_START as u64),
             max_size: layout::MAX_HEAP_SIZE,
         }
     }
@@ -243,7 +248,7 @@ impl ProcessHeap {
     
     /// Grow heap by increment
     pub fn grow(&mut self, increment: usize) -> Result<VirtualAddress, &'static str> {
-        let new_brk = VirtualAddress::new(self.brk.as_usize() + increment);
+        let new_brk = VirtualAddress::new((self.brk.as_usize() + increment) as u64);
         self.set_brk(new_brk)
     }
 }

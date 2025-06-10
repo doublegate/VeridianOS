@@ -2,6 +2,7 @@
 
 use core::arch::asm;
 use crate::sched::task::TaskContext;
+use crate::arch::context::ThreadContext;
 
 /// x86_64 CPU context
 #[repr(C)]
@@ -106,13 +107,7 @@ impl X86_64Context {
 
 impl crate::arch::context::ThreadContext for X86_64Context {
     fn new() -> Self {
-        Self {
-            r15: 0, r14: 0, r13: 0, r12: 0, r11: 0, r10: 0, r9: 0, r8: 0,
-            rdi: 0, rsi: 0, rbp: 0, rbx: 0, rdx: 0, rcx: 0, rax: 0,
-            rsp: 0, rip: 0, rflags: 0x202,
-            cs: 0x08, ss: 0x10, ds: 0x10, es: 0x10, fs: 0x00, gs: 0x00,
-            cr3: 0, fpu_state: core::ptr::null_mut(),
-        }
+        Self::default()
     }
     
     fn init(&mut self, entry_point: usize, stack_pointer: usize, _kernel_stack: usize) {
@@ -343,3 +338,20 @@ pub fn enable_xsave() {
         }
     }
 }
+
+impl Default for X86_64Context {
+    fn default() -> Self {
+        Self {
+            r15: 0, r14: 0, r13: 0, r12: 0, r11: 0, r10: 0, r9: 0, r8: 0,
+            rdi: 0, rsi: 0, rbp: 0, rbx: 0, rdx: 0, rcx: 0, rax: 0,
+            rsp: 0, rip: 0, rflags: 0x202,
+            cs: 0x08, ss: 0x10, ds: 0x10, es: 0x10, fs: 0x00, gs: 0x00,
+            cr3: 0, fpu_state: core::ptr::null_mut(),
+        }
+    }
+}
+
+// SAFETY: X86_64Context can be safely sent between threads
+// The FPU state pointer is either null or points to thread-local data
+unsafe impl Send for X86_64Context {}
+unsafe impl Sync for X86_64Context {}

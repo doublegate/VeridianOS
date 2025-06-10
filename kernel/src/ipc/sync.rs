@@ -20,7 +20,8 @@ use super::{
     fast_path::{fast_receive, fast_send},
     message::Message,
 };
-use crate::sched::{block_on_ipc, current_process, find_process, wake_up_process, ProcessState};
+use crate::sched::{block_on_ipc, current_process, find_process, wake_up_process};
+use crate::process::pcb::ProcessState;
 
 /// Statistics for synchronous IPC
 pub struct SyncIpcStats {
@@ -113,7 +114,7 @@ pub fn sync_call(request: Message, target: u64) -> Result<Message> {
 
     // Mark ourselves as waiting for reply
     let current = current_process();
-    current.state = ProcessState::ReplyBlocked;
+    current.state = ProcessState::Blocked;
 
     // Wait for reply
     sync_receive(current.pid)
@@ -125,7 +126,7 @@ pub fn sync_reply(reply: Message, caller: u64) -> Result<()> {
     let caller_process = find_process(caller).ok_or(IpcError::ProcessNotFound)?;
 
     // Verify caller is waiting for reply
-    if caller_process.state != ProcessState::ReplyBlocked {
+    if caller_process.state != ProcessState::Blocked {
         return Err(IpcError::InvalidMessage);
     }
 

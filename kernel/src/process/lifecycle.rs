@@ -6,18 +6,20 @@
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
-use alloc::{string::String, vec::Vec};
+use alloc::{string::String, vec::Vec, format};
 
 use crate::{
-    arch,
+    arch::{self, context::ThreadContext},
     mm::{self, PAGE_SIZE},
     sched,
+    println,
 };
 
 use super::{
     table,
     thread::{Thread, ThreadBuilder, ThreadId},
-    Process, ProcessBuilder, ProcessId, ProcessPriority, ProcessState,
+    pcb::{Process, ProcessBuilder, ProcessState},
+    ProcessId, ProcessPriority,
 };
 
 /// Default stack sizes
@@ -171,12 +173,15 @@ pub fn fork_process() -> Result<ProcessId, &'static str> {
         .cpu_affinity(current_thread.get_affinity())
         .build()?;
         
-        // Copy thread context
-        let mut new_ctx = thread.context.lock();
-        new_ctx.clone_from(&*ctx);
-        
-        // Set return value to 0 for child
-        new_ctx.set_return_value(0);
+        // Copy thread context and set return value to 0 for child
+        {
+            let mut new_ctx = thread.context.lock();
+            // Clone context manually
+            *new_ctx = (*ctx).clone();
+            
+            // Set return value to 0 for child
+            new_ctx.set_return_value(0);
+        } // Drop lock here
         
         thread
     };
@@ -346,43 +351,38 @@ fn cleanup_process(process: &Process) {
 /// Create scheduler task for thread
 fn create_scheduler_task(process: &Process, thread: &Thread) -> Result<(), &'static str> {
     // Create a sched::Task from our Thread
-    let task = sched::task::Task {
-        pid: process.pid.0,
-        tid: thread.tid.0,
-        state: sched::ProcessState::Ready,
-        priority: match process.priority {
-            ProcessPriority::RealTime => sched::task::Priority::RealTimeHigh,
-            ProcessPriority::System => sched::task::Priority::SystemHigh,
-            ProcessPriority::Normal => sched::task::Priority::UserNormal,
-            ProcessPriority::Low => sched::task::Priority::UserLow,
-            ProcessPriority::Idle => sched::task::Priority::Idle,
-        },
-        sched_class: match process.priority {
-            ProcessPriority::RealTime => sched::task::SchedClass::RealTime,
-            _ => sched::task::SchedClass::Normal,
-        },
-        time_slice: thread.time_slice.load(core::sync::atomic::Ordering::Acquire),
-        cpu_affinity: thread.cpu_affinity.load(core::sync::atomic::Ordering::Acquire),
-        current_cpu: None,
-        total_runtime: 0,
-        vruntime: 0,
-        context: {
-            // Convert our ThreadContext to scheduler's TaskContext
-            let ctx = thread.context.lock();
-            ctx.to_task_context()
-        },
-        fpu_state: None,
-        last_scheduled: 0,
-        voluntary_switches: 0,
-        involuntary_switches: 0,
-        page_table: {
-            let memory_space = process.memory_space.lock();
-            memory_space.get_page_table()
-        },
-        blocked_on: None,
-        wait_link: None,
-        ready_link: None,
+    // Get thread context info
+    let ctx = thread.context.lock();
+    let instruction_pointer = ctx.get_instruction_pointer();
+    let stack_pointer = ctx.get_stack_pointer();
+    drop(ctx);
+    
+    // Create a sched::Task using the constructor
+    #[cfg(feature = "alloc")]
+    let mut task = sched::task::Task::new(
+        process.pid.0,
+        thread.tid.0,
+        process.name.clone(),
+        instruction_pointer,
+        stack_pointer,
+        process.memory_space.lock().get_page_table() as usize,
+    );
+    
+    // Update task fields based on thread/process state  
+    task.priority = match process.priority {
+        ProcessPriority::RealTime => sched::task::Priority::RealTimeHigh,
+        ProcessPriority::System => sched::task::Priority::SystemHigh,
+        ProcessPriority::Normal => sched::task::Priority::UserNormal,
+        ProcessPriority::Low => sched::task::Priority::UserLow,
+        ProcessPriority::Idle => sched::task::Priority::Idle,
     };
+    
+    task.sched_class = match process.priority {
+        ProcessPriority::RealTime => sched::task::SchedClass::RealTime,
+        _ => sched::task::SchedClass::Normal,
+    };
+    
+    task.time_slice = thread.time_slice.load(core::sync::atomic::Ordering::Acquire);
     
     // Get task pointer
     let task_ptr = core::ptr::NonNull::new(&task as *const _ as *mut _)

@@ -3,13 +3,13 @@
 //! This module provides synchronization mechanisms for processes and threads,
 //! including mutexes, semaphores, and condition variables.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
-use alloc::collections::VecDeque;
+use alloc::{collections::VecDeque, vec::Vec};
 
 use spin::Mutex as SpinMutex;
 

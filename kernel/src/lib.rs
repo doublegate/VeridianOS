@@ -27,6 +27,7 @@ mod arch;
 mod cap;
 pub mod ipc;
 pub mod mm;
+pub mod process;
 mod sched;
 pub mod serial;
 mod syscall;

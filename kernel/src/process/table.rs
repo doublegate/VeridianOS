@@ -7,11 +7,13 @@
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
-use alloc::{boxed::Box, collections::BTreeMap};
+use alloc::{boxed::Box, collections::BTreeMap, vec::Vec};
 
 use spin::Mutex;
 
-use super::{Process, ProcessId, ProcessState};
+use crate::println;
+use super::{Process, ProcessId};
+use super::pcb::ProcessState;
 
 /// Process table entry
 #[cfg(feature = "alloc")]

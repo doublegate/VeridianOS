@@ -179,12 +179,16 @@ impl Thread {
         kernel_stack_base: usize,
         kernel_stack_size: usize,
     ) -> Self {
-        let mut thread = Self {
+        // Create context using ThreadContext trait
+        let mut context = <ArchThreadContext as ThreadContext>::new();
+        context.init(entry_point, user_stack_base + user_stack_size, kernel_stack_base + kernel_stack_size);
+        
+        let thread = Self {
             tid,
             process,
             name,
             state: AtomicU32::new(ThreadState::Creating as u32),
-            context: Mutex::new(ArchThreadContext::new()),
+            context: Mutex::new(context),
             user_stack: Stack::new(user_stack_base, user_stack_size),
             kernel_stack: Stack::new(kernel_stack_base, kernel_stack_size),
             tls: Mutex::new(ThreadLocalStorage::new()),
@@ -197,14 +201,6 @@ impl Thread {
             priority: 2, // Normal priority
             fpu_used: AtomicU32::new(0),
         };
-        
-        // Initialize context with entry point and stacks
-        {
-            let mut ctx = thread.context.lock();
-            ctx.set_instruction_pointer(entry_point);
-            ctx.set_stack_pointer(thread.user_stack.top());
-            ctx.set_kernel_stack(thread.kernel_stack.top());
-        }
         
         thread
     }

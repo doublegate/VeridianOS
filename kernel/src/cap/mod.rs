@@ -1,6 +1,17 @@
-// Capability system module
+//! Capability system module
+//!
+//! Implements capability-based security for VeridianOS
 
-#[allow(dead_code)]
+#![allow(dead_code)]
+
+pub mod types;
+
+// Re-export common types
+pub use types::{
+    Capability, CapabilityId, CapabilityPermissions, CapabilitySpace, CapabilityType,
+    alloc_cap_id,
+};
+
 pub fn init() {
     println!("[CAP] Initializing capability system...");
     // TODO: Initialize capability table

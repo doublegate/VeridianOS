@@ -32,23 +32,8 @@ pub type ProcessId = u64;
 /// Thread ID type
 pub type ThreadId = u64;
 
-/// Process state
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProcessState {
-    /// Process is ready to run
-    Ready = 0,
-    /// Process is currently running
-    Running = 1,
-    /// Process is blocked waiting for IPC receive
-    ReceiveBlocked = 2,
-    /// Process is blocked waiting for IPC reply
-    ReplyBlocked = 3,
-    /// Process is sleeping
-    Sleeping = 4,
-    /// Process has exited
-    Exited = 5,
-}
+// Import ProcessState from process module
+use crate::process::ProcessState;
 
 /// Process structure (compatibility wrapper)
 pub struct Process {
@@ -80,7 +65,15 @@ pub fn current_process() -> &'static mut Process {
             };
 
             CURRENT_PROCESS.pid = task.pid;
-            CURRENT_PROCESS.state = task.state;
+            CURRENT_PROCESS.state = match task.state {
+                ProcessState::Creating => ProcessState::Ready,
+                ProcessState::Ready => ProcessState::Ready,
+                ProcessState::Running => ProcessState::Running,
+                ProcessState::Blocked => ProcessState::Blocked,
+                ProcessState::Sleeping => ProcessState::Sleeping,
+                ProcessState::Zombie => ProcessState::Dead,
+                ProcessState::Dead => ProcessState::Dead,
+            };
             CURRENT_PROCESS.blocked_on = task.blocked_on;
             CURRENT_PROCESS.task = Some(task_ptr);
 
@@ -129,7 +122,7 @@ pub fn block_on_ipc(endpoint: u64) {
     if let Some(current_task) = SCHEDULER.lock().current() {
         unsafe {
             let task_mut = current_task.as_ptr();
-            (*task_mut).state = ProcessState::ReceiveBlocked;
+            (*task_mut).state = ProcessState::Blocked;
             (*task_mut).blocked_on = Some(endpoint);
         }
         SCHEDULER.lock().schedule();
@@ -274,7 +267,7 @@ pub fn exit_task(exit_code: i32) {
     if let Some(current_task) = SCHEDULER.lock().current() {
         unsafe {
             let task_mut = current_task.as_ptr();
-            (*task_mut).state = ProcessState::Exited;
+            (*task_mut).state = ProcessState::Dead;
         }
         SCHEDULER.lock().schedule();
     }

@@ -47,8 +47,10 @@ mod bench;
 mod cap;
 mod ipc;
 mod mm;
+mod process;
 mod sched;
 mod serial;
+mod syscall;
 
 #[cfg(test)]
 mod test_framework;

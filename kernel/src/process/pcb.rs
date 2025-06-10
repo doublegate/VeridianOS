@@ -21,12 +21,10 @@ use crate::{
     cap::{CapabilitySpace, CapabilityId},
     ipc::EndpointId,
     mm::VirtualAddressSpace,
+    println,
 };
 
-use super::{
-    thread::{Thread, ThreadId},
-    ProcessState,
-};
+use super::thread::{Thread, ThreadId};
 
 /// Process ID type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -163,7 +161,7 @@ impl Process {
             exit_code: AtomicU32::new(0),
             cpu_time: AtomicU64::new(0),
             memory_stats: MemoryStats::default(),
-            created_at: crate::arch::time::get_ticks(),
+            created_at: crate::arch::timer::get_ticks(),
             uid: 0,
             gid: 0,
         }

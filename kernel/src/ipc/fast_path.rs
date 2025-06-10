@@ -11,7 +11,8 @@ use super::{
     error::{IpcError, Result},
     SmallMessage,
 };
-use crate::sched::{current_process, ProcessState};
+use crate::sched::current_process;
+use crate::process::pcb::ProcessState;
 
 /// Performance counter for fast path operations
 static FAST_PATH_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -37,7 +38,7 @@ pub fn fast_send(msg: &SmallMessage, target_pid: u64) -> Result<()> {
     };
 
     // Check if target is waiting for message
-    if target.state == ProcessState::ReceiveBlocked {
+    if target.state == ProcessState::Blocked {
         // Direct transfer path - this is the fast case
         unsafe {
             transfer_registers(msg, target);
@@ -71,7 +72,7 @@ pub fn fast_receive(endpoint: u64, timeout: Option<u64>) -> Result<SmallMessage>
     }
 
     // Block current process
-    current.state = ProcessState::ReceiveBlocked;
+    current.state = ProcessState::Blocked;
     current.blocked_on = Some(endpoint);
 
     // Yield CPU and wait for message

@@ -16,6 +16,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+// Import println! macro
+use crate::println;
+
 // Re-export submodules
 pub mod pcb;
 pub mod table;
@@ -25,9 +28,10 @@ pub mod memory;
 pub mod sync;
 
 // Re-export common types
-pub use pcb::{Process, ProcessId, ProcessState};
+pub use pcb::{Process, ProcessId, ProcessState, ProcessPriority};
 pub use thread::{Thread, ThreadId, ThreadState};
 pub use table::PROCESS_TABLE;
+pub use lifecycle::{fork_process, exec_process, wait_process as wait_for_child};
 
 /// Maximum number of processes
 pub const MAX_PROCESSES: usize = 4096;
@@ -131,4 +135,84 @@ pub fn block_thread() {
 pub fn wake_thread(tid: ThreadId) {
     // TODO: Find thread and wake it up
     println!("[PROCESS] Waking thread {}", tid.0);
+}
+
+/// Create a new thread in the current process
+pub fn create_thread(
+    entry_point: usize,
+    stack_ptr: usize,
+    arg: usize,
+    tls_ptr: usize,
+) -> Result<ThreadId, &'static str> {
+    if let Some(process) = current_process() {
+        let tid = alloc_tid();
+        
+        #[cfg(feature = "alloc")]
+        {
+            use alloc::string::String;
+            // Create thread with provided parameters
+            // Note: Thread::new requires more parameters including stack info
+            // For now, use default stack sizes
+            let user_stack_base = 0x1000_0000; // Placeholder - should allocate
+            let user_stack_size = 1024 * 1024; // 1MB
+            let kernel_stack_base = 0x2000_0000; // Placeholder - should allocate
+            let kernel_stack_size = 64 * 1024; // 64KB
+            
+            let mut thread = Thread::new(
+                tid,
+                process.pid,
+                String::from("user_thread"),
+                entry_point,
+                user_stack_base,
+                user_stack_size,
+                kernel_stack_base,
+                kernel_stack_size,
+            );
+            
+            // Override the stack pointer if provided
+            if stack_ptr != 0 {
+                thread.user_stack.set_sp(stack_ptr);
+            }
+            
+            // Set up thread-local storage if provided
+            if tls_ptr != 0 {
+                thread.tls.lock().base = tls_ptr;
+            }
+            
+            // Store argument in a register (architecture-specific)
+            // For now, we'll skip this as it requires arch-specific code
+            let _ = arg;
+            
+            // Add thread to process
+            process.add_thread(thread);
+        }
+        
+        Ok(tid)
+    } else {
+        Err("No current process")
+    }
+}
+
+/// Set thread CPU affinity
+pub fn set_thread_affinity(tid: ThreadId, cpu_mask: u64) -> Result<(), &'static str> {
+    if let Some(process) = current_process() {
+        if let Some(thread) = process.get_thread(tid) {
+            thread.cpu_affinity.store(cpu_mask as usize, Ordering::SeqCst);
+            Ok(())
+        } else {
+            Err("Thread not found")
+        }
+    } else {
+        Err("No current process")
+    }
+}
+
+/// Get current thread ID
+pub fn get_thread_tid() -> ThreadId {
+    if let Some(thread) = current_thread() {
+        thread.tid
+    } else {
+        // Fallback to main thread ID
+        ThreadId(0)
+    }
 }

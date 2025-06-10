@@ -9,6 +9,7 @@ pub mod bootloader;
 pub mod frame_allocator;
 pub mod heap;
 pub mod page_table;
+pub mod vas;
 pub mod vmm;
 
 // Re-export commonly used types
@@ -17,6 +18,10 @@ pub use frame_allocator::{
 };
 #[allow(unused_imports)]
 pub use heap::init as init_heap;
+pub use vas::{VirtualAddressSpace, VirtualMapping, MappingType};
+
+/// Page size constant (4KB)
+pub const PAGE_SIZE: usize = 4096;
 
 /// Virtual memory address
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -29,6 +34,10 @@ impl VirtualAddress {
 
     pub fn as_u64(&self) -> u64 {
         self.0
+    }
+    
+    pub fn as_usize(&self) -> usize {
+        self.0 as usize
     }
 
     pub fn add(&self, offset: usize) -> Self {
@@ -70,6 +79,12 @@ impl core::ops::BitOr for PageFlags {
 
     fn bitor(self, rhs: Self) -> Self::Output {
         Self(self.0 | rhs.0)
+    }
+}
+
+impl core::ops::BitOrAssign for PageFlags {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
     }
 }
 
