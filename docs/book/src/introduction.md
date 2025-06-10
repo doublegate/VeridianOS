@@ -1,7 +1,7 @@
 # Introduction
 
 <p align="center">
-  <img src="../../../images/VeridianOS_Logo-Only.png" alt="VeridianOS Logo" width="200">
+  <img src="images/VeridianOS_Logo-Only.png" alt="VeridianOS Logo" width="200">
 </p>
 
 <p align="center">

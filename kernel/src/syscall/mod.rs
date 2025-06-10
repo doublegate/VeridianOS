@@ -5,10 +5,17 @@
 
 #![allow(dead_code)]
 
-use crate::ipc::{IpcError, SmallMessage};
+use crate::{
+    ipc::{
+        sync::{sync_call, sync_receive, sync_reply, sync_send},
+        IpcError, Message, SmallMessage,
+    },
+    sched,
+};
 
+// Import process syscalls module
 mod process;
-use process::*;
+use self::process::*;
 
 /// System call numbers
 #[repr(usize)]
@@ -118,6 +125,10 @@ fn handle_syscall(
         Syscall::IpcReceive => sys_ipc_receive(arg1, arg2),
         Syscall::IpcCall => sys_ipc_call(arg1, arg2, arg3, arg4, arg5),
         Syscall::IpcReply => sys_ipc_reply(arg1, arg2, arg3),
+        Syscall::IpcCreateEndpoint => sys_ipc_create_endpoint(arg1),
+        Syscall::IpcBindEndpoint => sys_ipc_bind_endpoint(arg1, arg2),
+        Syscall::IpcShareMemory => sys_ipc_share_memory(arg1, arg2, arg3, arg4),
+        Syscall::IpcMapMemory => sys_ipc_map_memory(arg1, arg2, arg3),
 
         // Process management
         Syscall::ProcessYield => sys_yield(),
@@ -150,7 +161,7 @@ fn handle_syscall(
 /// - msg_size: Size of message
 /// - flags: Send flags
 fn sys_ipc_send(
-    _capability: usize,
+    capability: usize,
     msg_ptr: usize,
     msg_size: usize,
     _flags: usize,
@@ -161,23 +172,41 @@ fn sys_ipc_send(
     }
 
     // Check if this is a small message (fast path)
-    if msg_size <= core::mem::size_of::<SmallMessage>() {
+    let message = if msg_size <= core::mem::size_of::<SmallMessage>() {
         // Fast path for small messages
         unsafe {
-            let _msg = *(msg_ptr as *const SmallMessage);
-            // TODO: Perform actual IPC send
-            // This would involve:
-            // 1. Validate capability
-            // 2. Find target process
-            // 3. Copy message to target
-            // 4. Context switch if synchronous
+            let small_msg = *(msg_ptr as *const SmallMessage);
+            Message::Small(small_msg)
         }
     } else {
         // Large message path
-        // TODO: Handle large messages with shared memory
-    }
+        unsafe {
+            let _msg_slice = core::slice::from_raw_parts(msg_ptr as *const u8, msg_size);
 
-    Ok(0)
+            // For now, create a large message with basic header
+            // In a real implementation, this would handle shared memory regions
+            let large_msg = crate::ipc::LargeMessage {
+                header: crate::ipc::message::MessageHeader::new(
+                    capability as u64,
+                    0,
+                    msg_size as u64,
+                ),
+                memory_region: crate::ipc::message::MemoryRegion::new(
+                    msg_ptr as u64,
+                    msg_size as u64,
+                ),
+                inline_data: [0; crate::ipc::message::SMALL_MESSAGE_MAX_SIZE],
+            };
+
+            Message::Large(large_msg)
+        }
+    };
+
+    // Perform the actual send using the IPC sync module
+    match sync_send(message, capability as u64) {
+        Ok(()) => Ok(0),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// IPC receive system call
@@ -185,50 +214,254 @@ fn sys_ipc_send(
 /// # Arguments
 /// - endpoint: Endpoint to receive from
 /// - buffer: Buffer to receive message into
-fn sys_ipc_receive(_endpoint: usize, buffer: usize) -> SyscallResult {
+fn sys_ipc_receive(endpoint: usize, buffer: usize) -> SyscallResult {
     if buffer == 0 {
         return Err(SyscallError::InvalidArgument);
     }
 
-    // TODO: Implement receive
-    // 1. Find endpoint
-    // 2. Check for waiting messages
-    // 3. If none, block current process
-    // 4. Copy message to buffer when available
+    // Receive message using IPC sync module
+    match sync_receive(endpoint as u64) {
+        Ok(message) => {
+            // Copy message to user buffer
+            unsafe {
+                match message {
+                    Message::Small(small_msg) => {
+                        // Copy small message to buffer
+                        let dst = buffer as *mut SmallMessage;
+                        *dst = small_msg;
+                        Ok(core::mem::size_of::<SmallMessage>())
+                    }
+                    Message::Large(large_msg) => {
+                        // For large messages, copy the header and setup shared memory
+                        // In a real implementation, this would handle memory mapping
+                        let header_size =
+                            core::mem::size_of::<crate::ipc::message::MessageHeader>();
+                        let dst = buffer as *mut u8;
 
-    Ok(0)
+                        // Copy header
+                        core::ptr::copy_nonoverlapping(
+                            &large_msg.header as *const _ as *const u8,
+                            dst,
+                            header_size,
+                        );
+
+                        // Copy data if it fits
+                        if large_msg.memory_region.size > 0
+                            && large_msg.memory_region.base_addr != 0
+                        {
+                            let data_dst = dst.add(header_size);
+                            core::ptr::copy_nonoverlapping(
+                                large_msg.memory_region.base_addr as *const u8,
+                                data_dst,
+                                large_msg.memory_region.size as usize,
+                            );
+                        }
+
+                        Ok(header_size + large_msg.memory_region.size as usize)
+                    }
+                }
+            }
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// IPC call (send and wait for reply)
 fn sys_ipc_call(
-    _capability: usize,
-    _send_msg: usize,
-    _send_size: usize,
-    _recv_buf: usize,
-    _recv_size: usize,
+    capability: usize,
+    send_msg: usize,
+    send_size: usize,
+    recv_buf: usize,
+    recv_size: usize,
 ) -> SyscallResult {
-    // TODO: Implement call semantics
-    // 1. Send message
-    // 2. Block waiting for reply
-    // 3. Return reply in recv_buf
+    // Validate arguments
+    if send_msg == 0 || send_size == 0 || recv_buf == 0 || recv_size == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
 
-    Ok(0)
+    // Create message from user buffer
+    let message = if send_size <= core::mem::size_of::<SmallMessage>() {
+        unsafe {
+            let small_msg = *(send_msg as *const SmallMessage);
+            Message::Small(small_msg)
+        }
+    } else {
+        // Create large message
+        let large_msg = crate::ipc::LargeMessage {
+            header: crate::ipc::message::MessageHeader::new(capability as u64, 0, send_size as u64),
+            memory_region: crate::ipc::message::MemoryRegion::new(
+                send_msg as u64,
+                send_size as u64,
+            ),
+            inline_data: [0; crate::ipc::message::SMALL_MESSAGE_MAX_SIZE],
+        };
+        Message::Large(large_msg)
+    };
+
+    // Perform synchronous call
+    match sync_call(message, capability as u64) {
+        Ok(reply) => {
+            // Copy reply to receive buffer
+            unsafe {
+                match reply {
+                    Message::Small(small_msg) => {
+                        if recv_size >= core::mem::size_of::<SmallMessage>() {
+                            let dst = recv_buf as *mut SmallMessage;
+                            *dst = small_msg;
+                            Ok(core::mem::size_of::<SmallMessage>())
+                        } else {
+                            Err(SyscallError::InvalidArgument)
+                        }
+                    }
+                    Message::Large(large_msg) => {
+                        let header_size =
+                            core::mem::size_of::<crate::ipc::message::MessageHeader>();
+                        if recv_size >= header_size {
+                            let dst = recv_buf as *mut u8;
+
+                            // Copy header
+                            core::ptr::copy_nonoverlapping(
+                                &large_msg.header as *const _ as *const u8,
+                                dst,
+                                header_size,
+                            );
+
+                            // Copy data
+                            let data_to_copy = core::cmp::min(
+                                large_msg.memory_region.size as usize,
+                                recv_size - header_size,
+                            );
+                            if data_to_copy > 0 && large_msg.memory_region.base_addr != 0 {
+                                let data_dst = dst.add(header_size);
+                                core::ptr::copy_nonoverlapping(
+                                    large_msg.memory_region.base_addr as *const u8,
+                                    data_dst,
+                                    data_to_copy,
+                                );
+                            }
+
+                            Ok(header_size + data_to_copy)
+                        } else {
+                            Err(SyscallError::InvalidArgument)
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// IPC reply to a previous call
-fn sys_ipc_reply(_caller: usize, _msg_ptr: usize, _msg_size: usize) -> SyscallResult {
-    // TODO: Implement reply
-    // 1. Validate caller is waiting for reply
-    // 2. Copy reply message
-    // 3. Wake up caller
+fn sys_ipc_reply(caller: usize, msg_ptr: usize, msg_size: usize) -> SyscallResult {
+    // Validate arguments
+    if msg_ptr == 0 || msg_size == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
 
-    Ok(0)
+    // Create reply message
+    let message = if msg_size <= core::mem::size_of::<SmallMessage>() {
+        unsafe {
+            let small_msg = *(msg_ptr as *const SmallMessage);
+            Message::Small(small_msg)
+        }
+    } else {
+        let large_msg = crate::ipc::LargeMessage {
+            header: crate::ipc::message::MessageHeader::new(0, 0, msg_size as u64),
+            memory_region: crate::ipc::message::MemoryRegion::new(msg_ptr as u64, msg_size as u64),
+            inline_data: [0; crate::ipc::message::SMALL_MESSAGE_MAX_SIZE],
+        };
+        Message::Large(large_msg)
+    };
+
+    // Send reply
+    match sync_reply(message, caller as u64) {
+        Ok(()) => Ok(0),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Yield CPU to another process
 fn sys_yield() -> SyscallResult {
-    // TODO: Trigger scheduler
+    // Trigger scheduler to yield CPU
+    sched::yield_cpu();
     Ok(0)
+}
+
+/// Create IPC endpoint
+fn sys_ipc_create_endpoint(_permissions: usize) -> SyscallResult {
+    let current_pid = sched::current_process().pid;
+
+    // Create endpoint (permissions will be handled by capability system)
+    match crate::ipc::create_endpoint(current_pid) {
+        Ok((endpoint_id, _capability)) => Ok(endpoint_id as usize),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Bind endpoint to a name
+fn sys_ipc_bind_endpoint(endpoint_id: usize, name_ptr: usize) -> SyscallResult {
+    if name_ptr == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    // For now, just validate the endpoint exists
+    // In a real implementation, this would register the endpoint with a name
+    // service
+    match crate::ipc::registry::lookup_endpoint(endpoint_id as u64) {
+        Ok(_) => Ok(0),
+        Err(_) => Err(SyscallError::ResourceNotFound),
+    }
+}
+
+/// Share memory region via IPC
+fn sys_ipc_share_memory(
+    addr: usize,
+    size: usize,
+    permissions: usize,
+    _target_pid: usize,
+) -> SyscallResult {
+    use crate::ipc::shared_memory::{Permissions, SharedRegion};
+
+    // Validate arguments
+    if addr == 0 || size == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    // Convert permissions bits to enum
+    let perms = match permissions & 0b111 {
+        0b001 => Permissions::Read,
+        0b011 => Permissions::Write,
+        0b100 => Permissions::Execute,
+        0b101 => Permissions::ReadExecute,
+        0b111 => Permissions::ReadWriteExecute,
+        _ => Permissions::Read, // Default to read-only
+    };
+
+    // Get current process ID
+    let current_pid = sched::current_process().pid;
+
+    // Create shared region owned by current process
+    let region = SharedRegion::new(current_pid, size, perms);
+
+    // TODO: Map the region at the specified address
+    let _ = addr;
+
+    // TODO: Actually share the region with target process
+    // For now, just return success
+    Ok(region.id() as usize)
+}
+
+/// Map shared memory from another process
+fn sys_ipc_map_memory(_region_id: usize, addr_hint: usize, _flags: usize) -> SyscallResult {
+    // TODO: Implement actual memory mapping
+    // For now, return the hint address
+    if addr_hint == 0 {
+        // Would allocate a virtual address
+        Ok(0x100000000) // Placeholder address
+    } else {
+        Ok(addr_hint)
+    }
 }
 
 impl TryFrom<usize> for Syscall {

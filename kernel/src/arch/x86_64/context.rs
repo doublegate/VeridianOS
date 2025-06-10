@@ -376,3 +376,59 @@ impl Default for X86_64Context {
 // The FPU state pointer is either null or points to thread-local data
 unsafe impl Send for X86_64Context {}
 unsafe impl Sync for X86_64Context {}
+
+/// Load context for first time (no previous context to save)
+///
+/// # Safety
+/// This function manipulates CPU state directly and must be called
+/// with interrupts disabled.
+#[no_mangle]
+pub unsafe extern "C" fn load_context(context: *const X86_64Context) {
+    // Load context directly using inline assembly
+    // This is not a naked function to avoid unstable features
+    asm!(
+        // rdi = context pointer
+
+        // Load CR3 (page table) first
+        "mov rax, [rdi + 200]",
+        "mov cr3, rax",
+        // Load segment registers
+        "mov ax, [rdi + 176]", // cs
+        "mov ds, ax",
+        "mov ax, [rdi + 178]", // ss
+        "mov es, ax",
+        "mov ax, [rdi + 180]", // ds
+        "mov fs, ax",
+        "mov ax, [rdi + 182]", // es
+        "mov gs, ax",
+        // Load general purpose registers
+        "mov r15, [rdi]",
+        "mov r14, [rdi + 8]",
+        "mov r13, [rdi + 16]",
+        "mov r12, [rdi + 24]",
+        "mov r11, [rdi + 32]",
+        "mov r10, [rdi + 40]",
+        "mov r9,  [rdi + 48]",
+        "mov r8,  [rdi + 56]",
+        "mov rsi, [rdi + 72]",
+        "mov rbp, [rdi + 80]",
+        "mov rbx, [rdi + 88]",
+        "mov rdx, [rdi + 96]",
+        "mov rcx, [rdi + 104]",
+        "mov rax, [rdi + 112]",
+        // Load stack pointer
+        "mov rsp, [rdi + 120]",
+        // Load RFLAGS and RIP for iretq
+        "push qword ptr [rdi + 178]", // SS
+        "push qword ptr [rdi + 120]", // RSP
+        "push qword ptr [rdi + 136]", // RFLAGS
+        "push qword ptr [rdi + 176]", // CS
+        "push qword ptr [rdi + 128]", // RIP
+        // Load final register
+        "mov rdi, [rdi + 64]",
+        // Return to loaded context
+        "iretq",
+        in("rdi") context,
+        options(noreturn)
+    );
+}

@@ -7,11 +7,12 @@ extern crate alloc;
 
 #[cfg(feature = "alloc")]
 use alloc::{format, string::String, vec::Vec};
+use core::sync::atomic::Ordering;
 
 use super::{
     pcb::{Process, ProcessBuilder, ProcessState},
     table,
-    thread::{Thread, ThreadBuilder},
+    thread::{Thread, ThreadBuilder, ThreadId},
     ProcessId, ProcessPriority,
 };
 use crate::{arch::context::ThreadContext, println, sched};
@@ -235,7 +236,7 @@ pub fn exit_process(exit_code: i32) {
         {
             let threads = process.threads.lock();
             for (_, thread) in threads.iter() {
-                thread.set_state(super::thread::ThreadState::Exited);
+                thread.set_state(super::thread::ThreadState::Zombie);
             }
         }
 
@@ -304,8 +305,16 @@ pub fn kill_process(pid: ProcessId, _signal: i32) -> Result<(), &'static str> {
     {
         let threads = process.threads.lock();
         for (_, thread) in threads.iter() {
-            thread.set_state(super::thread::ThreadState::Exited);
-            // TODO: Remove from scheduler
+            thread.set_state(super::thread::ThreadState::Zombie);
+
+            // Remove from scheduler if scheduled
+            if let Some(task_ptr) = thread.get_task_ptr() {
+                unsafe {
+                    let task = task_ptr.as_ptr();
+                    (*task).state = ProcessState::Dead;
+                    // Note: The scheduler will clean up dead tasks
+                }
+            }
         }
     }
 
@@ -341,6 +350,71 @@ fn cleanup_process(process: &Process) {
     }
 
     // TODO: Close files, release other resources
+}
+
+/// Clean up a dead thread
+#[cfg(feature = "alloc")]
+pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), &'static str> {
+    // Remove thread from process
+    let mut threads = process.threads.lock();
+
+    if let Some(thread) = threads.remove(&tid) {
+        println!("[PROCESS] Cleaning up thread {}", tid.0);
+
+        // Make sure thread is marked as dead
+        thread.set_state(super::thread::ThreadState::Dead);
+
+        // Clean up scheduler task if exists
+        if let Some(task_ptr) = thread.get_task_ptr() {
+            unsafe {
+                let task = task_ptr.as_ptr();
+
+                // Clear thread reference in task
+                (*task).thread_ref = None;
+
+                // Mark task for cleanup
+                (*task).state = ProcessState::Dead;
+
+                // The scheduler will eventually free the task memory
+            }
+        }
+
+        // TODO: Free thread stacks
+        // TODO: Clean up TLS area
+
+        Ok(())
+    } else {
+        Err("Thread not found")
+    }
+}
+
+/// Reap zombie threads in a process
+#[cfg(feature = "alloc")]
+pub fn reap_zombie_threads(process: &Process) -> Vec<(ThreadId, i32)> {
+    let mut reaped = Vec::new();
+    let threads = process.threads.lock();
+
+    // Find all zombie threads
+    let zombies: Vec<ThreadId> = threads
+        .iter()
+        .filter(|(_, thread)| thread.get_state() == super::thread::ThreadState::Zombie)
+        .map(|(tid, _)| *tid)
+        .collect();
+
+    drop(threads);
+
+    // Clean up each zombie thread
+    for tid in zombies {
+        if let Ok(()) = cleanup_thread(process, tid) {
+            // Get exit code before cleanup
+            if let Some(thread) = process.get_thread(tid) {
+                let exit_code = thread.exit_code.load(Ordering::Acquire) as i32;
+                reaped.push((tid, exit_code));
+            }
+        }
+    }
+
+    reaped
 }
 
 /// Create scheduler task for thread

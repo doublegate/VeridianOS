@@ -8,12 +8,7 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-#[cfg(feature = "alloc")]
-use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-
-#[cfg(feature = "alloc")]
-use spin::Mutex;
 
 use super::{
     error::{IpcError, Result},
@@ -21,8 +16,8 @@ use super::{
     message::Message,
 };
 use crate::{
-    process::pcb::ProcessState,
-    sched::{block_on_ipc, current_process, find_process, wake_up_process},
+    process::ProcessState,
+    sched::{current_process, find_process},
 };
 
 /// Statistics for synchronous IPC
@@ -138,61 +133,39 @@ pub fn sync_reply(reply: Message, caller: u64) -> Result<()> {
 
 /// Slow path for synchronous send
 fn sync_send_slow_path(msg: Message, target_endpoint: u64) -> Result<()> {
-    // Find target endpoint and validate capability
-    let endpoint = find_endpoint(target_endpoint)?;
-    validate_send_capability(&msg, endpoint)?;
+    // Validate send capability
+    validate_send_capability(&msg, target_endpoint)?;
 
-    // Check if receiver is waiting
-    if let Some(receiver_pid) = endpoint.get_waiting_receiver() {
-        // Direct handoff
-        deliver_message_to_process(msg, receiver_pid)?;
-        wake_up_process(receiver_pid);
-        Ok(())
-    } else {
-        // Queue message
-        endpoint.queue_message(msg)?;
-        Ok(())
+    // Use message passing subsystem
+    #[cfg(feature = "alloc")]
+    {
+        crate::ipc::message_passing::send_to_endpoint(msg, target_endpoint)
+    }
+    #[cfg(not(feature = "alloc"))]
+    {
+        Err(IpcError::OutOfMemory)
     }
 }
 
 /// Slow path for synchronous receive
 fn sync_receive_slow_path(endpoint: u64) -> Result<Message> {
-    let ep = find_endpoint(endpoint)?;
-
-    // Check for queued messages
-    if let Some(msg) = ep.dequeue_message() {
-        return Ok(msg);
+    // Use message passing subsystem with blocking
+    #[cfg(feature = "alloc")]
+    {
+        crate::ipc::message_passing::receive_from_endpoint(endpoint, true)
     }
-
-    // No messages, block current process
-    let current = current_process();
-    ep.add_waiting_receiver(current.pid);
-    block_on_ipc(endpoint);
-
-    // When we wake up, message should be available
-    ep.dequeue_message().ok_or(IpcError::InvalidMessage)
-}
-
-/// Deliver message directly to a process
-fn deliver_message_to_process(_msg: Message, pid: u64) -> Result<()> {
-    let _process = find_process(pid).ok_or(IpcError::ProcessNotFound)?;
-
-    // TODO: Copy message to process's address space
-    // For now, this is a placeholder
-
-    Ok(())
+    #[cfg(not(feature = "alloc"))]
+    {
+        Err(IpcError::OutOfMemory)
+    }
 }
 
 /// Validate send capability
-fn validate_send_capability(msg: &Message, _endpoint: &Endpoint) -> Result<()> {
-    let cap_id = msg.capability();
+fn validate_send_capability(msg: &Message, _endpoint_id: u64) -> Result<()> {
+    let _cap_id = msg.capability();
 
-    // TODO: Lookup capability in capability table
-    // For now, basic validation
-    if cap_id == 0 || cap_id > 0x10000 {
-        return Err(IpcError::InvalidCapability);
-    }
-
+    // TODO: Proper capability validation requires looking up the capability
+    // For now, allow all sends
     Ok(())
 }
 
@@ -247,67 +220,6 @@ pub struct SyncStatsSummary {
     pub slow_path_count: u64,
     pub avg_latency_cycles: u64,
     pub fast_path_percentage: u64,
-}
-
-// Placeholder endpoint structure
-struct Endpoint {
-    id: u64,
-    #[cfg(feature = "alloc")]
-    waiting_receivers: Mutex<Vec<u64>>,
-    #[cfg(feature = "alloc")]
-    message_queue: Mutex<Vec<Message>>,
-}
-
-impl Endpoint {
-    #[cfg(feature = "alloc")]
-    fn get_waiting_receiver(&self) -> Option<u64> {
-        self.waiting_receivers.lock().pop()
-    }
-
-    #[cfg(not(feature = "alloc"))]
-    fn get_waiting_receiver(&self) -> Option<u64> {
-        None
-    }
-
-    #[cfg(feature = "alloc")]
-    fn add_waiting_receiver(&self, pid: u64) {
-        self.waiting_receivers.lock().push(pid);
-    }
-
-    #[cfg(not(feature = "alloc"))]
-    fn add_waiting_receiver(&self, _pid: u64) {
-        // Without alloc, we can't queue receivers
-    }
-
-    #[cfg(feature = "alloc")]
-    fn queue_message(&self, msg: Message) -> Result<()> {
-        let mut queue = self.message_queue.lock();
-        if queue.len() >= 1024 {
-            return Err(IpcError::ChannelFull);
-        }
-        queue.push(msg);
-        Ok(())
-    }
-
-    #[cfg(not(feature = "alloc"))]
-    fn queue_message(&self, _msg: Message) -> Result<()> {
-        Err(IpcError::OutOfMemory)
-    }
-
-    #[cfg(feature = "alloc")]
-    fn dequeue_message(&self) -> Option<Message> {
-        self.message_queue.lock().pop()
-    }
-
-    #[cfg(not(feature = "alloc"))]
-    fn dequeue_message(&self) -> Option<Message> {
-        None
-    }
-}
-
-fn find_endpoint(_id: u64) -> Result<&'static Endpoint> {
-    // TODO: Implement endpoint lookup
-    Err(IpcError::EndpointNotFound)
 }
 
 #[cfg(target_arch = "x86_64")]

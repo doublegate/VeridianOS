@@ -176,6 +176,8 @@ pub struct Task {
     pub wait_link: Option<usize>,
     /// Ready queue link
     pub ready_link: Option<usize>,
+    /// Thread reference (for state synchronization)
+    pub thread_ref: Option<core::ptr::NonNull<crate::process::Thread>>,
 }
 
 impl Task {
@@ -210,6 +212,7 @@ impl Task {
             blocked_on: None,
             wait_link: None,
             ready_link: None,
+            thread_ref: None,
         }
     }
 

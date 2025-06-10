@@ -1,8 +1,8 @@
 # VeridianOS Scheduler Design Document
 
-**Version**: 1.1  
-**Date**: 2025-06-10  
-**Status**: Phase 1 Implementation In Progress (~25% Complete)
+**Version**: 1.2  
+**Date**: 2025-01-07  
+**Status**: Phase 1 Implementation In Progress (~30% Complete)
 
 ## Executive Summary
 
@@ -510,7 +510,7 @@ pub struct PerThreadStats {
 
 ## Implementation Phases
 
-### Phase 1 (Basic Scheduler) - IN PROGRESS (~25% Complete)
+### Phase 1 (Basic Scheduler) - IN PROGRESS (~30% Complete)
 1. ✅ Simple round-robin scheduler - IMPLEMENTED
 2. ✅ Basic context switching - IMPLEMENTED (all architectures)
 3. ✅ Single run queue - IMPLEMENTED
@@ -519,6 +519,9 @@ pub struct PerThreadStats {
 6. ✅ Timer interrupts (10ms tick) - IMPLEMENTED (all architectures)
 7. ✅ Process/Thread to Task integration - IMPLEMENTED
 8. ✅ Basic SMP support structures - IMPLEMENTED
+9. ✅ Thread-scheduler state synchronization - IMPLEMENTED
+10. ✅ Thread cleanup on exit - IMPLEMENTED
+11. ✅ CPU affinity enforcement in scheduling - IMPLEMENTED
 
 ### Phase 1 Completed Features:
 - Core scheduler structure with round-robin algorithm
@@ -526,8 +529,11 @@ pub struct PerThreadStats {
 - Timer setup for preemptive multitasking
 - Integration with process management subsystem
 - Per-CPU data structures foundation
-- CPU affinity support in task creation
+- CPU affinity support and enforcement
 - Basic load balancing framework
+- Thread state synchronization between modules
+- Proper thread cleanup on termination
+- IPC blocking/waking integration
 
 ### Phase 1 Remaining Work:
 - Priority-based scheduling algorithm

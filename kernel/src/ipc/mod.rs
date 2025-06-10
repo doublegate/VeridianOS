@@ -12,6 +12,7 @@ pub mod channel;
 pub mod error;
 pub mod fast_path;
 pub mod message;
+pub mod message_passing;
 pub mod perf;
 pub mod rate_limit;
 pub mod registry;

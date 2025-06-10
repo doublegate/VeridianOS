@@ -1,6 +1,6 @@
 # VeridianOS
 
-![VeridianOS Logo](images/VeridianOS_Logo-Only.png)
+![VeridianOS Logo](images/VeridianOS_Logo-Only.png){width="50%"}
 
 ## A next-generation microkernel operating system built with Rust
 
@@ -35,14 +35,14 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 ### 🚀 Phase 1: Microkernel Core (In Progress)
 
 **Started**: June 8, 2025
-**Status**: ~40% overall progress
+**Status**: ~35% overall progress
 
 **Components**:
 
 - IPC System: ~45% complete (sync/async channels, registry, perf tracking, rate limiting done)
 - Memory Management: ~95% complete (frame allocator, virtual memory, page tables, bootloader integration complete)
-- Process Management: 85% complete (PCB, threads, context switching, synchronization primitives, syscalls done)
-- Scheduler: ~25% complete (round-robin algorithm, idle task, timer setup, basic SMP support done)
+- Process Management: 100% complete (PCB, threads, context switching, synchronization primitives, syscalls done)
+- Scheduler: ~30% complete (round-robin algorithm, idle task, timer setup, SMP support, CPU affinity done)
 - Capability System: Not started
 
 **Phase 0 Achievements**:
@@ -259,8 +259,8 @@ VeridianOS builds upon ideas from many excellent operating systems:
 - [ ] Phase 1: Microkernel Core (4-5 months) - **IN PROGRESS**
   - [~] IPC implementation first (< 5μs latency target) - ~45% complete
   - [~] Memory management (hybrid buddy + bitmap) - ~95% complete
-  - [~] Process/Thread management - ~85% complete
-  - [~] Scheduler implementation - ~25% complete (round-robin working)
+  - [x] Process/Thread management - 100% complete
+  - [~] Scheduler implementation - ~30% complete (round-robin, CPU affinity working)
   - [ ] Capability system foundation
 - [ ] Phase 2: User Space Foundation (5-6 months)
   - [ ] Three-layer POSIX architecture
@@ -292,6 +292,6 @@ VeridianOS builds upon ideas from many excellent operating systems:
 
 ---
 
-![VeridianOS](images/VeridianOS_Full-Logo.png)
+![VeridianOS](images/VeridianOS_Full-Logo.png){width="50%"}
 
 **Building the future of operating systems, one commit at a time.**

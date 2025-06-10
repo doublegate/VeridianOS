@@ -11,11 +11,25 @@ extern crate alloc;
 
 #[cfg(feature = "alloc")]
 use alloc::string::String;
+use core::ptr::NonNull;
 
 use spin::Mutex;
 
 use super::ProcessId;
-use crate::arch::context::{ArchThreadContext, ThreadContext};
+use crate::{
+    arch::context::{ArchThreadContext, ThreadContext},
+    sched::task::Task,
+};
+
+/// Safe wrapper for task pointer that implements Send + Sync
+///
+/// Safety: Task pointers are only accessed from within the scheduler
+/// which has its own synchronization mechanisms.
+#[derive(Debug)]
+pub struct TaskPtr(Option<NonNull<Task>>);
+
+unsafe impl Send for TaskPtr {}
+unsafe impl Sync for TaskPtr {}
 
 /// Thread ID type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -41,8 +55,10 @@ pub enum ThreadState {
     Blocked = 3,
     /// Thread is sleeping
     Sleeping = 4,
-    /// Thread has exited
-    Exited = 5,
+    /// Thread has exited but not yet cleaned up (zombie)
+    Zombie = 5,
+    /// Thread is completely dead and can be cleaned up
+    Dead = 6,
 }
 
 /// Thread Local Storage (TLS) data
@@ -120,6 +136,9 @@ pub struct Thread {
 
     /// Floating point state saved flag
     pub fpu_used: AtomicU32,
+
+    /// Scheduler task pointer (if scheduled)
+    pub task_ptr: Mutex<TaskPtr>,
 }
 
 /// Stack information
@@ -216,6 +235,7 @@ impl Thread {
             exit_code: AtomicU32::new(0),
             priority: 2, // Normal priority
             fpu_used: AtomicU32::new(0),
+            task_ptr: Mutex::new(TaskPtr(None)),
         }
     }
 
@@ -227,8 +247,9 @@ impl Thread {
             2 => ThreadState::Running,
             3 => ThreadState::Blocked,
             4 => ThreadState::Sleeping,
-            5 => ThreadState::Exited,
-            _ => ThreadState::Exited,
+            5 => ThreadState::Zombie,
+            6 => ThreadState::Dead,
+            _ => ThreadState::Dead,
         }
     }
 
@@ -289,6 +310,68 @@ impl Thread {
     /// Update CPU time
     pub fn add_cpu_time(&self, microseconds: u64) {
         self.cpu_time.fetch_add(microseconds, Ordering::Relaxed);
+    }
+
+    /// Set scheduler task pointer
+    pub fn set_task_ptr(&self, task: Option<NonNull<Task>>) {
+        self.task_ptr.lock().0 = task;
+    }
+
+    /// Get scheduler task pointer
+    pub fn get_task_ptr(&self) -> Option<NonNull<Task>> {
+        self.task_ptr.lock().0
+    }
+
+    /// Synchronize state with scheduler task
+    pub fn sync_state_with_scheduler(&self, new_state: ThreadState) {
+        // Update our state
+        self.set_state(new_state);
+
+        // Update scheduler task state if linked
+        if let Some(task_ptr) = self.get_task_ptr() {
+            unsafe {
+                let task = task_ptr.as_ptr();
+                (*task).state = match new_state {
+                    ThreadState::Creating => crate::process::ProcessState::Creating,
+                    ThreadState::Ready => crate::process::ProcessState::Ready,
+                    ThreadState::Running => crate::process::ProcessState::Running,
+                    ThreadState::Blocked => crate::process::ProcessState::Blocked,
+                    ThreadState::Sleeping => crate::process::ProcessState::Sleeping,
+                    ThreadState::Zombie => crate::process::ProcessState::Zombie,
+                    ThreadState::Dead => crate::process::ProcessState::Dead,
+                };
+            }
+        }
+    }
+
+    /// Mark thread as ready to run
+    pub fn set_ready(&self) {
+        self.sync_state_with_scheduler(ThreadState::Ready);
+    }
+
+    /// Mark thread as blocked
+    pub fn set_blocked(&self, reason: Option<u64>) {
+        self.sync_state_with_scheduler(ThreadState::Blocked);
+
+        // Update scheduler task blocked_on field if linked
+        if let Some(task_ptr) = self.get_task_ptr() {
+            unsafe {
+                let task = task_ptr.as_ptr();
+                (*task).blocked_on = reason;
+            }
+        }
+    }
+
+    /// Mark thread as running on CPU
+    pub fn set_running(&self, cpu: u8) {
+        self.current_cpu.store(cpu as u32, Ordering::Release);
+        self.sync_state_with_scheduler(ThreadState::Running);
+    }
+
+    /// Mark thread as exited
+    pub fn set_exited(&self, exit_code: i32) {
+        self.exit_code.store(exit_code as u32, Ordering::Release);
+        self.sync_state_with_scheduler(ThreadState::Zombie);
     }
 
     /// Get total CPU time

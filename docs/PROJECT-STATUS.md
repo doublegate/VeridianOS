@@ -2,12 +2,12 @@
 
 ## Current Status: Phase 1 In Progress - Scheduler Implementation
 
-**Last Updated**: 2025-06-10  
+**Last Updated**: 2025-01-07  
 **Current Version**: v0.1.0 (Released June 7, 2025)  
 **Current Phase**: Phase 1 - Microkernel Core (Started June 8, 2025)  
-**Phase 1 Progress**: ~40% overall (IPC ~45%, Memory Management ~95%, Process Management 85%, Scheduler ~25%)
+**Phase 1 Progress**: ~35% overall (IPC ~45%, Memory Management ~95%, Process Management 100%, Scheduler ~30%)
 
-VeridianOS has successfully completed Phase 0 (Foundation and Tooling) and released v0.1.0! The project is now actively developing the microkernel core with significant progress on IPC, Memory Management, Process Management, and Scheduler implementation. Virtual memory management is now complete with page tables, bootloader integration, and kernel heap allocator. Process management includes full PCB implementation, thread context switching for all architectures, and comprehensive synchronization primitives. The scheduler now has a working round-robin algorithm, idle task management, timer setup for all architectures, and basic SMP support. The foundation infrastructure is fully operational: CI/CD pipeline is 100% passing across all architectures, all three target platforms boot successfully, comprehensive testing infrastructure is ready, documentation framework is established, and complete version control workflow is operational.
+VeridianOS has successfully completed Phase 0 (Foundation and Tooling) and released v0.1.0! The project is now actively developing the microkernel core with significant progress on IPC, Memory Management, Process Management, and Scheduler implementation. Virtual memory management is now complete with page tables, bootloader integration, and kernel heap allocator. Process management is 100% complete with full PCB implementation, thread context switching for all architectures, comprehensive synchronization primitives, thread-local storage, CPU affinity, and complete system call integration. The scheduler now has a working round-robin algorithm, idle task management, timer setup for all architectures, SMP support with CPU affinity enforcement, and thread-scheduler state synchronization. The foundation infrastructure is fully operational: CI/CD pipeline is 100% passing across all architectures, all three target platforms boot successfully, comprehensive testing infrastructure is ready, documentation framework is established, and complete version control workflow is operational.
 
 ### Phase 0 Achievements
 - ✅ QEMU testing infrastructure fully operational
@@ -177,7 +177,7 @@ The project has achieved:
 10. ✅ TLB invalidation for all architectures
 11. 🔴 Memory zones (DMA, Normal, High)
 
-**Process Management (85% Complete)**:
+**Process Management (100% Complete)**:
 1. ✅ Process Control Block (PCB) with comprehensive state management
 2. ✅ Thread management with full ThreadContext trait implementation
 3. ✅ Context switching for all architectures (x86_64, AArch64, RISC-V)
@@ -185,26 +185,33 @@ The project has achieved:
 5. ✅ Global process table with O(1) lookup
 6. ✅ Process synchronization primitives (Mutex, Semaphore, CondVar, RwLock, Barrier)
 7. ✅ Memory management integration
-8. ✅ IPC integration hooks
-9. ✅ Process system calls integration (create, exit, wait, exec, fork, kill)
+8. ✅ IPC integration hooks with blocking/waking on IPC operations
+9. ✅ Process system calls integration (fork, exec, exit, wait, getpid, kill, thread operations)
 10. ✅ Architecture-specific context switching fully implemented
-11. 🔴 Priority inheritance for mutexes (deferred)
-12. 🔴 Signal handling subsystem (deferred)
-13. 🔴 Process groups and sessions (deferred)
+11. ✅ Thread-local storage (TLS) implementation
+12. ✅ CPU affinity and NUMA awareness
+13. ✅ Thread cleanup and state synchronization with scheduler
+14. ✅ Message passing between processes
+15. 🔴 Priority inheritance for mutexes (deferred)
+16. 🔴 Signal handling subsystem (deferred)
+17. 🔴 Process groups and sessions (deferred)
 
-**Scheduler (~25% Complete)**:
+**Scheduler (~30% Complete)**:
 1. ✅ Core scheduler structure with round-robin algorithm
 2. ✅ Idle task creation and management
 3. ✅ Timer setup for all architectures (10ms tick)
-4. ✅ Process/Thread to Task integration
+4. ✅ Process/Thread to Task integration with bidirectional linking
 5. ✅ Basic SMP support with per-CPU data structures
-6. ✅ CPU affinity support in task scheduling
+6. ✅ CPU affinity support with enforcement in all scheduling algorithms
 7. ✅ Load balancing framework (basic implementation)
-8. 🔴 Priority scheduler implementation
-9. 🔴 CFS (Completely Fair Scheduler) implementation
-10. 🔴 Real-time scheduling classes
-11. 🔴 Full task migration between CPUs
-12. 🔴 Advanced load balancing algorithms
+8. ✅ Thread cleanup on exit with proper state synchronization
+9. ✅ Context switching implementation for all architectures
+10. ✅ Process/thread state synchronization between modules
+11. 🔴 Priority scheduler implementation
+12. 🔴 CFS (Completely Fair Scheduler) implementation
+13. 🔴 Real-time scheduling classes
+14. 🔴 Full task migration between CPUs
+15. 🔴 Advanced load balancing algorithms
 
 **Capability System (Not Started)**:
 1. 🔴 Full capability implementation beyond IPC tokens
@@ -277,8 +284,8 @@ The journey from concept to implementation begins now. With clear documentation,
 
 ---
 
-**Document Version**: 2.7  
-**Last Updated**: 2025-06-10  
-**Status**: Phase 1 In Progress (~40% overall - IPC ~45%, Memory Management ~95%, Process Management 85%, Scheduler ~25%)  
+**Document Version**: 2.8  
+**Last Updated**: 2025-01-07  
+**Status**: Phase 1 In Progress (~35% overall - IPC ~45%, Memory Management ~95%, Process Management 100%, Scheduler ~30%)  
 **Repository**: https://github.com/doublegate/VeridianOS  
 **CI Status**: ✅ **100% PASSING** - All checks green (Quick Checks, Build & Test, Security Audit) 🎉

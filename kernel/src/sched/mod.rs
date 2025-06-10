@@ -16,7 +16,7 @@ use core::{
 
 use crate::{
     arch::context::ThreadContext,
-    process::{ProcessId as ProcId, ThreadId as ThrId},
+    process::{thread::ThreadState, ProcessId as ProcId, ThreadId as ThrId},
     sched::task::{CpuSet, TaskContext},
 };
 
@@ -304,12 +304,52 @@ pub fn create_task(
 /// Exit current task
 #[allow(unused_variables)]
 pub fn exit_task(exit_code: i32) {
-    if let Some(current_task) = SCHEDULER.lock().current() {
+    let mut scheduler = SCHEDULER.lock();
+
+    if let Some(current_task) = scheduler.current() {
         unsafe {
             let task_mut = current_task.as_ptr();
+            let task_ref = &*task_mut;
+
+            // Mark task as dead
             (*task_mut).state = ProcessState::Dead;
+
+            // Clean up thread reference if exists
+            if let Some(thread_ptr) = task_ref.thread_ref {
+                let thread = thread_ptr.as_ref();
+
+                // Remove task pointer from thread
+                thread.set_task_ptr(None);
+
+                // Mark thread as dead
+                thread.set_state(ThreadState::Dead);
+
+                // Store exit code
+                thread.exit_code.store(exit_code as u32, Ordering::Release);
+            }
+
+            // Clean up scheduler data structures
+            // Remove from ready queue if present
+            if let Some(ready_link) = (*task_mut).ready_link {
+                // TODO: Remove from ready queue
+                (*task_mut).ready_link = None;
+            }
+
+            // Remove from wait queue if blocked
+            if let Some(wait_link) = (*task_mut).wait_link {
+                // TODO: Remove from wait queue
+                (*task_mut).wait_link = None;
+            }
+
+            // Clear current CPU assignment
+            (*task_mut).current_cpu = None;
+
+            // TODO: Free task memory after ensuring no references
+            // For now, we leak it as other parts may still have pointers
         }
-        SCHEDULER.lock().schedule();
+
+        // Schedule another task
+        scheduler.schedule();
     }
 
     // Should not return
@@ -377,8 +417,18 @@ pub fn create_task_from_thread(
     // Set user stack
     task.user_stack = thread.user_stack.top();
 
+    // Get thread pointer
+    let thread_ptr = NonNull::new(thread as *const _ as *mut _);
+    task.thread_ref = thread_ptr;
+
+    // Get the task pointer
+    let task_ptr = NonNull::new(Box::leak(task) as *mut _).unwrap();
+
+    // Link thread and task bidirectionally
+    thread.set_task_ptr(Some(task_ptr));
+
     // Return pointer to leaked task
-    Ok(NonNull::new(Box::leak(task) as *mut _).unwrap())
+    Ok(task_ptr)
 }
 
 /// Schedule a process thread

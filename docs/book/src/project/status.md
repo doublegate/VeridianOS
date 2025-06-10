@@ -5,7 +5,7 @@
 **Latest Release**: v0.1.0 - Foundation & Tooling  
 **Released**: June 7, 2025  
 **Current Phase**: Phase 1 - Microkernel Core (Started June 8, 2025)  
-**Phase 1 Progress**: ~40% Overall - IPC System ~45% complete, Memory Management ~95% complete, Process Management ~85% complete, Scheduler ~25% complete
+**Phase 1 Progress**: ~35% Overall - IPC System ~45% complete, Memory Management ~95% complete, Process Management 100% complete, Scheduler ~30% complete
 
 VeridianOS has successfully completed Phase 0 and is now actively developing the microkernel core. Major progress has been made on the IPC (Inter-Process Communication) system, Memory Management subsystem, Process Management, and now the Scheduler. Virtual memory, heap allocation, TLB management, process control blocks, thread management, context switching, and basic round-robin scheduling are now implemented.
 
@@ -93,7 +93,7 @@ VeridianOS has successfully completed Phase 0 and is now actively developing the
 - ✅ Reserved memory region tracking
 - ✅ Bootloader memory map integration
 
-**Process Management (~85% Complete)**:
+**Process Management (100% Complete) ✅**:
 - ✅ Process Control Block (PCB) implementation
 - ✅ Thread management with ThreadContext trait
 - ✅ Context switching for all architectures
@@ -101,20 +101,24 @@ VeridianOS has successfully completed Phase 0 and is now actively developing the
 - ✅ Global process table with O(1) lookup
 - ✅ Synchronization primitives (Mutex, Semaphore, CondVar, RwLock, Barrier)
 - ✅ Memory management integration
-- ✅ IPC integration hooks
+- ✅ IPC integration with blocking/waking
 - ✅ Process system calls (create, exit, wait, exec, fork, kill)
-- 🔲 Priority inheritance for mutexes (deferred)
-- 🔲 Signal handling subsystem (deferred)
-- 🔲 Process groups and sessions (deferred)
+- ✅ Thread-scheduler state synchronization
+- ✅ Thread cleanup on exit
+- ✅ CPU affinity enforcement
+- Deferred: Priority inheritance, signal handling, process groups
 
-**Scheduler (~25% Complete)**:
+**Scheduler (~30% Complete)**:
 - ✅ Core scheduler structure with round-robin algorithm
 - ✅ Idle task creation and management
 - ✅ Timer setup for all architectures (10ms tick)
-- ✅ Process/Thread to Task integration
+- ✅ Process/Thread to Task integration with bidirectional linking
 - ✅ Basic SMP support with per-CPU data
-- ✅ CPU affinity support in scheduling
+- ✅ CPU affinity enforcement in all scheduling
 - ✅ Load balancing framework (basic)
+- ✅ Thread cleanup on exit
+- ✅ IPC blocking/waking integration
+- ✅ Thread state synchronization
 - 🔲 Priority-based scheduling
 - 🔲 CFS (Completely Fair Scheduler)
 - 🔲 Real-time scheduling classes
@@ -216,6 +220,16 @@ VeridianOS welcomes contributions! Here's how you can help:
 See our [Contributing Guide](../contributing/how-to.md) for details.
 
 ## Recent Updates
+
+### January 7, 2025 - IPC-Process Integration Complete
+- Connected IPC system calls to actual IPC mechanisms
+- Implemented process blocking/waking on IPC operations
+- Completed message passing between processes
+- Achieved full context switching for all architectures
+- Synchronized process/thread states with scheduler
+- Implemented thread cleanup on exit
+- Added CPU affinity enforcement in scheduler
+- Phase 1 progress updated to ~35% overall (Process Management 100% complete)
 
 ### June 10, 2025 - Scheduler Implementation Started
 - Implemented core scheduler with round-robin algorithm

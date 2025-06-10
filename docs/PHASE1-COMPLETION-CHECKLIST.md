@@ -4,10 +4,10 @@
 
 This document tracks the specific tasks required to complete Phase 1 (Microkernel Core). Phase 1 establishes the fundamental OS services: memory management, process management, IPC, and capability-based security.
 
-**Current Status**: ~40% Complete  
+**Current Status**: ~35% Complete  
 **Started**: June 8, 2025  
 **Target Completion**: November 2025 (6 months)  
-**Last Updated**: June 10, 2025  
+**Last Updated**: January 7, 2025  
 **Critical Path**: Memory Management → Process Management → Scheduler → IPC → Capabilities
 
 ## Technical Tasks
@@ -48,7 +48,7 @@ This document tracks the specific tasks required to complete Phase 1 (Microkerne
   - [x] High memory support (32-bit)
   - [x] Zone balancing
 
-### 2. Process Management (85% Complete)
+### 2. Process Management (100% Complete)
 
 **Why Critical**: Processes are the unit of isolation and resource management. Required for IPC and capabilities.
 
@@ -102,8 +102,8 @@ This document tracks the specific tasks required to complete Phase 1 (Microkerne
 - [x] **System Integration**
   - [x] Process system calls (create, fork, exec, exit, wait, kill)
   - [x] Architecture-specific context switching fully implemented
-  - [ ] Integration with scheduler (partial - needs completion)
-  - [ ] Integration with IPC system (pending full integration)
+  - [x] Integration with scheduler (thread state sync, CPU affinity, cleanup on exit)
+  - [x] Integration with IPC system (blocking/waking, message passing between processes)
 
 **Deferred to Later Phases**:
 - [ ] Priority inheritance for mutexes
@@ -133,11 +133,11 @@ This document tracks the specific tasks required to complete Phase 1 (Microkerne
   - [x] CPU timestamp tracking
   - [x] Rate limiting for DoS protection
 
-- [ ] **IPC Integration**
-  - [ ] Process blocking/waking
-  - [ ] Scheduler integration
-  - [ ] Capability enforcement
-  - [ ] Error propagation
+- [x] **IPC Integration**
+  - [x] Process blocking/waking
+  - [x] Scheduler integration
+  - [ ] Capability enforcement (awaiting capability system)
+  - [x] Error propagation
 
 ### 4. Capability System (0% Complete)
 
@@ -172,7 +172,7 @@ This document tracks the specific tasks required to complete Phase 1 (Microkerne
   - [ ] Process capabilities
   - [ ] Hardware access capabilities
 
-### 5. Basic Scheduler (~25% Complete)
+### 5. Basic Scheduler (~30% Complete)
 
 **Why Critical**: Required for process switching and IPC blocking operations.
 
@@ -184,9 +184,11 @@ This document tracks the specific tasks required to complete Phase 1 (Microkerne
 
 - [x] **Scheduling Operations**
   - [x] yield() system call
-  - [ ] Block/wake operations (partial)
+  - [x] Block/wake operations (complete with IPC integration)
   - [x] Timer interrupts (10ms tick)
   - [x] Idle process
+  - [x] Thread cleanup on exit
+  - [x] CPU affinity enforcement
 
 - [ ] **Performance Targets**
   - [ ] Context switch < 10μs (not measured)

@@ -1,9 +1,9 @@
 # Phase 1: Microkernel Core
 
-**Status**: IN PROGRESS ~35% Overall - IPC ~45% Complete, Memory Management ~95% Complete, Process Management 100% Complete  
+**Status**: IN PROGRESS ~35% Overall - IPC ~45% Complete, Memory Management ~95% Complete, Process Management 100% Complete, Scheduler ~30% Complete  
 **Started**: June 8, 2025  
 **Duration**: Months 4-9  
-**Last Updated**: June 10, 2025  
+**Last Updated**: January 7, 2025  
 **Goal**: Implement the core microkernel functionality with high-performance IPC, memory management, and scheduling.
 
 ## Overview
@@ -151,7 +151,7 @@ sys_thread_yield()    // Yield CPU
 - [ ] Full scheduler integration
 - [ ] POSIX compatibility layer
 
-### Process Management (~90% Complete)
+### Process Management (100% Complete) ✅
 - [x] Process creation/termination ✅
 - [x] Thread management ✅
 - [x] Context switching ✅
@@ -159,13 +159,23 @@ sys_thread_yield()    // Yield CPU
 - [x] Process Control Block implementation ✅
 - [x] Global process table with O(1) lookup ✅
 - [x] Synchronization primitives (Mutex, Semaphore, etc.) ✅
-- [ ] Process system calls integration
-- [ ] Integration testing with scheduler
+- [x] Process system calls integration ✅
+- [x] IPC blocking/waking integration ✅
+- [x] Thread-scheduler state synchronization ✅
+- [x] Thread cleanup on exit ✅
 
-### Scheduler
+### Scheduler (~30% Complete)
+- [x] Round-robin scheduler ✅
+- [x] Idle task creation ✅
+- [x] Timer interrupts (all architectures) ✅
+- [x] Basic SMP support ✅
+- [x] CPU affinity enforcement ✅
+- [x] Thread cleanup integration ✅
+- [x] IPC blocking/waking ✅
+- [ ] Priority-based scheduling
 - [ ] Multi-level feedback queue
 - [ ] Real-time support
-- [ ] Load balancing
+- [ ] Full load balancing
 - [ ] Power management
 
 ### Capability System

@@ -89,6 +89,11 @@ pub fn current_process() -> Option<&'static Process> {
     }
 }
 
+/// Get current process (alias for compatibility)
+pub fn get_current_process() -> Option<&'static Process> {
+    current_process()
+}
+
 /// Get current thread
 pub fn current_thread() -> Option<&'static Thread> {
     // Get from current CPU's scheduler
@@ -113,14 +118,14 @@ pub fn yield_thread() {
 
 /// Exit current thread
 pub fn exit_thread(exit_code: i32) {
-    if let Some(_thread) = current_thread() {
+    if let Some(thread) = current_thread() {
         println!(
             "[PROCESS] Thread {} exiting with code {}",
-            _thread.tid.0, exit_code
+            thread.tid.0, exit_code
         );
 
-        // Mark thread as exited
-        // TODO: Proper cleanup
+        // Mark thread as exited with state synchronization
+        thread.set_exited(exit_code);
 
         // Never return - schedule another thread
         crate::sched::exit_task(exit_code);
@@ -129,16 +134,33 @@ pub fn exit_thread(exit_code: i32) {
 
 /// Block current thread
 pub fn block_thread() {
-    if let Some(_thread) = current_thread() {
-        // TODO: Update thread state to blocked
+    if let Some(thread) = current_thread() {
+        // Update thread state to blocked
+        thread.set_blocked(None);
         crate::sched::yield_cpu();
     }
 }
 
 /// Wake up a thread
-pub fn wake_thread(_tid: ThreadId) {
-    // TODO: Find thread and wake it up
-    println!("[PROCESS] Waking thread {}", _tid.0);
+pub fn wake_thread(tid: ThreadId) {
+    println!("[PROCESS] Waking thread {}", tid.0);
+
+    // Find thread in current process
+    if let Some(current_process) = get_current_process() {
+        let threads = current_process.threads.lock();
+        if let Some(thread) = threads.get(&tid) {
+            // Mark thread as ready
+            thread.set_ready();
+
+            // Wake up in scheduler if it has a task
+            if let Some(task_ptr) = thread.get_task_ptr() {
+                unsafe {
+                    let task = task_ptr.as_ptr();
+                    crate::sched::wake_up_process((*task).pid);
+                }
+            }
+        }
+    }
 }
 
 /// Create a new thread in the current process

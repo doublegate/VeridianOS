@@ -212,12 +212,13 @@ impl crate::arch::context::ThreadContext for RiscVContext {
     }
 
     fn get_kernel_stack(&self) -> usize {
-        // TODO: Return from thread pointer
-        0
+        // Kernel stack pointer is stored in thread pointer (tp)
+        self.tp
     }
 
-    fn set_kernel_stack(&mut self, _sp: usize) {
-        // TODO: Set in thread pointer
+    fn set_kernel_stack(&mut self, sp: usize) {
+        // Store kernel stack in thread pointer for quick access
+        self.tp = sp;
     }
 
     fn set_return_value(&mut self, value: usize) {
@@ -246,24 +247,117 @@ pub fn switch_context(from: &mut RiscVContext, to: &RiscVContext) {
 /// This function manipulates CPU state directly and must be called
 /// with interrupts disabled.
 #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+#[naked]
 #[no_mangle]
-pub unsafe extern "C" fn context_switch(current: *mut RiscVContext, next: *const RiscVContext) {
-    // Note: This is a simplified implementation
-    // Real implementation would need proper register saving/restoring
+pub unsafe extern "C" fn context_switch(_current: *mut RiscVContext, _next: *const RiscVContext) {
+    asm!(
+        // a0 = current context pointer
+        // a1 = next context pointer
 
-    // Save current context
-    let current_ref = &mut *current;
-    let next_ref = &*next;
-
-    // In a real implementation, we would:
-    // 1. Save all general purpose registers to current context
-    // 2. Save FPU state if enabled
-    // 3. Load new page table if different
-    // 4. Load all registers from new context
-    // 5. Return to new context
-
-    // For now, this is a placeholder
-    core::ptr::copy_nonoverlapping(next_ref, current_ref, 1);
+        // Save current context
+        // Save return address
+        "sd ra, 0(a0)",
+        // Save stack pointer
+        "sd sp, 8(a0)",
+        // Save global pointer
+        "sd gp, 16(a0)",
+        // Save thread pointer
+        "sd tp, 24(a0)",
+        // Save temporary registers
+        "sd t0, 32(a0)",
+        "sd t1, 40(a0)",
+        "sd t2, 48(a0)",
+        // Save saved registers
+        "sd s0, 56(a0)",
+        "sd s1, 64(a0)",
+        "sd s2, 72(a0)",
+        "sd s3, 80(a0)",
+        "sd s4, 88(a0)",
+        "sd s5, 96(a0)",
+        "sd s6, 104(a0)",
+        "sd s7, 112(a0)",
+        "sd s8, 120(a0)",
+        "sd s9, 128(a0)",
+        "sd s10, 136(a0)",
+        "sd s11, 144(a0)",
+        // Save argument registers
+        "sd a0, 152(a0)", // Save current a0
+        "sd a1, 160(a0)", // Save current a1
+        "sd a2, 168(a0)",
+        "sd a3, 176(a0)",
+        "sd a4, 184(a0)",
+        "sd a5, 192(a0)",
+        "sd a6, 200(a0)",
+        "sd a7, 208(a0)",
+        // Save more temporary registers
+        "sd t3, 216(a0)",
+        "sd t4, 224(a0)",
+        "sd t5, 232(a0)",
+        "sd t6, 240(a0)",
+        // Save CSRs
+        "csrr t0, sstatus",
+        "sd t0, 256(a0)",
+        "csrr t0, sepc",
+        "sd t0, 264(a0)",
+        "csrr t0, stvec",
+        "sd t0, 272(a0)",
+        "csrr t0, satp",
+        "sd t0, 280(a0)",
+        // Load new context
+        // Load satp first (if different)
+        "ld t1, 280(a1)", // New satp
+        "beq t0, t1, 1f", // Skip if same
+        "csrw satp, t1",  // Set new page table
+        "sfence.vma",     // Flush TLB
+        "1:",
+        // Load CSRs
+        "ld t0, 256(a1)",
+        "csrw sstatus, t0",
+        "ld t0, 264(a1)",
+        "csrw sepc, t0",
+        "ld t0, 272(a1)",
+        "csrw stvec, t0",
+        // Load general purpose registers
+        "ld ra, 0(a1)",
+        "ld sp, 8(a1)",
+        "ld gp, 16(a1)",
+        "ld tp, 24(a1)",
+        // Load temporary registers
+        "ld t0, 32(a1)",
+        "ld t1, 40(a1)",
+        "ld t2, 48(a1)",
+        // Load saved registers
+        "ld s0, 56(a1)",
+        "ld s1, 64(a1)",
+        "ld s2, 72(a1)",
+        "ld s3, 80(a1)",
+        "ld s4, 88(a1)",
+        "ld s5, 96(a1)",
+        "ld s6, 104(a1)",
+        "ld s7, 112(a1)",
+        "ld s8, 120(a1)",
+        "ld s9, 128(a1)",
+        "ld s10, 136(a1)",
+        "ld s11, 144(a1)",
+        // Load argument registers (except a0, a1)
+        "ld a2, 168(a1)",
+        "ld a3, 176(a1)",
+        "ld a4, 184(a1)",
+        "ld a5, 192(a1)",
+        "ld a6, 200(a1)",
+        "ld a7, 208(a1)",
+        // Load more temporary registers
+        "ld t3, 216(a1)",
+        "ld t4, 224(a1)",
+        "ld t5, 232(a1)",
+        "ld t6, 240(a1)",
+        // Load a0 and a1 last
+        "ld a0, 152(a1)",
+        "ld a1, 160(a1)",
+        // Return to new context
+        "ret",
+        options(noreturn)
+    );
 }
 
 /// Initialize FPU for current CPU
@@ -308,4 +402,70 @@ pub fn hart_id() -> usize {
         asm!("csrr {}, mhartid", out(reg) id);
         id
     }
+}
+
+/// Load context for first time (no previous context to save)
+///
+/// # Safety
+/// This function manipulates CPU state directly and must be called
+/// with interrupts disabled.
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+#[naked]
+#[no_mangle]
+pub unsafe extern "C" fn load_context(_context: *const RiscVContext) {
+    asm!(
+        // a0 = context pointer
+
+        // Load satp (page table)
+        "ld t0, 280(a0)",
+        "csrw satp, t0",
+        "sfence.vma", // Flush TLB
+        // Load CSRs
+        "ld t0, 256(a0)",
+        "csrw sstatus, t0",
+        "ld t0, 264(a0)",
+        "csrw sepc, t0",
+        "ld t0, 272(a0)",
+        "csrw stvec, t0",
+        // Load general purpose registers
+        "ld ra, 0(a0)",
+        "ld sp, 8(a0)",
+        "ld gp, 16(a0)",
+        "ld tp, 24(a0)",
+        // Load temporary registers
+        "ld t0, 32(a0)",
+        "ld t1, 40(a0)",
+        "ld t2, 48(a0)",
+        // Load saved registers
+        "ld s0, 56(a0)",
+        "ld s1, 64(a0)",
+        "ld s2, 72(a0)",
+        "ld s3, 80(a0)",
+        "ld s4, 88(a0)",
+        "ld s5, 96(a0)",
+        "ld s6, 104(a0)",
+        "ld s7, 112(a0)",
+        "ld s8, 120(a0)",
+        "ld s9, 128(a0)",
+        "ld s10, 136(a0)",
+        "ld s11, 144(a0)",
+        // Load argument registers (except a0)
+        "ld a1, 160(a0)",
+        "ld a2, 168(a0)",
+        "ld a3, 176(a0)",
+        "ld a4, 184(a0)",
+        "ld a5, 192(a0)",
+        "ld a6, 200(a0)",
+        "ld a7, 208(a0)",
+        // Load more temporary registers
+        "ld t3, 216(a0)",
+        "ld t4, 224(a0)",
+        "ld t5, 232(a0)",
+        "ld t6, 240(a0)",
+        // Load a0 last
+        "ld a0, 152(a0)",
+        // Return to loaded context via supervisor return
+        "sret",
+        options(noreturn)
+    );
 }

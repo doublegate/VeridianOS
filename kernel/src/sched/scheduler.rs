@@ -26,6 +26,8 @@ pub struct Scheduler {
     pub preemption_enabled: AtomicBool,
     /// Scheduler lock count
     pub lock_count: AtomicU64,
+    /// CPU ID this scheduler is running on
+    pub cpu_id: u8,
     /// CFS run queue (if using CFS)
     #[cfg(feature = "alloc")]
     pub cfs_queue: Option<Mutex<CfsRunQueue>>,
@@ -53,6 +55,7 @@ impl Scheduler {
             algorithm: SchedAlgorithm::Priority,
             preemption_enabled: AtomicBool::new(true),
             lock_count: AtomicU64::new(0),
+            cpu_id: 0, // Default to CPU 0, will be set per-CPU
             #[cfg(feature = "alloc")]
             cfs_queue: None,
         }
@@ -98,6 +101,13 @@ impl Scheduler {
     pub fn enqueue(&self, task: NonNull<Task>) {
         let task_ref = unsafe { task.as_ref() };
 
+        // Check if task can run on this CPU
+        if !task_ref.can_run_on(self.cpu_id) {
+            // Task can't run on this CPU, try to find a suitable CPU
+            self.enqueue_on_suitable_cpu(task);
+            return;
+        }
+
         // Update task state
         unsafe {
             let task_mut = task.as_ptr();
@@ -125,6 +135,26 @@ impl Scheduler {
         }
     }
 
+    /// Enqueue task on a suitable CPU that matches its affinity
+    fn enqueue_on_suitable_cpu(&self, task: NonNull<Task>) {
+        let task_ref = unsafe { task.as_ref() };
+
+        // Find first CPU that matches task affinity
+        for cpu in 0..super::smp::MAX_CPUS as u8 {
+            if task_ref.can_run_on(cpu) {
+                // Schedule on that CPU
+                super::scheduler::schedule_on_cpu(cpu, task);
+                return;
+            }
+        }
+
+        // No suitable CPU found, this is an error
+        println!(
+            "[SCHED] Warning: Task {} has no valid CPU affinity!",
+            task_ref.tid
+        );
+    }
+
     /// Select next task to run
     pub fn pick_next(&self) -> Option<NonNull<Task>> {
         match self.algorithm {
@@ -139,42 +169,102 @@ impl Scheduler {
 
     /// Round-robin task selection
     fn pick_next_rr(&self) -> Option<NonNull<Task>> {
-        READY_QUEUE
-            .lock()
-            .dequeue()
-            .or(self.idle_task.map(|t| t.as_ptr()))
+        let current_cpu = self.cpu_id;
+        let mut queue = READY_QUEUE.lock();
+
+        // Find a task that can run on this CPU
+        while let Some(task_ptr) = queue.dequeue() {
+            unsafe {
+                let task = task_ptr.as_ref();
+                if task.can_run_on(current_cpu) {
+                    return Some(task_ptr);
+                }
+                // Task can't run on this CPU, re-queue it
+                queue.enqueue(task_ptr);
+            }
+        }
+
+        // No runnable task found, use idle task
+        self.idle_task.map(|t| t.as_ptr())
     }
 
     /// Priority-based task selection
     fn pick_next_priority(&self) -> Option<NonNull<Task>> {
-        READY_QUEUE
-            .lock()
-            .dequeue()
-            .or(self.idle_task.map(|t| t.as_ptr()))
+        let current_cpu = self.cpu_id;
+        let mut queue = READY_QUEUE.lock();
+
+        // Find highest priority task that can run on this CPU
+        while let Some(task_ptr) = queue.dequeue() {
+            unsafe {
+                let task = task_ptr.as_ref();
+                if task.can_run_on(current_cpu) {
+                    return Some(task_ptr);
+                }
+                // Task can't run on this CPU, re-queue it
+                queue.enqueue(task_ptr);
+            }
+        }
+
+        // No runnable task found, use idle task
+        self.idle_task.map(|t| t.as_ptr())
     }
 
     /// CFS task selection
     #[cfg(feature = "alloc")]
     fn pick_next_cfs(&self) -> Option<NonNull<Task>> {
+        let current_cpu = self.cpu_id;
+
         if let Some(ref cfs) = self.cfs_queue {
-            cfs.lock().dequeue().or(self.idle_task.map(|t| t.as_ptr()))
-        } else {
-            self.idle_task.map(|t| t.as_ptr())
+            let mut queue = cfs.lock();
+
+            // Find task with lowest vruntime that can run on this CPU
+            while let Some(task_ptr) = queue.dequeue() {
+                unsafe {
+                    let task = task_ptr.as_ref();
+                    if task.can_run_on(current_cpu) {
+                        return Some(task_ptr);
+                    }
+                    // Task can't run on this CPU, re-queue it
+                    queue.enqueue(task_ptr);
+                }
+            }
         }
+
+        self.idle_task.map(|t| t.as_ptr())
     }
 
     /// Hybrid scheduler task selection
     #[cfg(feature = "alloc")]
     fn pick_next_hybrid(&self) -> Option<NonNull<Task>> {
+        let current_cpu = self.cpu_id;
+
         // Check real-time tasks first
-        if let Some(task) = READY_QUEUE.lock().dequeue() {
-            return Some(task);
+        {
+            let mut queue = READY_QUEUE.lock();
+            while let Some(task_ptr) = queue.dequeue() {
+                unsafe {
+                    let task = task_ptr.as_ref();
+                    if task.can_run_on(current_cpu) {
+                        return Some(task_ptr);
+                    }
+                    // Task can't run on this CPU, re-queue it
+                    queue.enqueue(task_ptr);
+                }
+            }
         }
 
         // Then check CFS queue
         if let Some(ref cfs) = self.cfs_queue {
-            if let Some(task) = cfs.lock().dequeue() {
-                return Some(task);
+            let mut queue = cfs.lock();
+            while let Some(task_ptr) = queue.dequeue() {
+                unsafe {
+                    let task = task_ptr.as_ref();
+                    if task.can_run_on(current_cpu) {
+                        return Some(task_ptr);
+                    }
+                    // Task can't run on this CPU, re-queue it
+                    queue.enqueue(task_ptr);
+                }
             }
         }
 
@@ -368,18 +458,39 @@ fn context_switch(current: &mut super::task::TaskContext, next: &super::task::Ta
 
 /// Load context for first task
 #[cfg(target_arch = "x86_64")]
-fn load_context(_context: &super::task::TaskContext) {
-    // TODO: Implement initial context load
+fn load_context(context: &super::task::TaskContext) {
+    use crate::arch::x86_64::context::X86_64Context;
+
+    match context {
+        super::task::TaskContext::X86_64(ctx) => unsafe {
+            // Load the initial context
+            crate::arch::x86_64::context::load_context(ctx as *const X86_64Context);
+        },
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
-fn load_context(_context: &super::task::TaskContext) {
-    // TODO: Implement initial context load
+fn load_context(context: &super::task::TaskContext) {
+    use crate::arch::aarch64::context::AArch64Context;
+
+    if let super::task::TaskContext::AArch64(ctx) = context {
+        unsafe {
+            // Load the initial context
+            crate::arch::aarch64::context::load_context(ctx as *const AArch64Context);
+        }
+    }
 }
 
 #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-fn load_context(_context: &super::task::TaskContext) {
-    // TODO: Implement initial context load
+fn load_context(context: &super::task::TaskContext) {
+    use crate::arch::riscv::context::RiscVContext;
+
+    if let super::task::TaskContext::RiscV(ctx) = context {
+        unsafe {
+            // Load the initial context
+            crate::arch::riscv::context::load_context(ctx as *const RiscVContext);
+        }
+    }
 }
 
 /// Get current CPU ID
@@ -410,6 +521,18 @@ pub fn current_scheduler() -> &'static Mutex<Scheduler> {
 
 /// Schedule on specific CPU
 pub fn schedule_on_cpu(cpu_id: u8, task: NonNull<Task>) {
+    // Check if task can run on the specified CPU
+    unsafe {
+        let task_ref = task.as_ref();
+        if !task_ref.can_run_on(cpu_id) {
+            println!(
+                "[SCHED] Warning: Task {} cannot run on CPU {} due to affinity mask",
+                task_ref.tid, cpu_id
+            );
+            return;
+        }
+    }
+
     if let Some(cpu_data) = super::smp::per_cpu(cpu_id) {
         // Add to per-CPU ready queue
         cpu_data.cpu_info.ready_queue.lock().enqueue(task);
