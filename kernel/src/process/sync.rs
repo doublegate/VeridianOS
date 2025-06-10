@@ -23,6 +23,15 @@ pub struct WaitQueue {
 }
 
 #[cfg(feature = "alloc")]
+impl Default for WaitQueue {
+    fn default() -> Self {
+        Self {
+            waiters: SpinMutex::new(VecDeque::new()),
+        }
+    }
+}
+
+#[cfg(feature = "alloc")]
 impl WaitQueue {
     /// Create a new wait queue
     pub const fn new() -> Self {
@@ -30,20 +39,20 @@ impl WaitQueue {
             waiters: SpinMutex::new(VecDeque::new()),
         }
     }
-    
+
     /// Add current thread to wait queue
     pub fn wait(&self) {
         if let (Some(process), Some(thread)) = (super::current_process(), super::current_thread()) {
             self.waiters.lock().push_back((process.pid, thread.tid));
-            
+
             // Block thread
             thread.set_state(super::thread::ThreadState::Blocked);
-            
+
             // Yield to scheduler
             crate::sched::yield_cpu();
         }
     }
-    
+
     /// Wake up one thread
     pub fn wake_one(&self) -> bool {
         if let Some((pid, tid)) = self.waiters.lock().pop_front() {
@@ -58,12 +67,12 @@ impl WaitQueue {
         }
         false
     }
-    
+
     /// Wake up all threads
     pub fn wake_all(&self) -> usize {
         let mut count = 0;
         let waiters = self.waiters.lock().drain(..).collect::<Vec<_>>();
-        
+
         for (pid, tid) in waiters {
             if let Some(process) = super::table::get_process(pid) {
                 if let Some(thread) = process.get_thread(tid) {
@@ -73,10 +82,10 @@ impl WaitQueue {
                 }
             }
         }
-        
+
         count
     }
-    
+
     /// Check if queue is empty
     pub fn is_empty(&self) -> bool {
         self.waiters.lock().is_empty()
@@ -94,6 +103,17 @@ pub struct Mutex {
     waiters: WaitQueue,
 }
 
+impl Default for Mutex {
+    fn default() -> Self {
+        Self {
+            locked: AtomicBool::new(false),
+            owner: AtomicU64::new(0),
+            #[cfg(feature = "alloc")]
+            waiters: WaitQueue::new(),
+        }
+    }
+}
+
 impl Mutex {
     /// Create a new mutex
     pub const fn new() -> Self {
@@ -104,15 +124,14 @@ impl Mutex {
             waiters: WaitQueue::new(),
         }
     }
-    
+
     /// Try to acquire the mutex
     pub fn try_lock(&self) -> bool {
-        if self.locked.compare_exchange(
-            false,
-            true,
-            Ordering::Acquire,
-            Ordering::Relaxed
-        ).is_ok() {
+        if self
+            .locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
             if let Some(thread) = super::current_thread() {
                 self.owner.store(thread.tid.0, Ordering::Relaxed);
             }
@@ -121,7 +140,7 @@ impl Mutex {
             false
         }
     }
-    
+
     /// Acquire the mutex, blocking if necessary
     pub fn lock(&self) {
         while !self.try_lock() {
@@ -130,7 +149,7 @@ impl Mutex {
                 // Add to wait queue and block
                 self.waiters.wait();
             }
-            
+
             #[cfg(not(feature = "alloc"))]
             {
                 // Spin or yield
@@ -138,7 +157,7 @@ impl Mutex {
             }
         }
     }
-    
+
     /// Release the mutex
     pub fn unlock(&self) {
         // Verify we own the lock
@@ -147,15 +166,15 @@ impl Mutex {
                 panic!("Mutex::unlock called by non-owner");
             }
         }
-        
+
         self.owner.store(0, Ordering::Relaxed);
         self.locked.store(false, Ordering::Release);
-        
+
         // Wake up one waiter
         #[cfg(feature = "alloc")]
         self.waiters.wake_one();
     }
-    
+
     /// Check if mutex is locked
     pub fn is_locked(&self) -> bool {
         self.locked.load(Ordering::Relaxed)
@@ -183,18 +202,17 @@ impl Semaphore {
             waiters: WaitQueue::new(),
         }
     }
-    
+
     /// Wait on semaphore (P operation)
     pub fn wait(&self) {
         loop {
             let count = self.count.load(Ordering::Relaxed);
             if count > 0 {
-                if self.count.compare_exchange(
-                    count,
-                    count - 1,
-                    Ordering::Acquire,
-                    Ordering::Relaxed
-                ).is_ok() {
+                if self
+                    .count
+                    .compare_exchange(count, count - 1, Ordering::Acquire, Ordering::Relaxed)
+                    .is_ok()
+                {
                     return;
                 }
             } else {
@@ -203,7 +221,7 @@ impl Semaphore {
                     // Block on wait queue
                     self.waiters.wait();
                 }
-                
+
                 #[cfg(not(feature = "alloc"))]
                 {
                     // Yield
@@ -212,18 +230,17 @@ impl Semaphore {
             }
         }
     }
-    
+
     /// Try to wait on semaphore without blocking
     pub fn try_wait(&self) -> bool {
         loop {
             let count = self.count.load(Ordering::Relaxed);
             if count > 0 {
-                if self.count.compare_exchange(
-                    count,
-                    count - 1,
-                    Ordering::Acquire,
-                    Ordering::Relaxed
-                ).is_ok() {
+                if self
+                    .count
+                    .compare_exchange(count, count - 1, Ordering::Acquire, Ordering::Relaxed)
+                    .is_ok()
+                {
                     return true;
                 }
             } else {
@@ -231,7 +248,7 @@ impl Semaphore {
             }
         }
     }
-    
+
     /// Signal semaphore (V operation)
     pub fn signal(&self) {
         loop {
@@ -239,22 +256,21 @@ impl Semaphore {
             if count >= self.max_count {
                 panic!("Semaphore overflow");
             }
-            
-            if self.count.compare_exchange(
-                count,
-                count + 1,
-                Ordering::Release,
-                Ordering::Relaxed
-            ).is_ok() {
+
+            if self
+                .count
+                .compare_exchange(count, count + 1, Ordering::Release, Ordering::Relaxed)
+                .is_ok()
+            {
                 // Wake up one waiter
                 #[cfg(feature = "alloc")]
                 self.waiters.wake_one();
-                
+
                 return;
             }
         }
     }
-    
+
     /// Get current count
     pub fn count(&self) -> u32 {
         self.count.load(Ordering::Relaxed)
@@ -269,6 +285,15 @@ pub struct CondVar {
 }
 
 #[cfg(feature = "alloc")]
+impl Default for CondVar {
+    fn default() -> Self {
+        Self {
+            waiters: WaitQueue::new(),
+        }
+    }
+}
+
+#[cfg(feature = "alloc")]
 impl CondVar {
     /// Create a new condition variable
     pub const fn new() -> Self {
@@ -276,29 +301,29 @@ impl CondVar {
             waiters: WaitQueue::new(),
         }
     }
-    
+
     /// Wait on condition variable
     pub fn wait(&self, mutex: &Mutex) {
         // Must hold the mutex
         if !mutex.is_locked() {
             panic!("CondVar::wait called without holding mutex");
         }
-        
+
         // Add to wait queue
         self.waiters.wait();
-        
+
         // Release mutex before blocking
         mutex.unlock();
-        
+
         // We've been woken up, re-acquire mutex
         mutex.lock();
     }
-    
+
     /// Signal one waiting thread
     pub fn signal(&self) {
         self.waiters.wake_one();
     }
-    
+
     /// Signal all waiting threads
     pub fn broadcast(&self) {
         self.waiters.wake_all();
@@ -316,6 +341,18 @@ pub struct RwLock {
     write_waiters: WaitQueue,
 }
 
+impl Default for RwLock {
+    fn default() -> Self {
+        Self {
+            state: AtomicUsize::new(0),
+            #[cfg(feature = "alloc")]
+            read_waiters: WaitQueue::new(),
+            #[cfg(feature = "alloc")]
+            write_waiters: WaitQueue::new(),
+        }
+    }
+}
+
 impl RwLock {
     /// Create a new read-write lock
     pub const fn new() -> Self {
@@ -327,96 +364,88 @@ impl RwLock {
             write_waiters: WaitQueue::new(),
         }
     }
-    
+
     /// Acquire read lock
     pub fn read_lock(&self) {
         loop {
             let state = self.state.load(Ordering::Relaxed);
-            
+
             // Can't read if write locked
             if state == usize::MAX {
                 #[cfg(feature = "alloc")]
                 self.read_waiters.wait();
-                
+
                 #[cfg(not(feature = "alloc"))]
                 crate::sched::yield_cpu();
-                
+
                 continue;
             }
-            
+
             // Try to increment reader count
-            if self.state.compare_exchange(
-                state,
-                state + 1,
-                Ordering::Acquire,
-                Ordering::Relaxed
-            ).is_ok() {
+            if self
+                .state
+                .compare_exchange(state, state + 1, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
                 return;
             }
         }
     }
-    
+
     /// Try to acquire read lock
     pub fn try_read_lock(&self) -> bool {
         let state = self.state.load(Ordering::Relaxed);
-        
+
         if state != usize::MAX {
-            self.state.compare_exchange(
-                state,
-                state + 1,
-                Ordering::Acquire,
-                Ordering::Relaxed
-            ).is_ok()
+            self.state
+                .compare_exchange(state, state + 1, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
         } else {
             false
         }
     }
-    
+
     /// Release read lock
     pub fn read_unlock(&self) {
         let prev = self.state.fetch_sub(1, Ordering::Release);
-        
+
         // If we were the last reader, wake up writers
         #[cfg(feature = "alloc")]
         if prev == 1 {
             self.write_waiters.wake_one();
         }
     }
-    
+
     /// Acquire write lock
     pub fn write_lock(&self) {
         loop {
-            if self.state.compare_exchange(
-                0,
-                usize::MAX,
-                Ordering::Acquire,
-                Ordering::Relaxed
-            ).is_ok() {
+            if self
+                .state
+                .compare_exchange(0, usize::MAX, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
                 return;
             }
-            
+
             #[cfg(feature = "alloc")]
             self.write_waiters.wait();
-            
+
             #[cfg(not(feature = "alloc"))]
             crate::sched::yield_cpu();
         }
     }
-    
+
     /// Try to acquire write lock
     pub fn try_write_lock(&self) -> bool {
-        self.state.compare_exchange(
-            0,
-            usize::MAX,
-            Ordering::Acquire,
-            Ordering::Relaxed
-        ).is_ok()
+        self.state
+            .compare_exchange(0, usize::MAX, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
     }
-    
+
     /// Release write lock
     pub fn write_unlock(&self) {
         self.state.store(0, Ordering::Release);
-        
+
         // Wake up all readers and one writer
         #[cfg(feature = "alloc")]
         {
@@ -450,17 +479,17 @@ impl Barrier {
             waiters: WaitQueue::new(),
         }
     }
-    
+
     /// Wait at barrier
     pub fn wait(&self) {
         let gen = self.generation.load(Ordering::Relaxed);
         let count = self.count.fetch_add(1, Ordering::Relaxed) + 1;
-        
+
         if count == self.threshold {
             // We're the last thread, reset and wake everyone
             self.count.store(0, Ordering::Relaxed);
             self.generation.fetch_add(1, Ordering::Relaxed);
-            
+
             #[cfg(feature = "alloc")]
             self.waiters.wake_all();
         } else {
@@ -468,7 +497,7 @@ impl Barrier {
             while self.generation.load(Ordering::Relaxed) == gen {
                 #[cfg(feature = "alloc")]
                 self.waiters.wait();
-                
+
                 #[cfg(not(feature = "alloc"))]
                 crate::sched::yield_cpu();
             }

@@ -7,10 +7,7 @@
 pub mod types;
 
 // Re-export common types
-pub use types::{
-    Capability, CapabilityId, CapabilityPermissions, CapabilitySpace, CapabilityType,
-    alloc_cap_id,
-};
+pub use types::{CapabilityId, CapabilitySpace};
 
 pub fn init() {
     println!("[CAP] Initializing capability system...");

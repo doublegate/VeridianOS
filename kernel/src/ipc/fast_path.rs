@@ -11,8 +11,7 @@ use super::{
     error::{IpcError, Result},
     SmallMessage,
 };
-use crate::sched::current_process;
-use crate::process::pcb::ProcessState;
+use crate::{process::pcb::ProcessState, sched::current_process};
 
 /// Performance counter for fast path operations
 static FAST_PATH_COUNT: AtomicU64 = AtomicU64::new(0);

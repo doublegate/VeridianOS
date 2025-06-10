@@ -10,7 +10,7 @@ use super::{ProcessId, ProcessState, ThreadId};
 
 /// Task priority levels
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum Priority {
     /// Real-time highest priority
     RealTimeHigh = 0,
@@ -25,17 +25,12 @@ pub enum Priority {
     /// User high priority
     UserHigh = 50,
     /// User normal priority
+    #[default]
     UserNormal = 60,
     /// User low priority
     UserLow = 70,
     /// Idle priority
     Idle = 99,
-}
-
-impl Default for Priority {
-    fn default() -> Self {
-        Priority::UserNormal
-    }
 }
 
 /// Scheduling class

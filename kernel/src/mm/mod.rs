@@ -18,7 +18,7 @@ pub use frame_allocator::{
 };
 #[allow(unused_imports)]
 pub use heap::init as init_heap;
-pub use vas::{VirtualAddressSpace, VirtualMapping, MappingType};
+pub use vas::VirtualAddressSpace;
 
 /// Page size constant (4KB)
 pub const PAGE_SIZE: usize = 4096;
@@ -35,7 +35,7 @@ impl VirtualAddress {
     pub fn as_u64(&self) -> u64 {
         self.0
     }
-    
+
     pub fn as_usize(&self) -> usize {
         self.0 as usize
     }

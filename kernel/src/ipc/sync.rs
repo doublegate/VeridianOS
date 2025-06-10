@@ -20,8 +20,10 @@ use super::{
     fast_path::{fast_receive, fast_send},
     message::Message,
 };
-use crate::sched::{block_on_ipc, current_process, find_process, wake_up_process};
-use crate::process::pcb::ProcessState;
+use crate::{
+    process::pcb::ProcessState,
+    sched::{block_on_ipc, current_process, find_process, wake_up_process},
+};
 
 /// Statistics for synchronous IPC
 pub struct SyncIpcStats {

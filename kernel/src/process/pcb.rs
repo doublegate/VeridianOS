@@ -9,22 +9,17 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
-use alloc::{
-    collections::BTreeMap,
-    string::String,
-    vec::Vec,
-};
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 use spin::Mutex;
 
+use super::thread::{Thread, ThreadId};
 use crate::{
-    cap::{CapabilitySpace, CapabilityId},
+    cap::{CapabilityId, CapabilitySpace},
     ipc::EndpointId,
     mm::VirtualAddressSpace,
     println,
 };
-
-use super::thread::{Thread, ThreadId};
 
 /// Process ID type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -76,53 +71,53 @@ pub enum ProcessPriority {
 pub struct Process {
     /// Process ID
     pub pid: ProcessId,
-    
+
     /// Parent process ID (None for init)
     pub parent: Option<ProcessId>,
-    
+
     /// Process name
     #[cfg(feature = "alloc")]
     pub name: String,
-    
+
     /// Process state
     pub state: AtomicU32,
-    
+
     /// Priority
     pub priority: ProcessPriority,
-    
+
     /// Virtual address space
     pub memory_space: Mutex<VirtualAddressSpace>,
-    
+
     /// Capability space
     pub capability_space: Mutex<CapabilitySpace>,
-    
+
     /// Threads in this process
     #[cfg(feature = "alloc")]
     pub threads: Mutex<BTreeMap<ThreadId, Thread>>,
-    
+
     /// IPC endpoints owned by this process
     #[cfg(feature = "alloc")]
     pub ipc_endpoints: Mutex<BTreeMap<EndpointId, CapabilityId>>,
-    
+
     /// Child processes
     #[cfg(feature = "alloc")]
     pub children: Mutex<Vec<ProcessId>>,
-    
+
     /// Exit code (set when process exits)
     pub exit_code: AtomicU32,
-    
+
     /// CPU time used (in microseconds)
     pub cpu_time: AtomicU64,
-    
+
     /// Memory usage statistics
     pub memory_stats: MemoryStats,
-    
+
     /// Creation timestamp
     pub created_at: u64,
-    
+
     /// User ID (for future use)
     pub uid: u32,
-    
+
     /// Group ID (for future use)
     pub gid: u32,
 }
@@ -166,7 +161,7 @@ impl Process {
             gid: 0,
         }
     }
-    
+
     /// Get process state
     pub fn get_state(&self) -> ProcessState {
         match self.state.load(Ordering::Acquire) {
@@ -180,36 +175,36 @@ impl Process {
             _ => ProcessState::Dead,
         }
     }
-    
+
     /// Set process state
     pub fn set_state(&self, state: ProcessState) {
         self.state.store(state as u32, Ordering::Release);
     }
-    
+
     /// Add a thread to this process
     #[cfg(feature = "alloc")]
     pub fn add_thread(&self, thread: Thread) -> Result<(), &'static str> {
         let tid = thread.tid;
         let mut threads = self.threads.lock();
-        
+
         if threads.len() >= super::MAX_THREADS_PER_PROCESS {
             return Err("Too many threads in process");
         }
-        
+
         if threads.contains_key(&tid) {
             return Err("Thread ID already exists");
         }
-        
+
         threads.insert(tid, thread);
         Ok(())
     }
-    
+
     /// Remove a thread from this process
     #[cfg(feature = "alloc")]
     pub fn remove_thread(&self, tid: ThreadId) -> Option<Thread> {
         self.threads.lock().remove(&tid)
     }
-    
+
     /// Get a thread by ID
     #[cfg(feature = "alloc")]
     pub fn get_thread(&self, tid: ThreadId) -> Option<&Thread> {
@@ -220,36 +215,33 @@ impl Process {
             threads.get(&tid).map(|t| &*(t as *const Thread))
         }
     }
-    
+
     /// Get number of threads
     #[cfg(feature = "alloc")]
     pub fn thread_count(&self) -> usize {
         self.threads.lock().len()
     }
-    
+
     /// Check if process is alive
     pub fn is_alive(&self) -> bool {
-        match self.get_state() {
-            ProcessState::Dead | ProcessState::Zombie => false,
-            _ => true,
-        }
+        !matches!(self.get_state(), ProcessState::Dead | ProcessState::Zombie)
     }
-    
+
     /// Update CPU time
     pub fn add_cpu_time(&self, microseconds: u64) {
         self.cpu_time.fetch_add(microseconds, Ordering::Relaxed);
     }
-    
+
     /// Get total CPU time
     pub fn get_cpu_time(&self) -> u64 {
         self.cpu_time.load(Ordering::Relaxed)
     }
-    
+
     /// Set exit code
     pub fn set_exit_code(&self, code: i32) {
         self.exit_code.store(code as u32, Ordering::Release);
     }
-    
+
     /// Get exit code
     pub fn get_exit_code(&self) -> i32 {
         self.exit_code.load(Ordering::Acquire) as i32
@@ -285,31 +277,31 @@ impl ProcessBuilder {
             gid: 0,
         }
     }
-    
+
     /// Set parent process
     pub fn parent(mut self, pid: ProcessId) -> Self {
         self.parent = Some(pid);
         self
     }
-    
+
     /// Set priority
     pub fn priority(mut self, priority: ProcessPriority) -> Self {
         self.priority = priority;
         self
     }
-    
+
     /// Set user ID
     pub fn uid(mut self, uid: u32) -> Self {
         self.uid = uid;
         self
     }
-    
+
     /// Set group ID
     pub fn gid(mut self, gid: u32) -> Self {
         self.gid = gid;
         self
     }
-    
+
     /// Build the process
     pub fn build(self) -> Process {
         let pid = super::alloc_pid();

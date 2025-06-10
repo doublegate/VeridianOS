@@ -20,18 +20,17 @@ extern crate alloc;
 use crate::println;
 
 // Re-export submodules
-pub mod pcb;
-pub mod table;
-pub mod thread;
 pub mod lifecycle;
 pub mod memory;
+pub mod pcb;
 pub mod sync;
+pub mod table;
+pub mod thread;
 
 // Re-export common types
-pub use pcb::{Process, ProcessId, ProcessState, ProcessPriority};
-pub use thread::{Thread, ThreadId, ThreadState};
-pub use table::PROCESS_TABLE;
-pub use lifecycle::{fork_process, exec_process, wait_process as wait_for_child};
+pub use lifecycle::{exec_process, fork_process, wait_process as wait_for_child};
+pub use pcb::{Process, ProcessId, ProcessPriority, ProcessState};
+pub use thread::{Thread, ThreadId};
 
 /// Maximum number of processes
 pub const MAX_PROCESSES: usize = 4096;
@@ -58,10 +57,10 @@ pub fn alloc_tid() -> ThreadId {
 /// Initialize process management subsystem
 pub fn init() {
     println!("[PROCESS] Initializing process management...");
-    
+
     // Initialize process table
     table::init();
-    
+
     // Create init process (PID 1)
     #[cfg(feature = "alloc")]
     {
@@ -71,7 +70,7 @@ pub fn init() {
             Err(e) => panic!("[PROCESS] Failed to create init process: {}", e),
         }
     }
-    
+
     println!("[PROCESS] Process management initialized");
 }
 
@@ -113,11 +112,14 @@ pub fn yield_thread() {
 /// Exit current thread
 pub fn exit_thread(exit_code: i32) {
     if let Some(thread) = current_thread() {
-        println!("[PROCESS] Thread {} exiting with code {}", thread.tid.0, exit_code);
-        
+        println!(
+            "[PROCESS] Thread {} exiting with code {}",
+            thread.tid.0, exit_code
+        );
+
         // Mark thread as exited
         // TODO: Proper cleanup
-        
+
         // Never return - schedule another thread
         crate::sched::exit_task(exit_code);
     }
@@ -125,7 +127,7 @@ pub fn exit_thread(exit_code: i32) {
 
 /// Block current thread
 pub fn block_thread() {
-    if let Some(thread) = current_thread() {
+    if let Some(_thread) = current_thread() {
         // TODO: Update thread state to blocked
         crate::sched::yield_cpu();
     }
@@ -146,7 +148,7 @@ pub fn create_thread(
 ) -> Result<ThreadId, &'static str> {
     if let Some(process) = current_process() {
         let tid = alloc_tid();
-        
+
         #[cfg(feature = "alloc")]
         {
             use alloc::string::String;
@@ -157,8 +159,8 @@ pub fn create_thread(
             let user_stack_size = 1024 * 1024; // 1MB
             let kernel_stack_base = 0x2000_0000; // Placeholder - should allocate
             let kernel_stack_size = 64 * 1024; // 64KB
-            
-            let mut thread = Thread::new(
+
+            let thread = Thread::new(
                 tid,
                 process.pid,
                 String::from("user_thread"),
@@ -168,25 +170,25 @@ pub fn create_thread(
                 kernel_stack_base,
                 kernel_stack_size,
             );
-            
+
             // Override the stack pointer if provided
             if stack_ptr != 0 {
                 thread.user_stack.set_sp(stack_ptr);
             }
-            
+
             // Set up thread-local storage if provided
             if tls_ptr != 0 {
                 thread.tls.lock().base = tls_ptr;
             }
-            
+
             // Store argument in a register (architecture-specific)
             // For now, we'll skip this as it requires arch-specific code
             let _ = arg;
-            
+
             // Add thread to process
-            process.add_thread(thread);
+            process.add_thread(thread)?;
         }
-        
+
         Ok(tid)
     } else {
         Err("No current process")
@@ -197,7 +199,9 @@ pub fn create_thread(
 pub fn set_thread_affinity(tid: ThreadId, cpu_mask: u64) -> Result<(), &'static str> {
     if let Some(process) = current_process() {
         if let Some(thread) = process.get_thread(tid) {
-            thread.cpu_affinity.store(cpu_mask as usize, Ordering::SeqCst);
+            thread
+                .cpu_affinity
+                .store(cpu_mask as usize, Ordering::SeqCst);
             Ok(())
         } else {
             Err("Thread not found")

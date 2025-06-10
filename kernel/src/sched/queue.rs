@@ -286,7 +286,7 @@ impl CfsRunQueue {
 
             self.tasks
                 .entry(vruntime)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(TaskPtr::new(task));
 
             self.total_weight += priority_to_weight(task_ref.priority);

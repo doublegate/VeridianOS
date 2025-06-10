@@ -52,6 +52,7 @@ pub fn alloc_pid() -> ProcessId {
 }
 
 /// Get the current process
+#[allow(static_mut_refs)]
 pub fn current_process() -> &'static mut Process {
     // Get from per-CPU scheduler
     if let Some(task_ptr) = SCHEDULER.lock().current() {
@@ -77,7 +78,7 @@ pub fn current_process() -> &'static mut Process {
             CURRENT_PROCESS.blocked_on = task.blocked_on;
             CURRENT_PROCESS.task = Some(task_ptr);
 
-            &mut *(&raw mut CURRENT_PROCESS)
+            &mut CURRENT_PROCESS
         }
     } else {
         // No current task, return dummy
@@ -87,7 +88,7 @@ pub fn current_process() -> &'static mut Process {
             blocked_on: None,
             task: None,
         };
-        unsafe { &mut *(&raw mut DUMMY_PROCESS) }
+        unsafe { &mut DUMMY_PROCESS }
     }
 }
 

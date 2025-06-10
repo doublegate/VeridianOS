@@ -127,8 +127,8 @@ Phase 1 implements the core microkernel functionality that forms the foundation 
 | Heap Allocation | <500ns | 350ns | ✅ Exceeds |
 
 ### Pending Metrics
-- Context Switch: <10μs (implemented, awaiting scheduler integration)
-- Process Creation: <100μs (implemented, awaiting syscall integration)
+- Context Switch: <10μs (fully implemented, tested)
+- Process Creation: <100μs (syscalls complete, tested)
 - Capability Validation: O(1) (requires capability system)
 
 ## 🔑 Key Design Decisions

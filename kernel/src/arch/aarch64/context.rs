@@ -1,6 +1,7 @@
 //! AArch64 context switching implementation
 
 use core::arch::asm;
+
 use crate::sched::task::TaskContext;
 
 /// AArch64 CPU context
@@ -99,47 +100,47 @@ impl crate::arch::context::ThreadContext for AArch64Context {
             },
         }
     }
-    
+
     fn init(&mut self, entry_point: usize, stack_pointer: usize, _kernel_stack: usize) {
         self.pc = entry_point as u64;
         self.elr = entry_point as u64;
         self.sp = stack_pointer as u64;
     }
-    
+
     fn get_instruction_pointer(&self) -> usize {
         self.pc as usize
     }
-    
+
     fn set_instruction_pointer(&mut self, ip: usize) {
         self.pc = ip as u64;
         self.elr = ip as u64;
     }
-    
+
     fn get_stack_pointer(&self) -> usize {
         self.sp as usize
     }
-    
+
     fn set_stack_pointer(&mut self, sp: usize) {
         self.sp = sp as u64;
     }
-    
+
     fn get_kernel_stack(&self) -> usize {
         // TODO: Return from thread-local storage
         0
     }
-    
+
     fn set_kernel_stack(&mut self, _sp: usize) {
         // TODO: Set in thread-local storage
     }
-    
+
     fn set_return_value(&mut self, value: usize) {
         self.x[0] = value as u64; // x0 is return register
     }
-    
+
     fn clone_from(&mut self, other: &Self) {
         *self = other.clone();
     }
-    
+
     fn to_task_context(&self) -> TaskContext {
         TaskContext::AArch64(self.clone())
     }

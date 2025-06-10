@@ -2,6 +2,8 @@
 
 This document tracks features, code, and functionality that were removed, disabled, or marked as TODO during the Process Management implementation session (June 10, 2025) that need to be reimplemented or re-added in future work.
 
+**Last Updated**: June 10, 2025 (Second Session)
+
 ## Process Management
 
 ### 1. Process System Calls - Actual Implementation
@@ -320,3 +322,139 @@ pub fn wake_thread(tid: ThreadId) {
    - Comprehensive testing
 
 This document should be updated as items are implemented or new items are discovered that need deferral.
+
+---
+
+## Items Added in Second Session (June 10, 2025)
+
+### 1. Test and Benchmark Compilation Issues
+**Location**: `kernel/tests/`, `kernel/benches/`
+**Status**: Tests and benchmarks fail to compile
+**Details**:
+- IPC integration tests use outdated API (Message::large signature changed)
+- Benchmarks reference non-existent modules and functions
+- Tests need updating to match new process management API
+- Missing mock implementations for testing
+
+### 2. Thread Stack Allocation
+**Location**: `kernel/src/process/mod.rs:156-159`
+**Status**: Hardcoded placeholder addresses
+```rust
+let user_stack_base = 0x1000_0000; // Placeholder - should allocate
+let user_stack_size = 1024 * 1024; // 1MB
+let kernel_stack_base = 0x2000_0000; // Placeholder - should allocate
+let kernel_stack_size = 64 * 1024; // 64KB
+```
+**Details**: Need proper stack allocation from memory manager
+
+### 3. Process Priority Enum Mismatch
+**Location**: `kernel/src/syscall/process.rs:284`
+**Status**: Incorrect enum variant usage
+**Details**:
+- ProcessPriority::RealTime is not a variant constructor
+- Need to update priority conversion logic
+- Missing proper priority mapping between syscall and internal representation
+
+### 4. Missing Scheduler Task Creation
+**Location**: `kernel/src/process/lifecycle.rs:362-397`
+**Status**: Creates task but doesn't properly integrate with scheduler
+**Details**:
+- Task creation uses raw pointer manipulation
+- No proper lifetime management
+- Scheduler integration incomplete
+
+### 5. Capability System Minimal Implementation
+**Location**: `kernel/src/cap/types.rs`
+**Status**: Created during session as stub
+**Details**:
+- Only basic structure, no actual functionality
+- No integration with process creation/fork
+- No capability validation or enforcement
+- Missing capability inheritance logic
+
+### 6. Virtual Address Space Stub
+**Location**: `kernel/src/mm/vas.rs`
+**Status**: Created during session with minimal functionality
+**Details**:
+- Basic structure only
+- No actual page table management
+- Missing TLB flush operations
+- No integration with hardware MMU
+
+### 7. Removed Thread Context Functionality
+**Location**: `kernel/src/arch/*/context.rs`
+**Status**: ThreadContext trait not fully utilized
+**Details**:
+- Architecture-specific register initialization incomplete
+- Missing proper FPU context handling
+- Kernel stack pointer management not implemented
+
+### 8. Process Table Static References
+**Location**: `kernel/src/process/table.rs:159`
+**Status**: Unsafe static reference returns
+**Details**:
+- Returns `&'static Process` through unsafe pointer cast
+- No proper lifetime management
+- Potential use-after-free issues
+- Need reference counting or arena allocation
+
+### 9. Clippy Suppressions Added
+**Location**: Various files
+**Status**: Multiple clippy warnings suppressed
+**Details**:
+- `#[allow(clippy::too_many_arguments)]` on Thread::new
+- `#[allow(static_mut_refs)]` in scheduler
+- Several unused variable suppressions
+- These should be properly addressed in future
+
+### 10. Memory Mapping Placeholder Functions
+**Location**: `kernel/src/process/memory.rs`
+**Status**: ProcessMemory trait not implemented
+**Details**:
+- Trait defined but no concrete implementation
+- Memory region management incomplete
+- COW support structures exist but unused
+- Page fault handling missing
+
+### 11. Simplified Error Types
+**Location**: Throughout process module
+**Status**: Using `&'static str` for errors
+**Details**:
+- No proper error enum types
+- Limited error context
+- Poor error propagation
+- Need comprehensive error handling system
+
+### 12. Missing Time Functions
+**Location**: `kernel/src/arch/timer.rs` references
+**Status**: get_ticks() used but not properly implemented
+**Details**:
+- Timer module exists but minimal
+- No proper time tracking for processes
+- CPU time accounting incomplete
+
+### 13. Process Communication Mechanisms
+**Location**: Would integrate with IPC
+**Status**: Not implemented
+**Details**:
+- No pipe implementation
+- No shared memory setup beyond stubs
+- No message queue implementation
+- Missing signal delivery infrastructure
+
+### 14. File Descriptor Management
+**Location**: Not implemented
+**Status**: Completely missing
+**Details**:
+- No file descriptor table
+- No open file tracking
+- No stdin/stdout/stderr setup
+- Required for exec() implementation
+
+### 15. Environment Variable Handling
+**Location**: `kernel/src/process/lifecycle.rs` exec function
+**Status**: Parameters accepted but ignored
+**Details**:
+- argv/envp parameters not processed
+- No environment storage in process
+- No way to pass environment to new processes

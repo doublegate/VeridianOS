@@ -1,6 +1,7 @@
 //! RISC-V context switching implementation
 
 use core::arch::asm;
+
 use crate::sched::task::TaskContext;
 
 /// RISC-V CPU context
@@ -143,11 +144,37 @@ impl RiscVContext {
 impl crate::arch::context::ThreadContext for RiscVContext {
     fn new() -> Self {
         Self {
-            ra: 0, sp: 0, gp: 0, tp: 0,
-            t0: 0, t1: 0, t2: 0,
-            s0: 0, s1: 0, s2: 0, s3: 0, s4: 0, s5: 0, s6: 0, s7: 0, s8: 0, s9: 0, s10: 0, s11: 0,
-            a0: 0, a1: 0, a2: 0, a3: 0, a4: 0, a5: 0, a6: 0, a7: 0,
-            t3: 0, t4: 0, t5: 0, t6: 0,
+            ra: 0,
+            sp: 0,
+            gp: 0,
+            tp: 0,
+            t0: 0,
+            t1: 0,
+            t2: 0,
+            s0: 0,
+            s1: 0,
+            s2: 0,
+            s3: 0,
+            s4: 0,
+            s5: 0,
+            s6: 0,
+            s7: 0,
+            s8: 0,
+            s9: 0,
+            s10: 0,
+            s11: 0,
+            a0: 0,
+            a1: 0,
+            a2: 0,
+            a3: 0,
+            a4: 0,
+            a5: 0,
+            a6: 0,
+            a7: 0,
+            t3: 0,
+            t4: 0,
+            t5: 0,
+            t6: 0,
             pc: 0,
             sstatus: 0x120,
             sepc: 0,
@@ -160,47 +187,47 @@ impl crate::arch::context::ThreadContext for RiscVContext {
             },
         }
     }
-    
+
     fn init(&mut self, entry_point: usize, stack_pointer: usize, _kernel_stack: usize) {
         self.pc = entry_point;
         self.sepc = entry_point;
         self.sp = stack_pointer;
     }
-    
+
     fn get_instruction_pointer(&self) -> usize {
         self.pc
     }
-    
+
     fn set_instruction_pointer(&mut self, ip: usize) {
         self.pc = ip;
         self.sepc = ip;
     }
-    
+
     fn get_stack_pointer(&self) -> usize {
         self.sp
     }
-    
+
     fn set_stack_pointer(&mut self, sp: usize) {
         self.sp = sp;
     }
-    
+
     fn get_kernel_stack(&self) -> usize {
         // TODO: Return from thread pointer
         0
     }
-    
+
     fn set_kernel_stack(&mut self, _sp: usize) {
         // TODO: Set in thread pointer
     }
-    
+
     fn set_return_value(&mut self, value: usize) {
         self.a0 = value; // a0 is return register
     }
-    
+
     fn clone_from(&mut self, other: &Self) {
         *self = other.clone();
     }
-    
+
     fn to_task_context(&self) -> TaskContext {
         TaskContext::RiscV(self.clone())
     }

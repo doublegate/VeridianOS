@@ -6,25 +6,19 @@
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
-use alloc::{string::String, vec::Vec, format};
-
-use crate::{
-    arch::{self, context::ThreadContext},
-    mm::{self, PAGE_SIZE},
-    sched,
-    println,
-};
+use alloc::{format, string::String, vec::Vec};
 
 use super::{
-    table,
-    thread::{Thread, ThreadBuilder, ThreadId},
     pcb::{Process, ProcessBuilder, ProcessState},
+    table,
+    thread::{Thread, ThreadBuilder},
     ProcessId, ProcessPriority,
 };
+use crate::{arch::context::ThreadContext, println, sched};
 
 /// Default stack sizes
-pub const DEFAULT_USER_STACK_SIZE: usize = 8 * 1024 * 1024;  // 8MB
-pub const DEFAULT_KERNEL_STACK_SIZE: usize = 64 * 1024;      // 64KB
+pub const DEFAULT_USER_STACK_SIZE: usize = 8 * 1024 * 1024; // 8MB
+pub const DEFAULT_KERNEL_STACK_SIZE: usize = 64 * 1024; // 64KB
 
 /// Process creation options
 #[cfg(feature = "alloc")]
@@ -63,106 +57,103 @@ pub fn create_process(name: String, entry_point: usize) -> Result<ProcessId, &'s
         entry_point,
         ..Default::default()
     };
-    
+
     create_process_with_options(options)
 }
 
 /// Create a new process with options
 #[cfg(feature = "alloc")]
-pub fn create_process_with_options(options: ProcessCreateOptions) -> Result<ProcessId, &'static str> {
+pub fn create_process_with_options(
+    options: ProcessCreateOptions,
+) -> Result<ProcessId, &'static str> {
     // Create the process
-    let mut process = ProcessBuilder::new(options.name.clone())
+    let process = ProcessBuilder::new(options.name.clone())
         .parent(options.parent.unwrap_or(ProcessId(0)))
         .priority(options.priority)
         .build();
-    
+
     let pid = process.pid;
-    
+
     // Set up the process's address space
     {
         let mut memory_space = process.memory_space.lock();
         memory_space.init()?;
-        
+
         // Map kernel space (higher half)
         // This is typically shared among all processes
         memory_space.map_kernel_space()?;
     }
-    
+
     // Create the main thread
-    let main_thread = ThreadBuilder::new(
-        pid,
-        format!("{}-main", options.name),
-        options.entry_point,
-    )
-    .user_stack_size(options.user_stack_size)
-    .kernel_stack_size(options.kernel_stack_size)
-    .build()?;
-    
+    let main_thread =
+        ThreadBuilder::new(pid, format!("{}-main", options.name), options.entry_point)
+            .user_stack_size(options.user_stack_size)
+            .kernel_stack_size(options.kernel_stack_size)
+            .build()?;
+
     let tid = main_thread.tid;
-    
+
     // Add thread to process
     process.add_thread(main_thread)?;
-    
+
     // Add process to process table
     table::add_process(process)?;
-    
+
     // Mark process as ready
     if let Some(process) = table::get_process(pid) {
         process.set_state(ProcessState::Ready);
-        
+
         // Add main thread to scheduler
         if let Some(thread) = process.get_thread(tid) {
             // Create a scheduler task for this thread
             create_scheduler_task(process, thread)?;
         }
     }
-    
-    println!("[PROCESS] Created process {} ({}) with main thread {}", 
-             pid.0, options.name, tid.0);
-    
+
+    println!(
+        "[PROCESS] Created process {} ({}) with main thread {}",
+        pid.0, options.name, tid.0
+    );
+
     Ok(pid)
 }
 
 /// Fork current process
 #[cfg(feature = "alloc")]
 pub fn fork_process() -> Result<ProcessId, &'static str> {
-    let current_process = super::current_process()
-        .ok_or("No current process")?;
-    
-    let current_thread = super::current_thread()
-        .ok_or("No current thread")?;
-    
+    let current_process = super::current_process().ok_or("No current process")?;
+
+    let current_thread = super::current_thread().ok_or("No current thread")?;
+
     // Create new process as copy of current
-    let mut new_process = ProcessBuilder::new(
-        format!("{}-fork", current_process.name)
-    )
-    .parent(current_process.pid)
-    .priority(current_process.priority)
-    .build();
-    
+    let new_process = ProcessBuilder::new(format!("{}-fork", current_process.name))
+        .parent(current_process.pid)
+        .priority(current_process.priority)
+        .build();
+
     let new_pid = new_process.pid;
-    
+
     // Clone address space
     {
         let current_space = current_process.memory_space.lock();
         let mut new_space = new_process.memory_space.lock();
-        
+
         // TODO: Implement copy-on-write for efficiency
-        new_space.clone_from(&*current_space)?;
+        new_space.clone_from(&current_space)?;
     }
-    
+
     // Clone capabilities
     {
         let current_caps = current_process.capability_space.lock();
         let mut new_caps = new_process.capability_space.lock();
-        
-        new_caps.clone_from(&*current_caps)?;
+
+        new_caps.clone_from(&current_caps)?;
     }
-    
+
     // Create thread in new process matching current thread
     let new_thread = {
         let ctx = current_thread.context.lock();
-        let mut thread = ThreadBuilder::new(
+        let thread = ThreadBuilder::new(
             new_pid,
             current_thread.name.clone(),
             ctx.get_instruction_pointer(),
@@ -172,43 +163,46 @@ pub fn fork_process() -> Result<ProcessId, &'static str> {
         .priority(current_thread.priority)
         .cpu_affinity(current_thread.get_affinity())
         .build()?;
-        
+
         // Copy thread context and set return value to 0 for child
         {
             let mut new_ctx = thread.context.lock();
             // Clone context manually
             *new_ctx = (*ctx).clone();
-            
+
             // Set return value to 0 for child
             new_ctx.set_return_value(0);
         } // Drop lock here
-        
+
         thread
     };
-    
+
     let new_tid = new_thread.tid;
     new_process.add_thread(new_thread)?;
-    
+
     // Add to parent's children list
     #[cfg(feature = "alloc")]
     {
         current_process.children.lock().push(new_pid);
     }
-    
+
     // Add process to table
     table::add_process(new_process)?;
-    
+
     // Mark as ready and add to scheduler
     if let Some(process) = table::get_process(new_pid) {
         process.set_state(ProcessState::Ready);
-        
+
         if let Some(thread) = process.get_thread(new_tid) {
             create_scheduler_task(process, thread)?;
         }
     }
-    
-    println!("[PROCESS] Forked process {} from {}", new_pid.0, current_process.pid.0);
-    
+
+    println!(
+        "[PROCESS] Forked process {} from {}",
+        new_pid.0, current_process.pid.0
+    );
+
     // Return child PID to parent
     Ok(new_pid)
 }
@@ -221,18 +215,21 @@ pub fn exec_process(_path: &str, _argv: &[&str], _envp: &[&str]) -> Result<(), &
     // 2. Replace current address space
     // 3. Reset thread to new entry point
     // 4. Clear signals, close files, etc.
-    
+
     Err("exec not yet implemented")
 }
 
 /// Exit current process
 pub fn exit_process(exit_code: i32) {
     if let Some(process) = super::current_process() {
-        println!("[PROCESS] Process {} exiting with code {}", process.pid.0, exit_code);
-        
+        println!(
+            "[PROCESS] Process {} exiting with code {}",
+            process.pid.0, exit_code
+        );
+
         // Set exit code
         process.set_exit_code(exit_code);
-        
+
         // Mark all threads as exited
         #[cfg(feature = "alloc")]
         {
@@ -241,15 +238,15 @@ pub fn exit_process(exit_code: i32) {
                 thread.set_state(super::thread::ThreadState::Exited);
             }
         }
-        
+
         // Clean up resources
         cleanup_process(process);
-        
+
         // Mark process as zombie (parent needs to reap)
         process.set_state(ProcessState::Zombie);
-        
+
         // TODO: Wake up parent if waiting
-        
+
         // Schedule another process
         sched::exit_task(exit_code);
     }
@@ -258,32 +255,31 @@ pub fn exit_process(exit_code: i32) {
 /// Wait for child process to exit
 #[cfg(feature = "alloc")]
 pub fn wait_process(pid: Option<ProcessId>) -> Result<(ProcessId, i32), &'static str> {
-    let current = super::current_process()
-        .ok_or("No current process")?;
-    
+    let current = super::current_process().ok_or("No current process")?;
+
     loop {
         // Check for zombie children
         let children = table::PROCESS_TABLE.find_children(current.pid);
-        
+
         for child_pid in children {
             if let Some(child) = table::get_process(child_pid) {
-                if pid.is_none() || pid == Some(child_pid) {
-                    if child.get_state() == ProcessState::Zombie {
-                        // Reap the zombie
-                        let exit_code = child.get_exit_code();
-                        
-                        // Remove from children list
-                        current.children.lock().retain(|&p| p != child_pid);
-                        
-                        // Remove from process table
-                        table::remove_process(child_pid);
-                        
-                        return Ok((child_pid, exit_code));
-                    }
+                if (pid.is_none() || pid == Some(child_pid))
+                    && child.get_state() == ProcessState::Zombie
+                {
+                    // Reap the zombie
+                    let exit_code = child.get_exit_code();
+
+                    // Remove from children list
+                    current.children.lock().retain(|&p| p != child_pid);
+
+                    // Remove from process table
+                    table::remove_process(child_pid);
+
+                    return Ok((child_pid, exit_code));
                 }
             }
         }
-        
+
         // No zombie children found, block
         // TODO: Implement proper blocking wait
         sched::yield_cpu();
@@ -292,18 +288,17 @@ pub fn wait_process(pid: Option<ProcessId>) -> Result<(ProcessId, i32), &'static
 
 /// Kill a process
 pub fn kill_process(pid: ProcessId, _signal: i32) -> Result<(), &'static str> {
-    let process = table::get_process(pid)
-        .ok_or("Process not found")?;
-    
+    let process = table::get_process(pid).ok_or("Process not found")?;
+
     if !process.is_alive() {
         return Err("Process already dead");
     }
-    
+
     println!("[PROCESS] Killing process {}", pid.0);
-    
+
     // TODO: Implement signal delivery
     // For now, just force exit
-    
+
     // Mark all threads as exited
     #[cfg(feature = "alloc")]
     {
@@ -313,11 +308,11 @@ pub fn kill_process(pid: ProcessId, _signal: i32) -> Result<(), &'static str> {
             // TODO: Remove from scheduler
         }
     }
-    
+
     // Clean up and mark as zombie
     cleanup_process(process);
     process.set_state(ProcessState::Zombie);
-    
+
     Ok(())
 }
 
@@ -328,13 +323,13 @@ fn cleanup_process(process: &Process) {
         let mut memory_space = process.memory_space.lock();
         memory_space.destroy();
     }
-    
+
     // Release capabilities
     {
         let mut cap_space = process.capability_space.lock();
         cap_space.destroy();
     }
-    
+
     // Close IPC endpoints
     #[cfg(feature = "alloc")]
     {
@@ -344,7 +339,7 @@ fn cleanup_process(process: &Process) {
             println!("[PROCESS] Closing IPC endpoint {}", endpoint_id);
         }
     }
-    
+
     // TODO: Close files, release other resources
 }
 
@@ -356,7 +351,7 @@ fn create_scheduler_task(process: &Process, thread: &Thread) -> Result<(), &'sta
     let instruction_pointer = ctx.get_instruction_pointer();
     let stack_pointer = ctx.get_stack_pointer();
     drop(ctx);
-    
+
     // Create a sched::Task using the constructor
     #[cfg(feature = "alloc")]
     let mut task = sched::task::Task::new(
@@ -367,8 +362,8 @@ fn create_scheduler_task(process: &Process, thread: &Thread) -> Result<(), &'sta
         stack_pointer,
         process.memory_space.lock().get_page_table() as usize,
     );
-    
-    // Update task fields based on thread/process state  
+
+    // Update task fields based on thread/process state
     task.priority = match process.priority {
         ProcessPriority::RealTime => sched::task::Priority::RealTimeHigh,
         ProcessPriority::System => sched::task::Priority::SystemHigh,
@@ -376,22 +371,24 @@ fn create_scheduler_task(process: &Process, thread: &Thread) -> Result<(), &'sta
         ProcessPriority::Low => sched::task::Priority::UserLow,
         ProcessPriority::Idle => sched::task::Priority::Idle,
     };
-    
+
     task.sched_class = match process.priority {
         ProcessPriority::RealTime => sched::task::SchedClass::RealTime,
         _ => sched::task::SchedClass::Normal,
     };
-    
-    task.time_slice = thread.time_slice.load(core::sync::atomic::Ordering::Acquire);
-    
+
+    task.time_slice = thread
+        .time_slice
+        .load(core::sync::atomic::Ordering::Acquire);
+
     // Get task pointer
     let task_ptr = core::ptr::NonNull::new(&task as *const _ as *mut _)
         .ok_or("Failed to create task pointer")?;
-    
+
     // Add to scheduler
-    let mut scheduler = sched::SCHEDULER.lock();
+    let scheduler = sched::SCHEDULER.lock();
     scheduler.enqueue(task_ptr);
-    
+
     Ok(())
 }
 
@@ -419,14 +416,16 @@ pub fn get_process_stats() -> ProcessStats {
         total_cpu_time: 0,
         total_memory_usage: 0,
     };
-    
+
     table::PROCESS_TABLE.for_each(|process| {
         stats.total_processes += 1;
         stats.total_threads += process.thread_count();
         stats.total_cpu_time += process.get_cpu_time();
-        stats.total_memory_usage += process.memory_stats.virtual_size
+        stats.total_memory_usage += process
+            .memory_stats
+            .virtual_size
             .load(core::sync::atomic::Ordering::Relaxed);
-        
+
         match process.get_state() {
             ProcessState::Running => stats.running_processes += 1,
             ProcessState::Blocked => stats.blocked_processes += 1,
@@ -434,6 +433,6 @@ pub fn get_process_stats() -> ProcessStats {
             _ => {}
         }
     });
-    
+
     stats
 }

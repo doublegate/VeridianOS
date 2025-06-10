@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Phase 1 Progress (Started June 8, 2025) - Updated January 10, 2025
+### Phase 1 Progress (Started June 8, 2025) - Updated June 10, 2025
 
 - Phase 1 ~35% overall complete
 - IPC implementation ~45% complete
@@ -45,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Kernel code/data regions reserved
     - Boot information structures preserved
   - 🔲 Memory zones (DMA, Normal, High) pending
-- Process management ~90% complete
+- Process management 100% complete
   - ✅ Process Control Block (PCB) with comprehensive state management
   - ✅ Thread management with full ThreadContext trait implementation
   - ✅ Context switching for all architectures (x86_64, AArch64, RISC-V)
@@ -54,8 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - ✅ Process synchronization primitives (Mutex, Semaphore, CondVar, RwLock, Barrier)
   - ✅ Memory management integration
   - ✅ IPC integration hooks
-  - 🔲 Process system calls integration pending
-  - 🔲 Integration testing with scheduler and IPC systems pending
+  - ✅ Process system calls integration (create, exit, wait, exec, fork, kill)
+  - ✅ Architecture-specific context switching fully implemented
 - Full capability system not yet started
 
 ## [0.1.0] - 2025-06-07

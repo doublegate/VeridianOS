@@ -34,7 +34,7 @@ pub enum Syscall {
     ProcessGetPPid = 16,
     ProcessSetPriority = 17,
     ProcessGetPriority = 18,
-    
+
     // Thread management
     ThreadCreate = 40,
     ThreadExit = 41,
@@ -118,7 +118,7 @@ fn handle_syscall(
         Syscall::IpcReceive => sys_ipc_receive(arg1, arg2),
         Syscall::IpcCall => sys_ipc_call(arg1, arg2, arg3, arg4, arg5),
         Syscall::IpcReply => sys_ipc_reply(arg1, arg2, arg3),
-        
+
         // Process management
         Syscall::ProcessYield => sys_yield(),
         Syscall::ProcessExit => sys_exit(arg1),
@@ -129,7 +129,7 @@ fn handle_syscall(
         Syscall::ProcessGetPPid => sys_getppid(),
         Syscall::ProcessSetPriority => sys_setpriority(arg1, arg2, arg3),
         Syscall::ProcessGetPriority => sys_getpriority(arg1, arg2),
-        
+
         // Thread management
         Syscall::ThreadCreate => sys_thread_create(arg1, arg2, arg3, arg4),
         Syscall::ThreadExit => sys_thread_exit(arg1),
@@ -137,7 +137,7 @@ fn handle_syscall(
         Syscall::ThreadGetTid => sys_gettid(),
         Syscall::ThreadSetAffinity => sys_thread_setaffinity(arg1, arg2, arg3),
         Syscall::ThreadGetAffinity => sys_thread_getaffinity(arg1, arg2, arg3),
-        
+
         _ => Err(SyscallError::InvalidSyscall),
     }
 }
@@ -245,7 +245,7 @@ impl TryFrom<usize> for Syscall {
             5 => Ok(Syscall::IpcBindEndpoint),
             6 => Ok(Syscall::IpcShareMemory),
             7 => Ok(Syscall::IpcMapMemory),
-            
+
             // Process management
             10 => Ok(Syscall::ProcessYield),
             11 => Ok(Syscall::ProcessExit),
@@ -256,15 +256,15 @@ impl TryFrom<usize> for Syscall {
             16 => Ok(Syscall::ProcessGetPPid),
             17 => Ok(Syscall::ProcessSetPriority),
             18 => Ok(Syscall::ProcessGetPriority),
-            
+
             // Memory management
             20 => Ok(Syscall::MemoryMap),
             21 => Ok(Syscall::MemoryUnmap),
-            
+
             // Capability management
             30 => Ok(Syscall::CapabilityGrant),
             31 => Ok(Syscall::CapabilityRevoke),
-            
+
             // Thread management
             40 => Ok(Syscall::ThreadCreate),
             41 => Ok(Syscall::ThreadExit),
@@ -272,7 +272,7 @@ impl TryFrom<usize> for Syscall {
             43 => Ok(Syscall::ThreadGetTid),
             44 => Ok(Syscall::ThreadSetAffinity),
             45 => Ok(Syscall::ThreadGetAffinity),
-            
+
             _ => Err(()),
         }
     }

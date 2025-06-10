@@ -3,15 +3,13 @@
 //! Implements system calls for process and thread management including
 //! creation, termination, and state management.
 
+use core::slice;
+
 use super::{SyscallError, SyscallResult};
 use crate::process::{
-    ProcessId, ThreadId, ProcessPriority,
-    current_process, current_thread, exit_thread, fork_process, 
-    exec_process, wait_for_child, create_thread, set_thread_affinity,
-    get_thread_tid, thread::ThreadState,
-    pcb::ProcessState,
+    create_thread, current_process, exec_process, exit_thread, fork_process, get_thread_tid,
+    set_thread_affinity, wait_for_child, ProcessId, ProcessPriority, ThreadId,
 };
-use core::slice;
 
 /// Fork the current process
 ///
@@ -42,7 +40,7 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
     // TODO: Validate and copy path from user space
     // For now, we'll use a placeholder
     let path = "placeholder";
-    
+
     // Parse argv and envp arrays (simplified for now)
     let argv: &[&str] = if argv_ptr != 0 {
         // TODO: Copy from user space
@@ -50,7 +48,7 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
     } else {
         &[]
     };
-    
+
     let envp: &[&str] = if envp_ptr != 0 {
         // TODO: Copy from user space
         &[]
@@ -172,21 +170,21 @@ pub fn sys_gettid() -> SyscallResult {
 /// - tid: Thread ID to join
 /// - retval_ptr: Pointer to store thread return value
 pub fn sys_thread_join(tid: usize, retval_ptr: usize) -> SyscallResult {
-    let target_tid = ThreadId(tid as u64);
-    
+    let _target_tid = ThreadId(tid as u64);
+
     // TODO: Implement thread join
     // This would involve:
     // 1. Find target thread
     // 2. Check if it's joinable
     // 3. Wait for it to terminate
     // 4. Get its exit value
-    
+
     if retval_ptr != 0 {
         unsafe {
             *(retval_ptr as *mut usize) = 0; // Placeholder
         }
     }
-    
+
     Ok(0)
 }
 
@@ -208,9 +206,7 @@ pub fn sys_thread_setaffinity(tid: usize, cpuset_ptr: usize, cpuset_size: usize)
     };
 
     // Read CPU set from user space
-    let cpuset = unsafe {
-        slice::from_raw_parts(cpuset_ptr as *const u8, cpuset_size)
-    };
+    let cpuset = unsafe { slice::from_raw_parts(cpuset_ptr as *const u8, cpuset_size) };
 
     // Extract CPU mask from cpuset (simplified)
     let cpu_mask = if cpuset_size >= 8 {
@@ -246,9 +242,7 @@ pub fn sys_thread_getaffinity(tid: usize, cpuset_ptr: usize, cpuset_size: usize)
     let cpu_mask: u64 = 0xFFFFFFFFFFFFFFFF; // All CPUs for now
 
     // Write CPU set to user space
-    let cpuset = unsafe {
-        slice::from_raw_parts_mut(cpuset_ptr as *mut u8, cpuset_size)
-    };
+    let cpuset = unsafe { slice::from_raw_parts_mut(cpuset_ptr as *mut u8, cpuset_size) };
 
     if cpuset_size >= 8 {
         cpuset[0..8].copy_from_slice(&cpu_mask.to_le_bytes());
