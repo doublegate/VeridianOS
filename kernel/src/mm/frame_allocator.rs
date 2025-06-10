@@ -5,7 +5,6 @@
 
 #![allow(dead_code)]
 
-use core::ops::Range;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use spin::Mutex;
@@ -15,7 +14,6 @@ extern crate alloc;
 
 #[cfg(feature = "alloc")]
 use alloc::boxed::Box;
-
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
@@ -447,33 +445,33 @@ impl FrameAllocator {
     #[cfg(feature = "alloc")]
     pub fn add_reserved_region(&self, region: ReservedRegion) -> Result<()> {
         let mut reserved = self.reserved_regions.lock();
-        
+
         // Check for overlaps with existing reserved regions
         for existing in reserved.iter() {
             if region.start < existing.end && region.end > existing.start {
                 return Err(FrameAllocatorError::ReservedMemoryConflict);
             }
         }
-        
+
         reserved.push(region);
         Ok(())
     }
-    
+
     /// Check if a frame range is reserved
     #[cfg(feature = "alloc")]
     pub fn is_reserved(&self, start: FrameNumber, count: usize) -> bool {
         let end = FrameNumber::new(start.as_u64() + count as u64);
         let reserved = self.reserved_regions.lock();
-        
+
         for region in reserved.iter() {
             if start < region.end && end > region.start {
                 return true;
             }
         }
-        
+
         false
     }
-    
+
     /// Mark standard reserved regions (e.g., BIOS, kernel, boot data)
     #[cfg(feature = "alloc")]
     pub fn mark_standard_reserved_regions(&self) {
@@ -483,7 +481,7 @@ impl FrameAllocator {
             end: FrameNumber::new(256), // 1MB / 4KB
             description: "BIOS and legacy devices",
         });
-        
+
         // Note: Kernel and boot data regions should be marked by the bootloader
     }
 
@@ -677,7 +675,7 @@ impl Default for FrameAllocator {
 /// Global frame allocator instance
 pub static FRAME_ALLOCATOR: Mutex<FrameAllocator> = Mutex::new(FrameAllocator::new());
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use super::*;
 
