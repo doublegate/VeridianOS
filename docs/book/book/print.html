@@ -1,15 +1,15 @@
 <!DOCTYPE HTML>
-<html lang="en" class="light sidebar-visible" dir="ltr">
+<html lang="en" class="navy sidebar-visible" dir="ltr">
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title></title>
+        <title>VeridianOS Developer Guide</title>
         <meta name="robots" content="noindex">
 
 
         <!-- Custom HTML head -->
 
-        <meta name="description" content="">
+        <meta name="description" content="Comprehensive guide to VeridianOS development">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta name="theme-color" content="#ffffff">
 
@@ -30,12 +30,13 @@
         <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
 
         <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../book-theme/veridian.css">
 
 
         <!-- Provide site root and default themes to javascript -->
         <script>
             const path_to_root = "";
-            const default_light_theme = "light";
+            const default_light_theme = "navy";
             const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
@@ -77,7 +78,7 @@
             try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
             if (theme === null || theme === undefined) { theme = default_theme; }
             const html = document.documentElement;
-            html.classList.remove('light')
+            html.classList.remove('navy')
             html.classList.add(theme);
             html.classList.add("js");
         </script>
@@ -135,11 +136,14 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title"></h1>
+                    <h1 class="menu-title">VeridianOS Developer Guide</h1>
 
                     <div class="right-buttons">
                         <a href="print.html" title="Print this book" aria-label="Print this book">
                             <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/doublegate/VeridianOS" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
 
                     </div>
@@ -192,7 +196,7 @@
 <ol>
 <li><strong>Microkernel Design</strong>: Only essential services run in kernel space, minimizing the attack surface</li>
 <li><strong>Capability-Based Security</strong>: Fine-grained access control with unforgeable capability tokens</li>
-<li><strong>Memory Safety</strong>: Rust's ownership system prevents entire classes of vulnerabilities</li>
+<li><strong>Memory Safety</strong>: Rust’s ownership system prevents entire classes of vulnerabilities</li>
 <li><strong>Modern Architecture</strong>: Designed for contemporary hardware with multi-core, NUMA, and heterogeneous computing support</li>
 </ol>
 <h2 id="project-philosophy"><a class="header" href="#project-philosophy">Project Philosophy</a></h2>
@@ -232,7 +236,7 @@
 <li><strong>Development Phases</strong>: Roadmap and implementation timeline</li>
 </ul>
 <h2 id="join-the-community"><a class="header" href="#join-the-community">Join the Community</a></h2>
-<p>VeridianOS is an open-source project welcoming contributions from developers worldwide. Whether you're interested in kernel development, system programming, or just learning about operating systems, there's a place for you in our community.</p>
+<p>VeridianOS is an open-source project welcoming contributions from developers worldwide. Whether you’re interested in kernel development, system programming, or just learning about operating systems, there’s a place for you in our community.</p>
 <ul>
 <li><strong>GitHub</strong>: <a href="https://github.com/doublegate/VeridianOS">github.com/doublegate/VeridianOS</a></li>
 <li><strong>Discord</strong>: <a href="https://discord.gg/veridian">discord.gg/veridian</a></li>
@@ -240,7 +244,7 @@
 </ul>
 <h2 id="license"><a class="header" href="#license">License</a></h2>
 <p>VeridianOS is dual-licensed under MIT and Apache 2.0 licenses. See the LICENSE files for details.</p>
-<p>Let's build the future of operating systems together!</p>
+<p>Let’s build the future of operating systems together!</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h1>
 <p>Before building VeridianOS, ensure you have the following tools installed:</p>
 <h2 id="required-software"><a class="header" href="#required-software">Required Software</a></h2>
@@ -606,7 +610,7 @@ rustup override set nightly-2025-01-15
 <p><strong>Permission denied errors</strong></p>
 <ul>
 <li>Ensure you have proper permissions in the project directory</li>
-<li>Don't run cargo or just commands with sudo</li>
+<li>Don’t run cargo or just commands with sudo</li>
 </ul>
 </li>
 </ol>
@@ -2099,7 +2103,7 @@ pub fn numa_stats(&amp;self, node: u8) -&gt; Option&lt;&amp;NumaStats&gt;;
 pub fn dump_state(&amp;self);
 pub fn verify_consistency(&amp;self) -&gt; Result&lt;()&gt;;
 <span class="boring">}</span></code></pre></pre>
-<p>The memory allocator forms the foundation of VeridianOS's memory management system, providing fast, secure, and scalable physical memory allocation for all kernel subsystems.</p>
+<p>The memory allocator forms the foundation of VeridianOS’s memory management system, providing fast, secure, and scalable physical memory allocation for all kernel subsystems.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="scheduler"><a class="header" href="#scheduler">Scheduler</a></h1>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="system-calls"><a class="header" href="#system-calls">System Calls</a></h1>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="interrupt-handling"><a class="header" href="#interrupt-handling">Interrupt Handling</a></h1>
@@ -2122,7 +2126,7 @@ pub fn verify_consistency(&amp;self) -&gt; Result&lt;()&gt;;
 <ol>
 <li>Check if someone is already working on the issue</li>
 <li>Comment on the issue to claim it</li>
-<li>Discuss your approach if it's a significant change</li>
+<li>Discuss your approach if it’s a significant change</li>
 <li>For major features, wait for design approval</li>
 </ol>
 <h4 id="development-process"><a class="header" href="#development-process">Development Process</a></h4>
@@ -2335,7 +2339,7 @@ just debug-riscv64
 <h2 id="getting-help-1"><a class="header" href="#getting-help-1">Getting Help</a></h2>
 <p>If you need help:</p>
 <ol>
-<li><strong>Read the documentation</strong>: Check if it's already explained</li>
+<li><strong>Read the documentation</strong>: Check if it’s already explained</li>
 <li><strong>Search issues</strong>: Someone might have asked before</li>
 <li><strong>Ask on Discord</strong>: Quick questions and discussions</li>
 <li><strong>Open an issue</strong>: For bugs or unclear documentation</li>
@@ -3070,7 +3074,7 @@ pub fn send(fd: Fd, buf: &amp;[u8], flags: i32) -&gt; Result&lt;usize, Errno&gt;
 <li><strong>AArch64 Quirks</strong>: Iterator-based code can hang on bare metal</li>
 <li><strong>Debug Symbols</strong>: Need platform-specific extraction tools</li>
 <li><strong>CI Optimization</strong>: Caching dramatically improves build times</li>
-<li><strong>Target Specs</strong>: Must match Rust's internal format exactly</li>
+<li><strong>Target Specs</strong>: Must match Rust’s internal format exactly</li>
 </ol>
 <h3 id="process-improvements"><a class="header" href="#process-improvements">Process Improvements</a></h3>
 <ol>
@@ -5775,9 +5779,9 @@ Performance optimization</li>
 <li><strong>Documentation</strong>: <a href="https://doublegate.github.io/VeridianOS">doublegate.github.io/VeridianOS</a></li>
 </ul>
 <h2 id="how-to-get-involved"><a class="header" href="#how-to-get-involved">How to Get Involved</a></h2>
-<p>VeridianOS welcomes contributions! Here's how you can help:</p>
+<p>VeridianOS welcomes contributions! Here’s how you can help:</p>
 <ol>
-<li><strong>Code Contributions</strong>: Pick an issue labeled "good first issue"</li>
+<li><strong>Code Contributions</strong>: Pick an issue labeled “good first issue”</li>
 <li><strong>Documentation</strong>: Help improve our guides and API docs</li>
 <li><strong>Testing</strong>: Write tests and improve coverage</li>
 <li><strong>Bug Reports</strong>: Report issues you encounter</li>
@@ -6132,7 +6136,7 @@ Basic POSIX compatibility</li>
 </ul>
 </li>
 </ol>
-<p>The roadmap is ambitious but achievable, with each phase building the foundation for the next. We're committed to transparency and will provide regular updates on our progress.</p>
+<p>The roadmap is ambitious but achievable, with each phase building the foundation for the next. We’re committed to transparency and will provide regular updates on our progress.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="frequently-asked-questions"><a class="header" href="#frequently-asked-questions">Frequently Asked Questions</a></h1>
 <h2 id="general-questions"><a class="header" href="#general-questions">General Questions</a></h2>
 <h3 id="what-is-veridianos"><a class="header" href="#what-is-veridianos">What is VeridianOS?</a></h3>
@@ -6141,7 +6145,7 @@ Basic POSIX compatibility</li>
 <p>VeridianOS addresses several limitations in existing systems:</p>
 <ul>
 <li><strong>Security</strong>: Capability-based security from the ground up</li>
-<li><strong>Safety</strong>: Rust's memory safety eliminates entire classes of bugs</li>
+<li><strong>Safety</strong>: Rust’s memory safety eliminates entire classes of bugs</li>
 <li><strong>Modularity</strong>: True microkernel design with isolated services</li>
 <li><strong>Performance</strong>: Modern algorithms and zero-copy IPC</li>
 <li><strong>Simplicity</strong>: Clean codebase without decades of legacy</li>
@@ -6156,7 +6160,7 @@ Basic POSIX compatibility</li>
 <li>Post-quantum cryptography ready</li>
 <li>Formal verification of critical components</li>
 </ol>
-<h3 id="whats-the-project-status"><a class="header" href="#whats-the-project-status">What's the project status?</a></h3>
+<h3 id="whats-the-project-status"><a class="header" href="#whats-the-project-status">What’s the project status?</a></h3>
 <p>VeridianOS has completed Phase 0 (Foundation) as of v0.1.0 (June 2025) and is now starting Phase 1 (Microkernel Core). All foundation infrastructure is in place and development is proceeding to kernel implementation.</p>
 <h3 id="when-will-it-be-ready-for-daily-use"><a class="header" href="#when-will-it-be-ready-for-daily-use">When will it be ready for daily use?</a></h3>
 <p>Our timeline targets:</p>
@@ -6180,7 +6184,7 @@ Basic POSIX compatibility</li>
 <li>4KB page size support</li>
 <li>Atomic operations</li>
 </ul>
-<h3 id="whats-a-microkernel"><a class="header" href="#whats-a-microkernel">What's a microkernel?</a></h3>
+<h3 id="whats-a-microkernel"><a class="header" href="#whats-a-microkernel">What’s a microkernel?</a></h3>
 <p>A microkernel runs minimal code in privileged mode:</p>
 <ul>
 <li>Memory management</li>
@@ -6199,8 +6203,8 @@ Basic POSIX compatibility</li>
 <h3 id="what-are-capabilities"><a class="header" href="#what-are-capabilities">What are capabilities?</a></h3>
 <p>Capabilities are unforgeable tokens that grant specific permissions:</p>
 <ul>
-<li><strong>Not "who you are"</strong>: No user IDs or access control lists</li>
-<li><strong>But "what you can do"</strong>: Hold a capability = have permission</li>
+<li><strong>Not “who you are”</strong>: No user IDs or access control lists</li>
+<li><strong>But “what you can do”</strong>: Hold a capability = have permission</li>
 <li><strong>Composable</strong>: Combine capabilities for complex permissions</li>
 <li><strong>Revocable</strong>: Invalidate capabilities to revoke access</li>
 </ul>
@@ -6261,14 +6265,14 @@ other_process.send_capability(read_cap)?;
 <h3 id="how-can-i-contribute"><a class="header" href="#how-can-i-contribute">How can I contribute?</a></h3>
 <p>Many ways to help:</p>
 <ol>
-<li><strong>Code</strong>: Pick issues labeled "good first issue"</li>
+<li><strong>Code</strong>: Pick issues labeled “good first issue”</li>
 <li><strong>Documentation</strong>: Improve guides and examples</li>
 <li><strong>Testing</strong>: Write tests, report bugs</li>
 <li><strong>Ideas</strong>: Suggest features and improvements</li>
 <li><strong>Advocacy</strong>: Spread the word</li>
 </ol>
 <p>See our <a href="project/../contributing/how-to.html">Contributing Guide</a>.</p>
-<h3 id="whats-the-development-process"><a class="header" href="#whats-the-development-process">What's the development process?</a></h3>
+<h3 id="whats-the-development-process"><a class="header" href="#whats-the-development-process">What’s the development process?</a></h3>
 <ol>
 <li>Discussion in GitHub issues</li>
 <li>Design documents for major features</li>
@@ -6323,7 +6327,7 @@ other_process.send_capability(read_cap)?;
 <li>Apache License 2.0</li>
 </ul>
 <p>This allows maximum compatibility with other projects.</p>
-<h3 id="whats-the-long-term-vision"><a class="header" href="#whats-the-long-term-vision">What's the long-term vision?</a></h3>
+<h3 id="whats-the-long-term-vision"><a class="header" href="#whats-the-long-term-vision">What’s the long-term vision?</a></h3>
 <p>VeridianOS aims to be:</p>
 <ul>
 <li>A secure foundation for critical systems</li>

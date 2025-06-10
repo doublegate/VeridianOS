@@ -1,14 +1,14 @@
 <!DOCTYPE HTML>
-<html lang="en" class="light sidebar-visible" dir="ltr">
+<html lang="en" class="navy sidebar-visible" dir="ltr">
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>FAQ</title>
+        <title>FAQ - VeridianOS Developer Guide</title>
 
 
         <!-- Custom HTML head -->
 
-        <meta name="description" content="">
+        <meta name="description" content="Comprehensive guide to VeridianOS development">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta name="theme-color" content="#ffffff">
 
@@ -29,12 +29,13 @@
         <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
 
         <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../../book-theme/veridian.css">
 
 
         <!-- Provide site root and default themes to javascript -->
         <script>
             const path_to_root = "../";
-            const default_light_theme = "light";
+            const default_light_theme = "navy";
             const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
@@ -76,7 +77,7 @@
             try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
             if (theme === null || theme === undefined) { theme = default_theme; }
             const html = document.documentElement;
-            html.classList.remove('light')
+            html.classList.remove('navy')
             html.classList.add(theme);
             html.classList.add("js");
         </script>
@@ -134,11 +135,14 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title"></h1>
+                    <h1 class="menu-title">VeridianOS Developer Guide</h1>
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
                             <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/doublegate/VeridianOS" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
 
                     </div>
@@ -174,7 +178,7 @@
 <p>VeridianOS addresses several limitations in existing systems:</p>
 <ul>
 <li><strong>Security</strong>: Capability-based security from the ground up</li>
-<li><strong>Safety</strong>: Rust's memory safety eliminates entire classes of bugs</li>
+<li><strong>Safety</strong>: Rust’s memory safety eliminates entire classes of bugs</li>
 <li><strong>Modularity</strong>: True microkernel design with isolated services</li>
 <li><strong>Performance</strong>: Modern algorithms and zero-copy IPC</li>
 <li><strong>Simplicity</strong>: Clean codebase without decades of legacy</li>
@@ -189,7 +193,7 @@
 <li>Post-quantum cryptography ready</li>
 <li>Formal verification of critical components</li>
 </ol>
-<h3 id="whats-the-project-status"><a class="header" href="#whats-the-project-status">What's the project status?</a></h3>
+<h3 id="whats-the-project-status"><a class="header" href="#whats-the-project-status">What’s the project status?</a></h3>
 <p>VeridianOS has completed Phase 0 (Foundation) as of v0.1.0 (June 2025) and is now starting Phase 1 (Microkernel Core). All foundation infrastructure is in place and development is proceeding to kernel implementation.</p>
 <h3 id="when-will-it-be-ready-for-daily-use"><a class="header" href="#when-will-it-be-ready-for-daily-use">When will it be ready for daily use?</a></h3>
 <p>Our timeline targets:</p>
@@ -213,7 +217,7 @@
 <li>4KB page size support</li>
 <li>Atomic operations</li>
 </ul>
-<h3 id="whats-a-microkernel"><a class="header" href="#whats-a-microkernel">What's a microkernel?</a></h3>
+<h3 id="whats-a-microkernel"><a class="header" href="#whats-a-microkernel">What’s a microkernel?</a></h3>
 <p>A microkernel runs minimal code in privileged mode:</p>
 <ul>
 <li>Memory management</li>
@@ -232,8 +236,8 @@
 <h3 id="what-are-capabilities"><a class="header" href="#what-are-capabilities">What are capabilities?</a></h3>
 <p>Capabilities are unforgeable tokens that grant specific permissions:</p>
 <ul>
-<li><strong>Not "who you are"</strong>: No user IDs or access control lists</li>
-<li><strong>But "what you can do"</strong>: Hold a capability = have permission</li>
+<li><strong>Not “who you are”</strong>: No user IDs or access control lists</li>
+<li><strong>But “what you can do”</strong>: Hold a capability = have permission</li>
 <li><strong>Composable</strong>: Combine capabilities for complex permissions</li>
 <li><strong>Revocable</strong>: Invalidate capabilities to revoke access</li>
 </ul>
@@ -294,14 +298,14 @@ other_process.send_capability(read_cap)?;
 <h3 id="how-can-i-contribute"><a class="header" href="#how-can-i-contribute">How can I contribute?</a></h3>
 <p>Many ways to help:</p>
 <ol>
-<li><strong>Code</strong>: Pick issues labeled "good first issue"</li>
+<li><strong>Code</strong>: Pick issues labeled “good first issue”</li>
 <li><strong>Documentation</strong>: Improve guides and examples</li>
 <li><strong>Testing</strong>: Write tests, report bugs</li>
 <li><strong>Ideas</strong>: Suggest features and improvements</li>
 <li><strong>Advocacy</strong>: Spread the word</li>
 </ol>
 <p>See our <a href="../contributing/how-to.html">Contributing Guide</a>.</p>
-<h3 id="whats-the-development-process"><a class="header" href="#whats-the-development-process">What's the development process?</a></h3>
+<h3 id="whats-the-development-process"><a class="header" href="#whats-the-development-process">What’s the development process?</a></h3>
 <ol>
 <li>Discussion in GitHub issues</li>
 <li>Design documents for major features</li>
@@ -356,7 +360,7 @@ other_process.send_capability(read_cap)?;
 <li>Apache License 2.0</li>
 </ul>
 <p>This allows maximum compatibility with other projects.</p>
-<h3 id="whats-the-long-term-vision"><a class="header" href="#whats-the-long-term-vision">What's the long-term vision?</a></h3>
+<h3 id="whats-the-long-term-vision"><a class="header" href="#whats-the-long-term-vision">What’s the long-term vision?</a></h3>
 <p>VeridianOS aims to be:</p>
 <ul>
 <li>A secure foundation for critical systems</li>

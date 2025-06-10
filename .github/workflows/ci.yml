@@ -196,8 +196,9 @@ jobs:
                   </body>
                   </html>
                   EOF
-                  mdbook build
-                  cp -r target/book artifacts/docs/guide
+                  cd docs/book && mdbook build
+                  cd ../..
+                  cp -r docs/book/book artifacts/docs/guide
                   cat > artifacts/docs/index.html << 'EOF'
                   <!DOCTYPE html>
                   <html>

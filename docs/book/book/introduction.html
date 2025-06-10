@@ -1,14 +1,14 @@
 <!DOCTYPE HTML>
-<html lang="en" class="light sidebar-visible" dir="ltr">
+<html lang="en" class="navy sidebar-visible" dir="ltr">
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Introduction</title>
+        <title>Introduction - VeridianOS Developer Guide</title>
 
 
         <!-- Custom HTML head -->
 
-        <meta name="description" content="">
+        <meta name="description" content="Comprehensive guide to VeridianOS development">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta name="theme-color" content="#ffffff">
 
@@ -29,12 +29,13 @@
         <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
 
         <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../book-theme/veridian.css">
 
 
         <!-- Provide site root and default themes to javascript -->
         <script>
             const path_to_root = "";
-            const default_light_theme = "light";
+            const default_light_theme = "navy";
             const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
@@ -76,7 +77,7 @@
             try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
             if (theme === null || theme === undefined) { theme = default_theme; }
             const html = document.documentElement;
-            html.classList.remove('light')
+            html.classList.remove('navy')
             html.classList.add(theme);
             html.classList.add("js");
         </script>
@@ -134,11 +135,14 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title"></h1>
+                    <h1 class="menu-title">VeridianOS Developer Guide</h1>
 
                     <div class="right-buttons">
                         <a href="print.html" title="Print this book" aria-label="Print this book">
                             <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/doublegate/VeridianOS" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
 
                     </div>
@@ -191,7 +195,7 @@
 <ol>
 <li><strong>Microkernel Design</strong>: Only essential services run in kernel space, minimizing the attack surface</li>
 <li><strong>Capability-Based Security</strong>: Fine-grained access control with unforgeable capability tokens</li>
-<li><strong>Memory Safety</strong>: Rust's ownership system prevents entire classes of vulnerabilities</li>
+<li><strong>Memory Safety</strong>: Rust’s ownership system prevents entire classes of vulnerabilities</li>
 <li><strong>Modern Architecture</strong>: Designed for contemporary hardware with multi-core, NUMA, and heterogeneous computing support</li>
 </ol>
 <h2 id="project-philosophy"><a class="header" href="#project-philosophy">Project Philosophy</a></h2>
@@ -231,7 +235,7 @@
 <li><strong>Development Phases</strong>: Roadmap and implementation timeline</li>
 </ul>
 <h2 id="join-the-community"><a class="header" href="#join-the-community">Join the Community</a></h2>
-<p>VeridianOS is an open-source project welcoming contributions from developers worldwide. Whether you're interested in kernel development, system programming, or just learning about operating systems, there's a place for you in our community.</p>
+<p>VeridianOS is an open-source project welcoming contributions from developers worldwide. Whether you’re interested in kernel development, system programming, or just learning about operating systems, there’s a place for you in our community.</p>
 <ul>
 <li><strong>GitHub</strong>: <a href="https://github.com/doublegate/VeridianOS">github.com/doublegate/VeridianOS</a></li>
 <li><strong>Discord</strong>: <a href="https://discord.gg/veridian">discord.gg/veridian</a></li>
@@ -239,7 +243,7 @@
 </ul>
 <h2 id="license"><a class="header" href="#license">License</a></h2>
 <p>VeridianOS is dual-licensed under MIT and Apache 2.0 licenses. See the LICENSE files for details.</p>
-<p>Let's build the future of operating systems together!</p>
+<p>Let’s build the future of operating systems together!</p>
 
                     </main>
 

@@ -4,10 +4,10 @@ authors = ["VeridianOS Contributors"]
 description = "Comprehensive guide to VeridianOS development"
 language = "en"
 multilingual = false
-src = "docs/book/src"
+src = "src"
 
 [build]
-build-dir = "target/book"
+build-dir = "book"
 create-missing = true
 
 [preprocessor.index]
@@ -15,13 +15,13 @@ create-missing = true
 [preprocessor.links]
 
 [output.html]
-theme = "docs/book-theme"
+theme = "../book-theme"
 default-theme = "navy"
 preferred-dark-theme = "navy"
 smart-punctuation = true
 mathjax-support = false
 copy-fonts = true
-additional-css = ["docs/book-theme/veridian.css"]
+additional-css = ["../book-theme/veridian.css"]
 additional-js = []
 no-section-label = false
 git-repository-url = "https://github.com/doublegate/VeridianOS"
