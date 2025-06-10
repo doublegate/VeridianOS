@@ -82,7 +82,7 @@ fn benchmark_small_message_ipc() -> BenchmarkResult {
 
 fn benchmark_large_message_ipc() -> BenchmarkResult {
     // Benchmark large message IPC (>64 bytes)
-    use veridian_kernel::ipc::shared_memory::MemoryRegion;
+    use veridian_kernel::ipc::message::MemoryRegion;
 
     benchmark!("Large Message IPC", ITERATIONS, {
         // Create a memory region descriptor

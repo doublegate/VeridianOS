@@ -15,9 +15,9 @@ use alloc::vec::Vec;
 use veridian_kernel::{
     ipc::{
         self, create_channel, create_endpoint, cycles_to_ns, get_registry_stats,
-        measure_ipc_operation, read_timestamp, validate_capability, AsyncChannel,
-        IpcCapability, IpcPermissions, Message, Permissions, RateLimits, SharedRegion,
-        TransferMode, IPC_PERF_STATS, RATE_LIMITER,
+        measure_ipc_operation, read_timestamp, validate_capability, AsyncChannel, IpcCapability,
+        IpcPermissions, Message, Permissions, RateLimits, SharedRegion, TransferMode,
+        IPC_PERF_STATS, RATE_LIMITER,
     },
     serial_println,
 };
@@ -291,7 +291,9 @@ fn test_concurrent_operations() {
     ipc::init();
 
     // Create multiple channels
-    let channels: Vec<_> = (0..10).map(|i| AsyncChannel::new(i as u64, 1, 100)).collect(); // id=i, owner=1, capacity=100
+    let channels: Vec<_> = (0..10)
+        .map(|i| AsyncChannel::new(i as u64, 1, 100))
+        .collect(); // id=i, owner=1, capacity=100
 
     // Simulate concurrent sends (in real system, would use threads)
     for (_i, channel) in channels.iter().enumerate() {

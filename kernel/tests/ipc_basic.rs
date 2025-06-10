@@ -16,7 +16,7 @@ use veridian_kernel::{
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     test_main();
-    loop {}
+    panic!("Test should not reach here")
 }
 
 #[test_case]

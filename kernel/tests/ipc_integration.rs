@@ -19,7 +19,7 @@ use veridian_kernel::{
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     test_main();
-    loop {}
+    panic!("Test should not reach here")
 }
 
 #[test_case]
@@ -83,8 +83,8 @@ fn test_shared_memory_setup() {
 
     // Create a shared memory region
     let region = SharedRegion::new(
-        1,    // owner PID
-        8192, // 2 pages
+        1,                            // owner PID
+        8192,                         // 2 pages
         Permission::ReadWriteExecute, // permissions
     );
 
@@ -93,9 +93,10 @@ fn test_shared_memory_setup() {
     assert_eq!(region.id(), 1); // Using id() method instead of owner field
 
     // Create memory region descriptor for IPC
-    let mem_region = veridian_kernel::ipc::message::MemoryRegion::new(0x100000, region.size() as u64)
-        .with_permissions(0x03) // READ | WRITE
-        .with_cache_policy(0); // WRITE_BACK
+    let mem_region =
+        veridian_kernel::ipc::message::MemoryRegion::new(0x100000, region.size() as u64)
+            .with_permissions(0x03) // READ | WRITE
+            .with_cache_policy(0); // WRITE_BACK
 
     // Create large message with shared memory
     let large_msg = Message::large(0x5678, 100, mem_region);

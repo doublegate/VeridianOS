@@ -19,7 +19,7 @@ use veridian_kernel::{
         validate_capability, AsyncChannel, IpcCapability, IpcPermissions, Message, Permissions,
         SharedRegion, TransferMode, IPC_PERF_STATS,
     },
-    serial_print, serial_println,
+    serial_println,
 };
 
 #[no_mangle]
@@ -79,12 +79,12 @@ fn bench_channel_creation(b: &mut Bencher) {
 #[bench]
 fn bench_async_channel_send_receive(b: &mut Bencher) {
     ipc::init();
-    let channel = AsyncChannel::new(1, 1000);
+    let channel = AsyncChannel::new(1, 1, 1000); // id=1, owner=1, capacity=1000
     let msg = Message::small(0, 1);
 
     b.iter(|| {
-        channel.send(msg.clone()).expect("Send failed");
-        let received = channel.receive().expect("Receive failed");
+        channel.send_async(msg.clone()).expect("Send failed");
+        let received = channel.receive_async().expect("Receive failed");
         core::hint::black_box(received);
     });
 }
@@ -92,10 +92,8 @@ fn bench_async_channel_send_receive(b: &mut Bencher) {
 #[bench]
 fn bench_async_channel_throughput(b: &mut Bencher) {
     ipc::init();
-    let channel = AsyncChannel::new(1, 10000);
-    let messages: Vec<_> = (0..1000)
-        .map(|i| Message::small(0, i as u32))
-        .collect();
+    let channel = AsyncChannel::new(1, 1, 10000); // id=1, owner=1, capacity=10000
+    let messages: Vec<_> = (0..1000).map(|i| Message::small(0, i as u32)).collect();
 
     b.iter(|| {
         // Send all messages
