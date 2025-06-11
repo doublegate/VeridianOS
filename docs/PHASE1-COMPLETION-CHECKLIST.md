@@ -345,22 +345,26 @@ Phase 1 is complete when:
 
 | Component | Start | Target End | Status |
 |-----------|-------|------------|--------|
-| Memory Management | Jun 8 | Jul 31 | In Progress |
-| Process Management | Jul 15 | Aug 31 | Not Started |
-| IPC System | Jun 8 | Sep 15 | 45% Complete |
-| Capability System | Aug 15 | Oct 15 | Not Started |
-| Scheduler | Sep 15 | Oct 31 | Not Started |
-| Integration | Oct 15 | Nov 15 | Not Started |
+| Memory Management | Jun 8 | Jul 31 | ~95% Complete |
+| Process Management | Jun 9 | Jun 10 | 100% Complete |
+| IPC System | Jun 8 | Jun 9 | 100% Complete |
+| Capability System | Jun 10 | Jun 11 | ~45% Complete |
+| Scheduler | Jun 10 | Oct 31 | ~35% Complete |
+| Integration | Jun 8 | Nov 15 | In Progress |
 
 ## Next Immediate Steps
 
 1. ~~Complete virtual memory manager~~ ✅ DONE
 2. ~~Implement kernel heap allocator~~ ✅ DONE
-3. Design process control block structure (3-5 days)
-4. Create basic process creation/destruction (1-2 weeks)
-5. Integrate IPC with process management (1 week)
-6. Implement basic scheduler (2 weeks)
-7. Create capability system foundation (2 weeks)
+3. ~~Design process control block structure~~ ✅ DONE
+4. ~~Create process creation/destruction~~ ✅ DONE
+5. ~~Integrate IPC with process management~~ ✅ DONE
+6. ~~Implement basic scheduler~~ ✅ DONE (Round-robin and priority)
+7. ~~Create capability system foundation~~ ✅ DONE (~45% complete)
+8. Complete capability inheritance and revocation
+9. Complete memory zones implementation
+10. Enhance scheduler with CFS algorithm (optional)
+11. Integration testing and performance validation
 
 ---
 

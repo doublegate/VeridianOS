@@ -1,8 +1,8 @@
 # VeridianOS Scheduler Design Document
 
-**Version**: 1.2  
-**Date**: 2025-01-07  
-**Status**: Phase 1 Implementation In Progress (~30% Complete)
+**Version**: 1.3  
+**Date**: 2025-06-11  
+**Status**: Phase 1 Implementation In Progress (~35% Complete)
 
 ## Executive Summary
 

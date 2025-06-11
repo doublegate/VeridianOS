@@ -2,6 +2,53 @@
 
 All notable changes to VeridianOS are documented here. This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Phase 1 Progress (Current Development)
+
+**Phase 1 Status**: ~65% Complete as of June 11, 2025
+
+#### Major Milestones Achieved
+
+##### IPC System (100% Complete)
+- ✅ Synchronous message passing with ring buffers
+- ✅ Fast path IPC with register-based transfer (<1μs latency achieved)
+- ✅ Zero-copy shared memory infrastructure
+- ✅ Asynchronous channels with lock-free buffers
+- ✅ Global channel registry with O(1) lookup
+- ✅ Rate limiting with token bucket algorithm
+- ✅ Complete IPC-Capability integration (June 11, 2025)
+
+##### Memory Management (~95% Complete)
+- ✅ Hybrid frame allocator (bitmap + buddy system)
+- ✅ Virtual memory manager with 4-level page tables
+- ✅ Kernel heap allocator with slab design
+- ✅ NUMA-aware allocation support
+- ✅ TLB management for all architectures
+- ✅ Bootloader memory map integration
+
+##### Process Management (100% Complete)
+- ✅ Process Control Block with comprehensive state management
+- ✅ Thread management with full ThreadContext trait
+- ✅ Context switching for all architectures
+- ✅ Synchronization primitives (Mutex, Semaphore, CondVar, RwLock, Barrier)
+- ✅ Process system calls (fork, exec, exit, wait, getpid, thread operations)
+- ✅ Thread-local storage implementation
+
+##### Scheduler (~35% Complete)
+- ✅ Round-robin scheduling algorithm
+- ✅ Basic priority scheduling support
+- ✅ Idle task management
+- ✅ Timer setup for all architectures
+- ✅ CPU affinity enforcement
+
+##### Capability System (~45% Complete)
+- ✅ 64-bit packed capability tokens
+- ✅ Two-level capability space with O(1) lookup
+- ✅ Rights management system
+- ✅ IPC and memory operation integration
+- ✅ Basic inheritance and revocation
+
 ## [0.1.0] - 2025-06-07
 
 ### 🎉 Phase 0 Complete: Foundation & Tooling

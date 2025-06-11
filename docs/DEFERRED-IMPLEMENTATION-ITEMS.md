@@ -2,7 +2,7 @@
 
 This document tracks features, code, and functionality that were removed, disabled, or marked as TODO during the Process Management implementation session (June 10, 2025) that need to be reimplemented or re-added in future work.
 
-**Last Updated**: June 10, 2025 (Evening - Scheduler Implementation)
+**Last Updated**: June 11, 2025 (IPC-Capability Integration Complete)
 
 ## Process Management
 

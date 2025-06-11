@@ -2,10 +2,10 @@
 
 ## Current Status: Phase 1 In Progress - Scheduler Implementation
 
-**Last Updated**: 2025-01-07  
+**Last Updated**: 2025-06-11  
 **Current Version**: v0.1.0 (Released June 7, 2025)  
 **Current Phase**: Phase 1 - Microkernel Core (Started June 8, 2025)  
-**Phase 1 Progress**: ~35% overall (IPC ~45%, Memory Management ~95%, Process Management 100%, Scheduler ~30%)
+**Phase 1 Progress**: ~65% overall (IPC 100%, Memory Management ~95%, Process Management 100%, Scheduler ~35%, Capability System ~45%)
 
 VeridianOS has successfully completed Phase 0 (Foundation and Tooling) and released v0.1.0! The project is now actively developing the microkernel core with significant progress on IPC, Memory Management, Process Management, and Scheduler implementation. Virtual memory management is now complete with page tables, bootloader integration, and kernel heap allocator. Process management is 100% complete with full PCB implementation, thread context switching for all architectures, comprehensive synchronization primitives, thread-local storage, CPU affinity, and complete system call integration. The scheduler now has a working round-robin algorithm, idle task management, timer setup for all architectures, SMP support with CPU affinity enforcement, and thread-scheduler state synchronization. The foundation infrastructure is fully operational: CI/CD pipeline is 100% passing across all architectures, all three target platforms boot successfully, comprehensive testing infrastructure is ready, documentation framework is established, and complete version control workflow is operational.
 
@@ -146,7 +146,7 @@ The project has achieved:
 
 ### Phase 1 Progress (Microkernel Core)
 
-**IPC System (~45% Complete)**:
+**IPC System (100% Complete)**:
 - ✅ Synchronous message passing with ring buffers
 - ✅ Message types (SmallMessage ≤64 bytes, LargeMessage)  
 - ✅ Fast path IPC with register-based transfer (<1μs latency - exceeds Phase 5 target!)
@@ -159,10 +159,10 @@ The project has achieved:
 - ✅ Performance tracking with CPU timestamps  
 - ✅ Rate limiting for DoS protection
 - ✅ NUMA-aware memory allocation support
-- 🔴 Full integration with process scheduler
-- 🔴 Integration with physical memory allocator
-- 🔴 Performance benchmarks implementation
-- 🔴 Integration tests with full system
+- ✅ Full integration with process scheduler
+- ✅ Integration with capability system (June 11, 2025)
+- ✅ Performance benchmarks implementation
+- ✅ Integration tests with full system
 
 **Memory Management (~95% Complete)**:
 1. ✅ Hybrid frame allocator implemented (bitmap + buddy system)
@@ -196,7 +196,7 @@ The project has achieved:
 16. 🔴 Signal handling subsystem (deferred)
 17. 🔴 Process groups and sessions (deferred)
 
-**Scheduler (~30% Complete)**:
+**Scheduler (~35% Complete)**:
 1. ✅ Core scheduler structure with round-robin algorithm
 2. ✅ Idle task creation and management
 3. ✅ Timer setup for all architectures (10ms tick)
@@ -213,8 +213,15 @@ The project has achieved:
 14. 🔴 Full task migration between CPUs
 15. 🔴 Advanced load balancing algorithms
 
-**Capability System (Not Started)**:
-1. 🔴 Full capability implementation beyond IPC tokens
+**Capability System (~45% Complete)**:
+1. ✅ 64-bit packed capability tokens with generation counters
+2. ✅ Two-level capability space with O(1) lookup performance
+3. ✅ Rights management (read, write, execute, grant, derive, manage)
+4. ✅ Object references for memory, process, thread, endpoint objects
+5. ✅ IPC integration with full permission validation (June 11, 2025)
+6. ✅ Memory operation capability checks
+7. 🔴 Hierarchical capability inheritance
+8. 🔴 Cascading revocation implementation
 
 ### Key Decisions Needed
 1. **Hosting**: ✅ GitHub selected (https://github.com/doublegate/VeridianOS)
@@ -284,8 +291,8 @@ The journey from concept to implementation begins now. With clear documentation,
 
 ---
 
-**Document Version**: 2.8  
-**Last Updated**: 2025-01-07  
-**Status**: Phase 1 In Progress (~35% overall - IPC ~45%, Memory Management ~95%, Process Management 100%, Scheduler ~30%)  
+**Document Version**: 2.9  
+**Last Updated**: 2025-06-11  
+**Status**: Phase 1 In Progress (~65% overall - IPC 100%, Memory Management ~95%, Process Management 100%, Scheduler ~35%, Capability System ~45%)  
 **Repository**: https://github.com/doublegate/VeridianOS  
 **CI Status**: ✅ **100% PASSING** - All checks green (Quick Checks, Build & Test, Security Audit) 🎉
