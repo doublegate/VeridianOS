@@ -752,7 +752,7 @@ fn balance_load() {
     let mut max_load = 0u8;
     let mut min_load = 100u8;
     let mut busiest_cpu = 0u8;
-    let mut idlest_cpu = 0u8;
+    let mut _idlest_cpu = 0u8;
 
     for cpu_id in 0..smp::MAX_CPUS as u8 {
         if let Some(cpu_data) = smp::per_cpu(cpu_id) {
@@ -766,7 +766,7 @@ fn balance_load() {
 
                 if load < min_load {
                     min_load = load;
-                    idlest_cpu = cpu_id;
+                    _idlest_cpu = cpu_id;
                 }
             }
         }
@@ -781,7 +781,7 @@ fn balance_load() {
         if tasks_to_migrate > 0 {
             println!(
                 "[SCHED] Load balancing: CPU {} (load={}) -> CPU {} (load={}), migrating {} tasks",
-                busiest_cpu, max_load, idlest_cpu, min_load, tasks_to_migrate
+                busiest_cpu, max_load, _idlest_cpu, min_load, tasks_to_migrate
             );
 
             // Record load balance metric

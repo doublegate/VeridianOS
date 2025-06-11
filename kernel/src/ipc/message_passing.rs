@@ -242,7 +242,7 @@ pub fn send_to_endpoint(msg: Message, endpoint_id: EndpointId) -> Result<()> {
                 if let Some(real_sender) = crate::process::table::get_process(sender.pid) {
                     let sender_cap_space = real_sender.capability_space.lock();
                     // Transfer capability to receiver
-                    if let Err(e) = crate::ipc::cap_transfer::transfer_capability(
+                    if let Err(_e) = crate::ipc::cap_transfer::transfer_capability(
                         &msg,
                         &sender_cap_space,
                         receiver_pid,

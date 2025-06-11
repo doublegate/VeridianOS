@@ -145,12 +145,13 @@ Currently implementing in phases:
 - **Documentation**: Complete (25+ comprehensive guides) + GitHub Pages deployment
 - **Infrastructure**: Directory structure, TODO system, and GitHub setup complete
 - **CI/CD**: ✅ GitHub Actions workflow passing all checks (100% success rate)
-- **Current Phase**: Phase 1 (Microkernel Core) - IN PROGRESS (~35% overall)
+- **Current Phase**: Phase 1 (Microkernel Core) - IN PROGRESS (~65% overall)
   - Phase 0 (Foundation) - 100% COMPLETE! 🎉
-  - IPC System: ~45% complete (sync/async channels, registry, perf tracking, rate limiting)
+  - IPC System: 100% complete - sync/async channels, registry, perf tracking, rate limiting, capability integration
   - Memory Management: ~95% complete - frame allocator, VMM, heap, page tables, bootloader integration
   - Process Management: 100% complete - PCB, threads, context switching, synchronization primitives, syscalls
-  - Capability System: Not started
+  - Capability System: ~45% complete - token structure, capability spaces, IPC/memory integration, basic operations
+  - Scheduler: ~35% complete - round-robin, load balancing framework, metrics tracking
 - **Latest Release**: v0.1.0 (June 7, 2025) - Foundation & Tooling
   - Release includes kernel binaries for all three architectures
   - Debug symbols available for x86_64 (AArch64/RISC-V pending)
@@ -162,15 +163,16 @@ Currently implementing in phases:
 - **Testing**: ✅ No-std test framework and benchmarks implemented
 - **Documentation**: ✅ Rustdoc and mdBook configured with automatic deployment
 - **Version Control**: ✅ Git hooks, PR templates, and release automation ready
-- **Current Work**: Complete CI resolution across all architectures
-  - Latest: Fixed all compilation errors and warnings (AArch64, RISC-V)
-  - All architectures building successfully with clean CI/CD pipeline  
-  - Complete IPC API migration in tests and benchmarks
-  - Ready for scheduler integration and capability system implementation
+- **Current Work**: IPC-Capability integration complete, Phase 1 at ~65%
+  - Latest: Complete IPC-Capability integration (June 11, 2025)
+  - All IPC operations now enforce capability-based access control
+  - Capability transfer through messages implemented
+  - Fixed all clippy warnings and formatting issues
+  - Next: Complete capability inheritance, revocation, and scheduler enhancements
 
 ## Implementation Status
 
-### Phase 1 Progress (~35% overall)
+### Phase 1 Progress (~65% overall)
 - **Memory Management**: ~95% complete
   - Hybrid frame allocator (bitmap + buddy system)
   - NUMA-aware allocation with per-node allocators
@@ -179,7 +181,7 @@ Currently implementing in phases:
   - Reserved memory tracking and zone management
   - Architecture-specific MMU operations (CR3, TTBR0, SATP)
 
-- **IPC System**: ~45% complete
+- **IPC System**: 100% complete
   - Synchronous/asynchronous channels with ring buffers
   - Zero-copy transfers with shared memory mappings
   - Fast path IPC with register-based transfer (<1μs achieved)
@@ -196,7 +198,21 @@ Currently implementing in phases:
   - Thread-local storage (TLS) implementation
   - CPU affinity and NUMA awareness
 
-- **Capability System**: Not started
+- **Capability System**: ~45% complete
+  - 64-bit packed capability tokens with generation counters
+  - Two-level capability space with O(1) lookup performance
+  - Rights management (read, write, execute, grant, derive, manage)
+  - Object references for memory, process, thread, endpoint objects
+  - Basic operations: create, lookup, validate, revoke
+  - Full IPC integration with permission validation
+  - Memory operation capability checks
+  - System call capability enforcement
+
+- **Scheduler**: ~35% complete
+  - Round-robin scheduling with time slice management
+  - Load balancing framework for multi-core systems
+  - Comprehensive metrics tracking (context switches, CPU time)
+  - Idle task management and CPU affinity support
 
 ### Driver Framework
 - Drivers run as separate user processes
@@ -327,10 +343,10 @@ Check these files regularly to track progress and identify next tasks.
 ### Key Implementation Files
 - `kernel/src/arch/` - Architecture-specific implementations (all working!)
 - `kernel/src/mm/` - Memory management implementation (~95% complete)
-- `kernel/src/ipc/` - Inter-process communication implementation (~45% complete)
+- `kernel/src/ipc/` - Inter-process communication implementation (100% complete)
 - `kernel/src/process/` - Process management implementation (100% complete)
-- `kernel/src/sched/` - Scheduler implementation (ready for integration)
-- `kernel/src/cap/` - Capability system (ready for implementation)
+- `kernel/src/sched/` - Scheduler implementation (~35% complete)
+- `kernel/src/cap/` - Capability system (~45% complete)
 - `kernel/src/syscall/` - System call interface with process operations
 - `kernel/src/print.rs` - Kernel output macros
 - `kernel/src/test_framework.rs` - No-std test infrastructure

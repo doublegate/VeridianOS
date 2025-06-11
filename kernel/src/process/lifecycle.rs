@@ -387,27 +387,27 @@ pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), &'static s
         // Free thread stacks
         // Free user stack
         if thread.user_stack.size > 0 {
-            let stack_base = thread.user_stack.base;
-            let stack_size = thread.user_stack.size;
+            let _stack_base = thread.user_stack.base;
+            let _stack_size = thread.user_stack.size;
 
             // TODO: Convert to physical address and free frames
             // This requires VMM integration which is not yet complete
             println!(
                 "[PROCESS] TODO: Free user stack at {:#x}, size {} (deferred)",
-                stack_base, stack_size
+                _stack_base, _stack_size
             );
         }
 
         // Free kernel stack
         if thread.kernel_stack.size > 0 {
-            let stack_base = thread.kernel_stack.base;
-            let stack_size = thread.kernel_stack.size;
+            let _stack_base = thread.kernel_stack.base;
+            let _stack_size = thread.kernel_stack.size;
 
             // TODO: Kernel stacks are in kernel space, directly free them
             // This requires frame allocator integration
             println!(
                 "[PROCESS] TODO: Free kernel stack at {:#x}, size {} (deferred)",
-                stack_base, stack_size
+                _stack_base, _stack_size
             );
         }
 

@@ -272,7 +272,7 @@ pub fn read_tsc() -> u64 {
 
 /// Print scheduler metrics
 pub fn print_metrics() {
-    let summary = SCHEDULER_METRICS.get_summary();
+    let _summary = SCHEDULER_METRICS.get_summary();
 
     println!("[SCHED] Scheduler Metrics:");
     println!(
