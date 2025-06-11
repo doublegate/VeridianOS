@@ -52,6 +52,22 @@ bench = false
 name = "basic_boot"
 harness = false
 
+[[test]]
+name = "ipc_integration_tests"
+harness = false
+
+[[test]]
+name = "ipc_benchmarks"
+harness = false
+
+[[test]]
+name = "scheduler_tests"
+harness = false
+
+[[test]]
+name = "process_tests"
+harness = false
+
 # Benchmarks
 [[bench]]
 name = "ipc_latency"

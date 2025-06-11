@@ -519,7 +519,7 @@ impl Scheduler {
 }
 
 /// Check if should preempt current task
-fn should_preempt(current: &Task, next: &Task) -> bool {
+pub fn should_preempt(current: &Task, next: &Task) -> bool {
     // Never preempt idle task except for any real task
     if current.sched_class == SchedClass::Idle && next.sched_class != SchedClass::Idle {
         return true;

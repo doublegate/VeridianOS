@@ -14,16 +14,22 @@ use alloc::vec::Vec;
 
 use veridian_kernel::{
     ipc::{
-        self, create_channel, create_endpoint, cycles_to_ns, get_registry_stats,
-        measure_ipc_operation, read_timestamp, validate_capability, AsyncChannel, IpcCapability,
-        IpcPermissions, Message, Permissions, RateLimits, SharedRegion, TransferMode,
+        self, create_channel, create_endpoint, get_registry_stats,
+        validate_capability, AsyncChannel, IpcCapability,
+        IpcPermissions, Message, Permissions, ProcessId, RateLimits, SharedRegion, TransferMode,
         IPC_PERF_STATS, RATE_LIMITER,
     },
     serial_println,
+    test_framework::{BenchmarkRunner, read_timestamp, cycles_to_ns},
+    kernel_bench,
 };
+
+#[path = "common/mod.rs"]
+mod common;
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    common::init_test_env("IPC Integration");
     test_main();
     loop {}
 }
@@ -41,7 +47,7 @@ fn test_registry_operations() {
     // Create multiple endpoints
     let mut endpoints = Vec::new();
     for i in 0..10 {
-        let (id, cap) = create_endpoint(i).expect("Failed to create endpoint");
+        let (id, cap) = create_endpoint(ProcessId(i)).expect("Failed to create endpoint");
         endpoints.push((id, cap));
     }
 
@@ -63,7 +69,7 @@ fn test_async_channel_throughput() {
     ipc::init();
 
     // Create async channel
-    let channel = AsyncChannel::new(1, 1, 1000); // id=1, owner=1, capacity=1000
+    let channel = AsyncChannel::new(1, ProcessId(1), 1000); // id=1, owner=1, capacity=1000
     let start = read_timestamp();
 
     // Send 1000 messages
@@ -99,7 +105,7 @@ fn test_rate_limiting() {
         burst_multiplier: 1,
     };
 
-    let pid = 42;
+    let pid = ProcessId(42);
 
     // Send messages until rate limited
     let mut sent = 0;
@@ -131,7 +137,7 @@ fn test_fast_path_vs_slow_path() {
 
     // Create channel
     let (_send_id, _recv_id, _send_cap, _recv_cap) =
-        create_channel(1, 100).expect("Failed to create channel");
+        create_channel(ProcessId(1), 100).expect("Failed to create channel");
 
     // Test small message (fast path)
     let small_msg = Message::small(0, 1);
