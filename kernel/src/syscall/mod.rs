@@ -6,10 +6,7 @@
 #![allow(dead_code)]
 
 use crate::{
-    ipc::{
-        sync::{sync_call, sync_receive, sync_reply, sync_send},
-        IpcError, Message, SmallMessage,
-    },
+    ipc::{sync_call, sync_receive, sync_reply, sync_send, IpcError, Message, SmallMessage},
     sched,
 };
 
@@ -73,18 +70,45 @@ pub enum SyscallError {
     OutOfMemory = -5,
     WouldBlock = -6,
     Interrupted = -7,
+    InvalidState = -8,
+
+    // Capability-specific errors
+    InvalidCapability = -9,
+    CapabilityRevoked = -10,
+    InsufficientRights = -11,
+    CapabilityNotFound = -12,
+    CapabilityAlreadyExists = -13,
+    InvalidCapabilityObject = -14,
+    CapabilityDelegationDenied = -15,
 }
 
 impl From<IpcError> for SyscallError {
     fn from(err: IpcError) -> Self {
         match err {
-            IpcError::InvalidCapability => SyscallError::PermissionDenied,
+            IpcError::InvalidCapability => SyscallError::InvalidCapability,
             IpcError::ProcessNotFound => SyscallError::ResourceNotFound,
             IpcError::EndpointNotFound => SyscallError::ResourceNotFound,
             IpcError::OutOfMemory => SyscallError::OutOfMemory,
             IpcError::WouldBlock => SyscallError::WouldBlock,
             IpcError::PermissionDenied => SyscallError::PermissionDenied,
             _ => SyscallError::InvalidArgument,
+        }
+    }
+}
+
+impl From<crate::cap::manager::CapError> for SyscallError {
+    fn from(err: crate::cap::manager::CapError) -> Self {
+        match err {
+            crate::cap::manager::CapError::InvalidCapability => SyscallError::InvalidCapability,
+            crate::cap::manager::CapError::InsufficientRights => SyscallError::InsufficientRights,
+            crate::cap::manager::CapError::CapabilityRevoked => SyscallError::CapabilityRevoked,
+            crate::cap::manager::CapError::OutOfMemory => SyscallError::OutOfMemory,
+            crate::cap::manager::CapError::InvalidObject => SyscallError::InvalidCapabilityObject,
+            crate::cap::manager::CapError::PermissionDenied => {
+                SyscallError::CapabilityDelegationDenied
+            }
+            crate::cap::manager::CapError::AlreadyExists => SyscallError::CapabilityAlreadyExists,
+            crate::cap::manager::CapError::NotFound => SyscallError::CapabilityNotFound,
         }
     }
 }
@@ -171,6 +195,20 @@ fn sys_ipc_send(
         return Err(SyscallError::InvalidArgument);
     }
 
+    // Get current process's capability space
+    let current_process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let real_process = crate::process::table::get_process(current_process.pid)
+        .ok_or(SyscallError::InvalidState)?;
+    let cap_space = real_process.capability_space.lock();
+
+    // Convert capability value to token
+    let cap_token = crate::cap::CapabilityToken::from_u64(capability as u64);
+
+    // Check send permission
+    if let Err(e) = crate::cap::ipc_integration::check_send_permission(cap_token, &cap_space) {
+        return Err(e.into());
+    }
+
     // Check if this is a small message (fast path)
     let message = if msg_size <= core::mem::size_of::<SmallMessage>() {
         // Fast path for small messages
@@ -217,6 +255,20 @@ fn sys_ipc_send(
 fn sys_ipc_receive(endpoint: usize, buffer: usize) -> SyscallResult {
     if buffer == 0 {
         return Err(SyscallError::InvalidArgument);
+    }
+
+    // Get current process's capability space
+    let current_process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let real_process = crate::process::table::get_process(current_process.pid)
+        .ok_or(SyscallError::InvalidState)?;
+    let cap_space = real_process.capability_space.lock();
+
+    // Convert endpoint to capability token
+    let cap_token = crate::cap::CapabilityToken::from_u64(endpoint as u64);
+
+    // Check receive permission
+    if let Err(e) = crate::cap::ipc_integration::check_receive_permission(cap_token, &cap_space) {
+        return Err(e.into());
     }
 
     // Receive message using IPC sync module
@@ -390,11 +442,15 @@ fn sys_yield() -> SyscallResult {
 
 /// Create IPC endpoint
 fn sys_ipc_create_endpoint(_permissions: usize) -> SyscallResult {
-    let current_pid = sched::current_process().pid;
+    let current_process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let cap_space = current_process.capability_space.lock();
 
-    // Create endpoint (permissions will be handled by capability system)
-    match crate::ipc::create_endpoint(current_pid) {
-        Ok((endpoint_id, _capability)) => Ok(endpoint_id as usize),
+    // Create endpoint with capability
+    match crate::cap::ipc_integration::create_endpoint_with_capability(&cap_space) {
+        Ok((_endpoint_id, capability)) => {
+            // Return the capability token (which includes the endpoint ID)
+            Ok(capability.to_u64() as usize)
+        }
         Err(e) => Err(e.into()),
     }
 }
@@ -428,6 +484,25 @@ fn sys_ipc_share_memory(
         return Err(SyscallError::InvalidArgument);
     }
 
+    // Get current process and capability space
+    let current_process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let cap_space = current_process.capability_space.lock();
+
+    // Convert permissions to capability rights
+    let mut rights = crate::cap::Rights::new(0);
+    if permissions & 0b001 != 0 {
+        rights = rights | crate::cap::memory_integration::MemoryRights::READ;
+    }
+    if permissions & 0b010 != 0 {
+        rights = rights | crate::cap::memory_integration::MemoryRights::WRITE;
+    }
+    if permissions & 0b100 != 0 {
+        rights = rights | crate::cap::memory_integration::MemoryRights::EXECUTE;
+    }
+    rights = rights
+        | crate::cap::memory_integration::MemoryRights::MAP
+        | crate::cap::memory_integration::MemoryRights::SHARE;
+
     // Convert permissions bits to enum
     let perms = match permissions & 0b111 {
         0b001 => Permissions::Read,
@@ -438,24 +513,55 @@ fn sys_ipc_share_memory(
         _ => Permissions::Read, // Default to read-only
     };
 
-    // Get current process ID
-    let current_pid = sched::current_process().pid;
-
     // Create shared region owned by current process
-    let region = SharedRegion::new(current_pid, size, perms);
+    let _region = SharedRegion::new(current_process.pid, size, perms);
 
-    // TODO: Map the region at the specified address
-    let _ = addr;
+    // Create memory capability for this region
+    let phys_addr = crate::mm::PhysicalAddress::new(addr as u64); // TODO: Get actual physical address
+    let attributes = crate::cap::object::MemoryAttributes::normal();
 
-    // TODO: Actually share the region with target process
-    // For now, just return success
-    Ok(region.id() as usize)
+    match crate::cap::memory_integration::create_memory_capability(
+        phys_addr.as_usize(),
+        size,
+        attributes,
+        rights,
+        &cap_space,
+    ) {
+        Ok(cap) => Ok(cap.to_u64() as usize),
+        Err(_) => Err(SyscallError::OutOfMemory),
+    }
 }
 
 /// Map shared memory from another process
-fn sys_ipc_map_memory(_region_id: usize, addr_hint: usize, _flags: usize) -> SyscallResult {
-    // TODO: Implement actual memory mapping
-    // For now, return the hint address
+fn sys_ipc_map_memory(capability: usize, addr_hint: usize, flags: usize) -> SyscallResult {
+    // Get current process and capability space
+    let current_process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let cap_space = current_process.capability_space.lock();
+
+    // Convert capability to token
+    let cap_token = crate::cap::CapabilityToken::from_u64(capability as u64);
+
+    // Check map permission
+    if let Err(e) = crate::cap::memory_integration::check_map_permission(cap_token, &cap_space) {
+        return Err(match e {
+            crate::cap::CapError::InvalidCapability => SyscallError::InvalidArgument,
+            crate::cap::CapError::InsufficientRights => SyscallError::PermissionDenied,
+            _ => SyscallError::InvalidArgument,
+        });
+    }
+
+    // Convert flags to page flags
+    let mut page_flags = crate::mm::PageFlags::PRESENT | crate::mm::PageFlags::USER;
+    if flags & 0b010 != 0 {
+        page_flags |= crate::mm::PageFlags::WRITABLE;
+    }
+    if flags & 0b100 == 0 {
+        // If execute bit is not set, mark as no-execute
+        page_flags |= crate::mm::PageFlags::NO_EXECUTE;
+    }
+
+    // TODO: Implement actual memory mapping with VMM
+    // For now, return the hint address or allocate a new one
     if addr_hint == 0 {
         // Would allocate a virtual address
         Ok(0x100000000) // Placeholder address

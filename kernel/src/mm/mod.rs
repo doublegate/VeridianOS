@@ -108,6 +108,13 @@ impl PageFlags {
     pub const HUGE: Self = Self(1 << 7);
     pub const GLOBAL: Self = Self(1 << 8);
     pub const NO_EXECUTE: Self = Self(1 << 63);
+
+    // Alias for NO_EXECUTE
+    pub const EXECUTABLE: Self = Self(0); // No NO_EXECUTE bit set
+
+    pub fn contains(&self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
 }
 
 impl core::ops::BitOr for PageFlags {

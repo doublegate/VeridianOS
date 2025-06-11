@@ -19,7 +19,7 @@ use spin::Mutex;
 use super::{error::Result, IpcError};
 use crate::{
     mm::{PageSize, PhysicalAddress, VirtualAddress},
-    sched::ProcessId,
+    process::ProcessId,
 };
 
 /// Shared memory region ID generator
@@ -172,6 +172,16 @@ impl SharedRegion {
         virtual_base: VirtualAddress,
         permissions: Permission,
     ) -> Result<()> {
+        // Verify the calling process has capability to map this region
+        if let Some(current_process) = crate::process::current_process() {
+            // Only owner or processes with proper capability can map
+            if current_process.pid != self.owner && current_process.pid != process {
+                // Would need to check for a memory capability here
+                // For now, only allow owner to map
+                return Err(IpcError::PermissionDenied);
+            }
+        }
+
         // Check if process already has a mapping
         let mut mappings = self.mappings.lock();
         if mappings.contains_key(&process) {
@@ -241,7 +251,7 @@ impl SharedRegion {
     pub fn create_capability(&self, target_process: ProcessId, _mode: TransferMode) -> u64 {
         // In a real implementation, this would create a capability token
         // For now, return a unique value based on region ID and target
-        self.id ^ target_process
+        self.id ^ target_process.0
     }
 
     /// Get the NUMA node for this region

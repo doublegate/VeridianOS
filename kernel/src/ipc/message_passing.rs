@@ -187,7 +187,7 @@ impl EndpointRegistry {
             drop(queue);
 
             for pid in waiting {
-                sched::wake_up_process(pid.0);
+                sched::wake_up_process(pid);
             }
 
             Ok(())
@@ -235,8 +235,27 @@ pub fn send_to_endpoint(msg: Message, endpoint_id: EndpointId) -> Result<()> {
     if let Some(receiver_pid) = queue.get_receiver() {
         // Direct delivery
         drop(queue);
+
+        // Handle capability transfer if present
+        if msg.capability() != 0 {
+            if let Some(sender) = crate::process::current_process() {
+                if let Some(real_sender) = crate::process::table::get_process(sender.pid) {
+                    let sender_cap_space = real_sender.capability_space.lock();
+                    // Transfer capability to receiver
+                    if let Err(e) = crate::ipc::cap_transfer::transfer_capability(
+                        &msg,
+                        &sender_cap_space,
+                        receiver_pid,
+                    ) {
+                        // Log capability transfer failure but don't fail the message send
+                        println!("[IPC] Capability transfer failed: {:?}", e);
+                    }
+                }
+            }
+        }
+
         deliver_to_process(msg, receiver_pid)?;
-        sched::wake_up_process(receiver_pid.0);
+        sched::wake_up_process(receiver_pid);
         endpoint.message_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     } else {
@@ -244,6 +263,7 @@ pub fn send_to_endpoint(msg: Message, endpoint_id: EndpointId) -> Result<()> {
         match queue.enqueue(msg) {
             Ok(()) => {
                 endpoint.message_count.fetch_add(1, Ordering::Relaxed);
+                // Note: Capability transfer happens when message is dequeued
                 Ok(())
             }
             Err(e) => Err(e),
@@ -272,13 +292,13 @@ pub fn receive_from_endpoint(endpoint_id: EndpointId, blocking: bool) -> Result<
 
         // Wake up senders that were waiting for space
         for pid in woken_senders {
-            sched::wake_up_process(pid.0);
+            sched::wake_up_process(pid);
         }
 
         Ok(msg)
     } else if blocking {
         // No message, block if requested
-        let current_pid = ProcessId(sched::current_process().pid);
+        let current_pid = sched::current_process().pid;
         queue.add_receiver(current_pid);
         drop(queue);
 
@@ -309,10 +329,32 @@ fn deliver_to_process(msg: Message, pid: ProcessId) -> Result<()> {
 pub fn retrieve_delivered_message() -> Option<Message> {
     static PROCESS_MESSAGES: Mutex<BTreeMap<ProcessId, Message>> = Mutex::new(BTreeMap::new());
 
-    let current_pid = ProcessId(sched::current_process().pid);
+    let current_pid = sched::current_process().pid;
     let mut messages = PROCESS_MESSAGES.lock();
 
-    messages.remove(&current_pid)
+    if let Some(msg) = messages.remove(&current_pid) {
+        // Validate any capability in the message
+        if msg.capability() != 0 {
+            if let Some(current) = crate::process::current_process() {
+                if let Some(real_process) = crate::process::table::get_process(current.pid) {
+                    let cap_space = real_process.capability_space.lock();
+                    let cap_token = crate::cap::CapabilityToken::from_u64(msg.capability());
+
+                    // Verify the capability exists in receiver's space
+                    if cap_space.lookup(cap_token).is_none() {
+                        println!(
+                            "[IPC] Warning: Capability {} not found in receiver's space",
+                            msg.capability()
+                        );
+                        // Still deliver the message but without the capability
+                    }
+                }
+            }
+        }
+        Some(msg)
+    } else {
+        None
+    }
 }
 
 /// Initialize message passing subsystem

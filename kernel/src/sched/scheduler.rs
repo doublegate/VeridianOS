@@ -114,22 +114,52 @@ impl Scheduler {
             (*task_mut).state = ProcessState::Ready;
         }
 
-        match self.algorithm {
-            SchedAlgorithm::RoundRobin | SchedAlgorithm::Priority => {
-                READY_QUEUE.lock().enqueue(task);
-            }
-            #[cfg(feature = "alloc")]
-            SchedAlgorithm::Cfs => {
-                if let Some(ref cfs) = self.cfs_queue {
-                    cfs.lock().enqueue(task);
+        // Use per-CPU queue if available
+        if let Some(cpu_data) = super::smp::per_cpu(self.cpu_id) {
+            match self.algorithm {
+                SchedAlgorithm::RoundRobin | SchedAlgorithm::Priority => {
+                    cpu_data.cpu_info.ready_queue.lock().enqueue(task);
+                    cpu_data.cpu_info.nr_running.fetch_add(1, Ordering::Relaxed);
+                    cpu_data.cpu_info.update_load();
+                }
+                #[cfg(feature = "alloc")]
+                SchedAlgorithm::Cfs => {
+                    if let Some(ref cfs) = self.cfs_queue {
+                        cfs.lock().enqueue(task);
+                        cpu_data.cpu_info.nr_running.fetch_add(1, Ordering::Relaxed);
+                        cpu_data.cpu_info.update_load();
+                    }
+                }
+                #[cfg(feature = "alloc")]
+                SchedAlgorithm::Hybrid => {
+                    if task_ref.sched_class == SchedClass::RealTime {
+                        cpu_data.cpu_info.ready_queue.lock().enqueue(task);
+                    } else if let Some(ref cfs) = self.cfs_queue {
+                        cfs.lock().enqueue(task);
+                    }
+                    cpu_data.cpu_info.nr_running.fetch_add(1, Ordering::Relaxed);
+                    cpu_data.cpu_info.update_load();
                 }
             }
-            #[cfg(feature = "alloc")]
-            SchedAlgorithm::Hybrid => {
-                if task_ref.sched_class == SchedClass::RealTime {
+        } else {
+            // Fallback to global queue
+            match self.algorithm {
+                SchedAlgorithm::RoundRobin | SchedAlgorithm::Priority => {
                     READY_QUEUE.lock().enqueue(task);
-                } else if let Some(ref cfs) = self.cfs_queue {
-                    cfs.lock().enqueue(task);
+                }
+                #[cfg(feature = "alloc")]
+                SchedAlgorithm::Cfs => {
+                    if let Some(ref cfs) = self.cfs_queue {
+                        cfs.lock().enqueue(task);
+                    }
+                }
+                #[cfg(feature = "alloc")]
+                SchedAlgorithm::Hybrid => {
+                    if task_ref.sched_class == SchedClass::RealTime {
+                        READY_QUEUE.lock().enqueue(task);
+                    } else if let Some(ref cfs) = self.cfs_queue {
+                        cfs.lock().enqueue(task);
+                    }
                 }
             }
         }
@@ -170,17 +200,37 @@ impl Scheduler {
     /// Round-robin task selection
     fn pick_next_rr(&self) -> Option<NonNull<Task>> {
         let current_cpu = self.cpu_id;
-        let mut queue = READY_QUEUE.lock();
 
-        // Find a task that can run on this CPU
-        while let Some(task_ptr) = queue.dequeue() {
-            unsafe {
-                let task = task_ptr.as_ref();
-                if task.can_run_on(current_cpu) {
-                    return Some(task_ptr);
+        // Try per-CPU queue first
+        if let Some(cpu_data) = super::smp::per_cpu(self.cpu_id) {
+            let mut queue = cpu_data.cpu_info.ready_queue.lock();
+
+            // Find a task that can run on this CPU
+            while let Some(task_ptr) = queue.dequeue() {
+                unsafe {
+                    let task = task_ptr.as_ref();
+                    if task.can_run_on(current_cpu) {
+                        cpu_data.cpu_info.nr_running.fetch_sub(1, Ordering::Relaxed);
+                        cpu_data.cpu_info.update_load();
+                        return Some(task_ptr);
+                    }
+                    // Task can't run on this CPU, re-queue it
+                    queue.enqueue(task_ptr);
                 }
-                // Task can't run on this CPU, re-queue it
-                queue.enqueue(task_ptr);
+            }
+        } else {
+            // Fallback to global queue
+            let mut queue = READY_QUEUE.lock();
+
+            while let Some(task_ptr) = queue.dequeue() {
+                unsafe {
+                    let task = task_ptr.as_ref();
+                    if task.can_run_on(current_cpu) {
+                        return Some(task_ptr);
+                    }
+                    // Task can't run on this CPU, re-queue it
+                    queue.enqueue(task_ptr);
+                }
             }
         }
 
@@ -191,17 +241,55 @@ impl Scheduler {
     /// Priority-based task selection
     fn pick_next_priority(&self) -> Option<NonNull<Task>> {
         let current_cpu = self.cpu_id;
-        let mut queue = READY_QUEUE.lock();
 
-        // Find highest priority task that can run on this CPU
-        while let Some(task_ptr) = queue.dequeue() {
-            unsafe {
-                let task = task_ptr.as_ref();
-                if task.can_run_on(current_cpu) {
-                    return Some(task_ptr);
+        // Try per-CPU queue first
+        if let Some(cpu_data) = super::smp::per_cpu(self.cpu_id) {
+            let mut queue = cpu_data.cpu_info.ready_queue.lock();
+
+            // The ReadyQueue already maintains priority order with bitmaps
+            // Just dequeue the highest priority task that can run on this CPU
+            let mut requeue_count = 0;
+            let max_attempts = 10; // Prevent infinite loop
+
+            while requeue_count < max_attempts {
+                match queue.dequeue() {
+                    Some(task_ptr) => {
+                        unsafe {
+                            let task = task_ptr.as_ref();
+                            if task.can_run_on(current_cpu) {
+                                cpu_data.cpu_info.nr_running.fetch_sub(1, Ordering::Relaxed);
+                                cpu_data.cpu_info.update_load();
+                                return Some(task_ptr);
+                            } else {
+                                // Task can't run on this CPU, re-queue it
+                                queue.enqueue(task_ptr);
+                                requeue_count += 1;
+                            }
+                        }
+                    }
+                    None => break, // No more tasks
                 }
-                // Task can't run on this CPU, re-queue it
-                queue.enqueue(task_ptr);
+            }
+        } else {
+            // Fallback to global queue
+            let mut queue = READY_QUEUE.lock();
+
+            let mut requeue_count = 0;
+            let max_attempts = 10;
+
+            while requeue_count < max_attempts {
+                match queue.dequeue() {
+                    Some(task_ptr) => unsafe {
+                        let task = task_ptr.as_ref();
+                        if task.can_run_on(current_cpu) {
+                            return Some(task_ptr);
+                        } else {
+                            queue.enqueue(task_ptr);
+                            requeue_count += 1;
+                        }
+                    },
+                    None => break,
+                }
             }
         }
 
@@ -311,6 +399,8 @@ impl Scheduler {
 
     /// Perform scheduling decision
     pub fn schedule(&mut self) {
+        let start_cycles = super::metrics::read_tsc();
+
         // Disable interrupts
         let _guard = crate::arch::disable_interrupts();
 
@@ -327,6 +417,8 @@ impl Scheduler {
                 if let Some(next) = self.pick_next() {
                     self.switch_to(next);
                 }
+                super::metrics::SCHEDULER_METRICS
+                    .record_scheduler_overhead(super::metrics::read_tsc() - start_cycles);
                 return;
             }
         };
@@ -344,10 +436,14 @@ impl Scheduler {
                         // Re-queue current task
                         self.enqueue(current.as_ptr());
                         self.switch_to(next);
+                        super::metrics::SCHEDULER_METRICS
+                            .record_scheduler_overhead(super::metrics::read_tsc() - start_cycles);
                         return;
                     }
                 }
                 // Current task continues
+                super::metrics::SCHEDULER_METRICS
+                    .record_scheduler_overhead(super::metrics::read_tsc() - start_cycles);
                 return;
             }
         }
@@ -356,6 +452,9 @@ impl Scheduler {
         if let Some(next) = self.pick_next() {
             self.switch_to(next);
         }
+
+        super::metrics::SCHEDULER_METRICS
+            .record_scheduler_overhead(super::metrics::read_tsc() - start_cycles);
     }
 
     /// Switch to new task
@@ -364,6 +463,17 @@ impl Scheduler {
         if self.current == Some(next_ptr) {
             return; // Already running
         }
+
+        let start_cycles = super::metrics::read_tsc();
+        let is_voluntary = unsafe {
+            if let Some(current) = self.current {
+                let current_ref = current.as_ptr().as_ref();
+                current_ref.state == ProcessState::Blocked
+                    || current_ref.state == ProcessState::Sleeping
+            } else {
+                false
+            }
+        };
 
         unsafe {
             // Update states
@@ -376,9 +486,16 @@ impl Scheduler {
             }
 
             let next_mut = next.as_ptr();
+            let next_ref = next.as_ref();
+
+            // Check if scheduling idle task
+            if next_ref.sched_class == SchedClass::Idle {
+                super::metrics::SCHEDULER_METRICS.record_idle_scheduled();
+            }
+
             (*next_mut).state = ProcessState::Running;
             (*next_mut).current_cpu = Some(current_cpu());
-            (*next_mut).mark_scheduled(current_cpu(), false);
+            (*next_mut).mark_scheduled(current_cpu(), is_voluntary);
 
             // Perform context switch
             if let Some(current) = self.current {
@@ -394,11 +511,20 @@ impl Scheduler {
             // Update current task
             self.current = Some(next_ptr);
         }
+
+        // Record context switch metrics
+        let switch_cycles = super::metrics::read_tsc() - start_cycles;
+        super::metrics::SCHEDULER_METRICS.record_context_switch(switch_cycles, is_voluntary);
     }
 }
 
 /// Check if should preempt current task
 fn should_preempt(current: &Task, next: &Task) -> bool {
+    // Never preempt idle task except for any real task
+    if current.sched_class == SchedClass::Idle && next.sched_class != SchedClass::Idle {
+        return true;
+    }
+
     // Real-time tasks always preempt non-real-time
     if next.sched_class == SchedClass::RealTime && current.sched_class != SchedClass::RealTime {
         return true;
@@ -406,7 +532,19 @@ fn should_preempt(current: &Task, next: &Task) -> bool {
 
     // Within same class, check effective priority
     if next.sched_class == current.sched_class {
-        return next.effective_priority() < current.effective_priority();
+        let next_prio = next.effective_priority();
+        let curr_prio = current.effective_priority();
+
+        // For real-time tasks, always preempt if higher priority
+        if current.sched_class == SchedClass::RealTime {
+            return next_prio < curr_prio;
+        }
+
+        // For normal tasks, only preempt if significantly higher priority
+        // or current task has used up its time slice
+        if current.sched_class == SchedClass::Normal {
+            return next_prio < curr_prio || (next_prio == curr_prio && current.time_slice == 0);
+        }
     }
 
     false
@@ -513,12 +651,11 @@ pub fn current_scheduler() -> &'static Mutex<Scheduler> {
     let cpu_id = current_cpu();
 
     // Try to get per-CPU scheduler
-    if let Some(_cpu_data) = super::smp::per_cpu(cpu_id) {
-        // For now, return global scheduler
-        // TODO: Return &cpu_data.cpu_info.scheduler once we fix lifetime issues
-        &SCHEDULER
+    if let Some(cpu_data) = super::smp::per_cpu(cpu_id) {
+        // Return reference to per-CPU scheduler
+        &cpu_data.cpu_info.scheduler
     } else {
-        // Fallback to global scheduler
+        // Fallback to global scheduler for BSP
         &SCHEDULER
     }
 }

@@ -171,7 +171,7 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="phase-1-microkernel-core"><a class="header" href="#phase-1-microkernel-core">Phase 1: Microkernel Core</a></h1>
-<p><strong>Status</strong>: IN PROGRESS ~35% Overall - IPC ~45% Complete, Memory Management ~95% Complete, Process Management 100% Complete<br />
+<p><strong>Status</strong>: IN PROGRESS ~35% Overall - IPC ~45% Complete, Memory Management ~95% Complete, Process Management 100% Complete, Scheduler ~30% Complete<br />
 <strong>Started</strong>: June 8, 2025<br />
 <strong>Duration</strong>: Months 4-9<br />
 <strong>Last Updated</strong>: June 10, 2025<br />
@@ -343,7 +343,7 @@ Full scheduler integration</li>
 <li><input disabled="" type="checkbox"/>
 POSIX compatibility layer</li>
 </ul>
-<h3 id="process-management-90-complete"><a class="header" href="#process-management-90-complete">Process Management (~90% Complete)</a></h3>
+<h3 id="process-management-100-complete-"><a class="header" href="#process-management-100-complete-">Process Management (100% Complete) ✅</a></h3>
 <ul>
 <li><input disabled="" type="checkbox" checked=""/>
 Process creation/termination ✅</li>
@@ -359,19 +359,39 @@ Process Control Block implementation ✅</li>
 Global process table with O(1) lookup ✅</li>
 <li><input disabled="" type="checkbox" checked=""/>
 Synchronization primitives (Mutex, Semaphore, etc.) ✅</li>
-<li><input disabled="" type="checkbox"/>
-Process system calls integration</li>
-<li><input disabled="" type="checkbox"/>
-Integration testing with scheduler</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Process system calls integration ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+IPC blocking/waking integration ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Thread-scheduler state synchronization ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Thread cleanup on exit ✅</li>
 </ul>
-<h3 id="scheduler"><a class="header" href="#scheduler">Scheduler</a></h3>
+<h3 id="scheduler-30-complete"><a class="header" href="#scheduler-30-complete">Scheduler (~30% Complete)</a></h3>
 <ul>
+<li><input disabled="" type="checkbox" checked=""/>
+Round-robin scheduler ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Idle task creation ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Timer interrupts (all architectures) ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Basic SMP support ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+CPU affinity enforcement ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Thread cleanup integration ✅</li>
+<li><input disabled="" type="checkbox" checked=""/>
+IPC blocking/waking ✅</li>
+<li><input disabled="" type="checkbox"/>
+Priority-based scheduling</li>
 <li><input disabled="" type="checkbox"/>
 Multi-level feedback queue</li>
 <li><input disabled="" type="checkbox"/>
 Real-time support</li>
 <li><input disabled="" type="checkbox"/>
-Load balancing</li>
+Full load balancing</li>
 <li><input disabled="" type="checkbox"/>
 Power management</li>
 </ul>

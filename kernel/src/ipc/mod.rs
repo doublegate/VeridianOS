@@ -7,6 +7,7 @@
 //! - Capability-based security integration
 
 pub mod async_channel;
+pub mod cap_transfer;
 pub mod capability;
 pub mod channel;
 pub mod error;
@@ -47,6 +48,8 @@ pub use registry::{create_channel, create_endpoint, get_registry_stats, validate
 pub use shared_memory::{Permissions, SharedRegion, TransferMode};
 #[cfg(test)]
 pub use sync::send_message;
+#[allow(unused_imports)]
+pub use sync::{sync_call, sync_receive, sync_reply, sync_send};
 
 /// IPC system initialization
 #[allow(dead_code)]

@@ -1,6 +1,6 @@
 # VeridianOS
 
-![VeridianOS Logo](images/VeridianOS_Logo-Only.png){width="50%"}
+<img src="images/VeridianOS_Logo-Only.png" alt="VeridianOS Logo" width="50%" />
 
 ## A next-generation microkernel operating system built with Rust
 
@@ -35,15 +35,15 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 ### 🚀 Phase 1: Microkernel Core (In Progress)
 
 **Started**: June 8, 2025
-**Status**: ~35% overall progress
+**Status**: ~65% overall progress
 
 **Components**:
 
-- IPC System: ~45% complete (sync/async channels, registry, perf tracking, rate limiting done)
+- IPC System: 100% complete ✅ (sync/async channels, registry, perf tracking, rate limiting, capability integration done)
 - Memory Management: ~95% complete (frame allocator, virtual memory, page tables, bootloader integration complete)
-- Process Management: 100% complete (PCB, threads, context switching, synchronization primitives, syscalls done)
-- Scheduler: ~30% complete (round-robin algorithm, idle task, timer setup, SMP support, CPU affinity done)
-- Capability System: Not started
+- Process Management: 100% complete ✅ (PCB, threads, context switching, synchronization primitives, syscalls done)
+- Scheduler: ~35% complete (round-robin algorithm, idle task, timer setup, SMP support, CPU affinity, IPC integration done)
+- Capability System: ~45% complete (tokens, rights, space management, IPC/memory integration done; inheritance/revocation pending)
 
 **Phase 0 Achievements**:
 
@@ -292,6 +292,6 @@ VeridianOS builds upon ideas from many excellent operating systems:
 
 ---
 
-![VeridianOS](images/VeridianOS_Full-Logo.png){width="50%"}
+<img src="images/VeridianOS_Full-Logo.png" alt="VeridianOS Full Banner" width="50%" />
 
 **Building the future of operating systems, one commit at a time.**

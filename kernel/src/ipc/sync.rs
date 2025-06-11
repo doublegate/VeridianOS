@@ -16,7 +16,7 @@ use super::{
     message::Message,
 };
 use crate::{
-    process::ProcessState,
+    process::{ProcessId, ProcessState},
     sched::{current_process, find_process},
 };
 
@@ -113,14 +113,14 @@ pub fn sync_call(request: Message, target: u64) -> Result<Message> {
     let current = current_process();
     current.state = ProcessState::Blocked;
 
-    // Wait for reply
-    sync_receive(current.pid)
+    // Wait for reply using process ID as endpoint
+    sync_receive(current.pid.0)
 }
 
 /// Reply to a previous call
 pub fn sync_reply(reply: Message, caller: u64) -> Result<()> {
     // Find caller process
-    let caller_process = find_process(caller).ok_or(IpcError::ProcessNotFound)?;
+    let caller_process = find_process(ProcessId(caller)).ok_or(IpcError::ProcessNotFound)?;
 
     // Verify caller is waiting for reply
     if caller_process.state != ProcessState::Blocked {
@@ -161,11 +161,30 @@ fn sync_receive_slow_path(endpoint: u64) -> Result<Message> {
 }
 
 /// Validate send capability
-fn validate_send_capability(msg: &Message, _endpoint_id: u64) -> Result<()> {
-    let _cap_id = msg.capability();
+fn validate_send_capability(msg: &Message, endpoint_id: u64) -> Result<()> {
+    let cap_id = msg.capability();
 
-    // TODO: Proper capability validation requires looking up the capability
-    // For now, allow all sends
+    // Get current process's capability space
+    let current_process = crate::process::current_process().ok_or(IpcError::ProcessNotFound)?;
+    let cap_space = current_process.capability_space.lock();
+
+    // Convert capability ID to token
+    let cap_token = crate::cap::CapabilityToken::from_u64(cap_id);
+
+    // Check if the capability grants send permission for this endpoint
+    // Note: This checks the capability exists, is valid, and has SEND rights
+    crate::cap::ipc_integration::check_send_permission(cap_token, &cap_space).map_err(
+        |e| match e {
+            IpcError::InvalidCapability => IpcError::InvalidCapability,
+            IpcError::PermissionDenied => IpcError::PermissionDenied,
+            _ => IpcError::InvalidCapability,
+        },
+    )?;
+
+    // TODO: Verify the capability is for the specific endpoint_id
+    // This requires enhancing the capability object model to store endpoint IDs
+    let _ = endpoint_id; // Currently not validated against capability
+
     Ok(())
 }
 

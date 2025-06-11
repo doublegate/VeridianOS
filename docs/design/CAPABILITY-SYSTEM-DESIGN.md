@@ -1,8 +1,8 @@
 # VeridianOS Capability System Design Document
 
-**Version**: 1.0  
-**Date**: 2025-06-07  
-**Status**: Draft for Phase 1 Implementation
+**Version**: 1.1  
+**Date**: 2025-06-11  
+**Status**: Partially Implemented (~45% Complete)
 
 ## Executive Summary
 
@@ -557,6 +557,35 @@ pub fn check_capabilities_batch(
 - SIMD batch validation
 - Speculative capability checks
 - Machine learning for cache prediction
+
+## Implementation Status (June 11, 2025)
+
+### Completed Components (~45%)
+- ✅ **Capability Token Structure**: 64-bit packed tokens implemented
+- ✅ **Capability Space**: Two-level table structure with O(1) lookup
+- ✅ **Rights Management**: Full rights system with grant/derive/delegate
+- ✅ **Object References**: Support for Memory, Process, Thread, Endpoint
+- ✅ **Basic Operations**: Create, validate, lookup, basic revoke
+- ✅ **IPC Integration**: Complete capability validation for all IPC operations
+- ✅ **Memory Integration**: Capability checks for memory operations
+- ✅ **System Call Enforcement**: All capability-related syscalls validate
+
+### In Progress
+- 🔶 **Capability Inheritance**: Fork/exec inheritance policies
+- 🔶 **Cascading Revocation**: Revocation tree tracking
+- 🔶 **Per-CPU Cache**: Performance optimization
+
+### Not Started
+- ❌ **Encrypted Capabilities**: Phase 3 enhancement
+- ❌ **Hardware Integration**: Phase 5 optimization
+- ❌ **Distributed Capabilities**: Future enhancement
+
+### Recent Changes (June 11, 2025)
+- Added full IPC-Capability integration
+- Implemented capability transfer through IPC messages
+- Added send/receive permission validation
+- Integrated with system call handlers
+- Added Rights::difference() method for delegation
 
 ---
 

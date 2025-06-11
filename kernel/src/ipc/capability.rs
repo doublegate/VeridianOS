@@ -9,8 +9,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 /// Global capability ID generator
 static CAPABILITY_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-/// Process ID type
-pub type ProcessId = u64;
+// Use ProcessId from process module
+pub use crate::process::ProcessId;
 
 /// Endpoint ID type
 pub type EndpointId = u64;
@@ -74,7 +74,7 @@ impl IpcCapability {
 
     /// Get the owner (same as target for compatibility)
     pub fn owner(&self) -> ProcessId {
-        self.target
+        ProcessId(self.target)
     }
 
     /// Check if capability has specific permission

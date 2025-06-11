@@ -16,8 +16,26 @@ use crate::process::{
 /// Creates a new process that is a copy of the current process.
 /// Returns the PID of the child in the parent, and 0 in the child.
 pub fn sys_fork() -> SyscallResult {
+    // Get current process before forking
+    let current = current_process().ok_or(SyscallError::InvalidState)?;
+
     match fork_process() {
         Ok(child_pid) => {
+            // In parent process, inherit capabilities to child
+            if let Some(child_process) = crate::process::get_process(child_pid) {
+                let parent_cap_space = current.capability_space.lock();
+                let child_cap_space = child_process.capability_space.lock();
+
+                // Inherit capabilities from parent to child
+                if let Err(_e) = crate::cap::inheritance::fork_inherit_capabilities(
+                    &parent_cap_space,
+                    &child_cap_space,
+                ) {
+                    // Log error but don't fail the fork
+                    println!("[WARN] Failed to inherit capabilities to child process");
+                }
+            }
+
             // In parent process, return child PID
             Ok(child_pid.0 as usize)
         }
@@ -55,6 +73,20 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
     } else {
         &[]
     };
+
+    // Get current process capability space before exec
+    let current = current_process().ok_or(SyscallError::InvalidState)?;
+    let old_cap_space = current.capability_space.lock();
+
+    // Create new capability space for exec'd process
+    let new_cap_space = crate::cap::CapabilitySpace::new();
+
+    // Inherit only capabilities marked for exec preservation
+    if let Err(_e) =
+        crate::cap::inheritance::exec_inherit_capabilities(&old_cap_space, &new_cap_space)
+    {
+        println!("[WARN] Failed to inherit capabilities during exec");
+    }
 
     match exec_process(path, argv, envp) {
         Ok(_) => {

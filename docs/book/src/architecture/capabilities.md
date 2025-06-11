@@ -1,5 +1,7 @@
 # Capability System
 
+**Implementation Status**: ~45% Complete (as of June 11, 2025)
+
 VeridianOS uses a capability-based security model where all resource access is mediated through unforgeable capability tokens. This provides fine-grained access control without the complexity of traditional access control lists.
 
 ## Design Principles
@@ -307,3 +309,38 @@ pub trait CapabilityStore {
 3. **Audit Capability Usage**: Log all capability operations
 4. **Implement Revocation**: Plan for capability invalidation
 5. **Cache Validations**: Optimize hot-path capability checks
+
+## Implementation Status (June 11, 2025)
+
+### Completed Features (~45% Complete)
+
+- **Capability Tokens**: 64-bit packed tokens with ID, generation, type, and flags
+- **Capability Spaces**: Two-level table structure (L1/L2) with O(1) lookup
+- **Rights Management**: Complete rights system (Read, Write, Execute, Grant, Derive, Manage)
+- **Object References**: Support for Memory, Process, Thread, Endpoint, and more
+- **Basic Operations**: Create, lookup, validate, and basic revoke
+- **IPC Integration**: Full capability validation for all IPC operations
+- **Memory Integration**: Capability checks for memory operations
+- **System Call Enforcement**: All capability-related syscalls validate permissions
+
+### Recent Achievements (June 11, 2025)
+
+- **IPC-Capability Integration**: Complete integration with IPC subsystem
+- **Capability Transfer**: Implemented secure capability passing through IPC
+- **Permission Enforcement**: All IPC operations validate send/receive rights
+- **Shared Memory Validation**: Memory sharing respects capability permissions
+
+### In Progress
+
+- **Capability Inheritance**: Fork/exec inheritance policies (design complete, implementation pending)
+- **Cascading Revocation**: Revocation tree tracking (basic revoke done, cascading pending)
+- **Per-CPU Cache**: Performance optimization for capability lookups
+
+### Not Yet Started
+
+- **Process Table Integration**: Needed for broadcast revocation
+- **Audit Logging**: Comprehensive audit trail
+- **Persistence**: Capability storage across reboots
+- **Hardware Integration**: Future hardware capability support
+
+The capability system provides the security foundation for VeridianOS, ensuring that all resource access is properly authorized and auditable.

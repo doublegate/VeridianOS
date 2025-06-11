@@ -70,6 +70,11 @@ impl CpuSet {
         Self { mask: !0u64 }
     }
 
+    /// Get the CPU mask
+    pub fn mask(&self) -> u64 {
+        self.mask
+    }
+
     /// Create new CPU set with single CPU
     pub fn single(cpu: u8) -> Self {
         Self { mask: 1u64 << cpu }
@@ -194,7 +199,7 @@ impl Task {
         Self {
             pid,
             tid,
-            parent_pid: 0,
+            parent_pid: ProcessId(0),
             name,
             state: ProcessState::Ready,
             priority: Priority::default(),
@@ -297,5 +302,5 @@ static NEXT_TID: AtomicU64 = AtomicU64::new(1);
 
 /// Allocate new thread ID
 pub fn alloc_tid() -> ThreadId {
-    NEXT_TID.fetch_add(1, Ordering::Relaxed)
+    ThreadId(NEXT_TID.fetch_add(1, Ordering::Relaxed))
 }

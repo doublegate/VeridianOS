@@ -30,6 +30,7 @@ pub mod thread;
 // Re-export common types
 pub use lifecycle::{exec_process, fork_process, wait_process as wait_for_child};
 pub use pcb::{Process, ProcessId, ProcessPriority, ProcessState};
+pub use table::get_process;
 pub use thread::{Thread, ThreadId};
 
 /// Maximum number of processes
@@ -82,7 +83,7 @@ pub fn current_process() -> Option<&'static Process> {
     if let Some(task) = crate::sched::SCHEDULER.lock().current() {
         unsafe {
             let task_ref = task.as_ref();
-            table::get_process(ProcessId(task_ref.pid))
+            table::get_process(task_ref.pid)
         }
     } else {
         None
@@ -100,8 +101,8 @@ pub fn current_thread() -> Option<&'static Thread> {
     if let Some(task) = crate::sched::SCHEDULER.lock().current() {
         unsafe {
             let task_ref = task.as_ref();
-            if let Some(process) = table::get_process(ProcessId(task_ref.pid)) {
-                process.get_thread(ThreadId(task_ref.tid))
+            if let Some(process) = table::get_process(task_ref.pid) {
+                process.get_thread(task_ref.tid)
             } else {
                 None
             }

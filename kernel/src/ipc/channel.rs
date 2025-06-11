@@ -20,7 +20,7 @@ use super::{
     error::{IpcError, Result},
     Message, SmallMessage,
 };
-use crate::sched::ProcessId;
+use crate::process::ProcessId;
 
 /// Maximum number of queued messages per channel
 pub const MAX_CHANNEL_QUEUE_SIZE: usize = 1024;

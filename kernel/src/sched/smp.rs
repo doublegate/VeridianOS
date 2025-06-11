@@ -25,7 +25,7 @@ pub struct CpuInfo {
     /// Number of tasks in run queue
     pub nr_running: AtomicU32,
     /// Per-CPU scheduler
-    pub scheduler: Scheduler,
+    pub scheduler: Mutex<Scheduler>,
     /// Per-CPU ready queue
     pub ready_queue: Mutex<ReadyQueue>,
     /// CPU vendor string
@@ -65,7 +65,7 @@ impl CpuInfo {
             current_task: AtomicU64::new(0),
             load: AtomicU8::new(0),
             nr_running: AtomicU32::new(0),
-            scheduler: Scheduler::new(),
+            scheduler: Mutex::new(Scheduler::new()),
             ready_queue: Mutex::new(ReadyQueue::new()),
             #[cfg(feature = "alloc")]
             vendor: String::new(),
@@ -279,8 +279,16 @@ pub fn init() {
 /// Initialize specific CPU
 pub fn init_cpu(cpu_id: u8) {
     unsafe {
+        let cpu_info = CpuInfo::new(cpu_id);
+
+        // Initialize per-CPU scheduler with CPU ID
+        {
+            let mut scheduler = cpu_info.scheduler.lock();
+            scheduler.cpu_id = cpu_id;
+        }
+
         let cpu_data = PerCpuData {
-            cpu_info: CpuInfo::new(cpu_id),
+            cpu_info,
             privilege_level: 0,
             irq_depth: 0,
             preempt_count: 0,
@@ -292,6 +300,13 @@ pub fn init_cpu(cpu_id: u8) {
 
         if let Some(ref mut data) = PER_CPU_DATA[cpu_id as usize] {
             data.cpu_info.bring_online();
+
+            // Initialize idle task for this CPU if not BSP
+            #[cfg(feature = "alloc")]
+            if cpu_id != 0 {
+                // Create per-CPU idle task
+                create_cpu_idle_task(cpu_id);
+            }
         }
     }
 }
@@ -406,17 +421,78 @@ pub fn cpu_down(cpu_id: u8) -> Result<(), &'static str> {
 }
 
 /// Load balancing: migrate task between CPUs
-pub fn migrate_task(task: &mut Task, _from_cpu: u8, to_cpu: u8) -> Result<(), &'static str> {
-    // Check if migration is allowed
-    if !task.cpu_affinity.contains(to_cpu) {
-        return Err("Task affinity prevents migration");
+pub fn migrate_task(
+    task_ptr: core::ptr::NonNull<Task>,
+    from_cpu: u8,
+    to_cpu: u8,
+) -> Result<(), &'static str> {
+    unsafe {
+        let task = task_ptr.as_ref();
+
+        // Check if migration is allowed
+        if !task.cpu_affinity.contains(to_cpu) {
+            return Err("Task affinity prevents migration");
+        }
+
+        // Don't migrate running tasks
+        if task.state == super::ProcessState::Running {
+            return Err("Cannot migrate running task");
+        }
+
+        // Don't migrate idle tasks
+        if task.sched_class == super::task::SchedClass::Idle {
+            return Err("Cannot migrate idle task");
+        }
     }
 
-    // TODO: Remove from source CPU queue
-    // TODO: Add to destination CPU queue
-    // TODO: Send IPI if needed
+    // Remove from source CPU queue
+    let removed = if let Some(from_cpu_data) = per_cpu(from_cpu) {
+        let mut queue = from_cpu_data.cpu_info.ready_queue.lock();
+        if queue.remove(task_ptr) {
+            from_cpu_data
+                .cpu_info
+                .nr_running
+                .fetch_sub(1, Ordering::Relaxed);
+            from_cpu_data.cpu_info.update_load();
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
 
-    Ok(())
+    if !removed {
+        return Err("Task not found in source CPU queue");
+    }
+
+    // Add to destination CPU queue
+    if let Some(to_cpu_data) = per_cpu(to_cpu) {
+        to_cpu_data.cpu_info.ready_queue.lock().enqueue(task_ptr);
+        to_cpu_data
+            .cpu_info
+            .nr_running
+            .fetch_add(1, Ordering::Relaxed);
+        to_cpu_data.cpu_info.update_load();
+
+        // Update task's current CPU hint
+        unsafe {
+            let task_mut = task_ptr.as_ptr();
+            (*task_mut).current_cpu = Some(to_cpu);
+        }
+
+        // Send IPI if destination CPU is idle
+        if to_cpu_data.cpu_info.is_idle() {
+            send_ipi(to_cpu, 0); // Wake up CPU
+        }
+
+        // Record migration metric
+        super::metrics::SCHEDULER_METRICS.record_migration();
+
+        Ok(())
+    } else {
+        Err("Destination CPU not initialized")
+    }
 }
 
 /// Find least loaded CPU
@@ -439,11 +515,89 @@ pub fn find_least_loaded_cpu() -> u8 {
     best_cpu
 }
 
+/// Find least loaded CPU that matches affinity mask
+pub fn find_least_loaded_cpu_with_affinity(affinity_mask: u64) -> u8 {
+    let mut best_cpu = 0;
+    let mut min_load = 100;
+    let mut found_any = false;
+
+    for cpu_id in 0..64.min(MAX_CPUS as u8) {
+        // Check up to 64 CPUs (mask size)
+        if (affinity_mask & (1u64 << cpu_id)) != 0 {
+            if let Some(cpu_data) = per_cpu(cpu_id) {
+                if cpu_data.cpu_info.is_online() {
+                    let load = cpu_data.cpu_info.load.load(Ordering::Relaxed);
+                    if load < min_load || !found_any {
+                        min_load = load;
+                        best_cpu = cpu_id;
+                        found_any = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // If no CPU matches affinity, fall back to least loaded
+    if !found_any {
+        find_least_loaded_cpu()
+    } else {
+        best_cpu
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 fn max_cpuid() -> u32 {
     unsafe {
         use core::arch::x86_64::__cpuid;
         let cpuid = __cpuid(0);
         cpuid.eax
+    }
+}
+
+/// Create idle task for specific CPU
+#[cfg(feature = "alloc")]
+fn create_cpu_idle_task(cpu_id: u8) {
+    use alloc::{boxed::Box, format};
+    use core::ptr::NonNull;
+
+    use super::{
+        idle_task_entry,
+        task::{Priority, SchedClass, SchedPolicy, Task},
+    };
+    use crate::process::{ProcessId, ThreadId};
+
+    // Allocate stack for idle task (8KB)
+    const IDLE_STACK_SIZE: usize = 8192;
+    let idle_stack = Box::leak(Box::new([0u8; IDLE_STACK_SIZE]));
+    let idle_stack_top = idle_stack.as_ptr() as usize + IDLE_STACK_SIZE;
+
+    // Get kernel page table
+    let kernel_page_table = crate::mm::get_kernel_page_table();
+
+    // Create idle task
+    let mut idle_task = Box::new(Task::new(
+        ProcessId(0),            // PID 0 for idle
+        ThreadId(cpu_id as u64), // TID = CPU ID for idle tasks
+        format!("idle-cpu{}", cpu_id),
+        idle_task_entry as usize,
+        idle_stack_top,
+        kernel_page_table,
+    ));
+
+    // Set as idle priority
+    idle_task.priority = Priority::Idle;
+    idle_task.sched_class = SchedClass::Idle;
+    idle_task.sched_policy = SchedPolicy::Idle;
+
+    // Set CPU affinity to only this CPU
+    idle_task.cpu_affinity = super::task::CpuSet::single(cpu_id);
+
+    // Get raw pointer to idle task
+    let idle_ptr = NonNull::new(Box::leak(idle_task) as *mut _).unwrap();
+
+    // Initialize per-CPU scheduler with idle task
+    if let Some(cpu_data) = per_cpu(cpu_id) {
+        let mut scheduler = cpu_data.cpu_info.scheduler.lock();
+        scheduler.init(idle_ptr);
     }
 }

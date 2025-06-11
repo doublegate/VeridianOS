@@ -16,7 +16,10 @@ use super::{
     error::{IpcError, Result},
     shared_memory::{Permission, SharedRegion},
 };
-use crate::mm::{PageFlags, PhysicalAddress, VirtualAddress};
+use crate::{
+    mm::{PageFlags, PhysicalAddress, VirtualAddress},
+    process::ProcessId,
+};
 
 /// Simple page table placeholder for IPC
 struct PageTable {
@@ -52,8 +55,8 @@ static ZERO_COPY_STATS: ZeroCopyStats = ZeroCopyStats {
 /// It's optimized for large transfers where copying would be expensive.
 pub fn zero_copy_transfer(
     region: &SharedRegion,
-    from_pid: u64,
-    to_pid: u64,
+    from_pid: ProcessId,
+    to_pid: ProcessId,
     flags: TransferFlags,
 ) -> Result<()> {
     let start = read_timestamp();
@@ -72,9 +75,30 @@ pub fn zero_copy_transfer(
 
     // Perform the transfer
     match flags.transfer_type {
-        TransferType::Move => transfer_move(region, &mut from_pt, &mut to_pt, num_pages)?,
-        TransferType::Share => transfer_share(region, &mut from_pt, &mut to_pt, num_pages)?,
-        TransferType::Copy => transfer_copy_on_write(region, &mut from_pt, &mut to_pt, num_pages)?,
+        TransferType::Move => transfer_move(
+            region,
+            from_pid,
+            to_pid,
+            &mut from_pt,
+            &mut to_pt,
+            num_pages,
+        )?,
+        TransferType::Share => transfer_share(
+            region,
+            from_pid,
+            to_pid,
+            &mut from_pt,
+            &mut to_pt,
+            num_pages,
+        )?,
+        TransferType::Copy => transfer_copy_on_write(
+            region,
+            from_pid,
+            to_pid,
+            &mut from_pt,
+            &mut to_pt,
+            num_pages,
+        )?,
     }
 
     // Update statistics
@@ -101,12 +125,14 @@ pub fn zero_copy_transfer(
 /// Transfer ownership of pages (unmap from source, map to destination)
 fn transfer_move(
     region: &SharedRegion,
+    from_pid: ProcessId,
+    to_pid: ProcessId,
     from_pt: &mut PageTable,
     to_pt: &mut PageTable,
     num_pages: usize,
 ) -> Result<()> {
     let from_vaddr = region
-        .get_mapping(from_pt.pid())
+        .get_mapping(from_pid)
         .ok_or(IpcError::InvalidMemoryRegion)?;
     let to_vaddr = allocate_virtual_range(to_pt, region.size())?;
 
@@ -128,8 +154,8 @@ fn transfer_move(
     }
 
     // Update region mapping
-    region.unmap(from_pt.pid())?;
-    region.map(to_pt.pid(), to_vaddr, Permission::Write)?;
+    region.unmap(from_pid)?;
+    region.map(to_pid, to_vaddr, Permission::Write)?;
 
     Ok(())
 }
@@ -137,12 +163,14 @@ fn transfer_move(
 /// Share pages between processes (map to both)
 fn transfer_share(
     region: &SharedRegion,
+    from_pid: ProcessId,
+    to_pid: ProcessId,
     from_pt: &mut PageTable,
     to_pt: &mut PageTable,
     num_pages: usize,
 ) -> Result<()> {
     let from_vaddr = region
-        .get_mapping(from_pt.pid())
+        .get_mapping(from_pid)
         .ok_or(IpcError::InvalidMemoryRegion)?;
     let to_vaddr = allocate_virtual_range(to_pt, region.size())?;
 
@@ -165,7 +193,7 @@ fn transfer_share(
     }
 
     // Update region mapping
-    region.map(to_pt.pid(), to_vaddr, Permission::Write)?;
+    region.map(to_pid, to_vaddr, Permission::Write)?;
 
     Ok(())
 }
@@ -173,12 +201,14 @@ fn transfer_share(
 /// Copy-on-write transfer (share initially, copy on write)
 fn transfer_copy_on_write(
     region: &SharedRegion,
+    from_pid: ProcessId,
+    to_pid: ProcessId,
     from_pt: &mut PageTable,
     to_pt: &mut PageTable,
     num_pages: usize,
 ) -> Result<()> {
     let from_vaddr = region
-        .get_mapping(from_pt.pid())
+        .get_mapping(from_pid)
         .ok_or(IpcError::InvalidMemoryRegion)?;
     let to_vaddr = allocate_virtual_range(to_pt, region.size())?;
 
@@ -202,7 +232,7 @@ fn transfer_copy_on_write(
     }
 
     // Update region mapping
-    region.map(to_pt.pid(), to_vaddr, Permission::Read)?;
+    region.map(to_pid, to_vaddr, Permission::Read)?;
 
     Ok(())
 }
@@ -248,8 +278,8 @@ pub fn grant_transfer_capability(
 #[cfg(feature = "alloc")]
 pub fn batch_zero_copy_transfer(
     transfers: &[(SharedRegion, TransferFlags)],
-    from_pid: u64,
-    to_pid: u64,
+    from_pid: ProcessId,
+    to_pid: ProcessId,
 ) -> Result<Vec<Result<()>>> {
     let mut results = Vec::with_capacity(transfers.len());
 
@@ -318,17 +348,17 @@ impl PageTableExt for PageTable {
     }
 }
 
-fn validate_transfer_capability(_from: u64, _to: u64, _region: u64) -> bool {
+fn validate_transfer_capability(_from: ProcessId, _to: ProcessId, _region: u64) -> bool {
     true
 }
-fn get_page_table(_pid: u64) -> Result<PageTable> {
+fn get_page_table(_pid: ProcessId) -> Result<PageTable> {
     // TODO: Get from process table
     Ok(PageTable::new())
 }
 fn allocate_virtual_range(_pt: &mut PageTable, _size: usize) -> Result<VirtualAddress> {
     Ok(VirtualAddress::new(0x200000))
 }
-fn flush_tlb_for_processes(_pids: &[u64]) {}
+fn flush_tlb_for_processes(_pids: &[ProcessId]) {}
 
 #[cfg(target_arch = "x86_64")]
 fn read_timestamp() -> u64 {

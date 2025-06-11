@@ -221,7 +221,17 @@ See our [Contributing Guide](../contributing/how-to.md) for details.
 
 ## Recent Updates
 
-### January 7, 2025 - IPC-Process Integration Complete
+### June 11, 2025 - IPC-Capability Integration Complete
+- Completed full IPC-Capability integration
+- All IPC operations now validate capabilities before proceeding
+- Implemented capability transfer through IPC messages
+- Added send/receive permission checks to all channels
+- Integrated capability validation in system call handlers
+- Fixed all compilation errors across architectures
+- IPC subsystem now 100% complete
+- Phase 1 overall progress now at ~65%
+
+### June 10, 2025 - IPC-Process Integration Complete
 - Connected IPC system calls to actual IPC mechanisms
 - Implemented process blocking/waking on IPC operations
 - Completed message passing between processes

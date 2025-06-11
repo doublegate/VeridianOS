@@ -112,7 +112,7 @@ impl TokenBucket {
 
     /// Reset the bucket for a new process
     fn reset(&self, pid: ProcessId, max_tokens: u32, refill_rate: u32) {
-        self.pid.store(pid, Ordering::Release);
+        self.pid.store(pid.0, Ordering::Release);
         self.tokens.store(max_tokens, Ordering::Release);
         self.max_tokens.store(max_tokens, Ordering::Release);
         self.refill_rate.store(refill_rate, Ordering::Release);
@@ -172,12 +172,12 @@ impl RateLimiter {
     /// Get or create a bucket for a process
     fn get_or_create_bucket(&self, pid: ProcessId, limits: &RateLimits) -> Result<&TokenBucket> {
         // Hash the PID to a bucket index
-        let index = (pid as usize) % MAX_PROCESSES;
+        let index = (pid.0 as usize) % MAX_PROCESSES;
         let bucket = &self.buckets[index];
 
         // Check if this bucket is for our process
         let current_pid = bucket.pid.load(Ordering::Acquire);
-        if current_pid == pid {
+        if current_pid == pid.0 {
             return Ok(bucket);
         }
 
@@ -185,7 +185,7 @@ impl RateLimiter {
         if current_pid == 0 {
             match bucket
                 .pid
-                .compare_exchange(0, pid, Ordering::Release, Ordering::Acquire)
+                .compare_exchange(0, pid.0, Ordering::Release, Ordering::Acquire)
             {
                 Ok(_) => {
                     // Successfully claimed, initialize it
@@ -198,7 +198,7 @@ impl RateLimiter {
                 }
                 Err(_) => {
                     // Someone else claimed it, check if it's ours now
-                    if bucket.pid.load(Ordering::Acquire) == pid {
+                    if bucket.pid.load(Ordering::Acquire) == pid.0 {
                         return Ok(bucket);
                     }
                 }
@@ -212,10 +212,10 @@ impl RateLimiter {
 
     /// Get statistics for a process
     pub fn get_stats(&self, pid: ProcessId) -> RateLimitStats {
-        let index = (pid as usize) % MAX_PROCESSES;
+        let index = (pid.0 as usize) % MAX_PROCESSES;
         let bucket = &self.buckets[index];
 
-        if bucket.pid.load(Ordering::Acquire) == pid {
+        if bucket.pid.load(Ordering::Acquire) == pid.0 {
             RateLimitStats {
                 messages_sent: bucket.messages_sent.load(Ordering::Relaxed),
                 bytes_sent: bucket.bytes_sent.load(Ordering::Relaxed),

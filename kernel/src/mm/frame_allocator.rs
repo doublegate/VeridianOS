@@ -117,6 +117,10 @@ impl PhysicalAddress {
         self.0
     }
 
+    pub const fn as_usize(&self) -> usize {
+        self.0 as usize
+    }
+
     pub const fn as_frame(&self) -> FrameNumber {
         FrameNumber::new(self.0 / FRAME_SIZE as u64)
     }

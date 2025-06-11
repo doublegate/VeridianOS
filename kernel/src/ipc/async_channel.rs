@@ -72,6 +72,22 @@ impl AsyncChannel {
             return Err(IpcError::EndpointNotFound);
         }
 
+        // Validate capability if provided
+        let cap_id = msg.capability();
+        if cap_id != 0 {
+            // Get current process's capability space
+            if let Some(current_process) = crate::process::current_process() {
+                if let Some(real_process) = crate::process::table::get_process(current_process.pid)
+                {
+                    let cap_space = real_process.capability_space.lock();
+                    let cap_token = crate::cap::CapabilityToken::from_u64(cap_id);
+
+                    // Check send permission
+                    crate::cap::ipc_integration::check_send_permission(cap_token, &cap_space)?;
+                }
+            }
+        }
+
         // Try to enqueue message
         match self.buffer.push(msg) {
             Ok(()) => {
@@ -115,6 +131,10 @@ impl AsyncChannel {
         if !self.active.load(Ordering::Acquire) {
             return Err(IpcError::EndpointNotFound);
         }
+
+        // For receiving, we check if the caller has receive permission
+        // This would typically be done at channel subscription time
+        // For now, we allow receives if the process has access to the channel
 
         match self.buffer.pop() {
             Some(msg) => {
