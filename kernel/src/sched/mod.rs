@@ -34,15 +34,20 @@ pub use scheduler::{SchedAlgorithm, SCHEDULER};
 pub use task::{Priority, SchedClass, SchedPolicy, Task};
 
 // Export functions needed by tests
+#[allow(unused_imports)]
 pub use self::scheduler::should_preempt;
 
 /// Set current task (for testing)
-pub fn set_current_task(task: *mut Task) {
+///
+/// # Safety
+/// The caller must ensure that the task pointer is valid and properly
+/// initialized
+pub unsafe fn set_current_task(task: *mut Task) {
     // This is a test helper function
     let scheduler = scheduler::current_scheduler();
     let mut sched = scheduler.lock();
     if !task.is_null() {
-        sched.current = Some(task_ptr::TaskPtr::new(unsafe { NonNull::new_unchecked(task) }));
+        sched.current = Some(task_ptr::TaskPtr::new(NonNull::new_unchecked(task)));
     } else {
         sched.current = None;
     }

@@ -38,15 +38,12 @@ pub mod bench;
 
 // Re-export for tests and benchmarks
 // Re-export memory management for tests
-pub use mm::{FrameNumber, MemoryRegion, FRAME_SIZE};
-pub use test_framework::{
-    exit_qemu, test_panic_handler, test_runner, QemuExitCode, Testable,
-    BenchmarkRunner, read_timestamp, cycles_to_ns,
-};
-
-// Re-export scheduler items for tests
-pub use sched::{Priority, SchedClass, Task};
-
+#[cfg(test)]
+pub use assert_err;
+#[cfg(test)]
+pub use assert_ok;
+#[cfg(test)]
+pub use assert_performance;
 // Re-export common test macros
 #[cfg(test)]
 pub use kernel_assert;
@@ -54,12 +51,13 @@ pub use kernel_assert;
 pub use kernel_assert_eq;
 #[cfg(test)]
 pub use kernel_bench;
-#[cfg(test)]
-pub use assert_ok;
-#[cfg(test)]
-pub use assert_err;
-#[cfg(test)]
-pub use assert_performance;
+pub use mm::{FrameNumber, MemoryRegion, FRAME_SIZE};
+// Re-export scheduler items for tests
+pub use sched::{Priority, SchedClass, Task};
+pub use test_framework::{
+    cycles_to_ns, exit_qemu, read_timestamp, test_panic_handler, test_runner, BenchmarkRunner,
+    QemuExitCode, Testable,
+};
 
 #[cfg(test)]
 #[no_mangle]

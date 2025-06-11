@@ -357,6 +357,25 @@ impl CfsRunQueue {
     }
 }
 
+impl Default for PriorityQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for ReadyQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl Default for CfsRunQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Convert priority to CFS weight
 fn priority_to_weight(priority: Priority) -> u64 {
     // Higher priority = higher weight = more CPU time

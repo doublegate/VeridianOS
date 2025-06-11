@@ -245,6 +245,12 @@ pub struct PerCpuData {
     pub tls: usize,
 }
 
+impl Default for CpuTopology {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Maximum number of CPUs
 pub const MAX_CPUS: usize = 256;
 

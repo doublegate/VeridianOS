@@ -640,6 +640,12 @@ fn current_cpu() -> u8 {
     super::smp::current_cpu_id()
 }
 
+impl Default for Scheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Default time slice
 const DEFAULT_TIME_SLICE: u32 = 10;
 

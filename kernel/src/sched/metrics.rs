@@ -241,6 +241,12 @@ impl PerCpuMetrics {
     }
 }
 
+impl Default for SchedulerMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Global scheduler metrics
 pub static SCHEDULER_METRICS: SchedulerMetrics = SchedulerMetrics::new();
 
@@ -274,23 +280,32 @@ pub fn read_tsc() -> u64 {
 pub fn print_metrics() {
     let summary = SCHEDULER_METRICS.get_summary();
 
-    println!("[SCHED] Scheduler Metrics:");
-    println!(
-        "  Context switches: {} (voluntary: {}, involuntary: {})",
-        summary.context_switches, summary.voluntary_switches, summary.involuntary_switches
-    );
-    println!(
-        "  Switch latency: avg={} cycles, min={}, max={}",
-        summary.avg_switch_latency, summary.min_switch_latency, summary.max_switch_latency
-    );
-    println!("  Scheduler overhead: {}%", summary.scheduler_overhead_pct);
-    println!("  Idle time: {}%", summary.idle_percentage);
-    println!(
-        "  Load balancing: {} ops, {} migrations",
-        summary.load_balance_count, summary.task_migrations
-    );
-    println!(
-        "  IPC: {} blocks, {} wakeups",
-        summary.ipc_blocks, summary.ipc_wakeups
-    );
+    #[cfg(target_arch = "x86_64")]
+    {
+        println!("[SCHED] Scheduler Metrics:");
+        println!(
+            "  Context switches: {} (voluntary: {}, involuntary: {})",
+            summary.context_switches, summary.voluntary_switches, summary.involuntary_switches
+        );
+        println!(
+            "  Switch latency: avg={} cycles, min={}, max={}",
+            summary.avg_switch_latency, summary.min_switch_latency, summary.max_switch_latency
+        );
+        println!("  Scheduler overhead: {}%", summary.scheduler_overhead_pct);
+        println!("  Idle time: {}%", summary.idle_percentage);
+        println!(
+            "  Load balancing: {} ops, {} migrations",
+            summary.load_balance_count, summary.task_migrations
+        );
+        println!(
+            "  IPC: {} blocks, {} wakeups",
+            summary.ipc_blocks, summary.ipc_wakeups
+        );
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        // Other architectures may not have println! available yet
+        let _ = summary;
+    }
 }

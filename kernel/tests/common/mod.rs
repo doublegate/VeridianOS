@@ -2,13 +2,12 @@
 
 #![no_std]
 
-use crate::test_framework::*;
-use crate::{serial_print, serial_println};
+use crate::{serial_print, serial_println, test_framework::*};
 
 /// Initialize test environment for a specific subsystem
 pub fn init_test_env(subsystem: &str) {
     serial_println!("\n=== {} Test Suite ===", subsystem);
-    
+
     // Initialize subsystems needed for testing
     #[cfg(feature = "alloc")]
     if crate::test_framework::TEST_REGISTRY.is_none() {
@@ -20,14 +19,14 @@ pub fn init_test_env(subsystem: &str) {
 #[cfg(feature = "alloc")]
 pub fn create_test_process(name: &str) -> crate::process::ProcessId {
     use crate::process::{Process, ProcessId};
-    
+
     // Create a minimal test process
     let pid = ProcessId(crate::process::table::next_pid());
     let process = Process::new(pid, name);
-    
+
     // Add to process table
     crate::process::table::insert_process(process);
-    
+
     pid
 }
 
@@ -39,18 +38,21 @@ pub fn cleanup_test_process(pid: crate::process::ProcessId) {
 
 /// Test helper for IPC operations
 pub mod ipc_helpers {
-    use crate::ipc::{self, ProcessId, Message, IpcCapability};
-    
+    use crate::ipc::{self, IpcCapability, Message, ProcessId};
+
     /// Create a test IPC channel
-    pub fn create_test_channel(owner: ProcessId, capacity: usize) -> Result<(u64, u64, IpcCapability, IpcCapability), ipc::IpcError> {
+    pub fn create_test_channel(
+        owner: ProcessId,
+        capacity: usize,
+    ) -> Result<(u64, u64, IpcCapability, IpcCapability), ipc::IpcError> {
         ipc::registry::create_channel(owner, capacity)
     }
-    
+
     /// Create a test endpoint
     pub fn create_test_endpoint(owner: ProcessId) -> Result<(u64, IpcCapability), ipc::IpcError> {
         ipc::registry::create_endpoint(owner)
     }
-    
+
     /// Send a test message
     pub fn send_test_message(msg: Message) -> Result<(), ipc::IpcError> {
         // Simplified test message send
@@ -60,14 +62,16 @@ pub mod ipc_helpers {
 
 /// Test helper for scheduler operations
 pub mod scheduler_helpers {
-    use crate::sched::{self, Task};
-    use crate::process::{ProcessId, ThreadId};
-    
+    use crate::{
+        process::{ProcessId, ThreadId},
+        sched::{self, Task},
+    };
+
     /// Create a test task
     pub fn create_test_task(name: &str, pid: ProcessId, tid: ThreadId) -> *mut Task {
         sched::create_task(name, pid, tid, 0, 0)
     }
-    
+
     /// Clean up test task
     pub fn cleanup_test_task(task: *mut Task) {
         unsafe {
@@ -81,13 +85,13 @@ pub mod scheduler_helpers {
 /// Test helper for memory operations
 pub mod memory_helpers {
     use crate::mm::{PhysicalAddress, VirtualAddress};
-    
+
     /// Allocate test memory frame
     pub fn alloc_test_frame() -> Option<PhysicalAddress> {
         // Use frame allocator when available
         Some(PhysicalAddress::new(0x100000)) // Placeholder
     }
-    
+
     /// Free test memory frame
     pub fn free_test_frame(addr: PhysicalAddress) {
         // Free frame when allocator available
@@ -128,7 +132,8 @@ macro_rules! assert_performance {
         if $time_ns >= $limit_ns {
             serial_println!(
                 "Performance assertion failed: {} ns >= {} ns",
-                $time_ns, $limit_ns
+                $time_ns,
+                $limit_ns
             );
             panic!("Performance requirement not met");
         }

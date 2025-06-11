@@ -4,13 +4,11 @@
 //! environment by using serial output and QEMU exit codes to report test
 //! results.
 
-use core::panic::PanicInfo;
-use core::time::Duration;
-
-use crate::{serial_print, serial_println};
-
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
+use core::{panic::PanicInfo, time::Duration};
+
+use crate::{serial_print, serial_println};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -170,6 +168,7 @@ macro_rules! kernel_assert_ne {
 // ===== Benchmark Infrastructure =====
 
 /// Trait for benchmarkable functions
+#[allow(dead_code)]
 pub trait Benchmark {
     fn run(&self, iterations: u64) -> Duration;
     fn warmup(&self, iterations: u64);
@@ -195,14 +194,14 @@ pub fn read_timestamp() -> u64 {
         use core::arch::x86_64::_rdtsc;
         _rdtsc()
     }
-    
+
     #[cfg(target_arch = "aarch64")]
     unsafe {
         let timestamp: u64;
         core::arch::asm!("mrs {}, cntvct_el0", out(reg) timestamp);
         timestamp
     }
-    
+
     #[cfg(target_arch = "riscv64")]
     unsafe {
         let timestamp: u64;
@@ -225,6 +224,12 @@ pub struct BenchmarkRunner {
     warmup_iterations: u64,
 }
 
+impl Default for BenchmarkRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BenchmarkRunner {
     pub const fn new() -> Self {
         Self {
@@ -238,28 +243,28 @@ impl BenchmarkRunner {
         F: FnMut(),
     {
         serial_print!("{}...\t", name);
-        
+
         // Warmup
         for _ in 0..self.warmup_iterations {
             f();
         }
-        
+
         // Actual benchmark
         let mut min_cycles = u64::MAX;
         let mut max_cycles = 0u64;
         let mut total_cycles = 0u64;
-        
+
         for _ in 0..self.iterations {
             let start = read_timestamp();
             f();
             let end = read_timestamp();
             let elapsed = end.saturating_sub(start);
-            
+
             total_cycles += elapsed;
             min_cycles = min_cycles.min(elapsed);
             max_cycles = max_cycles.max(elapsed);
         }
-        
+
         let avg_cycles = total_cycles / self.iterations;
         let result = BenchmarkResult {
             name,
@@ -269,7 +274,7 @@ impl BenchmarkRunner {
             min_time_ns: cycles_to_ns(min_cycles),
             max_time_ns: cycles_to_ns(max_cycles),
         };
-        
+
         serial_println!("[ok] avg: {} ns", result.avg_time_ns);
         result
     }
@@ -281,12 +286,14 @@ macro_rules! kernel_bench {
     ($name:ident, $body:expr) => {
         #[test_case]
         fn $name() {
-            use $crate::test_framework::{BenchmarkRunner, cycles_to_ns, read_timestamp};
+            use $crate::test_framework::{cycles_to_ns, read_timestamp, BenchmarkRunner};
             let runner = BenchmarkRunner::new();
-            let result = runner.run_benchmark(stringify!($name), || {
-                $body
-            });
-            serial_println!("  Min: {} ns, Max: {} ns", result.min_time_ns, result.max_time_ns);
+            let result = runner.run_benchmark(stringify!($name), || $body);
+            serial_println!(
+                "  Min: {} ns, Max: {} ns",
+                result.min_time_ns,
+                result.max_time_ns
+            );
         }
     };
 }
@@ -294,12 +301,14 @@ macro_rules! kernel_bench {
 // ===== Test Registry =====
 
 #[cfg(feature = "alloc")]
+#[allow(dead_code)]
 pub struct TestRegistry {
     tests: Vec<(&'static str, fn())>,
     benchmarks: Vec<(&'static str, fn())>,
 }
 
 #[cfg(feature = "alloc")]
+#[allow(dead_code)]
 impl TestRegistry {
     pub const fn new() -> Self {
         Self {
@@ -307,19 +316,19 @@ impl TestRegistry {
             benchmarks: Vec::new(),
         }
     }
-    
+
     pub fn register_test(&mut self, name: &'static str, test: fn()) {
         self.tests.push((name, test));
     }
-    
+
     pub fn register_benchmark(&mut self, name: &'static str, bench: fn()) {
         self.benchmarks.push((name, bench));
     }
-    
+
     pub fn run_all(&self) -> (usize, usize) {
         let mut passed = 0;
         let failed = 0;
-        
+
         serial_println!("Running {} tests", self.tests.len());
         for (name, test) in &self.tests {
             serial_print!("{}...\t", name);
@@ -327,22 +336,24 @@ impl TestRegistry {
             serial_println!("[ok]");
             passed += 1;
         }
-        
+
         if !self.benchmarks.is_empty() {
             serial_println!("\nRunning {} benchmarks", self.benchmarks.len());
             for (_name, bench) in &self.benchmarks {
                 bench();
             }
         }
-        
+
         (passed, failed)
     }
 }
 
 #[cfg(feature = "alloc")]
+#[allow(dead_code)]
 pub static mut TEST_REGISTRY: Option<TestRegistry> = None;
 
 #[cfg(feature = "alloc")]
+#[allow(dead_code)]
 pub fn init_test_registry() {
     unsafe {
         TEST_REGISTRY = Some(TestRegistry::new());
@@ -356,11 +367,9 @@ macro_rules! register_test {
         #[allow(non_snake_case)]
         #[used]
         #[link_section = ".test_registry"]
-        static $name: fn() = || {
-            unsafe {
-                if let Some(registry) = &mut $crate::test_framework::TEST_REGISTRY {
-                    registry.register_test(stringify!($name), $name);
-                }
+        static $name: fn() = || unsafe {
+            if let Some(registry) = &mut $crate::test_framework::TEST_REGISTRY {
+                registry.register_test(stringify!($name), $name);
             }
         };
     };
@@ -369,6 +378,7 @@ macro_rules! register_test {
 // ===== Test Timeout Support =====
 
 /// Run a test with a timeout (uses architecture-specific timer)
+#[allow(dead_code)]
 pub fn run_with_timeout<F>(f: F, timeout_cycles: u64) -> Result<(), &'static str>
 where
     F: FnOnce(),
@@ -376,7 +386,7 @@ where
     let start = read_timestamp();
     f();
     let end = read_timestamp();
-    
+
     if end.saturating_sub(start) > timeout_cycles {
         Err("Test timeout exceeded")
     } else {

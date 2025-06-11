@@ -1,8 +1,12 @@
+<div align="center">
+
 # VeridianOS
 
-<img src="images/VeridianOS_Logo-Only.png" alt="VeridianOS Logo" width="50%" />
+<img src="images/VeridianOS_Logo-Only.png" alt="VeridianOS Logo" width="60%" />
 
 ## A next-generation microkernel operating system built with Rust
+
+</div>
 
 [![CI Status](https://github.com/doublegate/VeridianOS/workflows/CI/badge.svg)](https://github.com/doublegate/VeridianOS/actions)
 [![Coverage](https://codecov.io/gh/doublegate/VeridianOS/branch/main/graph/badge.svg)](https://codecov.io/gh/doublegate/VeridianOS)
@@ -12,7 +16,7 @@
 
 ## Overview
 
-VeridianOS is a modern microkernel operating system written entirely in Rust, emphasizing security, modularity, and performance. It features a capability-based security model, zero-copy IPC, and support for multiple architectures.
+VeridianOS is a modern microkernel operating system written entirely in Rust, emphasizing security, modularity, and performance. It features a capability-based security model, zero-copy IPC, and supports multiple architectures with a focus on reliability and performance.
 
 ### Key Features
 
@@ -158,7 +162,7 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 VeridianOS uses a microkernel architecture with the following key components:
 
-```ascii
+```
 ┌─────────────────────────────────────────────┐
 │              User Applications              │
 ├─────────────────────────────────────────────┤
@@ -227,7 +231,7 @@ Security is a fundamental design principle:
 
 ## Community
 
-- 💬 [Discord Server](https://discord.gg/veridian) - Real-time chat
+- 💬 [Discord Server](https://discord.gg/24KbHS4C) - Real-time chat
 - 📧 [Mailing List](https://lists.veridian-os.org) - Development discussions
 - 🐛 [Issue Tracker](https://github.com/doublegate/VeridianOS/issues) - Bug reports and features
 - 📝 [Forum](https://forum.veridian-os.org) - Long-form discussions
@@ -292,6 +296,10 @@ VeridianOS builds upon ideas from many excellent operating systems:
 
 ---
 
-<img src="images/VeridianOS_Full-Logo.png" alt="VeridianOS Full Banner" width="50%" />
+<div align="center">
+
+<img src="images/VeridianOS_Full-Logo.png" alt="VeridianOS Full Banner" width="60%" />
 
 **Building the future of operating systems, one commit at a time.**
+
+</div>

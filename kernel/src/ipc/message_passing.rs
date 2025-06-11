@@ -248,7 +248,10 @@ pub fn send_to_endpoint(msg: Message, endpoint_id: EndpointId) -> Result<()> {
                         receiver_pid,
                     ) {
                         // Log capability transfer failure but don't fail the message send
+                        #[cfg(target_arch = "x86_64")]
                         println!("[IPC] Capability transfer failed: {:?}", e);
+                        #[cfg(not(target_arch = "x86_64"))]
+                        let _ = e;
                     }
                 }
             }
