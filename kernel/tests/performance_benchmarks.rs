@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 
 use veridian_kernel::{
     cap::{CapabilitySpace, CapabilityToken, Rights},
-    ipc::{self, ProcessId, perf::read_timestamp},
+    ipc::{self, perf::read_timestamp, ProcessId},
     serial_println,
 };
 
@@ -34,35 +34,36 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 fn bench_ipc_small_message_latency() {
     serial_println!("bench_ipc_small_message_latency...");
     ipc::init();
-    
+
     // Create channel
-    let (_send_id, _recv_id, _send_cap, _recv_cap) = 
+    let (_send_id, _recv_id, _send_cap, _recv_cap) =
         ipc::registry::create_channel(ProcessId(1), 1000).expect("Failed to create channel");
-    
+
     // Prepare message
     let msg = ipc::Message::small(0, 1);
-    
+
     // Measure send/receive latency
     let mut total_cycles = 0u64;
-    
+
     for _ in 0..ITERATIONS {
         let start = read_timestamp();
         // In a real implementation, we would send and receive
         // For now, just measure message creation
         let _ = msg.clone();
         let end = read_timestamp();
-        
+
         total_cycles += end - start;
     }
-    
+
     let avg_cycles = total_cycles / ITERATIONS as u64;
     let avg_ns = ipc::perf::cycles_to_ns(avg_cycles);
-    
+
     serial_println!(
         "  IPC small message latency: {} cycles ({} ns)",
-        avg_cycles, avg_ns
+        avg_cycles,
+        avg_ns
     );
-    
+
     // Target: < 1000ns (1µs)
     assert!(avg_ns < 1000, "IPC latency exceeds target of 1µs");
     serial_println!("[ok]");
@@ -71,9 +72,9 @@ fn bench_ipc_small_message_latency() {
 #[test_case]
 fn bench_capability_lookup() {
     serial_println!("bench_capability_lookup...");
-    
+
     let cap_space = CapabilitySpace::new();
-    
+
     // Insert capabilities
     for i in 0..100 {
         let cap = CapabilityToken::new(i, 0);
@@ -87,28 +88,25 @@ fn bench_capability_lookup() {
             )
             .expect("Insert failed");
     }
-    
+
     // Measure lookup time
     let mut total_cycles = 0u64;
     let test_cap = CapabilityToken::new(50, 0);
-    
+
     for _ in 0..ITERATIONS {
         let start = read_timestamp();
         let rights = cap_space.lookup(test_cap);
         let end = read_timestamp();
-        
+
         total_cycles += end - start;
         assert!(rights.is_some());
     }
-    
+
     let avg_cycles = total_cycles / ITERATIONS as u64;
     let avg_ns = ipc::perf::cycles_to_ns(avg_cycles);
-    
-    serial_println!(
-        "  Capability lookup: {} cycles ({} ns)",
-        avg_cycles, avg_ns
-    );
-    
+
+    serial_println!("  Capability lookup: {} cycles ({} ns)", avg_cycles, avg_ns);
+
     // Target: O(1) operation should be < 100ns
     assert!(avg_ns < 100, "Capability lookup exceeds target");
     serial_println!("[ok]");
@@ -117,17 +115,17 @@ fn bench_capability_lookup() {
 #[test_case]
 fn bench_memory_allocation() {
     serial_println!("bench_memory_allocation...");
-    
-    use veridian_kernel::mm::{FRAME_ALLOCATOR, PhysAddr};
-    
+
+    use veridian_kernel::mm::{PhysAddr, FRAME_ALLOCATOR};
+
     // Warm up allocator
     if let Some(frame) = FRAME_ALLOCATOR.allocate() {
         FRAME_ALLOCATOR.deallocate(frame);
     }
-    
+
     let mut total_cycles = 0u64;
     let mut frames = Vec::new();
-    
+
     // Measure allocation time
     for _ in 0..100 {
         let start = read_timestamp();
@@ -137,20 +135,17 @@ fn bench_memory_allocation() {
         let end = read_timestamp();
         total_cycles += end - start;
     }
-    
+
     // Clean up
     for frame in frames {
         FRAME_ALLOCATOR.deallocate(frame);
     }
-    
+
     let avg_cycles = total_cycles / 100;
     let avg_ns = ipc::perf::cycles_to_ns(avg_cycles);
-    
-    serial_println!(
-        "  Memory allocation: {} cycles ({} ns)",
-        avg_cycles, avg_ns
-    );
-    
+
+    serial_println!("  Memory allocation: {} cycles ({} ns)", avg_cycles, avg_ns);
+
     // Target: < 1000ns (1µs)
     assert!(avg_ns < 1000, "Memory allocation exceeds target");
     serial_println!("[ok]");
@@ -159,10 +154,10 @@ fn bench_memory_allocation() {
 #[test_case]
 fn bench_context_switch() {
     serial_println!("bench_context_switch...");
-    
+
     // This would require actual scheduler implementation
     // For now, just measure the cost of saving/restoring registers
-    
+
     let start = read_timestamp();
     for _ in 0..ITERATIONS {
         // Simulate context save/restore
@@ -171,16 +166,17 @@ fn bench_context_switch() {
         }
     }
     let end = read_timestamp();
-    
+
     let total_cycles = end - start;
     let avg_cycles = total_cycles / ITERATIONS as u64;
     let avg_ns = ipc::perf::cycles_to_ns(avg_cycles);
-    
+
     serial_println!(
         "  Context switch overhead: {} cycles ({} ns)",
-        avg_cycles, avg_ns
+        avg_cycles,
+        avg_ns
     );
-    
+
     // Target: < 10000ns (10µs)
     // Note: This is just measuring overhead, not actual context switch
     serial_println!("[ok]");
@@ -190,28 +186,31 @@ fn bench_context_switch() {
 fn bench_zero_copy_transfer() {
     serial_println!("bench_zero_copy_transfer...");
     ipc::init();
-    
+
     // Create shared region
-    let region = ipc::shared_memory::SharedRegion::new(1, 4096, ipc::shared_memory::Permissions::READ_WRITE);
-    
+    let region =
+        ipc::shared_memory::SharedRegion::new(1, 4096, ipc::shared_memory::Permissions::READ_WRITE);
+
     let mut total_cycles = 0u64;
-    
+
     for i in 0..100 {
         let start = read_timestamp();
-        let _cap = region.create_capability(ProcessId(i + 2), ipc::shared_memory::TransferMode::Share);
+        let _cap =
+            region.create_capability(ProcessId(i + 2), ipc::shared_memory::TransferMode::Share);
         let end = read_timestamp();
-        
+
         total_cycles += end - start;
     }
-    
+
     let avg_cycles = total_cycles / 100;
     let avg_ns = ipc::perf::cycles_to_ns(avg_cycles);
-    
+
     serial_println!(
         "  Zero-copy transfer: {} cycles ({} ns)",
-        avg_cycles, avg_ns
+        avg_cycles,
+        avg_ns
     );
-    
+
     // Should be much faster than copying data
     assert!(avg_ns < 500, "Zero-copy transfer too slow");
     serial_println!("[ok]");

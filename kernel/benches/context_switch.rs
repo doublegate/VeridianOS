@@ -51,7 +51,7 @@ pub extern "C" fn _start() -> ! {
 
 fn benchmark_minimal_context_switch() -> BenchmarkResult {
     use veridian_kernel::bench::{cycles_to_ns, read_timestamp};
-    
+
     // Simulate minimal context switch (registers only)
     let start = read_timestamp();
     for _ in 0..ITERATIONS {
@@ -98,11 +98,11 @@ fn benchmark_minimal_context_switch() -> BenchmarkResult {
         }
     }
     let end = read_timestamp();
-    
+
     let total_cycles = end - start;
     let avg_cycles = total_cycles / ITERATIONS;
     let avg_ns = cycles_to_ns(avg_cycles);
-    
+
     BenchmarkResult {
         name: alloc::string::String::from("Minimal Context Switch"),
         iterations: ITERATIONS,
@@ -115,7 +115,7 @@ fn benchmark_minimal_context_switch() -> BenchmarkResult {
 
 fn benchmark_full_context_switch() -> BenchmarkResult {
     use veridian_kernel::bench::{cycles_to_ns, read_timestamp};
-    
+
     // Simulate full context switch including segment registers
     let start = read_timestamp();
     for _ in 0..ITERATIONS {
@@ -131,11 +131,11 @@ fn benchmark_full_context_switch() -> BenchmarkResult {
         restore_context(&context);
     }
     let end = read_timestamp();
-    
+
     let total_cycles = end - start;
     let avg_cycles = total_cycles / ITERATIONS;
     let avg_ns = cycles_to_ns(avg_cycles);
-    
+
     BenchmarkResult {
         name: alloc::string::String::from("Full Context Switch"),
         iterations: ITERATIONS,
@@ -148,7 +148,7 @@ fn benchmark_full_context_switch() -> BenchmarkResult {
 
 fn benchmark_fpu_context_switch() -> BenchmarkResult {
     use veridian_kernel::bench::{cycles_to_ns, read_timestamp};
-    
+
     // Simulate context switch with FPU state
     let start = read_timestamp();
     for _ in 0..ITERATIONS {
@@ -172,11 +172,11 @@ fn benchmark_fpu_context_switch() -> BenchmarkResult {
         }
     }
     let end = read_timestamp();
-    
+
     let total_cycles = end - start;
     let avg_cycles = total_cycles / ITERATIONS;
     let avg_ns = cycles_to_ns(avg_cycles);
-    
+
     BenchmarkResult {
         name: alloc::string::String::from("FPU Context Switch"),
         iterations: ITERATIONS,

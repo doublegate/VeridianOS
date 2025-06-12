@@ -10,10 +10,7 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 
-use veridian_kernel::{
-    bench::BenchmarkResult,
-    serial_println,
-};
+use veridian_kernel::{bench::BenchmarkResult, serial_println};
 
 const IPC_TARGET_NS: u64 = 5000; // 5μs target
 const ITERATIONS: u64 = 1000;
@@ -53,9 +50,11 @@ pub extern "C" fn _start() -> ! {
 }
 
 fn benchmark_small_message_ipc() -> BenchmarkResult {
-    use veridian_kernel::bench::{cycles_to_ns, read_timestamp};
-    use veridian_kernel::ipc::{Message, SmallMessage};
-    
+    use veridian_kernel::{
+        bench::{cycles_to_ns, read_timestamp},
+        ipc::{Message, SmallMessage},
+    };
+
     // Benchmark small message IPC (≤64 bytes)
     let start = read_timestamp();
     for _ in 0..ITERATIONS {
@@ -81,11 +80,11 @@ fn benchmark_small_message_ipc() -> BenchmarkResult {
         }
     }
     let end = read_timestamp();
-    
+
     let total_cycles = end - start;
     let avg_cycles = total_cycles / ITERATIONS;
     let avg_ns = cycles_to_ns(avg_cycles);
-    
+
     BenchmarkResult {
         name: alloc::string::String::from("Small Message IPC"),
         iterations: ITERATIONS,
@@ -97,9 +96,11 @@ fn benchmark_small_message_ipc() -> BenchmarkResult {
 }
 
 fn benchmark_large_message_ipc() -> BenchmarkResult {
-    use veridian_kernel::bench::{cycles_to_ns, read_timestamp};
-    use veridian_kernel::ipc::{Message, message::MemoryRegion};
-    
+    use veridian_kernel::{
+        bench::{cycles_to_ns, read_timestamp},
+        ipc::{message::MemoryRegion, Message},
+    };
+
     // Benchmark large message IPC (>64 bytes)
     let start = read_timestamp();
     for _ in 0..ITERATIONS {
@@ -122,11 +123,11 @@ fn benchmark_large_message_ipc() -> BenchmarkResult {
         }
     }
     let end = read_timestamp();
-    
+
     let total_cycles = end - start;
     let avg_cycles = total_cycles / ITERATIONS;
     let avg_ns = cycles_to_ns(avg_cycles);
-    
+
     BenchmarkResult {
         name: alloc::string::String::from("Large Message IPC"),
         iterations: ITERATIONS,
@@ -138,9 +139,11 @@ fn benchmark_large_message_ipc() -> BenchmarkResult {
 }
 
 fn benchmark_capability_passing() -> BenchmarkResult {
-    use veridian_kernel::bench::{cycles_to_ns, read_timestamp};
-    use veridian_kernel::ipc::{IpcCapability, IpcPermissions};
-    
+    use veridian_kernel::{
+        bench::{cycles_to_ns, read_timestamp},
+        ipc::{IpcCapability, IpcPermissions},
+    };
+
     // Benchmark actual capability operations
     let start = read_timestamp();
     for _ in 0..ITERATIONS {
@@ -159,11 +162,11 @@ fn benchmark_capability_passing() -> BenchmarkResult {
         let _ = (id, has_send, has_recv, derived);
     }
     let end = read_timestamp();
-    
+
     let total_cycles = end - start;
     let avg_cycles = total_cycles / ITERATIONS;
     let avg_ns = cycles_to_ns(avg_cycles);
-    
+
     BenchmarkResult {
         name: alloc::string::String::from("Capability Passing"),
         iterations: ITERATIONS,

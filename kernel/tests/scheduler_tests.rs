@@ -198,7 +198,7 @@ fn test_cpu_load_tracking() {
 fn bench_task_creation() {
     serial_println!("bench_task_creation...");
     sched::init();
-    
+
     let start = read_timestamp();
     for i in 100..200 {
         unsafe {
@@ -208,7 +208,11 @@ fn bench_task_creation() {
     }
     let elapsed = read_timestamp() - start;
     let avg_cycles = elapsed / 100;
-    serial_println!("  Average: {} cycles ({} ns)", avg_cycles, cycles_to_ns(avg_cycles));
+    serial_println!(
+        "  Average: {} cycles ({} ns)",
+        avg_cycles,
+        cycles_to_ns(avg_cycles)
+    );
     serial_println!("[ok]");
 }
 
@@ -232,7 +236,11 @@ fn bench_context_switch() {
     serial_println!("Context switch time: {} ns", result.avg_time_ns);
 
     // Context switch should be <10μs
-    assert!(result.avg_time_ns < 10000, "Context switch too slow: {} ns", result.avg_time_ns);
+    assert!(
+        result.avg_time_ns < 10000,
+        "Context switch too slow: {} ns",
+        result.avg_time_ns
+    );
     serial_println!("[ok]");
 
     // Cleanup

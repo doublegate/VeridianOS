@@ -9,10 +9,7 @@
 use core::panic::PanicInfo;
 
 use veridian_kernel::{
-    ipc::{
-        shared_memory::Permission,
-        IpcCapability, IpcPermissions, Message, SmallMessage,
-    },
+    ipc::{shared_memory::Permission, IpcCapability, IpcPermissions, Message, SmallMessage},
     serial_print, serial_println,
 };
 

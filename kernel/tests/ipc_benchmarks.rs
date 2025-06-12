@@ -42,7 +42,11 @@ fn bench_small_message_creation() {
     }
     let elapsed = read_timestamp() - start;
     let avg_cycles = elapsed / 1000;
-    serial_println!("  Average: {} cycles ({} ns)", avg_cycles, cycles_to_ns(avg_cycles));
+    serial_println!(
+        "  Average: {} cycles ({} ns)",
+        avg_cycles,
+        cycles_to_ns(avg_cycles)
+    );
     serial_println!("[ok]");
 }
 
@@ -58,7 +62,11 @@ fn bench_large_message_creation() {
     }
     let elapsed = read_timestamp() - start;
     let avg_cycles = elapsed / 1000;
-    serial_println!("  Average: {} cycles ({} ns)", avg_cycles, cycles_to_ns(avg_cycles));
+    serial_println!(
+        "  Average: {} cycles ({} ns)",
+        avg_cycles,
+        cycles_to_ns(avg_cycles)
+    );
     serial_println!("[ok]");
 }
 
@@ -78,7 +86,11 @@ fn bench_endpoint_creation() {
 
     // Endpoint creation should be fast (<1μs)
     serial_println!("  Average: {} ns", result.avg_time_ns);
-    assert!(result.avg_time_ns < 1000, "Endpoint creation too slow: {} ns", result.avg_time_ns);
+    assert!(
+        result.avg_time_ns < 1000,
+        "Endpoint creation too slow: {} ns",
+        result.avg_time_ns
+    );
     serial_println!("[ok]");
 }
 
@@ -97,7 +109,11 @@ fn bench_channel_creation() {
 
     // Channel creation should be reasonably fast (<5μs)
     serial_println!("  Average: {} ns", result.avg_time_ns);
-    assert!(result.avg_time_ns < 5000, "Channel creation too slow: {} ns", result.avg_time_ns);
+    assert!(
+        result.avg_time_ns < 5000,
+        "Channel creation too slow: {} ns",
+        result.avg_time_ns
+    );
     serial_println!("[ok]");
 }
 
@@ -118,7 +134,11 @@ fn bench_async_channel_send_receive() {
 
     // Single message round-trip should be very fast (<1μs)
     serial_println!("  Average: {} ns", result.avg_time_ns);
-    assert!(result.avg_time_ns < 1000, "Async send/receive too slow: {} ns", result.avg_time_ns);
+    assert!(
+        result.avg_time_ns < 1000,
+        "Async send/receive too slow: {} ns",
+        result.avg_time_ns
+    );
     serial_println!("[ok]");
 }
 
@@ -165,7 +185,11 @@ fn bench_shared_region_creation() {
     }
     let elapsed = read_timestamp() - start;
     let avg_cycles = elapsed / 100;
-    serial_println!("  Average: {} cycles ({} ns)", avg_cycles, cycles_to_ns(avg_cycles));
+    serial_println!(
+        "  Average: {} cycles ({} ns)",
+        avg_cycles,
+        cycles_to_ns(avg_cycles)
+    );
     serial_println!("[ok]");
 }
 
@@ -184,7 +208,11 @@ fn bench_capability_validation() {
 
     // Capability validation should be O(1) and very fast
     serial_println!("  Average: {} ns", result.avg_time_ns);
-    assert!(result.avg_time_ns < 100, "Capability validation too slow: {} ns", result.avg_time_ns);
+    assert!(
+        result.avg_time_ns < 100,
+        "Capability validation too slow: {} ns",
+        result.avg_time_ns
+    );
     serial_println!("[ok]");
 }
 

@@ -72,20 +72,22 @@ fn init_test_allocator() {
 fn benchmark_small_allocation() -> BenchmarkResult {
     // Benchmark small allocations (64 bytes)
     use alloc::vec::Vec;
-    
+
     let start = read_timestamp();
     for _ in 0..ITERATIONS {
         let v: Vec<u8> = Vec::with_capacity(64);
         // Force the allocation to not be optimized away
         // Use a volatile read to prevent optimization
-        unsafe { core::ptr::read_volatile(&v as *const _); }
+        unsafe {
+            core::ptr::read_volatile(&v as *const _);
+        }
     }
     let end = read_timestamp();
-    
+
     let total_cycles = end - start;
     let avg_cycles = total_cycles / ITERATIONS;
     let avg_ns = cycles_to_ns(avg_cycles);
-    
+
     BenchmarkResult {
         name: alloc::string::String::from("Small Allocation"),
         iterations: ITERATIONS,
@@ -99,18 +101,20 @@ fn benchmark_small_allocation() -> BenchmarkResult {
 fn benchmark_medium_allocation() -> BenchmarkResult {
     // Benchmark medium allocations (4KB - typical page size)
     use alloc::vec::Vec;
-    
+
     let start = read_timestamp();
     for _ in 0..ITERATIONS {
         let v: Vec<u8> = Vec::with_capacity(4096);
-        unsafe { core::ptr::read_volatile(&v as *const _); }
+        unsafe {
+            core::ptr::read_volatile(&v as *const _);
+        }
     }
     let end = read_timestamp();
-    
+
     let total_cycles = end - start;
     let avg_cycles = total_cycles / ITERATIONS;
     let avg_ns = cycles_to_ns(avg_cycles);
-    
+
     BenchmarkResult {
         name: alloc::string::String::from("Medium Allocation"),
         iterations: ITERATIONS,
@@ -124,20 +128,22 @@ fn benchmark_medium_allocation() -> BenchmarkResult {
 fn benchmark_large_allocation() -> BenchmarkResult {
     // Benchmark large allocations (64KB)
     use alloc::vec::Vec;
-    
+
     let iterations = ITERATIONS / 10;
     let start = read_timestamp();
     for _ in 0..iterations {
         // Fewer iterations for large allocs
         let v: Vec<u8> = Vec::with_capacity(65536);
-        unsafe { core::ptr::read_volatile(&v as *const _); }
+        unsafe {
+            core::ptr::read_volatile(&v as *const _);
+        }
     }
     let end = read_timestamp();
-    
+
     let total_cycles = end - start;
     let avg_cycles = total_cycles / iterations;
     let avg_ns = cycles_to_ns(avg_cycles);
-    
+
     BenchmarkResult {
         name: alloc::string::String::from("Large Allocation"),
         iterations,
@@ -150,7 +156,7 @@ fn benchmark_large_allocation() -> BenchmarkResult {
 
 fn benchmark_deallocation() -> BenchmarkResult {
     use alloc::vec::Vec;
-    
+
     // Pre-allocate vectors for deallocation benchmark
     let mut vectors: Vec<Vec<u8>> = Vec::with_capacity(ITERATIONS as usize);
     for _ in 0..ITERATIONS {
@@ -174,7 +180,7 @@ fn benchmark_deallocation() -> BenchmarkResult {
 
     let avg_cycles = total_cycles / ITERATIONS;
     let avg_ns = cycles_to_ns(avg_cycles);
-    
+
     BenchmarkResult {
         name: alloc::string::String::from("Deallocation"),
         iterations: ITERATIONS,

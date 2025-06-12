@@ -68,6 +68,10 @@ harness = false
 name = "process_tests"
 harness = false
 
+[[test]]
+name = "should_panic"
+harness = false
+
 # Benchmarks
 [[bench]]
 name = "ipc_latency"

@@ -308,7 +308,7 @@ fn test_process_table_operations() {
 fn bench_process_creation() {
     serial_println!("bench_process_creation...");
     process::init();
-    
+
     let start = read_timestamp();
     for i in 1000..1100 {
         let pid = ProcessId(i);
@@ -317,7 +317,11 @@ fn bench_process_creation() {
     }
     let elapsed = read_timestamp() - start;
     let avg_cycles = elapsed / 100;
-    serial_println!("  Average: {} cycles ({} ns)", avg_cycles, cycles_to_ns(avg_cycles));
+    serial_println!(
+        "  Average: {} cycles ({} ns)",
+        avg_cycles,
+        cycles_to_ns(avg_cycles)
+    );
     serial_println!("[ok]");
 }
 
@@ -325,7 +329,7 @@ fn bench_process_creation() {
 fn bench_thread_creation() {
     serial_println!("bench_thread_creation...");
     process::init();
-    
+
     let start = read_timestamp();
     for i in 2000..2100 {
         let tid = ThreadId(i);
@@ -334,16 +338,20 @@ fn bench_thread_creation() {
     }
     let elapsed = read_timestamp() - start;
     let avg_cycles = elapsed / 100;
-    serial_println!("  Average: {} cycles ({} ns)", avg_cycles, cycles_to_ns(avg_cycles));
+    serial_println!(
+        "  Average: {} cycles ({} ns)",
+        avg_cycles,
+        cycles_to_ns(avg_cycles)
+    );
     serial_println!("[ok]");
 }
 
 #[test_case]
 fn bench_mutex_lock_unlock() {
     serial_println!("bench_mutex_lock_unlock...");
-    
+
     let mutex = KernelMutex::new();
-    
+
     let start = read_timestamp();
     for _ in 0..1000 {
         mutex.try_lock();
@@ -351,7 +359,11 @@ fn bench_mutex_lock_unlock() {
     }
     let elapsed = read_timestamp() - start;
     let avg_cycles = elapsed / 1000;
-    serial_println!("  Average: {} cycles ({} ns)", avg_cycles, cycles_to_ns(avg_cycles));
+    serial_println!(
+        "  Average: {} cycles ({} ns)",
+        avg_cycles,
+        cycles_to_ns(avg_cycles)
+    );
     serial_println!("[ok]");
 }
 
@@ -375,7 +387,11 @@ fn bench_process_table_lookup() {
     serial_println!("Process table lookup: {} ns", result.avg_time_ns);
 
     // Lookup should be fast (O(1) or O(log n))
-    assert!(result.avg_time_ns < 500, "Process table lookup too slow: {} ns", result.avg_time_ns);
+    assert!(
+        result.avg_time_ns < 500,
+        "Process table lookup too slow: {} ns",
+        result.avg_time_ns
+    );
     serial_println!("[ok]");
 
     // Cleanup
