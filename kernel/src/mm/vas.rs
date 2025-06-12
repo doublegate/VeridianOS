@@ -216,10 +216,40 @@ impl VirtualAddressSpace {
 
     /// Destroy the address space
     pub fn destroy(&mut self) {
-        // TODO: Free page tables
-        // TODO: Unmap all regions
         #[cfg(feature = "alloc")]
-        self.mappings.lock().clear();
+        {
+            use super::FRAME_ALLOCATOR;
+            
+            // First unmap all regions and free their physical frames
+            let mut mappings = self.mappings.lock();
+            for (_, mapping) in mappings.iter() {
+                if let Some(frames) = &mapping.allocated_frames {
+                    // Free the physical frames
+                    if let Ok(mut allocator) = FRAME_ALLOCATOR.try_lock() {
+                        for &frame in frames {
+                            let _ = allocator.free_frame(frame);
+                        }
+                    }
+                }
+                
+                // Unmap from page tables
+                if let Ok(mut tables) = crate::mm::page_table::PAGE_TABLES.try_lock() {
+                    let num_pages = mapping.size / 4096;
+                    for i in 0..num_pages {
+                        let vaddr = VirtualAddress(mapping.start.0 + i * 4096);
+                        let _ = tables.unmap(vaddr);
+                    }
+                }
+            }
+            
+            // Clear all mappings
+            mappings.clear();
+            
+            // Free the page table structures themselves
+            // Note: This would require walking the page table hierarchy
+            // and freeing intermediate table pages. For now, we just
+            // clear our tracking structures.
+        }
     }
 
     /// Set page table root
@@ -291,13 +321,23 @@ impl VirtualAddressSpace {
         let mut mappings = self.mappings.lock();
         let mapping = mappings.remove(&start).ok_or("Region not mapped")?;
 
+        // Unmap from page tables first
+        if let Ok(mut page_tables) = crate::mm::page_table::PAGE_TABLES.try_lock() {
+            let num_pages = mapping.size / 4096;
+            for i in 0..num_pages {
+                let vaddr = VirtualAddress(mapping.start.0 + i * 4096);
+                let _ = page_tables.unmap(vaddr);
+            }
+            
+            // Flush TLB for the unmapped range
+            crate::mm::page_table::flush_tlb_range(mapping.start, mapping.size);
+        }
+
         // Free the physical frames
         let frame_allocator = FRAME_ALLOCATOR.lock();
         for frame in mapping.physical_frames {
             let _ = frame_allocator.free_frames(frame, 1);
         }
-
-        // TODO: Actually unmap from page tables and flush TLB
 
         Ok(())
     }

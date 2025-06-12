@@ -1,28 +1,64 @@
 //! x86_64 system call entry point
 
-// TODO: Import syscall handler when syscall module is enabled
-// use crate::syscall::syscall_handler;
+use crate::syscall::syscall_handler;
+use core::arch::asm;
 
 /// x86_64 SYSCALL instruction entry point
 ///
-/// This is a placeholder implementation. The actual implementation
-/// requires naked function support which is currently unstable.
+/// This function handles the transition from user mode to kernel mode
+/// when a SYSCALL instruction is executed. It saves the user context,
+/// switches to the kernel stack, and calls the system call handler.
+///
+/// # Safety
+/// This function must only be called by the CPU's SYSCALL instruction.
+/// It expects specific register states as defined by the x86_64 ABI.
 #[no_mangle]
+#[naked]
 pub unsafe extern "C" fn syscall_entry() {
-    // Placeholder implementation
-    // In a real implementation, this would:
-    // 1. Save user context
-    // 2. Switch to kernel stack
-    // 3. Call syscall_handler
-    // 4. Restore user context
-    // 5. Return to user mode
-
-    // For now, just call the handler directly
-    // let _result = syscall_handler(0, 0, 0, 0, 0, 0);
+    asm!(
+        // Save user context on kernel stack
+        "swapgs",                    // Switch to kernel GS
+        "mov gs:[0x8], rsp",        // Save user RSP in per-CPU data
+        "mov rsp, gs:[0x0]",        // Load kernel RSP from per-CPU data
+        
+        // Save registers
+        "push rcx",                  // User RIP
+        "push r11",                  // User RFLAGS
+        "push rbp",
+        "push rbx",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
+        
+        // Call syscall handler with proper arguments
+        // rax = syscall number
+        // rdi = arg1, rsi = arg2, rdx = arg3
+        // r10 = arg4, r8 = arg5, r9 = arg6
+        "mov rcx, r10",              // Move arg4 to rcx (ABI mismatch fix)
+        "call {handler}",
+        
+        // Restore registers
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop rbx",
+        "pop rbp",
+        "pop r11",                   // User RFLAGS
+        "pop rcx",                   // User RIP
+        
+        // Restore user stack and return
+        "mov rsp, gs:[0x8]",        // Restore user RSP
+        "swapgs",                    // Switch back to user GS
+        "sysretq",
+        
+        handler = sym syscall_handler,
+        options(noreturn)
+    );
 }
 
 /// Initialize SYSCALL/SYSRET support
-#[allow(dead_code)]
 pub fn init_syscall() {
     use x86_64::registers::{
         model_specific::{Efer, EferFlags, LStar, Star},

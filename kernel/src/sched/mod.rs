@@ -272,17 +272,15 @@ pub fn wake_up_process(pid: ProcessId) {
                 .store(ProcessState::Ready as u32, Ordering::Release);
 
             // Find main thread and wake it
-            // TODO: Implement get_main_thread() method on Process
-            // if let Some(main_thread) = process.get_main_thread() {
-            //     main_thread.
-            // set_state(crate::process::thread::ThreadState::Ready);
+            if let Some(mut main_thread) = process.get_main_thread() {
+                main_thread.set_state(crate::process::thread::ThreadState::Ready);
 
-            //     // Try to schedule the thread if it has a task
-            //     if let Some(task_ptr) = main_thread.get_task_ptr() {
-            //         let target_cpu = smp::find_least_loaded_cpu();
-            //         scheduler::schedule_on_cpu(target_cpu, task_ptr);
-            //     }
-            // }
+                // Try to schedule the thread if it has a task
+                if let Some(task_ptr) = main_thread.get_task_ptr() {
+                    let target_cpu = smp::find_least_loaded_cpu();
+                    scheduler::schedule_on_cpu(target_cpu, task_ptr);
+                }
+            }
         }
     }
 }

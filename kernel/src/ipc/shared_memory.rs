@@ -248,10 +248,31 @@ impl SharedRegion {
     }
 
     /// Create a capability for this shared region
-    pub fn create_capability(&self, target_process: ProcessId, _mode: TransferMode) -> u64 {
-        // In a real implementation, this would create a capability token
-        // For now, return a unique value based on region ID and target
-        self.id ^ target_process.0
+    pub fn create_capability(&self, target_process: ProcessId, mode: TransferMode) -> u64 {
+        use crate::cap::{Capability, ObjectReference, Rights, CAPABILITY_MANAGER};
+        
+        // Determine rights based on transfer mode
+        let rights = match mode {
+            TransferMode::Move => Rights::READ | Rights::WRITE | Rights::GRANT,
+            TransferMode::Share => Rights::READ | Rights::WRITE,
+            TransferMode::CopyOnWrite => Rights::READ,
+        };
+        
+        // Create capability for shared memory region
+        let object_ref = ObjectReference::Memory {
+            region_id: self.id,
+            base: self.physical_base.0,
+            size: self.size,
+        };
+        
+        // Create and register the capability
+        let cap = Capability::new(object_ref, rights);
+        let token = cap.to_token();
+        
+        // Register with capability manager
+        CAPABILITY_MANAGER.lock().register(token, cap);
+        
+        token
     }
 
     /// Get the NUMA node for this region

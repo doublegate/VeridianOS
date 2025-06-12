@@ -10,7 +10,6 @@ pub fn get_ticks() -> u64 {
 }
 
 /// Increment timer ticks (called from timer interrupt)
-#[allow(dead_code)]
 pub fn tick() {
     TICKS.fetch_add(1, Ordering::Relaxed);
 

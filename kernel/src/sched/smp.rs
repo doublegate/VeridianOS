@@ -279,7 +279,30 @@ pub fn init() {
     // Initialize BSP (CPU 0)
     init_cpu(0);
 
-    // TODO: Wake up other CPUs
+    // Wake up Application Processors (APs)
+    wake_up_aps();
+}
+
+/// Wake up all Application Processors
+fn wake_up_aps() {
+    let topology = CPU_TOPOLOGY.lock();
+    let num_cpus = topology.total_cpus();
+    
+    if num_cpus <= 1 {
+        println!("[SMP] Single CPU system, no APs to wake");
+        return;
+    }
+    
+    println!("[SMP] Waking up {} Application Processors", num_cpus - 1);
+    
+    // Wake up each AP
+    for cpu_id in 1..num_cpus {
+        if let Err(e) = cpu_up(cpu_id as u8) {
+            println!("[SMP] Failed to wake CPU {}: {}", cpu_id, e);
+        } else {
+            println!("[SMP] Successfully woke CPU {}", cpu_id);
+        }
+    }
 }
 
 /// Initialize specific CPU
@@ -400,9 +423,28 @@ pub fn send_ipi(target_cpu: u8, vector: u8) {
     #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
     {
         // Use SBI IPI extension
-        // For now, just print a message
-        // TODO: Implement proper SBI IPI support
-        println!("[SMP] Would send IPI to RISC-V hart {}", target_cpu);
+        use riscv::register::satp;
+        
+        // Create hart mask for target CPU
+        let hart_mask = 1u64 << target_cpu;
+        let hart_mask_base = 0;
+        
+        // SBI call to send IPI
+        // Function ID 0x735049 ('sPI' in ASCII) for sbi_send_ipi
+        let sbi_ret = unsafe {
+            core::arch::asm!(
+                "ecall",
+                in("a0") hart_mask,
+                in("a1") hart_mask_base,
+                in("a7") 0x735049,
+                in("a6") 0,
+                lateout("a0") _,
+                lateout("a1") _,
+            )
+        };
+        
+        // Note: vector parameter is not used in RISC-V as IPIs are fixed
+        let _ = vector;
     }
 
     #[allow(unused_variables)]

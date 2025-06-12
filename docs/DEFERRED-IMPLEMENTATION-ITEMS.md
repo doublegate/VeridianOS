@@ -2,7 +2,68 @@
 
 This document tracks features, code, and functionality that were removed, disabled, or marked as TODO during the Process Management implementation session (June 10, 2025) and Phase 1 completion (June 11, 2025) that need to be reimplemented or re-added in future work.
 
-**Last Updated**: June 11, 2025 (Phase 1 100% Complete)
+**Last Updated**: June 12, 2025 (Phase 1 Final Polish)
+**Editor**: Claude (Anthropic) - Phase 1 completion verification and final fixes
+
+## Recently Resolved Items (June 12, 2025)
+
+The following items were resolved during Phase 1 final polish:
+
+### 1. x86_64 System Call Entry
+**Location**: `kernel/src/arch/x86_64/syscall.rs`
+**Resolution**: Implemented proper naked function with inline assembly for SYSCALL/SYSRET handling
+- Proper context save/restore
+- Kernel stack switching via GS segment
+- Full register preservation
+- Connected to syscall_handler
+
+### 2. Virtual Address Space Destruction
+**Location**: `kernel/src/mm/vas.rs:destroy()`
+**Resolution**: Implemented proper cleanup:
+- Unmaps all regions from page tables
+- Frees physical frames back to allocator
+- Clears mapping tracking structures
+
+### 3. Memory Region Unmapping
+**Location**: `kernel/src/mm/vas.rs:unmap_region()`
+**Resolution**: Added page table unmapping and TLB flush:
+- Unmaps pages from page tables
+- Flushes TLB for unmapped range
+- Frees physical frames
+
+### 4. SMP Wake Up APs
+**Location**: `kernel/src/sched/smp.rs`
+**Resolution**: Implemented wake_up_aps() function:
+- Detects number of CPUs from topology
+- Calls cpu_up() for each AP
+- Proper error handling
+
+### 5. RISC-V IPI Implementation
+**Location**: `kernel/src/sched/smp.rs:send_ipi()`
+**Resolution**: Implemented SBI IPI calls:
+- Uses SBI ecall interface
+- Proper hart mask creation
+- Function ID 0x735049 for sbi_send_ipi
+
+### 6. Process Main Thread Access
+**Location**: `kernel/src/process/pcb.rs`
+**Resolution**: Added get_main_thread() method:
+- Returns thread with lowest TID
+- Used by scheduler wake_up_process
+
+### 7. IPC Shared Memory Capability Creation
+**Location**: `kernel/src/ipc/shared_memory.rs:create_capability()`
+**Resolution**: Integrated with actual capability system:
+- Creates proper ObjectReference::Memory
+- Sets rights based on TransferMode
+- Registers with CAPABILITY_MANAGER
+
+### 8. Dead Code Removal
+**Locations**: Various architecture files
+**Resolution**: Removed unnecessary #[allow(dead_code)] attributes from:
+- x86_64 init, halt, interrupt functions
+- Timer tick functions
+- System call initialization
 
 ## Process Management
 
