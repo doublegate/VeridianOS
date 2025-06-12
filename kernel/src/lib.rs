@@ -38,19 +38,6 @@ pub mod bench;
 
 // Re-export for tests and benchmarks
 // Re-export memory management for tests
-#[cfg(test)]
-pub use assert_err;
-#[cfg(test)]
-pub use assert_ok;
-#[cfg(test)]
-pub use assert_performance;
-// Re-export common test macros
-#[cfg(test)]
-pub use kernel_assert;
-#[cfg(test)]
-pub use kernel_assert_eq;
-#[cfg(test)]
-pub use kernel_bench;
 pub use mm::{FrameNumber, MemoryRegion, FRAME_SIZE};
 // Re-export scheduler items for tests
 pub use sched::{Priority, SchedClass, Task};

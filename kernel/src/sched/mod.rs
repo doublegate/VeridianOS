@@ -772,7 +772,7 @@ fn balance_load() {
     let mut max_load = 0u8;
     let mut min_load = 100u8;
     let mut busiest_cpu = 0u8;
-    let mut _idlest_cpu = 0u8;
+    let mut idlest_cpu = 0u8;
 
     for cpu_id in 0..smp::MAX_CPUS as u8 {
         if let Some(cpu_data) = smp::per_cpu(cpu_id) {
@@ -786,7 +786,7 @@ fn balance_load() {
 
                 if load < min_load {
                     min_load = load;
-                    _idlest_cpu = cpu_id;
+                    idlest_cpu = cpu_id;
                 }
             }
         }
@@ -801,35 +801,92 @@ fn balance_load() {
         if tasks_to_migrate > 0 {
             println!(
                 "[SCHED] Load balancing: CPU {} (load={}) -> CPU {} (load={}), migrating {} tasks",
-                busiest_cpu, max_load, _idlest_cpu, min_load, tasks_to_migrate
+                busiest_cpu, max_load, idlest_cpu, min_load, tasks_to_migrate
             );
 
             // Record load balance metric
             metrics::SCHEDULER_METRICS.record_load_balance();
 
-            // Try to migrate tasks from busiest to idlest CPU
-            if let Some(busy_cpu_data) = smp::per_cpu(busiest_cpu) {
-                let migrated = 0u32;
+            // Perform actual task migration
+            migrate_tasks(busiest_cpu, idlest_cpu, tasks_to_migrate);
+        }
+    }
+}
 
-                // Get a snapshot of tasks to potentially migrate
-                let _candidates: Vec<core::ptr::NonNull<Task>> = Vec::new();
-                {
-                    let _queue = busy_cpu_data.cpu_info.ready_queue.lock();
-                    // Just peek at tasks, don't remove them yet
-                    // This is a simplified approach - in reality we'd need a
-                    // better way to iterate through the
-                    // queue without modifying it
+/// Migrate tasks from source CPU to target CPU
+#[cfg(feature = "alloc")]
+fn migrate_tasks(source_cpu: u8, target_cpu: u8, count: u32) {
+    use alloc::vec::Vec;
+    let mut migrated = 0u32;
+
+    // Try to get tasks from source CPU's ready queue
+    if let Some(source_cpu_data) = smp::per_cpu(source_cpu) {
+        // Collect tasks to migrate
+        let mut tasks_to_migrate = Vec::new();
+
+        {
+            let mut queue = source_cpu_data.cpu_info.ready_queue.lock();
+
+            // Try to dequeue tasks that can run on target CPU
+            for _ in 0..count {
+                if let Some(task_ptr) = queue.dequeue() {
+                    unsafe {
+                        let task = task_ptr.as_ref();
+                        if task.can_run_on(target_cpu) {
+                            tasks_to_migrate.push(task_ptr);
+                        } else {
+                            // Put it back if it can't run on target
+                            queue.enqueue(task_ptr);
+                        }
+                    }
                 }
+            }
 
-                // For now, we can't easily iterate the queue, so let's try a different approach
-                // We'll attempt to steal tasks when they're being dequeued
-                // This is handled in the scheduler's pick_next methods
+            // Update source CPU load
+            source_cpu_data
+                .cpu_info
+                .nr_running
+                .fetch_sub(tasks_to_migrate.len() as u32, Ordering::Relaxed);
+            source_cpu_data.cpu_info.update_load();
+        }
 
-                // Set a flag to indicate this CPU should try to push tasks
-                if migrated < tasks_to_migrate {
-                    // In a real implementation, we'd set a flag on the busy CPU
-                    // to push tasks to other CPUs when scheduling
+        // Migrate collected tasks to target CPU
+        if let Some(target_cpu_data) = smp::per_cpu(target_cpu) {
+            let mut target_queue = target_cpu_data.cpu_info.ready_queue.lock();
+
+            for task_ptr in tasks_to_migrate {
+                unsafe {
+                    let task_mut = task_ptr.as_ptr();
+
+                    // Update task's CPU assignment
+                    (*task_mut).last_cpu = Some(source_cpu);
+                    (*task_mut).migrations += 1;
+
+                    // Enqueue on target CPU
+                    target_queue.enqueue(task_ptr);
+                    migrated += 1;
                 }
+            }
+
+            // Update target CPU load
+            target_cpu_data
+                .cpu_info
+                .nr_running
+                .fetch_add(migrated, Ordering::Relaxed);
+            target_cpu_data.cpu_info.update_load();
+
+            // Wake up target CPU if idle
+            if target_cpu_data.cpu_info.is_idle() {
+                smp::send_ipi(target_cpu, 0);
+            }
+        }
+
+        if migrated > 0 {
+            println!("[SCHED] Successfully migrated {} tasks", migrated);
+
+            // Record migration metrics
+            for _ in 0..migrated {
+                metrics::SCHEDULER_METRICS.record_migration();
             }
         }
     }

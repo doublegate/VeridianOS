@@ -50,29 +50,20 @@ pub fn sys_fork() -> SyscallResult {
 /// - argv_ptr: Pointer to argument array
 /// - envp_ptr: Pointer to environment array
 pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallResult {
+    use crate::syscall::userspace::{copy_string_array_from_user, copy_string_from_user};
+
     // Validate pointers
     if path_ptr == 0 {
         return Err(SyscallError::InvalidArgument);
     }
 
-    // TODO: Validate and copy path from user space
-    // For now, we'll use a placeholder
-    let path = "placeholder";
+    // Copy path from user space
+    let path = unsafe { copy_string_from_user(path_ptr)? };
 
-    // Parse argv and envp arrays (simplified for now)
-    let argv: &[&str] = if argv_ptr != 0 {
-        // TODO: Copy from user space
-        &[]
-    } else {
-        &[]
-    };
+    // Parse argv and envp arrays from user space
+    let argv = unsafe { copy_string_array_from_user(argv_ptr)? };
 
-    let envp: &[&str] = if envp_ptr != 0 {
-        // TODO: Copy from user space
-        &[]
-    } else {
-        &[]
-    };
+    let envp = unsafe { copy_string_array_from_user(envp_ptr)? };
 
     // Get current process capability space before exec
     let current = current_process().ok_or(SyscallError::InvalidState)?;
@@ -88,7 +79,15 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
         println!("[WARN] Failed to inherit capabilities during exec");
     }
 
-    match exec_process(path, argv, envp) {
+    // Convert to slices for exec_process
+    #[cfg(feature = "alloc")]
+    extern crate alloc;
+    #[cfg(feature = "alloc")]
+    use alloc::vec::Vec;
+    let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+    let envp_refs: Vec<&str> = envp.iter().map(|s| s.as_str()).collect();
+
+    match exec_process(&path, &argv_refs, &envp_refs) {
         Ok(_) => {
             // exec should not return on success
             unreachable!("exec_process returned on success");
@@ -114,6 +113,8 @@ pub fn sys_exit(exit_code: usize) -> SyscallResult {
 /// - status_ptr: Pointer to store exit status
 /// - options: Wait options (WNOHANG, etc.)
 pub fn sys_wait(pid: isize, status_ptr: usize, _options: usize) -> SyscallResult {
+    use crate::syscall::userspace::copy_to_user;
+
     let wait_pid = if pid == -1 {
         None
     } else if pid > 0 {
@@ -127,7 +128,7 @@ pub fn sys_wait(pid: isize, status_ptr: usize, _options: usize) -> SyscallResult
             // Write exit status to user space if pointer provided
             if status_ptr != 0 {
                 unsafe {
-                    *(status_ptr as *mut i32) = exit_status;
+                    copy_to_user(status_ptr, &exit_status)?;
                 }
             }
             Ok(child_pid.0 as usize)
@@ -202,22 +203,53 @@ pub fn sys_gettid() -> SyscallResult {
 /// - tid: Thread ID to join
 /// - retval_ptr: Pointer to store thread return value
 pub fn sys_thread_join(tid: usize, retval_ptr: usize) -> SyscallResult {
-    let _target_tid = ThreadId(tid as u64);
+    use crate::syscall::userspace::copy_to_user;
 
-    // TODO: Implement thread join
-    // This would involve:
-    // 1. Find target thread
-    // 2. Check if it's joinable
-    // 3. Wait for it to terminate
-    // 4. Get its exit value
+    let target_tid = ThreadId(tid as u64);
 
-    if retval_ptr != 0 {
-        unsafe {
-            *(retval_ptr as *mut usize) = 0; // Placeholder
+    // Get current process
+    let current = current_process().ok_or(SyscallError::InvalidState)?;
+
+    // Find target thread in current process
+    loop {
+        // Check if thread exists and get its state
+        let thread_state = {
+            let threads = current.threads.lock();
+            threads.get(&target_tid).map(|thread| {
+                (
+                    thread.get_state(),
+                    thread.exit_code.load(core::sync::atomic::Ordering::Acquire),
+                )
+            })
+        };
+
+        match thread_state {
+            Some((crate::process::thread::ThreadState::Zombie, exit_code)) => {
+                // Thread has exited, clean it up
+                if crate::process::lifecycle::cleanup_thread(current, target_tid).is_err() {
+                    return Err(SyscallError::InvalidState);
+                }
+
+                // Return exit code to user
+                if retval_ptr != 0 {
+                    let exit_value = exit_code as usize;
+                    unsafe {
+                        copy_to_user(retval_ptr, &exit_value)?;
+                    }
+                }
+
+                return Ok(0);
+            }
+            Some(_) => {
+                // Thread still running, yield and try again
+                crate::sched::yield_cpu();
+            }
+            None => {
+                // Thread doesn't exist
+                return Err(SyscallError::ResourceNotFound);
+            }
         }
     }
-
-    Ok(0)
 }
 
 /// Set thread CPU affinity
@@ -260,24 +292,40 @@ pub fn sys_thread_setaffinity(tid: usize, cpuset_ptr: usize, cpuset_size: usize)
 /// - cpuset_ptr: Pointer to store CPU set
 /// - cpuset_size: Size of CPU set buffer
 pub fn sys_thread_getaffinity(tid: usize, cpuset_ptr: usize, cpuset_size: usize) -> SyscallResult {
+    use crate::syscall::userspace::{copy_slice_to_user, validate_user_ptr};
+
     if cpuset_ptr == 0 || cpuset_size == 0 {
         return Err(SyscallError::InvalidArgument);
     }
 
-    let _target_tid = if tid == 0 {
+    // Validate user pointer
+    validate_user_ptr(cpuset_ptr, cpuset_size)?;
+
+    let target_tid = if tid == 0 {
         get_thread_tid()
     } else {
         ThreadId(tid as u64)
     };
 
-    // TODO: Get actual CPU affinity from thread
-    let cpu_mask: u64 = 0xFFFFFFFFFFFFFFFF; // All CPUs for now
+    // Get actual CPU affinity from thread
+    let cpu_mask = if let Some(process) = current_process() {
+        if let Some(thread) = process.get_thread(target_tid) {
+            thread
+                .cpu_affinity
+                .load(core::sync::atomic::Ordering::Acquire) as u64
+        } else {
+            return Err(SyscallError::ResourceNotFound);
+        }
+    } else {
+        return Err(SyscallError::InvalidState);
+    };
 
     // Write CPU set to user space
-    let cpuset = unsafe { slice::from_raw_parts_mut(cpuset_ptr as *mut u8, cpuset_size) };
+    let mask_bytes = cpu_mask.to_le_bytes();
+    let bytes_to_copy = cpuset_size.min(8);
 
-    if cpuset_size >= 8 {
-        cpuset[0..8].copy_from_slice(&cpu_mask.to_le_bytes());
+    unsafe {
+        copy_slice_to_user(cpuset_ptr, &mask_bytes[..bytes_to_copy])?;
     }
 
     Ok(0)
@@ -315,11 +363,34 @@ pub fn sys_setpriority(which: usize, who: usize, priority: usize) -> SyscallResu
         _ => ProcessPriority::Idle,
     };
 
-    // TODO: Actually set the priority
-    // This would involve finding the process and updating its priority
-    let _ = (pid, new_priority);
+    // Actually set the priority
+    if let Some(process) = crate::process::table::get_process(pid) {
+        process.set_priority(new_priority);
 
-    Ok(0)
+        // Update scheduler tasks for all threads
+        #[cfg(feature = "alloc")]
+        {
+            let threads = process.threads.lock();
+            for (_, thread) in threads.iter() {
+                if let Some(task_ptr) = thread.get_task_ptr() {
+                    unsafe {
+                        let task = task_ptr.as_ptr();
+                        (*task).priority = match new_priority {
+                            ProcessPriority::RealTime => crate::sched::task::Priority::RealTimeHigh,
+                            ProcessPriority::System => crate::sched::task::Priority::SystemHigh,
+                            ProcessPriority::Normal => crate::sched::task::Priority::UserNormal,
+                            ProcessPriority::Low => crate::sched::task::Priority::UserLow,
+                            ProcessPriority::Idle => crate::sched::task::Priority::Idle,
+                        };
+                    }
+                }
+            }
+        }
+
+        Ok(0)
+    } else {
+        Err(SyscallError::ResourceNotFound)
+    }
 }
 
 /// Get process priority
@@ -333,7 +404,7 @@ pub fn sys_getpriority(which: usize, who: usize) -> SyscallResult {
         return Err(SyscallError::InvalidArgument);
     }
 
-    let _pid = if who == 0 {
+    let pid = if who == 0 {
         // Current process
         if let Some(process) = current_process() {
             process.pid
@@ -344,7 +415,17 @@ pub fn sys_getpriority(which: usize, who: usize) -> SyscallResult {
         ProcessId(who as u64)
     };
 
-    // TODO: Get actual priority from process
-    // For now, return normal priority
-    Ok(100) // Normal priority
+    // Get actual priority from process
+    if let Some(process) = crate::process::table::get_process(pid) {
+        let priority_value = match *process.priority.lock() {
+            ProcessPriority::RealTime => 20, // Highest priority
+            ProcessPriority::System => 60,   // High priority
+            ProcessPriority::Normal => 100,  // Normal priority
+            ProcessPriority::Low => 130,     // Low priority
+            ProcessPriority::Idle => 140,    // Lowest priority
+        };
+        Ok(priority_value)
+    } else {
+        Err(SyscallError::ResourceNotFound)
+    }
 }

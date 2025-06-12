@@ -183,6 +183,10 @@ pub struct Task {
     pub ready_link: Option<usize>,
     /// Thread reference (for state synchronization)
     pub thread_ref: Option<core::ptr::NonNull<crate::process::Thread>>,
+    /// Last CPU this task ran on
+    pub last_cpu: Option<u8>,
+    /// Number of times this task has been migrated
+    pub migrations: u32,
 }
 
 impl Task {
@@ -218,6 +222,8 @@ impl Task {
             wait_link: None,
             ready_link: None,
             thread_ref: None,
+            last_cpu: None,
+            migrations: 0,
         }
     }
 

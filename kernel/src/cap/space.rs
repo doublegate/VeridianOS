@@ -25,10 +25,10 @@ const L2_SIZE: usize = 256;
 
 /// Type alias for L2 tables to reduce complexity
 #[cfg(feature = "alloc")]
-type L2Tables = BTreeMap<u16, Box<[RwLock<Option<CapEntry>>; L2_SIZE]>>;
+type L2Tables = BTreeMap<u16, Box<[RwLock<Option<CapabilityEntry>>; L2_SIZE]>>;
 
 /// A single capability entry in the capability space
-pub struct CapEntry {
+pub struct CapabilityEntry {
     /// The capability token
     pub capability: CapabilityToken,
     /// Object reference
@@ -37,16 +37,37 @@ pub struct CapEntry {
     pub rights: Rights,
     /// Usage count for statistics
     pub usage_count: AtomicU64,
+    /// Inheritance flags
+    pub inheritance_flags: u32,
 }
 
-impl CapEntry {
+impl Clone for CapabilityEntry {
+    fn clone(&self) -> Self {
+        Self {
+            capability: self.capability,
+            object: self.object.clone(),
+            rights: self.rights,
+            usage_count: AtomicU64::new(self.usage_count.load(Ordering::Relaxed)),
+            inheritance_flags: self.inheritance_flags,
+        }
+    }
+}
+
+impl CapabilityEntry {
     pub fn new(capability: CapabilityToken, object: ObjectRef, rights: Rights) -> Self {
+        use super::inheritance::InheritanceFlags;
         Self {
             capability,
             object,
             rights,
             usage_count: AtomicU64::new(0),
+            inheritance_flags: InheritanceFlags::INHERITABLE,
         }
+    }
+
+    pub fn with_flags(mut self, flags: u32) -> Self {
+        self.inheritance_flags = flags;
+        self
     }
 }
 
@@ -62,7 +83,7 @@ pub struct CapSpaceStats {
 /// Per-process capability space
 pub struct CapabilitySpace {
     /// Fast lookup table (L1) - for first 256 capabilities
-    l1_table: Box<[RwLock<Option<CapEntry>>; L1_SIZE]>,
+    l1_table: Box<[RwLock<Option<CapabilityEntry>>; L1_SIZE]>,
 
     /// Second level tables (L2) - for capabilities beyond 256
     #[cfg(feature = "alloc")]
@@ -146,7 +167,7 @@ impl CapabilitySpace {
             if entry.is_some() {
                 return Err("Capability slot already occupied");
             }
-            *entry = Some(CapEntry::new(cap, object, rights));
+            *entry = Some(CapabilityEntry::new(cap, object, rights));
             self.stats.total_caps.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
@@ -168,7 +189,7 @@ impl CapabilitySpace {
             if entry.is_some() {
                 return Err("Capability slot already occupied");
             }
-            *entry = Some(CapEntry::new(cap, object, rights));
+            *entry = Some(CapabilityEntry::new(cap, object, rights));
             self.stats.total_caps.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
@@ -252,6 +273,101 @@ impl CapabilitySpace {
     /// Get statistics
     pub fn stats(&self) -> &CapSpaceStats {
         &self.stats
+    }
+
+    /// Iterate over all capabilities (for inheritance)
+    #[cfg(feature = "alloc")]
+    pub fn iter_capabilities<F>(&self, mut f: F) -> Result<(), &'static str>
+    where
+        F: FnMut(&CapabilityEntry) -> bool,
+    {
+        // Iterate L1 table
+        for i in 0..L1_SIZE {
+            let entry_guard = self.l1_table[i].read();
+            if let Some(ref entry) = *entry_guard {
+                if !f(entry) {
+                    return Ok(()); // Early exit if function returns false
+                }
+            }
+        }
+
+        // Iterate L2 tables
+        let l2_tables = self.l2_tables.read();
+        for (_, l2_table) in l2_tables.iter() {
+            for i in 0..L2_SIZE {
+                let entry_guard = l2_table[i].read();
+                if let Some(ref entry) = *entry_guard {
+                    if !f(entry) {
+                        return Ok(()); // Early exit
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get capability entry by ID (for inheritance)
+    pub fn get_entry(&self, cap_id: usize) -> Option<CapabilityEntry> {
+        // Fast path: check L1 table
+        if cap_id < L1_SIZE {
+            let entry = self.l1_table[cap_id].read();
+            return entry.clone();
+        }
+
+        // Slow path: check L2 tables
+        #[cfg(feature = "alloc")]
+        {
+            let l1_index = (cap_id >> 8) as u16;
+            let l2_index = cap_id & 0xFF;
+
+            let l2_tables = self.l2_tables.read();
+            if let Some(l2_table) = l2_tables.get(&l1_index) {
+                let entry = l2_table[l2_index].read();
+                return entry.clone();
+            }
+        }
+
+        None
+    }
+
+    /// Lookup and get full capability entry
+    pub fn lookup_entry(&self, cap: CapabilityToken) -> Option<(ObjectRef, Rights)> {
+        let cap_id = cap.id() as usize;
+
+        // Fast path: check L1 table
+        if cap_id < L1_SIZE {
+            let entry = self.l1_table[cap_id].read();
+            if let Some(ref cap_entry) = *entry {
+                if cap_entry.capability == cap {
+                    self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                    cap_entry.usage_count.fetch_add(1, Ordering::Relaxed);
+                    return Some((cap_entry.object.clone(), cap_entry.rights));
+                }
+            }
+        }
+
+        // Slow path: check L2 tables
+        #[cfg(feature = "alloc")]
+        {
+            let l1_index = (cap_id >> 8) as u16;
+            let l2_index = cap_id & 0xFF;
+
+            let l2_tables = self.l2_tables.read();
+            if let Some(l2_table) = l2_tables.get(&l1_index) {
+                let entry = l2_table[l2_index].read();
+                if let Some(ref cap_entry) = *entry {
+                    if cap_entry.capability == cap {
+                        self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                        cap_entry.usage_count.fetch_add(1, Ordering::Relaxed);
+                        return Some((cap_entry.object.clone(), cap_entry.rights));
+                    }
+                }
+            }
+        }
+
+        self.stats.misses.fetch_add(1, Ordering::Relaxed);
+        None
     }
 }
 

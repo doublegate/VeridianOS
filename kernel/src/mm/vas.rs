@@ -133,14 +133,50 @@ impl VirtualAddressSpace {
 
     /// Initialize virtual address space
     pub fn init(&mut self) -> Result<(), &'static str> {
-        // TODO: Allocate page table
-        // TODO: Map kernel space
+        use super::page_table::PageTableHierarchy;
+
+        // Allocate L4 page table
+        let page_table = PageTableHierarchy::new()?;
+        self.page_table_root
+            .store(page_table.l4_addr().as_u64(), Ordering::Release);
+
+        // Map kernel space
+        self.map_kernel_space()?;
+
         Ok(())
     }
 
     /// Map kernel space into this address space
     pub fn map_kernel_space(&mut self) -> Result<(), &'static str> {
-        // TODO: Map kernel memory regions
+        // Kernel space is at 0xFFFF_8000_0000_0000 and above
+        // This is typically shared across all address spaces
+        // For now, we'll just record the mapping - actual page table updates
+        // would happen through the PageMapper
+
+        #[cfg(feature = "alloc")]
+        {
+            // Map kernel code region (read-only, executable)
+            self.map_region(
+                VirtualAddress(0xFFFF_8000_0000_0000),
+                0x200000, // 2MB for kernel code
+                MappingType::Code,
+            )?;
+
+            // Map kernel data region (read-write, no-execute)
+            self.map_region(
+                VirtualAddress(0xFFFF_8000_0020_0000),
+                0x200000, // 2MB for kernel data
+                MappingType::Data,
+            )?;
+
+            // Map kernel heap region
+            self.map_region(
+                VirtualAddress(0xFFFF_C000_0000_0000),
+                0x1000_0000, // 256MB for kernel heap
+                MappingType::Heap,
+            )?;
+        }
+
         Ok(())
     }
 
@@ -205,6 +241,8 @@ impl VirtualAddressSpace {
         size: usize,
         mapping_type: MappingType,
     ) -> Result<(), &'static str> {
+        use super::FRAME_ALLOCATOR;
+
         // Align to page boundary
         let aligned_start = VirtualAddress(start.0 & !(4096 - 1));
         let aligned_size = ((size + 4095) / 4096) * 4096;
@@ -220,6 +258,27 @@ impl VirtualAddressSpace {
             }
         }
 
+        // Allocate physical frames for the mapping
+        let num_pages = aligned_size / 4096;
+        let mut physical_frames = Vec::with_capacity(num_pages);
+
+        // Get frame allocator
+        let frame_allocator = FRAME_ALLOCATOR.lock();
+
+        // Allocate frames
+        for _ in 0..num_pages {
+            let frame = frame_allocator
+                .allocate_frames(1, None)
+                .map_err(|_| "Failed to allocate physical frame")?;
+            physical_frames.push(frame);
+        }
+
+        // Map pages to frames in page table
+        // Note: In a real implementation, we would need to map the page table
+        // into virtual memory to modify it. For now, we'll just store the mapping.
+        let mut mapping = mapping;
+        mapping.physical_frames = physical_frames;
+
         mappings.insert(aligned_start, mapping);
         Ok(())
     }
@@ -227,10 +286,19 @@ impl VirtualAddressSpace {
     /// Unmap a region
     #[cfg(feature = "alloc")]
     pub fn unmap_region(&self, start: VirtualAddress) -> Result<(), &'static str> {
-        self.mappings
-            .lock()
-            .remove(&start)
-            .ok_or("Region not mapped")?;
+        use super::FRAME_ALLOCATOR;
+
+        let mut mappings = self.mappings.lock();
+        let mapping = mappings.remove(&start).ok_or("Region not mapped")?;
+
+        // Free the physical frames
+        let frame_allocator = FRAME_ALLOCATOR.lock();
+        for frame in mapping.physical_frames {
+            let _ = frame_allocator.free_frames(frame, 1);
+        }
+
+        // TODO: Actually unmap from page tables and flush TLB
+
         Ok(())
     }
 
@@ -310,6 +378,38 @@ impl VirtualAddressSpace {
         Ok(new_vas)
     }
 
+    /// Handle page fault
+    pub fn handle_page_fault(
+        &self,
+        fault_addr: VirtualAddress,
+        write: bool,
+        user: bool,
+    ) -> Result<(), &'static str> {
+        #[cfg(feature = "alloc")]
+        {
+            // Find the mapping for this address
+            let mapping = self
+                .find_mapping(fault_addr)
+                .ok_or("Page fault in unmapped region")?;
+
+            // Check permissions
+            if write && !mapping.flags.contains(PageFlags::WRITABLE) {
+                return Err("Write to read-only page");
+            }
+
+            if user && !mapping.flags.contains(PageFlags::USER) {
+                return Err("User access to kernel page");
+            }
+
+            // Check if this is a valid fault (e.g., COW, demand paging)
+            // For now, we'll just return an error as we don't support these features yet
+            Err("Page fault handling not fully implemented")
+        }
+
+        #[cfg(not(feature = "alloc"))]
+        Err("Page fault handling requires alloc feature")
+    }
+
     /// Get memory statistics
     #[cfg(feature = "alloc")]
     pub fn get_stats(&self) -> VasStats {
@@ -339,6 +439,36 @@ impl VirtualAddressSpace {
             heap_size,
             mapping_count: mappings.len(),
         }
+    }
+
+    /// Clear all mappings and free resources
+    pub fn clear(&mut self) {
+        #[cfg(feature = "alloc")]
+        {
+            use super::FRAME_ALLOCATOR;
+
+            // Get all mappings to free their frames
+            let mappings = self.mappings.get_mut();
+
+            // Free physical frames for each mapping
+            for (_, mapping) in mappings.iter() {
+                let frame_allocator = FRAME_ALLOCATOR.lock();
+                for frame in &mapping.physical_frames {
+                    frame_allocator.free_frames(*frame, 1).ok();
+                }
+            }
+
+            // Clear all mappings
+            mappings.clear();
+        }
+
+        // Reset metadata
+        self.heap_break
+            .store(self.heap_start.load(Ordering::Relaxed), Ordering::Release);
+        self.next_mmap_addr
+            .store(0x4000_0000_0000, Ordering::Release);
+
+        // TODO: Free page tables
     }
 }
 

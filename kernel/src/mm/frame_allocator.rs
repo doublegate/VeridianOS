@@ -812,6 +812,12 @@ impl FrameAllocator {
             allocation_time_ns: stats.allocation_time_ns,
         }
     }
+
+    /// Deallocate a single frame (wrapper for free_frames)
+    pub fn deallocate_frame(&self, frame: PhysicalAddress) {
+        let frame_num = FrameNumber::new(frame.as_u64() / FRAME_SIZE as u64);
+        let _ = self.free_frames(frame_num, 1);
+    }
 }
 
 impl Default for FrameAllocator {

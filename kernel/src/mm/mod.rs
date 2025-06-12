@@ -12,6 +12,11 @@ pub mod page_table;
 pub mod vas;
 pub mod vmm;
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
+
 // Re-export commonly used types
 pub use frame_allocator::{
     FrameAllocatorError, FrameNumber, PhysicalAddress, FRAME_ALLOCATOR, FRAME_SIZE,
@@ -198,6 +203,37 @@ pub fn init_default() {
     init(&default_map);
 }
 
+/// Translate virtual address to physical address
+pub fn translate_address(
+    vas: &VirtualAddressSpace,
+    vaddr: VirtualAddress,
+) -> Option<PhysicalAddress> {
+    // Find the mapping for this virtual address
+    #[cfg(feature = "alloc")]
+    {
+        if let Some(mapping) = vas.find_mapping(vaddr) {
+            // Calculate offset within the mapping
+            let offset = vaddr.0 - mapping.start.0;
+            let page_index = (offset / PAGE_SIZE as u64) as usize;
+
+            // Check if we have physical frames allocated
+            if page_index < mapping.physical_frames.len() {
+                let frame = mapping.physical_frames[page_index];
+                let page_offset = offset % PAGE_SIZE as u64;
+                return Some(PhysicalAddress::new(frame.as_addr().as_u64() + page_offset));
+            }
+        }
+    }
+
+    None
+}
+
+/// Free a physical frame
+pub fn free_frame(frame: PhysicalAddress) {
+    let frame_num = FrameNumber::new(frame.as_u64() / FRAME_SIZE as u64);
+    let _ = FRAME_ALLOCATOR.lock().free_frames(frame_num, 1);
+}
+
 /// Placeholder types for IPC integration
 pub type PagePermissions = PageFlags;
 pub type PhysicalPage = FrameNumber;
@@ -230,9 +266,3 @@ pub fn free_pages(pages: &[PhysicalPage]) -> Result<(), FrameAllocatorError> {
 
     FRAME_ALLOCATOR.lock().free_frames(first_frame, count)
 }
-
-#[cfg(feature = "alloc")]
-extern crate alloc;
-
-#[cfg(feature = "alloc")]
-use alloc::vec::Vec;

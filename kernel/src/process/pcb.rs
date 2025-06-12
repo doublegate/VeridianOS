@@ -83,7 +83,7 @@ pub struct Process {
     pub state: AtomicU32,
 
     /// Priority
-    pub priority: ProcessPriority,
+    pub priority: Mutex<ProcessPriority>,
 
     /// Virtual address space
     pub memory_space: Mutex<VirtualAddressSpace>,
@@ -147,7 +147,7 @@ impl Process {
             parent,
             name,
             state: AtomicU32::new(ProcessState::Creating as u32),
-            priority,
+            priority: Mutex::new(priority),
             memory_space: Mutex::new(VirtualAddressSpace::new()),
             capability_space: Mutex::new(CapabilitySpace::new()),
             threads: Mutex::new(BTreeMap::new()),
@@ -245,6 +245,11 @@ impl Process {
     /// Get exit code
     pub fn get_exit_code(&self) -> i32 {
         self.exit_code.load(Ordering::Acquire) as i32
+    }
+
+    /// Set process priority
+    pub fn set_priority(&self, new_priority: ProcessPriority) {
+        *self.priority.lock() = new_priority;
     }
 }
 

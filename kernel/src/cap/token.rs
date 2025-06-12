@@ -72,6 +72,12 @@ impl CapabilityToken {
     pub const fn null() -> Self {
         Self(0)
     }
+
+    /// Create capability token from parts
+    pub fn from_parts(id: u64, _object_id: u64, generation: u8, _metadata: u8) -> Self {
+        // For now, we'll use a simple format
+        Self::new(id, generation, 0, 0)
+    }
 }
 
 /// Capability permissions flags (4 bits)
@@ -185,6 +191,14 @@ impl core::ops::BitAnd for Rights {
 
     fn bitand(self, rhs: Self) -> Self::Output {
         Self(self.0 & rhs.0)
+    }
+}
+
+impl core::ops::Not for Rights {
+    type Output = Self;
+
+    fn not(self) -> Self::Output {
+        Self(!self.0)
     }
 }
 

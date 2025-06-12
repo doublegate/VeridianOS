@@ -14,6 +14,9 @@ use crate::{
 mod process;
 use self::process::*;
 
+// Import user space utilities
+mod userspace;
+
 /// System call numbers
 #[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,15 +74,16 @@ pub enum SyscallError {
     WouldBlock = -6,
     Interrupted = -7,
     InvalidState = -8,
+    InvalidPointer = -9,
 
     // Capability-specific errors
-    InvalidCapability = -9,
-    CapabilityRevoked = -10,
-    InsufficientRights = -11,
-    CapabilityNotFound = -12,
-    CapabilityAlreadyExists = -13,
-    InvalidCapabilityObject = -14,
-    CapabilityDelegationDenied = -15,
+    InvalidCapability = -10,
+    CapabilityRevoked = -11,
+    InsufficientRights = -12,
+    CapabilityNotFound = -13,
+    CapabilityAlreadyExists = -14,
+    InvalidCapabilityObject = -15,
+    CapabilityDelegationDenied = -16,
 }
 
 impl From<IpcError> for SyscallError {

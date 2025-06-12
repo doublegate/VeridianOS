@@ -107,6 +107,86 @@ impl ObjectRef {
     }
 }
 
+impl PartialEq for ObjectRef {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                ObjectRef::Memory {
+                    base: b1,
+                    size: s1,
+                    attributes: a1,
+                },
+                ObjectRef::Memory {
+                    base: b2,
+                    size: s2,
+                    attributes: a2,
+                },
+            ) => b1 == b2 && s1 == s2 && a1 == a2,
+            (ObjectRef::Process { pid: p1 }, ObjectRef::Process { pid: p2 }) => p1 == p2,
+            (ObjectRef::Thread { tid: t1 }, ObjectRef::Thread { tid: t2 }) => t1 == t2,
+            #[cfg(feature = "alloc")]
+            (ObjectRef::Endpoint { endpoint: e1 }, ObjectRef::Endpoint { endpoint: e2 }) => {
+                Arc::ptr_eq(e1, e2)
+            }
+            (ObjectRef::Interrupt { irq: i1 }, ObjectRef::Interrupt { irq: i2 }) => i1 == i2,
+            (
+                ObjectRef::IoPort { base: b1, size: s1 },
+                ObjectRef::IoPort { base: b2, size: s2 },
+            ) => b1 == b2 && s1 == s2,
+            (
+                ObjectRef::PageTable { root: r1, asid: a1 },
+                ObjectRef::PageTable { root: r2, asid: a2 },
+            ) => r1 == r2 && a1 == a2,
+            (ObjectRef::CapabilitySpace { pid: p1 }, ObjectRef::CapabilitySpace { pid: p2 }) => {
+                p1 == p2
+            }
+            (ObjectRef::Device { device_id: d1 }, ObjectRef::Device { device_id: d2 }) => d1 == d2,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ObjectRef {}
+
+impl core::fmt::Debug for ObjectRef {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            ObjectRef::Memory {
+                base,
+                size,
+                attributes,
+            } => f
+                .debug_struct("Memory")
+                .field("base", base)
+                .field("size", size)
+                .field("attributes", attributes)
+                .finish(),
+            ObjectRef::Process { pid } => f.debug_struct("Process").field("pid", pid).finish(),
+            ObjectRef::Thread { tid } => f.debug_struct("Thread").field("tid", tid).finish(),
+            #[cfg(feature = "alloc")]
+            ObjectRef::Endpoint { .. } => f.debug_struct("Endpoint").finish(),
+            ObjectRef::Interrupt { irq } => f.debug_struct("Interrupt").field("irq", irq).finish(),
+            ObjectRef::IoPort { base, size } => f
+                .debug_struct("IoPort")
+                .field("base", base)
+                .field("size", size)
+                .finish(),
+            ObjectRef::PageTable { root, asid } => f
+                .debug_struct("PageTable")
+                .field("root", root)
+                .field("asid", asid)
+                .finish(),
+            ObjectRef::CapabilitySpace { pid } => {
+                f.debug_struct("CapabilitySpace").field("pid", pid).finish()
+            }
+            ObjectRef::Device { device_id } => f
+                .debug_struct("Device")
+                .field("device_id", device_id)
+                .finish(),
+        }
+    }
+}
+
 /// Object access type for permission checking
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {

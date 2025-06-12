@@ -129,7 +129,7 @@ pub fn fork_process() -> Result<ProcessId, &'static str> {
     // Create new process as copy of current
     let new_process = ProcessBuilder::new(format!("{}-fork", current_process.name))
         .parent(current_process.pid)
-        .priority(current_process.priority)
+        .priority(*current_process.priority.lock())
         .build();
 
     let new_pid = new_process.pid;
@@ -247,7 +247,16 @@ pub fn exit_process(exit_code: i32) {
         // Mark process as zombie (parent needs to reap)
         process.set_state(ProcessState::Zombie);
 
-        // TODO: Wake up parent if waiting
+        // Wake up parent if waiting
+        if let Some(parent_pid) = process.parent {
+            if let Some(parent) = table::get_process(parent_pid) {
+                let parent_state = parent.get_state();
+                if parent_state == ProcessState::Blocked {
+                    parent.set_state(ProcessState::Ready);
+                    sched::wake_up_process(parent_pid);
+                }
+            }
+        }
 
         // Schedule another process
         sched::exit_task(exit_code);
@@ -328,33 +337,63 @@ pub fn kill_process(pid: ProcessId, _signal: i32) -> Result<(), &'static str> {
 
 /// Clean up process resources
 fn cleanup_process(process: &Process) {
+    println!(
+        "[PROCESS] Cleaning up resources for process {}",
+        process.pid.0
+    );
+
     // Release memory
     {
-        let memory_space = process.memory_space.lock();
-        // TODO: Implement proper memory space cleanup
-        // memory_space.destroy();
-        drop(memory_space);
+        let mut memory_space = process.memory_space.lock();
+        // Clear all mappings
+        memory_space.clear();
     }
 
     // Release capabilities
     {
         let cap_space = process.capability_space.lock();
-        // TODO: Implement proper capability space cleanup
-        // cap_space.destroy();
-        drop(cap_space);
+        // Clear all capabilities
+        cap_space.clear();
     }
 
     // Close IPC endpoints
     #[cfg(feature = "alloc")]
     {
-        let endpoints = process.ipc_endpoints.lock();
-        for (_endpoint_id, _) in endpoints.iter() {
-            // TODO: Close endpoint
-            println!("[PROCESS] Closing IPC endpoint {}", _endpoint_id);
+        let endpoints: Vec<crate::ipc::EndpointId> =
+            process.ipc_endpoints.lock().keys().cloned().collect();
+        for _endpoint_id in endpoints {
+            // Remove from global registry
+            // For now, just skip registry cleanup
+            // TODO: Implement proper IPC endpoint cleanup
+            println!("[PROCESS] Closed IPC endpoint {}", _endpoint_id);
+        }
+        process.ipc_endpoints.lock().clear();
+    }
+
+    // Reparent children to init if not zombie
+    #[cfg(feature = "alloc")]
+    {
+        let children: Vec<ProcessId> = process.children.lock().clone();
+        if !children.is_empty() && process.get_state() != ProcessState::Zombie {
+            if let Some(init_process) = table::get_process_mut(ProcessId(1)) {
+                for child_pid in children {
+                    if let Some(child) = table::get_process_mut(child_pid) {
+                        child.parent = Some(ProcessId(1));
+                        init_process.children.lock().push(child_pid);
+                        println!("[PROCESS] Reparented process {} to init", child_pid);
+                    }
+                }
+            }
+            process.children.lock().clear();
         }
     }
 
-    // TODO: Close files, release other resources
+    // Update CPU time statistics
+    let _cpu_time = process.cpu_time.load(Ordering::Relaxed);
+    println!(
+        "[PROCESS] Process {} used {} microseconds of CPU time",
+        process.pid.0, _cpu_time
+    );
 }
 
 /// Clean up a dead thread
@@ -480,7 +519,7 @@ fn create_scheduler_task(process: &Process, thread: &Thread) -> Result<(), &'sta
     );
 
     // Update task fields based on thread/process state
-    task.priority = match process.priority {
+    task.priority = match *process.priority.lock() {
         ProcessPriority::RealTime => sched::task::Priority::RealTimeHigh,
         ProcessPriority::System => sched::task::Priority::SystemHigh,
         ProcessPriority::Normal => sched::task::Priority::UserNormal,
@@ -488,7 +527,7 @@ fn create_scheduler_task(process: &Process, thread: &Thread) -> Result<(), &'sta
         ProcessPriority::Idle => sched::task::Priority::Idle,
     };
 
-    task.sched_class = match process.priority {
+    task.sched_class = match *process.priority.lock() {
         ProcessPriority::RealTime => sched::task::SchedClass::RealTime,
         _ => sched::task::SchedClass::Normal,
     };
