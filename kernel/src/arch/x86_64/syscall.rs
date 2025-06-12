@@ -1,7 +1,6 @@
 //! x86_64 system call entry point
 
 use crate::syscall::syscall_handler;
-use core::arch::asm;
 
 /// x86_64 SYSCALL instruction entry point
 ///
@@ -15,12 +14,12 @@ use core::arch::asm;
 #[no_mangle]
 #[naked]
 pub unsafe extern "C" fn syscall_entry() {
-    asm!(
+    core::arch::naked_asm!(
         // Save user context on kernel stack
         "swapgs",                    // Switch to kernel GS
         "mov gs:[0x8], rsp",        // Save user RSP in per-CPU data
         "mov rsp, gs:[0x0]",        // Load kernel RSP from per-CPU data
-        
+
         // Save registers
         "push rcx",                  // User RIP
         "push r11",                  // User RFLAGS
@@ -30,14 +29,14 @@ pub unsafe extern "C" fn syscall_entry() {
         "push r13",
         "push r14",
         "push r15",
-        
+
         // Call syscall handler with proper arguments
         // rax = syscall number
         // rdi = arg1, rsi = arg2, rdx = arg3
         // r10 = arg4, r8 = arg5, r9 = arg6
         "mov rcx, r10",              // Move arg4 to rcx (ABI mismatch fix)
         "call {handler}",
-        
+
         // Restore registers
         "pop r15",
         "pop r14",
@@ -47,18 +46,18 @@ pub unsafe extern "C" fn syscall_entry() {
         "pop rbp",
         "pop r11",                   // User RFLAGS
         "pop rcx",                   // User RIP
-        
+
         // Restore user stack and return
         "mov rsp, gs:[0x8]",        // Restore user RSP
         "swapgs",                    // Switch back to user GS
         "sysretq",
-        
-        handler = sym syscall_handler,
-        options(noreturn)
+
+        handler = sym syscall_handler
     );
 }
 
 /// Initialize SYSCALL/SYSRET support
+#[allow(dead_code)]
 pub fn init_syscall() {
     use x86_64::registers::{
         model_specific::{Efer, EferFlags, LStar, Star},

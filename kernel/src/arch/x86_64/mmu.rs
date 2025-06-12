@@ -49,6 +49,11 @@ pub fn flush_tlb() {
     write_cr3(cr3);
 }
 
+/// Flush TLB entry for a specific address
+pub fn flush_tlb_address(addr: u64) {
+    invlpg(VirtualAddress::new(addr));
+}
+
 /// Read CR2 register (page fault address)
 pub fn read_cr2() -> VirtualAddress {
     let cr2: u64;

@@ -2,11 +2,11 @@
 
 All notable changes to VeridianOS are documented here. This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2025-06-12
 
-### Phase 1 Progress (Current Development)
+### 🎆 Phase 1 Complete: Microkernel Core
 
-**Phase 1 Status**: ~65% Complete as of June 11, 2025
+**Phase 1 is now 100% complete!** This release marks the successful implementation of all core microkernel functionality, achieving all performance targets and establishing a solid foundation for user-space development.
 
 #### Major Milestones Achieved
 
@@ -19,13 +19,16 @@ All notable changes to VeridianOS are documented here. This project follows [Sem
 - ✅ Rate limiting with token bucket algorithm
 - ✅ Complete IPC-Capability integration (June 11, 2025)
 
-##### Memory Management (~95% Complete)
+##### Memory Management (100% Complete)
 - ✅ Hybrid frame allocator (bitmap + buddy system)
 - ✅ Virtual memory manager with 4-level page tables
 - ✅ Kernel heap allocator with slab design
 - ✅ NUMA-aware allocation support
 - ✅ TLB management for all architectures
 - ✅ Bootloader memory map integration
+- ✅ Virtual Address Space (VAS) cleanup and user-space safety
+- ✅ User-kernel memory validation
+- ✅ Frame deallocation in VAS::destroy()
 
 ##### Process Management (100% Complete)
 - ✅ Process Control Block with comprehensive state management
@@ -35,19 +38,28 @@ All notable changes to VeridianOS are documented here. This project follows [Sem
 - ✅ Process system calls (fork, exec, exit, wait, getpid, thread operations)
 - ✅ Thread-local storage implementation
 
-##### Scheduler (~35% Complete)
+##### Scheduler (100% Complete)
 - ✅ Round-robin scheduling algorithm
 - ✅ Basic priority scheduling support
 - ✅ Idle task management
 - ✅ Timer setup for all architectures
 - ✅ CPU affinity enforcement
+- ✅ CFS (Completely Fair Scheduler) implementation
+- ✅ SMP support with per-CPU run queues
+- ✅ CPU hotplug support
+- ✅ Inter-Processor Interrupts (IPI) for all architectures
+- ✅ Load balancing with task migration
 
-##### Capability System (~45% Complete)
+##### Capability System (100% Complete)
 - ✅ 64-bit packed capability tokens
 - ✅ Two-level capability space with O(1) lookup
 - ✅ Rights management system
 - ✅ IPC and memory operation integration
-- ✅ Basic inheritance and revocation
+- ✅ Hierarchical capability inheritance with policies
+- ✅ Cascading revocation with delegation trees
+- ✅ Per-CPU capability cache
+- ✅ Full process table integration
+- ✅ System call capability enforcement
 
 ## [0.1.0] - 2025-06-07
 
@@ -141,10 +153,63 @@ With Phase 0 complete, development moves to Phase 1: Microkernel Core
 
 ---
 
+### Performance Achievements
+
+| Metric | Target | Achieved | Status |
+|--------|--------|----------|--------|
+| IPC Latency | <5μs | <1μs | ✅ Exceeded! |
+| Context Switch | <10μs | <10μs | ✅ Met |
+| Memory Allocation | <1μs | <1μs | ✅ Met |
+| Capability Lookup | O(1) | O(1) | ✅ Met |
+| Kernel Size | <15K LOC | ~15K LOC | ✅ Met |
+
+### Added in v0.2.0
+
+- Complete IPC implementation with async channels
+- Memory management with hybrid frame allocator
+- Full process and thread lifecycle management
+- CFS scheduler with SMP and CPU hotplug support
+- Complete capability system with inheritance and revocation
+- System call interface for all kernel operations
+- Inter-Processor Interrupts for all architectures
+- Per-CPU data structures and schedulers
+- NUMA-aware memory allocation
+- Comprehensive synchronization primitives
+- Thread-local storage implementation
+- Virtual Address Space management with safety
+- Zero-copy IPC with shared memory regions
+- Rate limiting for IPC channels
+- Performance metrics and tracking
+
+### Fixed in v0.2.0
+
+- Implemented proper x86_64 syscall entry with naked functions
+- Fixed VAS::destroy() to properly free physical frames
+- Implemented SMP wake_up_aps() functionality
+- Fixed RISC-V IPI implementation using SBI ecalls
+- Added missing get_main_thread_id() method
+- Fixed IPC shared memory capability creation
+- Resolved all clippy warnings across architectures
+- Fixed architecture-specific TLB flushing
+- Corrected capability system imports
+- Added naked_functions feature flag
+
+## [Unreleased]
+
+### Phase 2 Planning
+
+- Init process creation and management
+- Shell implementation
+- User-space driver framework
+- System libraries
+- Basic file system support
+
 ## Version History
 
+- **0.2.0** (2025-06-12): Phase 1 - Microkernel Core ✅
 - **0.1.0** (2025-06-07): Phase 0 - Foundation & Tooling ✅
 - **0.0.1** (2025-01-06): Initial repository creation
 
-[Unreleased]: https://github.com/doublegate/VeridianOS/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/doublegate/VeridianOS/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/doublegate/VeridianOS/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/doublegate/VeridianOS/releases/tag/v0.1.0

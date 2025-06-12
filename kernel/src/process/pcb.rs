@@ -181,12 +181,12 @@ impl Process {
         self.state.store(state as u32, Ordering::Release);
     }
 
-    /// Get the main thread of this process
+    /// Get the main thread ID of this process
     #[cfg(feature = "alloc")]
-    pub fn get_main_thread(&self) -> Option<Thread> {
+    pub fn get_main_thread_id(&self) -> Option<ThreadId> {
         let threads = self.threads.lock();
         // The main thread is typically the first one created (lowest TID)
-        threads.values().min_by_key(|t| t.tid.0).cloned()
+        threads.values().min_by_key(|t| t.tid.0).map(|t| t.tid)
     }
 
     /// Add a thread to this process

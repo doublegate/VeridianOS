@@ -8,6 +8,7 @@ pub mod syscall;
 pub mod timer;
 pub mod vga;
 
+#[allow(dead_code)]
 pub fn init() {
     gdt::init();
     idt::init();
@@ -15,6 +16,7 @@ pub fn init() {
     unsafe { interrupts::enable() };
 }
 
+#[allow(dead_code)]
 pub fn halt() -> ! {
     use x86_64::instructions::hlt;
     interrupts::disable();
@@ -23,6 +25,7 @@ pub fn halt() -> ! {
     }
 }
 
+#[allow(dead_code)]
 pub fn enable_interrupts() {
     x86_64::instructions::interrupts::enable();
 }
@@ -56,10 +59,12 @@ pub fn serial_init() -> uart_16550::SerialPort {
 }
 
 mod interrupts {
+    #[allow(dead_code)]
     pub unsafe fn enable() {
         x86_64::instructions::interrupts::enable();
     }
 
+    #[allow(dead_code)]
     pub fn disable() {
         x86_64::instructions::interrupts::disable();
     }

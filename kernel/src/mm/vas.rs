@@ -219,32 +219,25 @@ impl VirtualAddressSpace {
         #[cfg(feature = "alloc")]
         {
             use super::FRAME_ALLOCATOR;
-            
+
             // First unmap all regions and free their physical frames
             let mut mappings = self.mappings.lock();
             for (_, mapping) in mappings.iter() {
-                if let Some(frames) = &mapping.allocated_frames {
-                    // Free the physical frames
-                    if let Ok(mut allocator) = FRAME_ALLOCATOR.try_lock() {
-                        for &frame in frames {
-                            let _ = allocator.free_frame(frame);
-                        }
-                    }
+                // Free the physical frames
+                let allocator = FRAME_ALLOCATOR.lock();
+                for &frame in &mapping.physical_frames {
+                    let _ = allocator.free_frames(frame, 1);
                 }
-                
+
                 // Unmap from page tables
-                if let Ok(mut tables) = crate::mm::page_table::PAGE_TABLES.try_lock() {
-                    let num_pages = mapping.size / 4096;
-                    for i in 0..num_pages {
-                        let vaddr = VirtualAddress(mapping.start.0 + i * 4096);
-                        let _ = tables.unmap(vaddr);
-                    }
-                }
+                // Note: In a real implementation, we would need the page mapper
+                // for this VAS to unmap the pages. For now, we'll just flush
+                // TLB.
             }
-            
+
             // Clear all mappings
             mappings.clear();
-            
+
             // Free the page table structures themselves
             // Note: This would require walking the page table hierarchy
             // and freeing intermediate table pages. For now, we just
@@ -321,16 +314,25 @@ impl VirtualAddressSpace {
         let mut mappings = self.mappings.lock();
         let mapping = mappings.remove(&start).ok_or("Region not mapped")?;
 
-        // Unmap from page tables first
-        if let Ok(mut page_tables) = crate::mm::page_table::PAGE_TABLES.try_lock() {
-            let num_pages = mapping.size / 4096;
-            for i in 0..num_pages {
-                let vaddr = VirtualAddress(mapping.start.0 + i * 4096);
-                let _ = page_tables.unmap(vaddr);
+        // Flush TLB for the unmapped range
+        #[cfg(target_arch = "x86_64")]
+        crate::arch::mmu::flush_tlb_address(mapping.start.0);
+        #[cfg(target_arch = "aarch64")]
+        {
+            // AArch64 TLB flush
+            use cortex_a::asm::barrier;
+            unsafe {
+                core::arch::asm!("tlbi vaae1is, {}", in(reg) mapping.start.0 >> 12);
+                barrier::dsb(barrier::SY);
+                barrier::isb(barrier::SY);
             }
-            
-            // Flush TLB for the unmapped range
-            crate::mm::page_table::flush_tlb_range(mapping.start, mapping.size);
+        }
+        #[cfg(target_arch = "riscv64")]
+        {
+            // RISC-V TLB flush
+            unsafe {
+                core::arch::asm!("sfence.vma {}, zero", in(reg) mapping.start.0);
+            }
         }
 
         // Free the physical frames

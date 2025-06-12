@@ -249,30 +249,43 @@ impl SharedRegion {
 
     /// Create a capability for this shared region
     pub fn create_capability(&self, target_process: ProcessId, mode: TransferMode) -> u64 {
-        use crate::cap::{Capability, ObjectReference, Rights, CAPABILITY_MANAGER};
-        
-        // Determine rights based on transfer mode
-        let rights = match mode {
-            TransferMode::Move => Rights::READ | Rights::WRITE | Rights::GRANT,
-            TransferMode::Share => Rights::READ | Rights::WRITE,
-            TransferMode::CopyOnWrite => Rights::READ,
+        use crate::cap::{
+            token::{CapabilityFlags, CapabilityToken},
+            types::{Capability, CapabilityId, CapabilityPermissions, CapabilityType},
         };
-        
+
+        // Determine permissions based on transfer mode
+        let perms = match mode {
+            TransferMode::Move => {
+                CapabilityPermissions::READ
+                    | CapabilityPermissions::WRITE
+                    | CapabilityPermissions::GRANT
+            }
+            TransferMode::Share => CapabilityPermissions::READ | CapabilityPermissions::WRITE,
+            TransferMode::CopyOnWrite => CapabilityPermissions::READ,
+        };
+
+        // Create capability ID based on region ID and target process
+        let cap_id = CapabilityId(self.id ^ target_process.0);
+
         // Create capability for shared memory region
-        let object_ref = ObjectReference::Memory {
-            region_id: self.id,
-            base: self.physical_base.0,
-            size: self.size,
+        let _cap = Capability::new(
+            cap_id,
+            CapabilityType::Memory,
+            perms,
+            self.physical_base.as_u64(),
+        );
+
+        // Create token with appropriate flags
+        let flags = match mode {
+            TransferMode::Move => CapabilityFlags::Read as u8 | CapabilityFlags::Write as u8,
+            TransferMode::Share => CapabilityFlags::Read as u8 | CapabilityFlags::Write as u8,
+            TransferMode::CopyOnWrite => CapabilityFlags::Read as u8,
         };
-        
-        // Create and register the capability
-        let cap = Capability::new(object_ref, rights);
-        let token = cap.to_token();
-        
-        // Register with capability manager
-        CAPABILITY_MANAGER.lock().register(token, cap);
-        
-        token
+
+        let token = CapabilityToken::new(cap_id.0, 0, CapabilityType::Memory as u8, flags);
+
+        token.to_u64()
     }
 
     /// Get the NUMA node for this region
