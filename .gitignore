@@ -33,6 +33,9 @@ target/
 **/*.rs.bk
 *.orig
 
+# Build logs
+build_output.log
+
 # IDE
 .vscode/
 .idea/
@@ -86,7 +89,8 @@ CLAUDE.local.md
 .local/
 
 # CI artifacts (downloaded from GitHub Actions)
-/release-artifacts/
+release-archives/
+release-artifacts/
 
 # Cache directories
 .cache/

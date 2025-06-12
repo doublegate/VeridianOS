@@ -51,23 +51,6 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 - Capability System: 100% complete ✅ (tokens, rights, space management, inheritance, revocation, per-CPU cache done)
 - Test Framework: 100% complete ✅ (no_std test framework with benchmarks, IPC/scheduler/process tests migrated)
 
-**Phase 0 Achievements**:
-
-- ✅ Development environment setup and automation
-- ✅ CI/CD pipeline (GitHub Actions) - 100% PASSING across all architectures!
-- ✅ Custom target specifications for x86_64, AArch64, and RISC-V
-- ✅ Basic kernel structure with modular architecture design
-- ✅ Code quality enforcement: formatting, linting, zero warnings policy
-- ✅ QEMU testing infrastructure with automated debugging
-- ✅ Bootloader integration (working on all three architectures!)
-- ✅ GDB debugging infrastructure with custom commands
-- ✅ Test framework foundation with no_std support
-- ✅ Documentation framework (rustdoc + mdBook) fully configured
-- ✅ Version control hooks and automated quality checks
-- ✅ Development tool integrations (VS Code, rust-analyzer)
-- ✅ Comprehensive technical documentation (25+ documents)
-- ✅ GitHub Pages documentation deployment
-- ✅ Release automation and artifact generation
 
 ### Architecture Support Status
 
@@ -96,27 +79,43 @@ cd VeridianOS
 # Install dependencies (Ubuntu/Debian)
 ./scripts/install-deps.sh
 
-# Build and run in QEMU
+# Build all architectures (recommended)
+./build-kernel.sh all dev      # Development build
+./build-kernel.sh all release  # Release build
+
+# Build specific architecture
+./build-kernel.sh x86_64 dev
+./build-kernel.sh aarch64 release
+./build-kernel.sh riscv64 dev
+
+# Run in QEMU
 just run
 
 # Or build manually for specific architectures
 cargo build --target targets/x86_64-veridian.json \
     -p veridian-kernel \
-    -Zbuild-std=core,compiler_builtins,alloc \
-    -Zbuild-std-features=compiler-builtins-mem
+    -Zbuild-std=core,compiler_builtins,alloc
 
 # Run in QEMU (x86_64)
-cargo bootimage --target targets/x86_64-veridian.json
 qemu-system-x86_64 \
-    -drive format=raw,file=target/x86_64-veridian/debug/bootimage-veridian-kernel.bin \
+    -kernel target/x86_64-veridian/debug/veridian-kernel \
+    -serial stdio \
+    -display none
+
+# Run in QEMU (AArch64)
+qemu-system-aarch64 \
+    -M virt \
+    -cpu cortex-a57 \
+    -kernel target/aarch64-unknown-none/debug/veridian-kernel \
     -serial stdio \
     -display none
 
 # Run in QEMU (RISC-V)
 qemu-system-riscv64 \
     -M virt \
-    -nographic \
-    -kernel target/riscv64gc-veridian/debug/veridian-kernel
+    -kernel target/riscv64gc-unknown-none-elf/debug/veridian-kernel \
+    -serial stdio \
+    -display none
 ```
 
 For detailed build instructions, see [BUILD-INSTRUCTIONS.md](docs/BUILD-INSTRUCTIONS.md).

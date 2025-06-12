@@ -3,8 +3,8 @@
 ENTRY(_start)
 
 SECTIONS {
-    /* Higher half kernel at -2GB */
-    . = 0xFFFF800000100000;
+    /* Higher half kernel at -2GB (0xFFFFFFFF80000000) */
+    . = 0xFFFFFFFF80100000;
 
     .text : ALIGN(4K) {
         KEEP(*(.text.boot))

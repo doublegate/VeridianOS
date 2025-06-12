@@ -1,0 +1,112 @@
+/*
+ * VeridianOS x86_64 Kernel Linker Script
+ * 
+ * This script links the kernel to run in the higher half of virtual memory
+ * at address 0xFFFFFFFF80000000 (top 2GB of 64-bit address space).
+ * 
+ * Memory Layout:
+ * - Physical Load Address: 0x100000 (1MB) - Where bootloader loads us
+ * - Virtual Base Address: 0xFFFFFFFF80000000 - Where we run after paging
+ * 
+ * The kernel code model in x86_64 allows efficient addressing within ±2GB
+ * of the kernel base, perfect for kernel code and data structures.
+ */
+
+OUTPUT_FORMAT(elf64-x86-64)
+ENTRY(_start)
+
+/* Define kernel addresses */
+KERNEL_PHYS_BASE = 0x100000;                    /* 1MB - typical kernel load address */
+KERNEL_VIRT_BASE = 0xFFFFFFFF80000000;         /* -2GB - kernel code model range */
+KERNEL_OFFSET = KERNEL_VIRT_BASE - KERNEL_PHYS_BASE;
+
+PHDRS
+{
+    /* Program headers for ELF loader */
+    text PT_LOAD FLAGS(5);      /* Execute + Read */
+    rodata PT_LOAD FLAGS(4);    /* Read only */
+    data PT_LOAD FLAGS(6);      /* Write + Read */
+}
+
+SECTIONS
+{
+    /* Start at kernel virtual base */
+    . = KERNEL_VIRT_BASE;
+
+    /* Code section - executable and read-only */
+    .text ALIGN(4K) : AT(ADDR(.text) - KERNEL_OFFSET)
+    {
+        __text_start = .;
+        KEEP(*(.multiboot))     /* Multiboot header must be early */
+        KEEP(*(.multiboot2))    /* Multiboot2 header support */
+        *(.text._start)         /* Entry point */
+        *(.text .text.*)        /* All code */
+        __text_end = .;
+    } :text
+
+    /* Read-only data section */
+    .rodata ALIGN(4K) : AT(ADDR(.rodata) - KERNEL_OFFSET)
+    {
+        __rodata_start = .;
+        *(.rodata .rodata.*)
+        
+        /* String constants and other read-only data */
+        *(.rodata.str1.1)
+        *(.rodata.str1.2)
+        *(.rodata.str1.4)
+        *(.rodata.str1.8)
+        *(.rodata.str1.16)
+        
+        /* Constant data */
+        *(.rodata.cst8)
+        *(.rodata.cst16)
+        *(.rodata.cst32)
+        
+        __rodata_end = .;
+    } :rodata
+
+    /* Read-write data section */
+    .data ALIGN(4K) : AT(ADDR(.data) - KERNEL_OFFSET)
+    {
+        __data_start = .;
+        *(.data .data.*)
+        
+        /* Global Offset Table */
+        *(.got)
+        *(.got.plt)
+        
+        __data_end = .;
+    } :data
+
+    /* Uninitialized data section */
+    .bss ALIGN(4K) : AT(ADDR(.bss) - KERNEL_OFFSET)
+    {
+        __bss_start = .;
+        *(.bss .bss.*)
+        *(COMMON)               /* Common symbols */
+        
+        /* Reserve space for kernel stack */
+        . = ALIGN(16);
+        __stack_bottom = .;
+        . += 0x20000;           /* 128KB kernel stack */
+        __stack_top = .;
+        
+        __bss_end = .;
+    } :data
+
+    /* End of kernel image */
+    __kernel_end = .;
+
+    /* Sections to discard */
+    /DISCARD/ :
+    {
+        *(.eh_frame)
+        *(.comment)
+        *(.note.*)
+    }
+}
+
+/* Export symbols for use in kernel code */
+PROVIDE(__kernel_phys_start = KERNEL_PHYS_BASE);
+PROVIDE(__kernel_virt_start = KERNEL_VIRT_BASE);
+PROVIDE(__kernel_size = __kernel_end - KERNEL_VIRT_BASE);

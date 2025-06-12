@@ -24,14 +24,29 @@ VeridianOS is a next-generation microkernel operating system written entirely in
 ## Essential Commands
 
 ### Building the Kernel
+
+#### Automated Build Script (Recommended)
 ```bash
-# Current build commands using standard bare metal targets
-cargo build --target x86_64-unknown-none -p veridian-kernel
+# Build all architectures (dev mode)
+./build-kernel.sh all dev
+
+# Build all architectures (release mode)
+./build-kernel.sh all release
+
+# Build specific architecture
+./build-kernel.sh x86_64 dev
+./build-kernel.sh aarch64 release
+./build-kernel.sh riscv64 dev
+```
+
+#### Manual Build Commands
+```bash
+# x86_64 with kernel code model (required for relocation fix)
+cargo build --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc
+
+# Standard bare metal targets for other architectures
 cargo build --target aarch64-unknown-none -p veridian-kernel  
 cargo build --target riscv64gc-unknown-none-elf -p veridian-kernel
-
-# Legacy custom targets (preserved but not used)
-# cargo build --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
 
 # Run with QEMU (x86_64)
 cargo run --target x86_64-unknown-none -p veridian-kernel -- -serial stdio -display none
@@ -40,6 +55,11 @@ cargo run --target x86_64-unknown-none -p veridian-kernel -- -serial stdio -disp
 qemu-system-aarch64 -M virt -cpu cortex-a57 -kernel target/aarch64-unknown-none/debug/veridian-kernel -serial stdio -display none
 qemu-system-riscv64 -M virt -kernel target/riscv64gc-unknown-none-elf/debug/veridian-kernel -serial stdio -display none
 ```
+
+#### Important Notes
+- x86_64 requires custom target JSON with kernel code model to avoid R_X86_64_32S relocation errors
+- Kernel is linked at 0xFFFFFFFF80100000 (top 2GB of virtual memory)
+- AArch64 and RISC-V use standard bare metal targets
 
 ### Testing
 ```bash
@@ -56,6 +76,8 @@ cargo run --target x86_64-unknown-none -p veridian-kernel -- -serial stdio -disp
 # Format and lint checks (always run these)
 cargo fmt --all
 cargo clippy --target x86_64-unknown-none -p veridian-kernel -- -D warnings
+cargo clippy --target aarch64-unknown-none -p veridian-kernel -- -D warnings
+cargo clippy --target riscv64gc-unknown-none-elf -p veridian-kernel -- -D warnings
 
 # Run specific test
 cargo test test_name
@@ -154,18 +176,22 @@ Currently implementing in phases:
 - **Documentation**: Complete (25+ comprehensive guides) + GitHub Pages deployment
 - **Infrastructure**: Directory structure, TODO system, and GitHub setup complete
 - **CI/CD**: ✅ GitHub Actions workflow passing all checks (100% success rate)
-- **Current Phase**: Phase 1 (Microkernel Core) - 100% COMPLETE! 🎉
-  - Phase 0 (Foundation) - 100% COMPLETE! ✅
-  - Phase 1 (Microkernel Core) - 100% COMPLETE! ✅
+- **Current Phase**: Phase 2 (User Space Foundation) - Starting next!
+  - Phase 0 (Foundation) - 100% COMPLETE! ✅ (v0.1.0 - June 7, 2025)
+  - Phase 1 (Microkernel Core) - 100% COMPLETE! ✅ (v0.2.0 - June 12, 2025)
   - IPC System: 100% complete - sync/async channels, registry, perf tracking, rate limiting, capability integration
   - Memory Management: 100% complete - frame allocator, VMM, heap, page tables, user space safety
   - Process Management: 100% complete - PCB, threads, context switching, synchronization primitives, syscalls
   - Capability System: 100% complete - inheritance, revocation, per-CPU cache, full integration
   - Scheduler: 100% complete - CFS/priority scheduling, load balancing, SMP support, CPU hotplug
-- **Latest Release**: v0.1.0 (June 7, 2025) - Foundation & Tooling
-  - Release includes kernel binaries for all three architectures
-  - Debug symbols available for x86_64 (AArch64/RISC-V pending)
-  - All release artifacts automatically built by CI
+- **Latest Release**: v0.2.0 (June 12, 2025) - Microkernel Core Complete
+  - All Phase 1 functionality implemented
+  - Performance targets met or exceeded (IPC <1μs)
+  - Kernel binaries for x86_64, AArch64, RISC-V
+  - Debug symbols for x86_64
+  - Source archives (.tar.gz and .zip)
+  - All artifacts available on GitHub release page
+- **Previous Release**: v0.1.0 (June 7, 2025) - Foundation & Tooling
 - **Build Status**: ✅ Compiling successfully for all target architectures
 - **Boot Status**: ✅ All architectures (x86_64, RISC-V, AArch64) boot successfully!
 - **Code Quality**: ✅ All format and clippy checks passing with zero warnings
@@ -173,11 +199,11 @@ Currently implementing in phases:
 - **Testing**: ✅ No-std test framework and benchmarks implemented
 - **Documentation**: ✅ Rustdoc and mdBook configured with automatic deployment
 - **Version Control**: ✅ Git hooks, PR templates, and release automation ready
-- **Phase 1 Completion**: June 11, 2025 - All microkernel core components complete!
-  - Completed in just 3 days (June 8-11, 2025)!
-  - All subsystems 100% implemented with no deferred items
+- **Phase 1 Completion**: June 12, 2025 - All microkernel core components complete!
+  - Completed in just 5 days (June 8-12, 2025)!
+  - All subsystems 100% implemented with comprehensive tracking
   - Performance targets achieved (IPC <1μs, context switch <10μs)
-  - Builds successfully for x86_64 and AArch64 (RISC-V needs minor fix)
+  - Builds successfully for all architectures with zero warnings
   - Ready to begin Phase 2: User space foundation
 
 ## Implementation Status

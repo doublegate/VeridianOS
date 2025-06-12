@@ -1,0 +1,181 @@
+# VeridianOS x86_64 Kernel Entry Point
+# 
+# This assembly stub handles the transition from the bootloader to Rust code.
+# It sets up the initial environment and jumps to the kernel's Rust entry point.
+#
+# The bootloader (GRUB/Multiboot2) loads us at physical address 0x100000,
+# but we're linked to run at 0xFFFFFFFF80000000. We handle this transition
+# carefully to avoid relocation issues.
+
+.section .multiboot2, "a"
+.align 8
+
+# Multiboot2 header for bootloader compatibility
+multiboot2_header_start:
+    .long 0xe85250d6                    # Multiboot2 magic number
+    .long 0                             # Architecture: i386
+    .long multiboot2_header_end - multiboot2_header_start
+    .long -(0xe85250d6 + 0 + (multiboot2_header_end - multiboot2_header_start))
+    
+    # End tag
+    .align 8
+    .short 0
+    .short 0
+    .long 8
+multiboot2_header_end:
+
+.section .text
+.code32
+.global _start
+.type _start, @function
+
+# Physical addresses for use before paging is enabled
+.equ KERNEL_PHYS_BASE, 0x100000
+.equ KERNEL_VIRT_BASE, 0xFFFFFFFF80000000
+.equ KERNEL_OFFSET, (KERNEL_VIRT_BASE - KERNEL_PHYS_BASE)
+
+# Macro to convert virtual address to physical
+.macro V2P addr
+    (\addr - KERNEL_OFFSET)
+.endm
+
+_start:
+    # Disable interrupts
+    cli
+    
+    # Save multiboot info pointer (in EBX) for later
+    mov %ebx, V2P(multiboot_info_ptr)
+    
+    # Clear screen (optional, helps with debugging)
+    mov $0xB8000, %edi
+    mov $0x0F200F20, %eax      # Space character with white on black
+    mov $1000, %ecx
+    rep stosl
+    
+    # Load our GDT before entering long mode
+    lgdt V2P(gdt64_ptr)
+    
+    # Enable PAE (Physical Address Extension)
+    mov %cr4, %eax
+    or $0x20, %eax              # Set PAE bit
+    mov %eax, %cr4
+    
+    # Load PML4 (Page Map Level 4) table
+    mov $V2P(pml4_table), %eax
+    mov %eax, %cr3
+    
+    # Enable long mode in EFER MSR
+    mov $0xC0000080, %ecx       # EFER MSR number
+    rdmsr
+    or $0x100, %eax             # Set LM bit
+    wrmsr
+    
+    # Enable paging and protected mode
+    mov %cr0, %eax
+    or $0x80000001, %eax        # Set PG and PE bits
+    mov %eax, %cr0
+    
+    # Jump to 64-bit code segment
+    ljmp $0x08, $V2P(long_mode_start)
+
+.code64
+long_mode_start:
+    # Reload segment registers with 64-bit data segment
+    mov $0x10, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+    mov %ax, %ss
+    
+    # Set up the stack at the higher half address
+    mov $stack_top, %rsp
+    
+    # Clear RFLAGS
+    push $0
+    popf
+    
+    # Jump to higher half code
+    mov $higher_half_start, %rax
+    jmp *%rax
+
+higher_half_start:
+    # Now we're running at the higher half virtual address
+    # We can use normal addressing from here
+    
+    # Clear BSS section
+    mov $__bss_start, %rdi
+    mov $__bss_end, %rcx
+    sub %rdi, %rcx
+    xor %rax, %rax
+    rep stosb
+    
+    # Retrieve multiboot info pointer
+    mov multiboot_info_ptr, %rdi
+    add $KERNEL_OFFSET, %rdi    # Convert to virtual address
+    
+    # Call Rust kernel entry point
+    call kernel_main
+    
+    # If kernel returns (it shouldn't), halt
+halt:
+    cli
+    hlt
+    jmp halt
+
+# Read-only data section
+.section .rodata
+.align 16
+
+# Global Descriptor Table for 64-bit mode
+gdt64:
+    .quad 0                     # Null descriptor
+    .quad 0x00AF9A000000FFFF   # Code segment: 64-bit, present, executable
+    .quad 0x00AF92000000FFFF   # Data segment: 64-bit, present, writable
+gdt64_end:
+
+gdt64_ptr:
+    .word gdt64_end - gdt64 - 1
+    .quad V2P(gdt64)
+
+# Initial page tables (identity + higher half mapping)
+.section .data
+.align 4096
+
+pml4_table:
+    .quad V2P(pdp_table_low) | 0x03     # Present, writable
+    .fill 510, 8, 0
+    .quad V2P(pdp_table_high) | 0x03    # Map higher half
+
+.align 4096
+pdp_table_low:
+    .quad V2P(pd_table) | 0x03          # Present, writable
+    .fill 511, 8, 0
+
+.align 4096
+pdp_table_high:
+    .fill 510, 8, 0
+    .quad V2P(pd_table) | 0x03          # Same PD for both mappings
+
+.align 4096
+pd_table:
+    # Map first 1GB using 2MB pages
+    .set i, 0
+    .rept 512
+    .quad (i << 21) | 0x83              # Present, writable, huge page
+    .set i, i + 1
+    .endr
+
+# BSS section
+.section .bss
+.align 16
+
+# Space to save multiboot info pointer
+multiboot_info_ptr:
+    .skip 8
+
+# Kernel stack (grows downward)
+.align 16
+stack_bottom:
+    .skip 0x20000               # 128KB stack
+stack_top:
