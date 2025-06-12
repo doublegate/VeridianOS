@@ -10,14 +10,9 @@
 
 extern crate alloc;
 
-use core::hint::black_box;
-
 use veridian_kernel::{
-    kernel_assert, kernel_assert_eq, kernel_bench,
-    process::{ProcessId, ProcessState, ThreadId},
-    sched::{self, metrics, Priority, SchedClass, Task},
+    sched::{self},
     serial_println,
-    test_framework::{cycles_to_ns, read_timestamp, BenchmarkRunner},
 };
 
 #[path = "common/mod.rs"]
@@ -199,14 +194,23 @@ fn test_cpu_load_tracking() {
 
 // ===== Performance Benchmarks =====
 
-kernel_bench!(bench_task_creation, {
-    static mut COUNTER: u64 = 100;
-    unsafe {
-        let task = sched::create_task("bench_task", ProcessId(COUNTER), ThreadId(COUNTER), 0, 0);
-        COUNTER += 1;
-        sched::exit_task(task);
+#[test_case]
+fn bench_task_creation() {
+    serial_println!("bench_task_creation...");
+    sched::init();
+    
+    let start = read_timestamp();
+    for i in 100..200 {
+        unsafe {
+            let task = sched::create_task("bench_task", ProcessId(i), ThreadId(i), 0, 0);
+            sched::exit_task(task);
+        }
     }
-});
+    let elapsed = read_timestamp() - start;
+    let avg_cycles = elapsed / 100;
+    serial_println!("  Average: {} cycles ({} ns)", avg_cycles, cycles_to_ns(avg_cycles));
+    serial_println!("[ok]");
+}
 
 #[test_case]
 fn bench_context_switch() {
@@ -228,7 +232,8 @@ fn bench_context_switch() {
     serial_println!("Context switch time: {} ns", result.avg_time_ns);
 
     // Context switch should be <10μs
-    assert_performance!(result.avg_time_ns, < 10000);
+    assert!(result.avg_time_ns < 10000, "Context switch too slow: {} ns", result.avg_time_ns);
+    serial_println!("[ok]");
 
     // Cleanup
     unsafe {

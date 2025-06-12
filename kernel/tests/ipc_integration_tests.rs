@@ -10,16 +10,9 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
-
 use veridian_kernel::{
-    ipc::{
-        self, create_channel, create_endpoint, get_registry_stats, validate_capability,
-        AsyncChannel, IpcCapability, IpcPermissions, Message, Permissions, ProcessId, RateLimits,
-        SharedRegion, TransferMode, IPC_PERF_STATS, RATE_LIMITER,
-    },
-    kernel_bench, serial_println,
-    test_framework::{cycles_to_ns, read_timestamp, BenchmarkRunner},
+    ipc::{self},
+    serial_println,
 };
 
 #[path = "common/mod.rs"]
@@ -296,11 +289,11 @@ fn test_concurrent_operations() {
 
     // Create multiple channels
     let channels: Vec<_> = (0..10)
-        .map(|i| AsyncChannel::new(i as u64, 1, 100))
+        .map(|i| AsyncChannel::new(i as u64, ProcessId(1), 100))
         .collect(); // id=i, owner=1, capacity=100
 
     // Simulate concurrent sends (in real system, would use threads)
-    for (_i, channel) in channels.iter().enumerate() {
+    for (i, channel) in channels.iter().enumerate() {
         for j in 0..10 {
             let msg = Message::small(0, (i * 256 + j) as u32);
             channel.send_async(msg).expect("Send failed");
@@ -308,7 +301,7 @@ fn test_concurrent_operations() {
     }
 
     // Verify all messages received
-    for (_i, channel) in channels.iter().enumerate() {
+    for channel in channels.iter() {
         let mut count = 0;
         while let Ok(msg) = channel.receive_async() {
             count += 1;

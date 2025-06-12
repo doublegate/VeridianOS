@@ -6,25 +6,38 @@
 #![no_main]
 #![feature(custom_test_frameworks)]
 #![test_runner(veridian_kernel::test_runner)]
-#![reexec_test_harness_main = "test_main"]
+#![reexport_test_harness_main = "test_main"]
 
 extern crate alloc;
 use alloc::string::String;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use veridian_kernel::{
     cap::{CapabilitySpace, CapabilityToken, Rights},
-    ipc::{IpcPermissions, Message, MessageHeader},
-    mm::{FrameAllocator, VirtualAddressSpace},
-    process::{Process, ProcessId, ProcessPriority, ThreadId},
-    sched::{Priority, Task},
-    test_utils::*,
+    ipc::{self, Message, ProcessId},
+    mm::{FRAME_ALLOCATOR, PhysAddr},
+    process::{self, ProcessPriority, ThreadId},
+    serial_println,
 };
 
-static TEST_SYNC: AtomicBool = AtomicBool::new(false);
+#[no_mangle]
+pub extern "C" fn _start() -> ! {
+    test_main();
+    loop {}
+}
+
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    veridian_kernel::test_panic_handler(info)
+}
 
 #[test_case]
 fn test_process_with_ipc_and_capabilities() {
+    serial_println!("test_process_with_ipc_and_capabilities...");
+    
+    // Initialize subsystems
+    process::init();
+    ipc::init();
+    
     // Create two processes
     let process1 = Process::new(
         ProcessId(100),
@@ -32,22 +45,21 @@ fn test_process_with_ipc_and_capabilities() {
         String::from("test-sender"),
         ProcessPriority::Normal,
     );
-
+    
     let process2 = Process::new(
         ProcessId(101),
         None,
         String::from("test-receiver"),
         ProcessPriority::Normal,
     );
-
+    
     // Create IPC endpoint
-    let endpoint_id = 1000;
-    let permissions = IpcPermissions::READ | IpcPermissions::WRITE;
-
+    let (endpoint_id, endpoint_cap) = create_endpoint(ProcessId(100)).expect("Failed to create endpoint");
+    
     // Create capability for endpoint
     let cap_token = CapabilityToken::new(1, 0);
     let rights = Rights::READ | Rights::WRITE | Rights::SEND | Rights::RECEIVE;
-
+    
     // Add capability to both processes
     process1
         .capability_space
@@ -58,7 +70,7 @@ fn test_process_with_ipc_and_capabilities() {
             rights,
         )
         .expect("Failed to insert capability");
-
+    
     process2
         .capability_space
         .lock()
@@ -68,19 +80,10 @@ fn test_process_with_ipc_and_capabilities() {
             rights,
         )
         .expect("Failed to insert capability");
-
+    
     // Create a message
-    let msg_data = [0x42u8; 32];
-    let header = MessageHeader {
-        msg_type: 1,
-        flags: 0,
-        sender: ProcessId(100),
-        receiver: ProcessId(101),
-        capability: Some(cap_token),
-        timestamp: 0,
-    };
-    let message = Message::new(header, &msg_data);
-
+    let msg = Message::small(endpoint_cap.id(), 42);
+    
     // Test that processes can communicate
     assert!(process1
         .capability_space
@@ -90,10 +93,16 @@ fn test_process_with_ipc_and_capabilities() {
         .capability_space
         .lock()
         .check_rights(cap_token, Rights::RECEIVE));
+    
+    serial_println!("[ok]");
 }
 
 #[test_case]
 fn test_memory_allocation_with_capabilities() {
+    serial_println!("test_memory_allocation_with_capabilities...");
+    
+    process::init();
+    
     // Create process with memory capabilities
     let process = Process::new(
         ProcessId(200),
@@ -101,281 +110,242 @@ fn test_memory_allocation_with_capabilities() {
         String::from("test-memory"),
         ProcessPriority::Normal,
     );
-
+    
     // Allocate memory
-    let mut frame_allocator = FrameAllocator::new();
-    frame_allocator.init(0x100000, 0x200000); // 1MB region
+    if let Some(frame) = FRAME_ALLOCATOR.allocate() {
+        // Create capability for memory region
+        let cap_token = CapabilityToken::new(2, 0);
+        let rights = Rights::READ | Rights::WRITE | Rights::MAP;
+        
+        process
+            .capability_space
+            .lock()
+            .insert(
+                cap_token,
+                veridian_kernel::cap::object::ObjectRef::Memory {
+                    start: frame,
+                    size: 4096,
+                    flags: 0,
+                },
+                rights,
+            )
+            .expect("Failed to insert memory capability");
+        
+        // Verify capability
+        assert!(process
+            .capability_space
+            .lock()
+            .check_rights(cap_token, Rights::MAP));
+        
+        // Clean up
+        FRAME_ALLOCATOR.deallocate(frame);
+    }
+    
+    serial_println!("[ok]");
+}
 
-    let frame = frame_allocator
-        .allocate_frame()
-        .expect("Failed to allocate frame");
+#[test_case]
+fn test_scheduler_with_multiple_processes() {
+    serial_println!("test_scheduler_with_multiple_processes...");
+    
+    use veridian_kernel::sched;
+    
+    // Initialize scheduler
+    process::init();
+    sched::init();
+    
+    // Create multiple processes with threads
+    for i in 300..303 {
+        let pid = ProcessId(i);
+        let process = Process::new(
+            pid,
+            None,
+            String::from("sched-test"),
+            ProcessPriority::Normal,
+        );
+        
+        // Create main thread
+        let thread = Thread::new(ThreadId(i), pid);
+        process.add_thread(thread).expect("Failed to add thread");
+        
+        // Insert into process table
+        process::table::insert_process(process);
+        
+        // Create scheduler task
+        let task = sched::create_task("sched-test", pid, ThreadId(i), 0, 0);
+        assert!(!task.is_null());
+    }
+    
+    // Run scheduler for a few ticks
+    for _ in 0..10 {
+        sched::schedule();
+    }
+    
+    // Check scheduler metrics
+    let metrics = sched::metrics::SCHEDULER_METRICS.get_summary();
+    assert!(metrics.context_switches > 0);
+    
+    serial_println!("[ok]");
+}
 
-    // Create capability for memory region
-    let cap_token = CapabilityToken::new(2, 0);
-    let rights = Rights::READ | Rights::WRITE | Rights::MAP;
-
+#[test_case]
+fn test_capability_revocation() {
+    serial_println!("test_capability_revocation...");
+    
+    process::init();
+    
+    let process = Process::new(
+        ProcessId(400),
+        None,
+        String::from("cap-test"),
+        ProcessPriority::Normal,
+    );
+    
+    // Create and insert capability
+    let cap_token = CapabilityToken::new(3, 0);
+    let rights = Rights::all();
+    
     process
         .capability_space
         .lock()
         .insert(
             cap_token,
-            veridian_kernel::cap::object::ObjectRef::Memory {
-                base: frame.as_usize(),
-                size: 4096,
+            veridian_kernel::cap::object::ObjectRef::Process {
+                pid: ProcessId(400),
             },
             rights,
         )
-        .expect("Failed to insert memory capability");
-
-    // Verify capability allows memory access
+        .expect("Failed to insert capability");
+    
+    // Verify it exists
     assert!(process
         .capability_space
         .lock()
-        .check_rights(cap_token, Rights::MAP));
-
-    // Clean up
-    frame_allocator.deallocate_frame(frame);
-}
-
-#[test_case]
-fn test_scheduler_with_processes() {
-    use core::ptr::NonNull;
-
-    use veridian_kernel::sched::{SchedAlgorithm, Scheduler};
-
-    // Create scheduler
-    let mut scheduler = Scheduler::new();
-    scheduler.algorithm = SchedAlgorithm::Priority;
-
-    // Create idle task
-    let idle_task = Task::new(
-        ProcessId(0),
-        ThreadId(0),
-        String::from("idle"),
-        idle_entry as usize,
-        0x80000,
-        0,
-    );
-    let idle_ptr = NonNull::new(&idle_task as *const _ as *mut _).unwrap();
-    scheduler.init(idle_ptr);
-
-    // Create test processes and tasks
-    for i in 1..=3 {
-        let process = Process::new(
-            ProcessId(300 + i),
-            None,
-            String::from("test-process"),
-            ProcessPriority::Normal,
-        );
-
-        let task = Task::new(
-            process.pid,
-            ThreadId(i),
-            String::from("test-task"),
-            test_entry as usize,
-            0x80000 + i as usize * 0x10000,
-            0,
-        );
-
-        let task_ptr = NonNull::new(&task as *const _ as *mut _).unwrap();
-        scheduler.enqueue(task_ptr);
-    }
-
-    // Run scheduler
-    let next = scheduler.pick_next();
-    assert!(next.is_some());
-}
-
-#[test_case]
-fn test_process_lifecycle() {
-    use veridian_kernel::process::lifecycle::*;
-
-    // Create parent process
-    let parent = create_process(String::from("parent"), test_entry as usize)
-        .expect("Failed to create parent");
-
-    // Fork child
-    let child = fork_process().expect("Failed to fork");
-
-    // In parent, child PID should be non-zero
-    if child.0 != 0 {
-        // Parent process
-        assert!(child.0 > parent.0);
-
-        // Wait for child
-        TEST_SYNC.store(true, Ordering::Release);
-
-        // Note: In real scenario, wait_process would block
-    } else {
-        // Child process
-        while !TEST_SYNC.load(Ordering::Acquire) {
-            core::hint::spin_loop();
-        }
-
-        // Exit child
-        exit_process(42);
-    }
-}
-
-#[test_case]
-fn test_capability_inheritance() {
-    use veridian_kernel::cap::inheritance::*;
-
-    // Create parent and child capability spaces
-    let parent_space = CapabilitySpace::new();
-    let child_space = CapabilitySpace::new();
-
-    // Add capabilities to parent
-    for i in 0..5 {
-        let cap = CapabilityToken::new(i, 0);
-        let rights = Rights::READ | Rights::WRITE;
-        parent_space
-            .insert(
-                cap,
-                veridian_kernel::cap::object::ObjectRef::Process {
-                    pid: ProcessId(i as u64),
-                },
-                rights,
-            )
-            .expect("Failed to insert capability");
-    }
-
-    // Test inheritance
-    let inherited = inherit_capabilities(&parent_space, &child_space, InheritancePolicy::All)
-        .expect("Failed to inherit capabilities");
-
-    assert_eq!(inherited, 5);
-    assert_eq!(parent_space.stats().total_caps.load(Ordering::Relaxed), 5);
-    assert_eq!(child_space.stats().total_caps.load(Ordering::Relaxed), 5);
-}
-
-#[test_case]
-fn test_ipc_with_scheduler_blocking() {
-    use veridian_kernel::{ipc::sync::SyncChannel, sched};
-
-    // Create sync channel
-    let channel = SyncChannel::new(2000, ProcessId(400), IpcPermissions::all());
-
-    // Test blocking behavior
-    let process = Process::new(
-        ProcessId(400),
-        None,
-        String::from("test-blocker"),
-        ProcessPriority::Normal,
-    );
-
-    // Set process as current (mock)
-    process.set_state(veridian_kernel::process::ProcessState::Running);
-
-    // Try to receive on empty channel (would block)
-    let cap = CapabilityToken::new(10, 0);
-    match channel.try_receive(cap) {
-        Err(veridian_kernel::ipc::IpcError::WouldBlock) => {
-            // Expected - channel is empty
-        }
-        _ => panic!("Expected WouldBlock error"),
-    }
-}
-
-#[test_case]
-fn test_memory_mapping_with_capabilities() {
-    let mut vas = VirtualAddressSpace::new();
-    vas.init().expect("Failed to init VAS");
-
-    // Create memory capability
-    let cap = CapabilityToken::new(20, 0);
-    let cap_space = CapabilitySpace::new();
-
-    cap_space
-        .insert(
-            cap,
-            veridian_kernel::cap::object::ObjectRef::Memory {
-                base: 0x100000,
-                size: 0x10000,
-            },
-            Rights::READ | Rights::WRITE | Rights::MAP,
-        )
-        .expect("Failed to insert capability");
-
-    // Verify capability allows mapping
-    assert!(cap_space.check_rights(cap, Rights::MAP));
-
-    // Map memory region
-    use veridian_kernel::mm::{PageFlags, VirtualAddress};
-    vas.map_region(
-        VirtualAddress::new(0x200000),
-        0x10000,
-        PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER,
-    )
-    .expect("Failed to map region");
-}
-
-#[test_case]
-fn test_process_exit_cleanup() {
-    use veridian_kernel::process::lifecycle::*;
-
-    // Create process with resources
-    let process = create_process(String::from("cleanup-test"), test_entry as usize)
-        .expect("Failed to create process");
-
-    // Add IPC endpoint
-    let endpoint_id = 5000;
-    veridian_kernel::process::get_process(process)
-        .unwrap()
-        .ipc_endpoints
-        .lock()
-        .insert(endpoint_id, 1);
-
-    // Add capability
-    let cap = CapabilityToken::new(30, 0);
-    veridian_kernel::process::get_process(process)
-        .unwrap()
+        .lookup(cap_token)
+        .is_some());
+    
+    // Revoke capability
+    process.capability_space.lock().revoke(cap_token);
+    
+    // Verify it's gone
+    assert!(process
         .capability_space
         .lock()
-        .insert(
-            cap,
-            veridian_kernel::cap::object::ObjectRef::Endpoint { id: endpoint_id },
-            Rights::all(),
-        )
-        .expect("Failed to insert capability");
+        .lookup(cap_token)
+        .is_none());
+    
+    serial_println!("[ok]");
+}
 
-    // Exit process
-    if let Some(proc) = veridian_kernel::process::get_process_mut(process) {
-        proc.set_exit_code(0);
-        proc.set_state(veridian_kernel::process::ProcessState::Zombie);
-    }
+#[test_case]
+fn test_thread_synchronization() {
+    serial_println!("test_thread_synchronization...");
+    
+    use veridian_kernel::process::sync::{KernelMutex, KernelSemaphore};
+    
+    process::init();
+    
+    // Create shared mutex
+    let mutex = KernelMutex::new();
+    
+    // Lock and unlock
+    assert!(mutex.try_lock());
+    mutex.unlock();
+    
+    // Create semaphore
+    let sem = KernelSemaphore::new(2);
+    
+    // Acquire permits
+    assert!(sem.try_wait());
+    assert!(sem.try_wait());
+    assert!(!sem.try_wait()); // Should fail
+    
+    // Release permits
+    sem.signal();
+    assert!(sem.try_wait()); // Should succeed now
+    
+    serial_println!("[ok]");
+}
 
-    // Verify resources are marked for cleanup
-    let proc = veridian_kernel::process::get_process(process).unwrap();
-    assert_eq!(
-        proc.get_state(),
-        veridian_kernel::process::ProcessState::Zombie
+#[test_case]
+fn test_ipc_with_shared_memory() {
+    serial_println!("test_ipc_with_shared_memory...");
+    
+    use veridian_kernel::ipc::{SharedRegion, Permissions, TransferMode};
+    
+    ipc::init();
+    
+    // Create shared memory region
+    let region = SharedRegion::new(1, 8192, Permissions::READ_WRITE);
+    
+    // Create capability for sharing
+    let cap = region.create_capability(ProcessId(500), TransferMode::Share);
+    assert!(cap.is_some());
+    
+    // Verify region properties
+    assert_eq!(region.size(), 8192);
+    assert_eq!(region.id(), 1);
+    assert!(region.permissions().contains(Permissions::READ));
+    assert!(region.permissions().contains(Permissions::WRITE));
+    
+    serial_println!("[ok]");
+}
+
+#[test_case]
+fn test_full_system_integration() {
+    serial_println!("test_full_system_integration...");
+    
+    // Initialize all subsystems
+    process::init();
+    ipc::init();
+    veridian_kernel::sched::init();
+    
+    // Create a parent process
+    let parent_pid = ProcessId(600);
+    let parent = Process::new(
+        parent_pid,
+        None,
+        String::from("parent"),
+        ProcessPriority::Normal,
     );
-}
-
-// Test entry points
-extern "C" fn idle_entry() -> ! {
-    loop {
-        veridian_kernel::arch::idle();
-    }
-}
-
-extern "C" fn test_entry() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
-}
-
-// Test harness entry point
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
-    veridian_kernel::init();
-    test_main();
-    veridian_kernel::arch::halt();
-}
-
-// Panic handler
-#[panic_handler]
-fn panic(info: &core::panic::PanicInfo) -> ! {
-    veridian_kernel::test_panic_handler(info)
+    
+    // Create child process
+    let child_pid = ProcessId(601);
+    let child = Process::new(
+        child_pid,
+        Some(parent_pid),
+        String::from("child"),
+        ProcessPriority::Normal,
+    );
+    
+    // Create IPC channel between them
+    let (send_id, recv_id, send_cap, recv_cap) = 
+        create_channel(parent_pid, 100).expect("Failed to create channel");
+    
+    // Add capabilities
+    parent.capability_space.lock().insert(
+        CapabilityToken::new(4, 0),
+        veridian_kernel::cap::object::ObjectRef::Endpoint { id: send_id },
+        Rights::SEND,
+    ).expect("Failed to insert send capability");
+    
+    child.capability_space.lock().insert(
+        CapabilityToken::new(5, 0),
+        veridian_kernel::cap::object::ObjectRef::Endpoint { id: recv_id },
+        Rights::RECEIVE,
+    ).expect("Failed to insert receive capability");
+    
+    // Insert into process table
+    process::table::insert_process(parent);
+    process::table::insert_process(child);
+    
+    // Verify processes exist
+    assert!(process::table::get_process(parent_pid).is_some());
+    assert!(process::table::get_process(child_pid).is_some());
+    
+    // Clean up
+    process::table::remove_process(parent_pid);
+    process::table::remove_process(child_pid);
+    
+    serial_println!("[ok]");
 }

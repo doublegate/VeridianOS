@@ -8,12 +8,11 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
 use core::panic::PanicInfo;
 
 use veridian_kernel::{
-    bench::{cycles_to_ns, read_timestamp, BenchmarkResult},
-    benchmark, serial_println,
+    bench::{cycles_to_ns, read_timestamp},
+    serial_println,
 };
 
 const MEMORY_ALLOC_TARGET_NS: u64 = 1000; // 1μs target
@@ -72,31 +71,86 @@ fn init_test_allocator() {
 
 fn benchmark_small_allocation() -> BenchmarkResult {
     // Benchmark small allocations (64 bytes)
-    benchmark!("Small Allocation", ITERATIONS, {
+    use alloc::vec::Vec;
+    
+    let start = read_timestamp();
+    for _ in 0..ITERATIONS {
         let v: Vec<u8> = Vec::with_capacity(64);
         // Force the allocation to not be optimized away
-        core::hint::black_box(v);
-    })
+        // Use a volatile read to prevent optimization
+        unsafe { core::ptr::read_volatile(&v as *const _); }
+    }
+    let end = read_timestamp();
+    
+    let total_cycles = end - start;
+    let avg_cycles = total_cycles / ITERATIONS;
+    let avg_ns = cycles_to_ns(avg_cycles);
+    
+    BenchmarkResult {
+        name: alloc::string::String::from("Small Allocation"),
+        iterations: ITERATIONS,
+        total_time_ns: cycles_to_ns(total_cycles),
+        avg_time_ns: avg_ns,
+        min_time_ns: avg_ns,
+        max_time_ns: avg_ns,
+    }
 }
 
 fn benchmark_medium_allocation() -> BenchmarkResult {
     // Benchmark medium allocations (4KB - typical page size)
-    benchmark!("Medium Allocation", ITERATIONS, {
+    use alloc::vec::Vec;
+    
+    let start = read_timestamp();
+    for _ in 0..ITERATIONS {
         let v: Vec<u8> = Vec::with_capacity(4096);
-        core::hint::black_box(v);
-    })
+        unsafe { core::ptr::read_volatile(&v as *const _); }
+    }
+    let end = read_timestamp();
+    
+    let total_cycles = end - start;
+    let avg_cycles = total_cycles / ITERATIONS;
+    let avg_ns = cycles_to_ns(avg_cycles);
+    
+    BenchmarkResult {
+        name: alloc::string::String::from("Medium Allocation"),
+        iterations: ITERATIONS,
+        total_time_ns: cycles_to_ns(total_cycles),
+        avg_time_ns: avg_ns,
+        min_time_ns: avg_ns,
+        max_time_ns: avg_ns,
+    }
 }
 
 fn benchmark_large_allocation() -> BenchmarkResult {
     // Benchmark large allocations (64KB)
-    benchmark!("Large Allocation", ITERATIONS / 10, {
+    use alloc::vec::Vec;
+    
+    let iterations = ITERATIONS / 10;
+    let start = read_timestamp();
+    for _ in 0..iterations {
         // Fewer iterations for large allocs
         let v: Vec<u8> = Vec::with_capacity(65536);
-        core::hint::black_box(v);
-    })
+        unsafe { core::ptr::read_volatile(&v as *const _); }
+    }
+    let end = read_timestamp();
+    
+    let total_cycles = end - start;
+    let avg_cycles = total_cycles / iterations;
+    let avg_ns = cycles_to_ns(avg_cycles);
+    
+    BenchmarkResult {
+        name: alloc::string::String::from("Large Allocation"),
+        iterations,
+        total_time_ns: cycles_to_ns(total_cycles),
+        avg_time_ns: avg_ns,
+        min_time_ns: avg_ns,
+        max_time_ns: avg_ns,
+    }
 }
 
 fn benchmark_deallocation() -> BenchmarkResult {
+    use alloc::vec::Vec;
+    
     // Pre-allocate vectors for deallocation benchmark
     let mut vectors: Vec<Vec<u8>> = Vec::with_capacity(ITERATIONS as usize);
     for _ in 0..ITERATIONS {
@@ -104,16 +158,31 @@ fn benchmark_deallocation() -> BenchmarkResult {
     }
 
     // Benchmark deallocation
-    let mut times = Vec::with_capacity(ITERATIONS as usize);
+    let mut total_cycles = 0u64;
+    let mut min_cycles = u64::MAX;
+    let mut max_cycles = 0u64;
 
     for v in vectors {
         let start = read_timestamp();
         drop(v);
         let end = read_timestamp();
-        times.push(cycles_to_ns(end.saturating_sub(start)));
+        let cycles = end.saturating_sub(start);
+        total_cycles += cycles;
+        min_cycles = min_cycles.min(cycles);
+        max_cycles = max_cycles.max(cycles);
     }
 
-    BenchmarkResult::new(alloc::string::String::from("Deallocation"), &times)
+    let avg_cycles = total_cycles / ITERATIONS;
+    let avg_ns = cycles_to_ns(avg_cycles);
+    
+    BenchmarkResult {
+        name: alloc::string::String::from("Deallocation"),
+        iterations: ITERATIONS,
+        total_time_ns: cycles_to_ns(total_cycles),
+        avg_time_ns: avg_ns,
+        min_time_ns: cycles_to_ns(min_cycles),
+        max_time_ns: cycles_to_ns(max_cycles),
+    }
 }
 
 fn print_result(name: &str, result: &BenchmarkResult) {
@@ -127,7 +196,7 @@ fn print_result(name: &str, result: &BenchmarkResult) {
 }
 
 fn check_target(name: &str, result: &BenchmarkResult, target_ns: u64) {
-    if result.meets_target(target_ns) {
+    if result.avg_time_ns < target_ns {
         serial_println!(
             "{:<20} ✓ PASS ({}ns < {}ns)",
             name,

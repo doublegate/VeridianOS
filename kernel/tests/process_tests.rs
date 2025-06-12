@@ -10,17 +10,14 @@
 
 extern crate alloc;
 
-use core::sync::atomic::{AtomicBool, Ordering};
-
 use veridian_kernel::{
-    kernel_assert, kernel_assert_eq, kernel_bench,
     process::{
         self,
         sync::{KernelBarrier, KernelCondVar, KernelMutex, KernelRwLock, KernelSemaphore},
-        Process, ProcessId, ProcessState, Thread, ThreadId, ThreadState,
+        ThreadState,
     },
     serial_println,
-    test_framework::{cycles_to_ns, read_timestamp, BenchmarkRunner},
+    test_framework::read_timestamp,
 };
 
 #[path = "common/mod.rs"]
@@ -307,32 +304,56 @@ fn test_process_table_operations() {
 
 // ===== Performance Benchmarks =====
 
-kernel_bench!(bench_process_creation, {
-    static mut COUNTER: u64 = 1000;
-    unsafe {
-        let pid = ProcessId(COUNTER);
+#[test_case]
+fn bench_process_creation() {
+    serial_println!("bench_process_creation...");
+    process::init();
+    
+    let start = read_timestamp();
+    for i in 1000..1100 {
+        let pid = ProcessId(i);
         let process = Process::new(pid, "bench_process");
-        COUNTER += 1;
         black_box(process);
     }
-});
+    let elapsed = read_timestamp() - start;
+    let avg_cycles = elapsed / 100;
+    serial_println!("  Average: {} cycles ({} ns)", avg_cycles, cycles_to_ns(avg_cycles));
+    serial_println!("[ok]");
+}
 
-kernel_bench!(bench_thread_creation, {
-    static mut COUNTER: u64 = 2000;
-    unsafe {
-        let tid = ThreadId(COUNTER);
+#[test_case]
+fn bench_thread_creation() {
+    serial_println!("bench_thread_creation...");
+    process::init();
+    
+    let start = read_timestamp();
+    for i in 2000..2100 {
+        let tid = ThreadId(i);
         let thread = Thread::new(tid, ProcessId(100));
-        COUNTER += 1;
         black_box(thread);
     }
-});
+    let elapsed = read_timestamp() - start;
+    let avg_cycles = elapsed / 100;
+    serial_println!("  Average: {} cycles ({} ns)", avg_cycles, cycles_to_ns(avg_cycles));
+    serial_println!("[ok]");
+}
 
-kernel_bench!(bench_mutex_lock_unlock, {
-    static MUTEX: KernelMutex = KernelMutex::new();
-
-    MUTEX.try_lock();
-    MUTEX.unlock();
-});
+#[test_case]
+fn bench_mutex_lock_unlock() {
+    serial_println!("bench_mutex_lock_unlock...");
+    
+    let mutex = KernelMutex::new();
+    
+    let start = read_timestamp();
+    for _ in 0..1000 {
+        mutex.try_lock();
+        mutex.unlock();
+    }
+    let elapsed = read_timestamp() - start;
+    let avg_cycles = elapsed / 1000;
+    serial_println!("  Average: {} cycles ({} ns)", avg_cycles, cycles_to_ns(avg_cycles));
+    serial_println!("[ok]");
+}
 
 #[test_case]
 fn bench_process_table_lookup() {
@@ -354,7 +375,8 @@ fn bench_process_table_lookup() {
     serial_println!("Process table lookup: {} ns", result.avg_time_ns);
 
     // Lookup should be fast (O(1) or O(log n))
-    assert_performance!(result.avg_time_ns, < 500);
+    assert!(result.avg_time_ns < 500, "Process table lookup too slow: {} ns", result.avg_time_ns);
+    serial_println!("[ok]");
 
     // Cleanup
     for i in 0..100 {

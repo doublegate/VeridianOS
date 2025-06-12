@@ -10,16 +10,9 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
-use core::hint::black_box;
-
 use veridian_kernel::{
-    ipc::{
-        self, create_channel, create_endpoint, validate_capability, AsyncChannel, IpcCapability,
-        Message, Permissions, ProcessId, SharedRegion, IPC_PERF_STATS,
-    },
-    kernel_bench, serial_println,
-    test_framework::{cycles_to_ns, read_timestamp, BenchmarkRunner},
+    ipc::{self},
+    serial_println,
 };
 
 #[path = "common/mod.rs"]
@@ -39,17 +32,35 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
 // ===== Message Creation Benchmarks =====
 
-kernel_bench!(bench_small_message_creation, {
-    let msg = Message::small(0, 1);
-    black_box(msg);
-});
+#[test_case]
+fn bench_small_message_creation() {
+    serial_println!("bench_small_message_creation...");
+    let start = read_timestamp();
+    for _ in 0..1000 {
+        let msg = Message::small(0, 1);
+        black_box(msg);
+    }
+    let elapsed = read_timestamp() - start;
+    let avg_cycles = elapsed / 1000;
+    serial_println!("  Average: {} cycles ({} ns)", avg_cycles, cycles_to_ns(avg_cycles));
+    serial_println!("[ok]");
+}
 
-kernel_bench!(bench_large_message_creation, {
+#[test_case]
+fn bench_large_message_creation() {
+    serial_println!("bench_large_message_creation...");
     let data = [0u8; 1024];
     let region = veridian_kernel::ipc::message::MemoryRegion::new(0, data.len() as u64);
-    let msg = Message::large(0, 1, region);
-    black_box(msg);
-});
+    let start = read_timestamp();
+    for _ in 0..1000 {
+        let msg = Message::large(0, 1, region);
+        black_box(msg);
+    }
+    let elapsed = read_timestamp() - start;
+    let avg_cycles = elapsed / 1000;
+    serial_println!("  Average: {} cycles ({} ns)", avg_cycles, cycles_to_ns(avg_cycles));
+    serial_println!("[ok]");
+}
 
 // ===== Registry Operation Benchmarks =====
 
@@ -66,7 +77,9 @@ fn bench_endpoint_creation() {
     });
 
     // Endpoint creation should be fast (<1μs)
-    assert_performance!(result.avg_time_ns, < 1000);
+    serial_println!("  Average: {} ns", result.avg_time_ns);
+    assert!(result.avg_time_ns < 1000, "Endpoint creation too slow: {} ns", result.avg_time_ns);
+    serial_println!("[ok]");
 }
 
 #[test_case]
@@ -83,7 +96,9 @@ fn bench_channel_creation() {
     });
 
     // Channel creation should be reasonably fast (<5μs)
-    assert_performance!(result.avg_time_ns, < 5000);
+    serial_println!("  Average: {} ns", result.avg_time_ns);
+    assert!(result.avg_time_ns < 5000, "Channel creation too slow: {} ns", result.avg_time_ns);
+    serial_println!("[ok]");
 }
 
 // ===== Async Channel Benchmarks =====
@@ -102,7 +117,9 @@ fn bench_async_channel_send_receive() {
     });
 
     // Single message round-trip should be very fast (<1μs)
-    assert_performance!(result.avg_time_ns, < 1000);
+    serial_println!("  Average: {} ns", result.avg_time_ns);
+    assert!(result.avg_time_ns < 1000, "Async send/receive too slow: {} ns", result.avg_time_ns);
+    serial_println!("[ok]");
 }
 
 #[test_case]
@@ -132,14 +149,25 @@ fn bench_async_channel_throughput() {
 
     serial_println!("Async throughput: {} msgs/sec", throughput);
     assert!(throughput > 100_000); // Should handle >100k msgs/sec
+    serial_println!("[ok]");
 }
 
 // ===== Shared Memory Benchmarks =====
 
-kernel_bench!(bench_shared_region_creation, {
-    let region = SharedRegion::new(ProcessId(1), 4096, Permissions::READ_WRITE);
-    black_box(region);
-});
+#[test_case]
+fn bench_shared_region_creation() {
+    serial_println!("bench_shared_region_creation...");
+    ipc::init();
+    let start = read_timestamp();
+    for i in 1..101 {
+        let region = SharedRegion::new(i, 4096, Permissions::READ_WRITE);
+        black_box(region);
+    }
+    let elapsed = read_timestamp() - start;
+    let avg_cycles = elapsed / 100;
+    serial_println!("  Average: {} cycles ({} ns)", avg_cycles, cycles_to_ns(avg_cycles));
+    serial_println!("[ok]");
+}
 
 // ===== Capability Benchmarks =====
 
@@ -155,7 +183,9 @@ fn bench_capability_validation() {
     });
 
     // Capability validation should be O(1) and very fast
-    assert_performance!(result.avg_time_ns, < 100);
+    serial_println!("  Average: {} ns", result.avg_time_ns);
+    assert!(result.avg_time_ns < 100, "Capability validation too slow: {} ns", result.avg_time_ns);
+    serial_println!("[ok]");
 }
 
 // ===== Fast Path vs Slow Path =====
@@ -191,6 +221,7 @@ fn bench_fast_path_vs_slow_path() {
 
     // Fast path should be significantly faster
     assert!(fast_result.avg_time_ns < slow_result.avg_time_ns / 2);
+    serial_println!("[ok]");
 }
 
 // ===== Performance Statistics =====
@@ -205,13 +236,14 @@ fn test_ipc_performance_stats() {
     }
 
     // Check performance stats
-    let stats = IPC_PERF_STATS.get_summary();
+    let report = IPC_PERF_STATS.get_report();
     serial_println!("IPC Performance Summary:");
-    serial_println!("  Total operations: {}", stats.total_operations);
-    serial_println!("  Average latency: {} ns", stats.avg_latency_ns);
-    serial_println!("  Min latency: {} ns", stats.min_latency_ns);
-    serial_println!("  Max latency: {} ns", stats.max_latency_ns);
+    serial_println!("  Total operations: {}", report.total_operations);
+    serial_println!("  Average latency: {} ns", report.average_latency_ns);
+    serial_println!("  Min latency: {} ns", report.min_latency_ns);
+    serial_println!("  Max latency: {} ns", report.max_latency_ns);
 
     // Verify performance meets targets
-    assert!(stats.avg_latency_ns < 1000); // <1μs average
+    assert!(report.average_latency_ns < 1000); // <1μs average
+    serial_println!("[ok]");
 }

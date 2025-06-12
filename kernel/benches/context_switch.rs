@@ -10,7 +10,7 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 
-use veridian_kernel::{bench::BenchmarkResult, benchmark, serial_println};
+use veridian_kernel::{bench::BenchmarkResult, serial_println};
 
 const CONTEXT_SWITCH_TARGET_NS: u64 = 10000; // 10μs target
 const ITERATIONS: u64 = 1000;
@@ -50,8 +50,11 @@ pub extern "C" fn _start() -> ! {
 }
 
 fn benchmark_minimal_context_switch() -> BenchmarkResult {
+    use veridian_kernel::bench::{cycles_to_ns, read_timestamp};
+    
     // Simulate minimal context switch (registers only)
-    benchmark!("Minimal Context Switch", ITERATIONS, {
+    let start = read_timestamp();
+    for _ in 0..ITERATIONS {
         unsafe {
             // Save general purpose registers
             core::arch::asm!(
@@ -93,12 +96,29 @@ fn benchmark_minimal_context_switch() -> BenchmarkResult {
                 out("rax") _,
             );
         }
-    })
+    }
+    let end = read_timestamp();
+    
+    let total_cycles = end - start;
+    let avg_cycles = total_cycles / ITERATIONS;
+    let avg_ns = cycles_to_ns(avg_cycles);
+    
+    BenchmarkResult {
+        name: alloc::string::String::from("Minimal Context Switch"),
+        iterations: ITERATIONS,
+        total_time_ns: cycles_to_ns(total_cycles),
+        avg_time_ns: avg_ns,
+        min_time_ns: avg_ns,
+        max_time_ns: avg_ns,
+    }
 }
 
 fn benchmark_full_context_switch() -> BenchmarkResult {
+    use veridian_kernel::bench::{cycles_to_ns, read_timestamp};
+    
     // Simulate full context switch including segment registers
-    benchmark!("Full Context Switch", ITERATIONS, {
+    let start = read_timestamp();
+    for _ in 0..ITERATIONS {
         let mut context = ProcessContext::default();
 
         // Save context
@@ -109,12 +129,29 @@ fn benchmark_full_context_switch() -> BenchmarkResult {
 
         // Restore context
         restore_context(&context);
-    })
+    }
+    let end = read_timestamp();
+    
+    let total_cycles = end - start;
+    let avg_cycles = total_cycles / ITERATIONS;
+    let avg_ns = cycles_to_ns(avg_cycles);
+    
+    BenchmarkResult {
+        name: alloc::string::String::from("Full Context Switch"),
+        iterations: ITERATIONS,
+        total_time_ns: cycles_to_ns(total_cycles),
+        avg_time_ns: avg_ns,
+        min_time_ns: avg_ns,
+        max_time_ns: avg_ns,
+    }
 }
 
 fn benchmark_fpu_context_switch() -> BenchmarkResult {
+    use veridian_kernel::bench::{cycles_to_ns, read_timestamp};
+    
     // Simulate context switch with FPU state
-    benchmark!("FPU Context Switch", ITERATIONS, {
+    let start = read_timestamp();
+    for _ in 0..ITERATIONS {
         unsafe {
             // Save FPU state
             #[cfg(target_arch = "x86_64")]
@@ -133,7 +170,21 @@ fn benchmark_fpu_context_switch() -> BenchmarkResult {
                 in(reg) &[0u8; 512],
             );
         }
-    })
+    }
+    let end = read_timestamp();
+    
+    let total_cycles = end - start;
+    let avg_cycles = total_cycles / ITERATIONS;
+    let avg_ns = cycles_to_ns(avg_cycles);
+    
+    BenchmarkResult {
+        name: alloc::string::String::from("FPU Context Switch"),
+        iterations: ITERATIONS,
+        total_time_ns: cycles_to_ns(total_cycles),
+        avg_time_ns: avg_ns,
+        min_time_ns: avg_ns,
+        max_time_ns: avg_ns,
+    }
 }
 
 #[repr(C)]

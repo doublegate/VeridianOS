@@ -1,7 +1,5 @@
 //! Common test utilities and helpers for VeridianOS kernel tests
 
-#![no_std]
-
 use crate::{serial_print, serial_println, test_framework::*};
 
 /// Initialize test environment for a specific subsystem
@@ -54,7 +52,7 @@ pub mod ipc_helpers {
     }
 
     /// Send a test message
-    pub fn send_test_message(msg: Message) -> Result<(), ipc::IpcError> {
+    pub fn send_test_message(_msg: Message) -> Result<(), ipc::IpcError> {
         // Simplified test message send
         Ok(())
     }
