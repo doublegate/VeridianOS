@@ -43,24 +43,29 @@ VeridianOS follows these core principles:
 
 ## Current Status
 
+### 🎉 **Phase 1: Microkernel Core** (100% Complete! - v0.2.0)
+
+**Released**: June 12, 2025  
+**Status**: COMPLETE ✅  
+**Latest Update**: December 6, 2025
+
+- ✅ Memory Management (100%): Hybrid allocator, VMM, kernel heap
+- ✅ Process Management (100%): Full lifecycle, context switching
+- ✅ IPC System (100%): <1μs latency, zero-copy transfers
+- ✅ Scheduler (100%): CFS, SMP support, load balancing
+- ✅ Capability System (100%): Hierarchical inheritance, per-CPU cache
+
+### Recent Improvements (December 2025)
+- Fixed x86_64 build issues with kernel code model
+- Resolved boot sequence issues across all architectures
+- Created automated build script for consistent builds
+- Kernel successfully boots through heap and IPC initialization
+
 ### 🎉 **Phase 0: Foundation & Tooling** (100% Complete! - v0.1.0)
 
 **Released**: June 7, 2025  
 **Status**: COMPLETE ✅
 
-### 🎆 **Phase 1: Microkernel Core** (100% Complete! - v0.2.0)
-
-**Started**: June 8, 2025  
-**Completed**: June 12, 2025  
-**Released**: v0.2.0 - June 12, 2025  
-**Status**: COMPLETE ✅
-
-- ✅ IPC System: Synchronous/async channels, <1μs latency achieved!
-- ✅ Memory Management: Hybrid allocator, VMM, heap, user-space safety
-- ✅ Process Management: Full lifecycle, context switching, synchronization
-- ✅ Scheduler: CFS, SMP support, load balancing, CPU hotplug
-- ✅ Capability System: Inheritance, revocation, per-CPU cache
-- ✅ Performance: All targets met or exceeded!
 
 ## What This Book Covers
 

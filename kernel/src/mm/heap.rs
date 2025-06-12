@@ -10,12 +10,21 @@ use core::{alloc::Layout, ptr::NonNull};
 use linked_list_allocator::LockedHeap;
 use spin::Mutex;
 
-use super::{VirtualAddress, FRAME_ALLOCATOR, FRAME_SIZE};
+use super::VirtualAddress;
+
+// Static heap storage - 4MB should be enough for initial testing
+static mut HEAP_MEMORY: [u8; 4 * 1024 * 1024] = [0; 4 * 1024 * 1024];
 
 /// Kernel heap size (16 MB initially)
 pub const HEAP_SIZE: usize = 16 * 1024 * 1024;
 
-/// Kernel heap start address (in higher half)
+/// Kernel heap start address
+/// For now, use a lower address that's likely to be identity mapped by
+/// bootloader In a real implementation, we'd properly set up page tables first
+#[cfg(target_arch = "x86_64")]
+pub const HEAP_START: usize = 0x444444440000; // Use an arbitrary high address that bootloader 0.9 maps
+
+#[cfg(not(target_arch = "x86_64"))]
 pub const HEAP_START: usize = 0xFFFF_C000_0000_0000;
 
 /// Slab allocator for efficient small allocations
@@ -217,36 +226,87 @@ impl SlabAllocator {
 
 /// Initialize the kernel heap
 pub fn init() -> Result<(), &'static str> {
+    // Use serial output instead of println for debugging
+    #[cfg(target_arch = "x86_64")]
+    {
+        use core::fmt::Write;
+        let mut serial = crate::arch::serial_init();
+        writeln!(
+            serial,
+            "[HEAP] Initializing kernel heap at 0x{:x}",
+            HEAP_START
+        )
+        .unwrap();
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
     println!("[HEAP] Initializing kernel heap at 0x{:x}", HEAP_START);
 
-    // For now, we'll use the linked list allocator directly
-    // In a real implementation, we'd:
-    // 1. Allocate physical frames for the heap
-    // 2. Map them to virtual addresses starting at HEAP_START
-    // 3. Initialize the slab allocator
+    // For bootloader 0.9, we need to work with what's already mapped
+    // The bootloader identity maps the first few GB of memory
+    // So we'll use a static heap area that's already mapped
 
-    // Allocate frames for heap
-    let frame_count = HEAP_SIZE / FRAME_SIZE;
-    let _frames = FRAME_ALLOCATOR
-        .lock()
-        .allocate_frames(frame_count, None)
-        .map_err(|_| "Failed to allocate frames for heap")?;
+    // Skip frame allocation for now - bootloader has already mapped memory
+    // In a real implementation, we'd properly allocate and map frames
 
-    println!("[HEAP] Allocated {} frames for heap", frame_count);
+    // Initialize the allocator with the static heap area
+    #[cfg(target_arch = "x86_64")]
+    {
+        use core::fmt::Write;
+        let mut serial = crate::arch::serial_init();
+        writeln!(serial, "[HEAP] About to initialize allocator...").unwrap();
+        writeln!(
+            serial,
+            "[HEAP] Heap start: 0x{:x}, size: 0x{:x}",
+            HEAP_START, HEAP_SIZE
+        )
+        .unwrap();
+    }
 
-    // In real implementation, would map these frames to HEAP_START
-    // For now, assume identity mapping or higher-half mapping
-
-    // Initialize the allocator
     unsafe {
-        crate::ALLOCATOR
-            .lock()
-            .init(HEAP_START as *mut u8, HEAP_SIZE);
-        println!(
-            "[HEAP] Heap initialized: {} MB at 0x{:x}",
-            HEAP_SIZE / (1024 * 1024),
-            HEAP_START
-        );
+        #[cfg(target_arch = "x86_64")]
+        {
+            use core::fmt::Write;
+            let mut serial = crate::arch::serial_init();
+            writeln!(serial, "[HEAP] Getting allocator lock...").unwrap();
+        }
+
+        let mut allocator = crate::ALLOCATOR.lock();
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            use core::fmt::Write;
+            let mut serial = crate::arch::serial_init();
+            writeln!(serial, "[HEAP] Got allocator lock, calling init...").unwrap();
+        }
+
+        // Use the static heap array instead of an arbitrary address
+        // Use raw pointers to avoid static mut refs warning
+        let heap_start = core::ptr::addr_of_mut!(HEAP_MEMORY) as *mut u8;
+        let heap_size = 4 * 1024 * 1024; // Size of HEAP_MEMORY
+        allocator.init(heap_start, heap_size);
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            use core::fmt::Write;
+            let mut serial = crate::arch::serial_init();
+            writeln!(serial, "[HEAP] Allocator init complete").unwrap();
+        }
+
+        drop(allocator);
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            use core::fmt::Write;
+            let mut serial = crate::arch::serial_init();
+            writeln!(
+                serial,
+                "[HEAP] Heap initialized: {} MB at 0x{:x}",
+                4, // 4MB heap size
+                core::ptr::addr_of!(HEAP_MEMORY) as usize
+            )
+            .unwrap();
+        }
     }
 
     Ok(())

@@ -1,9 +1,9 @@
 # Release Management TODO
 
 **Purpose**: Track release planning, milestones, and deployment tasks  
-**Last Updated**: 2025-01-07  
-**Current Version**: v0.1.0 (Released June 7, 2025)  
-**Current Status**: Working on v0.2.0 (Phase 1 - ~35% overall, IPC ~45% complete, Memory Management ~95% complete, Process Management 100% complete, Scheduler ~30% complete)
+**Last Updated**: 2025-12-06  
+**Current Version**: v0.2.0 (Released June 12, 2025)  
+**Current Status**: Phase 1 Complete! Starting Phase 2
 
 ## 🎯 Release Strategy
 
@@ -22,6 +22,22 @@ Following Semantic Versioning (SemVer):
 
 ## 📅 Release Roadmap
 
+### Recent Maintenance Updates (December 2025)
+
+#### Post-v0.2.0 Fixes
+**Date**: December 6, 2025  
+**Status**: Applied to main branch  
+**Issues Fixed**:
+- **ISSUE-0008**: x86_64 R_X86_64_32S relocation errors
+  - Fixed with custom target JSON using kernel code model
+  - Kernel now properly links at high addresses (0xFFFFFFFF80100000)
+- **ISSUE-0009**: Kernel boot double fault
+  - Fixed stack initialization and boot sequence
+  - Proper BSS clearing implemented
+- **ISSUE-0010**: Heap initialization failure
+  - Fixed initialization order
+  - Frame allocator now properly initialized before heap
+
 ### Pre-1.0 Releases (Development)
 
 #### v0.1.0 - Foundation ✅ RELEASED!
@@ -39,50 +55,57 @@ Following Semantic Versioning (SemVer):
 - [x] Documentation framework ✅
 - [x] Version control hooks ✅
 
-#### v0.2.0 - Core Kernel (IN PROGRESS)
-**Target Date**: Q3 2025  
-**Phase**: 1  
-**Status**: ~35% overall - IPC ~45% complete, Memory Management ~95% complete, Process Management 100% complete, Scheduler ~30% complete
-**Goals**:
-- [~] IPC implementation (45% complete)
+#### v0.2.0 - Core Kernel ✅ RELEASED!
+**Released**: June 12, 2025  
+**Phase**: 1 (Complete)  
+**Achievements**:
+- [x] IPC implementation (100% complete) ✅
   - [x] Synchronous message passing ✅
-  - [x] Fast path optimization ✅
+  - [x] Fast path optimization (<1μs achieved!) ✅
   - [x] Zero-copy transfers ✅
   - [x] Asynchronous channels ✅
   - [x] Performance benchmarks ✅
-  - [x] Process integration ✅
-  - [ ] Full scheduler integration
-- [~] Memory management working (95% complete)
-  - [x] Frame allocator ✅
-  - [x] Virtual memory ✅
-  - [x] Kernel heap ✅
-  - [x] Page tables ✅
-  - [x] TLB management ✅
+  - [x] Full capability integration ✅
+  - [x] Rate limiting and registry ✅
+- [x] Memory management (100% complete) ✅
+  - [x] Hybrid frame allocator ✅
+  - [x] Virtual memory manager ✅
+  - [x] Kernel heap with slab allocator ✅
+  - [x] Page tables and TLB management ✅
+  - [x] User space safety validation ✅
 - [x] Process management (100% complete) ✅
-- [~] Basic scheduler operational (30% complete)
-  - [x] Round-robin ✅
-  - [x] CPU affinity ✅
-  - [ ] Priority scheduling
-- [ ] Full capability system
+  - [x] Full lifecycle implementation ✅
+  - [x] Context switching all architectures ✅
+  - [x] Synchronization primitives ✅
+  - [x] System calls ✅
+- [x] Scheduler (100% complete) ✅
+  - [x] CFS implementation ✅
+  - [x] SMP support ✅
+  - [x] Load balancing ✅
+  - [x] CPU hotplug ✅
+- [x] Capability system (100% complete) ✅
+  - [x] Inheritance mechanisms ✅
+  - [x] Cascading revocation ✅
+  - [x] Per-CPU cache ✅
 
-#### v0.3.0 - Multi-Architecture
-**Target Date**: Q4 2025  
-**Phase**: 1-2  
-**Goals**:
-- [x] ARM64 boot support ✅ (Already complete!)
-- [x] RISC-V boot support ✅ (Already complete!)
-- [x] Cross-platform abstractions ✅ (Already complete!)
-- [ ] Advanced architecture features (Phase 2)
-- [ ] Unified build system
-
-#### v0.4.0 - User Space
+#### v0.3.0 - User Space Foundation (NEXT)
 **Target Date**: Q1 2026  
 **Phase**: 2  
 **Goals**:
-- [ ] User process support
-- [ ] Basic driver framework
-- [ ] Initial VFS implementation
-- [ ] Simple shell working
+- [ ] User process creation and management
+- [ ] Init system implementation
+- [ ] Basic shell (vsh)
+- [ ] User-space driver framework
+- [ ] Initial system calls
+
+#### v0.4.0 - Driver Framework
+**Target Date**: Q2 2026  
+**Phase**: 2  
+**Goals**:
+- [ ] Storage drivers (AHCI, NVMe)
+- [ ] Network drivers (e1000, virtio)
+- [ ] Virtual filesystem (VFS)
+- [ ] Device management
 
 #### v0.5.0 - Drivers and Services
 **Target Date**: Q2 2026  
@@ -216,6 +239,23 @@ Following Semantic Versioning (SemVer):
    - [ ] Track downloads
    - [ ] Handle issues
    - [ ] Plan patches
+
+## 🎯 Next Release Planning
+
+### v0.2.1 - Maintenance Release (If Needed)
+**Target**: As needed  
+**Focus**: Bug fixes and stability improvements
+- Post-v0.2.0 fixes already applied to main
+- Additional fixes as discovered
+
+### v0.3.0 - User Space Foundation
+**Target**: Q1 2026  
+**Current Status**: Planning phase
+**Key Deliverables**:
+- User process creation
+- Init system
+- Basic shell
+- System call interface
 
 ## 🔧 Release Artifacts
 

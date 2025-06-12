@@ -51,6 +51,18 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 - Capability System: 100% complete ✅ (tokens, rights, space management, inheritance, revocation, per-CPU cache done)
 - Test Framework: 100% complete ✅ (no_std test framework with benchmarks, IPC/scheduler/process tests migrated)
 
+### 🔧 Recent Updates (Post-v0.2.0)
+
+**Kernel Build Fixes**:
+- Fixed x86_64 R_X86_64_32S relocation errors by implementing kernel code model in custom target JSON
+- Resolved kernel boot issues including double fault and heap initialization
+- Kernel now successfully boots through heap initialization and IPC on all architectures
+
+**Development Tooling**:
+- Created `build-kernel.sh` script for automated builds across all architectures
+- Added `debug/` directory with kernel debugging tools and utilities
+- Enhanced debugging infrastructure for troubleshooting boot issues
+
 
 ### Architecture Support Status
 
@@ -79,19 +91,19 @@ cd VeridianOS
 # Install dependencies (Ubuntu/Debian)
 ./scripts/install-deps.sh
 
-# Build all architectures (recommended)
+# Build all architectures (recommended) - Uses automated script
 ./build-kernel.sh all dev      # Development build
 ./build-kernel.sh all release  # Release build
 
 # Build specific architecture
-./build-kernel.sh x86_64 dev
+./build-kernel.sh x86_64 dev   # Uses custom target with kernel code model
 ./build-kernel.sh aarch64 release
 ./build-kernel.sh riscv64 dev
 
 # Run in QEMU
 just run
 
-# Or build manually for specific architectures
+# Or build manually for specific architectures (x86_64 requires custom target)
 cargo build --target targets/x86_64-veridian.json \
     -p veridian-kernel \
     -Zbuild-std=core,compiler_builtins,alloc

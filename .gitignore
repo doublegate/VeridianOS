@@ -28,6 +28,7 @@ target/
 # Debug files
 *.dSYM/
 *.pdb
+/debug/
 
 # Test artifacts
 **/*.rs.bk

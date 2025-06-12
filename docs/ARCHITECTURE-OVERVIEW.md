@@ -1,6 +1,6 @@
 # VeridianOS Architecture Overview
 
-**Last Updated**: January 9, 2025
+**Last Updated**: December 6, 2025
 
 ## System Architecture
 

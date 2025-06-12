@@ -12,13 +12,20 @@ Before building, ensure you have:
 
 ## Quick Build
 
-The easiest way to build VeridianOS:
+The easiest way to build VeridianOS using the automated build script:
 
 ```bash
-# Build default target (x86_64)
-just build
+# Build all architectures (development)
+./build-kernel.sh all dev
 
-# Build and run in QEMU
+# Build specific architecture
+./build-kernel.sh x86_64 dev
+
+# Build release version
+./build-kernel.sh all release
+
+# Alternative: using just
+just build
 just run
 ```
 
@@ -26,15 +33,19 @@ just run
 
 ### x86_64
 
+**Note**: x86_64 requires custom target with kernel code model to avoid relocation errors.
+
 ```bash
+# Recommended: using build script
+./build-kernel.sh x86_64 dev
+
 # Using just
 just build-x86_64
 
-# Manual build
+# Manual build (with kernel code model)
 cargo build --target targets/x86_64-veridian.json \
     -p veridian-kernel \
-    -Zbuild-std=core,compiler_builtins,alloc \
-    -Zbuild-std-features=compiler-builtins-mem
+    -Zbuild-std=core,compiler_builtins,alloc
 ```
 
 Output: `target/x86_64-veridian/debug/veridian-kernel`
@@ -42,32 +53,34 @@ Output: `target/x86_64-veridian/debug/veridian-kernel`
 ### AArch64
 
 ```bash
+# Recommended: using build script
+./build-kernel.sh aarch64 dev
+
 # Using just
 just build-aarch64
 
-# Manual build
-cargo build --target targets/aarch64-veridian.json \
-    -p veridian-kernel \
-    -Zbuild-std=core,compiler_builtins,alloc \
-    -Zbuild-std-features=compiler-builtins-mem
+# Manual build (standard bare metal target)
+cargo build --target aarch64-unknown-none \
+    -p veridian-kernel
 ```
 
-Output: `target/aarch64-veridian/debug/veridian-kernel`
+Output: `target/aarch64-unknown-none/debug/veridian-kernel`
 
 ### RISC-V 64
 
 ```bash
+# Recommended: using build script
+./build-kernel.sh riscv64 dev
+
 # Using just
 just build-riscv64
 
-# Manual build
-cargo build --target targets/riscv64gc-veridian.json \
-    -p veridian-kernel \
-    -Zbuild-std=core,compiler_builtins,alloc \
-    -Zbuild-std-features=compiler-builtins-mem
+# Manual build (standard bare metal target)
+cargo build --target riscv64gc-unknown-none-elf \
+    -p veridian-kernel
 ```
 
-Output: `target/riscv64gc-veridian/debug/veridian-kernel`
+Output: `target/riscv64gc-unknown-none-elf/debug/veridian-kernel`
 
 ## Build Options
 
@@ -76,14 +89,16 @@ Output: `target/riscv64gc-veridian/debug/veridian-kernel`
 For optimized builds:
 
 ```bash
+# Using build script (recommended)
+./build-kernel.sh all release
+
 # Using just
 just build-release
 
-# Manual
+# Manual for x86_64
 cargo build --release --target targets/x86_64-veridian.json \
     -p veridian-kernel \
-    -Zbuild-std=core,compiler_builtins,alloc \
-    -Zbuild-std-features=compiler-builtins-mem
+    -Zbuild-std=core,compiler_builtins,alloc
 ```
 
 ### Build All Architectures

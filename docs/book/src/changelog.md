@@ -2,6 +2,22 @@
 
 All notable changes to VeridianOS are documented here. This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2025-12-06
+
+### Fixed
+- x86_64 build issues with R_X86_64_32S relocation errors using kernel code model
+- Boot sequence panic in PIC initialization using static array approach
+- Kernel heap initialization with proper static array backing
+
+### Added
+- `build-kernel.sh` script for automated cross-architecture builds
+- `debug/` directory for build artifacts and troubleshooting
+- Enhanced kernel build troubleshooting documentation
+
+### Changed
+- Updated x86_64 kernel linking to 0xFFFFFFFF80100000 (top 2GB)
+- Improved build instructions with architecture-specific guidance
+
 ## [0.2.0] - 2025-06-12
 
 ### 🎆 Phase 1 Complete: Microkernel Core

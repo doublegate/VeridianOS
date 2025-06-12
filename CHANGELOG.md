@@ -285,6 +285,37 @@ development. All foundational infrastructure is in place and operational.
 
 ## [Unreleased]
 
+### Fixed
+
+- **x86_64 kernel build issues** (2025-12-06)
+  - Resolved R_X86_64_32S relocation errors by implementing kernel code model in custom target JSON
+  - Fixed linker script to properly handle kernel addressing at 0xFFFFFFFF80100000
+  - Kernel now builds successfully with -Zbuild-std=core,compiler_builtins,alloc
+
+- **Kernel boot failures** (2025-12-06)
+  - Fixed double fault on boot caused by incorrect memory initialization
+  - Resolved heap initialization issues that prevented kernel startup
+  - Fixed page fault handling for proper virtual memory management
+  - Kernel now successfully boots through heap initialization and IPC setup
+
+### Added
+
+- **build-kernel.sh** - Automated build script for all architectures
+  - Supports development and release builds
+  - Handles architecture-specific target configurations
+  - Simplifies build process with consistent commands
+
+- **debug/ directory** - Kernel debugging tools and utilities
+  - Architecture-specific debugging configurations
+  - Memory dump utilities
+  - Boot sequence analysis tools
+
+### Improved
+
+- Enhanced debugging infrastructure for troubleshooting boot issues
+- Better error messages during kernel initialization
+- Improved build system with clearer architecture handling
+
 ### Phase 2 Planning (User Space Foundation)
 
 - Init process creation and management

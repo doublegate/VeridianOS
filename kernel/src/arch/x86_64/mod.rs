@@ -10,10 +10,33 @@ pub mod vga;
 
 #[allow(dead_code)]
 pub fn init() {
+    println!("[ARCH] Starting GDT init...");
     gdt::init();
+    println!("[ARCH] GDT initialized");
+
+    println!("[ARCH] Starting IDT init...");
     idt::init();
+    println!("[ARCH] IDT initialized");
+
+    // Initialize PIC (8259) before enabling interrupts
+    println!("[ARCH] Initializing PIC...");
+    unsafe {
+        use pic8259::ChainedPics;
+        const PIC_1_OFFSET: u8 = 32;
+        const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
+        let mut pics = ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET);
+        pics.initialize();
+        // Disable all interrupts for now
+        pics.write_masks(0xFF, 0xFF);
+    }
+    println!("[ARCH] PIC initialized with all interrupts masked");
+
+    println!("[ARCH] Starting MMU init...");
     mmu::init();
-    unsafe { interrupts::enable() };
+    println!("[ARCH] MMU initialized");
+
+    // Don't enable interrupts yet - they're all masked
+    println!("[ARCH] Skipping interrupt enable for now");
 }
 
 #[allow(dead_code)]

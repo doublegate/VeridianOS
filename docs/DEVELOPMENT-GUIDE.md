@@ -1,6 +1,6 @@
 # VeridianOS Development Guide
 
-**Last Updated**: January 9, 2025
+**Last Updated**: December 6, 2025
 
 ## Getting Started
 
@@ -168,6 +168,18 @@ veridian-os/
 
 ### 1. Building the Kernel
 
+**Recommended Method - Build Script:**
+```bash
+# Build all architectures (development mode)
+./build-kernel.sh all dev
+
+# Build specific architecture
+./build-kernel.sh x86_64 dev     # Uses kernel code model for x86_64
+./build-kernel.sh aarch64 release
+./build-kernel.sh riscv64 dev
+```
+
+**Alternative - Using Just:**
 ```bash
 # Build for default target (x86_64)
 just build
@@ -184,6 +196,8 @@ just build-all
 just clean
 just build
 ```
+
+**Note**: The x86_64 build requires special handling with kernel code model to avoid relocation errors.
 
 ### 2. Running in QEMU
 

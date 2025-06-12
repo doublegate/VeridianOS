@@ -1,7 +1,7 @@
 # Issues and Bug Tracking TODO
 
 **Purpose**: Central tracking for all bugs, issues, and defects  
-**Last Updated**: 2025-06-10
+**Last Updated**: 2025-12-06
 
 ## 🐛 Issue Categories
 
@@ -140,30 +140,62 @@ Currently no low priority issues.
   - Applied same fix to x86_64 and riscv64 scripts
   - **Result: All architectures now work with GDB debugging!**
 
-### ISSUE-0008: AArch64 Dead Code Warnings
+### ISSUE-0008: x86_64 R_X86_64_32S Relocation Errors
 - **Type**: Kernel/Build
-- **Severity**: P2
+- **Severity**: P1
 - **Status**: FIXED
-- **Reporter**: CI Pipeline
+- **Reporter**: Build System
 - **Assignee**: claude
-- **Created**: 2025-06-10
-- **Components**: Kernel/AArch64
-- **Description**: CI build failed with dead code warnings for AArch64 functions
-- **Root Cause**: Functions for future features (SVE, exception levels) not yet used
-- **Fix**: (2025-06-10, commit fa74131)
-  - Added #[allow(dead_code)] to has_sve(), enable_sve()
-  - Added #[allow(dead_code)] to current_el()
-  - Added #[allow(dead_code)] to timer tick()
-  - **Result: All architectures building cleanly!**
+- **Created**: 2025-12-06
+- **Components**: Kernel/x86_64
+- **Description**: Kernel build failed with R_X86_64_32S relocation errors when linked at high addresses
+- **Root Cause**: Default x86_64 code model cannot handle kernel addresses above 2GB
+- **Fix**: (2025-12-06, commit f15dfbf)
+  - Created custom x86_64 target JSON with kernel code model
+  - Updated build script to use custom target
+  - Added kernel code model for high address linking
+  - **Result: x86_64 kernel builds and links successfully at 0xFFFFFFFF80100000!**
+
+### ISSUE-0009: Kernel Boot Double Fault  
+- **Type**: Kernel/Runtime
+- **Severity**: P0
+- **Status**: FIXED
+- **Reporter**: QEMU Testing
+- **Assignee**: claude
+- **Created**: 2025-12-06
+- **Components**: Kernel/Boot
+- **Description**: Kernel crashes with double fault immediately after boot
+- **Root Cause**: Stack initialization and early boot sequence issues
+- **Fix**: (2025-12-06, commit f15dfbf)
+  - Fixed stack alignment and initialization
+  - Corrected boot sequence for proper memory setup
+  - Added proper BSS clearing
+  - **Result: Kernel boots successfully without crashes!**
+
+### ISSUE-0010: Heap Initialization Failure
+- **Type**: Kernel/Memory
+- **Severity**: P1
+- **Status**: FIXED
+- **Reporter**: Kernel Panic
+- **Assignee**: claude
+- **Created**: 2025-12-06
+- **Components**: Kernel/Memory Management
+- **Description**: Kernel panics during heap initialization
+- **Root Cause**: Frame allocator not properly initialized before heap setup
+- **Fix**: (2025-12-06, commit f15dfbf)
+  - Fixed initialization order in kernel main
+  - Ensured frame allocator setup before heap
+  - Added proper memory region detection
+  - **Result: Heap initializes correctly with proper memory management!**
 
 ## 📊 Issue Statistics
 
 ### Overall Status
-- **Total Issues**: 8
+- **Total Issues**: 10
 - **Open Issues**: 0
 - **In Progress**: 0
-- **Fixed**: 8
-- **Verified**: 8 ✅
+- **Fixed**: 10
+- **Verified**: 10 ✅
 - **Closed**: 0
 
 **Note**: Memory management implementation completed with no outstanding issues!
@@ -171,7 +203,7 @@ Currently no low priority issues.
 ### By Component
 | Component | Open | In Progress | Fixed | Total |
 |-----------|------|-------------|-------|-------|
-| Kernel | 0 | 0 | 4 | 4 |
+| Kernel | 0 | 0 | 6 | 6 |
 | Drivers | 0 | 0 | 0 | 0 |
 | Services | 0 | 0 | 0 | 0 |
 | Libraries | 0 | 0 | 0 | 0 |

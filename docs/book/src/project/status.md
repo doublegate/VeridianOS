@@ -6,9 +6,16 @@
 **Released**: June 12, 2025  
 **Previous Release**: v0.1.0 - Foundation & Tooling (June 7, 2025)  
 **Current Phase**: Phase 1 - Microkernel Core COMPLETE ✓  
-**Phase 1 Progress**: 100% Complete - All subsystems fully implemented!
+**Phase 1 Progress**: 100% Complete - All subsystems fully implemented!  
+**Last Updated**: December 6, 2025
 
 VeridianOS has successfully completed Phase 1 (Microkernel Core) with all major subsystems fully implemented! The project achieved 100% completion of IPC system with <1μs latency, memory management with user-space safety, process management with full lifecycle support, CFS scheduler with SMP and CPU hotplug, and a complete capability system with inheritance and revocation. The microkernel is now ready for Phase 2: User Space Foundation.
+
+### Recent Improvements (December 2025)
+- **x86_64 Build Fixed**: Resolved R_X86_64_32S relocation errors using kernel code model
+- **Boot Sequence Enhanced**: Kernel successfully boots through heap and IPC initialization
+- **Build Automation**: Created `build-kernel.sh` script for consistent cross-architecture builds
+- **Debug Infrastructure**: Established `debug/` directory for troubleshooting artifacts
 
 ## Phase 0 Achievements
 

@@ -130,7 +130,12 @@ veridian-os/
 ├── drivers/              # User-space driver processes
 ├── services/             # System services (VFS, network stack)
 ├── userland/             # User applications and libraries
-└── tools/                # Build tools and utilities
+├── tools/                # Build tools and utilities
+├── debug/                # Debug logs and scripts (gitignored)
+│   ├── *.log            # Serial output, QEMU logs, build logs
+│   ├── kernel-debug.sh  # Kernel debugging helper
+│   ├── gdb-kernel.sh    # GDB debugging script
+│   └── kernel.gdb       # GDB initialization commands
 ```
 
 ## Key Development Patterns
@@ -278,6 +283,44 @@ Currently implementing in phases:
 - Run `just debug-<arch>` for automated GDB sessions
 - Custom GDB commands available for kernel inspection
 
+### Debug Directory
+The `debug/` directory contains debugging tools and logs:
+- **kernel-debug.sh**: Run kernel with debug output saved to timestamped logs
+- **gdb-kernel.sh**: Start GDB debugging session with proper symbols
+- **kernel.gdb**: GDB initialization with custom commands
+- **clean-logs.sh**: Clean up old debug logs
+- All debug logs are saved with timestamps for later analysis
+- Directory is gitignored to avoid committing temporary files
+
+Example usage:
+```bash
+# Run kernel with debug output
+./debug/kernel-debug.sh x86_64 60
+
+# Start GDB debugging session
+./debug/gdb-kernel.sh
+
+# Clean logs older than 7 days
+./debug/clean-logs.sh 7
+```
+
+### Recent Critical Fixes (December 2025)
+1. **x86_64 R_X86_64_32S Relocation Errors** (ISSUE-0008)
+   - Problem: Kernel linked outside ±2GB addressing range
+   - Solution: Updated linker script to 0xFFFFFFFF80100000 (top 2GB)
+   - Added kernel code model to target configuration
+   - Created build-kernel.sh for automated builds
+
+2. **Kernel Boot Double Fault** (ISSUE-0009)
+   - Problem: Unhandled interrupts causing cascading faults
+   - Solution: Initialize PIC with interrupts masked (0xFF, 0xFF)
+   - Added proper interrupt setup sequence
+
+3. **Heap Initialization Failure** (ISSUE-0010)
+   - Problem: Heap at arbitrary address caused page faults
+   - Solution: Use static 4MB array in kernel binary
+   - Fixed static mut refs with core::ptr::addr_of! macro
+
 ### AArch64-Specific Notes
 - Iterator-based code causes hangs on bare metal - use direct memory writes only
 - Keep boot code extremely simple to avoid issues
@@ -390,3 +433,9 @@ Check these files regularly to track progress and identify next tasks.
 - `kernel/src/bench.rs` - Benchmarking framework
 - `docs/DEFERRED-IMPLEMENTATION-ITEMS.md` - Comprehensive tracking (1,415 lines)
 - `docs/TESTING-STATUS.md` - Testing limitations and alternatives
+
+### Current Known Issues
+- Process management initialization hang at boot (needs debugging)
+- Automated test execution blocked by Rust toolchain duplicate lang items
+- APIC/Timer integration simplified to println! stubs
+- OpenSBI integration for RISC-V needs implementation

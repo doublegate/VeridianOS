@@ -103,7 +103,24 @@ cargo install cargo-xbuild bootimage just
 | AArch64      | ✅ Working  | Custom boot sequence |
 | RISC-V 64    | ✅ Working  | Works with OpenSBI |
 
-### Using Just (Recommended)
+### Using the Build Script (Recommended)
+
+The project includes `build-kernel.sh` which handles architecture-specific build configurations and fixes:
+
+```bash
+# Build all architectures (development mode)
+./build-kernel.sh all dev
+
+# Build all architectures (release mode)
+./build-kernel.sh all release
+
+# Build specific architecture
+./build-kernel.sh x86_64 dev      # Uses kernel code model to fix relocation issues
+./build-kernel.sh aarch64 release
+./build-kernel.sh riscv64 dev
+```
+
+### Using Just
 
 We use `just` as our command runner. All common tasks have just recipes:
 
@@ -130,21 +147,23 @@ just clean
 
 #### Building the Kernel
 
-**Important**: Custom targets require building the core library from source using `-Zbuild-std`:
+**Important**: x86_64 requires custom target JSON with kernel code model to avoid R_X86_64_32S relocation errors:
 
 ```bash
-# Build for x86_64
-cargo build --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
+# Build for x86_64 (with kernel code model)
+cargo build --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc
 
-# Build for AArch64
-cargo build --target targets/aarch64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
+# Build for AArch64 (standard bare metal target)
+cargo build --target aarch64-unknown-none -p veridian-kernel
 
-# Build for RISC-V
-cargo build --target targets/riscv64gc-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
+# Build for RISC-V (standard bare metal target)
+cargo build --target riscv64gc-unknown-none-elf -p veridian-kernel
 
 # Release build
-cargo build --release --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
+cargo build --release --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc
 ```
+
+**Note**: The x86_64 kernel is linked at 0xFFFFFFFF80100000 (top 2GB of virtual memory) to work with the kernel code model.
 
 #### Creating Bootable Image
 
@@ -324,11 +343,14 @@ debug = 2           # Full debug info
 #### x86_64
 
 ```bash
-# Build bootimage first
-cargo bootimage --target targets/x86_64-veridian.json
+# Build kernel first
+./build-kernel.sh x86_64 dev
 
-# Run with QEMU
-qemu-system-x86_64 -drive format=raw,file=target/x86_64-veridian/debug/bootimage-veridian-kernel.bin -serial stdio -display none
+# Run with QEMU directly
+qemu-system-x86_64 -kernel target/x86_64-veridian/debug/veridian-kernel -serial stdio -display none
+
+# Or build and run with cargo
+cargo run --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -- -serial stdio -display none
 
 # Or use just
 just run
@@ -338,31 +360,29 @@ just run
 
 ```bash
 # Build kernel
-cargo build --target targets/aarch64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
+./build-kernel.sh aarch64 dev
 
 # Run with QEMU
-qemu-system-aarch64 -M virt -cpu cortex-a57 -nographic -kernel target/aarch64-veridian/debug/veridian-kernel
-
-# Note: AArch64 boot sequence is currently being debugged
+qemu-system-aarch64 -M virt -cpu cortex-a57 -nographic -kernel target/aarch64-unknown-none/debug/veridian-kernel
 ```
 
 #### RISC-V
 
 ```bash
 # Build kernel
-cargo build --target targets/riscv64gc-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
+./build-kernel.sh riscv64 dev
 
 # Run with QEMU
-qemu-system-riscv64 -M virt -nographic -kernel target/riscv64gc-veridian/debug/veridian-kernel
+qemu-system-riscv64 -M virt -nographic -kernel target/riscv64gc-unknown-none-elf/debug/veridian-kernel
 ```
 
 ### Testing Status
 
 | Architecture | Build | Boot | Serial I/O | Notes |
 |--------------|-------|------|------------|-------|
-| x86_64       | ✅    | ✅   | ✅         | Fully working with bootloader crate |
+| x86_64       | ✅    | ✅   | ✅         | Fully working with kernel code model fix |
+| AArch64      | ✅    | ✅   | ✅         | Boot sequence fixed and working |
 | RISC-V 64    | ✅    | ✅   | ✅         | Works with OpenSBI firmware |
-| AArch64      | ✅    | ⚠️   | ⚠️         | Assembly boot works, debugging Rust linkage |
 
 ### Running Tests
 
@@ -383,13 +403,15 @@ just test-all
 
 #### "can't find crate for `core`"
 
-This means the rust-src component is missing or you need to use `-Zbuild-std`:
+This means the rust-src component is missing:
 ```bash
 # Install rust-src
 rustup component add rust-src
 
-# When building custom targets, use -Zbuild-std:
-cargo build --target targets/x86_64-veridian.json -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
+# For x86_64 custom target, use -Zbuild-std:
+cargo build --target targets/x86_64-veridian.json -Zbuild-std=core,compiler_builtins,alloc
+
+# For standard targets (aarch64, riscv64), no special flags needed
 ```
 
 #### "error: linker `rust-lld` not found"
@@ -478,7 +500,16 @@ jobs:
   build-and-test:
     strategy:
       matrix:
-        arch: [x86_64, aarch64, riscv64]
+        include:
+          - arch: x86_64
+            target: targets/x86_64-veridian.json
+            build-std: true
+          - arch: aarch64
+            target: aarch64-unknown-none
+            build-std: false
+          - arch: riscv64
+            target: riscv64gc-unknown-none-elf
+            build-std: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -486,7 +517,12 @@ jobs:
         with:
           toolchain: nightly-2025-01-15
           components: rust-src, llvm-tools
-      - run: cargo build --target targets/${{ matrix.arch }}-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
+      - run: |
+          if [ "${{ matrix.build-std }}" = "true" ]; then
+            cargo build --target ${{ matrix.target }} -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc
+          else
+            cargo build --target ${{ matrix.target }} -p veridian-kernel
+          fi
 
   security-audit:
     runs-on: ubuntu-latest

@@ -57,18 +57,20 @@ pub extern "C" fn memset(dest: *mut u8, c: i32, n: usize) -> *mut u8 {
 ```
 
 #### Error: "relocation R_X86_64_32S out of range"
-This indicates position-dependent code in kernel:
+This error occurs when the kernel is linked at an address outside the ±2GB range that R_X86_64_32S relocations can handle.
 
-```toml
-# Fix in Cargo.toml
-[profile.dev]
-panic = "abort"
+**Solution**: Use the custom x86_64 target with kernel code model:
+```bash
+# Use the build script
+./build-kernel.sh x86_64 dev
 
-[profile.release]
-panic = "abort"
+# Or manually with cargo
+cargo build --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc
 ```
 
-And ensure PIC/PIE is disabled in linker script.
+The kernel is now linked at 0xFFFFFFFF80100000 (top 2GB of virtual memory) to work with the kernel code model.
+
+See `docs/KERNEL-BUILD-TROUBLESHOOTING.md` for detailed information.
 
 ### Build Performance Issues
 

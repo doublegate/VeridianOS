@@ -150,7 +150,9 @@ pub fn init(memory_map: &[MemoryRegion]) {
     println!("[MM] Initializing memory management...");
 
     // Initialize frame allocator with available memory regions
+    println!("[MM] Getting frame allocator lock...");
     let mut allocator = FRAME_ALLOCATOR.lock();
+    println!("[MM] Got frame allocator lock");
 
     let mut total_memory = 0u64;
     let mut usable_memory = 0u64;
@@ -193,6 +195,8 @@ pub fn init(memory_map: &[MemoryRegion]) {
 
 /// Initialize with default memory map for testing
 pub fn init_default() {
+    println!("[MM] init_default called");
+
     // Default memory map for testing (128MB starting at 1MB)
     let default_map = [MemoryRegion {
         start: 0x100000,         // 1MB
@@ -200,7 +204,9 @@ pub fn init_default() {
         usable: true,
     }];
 
+    println!("[MM] Calling init with default memory map");
     init(&default_map);
+    println!("[MM] init returned successfully");
 }
 
 /// Translate virtual address to physical address

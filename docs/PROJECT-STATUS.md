@@ -2,12 +2,19 @@
 
 ## Current Status: Phase 1 Complete - Ready for Phase 2
 
-**Last Updated**: 2025-06-12  
+**Last Updated**: 2025-12-06  
 **Current Version**: v0.2.0 (Released June 12, 2025)  
 **Current Phase**: Phase 1 - Microkernel Core COMPLETE ✓  
 **Phase 1 Progress**: 100% complete (IPC 100%, Memory Management 100%, Process Management 100%, Scheduler 100%, Capability System 100%)
 
 VeridianOS has successfully completed Phase 1 (Microkernel Core) and released v0.2.0! The project has achieved 100% completion of all core microkernel subsystems. Memory management is complete with hybrid frame allocator, virtual memory manager, kernel heap, and user-space safety features. Process management includes full lifecycle support, context switching for all architectures, comprehensive synchronization primitives, and system calls. The scheduler features CFS implementation, full SMP support with load balancing, CPU hotplug, and Inter-Processor Interrupts. The capability system provides hierarchical inheritance, cascading revocation, and per-CPU caching. IPC achieves <1μs latency with zero-copy transfers and rate limiting. All foundation infrastructure remains fully operational with CI/CD pipeline passing across all architectures.
+
+### Recent Fixes and Improvements (December 2025)
+- **x86_64 Build Issues Resolved**: Fixed R_X86_64_32S relocation errors using kernel code model in custom target JSON
+- **Boot Improvements**: Kernel now successfully boots through heap and IPC initialization
+- **PIC Initialization Fix**: Resolved early boot panic with static array for PIC remapping
+- **Build Automation**: Created `build-kernel.sh` script for consistent builds across architectures
+- **Debug Infrastructure**: Established `debug/` directory for build artifacts and troubleshooting
 
 ### Phase 0 Achievements
 - ✅ QEMU testing infrastructure fully operational
@@ -296,8 +303,8 @@ The journey from concept to implementation begins now. With clear documentation,
 
 ---
 
-**Document Version**: 3.0  
-**Last Updated**: 2025-06-12  
+**Document Version**: 3.1  
+**Last Updated**: 2025-12-06  
 **Status**: Phase 1 COMPLETE (100% overall - All subsystems fully implemented)  
 **Repository**: https://github.com/doublegate/VeridianOS  
 **CI Status**: ✅ **100% PASSING** - All checks green (Quick Checks, Build & Test, Security Audit) 🎉  
