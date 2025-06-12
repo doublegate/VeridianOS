@@ -20,7 +20,6 @@ env:
     CARGO_INCREMENTAL: 0
     RUSTFLAGS: "-D warnings"
     RUST_TOOLCHAIN: nightly-2025-01-15
-    BUILD_STD_FLAGS: "-Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem"
 
 # Cancel in-progress runs on same branch
 concurrency:
@@ -65,7 +64,13 @@ jobs:
         needs: quick-checks
         strategy:
             matrix:
-                target: [x86_64-veridian, aarch64-veridian, riscv64gc-veridian]
+                include:
+                    - target: x86_64-unknown-none
+                      arch: x86_64
+                    - target: aarch64-unknown-none
+                      arch: aarch64
+                    - target: riscv64gc-unknown-none-elf
+                      arch: riscv64gc
         steps:
             - uses: actions/checkout@v4
             - name: Install Rust
@@ -87,14 +92,14 @@ jobs:
                       ubuntu-cargo-${{ matrix.target }}-
                       ubuntu-cargo-
             - name: Install QEMU (x86_64 only)
-              if: matrix.target == 'x86_64-veridian'
+              if: matrix.arch == 'x86_64'
               run: |
                   sudo apt-get update
                   sudo apt-get install -y qemu-system-x86
             - name: Build kernel
               run: |
-                  cargo check --target targets/${{ matrix.target }}.json -p veridian-kernel ${{ env.BUILD_STD_FLAGS }}
-                  cargo build --release --target targets/${{ matrix.target }}.json -p veridian-kernel ${{ env.BUILD_STD_FLAGS }}
+                  cargo check --target ${{ matrix.target }} -p veridian-kernel
+                  cargo build --release --target ${{ matrix.target }} -p veridian-kernel
             - name: Install debugging tools
               run: |
                   rustup component add llvm-tools-preview
@@ -110,17 +115,17 @@ jobs:
                   else
                     OBJCOPY="objcopy"
                   fi
-                  cp target/${{ matrix.target }}/release/veridian-kernel artifacts/veridian-kernel-${{ matrix.target }}
+                  cp target/${{ matrix.target }}/release/veridian-kernel artifacts/veridian-kernel-${{ matrix.arch }}
                   if [ -f "target/${{ matrix.target }}/release/veridian-kernel" ]; then
                     $OBJCOPY --only-keep-debug target/${{ matrix.target }}/release/veridian-kernel \
-                      artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug || {
+                      artifacts/symbols/veridian-kernel-${{ matrix.arch }}.debug || {
                       echo "Warning: Failed to extract debug symbols"
-                      touch artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug
+                      touch artifacts/symbols/veridian-kernel-${{ matrix.arch }}.debug
                     }
-                    if [ -s "artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug" ]; then
+                    if [ -s "artifacts/symbols/veridian-kernel-${{ matrix.arch }}.debug" ]; then
                       $OBJCOPY --strip-debug \
-                        --add-gnu-debuglink=artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug \
-                        artifacts/veridian-kernel-${{ matrix.target }} || {
+                        --add-gnu-debuglink=artifacts/symbols/veridian-kernel-${{ matrix.arch }}.debug \
+                        artifacts/veridian-kernel-${{ matrix.arch }} || {
                         echo "Warning: Failed to strip and link debug symbols"
                       }
                     fi
@@ -131,14 +136,14 @@ jobs:
             - name: Upload artifacts
               uses: actions/upload-artifact@v4
               with:
-                  name: veridian-kernel-${{ matrix.target }}
-                  path: artifacts/veridian-kernel-${{ matrix.target }}
+                  name: veridian-kernel-${{ matrix.arch }}
+                  path: artifacts/veridian-kernel-${{ matrix.arch }}
                   retention-days: 7
             - name: Upload debug symbols
               uses: actions/upload-artifact@v4
               with:
-                  name: veridian-symbols-${{ matrix.target }}
-                  path: artifacts/symbols/veridian-kernel-${{ matrix.target }}.debug
+                  name: veridian-symbols-${{ matrix.arch }}
+                  path: artifacts/symbols/veridian-kernel-${{ matrix.arch }}.debug
                   retention-days: 30
 
     # Documentation generation
@@ -179,10 +184,10 @@ jobs:
                     --html-before-content=docs/assets/before.html \
                     --html-after-content=docs/assets/after.html"
                   cargo doc --no-deps --all-features \
-                    --target targets/x86_64-veridian.json \
-                    -p veridian-kernel ${{ env.BUILD_STD_FLAGS }}
+                    --target x86_64-unknown-none \
+                    -p veridian-kernel
                   mkdir -p artifacts/docs/api
-                  cp -r target/x86_64-veridian/doc/* artifacts/docs/api/
+                  cp -r target/x86_64-unknown-none/doc/* artifacts/docs/api/
                   cat > artifacts/docs/api/index.html << 'EOF'
                   <!DOCTYPE html>
                   <html>
@@ -275,15 +280,15 @@ jobs:
                   mkdir -p release/{kernel,symbols,docs}
                   for arch in x86_64 aarch64 riscv64gc; do
                     mkdir -p release/kernel/${arch%-*}
-                    if [ -f "downloads/veridian-kernel-${arch}-veridian/veridian-kernel-${arch}-veridian" ]; then
-                      cp "downloads/veridian-kernel-${arch}-veridian/veridian-kernel-${arch}-veridian" \
+                    if [ -f "downloads/veridian-kernel-${arch}/veridian-kernel-${arch}" ]; then
+                      cp "downloads/veridian-kernel-${arch}/veridian-kernel-${arch}" \
                          "release/kernel/${arch%-*}/veridian-kernel"
                     fi
                   done
                   for arch in x86_64 aarch64 riscv64gc; do
                     mkdir -p release/symbols/${arch%-*}
-                    if [ -f "downloads/veridian-symbols-${arch}-veridian/veridian-kernel-${arch}-veridian.debug" ]; then
-                      cp "downloads/veridian-symbols-${arch}-veridian/veridian-kernel-${arch}-veridian.debug" \
+                    if [ -f "downloads/veridian-symbols-${arch}/veridian-kernel-${arch}.debug" ]; then
+                      cp "downloads/veridian-symbols-${arch}/veridian-kernel-${arch}.debug" \
                          "release/symbols/${arch%-*}/veridian-kernel.debug"
                     fi
                   done
