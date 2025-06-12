@@ -98,8 +98,8 @@ jobs:
                   sudo apt-get install -y qemu-system-x86
             - name: Build kernel
               run: |
-                  cargo check --target ${{ matrix.target }} -p veridian-kernel
-                  cargo build --release --target ${{ matrix.target }} -p veridian-kernel
+                  cargo check --target ${{ matrix.target }} -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
+                  cargo build --release --target ${{ matrix.target }} -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
             - name: Install debugging tools
               run: |
                   rustup component add llvm-tools-preview
@@ -185,7 +185,9 @@ jobs:
                     --html-after-content=docs/assets/after.html"
                   cargo doc --no-deps --all-features \
                     --target x86_64-unknown-none \
-                    -p veridian-kernel
+                    -p veridian-kernel \
+                    -Zbuild-std=core,compiler_builtins,alloc \
+                    -Zbuild-std-features=compiler-builtins-mem
                   mkdir -p artifacts/docs/api
                   cp -r target/x86_64-unknown-none/doc/* artifacts/docs/api/
                   cat > artifacts/docs/api/index.html << 'EOF'
