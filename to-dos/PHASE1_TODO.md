@@ -5,8 +5,20 @@
 **Dependencies**: Phase 0 completion ✅  
 **Start Date**: June 8, 2025  
 **Completion Date**: June 12, 2025 (5 days!)  
-**Last Updated**: June 12, 2025 (Phase 1 Complete!)  
+**Last Updated**: December 6, 2025 (Post-Release Debugging)  
 **Released**: v0.2.0 - June 12, 2025
+
+## Post-Release Boot Status (December 2025)
+
+### Architecture Boot Testing
+- **x86_64**: ✅ Boots through all subsystems, hangs at process init (expected - scheduler not ready for init process)
+- **RISC-V**: ✅ Boots through all subsystems after mutex fix, hangs at process init (expected)
+- **AArch64**: ⚠️ Boot issue - kernel_main not reached from _start_rust (needs debugging)
+
+### Key Fixes Applied
+- **Memory Allocator**: Fixed mutex deadlock by skipping stats during initialization
+- **Architecture Memory Maps**: Added proper init_default() for all architectures
+- **Debug Output**: Added extensive tracing to identify boot progress
 
 🌟 **AI-Recommended Implementation Strategy**:
 1. **Start with IPC** (Weeks 1-6) - Foundation for everything

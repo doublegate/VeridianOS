@@ -3,8 +3,26 @@
 ## Summary
 
 **Kernel Compilation**: ✅ **WORKING** - All architectures compile successfully  
-**Kernel Boot**: ✅ **WORKING** - All architectures boot successfully in QEMU  
+**Kernel Boot**: ✅ **WORKING** - x86_64 and RISC-V boot through all subsystems (AArch64 has early boot issue)  
 **Integration Tests**: ❌ **BLOCKED** - Due to Rust toolchain limitations
+
+## Boot Testing Results (December 2025)
+
+### Architecture Status
+- **x86_64**: ✅ Boots successfully through all kernel subsystems
+  - Memory allocator initializes properly
+  - IPC system sets up correctly
+  - Hangs at process init (expected - scheduler not ready for init process)
+  
+- **RISC-V**: ✅ Boots successfully after mutex fix
+  - Fixed mutex deadlock in memory allocator by skipping stats during init
+  - Added architecture-specific memory map for init_default()
+  - Hangs at process init (expected - same as x86_64)
+  
+- **AArch64**: ⚠️ Early boot issue
+  - kernel_main not reached from _start_rust
+  - Assembly to Rust transition problem
+  - Needs debugging of boot sequence
 
 ## The Testing Challenge
 

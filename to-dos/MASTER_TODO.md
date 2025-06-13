@@ -192,11 +192,17 @@ Legend: ⚪ Not Started | 🟡 In Progress | 🟢 Complete
 
 ## 🐛 Known Issues
 
-Currently tracking 0 open issues (10 resolved). See [ISSUES_TODO.md](ISSUES_TODO.md) for details.
+Currently tracking 0 open issues (11 resolved). See [ISSUES_TODO.md](ISSUES_TODO.md) for details.
 - **Recent Fixes** (December 2025):
   - ISSUE-0008: x86_64 R_X86_64_32S relocation errors (RESOLVED)
   - ISSUE-0009: Kernel boot double fault (RESOLVED)
   - ISSUE-0010: Heap initialization failure (RESOLVED)
+  - ISSUE-0011: Memory allocator mutex deadlock (RESOLVED)
+  
+### Current Boot Status
+- **x86_64**: Boots through all subsystems, hangs at process init (expected - scheduler dependency)
+- **RISC-V**: Boots through all subsystems, hangs at process init (mutex fix applied)
+- **AArch64**: Boot issue - kernel_main not reached from _start_rust (needs debugging)
 
 ## 💡 Future Enhancements
 

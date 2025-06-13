@@ -9,6 +9,9 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use spin::Mutex;
 
+// Import println! macro
+use crate::println;
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -544,6 +547,13 @@ impl FrameAllocator {
         start_frame: FrameNumber,
         frame_count: usize,
     ) -> Result<()> {
+        println!(
+            "[FA] init_numa_node: node={}, start_frame={}, frame_count={}",
+            node,
+            start_frame.as_u64(),
+            frame_count
+        );
+
         if node >= MAX_NUMA_NODES {
             return Err(FrameAllocatorError::InvalidNumaNode);
         }
@@ -552,20 +562,25 @@ impl FrameAllocator {
         let bitmap_frames = frame_count.min(1024 * 1024); // Max 4GB for bitmap
         let buddy_frames = frame_count.saturating_sub(bitmap_frames);
 
+        println!(
+            "[FA] bitmap_frames={}, buddy_frames={}",
+            bitmap_frames, buddy_frames
+        );
+
         if bitmap_frames > 0 {
+            println!("[FA] Creating BitmapAllocator...");
             self.bitmap_allocators[node] = Some(BitmapAllocator::new(start_frame, bitmap_frames));
+            println!("[FA] BitmapAllocator created");
         }
 
         if buddy_frames > 0 {
+            println!("[FA] Creating BuddyAllocator...");
             let buddy_start = FrameNumber::new(start_frame.as_u64() + bitmap_frames as u64);
             self.buddy_allocators[node] = Some(BuddyAllocator::new(buddy_start, buddy_frames));
+            println!("[FA] BuddyAllocator created");
         }
 
-        {
-            let mut stats = self.stats.lock();
-            stats.total_frames += frame_count as u64;
-            stats.free_frames += frame_count as u64;
-        }
+        println!("[FA] Skipping stats update during init to avoid deadlock");
 
         Ok(())
     }

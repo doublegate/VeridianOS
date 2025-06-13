@@ -5,11 +5,6 @@ use core::arch::global_asm;
 // Include the assembly boot code
 global_asm!(include_str!("boot.S"));
 
-// Forward declaration for kernel_main
-extern "C" {
-    fn kernel_main() -> !;
-}
-
 #[no_mangle]
 pub unsafe extern "C" fn _start_rust() -> ! {
     // Write startup message
@@ -20,6 +15,20 @@ pub unsafe extern "C" fn _start_rust() -> ! {
     *uart = b'T';
     *uart = b'\n';
 
-    // Call kernel_main
-    kernel_main()
+    // Write test message before kernel_main
+    *uart = b'T';
+    *uart = b'E';
+    *uart = b'S';
+    *uart = b'T';
+    *uart = b'\n';
+
+    // Try calling kernel_main through a pointer to see if it's a linking issue
+    *uart = b'C';
+    *uart = b'A';
+    *uart = b'L';
+    *uart = b'L';
+    *uart = b'\n';
+
+    // Direct call to kernel_main
+    crate::kernel_main()
 }

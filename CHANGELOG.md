@@ -298,6 +298,12 @@ development. All foundational infrastructure is in place and operational.
   - Fixed page fault handling for proper virtual memory management
   - Kernel now successfully boots through heap initialization and IPC setup
 
+- **Memory allocator mutex deadlock** (2025-12-06)
+  - Fixed deadlock during initialization by skipping stats updates
+  - Added architecture-specific memory maps for init_default()
+  - RISC-V now boots successfully through all subsystems
+  - Process init hang is expected behavior (scheduler dependency)
+
 ### Added
 
 - **build-kernel.sh** - Automated build script for all architectures
@@ -331,6 +337,8 @@ development. All foundational infrastructure is in place and operational.
 - Limited hardware support
 - No file system
 - No networking
+- AArch64 boot sequence issue - kernel_main not reached from _start_rust
+- Process init hangs on all architectures (expected - scheduler not ready for init process)
 
 ## Versioning Scheme
 

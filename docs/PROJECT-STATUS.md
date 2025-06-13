@@ -9,12 +9,18 @@
 
 VeridianOS has successfully completed Phase 1 (Microkernel Core) and released v0.2.0! The project has achieved 100% completion of all core microkernel subsystems. Memory management is complete with hybrid frame allocator, virtual memory manager, kernel heap, and user-space safety features. Process management includes full lifecycle support, context switching for all architectures, comprehensive synchronization primitives, and system calls. The scheduler features CFS implementation, full SMP support with load balancing, CPU hotplug, and Inter-Processor Interrupts. The capability system provides hierarchical inheritance, cascading revocation, and per-CPU caching. IPC achieves <1μs latency with zero-copy transfers and rate limiting. All foundation infrastructure remains fully operational with CI/CD pipeline passing across all architectures.
 
+**Boot Status**: x86_64 and RISC-V boot successfully through all subsystems (process init hang is expected - scheduler dependency). AArch64 has an early boot issue where kernel_main is not reached from _start_rust.
+
 ### Recent Fixes and Improvements (December 2025)
 - **x86_64 Build Issues Resolved**: Fixed R_X86_64_32S relocation errors using kernel code model in custom target JSON
-- **Boot Improvements**: Kernel now successfully boots through heap and IPC initialization
+- **Boot Improvements**: x86_64 and RISC-V now successfully boot through all kernel subsystems
 - **PIC Initialization Fix**: Resolved early boot panic with static array for PIC remapping
+- **Memory Allocator Fix**: Fixed mutex deadlock by skipping stats updates during initialization
+- **Architecture-Specific Memory Maps**: Added proper memory maps for init_default() for all architectures
 - **Build Automation**: Created `build-kernel.sh` script for consistent builds across architectures
 - **Debug Infrastructure**: Established `debug/` directory for build artifacts and troubleshooting
+- **Boot Status**: Process init hang is expected behavior (scheduler not ready for init process)
+- **AArch64 Issue**: Boot sequence problem where kernel_main not reached from _start_rust
 
 ### Phase 0 Achievements
 - ✅ QEMU testing infrastructure fully operational

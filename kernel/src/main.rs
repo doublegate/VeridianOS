@@ -85,28 +85,66 @@ fn panic(info: &PanicInfo) -> ! {
 
 #[no_mangle]
 pub extern "C" fn kernel_main() -> ! {
-    // AArch64 implementation
+    // Direct UART output for AArch64
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let uart = 0x0900_0000 as *mut u8;
+        core::ptr::write_volatile(uart, b'K');
+        core::ptr::write_volatile(uart, b'E');
+        core::ptr::write_volatile(uart, b'R');
+        core::ptr::write_volatile(uart, b'N');
+        core::ptr::write_volatile(uart, b'E');
+        core::ptr::write_volatile(uart, b'L');
+        core::ptr::write_volatile(uart, b'_');
+        core::ptr::write_volatile(uart, b'M');
+        core::ptr::write_volatile(uart, b'A');
+        core::ptr::write_volatile(uart, b'I');
+        core::ptr::write_volatile(uart, b'N');
+        core::ptr::write_volatile(uart, b'\n');
+    }
+
+    // Simple AArch64 test
     #[cfg(target_arch = "aarch64")]
     {
-        // Simple UART output for AArch64 - no iterators!
-        unsafe {
-            let uart = 0x0900_0000 as *mut u8;
-            // Write "KERNEL MAIN\n" manually
-            *uart = b'K';
-            *uart = b'E';
-            *uart = b'R';
-            *uart = b'N';
-            *uart = b'E';
-            *uart = b'L';
-            *uart = b' ';
-            *uart = b'M';
-            *uart = b'A';
-            *uart = b'I';
-            *uart = b'N';
-            *uart = b'\n';
+        // Initialize serial output first
+        let mut serial_port = arch::serial_init();
+
+        // Write using serial port
+        use core::fmt::Write;
+        writeln!(serial_port, "VeridianOS kernel started!").unwrap();
+        writeln!(serial_port, "Architecture: AArch64").unwrap();
+        writeln!(serial_port, "Initializing...").unwrap();
+
+        // Initialize architecture
+        arch::init();
+        writeln!(serial_port, "Arch initialized").unwrap();
+
+        // Initialize memory management
+        writeln!(serial_port, "Initializing memory management...").unwrap();
+        mm::init_default();
+        writeln!(serial_port, "Memory management initialized").unwrap();
+
+        // Initialize kernel heap
+        writeln!(serial_port, "Initializing kernel heap...").unwrap();
+        if let Err(e) = mm::init_heap() {
+            writeln!(serial_port, "Failed to initialize heap: {}", e).unwrap();
+        } else {
+            writeln!(serial_port, "Kernel heap initialized").unwrap();
         }
 
-        // Simple loop
+        // Initialize IPC
+        writeln!(serial_port, "Initializing IPC...").unwrap();
+        ipc::init();
+        writeln!(serial_port, "IPC initialized").unwrap();
+
+        // Initialize process management
+        writeln!(serial_port, "Initializing process management...").unwrap();
+        process::init();
+        writeln!(serial_port, "Process management initialized").unwrap();
+
+        writeln!(serial_port, "Kernel initialization complete!").unwrap();
+
+        // Just loop for now
         loop {
             unsafe {
                 core::arch::asm!("wfe");
@@ -119,8 +157,21 @@ pub extern "C" fn kernel_main() -> ! {
         // Initialize serial port first for debugging (architecture-specific)
         let mut serial_port = arch::serial_init();
 
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let uart = 0x0900_0000 as *mut u8;
+            core::ptr::write_volatile(uart, b'2');
+        }
+
         // Write to serial port directly
         use core::fmt::Write;
+
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let uart = 0x0900_0000 as *mut u8;
+            core::ptr::write_volatile(uart, b'3');
+        }
+
         writeln!(serial_port, "VeridianOS kernel started!").unwrap();
 
         // Architecture-specific early output

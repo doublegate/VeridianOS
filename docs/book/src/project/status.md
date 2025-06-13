@@ -44,10 +44,15 @@ VeridianOS has successfully completed Phase 1 (Microkernel Core) with all major 
 | Component | x86_64 | AArch64 | RISC-V |
 |-----------|--------|---------|---------|
 | Build | ✅ | ✅ | ✅ |
-| Boot | ✅ | ✅ | ✅ |
+| Boot | ✅ | ⚠️ | ✅ |
 | Serial Output | ✅ | ✅ | ✅ |
 | GDB Debug | ✅ | ✅ | ✅ |
 | Tests | ✅ | ✅ | ✅ |
+
+**Boot Notes**:
+- x86_64: Boots through all subsystems, expected hang at process init
+- RISC-V: Boots through all subsystems after mutex fix, expected hang at process init  
+- AArch64: Boot issue - kernel_main not reached from _start_rust
 
 ## Development Metrics
 

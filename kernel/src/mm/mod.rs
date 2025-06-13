@@ -158,6 +158,14 @@ pub fn init(memory_map: &[MemoryRegion]) {
     let mut usable_memory = 0u64;
 
     for (idx, region) in memory_map.iter().enumerate() {
+        println!(
+            "[MM] Processing region {}: start=0x{:x}, size={} MB, usable={}",
+            idx,
+            region.start,
+            region.size / (1024 * 1024),
+            region.usable
+        );
+
         total_memory += region.size;
 
         if region.usable {
@@ -169,6 +177,7 @@ pub fn init(memory_map: &[MemoryRegion]) {
             // Use region index as NUMA node for now
             let numa_node = idx.min(7); // Max 8 NUMA nodes
 
+            println!("[MM] About to call init_numa_node for node {}", numa_node);
             if let Err(_e) = allocator.init_numa_node(numa_node, start_frame, frame_count) {
                 println!("[MM] Warning: Failed to initialize memory region {}", idx);
             } else {
@@ -183,13 +192,13 @@ pub fn init(memory_map: &[MemoryRegion]) {
     }
 
     drop(allocator); // Release lock before getting stats
+    println!("[MM] Allocator lock dropped");
 
-    let stats = FRAME_ALLOCATOR.lock().get_stats();
+    // Skip stats for now to avoid deadlock
     println!(
-        "[MM] Memory initialized: {} MB total, {} MB usable, {} MB available",
+        "[MM] Memory initialized: {} MB total, {} MB usable",
         total_memory / (1024 * 1024),
-        usable_memory / (1024 * 1024),
-        (stats.free_frames * FRAME_SIZE as u64) / (1024 * 1024)
+        usable_memory / (1024 * 1024)
     );
 }
 
@@ -197,9 +206,24 @@ pub fn init(memory_map: &[MemoryRegion]) {
 pub fn init_default() {
     println!("[MM] init_default called");
 
-    // Default memory map for testing (128MB starting at 1MB)
+    // Architecture-specific default memory maps
+    #[cfg(target_arch = "x86_64")]
     let default_map = [MemoryRegion {
         start: 0x100000,         // 1MB
+        size: 128 * 1024 * 1024, // 128MB
+        usable: true,
+    }];
+
+    #[cfg(target_arch = "aarch64")]
+    let default_map = [MemoryRegion {
+        start: 0x48000000,       // 1.125GB (after kernel at 0x40080000)
+        size: 128 * 1024 * 1024, // 128MB
+        usable: true,
+    }];
+
+    #[cfg(target_arch = "riscv64")]
+    let default_map = [MemoryRegion {
+        start: 0x88000000,       // 2.125GB (after kernel at 0x80200000)
         size: 128 * 1024 * 1024, // 128MB
         usable: true,
     }];

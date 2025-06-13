@@ -56,21 +56,28 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 **Kernel Build Fixes**:
 - Fixed x86_64 R_X86_64_32S relocation errors by implementing kernel code model in custom target JSON
 - Resolved kernel boot issues including double fault and heap initialization
-- Kernel now successfully boots through heap initialization and IPC on all architectures
+- Fixed memory allocator mutex deadlock by skipping stats updates during initialization
+- Added architecture-specific memory maps for init_default() to ensure proper heap setup
+
+**Boot Status**:
+- x86_64 and RISC-V boot successfully through all kernel subsystems
+- Process init hang is expected behavior (scheduler not yet ready for init process creation)
+- AArch64 has early boot issue where kernel_main is not reached from _start_rust
 
 **Development Tooling**:
 - Created `build-kernel.sh` script for automated builds across all architectures
 - Added `debug/` directory with kernel debugging tools and utilities
 - Enhanced debugging infrastructure for troubleshooting boot issues
+- Added extensive debug output to trace boot progress
 
 
 ### Architecture Support Status
 
 | Architecture | Build | Boot | Serial I/O | Status |
 |--------------|-------|------|------------|---------|
-| x86_64       | ✅    | ✅   | ✅         | **Fully Working** |
-| RISC-V 64    | ✅    | ✅   | ✅         | **Fully Working** |
-| AArch64      | ✅    | ✅   | ✅         | **Fully Working** (Fixed 2025-06-07) |
+| x86_64       | ✅    | ✅   | ✅         | **Fully Working** - Boots through all subsystems, hangs at process init (expected - scheduler dependency) |
+| RISC-V 64    | ✅    | ✅   | ✅         | **Fully Working** - Boots through all subsystems, hangs at process init (mutex fix applied) |
+| AArch64      | ✅    | ⚠️   | ✅         | **Boot Issue** - kernel_main not reached from _start_rust (debugging needed) |
 
 ## Quick Start
 

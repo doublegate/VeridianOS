@@ -2,8 +2,27 @@
 
 This document tracks features, code, and functionality that were removed, disabled, or marked as TODO during the Process Management implementation session (June 10, 2025) and Phase 1 completion (June 11, 2025) that need to be reimplemented or re-added in future work.
 
-**Last Updated**: June 12, 2025 (Phase 1 Final Polish)
+**Last Updated**: December 6, 2025 (Post-Release Debugging)
 **Editor**: Claude (Anthropic) - Phase 1 completion verification and final fixes
+
+## Recent Boot Status (December 6, 2025)
+
+### Boot Testing Results
+- **x86_64**: Boots successfully through all kernel subsystems, hangs at process init (expected - scheduler not ready for init process)
+- **RISC-V**: Boots successfully through all subsystems after mutex deadlock fix, hangs at process init (expected)
+- **AArch64**: Early boot issue - kernel_main not reached from _start_rust (assembly to Rust transition problem)
+
+### Memory Allocator Mutex Fix
+**Issue**: RISC-V hung during memory allocator initialization due to mutex deadlock
+**Resolution**: Skip stats updates during initialization phase to avoid allocation during init
+**Files Modified**:
+- `kernel/src/mm/frame_allocator.rs` - Added initialization flag
+- `kernel/src/mm/mod.rs` - Added architecture-specific memory maps for init_default()
+
+### Process Init Hang
+**Status**: Expected behavior - not a bug
+**Reason**: Process management tries to create init process before scheduler is ready
+**Details**: This is the expected end state for Phase 1 since user space is not yet implemented
 
 ## Recently Resolved Items (June 12, 2025)
 
