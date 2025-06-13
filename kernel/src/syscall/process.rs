@@ -299,7 +299,7 @@ pub fn sys_thread_getaffinity(tid: usize, cpuset_ptr: usize, cpuset_size: usize)
     }
 
     // Validate user pointer
-    validate_user_ptr(cpuset_ptr, cpuset_size)?;
+    validate_user_ptr(cpuset_ptr as *const u8, cpuset_size)?;
 
     let target_tid = if tid == 0 {
         get_thread_tid()

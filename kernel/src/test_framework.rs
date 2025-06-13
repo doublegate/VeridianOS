@@ -19,28 +19,52 @@ pub enum QemuExitCode {
 
 /// Trait that all testable functions must implement
 pub trait Testable {
-    fn run(&self);
+    fn run(&self) -> Result<(), &'static str>;
 }
 
 impl<T> Testable for T
 where
-    T: Fn(),
+    T: Fn() -> Result<(), &'static str>,
 {
-    fn run(&self) {
+    fn run(&self) -> Result<(), &'static str> {
         serial_print!("{}...\t", core::any::type_name::<T>());
-        self();
-        serial_println!("[ok]");
+        match self() {
+            Ok(()) => {
+                serial_println!("[ok]");
+                Ok(())
+            }
+            Err(e) => {
+                serial_println!("[failed]: {}", e);
+                Err(e)
+            }
+        }
     }
 }
 
 /// Custom test runner for kernel tests
-#[allow(dead_code)]
-pub fn test_runner(tests: &[&dyn Testable]) {
+#[cfg(test)]
+pub fn test_runner(tests: &[&dyn Testable]) -> ! {
     serial_println!("Running {} tests", tests.len());
+    let mut passed = 0;
+    let mut failed = 0;
+
     for test in tests {
-        test.run();
+        match test.run() {
+            Ok(()) => passed += 1,
+            Err(e) => {
+                failed += 1;
+                serial_println!("[ERROR] Test failed: {}", e);
+            }
+        }
     }
-    exit_qemu(QemuExitCode::Success);
+
+    serial_println!("\nTest Results: {} passed, {} failed", passed, failed);
+
+    if failed == 0 {
+        exit_qemu(QemuExitCode::Success);
+    } else {
+        exit_qemu(QemuExitCode::Failed);
+    }
 }
 
 /// Panic handler for test mode
@@ -98,19 +122,26 @@ pub fn exit_qemu(_exit_code: QemuExitCode) -> ! {
     }
 }
 
+/// Macro to define kernel tests
+#[macro_export]
+macro_rules! kernel_test {
+    ($name:ident, $test:expr) => {
+        #[test_case]
+        const $name: &dyn $crate::test_framework::Testable =
+            &|| -> Result<(), &'static str> { $test };
+    };
+}
+
 /// Helper macro for creating test modules
 #[macro_export]
 macro_rules! test_module {
-    ($name:ident, $($test:path),* $(,)?) => {
+    ($name:ident, $($test_name:ident => $test_fn:expr),* $(,)?) => {
         #[cfg(test)]
         mod $name {
             use super::*;
 
-            #[test_case]
             $(
-                fn $test() {
-                    $test();
-                }
+                kernel_test!($test_name, $test_fn);
             )*
         }
     };

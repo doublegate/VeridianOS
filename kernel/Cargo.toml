@@ -11,6 +11,10 @@ default = ["alloc"]
 alloc = []
 testing = []
 smp = []
+test-kernel = ["qemu-exit"]
+benchmarks = []
+integration-tests = []
+qemu-exit = []
 
 [dependencies]
 spin.workspace = true
@@ -70,6 +74,10 @@ harness = false
 
 [[test]]
 name = "should_panic"
+harness = false
+
+[[test]]
+name = "test_example"
 harness = false
 
 # Benchmarks

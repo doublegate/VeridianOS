@@ -6,29 +6,30 @@ use core::arch::global_asm;
 global_asm!(include_str!("boot.S"));
 
 #[no_mangle]
-pub unsafe extern "C" fn _start_rust() -> ! {
-    // Write startup message
-    let uart = 0x0900_0000 as *mut u8;
-    *uart = b'R';
-    *uart = b'U';
-    *uart = b'S';
-    *uart = b'T';
-    *uart = b'\n';
+#[link_section = ".text.boot"]
+pub extern "C" fn _start_rust() -> ! {
+    // BSS symbols from linker script
+    extern "C" {
+        static mut __bss_start: u8;
+        static mut __bss_end: u8;
+    }
 
-    // Write test message before kernel_main
-    *uart = b'T';
-    *uart = b'E';
-    *uart = b'S';
-    *uart = b'T';
-    *uart = b'\n';
+    unsafe {
+        // Clear BSS first
+        let bss_start = &raw const __bss_start as *mut u8;
+        let bss_end = &raw const __bss_end as *mut u8;
+        let bss_size = bss_end as usize - bss_start as usize;
+        core::ptr::write_bytes(bss_start, 0, bss_size);
 
-    // Try calling kernel_main through a pointer to see if it's a linking issue
-    *uart = b'C';
-    *uart = b'A';
-    *uart = b'L';
-    *uart = b'L';
-    *uart = b'\n';
+        // Write startup message
+        let uart = 0x0900_0000 as *mut u8;
+        core::ptr::write_volatile(uart, b'R');
+        core::ptr::write_volatile(uart, b'U');
+        core::ptr::write_volatile(uart, b'S');
+        core::ptr::write_volatile(uart, b'T');
+        core::ptr::write_volatile(uart, b'\n');
 
-    // Direct call to kernel_main
-    crate::kernel_main()
+        // Call kernel_main with proper ABI
+        crate::kernel_main()
+    }
 }

@@ -226,10 +226,5 @@ impl Clone for Capability {
     }
 }
 
-/// Global capability table ID allocator
-static GLOBAL_CAP_ID: AtomicU64 = AtomicU64::new(1);
-
-/// Allocate a globally unique capability ID
-pub fn alloc_cap_id() -> CapabilityId {
-    CapabilityId(GLOBAL_CAP_ID.fetch_add(1, Ordering::Relaxed))
-}
+// Use the allocation function from token module
+// pub use super::token::alloc_cap_id; // Not currently used

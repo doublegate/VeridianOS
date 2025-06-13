@@ -29,6 +29,7 @@ pub enum CapError {
     PermissionDenied,
     AlreadyExists,
     NotFound,
+    IdExhausted,
 }
 
 /// ID allocator for capability IDs
@@ -58,13 +59,33 @@ impl IdAllocator {
             }
         }
 
-        // Allocate new ID
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        if id > 0xFFFF_FFFF_FFFF {
-            // We've exhausted 48-bit IDs
-            return Err(CapError::OutOfMemory);
+        // Allocate new ID using atomic compare-exchange
+        const MAX_CAP_ID: u64 = (1 << 48) - 1;
+
+        loop {
+            let current = self.next_id.load(Ordering::Relaxed);
+
+            // Check if we've exhausted the ID space
+            if current > MAX_CAP_ID {
+                return Err(CapError::IdExhausted);
+            }
+
+            let next = current + 1;
+
+            // Use compare_exchange_weak for better performance
+            match self.next_id.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(current),
+                Err(_) => {
+                    // Another thread updated the counter, retry
+                    continue;
+                }
+            }
         }
-        Ok(id)
     }
 
     #[cfg(feature = "alloc")]

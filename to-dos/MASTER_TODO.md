@@ -1,6 +1,6 @@
 # VeridianOS Master TODO List
 
-**Last Updated**: 2025-12-06 (Phase 1 COMPLETE! Starting Phase 2)
+**Last Updated**: 2025-06-13 (Phase 1 COMPLETE! Starting Phase 2)
 
 🌟 **AI Analysis Incorporated**: Technical roadmap enhanced with insights from Claude-4, GPT-4o, and Grok-3
 
@@ -193,16 +193,17 @@ Legend: ⚪ Not Started | 🟡 In Progress | 🟢 Complete
 ## 🐛 Known Issues
 
 Currently tracking 0 open issues (11 resolved). See [ISSUES_TODO.md](ISSUES_TODO.md) for details.
-- **Recent Fixes** (December 2025):
-  - ISSUE-0008: x86_64 R_X86_64_32S relocation errors (RESOLVED)
-  - ISSUE-0009: Kernel boot double fault (RESOLVED)
-  - ISSUE-0010: Heap initialization failure (RESOLVED)
-  - ISSUE-0011: Memory allocator mutex deadlock (RESOLVED)
+- **Recent Fixes** (June 13, 2025):
+  - Boot sequence circular dependency (FIXED with bootstrap module)
+  - AArch64 calling convention issue (FIXED with &raw const)
+  - Scheduler unsafe static mutable access (FIXED with AtomicPtr)
+  - Capability token overflow vulnerability (FIXED with atomic compare-exchange)
+  - User pointer validation (IMPLEMENTED with page table walking)
   
-### Current Boot Status
-- **x86_64**: Boots through all subsystems, hangs at process init (expected - scheduler dependency)
-- **RISC-V**: Boots through all subsystems, hangs at process init (mutex fix applied)
-- **AArch64**: Boot issue - kernel_main not reached from _start_rust (needs debugging)
+### Current Boot Status (June 13, 2025)
+- **x86_64**: Builds successfully but hangs very early in boot (no serial output)
+- **RISC-V**: Builds successfully and boots to kernel banner ✅
+- **AArch64**: Builds successfully, shows "STB" but doesn't reach kernel_main
 
 ## 💡 Future Enhancements
 

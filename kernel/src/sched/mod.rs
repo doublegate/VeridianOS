@@ -16,6 +16,7 @@ use core::{
 
 use crate::{
     arch::context::ThreadContext,
+    error::KernelResult,
     process::{thread::ThreadState, ProcessId as ProcId, ThreadId as ThrId},
     sched::task::{CpuSet, TaskContext},
 };
@@ -74,45 +75,110 @@ pub fn alloc_pid() -> ProcessId {
     ProcessId(NEXT_PID.fetch_add(1, Ordering::Relaxed))
 }
 
+use core::sync::atomic::AtomicPtr;
+
+// Thread-safe current process storage using atomic pointer
+static CURRENT_PROCESS_PTR: AtomicPtr<Process> = AtomicPtr::new(core::ptr::null_mut());
+
 /// Get the current process
-#[allow(static_mut_refs)]
 pub fn current_process() -> &'static mut Process {
     // Get from per-CPU scheduler
     if let Some(task_ptr) = SCHEDULER.lock().current() {
         unsafe {
             let task = task_ptr.as_ref();
-            static mut CURRENT_PROCESS: Process = Process {
-                pid: ProcessId(0),
-                state: ProcessState::Running,
-                blocked_on: None,
-                task: None,
-            };
 
-            let current_ref = &mut *core::ptr::addr_of_mut!(CURRENT_PROCESS);
-            current_ref.pid = task.pid;
-            current_ref.state = match task.state {
-                ProcessState::Creating => ProcessState::Ready,
-                ProcessState::Ready => ProcessState::Ready,
-                ProcessState::Running => ProcessState::Running,
-                ProcessState::Blocked => ProcessState::Blocked,
-                ProcessState::Sleeping => ProcessState::Sleeping,
-                ProcessState::Zombie => ProcessState::Dead,
-                ProcessState::Dead => ProcessState::Dead,
-            };
-            current_ref.blocked_on = task.blocked_on;
-            current_ref.task = Some(task_ptr);
+            // Allocate process wrapper on heap for thread safety
+            #[cfg(feature = "alloc")]
+            {
+                use alloc::boxed::Box;
+                let process = Box::new(Process {
+                    pid: task.pid,
+                    state: match task.state {
+                        ProcessState::Creating => ProcessState::Ready,
+                        ProcessState::Ready => ProcessState::Ready,
+                        ProcessState::Running => ProcessState::Running,
+                        ProcessState::Blocked => ProcessState::Blocked,
+                        ProcessState::Sleeping => ProcessState::Sleeping,
+                        ProcessState::Zombie => ProcessState::Dead,
+                        ProcessState::Dead => ProcessState::Dead,
+                    },
+                    blocked_on: task.blocked_on,
+                    task: Some(task_ptr),
+                });
 
-            current_ref
+                let process_ptr = Box::into_raw(process);
+                let old_ptr = CURRENT_PROCESS_PTR.swap(process_ptr, Ordering::SeqCst);
+
+                // Clean up old allocation if any
+                if !old_ptr.is_null() {
+                    drop(Box::from_raw(old_ptr));
+                }
+
+                &mut *process_ptr
+            }
+
+            #[cfg(not(feature = "alloc"))]
+            {
+                // Without alloc, fall back to static storage
+                static mut CURRENT_PROCESS: Process = Process {
+                    pid: ProcessId(0),
+                    state: ProcessState::Running,
+                    blocked_on: None,
+                    task: None,
+                };
+
+                let current_ref = &mut *core::ptr::addr_of_mut!(CURRENT_PROCESS);
+                current_ref.pid = task.pid;
+                current_ref.state = match task.state {
+                    ProcessState::Creating => ProcessState::Ready,
+                    ProcessState::Ready => ProcessState::Ready,
+                    ProcessState::Running => ProcessState::Running,
+                    ProcessState::Blocked => ProcessState::Blocked,
+                    ProcessState::Sleeping => ProcessState::Sleeping,
+                    ProcessState::Zombie => ProcessState::Dead,
+                    ProcessState::Dead => ProcessState::Dead,
+                };
+                current_ref.blocked_on = task.blocked_on;
+                current_ref.task = Some(task_ptr);
+
+                current_ref
+            }
         }
     } else {
         // No current task, return dummy
-        static mut DUMMY_PROCESS: Process = Process {
-            pid: ProcessId(0),
-            state: ProcessState::Running,
-            blocked_on: None,
-            task: None,
-        };
-        unsafe { &mut *core::ptr::addr_of_mut!(DUMMY_PROCESS) }
+        unsafe {
+            #[cfg(feature = "alloc")]
+            {
+                use alloc::boxed::Box;
+                let dummy = Box::new(Process {
+                    pid: ProcessId(0),
+                    state: ProcessState::Running,
+                    blocked_on: None,
+                    task: None,
+                });
+
+                let dummy_ptr = Box::into_raw(dummy);
+                let old_ptr = CURRENT_PROCESS_PTR.swap(dummy_ptr, Ordering::SeqCst);
+
+                // Clean up old allocation if any
+                if !old_ptr.is_null() {
+                    drop(Box::from_raw(old_ptr));
+                }
+
+                &mut *dummy_ptr
+            }
+
+            #[cfg(not(feature = "alloc"))]
+            {
+                static mut DUMMY_PROCESS: Process = Process {
+                    pid: ProcessId(0),
+                    state: ProcessState::Running,
+                    blocked_on: None,
+                    task: None,
+                };
+                &mut *core::ptr::addr_of_mut!(DUMMY_PROCESS)
+            }
+        }
     }
 }
 
@@ -124,6 +190,9 @@ pub fn switch_to_process(target: &Process) {
         scheduler.schedule();
     }
 }
+
+// Thread-safe found process storage using atomic pointer
+static FOUND_PROCESS_PTR: AtomicPtr<Process> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Find process by PID
 pub fn find_process(pid: ProcessId) -> Option<&'static mut Process> {
@@ -138,21 +207,26 @@ pub fn find_process(pid: ProcessId) -> Option<&'static mut Process> {
     {
         // Get the actual process from the process table
         if let Some(process) = crate::process::table::get_process_mut(pid) {
+            use alloc::boxed::Box;
+
             // Create a Process wrapper for the scheduler
-            static mut FOUND_PROCESS: Process = Process {
-                pid: ProcessId(0),
-                state: ProcessState::Running,
-                blocked_on: None,
-                task: None,
-            };
+            let found = Box::new(Process {
+                pid: process.pid,
+                state: process.get_state(),
+                blocked_on: None, // Would need to be tracked
+                task: None,       // Would need task mapping
+            });
 
             unsafe {
-                FOUND_PROCESS.pid = process.pid;
-                FOUND_PROCESS.state = process.get_state();
-                FOUND_PROCESS.blocked_on = None; // Would need to be tracked
-                FOUND_PROCESS.task = None; // Would need task mapping
+                let found_ptr = Box::into_raw(found);
+                let old_ptr = FOUND_PROCESS_PTR.swap(found_ptr, Ordering::SeqCst);
 
-                Some(&mut *core::ptr::addr_of_mut!(FOUND_PROCESS))
+                // Clean up old allocation if any
+                if !old_ptr.is_null() {
+                    drop(Box::from_raw(old_ptr));
+                }
+
+                Some(&mut *found_ptr)
             }
         } else {
             None
@@ -388,7 +462,27 @@ fn get_endpoint_waiters(_endpoint: u64) -> [core::ptr::NonNull<Task>; 0] {
     []
 }
 
-/// Initialize scheduler
+/// Initialize scheduler with bootstrap task
+///
+/// This is used during early boot to initialize the scheduler with a
+/// bootstrap task that will complete kernel initialization.
+pub fn init_with_bootstrap(bootstrap_task: NonNull<Task>) -> KernelResult<()> {
+    println!("[SCHED] Initializing scheduler with bootstrap task...");
+
+    // Initialize SMP support
+    smp::init();
+
+    // Initialize scheduler with bootstrap task
+    SCHEDULER.lock().init(bootstrap_task);
+
+    // Set up timer interrupt for preemption
+    setup_preemption_timer();
+
+    println!("[SCHED] Scheduler initialized with bootstrap task");
+    Ok(())
+}
+
+/// Initialize scheduler normally (after bootstrap)
 pub fn init() {
     println!("[SCHED] Initializing scheduler...");
 
@@ -434,6 +528,13 @@ pub fn init() {
     }
 
     // Set up timer interrupt for preemption
+    setup_preemption_timer();
+
+    println!("[SCHED] Scheduler initialized");
+}
+
+/// Set up preemption timer
+fn setup_preemption_timer() {
     #[cfg(target_arch = "x86_64")]
     {
         // Configure timer for 10ms tick (100Hz)
@@ -454,8 +555,33 @@ pub fn init() {
         crate::arch::riscv::timer::setup_timer(10);
         println!("[SCHED] RISC-V timer configured for preemptive scheduling");
     }
+}
 
-    println!("[SCHED] Scheduler initialized");
+/// Start the scheduler
+///
+/// This transfers control to the scheduler, which will run the current task
+/// (bootstrap or idle) and never return.
+pub fn start() -> ! {
+    println!("[SCHED] Starting scheduler execution");
+
+    // Get the scheduler and run it
+    let mut scheduler = SCHEDULER.lock();
+
+    // Make sure we have a current task
+    if scheduler.current.is_none() {
+        panic!("[SCHED] No current task to run!");
+    }
+
+    // Start running tasks
+    scheduler.schedule();
+
+    // Should never reach here
+    panic!("[SCHED] Scheduler returned from schedule()!");
+}
+
+/// Check if there are ready tasks
+pub fn has_ready_tasks() -> bool {
+    READY_QUEUE.lock().has_ready_tasks()
 }
 
 /// Run scheduler main loop (called by idle task)

@@ -366,7 +366,7 @@ pub fn delegate_capability(
     // Create new capability for target
     // Generate new capability ID
     use super::token::alloc_cap_id;
-    let new_cap_id = alloc_cap_id();
+    let new_cap_id = alloc_cap_id().map_err(|_| "Out of capability IDs")?;
     let new_cap = CapabilityToken::from_parts(
         new_cap_id,
         0, // Object ID - not used for now

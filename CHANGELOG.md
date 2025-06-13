@@ -285,42 +285,35 @@ development. All foundational infrastructure is in place and operational.
 
 ## [Unreleased]
 
-### Fixed
+### Added (June 13, 2025)
 
-- **x86_64 kernel build issues** (2025-12-06)
-  - Resolved R_X86_64_32S relocation errors by implementing kernel code model in custom target JSON
-  - Fixed linker script to properly handle kernel addressing at 0xFFFFFFFF80100000
-  - Kernel now builds successfully with -Zbuild-std=core,compiler_builtins,alloc
+- **DEEP-RECOMMENDATIONS Implementation**
+  - Bootstrap module for multi-stage kernel initialization to fix circular dependencies
+  - Comprehensive user pointer validation with page table walking
+  - Custom test framework to bypass Rust lang_items conflicts
+  - KernelError enum for proper error handling throughout kernel
+  - Resource cleanup patterns with RAII (in progress)
 
-- **Kernel boot failures** (2025-12-06)
-  - Fixed double fault on boot caused by incorrect memory initialization
-  - Resolved heap initialization issues that prevented kernel startup
-  - Fixed page fault handling for proper virtual memory management
-  - Kernel now successfully boots through heap initialization and IPC setup
+- **Code Quality Improvements**
+  - Migration from string literals to proper error types (KernelResult<T>)
+  - Atomic operations replacing unsafe static mutable access
+  - Enhanced error propagation throughout all subsystems
 
-- **Memory allocator mutex deadlock** (2025-12-06)
-  - Fixed deadlock during initialization by skipping stats updates
-  - Added architecture-specific memory maps for init_default()
-  - RISC-V now boots successfully through all subsystems
-  - Process init hang is expected behavior (scheduler dependency)
+### Fixed (June 13, 2025)
 
-### Added
+- **Boot sequence circular dependency** - Implemented bootstrap module with proper initialization stages
+- **AArch64 calling convention** - Fixed BSS clearing with proper &raw const syntax
+- **Scheduler static mutable access** - Replaced with AtomicPtr for thread safety
+- **Capability token overflow** - Fixed with atomic compare-exchange and proper bounds checking
+- **Clippy warnings** - Resolved all warnings including static-mut-refs and unnecessary casts
+- **User space validation** - Fixed always-false comparison with USER_SPACE_START
 
-- **build-kernel.sh** - Automated build script for all architectures
-  - Supports development and release builds
-  - Handles architecture-specific target configurations
-  - Simplifies build process with consistent commands
+### Improved (June 13, 2025)
 
-- **debug/ directory** - Kernel debugging tools and utilities
-  - Architecture-specific debugging configurations
-  - Memory dump utilities
-  - Boot sequence analysis tools
-
-### Improved
-
-- Enhanced debugging infrastructure for troubleshooting boot issues
-- Better error messages during kernel initialization
-- Improved build system with clearer architecture handling
+- All architectures now compile with zero warnings policy enforced
+- Enhanced formatting consistency across entire codebase
+- Better error handling with KernelError and KernelResult types
+- Improved user-kernel boundary validation
 
 ### Phase 2 Planning (User Space Foundation)
 
@@ -332,13 +325,15 @@ development. All foundational infrastructure is in place and operational.
 
 ### Known Issues
 
-- No driver support yet
-- No user space support
+- No driver support yet (Phase 2)
+- No user space support (Phase 2)
 - Limited hardware support
-- No file system
-- No networking
-- AArch64 boot sequence issue - kernel_main not reached from _start_rust
-- Process init hangs on all architectures (expected - scheduler not ready for init process)
+- No file system (Phase 2)
+- No networking (Phase 3)
+- **Boot Issues** (June 13, 2025):
+  - x86_64: Hangs very early in boot (no serial output)
+  - AArch64: Shows "STB" but doesn't reach kernel_main
+  - RISC-V: Boots successfully to kernel banner ✅
 
 ## Versioning Scheme
 

@@ -271,7 +271,7 @@ pub fn init() -> Result<(), &'static str> {
             writeln!(serial, "[HEAP] Getting allocator lock...").unwrap();
         }
 
-        let mut allocator = crate::ALLOCATOR.lock();
+        let mut allocator = crate::get_allocator().lock();
 
         #[cfg(target_arch = "x86_64")]
         {

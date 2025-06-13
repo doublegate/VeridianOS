@@ -55,7 +55,23 @@ pub fn alloc_tid() -> ThreadId {
     ThreadId(NEXT_TID.fetch_add(1, Ordering::Relaxed))
 }
 
-/// Initialize process management subsystem
+/// Initialize process management subsystem without creating init process
+///
+/// This is used during bootstrap to initialize process structures
+/// without creating the init process (which requires scheduler).
+pub fn init_without_init_process() -> crate::error::KernelResult<()> {
+    println!("[PROCESS] Initializing process management structures...");
+
+    // Initialize process table
+    table::init();
+
+    println!("[PROCESS] Process management structures initialized");
+    Ok(())
+}
+
+/// Initialize process management subsystem (legacy)
+///
+/// This creates the init process, so scheduler must be initialized first.
 pub fn init() {
     println!("[PROCESS] Initializing process management...");
 

@@ -1,5 +1,7 @@
 # VeridianOS Build Instructions
 
+**Last Updated**: June 13, 2025
+
 ## Quick Start
 
 ```bash
@@ -10,8 +12,16 @@ cd VeridianOS
 # Install dependencies (Ubuntu/Debian)
 ./scripts/install-deps.sh
 
-# Build and run
-just run
+# Build all architectures using the automated script
+./build-kernel.sh all dev
+
+# Or build specific architecture
+./build-kernel.sh x86_64 dev
+./build-kernel.sh aarch64 dev
+./build-kernel.sh riscv64 dev
+
+# Run in QEMU (RISC-V recommended as it boots successfully)
+just run-riscv
 ```
 
 ## Detailed Build Instructions

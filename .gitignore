@@ -95,3 +95,4 @@ release-artifacts/
 
 # Cache directories
 .cache/
+.docker/

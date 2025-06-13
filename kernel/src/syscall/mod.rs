@@ -84,6 +84,11 @@ pub enum SyscallError {
     CapabilityAlreadyExists = -14,
     InvalidCapabilityObject = -15,
     CapabilityDelegationDenied = -16,
+
+    // Memory validation errors
+    UnmappedMemory = -17,
+    AccessDenied = -18,
+    ProcessNotFound = -19,
 }
 
 impl From<IpcError> for SyscallError {
@@ -113,6 +118,7 @@ impl From<crate::cap::manager::CapError> for SyscallError {
             }
             crate::cap::manager::CapError::AlreadyExists => SyscallError::CapabilityAlreadyExists,
             crate::cap::manager::CapError::NotFound => SyscallError::CapabilityNotFound,
+            crate::cap::manager::CapError::IdExhausted => SyscallError::OutOfMemory,
         }
     }
 }

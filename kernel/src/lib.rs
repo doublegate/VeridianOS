@@ -20,11 +20,18 @@ use linked_list_allocator::LockedHeap;
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
-#[macro_use]
-mod print;
+/// Get a reference to the global allocator
+pub fn get_allocator() -> &'static LockedHeap {
+    &ALLOCATOR
+}
 
-mod arch;
+#[macro_use]
+pub mod print;
+
+pub mod arch;
+pub mod bootstrap;
 mod cap;
+pub mod error;
 pub mod ipc;
 pub mod mm;
 pub mod process;
@@ -32,6 +39,8 @@ pub mod sched;
 pub mod serial;
 mod syscall;
 
+#[cfg(test)]
+mod test_config;
 mod test_framework;
 
 pub mod bench;
@@ -41,9 +50,11 @@ pub mod bench;
 pub use mm::{FrameNumber, MemoryRegion, FRAME_SIZE};
 // Re-export scheduler items for tests
 pub use sched::{Priority, SchedClass, Task};
+#[cfg(test)]
+pub use test_framework::test_runner;
 pub use test_framework::{
-    cycles_to_ns, exit_qemu, read_timestamp, test_panic_handler, test_runner, BenchmarkRunner,
-    QemuExitCode, Testable,
+    cycles_to_ns, exit_qemu, read_timestamp, test_panic_handler, BenchmarkRunner, QemuExitCode,
+    Testable,
 };
 
 #[cfg(test)]

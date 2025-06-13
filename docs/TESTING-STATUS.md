@@ -1,28 +1,31 @@
 # VeridianOS Testing Status
 
+**Last Updated**: June 13, 2025
+
 ## Summary
 
-**Kernel Compilation**: ✅ **WORKING** - All architectures compile successfully  
-**Kernel Boot**: ✅ **WORKING** - x86_64 and RISC-V boot through all subsystems (AArch64 has early boot issue)  
-**Integration Tests**: ❌ **BLOCKED** - Due to Rust toolchain limitations
+**Kernel Compilation**: ✅ **WORKING** - All architectures compile successfully with zero warnings  
+**Kernel Boot**: ⚠️ **PARTIAL** - Only RISC-V boots to kernel banner  
+**Integration Tests**: ❌ **BLOCKED** - Due to Rust toolchain limitations  
+**Custom Test Framework**: ✅ **IMPLEMENTED** - Bypasses lang_items conflicts
 
-## Boot Testing Results (December 2025)
+## Boot Testing Results (June 13, 2025)
 
 ### Architecture Status
-- **x86_64**: ✅ Boots successfully through all kernel subsystems
-  - Memory allocator initializes properly
-  - IPC system sets up correctly
-  - Hangs at process init (expected - scheduler not ready for init process)
+- **x86_64**: ❌ Builds successfully but hangs very early in boot
+  - No serial output visible
+  - Likely hanging in bootloader or very early init
+  - Binary size: 12M kernel, 168K bootimage
   
-- **RISC-V**: ✅ Boots successfully after mutex fix
-  - Fixed mutex deadlock in memory allocator by skipping stats during init
-  - Added architecture-specific memory map for init_default()
-  - Hangs at process init (expected - same as x86_64)
+- **RISC-V**: ✅ Boots successfully to kernel banner
+  - Shows "VeridianOS Kernel v0.2.0"
+  - Reaches "Kernel initialized successfully!"
+  - Binary size: 12M
   
-- **AArch64**: ⚠️ Early boot issue
-  - kernel_main not reached from _start_rust
-  - Assembly to Rust transition problem
-  - Needs debugging of boot sequence
+- **AArch64**: ⚠️ Partial boot
+  - Shows "STB" output (reaches boot code)
+  - Doesn't reach kernel_main
+  - Binary size: 11M
 
 ## The Testing Challenge
 

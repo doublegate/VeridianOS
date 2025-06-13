@@ -1,7 +1,7 @@
 # Issues and Bug Tracking TODO
 
 **Purpose**: Central tracking for all bugs, issues, and defects  
-**Last Updated**: 2025-12-06
+**Last Updated**: 2025-06-13
 
 ## 🐛 Issue Categories
 
@@ -20,7 +20,25 @@
 
 ## 🚨 Critical Issues (P0)
 
-Currently no critical issues.
+### ISSUE-0012: x86_64 Boot Hang
+- **Status**: Open
+- **Component**: Kernel/Boot
+- **Reported**: 2025-06-13
+- **Reporter**: Boot Testing
+- **Assignee**: TBD
+- **Description**: x86_64 kernel hangs very early in boot with no serial output
+- **Impact**: x86_64 platform unusable
+- **Workaround**: Use RISC-V for testing
+
+### ISSUE-0013: AArch64 Boot Incomplete
+- **Status**: Open
+- **Component**: Kernel/Boot
+- **Reported**: 2025-06-13
+- **Reporter**: Boot Testing
+- **Assignee**: TBD
+- **Description**: AArch64 shows "STB" but doesn't reach kernel_main
+- **Impact**: AArch64 platform partially unusable
+- **Workaround**: Use RISC-V for testing
 
 <!-- Template:
 ### ISSUE-0001: [Title]

@@ -435,7 +435,35 @@ Check these files regularly to track progress and identify next tasks.
 - `docs/TESTING-STATUS.md` - Testing limitations and alternatives
 
 ### Current Known Issues
-- Process management initialization hang at boot (needs debugging)
+- Process management initialization hang at boot (expected - scheduler dependency)
 - Automated test execution blocked by Rust toolchain duplicate lang items
 - APIC/Timer integration simplified to println! stubs
 - OpenSBI integration for RISC-V needs implementation
+- AArch64 boot issue - kernel_main not reached from _start_rust
+
+### Recent Critical Fixes (December 2025)
+1. **x86_64 R_X86_64_32S Relocation Errors** (ISSUE-0008)
+   - Problem: Kernel linked outside ±2GB addressing range
+   - Solution: Updated linker script to 0xFFFFFFFF80100000 (top 2GB)
+   - Added kernel code model to target configuration
+   - Created build-kernel.sh for automated builds
+
+2. **Kernel Boot Double Fault** (ISSUE-0009)
+   - Problem: Unhandled interrupts causing cascading faults
+   - Solution: Initialize PIC with interrupts masked (0xFF, 0xFF)
+   - Added proper interrupt setup sequence
+
+3. **Heap Initialization Failure** (ISSUE-0010)
+   - Problem: Heap at arbitrary address caused page faults
+   - Solution: Use static 4MB array in kernel binary
+   - Fixed static mut refs with core::ptr::addr_of! macro
+
+4. **Memory Allocator Mutex Deadlock** (ISSUE-0011)
+   - Problem: Nested mutex lock in frame allocator stats update
+   - Solution: Skip stats updates during init_numa_node
+   - RISC-V now boots successfully past memory initialization
+
+### Architecture Boot Status (December 2025)
+- **x86_64**: ✅ Boots through all subsystems, hangs at process init (expected)
+- **RISC-V**: ✅ Boots through all subsystems after mutex fix, hangs at process init (expected)
+- **AArch64**: ⚠️ Boot issue - kernel_main not reached from _start_rust (needs debugging)

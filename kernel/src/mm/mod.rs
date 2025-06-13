@@ -9,6 +9,7 @@ pub mod bootloader;
 pub mod frame_allocator;
 pub mod heap;
 pub mod page_table;
+pub mod user_validation;
 pub mod vas;
 pub mod vmm;
 
@@ -23,6 +24,7 @@ pub use frame_allocator::{
 };
 #[allow(unused_imports)]
 pub use heap::init as init_heap;
+pub use user_validation::{is_user_addr_valid, translate_address as translate_user_address};
 pub use vas::VirtualAddressSpace;
 
 /// Page size constant (4KB)
