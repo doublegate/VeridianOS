@@ -892,9 +892,9 @@ impl FrameAllocator {
     }
 
     /// Free a frame (used by RAII guards)
-    /// 
+    ///
     /// # Safety
-    /// 
+    ///
     /// The caller must ensure that:
     /// - The frame was previously allocated by this allocator
     /// - The frame is not currently in use

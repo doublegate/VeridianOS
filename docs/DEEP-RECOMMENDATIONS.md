@@ -12,7 +12,7 @@ VeridianOS demonstrates strong architectural foundations with its microkernel de
 2. **Security vulnerabilities** in capability management - ✅ FIXED (token overflow and RAII resource cleanup complete)
 3. **Architectural coupling** between subsystems - ✅ IMPROVED with atomic operations
 4. **Testing infrastructure** blocked by Rust toolchain limitations - ✅ DOCUMENTED with custom test framework
-5. **Resource management** - ✅ COMPLETED with comprehensive RAII patterns
+5. **Resource management** - ✅ COMPLETED with comprehensive RAII patterns (TODO #8 complete)
 
 ## Critical Issues Requiring Immediate Action
 

@@ -61,17 +61,24 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 - ✅ Implemented comprehensive user pointer validation with page table walking
 - ✅ Created custom test framework to bypass Rust lang_items conflicts
 - ✅ Started migration from string literals to proper error types (KernelError enum)
-- ✅ **NEW**: Implemented RAII patterns for resource cleanup throughout kernel
+- ✅ **COMPLETED**: Implemented RAII patterns for resource cleanup throughout kernel (TODO #8)
 
 **Code Quality Improvements**:
 - All architectures now compile with zero warnings
-- Fixed all clippy lints including static-mut-refs and unnecessary casts
+- Fixed all clippy lints including lifetime elision and explicit auto-deref
 - Proper formatting applied throughout codebase
 - Enhanced error handling with KernelResult type
 - Comprehensive resource cleanup with RAII patterns implemented
+- Documentation archive reorganization for cleaner structure
+
+**Documentation Organization**:
+- Created comprehensive archive structure: `docs/archive/{book,doc_updates,format,phase_0,phase_1,sessions}`
+- Preserved essential information in summary files for ongoing development
+- Moved historical documentation to appropriate archive directories
+- Maintained active documentation with current standards and practices
 
 **Next Development Phase**:
-- Ready to begin Phase 2: User Space Foundation
+- Ready to begin Phase 2: User Space Foundation (TODO #9)
 - Init process creation and management
 - Shell implementation and command processing
 - User-space driver framework completion
@@ -83,8 +90,8 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 - ✅ RISC-V: Builds successfully (12M kernel)
 
 **Current Boot Status**:
-- x86_64: Hangs early in boot (no serial output)
-- AArch64: Shows "STB" but doesn't reach kernel_main
+- x86_64: Hangs early in boot (no serial output) - ISSUE-0012
+- AArch64: Shows "STB" but doesn't reach kernel_main - ISSUE-0013
 - RISC-V: Boots successfully to kernel banner ✅
 
 
