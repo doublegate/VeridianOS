@@ -63,9 +63,16 @@ Files are numbered by priority:
 
 ## Latest Updates
 
+**June 15, 2025 (Latest)**: Critical Blockers RESOLVED
+- ✅ AArch64 iterator bug - Created comprehensive workarounds
+- ✅ Context switching - Was already implemented, fixed scheduler integration
+- ✅ Unified kernel_main across all architectures
+- ✅ All architectures now build with zero warnings
+- ⚠️ x86_64 boot hang remains (separate issue)
+
 **June 15, 2025**: Major reorganization during AArch64/x86_64 debugging session
 - Discovered critical AArch64 iterator bug
-- Identified missing context switching
+- Identified scheduler not loading context
 - Fixed x86_64 to use full bootstrap
 
 **June 13, 2025**: DEEP-RECOMMENDATIONS implementation
@@ -76,14 +83,14 @@ Files are numbered by priority:
 **June 12, 2025**: Phase 1 completion
 - Many items resolved
 - Full system integration tested
-- Ready for Phase 2
+- v0.2.0 released
 
-## Phase 2 Priority Items
+## Phase 2 Priority Items (Ready to Start)
 
-1. Fix AArch64 iterator/loop issues (CRITICAL BLOCKER)
-2. Implement context switching for all architectures
+1. ✅ ~~Fix AArch64 iterator/loop issues~~ - RESOLVED with workarounds
+2. ✅ ~~Implement context switching~~ - Already implemented, now connected
 3. Complete user space memory management
-4. Standardize kernel entry points
+4. ✅ ~~Standardize kernel entry points~~ - All use main.rs kernel_main
 5. Implement process system calls
 6. Add file system interface
 7. Create init process

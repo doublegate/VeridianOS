@@ -1,9 +1,15 @@
-/// Safe iteration utilities for AArch64 to work around compiler loop bugs
-///
-/// The AArch64 LLVM backend has a severe bug that causes all loop constructs
-/// to hang on bare metal. This module provides workarounds.
+//! Safe iteration utilities for AArch64 to work around compiler loop bugs
+//!
+//! The AArch64 LLVM backend has a severe bug that causes all loop constructs
+//! to hang on bare metal. This module provides workarounds.
 
 /// Write a string to UART without using loops
+///
+/// # Safety
+///
+/// The caller must ensure:
+/// - `uart_base` points to a valid UART data register
+/// - The UART hardware is properly initialized
 pub unsafe fn write_str_loopfree(uart_base: usize, s: &str) {
     let uart = uart_base as *mut u8;
     let bytes = s.as_bytes();
@@ -54,6 +60,12 @@ unsafe fn write_str_recursive(uart: *mut u8, bytes: &[u8]) {
 }
 
 /// Write a number without loops
+///
+/// # Safety
+///
+/// The caller must ensure:
+/// - `uart_base` points to a valid UART data register
+/// - The UART hardware is properly initialized
 pub unsafe fn write_num_loopfree(uart_base: usize, num: u64) {
     let uart = uart_base as *mut u8;
 
@@ -77,6 +89,12 @@ unsafe fn write_num_recursive(uart: *mut u8, num: u64) {
 }
 
 /// Write hex number without loops
+///
+/// # Safety
+///
+/// The caller must ensure:
+/// - `uart_base` points to a valid UART data register
+/// - The UART hardware is properly initialized
 pub unsafe fn write_hex_loopfree(uart_base: usize, num: u64) {
     let uart = uart_base as *mut u8;
 
@@ -157,6 +175,13 @@ fn init_slice_recursive<T: Copy>(slice: &mut [T], value: T) {
 }
 
 /// Copy memory without loops
+///
+/// # Safety
+///
+/// The caller must ensure:
+/// - `dest` and `src` are valid pointers
+/// - `dest` and `src` do not overlap
+/// - `count` bytes are readable from `src` and writable to `dest`
 pub unsafe fn memcpy_loopfree(dest: *mut u8, src: *const u8, count: usize) {
     // Use u64 copies for efficiency
     let dest_u64 = dest as *mut u64;
@@ -206,6 +231,12 @@ pub unsafe fn memcpy_loopfree(dest: *mut u8, src: *const u8, count: usize) {
 }
 
 /// Zero memory without loops
+///
+/// # Safety
+///
+/// The caller must ensure:
+/// - `dest` is a valid pointer
+/// - `count` bytes are writable from `dest`
 pub unsafe fn memset_loopfree(dest: *mut u8, value: u8, count: usize) {
     // Create u64 value by repeating the byte
     let value_u64 = (value as u64) * 0x0101010101010101u64;
