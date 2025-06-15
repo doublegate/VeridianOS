@@ -3,6 +3,7 @@
 // Include the boot module
 pub mod boot;
 pub mod context;
+pub mod safe_iter;
 pub mod timer;
 
 #[allow(dead_code)]
