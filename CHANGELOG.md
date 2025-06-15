@@ -14,10 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - CapabilityGuard for automatic capability revocation
   - ProcessResources for complete process lifecycle management
   - Comprehensive test suite and examples
-- Documentation archive organization
-  - Created `docs/archive/` with subdirectories for historical documentation
-  - Summary files preserve essential information for ongoing development
-  - Cleaner documentation structure for active development
+- Deferred implementation items organization
+  - Created `docs/deferred/` directory with 8 categorized files
+  - Organized 1,415+ lines of TODOs by priority and function
+  - Created IMPLEMENTATION-PLAN.md with 5-milestone roadmap (40-52 weeks)
+  - Added README.md describing the deferred items structure
 
 ### Changed
 - Updated DEEP-RECOMMENDATIONS status to 8 of 9 complete
@@ -25,18 +26,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed explicit auto-deref operations throughout codebase
 - Added safety documentation for unsafe functions
 - Reorganized historical documentation into archive structure
+- AArch64 now reaches kernel_main (but hangs on iterator usage)
+- x86_64 now uses full bootstrap implementation from main.rs
 
 ### Fixed
 - Resolved all remaining clippy warnings with proper fixes
 - Fixed unused import warning in capability module
 - Improved error handling with KernelResult throughout
+- AArch64 boot sequence now properly executes _start_rust
+- x86_64 kernel entry point now uses correct kernel_main
+
+### Discovered Issues
+- **CRITICAL**: AArch64 iterator/loop compilation causes kernel hangs
+- **HIGH**: Context switching not implemented for any architecture
+- **ISSUE-0012**: x86_64 still hangs early despite bootstrap fix
+- **ISSUE-0013**: AArch64 hangs when using iterators or for loops
 
 ### Next Phase
-- Ready to begin Phase 2: User Space Foundation (TODO #9)
-- Init process creation and management
-- Shell implementation and command processing
-- User-space driver framework
-- System libraries and application support
+- Investigate AArch64 iterator/loop compilation issue (Critical blocker)
+- Implement context switching for all architectures
+- Begin Phase 2: User Space Foundation (TODO #9)
+  - Init process creation and management
+  - Shell implementation and command processing
+  - User-space driver framework
+  - System libraries and application support
 
 ## [0.2.0] - 2025-06-12
 

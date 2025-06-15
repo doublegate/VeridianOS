@@ -72,14 +72,117 @@ pub extern "C" fn _start() -> ! {
 
 // Kernel main function for normal boot
 pub fn kernel_main() -> ! {
-    println!("VeridianOS Kernel v{}", env!("CARGO_PKG_VERSION"));
-    #[cfg(target_arch = "x86_64")]
-    println!("Architecture: x86_64");
+    // For AArch64, let's use direct UART writes until println! is stable
     #[cfg(target_arch = "aarch64")]
-    println!("Architecture: aarch64");
-    #[cfg(target_arch = "riscv64")]
-    println!("Architecture: riscv64");
-    println!("Kernel initialized successfully!");
+    unsafe {
+        let uart = 0x0900_0000 as *mut u8;
+
+        // Write "MAIN" to confirm we reached kernel_main
+        *uart = b'M';
+        *uart = b'A';
+        *uart = b'I';
+        *uart = b'N';
+        *uart = b'\n';
+
+        // Write a simple message directly - avoid iterators
+        *uart = b'V';
+        *uart = b'e';
+        *uart = b'r';
+        *uart = b'i';
+        *uart = b'd';
+        *uart = b'i';
+        *uart = b'a';
+        *uart = b'n';
+        *uart = b'O';
+        *uart = b'S';
+        *uart = b' ';
+        *uart = b'K';
+        *uart = b'e';
+        *uart = b'r';
+        *uart = b'n';
+        *uart = b'e';
+        *uart = b'l';
+        *uart = b' ';
+        *uart = b'v';
+        *uart = b'0';
+        *uart = b'.';
+        *uart = b'2';
+        *uart = b'.';
+        *uart = b'0';
+        *uart = b'\n';
+        *uart = b'A';
+        *uart = b'r';
+        *uart = b'c';
+        *uart = b'h';
+        *uart = b'i';
+        *uart = b't';
+        *uart = b'e';
+        *uart = b'c';
+        *uart = b't';
+        *uart = b'u';
+        *uart = b'r';
+        *uart = b'e';
+        *uart = b':';
+        *uart = b' ';
+        *uart = b'a';
+        *uart = b'a';
+        *uart = b'r';
+        *uart = b'c';
+        *uart = b'h';
+        *uart = b'6';
+        *uart = b'4';
+        *uart = b'\n';
+        *uart = b'K';
+        *uart = b'e';
+        *uart = b'r';
+        *uart = b'n';
+        *uart = b'e';
+        *uart = b'l';
+        *uart = b' ';
+        *uart = b'i';
+        *uart = b'n';
+        *uart = b'i';
+        *uart = b't';
+        *uart = b'i';
+        *uart = b'a';
+        *uart = b'l';
+        *uart = b'i';
+        *uart = b'z';
+        *uart = b'e';
+        *uart = b'd';
+        *uart = b' ';
+        *uart = b's';
+        *uart = b'u';
+        *uart = b'c';
+        *uart = b'c';
+        *uart = b'e';
+        *uart = b's';
+        *uart = b's';
+        *uart = b'f';
+        *uart = b'u';
+        *uart = b'l';
+        *uart = b'l';
+        *uart = b'y';
+        *uart = b'!';
+        *uart = b'\n';
+
+        // Write "DONE" to confirm we finished
+        *uart = b'D';
+        *uart = b'O';
+        *uart = b'N';
+        *uart = b'E';
+        *uart = b'\n';
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        println!("VeridianOS Kernel v{}", env!("CARGO_PKG_VERSION"));
+        #[cfg(target_arch = "x86_64")]
+        println!("Architecture: x86_64");
+        #[cfg(target_arch = "riscv64")]
+        println!("Architecture: riscv64");
+        println!("Kernel initialized successfully!");
+    }
 
     loop {
         core::hint::spin_loop();

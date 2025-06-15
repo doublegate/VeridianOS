@@ -14,6 +14,27 @@ VeridianOS demonstrates strong architectural foundations with its microkernel de
 4. **Testing infrastructure** blocked by Rust toolchain limitations - ✅ DOCUMENTED with custom test framework
 5. **Resource management** - ✅ COMPLETED with comprehensive RAII patterns (TODO #8 complete)
 
+## ⚠️ CRITICAL DISCOVERIES (June 15, 2025 Session)
+
+### AArch64 Iterator/Loop Compilation Bug 🔴
+- **Severity**: CRITICAL BLOCKER
+- **Discovery**: Any use of iterators or for loops causes AArch64 kernel to hang
+- **Impact**: Blocks most kernel functionality on AArch64
+- **Workaround**: Replace all iterators with manual while loops
+- **Action**: File upstream LLVM bug, implement custom iterator library
+
+### Missing Context Switching 🔴
+- **Severity**: CRITICAL
+- **Discovery**: No architecture has implemented context switching
+- **Impact**: Cannot switch between processes/threads - no multitasking
+- **Required**: Assembly implementation for all architectures
+
+### Deferred Items Organization ✅
+- Created `docs/deferred/` with 8 categorized files
+- 1,415+ lines of TODOs organized by priority
+- IMPLEMENTATION-PLAN.md with 5-milestone roadmap (40-52 weeks)
+- Milestone 1 focuses on critical architecture fixes (4-6 weeks)
+
 ## Critical Issues Requiring Immediate Action
 
 ### 1. Boot Sequence Circular Dependency ✅ FIXED

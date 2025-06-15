@@ -22,11 +22,29 @@ pub const BOOTSTRAP_TID: u64 = 0;
 /// DEEP-RECOMMENDATIONS.md to avoid circular dependencies between process
 /// management and scheduler.
 pub fn kernel_init() -> KernelResult<()> {
+    // For AArch64, use direct UART writes instead of println!
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let uart = 0x0900_0000 as *mut u8;
+        // Write "[BOOTSTRAP] Starting...\n"
+        let msg = b"[BOOTSTRAP] Starting...\n";
+        let mut i = 0;
+        while i < 24 {
+            *uart = msg[i];
+            i += 1;
+        }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[BOOTSTRAP] Starting multi-stage kernel initialization...");
 
     // Stage 1: Core hardware initialization
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[BOOTSTRAP] Stage 1: Hardware initialization");
+
     arch::init();
+
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[BOOTSTRAP] Architecture initialized");
 
     // Stage 2: Memory management

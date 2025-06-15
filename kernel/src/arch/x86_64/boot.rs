@@ -2,9 +2,12 @@
 
 use bootloader::{entry_point, BootInfo};
 
-entry_point!(kernel_main);
+entry_point!(kernel_main_entry);
 
-fn kernel_main(_boot_info: &'static BootInfo) -> ! {
-    // Jump to the main kernel entry
-    crate::kernel_main()
+fn kernel_main_entry(_boot_info: &'static BootInfo) -> ! {
+    // Call the real kernel_main from main.rs
+    extern "C" {
+        fn kernel_main() -> !;
+    }
+    unsafe { kernel_main() }
 }

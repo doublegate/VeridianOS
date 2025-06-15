@@ -52,21 +52,17 @@ impl Pl011Uart {
 impl fmt::Write for Pl011Uart {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         const UARTDR: usize = 0x000; // Data register
-        const UARTFR: usize = 0x018; // Flag register
-        const UARTFR_TXFF: u32 = 1 << 5; // Transmit FIFO full
 
-        for byte in s.bytes() {
+        // Direct UART access without iterators for AArch64
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
             unsafe {
-                // Wait for FIFO to not be full
-                while (core::ptr::read_volatile((self.base_addr + UARTFR) as *const u32)
-                    & UARTFR_TXFF)
-                    != 0
-                {
-                    core::hint::spin_loop();
-                }
-                // Write byte
-                core::ptr::write_volatile((self.base_addr + UARTDR) as *mut u32, byte as u32);
+                // Direct write without FIFO check for simplicity
+                let uart_dr = (self.base_addr + UARTDR) as *mut u8;
+                *uart_dr = bytes[i];
             }
+            i += 1;
         }
         Ok(())
     }

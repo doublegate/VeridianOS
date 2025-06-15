@@ -439,23 +439,35 @@ Check these files regularly to track progress and identify next tasks.
 - `docs/DEFERRED-IMPLEMENTATION-ITEMS.md` - Comprehensive tracking (1,415 lines)
 - `docs/TESTING-STATUS.md` - Testing limitations and alternatives
 
-### Current Known Issues (June 13, 2025)
+### Current Known Issues (June 15, 2025)
+- **CRITICAL**: AArch64 iterator/loop compilation bug causes kernel hangs (ISSUE-0013)
+- **CRITICAL**: No architecture has working context switching (ISSUE-0014)
 - x86_64 boot hang - no serial output (ISSUE-0012)
-- AArch64 partial boot - shows "STB" only (ISSUE-0013)
+- AArch64 reaches kernel_main but hangs on any iterator usage (ISSUE-0013)
 - Automated test execution blocked by Rust toolchain duplicate lang items
 - APIC/Timer integration simplified to println! stubs
 - OpenSBI integration for RISC-V needs implementation
 
 ### Session Context for Next Time
-**Where We Left Off**: Completed DEEP-RECOMMENDATIONS implementation (8/9 items)
-- ✅ Implemented: Bootstrap module, atomic ops, capability fix, user validation, test framework, error types (partial)
-- ✅ **COMPLETED**: TODO #8: RAII patterns for resource cleanup - DONE!
-- 📋 **NEXT**: TODO #9: Begin Phase 2 user space foundation
-- Files created: bootstrap.rs, error.rs, user_validation.rs, test framework enhancements, RAII implementations
-- Git status: Clean, ready for Phase 2 development
-- **Ready for Phase 2**: Init process, shell, user-space drivers
+**Where We Left Off**: Critical architecture debugging and deferred items organization
+- ✅ **COMPLETED**: Architecture debugging session (June 15, 2025)
+  - Successfully debugged AArch64 boot - now reaches kernel_main
+  - Discovered critical AArch64 iterator/loop compilation bug
+  - Fixed x86_64 to use full bootstrap implementation
+  - Verified RISC-V continues to work properly
+- ✅ **COMPLETED**: Deferred items reorganization
+  - Created docs/deferred/ with 8 categorized files
+  - Organized 1,415+ lines of TODOs by priority
+  - Created IMPLEMENTATION-PLAN.md with 5-milestone roadmap
+  - Added README.md for deferred items structure
+- 🚨 **BLOCKERS**: Critical issues preventing Phase 2
+  - AArch64 iterator bug blocks most functionality
+  - Missing context switching prevents multitasking
+  - x86_64 still hangs despite fixes
+- **DEEP-RECOMMENDATIONS**: 8 of 9 items complete (89%)
+- **Next Priority**: Milestone 1 - Critical Architecture Fixes (4-6 weeks)
 
 ### Architecture Boot Status (June 15, 2025)
-- **x86_64**: ❌ Builds successfully but hangs very early (no serial output)
-- **RISC-V**: ✅ Boots successfully to kernel banner - only working architecture!
-- **AArch64**: ⚠️ Shows "STB" but doesn't reach kernel_main
+- **x86_64**: ❌ Uses full bootstrap but still hangs early (no serial output)
+- **RISC-V**: ✅ Boots successfully to completion - only fully working architecture!
+- **AArch64**: ⚠️ Reaches kernel_main but hangs on any iterator/loop usage

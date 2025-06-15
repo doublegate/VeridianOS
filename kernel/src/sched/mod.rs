@@ -565,7 +565,7 @@ pub fn start() -> ! {
     println!("[SCHED] Starting scheduler execution");
 
     // Get the scheduler and run it
-    let mut scheduler = SCHEDULER.lock();
+    let scheduler = SCHEDULER.lock();
 
     // Make sure we have a current task
     if scheduler.current.is_none() {
@@ -573,10 +573,21 @@ pub fn start() -> ! {
     }
 
     // Start running tasks
-    scheduler.schedule();
+    println!("[SCHED] Starting scheduler loop...");
 
-    // Should never reach here
-    panic!("[SCHED] Scheduler returned from schedule()!");
+    // For now, just run the idle loop since context switching isn't implemented
+    println!("[SCHED] Context switching not implemented, entering idle loop");
+    loop {
+        // Check for ready tasks periodically
+        if has_ready_tasks() {
+            // In a real implementation, we would context switch here
+            // For now, just acknowledge we have tasks
+            println!("[SCHED] Tasks ready but context switching not implemented");
+        }
+
+        // Let the CPU rest
+        crate::arch::idle();
+    }
 }
 
 /// Check if there are ready tasks

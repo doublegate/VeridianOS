@@ -5,31 +5,38 @@ use core::arch::global_asm;
 // Include the assembly boot code
 global_asm!(include_str!("boot.S"));
 
+/// Entry point from assembly code
+///
+/// # Safety
+///
+/// This function is called from assembly with:
+/// - Stack properly initialized
+/// - BSS section cleared
+/// - Running in EL1 with MMU disabled
 #[no_mangle]
 #[link_section = ".text.boot"]
-pub extern "C" fn _start_rust() -> ! {
-    // BSS symbols from linker script
+pub unsafe extern "C" fn _start_rust() -> ! {
+    // PL011 UART base address for QEMU virt machine
+    let uart_base = 0x0900_0000_usize;
+    // For QEMU's PL011, we can write directly to the data register at offset 0
+    let uart_dr = uart_base as *mut u8;
+
+    // Write startup message
+    *uart_dr = b'R';
+    *uart_dr = b'U';
+    *uart_dr = b'S';
+    *uart_dr = b'T';
+    *uart_dr = b'\n';
+
+    // Write pre-kernel_main marker
+    *uart_dr = b'P';
+    *uart_dr = b'R';
+    *uart_dr = b'E';
+    *uart_dr = b'\n';
+
+    // Call kernel_main from main.rs
     extern "C" {
-        static mut __bss_start: u8;
-        static mut __bss_end: u8;
+        fn kernel_main() -> !;
     }
-
-    unsafe {
-        // Clear BSS first
-        let bss_start = &raw const __bss_start as *mut u8;
-        let bss_end = &raw const __bss_end as *mut u8;
-        let bss_size = bss_end as usize - bss_start as usize;
-        core::ptr::write_bytes(bss_start, 0, bss_size);
-
-        // Write startup message
-        let uart = 0x0900_0000 as *mut u8;
-        core::ptr::write_volatile(uart, b'R');
-        core::ptr::write_volatile(uart, b'U');
-        core::ptr::write_volatile(uart, b'S');
-        core::ptr::write_volatile(uart, b'T');
-        core::ptr::write_volatile(uart, b'\n');
-
-        // Call kernel_main with proper ABI
-        crate::kernel_main()
-    }
+    kernel_main()
 }

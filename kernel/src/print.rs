@@ -3,7 +3,11 @@
 #[cfg(target_arch = "x86_64")]
 #[macro_export]
 macro_rules! print {
-    ($($arg:tt)*) => ($crate::arch::x86_64::vga::_print(format_args!($($arg)*)));
+    ($($arg:tt)*) => ({
+        // Print to both VGA and serial for debugging
+        $crate::arch::x86_64::vga::_print(format_args!($($arg)*));
+        $crate::serial::_serial_print(format_args!($($arg)*));
+    });
 }
 
 #[cfg(target_arch = "x86_64")]

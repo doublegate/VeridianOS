@@ -29,16 +29,31 @@
 - **Description**: x86_64 kernel hangs very early in boot with no serial output
 - **Impact**: x86_64 platform unusable
 - **Workaround**: Use RISC-V for testing
+- **Update (2025-06-15)**: Fixed to use full bootstrap from main.rs but still hangs
 
-### ISSUE-0013: AArch64 Boot Incomplete
-- **Status**: Open
-- **Component**: Kernel/Boot
+### ISSUE-0013: AArch64 Iterator/Loop Compilation Bug
+- **Status**: Open - CRITICAL BLOCKER
+- **Component**: Kernel/Compiler
 - **Reported**: 2025-06-13
-- **Reporter**: Boot Testing
+- **Updated**: 2025-06-15
+- **Reporter**: Boot Testing / Debugging Session
 - **Assignee**: TBD
-- **Description**: AArch64 shows "STB" but doesn't reach kernel_main
-- **Impact**: AArch64 platform partially unusable
-- **Workaround**: Use RISC-V for testing
+- **Description**: AArch64 kernel hangs when any iterator or for loop is used in code
+- **Impact**: AArch64 platform severely limited - most kernel functionality unusable
+- **Workaround**: Replace all iterators with manual while loops (temporary)
+- **Root Cause**: Likely LLVM code generation issue for bare metal AArch64
+- **Action Required**: File upstream LLVM bug, implement custom iterator library
+
+### ISSUE-0014: Missing Context Switching Implementation
+- **Status**: Open - CRITICAL
+- **Component**: Kernel/Scheduler
+- **Reported**: 2025-06-15
+- **Reporter**: Code Analysis
+- **Assignee**: TBD
+- **Description**: No architecture has working context switching implementation
+- **Impact**: Cannot switch between processes/threads - no multitasking
+- **Files**: kernel/src/arch/{x86_64,aarch64,riscv}/context.rs
+- **Required**: Assembly implementation for register save/restore
 
 <!-- Template:
 ### ISSUE-0001: [Title]

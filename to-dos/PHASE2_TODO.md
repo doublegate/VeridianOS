@@ -1,36 +1,48 @@
 # Phase 2: User Space Foundation TODO
 
 **Phase Duration**: 5-6 months  
-**Status**: READY TO BEGIN  
-**Dependencies**: Phase 1 completion ✅  
-**Last Updated**: June 15, 2025 (TODO #8 RAII Complete - Ready to start TODO #9 Phase 2)
+**Status**: BLOCKED BY CRITICAL ISSUES  
+**Dependencies**: Phase 1 completion ✅ BUT critical blockers remain  
+**Last Updated**: June 15, 2025 (Critical architecture issues discovered)
 
-## Pre-Phase 2 Status
+## 🚨 CRITICAL BLOCKERS
+
+### Architecture Issues Preventing Phase 2
+1. **🔴 AArch64 Iterator/Loop Bug (ISSUE-0013)**
+   - Any use of iterators or for loops causes kernel hang
+   - Blocks most kernel functionality on AArch64
+   - Requires LLVM investigation and custom iterator library
+
+2. **🔴 Missing Context Switching (ISSUE-0014)**
+   - No architecture has working context switching
+   - Cannot switch between processes/threads
+   - Blocks all multitasking functionality
+
+3. **🟡 x86_64 Boot Hang (ISSUE-0012)**
+   - Still hangs very early despite bootstrap fixes
+   - Platform unusable for development
 
 ### Current Status (June 15, 2025)
-- **Phase 1**: 100% Complete - All kernel subsystems implemented ✅
-- **DEEP-RECOMMENDATIONS**: 8 of 9 items completed ✅
-- **Build Status**: All architectures compile with zero warnings ✅
+- **Phase 1**: 100% Complete in theory, but critical gaps in practice
+- **Deferred Items**: 1,415+ lines organized in `docs/deferred/`
+- **Implementation Plan**: 5-milestone roadmap created (40-52 weeks)
 - **Boot Status**:
   - x86_64: Hangs very early (no serial output) ❌
-  - AArch64: Shows "STB" but doesn't reach kernel_main ⚠️
-  - RISC-V: Boots successfully to kernel banner ✅
+  - AArch64: Reaches kernel_main but hangs on iterators ⚠️
+  - RISC-V: Only fully working architecture ✅
 
-### DEEP-RECOMMENDATIONS Implementation (8 of 9 Complete)
-Completed critical fixes:
-- ✅ **Boot Sequence Fixed**: Circular dependency resolved with bootstrap module
-- ✅ **AArch64 BSS Clearing**: Fixed with proper &raw const syntax
-- ✅ **Atomic Operations**: Replaced unsafe static mutable with AtomicPtr
-- ✅ **Capability Overflow**: Fixed with atomic compare-exchange
-- ✅ **User Pointer Validation**: Comprehensive validation with page table walking
-- ✅ **Custom Test Framework**: Created to bypass lang_items conflicts
-- ✅ **Error Types**: Started migration to KernelError enum (partial)
-- ✅ **RAII Patterns (TODO #8)**: Comprehensive resource cleanup implemented ✅
+### Required Before Phase 2 Can Begin
+1. **Milestone 1** (4-6 weeks): Critical Architecture Fixes
+   - Fix AArch64 iterator/loop compilation issue
+   - Implement context switching for all architectures
+   - Resolve x86_64 boot hang
+   - Standardize kernel entry points
 
-Ready for Phase 2:
-- ✅ **Resource Management**: Complete RAII framework with automatic cleanup
-- ✅ **TODO #8 COMPLETE**: RAII patterns fully implemented
-- 📋 **TODO #9 READY**: Begin Phase 2 user space foundation (NEXT TASK)
+2. **Milestone 2** (6-8 weeks): Core OS Foundation
+   - Complete process/thread management
+   - Fix memory management integration
+   - Enable basic IPC functionality
+   - Implement scheduler with real context switching
 
 ## Overview
 
