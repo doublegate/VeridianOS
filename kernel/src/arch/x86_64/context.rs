@@ -96,8 +96,12 @@ impl X86_64Context {
             fs: 0x00,
             gs: 0x00,
 
-            // Will be set to actual page table
-            cr3: 0,
+            // Initialize with current CR3
+            cr3: unsafe {
+                let mut cr3: u64;
+                asm!("mov {}, cr3", out(reg) cr3);
+                cr3
+            },
 
             // Will be allocated if FPU is used
             fpu_state: core::ptr::null_mut(),
@@ -389,18 +393,18 @@ pub unsafe extern "C" fn load_context(context: *const X86_64Context) {
     asm!(
         // rdi = context pointer
 
-        // Load CR3 (page table) first
-        "mov rax, [rdi + 200]",
+        // Load CR3 (page table) first if not zero
+        "mov rax, [rdi + 160]", // cr3
+        "test rax, rax",
+        "jz 2f",
         "mov cr3, rax",
-        // Load segment registers
-        "mov ax, [rdi + 176]", // cs
+        "2:",
+        
+        // Load segment registers (skip cs/ss as they'll be loaded by iretq)
+        "mov ax, [rdi + 148]", // ds
         "mov ds, ax",
-        "mov ax, [rdi + 178]", // ss
+        "mov ax, [rdi + 150]", // es
         "mov es, ax",
-        "mov ax, [rdi + 180]", // ds
-        "mov fs, ax",
-        "mov ax, [rdi + 182]", // es
-        "mov gs, ax",
         // Load general purpose registers
         "mov r15, [rdi]",
         "mov r14, [rdi + 8]",
@@ -418,12 +422,19 @@ pub unsafe extern "C" fn load_context(context: *const X86_64Context) {
         "mov rax, [rdi + 112]",
         // Load stack pointer
         "mov rsp, [rdi + 120]",
-        // Load RFLAGS and RIP for iretq
-        "push qword ptr [rdi + 178]", // SS
-        "push qword ptr [rdi + 120]", // RSP
-        "push qword ptr [rdi + 136]", // RFLAGS
-        "push qword ptr [rdi + 176]", // CS
-        "push qword ptr [rdi + 128]", // RIP
+        // Push values for iretq - note the order and sizes!
+        // SS is at offset 146 (u16) - need to zero-extend
+        "movzx rax, word ptr [rdi + 146]",
+        "push rax",
+        // RSP
+        "push qword ptr [rdi + 120]",
+        // RFLAGS
+        "push qword ptr [rdi + 136]",
+        // CS is at offset 144 (u16) - need to zero-extend
+        "movzx rax, word ptr [rdi + 144]",
+        "push rax",
+        // RIP
+        "push qword ptr [rdi + 128]",
         // Load final register
         "mov rdi, [rdi + 64]",
         // Return to loaded context

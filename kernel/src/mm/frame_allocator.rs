@@ -253,10 +253,14 @@ impl BitmapAllocator {
 
             for bit in 0..64 {
                 if *word & (1 << bit) != 0 {
+                    if consecutive == 0 {
+                        // Mark the start of a new consecutive sequence
+                        start_bit = word_idx * 64 + bit;
+                    }
                     consecutive += 1;
                     if consecutive == count {
                         // Found enough frames, allocate them
-                        let first_frame = start_bit - count + 1;
+                        let first_frame = start_bit;
 
                         // Mark frames as allocated
                         for i in 0..count {
@@ -274,7 +278,6 @@ impl BitmapAllocator {
                     }
                 } else {
                     consecutive = 0;
-                    start_bit = word_idx * 64 + bit + 1;
                 }
             }
         }

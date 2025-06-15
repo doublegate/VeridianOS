@@ -564,62 +564,63 @@ fn setup_preemption_timer() {
 pub fn start() -> ! {
     println!("[SCHED] Starting scheduler execution");
 
-    // Get the scheduler and run it
-    let scheduler = SCHEDULER.lock();
-
-    // Make sure we have a current task
-    if scheduler.current.is_none() {
-        panic!("[SCHED] No current task to run!");
-    }
+    // Get the scheduler and check we have a current task
+    {
+        let scheduler = SCHEDULER.lock();
+        // Make sure we have a current task
+        if scheduler.current.is_none() {
+            panic!("[SCHED] No current task to run!");
+        }
+    } // Drop the lock here to avoid deadlock
 
     // Start running tasks
     println!("[SCHED] Starting scheduler loop...");
+    
+    // The scheduler loop
+    loop {
+        // Get the current task and execute it
+        let scheduler = SCHEDULER.lock();
+        
+        if let Some(current_task) = &scheduler.current {
+            let task_ptr = current_task.as_ptr();
+            let task = unsafe { &*task_ptr.as_ptr() };
+            let task_name = task.name.clone();
 
-    // Get the current task and start executing it
-    let scheduler = SCHEDULER.lock();
-    if let Some(current_task) = &scheduler.current {
-        let task_ptr = current_task.as_ptr();
-        let task = unsafe { &*task_ptr.as_ptr() };
-        let task_name = task.name.clone();
+            // Match on the context type and load it
+            match &task.context {
+                #[cfg(target_arch = "x86_64")]
+                crate::sched::task::TaskContext::X86_64(ctx) => {
+                    println!("[SCHED] Loading initial task context for '{}'", task_name);
+                    unsafe {
+                        use crate::arch::x86_64::context::load_context;
+                        load_context(ctx);
+                        unreachable!("load_context should not return");
+                    }
+                }
 
-        // Match on the context type and load it
-        match &task.context {
-            #[cfg(target_arch = "x86_64")]
-            crate::sched::task::TaskContext::X86_64(ctx) => {
-                drop(scheduler); // Release lock before context switch
-                println!("[SCHED] Loading initial task context for '{}'", task_name);
-                unsafe {
-                    use crate::arch::x86_64::context::load_context;
-                    load_context(ctx as *const _);
-                    unreachable!("load_context should not return");
+                #[cfg(target_arch = "aarch64")]
+                crate::sched::task::TaskContext::AArch64(ctx) => {
+                    println!("[SCHED] Loading initial task context for '{}'", task_name);
+                    unsafe {
+                        use crate::arch::aarch64::context::load_context;
+                        load_context(ctx);
+                        unreachable!("load_context should not return");
+                    }
+                }
+
+                #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+                crate::sched::task::TaskContext::RiscV(ctx) => {
+                    println!("[SCHED] Loading initial task context for '{}'", task_name);
+                    unsafe {
+                        use crate::arch::riscv::context::load_context;
+                        load_context(ctx);
+                        unreachable!("load_context should not return");
+                    }
                 }
             }
-
-            #[cfg(target_arch = "aarch64")]
-            crate::sched::task::TaskContext::AArch64(ctx) => {
-                drop(scheduler); // Release lock before context switch
-                println!("[SCHED] Loading initial task context for '{}'", task_name);
-                unsafe {
-                    use crate::arch::aarch64::context::load_context;
-                    load_context(ctx as *const _);
-                    unreachable!("load_context should not return");
-                }
-            }
-
-            #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-            crate::sched::task::TaskContext::RiscV(ctx) => {
-                drop(scheduler); // Release lock before context switch
-                println!("[SCHED] Loading initial task context for '{}'", task_name);
-                unsafe {
-                    use crate::arch::riscv::context::load_context;
-                    load_context(ctx as *const _);
-                    unreachable!("load_context should not return");
-                }
-            }
+        } else {
+            panic!("[SCHED] No initial task to run!");
         }
-    } else {
-        drop(scheduler);
-        panic!("[SCHED] No initial task to run!");
     }
 }
 

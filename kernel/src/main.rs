@@ -169,14 +169,6 @@ pub extern "C" fn kernel_main() -> ! {
         *uart = b'\n';
     }
 
-    // Enable test tasks for demonstration
-    // Comment out this block if you don't want test tasks
-    #[cfg(feature = "alloc")]
-    {
-        println!("[KERNEL] Creating test tasks for context switch demonstration");
-        test_tasks::create_test_tasks();
-    }
-
     // Use bootstrap initialization for all architectures
     // For AArch64, bootstrap now uses safe iteration patterns
     #[cfg(target_arch = "aarch64")]
