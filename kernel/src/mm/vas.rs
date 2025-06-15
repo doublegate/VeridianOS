@@ -306,6 +306,29 @@ impl VirtualAddressSpace {
         Ok(())
     }
 
+    /// Map a region of virtual memory with RAII guard
+    #[cfg(feature = "alloc")]
+    pub fn map_region_raii(
+        &self,
+        start: VirtualAddress,
+        size: usize,
+        mapping_type: MappingType,
+        process_id: crate::process::ProcessId,
+    ) -> Result<crate::raii::MappedRegion, &'static str> {
+        // First map the region normally
+        self.map_region(start, size, mapping_type)?;
+        
+        // Create RAII guard for automatic unmapping
+        let aligned_start = VirtualAddress(start.0 & !(4096 - 1));
+        let aligned_size = ((size + 4095) / 4096) * 4096;
+        
+        Ok(crate::raii::MappedRegion::new(
+            aligned_start.as_usize(),
+            aligned_size,
+            process_id
+        ))
+    }
+
     /// Unmap a region
     #[cfg(feature = "alloc")]
     pub fn unmap_region(&self, start: VirtualAddress) -> Result<(), &'static str> {
@@ -342,6 +365,12 @@ impl VirtualAddressSpace {
         }
 
         Ok(())
+    }
+
+    /// Unmap a region by address
+    #[cfg(feature = "alloc")]
+    pub fn unmap(&self, start_addr: usize, _size: usize) -> Result<(), &'static str> {
+        self.unmap_region(VirtualAddress(start_addr as u64))
     }
 
     /// Find mapping for address

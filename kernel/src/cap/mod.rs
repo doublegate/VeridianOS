@@ -22,6 +22,7 @@ pub use manager::CapError;
 pub use space::CapabilitySpace;
 pub use token::{CapabilityToken, Rights};
 pub use types::CapabilityId;
+pub use object::ObjectRef;
 
 pub fn init() {
     println!("[CAP] Initializing capability system...");

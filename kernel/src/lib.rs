@@ -35,6 +35,7 @@ pub mod error;
 pub mod ipc;
 pub mod mm;
 pub mod process;
+pub mod raii;
 pub mod sched;
 pub mod serial;
 mod syscall;
@@ -42,6 +43,9 @@ mod syscall;
 #[cfg(test)]
 mod test_config;
 mod test_framework;
+
+#[cfg(test)]
+mod raii_tests;
 
 pub mod bench;
 

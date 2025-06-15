@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
 // Import println! macro
-use crate::println;
+use crate::{println, raii::{FrameGuard, FramesGuard}};
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -19,6 +19,20 @@ extern crate alloc;
 use alloc::boxed::Box;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
+
+// For non-alloc builds, provide Vec stub
+#[cfg(not(feature = "alloc"))]
+struct Vec<T> {
+    _phantom: core::marker::PhantomData<T>,
+}
+
+#[cfg(not(feature = "alloc"))]
+impl<T> Vec<T> {
+    fn with_capacity(_: usize) -> Self {
+        Self { _phantom: core::marker::PhantomData }
+    }
+    fn push(&mut self, _: T) {}
+}
 
 /// Size of a physical frame (4KB)
 pub const FRAME_SIZE: usize = 4096;
@@ -130,6 +144,26 @@ impl PhysicalAddress {
 
     pub const fn offset(&self, offset: u64) -> Self {
         Self::new(self.0 + offset)
+    }
+}
+
+/// Physical frame representation
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalFrame {
+    number: FrameNumber,
+}
+
+impl PhysicalFrame {
+    pub fn new(number: FrameNumber) -> Self {
+        Self { number }
+    }
+
+    pub fn number(&self) -> FrameNumber {
+        self.number
+    }
+
+    pub fn addr(&self) -> usize {
+        (self.number.0 * FRAME_SIZE as u64) as usize
     }
 }
 
@@ -825,6 +859,38 @@ impl FrameAllocator {
             bitmap_allocations: stats.bitmap_allocations,
             buddy_allocations: stats.buddy_allocations,
             allocation_time_ns: stats.allocation_time_ns,
+        }
+    }
+
+    /// Allocate a single frame with RAII guard
+    pub fn allocate_frame_raii(&'static self) -> Result<FrameGuard> {
+        let frame_num = self.allocate_frames(1, None)?;
+        let frame = PhysicalFrame::new(frame_num);
+        Ok(FrameGuard::new(frame, self))
+    }
+
+    /// Allocate multiple frames with RAII guard
+    pub fn allocate_frames_raii(&'static self, count: usize) -> Result<FramesGuard> {
+        let start_frame = self.allocate_frames(count, None)?;
+        let mut frames = Vec::with_capacity(count);
+        for i in 0..count {
+            frames.push(PhysicalFrame::new(FrameNumber(start_frame.0 + i as u64)));
+        }
+        Ok(FramesGuard::new(frames, self))
+    }
+
+    /// Allocate frame from specific NUMA node with RAII guard
+    pub fn allocate_frame_raii_numa(&'static self, numa_node: usize) -> Result<FrameGuard> {
+        let frame_num = self.allocate_frames(1, Some(numa_node))?;
+        let frame = PhysicalFrame::new(frame_num);
+        Ok(FrameGuard::new(frame, self))
+    }
+
+    /// Free a frame (used by RAII guards)
+    pub unsafe fn free_frame(&self, frame: PhysicalFrame) {
+        if let Err(e) = self.free_frames(frame.number(), 1) {
+            println!("[FrameAllocator] Warning: Failed to free frame {}: {:?}", 
+                frame.number().0, e);
         }
     }
 

@@ -106,6 +106,11 @@ pub fn current_process() -> Option<&'static Process> {
     }
 }
 
+/// Find process by ID
+pub fn find_process(pid: ProcessId) -> Option<&'static Process> {
+    table::get_process(pid)
+}
+
 /// Get current process (alias for compatibility)
 pub fn get_current_process() -> Option<&'static Process> {
     current_process()
@@ -146,6 +151,32 @@ pub fn exit_thread(exit_code: i32) {
 
         // Never return - schedule another thread
         crate::sched::exit_task(exit_code);
+    }
+}
+
+/// Terminate a specific thread
+pub fn terminate_thread(pid: ProcessId, tid: ThreadId) -> Result<(), &'static str> {
+    if let Some(process) = find_process(pid) {
+        if let Some(thread) = process.get_thread(tid) {
+            println!("[PROCESS] Terminating thread {} in process {}", tid.0, pid.0);
+            
+            // Mark thread as dead
+            thread.set_state(thread::ThreadState::Dead);
+            
+            // Remove from scheduler if it has a task
+            if let Some(task_ptr) = thread.get_task_ptr() {
+                unsafe {
+                    let task = task_ptr.as_ptr();
+                    (*task).state = ProcessState::Dead;
+                }
+            }
+            
+            Ok(())
+        } else {
+            Err("Thread not found")
+        }
+    } else {
+        Err("Process not found")
     }
 }
 

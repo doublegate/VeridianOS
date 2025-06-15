@@ -14,6 +14,18 @@ use spin::Mutex;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CapabilityId(pub u64);
 
+impl From<CapabilityId> for u64 {
+    fn from(id: CapabilityId) -> u64 {
+        id.0
+    }
+}
+
+impl From<u64> for CapabilityId {
+    fn from(value: u64) -> Self {
+        CapabilityId(value)
+    }
+}
+
 impl core::fmt::Display for CapabilityId {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "Cap#{}", self.0)

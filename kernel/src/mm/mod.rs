@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 
 // Re-export commonly used types
 pub use frame_allocator::{
-    FrameAllocatorError, FrameNumber, PhysicalAddress, FRAME_ALLOCATOR, FRAME_SIZE,
+    FrameAllocatorError, FrameNumber, PhysicalAddress, PhysicalFrame, FRAME_ALLOCATOR, FRAME_SIZE,
 };
 #[allow(unused_imports)]
 pub use heap::init as init_heap;

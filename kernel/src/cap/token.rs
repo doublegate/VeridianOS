@@ -49,6 +49,11 @@ impl CapabilityToken {
         ((self.0 >> 60) & 0xF) as u8
     }
 
+    /// Create a token from ID and generation (for revocation)
+    pub fn from_id_and_generation(id: super::types::CapabilityId, generation: u8) -> Self {
+        Self::new(id.into(), generation, 0, 0)
+    }
+
     /// Convert to raw u64 value
     #[inline]
     pub fn to_u64(self) -> u64 {

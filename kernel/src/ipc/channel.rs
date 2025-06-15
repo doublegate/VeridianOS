@@ -20,7 +20,7 @@ use super::{
     error::{IpcError, Result},
     Message, SmallMessage,
 };
-use crate::process::ProcessId;
+use crate::{process::ProcessId, raii::ChannelGuard};
 
 /// Maximum number of queued messages per channel
 pub const MAX_CHANNEL_QUEUE_SIZE: usize = 1024;
@@ -74,6 +74,13 @@ impl Endpoint {
             waiting_receivers: Mutex::new(Vec::new()),
             active: AtomicBool::new(true),
         }
+    }
+
+    /// Create a new endpoint with RAII guard
+    pub fn new_with_guard(owner: ProcessId) -> (Self, ChannelGuard) {
+        let endpoint = Self::new(owner);
+        let guard = ChannelGuard::new(endpoint.id);
+        (endpoint, guard)
     }
 
     /// Get endpoint ID
