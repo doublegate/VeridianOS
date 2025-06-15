@@ -282,7 +282,7 @@ impl CapabilitySpace {
     pub fn revoke(&mut self, cap_id: CapabilityId) -> Result<(), &'static str> {
         // Create a token with the given ID and current generation
         let token = CapabilityToken::from_id_and_generation(cap_id, self.generation());
-        
+
         if self.remove(token).is_some() {
             Ok(())
         } else {
@@ -291,18 +291,23 @@ impl CapabilitySpace {
     }
 
     /// Create a capability (simplified for testing)
-    pub fn create_capability(&mut self, rights: Rights, object: ObjectRef) -> Result<CapabilityId, &'static str> {
-        // Simple ID allocation - in real implementation this would use the global manager
+    pub fn create_capability(
+        &mut self,
+        rights: Rights,
+        object: ObjectRef,
+    ) -> Result<CapabilityId, &'static str> {
+        // Simple ID allocation - in real implementation this would use the global
+        // manager
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        
+
         if id > 0xFFFF_FFFF_FFFF {
             return Err("Capability ID space exhausted");
         }
-        
+
         let token = CapabilityToken::new(id, self.generation(), 0, 0);
         self.insert(token, object, rights)?;
-        
+
         Ok(CapabilityId(id))
     }
 

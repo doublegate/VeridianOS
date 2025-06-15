@@ -10,7 +10,10 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
 // Import println! macro
-use crate::{println, raii::{FrameGuard, FramesGuard}};
+use crate::{
+    println,
+    raii::{FrameGuard, FramesGuard},
+};
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -29,7 +32,9 @@ struct Vec<T> {
 #[cfg(not(feature = "alloc"))]
 impl<T> Vec<T> {
     fn with_capacity(_: usize) -> Self {
-        Self { _phantom: core::marker::PhantomData }
+        Self {
+            _phantom: core::marker::PhantomData,
+        }
     }
     fn push(&mut self, _: T) {}
 }
@@ -887,10 +892,20 @@ impl FrameAllocator {
     }
 
     /// Free a frame (used by RAII guards)
+    /// 
+    /// # Safety
+    /// 
+    /// The caller must ensure that:
+    /// - The frame was previously allocated by this allocator
+    /// - The frame is not currently in use
+    /// - The frame will not be used after this call
     pub unsafe fn free_frame(&self, frame: PhysicalFrame) {
         if let Err(e) = self.free_frames(frame.number(), 1) {
-            println!("[FrameAllocator] Warning: Failed to free frame {}: {:?}", 
-                frame.number().0, e);
+            println!(
+                "[FrameAllocator] Warning: Failed to free frame {}: {:?}",
+                frame.number().0,
+                e
+            );
         }
     }
 

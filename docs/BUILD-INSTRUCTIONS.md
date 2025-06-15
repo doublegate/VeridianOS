@@ -1,6 +1,6 @@
 # VeridianOS Build Instructions
 
-**Last Updated**: June 13, 2025
+**Last Updated**: June 15, 2025
 
 ## Quick Start
 

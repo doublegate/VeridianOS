@@ -284,28 +284,34 @@ pub fn create_channel(
 pub fn remove_channel(channel_id: u64) -> Result<()> {
     let mut registry_guard = IPC_REGISTRY.write();
     let registry = registry_guard.as_mut().ok_or(IpcError::NotInitialized)?;
-    
+
     // For now, treat channel_id as endpoint_id
     // In a real implementation, we'd track channel IDs separately
     let endpoint_id = channel_id;
-    
+
     // Remove the channel if it exists
     #[cfg(feature = "alloc")]
     {
         if registry.channels.remove(&endpoint_id).is_some() {
-            registry.stats.channels_destroyed.fetch_add(1, Ordering::Relaxed);
+            registry
+                .stats
+                .channels_destroyed
+                .fetch_add(1, Ordering::Relaxed);
             Ok(())
         } else {
             // Try removing as endpoint
             if registry.endpoints.remove(&endpoint_id).is_some() {
-                registry.stats.endpoints_destroyed.fetch_add(1, Ordering::Relaxed);
+                registry
+                    .stats
+                    .endpoints_destroyed
+                    .fetch_add(1, Ordering::Relaxed);
                 Ok(())
             } else {
                 Err(IpcError::EndpointNotFound)
             }
         }
     }
-    
+
     #[cfg(not(feature = "alloc"))]
     Err(IpcError::EndpointNotFound)
 }

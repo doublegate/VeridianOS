@@ -158,11 +158,14 @@ pub fn exit_thread(exit_code: i32) {
 pub fn terminate_thread(pid: ProcessId, tid: ThreadId) -> Result<(), &'static str> {
     if let Some(process) = find_process(pid) {
         if let Some(thread) = process.get_thread(tid) {
-            println!("[PROCESS] Terminating thread {} in process {}", tid.0, pid.0);
-            
+            println!(
+                "[PROCESS] Terminating thread {} in process {}",
+                tid.0, pid.0
+            );
+
             // Mark thread as dead
             thread.set_state(thread::ThreadState::Dead);
-            
+
             // Remove from scheduler if it has a task
             if let Some(task_ptr) = thread.get_task_ptr() {
                 unsafe {
@@ -170,7 +173,7 @@ pub fn terminate_thread(pid: ProcessId, tid: ThreadId) -> Result<(), &'static st
                     (*task).state = ProcessState::Dead;
                 }
             }
-            
+
             Ok(())
         } else {
             Err("Thread not found")

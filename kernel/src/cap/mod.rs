@@ -22,6 +22,8 @@ pub use manager::CapError;
 pub use space::CapabilitySpace;
 pub use token::{CapabilityToken, Rights};
 pub use types::CapabilityId;
+// Re-export ObjectRef for RAII tests and examples
+#[allow(unused_imports)]
 pub use object::ObjectRef;
 
 pub fn init() {

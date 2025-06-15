@@ -317,15 +317,15 @@ impl VirtualAddressSpace {
     ) -> Result<crate::raii::MappedRegion, &'static str> {
         // First map the region normally
         self.map_region(start, size, mapping_type)?;
-        
+
         // Create RAII guard for automatic unmapping
         let aligned_start = VirtualAddress(start.0 & !(4096 - 1));
         let aligned_size = ((size + 4095) / 4096) * 4096;
-        
+
         Ok(crate::raii::MappedRegion::new(
             aligned_start.as_usize(),
             aligned_size,
-            process_id
+            process_id,
         ))
     }
 

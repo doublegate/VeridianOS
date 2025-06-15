@@ -3,8 +3,10 @@
 //! This module provides RAII wrappers for various kernel resources to ensure
 //! proper cleanup when resources go out of scope.
 
-use core::ops::{Deref, DerefMut};
-use core::mem::ManuallyDrop;
+use core::{
+    mem::ManuallyDrop,
+    ops::{Deref, DerefMut},
+};
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -22,23 +24,27 @@ struct Vec<T> {
 
 #[cfg(not(feature = "alloc"))]
 impl<T> Vec<T> {
-    fn len(&self) -> usize { 0 }
+    fn len(&self) -> usize {
+        0
+    }
     fn clone(&self) -> Self {
-        Self { _phantom: core::marker::PhantomData }
+        Self {
+            _phantom: core::marker::PhantomData,
+        }
     }
 }
 
 use spin::{Mutex, MutexGuard};
 
 use crate::{
-    mm::{frame_allocator::FrameAllocator, PhysicalFrame},
-    process::ProcessId,
     cap::{CapabilityId, CapabilitySpace},
+    mm::{frame_allocator::FrameAllocator, PhysicalFrame},
     println,
+    process::ProcessId,
 };
 
 /// RAII wrapper for physical frames
-/// 
+///
 /// Automatically returns frames to the allocator when dropped
 pub struct FrameGuard {
     frame: PhysicalFrame,
@@ -93,7 +99,11 @@ impl FramesGuard {
     /// Create a new frames guard
     pub fn new(frames: Vec<PhysicalFrame>, allocator: &'static FrameAllocator) -> Self {
         let count = frames.len();
-        Self { frames, count, allocator }
+        Self {
+            frames,
+            count,
+            allocator,
+        }
     }
 
     /// Release ownership of the frames without deallocating
@@ -126,7 +136,11 @@ pub struct MappedRegion {
 impl MappedRegion {
     /// Create a new mapped region guard
     pub fn new(virt_addr: usize, size: usize, process_id: ProcessId) -> Self {
-        Self { virt_addr, size, process_id }
+        Self {
+            virt_addr,
+            size,
+            process_id,
+        }
     }
 
     /// Get the virtual address
@@ -146,11 +160,15 @@ impl Drop for MappedRegion {
         if let Some(process) = crate::process::find_process(self.process_id) {
             let memory_space = process.memory_space.lock();
             if let Err(e) = memory_space.unmap(self.virt_addr, self.size) {
-                println!("[RAII] Warning: Failed to unmap region at {:#x}: {:?}", 
-                    self.virt_addr, e);
+                println!(
+                    "[RAII] Warning: Failed to unmap region at {:#x}: {:?}",
+                    self.virt_addr, e
+                );
             } else {
-                println!("[RAII] Unmapped region at {:#x} (size: {:#x})", 
-                    self.virt_addr, self.size);
+                println!(
+                    "[RAII] Unmapped region at {:#x} (size: {:#x})",
+                    self.virt_addr, self.size
+                );
             }
         }
     }
@@ -186,8 +204,10 @@ impl Drop for CapabilityGuard {
         // Revoke the capability
         let mut space = self.space.lock();
         if let Err(e) = space.revoke(self.cap_id) {
-            println!("[RAII] Warning: Failed to revoke capability {}: {:?}", 
-                self.cap_id, e);
+            println!(
+                "[RAII] Warning: Failed to revoke capability {}: {:?}",
+                self.cap_id, e
+            );
         } else {
             println!("[RAII] Revoked capability {}", self.cap_id);
         }
@@ -195,7 +215,7 @@ impl Drop for CapabilityGuard {
 }
 
 /// RAII wrapper for process resources
-/// 
+///
 /// Ensures all process resources are cleaned up when the process exits
 #[cfg(feature = "alloc")]
 pub struct ProcessResources {
@@ -232,8 +252,10 @@ impl Drop for ProcessResources {
         // 1. First terminate all threads
         for &thread_id in self.threads.iter() {
             if let Err(e) = crate::process::terminate_thread(self.pid, thread_id) {
-                println!("[RAII] Warning: Failed to terminate thread {:?}: {:?}", 
-                    thread_id, e);
+                println!(
+                    "[RAII] Warning: Failed to terminate thread {:?}: {:?}",
+                    thread_id, e
+                );
             }
         }
 
@@ -269,23 +291,23 @@ impl<'a, T> TrackedMutexGuard<'a, T> {
     }
 }
 
-impl<'a, T> Drop for TrackedMutexGuard<'a, T> {
+impl<T> Drop for TrackedMutexGuard<'_, T> {
     fn drop(&mut self) {
         println!("[RAII] Released lock: {}", self.name);
     }
 }
 
-impl<'a, T> Deref for TrackedMutexGuard<'a, T> {
+impl<T> Deref for TrackedMutexGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &*self.guard
+        &self.guard
     }
 }
 
-impl<'a, T> DerefMut for TrackedMutexGuard<'a, T> {
+impl<T> DerefMut for TrackedMutexGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut *self.guard
+        &mut self.guard
     }
 }
 
@@ -317,8 +339,10 @@ impl Drop for ChannelGuard {
     fn drop(&mut self) {
         // Remove from global registry
         if let Err(e) = crate::ipc::registry::remove_channel(self.channel_id) {
-            println!("[RAII] Warning: Failed to remove channel {}: {:?}", 
-                self.channel_id, e);
+            println!(
+                "[RAII] Warning: Failed to remove channel {}: {:?}",
+                self.channel_id, e
+            );
         } else {
             println!("[RAII] Removed channel {} from registry", self.channel_id);
         }
@@ -341,8 +365,8 @@ pub struct ScopeGuard<F: FnOnce()> {
 impl<F: FnOnce()> ScopeGuard<F> {
     /// Create a new scope guard
     pub fn new(cleanup: F) -> Self {
-        Self { 
-            cleanup: Some(cleanup) 
+        Self {
+            cleanup: Some(cleanup),
         }
     }
 
