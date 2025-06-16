@@ -29,7 +29,7 @@ static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 #[cfg(target_arch = "riscv64")]
 #[global_allocator]
-static ALLOCATOR: UnsafeBumpAllocator = UnsafeBumpAllocator::new();
+pub static ALLOCATOR: UnsafeBumpAllocator = UnsafeBumpAllocator::new();
 
 #[cfg(target_arch = "riscv64")]
 static LOCKED_ALLOCATOR: LockedUnsafeBumpAllocator = LockedUnsafeBumpAllocator::empty();

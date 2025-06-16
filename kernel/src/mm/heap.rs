@@ -232,15 +232,29 @@ pub fn init() -> Result<(), &'static str> {
     println!("[HEAP] Initializing kernel heap at 0x{:x}", HEAP_START);
 
     unsafe {
-        let mut allocator = crate::get_allocator().lock();
-
         // Use the static heap array instead of an arbitrary address
         // Use raw pointers to avoid static mut refs warning
         let heap_start = core::ptr::addr_of_mut!(HEAP_MEMORY) as *mut u8;
         let heap_size = 4 * 1024 * 1024; // Size of HEAP_MEMORY
-        allocator.init(heap_start, heap_size);
 
-        drop(allocator);
+        // For RISC-V, initialize both allocators since they're separate
+        #[cfg(target_arch = "riscv64")]
+        {
+            // Initialize the global allocator directly
+            crate::ALLOCATOR.init(heap_start, heap_size);
+            
+            // Also initialize the locked allocator for compatibility
+            let mut allocator = crate::get_allocator().lock();
+            allocator.init(heap_start, heap_size);
+            drop(allocator);
+        }
+
+        #[cfg(not(target_arch = "riscv64"))]
+        {
+            let mut allocator = crate::get_allocator().lock();
+            allocator.init(heap_start, heap_size);
+            drop(allocator);
+        }
 
         println!(
             "[HEAP] Heap initialized: {} MB at 0x{:x}",

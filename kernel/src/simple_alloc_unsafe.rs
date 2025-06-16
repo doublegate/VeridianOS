@@ -35,28 +35,14 @@ impl UnsafeBumpAllocator {
     pub unsafe fn init(&self, start: *mut u8, size: usize) {
         let start_addr = start as usize;
         
-        #[cfg(target_arch = "riscv64")]
-        {
-            let uart = 0x10000000 as *mut u8;
-            let msg = b"[ALLOC] Initializing allocator\n";
-            for &byte in msg {
-                core::ptr::write_volatile(uart, byte);
-            }
-        }
+        // Use SeqCst ordering for RISC-V compatibility
+        self.start.store(start_addr, Ordering::SeqCst);
+        self.size.store(size, Ordering::SeqCst);
+        self.next.store(start_addr, Ordering::SeqCst);
+        self.allocations.store(0, Ordering::SeqCst);
         
-        self.start.store(start_addr, Ordering::Relaxed);
-        self.size.store(size, Ordering::Relaxed);
-        self.next.store(start_addr, Ordering::Relaxed);
-        self.allocations.store(0, Ordering::Relaxed);
-        
-        #[cfg(target_arch = "riscv64")]
-        {
-            let uart = 0x10000000 as *mut u8;
-            let msg = b"[ALLOC] Allocator initialized\n";
-            for &byte in msg {
-                core::ptr::write_volatile(uart, byte);
-            }
-        }
+        // Add memory barrier to ensure atomic stores complete
+        core::sync::atomic::fence(Ordering::SeqCst);
     }
 
     /// Get statistics about the allocator
@@ -73,8 +59,8 @@ impl UnsafeBumpAllocator {
 
 unsafe impl GlobalAlloc for UnsafeBumpAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let start = self.start.load(Ordering::Acquire);
-        let size = self.size.load(Ordering::Acquire);
+        let start = self.start.load(Ordering::SeqCst);
+        let size = self.size.load(Ordering::SeqCst);
         
         if start == 0 {
             // Not initialized
@@ -94,189 +80,52 @@ unsafe impl GlobalAlloc for UnsafeBumpAllocator {
         let alloc_size = layout.size();
         let alloc_align = layout.align();
         
-        // Debug large allocations
-        if alloc_size > 1024 {
-            #[cfg(target_arch = "riscv64")]
-            {
-                let uart = 0x10000000 as *mut u8;
-                let msg = b"[ALLOC] Large allocation requested: ";
-                for &byte in msg {
-                    core::ptr::write_volatile(uart, byte);
-                }
-                // Simple number output
-                let size_kb = alloc_size / 1024;
-                let digit = (size_kb % 10) as u8 + b'0';
-                core::ptr::write_volatile(uart, digit);
-                core::ptr::write_volatile(uart, b'K');
-                core::ptr::write_volatile(uart, b'\n');
-            }
-        }
-
-        // Enhanced atomic allocation with detailed debugging
+        // Atomic allocation with retry logic
         let max_retries = 100;
         let mut retry_count = 0;
         
-        #[cfg(target_arch = "riscv64")]
-        {
-            let uart = 0x10000000 as *mut u8;
-            let msg = b"[ALLOC] Starting allocation loop\n";
-            for &byte in msg {
-                core::ptr::write_volatile(uart, byte);
-            }
-        }
-        
         loop {
-            let current_next = self.next.load(Ordering::Acquire);
+            let current_next = self.next.load(Ordering::SeqCst);
             
-            #[cfg(target_arch = "riscv64")]
-            {
-                let uart = 0x10000000 as *mut u8;
-                let msg = b"[ALLOC] Got current_next value\n";
-                for &byte in msg {
-                    core::ptr::write_volatile(uart, byte);
-                }
-            }
-            
-            // Use the stored alignment value (but simplified to 8-byte minimum)
-            let align = if alloc_align > 8 { 8 } else { alloc_align }; // Cap at 8 bytes for simplicity
-            
-            #[cfg(target_arch = "riscv64")]
-            {
-                let uart = 0x10000000 as *mut u8;
-                let msg = b"[ALLOC] About to align\n";
-                for &byte in msg {
-                    core::ptr::write_volatile(uart, byte);
-                }
-            }
-            
-            // Simplified alignment calculation that's guaranteed to work
+            // Use simplified 8-byte alignment for reliability
+            let align = if alloc_align > 8 { 8 } else { alloc_align };
             let mask = align - 1;
             let aligned_next = (current_next + mask) & !mask;
             
-            #[cfg(target_arch = "riscv64")]
-            {
-                let uart = 0x10000000 as *mut u8;
-                let msg = b"[ALLOC] Alignment done\n";
-                for &byte in msg {
-                    core::ptr::write_volatile(uart, byte);
-                }
-            }
-            
-            // Check for arithmetic overflow (using stored alloc_size)
-            if aligned_next > usize::MAX - alloc_size {
-                #[cfg(target_arch = "riscv64")]
-                {
-                    let uart = 0x10000000 as *mut u8;
-                    let msg = b"[ALLOC] ERROR: Arithmetic overflow\n";
-                    for &byte in msg {
-                        core::ptr::write_volatile(uart, byte);
+            // Use safer overflow checking with checked_add
+            let alloc_end = match aligned_next.checked_add(alloc_size) {
+                Some(end) => {
+                    // Check bounds
+                    if end > start + size {
+                        return ptr::null_mut(); // Out of memory
                     }
-                }
-                return ptr::null_mut();
-            }
+                    end
+                },
+                None => return ptr::null_mut(), // Arithmetic overflow
+            };
             
-            let alloc_end = aligned_next + alloc_size;
-            
-            // Check bounds
-            if alloc_end > start + size {
-                #[cfg(target_arch = "riscv64")]
-                {
-                    let uart = 0x10000000 as *mut u8;
-                    let msg = b"[ALLOC] ERROR: Out of memory\n";
-                    for &byte in msg {
-                        core::ptr::write_volatile(uart, byte);
-                    }
-                }
-                return ptr::null_mut();
-            }
-            
-            #[cfg(target_arch = "riscv64")]
-            {
-                let uart = 0x10000000 as *mut u8;
-                let msg = b"[ALLOC] About to CAS\n";
-                for &byte in msg {
-                    core::ptr::write_volatile(uart, byte);
-                }
-            }
             
             // Try to update next pointer atomically with stronger ordering
             match self.next.compare_exchange_weak(
                 current_next,
                 alloc_end,
-                Ordering::Release,
-                Ordering::Acquire,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
             ) {
                 Ok(_) => {
-                    #[cfg(target_arch = "riscv64")]
-                    {
-                        let uart = 0x10000000 as *mut u8;
-                        let msg = b"[ALLOC] CAS succeeded\n";
-                        for &byte in msg {
-                            core::ptr::write_volatile(uart, byte);
-                        }
-                    }
-                    
                     // Success! Zero the allocated memory for safety
                     let allocated_ptr = aligned_next as *mut u8;
-                    
-                    #[cfg(target_arch = "riscv64")]
-                    {
-                        let uart = 0x10000000 as *mut u8;
-                        let msg = b"[ALLOC] About to zero memory\n";
-                        for &byte in msg {
-                            core::ptr::write_volatile(uart, byte);
-                        }
-                    }
-                    
                     core::ptr::write_bytes(allocated_ptr, 0, alloc_size);
-                    
-                    #[cfg(target_arch = "riscv64")]
-                    {
-                        let uart = 0x10000000 as *mut u8;
-                        let msg = b"[ALLOC] Memory zeroed\n";
-                        for &byte in msg {
-                            core::ptr::write_volatile(uart, byte);
-                        }
-                    }
                     
                     // Update statistics
                     self.allocations.fetch_add(1, Ordering::Relaxed);
                     
-                    // Debug successful large allocations
-                    if alloc_size > 1024 {
-                        #[cfg(target_arch = "riscv64")]
-                        {
-                            let uart = 0x10000000 as *mut u8;
-                            let msg = b"[ALLOC] Large allocation successful\n";
-                            for &byte in msg {
-                                core::ptr::write_volatile(uart, byte);
-                            }
-                        }
-                    }
-                    
                     return allocated_ptr;
                 }
                 Err(_) => {
-                    #[cfg(target_arch = "riscv64")]
-                    {
-                        let uart = 0x10000000 as *mut u8;
-                        let msg = b"[ALLOC] CAS failed, retrying\n";
-                        for &byte in msg {
-                            core::ptr::write_volatile(uart, byte);
-                        }
-                    }
-                    
                     // Retry with exponential backoff
                     retry_count += 1;
                     if retry_count >= max_retries {
-                        #[cfg(target_arch = "riscv64")]
-                        {
-                            let uart = 0x10000000 as *mut u8;
-                            let msg = b"[ALLOC] ERROR: Too many retries\n";
-                            for &byte in msg {
-                                core::ptr::write_volatile(uart, byte);
-                            }
-                        }
                         return ptr::null_mut();
                     }
                     
