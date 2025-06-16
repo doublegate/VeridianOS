@@ -3,9 +3,11 @@
 //! This is a lock-free bump allocator implementation to resolve the
 //! RISC-V heap initialization hang caused by spin lock incompatibility.
 
-use core::alloc::{GlobalAlloc, Layout};
-use core::ptr::{self, NonNull};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::{
+    alloc::{GlobalAlloc, Layout},
+    ptr::{self, NonNull},
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 /// Simple bump allocator without locks
 pub struct UnsafeBumpAllocator {
@@ -17,6 +19,7 @@ pub struct UnsafeBumpAllocator {
 
 impl UnsafeBumpAllocator {
     /// Create a new uninitialized bump allocator
+    #[allow(clippy::new_without_default)]
     pub const fn new() -> Self {
         Self {
             start: AtomicUsize::new(0),
@@ -30,17 +33,17 @@ impl UnsafeBumpAllocator {
     ///
     /// # Safety
     ///
-    /// The caller must ensure that the memory region from `start` to `start + size`
-    /// is valid and available for allocation.
+    /// The caller must ensure that the memory region from `start` to `start +
+    /// size` is valid and available for allocation.
     pub unsafe fn init(&self, start: *mut u8, size: usize) {
         let start_addr = start as usize;
-        
+
         // Use SeqCst ordering for RISC-V compatibility
         self.start.store(start_addr, Ordering::SeqCst);
         self.size.store(size, Ordering::SeqCst);
         self.next.store(start_addr, Ordering::SeqCst);
         self.allocations.store(0, Ordering::SeqCst);
-        
+
         // Add memory barrier to ensure atomic stores complete
         core::sync::atomic::fence(Ordering::SeqCst);
     }
@@ -61,7 +64,7 @@ unsafe impl GlobalAlloc for UnsafeBumpAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let start = self.start.load(Ordering::SeqCst);
         let size = self.size.load(Ordering::SeqCst);
-        
+
         if start == 0 {
             // Not initialized
             #[cfg(target_arch = "riscv64")]
@@ -79,19 +82,19 @@ unsafe impl GlobalAlloc for UnsafeBumpAllocator {
         // Store layout values early to avoid repeated method calls
         let alloc_size = layout.size();
         let alloc_align = layout.align();
-        
+
         // Atomic allocation with retry logic
         let max_retries = 100;
         let mut retry_count = 0;
-        
+
         loop {
             let current_next = self.next.load(Ordering::SeqCst);
-            
+
             // Use simplified 8-byte alignment for reliability
             let align = if alloc_align > 8 { 8 } else { alloc_align };
             let mask = align - 1;
             let aligned_next = (current_next + mask) & !mask;
-            
+
             // Use safer overflow checking with checked_add
             let alloc_end = match aligned_next.checked_add(alloc_size) {
                 Some(end) => {
@@ -100,11 +103,10 @@ unsafe impl GlobalAlloc for UnsafeBumpAllocator {
                         return ptr::null_mut(); // Out of memory
                     }
                     end
-                },
+                }
                 None => return ptr::null_mut(), // Arithmetic overflow
             };
-            
-            
+
             // Try to update next pointer atomically with stronger ordering
             match self.next.compare_exchange_weak(
                 current_next,
@@ -116,10 +118,10 @@ unsafe impl GlobalAlloc for UnsafeBumpAllocator {
                     // Success! Zero the allocated memory for safety
                     let allocated_ptr = aligned_next as *mut u8;
                     core::ptr::write_bytes(allocated_ptr, 0, alloc_size);
-                    
+
                     // Update statistics
                     self.allocations.fetch_add(1, Ordering::Relaxed);
-                    
+
                     return allocated_ptr;
                 }
                 Err(_) => {
@@ -128,7 +130,7 @@ unsafe impl GlobalAlloc for UnsafeBumpAllocator {
                     if retry_count >= max_retries {
                         return ptr::null_mut();
                     }
-                    
+
                     // Simple busy wait for backoff
                     for _ in 0..(retry_count * 10) {
                         core::hint::spin_loop();
@@ -158,9 +160,7 @@ impl LockedUnsafeBumpAllocator {
 
     /// Get a "lock" (just returns a wrapper)
     pub fn lock(&self) -> UnsafeBumpAllocatorGuard<'_> {
-        UnsafeBumpAllocatorGuard {
-            inner: &self.inner,
-        }
+        UnsafeBumpAllocatorGuard { inner: &self.inner }
     }
 }
 
@@ -169,7 +169,7 @@ pub struct UnsafeBumpAllocatorGuard<'a> {
     inner: &'a UnsafeBumpAllocator,
 }
 
-impl<'a> UnsafeBumpAllocatorGuard<'a> {
+impl UnsafeBumpAllocatorGuard<'_> {
     /// Initialize the allocator
     ///
     /// # Safety

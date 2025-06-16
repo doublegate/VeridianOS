@@ -134,30 +134,30 @@ pub fn create_test_tasks() {
 
         // Create Task A
         match process::lifecycle::create_process(String::from("test_task_a"), 0) {
-            Ok(pid_a) => {
-                println!("[TEST] Created process A with PID {}", pid_a.0);
+            Ok(_pid_a) => {
+                println!("[TEST] Created process A with PID {}", _pid_a.0);
 
-                if let Err(e) = process::create_thread(test_task_a as usize, 0, 0, 0) {
-                    println!("[TEST] Failed to create thread for task A: {}", e);
+                if let Err(_e) = process::create_thread(test_task_a as usize, 0, 0, 0) {
+                    println!("[TEST] Failed to create thread for task A: {}", _e);
                 } else {
                     println!("[TEST] Created thread for task A");
                 }
             }
-            Err(e) => println!("[TEST] Failed to create task A: {}", e),
+            Err(_e) => println!("[TEST] Failed to create task A: {}", _e),
         }
 
         // Create Task B
         match process::lifecycle::create_process(String::from("test_task_b"), 0) {
-            Ok(pid_b) => {
-                println!("[TEST] Created process B with PID {}", pid_b.0);
+            Ok(_pid_b) => {
+                println!("[TEST] Created process B with PID {}", _pid_b.0);
 
-                if let Err(e) = process::create_thread(test_task_b as usize, 0, 0, 0) {
-                    println!("[TEST] Failed to create thread for task B: {}", e);
+                if let Err(_e) = process::create_thread(test_task_b as usize, 0, 0, 0) {
+                    println!("[TEST] Failed to create thread for task B: {}", _e);
                 } else {
                     println!("[TEST] Created thread for task B");
                 }
             }
-            Err(e) => println!("[TEST] Failed to create task B: {}", e),
+            Err(_e) => println!("[TEST] Failed to create task B: {}", _e),
         }
 
         println!("[TEST] Test tasks created successfully");

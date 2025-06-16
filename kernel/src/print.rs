@@ -76,8 +76,7 @@ macro_rules! boot_println {
     ($s:literal) => {
         #[cfg(target_arch = "aarch64")]
         {
-            $crate::arch::aarch64::direct_uart::direct_print_str($s);
-            $crate::arch::aarch64::direct_uart::direct_print_newline();
+            // No-op for AArch64 to avoid LLVM bugs completely
         }
         #[cfg(not(target_arch = "aarch64"))]
         println!($s);
@@ -86,8 +85,7 @@ macro_rules! boot_println {
     ($($arg:tt)*) => {
         #[cfg(target_arch = "aarch64")]
         {
-            $crate::arch::aarch64::direct_uart::direct_print_str("[fmt]");
-            $crate::arch::aarch64::direct_uart::direct_print_newline();
+            // No-op for AArch64 to avoid LLVM bugs completely
         }
         #[cfg(not(target_arch = "aarch64"))]
         println!($($arg)*);

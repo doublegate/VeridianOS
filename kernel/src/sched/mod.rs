@@ -34,12 +34,10 @@ pub mod riscv_scheduler;
 
 // Re-export common types
 pub use queue::READY_QUEUE;
-
-#[cfg(not(target_arch = "riscv64"))]
-pub use scheduler::{SchedAlgorithm, SCHEDULER};
-
 #[cfg(target_arch = "riscv64")]
 pub use scheduler::SchedAlgorithm;
+#[cfg(not(target_arch = "riscv64"))]
+pub use scheduler::{SchedAlgorithm, SCHEDULER};
 
 #[cfg(target_arch = "riscv64")]
 pub static SCHEDULER: riscv_scheduler::RiscvScheduler = riscv_scheduler::RiscvScheduler::new();
@@ -603,13 +601,13 @@ pub fn start() -> ! {
         if let Some(current_task) = &scheduler.current {
             let task_ptr = current_task.as_ptr();
             let task = unsafe { &*task_ptr.as_ptr() };
-            let task_name = task.name.clone();
+            let _task_name = task.name.clone();
 
             // Match on the context type and load it
             match &task.context {
                 #[cfg(target_arch = "x86_64")]
                 crate::sched::task::TaskContext::X86_64(ctx) => {
-                    println!("[SCHED] Loading initial task context for '{}'", task_name);
+                    println!("[SCHED] Loading initial task context for '{}'", _task_name);
                     unsafe {
                         use crate::arch::x86_64::context::load_context;
                         load_context(ctx);
@@ -619,7 +617,7 @@ pub fn start() -> ! {
 
                 #[cfg(target_arch = "aarch64")]
                 crate::sched::task::TaskContext::AArch64(ctx) => {
-                    println!("[SCHED] Loading initial task context for '{}'", task_name);
+                    println!("[SCHED] Loading initial task context for '{}'", _task_name);
                     unsafe {
                         use crate::arch::aarch64::context::load_context;
                         load_context(ctx);
@@ -629,7 +627,7 @@ pub fn start() -> ! {
 
                 #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
                 crate::sched::task::TaskContext::RiscV(ctx) => {
-                    println!("[SCHED] Loading initial task context for '{}'", task_name);
+                    println!("[SCHED] Loading initial task context for '{}'", _task_name);
                     unsafe {
                         use crate::arch::riscv::context::load_context;
                         load_context(ctx);

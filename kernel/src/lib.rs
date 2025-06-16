@@ -21,7 +21,7 @@ use linked_list_allocator::LockedHeap;
 #[cfg(target_arch = "riscv64")]
 mod simple_alloc_unsafe;
 #[cfg(target_arch = "riscv64")]
-use simple_alloc_unsafe::{UnsafeBumpAllocator, LockedUnsafeBumpAllocator};
+use simple_alloc_unsafe::{LockedUnsafeBumpAllocator, UnsafeBumpAllocator};
 
 #[cfg(not(target_arch = "riscv64"))]
 #[global_allocator]

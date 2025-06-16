@@ -91,6 +91,7 @@ impl Deref for FrameGuard {
 /// RAII wrapper for multiple frames
 pub struct FramesGuard {
     frames: Vec<PhysicalFrame>,
+    #[allow(dead_code)]
     count: usize,
     allocator: &'static FrameAllocator,
 }
@@ -159,10 +160,10 @@ impl Drop for MappedRegion {
         // Unmap the region from the process's address space
         if let Some(process) = crate::process::find_process(self.process_id) {
             let memory_space = process.memory_space.lock();
-            if let Err(e) = memory_space.unmap(self.virt_addr, self.size) {
+            if let Err(_e) = memory_space.unmap(self.virt_addr, self.size) {
                 println!(
                     "[RAII] Warning: Failed to unmap region at {:#x}: {:?}",
-                    self.virt_addr, e
+                    self.virt_addr, _e
                 );
             } else {
                 println!(
@@ -203,10 +204,10 @@ impl Drop for CapabilityGuard {
     fn drop(&mut self) {
         // Revoke the capability
         let mut space = self.space.lock();
-        if let Err(e) = space.revoke(self.cap_id) {
+        if let Err(_e) = space.revoke(self.cap_id) {
             println!(
                 "[RAII] Warning: Failed to revoke capability {}: {:?}",
-                self.cap_id, e
+                self.cap_id, _e
             );
         } else {
             println!("[RAII] Revoked capability {}", self.cap_id);
@@ -251,10 +252,10 @@ impl Drop for ProcessResources {
 
         // 1. First terminate all threads
         for &thread_id in self.threads.iter() {
-            if let Err(e) = crate::process::terminate_thread(self.pid, thread_id) {
+            if let Err(_e) = crate::process::terminate_thread(self.pid, thread_id) {
                 println!(
                     "[RAII] Warning: Failed to terminate thread {:?}: {:?}",
-                    thread_id, e
+                    thread_id, _e
                 );
             }
         }
@@ -280,6 +281,7 @@ impl Drop for ProcessResources {
 /// RAII lock guard that logs acquisition and release
 pub struct TrackedMutexGuard<'a, T> {
     guard: MutexGuard<'a, T>,
+    #[allow(dead_code)]
     name: &'static str,
 }
 
@@ -338,10 +340,10 @@ impl ChannelGuard {
 impl Drop for ChannelGuard {
     fn drop(&mut self) {
         // Remove from global registry
-        if let Err(e) = crate::ipc::registry::remove_channel(self.channel_id) {
+        if let Err(_e) = crate::ipc::registry::remove_channel(self.channel_id) {
             println!(
                 "[RAII] Warning: Failed to remove channel {}: {:?}",
-                self.channel_id, e
+                self.channel_id, _e
             );
         } else {
             println!("[RAII] Removed channel {} from registry", self.channel_id);

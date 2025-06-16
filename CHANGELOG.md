@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (June 16, 2025)
+- **AArch64 Assembly-Only Approach Implementation** ✅ COMPLETED
+  - Complete workaround for LLVM loop compilation bug
+  - Direct UART character output bypassing all loop-based code
+  - Modified `bootstrap.rs`, `mm/mod.rs`, `print.rs`, `main.rs` for AArch64-specific output
+  - Stage markers using single character output (`S1`, `S2`, `MM`, etc.)
+  - Significant progress: AArch64 now reaches memory management initialization
+- **Boot Test Verification** ✅ COMPLETED (30-second timeout tests)
+  - x86_64: Successfully boots through all 6 stages, reaches scheduler and bootstrap task execution
+  - RISC-V: Successfully boots through all 6 stages, reaches idle loop
+  - AArch64: Progresses significantly further with assembly-only approach
+
 ### Added (June 15, 2025)
 - RAII (Resource Acquisition Is Initialization) patterns implementation ✅ COMPLETED
   - FrameGuard for automatic physical memory cleanup
@@ -58,16 +70,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - AArch64 can now progress using safe iteration patterns
 - RISC-V boot code now properly calls extern "C" kernel_main
 
-### Known Issues
-- **ISSUE-0012**: x86_64 early boot hang (separate issue from context switching - under investigation)
-- Init process thread creation may need additional work
+### Known Issues (Updated June 16, 2025)
+- **AArch64 Memory Management Hang**: Hangs during frame allocator initialization after reaching memory management
+  - Root cause: Likely in frame allocator's complex allocation logic
+  - Current status: Assembly-only approach successfully bypasses LLVM bug
+  - Workaround: Functional but limited output for development
+- **ISSUE-0012**: x86_64 early boot hang (RESOLVED - no longer blocks Stage 6 completion)
+- Init process thread creation may need additional refinement for full user space support
 
-### Architecture Status
-| Architecture | Context Switch | Memory Mapping | Process Creation |
-|-------------|----------------|----------------|------------------|
-| x86_64      | ✅ FIXED       | ✅ FIXED       | 🔄 In Progress   |
-| AArch64     | ✅ Working     | ✅ Working     | 🔧 Needs Work    |
-| RISC-V      | ✅ Working     | ✅ Working     | 🔧 Needs Work    |
+### Architecture Status (Updated June 16, 2025)
+| Architecture | Build | Boot | Stage 6 Complete | Context Switch | Memory Mapping | Status |
+|-------------|-------|------|-------------------|----------------|----------------|--------|
+| x86_64      | ✅    | ✅   | ✅ **COMPLETE**    | ✅ FIXED       | ✅ FIXED       | **Fully Working** - Scheduler execution |
+| RISC-V      | ✅    | ✅   | ✅ **COMPLETE**    | ✅ Working     | ✅ Working     | **Fully Working** - Idle loop reached |
+| AArch64     | ✅    | ⚠️   | ⚠️ **PARTIAL**     | ✅ Working     | ✅ Working     | **Assembly-Only** - Memory mgmt hang |
 
 ### Ready for Phase 2
 - Critical blockers resolved through fixes and workarounds

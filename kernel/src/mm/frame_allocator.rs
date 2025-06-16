@@ -903,11 +903,11 @@ impl FrameAllocator {
     /// - The frame is not currently in use
     /// - The frame will not be used after this call
     pub unsafe fn free_frame(&self, frame: PhysicalFrame) {
-        if let Err(e) = self.free_frames(frame.number(), 1) {
+        if let Err(_e) = self.free_frames(frame.number(), 1) {
             println!(
                 "[FrameAllocator] Warning: Failed to free frame {}: {:?}",
                 frame.number().0,
-                e
+                _e
             );
         }
     }

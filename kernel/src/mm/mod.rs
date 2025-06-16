@@ -149,17 +149,35 @@ pub struct MemoryRegion {
 /// Initialize the memory management subsystem
 #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
 pub fn init(memory_map: &[MemoryRegion]) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            let uart = 0x0900_0000 as *mut u8;
+            *uart = b'M';
+            *uart = b'M';
+            *uart = b'S';
+            *uart = b'T';
+            *uart = b'A';
+            *uart = b'R';
+            *uart = b'T';
+            *uart = b'\n';
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[MM] Initializing memory management...");
 
     // Initialize frame allocator with available memory regions
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[MM] Getting frame allocator lock...");
     let mut allocator = FRAME_ALLOCATOR.lock();
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[MM] Got frame allocator lock");
 
     let mut total_memory = 0u64;
     let mut usable_memory = 0u64;
 
     for (idx, region) in memory_map.iter().enumerate() {
+        #[cfg(not(target_arch = "aarch64"))]
         println!(
             "[MM] Processing region {}: start=0x{:x}, size={} MB, usable={}",
             idx,
@@ -179,10 +197,13 @@ pub fn init(memory_map: &[MemoryRegion]) {
             // Use region index as NUMA node for now
             let numa_node = idx.min(7); // Max 8 NUMA nodes
 
+            #[cfg(not(target_arch = "aarch64"))]
             println!("[MM] About to call init_numa_node for node {}", numa_node);
             if let Err(_e) = allocator.init_numa_node(numa_node, start_frame, frame_count) {
+                #[cfg(not(target_arch = "aarch64"))]
                 println!("[MM] Warning: Failed to initialize memory region {}", idx);
             } else {
+                #[cfg(not(target_arch = "aarch64"))]
                 println!(
                     "[MM] Initialized {} MB at 0x{:x} (NUMA node {})",
                     region.size / (1024 * 1024),
@@ -194,9 +215,23 @@ pub fn init(memory_map: &[MemoryRegion]) {
     }
 
     drop(allocator); // Release lock before getting stats
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            let uart = 0x0900_0000 as *mut u8;
+            *uart = b'M';
+            *uart = b'M';
+            *uart = b'F';
+            *uart = b'I';
+            *uart = b'N';
+            *uart = b'\n';
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[MM] Allocator lock dropped");
 
     // Skip stats for now to avoid deadlock
+    #[cfg(not(target_arch = "aarch64"))]
     println!(
         "[MM] Memory initialized: {} MB total, {} MB usable",
         total_memory / (1024 * 1024),
@@ -206,6 +241,19 @@ pub fn init(memory_map: &[MemoryRegion]) {
 
 /// Initialize with default memory map for testing
 pub fn init_default() {
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            let uart = 0x0900_0000 as *mut u8;
+            *uart = b'M';
+            *uart = b'M';
+            *uart = b'D';
+            *uart = b'E';
+            *uart = b'F';
+            *uart = b'\n';
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[MM] init_default called");
 
     // Architecture-specific default memory maps
@@ -230,8 +278,36 @@ pub fn init_default() {
         usable: true,
     }];
 
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            let uart = 0x0900_0000 as *mut u8;
+            *uart = b'M';
+            *uart = b'M';
+            *uart = b'I';
+            *uart = b'N';
+            *uart = b'I';
+            *uart = b'T';
+            *uart = b'\n';
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[MM] Calling init with default memory map");
+
     init(&default_map);
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            let uart = 0x0900_0000 as *mut u8;
+            *uart = b'M';
+            *uart = b'M';
+            *uart = b'O';
+            *uart = b'K';
+            *uart = b'\n';
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[MM] init returned successfully");
 }
 

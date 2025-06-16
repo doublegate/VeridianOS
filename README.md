@@ -96,13 +96,29 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 **Phase 2 Status**: Ready to proceed with user space foundation implementation!
 
 
-### Architecture Support Status
+### Architecture Support Status (Updated: June 16, 2025)
 
-| Architecture | Build | Boot | Serial I/O | Context Switch | Status |
-|--------------|-------|------|------------|----------------|---------|
-| x86_64       | ✅    | ❌   | ⚠️         | ✅             | **Build OK** - Early boot hang (ISSUE-0012), context switching implemented |
-| RISC-V 64    | ✅    | ✅   | ✅         | ✅             | **Fully Working** - Most stable platform, boots successfully |
-| AArch64      | ✅    | ✅   | ✅         | ✅             | **Working with Workarounds** - Safe iteration patterns avoid compiler bug |
+| Architecture | Build | Boot | Serial I/O | Context Switch | Stage 6 Complete | Status |
+|--------------|-------|------|------------|----------------|-------------------|---------|
+| x86_64       | ✅    | ✅   | ✅         | ✅             | ✅ **COMPLETE**   | **Fully Working** - Reaches Stage 6, executes bootstrap task in scheduler context |
+| RISC-V 64    | ✅    | ✅   | ✅         | ✅             | ✅ **COMPLETE**   | **Fully Working** - Most stable platform, reaches idle loop |
+| AArch64      | ✅    | ⚠️   | ✅         | ✅             | ⚠️ **PARTIAL**    | **Assembly-Only Mode** - LLVM bug workaround, progresses to memory management |
+
+**Boot Test Results (30-second timeout tests)**:
+- **x86_64**: Successfully boots through all 6 stages, scheduler starts, bootstrap task executes
+- **RISC-V**: Successfully boots through all 6 stages, reaches idle loop  
+- **AArch64**: Uses assembly-only output to bypass LLVM bug, reaches memory management initialization but hangs during frame allocator setup
+
+### AArch64 LLVM Bug Workaround
+
+AArch64 development uses an **assembly-only approach** to bypass a critical LLVM loop compilation bug:
+
+- **Issue**: LLVM miscompiles iterator-based loops on AArch64, causing kernel hangs
+- **Solution**: All `println!` and `boot_println!` macros are no-ops on AArch64 
+- **Output Method**: Direct UART character writes (`*uart = b'X';`) for critical messages
+- **Files Modified**: `bootstrap.rs`, `mm/mod.rs`, `print.rs`, `main.rs`
+- **Progress**: Successfully bypasses the bug and reaches memory management initialization
+- **Reference**: See `kernel/src/arch/aarch64/README_LLVM_BUG.md` for technical details
 
 ## Quick Start
 

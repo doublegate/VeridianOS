@@ -72,15 +72,23 @@ pub extern "C" fn kernel_main() -> ! {
     // AArch64: Due to LLVM bug, we use manual prints for critical messages
     #[cfg(target_arch = "aarch64")]
     {
-        // Print basic kernel info using manual approach
-        uart_write!(
-            b'V', b'e', b'r', b'i', b'd', b'i', b'a', b'n', b'O', b'S', b' ',
-            b'K', b'e', b'r', b'n', b'e', b'l', b' ', b'v', b'0', b'.', b'2', b'.', b'0', b'\n'
-        );
-        uart_write!(
-            b'A', b'r', b'c', b'h', b'i', b't', b'e', b'c', b't', b'u', b'r', b'e', b':', b' ',
-            b'a', b'a', b'r', b'c', b'h', b'6', b'4', b'\n'
-        );
+        // First, output a simple marker to confirm we reach kernel_main
+        unsafe {
+            let uart = 0x0900_0000 as *mut u8;
+            *uart = b'M';
+            *uart = b'A';
+            *uart = b'I';
+            *uart = b'N';
+            *uart = b'\n';
+        }
+
+        // Skip all string printing - just output minimal markers
+        unsafe {
+            let uart = 0x0900_0000 as *mut u8;
+            *uart = b'O';
+            *uart = b'K';
+            *uart = b'\n';
+        }
     }
     #[cfg(not(target_arch = "aarch64"))]
     {
@@ -90,7 +98,6 @@ pub extern "C" fn kernel_main() -> ! {
         #[cfg(target_arch = "riscv64")]
         println!("Architecture: riscv64");
     }
-
 
     // Use bootstrap initialization for all architectures
     // For AArch64, bootstrap now uses safe iteration patterns

@@ -1,7 +1,7 @@
 //! RISC-V specific scheduler wrapper to bypass spin lock issues
 
-use core::cell::UnsafeCell;
-use core::sync::atomic::AtomicBool;
+use core::{cell::UnsafeCell, sync::atomic::AtomicBool};
+
 use super::scheduler::Scheduler;
 
 /// RISC-V safe scheduler wrapper
@@ -12,6 +12,7 @@ pub struct RiscvScheduler {
 
 impl RiscvScheduler {
     /// Create new scheduler
+    #[allow(clippy::new_without_default)]
     pub const fn new() -> Self {
         Self {
             inner: UnsafeCell::new(Scheduler::new()),
@@ -24,8 +25,8 @@ impl RiscvScheduler {
     pub fn lock(&self) -> RiscvSchedulerGuard<'_> {
         // For RISC-V, we bypass the lock during early boot
         // This is safe during single-threaded bootstrap
-        RiscvSchedulerGuard { 
-            scheduler: unsafe { &mut *self.inner.get() }
+        RiscvSchedulerGuard {
+            scheduler: unsafe { &mut *self.inner.get() },
         }
     }
 }
@@ -35,15 +36,15 @@ pub struct RiscvSchedulerGuard<'a> {
     scheduler: &'a mut Scheduler,
 }
 
-impl<'a> core::ops::Deref for RiscvSchedulerGuard<'a> {
+impl core::ops::Deref for RiscvSchedulerGuard<'_> {
     type Target = Scheduler;
-    
+
     fn deref(&self) -> &Self::Target {
         self.scheduler
     }
 }
 
-impl<'a> core::ops::DerefMut for RiscvSchedulerGuard<'a> {
+impl core::ops::DerefMut for RiscvSchedulerGuard<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.scheduler
     }

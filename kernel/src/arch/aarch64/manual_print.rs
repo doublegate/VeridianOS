@@ -1,5 +1,5 @@
 //! Manual printing helpers for AArch64
-//! 
+//!
 //! Due to the LLVM bug, this is the only reliable way to print on AArch64.
 //! Use these macros for critical boot messages.
 
@@ -29,11 +29,11 @@ macro_rules! uart_print_chars {
 /// Common messages as constants for easy use
 pub mod messages {
     /// Boot success message
-    pub const BOOT_OK: &[u8] = &[b'B', b'o', b'o', b't', b' ', b'O', b'K', b'\n'];
-    
+    pub const BOOT_OK: &[u8] = b"Boot OK\n";
+
     /// Error prefix
-    pub const ERROR: &[u8] = &[b'E', b'R', b'R', b'O', b'R', b':', b' '];
-    
+    pub const ERROR: &[u8] = b"ERROR: ";
+
     /// Warning prefix  
-    pub const WARN: &[u8] = &[b'W', b'A', b'R', b'N', b':', b' '];
+    pub const WARN: &[u8] = b"WARN: ";
 }

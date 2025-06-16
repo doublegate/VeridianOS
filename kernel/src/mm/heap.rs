@@ -242,10 +242,11 @@ pub fn init() -> Result<(), &'static str> {
         {
             // Initialize the global allocator directly
             crate::ALLOCATOR.init(heap_start, heap_size);
-            
+
             // Also initialize the locked allocator for compatibility
             let mut allocator = crate::get_allocator().lock();
             allocator.init(heap_start, heap_size);
+            #[allow(clippy::drop_non_drop)]
             drop(allocator);
         }
 
