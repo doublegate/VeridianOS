@@ -505,17 +505,19 @@ impl Scheduler {
             } else {
                 // First task, load its context directly
                 // This happens when scheduler starts with bootstrap task
-                #[cfg(target_arch = "x86_64")]
-                if let crate::sched::task::TaskContext::X86_64(ctx) = &(*next.as_ptr()).context {
-                    crate::arch::x86_64::context::load_context(ctx as *const _);
-                }
-                #[cfg(target_arch = "aarch64")]
-                if let crate::sched::task::TaskContext::AArch64(ctx) = &(*next.as_ptr()).context {
-                    crate::arch::aarch64::context::load_context(ctx as *const _);
-                }
-                #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-                if let crate::sched::task::TaskContext::RiscV(ctx) = &(*next.as_ptr()).context {
-                    crate::arch::riscv::context::load_context(ctx as *const _);
+                match &(*next.as_ptr()).context {
+                    #[cfg(target_arch = "x86_64")]
+                    crate::sched::task::TaskContext::X86_64(ctx) => {
+                        crate::arch::x86_64::context::load_context(ctx as *const _);
+                    }
+                    #[cfg(target_arch = "aarch64")]
+                    crate::sched::task::TaskContext::AArch64(ctx) => {
+                        crate::arch::aarch64::context::load_context(ctx as *const _);
+                    }
+                    #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+                    crate::sched::task::TaskContext::RiscV(ctx) => {
+                        crate::arch::riscv::context::load_context(ctx as *const _);
+                    }
                 }
             }
 

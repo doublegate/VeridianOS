@@ -399,7 +399,7 @@ pub unsafe extern "C" fn load_context(context: *const X86_64Context) {
         "jz 2f",
         "mov cr3, rax",
         "2:",
-        
+
         // Load segment registers (skip cs/ss as they'll be loaded by iretq)
         "mov ax, [rdi + 148]", // ds
         "mov ds, ax",

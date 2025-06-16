@@ -575,12 +575,13 @@ pub fn start() -> ! {
 
     // Start running tasks
     println!("[SCHED] Starting scheduler loop...");
-    
+
     // The scheduler loop
+    #[allow(clippy::never_loop)]
     loop {
         // Get the current task and execute it
         let scheduler = SCHEDULER.lock();
-        
+
         if let Some(current_task) = &scheduler.current {
             let task_ptr = current_task.as_ptr();
             let task = unsafe { &*task_ptr.as_ptr() };

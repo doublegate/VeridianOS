@@ -171,7 +171,7 @@ pub extern "C" fn bootstrap_stage4() -> ! {
                 panic!("[BOOTSTRAP] Failed to create init process: {}", e);
             }
         }
-        
+
         // Create test tasks for demonstration (after init process is ready)
         // This demonstrates context switching between multiple tasks
         println!("[BOOTSTRAP] Creating test tasks for context switch demonstration");
