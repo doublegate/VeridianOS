@@ -89,33 +89,6 @@ pub extern "C" fn kernel_main() -> ! {
         println!("Architecture: x86_64");
         #[cfg(target_arch = "riscv64")]
         println!("Architecture: riscv64");
-        println!("Test1");
-        println!("Test2");
-        println!("Testing println! macro...");
-    }
-    
-    // Add a simple direct test to see where it hangs
-    #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            let uart = 0x0900_0000 as *mut u8;
-            *uart = b'P';
-            *uart = b'O';
-            *uart = b'S';
-            *uart = b'T';
-            *uart = b'\n';
-        }
-    }
-
-    // Now try the bootstrap initialization
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        let uart = 0x0900_0000 as *mut u8;
-        *uart = b'B';
-        *uart = b'O';
-        *uart = b'O';
-        *uart = b'T';
-        *uart = b'\n';
     }
 
 
