@@ -69,85 +69,19 @@ fn panic(info: &PanicInfo) -> ! {
 
 #[no_mangle]
 pub extern "C" fn kernel_main() -> ! {
-    // For AArch64, add early debug output
+    // AArch64: Due to LLVM bug, we use manual prints for critical messages
     #[cfg(target_arch = "aarch64")]
-    unsafe {
-        let uart = 0x0900_0000 as *mut u8;
-        // Write "KERN" to show we reached kernel_main
-        *uart = b'K';
-        *uart = b'E';
-        *uart = b'R';
-        *uart = b'N';
-        *uart = b'\n';
+    {
+        // Print basic kernel info using manual approach
+        uart_write!(
+            b'V', b'e', b'r', b'i', b'd', b'i', b'a', b'n', b'O', b'S', b' ',
+            b'K', b'e', b'r', b'n', b'e', b'l', b' ', b'v', b'0', b'.', b'2', b'.', b'0', b'\n'
+        );
+        uart_write!(
+            b'A', b'r', b'c', b'h', b'i', b't', b'e', b'c', b't', b'u', b'r', b'e', b':', b' ',
+            b'a', b'a', b'r', b'c', b'h', b'6', b'4', b'\n'
+        );
     }
-
-    // For AArch64, test with direct writes first
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        let uart = 0x0900_0000 as *mut u8;
-        // Write without loops
-        *uart = b'V';
-        *uart = b'e';
-        *uart = b'r';
-        *uart = b'i';
-        *uart = b'd';
-        *uart = b'i';
-        *uart = b'a';
-        *uart = b'n';
-        *uart = b'O';
-        *uart = b'S';
-        *uart = b' ';
-        *uart = b'K';
-        *uart = b'e';
-        *uart = b'r';
-        *uart = b'n';
-        *uart = b'e';
-        *uart = b'l';
-        *uart = b' ';
-        *uart = b'v';
-        *uart = b'0';
-        *uart = b'.';
-        *uart = b'2';
-        *uart = b'.';
-        *uart = b'0';
-        *uart = b'\n';
-        *uart = b'A';
-        *uart = b'r';
-        *uart = b'c';
-        *uart = b'h';
-        *uart = b'i';
-        *uart = b't';
-        *uart = b'e';
-        *uart = b'c';
-        *uart = b't';
-        *uart = b'u';
-        *uart = b'r';
-        *uart = b'e';
-        *uart = b':';
-        *uart = b' ';
-        *uart = b'a';
-        *uart = b'a';
-        *uart = b'r';
-        *uart = b'c';
-        *uart = b'h';
-        *uart = b'6';
-        *uart = b'4';
-        *uart = b'\n';
-    }
-
-    // Now let's try println with a simple message
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        let uart = 0x0900_0000 as *mut u8;
-        // Test println
-        *uart = b'T';
-        *uart = b'E';
-        *uart = b'S';
-        *uart = b'T';
-        *uart = b'\n';
-    }
-
-    // Skip println! for AArch64 for now since it seems problematic
     #[cfg(not(target_arch = "aarch64"))]
     {
         println!("VeridianOS Kernel v{}", env!("CARGO_PKG_VERSION"));
@@ -155,7 +89,22 @@ pub extern "C" fn kernel_main() -> ! {
         println!("Architecture: x86_64");
         #[cfg(target_arch = "riscv64")]
         println!("Architecture: riscv64");
+        println!("Test1");
+        println!("Test2");
         println!("Testing println! macro...");
+    }
+    
+    // Add a simple direct test to see where it hangs
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            let uart = 0x0900_0000 as *mut u8;
+            *uart = b'P';
+            *uart = b'O';
+            *uart = b'S';
+            *uart = b'T';
+            *uart = b'\n';
+        }
     }
 
     // Now try the bootstrap initialization
@@ -168,6 +117,7 @@ pub extern "C" fn kernel_main() -> ! {
         *uart = b'T';
         *uart = b'\n';
     }
+
 
     // Use bootstrap initialization for all architectures
     // For AArch64, bootstrap now uses safe iteration patterns

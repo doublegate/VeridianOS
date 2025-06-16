@@ -1,0 +1,24 @@
+[package]
+name = "veridian-rt"
+version = "0.1.0"
+edition = "2021"
+authors = ["VeridianOS Contributors"]
+description = "User-space runtime library for VeridianOS"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/doublegate/VeridianOS"
+
+[dependencies]
+
+[features]
+default = []
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[profile.dev]
+panic = "abort"
+lto = false
+
+[profile.release]
+panic = "abort"
+lto = true

@@ -24,8 +24,11 @@ pub const HEAP_SIZE: usize = 16 * 1024 * 1024;
 #[cfg(target_arch = "x86_64")]
 pub const HEAP_START: usize = 0x444444440000; // Use an arbitrary high address that bootloader 0.9 maps
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(all(not(target_arch = "x86_64"), not(target_arch = "riscv64")))]
 pub const HEAP_START: usize = 0xFFFF_C000_0000_0000;
+
+#[cfg(target_arch = "riscv64")]
+pub const HEAP_START: usize = 0x81000000; // Use physical address that's likely mapped
 
 /// Slab allocator for efficient small allocations
 pub struct SlabAllocator {
@@ -226,59 +229,10 @@ impl SlabAllocator {
 
 /// Initialize the kernel heap
 pub fn init() -> Result<(), &'static str> {
-    // Use serial output instead of println for debugging
-    #[cfg(target_arch = "x86_64")]
-    {
-        use core::fmt::Write;
-        let mut serial = crate::arch::serial_init();
-        writeln!(
-            serial,
-            "[HEAP] Initializing kernel heap at 0x{:x}",
-            HEAP_START
-        )
-        .unwrap();
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
     println!("[HEAP] Initializing kernel heap at 0x{:x}", HEAP_START);
 
-    // For bootloader 0.9, we need to work with what's already mapped
-    // The bootloader identity maps the first few GB of memory
-    // So we'll use a static heap area that's already mapped
-
-    // Skip frame allocation for now - bootloader has already mapped memory
-    // In a real implementation, we'd properly allocate and map frames
-
-    // Initialize the allocator with the static heap area
-    #[cfg(target_arch = "x86_64")]
-    {
-        use core::fmt::Write;
-        let mut serial = crate::arch::serial_init();
-        writeln!(serial, "[HEAP] About to initialize allocator...").unwrap();
-        writeln!(
-            serial,
-            "[HEAP] Heap start: 0x{:x}, size: 0x{:x}",
-            HEAP_START, HEAP_SIZE
-        )
-        .unwrap();
-    }
-
     unsafe {
-        #[cfg(target_arch = "x86_64")]
-        {
-            use core::fmt::Write;
-            let mut serial = crate::arch::serial_init();
-            writeln!(serial, "[HEAP] Getting allocator lock...").unwrap();
-        }
-
         let mut allocator = crate::get_allocator().lock();
-
-        #[cfg(target_arch = "x86_64")]
-        {
-            use core::fmt::Write;
-            let mut serial = crate::arch::serial_init();
-            writeln!(serial, "[HEAP] Got allocator lock, calling init...").unwrap();
-        }
 
         // Use the static heap array instead of an arbitrary address
         // Use raw pointers to avoid static mut refs warning
@@ -286,27 +240,13 @@ pub fn init() -> Result<(), &'static str> {
         let heap_size = 4 * 1024 * 1024; // Size of HEAP_MEMORY
         allocator.init(heap_start, heap_size);
 
-        #[cfg(target_arch = "x86_64")]
-        {
-            use core::fmt::Write;
-            let mut serial = crate::arch::serial_init();
-            writeln!(serial, "[HEAP] Allocator init complete").unwrap();
-        }
-
         drop(allocator);
 
-        #[cfg(target_arch = "x86_64")]
-        {
-            use core::fmt::Write;
-            let mut serial = crate::arch::serial_init();
-            writeln!(
-                serial,
-                "[HEAP] Heap initialized: {} MB at 0x{:x}",
-                4, // 4MB heap size
-                core::ptr::addr_of!(HEAP_MEMORY) as usize
-            )
-            .unwrap();
-        }
+        println!(
+            "[HEAP] Heap initialized: {} MB at 0x{:x}",
+            4, // 4MB heap size
+            core::ptr::addr_of!(HEAP_MEMORY) as usize
+        );
     }
 
     Ok(())
