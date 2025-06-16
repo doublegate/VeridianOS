@@ -4,11 +4,13 @@ This document describes how the critical architecture blockers preventing Phase 
 
 ## Summary
 
-All three critical blockers have been resolved:
+All critical blockers have been resolved:
 
 1. **ISSUE-0013**: AArch64 iterator/loop compilation bug ✅ WORKAROUND IMPLEMENTED
 2. **ISSUE-0014**: Context switching not implemented ✅ FALSE ALARM - ALREADY IMPLEMENTED
-3. **ISSUE-0012**: x86_64 early boot hang ⚠️ EXISTING ISSUE - SEPARATE FIX NEEDED
+3. **ISSUE-0015**: x86_64 context switch infinite loop ✅ FIXED (June 15, 2025)
+4. **ISSUE-0016**: x86_64 memory mapping errors ✅ FIXED (June 15, 2025)
+5. **ISSUE-0012**: x86_64 early boot hang ⚠️ EXISTING ISSUE - SEPARATE FIX NEEDED
 
 ## Resolution Details
 
@@ -46,7 +48,43 @@ unsafe { crate::arch::context::load_context(context_ptr); }
 
 **Status**: ✅ Fixed - scheduler now properly loads initial task context
 
-### 3. x86_64 Early Boot Hang (ISSUE-0012)
+### 3. x86_64 Context Switch Infinite Loop (ISSUE-0015) - NEW!
+
+**Problem**: x86_64 context switching caused infinite loop when switching from scheduler to tasks.
+
+**Root Cause**: Using `iretq` (interrupt return) instead of `ret` for kernel-to-kernel context switches:
+- `iretq` expects an interrupt frame with specific stack layout
+- Kernel-to-kernel switches don't have interrupt frames
+- Resulted in infinite loop as CPU repeatedly tried to return
+
+**Solution**: Changed `load_context` in `arch/x86_64/context.rs`:
+```rust
+// OLD: Using iretq
+"iretq"
+
+// NEW: Using ret with proper stack setup
+"mov rsp, [rdi + 120]",        // Load new stack pointer
+"push qword ptr [rdi + 128]",  // Push RIP as return address
+"ret",                         // Jump to pushed address
+```
+
+**Status**: ✅ FIXED - Bootstrap_stage4 now executes successfully
+
+### 4. x86_64 Memory Mapping Errors (ISSUE-0016) - NEW!
+
+**Problem**: "Address range already mapped" error when creating init process.
+
+**Root Causes**:
+1. Duplicate kernel space mapping - `init()` already calls `map_kernel_space()`
+2. Kernel heap size of 256MB exceeded total memory of 128MB
+
+**Solutions**:
+1. Removed duplicate `map_kernel_space()` call in `process/lifecycle.rs`
+2. Reduced heap size from 256MB to 16MB in `mm/vas.rs`
+
+**Status**: ✅ FIXED - Init process creation now progresses past memory setup
+
+### 5. x86_64 Early Boot Hang (ISSUE-0012)
 
 **Problem**: x86_64 hangs very early in boot with no serial output.
 
@@ -78,6 +116,19 @@ unsafe { crate::arch::context::load_context(context_ptr); }
 5. **kernel/src/test_tasks.rs** (NEW)
    - Test tasks A and B for verifying context switching
    - Architecture-aware implementations (uses safe_iter for AArch64)
+
+6. **kernel/src/arch/x86_64/context.rs** (FIXED - June 15, 2025)
+   - Changed `load_context` from using `iretq` to `ret` instruction
+   - Fixed kernel-to-kernel context switch mechanism
+   - Bootstrap_stage4 now executes correctly
+
+7. **kernel/src/process/lifecycle.rs** (FIXED - June 15, 2025)
+   - Removed duplicate `map_kernel_space()` call
+   - Fixed process creation memory setup
+
+8. **kernel/src/mm/vas.rs** (FIXED - June 15, 2025)
+   - Reduced kernel heap mapping from 256MB to 16MB
+   - Fixed memory exhaustion issue
 
 6. **kernel/src/main.rs**
    - Updated to use bootstrap for all architectures

@@ -21,15 +21,16 @@
 ## 🚨 Critical Issues (P0)
 
 ### ISSUE-0012: x86_64 Boot Hang
-- **Status**: Open
+- **Status**: Open (Partial Progress)
 - **Component**: Kernel/Boot
 - **Reported**: 2025-06-13
 - **Reporter**: Boot Testing
 - **Assignee**: TBD
 - **Description**: x86_64 kernel hangs very early in boot with no serial output
-- **Impact**: x86_64 platform unusable
-- **Workaround**: Use RISC-V for testing
-- **Update (2025-06-15)**: Fixed to use full bootstrap from main.rs but still hangs
+- **Impact**: x86_64 platform early boot unusable
+- **Workaround**: Use RISC-V for testing early boot
+- **Update (2025-06-15)**: Fixed to use full bootstrap from main.rs but still hangs early
+- **Progress**: Context switching and memory mapping now work! See ISSUE-0015 and ISSUE-0016
 
 ### ISSUE-0013: AArch64 Iterator/Loop Compilation Bug
 - **Status**: RESOLVED with Workarounds ✅
@@ -90,6 +91,37 @@ Currently no medium priority issues.
 Currently no low priority issues.
 
 ## ✅ Recently Resolved Issues
+
+### ISSUE-0015: x86_64 Context Switch Infinite Loop
+- **Status**: RESOLVED ✅
+- **Component**: Kernel/Context Switching
+- **Reported**: 2025-06-15
+- **Resolved**: 2025-06-15
+- **Reporter**: Debugging Session
+- **Assignee**: Claude
+- **Description**: x86_64 context switching caused infinite loop when switching from scheduler
+- **Impact**: Could not execute tasks on x86_64
+- **Root Cause**: Using `iretq` (interrupt return) instead of `ret` for kernel-to-kernel context switch
+- **Fix**: Changed `load_context` in `arch/x86_64/context.rs` to use `ret` instruction
+- **Verification**: Bootstrap_stage4 now executes successfully
+- **Details**: `iretq` expects interrupt frame on stack, but kernel-to-kernel switches don't have that
+
+### ISSUE-0016: x86_64 Memory Mapping Errors
+- **Status**: RESOLVED ✅
+- **Component**: Kernel/Memory Management
+- **Reported**: 2025-06-15
+- **Resolved**: 2025-06-15
+- **Reporter**: Init Process Creation
+- **Assignee**: Claude
+- **Description**: "Address range already mapped" error when creating init process
+- **Impact**: Could not create user processes on x86_64
+- **Root Causes**: 
+  1. Duplicate kernel space mapping (init() already calls map_kernel_space())
+  2. Kernel heap size of 256MB exceeded total memory of 128MB
+- **Fixes**: 
+  1. Removed duplicate `map_kernel_space()` call in `process/lifecycle.rs`
+  2. Reduced heap size from 256MB to 16MB in `mm/vas.rs`
+- **Verification**: Init process creation now progresses past memory setup
 
 ### ISSUE-0001: CI Build Failures for Custom Targets
 - **Status**: Fixed/Verified

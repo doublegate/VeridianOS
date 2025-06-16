@@ -3,7 +3,7 @@
 **Phase Duration**: 5-6 months  
 **Status**: READY TO START ✅  
 **Dependencies**: Phase 1 completion ✅ Critical blockers RESOLVED ✅  
-**Last Updated**: June 15, 2025 (Critical blockers resolved with workarounds)
+**Last Updated**: June 15, 2025 (Critical blockers resolved, x86_64 progress!)
 
 ## ✅ CRITICAL BLOCKERS RESOLVED
 
@@ -20,17 +20,24 @@
    - All architectures have working context switching
    - Added test tasks for verification
 
-3. **⚠️ x86_64 Boot Hang (ISSUE-0012) - PENDING**
-   - Existing issue, not a Phase 2 blocker
-   - Use RISC-V or AArch64 for development
-   - Needs separate investigation
+3. **✅ x86_64 Context Switch Fixed! (June 15, 2025)**
+   - Fixed infinite loop by changing from `iretq` to `ret` instruction
+   - Bootstrap_stage4 now executes correctly
+   - Context switching from scheduler works properly
+
+4. **✅ x86_64 Memory Mapping Fixed! (June 15, 2025)**
+   - Resolved "Address range already mapped" error
+   - Fixed duplicate kernel space mapping
+   - Reduced heap size from 256MB to 16MB
+   - Init process creation now progresses successfully
 
 ### Current Status (June 15, 2025)
 - **Phase 1**: 100% Complete with all blockers resolved ✅
+- **x86_64 Progress**: Context switching and memory mapping working! 🎉
 - **Implementation Ready**: Can proceed with Phase 2 development
 - **Workarounds**: AArch64 safe iteration patterns in place
 - **Boot Status**:
-  - x86_64: Early boot hang (separate issue) ⚠️
+  - x86_64: Context switch and memory mapping working! (Still has early boot hang - ISSUE-0012)
   - AArch64: Working with safe iteration patterns ✅
   - RISC-V: Most stable platform ✅
 

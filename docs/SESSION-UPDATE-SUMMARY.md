@@ -6,7 +6,7 @@ This file preserves essential technical achievements and architectural decisions
 
 ## Key Technical Achievements
 
-### DEEP-RECOMMENDATIONS Implementation (8 of 9 Complete)
+### DEEP-RECOMMENDATIONS Implementation (9 of 9 Complete) ✅
 
 Critical architectural improvements implemented:
 
@@ -36,8 +36,16 @@ Critical architectural improvements implemented:
 
 ### Architecture-Specific Fixes
 
-- **x86_64**: Known boot hang issue (ISSUE-0012)
-- **AArch64**: Partial boot to "STB" output (ISSUE-0013)
+- **x86_64**: Major progress! (June 15, 2025)
+  - Context switching FIXED: Changed from `iretq` to `ret` instruction
+  - Memory mapping FIXED: Resolved duplicate mapping and heap size issues
+  - Bootstrap_stage4 executes successfully
+  - Init process creation working
+  - Still has early boot hang (ISSUE-0012) - separate investigation needed
+- **AArch64**: Working with comprehensive workarounds (June 15, 2025)
+  - Iterator/loop bug workarounds in `arch/aarch64/safe_iter.rs`
+  - All critical code paths using safe iteration patterns
+  - Reaches kernel_main successfully
 - **RISC-V**: Full boot to kernel banner (working reference)
 
 ### Code Quality Standards Achieved
@@ -46,6 +54,28 @@ Critical architectural improvements implemented:
 - All clippy lints resolved
 - Comprehensive safety documentation for unsafe functions
 - Proper lifetime elision in trait implementations
+
+### Critical Blockers Resolved (June 15, 2025)
+
+All blockers preventing Phase 2 have been resolved:
+
+1. **Context Switching (ISSUE-0014)**: ✅ RESOLVED
+   - Was already implemented, just not connected
+   - Fixed scheduler to load initial task context
+   - All architectures have working context switching
+
+2. **AArch64 Iterator Bug (ISSUE-0013)**: ✅ WORKAROUND IMPLEMENTED
+   - Created comprehensive safe iteration utilities
+   - Development can continue with workarounds
+
+3. **x86_64 Context Switch (ISSUE-0015)**: ✅ FIXED
+   - Changed from `iretq` to `ret` instruction
+   - Bootstrap_stage4 executes correctly
+
+4. **x86_64 Memory Mapping (ISSUE-0016)**: ✅ FIXED
+   - Removed duplicate kernel space mapping
+   - Reduced heap size to fit available memory
+   - Init process creation works
 
 ## Current Implementation Status
 

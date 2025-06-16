@@ -78,11 +78,9 @@ pub fn create_process_with_options(
     // Set up the process's address space
     {
         let mut memory_space = process.memory_space.lock();
+        // init() already maps kernel space, so we don't need to call map_kernel_space()
+        // again
         memory_space.init()?;
-
-        // Map kernel space (higher half)
-        // This is typically shared among all processes
-        memory_space.map_kernel_space()?;
     }
 
     // Create the main thread

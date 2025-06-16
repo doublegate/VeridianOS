@@ -61,6 +61,10 @@ pub struct FpuState {
 impl X86_64Context {
     /// Create new context for a task
     pub fn new(entry_point: usize, stack_pointer: usize) -> Self {
+        // Adjust stack pointer to leave room for a fake return address
+        // This prevents issues if the called function tries to access stack arguments
+        let adjusted_sp = (stack_pointer - 8) as u64;
+
         Self {
             // Clear all general purpose registers
             r15: 0,
@@ -79,14 +83,14 @@ impl X86_64Context {
             rcx: 0,
             rax: 0,
 
-            // Set stack pointer to top of stack
-            rsp: stack_pointer as u64,
+            // Set stack pointer with adjustment
+            rsp: adjusted_sp,
 
             // Set instruction pointer to entry point
             rip: entry_point as u64,
 
-            // Default RFLAGS (interrupts enabled)
-            rflags: 0x202,
+            // Default RFLAGS (interrupts disabled for now)
+            rflags: 0x002,
 
             // Kernel segments
             cs: 0x08, // Kernel code segment
@@ -389,7 +393,7 @@ unsafe impl Sync for X86_64Context {}
 #[no_mangle]
 pub unsafe extern "C" fn load_context(context: *const X86_64Context) {
     // Load context directly using inline assembly
-    // This is not a naked function to avoid unstable features
+    // For kernel-to-kernel context switch, we can use a simpler approach
     asm!(
         // rdi = context pointer
 
@@ -400,11 +404,20 @@ pub unsafe extern "C" fn load_context(context: *const X86_64Context) {
         "mov cr3, rax",
         "2:",
 
-        // Load segment registers (skip cs/ss as they'll be loaded by iretq)
+        // Load segment registers
         "mov ax, [rdi + 148]", // ds
         "mov ds, ax",
         "mov ax, [rdi + 150]", // es
         "mov es, ax",
+
+        // Load stack pointer and push return address
+        "mov rsp, [rdi + 120]",
+        "push qword ptr [rdi + 128]", // Push RIP as return address
+
+        // Load RFLAGS
+        "push qword ptr [rdi + 136]",
+        "popfq",
+
         // Load general purpose registers
         "mov r15, [rdi]",
         "mov r14, [rdi + 8]",
@@ -420,25 +433,12 @@ pub unsafe extern "C" fn load_context(context: *const X86_64Context) {
         "mov rdx, [rdi + 96]",
         "mov rcx, [rdi + 104]",
         "mov rax, [rdi + 112]",
-        // Load stack pointer
-        "mov rsp, [rdi + 120]",
-        // Push values for iretq - note the order and sizes!
-        // SS is at offset 146 (u16) - need to zero-extend
-        "movzx rax, word ptr [rdi + 146]",
-        "push rax",
-        // RSP
-        "push qword ptr [rdi + 120]",
-        // RFLAGS
-        "push qword ptr [rdi + 136]",
-        // CS is at offset 144 (u16) - need to zero-extend
-        "movzx rax, word ptr [rdi + 144]",
-        "push rax",
-        // RIP
-        "push qword ptr [rdi + 128]",
+
         // Load final register
         "mov rdi, [rdi + 64]",
-        // Return to loaded context
-        "iretq",
+
+        // Return to loaded context (RIP was pushed earlier)
+        "ret",
         in("rdi") context,
         options(noreturn)
     );

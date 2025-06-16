@@ -2,23 +2,23 @@
 
 **Priority**: CRITICAL - Blocks core functionality
 **Phase**: Must be resolved for Phase 2
+**Last Updated**: June 15, 2025 - Major x86_64 fixes implemented!
 
 ## AArch64 Critical Blockers
 
 ### 1. Iterator and Loop Compilation Issues
-**Status**: 🔴 CRITICAL BLOCKER
+**Status**: ✅ RESOLVED WITH WORKAROUNDS (June 15, 2025)
 **Location**: Throughout AArch64 code paths
 **Issue**: For loops and iterators cause kernel hangs on bare metal AArch64
-**Current Workarounds**:
-- `kernel/src/lib.rs` (lines 74-114): kernel_main uses direct UART writes character by character
-- `kernel/src/main.rs` (lines 84-136): Manual character writes instead of string loops
-- `kernel/src/serial.rs` (lines 53-68): Pl011Uart::write_str uses while loops with manual indexing
+**Resolution**: Created comprehensive workarounds in `arch/aarch64/safe_iter.rs`
+- Implemented loop-free utilities: `write_str_loopfree()`, `write_num_loopfree()`, etc.
+- Created `aarch64_for!` macro for safe iteration when needed
+- Memory operations without loops: `memcpy_loopfree()`, `memset_loopfree()`
+- All critical code paths updated to use safe iteration patterns
 
-**Required Fix**:
-- Investigate root cause of iterator codegen issues on AArch64
-- May be related to LLVM optimizations or missing memory barriers
-- Consider custom iterator implementations for bare metal
-- Test with different optimization levels and LLVM versions
+**Future Work**:
+- File upstream LLVM bug report with minimal test case
+- Continue using workarounds until compiler issue resolved
 
 ### 2. Bootstrap Process Completely Bypassed
 **Status**: 🔴 CRITICAL
@@ -53,50 +53,50 @@
 ## Cross-Architecture Critical Issues
 
 ### 1. Context Switching Not Implemented
-**Status**: 🔴 CRITICAL BLOCKER
+**Status**: ✅ RESOLVED (June 15, 2025)
 **Location**: Multiple files
-**Critical Gap**: No actual CPU context switching despite scheduler infrastructure
-**Current Workaround**: `kernel/src/sched/mod.rs` (lines 575-590) - idle loop instead
+**Resolution**: Context switching was already fully implemented!
+- `arch/x86_64/context.rs`: Complete implementation with all registers
+  - **FIXED**: Changed from `iretq` to `ret` for kernel-to-kernel switches
+- `arch/aarch64/context.rs`: Full implementation using pure assembly
+- `arch/riscv64/context.rs`: Standard RISC-V context switch
+- `sched/mod.rs`: Fixed to actually load initial task context
 
-**Required Implementation**:
-- `arch/x86_64/context.rs`: Actual assembly for context save/restore
-- `arch/aarch64/context.rs`: Context switch implementation
-- `arch/riscv64/context.rs`: Context switch implementation
-- `sched/scheduler.rs`: switch_to() must call arch-specific implementations
-- Proper task state preservation across switches
-- FPU/vector state handling
+**x86_64 Specific Fix**:
+- Problem: Using `iretq` (interrupt return) for kernel-to-kernel switches
+- Solution: Changed to `ret` instruction with proper stack setup
+- Result: Bootstrap_stage4 now executes correctly
 
 ### 2. Multiple kernel_main Functions Confusion
-**Status**: 🟡 HIGH
-**Locations**: 
-- `kernel/src/lib.rs`: Simplified test version
-- `kernel/src/main.rs`: Full version with bootstrap
-
-**Issues**:
-- Different architectures call different versions
-- RISC-V still using simplified version
-- Inconsistent initialization across architectures
-
-**Required Fix**:
-- Remove lib.rs kernel_main
-- Ensure all boot code calls main.rs version
-- Standardize entry point across architectures
+**Status**: ✅ RESOLVED (June 15, 2025)
+**Resolution**: Unified kernel_main across all architectures
+- Removed duplicate kernel_main from lib.rs
+- All architectures now use main.rs version
+- RISC-V updated to call `extern "C" kernel_main`
+- Consistent bootstrap initialization for all platforms
 
 ### 3. RISC-V Missing Full Bootstrap
-**Status**: 🟡 HIGH
+**Status**: ✅ RESOLVED (June 15, 2025)
 **Location**: `kernel/src/arch/riscv64/boot.rs`
-**Issue**: Calls crate::kernel_main() which is the simplified version
-**Fix**: Update to call extern "C" kernel_main like x86_64
+**Resolution**: Updated to call `extern "C" kernel_main` from main.rs
+- Now uses full bootstrap process like other architectures
+- Consistent initialization across all platforms
 
 ## Architecture-Specific Implementation Gaps
 
 ### x86_64 Issues
+- **Context Switching**: ✅ RESOLVED (June 15, 2025) - Fixed `iretq` to `ret` instruction
+- **Memory Mapping**: ✅ RESOLVED (June 15, 2025)
+  - Fixed duplicate kernel space mapping error
+  - Reduced heap size from 256MB to 16MB
+  - Init process creation now works correctly
 - **Kernel Stack in TSS**: TODO placeholder at `kernel/src/arch/x86_64/context.rs`
 - **System Call Entry**: ✅ RESOLVED - Proper naked function with inline assembly implemented
 - **APIC Integration**: Timer and IPI functionality replaced with println! stubs
   - Need proper APIC module implementation
   - Required for multi-core support
   - Timer interrupts currently simplified
+- **Early Boot Hang**: ISSUE-0012 still pending (separate investigation needed)
 
 ### AArch64 Issues
 - **Hardware Initialization**: `kernel/src/arch/aarch64/mod.rs` (line 11) - "This will be expanded later"

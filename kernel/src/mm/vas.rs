@@ -169,10 +169,10 @@ impl VirtualAddressSpace {
                 MappingType::Data,
             )?;
 
-            // Map kernel heap region
+            // Map kernel heap region (reduced from 256MB to 16MB)
             self.map_region(
                 VirtualAddress(0xFFFF_C000_0000_0000),
-                0x1000_0000, // 256MB for kernel heap
+                0x1000000, // 16MB for kernel heap (instead of 256MB)
                 MappingType::Heap,
             )?;
         }

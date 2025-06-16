@@ -137,34 +137,32 @@ pub extern "C" fn bootstrap_stage4() -> ! {
     {
         use alloc::string::String;
 
-        match process::lifecycle::create_process(String::from("init"), 0) {
+        let init_entry = init_process_main as usize;
+        match process::lifecycle::create_process(String::from("init"), init_entry) {
             Ok(init_pid) => {
                 println!("[BOOTSTRAP] Created init process with PID {}", init_pid.0);
 
-                // Create main thread for init process
-                if let Some(init_proc) = process::table::get_process_mut(init_pid) {
-                    let entry = init_process_main as usize;
-                    match process::create_thread(entry, 0, 0, 0) {
-                        Ok(tid) => {
-                            println!(
-                                "[BOOTSTRAP] Created init thread {} for PID {}",
-                                tid.0, init_pid.0
-                            );
-
-                            // Schedule the init thread
-                            if let Some(thread) = init_proc.get_thread(tid) {
-                                if let Err(e) = sched::schedule_thread(init_pid, tid, thread) {
-                                    println!(
-                                        "[BOOTSTRAP] Warning: Failed to schedule init thread: {}",
-                                        e
-                                    );
-                                }
+                // The init process already has a main thread created by create_process
+                // We just need to schedule it
+                if let Some(init_proc) = process::table::get_process(init_pid) {
+                    // Get the main thread ID
+                    if let Some(tid) = init_proc.get_main_thread_id() {
+                        // Get the thread itself
+                        if let Some(main_thread) = init_proc.get_thread(tid) {
+                            if let Err(e) = sched::schedule_thread(init_pid, tid, main_thread) {
+                                println!(
+                                    "[BOOTSTRAP] Warning: Failed to schedule init thread: {}",
+                                    e
+                                );
                             }
+                        } else {
+                            panic!("[BOOTSTRAP] Failed to get init main thread!");
                         }
-                        Err(e) => {
-                            panic!("[BOOTSTRAP] Failed to create init thread: {}", e);
-                        }
+                    } else {
+                        panic!("[BOOTSTRAP] Init process has no main thread!");
                     }
+                } else {
+                    panic!("[BOOTSTRAP] Failed to find init process after creation!");
                 }
             }
             Err(e) => {
@@ -176,6 +174,11 @@ pub extern "C" fn bootstrap_stage4() -> ! {
         // This demonstrates context switching between multiple tasks
         println!("[BOOTSTRAP] Creating test tasks for context switch demonstration");
         crate::test_tasks::create_test_tasks();
+    }
+
+    #[cfg(not(feature = "alloc"))]
+    {
+        println!("[BOOTSTRAP] Warning: alloc feature not enabled, skipping init process creation");
     }
 
     println!("[BOOTSTRAP] Bootstrap complete, transitioning to idle task");
