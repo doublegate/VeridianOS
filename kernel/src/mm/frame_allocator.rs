@@ -10,10 +10,9 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
 // Import println! macro
-use crate::{
-    println,
-    raii::{FrameGuard, FramesGuard},
-};
+#[cfg(not(target_arch = "aarch64"))]
+use crate::println;
+use crate::raii::{FrameGuard, FramesGuard};
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -589,6 +588,7 @@ impl FrameAllocator {
         start_frame: FrameNumber,
         frame_count: usize,
     ) -> Result<()> {
+        #[cfg(not(target_arch = "aarch64"))]
         println!(
             "[FA] init_numa_node: node={}, start_frame={}, frame_count={}",
             node,
@@ -604,24 +604,30 @@ impl FrameAllocator {
         let bitmap_frames = frame_count.min(1024 * 1024); // Max 4GB for bitmap
         let buddy_frames = frame_count.saturating_sub(bitmap_frames);
 
+        #[cfg(not(target_arch = "aarch64"))]
         println!(
             "[FA] bitmap_frames={}, buddy_frames={}",
             bitmap_frames, buddy_frames
         );
 
         if bitmap_frames > 0 {
+            #[cfg(not(target_arch = "aarch64"))]
             println!("[FA] Creating BitmapAllocator...");
             self.bitmap_allocators[node] = Some(BitmapAllocator::new(start_frame, bitmap_frames));
+            #[cfg(not(target_arch = "aarch64"))]
             println!("[FA] BitmapAllocator created");
         }
 
         if buddy_frames > 0 {
+            #[cfg(not(target_arch = "aarch64"))]
             println!("[FA] Creating BuddyAllocator...");
             let buddy_start = FrameNumber::new(start_frame.as_u64() + bitmap_frames as u64);
             self.buddy_allocators[node] = Some(BuddyAllocator::new(buddy_start, buddy_frames));
+            #[cfg(not(target_arch = "aarch64"))]
             println!("[FA] BuddyAllocator created");
         }
 
+        #[cfg(not(target_arch = "aarch64"))]
         println!("[FA] Skipping stats update during init to avoid deadlock");
 
         Ok(())
@@ -904,6 +910,7 @@ impl FrameAllocator {
     /// - The frame will not be used after this call
     pub unsafe fn free_frame(&self, frame: PhysicalFrame) {
         if let Err(_e) = self.free_frames(frame.number(), 1) {
+            #[cfg(not(target_arch = "aarch64"))]
             println!(
                 "[FrameAllocator] Warning: Failed to free frame {}: {:?}",
                 frame.number().0,

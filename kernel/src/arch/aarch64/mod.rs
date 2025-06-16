@@ -11,6 +11,14 @@ pub mod timer;
 #[allow(dead_code)]
 pub fn init() {
     // Architecture-specific initialization
+    unsafe {
+        let uart = 0x0900_0000 as *mut u8;
+        core::ptr::write_volatile(uart, b'A');
+        core::ptr::write_volatile(uart, b'R');
+        core::ptr::write_volatile(uart, b'C');
+        core::ptr::write_volatile(uart, b'H');
+        core::ptr::write_volatile(uart, b'\n');
+    }
     // This will be expanded later
 }
 

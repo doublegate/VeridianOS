@@ -1,18 +1,19 @@
-<div align="center">
-
+<!-- markdownlint-disable MD033 -->
 # VeridianOS
+
+<div align="center">
 
 <img src="images/VeridianOS_Logo-Only.png" alt="VeridianOS Logo" width="60%" />
 
 ## A next-generation microkernel operating system built with Rust
-
-</div>
 
 [![CI Status](https://github.com/doublegate/VeridianOS/workflows/CI/badge.svg)](https://github.com/doublegate/VeridianOS/actions)
 [![Coverage](https://codecov.io/gh/doublegate/VeridianOS/branch/main/graph/badge.svg)](https://codecov.io/gh/doublegate/VeridianOS)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE-MIT)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE-APACHE)
 [![Discord](https://img.shields.io/discord/123456789?label=Discord&logo=discord)](https://discord.gg/veridian)
+
+</div>
 
 ## Overview
 
@@ -56,6 +57,7 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 **MAJOR PROGRESS: x86_64 Context Switching and Memory Mapping FIXED!** 🎉
 
 **Critical Fixes Implemented**:
+
 - ✅ **x86_64 Context Switch**: Fixed by changing from `iretq` to `ret` instruction - bootstrap_stage4 now executes!
 - ✅ **Memory Mapping**: Fixed duplicate kernel space mapping and reduced heap size from 256MB to 16MB
 - ✅ **Process Creation**: Init process creation now progresses successfully past memory setup
@@ -63,18 +65,21 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 - ✅ **ISSUE-0014 RESOLVED**: Context switching - Fixed across all architectures
 
 **x86_64 Specific Achievements**:
+
 - Context switching from scheduler to bootstrap_stage4 works correctly
 - Virtual address space (VAS) initialization completes successfully
 - Process creation infrastructure functional (PID allocation, memory setup)
 - Ready for user-space application development
 
 **Architecture-Wide Improvements**:
+
 - Unified kernel_main entry point across all architectures
 - Zero warnings policy maintained
 - Improved scheduler integration with proper task loading
 - Enhanced memory management with proper size constraints
 
 **DEEP-RECOMMENDATIONS Status (9 of 9 Complete)** ✅:
+
 - ✅ Bootstrap module - fixed circular dependency
 - ✅ AArch64 calling convention - proper BSS clearing
 - ✅ Atomic operations - replaced unsafe static mutable access
@@ -95,7 +100,6 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 
 **Phase 2 Status**: Ready to proceed with user space foundation implementation!
 
-
 ### Architecture Support Status (Updated: June 16, 2025)
 
 | Architecture | Build | Boot | Serial I/O | Context Switch | Stage 6 Complete | Status |
@@ -105,8 +109,9 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 | AArch64      | ✅    | ⚠️   | ✅         | ✅             | ⚠️ **PARTIAL**    | **Assembly-Only Mode** - LLVM bug workaround, progresses to memory management |
 
 **Boot Test Results (30-second timeout tests)**:
+
 - **x86_64**: Successfully boots through all 6 stages, scheduler starts, bootstrap task executes
-- **RISC-V**: Successfully boots through all 6 stages, reaches idle loop  
+- **RISC-V**: Successfully boots through all 6 stages, reaches idle loop
 - **AArch64**: Uses assembly-only output to bypass LLVM bug, reaches memory management initialization but hangs during frame allocator setup
 
 ### AArch64 LLVM Bug Workaround
@@ -114,7 +119,7 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 AArch64 development uses an **assembly-only approach** to bypass a critical LLVM loop compilation bug:
 
 - **Issue**: LLVM miscompiles iterator-based loops on AArch64, causing kernel hangs
-- **Solution**: All `println!` and `boot_println!` macros are no-ops on AArch64 
+- **Solution**: All `println!` and `boot_println!` macros are no-ops on AArch64
 - **Output Method**: Direct UART character writes (`*uart = b'X';`) for critical messages
 - **Files Modified**: `bootstrap.rs`, `mm/mod.rs`, `print.rs`, `main.rs`
 - **Progress**: Successfully bypasses the bug and reaches memory management initialization
@@ -223,7 +228,7 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 VeridianOS uses a microkernel architecture with the following key components:
 
-```
+```ascii
 ┌─────────────────────────────────────────────┐
 │              User Applications              │
 ├─────────────────────────────────────────────┤
@@ -360,8 +365,11 @@ VeridianOS builds upon ideas from many excellent operating systems:
 
 <div align="center">
 
+![Alt](https://repobeats.axiom.co/api/embed/1292141e5c9e3241d1afa584338f1dfdb278a269.svg "Repobeats analytics image")
+
 <img src="images/VeridianOS_Full-Logo.png" alt="VeridianOS Full Banner" width="60%" />
 
 **Building the future of operating systems, one commit at a time.**
 
-![Alt](https://repobeats.axiom.co/api/embed/1292141e5c9e3241d1afa584338f1dfdb278a269.svg "Repobeats analytics image")</div>
+</div>
+<!-- markdownlint-enable MD033 -->

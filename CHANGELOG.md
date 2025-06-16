@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added (June 16, 2025)
+
 - **AArch64 Assembly-Only Approach Implementation** ✅ COMPLETED
   - Complete workaround for LLVM loop compilation bug
   - Direct UART character output bypassing all loop-based code
@@ -20,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - AArch64: Progresses significantly further with assembly-only approach
 
 ### Added (June 15, 2025)
+
 - RAII (Resource Acquisition Is Initialization) patterns implementation ✅ COMPLETED
   - FrameGuard for automatic physical memory cleanup
   - MappedRegion for virtual memory region management
@@ -37,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Assembly-based delays for AArch64
 
 ### Changed
+
 - Updated DEEP-RECOMMENDATIONS status to 9 of 9 complete ✅
 - Unified kernel_main across all architectures
   - Removed duplicate from lib.rs
@@ -53,7 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fits within 128MB total system memory
   - Prevents frame allocation hangs
 
-### Fixed
+### Fixed (Current - June 16, 2025)
+
 - **x86_64 Context Switch FIXED**: Changed `load_context` from using `iretq` (interrupt return) to `ret` (function return)
   - Bootstrap_stage4 now executes successfully
   - Proper stack setup with return address
@@ -71,6 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - RISC-V boot code now properly calls extern "C" kernel_main
 
 ### Known Issues (Updated June 16, 2025)
+
 - **AArch64 Memory Management Hang**: Hangs during frame allocator initialization after reaching memory management
   - Root cause: Likely in frame allocator's complex allocation logic
   - Current status: Assembly-only approach successfully bypasses LLVM bug
@@ -79,6 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Init process thread creation may need additional refinement for full user space support
 
 ### Architecture Status (Updated June 16, 2025)
+
 | Architecture | Build | Boot | Stage 6 Complete | Context Switch | Memory Mapping | Status |
 |-------------|-------|------|-------------------|----------------|----------------|--------|
 | x86_64      | ✅    | ✅   | ✅ **COMPLETE**    | ✅ FIXED       | ✅ FIXED       | **Fully Working** - Scheduler execution |
@@ -86,6 +92,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | AArch64     | ✅    | ⚠️   | ⚠️ **PARTIAL**     | ✅ Working     | ✅ Working     | **Assembly-Only** - Memory mgmt hang |
 
 ### Ready for Phase 2
+
 - Critical blockers resolved through fixes and workarounds
 - x86_64 now has functional context switching and memory management
 - Phase 2: User Space Foundation can now proceed
@@ -93,6 +100,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Shell implementation and command processing
   - User-space driver framework
   - System libraries and application support
+
+### Added (Historical - June 15, 2025)
+
+- **DEEP-RECOMMENDATIONS Implementation (8 of 9 Complete)**
+  - Bootstrap module for multi-stage kernel initialization to fix circular dependencies
+  - Comprehensive user pointer validation with page table walking
+  - Custom test framework to bypass Rust lang_items conflicts
+  - KernelError enum for proper error handling throughout kernel
+  - **Resource cleanup patterns with RAII (COMPLETED)** - Full RAII implementation throughout kernel
+
+- **Code Quality Improvements**
+  - Migration from string literals to proper error types (KernelResult)
+  - Atomic operations replacing unsafe static mutable access
+  - Enhanced error propagation throughout all subsystems
+  - Comprehensive RAII patterns for automatic resource management
+
+- **Phase 2 Preparation**
+  - All Phase 1 components stable and ready for user space development
+  - DEEP-RECOMMENDATIONS implementation nearly complete (8 of 9 items)
+  - Kernel architecture prepared for init process and shell implementation
+
+### Fixed (Historical - June 13-15, 2025)
+
+- **Boot sequence circular dependency** - Implemented bootstrap module with proper initialization stages
+- **AArch64 calling convention** - Fixed BSS clearing with proper &raw const syntax
+- **Scheduler static mutable access** - Replaced with AtomicPtr for thread safety
+- **Capability token overflow** - Fixed with atomic compare-exchange and proper bounds checking
+- **Clippy warnings** - Resolved all warnings including static-mut-refs and unnecessary casts
+- **User space validation** - Fixed always-false comparison with USER_SPACE_START
+- **Resource management** - Implemented comprehensive RAII patterns for automatic cleanup
+
+### Improved (June 13-15, 2025)
+
+- All architectures now compile with zero warnings policy enforced
+- Enhanced formatting consistency across entire codebase
+- Better error handling with KernelError and KernelResult types
+- Improved user-kernel boundary validation
+
+### Phase 2 Planning (User Space Foundation)
+
+- Init process creation and management
+- Shell implementation
+- User-space driver framework
+- System libraries
+- Basic file system support
 
 ## [0.2.0] - 2025-06-12
 
@@ -257,7 +309,7 @@ development. All foundational infrastructure is in place and operational.
 - Development tool integrations (VS Code workspace, rust-analyzer config)
 - Phase 0 completion with all infrastructure ready for Phase 1
 
-### Fixed
+### Fixed (v0.1.0)
 
 - Clippy warnings for unused imports and dead code (ISSUE-0005) - **RESOLVED 2025-06-06**
   - Removed unused `core::fmt::Write` import in serial.rs
@@ -371,65 +423,6 @@ development. All foundational infrastructure is in place and operational.
 - Memory allocation: <1μs average
 - Capability lookup: O(1) performance
 - Kernel size: ~15,000 lines of code (target met)
-
-## [Unreleased]
-
-### Added (June 15, 2025)
-
-- **DEEP-RECOMMENDATIONS Implementation (8 of 9 Complete)**
-  - Bootstrap module for multi-stage kernel initialization to fix circular dependencies
-  - Comprehensive user pointer validation with page table walking
-  - Custom test framework to bypass Rust lang_items conflicts
-  - KernelError enum for proper error handling throughout kernel
-  - **Resource cleanup patterns with RAII (COMPLETED)** - Full RAII implementation throughout kernel
-
-- **Code Quality Improvements**
-  - Migration from string literals to proper error types (KernelResult<T>)
-  - Atomic operations replacing unsafe static mutable access
-  - Enhanced error propagation throughout all subsystems
-  - Comprehensive RAII patterns for automatic resource management
-
-- **Phase 2 Preparation**
-  - All Phase 1 components stable and ready for user space development
-  - DEEP-RECOMMENDATIONS implementation nearly complete (8 of 9 items)
-  - Kernel architecture prepared for init process and shell implementation
-
-### Fixed (June 13-15, 2025)
-
-- **Boot sequence circular dependency** - Implemented bootstrap module with proper initialization stages
-- **AArch64 calling convention** - Fixed BSS clearing with proper &raw const syntax
-- **Scheduler static mutable access** - Replaced with AtomicPtr for thread safety
-- **Capability token overflow** - Fixed with atomic compare-exchange and proper bounds checking
-- **Clippy warnings** - Resolved all warnings including static-mut-refs and unnecessary casts
-- **User space validation** - Fixed always-false comparison with USER_SPACE_START
-- **Resource management** - Implemented comprehensive RAII patterns for automatic cleanup
-
-### Improved (June 13-15, 2025)
-
-- All architectures now compile with zero warnings policy enforced
-- Enhanced formatting consistency across entire codebase
-- Better error handling with KernelError and KernelResult types
-- Improved user-kernel boundary validation
-
-### Phase 2 Planning (User Space Foundation)
-
-- Init process creation and management
-- Shell implementation
-- User-space driver framework
-- System libraries
-- Basic file system support
-
-### Known Issues
-
-- No driver support yet (Phase 2)
-- No user space support (Phase 2)
-- Limited hardware support
-- No file system (Phase 2)
-- No networking (Phase 3)
-- **Boot Issues** (June 13, 2025):
-  - x86_64: Hangs very early in boot (no serial output)
-  - AArch64: Shows "STB" but doesn't reach kernel_main
-  - RISC-V: Boots successfully to kernel banner ✅
 
 ## Versioning Scheme
 

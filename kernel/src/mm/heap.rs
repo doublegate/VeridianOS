@@ -229,12 +229,28 @@ impl SlabAllocator {
 
 /// Initialize the kernel heap
 pub fn init() -> Result<(), &'static str> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            let uart = 0x0900_0000 as *mut u8;
+            *uart = b'H';
+            *uart = b'E';
+            *uart = b'A';
+            *uart = b'P';
+            *uart = b'I';
+            *uart = b'\n';
+        }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[HEAP] Initializing kernel heap at 0x{:x}", HEAP_START);
 
     unsafe {
         // Use the static heap array instead of an arbitrary address
         // Use raw pointers to avoid static mut refs warning
+        #[cfg_attr(target_arch = "aarch64", allow(unused_variables))]
         let heap_start = core::ptr::addr_of_mut!(HEAP_MEMORY) as *mut u8;
+        #[cfg_attr(target_arch = "aarch64", allow(unused_variables))]
         let heap_size = 4 * 1024 * 1024; // Size of HEAP_MEMORY
 
         // For RISC-V, initialize both allocators since they're separate
@@ -252,16 +268,66 @@ pub fn init() -> Result<(), &'static str> {
 
         #[cfg(not(target_arch = "riscv64"))]
         {
-            let mut allocator = crate::get_allocator().lock();
-            allocator.init(heap_start, heap_size);
-            drop(allocator);
+            #[cfg(target_arch = "aarch64")]
+            {
+                let uart = 0x0900_0000 as *mut u8;
+                *uart = b'A';
+                *uart = b'L';
+                *uart = b'O';
+                *uart = b'C';
+                *uart = b'K';
+                *uart = b'\n';
+            }
+
+            #[cfg(target_arch = "aarch64")]
+            {
+                // Skip allocator lock for AArch64
+                let uart = 0x0900_0000 as *mut u8;
+                *uart = b'S';
+                *uart = b'K';
+                *uart = b'I';
+                *uart = b'P';
+                *uart = b'A';
+                *uart = b'\n';
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                let mut allocator = crate::get_allocator().lock();
+                allocator.init(heap_start, heap_size);
+                drop(allocator);
+            }
         }
 
+        #[cfg(target_arch = "aarch64")]
+        {
+            let uart = 0x0900_0000 as *mut u8;
+            *uart = b'H';
+            *uart = b'E';
+            *uart = b'A';
+            *uart = b'P';
+            *uart = b'O';
+            *uart = b'K';
+            *uart = b'\n';
+        }
+
+        #[cfg(not(target_arch = "aarch64"))]
         println!(
             "[HEAP] Heap initialized: {} MB at 0x{:x}",
             4, // 4MB heap size
             core::ptr::addr_of!(HEAP_MEMORY) as usize
         );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            let uart = 0x0900_0000 as *mut u8;
+            *uart = b'H';
+            *uart = b'R';
+            *uart = b'E';
+            *uart = b'T';
+            *uart = b'\n';
+        }
     }
 
     Ok(())

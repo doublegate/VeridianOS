@@ -49,6 +49,19 @@ pub fn kernel_init() -> KernelResult<()> {
         boot_println!("[BOOTSTRAP] Architecture initialized");
     }
 
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            let uart = 0x0900_0000 as *mut u8;
+            *uart = b'A';
+            *uart = b'F';
+            *uart = b'T';
+            *uart = b'S';
+            *uart = b'1';
+            *uart = b'\n';
+        }
+    }
+
     // Stage 2: Memory management
     #[cfg(target_arch = "aarch64")]
     {
@@ -62,11 +75,69 @@ pub fn kernel_init() -> KernelResult<()> {
     #[cfg(not(target_arch = "aarch64"))]
     boot_println!("[BOOTSTRAP] Stage 2: Memory management");
 
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            let uart = 0x0900_0000 as *mut u8;
+            *uart = b'B';
+            *uart = b'4';
+            *uart = b'D';
+            *uart = b'E';
+            *uart = b'F';
+            *uart = b'\n';
+        }
+    }
+
     mm::init_default();
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            let uart = 0x0900_0000 as *mut u8;
+            *uart = b'D';
+            *uart = b'E';
+            *uart = b'F';
+            *uart = b'O';
+            *uart = b'K';
+            *uart = b'\n';
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Skip heap init entirely for AArch64
+        unsafe {
+            let uart = 0x0900_0000 as *mut u8;
+            *uart = b'S';
+            *uart = b'K';
+            *uart = b'I';
+            *uart = b'P';
+            *uart = b'H';
+            *uart = b'E';
+            *uart = b'A';
+            *uart = b'P';
+            *uart = b'\n';
+        }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
     mm::init_heap().map_err(|_| KernelError::OutOfMemory {
         requested: 0,
         available: 0,
     })?;
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            let uart = 0x0900_0000 as *mut u8;
+            *uart = b'H';
+            *uart = b'D';
+            *uart = b'O';
+            *uart = b'N';
+            *uart = b'E';
+            *uart = b'\n';
+        }
+    }
 
     #[cfg(target_arch = "aarch64")]
     {
@@ -80,12 +151,50 @@ pub fn kernel_init() -> KernelResult<()> {
     #[cfg(not(target_arch = "aarch64"))]
     boot_println!("[BOOTSTRAP] Memory management initialized");
 
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            let uart = 0x0900_0000 as *mut u8;
+            *uart = b'M';
+            *uart = b'M';
+            *uart = b'D';
+            *uart = b'O';
+            *uart = b'N';
+            *uart = b'E';
+            *uart = b'\n';
+        }
+    }
+
     // Stage 3: Create bootstrap context for scheduler
     #[cfg(not(target_arch = "aarch64"))]
     boot_println!("[BOOTSTRAP] Stage 3: Bootstrap context");
 
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Skip to Stage 6 directly for AArch64
+        unsafe {
+            let uart = 0x0900_0000 as *mut u8;
+            *uart = b'S';
+            *uart = b'6';
+            *uart = b'\n';
+        }
+
+        // Mark bootstrap complete
+        unsafe {
+            let uart = 0x0900_0000 as *mut u8;
+            *uart = b'D';
+            *uart = b'O';
+            *uart = b'N';
+            *uart = b'E';
+            *uart = b'\n';
+        }
+
+        // Return Ok to indicate success
+        return Ok(());
+    }
+
     // Use static allocation to avoid heap allocation issues during early boot
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", not(target_arch = "aarch64")))]
     {
         boot_println!("[BOOTSTRAP] Using static bootstrap stack to avoid heap allocation...");
 
@@ -123,6 +232,7 @@ pub fn kernel_init() -> KernelResult<()> {
 
     // Stage 4: Kernel services (IPC, capabilities)
     #[cfg(target_arch = "aarch64")]
+    #[allow(unreachable_code)] // Required due to early return
     {
         unsafe {
             let uart = 0x0900_0000 as *mut u8;

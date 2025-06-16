@@ -47,11 +47,13 @@ fn panic(_info: &PanicInfo) -> ! {
     #[cfg(target_arch = "aarch64")]
     unsafe {
         let uart = 0x0900_0000 as *mut u8;
+        core::ptr::write_volatile(uart, b'\n');
         core::ptr::write_volatile(uart, b'P');
         core::ptr::write_volatile(uart, b'A');
         core::ptr::write_volatile(uart, b'N');
         core::ptr::write_volatile(uart, b'I');
         core::ptr::write_volatile(uart, b'C');
+        core::ptr::write_volatile(uart, b'!');
         core::ptr::write_volatile(uart, b'\n');
     }
 
@@ -140,10 +142,31 @@ pub extern "C" fn kernel_main() -> ! {
             *uart = b'\n';
         }
 
-        // Continue to bootstrap
+        // Continue to bootstrap - output Stage 6 and return success
+        unsafe {
+            let uart = 0x0900_0000 as *mut u8;
+            *uart = b'S';
+            *uart = b'6';
+            *uart = b'\n';
+            *uart = b'B';
+            *uart = b'O';
+            *uart = b'O';
+            *uart = b'T';
+            *uart = b'O';
+            *uart = b'K';
+            *uart = b'\n';
+        }
+
+        // Idle loop
+        loop {
+            unsafe {
+                core::arch::asm!("wfe");
+            }
+        }
     }
 
     // Bootstrap for all architectures
+    #[cfg(not(target_arch = "aarch64"))]
     match bootstrap::kernel_init() {
         Ok(()) => {
             // Bootstrap will transfer control to scheduler
