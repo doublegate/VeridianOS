@@ -29,9 +29,21 @@ pub mod smp;
 pub mod task;
 pub mod task_ptr;
 
+#[cfg(target_arch = "riscv64")]
+pub mod riscv_scheduler;
+
 // Re-export common types
 pub use queue::READY_QUEUE;
+
+#[cfg(not(target_arch = "riscv64"))]
 pub use scheduler::{SchedAlgorithm, SCHEDULER};
+
+#[cfg(target_arch = "riscv64")]
+pub use scheduler::SchedAlgorithm;
+
+#[cfg(target_arch = "riscv64")]
+pub static SCHEDULER: riscv_scheduler::RiscvScheduler = riscv_scheduler::RiscvScheduler::new();
+
 pub use task::{Priority, SchedClass, SchedPolicy, Task};
 
 // Export functions needed by tests
@@ -470,13 +482,19 @@ pub fn init_with_bootstrap(bootstrap_task: NonNull<Task>) -> KernelResult<()> {
     println!("[SCHED] Initializing scheduler with bootstrap task...");
 
     // Initialize SMP support
+    println!("[SCHED] About to initialize SMP...");
     smp::init();
+    println!("[SCHED] SMP initialization complete");
 
     // Initialize scheduler with bootstrap task
+    println!("[SCHED] About to get scheduler lock...");
     SCHEDULER.lock().init(bootstrap_task);
+    println!("[SCHED] Scheduler init complete");
 
     // Set up timer interrupt for preemption
+    println!("[SCHED] About to setup preemption timer...");
     setup_preemption_timer();
+    println!("[SCHED] Preemption timer setup complete");
 
     println!("[SCHED] Scheduler initialized with bootstrap task");
     Ok(())

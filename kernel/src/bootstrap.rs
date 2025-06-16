@@ -55,13 +55,18 @@ pub fn kernel_init() -> KernelResult<()> {
             sched::{Priority, SchedClass, SchedPolicy, Task},
         };
 
+        boot_println!("[BOOTSTRAP] About to create bootstrap stack...");
         // Create bootstrap task that will initialize remaining subsystems
         const BOOTSTRAP_STACK_SIZE: usize = 16 * 1024; // 16KB stack
         let bootstrap_stack = Box::leak(Box::new([0u8; BOOTSTRAP_STACK_SIZE]));
         let bootstrap_stack_top = bootstrap_stack.as_ptr() as usize + BOOTSTRAP_STACK_SIZE;
+        boot_println!("[BOOTSTRAP] Bootstrap stack created");
 
+        boot_println!("[BOOTSTRAP] About to get kernel page table...");
         let kernel_page_table = mm::get_kernel_page_table();
+        boot_println!("[BOOTSTRAP] Got kernel page table");
 
+        boot_println!("[BOOTSTRAP] About to create bootstrap task...");
         let mut bootstrap_task = Box::new(Task::new(
             ProcessId(BOOTSTRAP_PID),
             ThreadId(BOOTSTRAP_TID),
@@ -70,14 +75,20 @@ pub fn kernel_init() -> KernelResult<()> {
             bootstrap_stack_top,
             kernel_page_table,
         ));
+        boot_println!("[BOOTSTRAP] Bootstrap task created");
 
+        boot_println!("[BOOTSTRAP] About to set task properties...");
         // Set highest priority for bootstrap
         bootstrap_task.priority = Priority::SystemHigh;
         bootstrap_task.sched_class = SchedClass::Normal; // System class doesn't exist, use Normal
         bootstrap_task.sched_policy = SchedPolicy::Fifo;
+        boot_println!("[BOOTSTRAP] Task properties set");
 
+        boot_println!("[BOOTSTRAP] About to create task pointer...");
         let bootstrap_ptr = NonNull::new(Box::leak(bootstrap_task) as *mut _).unwrap();
+        boot_println!("[BOOTSTRAP] Task pointer created");
 
+        boot_println!("[BOOTSTRAP] About to initialize scheduler...");
         // Initialize scheduler with bootstrap task
         sched::init_with_bootstrap(bootstrap_ptr).map_err(|_| KernelError::InvalidState {
             expected: "scheduler ready",
