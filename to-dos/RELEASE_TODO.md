@@ -99,6 +99,16 @@ Following Semantic Versioning (SemVer):
 #### v0.3.0 - User Space Foundation (NEXT)
 **Target Date**: Q1 2026  
 **Phase**: 2  
+**Pre-requisites** (9 fixes remaining):
+- [ ] Complete AArch64 bootstrap process (currently bypassed)
+- [ ] Fix x86_64 early boot hang (ISSUE-0012)
+- [ ] Implement kernel stack in TSS for x86_64
+- [ ] Complete APIC module for x86_64
+- [ ] Implement Thread Local Storage (TLS) for all architectures
+- [ ] Complete RISC-V UART initialization
+- [ ] Expand RISC-V SBI module
+- [ ] Fix test framework lang items conflict
+- [ ] Update target JSON files
 **Goals**:
 - [ ] User process creation and management
 - [ ] Init system implementation

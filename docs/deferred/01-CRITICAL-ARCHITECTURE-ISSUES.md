@@ -2,7 +2,7 @@
 
 **Priority**: CRITICAL - Blocks core functionality
 **Phase**: Must be resolved for Phase 2
-**Last Updated**: June 15, 2025 - Major x86_64 fixes implemented!
+**Last Updated**: January 17, 2025 - Pre-Phase 2 Assessment Complete
 
 ## AArch64 Critical Blockers
 
@@ -21,7 +21,7 @@
 - Continue using workarounds until compiler issue resolved
 
 ### 2. Bootstrap Process Completely Bypassed
-**Status**: 🔴 CRITICAL
+**Status**: 🔴 CRITICAL - TOP PRIORITY FOR PHASE 2
 **Location**: `kernel/src/main.rs` (lines 172-215)
 **Issue**: Full bootstrap process skipped for AArch64 due to println!/loop issues
 **Impact**: 
@@ -29,11 +29,20 @@
 - No memory management setup
 - No scheduler initialization
 - No IPC/capability system setup
+- Currently just outputs "S6" and enters idle loop
 
 **Required Fix**:
 - Rewrite bootstrap process without loops/iterators for AArch64
+- Use assembly-only output methods from direct_uart.rs
 - Create architecture-specific bootstrap implementation
 - Ensure all Phase 1 subsystems properly initialize
+- Test each bootstrap stage individually to avoid hangs
+
+**Workaround Strategy**:
+- Use direct UART writes instead of boot_println!
+- Replace all loops with manual assembly or recursion
+- Initialize subsystems one at a time with debug output
+- Consider minimal initialization for Phase 2 development
 
 ### 3. Serial Driver Bare Minimum Implementation
 **Status**: 🟡 HIGH
@@ -50,9 +59,27 @@
 - Add proper error detection and recovery
 - Consider DMA support for better performance
 
+## x86_64 Critical Issues
+
+### 1. Early Boot Hang (ISSUE-0012)
+**Status**: 🔴 CRITICAL - BLOCKS x86_64 DEVELOPMENT
+**Location**: Very early in boot sequence
+**Issue**: x86_64 kernel hangs with no serial output during early boot
+**Symptoms**:
+- No output to serial console
+- Hangs before reaching kernel_main
+- May be related to memory initialization or GDT/IDT setup
+
+**Required Investigation**:
+- Check early boot assembly code
+- Verify serial port initialization timing
+- Test with minimal boot sequence
+- Add assembly-level debug output
+- Check memory regions and stack setup
+
 ## Cross-Architecture Critical Issues
 
-### 1. Context Switching Not Implemented
+### 1. Context Switching Implementation
 **Status**: ✅ RESOLVED (June 15, 2025)
 **Location**: Multiple files
 **Resolution**: Context switching was already fully implemented!

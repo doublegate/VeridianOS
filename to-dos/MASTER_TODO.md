@@ -19,11 +19,12 @@ This is the master tracking document for all VeridianOS development tasks across
 - **✅ RISC-V**: Successfully boots through all 6 stages, reaches idle loop
 - **✅ AArch64**: Assembly-only approach implemented, now boots to Stage 6 successfully!
 
-### AArch64 Assembly-Only Workaround (Implemented in v0.2.1) ✅
-- **Problem**: LLVM loop compilation bug causing kernel hangs
-- **Solution**: Complete assembly-only approach bypassing all loop-based code
-- **Implementation**: Modified `bootstrap.rs`, `mm/mod.rs`, `print.rs`, `main.rs` for direct UART output
-- **Result**: AArch64 now boots successfully through all stages!
+### AArch64 Stack Fix & Implementation (Updated in v0.2.1) ✅
+- **Root Cause**: Stack initialization issue, NOT LLVM bug - stack pointer was hardcoded instead of using linker symbols
+- **Solution**: Fixed stack setup in boot.S with proper alignment and linker-defined addresses
+- **Implementation**: Proper stack initialization, unified bootstrap, descriptive UART messages
+- **Result**: AArch64 now boots successfully through Stage 6 with function calls working!
+- **Remaining**: Bootstrap needs to transition to scheduler (see AARCH64-FIXES-TODO.md)
 
 ### Previous Critical Blockers (All Resolved June 15, 2025)
 - **✅ ISSUE-0013 RESOLVED**: AArch64 iterator/loop bug - Created comprehensive workarounds + assembly-only approach
@@ -193,6 +194,9 @@ Legend: ⚪ Not Started | 🟡 In Progress | 🟢 Complete
 - [Phase 4 TODO](PHASE4_TODO.md)
 - [Phase 5 TODO](PHASE5_TODO.md)
 - [Phase 6 TODO](PHASE6_TODO.md)
+
+### Architecture-Specific TODOs
+- [AArch64 Fixes TODO](AARCH64-FIXES-TODO.md) - Complete AArch64 implementation fixes
 
 ## 📝 Administrative Tasks
 

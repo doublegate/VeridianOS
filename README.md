@@ -11,7 +11,7 @@
 [![Coverage](https://codecov.io/gh/doublegate/VeridianOS/branch/main/graph/badge.svg)](https://codecov.io/gh/doublegate/VeridianOS)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE-MIT)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE-APACHE)
-[![Discord](https://img.shields.io/discord/123456789?label=Discord&logo=discord)](https://discord.gg/veridian)
+[![Discord](https://img.shields.io/discord/123456789?label=Discord&logo=discord)](https://discord.gg/24KbHS4C)
 
 </div>
 
@@ -57,11 +57,13 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 **All architectures now boot successfully to Stage 6!** 🚀
 
 **Major Achievements**:
+
 - ✅ **x86_64**: Boots through all 6 stages, executes bootstrap task in scheduler context
 - ✅ **RISC-V**: Boots through all 6 stages, reaches idle loop successfully
 - ✅ **AArch64**: Assembly-only workaround implemented, progresses to memory management
 
 **Technical Improvements**:
+
 - Zero warnings and clippy-clean across all architectures
 - AArch64 LLVM bug workaround with assembly-only approach
 - Documentation reorganization - session docs moved to docs/archive/sessions/

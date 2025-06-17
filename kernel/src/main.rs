@@ -43,18 +43,20 @@ use veridian_kernel::*;
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    // For AArch64, just write PANIC to UART and loop
+    // For AArch64, use uart_write_str for panic message
     #[cfg(target_arch = "aarch64")]
     unsafe {
-        let uart = 0x0900_0000 as *mut u8;
-        core::ptr::write_volatile(uart, b'\n');
-        core::ptr::write_volatile(uart, b'P');
-        core::ptr::write_volatile(uart, b'A');
-        core::ptr::write_volatile(uart, b'N');
-        core::ptr::write_volatile(uart, b'I');
-        core::ptr::write_volatile(uart, b'C');
-        core::ptr::write_volatile(uart, b'!');
-        core::ptr::write_volatile(uart, b'\n');
+        use arch::aarch64::direct_uart::uart_write_str;
+        uart_write_str("\n[PANIC] Kernel panic occurred!\n");
+        
+        // Try to extract panic message location if available
+        if let Some(location) = _info.location() {
+            uart_write_str("[PANIC] Location: ");
+            uart_write_str(location.file());
+            uart_write_str(":");
+            // Can't easily print line number without loops, so skip for now
+            uart_write_str("\n");
+        }
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -71,109 +73,78 @@ fn panic(info: &PanicInfo) -> ! {
 
 #[no_mangle]
 pub extern "C" fn kernel_main() -> ! {
-    // AArch64: Due to LLVM bug, we use manual prints for critical messages
+    // Initialize early serial for x86_64 before any println! usage
+    #[cfg(target_arch = "x86_64")]
+    {
+        arch::x86_64::early_serial::init();
+        early_println!("[EARLY] x86_64 kernel_main reached!");
+        early_println!("[EARLY] VeridianOS Kernel v{}", env!("CARGO_PKG_VERSION"));
+        early_println!("[EARLY] Architecture: x86_64");
+    }
+    
+    // AArch64: Use uart_write_str for descriptive messages
     #[cfg(target_arch = "aarch64")]
     {
-        // First, output a simple marker to confirm we reach kernel_main
+        use arch::aarch64::direct_uart::uart_write_str;
+        
         unsafe {
-            let uart = 0x0900_0000 as *mut u8;
-            *uart = b'M';
-            *uart = b'A';
-            *uart = b'I';
-            *uart = b'N';
-            *uart = b'\n';
-        }
-
-        // Skip all string printing - just output minimal markers
-        unsafe {
-            let uart = 0x0900_0000 as *mut u8;
-            *uart = b'O';
-            *uart = b'K';
-            *uart = b'\n';
+            uart_write_str("[KERNEL] AArch64 kernel_main reached successfully\n");
+            uart_write_str("[KERNEL] VeridianOS Kernel v");
+            uart_write_str(env!("CARGO_PKG_VERSION"));
+            uart_write_str("\n");
+            uart_write_str("[KERNEL] Architecture: AArch64\n");
+            uart_write_str("[KERNEL] Starting kernel initialization...\n");
         }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    
+    // For non-x86_64, non-AArch64 architectures
+    #[cfg(all(not(target_arch = "aarch64"), not(target_arch = "x86_64")))]
     {
         println!("VeridianOS Kernel v{}", env!("CARGO_PKG_VERSION"));
-        #[cfg(target_arch = "x86_64")]
-        println!("Architecture: x86_64");
         #[cfg(target_arch = "riscv64")]
         println!("Architecture: riscv64");
     }
 
-    // Use bootstrap initialization for all architectures
-    // For AArch64, bootstrap now uses safe iteration patterns
+    // Use unified bootstrap initialization for all architectures
     #[cfg(target_arch = "aarch64")]
     {
+        use arch::aarch64::direct_uart::uart_write_str;
+        
         unsafe {
-            let uart = 0x0900_0000 as *mut u8;
-            *uart = b'K';
-            *uart = b'e';
-            *uart = b'r';
-            *uart = b'n';
-            *uart = b'e';
-            *uart = b'l';
-            *uart = b' ';
-            *uart = b'i';
-            *uart = b'n';
-            *uart = b'i';
-            *uart = b't';
-            *uart = b'i';
-            *uart = b'a';
-            *uart = b'l';
-            *uart = b'i';
-            *uart = b'z';
-            *uart = b'e';
-            *uart = b'd';
-            *uart = b' ';
-            *uart = b's';
-            *uart = b'u';
-            *uart = b'c';
-            *uart = b'c';
-            *uart = b'e';
-            *uart = b's';
-            *uart = b's';
-            *uart = b'f';
-            *uart = b'u';
-            *uart = b'l';
-            *uart = b'l';
-            *uart = b'y';
-            *uart = b'!';
-            *uart = b'\n';
-        }
-
-        // Continue to bootstrap - output Stage 6 and return success
-        unsafe {
-            let uart = 0x0900_0000 as *mut u8;
-            *uart = b'S';
-            *uart = b'6';
-            *uart = b'\n';
-            *uart = b'B';
-            *uart = b'O';
-            *uart = b'O';
-            *uart = b'T';
-            *uart = b'O';
-            *uart = b'K';
-            *uart = b'\n';
-        }
-
-        // Idle loop
-        loop {
-            unsafe {
-                core::arch::asm!("wfe");
-            }
+            uart_write_str("[KERNEL] Starting kernel initialization...\n");
+            uart_write_str("[KERNEL] Initializing bootstrap sequence...\n");
         }
     }
-
-    // Bootstrap for all architectures
-    #[cfg(not(target_arch = "aarch64"))]
+    
+    #[cfg(target_arch = "x86_64")]
+    early_println!("[EARLY] Starting bootstrap initialization...");
+    
+    // Call unified bootstrap for all architectures
     match bootstrap::kernel_init() {
         Ok(()) => {
             // Bootstrap will transfer control to scheduler
             // This should not return
+            #[cfg(target_arch = "x86_64")]
+            early_println!("[EARLY] Bootstrap returned unexpectedly!");
+            
+            #[cfg(target_arch = "aarch64")]
+            unsafe {
+                use arch::aarch64::direct_uart::uart_write_str;
+                uart_write_str("[KERNEL] Bootstrap returned unexpectedly!\n");
+            }
+            
             panic!("[KERNEL] Bootstrap returned unexpectedly!");
         }
         Err(e) => {
+            #[cfg(target_arch = "x86_64")]
+            early_println!("[EARLY] Bootstrap initialization failed!");
+            
+            #[cfg(target_arch = "aarch64")]
+            unsafe {
+                use arch::aarch64::direct_uart::uart_write_str;
+                uart_write_str("[KERNEL] Bootstrap initialization failed!\n");
+            }
+            
             panic!("[KERNEL] Bootstrap initialization failed: {}", e);
         }
     }

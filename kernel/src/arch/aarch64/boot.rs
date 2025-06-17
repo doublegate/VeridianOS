@@ -16,23 +16,13 @@ global_asm!(include_str!("boot.S"));
 #[no_mangle]
 #[link_section = ".text.boot"]
 pub unsafe extern "C" fn _start_rust() -> ! {
-    // PL011 UART base address for QEMU virt machine
-    let uart_base = 0x0900_0000_usize;
-    // For QEMU's PL011, we can write directly to the data register at offset 0
-    let uart_dr = uart_base as *mut u8;
-
-    // Write startup message
-    *uart_dr = b'R';
-    *uart_dr = b'U';
-    *uart_dr = b'S';
-    *uart_dr = b'T';
-    *uart_dr = b'\n';
-
-    // Write pre-kernel_main marker
-    *uart_dr = b'P';
-    *uart_dr = b'R';
-    *uart_dr = b'E';
-    *uart_dr = b'\n';
+    // Use direct_uart for proper string output
+    use crate::arch::aarch64::direct_uart::uart_write_str;
+    
+    // Write startup messages
+    uart_write_str("[BOOT] AArch64 Rust entry point reached\n");
+    uart_write_str("[BOOT] Stack initialized and BSS cleared\n");
+    uart_write_str("[BOOT] Preparing to enter kernel_main...\n");
 
     // Call kernel_main from main.rs
     extern "C" {

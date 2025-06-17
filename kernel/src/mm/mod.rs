@@ -152,15 +152,8 @@ pub fn init(memory_map: &[MemoryRegion]) {
     #[cfg(target_arch = "aarch64")]
     {
         unsafe {
-            let uart = 0x0900_0000 as *mut u8;
-            *uart = b'M';
-            *uart = b'M';
-            *uart = b'S';
-            *uart = b'T';
-            *uart = b'A';
-            *uart = b'R';
-            *uart = b'T';
-            *uart = b'\n';
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[MM] Starting memory management initialization\n");
         }
     }
     #[cfg(not(target_arch = "aarch64"))]
@@ -173,13 +166,8 @@ pub fn init(memory_map: &[MemoryRegion]) {
     #[cfg(target_arch = "aarch64")]
     {
         unsafe {
-            let uart = 0x0900_0000 as *mut u8;
-            *uart = b'L';
-            *uart = b'O';
-            *uart = b'C';
-            *uart = b'K';
-            *uart = b'1';
-            *uart = b'\n';
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[MM] Attempting to acquire frame allocator lock\n");
         }
     }
 
@@ -187,33 +175,10 @@ pub fn init(memory_map: &[MemoryRegion]) {
     #[cfg(target_arch = "aarch64")]
     {
         unsafe {
-            let uart = 0x0900_0000 as *mut u8;
-            *uart = b'S';
-            *uart = b'K';
-            *uart = b'I';
-            *uart = b'P';
-            *uart = b'\n';
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[MM] Skipping frame allocator initialization on AArch64\n");
+            uart_write_str("[MM] Memory management initialization complete (minimal)\n");
         }
-
-        // Also output MMFIN before returning
-        unsafe {
-            let uart = 0x0900_0000 as *mut u8;
-            *uart = b'M';
-            *uart = b'M';
-            *uart = b'F';
-            *uart = b'I';
-            *uart = b'N';
-            *uart = b'\n';
-        }
-
-        unsafe {
-            let uart = 0x0900_0000 as *mut u8;
-            *uart = b'R';
-            *uart = b'E';
-            *uart = b'T';
-            *uart = b'\n';
-        }
-
         return;
     }
 
@@ -329,13 +294,8 @@ pub fn init_default() {
     #[cfg(target_arch = "aarch64")]
     {
         unsafe {
-            let uart = 0x0900_0000 as *mut u8;
-            *uart = b'M';
-            *uart = b'M';
-            *uart = b'D';
-            *uart = b'E';
-            *uart = b'F';
-            *uart = b'\n';
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[MM] Using default memory map for initialization\n");
         }
         // Early return for AArch64 to avoid any issues
         return;

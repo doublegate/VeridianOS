@@ -42,6 +42,12 @@ pub fn direct_print_str(s: &str) {
     }
 }
 
+/// Output a string to UART without using any loops or iterators
+/// (Alias for direct_print_str for compatibility)
+pub unsafe fn uart_write_str(s: &str) {
+    uart_write_bytes_asm(s.as_ptr(), s.len());
+}
+
 /// Print a single character directly to UART
 pub fn direct_print_char(c: char) {
     let mut buffer = [0u8; 4];

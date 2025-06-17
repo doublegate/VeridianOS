@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Next Phase: User Space Foundation (Phase 2)
+
 - Init process creation and management
 - Shell implementation and command processing
 - User-space driver framework
@@ -308,7 +309,7 @@ microkernel functionality. All essential kernel subsystems are implemented and o
 **Phase 0: Foundation is now 100% complete!** This marks a major milestone in VeridianOS
 development. All foundational infrastructure is in place and operational.
 
-### Added
+### Added in v0.1.0
 
 - Initial project structure with complete directory hierarchy
 - Comprehensive documentation for all development phases

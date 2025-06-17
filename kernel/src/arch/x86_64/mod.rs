@@ -1,5 +1,6 @@
 pub mod boot;
 pub mod context;
+pub mod early_serial;
 pub mod gdt;
 pub mod idt;
 pub mod mmu;

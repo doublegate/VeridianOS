@@ -1,7 +1,7 @@
 # Issues and Bug Tracking TODO
 
 **Purpose**: Central tracking for all bugs, issues, and defects  
-**Last Updated**: 2025-06-15
+**Last Updated**: 2025-06-17
 
 ## 🐛 Issue Categories
 
@@ -21,33 +21,60 @@
 ## 🚨 Critical Issues (P0)
 
 ### ISSUE-0012: x86_64 Boot Hang
-- **Status**: Open (Partial Progress)
+- **Status**: Open (Critical - Blocks x86_64 Development)
 - **Component**: Kernel/Boot
 - **Reported**: 2025-06-13
+- **Last Updated**: 2025-01-17
 - **Reporter**: Boot Testing
 - **Assignee**: TBD
 - **Description**: x86_64 kernel hangs very early in boot with no serial output
 - **Impact**: x86_64 platform early boot unusable
-- **Workaround**: Use RISC-V for testing early boot
+- **Workaround**: Use RISC-V or AArch64 for testing
 - **Update (2025-06-15)**: Fixed to use full bootstrap from main.rs but still hangs early
 - **Progress**: Context switching and memory mapping now work! See ISSUE-0015 and ISSUE-0016
+- **Pre-Phase 2 Status**: Identified as one of two critical blockers for Phase 2 development
 
-### ISSUE-0013: AArch64 Iterator/Loop Compilation Bug
-- **Status**: RESOLVED with Workarounds ✅
-- **Component**: Kernel/Compiler
+### ISSUE-0013: AArch64 Function Call Hang
+- **Status**: RESOLVED ✅
+- **Component**: Kernel/Boot
 - **Reported**: 2025-06-13
-- **Resolved**: 2025-06-15
+- **Resolved**: 2025-06-17
 - **Reporter**: Boot Testing / Debugging Session
 - **Assignee**: Claude
-- **Description**: AArch64 kernel hangs when any iterator or for loop is used in code
-- **Impact**: AArch64 platform severely limited - most kernel functionality unusable
-- **Root Cause**: LLVM code generation issue for bare metal AArch64
-- **Workaround**: Implemented comprehensive loop-free utilities in `arch/aarch64/safe_iter.rs`
-  - `write_str_loopfree()`, `write_num_loopfree()`, `write_hex_loopfree()`
-  - `memcpy_loopfree()`, `memset_loopfree()`, `init_array_loopfree()`
-  - `aarch64_for!` macro for safe iteration when needed
-- **Resolution**: Development can continue using safe iteration patterns
-- **Future**: File upstream LLVM bug report with minimal test case
+- **Description**: AArch64 kernel hangs when any function call is made
+- **Impact**: AArch64 platform severely limited - no function calls possible
+- **Root Cause**: Improper stack initialization - hardcoded to 0x80000 instead of using linker symbols
+- **Fix**: Updated boot.S to use linker-defined __stack_top with proper 16-byte alignment
+- **Resolution**: Function calls now work correctly, unified bootstrap used
+- **Note**: What appeared to be an LLVM bug was actually incorrect stack setup
+
+### ISSUE-0017: AArch64 Bootstrap Completion
+- **Status**: Open
+- **Component**: Kernel/Bootstrap
+- **Reported**: 2025-06-17
+- **Reporter**: Implementation Session
+- **Assignee**: TBD
+- **Description**: AArch64 bootstrap returns at Stage 6 instead of transitioning to scheduler
+- **Impact**: Kernel panics with "Bootstrap returned unexpectedly!" after successful init
+- **Root Cause**: Early return in bootstrap.rs for AArch64 at Stage 6
+- **Workaround**: None - needs proper implementation
+- **Fix Plan**: See to-dos/AARCH64-FIXES-TODO.md for complete implementation plan
+
+### ISSUE-0018: RISC-V Frame Allocator Lock Hang
+- **Status**: Open (Regression)
+- **Component**: Kernel/Memory Management
+- **Reported**: 2025-06-17
+- **Reporter**: Stack Setup Audit
+- **Assignee**: TBD
+- **Description**: RISC-V kernel restarts when trying to acquire frame allocator lock
+- **Impact**: RISC-V cannot boot past memory initialization
+- **Symptoms**: 
+  - Kernel prints "Getting frame allocator lock..." then restarts
+  - Boot sequence repeats indefinitely
+  - Was previously working (booted to Stage 6)
+- **Root Cause**: Unknown - likely mutex/lock initialization issue
+- **Workaround**: None currently
+- **Notes**: Not related to stack setup - occurs with both original and improved boot.S
 
 ### ISSUE-0014: Context Switching Not Connected
 - **Status**: RESOLVED ✅

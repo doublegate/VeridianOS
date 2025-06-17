@@ -232,13 +232,8 @@ pub fn init() -> Result<(), &'static str> {
     #[cfg(target_arch = "aarch64")]
     {
         unsafe {
-            let uart = 0x0900_0000 as *mut u8;
-            *uart = b'H';
-            *uart = b'E';
-            *uart = b'A';
-            *uart = b'P';
-            *uart = b'I';
-            *uart = b'\n';
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[HEAP] Initializing kernel heap\n");
         }
     }
 
@@ -270,25 +265,15 @@ pub fn init() -> Result<(), &'static str> {
         {
             #[cfg(target_arch = "aarch64")]
             {
-                let uart = 0x0900_0000 as *mut u8;
-                *uart = b'A';
-                *uart = b'L';
-                *uart = b'O';
-                *uart = b'C';
-                *uart = b'K';
-                *uart = b'\n';
+                use crate::arch::aarch64::direct_uart::uart_write_str;
+                uart_write_str("[HEAP] Acquiring allocator lock\n");
             }
 
             #[cfg(target_arch = "aarch64")]
             {
                 // Skip allocator lock for AArch64
-                let uart = 0x0900_0000 as *mut u8;
-                *uart = b'S';
-                *uart = b'K';
-                *uart = b'I';
-                *uart = b'P';
-                *uart = b'A';
-                *uart = b'\n';
+                use crate::arch::aarch64::direct_uart::uart_write_str;
+                uart_write_str("[HEAP] Skipping allocator lock on AArch64\n");
             }
             #[cfg(not(target_arch = "aarch64"))]
             {
@@ -300,14 +285,8 @@ pub fn init() -> Result<(), &'static str> {
 
         #[cfg(target_arch = "aarch64")]
         {
-            let uart = 0x0900_0000 as *mut u8;
-            *uart = b'H';
-            *uart = b'E';
-            *uart = b'A';
-            *uart = b'P';
-            *uart = b'O';
-            *uart = b'K';
-            *uart = b'\n';
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[HEAP] Heap initialization complete\n");
         }
 
         #[cfg(not(target_arch = "aarch64"))]
@@ -321,12 +300,8 @@ pub fn init() -> Result<(), &'static str> {
     #[cfg(target_arch = "aarch64")]
     {
         unsafe {
-            let uart = 0x0900_0000 as *mut u8;
-            *uart = b'H';
-            *uart = b'R';
-            *uart = b'E';
-            *uart = b'T';
-            *uart = b'\n';
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[HEAP] Returning from heap init\n");
         }
     }
 
