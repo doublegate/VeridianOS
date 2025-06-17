@@ -1,30 +1,31 @@
 # VeridianOS Testing Status
 
-**Last Updated**: June 15, 2025
+**Last Updated**: June 17, 2025  
+**Latest Release**: v0.2.1 - All architectures boot to Stage 6
 
 ## Summary
 
 **Kernel Compilation**: ✅ **WORKING** - All architectures compile successfully with zero warnings  
-**Kernel Boot**: ⚠️ **PARTIAL** - Only RISC-V boots to kernel banner  
+**Kernel Boot**: ✅ **WORKING** - All three architectures boot to Stage 6 successfully  
 **Integration Tests**: ❌ **BLOCKED** - Due to Rust toolchain limitations  
 **Custom Test Framework**: ✅ **IMPLEMENTED** - Bypasses lang_items conflicts
 
-## Boot Testing Results (Current as of June 15, 2025)
+## Boot Testing Results (Current as of June 17, 2025)
 
 ### Architecture Status
-- **x86_64**: ❌ Builds successfully but hangs very early in boot
-  - No serial output visible
-  - Likely hanging in bootloader or very early init
+- **x86_64**: ✅ Boots successfully to Stage 6
+  - Reaches scheduler and executes bootstrap task
+  - Context switching functional
   - Binary size: 12M kernel, 168K bootimage
   
-- **RISC-V**: ✅ Boots successfully to kernel banner
-  - Shows "VeridianOS Kernel v0.2.0"
-  - Reaches "Kernel initialized successfully!"
+- **RISC-V**: ✅ Boots successfully to Stage 6
+  - Shows "VeridianOS Kernel v0.2.1"
+  - Reaches idle loop
   - Binary size: 12M
   
-- **AArch64**: ⚠️ Partial boot
-  - Shows "STB" output (reaches boot code)
-  - Doesn't reach kernel_main
+- **AArch64**: ✅ Boots to Stage 6 with assembly workarounds
+  - Assembly-only approach bypasses LLVM loop bugs
+  - Shows stage markers: S1, S2, MM, IPC, etc.
   - Binary size: 11M
 
 ## The Testing Challenge

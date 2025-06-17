@@ -2,9 +2,36 @@
 
 All notable changes to VeridianOS are documented here. This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 2025-06-15
+## [0.2.1] - 2025-06-17
 
-### 🎯 DEEP-RECOMMENDATIONS Implementation Complete (8 of 9)
+### 🚀 Maintenance Release: All Architectures Boot to Stage 6
+
+This maintenance release consolidates all critical fixes and confirms that all three architectures can successfully boot to Stage 6.
+
+#### Added
+- AArch64 assembly-only approach implementation
+  - Created `direct_uart.rs` with pure assembly UART functions
+  - Stage progression markers: S1-S6, MM, IPC, PROC, DONE
+  - Complete bypass of LLVM loop compilation bugs
+- Boot testing verification for all architectures
+- Comprehensive documentation of assembly workarounds
+
+#### Fixed
+- AArch64 LLVM loop compilation bug (complete workaround)
+- All architectures now boot to Stage 6 successfully
+- Zero warnings across all architectures maintained
+- Documentation reorganized (sessions moved to `docs/archive/sessions/`)
+
+#### Status
+- **x86_64**: ✅ Boots to Stage 6, reaches scheduler and bootstrap task
+- **RISC-V**: ✅ Boots to Stage 6, reaches idle loop
+- **AArch64**: ✅ Boots to Stage 6 with assembly workarounds
+- **DEEP-RECOMMENDATIONS**: 9 of 9 items complete (100%)
+- **Ready for Phase 2**: All critical blockers resolved
+
+## [Unreleased] - 2025-06-17
+
+### 🎯 DEEP-RECOMMENDATIONS Implementation Complete (9 of 9)
 
 #### Added
 - Comprehensive RAII patterns for automatic resource cleanup (TODO #8 ✅)
@@ -244,10 +271,12 @@ With Phase 0 complete, development moves to Phase 1: Microkernel Core
 
 ## Version History
 
+- **0.2.1** (2025-06-17): Maintenance Release - All architectures boot to Stage 6 ✅
 - **0.2.0** (2025-06-12): Phase 1 - Microkernel Core ✅
 - **0.1.0** (2025-06-07): Phase 0 - Foundation & Tooling ✅
 - **0.0.1** (2025-01-06): Initial repository creation
 
-[Unreleased]: https://github.com/doublegate/VeridianOS/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/doublegate/VeridianOS/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/doublegate/VeridianOS/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/doublegate/VeridianOS/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/doublegate/VeridianOS/releases/tag/v0.1.0

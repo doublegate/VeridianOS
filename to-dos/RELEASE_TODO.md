@@ -1,9 +1,9 @@
 # Release Management TODO
 
 **Purpose**: Track release planning, milestones, and deployment tasks  
-**Last Updated**: 2025-06-15  
-**Current Version**: v0.2.0 (Released June 12, 2025)  
-**Current Status**: Phase 1 Complete! TODO #8 RAII Complete - Ready for TODO #9 Phase 2
+**Last Updated**: 2025-06-17  
+**Current Version**: v0.2.1 (Released June 17, 2025)  
+**Current Status**: Phase 1 Complete! All boot issues resolved - Ready for Phase 2
 
 ## 🎯 Release Strategy
 
@@ -22,23 +22,31 @@ Following Semantic Versioning (SemVer):
 
 ## 📅 Release Roadmap
 
-### Recent Maintenance Updates (December 2025)
+### Recent Maintenance Updates (June 2025)
 
-#### Post-v0.2.0 Fixes
-**Date**: December 6, 2025  
-**Status**: Applied to main branch  
+#### v0.2.1 Critical Boot Fixes
+**Date**: June 17, 2025  
+**Status**: Released as v0.2.1  
 **Issues Fixed**:
-- **ISSUE-0008**: x86_64 R_X86_64_32S relocation errors
-  - Fixed with custom target JSON using kernel code model
-  - Kernel now properly links at high addresses (0xFFFFFFFF80100000)
-- **ISSUE-0009**: Kernel boot double fault
-  - Fixed stack initialization and boot sequence
-  - Proper BSS clearing implemented
-- **ISSUE-0010**: Heap initialization failure
-  - Fixed initialization order
-  - Frame allocator now properly initialized before heap
+- **ISSUE-0013**: AArch64 iterator/loop compilation bug
+  - Fixed with assembly-only workaround bypassing LLVM bug
+  - AArch64 now boots to Stage 6 successfully
+- **ISSUE-0014**: Context switching not loading initial context
+  - Fixed scheduler to properly load task context on start
+  - All architectures now have working context switching
+- **Boot Testing**: All three architectures verified booting to Stage 6
 
 ### Pre-1.0 Releases (Development)
+
+#### v0.2.1 - Boot Fixes ✅ RELEASED!
+**Released**: June 17, 2025  
+**Phase**: 1 (Maintenance)  
+**Achievements**:
+- [x] AArch64 assembly-only workaround for LLVM bug ✅
+- [x] All architectures boot to Stage 6 successfully ✅
+- [x] Zero warnings across all platforms ✅
+- [x] Clippy-clean codebase ✅
+- [x] Updated documentation for boot status ✅
 
 #### v0.1.0 - Foundation ✅ RELEASED!
 **Released**: June 7, 2025  
@@ -242,11 +250,12 @@ Following Semantic Versioning (SemVer):
 
 ## 🎯 Next Release Planning
 
-### v0.2.1 - Maintenance Release (If Needed)
+### v0.2.2 - Maintenance Release (If Needed)
 **Target**: As needed  
 **Focus**: Bug fixes and stability improvements
-- Post-v0.2.0 fixes already applied to main
 - Additional fixes as discovered
+- Performance optimizations
+- Documentation updates
 
 ### v0.3.0 - User Space Foundation
 **Target**: Q1 2026  

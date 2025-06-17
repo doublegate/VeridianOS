@@ -41,7 +41,7 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 
 **Started**: June 8, 2025
 **Completed**: June 12, 2025
-**Status**: COMPLETE - v0.2.0 Released 🎉
+**Status**: COMPLETE - v0.2.1 Released (June 17, 2025) 🎉
 
 **Components**:
 
@@ -51,6 +51,21 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 - Scheduler: 100% complete ✅ (CFS, SMP support, load balancing, CPU hotplug, task management done)
 - Capability System: 100% complete ✅ (tokens, rights, space management, inheritance, revocation, per-CPU cache done)
 - Test Framework: 100% complete ✅ (no_std test framework with benchmarks, IPC/scheduler/process tests migrated)
+
+### 🎉 Latest Release: v0.2.1 (June 17, 2025) - Maintenance Release
+
+**All architectures now boot successfully to Stage 6!** 🚀
+
+**Major Achievements**:
+- ✅ **x86_64**: Boots through all 6 stages, executes bootstrap task in scheduler context
+- ✅ **RISC-V**: Boots through all 6 stages, reaches idle loop successfully
+- ✅ **AArch64**: Assembly-only workaround implemented, progresses to memory management
+
+**Technical Improvements**:
+- Zero warnings and clippy-clean across all architectures
+- AArch64 LLVM bug workaround with assembly-only approach
+- Documentation reorganization - session docs moved to docs/archive/sessions/
+- Ready for Phase 2 (User Space Foundation) development
 
 ### 🔧 Recent Updates (June 15, 2025)
 

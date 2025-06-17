@@ -1,5 +1,8 @@
 # VeridianOS Troubleshooting Guide
 
+**Last Updated**: June 17, 2025  
+**Latest Release**: v0.2.1 - All architectures boot to Stage 6
+
 ## Build Issues
 
 ### Rust Toolchain Problems

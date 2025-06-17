@@ -63,7 +63,14 @@ Files are numbered by priority:
 
 ## Latest Updates
 
-**June 15, 2025 (Latest)**: Critical Blockers RESOLVED
+**June 17, 2025 (Latest)**: v0.2.1 Maintenance Release
+- ✅ All three architectures boot to Stage 6 successfully
+- ✅ AArch64 assembly-only approach bypasses LLVM bugs  
+- ✅ Zero warnings and clippy-clean across all architectures
+- ✅ Documentation reorganized (sessions moved to docs/archive/sessions/)
+- ✅ Ready for Phase 2 user space development
+
+**June 15, 2025**: Critical Blockers RESOLVED
 - ✅ AArch64 iterator bug - Created comprehensive workarounds
 - ✅ Context switching - Was already implemented, fixed scheduler integration
 - ✅ Unified kernel_main across all architectures

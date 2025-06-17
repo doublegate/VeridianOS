@@ -1,5 +1,8 @@
 # VeridianOS Implementation Roadmap
 
+**Last Updated**: June 17, 2025  
+**Latest Release**: v0.2.1 - Maintenance release with all three architectures booting to Stage 6
+
 ## Executive Summary
 
 This document provides a detailed technical roadmap for implementing VeridianOS based on comprehensive analysis of the project requirements and AI-assisted development insights. The roadmap spans 42 months across 7 phases, with specific technical milestones and measurable performance targets.

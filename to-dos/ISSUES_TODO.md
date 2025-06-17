@@ -298,7 +298,7 @@ Currently no low priority issues.
 ### By Component
 | Component | Open | In Progress | Fixed | Total |
 |-----------|------|-------------|-------|-------|
-| Kernel | 0 | 0 | 7 | 7 |
+| Kernel | 0 | 0 | 10 | 10 |
 | Drivers | 0 | 0 | 0 | 0 |
 | Services | 0 | 0 | 0 | 0 |
 | Libraries | 0 | 0 | 0 | 0 |

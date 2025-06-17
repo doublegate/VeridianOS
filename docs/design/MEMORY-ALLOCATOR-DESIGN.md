@@ -1,8 +1,9 @@
 # VeridianOS Memory Allocator Design Document
 
-**Version**: 1.2  
-**Date**: 2025-12-06  
-**Status**: Implementation Complete (100%)
+**Version**: 1.3  
+**Date**: 2025-06-17  
+**Status**: Implementation Complete (100%)  
+**Latest Release**: v0.2.1 - All architectures boot to Stage 6
 
 ## Executive Summary
 

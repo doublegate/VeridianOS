@@ -2,17 +2,22 @@
 
 ## Current Status: Phase 1 Complete - Ready for Phase 2
 
-**Latest Release**: v0.2.0 - Microkernel Core  
-**Released**: June 12, 2025  
-**Previous Release**: v0.1.0 - Foundation & Tooling (June 7, 2025)  
+**Latest Release**: v0.2.1 - Maintenance Release  
+**Released**: June 17, 2025  
+**Previous Release**: v0.2.0 - Microkernel Core (June 12, 2025)  
 **Current Phase**: Phase 1 - Microkernel Core COMPLETE ✓  
 **Phase 1 Progress**: 100% Complete - All subsystems fully implemented!  
-**Last Updated**: June 15, 2025
+**Last Updated**: June 17, 2025
 
 VeridianOS has successfully completed Phase 1 (Microkernel Core) with all major subsystems fully implemented! The project achieved 100% completion of IPC system with <1μs latency, memory management with user-space safety, process management with full lifecycle support, CFS scheduler with SMP and CPU hotplug, and a complete capability system with inheritance and revocation. The microkernel is now ready for Phase 2: User Space Foundation.
 
-### Recent Improvements (June 15, 2025)
-- **DEEP-RECOMMENDATIONS Implementation (8 of 9 Complete)**:
+### Recent Improvements (June 17, 2025)
+- **v0.2.1 Maintenance Release**:
+  - ✅ All three architectures (x86_64, AArch64, RISC-V) boot to Stage 6
+  - ✅ AArch64 assembly-only approach successfully bypasses LLVM loop compilation bugs
+  - ✅ Zero warnings and clippy-clean across all architectures
+  - ✅ Documentation reorganized with session docs moved to `docs/archive/sessions/`
+- **DEEP-RECOMMENDATIONS Implementation (9 of 9 Complete)**:
   - ✅ Bootstrap module fixing boot sequence circular dependency
   - ✅ AArch64 calling convention fixed with proper BSS clearing
   - ✅ Atomic operations replacing unsafe static access
@@ -21,6 +26,7 @@ VeridianOS has successfully completed Phase 1 (Microkernel Core) with all major 
   - ✅ Custom test framework to bypass lang_items conflicts
   - ✅ Error type migration from string literals to KernelError enum
   - ✅ **COMPLETED**: Comprehensive RAII patterns for resource cleanup (TODO #8)
+  - ✅ **COMPLETED**: AArch64 workarounds for LLVM bugs
 - **Documentation Organization**: Archive structure created for historical docs
 - **Code Quality**: Fixed all clippy warnings including lifetime elision
 - **Phase 2 Readiness**: All Phase 1 components stable, ready for user space foundation (TODO #9)
@@ -57,10 +63,10 @@ VeridianOS has successfully completed Phase 1 (Microkernel Core) with all major 
 | GDB Debug | ✅ | ✅ | ✅ |
 | Tests | ✅ | ✅ | ✅ |
 
-**Boot Notes**:
-- x86_64: Boots through all subsystems, expected hang at process init
-- RISC-V: Boots through all subsystems after mutex fix, expected hang at process init  
-- AArch64: Boot issue - kernel_main not reached from _start_rust
+**Boot Notes** (v0.2.1):
+- x86_64: Boots successfully to Stage 6, reaches scheduler and bootstrap task
+- RISC-V: Boots successfully to Stage 6, reaches idle loop  
+- AArch64: Boots to Stage 6 with assembly-only workarounds for LLVM loop bugs
 
 ## Development Metrics
 

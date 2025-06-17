@@ -1,6 +1,7 @@
 # VeridianOS Development Guide
 
-**Last Updated**: December 6, 2025
+**Last Updated**: June 17, 2025  
+**Latest Release**: v0.2.1 - Maintenance release with all three architectures booting to Stage 6
 
 ## Getting Started
 

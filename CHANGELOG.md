@@ -7,9 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added (June 16, 2025)
+### Next Phase: User Space Foundation (Phase 2)
+- Init process creation and management
+- Shell implementation and command processing
+- User-space driver framework
+- System libraries and POSIX compatibility
 
-- **AArch64 Assembly-Only Approach Implementation** ✅ COMPLETED
+## [0.2.1] - 2025-06-17
+
+### Maintenance Release - All Architectures Boot Successfully! 🎉
+
+This maintenance release consolidates all fixes from the past few days and confirms that all three architectures can successfully boot to Stage 6. This release marks readiness for Phase 2 development.
+
+### Added
+
+- **AArch64 Assembly-Only Approach Implementation** ✅ COMPLETED (June 16, 2025)
   - Complete workaround for LLVM loop compilation bug
   - Direct UART character output bypassing all loop-based code
   - Modified `bootstrap.rs`, `mm/mod.rs`, `print.rs`, `main.rs` for AArch64-specific output
@@ -20,7 +32,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - RISC-V: Successfully boots through all 6 stages, reaches idle loop
   - AArch64: Progresses significantly further with assembly-only approach
 
-### Added (June 15, 2025)
+### Improved
+
+- **Code Quality**: Zero warnings and clippy-clean across all architectures
+- **Documentation**: Session documentation reorganized to docs/archive/sessions/
+- **Architecture Support**: All three architectures now confirmed to boot successfully
+- **Build Process**: Automated build script usage documented in README
+
+### Architecture Boot Status
+
+| Architecture | Build | Boot | Stage 6 Complete | Status |
+|-------------|-------|------|-------------------|---------|
+| x86_64      | ✅    | ✅   | ✅ **COMPLETE**    | **Fully Working** - Executes bootstrap task |
+| RISC-V      | ✅    | ✅   | ✅ **COMPLETE**    | **Fully Working** - Reaches idle loop |
+| AArch64     | ✅    | ⚠️   | ⚠️ **PARTIAL**     | **Assembly-Only** - Memory mgmt workaround |
+
+### Added (from June 15, 2025)
 
 - RAII (Resource Acquisition Is Initialization) patterns implementation ✅ COMPLETED
   - FrameGuard for automatic physical memory cleanup
@@ -453,6 +480,7 @@ While in pre-1.0 development:
 - **0.9.0** - Package management
 - **1.0.0** - First stable release
 
-[Unreleased]: https://github.com/doublegate/VeridianOS/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/doublegate/VeridianOS/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/doublegate/VeridianOS/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/doublegate/VeridianOS/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/doublegate/VeridianOS/releases/tag/v0.1.0

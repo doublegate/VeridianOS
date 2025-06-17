@@ -4,6 +4,8 @@
 
 Phase 1 (Microkernel Core) was completed on June 12, 2025, and released as v0.2.0. Achieved 100% implementation in just 5 days (June 8-12, 2025). This document preserves essential technical achievements from Phase 1. Detailed historical documentation is archived in `docs/archive/phase_1/`.
 
+**Latest Release**: v0.2.1 (June 17, 2025) - Maintenance release with all three architectures booting to Stage 6.
+
 ## Core Components Implemented
 
 ### Memory Management (100% Complete)

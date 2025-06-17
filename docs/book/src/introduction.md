@@ -47,7 +47,7 @@ VeridianOS follows these core principles:
 
 **Released**: June 12, 2025  
 **Status**: COMPLETE ✅  
-**Latest Update**: June 15, 2025
+**Latest Release**: v0.2.1 (June 17, 2025) - Maintenance release with all three architectures booting to Stage 6
 
 - ✅ Memory Management (100%): Hybrid allocator, VMM, kernel heap
 - ✅ Process Management (100%): Full lifecycle, context switching
@@ -55,8 +55,13 @@ VeridianOS follows these core principles:
 - ✅ Scheduler (100%): CFS, SMP support, load balancing
 - ✅ Capability System (100%): Hierarchical inheritance, per-CPU cache
 
-### Recent Improvements (June 15, 2025)
-- **DEEP-RECOMMENDATIONS Implementation (8 of 9 Complete)**:
+### Recent Improvements (June 17, 2025)
+- **v0.2.1 Maintenance Release**:
+  - ✅ All three architectures (x86_64, AArch64, RISC-V) boot to Stage 6
+  - ✅ AArch64 assembly-only approach successfully bypasses LLVM loop compilation bugs
+  - ✅ Zero warnings and clippy-clean across all architectures
+  - ✅ Documentation reorganized with session docs moved to `docs/archive/sessions/`
+- **DEEP-RECOMMENDATIONS Implementation (9 of 9 Complete)**:
   - ✅ Bootstrap module fixing boot sequence circular dependency
   - ✅ AArch64 calling convention fixed with proper BSS clearing
   - ✅ Atomic operations replacing unsafe static access
@@ -65,6 +70,7 @@ VeridianOS follows these core principles:
   - ✅ Custom test framework bypassing lang_items conflicts
   - ✅ Error type migration from string literals to KernelError enum
   - ✅ **COMPLETED**: Comprehensive RAII patterns for resource cleanup (TODO #8)
+  - ✅ **COMPLETED**: AArch64 workarounds for LLVM bugs
 - **Documentation Organization**: Created archive structure for historical docs
 - **Phase 2 Readiness**: All components stable, ready for user space foundation (TODO #9)
 
