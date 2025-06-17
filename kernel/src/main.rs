@@ -73,6 +73,12 @@ fn panic(info: &PanicInfo) -> ! {
 
 #[no_mangle]
 pub extern "C" fn kernel_main() -> ! {
+    // Disable interrupts immediately for x86_64
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack));
+    }
+    
     // Initialize early serial for x86_64 before any println! usage
     #[cfg(target_arch = "x86_64")]
     {

@@ -2,9 +2,17 @@
 
 use bootloader::{entry_point, BootInfo};
 
+// Store boot info for later use
+pub static mut BOOT_INFO: Option<&'static BootInfo> = None;
+
 entry_point!(kernel_main_entry);
 
-fn kernel_main_entry(_boot_info: &'static BootInfo) -> ! {
+fn kernel_main_entry(boot_info: &'static BootInfo) -> ! {
+    // Disable interrupts immediately
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack));
+    }
+    
     // Initialize early serial first thing
     unsafe {
         // Direct serial port initialization at 0x3F8
@@ -26,6 +34,11 @@ fn kernel_main_entry(_boot_info: &'static BootInfo) -> ! {
         
         // Write boot marker
         write_str(base, "BOOT_ENTRY\n");
+    }
+    
+    // Store boot info in a static for later use
+    unsafe {
+        BOOT_INFO = Some(boot_info);
     }
     
     // Call the real kernel_main from main.rs

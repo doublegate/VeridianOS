@@ -148,7 +148,7 @@ pub struct MemoryRegion {
 
 /// Initialize the memory management subsystem
 #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
-pub fn init(memory_map: &[MemoryRegion]) {
+pub fn init(_memory_map: &[MemoryRegion]) {
     #[cfg(target_arch = "aarch64")]
     {
         unsafe {
@@ -160,6 +160,14 @@ pub fn init(memory_map: &[MemoryRegion]) {
     println!("[MM] Initializing memory management...");
 
     // Initialize frame allocator with available memory regions
+    // For now, skip frame allocator initialization on x86_64 due to early boot issues
+    #[cfg(target_arch = "x86_64")]
+    {
+        println!("[MM] Deferring frame allocator initialization on x86_64");
+        println!("[MM] Memory management initialization complete (minimal)");
+        return;
+    }
+    
     #[cfg(not(target_arch = "aarch64"))]
     println!("[MM] Getting frame allocator lock...");
 
@@ -182,53 +190,17 @@ pub fn init(memory_map: &[MemoryRegion]) {
         return;
     }
 
-    #[cfg(not(target_arch = "aarch64"))]
-    let mut allocator = FRAME_ALLOCATOR.lock();
-
-    #[cfg(not(target_arch = "aarch64"))]
-    #[allow(unreachable_code)] // Required due to AArch64 early return
+    // Only proceed with frame allocator for RISC-V
+    #[cfg(target_arch = "riscv64")]
     {
-        unsafe {
-            let uart = 0x0900_0000 as *mut u8;
-            *uart = b'L';
-            *uart = b'O';
-            *uart = b'C';
-            *uart = b'K';
-            *uart = b'2';
-            *uart = b'\n';
-        }
-    }
+        let mut allocator = FRAME_ALLOCATOR.lock();
+        println!("[MM] Frame allocator locked successfully");
+        println!("[MM] Got frame allocator lock");
+        
+        let mut total_memory = 0u64;
+        let mut usable_memory = 0u64;
 
-    #[cfg(not(target_arch = "aarch64"))]
-    println!("[MM] Got frame allocator lock");
-
-    #[cfg(not(target_arch = "aarch64"))]
-    let mut total_memory = 0u64;
-    #[cfg(not(target_arch = "aarch64"))]
-    let mut usable_memory = 0u64;
-
-    // Skip allocator usage for AArch64
-    #[cfg(target_arch = "aarch64")]
-    #[allow(unreachable_code)] // Required due to early return
-    {
-        // Just mark completion
-        unsafe {
-            let uart = 0x0900_0000 as *mut u8;
-            *uart = b'A';
-            *uart = b'A';
-            *uart = b'6';
-            *uart = b'4';
-            *uart = b'S';
-            *uart = b'K';
-            *uart = b'I';
-            *uart = b'P';
-            *uart = b'\n';
-        }
-    }
-
-    #[cfg(not(target_arch = "aarch64"))]
-    #[allow(unreachable_code)] // Required due to AArch64 early return
-    for (idx, region) in memory_map.iter().enumerate() {
+        for (idx, region) in memory_map.iter().enumerate() {
         println!(
             "[MM] Processing region {}: start=0x{:x}, size={} MB, usable={}",
             idx,
@@ -262,31 +234,16 @@ pub fn init(memory_map: &[MemoryRegion]) {
         }
     }
 
-    #[cfg(not(target_arch = "aarch64"))]
-    #[allow(unreachable_code)] // Required due to AArch64 early return
-    drop(allocator); // Release lock before getting stats
-    #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            let uart = 0x0900_0000 as *mut u8;
-            *uart = b'M';
-            *uart = b'M';
-            *uart = b'F';
-            *uart = b'I';
-            *uart = b'N';
-            *uart = b'\n';
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    println!("[MM] Allocator lock dropped");
+        drop(allocator); // Release lock before getting stats
+        println!("[MM] Allocator lock dropped");
 
-    // Skip stats for now to avoid deadlock
-    #[cfg(not(target_arch = "aarch64"))]
-    println!(
-        "[MM] Memory initialized: {} MB total, {} MB usable",
-        total_memory / (1024 * 1024),
-        usable_memory / (1024 * 1024)
-    );
+        // Skip stats for now to avoid deadlock
+        println!(
+            "[MM] Memory initialized: {} MB total, {} MB usable",
+            total_memory / (1024 * 1024),
+            usable_memory / (1024 * 1024)
+        );
+    } // End of RISC-V block
 }
 
 /// Initialize with default memory map for testing

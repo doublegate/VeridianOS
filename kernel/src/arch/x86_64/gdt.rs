@@ -14,6 +14,19 @@ pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 lazy_static! {
     static ref TSS: TaskStateSegment = {
         let mut tss = TaskStateSegment::new();
+        
+        // Set up the kernel stack for privilege level 0
+        // This is used when transitioning from user mode to kernel mode
+        tss.privilege_stack_table[0] = {
+            const STACK_SIZE: usize = 4096 * 5;
+            static mut KERNEL_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
+            
+            let stack_ptr = &raw const KERNEL_STACK;
+            let stack_start = VirtAddr::from_ptr(stack_ptr);
+            stack_start + STACK_SIZE as u64
+        };
+        
+        // Set up the double fault stack
         tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
             const STACK_SIZE: usize = 4096 * 5;
             static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];

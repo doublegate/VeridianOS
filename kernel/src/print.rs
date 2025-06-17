@@ -4,8 +4,8 @@
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => ({
-        // Print to both VGA and serial for debugging
-        $crate::arch::x86_64::vga::_print(format_args!($($arg)*));
+        // Skip VGA for now due to early boot issues, only use serial
+        // $crate::arch::x86_64::vga::_print(format_args!($($arg)*));
         $crate::serial::_serial_print(format_args!($($arg)*));
     });
 }
