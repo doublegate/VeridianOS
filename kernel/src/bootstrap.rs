@@ -5,7 +5,7 @@
 
 use crate::{
     arch, cap,
-    error::{KernelError, KernelResult},
+    error::KernelResult,
     ipc, mm, process, sched,
 };
 
@@ -22,417 +22,127 @@ pub const BOOTSTRAP_TID: u64 = 0;
 /// DEEP-RECOMMENDATIONS.md to avoid circular dependencies between process
 /// management and scheduler.
 pub fn kernel_init() -> KernelResult<()> {
-    // AArch64-specific bypass to avoid LLVM bug
+    // Stage 1: Hardware initialization
+    #[cfg(target_arch = "x86_64")]
+    arch::x86_64::bootstrap::stage1_start();
     #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Stage 1: Hardware initialization\n");
-        }
-        arch::init();
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Architecture initialized\n");
-        }
-    }
-
-    // Use boot_println! for other architectures
-    #[cfg(not(target_arch = "aarch64"))]
-    {
-        boot_println!("[BOOTSTRAP] Starting multi-stage kernel initialization...");
-        boot_println!("[BOOTSTRAP] Stage 1: Hardware initialization");
-        arch::init();
-        boot_println!("[BOOTSTRAP] Architecture initialized");
-    }
-
+    arch::aarch64::bootstrap::stage1_start();
+    #[cfg(target_arch = "riscv64")]
+    arch::riscv64::bootstrap::stage1_start();
+    
+    arch::init();
+    
+    #[cfg(target_arch = "x86_64")]
+    arch::x86_64::bootstrap::stage1_complete();
     #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Stage 1 complete\n");
-        }
-    }
+    arch::aarch64::bootstrap::stage1_complete();
+    #[cfg(target_arch = "riscv64")]
+    arch::riscv64::bootstrap::stage1_complete();
 
     // Stage 2: Memory management
+    #[cfg(target_arch = "x86_64")]
+    arch::x86_64::bootstrap::stage2_start();
     #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Stage 2: Memory management\n");
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    boot_println!("[BOOTSTRAP] Stage 2: Memory management");
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Initializing memory with default configuration\n");
-        }
-    }
-
+    arch::aarch64::bootstrap::stage2_start();
+    #[cfg(target_arch = "riscv64")]
+    arch::riscv64::bootstrap::stage2_start();
+    
     mm::init_default();
-
+    
+    #[cfg(target_arch = "x86_64")]
+    arch::x86_64::bootstrap::stage2_complete();
     #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Memory initialization complete\n");
-        }
-    }
+    arch::aarch64::bootstrap::stage2_complete();
+    #[cfg(target_arch = "riscv64")]
+    arch::riscv64::bootstrap::stage2_complete();
 
+    // Stage 3: Process management
+    #[cfg(target_arch = "x86_64")]
+    arch::x86_64::bootstrap::stage3_start();
     #[cfg(target_arch = "aarch64")]
-    {
-        // Skip heap init entirely for AArch64
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Skipping heap initialization on AArch64\n");
-        }
-    }
-
-    #[cfg(not(target_arch = "aarch64"))]
-    mm::init_heap().map_err(|_| KernelError::OutOfMemory {
-        requested: 0,
-        available: 0,
-    })?;
-
+    arch::aarch64::bootstrap::stage3_start();
+    #[cfg(target_arch = "riscv64")]
+    arch::riscv64::bootstrap::stage3_start();
+    
+    process::init();
+    
+    #[cfg(target_arch = "x86_64")]
+    arch::x86_64::bootstrap::stage3_complete();
     #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Heap initialization complete\n");
-        }
-    }
+    arch::aarch64::bootstrap::stage3_complete();
+    #[cfg(target_arch = "riscv64")]
+    arch::riscv64::bootstrap::stage3_complete();
 
+    // Stage 4: Core kernel services
+    #[cfg(target_arch = "x86_64")]
+    arch::x86_64::bootstrap::stage4_start();
     #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Stage 3: Bootstrap context\n");
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    boot_println!("[BOOTSTRAP] Memory management initialized");
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Memory management initialized\n");
-        }
-    }
-
-    // Stage 3: Create bootstrap context for scheduler
-    #[cfg(not(target_arch = "aarch64"))]
-    boot_println!("[BOOTSTRAP] Stage 3: Bootstrap context");
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // Skip to Stage 6 directly for AArch64
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Stage 6: Bootstrap complete\n");
-            uart_write_str("[BOOTSTRAP] All kernel subsystems initialized successfully\n");
-        }
-
-        // Return Ok to indicate success
-        return Ok(());
-    }
-
-    // Use static allocation to avoid heap allocation issues during early boot
-    #[cfg(all(feature = "alloc", not(target_arch = "aarch64")))]
-    {
-        boot_println!("[BOOTSTRAP] Using static bootstrap stack to avoid heap allocation...");
-
-        // Static bootstrap stack to avoid heap allocation during early boot
-        static mut BOOTSTRAP_STACK: [u8; 8192] = [0u8; 8192];
-        let _bootstrap_stack_top =
-            unsafe { core::ptr::addr_of_mut!(BOOTSTRAP_STACK).add(8192) as usize };
-        boot_println!("[BOOTSTRAP] Static bootstrap stack prepared");
-
-        boot_println!("[BOOTSTRAP] About to get kernel page table...");
-        let _kernel_page_table = mm::get_kernel_page_table();
-        boot_println!("[BOOTSTRAP] Got kernel page table");
-
-        boot_println!("[BOOTSTRAP] About to initialize scheduler without bootstrap task...");
-        boot_println!("[BOOTSTRAP] About to initialize SMP...");
-        boot_println!("[BOOTSTRAP] Skipping SMP initialization due to heap allocation issues");
-        boot_println!("[BOOTSTRAP] SMP initialization skipped");
-
-        boot_println!("[BOOTSTRAP] About to initialize basic scheduler...");
-        boot_println!("[BOOTSTRAP] Using RISC-V scheduler initialization");
-
-        // For RISC-V, skip scheduler initialization that requires heap allocations
-        #[cfg(target_arch = "riscv64")]
-        {
-            // Minimal scheduler setup without heap allocations
-            boot_println!("[BOOTSTRAP] Skipping complex scheduler init for RISC-V");
-        }
-
-        #[cfg(not(target_arch = "riscv64"))]
-        {
-            sched::init();
-        }
-        boot_println!("[BOOTSTRAP] Scheduler initialized without bootstrap task");
-    }
-
-    // Stage 4: Kernel services (IPC, capabilities)
-    #[cfg(target_arch = "aarch64")]
-    #[allow(unreachable_code)] // Required due to early return
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Stage 4: Kernel services\n");
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    boot_println!("[BOOTSTRAP] Stage 4: Kernel services");
-
-    ipc::init();
+    arch::aarch64::bootstrap::stage4_start();
+    #[cfg(target_arch = "riscv64")]
+    arch::riscv64::bootstrap::stage4_start();
+    
     cap::init();
-
+    ipc::init();
+    
+    #[cfg(target_arch = "x86_64")]
+    arch::x86_64::bootstrap::stage4_complete();
     #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] IPC and capability systems initialized\n");
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    boot_println!("[BOOTSTRAP] IPC and capability systems initialized");
+    arch::aarch64::bootstrap::stage4_complete();
+    #[cfg(target_arch = "riscv64")]
+    arch::riscv64::bootstrap::stage4_complete();
 
-    // Stage 5: Now safe to initialize process management
+    // Stage 5: Scheduler initialization
+    #[cfg(target_arch = "x86_64")]
+    arch::x86_64::bootstrap::stage5_start();
     #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Stage 5: Process management\n");
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    boot_println!("[BOOTSTRAP] Stage 5: Process management");
-
-    process::init_without_init_process().map_err(|_| KernelError::InvalidState {
-        expected: "process system initialized",
-        actual: "initialization failed",
-    })?;
-
+    arch::aarch64::bootstrap::stage5_start();
+    #[cfg(target_arch = "riscv64")]
+    arch::riscv64::bootstrap::stage5_start();
+    
+    sched::init();
+    
+    #[cfg(target_arch = "x86_64")]
+    arch::x86_64::bootstrap::stage5_complete();
     #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Process management initialized\n");
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    boot_println!("[BOOTSTRAP] Process management initialized (without init process)");
+    arch::aarch64::bootstrap::stage5_complete();
+    #[cfg(target_arch = "riscv64")]
+    arch::riscv64::bootstrap::stage5_complete();
 
-    // Stage 6: Completing initialization
-    #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Stage 6: Completing initialization\n");
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    boot_println!("[BOOTSTRAP] Stage 6: Completing initialization");
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Process management initialized\n");
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    boot_println!("[BOOTSTRAP] Kernel initialization complete!");
-
-    // Continue initialization inline instead of scheduler transfer
-    #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Continuing initialization inline...\n");
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    boot_println!("[BOOTSTRAP] Continuing initialization inline...");
-
-    bootstrap_stage4_inline();
+    Ok(())
 }
 
-/// Inline bootstrap stage 4 - simplified approach
-fn bootstrap_stage4_inline() -> ! {
-    #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Stage 4 inline running in bootstrap context\n");
-        }
+/// Run the bootstrap sequence
+pub fn run() -> ! {
+    if let Err(e) = kernel_init() {
+        panic!("Bootstrap failed: {:?}", e);
     }
-    #[cfg(not(target_arch = "aarch64"))]
-    boot_println!("[BOOTSTRAP] Stage 4 inline running in bootstrap context");
 
-    // Skip init process creation due to heap allocation issues
+    // Stage 6: User space transition
+    #[cfg(target_arch = "x86_64")]
+    arch::x86_64::bootstrap::stage6_start();
     #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Skipping init process creation due to heap allocation issues\n");
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    boot_println!("[BOOTSTRAP] Skipping init process creation due to heap allocation issues");
+    arch::aarch64::bootstrap::stage6_start();
+    #[cfg(target_arch = "riscv64")]
+    arch::riscv64::bootstrap::stage6_start();
 
-    // Create test tasks for demonstration would normally go here
-    // but we skip it to avoid heap allocations
+    // Create init process
+    create_init_process();
 
-    #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Bootstrap complete - heap allocations need to be fixed\n");
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    boot_println!("[BOOTSTRAP] Bootstrap complete - heap allocations need to be fixed");
-
-    // Enter idle loop
-    #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Entering idle loop\n");
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    boot_println!("[BOOTSTRAP] Entering idle loop");
-
-    idle_task_main()
+    // Transfer control to scheduler
+    sched::start();
 }
 
-/// Bootstrap stage 4 - runs as first scheduled task
-///
-/// This function runs within the scheduler context and completes
-/// the remaining initialization steps.
-#[no_mangle]
-pub extern "C" fn bootstrap_stage4() -> ! {
-    boot_println!("[BOOTSTRAP] Stage 4 task running in scheduler context");
-
-    // Now we can safely create the init process
+/// Create the init process
+fn create_init_process() {
     #[cfg(feature = "alloc")]
     {
         use alloc::string::String;
-
-        let init_entry = init_process_main as usize;
-        match process::lifecycle::create_process(String::from("init"), init_entry) {
-            Ok(init_pid) => {
-                boot_print_num!("[BOOTSTRAP] Created init process with PID ", init_pid.0);
-
-                // The init process already has a main thread created by create_process
-                // We just need to schedule it
-                if let Some(init_proc) = process::table::get_process(init_pid) {
-                    // Get the main thread ID
-                    if let Some(tid) = init_proc.get_main_thread_id() {
-                        // Get the thread itself
-                        if let Some(main_thread) = init_proc.get_thread(tid) {
-                            if let Err(_e) = sched::schedule_thread(init_pid, tid, main_thread) {
-                                #[cfg(not(target_arch = "aarch64"))]
-                                boot_println!(
-                                    "[BOOTSTRAP] Warning: Failed to schedule init thread"
-                                );
-                            }
-                        } else {
-                            panic!("[BOOTSTRAP] Failed to get init main thread!");
-                        }
-                    } else {
-                        panic!("[BOOTSTRAP] Init process has no main thread!");
-                    }
-                } else {
-                    panic!("[BOOTSTRAP] Failed to find init process after creation!");
-                }
-            }
-            Err(_e) => {
-                panic!("[BOOTSTRAP] Failed to create init process");
-            }
+        
+        // TODO: Load init from filesystem
+        // For now, create a test process
+        // Process is automatically marked as ready in create_process
+        if let Ok(_init_pid) = process::lifecycle::create_process(String::from("init"), 0) {
+            // Process created and marked as ready
         }
-
-        // Create test tasks for demonstration (after init process is ready)
-        // This demonstrates context switching between multiple tasks
-        boot_println!("[BOOTSTRAP] Creating test tasks for context switch demonstration");
-        crate::test_tasks::create_test_tasks();
-    }
-
-    #[cfg(not(feature = "alloc"))]
-    {
-        boot_println!(
-            "[BOOTSTRAP] Warning: alloc feature not enabled, skipping init process creation"
-        );
-    }
-
-    boot_println!("[BOOTSTRAP] Bootstrap complete, transitioning to idle task");
-
-    // Transform into idle task
-    idle_task_main()
-}
-
-/// Init process main function
-#[no_mangle]
-extern "C" fn init_process_main() -> ! {
-    boot_println!("[INIT] Init process started!");
-
-    // TODO: Mount root filesystem
-    // TODO: Start core services
-    // TODO: Start user shell
-
-    let mut counter = 0u64;
-    loop {
-        if counter % 1_000_000 == 0 {
-            boot_print_num!("[INIT] Running... ", counter / 1_000_000);
-        }
-        counter = counter.wrapping_add(1);
-
-        // Yield periodically
-        if counter % 10_000 == 0 {
-            sched::yield_cpu();
-        }
-    }
-}
-
-/// Idle task main function
-fn idle_task_main() -> ! {
-    #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[IDLE] Entering idle loop\n");
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    boot_println!("[IDLE] Entering idle loop");
-
-    let mut idle_counter = 0u64;
-    loop {
-        // Check for work
-        if sched::has_ready_tasks() {
-            sched::yield_cpu();
-        }
-
-        // Periodic maintenance
-        idle_counter = idle_counter.wrapping_add(1);
-        if idle_counter % 100_000 == 0 {
-            // Perform cleanup, load balancing, etc.
-            #[cfg(feature = "alloc")]
-            {
-                if idle_counter % 1_000_000 == 0 {
-                    sched::cleanup_dead_tasks();
-                }
-            }
-        }
-
-        // Enter low power state
-        arch::idle();
     }
 }

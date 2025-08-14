@@ -2,8 +2,11 @@
 
 // Include the boot module
 pub mod boot;
+pub mod bootstrap;
 pub mod context;
 pub mod direct_uart;
+pub mod entry;
+pub mod serial;
 pub mod timer;
 
 #[allow(dead_code)]

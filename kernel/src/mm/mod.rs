@@ -200,7 +200,7 @@ pub fn init(_memory_map: &[MemoryRegion]) {
         let mut total_memory = 0u64;
         let mut usable_memory = 0u64;
 
-        for (idx, region) in memory_map.iter().enumerate() {
+        for (idx, region) in _memory_map.iter().enumerate() {
         println!(
             "[MM] Processing region {}: start=0x{:x}, size={} MB, usable={}",
             idx,
