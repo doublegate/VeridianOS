@@ -46,3 +46,9 @@ pub fn stage5_complete() {
 pub fn stage6_start() {
     early_println!("[BOOTSTRAP] Stage 6: User space transition");
 }
+
+pub fn stage6_complete() {
+    early_println!("[BOOTSTRAP] User space transition prepared");
+    early_println!("[KERNEL] Boot sequence complete!");
+    early_println!("BOOTOK");
+}

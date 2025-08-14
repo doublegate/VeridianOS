@@ -1,16 +1,22 @@
 // Boot entry point for x86_64
 
-use bootloader::{entry_point, BootInfo};
+use bootloader_api::BootInfo;
 
 // Store boot info for later use
-pub static mut BOOT_INFO: Option<&'static BootInfo> = None;
+pub static mut BOOT_INFO: Option<&'static mut BootInfo> = None;
 
-entry_point!(kernel_main_entry);
-
-fn kernel_main_entry(boot_info: &'static BootInfo) -> ! {
+// Early initialization that must happen before kernel_main
+pub fn early_boot_init() {
     // Disable interrupts immediately
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
+    }
+    
+    // Initialize VGA text buffer first for immediate feedback
+    unsafe {
+        let vga = 0xb8000 as *mut u16;
+        // Write 'B' in white on black
+        vga.write_volatile(0x0F42);
     }
     
     // Initialize early serial first thing
@@ -35,17 +41,6 @@ fn kernel_main_entry(boot_info: &'static BootInfo) -> ! {
         // Write boot marker
         write_str(base, "BOOT_ENTRY\n");
     }
-    
-    // Store boot info in a static for later use
-    unsafe {
-        BOOT_INFO = Some(boot_info);
-    }
-    
-    // Call the real kernel_main from main.rs
-    extern "C" {
-        fn kernel_main() -> !;
-    }
-    unsafe { kernel_main() }
 }
 
 #[inline]

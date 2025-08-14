@@ -591,3 +591,30 @@ Check these files regularly to track progress and identify next tasks.
 - **Priority Mapping**: Convert between syscall priorities and internal scheduler priorities
 - **Deferred Implementation Tracking**: Document all TODOs and stubs for future work
 
+## Recent Architecture Refactoring (August 13, 2025)
+
+### Bootstrap Simplification
+- **Refactored**: Simplified bootstrap.rs from 439 lines to ~150 lines
+- **Architecture Separation**: Created dedicated entry.rs and bootstrap.rs for each architecture
+- **Module Organization**: Each architecture (x86_64, AArch64, RISC-V) has its own:
+  - `entry.rs`: Early initialization and panic handling
+  - `bootstrap.rs`: Stage-specific output functions
+  - `serial.rs`: Architecture-specific serial implementations
+- **Print Consolidation**: Unified print macros in main print.rs module
+- **Build Status**: All three architectures compile successfully
+- **Boot Testing**: AArch64 and RISC-V boot through Stage 3 successfully
+
+### Gemini CLI Integration
+- **Added**: Gemini CLI support for AI-assisted development (commit 0f77faa)
+- **GEMINI.md**: Created for AI context about the project
+- **GitHub Workflows**: Added automated PR reviews and issue triage
+- **Integration**: Enhances development workflow with AI assistance
+
+### x86_64 Bootloader Diagnosis (August 14, 2025)
+- **Issue Identified**: x86_64 architecture doesn't boot due to bootloader 0.9 limitations
+- **Root Cause**: Bootloader 0.9 cannot handle higher-half kernels (0xffffffff80000000+)
+- **Current Status**: AArch64 and RISC-V boot to Stage 6 successfully, x86_64 blocked
+- **Solutions Available**: Upgrade to bootloader 0.10+, switch to GRUB/Limine, or custom boot stub
+- **Architecture Differences**: x86_64 requires bootloader, AArch64/RISC-V use direct QEMU loading
+- **Implementation Added**: VGA/serial debug output, entry_point! macro, symbol conflict fixes
+

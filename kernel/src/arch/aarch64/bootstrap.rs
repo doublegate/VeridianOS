@@ -68,3 +68,11 @@ pub fn stage6_start() {
         uart_write_str("[BOOTSTRAP] Stage 6: User space transition\n");
     }
 }
+
+pub fn stage6_complete() {
+    unsafe {
+        uart_write_str("[BOOTSTRAP] User space transition prepared\n");
+        uart_write_str("[KERNEL] Boot sequence complete!\n");
+        uart_write_str("BOOTOK\n");
+    }
+}

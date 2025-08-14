@@ -27,6 +27,14 @@ pub use token::{CapabilityToken, Rights};
 pub use types::CapabilityId;
 
 pub fn init() {
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[CAP] Initializing capability system...\n");
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[CAP] Initializing capability system...");
 
     // The global capability manager is already initialized as a static
@@ -34,5 +42,13 @@ pub fn init() {
     // TODO: Create root capability for kernel
     // TODO: Set up initial capability spaces for core processes
 
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[CAP] Capability system initialized\n");
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[CAP] Capability system initialized");
 }

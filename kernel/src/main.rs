@@ -40,6 +40,54 @@ use core::panic::PanicInfo;
 // Use the kernel library
 use veridian_kernel::*;
 
+// For x86_64, use the new bootloader_api
+#[cfg(target_arch = "x86_64")]
+use bootloader_api::{entry_point, BootInfo};
+#[cfg(target_arch = "x86_64")]
+use bootloader_api::config::{BootloaderConfig, Mapping};
+
+// Configure bootloader to map physical memory (equivalent to old map_physical_memory feature)
+#[cfg(target_arch = "x86_64")]
+pub static BOOTLOADER_CONFIG: BootloaderConfig = {
+    let mut config = BootloaderConfig::new_default();
+    config.mappings.physical_memory = Some(Mapping::Dynamic);
+    config
+};
+
+#[cfg(target_arch = "x86_64")]
+entry_point!(x86_64_kernel_entry, config = &BOOTLOADER_CONFIG);
+
+#[cfg(target_arch = "x86_64")]
+fn x86_64_kernel_entry(boot_info: &'static mut BootInfo) -> ! {
+    // Write 'E' to VGA to show we reached entry point
+    unsafe {
+        let vga = 0xb8000 as *mut u16;
+        vga.write_volatile(0x0F45); // 'E' in white on black
+        vga.offset(1).write_volatile(0x0F42); // 'B' to show boot.rs was called
+        
+        // Also try direct serial output here
+        let port: u16 = 0x3F8;
+        // Simple serial byte output
+        core::arch::asm!(
+            "out dx, al",
+            in("dx") port,
+            in("al") b'X',
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    
+    // Run early boot initialization (serial port, etc.)
+    arch::x86_64::boot::early_boot_init();
+    
+    // Store boot info for later use
+    unsafe {
+        arch::x86_64::boot::BOOT_INFO = Some(boot_info);
+    }
+    
+    // Call the main kernel implementation
+    kernel_main_impl()
+}
+
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
@@ -62,8 +110,20 @@ fn panic(info: &PanicInfo) -> ! {
     test_framework::test_panic_handler(info)
 }
 
+// For x86_64, this is called from x86_64_kernel_entry
+// For other architectures, this needs to be extern "C"
+#[cfg(not(target_arch = "x86_64"))]
 #[no_mangle]
 pub extern "C" fn kernel_main() -> ! {
+    kernel_main_impl()
+}
+
+#[cfg(target_arch = "x86_64")]
+fn kernel_main() -> ! {
+    kernel_main_impl()
+}
+
+fn kernel_main_impl() -> ! {
     // Architecture-specific early initialization
     #[cfg(target_arch = "x86_64")]
     arch::x86_64::entry::arch_early_init();

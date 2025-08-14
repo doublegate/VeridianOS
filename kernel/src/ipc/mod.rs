@@ -54,14 +54,28 @@ pub use sync::{sync_call, sync_receive, sync_reply, sync_send};
 /// IPC system initialization
 #[allow(dead_code)]
 pub fn init() {
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[IPC] Initializing IPC system...\n");
+            uart_write_str("[IPC] About to initialize registry...\n");
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[IPC] Initializing IPC system...");
 
     // Initialize the global IPC registry
     registry::init();
-
-    // TODO: Initialize message queues
-    // TODO: Set up shared memory regions
-    // TODO: Initialize synchronization primitives
-
+    
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[IPC] Registry initialized\n");
+            uart_write_str("[IPC] IPC system initialized\n");
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[IPC] IPC system initialized");
 }

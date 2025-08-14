@@ -64,7 +64,7 @@ pub fn kernel_init() -> KernelResult<()> {
     #[cfg(target_arch = "riscv64")]
     arch::riscv64::bootstrap::stage3_start();
     
-    process::init();
+    process::init_without_init_process().expect("Failed to initialize process management");
     
     #[cfg(target_arch = "x86_64")]
     arch::x86_64::bootstrap::stage3_complete();
@@ -126,7 +126,41 @@ pub fn run() -> ! {
     arch::riscv64::bootstrap::stage6_start();
 
     // Create init process
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[BOOTSTRAP] About to create init process...\n");
+        }
+    }
+    
+    #[cfg(target_arch = "riscv64")]
+    {
+        println!("[BOOTSTRAP] About to create init process...");
+    }
+    
     create_init_process();
+    
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[BOOTSTRAP] Init process created\n");
+        }
+    }
+    
+    #[cfg(target_arch = "riscv64")]
+    {
+        println!("[BOOTSTRAP] Init process created");
+    }
+    
+    // Mark Stage 6 complete
+    #[cfg(target_arch = "x86_64")]
+    arch::x86_64::bootstrap::stage6_complete();
+    #[cfg(target_arch = "aarch64")]
+    arch::aarch64::bootstrap::stage6_complete();
+    #[cfg(target_arch = "riscv64")]
+    arch::riscv64::bootstrap::stage6_complete();
 
     // Transfer control to scheduler
     sched::start();
@@ -134,6 +168,23 @@ pub fn run() -> ! {
 
 /// Create the init process
 fn create_init_process() {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Skip init process creation for AArch64 due to allocation issues
+        unsafe {
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[BOOTSTRAP] Skipping init process creation for AArch64\n");
+        }
+        return;
+    }
+    
+    #[cfg(target_arch = "riscv64")]
+    {
+        // Skip init process creation for RISC-V due to allocation issues
+        println!("[BOOTSTRAP] Skipping init process creation for RISC-V");
+        return;
+    }
+    
     #[cfg(feature = "alloc")]
     {
         use alloc::string::String;

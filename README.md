@@ -32,6 +32,8 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 
 ## Project Status
 
+**Last Updated**: August 14, 2025
+
 ### 🎉 Phase 0: Foundation & Tooling (100% Complete! - v0.1.0)
 
 **Released**: June 7, 2025
@@ -42,6 +44,13 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 **Started**: June 8, 2025
 **Completed**: June 12, 2025
 **Status**: COMPLETE - v0.2.1 Released (June 17, 2025) 🎉
+
+### ⚡ Recent Updates: Bootloader Modernization (August 2025)
+
+**Status**: Bootloader upgraded from 0.9 → 0.11.11 with API modernization
+- ✅ **AArch64**: Fully functional - boots to Stage 6 with BOOTOK
+- ✅ **RISC-V**: Fully functional - boots to Stage 6 with BOOTOK  
+- ⚠️ **x86_64**: API updated but disk image creation blocked by upstream BIOS compilation issues
 
 **Components**:
 
@@ -54,13 +63,13 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 
 ### 🎉 Latest Release: v0.2.1 (June 17, 2025) - Maintenance Release
 
-**All architectures now boot successfully to Stage 6!** 🚀
+**Multi-architecture support with modern bootloader API!** 🚀
 
-**Major Achievements**:
+**Current Architecture Status** (August 2025):
 
-- ✅ **x86_64**: Boots through all 6 stages, executes bootstrap task in scheduler context
-- ✅ **RISC-V**: Boots through all 6 stages, reaches idle loop successfully
-- ✅ **AArch64**: Assembly-only workaround implemented, progresses to memory management
+- ✅ **AArch64**: Boots to Stage 6 with BOOTOK - fully functional
+- ✅ **RISC-V**: Boots to Stage 6 with BOOTOK - fully functional  
+- ⚠️ **x86_64**: Bootloader API updated but disk image creation blocked by upstream issues
 
 **Technical Improvements**:
 

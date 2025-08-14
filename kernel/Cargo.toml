@@ -26,7 +26,7 @@ log.workspace = true
 # Architecture-specific dependencies
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_64.workspace = true
-bootloader = "0.9"
+bootloader_api = "0.11"
 uart_16550 = "0.3"
 pic8259 = "0.10"
 pc-keyboard = "0.7"
@@ -39,6 +39,10 @@ riscv.workspace = true
 
 [build-dependencies]
 cc = "1.0"
+
+[package.metadata.bootloader]
+# Map physical memory to this virtual address  
+# Use standard bootloader defaults for now
 
 [lib]
 name = "veridian_kernel"

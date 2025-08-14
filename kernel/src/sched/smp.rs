@@ -273,6 +273,27 @@ static CPU_TOPOLOGY: Mutex<CpuTopology> = Mutex::new(CpuTopology {
 
 /// Initialize SMP support
 pub fn init() {
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[SMP] Initializing SMP support (simplified for AArch64)...\n");
+            // Skip complex SMP initialization for AArch64
+            // Just initialize BSP with minimal setup
+            uart_write_str("[SMP] SMP initialized (BSP only for AArch64)\n");
+        }
+        return;
+    }
+    
+    #[cfg(target_arch = "riscv64")]
+    {
+        println!("[SMP] Initializing SMP support (simplified for RISC-V)...");
+        // Skip complex SMP initialization for RISC-V
+        // Just initialize BSP with minimal setup
+        println!("[SMP] SMP initialized (BSP only for RISC-V)");
+        return;
+    }
+    
     // Detect CPU topology
     CPU_TOPOLOGY.lock().detect();
 

@@ -147,8 +147,7 @@ pub struct MemoryRegion {
 }
 
 /// Initialize the memory management subsystem
-#[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
-pub fn init(_memory_map: &[MemoryRegion]) {
+pub fn init(memory_map: &[MemoryRegion]) {
     #[cfg(target_arch = "aarch64")]
     {
         unsafe {
@@ -160,90 +159,113 @@ pub fn init(_memory_map: &[MemoryRegion]) {
     println!("[MM] Initializing memory management...");
 
     // Initialize frame allocator with available memory regions
-    // For now, skip frame allocator initialization on x86_64 due to early boot issues
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(target_arch = "aarch64")]
     {
-        println!("[MM] Deferring frame allocator initialization on x86_64");
-        println!("[MM] Memory management initialization complete (minimal)");
-        return;
+        unsafe {
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[MM] Getting frame allocator lock...\n");
+        }
     }
-    
     #[cfg(not(target_arch = "aarch64"))]
     println!("[MM] Getting frame allocator lock...");
 
-    #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[MM] Attempting to acquire frame allocator lock\n");
-        }
-    }
-
-    // For AArch64, skip the frame allocator initialization due to mutex issues
-    #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[MM] Skipping frame allocator initialization on AArch64\n");
-            uart_write_str("[MM] Memory management initialization complete (minimal)\n");
-        }
-        return;
-    }
-
-    // Only proceed with frame allocator for RISC-V
-    #[cfg(target_arch = "riscv64")]
+    // Get frame allocator lock and initialize memory regions
     {
         let mut allocator = FRAME_ALLOCATOR.lock();
+        
+        #[cfg(target_arch = "aarch64")]
+        {
+            unsafe {
+                use crate::arch::aarch64::direct_uart::uart_write_str;
+                uart_write_str("[MM] Frame allocator locked successfully\n");
+            }
+        }
+        #[cfg(not(target_arch = "aarch64"))]
         println!("[MM] Frame allocator locked successfully");
-        println!("[MM] Got frame allocator lock");
         
         let mut total_memory = 0u64;
         let mut usable_memory = 0u64;
 
-        for (idx, region) in _memory_map.iter().enumerate() {
-        println!(
-            "[MM] Processing region {}: start=0x{:x}, size={} MB, usable={}",
-            idx,
-            region.start,
-            region.size / (1024 * 1024),
-            region.usable
-        );
+        for (idx, region) in memory_map.iter().enumerate() {
+            #[cfg(target_arch = "aarch64")]
+            {
+                // Simple progress indicator for AArch64
+                unsafe {
+                    use crate::arch::aarch64::direct_uart::uart_write_str;
+                    uart_write_str("[MM] Processing memory region\n");
+                }
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            println!(
+                "[MM] Processing region {}: start=0x{:x}, size={} MB, usable={}",
+                idx,
+                region.start,
+                region.size / (1024 * 1024),
+                region.usable
+            );
 
-        total_memory += region.size;
+            total_memory += region.size;
 
-        if region.usable {
-            usable_memory += region.size;
+            if region.usable {
+                usable_memory += region.size;
 
-            let start_frame = FrameNumber::new(region.start / FRAME_SIZE as u64);
-            let frame_count = region.size as usize / FRAME_SIZE;
+                let start_frame = FrameNumber::new(region.start / FRAME_SIZE as u64);
+                let frame_count = region.size as usize / FRAME_SIZE;
 
-            // Use region index as NUMA node for now
-            let numa_node = idx.min(7); // Max 8 NUMA nodes
+                // Use region index as NUMA node for now
+                let numa_node = idx.min(7); // Max 8 NUMA nodes
 
-            println!("[MM] About to call init_numa_node for node {}", numa_node);
-            if let Err(_e) = allocator.init_numa_node(numa_node, start_frame, frame_count) {
-                println!("[MM] Warning: Failed to initialize memory region {}", idx);
-            } else {
-                println!(
-                    "[MM] Initialized {} MB at 0x{:x} (NUMA node {})",
-                    region.size / (1024 * 1024),
-                    region.start,
-                    numa_node
-                );
+                #[cfg(not(target_arch = "aarch64"))]
+                println!("[MM] About to call init_numa_node for node {}", numa_node);
+                
+                if let Err(_e) = allocator.init_numa_node(numa_node, start_frame, frame_count) {
+                    #[cfg(target_arch = "aarch64")]
+                    {
+                        unsafe {
+                            use crate::arch::aarch64::direct_uart::uart_write_str;
+                            uart_write_str("[MM] Warning: Failed to initialize memory region\n");
+                        }
+                    }
+                    #[cfg(not(target_arch = "aarch64"))]
+                    println!("[MM] Warning: Failed to initialize memory region {}", idx);
+                } else {
+                    #[cfg(target_arch = "aarch64")]
+                    {
+                        unsafe {
+                            use crate::arch::aarch64::direct_uart::uart_write_str;
+                            uart_write_str("[MM] Memory region initialized\n");
+                        }
+                    }
+                    #[cfg(not(target_arch = "aarch64"))]
+                    println!(
+                        "[MM] Initialized {} MB at 0x{:x} (NUMA node {})",
+                        region.size / (1024 * 1024),
+                        region.start,
+                        numa_node
+                    );
+                }
             }
         }
-    }
 
         drop(allocator); // Release lock before getting stats
-        println!("[MM] Allocator lock dropped");
-
-        // Skip stats for now to avoid deadlock
-        println!(
-            "[MM] Memory initialized: {} MB total, {} MB usable",
-            total_memory / (1024 * 1024),
-            usable_memory / (1024 * 1024)
-        );
-    } // End of RISC-V block
+        
+        #[cfg(target_arch = "aarch64")]
+        {
+            unsafe {
+                use crate::arch::aarch64::direct_uart::uart_write_str;
+                uart_write_str("[MM] Memory initialization complete\n");
+            }
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            println!("[MM] Allocator lock dropped");
+            println!(
+                "[MM] Memory initialized: {} MB total, {} MB usable",
+                total_memory / (1024 * 1024),
+                usable_memory / (1024 * 1024)
+            );
+        }
+    } // End of allocator block
 }
 
 /// Initialize with default memory map for testing
@@ -254,8 +276,6 @@ pub fn init_default() {
             use crate::arch::aarch64::direct_uart::uart_write_str;
             uart_write_str("[MM] Using default memory map for initialization\n");
         }
-        // Early return for AArch64 to avoid any issues
-        return;
     }
     #[cfg(not(target_arch = "aarch64"))]
     println!("[MM] init_default called");
@@ -269,7 +289,6 @@ pub fn init_default() {
     }];
 
     #[cfg(target_arch = "aarch64")]
-    #[allow(unreachable_code)] // We return early, but need this for compilation
     let default_map = [MemoryRegion {
         start: 0x48000000, // 1.125GB (after kernel at 0x40080000)
         size: 134217728,   // 128MB pre-calculated
@@ -284,71 +303,26 @@ pub fn init_default() {
     }];
 
     #[cfg(target_arch = "aarch64")]
-    #[allow(unreachable_code)] // Required due to early return
     {
         unsafe {
-            let uart = 0x0900_0000 as *mut u8;
-            *uart = b'M';
-            *uart = b'M';
-            *uart = b'I';
-            *uart = b'N';
-            *uart = b'I';
-            *uart = b'T';
-            *uart = b'\n';
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[MM] Calling init with default memory map\n");
         }
     }
     #[cfg(not(target_arch = "aarch64"))]
     println!("[MM] Calling init with default memory map");
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            let uart = 0x0900_0000 as *mut u8;
-            *uart = b'B';
-            *uart = b'4';
-            *uart = b'I';
-            *uart = b'N';
-            *uart = b'I';
-            *uart = b'T';
-            *uart = b'\n';
-        }
-    }
 
     init(&default_map);
 
     #[cfg(target_arch = "aarch64")]
     {
         unsafe {
-            let uart = 0x0900_0000 as *mut u8;
-            *uart = b'A';
-            *uart = b'F';
-            *uart = b'T';
-            *uart = b'E';
-            *uart = b'R';
-            *uart = b'\n';
-            *uart = b'M';
-            *uart = b'M';
-            *uart = b'O';
-            *uart = b'K';
-            *uart = b'\n';
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[MM] init returned successfully\n");
         }
     }
     #[cfg(not(target_arch = "aarch64"))]
     println!("[MM] init returned successfully");
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            let uart = 0x0900_0000 as *mut u8;
-            *uart = b'E';
-            *uart = b'N';
-            *uart = b'D';
-            *uart = b'D';
-            *uart = b'E';
-            *uart = b'F';
-            *uart = b'\n';
-        }
-    }
 }
 
 /// Translate virtual address to physical address

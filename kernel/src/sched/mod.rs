@@ -575,6 +575,22 @@ pub fn init() {
 
     // Initialize SMP support
     smp::init();
+    
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use crate::arch::aarch64::direct_uart::uart_write_str;
+        uart_write_str("[SCHED] Skipping idle task creation for AArch64\n");
+        uart_write_str("[SCHED] Scheduler initialized (minimal for AArch64)\n");
+    }
+    
+    #[cfg(target_arch = "riscv64")]
+    {
+        println!("[SCHED] Skipping idle task creation for RISC-V");
+        println!("[SCHED] Scheduler initialized (minimal for RISC-V)");
+    }
+    
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    return;
 
     // Create idle task for BSP
     #[cfg(feature = "alloc")]
@@ -691,9 +707,33 @@ pub fn start() -> ! {
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[SCHED] Starting scheduler execution\n");
+        uart_write_str("[SCHED] Entering simplified idle loop for AArch64\n");
+    }
+    
+    #[cfg(target_arch = "aarch64")]
+    {
+        // For AArch64, just enter a simple idle loop
+        loop {
+            unsafe {
+                core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
+            }
+        }
+    }
+    
+    #[cfg(target_arch = "riscv64")]
+    {
+        println!("[SCHED] Entering simplified idle loop for RISC-V");
+        // For RISC-V, just enter a simple idle loop
+        loop {
+            unsafe {
+                // RISC-V wait for interrupt instruction
+                core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
+            }
+        }
     }
 
     // Get the scheduler and check we have a current task
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
     {
         let scheduler = SCHEDULER.lock();
         // Make sure we have a current task
@@ -703,7 +743,7 @@ pub fn start() -> ! {
     } // Drop the lock here to avoid deadlock
 
     // Start running tasks
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
     println!("[SCHED] Starting scheduler loop...");
     
     #[cfg(target_arch = "aarch64")]
@@ -711,6 +751,9 @@ pub fn start() -> ! {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[SCHED] Starting scheduler loop...\n");
     }
+    
+    #[cfg(target_arch = "riscv64")]
+    println!("[SCHED] Starting scheduler loop...");
 
     // The scheduler loop
     #[allow(clippy::never_loop)]
