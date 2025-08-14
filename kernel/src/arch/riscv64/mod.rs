@@ -1,6 +1,9 @@
 // RISC-V 64 architecture support
 
 pub mod boot;
+pub mod bootstrap;
+pub mod entry;
+pub mod serial;
 
 // Re-export context and timer from parent riscv module
 #[allow(unused_imports)]

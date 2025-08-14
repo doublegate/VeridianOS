@@ -25,3 +25,9 @@ pub fn _print(args: ::core::fmt::Arguments) {
             .expect("Printing to serial failed");
     });
 }
+
+// Alias for compatibility
+#[doc(hidden)]
+pub fn _serial_print(args: ::core::fmt::Arguments) {
+    _print(args);
+}

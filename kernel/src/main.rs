@@ -43,24 +43,15 @@ use veridian_kernel::*;
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    // For AArch64, use uart_write_str for panic message
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        use arch::aarch64::direct_uart::uart_write_str;
-        uart_write_str("\n[PANIC] Kernel panic occurred!\n");
-        
-        // Try to extract panic message location if available
-        if let Some(location) = _info.location() {
-            uart_write_str("[PANIC] Location: ");
-            uart_write_str(location.file());
-            uart_write_str(":");
-            // Can't easily print line number without loops, so skip for now
-            uart_write_str("\n");
-        }
-    }
-
+    // Use architecture-specific panic handler
     #[cfg(target_arch = "x86_64")]
-    println!("[KERNEL PANIC] {}", _info);
+    arch::x86_64::entry::arch_panic_handler(_info);
+    
+    #[cfg(target_arch = "aarch64")]
+    arch::aarch64::entry::arch_panic_handler(_info);
+    
+    #[cfg(target_arch = "riscv64")]
+    arch::riscv64::entry::arch_panic_handler(_info);
 
     arch::halt();
 }
@@ -73,93 +64,39 @@ fn panic(info: &PanicInfo) -> ! {
 
 #[no_mangle]
 pub extern "C" fn kernel_main() -> ! {
-    // Disable interrupts immediately for x86_64
+    // Architecture-specific early initialization
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        core::arch::asm!("cli", options(nomem, nostack));
-    }
+    arch::x86_64::entry::arch_early_init();
     
-    // Initialize early serial for x86_64 before any println! usage
-    #[cfg(target_arch = "x86_64")]
-    {
-        arch::x86_64::early_serial::init();
-        early_println!("[EARLY] x86_64 kernel_main reached!");
-        early_println!("[EARLY] VeridianOS Kernel v{}", env!("CARGO_PKG_VERSION"));
-        early_println!("[EARLY] Architecture: x86_64");
-    }
-    
-    // AArch64: Use uart_write_str for descriptive messages
     #[cfg(target_arch = "aarch64")]
-    {
-        use arch::aarch64::direct_uart::uart_write_str;
-        
-        unsafe {
-            uart_write_str("[KERNEL] AArch64 kernel_main reached successfully\n");
-            uart_write_str("[KERNEL] VeridianOS Kernel v");
-            uart_write_str(env!("CARGO_PKG_VERSION"));
-            uart_write_str("\n");
-            uart_write_str("[KERNEL] Architecture: AArch64\n");
-            uart_write_str("[KERNEL] Starting kernel initialization...\n");
-        }
-    }
+    arch::aarch64::entry::arch_early_init();
     
-    // For non-x86_64, non-AArch64 architectures
-    #[cfg(all(not(target_arch = "aarch64"), not(target_arch = "x86_64")))]
-    {
-        println!("VeridianOS Kernel v{}", env!("CARGO_PKG_VERSION"));
-        #[cfg(target_arch = "riscv64")]
-        println!("Architecture: riscv64");
-    }
+    #[cfg(target_arch = "riscv64")]
+    arch::riscv64::entry::arch_early_init();
 
-    // Use unified bootstrap initialization for all architectures
-    #[cfg(target_arch = "aarch64")]
-    {
-        use arch::aarch64::direct_uart::uart_write_str;
-        
-        unsafe {
-            uart_write_str("[KERNEL] Starting kernel initialization...\n");
-            uart_write_str("[KERNEL] Initializing bootstrap sequence...\n");
-        }
-    }
-    
+    // Use unified bootstrap initialization
     #[cfg(target_arch = "x86_64")]
     early_println!("[EARLY] Starting bootstrap initialization...");
     
-    // Call unified bootstrap for all architectures
-    match bootstrap::kernel_init() {
-        Ok(()) => {
-            // Bootstrap will transfer control to scheduler
-            // This should not return
-            #[cfg(target_arch = "x86_64")]
-            early_println!("[EARLY] Bootstrap returned unexpectedly!");
-            
-            #[cfg(target_arch = "aarch64")]
-            unsafe {
-                use arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[KERNEL] Bootstrap returned unexpectedly!\n");
-            }
-            
-            panic!("[KERNEL] Bootstrap returned unexpectedly!");
-        }
-        Err(e) => {
-            #[cfg(target_arch = "x86_64")]
-            early_println!("[EARLY] Bootstrap initialization failed!");
-            
-            #[cfg(target_arch = "aarch64")]
-            unsafe {
-                use arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[KERNEL] Bootstrap initialization failed!\n");
-            }
-            
-            panic!("[KERNEL] Bootstrap initialization failed: {}", e);
-        }
+    #[cfg(not(target_arch = "x86_64"))]
+    boot_println!("[EARLY] Starting bootstrap initialization...");
+
+    // Run bootstrap
+    bootstrap::run();
+
+    // Bootstrap should not return
+    panic!("Bootstrap returned unexpectedly!");
+}
+
+// Test runner for kernel tests
+#[cfg(test)]
+fn test_runner(tests: &[&dyn Fn()]) {
+    println!("Running {} tests", tests.len());
+    for test in tests {
+        test();
     }
 }
 
+// Export key functions for tests
 #[cfg(test)]
-use test_framework::{exit_qemu, QemuExitCode, Testable};
-
-#[cfg(test)]
-fn test_runner(tests: &[&dyn Testable]) {
-    test_framework::test_runner(tests)
-}
+pub use test_framework::*;

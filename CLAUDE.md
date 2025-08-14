@@ -284,6 +284,22 @@ Currently implementing in phases:
 - Interrupt forwarding from kernel to user-space drivers
 - DMA buffer management with IOMMU protection
 
+### Technical Decisions Made
+- **Language**: Rust-only implementation for memory safety
+- **Architecture**: Microkernel with user-space drivers
+- **Security Model**: Capability-based access control
+- **Target Platforms**: x86_64, AArch64, and RISC-V
+- **Memory Model**: Zero-copy IPC with shared memory
+- **Cryptography**: Post-quantum ready with ML-KEM and ML-DSA support
+
+### Network Stack Architecture (Future)
+- lwIP integration for initial implementation
+- Custom Rust network stack planned for later phases
+- User-space networking with kernel bypass
+- DPDK support for high-performance networking
+- eBPF for programmable packet processing
+
+
 ## Common Development Tasks
 
 ### Adding a New System Call
@@ -333,43 +349,6 @@ Example usage:
 ./debug/clean-logs.sh 7
 ```
 
-### Recent Session Work (June 13-16, 2025)
-
-1. **DEEP-RECOMMENDATIONS Implementation** - 9 of 9 items ✅ (100% COMPLETE!)
-   - Bootstrap module fixing circular dependency
-   - Atomic operations for thread safety
-   - Capability overflow prevention
-   - User pointer validation implementation
-   - Custom test framework creation
-   - Error type migration started
-   - ✅ **COMPLETED**: RAII patterns implementation (TODO #8)
-   - ✅ **COMPLETED**: AArch64 assembly workaround implementation (TODO #10)
-
-2. **AArch64 Assembly-Only Boot Implementation (June 16, 2025)**
-   - **MAJOR BREAKTHROUGH**: Successfully bypassed LLVM loop compilation bugs
-   - **Assembly UART Module**: Created `kernel/src/arch/aarch64/direct_uart.rs`
-   - **Boot Sequence Fixes**: Modified `boot_println!` to be no-op for AArch64
-   - **Manual Output**: Direct UART character output throughout bootstrap
-   - **Progress Tracking**: Added stage markers S1-S6, MM, IPC, PROC, DONE
-   - **Boot Testing**: All architectures now progress significantly through Stage 6
-
-3. **Architecture Boot Status (June 16, 2025)**
-   - **x86_64**: ✅ Reaches Stage 6 and bootstrap task execution
-   - **RISC-V**: ✅ Reaches Stage 6 and idle loop
-   - **AArch64**: ✅ Major improvement - progresses through memory management with assembly workarounds
-
-4. **Code Quality & Documentation**
-   - Zero warnings across all architectures maintained
-   - All clippy lints resolved
-   - Updated all root-level and docs/ documentation
-   - Applied formatting and resolved all issues
-   - Git repository synchronized (commit ac050a3)
-
-5. **Current Status**
-   - ✅ Complete: All critical blockers resolved
-   - ✅ Complete: AArch64 LLVM workaround implemented
-   - 📋 Ready: Phase 2 implementation (TODO #9) - All architectures functional
-   - Git: Clean tree, synchronized with GitHub, ready for Phase 2 development
 
 ### AArch64-Specific Notes
 
@@ -481,77 +460,134 @@ Check these files regularly to track progress and identify next tasks.
   - `ISSUES_TODO.md`: Bug tracking and known issues
   - `RELEASE_TODO.md`: Release planning and version milestones
 
+### Key Technical Patterns Learned
+
+- **R_X86_64_32S Relocation**: Kernel must be in top 2GB of address space for ±2GB addressing
+- **Kernel Code Model**: Required for x86_64 higher-half kernels above 2GB boundary
+- **PIC Initialization**: Must mask interrupts during init to prevent double faults
+- **Static Heap**: Use static arrays in kernel binary rather than arbitrary addresses
+- **Testing Limitations**: no_std kernel testing blocked by duplicate lang items in Rust toolchain
+- **Build Target Strategy**: Standard targets more compatible than custom JSON specs
+- **Documentation Consolidation**: Single authoritative deferred items document essential
+- **API Migration**: Systematic approach needed when changing core APIs
+- **Memory Safety**: User-kernel boundary validation critical for security
+- **Performance Validation**: All Phase 1 targets met (IPC <1μs, context switch <10μs)
+- **Release Automation**: CI artifacts can be downloaded and attached to releases via gh CLI
+- **Version Synchronization**: Update version numbers across all documentation consistently
+
 ### Key Implementation Files (Phase 1 - 100% Complete!)
 
 - `kernel/src/arch/` - Architecture-specific implementations (100% - all working!)
+  - `arch/aarch64/direct_uart.rs` - Assembly-only UART for LLVM workaround
+  - `arch/aarch64/safe_iter.rs` - Loop-free utilities for AArch64
 - `kernel/src/mm/` - Memory management implementation (100% - hybrid allocator, VMM, VAS)
 - `kernel/src/ipc/` - Inter-process communication implementation (100% - fast path <1μs)
 - `kernel/src/process/` - Process management implementation (100% - full lifecycle)
 - `kernel/src/sched/` - Scheduler implementation (100% - CFS, SMP, load balancing)
 - `kernel/src/cap/` - Capability system (100% - inheritance, revocation, cache)
 - `kernel/src/syscall/` - System call interface (100% - user-space safety)
+- `kernel/src/raii.rs` - RAII patterns for resource management
 - `kernel/src/print.rs` - Kernel output macros
 - `kernel/src/test_framework.rs` - No-std test infrastructure
 - `kernel/src/bench.rs` - Benchmarking framework
 - `docs/DEFERRED-IMPLEMENTATION-ITEMS.md` - Comprehensive tracking (1,415 lines)
 - `docs/TESTING-STATUS.md` - Testing limitations and alternatives
 
-### Current Known Issues (June 15, 2025)
+## OS-Specific CI/CD Patterns
 
-- **RESOLVED**: AArch64 iterator/loop compilation bug (ISSUE-0013) - Workarounds implemented ✅
-- **RESOLVED**: Context switching (ISSUE-0014) - Fixed scheduler integration ✅
-- x86_64 boot hang - no serial output (ISSUE-0012) - Separate issue, not a blocker
-- Automated test execution blocked by Rust toolchain duplicate lang items
-- APIC/Timer integration simplified to println! stubs
-- OpenSBI integration for RISC-V needs implementation
+### Custom Target Requirements
+- **Custom Targets Need -Zbuild-std**: Custom targets require building std library from source
+- **Architecture-Specific Testing**: Run tests conditionally based on target architecture
+- **QEMU Integration**: Set up automated testing with architecture emulators
+- **Target Spec Validation**: Validate custom target specifications against built-in targets
+- **Dead Code Warnings**: Add #[allow(dead_code)] for architecture-specific functions
+- **Stable Feature Flags**: Remove feature flags that have been stabilized (like const_mut_refs)
+- **Workflow Optimization**: Use environment variables for reusable values (BUILD_STD_FLAGS)
+- **Concurrency Control**: Add cancel-in-progress to prevent duplicate runs
+- **Documentation Pipeline**: Include mdBook building and rustdoc with custom themes
+- **Release Artifacts**: Create comprehensive packages with kernel, symbols, and docs
+- **Artifact Download**: Use `gh run download <run-id> --dir <dir>` to fetch CI artifacts
+- **Release Asset Upload**: Use `gh release upload <tag> <files...> --clobber` to add artifacts
+- **AArch64 Compilation**: Unused variables cause failures with -D warnings, prefix with underscore
+- **Cross-Architecture Issues**: println! may be no-op on some targets, causing unused variable warnings
 
-### Session Summary (June 15, 2025) - Critical Blockers RESOLVED! 🎉
+### Clippy Fix Patterns
+- **Formatting Issues**: Remove extra blank lines, fix line breaks in println! macros
+- **Clippy new_without_default**: Add Default impl for structs with new() methods
+- **Clippy manual_flatten**: Use iter().flatten() instead of nested if let Some loops
+- **Unused Variables on Non-x86_64**: println! is no-op, use #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
+- **Unused Imports in Public APIs**: Use #[allow(unused_imports)] for re-exported types
+- **Macro Expression Issues**: Wrap println! in blocks when used in match expressions
+- **Empty Loop Warning**: Replace `loop {}` with `panic!("message")` to satisfy clippy
+- **Unused Variables**: Prefix with underscore (_var) to indicate intentional non-use
 
-- **MAJOR ACHIEVEMENT**: Resolved ALL critical blockers preventing Phase 2
-  - **AArch64 Iterator Bug (ISSUE-0013)**: Created comprehensive workarounds in safe_iter.rs ✅
-  - **Context Switching (ISSUE-0014)**: Fixed scheduler to load initial task context ✅
-  - **Unified kernel_main**: All architectures now use main.rs entry point ✅
-- **Three-Agent Worktree Analysis**: Used conservative, refactor, and compiler approaches
-- **Implementation Details**:
-  - Created arch/aarch64/safe_iter.rs with loop-free utilities
-  - Fixed scheduler start() to load context instead of idle loop
-  - Created test tasks to verify context switching
-  - All architectures compile with zero warnings
-- **Documentation Updates**: All files updated marking Phase 2 as "READY TO START"
-- **DEEP-RECOMMENDATIONS**: 9 of 9 items complete (100%) ✅
-- **Git Status**: Clean tree, synced with commits 9721bc6 and 24feb8b
-- **Next**: Ready to begin Phase 2 User Space Foundation (TODO #9 IN PROGRESS)
+## Microkernel IPC Development Patterns
 
-### Session Summary (June 16-17, 2025) - AArch64 Assembly Boot & v0.2.1 Release 🎉
+### IPC Architecture Design
+- **Registry Pattern**: Global registry with O(1) lookup for endpoints and channels
+- **Lock-Free Async**: Use lock-free ring buffers for async channels
+- **Performance Measurement**: Track CPU cycles for latency measurement
+- **Rate Limiting**: Token bucket algorithm for DoS protection
+- **Zero-Copy Design**: Shared memory regions with page remapping
+- **Fast Path Optimization**: Register-based transfer for small messages (≤64 bytes)
+- **NUMA Awareness**: Build in NUMA support from the start
+- **Message Size Optimization**: Small messages for register transfer, large for memory
+- **Architecture Abstractions**: Separate register mappings per architecture
+- **Error Handling**: Comprehensive Result<T> types with detailed errors
+- **Capability Integration**: 64-bit tokens with generation counters
 
-- **MAJOR ACHIEVEMENT**: All architectures now boot successfully to Stage 6!
-  - **AArch64 Assembly-Only Boot**: Implemented complete workaround for LLVM bugs
-    - Created kernel/src/arch/aarch64/direct_uart.rs with assembly UART
-    - Made boot_println! no-op for AArch64 to avoid all loops
-    - Direct byte-by-byte output for reliable boot sequence
-    - Fixed control flow issue where S6 wasn't being output
-  - **Clippy Fixes**: Resolved all warnings while maintaining functionality
-    - Fixed unreachable code warnings with #[allow(unreachable_code)]
-    - Fixed unused variables with #[cfg_attr()] annotations
-    - Removed unnecessary unsafe blocks
-    - Changed write_volatile to direct pointer dereferences for AArch64
-  - **v0.2.1 Release**: Created maintenance release with all fixes
-    - Tagged and pushed to GitHub
-    - Created release with detailed notes
-    - Uploaded all CI artifacts (binaries, debug symbols, source)
-    - Updated all documentation (39 files)
-- **Documentation Updates**: Comprehensive update of all project docs
-  - Root level: README.md, CHANGELOG.md, PROJECT-STATUS.md
-  - docs/: 16 files including mdBook source
-  - ref_docs/: 18 technical documentation files
-  - to-dos/: All 5 TODO tracking files
-- **Git Status**: Clean tree, synced with commit 6e53f6c
-- **Next**: Ready for Phase 2 User Space Foundation!
+### IPC API Migration Patterns
+- **Test Restoration**: When refactoring, restore tests rather than deleting them
+- **API Migration**: When changing APIs, systematically update all tests and benchmarks
+- **Method Naming**: Use descriptive names like send_async vs send for clarity
+- **Constructor Parameters**: Maintain consistent parameter order (id, owner, capacity)
 
-### Architecture Boot Status (June 17, 2025)
+## Memory Allocator Implementation
 
-- **x86_64**: ✅ Boots to Stage 6 with full bootstrap sequence
-- **RISC-V**: ✅ Boots to Stage 6 with complete initialization
-- **AArch64**: ✅ Boots to Stage 6 with assembly-only workarounds
+### Hybrid Allocator Design
+- **Hybrid Allocator**: Combine bitmap (small) and buddy (large) allocators
+- **Threshold Selection**: Switch allocators at optimal frame count (e.g., 512 frames)
+- **NUMA Support**: Per-node allocators for locality
+- **Statistics Tracking**: Track allocation patterns for optimization
+- **Feature Gating**: Use cfg(feature = "alloc") for allocator-dependent code
+- **Array Initialization**: Use const patterns for non-Copy types in arrays
+- **Zone Management**: DMA, Normal, High memory zones
+- **Page Table Management**: 4-level for x86_64/AArch64, Sv48 for RISC-V
+- **TLB Shootdown**: Required for cross-CPU virtual memory updates
+- **Slab Allocator**: For kernel objects with cache awareness
+- **Reserved Memory Handling**: Track reserved regions with overlap checking
+- **Reserved Region Structure**: Start/end frames with description for debugging
+- **Allocation Filtering**: Check allocated frames against reserved list
 
-All architectures output: STB → RUST → PRE → MAIN → OK → S6 → BOOTOK
+## Kernel Debugging Infrastructure
+
+### GDB Script Organization
+- **Script Structure**: Create scripts/gdb/ with common and arch-specific configs
+- **Debug Launch Scripts**: Create executable debug scripts for easy debugging
+- **Custom GDB Commands**: Implement architecture-specific memory examination
+- **Symbol Loading**: Use kernel-symbols command with architecture parameter
+- **Breakpoint Helpers**: Create break-panic, break-main, break-boot commands
+- **Memory Inspection**: Implement examine-stack, examine-uart, walk-page-table commands
+- **Documentation**: Always document debugging workflows and custom commands
+- **QEMU GDB Server**: Use -s -S flags (server on :1234, start paused)
+- **Multiarch GDB**: Use gdb-multiarch for cross-architecture debugging
+- **String Arguments in GDB**: Quote string arguments to avoid symbol interpretation
+
+## Process Management Implementation
+
+### Process Control Architecture
+- **Process Control Block**: Use atomic state management with thread-safe operations
+- **Thread Context Trait**: Define architecture-independent interface for context switching
+- **Process Table Design**: Global table with O(1) lookup using BTreeMap or fixed array
+- **Context Switching**: Implement save/restore for all architectures with proper FPU handling
+- **System Call Integration**: Complete syscall interface for process/thread operations
+- **Synchronization Primitives**: Mutex, Semaphore, CondVar, RwLock, Barrier implementations
+- **Process Lifecycle**: fork(), exec(), exit(), wait() with proper resource cleanup
+- **Thread Management**: Thread creation with TLS, CPU affinity, and stack management
+- **Error Handling**: Use &'static str for errors during early development, refactor later
+- **Feature Gating**: Heavy use of cfg(feature = "alloc") for optional allocator support
+- **Unsafe Code Management**: Document all unsafe blocks, minimize scope
+- **Static References**: Use unsafe pointer casts for global process/thread access
+- **Priority Mapping**: Convert between syscall priorities and internal scheduler priorities
+- **Deferred Implementation Tracking**: Document all TODOs and stubs for future work
+
