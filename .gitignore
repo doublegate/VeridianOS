@@ -96,3 +96,8 @@ release-artifacts/
 # Cache directories
 .cache/
 .docker/
+
+# Gemini CLI
+.gemini/
+.gemini-history
+
