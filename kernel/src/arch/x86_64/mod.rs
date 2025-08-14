@@ -6,6 +6,7 @@ pub mod entry;
 pub mod gdt;
 pub mod idt;
 pub mod mmu;
+pub mod multiboot;
 pub mod serial;
 pub mod syscall;
 pub mod timer;

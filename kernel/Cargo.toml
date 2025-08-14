@@ -26,7 +26,8 @@ log.workspace = true
 # Architecture-specific dependencies
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_64.workspace = true
-bootloader_api = "0.11"
+bootloader = { version = "0.9", features = ["map_physical_memory"] }
+bootloader_api = "0.11"  # Keep for API compatibility, use bootloader 0.9 for actual boot
 uart_16550 = "0.3"
 pic8259 = "0.10"
 pc-keyboard = "0.7"

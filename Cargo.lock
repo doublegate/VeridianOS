@@ -27,6 +27,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b8e56985ec62d17e9c1001dc89c88ecd7dc08e47eba5ec7c29c7b5eeecde967"
 
 [[package]]
+name = "bootloader"
+version = "0.9.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ea119c3ed05625c179e09d17d0914570a3753ca09c890a73d98f6b72aea00d2"
+
+[[package]]
 name = "bootloader_api"
 version = "0.11.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -188,6 +194,7 @@ name = "veridian-kernel"
 version = "0.2.1"
 dependencies = [
  "bitflags 2.9.1",
+ "bootloader",
  "bootloader_api",
  "cc",
  "cortex-a",

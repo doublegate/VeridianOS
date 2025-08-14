@@ -323,6 +323,12 @@ pub fn init_default() {
     }
     #[cfg(not(target_arch = "aarch64"))]
     println!("[MM] init returned successfully");
+
+    // Initialize heap allocator after frame allocator is ready
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        init_heap().expect("Heap initialization failed");
+    }
 }
 
 /// Translate virtual address to physical address

@@ -6,6 +6,11 @@ SECTIONS {
     /* Higher half kernel at -2GB (0xFFFFFFFF80000000) */
     . = 0xFFFFFFFF80100000;
 
+    /* Multiboot header must be early in the file */
+    .multiboot_header : ALIGN(8) {
+        KEEP(*(.multiboot_header))
+    }
+
     .text : ALIGN(4K) {
         KEEP(*(.text.boot))
         *(.text .text.*)

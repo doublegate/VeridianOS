@@ -40,25 +40,15 @@ use core::panic::PanicInfo;
 // Use the kernel library
 use veridian_kernel::*;
 
-// For x86_64, use the new bootloader_api
+// For x86_64, use bootloader 0.9 for working boot
 #[cfg(target_arch = "x86_64")]
-use bootloader_api::{entry_point, BootInfo};
-#[cfg(target_arch = "x86_64")]
-use bootloader_api::config::{BootloaderConfig, Mapping};
-
-// Configure bootloader to map physical memory (equivalent to old map_physical_memory feature)
-#[cfg(target_arch = "x86_64")]
-pub static BOOTLOADER_CONFIG: BootloaderConfig = {
-    let mut config = BootloaderConfig::new_default();
-    config.mappings.physical_memory = Some(Mapping::Dynamic);
-    config
-};
+use bootloader::{entry_point, BootInfo};
 
 #[cfg(target_arch = "x86_64")]
-entry_point!(x86_64_kernel_entry, config = &BOOTLOADER_CONFIG);
+entry_point!(x86_64_kernel_entry);
 
 #[cfg(target_arch = "x86_64")]
-fn x86_64_kernel_entry(boot_info: &'static mut BootInfo) -> ! {
+fn x86_64_kernel_entry(boot_info: &'static BootInfo) -> ! {
     // Write 'E' to VGA to show we reached entry point
     unsafe {
         let vga = 0xb8000 as *mut u16;
