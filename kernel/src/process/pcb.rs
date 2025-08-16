@@ -259,6 +259,23 @@ impl Process {
     pub fn set_priority(&self, new_priority: ProcessPriority) {
         *self.priority.lock() = new_priority;
     }
+    
+    /// Get mutable reference to memory space
+    pub fn memory_space_mut(&mut self) -> Option<&mut VirtualAddressSpace> {
+        Some(self.memory_space.get_mut())
+    }
+    
+    /// Set process name
+    #[cfg(feature = "alloc")]
+    pub fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+    
+    /// Get main thread (first thread created)
+    #[cfg(feature = "alloc")]
+    pub fn get_main_thread_mut(&mut self) -> Option<&mut Thread> {
+        self.threads.get_mut().values_mut().next()
+    }
 }
 
 impl Drop for Process {

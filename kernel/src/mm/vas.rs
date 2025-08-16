@@ -541,6 +541,81 @@ impl VirtualAddressSpace {
 
         // TODO: Free page tables
     }
+    
+    /// Clear user-space mappings only (for exec)
+    pub fn clear_user_space(&mut self) -> Result<(), &'static str> {
+        #[cfg(feature = "alloc")]
+        {
+            use super::FRAME_ALLOCATOR;
+            
+            let mappings = self.mappings.get_mut();
+            let mut to_remove = Vec::new();
+            
+            // Find all user-space mappings (below kernel space)
+            const KERNEL_SPACE_START: u64 = 0xFFFF_8000_0000_0000;
+            
+            for (addr, mapping) in mappings.iter() {
+                if addr.0 < KERNEL_SPACE_START {
+                    to_remove.push(*addr);
+                    
+                    // Free physical frames
+                    let frame_allocator = FRAME_ALLOCATOR.lock();
+                    for frame in &mapping.physical_frames {
+                        frame_allocator.free_frames(*frame, 1).ok();
+                    }
+                }
+            }
+            
+            // Remove user-space mappings
+            for addr in to_remove {
+                mappings.remove(&addr);
+            }
+        }
+        
+        // Reset user-space metadata
+        self.heap_break
+            .store(self.heap_start.load(Ordering::Relaxed), Ordering::Release);
+        self.next_mmap_addr
+            .store(0x4000_0000_0000, Ordering::Release);
+            
+        Ok(())
+    }
+    
+    /// Map a single page at a virtual address
+    pub fn map_page(&mut self, vaddr: usize, flags: PageFlags) -> Result<(), &'static str> {
+        use super::{FRAME_ALLOCATOR, PAGE_SIZE};
+        
+        // Allocate a physical frame
+        let frame = FRAME_ALLOCATOR.lock()
+            .allocate_frames(1, None)
+            .map_err(|_| "Failed to allocate frame")?;
+        
+        // Map the page (architecture-specific)
+        // TODO: Implement architecture-specific page mapping
+        // For now, we'll just record the mapping
+        
+        // Record the mapping
+        #[cfg(feature = "alloc")]
+        {
+            let mut mappings = self.mappings.lock();
+            let vaddr_aligned = VirtualAddress(vaddr as u64);
+            
+            if let Some(mapping) = mappings.get_mut(&vaddr_aligned) {
+                mapping.physical_frames.push(frame);
+            } else {
+                let mut new_mapping = VirtualMapping::new(
+                    vaddr_aligned,
+                    PAGE_SIZE,
+                    MappingType::Data,
+                );
+                new_mapping.physical_frames.push(frame);
+                new_mapping.flags = flags;
+                mappings.insert(vaddr_aligned, new_mapping);
+            }
+        }
+        
+        Ok(())
+    }
 }
 
 /// Virtual address space statistics

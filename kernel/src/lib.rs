@@ -52,6 +52,7 @@ pub mod print;
 pub mod arch;
 pub mod bootstrap;
 mod cap;
+pub mod elf;
 pub mod error;
 pub mod ipc;
 pub mod mm;

@@ -21,6 +21,7 @@ use crate::println;
 
 // Re-export submodules
 pub mod lifecycle;
+pub mod loader;
 pub mod memory;
 pub mod pcb;
 pub mod sync;

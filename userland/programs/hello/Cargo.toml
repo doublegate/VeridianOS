@@ -1,0 +1,11 @@
+[package]
+name = "hello"
+version = "0.3.0"
+edition = "2021"
+
+[dependencies]
+libveridian = { path = "../../libs/libveridian" }
+
+[[bin]]
+name = "hello"
+path = "src/main.rs"

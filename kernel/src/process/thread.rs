@@ -378,6 +378,20 @@ impl Thread {
     pub fn get_cpu_time(&self) -> u64 {
         self.cpu_time.load(Ordering::Relaxed)
     }
+    
+    /// Set thread entry point
+    pub fn set_entry_point(&mut self, entry: usize) {
+        self.context.get_mut().set_instruction_pointer(entry);
+    }
+    
+    /// Reset thread context for exec
+    pub fn reset_context(&mut self) {
+        // Reset to initial state
+        *self.context.get_mut() = ArchThreadContext::default();
+        self.state.store(ThreadState::Ready as u32, Ordering::Release);
+        self.cpu_time.store(0, Ordering::Relaxed);
+        self.time_slice.store(10, Ordering::Relaxed); // Default time slice
+    }
 }
 
 /// Thread builder for convenient thread creation
