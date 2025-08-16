@@ -1,0 +1,11 @@
+[package]
+name = "ps2-keyboard"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+driver-common = { path = "../common" }
+
+[[bin]]
+name = "ps2-keyboard"
+path = "src/main.rs"

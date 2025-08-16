@@ -1,0 +1,11 @@
+[package]
+name = "virtio-blk"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+driver-common = { path = "../common" }
+
+[[bin]]
+name = "virtio-blk"
+path = "src/main.rs"
