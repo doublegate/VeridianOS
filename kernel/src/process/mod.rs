@@ -296,3 +296,27 @@ pub fn get_thread_tid() -> ThreadId {
         ThreadId(0)
     }
 }
+
+/// Get a list of all process IDs
+pub fn get_process_list() -> Option<alloc::vec::Vec<u64>> {
+    #[cfg(feature = "alloc")]
+    {
+        use table::PROCESS_TABLE;
+        let mut pids = alloc::vec::Vec::new();
+        
+        // Iterate through all processes
+        PROCESS_TABLE.for_each(|process| {
+            pids.push(process.pid.0);
+        });
+        
+        if pids.is_empty() {
+            None
+        } else {
+            Some(pids)
+        }
+    }
+    #[cfg(not(feature = "alloc"))]
+    None
+}
+
+// get_process is already re-exported at the top of the module

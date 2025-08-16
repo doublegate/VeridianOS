@@ -14,6 +14,10 @@ use crate::{
 mod process;
 use self::process::*;
 
+// Import filesystem syscalls module
+mod filesystem;
+use self::filesystem::*;
+
 // Import user space utilities
 mod userspace;
 
@@ -57,6 +61,27 @@ pub enum Syscall {
     // Capability management
     CapabilityGrant = 30,
     CapabilityRevoke = 31,
+    
+    // Filesystem operations
+    FileOpen = 50,
+    FileClose = 51,
+    FileRead = 52,
+    FileWrite = 53,
+    FileSeek = 54,
+    FileStat = 55,
+    FileTruncate = 56,
+    
+    // Directory operations
+    DirMkdir = 60,
+    DirRmdir = 61,
+    DirOpendir = 62,
+    DirReaddir = 63,
+    DirClosedir = 64,
+    
+    // Filesystem management
+    FsMount = 70,
+    FsUnmount = 71,
+    FsSync = 72,
 }
 
 /// System call result type
@@ -182,6 +207,24 @@ fn handle_syscall(
         Syscall::ThreadGetTid => sys_gettid(),
         Syscall::ThreadSetAffinity => sys_thread_setaffinity(arg1, arg2, arg3),
         Syscall::ThreadGetAffinity => sys_thread_getaffinity(arg1, arg2, arg3),
+
+        // Filesystem operations
+        Syscall::FileOpen => sys_open(arg1, arg2, arg3),
+        Syscall::FileClose => sys_close(arg1),
+        Syscall::FileRead => sys_read(arg1, arg2, arg3),
+        Syscall::FileWrite => sys_write(arg1, arg2, arg3),
+        Syscall::FileSeek => sys_seek(arg1, arg2 as isize, arg3),
+        Syscall::FileStat => sys_stat(arg1, arg2),
+        Syscall::FileTruncate => sys_truncate(arg1, arg2),
+        
+        // Directory operations
+        Syscall::DirMkdir => sys_mkdir(arg1, arg2),
+        Syscall::DirRmdir => sys_rmdir(arg1),
+        
+        // Filesystem management
+        Syscall::FsMount => sys_mount(arg1, arg2, arg3, arg4),
+        Syscall::FsUnmount => sys_unmount(arg1),
+        Syscall::FsSync => sys_sync(),
 
         _ => Err(SyscallError::InvalidSyscall),
     }
@@ -621,6 +664,27 @@ impl TryFrom<usize> for Syscall {
             43 => Ok(Syscall::ThreadGetTid),
             44 => Ok(Syscall::ThreadSetAffinity),
             45 => Ok(Syscall::ThreadGetAffinity),
+            
+            // Filesystem operations
+            50 => Ok(Syscall::FileOpen),
+            51 => Ok(Syscall::FileClose),
+            52 => Ok(Syscall::FileRead),
+            53 => Ok(Syscall::FileWrite),
+            54 => Ok(Syscall::FileSeek),
+            55 => Ok(Syscall::FileStat),
+            56 => Ok(Syscall::FileTruncate),
+            
+            // Directory operations
+            60 => Ok(Syscall::DirMkdir),
+            61 => Ok(Syscall::DirRmdir),
+            62 => Ok(Syscall::DirOpendir),
+            63 => Ok(Syscall::DirReaddir),
+            64 => Ok(Syscall::DirClosedir),
+            
+            // Filesystem management
+            70 => Ok(Syscall::FsMount),
+            71 => Ok(Syscall::FsUnmount),
+            72 => Ok(Syscall::FsSync),
 
             _ => Err(()),
         }

@@ -1,0 +1,11 @@
+[package]
+name = "veridian-driver-common"
+version = "0.3.0"
+authors = ["VeridianOS Team"]
+edition = "2021"
+
+[dependencies]
+# No dependencies for now - this is a no_std library
+
+[features]
+default = []

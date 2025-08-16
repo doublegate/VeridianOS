@@ -1,0 +1,17 @@
+[package]
+name = "null-driver"
+version = "0.3.0"
+authors = ["VeridianOS Team"]
+edition = "2021"
+
+[dependencies]
+libveridian = { path = "../../userland/libs/libveridian" }
+veridian-driver-common = { path = "../common" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true

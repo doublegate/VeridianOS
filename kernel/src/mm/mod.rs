@@ -394,3 +394,22 @@ pub fn free_pages(pages: &[PhysicalPage]) -> Result<(), FrameAllocatorError> {
 
     FRAME_ALLOCATOR.lock().free_frames(first_frame, count)
 }
+
+/// Memory statistics structure
+pub struct MemoryStats {
+    pub total_frames: usize,
+    pub free_frames: usize,
+    pub cached_frames: usize,
+}
+
+/// Get memory statistics
+pub fn get_memory_stats() -> MemoryStats {
+    let allocator = FRAME_ALLOCATOR.lock();
+    let stats = allocator.get_stats();
+    
+    MemoryStats {
+        total_frames: stats.total_frames as usize,
+        free_frames: stats.free_frames as usize,
+        cached_frames: 0, // TODO: Implement page cache tracking
+    }
+}

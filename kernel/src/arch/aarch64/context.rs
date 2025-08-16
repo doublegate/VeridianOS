@@ -82,8 +82,8 @@ impl AArch64Context {
     }
 }
 
-impl crate::arch::context::ThreadContext for AArch64Context {
-    fn new() -> Self {
+impl Default for AArch64Context {
+    fn default() -> Self {
         Self {
             x: [0; 31],
             sp: 0,
@@ -99,6 +99,12 @@ impl crate::arch::context::ThreadContext for AArch64Context {
                 fpsr: 0,
             },
         }
+    }
+}
+
+impl crate::arch::context::ThreadContext for AArch64Context {
+    fn new() -> Self {
+        Self::default()
     }
 
     fn init(&mut self, entry_point: usize, stack_pointer: usize, _kernel_stack: usize) {

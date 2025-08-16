@@ -141,8 +141,8 @@ impl RiscVContext {
     }
 }
 
-impl crate::arch::context::ThreadContext for RiscVContext {
-    fn new() -> Self {
+impl Default for RiscVContext {
+    fn default() -> Self {
         Self {
             ra: 0,
             sp: 0,
@@ -186,6 +186,12 @@ impl crate::arch::context::ThreadContext for RiscVContext {
                 fcsr: 0,
             },
         }
+    }
+}
+
+impl crate::arch::context::ThreadContext for RiscVContext {
+    fn new() -> Self {
+        Self::default()
     }
 
     fn init(&mut self, entry_point: usize, stack_pointer: usize, _kernel_stack: usize) {

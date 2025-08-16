@@ -6,7 +6,7 @@
 use crate::{
     arch, cap,
     error::KernelResult,
-    ipc, mm, process, sched,
+    fs, ipc, mm, process, sched,
 };
 
 #[cfg(feature = "alloc")]
@@ -83,6 +83,12 @@ pub fn kernel_init() -> KernelResult<()> {
     
     cap::init();
     ipc::init();
+    
+    // Initialize VFS and mount essential filesystems
+    #[cfg(feature = "alloc")]
+    {
+        fs::init();
+    }
     
     #[cfg(target_arch = "x86_64")]
     arch::x86_64::bootstrap::stage4_complete();

@@ -16,6 +16,7 @@ use spin::Mutex;
 use super::thread::{Thread, ThreadId};
 use crate::{
     cap::{CapabilityId, CapabilitySpace},
+    fs::file::FileTable,
     ipc::EndpointId,
     mm::VirtualAddressSpace,
     println,
@@ -90,6 +91,9 @@ pub struct Process {
 
     /// Capability space
     pub capability_space: Mutex<CapabilitySpace>,
+    
+    /// File descriptor table
+    pub file_table: Mutex<FileTable>,
 
     /// Threads in this process
     #[cfg(feature = "alloc")]
@@ -150,6 +154,7 @@ impl Process {
             priority: Mutex::new(priority),
             memory_space: Mutex::new(VirtualAddressSpace::new()),
             capability_space: Mutex::new(CapabilitySpace::new()),
+            file_table: Mutex::new(FileTable::new()),
             threads: Mutex::new(BTreeMap::new()),
             ipc_endpoints: Mutex::new(BTreeMap::new()),
             children: Mutex::new(Vec::new()),

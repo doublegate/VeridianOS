@@ -54,6 +54,7 @@ pub mod bootstrap;
 mod cap;
 pub mod elf;
 pub mod error;
+pub mod fs;
 pub mod ipc;
 pub mod mm;
 pub mod process;
