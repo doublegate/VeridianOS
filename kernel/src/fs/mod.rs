@@ -371,18 +371,33 @@ impl Vfs {
 }
 
 /// Global VFS instance
-lazy_static::lazy_static! {
-    pub static ref VFS: RwLock<Vfs> = RwLock::new(Vfs {
-        root_fs: None,
-        mounts: BTreeMap::new(),
-        cwd: String::from("/"),
-    });
-}
+pub static VFS: spin::Once<RwLock<Vfs>> = spin::Once::new();
 
 /// Initialize the VFS with a RAM filesystem as root
 pub fn init() {
     use crate::println;
     println!("[VFS] Initializing Virtual Filesystem...");
+    
+    // Initialize the VFS Once
+    println!("[VFS] About to call VFS.call_once()...");
+    VFS.call_once(|| {
+        println!("[VFS] Inside VFS.call_once() closure");
+        println!("[VFS] Creating BTreeMap...");
+        let mounts = BTreeMap::new();
+        println!("[VFS] Creating String from /...");
+        let cwd = String::from("/");
+        println!("[VFS] Creating Vfs struct...");
+        let vfs = Vfs {
+            root_fs: None,
+            mounts,
+            cwd,
+        };
+        println!("[VFS] Creating RwLock...");
+        let lock = RwLock::new(vfs);
+        println!("[VFS] Returning from closure");
+        lock
+    });
+    println!("[VFS] VFS.call_once() completed");
     
     #[cfg(feature = "alloc")]
     {
@@ -410,20 +425,20 @@ pub fn init() {
         
         // Mount as root filesystem
         println!("[VFS] Mounting ramfs as root...");
-        VFS.write().mount_root(Arc::new(ramfs)).unwrap();
+        VFS.get().unwrap().write().mount_root(Arc::new(ramfs)).unwrap();
         println!("[VFS] Mounted ramfs as root filesystem");
         
         // Mount special filesystems
         println!("[VFS] Creating devfs...");
         let devfs = devfs::DevFs::new();
         println!("[VFS] Mounting devfs at /dev...");
-        VFS.write().mount("/dev".into(), Arc::new(devfs)).ok();
+        VFS.get().unwrap().write().mount("/dev".into(), Arc::new(devfs)).ok();
         println!("[VFS] Mounted devfs at /dev");
         
         println!("[VFS] Creating procfs...");
         let procfs = procfs::ProcFs::new();
         println!("[VFS] Mounting procfs at /proc...");
-        VFS.write().mount("/proc".into(), Arc::new(procfs)).ok();
+        VFS.get().unwrap().write().mount("/proc".into(), Arc::new(procfs)).ok();
         println!("[VFS] Mounted procfs at /proc");
         
         // Create subdirectories

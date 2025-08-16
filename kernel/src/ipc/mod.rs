@@ -62,7 +62,10 @@ pub fn init() {
             uart_write_str("[IPC] About to initialize registry...\n");
         }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    println!("[IPC] Initializing IPC system...");
+    
+    #[cfg(target_arch = "riscv64")]
     println!("[IPC] Initializing IPC system...");
 
     // Initialize the global IPC registry
@@ -76,6 +79,9 @@ pub fn init() {
             uart_write_str("[IPC] IPC system initialized\n");
         }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    println!("[IPC] IPC system initialized");
+    
+    #[cfg(target_arch = "riscv64")]
     println!("[IPC] IPC system initialized");
 }

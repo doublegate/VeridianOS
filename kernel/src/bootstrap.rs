@@ -6,7 +6,7 @@
 use crate::{
     arch, cap,
     error::KernelResult,
-    fs, ipc, mm, process, sched,
+    fs, ipc, mm, process, sched, services,
 };
 
 #[cfg(feature = "alloc")]
@@ -88,6 +88,12 @@ pub fn kernel_init() -> KernelResult<()> {
     #[cfg(feature = "alloc")]
     {
         fs::init();
+    }
+    
+    // Initialize services (process server, driver framework, etc.)
+    #[cfg(feature = "alloc")]
+    {
+        services::init();
     }
     
     #[cfg(target_arch = "x86_64")]

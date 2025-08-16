@@ -28,7 +28,7 @@ pub trait BuiltinCommand: Send + Sync {
     fn description(&self) -> &str;
     
     /// Execute the command
-    fn execute(&self, args: &[String], shell: &mut Shell) -> CommandResult;
+    fn execute(&self, args: &[String], shell: &Shell) -> CommandResult;
 }
 
 /// Shell environment variable
@@ -163,6 +163,21 @@ impl Shell {
         
         // Exit the shell process
         crate::process::lifecycle::exit_process(*self.last_exit_code.read());
+        
+        // Should never reach here after exit_process
+        loop {
+            #[cfg(target_arch = "x86_64")]
+            unsafe { core::arch::asm!("hlt") }
+            
+            #[cfg(target_arch = "aarch64")]
+            unsafe { core::arch::asm!("wfi") }
+            
+            #[cfg(target_arch = "riscv64")]
+            unsafe { core::arch::asm!("wfi") }
+            
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
+            core::hint::spin_loop();
+        }
     }
     
     /// Execute a command line
@@ -192,7 +207,7 @@ impl Shell {
     /// Set current working directory
     pub fn set_cwd(&self, path: String) -> Result<(), &'static str> {
         // Verify directory exists using VFS
-        let vfs = crate::fs::VFS.read();
+        let vfs = crate::fs::VFS.get().unwrap().read();
         let node = vfs.resolve_path(&path)?;
         let metadata = node.metadata()?;
         
@@ -321,7 +336,7 @@ impl Shell {
             };
             
             // Check if file exists using VFS
-            if let Ok(_node) = crate::fs::VFS.read().resolve_path(&full_path) {
+            if let Ok(_node) = crate::fs::VFS.get().unwrap().read().resolve_path(&full_path) {
                 // Load and execute the program
                 match crate::userspace::load_user_program(
                     &full_path,
@@ -380,7 +395,7 @@ impl BuiltinCommand for HelpCommand {
     fn name(&self) -> &str { "help" }
     fn description(&self) -> &str { "Show available commands" }
     
-    fn execute(&self, _args: &[String], shell: &mut Shell) -> CommandResult {
+    fn execute(&self, _args: &[String], shell: &Shell) -> CommandResult {
         crate::println!("VeridianOS Shell - Available Commands:");
         crate::println!();
         
@@ -404,7 +419,7 @@ impl BuiltinCommand for CdCommand {
     fn name(&self) -> &str { "cd" }
     fn description(&self) -> &str { "Change current directory" }
     
-    fn execute(&self, args: &[String], shell: &mut Shell) -> CommandResult {
+    fn execute(&self, args: &[String], shell: &Shell) -> CommandResult {
         let target = if args.is_empty() {
             shell.get_env("HOME").unwrap_or_else(|| String::from("/"))
         } else {
@@ -426,7 +441,7 @@ impl BuiltinCommand for PwdCommand {
     fn name(&self) -> &str { "pwd" }
     fn description(&self) -> &str { "Print current working directory" }
     
-    fn execute(&self, _args: &[String], shell: &mut Shell) -> CommandResult {
+    fn execute(&self, _args: &[String], shell: &Shell) -> CommandResult {
         crate::println!("{}", shell.get_cwd());
         CommandResult::Success(0)
     }
@@ -437,14 +452,14 @@ impl BuiltinCommand for LsCommand {
     fn name(&self) -> &str { "ls" }
     fn description(&self) -> &str { "List directory contents" }
     
-    fn execute(&self, args: &[String], shell: &mut Shell) -> CommandResult {
+    fn execute(&self, args: &[String], shell: &Shell) -> CommandResult {
         let path = if args.is_empty() {
             shell.get_cwd()
         } else {
             args[0].clone()
         };
         
-        match crate::fs::VFS.read().resolve_path(&path) {
+        match crate::fs::VFS.get().unwrap().read().resolve_path(&path) {
             Ok(node) => {
                 match node.readdir() {
                     Ok(entries) => {
@@ -475,13 +490,13 @@ impl BuiltinCommand for MkdirCommand {
     fn name(&self) -> &str { "mkdir" }
     fn description(&self) -> &str { "Create directories" }
     
-    fn execute(&self, args: &[String], _shell: &mut Shell) -> CommandResult {
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
         if args.is_empty() {
             return CommandResult::Error(String::from("mkdir: missing operand"));
         }
         
         for path in args {
-            match crate::fs::VFS.read().mkdir(path, crate::fs::Permissions::default()) {
+            match crate::fs::VFS.get().unwrap().read().mkdir(path, crate::fs::Permissions::default()) {
                 Ok(()) => {}
                 Err(e) => return CommandResult::Error(format!("mkdir: {}: {}", path, e)),
             }
@@ -496,13 +511,13 @@ impl BuiltinCommand for CatCommand {
     fn name(&self) -> &str { "cat" }
     fn description(&self) -> &str { "Display file contents" }
     
-    fn execute(&self, args: &[String], _shell: &mut Shell) -> CommandResult {
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
         if args.is_empty() {
             return CommandResult::Error(String::from("cat: missing file operand"));
         }
         
         for path in args {
-            match crate::fs::VFS.read().resolve_path(path) {
+            match crate::fs::VFS.get().unwrap().read().resolve_path(path) {
                 Ok(node) => {
                     let mut buffer = [0u8; 4096];
                     let mut offset = 0;
@@ -536,7 +551,7 @@ impl BuiltinCommand for EchoCommand {
     fn name(&self) -> &str { "echo" }
     fn description(&self) -> &str { "Display text" }
     
-    fn execute(&self, args: &[String], _shell: &mut Shell) -> CommandResult {
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
         if !args.is_empty() {
             let output = args.join(" ");
             crate::println!("{}", output);
@@ -552,7 +567,7 @@ impl BuiltinCommand for TouchCommand {
     fn name(&self) -> &str { "touch" }
     fn description(&self) -> &str { "Create empty files" }
     
-    fn execute(&self, args: &[String], _shell: &mut Shell) -> CommandResult {
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
         if args.is_empty() {
             return CommandResult::Error(String::from("touch: missing file operand"));
         }
@@ -571,13 +586,13 @@ impl BuiltinCommand for RmCommand {
     fn name(&self) -> &str { "rm" }
     fn description(&self) -> &str { "Remove files and directories" }
     
-    fn execute(&self, args: &[String], _shell: &mut Shell) -> CommandResult {
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
         if args.is_empty() {
             return CommandResult::Error(String::from("rm: missing operand"));
         }
         
         for path in args {
-            match crate::fs::VFS.read().unlink(path) {
+            match crate::fs::VFS.get().unwrap().read().unlink(path) {
                 Ok(()) => {}
                 Err(e) => return CommandResult::Error(format!("rm: {}: {}", path, e)),
             }
@@ -592,7 +607,7 @@ impl BuiltinCommand for PsCommand {
     fn name(&self) -> &str { "ps" }
     fn description(&self) -> &str { "List running processes" }
     
-    fn execute(&self, _args: &[String], _shell: &mut Shell) -> CommandResult {
+    fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
         let process_server = crate::services::process_server::get_process_server();
         let processes = process_server.list_processes();
         
@@ -620,7 +635,7 @@ impl BuiltinCommand for KillCommand {
     fn name(&self) -> &str { "kill" }
     fn description(&self) -> &str { "Send signal to process" }
     
-    fn execute(&self, args: &[String], _shell: &mut Shell) -> CommandResult {
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
         if args.is_empty() {
             return CommandResult::Error(String::from("kill: missing process ID"));
         }
@@ -644,7 +659,7 @@ impl BuiltinCommand for UptimeCommand {
     fn name(&self) -> &str { "uptime" }
     fn description(&self) -> &str { "Show system uptime" }
     
-    fn execute(&self, _args: &[String], _shell: &mut Shell) -> CommandResult {
+    fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
         // TODO: Get actual system uptime
         crate::println!("uptime: 0 days, 0 hours, 0 minutes");
         CommandResult::Success(0)
@@ -656,7 +671,7 @@ impl BuiltinCommand for MountCommand {
     fn name(&self) -> &str { "mount" }
     fn description(&self) -> &str { "Show mounted filesystems" }
     
-    fn execute(&self, _args: &[String], _shell: &mut Shell) -> CommandResult {
+    fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
         // TODO: Show actual mount information
         crate::println!("/ on ramfs (rw)");
         crate::println!("/dev on devfs (rw)");
@@ -670,7 +685,7 @@ impl BuiltinCommand for LsmodCommand {
     fn name(&self) -> &str { "lsmod" }
     fn description(&self) -> &str { "List loaded drivers" }
     
-    fn execute(&self, _args: &[String], _shell: &mut Shell) -> CommandResult {
+    fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
         let driver_framework = crate::services::driver_framework::get_driver_framework();
         let stats = driver_framework.get_statistics();
         
@@ -690,7 +705,7 @@ impl BuiltinCommand for EnvCommand {
     fn name(&self) -> &str { "env" }
     fn description(&self) -> &str { "Show environment variables" }
     
-    fn execute(&self, _args: &[String], shell: &mut Shell) -> CommandResult {
+    fn execute(&self, _args: &[String], shell: &Shell) -> CommandResult {
         let env_vars = shell.get_all_env();
         for var in env_vars {
             crate::println!("{}", var);
@@ -704,7 +719,7 @@ impl BuiltinCommand for ExportCommand {
     fn name(&self) -> &str { "export" }
     fn description(&self) -> &str { "Set environment variable" }
     
-    fn execute(&self, args: &[String], shell: &mut Shell) -> CommandResult {
+    fn execute(&self, args: &[String], shell: &Shell) -> CommandResult {
         if args.is_empty() {
             return CommandResult::Error(String::from("export: missing variable"));
         }
@@ -728,7 +743,7 @@ impl BuiltinCommand for UnsetCommand {
     fn name(&self) -> &str { "unset" }
     fn description(&self) -> &str { "Unset environment variable" }
     
-    fn execute(&self, args: &[String], shell: &mut Shell) -> CommandResult {
+    fn execute(&self, args: &[String], shell: &Shell) -> CommandResult {
         if args.is_empty() {
             return CommandResult::Error(String::from("unset: missing variable"));
         }
@@ -746,7 +761,7 @@ impl BuiltinCommand for HistoryCommand {
     fn name(&self) -> &str { "history" }
     fn description(&self) -> &str { "Show command history" }
     
-    fn execute(&self, _args: &[String], shell: &mut Shell) -> CommandResult {
+    fn execute(&self, _args: &[String], shell: &Shell) -> CommandResult {
         let history = shell.history.read();
         for (i, cmd) in history.iter().enumerate() {
             crate::println!("{:4} {}", i + 1, cmd);
@@ -760,7 +775,7 @@ impl BuiltinCommand for ClearCommand {
     fn name(&self) -> &str { "clear" }
     fn description(&self) -> &str { "Clear the screen" }
     
-    fn execute(&self, _args: &[String], _shell: &mut Shell) -> CommandResult {
+    fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
         // TODO: Actually clear the screen
         crate::println!("\x1b[2J\x1b[H");
         CommandResult::Success(0)
@@ -772,7 +787,7 @@ impl BuiltinCommand for ExitCommand {
     fn name(&self) -> &str { "exit" }
     fn description(&self) -> &str { "Exit the shell" }
     
-    fn execute(&self, args: &[String], _shell: &mut Shell) -> CommandResult {
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
         let exit_code = if args.is_empty() {
             0
         } else {

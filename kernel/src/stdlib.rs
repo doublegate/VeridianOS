@@ -281,7 +281,7 @@ pub mod io {
             OpenFlags::read_only()
         };
         
-        match VFS.read().open(path, open_flags) {
+        match VFS.get().unwrap().read().open(path, open_flags) {
             Ok(node) => {
                 let file = Box::new(File {
                     node,
@@ -438,6 +438,20 @@ pub mod process {
     /// Exit current process
     pub fn exit(status: i32) -> ! {
         crate::process::lifecycle::exit_process(status);
+        // Process should never return after exit
+        loop {
+            #[cfg(target_arch = "x86_64")]
+            unsafe { core::arch::asm!("hlt") }
+            
+            #[cfg(target_arch = "aarch64")]
+            unsafe { core::arch::asm!("wfi") }
+            
+            #[cfg(target_arch = "riscv64")]
+            unsafe { core::arch::asm!("wfi") }
+            
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
+            core::hint::spin_loop();
+        }
     }
     
     /// Get current process ID

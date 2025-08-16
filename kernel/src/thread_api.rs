@@ -4,15 +4,11 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::{Mutex, RwLock};
 use crate::process::{ProcessId, get_process};
-
-/// Thread ID type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ThreadId(pub u64);
+use crate::process::thread::ThreadId;  // Use the ThreadId from process::thread module
 
 /// Thread priority levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +80,7 @@ impl Default for ThreadAttributes {
 }
 
 /// Thread-local storage key
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TlsKey(u32);
 
 /// Thread entry point function type
@@ -170,6 +166,14 @@ pub struct ThreadManager {
     /// TLS destructors
     tls_destructors: RwLock<alloc::collections::BTreeMap<TlsKey, fn(*mut u8)>>,
 }
+
+// SAFETY: ThreadManager is safe to send between threads
+// All fields are either atomic or protected by RwLock
+unsafe impl Send for ThreadManager {}
+
+// SAFETY: ThreadManager is safe to share between threads
+// All mutations are protected by atomic operations or RwLock
+unsafe impl Sync for ThreadManager {}
 
 impl ThreadManager {
     /// Create a new thread manager
@@ -469,6 +473,17 @@ impl ThreadManager {
         }
         
         Err("Thread context not found")
+    }
+    
+    /// Get current thread ID from scheduler
+    pub fn get_current_thread_id(&self) -> Option<ThreadId> {
+        // Get from scheduler
+        let tid = crate::sched::get_current_thread_id();
+        if tid != 0 {
+            Some(ThreadId(tid))
+        } else {
+            None
+        }
     }
     
     /// List all threads

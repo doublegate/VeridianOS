@@ -549,8 +549,11 @@ impl StorageManager {
     }
     
     /// Get device by index
-    pub fn get_device(&mut self, index: usize) -> Option<&mut (dyn StorageDevice + '_)> {
-        self.devices.get_mut(index).map(move |d| d.as_mut())
+    pub fn get_device(&mut self, index: usize) -> Option<&mut dyn StorageDevice> {
+        match self.devices.get_mut(index) {
+            Some(device) => Some(device.as_mut()),
+            None => None,
+        }
     }
     
     /// List all devices

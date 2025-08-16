@@ -571,7 +571,10 @@ pub fn init_with_bootstrap(bootstrap_task: NonNull<Task>) -> KernelResult<()> {
 
 /// Initialize scheduler normally (after bootstrap)
 pub fn init() {
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    println!("[SCHED] Initializing scheduler...");
+    
+    #[cfg(target_arch = "riscv64")]
     println!("[SCHED] Initializing scheduler...");
     
     #[cfg(target_arch = "aarch64")]
@@ -593,8 +596,8 @@ pub fn init() {
     
     #[cfg(target_arch = "riscv64")]
     {
-        println!("[SCHED] Skipping idle task creation for RISC-V");
-        println!("[SCHED] Scheduler initialized (minimal for RISC-V)");
+        // Skip println for RISC-V to avoid serial issues
+        // Scheduler initialized (minimal for RISC-V)
     }
     
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]

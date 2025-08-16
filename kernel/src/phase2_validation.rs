@@ -85,7 +85,7 @@ pub fn quick_health_check() -> bool {
     let mut healthy = true;
     
     // Check VFS
-    if let Ok(_) = crate::fs::VFS.read().resolve_path("/") {
+    if let Ok(_) = crate::fs::VFS.get().unwrap().read().resolve_path("/") {
         crate::println!("✓ VFS responding");
     } else {
         crate::println!("✗ VFS not responding");
@@ -94,7 +94,7 @@ pub fn quick_health_check() -> bool {
     
     // Check Process Server
     let process_server = crate::services::process_server::get_process_server();
-    let processes = process_server.lock().list_processes();
+    let processes = process_server.list_processes();
     if !processes.is_empty() {
         crate::println!("✓ Process Server responding ({} processes)", processes.len());
     } else {

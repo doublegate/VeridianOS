@@ -58,7 +58,7 @@ pub fn sys_open(path: usize, flags: usize, _mode: usize) -> SyscallResult {
         .ok_or(SyscallError::InvalidArgument)?;
     
     // Open the file through VFS
-    match VFS.read().open(path_str, open_flags) {
+    match VFS.get().unwrap().read().open(path_str, open_flags) {
         Ok(node) => {
             // Create file
             let file = crate::fs::file::File::new(node, open_flags);
@@ -300,7 +300,7 @@ pub fn sys_mkdir(path: usize, mode: usize) -> SyscallResult {
     
     // Create directory through VFS
     let permissions = Permissions::from_mode(mode as u32);
-    match VFS.read().mkdir(path_str, permissions) {
+    match VFS.get().unwrap().read().mkdir(path_str, permissions) {
         Ok(_) => Ok(0),
         Err(_) => Err(SyscallError::InvalidState),
     }
@@ -338,7 +338,7 @@ pub fn sys_rmdir(path: usize) -> SyscallResult {
     };
     
     // Remove directory through VFS
-    match VFS.read().unlink(path_str) {
+    match VFS.get().unwrap().read().unlink(path_str) {
         Ok(_) => Ok(0),
         Err(_) => Err(SyscallError::InvalidState),
     }
@@ -400,7 +400,7 @@ pub fn sys_mount(_device: usize, mount_point: usize, fs_type: usize, flags: usiz
     };
     
     // Mount filesystem
-    match VFS.write().mount_by_type(mount_path, fs_type_str, flags as u32) {
+    match VFS.get().unwrap().write().mount_by_type(mount_path, fs_type_str, flags as u32) {
         Ok(_) => Ok(0),
         Err(_) => Err(SyscallError::InvalidState),
     }
@@ -438,7 +438,7 @@ pub fn sys_unmount(mount_point: usize) -> SyscallResult {
     };
     
     // Unmount filesystem
-    match VFS.write().unmount(mount_path) {
+    match VFS.get().unwrap().write().unmount(mount_path) {
         Ok(_) => Ok(0),
         Err(_) => Err(SyscallError::InvalidState),
     }
@@ -448,7 +448,7 @@ pub fn sys_unmount(mount_point: usize) -> SyscallResult {
 ///
 /// Flushes all pending writes to disk
 pub fn sys_sync() -> SyscallResult {
-    match VFS.read().sync() {
+    match VFS.get().unwrap().read().sync() {
         Ok(_) => Ok(0),
         Err(_) => Err(SyscallError::InvalidState),
     }

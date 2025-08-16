@@ -91,6 +91,14 @@ pub struct VgaConsole {
     default_color: u8,
 }
 
+// SAFETY: VgaConsole is safe to send between threads as the buffer
+// is a fixed hardware address and all methods requiring mutation take &mut self
+unsafe impl Send for VgaConsole {}
+
+// SAFETY: VgaConsole is safe to share between threads as the buffer
+// is a fixed hardware address and mutation is protected by &mut self
+unsafe impl Sync for VgaConsole {}
+
 impl VgaConsole {
     /// Create a new VGA console
     pub fn new() -> Self {
@@ -428,8 +436,11 @@ impl ConsoleDriver {
     }
     
     /// Get active console device
-    pub fn get_active_device(&mut self) -> Option<&mut (dyn ConsoleDevice + '_)> {
-        self.devices.get_mut(self.active_device).map(move |d| d.as_mut())
+    pub fn get_active_device(&mut self) -> Option<&mut dyn ConsoleDevice> {
+        match self.devices.get_mut(self.active_device) {
+            Some(device) => Some(device.as_mut()),
+            None => None,
+        }
     }
     
     /// Write to all console devices

@@ -19,23 +19,37 @@ impl Uart16550Compat {
 
 impl fmt::Write for Uart16550Compat {
     fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.write_bytes(s.as_bytes());
+        Ok(())
+    }
+}
+
+impl Uart16550Compat {
+    pub fn write_bytes(&self, bytes: &[u8]) {
         const THR: usize = 0x00; // Transmitter Holding Register
         const LSR: usize = 0x05; // Line Status Register
         const LSR_THRE: u8 = 1 << 5; // Transmitter Holding Register Empty
 
-        for byte in s.bytes() {
+        for &byte in bytes {
             unsafe {
                 // Wait for transmitter to be ready
-                while (core::ptr::read_volatile((self.base_addr + LSR) as *const u8) & LSR_THRE)
-                    == 0
-                {
+                let mut count = 0;
+                while (core::ptr::read_volatile((self.base_addr + LSR) as *const u8) & LSR_THRE) == 0 {
+                    count += 1;
+                    if count > 1000000 {
+                        // Timeout to prevent infinite loop
+                        return;
+                    }
                     core::hint::spin_loop();
                 }
                 // Write byte
                 core::ptr::write_volatile((self.base_addr + THR) as *mut u8, byte);
             }
         }
-        Ok(())
+    }
+    
+    pub fn write_str_direct(&self, s: &str) {
+        self.write_bytes(s.as_bytes());
     }
 }
 

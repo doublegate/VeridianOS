@@ -60,7 +60,7 @@ pub fn load_user_program(
     println!("[LOADER] Loading program: {}", path);
     
     // Open the file
-    let file_node = VFS.read().open(path, crate::fs::file::OpenFlags::read_only())
+    let file_node = VFS.get().unwrap().read().open(path, crate::fs::file::OpenFlags::read_only())
         .map_err(|_| "Failed to open program file")?;
     
     // Get file size
@@ -99,7 +99,7 @@ pub fn load_user_program(
     let entry_point = binary.entry_point as usize;
     
     // Extract program name from path
-    let name = path.rsplit('/').next().unwrap_or("unknown").into();
+    let name: String = path.rsplit('/').next().unwrap_or("unknown").into();
     
     // Convert arguments to owned strings
     let argv_vec: Vec<String> = argv.iter().map(|s| String::from(*s)).collect();

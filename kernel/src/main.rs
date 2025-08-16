@@ -105,6 +105,19 @@ fn panic(info: &PanicInfo) -> ! {
 #[cfg(not(target_arch = "x86_64"))]
 #[no_mangle]
 pub extern "C" fn kernel_main() -> ! {
+    // Very early RISC-V debug output
+    #[cfg(target_arch = "riscv64")]
+    unsafe {
+        // Direct write to UART at 0x10000000
+        let uart_base = 0x1000_0000 as *mut u8;
+        // Write 'V' for VeridianOS
+        uart_base.write_volatile(b'V');
+        uart_base.write_volatile(b'E');
+        uart_base.write_volatile(b'R');
+        uart_base.write_volatile(b'I');
+        uart_base.write_volatile(b'\n');
+    }
+    
     kernel_main_impl()
 }
 

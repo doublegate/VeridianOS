@@ -161,7 +161,7 @@ impl DriverFramework {
     
     /// Register a driver
     pub fn register_driver(&self, driver: Box<dyn Driver>) -> Result<(), &'static str> {
-        let name = driver.name().into();
+        let name: String = driver.name().into();
         
         if self.drivers.read().contains_key(&name) {
             return Err("Driver already registered");
@@ -293,14 +293,48 @@ impl DriverFramework {
             .map(|(id, dev)| (*id, dev.clone()))
             .collect();
             
-        let mut driver = self.drivers.write()
-            .get_mut(driver_name)
-            .ok_or("Driver not found")?;
+        // Check if driver exists first
+        {
+            let drivers = self.drivers.read();
+            if !drivers.contains_key(driver_name) {
+                return Err("Driver not found");
+            }
+        }
             
         for (device_id, device) in devices {
-            if driver.supports_device(&device) {
-                if driver.probe(&device).is_ok() {
-                    if driver.attach(&device).is_ok() {
+            // Check if driver supports device
+            let supports = {
+                let mut drivers = self.drivers.write();
+                if let Some(driver) = drivers.get_mut(driver_name) {
+                    driver.supports_device(&device)
+                } else {
+                    false
+                }
+            };
+            
+            if supports {
+                // Try to probe the device
+                let probe_ok = {
+                    let mut drivers = self.drivers.write();
+                    if let Some(driver) = drivers.get_mut(driver_name) {
+                        driver.probe(&device).is_ok()
+                    } else {
+                        false
+                    }
+                };
+                
+                if probe_ok {
+                    // Try to attach the device
+                    let attach_ok = {
+                        let mut drivers = self.drivers.write();
+                        if let Some(driver) = drivers.get_mut(driver_name) {
+                            driver.attach(&device).is_ok()
+                        } else {
+                            false
+                        }
+                    };
+                    
+                    if attach_ok {
                         self.bindings.write().insert(device_id, driver_name.into());
                         
                         if let Some(dev) = self.devices.write().get_mut(&device_id) {
@@ -425,6 +459,11 @@ impl DriverFramework {
         }
         
         Ok(())
+    }
+    
+    /// Get all registered drivers
+    pub fn get_drivers(&self) -> Vec<String> {
+        self.drivers.read().keys().cloned().collect()
     }
     
     /// Get statistics

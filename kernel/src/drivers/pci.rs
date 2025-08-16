@@ -85,7 +85,7 @@ pub mod command_flags {
 }
 
 /// PCI device location
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PciLocation {
     pub bus: u8,
     pub device: u8,
@@ -572,7 +572,9 @@ pub fn init() {
     
     // Register with driver framework
     let driver_framework = crate::services::driver_framework::get_driver_framework();
-    let bus_instance = PCI_BUS.get().unwrap().lock().clone();
+    
+    // Create a new PciBus instance for registration (since we can't clone the mutex guard)
+    let bus_instance = PciBus::new();
     
     if let Err(e) = driver_framework.register_bus(alloc::boxed::Box::new(bus_instance)) {
         crate::println!("[PCI] Failed to register PCI bus: {}", e);

@@ -146,7 +146,7 @@ pub mod test_runner {
         crate::println!("🚀 Running Phase 2 Validation Tests...");
         
         // Run all test programs
-        let tests = [
+        let tests: [(&str, fn() -> Result<(), String>); 8] = [
             ("Hello World", super::test_programs::hello_world::run),
             ("Process Test", super::test_programs::process_test::run),
             ("Thread Test", super::test_programs::thread_test::run),
@@ -186,7 +186,7 @@ pub mod test_runner {
         crate::println!("🔥 Running Critical Tests...");
         
         // Critical tests
-        let tests = [
+        let tests: [(&str, fn() -> Result<(), String>); 3] = [
             ("Process Test", super::test_programs::process_test::run),
             ("Filesystem Test", super::test_programs::filesystem_test::run),
             ("Driver Test", super::test_programs::driver_test::run),

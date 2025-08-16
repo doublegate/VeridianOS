@@ -352,7 +352,7 @@ impl LoopbackDriver {
         let mut config = InterfaceConfig::new(String::from("lo"), loopback_mac);
         config.ip_address = Some([127, 0, 0, 1]);
         config.netmask = Some([255, 0, 0, 0]);
-        config.mtu = 65536; // Loopback can have larger MTU
+        config.mtu = 65535; // Loopback can have larger MTU (max for u16)
         
         Self {
             name: String::from("loopback"),

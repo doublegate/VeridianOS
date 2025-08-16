@@ -36,7 +36,15 @@ pub fn init() {
         }
     }
     
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "riscv64")]
+    {
+        println!("[IPC-REG] Initializing registry for RISC-V...");
+        let mut registry = IPC_REGISTRY.lock();
+        *registry = Some(IpcRegistry::new());
+        println!("[IPC-REG] Registry initialized for RISC-V");
+    }
+    
+    #[cfg(all(not(target_arch = "aarch64"), not(target_arch = "riscv64")))]
     {
         let mut registry = IPC_REGISTRY.lock();
         *registry = Some(IpcRegistry::new());

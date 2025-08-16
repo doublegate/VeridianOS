@@ -266,7 +266,7 @@ impl UsbBus {
         // Initialize the controller
         controller.init()?;
         
-        let controller_name = controller.name().into();
+        let controller_name: String = controller.name().into();
         let controller_index = self.controllers.read().len();
         
         // Scan ports for devices
