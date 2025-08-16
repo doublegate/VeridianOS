@@ -61,8 +61,15 @@ pub mod process;
 pub mod raii;
 pub mod sched;
 pub mod serial;
+pub mod services;
+pub mod stdlib;
 mod syscall;
 pub mod test_tasks;
+pub mod thread_api;
+pub mod userspace;
+pub mod drivers;
+pub mod userland;
+pub mod phase2_validation;
 
 #[cfg(test)]
 mod test_config;

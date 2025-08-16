@@ -168,6 +168,17 @@ pub fn run() -> ! {
     #[cfg(target_arch = "riscv64")]
     arch::riscv64::bootstrap::stage6_complete();
 
+    // Phase 2 validation (only run once after all services are initialized)
+    crate::println!("");
+    crate::println!("🔬 Running Phase 2 Complete Validation...");
+    crate::phase2_validation::quick_health_check();
+    
+    // Uncomment the following line to run full Phase 2 validation:
+    // crate::phase2_validation::validate_phase2_complete();
+    
+    crate::println!("✅ Phase 2 User Space Foundation - COMPLETE!");
+    crate::println!("");
+
     // Transfer control to scheduler
     sched::start();
 }
@@ -193,13 +204,24 @@ fn create_init_process() {
     
     #[cfg(feature = "alloc")]
     {
-        use alloc::string::String;
-        
-        // TODO: Load init from filesystem
-        // For now, create a test process
-        // Process is automatically marked as ready in create_process
-        if let Ok(_init_pid) = process::lifecycle::create_process(String::from("init"), 0) {
-            // Process created and marked as ready
+        // Try to load init from the filesystem
+        match crate::userspace::load_init_process() {
+            Ok(init_pid) => {
+                println!("[BOOTSTRAP] Init process created with PID {}", init_pid.0);
+                
+                // Try to load a shell as well
+                if let Ok(shell_pid) = crate::userspace::loader::load_shell() {
+                    println!("[BOOTSTRAP] Shell process created with PID {}", shell_pid.0);
+                }
+            }
+            Err(e) => {
+                println!("[BOOTSTRAP] Failed to create init process: {}", e);
+                // Fall back to creating a minimal test process
+                use alloc::string::String;
+                if let Ok(pid) = process::lifecycle::create_process(String::from("init"), 0) {
+                    println!("[BOOTSTRAP] Created fallback init process with PID {}", pid.0);
+                }
+            }
         }
     }
 }

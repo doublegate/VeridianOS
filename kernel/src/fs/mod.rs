@@ -371,11 +371,13 @@ impl Vfs {
 }
 
 /// Global VFS instance
-pub static VFS: RwLock<Vfs> = RwLock::new(Vfs {
-    root_fs: None,
-    mounts: BTreeMap::new(),
-    cwd: String::new(),
-});
+lazy_static::lazy_static! {
+    pub static ref VFS: RwLock<Vfs> = RwLock::new(Vfs {
+        root_fs: None,
+        mounts: BTreeMap::new(),
+        cwd: String::from("/"),
+    });
+}
 
 /// Initialize the VFS with a RAM filesystem as root
 pub fn init() {
@@ -384,30 +386,59 @@ pub fn init() {
     
     #[cfg(feature = "alloc")]
     {
+        println!("[VFS] Creating RAM filesystem...");
         // Create a RAM filesystem as the root
         let ramfs = ramfs::RamFs::new();
+        println!("[VFS] RAM filesystem created");
         
         // Create essential directories
+        println!("[VFS] Getting root node...");
         let root = ramfs.root();
+        println!("[VFS] Creating essential directories...");
+        
         root.mkdir("dev", Permissions::default()).ok();
         root.mkdir("proc", Permissions::default()).ok();
         root.mkdir("bin", Permissions::default()).ok();
         root.mkdir("etc", Permissions::default()).ok();
         root.mkdir("tmp", Permissions::default()).ok();
         root.mkdir("home", Permissions::default()).ok();
+        root.mkdir("usr", Permissions::default()).ok();
+        root.mkdir("lib", Permissions::default()).ok();
+        root.mkdir("sbin", Permissions::default()).ok();
+        root.mkdir("var", Permissions::default()).ok();
+        println!("[VFS] Essential directories created");
         
         // Mount as root filesystem
+        println!("[VFS] Mounting ramfs as root...");
         VFS.write().mount_root(Arc::new(ramfs)).unwrap();
         println!("[VFS] Mounted ramfs as root filesystem");
         
         // Mount special filesystems
+        println!("[VFS] Creating devfs...");
         let devfs = devfs::DevFs::new();
+        println!("[VFS] Mounting devfs at /dev...");
         VFS.write().mount("/dev".to_string(), Arc::new(devfs)).ok();
         println!("[VFS] Mounted devfs at /dev");
         
+        println!("[VFS] Creating procfs...");
         let procfs = procfs::ProcFs::new();
+        println!("[VFS] Mounting procfs at /proc...");
         VFS.write().mount("/proc".to_string(), Arc::new(procfs)).ok();
         println!("[VFS] Mounted procfs at /proc");
+        
+        // Create subdirectories
+        if let Ok(usr) = root.lookup("usr") {
+            usr.mkdir("bin", Permissions::default()).ok();
+            usr.mkdir("sbin", Permissions::default()).ok();
+            usr.mkdir("lib", Permissions::default()).ok();
+            usr.mkdir("local", Permissions::default()).ok();
+        }
+        
+        if let Ok(var) = root.lookup("var") {
+            var.mkdir("log", Permissions::default()).ok();
+            var.mkdir("run", Permissions::default()).ok();
+            var.mkdir("tmp", Permissions::default()).ok();
+        }
         
         println!("[VFS] Virtual Filesystem initialized with 3 filesystems");
     }
