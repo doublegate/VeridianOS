@@ -5,6 +5,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::boxed::Box;
+use alloc::{vec, format};
 use spin::Mutex;
 use crate::services::driver_framework::{
     Driver, DeviceInfo, DeviceClass, DeviceStatus
@@ -172,7 +173,7 @@ impl AtaDriver {
                 }
             }
         }
-        self.info.model = model.trim().to_string();
+        self.info.model = model.trim().into();
         
         // Serial number (words 10-19)
         let mut serial = String::new();
@@ -185,7 +186,7 @@ impl AtaDriver {
                 }
             }
         }
-        self.info.serial = serial.trim().to_string();
+        self.info.serial = serial.trim().into();
         
         // Capacity (words 60-61 for 28-bit LBA)
         let capacity_sectors = data[60] as u64 | ((data[61] as u64) << 16);
@@ -548,8 +549,8 @@ impl StorageManager {
     }
     
     /// Get device by index
-    pub fn get_device(&mut self, index: usize) -> Option<&mut dyn StorageDevice> {
-        self.devices.get_mut(index).map(|d| d.as_mut())
+    pub fn get_device(&mut self, index: usize) -> Option<&mut (dyn StorageDevice + '_)> {
+        self.devices.get_mut(index).map(move |d| d.as_mut())
     }
     
     /// List all devices

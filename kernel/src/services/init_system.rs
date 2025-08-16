@@ -5,6 +5,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
+use alloc::vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use spin::RwLock;
 use crate::process::ProcessId;
@@ -494,7 +495,7 @@ impl InitSystem {
             return Ok(()); // Already visited
         }
         
-        visited.insert(name.to_string(), true);
+        visited.insert(name.into(), true);
         
         if let Some(service) = services.get(name) {
             // Visit dependencies first
@@ -505,8 +506,8 @@ impl InitSystem {
             }
         }
         
-        visited.insert(name.to_string(), false);
-        order.push(name.to_string());
+        visited.insert(name.into(), false);
+        order.push(name.into());
         Ok(())
     }
     

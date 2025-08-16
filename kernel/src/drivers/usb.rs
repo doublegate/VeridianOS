@@ -6,6 +6,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
 use alloc::boxed::Box;
+use alloc::{vec, format};
 use core::mem;
 use spin::{Mutex, RwLock};
 use crate::services::driver_framework::{
@@ -265,7 +266,7 @@ impl UsbBus {
         // Initialize the controller
         controller.init()?;
         
-        let controller_name = controller.name().to_string();
+        let controller_name = controller.name().into();
         let controller_index = self.controllers.read().len();
         
         // Scan ports for devices

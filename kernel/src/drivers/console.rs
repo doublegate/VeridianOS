@@ -5,6 +5,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::boxed::Box;
+use alloc::{vec, format};
 use spin::Mutex;
 use crate::services::driver_framework::{
     Driver, DeviceInfo, DeviceClass, DeviceStatus
@@ -427,8 +428,8 @@ impl ConsoleDriver {
     }
     
     /// Get active console device
-    pub fn get_active_device(&mut self) -> Option<&mut dyn ConsoleDevice> {
-        self.devices.get_mut(self.active_device).map(|d| d.as_mut())
+    pub fn get_active_device(&mut self) -> Option<&mut (dyn ConsoleDevice + '_)> {
+        self.devices.get_mut(self.active_device).map(move |d| d.as_mut())
     }
     
     /// Write to all console devices

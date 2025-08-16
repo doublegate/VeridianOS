@@ -32,7 +32,10 @@ pub mod thread;
 pub use lifecycle::{exec_process, fork_process, wait_process as wait_for_child};
 pub use pcb::{Process, ProcessId, ProcessPriority, ProcessState};
 pub use table::get_process;
-pub use thread::{Thread, ThreadId};
+pub use thread::{Thread, ThreadId, ThreadState};
+
+// Re-export thread context types for compatibility
+pub use crate::arch::context::{ThreadContext, ArchThreadContext};
 
 /// Maximum number of processes
 pub const MAX_PROCESSES: usize = 4096;

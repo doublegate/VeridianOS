@@ -4,6 +4,7 @@
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use alloc::boxed::Box;
 use alloc::format;
 use core::mem;
 use core::ptr;
@@ -441,7 +442,9 @@ pub mod process {
     
     /// Get current process ID
     pub fn getpid() -> u32 {
-        crate::process::get_current_process_id().0 as u32
+        crate::process::get_current_process()
+            .map(|p| p.pid.0 as u32)
+            .unwrap_or(0) // Return 0 if no current process
     }
     
     /// Get parent process ID
@@ -646,6 +649,7 @@ pub mod random {
 /// System information
 pub mod system {
     use alloc::vec::Vec;
+    use alloc::string::String;
     
     /// System information structure
     #[derive(Debug)]

@@ -99,7 +99,7 @@ pub fn load_user_program(
     let entry_point = binary.entry_point as usize;
     
     // Extract program name from path
-    let name = path.rsplit('/').next().unwrap_or("unknown").to_string();
+    let name = path.rsplit('/').next().unwrap_or("unknown").into();
     
     // Convert arguments to owned strings
     let argv_vec: Vec<String> = argv.iter().map(|s| String::from(*s)).collect();

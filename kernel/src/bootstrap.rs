@@ -173,8 +173,8 @@ pub fn run() -> ! {
     crate::println!("🔬 Running Phase 2 Complete Validation...");
     crate::phase2_validation::quick_health_check();
     
-    // Uncomment the following line to run full Phase 2 validation:
-    // crate::phase2_validation::validate_phase2_complete();
+    // Run full Phase 2 validation:
+    crate::phase2_validation::validate_phase2_complete();
     
     crate::println!("✅ Phase 2 User Space Foundation - COMPLETE!");
     crate::println!("");

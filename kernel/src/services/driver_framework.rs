@@ -161,7 +161,7 @@ impl DriverFramework {
     
     /// Register a driver
     pub fn register_driver(&self, driver: Box<dyn Driver>) -> Result<(), &'static str> {
-        let name = driver.name().to_string();
+        let name = driver.name().into();
         
         if self.drivers.read().contains_key(&name) {
             return Err("Driver already registered");
@@ -197,7 +197,7 @@ impl DriverFramework {
     
     /// Register a bus
     pub fn register_bus(&self, bus: Box<dyn Bus>) -> Result<(), &'static str> {
-        let name = bus.name().to_string();
+        let name = bus.name().into();
         
         if self.buses.read().contains_key(&name) {
             return Err("Bus already registered");
@@ -301,10 +301,10 @@ impl DriverFramework {
             if driver.supports_device(&device) {
                 if driver.probe(&device).is_ok() {
                     if driver.attach(&device).is_ok() {
-                        self.bindings.write().insert(device_id, driver_name.to_string());
+                        self.bindings.write().insert(device_id, driver_name.into());
                         
                         if let Some(dev) = self.devices.write().get_mut(&device_id) {
-                            dev.driver = Some(driver_name.to_string());
+                            dev.driver = Some(driver_name.into());
                             dev.status = DeviceStatus::Active;
                         }
                         
@@ -312,7 +312,7 @@ impl DriverFramework {
                             self.irq_handlers.write()
                                 .entry(irq)
                                 .or_insert_with(Vec::new)
-                                .push(driver_name.to_string());
+                                .push(driver_name.into());
                         }
                         
                         crate::println!("[DRIVER_FRAMEWORK] Bound driver {} to device {}", 

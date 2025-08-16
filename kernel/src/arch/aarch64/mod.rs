@@ -66,3 +66,37 @@ pub fn disable_interrupts() -> impl Drop {
 pub fn serial_init() -> crate::serial::Pl011Uart {
     crate::serial::Pl011Uart::new(0x0900_0000)
 }
+
+/// I/O port functions (stubs for AArch64 - ARM doesn't have I/O ports)
+#[allow(dead_code)]
+pub unsafe fn outb(_port: u16, _value: u8) {
+    // No-op: ARM doesn't have I/O ports
+}
+
+#[allow(dead_code)]
+pub unsafe fn inb(_port: u16) -> u8 {
+    // No-op: ARM doesn't have I/O ports
+    0
+}
+
+#[allow(dead_code)]
+pub unsafe fn outw(_port: u16, _value: u16) {
+    // No-op: ARM doesn't have I/O ports
+}
+
+#[allow(dead_code)]
+pub unsafe fn inw(_port: u16) -> u16 {
+    // No-op: ARM doesn't have I/O ports
+    0
+}
+
+#[allow(dead_code)]
+pub unsafe fn outl(_port: u16, _value: u32) {
+    // No-op: ARM doesn't have I/O ports
+}
+
+#[allow(dead_code)]
+pub unsafe fn inl(_port: u16) -> u32 {
+    // No-op: ARM doesn't have I/O ports
+    0
+}

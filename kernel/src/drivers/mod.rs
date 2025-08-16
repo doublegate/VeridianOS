@@ -10,9 +10,9 @@ pub mod storage;
 
 pub use pci::{PciBus, PciDevice};
 pub use usb::{UsbBus, UsbDevice};
-pub use network::{NetworkDriver, EthernetDriver};
-pub use console::{ConsoleDriver, VgaConsole, SerialConsole};
-pub use storage::{StorageDriver, AtaDriver};
+pub use network::{NetworkDevice, EthernetDriver, LoopbackDriver};
+pub use console::{ConsoleDevice, ConsoleDriver, VgaConsole, SerialConsole};
+pub use storage::{StorageDevice, AtaDriver};
 
 /// Initialize all drivers
 pub fn init() {

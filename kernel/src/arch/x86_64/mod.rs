@@ -115,6 +115,37 @@ pub fn serial_init() -> uart_16550::SerialPort {
     serial_port
 }
 
+/// Basic I/O port functions
+#[allow(dead_code)]
+pub unsafe fn outb(port: u16, value: u8) {
+    x86_64::instructions::port::Port::new(port).write(value);
+}
+
+#[allow(dead_code)]
+pub unsafe fn inb(port: u16) -> u8 {
+    x86_64::instructions::port::Port::new(port).read()
+}
+
+#[allow(dead_code)]
+pub unsafe fn outw(port: u16, value: u16) {
+    x86_64::instructions::port::Port::new(port).write(value);
+}
+
+#[allow(dead_code)]
+pub unsafe fn inw(port: u16) -> u16 {
+    x86_64::instructions::port::Port::new(port).read()
+}
+
+#[allow(dead_code)]
+pub unsafe fn outl(port: u16, value: u32) {
+    x86_64::instructions::port::Port::new(port).write(value);
+}
+
+#[allow(dead_code)]
+pub unsafe fn inl(port: u16) -> u32 {
+    x86_64::instructions::port::Port::new(port).read()
+}
+
 mod interrupts {
     #[allow(dead_code)]
     pub unsafe fn enable() {

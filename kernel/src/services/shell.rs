@@ -5,7 +5,8 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
-use alloc::format;
+use alloc::boxed::Box;
+use alloc::{format, vec};
 use spin::RwLock;
 use crate::process::ProcessId;
 
@@ -242,38 +243,38 @@ impl Shell {
         let mut builtins = self.builtins.write();
         
         // Help command
-        builtins.insert("help".to_string(), Box::new(HelpCommand));
-        builtins.insert("?".to_string(), Box::new(HelpCommand));
+        builtins.insert("help".into(), Box::new(HelpCommand));
+        builtins.insert("?".into(), Box::new(HelpCommand));
         
         // Directory commands
-        builtins.insert("cd".to_string(), Box::new(CdCommand));
-        builtins.insert("pwd".to_string(), Box::new(PwdCommand));
-        builtins.insert("ls".to_string(), Box::new(LsCommand));
-        builtins.insert("mkdir".to_string(), Box::new(MkdirCommand));
+        builtins.insert("cd".into(), Box::new(CdCommand));
+        builtins.insert("pwd".into(), Box::new(PwdCommand));
+        builtins.insert("ls".into(), Box::new(LsCommand));
+        builtins.insert("mkdir".into(), Box::new(MkdirCommand));
         
         // File commands
-        builtins.insert("cat".to_string(), Box::new(CatCommand));
-        builtins.insert("echo".to_string(), Box::new(EchoCommand));
-        builtins.insert("touch".to_string(), Box::new(TouchCommand));
-        builtins.insert("rm".to_string(), Box::new(RmCommand));
+        builtins.insert("cat".into(), Box::new(CatCommand));
+        builtins.insert("echo".into(), Box::new(EchoCommand));
+        builtins.insert("touch".into(), Box::new(TouchCommand));
+        builtins.insert("rm".into(), Box::new(RmCommand));
         
         // System commands
-        builtins.insert("ps".to_string(), Box::new(PsCommand));
-        builtins.insert("kill".to_string(), Box::new(KillCommand));
-        builtins.insert("uptime".to_string(), Box::new(UptimeCommand));
-        builtins.insert("mount".to_string(), Box::new(MountCommand));
-        builtins.insert("lsmod".to_string(), Box::new(LsmodCommand));
+        builtins.insert("ps".into(), Box::new(PsCommand));
+        builtins.insert("kill".into(), Box::new(KillCommand));
+        builtins.insert("uptime".into(), Box::new(UptimeCommand));
+        builtins.insert("mount".into(), Box::new(MountCommand));
+        builtins.insert("lsmod".into(), Box::new(LsmodCommand));
         
         // Environment commands
-        builtins.insert("env".to_string(), Box::new(EnvCommand));
-        builtins.insert("export".to_string(), Box::new(ExportCommand));
-        builtins.insert("unset".to_string(), Box::new(UnsetCommand));
+        builtins.insert("env".into(), Box::new(EnvCommand));
+        builtins.insert("export".into(), Box::new(ExportCommand));
+        builtins.insert("unset".into(), Box::new(UnsetCommand));
         
         // Shell commands
-        builtins.insert("history".to_string(), Box::new(HistoryCommand));
-        builtins.insert("clear".to_string(), Box::new(ClearCommand));
-        builtins.insert("exit".to_string(), Box::new(ExitCommand));
-        builtins.insert("logout".to_string(), Box::new(ExitCommand));
+        builtins.insert("history".into(), Box::new(HistoryCommand));
+        builtins.insert("clear".into(), Box::new(ClearCommand));
+        builtins.insert("exit".into(), Box::new(ExitCommand));
+        builtins.insert("logout".into(), Box::new(ExitCommand));
     }
     
     fn tokenize(&self, command_line: &str) -> Vec<String> {
@@ -379,7 +380,7 @@ impl BuiltinCommand for HelpCommand {
     fn name(&self) -> &str { "help" }
     fn description(&self) -> &str { "Show available commands" }
     
-    fn execute(&self, _args: &[String], shell: &Shell) -> CommandResult {
+    fn execute(&self, _args: &[String], shell: &mut Shell) -> CommandResult {
         crate::println!("VeridianOS Shell - Available Commands:");
         crate::println!();
         
@@ -403,7 +404,7 @@ impl BuiltinCommand for CdCommand {
     fn name(&self) -> &str { "cd" }
     fn description(&self) -> &str { "Change current directory" }
     
-    fn execute(&self, args: &[String], shell: &Shell) -> CommandResult {
+    fn execute(&self, args: &[String], shell: &mut Shell) -> CommandResult {
         let target = if args.is_empty() {
             shell.get_env("HOME").unwrap_or_else(|| String::from("/"))
         } else {
@@ -425,7 +426,7 @@ impl BuiltinCommand for PwdCommand {
     fn name(&self) -> &str { "pwd" }
     fn description(&self) -> &str { "Print current working directory" }
     
-    fn execute(&self, _args: &[String], shell: &Shell) -> CommandResult {
+    fn execute(&self, _args: &[String], shell: &mut Shell) -> CommandResult {
         crate::println!("{}", shell.get_cwd());
         CommandResult::Success(0)
     }
@@ -436,7 +437,7 @@ impl BuiltinCommand for LsCommand {
     fn name(&self) -> &str { "ls" }
     fn description(&self) -> &str { "List directory contents" }
     
-    fn execute(&self, args: &[String], shell: &Shell) -> CommandResult {
+    fn execute(&self, args: &[String], shell: &mut Shell) -> CommandResult {
         let path = if args.is_empty() {
             shell.get_cwd()
         } else {
@@ -474,7 +475,7 @@ impl BuiltinCommand for MkdirCommand {
     fn name(&self) -> &str { "mkdir" }
     fn description(&self) -> &str { "Create directories" }
     
-    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+    fn execute(&self, args: &[String], _shell: &mut Shell) -> CommandResult {
         if args.is_empty() {
             return CommandResult::Error(String::from("mkdir: missing operand"));
         }
@@ -495,7 +496,7 @@ impl BuiltinCommand for CatCommand {
     fn name(&self) -> &str { "cat" }
     fn description(&self) -> &str { "Display file contents" }
     
-    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+    fn execute(&self, args: &[String], _shell: &mut Shell) -> CommandResult {
         if args.is_empty() {
             return CommandResult::Error(String::from("cat: missing file operand"));
         }
@@ -535,7 +536,7 @@ impl BuiltinCommand for EchoCommand {
     fn name(&self) -> &str { "echo" }
     fn description(&self) -> &str { "Display text" }
     
-    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+    fn execute(&self, args: &[String], _shell: &mut Shell) -> CommandResult {
         if !args.is_empty() {
             let output = args.join(" ");
             crate::println!("{}", output);
@@ -551,7 +552,7 @@ impl BuiltinCommand for TouchCommand {
     fn name(&self) -> &str { "touch" }
     fn description(&self) -> &str { "Create empty files" }
     
-    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+    fn execute(&self, args: &[String], _shell: &mut Shell) -> CommandResult {
         if args.is_empty() {
             return CommandResult::Error(String::from("touch: missing file operand"));
         }
@@ -570,7 +571,7 @@ impl BuiltinCommand for RmCommand {
     fn name(&self) -> &str { "rm" }
     fn description(&self) -> &str { "Remove files and directories" }
     
-    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+    fn execute(&self, args: &[String], _shell: &mut Shell) -> CommandResult {
         if args.is_empty() {
             return CommandResult::Error(String::from("rm: missing operand"));
         }
@@ -591,7 +592,7 @@ impl BuiltinCommand for PsCommand {
     fn name(&self) -> &str { "ps" }
     fn description(&self) -> &str { "List running processes" }
     
-    fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
+    fn execute(&self, _args: &[String], _shell: &mut Shell) -> CommandResult {
         let process_server = crate::services::process_server::get_process_server();
         let processes = process_server.list_processes();
         
@@ -619,7 +620,7 @@ impl BuiltinCommand for KillCommand {
     fn name(&self) -> &str { "kill" }
     fn description(&self) -> &str { "Send signal to process" }
     
-    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+    fn execute(&self, args: &[String], _shell: &mut Shell) -> CommandResult {
         if args.is_empty() {
             return CommandResult::Error(String::from("kill: missing process ID"));
         }
@@ -643,7 +644,7 @@ impl BuiltinCommand for UptimeCommand {
     fn name(&self) -> &str { "uptime" }
     fn description(&self) -> &str { "Show system uptime" }
     
-    fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
+    fn execute(&self, _args: &[String], _shell: &mut Shell) -> CommandResult {
         // TODO: Get actual system uptime
         crate::println!("uptime: 0 days, 0 hours, 0 minutes");
         CommandResult::Success(0)
@@ -655,7 +656,7 @@ impl BuiltinCommand for MountCommand {
     fn name(&self) -> &str { "mount" }
     fn description(&self) -> &str { "Show mounted filesystems" }
     
-    fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
+    fn execute(&self, _args: &[String], _shell: &mut Shell) -> CommandResult {
         // TODO: Show actual mount information
         crate::println!("/ on ramfs (rw)");
         crate::println!("/dev on devfs (rw)");
@@ -669,7 +670,7 @@ impl BuiltinCommand for LsmodCommand {
     fn name(&self) -> &str { "lsmod" }
     fn description(&self) -> &str { "List loaded drivers" }
     
-    fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
+    fn execute(&self, _args: &[String], _shell: &mut Shell) -> CommandResult {
         let driver_framework = crate::services::driver_framework::get_driver_framework();
         let stats = driver_framework.get_statistics();
         
@@ -689,7 +690,7 @@ impl BuiltinCommand for EnvCommand {
     fn name(&self) -> &str { "env" }
     fn description(&self) -> &str { "Show environment variables" }
     
-    fn execute(&self, _args: &[String], shell: &Shell) -> CommandResult {
+    fn execute(&self, _args: &[String], shell: &mut Shell) -> CommandResult {
         let env_vars = shell.get_all_env();
         for var in env_vars {
             crate::println!("{}", var);
@@ -703,15 +704,15 @@ impl BuiltinCommand for ExportCommand {
     fn name(&self) -> &str { "export" }
     fn description(&self) -> &str { "Set environment variable" }
     
-    fn execute(&self, args: &[String], shell: &Shell) -> CommandResult {
+    fn execute(&self, args: &[String], shell: &mut Shell) -> CommandResult {
         if args.is_empty() {
             return CommandResult::Error(String::from("export: missing variable"));
         }
         
         for arg in args {
             if let Some(eq_pos) = arg.find('=') {
-                let name = arg[..eq_pos].to_string();
-                let value = arg[eq_pos + 1..].to_string();
+                let name = arg[..eq_pos].into();
+                let value = arg[eq_pos + 1..].into();
                 shell.set_env(name, value);
             } else {
                 return CommandResult::Error(format!("export: invalid syntax: {}", arg));
@@ -727,7 +728,7 @@ impl BuiltinCommand for UnsetCommand {
     fn name(&self) -> &str { "unset" }
     fn description(&self) -> &str { "Unset environment variable" }
     
-    fn execute(&self, args: &[String], shell: &Shell) -> CommandResult {
+    fn execute(&self, args: &[String], shell: &mut Shell) -> CommandResult {
         if args.is_empty() {
             return CommandResult::Error(String::from("unset: missing variable"));
         }
@@ -745,7 +746,7 @@ impl BuiltinCommand for HistoryCommand {
     fn name(&self) -> &str { "history" }
     fn description(&self) -> &str { "Show command history" }
     
-    fn execute(&self, _args: &[String], shell: &Shell) -> CommandResult {
+    fn execute(&self, _args: &[String], shell: &mut Shell) -> CommandResult {
         let history = shell.history.read();
         for (i, cmd) in history.iter().enumerate() {
             crate::println!("{:4} {}", i + 1, cmd);
@@ -759,7 +760,7 @@ impl BuiltinCommand for ClearCommand {
     fn name(&self) -> &str { "clear" }
     fn description(&self) -> &str { "Clear the screen" }
     
-    fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
+    fn execute(&self, _args: &[String], _shell: &mut Shell) -> CommandResult {
         // TODO: Actually clear the screen
         crate::println!("\x1b[2J\x1b[H");
         CommandResult::Success(0)
@@ -771,7 +772,7 @@ impl BuiltinCommand for ExitCommand {
     fn name(&self) -> &str { "exit" }
     fn description(&self) -> &str { "Exit the shell" }
     
-    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+    fn execute(&self, args: &[String], _shell: &mut Shell) -> CommandResult {
         let exit_code = if args.is_empty() {
             0
         } else {

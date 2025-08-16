@@ -225,7 +225,7 @@ impl Vfs {
         if path == "/" {
             self.mount_root(fs)
         } else {
-            self.mount(path.to_string(), fs)
+            self.mount(path.into(), fs)
         }
     }
     
@@ -243,7 +243,7 @@ impl Vfs {
         
         // Normalize path
         let path = if path.starts_with('/') {
-            path.to_string()
+            path.into()
         } else {
             // Relative path - prepend CWD
             format!("{}/{}", self.cwd, path)
@@ -417,13 +417,13 @@ pub fn init() {
         println!("[VFS] Creating devfs...");
         let devfs = devfs::DevFs::new();
         println!("[VFS] Mounting devfs at /dev...");
-        VFS.write().mount("/dev".to_string(), Arc::new(devfs)).ok();
+        VFS.write().mount("/dev".into(), Arc::new(devfs)).ok();
         println!("[VFS] Mounted devfs at /dev");
         
         println!("[VFS] Creating procfs...");
         let procfs = procfs::ProcFs::new();
         println!("[VFS] Mounting procfs at /proc...");
-        VFS.write().mount("/proc".to_string(), Arc::new(procfs)).ok();
+        VFS.write().mount("/proc".into(), Arc::new(procfs)).ok();
         println!("[VFS] Mounted procfs at /proc");
         
         // Create subdirectories

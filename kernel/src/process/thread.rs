@@ -62,7 +62,6 @@ pub enum ThreadState {
 }
 
 /// Thread Local Storage (TLS) data
-#[derive(Default)]
 pub struct ThreadLocalStorage {
     /// TLS base address
     pub base: usize,
@@ -70,12 +69,21 @@ pub struct ThreadLocalStorage {
     pub size: usize,
     /// TLS data pointer (architecture-specific)
     pub data_ptr: usize,
+    /// TLS key-value data storage
+    #[cfg(feature = "alloc")]
+    pub data: alloc::collections::BTreeMap<u64, u64>,
 }
 
 impl ThreadLocalStorage {
     /// Create new TLS area
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            base: 0,
+            size: 0,
+            data_ptr: 0,
+            #[cfg(feature = "alloc")]
+            data: alloc::collections::BTreeMap::new(),
+        }
     }
 
     /// Allocate TLS area
@@ -83,6 +91,36 @@ impl ThreadLocalStorage {
         // TODO: Allocate memory for TLS
         self.size = size;
         Ok(())
+    }
+    
+    /// Set TLS value for key
+    #[cfg(feature = "alloc")]
+    pub fn set_value(&mut self, key: u64, value: u64) {
+        self.data.insert(key, value);
+    }
+    
+    /// Get TLS value for key
+    #[cfg(feature = "alloc")]
+    pub fn get_value(&self, key: u64) -> Option<u64> {
+        self.data.get(&key).copied()
+    }
+    
+    /// Remove TLS value for key
+    #[cfg(feature = "alloc")]
+    pub fn remove_value(&mut self, key: u64) -> Option<u64> {
+        self.data.remove(&key)
+    }
+    
+    /// Get all TLS keys
+    #[cfg(feature = "alloc")]
+    pub fn keys(&self) -> impl Iterator<Item = &u64> {
+        self.data.keys()
+    }
+}
+
+impl Default for ThreadLocalStorage {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -377,6 +415,30 @@ impl Thread {
     /// Get total CPU time
     pub fn get_cpu_time(&self) -> u64 {
         self.cpu_time.load(Ordering::Relaxed)
+    }
+    
+    /// Set TLS value for this thread
+    #[cfg(feature = "alloc")]
+    pub fn set_tls_value(&self, key: u64, value: u64) {
+        self.tls.lock().set_value(key, value);
+    }
+    
+    /// Get TLS value for this thread
+    #[cfg(feature = "alloc")]
+    pub fn get_tls_value(&self, key: u64) -> Option<u64> {
+        self.tls.lock().get_value(key)
+    }
+    
+    /// Remove TLS value for this thread
+    #[cfg(feature = "alloc")]
+    pub fn remove_tls_value(&self, key: u64) -> Option<u64> {
+        self.tls.lock().remove_value(key)
+    }
+    
+    /// Get all TLS keys for this thread
+    #[cfg(feature = "alloc")]
+    pub fn get_tls_keys(&self) -> alloc::vec::Vec<u64> {
+        self.tls.lock().keys().copied().collect()
     }
     
     /// Set thread entry point

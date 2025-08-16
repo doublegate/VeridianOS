@@ -65,3 +65,37 @@ pub fn serial_init() -> crate::serial::Uart16550Compat {
     uart.init();
     uart
 }
+
+/// I/O port functions (stubs for RISC-V - no I/O ports like x86)
+#[allow(dead_code)]
+pub unsafe fn outb(_port: u16, _value: u8) {
+    // No-op: RISC-V doesn't have I/O ports
+}
+
+#[allow(dead_code)]
+pub unsafe fn inb(_port: u16) -> u8 {
+    // No-op: RISC-V doesn't have I/O ports
+    0
+}
+
+#[allow(dead_code)]
+pub unsafe fn outw(_port: u16, _value: u16) {
+    // No-op: RISC-V doesn't have I/O ports
+}
+
+#[allow(dead_code)]
+pub unsafe fn inw(_port: u16) -> u16 {
+    // No-op: RISC-V doesn't have I/O ports
+    0
+}
+
+#[allow(dead_code)]
+pub unsafe fn outl(_port: u16, _value: u32) {
+    // No-op: RISC-V doesn't have I/O ports
+}
+
+#[allow(dead_code)]
+pub unsafe fn inl(_port: u16) -> u32 {
+    // No-op: RISC-V doesn't have I/O ports
+    0
+}

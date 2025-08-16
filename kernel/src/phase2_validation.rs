@@ -3,7 +3,7 @@
 //! End-to-end validation of all Phase 2 components working together.
 
 use alloc::string::String;
-use crate::userland::{run_phase2_validation, TestSuiteSummary};
+use crate::userland::test_runner::{run_phase2_validation, TestSuiteSummary};
 
 /// Run complete Phase 2 validation
 pub fn validate_phase2_complete() -> bool {
@@ -85,7 +85,7 @@ pub fn quick_health_check() -> bool {
     let mut healthy = true;
     
     // Check VFS
-    if let Ok(_) = crate::services::vfs::get_vfs().stat("/") {
+    if let Ok(_) = crate::fs::VFS.read().resolve_path("/") {
         crate::println!("✓ VFS responding");
     } else {
         crate::println!("✗ VFS not responding");
