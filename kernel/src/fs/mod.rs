@@ -376,8 +376,12 @@ static mut VFS_X86: Option<alloc::boxed::Box<RwLock<Vfs>>> = None;
 
 /// Global VFS instance for AArch64/RISC-V (avoiding spin::Once issues)
 /// IMPORTANT: Must be explicitly None - uninitialized memory is not guaranteed to be zero on AArch64
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+#[cfg(target_arch = "aarch64")]
 static mut VFS_STATIC: Option<alloc::boxed::Box<RwLock<Vfs>>> = None;
+
+/// For RISC-V, use a direct static to avoid Box allocation issues with bump allocator
+#[cfg(target_arch = "riscv64")]
+static mut VFS_RISCV: Option<RwLock<Vfs>> = None;
 
 /// Get the VFS instance (architecture-specific)
 pub fn get_vfs() -> &'static RwLock<Vfs> {
@@ -388,10 +392,17 @@ pub fn get_vfs() -> &'static RwLock<Vfs> {
         }
     }
     
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    #[cfg(target_arch = "aarch64")]
     {
         unsafe {
             VFS_STATIC.as_ref().expect("VFS not initialized").as_ref()
+        }
+    }
+    
+    #[cfg(target_arch = "riscv64")]
+    {
+        unsafe {
+            VFS_RISCV.as_ref().expect("VFS not initialized")
         }
     }
 }
@@ -408,7 +419,20 @@ pub fn init() {
         uart_write_str("[VFS] Initializing Virtual Filesystem...\n");
     }
     
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "riscv64")]
+    {
+        println!("[VFS] Entering init function...");
+        // Use direct UART output for redundancy
+        unsafe {
+            let uart_base = 0x10000000 as *mut u8;
+            let msg = b"[VFS-UART] Init function entered\n";
+            for &byte in msg {
+                uart_base.write_volatile(byte);
+            }
+        }
+    }
+    
+    #[cfg(all(not(target_arch = "aarch64"), not(target_arch = "riscv64")))]
     println!("[VFS] Initializing Virtual Filesystem...");
     
     // Initialize the VFS
@@ -461,21 +485,26 @@ pub fn init() {
                 
                 // Add memory barriers before static mut initialization
                 uart_write_str("[VFS] Adding memory barriers for safe initialization...\n");
-                core::arch::asm!(
-                    "dsb sy",  // Data Synchronization Barrier - ensures all memory accesses complete
-                    "isb",     // Instruction Synchronization Barrier - flushes pipeline
-                    options(nostack, nomem)
-                );
+                unsafe {
+                    core::arch::asm!(
+                        "dsb sy",  // Data Synchronization Barrier - ensures all memory accesses complete
+                        "isb",     // Instruction Synchronization Barrier - flushes pipeline
+                        options(nostack, nomem, preserves_flags)
+                    );
+                }
+                uart_write_str("[VFS] Memory barriers applied successfully\n");
                 
-                // Now it should be safe to initialize
-                VFS_STATIC = None;
+                // Skip setting to None on AArch64 - causes hang
+                uart_write_str("[VFS] Skipping VFS_STATIC = None (causes hang on AArch64)\n");
                 
                 // Add another barrier after initialization
-                core::arch::asm!(
-                    "dsb sy",
-                    "isb",
-                    options(nostack, nomem)
-                );
+                unsafe {
+                    core::arch::asm!(
+                        "dsb sy",
+                        "isb",
+                        options(nostack, nomem, preserves_flags)
+                    );
+                }
                 
                 uart_write_str("[VFS] Static initialization complete with memory barriers\n");
             }
@@ -483,9 +512,23 @@ pub fn init() {
         #[cfg(target_arch = "riscv64")]
         {
             println!("[VFS] Initializing VFS (static path for RISC-V)...");
+            println!("[VFS] About to set VFS_RISCV to None...");
             unsafe {
-                VFS_STATIC = None;  // Also force to None on RISC-V for safety
+                // Use direct UART for redundant output
+                let uart_base = 0x10000000 as *mut u8;
+                let msg = b"[VFS-UART] Setting VFS_RISCV to None\n";
+                for &byte in msg {
+                    uart_base.write_volatile(byte);
+                }
+                
+                VFS_RISCV = None;  // Force to None on RISC-V for safety
+                
+                let msg2 = b"[VFS-UART] VFS_RISCV set to None successfully\n";
+                for &byte in msg2 {
+                    uart_base.write_volatile(byte);
+                }
             }
+            println!("[VFS] VFS_RISCV cleared successfully");
         }
         
         #[cfg(target_arch = "aarch64")]
@@ -501,7 +544,13 @@ pub fn init() {
                 uart_write_str("[VFS] Inside unsafe block, checking if VFS_STATIC is_some()...\n");
             }
             
-            if VFS_STATIC.is_some() {
+            #[cfg(target_arch = "aarch64")]
+            let already_initialized = VFS_STATIC.is_some();
+            
+            #[cfg(target_arch = "riscv64")]
+            let already_initialized = VFS_RISCV.is_some();
+            
+            if already_initialized {
                 #[cfg(target_arch = "aarch64")]
                 {
                     use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -583,9 +632,32 @@ pub fn init() {
             #[cfg(target_arch = "riscv64")]
             {
                 println!("[VFS] RwLock created successfully");
-                println!("[VFS] About to box the RwLock...");
+                
+                // Check allocator state and size requirements
+                use core::mem::size_of;
+                let vfs_size = size_of::<RwLock<Vfs>>();
+                println!("[VFS] Size of RwLock<Vfs>: {} bytes", vfs_size);
+                
+                // Get allocator stats
+                unsafe {
+                    use crate::ALLOCATOR;
+                    let (allocated, remaining, count) = ALLOCATOR.stats();
+                    println!("[VFS] Allocator stats before assignment:");
+                    println!("      Allocated: {} bytes", allocated);
+                    println!("      Remaining: {} bytes", remaining);
+                    println!("      Allocations: {}", count);
+                }
+                
+                println!("[VFS] Will store RwLock directly (no Box allocation)...");
             }
             
+            // For RISC-V, don't use Box due to bump allocator limitations
+            #[cfg(target_arch = "riscv64")]
+            {
+                println!("[VFS] Storing RwLock directly in VFS_RISCV (no Box)...");
+            }
+            
+            #[cfg(not(target_arch = "riscv64"))]
             let boxed_vfs = alloc::boxed::Box::new(rwlock);
             
             #[cfg(target_arch = "aarch64")]
@@ -605,24 +677,37 @@ pub fn init() {
             {
                 use crate::arch::aarch64::direct_uart::uart_write_str;
                 uart_write_str("[VFS] Applying memory barriers before VFS_STATIC assignment...\n");
-                core::arch::asm!(
-                    "dsb sy",  // Data Synchronization Barrier
-                    "isb",     // Instruction Synchronization Barrier  
-                    options(nostack, nomem)
-                );
+                unsafe {
+                    core::arch::asm!(
+                        "dsb sy",  // Data Synchronization Barrier
+                        "isb",     // Instruction Synchronization Barrier  
+                        options(nostack, nomem, preserves_flags)
+                    );
+                }
             }
             
-            VFS_STATIC = Some(boxed_vfs);
+            #[cfg(target_arch = "aarch64")]
+            {
+                VFS_STATIC = Some(boxed_vfs);
+            }
+            
+            #[cfg(target_arch = "riscv64")]
+            {
+                VFS_RISCV = Some(rwlock);
+                println!("[VFS] VFS_RISCV assigned successfully (no Box)");
+            }
             
             // Apply memory barriers for AArch64 after assignment
             #[cfg(target_arch = "aarch64")]
             {
                 use crate::arch::aarch64::direct_uart::uart_write_str;
-                core::arch::asm!(
-                    "dsb sy",  // Ensure write is complete
-                    "isb",     // Flush pipeline
-                    options(nostack, nomem)
-                );
+                unsafe {
+                    core::arch::asm!(
+                        "dsb sy",  // Ensure write is complete
+                        "isb",     // Flush pipeline
+                        options(nostack, nomem, preserves_flags)
+                    );
+                }
                 uart_write_str("[VFS] VFS_STATIC assigned successfully with memory barriers\n");
                 uart_write_str("[VFS] VFS initialized\n");
             }

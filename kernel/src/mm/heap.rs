@@ -251,18 +251,38 @@ pub fn init() -> Result<(), &'static str> {
         // For RISC-V, initialize both allocators since they're separate
         #[cfg(target_arch = "riscv64")]
         {
-            // Initialize the global allocator directly
+            println!("[HEAP] Initializing RISC-V UnsafeBumpAllocator");
+            println!("[HEAP] Heap start: {:p}, size: {} bytes", heap_start, heap_size);
+            
+            // Initialize the global allocator directly using lib.rs export
             unsafe {
-                crate::ALLOCATOR.init(heap_start, heap_size);
+                use crate::ALLOCATOR;
+                
+                println!("[HEAP] Calling ALLOCATOR.init()...");
+                ALLOCATOR.init(heap_start, heap_size);
+                println!("[HEAP] ALLOCATOR.init() completed");
+                
+                // Test allocation to verify it works
+                let test_layout = core::alloc::Layout::from_size_align(8, 8).unwrap();
+                use core::alloc::GlobalAlloc;
+                let test_ptr = ALLOCATOR.alloc(test_layout);
+                if !test_ptr.is_null() {
+                    println!("[HEAP] Test allocation successful at {:p}", test_ptr);
+                    // Don't deallocate since bump allocator doesn't support it
+                } else {
+                    println!("[HEAP] WARNING: Test allocation failed!");
+                }
             }
 
             // Also initialize the locked allocator for compatibility
+            println!("[HEAP] Initializing locked allocator...");
             let mut allocator = crate::get_allocator().lock();
             unsafe {
                 allocator.init(heap_start, heap_size);
             }
             #[allow(clippy::drop_non_drop)]
             drop(allocator);
+            println!("[HEAP] RISC-V heap initialization complete");
         }
 
         #[cfg(not(target_arch = "riscv64"))]

@@ -582,8 +582,12 @@ impl InitSystem {
 #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
 static INIT_SYSTEM: spin::Once<InitSystem> = spin::Once::new();
 
-/// Global init system for AArch64/RISC-V (avoiding spin::Once issues)
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+/// For AArch64, use a pointer-based approach to avoid static mut issues
+#[cfg(target_arch = "aarch64")]
+static mut INIT_SYSTEM_PTR: *mut InitSystem = core::ptr::null_mut();
+
+/// Global init system for RISC-V (avoiding spin::Once issues)
+#[cfg(target_arch = "riscv64")]
 static mut INIT_SYSTEM_STATIC: Option<InitSystem> = None;
 
 /// Initialize the init system
@@ -593,13 +597,66 @@ pub fn init() {
         INIT_SYSTEM.call_once(|| InitSystem::new());
     }
     
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use crate::arch::aarch64::direct_uart::uart_write_str;
+        uart_write_str("[INIT] Checking if already initialized...\n");
+        
+        // Check if already initialized
+        if !INIT_SYSTEM_PTR.is_null() {
+            uart_write_str("[INIT] Already initialized, skipping...\n");
+            return;
+        }
+        
+        uart_write_str("[INIT] Not initialized, creating new InitSystem...\n");
+        
+        // Allocate the InitSystem on the heap using a Box
+        let init_system = alloc::boxed::Box::new(InitSystem::new());
+        
+        uart_write_str("[INIT] InitSystem created on heap\n");
+        
+        // Leak the Box to get a static pointer
+        let init_system_ptr = alloc::boxed::Box::leak(init_system) as *mut InitSystem;
+        
+        uart_write_str("[INIT] Applying memory barriers before pointer assignment...\n");
+        
+        // Apply memory barriers before pointer assignment
+        core::arch::asm!(
+            "dsb sy",  // Data Synchronization Barrier
+            "isb",     // Instruction Synchronization Barrier
+            options(nostack, nomem, preserves_flags)
+        );
+        
+        uart_write_str("[INIT] Memory barriers applied, assigning pointer...\n");
+        
+        // Assign the pointer
+        INIT_SYSTEM_PTR = init_system_ptr;
+        
+        uart_write_str("[INIT] Pointer assigned, applying post-barriers...\n");
+        
+        // Apply memory barriers after write
+        core::arch::asm!(
+            "dsb sy",  // Ensure write is complete
+            "isb",     // Flush pipeline
+            options(nostack, nomem, preserves_flags)
+        );
+        
+        uart_write_str("[INIT] Static initialization complete with pointer approach\n");
+    }
+    
+    #[cfg(target_arch = "riscv64")]
     unsafe {
         if INIT_SYSTEM_STATIC.is_none() {
             INIT_SYSTEM_STATIC = Some(InitSystem::new());
         }
     }
     
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use crate::arch::aarch64::direct_uart::uart_write_str;
+        uart_write_str("[INIT] Init system module loaded\n");
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     crate::println!("[INIT] Init system module loaded");
 }
 
@@ -610,7 +667,15 @@ pub fn get_init_system() -> &'static InitSystem {
         INIT_SYSTEM.get().expect("Init system not initialized")
     }
     
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        if INIT_SYSTEM_PTR.is_null() {
+            panic!("Init system not initialized");
+        }
+        &*INIT_SYSTEM_PTR
+    }
+    
+    #[cfg(target_arch = "riscv64")]
     unsafe {
         INIT_SYSTEM_STATIC.as_ref().expect("Init system not initialized")
     }
