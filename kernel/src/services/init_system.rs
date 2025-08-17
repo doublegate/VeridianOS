@@ -579,17 +579,41 @@ impl InitSystem {
 }
 
 /// Global init system instance
+#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
 static INIT_SYSTEM: spin::Once<InitSystem> = spin::Once::new();
+
+/// Global init system for AArch64/RISC-V (avoiding spin::Once issues)
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+static mut INIT_SYSTEM_STATIC: Option<InitSystem> = None;
 
 /// Initialize the init system
 pub fn init() {
-    INIT_SYSTEM.call_once(|| InitSystem::new());
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        INIT_SYSTEM.call_once(|| InitSystem::new());
+    }
+    
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    unsafe {
+        if INIT_SYSTEM_STATIC.is_none() {
+            INIT_SYSTEM_STATIC = Some(InitSystem::new());
+        }
+    }
+    
     crate::println!("[INIT] Init system module loaded");
 }
 
 /// Get the global init system
 pub fn get_init_system() -> &'static InitSystem {
-    INIT_SYSTEM.get().expect("Init system not initialized")
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        INIT_SYSTEM.get().expect("Init system not initialized")
+    }
+    
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    unsafe {
+        INIT_SYSTEM_STATIC.as_ref().expect("Init system not initialized")
+    }
 }
 
 /// Run the init process

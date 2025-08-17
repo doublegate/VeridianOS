@@ -568,12 +568,25 @@ impl StorageManager {
 }
 
 /// Global storage manager instance
+#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
 static STORAGE_MANAGER: spin::Once<Mutex<StorageManager>> = spin::Once::new();
+
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+static mut STORAGE_MANAGER_STATIC: Option<Mutex<StorageManager>> = None;
 
 /// Initialize storage subsystem
 pub fn init() {
     let storage_manager = StorageManager::new();
-    STORAGE_MANAGER.call_once(|| Mutex::new(storage_manager));
+    
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        STORAGE_MANAGER.call_once(|| Mutex::new(storage_manager));
+    }
+    
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    unsafe {
+        STORAGE_MANAGER_STATIC = Some(Mutex::new(storage_manager));
+    }
     
     // Register ATA driver with driver framework
     let driver_framework = crate::services::driver_framework::get_driver_framework();
@@ -617,5 +630,13 @@ pub fn init() {
 
 /// Get the global storage manager
 pub fn get_storage_manager() -> &'static Mutex<StorageManager> {
-    STORAGE_MANAGER.get().expect("Storage manager not initialized")
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        STORAGE_MANAGER.get().expect("Storage manager not initialized")
+    }
+    
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    unsafe {
+        STORAGE_MANAGER_STATIC.as_ref().expect("Storage manager not initialized")
+    }
 }

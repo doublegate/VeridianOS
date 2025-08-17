@@ -7,18 +7,14 @@ global_asm!(include_str!("boot.S"));
 
 #[no_mangle]
 pub extern "C" fn _start_rust() -> ! {
-    // Very early debug output - try without waiting for LSR
+    // Use SBI console output to show we reached Rust code
     unsafe {
-        // Direct write to UART at 0x10000000
-        let uart_base = 0x1000_0000 as *mut u8;
-        
-        // Just write directly without checking LSR first
-        // QEMU's UART should be ready immediately
-        uart_base.write_volatile(b'B');
-        uart_base.write_volatile(b'O');
-        uart_base.write_volatile(b'O');
-        uart_base.write_volatile(b'T');
-        uart_base.write_volatile(b'\n');
+        // SBI console putchar
+        sbi_putchar(b'B');
+        sbi_putchar(b'O');
+        sbi_putchar(b'O');
+        sbi_putchar(b'T');
+        sbi_putchar(b'\n');
     }
     
     // Call the kernel main function from main.rs
@@ -26,4 +22,15 @@ pub extern "C" fn _start_rust() -> ! {
         fn kernel_main() -> !;
     }
     unsafe { kernel_main() }
+}
+
+/// SBI console putchar using ecall
+#[inline]
+unsafe fn sbi_putchar(ch: u8) {
+    core::arch::asm!(
+        "ecall",
+        in("a0") ch as usize,     // Character to print
+        in("a7") 0x01usize,       // SBI function ID 0x01 = console_putchar (legacy)
+        options(nostack, nomem)
+    );
 }

@@ -402,7 +402,12 @@ const NUM_RT_PRIORITIES: usize = 30;
 const NUM_NORMAL_PRIORITIES: usize = 4;
 
 /// Global ready queue protected by mutex
+#[cfg(not(target_arch = "riscv64"))]
 pub static READY_QUEUE: Mutex<ReadyQueue> = Mutex::new(ReadyQueue::new());
+
+/// Global ready queue for RISC-V (avoiding spin::Mutex issues)
+#[cfg(target_arch = "riscv64")]
+pub static mut READY_QUEUE_STATIC: Option<alloc::boxed::Box<ReadyQueue>> = None;
 
 /// Per-CPU ready queues for SMP
 #[cfg(feature = "smp")]
@@ -412,3 +417,39 @@ pub static PER_CPU_QUEUES: [Mutex<ReadyQueue>; MAX_CPUS] =
 /// Maximum number of CPUs supported
 #[cfg(feature = "smp")]
 pub const MAX_CPUS: usize = 64;
+
+/// Get the global ready queue (architecture-specific)
+#[cfg(target_arch = "riscv64")]
+pub fn get_ready_queue() -> &'static mut ReadyQueue {
+    unsafe {
+        if READY_QUEUE_STATIC.is_none() {
+            // Initialize the ready queue
+            #[cfg(feature = "alloc")]
+            {
+                let queue = alloc::boxed::Box::new(ReadyQueue::new());
+                READY_QUEUE_STATIC = Some(queue);
+            }
+            #[cfg(not(feature = "alloc"))]
+            {
+                panic!("Cannot initialize ready queue without alloc feature");
+            }
+        }
+        READY_QUEUE_STATIC.as_mut().unwrap().as_mut()
+    }
+}
+
+/// Initialize the ready queue for RISC-V
+#[cfg(target_arch = "riscv64")]
+pub fn init_ready_queue() {
+    unsafe {
+        if READY_QUEUE_STATIC.is_none() {
+            #[cfg(feature = "alloc")]
+            {
+                crate::println!("[SCHED] Initializing RISC-V ready queue...");
+                let queue = alloc::boxed::Box::new(ReadyQueue::new());
+                READY_QUEUE_STATIC = Some(queue);
+                crate::println!("[SCHED] RISC-V ready queue initialized");
+            }
+        }
+    }
+}

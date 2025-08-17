@@ -16,37 +16,94 @@ pub use shell::Shell;
 /// Initialize all system services
 pub fn init() {
     use crate::println;
-    println!("[SERVICES] Initializing system services...");
+    
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use crate::arch::aarch64::direct_uart::uart_write_str;
+        uart_write_str("[SERVICES] Initializing system services (AArch64)...\n");
+        uart_write_str("[SERVICES] About to initialize process server...\n");
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        println!("[SERVICES] Initializing system services...");
+        println!("[SERVICES] About to initialize process server...");
+    }
     
     // Initialize process server
-    println!("[SERVICES] About to initialize process server...");
     process_server::init();
-    println!("[SERVICES] Process server initialized");
+    
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use crate::arch::aarch64::direct_uart::uart_write_str;
+        uart_write_str("[SERVICES] Process server initialized\n");
+        uart_write_str("[SERVICES] About to initialize driver framework...\n");
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        println!("[SERVICES] Process server initialized");
+        println!("[SERVICES] About to initialize driver framework...");
+    }
     
     // Initialize driver framework
-    println!("[SERVICES] About to initialize driver framework...");
     driver_framework::init();
-    println!("[SERVICES] Driver framework initialized");
+    
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use crate::arch::aarch64::direct_uart::uart_write_str;
+        uart_write_str("[SERVICES] Driver framework initialized\n");
+        uart_write_str("[SERVICES] About to initialize init system...\n");
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        println!("[SERVICES] Driver framework initialized");
+        println!("[SERVICES] About to initialize init system...");
+    }
     
     // Initialize init system
-    println!("[SERVICES] About to initialize init system...");
     init_system::init();
-    println!("[SERVICES] Init system initialized");
+    
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use crate::arch::aarch64::direct_uart::uart_write_str;
+        uart_write_str("[SERVICES] Init system initialized\n");
+        uart_write_str("[SERVICES] About to initialize thread management...\n");
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        println!("[SERVICES] Init system initialized");
+        println!("[SERVICES] About to initialize thread management...");
+    }
     
     // Initialize thread management APIs
-    println!("[SERVICES] About to initialize thread management...");
     crate::thread_api::init();
-    println!("[SERVICES] Thread management initialized");
+    
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use crate::arch::aarch64::direct_uart::uart_write_str;
+        uart_write_str("[SERVICES] Thread management initialized\n");
+        uart_write_str("[SERVICES] About to initialize standard library...\n");
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        println!("[SERVICES] Thread management initialized");
+        println!("[SERVICES] About to initialize standard library...");
+    }
     
     // Initialize standard library
-    println!("[SERVICES] About to initialize standard library...");
     crate::stdlib::init();
-    println!("[SERVICES] Standard library initialized");
     
-    // Initialize network subsystem
-    println!("[SERVICES] About to initialize network subsystem...");
-    crate::drivers::network::init();
-    println!("[SERVICES] Network subsystem initialized");
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use crate::arch::aarch64::direct_uart::uart_write_str;
+        uart_write_str("[SERVICES] Standard library initialized\n");
+        uart_write_str("[SERVICES] System services initialized\n");
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        println!("[SERVICES] Standard library initialized");
+        println!("[SERVICES] System services initialized");
+    }
     
-    println!("[SERVICES] System services initialized");
+    // NOTE: Network initialization removed - was causing kernel hang
+    // The network subsystem should be initialized lazily when needed
 }

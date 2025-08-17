@@ -15,20 +15,21 @@ const UART0_BASE: usize = 0x0900_0000;
 /// This implementation uses pure inline assembly for the entire operation.
 unsafe fn uart_write_bytes_asm(ptr: *const u8, len: usize) {
     // Use inline assembly to perform the entire operation
+    // Pass UART address as an input rather than loading it in assembly
+    let uart_addr: usize = 0x0900_0000;
     core::arch::asm!(
-        "mov {uart}, #0x09000000",      // Load UART base address
-        "mov {i}, #0",                  // Initialize counter
-        "1:",                           // Loop start
-        "cmp {i}, {len}",               // Compare counter with length
-        "b.ge 2f",                      // Branch if counter >= length
-        "ldrb {byte:w}, [{ptr}, {i}]",  // Load byte from string[i]
-        "strb {byte:w}, [{uart}]",      // Store byte to UART
-        "add {i}, {i}, #1",             // Increment counter
-        "b 1b",                         // Branch back to loop
-        "2:",                           // End
+        "mov {i}, #0",                    // Initialize counter
+        "1:",                             // Loop start
+        "cmp {i}, {len}",                 // Compare counter with length
+        "b.ge 2f",                        // Branch if counter >= length
+        "ldrb {byte:w}, [{ptr}, {i}]",   // Load byte from string[i]
+        "strb {byte:w}, [{uart}]",       // Store byte to UART
+        "add {i}, {i}, #1",               // Increment counter
+        "b 1b",                           // Branch back to loop
+        "2:",                             // End
         ptr = in(reg) ptr,
         len = in(reg) len,
-        uart = out(reg) _,
+        uart = in(reg) uart_addr,
         i = out(reg) _,
         byte = out(reg) _,
         options(nostack, preserves_flags)

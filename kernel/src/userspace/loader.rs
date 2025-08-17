@@ -11,7 +11,7 @@ use alloc::{string::String, vec::Vec, vec};
 
 use crate::{
     elf::{ElfError, ElfLoader},
-    fs::VFS,
+    fs::get_vfs,
     process::{ProcessId, lifecycle},
     println,
 };
@@ -60,7 +60,7 @@ pub fn load_user_program(
     println!("[LOADER] Loading program: {}", path);
     
     // Open the file
-    let file_node = VFS.get().unwrap().read().open(path, crate::fs::file::OpenFlags::read_only())
+    let file_node = get_vfs().read().open(path, crate::fs::file::OpenFlags::read_only())
         .map_err(|_| "Failed to open program file")?;
     
     // Get file size

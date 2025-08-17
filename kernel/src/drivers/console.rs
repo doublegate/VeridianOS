@@ -549,7 +549,11 @@ impl Driver for ConsoleDriver {
 }
 
 /// Global console driver instance
+#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
 static CONSOLE_DRIVER: spin::Once<Mutex<ConsoleDriver>> = spin::Once::new();
+
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+static mut CONSOLE_DRIVER_STATIC: Option<Mutex<ConsoleDriver>> = None;
 
 /// Initialize console subsystem
 pub fn init() {
@@ -569,7 +573,15 @@ pub fn init() {
         device.set_cursor_visible(true).ok();
     }
     
-    CONSOLE_DRIVER.call_once(|| Mutex::new(console_driver));
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        CONSOLE_DRIVER.call_once(|| Mutex::new(console_driver));
+    }
+    
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    unsafe {
+        CONSOLE_DRIVER_STATIC = Some(Mutex::new(console_driver));
+    }
     
     // Register with driver framework
     let driver_framework = crate::services::driver_framework::get_driver_framework();
@@ -584,5 +596,13 @@ pub fn init() {
 
 /// Get the global console driver
 pub fn get_console_driver() -> &'static Mutex<ConsoleDriver> {
-    CONSOLE_DRIVER.get().expect("Console driver not initialized")
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        CONSOLE_DRIVER.get().expect("Console driver not initialized")
+    }
+    
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    unsafe {
+        CONSOLE_DRIVER_STATIC.as_ref().expect("Console driver not initialized")
+    }
 }

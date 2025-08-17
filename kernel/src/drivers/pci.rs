@@ -563,12 +563,25 @@ impl Bus for PciBus {
 }
 
 /// Global PCI bus instance
+#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
 static PCI_BUS: spin::Once<spin::Mutex<PciBus>> = spin::Once::new();
+
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+static mut PCI_BUS_STATIC: Option<spin::Mutex<PciBus>> = None;
 
 /// Initialize PCI bus
 pub fn init() {
     let pci_bus = PciBus::new();
-    PCI_BUS.call_once(|| spin::Mutex::new(pci_bus));
+    
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        PCI_BUS.call_once(|| spin::Mutex::new(pci_bus));
+    }
+    
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    unsafe {
+        PCI_BUS_STATIC = Some(spin::Mutex::new(pci_bus));
+    }
     
     // Register with driver framework
     let driver_framework = crate::services::driver_framework::get_driver_framework();
@@ -585,5 +598,13 @@ pub fn init() {
 
 /// Get the global PCI bus
 pub fn get_pci_bus() -> &'static spin::Mutex<PciBus> {
-    PCI_BUS.get().expect("PCI bus not initialized")
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        PCI_BUS.get().expect("PCI bus not initialized")
+    }
+    
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    unsafe {
+        PCI_BUS_STATIC.as_ref().expect("PCI bus not initialized")
+    }
 }

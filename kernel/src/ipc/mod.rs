@@ -65,8 +65,7 @@ pub fn init() {
     #[cfg(target_arch = "x86_64")]
     println!("[IPC] Initializing IPC system...");
     
-    #[cfg(target_arch = "riscv64")]
-    println!("[IPC] Initializing IPC system...");
+    // Skip println for RISC-V to avoid potential serial deadlock
 
     // Initialize the global IPC registry
     registry::init();
@@ -82,6 +81,5 @@ pub fn init() {
     #[cfg(target_arch = "x86_64")]
     println!("[IPC] IPC system initialized");
     
-    #[cfg(target_arch = "riscv64")]
-    println!("[IPC] IPC system initialized");
+    // Skip println for RISC-V to avoid potential serial deadlock
 }

@@ -708,12 +708,25 @@ impl UsbHostController for UhciController {
 }
 
 /// Global USB bus instance
+#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
 static USB_BUS: spin::Once<Mutex<UsbBus>> = spin::Once::new();
+
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+static mut USB_BUS_STATIC: Option<Mutex<UsbBus>> = None;
 
 /// Initialize USB subsystem
 pub fn init() {
     let usb_bus = UsbBus::new();
-    USB_BUS.call_once(|| Mutex::new(usb_bus));
+    
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        USB_BUS.call_once(|| Mutex::new(usb_bus));
+    }
+    
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    unsafe {
+        USB_BUS_STATIC = Some(Mutex::new(usb_bus));
+    }
     
     // Add UHCI controller (placeholder)
     let uhci = UhciController::new(0); // No actual hardware for now
@@ -735,5 +748,13 @@ pub fn init() {
 
 /// Get the global USB bus
 pub fn get_usb_bus() -> &'static Mutex<UsbBus> {
-    USB_BUS.get().expect("USB bus not initialized")
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        USB_BUS.get().expect("USB bus not initialized")
+    }
+    
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    unsafe {
+        USB_BUS_STATIC.as_ref().expect("USB bus not initialized")
+    }
 }

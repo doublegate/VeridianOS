@@ -566,11 +566,23 @@ impl NetworkManager {
 }
 
 /// Global network manager instance
+#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
 static NETWORK_MANAGER: spin::Once<NetworkManager> = spin::Once::new();
+
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+static mut NETWORK_MANAGER_STATIC: Option<NetworkManager> = None;
 
 /// Initialize network subsystem
 pub fn init() {
-    NETWORK_MANAGER.call_once(|| NetworkManager::new());
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        NETWORK_MANAGER.call_once(|| NetworkManager::new());
+    }
+    
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    unsafe {
+        NETWORK_MANAGER_STATIC = Some(NetworkManager::new());
+    }
     
     // Create and register loopback interface
     let loopback = Arc::new(Mutex::new(LoopbackDriver::new()));
@@ -615,5 +627,13 @@ pub fn init() {
 
 /// Get the global network manager
 pub fn get_network_manager() -> &'static NetworkManager {
-    NETWORK_MANAGER.get().expect("Network manager not initialized")
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        NETWORK_MANAGER.get().expect("Network manager not initialized")
+    }
+    
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    unsafe {
+        NETWORK_MANAGER_STATIC.as_ref().expect("Network manager not initialized")
+    }
 }

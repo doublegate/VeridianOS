@@ -207,7 +207,7 @@ impl Shell {
     /// Set current working directory
     pub fn set_cwd(&self, path: String) -> Result<(), &'static str> {
         // Verify directory exists using VFS
-        let vfs = crate::fs::VFS.get().unwrap().read();
+        let vfs = crate::fs::get_vfs().read();
         let node = vfs.resolve_path(&path)?;
         let metadata = node.metadata()?;
         
@@ -336,7 +336,7 @@ impl Shell {
             };
             
             // Check if file exists using VFS
-            if let Ok(_node) = crate::fs::VFS.get().unwrap().read().resolve_path(&full_path) {
+            if let Ok(_node) = crate::fs::get_vfs().read().resolve_path(&full_path) {
                 // Load and execute the program
                 match crate::userspace::load_user_program(
                     &full_path,
@@ -459,7 +459,7 @@ impl BuiltinCommand for LsCommand {
             args[0].clone()
         };
         
-        match crate::fs::VFS.get().unwrap().read().resolve_path(&path) {
+        match crate::fs::get_vfs().read().resolve_path(&path) {
             Ok(node) => {
                 match node.readdir() {
                     Ok(entries) => {
@@ -496,7 +496,7 @@ impl BuiltinCommand for MkdirCommand {
         }
         
         for path in args {
-            match crate::fs::VFS.get().unwrap().read().mkdir(path, crate::fs::Permissions::default()) {
+            match crate::fs::get_vfs().read().mkdir(path, crate::fs::Permissions::default()) {
                 Ok(()) => {}
                 Err(e) => return CommandResult::Error(format!("mkdir: {}: {}", path, e)),
             }
@@ -517,7 +517,7 @@ impl BuiltinCommand for CatCommand {
         }
         
         for path in args {
-            match crate::fs::VFS.get().unwrap().read().resolve_path(path) {
+            match crate::fs::get_vfs().read().resolve_path(path) {
                 Ok(node) => {
                     let mut buffer = [0u8; 4096];
                     let mut offset = 0;
@@ -592,7 +592,7 @@ impl BuiltinCommand for RmCommand {
         }
         
         for path in args {
-            match crate::fs::VFS.get().unwrap().read().unlink(path) {
+            match crate::fs::get_vfs().read().unlink(path) {
                 Ok(()) => {}
                 Err(e) => return CommandResult::Error(format!("rm: {}: {}", path, e)),
             }
@@ -799,17 +799,38 @@ impl BuiltinCommand for ExitCommand {
 }
 
 /// Global shell instance
+#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
 static SHELL: spin::Once<Shell> = spin::Once::new();
+
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+static mut SHELL_STATIC: Option<Shell> = None;
 
 /// Initialize the shell
 pub fn init() {
-    SHELL.call_once(|| Shell::new());
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        SHELL.call_once(|| Shell::new());
+    }
+    
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    unsafe {
+        SHELL_STATIC = Some(Shell::new());
+    }
+    
     crate::println!("[SHELL] Shell module loaded");
 }
 
 /// Get the global shell
 pub fn get_shell() -> &'static Shell {
-    SHELL.get().expect("Shell not initialized")
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        SHELL.get().expect("Shell not initialized")
+    }
+    
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    unsafe {
+        SHELL_STATIC.as_ref().expect("Shell not initialized")
+    }
 }
 
 /// Run shell as a process

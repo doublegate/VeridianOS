@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use alloc::string::String;
 use core::mem;
 use core::slice;
-use crate::fs::VFS;
+use crate::fs::get_vfs;
 
 /// ELF magic number
 const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
@@ -805,10 +805,10 @@ impl ElfLoader {
 
 /// Load an ELF binary from the filesystem
 pub fn load_elf_from_file(path: &str) -> Result<ElfBinary, ElfError> {
-    use crate::fs::VFS;
+    use crate::fs::get_vfs;
     
     // Open the file
-    let vfs = VFS.get().unwrap().read();
+    let vfs = get_vfs().read();
     let node = vfs.resolve_path(path)
         .map_err(|_| ElfError::FileReadFailed)?;
     
@@ -860,7 +860,7 @@ pub fn exec_elf(path: &str) -> Result<u64, ElfError> {
     }
     
     // Read file again and load into memory
-    let vfs = VFS.get().unwrap().read();
+    let vfs = get_vfs().read();
     let node = vfs.resolve_path(path)
         .map_err(|_| ElfError::FileReadFailed)?;
     

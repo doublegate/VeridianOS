@@ -36,6 +36,16 @@ impl UnsafeBumpAllocator {
     /// The caller must ensure that the memory region from `start` to `start +
     /// size` is valid and available for allocation.
     pub unsafe fn init(&self, start: *mut u8, size: usize) {
+        // Debug output to confirm init is called
+        #[cfg(target_arch = "riscv64")]
+        {
+            let uart = 0x10000000 as *mut u8;
+            let msg = b"[ALLOC] init called\n";
+            for &byte in msg {
+                core::ptr::write_volatile(uart, byte);
+            }
+        }
+        
         let start_addr = start as usize;
 
         // Use SeqCst ordering for RISC-V compatibility
@@ -46,6 +56,16 @@ impl UnsafeBumpAllocator {
 
         // Add memory barrier to ensure atomic stores complete
         core::sync::atomic::fence(Ordering::SeqCst);
+        
+        // Debug output to confirm init completed
+        #[cfg(target_arch = "riscv64")]
+        {
+            let uart = 0x10000000 as *mut u8;
+            let msg = b"[ALLOC] init done\n";
+            for &byte in msg {
+                core::ptr::write_volatile(uart, byte);
+            }
+        }
     }
 
     /// Get statistics about the allocator
@@ -64,6 +84,20 @@ unsafe impl GlobalAlloc for UnsafeBumpAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let start = self.start.load(Ordering::SeqCst);
         let size = self.size.load(Ordering::SeqCst);
+        
+        // Debug output for first allocation attempt
+        #[cfg(target_arch = "riscv64")]
+        {
+            static mut FIRST_ALLOC: bool = true;
+            if FIRST_ALLOC {
+                FIRST_ALLOC = false;
+                let uart = 0x10000000 as *mut u8;
+                let msg = b"[ALLOC] First allocation attempt\n";
+                for &byte in msg {
+                    core::ptr::write_volatile(uart, byte);
+                }
+            }
+        }
 
         if start == 0 {
             // Not initialized
@@ -71,7 +105,7 @@ unsafe impl GlobalAlloc for UnsafeBumpAllocator {
             {
                 // Use RISC-V UART for debug output during early allocation
                 let uart = 0x10000000 as *mut u8;
-                let msg = b"[ALLOC] ERROR: Allocator not initialized\n";
+                let msg = b"[ALLOC] ERROR: Allocator not initialized (start=0)\n";
                 for &byte in msg {
                     core::ptr::write_volatile(uart, byte);
                 }

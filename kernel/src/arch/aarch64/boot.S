@@ -32,8 +32,20 @@ el2_entry:
     eret
 
 el1_entry:
-    // Save UART base for later use
-    mov x0, #0x09000000
+    // Write early boot indicator to UART
+    // Load UART base address 0x09000000 using ldr
+    ldr x0, =0x09000000
+    
+    // Write "AA64\n" to UART
+    mov w1, #'A'
+    strb w1, [x0]
+    strb w1, [x0]  // Second 'A'
+    mov w1, #'6'
+    strb w1, [x0]
+    mov w1, #'4'
+    strb w1, [x0]
+    mov w1, #'\n'
+    strb w1, [x0]
     
     // Set up stack using linker-defined symbol
     adrp x1, __stack_top

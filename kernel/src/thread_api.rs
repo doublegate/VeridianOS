@@ -546,17 +546,41 @@ pub struct ThreadStats {
 }
 
 /// Global thread manager instance
+#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
 static THREAD_MANAGER: spin::Once<ThreadManager> = spin::Once::new();
+
+/// Global thread manager for AArch64/RISC-V (avoiding spin::Once issues)
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+static mut THREAD_MANAGER_STATIC: Option<ThreadManager> = None;
 
 /// Initialize the thread manager
 pub fn init() {
-    THREAD_MANAGER.call_once(|| ThreadManager::new());
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        THREAD_MANAGER.call_once(|| ThreadManager::new());
+    }
+    
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    unsafe {
+        if THREAD_MANAGER_STATIC.is_none() {
+            THREAD_MANAGER_STATIC = Some(ThreadManager::new());
+        }
+    }
+    
     crate::println!("[THREAD_API] Thread management APIs initialized");
 }
 
 /// Get the global thread manager
 pub fn get_thread_manager() -> &'static ThreadManager {
-    THREAD_MANAGER.get().expect("Thread manager not initialized")
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        THREAD_MANAGER.get().expect("Thread manager not initialized")
+    }
+    
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    unsafe {
+        THREAD_MANAGER_STATIC.as_ref().expect("Thread manager not initialized")
+    }
 }
 
 // Convenience functions

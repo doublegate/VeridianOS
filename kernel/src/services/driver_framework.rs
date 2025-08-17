@@ -507,15 +507,95 @@ pub struct DriverFrameworkStats {
 }
 
 /// Global driver framework instance
+#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
 static DRIVER_FRAMEWORK: spin::Once<DriverFramework> = spin::Once::new();
+
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+static mut DRIVER_FRAMEWORK_STATIC: Option<DriverFramework> = None;
 
 /// Initialize the driver framework
 pub fn init() {
-    DRIVER_FRAMEWORK.call_once(|| DriverFramework::new());
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        DRIVER_FRAMEWORK.call_once(|| DriverFramework::new());
+    }
+    
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    unsafe {
+        #[cfg(target_arch = "aarch64")]
+        {
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[DRIVER_FRAMEWORK] About to create new DriverFramework...\n");
+        }
+        
+        let framework = DriverFramework::new();
+        
+        #[cfg(target_arch = "aarch64")]
+        {
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[DRIVER_FRAMEWORK] DriverFramework created, adding memory barrier...\n");
+            
+            // Add memory barrier before write
+            core::arch::asm!("dsb sy", options(nostack, nomem));
+            core::arch::asm!("isb", options(nostack, nomem));
+            
+            uart_write_str("[DRIVER_FRAMEWORK] Memory barrier complete, setting static...\n");
+        }
+        
+        #[cfg(target_arch = "aarch64")]
+        {
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[DRIVER_FRAMEWORK] Applying memory barriers for safe static initialization...\n");
+            
+            // Add memory barriers before static mut write
+            core::arch::asm!(
+                "dsb sy",  // Data Synchronization Barrier
+                "isb",     // Instruction Synchronization Barrier
+                options(nostack, nomem)
+            );
+            
+            // Now safe to write
+            DRIVER_FRAMEWORK_STATIC = Some(framework);
+            
+            // Add barrier after write
+            core::arch::asm!(
+                "dsb sy",
+                "isb",
+                options(nostack, nomem)
+            );
+            
+            uart_write_str("[DRIVER_FRAMEWORK] Static initialization complete with barriers\n");
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            DRIVER_FRAMEWORK_STATIC = Some(framework);
+        }
+        
+        #[cfg(target_arch = "aarch64")]
+        {
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[DRIVER_FRAMEWORK] Initialization complete (lazy mode)\n");
+        }
+    }
+    
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use crate::arch::aarch64::direct_uart::uart_write_str;
+        uart_write_str("[DRIVER_FRAMEWORK] Driver framework initialized\n");
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     crate::println!("[DRIVER_FRAMEWORK] Driver framework initialized");
 }
 
 /// Get the global driver framework
 pub fn get_driver_framework() -> &'static DriverFramework {
-    DRIVER_FRAMEWORK.get().expect("Driver framework not initialized")
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        DRIVER_FRAMEWORK.get().expect("Driver framework not initialized")
+    }
+    
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    unsafe {
+        DRIVER_FRAMEWORK_STATIC.as_ref().expect("Driver framework not initialized")
+    }
 }

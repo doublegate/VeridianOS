@@ -33,6 +33,7 @@ pub mod task_ptr;
 pub mod riscv_scheduler;
 
 // Re-export common types
+#[cfg(not(target_arch = "riscv64"))]
 pub use queue::READY_QUEUE;
 #[cfg(target_arch = "riscv64")]
 pub use scheduler::SchedAlgorithm;
@@ -574,8 +575,7 @@ pub fn init() {
     #[cfg(target_arch = "x86_64")]
     println!("[SCHED] Initializing scheduler...");
     
-    #[cfg(target_arch = "riscv64")]
-    println!("[SCHED] Initializing scheduler...");
+    // Skip println for RISC-V to avoid serial issues
     
     #[cfg(target_arch = "aarch64")]
     unsafe {
@@ -584,6 +584,10 @@ pub fn init() {
         uart_write_str("[SCHED] Initializing scheduler...\n");
     }
 
+    // Initialize RISC-V ready queue to avoid spin lock issues
+    #[cfg(target_arch = "riscv64")]
+    queue::init_ready_queue();
+    
     // Initialize SMP support
     smp::init();
     
@@ -733,7 +737,7 @@ pub fn start() -> ! {
     
     #[cfg(target_arch = "riscv64")]
     {
-        println!("[SCHED] Entering simplified idle loop for RISC-V");
+        // Skip println for RISC-V to avoid serial issues
         // For RISC-V, just enter a simple idle loop
         loop {
             unsafe {
@@ -763,8 +767,7 @@ pub fn start() -> ! {
         uart_write_str("[SCHED] Starting scheduler loop...\n");
     }
     
-    #[cfg(target_arch = "riscv64")]
-    println!("[SCHED] Starting scheduler loop...");
+    // Skip println for RISC-V to avoid serial issues
 
     // The scheduler loop
     #[allow(clippy::never_loop)]
@@ -835,7 +838,14 @@ pub fn start() -> ! {
 
 /// Check if there are ready tasks
 pub fn has_ready_tasks() -> bool {
-    READY_QUEUE.lock().has_ready_tasks()
+    #[cfg(not(target_arch = "riscv64"))]
+    {
+        READY_QUEUE.lock().has_ready_tasks()
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        queue::get_ready_queue().has_ready_tasks()
+    }
 }
 
 /// Run scheduler main loop (called by idle task)
@@ -853,8 +863,17 @@ pub fn run() -> ! {
 
     loop {
         // Check for ready tasks
-        if READY_QUEUE.lock().has_ready_tasks() {
-            SCHEDULER.lock().schedule();
+        #[cfg(not(target_arch = "riscv64"))]
+        {
+            if READY_QUEUE.lock().has_ready_tasks() {
+                SCHEDULER.lock().schedule();
+            }
+        }
+        #[cfg(target_arch = "riscv64")]
+        {
+            if queue::get_ready_queue().has_ready_tasks() {
+                SCHEDULER.lock().schedule();
+            }
         }
 
         // Periodically perform load balancing and cleanup

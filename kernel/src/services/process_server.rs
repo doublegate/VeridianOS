@@ -121,18 +121,40 @@ pub struct ProcessServer {
 impl ProcessServer {
     /// Create a new process server
     pub fn new() -> Self {
-        Self {
-            processes: RwLock::new(BTreeMap::new()),
-            resource_limits: RwLock::new(BTreeMap::new()),
-            sessions: RwLock::new(BTreeMap::new()),
-            process_groups: RwLock::new(BTreeMap::new()),
-            next_pid: AtomicU64::new(2), // Start at 2, PID 1 is init
-            next_sid: AtomicU64::new(1),
-            next_pgid: AtomicU64::new(1),
-            orphans: RwLock::new(Vec::new()),
-            total_processes_created: AtomicU64::new(0),
-            total_processes_exited: AtomicU64::new(0),
-        }
+        crate::println!("[PROCESS_SERVER] Creating new ProcessServer...");
+        
+        crate::println!("[PROCESS_SERVER] Creating BTreeMaps...");
+        let processes = RwLock::new(BTreeMap::new());
+        let resource_limits = RwLock::new(BTreeMap::new());
+        let sessions = RwLock::new(BTreeMap::new());
+        let process_groups = RwLock::new(BTreeMap::new());
+        
+        crate::println!("[PROCESS_SERVER] Creating Vec...");
+        let orphans = RwLock::new(Vec::new());
+        
+        crate::println!("[PROCESS_SERVER] Creating atomics...");
+        let next_pid = AtomicU64::new(2); // Start at 2, PID 1 is init
+        let next_sid = AtomicU64::new(1);
+        let next_pgid = AtomicU64::new(1);
+        let total_processes_created = AtomicU64::new(0);
+        let total_processes_exited = AtomicU64::new(0);
+        
+        crate::println!("[PROCESS_SERVER] Constructing ProcessServer...");
+        let server = Self {
+            processes,
+            resource_limits,
+            sessions,
+            process_groups,
+            next_pid,
+            next_sid,
+            next_pgid,
+            orphans,
+            total_processes_created,
+            total_processes_exited,
+        };
+        
+        crate::println!("[PROCESS_SERVER] ProcessServer created successfully");
+        server
     }
     
     /// Create a new process
@@ -473,15 +495,66 @@ pub struct ProcessServerStats {
 }
 
 /// Global process server instance
+#[cfg(target_arch = "x86_64")]
 static PROCESS_SERVER: spin::Once<ProcessServer> = spin::Once::new();
+
+/// Global process server instance for AArch64/RISC-V (avoiding spin::Once issues)
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+static mut PROCESS_SERVER_STATIC: Option<alloc::boxed::Box<ProcessServer>> = None;
 
 /// Initialize the process server
 pub fn init() {
-    PROCESS_SERVER.call_once(|| ProcessServer::new());
-    crate::println!("[PROCESS_SERVER] Process server initialized");
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::println!("[PROCESS_SERVER] About to call PROCESS_SERVER.call_once()");
+        
+        // Check if it was already initialized (which would cause panic)
+        if PROCESS_SERVER.is_completed() {
+            crate::println!("[PROCESS_SERVER] WARNING: Already initialized!");
+            return;
+        }
+        
+        PROCESS_SERVER.call_once(|| {
+            crate::println!("[PROCESS_SERVER] Inside call_once closure");
+            let server = ProcessServer::new();
+            crate::println!("[PROCESS_SERVER] ProcessServer::new() returned");
+            server
+        });
+        crate::println!("[PROCESS_SERVER] Process server initialized");
+    }
+    
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    {
+        crate::println!("[PROCESS_SERVER] Initializing process server (static path)");
+        unsafe {
+            if PROCESS_SERVER_STATIC.is_some() {
+                crate::println!("[PROCESS_SERVER] WARNING: Already initialized! Skipping re-initialization.");
+                return;
+            }
+            
+            crate::println!("[PROCESS_SERVER] Creating ProcessServer...");
+            let server = ProcessServer::new();
+            crate::println!("[PROCESS_SERVER] ProcessServer::new() returned");
+            crate::println!("[PROCESS_SERVER] Boxing ProcessServer...");
+            let boxed_server = alloc::boxed::Box::new(server);
+            crate::println!("[PROCESS_SERVER] Setting PROCESS_SERVER_STATIC...");
+            PROCESS_SERVER_STATIC = Some(boxed_server);
+            crate::println!("[PROCESS_SERVER] Process server initialized");
+        }
+    }
 }
 
 /// Get the global process server
 pub fn get_process_server() -> &'static ProcessServer {
-    PROCESS_SERVER.get().expect("Process server not initialized")
+    #[cfg(target_arch = "x86_64")]
+    {
+        PROCESS_SERVER.get().expect("Process server not initialized")
+    }
+    
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    {
+        unsafe {
+            PROCESS_SERVER_STATIC.as_ref().expect("Process server not initialized").as_ref()
+        }
+    }
 }

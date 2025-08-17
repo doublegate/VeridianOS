@@ -22,6 +22,19 @@ pub const BOOTSTRAP_TID: u64 = 0;
 /// DEEP-RECOMMENDATIONS.md to avoid circular dependencies between process
 /// management and scheduler.
 pub fn kernel_init() -> KernelResult<()> {
+    // Direct UART output for RISC-V debugging
+    #[cfg(target_arch = "riscv64")]
+    unsafe {
+        let uart_base = 0x1000_0000 as *mut u8;
+        // Write "KINIT" to show kernel_init reached
+        uart_base.write_volatile(b'K');
+        uart_base.write_volatile(b'I');
+        uart_base.write_volatile(b'N');
+        uart_base.write_volatile(b'I');
+        uart_base.write_volatile(b'T');
+        uart_base.write_volatile(b'\n');
+    }
+    
     // Stage 1: Hardware initialization
     #[cfg(target_arch = "x86_64")]
     arch::x86_64::bootstrap::stage1_start();
@@ -81,19 +94,56 @@ pub fn kernel_init() -> KernelResult<()> {
     #[cfg(target_arch = "riscv64")]
     arch::riscv64::bootstrap::stage4_start();
     
+    println!("[BOOTSTRAP] Initializing capabilities...");
     cap::init();
+    println!("[BOOTSTRAP] Capabilities initialized");
+    
+    println!("[BOOTSTRAP] Initializing IPC...");
     ipc::init();
+    println!("[BOOTSTRAP] IPC initialized");
     
     // Initialize VFS and mount essential filesystems
     #[cfg(feature = "alloc")]
     {
+        // Add early debug output for AArch64
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[BOOTSTRAP] About to initialize VFS (AArch64 direct UART)...\n");
+        }
+        
+        println!("[BOOTSTRAP] Initializing VFS...");
         fs::init();
+        
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[BOOTSTRAP] VFS initialized (AArch64 direct UART)\n");
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        println!("[BOOTSTRAP] VFS initialized");
     }
     
     // Initialize services (process server, driver framework, etc.)
     #[cfg(feature = "alloc")]
     {
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[BOOTSTRAP] Initializing services (AArch64)...\n");
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        println!("[BOOTSTRAP] Initializing services...");
+        
         services::init();
+        
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            use crate::arch::aarch64::direct_uart::uart_write_str;
+            uart_write_str("[BOOTSTRAP] Services initialized (AArch64)\n");
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        println!("[BOOTSTRAP] Services initialized");
     }
     
     #[cfg(target_arch = "x86_64")]
@@ -125,6 +175,17 @@ pub fn kernel_init() -> KernelResult<()> {
 
 /// Run the bootstrap sequence
 pub fn run() -> ! {
+    // Direct UART output for RISC-V debugging
+    #[cfg(target_arch = "riscv64")]
+    unsafe {
+        let uart_base = 0x1000_0000 as *mut u8;
+        // Write "RUN" to show run() reached
+        uart_base.write_volatile(b'R');
+        uart_base.write_volatile(b'U');
+        uart_base.write_volatile(b'N');
+        uart_base.write_volatile(b'\n');
+    }
+    
     if let Err(e) = kernel_init() {
         panic!("Bootstrap failed: {:?}", e);
     }
@@ -191,23 +252,6 @@ pub fn run() -> ! {
 
 /// Create the init process
 fn create_init_process() {
-    #[cfg(target_arch = "aarch64")]
-    {
-        // Skip init process creation for AArch64 due to allocation issues
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[BOOTSTRAP] Skipping init process creation for AArch64\n");
-        }
-        return;
-    }
-    
-    #[cfg(target_arch = "riscv64")]
-    {
-        // Skip init process creation for RISC-V due to allocation issues
-        println!("[BOOTSTRAP] Skipping init process creation for RISC-V");
-        return;
-    }
-    
     #[cfg(feature = "alloc")]
     {
         // Try to load init from the filesystem

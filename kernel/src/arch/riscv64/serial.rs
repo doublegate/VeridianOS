@@ -26,24 +26,16 @@ impl fmt::Write for Uart16550Compat {
 
 impl Uart16550Compat {
     pub fn write_bytes(&self, bytes: &[u8]) {
-        const THR: usize = 0x00; // Transmitter Holding Register
-        const LSR: usize = 0x05; // Line Status Register
-        const LSR_THRE: u8 = 1 << 5; // Transmitter Holding Register Empty
-
+        // Use SBI console putchar for output on RISC-V
         for &byte in bytes {
             unsafe {
-                // Wait for transmitter to be ready
-                let mut count = 0;
-                while (core::ptr::read_volatile((self.base_addr + LSR) as *const u8) & LSR_THRE) == 0 {
-                    count += 1;
-                    if count > 1000000 {
-                        // Timeout to prevent infinite loop
-                        return;
-                    }
-                    core::hint::spin_loop();
-                }
-                // Write byte
-                core::ptr::write_volatile((self.base_addr + THR) as *mut u8, byte);
+                // SBI console putchar using ecall (legacy interface)
+                core::arch::asm!(
+                    "ecall",
+                    in("a0") byte as usize,     // Character to print
+                    in("a7") 0x01usize,       // SBI function ID 0x01 = console_putchar
+                    options(nostack, nomem)
+                );
             }
         }
     }

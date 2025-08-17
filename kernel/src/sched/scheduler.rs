@@ -8,11 +8,14 @@ use core::{
 use spin::Mutex;
 
 use super::{
-    queue::{CfsRunQueue, READY_QUEUE},
+    queue::CfsRunQueue,
     task::{Priority, SchedClass, Task},
     task_ptr::TaskPtr,
     ProcessState,
 };
+
+#[cfg(not(target_arch = "riscv64"))]
+use super::queue::READY_QUEUE;
 
 /// Scheduler state
 pub struct Scheduler {
@@ -145,7 +148,10 @@ impl Scheduler {
             // Fallback to global queue
             match self.algorithm {
                 SchedAlgorithm::RoundRobin | SchedAlgorithm::Priority => {
+                    #[cfg(not(target_arch = "riscv64"))]
                     READY_QUEUE.lock().enqueue(task);
+                    #[cfg(target_arch = "riscv64")]
+                    super::queue::get_ready_queue().enqueue(task);
                 }
                 #[cfg(feature = "alloc")]
                 SchedAlgorithm::Cfs => {
@@ -156,7 +162,10 @@ impl Scheduler {
                 #[cfg(feature = "alloc")]
                 SchedAlgorithm::Hybrid => {
                     if task_ref.sched_class == SchedClass::RealTime {
+                        #[cfg(not(target_arch = "riscv64"))]
                         READY_QUEUE.lock().enqueue(task);
+                        #[cfg(target_arch = "riscv64")]
+                        super::queue::get_ready_queue().enqueue(task);
                     } else if let Some(ref cfs) = self.cfs_queue {
                         cfs.lock().enqueue(task);
                     }
@@ -220,16 +229,34 @@ impl Scheduler {
             }
         } else {
             // Fallback to global queue
-            let mut queue = READY_QUEUE.lock();
+            #[cfg(not(target_arch = "riscv64"))]
+            {
+                let mut queue = READY_QUEUE.lock();
 
-            while let Some(task_ptr) = queue.dequeue() {
-                unsafe {
-                    let task = task_ptr.as_ref();
-                    if task.can_run_on(current_cpu) {
-                        return Some(task_ptr);
+                while let Some(task_ptr) = queue.dequeue() {
+                    unsafe {
+                        let task = task_ptr.as_ref();
+                        if task.can_run_on(current_cpu) {
+                            return Some(task_ptr);
+                        }
+                        // Task can't run on this CPU, re-queue it
+                        queue.enqueue(task_ptr);
                     }
-                    // Task can't run on this CPU, re-queue it
-                    queue.enqueue(task_ptr);
+                }
+            }
+            #[cfg(target_arch = "riscv64")]
+            {
+                let queue = super::queue::get_ready_queue();
+
+                while let Some(task_ptr) = queue.dequeue() {
+                    unsafe {
+                        let task = task_ptr.as_ref();
+                        if task.can_run_on(current_cpu) {
+                            return Some(task_ptr);
+                        }
+                        // Task can't run on this CPU, re-queue it
+                        queue.enqueue(task_ptr);
+                    }
                 }
             }
         }
@@ -272,23 +299,48 @@ impl Scheduler {
             }
         } else {
             // Fallback to global queue
-            let mut queue = READY_QUEUE.lock();
+            #[cfg(not(target_arch = "riscv64"))]
+            {
+                let mut queue = READY_QUEUE.lock();
 
-            let mut requeue_count = 0;
-            let max_attempts = 10;
+                let mut requeue_count = 0;
+                let max_attempts = 10;
 
-            while requeue_count < max_attempts {
-                match queue.dequeue() {
-                    Some(task_ptr) => unsafe {
-                        let task = task_ptr.as_ref();
-                        if task.can_run_on(current_cpu) {
-                            return Some(task_ptr);
-                        } else {
-                            queue.enqueue(task_ptr);
-                            requeue_count += 1;
-                        }
-                    },
-                    None => break,
+                while requeue_count < max_attempts {
+                    match queue.dequeue() {
+                        Some(task_ptr) => unsafe {
+                            let task = task_ptr.as_ref();
+                            if task.can_run_on(current_cpu) {
+                                return Some(task_ptr);
+                            } else {
+                                queue.enqueue(task_ptr);
+                                requeue_count += 1;
+                            }
+                        },
+                        None => break,
+                    }
+                }
+            }
+            #[cfg(target_arch = "riscv64")]
+            {
+                let queue = super::queue::get_ready_queue();
+
+                let mut requeue_count = 0;
+                let max_attempts = 10;
+
+                while requeue_count < max_attempts {
+                    match queue.dequeue() {
+                        Some(task_ptr) => unsafe {
+                            let task = task_ptr.as_ref();
+                            if task.can_run_on(current_cpu) {
+                                return Some(task_ptr);
+                            } else {
+                                queue.enqueue(task_ptr);
+                                requeue_count += 1;
+                            }
+                        },
+                        None => break,
+                    }
                 }
             }
         }
@@ -328,15 +380,32 @@ impl Scheduler {
 
         // Check real-time tasks first
         {
-            let mut queue = READY_QUEUE.lock();
-            while let Some(task_ptr) = queue.dequeue() {
-                unsafe {
-                    let task = task_ptr.as_ref();
-                    if task.can_run_on(current_cpu) {
-                        return Some(task_ptr);
+            #[cfg(not(target_arch = "riscv64"))]
+            {
+                let mut queue = READY_QUEUE.lock();
+                while let Some(task_ptr) = queue.dequeue() {
+                    unsafe {
+                        let task = task_ptr.as_ref();
+                        if task.can_run_on(current_cpu) {
+                            return Some(task_ptr);
+                        }
+                        // Task can't run on this CPU, re-queue it
+                        queue.enqueue(task_ptr);
                     }
-                    // Task can't run on this CPU, re-queue it
-                    queue.enqueue(task_ptr);
+                }
+            }
+            #[cfg(target_arch = "riscv64")]
+            {
+                let queue = super::queue::get_ready_queue();
+                while let Some(task_ptr) = queue.dequeue() {
+                    unsafe {
+                        let task = task_ptr.as_ref();
+                        if task.can_run_on(current_cpu) {
+                            return Some(task_ptr);
+                        }
+                        // Task can't run on this CPU, re-queue it
+                        queue.enqueue(task_ptr);
+                    }
                 }
             }
         }

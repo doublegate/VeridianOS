@@ -243,7 +243,7 @@ pub mod string {
 /// File I/O functions
 pub mod io {
     use super::*;
-    use crate::fs::{VFS, OpenFlags};
+    use crate::fs::{get_vfs, OpenFlags};
     use alloc::sync::Arc;
     
     /// File handle
@@ -281,7 +281,7 @@ pub mod io {
             OpenFlags::read_only()
         };
         
-        match VFS.get().unwrap().read().open(path, open_flags) {
+        match get_vfs().read().open(path, open_flags) {
             Ok(node) => {
                 let file = Box::new(File {
                     node,

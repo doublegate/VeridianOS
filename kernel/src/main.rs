@@ -100,8 +100,7 @@ fn panic(info: &PanicInfo) -> ! {
     test_framework::test_panic_handler(info)
 }
 
-// For x86_64, this is called from x86_64_kernel_entry
-// For other architectures, this needs to be extern "C"
+// For non-x86_64 architectures, kernel_main is called from assembly boot code
 #[cfg(not(target_arch = "x86_64"))]
 #[no_mangle]
 pub extern "C" fn kernel_main() -> ! {
@@ -121,10 +120,7 @@ pub extern "C" fn kernel_main() -> ! {
     kernel_main_impl()
 }
 
-#[cfg(target_arch = "x86_64")]
-fn kernel_main() -> ! {
-    kernel_main_impl()
-}
+// For x86_64, kernel_main_impl is called directly from x86_64_kernel_entry
 
 fn kernel_main_impl() -> ! {
     // Architecture-specific early initialization

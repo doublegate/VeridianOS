@@ -69,6 +69,7 @@ venv/
 
 # Local memory file (contains project-specific state)
 CLAUDE.local.md
+WARP.md
 
 # Cargo/Rust user directories
 .cargo/
@@ -100,4 +101,9 @@ release-artifacts/
 # Gemini CLI
 .gemini/
 .gemini-history
+
+# Boot logs and debug output
+*_boot.log
+*_boot_debug.log
+*.log
 

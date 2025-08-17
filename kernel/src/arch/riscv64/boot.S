@@ -2,6 +2,29 @@
 .global _start
 
 _start:
+    # Use SBI console putchar (ecall) for output
+    # SBI legacy extension: function ID 0x01 for putchar
+    
+    li a0, 'R'           # Character to print
+    li a7, 0x01          # SBI function ID 0x01 = console_putchar (legacy)
+    ecall
+    
+    li a0, 'V'
+    li a7, 0x01
+    ecall
+    
+    li a0, '6'
+    li a7, 0x01
+    ecall
+    
+    li a0, '4'
+    li a7, 0x01
+    ecall
+    
+    li a0, '\n'
+    li a7, 0x01
+    ecall
+    
     # Clear all registers
     li x1, 0
     li x2, 0
@@ -35,8 +58,8 @@ _start:
     li x30, 0
     li x31, 0
 
-    # Set up stack
-    la sp, _stack_top
+    # Set up stack - use __stack_top from linker script
+    la sp, __stack_top
 
     # Jump to Rust code
     jal _start_rust
@@ -45,9 +68,3 @@ _start:
 1:
     wfi
     j 1b
-
-.section .bss
-.align 16
-_stack:
-    .space 0x4000
-_stack_top:
