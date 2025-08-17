@@ -370,40 +370,17 @@ impl Vfs {
     }
 }
 
-/// Global VFS instance - use static mut for x86_64 to avoid spin::Once deadlock
-#[cfg(target_arch = "x86_64")]
-static mut VFS_X86: Option<alloc::boxed::Box<RwLock<Vfs>>> = None;
+/// Global VFS instance - using pointer pattern for all architectures
+/// This avoids static mut Option issues and provides consistent behavior
+static mut VFS_PTR: *mut RwLock<Vfs> = core::ptr::null_mut();
 
-/// Global VFS instance for AArch64/RISC-V (avoiding spin::Once issues)
-/// IMPORTANT: Must be explicitly None - uninitialized memory is not guaranteed to be zero on AArch64
-#[cfg(target_arch = "aarch64")]
-static mut VFS_STATIC: Option<alloc::boxed::Box<RwLock<Vfs>>> = None;
-
-/// For RISC-V, use a direct static to avoid Box allocation issues with bump allocator
-#[cfg(target_arch = "riscv64")]
-static mut VFS_RISCV: Option<RwLock<Vfs>> = None;
-
-/// Get the VFS instance (architecture-specific)
+/// Get the VFS instance (unified for all architectures)
 pub fn get_vfs() -> &'static RwLock<Vfs> {
-    #[cfg(target_arch = "x86_64")]
-    {
-        unsafe {
-            VFS_X86.as_ref().expect("VFS not initialized").as_ref()
+    unsafe {
+        if VFS_PTR.is_null() {
+            panic!("VFS not initialized");
         }
-    }
-    
-    #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            VFS_STATIC.as_ref().expect("VFS not initialized").as_ref()
-        }
-    }
-    
-    #[cfg(target_arch = "riscv64")]
-    {
-        unsafe {
-            VFS_RISCV.as_ref().expect("VFS not initialized")
-        }
+        &*VFS_PTR
     }
 }
 
@@ -411,451 +388,145 @@ pub fn get_vfs() -> &'static RwLock<Vfs> {
 pub fn init() {
     use crate::println;
     
-    // Direct UART output for AArch64 debugging
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        use crate::arch::aarch64::direct_uart::uart_write_str;
-        uart_write_str("[VFS-DIRECT] Starting VFS init function...\n");
-        uart_write_str("[VFS] Initializing Virtual Filesystem...\n");
-    }
-    
-    #[cfg(target_arch = "riscv64")]
-    {
-        println!("[VFS] Entering init function...");
-        // Use direct UART output for redundancy
-        unsafe {
-            let uart_base = 0x10000000 as *mut u8;
-            let msg = b"[VFS-UART] Init function entered\n";
-            for &byte in msg {
-                uart_base.write_volatile(byte);
-            }
-        }
-    }
-    
-    #[cfg(all(not(target_arch = "aarch64"), not(target_arch = "riscv64")))]
     println!("[VFS] Initializing Virtual Filesystem...");
     
-    // Initialize the VFS
-    #[cfg(target_arch = "x86_64")]
-    {
-        println!("[VFS] Initializing VFS for x86_64...");
-        unsafe {
-            if VFS_X86.is_some() {
-                println!("[VFS] WARNING: VFS already initialized! Skipping re-initialization.");
-                return;
-            }
-            
-            println!("[VFS] Creating BTreeMap...");
-            let mounts = BTreeMap::new();
-            println!("[VFS] BTreeMap created successfully");
-            
-            println!("[VFS] Creating String from /...");
-            let cwd = String::from("/");
-            println!("[VFS] String created successfully");
-            
-            println!("[VFS] Creating Vfs struct...");
-            let vfs = Vfs {
-                root_fs: None,
-                mounts,
-                cwd,
-            };
-            println!("[VFS] Vfs struct created successfully");
-            
-            println!("[VFS] Creating RwLock...");
-            let rwlock = RwLock::new(vfs);
-            println!("[VFS] RwLock created successfully");
-            
-            println!("[VFS] Boxing the RwLock...");
-            let boxed_vfs = alloc::boxed::Box::new(rwlock);
-            println!("[VFS] Box created successfully");
-            
-            println!("[VFS] Storing in VFS_X86...");
-            VFS_X86 = Some(boxed_vfs);
-            println!("[VFS] VFS initialized successfully");
+    unsafe {
+        // Check if already initialized
+        if !VFS_PTR.is_null() {
+            println!("[VFS] WARNING: VFS already initialized! Skipping re-initialization.");
+            return;
         }
-    }
-    
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-    {
+        
+        println!("[VFS] Creating VFS structure...");
+        
+        // Create VFS structure
+        let mounts = BTreeMap::new();
+        let cwd = String::from("/");
+        let vfs = Vfs {
+            root_fs: None,
+            mounts,
+            cwd,
+        };
+        
+        // Create RwLock wrapper
+        let vfs_lock = RwLock::new(vfs);
+        
+        // Box it and leak to get a static pointer
+        let vfs_box = alloc::boxed::Box::new(vfs_lock);
+        let vfs_ptr = alloc::boxed::Box::leak(vfs_box) as *mut RwLock<Vfs>;
+        
+        // Memory barriers for AArch64
         #[cfg(target_arch = "aarch64")]
         {
-            unsafe {
-                use crate::arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[VFS] Initializing VFS (static path for AArch64)...\n");
-                
-                // Add memory barriers before static mut initialization
-                uart_write_str("[VFS] Adding memory barriers for safe initialization...\n");
-                unsafe {
-                    core::arch::asm!(
-                        "dsb sy",  // Data Synchronization Barrier - ensures all memory accesses complete
-                        "isb",     // Instruction Synchronization Barrier - flushes pipeline
-                        options(nostack, nomem, preserves_flags)
-                    );
-                }
-                uart_write_str("[VFS] Memory barriers applied successfully\n");
-                
-                // Skip setting to None on AArch64 - causes hang
-                uart_write_str("[VFS] Skipping VFS_STATIC = None (causes hang on AArch64)\n");
-                
-                // Add another barrier after initialization
-                unsafe {
-                    core::arch::asm!(
-                        "dsb sy",
-                        "isb",
-                        options(nostack, nomem, preserves_flags)
-                    );
-                }
-                
-                uart_write_str("[VFS] Static initialization complete with memory barriers\n");
-            }
+            core::arch::asm!(
+                "dsb sy",  // Data Synchronization Barrier
+                "isb",     // Instruction Synchronization Barrier
+                options(nostack, nomem, preserves_flags)
+            );
         }
+        
+        // Memory barriers for RISC-V
         #[cfg(target_arch = "riscv64")]
         {
-            println!("[VFS] Initializing VFS (static path for RISC-V)...");
-            println!("[VFS] About to set VFS_RISCV to None...");
-            unsafe {
-                // Use direct UART for redundant output
-                let uart_base = 0x10000000 as *mut u8;
-                let msg = b"[VFS-UART] Setting VFS_RISCV to None\n";
-                for &byte in msg {
-                    uart_base.write_volatile(byte);
-                }
-                
-                VFS_RISCV = None;  // Force to None on RISC-V for safety
-                
-                let msg2 = b"[VFS-UART] VFS_RISCV set to None successfully\n";
-                for &byte in msg2 {
-                    uart_base.write_volatile(byte);
-                }
-            }
-            println!("[VFS] VFS_RISCV cleared successfully");
+            core::arch::asm!(
+                "fence rw, rw",  // Full memory fence
+                options(nostack, nomem, preserves_flags)
+            );
         }
         
+        // Store the pointer
+        VFS_PTR = vfs_ptr;
+        
+        // Memory barriers after assignment for AArch64
         #[cfg(target_arch = "aarch64")]
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[VFS] Entering unsafe block for VFS init...\n");
+        {
+            core::arch::asm!(
+                "dsb sy",
+                "isb",
+                options(nostack, nomem, preserves_flags)
+            );
         }
         
-        unsafe {
-            #[cfg(target_arch = "aarch64")]
-            {
-                use crate::arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[VFS] Inside unsafe block, checking if VFS_STATIC is_some()...\n");
-            }
-            
-            #[cfg(target_arch = "aarch64")]
-            let already_initialized = VFS_STATIC.is_some();
-            
-            #[cfg(target_arch = "riscv64")]
-            let already_initialized = VFS_RISCV.is_some();
-            
-            if already_initialized {
-                #[cfg(target_arch = "aarch64")]
-                {
-                    use crate::arch::aarch64::direct_uart::uart_write_str;
-                    uart_write_str("[VFS] WARNING: VFS already initialized! Skipping re-initialization.\n");
-                }
-                #[cfg(target_arch = "riscv64")]
-                println!("[VFS] WARNING: VFS already initialized! Skipping re-initialization.");
-                return;
-            }
-            
-            #[cfg(target_arch = "aarch64")]
-            {
-                use crate::arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[VFS] VFS_STATIC is None, proceeding with initialization...\n");
-            }
-            
-            #[cfg(target_arch = "aarch64")]
-            {
-                use crate::arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[VFS] About to create BTreeMap...\n");
-            }
-            #[cfg(target_arch = "riscv64")]
-            println!("[VFS] About to create BTreeMap...");
-            
-            let mounts = BTreeMap::new();
-            
-            #[cfg(target_arch = "aarch64")]
-            {
-                use crate::arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[VFS] BTreeMap created successfully\n");
-                uart_write_str("[VFS] About to create String from '/'...\n");
-            }
-            #[cfg(target_arch = "riscv64")]
-            {
-                println!("[VFS] BTreeMap created successfully");
-                println!("[VFS] About to create String from '/'...");
-            }
-            
-            let cwd = String::from("/");
-            
-            #[cfg(target_arch = "aarch64")]
-            {
-                use crate::arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[VFS] String created successfully\n");
-                uart_write_str("[VFS] About to create Vfs struct...\n");
-            }
-            #[cfg(target_arch = "riscv64")]
-            {
-                println!("[VFS] String created successfully");
-                println!("[VFS] About to create Vfs struct...");
-            }
-            
-            let vfs = Vfs {
-                root_fs: None,
-                mounts,
-                cwd,
-            };
-            
-            #[cfg(target_arch = "aarch64")]
-            {
-                use crate::arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[VFS] Vfs struct created successfully\n");
-                uart_write_str("[VFS] About to create RwLock...\n");
-            }
-            #[cfg(target_arch = "riscv64")]
-            {
-                println!("[VFS] Vfs struct created successfully");
-                println!("[VFS] About to create RwLock...");
-            }
-            
-            let rwlock = RwLock::new(vfs);
-            
-            #[cfg(target_arch = "aarch64")]
-            {
-                use crate::arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[VFS] RwLock created successfully\n");
-                uart_write_str("[VFS] About to box the RwLock...\n");
-            }
-            #[cfg(target_arch = "riscv64")]
-            {
-                println!("[VFS] RwLock created successfully");
-                
-                // Check allocator state and size requirements
-                use core::mem::size_of;
-                let vfs_size = size_of::<RwLock<Vfs>>();
-                println!("[VFS] Size of RwLock<Vfs>: {} bytes", vfs_size);
-                
-                // Get allocator stats
-                unsafe {
-                    use crate::ALLOCATOR;
-                    let (allocated, remaining, count) = ALLOCATOR.stats();
-                    println!("[VFS] Allocator stats before assignment:");
-                    println!("      Allocated: {} bytes", allocated);
-                    println!("      Remaining: {} bytes", remaining);
-                    println!("      Allocations: {}", count);
-                }
-                
-                println!("[VFS] Will store RwLock directly (no Box allocation)...");
-            }
-            
-            // For RISC-V, don't use Box due to bump allocator limitations
-            #[cfg(target_arch = "riscv64")]
-            {
-                println!("[VFS] Storing RwLock directly in VFS_RISCV (no Box)...");
-            }
-            
-            #[cfg(not(target_arch = "riscv64"))]
-            let boxed_vfs = alloc::boxed::Box::new(rwlock);
-            
-            #[cfg(target_arch = "aarch64")]
-            {
-                use crate::arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[VFS] Box created successfully\n");
-                uart_write_str("[VFS] About to store in VFS_STATIC...\n");
-            }
-            #[cfg(target_arch = "riscv64")]
-            {
-                println!("[VFS] Box created successfully");
-                println!("[VFS] About to store in VFS_STATIC...");
-            }
-            
-            // Apply memory barriers for AArch64 before critical assignment
-            #[cfg(target_arch = "aarch64")]
-            {
-                use crate::arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[VFS] Applying memory barriers before VFS_STATIC assignment...\n");
-                unsafe {
-                    core::arch::asm!(
-                        "dsb sy",  // Data Synchronization Barrier
-                        "isb",     // Instruction Synchronization Barrier  
-                        options(nostack, nomem, preserves_flags)
-                    );
-                }
-            }
-            
-            #[cfg(target_arch = "aarch64")]
-            {
-                VFS_STATIC = Some(boxed_vfs);
-            }
-            
-            #[cfg(target_arch = "riscv64")]
-            {
-                VFS_RISCV = Some(rwlock);
-                println!("[VFS] VFS_RISCV assigned successfully (no Box)");
-            }
-            
-            // Apply memory barriers for AArch64 after assignment
-            #[cfg(target_arch = "aarch64")]
-            {
-                use crate::arch::aarch64::direct_uart::uart_write_str;
-                unsafe {
-                    core::arch::asm!(
-                        "dsb sy",  // Ensure write is complete
-                        "isb",     // Flush pipeline
-                        options(nostack, nomem, preserves_flags)
-                    );
-                }
-                uart_write_str("[VFS] VFS_STATIC assigned successfully with memory barriers\n");
-                uart_write_str("[VFS] VFS initialized\n");
-            }
-            #[cfg(target_arch = "riscv64")]
-            println!("[VFS] VFS initialized");
+        // Memory barriers after assignment for RISC-V
+        #[cfg(target_arch = "riscv64")]
+        {
+            core::arch::asm!(
+                "fence rw, rw",
+                options(nostack, nomem, preserves_flags)
+            );
         }
+        
+        println!("[VFS] VFS initialized successfully");
     }
     
+    // Create and mount filesystems
     #[cfg(feature = "alloc")]
     {
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[VFS] Creating RAM filesystem...\n");
-        }
-        #[cfg(not(target_arch = "aarch64"))]
         println!("[VFS] Creating RAM filesystem...");
         
         // Create a RAM filesystem as the root
         let ramfs = ramfs::RamFs::new();
         
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[VFS] RAM filesystem created\n");
-            uart_write_str("[VFS] Getting root node...\n");
-        }
-        #[cfg(not(target_arch = "aarch64"))]
+        // Mount as root
         {
-            println!("[VFS] RAM filesystem created");
-            println!("[VFS] Getting root node...");
+            let vfs = get_vfs();
+            let mut vfs_guard = vfs.write();
+            vfs_guard.mount_root(Arc::new(ramfs)).ok();
         }
         
-        // Create essential directories
-        let root = ramfs.root();
+        println!("[VFS] RAM filesystem mounted as root");
         
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[VFS] Creating essential directories...\n");
-        }
-        #[cfg(not(target_arch = "aarch64"))]
-        println!("[VFS] Creating essential directories...");
-        
-        root.mkdir("dev", Permissions::default()).ok();
-        root.mkdir("proc", Permissions::default()).ok();
-        root.mkdir("bin", Permissions::default()).ok();
-        root.mkdir("etc", Permissions::default()).ok();
-        root.mkdir("tmp", Permissions::default()).ok();
-        root.mkdir("home", Permissions::default()).ok();
-        root.mkdir("usr", Permissions::default()).ok();
-        root.mkdir("lib", Permissions::default()).ok();
-        root.mkdir("sbin", Permissions::default()).ok();
-        root.mkdir("var", Permissions::default()).ok();
-        
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[VFS] Essential directories created\n");
-            uart_write_str("[VFS] Mounting ramfs as root...\n");
-        }
-        #[cfg(not(target_arch = "aarch64"))]
+        // Create standard directories in root
         {
-            println!("[VFS] Essential directories created");
-            println!("[VFS] Mounting ramfs as root...");
+            let vfs = get_vfs();
+            let vfs_guard = vfs.read();
+            if let Some(ref root_fs) = vfs_guard.root_fs {
+                let root = root_fs.root();
+                root.mkdir("bin", Permissions::default()).ok();
+                root.mkdir("boot", Permissions::default()).ok();
+                root.mkdir("dev", Permissions::default()).ok();
+                root.mkdir("etc", Permissions::default()).ok();
+                root.mkdir("home", Permissions::default()).ok();
+                root.mkdir("lib", Permissions::default()).ok();
+                root.mkdir("mnt", Permissions::default()).ok();
+                root.mkdir("opt", Permissions::default()).ok();
+                root.mkdir("proc", Permissions::default()).ok();
+                root.mkdir("root", Permissions::default()).ok();
+                root.mkdir("sbin", Permissions::default()).ok();
+                root.mkdir("sys", Permissions::default()).ok();
+                root.mkdir("tmp", Permissions::default()).ok();
+                root.mkdir("usr", Permissions::default()).ok();
+                root.mkdir("var", Permissions::default()).ok();
+            }
         }
         
-        // Mount as root filesystem
-        get_vfs().write().mount_root(Arc::new(ramfs)).unwrap();
+        println!("[VFS] Created standard directories");
         
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[VFS] Mounted ramfs as root filesystem\n");
-            uart_write_str("[VFS] Creating devfs...\n");
-        }
-        #[cfg(not(target_arch = "aarch64"))]
-        {
-            println!("[VFS] Mounted ramfs as root filesystem");
-            println!("[VFS] Creating devfs...");
-        }
-        
-        // Mount special filesystems
+        // Create DevFS and mount at /dev
+        println!("[VFS] Creating device filesystem...");
         let devfs = devfs::DevFs::new();
         
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[VFS] Mounting devfs at /dev...\n");
-        }
-        #[cfg(not(target_arch = "aarch64"))]
-        println!("[VFS] Mounting devfs at /dev...");
-        
-        get_vfs().write().mount("/dev".into(), Arc::new(devfs)).ok();
-        
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[VFS] Mounted devfs at /dev\n");
-            uart_write_str("[VFS] Creating procfs...\n");
-        }
-        #[cfg(not(target_arch = "aarch64"))]
         {
-            println!("[VFS] Mounted devfs at /dev");
-            println!("[VFS] Creating procfs...");
+            let vfs = get_vfs();
+            let mut vfs_guard = vfs.write();
+            vfs_guard.mount("/dev".into(), Arc::new(devfs)).ok();
         }
         
+        println!("[VFS] Device filesystem mounted at /dev");
+        
+        // Create ProcFS and mount at /proc
+        println!("[VFS] Creating process filesystem...");
         let procfs = procfs::ProcFs::new();
         
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[VFS] Mounting procfs at /proc...\n");
-        }
-        #[cfg(not(target_arch = "aarch64"))]
-        println!("[VFS] Mounting procfs at /proc...");
-        
-        get_vfs().write().mount("/proc".into(), Arc::new(procfs)).ok();
-        
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[VFS] Mounted procfs at /proc\n");
-        }
-        #[cfg(not(target_arch = "aarch64"))]
-        println!("[VFS] Mounted procfs at /proc");
-        
-        // Create subdirectories
-        if let Ok(usr) = root.lookup("usr") {
-            usr.mkdir("bin", Permissions::default()).ok();
-            usr.mkdir("sbin", Permissions::default()).ok();
-            usr.mkdir("lib", Permissions::default()).ok();
-            usr.mkdir("local", Permissions::default()).ok();
+        {
+            let vfs = get_vfs();
+            let mut vfs_guard = vfs.write();
+            vfs_guard.mount("/proc".into(), Arc::new(procfs)).ok();
         }
         
-        if let Ok(var) = root.lookup("var") {
-            var.mkdir("log", Permissions::default()).ok();
-            var.mkdir("run", Permissions::default()).ok();
-            var.mkdir("tmp", Permissions::default()).ok();
-        }
+        println!("[VFS] Process filesystem mounted at /proc");
         
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[VFS] Virtual Filesystem initialized with 3 filesystems\n");
-        }
-        #[cfg(not(target_arch = "aarch64"))]
-        println!("[VFS] Virtual Filesystem initialized with 3 filesystems");
+        println!("[VFS] Virtual Filesystem initialization complete");
     }
     
     #[cfg(not(feature = "alloc"))]

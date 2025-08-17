@@ -494,67 +494,78 @@ pub struct ProcessServerStats {
     pub process_groups: usize,
 }
 
-/// Global process server instance
-#[cfg(target_arch = "x86_64")]
-static PROCESS_SERVER: spin::Once<ProcessServer> = spin::Once::new();
-
-/// Global process server instance for AArch64/RISC-V (avoiding spin::Once issues)
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-static mut PROCESS_SERVER_STATIC: Option<alloc::boxed::Box<ProcessServer>> = None;
+/// Global process server instance using pointer pattern for all architectures
+/// This avoids static mut Option issues and provides consistent behavior
+static mut PROCESS_SERVER_PTR: *mut ProcessServer = core::ptr::null_mut();
 
 /// Initialize the process server
 pub fn init() {
-    #[cfg(target_arch = "x86_64")]
-    {
-        crate::println!("[PROCESS_SERVER] About to call PROCESS_SERVER.call_once()");
-        
-        // Check if it was already initialized (which would cause panic)
-        if PROCESS_SERVER.is_completed() {
-            crate::println!("[PROCESS_SERVER] WARNING: Already initialized!");
+    use crate::println;
+    
+    unsafe {
+        if !PROCESS_SERVER_PTR.is_null() {
+            println!("[PROCESS_SERVER] WARNING: Already initialized! Skipping re-initialization.");
             return;
         }
         
-        PROCESS_SERVER.call_once(|| {
-            crate::println!("[PROCESS_SERVER] Inside call_once closure");
-            let server = ProcessServer::new();
-            crate::println!("[PROCESS_SERVER] ProcessServer::new() returned");
-            server
-        });
-        crate::println!("[PROCESS_SERVER] Process server initialized");
-    }
-    
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-    {
-        crate::println!("[PROCESS_SERVER] Initializing process server (static path)");
-        unsafe {
-            if PROCESS_SERVER_STATIC.is_some() {
-                crate::println!("[PROCESS_SERVER] WARNING: Already initialized! Skipping re-initialization.");
-                return;
-            }
-            
-            crate::println!("[PROCESS_SERVER] Creating ProcessServer...");
-            let server = ProcessServer::new();
-            crate::println!("[PROCESS_SERVER] ProcessServer::new() returned");
-            crate::println!("[PROCESS_SERVER] Boxing ProcessServer...");
-            let boxed_server = alloc::boxed::Box::new(server);
-            crate::println!("[PROCESS_SERVER] Setting PROCESS_SERVER_STATIC...");
-            PROCESS_SERVER_STATIC = Some(boxed_server);
-            crate::println!("[PROCESS_SERVER] Process server initialized");
+        println!("[PROCESS_SERVER] Creating ProcessServer...");
+        let server = ProcessServer::new();
+        
+        // Box it and leak to get a static pointer
+        let server_box = alloc::boxed::Box::new(server);
+        let server_ptr = alloc::boxed::Box::leak(server_box) as *mut ProcessServer;
+        
+        // Memory barriers for AArch64
+        #[cfg(target_arch = "aarch64")]
+        {
+            core::arch::asm!(
+                "dsb sy",  // Data Synchronization Barrier
+                "isb",     // Instruction Synchronization Barrier
+                options(nostack, nomem, preserves_flags)
+            );
         }
+        
+        // Memory barriers for RISC-V
+        #[cfg(target_arch = "riscv64")]
+        {
+            core::arch::asm!(
+                "fence rw, rw",  // Full memory fence
+                options(nostack, nomem, preserves_flags)
+            );
+        }
+        
+        // Store the pointer
+        PROCESS_SERVER_PTR = server_ptr;
+        
+        // Memory barriers after assignment for AArch64
+        #[cfg(target_arch = "aarch64")]
+        {
+            core::arch::asm!(
+                "dsb sy",
+                "isb",
+                options(nostack, nomem, preserves_flags)
+            );
+        }
+        
+        // Memory barriers after assignment for RISC-V
+        #[cfg(target_arch = "riscv64")]
+        {
+            core::arch::asm!(
+                "fence rw, rw",
+                options(nostack, nomem, preserves_flags)
+            );
+        }
+        
+        println!("[PROCESS_SERVER] Process server initialized");
     }
 }
 
 /// Get the global process server
 pub fn get_process_server() -> &'static ProcessServer {
-    #[cfg(target_arch = "x86_64")]
-    {
-        PROCESS_SERVER.get().expect("Process server not initialized")
-    }
-    
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-    {
-        unsafe {
-            PROCESS_SERVER_STATIC.as_ref().expect("Process server not initialized").as_ref()
+    unsafe {
+        if PROCESS_SERVER_PTR.is_null() {
+            panic!("Process server not initialized");
         }
+        &*PROCESS_SERVER_PTR
     }
 }

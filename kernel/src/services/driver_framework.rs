@@ -506,109 +506,80 @@ pub struct DriverFrameworkStats {
     pub suspended_devices: usize,
 }
 
-/// Global driver framework instance
-#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-static DRIVER_FRAMEWORK: spin::Once<DriverFramework> = spin::Once::new();
-
-/// For AArch64, use a pointer-based approach to avoid static mut issues
-#[cfg(target_arch = "aarch64")]
+/// Global driver framework using pointer pattern for all architectures
+/// This avoids static mut Option issues and provides consistent behavior
 static mut DRIVER_FRAMEWORK_PTR: *mut DriverFramework = core::ptr::null_mut();
-
-#[cfg(target_arch = "riscv64")]
-static mut DRIVER_FRAMEWORK_STATIC: Option<DriverFramework> = None;
 
 /// Initialize the driver framework
 pub fn init() {
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-    {
-        DRIVER_FRAMEWORK.call_once(|| DriverFramework::new());
-    }
+    use crate::println;
     
-    #[cfg(target_arch = "aarch64")]
     unsafe {
-        use crate::arch::aarch64::direct_uart::uart_write_str;
-        uart_write_str("[DRIVER_FRAMEWORK] Checking if already initialized...\n");
-        
         // Check if already initialized
         if !DRIVER_FRAMEWORK_PTR.is_null() {
-            uart_write_str("[DRIVER_FRAMEWORK] Already initialized, skipping...\n");
+            println!("[DRIVER_FRAMEWORK] Already initialized, skipping...");
             return;
         }
         
-        uart_write_str("[DRIVER_FRAMEWORK] Not initialized, creating new DriverFramework...\n");
+        println!("[DRIVER_FRAMEWORK] Creating new DriverFramework...");
         
         // Allocate the DriverFramework on the heap using a Box
         let framework = alloc::boxed::Box::new(DriverFramework::new());
         
-        uart_write_str("[DRIVER_FRAMEWORK] DriverFramework created on heap\n");
-        
         // Leak the Box to get a static pointer
         let framework_ptr = alloc::boxed::Box::leak(framework) as *mut DriverFramework;
         
-        uart_write_str("[DRIVER_FRAMEWORK] Applying memory barriers before pointer assignment...\n");
+        // Memory barriers for AArch64
+        #[cfg(target_arch = "aarch64")]
+        {
+            core::arch::asm!(
+                "dsb sy",  // Data Synchronization Barrier
+                "isb",     // Instruction Synchronization Barrier
+                options(nostack, nomem, preserves_flags)
+            );
+        }
         
-        // Apply memory barriers before pointer assignment
-        core::arch::asm!(
-            "dsb sy",  // Data Synchronization Barrier
-            "isb",     // Instruction Synchronization Barrier
-            options(nostack, nomem, preserves_flags)
-        );
-        
-        uart_write_str("[DRIVER_FRAMEWORK] Memory barriers applied, assigning pointer...\n");
+        // Memory barriers for RISC-V
+        #[cfg(target_arch = "riscv64")]
+        {
+            core::arch::asm!(
+                "fence rw, rw",  // Full memory fence
+                options(nostack, nomem, preserves_flags)
+            );
+        }
         
         // Assign the pointer
         DRIVER_FRAMEWORK_PTR = framework_ptr;
         
-        uart_write_str("[DRIVER_FRAMEWORK] Pointer assigned, applying post-barriers...\n");
-        
-        // Apply memory barriers after write
-        core::arch::asm!(
-            "dsb sy",  // Ensure write is complete
-            "isb",     // Flush pipeline
-            options(nostack, nomem, preserves_flags)
-        );
-        
-        uart_write_str("[DRIVER_FRAMEWORK] Static initialization complete with pointer approach\n");
-    }
-    
-    #[cfg(target_arch = "riscv64")]
-    unsafe {
-        if DRIVER_FRAMEWORK_STATIC.is_some() {
-            crate::println!("[DRIVER_FRAMEWORK] Already initialized, skipping...");
-            return;
+        // Memory barriers after assignment for AArch64
+        #[cfg(target_arch = "aarch64")]
+        {
+            core::arch::asm!(
+                "dsb sy",
+                "isb",
+                options(nostack, nomem, preserves_flags)
+            );
         }
         
-        let framework = DriverFramework::new();
-        DRIVER_FRAMEWORK_STATIC = Some(framework);
-        crate::println!("[DRIVER_FRAMEWORK] Static initialization complete");
+        // Memory barriers after assignment for RISC-V
+        #[cfg(target_arch = "riscv64")]
+        {
+            core::arch::asm!(
+                "fence rw, rw",
+                options(nostack, nomem, preserves_flags)
+            );
+        }
+        
+        println!("[DRIVER_FRAMEWORK] Driver framework initialized");
     }
-    
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        use crate::arch::aarch64::direct_uart::uart_write_str;
-        uart_write_str("[DRIVER_FRAMEWORK] Driver framework initialized\n");
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    crate::println!("[DRIVER_FRAMEWORK] Driver framework initialized");
 }
 
 /// Get the global driver framework
 pub fn get_driver_framework() -> &'static DriverFramework {
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-    {
-        DRIVER_FRAMEWORK.get().expect("Driver framework not initialized")
-    }
-    
-    #[cfg(target_arch = "aarch64")]
     unsafe {
         if DRIVER_FRAMEWORK_PTR.is_null() {
             panic!("Driver framework not initialized");
         }
         &*DRIVER_FRAMEWORK_PTR
-    }
-    
-    #[cfg(target_arch = "riscv64")]
-    unsafe {
-        DRIVER_FRAMEWORK_STATIC.as_ref().expect("Driver framework not initialized")
     }
 }

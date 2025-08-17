@@ -20,44 +20,72 @@ use super::{
     error::{IpcError, Result},
 };
 
-/// Global IPC registry
-#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-static IPC_REGISTRY: Mutex<Option<IpcRegistry>> = Mutex::new(None);
-
-/// Global IPC registry for AArch64/RISC-V (avoiding spin::Mutex issues)
-#[cfg(target_arch = "riscv64")]
-static mut IPC_REGISTRY_STATIC: Option<IpcRegistry> = None;
-
-/// Global IPC registry for AArch64 (using lazy initialization)
-#[cfg(target_arch = "aarch64")]
-static mut IPC_REGISTRY_AARCH64: Option<IpcRegistry> = None;
-
-/// Flag to indicate AArch64 registry is initialized
-#[cfg(target_arch = "aarch64")]
-static mut IPC_REGISTRY_INIT: bool = false;
+/// Global IPC registry using pointer pattern for all architectures
+/// This avoids static mut Option issues and provides consistent behavior
+static mut IPC_REGISTRY_PTR: *mut Mutex<IpcRegistry> = core::ptr::null_mut();
 
 /// Initialize the IPC registry
 pub fn init() {
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        use crate::arch::aarch64::direct_uart::uart_write_str;
-        uart_write_str("[IPC-REG] Marking registry as initialized for AArch64 (lazy init)...\n");
-        
-        // Just mark as initialized - actual registry created on first use
-        IPC_REGISTRY_INIT = true;
-        
-        uart_write_str("[IPC-REG] Registry marked for lazy initialization on AArch64\n");
-    }
+    use crate::println;
     
-    #[cfg(target_arch = "riscv64")]
     unsafe {
-        IPC_REGISTRY_STATIC = Some(IpcRegistry::new());
-    }
-    
-    #[cfg(all(not(target_arch = "aarch64"), not(target_arch = "riscv64")))]
-    {
-        let mut registry = IPC_REGISTRY.lock();
-        *registry = Some(IpcRegistry::new());
+        if !IPC_REGISTRY_PTR.is_null() {
+            println!("[IPC-REG] Registry already initialized, skipping...");
+            return;
+        }
+        
+        println!("[IPC-REG] Initializing IPC registry...");
+        
+        // Create the registry
+        let registry = IpcRegistry::new();
+        let registry_mutex = Mutex::new(registry);
+        
+        // Box it and leak to get a static pointer
+        let registry_box = alloc::boxed::Box::new(registry_mutex);
+        let registry_ptr = alloc::boxed::Box::leak(registry_box) as *mut Mutex<IpcRegistry>;
+        
+        // Memory barriers for AArch64
+        #[cfg(target_arch = "aarch64")]
+        {
+            core::arch::asm!(
+                "dsb sy",  // Data Synchronization Barrier
+                "isb",     // Instruction Synchronization Barrier
+                options(nostack, nomem, preserves_flags)
+            );
+        }
+        
+        // Memory barriers for RISC-V
+        #[cfg(target_arch = "riscv64")]
+        {
+            core::arch::asm!(
+                "fence rw, rw",  // Full memory fence
+                options(nostack, nomem, preserves_flags)
+            );
+        }
+        
+        // Store the pointer
+        IPC_REGISTRY_PTR = registry_ptr;
+        
+        // Memory barriers after assignment for AArch64
+        #[cfg(target_arch = "aarch64")]
+        {
+            core::arch::asm!(
+                "dsb sy",
+                "isb",
+                options(nostack, nomem, preserves_flags)
+            );
+        }
+        
+        // Memory barriers after assignment for RISC-V
+        #[cfg(target_arch = "riscv64")]
+        {
+            core::arch::asm!(
+                "fence rw, rw",
+                options(nostack, nomem, preserves_flags)
+            );
+        }
+        
+        println!("[IPC-REG] Registry initialized successfully");
     }
 }
 
@@ -347,129 +375,34 @@ pub struct RegistryStatsSummary {
 
 /// Helper functions for cross-architecture registry access
 /// Get a mutable reference to the global registry
-#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-fn with_registry_mut<T, F>(f: F) -> Result<T>
-where
-    F: FnOnce(&mut IpcRegistry) -> Result<T>,
-{
-    let mut registry_guard = IPC_REGISTRY.lock();
-    let registry = registry_guard.as_mut().ok_or(IpcError::NotInitialized)?;
-    f(registry)
-}
-
-#[cfg(target_arch = "riscv64")]
 fn with_registry_mut<T, F>(f: F) -> Result<T>
 where
     F: FnOnce(&mut IpcRegistry) -> Result<T>,
 {
     unsafe {
-        let registry = IPC_REGISTRY_STATIC.as_mut().ok_or(IpcError::NotInitialized)?;
-        f(registry)
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-fn with_registry_mut<T, F>(f: F) -> Result<T>
-where
-    F: FnOnce(&mut IpcRegistry) -> Result<T>,
-{
-    unsafe {
-        if !IPC_REGISTRY_INIT {
+        if IPC_REGISTRY_PTR.is_null() {
             return Err(IpcError::NotInitialized);
         }
         
-        // Lazy initialize if needed
-        if IPC_REGISTRY_AARCH64.is_none() {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[IPC-REG] Lazy initializing registry on first use...\n");
-            
-            // Create registry inline without any intermediate variables
-            IPC_REGISTRY_AARCH64 = Some(IpcRegistry {
-                #[cfg(feature = "alloc")]
-                endpoints: BTreeMap::new(),
-                #[cfg(feature = "alloc")]
-                channels: BTreeMap::new(),
-                #[cfg(feature = "alloc")]
-                process_endpoints: BTreeMap::new(),
-                next_endpoint_id: AtomicU64::new(1),
-                stats: RegistryStats {
-                    endpoints_created: AtomicU64::new(0),
-                    endpoints_destroyed: AtomicU64::new(0),
-                    channels_created: AtomicU64::new(0),
-                    channels_destroyed: AtomicU64::new(0),
-                    capability_lookups: AtomicU64::new(0),
-                    capability_hits: AtomicU64::new(0),
-                },
-            });
-            
-            uart_write_str("[IPC-REG] Registry lazy initialized successfully\n");
-        }
-        
-        let registry = IPC_REGISTRY_AARCH64.as_mut().ok_or(IpcError::NotInitialized)?;
-        f(registry)
+        let registry_mutex = &*IPC_REGISTRY_PTR;
+        let mut registry_guard = registry_mutex.lock();
+        f(&mut *registry_guard)
     }
 }
 
 /// Get an immutable reference to the global registry
-#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-fn with_registry<T, F>(f: F) -> Result<T>
-where
-    F: FnOnce(&IpcRegistry) -> Result<T>,
-{
-    let registry_guard = IPC_REGISTRY.lock();
-    let registry = registry_guard.as_ref().ok_or(IpcError::NotInitialized)?;
-    f(registry)
-}
-
-#[cfg(target_arch = "riscv64")]
 fn with_registry<T, F>(f: F) -> Result<T>
 where
     F: FnOnce(&IpcRegistry) -> Result<T>,
 {
     unsafe {
-        let registry = IPC_REGISTRY_STATIC.as_ref().ok_or(IpcError::NotInitialized)?;
-        f(registry)
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-fn with_registry<T, F>(f: F) -> Result<T>
-where
-    F: FnOnce(&IpcRegistry) -> Result<T>,
-{
-    unsafe {
-        if !IPC_REGISTRY_INIT {
+        if IPC_REGISTRY_PTR.is_null() {
             return Err(IpcError::NotInitialized);
         }
         
-        // Lazy initialize if needed (same as with_registry_mut)
-        if IPC_REGISTRY_AARCH64.is_none() {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[IPC-REG] Lazy initializing registry on first use (read)...\n");
-            
-            IPC_REGISTRY_AARCH64 = Some(IpcRegistry {
-                #[cfg(feature = "alloc")]
-                endpoints: BTreeMap::new(),
-                #[cfg(feature = "alloc")]
-                channels: BTreeMap::new(),
-                #[cfg(feature = "alloc")]
-                process_endpoints: BTreeMap::new(),
-                next_endpoint_id: AtomicU64::new(1),
-                stats: RegistryStats {
-                    endpoints_created: AtomicU64::new(0),
-                    endpoints_destroyed: AtomicU64::new(0),
-                    channels_created: AtomicU64::new(0),
-                    channels_destroyed: AtomicU64::new(0),
-                    capability_lookups: AtomicU64::new(0),
-                    capability_hits: AtomicU64::new(0),
-                },
-            });
-            
-            uart_write_str("[IPC-REG] Registry lazy initialized successfully (read)\n");
-        }
-        
-        let registry = IPC_REGISTRY_AARCH64.as_ref().ok_or(IpcError::NotInitialized)?;
-        f(registry)
+        let registry_mutex = &*IPC_REGISTRY_PTR;
+        let registry_guard = registry_mutex.lock();
+        f(&*registry_guard)
     }
 }
 

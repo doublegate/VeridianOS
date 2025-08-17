@@ -624,11 +624,21 @@ Check these files regularly to track progress and identify next tasks.
 - **Architecture Differences**: x86_64 requires bootloader, AArch64/RISC-V use direct QEMU loading
 - **Implementation Added**: VGA/serial debug output, entry_point! macro, symbol conflict fixes
 
-### Phase 2 Architecture-Specific Fixes (August 16, 2025)
+### Phase 2 Architecture-Specific Fixes (August 16-17, 2025)
 - **AArch64 Static Mut Fix**: Resolved hangs by using pointer-based approach with Box::leak pattern
 - **Memory Barriers**: DSB SY and ISB instructions required for AArch64 static pointer initialization
 - **Services Fixed**: ThreadManager, InitSystem, DriverFramework all use pointer approach
 - **RISC-V Status**: Reaches Stage 6 BOOTOK but immediately reboots (timer/interrupt issue)
 - **x86_64 Status**: Early boot hang persists, needs further debugging
 - **Achievement**: AArch64 100% functional with complete Phase 2 implementation
+
+### Unified Static Mut Pointer Pattern (August 17, 2025)
+- **Pattern**: Convert all `static mut INSTANCE: Option<T> = None` to `static mut PTR: *mut T = core::ptr::null_mut()`
+- **Implementation**: Use Box::leak pattern: `Box::leak(Box::new(instance)) as *mut T`
+- **Memory Barriers**: 
+  - AArch64: `dsb sy` and `isb` instructions before and after assignment
+  - RISC-V: `fence rw, rw` instruction before and after assignment
+  - x86_64: No explicit barriers needed
+- **Modules Converted**: VFS, IPC Registry, Process Server, Shell, Thread API, Init System, Driver Framework
+- **Result**: Eliminated architecture-specific static mut issues, AArch64 now boots to Stage 6
 

@@ -799,37 +799,78 @@ impl BuiltinCommand for ExitCommand {
 }
 
 /// Global shell instance
-#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-static SHELL: spin::Once<Shell> = spin::Once::new();
-
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-static mut SHELL_STATIC: Option<Shell> = None;
+/// Global shell instance using pointer pattern for all architectures
+/// This avoids static mut Option issues and provides consistent behavior
+static mut SHELL_PTR: *mut Shell = core::ptr::null_mut();
 
 /// Initialize the shell
 pub fn init() {
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-    {
-        SHELL.call_once(|| Shell::new());
-    }
+    use crate::println;
     
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     unsafe {
-        SHELL_STATIC = Some(Shell::new());
+        if !SHELL_PTR.is_null() {
+            println!("[SHELL] WARNING: Already initialized! Skipping re-initialization.");
+            return;
+        }
+        
+        let shell = Shell::new();
+        
+        // Box it and leak to get a static pointer
+        let shell_box = alloc::boxed::Box::new(shell);
+        let shell_ptr = alloc::boxed::Box::leak(shell_box) as *mut Shell;
+        
+        // Memory barriers for AArch64
+        #[cfg(target_arch = "aarch64")]
+        {
+            core::arch::asm!(
+                "dsb sy",  // Data Synchronization Barrier
+                "isb",     // Instruction Synchronization Barrier
+                options(nostack, nomem, preserves_flags)
+            );
+        }
+        
+        // Memory barriers for RISC-V
+        #[cfg(target_arch = "riscv64")]
+        {
+            core::arch::asm!(
+                "fence rw, rw",  // Full memory fence
+                options(nostack, nomem, preserves_flags)
+            );
+        }
+        
+        // Store the pointer
+        SHELL_PTR = shell_ptr;
+        
+        // Memory barriers after assignment for AArch64
+        #[cfg(target_arch = "aarch64")]
+        {
+            core::arch::asm!(
+                "dsb sy",
+                "isb",
+                options(nostack, nomem, preserves_flags)
+            );
+        }
+        
+        // Memory barriers after assignment for RISC-V
+        #[cfg(target_arch = "riscv64")]
+        {
+            core::arch::asm!(
+                "fence rw, rw",
+                options(nostack, nomem, preserves_flags)
+            );
+        }
+        
+        println!("[SHELL] Shell module loaded");
     }
-    
-    crate::println!("[SHELL] Shell module loaded");
 }
 
 /// Get the global shell
 pub fn get_shell() -> &'static Shell {
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-    {
-        SHELL.get().expect("Shell not initialized")
-    }
-    
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     unsafe {
-        SHELL_STATIC.as_ref().expect("Shell not initialized")
+        if SHELL_PTR.is_null() {
+            panic!("Shell not initialized");
+        }
+        &*SHELL_PTR
     }
 }
 

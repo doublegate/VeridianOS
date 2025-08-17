@@ -545,107 +545,81 @@ pub struct ThreadStats {
     pub name: String,
 }
 
-/// Global thread manager instance
-#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-static THREAD_MANAGER: spin::Once<ThreadManager> = spin::Once::new();
-
-/// For AArch64, use a pointer-based approach to avoid static mut issues
-#[cfg(target_arch = "aarch64")]
+/// Global thread manager using pointer pattern for all architectures
+/// This avoids static mut Option issues and provides consistent behavior
 static mut THREAD_MANAGER_PTR: *mut ThreadManager = core::ptr::null_mut();
-
-/// Global thread manager for RISC-V (avoiding spin::Once issues)
-#[cfg(target_arch = "riscv64")]
-static mut THREAD_MANAGER_STATIC: Option<ThreadManager> = None;
 
 /// Initialize the thread manager
 pub fn init() {
-    #[cfg(target_arch = "riscv64")]
-    {
-        use crate::println;
-        println!("[THREAD_API] WARNING: Skipping thread manager init on RISC-V (causes reboot)");
-        println!("[THREAD_API] Thread manager functionality disabled for RISC-V");
-        return; // Skip initialization on RISC-V to avoid reboot
-    }
+    use crate::println;
     
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-    {
-        THREAD_MANAGER.call_once(|| ThreadManager::new());
-    }
-    
-    #[cfg(target_arch = "aarch64")]
     unsafe {
-        use crate::arch::aarch64::direct_uart::uart_write_str;
-        uart_write_str("[THREAD_API] Checking if already initialized...\n");
-        
         // Check if already initialized
         if !THREAD_MANAGER_PTR.is_null() {
-            uart_write_str("[THREAD_API] Already initialized, skipping...\n");
+            println!("[THREAD_API] Already initialized, skipping...");
             return;
         }
         
-        uart_write_str("[THREAD_API] Not initialized, creating new ThreadManager...\n");
+        println!("[THREAD_API] Creating new ThreadManager...");
         
         // Allocate the ThreadManager on the heap using a Box
         let manager = alloc::boxed::Box::new(ThreadManager::new());
         
-        uart_write_str("[THREAD_API] ThreadManager created on heap\n");
-        
         // Leak the Box to get a static pointer
         let manager_ptr = alloc::boxed::Box::leak(manager) as *mut ThreadManager;
         
-        uart_write_str("[THREAD_API] Applying memory barriers before pointer assignment...\n");
+        // Memory barriers for AArch64
+        #[cfg(target_arch = "aarch64")]
+        {
+            core::arch::asm!(
+                "dsb sy",  // Data Synchronization Barrier
+                "isb",     // Instruction Synchronization Barrier
+                options(nostack, nomem, preserves_flags)
+            );
+        }
         
-        // Apply memory barriers before pointer assignment
-        core::arch::asm!(
-            "dsb sy",  // Data Synchronization Barrier
-            "isb",     // Instruction Synchronization Barrier
-            options(nostack, nomem, preserves_flags)
-        );
-        
-        uart_write_str("[THREAD_API] Memory barriers applied, assigning pointer...\n");
+        // Memory barriers for RISC-V
+        #[cfg(target_arch = "riscv64")]
+        {
+            core::arch::asm!(
+                "fence rw, rw",  // Full memory fence
+                options(nostack, nomem, preserves_flags)
+            );
+        }
         
         // Assign the pointer
         THREAD_MANAGER_PTR = manager_ptr;
         
-        uart_write_str("[THREAD_API] Pointer assigned, applying post-barriers...\n");
+        // Memory barriers after assignment for AArch64
+        #[cfg(target_arch = "aarch64")]
+        {
+            core::arch::asm!(
+                "dsb sy",
+                "isb",
+                options(nostack, nomem, preserves_flags)
+            );
+        }
         
-        // Apply memory barriers after write
-        core::arch::asm!(
-            "dsb sy",  // Ensure write is complete
-            "isb",     // Flush pipeline
-            options(nostack, nomem, preserves_flags)
-        );
+        // Memory barriers after assignment for RISC-V
+        #[cfg(target_arch = "riscv64")]
+        {
+            core::arch::asm!(
+                "fence rw, rw",
+                options(nostack, nomem, preserves_flags)
+            );
+        }
         
-        uart_write_str("[THREAD_API] Static initialization complete with pointer approach\n");
+        println!("[THREAD_API] Thread management APIs initialized");
     }
-    
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        use crate::arch::aarch64::direct_uart::uart_write_str;
-        uart_write_str("[THREAD_API] Thread management APIs initialized\n");
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    crate::println!("[THREAD_API] Thread management APIs initialized");
 }
 
 /// Get the global thread manager
 pub fn get_thread_manager() -> &'static ThreadManager {
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-    {
-        THREAD_MANAGER.get().expect("Thread manager not initialized")
-    }
-    
-    #[cfg(target_arch = "aarch64")]
     unsafe {
         if THREAD_MANAGER_PTR.is_null() {
             panic!("Thread manager not initialized");
         }
         &*THREAD_MANAGER_PTR
-    }
-    
-    #[cfg(target_arch = "riscv64")]
-    unsafe {
-        THREAD_MANAGER_STATIC.as_ref().expect("Thread manager not initialized")
     }
 }
 
