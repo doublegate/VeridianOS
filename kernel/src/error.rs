@@ -86,6 +86,9 @@ pub enum KernelError {
         operation: &'static str,
         duration_ms: u64,
     },
+    NotImplemented {
+        feature: &'static str,
+    },
 }
 
 /// Capability-specific errors
@@ -202,6 +205,9 @@ impl fmt::Display for KernelError {
                 duration_ms,
             } => {
                 write!(f, "Timeout during {}: {} ms", operation, duration_ms)
+            }
+            Self::NotImplemented { feature } => {
+                write!(f, "Feature not implemented: {}", feature)
             }
         }
     }
