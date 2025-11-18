@@ -11,7 +11,20 @@ pub use super::riscv::{context, timer};
 
 #[allow(dead_code)]
 pub fn init() {
-    // TODO: Initialize RISC-V 64-specific features
+    // Initialize SBI (Supervisor Binary Interface)
+    super::riscv::sbi::init();
+
+    // Enable supervisor-mode external, software, and timer interrupts
+    unsafe {
+        // Enable interrupts in sstatus
+        enable_interrupts();
+
+        // Enable specific interrupt sources in sie
+        // SEIE (bit 9), STIE (bit 5), SSIE (bit 1)
+        core::arch::asm!("csrs sie, {}", in(reg) (1 << 9) | (1 << 5) | (1 << 1));
+    }
+
+    println!("[RISCV64] Architecture initialization complete");
 }
 
 #[allow(dead_code)]
