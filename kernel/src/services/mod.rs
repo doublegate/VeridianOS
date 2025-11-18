@@ -7,6 +7,7 @@ pub mod process_server;
 pub mod driver_framework;
 pub mod init_system;
 pub mod shell;
+pub mod desktop_ipc;
 
 pub use process_server::ProcessServer;
 pub use driver_framework::DriverFramework;

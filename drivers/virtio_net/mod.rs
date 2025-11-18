@@ -6,6 +6,7 @@
 use crate::drivers::DeviceDriver;
 use crate::error::KernelError;
 use crate::net::{MacAddress, Packet};
+use crate::net::device::{NetworkDevice, DeviceCapabilities, DeviceStatistics, DeviceState};
 
 /// VirtIO Network Device Feature Bits
 const VIRTIO_NET_F_CSUM: u64 = 1 << 0;
@@ -69,6 +70,8 @@ pub struct VirtioNetDriver {
     features: u64,
     rx_queue_size: u16,
     tx_queue_size: u16,
+    state: DeviceState,
+    stats: DeviceStatistics,
 }
 
 impl VirtioNetDriver {
@@ -80,6 +83,8 @@ impl VirtioNetDriver {
             features: 0,
             rx_queue_size: 256,
             tx_queue_size: 256,
+            state: DeviceState::Down,
+            stats: DeviceStatistics::default(),
         };
 
         driver.initialize()?;
@@ -152,6 +157,9 @@ impl VirtioNetDriver {
                  self.mac_address.0[0], self.mac_address.0[1], self.mac_address.0[2],
                  self.mac_address.0[3], self.mac_address.0[4], self.mac_address.0[5]);
 
+        // Device is now up
+        self.state = DeviceState::Up;
+
         Ok(())
     }
 
@@ -187,7 +195,84 @@ impl DeviceDriver for VirtioNetDriver {
     fn cleanup(&mut self) -> Result<(), KernelError> {
         // Reset device
         self.write_reg(0x70, 0);
+        self.state = DeviceState::Down;
         Ok(())
+    }
+}
+
+impl NetworkDevice for VirtioNetDriver {
+    fn name(&self) -> &str {
+        "eth1"
+    }
+
+    fn mac_address(&self) -> MacAddress {
+        self.mac_address
+    }
+
+    fn capabilities(&self) -> DeviceCapabilities {
+        DeviceCapabilities {
+            max_transmission_unit: 1500,
+            supports_vlan: false,
+            supports_checksum_offload: (self.features & VIRTIO_NET_F_CSUM) != 0,
+            supports_tso: false,
+            supports_lro: false,
+        }
+    }
+
+    fn state(&self) -> DeviceState {
+        self.state
+    }
+
+    fn set_state(&mut self, state: DeviceState) -> Result<(), KernelError> {
+        match state {
+            DeviceState::Up => {
+                if self.state == DeviceState::Down {
+                    // Set DRIVER_OK status bit
+                    self.write_reg(0x70, 1 | 2 | 4 | 8);
+                }
+                self.state = DeviceState::Up;
+            }
+            DeviceState::Down => {
+                // Reset device
+                self.write_reg(0x70, 0);
+                self.state = DeviceState::Down;
+            }
+            _ => {
+                self.state = state;
+            }
+        }
+        Ok(())
+    }
+
+    fn statistics(&self) -> DeviceStatistics {
+        self.stats
+    }
+
+    fn transmit(&mut self, packet: &Packet) -> Result<(), KernelError> {
+        if self.state != DeviceState::Up {
+            self.stats.tx_dropped += 1;
+            return Err(KernelError::InvalidState {
+                expected: "up",
+                actual: "not_up",
+            });
+        }
+
+        // TODO: Implement virtqueue-based transmission
+        // For now, just update statistics
+        self.stats.tx_packets += 1;
+        self.stats.tx_bytes += packet.len() as u64;
+
+        println!("[VIRTIO-NET] Transmitting {} bytes (stub)", packet.len());
+        Ok(())
+    }
+
+    fn receive(&mut self) -> Result<Option<Packet>, KernelError> {
+        if self.state != DeviceState::Up {
+            return Ok(None);
+        }
+
+        // TODO: Implement virtqueue-based reception
+        Ok(None)
     }
 }
 

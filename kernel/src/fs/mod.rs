@@ -14,6 +14,7 @@ pub mod devfs;
 pub mod procfs;
 pub mod file;
 pub mod blockfs;
+pub mod blockdev;
 
 pub use file::{File, FileDescriptor, FileTable, OpenFlags, SeekFrom};
 

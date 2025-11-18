@@ -12,6 +12,7 @@ pub mod tcp;
 pub mod udp;
 pub mod socket;
 pub mod device;
+pub mod integration;
 
 use crate::error::KernelError;
 use alloc::vec::Vec;
@@ -193,6 +194,9 @@ pub fn init() -> Result<(), KernelError> {
 
     // Initialize socket layer
     socket::init()?;
+
+    // Register hardware network drivers
+    let _ = integration::register_drivers(); // Non-fatal if no hardware found
 
     println!("[NET] Network stack initialized");
     Ok(())

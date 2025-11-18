@@ -7,6 +7,7 @@ use crate::drivers::DeviceDriver;
 use crate::error::KernelError;
 use crate::mm::PhysicalAddress;
 use crate::net::{MacAddress, Packet};
+use crate::net::device::{NetworkDevice, DeviceCapabilities, DeviceStatistics, DeviceState};
 
 /// E1000 PCI vendor and device IDs
 pub const E1000_VENDOR_ID: u16 = 0x8086;
@@ -72,6 +73,8 @@ pub struct E1000Driver {
     tx_buffers: [[u8; 2048]; NUM_TX_DESC],
     rx_current: usize,
     tx_current: usize,
+    state: DeviceState,
+    stats: DeviceStatistics,
 }
 
 impl E1000Driver {
@@ -101,6 +104,8 @@ impl E1000Driver {
             tx_buffers: [[0u8; 2048]; NUM_TX_DESC],
             rx_current: 0,
             tx_current: 0,
+            state: DeviceState::Down,
+            stats: DeviceStatistics::default(),
         };
 
         driver.initialize()?;
@@ -217,11 +222,14 @@ impl E1000Driver {
                  self.mac_address.0[0], self.mac_address.0[1], self.mac_address.0[2],
                  self.mac_address.0[3], self.mac_address.0[4], self.mac_address.0[5]);
 
+        // Device is now up
+        self.state = DeviceState::Up;
+
         Ok(())
     }
 
-    /// Transmit a packet
-    pub fn transmit(&mut self, packet: &[u8]) -> Result<(), KernelError> {
+    /// Transmit a packet (raw implementation)
+    fn transmit_raw(&mut self, packet: &[u8]) -> Result<(), KernelError> {
         if packet.len() > 2048 {
             return Err(KernelError::InvalidArgument {
                 name: "packet_size",
@@ -234,6 +242,7 @@ impl E1000Driver {
 
         // Wait for descriptor to be available
         if (desc.status & 1) == 0 {
+            self.stats.tx_dropped += 1;
             return Err(KernelError::WouldBlock);
         }
 
@@ -249,11 +258,15 @@ impl E1000Driver {
         self.tx_current = (self.tx_current + 1) % NUM_TX_DESC;
         self.write_reg(REG_TDT, self.tx_current as u32);
 
+        // Update statistics
+        self.stats.tx_packets += 1;
+        self.stats.tx_bytes += packet.len() as u64;
+
         Ok(())
     }
 
-    /// Receive a packet
-    pub fn receive(&mut self) -> Result<Option<Packet>, KernelError> {
+    /// Receive a packet (raw implementation)
+    fn receive_raw(&mut self) -> Result<Option<Packet>, KernelError> {
         let idx = self.rx_current;
         let desc = &mut self.rx_descriptors[idx];
 
@@ -262,10 +275,24 @@ impl E1000Driver {
             return Ok(None);
         }
 
+        // Check for errors
+        if desc.errors != 0 {
+            self.stats.rx_errors += 1;
+            // Reset descriptor
+            desc.status = 0;
+            self.rx_current = (self.rx_current + 1) % NUM_RX_DESC;
+            self.write_reg(REG_RDT, self.rx_current as u32);
+            return Ok(None);
+        }
+
         // Get packet data
         let len = desc.length as usize;
         let data = self.rx_buffers[idx][..len].to_vec();
         let packet = Packet::from_bytes(&data);
+
+        // Update statistics
+        self.stats.rx_packets += 1;
+        self.stats.rx_bytes += len as u64;
 
         // Reset descriptor
         desc.status = 0;
@@ -297,7 +324,79 @@ impl DeviceDriver for E1000Driver {
         // Disable RX and TX
         self.write_reg(REG_RCTL, 0);
         self.write_reg(REG_TCTL, 0);
+        self.state = DeviceState::Down;
         Ok(())
+    }
+}
+
+impl NetworkDevice for E1000Driver {
+    fn name(&self) -> &str {
+        "eth0"
+    }
+
+    fn mac_address(&self) -> MacAddress {
+        self.mac_address
+    }
+
+    fn capabilities(&self) -> DeviceCapabilities {
+        DeviceCapabilities {
+            max_transmission_unit: 1500,
+            supports_vlan: false,
+            supports_checksum_offload: true,
+            supports_tso: false,
+            supports_lro: false,
+        }
+    }
+
+    fn state(&self) -> DeviceState {
+        self.state
+    }
+
+    fn set_state(&mut self, state: DeviceState) -> Result<(), KernelError> {
+        match state {
+            DeviceState::Up => {
+                if self.state == DeviceState::Down {
+                    // Re-enable RX and TX
+                    self.write_reg(REG_RCTL, (1 << 1) | (1 << 2) | (1 << 15));
+                    self.write_reg(REG_TCTL, (1 << 1) | (1 << 3) | (0x10 << 4));
+                }
+                self.state = DeviceState::Up;
+            }
+            DeviceState::Down => {
+                // Disable RX and TX
+                self.write_reg(REG_RCTL, 0);
+                self.write_reg(REG_TCTL, 0);
+                self.state = DeviceState::Down;
+            }
+            _ => {
+                self.state = state;
+            }
+        }
+        Ok(())
+    }
+
+    fn statistics(&self) -> DeviceStatistics {
+        self.stats
+    }
+
+    fn transmit(&mut self, packet: &Packet) -> Result<(), KernelError> {
+        if self.state != DeviceState::Up {
+            self.stats.tx_dropped += 1;
+            return Err(KernelError::InvalidState {
+                expected: "up",
+                actual: "not_up",
+            });
+        }
+
+        self.transmit_raw(packet.data())
+    }
+
+    fn receive(&mut self) -> Result<Option<Packet>, KernelError> {
+        if self.state != DeviceState::Up {
+            return Ok(None);
+        }
+
+        self.receive_raw()
     }
 }
 
