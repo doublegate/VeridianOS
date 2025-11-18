@@ -13,6 +13,7 @@ pub mod udp;
 pub mod socket;
 pub mod device;
 pub mod integration;
+pub mod dma_pool;
 
 use crate::error::KernelError;
 use alloc::vec::Vec;
@@ -179,6 +180,9 @@ pub fn get_stats() -> NetworkStats {
 /// Initialize network stack
 pub fn init() -> Result<(), KernelError> {
     println!("[NET] Initializing network stack...");
+
+    // Initialize DMA buffer pool for zero-copy networking
+    dma_pool::init_network_pool(256)?;
 
     // Initialize device layer
     device::init()?;
