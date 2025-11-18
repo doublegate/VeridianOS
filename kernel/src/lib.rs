@@ -77,6 +77,7 @@ pub mod pkg;
 pub mod perf;
 pub mod graphics;
 pub mod net;
+pub mod desktop;
 
 #[cfg(test)]
 mod test_config;
