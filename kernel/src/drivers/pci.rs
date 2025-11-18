@@ -122,6 +122,34 @@ pub enum PciBar {
     None,
 }
 
+impl PciBar {
+    /// Get memory address if this is a memory BAR
+    pub fn get_memory_address(&self) -> Option<u64> {
+        match self {
+            PciBar::Memory { address, .. } => Some(*address),
+            _ => None,
+        }
+    }
+
+    /// Get I/O port address if this is an I/O BAR
+    pub fn get_io_address(&self) -> Option<u32> {
+        match self {
+            PciBar::Io { address, .. } => Some(*address),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a memory BAR
+    pub fn is_memory(&self) -> bool {
+        matches!(self, PciBar::Memory { .. })
+    }
+
+    /// Check if this is an I/O BAR
+    pub fn is_io(&self) -> bool {
+        matches!(self, PciBar::Io { .. })
+    }
+}
+
 /// PCI device representation
 #[derive(Debug, Clone)]
 pub struct PciDevice {
