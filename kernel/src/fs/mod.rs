@@ -220,6 +220,7 @@ impl Vfs {
             "ramfs" => Arc::new(ramfs::RamFs::new()),
             "devfs" => Arc::new(devfs::DevFs::new()),
             "procfs" => Arc::new(procfs::ProcFs::new()),
+            "blockfs" => Arc::new(blockfs::BlockFs::new(10000, 1000)),
             _ => return Err("Unknown filesystem type"),
         };
         
