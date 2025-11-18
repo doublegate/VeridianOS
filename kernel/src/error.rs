@@ -89,6 +89,8 @@ pub enum KernelError {
     NotImplemented {
         feature: &'static str,
     },
+    /// Operation would block
+    WouldBlock,
 }
 
 /// Capability-specific errors
@@ -209,6 +211,7 @@ impl fmt::Display for KernelError {
             Self::NotImplemented { feature } => {
                 write!(f, "Feature not implemented: {}", feature)
             }
+            Self::WouldBlock => write!(f, "Operation would block"),
         }
     }
 }

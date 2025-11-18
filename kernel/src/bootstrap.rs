@@ -6,7 +6,7 @@
 use crate::{
     arch, cap,
     error::KernelResult,
-    fs, graphics, ipc, mm, perf, pkg, process, sched, security, services,
+    fs, graphics, ipc, mm, net, perf, pkg, process, sched, security, services,
 };
 
 #[cfg(feature = "alloc")]
@@ -177,6 +177,14 @@ pub fn kernel_init() -> KernelResult<()> {
         println!("[BOOTSTRAP] Initializing package manager...");
         pkg::init().expect("Failed to initialize package manager");
         println!("[BOOTSTRAP] Package manager initialized");
+    }
+
+    // Initialize network stack
+    #[cfg(feature = "alloc")]
+    {
+        println!("[BOOTSTRAP] Initializing network stack...");
+        net::init().expect("Failed to initialize network stack");
+        println!("[BOOTSTRAP] Network stack initialized");
     }
 
     // Initialize graphics subsystem

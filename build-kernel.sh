@@ -36,8 +36,7 @@ fi
 build_arch() {
     local arch=$1
     local target=$2
-    local custom_target=$3
-    
+
     echo -e "${BLUE}Building $arch kernel...${NC}"
     
     if [ "$BUILD_TYPE" == "release" ]; then
@@ -46,41 +45,31 @@ build_arch() {
         RELEASE_FLAG=""
     fi
     
-    if [ "$custom_target" == "true" ]; then
-        # Build with custom target JSON (for x86_64 with kernel code model)
-        if cargo build $RELEASE_FLAG --target "$target" -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc; then
-            echo -e "${GREEN}$arch build successful!${NC}"
-        else
-            echo -e "${RED}$arch build failed!${NC}"
-            exit 1
-        fi
+    # All architectures need -Zbuild-std for bare metal targets
+    if cargo build $RELEASE_FLAG --target "$target" -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc; then
+        echo -e "${GREEN}$arch build successful!${NC}"
     else
-        # Build with standard bare metal target
-        if cargo build $RELEASE_FLAG --target "$target" -p veridian-kernel; then
-            echo -e "${GREEN}$arch build successful!${NC}"
-        else
-            echo -e "${RED}$arch build failed!${NC}"
-            exit 1
-        fi
+        echo -e "${RED}$arch build failed!${NC}"
+        exit 1
     fi
 }
 
 # Build based on architecture selection
 case $ARCH in
     x86_64)
-        build_arch "x86_64" "targets/x86_64-veridian.json" "true"
+        build_arch "x86_64" "targets/x86_64-veridian.json"
         ;;
     aarch64)
-        build_arch "AArch64" "aarch64-unknown-none" "false"
+        build_arch "AArch64" "aarch64-unknown-none"
         ;;
     riscv64)
-        build_arch "RISC-V" "riscv64gc-unknown-none-elf" "false"
+        build_arch "RISC-V" "riscv64gc-unknown-none-elf"
         ;;
     all)
         echo -e "${YELLOW}Building all architectures...${NC}"
-        build_arch "x86_64" "targets/x86_64-veridian.json" "true"
-        build_arch "AArch64" "aarch64-unknown-none" "false"
-        build_arch "RISC-V" "riscv64gc-unknown-none-elf" "false"
+        build_arch "x86_64" "targets/x86_64-veridian.json"
+        build_arch "AArch64" "aarch64-unknown-none"
+        build_arch "RISC-V" "riscv64gc-unknown-none-elf"
         ;;
     *)
         echo -e "${RED}Unknown architecture: $ARCH${NC}"
