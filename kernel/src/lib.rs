@@ -85,6 +85,9 @@ mod test_framework;
 #[cfg(test)]
 mod raii_tests;
 
+#[cfg(test)]
+mod integration_tests;
+
 pub mod bench;
 
 // Re-export for tests and benchmarks
