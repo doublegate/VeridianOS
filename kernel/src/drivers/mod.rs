@@ -10,6 +10,7 @@ pub mod storage;
 pub mod gpu;
 pub mod e1000;
 pub mod virtio_net;
+pub mod nvme;
 
 pub use pci::{PciBus, PciDevice};
 pub use usb::{UsbBus, UsbDevice};

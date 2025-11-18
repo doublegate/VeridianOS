@@ -4,6 +4,7 @@
 //! window management, and graphical user interface components.
 
 pub mod font;
+pub mod window_manager;
 
 use crate::error::KernelError;
 
@@ -13,6 +14,9 @@ pub fn init() -> Result<(), KernelError> {
 
     // Initialize font rendering
     font::init()?;
+
+    // Initialize window manager
+    window_manager::init()?;
 
     println!("[DESKTOP] Desktop subsystem initialized");
     Ok(())

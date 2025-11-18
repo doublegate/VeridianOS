@@ -14,6 +14,7 @@ pub mod socket;
 pub mod device;
 pub mod integration;
 pub mod dma_pool;
+pub mod dhcp;
 
 use crate::error::KernelError;
 use alloc::vec::Vec;
