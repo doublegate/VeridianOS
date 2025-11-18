@@ -13,6 +13,7 @@ pub mod ramfs;
 pub mod devfs;
 pub mod procfs;
 pub mod file;
+pub mod blockfs;
 
 pub use file::{File, FileDescriptor, FileTable, OpenFlags, SeekFrom};
 
