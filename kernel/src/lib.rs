@@ -73,6 +73,7 @@ pub mod drivers;
 pub mod userland;
 pub mod phase2_validation;
 pub mod security;
+pub mod crypto;
 pub mod pkg;
 pub mod perf;
 pub mod graphics;
