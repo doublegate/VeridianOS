@@ -2,13 +2,13 @@
 //!
 //! Implements console drivers for VGA text mode and serial console.
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 use alloc::{vec, format};
 use spin::Mutex;
 use crate::services::driver_framework::{
-    Driver, DeviceInfo, DeviceClass, DeviceStatus
+    Driver, DeviceInfo, DeviceClass
 };
 
 /// Console colors (VGA text mode)

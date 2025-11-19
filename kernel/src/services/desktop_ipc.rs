@@ -3,7 +3,7 @@
 //! Provides IPC communication channels for desktop applications (window manager, terminal, etc.)
 
 use crate::error::KernelError;
-use crate::ipc::{EndpointId, Message};
+use crate::ipc::EndpointId;
 use alloc::vec::Vec;
 
 /// Desktop IPC message types

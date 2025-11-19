@@ -5,7 +5,6 @@
 use crate::error::KernelError;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use alloc::vec;
 use spin::RwLock;
 
 /// Window ID type

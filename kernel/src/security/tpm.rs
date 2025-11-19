@@ -220,7 +220,7 @@ impl Tpm {
         }
 
         // Stub implementation - would request random bytes from TPM
-        let mut random_data = Vec::with_capacity(num_bytes);
+        let random_data = Vec::with_capacity(num_bytes);
 
         // In real implementation, this would send TPM2_GetRandom command
 
@@ -234,7 +234,7 @@ impl Tpm {
         }
 
         // Stub implementation - would read from TPM
-        let mut pcr_value = [0u8; 32];
+        let pcr_value = [0u8; 32];
 
         crate::println!("[TPM] Reading PCR {}", pcr_index);
 

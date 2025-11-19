@@ -31,7 +31,7 @@
 //! - Backward compatibility during transition period
 //! - Meet-in-the-middle security guarantees
 
-use super::{CryptoResult, CryptoError};
+use super::CryptoResult;
 use alloc::vec::Vec;
 
 /// Dilithium security levels

@@ -2,7 +2,7 @@
 //!
 //! Implements SHA-256, SHA-512, and BLAKE3 hash algorithms.
 
-use super::{CryptoResult, CryptoError};
+use super::CryptoResult;
 use alloc::vec::Vec;
 
 /// Hash algorithm types

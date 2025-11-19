@@ -4,7 +4,6 @@
 
 use crate::error::KernelError;
 use crate::graphics::Color;
-use crate::graphics::framebuffer::Framebuffer;
 use core::slice;
 
 /// VBE Mode Info Block

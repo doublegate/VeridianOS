@@ -16,8 +16,6 @@ use crate::{
     println,
 };
 
-#[cfg(feature = "alloc")]
-use alloc::string::ToString;
 
 /// Load and execute the init process
 #[cfg(feature = "alloc")]

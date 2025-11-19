@@ -2,10 +2,10 @@
 //!
 //! Implements PCI bus enumeration and device management.
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
-use alloc::{vec, format};
+use alloc::format;
 use core::mem;
 use crate::services::driver_framework::{
     Bus, DeviceInfo, DeviceClass, DeviceId, DeviceStatus

@@ -2,7 +2,7 @@
 //!
 //! Provides cryptographically secure random number generation.
 
-use super::{CryptoResult, CryptoError};
+use super::CryptoResult;
 use alloc::vec::Vec;
 use spin::Mutex;
 

@@ -4,10 +4,9 @@
 
 use crate::error::KernelError;
 use crate::fs::blockdev::BlockDevice;
-use crate::mm::PhysicalAddress;
 use alloc::vec::Vec;
 use alloc::vec;
-use core::sync::atomic::{AtomicU16, Ordering};
+use core::sync::atomic::AtomicU16;
 
 /// NVMe PCI vendor/device IDs
 pub const NVME_VENDOR_INTEL: u16 = 0x8086;

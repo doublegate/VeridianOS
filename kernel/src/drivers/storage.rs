@@ -2,10 +2,10 @@
 //!
 //! Implements storage drivers including ATA/IDE, AHCI/SATA, and NVMe.
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
-use alloc::{vec, format};
+use alloc::vec;
 use spin::Mutex;
 use crate::services::driver_framework::{
     Driver, DeviceInfo, DeviceClass, DeviceStatus

@@ -1,8 +1,7 @@
 //! UDP protocol implementation
 
-use super::{IpAddress, Port, SocketAddr};
+use super::{IpAddress, SocketAddr};
 use crate::error::KernelError;
-use alloc::vec::Vec;
 
 /// UDP header
 #[derive(Debug, Clone)]

@@ -7,7 +7,6 @@
 //! - Data blocks for file content
 
 use super::{DirEntry, Filesystem, Metadata, NodeType, Permissions, VfsNode};
-use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;

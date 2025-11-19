@@ -2,7 +2,7 @@
 //!
 //! Provides a unified interface for different filesystem implementations.
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::sync::Arc;
 use spin::RwLock;

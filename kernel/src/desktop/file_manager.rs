@@ -7,8 +7,7 @@ use crate::desktop::window_manager::{WindowId, get_window_manager, InputEvent};
 use crate::desktop::font::{get_font_manager, FontSize, FontStyle};
 use crate::fs::{get_vfs, NodeType};
 use alloc::vec::Vec;
-use alloc::vec;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::format;
 use spin::RwLock;
 

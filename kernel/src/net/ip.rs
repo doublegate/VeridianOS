@@ -1,6 +1,6 @@
 //! IP layer implementation
 
-use super::{IpAddress, Ipv4Address, Packet};
+use super::{IpAddress, Ipv4Address};
 use crate::error::KernelError;
 use alloc::vec::Vec;
 

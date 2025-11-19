@@ -167,7 +167,7 @@ impl KeyPair {
 
 /// X25519 key exchange
 pub mod key_exchange {
-    use super::{CryptoResult, CryptoError};
+    use super::CryptoResult;
 
     /// Public key for key exchange
     pub struct PublicKey {

@@ -8,7 +8,7 @@ use crate::desktop::font::{get_font_manager, FontSize, FontStyle};
 use crate::fs::{get_vfs, OpenFlags};
 use alloc::vec::Vec;
 use alloc::vec;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::format;
 use spin::RwLock;
 

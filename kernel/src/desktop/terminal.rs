@@ -3,13 +3,12 @@
 //! Combines PTY, font rendering, and window manager to provide a graphical terminal.
 
 use crate::error::KernelError;
-use crate::desktop::font::{Font, FontSize, FontStyle, get_font_manager};
+use crate::desktop::font::{FontSize, FontStyle, get_font_manager};
 use crate::desktop::window_manager::{WindowId, get_window_manager, InputEvent};
-use crate::fs::pty::{get_pty_manager, PtyMaster, PtySlave};
+use crate::fs::pty::get_pty_manager;
 use alloc::vec::Vec;
 use alloc::vec;
-use alloc::string::{String, ToString};
-use alloc::format;
+use alloc::string::ToString;
 use spin::RwLock;
 
 /// Terminal dimensions

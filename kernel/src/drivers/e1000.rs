@@ -4,7 +4,6 @@
 //! commonly found in QEMU and VirtualBox virtual machines.
 
 use crate::error::KernelError;
-use crate::mm::PhysicalAddress;
 use crate::net::{MacAddress, Packet};
 use crate::net::device::{NetworkDevice, DeviceCapabilities, DeviceStatistics, DeviceState};
 

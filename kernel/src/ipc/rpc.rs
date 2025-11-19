@@ -8,9 +8,7 @@ use super::{EndpointId, Message, SmallMessage, sync_send, sync_receive, IpcError
 use alloc::vec::Vec;
 use alloc::string::{String, ToString};
 use alloc::collections::BTreeMap;
-use alloc::boxed::Box;
 use spin::RwLock;
-use core::mem;
 
 /// RPC method identifier
 pub type MethodId = u32;

@@ -272,7 +272,7 @@ pub fn get_random_bytes(buffer: &mut [u8]) -> Result<(), KernelError> {
 pub fn derive_key(password: &[u8], salt: &[u8], output: &mut [u8]) -> Result<(), KernelError> {
     // TODO: Implement Argon2id
     // For now, simple PBKDF2-like approach
-    let mut temp = [0u8; 64];
+    let temp = [0u8; 64];
     hash(HashAlgorithm::Sha256, password)?;
 
     for i in 0..output.len() {

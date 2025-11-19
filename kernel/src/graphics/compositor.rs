@@ -1,6 +1,6 @@
 //! Window compositor
 
-use super::{Color, Rect};
+use super::Rect;
 use crate::error::KernelError;
 use alloc::vec::Vec;
 

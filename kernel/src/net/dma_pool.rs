@@ -118,8 +118,8 @@ impl DmaBufferPool {
             });
         }
 
-        let mut buffers = Vec::with_capacity(num_buffers);
-        let mut free_list = Vec::with_capacity(num_buffers);
+        let buffers = Vec::with_capacity(num_buffers);
+        let free_list = Vec::with_capacity(num_buffers);
 
         // TODO: Proper DMA buffer allocation
         // For now, this is a placeholder that documents the requirements

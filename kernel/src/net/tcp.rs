@@ -1,6 +1,6 @@
 //! TCP protocol implementation
 
-use super::{IpAddress, Port, SocketAddr};
+use super::SocketAddr;
 use crate::error::KernelError;
 
 /// TCP header flags

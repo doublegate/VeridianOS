@@ -5,7 +5,6 @@
 use crate::error::KernelError;
 use alloc::vec::Vec;
 use alloc::vec;
-use core::fmt;
 
 /// Font size in pixels
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

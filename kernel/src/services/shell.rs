@@ -92,7 +92,7 @@ pub struct Shell {
 impl Shell {
     /// Create a new shell
     pub fn new() -> Self {
-        let mut shell = Self {
+        let shell = Self {
             config: ShellConfig::default(),
             environment: RwLock::new(BTreeMap::new()),
             history: RwLock::new(Vec::new()),

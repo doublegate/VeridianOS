@@ -2,7 +2,7 @@
 //!
 //! Implements find, grep, wc, head, tail, and other common Unix utilities.
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 use alloc::vec;

@@ -3,13 +3,11 @@
 //! Loads ELF binaries from filesystem and executes them in user space.
 
 use crate::error::KernelError;
-use crate::mm::{PhysicalAddress, VirtualAddress};
+use crate::mm::VirtualAddress;
 use crate::process::{ProcessId, Process};
 use crate::elf::{Elf64Header, Elf64ProgramHeader};
 use alloc::vec::Vec;
-use alloc::vec;
 use alloc::string::String;
-use alloc::format;
 
 /// Program arguments
 pub struct ProgramArgs {

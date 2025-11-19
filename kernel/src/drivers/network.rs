@@ -2,12 +2,12 @@
 //!
 //! Implements network device drivers including Ethernet, Wi-Fi, and loopback.
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
-use alloc::{vec, format};
+use alloc::vec;
 use spin::{Mutex, RwLock};
 use crate::services::driver_framework::{
     Driver, DeviceInfo, DeviceClass, DeviceStatus
