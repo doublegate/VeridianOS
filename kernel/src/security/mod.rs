@@ -11,6 +11,9 @@ pub mod crypto;
 pub mod mac;
 pub mod audit;
 pub mod boot;
+pub mod memory_protection;
+pub mod auth;
+pub mod tpm;
 
 use crate::error::KernelError;
 
@@ -75,8 +78,17 @@ pub enum AccessType {
 pub fn init() -> Result<(), KernelError> {
     println!("[SECURITY] Initializing security subsystem...");
 
-    // Initialize cryptography
-    crypto::init()?;
+    // Initialize cryptography (now in separate crypto module)
+    // crypto::init()?; // Handled by top-level crypto module
+
+    // Initialize memory protection (ASLR, stack canaries, etc.)
+    memory_protection::init()?;
+
+    // Initialize authentication framework
+    auth::init()?;
+
+    // Initialize TPM support (if available)
+    tpm::init()?;
 
     // Initialize MAC system
     mac::init()?;

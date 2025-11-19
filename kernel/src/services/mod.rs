@@ -7,6 +7,8 @@ pub mod process_server;
 pub mod driver_framework;
 pub mod init_system;
 pub mod shell;
+// TODO: shell_utils module needs public API for command registration
+// pub mod shell_utils;
 pub mod desktop_ipc;
 
 pub use process_server::ProcessServer;

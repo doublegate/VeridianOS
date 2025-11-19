@@ -7,12 +7,14 @@ pub mod symmetric;
 pub mod asymmetric;
 pub mod random;
 pub mod keystore;
+pub mod post_quantum;
 
 pub use hash::{HashAlgorithm, Hash256, Hash512};
 pub use symmetric::{SymmetricCipher, Aes256Gcm, ChaCha20Poly1305};
 pub use asymmetric::{SigningKey, VerifyingKey, KeyPair};
 pub use random::{SecureRandom, get_random};
 pub use keystore::{KeyStore, KeyId, Key};
+pub use post_quantum::{DilithiumSigningKey, KyberSecretKey, HybridKeyExchange};
 
 use crate::error::KernelError;
 
