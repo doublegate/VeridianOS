@@ -1,164 +1,65 @@
-//! Package management system for VeridianOS
+//! Package Management System
 //!
-//! Provides package installation, removal, updates, and dependency resolution.
+//! VeridianOS package manager for installing, updating, and managing software packages.
 
-use crate::error::KernelError;
+pub mod format;
+pub mod repository;
+pub mod resolver;
+
 use alloc::string::String;
 use alloc::vec::Vec;
+use alloc::collections::BTreeMap;
+use crate::error::KernelError;
+
+/// Package identifier
+pub type PackageId = String;
+
+/// Package version using semantic versioning
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Version {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+}
+
+impl Version {
+    pub fn new(major: u32, minor: u32, patch: u32) -> Self {
+        Self { major, minor, patch }
+    }
+}
 
 /// Package metadata
 #[derive(Debug, Clone)]
 pub struct PackageMetadata {
-    /// Package name
     pub name: String,
-    /// Version (semantic versioning)
-    pub version: (u32, u32, u32),
-    /// Description
+    pub version: Version,
+    pub author: String,
     pub description: String,
-    /// Dependencies
-    pub dependencies: Vec<String>,
-    /// Package size in bytes
-    pub size: usize,
-    /// Install path
-    pub install_path: String,
+    pub license: String,
+    pub dependencies: Vec<Dependency>,
 }
 
-/// Package state
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PackageState {
-    NotInstalled,
-    Installing,
-    Installed,
-    Updating,
-    Removing,
-    Failed,
-}
-
-/// Package database entry
+/// Package dependency
 #[derive(Debug, Clone)]
-pub struct PackageEntry {
-    pub metadata: PackageMetadata,
-    pub state: PackageState,
-    pub install_time: u64,
+pub struct Dependency {
+    pub name: String,
+    pub version_req: String,
 }
 
-/// Maximum packages
-const MAX_PACKAGES: usize = 256;
-
-/// Package database
-static mut PACKAGES: [Option<PackageEntry>; MAX_PACKAGES] = [const { None }; MAX_PACKAGES];
-static mut PKG_COUNT: usize = 0;
-
-/// Install a package
-pub fn install(name: &str, version: (u32, u32, u32)) -> Result<(), KernelError> {
-    println!("[PKG] Installing package: {} v{}.{}.{}", name, version.0, version.1, version.2);
-
-    unsafe {
-        if PKG_COUNT >= MAX_PACKAGES {
-            return Err(KernelError::ResourceExhausted {
-                resource: "package_slots",
-            });
-        }
-
-        // Create package entry
-        let entry = PackageEntry {
-            metadata: PackageMetadata {
-                name: String::from(name),
-                version,
-                description: String::from("Package description"),
-                dependencies: Vec::new(),
-                size: 0,
-                install_path: String::from("/pkg/"),
-            },
-            state: PackageState::Installed,
-            install_time: 0,
-        };
-
-        PACKAGES[PKG_COUNT] = Some(entry);
-        PKG_COUNT += 1;
-    }
-
-    println!("[PKG] Package installed successfully");
-    Ok(())
+/// Package manager
+pub struct PackageManager {
+    installed: BTreeMap<PackageId, PackageMetadata>,
 }
 
-/// Remove a package
-pub fn remove(name: &str) -> Result<(), KernelError> {
-    println!("[PKG] Removing package: {}", name);
-
-    unsafe {
-        for i in 0..PKG_COUNT {
-            if let Some(ref mut entry) = PACKAGES[i] {
-                if entry.metadata.name == name {
-                    PACKAGES[i] = None;
-                    println!("[PKG] Package removed successfully");
-                    return Ok(());
-                }
-            }
+impl PackageManager {
+    pub fn new() -> Self {
+        Self {
+            installed: BTreeMap::new(),
         }
     }
-
-    Err(KernelError::NotFound {
-        resource: "package",
-        id: 0,
-    })
 }
 
-/// List installed packages
-pub fn list() -> Vec<String> {
-    let mut result = Vec::new();
-    unsafe {
-        for i in 0..PKG_COUNT {
-            if let Some(ref entry) = PACKAGES[i] {
-                result.push(entry.metadata.name.clone());
-            }
-        }
-    }
-    result
-}
-
-/// Check if package is installed
-pub fn is_installed(name: &str) -> bool {
-    unsafe {
-        for i in 0..PKG_COUNT {
-            if let Some(ref entry) = PACKAGES[i] {
-                if entry.metadata.name == name {
-                    return entry.state == PackageState::Installed;
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Initialize package manager
-pub fn init() -> Result<(), KernelError> {
-    println!("[PKG] Initializing package manager...");
-
-    // Install core packages
-    install("veridian-base", (0, 1, 0))?;
-    install("veridian-utils", (0, 1, 0))?;
-
-    println!("[PKG] Package manager initialized");
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test_case]
-    fn test_install_package() {
-        let result = install("test-pkg", (1, 0, 0));
-        assert!(result.is_ok());
-        assert!(is_installed("test-pkg"));
-    }
-
-    #[test_case]
-    fn test_remove_package() {
-        install("remove-test", (1, 0, 0)).unwrap();
-        assert!(is_installed("remove-test"));
-        remove("remove-test").unwrap();
-        assert!(!is_installed("remove-test"));
-    }
+/// Initialize package management system
+pub fn init() {
+    crate::println!("[PKG] Package management system initialized (stub)");
 }

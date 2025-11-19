@@ -175,7 +175,7 @@ pub fn kernel_init() -> KernelResult<()> {
     #[cfg(feature = "alloc")]
     {
         println!("[BOOTSTRAP] Initializing package manager...");
-        pkg::init().expect("Failed to initialize package manager");
+        pkg::init();
         println!("[BOOTSTRAP] Package manager initialized");
     }
 
