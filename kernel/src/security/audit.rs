@@ -1,6 +1,5 @@
 //! Security audit framework
 
-//!
 //! Tracks and logs security-relevant events for compliance and forensics.
 
 use crate::error::KernelError;
@@ -60,11 +59,19 @@ impl AuditEvent {
 /// Fallback timestamp function
 fn read_timestamp_fallback() -> u64 {
     // Try to use the test framework function if available
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64"))]
+    #[cfg(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    ))]
     {
         crate::test_framework::read_timestamp()
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )))]
     {
         0 // Fallback
     }

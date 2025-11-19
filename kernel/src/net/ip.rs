@@ -1,8 +1,9 @@
 //! IP layer implementation
 
+use alloc::vec::Vec;
+
 use super::{IpAddress, Ipv4Address};
 use crate::error::KernelError;
-use alloc::vec::Vec;
 
 /// IP protocol numbers
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

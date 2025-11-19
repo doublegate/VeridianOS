@@ -1,23 +1,27 @@
 //! NUMA-Aware Scheduling
 //!
-//! Optimizes process placement for Non-Uniform Memory Access (NUMA) architectures.
+//! Optimizes process placement for Non-Uniform Memory Access (NUMA)
+//! architectures.
 //!
 //! ## NUMA Background
 //!
 //! Modern multi-socket systems have NUMA characteristics where memory access
 //! latency depends on which CPU socket is accessing which memory node.
-//! Local memory access is faster than remote access (typical ratio: 1.0x vs 1.5-2.0x).
+//! Local memory access is faster than remote access (typical ratio: 1.0x vs
+//! 1.5-2.0x).
 //!
 //! ## Optimization Strategy
 //!
 //! 1. **Memory affinity**: Schedule processes on CPUs close to their memory
-//! 2. **Load balancing**: Balance load within NUMA nodes before cross-node migration
+//! 2. **Load balancing**: Balance load within NUMA nodes before cross-node
+//!    migration
 //! 3. **Page migration**: Move pages to local node when access patterns change
-//! 4. **Interleaving**: Distribute memory across nodes for bandwidth-intensive workloads
+//! 4. **Interleaving**: Distribute memory across nodes for bandwidth-intensive
+//!    workloads
 
-use alloc::vec::Vec;
-use alloc::collections::BTreeMap;
+use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
 use spin::RwLock;
 
 /// NUMA node identifier

@@ -1,10 +1,12 @@
 //! Post-Quantum Cryptography
 //!
-//! Implements ML-DSA (Dilithium) signatures and ML-KEM (Kyber) key encapsulation.
+//! Implements ML-DSA (Dilithium) signatures and ML-KEM (Kyber) key
+//! encapsulation.
 //!
 //! ## NIST Standards Compliance
 //!
-//! This module implements algorithms selected by NIST for post-quantum cryptography:
+//! This module implements algorithms selected by NIST for post-quantum
+//! cryptography:
 //! - **ML-DSA (FIPS 204)**: Module-Lattice-Based Digital Signature Algorithm
 //!   - Replaces Dilithium after standardization
 //!   - Provides quantum-resistant digital signatures
@@ -26,28 +28,30 @@
 //!
 //! ## Integration with Classical Cryptography
 //!
-//! Hybrid key exchange combines classical (X25519) and post-quantum (Kyber) to provide:
+//! Hybrid key exchange combines classical (X25519) and post-quantum (Kyber) to
+//! provide:
 //! - Security against both classical and quantum attacks
 //! - Backward compatibility during transition period
 //! - Meet-in-the-middle security guarantees
 
-use super::CryptoResult;
 use alloc::vec::Vec;
+
+use super::CryptoResult;
 
 /// Dilithium security levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DilithiumLevel {
-    Level2,  // ~128 bits security
-    Level3,  // ~192 bits security
-    Level5,  // ~256 bits security
+    Level2, // ~128 bits security
+    Level3, // ~192 bits security
+    Level5, // ~256 bits security
 }
 
 /// Kyber security levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KyberLevel {
-    Kyber512,   // ~128 bits security
-    Kyber768,   // ~192 bits security
-    Kyber1024,  // ~256 bits security
+    Kyber512,  // ~128 bits security
+    Kyber768,  // ~192 bits security
+    Kyber1024, // ~256 bits security
 }
 
 /// ML-DSA (Dilithium) signing key
@@ -73,14 +77,16 @@ impl DilithiumSigningKey {
         use super::random::get_random;
 
         let secret_size = match level {
-            DilithiumLevel::Level2 => 2560,   // Dilithium2
-            DilithiumLevel::Level3 => 4000,   // Dilithium3
-            DilithiumLevel::Level5 => 4880,   // Dilithium5
+            DilithiumLevel::Level2 => 2560, // Dilithium2
+            DilithiumLevel::Level3 => 4000, // Dilithium3
+            DilithiumLevel::Level5 => 4880, // Dilithium5
         };
 
         let rng = get_random();
         let mut secret = Vec::with_capacity(secret_size);
-        unsafe { secret.set_len(secret_size); }
+        unsafe {
+            secret.set_len(secret_size);
+        }
         rng.fill_bytes(&mut secret)?;
 
         Ok(Self { level, secret })
@@ -98,7 +104,9 @@ impl DilithiumSigningKey {
         };
 
         let mut sig_bytes = Vec::with_capacity(sig_size);
-        unsafe { sig_bytes.set_len(sig_size); }
+        unsafe {
+            sig_bytes.set_len(sig_size);
+        }
 
         // Simple stub - XOR message bytes with secret
         for (i, &byte) in message.iter().enumerate().take(sig_bytes.len()) {
@@ -118,7 +126,9 @@ impl DilithiumSigningKey {
         };
 
         let mut public = Vec::with_capacity(public_size);
-        unsafe { public.set_len(public_size); }
+        unsafe {
+            public.set_len(public_size);
+        }
 
         // Simple derivation (NOT secure - just for structure)
         for (i, byte) in self.secret.iter().enumerate().take(public_size) {
@@ -184,7 +194,9 @@ impl KyberSecretKey {
 
         let rng = get_random();
         let mut secret = Vec::with_capacity(secret_size);
-        unsafe { secret.set_len(secret_size); }
+        unsafe {
+            secret.set_len(secret_size);
+        }
         rng.fill_bytes(&mut secret)?;
 
         Ok(Self { level, secret })
@@ -199,7 +211,9 @@ impl KyberSecretKey {
         };
 
         let mut public = Vec::with_capacity(public_size);
-        unsafe { public.set_len(public_size); }
+        unsafe {
+            public.set_len(public_size);
+        }
 
         // Simple derivation (NOT secure - just for structure)
         for (i, byte) in self.secret.iter().enumerate().take(public_size) {
@@ -219,7 +233,8 @@ impl KyberSecretKey {
 
         use super::hash::sha256;
 
-        // Hash the ciphertext and secret to derive shared secret (NOT secure - just stub)
+        // Hash the ciphertext and secret to derive shared secret (NOT secure - just
+        // stub)
         let mut input = Vec::new();
         input.extend_from_slice(&ciphertext.bytes);
         input.extend_from_slice(&self.secret);
@@ -238,8 +253,7 @@ impl KyberPublicKey {
         // Stub implementation of ML-KEM encapsulation
         // TODO: Implement full Kyber algorithm
 
-        use super::random::get_random;
-        use super::hash::sha256;
+        use super::{hash::sha256, random::get_random};
 
         let ct_size = match self.level {
             KyberLevel::Kyber512 => 768,
@@ -249,7 +263,9 @@ impl KyberPublicKey {
 
         let rng = get_random();
         let mut ct_bytes = Vec::with_capacity(ct_size);
-        unsafe { ct_bytes.set_len(ct_size); }
+        unsafe {
+            ct_bytes.set_len(ct_size);
+        }
         rng.fill_bytes(&mut ct_bytes)?;
 
         // Generate shared secret (stub)
@@ -261,7 +277,9 @@ impl KyberPublicKey {
 
         Ok((
             KyberCiphertext { bytes: ct_bytes },
-            KyberSharedSecret { bytes: *hash.as_bytes() },
+            KyberSharedSecret {
+                bytes: *hash.as_bytes(),
+            },
         ))
     }
 }

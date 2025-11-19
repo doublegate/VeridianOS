@@ -2,8 +2,9 @@
 //!
 //! Provides a common interface for block-level storage devices.
 
-use crate::error::KernelError;
 use alloc::vec::Vec;
+
+use crate::error::KernelError;
 
 /// Block device trait
 pub trait BlockDevice: Send + Sync {
@@ -98,8 +99,9 @@ impl BlockDevice for RamBlockDevice {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use alloc::string::String;
+
+    use super::*;
 
     #[test_case]
     fn test_ram_block_device() {

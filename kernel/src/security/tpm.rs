@@ -24,9 +24,11 @@
 //! 2. MMIO or I2C/SPI drivers for communication
 //! 3. TSS (TPM Software Stack) library for command marshaling
 
-use crate::error::KernelError;
 use alloc::vec::Vec;
+
 use spin::Mutex;
+
+use crate::error::KernelError;
 
 /// TPM MMIO base addresses (platform-specific)
 pub mod mmio {
@@ -153,19 +155,17 @@ impl Tpm {
         None
 
         // Production code would do something like:
-        /*
-        unsafe {
-            let base = mmio::TPM2_BASE;
-            let id_ptr = (base + mmio::TPM_INTERFACE_ID) as *const u32;
-            let id = core::ptr::read_volatile(id_ptr);
-
-            // Check for valid TPM interface ID
-            if (id & 0xFFFF) != 0 && (id & 0xFFFF) != 0xFFFF {
-                return Some(base);
-            }
-        }
-        None
-        */
+        // unsafe {
+        // let base = mmio::TPM2_BASE;
+        // let id_ptr = (base + mmio::TPM_INTERFACE_ID) as *const u32;
+        // let id = core::ptr::read_volatile(id_ptr);
+        //
+        // Check for valid TPM interface ID
+        // if (id & 0xFFFF) != 0 && (id & 0xFFFF) != 0xFFFF {
+        // return Some(base);
+        // }
+        // }
+        // None
     }
 
     /// Initialize TPM
@@ -181,7 +181,10 @@ impl Tpm {
             return Ok(());
         }
 
-        crate::println!("[TPM] Performing startup sequence for {:?} interface...", self.interface_type);
+        crate::println!(
+            "[TPM] Performing startup sequence for {:?} interface...",
+            self.interface_type
+        );
 
         // Send TPM2_Startup command
         match self.interface_type {
@@ -265,7 +268,10 @@ impl Tpm {
             return Err(TpmError::NotInitialized);
         }
 
-        crate::println!("[TPM] Creating attestation quote for {} PCRs", pcr_selection.len());
+        crate::println!(
+            "[TPM] Creating attestation quote for {} PCRs",
+            pcr_selection.len()
+        );
 
         // Stub - would create signed quote of PCR values
         let quote = Vec::new();
@@ -322,7 +328,11 @@ impl Tpm {
             return Err(TpmError::NotInitialized);
         }
 
-        crate::println!("[TPM] Signing {} bytes with key handle 0x{:08X}", data.len(), handle);
+        crate::println!(
+            "[TPM] Signing {} bytes with key handle 0x{:08X}",
+            data.len(),
+            handle
+        );
 
         // Stub - would sign with TPM key
         let signature = Vec::new();
@@ -331,7 +341,12 @@ impl Tpm {
     }
 
     /// Verify signature with TPM key
-    pub fn verify_signature(&self, handle: TpmHandle, data: &[u8], signature: &[u8]) -> TpmResult<bool> {
+    pub fn verify_signature(
+        &self,
+        handle: TpmHandle,
+        data: &[u8],
+        signature: &[u8],
+    ) -> TpmResult<bool> {
         if !self.initialized {
             return Err(TpmError::NotInitialized);
         }

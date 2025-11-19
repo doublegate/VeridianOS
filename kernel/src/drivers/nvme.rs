@@ -2,24 +2,23 @@
 //!
 //! High-performance storage driver for NVMe SSDs using the BlockDevice trait.
 
-use crate::error::KernelError;
-use crate::fs::blockdev::BlockDevice;
-use alloc::vec::Vec;
-use alloc::vec;
+use alloc::{vec, vec::Vec};
 use core::sync::atomic::AtomicU16;
+
+use crate::{error::KernelError, fs::blockdev::BlockDevice};
 
 /// NVMe PCI vendor/device IDs
 pub const NVME_VENDOR_INTEL: u16 = 0x8086;
 pub const NVME_VENDOR_SAMSUNG: u16 = 0x144d;
 
 /// NVMe register offsets
-const REG_CAP: usize = 0x00;       // Controller Capabilities
-const REG_VS: usize = 0x08;        // Version
-const REG_CC: usize = 0x14;        // Controller Configuration
-const REG_CSTS: usize = 0x1C;      // Controller Status
-const REG_AQA: usize = 0x24;       // Admin Queue Attributes
-const REG_ASQ: usize = 0x28;       // Admin Submission Queue
-const REG_ACQ: usize = 0x30;       // Admin Completion Queue
+const REG_CAP: usize = 0x00; // Controller Capabilities
+const REG_VS: usize = 0x08; // Version
+const REG_CC: usize = 0x14; // Controller Configuration
+const REG_CSTS: usize = 0x1C; // Controller Status
+const REG_AQA: usize = 0x24; // Admin Queue Attributes
+const REG_ASQ: usize = 0x28; // Admin Submission Queue
+const REG_ACQ: usize = 0x30; // Admin Completion Queue
 
 /// Controller Configuration bits
 const CC_ENABLE: u32 = 1 << 0;
@@ -121,7 +120,17 @@ impl QueuePair {
     fn new(queue_size: u16) -> Self {
         Self {
             submission_queue: vec![SubmissionQueueEntry::new(); queue_size as usize],
-            completion_queue: vec![CompletionQueueEntry { result: 0, _reserved: 0, sq_head: 0, sq_id: 0, command_id: 0, status: 0 }; queue_size as usize],
+            completion_queue: vec![
+                CompletionQueueEntry {
+                    result: 0,
+                    _reserved: 0,
+                    sq_head: 0,
+                    sq_id: 0,
+                    command_id: 0,
+                    status: 0
+                };
+                queue_size as usize
+            ],
             sq_tail: AtomicU16::new(0),
             cq_head: AtomicU16::new(0),
             queue_size,
@@ -189,7 +198,10 @@ impl NvmeController {
 
     /// Initialize the NVMe controller
     fn initialize(&mut self) -> Result<(), KernelError> {
-        println!("[NVME] Initializing NVMe controller at 0x{:x}", self.mmio_base);
+        println!(
+            "[NVME] Initializing NVMe controller at 0x{:x}",
+            self.mmio_base
+        );
 
         // Read version
         let version = self.read_reg(REG_VS);
@@ -223,7 +235,10 @@ impl NvmeController {
         let admin_queue_size = 64.min(max_queue_entries);
         self.admin_queue = Some(QueuePair::new(admin_queue_size));
 
-        println!("[NVME] Created admin queue with {} entries", admin_queue_size);
+        println!(
+            "[NVME] Created admin queue with {} entries",
+            admin_queue_size
+        );
 
         // NOTE: Full initialization requires:
         // 1. DMA-capable memory allocation for queues
@@ -246,7 +261,11 @@ impl NvmeController {
     }
 
     /// Read blocks (stub implementation)
-    fn read_blocks_internal(&self, _start_block: u64, _buffer: &mut [u8]) -> Result<(), KernelError> {
+    fn read_blocks_internal(
+        &self,
+        _start_block: u64,
+        _buffer: &mut [u8],
+    ) -> Result<(), KernelError> {
         // TODO: Create I/O command
         // TODO: Submit to I/O queue
         // TODO: Wait for completion
@@ -256,7 +275,11 @@ impl NvmeController {
     }
 
     /// Write blocks (stub implementation)
-    fn write_blocks_internal(&mut self, _start_block: u64, _buffer: &[u8]) -> Result<(), KernelError> {
+    fn write_blocks_internal(
+        &mut self,
+        _start_block: u64,
+        _buffer: &[u8],
+    ) -> Result<(), KernelError> {
         // TODO: Create I/O command
         // TODO: Copy data to DMA buffer
         // TODO: Submit to I/O queue

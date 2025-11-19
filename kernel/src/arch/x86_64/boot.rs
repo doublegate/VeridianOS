@@ -11,19 +11,19 @@ pub fn early_boot_init() {
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
     }
-    
+
     // Initialize VGA text buffer first for immediate feedback
     unsafe {
         let vga = 0xb8000 as *mut u16;
         // Write 'B' in white on black
         vga.write_volatile(0x0F42);
     }
-    
+
     // Initialize early serial first thing
     unsafe {
         // Direct serial port initialization at 0x3F8
         let base: u16 = 0x3F8;
-        
+
         // Disable interrupts
         outb(base + 1, 0x00);
         // Enable DLAB
@@ -37,7 +37,7 @@ pub fn early_boot_init() {
         outb(base + 2, 0xC7);
         // Enable IRQs, set RTS/DSR
         outb(base + 4, 0x0B);
-        
+
         // Write boot marker
         write_str(base, "BOOT_ENTRY\n");
     }

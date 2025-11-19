@@ -1,10 +1,11 @@
 //! Desktop IPC Protocol
 //!
-//! Provides IPC communication channels for desktop applications (window manager, terminal, etc.)
+//! Provides IPC communication channels for desktop applications (window
+//! manager, terminal, etc.)
 
-use crate::error::KernelError;
-use crate::ipc::EndpointId;
 use alloc::vec::Vec;
+
+use crate::{error::KernelError, ipc::EndpointId};
 
 /// Desktop IPC message types
 #[repr(u32)]
@@ -89,13 +90,7 @@ pub mod helpers {
     use super::*;
 
     /// Create a window creation message
-    pub fn create_window_message(
-        x: i32,
-        y: i32,
-        width: u32,
-        height: u32,
-        title: &str,
-    ) -> Vec<u8> {
+    pub fn create_window_message(x: i32, y: i32, width: u32, height: u32, title: &str) -> Vec<u8> {
         let mut data = Vec::new();
 
         // Message type
@@ -178,7 +173,12 @@ pub mod helpers {
         data.extend_from_slice(&(DesktopMessageType::MouseMove as u32).to_le_bytes());
 
         // Event struct
-        let event = MouseEvent { x, y, button, pressed };
+        let event = MouseEvent {
+            x,
+            y,
+            button,
+            pressed,
+        };
 
         unsafe {
             let event_bytes = core::slice::from_raw_parts(
@@ -210,8 +210,7 @@ pub fn init() -> Result<(), KernelError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::helpers::*;
+    use super::{helpers::*, *};
 
     #[test_case]
     fn test_create_window_message() {
@@ -226,9 +225,6 @@ mod tests {
         let msg = keyboard_event_message(65, 0, true); // 'A' key pressed
 
         // Should contain message type + event struct
-        assert_eq!(
-            msg.len(),
-            4 + core::mem::size_of::<KeyEvent>()
-        );
+        assert_eq!(msg.len(), 4 + core::mem::size_of::<KeyEvent>());
     }
 }

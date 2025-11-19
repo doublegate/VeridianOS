@@ -6,12 +6,12 @@
 //! - Block allocation bitmap
 //! - Data blocks for file content
 
-use super::{DirEntry, Filesystem, Metadata, NodeType, Permissions, VfsNode};
-use alloc::sync::Arc;
-use alloc::vec;
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::mem::size_of;
+
 use spin::RwLock;
+
+use super::{DirEntry, Filesystem, Metadata, NodeType, Permissions, VfsNode};
 
 /// Block size (4KB)
 pub const BLOCK_SIZE: usize = 4096;
@@ -225,13 +225,21 @@ impl VfsNode for BlockFsNode {
         Ok(Arc::new(BlockFsNode::new(child_inode, self.fs.clone())))
     }
 
-    fn create(&self, name: &str, permissions: Permissions) -> Result<Arc<dyn VfsNode>, &'static str> {
+    fn create(
+        &self,
+        name: &str,
+        permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, &'static str> {
         let mut fs = self.fs.write();
         let new_inode = fs.create_file(self.inode_num, name, permissions)?;
         Ok(Arc::new(BlockFsNode::new(new_inode, self.fs.clone())))
     }
 
-    fn mkdir(&self, name: &str, permissions: Permissions) -> Result<Arc<dyn VfsNode>, &'static str> {
+    fn mkdir(
+        &self,
+        name: &str,
+        permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, &'static str> {
         let mut fs = self.fs.write();
         let new_inode = fs.create_directory(self.inode_num, name, permissions)?;
         Ok(Arc::new(BlockFsNode::new(new_inode, self.fs.clone())))
@@ -282,7 +290,8 @@ impl BlockFsInner {
 
     fn allocate_inode(&mut self) -> Option<u32> {
         for (idx, inode) in self.inode_table.iter().enumerate() {
-            if inode.links_count == 0 && idx > 0 { // Don't allocate root
+            if inode.links_count == 0 && idx > 0 {
+                // Don't allocate root
                 self.superblock.free_inodes -= 1;
                 return Some(idx as u32);
             }
@@ -301,8 +310,15 @@ impl BlockFsInner {
         self.superblock.free_blocks += 1;
     }
 
-    fn read_inode(&self, inode_num: u32, offset: usize, buffer: &mut [u8]) -> Result<usize, &'static str> {
-        let inode = self.inode_table.get(inode_num as usize)
+    fn read_inode(
+        &self,
+        inode_num: u32,
+        offset: usize,
+        buffer: &mut [u8],
+    ) -> Result<usize, &'static str> {
+        let inode = self
+            .inode_table
+            .get(inode_num as usize)
             .ok_or("Invalid inode")?;
 
         if offset >= inode.size as usize {
@@ -341,7 +357,12 @@ impl BlockFsInner {
         Ok(bytes_read)
     }
 
-    fn write_inode(&mut self, inode_num: u32, offset: usize, data: &[u8]) -> Result<usize, &'static str> {
+    fn write_inode(
+        &mut self,
+        inode_num: u32,
+        offset: usize,
+        data: &[u8],
+    ) -> Result<usize, &'static str> {
         // Collect block information in multiple passes to avoid borrow conflicts
         let mut blocks_needed = Vec::new();
         let mut current_offset = offset;
@@ -396,7 +417,9 @@ impl BlockFsInner {
     }
 
     fn get_metadata(&self, inode_num: u32) -> Result<Metadata, &'static str> {
-        let inode = self.inode_table.get(inode_num as usize)
+        let inode = self
+            .inode_table
+            .get(inode_num as usize)
             .ok_or("Invalid inode")?;
 
         Ok(Metadata {
@@ -412,7 +435,9 @@ impl BlockFsInner {
     }
 
     fn readdir(&self, inode_num: u32) -> Result<Vec<DirEntry>, &'static str> {
-        let inode = self.inode_table.get(inode_num as usize)
+        let inode = self
+            .inode_table
+            .get(inode_num as usize)
             .ok_or("Invalid inode")?;
 
         if !inode.is_dir() {
@@ -428,7 +453,12 @@ impl BlockFsInner {
         Err("Not found")
     }
 
-    fn create_file(&mut self, _parent: u32, _name: &str, permissions: Permissions) -> Result<u32, &'static str> {
+    fn create_file(
+        &mut self,
+        _parent: u32,
+        _name: &str,
+        permissions: Permissions,
+    ) -> Result<u32, &'static str> {
         let inode_num = self.allocate_inode().ok_or("No free inodes")?;
 
         let mode = permissions_to_mode(permissions, false);
@@ -439,7 +469,12 @@ impl BlockFsInner {
         Ok(inode_num)
     }
 
-    fn create_directory(&mut self, _parent: u32, _name: &str, permissions: Permissions) -> Result<u32, &'static str> {
+    fn create_directory(
+        &mut self,
+        _parent: u32,
+        _name: &str,
+        permissions: Permissions,
+    ) -> Result<u32, &'static str> {
         let inode_num = self.allocate_inode().ok_or("No free inodes")?;
 
         let mode = permissions_to_mode(permissions, true);
@@ -457,7 +492,9 @@ impl BlockFsInner {
     }
 
     fn truncate_inode(&mut self, inode_num: u32, size: usize) -> Result<(), &'static str> {
-        let inode = self.inode_table.get_mut(inode_num as usize)
+        let inode = self
+            .inode_table
+            .get_mut(inode_num as usize)
             .ok_or("Invalid inode")?;
 
         inode.size = size as u32;
@@ -476,15 +513,33 @@ fn permissions_to_mode(perms: Permissions, is_dir: bool) -> u16 {
         mode |= 0x8000;
     }
 
-    if perms.owner_read { mode |= 0o400; }
-    if perms.owner_write { mode |= 0o200; }
-    if perms.owner_exec { mode |= 0o100; }
-    if perms.group_read { mode |= 0o040; }
-    if perms.group_write { mode |= 0o020; }
-    if perms.group_exec { mode |= 0o010; }
-    if perms.other_read { mode |= 0o004; }
-    if perms.other_write { mode |= 0o002; }
-    if perms.other_exec { mode |= 0o001; }
+    if perms.owner_read {
+        mode |= 0o400;
+    }
+    if perms.owner_write {
+        mode |= 0o200;
+    }
+    if perms.owner_exec {
+        mode |= 0o100;
+    }
+    if perms.group_read {
+        mode |= 0o040;
+    }
+    if perms.group_write {
+        mode |= 0o020;
+    }
+    if perms.group_exec {
+        mode |= 0o010;
+    }
+    if perms.other_read {
+        mode |= 0o004;
+    }
+    if perms.other_write {
+        mode |= 0o002;
+    }
+    if perms.other_exec {
+        mode |= 0o001;
+    }
 
     mode
 }

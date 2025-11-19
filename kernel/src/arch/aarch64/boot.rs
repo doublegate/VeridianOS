@@ -18,7 +18,7 @@ global_asm!(include_str!("boot.S"));
 pub unsafe extern "C" fn _start_rust() -> ! {
     // Use direct_uart for proper string output
     use crate::arch::aarch64::direct_uart::uart_write_str;
-    
+
     // Write startup messages
     uart_write_str("[BOOT] AArch64 Rust entry point reached\n");
     uart_write_str("[BOOT] Stack initialized and BSS cleared\n");

@@ -18,18 +18,17 @@
 //! - **Compositor**: Window manager
 //! - **Shell**: Desktop interface (xdg-shell)
 
-pub mod protocol;
-pub mod surface;
-pub mod compositor;
 pub mod buffer;
+pub mod compositor;
+pub mod protocol;
 pub mod shell;
+pub mod surface;
 
-use alloc::vec::Vec;
-use alloc::collections::BTreeMap;
-use alloc::string::String;
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
+
 use spin::RwLock;
-use crate::error::KernelError;
-use crate::sync::once_lock::GlobalState;
+
+use crate::{error::KernelError, sync::once_lock::GlobalState};
 
 /// Wayland object ID
 pub type ObjectId = u32;
@@ -71,7 +70,9 @@ impl WaylandDisplay {
 
     /// Connect a new client
     pub fn connect_client(&self) -> Result<u32, KernelError> {
-        let client_id = self.next_client_id.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let client_id = self
+            .next_client_id
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
         let client = WaylandClient::new(client_id);
         self.clients.write().insert(client_id, client);
@@ -88,8 +89,10 @@ impl WaylandDisplay {
     /// Process client message
     pub fn process_message(&self, client_id: u32, data: &[u8]) -> Result<Vec<u8>, KernelError> {
         let clients = self.clients.read();
-        let client = clients.get(&client_id)
-            .ok_or(KernelError::NotFound { resource: "client", id: client_id as u64 })?;
+        let client = clients.get(&client_id).ok_or(KernelError::NotFound {
+            resource: "client",
+            id: client_id as u64,
+        })?;
 
         client.handle_message(data)
     }
@@ -135,7 +138,9 @@ impl WaylandClient {
 
     /// Create new object
     pub fn create_object(&self, interface: &str) -> ObjectId {
-        let id = self.next_object_id.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let id = self
+            .next_object_id
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
         let object = Object {
             id,
@@ -164,10 +169,12 @@ static WAYLAND_DISPLAY: GlobalState<WaylandDisplay> = GlobalState::new();
 
 /// Initialize Wayland compositor
 pub fn init() -> Result<(), KernelError> {
-    WAYLAND_DISPLAY.init(WaylandDisplay::new()).map_err(|_| KernelError::InvalidState {
-        expected: "uninitialized",
-        actual: "initialized",
-    })?;
+    WAYLAND_DISPLAY
+        .init(WaylandDisplay::new())
+        .map_err(|_| KernelError::InvalidState {
+            expected: "uninitialized",
+            actual: "initialized",
+        })?;
 
     crate::println!("[WAYLAND] Wayland compositor initialized");
     Ok(())
@@ -185,7 +192,8 @@ mod tests {
     #[test_case]
     fn test_display_creation() {
         let display = WaylandDisplay::new();
-        assert_eq!(display.globals.read().len(), 3); // compositor, shm, xdg_wm_base
+        assert_eq!(display.globals.read().len(), 3); // compositor, shm,
+                                                     // xdg_wm_base
     }
 
     #[test_case]

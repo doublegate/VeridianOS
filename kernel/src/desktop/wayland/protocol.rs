@@ -30,7 +30,7 @@ pub struct Message {
 pub enum Argument {
     Int(i32),
     Uint(u32),
-    Fixed(i32),  // Fixed-point (1/256 precision)
+    Fixed(i32), // Fixed-point (1/256 precision)
     String(alloc::string::String),
     Object(u32),
     NewId(u32),

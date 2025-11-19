@@ -1,6 +1,7 @@
 //! RISC-V timer implementation
 
 use core::sync::atomic::{AtomicU64, Ordering};
+
 use super::sbi;
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
@@ -56,7 +57,10 @@ pub fn setup_timer(interval_ms: u32) {
     // Use SBI to set timer
     let result = sbi::set_timer(next_time);
     if !result.is_ok() {
-        println!("[TIMER] WARNING: SBI set_timer failed with error {}", result.error);
+        println!(
+            "[TIMER] WARNING: SBI set_timer failed with error {}",
+            result.error
+        );
     }
 
     // Enable supervisor timer interrupts in SIE
@@ -69,5 +73,8 @@ pub fn setup_timer(interval_ms: u32) {
         "[TIMER] Configured RISC-V timer for {}ms intervals ({} cycles)",
         interval_ms, interval_cycles
     );
-    println!("[TIMER] Current time: {}, Next interrupt: {}", current_time, next_time);
+    println!(
+        "[TIMER] Current time: {}, Next interrupt: {}",
+        current_time, next_time
+    );
 }

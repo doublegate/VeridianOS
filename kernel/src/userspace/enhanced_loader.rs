@@ -2,12 +2,14 @@
 //!
 //! Loads ELF binaries from filesystem and executes them in user space.
 
-use crate::error::KernelError;
-use crate::mm::VirtualAddress;
-use crate::process::{ProcessId, Process};
-use crate::elf::{Elf64Header, Elf64ProgramHeader};
-use alloc::vec::Vec;
-use alloc::string::String;
+use alloc::{string::String, vec::Vec};
+
+use crate::{
+    elf::{Elf64Header, Elf64ProgramHeader},
+    error::KernelError,
+    mm::VirtualAddress,
+    process::{Process, ProcessId},
+};
 
 /// Program arguments
 pub struct ProgramArgs {
@@ -120,15 +122,21 @@ impl EnhancedElfLoader {
         // For now, return a stub entry point
         let entry_point = VirtualAddress(0x400000);
 
-        println!("[ELF-LOADER] Program loaded, entry point: 0x{:x}", entry_point.0);
+        println!(
+            "[ELF-LOADER] Program loaded, entry point: 0x{:x}",
+            entry_point.0
+        );
 
         Ok(entry_point)
     }
 
     /// Set up program arguments on stack
     pub fn setup_args(&self, _process: &Process, args: &ProgramArgs) -> Result<(), KernelError> {
-        println!("[ELF-LOADER] Setting up {} arguments and {} env vars",
-                 args.args.len(), args.env.len());
+        println!(
+            "[ELF-LOADER] Setting up {} arguments and {} env vars",
+            args.args.len(),
+            args.env.len()
+        );
 
         // TODO: Push arguments and environment onto stack
         // Format: [argc, argv[], envp[], arg strings, env strings]
@@ -212,6 +220,6 @@ mod tests {
     #[test_case]
     fn test_elf_magic_check() {
         let data = vec![0x7f, b'E', b'L', b'F']; // ELF magic
-        // Would test ELF loading here
+                                                 // Would test ELF loading here
     }
 }

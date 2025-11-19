@@ -9,7 +9,7 @@ use crate::sched;
 pub extern "C" fn test_task_a() -> ! {
     #[cfg(target_arch = "aarch64")]
     {
-        use crate::arch::aarch64::direct_uart::{uart_write_str, direct_print_num};
+        use crate::arch::aarch64::direct_uart::{direct_print_num, uart_write_str};
 
         unsafe {
             let mut counter = 0u64;
@@ -67,7 +67,7 @@ pub extern "C" fn test_task_a() -> ! {
 pub extern "C" fn test_task_b() -> ! {
     #[cfg(target_arch = "aarch64")]
     {
-        use crate::arch::aarch64::direct_uart::{uart_write_str, direct_print_num};
+        use crate::arch::aarch64::direct_uart::{direct_print_num, uart_write_str};
 
         unsafe {
             let mut counter = 0u64;
@@ -130,7 +130,7 @@ pub fn create_test_tasks() {
 
         #[cfg(not(target_arch = "aarch64"))]
         println!("[TEST] Creating test tasks for context switch verification");
-        
+
         #[cfg(target_arch = "aarch64")]
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -142,7 +142,7 @@ pub fn create_test_tasks() {
             Ok(_pid_a) => {
                 #[cfg(not(target_arch = "aarch64"))]
                 println!("[TEST] Created process A with PID {}", _pid_a.0);
-                
+
                 #[cfg(target_arch = "aarch64")]
                 unsafe {
                     use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -152,7 +152,7 @@ pub fn create_test_tasks() {
                 if let Err(_e) = process::create_thread(test_task_a as usize, 0, 0, 0) {
                     #[cfg(not(target_arch = "aarch64"))]
                     println!("[TEST] Failed to create thread for task A: {}", _e);
-                    
+
                     #[cfg(target_arch = "aarch64")]
                     unsafe {
                         use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -161,7 +161,7 @@ pub fn create_test_tasks() {
                 } else {
                     #[cfg(not(target_arch = "aarch64"))]
                     println!("[TEST] Created thread for task A");
-                    
+
                     #[cfg(target_arch = "aarch64")]
                     unsafe {
                         use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -172,7 +172,7 @@ pub fn create_test_tasks() {
             Err(_e) => {
                 #[cfg(not(target_arch = "aarch64"))]
                 println!("[TEST] Failed to create task A: {}", _e);
-                
+
                 #[cfg(target_arch = "aarch64")]
                 unsafe {
                     use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -186,7 +186,7 @@ pub fn create_test_tasks() {
             Ok(_pid_b) => {
                 #[cfg(not(target_arch = "aarch64"))]
                 println!("[TEST] Created process B with PID {}", _pid_b.0);
-                
+
                 #[cfg(target_arch = "aarch64")]
                 unsafe {
                     use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -196,7 +196,7 @@ pub fn create_test_tasks() {
                 if let Err(_e) = process::create_thread(test_task_b as usize, 0, 0, 0) {
                     #[cfg(not(target_arch = "aarch64"))]
                     println!("[TEST] Failed to create thread for task B: {}", _e);
-                    
+
                     #[cfg(target_arch = "aarch64")]
                     unsafe {
                         use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -205,7 +205,7 @@ pub fn create_test_tasks() {
                 } else {
                     #[cfg(not(target_arch = "aarch64"))]
                     println!("[TEST] Created thread for task B");
-                    
+
                     #[cfg(target_arch = "aarch64")]
                     unsafe {
                         use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -216,7 +216,7 @@ pub fn create_test_tasks() {
             Err(_e) => {
                 #[cfg(not(target_arch = "aarch64"))]
                 println!("[TEST] Failed to create task B: {}", _e);
-                
+
                 #[cfg(target_arch = "aarch64")]
                 unsafe {
                     use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -227,7 +227,7 @@ pub fn create_test_tasks() {
 
         #[cfg(not(target_arch = "aarch64"))]
         println!("[TEST] Test tasks created successfully");
-        
+
         #[cfg(target_arch = "aarch64")]
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -239,7 +239,7 @@ pub fn create_test_tasks() {
     {
         #[cfg(not(target_arch = "aarch64"))]
         println!("[TEST] Cannot create test tasks: alloc feature not enabled");
-        
+
         #[cfg(target_arch = "aarch64")]
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;

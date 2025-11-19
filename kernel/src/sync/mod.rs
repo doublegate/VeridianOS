@@ -4,4 +4,4 @@
 
 pub mod once_lock;
 
-pub use once_lock::{OnceLock, LazyLock, GlobalState};
+pub use once_lock::{GlobalState, LazyLock, OnceLock};

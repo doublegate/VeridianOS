@@ -2,8 +2,9 @@
 //!
 //! Implements SHA-256, SHA-512, and BLAKE3 hash algorithms.
 
-use super::CryptoResult;
 use alloc::vec::Vec;
+
+use super::CryptoResult;
 
 /// Hash algorithm types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

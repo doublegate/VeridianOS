@@ -2,7 +2,6 @@
 //!
 //! Desktop shell protocol (windows, popups, etc.)
 
-
 /// XDG toplevel (window)
 pub struct XdgToplevel {
     /// Surface ID

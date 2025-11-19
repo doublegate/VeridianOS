@@ -252,16 +252,19 @@ pub fn init() -> Result<(), &'static str> {
         #[cfg(target_arch = "riscv64")]
         {
             println!("[HEAP] Initializing RISC-V UnsafeBumpAllocator");
-            println!("[HEAP] Heap start: {:p}, size: {} bytes", heap_start, heap_size);
-            
+            println!(
+                "[HEAP] Heap start: {:p}, size: {} bytes",
+                heap_start, heap_size
+            );
+
             // Initialize the global allocator directly using lib.rs export
             unsafe {
                 use crate::ALLOCATOR;
-                
+
                 println!("[HEAP] Calling ALLOCATOR.init()...");
                 ALLOCATOR.init(heap_start, heap_size);
                 println!("[HEAP] ALLOCATOR.init() completed");
-                
+
                 // Test allocation to verify it works
                 let test_layout = core::alloc::Layout::from_size_align(8, 8).unwrap();
                 use core::alloc::GlobalAlloc;

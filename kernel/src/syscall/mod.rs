@@ -61,7 +61,7 @@ pub enum Syscall {
     // Capability management
     CapabilityGrant = 30,
     CapabilityRevoke = 31,
-    
+
     // Filesystem operations
     FileOpen = 50,
     FileClose = 51,
@@ -70,14 +70,14 @@ pub enum Syscall {
     FileSeek = 54,
     FileStat = 55,
     FileTruncate = 56,
-    
+
     // Directory operations
     DirMkdir = 60,
     DirRmdir = 61,
     DirOpendir = 62,
     DirReaddir = 63,
     DirClosedir = 64,
-    
+
     // Filesystem management
     FsMount = 70,
     FsUnmount = 71,
@@ -216,11 +216,11 @@ fn handle_syscall(
         Syscall::FileSeek => sys_seek(arg1, arg2 as isize, arg3),
         Syscall::FileStat => sys_stat(arg1, arg2),
         Syscall::FileTruncate => sys_truncate(arg1, arg2),
-        
+
         // Directory operations
         Syscall::DirMkdir => sys_mkdir(arg1, arg2),
         Syscall::DirRmdir => sys_rmdir(arg1),
-        
+
         // Filesystem management
         Syscall::FsMount => sys_mount(arg1, arg2, arg3, arg4),
         Syscall::FsUnmount => sys_unmount(arg1),
@@ -664,7 +664,7 @@ impl TryFrom<usize> for Syscall {
             43 => Ok(Syscall::ThreadGetTid),
             44 => Ok(Syscall::ThreadSetAffinity),
             45 => Ok(Syscall::ThreadGetAffinity),
-            
+
             // Filesystem operations
             50 => Ok(Syscall::FileOpen),
             51 => Ok(Syscall::FileClose),
@@ -673,14 +673,14 @@ impl TryFrom<usize> for Syscall {
             54 => Ok(Syscall::FileSeek),
             55 => Ok(Syscall::FileStat),
             56 => Ok(Syscall::FileTruncate),
-            
+
             // Directory operations
             60 => Ok(Syscall::DirMkdir),
             61 => Ok(Syscall::DirRmdir),
             62 => Ok(Syscall::DirOpendir),
             63 => Ok(Syscall::DirReaddir),
             64 => Ok(Syscall::DirClosedir),
-            
+
             // Filesystem management
             70 => Ok(Syscall::FsMount),
             71 => Ok(Syscall::FsUnmount),

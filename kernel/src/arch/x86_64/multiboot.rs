@@ -67,7 +67,7 @@ pub extern "C" fn multiboot_main(magic: u64, info_addr: u64) -> ! {
         vga.write_volatile(0x0F4D); // 'M' for multiboot
         vga.offset(1).write_volatile(0x0F42); // 'B'
     }
-    
+
     // Verify multiboot2 magic
     if magic != 0x36d76289 {
         // Show error on VGA
@@ -80,24 +80,32 @@ pub extern "C" fn multiboot_main(magic: u64, info_addr: u64) -> ! {
             unsafe { core::arch::asm!("hlt") };
         }
     }
-    
+
     // Initialize early serial for debugging
     let mut serial_port = crate::arch::x86_64::serial_init();
     use core::fmt::Write;
     let _ = writeln!(serial_port, "[MULTIBOOT] Multiboot2 entry successful!");
-    let _ = writeln!(serial_port, "[MULTIBOOT] Magic: 0x{:x}, Info: 0x{:x}", magic, info_addr);
-    
+    let _ = writeln!(
+        serial_port,
+        "[MULTIBOOT] Magic: 0x{:x}, Info: 0x{:x}",
+        magic, info_addr
+    );
+
     // Set up minimal boot info structure
     // For now, we'll skip the full multiboot info parsing and use defaults
     unsafe {
-        crate::arch::x86_64::boot::BOOT_INFO = None; // Multiboot doesn't use bootloader_api BootInfo
+        crate::arch::x86_64::boot::BOOT_INFO = None; // Multiboot doesn't use
+                                                     // bootloader_api BootInfo
     }
-    
+
     // Initialize early architecture
     crate::arch::x86_64::entry::arch_early_init();
-    
-    let _ = writeln!(serial_port, "[MULTIBOOT] Starting bootstrap initialization...");
-    
+
+    let _ = writeln!(
+        serial_port,
+        "[MULTIBOOT] Starting bootstrap initialization..."
+    );
+
     // Run bootstrap directly
     crate::bootstrap::run();
 }

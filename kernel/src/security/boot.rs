@@ -1,10 +1,9 @@
 //! Secure boot verification
 
-//!
 //! Verifies the integrity of the boot chain using cryptographic signatures.
 
-use crate::error::KernelError;
 use super::crypto::{hash, HashAlgorithm};
+use crate::error::KernelError;
 
 /// Boot verification status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

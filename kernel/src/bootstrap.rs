@@ -4,9 +4,8 @@
 //! circular dependencies between subsystems.
 
 use crate::{
-    arch, cap,
-    error::KernelResult,
-    fs, graphics, ipc, mm, net, perf, pkg, process, sched, security, services,
+    arch, cap, error::KernelResult, fs, graphics, ipc, mm, net, perf, pkg, process, sched,
+    security, services,
 };
 
 #[cfg(feature = "alloc")]
@@ -34,7 +33,7 @@ pub fn kernel_init() -> KernelResult<()> {
         uart_base.write_volatile(b'T');
         uart_base.write_volatile(b'\n');
     }
-    
+
     // Stage 1: Hardware initialization
     #[cfg(target_arch = "x86_64")]
     arch::x86_64::bootstrap::stage1_start();
@@ -42,9 +41,9 @@ pub fn kernel_init() -> KernelResult<()> {
     arch::aarch64::bootstrap::stage1_start();
     #[cfg(target_arch = "riscv64")]
     arch::riscv64::bootstrap::stage1_start();
-    
+
     arch::init();
-    
+
     #[cfg(target_arch = "x86_64")]
     arch::x86_64::bootstrap::stage1_complete();
     #[cfg(target_arch = "aarch64")]
@@ -59,9 +58,9 @@ pub fn kernel_init() -> KernelResult<()> {
     arch::aarch64::bootstrap::stage2_start();
     #[cfg(target_arch = "riscv64")]
     arch::riscv64::bootstrap::stage2_start();
-    
+
     mm::init_default();
-    
+
     #[cfg(target_arch = "x86_64")]
     arch::x86_64::bootstrap::stage2_complete();
     #[cfg(target_arch = "aarch64")]
@@ -76,9 +75,9 @@ pub fn kernel_init() -> KernelResult<()> {
     arch::aarch64::bootstrap::stage3_start();
     #[cfg(target_arch = "riscv64")]
     arch::riscv64::bootstrap::stage3_start();
-    
+
     process::init_without_init_process().expect("Failed to initialize process management");
-    
+
     #[cfg(target_arch = "x86_64")]
     arch::x86_64::bootstrap::stage3_complete();
     #[cfg(target_arch = "aarch64")]
@@ -93,7 +92,7 @@ pub fn kernel_init() -> KernelResult<()> {
     arch::aarch64::bootstrap::stage4_start();
     #[cfg(target_arch = "riscv64")]
     arch::riscv64::bootstrap::stage4_start();
-    
+
     println!("[BOOTSTRAP] Initializing capabilities...");
     cap::init();
     println!("[BOOTSTRAP] Capabilities initialized");
@@ -109,7 +108,7 @@ pub fn kernel_init() -> KernelResult<()> {
     println!("[BOOTSTRAP] Initializing IPC...");
     ipc::init();
     println!("[BOOTSTRAP] IPC initialized");
-    
+
     // Initialize VFS and mount essential filesystems
     #[cfg(feature = "alloc")]
     {
@@ -119,10 +118,10 @@ pub fn kernel_init() -> KernelResult<()> {
             use crate::arch::aarch64::direct_uart::uart_write_str;
             uart_write_str("[BOOTSTRAP] About to initialize VFS (AArch64 direct UART)...\n");
         }
-        
+
         println!("[BOOTSTRAP] Initializing VFS...");
         fs::init();
-        
+
         #[cfg(target_arch = "aarch64")]
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -131,7 +130,7 @@ pub fn kernel_init() -> KernelResult<()> {
         #[cfg(not(target_arch = "aarch64"))]
         println!("[BOOTSTRAP] VFS initialized");
     }
-    
+
     // Initialize services (process server, driver framework, etc.)
     #[cfg(feature = "alloc")]
     {
@@ -142,9 +141,9 @@ pub fn kernel_init() -> KernelResult<()> {
         }
         #[cfg(not(target_arch = "aarch64"))]
         println!("[BOOTSTRAP] Initializing services...");
-        
+
         services::init();
-        
+
         #[cfg(target_arch = "aarch64")]
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -153,7 +152,7 @@ pub fn kernel_init() -> KernelResult<()> {
         #[cfg(not(target_arch = "aarch64"))]
         println!("[BOOTSTRAP] Services initialized");
     }
-    
+
     #[cfg(target_arch = "x86_64")]
     arch::x86_64::bootstrap::stage4_complete();
     #[cfg(target_arch = "aarch64")]
@@ -168,7 +167,7 @@ pub fn kernel_init() -> KernelResult<()> {
     arch::aarch64::bootstrap::stage5_start();
     #[cfg(target_arch = "riscv64")]
     arch::riscv64::bootstrap::stage5_start();
-    
+
     sched::init();
 
     // Initialize package manager
@@ -214,7 +213,7 @@ pub fn run() -> ! {
         uart_base.write_volatile(b'N');
         uart_base.write_volatile(b'\n');
     }
-    
+
     if let Err(e) = kernel_init() {
         panic!("Bootstrap failed: {:?}", e);
     }
@@ -235,14 +234,14 @@ pub fn run() -> ! {
             uart_write_str("[BOOTSTRAP] About to create init process...\n");
         }
     }
-    
+
     #[cfg(target_arch = "riscv64")]
     {
         println!("[BOOTSTRAP] About to create init process...");
     }
-    
+
     create_init_process();
-    
+
     #[cfg(target_arch = "aarch64")]
     {
         unsafe {
@@ -250,12 +249,12 @@ pub fn run() -> ! {
             uart_write_str("[BOOTSTRAP] Init process created\n");
         }
     }
-    
+
     #[cfg(target_arch = "riscv64")]
     {
         println!("[BOOTSTRAP] Init process created");
     }
-    
+
     // Mark Stage 6 complete
     #[cfg(target_arch = "x86_64")]
     arch::x86_64::bootstrap::stage6_complete();
@@ -268,10 +267,10 @@ pub fn run() -> ! {
     crate::println!("");
     crate::println!("🔬 Running Phase 2 Complete Validation...");
     crate::phase2_validation::quick_health_check();
-    
+
     // Run full Phase 2 validation:
     crate::phase2_validation::validate_phase2_complete();
-    
+
     crate::println!("✅ Phase 2 User Space Foundation - COMPLETE!");
     crate::println!("");
 
@@ -287,7 +286,7 @@ fn create_init_process() {
         match crate::userspace::load_init_process() {
             Ok(init_pid) => {
                 println!("[BOOTSTRAP] Init process created with PID {}", init_pid.0);
-                
+
                 // Try to load a shell as well
                 if let Ok(shell_pid) = crate::userspace::loader::load_shell() {
                     println!("[BOOTSTRAP] Shell process created with PID {}", shell_pid.0);
@@ -298,7 +297,10 @@ fn create_init_process() {
                 // Fall back to creating a minimal test process
                 use alloc::string::String;
                 if let Ok(pid) = process::lifecycle::create_process(String::from("init"), 0) {
-                    println!("[BOOTSTRAP] Created fallback init process with PID {}", pid.0);
+                    println!(
+                        "[BOOTSTRAP] Created fallback init process with PID {}",
+                        pid.0
+                    );
                 }
             }
         }

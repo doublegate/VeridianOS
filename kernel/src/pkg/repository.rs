@@ -1,8 +1,8 @@
 //! Package Repository Management
 
+use alloc::{string::String, vec::Vec};
+
 use super::{PackageId, PackageMetadata};
-use alloc::vec::Vec;
-use alloc::string::String;
 
 /// Package repository
 #[derive(Debug, Clone)]

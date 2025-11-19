@@ -28,10 +28,11 @@ pub struct Buffer {
 
 impl Buffer {
     pub fn new(id: u32, width: u32, height: u32, format: PixelFormat) -> Self {
-        let stride = width * match format {
-            PixelFormat::ARGB8888 | PixelFormat::XRGB8888 => 4,
-            PixelFormat::RGB565 => 2,
-        };
+        let stride = width
+            * match format {
+                PixelFormat::ARGB8888 | PixelFormat::XRGB8888 => 4,
+                PixelFormat::RGB565 => 2,
+            };
 
         Self {
             id,

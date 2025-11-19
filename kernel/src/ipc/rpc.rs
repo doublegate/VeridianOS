@@ -4,11 +4,15 @@
 //!
 //! Provides method-based RPC with service discovery and marshaling.
 
-use super::{EndpointId, Message, SmallMessage, sync_send, sync_receive, IpcError};
-use alloc::vec::Vec;
-use alloc::string::{String, ToString};
-use alloc::collections::BTreeMap;
+use alloc::{
+    collections::BTreeMap,
+    string::{String, ToString},
+    vec::Vec,
+};
+
 use spin::RwLock;
+
+use super::{sync_receive, sync_send, EndpointId, IpcError, Message, SmallMessage};
 
 /// RPC method identifier
 pub type MethodId = u32;
@@ -108,7 +112,8 @@ impl RpcClient {
 
             // Pack params into remaining data space (3 bytes per u64)
             for (i, chunk) in params.chunks(8).enumerate() {
-                if i + 3 < 4 {  // data[3] available
+                if i + 3 < 4 {
+                    // data[3] available
                     let mut value = 0u64;
                     for (j, &byte) in chunk.iter().enumerate() {
                         value |= (byte as u64) << (j * 8);
@@ -181,11 +186,11 @@ impl RpcServer {
 
     /// Process incoming RPC requests (call in a loop)
     ///
-    /// Receives one request, dispatches to appropriate service, and sends response.
+    /// Receives one request, dispatches to appropriate service, and sends
+    /// response.
     pub fn process_requests(&self) -> Result<(), RpcError> {
         // Receive incoming request
-        let request = sync_receive(self.endpoint_id)
-            .map_err(|e| RpcError::from(e))?;
+        let request = sync_receive(self.endpoint_id).map_err(|e| RpcError::from(e))?;
 
         match request {
             Message::Small(msg) => {

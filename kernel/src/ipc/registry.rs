@@ -27,64 +27,57 @@ static mut IPC_REGISTRY_PTR: *mut Mutex<IpcRegistry> = core::ptr::null_mut();
 /// Initialize the IPC registry
 pub fn init() {
     use crate::println;
-    
+
     unsafe {
         if !IPC_REGISTRY_PTR.is_null() {
             println!("[IPC-REG] Registry already initialized, skipping...");
             return;
         }
-        
+
         println!("[IPC-REG] Initializing IPC registry...");
-        
+
         // Create the registry
         let registry = IpcRegistry::new();
         let registry_mutex = Mutex::new(registry);
-        
+
         // Box it and leak to get a static pointer
         let registry_box = alloc::boxed::Box::new(registry_mutex);
         let registry_ptr = alloc::boxed::Box::leak(registry_box) as *mut Mutex<IpcRegistry>;
-        
+
         // Memory barriers for AArch64
         #[cfg(target_arch = "aarch64")]
         {
             core::arch::asm!(
-                "dsb sy",  // Data Synchronization Barrier
-                "isb",     // Instruction Synchronization Barrier
+                "dsb sy", // Data Synchronization Barrier
+                "isb",    // Instruction Synchronization Barrier
                 options(nostack, nomem, preserves_flags)
             );
         }
-        
+
         // Memory barriers for RISC-V
         #[cfg(target_arch = "riscv64")]
         {
             core::arch::asm!(
-                "fence rw, rw",  // Full memory fence
+                "fence rw, rw", // Full memory fence
                 options(nostack, nomem, preserves_flags)
             );
         }
-        
+
         // Store the pointer
         IPC_REGISTRY_PTR = registry_ptr;
-        
+
         // Memory barriers after assignment for AArch64
         #[cfg(target_arch = "aarch64")]
         {
-            core::arch::asm!(
-                "dsb sy",
-                "isb",
-                options(nostack, nomem, preserves_flags)
-            );
+            core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
         }
-        
+
         // Memory barriers after assignment for RISC-V
         #[cfg(target_arch = "riscv64")]
         {
-            core::arch::asm!(
-                "fence rw, rw",
-                options(nostack, nomem, preserves_flags)
-            );
+            core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
         }
-        
+
         println!("[IPC-REG] Registry initialized successfully");
     }
 }
@@ -124,7 +117,7 @@ impl IpcRegistry {
             use crate::arch::aarch64::direct_uart::uart_write_str;
             uart_write_str("[IPC-REG] Creating registry structure...\n");
         }
-        
+
         // Create BTreeMaps with explicit feature check
         #[cfg(feature = "alloc")]
         let endpoints = {
@@ -135,7 +128,7 @@ impl IpcRegistry {
             }
             BTreeMap::new()
         };
-        
+
         #[cfg(feature = "alloc")]
         let channels = {
             #[cfg(target_arch = "aarch64")]
@@ -145,7 +138,7 @@ impl IpcRegistry {
             }
             BTreeMap::new()
         };
-        
+
         #[cfg(feature = "alloc")]
         let process_endpoints = {
             #[cfg(target_arch = "aarch64")]
@@ -155,13 +148,13 @@ impl IpcRegistry {
             }
             BTreeMap::new()
         };
-        
+
         #[cfg(target_arch = "aarch64")]
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
             uart_write_str("[IPC-REG] Creating atomic counters...\n");
         }
-        
+
         let registry = Self {
             #[cfg(feature = "alloc")]
             endpoints,
@@ -179,13 +172,13 @@ impl IpcRegistry {
                 capability_hits: AtomicU64::new(0),
             },
         };
-        
+
         #[cfg(target_arch = "aarch64")]
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
             uart_write_str("[IPC-REG] Registry structure created successfully\n");
         }
-        
+
         registry
     }
 
@@ -383,7 +376,7 @@ where
         if IPC_REGISTRY_PTR.is_null() {
             return Err(IpcError::NotInitialized);
         }
-        
+
         let registry_mutex = &*IPC_REGISTRY_PTR;
         let mut registry_guard = registry_mutex.lock();
         f(&mut *registry_guard)
@@ -399,7 +392,7 @@ where
         if IPC_REGISTRY_PTR.is_null() {
             return Err(IpcError::NotInitialized);
         }
-        
+
         let registry_mutex = &*IPC_REGISTRY_PTR;
         let registry_guard = registry_mutex.lock();
         f(&*registry_guard)

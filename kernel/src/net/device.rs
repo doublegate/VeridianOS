@@ -1,10 +1,9 @@
 //! Network device abstraction layer
 
+use alloc::{boxed::Box, string::String, vec::Vec};
+
 use super::{MacAddress, Packet};
 use crate::error::KernelError;
-use alloc::boxed::Box;
-use alloc::string::String;
-use alloc::vec::Vec;
 
 /// Network device capabilities
 #[derive(Debug, Clone, Copy)]
@@ -299,7 +298,8 @@ pub fn register_device(device: Box<dyn NetworkDevice>) -> Result<(), KernelError
 pub fn get_device(name: &str) -> Option<&'static dyn NetworkDevice> {
     unsafe {
         if let Some(ref devices) = DEVICES {
-            devices.iter()
+            devices
+                .iter()
                 .find(|d| d.name() == name)
                 .map(|d| d.as_ref() as &'static dyn NetworkDevice)
         } else {
@@ -312,7 +312,8 @@ pub fn get_device(name: &str) -> Option<&'static dyn NetworkDevice> {
 pub fn get_device_mut(name: &str) -> Option<&'static mut dyn NetworkDevice> {
     unsafe {
         if let Some(ref mut devices) = DEVICES {
-            devices.iter_mut()
+            devices
+                .iter_mut()
                 .find(|d| d.name() == name)
                 .map(|d| d.as_mut() as &'static mut dyn NetworkDevice)
         } else {
@@ -325,9 +326,7 @@ pub fn get_device_mut(name: &str) -> Option<&'static mut dyn NetworkDevice> {
 pub fn list_devices() -> Vec<String> {
     unsafe {
         if let Some(ref devices) = DEVICES {
-            devices.iter()
-                .map(|d| String::from(d.name()))
-                .collect()
+            devices.iter().map(|d| String::from(d.name())).collect()
         } else {
             Vec::new()
         }

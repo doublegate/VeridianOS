@@ -2,16 +2,19 @@
 //!
 //! Simple text editor with basic editing capabilities.
 
-use crate::error::KernelError;
-use crate::desktop::window_manager::{WindowId, get_window_manager, InputEvent};
-use crate::desktop::font::{get_font_manager, FontSize, FontStyle};
-use crate::fs::{get_vfs, OpenFlags};
-use crate::sync::once_lock::GlobalState;
-use alloc::vec::Vec;
-use alloc::vec;
-use alloc::string::String;
-use alloc::format;
+use alloc::{format, string::String, vec, vec::Vec};
+
 use spin::RwLock;
+
+use crate::{
+    desktop::{
+        font::{get_font_manager, FontSize, FontStyle},
+        window_manager::{with_window_manager, InputEvent, WindowId},
+    },
+    error::KernelError,
+    fs::{get_vfs, OpenFlags},
+    sync::once_lock::GlobalState,
+};
 
 /// Text buffer line
 type Line = Vec<char>;
@@ -101,22 +104,22 @@ impl TextEditor {
         match vfs.read().open(path, OpenFlags::read_only()) {
             Ok(node) => {
                 // Read file
-                let metadata = node.metadata()
-                    .map_err(|_| KernelError::InvalidArgument {
-                        name: "file_metadata",
-                        value: "failed_to_read",
-                    })?;
+                let metadata = node.metadata().map_err(|_| KernelError::InvalidArgument {
+                    name: "file_metadata",
+                    value: "failed_to_read",
+                })?;
                 let mut file_buffer = vec![0u8; metadata.size];
 
                 match node.read(0, &mut file_buffer) {
                     Ok(_bytes_read) => {
                         // Parse content into lines
                         self.buffer.clear();
-                        let content = core::str::from_utf8(&file_buffer)
-                            .map_err(|_| KernelError::InvalidArgument {
+                        let content = core::str::from_utf8(&file_buffer).map_err(|_| {
+                            KernelError::InvalidArgument {
                                 name: "file_content",
                                 value: "invalid_utf8",
-                            })?;
+                            }
+                        })?;
 
                         for line in content.lines() {
                             self.buffer.push(line.chars().collect());
@@ -152,7 +155,9 @@ impl TextEditor {
 
     /// Save file to filesystem
     pub fn save_file(&mut self) -> Result<(), KernelError> {
-        let path = self.file_path.as_ref()
+        let path = self
+            .file_path
+            .as_ref()
             .ok_or(KernelError::InvalidArgument {
                 name: "file_path",
                 value: "no_path_specified",
@@ -202,7 +207,10 @@ impl TextEditor {
     /// Process input event
     pub fn process_input(&mut self, event: InputEvent) -> Result<(), KernelError> {
         match event {
-            InputEvent::KeyPress { character, scancode } => {
+            InputEvent::KeyPress {
+                character,
+                scancode,
+            } => {
                 match character {
                     '\n' | '\r' => {
                         // Insert newline
@@ -313,7 +321,12 @@ impl TextEditor {
     }
 
     /// Render text editor
-    pub fn render(&self, framebuffer: &mut [u8], fb_width: usize, fb_height: usize) -> Result<(), KernelError> {
+    pub fn render(
+        &self,
+        framebuffer: &mut [u8],
+        fb_width: usize,
+        fb_height: usize,
+    ) -> Result<(), KernelError> {
         // Clear background
         for pixel in framebuffer.iter_mut() {
             *pixel = 16; // Very dark gray
@@ -321,18 +334,36 @@ impl TextEditor {
 
         // Get font
         let font_manager = get_font_manager()?;
-        let font = font_manager.get_font(FontSize::Medium, FontStyle::Regular)
-            .ok_or(KernelError::NotFound { resource: "font", id: 0 })?;
+        let font = font_manager
+            .get_font(FontSize::Medium, FontStyle::Regular)
+            .ok_or(KernelError::NotFound {
+                resource: "font",
+                id: 0,
+            })?;
 
         // Render status bar
         let status = if let Some(ref path) = self.file_path {
             if self.modified {
-                format!("{}* - Line {}, Col {}", path, self.cursor_line + 1, self.cursor_col + 1)
+                format!(
+                    "{}* - Line {}, Col {}",
+                    path,
+                    self.cursor_line + 1,
+                    self.cursor_col + 1
+                )
             } else {
-                format!("{} - Line {}, Col {}", path, self.cursor_line + 1, self.cursor_col + 1)
+                format!(
+                    "{} - Line {}, Col {}",
+                    path,
+                    self.cursor_line + 1,
+                    self.cursor_col + 1
+                )
             }
         } else {
-            format!("[New File] - Line {}, Col {}", self.cursor_line + 1, self.cursor_col + 1)
+            format!(
+                "[New File] - Line {}, Col {}",
+                self.cursor_line + 1,
+                self.cursor_col + 1
+            )
         };
 
         let _ = font.render_text(&status, framebuffer, fb_width, fb_height, 5, 5);
@@ -341,7 +372,13 @@ impl TextEditor {
         let char_height = 12;
         let start_y = 30;
 
-        for (i, line) in self.buffer.iter().enumerate().skip(self.scroll_line).take(self.visible_rows) {
+        for (i, line) in self
+            .buffer
+            .iter()
+            .enumerate()
+            .skip(self.scroll_line)
+            .take(self.visible_rows)
+        {
             let y = start_y + ((i - self.scroll_line) * char_height) as i32;
 
             // Convert line to string
@@ -359,7 +396,11 @@ impl TextEditor {
                         let px = cursor_x + dx as i32;
                         let py = y + dy as i32;
 
-                        if px >= 0 && py >= 0 && (px as usize) < fb_width && (py as usize) < fb_height {
+                        if px >= 0
+                            && py >= 0
+                            && (px as usize) < fb_width
+                            && (py as usize) < fb_height
+                        {
                             let index = py as usize * fb_width + px as usize;
                             if index < framebuffer.len() {
                                 framebuffer[index] = 255; // White cursor
@@ -391,10 +432,12 @@ pub fn init() -> Result<(), KernelError> {
 /// Create a new text editor instance
 pub fn create_text_editor(file_path: Option<String>) -> Result<(), KernelError> {
     let editor = TextEditor::new(file_path)?;
-    TEXT_EDITOR.init(RwLock::new(editor)).map_err(|_| KernelError::InvalidState {
-        expected: "uninitialized",
-        actual: "initialized",
-    })?;
+    TEXT_EDITOR
+        .init(RwLock::new(editor))
+        .map_err(|_| KernelError::InvalidState {
+            expected: "uninitialized",
+            actual: "initialized",
+        })?;
     Ok(())
 }
 

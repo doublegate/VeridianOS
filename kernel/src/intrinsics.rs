@@ -8,7 +8,8 @@ use core::ffi::c_void;
 /// Memory copy intrinsic
 ///
 /// # Safety
-/// Caller must ensure src and dest don't overlap and are valid for the given length
+/// Caller must ensure src and dest don't overlap and are valid for the given
+/// length
 #[no_mangle]
 pub unsafe extern "C" fn memcpy(dest: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {
     let dest_u8 = dest as *mut u8;
@@ -121,21 +122,11 @@ mod tests {
 
         unsafe {
             assert_eq!(
-                memcmp(
-                    a.as_ptr() as *const c_void,
-                    b.as_ptr() as *const c_void,
-                    5
-                ),
+                memcmp(a.as_ptr() as *const c_void, b.as_ptr() as *const c_void, 5),
                 0
             );
 
-            assert!(
-                memcmp(
-                    a.as_ptr() as *const c_void,
-                    c.as_ptr() as *const c_void,
-                    5
-                ) < 0
-            );
+            assert!(memcmp(a.as_ptr() as *const c_void, c.as_ptr() as *const c_void, 5) < 0);
         }
     }
 

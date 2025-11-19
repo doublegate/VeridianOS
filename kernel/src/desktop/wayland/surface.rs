@@ -2,8 +2,8 @@
 //!
 //! Represents a renderable rectangular area.
 
-use crate::error::KernelError;
 use super::buffer::Buffer;
+use crate::error::KernelError;
 
 /// Wayland surface
 pub struct Surface {

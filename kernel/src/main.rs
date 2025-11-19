@@ -35,14 +35,13 @@
 
 use core::panic::PanicInfo;
 
+// For x86_64, use bootloader 0.9 for working boot
+#[cfg(target_arch = "x86_64")]
+use bootloader::{entry_point, BootInfo};
 // Global allocator is defined in lib.rs
 
 // Use the kernel library
 use veridian_kernel::*;
-
-// For x86_64, use bootloader 0.9 for working boot
-#[cfg(target_arch = "x86_64")]
-use bootloader::{entry_point, BootInfo};
 
 #[cfg(target_arch = "x86_64")]
 entry_point!(x86_64_kernel_entry);
@@ -54,7 +53,7 @@ fn x86_64_kernel_entry(boot_info: &'static BootInfo) -> ! {
         let vga = 0xb8000 as *mut u16;
         vga.write_volatile(0x0F45); // 'E' in white on black
         vga.offset(1).write_volatile(0x0F42); // 'B' to show boot.rs was called
-        
+
         // Also try direct serial output here
         let port: u16 = 0x3F8;
         // Simple serial byte output
@@ -65,15 +64,15 @@ fn x86_64_kernel_entry(boot_info: &'static BootInfo) -> ! {
             options(nomem, nostack, preserves_flags)
         );
     }
-    
+
     // Run early boot initialization (serial port, etc.)
     arch::x86_64::boot::early_boot_init();
-    
+
     // Store boot info for later use
     unsafe {
         arch::x86_64::boot::BOOT_INFO = Some(boot_info);
     }
-    
+
     // Call the main kernel implementation
     kernel_main_impl()
 }
@@ -84,10 +83,10 @@ fn panic(_info: &PanicInfo) -> ! {
     // Use architecture-specific panic handler
     #[cfg(target_arch = "x86_64")]
     arch::x86_64::entry::arch_panic_handler(_info);
-    
+
     #[cfg(target_arch = "aarch64")]
     arch::aarch64::entry::arch_panic_handler(_info);
-    
+
     #[cfg(target_arch = "riscv64")]
     arch::riscv64::entry::arch_panic_handler(_info);
 
@@ -116,7 +115,7 @@ pub extern "C" fn kernel_main() -> ! {
         uart_base.write_volatile(b'I');
         uart_base.write_volatile(b'\n');
     }
-    
+
     kernel_main_impl()
 }
 
@@ -126,17 +125,17 @@ fn kernel_main_impl() -> ! {
     // Architecture-specific early initialization
     #[cfg(target_arch = "x86_64")]
     arch::x86_64::entry::arch_early_init();
-    
+
     #[cfg(target_arch = "aarch64")]
     arch::aarch64::entry::arch_early_init();
-    
+
     #[cfg(target_arch = "riscv64")]
     arch::riscv64::entry::arch_early_init();
 
     // Use unified bootstrap initialization
     #[cfg(target_arch = "x86_64")]
     early_println!("[EARLY] Starting bootstrap initialization...");
-    
+
     #[cfg(not(target_arch = "x86_64"))]
     boot_println!("[EARLY] Starting bootstrap initialization...");
 
@@ -144,7 +143,6 @@ fn kernel_main_impl() -> ! {
     bootstrap::run();
 
     // Bootstrap should not return (unreachable but kept for safety)
-    #[allow(unreachable_code)]
     panic!("Bootstrap returned unexpectedly!");
 }
 

@@ -19,34 +19,34 @@ impl EarlySerial {
         unsafe {
             // Disable interrupts
             outb(self.base + 1, 0x00);
-            
+
             // Enable DLAB (set baud rate divisor)
             outb(self.base + 3, 0x80);
-            
+
             // Set divisor to 3 (lo byte) 38400 baud
             outb(self.base + 0, 0x03);
             outb(self.base + 1, 0x00); // (hi byte)
-            
+
             // 8 bits, no parity, one stop bit
             outb(self.base + 3, 0x03);
-            
+
             // Enable FIFO, clear them, with 14-byte threshold
             outb(self.base + 2, 0xC7);
-            
+
             // Enable IRQs, set RTS/DSR
             outb(self.base + 4, 0x0B);
-            
+
             // Set loopback mode, test the serial chip
             outb(self.base + 4, 0x1E);
-            
+
             // Test serial chip (send 0xAE and check if we receive it back)
             outb(self.base + 0, 0xAE);
-            
+
             // Check if we received the correct byte back
             if inb(self.base + 0) != 0xAE {
                 // Serial port is faulty, but continue anyway
             }
-            
+
             // Set normal operation mode (not loopback)
             outb(self.base + 4, 0x0F);
         }
@@ -59,7 +59,7 @@ impl EarlySerial {
             while (inb(self.base + 5) & 0x20) == 0 {
                 core::hint::spin_loop();
             }
-            
+
             // Send byte
             outb(self.base, byte);
         }

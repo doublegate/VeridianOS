@@ -1,16 +1,21 @@
 //! GUI File Manager Application
 //!
-//! Provides graphical file browsing and management using the window manager and VFS.
+//! Provides graphical file browsing and management using the window manager and
+//! VFS.
 
-use crate::error::KernelError;
-use crate::desktop::window_manager::{WindowId, get_window_manager, InputEvent};
-use crate::desktop::font::{get_font_manager, FontSize, FontStyle};
-use crate::fs::{get_vfs, NodeType};
-use crate::sync::once_lock::GlobalState;
-use alloc::vec::Vec;
-use alloc::string::String;
-use alloc::format;
+use alloc::{format, string::String, vec::Vec};
+
 use spin::RwLock;
+
+use crate::{
+    desktop::{
+        font::{get_font_manager, FontSize, FontStyle},
+        window_manager::{with_window_manager, InputEvent, WindowId},
+    },
+    error::KernelError,
+    fs::{get_vfs, NodeType},
+    sync::once_lock::GlobalState,
+};
 
 /// File entry in the browser
 #[derive(Debug, Clone)]
@@ -52,9 +57,9 @@ impl FileManager {
         // Create window
         let window_id = with_window_manager(|wm| wm.create_window(200, 100, width, height, 0))
             .ok_or(KernelError::InvalidState {
-                expected: "initialized",
-                actual: "uninitialized",
-            })??;
+            expected: "initialized",
+            actual: "uninitialized",
+        })??;
 
         let mut fm = Self {
             window_id,
@@ -84,7 +89,10 @@ impl FileManager {
         let vfs = get_vfs();
 
         // Open directory
-        match vfs.read().open(&self.current_path, crate::fs::file::OpenFlags::read_only()) {
+        match vfs
+            .read()
+            .open(&self.current_path, crate::fs::file::OpenFlags::read_only())
+        {
             Ok(dir_node) => {
                 // List directory contents
                 match dir_node.readdir() {
@@ -109,13 +117,12 @@ impl FileManager {
         }
 
         // Sort entries: directories first, then files
-        self.entries.sort_by(|a, b| {
-            match (a.node_type, b.node_type) {
+        self.entries
+            .sort_by(|a, b| match (a.node_type, b.node_type) {
                 (NodeType::Directory, NodeType::File) => core::cmp::Ordering::Less,
                 (NodeType::File, NodeType::Directory) => core::cmp::Ordering::Greater,
                 _ => a.name.cmp(&b.name),
-            }
-        });
+            });
 
         println!("[FILE-MANAGER] Loaded {} entries", self.entries.len());
 
@@ -154,7 +161,12 @@ impl FileManager {
                     _ => {}
                 }
             }
-            InputEvent::MouseButton { button: 0, pressed: true, x, y } => {
+            InputEvent::MouseButton {
+                button: 0,
+                pressed: true,
+                x,
+                y,
+            } => {
                 // Left click - select item
                 self.handle_click(x, y)?;
             }
@@ -232,7 +244,12 @@ impl FileManager {
     }
 
     /// Render file manager
-    pub fn render(&self, framebuffer: &mut [u8], fb_width: usize, fb_height: usize) -> Result<(), KernelError> {
+    pub fn render(
+        &self,
+        framebuffer: &mut [u8],
+        fb_width: usize,
+        fb_height: usize,
+    ) -> Result<(), KernelError> {
         // Clear background
         for pixel in framebuffer.iter_mut() {
             *pixel = 32; // Dark gray
@@ -240,8 +257,12 @@ impl FileManager {
 
         // Get font
         let font_manager = get_font_manager()?;
-        let font = font_manager.get_font(FontSize::Medium, FontStyle::Regular)
-            .ok_or(KernelError::NotFound { resource: "font", id: 0 })?;
+        let font = font_manager
+            .get_font(FontSize::Medium, FontStyle::Regular)
+            .ok_or(KernelError::NotFound {
+                resource: "font",
+                id: 0,
+            })?;
 
         // Render header
         let header = format!("File Manager - {}", self.current_path);
@@ -302,10 +323,12 @@ pub fn init() -> Result<(), KernelError> {
 /// Create a new file manager instance
 pub fn create_file_manager() -> Result<(), KernelError> {
     let fm = FileManager::new()?;
-    FILE_MANAGER.init(RwLock::new(fm)).map_err(|_| KernelError::InvalidState {
-        expected: "uninitialized",
-        actual: "initialized",
-    })?;
+    FILE_MANAGER
+        .init(RwLock::new(fm))
+        .map_err(|_| KernelError::InvalidState {
+            expected: "uninitialized",
+            actual: "initialized",
+        })?;
     Ok(())
 }
 

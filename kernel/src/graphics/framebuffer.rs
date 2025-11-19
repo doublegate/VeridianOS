@@ -103,7 +103,11 @@ pub fn init() -> Result<(), KernelError> {
     let fb = get();
     // fb.configure(1024, 768, null_mut()); // Would need actual buffer
 
-    println!("[FB] Framebuffer initialized ({}x{})", fb.width(), fb.height());
+    println!(
+        "[FB] Framebuffer initialized ({}x{})",
+        fb.width(),
+        fb.height()
+    );
     Ok(())
 }
 

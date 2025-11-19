@@ -39,7 +39,7 @@ impl Uart16550Compat {
             }
         }
     }
-    
+
     pub fn write_str_direct(&self, s: &str) {
         self.write_bytes(s.as_bytes());
     }

@@ -3,12 +3,12 @@
 //! Provides desktop environment functionality including font rendering,
 //! window management, and graphical user interface components.
 
-pub mod font;
-pub mod window_manager;
-pub mod wayland;
-pub mod terminal;
 pub mod file_manager;
+pub mod font;
+pub mod terminal;
 pub mod text_editor;
+pub mod wayland;
+pub mod window_manager;
 
 use crate::error::KernelError;
 

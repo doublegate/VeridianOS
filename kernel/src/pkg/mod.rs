@@ -1,15 +1,14 @@
 //! Package Management System
 //!
-//! VeridianOS package manager for installing, updating, and managing software packages.
+//! VeridianOS package manager for installing, updating, and managing software
+//! packages.
 
 pub mod format;
 pub mod repository;
 pub mod resolver;
 
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::vec;
-use alloc::collections::BTreeMap;
+use alloc::{collections::BTreeMap, string::String, vec, vec::Vec};
+
 use crate::error::KernelError;
 
 /// Package identifier
@@ -25,7 +24,11 @@ pub struct Version {
 
 impl Version {
     pub fn new(major: u32, minor: u32, patch: u32) -> Self {
-        Self { major, minor, patch }
+        Self {
+            major,
+            minor,
+            patch,
+        }
     }
 }
 
@@ -77,10 +80,15 @@ impl PackageManager {
     /// Install a package by name and version
     pub fn install(&mut self, name: String, version_req: String) -> PkgResult<()> {
         // Create dependency for the package
-        let dep = Dependency { name: name.clone(), version_req: version_req.clone() };
+        let dep = Dependency {
+            name: name.clone(),
+            version_req: version_req.clone(),
+        };
 
         // Resolve dependencies
-        let packages = self.resolver.resolve(&[dep])
+        let packages = self
+            .resolver
+            .resolve(&[dep])
             .map_err(|_e| KernelError::InvalidState {
                 expected: "resolvable dependencies",
                 actual: "dependency resolution failed",
@@ -102,7 +110,13 @@ impl PackageManager {
             // Extract and install
             self.install_package(pkg_id.clone(), version.clone(), package_data)?;
 
-            crate::println!("[PKG] Installed {} {}.{}.{}", pkg_id, version.major, version.minor, version.patch);
+            crate::println!(
+                "[PKG] Installed {} {}.{}.{}",
+                pkg_id,
+                version.major,
+                version.minor,
+                version.patch
+            );
         }
 
         Ok(())
@@ -227,11 +241,7 @@ impl PackageManager {
     fn find_dependents(&self, package_id: &PackageId) -> Vec<PackageId> {
         self.installed
             .iter()
-            .filter(|(_, meta)| {
-                meta.dependencies
-                    .iter()
-                    .any(|dep| &dep.name == package_id)
-            })
+            .filter(|(_, meta)| meta.dependencies.iter().any(|dep| &dep.name == package_id))
             .map(|(id, _)| id.clone())
             .collect()
     }

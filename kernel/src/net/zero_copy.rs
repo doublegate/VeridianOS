@@ -11,10 +11,11 @@
 //! 5. **TCP_CORK**: Batch small writes into single packet
 //! 6. **Memory Mapping**: mmap() network buffers to user space
 
-use alloc::vec::Vec;
-use alloc::collections::VecDeque;
+use alloc::{collections::VecDeque, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
+
 use spin::Mutex;
+
 use crate::error::KernelError;
 
 /// DMA buffer pool for zero-copy operations
@@ -54,16 +55,12 @@ impl DmaBuffer {
 
     /// Get mutable slice
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        unsafe {
-            core::slice::from_raw_parts_mut(self.virtual_addr as *mut u8, self.size)
-        }
+        unsafe { core::slice::from_raw_parts_mut(self.virtual_addr as *mut u8, self.size) }
     }
 
     /// Get immutable slice
     pub fn as_slice(&self) -> &[u8] {
-        unsafe {
-            core::slice::from_raw_parts(self.virtual_addr as *const u8, self.size)
-        }
+        unsafe { core::slice::from_raw_parts(self.virtual_addr as *const u8, self.size) }
     }
 }
 

@@ -3,9 +3,13 @@
 //! Driver for paravirtualized network devices using the VirtIO protocol.
 //! Commonly used in QEMU/KVM virtual machines for high performance.
 
-use crate::error::KernelError;
-use crate::net::{MacAddress, Packet};
-use crate::net::device::{NetworkDevice, DeviceCapabilities, DeviceStatistics, DeviceState};
+use crate::{
+    error::KernelError,
+    net::{
+        device::{DeviceCapabilities, DeviceState, DeviceStatistics, NetworkDevice},
+        MacAddress, Packet,
+    },
+};
 
 /// VirtIO Network Device Feature Bits
 const VIRTIO_NET_F_CSUM: u64 = 1 << 0;
@@ -88,10 +92,12 @@ struct Virtqueue {
 
 impl Virtqueue {
     /// Create a new virtqueue (requires pre-allocated memory)
-    fn new(descriptors: &'static mut [VirtqDesc],
-           avail: &'static mut VirtqAvail,
-           used: &'static mut VirtqUsed,
-           size: u16) -> Self {
+    fn new(
+        descriptors: &'static mut [VirtqDesc],
+        avail: &'static mut VirtqAvail,
+        used: &'static mut VirtqUsed,
+        size: u16,
+    ) -> Self {
         // Initialize descriptor free list
         for i in 0..size {
             descriptors[i as usize].next = if i + 1 < size { i + 1 } else { 0 };
@@ -196,9 +202,7 @@ impl VirtioNetDriver {
 
     /// Read from MMIO register
     fn read_reg(&self, offset: usize) -> u32 {
-        unsafe {
-            core::ptr::read_volatile((self.mmio_base + offset) as *const u32)
-        }
+        unsafe { core::ptr::read_volatile((self.mmio_base + offset) as *const u32) }
     }
 
     /// Write to MMIO register
@@ -256,9 +260,15 @@ impl VirtioNetDriver {
         // Set DRIVER_OK status bit
         self.write_reg(0x70, 1 | 2 | 4 | 8);
 
-        println!("[VIRTIO-NET] Initialized with MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-                 self.mac_address.0[0], self.mac_address.0[1], self.mac_address.0[2],
-                 self.mac_address.0[3], self.mac_address.0[4], self.mac_address.0[5]);
+        println!(
+            "[VIRTIO-NET] Initialized with MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+            self.mac_address.0[0],
+            self.mac_address.0[1],
+            self.mac_address.0[2],
+            self.mac_address.0[3],
+            self.mac_address.0[4],
+            self.mac_address.0[5]
+        );
 
         // Device is now up
         self.state = DeviceState::Up;
@@ -280,9 +290,11 @@ impl VirtioNetDriver {
 
         if let Some(ref mut tx_queue) = self.tx_queue {
             // Allocate a descriptor for the packet
-            let desc_idx = tx_queue.alloc_desc().ok_or(KernelError::ResourceExhausted {
-                resource: "virtio_tx_descriptors",
-            })?;
+            let desc_idx = tx_queue
+                .alloc_desc()
+                .ok_or(KernelError::ResourceExhausted {
+                    resource: "virtio_tx_descriptors",
+                })?;
 
             // TODO: Proper implementation would:
             // 1. Allocate DMA buffer from pool
@@ -298,7 +310,10 @@ impl VirtioNetDriver {
             // Free descriptor (would normally be done after TX complete interrupt)
             tx_queue.free_desc(desc_idx);
 
-            println!("[VIRTIO-NET] Transmitted {} bytes (virtqueue stub)", packet.len());
+            println!(
+                "[VIRTIO-NET] Transmitted {} bytes (virtqueue stub)",
+                packet.len()
+            );
             Ok(())
         } else {
             Err(KernelError::HardwareError {

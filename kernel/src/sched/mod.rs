@@ -489,7 +489,7 @@ fn get_endpoint_waiters(_endpoint: u64) -> [core::ptr::NonNull<Task>; 0] {
 pub fn init_with_bootstrap(bootstrap_task: NonNull<Task>) -> KernelResult<()> {
     #[cfg(not(target_arch = "aarch64"))]
     println!("[SCHED] Initializing scheduler with bootstrap task...");
-    
+
     #[cfg(target_arch = "aarch64")]
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -499,18 +499,18 @@ pub fn init_with_bootstrap(bootstrap_task: NonNull<Task>) -> KernelResult<()> {
     // Initialize SMP support
     #[cfg(not(target_arch = "aarch64"))]
     println!("[SCHED] About to initialize SMP...");
-    
+
     #[cfg(target_arch = "aarch64")]
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[SCHED] About to initialize SMP...\n");
     }
-    
+
     smp::init();
-    
+
     #[cfg(not(target_arch = "aarch64"))]
     println!("[SCHED] SMP initialization complete");
-    
+
     #[cfg(target_arch = "aarch64")]
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -520,18 +520,18 @@ pub fn init_with_bootstrap(bootstrap_task: NonNull<Task>) -> KernelResult<()> {
     // Initialize scheduler with bootstrap task
     #[cfg(not(target_arch = "aarch64"))]
     println!("[SCHED] About to get scheduler lock...");
-    
+
     #[cfg(target_arch = "aarch64")]
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[SCHED] About to get scheduler lock...\n");
     }
-    
+
     SCHEDULER.lock().init(bootstrap_task);
-    
+
     #[cfg(not(target_arch = "aarch64"))]
     println!("[SCHED] Scheduler init complete");
-    
+
     #[cfg(target_arch = "aarch64")]
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -541,18 +541,18 @@ pub fn init_with_bootstrap(bootstrap_task: NonNull<Task>) -> KernelResult<()> {
     // Set up timer interrupt for preemption
     #[cfg(not(target_arch = "aarch64"))]
     println!("[SCHED] About to setup preemption timer...");
-    
+
     #[cfg(target_arch = "aarch64")]
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[SCHED] About to setup preemption timer...\n");
     }
-    
+
     setup_preemption_timer();
-    
+
     #[cfg(not(target_arch = "aarch64"))]
     println!("[SCHED] Preemption timer setup complete");
-    
+
     #[cfg(target_arch = "aarch64")]
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -561,13 +561,13 @@ pub fn init_with_bootstrap(bootstrap_task: NonNull<Task>) -> KernelResult<()> {
 
     #[cfg(not(target_arch = "aarch64"))]
     println!("[SCHED] Scheduler initialized with bootstrap task");
-    
+
     #[cfg(target_arch = "aarch64")]
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[SCHED] Scheduler initialized with bootstrap task\n");
     }
-    
+
     Ok(())
 }
 
@@ -575,9 +575,9 @@ pub fn init_with_bootstrap(bootstrap_task: NonNull<Task>) -> KernelResult<()> {
 pub fn init() {
     #[cfg(target_arch = "x86_64")]
     println!("[SCHED] Initializing scheduler...");
-    
+
     // Skip println for RISC-V to avoid serial issues
-    
+
     #[cfg(target_arch = "aarch64")]
     unsafe {
         // Direct UART output to avoid loops
@@ -588,23 +588,23 @@ pub fn init() {
     // Initialize RISC-V ready queue to avoid spin lock issues
     #[cfg(target_arch = "riscv64")]
     queue::init_ready_queue();
-    
+
     // Initialize SMP support
     smp::init();
-    
+
     #[cfg(target_arch = "aarch64")]
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[SCHED] Skipping idle task creation for AArch64\n");
         uart_write_str("[SCHED] Scheduler initialized (minimal for AArch64)\n");
     }
-    
+
     #[cfg(target_arch = "riscv64")]
     {
         // Skip println for RISC-V to avoid serial issues
         // Scheduler initialized (minimal for RISC-V)
     }
-    
+
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     return;
 
@@ -645,7 +645,7 @@ pub fn init() {
 
         #[cfg(not(target_arch = "aarch64"))]
         println!("[SCHED] Created idle task with PID 0");
-        
+
         #[cfg(target_arch = "aarch64")]
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -658,7 +658,7 @@ pub fn init() {
 
     #[cfg(not(target_arch = "aarch64"))]
     println!("[SCHED] Scheduler initialized");
-    
+
     #[cfg(target_arch = "aarch64")]
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -674,7 +674,7 @@ fn setup_preemption_timer() {
         crate::arch::x86_64::timer::setup_timer(10);
         #[cfg(not(target_arch = "aarch64"))]
         println!("[SCHED] x86_64 timer configured for preemptive scheduling");
-        
+
         #[cfg(target_arch = "aarch64")]
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -688,7 +688,7 @@ fn setup_preemption_timer() {
         crate::arch::aarch64::timer::setup_timer(10);
         #[cfg(not(target_arch = "aarch64"))]
         println!("[SCHED] AArch64 timer configured for preemptive scheduling");
-        
+
         #[cfg(target_arch = "aarch64")]
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -702,7 +702,7 @@ fn setup_preemption_timer() {
         crate::arch::riscv::timer::setup_timer(10);
         #[cfg(not(target_arch = "aarch64"))]
         println!("[SCHED] RISC-V timer configured for preemptive scheduling");
-        
+
         #[cfg(target_arch = "aarch64")]
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -718,14 +718,14 @@ fn setup_preemption_timer() {
 pub fn start() -> ! {
     #[cfg(not(target_arch = "aarch64"))]
     println!("[SCHED] Starting scheduler execution");
-    
+
     #[cfg(target_arch = "aarch64")]
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[SCHED] Starting scheduler execution\n");
         uart_write_str("[SCHED] Entering simplified idle loop for AArch64\n");
     }
-    
+
     #[cfg(target_arch = "aarch64")]
     {
         // For AArch64, just enter a simple idle loop
@@ -735,7 +735,7 @@ pub fn start() -> ! {
             }
         }
     }
-    
+
     #[cfg(target_arch = "riscv64")]
     {
         // Skip println for RISC-V to avoid serial issues
@@ -761,13 +761,13 @@ pub fn start() -> ! {
     // Start running tasks
     #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
     println!("[SCHED] Starting scheduler loop...");
-    
+
     #[cfg(target_arch = "aarch64")]
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[SCHED] Starting scheduler loop...\n");
     }
-    
+
     // Skip println for RISC-V to avoid serial issues
 
     // The scheduler loop
@@ -787,13 +787,13 @@ pub fn start() -> ! {
                 crate::sched::task::TaskContext::X86_64(ctx) => {
                     #[cfg(not(target_arch = "aarch64"))]
                     println!("[SCHED] Loading initial task context for '{}'", _task_name);
-                    
+
                     #[cfg(target_arch = "aarch64")]
                     unsafe {
                         use crate::arch::aarch64::direct_uart::uart_write_str;
                         uart_write_str("[SCHED] Loading initial task context\n");
                     }
-                    
+
                     unsafe {
                         use crate::arch::x86_64::context::load_context;
                         load_context(ctx);
@@ -802,28 +802,26 @@ pub fn start() -> ! {
                 }
 
                 #[cfg(target_arch = "aarch64")]
-                crate::sched::task::TaskContext::AArch64(ctx) => {
-                    unsafe {
-                        use crate::arch::aarch64::direct_uart::uart_write_str;
-                        uart_write_str("[SCHED] Loading initial task context\n");
-                        
-                        use crate::arch::aarch64::context::load_context;
-                        load_context(ctx);
-                        unreachable!("load_context should not return");
-                    }
-                }
+                crate::sched::task::TaskContext::AArch64(ctx) => unsafe {
+                    use crate::arch::aarch64::direct_uart::uart_write_str;
+                    uart_write_str("[SCHED] Loading initial task context\n");
+
+                    use crate::arch::aarch64::context::load_context;
+                    load_context(ctx);
+                    unreachable!("load_context should not return");
+                },
 
                 #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
                 crate::sched::task::TaskContext::RiscV(ctx) => {
                     #[cfg(not(target_arch = "aarch64"))]
                     println!("[SCHED] Loading initial task context for '{}'", _task_name);
-                    
+
                     #[cfg(target_arch = "aarch64")]
                     unsafe {
                         use crate::arch::aarch64::direct_uart::uart_write_str;
                         uart_write_str("[SCHED] Loading initial task context\n");
                     }
-                    
+
                     unsafe {
                         use crate::arch::riscv::context::load_context;
                         load_context(ctx);
@@ -853,7 +851,7 @@ pub fn has_ready_tasks() -> bool {
 pub fn run() -> ! {
     #[cfg(not(target_arch = "aarch64"))]
     println!("[SCHED] Entering scheduler main loop");
-    
+
     #[cfg(target_arch = "aarch64")]
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -1167,7 +1165,7 @@ pub fn cleanup_dead_tasks() {
 
             #[cfg(not(target_arch = "aarch64"))]
             println!("[SCHED] Cleaned up dead task");
-            
+
             #[cfg(target_arch = "aarch64")]
             unsafe {
                 use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -1220,7 +1218,7 @@ fn balance_load() {
                 "[SCHED] Load balancing: CPU {} (load={}) -> CPU {} (load={}), migrating {} tasks",
                 busiest_cpu, max_load, idlest_cpu, min_load, tasks_to_migrate
             );
-            
+
             #[cfg(target_arch = "aarch64")]
             unsafe {
                 use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -1307,7 +1305,7 @@ fn migrate_tasks(source_cpu: u8, target_cpu: u8, count: u32) {
         if migrated > 0 {
             #[cfg(not(target_arch = "aarch64"))]
             println!("[SCHED] Successfully migrated {} tasks", migrated);
-            
+
             #[cfg(target_arch = "aarch64")]
             unsafe {
                 use crate::arch::aarch64::direct_uart::uart_write_str;

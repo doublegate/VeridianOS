@@ -18,7 +18,7 @@ pub fn init() {
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
     }
-    
+
     println!("[ARCH] Starting GDT init...");
     gdt::init();
     println!("[ARCH] GDT initialized");
@@ -31,34 +31,34 @@ pub fn init() {
     println!("[ARCH] Initializing PIC...");
     unsafe {
         use x86_64::instructions::port::Port;
-        
+
         // Initialize PIC manually to ensure interrupts stay masked
         const PIC1_COMMAND: u16 = 0x20;
         const PIC1_DATA: u16 = 0x21;
         const PIC2_COMMAND: u16 = 0xA0;
         const PIC2_DATA: u16 = 0xA1;
-        
+
         let mut pic1_cmd = Port::<u8>::new(PIC1_COMMAND);
         let mut pic1_data = Port::<u8>::new(PIC1_DATA);
         let mut pic2_cmd = Port::<u8>::new(PIC2_COMMAND);
         let mut pic2_data = Port::<u8>::new(PIC2_DATA);
-        
+
         // Start initialization sequence
         pic1_cmd.write(0x11);
         pic2_cmd.write(0x11);
-        
+
         // Set vector offsets
         pic1_data.write(32);
         pic2_data.write(40);
-        
+
         // Set cascading
         pic1_data.write(4);
         pic2_data.write(2);
-        
+
         // Set 8086 mode
         pic1_data.write(0x01);
         pic2_data.write(0x01);
-        
+
         // Mask all interrupts
         pic1_data.write(0xFF);
         pic2_data.write(0xFF);

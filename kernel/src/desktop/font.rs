@@ -1,10 +1,11 @@
 //! Font Rendering System for Desktop Applications
 //!
-//! Provides bitmap font rendering with support for multiple font sizes and styles.
+//! Provides bitmap font rendering with support for multiple font sizes and
+//! styles.
+
+use alloc::{vec, vec::Vec};
 
 use crate::error::KernelError;
-use alloc::vec::Vec;
-use alloc::vec;
 
 /// Font size in pixels
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,7 +191,15 @@ impl Font {
     }
 
     /// Render text to a bitmap buffer
-    pub fn render_text(&self, text: &str, buffer: &mut [u8], buffer_width: usize, buffer_height: usize, x: i32, y: i32) -> Result<(), KernelError> {
+    pub fn render_text(
+        &self,
+        text: &str,
+        buffer: &mut [u8],
+        buffer_width: usize,
+        buffer_height: usize,
+        x: i32,
+        y: i32,
+    ) -> Result<(), KernelError> {
         let mut cursor_x = x;
         let cursor_y = y;
 
@@ -203,7 +212,11 @@ impl Font {
                             let px = cursor_x + gx as i32 + glyph.x_offset as i32;
                             let py = cursor_y + gy as i32 + glyph.y_offset as i32;
 
-                            if px >= 0 && py >= 0 && (px as usize) < buffer_width && (py as usize) < buffer_height {
+                            if px >= 0
+                                && py >= 0
+                                && (px as usize) < buffer_width
+                                && (py as usize) < buffer_height
+                            {
                                 let pixel_index = py as usize * buffer_width + px as usize;
                                 if pixel_index < buffer.len() {
                                     buffer[pixel_index] = 255; // White pixel
@@ -247,10 +260,14 @@ impl FontManager {
     /// Load default fonts
     fn load_default_fonts(&mut self) {
         // Create default font set
-        self.fonts.push(Font::new("Monospace", FontSize::Small, FontStyle::Regular));
-        self.fonts.push(Font::new("Monospace", FontSize::Medium, FontStyle::Regular));
-        self.fonts.push(Font::new("Monospace", FontSize::Large, FontStyle::Regular));
-        self.fonts.push(Font::new("Monospace", FontSize::Medium, FontStyle::Bold));
+        self.fonts
+            .push(Font::new("Monospace", FontSize::Small, FontStyle::Regular));
+        self.fonts
+            .push(Font::new("Monospace", FontSize::Medium, FontStyle::Regular));
+        self.fonts
+            .push(Font::new("Monospace", FontSize::Large, FontStyle::Regular));
+        self.fonts
+            .push(Font::new("Monospace", FontSize::Medium, FontStyle::Bold));
 
         println!("[FONT] Loaded {} default fonts", self.fonts.len());
     }
@@ -262,7 +279,9 @@ impl FontManager {
 
     /// Get font by size and style
     pub fn get_font(&self, size: FontSize, style: FontStyle) -> Option<&Font> {
-        self.fonts.iter().find(|f| f.size == size && f.style == style)
+        self.fonts
+            .iter()
+            .find(|f| f.size == size && f.style == style)
     }
 
     /// Add a font
