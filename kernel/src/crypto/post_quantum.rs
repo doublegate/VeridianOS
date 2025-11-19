@@ -1,6 +1,35 @@
 //! Post-Quantum Cryptography
 //!
 //! Implements ML-DSA (Dilithium) signatures and ML-KEM (Kyber) key encapsulation.
+//!
+//! ## NIST Standards Compliance
+//!
+//! This module implements algorithms selected by NIST for post-quantum cryptography:
+//! - **ML-DSA (FIPS 204)**: Module-Lattice-Based Digital Signature Algorithm
+//!   - Replaces Dilithium after standardization
+//!   - Provides quantum-resistant digital signatures
+//!   - Security levels: 2, 3, 5 (128, 192, 256-bit equivalents)
+//! - **ML-KEM (FIPS 203)**: Module-Lattice-Based Key Encapsulation Mechanism
+//!   - Replaces Kyber after standardization
+//!   - Provides quantum-resistant key exchange
+//!   - Security levels: 512, 768, 1024 (128, 192, 256-bit equivalents)
+//!
+//! ## Implementation Status
+//!
+//! **Current**: Stub implementations showing API structure
+//! **Production Requirements**:
+//! - Full NIST-compliant algorithm implementations
+//! - Constant-time operations to prevent timing attacks
+//! - Proper random number generation from hardware
+//! - Side-channel attack mitigations
+//! - FIPS 140-3 validation for cryptographic modules
+//!
+//! ## Integration with Classical Cryptography
+//!
+//! Hybrid key exchange combines classical (X25519) and post-quantum (Kyber) to provide:
+//! - Security against both classical and quantum attacks
+//! - Backward compatibility during transition period
+//! - Meet-in-the-middle security guarantees
 
 use super::{CryptoResult, CryptoError};
 use alloc::vec::Vec;
