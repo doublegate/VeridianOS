@@ -18,8 +18,7 @@
 //! +------------------+
 //! ```
 
-use alloc::vec::Vec;
-use alloc::string::String;
+use alloc::{string::String, vec::Vec};
 
 /// Package file magic number
 pub const VPKG_MAGIC: [u8; 4] = *b"VPKG";
@@ -73,8 +72,8 @@ impl Compression {
     pub fn ratio_estimate(&self) -> f32 {
         match self {
             Compression::None => 1.0,
-            Compression::Zstd => 0.3,   // ~70% reduction
-            Compression::Lz4 => 0.5,    // ~50% reduction
+            Compression::Zstd => 0.3,    // ~70% reduction
+            Compression::Lz4 => 0.5,     // ~50% reduction
             Compression::Brotli => 0.25, // ~75% reduction
         }
     }
@@ -271,13 +270,7 @@ mod tests {
 
     #[test_case]
     fn test_header_creation() {
-        let header = PackageHeader::new(
-            PackageType::Binary,
-            Compression::Zstd,
-            1024,
-            4096,
-            128,
-        );
+        let header = PackageHeader::new(PackageType::Binary, Compression::Zstd, 1024, 4096, 128);
 
         assert!(header.validate());
         assert_eq!(header.get_type(), Some(PackageType::Binary));

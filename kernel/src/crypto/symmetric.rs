@@ -2,8 +2,9 @@
 //!
 //! Implements AES-256-GCM and ChaCha20-Poly1305 authenticated encryption.
 
-use super::{CryptoResult, CryptoError};
 use alloc::vec::Vec;
+
+use super::{CryptoError, CryptoResult};
 
 /// Symmetric cipher trait
 pub trait SymmetricCipher {

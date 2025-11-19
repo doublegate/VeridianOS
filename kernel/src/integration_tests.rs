@@ -5,8 +5,9 @@
 
 #![cfg(test)]
 
-use crate::{cap, error::KernelError, fs, ipc, net, process, security};
 use alloc::vec::Vec;
+
+use crate::{cap, error::KernelError, fs, ipc, net, process, security};
 
 /// Test IPC with capability validation
 #[test_case]
@@ -62,10 +63,12 @@ fn test_security_mac_with_filesystem() {
     fs::init();
 
     // Test MAC access control
-    let has_access = security::mac::check_access("system_t", "system_t", security::mac::AccessType::Read);
+    let has_access =
+        security::mac::check_access("system_t", "system_t", security::mac::AccessType::Read);
     assert!(has_access, "System should have read access to itself");
 
-    let has_access = security::mac::check_access("user_t", "system_t", security::mac::AccessType::Execute);
+    let has_access =
+        security::mac::check_access("user_t", "system_t", security::mac::AccessType::Execute);
     assert!(!has_access, "User should not have execute access to system");
 }
 
@@ -101,9 +104,8 @@ fn test_process_with_capabilities() {
     assert!(pid > 0);
 
     // Create a capability for the process
-    let cap_id =
-        cap::create_capability(pid, cap::Rights::READ | cap::Rights::WRITE, 1234)
-            .expect("Failed to create capability");
+    let cap_id = cap::create_capability(pid, cap::Rights::READ | cap::Rights::WRITE, 1234)
+        .expect("Failed to create capability");
 
     // Verify capability exists
     assert!(cap::validate_capability(cap_id, cap::Rights::READ).is_ok());

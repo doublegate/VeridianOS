@@ -15,12 +15,11 @@
 //! - Synchronization: Fences, semaphores for GPU/CPU sync
 //! - Queues: Graphics, compute, transfer queues
 
-use alloc::vec::Vec;
-use alloc::vec;
-use alloc::string::String;
+use alloc::{string::String, vec, vec::Vec};
+
 use spin::RwLock;
-use crate::error::KernelError;
-use crate::sync::once_lock::GlobalState;
+
+use crate::{error::KernelError, sync::once_lock::GlobalState};
 
 /// GPU device
 #[derive(Clone)]
@@ -277,10 +276,12 @@ pub fn init() -> Result<(), KernelError> {
     let manager = GpuManager::new();
     manager.init()?;
 
-    GPU_MANAGER.init(manager).map_err(|_| KernelError::InvalidState {
-        expected: "uninitialized",
-        actual: "initialized",
-    })?;
+    GPU_MANAGER
+        .init(manager)
+        .map_err(|_| KernelError::InvalidState {
+            expected: "uninitialized",
+            actual: "initialized",
+        })?;
 
     crate::println!("[GPU] GPU acceleration initialized");
     Ok(())

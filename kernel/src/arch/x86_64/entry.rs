@@ -1,6 +1,7 @@
 // x86_64 kernel entry point and panic handler
 
 use core::panic::PanicInfo;
+
 use crate::{early_println, println};
 
 pub fn arch_early_init() {
@@ -8,7 +9,7 @@ pub fn arch_early_init() {
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
     }
-    
+
     // Initialize early serial before any println! usage
     crate::arch::x86_64::early_serial::init();
     early_println!("[EARLY] x86_64 kernel_main reached!");

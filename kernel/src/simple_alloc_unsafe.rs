@@ -45,7 +45,7 @@ impl UnsafeBumpAllocator {
                 core::ptr::write_volatile(uart, byte);
             }
         }
-        
+
         let start_addr = start as usize;
 
         // Use SeqCst ordering for RISC-V compatibility
@@ -56,7 +56,7 @@ impl UnsafeBumpAllocator {
 
         // Add memory barrier to ensure atomic stores complete
         core::sync::atomic::fence(Ordering::SeqCst);
-        
+
         // Debug output to confirm init completed
         #[cfg(target_arch = "riscv64")]
         {
@@ -84,7 +84,7 @@ unsafe impl GlobalAlloc for UnsafeBumpAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let start = self.start.load(Ordering::SeqCst);
         let size = self.size.load(Ordering::SeqCst);
-        
+
         // Debug output for first allocation attempt
         #[cfg(target_arch = "riscv64")]
         {

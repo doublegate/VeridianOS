@@ -3,10 +3,13 @@
 //! Implements SAT-based dependency resolution for package management.
 //! Uses a simplified 2-SAT solver for conflict resolution.
 
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    string::String,
+    vec::Vec,
+};
+
 use super::{Dependency, PackageId, Version};
-use alloc::vec::Vec;
-use alloc::collections::{BTreeMap, BTreeSet};
-use alloc::string::String;
 
 /// Version requirement
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,7 +136,10 @@ impl DependencyResolver {
 
     /// Resolve dependencies for a package
     /// Returns a topologically sorted list of packages to install
-    pub fn resolve(&self, dependencies: &[Dependency]) -> Result<Vec<(PackageId, Version)>, String> {
+    pub fn resolve(
+        &self,
+        dependencies: &[Dependency],
+    ) -> Result<Vec<(PackageId, Version)>, String> {
         let mut solution = BTreeMap::new();
         let mut visited = BTreeSet::new();
 
@@ -188,8 +194,16 @@ impl DependencyResolver {
         let version = self.find_suitable_version(&dep.name, &dep.version_req)?;
 
         // Get candidate metadata
-        let candidate = self.metadata.get(&(dep.name.clone(), version.clone()))
-            .ok_or_else(|| alloc::format!("Missing metadata for {} {}", dep.name, Self::version_to_string(&version)))?;
+        let candidate = self
+            .metadata
+            .get(&(dep.name.clone(), version.clone()))
+            .ok_or_else(|| {
+                alloc::format!(
+                    "Missing metadata for {} {}",
+                    dep.name,
+                    Self::version_to_string(&version)
+                )
+            })?;
 
         // Resolve transitive dependencies
         for trans_dep in &candidate.dependencies {
@@ -205,8 +219,14 @@ impl DependencyResolver {
     }
 
     /// Find a suitable version for a package given version requirement
-    fn find_suitable_version(&self, package_id: &PackageId, version_req_str: &str) -> Result<Version, String> {
-        let versions = self.available.get(package_id)
+    fn find_suitable_version(
+        &self,
+        package_id: &PackageId,
+        version_req_str: &str,
+    ) -> Result<Version, String> {
+        let versions = self
+            .available
+            .get(package_id)
             .ok_or_else(|| alloc::format!("Package not found: {}", package_id))?;
 
         let req = VersionReq::parse(version_req_str);
@@ -290,12 +310,7 @@ mod tests {
     fn test_simple_resolution() {
         let mut resolver = DependencyResolver::new();
 
-        resolver.register_package(
-            String::from("pkg-a"),
-            Version::new(1, 0, 0),
-            vec![],
-            vec![],
-        );
+        resolver.register_package(String::from("pkg-a"), Version::new(1, 0, 0), vec![], vec![]);
 
         let deps = vec![Dependency {
             name: String::from("pkg-a"),

@@ -1,16 +1,21 @@
 //! Terminal Emulator Application
 //!
-//! Combines PTY, font rendering, and window manager to provide a graphical terminal.
+//! Combines PTY, font rendering, and window manager to provide a graphical
+//! terminal.
 
-use crate::error::KernelError;
-use crate::desktop::font::{FontSize, FontStyle, get_font_manager};
-use crate::desktop::window_manager::{WindowId, get_window_manager, InputEvent};
-use crate::fs::pty::with_pty_manager;
-use crate::sync::once_lock::GlobalState;
-use alloc::vec::Vec;
-use alloc::vec;
-use alloc::string::ToString;
+use alloc::{string::ToString, vec, vec::Vec};
+
 use spin::RwLock;
+
+use crate::{
+    desktop::{
+        font::{get_font_manager, FontSize, FontStyle},
+        window_manager::{with_window_manager, InputEvent, WindowId},
+    },
+    error::KernelError,
+    fs::pty::with_pty_manager,
+    sync::once_lock::GlobalState,
+};
 
 /// Terminal dimensions
 const TERMINAL_COLS: usize = 80;
@@ -26,9 +31,17 @@ pub struct Color {
 
 impl Color {
     pub const BLACK: Color = Color { r: 0, g: 0, b: 0 };
-    pub const WHITE: Color = Color { r: 255, g: 255, b: 255 };
+    pub const WHITE: Color = Color {
+        r: 255,
+        g: 255,
+        b: 255,
+    };
     pub const GREEN: Color = Color { r: 0, g: 255, b: 0 };
-    pub const BLUE: Color = Color { r: 0, g: 128, b: 255 };
+    pub const BLUE: Color = Color {
+        r: 0,
+        g: 128,
+        b: 255,
+    };
 }
 
 /// Terminal cell
@@ -86,9 +99,9 @@ impl TerminalEmulator {
         // Create window
         let window_id = with_window_manager(|wm| wm.create_window(100, 100, width, height, 0))
             .ok_or(KernelError::InvalidState {
-                expected: "initialized",
-                actual: "uninitialized",
-            })??;
+            expected: "initialized",
+            actual: "uninitialized",
+        })??;
 
         // Create PTY pair
         let (pty_master_id, pty_slave_id) = with_pty_manager(|manager| manager.create_pty())
@@ -103,8 +116,10 @@ impl TerminalEmulator {
             buffer.push(vec![Cell::default(); TERMINAL_COLS]);
         }
 
-        println!("[TERMINAL] Created terminal emulator: window={}, pty={}",
-                 window_id, pty_master_id);
+        println!(
+            "[TERMINAL] Created terminal emulator: window={}, pty={}",
+            window_id, pty_master_id
+        );
 
         Ok(Self {
             window_id,
@@ -126,7 +141,9 @@ impl TerminalEmulator {
             InputEvent::KeyPress { character, .. } => {
                 // Send character to PTY
                 let master_id = self.pty_master_id;
-                if let Some(master) = with_pty_manager(|manager| manager.get_master(master_id)).flatten() {
+                if let Some(master) =
+                    with_pty_manager(|manager| manager.get_master(master_id)).flatten()
+                {
                     let mut buf = [0u8; 4];
                     let encoded = character.encode_utf8(&mut buf);
                     master.write(encoded.as_bytes())?;
@@ -241,11 +258,20 @@ impl TerminalEmulator {
     }
 
     /// Render terminal to framebuffer
-    pub fn render(&self, framebuffer: &mut [u8], fb_width: usize, fb_height: usize) -> Result<(), KernelError> {
+    pub fn render(
+        &self,
+        framebuffer: &mut [u8],
+        fb_width: usize,
+        fb_height: usize,
+    ) -> Result<(), KernelError> {
         // Get font
         let font_manager = get_font_manager()?;
-        let font = font_manager.get_font(FontSize::Medium, FontStyle::Regular)
-            .ok_or(KernelError::NotFound { resource: "font", id: 0 })?;
+        let font = font_manager
+            .get_font(FontSize::Medium, FontStyle::Regular)
+            .ok_or(KernelError::NotFound {
+                resource: "font",
+                id: 0,
+            })?;
 
         // Clear framebuffer to background color
         for pixel in framebuffer.iter_mut() {
@@ -253,7 +279,7 @@ impl TerminalEmulator {
         }
 
         // Render each cell
-        let char_width = 8;  // Approximate character width
+        let char_width = 8; // Approximate character width
         let char_height = 12; // Font size
 
         for y in 0..TERMINAL_ROWS {
@@ -267,7 +293,14 @@ impl TerminalEmulator {
 
                     // Use font rendering (simplified - would need proper glyph rendering)
                     let char_str = cell.character.to_string();
-                    let _ = font.render_text(&char_str, framebuffer, fb_width, fb_height, screen_x, screen_y);
+                    let _ = font.render_text(
+                        &char_str,
+                        framebuffer,
+                        fb_width,
+                        fb_height,
+                        screen_x,
+                        screen_y,
+                    );
                 }
             }
         }
@@ -331,7 +364,10 @@ impl TerminalManager {
         if let Some(terminal) = terminals.get_mut(terminal_id) {
             terminal.process_input(event)
         } else {
-            Err(KernelError::NotFound { resource: "terminal", id: terminal_id as u64 })
+            Err(KernelError::NotFound {
+                resource: "terminal",
+                id: terminal_id as u64,
+            })
         }
     }
 
@@ -357,10 +393,12 @@ static TERMINAL_MANAGER: GlobalState<TerminalManager> = GlobalState::new();
 /// Initialize terminal system
 pub fn init() -> Result<(), KernelError> {
     let manager = TerminalManager::new();
-    TERMINAL_MANAGER.init(manager).map_err(|_| KernelError::InvalidState {
-        expected: "uninitialized",
-        actual: "initialized",
-    })?;
+    TERMINAL_MANAGER
+        .init(manager)
+        .map_err(|_| KernelError::InvalidState {
+            expected: "uninitialized",
+            actual: "initialized",
+        })?;
 
     println!("[TERMINAL] Terminal emulator system initialized");
     Ok(())

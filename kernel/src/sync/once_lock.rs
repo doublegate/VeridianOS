@@ -3,8 +3,11 @@
 //! Provides safe alternatives to `static mut` for global state management.
 //! Uses atomic operations and proper synchronization for Rust 2024 edition.
 
-use core::sync::atomic::{AtomicPtr, Ordering};
-use core::cell::UnsafeCell;
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicPtr, Ordering},
+};
+
 use spin::Mutex;
 
 /// A cell that can be written to only once (Rust 2024 compatible)
@@ -47,7 +50,8 @@ impl<T> OnceLock<T> {
 
     /// Initialize the cell with a value
     ///
-    /// Returns Ok(()) if initialization succeeds, Err(value) if already initialized
+    /// Returns Ok(()) if initialization succeeds, Err(value) if already
+    /// initialized
     pub fn set(&self, value: T) -> Result<(), T> {
         let boxed = alloc::boxed::Box::new(value);
         let ptr = alloc::boxed::Box::into_raw(boxed);

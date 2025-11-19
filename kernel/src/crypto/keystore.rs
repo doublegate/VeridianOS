@@ -2,11 +2,11 @@
 //!
 //! Secure storage and management of cryptographic keys.
 
-use super::{CryptoResult, CryptoError};
-use alloc::collections::BTreeMap;
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
+
 use spin::RwLock;
+
+use super::{CryptoError, CryptoResult};
 
 /// Key identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -83,18 +83,14 @@ impl KeyStore {
     pub fn get_key(&self, id: KeyId) -> CryptoResult<Key> {
         let keys = self.keys.read();
 
-        keys.get(&id)
-            .cloned()
-            .ok_or(CryptoError::InvalidKey)
+        keys.get(&id).cloned().ok_or(CryptoError::InvalidKey)
     }
 
     /// Delete a key
     pub fn delete_key(&self, id: KeyId) -> CryptoResult<()> {
         let mut keys = self.keys.write();
 
-        keys.remove(&id)
-            .ok_or(CryptoError::InvalidKey)
-            .map(|_| ())
+        keys.remove(&id).ok_or(CryptoError::InvalidKey).map(|_| ())
     }
 
     /// List all key IDs
@@ -198,7 +194,13 @@ mod tests {
 
         // Store a key
         let key_data = vec![0x42u8; 32];
-        let id = store.store_key(KeyType::Symmetric, key_data.clone(), String::from("test_key")).unwrap();
+        let id = store
+            .store_key(
+                KeyType::Symmetric,
+                key_data.clone(),
+                String::from("test_key"),
+            )
+            .unwrap();
 
         // Retrieve the key
         let retrieved = store.get_key(id).unwrap();

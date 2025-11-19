@@ -1,12 +1,13 @@
 //! DMA Buffer Pool for Zero-Copy Networking
 //!
 //! Provides pre-allocated DMA-capable buffers for network packet transmission
-//! and reception, enabling zero-copy operation with minimal allocation overhead.
+//! and reception, enabling zero-copy operation with minimal allocation
+//! overhead.
 
-use crate::error::KernelError;
-use crate::mm::PhysicalAddress;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
+
+use crate::{error::KernelError, mm::PhysicalAddress};
 
 /// Standard network buffer size (1500 MTU + headers + alignment)
 pub const DMA_BUFFER_SIZE: usize = 2048;
@@ -105,7 +106,8 @@ pub struct DmaBufferPool {
 impl DmaBufferPool {
     /// Create a new DMA buffer pool
     ///
-    /// NOTE: This is a stub implementation. Proper DMA buffer allocation requires:
+    /// NOTE: This is a stub implementation. Proper DMA buffer allocation
+    /// requires:
     /// 1. Physically contiguous memory allocation
     /// 2. Cache-coherent memory mapping
     /// 3. IOMMU configuration (if available)
@@ -124,7 +126,10 @@ impl DmaBufferPool {
         // TODO: Proper DMA buffer allocation
         // For now, this is a placeholder that documents the requirements
 
-        println!("[DMA-POOL] Created buffer pool with {} buffers (stub)", num_buffers);
+        println!(
+            "[DMA-POOL] Created buffer pool with {} buffers (stub)",
+            num_buffers
+        );
         println!("[DMA-POOL] NOTE: Proper implementation requires:");
         println!("[DMA-POOL]   - Physically contiguous memory allocation");
         println!("[DMA-POOL]   - Cache-coherent DMA mapping");

@@ -35,7 +35,7 @@ pub use table::get_process;
 pub use thread::{Thread, ThreadId, ThreadState};
 
 // Re-export thread context types for compatibility
-pub use crate::arch::context::{ThreadContext, ArchThreadContext};
+pub use crate::arch::context::{ArchThreadContext, ThreadContext};
 
 /// Maximum number of processes
 pub const MAX_PROCESSES: usize = 4096;
@@ -306,12 +306,12 @@ pub fn get_process_list() -> Option<alloc::vec::Vec<u64>> {
     {
         use table::PROCESS_TABLE;
         let mut pids = alloc::vec::Vec::new();
-        
+
         // Iterate through all processes
         PROCESS_TABLE.for_each(|process| {
             pids.push(process.pid.0);
         });
-        
+
         if pids.is_empty() {
             None
         } else {

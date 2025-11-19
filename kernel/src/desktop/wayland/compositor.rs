@@ -2,9 +2,10 @@
 //!
 //! Manages surfaces and composites them into final framebuffer.
 
-use alloc::vec::Vec;
-use alloc::collections::BTreeMap;
+use alloc::{collections::BTreeMap, vec::Vec};
+
 use spin::RwLock;
+
 use super::surface::Surface;
 use crate::error::KernelError;
 

@@ -2,12 +2,11 @@
 //!
 //! Provides device nodes for hardware and virtual devices.
 
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::sync::Arc;
+use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
+
 use spin::RwLock;
-use alloc::collections::BTreeMap;
-use super::{VfsNode, Filesystem, NodeType, Metadata, Permissions, DirEntry};
+
+use super::{DirEntry, Filesystem, Metadata, NodeType, Permissions, VfsNode};
 
 /// Device node
 struct DevNode {
@@ -28,7 +27,7 @@ impl DevNode {
             permissions: Permissions::default(),
         }
     }
-    
+
     #[allow(dead_code)]
     fn new_block(name: String, major: u32, minor: u32) -> Self {
         Self {
@@ -67,7 +66,7 @@ impl VfsNode for DevNode {
             }
         }
     }
-    
+
     fn write(&self, _offset: usize, data: &[u8]) -> Result<usize, &'static str> {
         match self.name.as_str() {
             "null" => {
@@ -87,7 +86,7 @@ impl VfsNode for DevNode {
             }
         }
     }
-    
+
     fn metadata(&self) -> Result<Metadata, &'static str> {
         Ok(Metadata {
             node_type: self.node_type,
@@ -100,27 +99,35 @@ impl VfsNode for DevNode {
             accessed: 0,
         })
     }
-    
+
     fn readdir(&self) -> Result<Vec<DirEntry>, &'static str> {
         Err("Not a directory")
     }
-    
+
     fn lookup(&self, _name: &str) -> Result<Arc<dyn VfsNode>, &'static str> {
         Err("Not a directory")
     }
-    
-    fn create(&self, _name: &str, _permissions: Permissions) -> Result<Arc<dyn VfsNode>, &'static str> {
+
+    fn create(
+        &self,
+        _name: &str,
+        _permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, &'static str> {
         Err("Cannot create files in device")
     }
-    
-    fn mkdir(&self, _name: &str, _permissions: Permissions) -> Result<Arc<dyn VfsNode>, &'static str> {
+
+    fn mkdir(
+        &self,
+        _name: &str,
+        _permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, &'static str> {
         Err("Cannot create directories in device")
     }
-    
+
     fn unlink(&self, _name: &str) -> Result<(), &'static str> {
         Err("Cannot unlink device")
     }
-    
+
     fn truncate(&self, _size: usize) -> Result<(), &'static str> {
         Err("Cannot truncate device")
     }
@@ -134,38 +141,38 @@ struct DevRoot {
 impl DevRoot {
     fn new() -> Self {
         let mut devices = BTreeMap::new();
-        
+
         // Create standard device nodes
         devices.insert(
             String::from("null"),
             Arc::new(DevNode::new_char(String::from("null"), 1, 3)),
         );
-        
+
         devices.insert(
             String::from("zero"),
             Arc::new(DevNode::new_char(String::from("zero"), 1, 5)),
         );
-        
+
         devices.insert(
             String::from("random"),
             Arc::new(DevNode::new_char(String::from("random"), 1, 8)),
         );
-        
+
         devices.insert(
             String::from("urandom"),
             Arc::new(DevNode::new_char(String::from("urandom"), 1, 9)),
         );
-        
+
         devices.insert(
             String::from("console"),
             Arc::new(DevNode::new_char(String::from("console"), 5, 1)),
         );
-        
+
         devices.insert(
             String::from("tty0"),
             Arc::new(DevNode::new_char(String::from("tty0"), 4, 0)),
         );
-        
+
         Self {
             devices: RwLock::new(devices),
         }
@@ -176,11 +183,11 @@ impl VfsNode for DevRoot {
     fn read(&self, _offset: usize, _buffer: &mut [u8]) -> Result<usize, &'static str> {
         Err("Cannot read directory")
     }
-    
+
     fn write(&self, _offset: usize, _data: &[u8]) -> Result<usize, &'static str> {
         Err("Cannot write to directory")
     }
-    
+
     fn metadata(&self) -> Result<Metadata, &'static str> {
         Ok(Metadata {
             node_type: NodeType::Directory,
@@ -193,23 +200,23 @@ impl VfsNode for DevRoot {
             accessed: 0,
         })
     }
-    
+
     fn readdir(&self) -> Result<Vec<DirEntry>, &'static str> {
         let devices = self.devices.read();
         let mut entries = Vec::new();
-        
+
         entries.push(DirEntry {
             name: String::from("."),
             node_type: NodeType::Directory,
             inode: 0,
         });
-        
+
         entries.push(DirEntry {
             name: String::from(".."),
             node_type: NodeType::Directory,
             inode: 0,
         });
-        
+
         for (name, device) in devices.iter() {
             entries.push(DirEntry {
                 name: name.clone(),
@@ -217,29 +224,38 @@ impl VfsNode for DevRoot {
                 inode: 0,
             });
         }
-        
+
         Ok(entries)
     }
-    
+
     fn lookup(&self, name: &str) -> Result<Arc<dyn VfsNode>, &'static str> {
         let devices = self.devices.read();
-        devices.get(name)
+        devices
+            .get(name)
             .map(|node| node.clone() as Arc<dyn VfsNode>)
             .ok_or("Device not found")
     }
-    
-    fn create(&self, _name: &str, _permissions: Permissions) -> Result<Arc<dyn VfsNode>, &'static str> {
+
+    fn create(
+        &self,
+        _name: &str,
+        _permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, &'static str> {
         Err("Cannot create files in /dev")
     }
-    
-    fn mkdir(&self, _name: &str, _permissions: Permissions) -> Result<Arc<dyn VfsNode>, &'static str> {
+
+    fn mkdir(
+        &self,
+        _name: &str,
+        _permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, &'static str> {
         Err("Cannot create directories in /dev")
     }
-    
+
     fn unlink(&self, _name: &str) -> Result<(), &'static str> {
         Err("Cannot unlink from /dev")
     }
-    
+
     fn truncate(&self, _size: usize) -> Result<(), &'static str> {
         Err("Cannot truncate directory")
     }
@@ -262,15 +278,15 @@ impl Filesystem for DevFs {
     fn root(&self) -> Arc<dyn VfsNode> {
         self.root.clone() as Arc<dyn VfsNode>
     }
-    
+
     fn name(&self) -> &str {
         "devfs"
     }
-    
+
     fn is_readonly(&self) -> bool {
         false
     }
-    
+
     fn sync(&self) -> Result<(), &'static str> {
         Ok(())
     }

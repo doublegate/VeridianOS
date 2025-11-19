@@ -1,32 +1,33 @@
 //! Device drivers module
 //!
-//! Contains all device drivers including bus drivers, network drivers, and device-specific drivers.
+//! Contains all device drivers including bus drivers, network drivers, and
+//! device-specific drivers.
 
-pub mod pci;
-pub mod usb;
-pub mod network;
 pub mod console;
-pub mod storage;
-pub mod gpu;
 pub mod e1000;
-pub mod virtio_net;
+pub mod gpu;
+pub mod network;
 pub mod nvme;
+pub mod pci;
+pub mod storage;
+pub mod usb;
+pub mod virtio_net;
 
-pub use pci::{PciBus, PciDevice};
-pub use usb::{UsbBus, UsbDevice};
-pub use network::{NetworkDevice, EthernetDriver, LoopbackDriver};
-pub use console::{ConsoleDevice, ConsoleDriver, VgaConsole, SerialConsole};
-pub use storage::{StorageDevice, AtaDriver};
+pub use console::{ConsoleDevice, ConsoleDriver, SerialConsole, VgaConsole};
 pub use gpu::{GpuDriver, PixelFormat};
+pub use network::{EthernetDriver, LoopbackDriver, NetworkDevice};
+pub use pci::{PciBus, PciDevice};
+pub use storage::{AtaDriver, StorageDevice};
+pub use usb::{UsbBus, UsbDevice};
 
 /// Initialize all drivers
 pub fn init() {
     crate::println!("[DRIVERS] Initializing device drivers...");
-    
+
     // Initialize bus drivers
     pci::init();
     usb::init();
-    
+
     // Initialize device drivers
     network::init();
     console::init();

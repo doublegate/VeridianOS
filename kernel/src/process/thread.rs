@@ -92,25 +92,25 @@ impl ThreadLocalStorage {
         self.size = size;
         Ok(())
     }
-    
+
     /// Set TLS value for key
     #[cfg(feature = "alloc")]
     pub fn set_value(&mut self, key: u64, value: u64) {
         self.data.insert(key, value);
     }
-    
+
     /// Get TLS value for key
     #[cfg(feature = "alloc")]
     pub fn get_value(&self, key: u64) -> Option<u64> {
         self.data.get(&key).copied()
     }
-    
+
     /// Remove TLS value for key
     #[cfg(feature = "alloc")]
     pub fn remove_value(&mut self, key: u64) -> Option<u64> {
         self.data.remove(&key)
     }
-    
+
     /// Get all TLS keys
     #[cfg(feature = "alloc")]
     pub fn keys(&self) -> impl Iterator<Item = &u64> {
@@ -416,41 +416,42 @@ impl Thread {
     pub fn get_cpu_time(&self) -> u64 {
         self.cpu_time.load(Ordering::Relaxed)
     }
-    
+
     /// Set TLS value for this thread
     #[cfg(feature = "alloc")]
     pub fn set_tls_value(&self, key: u64, value: u64) {
         self.tls.lock().set_value(key, value);
     }
-    
+
     /// Get TLS value for this thread
     #[cfg(feature = "alloc")]
     pub fn get_tls_value(&self, key: u64) -> Option<u64> {
         self.tls.lock().get_value(key)
     }
-    
+
     /// Remove TLS value for this thread
     #[cfg(feature = "alloc")]
     pub fn remove_tls_value(&self, key: u64) -> Option<u64> {
         self.tls.lock().remove_value(key)
     }
-    
+
     /// Get all TLS keys for this thread
     #[cfg(feature = "alloc")]
     pub fn get_tls_keys(&self) -> alloc::vec::Vec<u64> {
         self.tls.lock().keys().copied().collect()
     }
-    
+
     /// Set thread entry point
     pub fn set_entry_point(&mut self, entry: usize) {
         self.context.get_mut().set_instruction_pointer(entry);
     }
-    
+
     /// Reset thread context for exec
     pub fn reset_context(&mut self) {
         // Reset to initial state
         *self.context.get_mut() = ArchThreadContext::default();
-        self.state.store(ThreadState::Ready as u32, Ordering::Release);
+        self.state
+            .store(ThreadState::Ready as u32, Ordering::Release);
         self.cpu_time.store(0, Ordering::Relaxed);
         self.time_slice.store(10, Ordering::Relaxed); // Default time slice
     }

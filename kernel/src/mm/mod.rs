@@ -172,7 +172,7 @@ pub fn init(memory_map: &[MemoryRegion]) {
     // Get frame allocator lock and initialize memory regions
     {
         let mut allocator = FRAME_ALLOCATOR.lock();
-        
+
         #[cfg(target_arch = "aarch64")]
         {
             unsafe {
@@ -182,7 +182,7 @@ pub fn init(memory_map: &[MemoryRegion]) {
         }
         #[cfg(not(target_arch = "aarch64"))]
         println!("[MM] Frame allocator locked successfully");
-        
+
         let mut total_memory = 0u64;
         let mut usable_memory = 0u64;
 
@@ -217,7 +217,7 @@ pub fn init(memory_map: &[MemoryRegion]) {
 
                 #[cfg(not(target_arch = "aarch64"))]
                 println!("[MM] About to call init_numa_node for node {}", numa_node);
-                
+
                 if let Err(_e) = allocator.init_numa_node(numa_node, start_frame, frame_count) {
                     #[cfg(target_arch = "aarch64")]
                     {
@@ -248,7 +248,7 @@ pub fn init(memory_map: &[MemoryRegion]) {
         }
 
         drop(allocator); // Release lock before getting stats
-        
+
         #[cfg(target_arch = "aarch64")]
         {
             unsafe {
@@ -406,7 +406,7 @@ pub struct MemoryStats {
 pub fn get_memory_stats() -> MemoryStats {
     let allocator = FRAME_ALLOCATOR.lock();
     let stats = allocator.get_stats();
-    
+
     MemoryStats {
         total_frames: stats.total_frames as usize,
         free_frames: stats.free_frames as usize,

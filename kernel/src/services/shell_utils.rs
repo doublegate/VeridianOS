@@ -2,19 +2,20 @@
 //!
 //! Implements find, grep, wc, head, tail, and other common Unix utilities.
 
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::boxed::Box;
-use alloc::vec;
-use super::shell::{BuiltinCommand, Shell, CommandResult};
-use alloc::format;
+use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
+
+use super::shell::{BuiltinCommand, CommandResult, Shell};
 
 /// Find command - search for files
 pub struct FindCommand;
 
 impl BuiltinCommand for FindCommand {
-    fn name(&self) -> &str { "find" }
-    fn description(&self) -> &str { "Search for files in directory hierarchy" }
+    fn name(&self) -> &str {
+        "find"
+    }
+    fn description(&self) -> &str {
+        "Search for files in directory hierarchy"
+    }
 
     fn execute(&self, args: &[String], shell: &Shell) -> CommandResult {
         let start_path = if args.is_empty() {
@@ -23,11 +24,7 @@ impl BuiltinCommand for FindCommand {
             args[0].clone()
         };
 
-        let pattern = if args.len() > 1 {
-            Some(&args[1])
-        } else {
-            None
-        };
+        let pattern = if args.len() > 1 { Some(&args[1]) } else { None };
 
         match find_files(&start_path, pattern) {
             Ok(files) => {
@@ -45,8 +42,12 @@ impl BuiltinCommand for FindCommand {
 pub struct GrepCommand;
 
 impl BuiltinCommand for GrepCommand {
-    fn name(&self) -> &str { "grep" }
-    fn description(&self) -> &str { "Search for patterns in files" }
+    fn name(&self) -> &str {
+        "grep"
+    }
+    fn description(&self) -> &str {
+        "Search for patterns in files"
+    }
 
     fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
         if args.len() < 2 {
@@ -72,8 +73,12 @@ impl BuiltinCommand for GrepCommand {
 pub struct WcCommand;
 
 impl BuiltinCommand for WcCommand {
-    fn name(&self) -> &str { "wc" }
-    fn description(&self) -> &str { "Count lines, words, and characters" }
+    fn name(&self) -> &str {
+        "wc"
+    }
+    fn description(&self) -> &str {
+        "Count lines, words, and characters"
+    }
 
     fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
         if args.is_empty() {
@@ -99,8 +104,12 @@ impl BuiltinCommand for WcCommand {
 pub struct HeadCommand;
 
 impl BuiltinCommand for HeadCommand {
-    fn name(&self) -> &str { "head" }
-    fn description(&self) -> &str { "Output the first part of files" }
+    fn name(&self) -> &str {
+        "head"
+    }
+    fn description(&self) -> &str {
+        "Output the first part of files"
+    }
 
     fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
         if args.is_empty() {
@@ -126,8 +135,12 @@ impl BuiltinCommand for HeadCommand {
 pub struct TailCommand;
 
 impl BuiltinCommand for TailCommand {
-    fn name(&self) -> &str { "tail" }
-    fn description(&self) -> &str { "Output the last part of files" }
+    fn name(&self) -> &str {
+        "tail"
+    }
+    fn description(&self) -> &str {
+        "Output the last part of files"
+    }
 
     fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
         if args.is_empty() {
@@ -153,8 +166,12 @@ impl BuiltinCommand for TailCommand {
 pub struct DiffCommand;
 
 impl BuiltinCommand for DiffCommand {
-    fn name(&self) -> &str { "diff" }
-    fn description(&self) -> &str { "Compare files line by line" }
+    fn name(&self) -> &str {
+        "diff"
+    }
+    fn description(&self) -> &str {
+        "Compare files line by line"
+    }
 
     fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
         if args.len() < 2 {
@@ -184,8 +201,12 @@ impl BuiltinCommand for DiffCommand {
 pub struct SortCommand;
 
 impl BuiltinCommand for SortCommand {
-    fn name(&self) -> &str { "sort" }
-    fn description(&self) -> &str { "Sort lines of text files" }
+    fn name(&self) -> &str {
+        "sort"
+    }
+    fn description(&self) -> &str {
+        "Sort lines of text files"
+    }
 
     fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
         if args.is_empty() {
@@ -208,8 +229,12 @@ impl BuiltinCommand for SortCommand {
 pub struct UniqCommand;
 
 impl BuiltinCommand for UniqCommand {
-    fn name(&self) -> &str { "uniq" }
-    fn description(&self) -> &str { "Report or omit repeated lines" }
+    fn name(&self) -> &str {
+        "uniq"
+    }
+    fn description(&self) -> &str {
+        "Report or omit repeated lines"
+    }
 
     fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
         if args.is_empty() {
@@ -234,7 +259,11 @@ fn find_files(start_path: &str, pattern: Option<&String>) -> Result<Vec<String>,
     let mut results = Vec::new();
 
     // Recursively search directory tree
-    fn search_dir(path: &str, pattern: Option<&String>, results: &mut Vec<String>) -> Result<(), &'static str> {
+    fn search_dir(
+        path: &str,
+        pattern: Option<&String>,
+        results: &mut Vec<String>,
+    ) -> Result<(), &'static str> {
         let vfs = crate::fs::get_vfs().read();
         let node = vfs.resolve_path(path)?;
 
@@ -278,8 +307,7 @@ fn grep_file(pattern: &str, file_path: &str) -> Result<Vec<String>, &'static str
     let mut buffer = [0u8; 4096];
     let bytes_read = node.read(0, &mut buffer)?;
 
-    let content = core::str::from_utf8(&buffer[..bytes_read])
-        .map_err(|_| "Invalid UTF-8")?;
+    let content = core::str::from_utf8(&buffer[..bytes_read]).map_err(|_| "Invalid UTF-8")?;
 
     let mut matches = Vec::new();
     for line in content.lines() {
@@ -298,8 +326,7 @@ fn count_file(file_path: &str) -> Result<(usize, usize, usize), &'static str> {
     let mut buffer = [0u8; 4096];
     let bytes_read = node.read(0, &mut buffer)?;
 
-    let content = core::str::from_utf8(&buffer[..bytes_read])
-        .map_err(|_| "Invalid UTF-8")?;
+    let content = core::str::from_utf8(&buffer[..bytes_read]).map_err(|_| "Invalid UTF-8")?;
 
     let lines = content.lines().count();
     let words = content.split_whitespace().count();
@@ -315,13 +342,9 @@ fn head_file(file_path: &str, num_lines: usize) -> Result<Vec<String>, &'static 
     let mut buffer = [0u8; 4096];
     let bytes_read = node.read(0, &mut buffer)?;
 
-    let content = core::str::from_utf8(&buffer[..bytes_read])
-        .map_err(|_| "Invalid UTF-8")?;
+    let content = core::str::from_utf8(&buffer[..bytes_read]).map_err(|_| "Invalid UTF-8")?;
 
-    let lines: Vec<String> = content.lines()
-        .take(num_lines)
-        .map(String::from)
-        .collect();
+    let lines: Vec<String> = content.lines().take(num_lines).map(String::from).collect();
 
     Ok(lines)
 }
@@ -333,8 +356,7 @@ fn tail_file(file_path: &str, num_lines: usize) -> Result<Vec<String>, &'static 
     let mut buffer = [0u8; 4096];
     let bytes_read = node.read(0, &mut buffer)?;
 
-    let content = core::str::from_utf8(&buffer[..bytes_read])
-        .map_err(|_| "Invalid UTF-8")?;
+    let content = core::str::from_utf8(&buffer[..bytes_read]).map_err(|_| "Invalid UTF-8")?;
 
     let all_lines: Vec<String> = content.lines().map(String::from).collect();
     let start = if all_lines.len() > num_lines {
@@ -358,10 +380,10 @@ fn diff_files(file1: &str, file2: &str) -> Result<Vec<String>, &'static str> {
     let bytes1 = node1.read(0, &mut buffer1)?;
     let bytes2 = node2.read(0, &mut buffer2)?;
 
-    let content1 = core::str::from_utf8(&buffer1[..bytes1])
-        .map_err(|_| "Invalid UTF-8 in file1")?;
-    let content2 = core::str::from_utf8(&buffer2[..bytes2])
-        .map_err(|_| "Invalid UTF-8 in file2")?;
+    let content1 =
+        core::str::from_utf8(&buffer1[..bytes1]).map_err(|_| "Invalid UTF-8 in file1")?;
+    let content2 =
+        core::str::from_utf8(&buffer2[..bytes2]).map_err(|_| "Invalid UTF-8 in file2")?;
 
     let lines1: Vec<&str> = content1.lines().collect();
     let lines2: Vec<&str> = content2.lines().collect();
@@ -393,8 +415,7 @@ fn sort_file(file_path: &str) -> Result<Vec<String>, &'static str> {
     let mut buffer = [0u8; 4096];
     let bytes_read = node.read(0, &mut buffer)?;
 
-    let content = core::str::from_utf8(&buffer[..bytes_read])
-        .map_err(|_| "Invalid UTF-8")?;
+    let content = core::str::from_utf8(&buffer[..bytes_read]).map_err(|_| "Invalid UTF-8")?;
 
     let mut lines: Vec<String> = content.lines().map(String::from).collect();
     lines.sort();
@@ -409,8 +430,7 @@ fn uniq_file(file_path: &str) -> Result<Vec<String>, &'static str> {
     let mut buffer = [0u8; 4096];
     let bytes_read = node.read(0, &mut buffer)?;
 
-    let content = core::str::from_utf8(&buffer[..bytes_read])
-        .map_err(|_| "Invalid UTF-8")?;
+    let content = core::str::from_utf8(&buffer[..bytes_read]).map_err(|_| "Invalid UTF-8")?;
 
     let mut unique_lines = Vec::new();
     let mut last_line: Option<String> = None;

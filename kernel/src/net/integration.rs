@@ -1,11 +1,12 @@
 //! Network Driver Integration Module
 //!
-//! Provides automatic registration of hardware network drivers with the network stack.
-//! Uses PCI bus enumeration to auto-detect network hardware.
+//! Provides automatic registration of hardware network drivers with the network
+//! stack. Uses PCI bus enumeration to auto-detect network hardware.
+
+use alloc::boxed::Box;
 
 use super::device::{self, NetworkDevice};
 use crate::error::KernelError;
-use alloc::boxed::Box;
 
 // PCI vendor and device IDs for network cards
 const INTEL_VENDOR_ID: u16 = 0x8086;
@@ -35,8 +36,10 @@ pub fn register_drivers() -> Result<(), KernelError> {
         // Search for Intel E1000 network cards
         let e1000_devices = bus.find_devices_by_id(INTEL_VENDOR_ID, E1000_DEVICE_ID);
         for device in e1000_devices {
-            println!("[NET-INTEGRATION] Found E1000 at {:02x}:{:02x}.{}",
-                device.location.bus, device.location.device, device.location.function);
+            println!(
+                "[NET-INTEGRATION] Found E1000 at {:02x}:{:02x}.{}",
+                device.location.bus, device.location.device, device.location.function
+            );
 
             // Get BAR0 (MMIO base address)
             if let Some(bar0) = device.bars.first() {
@@ -51,8 +54,10 @@ pub fn register_drivers() -> Result<(), KernelError> {
         // Search for Intel E1000E network cards
         let e1000e_devices = bus.find_devices_by_id(INTEL_VENDOR_ID, E1000E_DEVICE_ID);
         for device in e1000e_devices {
-            println!("[NET-INTEGRATION] Found E1000E at {:02x}:{:02x}.{}",
-                device.location.bus, device.location.device, device.location.function);
+            println!(
+                "[NET-INTEGRATION] Found E1000E at {:02x}:{:02x}.{}",
+                device.location.bus, device.location.device, device.location.function
+            );
 
             if let Some(bar0) = device.bars.first() {
                 if let Some(address) = bar0.get_memory_address() {
@@ -68,8 +73,10 @@ pub fn register_drivers() -> Result<(), KernelError> {
         let virtio_modern = bus.find_devices_by_id(REDHAT_VENDOR_ID, VIRTIO_NET_MODERN_DEVICE_ID);
 
         for device in virtio_legacy.iter().chain(virtio_modern.iter()) {
-            println!("[NET-INTEGRATION] Found VirtIO-Net at {:02x}:{:02x}.{}",
-                device.location.bus, device.location.device, device.location.function);
+            println!(
+                "[NET-INTEGRATION] Found VirtIO-Net at {:02x}:{:02x}.{}",
+                device.location.bus, device.location.device, device.location.function
+            );
 
             if let Some(bar0) = device.bars.first() {
                 if let Some(address) = bar0.get_memory_address() {
@@ -98,7 +105,10 @@ pub fn register_drivers() -> Result<(), KernelError> {
         }
     }
 
-    println!("[NET-INTEGRATION] Network device scan complete: {} devices registered", device_count);
+    println!(
+        "[NET-INTEGRATION] Network device scan complete: {} devices registered",
+        device_count
+    );
     Ok(())
 }
 
@@ -108,7 +118,10 @@ fn try_register_e1000(bar_address: u64) -> Result<(), KernelError> {
     {
         use crate::drivers::e1000::E1000Driver;
 
-        println!("[NET-INTEGRATION] Initializing E1000 at 0x{:x}", bar_address);
+        println!(
+            "[NET-INTEGRATION] Initializing E1000 at 0x{:x}",
+            bar_address
+        );
 
         match E1000Driver::new(bar_address as usize) {
             Ok(driver) => {
@@ -118,10 +131,10 @@ fn try_register_e1000(bar_address: u64) -> Result<(), KernelError> {
                 // TODO: Register with network device registry
                 // device::register_device(Box::new(driver))?;
 
-                println!("[NET-INTEGRATION] E1000 initialized: {} (MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
-                    name,
-                    mac.0[0], mac.0[1], mac.0[2],
-                    mac.0[3], mac.0[4], mac.0[5]
+                println!(
+                    "[NET-INTEGRATION] E1000 initialized: {} (MAC: \
+                     {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+                    name, mac.0[0], mac.0[1], mac.0[2], mac.0[3], mac.0[4], mac.0[5]
                 );
 
                 Ok(())
@@ -147,7 +160,10 @@ fn try_register_e1000(bar_address: u64) -> Result<(), KernelError> {
 fn try_register_virtio_net(bar_address: u64) -> Result<(), KernelError> {
     use crate::drivers::virtio_net::VirtioNetDriver;
 
-    println!("[NET-INTEGRATION] Initializing VirtIO-Net at 0x{:x}", bar_address);
+    println!(
+        "[NET-INTEGRATION] Initializing VirtIO-Net at 0x{:x}",
+        bar_address
+    );
 
     match VirtioNetDriver::new(bar_address as usize) {
         Ok(driver) => {
@@ -157,10 +173,10 @@ fn try_register_virtio_net(bar_address: u64) -> Result<(), KernelError> {
             // TODO: Register with network device registry
             // device::register_device(Box::new(driver))?;
 
-            println!("[NET-INTEGRATION] VirtIO-Net initialized: {} (MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
-                name,
-                mac.0[0], mac.0[1], mac.0[2],
-                mac.0[3], mac.0[4], mac.0[5]
+            println!(
+                "[NET-INTEGRATION] VirtIO-Net initialized: {} (MAC: \
+                 {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+                name, mac.0[0], mac.0[1], mac.0[2], mac.0[3], mac.0[4], mac.0[5]
             );
 
             Ok(())

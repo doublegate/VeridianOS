@@ -1,12 +1,13 @@
 // RISC-V kernel entry point and panic handler
 
 use core::panic::PanicInfo;
+
 use crate::println;
 
 pub fn arch_early_init() {
     println!("VeridianOS Kernel v{}", env!("CARGO_PKG_VERSION"));
     println!("Architecture: riscv64");
-    
+
     // Use SBI console output to confirm we finished arch_early_init
     unsafe {
         // SBI console putchar

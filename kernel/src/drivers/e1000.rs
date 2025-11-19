@@ -3,34 +3,38 @@
 //! This driver supports the Intel E1000 Gigabit Ethernet controller,
 //! commonly found in QEMU and VirtualBox virtual machines.
 
-use crate::error::KernelError;
-use crate::net::{MacAddress, Packet};
-use crate::net::device::{NetworkDevice, DeviceCapabilities, DeviceStatistics, DeviceState};
+use crate::{
+    error::KernelError,
+    net::{
+        device::{DeviceCapabilities, DeviceState, DeviceStatistics, NetworkDevice},
+        MacAddress, Packet,
+    },
+};
 
 /// E1000 PCI vendor and device IDs
 pub const E1000_VENDOR_ID: u16 = 0x8086;
 pub const E1000_DEVICE_ID: u16 = 0x100E;
 
 /// E1000 register offsets
-const REG_CTRL: usize = 0x0000;      // Device Control
-const REG_STATUS: usize = 0x0008;    // Device Status
-const REG_EEPROM: usize = 0x0014;    // EEPROM Read
-const REG_CTRL_EXT: usize = 0x0018;  // Extended Device Control
-const REG_ICR: usize = 0x00C0;       // Interrupt Cause Read
-const REG_IMS: usize = 0x00D0;       // Interrupt Mask Set
-const REG_RCTL: usize = 0x0100;      // Receive Control
-const REG_TCTL: usize = 0x0400;      // Transmit Control
-const REG_RDBAL: usize = 0x2800;     // RX Descriptor Base Low
-const REG_RDBAH: usize = 0x2804;     // RX Descriptor Base High
-const REG_RDLEN: usize = 0x2808;     // RX Descriptor Length
-const REG_RDH: usize = 0x2810;       // RX Descriptor Head
-const REG_RDT: usize = 0x2818;       // RX Descriptor Tail
-const REG_TDBAL: usize = 0x3800;     // TX Descriptor Base Low
-const REG_TDBAH: usize = 0x3804;     // TX Descriptor Base High
-const REG_TDLEN: usize = 0x3808;     // TX Descriptor Length
-const REG_TDH: usize = 0x3810;       // TX Descriptor Head
-const REG_TDT: usize = 0x3818;       // TX Descriptor Tail
-const REG_MTA: usize = 0x5200;       // Multicast Table Array
+const REG_CTRL: usize = 0x0000; // Device Control
+const REG_STATUS: usize = 0x0008; // Device Status
+const REG_EEPROM: usize = 0x0014; // EEPROM Read
+const REG_CTRL_EXT: usize = 0x0018; // Extended Device Control
+const REG_ICR: usize = 0x00C0; // Interrupt Cause Read
+const REG_IMS: usize = 0x00D0; // Interrupt Mask Set
+const REG_RCTL: usize = 0x0100; // Receive Control
+const REG_TCTL: usize = 0x0400; // Transmit Control
+const REG_RDBAL: usize = 0x2800; // RX Descriptor Base Low
+const REG_RDBAH: usize = 0x2804; // RX Descriptor Base High
+const REG_RDLEN: usize = 0x2808; // RX Descriptor Length
+const REG_RDH: usize = 0x2810; // RX Descriptor Head
+const REG_RDT: usize = 0x2818; // RX Descriptor Tail
+const REG_TDBAL: usize = 0x3800; // TX Descriptor Base Low
+const REG_TDBAH: usize = 0x3804; // TX Descriptor Base High
+const REG_TDLEN: usize = 0x3808; // TX Descriptor Length
+const REG_TDH: usize = 0x3810; // TX Descriptor Head
+const REG_TDT: usize = 0x3818; // TX Descriptor Tail
+const REG_MTA: usize = 0x5200; // Multicast Table Array
 
 /// Number of RX/TX descriptors
 const NUM_RX_DESC: usize = 32;
@@ -112,9 +116,7 @@ impl E1000Driver {
 
     /// Read from MMIO register
     fn read_reg(&self, offset: usize) -> u32 {
-        unsafe {
-            core::ptr::read_volatile((self.mmio_base + offset) as *const u32)
-        }
+        unsafe { core::ptr::read_volatile((self.mmio_base + offset) as *const u32) }
     }
 
     /// Write to MMIO register
@@ -216,9 +218,15 @@ impl E1000Driver {
             self.write_reg(REG_MTA + i * 4, 0);
         }
 
-        println!("[E1000] Initialized with MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-                 self.mac_address.0[0], self.mac_address.0[1], self.mac_address.0[2],
-                 self.mac_address.0[3], self.mac_address.0[4], self.mac_address.0[5]);
+        println!(
+            "[E1000] Initialized with MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+            self.mac_address.0[0],
+            self.mac_address.0[1],
+            self.mac_address.0[2],
+            self.mac_address.0[3],
+            self.mac_address.0[4],
+            self.mac_address.0[5]
+        );
 
         // Device is now up
         self.state = DeviceState::Up;

@@ -284,7 +284,7 @@ pub fn init() {
         }
         return;
     }
-    
+
     #[cfg(target_arch = "riscv64")]
     {
         println!("[SMP] Initializing SMP support (simplified for RISC-V)...");
@@ -293,7 +293,7 @@ pub fn init() {
         println!("[SMP] SMP initialized (BSP only for RISC-V)");
         return;
     }
-    
+
     // Detect CPU topology
     CPU_TOPOLOGY.lock().detect();
 

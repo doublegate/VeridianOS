@@ -1,10 +1,11 @@
 //! Window compositor
 
-use super::Rect;
-use crate::error::KernelError;
-use crate::sync::once_lock::GlobalState;
 use alloc::vec::Vec;
+
 use spin::RwLock;
+
+use super::Rect;
+use crate::{error::KernelError, sync::once_lock::GlobalState};
 
 /// Window handle
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,10 +109,12 @@ pub fn with_compositor<R, F: FnOnce(&mut Compositor) -> R>(f: F) -> Option<R> {
 pub fn init() -> Result<(), KernelError> {
     println!("[COMP] Initializing compositor...");
 
-    COMPOSITOR.init(RwLock::new(Compositor::new())).map_err(|_| KernelError::InvalidState {
-        expected: "uninitialized",
-        actual: "initialized",
-    })?;
+    COMPOSITOR
+        .init(RwLock::new(Compositor::new()))
+        .map_err(|_| KernelError::InvalidState {
+            expected: "uninitialized",
+            actual: "initialized",
+        })?;
 
     // Create a test window
     with_compositor(|comp| {

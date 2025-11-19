@@ -16,7 +16,7 @@ pub extern "C" fn _start_rust() -> ! {
         sbi_putchar(b'T');
         sbi_putchar(b'\n');
     }
-    
+
     // Call the kernel main function from main.rs
     extern "C" {
         fn kernel_main() -> !;

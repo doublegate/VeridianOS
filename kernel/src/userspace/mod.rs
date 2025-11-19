@@ -6,8 +6,8 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-pub mod loader;
 pub mod enhanced_loader;
+pub mod loader;
 
 pub use loader::{load_init_process, load_user_program};
 
@@ -15,7 +15,7 @@ pub use loader::{load_init_process, load_user_program};
 pub fn init() {
     use crate::println;
     println!("[USERSPACE] Initializing user-space support...");
-    
+
     // User-space support is ready
     println!("[USERSPACE] User-space support initialized");
 }

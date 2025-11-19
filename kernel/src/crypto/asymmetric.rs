@@ -2,8 +2,9 @@
 //!
 //! Implements Ed25519 signatures and X25519 key exchange.
 
-use super::{CryptoResult, CryptoError};
 use alloc::vec::Vec;
+
+use super::{CryptoError, CryptoResult};
 
 /// Signing key (private key)
 pub struct SigningKey {
@@ -146,7 +147,9 @@ impl KeyPair {
             pub_key_bytes[i] = byte.wrapping_mul(9);
         }
 
-        let verifying_key = VerifyingKey { bytes: pub_key_bytes };
+        let verifying_key = VerifyingKey {
+            bytes: pub_key_bytes,
+        };
 
         Ok(Self {
             signing_key,

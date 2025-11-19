@@ -1,13 +1,16 @@
 //! Authentication Framework
 //!
-//! Provides user authentication, password hashing, and multi-factor authentication.
+//! Provides user authentication, password hashing, and multi-factor
+//! authentication.
 
-use crate::error::KernelError;
-use crate::crypto::hash::{sha256, Hash256};
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::collections::BTreeMap;
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
+
 use spin::RwLock;
+
+use crate::{
+    crypto::hash::{sha256, Hash256},
+    error::KernelError,
+};
 
 /// User identifier
 pub type UserId = u32;
@@ -291,7 +294,8 @@ impl AuthManager {
     pub fn delete_user(&self, username: &str) -> Result<(), KernelError> {
         let mut accounts = self.accounts.write();
 
-        accounts.remove(username)
+        accounts
+            .remove(username)
             .map(|_| ())
             .ok_or(KernelError::NotFound {
                 resource: "user",
@@ -345,9 +349,7 @@ pub fn init() -> Result<(), KernelError> {
 
 /// Get global authentication manager
 pub fn get_auth_manager() -> &'static AuthManager {
-    unsafe {
-        AUTH_MANAGER.as_ref().expect("Auth manager not initialized")
-    }
+    unsafe { AUTH_MANAGER.as_ref().expect("Auth manager not initialized") }
 }
 
 #[cfg(test)]
@@ -369,8 +371,14 @@ mod tests {
         let _ = auth.create_user(String::from("alice"), "secret");
 
         assert_eq!(auth.authenticate("alice", "secret"), AuthResult::Success);
-        assert_eq!(auth.authenticate("alice", "wrong"), AuthResult::InvalidCredentials);
-        assert_eq!(auth.authenticate("bob", "secret"), AuthResult::InvalidCredentials);
+        assert_eq!(
+            auth.authenticate("alice", "wrong"),
+            AuthResult::InvalidCredentials
+        );
+        assert_eq!(
+            auth.authenticate("bob", "secret"),
+            AuthResult::InvalidCredentials
+        );
     }
 
     #[test_case]
@@ -385,6 +393,9 @@ mod tests {
         }
 
         // Account should now be locked
-        assert_eq!(auth.authenticate("bob", "password"), AuthResult::AccountLocked);
+        assert_eq!(
+            auth.authenticate("bob", "password"),
+            AuthResult::AccountLocked
+        );
     }
 }

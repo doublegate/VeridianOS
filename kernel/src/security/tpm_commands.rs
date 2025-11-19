@@ -17,8 +17,7 @@
 //! +-------------------+
 //! ```
 
-use alloc::vec::Vec;
-use alloc::vec;
+use alloc::{vec, vec::Vec};
 
 /// TPM Structure Tags
 #[repr(u16)]
@@ -91,9 +90,9 @@ pub enum TpmStartupType {
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct TpmCommandHeader {
-    pub tag: u16,       // TpmStructureTag
-    pub size: u32,      // Total command size in bytes
-    pub command: u32,   // TpmCommandCode
+    pub tag: u16,     // TpmStructureTag
+    pub size: u32,    // Total command size in bytes
+    pub command: u32, // TpmCommandCode
 }
 
 impl TpmCommandHeader {
@@ -207,8 +206,7 @@ impl TpmGetRandomResponse {
             return Err("Response too short");
         }
 
-        let header = TpmResponseHeader::parse(data)
-            .ok_or("Invalid response header")?;
+        let header = TpmResponseHeader::parse(data).ok_or("Invalid response header")?;
 
         if !header.response_code().is_success() {
             return Err("TPM command failed");
@@ -234,7 +232,7 @@ pub struct TpmPcrReadCommand {
 
 #[derive(Debug, Clone)]
 pub struct PcrSelection {
-    pub hash_alg: u16,      // TPM_ALG_* (e.g., SHA256 = 0x000B)
+    pub hash_alg: u16,       // TPM_ALG_* (e.g., SHA256 = 0x000B)
     pub pcr_bitmap: Vec<u8>, // Bitmap of selected PCRs
 }
 

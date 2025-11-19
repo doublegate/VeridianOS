@@ -97,7 +97,10 @@ pub fn init() {
     let impl_version = get_sbi_impl_version();
 
     println!("[SBI] SBI implementation ID: {}", impl_id.value);
-    println!("[SBI] SBI implementation version: 0x{:x}", impl_version.value);
+    println!(
+        "[SBI] SBI implementation version: 0x{:x}",
+        impl_version.value
+    );
 
     // Check for required extensions
     let timer_available = probe_extension(SBI_EXT_TIMER);
@@ -107,7 +110,10 @@ pub fn init() {
     println!("[SBI] IPI extension available: {}", ipi_available);
 
     let rfence_available = probe_extension(SBI_EXT_RFENCE);
-    println!("[SBI] Remote fence extension available: {}", rfence_available);
+    println!(
+        "[SBI] Remote fence extension available: {}",
+        rfence_available
+    );
 
     if !timer_available {
         println!("[SBI] WARNING: Timer extension not available!");

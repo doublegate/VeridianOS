@@ -17,17 +17,17 @@ pub mod dilithium {
         pub const SIGNATURE_SIZE: usize = 2420;
 
         // Lattice parameters
-        pub const Q: u32 = 8380417;              // Prime modulus
-        pub const D: u32 = 13;                   // Dropped bits from t
-        pub const TAU: usize = 39;               // Number of ±1's in c
+        pub const Q: u32 = 8380417; // Prime modulus
+        pub const D: u32 = 13; // Dropped bits from t
+        pub const TAU: usize = 39; // Number of ±1's in c
         pub const CHALLENGE_ENTROPY: usize = 192; // Bits of entropy in c
-        pub const GAMMA1: u32 = 1 << 17;         // y coefficient range
-        pub const GAMMA2: u32 = (Q - 1) / 88;    // Low-order rounding range
-        pub const K: usize = 4;                  // Rows in A
-        pub const L: usize = 4;                  // Columns in A
-        pub const ETA: u32 = 2;                  // Secret key range
-        pub const BETA: u32 = TAU as u32 * ETA;  // Max coefficient of ct0
-        pub const OMEGA: usize = 80;             // Max number of 1s in hint
+        pub const GAMMA1: u32 = 1 << 17; // y coefficient range
+        pub const GAMMA2: u32 = (Q - 1) / 88; // Low-order rounding range
+        pub const K: usize = 4; // Rows in A
+        pub const L: usize = 4; // Columns in A
+        pub const ETA: u32 = 2; // Secret key range
+        pub const BETA: u32 = TAU as u32 * ETA; // Max coefficient of ct0
+        pub const OMEGA: usize = 80; // Max number of 1s in hint
     }
 
     /// ML-DSA-65 (Security Level 3 - equivalent to AES-192)
@@ -79,13 +79,13 @@ pub mod kyber {
         pub const SHARED_SECRET_SIZE: usize = 32;
 
         // Lattice parameters
-        pub const Q: u32 = 3329;                 // Prime modulus
-        pub const N: usize = 256;                // Polynomial degree
-        pub const K: usize = 2;                  // Module rank
-        pub const ETA1: u32 = 3;                 // Secret key noise
-        pub const ETA2: u32 = 2;                 // Encryption noise
-        pub const DU: usize = 10;                // Ciphertext compression
-        pub const DV: usize = 4;                 // Ciphertext compression
+        pub const Q: u32 = 3329; // Prime modulus
+        pub const N: usize = 256; // Polynomial degree
+        pub const K: usize = 2; // Module rank
+        pub const ETA1: u32 = 3; // Secret key noise
+        pub const ETA2: u32 = 2; // Encryption noise
+        pub const DU: usize = 10; // Ciphertext compression
+        pub const DV: usize = 4; // Ciphertext compression
     }
 
     /// ML-KEM-768 (Security Level 3 - equivalent to AES-192)
@@ -158,12 +158,15 @@ impl SecurityLevel {
     /// Get recommended use cases
     pub fn use_cases(&self) -> &'static str {
         match self {
-            SecurityLevel::Level1 | SecurityLevel::Level2 =>
-                "Standard security applications, IoT devices, embedded systems",
-            SecurityLevel::Level3 | SecurityLevel::Level4 =>
-                "High-value data, long-term confidentiality, government applications",
-            SecurityLevel::Level5 =>
-                "Top Secret information, critical infrastructure, military use",
+            SecurityLevel::Level1 | SecurityLevel::Level2 => {
+                "Standard security applications, IoT devices, embedded systems"
+            }
+            SecurityLevel::Level3 | SecurityLevel::Level4 => {
+                "High-value data, long-term confidentiality, government applications"
+            }
+            SecurityLevel::Level5 => {
+                "Top Secret information, critical infrastructure, military use"
+            }
         }
     }
 }

@@ -2,9 +2,11 @@
 //!
 //! Provides cryptographically secure random number generation.
 
-use super::CryptoResult;
 use alloc::vec::Vec;
+
 use spin::Mutex;
+
+use super::CryptoResult;
 
 /// Secure random number generator
 pub struct SecureRandom {
@@ -23,10 +25,7 @@ impl SecureRandom {
         let seed = Self::get_entropy()?;
 
         Ok(Self {
-            state: Mutex::new(RandomState {
-                counter: 0,
-                seed,
-            }),
+            state: Mutex::new(RandomState { counter: 0, seed }),
         })
     }
 
@@ -111,7 +110,9 @@ impl SecureRandom {
             // Fallback for other architectures
             let mut counter = 0u64;
             for (i, byte) in dest.iter_mut().enumerate() {
-                counter = counter.wrapping_mul(1664525).wrapping_add(1013904223 + i as u64);
+                counter = counter
+                    .wrapping_mul(1664525)
+                    .wrapping_add(1013904223 + i as u64);
                 *byte = (counter >> 32) as u8;
             }
         }
@@ -164,7 +165,9 @@ pub fn get_random() -> &'static SecureRandom {
 /// Generate random bytes (convenience function)
 pub fn random_bytes(count: usize) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(count);
-    unsafe { bytes.set_len(count); }
+    unsafe {
+        bytes.set_len(count);
+    }
 
     let rng = get_random();
     let _ = rng.fill_bytes(&mut bytes);

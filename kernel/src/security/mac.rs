@@ -1,11 +1,10 @@
 //! Mandatory Access Control (MAC) system
 
-//!
 //! Provides a policy-based access control system similar to SELinux.
 //! Enforces security policies for all system operations.
 
-use crate::error::KernelError;
 use super::AccessType;
+use crate::error::KernelError;
 
 /// Maximum number of policy rules
 const MAX_POLICY_RULES: usize = 1024;
@@ -59,7 +58,10 @@ static mut MAC_ENABLED: bool = false;
 pub fn add_rule(rule: PolicyRule) -> Result<(), KernelError> {
     unsafe {
         if POLICY_COUNT >= MAX_POLICY_RULES {
-            return Err(KernelError::OutOfMemory { requested: 0, available: 0 });
+            return Err(KernelError::OutOfMemory {
+                requested: 0,
+                available: 0,
+            });
         }
 
         POLICY_RULES[POLICY_COUNT] = Some(rule);
@@ -126,7 +128,9 @@ fn load_default_policy() -> Result<(), KernelError> {
     add_rule(PolicyRule::new("init_t", "user_t", 0x7))?;
     add_rule(PolicyRule::new("init_t", "file_t", 0x7))?;
 
-    println!("[MAC] Loaded {} default policy rules", unsafe { POLICY_COUNT });
+    println!("[MAC] Loaded {} default policy rules", unsafe {
+        POLICY_COUNT
+    });
     Ok(())
 }
 
@@ -140,7 +144,9 @@ pub fn init() -> Result<(), KernelError> {
     // Enable MAC enforcement
     enable();
 
-    println!("[MAC] MAC system initialized with {} rules", unsafe { POLICY_COUNT });
+    println!("[MAC] MAC system initialized with {} rules", unsafe {
+        POLICY_COUNT
+    });
     Ok(())
 }
 

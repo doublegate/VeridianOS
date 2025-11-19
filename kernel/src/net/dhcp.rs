@@ -1,11 +1,15 @@
 //! DHCP Client for Automatic Network Configuration
 //!
-//! Implements DHCPv4 protocol for obtaining IP addresses and network configuration.
+//! Implements DHCPv4 protocol for obtaining IP addresses and network
+//! configuration.
 
-use crate::error::KernelError;
-use crate::net::{Ipv4Address, MacAddress};
 use alloc::vec::Vec;
 use core::convert::TryInto;
+
+use crate::{
+    error::KernelError,
+    net::{Ipv4Address, MacAddress},
+};
 
 /// DHCP message types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -332,9 +336,10 @@ impl DhcpClient {
         self.state = DhcpState::Bound;
 
         println!("[DHCP] Received ACK - IP address configured");
-        println!("[DHCP] IP: {}.{}.{}.{}",
-            packet.yiaddr.0[0], packet.yiaddr.0[1],
-            packet.yiaddr.0[2], packet.yiaddr.0[3]);
+        println!(
+            "[DHCP] IP: {}.{}.{}.{}",
+            packet.yiaddr.0[0], packet.yiaddr.0[1], packet.yiaddr.0[2], packet.yiaddr.0[3]
+        );
 
         Ok(())
     }

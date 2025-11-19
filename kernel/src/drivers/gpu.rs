@@ -1,10 +1,11 @@
 //! GPU Driver Module
 //!
-//! Supports VBE (VESA BIOS Extensions) and GOP (Graphics Output Protocol) for framebuffer access
+//! Supports VBE (VESA BIOS Extensions) and GOP (Graphics Output Protocol) for
+//! framebuffer access
 
-use crate::error::KernelError;
-use crate::graphics::Color;
 use core::slice;
+
+use crate::{error::KernelError, graphics::Color};
 
 /// VBE Mode Info Block
 #[repr(C, packed)]
@@ -177,7 +178,14 @@ impl GpuDriver {
     }
 
     /// Fill a rectangle
-    pub fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: Color) -> Result<(), KernelError> {
+    pub fn fill_rect(
+        &mut self,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        color: Color,
+    ) -> Result<(), KernelError> {
         let pixel_value = self.color_to_pixel(color);
         let width = self.width;
         let height = self.height;
@@ -213,10 +221,16 @@ impl GpuDriver {
     fn color_to_pixel(&self, color: Color) -> u32 {
         match self.pixel_format {
             PixelFormat::Rgb888 | PixelFormat::Rgba8888 => {
-                ((color.a as u32) << 24) | ((color.r as u32) << 16) | ((color.g as u32) << 8) | (color.b as u32)
+                ((color.a as u32) << 24)
+                    | ((color.r as u32) << 16)
+                    | ((color.g as u32) << 8)
+                    | (color.b as u32)
             }
             PixelFormat::Bgr888 | PixelFormat::Bgra8888 => {
-                ((color.a as u32) << 24) | ((color.b as u32) << 16) | ((color.g as u32) << 8) | (color.r as u32)
+                ((color.a as u32) << 24)
+                    | ((color.b as u32) << 16)
+                    | ((color.g as u32) << 8)
+                    | (color.r as u32)
             }
         }
     }
@@ -232,7 +246,14 @@ impl GpuDriver {
     }
 
     /// Blit buffer to screen
-    pub fn blit(&mut self, buffer: &[u32], x: usize, y: usize, w: usize, h: usize) -> Result<(), KernelError> {
+    pub fn blit(
+        &mut self,
+        buffer: &[u32],
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+    ) -> Result<(), KernelError> {
         let width = self.width;
         let height = self.height;
         let pitch = self.pitch;
@@ -294,7 +315,12 @@ mod tests {
     #[test_case]
     fn test_pixel_format() {
         let driver = GpuDriver::simple(0x1000000, 800, 600);
-        let color = Color { r: 255, g: 128, b: 64, a: 255 };
+        let color = Color {
+            r: 255,
+            g: 128,
+            b: 64,
+            a: 255,
+        };
         let pixel = driver.color_to_pixel(color);
 
         // RGBA8888 format

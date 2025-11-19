@@ -4,8 +4,8 @@
 
 use crate::error::KernelError;
 
-pub mod framebuffer;
 pub mod compositor;
+pub mod framebuffer;
 pub mod gpu;
 
 /// Color representation (RGBA)

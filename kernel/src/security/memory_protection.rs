@@ -2,10 +2,11 @@
 //!
 //! Implements ASLR, stack canaries, and other memory protection mechanisms.
 
-use crate::error::KernelError;
-use crate::crypto::random::get_random;
 use core::sync::atomic::{AtomicU64, Ordering};
+
 use spin::RwLock;
+
+use crate::{crypto::random::get_random, error::KernelError};
 
 /// ASLR (Address Space Layout Randomization) manager
 pub struct Aslr {
@@ -125,9 +126,7 @@ impl StackCanary {
 
     /// Check canary on stack
     pub fn check(&self, stack_ptr: *const u64) -> bool {
-        unsafe {
-            *stack_ptr == self.value
-        }
+        unsafe { *stack_ptr == self.value }
     }
 }
 
@@ -262,7 +261,9 @@ pub fn init() -> Result<(), KernelError> {
 /// Get global memory protection instance
 pub fn get_memory_protection() -> &'static MemoryProtection {
     unsafe {
-        MEMORY_PROTECTION.as_ref().expect("Memory protection not initialized")
+        MEMORY_PROTECTION
+            .as_ref()
+            .expect("Memory protection not initialized")
     }
 }
 

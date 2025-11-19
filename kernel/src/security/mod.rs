@@ -1,18 +1,17 @@
 //! Security infrastructure for VeridianOS
 
-//!
 //! This module provides comprehensive security features including:
 //! - Cryptographic primitives
 //! - Mandatory Access Control (MAC)
 //! - Security audit framework
 //! - Secure boot verification
 
+pub mod audit;
+pub mod auth;
+pub mod boot;
 pub mod crypto;
 pub mod mac;
-pub mod audit;
-pub mod boot;
 pub mod memory_protection;
-pub mod auth;
 pub mod tpm;
 pub mod tpm_commands;
 

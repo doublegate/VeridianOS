@@ -2,21 +2,21 @@
 //!
 //! Provides cryptographic primitives and services for secure operations.
 
-pub mod hash;
-pub mod symmetric;
 pub mod asymmetric;
-pub mod random;
+pub mod constant_time;
+pub mod hash;
 pub mod keystore;
 pub mod post_quantum;
-pub mod constant_time;
 pub mod pq_params;
+pub mod random;
+pub mod symmetric;
 
-pub use hash::{HashAlgorithm, Hash256, Hash512};
-pub use symmetric::{SymmetricCipher, Aes256Gcm, ChaCha20Poly1305};
-pub use asymmetric::{SigningKey, VerifyingKey, KeyPair};
-pub use random::{SecureRandom, get_random};
-pub use keystore::{KeyStore, KeyId, Key};
-pub use post_quantum::{DilithiumSigningKey, KyberSecretKey, HybridKeyExchange};
+pub use asymmetric::{KeyPair, SigningKey, VerifyingKey};
+pub use hash::{Hash256, Hash512, HashAlgorithm};
+pub use keystore::{Key, KeyId, KeyStore};
+pub use post_quantum::{DilithiumSigningKey, HybridKeyExchange, KyberSecretKey};
+pub use random::{get_random, SecureRandom};
+pub use symmetric::{Aes256Gcm, ChaCha20Poly1305, SymmetricCipher};
 
 use crate::error::KernelError;
 

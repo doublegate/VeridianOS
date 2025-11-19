@@ -7,18 +7,19 @@
 //! - Socket API
 //! - Network device abstraction
 
+pub mod device;
+pub mod dhcp;
+pub mod dma_pool;
+pub mod integration;
 pub mod ip;
+pub mod socket;
 pub mod tcp;
 pub mod udp;
-pub mod socket;
-pub mod device;
 pub mod zero_copy;
-pub mod integration;
-pub mod dma_pool;
-pub mod dhcp;
+
+use alloc::vec::Vec;
 
 use crate::error::KernelError;
-use alloc::vec::Vec;
 
 /// MAC address (6 bytes)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

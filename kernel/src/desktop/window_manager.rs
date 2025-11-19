@@ -2,11 +2,11 @@
 //!
 //! Manages windows, input events, and coordinates desktop applications.
 
-use crate::error::KernelError;
-use crate::sync::once_lock::GlobalState;
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
+
 use spin::RwLock;
+
+use crate::{error::KernelError, sync::once_lock::GlobalState};
 
 /// Window ID type
 pub type WindowId = u32;
@@ -72,11 +72,27 @@ impl Window {
 /// Input event types
 #[derive(Debug, Clone, Copy)]
 pub enum InputEvent {
-    KeyPress { scancode: u8, character: char },
-    KeyRelease { scancode: u8 },
-    MouseMove { x: i32, y: i32 },
-    MouseButton { button: u8, pressed: bool, x: i32, y: i32 },
-    MouseScroll { delta_x: i16, delta_y: i16 },
+    KeyPress {
+        scancode: u8,
+        character: char,
+    },
+    KeyRelease {
+        scancode: u8,
+    },
+    MouseMove {
+        x: i32,
+        y: i32,
+    },
+    MouseButton {
+        button: u8,
+        pressed: bool,
+        x: i32,
+        y: i32,
+    },
+    MouseScroll {
+        delta_x: i16,
+        delta_y: i16,
+    },
 }
 
 /// Window event
@@ -123,7 +139,14 @@ impl WindowManager {
     }
 
     /// Create a new window
-    pub fn create_window(&self, x: i32, y: i32, width: u32, height: u32, owner_pid: u64) -> Result<WindowId, KernelError> {
+    pub fn create_window(
+        &self,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        owner_pid: u64,
+    ) -> Result<WindowId, KernelError> {
         let id = {
             let mut next_id = self.next_window_id.write();
             let id = *next_id;
@@ -170,7 +193,12 @@ impl WindowManager {
     }
 
     /// Resize a window
-    pub fn resize_window(&self, window_id: WindowId, width: u32, height: u32) -> Result<(), KernelError> {
+    pub fn resize_window(
+        &self,
+        window_id: WindowId,
+        width: u32,
+        height: u32,
+    ) -> Result<(), KernelError> {
         if let Some(window) = self.windows.write().get_mut(&window_id) {
             window.width = width;
             window.height = height;
@@ -243,41 +271,36 @@ impl WindowManager {
 
                 // Send to focused window
                 if let Some(window_id) = *self.focused_window.read() {
-                    self.queue_event(WindowEvent {
-                        window_id,
-                        event,
-                    });
+                    self.queue_event(WindowEvent { window_id, event });
                 }
             }
-            InputEvent::MouseButton { button, pressed, x, y } => {
+            InputEvent::MouseButton {
+                button,
+                pressed,
+                x,
+                y,
+            } => {
                 if pressed {
                     // Click - focus window at position
                     if let Some(window_id) = self.window_at_position(x, y) {
                         let _ = self.focus_window(window_id);
 
                         // Send click event to window
-                        self.queue_event(WindowEvent {
-                            window_id,
-                            event,
-                        });
+                        self.queue_event(WindowEvent { window_id, event });
                     }
                 } else {
                     // Release - send to focused window
                     if let Some(window_id) = *self.focused_window.read() {
-                        self.queue_event(WindowEvent {
-                            window_id,
-                            event,
-                        });
+                        self.queue_event(WindowEvent { window_id, event });
                     }
                 }
             }
-            InputEvent::KeyPress { .. } | InputEvent::KeyRelease { .. } | InputEvent::MouseScroll { .. } => {
+            InputEvent::KeyPress { .. }
+            | InputEvent::KeyRelease { .. }
+            | InputEvent::MouseScroll { .. } => {
                 // Send keyboard events to focused window
                 if let Some(window_id) = *self.focused_window.read() {
-                    self.queue_event(WindowEvent {
-                        window_id,
-                        event,
-                    });
+                    self.queue_event(WindowEvent { window_id, event });
                 }
             }
         }
@@ -332,10 +355,12 @@ static WINDOW_MANAGER: GlobalState<WindowManager> = GlobalState::new();
 /// Initialize window manager
 pub fn init() -> Result<(), KernelError> {
     let wm = WindowManager::new();
-    WINDOW_MANAGER.init(wm).map_err(|_| KernelError::InvalidState {
-        expected: "uninitialized",
-        actual: "initialized",
-    })?;
+    WINDOW_MANAGER
+        .init(wm)
+        .map_err(|_| KernelError::InvalidState {
+            expected: "uninitialized",
+            actual: "initialized",
+        })?;
 
     println!("[WM] Window manager initialized");
     Ok(())
@@ -348,10 +373,12 @@ pub fn with_window_manager<R, F: FnOnce(&WindowManager) -> R>(f: F) -> Option<R>
 
 /// Get the global window manager (deprecated - use with_window_manager instead)
 pub fn get_window_manager() -> Result<(), KernelError> {
-    WINDOW_MANAGER.with(|_| ()).ok_or(KernelError::InvalidState {
-        expected: "initialized",
-        actual: "uninitialized",
-    })
+    WINDOW_MANAGER
+        .with(|_| ())
+        .ok_or(KernelError::InvalidState {
+            expected: "initialized",
+            actual: "uninitialized",
+        })
 }
 
 #[cfg(test)]

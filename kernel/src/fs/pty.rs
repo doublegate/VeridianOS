@@ -1,30 +1,29 @@
 //! Pseudo-Terminal (PTY) Support
 //!
-//! Provides pseudo-terminal devices for terminal emulation and shell interaction.
+//! Provides pseudo-terminal devices for terminal emulation and shell
+//! interaction.
 
-use crate::error::KernelError;
-use crate::process::ProcessId;
-use crate::sync::once_lock::GlobalState;
-use alloc::collections::VecDeque;
-use alloc::vec::Vec;
-use alloc::sync::Arc;
+use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
+
 use spin::RwLock;
+
+use crate::{error::KernelError, process::ProcessId, sync::once_lock::GlobalState};
 
 /// PTY buffer size
 const PTY_BUFFER_SIZE: usize = 4096;
 
 /// Terminal control characters
 pub mod termios {
-    pub const VINTR: u8 = 0;    // ^C
-    pub const VQUIT: u8 = 1;    // ^\
-    pub const VERASE: u8 = 2;   // Backspace
-    pub const VKILL: u8 = 3;    // ^U
-    pub const VEOF: u8 = 4;     // ^D
-    pub const VEOL: u8 = 5;     // End of line
-    pub const VSUSP: u8 = 6;    // ^Z
-    pub const VINTR_CHAR: u8 = 3;   // ASCII ^C
-    pub const VEOF_CHAR: u8 = 4;    // ASCII ^D
+    pub const VINTR: u8 = 0; // ^C
+    pub const VQUIT: u8 = 1; // ^\
+    pub const VERASE: u8 = 2; // Backspace
+    pub const VKILL: u8 = 3; // ^U
+    pub const VEOF: u8 = 4; // ^D
+    pub const VEOL: u8 = 5; // End of line
+    pub const VSUSP: u8 = 6; // ^Z
+    pub const VINTR_CHAR: u8 = 3; // ASCII ^C
+    pub const VEOF_CHAR: u8 = 4; // ASCII ^D
 }
 
 /// PTY Terminal mode flags
@@ -185,10 +184,7 @@ pub struct PtySlave {
 impl PtySlave {
     /// Create a new PTY slave
     pub fn new(id: u32, master_id: u32) -> Self {
-        Self {
-            id,
-            master_id,
-        }
+        Self { id, master_id }
     }
 
     /// Get PTY ID
@@ -284,7 +280,10 @@ impl PtyManager {
 
         self.masters.write().push(master);
 
-        println!("[PTY] Created PTY pair: master={}, slave={}", master_id, master_id);
+        println!(
+            "[PTY] Created PTY pair: master={}, slave={}",
+            master_id, master_id
+        );
 
         Ok((master_id, master_id))
     }
@@ -332,10 +331,12 @@ static PTY_MANAGER: GlobalState<PtyManager> = GlobalState::new();
 /// Initialize PTY system
 pub fn init() -> Result<(), KernelError> {
     let manager = PtyManager::new();
-    PTY_MANAGER.init(manager).map_err(|_| KernelError::InvalidState {
-        expected: "uninitialized",
-        actual: "initialized",
-    })?;
+    PTY_MANAGER
+        .init(manager)
+        .map_err(|_| KernelError::InvalidState {
+            expected: "uninitialized",
+            actual: "initialized",
+        })?;
 
     println!("[PTY] Pseudo-terminal system initialized");
     Ok(())

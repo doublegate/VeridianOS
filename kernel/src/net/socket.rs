@@ -1,8 +1,9 @@
 //! Socket API implementation
 
+use alloc::vec::Vec;
+
 use super::{IpAddress, SocketAddr};
 use crate::error::KernelError;
-use alloc::vec::Vec;
 
 /// Socket domain (address family)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,18 +93,24 @@ pub struct Socket {
 
 impl Socket {
     /// Create a new socket
-    pub fn new(domain: SocketDomain, socket_type: SocketType, protocol: SocketProtocol) -> Result<Self, KernelError> {
+    pub fn new(
+        domain: SocketDomain,
+        socket_type: SocketType,
+        protocol: SocketProtocol,
+    ) -> Result<Self, KernelError> {
         // Validate domain/type/protocol combination
         match (domain, socket_type, protocol) {
-            (SocketDomain::Inet, SocketType::Stream, SocketProtocol::Tcp) |
-            (SocketDomain::Inet, SocketType::Stream, SocketProtocol::Default) |
-            (SocketDomain::Inet, SocketType::Dgram, SocketProtocol::Udp) |
-            (SocketDomain::Inet, SocketType::Dgram, SocketProtocol::Default) |
-            (SocketDomain::Inet, SocketType::Raw, _) => {},
-            _ => return Err(KernelError::InvalidArgument {
-                name: "socket_combination",
-                value: "unsupported",
-            }),
+            (SocketDomain::Inet, SocketType::Stream, SocketProtocol::Tcp)
+            | (SocketDomain::Inet, SocketType::Stream, SocketProtocol::Default)
+            | (SocketDomain::Inet, SocketType::Dgram, SocketProtocol::Udp)
+            | (SocketDomain::Inet, SocketType::Dgram, SocketProtocol::Default)
+            | (SocketDomain::Inet, SocketType::Raw, _) => {}
+            _ => {
+                return Err(KernelError::InvalidArgument {
+                    name: "socket_combination",
+                    value: "unsupported",
+                })
+            }
         }
 
         Ok(Self {
@@ -159,20 +166,24 @@ impl Socket {
     /// Connect to remote address
     pub fn connect(&mut self, addr: SocketAddr) -> Result<(), KernelError> {
         match self.state {
-            SocketState::Unbound | SocketState::Bound => {},
-            _ => return Err(KernelError::InvalidState {
-                expected: "unbound_or_bound",
-                actual: "other",
-            }),
+            SocketState::Unbound | SocketState::Bound => {}
+            _ => {
+                return Err(KernelError::InvalidState {
+                    expected: "unbound_or_bound",
+                    actual: "other",
+                })
+            }
         }
 
         // Auto-bind if not bound
         if self.state == SocketState::Unbound {
             let local_addr = match addr.ip() {
                 IpAddress::V4(_) => SocketAddr::v4(super::Ipv4Address::UNSPECIFIED, 0),
-                IpAddress::V6(_) => return Err(KernelError::NotImplemented {
-                    feature: "ipv6_auto_bind",
-                }),
+                IpAddress::V6(_) => {
+                    return Err(KernelError::NotImplemented {
+                        feature: "ipv6_auto_bind",
+                    })
+                }
             };
             self.bind(local_addr)?;
         }
@@ -230,11 +241,9 @@ impl Socket {
                 // UDP send
                 super::udp::UdpSocket::new().send_to(data, remote)
             }
-            SocketType::Raw => {
-                Err(KernelError::NotImplemented {
-                    feature: "raw_socket_send",
-                })
-            }
+            SocketType::Raw => Err(KernelError::NotImplemented {
+                feature: "raw_socket_send",
+            }),
         }
     }
 
@@ -265,7 +274,11 @@ impl Socket {
     }
 
     /// Receive data with source address
-    pub fn recv_from(&self, buffer: &mut [u8], flags: u32) -> Result<(usize, SocketAddr), KernelError> {
+    pub fn recv_from(
+        &self,
+        buffer: &mut [u8],
+        flags: u32,
+    ) -> Result<(usize, SocketAddr), KernelError> {
         if self.state == SocketState::Unbound {
             return Err(KernelError::InvalidState {
                 expected: "bound",
@@ -331,7 +344,11 @@ pub fn init() -> Result<(), KernelError> {
 }
 
 /// Create a new socket and return its ID
-pub fn create_socket(domain: SocketDomain, socket_type: SocketType, protocol: SocketProtocol) -> Result<usize, KernelError> {
+pub fn create_socket(
+    domain: SocketDomain,
+    socket_type: SocketType,
+    protocol: SocketProtocol,
+) -> Result<usize, KernelError> {
     let mut socket = Socket::new(domain, socket_type, protocol)?;
 
     unsafe {
@@ -356,7 +373,8 @@ pub fn create_socket(domain: SocketDomain, socket_type: SocketType, protocol: So
 pub fn get_socket(id: usize) -> Result<&'static Socket, KernelError> {
     unsafe {
         if let Some(ref table) = SOCKET_TABLE {
-            table.iter()
+            table
+                .iter()
                 .find(|s| s.id == id)
                 .ok_or(KernelError::InvalidArgument {
                     name: "socket_id",
@@ -375,7 +393,8 @@ pub fn get_socket(id: usize) -> Result<&'static Socket, KernelError> {
 pub fn get_socket_mut(id: usize) -> Result<&'static mut Socket, KernelError> {
     unsafe {
         if let Some(ref mut table) = SOCKET_TABLE {
-            table.iter_mut()
+            table
+                .iter_mut()
                 .find(|s| s.id == id)
                 .ok_or(KernelError::InvalidArgument {
                     name: "socket_id",
@@ -397,14 +416,16 @@ mod tests {
 
     #[test_case]
     fn test_socket_creation() {
-        let socket = Socket::new(SocketDomain::Inet, SocketType::Stream, SocketProtocol::Tcp).unwrap();
+        let socket =
+            Socket::new(SocketDomain::Inet, SocketType::Stream, SocketProtocol::Tcp).unwrap();
         assert_eq!(socket.state, SocketState::Unbound);
         assert_eq!(socket.socket_type, SocketType::Stream);
     }
 
     #[test_case]
     fn test_socket_bind() {
-        let mut socket = Socket::new(SocketDomain::Inet, SocketType::Stream, SocketProtocol::Tcp).unwrap();
+        let mut socket =
+            Socket::new(SocketDomain::Inet, SocketType::Stream, SocketProtocol::Tcp).unwrap();
         let addr = SocketAddr::v4(Ipv4Address::LOCALHOST, 8080);
 
         assert_eq!(socket.state, SocketState::Unbound);

@@ -7,15 +7,14 @@ use core::{
 
 use spin::Mutex;
 
+#[cfg(not(target_arch = "riscv64"))]
+use super::queue::READY_QUEUE;
 use super::{
     queue::CfsRunQueue,
     task::{Priority, SchedClass, Task},
     task_ptr::TaskPtr,
     ProcessState,
 };
-
-#[cfg(not(target_arch = "riscv64"))]
-use super::queue::READY_QUEUE;
 
 /// Scheduler state
 pub struct Scheduler {
