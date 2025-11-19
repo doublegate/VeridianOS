@@ -8,6 +8,8 @@ pub mod asymmetric;
 pub mod random;
 pub mod keystore;
 pub mod post_quantum;
+pub mod constant_time;
+pub mod pq_params;
 
 pub use hash::{HashAlgorithm, Hash256, Hash512};
 pub use symmetric::{SymmetricCipher, Aes256Gcm, ChaCha20Poly1305};
