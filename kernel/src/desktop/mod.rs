@@ -5,6 +5,9 @@
 
 pub mod font;
 pub mod window_manager;
+pub mod terminal;
+pub mod file_manager;
+pub mod text_editor;
 
 use crate::error::KernelError;
 
@@ -17,6 +20,15 @@ pub fn init() -> Result<(), KernelError> {
 
     // Initialize window manager
     window_manager::init()?;
+
+    // Initialize terminal system
+    terminal::init()?;
+
+    // Initialize file manager
+    file_manager::init()?;
+
+    // Initialize text editor
+    text_editor::init()?;
 
     println!("[DESKTOP] Desktop subsystem initialized");
     Ok(())
