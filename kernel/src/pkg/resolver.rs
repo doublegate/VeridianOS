@@ -7,7 +7,6 @@ use super::{Dependency, PackageId, Version};
 use alloc::vec::Vec;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
-use core::cmp::Ordering;
 
 /// Version requirement
 #[derive(Debug, Clone, PartialEq, Eq)]
