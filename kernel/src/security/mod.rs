@@ -14,6 +14,7 @@ pub mod boot;
 pub mod memory_protection;
 pub mod auth;
 pub mod tpm;
+pub mod tpm_commands;
 
 use crate::error::KernelError;
 
