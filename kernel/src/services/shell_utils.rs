@@ -5,6 +5,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::boxed::Box;
+use alloc::vec;
 use super::shell::{BuiltinCommand, Shell, CommandResult};
 use alloc::format;
 
@@ -426,14 +427,17 @@ fn uniq_file(file_path: &str) -> Result<Vec<String>, &'static str> {
 
 /// Register all utility commands with the shell
 pub fn register_utils(shell: &Shell) {
-    let mut builtins = shell.builtins.write();
+    // Use the public API to register commands
+    let commands: Vec<Box<dyn BuiltinCommand>> = vec![
+        Box::new(FindCommand),
+        Box::new(GrepCommand),
+        Box::new(WcCommand),
+        Box::new(HeadCommand),
+        Box::new(TailCommand),
+        Box::new(DiffCommand),
+        Box::new(SortCommand),
+        Box::new(UniqCommand),
+    ];
 
-    builtins.insert("find".into(), Box::new(FindCommand));
-    builtins.insert("grep".into(), Box::new(GrepCommand));
-    builtins.insert("wc".into(), Box::new(WcCommand));
-    builtins.insert("head".into(), Box::new(HeadCommand));
-    builtins.insert("tail".into(), Box::new(TailCommand));
-    builtins.insert("diff".into(), Box::new(DiffCommand));
-    builtins.insert("sort".into(), Box::new(SortCommand));
-    builtins.insert("uniq".into(), Box::new(UniqCommand));
+    shell.register_builtins_batch(commands);
 }

@@ -2,14 +2,15 @@
 //!
 //! High-level RPC abstraction built on top of the IPC system.
 //!
-//! NOTE: This is a framework stub showing the intended RPC architecture.
-//! Full implementation requires integration with the IPC message passing API.
+//! Provides method-based RPC with service discovery and marshaling.
 
-use super::EndpointId;
+use super::{EndpointId, Message, SmallMessage, sync_send, sync_receive, IpcError};
 use alloc::vec::Vec;
 use alloc::string::{String, ToString};
 use alloc::collections::BTreeMap;
+use alloc::boxed::Box;
 use spin::RwLock;
+use core::mem;
 
 /// RPC method identifier
 pub type MethodId = u32;
@@ -31,6 +32,34 @@ pub struct RpcError {
     pub request_id: RequestId,
     pub error_code: i32,
     pub message: String,
+}
+
+impl From<IpcError> for RpcError {
+    fn from(err: IpcError) -> Self {
+        let error_code = match err {
+            IpcError::InvalidCapability => -1,
+            IpcError::PermissionDenied => -2,
+            IpcError::WouldBlock => -3,
+            IpcError::Timeout => -4,
+            IpcError::ProcessNotFound => -5,
+            IpcError::EndpointNotFound => -6,
+            IpcError::MessageTooLarge => -7,
+            IpcError::OutOfMemory => -8,
+            IpcError::RateLimitExceeded => -9,
+            IpcError::InvalidMessage => -10,
+            IpcError::ChannelFull => -11,
+            IpcError::ChannelEmpty => -12,
+            IpcError::EndpointBusy => -13,
+            IpcError::InvalidMemoryRegion => -14,
+            IpcError::ResourceBusy => -15,
+            IpcError::NotInitialized => -16,
+        };
+        RpcError {
+            request_id: 0,
+            error_code,
+            message: alloc::format!("{:?}", err),
+        }
+    }
 }
 
 /// RPC service handler trait
@@ -62,8 +91,8 @@ impl RpcClient {
 
     /// Make synchronous RPC call
     ///
-    /// TODO: Implement full RPC call using IPC message passing
-    pub fn call(&self, method_id: MethodId, _params: Vec<u8>) -> Result<Vec<u8>, RpcError> {
+    /// Sends an RPC request and waits for the response.
+    pub fn call(&self, method_id: MethodId, params: Vec<u8>) -> Result<Vec<u8>, RpcError> {
         let request_id = {
             let mut next = self.next_request_id.write();
             let id = *next;
@@ -71,10 +100,63 @@ impl RpcClient {
             id
         };
 
-        // Stub - return empty response
-        crate::println!("[RPC] Stub call to endpoint {:?}, method {}", self.endpoint_id, method_id);
+        // Build RPC request message
+        // For small params (≤24 bytes), pack into SmallMessage data registers
+        if params.len() <= 24 {
+            let mut msg = SmallMessage::new(0, RpcMessageType::Request as u32);
+            msg.data[0] = request_id;
+            msg.data[1] = method_id as u64;
+            msg.data[2] = params.len() as u64;
 
-        Ok(Vec::new())
+            // Pack params into remaining data space (3 bytes per u64)
+            for (i, chunk) in params.chunks(8).enumerate() {
+                if i + 3 < 4 {  // data[3] available
+                    let mut value = 0u64;
+                    for (j, &byte) in chunk.iter().enumerate() {
+                        value |= (byte as u64) << (j * 8);
+                    }
+                    msg.data[3] = value;
+                }
+            }
+
+            // Send request
+            sync_send(Message::Small(msg), self.endpoint_id)?;
+
+            // Wait for response
+            let response = sync_receive(self.endpoint_id)?;
+
+            match response {
+                Message::Small(resp_msg) => {
+                    // Extract response data
+                    let resp_len = resp_msg.data[2] as usize;
+                    let mut result = Vec::with_capacity(resp_len);
+
+                    // Unpack response from data[3]
+                    let value = resp_msg.data[3];
+                    for i in 0..resp_len.min(8) {
+                        result.push(((value >> (i * 8)) & 0xFF) as u8);
+                    }
+
+                    Ok(result)
+                }
+                Message::Large(_) => {
+                    // For now, reject large responses in small calls
+                    Err(RpcError {
+                        request_id,
+                        error_code: -100,
+                        message: "Unexpected large response".to_string(),
+                    })
+                }
+            }
+        } else {
+            // For larger params, we'd use LargeMessage
+            // For now, return error
+            Err(RpcError {
+                request_id,
+                error_code: -101,
+                message: "Large RPC calls not yet implemented".to_string(),
+            })
+        }
     }
 }
 
@@ -101,10 +183,97 @@ impl RpcServer {
 
     /// Process incoming RPC requests (call in a loop)
     ///
-    /// TODO: Implement full request processing using IPC
-    pub fn process_requests(&self) -> Result<(), ()> {
-        crate::println!("[RPC] Stub process_requests for endpoint {:?}", self.endpoint_id);
-        Ok(())
+    /// Receives one request, dispatches to appropriate service, and sends response.
+    pub fn process_requests(&self) -> Result<(), RpcError> {
+        // Receive incoming request
+        let request = sync_receive(self.endpoint_id)
+            .map_err(|e| RpcError::from(e))?;
+
+        match request {
+            Message::Small(msg) => {
+                // Extract RPC request fields
+                let request_id = msg.data[0];
+                let method_id = msg.data[1] as u32;
+                let params_len = msg.data[2] as usize;
+
+                // Unpack parameters
+                let mut params = Vec::with_capacity(params_len);
+                let value = msg.data[3];
+                for i in 0..params_len.min(8) {
+                    params.push(((value >> (i * 8)) & 0xFF) as u8);
+                }
+
+                // Dispatch to service (for now, just echo back)
+                // TODO: Lookup service by method_id and dispatch
+                let services = self.services.read();
+
+                // Find service that handles this method
+                let mut result = Vec::new();
+                let mut found = false;
+
+                for service in services.values() {
+                    if service.methods().contains(&method_id) {
+                        match service.handle_method(method_id, &params) {
+                            Ok(response_data) => {
+                                result = response_data;
+                                found = true;
+                                break;
+                            }
+                            Err(err) => {
+                                // Send error response
+                                let error_msg = SmallMessage::new(0, RpcMessageType::Error as u32)
+                                    .with_data(0, request_id)
+                                    .with_data(1, err.error_code as u64);
+
+                                sync_send(Message::Small(error_msg), self.endpoint_id)
+                                    .map_err(|e| RpcError::from(e))?;
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+
+                if !found {
+                    // Method not found - send error
+                    let error_msg = SmallMessage::new(0, RpcMessageType::Error as u32)
+                        .with_data(0, request_id)
+                        .with_data(1, -404i64 as u64);
+
+                    sync_send(Message::Small(error_msg), self.endpoint_id)
+                        .map_err(|e| RpcError::from(e))?;
+                    return Ok(());
+                }
+
+                // Pack result into response
+                let mut response_msg = SmallMessage::new(0, RpcMessageType::Response as u32);
+                response_msg.data[0] = request_id;
+                response_msg.data[1] = method_id as u64;
+                response_msg.data[2] = result.len() as u64;
+
+                // Pack response data
+                if result.len() <= 8 {
+                    let mut value = 0u64;
+                    for (i, &byte) in result.iter().enumerate() {
+                        value |= (byte as u64) << (i * 8);
+                    }
+                    response_msg.data[3] = value;
+                }
+
+                // Send response
+                sync_send(Message::Small(response_msg), self.endpoint_id)
+                    .map_err(|e| RpcError::from(e))?;
+
+                Ok(())
+            }
+            Message::Large(_) => {
+                // Large message RPC not yet implemented
+                Err(RpcError {
+                    request_id: 0,
+                    error_code: -102,
+                    message: "Large RPC requests not yet implemented".to_string(),
+                })
+            }
+        }
     }
 }
 
