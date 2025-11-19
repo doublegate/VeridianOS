@@ -2,7 +2,9 @@
 
 use super::Rect;
 use crate::error::KernelError;
+use crate::sync::once_lock::GlobalState;
 use alloc::vec::Vec;
+use spin::RwLock;
 
 /// Window handle
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,34 +94,37 @@ impl Compositor {
     }
 }
 
-static mut COMPOSITOR: Option<Compositor> = None;
+static COMPOSITOR: GlobalState<RwLock<Compositor>> = GlobalState::new();
 
-/// Get compositor instance
-pub fn get() -> &'static mut Compositor {
-    unsafe {
-        COMPOSITOR.as_mut().expect("Compositor not initialized")
-    }
+/// Execute a function with the compositor
+pub fn with_compositor<R, F: FnOnce(&mut Compositor) -> R>(f: F) -> Option<R> {
+    COMPOSITOR.with(|comp| {
+        let mut compositor = comp.write();
+        f(&mut compositor)
+    })
 }
 
 /// Initialize compositor
 pub fn init() -> Result<(), KernelError> {
     println!("[COMP] Initializing compositor...");
 
-    unsafe {
-        COMPOSITOR = Some(Compositor::new());
-    }
+    COMPOSITOR.init(RwLock::new(Compositor::new())).map_err(|_| KernelError::InvalidState {
+        expected: "uninitialized",
+        actual: "initialized",
+    })?;
 
     // Create a test window
-    let comp = get();
-    let _window_id = comp.create_window(
-        Rect {
-            x: 100,
-            y: 100,
-            width: 640,
-            height: 480,
-        },
-        "VeridianOS",
-    );
+    with_compositor(|comp| {
+        comp.create_window(
+            Rect {
+                x: 100,
+                y: 100,
+                width: 640,
+                height: 480,
+            },
+            "VeridianOS",
+        )
+    });
 
     println!("[COMP] Compositor initialized");
     Ok(())
