@@ -6,6 +6,7 @@ use crate::error::KernelError;
 
 pub mod framebuffer;
 pub mod compositor;
+pub mod gpu;
 
 /// Color representation (RGBA)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
