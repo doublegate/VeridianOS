@@ -6,6 +6,7 @@ use crate::error::KernelError;
 use crate::desktop::font::{FontSize, FontStyle, get_font_manager};
 use crate::desktop::window_manager::{WindowId, get_window_manager, InputEvent};
 use crate::fs::pty::with_pty_manager;
+use crate::sync::once_lock::GlobalState;
 use alloc::vec::Vec;
 use alloc::vec;
 use alloc::string::ToString;
@@ -34,7 +35,9 @@ impl Color {
 #[derive(Debug, Clone, Copy)]
 struct Cell {
     character: char,
+    #[allow(dead_code)]
     foreground: Color,
+    #[allow(dead_code)]
     background: Color,
 }
 
@@ -346,34 +349,23 @@ impl Default for TerminalManager {
 }
 
 /// Global terminal manager
-static mut TERMINAL_MANAGER: Option<TerminalManager> = None;
+static TERMINAL_MANAGER: GlobalState<TerminalManager> = GlobalState::new();
 
 /// Initialize terminal system
 pub fn init() -> Result<(), KernelError> {
-    unsafe {
-        if TERMINAL_MANAGER.is_some() {
-            return Err(KernelError::InvalidState {
-                expected: "uninitialized",
-                actual: "initialized",
-            });
-        }
+    let manager = TerminalManager::new();
+    TERMINAL_MANAGER.init(manager).map_err(|_| KernelError::InvalidState {
+        expected: "uninitialized",
+        actual: "initialized",
+    })?;
 
-        let manager = TerminalManager::new();
-        TERMINAL_MANAGER = Some(manager);
-
-        println!("[TERMINAL] Terminal emulator system initialized");
-        Ok(())
-    }
+    println!("[TERMINAL] Terminal emulator system initialized");
+    Ok(())
 }
 
-/// Get the global terminal manager
-pub fn get_terminal_manager() -> Result<&'static TerminalManager, KernelError> {
-    unsafe {
-        TERMINAL_MANAGER.as_ref().ok_or(KernelError::InvalidState {
-            expected: "initialized",
-            actual: "uninitialized",
-        })
-    }
+/// Execute a function with the terminal manager
+pub fn with_terminal_manager<R, F: FnOnce(&TerminalManager) -> R>(f: F) -> Option<R> {
+    TERMINAL_MANAGER.with(f)
 }
 
 #[cfg(test)]

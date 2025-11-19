@@ -6,6 +6,7 @@ use crate::error::KernelError;
 use crate::desktop::window_manager::{WindowId, get_window_manager, InputEvent};
 use crate::desktop::font::{get_font_manager, FontSize, FontStyle};
 use crate::fs::{get_vfs, OpenFlags};
+use crate::sync::once_lock::GlobalState;
 use alloc::vec::Vec;
 use alloc::vec;
 use alloc::string::String;
@@ -376,7 +377,7 @@ impl TextEditor {
 }
 
 /// Global text editor (can support multiple instances)
-static mut TEXT_EDITOR: Option<RwLock<TextEditor>> = None;
+static TEXT_EDITOR: GlobalState<RwLock<TextEditor>> = GlobalState::new();
 
 /// Initialize text editor
 pub fn init() -> Result<(), KernelError> {
@@ -386,21 +387,17 @@ pub fn init() -> Result<(), KernelError> {
 
 /// Create a new text editor instance
 pub fn create_text_editor(file_path: Option<String>) -> Result<(), KernelError> {
-    unsafe {
-        let editor = TextEditor::new(file_path)?;
-        TEXT_EDITOR = Some(RwLock::new(editor));
-        Ok(())
-    }
+    let editor = TextEditor::new(file_path)?;
+    TEXT_EDITOR.init(RwLock::new(editor)).map_err(|_| KernelError::InvalidState {
+        expected: "uninitialized",
+        actual: "initialized",
+    })?;
+    Ok(())
 }
 
-/// Get the global text editor
-pub fn get_text_editor() -> Result<&'static RwLock<TextEditor>, KernelError> {
-    unsafe {
-        TEXT_EDITOR.as_ref().ok_or(KernelError::InvalidState {
-            expected: "initialized",
-            actual: "uninitialized",
-        })
-    }
+/// Execute a function with the text editor
+pub fn with_text_editor<R, F: FnOnce(&RwLock<TextEditor>) -> R>(f: F) -> Option<R> {
+    TEXT_EDITOR.with(f)
 }
 
 #[cfg(test)]

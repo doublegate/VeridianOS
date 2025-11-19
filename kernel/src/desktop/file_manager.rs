@@ -6,6 +6,7 @@ use crate::error::KernelError;
 use crate::desktop::window_manager::{WindowId, get_window_manager, InputEvent};
 use crate::desktop::font::{get_font_manager, FontSize, FontStyle};
 use crate::fs::{get_vfs, NodeType};
+use crate::sync::once_lock::GlobalState;
 use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::format;
@@ -287,7 +288,7 @@ impl FileManager {
 }
 
 /// Global file manager (can support multiple instances)
-static mut FILE_MANAGER: Option<RwLock<FileManager>> = None;
+static FILE_MANAGER: GlobalState<RwLock<FileManager>> = GlobalState::new();
 
 /// Initialize file manager
 pub fn init() -> Result<(), KernelError> {
@@ -297,21 +298,17 @@ pub fn init() -> Result<(), KernelError> {
 
 /// Create a new file manager instance
 pub fn create_file_manager() -> Result<(), KernelError> {
-    unsafe {
-        let fm = FileManager::new()?;
-        FILE_MANAGER = Some(RwLock::new(fm));
-        Ok(())
-    }
+    let fm = FileManager::new()?;
+    FILE_MANAGER.init(RwLock::new(fm)).map_err(|_| KernelError::InvalidState {
+        expected: "uninitialized",
+        actual: "initialized",
+    })?;
+    Ok(())
 }
 
-/// Get the global file manager
-pub fn get_file_manager() -> Result<&'static RwLock<FileManager>, KernelError> {
-    unsafe {
-        FILE_MANAGER.as_ref().ok_or(KernelError::InvalidState {
-            expected: "initialized",
-            actual: "uninitialized",
-        })
-    }
+/// Execute a function with the file manager
+pub fn with_file_manager<R, F: FnOnce(&RwLock<FileManager>) -> R>(f: F) -> Option<R> {
+    FILE_MANAGER.with(f)
 }
 
 #[cfg(test)]
