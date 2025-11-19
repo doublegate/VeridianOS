@@ -20,6 +20,7 @@ use alloc::vec;
 use alloc::string::String;
 use spin::RwLock;
 use crate::error::KernelError;
+use crate::sync::once_lock::GlobalState;
 
 /// GPU device
 #[derive(Clone)]
@@ -269,24 +270,25 @@ impl Default for GpuManager {
 }
 
 /// Global GPU manager
-static mut GPU_MANAGER: Option<GpuManager> = None;
+static GPU_MANAGER: GlobalState<GpuManager> = GlobalState::new();
 
 /// Initialize GPU subsystem
 pub fn init() -> Result<(), KernelError> {
     let manager = GpuManager::new();
     manager.init()?;
 
-    unsafe {
-        GPU_MANAGER = Some(manager);
-    }
+    GPU_MANAGER.init(manager).map_err(|_| KernelError::InvalidState {
+        expected: "uninitialized",
+        actual: "initialized",
+    })?;
 
     crate::println!("[GPU] GPU acceleration initialized");
     Ok(())
 }
 
-/// Get global GPU manager
-pub fn get_gpu_manager() -> Option<&'static GpuManager> {
-    unsafe { GPU_MANAGER.as_ref() }
+/// Execute a function with the GPU manager
+pub fn with_gpu_manager<R, F: FnOnce(&GpuManager) -> R>(f: F) -> Option<R> {
+    GPU_MANAGER.with(f)
 }
 
 #[cfg(test)]

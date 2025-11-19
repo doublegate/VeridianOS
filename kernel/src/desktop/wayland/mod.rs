@@ -29,6 +29,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use spin::RwLock;
 use crate::error::KernelError;
+use crate::sync::once_lock::GlobalState;
 
 /// Wayland object ID
 pub type ObjectId = u32;
@@ -159,21 +160,22 @@ struct Object {
 }
 
 /// Global Wayland display instance
-static mut WAYLAND_DISPLAY: Option<WaylandDisplay> = None;
+static WAYLAND_DISPLAY: GlobalState<WaylandDisplay> = GlobalState::new();
 
 /// Initialize Wayland compositor
 pub fn init() -> Result<(), KernelError> {
-    unsafe {
-        WAYLAND_DISPLAY = Some(WaylandDisplay::new());
-    }
+    WAYLAND_DISPLAY.init(WaylandDisplay::new()).map_err(|_| KernelError::InvalidState {
+        expected: "uninitialized",
+        actual: "initialized",
+    })?;
 
     crate::println!("[WAYLAND] Wayland compositor initialized");
     Ok(())
 }
 
-/// Get global Wayland display
-pub fn get_display() -> Option<&'static WaylandDisplay> {
-    unsafe { WAYLAND_DISPLAY.as_ref() }
+/// Execute a function with the Wayland display
+pub fn with_display<R, F: FnOnce(&WaylandDisplay) -> R>(f: F) -> Option<R> {
+    WAYLAND_DISPLAY.with(f)
 }
 
 #[cfg(test)]
