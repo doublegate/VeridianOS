@@ -3,6 +3,7 @@
 //! Manages windows, input events, and coordinates desktop applications.
 
 use crate::error::KernelError;
+use crate::sync::once_lock::GlobalState;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use spin::RwLock;
@@ -326,34 +327,26 @@ impl Default for WindowManager {
 }
 
 /// Global window manager
-static mut WINDOW_MANAGER: Option<WindowManager> = None;
+static WINDOW_MANAGER: GlobalState<WindowManager> = GlobalState::new();
 
 /// Initialize window manager
 pub fn init() -> Result<(), KernelError> {
-    unsafe {
-        if WINDOW_MANAGER.is_some() {
-            return Err(KernelError::InvalidState {
-                expected: "uninitialized",
-                actual: "initialized",
-            });
-        }
+    let wm = WindowManager::new();
+    WINDOW_MANAGER.init(wm).map_err(|_| KernelError::InvalidState {
+        expected: "uninitialized",
+        actual: "initialized",
+    })?;
 
-        let wm = WindowManager::new();
-        WINDOW_MANAGER = Some(wm);
-
-        println!("[WM] Window manager initialized");
-        Ok(())
-    }
+    println!("[WM] Window manager initialized");
+    Ok(())
 }
 
 /// Get the global window manager
 pub fn get_window_manager() -> Result<&'static WindowManager, KernelError> {
-    unsafe {
-        WINDOW_MANAGER.as_ref().ok_or(KernelError::InvalidState {
-            expected: "initialized",
-            actual: "uninitialized",
-        })
-    }
+    WINDOW_MANAGER.with(|wm| wm).ok_or(KernelError::InvalidState {
+        expected: "initialized",
+        actual: "uninitialized",
+    })
 }
 
 #[cfg(test)]
