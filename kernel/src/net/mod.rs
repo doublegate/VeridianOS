@@ -12,6 +12,7 @@ pub mod tcp;
 pub mod udp;
 pub mod socket;
 pub mod device;
+pub mod zero_copy;
 pub mod integration;
 pub mod dma_pool;
 pub mod dhcp;

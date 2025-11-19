@@ -62,6 +62,7 @@ pub mod mm;
 pub mod process;
 pub mod raii;
 pub mod sched;
+pub mod sync;
 pub mod serial;
 pub mod services;
 pub mod stdlib;
