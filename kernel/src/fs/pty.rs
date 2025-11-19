@@ -4,8 +4,11 @@
 
 use crate::error::KernelError;
 use crate::process::ProcessId;
+use crate::sync::once_lock::GlobalState;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU32, Ordering};
 use spin::RwLock;
 
 /// PTY buffer size
@@ -256,31 +259,30 @@ impl PtySlave {
 
 /// PTY Manager for creating and managing PTY pairs
 pub struct PtyManager {
-    /// All PTY masters
-    masters: Vec<PtyMaster>,
+    /// All PTY masters (with interior mutability and Arc for sharing)
+    masters: RwLock<Vec<Arc<PtyMaster>>>,
 
-    /// Next PTY ID
-    next_id: u32,
+    /// Next PTY ID (atomic for thread-safety)
+    next_id: AtomicU32,
 }
 
 impl PtyManager {
     /// Create a new PTY manager
     pub fn new() -> Self {
         Self {
-            masters: Vec::new(),
-            next_id: 0,
+            masters: RwLock::new(Vec::new()),
+            next_id: AtomicU32::new(0),
         }
     }
 
     /// Create a new PTY pair
-    pub fn create_pty(&mut self) -> Result<(u32, u32), KernelError> {
-        let id = self.next_id;
-        self.next_id += 1;
+    pub fn create_pty(&self) -> Result<(u32, u32), KernelError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
-        let master = PtyMaster::new(id);
+        let master = Arc::new(PtyMaster::new(id));
         let master_id = master.id();
 
-        self.masters.push(master);
+        self.masters.write().push(master);
 
         println!("[PTY] Created PTY pair: master={}, slave={}", master_id, master_id);
 
@@ -288,19 +290,20 @@ impl PtyManager {
     }
 
     /// Get PTY master by ID
-    pub fn get_master(&self, id: u32) -> Option<&PtyMaster> {
-        self.masters.iter().find(|m| m.id == id)
+    pub fn get_master(&self, id: u32) -> Option<Arc<PtyMaster>> {
+        self.masters.read().iter().find(|m| m.id == id).cloned()
     }
 
-    /// Get PTY master by ID (mutable)
-    pub fn get_master_mut(&mut self, id: u32) -> Option<&mut PtyMaster> {
-        self.masters.iter_mut().find(|m| m.id == id)
+    /// Check if PTY exists
+    pub fn has_pty(&self, id: u32) -> bool {
+        self.masters.read().iter().any(|m| m.id == id)
     }
 
     /// Close a PTY
-    pub fn close_pty(&mut self, id: u32) -> Result<(), KernelError> {
-        if let Some(pos) = self.masters.iter().position(|m| m.id == id) {
-            self.masters.remove(pos);
+    pub fn close_pty(&self, id: u32) -> Result<(), KernelError> {
+        let mut masters = self.masters.write();
+        if let Some(pos) = masters.iter().position(|m| m.id == id) {
+            masters.remove(pos);
             println!("[PTY] Closed PTY {}", id);
             Ok(())
         } else {
@@ -313,7 +316,7 @@ impl PtyManager {
 
     /// Get number of active PTYs
     pub fn count(&self) -> usize {
-        self.masters.len()
+        self.masters.read().len()
     }
 }
 
@@ -324,45 +327,28 @@ impl Default for PtyManager {
 }
 
 /// Global PTY manager
-static mut PTY_MANAGER: Option<PtyManager> = None;
+static PTY_MANAGER: GlobalState<PtyManager> = GlobalState::new();
 
 /// Initialize PTY system
 pub fn init() -> Result<(), KernelError> {
-    unsafe {
-        if PTY_MANAGER.is_some() {
-            return Err(KernelError::InvalidState {
-                expected: "uninitialized",
-                actual: "initialized",
-            });
-        }
+    let manager = PtyManager::new();
+    PTY_MANAGER.init(manager).map_err(|_| KernelError::InvalidState {
+        expected: "uninitialized",
+        actual: "initialized",
+    })?;
 
-        let manager = PtyManager::new();
-        PTY_MANAGER = Some(manager);
-
-        println!("[PTY] Pseudo-terminal system initialized");
-        Ok(())
-    }
+    println!("[PTY] Pseudo-terminal system initialized");
+    Ok(())
 }
 
-/// Get the global PTY manager
-pub fn get_pty_manager() -> Result<&'static mut PtyManager, KernelError> {
-    unsafe {
-        PTY_MANAGER.as_mut().ok_or(KernelError::InvalidState {
-            expected: "initialized",
-            actual: "uninitialized",
-        })
-    }
+/// Execute a function with the PTY manager
+pub fn with_pty_manager<R, F: FnOnce(&PtyManager) -> R>(f: F) -> Option<R> {
+    PTY_MANAGER.with(f)
 }
 
 /// Helper function to get PTY master
-fn get_pty_master(id: u32) -> Option<&'static PtyMaster> {
-    unsafe {
-        if let Some(manager) = PTY_MANAGER.as_ref() {
-            manager.get_master(id)
-        } else {
-            None
-        }
-    }
+fn get_pty_master(id: u32) -> Option<Arc<PtyMaster>> {
+    PTY_MANAGER.with(|manager| manager.get_master(id)).flatten()
 }
 
 #[cfg(test)]

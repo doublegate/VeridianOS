@@ -2,8 +2,6 @@
 //!
 //! Desktop shell protocol (windows, popups, etc.)
 
-use crate::error::KernelError;
-use super::surface::Surface;
 
 /// XDG toplevel (window)
 pub struct XdgToplevel {

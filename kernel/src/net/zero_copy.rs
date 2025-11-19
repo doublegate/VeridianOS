@@ -70,7 +70,7 @@ impl DmaBuffer {
 impl DmaBufferPool {
     /// Create new DMA buffer pool
     pub fn new(buffer_size: usize, initial_count: usize) -> Self {
-        let mut pool = Self {
+        let pool = Self {
             free_buffers: Mutex::new(VecDeque::new()),
             total_buffers: AtomicU64::new(0),
             in_use: AtomicU64::new(0),

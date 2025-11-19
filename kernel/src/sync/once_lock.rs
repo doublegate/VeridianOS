@@ -5,7 +5,6 @@
 
 use core::sync::atomic::{AtomicPtr, Ordering};
 use core::cell::UnsafeCell;
-use core::mem::MaybeUninit;
 use spin::Mutex;
 
 /// A cell that can be written to only once (Rust 2024 compatible)

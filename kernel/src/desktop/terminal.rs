@@ -5,7 +5,7 @@
 use crate::error::KernelError;
 use crate::desktop::font::{FontSize, FontStyle, get_font_manager};
 use crate::desktop::window_manager::{WindowId, get_window_manager, InputEvent};
-use crate::fs::pty::get_pty_manager;
+use crate::fs::pty::with_pty_manager;
 use alloc::vec::Vec;
 use alloc::vec;
 use alloc::string::ToString;
@@ -85,8 +85,11 @@ impl TerminalEmulator {
         let window_id = wm.create_window(100, 100, width, height, 0)?;
 
         // Create PTY pair
-        let pty_manager = get_pty_manager()?;
-        let (pty_master_id, pty_slave_id) = pty_manager.create_pty()?;
+        let (pty_master_id, pty_slave_id) = with_pty_manager(|manager| manager.create_pty())
+            .ok_or(KernelError::InvalidState {
+                expected: "initialized",
+                actual: "uninitialized",
+            })??;
 
         // Initialize buffer
         let mut buffer = Vec::new();
@@ -116,8 +119,8 @@ impl TerminalEmulator {
         match event {
             InputEvent::KeyPress { character, .. } => {
                 // Send character to PTY
-                let pty_manager = get_pty_manager()?;
-                if let Some(master) = pty_manager.get_master(self.pty_master_id) {
+                let master_id = self.pty_master_id;
+                if let Some(master) = with_pty_manager(|manager| manager.get_master(master_id)).flatten() {
                     let mut buf = [0u8; 4];
                     let encoded = character.encode_utf8(&mut buf);
                     master.write(encoded.as_bytes())?;
@@ -137,8 +140,8 @@ impl TerminalEmulator {
     /// Update terminal from PTY output
     pub fn update(&mut self) -> Result<(), KernelError> {
         // Read from PTY
-        let pty_manager = get_pty_manager()?;
-        if let Some(master) = pty_manager.get_master(self.pty_master_id) {
+        let master_id = self.pty_master_id;
+        if let Some(master) = with_pty_manager(|manager| manager.get_master(master_id)).flatten() {
             let mut buf = [0u8; 1024];
             match master.read(&mut buf) {
                 Ok(bytes_read) => {

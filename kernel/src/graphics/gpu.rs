@@ -17,7 +17,6 @@
 
 use alloc::vec::Vec;
 use alloc::vec;
-use alloc::collections::BTreeMap;
 use alloc::string::String;
 use spin::RwLock;
 use crate::error::KernelError;
@@ -274,7 +273,7 @@ static mut GPU_MANAGER: Option<GpuManager> = None;
 
 /// Initialize GPU subsystem
 pub fn init() -> Result<(), KernelError> {
-    let mut manager = GpuManager::new();
+    let manager = GpuManager::new();
     manager.init()?;
 
     unsafe {
