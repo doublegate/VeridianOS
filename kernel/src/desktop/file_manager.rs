@@ -50,8 +50,11 @@ impl FileManager {
         let height = 480;
 
         // Create window
-        let wm = get_window_manager()?;
-        let window_id = wm.create_window(200, 100, width, height, 0)?;
+        let window_id = with_window_manager(|wm| wm.create_window(200, 100, width, height, 0))
+            .ok_or(KernelError::InvalidState {
+                expected: "initialized",
+                actual: "uninitialized",
+            })??;
 
         let mut fm = Self {
             window_id,

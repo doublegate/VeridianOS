@@ -84,8 +84,11 @@ impl TerminalEmulator {
     /// Create a new terminal emulator
     pub fn new(width: u32, height: u32) -> Result<Self, KernelError> {
         // Create window
-        let wm = get_window_manager()?;
-        let window_id = wm.create_window(100, 100, width, height, 0)?;
+        let window_id = with_window_manager(|wm| wm.create_window(100, 100, width, height, 0))
+            .ok_or(KernelError::InvalidState {
+                expected: "initialized",
+                actual: "uninitialized",
+            })??;
 
         // Create PTY pair
         let (pty_master_id, pty_slave_id) = with_pty_manager(|manager| manager.create_pty())

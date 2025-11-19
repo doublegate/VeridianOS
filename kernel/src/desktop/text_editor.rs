@@ -55,8 +55,11 @@ impl TextEditor {
         let height = 600;
 
         // Create window
-        let wm = get_window_manager()?;
-        let window_id = wm.create_window(150, 80, width, height, 0)?;
+        let window_id = with_window_manager(|wm| wm.create_window(150, 80, width, height, 0))
+            .ok_or(KernelError::InvalidState {
+                expected: "initialized",
+                actual: "uninitialized",
+            })??;
 
         // Calculate visible area
         let char_width = 8;

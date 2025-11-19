@@ -341,9 +341,14 @@ pub fn init() -> Result<(), KernelError> {
     Ok(())
 }
 
-/// Get the global window manager
-pub fn get_window_manager() -> Result<&'static WindowManager, KernelError> {
-    WINDOW_MANAGER.with(|wm| wm).ok_or(KernelError::InvalidState {
+/// Execute a function with the window manager
+pub fn with_window_manager<R, F: FnOnce(&WindowManager) -> R>(f: F) -> Option<R> {
+    WINDOW_MANAGER.with(f)
+}
+
+/// Get the global window manager (deprecated - use with_window_manager instead)
+pub fn get_window_manager() -> Result<(), KernelError> {
+    WINDOW_MANAGER.with(|_| ()).ok_or(KernelError::InvalidState {
         expected: "initialized",
         actual: "uninitialized",
     })
