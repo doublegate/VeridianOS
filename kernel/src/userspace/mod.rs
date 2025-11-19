@@ -7,6 +7,7 @@
 extern crate alloc;
 
 pub mod loader;
+pub mod enhanced_loader;
 
 pub use loader::{load_init_process, load_user_program};
 

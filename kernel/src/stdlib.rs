@@ -2,11 +2,9 @@
 //!
 //! Core library functions and utilities for user-space applications.
 
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
+use alloc::string::String;
 use alloc::boxed::Box;
 use alloc::format;
-use core::mem;
 use core::ptr;
 use core::slice;
 
@@ -432,8 +430,8 @@ pub mod io {
 
 /// Process management functions
 pub mod process {
-    use super::*;
-    use crate::process::ProcessId;
+    
+    
     
     /// Exit current process
     pub fn exit(status: i32) -> ! {
@@ -662,7 +660,7 @@ pub mod random {
 
 /// System information
 pub mod system {
-    use alloc::vec::Vec;
+    
     use alloc::string::String;
     
     /// System information structure

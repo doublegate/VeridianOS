@@ -143,7 +143,8 @@ fn kernel_main_impl() -> ! {
     // Run bootstrap
     bootstrap::run();
 
-    // Bootstrap should not return
+    // Bootstrap should not return (unreachable but kept for safety)
+    #[allow(unreachable_code)]
     panic!("Bootstrap returned unexpectedly!");
 }
 

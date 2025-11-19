@@ -223,8 +223,8 @@ impl ThreadManager {
             drop(memory_space); // Release the lock
             
             // Create the actual Thread object
-            use crate::process::thread::{ThreadBuilder, Thread};
-            use alloc::string::ToString;
+            use crate::process::thread::Thread;
+            
             
             let kernel_stack_size = 64 * 1024; // 64KB kernel stack
             let kernel_stack_base = 0x80000000; // Kernel stack area

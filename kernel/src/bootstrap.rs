@@ -6,7 +6,7 @@
 use crate::{
     arch, cap,
     error::KernelResult,
-    fs, ipc, mm, process, sched, services,
+    fs, graphics, ipc, mm, net, perf, pkg, process, sched, security, services,
 };
 
 #[cfg(feature = "alloc")]
@@ -97,7 +97,15 @@ pub fn kernel_init() -> KernelResult<()> {
     println!("[BOOTSTRAP] Initializing capabilities...");
     cap::init();
     println!("[BOOTSTRAP] Capabilities initialized");
-    
+
+    println!("[BOOTSTRAP] Initializing security subsystem...");
+    security::init().expect("Failed to initialize security");
+    println!("[BOOTSTRAP] Security subsystem initialized");
+
+    println!("[BOOTSTRAP] Initializing performance monitoring...");
+    perf::init().expect("Failed to initialize performance monitoring");
+    println!("[BOOTSTRAP] Performance monitoring initialized");
+
     println!("[BOOTSTRAP] Initializing IPC...");
     ipc::init();
     println!("[BOOTSTRAP] IPC initialized");
@@ -162,7 +170,28 @@ pub fn kernel_init() -> KernelResult<()> {
     arch::riscv64::bootstrap::stage5_start();
     
     sched::init();
-    
+
+    // Initialize package manager
+    #[cfg(feature = "alloc")]
+    {
+        println!("[BOOTSTRAP] Initializing package manager...");
+        pkg::init();
+        println!("[BOOTSTRAP] Package manager initialized");
+    }
+
+    // Initialize network stack
+    #[cfg(feature = "alloc")]
+    {
+        println!("[BOOTSTRAP] Initializing network stack...");
+        net::init().expect("Failed to initialize network stack");
+        println!("[BOOTSTRAP] Network stack initialized");
+    }
+
+    // Initialize graphics subsystem
+    println!("[BOOTSTRAP] Initializing graphics subsystem...");
+    graphics::init().expect("Failed to initialize graphics");
+    println!("[BOOTSTRAP] Graphics subsystem initialized");
+
     #[cfg(target_arch = "x86_64")]
     arch::x86_64::bootstrap::stage5_complete();
     #[cfg(target_arch = "aarch64")]

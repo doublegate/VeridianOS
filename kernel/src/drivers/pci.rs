@@ -2,10 +2,10 @@
 //!
 //! Implements PCI bus enumeration and device management.
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
-use alloc::{vec, format};
+use alloc::format;
 use core::mem;
 use crate::services::driver_framework::{
     Bus, DeviceInfo, DeviceClass, DeviceId, DeviceStatus
@@ -120,6 +120,34 @@ pub enum PciBar {
         size: u32,
     },
     None,
+}
+
+impl PciBar {
+    /// Get memory address if this is a memory BAR
+    pub fn get_memory_address(&self) -> Option<u64> {
+        match self {
+            PciBar::Memory { address, .. } => Some(*address),
+            _ => None,
+        }
+    }
+
+    /// Get I/O port address if this is an I/O BAR
+    pub fn get_io_address(&self) -> Option<u32> {
+        match self {
+            PciBar::Io { address, .. } => Some(*address),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a memory BAR
+    pub fn is_memory(&self) -> bool {
+        matches!(self, PciBar::Memory { .. })
+    }
+
+    /// Check if this is an I/O BAR
+    pub fn is_io(&self) -> bool {
+        matches!(self, PciBar::Io { .. })
+    }
 }
 
 /// PCI device representation

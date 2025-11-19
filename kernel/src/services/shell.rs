@@ -92,7 +92,7 @@ pub struct Shell {
 impl Shell {
     /// Create a new shell
     pub fn new() -> Self {
-        let mut shell = Self {
+        let shell = Self {
             config: ShellConfig::default(),
             environment: RwLock::new(BTreeMap::new()),
             history: RwLock::new(Vec::new()),
@@ -291,7 +291,21 @@ impl Shell {
         builtins.insert("exit".into(), Box::new(ExitCommand));
         builtins.insert("logout".into(), Box::new(ExitCommand));
     }
-    
+
+    /// Register a builtin command (public API for external modules)
+    pub fn register_builtin(&self, command: Box<dyn BuiltinCommand>) {
+        let mut builtins = self.builtins.write();
+        builtins.insert(command.name().to_string(), command);
+    }
+
+    /// Register multiple builtin commands at once
+    pub fn register_builtins_batch(&self, commands: Vec<Box<dyn BuiltinCommand>>) {
+        let mut builtins = self.builtins.write();
+        for command in commands {
+            builtins.insert(command.name().to_string(), command);
+        }
+    }
+
     fn tokenize(&self, command_line: &str) -> Vec<String> {
         let mut tokens = Vec::new();
         let mut current_token = String::new();

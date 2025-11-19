@@ -2,7 +2,7 @@
 //!
 //! Provides a unified interface for different filesystem implementations.
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::sync::Arc;
 use spin::RwLock;
@@ -13,6 +13,9 @@ pub mod ramfs;
 pub mod devfs;
 pub mod procfs;
 pub mod file;
+pub mod blockfs;
+pub mod blockdev;
+pub mod pty;
 
 pub use file::{File, FileDescriptor, FileTable, OpenFlags, SeekFrom};
 
@@ -219,6 +222,7 @@ impl Vfs {
             "ramfs" => Arc::new(ramfs::RamFs::new()),
             "devfs" => Arc::new(devfs::DevFs::new()),
             "procfs" => Arc::new(procfs::ProcFs::new()),
+            "blockfs" => Arc::new(blockfs::BlockFs::new(10000, 1000)),
             _ => return Err("Unknown filesystem type"),
         };
         

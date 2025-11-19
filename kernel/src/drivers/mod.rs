@@ -7,12 +7,17 @@ pub mod usb;
 pub mod network;
 pub mod console;
 pub mod storage;
+pub mod gpu;
+pub mod e1000;
+pub mod virtio_net;
+pub mod nvme;
 
 pub use pci::{PciBus, PciDevice};
 pub use usb::{UsbBus, UsbDevice};
 pub use network::{NetworkDevice, EthernetDriver, LoopbackDriver};
 pub use console::{ConsoleDevice, ConsoleDriver, VgaConsole, SerialConsole};
 pub use storage::{StorageDevice, AtaDriver};
+pub use gpu::{GpuDriver, PixelFormat};
 
 /// Initialize all drivers
 pub fn init() {
@@ -26,6 +31,7 @@ pub fn init() {
     network::init();
     console::init();
     storage::init();
-    
+    let _ = gpu::init();
+
     crate::println!("[DRIVERS] Device drivers initialized");
 }

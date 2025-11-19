@@ -17,6 +17,7 @@ pub mod message_passing;
 pub mod perf;
 pub mod rate_limit;
 pub mod registry;
+pub mod rpc;
 pub mod shared_memory;
 pub mod sync;
 pub mod zero_copy;

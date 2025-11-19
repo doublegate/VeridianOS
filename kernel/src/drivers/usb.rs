@@ -2,12 +2,11 @@
 //!
 //! Implements USB host controller and device management.
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
 use alloc::boxed::Box;
 use alloc::{vec, format};
-use core::mem;
 use spin::{Mutex, RwLock};
 use crate::services::driver_framework::{
     Bus, DeviceInfo, DeviceClass, DeviceId, DeviceStatus
@@ -564,7 +563,7 @@ impl Bus for UsbBus {
     fn enable_device(&mut self, device: &DeviceInfo) -> Result<(), &'static str> {
         let address = device.address as u8;
         
-        if let Some(mut usb_device) = self.devices.write().get_mut(&address) {
+        if let Some(usb_device) = self.devices.write().get_mut(&address) {
             // Set configuration 1 if available
             if !usb_device.descriptor.configurations.is_empty() {
                 usb_device.current_configuration = Some(1);
@@ -578,7 +577,7 @@ impl Bus for UsbBus {
     fn disable_device(&mut self, device: &DeviceInfo) -> Result<(), &'static str> {
         let address = device.address as u8;
         
-        if let Some(mut usb_device) = self.devices.write().get_mut(&address) {
+        if let Some(usb_device) = self.devices.write().get_mut(&address) {
             usb_device.current_configuration = None;
             crate::println!("[USB] Disabled device at address {}", address);
         }

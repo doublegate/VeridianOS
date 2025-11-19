@@ -23,6 +23,7 @@ use crate::{
 
 // Re-export submodules
 pub mod metrics;
+pub mod numa;
 pub mod queue;
 pub mod scheduler;
 pub mod smp;

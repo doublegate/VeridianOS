@@ -2,8 +2,7 @@
 //!
 //! End-to-end validation of all Phase 2 components working together.
 
-use alloc::string::String;
-use crate::userland::test_runner::{run_phase2_validation, TestSuiteSummary};
+use crate::userland::test_runner::run_phase2_validation;
 
 /// Run complete Phase 2 validation
 pub fn validate_phase2_complete() -> bool {

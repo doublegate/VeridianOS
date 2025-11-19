@@ -49,6 +49,8 @@ pub fn get_allocator() -> &'static LockedUnsafeBumpAllocator {
 #[macro_use]
 pub mod print;
 
+mod intrinsics;
+
 pub mod arch;
 pub mod bootstrap;
 mod cap;
@@ -60,6 +62,7 @@ pub mod mm;
 pub mod process;
 pub mod raii;
 pub mod sched;
+pub mod sync;
 pub mod serial;
 pub mod services;
 pub mod stdlib;
@@ -70,6 +73,13 @@ pub mod userspace;
 pub mod drivers;
 pub mod userland;
 pub mod phase2_validation;
+pub mod security;
+pub mod crypto;
+pub mod pkg;
+pub mod perf;
+pub mod graphics;
+pub mod net;
+pub mod desktop;
 
 #[cfg(test)]
 mod test_config;
@@ -77,6 +87,9 @@ mod test_framework;
 
 #[cfg(test)]
 mod raii_tests;
+
+#[cfg(test)]
+mod integration_tests;
 
 pub mod bench;
 
