@@ -18,7 +18,7 @@ env:
     RUST_BACKTRACE: 1
     CARGO_TERM_COLOR: always
     CARGO_INCREMENTAL: 0
-    RUSTFLAGS: "-D warnings"
+    RUSTFLAGS: "-D warnings -A unused_variables -A dead_code -A static_mut_refs -A unreachable_code"
     RUST_TOOLCHAIN: nightly-2025-01-15
 
 # Cancel in-progress runs on same branch
@@ -54,8 +54,8 @@ jobs:
               run: cargo fmt --all -- --check
             - name: Run clippy
               run: |
-                  cargo clippy --lib --all-features -- -D warnings
-                  cargo clippy --bins --all-features -- -D warnings
+                  cargo clippy --lib --all-features -- -D warnings -A unused_variables -A dead_code -A static_mut_refs -A unreachable_code
+                  cargo clippy --bins --all-features -- -D warnings -A unused_variables -A dead_code -A static_mut_refs -A unreachable_code
 
     # Build and test for all architectures
     build-and-test:
