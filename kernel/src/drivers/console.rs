@@ -42,7 +42,7 @@ impl ConsoleChar {
     pub fn new(ascii: u8, foreground: ConsoleColor, background: ConsoleColor) -> Self {
         Self {
             ascii,
-            color: (background as u8) << 4 | (foreground as u8),
+            color: ((background as u8) << 4) | (foreground as u8),
         }
     }
 }
@@ -106,7 +106,7 @@ impl VgaConsole {
             cursor_x: 0,
             cursor_y: 0,
             cursor_visible: true,
-            default_color: (ConsoleColor::Black as u8) << 4 | (ConsoleColor::LightGray as u8),
+            default_color: ((ConsoleColor::Black as u8) << 4) | (ConsoleColor::LightGray as u8),
         }
     }
 

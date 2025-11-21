@@ -47,18 +47,24 @@ pub unsafe extern "C" fn memmove(dest: *mut c_void, src: *const c_void, n: usize
     let dest_u8 = dest as *mut u8;
     let src_u8 = src as *const u8;
 
-    if (dest_u8 as usize) < (src_u8 as usize) {
-        // Copy forward
-        for i in 0..n {
-            *dest_u8.add(i) = *src_u8.add(i);
+    use core::cmp::Ordering;
+    match (dest_u8 as usize).cmp(&(src_u8 as usize)) {
+        Ordering::Less => {
+            // Copy forward
+            for i in 0..n {
+                *dest_u8.add(i) = *src_u8.add(i);
+            }
         }
-    } else if (dest_u8 as usize) > (src_u8 as usize) {
-        // Copy backward to handle overlap
-        for i in (0..n).rev() {
-            *dest_u8.add(i) = *src_u8.add(i);
+        Ordering::Greater => {
+            // Copy backward to handle overlap
+            for i in (0..n).rev() {
+                *dest_u8.add(i) = *src_u8.add(i);
+            }
+        }
+        Ordering::Equal => {
+            // If dest == src, no-op
         }
     }
-    // If dest == src, no-op
 
     dest
 }

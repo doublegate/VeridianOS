@@ -423,10 +423,10 @@ impl ProcessServer {
 
         // Find zombies whose parents are init or dead
         for (pid, process) in processes.iter() {
-            if process.state == ProcessState::Zombie {
-                if process.ppid.0 == 1 || !processes.contains_key(&process.ppid.0) {
-                    to_remove.push(*pid);
-                }
+            if process.state == ProcessState::Zombie
+                && (process.ppid.0 == 1 || !processes.contains_key(&process.ppid.0))
+            {
+                to_remove.push(*pid);
             }
         }
 

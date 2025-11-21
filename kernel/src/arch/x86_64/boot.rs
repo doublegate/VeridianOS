@@ -29,7 +29,7 @@ pub fn early_boot_init() {
         // Enable DLAB
         outb(base + 3, 0x80);
         // Set divisor to 3 (38400 baud)
-        outb(base + 0, 0x03);
+        outb(base, 0x03);
         outb(base + 1, 0x00);
         // 8 bits, no parity, one stop bit
         outb(base + 3, 0x03);

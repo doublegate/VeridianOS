@@ -58,7 +58,7 @@ impl Ipv4Header {
         bytes[1] = self.tos;
         bytes[2..4].copy_from_slice(&self.total_length.to_be_bytes());
         bytes[4..6].copy_from_slice(&self.identification.to_be_bytes());
-        bytes[6] = self.flags << 5 | ((self.fragment_offset >> 8) as u8);
+        bytes[6] = (self.flags << 5) | ((self.fragment_offset >> 8) as u8);
         bytes[7] = (self.fragment_offset & 0xFF) as u8;
         bytes[8] = self.ttl;
         bytes[9] = self.protocol;

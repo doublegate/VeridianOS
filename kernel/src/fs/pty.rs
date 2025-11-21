@@ -131,11 +131,9 @@ impl PtyMaster {
 
         for &byte in data {
             // Handle special characters if needed
-            if flags.isig {
-                if byte == termios::VINTR_CHAR {
-                    // TODO: Send SIGINT to foreground process group
-                    continue;
-                }
+            if flags.isig && byte == termios::VINTR_CHAR {
+                // TODO: Send SIGINT to foreground process group
+                continue;
             }
 
             if input.len() < PTY_BUFFER_SIZE {
@@ -232,14 +230,12 @@ impl PtySlave {
                         output.push_back(b'\r');
                         output.push_back(b'\n');
                     }
+                } else if output.len() < PTY_BUFFER_SIZE {
+                    output.push_back(byte);
                 } else {
-                    if output.len() < PTY_BUFFER_SIZE {
-                        output.push_back(byte);
-                    } else {
-                        return Err(KernelError::ResourceExhausted {
-                            resource: "pty_output_buffer",
-                        });
-                    }
+                    return Err(KernelError::ResourceExhausted {
+                        resource: "pty_output_buffer",
+                    });
                 }
             }
 

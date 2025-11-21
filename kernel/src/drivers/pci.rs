@@ -505,8 +505,8 @@ impl Bus for PciBus {
             }
 
             let device_info = DeviceInfo {
-                id: (location.bus as u64) << 16
-                    | (location.device as u64) << 8
+                id: ((location.bus as u64) << 16)
+                    | ((location.device as u64) << 8)
                     | (location.function as u64),
                 name: format!(
                     "PCI Device {:04x}:{:04x}",

@@ -8,6 +8,12 @@ pub struct EarlySerial {
     base: u16,
 }
 
+impl Default for EarlySerial {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EarlySerial {
     /// Create early serial port
     pub const fn new() -> Self {
@@ -24,7 +30,7 @@ impl EarlySerial {
             outb(self.base + 3, 0x80);
 
             // Set divisor to 3 (lo byte) 38400 baud
-            outb(self.base + 0, 0x03);
+            outb(self.base, 0x03);
             outb(self.base + 1, 0x00); // (hi byte)
 
             // 8 bits, no parity, one stop bit
@@ -40,10 +46,10 @@ impl EarlySerial {
             outb(self.base + 4, 0x1E);
 
             // Test serial chip (send 0xAE and check if we receive it back)
-            outb(self.base + 0, 0xAE);
+            outb(self.base, 0xAE);
 
             // Check if we received the correct byte back
-            if inb(self.base + 0) != 0xAE {
+            if inb(self.base) != 0xAE {
                 // Serial port is faulty, but continue anyway
             }
 
