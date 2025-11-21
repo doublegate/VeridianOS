@@ -80,6 +80,7 @@ pub mod test_tasks;
 pub mod thread_api;
 pub mod userland;
 pub mod userspace;
+pub mod utils;
 
 #[cfg(test)]
 mod test_config;

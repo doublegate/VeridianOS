@@ -1,8 +1,28 @@
-use std::{env, path::PathBuf};
+use std::{env, path::PathBuf, process::Command};
 
 fn main() {
     let target = env::var("TARGET").expect("TARGET not set");
     let _out_dir = env::var("OUT_DIR").expect("OUT_DIR not set");
+
+    // Get git hash
+    let git_hash = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .unwrap_or_else(|| "0000000000000000000000000000000000000000".to_string());
+
+    println!("cargo:rustc-env=GIT_HASH={}", git_hash.trim());
+
+    // Get build timestamp
+    let build_timestamp = Command::new("date")
+        .args(["+%s"])
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .unwrap_or_else(|| "0".to_string());
+
+    println!("cargo:rustc-env=BUILD_TIMESTAMP={}", build_timestamp.trim());
 
     // Get the manifest directory (where Cargo.toml is)
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");

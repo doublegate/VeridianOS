@@ -18,6 +18,10 @@ use self::process::*;
 mod filesystem;
 use self::filesystem::*;
 
+// Import info syscalls module
+mod info;
+use self::info::*;
+
 // Import user space utilities
 mod userspace;
 
@@ -82,6 +86,9 @@ pub enum Syscall {
     FsMount = 70,
     FsUnmount = 71,
     FsSync = 72,
+
+    // Kernel information
+    KernelGetInfo = 80,
 }
 
 /// System call result type
@@ -225,6 +232,9 @@ fn handle_syscall(
         Syscall::FsMount => sys_mount(arg1, arg2, arg3, arg4),
         Syscall::FsUnmount => sys_unmount(arg1),
         Syscall::FsSync => sys_sync(),
+
+        // Kernel information
+        Syscall::KernelGetInfo => sys_get_kernel_info(arg1),
 
         _ => Err(SyscallError::InvalidSyscall),
     }
@@ -685,6 +695,9 @@ impl TryFrom<usize> for Syscall {
             70 => Ok(Syscall::FsMount),
             71 => Ok(Syscall::FsUnmount),
             72 => Ok(Syscall::FsSync),
+
+            // Kernel information
+            80 => Ok(Syscall::KernelGetInfo),
 
             _ => Err(()),
         }

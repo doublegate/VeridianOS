@@ -27,7 +27,6 @@ target/
 
 # Debug files
 *.dSYM/
-*.pdb
 /debug/
 
 # Test artifacts
@@ -37,9 +36,7 @@ target/
 # Build logs
 build_output.log
 
-# IDE
-.vscode/
-.idea/
+# IDE (duplicate removed - already defined above)
 
 # Kernel images
 *.bin
@@ -106,4 +103,65 @@ release-artifacts/
 *_boot.log
 *_boot_debug.log
 *.log
+
+# GitHub Actions credentials
+gha-creds-*.json
+
+# MCP server databases
+*.db
+*.sqlite
+*.sqlite3
+sqlite_mcp_server.db
+
+# Kernel/ELF artifacts
+*.elf
+*.sym
+*.map
+
+# Bootloader/GRUB artifacts
+isofiles/
+*.grub
+OVMF*.fd
+*.fd
+
+# Core dumps and memory dumps
+core
+core.*
+vgcore.*
+*.dump
+*.core
+
+# Profiling
+perf.data
+perf.data.*
+flamegraph.svg
+callgrind.out.*
+cachegrind.out.*
+massif.out.*
+*.prof
+
+# Additional editors
+.helix/
+.zed/
+.nvim/
+\#*\#
+.#*
+
+# Rust tooling
+.rust-analyzer/
+rust-project.json
+
+# Temporary and backup files
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Serial/UART logs
+serial.log
+uart.log
+
+# QEMU state files
+*.state
+*.snapshot
 
