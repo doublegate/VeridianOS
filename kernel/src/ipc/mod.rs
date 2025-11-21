@@ -44,7 +44,10 @@ pub use rate_limit::{RateLimits, RATE_LIMITER};
 #[cfg(test)]
 pub use registry::lookup_endpoint;
 #[allow(unused_imports)]
-pub use registry::{create_channel, create_endpoint, get_registry_stats, validate_capability};
+pub use registry::{
+    create_channel, create_endpoint, get_registry_stats, remove_process_endpoints,
+    validate_capability,
+};
 #[allow(unused_imports)]
 pub use shared_memory::{Permissions, SharedRegion, TransferMode};
 #[cfg(test)]

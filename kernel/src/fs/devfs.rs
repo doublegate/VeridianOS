@@ -75,8 +75,8 @@ impl VfsNode for DevNode {
             }
             "console" | "tty0" => {
                 // Write to console
-                for &byte in data {
-                    crate::print!("{}", byte as char);
+                for &_byte in data {
+                    crate::print!("{}", _byte as char);
                 }
                 Ok(data.len())
             }
@@ -271,6 +271,12 @@ impl DevFs {
         Self {
             root: Arc::new(DevRoot::new()),
         }
+    }
+}
+
+impl Default for DevFs {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

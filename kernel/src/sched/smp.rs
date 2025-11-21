@@ -1,5 +1,11 @@
 //! Symmetric multiprocessing (SMP) support
 
+#![allow(
+    clippy::fn_to_numeric_cast,
+    clippy::needless_return,
+    function_casts_as_integer
+)]
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 #[cfg(feature = "alloc")]
@@ -295,13 +301,16 @@ pub fn init() {
     }
 
     // Detect CPU topology
-    CPU_TOPOLOGY.lock().detect();
+    #[cfg(target_arch = "x86_64")]
+    {
+        CPU_TOPOLOGY.lock().detect();
 
-    // Initialize BSP (CPU 0)
-    init_cpu(0);
+        // Initialize BSP (CPU 0)
+        init_cpu(0);
 
-    // Wake up Application Processors (APs)
-    wake_up_aps();
+        // Wake up Application Processors (APs)
+        wake_up_aps();
+    }
 }
 
 /// Wake up all Application Processors

@@ -36,6 +36,7 @@ impl<T> Vec<T> {
 
 use spin::{Mutex, MutexGuard};
 
+#[allow(unused_imports)]
 use crate::{
     cap::{CapabilityId, CapabilitySpace},
     mm::{frame_allocator::FrameAllocator, PhysicalFrame},

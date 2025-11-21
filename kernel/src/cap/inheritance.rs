@@ -84,13 +84,15 @@ pub fn inherit_capabilities(
                 // Iterate through parent's L1 table
                 for cap_id in 0..256 {
                     if let Some(cap_entry) = get_capability_at(parent_space, cap_id) {
-                        match child_space.insert(
-                            cap_entry.capability,
-                            cap_entry.object.clone(),
-                            cap_entry.rights,
-                        ) {
-                            Ok(()) => inherited_count += 1,
-                            Err(_) => {} // Skip on error
+                        if child_space
+                            .insert(
+                                cap_entry.capability,
+                                cap_entry.object.clone(),
+                                cap_entry.rights,
+                            )
+                            .is_ok()
+                        {
+                            inherited_count += 1;
                         }
                     }
                 }
@@ -104,13 +106,15 @@ pub fn inherit_capabilities(
                 // Only L1 table available
                 for cap_id in 0..256 {
                     if let Some(cap_entry) = get_capability_at(parent_space, cap_id) {
-                        match child_space.insert(
-                            cap_entry.capability,
-                            cap_entry.object.clone(),
-                            cap_entry.rights,
-                        ) {
-                            Ok(()) => inherited_count += 1,
-                            Err(_) => {} // Skip on error
+                        if child_space
+                            .insert(
+                                cap_entry.capability,
+                                cap_entry.object.clone(),
+                                cap_entry.rights,
+                            )
+                            .is_ok()
+                        {
+                            inherited_count += 1;
                         }
                     }
                 }

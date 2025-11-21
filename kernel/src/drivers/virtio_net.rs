@@ -3,6 +3,9 @@
 //! Driver for paravirtualized network devices using the VirtIO protocol.
 //! Commonly used in QEMU/KVM virtual machines for high performance.
 
+// Allow dead code for VirtIO feature bits and structures not yet fully implemented
+#![allow(dead_code, clippy::needless_range_loop)]
+
 use crate::{
     error::KernelError,
     net::{

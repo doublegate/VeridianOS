@@ -19,6 +19,7 @@ use crate::{
 
 /// File entry in the browser
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct FileEntry {
     name: String,
     node_type: NodeType,
@@ -27,6 +28,7 @@ struct FileEntry {
 }
 
 /// File manager state
+#[allow(dead_code)]
 pub struct FileManager {
     /// Window ID
     window_id: WindowId,
@@ -177,7 +179,7 @@ impl FileManager {
     }
 
     /// Handle mouse click
-    fn handle_click(&mut self, x: i32, y: i32) -> Result<(), KernelError> {
+    fn handle_click(&mut self, _x: i32, y: i32) -> Result<(), KernelError> {
         // Calculate which entry was clicked
         let line_height = 20;
         let header_height = 40;

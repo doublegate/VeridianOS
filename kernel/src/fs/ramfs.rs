@@ -266,6 +266,12 @@ impl RamFs {
     }
 }
 
+impl Default for RamFs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Filesystem for RamFs {
     fn root(&self) -> Arc<dyn VfsNode> {
         self.root.clone() as Arc<dyn VfsNode>

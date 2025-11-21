@@ -2,6 +2,8 @@
 //!
 //! Implements find, grep, wc, head, tail, and other common Unix utilities.
 
+#![allow(unused_variables)]
+
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
 use super::shell::{BuiltinCommand, CommandResult, Shell};

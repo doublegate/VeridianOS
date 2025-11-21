@@ -12,6 +12,7 @@ use alloc::{boxed::Box, collections::BTreeMap, vec::Vec};
 use spin::Mutex;
 
 use super::{pcb::ProcessState, Process, ProcessId};
+#[allow(unused_imports)]
 use crate::println;
 
 /// Process table entry

@@ -80,34 +80,63 @@ pub fn serial_init() -> crate::serial::Uart16550Compat {
 }
 
 /// I/O port functions (stubs for RISC-V - no I/O ports like x86)
-#[allow(dead_code)]
+///
+/// # Safety
+///
+/// These are no-op stubs for API compatibility. Safe to call on RISC-V.
+#[allow(dead_code, clippy::missing_safety_doc)]
 pub unsafe fn outb(_port: u16, _value: u8) {
     // No-op: RISC-V doesn't have I/O ports
 }
 
-#[allow(dead_code)]
+/// Read byte from I/O port (stub for RISC-V).
+///
+/// # Safety
+///
+/// This is a no-op stub for API compatibility. Safe to call on RISC-V.
+#[allow(dead_code, clippy::missing_safety_doc)]
 pub unsafe fn inb(_port: u16) -> u8 {
     // No-op: RISC-V doesn't have I/O ports
     0
 }
 
-#[allow(dead_code)]
+/// Write word to I/O port (stub for RISC-V).
+///
+/// # Safety
+///
+/// This is a no-op stub for API compatibility. Safe to call on RISC-V.
+#[allow(dead_code, clippy::missing_safety_doc)]
 pub unsafe fn outw(_port: u16, _value: u16) {
     // No-op: RISC-V doesn't have I/O ports
 }
 
-#[allow(dead_code)]
+/// Read word from I/O port (stub for RISC-V).
+///
+/// # Safety
+///
+/// This is a no-op stub for API compatibility. Safe to call on RISC-V.
+#[allow(dead_code, clippy::missing_safety_doc)]
 pub unsafe fn inw(_port: u16) -> u16 {
     // No-op: RISC-V doesn't have I/O ports
     0
 }
 
-#[allow(dead_code)]
+/// Write long to I/O port (stub for RISC-V).
+///
+/// # Safety
+///
+/// This is a no-op stub for API compatibility. Safe to call on RISC-V.
+#[allow(dead_code, clippy::missing_safety_doc)]
 pub unsafe fn outl(_port: u16, _value: u32) {
     // No-op: RISC-V doesn't have I/O ports
 }
 
-#[allow(dead_code)]
+/// Read long from I/O port (stub for RISC-V).
+///
+/// # Safety
+///
+/// This is a no-op stub for API compatibility. Safe to call on RISC-V.
+#[allow(dead_code, clippy::missing_safety_doc)]
 pub unsafe fn inl(_port: u16) -> u32 {
     // No-op: RISC-V doesn't have I/O ports
     0

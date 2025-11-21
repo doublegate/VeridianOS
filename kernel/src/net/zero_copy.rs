@@ -361,6 +361,12 @@ impl ZeroCopyStats {
     }
 }
 
+impl Default for ZeroCopyStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Global zero-copy statistics
 pub static ZERO_COPY_STATS: ZeroCopyStats = ZeroCopyStats::new();
 

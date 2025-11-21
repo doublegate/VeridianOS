@@ -45,6 +45,11 @@ pub fn direct_print_str(s: &str) {
 
 /// Output a string to UART without using any loops or iterators
 /// (Alias for direct_print_str for compatibility)
+///
+/// # Safety
+///
+/// This is safe to call as it only writes to the UART registers.
+#[allow(clippy::missing_safety_doc)]
 pub unsafe fn uart_write_str(s: &str) {
     uart_write_bytes_asm(s.as_ptr(), s.len());
 }

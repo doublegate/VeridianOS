@@ -1,7 +1,9 @@
 //! Mandatory Access Control (MAC) system
-
+//!
 //! Provides a policy-based access control system similar to SELinux.
 //! Enforces security policies for all system operations.
+
+#![allow(clippy::needless_range_loop)]
 
 use super::AccessType;
 use crate::error::KernelError;

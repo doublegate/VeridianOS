@@ -13,6 +13,7 @@ pub use loader::{load_init_process, load_user_program};
 
 /// Initialize user-space support
 pub fn init() {
+    #[allow(unused_imports)]
     use crate::println;
     println!("[USERSPACE] Initializing user-space support...");
 

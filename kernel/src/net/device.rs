@@ -1,5 +1,7 @@
 //! Network device abstraction layer
 
+#![allow(clippy::derivable_impls)]
+
 use alloc::{boxed::Box, string::String, vec::Vec};
 
 use super::{MacAddress, Packet};
@@ -114,6 +116,12 @@ impl LoopbackDevice {
             stats: DeviceStatistics::default(),
             queue: Vec::new(),
         }
+    }
+}
+
+impl Default for LoopbackDevice {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

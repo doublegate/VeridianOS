@@ -2,6 +2,12 @@
 //!
 //! High-level thread management interface for user-space applications.
 
+#![allow(
+    clippy::type_complexity,
+    clippy::arc_with_non_send_sync,
+    clippy::manual_div_ceil
+)]
+
 use alloc::{string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -96,6 +102,8 @@ pub struct ThreadHandle {
     pub joinable: AtomicBool,
     pub cpu_time: AtomicU64,
     pub context_switches: AtomicU64,
+    /// Cancellation requested flag
+    pub cancel_requested: AtomicBool,
 }
 
 impl ThreadHandle {
@@ -109,6 +117,7 @@ impl ThreadHandle {
             exit_value: Mutex::new(None),
             cpu_time: AtomicU64::new(0),
             context_switches: AtomicU64::new(0),
+            cancel_requested: AtomicBool::new(false),
             attributes,
         }
     }
@@ -142,6 +151,16 @@ impl ThreadHandle {
     pub fn get_context_switches(&self) -> u64 {
         self.context_switches.load(Ordering::Relaxed)
     }
+
+    /// Check if cancellation was requested
+    pub fn is_cancel_requested(&self) -> bool {
+        self.cancel_requested.load(Ordering::Acquire)
+    }
+
+    /// Request cancellation
+    pub fn request_cancel(&self) {
+        self.cancel_requested.store(true, Ordering::Release);
+    }
 }
 
 /// Thread creation parameters
@@ -173,6 +192,12 @@ unsafe impl Send for ThreadManager {}
 // SAFETY: ThreadManager is safe to share between threads
 // All mutations are protected by atomic operations or RwLock
 unsafe impl Sync for ThreadManager {}
+
+impl Default for ThreadManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl ThreadManager {
     /// Create a new thread manager
@@ -316,13 +341,23 @@ impl ThreadManager {
     }
 
     /// Cancel a thread
+    ///
+    /// Sets the cancellation flag on the thread. The thread should check
+    /// is_cancel_requested() periodically and exit gracefully when cancelled.
+    /// If the thread is blocked, it will be moved to Ready state to allow
+    /// it to process the cancellation.
     pub fn cancel_thread(&self, thread_id: ThreadId) -> Result<(), &'static str> {
         let handle = self.get_thread(thread_id).ok_or("Thread not found")?;
 
-        handle.set_state(ThreadState::Terminated);
+        // Set cancellation flag - thread should check this and exit gracefully
+        handle.request_cancel();
 
-        // TODO: Send cancellation signal to thread
-        crate::println!("[THREAD] Cancelled thread {}", thread_id.0);
+        // If thread is blocked, wake it up so it can process cancellation
+        if handle.get_state() == ThreadState::Blocked {
+            handle.set_state(ThreadState::Ready);
+        }
+
+        crate::println!("[THREAD] Cancellation requested for thread {}", thread_id.0);
 
         Ok(())
     }
@@ -341,6 +376,7 @@ impl ThreadManager {
     }
 
     /// Set thread priority
+    #[allow(unused_variables)]
     pub fn set_thread_priority(
         &self,
         thread_id: ThreadId,
@@ -350,7 +386,7 @@ impl ThreadManager {
 
         // Update process thread priority
         if let Some(process) = get_process(handle.process_id) {
-            if let Some(thread) = process.get_thread(thread_id) {
+            if let Some(_thread) = process.get_thread(thread_id) {
                 // Update thread priority (stored in the thread object)
                 // Note: In a real implementation, we'd need mutable access
                 // For now, just track it in the handle attributes
@@ -557,6 +593,7 @@ static mut THREAD_MANAGER_PTR: *mut ThreadManager = core::ptr::null_mut();
 
 /// Initialize the thread manager
 pub fn init() {
+    #[allow(unused_imports)]
     use crate::println;
 
     unsafe {
@@ -666,9 +703,30 @@ pub fn yield_thread() {
 }
 
 /// Sleep for a number of milliseconds
+///
+/// Uses timer-based sleep to avoid busy-waiting. The thread will yield
+/// to the scheduler while waiting for the sleep duration to elapse.
 pub fn sleep_ms(ms: u64) {
-    // TODO: Implement proper sleep with timer
-    for _ in 0..(ms * 1000) {
-        core::hint::spin_loop();
+    use crate::arch::timer::get_ticks;
+
+    // Get current time in ticks
+    let start_ticks = get_ticks();
+
+    // Convert milliseconds to approximate tick count
+    // Assuming ~1000 ticks per second (typical timer frequency)
+    // This may vary by architecture - adjust tick_rate as needed
+    const TICKS_PER_MS: u64 = 1;
+    let target_ticks = ms.saturating_mul(TICKS_PER_MS);
+    let end_ticks = start_ticks.saturating_add(target_ticks);
+
+    // Sleep loop - yield to scheduler while waiting
+    while get_ticks() < end_ticks {
+        // Yield to allow other threads to run
+        yield_thread();
+
+        // Brief spin to avoid hammering the scheduler
+        for _ in 0..100 {
+            core::hint::spin_loop();
+        }
     }
 }

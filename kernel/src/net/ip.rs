@@ -1,5 +1,7 @@
 //! IP layer implementation
 
+#![allow(static_mut_refs)]
+
 use alloc::vec::Vec;
 
 use super::{IpAddress, Ipv4Address};

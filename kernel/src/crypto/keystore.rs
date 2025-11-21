@@ -2,6 +2,8 @@
 //!
 //! Secure storage and management of cryptographic keys.
 
+#![allow(static_mut_refs)]
+
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 use spin::RwLock;

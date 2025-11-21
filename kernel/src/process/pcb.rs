@@ -14,6 +14,7 @@ use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use spin::Mutex;
 
 use super::thread::{Thread, ThreadId};
+#[allow(unused_imports)]
 use crate::{
     cap::{CapabilityId, CapabilitySpace},
     fs::file::FileTable,
@@ -124,6 +125,16 @@ pub struct Process {
 
     /// Group ID (for future use)
     pub gid: u32,
+
+    /// Signal handlers (signal number -> handler action)
+    /// 0 = default, 1 = ignore, other values = handler address
+    pub signal_handlers: Mutex<[u64; 32]>,
+
+    /// Pending signals bitmap
+    pub pending_signals: AtomicU64,
+
+    /// Signal mask (blocked signals)
+    pub signal_mask: AtomicU64,
 }
 
 /// Memory usage statistics
@@ -164,6 +175,9 @@ impl Process {
             created_at: crate::arch::timer::get_ticks(),
             uid: 0,
             gid: 0,
+            signal_handlers: Mutex::new([0u64; 32]),
+            pending_signals: AtomicU64::new(0),
+            signal_mask: AtomicU64::new(0),
         }
     }
 
@@ -280,6 +294,95 @@ impl Process {
     #[cfg(feature = "alloc")]
     pub fn get_main_thread_mut(&mut self) -> Option<&mut Thread> {
         self.threads.get_mut().values_mut().next()
+    }
+
+    /// Reset all signal handlers to default (used during exec)
+    pub fn reset_signal_handlers(&self) {
+        let mut handlers = self.signal_handlers.lock();
+        for handler in handlers.iter_mut() {
+            *handler = 0; // 0 = default action
+        }
+        // Clear pending signals that were ignored
+        self.pending_signals.store(0, Ordering::Release);
+    }
+
+    /// Set a signal handler
+    /// handler: 0 = default, 1 = ignore, other = handler address
+    pub fn set_signal_handler(&self, signum: usize, handler: u64) -> Result<u64, &'static str> {
+        if signum >= 32 {
+            return Err("Invalid signal number");
+        }
+        // SIGKILL (9) and SIGSTOP (19) cannot be caught or ignored
+        if signum == 9 || signum == 19 {
+            return Err("Cannot change handler for SIGKILL or SIGSTOP");
+        }
+        let mut handlers = self.signal_handlers.lock();
+        let old = handlers[signum];
+        handlers[signum] = handler;
+        Ok(old)
+    }
+
+    /// Get a signal handler
+    pub fn get_signal_handler(&self, signum: usize) -> Option<u64> {
+        if signum >= 32 {
+            return None;
+        }
+        Some(self.signal_handlers.lock()[signum])
+    }
+
+    /// Send a signal to this process
+    pub fn send_signal(&self, signum: usize) -> Result<(), &'static str> {
+        if signum >= 32 {
+            return Err("Invalid signal number");
+        }
+        // Set the signal bit in pending signals
+        let mask = 1u64 << signum;
+        self.pending_signals.fetch_or(mask, Ordering::AcqRel);
+        Ok(())
+    }
+
+    /// Check if a signal is pending
+    pub fn is_signal_pending(&self, signum: usize) -> bool {
+        if signum >= 32 {
+            return false;
+        }
+        let pending = self.pending_signals.load(Ordering::Acquire);
+        let mask = self.signal_mask.load(Ordering::Acquire);
+        let effective_pending = pending & !mask;
+        (effective_pending & (1u64 << signum)) != 0
+    }
+
+    /// Get the next pending signal (lowest numbered, unmasked)
+    pub fn get_next_pending_signal(&self) -> Option<usize> {
+        let pending = self.pending_signals.load(Ordering::Acquire);
+        let mask = self.signal_mask.load(Ordering::Acquire);
+        let effective_pending = pending & !mask;
+        if effective_pending == 0 {
+            return None;
+        }
+        // Find lowest set bit
+        Some(effective_pending.trailing_zeros() as usize)
+    }
+
+    /// Clear a pending signal
+    pub fn clear_pending_signal(&self, signum: usize) {
+        if signum < 32 {
+            let mask = !(1u64 << signum);
+            self.pending_signals.fetch_and(mask, Ordering::AcqRel);
+        }
+    }
+
+    /// Set signal mask (returns old mask)
+    pub fn set_signal_mask(&self, new_mask: u64) -> u64 {
+        // Cannot mask SIGKILL (9) or SIGSTOP (19)
+        let protected = (1u64 << 9) | (1u64 << 19);
+        let actual_mask = new_mask & !protected;
+        self.signal_mask.swap(actual_mask, Ordering::AcqRel)
+    }
+
+    /// Get current signal mask
+    pub fn get_signal_mask(&self) -> u64 {
+        self.signal_mask.load(Ordering::Acquire)
     }
 }
 

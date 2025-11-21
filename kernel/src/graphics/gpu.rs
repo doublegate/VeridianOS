@@ -7,7 +7,9 @@
 //! - **Vulkan**: Modern cross-platform graphics API
 //! - **OpenGL ES**: Embedded graphics (compatibility)
 //! - **Compute**: GPU compute shaders for parallel processing
-//!
+
+// Allow dead code for GPU features pending full implementation
+#![allow(dead_code)]
 //! ## Architecture
 //!
 //! - Command buffers: Record rendering/compute commands

@@ -8,6 +8,9 @@
 //! - Direct rendering: Clients draw directly to surfaces
 //! - Asynchronous updates: No blocking on server
 //! - Security: No global coordinate space, isolated clients
+
+// Allow dead code for Wayland protocol structures not yet fully implemented
+#![allow(dead_code)]
 //! - Efficiency: Minimal data copies, GPU acceleration
 //!
 //! ## Core Concepts

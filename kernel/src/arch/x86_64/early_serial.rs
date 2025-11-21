@@ -1,3 +1,5 @@
+#![allow(clippy::macro_metavars_in_unsafe)]
+
 // Early serial output for x86_64 boot debugging
 // This bypasses lazy_static to allow output before static initialization
 
@@ -122,8 +124,10 @@ pub fn init() {
 
 /// Early print macro for debugging
 #[macro_export]
+#[allow(clippy::macro_metavars_in_unsafe)]
 macro_rules! early_print {
     ($($arg:tt)*) => {
+        #[allow(clippy::macro_metavars_in_unsafe)]
         unsafe {
             use core::fmt::Write;
             let serial = core::ptr::addr_of_mut!($crate::arch::x86_64::early_serial::EARLY_SERIAL);

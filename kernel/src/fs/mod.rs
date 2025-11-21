@@ -2,7 +2,9 @@
 //!
 //! Provides a unified interface for different filesystem implementations.
 
-use alloc::{collections::BTreeMap, format, string::String, sync::Arc, vec::Vec};
+#![allow(clippy::should_implement_trait)]
+
+use alloc::{collections::BTreeMap, format, string::String, sync::Arc, vec, vec::Vec};
 
 use spin::RwLock;
 
@@ -194,7 +196,15 @@ impl Vfs {
             cwd: String::from("/"),
         }
     }
+}
 
+impl Default for Vfs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Vfs {
     /// Mount the root filesystem
     pub fn mount_root(&mut self, fs: Arc<dyn Filesystem>) -> Result<(), &'static str> {
         if self.root_fs.is_some() {
@@ -402,6 +412,7 @@ pub fn get_vfs() -> &'static RwLock<Vfs> {
 
 /// Initialize the VFS with a RAM filesystem as root
 pub fn init() {
+    #[allow(unused_imports)]
     use crate::println;
 
     println!("[VFS] Initializing Virtual Filesystem...");
@@ -542,4 +553,116 @@ pub fn init() {
     {
         println!("[VFS] Skipping VFS initialization (no alloc)");
     }
+}
+
+/// Read the entire contents of a file into a Vec<u8>
+///
+/// This is a convenience function that opens a file, reads its entire
+/// contents into memory, and returns the data as a byte vector.
+///
+/// # Arguments
+/// * `path` - The filesystem path to the file
+///
+/// # Returns
+/// * `Ok(Vec<u8>)` - The file contents on success
+/// * `Err(&'static str)` - An error message on failure
+pub fn read_file(path: &str) -> Result<Vec<u8>, &'static str> {
+    let vfs = get_vfs().read();
+
+    // Resolve the path to a VFS node
+    let node = vfs.resolve_path(path)?;
+
+    // Get file metadata to determine size
+    let metadata = node.metadata()?;
+
+    // Ensure it's a file, not a directory
+    if metadata.node_type != NodeType::File {
+        return Err("Not a file");
+    }
+
+    // Allocate buffer for file contents
+    let size = metadata.size;
+    let mut buffer = vec![0u8; size];
+
+    // Read the entire file
+    let bytes_read = node.read(0, &mut buffer)?;
+
+    // Truncate to actual bytes read (in case file changed)
+    buffer.truncate(bytes_read);
+
+    Ok(buffer)
+}
+
+/// Write data to a file, creating it if it doesn't exist
+///
+/// # Arguments
+/// * `path` - The filesystem path to the file
+/// * `data` - The data to write
+///
+/// # Returns
+/// * `Ok(usize)` - The number of bytes written on success
+/// * `Err(&'static str)` - An error message on failure
+pub fn write_file(path: &str, data: &[u8]) -> Result<usize, &'static str> {
+    let vfs = get_vfs().read();
+
+    // Try to resolve the path first
+    let node = match vfs.resolve_path(path) {
+        Ok(node) => node,
+        Err(_) => {
+            // File doesn't exist, try to create it
+            // Split path into parent directory and filename
+            let (parent_path, filename) = if let Some(pos) = path.rfind('/') {
+                if pos == 0 {
+                    ("/", &path[1..])
+                } else {
+                    (&path[..pos], &path[pos + 1..])
+                }
+            } else {
+                return Err("Invalid path");
+            };
+
+            // Get parent directory
+            let parent = vfs.resolve_path(parent_path)?;
+
+            // Create the file
+            parent.create(filename, Permissions::default())?
+        }
+    };
+
+    // Truncate the file first
+    node.truncate(0)?;
+
+    // Write the data
+    node.write(0, data)
+}
+
+/// Check if a file exists
+pub fn file_exists(path: &str) -> bool {
+    let vfs = get_vfs().read();
+    vfs.resolve_path(path).is_ok()
+}
+
+/// Get file size without reading contents
+pub fn file_size(path: &str) -> Result<usize, &'static str> {
+    let vfs = get_vfs().read();
+    let node = vfs.resolve_path(path)?;
+    let metadata = node.metadata()?;
+    Ok(metadata.size)
+}
+
+/// Copy a file from one location to another
+pub fn copy_file(src_path: &str, dst_path: &str) -> Result<usize, &'static str> {
+    let data = read_file(src_path)?;
+    write_file(dst_path, &data)
+}
+
+/// Append data to a file
+pub fn append_file(path: &str, data: &[u8]) -> Result<usize, &'static str> {
+    let vfs = get_vfs().read();
+    let node = vfs.resolve_path(path)?;
+    let metadata = node.metadata()?;
+    let current_size = metadata.size;
+
+    // Write at the end of the file
+    node.write(current_size, data)
 }

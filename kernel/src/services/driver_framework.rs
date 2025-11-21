@@ -2,6 +2,8 @@
 //!
 //! Provides driver registration, device enumeration, and driver-device binding.
 
+#![allow(clippy::unwrap_or_default)]
+
 use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -161,7 +163,15 @@ impl DriverFramework {
             irq_handlers: RwLock::new(BTreeMap::new()),
         }
     }
+}
 
+impl Default for DriverFramework {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DriverFramework {
     /// Register a driver
     pub fn register_driver(&self, driver: Box<dyn Driver>) -> Result<(), &'static str> {
         let name: String = driver.name().into();
@@ -546,6 +556,7 @@ static mut DRIVER_FRAMEWORK_PTR: *mut DriverFramework = core::ptr::null_mut();
 
 /// Initialize the driver framework
 pub fn init() {
+    #[allow(unused_imports)]
     use crate::println;
 
     unsafe {

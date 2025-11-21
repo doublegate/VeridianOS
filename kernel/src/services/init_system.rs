@@ -3,6 +3,8 @@
 //! The init process (PID 1) that starts all system services and manages the
 //! system lifecycle.
 
+#![allow(clippy::if_same_then_else)]
+
 use alloc::{collections::BTreeMap, string::String, vec, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -119,7 +121,15 @@ impl InitSystem {
             monitoring_active: AtomicBool::new(false),
         }
     }
+}
 
+impl Default for InitSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl InitSystem {
     /// Initialize the init system
     pub fn initialize(&self) -> Result<(), &'static str> {
         crate::println!("[INIT] Initializing init system...");
@@ -587,6 +597,7 @@ static mut INIT_SYSTEM_PTR: *mut InitSystem = core::ptr::null_mut();
 
 /// Initialize the init system
 pub fn init() {
+    #[allow(unused_imports)]
     use crate::println;
 
     unsafe {

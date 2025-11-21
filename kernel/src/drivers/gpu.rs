@@ -3,6 +3,9 @@
 //! Supports VBE (VESA BIOS Extensions) and GOP (Graphics Output Protocol) for
 //! framebuffer access
 
+// Allow dead code for GPU mode info fields not yet fully utilized
+#![allow(dead_code, static_mut_refs)]
+
 use core::slice;
 
 use crate::{error::KernelError, graphics::Color};

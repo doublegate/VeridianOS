@@ -2,6 +2,7 @@
 
 use core::panic::PanicInfo;
 
+#[allow(unused_imports)]
 use crate::println;
 
 pub fn arch_early_init() {

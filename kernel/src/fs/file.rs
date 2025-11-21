@@ -215,10 +215,18 @@ impl File {
     }
 }
 
+/// File descriptor entry with flags
+pub struct FileEntry {
+    /// The file itself
+    pub file: Arc<File>,
+    /// Close-on-exec flag
+    pub cloexec: bool,
+}
+
 /// File descriptor table for a process
 pub struct FileTable {
     /// File descriptors
-    files: RwLock<Vec<Option<Arc<File>>>>,
+    files: RwLock<Vec<Option<FileEntry>>>,
 
     /// Next available file descriptor
     next_fd: RwLock<FileDescriptor>,
@@ -239,16 +247,35 @@ impl FileTable {
             next_fd: RwLock::new(3),
         }
     }
+}
 
+impl Default for FileTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FileTable {
     /// Open a file and return a file descriptor
     pub fn open(&self, file: Arc<File>) -> Result<FileDescriptor, &'static str> {
+        self.open_with_flags(file, false)
+    }
+
+    /// Open a file with close-on-exec flag and return a file descriptor
+    pub fn open_with_flags(
+        &self,
+        file: Arc<File>,
+        cloexec: bool,
+    ) -> Result<FileDescriptor, &'static str> {
         let mut files = self.files.write();
         let mut next_fd = self.next_fd.write();
+
+        let entry = FileEntry { file, cloexec };
 
         // Find an empty slot
         for (fd, slot) in files.iter_mut().enumerate() {
             if slot.is_none() {
-                *slot = Some(file);
+                *slot = Some(entry);
                 return Ok(fd);
             }
         }
@@ -259,7 +286,7 @@ impl FileTable {
             return Err("Too many open files");
         }
 
-        files.push(Some(file));
+        files.push(Some(entry));
         *next_fd += 1;
         Ok(fd)
     }
@@ -267,7 +294,16 @@ impl FileTable {
     /// Get a file by descriptor
     pub fn get(&self, fd: FileDescriptor) -> Option<Arc<File>> {
         let files = self.files.read();
-        files.get(fd)?.as_ref().cloned()
+        files.get(fd)?.as_ref().map(|entry| entry.file.clone())
+    }
+
+    /// Get a file entry by descriptor (includes flags)
+    pub fn get_entry(&self, fd: FileDescriptor) -> Option<(Arc<File>, bool)> {
+        let files = self.files.read();
+        files
+            .get(fd)?
+            .as_ref()
+            .map(|entry| (entry.file.clone(), entry.cloexec))
     }
 
     /// Close a file descriptor
@@ -278,9 +314,9 @@ impl FileTable {
             return Err("Invalid file descriptor");
         }
 
-        if let Some(file) = files[fd].take() {
+        if let Some(entry) = files[fd].take() {
             // Decrement reference count
-            if file.dec_ref() == 0 {
+            if entry.file.dec_ref() == 0 {
                 // Last reference, file will be dropped
             }
             Ok(())
@@ -293,11 +329,28 @@ impl FileTable {
     pub fn dup(&self, fd: FileDescriptor) -> Result<FileDescriptor, &'static str> {
         let file = self.get(fd).ok_or("Invalid file descriptor")?;
         file.inc_ref();
+        // Duplicated FDs don't inherit close-on-exec
         self.open(file)
+    }
+
+    /// Duplicate a file descriptor with close-on-exec flag
+    pub fn dup_cloexec(&self, fd: FileDescriptor) -> Result<FileDescriptor, &'static str> {
+        let file = self.get(fd).ok_or("Invalid file descriptor")?;
+        file.inc_ref();
+        self.open_with_flags(file, true)
     }
 
     /// Replace a file descriptor with another
     pub fn dup2(&self, old_fd: FileDescriptor, new_fd: FileDescriptor) -> Result<(), &'static str> {
+        // If old_fd == new_fd, just return success without doing anything
+        if old_fd == new_fd {
+            // Verify old_fd is valid
+            if self.get(old_fd).is_none() {
+                return Err("Invalid file descriptor");
+            }
+            return Ok(());
+        }
+
         let file = self.get(old_fd).ok_or("Invalid file descriptor")?;
         file.inc_ref();
 
@@ -310,11 +363,136 @@ impl FileTable {
 
         // Close existing file at new_fd if any
         if let Some(existing) = files[new_fd].take() {
-            existing.dec_ref();
+            existing.file.dec_ref();
         }
 
-        // Set new file
-        files[new_fd] = Some(file);
+        // Set new file (dup2 doesn't preserve close-on-exec)
+        files[new_fd] = Some(FileEntry {
+            file,
+            cloexec: false,
+        });
         Ok(())
+    }
+
+    /// Replace a file descriptor with another, setting close-on-exec flag
+    pub fn dup3(
+        &self,
+        old_fd: FileDescriptor,
+        new_fd: FileDescriptor,
+        cloexec: bool,
+    ) -> Result<(), &'static str> {
+        // dup3 with same fds is an error (unlike dup2)
+        if old_fd == new_fd {
+            return Err("old_fd and new_fd cannot be the same");
+        }
+
+        let file = self.get(old_fd).ok_or("Invalid file descriptor")?;
+        file.inc_ref();
+
+        let mut files = self.files.write();
+
+        // Ensure files vector is large enough
+        while files.len() <= new_fd {
+            files.push(None);
+        }
+
+        // Close existing file at new_fd if any
+        if let Some(existing) = files[new_fd].take() {
+            existing.file.dec_ref();
+        }
+
+        // Set new file with specified close-on-exec flag
+        files[new_fd] = Some(FileEntry { file, cloexec });
+        Ok(())
+    }
+
+    /// Set close-on-exec flag for a file descriptor
+    pub fn set_cloexec(&self, fd: FileDescriptor, cloexec: bool) -> Result<(), &'static str> {
+        let mut files = self.files.write();
+
+        if fd >= files.len() {
+            return Err("Invalid file descriptor");
+        }
+
+        if let Some(entry) = files[fd].as_mut() {
+            entry.cloexec = cloexec;
+            Ok(())
+        } else {
+            Err("File descriptor not open")
+        }
+    }
+
+    /// Get close-on-exec flag for a file descriptor
+    pub fn get_cloexec(&self, fd: FileDescriptor) -> Result<bool, &'static str> {
+        let files = self.files.read();
+
+        if fd >= files.len() {
+            return Err("Invalid file descriptor");
+        }
+
+        if let Some(entry) = files[fd].as_ref() {
+            Ok(entry.cloexec)
+        } else {
+            Err("File descriptor not open")
+        }
+    }
+
+    /// Close all file descriptors marked with close-on-exec
+    /// Called during exec() system call
+    pub fn close_on_exec(&self) {
+        let mut files = self.files.write();
+
+        for slot in files.iter_mut() {
+            if let Some(entry) = slot.as_ref() {
+                if entry.cloexec {
+                    // Close this descriptor
+                    if let Some(entry) = slot.take() {
+                        entry.file.dec_ref();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get the number of open file descriptors
+    pub fn count_open(&self) -> usize {
+        let files = self.files.read();
+        files.iter().filter(|slot| slot.is_some()).count()
+    }
+
+    /// Clone file table for fork()
+    /// All file descriptors are duplicated with same flags
+    pub fn clone_for_fork(&self) -> Self {
+        let files = self.files.read();
+        let next_fd = *self.next_fd.read();
+
+        let mut new_files = Vec::with_capacity(files.len());
+        for slot in files.iter() {
+            if let Some(entry) = slot {
+                entry.file.inc_ref();
+                new_files.push(Some(FileEntry {
+                    file: entry.file.clone(),
+                    cloexec: entry.cloexec,
+                }));
+            } else {
+                new_files.push(None);
+            }
+        }
+
+        Self {
+            files: RwLock::new(new_files),
+            next_fd: RwLock::new(next_fd),
+        }
+    }
+
+    /// Close all open file descriptors
+    pub fn close_all(&self) {
+        let mut files = self.files.write();
+
+        for slot in files.iter_mut() {
+            if let Some(entry) = slot.take() {
+                entry.file.dec_ref();
+            }
+        }
     }
 }

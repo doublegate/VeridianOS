@@ -2,6 +2,8 @@
 //!
 //! Re-exports userland test programs and infrastructure for kernel integration.
 
+#![allow(clippy::type_complexity)]
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -118,6 +120,12 @@ pub mod test_runner {
         pub passed: usize,
         pub failed: usize,
         pub errors: Vec<String>,
+    }
+
+    impl Default for TestSuiteSummary {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl TestSuiteSummary {

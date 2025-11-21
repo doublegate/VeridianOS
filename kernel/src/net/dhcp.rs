@@ -3,6 +3,9 @@
 //! Implements DHCPv4 protocol for obtaining IP addresses and network
 //! configuration.
 
+// Allow dead code for DHCP option codes and methods not yet fully utilized
+#![allow(dead_code)]
+
 use alloc::vec::Vec;
 use core::convert::TryInto;
 
@@ -331,14 +334,14 @@ impl DhcpClient {
     }
 
     /// Process DHCP ACK
-    pub fn process_ack(&mut self, packet: &DhcpPacket) -> Result<(), KernelError> {
+    pub fn process_ack(&mut self, _packet: &DhcpPacket) -> Result<(), KernelError> {
         // TODO: Parse ACK, configure interface
         self.state = DhcpState::Bound;
 
         println!("[DHCP] Received ACK - IP address configured");
         println!(
             "[DHCP] IP: {}.{}.{}.{}",
-            packet.yiaddr.0[0], packet.yiaddr.0[1], packet.yiaddr.0[2], packet.yiaddr.0[3]
+            _packet.yiaddr.0[0], _packet.yiaddr.0[1], _packet.yiaddr.0[2], _packet.yiaddr.0[3]
         );
 
         Ok(())
@@ -350,10 +353,10 @@ impl DhcpClient {
 
         // Create DISCOVER packet
         let discover = self.create_discover();
-        let discover_bytes = discover.to_bytes();
+        let _discover_bytes = discover.to_bytes();
 
         // TODO: Send via UDP to 255.255.255.255:67
-        println!("[DHCP] Sending DISCOVER ({} bytes)", discover_bytes.len());
+        println!("[DHCP] Sending DISCOVER ({} bytes)", _discover_bytes.len());
 
         self.state = DhcpState::Selecting;
 

@@ -2,7 +2,7 @@
 
 use core::panic::PanicInfo;
 
-use crate::{early_println, println};
+use crate::early_println;
 
 pub fn arch_early_init() {
     // Disable interrupts immediately

@@ -7,7 +7,7 @@
 //! - CPU affinity
 //! - Context switching for x86_64, AArch64, and RISC-V
 
-#![allow(dead_code)]
+#![allow(dead_code, function_casts_as_integer)]
 
 use core::{
     ptr::NonNull,
@@ -289,6 +289,76 @@ pub fn block_on_ipc(endpoint: u64) {
 
         // Force a reschedule
         sched.schedule();
+    }
+}
+
+/// Block a process (for signal handling like SIGSTOP)
+/// Sets process and thread states to Blocked and triggers reschedule
+pub fn block_process(pid: ProcessId) {
+    // First try to find the process in wait queues or as current task
+    #[cfg(feature = "alloc")]
+    {
+        // Check if this is the current task
+        let scheduler = scheduler::current_scheduler();
+        let sched = scheduler.lock();
+
+        if let Some(current_task) = sched.current() {
+            unsafe {
+                if (*current_task.as_ptr()).pid == pid {
+                    // This is the current task - block it
+                    let task_mut = current_task.as_ptr();
+                    (*task_mut).state = ProcessState::Blocked;
+
+                    // Update thread state if linked
+                    if let Some(thread_ptr) = (*task_mut).thread_ref {
+                        thread_ptr
+                            .as_ref()
+                            .set_state(crate::process::thread::ThreadState::Blocked);
+                    }
+
+                    drop(sched);
+                    // Force a reschedule
+                    SCHEDULER.lock().schedule();
+                    return;
+                }
+            }
+        }
+        drop(sched);
+
+        // Look up process in the process table and block all its threads
+        if let Some(process) = crate::process::table::get_process_mut(pid) {
+            // Update process state
+            process
+                .state
+                .store(ProcessState::Blocked as u32, Ordering::Release);
+
+            // Block all threads in the process
+            let threads = process.threads.lock();
+            for (_tid, thread) in threads.iter() {
+                thread.set_state(crate::process::thread::ThreadState::Blocked);
+
+                // If thread has a task, update task state too
+                if let Some(task_ptr) = thread.get_task_ptr() {
+                    unsafe {
+                        (*task_ptr.as_ptr()).state = ProcessState::Blocked;
+                    }
+                }
+            }
+
+            #[cfg(not(target_arch = "aarch64"))]
+            println!("[SCHED] Blocked process {} and all its threads", pid.0);
+
+            #[cfg(target_arch = "aarch64")]
+            unsafe {
+                use crate::arch::aarch64::direct_uart::uart_write_str;
+                uart_write_str("[SCHED] Blocked process and all its threads\n");
+            }
+        }
+    }
+
+    #[cfg(not(feature = "alloc"))]
+    {
+        let _ = pid;
     }
 }
 
@@ -608,37 +678,37 @@ pub fn init() {
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     return;
 
-    // Create idle task for BSP
-    #[cfg(feature = "alloc")]
+    // Create idle task for BSP (x86_64 only)
+    #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
     {
         extern crate alloc;
         use alloc::{boxed::Box, string::String};
 
         // Allocate stack for idle task (8KB)
         const IDLE_STACK_SIZE: usize = 8192;
-        let idle_stack = Box::leak(Box::new([0u8; IDLE_STACK_SIZE]));
-        let idle_stack_top = idle_stack.as_ptr() as usize + IDLE_STACK_SIZE;
+        let _idle_stack = Box::leak(Box::new([0u8; IDLE_STACK_SIZE]));
+        let _idle_stack_top = _idle_stack.as_ptr() as usize + IDLE_STACK_SIZE;
 
         // Get kernel page table
-        let kernel_page_table = crate::mm::get_kernel_page_table();
+        let _kernel_page_table = crate::mm::get_kernel_page_table();
 
         // Create idle task
-        let mut idle_task = Box::new(Task::new(
+        let mut _idle_task = Box::new(Task::new(
             ProcessId(0), // PID 0 for idle
             ThreadId(0),  // TID 0
             String::from("idle"),
             idle_task_entry as usize,
-            idle_stack_top,
-            kernel_page_table,
+            _idle_stack_top,
+            _kernel_page_table,
         ));
 
         // Set as idle priority
-        idle_task.priority = Priority::Idle;
-        idle_task.sched_class = SchedClass::Idle;
-        idle_task.sched_policy = SchedPolicy::Idle;
+        _idle_task.priority = Priority::Idle;
+        _idle_task.sched_class = SchedClass::Idle;
+        _idle_task.sched_policy = SchedPolicy::Idle;
 
         // Get raw pointer to idle task
-        let idle_ptr = NonNull::new(Box::leak(idle_task) as *mut _).unwrap();
+        let idle_ptr = NonNull::new(Box::leak(_idle_task) as *mut _).unwrap();
 
         // Initialize scheduler with idle task
         SCHEDULER.lock().init(idle_ptr);
@@ -653,16 +723,11 @@ pub fn init() {
         }
     }
 
-    // Set up timer interrupt for preemption
-    setup_preemption_timer();
-
-    #[cfg(not(target_arch = "aarch64"))]
-    println!("[SCHED] Scheduler initialized");
-
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        use crate::arch::aarch64::direct_uart::uart_write_str;
-        uart_write_str("[SCHED] Scheduler initialized\n");
+    // Set up timer interrupt for preemption (x86_64 only)
+    #[cfg(target_arch = "x86_64")]
+    {
+        setup_preemption_timer();
+        println!("[SCHED] Scheduler initialized");
     }
 }
 
@@ -748,8 +813,8 @@ pub fn start() -> ! {
         }
     }
 
-    // Get the scheduler and check we have a current task
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    // x86_64 only: Get the scheduler and check we have a current task
+    #[cfg(target_arch = "x86_64")]
     {
         let scheduler = SCHEDULER.lock();
         // Make sure we have a current task
@@ -758,19 +823,12 @@ pub fn start() -> ! {
         }
     } // Drop the lock here to avoid deadlock
 
-    // Start running tasks
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    // Start running tasks (x86_64 only)
+    #[cfg(target_arch = "x86_64")]
     println!("[SCHED] Starting scheduler loop...");
 
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        use crate::arch::aarch64::direct_uart::uart_write_str;
-        uart_write_str("[SCHED] Starting scheduler loop...\n");
-    }
-
-    // Skip println for RISC-V to avoid serial issues
-
-    // The scheduler loop
+    // The scheduler loop (x86_64 only)
+    #[cfg(target_arch = "x86_64")]
     #[allow(clippy::never_loop)]
     loop {
         // Get the current task and execute it
@@ -781,49 +839,12 @@ pub fn start() -> ! {
             let task = unsafe { &*task_ptr.as_ptr() };
             let _task_name = task.name.clone();
 
-            // Match on the context type and load it
+            // Match on the context type and load it (x86_64 only)
             match &task.context {
-                #[cfg(target_arch = "x86_64")]
                 crate::sched::task::TaskContext::X86_64(ctx) => {
-                    #[cfg(not(target_arch = "aarch64"))]
                     println!("[SCHED] Loading initial task context for '{}'", _task_name);
-
-                    #[cfg(target_arch = "aarch64")]
-                    unsafe {
-                        use crate::arch::aarch64::direct_uart::uart_write_str;
-                        uart_write_str("[SCHED] Loading initial task context\n");
-                    }
-
                     unsafe {
                         use crate::arch::x86_64::context::load_context;
-                        load_context(ctx);
-                        unreachable!("load_context should not return");
-                    }
-                }
-
-                #[cfg(target_arch = "aarch64")]
-                crate::sched::task::TaskContext::AArch64(ctx) => unsafe {
-                    use crate::arch::aarch64::direct_uart::uart_write_str;
-                    uart_write_str("[SCHED] Loading initial task context\n");
-
-                    use crate::arch::aarch64::context::load_context;
-                    load_context(ctx);
-                    unreachable!("load_context should not return");
-                },
-
-                #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-                crate::sched::task::TaskContext::RiscV(ctx) => {
-                    #[cfg(not(target_arch = "aarch64"))]
-                    println!("[SCHED] Loading initial task context for '{}'", _task_name);
-
-                    #[cfg(target_arch = "aarch64")]
-                    unsafe {
-                        use crate::arch::aarch64::direct_uart::uart_write_str;
-                        uart_write_str("[SCHED] Loading initial task context\n");
-                    }
-
-                    unsafe {
-                        use crate::arch::riscv::context::load_context;
                         load_context(ctx);
                         unreachable!("load_context should not return");
                     }

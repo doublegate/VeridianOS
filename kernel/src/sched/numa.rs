@@ -19,6 +19,8 @@
 //! 4. **Interleaving**: Distribute memory across nodes for bandwidth-intensive
 //!    workloads
 
+#![allow(static_mut_refs)]
+
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -154,6 +156,12 @@ impl NodeLoad {
 
         // Weighted average: 40% process count, 40% CPU, 20% memory
         (proc_count * 1000 + cpu_util * 40 + mem_pressure * 20) / 100
+    }
+}
+
+impl Default for NodeLoad {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -2,6 +2,9 @@
 //!
 //! Simple text editor with basic editing capabilities.
 
+// Allow dead code for editor fields not yet used in rendering
+#![allow(dead_code)]
+
 use alloc::{format, string::String, vec, vec::Vec};
 
 use spin::RwLock;
@@ -206,43 +209,41 @@ impl TextEditor {
 
     /// Process input event
     pub fn process_input(&mut self, event: InputEvent) -> Result<(), KernelError> {
-        match event {
-            InputEvent::KeyPress {
-                character,
-                scancode,
-            } => {
-                match character {
-                    '\n' | '\r' => {
-                        // Insert newline
-                        self.insert_newline();
+        if let InputEvent::KeyPress {
+            character,
+            scancode,
+        } = event
+        {
+            match character {
+                '\n' | '\r' => {
+                    // Insert newline
+                    self.insert_newline();
+                }
+                '\x08' => {
+                    // Backspace
+                    self.delete_char();
+                }
+                '\t' => {
+                    // Tab - insert 4 spaces
+                    for _ in 0..4 {
+                        self.insert_char(' ');
                     }
-                    '\x08' => {
-                        // Backspace
-                        self.delete_char();
-                    }
-                    '\t' => {
-                        // Tab - insert 4 spaces
-                        for _ in 0..4 {
-                            self.insert_char(' ');
-                        }
-                    }
-                    ch if ch >= ' ' && ch <= '~' => {
-                        // Printable character
-                        self.insert_char(ch);
-                    }
-                    _ => {
-                        // Handle special keys via scancode
-                        match scancode {
-                            72 => self.move_cursor_up(),    // Up arrow
-                            80 => self.move_cursor_down(),  // Down arrow
-                            75 => self.move_cursor_left(),  // Left arrow
-                            77 => self.move_cursor_right(), // Right arrow
-                            _ => {}
-                        }
+                }
+                ch if (' '..='~').contains(&ch) => {
+                    // Printable character
+                    self.insert_char(ch);
+                }
+                _ => {
+                    // Handle special keys via scancode
+                    match scancode {
+                        72 => self.move_cursor_up(),    // Up arrow
+                        80 => self.move_cursor_down(),  // Down arrow
+                        75 => self.move_cursor_left(),  // Left arrow
+                        77 => self.move_cursor_right(), // Right arrow
+                        _ => {}
                     }
                 }
             }
-            _ => {}
         }
 
         Ok(())
@@ -393,7 +394,7 @@ impl TextEditor {
                 // Draw cursor (vertical bar)
                 for dy in 0..char_height {
                     for dx in 0..2 {
-                        let px = cursor_x + dx as i32;
+                        let px = cursor_x + dx;
                         let py = y + dy as i32;
 
                         if px >= 0

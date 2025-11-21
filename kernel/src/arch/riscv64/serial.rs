@@ -3,6 +3,7 @@
 use core::fmt;
 
 pub struct Uart16550Compat {
+    #[allow(dead_code)]
     base_addr: usize,
 }
 

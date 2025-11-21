@@ -1,5 +1,9 @@
 //! UDP protocol implementation
 
+use alloc::{collections::BTreeMap, vec::Vec};
+
+use spin::Mutex;
+
 use super::{IpAddress, SocketAddr};
 use crate::error::KernelError;
 
@@ -106,7 +110,15 @@ impl UdpSocket {
             bound: false,
         }
     }
+}
 
+impl Default for UdpSocket {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl UdpSocket {
     /// Bind to local address
     pub fn bind(&mut self, addr: SocketAddr) -> Result<(), KernelError> {
         if self.bound {
@@ -170,7 +182,7 @@ impl UdpSocket {
     }
 
     /// Receive data
-    pub fn recv_from(&self, buffer: &mut [u8]) -> Result<(usize, SocketAddr), KernelError> {
+    pub fn recv_from(&self, _buffer: &mut [u8]) -> Result<(usize, SocketAddr), KernelError> {
         if !self.bound {
             return Err(KernelError::InvalidState {
                 expected: "bound",
@@ -195,6 +207,183 @@ pub fn init() -> Result<(), KernelError> {
     println!("[UDP] Initializing UDP protocol...");
     println!("[UDP] UDP initialized");
     Ok(())
+}
+
+// ============================================================================
+// Socket Layer Interface
+// ============================================================================
+
+/// Received UDP datagram with source address
+struct ReceivedDatagram {
+    data: Vec<u8>,
+    from: SocketAddr,
+}
+
+/// UDP receive buffer per socket
+struct UdpSocketBuffer {
+    local_addr: SocketAddr,
+    recv_queue: Vec<ReceivedDatagram>,
+    max_queue_size: usize,
+}
+
+/// Global UDP socket buffers
+static UDP_SOCKETS: Mutex<BTreeMap<usize, UdpSocketBuffer>> = Mutex::new(BTreeMap::new());
+
+/// Register a UDP socket for receiving
+pub fn register_socket(socket_id: usize, local_addr: SocketAddr) {
+    let mut sockets = UDP_SOCKETS.lock();
+    sockets.insert(
+        socket_id,
+        UdpSocketBuffer {
+            local_addr,
+            recv_queue: Vec::new(),
+            max_queue_size: 64,
+        },
+    );
+}
+
+/// Unregister a UDP socket
+pub fn unregister_socket(socket_id: usize) {
+    let mut sockets = UDP_SOCKETS.lock();
+    sockets.remove(&socket_id);
+}
+
+/// Receive data from a UDP socket (called by socket layer)
+pub fn receive_from(
+    socket_id: usize,
+    buffer: &mut [u8],
+) -> Result<(usize, SocketAddr), KernelError> {
+    let mut sockets = UDP_SOCKETS.lock();
+
+    if let Some(sock_buf) = sockets.get_mut(&socket_id) {
+        if let Some(datagram) = sock_buf.recv_queue.pop() {
+            let copy_len = buffer.len().min(datagram.data.len());
+            buffer[..copy_len].copy_from_slice(&datagram.data[..copy_len]);
+            return Ok((copy_len, datagram.from));
+        }
+        return Err(KernelError::WouldBlock);
+    }
+
+    Err(KernelError::InvalidArgument {
+        name: "socket_id",
+        value: "not_found",
+    })
+}
+
+/// Process incoming UDP packet (called by IP layer)
+pub fn process_packet(
+    src_addr: IpAddress,
+    dst_addr: IpAddress,
+    data: &[u8],
+) -> Result<(), KernelError> {
+    if data.len() < UdpHeader::SIZE {
+        return Err(KernelError::InvalidArgument {
+            name: "udp_packet",
+            value: "too_short",
+        });
+    }
+
+    // Parse UDP header
+    let header = UdpHeader::from_bytes(data)?;
+
+    // Validate length
+    if data.len() < header.length as usize {
+        return Err(KernelError::InvalidArgument {
+            name: "udp_length",
+            value: "mismatch",
+        });
+    }
+
+    // Extract payload
+    let payload = &data[UdpHeader::SIZE..header.length as usize];
+    let src = SocketAddr::new(src_addr, header.source_port);
+    let _dst = SocketAddr::new(dst_addr, header.dest_port);
+
+    // Find matching socket by destination port
+    let mut sockets = UDP_SOCKETS.lock();
+    for (_socket_id, sock_buf) in sockets.iter_mut() {
+        if sock_buf.local_addr.port() == header.dest_port || sock_buf.local_addr.port() == 0 {
+            // Check queue size
+            if sock_buf.recv_queue.len() < sock_buf.max_queue_size {
+                sock_buf.recv_queue.push(ReceivedDatagram {
+                    data: payload.to_vec(),
+                    from: src,
+                });
+
+                #[cfg(feature = "net_debug")]
+                println!(
+                    "[UDP] Queued {} bytes from {:?} for socket {} (port {})",
+                    payload.len(),
+                    src,
+                    socket_id,
+                    dst.port()
+                );
+
+                return Ok(());
+            } else {
+                #[cfg(feature = "net_debug")]
+                println!("[UDP] Socket {} queue full, dropping packet", socket_id);
+                return Err(KernelError::ResourceExhausted {
+                    resource: "udp_queue",
+                });
+            }
+        }
+    }
+
+    #[cfg(feature = "net_debug")]
+    println!(
+        "[UDP] No socket for port {}, dropping packet",
+        header.dest_port
+    );
+
+    Ok(())
+}
+
+/// Send UDP packet (internal implementation)
+pub fn send_packet(src: SocketAddr, dst: SocketAddr, data: &[u8]) -> Result<usize, KernelError> {
+    // Create UDP header
+    let mut header = UdpHeader::new(src.port(), dst.port(), data.len());
+
+    // Calculate checksum
+    header.calculate_checksum(src.ip(), dst.ip(), data);
+
+    // Build packet: header + data
+    let header_bytes = header.to_bytes();
+    let mut packet = Vec::with_capacity(UdpHeader::SIZE + data.len());
+    packet.extend_from_slice(&header_bytes);
+    packet.extend_from_slice(data);
+
+    // Send via IP layer
+    super::ip::send(dst.ip(), super::ip::IpProtocol::Udp, &packet)?;
+
+    Ok(data.len())
+}
+
+/// Get UDP statistics
+pub fn get_stats() -> UdpStats {
+    let sockets = UDP_SOCKETS.lock();
+    let mut total_queued = 0;
+    for sock in sockets.values() {
+        total_queued += sock.recv_queue.len();
+    }
+
+    UdpStats {
+        active_sockets: sockets.len(),
+        datagrams_queued: total_queued,
+        datagrams_sent: 0,    // Would track in real implementation
+        datagrams_recv: 0,    // Would track in real implementation
+        datagrams_dropped: 0, // Would track in real implementation
+    }
+}
+
+/// UDP statistics
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UdpStats {
+    pub active_sockets: usize,
+    pub datagrams_queued: usize,
+    pub datagrams_sent: u64,
+    pub datagrams_recv: u64,
+    pub datagrams_dropped: u64,
 }
 
 #[cfg(test)]

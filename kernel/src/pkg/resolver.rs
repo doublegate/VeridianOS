@@ -3,6 +3,8 @@
 //! Implements SAT-based dependency resolution for package management.
 //! Uses a simplified 2-SAT solver for conflict resolution.
 
+#![allow(clippy::manual_strip, clippy::unwrap_or_default)]
+
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     string::String,
@@ -80,6 +82,7 @@ impl VersionReq {
 
 /// Package resolution candidate
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct Candidate {
     package_id: PackageId,
     version: Version,

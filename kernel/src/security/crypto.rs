@@ -214,8 +214,8 @@ fn sha256_simple(data: &[u8], output: &mut [u8]) {
 /// Encrypt data using specified algorithm
 pub fn encrypt(
     algorithm: EncryptionAlgorithm,
-    key: &Key,
-    nonce: &[u8],
+    _key: &Key,
+    _nonce: &[u8],
     plaintext: &[u8],
     ciphertext: &mut [u8],
 ) -> Result<usize, KernelError> {
@@ -244,8 +244,8 @@ pub fn encrypt(
 /// Decrypt data using specified algorithm
 pub fn decrypt(
     algorithm: EncryptionAlgorithm,
-    key: &Key,
-    nonce: &[u8],
+    _key: &Key,
+    _nonce: &[u8],
     ciphertext: &[u8],
     plaintext: &mut [u8],
 ) -> Result<usize, KernelError> {

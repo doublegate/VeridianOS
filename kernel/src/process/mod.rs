@@ -16,7 +16,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-// Import println! macro
+// Import println! macro - may be no-op on some architectures
+#[allow(unused_imports)]
 use crate::println;
 
 // Re-export submodules

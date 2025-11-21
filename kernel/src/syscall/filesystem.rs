@@ -3,6 +3,8 @@
 //! Provides kernel-side implementation of filesystem operations including
 //! file I/O, directory management, and filesystem management.
 
+#![allow(clippy::unnecessary_cast)]
+
 use super::{SyscallError, SyscallResult};
 use crate::{
     fs::{get_vfs, OpenFlags, Permissions, SeekFrom},

@@ -2,6 +2,8 @@
 //!
 //! Implements storage drivers including ATA/IDE, AHCI/SATA, and NVMe.
 
+#![allow(static_mut_refs)]
+
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
 use spin::Mutex;
@@ -92,6 +94,7 @@ pub trait StorageDevice: Send + Sync {
 }
 
 /// ATA (IDE) driver implementation
+#[allow(dead_code)]
 pub struct AtaDriver {
     name: String,
     base_port: u16,
@@ -153,8 +156,8 @@ impl AtaDriver {
 
         // Read identification data
         let mut identify_data = [0u16; 256];
-        for i in 0..256 {
-            identify_data[i] = self.read_data();
+        for item in &mut identify_data {
+            *item = self.read_data();
         }
 
         // Parse identification data
@@ -171,12 +174,12 @@ impl AtaDriver {
     }
 
     /// Parse IDENTIFY data
+    #[allow(clippy::needless_range_loop)]
     fn parse_identify_data(&mut self, data: &[u16; 256]) {
         // Model string (words 27-46)
         let mut model = String::new();
-        for i in 27..47 {
-            let word = data[i];
-            let bytes = [(word >> 8) as u8, word as u8];
+        for word in data.iter().take(47).skip(27) {
+            let bytes = [(word >> 8) as u8, *word as u8];
             for &byte in &bytes {
                 if byte != 0 && byte != b' ' {
                     model.push(byte as char);
@@ -187,9 +190,8 @@ impl AtaDriver {
 
         // Serial number (words 10-19)
         let mut serial = String::new();
-        for i in 10..20 {
-            let word = data[i];
-            let bytes = [(word >> 8) as u8, word as u8];
+        for word in data.iter().take(20).skip(10) {
+            let bytes = [(word >> 8) as u8, *word as u8];
             for &byte in &bytes {
                 if byte != 0 && byte != b' ' {
                     serial.push(byte as char);
@@ -418,35 +420,35 @@ impl Driver for AtaDriver {
     fn supports_device(&self, device: &DeviceInfo) -> bool {
         device.class == DeviceClass::Storage
             && device.bus == "pci"
-            && device.device_id.as_ref().map_or(false, |id| {
+            && device.device_id.as_ref().is_some_and(|id| {
                 // Check for IDE/ATA controller class codes
                 id.class_code == 0x01 && // Mass storage
             (id.subclass == 0x01 || id.subclass == 0x05) // IDE or ATA
             })
     }
 
-    fn probe(&mut self, device: &DeviceInfo) -> Result<(), &'static str> {
-        crate::println!("[ATA] Probing device: {}", device.name);
+    fn probe(&mut self, _device: &DeviceInfo) -> Result<(), &'static str> {
+        crate::println!("[ATA] Probing device: {}", _device.name);
 
         // Try to initialize the ATA device
         self.init()
     }
 
-    fn attach(&mut self, device: &DeviceInfo) -> Result<(), &'static str> {
-        crate::println!("[ATA] Attaching to device: {}", device.name);
+    fn attach(&mut self, _device: &DeviceInfo) -> Result<(), &'static str> {
+        crate::println!("[ATA] Attaching to device: {}", _device.name);
 
         // Device should already be initialized from probe
-        crate::println!("[ATA] Successfully attached to {}", device.name);
+        crate::println!("[ATA] Successfully attached to {}", _device.name);
         Ok(())
     }
 
-    fn detach(&mut self, device: &DeviceInfo) -> Result<(), &'static str> {
-        crate::println!("[ATA] Detaching from device: {}", device.name);
+    fn detach(&mut self, _device: &DeviceInfo) -> Result<(), &'static str> {
+        crate::println!("[ATA] Detaching from device: {}", _device.name);
 
         // Flush any pending writes
         self.flush().ok();
 
-        crate::println!("[ATA] Successfully detached from {}", device.name);
+        crate::println!("[ATA] Successfully detached from {}", _device.name);
         Ok(())
     }
 
@@ -469,8 +471,8 @@ impl Driver for AtaDriver {
         Ok(())
     }
 
-    fn handle_interrupt(&mut self, irq: u8) -> Result<(), &'static str> {
-        crate::println!("[ATA] Handling interrupt {} for {}", irq, self.name);
+    fn handle_interrupt(&mut self, _irq: u8) -> Result<(), &'static str> {
+        crate::println!("[ATA] Handling interrupt {} for {}", _irq, self.name);
 
         // Read status to clear interrupt
         let status = self.read_register(7);
@@ -478,8 +480,8 @@ impl Driver for AtaDriver {
         // Check for errors
         if status & 0x01 != 0 {
             // ERR bit set
-            let error = self.read_register(1);
-            crate::println!("[ATA] Error detected: 0x{:02x}", error);
+            let _error = self.read_register(1);
+            crate::println!("[ATA] Error detected: 0x{:02x}", _error);
             return Err("ATA error");
         }
 
@@ -494,13 +496,13 @@ impl Driver for AtaDriver {
 
         // Calculate number of sectors to read
         let bytes_needed = buffer.len() + sector_offset;
-        let sectors_needed = (bytes_needed + sector_size as usize - 1) / sector_size as usize;
+        let sectors_needed = bytes_needed.div_ceil(sector_size as usize);
 
         // Allocate temporary buffer for sector-aligned reads
         let mut sector_buffer = vec![0u8; sectors_needed * sector_size as usize];
 
         // Read sectors
-        let sectors_read = self.read_sectors(lba, sectors_needed as u32, &mut sector_buffer)?;
+        let _sectors_read = self.read_sectors(lba, sectors_needed as u32, &mut sector_buffer)?;
 
         // Copy requested data
         let copy_len = buffer.len().min(sector_buffer.len() - sector_offset);
@@ -530,7 +532,7 @@ impl Driver for AtaDriver {
         Ok(sectors_written as usize * sector_size as usize)
     }
 
-    fn ioctl(&mut self, cmd: u32, arg: u64) -> Result<u64, &'static str> {
+    fn ioctl(&mut self, cmd: u32, _arg: u64) -> Result<u64, &'static str> {
         match cmd {
             0x3000 => {
                 // Get capacity
@@ -562,6 +564,12 @@ impl Driver for AtaDriver {
 /// Storage manager for managing multiple storage devices
 pub struct StorageManager {
     devices: Vec<Box<dyn StorageDevice>>,
+}
+
+impl Default for StorageManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StorageManager {
@@ -650,8 +658,8 @@ pub fn init() {
         dummy_device,
     );
 
-    if let Err(e) = driver_framework.register_driver(Box::new(ata_driver)) {
-        crate::println!("[STORAGE] Failed to register ATA driver: {}", e);
+    if let Err(_e) = driver_framework.register_driver(Box::new(ata_driver)) {
+        crate::println!("[STORAGE] Failed to register ATA driver: {}", _e);
     } else {
         crate::println!("[STORAGE] Storage subsystem initialized");
     }

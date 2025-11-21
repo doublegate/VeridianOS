@@ -229,8 +229,8 @@ pub mod key_exchange {
             // TODO: Implement full X25519 algorithm
             let mut shared = [0u8; 32];
 
-            for i in 0..32 {
-                shared[i] = self.bytes[i] ^ their_public.bytes[i];
+            for (i, (s, t)) in self.bytes.iter().zip(their_public.bytes.iter()).enumerate() {
+                shared[i] = s ^ t;
             }
 
             Ok(SharedSecret { bytes: shared })

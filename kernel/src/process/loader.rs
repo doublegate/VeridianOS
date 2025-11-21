@@ -3,6 +3,8 @@
 //! This module handles loading user programs from ELF binaries into process
 //! memory.
 
+#![allow(clippy::get_first)]
+
 use alloc::{string::String, vec::Vec};
 
 use crate::{

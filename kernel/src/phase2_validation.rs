@@ -2,6 +2,8 @@
 //!
 //! End-to-end validation of all Phase 2 components working together.
 
+#![allow(clippy::redundant_pattern_matching, clippy::if_same_then_else)]
+
 use crate::userland::test_runner::run_phase2_validation;
 
 /// Run complete Phase 2 validation

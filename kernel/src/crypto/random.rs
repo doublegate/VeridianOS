@@ -2,7 +2,9 @@
 //!
 //! Provides cryptographically secure random number generation.
 
-use alloc::vec::Vec;
+#![allow(static_mut_refs)]
+
+use alloc::{vec, vec::Vec};
 
 use spin::Mutex;
 
@@ -164,10 +166,7 @@ pub fn get_random() -> &'static SecureRandom {
 
 /// Generate random bytes (convenience function)
 pub fn random_bytes(count: usize) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(count);
-    unsafe {
-        bytes.set_len(count);
-    }
+    let mut bytes = vec![0u8; count];
 
     let rng = get_random();
     let _ = rng.fill_bytes(&mut bytes);

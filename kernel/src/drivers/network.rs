@@ -2,6 +2,8 @@
 //!
 //! Implements network device drivers including Ethernet, Wi-Fi, and loopback.
 
+#![allow(static_mut_refs)]
+
 use alloc::{boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec, vec::Vec};
 
 use spin::{Mutex, RwLock};
@@ -113,6 +115,7 @@ pub trait NetworkDevice: Send + Sync {
 }
 
 /// Ethernet driver implementation
+#[allow(dead_code)]
 pub struct EthernetDriver {
     name: String,
     config: Mutex<InterfaceConfig>,
@@ -251,30 +254,30 @@ impl Driver for EthernetDriver {
         device.class == DeviceClass::Network
     }
 
-    fn probe(&mut self, device: &DeviceInfo) -> Result<(), &'static str> {
-        crate::println!("[ETH] Probing device: {}", device.name);
+    fn probe(&mut self, _device: &DeviceInfo) -> Result<(), &'static str> {
+        crate::println!("[ETH] Probing device: {}", _device.name);
         // TODO: Check if this is actually an Ethernet device
         Ok(())
     }
 
-    fn attach(&mut self, device: &DeviceInfo) -> Result<(), &'static str> {
-        crate::println!("[ETH] Attaching to device: {}", device.name);
+    fn attach(&mut self, _device: &DeviceInfo) -> Result<(), &'static str> {
+        crate::println!("[ETH] Attaching to device: {}", _device.name);
 
         // Initialize hardware
         // TODO: Initialize actual Ethernet hardware
 
         self.up()?;
 
-        crate::println!("[ETH] Successfully attached to {}", device.name);
+        crate::println!("[ETH] Successfully attached to {}", _device.name);
         Ok(())
     }
 
-    fn detach(&mut self, device: &DeviceInfo) -> Result<(), &'static str> {
-        crate::println!("[ETH] Detaching from device: {}", device.name);
+    fn detach(&mut self, _device: &DeviceInfo) -> Result<(), &'static str> {
+        crate::println!("[ETH] Detaching from device: {}", _device.name);
 
         self.down()?;
 
-        crate::println!("[ETH] Successfully detached from {}", device.name);
+        crate::println!("[ETH] Successfully detached from {}", _device.name);
         Ok(())
     }
 
@@ -286,8 +289,8 @@ impl Driver for EthernetDriver {
         self.up()
     }
 
-    fn handle_interrupt(&mut self, irq: u8) -> Result<(), &'static str> {
-        crate::println!("[ETH] Handling interrupt {} for {}", irq, self.name);
+    fn handle_interrupt(&mut self, _irq: u8) -> Result<(), &'static str> {
+        crate::println!("[ETH] Handling interrupt {} for {}", _irq, self.name);
 
         // TODO: Handle actual hardware interrupts
         // - Check interrupt status
@@ -298,7 +301,7 @@ impl Driver for EthernetDriver {
         Ok(())
     }
 
-    fn read(&mut self, offset: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
+    fn read(&mut self, _offset: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
         // For network devices, reading could return received packets
         if let Some(packet) = self.receive_packet()? {
             let copy_len = buffer.len().min(packet.data.len());
@@ -309,14 +312,14 @@ impl Driver for EthernetDriver {
         }
     }
 
-    fn write(&mut self, offset: u64, data: &[u8]) -> Result<usize, &'static str> {
+    fn write(&mut self, _offset: u64, data: &[u8]) -> Result<usize, &'static str> {
         // For network devices, writing sends packets
         let packet = NetworkPacket::new(data.to_vec());
         self.send_packet(packet)?;
         Ok(data.len())
     }
 
-    fn ioctl(&mut self, cmd: u32, arg: u64) -> Result<u64, &'static str> {
+    fn ioctl(&mut self, cmd: u32, _arg: u64) -> Result<u64, &'static str> {
         match cmd {
             0x1000 => {
                 // Get interface status
@@ -342,6 +345,12 @@ pub struct LoopbackDriver {
     config: Mutex<InterfaceConfig>,
     stats: Mutex<NetworkStats>,
     enabled: Mutex<bool>,
+}
+
+impl Default for LoopbackDriver {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LoopbackDriver {
@@ -493,6 +502,12 @@ pub struct NetworkManager {
     default_route: RwLock<Option<String>>,
 }
 
+impl Default for NetworkManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NetworkManager {
     pub fn new() -> Self {
         Self {
@@ -574,7 +589,7 @@ static mut NETWORK_MANAGER_STATIC: Option<NetworkManager> = None;
 pub fn init() {
     #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
     {
-        NETWORK_MANAGER.call_once(|| NetworkManager::new());
+        NETWORK_MANAGER.call_once(NetworkManager::new);
     }
 
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
@@ -616,8 +631,8 @@ pub fn init() {
         dummy_device,
     );
 
-    if let Err(e) = driver_framework.register_driver(Box::new(ethernet_driver)) {
-        crate::println!("[NET] Failed to register Ethernet driver: {}", e);
+    if let Err(_e) = driver_framework.register_driver(Box::new(ethernet_driver)) {
+        crate::println!("[NET] Failed to register Ethernet driver: {}", _e);
     }
 
     crate::println!("[NET] Network subsystem initialized");

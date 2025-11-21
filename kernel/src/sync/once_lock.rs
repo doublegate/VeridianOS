@@ -3,6 +3,8 @@
 //! Provides safe alternatives to `static mut` for global state management.
 //! Uses atomic operations and proper synchronization for Rust 2024 edition.
 
+#![allow(clippy::needless_lifetimes, mismatched_lifetime_syntaxes)]
+
 use core::{
     cell::UnsafeCell,
     sync::atomic::{AtomicPtr, Ordering},
@@ -15,6 +17,12 @@ use spin::Mutex;
 /// Similar to std::sync::OnceLock but works in no_std environments.
 pub struct OnceLock<T> {
     inner: AtomicPtr<T>,
+}
+
+impl<T> Default for OnceLock<T> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<T> OnceLock<T> {

@@ -275,7 +275,7 @@ impl WindowManager {
                 }
             }
             InputEvent::MouseButton {
-                button,
+                button: _button,
                 pressed,
                 x,
                 y,

@@ -17,6 +17,7 @@ pub use shell::Shell;
 
 /// Initialize all system services
 pub fn init() {
+    #[allow(unused_imports)]
     use crate::println;
 
     #[cfg(target_arch = "aarch64")]

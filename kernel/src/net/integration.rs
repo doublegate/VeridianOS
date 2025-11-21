@@ -8,19 +8,28 @@ use alloc::boxed::Box;
 use super::device::{self, NetworkDevice};
 use crate::error::KernelError;
 
-// PCI vendor and device IDs for network cards
+// PCI vendor and device IDs for network cards (only used on x86_64)
+#[cfg(target_arch = "x86_64")]
 const INTEL_VENDOR_ID: u16 = 0x8086;
+#[cfg(target_arch = "x86_64")]
 const E1000_DEVICE_ID: u16 = 0x100E;
+#[cfg(target_arch = "x86_64")]
 const E1000E_DEVICE_ID: u16 = 0x10D3;
+#[cfg(target_arch = "x86_64")]
 const REDHAT_VENDOR_ID: u16 = 0x1AF4;
+#[cfg(target_arch = "x86_64")]
 const VIRTIO_NET_LEGACY_DEVICE_ID: u16 = 0x1000;
+#[cfg(target_arch = "x86_64")]
 const VIRTIO_NET_MODERN_DEVICE_ID: u16 = 0x1041;
+#[allow(dead_code)]
 const PCI_CLASS_NETWORK: u8 = 0x02;
 
 /// Initialize and register all available network drivers
+#[allow(unused_assignments)]
 pub fn register_drivers() -> Result<(), KernelError> {
     println!("[NET-INTEGRATION] Scanning for network devices...");
 
+    #[allow(unused_variables)]
     let mut device_count = 0;
 
     // Only x86_64 has PCI support
@@ -113,6 +122,7 @@ pub fn register_drivers() -> Result<(), KernelError> {
 }
 
 /// Try to register E1000 driver if hardware is present
+#[allow(dead_code)]
 fn try_register_e1000(bar_address: u64) -> Result<(), KernelError> {
     #[cfg(target_arch = "x86_64")]
     {
@@ -167,8 +177,8 @@ fn try_register_virtio_net(bar_address: u64) -> Result<(), KernelError> {
 
     match VirtioNetDriver::new(bar_address as usize) {
         Ok(driver) => {
-            let name = driver.name();
-            let mac = driver.mac_address();
+            let _name = driver.name();
+            let _mac = driver.mac_address();
 
             // TODO: Register with network device registry
             // device::register_device(Box::new(driver))?;
@@ -176,7 +186,7 @@ fn try_register_virtio_net(bar_address: u64) -> Result<(), KernelError> {
             println!(
                 "[NET-INTEGRATION] VirtIO-Net initialized: {} (MAC: \
                  {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
-                name, mac.0[0], mac.0[1], mac.0[2], mac.0[3], mac.0[4], mac.0[5]
+                _name, _mac.0[0], _mac.0[1], _mac.0[2], _mac.0[3], _mac.0[4], _mac.0[5]
             );
 
             Ok(())

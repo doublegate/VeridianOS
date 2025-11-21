@@ -8,6 +8,9 @@
 //! This module implements algorithms selected by NIST for post-quantum
 //! cryptography:
 //! - **ML-DSA (FIPS 204)**: Module-Lattice-Based Digital Signature Algorithm
+
+// Allow dead code for cryptographic structures pending full implementation
+#![allow(dead_code)]
 //!   - Replaces Dilithium after standardization
 //!   - Provides quantum-resistant digital signatures
 //!   - Security levels: 2, 3, 5 (128, 192, 256-bit equivalents)
@@ -34,7 +37,7 @@
 //! - Backward compatibility during transition period
 //! - Meet-in-the-middle security guarantees
 
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 use super::CryptoResult;
 
@@ -83,10 +86,7 @@ impl DilithiumSigningKey {
         };
 
         let rng = get_random();
-        let mut secret = Vec::with_capacity(secret_size);
-        unsafe {
-            secret.set_len(secret_size);
-        }
+        let mut secret = vec![0u8; secret_size];
         rng.fill_bytes(&mut secret)?;
 
         Ok(Self { level, secret })
@@ -103,10 +103,7 @@ impl DilithiumSigningKey {
             DilithiumLevel::Level5 => 4595,
         };
 
-        let mut sig_bytes = Vec::with_capacity(sig_size);
-        unsafe {
-            sig_bytes.set_len(sig_size);
-        }
+        let mut sig_bytes = vec![0u8; sig_size];
 
         // Simple stub - XOR message bytes with secret
         for (i, &byte) in message.iter().enumerate().take(sig_bytes.len()) {
@@ -125,10 +122,7 @@ impl DilithiumSigningKey {
             DilithiumLevel::Level5 => 2592,
         };
 
-        let mut public = Vec::with_capacity(public_size);
-        unsafe {
-            public.set_len(public_size);
-        }
+        let mut public = vec![0u8; public_size];
 
         // Simple derivation (NOT secure - just for structure)
         for (i, byte) in self.secret.iter().enumerate().take(public_size) {
@@ -144,7 +138,7 @@ impl DilithiumSigningKey {
 
 impl DilithiumVerifyingKey {
     /// Verify a signature
-    pub fn verify(&self, message: &[u8], signature: &DilithiumSignature) -> CryptoResult<bool> {
+    pub fn verify(&self, _message: &[u8], signature: &DilithiumSignature) -> CryptoResult<bool> {
         // Stub implementation of ML-DSA verification
         // TODO: Implement full Dilithium algorithm
 
@@ -193,10 +187,7 @@ impl KyberSecretKey {
         };
 
         let rng = get_random();
-        let mut secret = Vec::with_capacity(secret_size);
-        unsafe {
-            secret.set_len(secret_size);
-        }
+        let mut secret = vec![0u8; secret_size];
         rng.fill_bytes(&mut secret)?;
 
         Ok(Self { level, secret })
@@ -210,10 +201,7 @@ impl KyberSecretKey {
             KyberLevel::Kyber1024 => 1568,
         };
 
-        let mut public = Vec::with_capacity(public_size);
-        unsafe {
-            public.set_len(public_size);
-        }
+        let mut public = vec![0u8; public_size];
 
         // Simple derivation (NOT secure - just for structure)
         for (i, byte) in self.secret.iter().enumerate().take(public_size) {
@@ -262,10 +250,7 @@ impl KyberPublicKey {
         };
 
         let rng = get_random();
-        let mut ct_bytes = Vec::with_capacity(ct_size);
-        unsafe {
-            ct_bytes.set_len(ct_size);
-        }
+        let mut ct_bytes = vec![0u8; ct_size];
         rng.fill_bytes(&mut ct_bytes)?;
 
         // Generate shared secret (stub)

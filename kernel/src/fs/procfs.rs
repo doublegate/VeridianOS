@@ -2,6 +2,8 @@
 //!
 //! Provides information about running processes and system state.
 
+#![allow(clippy::useless_format)]
+
 use alloc::{format, string::String, sync::Arc, vec::Vec};
 
 use super::{DirEntry, Filesystem, Metadata, NodeType, Permissions, VfsNode};
@@ -321,6 +323,12 @@ impl ProcFs {
         Self {
             root: Arc::new(ProcNode::new_root()),
         }
+    }
+}
+
+impl Default for ProcFs {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

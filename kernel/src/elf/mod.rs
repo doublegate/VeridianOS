@@ -2,6 +2,8 @@
 //!
 //! Loads and executes ELF64 binaries for user-space programs.
 
+#![allow(clippy::slow_vector_initialization, clippy::unnecessary_cast)]
+
 use alloc::{string::String, vec::Vec};
 use core::{mem, slice};
 
@@ -250,6 +252,12 @@ pub struct ElfRelocation {
 
 /// ELF loader
 pub struct ElfLoader;
+
+impl Default for ElfLoader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl ElfLoader {
     /// Create a new ELF loader

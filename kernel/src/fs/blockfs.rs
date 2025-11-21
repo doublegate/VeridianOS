@@ -6,6 +6,16 @@
 //! - Block allocation bitmap
 //! - Data blocks for file content
 
+// Allow dead code for filesystem methods not yet called from higher layers
+#![allow(
+    dead_code,
+    clippy::if_same_then_else,
+    clippy::manual_div_ceil,
+    clippy::slow_vector_initialization,
+    clippy::manual_saturating_arithmetic,
+    clippy::implicit_saturating_sub
+)]
+
 use alloc::{sync::Arc, vec, vec::Vec};
 use core::mem::size_of;
 

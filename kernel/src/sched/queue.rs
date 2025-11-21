@@ -1,11 +1,14 @@
 //! Ready queue management for scheduler
 
+#![allow(static_mut_refs)]
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 #[cfg(feature = "alloc")]
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::ptr::NonNull;
 
+#[allow(unused_imports)]
 use spin::Mutex;
 
 use super::{

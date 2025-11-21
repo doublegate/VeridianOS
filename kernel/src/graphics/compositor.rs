@@ -48,7 +48,15 @@ impl Compositor {
             focused_window: None,
         }
     }
+}
 
+impl Default for Compositor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Compositor {
     /// Create a new window
     pub fn create_window(&mut self, rect: Rect, title: &'static str) -> WindowId {
         let id = WindowId(self.next_id);

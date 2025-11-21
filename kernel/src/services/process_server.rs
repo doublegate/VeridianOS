@@ -155,7 +155,15 @@ impl ProcessServer {
         crate::println!("[PROCESS_SERVER] ProcessServer created successfully");
         server
     }
+}
 
+impl Default for ProcessServer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ProcessServer {
     /// Create a new process
     pub fn create_process(
         &self,
@@ -368,7 +376,7 @@ impl ProcessServer {
 
     /// Send signal to process
     pub fn send_signal(&self, pid: ProcessId, signal: i32) -> Result<(), &'static str> {
-        if let Some(process) = self.processes.read().get(&pid.0) {
+        if let Some(_process) = self.processes.read().get(&pid.0) {
             match signal {
                 9 => {
                     // SIGKILL
@@ -517,6 +525,7 @@ static mut PROCESS_SERVER_PTR: *mut ProcessServer = core::ptr::null_mut();
 
 /// Initialize the process server
 pub fn init() {
+    #[allow(unused_imports)]
     use crate::println;
 
     unsafe {

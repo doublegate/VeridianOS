@@ -1,7 +1,10 @@
-/// Test tasks for verifying context switching functionality
-///
-/// These tasks are designed to test that context switching works properly
-/// on all architectures, with special handling for AArch64's loop limitations.
+//! Test tasks for verifying context switching functionality
+//!
+//! These tasks are designed to test that context switching works properly
+//! on all architectures, with special handling for AArch64's loop limitations.
+
+#![allow(clippy::fn_to_numeric_cast, function_casts_as_integer)]
+
 use crate::sched;
 
 /// Test task A - prints messages and yields

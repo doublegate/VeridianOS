@@ -284,22 +284,25 @@ fn create_init_process() {
     {
         // Try to load init from the filesystem
         match crate::userspace::load_init_process() {
-            Ok(init_pid) => {
-                println!("[BOOTSTRAP] Init process created with PID {}", init_pid.0);
+            Ok(_init_pid) => {
+                println!("[BOOTSTRAP] Init process created with PID {}", _init_pid.0);
 
                 // Try to load a shell as well
-                if let Ok(shell_pid) = crate::userspace::loader::load_shell() {
-                    println!("[BOOTSTRAP] Shell process created with PID {}", shell_pid.0);
+                if let Ok(_shell_pid) = crate::userspace::loader::load_shell() {
+                    println!(
+                        "[BOOTSTRAP] Shell process created with PID {}",
+                        _shell_pid.0
+                    );
                 }
             }
-            Err(e) => {
-                println!("[BOOTSTRAP] Failed to create init process: {}", e);
+            Err(_e) => {
+                println!("[BOOTSTRAP] Failed to create init process: {}", _e);
                 // Fall back to creating a minimal test process
                 use alloc::string::String;
-                if let Ok(pid) = process::lifecycle::create_process(String::from("init"), 0) {
+                if let Ok(_pid) = process::lifecycle::create_process(String::from("init"), 0) {
                     println!(
                         "[BOOTSTRAP] Created fallback init process with PID {}",
-                        pid.0
+                        _pid.0
                     );
                 }
             }

@@ -3,6 +3,8 @@
 //! Provides bitmap font rendering with support for multiple font sizes and
 //! styles.
 
+#![allow(static_mut_refs)]
+
 use alloc::{vec, vec::Vec};
 
 use crate::error::KernelError;
@@ -64,7 +66,7 @@ pub struct Glyph {
 impl Glyph {
     /// Create a new glyph
     pub fn new(character: char, width: u8, height: u8) -> Self {
-        let bitmap_size = ((width as usize * height as usize) + 7) / 8;
+        let bitmap_size = (width as usize * height as usize).div_ceil(8);
         Self {
             character,
             bitmap: vec![0; bitmap_size],
@@ -172,7 +174,7 @@ impl Font {
     /// Get glyph for a character
     pub fn get_glyph(&self, ch: char) -> Option<&Glyph> {
         let code = ch as u32;
-        if code >= 32 && code <= 126 {
+        if (32..=126).contains(&code) {
             Some(&self.glyphs[(code - 32) as usize])
         } else {
             None

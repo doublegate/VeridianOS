@@ -3,6 +3,9 @@
 //! Provides pseudo-terminal devices for terminal emulation and shell
 //! interaction.
 
+// Allow dead code for PTY fields not yet used in current implementation
+#![allow(dead_code, clippy::needless_range_loop)]
+
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 

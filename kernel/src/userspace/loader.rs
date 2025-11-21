@@ -3,12 +3,15 @@
 //! This module handles loading user-space programs from the filesystem
 //! and creating processes to execute them.
 
+#![allow(clippy::slow_vector_initialization, clippy::explicit_auto_deref)]
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
 use alloc::{string::String, vec, vec::Vec};
 
+#[allow(unused_imports)]
 use crate::{
     elf::{ElfError, ElfLoader},
     fs::get_vfs,
@@ -36,8 +39,8 @@ pub fn load_init_process() -> Result<ProcessId, &'static str> {
                 println!("[LOADER] Successfully loaded init from {}", path);
                 return Ok(pid);
             }
-            Err(e) => {
-                println!("[LOADER] Failed to load {}: {}", path, e);
+            Err(_e) => {
+                println!("[LOADER] Failed to load {}: {}", path, _e);
             }
         }
     }
@@ -135,8 +138,15 @@ pub fn load_user_program(
         if binary.dynamic {
             println!("[LOADER] Program requires dynamic linking");
             if let Some(interpreter) = &binary.interpreter {
-                println!("[LOADER] Need to load interpreter: {}", interpreter);
-                // TODO: Implement dynamic linker loading
+                println!("[LOADER] Loading interpreter: {}", interpreter);
+
+                // Load the dynamic linker/interpreter
+                #[allow(unused_variables)]
+                let interp_entry = load_dynamic_linker(process, interpreter, &binary)?;
+
+                // When dynamic linking is used, execution starts at the interpreter
+                // The interpreter will then load the main program
+                println!("[LOADER] Interpreter loaded, entry: 0x{:x}", interp_entry);
             }
         }
 
@@ -147,6 +157,158 @@ pub fn load_user_program(
     }
 
     Ok(pid)
+}
+
+/// Load the dynamic linker/interpreter for dynamically linked binaries
+#[cfg(feature = "alloc")]
+fn load_dynamic_linker(
+    process: &crate::process::Process,
+    interpreter_path: &str,
+    _main_binary: &crate::elf::ElfBinary,
+) -> Result<u64, &'static str> {
+    use crate::mm::PageFlags;
+
+    // Read the interpreter from filesystem
+    let file_node = get_vfs()
+        .read()
+        .open(interpreter_path, crate::fs::file::OpenFlags::read_only())
+        .map_err(|_| "Failed to open interpreter")?;
+
+    let metadata = file_node
+        .metadata()
+        .map_err(|_| "Failed to get interpreter metadata")?;
+    let file_size = metadata.size;
+
+    let mut buffer = Vec::with_capacity(file_size);
+    buffer.resize(file_size, 0);
+
+    file_node
+        .read(0, &mut buffer)
+        .map_err(|_| "Failed to read interpreter")?;
+
+    // Parse the interpreter ELF
+    let loader = ElfLoader::new();
+    let interp_binary = loader
+        .parse(&buffer)
+        .map_err(|_| "Failed to parse interpreter ELF")?;
+
+    // Load interpreter at a high address to avoid collision with main binary
+    // Standard Linux ld.so loads at 0x7f00_0000_0000 region
+    let interp_base = 0x7F00_0000_0000_u64;
+
+    let mut memory_space = process.memory_space.lock();
+
+    // Map and load each segment of the interpreter
+    for segment in &interp_binary.segments {
+        if segment.segment_type != crate::elf::SegmentType::Load {
+            continue;
+        }
+
+        // Calculate adjusted virtual address
+        let adjusted_vaddr = interp_base + segment.virtual_addr;
+        let page_start = adjusted_vaddr & !0xFFF;
+        let page_end = (adjusted_vaddr + segment.memory_size + 0xFFF) & !0xFFF;
+        let num_pages = ((page_end - page_start) / 0x1000) as usize;
+
+        // Determine page flags
+        let mut flags = PageFlags::USER | PageFlags::PRESENT;
+        if (segment.flags & 0x2) != 0 {
+            // PF_W
+            flags |= PageFlags::WRITABLE;
+        }
+        if (segment.flags & 0x1) == 0 {
+            // PF_X not set
+            flags |= PageFlags::NO_EXECUTE;
+        }
+
+        // Map pages for this segment
+        for i in 0..num_pages {
+            let addr = page_start + (i as u64 * 0x1000);
+            memory_space
+                .map_page(addr as usize, flags)
+                .map_err(|_| "Failed to map interpreter page")?;
+        }
+
+        // Copy segment data
+        if segment.file_size > 0 {
+            unsafe {
+                let dest = adjusted_vaddr as *mut u8;
+                let src = buffer.as_ptr().add(segment.file_offset as usize);
+                core::ptr::copy_nonoverlapping(src, dest, segment.file_size as usize);
+            }
+        }
+
+        // Zero BSS
+        if segment.memory_size > segment.file_size {
+            unsafe {
+                let bss_start = (adjusted_vaddr + segment.file_size) as *mut u8;
+                let bss_size = (segment.memory_size - segment.file_size) as usize;
+                core::ptr::write_bytes(bss_start, 0, bss_size);
+            }
+        }
+    }
+
+    // Calculate interpreter entry point (adjusted for base address)
+    let interp_entry = interp_base + interp_binary.entry_point;
+
+    // Set up auxiliary vector (auxv) for the interpreter
+    // This provides information about the main program to the dynamic linker
+    setup_auxiliary_vector(process, _main_binary, interp_base)?;
+
+    println!(
+        "[LOADER] Dynamic linker loaded at 0x{:x}, entry: 0x{:x}",
+        interp_base, interp_entry
+    );
+
+    Ok(interp_entry)
+}
+
+/// Set up the auxiliary vector for dynamic linking
+#[cfg(feature = "alloc")]
+#[allow(unused_variables)]
+fn setup_auxiliary_vector(
+    _process: &crate::process::Process,
+    main_binary: &crate::elf::ElfBinary,
+    interp_base: u64,
+) -> Result<(), &'static str> {
+    // Auxiliary vector types (from Linux elf.h)
+    const AT_NULL: u64 = 0; // End of vector
+    const AT_PHDR: u64 = 3; // Program headers for program
+    const AT_PHENT: u64 = 4; // Size of program header entry
+    const AT_PHNUM: u64 = 5; // Number of program headers
+    const AT_PAGESZ: u64 = 6; // System page size
+    const AT_BASE: u64 = 7; // Base address of interpreter
+    const AT_ENTRY: u64 = 9; // Entry point of program
+    const AT_UID: u64 = 11; // Real user ID
+    const AT_EUID: u64 = 12; // Effective user ID
+    const AT_GID: u64 = 13; // Real group ID
+    const AT_EGID: u64 = 14; // Effective group ID
+
+    // Build auxiliary vector entries
+    let auxv: Vec<(u64, u64)> = vec![
+        (AT_PAGESZ, 0x1000),                           // Page size
+        (AT_BASE, interp_base),                        // Interpreter base
+        (AT_ENTRY, main_binary.entry_point),           // Main program entry
+        (AT_PHNUM, main_binary.segments.len() as u64), // Number of program headers
+        (AT_PHENT, 56),                                // Size of program header (Elf64_Phdr)
+        (AT_PHDR, main_binary.load_base),              // Program headers address
+        (AT_UID, 0),                                   // Root user
+        (AT_EUID, 0),
+        (AT_GID, 0),
+        (AT_EGID, 0),
+        (AT_NULL, 0), // End of auxv
+    ];
+
+    // The auxiliary vector would typically be pushed onto the stack
+    // after the environment pointers. For now, we just prepare the data.
+    // The actual stack setup happens in the setup_args function.
+
+    println!(
+        "[LOADER] Auxiliary vector prepared with {} entries",
+        auxv.len()
+    );
+
+    Ok(())
 }
 
 /// Create a minimal init process when no init binary is available

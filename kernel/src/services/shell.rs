@@ -2,6 +2,10 @@
 //!
 //! Basic shell with command parsing and built-in commands.
 
+// Many variables in this module are only used in println! calls which are
+// no-ops on some architectures (like AArch64), causing unused variable warnings.
+#![allow(unused_variables)]
+
 use alloc::{
     boxed::Box,
     collections::BTreeMap,
@@ -94,6 +98,12 @@ pub struct Shell {
     running: RwLock<bool>,
 }
 
+impl Default for Shell {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Shell {
     /// Create a new shell
     pub fn new() -> Self {
@@ -129,8 +139,8 @@ impl Shell {
             }
 
             // Display prompt
-            let prompt = self.expand_prompt();
-            crate::print!("{}", prompt);
+            let _prompt = self.expand_prompt();
+            crate::print!("{}", _prompt);
 
             // Read command
             let command_line = self.read_line();
@@ -148,8 +158,8 @@ impl Shell {
                 CommandResult::Success(code) => {
                     *self.last_exit_code.write() = code;
                 }
-                CommandResult::Error(msg) => {
-                    crate::println!("vsh: {}", msg);
+                CommandResult::Error(_msg) => {
+                    crate::println!("vsh: {}", _msg);
                     *self.last_exit_code.write() = 1;
                 }
                 CommandResult::NotFound => {
@@ -938,6 +948,7 @@ static mut SHELL_PTR: *mut Shell = core::ptr::null_mut();
 
 /// Initialize the shell
 pub fn init() {
+    #[allow(unused_imports)]
     use crate::println;
 
     unsafe {

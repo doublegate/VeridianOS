@@ -2,6 +2,9 @@
 //!
 //! Core library functions and utilities for user-space applications.
 
+// Allow missing safety docs - these are standard C-compatible functions
+#![allow(clippy::missing_safety_doc)]
+
 use alloc::{boxed::Box, format, string::String};
 use core::{ptr, slice};
 
@@ -245,6 +248,7 @@ pub mod io {
     use crate::fs::{get_vfs, OpenFlags};
 
     /// File handle
+    #[allow(dead_code)]
     pub struct File {
         node: Arc<dyn crate::fs::VfsNode>,
         position: usize,
@@ -469,14 +473,28 @@ pub mod process {
 
     /// Get parent process ID
     pub fn getppid() -> u32 {
-        // TODO: Get actual parent PID
-        1 // Return init for now
+        crate::process::get_current_process()
+            .and_then(|p| p.parent)
+            .map(|ppid| ppid.0 as u32)
+            .unwrap_or(1) // Return init (PID 1) if no parent or no current
+                          // process
     }
 
     /// Fork process
+    ///
+    /// Creates a copy of the current process. Returns:
+    /// - 0 to the child process
+    /// - Child's PID to the parent process
+    /// - -1 on error
     pub fn fork() -> i32 {
-        // TODO: Implement actual fork
-        -1 // Not implemented
+        match crate::process::fork_process() {
+            Ok(child_pid) => {
+                // fork_process() returns the child PID to the parent
+                // The child process will have return value 0 set in its context
+                child_pid.0 as i32
+            }
+            Err(_) => -1,
+        }
     }
 
     /// Execute program
@@ -488,9 +506,25 @@ pub mod process {
     }
 
     /// Wait for child process
-    pub fn wait(status: *mut i32) -> i32 {
-        // TODO: Implement actual wait
-        -1 // Not implemented
+    ///
+    /// Waits for any child process to terminate and returns its PID.
+    /// If `status` is non-null, the exit status is stored there.
+    /// Returns -1 if there are no child processes or on error.
+    ///
+    /// # Safety
+    /// The `status` pointer must be either null or point to valid, writable
+    /// memory.
+    pub unsafe fn wait(status: *mut i32) -> i32 {
+        match crate::process::wait_for_child(None) {
+            Ok((pid, exit_status)) => {
+                // Store exit status if pointer is valid
+                if !status.is_null() {
+                    *status = exit_status;
+                }
+                pid.0 as i32
+            }
+            Err(_) => -1,
+        }
     }
 }
 
@@ -569,10 +603,28 @@ pub mod math {
 
 /// Time functions
 pub mod time {
+    /// Boot timestamp base (could be set from RTC on boot)
+    static mut BOOT_TIME_SECONDS: u64 = 0;
+
+    /// Set boot time from RTC (call during system initialization)
+    pub fn set_boot_time(seconds_since_epoch: u64) {
+        unsafe {
+            BOOT_TIME_SECONDS = seconds_since_epoch;
+        }
+    }
+
     /// Get current time in seconds since epoch
+    ///
+    /// Returns the current system time based on:
+    /// - Boot time (set from RTC during initialization)
+    /// - Timer ticks elapsed since boot
     pub fn time() -> u64 {
-        // TODO: Get actual system time
-        0
+        let ticks = crate::arch::timer::get_ticks();
+        // Assuming ~1000 ticks per second (typical timer frequency)
+        // Convert ticks to seconds since boot
+        let seconds_since_boot = ticks / 1000;
+
+        unsafe { BOOT_TIME_SECONDS + seconds_since_boot }
     }
 
     /// Sleep for seconds
@@ -688,8 +740,28 @@ pub mod random {
 
 /// System information
 pub mod system {
+    use alloc::{collections::BTreeMap, string::String};
 
-    use alloc::string::String;
+    use spin::RwLock;
+
+    /// Global environment variable storage
+    static ENVIRONMENT: RwLock<Option<BTreeMap<String, String>>> = RwLock::new(None);
+
+    /// Initialize environment with default values
+    pub fn init_environment() {
+        let mut env = BTreeMap::new();
+        env.insert(
+            String::from("PATH"),
+            String::from("/bin:/usr/bin:/sbin:/usr/sbin"),
+        );
+        env.insert(String::from("HOME"), String::from("/root"));
+        env.insert(String::from("USER"), String::from("root"));
+        env.insert(String::from("SHELL"), String::from("/bin/vsh"));
+        env.insert(String::from("TERM"), String::from("vt100"));
+        env.insert(String::from("PWD"), String::from("/"));
+        env.insert(String::from("LANG"), String::from("C"));
+        *ENVIRONMENT.write() = Some(env);
+    }
 
     /// System information structure
     #[derive(Debug)]
@@ -725,25 +797,76 @@ pub mod system {
     }
 
     /// Get environment variable
+    ///
+    /// Retrieves the value of the specified environment variable.
+    /// Returns None if the variable is not set.
     pub fn getenv(name: &str) -> Option<String> {
-        // TODO: Access actual environment
-        match name {
-            "PATH" => Some(String::from("/bin:/usr/bin")),
-            "HOME" => Some(String::from("/")),
-            "USER" => Some(String::from("root")),
-            _ => None,
+        let env_guard = ENVIRONMENT.read();
+        if let Some(ref env) = *env_guard {
+            env.get(name).cloned()
+        } else {
+            // Fallback defaults if environment not initialized
+            match name {
+                "PATH" => Some(String::from("/bin:/usr/bin")),
+                "HOME" => Some(String::from("/root")),
+                "USER" => Some(String::from("root")),
+                _ => None,
+            }
         }
     }
 
     /// Set environment variable
+    ///
+    /// Sets the environment variable `name` to `value`.
+    /// Returns 0 on success, -1 on error.
     pub fn setenv(name: &str, value: &str) -> i32 {
-        // TODO: Set actual environment variable
-        crate::println!("setenv: {}={}", name, value);
-        0
+        let mut env_guard = ENVIRONMENT.write();
+        if env_guard.is_none() {
+            // Initialize environment if not already done
+            *env_guard = Some(BTreeMap::new());
+        }
+
+        if let Some(ref mut env) = *env_guard {
+            env.insert(String::from(name), String::from(value));
+            0
+        } else {
+            -1
+        }
+    }
+
+    /// Unset environment variable
+    ///
+    /// Removes the environment variable `name`.
+    /// Returns 0 on success, -1 if variable doesn't exist.
+    pub fn unsetenv(name: &str) -> i32 {
+        let mut env_guard = ENVIRONMENT.write();
+        if let Some(ref mut env) = *env_guard {
+            if env.remove(name).is_some() {
+                0
+            } else {
+                -1
+            }
+        } else {
+            -1
+        }
+    }
+
+    /// Get all environment variables
+    ///
+    /// Returns a copy of all environment variables as a BTreeMap.
+    pub fn get_all_env() -> BTreeMap<String, String> {
+        let env_guard = ENVIRONMENT.read();
+        if let Some(ref env) = *env_guard {
+            env.clone()
+        } else {
+            BTreeMap::new()
+        }
     }
 }
 
 /// Initialize standard library
 pub fn init() {
+    // Initialize environment variables with defaults
+    system::init_environment();
     crate::println!("[STDLIB] Standard library foundation initialized");
 }

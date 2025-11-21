@@ -271,6 +271,64 @@ impl CapabilitySpace {
         self.stats.total_caps.store(0, Ordering::Relaxed);
     }
 
+    /// Clone capabilities from another capability space
+    ///
+    /// Copies all capabilities from the source space to this space.
+    /// Used during fork() to give child process same capabilities as parent.
+    pub fn clone_from(&self, other: &Self) -> Result<(), &'static str> {
+        // Clear existing capabilities first
+        self.clear();
+
+        // Clone L1 table entries
+        for i in 0..L1_SIZE {
+            let source_entry = other.l1_table[i].read();
+            if let Some(ref entry) = *source_entry {
+                *self.l1_table[i].write() = Some(CapabilityEntry {
+                    capability: entry.capability,
+                    object: entry.object.clone(),
+                    rights: entry.rights,
+                    usage_count: AtomicU64::new(0),
+                    inheritance_flags: entry.inheritance_flags,
+                });
+                self.stats.total_caps.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        // Clone L2 table entries
+        #[cfg(feature = "alloc")]
+        {
+            let source_l2 = other.l2_tables.read();
+            let mut dest_l2 = self.l2_tables.write();
+
+            for (l1_index, source_table) in source_l2.iter() {
+                let new_table: Box<[RwLock<Option<CapabilityEntry>>; L2_SIZE]> =
+                    Box::new(core::array::from_fn(|_| RwLock::new(None)));
+
+                for j in 0..L2_SIZE {
+                    let source_entry = source_table[j].read();
+                    if let Some(ref entry) = *source_entry {
+                        *new_table[j].write() = Some(CapabilityEntry {
+                            capability: entry.capability,
+                            object: entry.object.clone(),
+                            rights: entry.rights,
+                            usage_count: AtomicU64::new(0),
+                            inheritance_flags: entry.inheritance_flags,
+                        });
+                        self.stats.total_caps.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+
+                dest_l2.insert(*l1_index, new_table);
+            }
+        }
+
+        // Set generation to match source
+        self.generation
+            .store(other.generation.load(Ordering::SeqCst), Ordering::SeqCst);
+
+        Ok(())
+    }
+
     /// Revoke all capabilities (for process cleanup)
     pub fn revoke_all(&mut self) {
         self.clear();

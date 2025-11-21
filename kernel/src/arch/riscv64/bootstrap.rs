@@ -1,5 +1,6 @@
 // RISC-V-specific bootstrap output functions
 
+#[allow(unused_imports)]
 use crate::println;
 
 pub fn stage1_start() {

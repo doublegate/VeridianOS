@@ -3,7 +3,7 @@
 //! This module provides O(1) lookup for IPC endpoints and channels,
 //! managing the global namespace for IPC operations.
 
-#![allow(dead_code)]
+#![allow(dead_code, clippy::explicit_auto_deref)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -26,6 +26,7 @@ static mut IPC_REGISTRY_PTR: *mut Mutex<IpcRegistry> = core::ptr::null_mut();
 
 /// Initialize the IPC registry
 pub fn init() {
+    #[allow(unused_imports)]
     use crate::println;
 
     unsafe {
@@ -445,6 +446,54 @@ pub fn remove_channel(channel_id: u64) -> Result<()> {
 
         #[cfg(not(feature = "alloc"))]
         Err(IpcError::EndpointNotFound)
+    })
+}
+
+/// Remove all endpoints owned by a process (used during process cleanup)
+pub fn remove_process_endpoints(owner: ProcessId) -> Result<usize> {
+    with_registry_mut(|registry| {
+        #[cfg(feature = "alloc")]
+        {
+            // Get all endpoint IDs owned by this process
+            let endpoint_ids: alloc::vec::Vec<EndpointId> = registry
+                .process_endpoints
+                .get(&owner)
+                .map(|eps| eps.keys().cloned().collect())
+                .unwrap_or_default();
+
+            let mut removed_count = 0;
+
+            // Remove each endpoint from the registry
+            for endpoint_id in &endpoint_ids {
+                // Remove from endpoints table
+                if registry.endpoints.remove(endpoint_id).is_some() {
+                    registry
+                        .stats
+                        .endpoints_destroyed
+                        .fetch_add(1, Ordering::Relaxed);
+                    removed_count += 1;
+                }
+
+                // Remove from channels table (in case it's a channel endpoint)
+                if registry.channels.remove(endpoint_id).is_some() {
+                    registry
+                        .stats
+                        .channels_destroyed
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+
+            // Remove the process's endpoint mapping entirely
+            registry.process_endpoints.remove(&owner);
+
+            Ok(removed_count)
+        }
+
+        #[cfg(not(feature = "alloc"))]
+        {
+            let _ = owner;
+            Ok(0)
+        }
     })
 }
 

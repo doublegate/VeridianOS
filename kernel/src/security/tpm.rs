@@ -97,6 +97,7 @@ pub enum TpmError {
 }
 
 /// TPM 2.0 interface
+#[allow(dead_code)]
 pub struct Tpm {
     initialized: bool,
     locality: u8,
@@ -231,7 +232,7 @@ impl Tpm {
     }
 
     /// Read Platform Configuration Register (PCR)
-    pub fn pcr_read(&self, pcr_index: PcrIndex) -> TpmResult<[u8; 32]> {
+    pub fn pcr_read(&self, _pcr_index: PcrIndex) -> TpmResult<[u8; 32]> {
         if !self.initialized {
             return Err(TpmError::NotInitialized);
         }
@@ -239,7 +240,7 @@ impl Tpm {
         // Stub implementation - would read from TPM
         let pcr_value = [0u8; 32];
 
-        crate::println!("[TPM] Reading PCR {}", pcr_index);
+        crate::println!("[TPM] Reading PCR {}", _pcr_index);
 
         // In real implementation, send TPM2_PCR_Read command
 
@@ -247,12 +248,12 @@ impl Tpm {
     }
 
     /// Extend Platform Configuration Register with measurement
-    pub fn pcr_extend(&mut self, pcr_index: PcrIndex, data: &[u8; 32]) -> TpmResult<()> {
+    pub fn pcr_extend(&mut self, _pcr_index: PcrIndex, _data: &[u8; 32]) -> TpmResult<()> {
         if !self.initialized {
             return Err(TpmError::NotInitialized);
         }
 
-        crate::println!("[TPM] Extending PCR {}", pcr_index);
+        crate::println!("[TPM] Extending PCR {}", _pcr_index);
 
         // In real implementation:
         // 1. Read current PCR value
@@ -263,14 +264,14 @@ impl Tpm {
     }
 
     /// Create attestation quote
-    pub fn quote(&self, pcr_selection: &[PcrIndex], nonce: &[u8; 32]) -> TpmResult<Vec<u8>> {
+    pub fn quote(&self, _pcr_selection: &[PcrIndex], _nonce: &[u8; 32]) -> TpmResult<Vec<u8>> {
         if !self.initialized {
             return Err(TpmError::NotInitialized);
         }
 
         crate::println!(
             "[TPM] Creating attestation quote for {} PCRs",
-            pcr_selection.len()
+            _pcr_selection.len()
         );
 
         // Stub - would create signed quote of PCR values
@@ -280,12 +281,12 @@ impl Tpm {
     }
 
     /// Seal data to TPM (encrypt with TPM key)
-    pub fn seal(&self, data: &[u8], pcr_selection: &[PcrIndex]) -> TpmResult<Vec<u8>> {
+    pub fn seal(&self, _data: &[u8], _pcr_selection: &[PcrIndex]) -> TpmResult<Vec<u8>> {
         if !self.initialized {
             return Err(TpmError::NotInitialized);
         }
 
-        crate::println!("[TPM] Sealing {} bytes to PCRs", data.len());
+        crate::println!("[TPM] Sealing {} bytes to PCRs", _data.len());
 
         // Stub - would encrypt data with TPM storage key
         // Data can only be unsealed if PCR values match
@@ -295,7 +296,7 @@ impl Tpm {
     }
 
     /// Unseal data from TPM (decrypt with TPM key)
-    pub fn unseal(&self, sealed_blob: &[u8]) -> TpmResult<Vec<u8>> {
+    pub fn unseal(&self, _sealed_blob: &[u8]) -> TpmResult<Vec<u8>> {
         if !self.initialized {
             return Err(TpmError::NotInitialized);
         }
@@ -323,15 +324,15 @@ impl Tpm {
     }
 
     /// Sign data with TPM key
-    pub fn sign(&self, handle: TpmHandle, data: &[u8]) -> TpmResult<Vec<u8>> {
+    pub fn sign(&self, _handle: TpmHandle, _data: &[u8]) -> TpmResult<Vec<u8>> {
         if !self.initialized {
             return Err(TpmError::NotInitialized);
         }
 
         crate::println!(
             "[TPM] Signing {} bytes with key handle 0x{:08X}",
-            data.len(),
-            handle
+            _data.len(),
+            _handle
         );
 
         // Stub - would sign with TPM key
@@ -343,15 +344,18 @@ impl Tpm {
     /// Verify signature with TPM key
     pub fn verify_signature(
         &self,
-        handle: TpmHandle,
-        data: &[u8],
-        signature: &[u8],
+        _handle: TpmHandle,
+        _data: &[u8],
+        _signature: &[u8],
     ) -> TpmResult<bool> {
         if !self.initialized {
             return Err(TpmError::NotInitialized);
         }
 
-        crate::println!("[TPM] Verifying signature with key handle 0x{:08X}", handle);
+        crate::println!(
+            "[TPM] Verifying signature with key handle 0x{:08X}",
+            _handle
+        );
 
         // Stub - would verify with TPM key
         Ok(true)

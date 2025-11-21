@@ -2,6 +2,9 @@
 //!
 //! Implements console drivers for VGA text mode and serial console.
 
+// Allow dead code for console driver features not yet fully utilized
+#![allow(dead_code, static_mut_refs)]
+
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
 use spin::Mutex;
@@ -95,6 +98,12 @@ unsafe impl Send for VgaConsole {}
 // SAFETY: VgaConsole is safe to share between threads as the buffer
 // is a fixed hardware address and mutation is protected by &mut self
 unsafe impl Sync for VgaConsole {}
+
+impl Default for VgaConsole {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl VgaConsole {
     /// Create a new VGA console
@@ -290,7 +299,7 @@ impl SerialConsole {
             crate::arch::outb(self.port + 3, 0x80);
 
             // Set divisor to 3 (38400 baud)
-            crate::arch::outb(self.port + 0, 0x03);
+            crate::arch::outb(self.port, 0x03);
             crate::arch::outb(self.port + 1, 0x00);
 
             // 8 bits, no parity, one stop bit
@@ -418,6 +427,12 @@ pub struct ConsoleDriver {
     name: String,
 }
 
+impl Default for ConsoleDriver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConsoleDriver {
     /// Create a new console driver
     pub fn new() -> Self {
@@ -478,8 +493,8 @@ impl Driver for ConsoleDriver {
         matches!(device.class, DeviceClass::Display | DeviceClass::Serial)
     }
 
-    fn probe(&mut self, device: &DeviceInfo) -> Result<(), &'static str> {
-        crate::println!("[CONSOLE] Probing device: {}", device.name);
+    fn probe(&mut self, _device: &DeviceInfo) -> Result<(), &'static str> {
+        crate::println!("[CONSOLE] Probing device: {}", _device.name);
         Ok(())
     }
 
@@ -503,8 +518,8 @@ impl Driver for ConsoleDriver {
         Ok(())
     }
 
-    fn detach(&mut self, device: &DeviceInfo) -> Result<(), &'static str> {
-        crate::println!("[CONSOLE] Detaching from device: {}", device.name);
+    fn detach(&mut self, _device: &DeviceInfo) -> Result<(), &'static str> {
+        crate::println!("[CONSOLE] Detaching from device: {}", _device.name);
         // TODO: Remove specific console device
         Ok(())
     }
@@ -519,12 +534,12 @@ impl Driver for ConsoleDriver {
         Ok(())
     }
 
-    fn handle_interrupt(&mut self, irq: u8) -> Result<(), &'static str> {
-        crate::println!("[CONSOLE] Handling interrupt {} for console", irq);
+    fn handle_interrupt(&mut self, _irq: u8) -> Result<(), &'static str> {
+        crate::println!("[CONSOLE] Handling interrupt {} for console", _irq);
         Ok(())
     }
 
-    fn read(&mut self, _offset: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
+    fn read(&mut self, _offset: u64, _buffer: &mut [u8]) -> Result<usize, &'static str> {
         // TODO: Read input from console (keyboard)
         Ok(0)
     }
@@ -604,8 +619,8 @@ pub fn init() {
     let driver_framework = crate::services::driver_framework::get_driver_framework();
     let console_instance = ConsoleDriver::new();
 
-    if let Err(e) = driver_framework.register_driver(Box::new(console_instance)) {
-        crate::println!("[CONSOLE] Failed to register console driver: {}", e);
+    if let Err(_e) = driver_framework.register_driver(Box::new(console_instance)) {
+        crate::println!("[CONSOLE] Failed to register console driver: {}", _e);
     } else {
         crate::println!("[CONSOLE] Console subsystem initialized");
     }

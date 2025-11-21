@@ -147,6 +147,7 @@ pub struct MemoryRegion {
 }
 
 /// Initialize the memory management subsystem
+#[allow(unused_variables, unused_assignments)]
 pub fn init(memory_map: &[MemoryRegion]) {
     #[cfg(target_arch = "aarch64")]
     {
@@ -183,7 +184,9 @@ pub fn init(memory_map: &[MemoryRegion]) {
         #[cfg(not(target_arch = "aarch64"))]
         println!("[MM] Frame allocator locked successfully");
 
+        #[allow(unused_assignments)]
         let mut total_memory = 0u64;
+        #[allow(unused_assignments)]
         let mut usable_memory = 0u64;
 
         for (idx, region) in memory_map.iter().enumerate() {

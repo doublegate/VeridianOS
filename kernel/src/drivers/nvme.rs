@@ -2,6 +2,10 @@
 //!
 //! High-performance storage driver for NVMe SSDs using the BlockDevice trait.
 
+// Allow dead code for hardware register definitions that are part of the NVMe spec
+// but not yet used in the current implementation
+#![allow(dead_code)]
+
 use alloc::{vec, vec::Vec};
 use core::sync::atomic::AtomicU16;
 
@@ -205,10 +209,10 @@ impl NvmeController {
 
         // Read version
         let version = self.read_reg(REG_VS);
-        let major = (version >> 16) & 0xFFFF;
-        let minor = (version >> 8) & 0xFF;
-        let tertiary = version & 0xFF;
-        println!("[NVME] Version: {}.{}.{}", major, minor, tertiary);
+        let _major = (version >> 16) & 0xFFFF;
+        let _minor = (version >> 8) & 0xFF;
+        let _tertiary = version & 0xFF;
+        println!("[NVME] Version: {}.{}.{}", _major, _minor, _tertiary);
 
         // Read capabilities
         let cap = self.read_reg64(REG_CAP);

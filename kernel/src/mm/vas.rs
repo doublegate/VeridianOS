@@ -3,6 +3,8 @@
 //! Manages virtual memory for processes including page tables,
 //! memory mappings, and address space operations.
 
+#![allow(clippy::manual_div_ceil)]
+
 use core::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "alloc")]
@@ -579,6 +581,30 @@ impl VirtualAddressSpace {
             .store(0x4000_0000_0000, Ordering::Release);
 
         Ok(())
+    }
+
+    /// Get user stack base address
+    pub fn user_stack_base(&self) -> usize {
+        // User stack starts below stack_top and grows downward
+        // Reserve 8MB for stack
+        const DEFAULT_STACK_SIZE: u64 = 8 * 1024 * 1024;
+        (self.stack_top.load(Ordering::Acquire) - DEFAULT_STACK_SIZE) as usize
+    }
+
+    /// Get user stack size
+    pub fn user_stack_size(&self) -> usize {
+        // Default stack size is 8MB
+        8 * 1024 * 1024
+    }
+
+    /// Get stack top address
+    pub fn stack_top(&self) -> usize {
+        self.stack_top.load(Ordering::Acquire) as usize
+    }
+
+    /// Set stack top address
+    pub fn set_stack_top(&self, addr: usize) {
+        self.stack_top.store(addr as u64, Ordering::Release);
     }
 
     /// Map a single page at a virtual address

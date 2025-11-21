@@ -3,7 +3,7 @@
 //! Implements a slab allocator for the kernel heap with size classes
 //! and per-CPU caches for performance.
 
-#![allow(dead_code)]
+#![allow(dead_code, clippy::unwrap_or_default)]
 
 use core::{alloc::Layout, ptr::NonNull};
 
@@ -240,6 +240,7 @@ pub fn init() -> Result<(), &'static str> {
     #[cfg(not(target_arch = "aarch64"))]
     println!("[HEAP] Initializing kernel heap at 0x{:x}", HEAP_START);
 
+    #[allow(unused_unsafe)]
     unsafe {
         // Use the static heap array instead of an arbitrary address
         // Use raw pointers to avoid static mut refs warning

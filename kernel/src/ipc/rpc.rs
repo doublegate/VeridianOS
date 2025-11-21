@@ -4,6 +4,8 @@
 //!
 //! Provides method-based RPC with service discovery and marshaling.
 
+#![allow(static_mut_refs)]
+
 use alloc::{
     collections::BTreeMap,
     string::{String, ToString},
@@ -190,7 +192,7 @@ impl RpcServer {
     /// response.
     pub fn process_requests(&self) -> Result<(), RpcError> {
         // Receive incoming request
-        let request = sync_receive(self.endpoint_id).map_err(|e| RpcError::from(e))?;
+        let request = sync_receive(self.endpoint_id).map_err(RpcError::from)?;
 
         match request {
             Message::Small(msg) => {
@@ -229,7 +231,7 @@ impl RpcServer {
                                     .with_data(1, err.error_code as u64);
 
                                 sync_send(Message::Small(error_msg), self.endpoint_id)
-                                    .map_err(|e| RpcError::from(e))?;
+                                    .map_err(RpcError::from)?;
                                 return Ok(());
                             }
                         }
@@ -243,7 +245,7 @@ impl RpcServer {
                         .with_data(1, -404i64 as u64);
 
                     sync_send(Message::Small(error_msg), self.endpoint_id)
-                        .map_err(|e| RpcError::from(e))?;
+                        .map_err(RpcError::from)?;
                     return Ok(());
                 }
 
@@ -264,7 +266,7 @@ impl RpcServer {
 
                 // Send response
                 sync_send(Message::Small(response_msg), self.endpoint_id)
-                    .map_err(|e| RpcError::from(e))?;
+                    .map_err(RpcError::from)?;
 
                 Ok(())
             }

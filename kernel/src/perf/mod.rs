@@ -59,6 +59,7 @@ pub fn reset_stats() {
 }
 
 /// Performance profiler
+#[allow(dead_code)]
 pub struct Profiler {
     start_time: u64,
     name: &'static str,
@@ -75,8 +76,8 @@ impl Profiler {
 
     /// End profiling and print results
     pub fn end(self) {
-        let elapsed = crate::test_framework::read_timestamp() - self.start_time;
-        println!("[PERF] {} took {} cycles", self.name, elapsed);
+        let _elapsed = crate::test_framework::read_timestamp() - self.start_time;
+        println!("[PERF] {} took {} cycles", self.name, _elapsed);
     }
 }
 

@@ -9,8 +9,8 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use spin::Mutex;
 
-// Import println! macro
-#[cfg(not(target_arch = "aarch64"))]
+// Import println! macro - may be no-op on some architectures
+#[allow(unused_imports)]
 use crate::println;
 use crate::raii::{FrameGuard, FramesGuard};
 

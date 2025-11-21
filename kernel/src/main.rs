@@ -121,6 +121,7 @@ pub extern "C" fn kernel_main() -> ! {
 
 // For x86_64, kernel_main_impl is called directly from x86_64_kernel_entry
 
+#[allow(unreachable_code)]
 fn kernel_main_impl() -> ! {
     // Architecture-specific early initialization
     #[cfg(target_arch = "x86_64")]

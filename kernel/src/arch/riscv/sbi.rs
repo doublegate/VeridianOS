@@ -2,6 +2,9 @@
 //!
 //! Provides wrappers for SBI calls to interact with machine mode firmware.
 
+// Some SBI extension IDs are defined for future use
+#![allow(dead_code)]
+
 /// SBI extension IDs
 const SBI_EXT_BASE: usize = 0x10;
 const SBI_EXT_TIMER: usize = 0x54494D45; // "TIME"
@@ -90,8 +93,9 @@ pub fn console_getchar() -> isize {
 }
 
 /// Initialize SBI and print version info
+#[allow(unused_imports)]
 pub fn init() {
-    use crate::println;
+    use crate::println; // Required for macro availability in this scope
 
     let impl_id = get_sbi_impl_id();
     let impl_version = get_sbi_impl_version();

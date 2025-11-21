@@ -3,6 +3,9 @@
 //! This driver supports the Intel E1000 Gigabit Ethernet controller,
 //! commonly found in QEMU and VirtualBox virtual machines.
 
+// Allow dead code for hardware register definitions that are part of the E1000 spec
+#![allow(dead_code)]
+
 use crate::{
     error::KernelError,
     net::{

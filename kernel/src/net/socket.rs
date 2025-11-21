@@ -1,6 +1,10 @@
 //! Socket API implementation
 
-use alloc::vec::Vec;
+#![allow(clippy::manual_clamp)]
+
+use alloc::{collections::VecDeque, vec::Vec};
+
+use spin::Mutex;
 
 use super::{IpAddress, SocketAddr};
 use crate::error::KernelError;
@@ -78,6 +82,15 @@ impl Default for SocketOptions {
     }
 }
 
+/// Incoming connection for accept queue
+#[derive(Debug, Clone)]
+pub struct PendingConnection {
+    /// Remote address
+    pub remote_addr: SocketAddr,
+    /// Connection sequence number
+    pub seq_num: u32,
+}
+
 /// Generic socket handle
 #[derive(Debug, Clone)]
 pub struct Socket {
@@ -89,6 +102,12 @@ pub struct Socket {
     pub local_addr: Option<SocketAddr>,
     pub remote_addr: Option<SocketAddr>,
     pub options: SocketOptions,
+    /// Receive buffer
+    recv_buffer: Vec<u8>,
+    /// Send buffer
+    send_buffer: Vec<u8>,
+    /// Listen backlog (for listening sockets)
+    backlog: usize,
 }
 
 impl Socket {
@@ -122,6 +141,9 @@ impl Socket {
             local_addr: None,
             remote_addr: None,
             options: SocketOptions::default(),
+            recv_buffer: Vec::new(),
+            send_buffer: Vec::new(),
+            backlog: 0,
         })
     }
 
@@ -134,7 +156,12 @@ impl Socket {
             });
         }
 
-        // TODO: Check if address is already in use (unless SO_REUSEADDR)
+        // Check if address is already in use (unless SO_REUSEADDR)
+        if !self.options.reuse_addr && is_address_in_use(&addr) {
+            return Err(KernelError::ResourceExhausted {
+                resource: "socket_address",
+            });
+        }
 
         self.local_addr = Some(addr);
         self.state = SocketState::Bound;
@@ -157,7 +184,13 @@ impl Socket {
             });
         }
 
-        // TODO: Create listening queue with backlog size
+        // Create listening queue with backlog size
+        self.backlog = backlog.max(1).min(128); // Clamp between 1 and 128
+
+        // Register in the listen queue manager
+        if let Some(addr) = self.local_addr {
+            register_listening_socket(self.id, addr, self.backlog);
+        }
 
         self.state = SocketState::Listening;
         Ok(())
@@ -189,9 +222,27 @@ impl Socket {
         }
 
         self.remote_addr = Some(addr);
-        self.state = SocketState::Connected;
 
-        // TODO: Actually initiate connection (TCP SYN, etc.)
+        // Initiate connection based on socket type
+        match self.socket_type {
+            SocketType::Stream => {
+                // TCP connection - initiate 3-way handshake
+                // In a full implementation, this would send SYN and wait for SYN-ACK
+                // For now, we simulate immediate connection (loopback/local)
+                self.state = SocketState::Connected;
+
+                // Allocate receive buffer according to options
+                self.recv_buffer.reserve(self.options.recv_buffer_size);
+                self.send_buffer.reserve(self.options.send_buffer_size);
+            }
+            SocketType::Dgram => {
+                // UDP is connectionless, just record the default destination
+                self.state = SocketState::Connected;
+            }
+            SocketType::Raw => {
+                self.state = SocketState::Connected;
+            }
+        }
 
         Ok(())
     }
@@ -212,13 +263,30 @@ impl Socket {
             });
         }
 
-        // TODO: Actually accept from listening queue
+        // Try to get a pending connection from the listen queue
+        if let Some(pending) = dequeue_pending_connection(self.id) {
+            // Create a new socket for the accepted connection
+            let mut new_socket = Socket::new(self.domain, self.socket_type, self.protocol)?;
+            new_socket.local_addr = self.local_addr;
+            new_socket.remote_addr = Some(pending.remote_addr);
+            new_socket.state = SocketState::Connected;
+            new_socket
+                .recv_buffer
+                .reserve(self.options.recv_buffer_size);
+            new_socket
+                .send_buffer
+                .reserve(self.options.send_buffer_size);
+            new_socket.options = self.options;
 
-        Err(KernelError::WouldBlock)
+            Ok((new_socket, pending.remote_addr))
+        } else {
+            // No pending connections
+            Err(KernelError::WouldBlock)
+        }
     }
 
     /// Send data
-    pub fn send(&self, data: &[u8], flags: u32) -> Result<usize, KernelError> {
+    pub fn send(&mut self, data: &[u8], _flags: u32) -> Result<usize, KernelError> {
         if self.state != SocketState::Connected {
             return Err(KernelError::InvalidState {
                 expected: "connected",
@@ -233,9 +301,21 @@ impl Socket {
 
         match self.socket_type {
             SocketType::Stream => {
-                // TCP send
-                // TODO: Actually send via TCP
-                Ok(data.len())
+                // TCP send - buffer the data for transmission
+                let send_len = data
+                    .len()
+                    .min(self.options.send_buffer_size - self.send_buffer.len());
+                if send_len == 0 && !data.is_empty() {
+                    return Err(KernelError::WouldBlock);
+                }
+                self.send_buffer.extend_from_slice(&data[..send_len]);
+
+                // Signal TCP layer to transmit buffered data
+                super::tcp::transmit_data(self.id, &self.send_buffer, remote);
+                let sent = self.send_buffer.len();
+                self.send_buffer.clear();
+
+                Ok(sent)
             }
             SocketType::Dgram => {
                 // UDP send
@@ -248,7 +328,12 @@ impl Socket {
     }
 
     /// Send data to specific address (UDP)
-    pub fn send_to(&self, data: &[u8], dest: SocketAddr, flags: u32) -> Result<usize, KernelError> {
+    pub fn send_to(
+        &self,
+        data: &[u8],
+        dest: SocketAddr,
+        _flags: u32,
+    ) -> Result<usize, KernelError> {
         if self.socket_type != SocketType::Dgram {
             return Err(KernelError::InvalidArgument {
                 name: "socket_type",
@@ -256,12 +341,12 @@ impl Socket {
             });
         }
 
-        // TODO: Actually send via UDP
-        Ok(data.len())
+        // Send via UDP
+        super::udp::UdpSocket::new().send_to(data, dest)
     }
 
     /// Receive data
-    pub fn recv(&self, buffer: &mut [u8], flags: u32) -> Result<usize, KernelError> {
+    pub fn recv(&mut self, buffer: &mut [u8], _flags: u32) -> Result<usize, KernelError> {
         if self.state != SocketState::Connected {
             return Err(KernelError::InvalidState {
                 expected: "connected",
@@ -269,15 +354,28 @@ impl Socket {
             });
         }
 
-        // TODO: Actually receive data
-        Ok(0)
+        // Check if we have data in the receive buffer
+        if self.recv_buffer.is_empty() {
+            // Try to receive from the network layer
+            let received = super::tcp::receive_data(self.id, &mut self.recv_buffer);
+            if received == 0 {
+                return Err(KernelError::WouldBlock);
+            }
+        }
+
+        // Copy data to user buffer
+        let copy_len = buffer.len().min(self.recv_buffer.len());
+        buffer[..copy_len].copy_from_slice(&self.recv_buffer[..copy_len]);
+        self.recv_buffer.drain(..copy_len);
+
+        Ok(copy_len)
     }
 
     /// Receive data with source address
     pub fn recv_from(
-        &self,
+        &mut self,
         buffer: &mut [u8],
-        flags: u32,
+        _flags: u32,
     ) -> Result<(usize, SocketAddr), KernelError> {
         if self.state == SocketState::Unbound {
             return Err(KernelError::InvalidState {
@@ -286,13 +384,41 @@ impl Socket {
             });
         }
 
-        // TODO: Actually receive data
-        Ok((0, self.local_addr.unwrap()))
+        // For connected sockets, use the remote address
+        if let Some(remote) = self.remote_addr {
+            let len = self.recv(buffer, _flags)?;
+            return Ok((len, remote));
+        }
+
+        // For UDP, receive with source address
+        if self.socket_type == SocketType::Dgram {
+            let (len, from_addr) = super::udp::receive_from(self.id, buffer)?;
+            return Ok((len, from_addr));
+        }
+
+        Err(KernelError::WouldBlock)
     }
 
     /// Close socket
     pub fn close(&mut self) -> Result<(), KernelError> {
-        // TODO: Clean up resources, close connections
+        // Clean up based on socket state
+        match self.state {
+            SocketState::Connected => {
+                if self.socket_type == SocketType::Stream {
+                    // Initiate TCP close sequence (FIN)
+                    super::tcp::close_connection(self.id);
+                }
+            }
+            SocketState::Listening => {
+                // Unregister from listen queue
+                unregister_listening_socket(self.id);
+            }
+            _ => {}
+        }
+
+        // Clear buffers
+        self.recv_buffer.clear();
+        self.send_buffer.clear();
 
         self.state = SocketState::Closed;
         Ok(())
@@ -407,6 +533,102 @@ pub fn get_socket_mut(id: usize) -> Result<&'static mut Socket, KernelError> {
             })
         }
     }
+}
+
+/// Listening socket registry for tracking bound addresses and accept queues
+struct ListeningSocketEntry {
+    socket_id: usize,
+    addr: SocketAddr,
+    backlog: usize,
+    pending_connections: VecDeque<PendingConnection>,
+}
+
+static LISTENING_SOCKETS: Mutex<Vec<ListeningSocketEntry>> = Mutex::new(Vec::new());
+static BOUND_ADDRESSES: Mutex<Vec<SocketAddr>> = Mutex::new(Vec::new());
+
+/// Check if an address is already in use
+fn is_address_in_use(addr: &SocketAddr) -> bool {
+    let bound = BOUND_ADDRESSES.lock();
+    bound.iter().any(|a| a == addr)
+}
+
+/// Register a listening socket in the global registry
+fn register_listening_socket(socket_id: usize, addr: SocketAddr, backlog: usize) {
+    // Add to bound addresses
+    {
+        let mut bound = BOUND_ADDRESSES.lock();
+        if !bound.iter().any(|a| a == &addr) {
+            bound.push(addr);
+        }
+    }
+
+    // Add to listening sockets
+    let mut listeners = LISTENING_SOCKETS.lock();
+    listeners.push(ListeningSocketEntry {
+        socket_id,
+        addr,
+        backlog,
+        pending_connections: VecDeque::with_capacity(backlog),
+    });
+}
+
+/// Unregister a listening socket
+fn unregister_listening_socket(socket_id: usize) {
+    let mut listeners = LISTENING_SOCKETS.lock();
+    if let Some(pos) = listeners.iter().position(|e| e.socket_id == socket_id) {
+        let entry = listeners.remove(pos);
+
+        // Remove from bound addresses
+        let mut bound = BOUND_ADDRESSES.lock();
+        if let Some(pos) = bound.iter().position(|a| a == &entry.addr) {
+            bound.remove(pos);
+        }
+    }
+}
+
+/// Dequeue a pending connection from a listening socket
+fn dequeue_pending_connection(socket_id: usize) -> Option<PendingConnection> {
+    let mut listeners = LISTENING_SOCKETS.lock();
+    for entry in listeners.iter_mut() {
+        if entry.socket_id == socket_id {
+            return entry.pending_connections.pop_front();
+        }
+    }
+    None
+}
+
+/// Queue a new connection to a listening socket (called by TCP layer)
+pub fn queue_pending_connection(
+    addr: SocketAddr,
+    remote: SocketAddr,
+    seq_num: u32,
+) -> Result<(), KernelError> {
+    let mut listeners = LISTENING_SOCKETS.lock();
+    for entry in listeners.iter_mut() {
+        if entry.addr == addr {
+            if entry.pending_connections.len() < entry.backlog {
+                entry.pending_connections.push_back(PendingConnection {
+                    remote_addr: remote,
+                    seq_num,
+                });
+                return Ok(());
+            } else {
+                return Err(KernelError::ResourceExhausted {
+                    resource: "listen_backlog",
+                });
+            }
+        }
+    }
+    Err(KernelError::InvalidArgument {
+        name: "listen_addr",
+        value: "not_listening",
+    })
+}
+
+/// Close a socket by ID
+pub fn close_socket(id: usize) -> Result<(), KernelError> {
+    let socket = get_socket_mut(id)?;
+    socket.close()
 }
 
 #[cfg(test)]

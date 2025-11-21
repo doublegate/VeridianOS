@@ -1,5 +1,7 @@
 //! x86_64 system call entry point
 
+#![allow(function_casts_as_integer)]
+
 use crate::syscall::syscall_handler;
 
 /// x86_64 SYSCALL instruction entry point

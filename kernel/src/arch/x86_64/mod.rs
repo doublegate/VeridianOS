@@ -1,3 +1,5 @@
+#![allow(clippy::missing_safety_doc)]
+
 pub mod boot;
 pub mod bootstrap;
 pub mod context;

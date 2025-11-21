@@ -2,6 +2,8 @@
 //!
 //! Implements ASLR, stack canaries, and other memory protection mechanisms.
 
+#![allow(static_mut_refs, clippy::not_unsafe_ptr_arg_deref)]
+
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use spin::RwLock;

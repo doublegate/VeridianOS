@@ -4,6 +4,9 @@
 //! and reception, enabling zero-copy operation with minimal allocation
 //! overhead.
 
+// Allow dead code for DMA pool fields pending driver integration
+#![allow(dead_code, static_mut_refs)]
+
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 

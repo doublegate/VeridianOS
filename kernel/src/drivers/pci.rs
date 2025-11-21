@@ -2,6 +2,8 @@
 //!
 //! Implements PCI bus enumeration and device management.
 
+#![allow(static_mut_refs)]
+
 use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 use core::mem;
 
@@ -219,6 +221,12 @@ pub struct PciBus {
     enumerated: core::sync::atomic::AtomicBool,
 }
 
+impl Default for PciBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PciBus {
     /// Create a new PCI bus
     pub fn new() -> Self {
@@ -229,12 +237,14 @@ impl PciBus {
     }
 
     /// Enumerate all PCI devices
+    #[allow(unused_assignments)]
     pub fn enumerate_devices(&self) -> Result<(), &'static str> {
         if self.enumerated.load(core::sync::atomic::Ordering::Acquire) {
             return Ok(());
         }
 
         crate::println!("[PCI] Enumerating PCI devices...");
+        #[allow(unused_variables)]
         let mut device_count = 0;
 
         // Scan all buses
@@ -472,8 +482,8 @@ impl Bus for PciBus {
 
     fn scan(&mut self) -> Vec<DeviceInfo> {
         // Enumerate devices if not done already
-        self.enumerate_devices().unwrap_or_else(|e| {
-            crate::println!("[PCI] Enumeration failed: {}", e);
+        self.enumerate_devices().unwrap_or_else(|_e| {
+            crate::println!("[PCI] Enumeration failed: {}", _e);
         });
 
         let devices = self.devices.read();
@@ -543,8 +553,12 @@ impl Bus for PciBus {
         let location = PciLocation::new(bus, dev, func);
 
         match size {
-            1 => Ok(self.read_config_byte(location, unsafe { mem::transmute(offset) }) as u32),
-            2 => Ok(self.read_config_word(location, unsafe { mem::transmute(offset) }) as u32),
+            1 => Ok(self.read_config_byte(location, unsafe {
+                mem::transmute::<u16, PciConfigRegister>(offset)
+            }) as u32),
+            2 => Ok(self.read_config_word(location, unsafe {
+                mem::transmute::<u16, PciConfigRegister>(offset)
+            }) as u32),
             4 => Ok(self.read_config_dword(location, offset)),
             _ => Err("Invalid size"),
         }
@@ -643,8 +657,8 @@ pub fn init() {
     // guard)
     let bus_instance = PciBus::new();
 
-    if let Err(e) = driver_framework.register_bus(alloc::boxed::Box::new(bus_instance)) {
-        crate::println!("[PCI] Failed to register PCI bus: {}", e);
+    if let Err(_e) = driver_framework.register_bus(alloc::boxed::Box::new(bus_instance)) {
+        crate::println!("[PCI] Failed to register PCI bus: {}", _e);
     } else {
         crate::println!("[PCI] PCI bus driver initialized");
     }

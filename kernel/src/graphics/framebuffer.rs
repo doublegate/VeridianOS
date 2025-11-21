@@ -1,5 +1,8 @@
 //! Framebuffer implementation
 
+// Allow dead code for framebuffer fields not yet used in rendering
+#![allow(dead_code, static_mut_refs)]
+
 use super::{Color, GraphicsContext, Rect};
 use crate::error::KernelError;
 
@@ -36,6 +39,12 @@ impl Framebuffer {
 
     pub fn height(&self) -> u32 {
         self.height
+    }
+}
+
+impl Default for Framebuffer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -100,13 +109,13 @@ pub fn init() -> Result<(), KernelError> {
 
     // TODO: Get framebuffer info from bootloader
     // For now, create a dummy configuration
-    let fb = get();
-    // fb.configure(1024, 768, null_mut()); // Would need actual buffer
+    let _fb = get();
+    // _fb.configure(1024, 768, null_mut()); // Would need actual buffer
 
     println!(
         "[FB] Framebuffer initialized ({}x{})",
-        fb.width(),
-        fb.height()
+        _fb.width(),
+        _fb.height()
     );
     Ok(())
 }
