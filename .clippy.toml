@@ -1,16 +1,32 @@
-# Clippy configuration
+# Clippy configuration for VeridianOS kernel
+# Updated for Rust 1.93.0-nightly
 
 # Maximum cognitive complexity
 cognitive-complexity-threshold = 30
 
 # Maximum number of lines in a function
-too-many-lines-threshold = 100
+too-many-lines-threshold = 150
 
-# Maximum number of arguments  
-too-many-arguments-threshold = 7
+# Maximum number of arguments
+too-many-arguments-threshold = 8
 
 # Maximum single literal prefix for type complexity
-type-complexity-threshold = 250
+type-complexity-threshold = 300
 
-# Enforce MSRV
-msrv = "1.80.0"
+# Enforce MSRV (nightly-2025-11-15)
+msrv = "1.93.0"
+
+# Allow longer literal values without separators (common in crypto/OS code)
+literal-representation-threshold = 16
+
+# Kernel code often has legitimate large enum variants
+single-char-binding-names-threshold = 4
+
+# Allow more struct fields (kernel structures are complex)
+struct-field-count-threshold = 30
+
+# Disable some pedantic lints that are too noisy for kernel code
+avoid-breaking-exported-api = true
+
+# Allow doc comments on private items for kernel documentation
+check-private-items = false

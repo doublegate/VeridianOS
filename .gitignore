@@ -165,3 +165,88 @@ uart.log
 *.state
 *.snapshot
 
+# Git worktrees
+worktrees/
+
+# ISO build artifacts
+iso_build/
+*.iso
+
+# Temporary status/summary files (generated during development)
+*-STATUS-SUMMARY.md
+*-FIX-SUMMARY.md
+*-UPGRADE-STATUS.md
+memory-optimization-summary.md
+
+# Test scripts output
+test_*.rs
+
+# Python build scripts (generated)
+*.pyc
+build-disk-image.py
+test-x86-kernel.py
+create-uefi-image.py
+
+# Artifacts directory (CI downloads)
+artifacts/
+
+# Node/NPM (if accidentally created)
+node_modules/
+package-lock.json
+
+# Rust incremental compilation
+incremental/
+
+# Kernel binary outputs
+kernel.bin
+bootimage-*.bin
+
+# LLVM artifacts
+*.ll
+*.bc
+
+# Assembly intermediates
+*.S.tmp
+
+# Linker maps
+*.ld.map
+
+# Crash reports
+crash-*.txt
+hs_err_pid*.log
+
+# macOS artifacts
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows artifacts
+desktop.ini
+ehthumbs.db
+
+# Linux artifacts
+*~
+.directory
+
+# Vim session files
+Session.vim
+*.vim
+
+# JetBrains artifacts
+*.iml
+out/
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Archive files (temporary)
+*.tar.gz
+*.tar.xz
+*.zip
+*.7z
+
+# Object dump outputs
+*.objdump
+*.disasm
+
