@@ -8,7 +8,7 @@
 #![feature(custom_test_frameworks)]
 #![feature(abi_x86_interrupt)]
 #![feature(alloc_error_handler)]
-#![feature(naked_functions)]
+// naked_functions is stable since Rust 1.88.0, no feature flag needed
 #![test_runner(crate::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 

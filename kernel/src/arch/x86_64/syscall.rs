@@ -12,7 +12,7 @@ use crate::syscall::syscall_handler;
 /// This function must only be called by the CPU's SYSCALL instruction.
 /// It expects specific register states as defined by the x86_64 ABI.
 #[no_mangle]
-#[naked]
+#[unsafe(naked)]
 pub unsafe extern "C" fn syscall_entry() {
     core::arch::naked_asm!(
         // Save user context on kernel stack

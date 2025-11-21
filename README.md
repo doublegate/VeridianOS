@@ -46,7 +46,7 @@ VeridianOS is a production-ready microkernel operating system written entirely i
 
 ## 🎯 Project Status
 
-**Last Updated**: November 19, 2025
+**Last Updated**: November 20, 2025
 **Current Version**: v0.3.0-rc (Pre-release)
 **Status**: 🎉 **ALL FEATURES COMPLETE** - Ready for Testing Phase
 **Branch**: `claude/complete-project-implementation-01KUtqiAyfzZtyPR5n5knqoS`
@@ -128,7 +128,7 @@ Completed in just **5 days** with all performance targets met:
 
 ### Prerequisites
 
-- **Rust**: nightly-2025-01-15 or later
+- **Rust**: nightly-2025-11-15 (Rust 1.93.0-nightly) or later
 - **QEMU**: 8.0+ (for testing)
 - **Memory**: 8GB RAM (16GB recommended)
 - **Storage**: 20GB free disk space
@@ -145,7 +145,7 @@ cd VeridianOS
 ./scripts/install-deps.sh
 
 # Install Rust toolchain
-rustup toolchain install nightly-2025-01-15
+rustup toolchain install nightly-2025-11-15
 rustup component add rust-src llvm-tools-preview
 ```
 

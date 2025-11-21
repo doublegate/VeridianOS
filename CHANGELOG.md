@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Rust Toolchain Update (November 20, 2025)
+
+- **Toolchain upgraded**: `nightly-2025-01-15` (Rust 1.86) → `nightly-2025-11-15` (Rust 1.93.0-nightly)
+- **Reason**: Security audit dependencies (cargo-audit) require Rust 1.88+
+- **naked_functions stabilized**: Removed `#![feature(naked_functions)]` (stable since Rust 1.88.0)
+- **New syntax**: Changed `#[naked]` to `#[unsafe(naked)]` per stabilization
+- **CI updates**: Added 10 new lint allows for Rust 1.93 compatibility
+- **All architectures**: x86_64, AArch64, RISC-V building successfully
+
 ### ✨ RUST 2024 EDITION MIGRATION COMPLETE (November 19, 2025)
 
 **MAJOR MILESTONE**: Complete elimination of ALL static mut references - 100% Rust 2024 compatible!

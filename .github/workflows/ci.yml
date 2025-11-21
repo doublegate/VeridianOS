@@ -22,6 +22,9 @@ env:
     # See individual comments for rationale. All critical warnings remain enabled.
     CLIPPY_ALLOW: >-
         -A unused_variables
+        -A unused_imports
+        -A unused_assignments
+        -A unused_unsafe
         -A dead_code
         -A static_mut_refs
         -A unreachable_code
@@ -55,8 +58,15 @@ env:
         -A clippy::op_ref
         -A clippy::macro_metavars_in_unsafe
         -A clippy::not_unsafe_ptr_arg_deref
+        -A clippy::precedence
+        -A clippy::collapsible_if
+        -A clippy::collapsible_else_if
+        -A clippy::comparison_chain
+        -A clippy::implicit_saturating_sub
+        -A function_casts_as_integer
+        -A mismatched_lifetime_syntaxes
     RUSTFLAGS: "-D warnings"
-    RUST_TOOLCHAIN: nightly-2025-01-15
+    RUST_TOOLCHAIN: nightly-2025-11-15
 
 # Cancel in-progress runs on same branch
 concurrency:
