@@ -1,0 +1,14 @@
+[package]
+name = "bootimage-builder"
+version = "0.1.0"
+edition = "2021"
+description = "Creates bootable disk images from the VeridianOS kernel"
+
+# Mark as standalone package (not part of workspace)
+# This is required because it needs std and can't use bare metal config
+[workspace]
+
+[dependencies]
+bootloader = "0.11"
+anyhow = "1.0"
+clap = { version = "4.0", features = ["derive"] }

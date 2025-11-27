@@ -61,21 +61,23 @@ impl SecureRandom {
     fn get_entropy() -> CryptoResult<[u8; 32]> {
         let mut entropy = [0u8; 32];
 
-        // Try hardware RNG if available
-        #[cfg(target_arch = "x86_64")]
-        {
-            if Self::try_rdrand(&mut entropy) {
-                return Ok(entropy);
-            }
-        }
+        // Skip RDRAND for now - it causes crashes with bootloader 0.11
+        // TODO: Re-enable RDRAND after proper CPUID feature detection
+        // #[cfg(target_arch = "x86_64")]
+        // {
+        //     if Self::try_rdrand(&mut entropy) {
+        //         return Ok(entropy);
+        //     }
+        // }
 
-        // Fallback to timer-based entropy
+        // Use timer-based entropy
         Self::timer_entropy(&mut entropy);
 
         Ok(entropy)
     }
 
     #[cfg(target_arch = "x86_64")]
+    #[allow(dead_code)]
     fn try_rdrand(dest: &mut [u8; 32]) -> bool {
         use core::arch::x86_64::_rdrand64_step;
 

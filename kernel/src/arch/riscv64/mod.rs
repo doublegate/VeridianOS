@@ -14,17 +14,23 @@ pub fn init() {
     // Initialize SBI (Supervisor Binary Interface)
     super::riscv::sbi::init();
 
-    // Enable supervisor-mode external, software, and timer interrupts
+    // IMPORTANT: Do NOT enable interrupts during early boot!
+    // There is no trap handler (stvec) set up yet, so any interrupt
+    // would cause the CPU to jump to address 0 and crash/reboot.
+    //
+    // The trap handler must be set up first before enabling interrupts.
+    // For now, keep interrupts disabled - WFI will still return on
+    // external events even with interrupts disabled.
     unsafe {
-        // Enable interrupts in sstatus
-        enable_interrupts();
+        // Ensure interrupts are DISABLED in sstatus
+        core::arch::asm!("csrci sstatus, 2", options(nomem, nostack));
 
-        // Enable specific interrupt sources in sie
-        // SEIE (bit 9), STIE (bit 5), SSIE (bit 1)
-        core::arch::asm!("csrs sie, {}", in(reg) (1 << 9) | (1 << 5) | (1 << 1));
+        // Clear all interrupt enable bits in sie
+        // This prevents any interrupts from being delivered
+        core::arch::asm!("csrw sie, zero", options(nomem, nostack));
     }
 
-    println!("[RISCV64] Architecture initialization complete");
+    println!("[RISCV64] Architecture initialization complete (interrupts disabled)");
 }
 
 #[allow(dead_code)]

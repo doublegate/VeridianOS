@@ -35,44 +35,110 @@
 
 use core::panic::PanicInfo;
 
-// For x86_64, use bootloader 0.9 for working boot
+// For x86_64, use bootloader_api 0.11+ for entry point and boot info
 #[cfg(target_arch = "x86_64")]
-use bootloader::{entry_point, BootInfo};
+use bootloader_api::{config::Mapping, entry_point, BootInfo, BootloaderConfig};
 // Global allocator is defined in lib.rs
 
 // Use the kernel library
 use veridian_kernel::*;
 
+/// Bootloader configuration for x86_64
+/// Maps physical memory at a fixed address for kernel access
 #[cfg(target_arch = "x86_64")]
-entry_point!(x86_64_kernel_entry);
+const BOOTLOADER_CONFIG: BootloaderConfig = {
+    let mut config = BootloaderConfig::new_default();
+    // Map physical memory for kernel access (required for page table management)
+    config.mappings.physical_memory = Some(Mapping::Dynamic);
+    config.kernel_stack_size = 128 * 1024; // 128 KiB kernel stack
+    config
+};
 
 #[cfg(target_arch = "x86_64")]
-fn x86_64_kernel_entry(boot_info: &'static BootInfo) -> ! {
-    // Write 'E' to VGA to show we reached entry point
+entry_point!(x86_64_kernel_entry, config = &BOOTLOADER_CONFIG);
+
+#[cfg(target_arch = "x86_64")]
+fn x86_64_kernel_entry(boot_info: &'static mut BootInfo) -> ! {
+    // First thing: try direct serial output to prove we're running
+    // This uses I/O ports which don't require memory mapping
     unsafe {
-        let vga = 0xb8000 as *mut u16;
-        vga.write_volatile(0x0F45); // 'E' in white on black
-        vga.offset(1).write_volatile(0x0F42); // 'B' to show boot.rs was called
+        // Initialize serial port at 0x3F8 (COM1)
+        let base: u16 = 0x3F8;
 
-        // Also try direct serial output here
-        let port: u16 = 0x3F8;
-        // Simple serial byte output
-        core::arch::asm!(
-            "out dx, al",
-            in("dx") port,
-            in("al") b'X',
-            options(nomem, nostack, preserves_flags)
-        );
+        // Disable interrupts
+        core::arch::asm!("out dx, al", in("dx") base + 1, in("al") 0u8, options(nomem, nostack, preserves_flags));
+        // Enable DLAB
+        core::arch::asm!("out dx, al", in("dx") base + 3, in("al") 0x80u8, options(nomem, nostack, preserves_flags));
+        // Set divisor to 3 (38400 baud)
+        core::arch::asm!("out dx, al", in("dx") base, in("al") 0x03u8, options(nomem, nostack, preserves_flags));
+        core::arch::asm!("out dx, al", in("dx") base + 1, in("al") 0x00u8, options(nomem, nostack, preserves_flags));
+        // 8 bits, no parity, one stop bit
+        core::arch::asm!("out dx, al", in("dx") base + 3, in("al") 0x03u8, options(nomem, nostack, preserves_flags));
+        // Enable FIFO
+        core::arch::asm!("out dx, al", in("dx") base + 2, in("al") 0xC7u8, options(nomem, nostack, preserves_flags));
+        // Enable IRQs, RTS/DSR
+        core::arch::asm!("out dx, al", in("dx") base + 4, in("al") 0x0Bu8, options(nomem, nostack, preserves_flags));
+
+        // Output "KERNEL_ENTRY\n"
+        for &b in b"KERNEL_ENTRY\n" {
+            // Wait for transmit buffer
+            loop {
+                let status: u8;
+                core::arch::asm!("in al, dx", out("al") status, in("dx") base + 5, options(nomem, nostack, preserves_flags));
+                if (status & 0x20) != 0 {
+                    break;
+                }
+            }
+            core::arch::asm!("out dx, al", in("dx") base, in("al") b, options(nomem, nostack, preserves_flags));
+        }
     }
 
+    // Helper to output debug strings via serial
+    fn serial_puts(s: &[u8]) {
+        unsafe {
+            let base: u16 = 0x3F8;
+            for &b in s {
+                loop {
+                    let status: u8;
+                    core::arch::asm!("in al, dx", out("al") status, in("dx") base + 5, options(nomem, nostack, preserves_flags));
+                    if (status & 0x20) != 0 {
+                        break;
+                    }
+                }
+                core::arch::asm!("out dx, al", in("dx") base, in("al") b, options(nomem, nostack, preserves_flags));
+            }
+        }
+    }
+
+    // Try to write to VGA using the physical memory offset from bootloader
+    serial_puts(b"PHYS_MEM...");
+    if let Some(phys_mem_offset) = boot_info.physical_memory_offset.into_option() {
+        serial_puts(b"OK\n");
+        unsafe {
+            let vga_addr = phys_mem_offset + 0xb8000;
+            let vga = vga_addr as *mut u16;
+            vga.write_volatile(0x0F45); // 'E' in white on black
+            vga.offset(1).write_volatile(0x0F4E); // 'N' for entry
+            vga.offset(2).write_volatile(0x0F54); // 'T' for entry
+            vga.offset(3).write_volatile(0x0F52); // 'R' for entry
+            vga.offset(4).write_volatile(0x0F59); // 'Y'
+        }
+    } else {
+        serial_puts(b"NONE\n");
+    }
+
+    // Skip early_boot_init for now since serial is already initialized
     // Run early boot initialization (serial port, etc.)
-    arch::x86_64::boot::early_boot_init();
+    // arch::x86_64::boot::early_boot_init();
+    serial_puts(b"BOOT_INFO...");
 
     // Store boot info for later use
     unsafe {
         arch::x86_64::boot::BOOT_INFO = Some(boot_info);
     }
+    serial_puts(b"OK\n");
 
+    serial_puts(b"KERNEL_MAIN...\n");
     // Call the main kernel implementation
     kernel_main_impl()
 }

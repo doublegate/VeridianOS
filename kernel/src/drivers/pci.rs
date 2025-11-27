@@ -664,6 +664,19 @@ pub fn init() {
     }
 }
 
+/// Check if PCI bus has been initialized
+pub fn is_pci_initialized() -> bool {
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        PCI_BUS.get().is_some()
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    unsafe {
+        PCI_BUS_STATIC.is_some()
+    }
+}
+
 /// Get the global PCI bus
 pub fn get_pci_bus() -> &'static spin::Mutex<PciBus> {
     #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]

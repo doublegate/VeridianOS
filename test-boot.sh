@@ -15,6 +15,18 @@ timeout 5 qemu-system-riscv64 -M virt \
 
 echo ""
 echo "Testing x86_64 boot..."
-timeout 5 qemu-system-x86_64 \
-    -drive format=raw,file=target/x86_64-unknown-none/debug/bootimage-veridian-kernel.bin \
-    -serial stdio -display none 2>&1 | grep -E "Stage|BOOTOK" | head -10
+# Note: Using veridian-bios.img from bootloader 0.11+ (or legacy bootimage path as fallback)
+BIOS_IMAGE="target/x86_64-veridian/debug/veridian-bios.img"
+LEGACY_IMAGE="target/x86_64-unknown-none/debug/bootimage-veridian-kernel.bin"
+
+if [ -f "$BIOS_IMAGE" ]; then
+    timeout 5 qemu-system-x86_64 \
+        -drive format=raw,file="$BIOS_IMAGE" \
+        -serial stdio -display none 2>&1 | grep -E "Stage|BOOTOK" | head -10
+elif [ -f "$LEGACY_IMAGE" ]; then
+    timeout 5 qemu-system-x86_64 \
+        -drive format=raw,file="$LEGACY_IMAGE" \
+        -serial stdio -display none 2>&1 | grep -E "Stage|BOOTOK" | head -10
+else
+    echo "No x86_64 bootable image found. Run './build-kernel.sh x86_64' first."
+fi

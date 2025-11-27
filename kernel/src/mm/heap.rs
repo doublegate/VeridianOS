@@ -12,8 +12,9 @@ use spin::Mutex;
 
 use super::VirtualAddress;
 
-// Static heap storage - 4MB should be enough for initial testing
-static mut HEAP_MEMORY: [u8; 4 * 1024 * 1024] = [0; 4 * 1024 * 1024];
+// Static heap storage - 512KB for early boot (reduced from 4MB for bootloader
+// 0.11 compatibility)
+static mut HEAP_MEMORY: [u8; 512 * 1024] = [0; 512 * 1024];
 
 /// Kernel heap size (16 MB initially)
 pub const HEAP_SIZE: usize = 16 * 1024 * 1024;
@@ -247,7 +248,7 @@ pub fn init() -> Result<(), &'static str> {
         #[cfg_attr(target_arch = "aarch64", allow(unused_variables))]
         let heap_start = core::ptr::addr_of_mut!(HEAP_MEMORY) as *mut u8;
         #[cfg_attr(target_arch = "aarch64", allow(unused_variables))]
-        let heap_size = 4 * 1024 * 1024; // Size of HEAP_MEMORY
+        let heap_size = 512 * 1024; // Size of HEAP_MEMORY (512KB)
 
         // For RISC-V, initialize both allocators since they're separate
         #[cfg(target_arch = "riscv64")]

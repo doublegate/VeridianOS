@@ -29,9 +29,16 @@ fn main() {
     let kernel_dir = PathBuf::from(manifest_dir);
 
     // Set the linker script based on target architecture
+    // Note: For x86_64 with bootloader 0.11+, we don't use a custom linker script
+    // The bootloader handles loading the PIE kernel and setting up virtual mappings
     if target.contains("x86_64") {
-        let linker_script = kernel_dir.join("src/arch/x86_64/link.ld");
-        println!("cargo:rustc-link-arg=-T{}", linker_script.display());
+        // Check for custom x86_64-veridian target (uses custom linker script)
+        // Standard x86_64-unknown-none works with bootloader 0.11 without custom linker
+        if target == "x86_64-veridian" {
+            let linker_script = kernel_dir.join("src/arch/x86_64/link.ld");
+            println!("cargo:rustc-link-arg=-T{}", linker_script.display());
+        }
+        // For x86_64-unknown-none, let bootloader handle the linking
     } else if target.contains("aarch64") {
         let linker_script = kernel_dir.join("src/arch/aarch64/link.ld");
         println!("cargo:rustc-link-arg=-T{}", linker_script.display());

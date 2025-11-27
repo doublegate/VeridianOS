@@ -117,12 +117,12 @@ pub fn with_compositor<R, F: FnOnce(&mut Compositor) -> R>(f: F) -> Option<R> {
 pub fn init() -> Result<(), KernelError> {
     println!("[COMP] Initializing compositor...");
 
-    COMPOSITOR
-        .init(RwLock::new(Compositor::new()))
-        .map_err(|_| KernelError::InvalidState {
-            expected: "uninitialized",
-            actual: "initialized",
-        })?;
+    // Try to initialize, but don't fail if already initialized
+    if COMPOSITOR.init(RwLock::new(Compositor::new())).is_err() {
+        // Already initialized - this is fine
+        println!("[COMP] Compositor already initialized, skipping...");
+        return Ok(());
+    }
 
     // Create a test window
     with_compositor(|comp| {

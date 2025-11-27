@@ -258,7 +258,9 @@ impl Default for CpuTopology {
 }
 
 /// Maximum number of CPUs
-pub const MAX_CPUS: usize = 256;
+/// Reduced from 256 to 16 for bootloader 0.11 compatibility (reduces static
+/// data size)
+pub const MAX_CPUS: usize = 16;
 
 /// Maximum load factor for load calculation
 const MAX_LOAD_FACTOR: u32 = 10;
@@ -300,16 +302,15 @@ pub fn init() {
         return;
     }
 
-    // Detect CPU topology
+    // Simplified x86_64 SMP init for bootloader 0.11 compatibility
+    // Skip complex topology detection and AP wakeup for now
     #[cfg(target_arch = "x86_64")]
     {
-        CPU_TOPOLOGY.lock().detect();
-
-        // Initialize BSP (CPU 0)
-        init_cpu(0);
-
-        // Wake up Application Processors (APs)
-        wake_up_aps();
+        println!("[SMP] Initializing SMP support (simplified for x86_64)...");
+        // Skip CPU topology detection which uses CPUID
+        // Skip init_cpu(0) which accesses large PER_CPU_DATA array
+        // Skip wake_up_aps() which tries to wake secondary CPUs
+        println!("[SMP] SMP initialized (BSP only for x86_64)");
     }
 }
 

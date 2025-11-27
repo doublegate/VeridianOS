@@ -35,62 +35,69 @@ pub fn register_drivers() -> Result<(), KernelError> {
     // Only x86_64 has PCI support
     #[cfg(target_arch = "x86_64")]
     {
-        // Get PCI bus and enumerate devices
-        let pci_bus = crate::drivers::pci::get_pci_bus();
-        let bus = pci_bus.lock();
+        // Check if PCI is initialized before trying to access it
+        if !crate::drivers::pci::is_pci_initialized() {
+            println!("[NET-INTEGRATION] PCI bus not initialized, skipping PCI device scan");
+        } else {
+            // Get PCI bus and enumerate devices
+            let pci_bus = crate::drivers::pci::get_pci_bus();
+            let bus = pci_bus.lock();
 
-        // Ensure PCI enumeration is complete
-        let _ = bus.enumerate_devices();
+            // Ensure PCI enumeration is complete
+            let _ = bus.enumerate_devices();
 
-        // Search for Intel E1000 network cards
-        let e1000_devices = bus.find_devices_by_id(INTEL_VENDOR_ID, E1000_DEVICE_ID);
-        for device in e1000_devices {
-            println!(
-                "[NET-INTEGRATION] Found E1000 at {:02x}:{:02x}.{}",
-                device.location.bus, device.location.device, device.location.function
-            );
+            // Search for Intel E1000 network cards
+            let e1000_devices = bus.find_devices_by_id(INTEL_VENDOR_ID, E1000_DEVICE_ID);
+            for device in e1000_devices {
+                println!(
+                    "[NET-INTEGRATION] Found E1000 at {:02x}:{:02x}.{}",
+                    device.location.bus, device.location.device, device.location.function
+                );
 
-            // Get BAR0 (MMIO base address)
-            if let Some(bar0) = device.bars.first() {
-                if let Some(address) = bar0.get_memory_address() {
-                    if try_register_e1000(address).is_ok() {
-                        device_count += 1;
+                // Get BAR0 (MMIO base address)
+                if let Some(bar0) = device.bars.first() {
+                    if let Some(address) = bar0.get_memory_address() {
+                        if try_register_e1000(address).is_ok() {
+                            device_count += 1;
+                        }
                     }
                 }
             }
-        }
 
-        // Search for Intel E1000E network cards
-        let e1000e_devices = bus.find_devices_by_id(INTEL_VENDOR_ID, E1000E_DEVICE_ID);
-        for device in e1000e_devices {
-            println!(
-                "[NET-INTEGRATION] Found E1000E at {:02x}:{:02x}.{}",
-                device.location.bus, device.location.device, device.location.function
-            );
+            // Search for Intel E1000E network cards
+            let e1000e_devices = bus.find_devices_by_id(INTEL_VENDOR_ID, E1000E_DEVICE_ID);
+            for device in e1000e_devices {
+                println!(
+                    "[NET-INTEGRATION] Found E1000E at {:02x}:{:02x}.{}",
+                    device.location.bus, device.location.device, device.location.function
+                );
 
-            if let Some(bar0) = device.bars.first() {
-                if let Some(address) = bar0.get_memory_address() {
-                    if try_register_e1000(address).is_ok() {
-                        device_count += 1;
+                if let Some(bar0) = device.bars.first() {
+                    if let Some(address) = bar0.get_memory_address() {
+                        if try_register_e1000(address).is_ok() {
+                            device_count += 1;
+                        }
                     }
                 }
             }
-        }
 
-        // Search for VirtIO-Net (legacy and modern)
-        let virtio_legacy = bus.find_devices_by_id(REDHAT_VENDOR_ID, VIRTIO_NET_LEGACY_DEVICE_ID);
-        let virtio_modern = bus.find_devices_by_id(REDHAT_VENDOR_ID, VIRTIO_NET_MODERN_DEVICE_ID);
+            // Search for VirtIO-Net (legacy and modern)
+            let virtio_legacy =
+                bus.find_devices_by_id(REDHAT_VENDOR_ID, VIRTIO_NET_LEGACY_DEVICE_ID);
+            let virtio_modern =
+                bus.find_devices_by_id(REDHAT_VENDOR_ID, VIRTIO_NET_MODERN_DEVICE_ID);
 
-        for device in virtio_legacy.iter().chain(virtio_modern.iter()) {
-            println!(
-                "[NET-INTEGRATION] Found VirtIO-Net at {:02x}:{:02x}.{}",
-                device.location.bus, device.location.device, device.location.function
-            );
+            for device in virtio_legacy.iter().chain(virtio_modern.iter()) {
+                println!(
+                    "[NET-INTEGRATION] Found VirtIO-Net at {:02x}:{:02x}.{}",
+                    device.location.bus, device.location.device, device.location.function
+                );
 
-            if let Some(bar0) = device.bars.first() {
-                if let Some(address) = bar0.get_memory_address() {
-                    if try_register_virtio_net(address).is_ok() {
-                        device_count += 1;
+                if let Some(bar0) = device.bars.first() {
+                    if let Some(address) = bar0.get_memory_address() {
+                        if try_register_virtio_net(address).is_ok() {
+                            device_count += 1;
+                        }
                     }
                 }
             }

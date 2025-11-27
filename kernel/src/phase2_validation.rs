@@ -134,15 +134,20 @@ pub fn quick_health_check() -> bool {
     }
 
     // Check Network Manager
-    let network_manager = crate::drivers::network::get_network_manager();
-    let interfaces = network_manager.list_interfaces();
-    if !interfaces.is_empty() {
-        crate::println!(
-            "✓ Network Manager responding ({} interfaces)",
-            interfaces.len()
-        );
+    if crate::drivers::network::is_network_initialized() {
+        let network_manager = crate::drivers::network::get_network_manager();
+        let interfaces = network_manager.list_interfaces();
+        if !interfaces.is_empty() {
+            crate::println!(
+                "✓ Network Manager responding ({} interfaces)",
+                interfaces.len()
+            );
+        } else {
+            crate::println!("✗ Network Manager has no interfaces");
+            healthy = false;
+        }
     } else {
-        crate::println!("✗ Network Manager has no interfaces");
+        crate::println!("✗ Network Manager not initialized");
         healthy = false;
     }
 

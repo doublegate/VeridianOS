@@ -223,10 +223,9 @@ static mut NETWORK_DMA_POOL: Option<DmaBufferPool> = None;
 pub fn init_network_pool(num_buffers: usize) -> Result<(), KernelError> {
     unsafe {
         if NETWORK_DMA_POOL.is_some() {
-            return Err(KernelError::InvalidState {
-                expected: "uninitialized",
-                actual: "initialized",
-            });
+            // Already initialized - this is fine, just skip re-initialization
+            println!("[DMA-POOL] Network DMA pool already initialized, skipping...");
+            return Ok(());
         }
 
         let pool = DmaBufferPool::new(num_buffers)?;

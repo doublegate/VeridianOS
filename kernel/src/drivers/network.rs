@@ -638,6 +638,19 @@ pub fn init() {
     crate::println!("[NET] Network subsystem initialized");
 }
 
+/// Check if network manager has been initialized
+pub fn is_network_initialized() -> bool {
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        NETWORK_MANAGER.get().is_some()
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    unsafe {
+        NETWORK_MANAGER_STATIC.is_some()
+    }
+}
+
 /// Get the global network manager
 pub fn get_network_manager() -> &'static NetworkManager {
     #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]

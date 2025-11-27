@@ -27,11 +27,17 @@ log.workspace = true
 # Architecture-specific dependencies
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_64.workspace = true
-bootloader = { version = "0.9", features = ["map_physical_memory"] }
-bootloader_api = "0.11"  # Keep for API compatibility, use bootloader 0.9 for actual boot
+# bootloader 0.11+ architecture:
+# - bootloader_api: kernel-side types (entry_point, BootInfo, BootloaderConfig)
+# - bootloader: build-time disk image creation (see build.rs)
+bootloader_api = "0.11"
 uart_16550 = "0.3"
 pic8259 = "0.10"
 pc-keyboard = "0.7"
+
+# Build dependencies for creating bootable disk image
+[target.'cfg(target_arch = "x86_64")'.build-dependencies]
+bootloader = "0.11"
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 cortex-a.workspace = true

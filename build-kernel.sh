@@ -38,16 +38,34 @@ build_arch() {
     local target=$2
 
     echo -e "${BLUE}Building $arch kernel...${NC}"
-    
+
     if [ "$BUILD_TYPE" == "release" ]; then
         RELEASE_FLAG="--release"
+        BUILD_DIR="release"
     else
         RELEASE_FLAG=""
+        BUILD_DIR="debug"
     fi
-    
+
     # All architectures need -Zbuild-std for bare metal targets
     if cargo build $RELEASE_FLAG --target "$target" -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc; then
         echo -e "${GREEN}$arch build successful!${NC}"
+
+        # For x86_64, create bootable disk image using bootloader 0.11+
+        if [ "$arch" == "x86_64" ]; then
+            echo -e "${YELLOW}Creating bootable disk image for x86_64...${NC}"
+
+            KERNEL_PATH="target/$target/$BUILD_DIR/veridian-kernel"
+            OUTPUT_DIR="target/$target/$BUILD_DIR"
+
+            # Use the isolated build script to avoid workspace config conflicts
+            if ./tools/build-bootimage.sh "$KERNEL_PATH" "$OUTPUT_DIR" bios; then
+                echo -e "${GREEN}Bootable disk image created!${NC}"
+            else
+                echo -e "${YELLOW}Warning: Could not create disk image${NC}"
+                echo -e "${YELLOW}You can manually run: ./tools/build-bootimage.sh $KERNEL_PATH $OUTPUT_DIR bios${NC}"
+            fi
+        fi
     else
         echo -e "${RED}$arch build failed!${NC}"
         exit 1

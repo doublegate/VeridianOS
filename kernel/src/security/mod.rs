@@ -82,22 +82,34 @@ pub fn init() -> Result<(), KernelError> {
     // crypto::init()?; // Handled by top-level crypto module
 
     // Initialize memory protection (ASLR, stack canaries, etc.)
+    println!("[SECURITY] About to init memory_protection...");
     memory_protection::init()?;
+    println!("[SECURITY] memory_protection done");
 
     // Initialize authentication framework
+    println!("[SECURITY] About to init auth...");
     auth::init()?;
+    println!("[SECURITY] auth done");
 
     // Initialize TPM support (if available)
+    println!("[SECURITY] About to init tpm...");
     tpm::init()?;
+    println!("[SECURITY] tpm done");
 
     // Initialize MAC system
+    println!("[SECURITY] About to init mac...");
     mac::init()?;
+    println!("[SECURITY] mac done");
 
     // Initialize audit system
+    println!("[SECURITY] About to init audit...");
     audit::init()?;
+    println!("[SECURITY] audit done");
 
     // Verify secure boot (if enabled)
+    println!("[SECURITY] About to verify boot...");
     boot::verify()?;
+    println!("[SECURITY] boot verify done");
 
     println!("[SECURITY] Security subsystem initialized successfully");
     Ok(())

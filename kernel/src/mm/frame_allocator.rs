@@ -213,7 +213,9 @@ pub struct FrameAllocatorStats {
 /// Bitmap allocator for small allocations (<512 frames)
 struct BitmapAllocator {
     /// Bitmap tracking free frames (1 = free, 0 = allocated)
-    bitmap: Mutex<[u64; 16384]>, // Supports up to 1M frames (4GB)
+    /// Reduced from 16384 to 2048 for bootloader 0.11 compatibility (128K
+    /// frames = 512MB)
+    bitmap: Mutex<[u64; 2048]>,
     /// Starting frame number
     start_frame: FrameNumber,
     /// Total frames managed
@@ -225,7 +227,7 @@ struct BitmapAllocator {
 impl BitmapAllocator {
     const fn new(start_frame: FrameNumber, frame_count: usize) -> Self {
         Self {
-            bitmap: Mutex::new([u64::MAX; 16384]),
+            bitmap: Mutex::new([u64::MAX; 2048]),
             start_frame,
             total_frames: frame_count,
             free_frames: AtomicUsize::new(frame_count),
@@ -601,7 +603,8 @@ impl FrameAllocator {
         }
 
         // Split frames between bitmap and buddy allocators
-        let bitmap_frames = frame_count.min(1024 * 1024); // Max 4GB for bitmap
+        // Max 128K frames (512MB) for bitmap with 2048-entry bitmap array
+        let bitmap_frames = frame_count.min(2048 * 64);
         let buddy_frames = frame_count.saturating_sub(bitmap_frames);
 
         #[cfg(not(target_arch = "aarch64"))]

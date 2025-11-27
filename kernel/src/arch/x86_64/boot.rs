@@ -1,9 +1,9 @@
 // Boot entry point for x86_64
 
-use bootloader::BootInfo;
+use bootloader_api::BootInfo;
 
-// Store boot info for later use
-pub static mut BOOT_INFO: Option<&'static BootInfo> = None;
+// Store boot info for later use (mutable reference for 0.11+ API)
+pub static mut BOOT_INFO: Option<&'static mut BootInfo> = None;
 
 // Early initialization that must happen before kernel_main
 pub fn early_boot_init() {
