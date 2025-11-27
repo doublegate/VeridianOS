@@ -307,7 +307,7 @@ impl BlockDevice for NvmeController {
     }
 
     fn read_blocks(&self, start_block: u64, buffer: &mut [u8]) -> Result<(), KernelError> {
-        if buffer.len() % self.block_size != 0 {
+        if !buffer.len().is_multiple_of(self.block_size) {
             return Err(KernelError::InvalidArgument {
                 name: "buffer_length",
                 value: "not_multiple_of_block_size",
@@ -318,7 +318,7 @@ impl BlockDevice for NvmeController {
     }
 
     fn write_blocks(&mut self, start_block: u64, buffer: &[u8]) -> Result<(), KernelError> {
-        if buffer.len() % self.block_size != 0 {
+        if !buffer.len().is_multiple_of(self.block_size) {
             return Err(KernelError::InvalidArgument {
                 name: "buffer_length",
                 value: "not_multiple_of_block_size",

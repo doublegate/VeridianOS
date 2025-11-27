@@ -898,13 +898,13 @@ pub fn run() -> ! {
 
         // Periodically perform load balancing and cleanup
         balance_counter = balance_counter.wrapping_add(1);
-        if balance_counter % 1000 == 0 {
+        if balance_counter.is_multiple_of(1000) {
             #[cfg(feature = "alloc")]
             {
                 balance_load();
 
                 // Also clean up dead tasks
-                if balance_counter % 10000 == 0 {
+                if balance_counter.is_multiple_of(10000) {
                     cleanup_dead_tasks();
                 }
             }

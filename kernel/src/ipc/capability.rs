@@ -251,6 +251,7 @@ impl CapabilityTable {
     }
 
     /// Insert a capability into the table
+    #[allow(clippy::result_unit_err)]
     pub fn insert(&mut self, _cap: IpcCapability) -> Result<(), ()> {
         // TODO: Implement insertion
         Ok(())

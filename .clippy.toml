@@ -22,9 +22,6 @@ literal-representation-threshold = 16
 # Kernel code often has legitimate large enum variants
 single-char-binding-names-threshold = 4
 
-# Allow more struct fields (kernel structures are complex)
-struct-field-count-threshold = 30
-
 # Disable some pedantic lints that are too noisy for kernel code
 avoid-breaking-exported-api = true
 

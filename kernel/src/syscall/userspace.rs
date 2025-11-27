@@ -75,7 +75,7 @@ fn validate_page_mappings(start: usize, end: usize) -> Result<(), SyscallError> 
     }
 
     // Also check the last byte if it doesn't align with page boundary
-    if end % PAGE_SIZE != 0 {
+    if !end.is_multiple_of(PAGE_SIZE) {
         let last_page = (end - 1) & !(PAGE_SIZE - 1);
         if !crate::mm::is_user_addr_valid(last_page) {
             return Err(SyscallError::UnmappedMemory);

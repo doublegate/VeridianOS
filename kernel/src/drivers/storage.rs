@@ -522,7 +522,7 @@ impl Driver for AtaDriver {
             return Err("Non-aligned writes not supported");
         }
 
-        if data.len() % sector_size as usize != 0 {
+        if !data.len().is_multiple_of(sector_size as usize) {
             return Err("Write size must be multiple of sector size");
         }
 

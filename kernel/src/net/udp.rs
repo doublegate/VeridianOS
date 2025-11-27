@@ -297,11 +297,13 @@ pub fn process_packet(
     // Extract payload
     let payload = &data[UdpHeader::SIZE..header.length as usize];
     let src = SocketAddr::new(src_addr, header.source_port);
-    let _dst = SocketAddr::new(dst_addr, header.dest_port);
+    #[allow(unused_variables)]
+    let dst = SocketAddr::new(dst_addr, header.dest_port);
 
     // Find matching socket by destination port
     let mut sockets = UDP_SOCKETS.lock();
-    for (_socket_id, sock_buf) in sockets.iter_mut() {
+    #[allow(unused_variables)]
+    for (socket_id, sock_buf) in sockets.iter_mut() {
         if sock_buf.local_addr.port() == header.dest_port || sock_buf.local_addr.port() == 0 {
             // Check queue size
             if sock_buf.recv_queue.len() < sock_buf.max_queue_size {

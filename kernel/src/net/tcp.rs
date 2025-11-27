@@ -299,7 +299,8 @@ pub fn process_packet(
     let src_port = u16::from_be_bytes([data[0], data[1]]);
     let dst_port = u16::from_be_bytes([data[2], data[3]]);
     let seq_num = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-    let _ack_num = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
+    #[allow(unused_variables)]
+    let ack_num = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
     let data_offset = ((data[12] >> 4) * 4) as usize;
     let flags = TcpFlags::new(data[13]);
     let _window = u16::from_be_bytes([data[14], data[15]]);
@@ -310,7 +311,8 @@ pub fn process_packet(
     let _local = SocketAddr::new(dst_addr, dst_port);
 
     // Find socket by remote address match
-    for (_socket_id, state) in connections.iter_mut() {
+    #[allow(unused_variables)]
+    for (socket_id, state) in connections.iter_mut() {
         if state.connection.remote == remote
             || (state.connection.state == TcpState::Listen
                 && state.connection.local.port() == dst_port)
