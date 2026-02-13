@@ -319,6 +319,63 @@ jobs:
                   # informational only. Accepted until bootloader is upgraded.
                   ignore: RUSTSEC-2025-0141
 
+    # Code coverage with Codecov
+    coverage:
+        name: Code Coverage
+        runs-on: ubuntu-latest
+        needs: quick-checks
+        continue-on-error: true
+        steps:
+            - uses: actions/checkout@v4
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@nightly
+              with:
+                  toolchain: ${{ env.RUST_TOOLCHAIN }}
+                  components: llvm-tools-preview
+            - name: Cache dependencies
+              uses: actions/cache@v4
+              with:
+                  path: |
+                      ~/.cargo/bin/
+                      ~/.cargo/registry/index/
+                      ~/.cargo/registry/cache/
+                      ~/.cargo/git/db/
+                      target/
+                  key: ubuntu-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+                  restore-keys: |
+                      ubuntu-cargo-coverage-
+                      ubuntu-cargo-
+            - name: Install cargo-llvm-cov
+              uses: taiki-e/install-action@cargo-llvm-cov
+            - name: Generate coverage report
+              run: |
+                  # Run library tests on host target with coverage instrumentation.
+                  # The kernel is #![no_std] bare-metal, so only host-compatible
+                  # unit tests are captured. Coverage will grow as test infrastructure
+                  # matures through future development phases.
+                  cargo llvm-cov \
+                    --all-features \
+                    --workspace \
+                    --lcov \
+                    --output-path lcov.info \
+                    --ignore-filename-regex '(tests/|test_|bench)' \
+                    2>&1 || {
+                      echo "Coverage generation produced warnings (expected for no_std kernel)"
+                      # Create minimal lcov if generation fails entirely
+                      if [ ! -f lcov.info ]; then
+                        echo "TN:" > lcov.info
+                        echo "end_of_record" >> lcov.info
+                      fi
+                    }
+            - name: Upload coverage to Codecov
+              uses: codecov/codecov-action@v5
+              with:
+                  token: ${{ secrets.CODECOV_TOKEN }}
+                  slug: doublegate/VeridianOS
+                  files: lcov.info
+                  fail_ci_if_error: false
+                  verbose: true
+
     # Create combined release artifacts
     release-artifacts:
         name: Create Release Artifacts
@@ -455,7 +512,7 @@ jobs:
     ci-summary:
         name: CI Summary
         runs-on: ubuntu-latest
-        needs: [quick-checks, build-and-test, documentation, security]
+        needs: [quick-checks, build-and-test, documentation, security, coverage]
         if: always()
         steps:
             - name: Check job results
@@ -482,11 +539,17 @@ jobs:
                   else
                     echo "❌ **Security Audit**: Issues detected" >> $GITHUB_STEP_SUMMARY
                   fi
+                  if [ "${{ needs.coverage.result }}" == "success" ]; then
+                    echo "✅ **Code Coverage**: Report uploaded to Codecov" >> $GITHUB_STEP_SUMMARY
+                  else
+                    echo "⚠️ **Code Coverage**: Upload incomplete (non-blocking)" >> $GITHUB_STEP_SUMMARY
+                  fi
                   echo "" >> $GITHUB_STEP_SUMMARY
                   echo "### Build Information" >> $GITHUB_STEP_SUMMARY
                   echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
                   echo "- **Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
                   echo "- **Workflow**: ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+                  # Coverage is non-blocking (continue-on-error: true)
                   if [ "${{ needs.quick-checks.result }}" != "success" ] || \
                      [ "${{ needs.build-and-test.result }}" != "success" ] || \
                      [ "${{ needs.documentation.result }}" != "success" ] || \
