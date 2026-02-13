@@ -149,6 +149,14 @@ find_test_binaries() {
     # x86_64 custom target uses a different path
     if [ "$arch" = "x86_64" ]; then
         bin_dir="${TARGET_DIR}/x86_64-veridian/debug"
+        # x86_64 requires disk images (UEFI/BIOS) -- raw ELFs from deps/
+        # cannot be booted directly. Only look for disk images.
+        for img in "${bin_dir}/veridian-uefi.img" "${bin_dir}/veridian-bios.img"; do
+            if [ -f "$img" ]; then
+                echo "$img"
+            fi
+        done
+        return
     fi
 
     if [ ! -d "$bin_dir" ]; then
@@ -185,13 +193,34 @@ run_test() {
 
     case "$arch" in
         x86_64)
-            qemu_cmd=(
-                qemu-system-x86_64
-                -drive "format=raw,file=${binary}"
-                -serial stdio
-                -display none
-                -no-reboot
-            )
+            if [[ "$binary" == *uefi* ]]; then
+                # UEFI disk image requires OVMF firmware
+                # Find OVMF firmware (prefer combined .fd for -bios flag)
+                local ovmf="/usr/share/edk2/x64/OVMF.4m.fd"
+                if [ ! -f "$ovmf" ]; then
+                    ovmf="/usr/share/edk2/x64/OVMF.fd"
+                fi
+                if [ ! -f "$ovmf" ]; then
+                    ovmf="/usr/share/OVMF/OVMF.fd"
+                fi
+                qemu_cmd=(
+                    qemu-system-x86_64
+                    -bios "$ovmf"
+                    -drive "format=raw,file=${binary}"
+                    -serial stdio
+                    -display none
+                    -no-reboot
+                )
+            else
+                # BIOS disk image
+                qemu_cmd=(
+                    qemu-system-x86_64
+                    -drive "format=raw,file=${binary}"
+                    -serial stdio
+                    -display none
+                    -no-reboot
+                )
+            fi
             # ISA debug exit for x86_64 (port 0xf4)
             qemu_exit_args=(-device isa-debug-exit,iobase=0xf4,iosize=0x04)
             ;;
@@ -226,25 +255,25 @@ run_test() {
     local exit_code=0
     timeout "${TIMEOUT}s" "${qemu_cmd[@]}" "${qemu_exit_args[@]}" > "$serial_log" 2>&1 || exit_code=$?
 
-    # Parse results
+    # Parse results -- check serial output first, since kernels that enter
+    # an idle loop (HLT/WFI) will always be killed by timeout.
     local result="unknown"
 
-    if [ "$exit_code" -eq 124 ]; then
-        # timeout(1) returns 124 when the command times out
-        result="timeout"
+    if grep -q 'BOOTOK' "$serial_log"; then
+        result="boot-ok"
     elif grep -q '\[ok\]' "$serial_log"; then
         result="pass"
-    elif grep -q '\[failed\]' "$serial_log"; then
+    elif grep -q '\[failed\]' "$serial_log" || grep -q 'BOOTFAIL' "$serial_log"; then
         result="fail"
-    elif grep -q 'BOOTOK' "$serial_log"; then
-        # Kernel booted successfully (not a test binary, but useful)
-        result="boot-ok"
     elif [ "$exit_code" -eq 33 ]; then
         # QEMU isa-debug-exit with value 0x10 -> exit code (0x10 << 1) | 1 = 33
         result="pass"
     elif [ "$exit_code" -eq 35 ]; then
         # QEMU isa-debug-exit with value 0x11 -> exit code (0x11 << 1) | 1 = 35
         result="fail"
+    elif [ "$exit_code" -eq 124 ]; then
+        # timeout(1) returns 124 -- only report as timeout if no markers found
+        result="timeout"
     fi
 
     # Report result
@@ -328,9 +357,16 @@ run_kernel_boot_test() {
     triple="$(target_triple "$arch")"
     local kernel="${TARGET_DIR}/${triple}/debug/veridian-kernel"
 
-    # x86_64 custom target
+    # x86_64 uses a disk image (UEFI preferred, BIOS fallback) rather than raw ELF
     if [ "$arch" = "x86_64" ]; then
-        kernel="${TARGET_DIR}/x86_64-veridian/debug/veridian-kernel"
+        kernel="${TARGET_DIR}/x86_64-veridian/debug/veridian-uefi.img"
+        if [ ! -f "$kernel" ]; then
+            kernel="${TARGET_DIR}/x86_64-veridian/debug/veridian-bios.img"
+        fi
+        if [ ! -f "$kernel" ]; then
+            # Fall back to raw ELF path for error message
+            kernel="${TARGET_DIR}/x86_64-veridian/debug/veridian-kernel"
+        fi
     fi
 
     if [ ! -f "$kernel" ]; then

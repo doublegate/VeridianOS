@@ -1,3 +1,54 @@
+## [0.2.3] - 2026-02-13
+
+### x86_64 UEFI Boot Parity - Full Multi-Architecture Runtime Verification
+
+**MILESTONE**: x86_64 achieves full boot parity with AArch64 and RISC-V. All three architectures now boot in QEMU, pass 12/12 kernel-mode init tests, and emit BOOTOK. The x86_64 boot path uses UEFI via the bootloader 0.11.15 crate with a custom bootimage-builder tool.
+
+#### x86_64 UEFI Boot Path (New)
+
+- **Bootimage Builder**: `tools/bootimage-builder/` now compiles and produces UEFI disk images
+  - Removed unused `DiskImageBuilder` import that prevented compilation
+  - Switched to UEFI-only mode (`default-features = false, features = ["uefi"]`) to avoid R_386_16 relocation errors from bootloader 0.11's 16-bit BIOS real mode code on modern LLVM
+  - Removed all BIOS-related code paths (`BiosBoot`, `BootMode` enum, `--mode` CLI argument)
+  - Builder compiles in `/tmp/veridian-bootimage-builder` to avoid workspace config conflicts
+- **Build Pipeline**: `build-kernel.sh` and `tools/build-bootimage.sh` updated for UEFI-only flow
+  - `build-bootimage.sh` simplified to remove mode argument, UEFI-only output
+  - `build-kernel.sh` calls bootimage builder without mode parameter
+  - Output: `target/x86_64-veridian/debug/veridian-uefi.img`
+- **QEMU Boot**: x86_64 boots via OVMF firmware (`-bios /usr/share/edk2/x64/OVMF.4m.fd`)
+
+#### Scheduler Simplification (x86_64)
+
+- **`sched::init()`**: Removed x86_64-specific idle task creation (8KB `Box::leak` allocation), `SCHEDULER.lock().init()` call, and PIT timer setup. All architectures now use an unconditional early return since `kernel_init_main()` tests execute before the scheduler initializes
+- **`sched::start()`**: Replaced complex x86_64 scheduler loop (`SCHEDULER.lock()`, `load_context()`, `unreachable!()`) with `crate::arch::idle()` HLT loop, matching the AArch64 WFI and RISC-V WFI idle patterns
+
+#### QEMU Test Infrastructure Improvements
+
+- **`scripts/run-qemu-tests.sh`**:
+  - `run_test()`: Added UEFI image detection with OVMF firmware path discovery (checks `/usr/share/edk2/x64/OVMF.4m.fd`, `OVMF.fd`, `/usr/share/OVMF/OVMF.fd`)
+  - `run_kernel_boot_test()`: x86_64 now prefers UEFI disk images over raw ELF binaries
+  - `find_test_binaries()`: x86_64 returns only bootable disk images (raw ELFs cannot boot directly)
+  - Result parsing reordered: serial output markers (BOOTOK/BOOTFAIL) checked before timeout exit code, since kernels in HLT idle loops always trigger timeout(1)
+
+#### Boot Test Results
+
+| Architecture | Init Tests | BOOTOK | Boot Method |
+|--------------|-----------|--------|-------------|
+| x86_64       | 12/12     | Yes    | UEFI disk image via OVMF |
+| AArch64      | 12/12     | Yes    | Direct ELF via `-kernel` |
+| RISC-V 64    | 12/12     | Yes    | Direct ELF via `-kernel` (OpenSBI) |
+
+#### Files Changed
+
+- `tools/bootimage-builder/src/main.rs` - UEFI-only rewrite
+- `tools/bootimage-builder/Cargo.toml` - UEFI-only bootloader features
+- `tools/build-bootimage.sh` - Removed mode argument, UEFI-only
+- `build-kernel.sh` - Removed mode argument from bootimage call
+- `kernel/src/sched/mod.rs` - Simplified init() and start() for x86_64
+- `scripts/run-qemu-tests.sh` - x86_64 UEFI boot support, result parsing fix
+
+---
+
 ## [0.2.2] - 2026-02-13
 
 ### Phase 2 Runtime Activation - All Init Tests Passing
@@ -993,6 +1044,7 @@ While in pre-1.0 development:
 - **0.9.0** - Package management
 - **1.0.0** - First stable release
 
+[0.2.3]: https://github.com/doublegate/VeridianOS/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/doublegate/VeridianOS/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/doublegate/VeridianOS/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/doublegate/VeridianOS/compare/v0.1.0...v0.2.0

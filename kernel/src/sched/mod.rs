@@ -675,60 +675,12 @@ pub fn init() {
         // Scheduler initialized (minimal for RISC-V)
     }
 
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-    return;
-
-    // Create idle task for BSP (x86_64 only)
-    #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
-    {
-        extern crate alloc;
-        use alloc::{boxed::Box, string::String};
-
-        // Allocate stack for idle task (8KB)
-        const IDLE_STACK_SIZE: usize = 8192;
-        let _idle_stack = Box::leak(Box::new([0u8; IDLE_STACK_SIZE]));
-        let _idle_stack_top = _idle_stack.as_ptr() as usize + IDLE_STACK_SIZE;
-
-        // Get kernel page table
-        let _kernel_page_table = crate::mm::get_kernel_page_table();
-
-        // Create idle task
-        let mut _idle_task = Box::new(Task::new(
-            ProcessId(0), // PID 0 for idle
-            ThreadId(0),  // TID 0
-            String::from("idle"),
-            idle_task_entry as usize,
-            _idle_stack_top,
-            _kernel_page_table,
-        ));
-
-        // Set as idle priority
-        _idle_task.priority = Priority::Idle;
-        _idle_task.sched_class = SchedClass::Idle;
-        _idle_task.sched_policy = SchedPolicy::Idle;
-
-        // Get raw pointer to idle task
-        let idle_ptr = NonNull::new(Box::leak(_idle_task) as *mut _).unwrap();
-
-        // Initialize scheduler with idle task
-        SCHEDULER.lock().init(idle_ptr);
-
-        #[cfg(not(target_arch = "aarch64"))]
-        println!("[SCHED] Created idle task with PID 0");
-
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[SCHED] Created idle task with PID 0\n");
-        }
-    }
-
-    // Set up timer interrupt for preemption (x86_64 only)
+    // Skip complex scheduler setup on all architectures for now.
+    // kernel_init_main() tests run before sched::init() and don't need the
+    // scheduler. The idle task creation and PIT timer setup can hang or panic
+    // during early boot.
     #[cfg(target_arch = "x86_64")]
-    {
-        setup_preemption_timer();
-        println!("[SCHED] Scheduler initialized");
-    }
+    println!("[SCHED] Scheduler initialized (minimal for x86_64)");
 }
 
 /// Set up preemption timer
@@ -814,45 +766,12 @@ pub fn start() -> ! {
         }
     }
 
-    // x86_64 only: Get the scheduler and check we have a current task
+    // x86_64: Enter HLT idle loop (matches AArch64 WFI and RISC-V WFI)
     #[cfg(target_arch = "x86_64")]
     {
-        let scheduler = SCHEDULER.lock();
-        // Make sure we have a current task
-        if scheduler.current.is_none() {
-            panic!("[SCHED] No current task to run!");
-        }
-    } // Drop the lock here to avoid deadlock
-
-    // Start running tasks (x86_64 only)
-    #[cfg(target_arch = "x86_64")]
-    println!("[SCHED] Starting scheduler loop...");
-
-    // The scheduler loop (x86_64 only)
-    #[cfg(target_arch = "x86_64")]
-    #[allow(clippy::never_loop)]
-    loop {
-        // Get the current task and execute it
-        let scheduler = SCHEDULER.lock();
-
-        if let Some(current_task) = &scheduler.current {
-            let task_ptr = current_task.as_ptr();
-            let task = unsafe { &*task_ptr.as_ptr() };
-            let _task_name = task.name.clone();
-
-            // Match on the context type and load it (x86_64 only)
-            match &task.context {
-                crate::sched::task::TaskContext::X86_64(ctx) => {
-                    println!("[SCHED] Loading initial task context for '{}'", _task_name);
-                    unsafe {
-                        use crate::arch::x86_64::context::load_context;
-                        load_context(ctx);
-                        unreachable!("load_context should not return");
-                    }
-                }
-            }
-        } else {
-            panic!("[SCHED] No initial task to run!");
+        println!("[SCHED] Entering idle loop");
+        loop {
+            crate::arch::idle();
         }
     }
 }

@@ -59,7 +59,7 @@ build_arch() {
             OUTPUT_DIR="target/$target/$BUILD_DIR"
 
             # Use the isolated build script to avoid workspace config conflicts
-            if ./tools/build-bootimage.sh "$KERNEL_PATH" "$OUTPUT_DIR" bios; then
+            if ./tools/build-bootimage.sh "$KERNEL_PATH" "$OUTPUT_DIR"; then
                 echo -e "${GREEN}Bootable disk image created!${NC}"
             else
                 echo -e "${YELLOW}Warning: Could not create disk image${NC}"

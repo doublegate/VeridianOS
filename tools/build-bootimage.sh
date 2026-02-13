@@ -1,6 +1,9 @@
 #!/bin/bash
-# Build script for creating bootable disk images using bootloader 0.11+
+# Build script for creating bootable UEFI disk images using bootloader 0.11+
 # This script builds the bootimage-builder tool in /tmp to avoid workspace config conflicts
+#
+# Note: Only UEFI mode is supported. BIOS mode fails because bootloader 0.11's
+# 16-bit real mode code causes R_386_16 relocation errors on newer LLVM.
 
 set -e
 
@@ -15,18 +18,17 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-echo -e "${YELLOW}VeridianOS Bootimage Builder${NC}"
+echo -e "${YELLOW}VeridianOS Bootimage Builder (UEFI)${NC}"
 
 # Parse arguments
 KERNEL_PATH="${1:-}"
 OUTPUT_DIR="${2:-}"
-MODE="${3:-bios}"
 
 if [ -z "$KERNEL_PATH" ]; then
-    echo "Usage: $0 <kernel-elf-path> <output-dir> [bios|uefi|both]"
+    echo "Usage: $0 <kernel-elf-path> [output-dir]"
     echo ""
     echo "Example:"
-    echo "  $0 target/x86_64-veridian/debug/veridian-kernel target/x86_64-veridian/debug bios"
+    echo "  $0 target/x86_64-veridian/debug/veridian-kernel target/x86_64-veridian/debug"
     exit 1
 fi
 
@@ -76,10 +78,9 @@ if ! cargo +nightly build --release 2>&1; then
 fi
 
 # Run the builder
-echo "Creating disk image..."
+echo "Creating UEFI disk image..."
 "$BUILD_DIR/target/release/bootimage-builder" \
     --kernel "$FULL_KERNEL_PATH" \
-    --output "$FULL_OUTPUT_DIR" \
-    --mode "$MODE"
+    --output "$FULL_OUTPUT_DIR"
 
 echo -e "${GREEN}Done!${NC}"

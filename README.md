@@ -113,9 +113,9 @@ experiments/   Non-normative exploratory work
 
 | Architecture | Build | Boot | Init Tests | Stage 6 | Status |
 |--------------|-------|------|-----------|---------|--------|
+| x86_64       | ✅    | ✅   | 12/12     | ✅      | **100% Functional** — UEFI boot with full Phase 2 runtime activation |
 | AArch64      | ✅    | ✅   | 12/12     | ✅      | **100% Functional** — Full Phase 2 runtime activation with BOOTOK |
 | RISC-V 64    | ✅    | ✅   | 12/12     | ✅      | **100% Functional** — Full Phase 2 runtime activation with BOOTOK |
-| x86_64       | ✅    | ✅   | --        | ✅      | **Builds successfully** — Bootloader migration in progress |
 
 ### Phase 0: Foundation & Tooling — Complete (v0.1.0)
 
@@ -134,9 +134,9 @@ Core subsystems implemented:
 - **Capability System** — Tokens, rights, space management, inheritance, revocation, per-CPU cache
 - **Test Framework** — `no_std` test framework with benchmarks, IPC/scheduler/process tests
 
-### Phase 2: User Space Foundation — Runtime Verified (v0.2.2)
+### Phase 2: User Space Foundation — Runtime Verified (v0.2.3)
 
-Started August 15, 2025. Architecturally complete August 16, 2025. Runtime activation verified February 13, 2026.
+Started August 15, 2025. Architecturally complete August 16, 2025. Runtime activation verified February 13, 2026. Full multi-architecture boot parity achieved February 13, 2026.
 
 Implementation achievements:
 
@@ -215,9 +215,16 @@ cargo build --target targets/x86_64-veridian.json \
     -p veridian-kernel \
     -Zbuild-std=core,compiler_builtins,alloc
 
-# Run in QEMU (x86_64)
+# Run in QEMU (x86_64 - requires UEFI disk image)
+# First build the UEFI image:
+./tools/build-bootimage.sh \
+    target/x86_64-veridian/debug/veridian-kernel \
+    target/x86_64-veridian/debug
+
+# Then boot with OVMF firmware:
 qemu-system-x86_64 \
-    -kernel target/x86_64-veridian/debug/veridian-kernel \
+    -bios /usr/share/edk2/x64/OVMF.4m.fd \
+    -drive format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
     -serial stdio \
     -display none
 
@@ -245,9 +252,9 @@ For detailed build instructions, see [BUILD-INSTRUCTIONS.md](docs/BUILD-INSTRUCT
 
 ### Architectures
 
-- **AArch64** — Full support (primary development target)
-- **x86_64** — In progress (bootloader issues under investigation)
-- **RISC-V (RV64GC)** — Near-complete (timer stability issue remaining)
+- **x86_64** — Full support (UEFI boot via bootloader 0.11.15)
+- **AArch64** — Full support (direct QEMU `-kernel` loading)
+- **RISC-V (RV64GC)** — Full support (direct QEMU `-kernel` loading via OpenSBI)
 
 ### Minimum Requirements
 

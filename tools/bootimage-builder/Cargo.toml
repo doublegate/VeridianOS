@@ -9,6 +9,6 @@ description = "Creates bootable disk images from the VeridianOS kernel"
 [workspace]
 
 [dependencies]
-bootloader = "0.11.15"
+bootloader = { version = "0.11.15", default-features = false, features = ["uefi"] }
 anyhow = "1.0"
 clap = { version = "4.0", features = ["derive"] }
