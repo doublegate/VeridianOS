@@ -69,7 +69,7 @@ VeridianOS assumes a single-machine environment with a trusted toolchain. It foc
 
 The system is defined by explicit invariants governing authority, isolation, memory ownership, and unsafe code usage. These are normative and binding.
 
-See `docs/invariants.md` for the authoritative list.
+See [Invariants](docs/invariants.md) for the authoritative list.
 
 ---
 
@@ -156,7 +156,7 @@ Implementation achievements:
 
 **Unified static mut pointer pattern**: Implemented across all architectures. Zero warnings and clippy-clean on all targets.
 
-**AArch64 LLVM workaround**: AArch64 uses an assembly-only approach to bypass a critical LLVM loop compilation bug. All `println!` and `boot_println!` macros are no-ops on AArch64; critical messages use direct UART character writes. See `kernel/src/arch/aarch64/README_LLVM_BUG.md` for details.
+**AArch64 LLVM workaround**: AArch64 uses an assembly-only approach to bypass a critical LLVM loop compilation bug. All `println!` and `boot_println!` macros are no-ops on AArch64; critical messages use direct UART character writes. See [README - LLVM Bug](kernel/src/arch/aarch64/README_LLVM_BUG.md) for details.
 
 **DEEP-RECOMMENDATIONS**: All 9 of 9 recommendations complete — bootstrap circular dependency fix, AArch64 calling convention, atomic operations, capability overflow, user pointer validation, custom test framework, error type migration, RAII patterns, and Phase 2 readiness.
 
@@ -291,15 +291,15 @@ See [PROJECT-STATUS.md](docs/PROJECT-STATUS.md) for detailed status information 
 
 ## How to Read the Code
 
-1. `docs/invariants.md` — Architectural invariants (start here)
-2. `docs/architecture.md` — System architecture
+1. [Invariants](docs/invariants.md) — Architectural invariants (start here)
+2. [Architecture](docs/architecture.md) — System architecture
 
 Helpful diagrams:
-- `docs/diagrams/architecture-capability-flow.mmd`
-- `docs/diagrams/kernel-entry-points.mmd`
+- [Mermaid - Architecture Capability Flow](docs/diagrams/architecture-capability-flow.mmd)
+- [Mermaid - Kernal Entry Points](docs/diagrams/kernel-entry-points.mmd)
 
-3. `docs/kernel-entry-points.md` — Kernel entry points
-4. `docs/capability-flow.md` — Capability flow into services and drivers
+3. [Kernel Entry Points](docs/kernel-entry-points.md) — Kernel entry points
+4. [Capability Flow](docs/capability-flow.md) — Capability flow into services and drivers
 
 ---
 
@@ -307,7 +307,7 @@ Helpful diagrams:
 
 Unsafe Rust is permitted only to enforce higher-level invariants and is strictly controlled.
 
-See `docs/unsafe-policy.md`.
+See [Unsafe Policy](docs/unsafe-policy.md).
 
 ---
 
