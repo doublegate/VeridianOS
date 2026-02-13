@@ -76,41 +76,72 @@ pub enum AccessType {
 
 /// Initialize security subsystem
 pub fn init() -> Result<(), KernelError> {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        crate::arch::aarch64::direct_uart::uart_write_str("[SECURITY] init start\n");
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[SECURITY] Initializing security subsystem...");
 
-    // Initialize cryptography (now in separate crypto module)
-    // crypto::init()?; // Handled by top-level crypto module
-
     // Initialize memory protection (ASLR, stack canaries, etc.)
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[SECURITY] About to init memory_protection...");
     memory_protection::init()?;
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        crate::arch::aarch64::direct_uart::uart_write_str("[SECURITY] mem_prot done\n");
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[SECURITY] memory_protection done");
 
     // Initialize authentication framework
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        crate::arch::aarch64::direct_uart::uart_write_str("[SECURITY] auth start\n");
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[SECURITY] About to init auth...");
     auth::init()?;
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        crate::arch::aarch64::direct_uart::uart_write_str("[SECURITY] auth done\n");
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[SECURITY] auth done");
 
     // Initialize TPM support (if available)
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[SECURITY] About to init tpm...");
     tpm::init()?;
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[SECURITY] tpm done");
 
     // Initialize MAC system
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[SECURITY] About to init mac...");
     mac::init()?;
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[SECURITY] mac done");
 
     // Initialize audit system
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[SECURITY] About to init audit...");
     audit::init()?;
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[SECURITY] audit done");
 
     // Verify secure boot (if enabled)
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[SECURITY] About to verify boot...");
     boot::verify()?;
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[SECURITY] boot verify done");
 
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        crate::arch::aarch64::direct_uart::uart_write_str("[SECURITY] init complete\n");
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[SECURITY] Security subsystem initialized successfully");
     Ok(())
 }

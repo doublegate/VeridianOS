@@ -952,38 +952,18 @@ pub fn init() {
     use crate::println;
 
     unsafe {
-        if !SHELL_PTR.is_null() {
+        let current = core::ptr::read_volatile(&raw const SHELL_PTR);
+        if !current.is_null() {
             println!("[SHELL] WARNING: Already initialized! Skipping re-initialization.");
             return;
         }
 
         let shell = Shell::new();
-
-        // Box it and leak to get a static pointer
         let shell_box = alloc::boxed::Box::new(shell);
         let shell_ptr = alloc::boxed::Box::leak(shell_box) as *mut Shell;
 
-        // Memory barriers for AArch64
-        #[cfg(target_arch = "aarch64")]
-        {
-            core::arch::asm!(
-                "dsb sy", // Data Synchronization Barrier
-                "isb",    // Instruction Synchronization Barrier
-                options(nostack, nomem, preserves_flags)
-            );
-        }
-
-        // Memory barriers for RISC-V
-        #[cfg(target_arch = "riscv64")]
-        {
-            core::arch::asm!(
-                "fence rw, rw", // Full memory fence
-                options(nostack, nomem, preserves_flags)
-            );
-        }
-
-        // Store the pointer
-        SHELL_PTR = shell_ptr;
+        // Store the pointer using volatile write to prevent compiler optimization
+        core::ptr::write_volatile(&raw mut SHELL_PTR, shell_ptr);
 
         // Memory barriers after assignment for AArch64
         #[cfg(target_arch = "aarch64")]
@@ -997,17 +977,42 @@ pub fn init() {
             core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
         }
 
-        println!("[SHELL] Shell module loaded");
+        // Verify the write took effect
+        let _verify = core::ptr::read_volatile(&raw const SHELL_PTR);
+        #[cfg(target_arch = "aarch64")]
+        {
+            crate::arch::aarch64::direct_uart::direct_print_str("[SHELL] Shell module loaded\n");
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        if _verify.is_null() {
+            println!("[SHELL] ERROR: SHELL_PTR write failed!");
+        } else {
+            println!("[SHELL] Shell module loaded (ptr={:p})", _verify);
+        }
     }
 }
 
 /// Get the global shell
 pub fn get_shell() -> &'static Shell {
     unsafe {
-        if SHELL_PTR.is_null() {
+        // Use read_volatile to prevent compiler from caching the initial null value
+        let ptr = core::ptr::read_volatile(&raw const SHELL_PTR);
+        if ptr.is_null() {
             panic!("Shell not initialized");
         }
-        &*SHELL_PTR
+        &*ptr
+    }
+}
+
+/// Try to get the global shell (non-panicking)
+pub fn try_get_shell() -> Option<&'static Shell> {
+    unsafe {
+        let ptr = core::ptr::read_volatile(&raw const SHELL_PTR);
+        if ptr.is_null() {
+            None
+        } else {
+            Some(&*ptr)
+        }
     }
 }
 

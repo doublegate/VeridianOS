@@ -5,33 +5,38 @@
 
 #![allow(dead_code, clippy::unwrap_or_default)]
 
+#[cfg(target_arch = "x86_64")]
 use core::{alloc::Layout, ptr::NonNull};
 
+#[cfg(target_arch = "x86_64")]
 use linked_list_allocator::LockedHeap;
+#[cfg(target_arch = "x86_64")]
 use spin::Mutex;
 
+#[cfg(target_arch = "x86_64")]
 use super::VirtualAddress;
 
-// Static heap storage - 512KB for early boot (reduced from 4MB for bootloader
-// 0.11 compatibility)
-static mut HEAP_MEMORY: [u8; 512 * 1024] = [0; 512 * 1024];
+// Static heap storage - kept in BSS for layout stability across all
+// architectures. x86_64 uses this directly; AArch64/RISC-V use fixed physical
+// addresses instead to avoid BSS/heap overlap issues.
+static mut HEAP_MEMORY: [u8; 2 * 1024 * 1024] = [0; 2 * 1024 * 1024];
 
 /// Kernel heap size (16 MB initially)
 pub const HEAP_SIZE: usize = 16 * 1024 * 1024;
 
 /// Kernel heap start address
-/// For now, use a lower address that's likely to be identity mapped by
-/// bootloader In a real implementation, we'd properly set up page tables first
 #[cfg(target_arch = "x86_64")]
-pub const HEAP_START: usize = 0x444444440000; // Use an arbitrary high address that bootloader 0.9 maps
+pub const HEAP_START: usize = 0x444444440000; // Address mapped by bootloader 0.9
 
-#[cfg(all(not(target_arch = "x86_64"), not(target_arch = "riscv64")))]
-pub const HEAP_START: usize = 0xFFFF_C000_0000_0000;
+#[cfg(target_arch = "aarch64")]
+pub const HEAP_START: usize = 0x41000000; // 16MB into QEMU virt RAM (starts at 0x40000000)
 
 #[cfg(target_arch = "riscv64")]
-pub const HEAP_START: usize = 0x81000000; // Use physical address that's likely mapped
+pub const HEAP_START: usize = 0x81000000; // 16MB into QEMU virt RAM (starts at 0x80000000)
 
-/// Slab allocator for efficient small allocations
+/// Slab allocator for efficient small allocations (x86_64 only, uses
+/// LockedHeap)
+#[cfg(target_arch = "x86_64")]
 pub struct SlabAllocator {
     /// Size classes for slab allocation
     slabs: [Option<Slab>; 10],
@@ -41,6 +46,7 @@ pub struct SlabAllocator {
     stats: Mutex<HeapStats>,
 }
 
+#[cfg(target_arch = "x86_64")]
 /// A slab for a specific size class
 struct Slab {
     /// Object size for this slab
@@ -55,11 +61,13 @@ struct Slab {
     base: VirtualAddress,
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Free object in slab free list
 struct FreeObject {
     next: Option<NonNull<FreeObject>>,
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Heap statistics
 #[derive(Debug, Default, Clone)]
 pub struct HeapStats {
@@ -77,15 +85,18 @@ pub struct HeapStats {
     pub free_count: u64,
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Size classes for slab allocator (in bytes)
 const SIZE_CLASSES: [usize; 10] = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
 
+#[cfg(target_arch = "x86_64")]
 impl Default for SlabAllocator {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 impl SlabAllocator {
     /// Create a new slab allocator
     pub const fn new() -> Self {
@@ -231,26 +242,19 @@ impl SlabAllocator {
 /// Initialize the kernel heap
 pub fn init() -> Result<(), &'static str> {
     #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[HEAP] Initializing kernel heap\n");
-        }
+    unsafe {
+        use crate::arch::aarch64::direct_uart::uart_write_str;
+        uart_write_str("[HEAP] Initializing kernel heap\n");
     }
-
     #[cfg(not(target_arch = "aarch64"))]
     println!("[HEAP] Initializing kernel heap at 0x{:x}", HEAP_START);
 
     #[allow(unused_unsafe)]
     unsafe {
-        // Use the static heap array instead of an arbitrary address
-        // Use raw pointers to avoid static mut refs warning
-        #[cfg_attr(target_arch = "aarch64", allow(unused_variables))]
         let heap_start = core::ptr::addr_of_mut!(HEAP_MEMORY) as *mut u8;
-        #[cfg_attr(target_arch = "aarch64", allow(unused_variables))]
         let heap_size = 512 * 1024; // Size of HEAP_MEMORY (512KB)
 
-        // For RISC-V, initialize both allocators since they're separate
+        // RISC-V: Use lock-free UnsafeBumpAllocator
         #[cfg(target_arch = "riscv64")]
         {
             println!("[HEAP] Initializing RISC-V UnsafeBumpAllocator");
@@ -259,27 +263,24 @@ pub fn init() -> Result<(), &'static str> {
                 heap_start, heap_size
             );
 
-            // Initialize the global allocator directly using lib.rs export
             unsafe {
+                use core::alloc::GlobalAlloc;
+
                 use crate::ALLOCATOR;
 
                 println!("[HEAP] Calling ALLOCATOR.init()...");
                 ALLOCATOR.init(heap_start, heap_size);
                 println!("[HEAP] ALLOCATOR.init() completed");
 
-                // Test allocation to verify it works
                 let test_layout = core::alloc::Layout::from_size_align(8, 8).unwrap();
-                use core::alloc::GlobalAlloc;
                 let test_ptr = ALLOCATOR.alloc(test_layout);
                 if !test_ptr.is_null() {
                     println!("[HEAP] Test allocation successful at {:p}", test_ptr);
-                    // Don't deallocate since bump allocator doesn't support it
                 } else {
                     println!("[HEAP] WARNING: Test allocation failed!");
                 }
             }
 
-            // Also initialize the locked allocator for compatibility
             println!("[HEAP] Initializing locked allocator...");
             let mut allocator = crate::get_allocator().lock();
             unsafe {
@@ -290,48 +291,75 @@ pub fn init() -> Result<(), &'static str> {
             println!("[HEAP] RISC-V heap initialization complete");
         }
 
-        #[cfg(not(target_arch = "riscv64"))]
-        {
-            #[cfg(target_arch = "aarch64")]
-            {
-                use crate::arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[HEAP] Acquiring allocator lock\n");
-            }
-
-            #[cfg(target_arch = "aarch64")]
-            {
-                // Skip allocator lock for AArch64
-                use crate::arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[HEAP] Skipping allocator lock on AArch64\n");
-            }
-            #[cfg(not(target_arch = "aarch64"))]
-            {
-                let mut allocator = crate::get_allocator().lock();
-                allocator.init(heap_start, heap_size);
-                drop(allocator);
-            }
-        }
-
+        // AArch64: Use lock-free UnsafeBumpAllocator (LockedHeap deadlocks on AArch64)
+        // Initialize fields directly to avoid function call issues on AArch64
         #[cfg(target_arch = "aarch64")]
         {
+            use core::sync::atomic::Ordering;
+
             use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[HEAP] Heap initialization complete\n");
+
+            uart_write_str("[HEAP] Initializing AArch64 UnsafeBumpAllocator\n");
+
+            let start_addr = heap_start as usize;
+
+            // Initialize ALLOCATOR atomics directly (bypasses function call)
+            crate::ALLOCATOR.start.store(start_addr, Ordering::SeqCst);
+            crate::ALLOCATOR.size.store(heap_size, Ordering::SeqCst);
+            crate::ALLOCATOR.next.store(start_addr, Ordering::SeqCst);
+            crate::ALLOCATOR.allocations.store(0, Ordering::SeqCst);
+            core::sync::atomic::fence(Ordering::SeqCst);
+
+            // AArch64 memory barriers
+            unsafe {
+                core::arch::asm!("dsb sy", "isb", options(nomem, nostack));
+            }
+
+            uart_write_str("[HEAP] ALLOCATOR initialized\n");
+
+            // Verify allocator state
+            let next_val = crate::ALLOCATOR.next.load(Ordering::SeqCst);
+            if next_val != 0 {
+                uart_write_str("[HEAP] Allocator state verified OK\n");
+            } else {
+                uart_write_str("[HEAP] WARNING: Allocator next=0\n");
+            }
+
+            // Initialize locked allocator too (direct field access)
+            crate::LOCKED_ALLOCATOR
+                .inner
+                .start
+                .store(start_addr, Ordering::SeqCst);
+            crate::LOCKED_ALLOCATOR
+                .inner
+                .size
+                .store(heap_size, Ordering::SeqCst);
+            crate::LOCKED_ALLOCATOR
+                .inner
+                .next
+                .store(start_addr, Ordering::SeqCst);
+            crate::LOCKED_ALLOCATOR
+                .inner
+                .allocations
+                .store(0, Ordering::SeqCst);
+            core::sync::atomic::fence(Ordering::SeqCst);
+
+            uart_write_str("[HEAP] AArch64 heap initialization complete\n");
         }
 
-        #[cfg(not(target_arch = "aarch64"))]
+        // x86_64: Use LockedHeap
+        #[cfg(target_arch = "x86_64")]
+        {
+            let mut allocator = crate::get_allocator().lock();
+            allocator.init(heap_start, heap_size);
+            drop(allocator);
+        }
+
         println!(
-            "[HEAP] Heap initialized: {} MB at 0x{:x}",
-            4, // 4MB heap size
-            core::ptr::addr_of!(HEAP_MEMORY) as usize
+            "[HEAP] Heap initialized: {} KB at {:p}",
+            heap_size / 1024,
+            core::ptr::addr_of!(HEAP_MEMORY)
         );
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[HEAP] Returning from heap init\n");
-        }
     }
 
     Ok(())

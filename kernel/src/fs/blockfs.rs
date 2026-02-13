@@ -19,8 +19,11 @@
 use alloc::{sync::Arc, vec, vec::Vec};
 use core::mem::size_of;
 
+#[cfg(not(target_arch = "aarch64"))]
 use spin::RwLock;
 
+#[cfg(target_arch = "aarch64")]
+use super::bare_lock::RwLock;
 use super::{DirEntry, Filesystem, Metadata, NodeType, Permissions, VfsNode};
 
 /// Block size (4KB)
@@ -209,6 +212,12 @@ impl BlockFsNode {
 }
 
 impl VfsNode for BlockFsNode {
+    fn node_type(&self) -> NodeType {
+        self.metadata()
+            .map(|m| m.node_type)
+            .unwrap_or(NodeType::File)
+    }
+
     fn read(&self, offset: usize, buffer: &mut [u8]) -> Result<usize, &'static str> {
         let fs = self.fs.read();
         fs.read_inode(self.inode_num, offset, buffer)

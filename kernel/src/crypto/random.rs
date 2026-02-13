@@ -35,8 +35,11 @@ impl SecureRandom {
     pub fn fill_bytes(&self, dest: &mut [u8]) -> CryptoResult<()> {
         let mut state = self.state.lock();
 
-        for byte in dest.iter_mut() {
-            *byte = Self::next_byte(&mut state);
+        // Use index-based loop instead of iter_mut() to avoid AArch64 LLVM hang
+        let mut i = 0;
+        while i < dest.len() {
+            dest[i] = Self::next_byte(&mut state);
+            i += 1;
         }
 
         Ok(())
@@ -112,12 +115,15 @@ impl SecureRandom {
         #[cfg(not(target_arch = "x86_64"))]
         {
             // Fallback for other architectures
+            // Use index-based loop instead of iter_mut() to avoid AArch64 LLVM hang
             let mut counter = 0u64;
-            for (i, byte) in dest.iter_mut().enumerate() {
+            let mut i = 0;
+            while i < dest.len() {
                 counter = counter
                     .wrapping_mul(1664525)
                     .wrapping_add(1013904223 + i as u64);
-                *byte = (counter >> 32) as u8;
+                dest[i] = (counter >> 32) as u8;
+                i += 1;
             }
         }
     }
@@ -143,25 +149,23 @@ impl Default for SecureRandom {
 }
 
 /// Global secure random number generator
-static GLOBAL_RNG: Mutex<Option<SecureRandom>> = Mutex::new(None);
+static mut RNG_STORAGE: Option<SecureRandom> = None;
 
 /// Initialize random number generator
 pub fn init() -> CryptoResult<()> {
     let rng = SecureRandom::new()?;
-    *GLOBAL_RNG.lock() = Some(rng);
+    unsafe {
+        RNG_STORAGE = Some(rng);
+    }
     Ok(())
 }
 
 /// Get global random number generator
 pub fn get_random() -> &'static SecureRandom {
-    // This is safe because init() must be called before use
     unsafe {
-        static mut RNG_STORAGE: Option<SecureRandom> = None;
-
         if RNG_STORAGE.is_none() {
             RNG_STORAGE = Some(SecureRandom::new().expect("Failed to create RNG"));
         }
-
         RNG_STORAGE.as_ref().unwrap()
     }
 }

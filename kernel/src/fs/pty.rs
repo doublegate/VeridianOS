@@ -9,8 +9,11 @@
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 
+#[cfg(not(target_arch = "aarch64"))]
 use spin::RwLock;
 
+#[cfg(target_arch = "aarch64")]
+use super::bare_lock::RwLock;
 use crate::{error::KernelError, process::ProcessId, sync::once_lock::GlobalState};
 
 /// PTY buffer size

@@ -2,8 +2,11 @@
 
 use alloc::{sync::Arc, vec::Vec};
 
+#[cfg(not(target_arch = "aarch64"))]
 use spin::RwLock;
 
+#[cfg(target_arch = "aarch64")]
+use super::bare_lock::RwLock;
 use super::VfsNode;
 
 /// File descriptor number

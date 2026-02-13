@@ -32,6 +32,12 @@ el2_entry:
     eret
 
 el1_entry:
+    // Enable FP/NEON - LLVM may emit SIMD instructions (e.g. movi/str q0
+    // for buffer zeroing). Without this, those instructions trap silently.
+    mov x0, #(3 << 20)
+    msr cpacr_el1, x0
+    isb
+
     // Write early boot indicator to UART
     // Load UART base address 0x09000000 using ldr
     ldr x0, =0x09000000

@@ -15,33 +15,33 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-#[cfg(not(target_arch = "riscv64"))]
+#[cfg(target_arch = "x86_64")]
 use linked_list_allocator::LockedHeap;
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
 mod simple_alloc_unsafe;
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
 use simple_alloc_unsafe::{LockedUnsafeBumpAllocator, UnsafeBumpAllocator};
 
-#[cfg(not(target_arch = "riscv64"))]
+#[cfg(target_arch = "x86_64")]
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
 #[global_allocator]
 pub static ALLOCATOR: UnsafeBumpAllocator = UnsafeBumpAllocator::new();
 
-#[cfg(target_arch = "riscv64")]
-static LOCKED_ALLOCATOR: LockedUnsafeBumpAllocator = LockedUnsafeBumpAllocator::empty();
+#[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
+pub static LOCKED_ALLOCATOR: LockedUnsafeBumpAllocator = LockedUnsafeBumpAllocator::empty();
 
 /// Get a reference to the global allocator
-#[cfg(not(target_arch = "riscv64"))]
+#[cfg(target_arch = "x86_64")]
 pub fn get_allocator() -> &'static LockedHeap {
     &ALLOCATOR
 }
 
-/// Get a reference to the global allocator for RISC-V
-#[cfg(target_arch = "riscv64")]
+/// Get a reference to the global allocator for RISC-V/AArch64
+#[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
 pub fn get_allocator() -> &'static LockedUnsafeBumpAllocator {
     &LOCKED_ALLOCATOR
 }

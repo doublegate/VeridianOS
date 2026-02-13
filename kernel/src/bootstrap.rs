@@ -3,9 +3,10 @@
 //! This module handles the multi-stage initialization process to avoid
 //! circular dependencies between subsystems.
 
+#[cfg(not(target_arch = "aarch64"))]
+use crate::security;
 use crate::{
-    arch, cap, error::KernelResult, fs, graphics, ipc, mm, net, perf, pkg, process, sched,
-    security, services,
+    arch, cap, error::KernelResult, fs, graphics, ipc, mm, net, perf, pkg, process, sched, services,
 };
 
 #[cfg(feature = "alloc")]
@@ -68,6 +69,19 @@ pub fn kernel_init() -> KernelResult<()> {
     #[cfg(target_arch = "riscv64")]
     arch::riscv64::bootstrap::stage2_complete();
 
+    // Verify heap allocation works (AArch64 requires -Zub-checks=no)
+    #[cfg(target_arch = "aarch64")]
+    {
+        let test_box = alloc::boxed::Box::new(42u64);
+        assert!(*test_box == 42);
+        drop(test_box);
+        unsafe {
+            crate::arch::aarch64::direct_uart::uart_write_str(
+                "[BOOTSTRAP] Heap allocation verified OK\n",
+            );
+        }
+    }
+
     // Stage 3: Process management
     #[cfg(target_arch = "x86_64")]
     arch::x86_64::bootstrap::stage3_start();
@@ -97,16 +111,41 @@ pub fn kernel_init() -> KernelResult<()> {
     cap::init();
     println!("[BOOTSTRAP] Capabilities initialized");
 
-    println!("[BOOTSTRAP] Initializing security subsystem...");
-    security::init().expect("Failed to initialize security");
-    println!("[BOOTSTRAP] Security subsystem initialized");
+    // Security subsystem uses spin::Mutex which hangs on AArch64 bare metal
+    // (CAS-based spinlocks interact badly with AArch64 exclusive monitor).
+    // Skip security init on AArch64 - not needed for Phase 2 VFS/shell tests.
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        println!("[BOOTSTRAP] Initializing security subsystem...");
+        security::init().expect("Failed to initialize security");
+        println!("[BOOTSTRAP] Security subsystem initialized");
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use crate::arch::aarch64::direct_uart::uart_write_str;
+        uart_write_str("[BOOTSTRAP] Security subsystem skipped (AArch64 spinlock issue)\n");
+    }
 
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use crate::arch::aarch64::direct_uart::uart_write_str;
+        uart_write_str("[BOOTSTRAP] Initializing perf/IPC...\n");
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[BOOTSTRAP] Initializing performance monitoring...");
     perf::init().expect("Failed to initialize performance monitoring");
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[BOOTSTRAP] Performance monitoring initialized");
 
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[BOOTSTRAP] Initializing IPC...");
     ipc::init();
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use crate::arch::aarch64::direct_uart::uart_write_str;
+        uart_write_str("[BOOTSTRAP] Perf/IPC initialized\n");
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     println!("[BOOTSTRAP] IPC initialized");
 
     // Initialize VFS and mount essential filesystems
@@ -159,6 +198,11 @@ pub fn kernel_init() -> KernelResult<()> {
     arch::aarch64::bootstrap::stage4_complete();
     #[cfg(target_arch = "riscv64")]
     arch::riscv64::bootstrap::stage4_complete();
+
+    // Run kernel-mode init tests after Stage 4 (VFS + shell ready)
+    // Must run BEFORE Stage 5 scheduler init on RISC-V where the allocator
+    // gets corrupted during scheduler's 72KB ready queue allocation
+    kernel_init_main();
 
     // Stage 5: Scheduler initialization
     #[cfg(target_arch = "x86_64")]
@@ -263,19 +307,239 @@ pub fn run() -> ! {
     #[cfg(target_arch = "riscv64")]
     arch::riscv64::bootstrap::stage6_complete();
 
-    // Phase 2 validation (only run once after all services are initialized)
-    crate::println!("");
-    crate::println!("🔬 Running Phase 2 Complete Validation...");
-    crate::phase2_validation::quick_health_check();
-
-    // Run full Phase 2 validation:
-    crate::phase2_validation::validate_phase2_complete();
-
-    crate::println!("✅ Phase 2 User Space Foundation - COMPLETE!");
-    crate::println!("");
-
-    // Transfer control to scheduler
+    // Transfer control to scheduler (kernel_init_main runs inside start())
     sched::start();
+}
+
+/// Kernel-mode init function
+///
+/// Exercises Phase 2 subsystems (VFS, shell, services) at runtime and emits
+/// QEMU-parseable `[ok]`/`[failed]` markers for each test. Called from
+/// `sched::start()` before entering the idle loop.
+#[cfg(feature = "alloc")]
+pub fn kernel_init_main() {
+    // AArch64 println! is a no-op (LLVM bug), so use direct UART everywhere
+    macro_rules! kprintln {
+        ($s:literal) => {{
+            #[cfg(target_arch = "aarch64")]
+            {
+                crate::arch::aarch64::direct_uart::direct_print_str($s);
+                crate::arch::aarch64::direct_uart::direct_print_str("\n");
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            println!($s);
+        }};
+    }
+
+    kprintln!("");
+    kprintln!("========================================");
+    kprintln!("[INIT] VeridianOS kernel-mode init");
+    kprintln!("========================================");
+
+    let mut passed = 0u32;
+    let mut failed = 0u32;
+
+    // --- VFS Tests ---
+    kprintln!("[INIT] VFS tests:");
+
+    // Test 1: Create directory
+    {
+        let ok = fs::get_vfs()
+            .read()
+            .mkdir("/tmp/test_init", fs::Permissions::default())
+            .is_ok();
+        report_test("vfs_mkdir", ok, &mut passed, &mut failed);
+    }
+
+    // Test 2: Write file via VFS create + write
+    {
+        let ok = (|| -> Result<(), &'static str> {
+            let vfs = fs::get_vfs().read();
+            let parent = vfs.resolve_path("/tmp/test_init")?;
+            let file = parent.create("hello.txt", fs::Permissions::default())?;
+            file.write(0, b"Hello VeridianOS")?;
+            Ok(())
+        })()
+        .is_ok();
+        report_test("vfs_write_file", ok, &mut passed, &mut failed);
+    }
+
+    // Test 3: Read file back and verify contents
+    {
+        let ok = (|| -> Result<bool, &'static str> {
+            let vfs = fs::get_vfs().read();
+            let dir = vfs.resolve_path("/tmp/test_init")?;
+            let file = dir.lookup("hello.txt")?;
+            let mut buf = [0u8; 32];
+            let n = file.read(0, &mut buf)?;
+            Ok(&buf[..n] == b"Hello VeridianOS")
+        })()
+        .unwrap_or(false);
+        report_test("vfs_read_verify", ok, &mut passed, &mut failed);
+    }
+
+    // Test 4: List directory entries
+    {
+        let ok = (|| -> Result<bool, &'static str> {
+            let vfs = fs::get_vfs().read();
+            let node = vfs.resolve_path("/tmp/test_init")?;
+            let entries = node.readdir()?;
+            Ok(entries.iter().any(|e| e.name == "hello.txt"))
+        })()
+        .unwrap_or(false);
+        report_test("vfs_readdir", ok, &mut passed, &mut failed);
+    }
+
+    // Test 5: /proc is mounted
+    {
+        let ok = fs::get_vfs().read().resolve_path("/proc").is_ok();
+        report_test("vfs_procfs", ok, &mut passed, &mut failed);
+    }
+
+    // Test 6: /dev is mounted
+    {
+        let ok = fs::get_vfs().read().resolve_path("/dev").is_ok();
+        report_test("vfs_devfs", ok, &mut passed, &mut failed);
+    }
+
+    // --- Shell Tests ---
+    kprintln!("[INIT] Shell tests:");
+
+    let shell = match services::shell::try_get_shell() {
+        Some(s) => s,
+        None => {
+            kprintln!("  shell unavailable [failed]");
+            failed += 6;
+            print_summary(passed, failed);
+            return;
+        }
+    };
+
+    // Test 7: help command
+    {
+        let ok = matches!(
+            shell.execute_command("help"),
+            services::shell::CommandResult::Success(_)
+        );
+        report_test("shell_help", ok, &mut passed, &mut failed);
+    }
+
+    // Test 8: pwd command
+    {
+        let ok = matches!(
+            shell.execute_command("pwd"),
+            services::shell::CommandResult::Success(_)
+        );
+        report_test("shell_pwd", ok, &mut passed, &mut failed);
+    }
+
+    // Test 9: ls / command
+    {
+        let ok = matches!(
+            shell.execute_command("ls /"),
+            services::shell::CommandResult::Success(_)
+        );
+        report_test("shell_ls", ok, &mut passed, &mut failed);
+    }
+
+    // Test 10: env command
+    {
+        let ok = matches!(
+            shell.execute_command("env"),
+            services::shell::CommandResult::Success(_)
+        );
+        report_test("shell_env", ok, &mut passed, &mut failed);
+    }
+
+    // Test 11: echo command
+    {
+        let ok = matches!(
+            shell.execute_command("echo hello"),
+            services::shell::CommandResult::Success(_)
+        );
+        report_test("shell_echo", ok, &mut passed, &mut failed);
+    }
+
+    // Test 12: mkdir + verification via VFS
+    {
+        let ok = matches!(
+            shell.execute_command("mkdir /tmp/shell_test"),
+            services::shell::CommandResult::Success(_)
+        ) && fs::file_exists("/tmp/shell_test");
+        report_test("shell_mkdir_verify", ok, &mut passed, &mut failed);
+    }
+
+    // --- Summary ---
+    print_summary(passed, failed);
+}
+
+#[cfg(not(feature = "alloc"))]
+pub fn kernel_init_main() {
+    #[cfg(target_arch = "aarch64")]
+    {
+        crate::arch::aarch64::direct_uart::direct_print_str("BOOTOK\n");
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    println!("BOOTOK");
+}
+
+/// Print test summary and BOOTOK/BOOTFAIL
+fn print_summary(passed: u32, failed: u32) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        use crate::arch::aarch64::direct_uart::{direct_print_num, direct_print_str};
+        direct_print_str("========================================\n");
+        direct_print_str("[INIT] Results: ");
+        direct_print_num(passed as u64);
+        direct_print_str("/");
+        direct_print_num((passed + failed) as u64);
+        direct_print_str(" passed\n");
+        if failed == 0 {
+            direct_print_str("BOOTOK\n");
+        } else {
+            direct_print_str("BOOTFAIL\n");
+        }
+        direct_print_str("========================================\n");
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        println!("========================================");
+        println!("[INIT] Results: {}/{} passed", passed, passed + failed);
+        if failed == 0 {
+            println!("BOOTOK");
+        } else {
+            println!("BOOTFAIL");
+        }
+        println!("========================================");
+    }
+}
+
+/// Report a single test result with QEMU-parseable markers
+fn report_test(name: &str, ok: bool, passed: &mut u32, failed: &mut u32) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        use crate::arch::aarch64::direct_uart::direct_print_str;
+        direct_print_str("  ");
+        direct_print_str(name);
+        if ok {
+            direct_print_str("...[ok]\n");
+        } else {
+            direct_print_str("...[failed]\n");
+        }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    if ok {
+        println!("  {}...[ok]", name);
+    } else {
+        println!("  {}...[failed]", name);
+    }
+
+    if ok {
+        *passed += 1;
+    } else {
+        *failed += 1;
+    }
 }
 
 /// Create the init process

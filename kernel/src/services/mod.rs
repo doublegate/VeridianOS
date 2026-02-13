@@ -99,11 +99,26 @@ pub fn init() {
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[SERVICES] Standard library initialized\n");
-        uart_write_str("[SERVICES] System services initialized\n");
+        uart_write_str("[SERVICES] About to initialize shell...\n");
     }
     #[cfg(not(target_arch = "aarch64"))]
     {
         println!("[SERVICES] Standard library initialized");
+        println!("[SERVICES] About to initialize shell...");
+    }
+
+    // Initialize shell
+    shell::init();
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use crate::arch::aarch64::direct_uart::uart_write_str;
+        uart_write_str("[SERVICES] Shell initialized\n");
+        uart_write_str("[SERVICES] System services initialized\n");
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        println!("[SERVICES] Shell initialized");
         println!("[SERVICES] System services initialized");
     }
 

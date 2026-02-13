@@ -37,47 +37,24 @@ pub fn init() {
 
         println!("[IPC-REG] Initializing IPC registry...");
 
-        // Create the registry
         let registry = IpcRegistry::new();
         let registry_mutex = Mutex::new(registry);
-
-        // Box it and leak to get a static pointer
         let registry_box = alloc::boxed::Box::new(registry_mutex);
-        let registry_ptr = alloc::boxed::Box::leak(registry_box) as *mut Mutex<IpcRegistry>;
+        let ptr = alloc::boxed::Box::leak(registry_box) as *mut Mutex<IpcRegistry>;
 
-        // Memory barriers for AArch64
+        // Memory barriers before assignment
         #[cfg(target_arch = "aarch64")]
-        {
-            core::arch::asm!(
-                "dsb sy", // Data Synchronization Barrier
-                "isb",    // Instruction Synchronization Barrier
-                options(nostack, nomem, preserves_flags)
-            );
-        }
-
-        // Memory barriers for RISC-V
+        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
         #[cfg(target_arch = "riscv64")]
-        {
-            core::arch::asm!(
-                "fence rw, rw", // Full memory fence
-                options(nostack, nomem, preserves_flags)
-            );
-        }
+        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
 
-        // Store the pointer
-        IPC_REGISTRY_PTR = registry_ptr;
+        IPC_REGISTRY_PTR = ptr;
 
-        // Memory barriers after assignment for AArch64
+        // Memory barriers after assignment
         #[cfg(target_arch = "aarch64")]
-        {
-            core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
-        }
-
-        // Memory barriers after assignment for RISC-V
+        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
         #[cfg(target_arch = "riscv64")]
-        {
-            core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
-        }
+        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
 
         println!("[IPC-REG] Registry initialized successfully");
     }
@@ -113,56 +90,13 @@ struct RegistryStats {
 impl IpcRegistry {
     /// Create a new IPC registry
     fn new() -> Self {
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[IPC-REG] Creating registry structure...\n");
-        }
-
-        // Create BTreeMaps with explicit feature check
-        #[cfg(feature = "alloc")]
-        let endpoints = {
-            #[cfg(target_arch = "aarch64")]
-            unsafe {
-                use crate::arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[IPC-REG] Creating endpoints map...\n");
-            }
-            BTreeMap::new()
-        };
-
-        #[cfg(feature = "alloc")]
-        let channels = {
-            #[cfg(target_arch = "aarch64")]
-            unsafe {
-                use crate::arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[IPC-REG] Creating channels map...\n");
-            }
-            BTreeMap::new()
-        };
-
-        #[cfg(feature = "alloc")]
-        let process_endpoints = {
-            #[cfg(target_arch = "aarch64")]
-            unsafe {
-                use crate::arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[IPC-REG] Creating process_endpoints map...\n");
-            }
-            BTreeMap::new()
-        };
-
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[IPC-REG] Creating atomic counters...\n");
-        }
-
-        let registry = Self {
+        Self {
             #[cfg(feature = "alloc")]
-            endpoints,
+            endpoints: BTreeMap::new(),
             #[cfg(feature = "alloc")]
-            channels,
+            channels: BTreeMap::new(),
             #[cfg(feature = "alloc")]
-            process_endpoints,
+            process_endpoints: BTreeMap::new(),
             next_endpoint_id: AtomicU64::new(1),
             stats: RegistryStats {
                 endpoints_created: AtomicU64::new(0),
@@ -172,15 +106,7 @@ impl IpcRegistry {
                 capability_lookups: AtomicU64::new(0),
                 capability_hits: AtomicU64::new(0),
             },
-        };
-
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[IPC-REG] Registry structure created successfully\n");
         }
-
-        registry
     }
 
     /// Create a new endpoint

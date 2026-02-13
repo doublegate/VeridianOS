@@ -601,53 +601,28 @@ pub fn init() {
     use crate::println;
 
     unsafe {
-        // Check if already initialized
         if !INIT_SYSTEM_PTR.is_null() {
             println!("[INIT] Already initialized, skipping...");
             return;
         }
 
         println!("[INIT] Creating new InitSystem...");
-
-        // Allocate the InitSystem on the heap using a Box
         let init_system = alloc::boxed::Box::new(InitSystem::new());
+        let ptr = alloc::boxed::Box::leak(init_system) as *mut InitSystem;
 
-        // Leak the Box to get a static pointer
-        let init_system_ptr = alloc::boxed::Box::leak(init_system) as *mut InitSystem;
-
-        // Memory barriers for AArch64
+        // Memory barriers before assignment
         #[cfg(target_arch = "aarch64")]
-        {
-            core::arch::asm!(
-                "dsb sy", // Data Synchronization Barrier
-                "isb",    // Instruction Synchronization Barrier
-                options(nostack, nomem, preserves_flags)
-            );
-        }
-
-        // Memory barriers for RISC-V
+        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
         #[cfg(target_arch = "riscv64")]
-        {
-            core::arch::asm!(
-                "fence rw, rw", // Full memory fence
-                options(nostack, nomem, preserves_flags)
-            );
-        }
+        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
 
-        // Assign the pointer
-        INIT_SYSTEM_PTR = init_system_ptr;
+        INIT_SYSTEM_PTR = ptr;
 
-        // Memory barriers after assignment for AArch64
+        // Memory barriers after assignment
         #[cfg(target_arch = "aarch64")]
-        {
-            core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
-        }
-
-        // Memory barriers after assignment for RISC-V
+        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
         #[cfg(target_arch = "riscv64")]
-        {
-            core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
-        }
+        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
 
         println!("[INIT] Init system module loaded");
     }

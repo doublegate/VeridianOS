@@ -8,6 +8,8 @@ use alloc::{collections::BTreeMap, format, string::String, sync::Arc, vec, vec::
 
 use spin::RwLock;
 
+#[cfg(target_arch = "aarch64")]
+pub mod bare_lock;
 pub mod blockdev;
 pub mod blockfs;
 pub mod devfs;
@@ -120,6 +122,9 @@ pub struct DirEntry {
 
 /// VFS node operations trait
 pub trait VfsNode: Send + Sync {
+    /// Node type query (also serves as vtable slot padding for AArch64)
+    fn node_type(&self) -> NodeType;
+
     /// Read data from the node
     fn read(&self, offset: usize, buffer: &mut [u8]) -> Result<usize, &'static str>;
 
@@ -403,10 +408,23 @@ static mut VFS_PTR: *mut RwLock<Vfs> = core::ptr::null_mut();
 /// Get the VFS instance (unified for all architectures)
 pub fn get_vfs() -> &'static RwLock<Vfs> {
     unsafe {
-        if VFS_PTR.is_null() {
+        let ptr = core::ptr::read_volatile(&raw const VFS_PTR);
+        if ptr.is_null() {
             panic!("VFS not initialized");
         }
-        &*VFS_PTR
+        &*ptr
+    }
+}
+
+/// Try to get the VFS instance without panicking
+pub fn try_get_vfs() -> Option<&'static RwLock<Vfs>> {
+    unsafe {
+        let ptr = core::ptr::read_volatile(&raw const VFS_PTR);
+        if ptr.is_null() {
+            None
+        } else {
+            Some(&*ptr)
+        }
     }
 }
 
@@ -418,15 +436,13 @@ pub fn init() {
     println!("[VFS] Initializing Virtual Filesystem...");
 
     unsafe {
-        // Check if already initialized
-        if !VFS_PTR.is_null() {
+        if !core::ptr::read_volatile(&raw const VFS_PTR).is_null() {
             println!("[VFS] WARNING: VFS already initialized! Skipping re-initialization.");
             return;
         }
 
         println!("[VFS] Creating VFS structure...");
 
-        // Create VFS structure
         let mounts = BTreeMap::new();
         let cwd = String::from("/");
         let vfs = Vfs {
@@ -434,47 +450,23 @@ pub fn init() {
             mounts,
             cwd,
         };
-
-        // Create RwLock wrapper
         let vfs_lock = RwLock::new(vfs);
-
-        // Box it and leak to get a static pointer
         let vfs_box = alloc::boxed::Box::new(vfs_lock);
-        let vfs_ptr = alloc::boxed::Box::leak(vfs_box) as *mut RwLock<Vfs>;
+        let ptr = alloc::boxed::Box::leak(vfs_box) as *mut RwLock<Vfs>;
 
-        // Memory barriers for AArch64
+        // Memory barriers before assignment
         #[cfg(target_arch = "aarch64")]
-        {
-            core::arch::asm!(
-                "dsb sy", // Data Synchronization Barrier
-                "isb",    // Instruction Synchronization Barrier
-                options(nostack, nomem, preserves_flags)
-            );
-        }
-
-        // Memory barriers for RISC-V
+        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
         #[cfg(target_arch = "riscv64")]
-        {
-            core::arch::asm!(
-                "fence rw, rw", // Full memory fence
-                options(nostack, nomem, preserves_flags)
-            );
-        }
+        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
 
-        // Store the pointer
-        VFS_PTR = vfs_ptr;
+        core::ptr::write_volatile(&raw mut VFS_PTR, ptr);
 
-        // Memory barriers after assignment for AArch64
+        // Memory barriers after assignment
         #[cfg(target_arch = "aarch64")]
-        {
-            core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
-        }
-
-        // Memory barriers after assignment for RISC-V
+        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
         #[cfg(target_arch = "riscv64")]
-        {
-            core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
-        }
+        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
 
         println!("[VFS] VFS initialized successfully");
     }

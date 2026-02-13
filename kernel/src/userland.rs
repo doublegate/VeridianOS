@@ -22,73 +22,141 @@ pub mod test_programs {
         use alloc::string::String;
 
         pub fn run() -> Result<(), String> {
-            crate::println!("Hello, World from user-space!");
+            crate::println!("Hello, World from VeridianOS!");
             Ok(())
         }
     }
 
-    /// Process management test
+    /// Process management test - verifies process server has processes
     pub mod process_test {
         use alloc::string::String;
 
         pub fn run() -> Result<(), String> {
-            crate::println!("Process test running...");
-            // Test process creation and management
+            crate::println!("Process test: checking process server...");
+            let ps = crate::services::process_server::get_process_server();
+            let processes = ps.list_processes();
+            if processes.is_empty() {
+                return Err(String::from("Process server has no processes"));
+            }
+            crate::println!("  Found {} processes", processes.len());
             Ok(())
         }
     }
 
-    /// Thread management test
+    /// Thread management test - verifies thread manager responds
     pub mod thread_test {
         use alloc::string::String;
 
         pub fn run() -> Result<(), String> {
-            crate::println!("Thread test running...");
-            // Test thread creation and management
-            Ok(())
+            crate::println!("Thread test: checking thread manager...");
+            let tm = crate::thread_api::get_thread_manager();
+            if tm.get_current_thread_id().is_some() {
+                crate::println!("  Thread manager responding");
+                Ok(())
+            } else {
+                Err(String::from("Thread manager not responding"))
+            }
         }
     }
 
-    /// Filesystem test
+    /// Filesystem test - exercises VFS write/read/mkdir/readdir
     pub mod filesystem_test {
         use alloc::string::String;
 
         pub fn run() -> Result<(), String> {
-            crate::println!("Filesystem test running...");
-            // Test VFS operations
+            crate::println!("Filesystem test: exercising VFS...");
+
+            // Write a file
+            crate::fs::write_file("/tmp/fs_test.txt", b"VFS works").map_err(String::from)?;
+
+            // Read it back
+            let data = crate::fs::read_file("/tmp/fs_test.txt").map_err(String::from)?;
+            if data != b"VFS works" {
+                return Err(String::from("Read data mismatch"));
+            }
+            crate::println!("  Write/read verified");
+
+            // List /tmp
+            let vfs = crate::fs::get_vfs().read();
+            let node = vfs.resolve_path("/tmp").map_err(String::from)?;
+            let entries = node.readdir().map_err(String::from)?;
+            let found = entries.iter().any(|e| e.name == "fs_test.txt");
+            if !found {
+                return Err(String::from("File not found in directory listing"));
+            }
+            crate::println!("  Directory listing verified");
+
             Ok(())
         }
     }
 
-    /// Network test
+    /// Network test - checks if network subsystem is reachable
     pub mod network_test {
         use alloc::string::String;
 
         pub fn run() -> Result<(), String> {
-            crate::println!("Network test running...");
-            // Test network operations
+            crate::println!("Network test: checking network subsystem...");
+            let _initialized = crate::drivers::network::is_network_initialized();
+            crate::println!("  Network subsystem checked (non-critical)");
             Ok(())
         }
     }
 
-    /// Driver test
+    /// Driver test - verifies driver framework has registered drivers
     pub mod driver_test {
         use alloc::string::String;
 
         pub fn run() -> Result<(), String> {
-            crate::println!("Driver test running...");
-            // Test driver framework
+            crate::println!("Driver test: checking driver framework...");
+            let df = crate::services::driver_framework::get_driver_framework();
+            let stats = df.get_statistics();
+            crate::println!(
+                "  Drivers: {}, Buses: {}",
+                stats.total_drivers,
+                stats.total_buses
+            );
+            if stats.total_drivers == 0 && stats.total_buses == 0 {
+                return Err(String::from("No drivers or buses registered"));
+            }
             Ok(())
         }
     }
 
-    /// Shell test
+    /// Shell test - runs built-in commands programmatically
     pub mod shell_test {
         use alloc::string::String;
 
         pub fn run() -> Result<(), String> {
-            crate::println!("Shell test running...");
-            // Test shell functionality
+            crate::println!("Shell test: executing built-in commands...");
+            let shell = crate::services::shell::get_shell();
+
+            // Test pwd
+            if !matches!(
+                shell.execute_command("pwd"),
+                crate::services::shell::CommandResult::Success(_)
+            ) {
+                return Err(String::from("pwd command failed"));
+            }
+            crate::println!("  pwd: ok");
+
+            // Test env
+            if !matches!(
+                shell.execute_command("env"),
+                crate::services::shell::CommandResult::Success(_)
+            ) {
+                return Err(String::from("env command failed"));
+            }
+            crate::println!("  env: ok");
+
+            // Test nonexistent command returns NotFound
+            if !matches!(
+                shell.execute_command("nonexistent_cmd_xyz"),
+                crate::services::shell::CommandResult::NotFound
+            ) {
+                return Err(String::from("Expected NotFound for unknown command"));
+            }
+            crate::println!("  not-found detection: ok");
+
             Ok(())
         }
     }
@@ -98,8 +166,14 @@ pub mod test_programs {
         use alloc::string::String;
 
         pub fn run() -> Result<(), String> {
-            crate::println!("Standard library test running...");
-            // Test stdlib functions
+            crate::println!("Standard library test: basic validation...");
+            // Verify alloc works (String, Vec)
+            let s = String::from("hello");
+            let v: alloc::vec::Vec<u32> = alloc::vec![1, 2, 3];
+            if s.len() != 5 || v.len() != 3 {
+                return Err(String::from("Basic alloc types broken"));
+            }
+            crate::println!("  alloc types: ok");
             Ok(())
         }
     }

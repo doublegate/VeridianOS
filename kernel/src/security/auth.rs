@@ -82,8 +82,14 @@ impl UserAccount {
 
         let mut current_hash = sha256(&hash_input);
 
-        // Do 10000 iterations for stretching
-        for _ in 0..10000 {
+        // Key stretching: use few iterations in debug builds (QEMU is slow),
+        // full strength in release builds
+        #[cfg(debug_assertions)]
+        const ITERATIONS: u32 = 10;
+        #[cfg(not(debug_assertions))]
+        const ITERATIONS: u32 = 10_000;
+
+        for _ in 0..ITERATIONS {
             let mut next_input = Vec::new();
             next_input.extend_from_slice(current_hash.as_bytes());
             next_input.extend_from_slice(&salt);
@@ -101,7 +107,12 @@ impl UserAccount {
 
         let mut current_hash = sha256(&hash_input);
 
-        for _ in 0..10000 {
+        #[cfg(debug_assertions)]
+        const ITERATIONS: u32 = 10;
+        #[cfg(not(debug_assertions))]
+        const ITERATIONS: u32 = 10_000;
+
+        for _ in 0..ITERATIONS {
             let mut next_input = Vec::new();
             next_input.extend_from_slice(current_hash.as_bytes());
             next_input.extend_from_slice(&self.salt);

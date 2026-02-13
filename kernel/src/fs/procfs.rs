@@ -48,6 +48,13 @@ impl ProcNode {
 }
 
 impl VfsNode for ProcNode {
+    fn node_type(&self) -> NodeType {
+        match &self.node_type {
+            ProcNodeType::Root | ProcNodeType::ProcessDir(_) => NodeType::Directory,
+            ProcNodeType::ProcessFile(_, _) | ProcNodeType::SystemFile(_) => NodeType::File,
+        }
+    }
+
     fn read(&self, offset: usize, buffer: &mut [u8]) -> Result<usize, &'static str> {
         let content = match &self.node_type {
             ProcNodeType::SystemFile(name) => {

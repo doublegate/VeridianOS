@@ -792,12 +792,11 @@ pub fn start() -> ! {
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[SCHED] Starting scheduler execution\n");
-        uart_write_str("[SCHED] Entering simplified idle loop for AArch64\n");
     }
 
     #[cfg(target_arch = "aarch64")]
     {
-        // For AArch64, just enter a simple idle loop
+        // Enter idle loop
         loop {
             unsafe {
                 core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
@@ -807,11 +806,9 @@ pub fn start() -> ! {
 
     #[cfg(target_arch = "riscv64")]
     {
-        // Skip println for RISC-V to avoid serial issues
-        // For RISC-V, just enter a simple idle loop
+        // Enter idle loop
         loop {
             unsafe {
-                // RISC-V wait for interrupt instruction
                 core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
             }
         }

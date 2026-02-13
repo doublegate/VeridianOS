@@ -33,7 +33,7 @@ SECTIONS
     /* Stack grows downward, place it after BSS */
     . = ALIGN(16K);
     __stack_bottom = .;
-    . = . + 0x20000; /* 128KB stack */
+    . = . + 0x100000; /* 1MB stack */
     __stack_top = .;
     
     /* Kernel end marker */

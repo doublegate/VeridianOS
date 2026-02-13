@@ -560,53 +560,28 @@ pub fn init() {
     use crate::println;
 
     unsafe {
-        // Check if already initialized
         if !DRIVER_FRAMEWORK_PTR.is_null() {
             println!("[DRIVER_FRAMEWORK] Already initialized, skipping...");
             return;
         }
 
         println!("[DRIVER_FRAMEWORK] Creating new DriverFramework...");
-
-        // Allocate the DriverFramework on the heap using a Box
         let framework = alloc::boxed::Box::new(DriverFramework::new());
+        let ptr = alloc::boxed::Box::leak(framework) as *mut DriverFramework;
 
-        // Leak the Box to get a static pointer
-        let framework_ptr = alloc::boxed::Box::leak(framework) as *mut DriverFramework;
-
-        // Memory barriers for AArch64
+        // Memory barriers before assignment
         #[cfg(target_arch = "aarch64")]
-        {
-            core::arch::asm!(
-                "dsb sy", // Data Synchronization Barrier
-                "isb",    // Instruction Synchronization Barrier
-                options(nostack, nomem, preserves_flags)
-            );
-        }
-
-        // Memory barriers for RISC-V
+        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
         #[cfg(target_arch = "riscv64")]
-        {
-            core::arch::asm!(
-                "fence rw, rw", // Full memory fence
-                options(nostack, nomem, preserves_flags)
-            );
-        }
+        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
 
-        // Assign the pointer
-        DRIVER_FRAMEWORK_PTR = framework_ptr;
+        DRIVER_FRAMEWORK_PTR = ptr;
 
-        // Memory barriers after assignment for AArch64
+        // Memory barriers after assignment
         #[cfg(target_arch = "aarch64")]
-        {
-            core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
-        }
-
-        // Memory barriers after assignment for RISC-V
+        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
         #[cfg(target_arch = "riscv64")]
-        {
-            core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
-        }
+        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
 
         println!("[DRIVER_FRAMEWORK] Driver framework initialized");
     }

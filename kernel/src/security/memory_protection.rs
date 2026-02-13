@@ -24,9 +24,12 @@ impl Aslr {
         let mut entropy_pool = [0u64; 16];
 
         // Fill with secure random data
+        // Use index-based loop instead of iter_mut() to avoid AArch64 LLVM hang
         let rng = get_random();
-        for entry in entropy_pool.iter_mut() {
-            *entry = rng.next_u64();
+        let mut i = 0;
+        while i < 16 {
+            entropy_pool[i] = rng.next_u64();
+            i += 1;
         }
 
         Ok(Self {
@@ -72,8 +75,11 @@ impl Aslr {
         let mut pool = self.entropy_pool.write();
         let rng = get_random();
 
-        for entry in pool.iter_mut() {
-            *entry = rng.next_u64();
+        // Use index-based loop instead of iter_mut() to avoid AArch64 LLVM hang
+        let mut i = 0;
+        while i < 16 {
+            pool[i] = rng.next_u64();
+            i += 1;
         }
     }
 }

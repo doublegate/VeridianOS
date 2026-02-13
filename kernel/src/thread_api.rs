@@ -597,53 +597,28 @@ pub fn init() {
     use crate::println;
 
     unsafe {
-        // Check if already initialized
         if !THREAD_MANAGER_PTR.is_null() {
             println!("[THREAD_API] Already initialized, skipping...");
             return;
         }
 
         println!("[THREAD_API] Creating new ThreadManager...");
-
-        // Allocate the ThreadManager on the heap using a Box
         let manager = alloc::boxed::Box::new(ThreadManager::new());
+        let ptr = alloc::boxed::Box::leak(manager) as *mut ThreadManager;
 
-        // Leak the Box to get a static pointer
-        let manager_ptr = alloc::boxed::Box::leak(manager) as *mut ThreadManager;
-
-        // Memory barriers for AArch64
+        // Memory barriers before assignment
         #[cfg(target_arch = "aarch64")]
-        {
-            core::arch::asm!(
-                "dsb sy", // Data Synchronization Barrier
-                "isb",    // Instruction Synchronization Barrier
-                options(nostack, nomem, preserves_flags)
-            );
-        }
-
-        // Memory barriers for RISC-V
+        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
         #[cfg(target_arch = "riscv64")]
-        {
-            core::arch::asm!(
-                "fence rw, rw", // Full memory fence
-                options(nostack, nomem, preserves_flags)
-            );
-        }
+        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
 
-        // Assign the pointer
-        THREAD_MANAGER_PTR = manager_ptr;
+        THREAD_MANAGER_PTR = ptr;
 
-        // Memory barriers after assignment for AArch64
+        // Memory barriers after assignment
         #[cfg(target_arch = "aarch64")]
-        {
-            core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
-        }
-
-        // Memory barriers after assignment for RISC-V
+        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
         #[cfg(target_arch = "riscv64")]
-        {
-            core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
-        }
+        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
 
         println!("[THREAD_API] Thread management APIs initialized");
     }

@@ -536,44 +536,22 @@ pub fn init() {
 
         println!("[PROCESS_SERVER] Creating ProcessServer...");
         let server = ProcessServer::new();
-
-        // Box it and leak to get a static pointer
         let server_box = alloc::boxed::Box::new(server);
-        let server_ptr = alloc::boxed::Box::leak(server_box) as *mut ProcessServer;
+        let ptr = alloc::boxed::Box::leak(server_box) as *mut ProcessServer;
 
-        // Memory barriers for AArch64
+        // Memory barriers before assignment
         #[cfg(target_arch = "aarch64")]
-        {
-            core::arch::asm!(
-                "dsb sy", // Data Synchronization Barrier
-                "isb",    // Instruction Synchronization Barrier
-                options(nostack, nomem, preserves_flags)
-            );
-        }
-
-        // Memory barriers for RISC-V
+        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
         #[cfg(target_arch = "riscv64")]
-        {
-            core::arch::asm!(
-                "fence rw, rw", // Full memory fence
-                options(nostack, nomem, preserves_flags)
-            );
-        }
+        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
 
-        // Store the pointer
-        PROCESS_SERVER_PTR = server_ptr;
+        PROCESS_SERVER_PTR = ptr;
 
-        // Memory barriers after assignment for AArch64
+        // Memory barriers after assignment
         #[cfg(target_arch = "aarch64")]
-        {
-            core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
-        }
-
-        // Memory barriers after assignment for RISC-V
+        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
         #[cfg(target_arch = "riscv64")]
-        {
-            core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
-        }
+        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
 
         println!("[PROCESS_SERVER] Process server initialized");
     }

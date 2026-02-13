@@ -4,8 +4,11 @@
 
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 
+#[cfg(not(target_arch = "aarch64"))]
 use spin::RwLock;
 
+#[cfg(target_arch = "aarch64")]
+use super::bare_lock::RwLock;
 use super::{DirEntry, Filesystem, Metadata, NodeType, Permissions, VfsNode};
 
 /// RAM filesystem node
@@ -69,6 +72,10 @@ impl RamNode {
 }
 
 impl VfsNode for RamNode {
+    fn node_type(&self) -> NodeType {
+        self.node_type
+    }
+
     fn read(&self, offset: usize, buffer: &mut [u8]) -> Result<usize, &'static str> {
         if self.node_type != NodeType::File {
             return Err("Not a file");
