@@ -763,7 +763,11 @@ fn setup_preemption_timer() {
 
     #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
     {
-        // Configure RISC-V timer for 10ms tick
+        // Configure RISC-V timer for 10ms tick.
+        // NOTE: setup_timer() configures the SBI timer but does NOT enable
+        // STIE (supervisor timer interrupt enable) because no trap handler
+        // (stvec) is registered yet. Enabling STIE without stvec causes
+        // the CPU to jump to address 0 on timer fire, rebooting the system.
         crate::arch::riscv::timer::setup_timer(10);
         #[cfg(not(target_arch = "aarch64"))]
         println!("[SCHED] RISC-V timer configured for preemptive scheduling");

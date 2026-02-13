@@ -63,11 +63,11 @@ pub fn setup_timer(interval_ms: u32) {
         );
     }
 
-    // Enable supervisor timer interrupts in SIE
-    unsafe {
-        // Set STIE bit (bit 5) in sie register
-        core::arch::asm!("csrs sie, {}", in(reg) 1u64 << 5);
-    }
+    // NOTE: Do NOT enable STIE here. There is no trap handler (stvec)
+    // registered yet, so enabling timer interrupts would cause the CPU
+    // to jump to address 0 when the timer fires, crashing/rebooting.
+    // Timer interrupts will be enabled once a proper trap handler is
+    // set up in a future phase.
 
     println!(
         "[TIMER] Configured RISC-V timer for {}ms intervals ({} cycles)",
