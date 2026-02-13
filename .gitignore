@@ -238,3 +238,9 @@ out/
 *.objdump
 *.disasm
 
+# mdBook build output
+docs/book/book/
+
+# QEMU test output
+/tmp/veridian-*
+

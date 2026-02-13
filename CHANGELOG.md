@@ -1,6 +1,89 @@
-## [Unreleased]
+## [0.2.2] - 2026-02-13
 
-### 🎉 Bootloader 0.11+ Migration Complete (November 27, 2025)
+### Phase 2 Runtime Activation - All Init Tests Passing
+
+**MILESTONE**: Kernel-mode init tests verify Phase 2 subsystems at runtime. AArch64 and RISC-V both achieve 12/12 tests with BOOTOK. Root cause of all AArch64 VFS hangs identified and fixed (missing FP/NEON enable in boot.S).
+
+#### Kernel-Mode Init Tests (bootstrap.rs)
+
+Added `kernel_init_main()` - a kernel-mode init function that exercises Phase 2 subsystems and emits QEMU-parseable `[ok]`/`[failed]` markers:
+
+**VFS Tests (6)**:
+- `vfs_mkdir` - Create directory via VFS
+- `vfs_write_file` - Write file via VFS create + write
+- `vfs_read_verify` - Read file back and verify contents match
+- `vfs_readdir` - List directory entries and verify file presence
+- `vfs_procfs` - Verify /proc is mounted
+- `vfs_devfs` - Verify /dev is mounted
+
+**Shell Tests (6)**:
+- `shell_help` - Execute help command
+- `shell_pwd` - Execute pwd command
+- `shell_ls` - Execute ls / command
+- `shell_env` - Execute env command
+- `shell_echo` - Execute echo command
+- `shell_mkdir_verify` - Create directory via shell, verify via VFS
+
+**Results**: AArch64 12/12 BOOTOK, RISC-V 12/12 BOOTOK, x86_64 builds successfully.
+
+#### AArch64 FP/NEON Fix (Root Cause)
+
+- **Problem**: `file.read()` on buffers >= 16 bytes would hang silently
+- **Root Cause**: LLVM emits NEON/SIMD instructions (`movi v0.2d, #0` + `str q0`) for efficient buffer zeroing. Without CPACR_EL1.FPEN enabled, these instructions trap on the CPU
+- **Fix**: Added `mov x0, #(3 << 20); msr cpacr_el1, x0; isb` to `boot.S` before any Rust code executes
+- **Impact**: Completely resolves all AArch64 file/buffer operation hangs
+
+#### AArch64 Allocator Unification
+
+- Extended `UnsafeBumpAllocator` to AArch64 (previously RISC-V only)
+- AArch64 allocation path uses simple load-store (no CAS, no iterators)
+- Direct atomic initialization with DSB SY + ISB memory barriers
+- Heap initialization now enabled on AArch64 (was previously skipped)
+
+#### New: bare_lock Module (fs/bare_lock.rs)
+
+- UnsafeCell-based single-threaded RwLock for AArch64 bare metal
+- Replaces `spin::RwLock` in ramfs, devfs, blockfs, file, pty on AArch64
+- Avoids `ldaxr/stlxr` CAS spinlock hangs without exclusive monitor
+
+#### VfsNode Trait Extension
+
+- Added `node_type()` as first method in VfsNode trait
+- Implemented across all 5 VfsNode implementations (RamNode, DevNode, DevRoot, ProcNode, BlockFsNode)
+- VFS init uses volatile pointer operations for global state
+- Added `try_get_vfs()` non-panicking accessor
+
+#### Service Init Improvements
+
+- Shell: volatile read/write for SHELL_PTR, added `try_get_shell()` accessor
+- Shell init added to `services::init()` (was missing from initialization chain)
+- IPC registry: removed verbose AArch64 debug prints
+- All 7 service modules: condensed memory barrier blocks
+
+#### Security and Crypto Fixes
+
+- `auth.rs`: PBKDF2 iterations reduced from 10,000 to 10 in debug builds (QEMU too slow for full key stretching)
+- `memory_protection.rs` and `crypto/random.rs`: replaced `iter_mut()` with index-based while loops (AArch64 LLVM iterator issues)
+- `security/mod.rs`: conditional AArch64 compilation with direct UART output
+
+#### Test Programs (userland.rs)
+
+- Replaced all stub test programs with real implementations
+- `filesystem_test`: VFS write/read/verify + directory listing
+- `shell_test`: pwd, env, unknown-command NotFound detection
+- `process_test`: verify process server has processes
+- `driver_test`: check driver framework statistics
+- `stdlib_test`: verify alloc types (String, Vec)
+
+#### Other Changes
+
+- AArch64 stack increased from 128KB to 1MB (link.ld)
+- `simple_alloc_unsafe.rs`: fixed clippy `needless_return` warning
+- Scheduler: cleaned up idle loop comments
+
+---
+
+### Bootloader 0.11+ Migration Complete (November 27, 2025)
 
 **MAJOR MILESTONE**: Successfully migrated from bootloader 0.9 to 0.11.11 with comprehensive memory optimizations!
 
@@ -364,9 +447,7 @@ All notable changes to VeridianOS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### 🎉 UNIFIED POINTER PATTERN IMPLEMENTATION (August 17, 2025 - 1:00 AM EDT)
+### Unified Pointer Pattern (August 17, 2025)
 
 **MAJOR ARCHITECTURAL IMPROVEMENT**: Systematic conversion to unified pointer pattern complete!
 
@@ -912,7 +993,7 @@ While in pre-1.0 development:
 - **0.9.0** - Package management
 - **1.0.0** - First stable release
 
-[Unreleased]: https://github.com/doublegate/VeridianOS/compare/v0.2.1...HEAD
+[0.2.2]: https://github.com/doublegate/VeridianOS/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/doublegate/VeridianOS/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/doublegate/VeridianOS/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/doublegate/VeridianOS/releases/tag/v0.1.0

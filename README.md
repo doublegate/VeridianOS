@@ -107,15 +107,15 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Last Updated**: August 17, 2025
+**Last Updated**: February 13, 2026
 
 ### Current Architecture Support
 
-| Architecture | Build | Boot | Serial I/O | Context Switch | Stage 6 | Status |
-|--------------|-------|------|------------|----------------|---------|--------|
-| AArch64      | ✅    | ✅   | ✅         | ✅             | ✅      | **100% Functional** — Boots to Stage 6 with unified static mut pointer pattern |
-| RISC-V 64    | ✅    | ✅   | ✅         | ✅             | ⚠️      | **95% Complete** — Reaches Stage 6 but reboots (timer/WFI issue) |
-| x86_64       | ✅    | ✅   | ✅         | ✅             | ⚠️      | **30% Complete** — Early boot hang (bootloader issue under investigation) |
+| Architecture | Build | Boot | Init Tests | Stage 6 | Status |
+|--------------|-------|------|-----------|---------|--------|
+| AArch64      | ✅    | ✅   | 12/12     | ✅      | **100% Functional** — Full Phase 2 runtime activation with BOOTOK |
+| RISC-V 64    | ✅    | ✅   | 12/12     | ✅      | **100% Functional** — Full Phase 2 runtime activation with BOOTOK |
+| x86_64       | ✅    | ✅   | --        | ✅      | **Builds successfully** — Bootloader migration in progress |
 
 ### Phase 0: Foundation & Tooling — Complete (v0.1.0)
 
@@ -134,9 +134,9 @@ Core subsystems implemented:
 - **Capability System** — Tokens, rights, space management, inheritance, revocation, per-CPU cache
 - **Test Framework** — `no_std` test framework with benchmarks, IPC/scheduler/process tests
 
-### Phase 2: User Space Foundation — Architecturally Complete
+### Phase 2: User Space Foundation — Runtime Verified (v0.2.2)
 
-Started August 15, 2025. Architecturally complete August 16, 2025.
+Started August 15, 2025. Architecturally complete August 16, 2025. Runtime activation verified February 13, 2026.
 
 Implementation achievements:
 
@@ -151,10 +151,15 @@ Implementation achievements:
 - **Init System** — Service management with dependencies and runlevels
 - **Shell Implementation** — 20+ built-in commands with environment management
 - **Driver Suite** — PCI/USB bus drivers, network drivers (Ethernet + loopback with TCP/IP stack), storage drivers (ATA/IDE), console drivers (VGA + serial)
+- **Runtime Init Tests** — 12 kernel-mode tests (6 VFS + 6 shell) verifying subsystem functionality at boot
 
 ### Technical Notes
 
-**Unified static mut pointer pattern**: Implemented across all architectures. Zero warnings and clippy-clean on all targets.
+**AArch64 FP/NEON fix**: Root cause of AArch64 VFS read hangs identified and resolved. LLVM emits NEON/SIMD instructions (`movi v0.2d`, `str q0`) for buffer zeroing on buffers >= 16 bytes. Without CPACR_EL1.FPEN enabled, these instructions trap silently. Fixed by enabling FP/NEON in `boot.S` before entering Rust code.
+
+**UnsafeBumpAllocator on AArch64**: AArch64 now uses the same lock-free bump allocator as RISC-V, with a simple load-store allocation path (no CAS) and direct atomic initialization with DSB SY/ISB memory barriers.
+
+**bare_lock::RwLock**: UnsafeCell-based single-threaded RwLock replacement for AArch64 bare metal, used in VFS filesystem modules to avoid `spin::RwLock` CAS spinlock hangs without proper exclusive monitor configuration.
 
 **AArch64 LLVM workaround**: AArch64 uses an assembly-only approach to bypass a critical LLVM loop compilation bug. All `println!` and `boot_println!` macros are no-ops on AArch64; critical messages use direct UART character writes. See [README - LLVM Bug](kernel/src/arch/aarch64/README_LLVM_BUG.md) for details.
 
@@ -178,7 +183,7 @@ Normative truth lives in this README and `docs/`.
 
 ### Prerequisites
 
-- Rust nightly-2025-01-15 or later
+- Rust nightly-2025-11-15 or later
 - QEMU 8.0+ (for testing)
 - 8GB RAM (16GB recommended)
 - 20GB free disk space
@@ -350,7 +355,7 @@ Security is a fundamental design principle:
 
 - [x] Phase 0: Foundation — Complete (2025-06-07)
 - [x] Phase 1: Microkernel Core — Complete (2025-06-12, v0.2.1)
-- [x] Phase 2: User Space Foundation — Architecturally complete (2025-08-16)
+- [x] Phase 2: User Space Foundation — Runtime verified (2025-08-16, v0.2.2)
 
 ### Mid-term (2026)
 
