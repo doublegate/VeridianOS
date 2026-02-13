@@ -15,28 +15,15 @@ flowchart TB
   %% Kernel Entry Points
   %% =========================
 
-  BOOT[Firmware / Bootloader<br/><span style="font-size:12px;color:#334155">
-    initial control transfer
-  </span>]
+  BOOT["Firmware / Bootloader<br>initial control transfer"]
 
-  USER[Userland Process<br/><span style="font-size:12px;color:#334155">
-    constrained • no ambient authority
-  </span>]
+  USER["Userland Process<br>constrained - no ambient authority"]
 
-  HW[Hardware / Devices<br/><span style="font-size:12px;color:#334155">
-    asynchronous events
-  </span>]
+  HW["Hardware / Devices<br>asynchronous events"]
 
-  KERNEL[Kernel (TCB)<br/><span style="font-size:12px;color:#334155">
-    sole authority origin<br/>
-    isolation • mediation • validation
-  </span>]
+  KERNEL["Kernel - TCB<br>sole authority origin<br>isolation - mediation - validation"]
 
-  VALIDATE[[Boundary Validation<br/><span style="font-size:12px;color:#334155">
-    capability check<br/>
-    endpoint validation<br/>
-    memory ownership rules
-  </span>]]
+  VALIDATE[["Boundary Validation<br>capability check<br>endpoint validation<br>memory ownership rules"]]
 
   %% --- Entry paths ---
   BOOT -->|boot entry| KERNEL
@@ -48,11 +35,11 @@ flowchart TB
   VALIDATE --> KERNEL
 
   %% --- Styling ---
-  classDef kernel fill:rgba(59,130,246,0.10),stroke:rgba(15,23,42,0.30),stroke-width:2px;
-  classDef user fill:rgba(16,185,129,0.10),stroke:rgba(15,23,42,0.30),stroke-width:2px;
-  classDef boot fill:rgba(100,116,139,0.10),stroke:rgba(15,23,42,0.30),stroke-width:2px;
-  classDef hw fill:rgba(168,85,247,0.10),stroke:rgba(15,23,42,0.30),stroke-width:2px;
-  classDef validate fill:rgba(255,255,255,0.65),stroke:rgba(15,23,42,0.22),stroke-width:2px;
+  classDef kernel fill:rgba(59,130,246,0.10),stroke:rgba(15,23,42,0.30),stroke-width:2px
+  classDef user fill:rgba(16,185,129,0.10),stroke:rgba(15,23,42,0.30),stroke-width:2px
+  classDef boot fill:rgba(100,116,139,0.10),stroke:rgba(15,23,42,0.30),stroke-width:2px
+  classDef hw fill:rgba(168,85,247,0.10),stroke:rgba(15,23,42,0.30),stroke-width:2px
+  classDef validate fill:rgba(255,255,255,0.65),stroke:rgba(15,23,42,0.22),stroke-width:2px
 
   class KERNEL kernel
   class USER user
