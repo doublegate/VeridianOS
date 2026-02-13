@@ -11,7 +11,7 @@ cargo build --target x86_64-unknown-none -p veridian-kernel --features multiboot
 echo "Kernel built successfully!"
 echo ""
 echo "To create GRUB ISO:"
-echo "  ./create-grub-image.sh"
+echo "  ./scripts/create-grub-image.sh"
 echo ""
 echo "To test:"
 echo "  qemu-system-x86_64 -cdrom veridian-os.iso -serial stdio -display none"

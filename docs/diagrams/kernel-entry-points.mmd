@@ -1,0 +1,61 @@
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "fontFamily": "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
+    "fontSize": "14px",
+    "primaryTextColor": "#0f172a",
+    "lineColor": "#1f2937"
+  },
+  "flowchart": { "curve": "basis", "nodeSpacing": 60, "rankSpacing": 70 }
+}}%%
+
+flowchart TB
+
+  %% =========================
+  %% Kernel Entry Points
+  %% =========================
+
+  BOOT[Firmware / Bootloader<br/><span style="font-size:12px;color:#334155">
+    initial control transfer
+  </span>]
+
+  USER[Userland Process<br/><span style="font-size:12px;color:#334155">
+    constrained • no ambient authority
+  </span>]
+
+  HW[Hardware / Devices<br/><span style="font-size:12px;color:#334155">
+    asynchronous events
+  </span>]
+
+  KERNEL[Kernel (TCB)<br/><span style="font-size:12px;color:#334155">
+    sole authority origin<br/>
+    isolation • mediation • validation
+  </span>]
+
+  VALIDATE[[Boundary Validation<br/><span style="font-size:12px;color:#334155">
+    capability check<br/>
+    endpoint validation<br/>
+    memory ownership rules
+  </span>]]
+
+  %% --- Entry paths ---
+  BOOT -->|boot entry| KERNEL
+  USER -->|syscall entry| KERNEL
+  HW   -->|interrupt / exception entry| KERNEL
+
+  %% --- Mediation ---
+  KERNEL --> VALIDATE
+  VALIDATE --> KERNEL
+
+  %% --- Styling ---
+  classDef kernel fill:rgba(59,130,246,0.10),stroke:rgba(15,23,42,0.30),stroke-width:2px;
+  classDef user fill:rgba(16,185,129,0.10),stroke:rgba(15,23,42,0.30),stroke-width:2px;
+  classDef boot fill:rgba(100,116,139,0.10),stroke:rgba(15,23,42,0.30),stroke-width:2px;
+  classDef hw fill:rgba(168,85,247,0.10),stroke:rgba(15,23,42,0.30),stroke-width:2px;
+  classDef validate fill:rgba(255,255,255,0.65),stroke:rgba(15,23,42,0.22),stroke-width:2px;
+
+  class KERNEL kernel
+  class USER user
+  class BOOT boot
+  class HW hw
+  class VALIDATE validate

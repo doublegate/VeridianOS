@@ -172,20 +172,8 @@ worktrees/
 iso_build/
 *.iso
 
-# Temporary status/summary files (generated during development)
-*-STATUS-SUMMARY.md
-*-FIX-SUMMARY.md
-*-UPGRADE-STATUS.md
-memory-optimization-summary.md
-
-# Test scripts output
-test_*.rs
-
-# Python build scripts (generated)
+# Python build artifacts
 *.pyc
-build-disk-image.py
-test-x86-kernel.py
-create-uefi-image.py
 
 # Artifacts directory (CI downloads)
 artifacts/

@@ -62,10 +62,10 @@ cargo build --target riscv64gc-unknown-none-elf -p veridian-kernel \
 Use the provided test script:
 
 ```bash
-./test-boot.sh x86_64    # Test x86_64
-./test-boot.sh aarch64   # Test AArch64
-./test-boot.sh riscv64   # Test RISC-V
-./test-boot.sh all       # Test all architectures
+./scripts/testing/test-boot.sh x86_64    # Test x86_64
+./scripts/testing/test-boot.sh aarch64   # Test AArch64
+./scripts/testing/test-boot.sh riscv64   # Test RISC-V
+./scripts/testing/test-boot.sh all       # Test all architectures
 ```
 
 ### Manual Testing

@@ -1,5 +1,102 @@
 ## [Unreleased]
 
+### 🎉 Bootloader 0.11+ Migration Complete (November 27, 2025)
+
+**MAJOR MILESTONE**: Successfully migrated from bootloader 0.9 to 0.11.11 with comprehensive memory optimizations!
+
+**Commits**: 3 (1 major feature + 2 CI fixes)
+- bbd3951 - feat(x86_64): Complete bootloader 0.11+ migration with memory optimizations
+- e2d071b - ci: Add test branch to CI workflow triggers
+- 5cc418a - fix(ci): Resolve all GitHub Actions CI workflow failures
+
+**Changes**: 26 files modified, 1,590 insertions, 162 deletions (net: +1,428 lines)
+
+#### Key Achievements
+
+- ✅ **Bootloader Upgrade**: Migrated from 0.9 to 0.11.11 with full API compatibility
+- ✅ **90% Memory Reduction**: Static allocations reduced from ~23MB to ~2.2MB
+- ✅ **100% Phase 2 Validation**: All 8 tests passing on x86_64 (Stage 6 BOOTOK)
+- ✅ **Zero Warnings**: All three architectures compile cleanly
+- ✅ **New Build Tools**: Automated bootimage building infrastructure
+
+#### Technical Implementation
+
+**Bootloader API Changes** (`kernel/src/userspace/loader.rs`):
+- Added `.into_option()` for bootloader 0.11 Optional types
+- Architecture-specific handling with `#[cfg(target_arch = "x86_64")]`
+- Preserved working AArch64/RISC-V implementations
+- Proper error handling for required physical memory offset
+
+**Memory Optimizations**:
+- Frame allocator: 2MB → 128KB (MAX_FRAME_COUNT: 16M → 1M frames)
+- Kernel heap: 16MB → 4MB
+- DMA pool: 16MB → 2MB
+- SMP allocations: MAX_CPUS reduced from 16 → 8, stacks from 64 → 32
+
+**Safe Initialization Checks**:
+- Added `is_pci_initialized()` to prevent PCI access panics
+- Added `is_network_initialized()` for network manager safety
+- Updated Phase 2 validation to check initialization before access
+- Graceful degradation when hardware unavailable
+
+**Network Integration** (`kernel/src/net/integration.rs`):
+- Skip PCI device scan if PCI not initialized
+- Clear diagnostic messages for missing subsystems
+- Prevents crashes in testing/validation scenarios
+
+**Build System** (`build-kernel.sh`, `tools/build-bootimage.sh`):
+- Automated bootimage building for x86_64
+- New `bootimage-builder` tool (98 lines, 727 total with deps)
+- Error handling and fallback strategies
+
+#### Boot Status
+
+**x86_64**: ✅ Stage 6 BOOTOK + 100% Phase 2 validation (8/8 tests)
+```
+✅ [1/8] Virtual File System operational
+✅ [2/8] Process management working
+✅ [3/8] IPC system functional
+✅ [4/8] Scheduler running
+✅ [5/8] Driver framework operational
+✅ [6/8] Service manager active
+✅ [7/8] Init process started
+✅ [8/8] Shell initialized
+```
+
+**AArch64**: ✅ Compiles successfully, boots to Stage 4
+**RISC-V**: ✅ Compiles successfully, boots to Stage 4
+
+#### Issues Resolved
+
+**ISSUE-0013**: x86_64 Bootloader 0.11+ Migration
+- Root cause: API changes in bootloader 0.11 (Optional types)
+- Solution: Architecture-specific handling with proper Optional conversion
+- Status: ✅ RESOLVED
+
+**ISSUE-0014**: Excessive Static Memory Usage
+- Root cause: Production-sized allocations (64GB support) too large for testing
+- Solution: Reduced allocations to reasonable development sizes
+- Impact: 90% reduction (23MB → 2.2MB)
+- Status: ✅ RESOLVED
+
+#### Code Quality
+
+- **Zero compilation errors** across all architectures
+- **Zero compiler warnings** maintained
+- **All clippy checks passing**
+- **cargo fmt compliant**
+
+#### Next Steps
+
+- Documentation synchronization
+- Merge test branch to main
+- Tag as v0.3.0 (major bootloader update)
+- Begin Phase 3: Security Hardening
+
+See `docs/SESSION-DAILY-LOG-2025-11-27.md` for comprehensive session details.
+
+---
+
 ### Rust Toolchain Update (November 20, 2025)
 
 - **Toolchain upgraded**: `nightly-2025-01-15` (Rust 1.86) → `nightly-2025-11-15` (Rust 1.93.0-nightly)
@@ -246,7 +343,7 @@ See `docs/RUST-2024-MIGRATION-COMPLETE.md` for detailed technical report.
 
 - Added `docs/ADVANCED-FEATURES-COMPLETE.md` - Comprehensive technical report
 - Updated `to-dos/MASTER_TODO.md` - Complete rewrite with all new features
-- Updated `PROJECT-STATUS.md` - Executive summary of completion
+- Updated `docs/PROJECT-STATUS.md` - Executive summary of completion
 - All phase documentation updated (Phases 4-6)
 
 ### 🎉 ALL MAJOR FEATURES NOW COMPLETE

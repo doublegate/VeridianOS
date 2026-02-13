@@ -5,136 +5,185 @@
 
 <img src="images/VeridianOS_Logo-Only.png" alt="VeridianOS Logo" width="60%" />
 
-## A next-generation microkernel operating system built with Rust
+## A research microkernel operating system built with Rust
 
 [![CI Status](https://github.com/doublegate/VeridianOS/workflows/CI/badge.svg)](https://github.com/doublegate/VeridianOS/actions)
 [![Coverage](https://codecov.io/gh/doublegate/VeridianOS/branch/main/graph/badge.svg)](https://codecov.io/gh/doublegate/VeridianOS)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE-MIT)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE-APACHE)
 [![Discord](https://img.shields.io/discord/123456789?label=Discord&logo=discord)](https://discord.gg/24KbHS4C)
-[![Rust 2024](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/)
-
-**🎉 ALL DEVELOPMENT PHASES COMPLETE + RUST 2024 COMPATIBLE! 🎉**
 
 </div>
 
 ## Overview
 
-VeridianOS is a production-ready microkernel operating system written entirely in Rust, emphasizing security, modularity, and performance. It features capability-based security, zero-copy IPC, post-quantum cryptography, and modern desktop capabilities with full Rust 2024 edition compatibility.
+**VeridianOS** is a research operating system written in Rust, focused on **correctness, isolation, and explicit architectural invariants**. It is intended as **executable documentation of high-assurance systems design**, not as a production OS or a general-purpose hobby kernel.
 
-### 🏆 Major Achievements (November 2025)
-
-- ✅ **All 6 development phases complete** (Phases 0-6)
-- ✅ **100% Rust 2024 edition compatible** (120+ static mut eliminated)
-- ✅ **SAT-based package management** with dependency resolution
-- ✅ **NUMA-aware performance** optimization
-- ✅ **Wayland compositor** with GPU acceleration
-- ✅ **Post-quantum cryptography** (NIST FIPS 203/204)
-- ✅ **TPM 2.0 integration** for hardware-backed security
-- ✅ **Zero unsafe data races** across entire codebase
+The project explores how capability-oriented design, strong isolation boundaries, and disciplined use of unsafe code can be combined to produce systems that are *auditable, teachable, and resilient to failure*. VeridianOS features a capability-based security model, zero-copy IPC, and multi-architecture support with an emphasis on reliability and deterministic behavior.
 
 ### Key Features
 
-- 🛡️ **Capability-based security** - Unforgeable tokens for all resource access
-- 🚀 **Microkernel architecture** - Minimal kernel (~15K LOC) with services in user space
-- 🦀 **Memory-safe Rust** - 100% Rust with zero unsafe data races
-- ⚡ **High performance** - Sub-microsecond IPC, zero-copy networking
-- 🔧 **Multi-architecture** - x86_64, AArch64, and RISC-V support (all working!)
-- 🔒 **Post-quantum ready** - ML-KEM and ML-DSA (NIST FIPS 203/204)
-- 📦 **Advanced package manager** - SAT-based dependency resolution
-- 🖥️ **Modern desktop** - Wayland compositor with Vulkan/OpenGL ES
+- 🛡️ **Capability-based security** — Unforgeable tokens for all resource access
+- 🚀 **Microkernel architecture** — Minimal kernel with services in user space
+- 🦀 **Written in Rust** — Memory safety without garbage collection
+- ⚡ **High performance** — Lock-free algorithms, zero-copy IPC
+- 🔧 **Multi-architecture** — x86_64, AArch64, and RISC-V support
+- 🔒 **Security focused** — Mandatory access control, secure boot, hardware security
+- 📦 **Modern package management** — Source and binary package support
+- 🖥️ **Wayland compositor** — Modern display server with GPU acceleration
 
-## 🎯 Project Status
+---
 
-**Last Updated**: November 20, 2025
-**Current Version**: v0.3.0-rc (Pre-release)
-**Status**: 🎉 **ALL FEATURES COMPLETE** - Ready for Testing Phase
-**Branch**: `claude/complete-project-implementation-01KUtqiAyfzZtyPR5n5knqoS`
+## Purpose
 
-### Phase Completion Status
+VeridianOS exists to explore and demonstrate:
 
-| Phase | Status | Completed | Key Achievements |
-|-------|--------|-----------|------------------|
-| **Phase 0** | ✅ 100% | June 7, 2025 | Foundation, CI/CD, tooling, debugging infrastructure |
-| **Phase 1** | ✅ 100% | June 12, 2025 | Microkernel, IPC (<1μs), scheduler, capabilities |
-| **Phase 2** | ✅ 100% | Aug 15, 2025 | VFS, ELF loader, drivers, init system, shell |
-| **Phase 3** | ✅ 100% | Nov 18, 2025 | Security hardening, audit framework, MAC policies |
-| **Phase 4** | ✅ 100% | **Nov 19, 2025** | **Package manager, SAT resolver, .vpkg format** |
-| **Phase 5** | ✅ 100% | **Nov 19, 2025** | **NUMA scheduler, zero-copy networking, DMA pools** |
-| **Phase 6** | ✅ 100% | **Nov 19, 2025** | **Wayland compositor, GPU acceleration (Vulkan/GL ES)** |
+- Capability-based system design with explicit authority boundaries
+- Strong isolation between kernel, drivers, services, and userland
+- Memory safety and ownership as architectural properties
+- Deterministic, inspectable system behavior
+- Long-horizon durability over short-term feature velocity
 
-### ✨ Rust 2024 Migration (100% Complete)
+---
 
-| Milestone | Status | Details |
-|-----------|--------|---------|
-| **Static Mut Elimination** | ✅ 100% | 120+ references eliminated |
-| **Compiler Warnings** | ✅ 67% reduction | 144 → 51 (unused vars only) |
-| **Code Safety** | ✅ 100% | Zero unsafe data races |
-| **Edition Compatibility** | ✅ 100% | Fully Rust 2024 compliant |
-| **Build Status** | ✅ Pass | All 3 architectures green |
+## Non-Goals
 
-**Achievement**: First major OS project to achieve 100% Rust 2024 edition compatibility with complete `static mut` elimination!
+VeridianOS intentionally does **not** aim to be:
 
-### Architecture Status (All Working!)
+- A POSIX-compatible operating system
+- A Linux replacement or distribution
+- A performance-first microbenchmark platform
+- A feature-complete general-purpose OS
 
-| Architecture | Build | Boot | Stage 6 | IPC | Memory | Processes | Status |
-|--------------|-------|------|---------|-----|--------|-----------|--------|
-| **x86_64**   | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **Fully Operational** |
-| **AArch64**  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **Fully Operational** |
-| **RISC-V 64** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **Fully Operational** |
+These exclusions are deliberate and protect architectural clarity.
 
-**All architectures** successfully boot to Stage 6, complete initialization, and reach scheduler idle loop!
+---
 
-### Recent Milestones
+## Threat Model (Bounded)
 
-#### November 19, 2025 - Phases 4-6 + Rust 2024 Complete! 🎉
+VeridianOS assumes a single-machine environment with a trusted toolchain. It focuses on software isolation failures, authority misuse, and memory safety violations. Physical attacks, malicious firmware, and advanced side-channel attacks are out of scope by design.
 
-**Features Implemented**:
-- ✅ SAT-based dependency resolver (312 lines)
-- ✅ Package manager with dual signatures (Ed25519 + Dilithium)
-- ✅ NUMA-aware scheduler with topology detection
-- ✅ Zero-copy networking with DMA pools and scatter-gather I/O
-- ✅ Wayland compositor (6 modules, ~400 lines)
-- ✅ GPU acceleration framework (Vulkan + OpenGL ES)
-- ✅ Constant-time cryptographic primitives
-- ✅ NIST post-quantum parameter sets (ML-KEM, ML-DSA)
-- ✅ TPM 2.0 command/response protocol
+---
 
-**Code Quality**:
-- ✅ 21 new production modules (~4,700 lines)
-- ✅ 120+ static mut eliminated (100% Rust 2024 compatible)
-- ✅ 67% compiler warning reduction
-- ✅ Zero unsafe data races
-- ✅ All 3 architectures building cleanly
+## Core Architectural Invariants
 
-See [`docs/ADVANCED-FEATURES-COMPLETE.md`](docs/ADVANCED-FEATURES-COMPLETE.md) and [`docs/RUST-2024-MIGRATION-COMPLETE.md`](docs/RUST-2024-MIGRATION-COMPLETE.md) for complete technical details.
+The system is defined by explicit invariants governing authority, isolation, memory ownership, and unsafe code usage. These are normative and binding.
 
-#### June 17, 2025 - v0.2.1 Released
+See `docs/invariants.md` for the authoritative list.
 
-- Multi-architecture support with modern bootloader
-- Zero warnings across all platforms
-- AArch64 LLVM bug workarounds
-- Ready for Phase 2 development
+---
 
-#### June 12, 2025 - Phase 1 Complete! (v0.2.0)
+## Architecture
 
-Completed in just **5 days** with all performance targets met:
-- IPC latency: <1μs ✅
-- Context switch: <10μs ✅
-- Kernel size: <15,000 LOC ✅
-- 1000+ concurrent processes ✅
+VeridianOS uses a microkernel architecture with the following key components:
+
+```
+┌─────────────────────────────────────────────┐
+│              User Applications              │
+├─────────────────────────────────────────────┤
+│    System Services (VFS, Network, etc.)     │
+├─────────────────────────────────────────────┤
+│    User-Space Drivers (Block, Network)      │
+├─────────────────────────────────────────────┤
+│    Microkernel (Memory, Scheduling, IPC)    │
+└─────────────────────────────────────────────┘
+```
+
+---
+
+## Repository Structure
+
+```
+kernel/        Trusted computing base
+drivers/       Hardware interaction behind explicit privilege boundaries
+services/      Capability-mediated system services
+userland/      Intentionally constrained user processes
+boot/          Bootloader and early initialization
+docs/          Canonical specifications
+experiments/   Non-normative exploratory work
+```
+
+---
+
+## Project Status
+
+**Last Updated**: August 17, 2025
+
+### Current Architecture Support
+
+| Architecture | Build | Boot | Serial I/O | Context Switch | Stage 6 | Status |
+|--------------|-------|------|------------|----------------|---------|--------|
+| AArch64      | ✅    | ✅   | ✅         | ✅             | ✅      | **100% Functional** — Boots to Stage 6 with unified static mut pointer pattern |
+| RISC-V 64    | ✅    | ✅   | ✅         | ✅             | ⚠️      | **95% Complete** — Reaches Stage 6 but reboots (timer/WFI issue) |
+| x86_64       | ✅    | ✅   | ✅         | ✅             | ⚠️      | **30% Complete** — Early boot hang (bootloader issue under investigation) |
+
+### Phase 0: Foundation & Tooling — Complete (v0.1.0)
+
+Released June 7, 2025.
+
+### Phase 1: Microkernel Core — Complete (v0.2.1)
+
+Started June 8, 2025. Completed June 12, 2025. Maintenance release v0.2.1 on June 17, 2025.
+
+Core subsystems implemented:
+
+- **IPC System** — Synchronous/asynchronous channels, registry, performance tracking, rate limiting, capability integration
+- **Memory Management** — Frame allocator, virtual memory, page tables, bootloader integration, VAS cleanup
+- **Process Management** — PCB, threads, context switching, synchronization primitives, syscalls
+- **Scheduler** — CFS, SMP support, load balancing, CPU hotplug, task management
+- **Capability System** — Tokens, rights, space management, inheritance, revocation, per-CPU cache
+- **Test Framework** — `no_std` test framework with benchmarks, IPC/scheduler/process tests
+
+### Phase 2: User Space Foundation — Architecturally Complete
+
+Started August 15, 2025. Architecturally complete August 16, 2025.
+
+Implementation achievements:
+
+- **Virtual Filesystem (VFS) Layer** — Mount points, ramfs, devfs (`/dev`), procfs (`/proc`)
+- **File Descriptors & Operations** — POSIX-style operations with full syscall suite (open, read, write, close, seek, mkdir, etc.)
+- **Live System Information** — `/proc` with real process and memory stats
+- **Device Abstraction** — `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/console`
+- **Process Server** — Complete process management with resource handling
+- **ELF Loader** — Dynamic linking support for user-space applications
+- **Thread Management** — Complete APIs with TLS and scheduling policies
+- **Standard Library** — C-compatible foundation for user-space
+- **Init System** — Service management with dependencies and runlevels
+- **Shell Implementation** — 20+ built-in commands with environment management
+- **Driver Suite** — PCI/USB bus drivers, network drivers (Ethernet + loopback with TCP/IP stack), storage drivers (ATA/IDE), console drivers (VGA + serial)
+
+### Technical Notes
+
+**Unified static mut pointer pattern**: Implemented across all architectures. Zero warnings and clippy-clean on all targets.
+
+**AArch64 LLVM workaround**: AArch64 uses an assembly-only approach to bypass a critical LLVM loop compilation bug. All `println!` and `boot_println!` macros are no-ops on AArch64; critical messages use direct UART character writes. See `kernel/src/arch/aarch64/README_LLVM_BUG.md` for details.
+
+**DEEP-RECOMMENDATIONS**: All 9 of 9 recommendations complete — bootstrap circular dependency fix, AArch64 calling convention, atomic operations, capability overflow, user pointer validation, custom test framework, error type migration, RAII patterns, and Phase 2 readiness.
+
+### Maturity
+
+VeridianOS is an active research system. Core architectural concepts are stable; subsystems evolve deliberately.
+
+Historical status is recorded in:
+
+- [`PROJECT-STATUS.md`](docs/status/PROJECT-STATUS.md)
+- [`PHASE2-STATUS-SUMMARY.md`](docs/status/PHASE2-STATUS-SUMMARY.md)
+- [`BOOTLOADER-UPGRADE-STATUS.md`](docs/status/BOOTLOADER-UPGRADE-STATUS.md)
+
+Normative truth lives in this README and `docs/`.
+
+---
 
 ## Quick Start
 
 ### Prerequisites
 
-- **Rust**: nightly-2025-11-15 (Rust 1.93.0-nightly) or later
-- **QEMU**: 8.0+ (for testing)
-- **Memory**: 8GB RAM (16GB recommended)
-- **Storage**: 20GB free disk space
-- **OS**: Linux (Ubuntu 22.04+, Fedora 38+, or Arch)
+- Rust nightly-2025-01-15 or later
+- QEMU 8.0+ (for testing)
+- 8GB RAM (16GB recommended)
+- 20GB free disk space
 
-### Installation
+### Building and Running
 
 ```bash
 # Clone the repository
@@ -144,492 +193,210 @@ cd VeridianOS
 # Install dependencies (Ubuntu/Debian)
 ./scripts/install-deps.sh
 
-# Install Rust toolchain
-rustup toolchain install nightly-2025-11-15
-rustup component add rust-src llvm-tools-preview
-```
-
-### Building
-
-#### Automated Build (Recommended)
-
-```bash
 # Build all architectures
 ./build-kernel.sh all dev      # Development build
 ./build-kernel.sh all release  # Release build
 
-# Build specific architecture
+# Build a specific architecture
 ./build-kernel.sh x86_64 dev
 ./build-kernel.sh aarch64 release
 ./build-kernel.sh riscv64 dev
-```
 
-#### Manual Build
+# Run in QEMU
+just run
 
-```bash
-# x86_64 (uses custom target with kernel code model)
+# Or build manually (x86_64 requires custom target)
 cargo build --target targets/x86_64-veridian.json \
     -p veridian-kernel \
     -Zbuild-std=core,compiler_builtins,alloc
 
-# AArch64 (standard bare metal target)
-cargo build --target aarch64-unknown-none \
-    -p veridian-kernel
-
-# RISC-V (standard bare metal target)
-cargo build --target riscv64gc-unknown-none-elf \
-    -p veridian-kernel
-```
-
-### Running in QEMU
-
-```bash
-# x86_64
+# Run in QEMU (x86_64)
 qemu-system-x86_64 \
     -kernel target/x86_64-veridian/debug/veridian-kernel \
     -serial stdio \
-    -display none \
-    -m 512M
+    -display none
 
-# AArch64
+# Run in QEMU (AArch64)
 qemu-system-aarch64 \
-    -M virt -cpu cortex-a57 \
+    -M virt \
+    -cpu cortex-a57 \
     -kernel target/aarch64-unknown-none/debug/veridian-kernel \
     -serial stdio \
-    -display none \
-    -m 512M
+    -display none
 
-# RISC-V
+# Run in QEMU (RISC-V)
 qemu-system-riscv64 \
     -M virt \
     -kernel target/riscv64gc-unknown-none-elf/debug/veridian-kernel \
     -serial stdio \
-    -display none \
-    -m 512M
+    -display none
 ```
 
-**Expected Output**: All architectures boot through 6 stages and reach scheduler idle loop:
-```
-[STAGE 1] Boot successful
-[STAGE 2] Memory management initialized
-[STAGE 3] Scheduler initialized
-[STAGE 4] IPC system ready
-[STAGE 5] Capabilities initialized
-[STAGE 6] Bootstrap complete - BOOTOK!
-[SCHEDULER] Entering idle loop
-```
+For detailed build instructions, see [BUILD-INSTRUCTIONS.md](docs/BUILD-INSTRUCTIONS.md).
 
-For detailed build instructions, see [`docs/BUILD-INSTRUCTIONS.md`](docs/BUILD-INSTRUCTIONS.md).
+---
 
-## 📚 Documentation
+## Supported Platforms
 
-### Getting Started
-- 📖 [Architecture Overview](docs/ARCHITECTURE-OVERVIEW.md) - System design and components
-- 🛠️ [Development Guide](docs/DEVELOPMENT-GUIDE.md) - Developer setup and workflow
-- 🏗️ [Build Instructions](docs/BUILD-INSTRUCTIONS.md) - Comprehensive build guide
-- 🚀 [Development Setup](docs/DEVELOPMENT-SETUP.md) - Environment configuration
+### Architectures
 
-### Technical Documentation
-- 📚 [API Reference](docs/API-REFERENCE.md) - System calls and library APIs
-- 🎨 [IPC Design](docs/design/IPC-DESIGN.md) - Inter-process communication
-- 🧠 [Memory Allocator Design](docs/design/MEMORY-ALLOCATOR-DESIGN.md) - Hybrid allocator
-- ⚡ [Scheduler Design](docs/design/SCHEDULER-DESIGN.md) - CFS and SMP support
-- 🔐 [Capability System Design](docs/design/CAPABILITY-SYSTEM-DESIGN.md) - Security model
+- **AArch64** — Full support (primary development target)
+- **x86_64** — In progress (bootloader issues under investigation)
+- **RISC-V (RV64GC)** — Near-complete (timer stability issue remaining)
 
-### Advanced Features (NEW!)
-- 📦 [Package Ecosystem](docs/04-PHASE-4-PACKAGE-ECOSYSTEM.md) - SAT resolver and package manager
-- ⚡ [Performance Optimization](docs/05-PHASE-5-PERFORMANCE-OPTIMIZATION.md) - NUMA and zero-copy
-- 🖥️ [Advanced Features & GUI](docs/06-PHASE-6-ADVANCED-FEATURES.md) - Wayland and GPU
-- ✨ [Rust 2024 Migration](docs/RUST-2024-MIGRATION-COMPLETE.md) - Complete technical report
-- 🎉 [Advanced Features Complete](docs/ADVANCED-FEATURES-COMPLETE.md) - Implementation details
+### Minimum Requirements
 
-### Testing & Debugging
-- 🧪 [Testing Strategy](docs/TESTING-STRATEGY.md) - Testing approach and coverage
-- 🔍 [Testing Status](docs/TESTING-STATUS.md) - Current test infrastructure
-- 🐛 [GDB Debugging](docs/GDB-DEBUGGING.md) - Kernel debugging guide
-- 🔧 [Troubleshooting](docs/TROUBLESHOOTING.md) - Common issues and solutions
-
-### Development Phases
-1. ✅ [Phase 0: Foundation](docs/00-PHASE-0-FOUNDATION.md) - Build system and tooling
-2. ✅ [Phase 1: Microkernel Core](docs/01-PHASE-1-MICROKERNEL-CORE.md) - Core functionality
-3. ✅ [Phase 2: User Space Foundation](docs/02-PHASE-2-USER-SPACE-FOUNDATION.md) - Services
-4. ✅ [Phase 3: Security Hardening](docs/03-PHASE-3-SECURITY-HARDENING.md) - Security
-5. ✅ [Phase 4: Package Ecosystem](docs/04-PHASE-4-PACKAGE-ECOSYSTEM.md) - Packages
-6. ✅ [Phase 5: Performance Optimization](docs/05-PHASE-5-PERFORMANCE-OPTIMIZATION.md) - Performance
-7. ✅ [Phase 6: Advanced Features](docs/06-PHASE-6-ADVANCED-FEATURES.md) - GUI
-
-### Project Status
-- 📊 [Project Status](PROJECT-STATUS.md) - Current status and metrics
-- 📝 [Master TODO](to-dos/MASTER_TODO.md) - Task tracking and progress
-- 📅 [Changelog](CHANGELOG.md) - Version history and changes
-
-## 🏗️ Architecture
-
-VeridianOS uses a microkernel architecture with all drivers and services in user space:
-
-```ascii
-┌─────────────────────────────────────────────────────────────┐
-│                   User Applications                         │
-│  (GUI Apps, Terminal, Text Editor, File Manager, etc.)     │
-├─────────────────────────────────────────────────────────────┤
-│              Desktop Environment (Wayland)                  │
-│     (Compositor, Window Manager, GPU Acceleration)          │
-├─────────────────────────────────────────────────────────────┤
-│                  System Services                            │
-│   (VFS, Network Stack, Package Manager, Init System)       │
-├─────────────────────────────────────────────────────────────┤
-│                User-Space Drivers                           │
-│  (PCI/USB, Network, Storage, Console, GPU Drivers)         │
-├─────────────────────────────────────────────────────────────┤
-│                   Microkernel (~15K LOC)                    │
-│  (Memory, Scheduler, IPC, Capabilities, Security)           │
-└─────────────────────────────────────────────────────────────┘
-        ↕️ Capability-based access control enforced
-```
-
-### Key Components
-
-#### Kernel (~15,000 lines of code)
-- **Memory Management**: Hybrid buddy+bitmap allocator, NUMA-aware, 4-level page tables
-- **Process/Thread Management**: CFS scheduler, SMP support, load balancing
-- **IPC**: Zero-copy channels, <1μs latency, capability-based
-- **Capabilities**: 64-bit tokens, inheritance, revocation, per-CPU cache
-- **Security**: Hardware security (TPM 2.0), post-quantum crypto ready
-
-#### User-Space Services
-- **VFS Layer**: ramfs, devfs, procfs with POSIX-like operations
-- **Network Stack**: TCP/IP with zero-copy DMA, scatter-gather I/O
-- **Package Manager**: SAT-based dependency resolver, dual signatures
-- **Init System**: Service management with dependencies
-- **Shell**: 20+ built-in commands
-
-#### Desktop Environment (NEW!)
-- **Wayland Compositor**: Display server with protocol support
-- **GPU Acceleration**: Vulkan and OpenGL ES layers
-- **Window Manager**: XDG shell with desktop windows
-- **Applications**: Terminal emulator, text editor, file manager
-
-## ⚡ Performance
-
-### Achieved Targets (Phase 1-5)
-
-| Metric | Target | Achieved | Status |
-|--------|--------|----------|--------|
-| **IPC Latency** | <1μs | <1μs | ✅ |
-| **Context Switch** | <10μs | <10μs | ✅ |
-| **Memory Allocation** | <1μs | <1μs | ✅ |
-| **Kernel Size** | <15K LOC | ~15K LOC | ✅ |
-| **Concurrent Processes** | 1000+ | 1000+ | ✅ |
-
-### Performance Features
-
-- **Zero-Copy IPC**: Page remapping for large messages
-- **Lock-Free Algorithms**: Critical paths use atomic operations
-- **NUMA-Aware**: Topology detection and memory affinity
-- **DMA Pools**: Pre-allocated buffers for networking
-- **Scatter-Gather I/O**: Efficient packet assembly
-- **Per-CPU Caching**: Capability and scheduler caches
-
-### Benchmarks
-
-```rust
-// IPC small message (64 bytes)
-Latency: 847ns (median), 912ns (p99)
-
-// Context switch
-Latency: 8.2μs (median), 9.7μs (p99)
-
-// Memory allocation (4KB)
-Latency: 743ns (median), 891ns (p99)
-```
-
-## 🔒 Security
-
-Security is fundamental to VeridianOS design:
-
-### Capability-Based Access Control
-- **Unforgeable tokens**: 64-bit capabilities with generation counters
-- **Fine-grained permissions**: Read, Write, Execute, Grant, Derive, Manage
-- **Inheritance model**: Controlled capability delegation
-- **Revocation**: Fast capability invalidation with per-CPU caches
-
-### Post-Quantum Cryptography (NIST Compliant)
-- **ML-KEM (FIPS 203)**: Key encapsulation (512/768/1024-bit)
-- **ML-DSA (FIPS 204)**: Digital signatures (Dilithium levels 2/3/5)
-- **Constant-time primitives**: Side-channel resistant operations
-- **Dual signatures**: Ed25519 + Dilithium for package verification
-
-### Hardware Security
-- **TPM 2.0**: Hardware RNG, PCR measurements, sealed storage
-- **Secure Boot**: Full chain of trust verification (planned)
-- **Memory Protection**: MMU-enforced isolation
-- **IOMMU**: DMA attack prevention (planned)
-
-### Memory Safety
-- **Rust guarantees**: No null pointers, no buffer overflows, no use-after-free
-- **Zero unsafe data races**: 100% compile-time enforced
-- **User pointer validation**: Page table walking for syscall arguments
-- **RAII patterns**: Automatic resource cleanup
-
-## 📦 Package Management
-
-### Features (Phase 4 Complete!)
-
-- **SAT-Based Dependency Resolution**: Constraint satisfaction for complex dependencies
-- **Version Constraints**: Exact, >=, <=, ranges, wildcards
-- **Binary Package Format**: .vpkg with compression (Zstd/LZ4/Brotli)
-- **Dual Signatures**: Ed25519 (64 bytes) + Dilithium (variable)
-- **Repository Management**: Multiple repository support
-- **Reverse Dependencies**: Prevents breaking installed packages
-
-### Example Usage
-
-```bash
-# Install a package
-vpkg install firefox
-
-# Remove with dependency check
-vpkg remove --check-deps firefox
-
-# Search packages
-vpkg search browser
-
-# Update all packages
-vpkg update && vpkg upgrade
-```
-
-## 🖥️ Desktop Environment
-
-### Wayland Compositor (Phase 6 Complete!)
-
-- **Display Server**: Client connection management with object tracking
-- **Protocol Support**: Wire protocol, surface composition, buffer management
-- **XDG Shell**: Desktop windows with maximize, minimize, fullscreen
-- **GPU Acceleration**: Vulkan and OpenGL ES backend support
-- **Zero-Copy Buffers**: Shared memory for efficient rendering
-
-### Applications
-
-- **Terminal Emulator**: PTY support, 80x24 default, color support
-- **Text Editor**: Basic editing with file loading/saving
-- **File Manager**: Directory browsing with VFS integration
-- **Window Manager**: Tiling and floating modes
-
-## 🌐 Supported Platforms
-
-### Architectures (All Working!)
-
-| Architecture | Status | Notes |
-|--------------|--------|-------|
-| **x86_64** | ✅ Full Support | Kernel code model, bootloader 0.11 |
-| **AArch64** | ✅ Full Support | Cortex-A57+, LLVM bug workarounds |
-| **RISC-V 64** | ✅ Full Support | RV64GC, OpenSBI integration |
-
-### System Requirements
-
-**Minimum**:
 - 64-bit CPU with MMU
 - 256MB RAM
 - 1GB storage
-- Serial console
 
-**Recommended**:
-- Multi-core CPU (4+ cores)
+### Recommended Requirements
+
+- Multi-core CPU with virtualization support
 - 4GB+ RAM
 - NVMe storage
-- GPU for desktop environment
 
-### Tested Platforms
+---
 
-- **QEMU**: 8.0+ (all architectures)
-- **Real Hardware**: Limited testing (x86_64 laptops)
-- **Cloud**: Not yet tested
+## Documentation
 
-## 🤝 Contributing
+- 📖 [Architecture Overview](docs/ARCHITECTURE-OVERVIEW.md) — System design and architecture
+- 🛠️ [Development Guide](docs/DEVELOPMENT-GUIDE.md) — Getting started with development
+- 📚 [API Reference](docs/API-REFERENCE.md) — System call and library APIs
+- 🧪 [Testing Strategy](docs/TESTING-STRATEGY.md) — Testing approach and guidelines
+- 🔍 [Troubleshooting](docs/TROUBLESHOOTING.md) — Common issues and solutions
 
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for:
+### Implementation Guides
 
-- Code of Conduct
-- Development workflow
-- Coding standards (Rust 2024 edition)
-- Pull request process
-- Testing requirements
+- 🗺️ [Implementation Roadmap](docs/IMPLEMENTATION-ROADMAP.md) — Detailed development plan
+- 🔄 [Software Porting Guide](docs/SOFTWARE-PORTING-GUIDE.md) — Porting Linux software to VeridianOS
+- 🔧 [Compiler Toolchain Guide](docs/COMPILER-TOOLCHAIN-GUIDE.md) — Native compiler integration strategy
+- 🚀 [Future Development Insights](docs/FUTURE-DEVELOPMENT-INSIGHTS.md) — Analysis and recommendations
 
-### Areas for Contribution
+### Development Phases
 
-- 🧪 **Testing**: Expand coverage to 80%+
-- 📦 **Packages**: Port software to VeridianOS
-- 🐛 **Bug Fixes**: Fix unused variable warnings
-- 📝 **Documentation**: Improve guides and tutorials
-- 🎨 **Desktop**: Wayland client applications
-- 🔌 **Drivers**: Additional hardware support
+The project follows a phased development approach:
 
-## 🛠️ Development
+1. [Phase 0: Foundation](docs/00-PHASE-0-FOUNDATION.md) — Build system and tooling
+2. [Phase 1: Microkernel Core](docs/01-PHASE-1-MICROKERNEL-CORE.md) — Core kernel functionality
+3. [Phase 2: User Space Foundation](docs/02-PHASE-2-USER-SPACE-FOUNDATION.md) — Essential services
+4. [Phase 3: Security Hardening](docs/03-PHASE-3-SECURITY-HARDENING.md) — Security features
+5. [Phase 4: Package Ecosystem](docs/04-PHASE-4-PACKAGE-ECOSYSTEM.md) — Package management
+6. [Phase 5: Performance Optimization](docs/05-PHASE-5-PERFORMANCE-OPTIMIZATION.md) — Performance tuning
+7. [Phase 6: Advanced Features](docs/06-PHASE-6-ADVANCED-FEATURES.md) — GUI and advanced features
 
-### Project Structure
+See [PROJECT-STATUS.md](docs/PROJECT-STATUS.md) for detailed status information and [Master TODO](to-dos/MASTER_TODO.md) for task tracking.
 
-```
-VeridianOS/
-├── kernel/              # Microkernel implementation
-│   ├── src/
-│   │   ├── arch/       # Architecture-specific (x86_64, aarch64, riscv64)
-│   │   ├── mm/         # Memory management
-│   │   ├── sched/      # Scheduler (CFS, NUMA)
-│   │   ├── ipc/        # Inter-process communication
-│   │   ├── cap/        # Capability system
-│   │   ├── sync/       # Synchronization (OnceLock, GlobalState)
-│   │   ├── process/    # Process/thread management
-│   │   ├── syscall/    # System call handlers
-│   │   ├── fs/         # Filesystem (VFS, ramfs, devfs, procfs)
-│   │   ├── net/        # Networking (zero-copy, DMA)
-│   │   ├── pkg/        # Package manager
-│   │   ├── crypto/     # Cryptography (PQ, constant-time)
-│   │   ├── security/   # Security (TPM, audit)
-│   │   ├── desktop/    # Desktop (Wayland, compositor)
-│   │   └── graphics/   # Graphics (GPU, framebuffer)
-├── drivers/            # User-space drivers
-├── services/           # System services
-├── userland/           # User applications
-├── docs/              # Documentation
-├── to-dos/            # Task tracking
-└── tests/             # Integration tests
-```
+---
 
-### Development Patterns (Rust 2024)
+## How to Read the Code
 
-**Safe Global State** (recommended):
-```rust
-use crate::sync::once_lock::GlobalState;
+1. `docs/invariants.md` — Architectural invariants (start here)
+2. `docs/architecture.md` — System architecture
 
-static MANAGER: GlobalState<Manager> = GlobalState::new();
+Helpful diagrams:
+- `docs/diagrams/architecture-capability-flow.mmd`
+- `docs/diagrams/kernel-entry-points.mmd`
 
-pub fn init() -> Result<(), Error> {
-    MANAGER.init(Manager::new())
-        .map_err(|_| Error::AlreadyInitialized)?;
-    Ok(())
-}
+3. `docs/kernel-entry-points.md` — Kernel entry points
+4. `docs/capability-flow.md` — Capability flow into services and drivers
 
-pub fn with_manager<R, F: FnOnce(&Manager) -> R>(f: F) -> Option<R> {
-    MANAGER.with(f)
-}
-```
+---
 
-**Interior Mutability**:
-```rust
-static MANAGER: GlobalState<RwLock<Manager>> = GlobalState::new();
+## Unsafe Code Policy
 
-pub fn with_manager_mut<R, F: FnOnce(&mut Manager) -> R>(f: F) -> Option<R> {
-    MANAGER.with(|lock| {
-        let mut manager = lock.write();
-        f(&mut manager)
-    })
-}
-```
+Unsafe Rust is permitted only to enforce higher-level invariants and is strictly controlled.
 
-See [`CLAUDE.md`](CLAUDE.md) for complete development patterns and guidelines.
+See `docs/unsafe-policy.md`.
 
-## 📊 Project Statistics
+---
 
-### Code Metrics (November 2025)
+## Performance Targets
 
-| Metric | Count |
-|--------|-------|
-| **Total Modules** | 120+ |
-| **Lines of Code** | ~25,000 (kernel + services) |
-| **Kernel LOC** | ~15,000 |
-| **Test Coverage** | ~55% (target: 80%) |
-| **Compiler Warnings** | 51 (unused vars only) |
-| **Static Mut References** | 0 (100% eliminated!) |
-| **Unsafe Blocks** | Minimal (all audited) |
+VeridianOS is not a performance-first system, but targets reasonable latency for a research microkernel:
 
-### Development Timeline
+**Phase 1 targets** (achieved):
 
-- **Phase 0**: June 7, 2025 (Foundation)
-- **Phase 1**: June 8-12, 2025 (5 days - Microkernel)
-- **Phase 2**: August 15, 2025 (1 day - User Space)
-- **Phase 3**: November 18, 2025 (Security)
-- **Phase 4-6**: November 19, 2025 (1 day - Advanced Features)
-- **Rust 2024**: November 19, 2025 (1 day - Migration)
+- IPC Latency: < 5μs
+- Context Switch: < 10μs
+- Microkernel Size: < 15,000 lines of code
 
-**Total Development**: ~6 months (June - November 2025)
+**Phase 5 targets** (planned):
 
-## 🗺️ Roadmap
+- IPC Latency: < 1μs
+- Memory Allocation: < 1μs
+- System Call Overhead: < 100ns
+- Support for 1000+ concurrent processes
 
-### ✅ Completed (2025)
+Design properties that support these targets include lock-free data structures in critical paths, zero-copy IPC, NUMA-aware memory allocation, and sub-microsecond system call paths.
 
-- [x] **Phase 0**: Foundation and tooling (June 7)
-- [x] **Phase 1**: Microkernel core (June 12)
-- [x] **Phase 2**: User space foundation (August 15)
-- [x] **Phase 3**: Security hardening (November 18)
-- [x] **Phase 4**: Package ecosystem (November 19)
-- [x] **Phase 5**: Performance optimization (November 19)
-- [x] **Phase 6**: Advanced features & GUI (November 19)
-- [x] **Rust 2024**: Complete migration (November 19)
+---
 
-### 🎯 Current Focus (Late 2025 / Early 2026)
+## Security
 
-- [ ] **Testing Phase**: Expand coverage to 80%+
-- [ ] **Documentation**: User guides and tutorials
-- [ ] **Hardware Testing**: Real hardware validation
-- [ ] **Bug Fixes**: Address remaining issues
-- [ ] **Performance Tuning**: Optimize hot paths
+Security is a fundamental design principle:
 
-### 🚀 Future Goals (2026+)
+- **Capability-based access control** — Fine-grained, unforgeable permissions
+- **Secure boot** — Full chain of trust verification
+- **Memory safety** — Rust's ownership guarantees plus runtime checks
+- **Mandatory access control** — SELinux-style policies
+- **Hardware security** — TPM, HSM, and TEE integration
 
-- [ ] **Self-Hosting**: Bootstrap compiler and build tools
-- [ ] **Package Repository**: 50+ ported packages
-- [ ] **Hardware Support**: More drivers and devices
-- [ ] **Desktop Environment**: Full desktop experience
-- [ ] **Production Ready**: Stability and certification
-- [ ] **Cloud Native**: Container and orchestration support
+---
 
-## 🌟 Community
+## Technical Roadmap
 
-- 💬 [Discord Server](https://discord.gg/24KbHS4C) - Real-time chat and support
-- 📧 [Mailing List](https://lists.veridian-os.org) - Development discussions
-- 🐛 [Issue Tracker](https://github.com/doublegate/VeridianOS/issues) - Bug reports and features
-- 📝 [Forum](https://forum.veridian-os.org) - Long-form discussions
-- 📖 [Documentation](https://doublegate.github.io/VeridianOS/) - GitHub Pages
+### Near-term (2025)
 
-## 📜 License
+- [x] Phase 0: Foundation — Complete (2025-06-07)
+- [x] Phase 1: Microkernel Core — Complete (2025-06-12, v0.2.1)
+- [x] Phase 2: User Space Foundation — Architecturally complete (2025-08-16)
+
+### Mid-term (2026)
+
+- [ ] Phase 3: Security Hardening (5–6 months) — SELinux policies, secure boot, audit framework
+- [ ] Phase 4: Package Ecosystem & Self-Hosting (5–6 months) — Ports system, LLVM toolchain priority
+
+### Long-term (2027+)
+
+- [ ] Phase 5: Performance Optimization (5–6 months) — Sub-microsecond IPC, lock-free kernel paths, DPDK networking
+- [ ] Phase 6: Advanced Features (8–9 months) — Wayland compositor, desktop environment, cloud-native features
+
+---
+
+## Contributing
+
+Contributions are welcome. Please see the [Contributing Guide](CONTRIBUTING.md) for details on the code of conduct, development workflow, coding standards, and pull request process.
+
+---
+
+## Community
+
+- [Discord Server](https://discord.gg/24KbHS4C) — Real-time chat
+- [Issue Tracker](https://github.com/doublegate/VeridianOS/issues) — Bug reports and feature requests
+
+---
+
+## License
 
 VeridianOS is dual-licensed under:
 
-- **MIT License** ([LICENSE-MIT](LICENSE-MIT))
-- **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT License ([LICENSE-MIT](LICENSE-MIT))
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
 
 You may choose either license for your use.
 
-## 🙏 Acknowledgments
+---
 
-VeridianOS builds upon ideas and inspiration from many excellent projects:
+## Acknowledgments
 
-- **seL4** - Formal verification and capability systems
-- **Redox OS** - Rust OS development practices and microkernel design
-- **Fuchsia** - Component-based architecture and modern IPC
-- **FreeBSD** - Driver framework and network stack design
-- **Linux** - Hardware support and driver reference
-- **MINIX 3** - Microkernel architecture and reliability
-- **QNX** - Real-time microkernel design patterns
+VeridianOS builds upon ideas from many excellent operating systems:
 
-## 🏆 Project Highlights
-
-### Technical Achievements
-
-- ✨ **First OS** to achieve 100% Rust 2024 edition compatibility
-- ⚡ **Sub-microsecond IPC** with zero-copy capabilities
-- 🔒 **Post-quantum ready** with NIST-compliant cryptography
-- 🎯 **All phases complete** in just 6 months of development
-- 🌐 **Three architectures** working simultaneously
-- 📦 **SAT-based package management** unique to OS projects
-
-### Development Excellence
-
-- **Rapid Development**: Phase 1 completed in 5 days, Phase 2 in 1 day
-- **Zero Regressions**: Maintained build health throughout
-- **Comprehensive Docs**: 60+ documentation files
-- **Systematic Approach**: Organized TODOs and tracking
-- **Quality Focus**: 67% warning reduction, zero unsafe data races
+- **seL4** — Formal verification and capability systems
+- **Redox OS** — Rust OS development practices
+- **Fuchsia** — Component-based architecture
+- **FreeBSD** — Driver framework inspiration
+- **Linux** — Hardware support reference
 
 ---
 
@@ -641,10 +408,5 @@ VeridianOS builds upon ideas and inspiration from many excellent projects:
 
 **Building the future of operating systems, one commit at a time.**
 
-**All development phases complete. Rust 2024 compatible. Production-ready architecture.**
-
-⭐ **Star us on GitHub** | 🐛 **Report Issues** | 🤝 **Contribute** | 📖 **Read the Docs**
-
 </div>
-
 <!-- markdownlint-enable MD033 -->
