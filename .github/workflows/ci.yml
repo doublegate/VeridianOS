@@ -305,12 +305,19 @@ jobs:
     security:
         name: Security Audit
         runs-on: ubuntu-latest
+        permissions:
+            checks: write
+            contents: read
         steps:
             - uses: actions/checkout@v4
             - name: Run cargo-audit
               uses: rustsec/audit-check@v2
               with:
                   token: ${{ secrets.GITHUB_TOKEN }}
+                  # bincode 1.3.3 (RUSTSEC-2025-0141): unmaintained transitive
+                  # dependency of bootloader crate. No security vulnerability;
+                  # informational only. Accepted until bootloader is upgraded.
+                  ignore: RUSTSEC-2025-0141
 
     # Create combined release artifacts
     release-artifacts:
