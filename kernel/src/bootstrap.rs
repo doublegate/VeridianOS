@@ -569,9 +569,10 @@ pub fn kernel_init_main() {
 
     // Test 20: Audit log records events after enable
     {
+        // Generate an explicit audit event so the test does not depend on
+        // bootstrap ordering (process/capability audit hooks fire later).
+        security::audit::log_process_create(0, 0, 0);
         let (count, _max) = security::audit::get_stats();
-        // Audit should have recorded at least one event (from cap init or process
-        // create)
         let ok = count > 0;
         report_test("audit_has_events", ok, &mut passed, &mut failed);
     }
