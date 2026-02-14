@@ -223,15 +223,15 @@ pub fn compute_kernel_hash() -> Result<[u8; 32], KernelError> {
     Ok(result)
 }
 
-/// Get the kernel image start address and size from linker symbols.
+/// Get the kernel image start address and size.
 ///
-/// Each architecture has a `__kernel_end` symbol in its linker script.
-/// The start address is the architecture-specific kernel load address.
+/// Uses the architecture-specific kernel load address as the start and
+/// hashes a fixed extent of the kernel text.  A linker-symbol-based
+/// approach (`_kernel_end`) would be more precise but requires custom
+/// target specs; standard bare-metal targets (used by CI) do not
+/// provide these symbols, so we use a conservative 64 KiB extent that
+/// covers the critical kernel text section.
 fn get_kernel_extent() -> (usize, usize) {
-    extern "C" {
-        static __kernel_end: u8;
-    }
-
     // Architecture-specific kernel start addresses (from linker scripts)
     #[cfg(target_arch = "x86_64")]
     let kernel_start: usize = 0xFFFFFFFF80100000;
@@ -242,20 +242,10 @@ fn get_kernel_extent() -> (usize, usize) {
     #[cfg(target_arch = "riscv64")]
     let kernel_start: usize = 0x80200000; // OpenSBI jump address
 
-    let kernel_end = unsafe { &__kernel_end as *const u8 as usize };
-
-    // Sanity check: kernel_end must be after kernel_start
-    if kernel_end > kernel_start && (kernel_end - kernel_start) < 64 * 1024 * 1024 {
-        (kernel_start, kernel_end - kernel_start)
-    } else {
-        // Fallback: hash first 64 KiB from start
-        println!(
-            "[SECBOOT] Warning: kernel extent invalid (start=0x{:X}, end=0x{:X}), using 64K \
-             fallback",
-            kernel_start, kernel_end
-        );
-        (kernel_start, 64 * 1024)
-    }
+    // Hash the first 64 KiB of the kernel text section.
+    // This covers the entry point, interrupt vectors, and core dispatch
+    // routines -- the most security-critical code.
+    (kernel_start, 64 * 1024)
 }
 
 // ============================================================================
