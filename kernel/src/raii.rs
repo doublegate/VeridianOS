@@ -74,6 +74,10 @@ impl FrameGuard {
 impl Drop for FrameGuard {
     fn drop(&mut self) {
         // Return the frame to the allocator
+        // SAFETY: The frame was allocated from this allocator when the
+        // FrameGuard was created. The guard has exclusive ownership, so
+        // the frame has not been freed elsewhere. free_frame returns
+        // the frame to the allocator's free pool.
         unsafe {
             self.allocator.free_frame(self.frame);
         }
@@ -120,6 +124,9 @@ impl Drop for FramesGuard {
     fn drop(&mut self) {
         // Return all frames to the allocator
         for frame in &self.frames {
+            // SAFETY: Each frame was allocated from this allocator when the
+            // FramesGuard was created. The guard has exclusive ownership of
+            // all frames. free_frame returns each frame to the free pool.
             unsafe {
                 self.allocator.free_frame(*frame);
             }
@@ -262,6 +269,10 @@ impl Drop for ProcessResources {
         }
 
         // 2. Then revoke all capabilities
+        // SAFETY: ManuallyDrop::take moves the Arc out of the ManuallyDrop
+        // wrapper. This is safe because we are in the Drop impl and will
+        // not access self.capabilities again. The Arc's refcount ensures
+        // the CapabilitySpace is valid until the last reference is dropped.
         unsafe {
             let capabilities = ManuallyDrop::take(&mut self.capabilities);
             let mut cap_space = capabilities.lock();
@@ -269,6 +280,10 @@ impl Drop for ProcessResources {
         }
 
         // 3. Finally clean up memory space
+        // SAFETY: ManuallyDrop::take moves the Arc out of the ManuallyDrop
+        // wrapper. This is safe because we are in the Drop impl and will
+        // not access self.memory_space again. The Arc's refcount ensures
+        // the VirtualAddressSpace is valid until the last reference drops.
         unsafe {
             let memory_space = ManuallyDrop::take(&mut self.memory_space);
             let mut mem_space = memory_space.lock();

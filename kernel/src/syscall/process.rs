@@ -58,9 +58,15 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
     }
 
     // Copy path from user space
+    // SAFETY: path_ptr was validated as non-zero above. copy_string_from_user
+    // reads a null-terminated string from the user-space pointer with length
+    // bounds checking. The caller must provide valid mapped user memory.
     let path = unsafe { copy_string_from_user(path_ptr)? };
 
     // Parse argv and envp arrays from user space
+    // SAFETY: argv_ptr and envp_ptr are user-space pointers to null-terminated
+    // arrays of string pointers. copy_string_array_from_user handles null
+    // pointer checks internally and bounds-checks string lengths.
     let argv = unsafe { copy_string_array_from_user(argv_ptr)? };
 
     let envp = unsafe { copy_string_array_from_user(envp_ptr)? };
@@ -127,6 +133,9 @@ pub fn sys_wait(pid: isize, status_ptr: usize, _options: usize) -> SyscallResult
         Ok((child_pid, exit_status)) => {
             // Write exit status to user space if pointer provided
             if status_ptr != 0 {
+                // SAFETY: status_ptr is a non-zero user-space pointer.
+                // copy_to_user validates the pointer and copies the i32
+                // exit status value to the user buffer.
                 unsafe {
                     copy_to_user(status_ptr, &exit_status)?;
                 }
@@ -233,6 +242,9 @@ pub fn sys_thread_join(tid: usize, retval_ptr: usize) -> SyscallResult {
                 // Return exit code to user
                 if retval_ptr != 0 {
                     let exit_value = exit_code as usize;
+                    // SAFETY: retval_ptr is a non-zero user-space pointer.
+                    // copy_to_user validates the pointer and copies the
+                    // usize exit value to the user buffer.
                     unsafe {
                         copy_to_user(retval_ptr, &exit_value)?;
                     }
@@ -270,11 +282,19 @@ pub fn sys_thread_setaffinity(tid: usize, cpuset_ptr: usize, cpuset_size: usize)
     };
 
     // Read CPU set from user space
+    // SAFETY: cpuset_ptr was validated as non-zero and cpuset_size > 0
+    // above. The caller must provide a valid, readable user-space buffer
+    // of at least cpuset_size bytes containing the CPU affinity mask.
     let cpuset = unsafe { slice::from_raw_parts(cpuset_ptr as *const u8, cpuset_size) };
 
     // Extract CPU mask from cpuset (simplified)
     let cpu_mask = if cpuset_size >= 8 {
-        u64::from_le_bytes(cpuset[0..8].try_into().unwrap())
+        // Slice is exactly 8 bytes (cpuset_size >= 8 checked above)
+        u64::from_le_bytes(
+            cpuset[0..8]
+                .try_into()
+                .expect("8-byte slice conversion failed"),
+        )
     } else {
         return Err(SyscallError::InvalidArgument);
     };
@@ -324,6 +344,9 @@ pub fn sys_thread_getaffinity(tid: usize, cpuset_ptr: usize, cpuset_size: usize)
     let mask_bytes = cpu_mask.to_le_bytes();
     let bytes_to_copy = cpuset_size.min(8);
 
+    // SAFETY: cpuset_ptr was validated as non-zero and checked via
+    // validate_user_ptr above. copy_slice_to_user copies the CPU mask
+    // bytes to the user-space buffer.
     unsafe {
         copy_slice_to_user(cpuset_ptr, &mask_bytes[..bytes_to_copy])?;
     }
@@ -373,6 +396,10 @@ pub fn sys_setpriority(which: usize, who: usize, priority: usize) -> SyscallResu
             let threads = process.threads.lock();
             for (_, thread) in threads.iter() {
                 if let Some(task_ptr) = thread.get_task_ptr() {
+                    // SAFETY: task_ptr is a valid NonNull<Task> obtained from
+                    // the thread's stored task pointer. We modify the priority
+                    // field while holding the threads lock, preventing
+                    // concurrent modification.
                     unsafe {
                         let task = task_ptr.as_ptr();
                         (*task).priority = match new_priority {

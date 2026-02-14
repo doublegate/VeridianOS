@@ -1,4 +1,8 @@
-// RISC-V serial implementation using 16550 UART
+//! RISC-V serial output via SBI console putchar.
+//!
+//! Provides a `Uart16550Compat` wrapper that uses SBI ecall (function 0x01)
+//! for console output. The QEMU virt machine places the 16550 UART at
+//! `0x1000_0000`, but output goes through SBI rather than direct MMIO.
 
 use core::fmt;
 
@@ -13,8 +17,7 @@ impl Uart16550Compat {
     }
 
     pub fn init(&mut self) {
-        // TODO: Initialize UART
-        // For QEMU virt machine, the UART is already initialized
+        // QEMU virt machine UART is already initialized by firmware
     }
 }
 
@@ -29,6 +32,9 @@ impl Uart16550Compat {
     pub fn write_bytes(&self, bytes: &[u8]) {
         // Use SBI console putchar for output on RISC-V
         for &byte in bytes {
+            // SAFETY: The ecall instruction invokes the SBI legacy console putchar
+            // (function 0x01). a0 holds the character, a7 holds the function ID.
+            // This is the standard mechanism for console output on RISC-V.
             unsafe {
                 // SBI console putchar using ecall (legacy interface)
                 core::arch::asm!(
@@ -59,5 +65,5 @@ pub fn create_serial_port() -> SerialPort {
 pub fn _serial_print(args: fmt::Arguments) {
     use core::fmt::Write;
     let mut uart = create_serial_port();
-    uart.write_fmt(args).unwrap();
+    uart.write_fmt(args).expect("serial write_fmt failed");
 }

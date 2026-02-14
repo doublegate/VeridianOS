@@ -97,6 +97,8 @@ pub enum TpmError {
 }
 
 /// TPM 2.0 interface
+///
+/// Phase 3 (security hardening) -- fields are not all exercised yet.
 #[allow(dead_code)]
 pub struct Tpm {
     initialized: bool,

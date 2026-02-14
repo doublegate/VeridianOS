@@ -198,6 +198,8 @@ where
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 pub fn read_timestamp() -> u64 {
+    // SAFETY: _rdtsc reads the x86_64 Time Stamp Counter. It is always available
+    // in kernel mode and requires no special setup or preconditions.
     unsafe { core::arch::x86_64::_rdtsc() }
 }
 
@@ -206,6 +208,9 @@ pub fn read_timestamp() -> u64 {
 pub fn read_timestamp() -> u64 {
     // Read the system counter
     let val: u64;
+    // SAFETY: The mrs instruction reads the AArch64 Virtual Counter register
+    // (cntvct_el0), which is always accessible in kernel mode and produces no
+    // side effects beyond reading a monotonically increasing counter.
     unsafe {
         core::arch::asm!("mrs {}, cntvct_el0", out(reg) val);
     }
@@ -217,6 +222,9 @@ pub fn read_timestamp() -> u64 {
 pub fn read_timestamp() -> u64 {
     // Read the cycle counter
     let val: u64;
+    // SAFETY: The rdcycle instruction reads the RISC-V cycle counter CSR, which
+    // is always accessible in kernel mode and produces no side effects beyond
+    // reading a monotonically increasing counter.
     unsafe {
         core::arch::asm!("rdcycle {}", out(reg) val);
     }

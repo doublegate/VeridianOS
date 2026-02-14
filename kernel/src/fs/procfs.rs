@@ -276,7 +276,7 @@ impl VfsNode for ProcNode {
                     _ => {
                         // Try to parse as PID
                         if let Ok(pid) = name.parse::<u64>() {
-                            // TODO: Check if process exists
+                            // TODO(phase3): Validate PID against process table before creating node
                             Ok(Arc::new(ProcNode::new_process_dir(pid)) as Arc<dyn VfsNode>)
                         } else {
                             Err("File not found")

@@ -163,6 +163,8 @@ static mut STATS: NetworkStats = NetworkStats {
 
 /// Update network statistics
 pub fn update_stats_tx(bytes: usize) {
+    // SAFETY: STATS is a static mut NetworkStats struct updated during packet
+    // transmission. Single-threaded access assumed during kernel operation.
     unsafe {
         STATS.packets_sent += 1;
         STATS.bytes_sent += bytes as u64;
@@ -170,6 +172,8 @@ pub fn update_stats_tx(bytes: usize) {
 }
 
 pub fn update_stats_rx(bytes: usize) {
+    // SAFETY: STATS is a static mut NetworkStats struct updated during packet
+    // reception. Single-threaded access assumed during kernel operation.
     unsafe {
         STATS.packets_received += 1;
         STATS.bytes_received += bytes as u64;
@@ -177,6 +181,8 @@ pub fn update_stats_rx(bytes: usize) {
 }
 
 pub fn get_stats() -> NetworkStats {
+    // SAFETY: STATS is a static mut Copy type read for diagnostic output.
+    // Returns a copy, so no aliasing concerns.
     unsafe { STATS }
 }
 

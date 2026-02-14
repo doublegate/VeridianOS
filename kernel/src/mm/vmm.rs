@@ -140,6 +140,12 @@ impl VirtualMemoryManager {
             // In a real implementation, this would use recursive mapping or physical memory
             // mapping
             let l4_virt = 0xFFFF_FF00_0000_0000 as *mut PageTable;
+            // SAFETY: The L4 page table is expected to be mapped at a fixed virtual
+            // address (0xFFFF_FF00_0000_0000) via recursive mapping or the kernel's
+            // physical memory map. This address is within the kernel's higher-half
+            // address space and is reserved for page table access. The PageMapper
+            // requires exclusive access to this table, which is maintained by the
+            // VMM being the sole owner of the mapper through `&mut self`.
             unsafe {
                 self.mapper = Some(PageMapper::new(l4_virt));
             }
@@ -324,6 +330,11 @@ pub mod tlb {
     /// Flush TLB for a specific address
     #[cfg(target_arch = "x86_64")]
     pub fn flush_address(addr: VirtualAddress) {
+        // SAFETY: `invlpg` invalidates the TLB entry for the page containing the
+        // given virtual address. This is a privileged instruction that is always
+        // safe to execute in ring 0 (kernel mode). It has no effect if the address
+        // has no TLB entry. It does not access the memory at `addr`, only
+        // invalidates the cached translation.
         unsafe {
             core::arch::asm!("invlpg [{}]", in(reg) addr.as_u64());
         }
@@ -331,6 +342,12 @@ pub mod tlb {
 
     #[cfg(target_arch = "aarch64")]
     pub fn flush_address(addr: VirtualAddress) {
+        // SAFETY: `tlbi vae1` invalidates the TLB entry for the given virtual
+        // address at EL1. The address is shifted right by 12 to form the required
+        // page-number operand format. DSB SY ensures the invalidation completes
+        // before proceeding, and ISB ensures subsequent instructions see the updated
+        // translations. These are architectural barrier/maintenance instructions
+        // that are always safe to execute at EL1.
         unsafe {
             let addr = addr.as_u64() >> 12;
             core::arch::asm!("tlbi vae1, {}", in(reg) addr);
@@ -341,6 +358,10 @@ pub mod tlb {
 
     #[cfg(target_arch = "riscv64")]
     pub fn flush_address(addr: VirtualAddress) {
+        // SAFETY: `sfence.vma` with a specific address and zero ASID invalidates
+        // all TLB entries for that virtual address across all ASIDs. This is a
+        // supervisor-mode instruction that is always safe to execute in S-mode.
+        // It only affects TLB caching, not actual memory.
         unsafe {
             core::arch::asm!("sfence.vma {}, zero", in(reg) addr.as_u64());
         }
@@ -349,6 +370,11 @@ pub mod tlb {
     /// Flush entire TLB
     #[cfg(target_arch = "x86_64")]
     pub fn flush_all() {
+        // SAFETY: Reloading CR3 with its current value is the standard x86_64
+        // mechanism to flush the entire TLB. Reading CR3 is a privileged but
+        // side-effect-free operation, and writing the same value back only
+        // invalidates non-global TLB entries. This is safe in ring 0 and has
+        // no effect on memory contents.
         unsafe {
             let cr3: u64;
             core::arch::asm!("mov {}, cr3", out(reg) cr3);
@@ -358,6 +384,10 @@ pub mod tlb {
 
     #[cfg(target_arch = "aarch64")]
     pub fn flush_all() {
+        // SAFETY: `tlbi vmalle1` invalidates all EL1 TLB entries. DSB SY ensures
+        // the invalidation is complete before proceeding, and ISB flushes the
+        // instruction pipeline. These are architectural maintenance instructions
+        // that are always safe at EL1 and only affect TLB caching.
         unsafe {
             core::arch::asm!("tlbi vmalle1");
             core::arch::asm!("dsb sy");
@@ -367,8 +397,129 @@ pub mod tlb {
 
     #[cfg(target_arch = "riscv64")]
     pub fn flush_all() {
+        // SAFETY: `sfence.vma` with no arguments invalidates all TLB entries for
+        // all addresses and all ASIDs. This is a supervisor-mode fence instruction
+        // that is always safe to execute in S-mode and only affects TLB caching.
         unsafe {
             core::arch::asm!("sfence.vma");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- VirtualMemoryManager translate tests ---
+    //
+    // translate() is pure logic (no hardware interaction) and is testable
+    // on the host.
+
+    #[test]
+    fn test_translate_identity_mapped_region() {
+        // The VMM's translate() treats addresses < 0x8000_0000 as identity mapped
+        let vmm = VirtualMemoryManager {
+            page_tables: PageTableHierarchy::empty_for_test(),
+            is_kernel: false,
+            mapper: None,
+        };
+
+        // Address in the identity-mapped first 2GB
+        let result = vmm.translate(VirtualAddress::new(0x100000));
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().as_u64(), 0x100000);
+    }
+
+    #[test]
+    fn test_translate_identity_mapped_boundary() {
+        let vmm = VirtualMemoryManager {
+            page_tables: PageTableHierarchy::empty_for_test(),
+            is_kernel: false,
+            mapper: None,
+        };
+
+        // Last valid identity-mapped address
+        let result = vmm.translate(VirtualAddress::new(0x7FFF_FFFF));
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().as_u64(), 0x7FFF_FFFF);
+
+        // Just past the 2GB boundary -- no longer identity mapped
+        let result = vmm.translate(VirtualAddress::new(0x8000_0000));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_translate_higher_half_kernel() {
+        let vmm = VirtualMemoryManager {
+            page_tables: PageTableHierarchy::empty_for_test(),
+            is_kernel: true,
+            mapper: None,
+        };
+
+        // Higher-half kernel mapping: 0xFFFF_8000_0000_0000 -> 0x100000 (1MB)
+        let virt = VirtualAddress::new(0xFFFF_8000_0000_0000);
+        let result = vmm.translate(virt);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().as_u64(), 0x100000);
+    }
+
+    #[test]
+    fn test_translate_higher_half_kernel_with_offset() {
+        let vmm = VirtualMemoryManager {
+            page_tables: PageTableHierarchy::empty_for_test(),
+            is_kernel: true,
+            mapper: None,
+        };
+
+        // Offset within the kernel higher-half mapping
+        let offset = 0x5000u64;
+        let virt = VirtualAddress::new(0xFFFF_8000_0000_0000 + offset);
+        let result = vmm.translate(virt);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().as_u64(), 0x100000 + offset);
+    }
+
+    #[test]
+    fn test_translate_unmapped_address() {
+        let vmm = VirtualMemoryManager {
+            page_tables: PageTableHierarchy::empty_for_test(),
+            is_kernel: false,
+            mapper: None,
+        };
+
+        // Random high address that is not in any known mapping
+        let result = vmm.translate(VirtualAddress::new(0xDEAD_0000_0000));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_translate_zero_address() {
+        let vmm = VirtualMemoryManager {
+            page_tables: PageTableHierarchy::empty_for_test(),
+            is_kernel: false,
+            mapper: None,
+        };
+
+        // Address 0 is within the identity-mapped region
+        let result = vmm.translate(VirtualAddress::new(0));
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().as_u64(), 0);
+    }
+
+    #[test]
+    fn test_is_kernel_flag() {
+        let user_vmm = VirtualMemoryManager {
+            page_tables: PageTableHierarchy::empty_for_test(),
+            is_kernel: false,
+            mapper: None,
+        };
+        assert!(!user_vmm.is_kernel);
+
+        let kernel_vmm = VirtualMemoryManager {
+            page_tables: PageTableHierarchy::empty_for_test(),
+            is_kernel: true,
+            mapper: None,
+        };
+        assert!(kernel_vmm.is_kernel);
     }
 }

@@ -3,7 +3,9 @@
 //! This driver supports the Intel E1000 Gigabit Ethernet controller,
 //! commonly found in QEMU and VirtualBox virtual machines.
 
-// Allow dead code for hardware register definitions that are part of the E1000 spec
+// Hardware register offsets, descriptor structs, and initialization constants
+// are defined per the Intel E1000 specification. Many are retained for
+// completeness even if the current driver only uses a subset.
 #![allow(dead_code)]
 
 use crate::{
@@ -119,11 +121,16 @@ impl E1000Driver {
 
     /// Read from MMIO register
     fn read_reg(&self, offset: usize) -> u32 {
+        // SAFETY: Reading an E1000 MMIO register at mmio_base + offset. The mmio_base
+        // is the controller's BAR0 address from PCI configuration. read_volatile
+        // prevents the compiler from eliding or reordering this hardware register
+        // access.
         unsafe { core::ptr::read_volatile((self.mmio_base + offset) as *const u32) }
     }
 
     /// Write to MMIO register
     fn write_reg(&self, offset: usize, value: u32) {
+        // SAFETY: Writing an E1000 MMIO register. Same invariants as read_reg.
         unsafe {
             core::ptr::write_volatile((self.mmio_base + offset) as *mut u32, value);
         }

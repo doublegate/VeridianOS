@@ -1,4 +1,7 @@
-// Boot entry point for x86_64
+//! x86_64 boot entry point using the `bootloader` crate.
+//!
+//! Receives `BootInfo` from the bootloader and performs early hardware
+//! initialization including serial setup, VGA output, and kernel heap init.
 
 use bootloader_api::BootInfo;
 
@@ -7,19 +10,25 @@ pub static mut BOOT_INFO: Option<&'static mut BootInfo> = None;
 
 // Early initialization that must happen before kernel_main
 pub fn early_boot_init() {
-    // Disable interrupts immediately
+    // SAFETY: The cli instruction disables hardware interrupts. Required during
+    // early boot to prevent interrupt handlers from firing before the IDT is set
+    // up.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
     }
 
-    // Initialize VGA text buffer first for immediate feedback
+    // SAFETY: 0xb8000 is the standard VGA text buffer address on x86 PCs.
+    // write_volatile ensures the write is not optimized away. Always mapped
+    // during early boot.
     unsafe {
         let vga = 0xb8000 as *mut u16;
         // Write 'B' in white on black
         vga.write_volatile(0x0F42);
     }
 
-    // Initialize early serial first thing
+    // SAFETY: Direct I/O port writes to COM1 (0x3F8) to initialize the serial
+    // port for early boot debugging. The 16550 UART initialization sequence
+    // (disable IRQs, set baud rate, configure line control) is well-defined.
     unsafe {
         // Direct serial port initialization at 0x3F8
         let base: u16 = 0x3F8;

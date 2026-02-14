@@ -56,14 +56,12 @@ lazy_static! {
     };
 }
 
-#[allow(dead_code)]
 struct Selectors {
     code_selector: SegmentSelector,
     data_selector: SegmentSelector,
     tss_selector: SegmentSelector,
 }
 
-#[allow(dead_code)]
 pub fn init() {
     use x86_64::instructions::{
         segmentation::{Segment, CS, DS},
@@ -71,6 +69,10 @@ pub fn init() {
     };
 
     GDT.0.load();
+    // SAFETY: After loading the GDT, segment registers must be updated to reference
+    // the new descriptors. CS must be reloaded via a far return/jump. DS and TSS
+    // are loaded directly. The selectors come from GDT.1 which was computed
+    // from the same GDT we just loaded, so they reference valid descriptors.
     unsafe {
         CS::set_reg(GDT.1.code_selector);
         DS::set_reg(GDT.1.data_selector);

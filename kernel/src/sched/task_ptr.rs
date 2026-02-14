@@ -32,8 +32,14 @@ impl TaskPtr {
     }
 }
 
-// Safety: Tasks are only modified by the owning CPU with interrupts disabled
+// SAFETY: TaskPtr wraps a NonNull<Task> pointing to kernel-managed memory.
+// Tasks are only modified while holding the scheduler lock or per-CPU ready
+// queue lock, preventing data races. Sending a TaskPtr between threads is
+// safe because the underlying Task is protected by these locks.
 unsafe impl Send for TaskPtr {}
+// SAFETY: Shared references to TaskPtr only provide a NonNull<Task> which
+// itself requires unsafe to dereference. All actual Task access goes through
+// the scheduler lock or ready queue lock, ensuring synchronized access.
 unsafe impl Sync for TaskPtr {}
 
 impl From<NonNull<Task>> for TaskPtr {

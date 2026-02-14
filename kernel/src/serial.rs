@@ -1,5 +1,8 @@
-// Generic serial interface that delegates to architecture-specific
-// implementations
+//! Generic serial interface for kernel console output.
+//!
+//! Provides a unified `Uart16550Compat` type and `serial_print!` /
+//! `serial_println!` macros that delegate to the architecture-specific
+//! UART implementation.
 
 use core::fmt;
 

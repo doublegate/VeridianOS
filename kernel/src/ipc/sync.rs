@@ -181,9 +181,8 @@ fn validate_send_capability(msg: &Message, endpoint_id: u64) -> Result<()> {
         },
     )?;
 
-    // TODO: Verify the capability is for the specific endpoint_id
-    // This requires enhancing the capability object model to store endpoint IDs
-    let _ = endpoint_id; // Currently not validated against capability
+    // TODO(phase3): Verify capability is for the specific endpoint_id
+    let _ = endpoint_id;
 
     Ok(())
 }
@@ -243,6 +242,9 @@ pub struct SyncStatsSummary {
 
 #[cfg(target_arch = "x86_64")]
 fn read_timestamp() -> u64 {
+    // SAFETY: _rdtsc() reads the x86_64 Time Stamp Counter via the RDTSC
+    // instruction. This is a read-only, side-effect-free operation that is always
+    // available in kernel mode and requires no special setup or preconditions.
     unsafe { core::arch::x86_64::_rdtsc() }
 }
 

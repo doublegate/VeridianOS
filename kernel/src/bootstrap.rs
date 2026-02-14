@@ -12,6 +12,78 @@ use crate::{
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+/// Macro to generate the 12 bootstrap stage tracking functions.
+///
+/// Each architecture provides its own `$print_fn` macro that accepts a single
+/// string literal and outputs it (with a trailing newline) to the
+/// architecture's early console.  This eliminates the otherwise-identical
+/// stage function bodies duplicated across x86_64, AArch64, and RISC-V.
+///
+/// # Usage
+///
+/// ```ignore
+/// // In arch/<arch>/bootstrap.rs:
+/// macro_rules! arch_boot_print {
+///     ($s:expr) => { /* arch-specific print */ };
+/// }
+/// crate::bootstrap::define_bootstrap_stages!(arch_boot_print);
+/// ```
+#[macro_export]
+macro_rules! define_bootstrap_stages {
+    ($print_fn:ident) => {
+        pub fn stage1_start() {
+            $print_fn!("[BOOTSTRAP] Starting multi-stage kernel initialization...");
+            $print_fn!("[BOOTSTRAP] Stage 1: Hardware initialization");
+        }
+
+        pub fn stage1_complete() {
+            $print_fn!("[BOOTSTRAP] Architecture initialized");
+        }
+
+        pub fn stage2_start() {
+            $print_fn!("[BOOTSTRAP] Stage 2: Memory management");
+        }
+
+        pub fn stage2_complete() {
+            $print_fn!("[BOOTSTRAP] Memory management initialized");
+        }
+
+        pub fn stage3_start() {
+            $print_fn!("[BOOTSTRAP] Stage 3: Process management");
+        }
+
+        pub fn stage3_complete() {
+            $print_fn!("[BOOTSTRAP] Process management initialized");
+        }
+
+        pub fn stage4_start() {
+            $print_fn!("[BOOTSTRAP] Stage 4: Kernel services");
+        }
+
+        pub fn stage4_complete() {
+            $print_fn!("[BOOTSTRAP] Core services initialized");
+        }
+
+        pub fn stage5_start() {
+            $print_fn!("[BOOTSTRAP] Stage 5: Scheduler activation");
+        }
+
+        pub fn stage5_complete() {
+            $print_fn!("[BOOTSTRAP] Scheduler activated - entering main scheduling loop");
+        }
+
+        pub fn stage6_start() {
+            $print_fn!("[BOOTSTRAP] Stage 6: User space transition");
+        }
+
+        pub fn stage6_complete() {
+            $print_fn!("[BOOTSTRAP] User space transition prepared");
+            $print_fn!("[KERNEL] Boot sequence complete!");
+            $print_fn!("BOOTOK");
+        }
+    };
+}
+
 /// Bootstrap task ID (runs before scheduler is fully initialized)
 pub const BOOTSTRAP_PID: u64 = 0;
 pub const BOOTSTRAP_TID: u64 = 0;
@@ -24,6 +96,10 @@ pub const BOOTSTRAP_TID: u64 = 0;
 pub fn kernel_init() -> KernelResult<()> {
     // Direct UART output for RISC-V debugging
     #[cfg(target_arch = "riscv64")]
+    // SAFETY: 0x1000_0000 is the UART data register on the QEMU virt
+    // machine.  This address is always mapped and writable during early
+    // boot on this platform.  write_volatile ensures the compiler does
+    // not elide or reorder the MMIO stores.
     unsafe {
         let uart_base = 0x1000_0000 as *mut u8;
         // Write "KINIT" to show kernel_init reached
@@ -75,6 +151,9 @@ pub fn kernel_init() -> KernelResult<()> {
         let test_box = alloc::boxed::Box::new(42u64);
         assert!(*test_box == 42);
         drop(test_box);
+        // SAFETY: uart_write_str performs MMIO writes to the QEMU virt
+        // machine UART at 0x0900_0000.  The address is mapped and valid
+        // during early boot.  Only writes bytes to the data register.
         unsafe {
             crate::arch::aarch64::direct_uart::uart_write_str(
                 "[BOOTSTRAP] Heap allocation verified OK\n",
@@ -121,12 +200,15 @@ pub fn kernel_init() -> KernelResult<()> {
         println!("[BOOTSTRAP] Security subsystem initialized");
     }
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: MMIO write to QEMU virt UART at 0x0900_0000, which is mapped
+    // and valid during boot.  Only writes bytes to the UART data register.
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[BOOTSTRAP] Security subsystem skipped (AArch64 spinlock issue)\n");
     }
 
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: MMIO write to QEMU virt UART (see above).
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[BOOTSTRAP] Initializing perf/IPC...\n");
@@ -141,6 +223,7 @@ pub fn kernel_init() -> KernelResult<()> {
     println!("[BOOTSTRAP] Initializing IPC...");
     ipc::init();
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: MMIO write to QEMU virt UART (see safety note at top of Stage 4).
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[BOOTSTRAP] Perf/IPC initialized\n");
@@ -153,6 +236,7 @@ pub fn kernel_init() -> KernelResult<()> {
     {
         // Add early debug output for AArch64
         #[cfg(target_arch = "aarch64")]
+        // SAFETY: MMIO write to QEMU virt UART at 0x0900_0000.
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
             uart_write_str("[BOOTSTRAP] About to initialize VFS (AArch64 direct UART)...\n");
@@ -162,6 +246,7 @@ pub fn kernel_init() -> KernelResult<()> {
         fs::init();
 
         #[cfg(target_arch = "aarch64")]
+        // SAFETY: MMIO write to QEMU virt UART at 0x0900_0000.
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
             uart_write_str("[BOOTSTRAP] VFS initialized (AArch64 direct UART)\n");
@@ -174,6 +259,7 @@ pub fn kernel_init() -> KernelResult<()> {
     #[cfg(feature = "alloc")]
     {
         #[cfg(target_arch = "aarch64")]
+        // SAFETY: MMIO write to QEMU virt UART at 0x0900_0000.
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
             uart_write_str("[BOOTSTRAP] Initializing services (AArch64)...\n");
@@ -184,6 +270,7 @@ pub fn kernel_init() -> KernelResult<()> {
         services::init();
 
         #[cfg(target_arch = "aarch64")]
+        // SAFETY: MMIO write to QEMU virt UART at 0x0900_0000.
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
             uart_write_str("[BOOTSTRAP] Services initialized (AArch64)\n");
@@ -249,6 +336,10 @@ pub fn kernel_init() -> KernelResult<()> {
 pub fn run() -> ! {
     // Direct UART output for RISC-V debugging
     #[cfg(target_arch = "riscv64")]
+    // SAFETY: 0x1000_0000 is the UART data register on the QEMU virt
+    // machine.  This address is always mapped and writable during early
+    // boot.  write_volatile ensures the compiler does not elide the
+    // MMIO stores.
     unsafe {
         let uart_base = 0x1000_0000 as *mut u8;
         // Write "RUN" to show run() reached
@@ -259,6 +350,8 @@ pub fn run() -> ! {
     }
 
     if let Err(e) = kernel_init() {
+        // Panic is intentional: kernel_init failure during boot is unrecoverable.
+        // No subsystems are available for graceful error handling at this point.
         panic!("Bootstrap failed: {:?}", e);
     }
 
@@ -273,6 +366,7 @@ pub fn run() -> ! {
     // Create init process
     #[cfg(target_arch = "aarch64")]
     {
+        // SAFETY: MMIO write to QEMU virt UART at 0x0900_0000.
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
             uart_write_str("[BOOTSTRAP] About to create init process...\n");
@@ -288,6 +382,7 @@ pub fn run() -> ! {
 
     #[cfg(target_arch = "aarch64")]
     {
+        // SAFETY: MMIO write to QEMU virt UART at 0x0900_0000.
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
             uart_write_str("[BOOTSTRAP] Init process created\n");

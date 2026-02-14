@@ -8,7 +8,8 @@
 //! - **OpenGL ES**: Embedded graphics (compatibility)
 //! - **Compute**: GPU compute shaders for parallel processing
 
-// Allow dead code for GPU features pending full implementation
+// Phase 6 (desktop) -- GPU acceleration structures are defined but not yet
+// wired to actual hardware drivers.
 #![allow(dead_code)]
 //! ## Architecture
 //!
@@ -56,8 +57,7 @@ pub struct GpuFeatures {
 impl GpuDevice {
     /// Detect GPU devices
     pub fn enumerate() -> Vec<GpuDevice> {
-        // TODO: Enumerate PCIe devices for GPUs
-        // For now, return stub device
+        // TODO(phase6): Enumerate PCIe devices for GPU detection
 
         vec![GpuDevice {
             name: String::from("Virtual GPU"),
@@ -128,7 +128,7 @@ impl CommandBuffer {
 
     /// Submit command buffer to GPU
     pub fn submit(&self) -> Result<(), KernelError> {
-        // TODO: Submit to GPU command queue
+        // TODO(phase6): Submit to GPU command queue via DMA
         Ok(())
     }
 }
@@ -226,13 +226,13 @@ pub mod opengl_es {
 
         /// Make context current
         pub fn make_current(&self) -> Result<(), KernelError> {
-            // TODO: Bind context to current thread
+            // TODO(phase6): Bind OpenGL ES context to current thread
             Ok(())
         }
 
         /// Swap buffers
         pub fn swap_buffers(&self) -> Result<(), KernelError> {
-            // TODO: Present framebuffer
+            // TODO(phase6): Present framebuffer via page flip or blit
             Ok(())
         }
     }

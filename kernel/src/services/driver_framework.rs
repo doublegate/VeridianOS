@@ -559,6 +559,11 @@ pub fn init() {
     #[allow(unused_imports)]
     use crate::println;
 
+    // SAFETY: DRIVER_FRAMEWORK_PTR is a static mut pointer initialized
+    // to null. This block guards against double init, creates a
+    // DriverFramework via Box::leak for 'static lifetime, and stores
+    // the pointer with architecture-specific memory barriers. Called
+    // once during early boot before concurrent access.
     unsafe {
         if !DRIVER_FRAMEWORK_PTR.is_null() {
             println!("[DRIVER_FRAMEWORK] Already initialized, skipping...");
@@ -587,12 +592,30 @@ pub fn init() {
     }
 }
 
-/// Get the global driver framework
-pub fn get_driver_framework() -> &'static DriverFramework {
+/// Try to get the global driver framework without panicking.
+///
+/// Returns `None` if the driver framework has not been initialized via
+/// [`init`].
+pub fn try_get_driver_framework() -> Option<&'static DriverFramework> {
+    // SAFETY: DRIVER_FRAMEWORK_PTR was set during init() via Box::leak,
+    // producing a valid 'static pointer. Once set, it is never modified
+    // or freed.
     unsafe {
         if DRIVER_FRAMEWORK_PTR.is_null() {
-            panic!("Driver framework not initialized");
+            None
+        } else {
+            Some(&*DRIVER_FRAMEWORK_PTR)
         }
-        &*DRIVER_FRAMEWORK_PTR
     }
+}
+
+/// Get the global driver framework.
+///
+/// Panics if the driver framework has not been initialized via [`init`].
+/// Prefer [`try_get_driver_framework`] in contexts where a panic is
+/// unacceptable.
+pub fn get_driver_framework() -> &'static DriverFramework {
+    // Panic is intentional: accessing the driver framework before init() is a
+    // programming error indicating a broken boot sequence.
+    try_get_driver_framework().expect("Driver framework not initialized: init() was not called")
 }

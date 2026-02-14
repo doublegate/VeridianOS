@@ -54,6 +54,9 @@ pub enum KernelError {
     /// System call errors
     SyscallError(SyscallError),
 
+    /// Filesystem-related errors
+    FsError(FsError),
+
     /// Hardware errors
     HardwareError {
         device: &'static str,
@@ -91,6 +94,15 @@ pub enum KernelError {
     },
     /// Operation would block
     WouldBlock,
+    /// Subsystem not initialized (called before init())
+    NotInitialized {
+        subsystem: &'static str,
+    },
+    /// Legacy string error for gradual migration from &'static str patterns.
+    /// New code should use specific error variants instead.
+    LegacyError {
+        message: &'static str,
+    },
 }
 
 /// Capability-specific errors
@@ -144,6 +156,45 @@ pub enum SyscallError {
     StringTooLong { max: usize },
     AccessDenied,
     NotImplemented,
+}
+
+/// Filesystem-specific errors
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsError {
+    /// File or directory not found
+    NotFound,
+    /// Path already exists
+    AlreadyExists,
+    /// Permission denied
+    PermissionDenied,
+    /// Target is not a directory
+    NotADirectory,
+    /// Target is not a file
+    NotAFile,
+    /// Target is a directory (when file expected)
+    IsADirectory,
+    /// Filesystem is read-only
+    ReadOnly,
+    /// Invalid path format
+    InvalidPath,
+    /// Root filesystem not mounted
+    NoRootFs,
+    /// Path already has a mount point
+    AlreadyMounted,
+    /// Path is not a mount point
+    NotMounted,
+    /// Unknown filesystem type
+    UnknownFsType,
+    /// I/O error during operation
+    IoError,
+    /// Directory is not empty
+    DirectoryNotEmpty,
+    /// File descriptor table is full
+    TooManyOpenFiles,
+    /// Invalid file descriptor
+    BadFileDescriptor,
+    /// Operation not supported on this node type
+    NotSupported,
 }
 
 /// Result type alias for kernel operations
@@ -212,6 +263,11 @@ impl fmt::Display for KernelError {
                 write!(f, "Feature not implemented: {}", feature)
             }
             Self::WouldBlock => write!(f, "Operation would block"),
+            Self::FsError(e) => write!(f, "Filesystem error: {:?}", e),
+            Self::NotInitialized { subsystem } => {
+                write!(f, "Subsystem not initialized: {}", subsystem)
+            }
+            Self::LegacyError { message } => write!(f, "{}", message),
         }
     }
 }
@@ -255,6 +311,23 @@ impl From<SchedError> for KernelError {
 impl From<SyscallError> for KernelError {
     fn from(err: SyscallError) -> Self {
         Self::SyscallError(err)
+    }
+}
+
+impl From<FsError> for KernelError {
+    fn from(err: FsError) -> Self {
+        Self::FsError(err)
+    }
+}
+
+/// Conversion from legacy &'static str errors to KernelError.
+///
+/// This enables gradual migration: functions returning Result<T, &'static str>
+/// can be called with `?` from functions returning Result<T, KernelError>.
+/// New code should prefer specific error variants over this conversion.
+impl From<&'static str> for KernelError {
+    fn from(msg: &'static str) -> Self {
+        Self::LegacyError { message: msg }
     }
 }
 

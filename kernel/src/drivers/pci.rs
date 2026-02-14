@@ -9,7 +9,7 @@ use core::mem;
 
 use crate::services::driver_framework::{Bus, DeviceClass, DeviceId, DeviceInfo, DeviceStatus};
 
-/// PCI configuration space registers
+/// PCI configuration space registers (per PCI Local Bus Specification)
 #[repr(u16)]
 #[allow(dead_code)]
 pub enum PciConfigRegister {
@@ -42,7 +42,7 @@ pub enum PciConfigRegister {
     MaxLatency = 0x3F,
 }
 
-/// PCI class codes
+/// PCI class codes (per PCI specification)
 #[allow(dead_code)]
 pub mod class_codes {
     pub const UNCLASSIFIED: u8 = 0x00;
@@ -66,7 +66,7 @@ pub mod class_codes {
     pub const COPROCESSOR: u8 = 0xFF;
 }
 
-/// PCI command register flags
+/// PCI command register flags (per PCI specification)
 #[allow(dead_code)]
 pub mod command_flags {
     pub const IO_SPACE: u16 = 1 << 0;
@@ -424,6 +424,10 @@ impl PciBus {
     fn read_config_dword(&self, location: PciLocation, offset: u16) -> u32 {
         let address = location.to_config_address() | (offset as u32 & 0xFC);
 
+        // SAFETY: PCI configuration space access requires writing the target address
+        // to I/O port 0xCF8 (CONFIG_ADDRESS) then reading the data from I/O port
+        // 0xCFC (CONFIG_DATA). These are the standard PCI mechanism #1 ports defined
+        // by the PCI specification. We are in kernel mode with full I/O privilege.
         unsafe {
             // Write configuration address
             crate::arch::outl(0xCF8, address);
@@ -436,6 +440,9 @@ impl PciBus {
     fn write_config_dword(&self, location: PciLocation, offset: u16, value: u32) {
         let address = location.to_config_address() | (offset as u32 & 0xFC);
 
+        // SAFETY: PCI configuration space write via mechanism #1. Writing the target
+        // address to port 0xCF8 then the data to port 0xCFC. Same invariants as
+        // read_config_dword above. We are in kernel mode with full I/O privilege.
         unsafe {
             // Write configuration address
             crate::arch::outl(0xCF8, address);
@@ -553,9 +560,14 @@ impl Bus for PciBus {
         let location = PciLocation::new(bus, dev, func);
 
         match size {
+            // SAFETY: PciConfigRegister is #[repr(u16)] so any u16 value that maps
+            // to a valid variant is safe to transmute. Offsets outside valid register
+            // values will produce a bit pattern that reads from the corresponding PCI
+            // config space offset, which is defined hardware behavior.
             1 => Ok(self.read_config_byte(location, unsafe {
                 mem::transmute::<u16, PciConfigRegister>(offset)
             }) as u32),
+            // SAFETY: Same as the 1-byte case above.
             2 => Ok(self.read_config_word(location, unsafe {
                 mem::transmute::<u16, PciConfigRegister>(offset)
             }) as u32),
@@ -646,6 +658,8 @@ pub fn init() {
     }
 
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    // SAFETY: PCI_BUS_STATIC is a static mut Option written once during single-threaded
+    // init. No concurrent access is possible at this point in kernel bootstrap.
     unsafe {
         PCI_BUS_STATIC = Some(spin::Mutex::new(pci_bus));
     }
@@ -672,6 +686,8 @@ pub fn is_pci_initialized() -> bool {
     }
 
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    // SAFETY: Reading PCI_BUS_STATIC to check initialization. The value is set once
+    // during init() and only read thereafter, so no data race is possible.
     unsafe {
         PCI_BUS_STATIC.is_some()
     }
@@ -685,6 +701,8 @@ pub fn get_pci_bus() -> &'static spin::Mutex<PciBus> {
     }
 
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    // SAFETY: PCI_BUS_STATIC is set once during init() and never modified after.
+    // The returned reference is 'static because the static lives for the program duration.
     unsafe {
         PCI_BUS_STATIC.as_ref().expect("PCI bus not initialized")
     }

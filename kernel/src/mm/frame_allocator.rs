@@ -459,6 +459,15 @@ impl BuddyAllocator {
                     } else {
                         // Search for buddy in list - need to handle borrowing carefully
                         let mut prev: *mut BuddyBlock = head;
+                        // SAFETY: We traverse the linked list of BuddyBlocks using raw
+                        // pointers to work around Rust's borrow checker limitations with
+                        // linked list mutation. `prev` always points to a valid BuddyBlock
+                        // because: (1) it starts as `head`, which is a valid &mut reference,
+                        // and (2) each iteration advances it to the next block obtained from
+                        // a `Box<BuddyBlock>`, which is heap-allocated and valid. The list
+                        // is protected by the Mutex on `self.free_lists[current_order]`,
+                        // ensuring exclusive access. We only modify `prev.next` (removing
+                        // one node) and then break, so no dangling pointers are created.
                         unsafe {
                             while let Some(ref mut next_box) = (*prev).next {
                                 if next_box.frame == buddy_frame {
@@ -947,18 +956,26 @@ mod tests {
         let allocator = BitmapAllocator::new(FrameNumber::new(0), 1000);
 
         // Test single frame allocation
-        let frame = allocator.allocate(1).unwrap();
+        let frame = allocator
+            .allocate(1)
+            .expect("single frame allocation from fresh allocator should succeed");
         assert_eq!(frame.as_u64(), 0);
 
         // Test contiguous allocation
-        let frame = allocator.allocate(10).unwrap();
+        let frame = allocator
+            .allocate(10)
+            .expect("10-frame contiguous allocation should succeed with 999 free frames");
         assert_eq!(frame.as_u64(), 1);
 
         // Test free
-        allocator.free(frame, 10).unwrap();
+        allocator
+            .free(frame, 10)
+            .expect("freeing previously allocated frames should succeed");
 
         // Should be able to allocate again
-        let frame2 = allocator.allocate(10).unwrap();
+        let frame2 = allocator
+            .allocate(10)
+            .expect("re-allocation after free should succeed");
         assert_eq!(frame2.as_u64(), frame.as_u64());
     }
 
@@ -967,19 +984,29 @@ mod tests {
         let allocator = BuddyAllocator::new(FrameNumber::new(0), 1024);
 
         // Test power-of-2 allocation
-        let frame = allocator.allocate(512).unwrap();
+        let frame = allocator
+            .allocate(512)
+            .expect("512-frame allocation from 1024-frame buddy allocator should succeed");
         assert_eq!(frame.as_u64(), 0);
 
         // Test buddy splitting
-        let frame2 = allocator.allocate(512).unwrap();
+        let frame2 = allocator
+            .allocate(512)
+            .expect("second 512-frame allocation should succeed after buddy split");
         assert_eq!(frame2.as_u64(), 512);
 
         // Test buddy merging
-        allocator.free(frame, 512).unwrap();
-        allocator.free(frame2, 512).unwrap();
+        allocator
+            .free(frame, 512)
+            .expect("freeing first buddy block should succeed");
+        allocator
+            .free(frame2, 512)
+            .expect("freeing second buddy block should succeed and trigger merge");
 
         // Should be able to allocate full size again
-        let frame3 = allocator.allocate(1024).unwrap();
+        let frame3 = allocator
+            .allocate(1024)
+            .expect("full-size allocation should succeed after buddy merge");
         assert_eq!(frame3.as_u64(), 0);
     }
 }

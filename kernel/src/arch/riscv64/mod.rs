@@ -1,4 +1,8 @@
-// RISC-V 64 architecture support
+//! RISC-V 64-bit architecture support.
+//!
+//! Provides initialization, interrupt control, serial I/O, and I/O port
+//! stubs for the RISC-V 64-bit platform. Uses the SBI (Supervisor Binary
+//! Interface) for machine-mode services.
 
 pub mod boot;
 pub mod bootstrap;
@@ -9,6 +13,7 @@ pub mod serial;
 #[allow(unused_imports)]
 pub use super::riscv::{context, timer};
 
+/// Called from bootstrap on RISC-V; appears unused on other architectures.
 #[allow(dead_code)]
 pub fn init() {
     // Initialize SBI (Supervisor Binary Interface)
@@ -21,6 +26,10 @@ pub fn init() {
     // The trap handler must be set up first before enabling interrupts.
     // For now, keep interrupts disabled - WFI will still return on
     // external events even with interrupts disabled.
+    // SAFETY: CSR writes to disable interrupts during early boot. csrci clears
+    // the SIE bit in sstatus (supervisor interrupt enable). csrw sie, zero clears
+    // all interrupt enable bits. Required because no trap handler (stvec) is
+    // registered yet - any interrupt would jump to address 0 and crash.
     unsafe {
         // Ensure interrupts are DISABLED in sstatus
         core::arch::asm!("csrci sstatus, 2", options(nomem, nostack));
@@ -33,20 +42,28 @@ pub fn init() {
     println!("[RISCV64] Architecture initialization complete (interrupts disabled)");
 }
 
+/// Halt the CPU. Used by panic/shutdown paths.
 #[allow(dead_code)]
 pub fn halt() -> ! {
     loop {
+        // SAFETY: wfi (Wait For Interrupt) halts the CPU until an interrupt occurs.
+        // Safe in a halt loop; reduces power consumption. Returns on external events
+        // even with interrupts disabled.
         unsafe { core::arch::asm!("wfi") };
     }
 }
 
+/// Enable supervisor interrupts. Requires stvec to be configured first.
 #[allow(dead_code)]
 pub fn enable_interrupts() {
+    // SAFETY: csrsi sets the SIE bit in sstatus, enabling supervisor interrupts.
+    // The caller must ensure a trap handler (stvec) is properly configured.
     unsafe {
         core::arch::asm!("csrsi sstatus, 2");
     }
 }
 
+/// Disable interrupts with RAII guard that restores the previous state on drop.
 #[allow(dead_code)]
 pub fn disable_interrupts() -> impl Drop {
     struct InterruptGuard {
@@ -56,6 +73,8 @@ pub fn disable_interrupts() -> impl Drop {
     impl Drop for InterruptGuard {
         fn drop(&mut self) {
             if self.was_enabled {
+                // SAFETY: csrsi sets the SIE bit in sstatus, re-enabling supervisor
+                // interrupts that were disabled by disable_interrupts().
                 unsafe {
                     core::arch::asm!("csrsi sstatus, 2");
                 }
@@ -64,6 +83,9 @@ pub fn disable_interrupts() -> impl Drop {
     }
 
     let mut sstatus: usize;
+    // SAFETY: csrr reads the sstatus CSR to save the current interrupt state.
+    // csrci clears the SIE bit, disabling supervisor interrupts. Both are
+    // privileged operations always available in supervisor mode.
     unsafe {
         core::arch::asm!("csrr {}, sstatus", out(reg) sstatus);
         core::arch::asm!("csrci sstatus, 2");
@@ -73,8 +95,11 @@ pub fn disable_interrupts() -> impl Drop {
     }
 }
 
+/// Idle the CPU until an interrupt. Called from the scheduler idle loop.
 #[allow(dead_code)]
 pub fn idle() {
+    // SAFETY: wfi (Wait For Interrupt) halts the CPU until an interrupt.
+    // Non-destructive.
     unsafe { core::arch::asm!("wfi") };
 }
 
@@ -85,7 +110,9 @@ pub fn serial_init() -> crate::serial::Uart16550Compat {
     uart
 }
 
-/// I/O port functions (stubs for RISC-V - no I/O ports like x86)
+/// I/O port stubs for RISC-V -- RISC-V does not have I/O ports.
+/// These exist solely so that architecture-generic driver code compiles
+/// on all platforms without conditional compilation at every call site.
 ///
 /// # Safety
 ///

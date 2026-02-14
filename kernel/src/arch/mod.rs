@@ -1,3 +1,10 @@
+//! Architecture abstraction layer for VeridianOS.
+//!
+//! This module provides architecture-specific implementations for x86_64,
+//! AArch64, and RISC-V 64-bit platforms. Each sub-module exports a common
+//! interface (serial, boot, context switching, interrupts) that the
+//! architecture-independent kernel code uses.
+
 #[cfg(target_arch = "x86_64")]
 pub mod x86_64;
 

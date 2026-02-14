@@ -233,7 +233,15 @@ struct RingBuffer<T> {
 impl<T> RingBuffer<T> {
     /// Create a new ring buffer
     fn new(capacity: usize) -> Self {
-        let layout = core::alloc::Layout::array::<T>(capacity).unwrap();
+        let layout =
+            core::alloc::Layout::array::<T>(capacity).expect("ring buffer capacity overflow");
+        // SAFETY: The layout is computed from Layout::array::<T>(capacity) which
+        // ensures proper size and alignment for an array of T elements. The alloc()
+        // call returns a pointer to uninitialized memory of the requested layout.
+        // If allocation fails (returns null), subsequent push/pop operations will
+        // cause undefined behavior -- in a production kernel, this should be checked.
+        // The returned pointer is cast to *mut T, which is valid because the layout
+        // guarantees correct alignment for T.
         let buffer = unsafe { alloc::alloc::alloc(layout) as *mut T };
 
         Self {
@@ -255,7 +263,13 @@ impl<T> RingBuffer<T> {
         // Reserve a slot
         let write_pos = self.write_pos.fetch_add(1, Ordering::Relaxed) % self.capacity;
 
-        // Write the item
+        // SAFETY: `write_pos` is computed modulo `self.capacity`, so it is always
+        // within bounds of the allocated buffer (0..capacity-1). The size check above
+        // ensures we are not writing past the buffer's logical capacity. `ptr::write`
+        // is used instead of assignment because the slot may contain uninitialized
+        // memory (never written) or previously-read memory (already consumed by pop).
+        // In either case, we must not run Drop on the old value, which ptr::write
+        // avoids. The buffer pointer is valid because it was allocated in `new()`.
         unsafe {
             ptr::write(self.buffer.add(write_pos), item);
         }
@@ -285,7 +299,12 @@ impl<T> RingBuffer<T> {
                     // Successfully reserved an item
                     let read_pos = self.read_pos.fetch_add(1, Ordering::Relaxed) % self.capacity;
 
-                    // Read the item
+                    // SAFETY: `read_pos` is computed modulo `self.capacity`, so it is
+                    // within bounds. The compare_exchange above successfully decremented
+                    // the size, guaranteeing a valid item exists at this slot (placed by
+                    // a prior push()). `ptr::read` is used to move the value out of the
+                    // buffer without dropping it in place -- ownership transfers to the
+                    // caller. The buffer pointer is valid from the allocation in `new()`.
                     let item = unsafe { ptr::read(self.buffer.add(read_pos)) };
 
                     return Some(item);
@@ -315,15 +334,32 @@ impl<T> Drop for RingBuffer<T> {
         while self.pop().is_some() {}
 
         // Deallocate buffer
-        let layout = core::alloc::Layout::array::<T>(self.capacity).unwrap();
+        let layout = core::alloc::Layout::array::<T>(self.capacity)
+            .expect("ring buffer layout error in drop");
+        // SAFETY: The buffer was allocated in `new()` using `alloc::alloc::alloc`
+        // with the same layout (same capacity and type T). All remaining items have
+        // been drained by the pop() loop above, so no live T values remain in the
+        // buffer. The pointer has not been deallocated elsewhere. We have exclusive
+        // access via `&mut self` in the Drop impl.
         unsafe {
             alloc::alloc::dealloc(self.buffer as *mut u8, layout);
         }
     }
 }
 
-// Safety: Ring buffer is designed to be thread-safe
+// SAFETY: RingBuffer<T> can be sent across threads if T: Send. The buffer is a
+// raw heap allocation owned entirely by the RingBuffer, and all T values stored
+// in it are owned by the buffer. Transferring the RingBuffer transfers
+// ownership of the contained T values.
 unsafe impl<T: Send> Send for RingBuffer<T> {}
+// SAFETY: RingBuffer<T> can be shared across threads if T: Send. Thread safety
+// is provided by atomic operations on write_pos, read_pos, and size, which
+// coordinate concurrent push/pop access. The size atomic with Acquire/Release
+// ordering ensures that a consumer sees fully written data from a producer.
+// NOTE: This implementation has a subtle race between concurrent pushers (or
+// concurrent poppers) since fetch_add on position does not coordinate with the
+// size check. In practice, this is used with single-producer/single-consumer
+// patterns.
 unsafe impl<T: Send> Sync for RingBuffer<T> {}
 
 /// Async channel statistics
@@ -383,11 +419,14 @@ impl Default for MessageBatch {
 
 // Placeholder functions for process management
 fn wake_process(_pid: ProcessId) {
-    // TODO: Implement process wakeup
+    // TODO(phase3): Implement process wakeup via scheduler
 }
 
 #[cfg(target_arch = "x86_64")]
 fn read_timestamp() -> u64 {
+    // SAFETY: _rdtsc() reads the x86_64 Time Stamp Counter via the RDTSC
+    // instruction. This is a read-only, side-effect-free operation that is always
+    // available in kernel mode and requires no special setup or preconditions.
     unsafe { core::arch::x86_64::_rdtsc() }
 }
 

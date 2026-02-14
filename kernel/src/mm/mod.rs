@@ -60,6 +60,9 @@ pub fn get_kernel_page_table() -> usize {
     {
         // CR3 holds the page table base
         let cr3: u64;
+        // SAFETY: Reading CR3 is a privileged, read-only operation that returns the
+        // current page table root physical address. It has no side effects and is
+        // always valid in ring 0 (kernel mode).
         unsafe {
             core::arch::asm!("mov {}, cr3", out(reg) cr3);
         }
@@ -70,6 +73,9 @@ pub fn get_kernel_page_table() -> usize {
     {
         // TTBR0_EL1 holds the page table base
         let ttbr0: u64;
+        // SAFETY: Reading TTBR0_EL1 is a read-only system register access that
+        // returns the EL0/EL1 page table base address. It has no side effects and
+        // is always accessible at EL1 (kernel mode).
         unsafe {
             core::arch::asm!("mrs {}, TTBR0_EL1", out(reg) ttbr0);
         }
@@ -80,6 +86,9 @@ pub fn get_kernel_page_table() -> usize {
     {
         // SATP holds the page table base
         let satp: usize;
+        // SAFETY: Reading the SATP CSR is a read-only operation that returns the
+        // page table configuration (mode + ASID + PPN). It has no side effects and
+        // is always accessible in S-mode (supervisor/kernel mode).
         unsafe {
             core::arch::asm!("csrr {}, satp", out(reg) satp);
         }
@@ -151,6 +160,9 @@ pub struct MemoryRegion {
 pub fn init(memory_map: &[MemoryRegion]) {
     #[cfg(target_arch = "aarch64")]
     {
+        // SAFETY: `uart_write_str` performs MMIO writes to the PL011 UART at
+        // 0x09000000, which is always mapped on the QEMU virt machine. This is a
+        // fire-and-forget write with no memory safety implications.
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
             uart_write_str("[MM] Starting memory management initialization\n");
@@ -162,6 +174,7 @@ pub fn init(memory_map: &[MemoryRegion]) {
     // Initialize frame allocator with available memory regions
     #[cfg(target_arch = "aarch64")]
     {
+        // SAFETY: MMIO write to PL011 UART -- always safe on QEMU virt.
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
             uart_write_str("[MM] Getting frame allocator lock...\n");
@@ -176,6 +189,7 @@ pub fn init(memory_map: &[MemoryRegion]) {
 
         #[cfg(target_arch = "aarch64")]
         {
+            // SAFETY: MMIO write to PL011 UART -- always safe on QEMU virt.
             unsafe {
                 use crate::arch::aarch64::direct_uart::uart_write_str;
                 uart_write_str("[MM] Frame allocator locked successfully\n");
@@ -193,6 +207,7 @@ pub fn init(memory_map: &[MemoryRegion]) {
             #[cfg(target_arch = "aarch64")]
             {
                 // Simple progress indicator for AArch64
+                // SAFETY: MMIO write to PL011 UART -- always safe on QEMU virt.
                 unsafe {
                     use crate::arch::aarch64::direct_uart::uart_write_str;
                     uart_write_str("[MM] Processing memory region\n");
@@ -224,6 +239,7 @@ pub fn init(memory_map: &[MemoryRegion]) {
                 if let Err(_e) = allocator.init_numa_node(numa_node, start_frame, frame_count) {
                     #[cfg(target_arch = "aarch64")]
                     {
+                        // SAFETY: MMIO write to PL011 UART -- always safe on QEMU virt.
                         unsafe {
                             use crate::arch::aarch64::direct_uart::uart_write_str;
                             uart_write_str("[MM] Warning: Failed to initialize memory region\n");
@@ -234,6 +250,7 @@ pub fn init(memory_map: &[MemoryRegion]) {
                 } else {
                     #[cfg(target_arch = "aarch64")]
                     {
+                        // SAFETY: MMIO write to PL011 UART -- always safe on QEMU virt.
                         unsafe {
                             use crate::arch::aarch64::direct_uart::uart_write_str;
                             uart_write_str("[MM] Memory region initialized\n");
@@ -254,6 +271,7 @@ pub fn init(memory_map: &[MemoryRegion]) {
 
         #[cfg(target_arch = "aarch64")]
         {
+            // SAFETY: MMIO write to PL011 UART -- always safe on QEMU virt.
             unsafe {
                 use crate::arch::aarch64::direct_uart::uart_write_str;
                 uart_write_str("[MM] Memory initialization complete\n");
@@ -275,6 +293,7 @@ pub fn init(memory_map: &[MemoryRegion]) {
 pub fn init_default() {
     #[cfg(target_arch = "aarch64")]
     {
+        // SAFETY: MMIO write to PL011 UART -- always safe on QEMU virt.
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
             uart_write_str("[MM] Using default memory map for initialization\n");
@@ -307,6 +326,7 @@ pub fn init_default() {
 
     #[cfg(target_arch = "aarch64")]
     {
+        // SAFETY: MMIO write to PL011 UART -- always safe on QEMU virt.
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
             uart_write_str("[MM] Calling init with default memory map\n");
@@ -319,6 +339,7 @@ pub fn init_default() {
 
     #[cfg(target_arch = "aarch64")]
     {
+        // SAFETY: MMIO write to PL011 UART -- always safe on QEMU virt.
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
             uart_write_str("[MM] init returned successfully\n");
@@ -410,6 +431,6 @@ pub fn get_memory_stats() -> MemoryStats {
     MemoryStats {
         total_frames: stats.total_frames as usize,
         free_frames: stats.free_frames as usize,
-        cached_frames: 0, // TODO: Implement page cache tracking
+        cached_frames: 0, // TODO(phase5): Implement page cache tracking
     }
 }

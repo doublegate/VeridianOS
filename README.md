@@ -134,6 +134,18 @@ Core subsystems implemented:
 - **Capability System** — Tokens, rights, space management, inheritance, revocation, per-CPU cache
 - **Test Framework** — `no_std` test framework with benchmarks, IPC/scheduler/process tests
 
+### Technical Debt Remediation (v0.2.4)
+
+Released February 13, 2026. Comprehensive codebase quality improvement:
+
+- **550 `// SAFETY:` comments** added across 122 files (0.9% to 84.5% coverage)
+- **180 new unit tests** across 7 modules (70 to 250 total)
+- **5 god objects split** into focused submodules (0 files >1000 LOC remaining)
+- **201 TODO/FIXME/HACK** comments triaged with phase tags
+- **204 files** with module-level documentation (up from ~60)
+- **39 files** cleaned of `#[allow(dead_code)]` with proper feature gating
+- **161 files changed** total
+
 ### Phase 2: User Space Foundation — Runtime Verified (v0.2.3)
 
 Started August 15, 2025. Architecturally complete August 16, 2025. Runtime activation verified February 13, 2026. Full multi-architecture boot parity achieved February 13, 2026.
@@ -362,7 +374,8 @@ Security is a fundamental design principle:
 
 - [x] Phase 0: Foundation — Complete (2025-06-07)
 - [x] Phase 1: Microkernel Core — Complete (2025-06-12, v0.2.1)
-- [x] Phase 2: User Space Foundation — Runtime verified (2025-08-16, v0.2.2)
+- [x] Phase 2: User Space Foundation — Runtime verified (2025-08-16, v0.2.3)
+- [x] Technical Debt Remediation — 9/10 issues resolved (2026-02-13, v0.2.4)
 
 ### Mid-term (2026)
 

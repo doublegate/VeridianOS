@@ -194,7 +194,9 @@ impl InitSystem {
         drop(services); // Release lock for dependency check
         self.check_dependencies(name)?;
         let mut services = self.services.write();
-        let service = services.get_mut(name).unwrap();
+        let service = services
+            .get_mut(name)
+            .expect("service disappeared between dependency check and start");
 
         // Create process for service
         let process_server = crate::services::process_server::get_process_server();
@@ -240,8 +242,7 @@ impl InitSystem {
             // Send SIGTERM
             process_server.send_signal(pid, 15)?;
 
-            // TODO: Wait for process to exit with timeout
-            // For now, assume it stopped
+            // TODO(phase3): Wait for process to exit with configurable timeout
             service.state = ServiceState::Stopped;
             service.pid = None;
 
@@ -343,7 +344,8 @@ impl InitSystem {
                         service.definition.name,
                         service.restart_count
                     );
-                    // TODO: Schedule restart with delay
+                    // TODO(phase3): Schedule restart with configurable back-off
+                    // delay
                 } else if service.restart_count >= service.definition.max_restarts {
                     service.state = ServiceState::Failed;
                     service.last_error = Some(String::from("Max restart attempts exceeded"));
@@ -385,7 +387,8 @@ impl InitSystem {
         // Switch to runlevel 6 (reboot)
         self.switch_runlevel(Runlevel::Reboot)?;
 
-        // TODO: Trigger actual system reboot
+        // TODO(phase3): Trigger actual system reboot via architecture-specific
+        // mechanism
         crate::println!("[INIT] System rebooting...");
 
         Ok(())
@@ -586,7 +589,7 @@ impl InitSystem {
     }
 
     fn get_system_time(&self) -> u64 {
-        // TODO: Get actual system time
+        // TODO(phase3): Get actual system time from clock subsystem
         0
     }
 }
@@ -600,6 +603,11 @@ pub fn init() {
     #[allow(unused_imports)]
     use crate::println;
 
+    // SAFETY: INIT_SYSTEM_PTR is a static mut pointer initialized to
+    // null. This block guards against double init, creates an
+    // InitSystem via Box::leak for 'static lifetime, and stores the
+    // pointer with architecture-specific memory barriers. Called once
+    // during early boot before concurrent access.
     unsafe {
         if !INIT_SYSTEM_PTR.is_null() {
             println!("[INIT] Already initialized, skipping...");
@@ -628,14 +636,30 @@ pub fn init() {
     }
 }
 
-/// Get the global init system
-pub fn get_init_system() -> &'static InitSystem {
+/// Try to get the global init system without panicking.
+///
+/// Returns `None` if the init system has not been initialized via [`init`].
+pub fn try_get_init_system() -> Option<&'static InitSystem> {
+    // SAFETY: INIT_SYSTEM_PTR was set during init() via Box::leak,
+    // producing a valid 'static pointer. Once set, it is never modified
+    // or freed.
     unsafe {
         if INIT_SYSTEM_PTR.is_null() {
-            panic!("Init system not initialized");
+            None
+        } else {
+            Some(&*INIT_SYSTEM_PTR)
         }
-        &*INIT_SYSTEM_PTR
     }
+}
+
+/// Get the global init system.
+///
+/// Panics if the init system has not been initialized via [`init`].
+/// Prefer [`try_get_init_system`] in contexts where a panic is unacceptable.
+pub fn get_init_system() -> &'static InitSystem {
+    // Panic is intentional: accessing the init system before init() is a
+    // programming error indicating a broken boot sequence.
+    try_get_init_system().expect("Init system not initialized: init() was not called")
 }
 
 /// Run the init process
@@ -666,7 +690,7 @@ pub fn run_init() -> ! {
         process_server.reap_zombies();
 
         // Sleep for a bit
-        // TODO: Use proper wait/signal mechanism
+        // TODO(phase3): Use proper wait/signal mechanism instead of spin loop
         for _ in 0..1000000 {
             core::hint::spin_loop();
         }

@@ -43,6 +43,10 @@ static mut CONFIG: SecureBootConfig = SecureBootConfig::default();
 
 /// Verify secure boot chain
 pub fn verify() -> Result<(), KernelError> {
+    // SAFETY: CONFIG is a static mut SecureBootConfig read during single-threaded
+    // kernel init. It is only written by enable()/disable() which also run
+    // during init. No concurrent access is possible at this point in the
+    // bootstrap sequence.
     unsafe {
         if !CONFIG.enabled {
             println!("[SECBOOT] Secure boot disabled");
@@ -51,9 +55,7 @@ pub fn verify() -> Result<(), KernelError> {
 
         println!("[SECBOOT] Verifying secure boot chain...");
 
-        // TODO: Verify bootloader signature
-        // TODO: Verify kernel signature
-        // TODO: Check TPM measurements
+        // TODO(phase3): Verify bootloader and kernel signatures, check TPM measurements
 
         if CONFIG.enforce {
             // In enforce mode, fail if we can't verify
@@ -68,8 +70,7 @@ pub fn verify() -> Result<(), KernelError> {
 
 /// Compute kernel hash for verification
 pub fn compute_kernel_hash() -> Result<[u8; 32], KernelError> {
-    // TODO: Hash the kernel image
-    // For now, return a dummy hash
+    // TODO(phase3): Hash the actual kernel image from memory
     let dummy_data = b"VeridianOS kernel image";
     let hash_result = hash(HashAlgorithm::Sha256, dummy_data)?;
 
@@ -80,6 +81,9 @@ pub fn compute_kernel_hash() -> Result<[u8; 32], KernelError> {
 
 /// Enable secure boot
 pub fn enable(enforce: bool) {
+    // SAFETY: CONFIG is a static mut SecureBootConfig written during
+    // single-threaded kernel init or controlled administrative operations. No
+    // concurrent readers.
     unsafe {
         CONFIG.enabled = true;
         CONFIG.enforce = enforce;
@@ -89,6 +93,8 @@ pub fn enable(enforce: bool) {
 
 /// Disable secure boot
 pub fn disable() {
+    // SAFETY: CONFIG is a static mut SecureBootConfig written during controlled
+    // administrative operations. Single-threaded access assumed.
     unsafe {
         CONFIG.enabled = false;
         CONFIG.enforce = false;

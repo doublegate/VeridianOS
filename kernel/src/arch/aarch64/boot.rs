@@ -1,4 +1,7 @@
-// AArch64 boot code - matches x86_64 pattern
+//! AArch64 boot entry point.
+//!
+//! Includes the assembly startup code (`boot.S`) and the Rust `_start_rust`
+//! entry that prints an early banner via direct UART and calls `kernel_main`.
 
 use core::arch::global_asm;
 

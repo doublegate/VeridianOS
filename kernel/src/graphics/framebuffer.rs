@@ -55,6 +55,10 @@ impl GraphicsContext for Framebuffer {
         }
 
         if let Some(buffer) = self.buffer {
+            // SAFETY: 'buffer' is a raw pointer to the framebuffer's pixel memory,
+            // set during initialization. The bounds check above guarantees x and y
+            // are within [0, width) and [0, height) respectively, so the computed
+            // offset is within the allocated framebuffer region.
             unsafe {
                 let offset = (y as u32 * self.width + x as u32) as isize;
                 *buffer.offset(offset) = color.to_u32();
@@ -100,6 +104,10 @@ static mut FRAMEBUFFER: Framebuffer = Framebuffer::new();
 
 /// Get framebuffer instance
 pub fn get() -> &'static mut Framebuffer {
+    // SAFETY: FRAMEBUFFER is a static mut initialized at compile time via
+    // Framebuffer::new() (a const fn). The returned &'static mut reference is
+    // valid for the kernel's lifetime. In the current single-threaded kernel
+    // model, only one caller accesses this at a time.
     unsafe { &mut FRAMEBUFFER }
 }
 
@@ -107,8 +115,7 @@ pub fn get() -> &'static mut Framebuffer {
 pub fn init() -> Result<(), KernelError> {
     println!("[FB] Initializing framebuffer...");
 
-    // TODO: Get framebuffer info from bootloader
-    // For now, create a dummy configuration
+    // TODO(phase6): Get framebuffer info from bootloader (VBE/GOP detection)
     let _fb = get();
     // _fb.configure(1024, 768, null_mut()); // Would need actual buffer
 

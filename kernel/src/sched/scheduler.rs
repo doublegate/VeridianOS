@@ -1,4 +1,8 @@
 //! Core scheduler implementation
+//!
+//! Contains the `Scheduler` struct which implements the scheduling algorithms
+//! (round-robin, priority, CFS, hybrid), task enqueueing/dequeueing, context
+//! switching, and the global scheduler instance.
 
 use core::{
     ptr::NonNull,
@@ -101,6 +105,10 @@ impl Scheduler {
 
     /// Add task to ready queue
     pub fn enqueue(&self, task: NonNull<Task>) {
+        // SAFETY: `task` is a valid NonNull<Task> provided by the caller
+        // (scheduler.schedule, wake_up_process, etc.). We read task fields
+        // (cpu_affinity, sched_class) to determine the correct queue. The
+        // caller ensures the task is not concurrently modified.
         let task_ref = unsafe { task.as_ref() };
 
         // Check if task can run on this CPU
@@ -110,7 +118,10 @@ impl Scheduler {
             return;
         }
 
-        // Update task state
+        // SAFETY: `task` is a valid NonNull<Task>. We update its state to
+        // Ready before placing it in a queue. We hold the scheduler lock
+        // (callers acquire it before calling enqueue), ensuring exclusive
+        // access to the task's state field.
         unsafe {
             let task_mut = task.as_ptr();
             (*task_mut).state = ProcessState::Ready;
@@ -175,6 +186,9 @@ impl Scheduler {
 
     /// Enqueue task on a suitable CPU that matches its affinity
     fn enqueue_on_suitable_cpu(&self, task: NonNull<Task>) {
+        // SAFETY: `task` is a valid NonNull<Task>. We read cpu_affinity and
+        // tid fields to find a suitable CPU and log warnings. The task is not
+        // concurrently modified because the caller holds the scheduler lock.
         let task_ref = unsafe { task.as_ref() };
 
         // Find first CPU that matches task affinity
@@ -215,6 +229,10 @@ impl Scheduler {
 
             // Find a task that can run on this CPU
             while let Some(task_ptr) = queue.dequeue() {
+                // SAFETY: task_ptr was just dequeued from the ready queue
+                // where it was stored as a valid NonNull<Task>. We read
+                // cpu_affinity via can_run_on to check compatibility. Tasks
+                // in the queue are not deallocated while enqueued.
                 unsafe {
                     let task = task_ptr.as_ref();
                     if task.can_run_on(current_cpu) {
@@ -233,6 +251,8 @@ impl Scheduler {
                 let mut queue = READY_QUEUE.lock();
 
                 while let Some(task_ptr) = queue.dequeue() {
+                    // SAFETY: Same as above -- task_ptr is valid from the
+                    // global ready queue.
                     unsafe {
                         let task = task_ptr.as_ref();
                         if task.can_run_on(current_cpu) {
@@ -248,6 +268,8 @@ impl Scheduler {
                 let queue = super::queue::get_ready_queue();
 
                 while let Some(task_ptr) = queue.dequeue() {
+                    // SAFETY: Same as above -- task_ptr is valid from the
+                    // RISC-V global ready queue.
                     unsafe {
                         let task = task_ptr.as_ref();
                         if task.can_run_on(current_cpu) {
@@ -280,6 +302,9 @@ impl Scheduler {
             while requeue_count < max_attempts {
                 match queue.dequeue() {
                     Some(task_ptr) => {
+                        // SAFETY: task_ptr was just dequeued from the per-CPU
+                        // ready queue where it was stored as a valid
+                        // NonNull<Task>. We read cpu_affinity via can_run_on.
                         unsafe {
                             let task = task_ptr.as_ref();
                             if task.can_run_on(current_cpu) {
@@ -307,6 +332,7 @@ impl Scheduler {
 
                 while requeue_count < max_attempts {
                     match queue.dequeue() {
+                        // SAFETY: task_ptr is valid from the global ready queue.
                         Some(task_ptr) => unsafe {
                             let task = task_ptr.as_ref();
                             if task.can_run_on(current_cpu) {
@@ -329,6 +355,7 @@ impl Scheduler {
 
                 while requeue_count < max_attempts {
                     match queue.dequeue() {
+                        // SAFETY: task_ptr is valid from RISC-V ready queue.
                         Some(task_ptr) => unsafe {
                             let task = task_ptr.as_ref();
                             if task.can_run_on(current_cpu) {
@@ -358,6 +385,8 @@ impl Scheduler {
 
             // Find task with lowest vruntime that can run on this CPU
             while let Some(task_ptr) = queue.dequeue() {
+                // SAFETY: task_ptr is valid from the CFS run queue. We read
+                // cpu_affinity to check if the task can run on this CPU.
                 unsafe {
                     let task = task_ptr.as_ref();
                     if task.can_run_on(current_cpu) {
@@ -383,6 +412,8 @@ impl Scheduler {
             {
                 let mut queue = READY_QUEUE.lock();
                 while let Some(task_ptr) = queue.dequeue() {
+                    // SAFETY: task_ptr is valid from the global ready queue.
+                    // We check affinity before returning it.
                     unsafe {
                         let task = task_ptr.as_ref();
                         if task.can_run_on(current_cpu) {
@@ -397,6 +428,7 @@ impl Scheduler {
             {
                 let queue = super::queue::get_ready_queue();
                 while let Some(task_ptr) = queue.dequeue() {
+                    // SAFETY: Same as above for RISC-V ready queue.
                     unsafe {
                         let task = task_ptr.as_ref();
                         if task.can_run_on(current_cpu) {
@@ -413,6 +445,7 @@ impl Scheduler {
         if let Some(ref cfs) = self.cfs_queue {
             let mut queue = cfs.lock();
             while let Some(task_ptr) = queue.dequeue() {
+                // SAFETY: task_ptr is valid from the CFS queue.
                 unsafe {
                     let task = task_ptr.as_ref();
                     if task.can_run_on(current_cpu) {
@@ -429,6 +462,10 @@ impl Scheduler {
 
     /// Update task runtime statistics
     pub fn update_runtime(&self, task: NonNull<Task>, runtime: u64) {
+        // SAFETY: `task` is a valid NonNull<Task> passed by the caller. We
+        // update statistics (runtime via atomic operations) and vruntime for
+        // CFS scheduling. The caller holds the scheduler lock ensuring no
+        // concurrent modification of the vruntime field.
         unsafe {
             let task_ref = task.as_ref();
             task_ref.update_runtime(runtime);
@@ -448,6 +485,10 @@ impl Scheduler {
     /// Handle timer tick
     pub fn tick(&mut self) {
         if let Some(current) = self.current {
+            // SAFETY: `current` is a TaskPtr stored in the scheduler which
+            // points to a valid Task. We are called from the timer interrupt
+            // handler with the scheduler lock held. We decrement the time
+            // slice and potentially trigger a reschedule if it expires.
             unsafe {
                 let task_mut = current.as_raw();
 
@@ -492,6 +533,10 @@ impl Scheduler {
         };
 
         // Check if current task should continue
+        // SAFETY: `current` is a TaskPtr from self.current which points to a
+        // valid Task. We hold the scheduler lock and interrupts are disabled,
+        // so the task is not concurrently modified. We read its state and
+        // compare with the next candidate task to decide on preemption.
         unsafe {
             let current_ref = current.as_ptr().as_ref();
             if current_ref.state == ProcessState::Running {
@@ -533,6 +578,10 @@ impl Scheduler {
         }
 
         let start_cycles = super::metrics::read_tsc();
+        // SAFETY: If self.current is Some, its TaskPtr points to a valid Task.
+        // We read the state field to determine if the context switch is
+        // voluntary (task blocked/sleeping) or involuntary (preemption).
+        // The scheduler lock is held ensuring exclusive access.
         let is_voluntary = unsafe {
             if let Some(current) = self.current {
                 let current_ref = current.as_ptr().as_ref();
@@ -543,6 +592,14 @@ impl Scheduler {
             }
         };
 
+        // SAFETY: Both `self.current` (if Some) and `next` point to valid
+        // Tasks. We hold the scheduler lock and interrupts are disabled
+        // (from schedule()), ensuring exclusive access. We update:
+        // - current task: state to Ready, clear current_cpu
+        // - next task: state to Running, set current_cpu, mark_scheduled
+        // - Load context for the first task if no current task exists
+        // The context pointers passed to load_context are derived from the
+        // task's context field which is valid for the task's lifetime.
         unsafe {
             // Update states
             if let Some(current) = self.current {
@@ -576,14 +633,21 @@ impl Scheduler {
                 match &(*next.as_ptr()).context {
                     #[cfg(target_arch = "x86_64")]
                     crate::sched::task::TaskContext::X86_64(ctx) => {
+                        // SAFETY: ctx is a reference to a valid X86_64Context
+                        // within the task. load_context restores CPU registers
+                        // from this context structure.
                         crate::arch::x86_64::context::load_context(ctx as *const _);
                     }
                     #[cfg(target_arch = "aarch64")]
                     crate::sched::task::TaskContext::AArch64(ctx) => {
+                        // SAFETY: ctx is a reference to a valid AArch64Context.
+                        // load_context restores registers from it.
                         crate::arch::aarch64::context::load_context(ctx as *const _);
                     }
                     #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
                     crate::sched::task::TaskContext::RiscV(ctx) => {
+                        // SAFETY: ctx is a reference to a valid RiscVContext.
+                        // load_context restores registers from it.
                         crate::arch::riscv::context::load_context(ctx as *const _);
                     }
                 }
@@ -649,6 +713,10 @@ fn priority_to_weight(priority: Priority) -> u64 {
 fn context_switch(current: &mut super::task::TaskContext, next: &super::task::TaskContext) {
     use super::task::TaskContext;
     match (current, next) {
+        // SAFETY: Both curr and next point to valid context structures within
+        // their respective Tasks. context_switch saves curr's registers and
+        // restores next's. The scheduler lock and disabled interrupts ensure
+        // no concurrent access to these contexts.
         (TaskContext::X86_64(curr), TaskContext::X86_64(next)) => unsafe {
             crate::arch::x86_64::context::context_switch(curr as *mut _, next as *const _);
         },
@@ -659,6 +727,8 @@ fn context_switch(current: &mut super::task::TaskContext, next: &super::task::Ta
 fn context_switch(current: &mut super::task::TaskContext, next: &super::task::TaskContext) {
     use super::task::TaskContext;
     match (current, next) {
+        // SAFETY: Same as x86_64 -- valid context structures, scheduler lock
+        // held, interrupts disabled.
         (TaskContext::AArch64(curr), TaskContext::AArch64(next)) => unsafe {
             crate::arch::aarch64::context::context_switch(curr as *mut _, next as *const _);
         },
@@ -669,6 +739,8 @@ fn context_switch(current: &mut super::task::TaskContext, next: &super::task::Ta
 fn context_switch(current: &mut super::task::TaskContext, next: &super::task::TaskContext) {
     use super::task::TaskContext;
     match (current, next) {
+        // SAFETY: Same as x86_64 -- valid context structures, scheduler lock
+        // held, interrupts disabled.
         (TaskContext::RiscV(curr), TaskContext::RiscV(next)) => unsafe {
             crate::arch::riscv::context::context_switch(curr as *mut _, next as *const _);
         },
@@ -681,8 +753,10 @@ fn load_context(context: &super::task::TaskContext) {
     use crate::arch::x86_64::context::X86_64Context;
 
     match context {
+        // SAFETY: ctx is a valid reference to an X86_64Context within the
+        // bootstrap task. load_context restores CPU registers from this
+        // structure. This is called once during scheduler startup.
         super::task::TaskContext::X86_64(ctx) => unsafe {
-            // Load the initial context
             crate::arch::x86_64::context::load_context(ctx as *const X86_64Context);
         },
     }
@@ -693,8 +767,9 @@ fn load_context(context: &super::task::TaskContext) {
     use crate::arch::aarch64::context::AArch64Context;
 
     match context {
+        // SAFETY: Same as x86_64 -- valid context reference for the bootstrap
+        // task. load_context restores CPU registers.
         super::task::TaskContext::AArch64(ctx) => unsafe {
-            // Load the initial context
             crate::arch::aarch64::context::load_context(ctx as *const AArch64Context);
         },
         #[allow(unreachable_patterns)]
@@ -707,8 +782,9 @@ fn load_context(context: &super::task::TaskContext) {
     use crate::arch::riscv::context::RiscVContext;
 
     match context {
+        // SAFETY: Same as x86_64 -- valid context reference for the bootstrap
+        // task. load_context restores CPU registers.
         super::task::TaskContext::RiscV(ctx) => unsafe {
-            // Load the initial context
             crate::arch::riscv::context::load_context(ctx as *const RiscVContext);
         },
         #[allow(unreachable_patterns)]
@@ -749,7 +825,10 @@ pub fn current_scheduler() -> &'static Mutex<Scheduler> {
 
 /// Schedule on specific CPU
 pub fn schedule_on_cpu(cpu_id: u8, task: NonNull<Task>) {
-    // Check if task can run on the specified CPU
+    // SAFETY: `task` is a valid NonNull<Task> provided by the caller. We
+    // read the task's cpu_affinity and tid fields to verify it can run on
+    // the specified CPU. The task is not concurrently modified because the
+    // caller manages its lifecycle.
     unsafe {
         let task_ref = task.as_ref();
         if !task_ref.can_run_on(cpu_id) {

@@ -58,6 +58,9 @@ static mut MAC_ENABLED: bool = false;
 
 /// Add a policy rule
 pub fn add_rule(rule: PolicyRule) -> Result<(), KernelError> {
+    // SAFETY: POLICY_RULES and POLICY_COUNT are static mut arrays/counters accessed
+    // during single-threaded kernel init. POLICY_COUNT is checked against
+    // MAX_POLICY_RULES before array indexing to prevent out-of-bounds access.
     unsafe {
         if POLICY_COUNT >= MAX_POLICY_RULES {
             return Err(KernelError::OutOfMemory {
@@ -75,6 +78,10 @@ pub fn add_rule(rule: PolicyRule) -> Result<(), KernelError> {
 
 /// Check if access is allowed by MAC policy
 pub fn check_access(source: &str, target: &str, access: AccessType) -> bool {
+    // SAFETY: MAC_ENABLED, POLICY_RULES, and POLICY_COUNT are static mut globals
+    // accessed during single-threaded kernel operation. POLICY_COUNT is bounded
+    // by MAX_POLICY_RULES (enforced in add_rule), so all indexed accesses into
+    // POLICY_RULES are in-bounds.
     unsafe {
         if !MAC_ENABLED {
             return true; // MAC disabled, allow all
@@ -96,6 +103,9 @@ pub fn check_access(source: &str, target: &str, access: AccessType) -> bool {
 
 /// Enable MAC enforcement
 pub fn enable() {
+    // SAFETY: MAC_ENABLED is a static mut bool written during single-threaded
+    // kernel init or controlled administrative operations. No concurrent
+    // readers at init time.
     unsafe {
         MAC_ENABLED = true;
     }
@@ -104,6 +114,8 @@ pub fn enable() {
 
 /// Disable MAC enforcement (for debugging)
 pub fn disable() {
+    // SAFETY: MAC_ENABLED is a static mut bool written during debugging/admin
+    // operations. Single-threaded access assumed during early kernel operation.
     unsafe {
         MAC_ENABLED = false;
     }
@@ -130,6 +142,9 @@ fn load_default_policy() -> Result<(), KernelError> {
     add_rule(PolicyRule::new("init_t", "user_t", 0x7))?;
     add_rule(PolicyRule::new("init_t", "file_t", 0x7))?;
 
+    // SAFETY: POLICY_COUNT is a static mut counter read here for diagnostic output.
+    // This runs during single-threaded kernel init after all add_rule calls
+    // complete.
     println!("[MAC] Loaded {} default policy rules", unsafe {
         POLICY_COUNT
     });
@@ -146,6 +161,8 @@ pub fn init() -> Result<(), KernelError> {
     // Enable MAC enforcement
     enable();
 
+    // SAFETY: POLICY_COUNT is a static mut counter read for diagnostic output.
+    // Called at end of init() during single-threaded kernel bootstrap.
     println!("[MAC] MAC system initialized with {} rules", unsafe {
         POLICY_COUNT
     });

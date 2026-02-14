@@ -77,6 +77,10 @@ pub fn test_panic_handler(info: &PanicInfo) -> ! {
 /// Exit QEMU with a specific exit code
 pub fn exit_qemu(_exit_code: QemuExitCode) -> ! {
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: Writing to I/O port 0xf4 is the QEMU debug exit device.
+    // This triggers QEMU to exit with the given code. The function is
+    // marked as noreturn (-> !), so unreachable_unchecked is valid
+    // since QEMU terminates before the instruction after the port write.
     unsafe {
         use x86_64::instructions::port::Port;
         let mut port = Port::new(0xf4);
@@ -88,6 +92,9 @@ pub fn exit_qemu(_exit_code: QemuExitCode) -> ! {
     {
         // Use PSCI SYSTEM_OFF for AArch64
         const PSCI_SYSTEM_OFF: u32 = 0x84000008;
+        // SAFETY: PSCI SYSTEM_OFF (0x84000008) is a standard ARM PSCI
+        // call that powers off the system. The HVC instruction traps to
+        // the hypervisor (QEMU). This is noreturn since the VM terminates.
         unsafe {
             core::arch::asm!(
                 "mov w0, {psci_off:w}",
@@ -102,6 +109,10 @@ pub fn exit_qemu(_exit_code: QemuExitCode) -> ! {
     {
         // Use SBI shutdown call
         const SBI_SHUTDOWN: usize = 8;
+        // SAFETY: SBI shutdown (EID 8) is a standard RISC-V SBI call
+        // that powers off the system. The ecall traps to the SBI
+        // firmware (OpenSBI in QEMU). This is noreturn since the VM
+        // terminates.
         unsafe {
             core::arch::asm!(
                 "li a7, {sbi_shutdown}",
@@ -199,6 +210,8 @@ macro_rules! kernel_assert_ne {
 // ===== Benchmark Infrastructure =====
 
 /// Trait for benchmarkable functions
+///
+/// Intentionally kept available for on-demand benchmark binaries.
 #[allow(dead_code)]
 pub trait Benchmark {
     fn run(&self, iterations: u64) -> Duration;
@@ -221,12 +234,19 @@ pub struct BenchmarkResult {
 #[inline(always)]
 pub fn read_timestamp() -> u64 {
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: RDTSC is a non-privileged instruction available on all
+    // x86_64 processors. It reads the Time Stamp Counter with no side
+    // effects. The returned value is valid but may not be monotonic
+    // across CPUs.
     unsafe {
         use core::arch::x86_64::_rdtsc;
         _rdtsc()
     }
 
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: Reading CNTVCT_EL0 (virtual timer count) is a non-
+    // privileged operation on AArch64. It has no side effects and
+    // returns the current virtual timer counter value.
     unsafe {
         let timestamp: u64;
         core::arch::asm!("mrs {}, cntvct_el0", out(reg) timestamp);
@@ -234,6 +254,8 @@ pub fn read_timestamp() -> u64 {
     }
 
     #[cfg(target_arch = "riscv64")]
+    // SAFETY: RDCYCLE reads the cycle counter CSR, which is a non-
+    // privileged read-only operation on RISC-V. It has no side effects.
     unsafe {
         let timestamp: u64;
         core::arch::asm!("rdcycle {}", out(reg) timestamp);
@@ -331,6 +353,10 @@ macro_rules! kernel_bench {
 
 // ===== Test Registry =====
 
+/// Test registry for collecting and running kernel tests.
+///
+/// Used by the `testing` feature when test binaries register
+/// their tests via the `register_test!` macro.
 #[cfg(feature = "alloc")]
 #[allow(dead_code)]
 pub struct TestRegistry {
@@ -383,9 +409,13 @@ impl TestRegistry {
 #[allow(dead_code)]
 pub static mut TEST_REGISTRY: Option<TestRegistry> = None;
 
+/// Initialize the test registry. Called once before tests run.
 #[cfg(feature = "alloc")]
 #[allow(dead_code)]
 pub fn init_test_registry() {
+    // SAFETY: This is called once during test initialization, before any
+    // tests run. No concurrent access to TEST_REGISTRY is possible at
+    // this point since tests run sequentially after init.
     unsafe {
         TEST_REGISTRY = Some(TestRegistry::new());
     }
@@ -409,6 +439,8 @@ macro_rules! register_test {
 // ===== Test Timeout Support =====
 
 /// Run a test with a timeout (uses architecture-specific timer)
+///
+/// Available for test binaries that need timeout enforcement.
 #[allow(dead_code)]
 pub fn run_with_timeout<F>(f: F, timeout_cycles: u64) -> Result<(), &'static str>
 where

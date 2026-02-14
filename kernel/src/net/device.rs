@@ -1,4 +1,8 @@
 //! Network device abstraction layer
+//!
+//! Defines the [`NetworkDevice`] trait and device registry for hardware
+//! network drivers. All network drivers (E1000, VirtIO-Net, etc.)
+//! implement this trait to provide a uniform interface for the IP stack.
 
 #![allow(clippy::derivable_impls)]
 
@@ -229,7 +233,7 @@ impl NetworkDevice for EthernetDevice {
 
     fn set_state(&mut self, state: DeviceState) -> Result<(), KernelError> {
         self.state = state;
-        // TODO: Actually configure hardware
+        // TODO(phase4): Configure hardware state via device registers
         Ok(())
     }
 
@@ -246,7 +250,7 @@ impl NetworkDevice for EthernetDevice {
             });
         }
 
-        // TODO: Actually transmit via hardware
+        // TODO(phase4): Transmit via hardware DMA/MMIO
         self.stats.tx_packets += 1;
         self.stats.tx_bytes += packet.len() as u64;
 
@@ -258,7 +262,7 @@ impl NetworkDevice for EthernetDevice {
             return Ok(None);
         }
 
-        // TODO: Actually receive from hardware
+        // TODO(phase4): Receive from hardware via DMA ring buffer
         Ok(None)
     }
 }
@@ -270,6 +274,10 @@ static mut DEVICES: Option<Vec<Box<dyn NetworkDevice>>> = None;
 pub fn init() -> Result<(), KernelError> {
     println!("[NETDEV] Initializing network device subsystem...");
 
+    // SAFETY: DEVICES is a static mut Option<Vec> written once during
+    // single-threaded kernel init. The loopback device is immediately
+    // registered in the same block. No concurrent access is possible at this
+    // point in kernel bootstrap.
     unsafe {
         DEVICES = Some(Vec::new());
 
@@ -288,6 +296,8 @@ pub fn init() -> Result<(), KernelError> {
 
 /// Register a network device
 pub fn register_device(device: Box<dyn NetworkDevice>) -> Result<(), KernelError> {
+    // SAFETY: DEVICES is a static mut Vec initialized during init(). Registration
+    // occurs during single-threaded kernel init or controlled driver loading.
     unsafe {
         if let Some(ref mut devices) = DEVICES {
             println!("[NETDEV] Registering device: {}", device.name());
@@ -304,6 +314,9 @@ pub fn register_device(device: Box<dyn NetworkDevice>) -> Result<(), KernelError
 
 /// Get device by name
 pub fn get_device(name: &str) -> Option<&'static dyn NetworkDevice> {
+    // SAFETY: DEVICES is set during init() and the returned reference has 'static
+    // lifetime because the static mut Vec is never moved or dropped. Read-only
+    // access.
     unsafe {
         if let Some(ref devices) = DEVICES {
             devices
@@ -318,6 +331,9 @@ pub fn get_device(name: &str) -> Option<&'static dyn NetworkDevice> {
 
 /// Get mutable device by name
 pub fn get_device_mut(name: &str) -> Option<&'static mut dyn NetworkDevice> {
+    // SAFETY: DEVICES is set during init(). Mutable access assumes single-threaded
+    // operation or external synchronization by the caller. The returned mutable
+    // reference has 'static lifetime as the static Vec is never moved or dropped.
     unsafe {
         if let Some(ref mut devices) = DEVICES {
             devices
@@ -332,6 +348,8 @@ pub fn get_device_mut(name: &str) -> Option<&'static mut dyn NetworkDevice> {
 
 /// List all device names
 pub fn list_devices() -> Vec<String> {
+    // SAFETY: DEVICES is set during init(). Read-only access to enumerate device
+    // names.
     unsafe {
         if let Some(ref devices) = DEVICES {
             devices.iter().map(|d| String::from(d.name())).collect()

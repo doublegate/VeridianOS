@@ -56,6 +56,10 @@ fn test_frame_guard_leak() {
     );
 
     // Manual cleanup required
+    // SAFETY: leaked_frame was obtained from FRAME_ALLOCATOR.allocate_frame()
+    // and intentionally leaked via mem::forget. Freeing it here returns the
+    // frame to the allocator's free list. The frame has not been freed
+    // elsewhere (the guard was forgotten, not dropped).
     unsafe {
         FRAME_ALLOCATOR.free_frame(leaked_frame);
     }

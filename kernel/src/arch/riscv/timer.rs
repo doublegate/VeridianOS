@@ -13,6 +13,9 @@ pub fn get_ticks() -> u64 {
 }
 
 /// Increment timer ticks (called from timer interrupt)
+///
+/// Currently unused -- will be called from the RISC-V timer interrupt
+/// handler once a proper trap vector (stvec) is registered in a future phase.
 #[allow(dead_code)]
 pub fn tick() {
     TICKS.fetch_add(1, Ordering::Relaxed);
@@ -20,6 +23,9 @@ pub fn tick() {
     // Schedule next timer interrupt
     let interval = TIMER_INTERVAL.load(Ordering::Relaxed);
     if interval > 0 {
+        // SAFETY: The rdtime instruction reads the RISC-V real-time counter CSR,
+        // which is always accessible in supervisor mode and produces no side effects.
+        // sbi::set_timer is a safe SBI ecall wrapper.
         unsafe {
             let time: u64;
             core::arch::asm!("rdtime {}", out(reg) time);
@@ -34,6 +40,8 @@ pub fn tick() {
 /// Read current time value
 pub fn read_time() -> u64 {
     let time: u64;
+    // SAFETY: The rdtime instruction reads the RISC-V real-time counter CSR,
+    // which is always accessible in supervisor mode. No side effects.
     unsafe {
         core::arch::asm!("rdtime {}", out(reg) time);
     }

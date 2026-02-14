@@ -249,7 +249,7 @@ impl ProcessHeap {
             return Err("Invalid heap break");
         }
 
-        // TODO: Actually allocate/free pages
+        // TODO(phase3): Actually allocate/free pages via VMM for heap expansion
         self.brk = new_brk;
         Ok(self.brk)
     }

@@ -242,6 +242,10 @@ impl crate::arch::context::ThreadContext for RiscVContext {
 
 /// Switch context using the ThreadContext interface
 pub fn switch_context(from: &mut RiscVContext, to: &RiscVContext) {
+    // SAFETY: Both `from` and `to` are valid references to RiscVContext structs
+    // with repr(C) layout. context_switch saves all registers from the current
+    // CPU state into `from` and restores them from `to`. Interrupts must be
+    // disabled by the caller to prevent concurrent access to the contexts.
     unsafe {
         context_switch(from as *mut _, to as *const _);
     }
@@ -371,6 +375,9 @@ pub unsafe extern "C" fn context_switch(current: *mut RiscVContext, next: *const
 
 /// Initialize FPU for current CPU
 pub fn init_fpu() {
+    // SAFETY: Sets the FS field in mstatus to "Dirty" (0x6000), enabling the FPU.
+    // This is a privileged CSR write that must be done in machine/supervisor mode.
+    // The t0 register is used as a temporary and marked as clobbered.
     unsafe {
         // Enable FPU in mstatus
         asm!(
@@ -382,9 +389,14 @@ pub fn init_fpu() {
 }
 
 /// Check if CPU supports F extension
+///
+/// Currently unused but retained for future FPU context switching
+/// and feature detection during SMP bring-up.
 #[allow(dead_code)]
 pub fn has_f_extension() -> bool {
     // Check misa register
+    // SAFETY: Reading the misa CSR is a read-only operation that reports
+    // which ISA extensions are supported. Always accessible in M-mode.
     unsafe {
         let misa: usize;
         asm!("csrr {}, misa", out(reg) misa);
@@ -393,9 +405,14 @@ pub fn has_f_extension() -> bool {
 }
 
 /// Check if CPU supports D extension
+///
+/// Currently unused but retained for future FPU context switching
+/// and feature detection during SMP bring-up.
 #[allow(dead_code)]
 pub fn has_d_extension() -> bool {
     // Check misa register
+    // SAFETY: Reading the misa CSR is a read-only operation that reports
+    // which ISA extensions are supported. Always accessible in M-mode.
     unsafe {
         let misa: usize;
         asm!("csrr {}, misa", out(reg) misa);
@@ -404,8 +421,13 @@ pub fn has_d_extension() -> bool {
 }
 
 /// Get current hart (hardware thread) ID
+///
+/// Currently unused but retained for future SMP support where
+/// hart identification is needed for per-CPU data structures.
 #[allow(dead_code)]
 pub fn hart_id() -> usize {
+    // SAFETY: Reading the mhartid CSR is a read-only operation that returns the
+    // current hardware thread ID. Always accessible in M-mode with no side effects.
     unsafe {
         let id: usize;
         asm!("csrr {}, mhartid", out(reg) id);

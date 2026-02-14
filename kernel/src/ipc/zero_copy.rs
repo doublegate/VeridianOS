@@ -269,8 +269,7 @@ pub fn grant_transfer_capability(
     _region_id: u64,
     _permissions: Permission,
 ) -> Result<u64> {
-    // TODO: Create capability for transfer
-    // This would integrate with the capability system
+    // TODO(phase3): Create transfer capability via capability system integration
     Ok(0)
 }
 
@@ -352,7 +351,7 @@ fn validate_transfer_capability(_from: ProcessId, _to: ProcessId, _region: u64) 
     true
 }
 fn get_page_table(_pid: ProcessId) -> Result<PageTable> {
-    // TODO: Get from process table
+    // TODO(phase3): Get page table from process table
     Ok(PageTable::new())
 }
 fn allocate_virtual_range(_pt: &mut PageTable, _size: usize) -> Result<VirtualAddress> {
@@ -362,6 +361,9 @@ fn flush_tlb_for_processes(_pids: &[ProcessId]) {}
 
 #[cfg(target_arch = "x86_64")]
 fn read_timestamp() -> u64 {
+    // SAFETY: _rdtsc() reads the x86_64 Time Stamp Counter via the RDTSC
+    // instruction. This is a read-only, side-effect-free operation that is always
+    // available in kernel mode and requires no special setup or preconditions.
     unsafe { core::arch::x86_64::_rdtsc() }
 }
 

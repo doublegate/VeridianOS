@@ -25,6 +25,10 @@ static mut COUNTERS: PerfCounters = PerfCounters {
 /// Increment syscall counter
 #[inline(always)]
 pub fn count_syscall() {
+    // SAFETY: COUNTERS is a static mut used as a simple global accumulator. All
+    // accesses are non-atomic wrapping increments on a single field. In the
+    // current single-core kernel, no concurrent mutation occurs. Minor races on
+    // SMP would only cause a missed count, not memory unsafety.
     unsafe {
         COUNTERS.syscalls = COUNTERS.syscalls.wrapping_add(1);
     }
@@ -33,6 +37,9 @@ pub fn count_syscall() {
 /// Increment context switch counter
 #[inline(always)]
 pub fn count_context_switch() {
+    // SAFETY: COUNTERS is a static mut global accumulator. The wrapping_add on a
+    // single u64 field is safe in the current single-core kernel. On SMP, a missed
+    // count is the worst outcome (no memory corruption).
     unsafe {
         COUNTERS.context_switches = COUNTERS.context_switches.wrapping_add(1);
     }
@@ -41,6 +48,9 @@ pub fn count_context_switch() {
 /// Increment page fault counter
 #[inline(always)]
 pub fn count_page_fault() {
+    // SAFETY: COUNTERS is a static mut global accumulator. The wrapping_add on a
+    // single u64 field is safe in the current single-core kernel. On SMP, a missed
+    // count is the worst outcome (no memory corruption).
     unsafe {
         COUNTERS.page_faults = COUNTERS.page_faults.wrapping_add(1);
     }
@@ -48,20 +58,27 @@ pub fn count_page_fault() {
 
 /// Get performance statistics
 pub fn get_stats() -> PerfCounters {
+    // SAFETY: COUNTERS is a static mut read as a snapshot. The Copy on PerfCounters
+    // produces a consistent point-in-time value. Slight staleness on SMP is
+    // acceptable for diagnostic counters.
     unsafe { COUNTERS }
 }
 
 /// Reset performance counters
 pub fn reset_stats() {
+    // SAFETY: COUNTERS is a static mut reset to the default zero state. This is
+    // called from diagnostic paths only. In the current single-core kernel, no
+    // concurrent access occurs during reset.
     unsafe {
         COUNTERS = PerfCounters::default();
     }
 }
 
 /// Performance profiler
-#[allow(dead_code)]
 pub struct Profiler {
     start_time: u64,
+    /// Read in end() via println! which is a no-op on some architectures.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     name: &'static str,
 }
 
@@ -84,19 +101,21 @@ impl Profiler {
 /// Optimize memory allocator
 pub fn optimize_memory() {
     println!("[PERF] Optimizing memory allocator...");
-    // TODO: Implement memory optimization
+    // TODO(phase5): Implement memory allocator optimization (compaction,
+    // defrag)
 }
 
 /// Optimize scheduler
 pub fn optimize_scheduler() {
     println!("[PERF] Optimizing scheduler...");
-    // TODO: Implement scheduler optimization
+    // TODO(phase5): Implement scheduler optimization (affinity tuning, load
+    // rebalance)
 }
 
 /// Optimize IPC
 pub fn optimize_ipc() {
     println!("[PERF] Optimizing IPC...");
-    // TODO: Implement IPC optimization
+    // TODO(phase5): Implement IPC optimization (fast-path tuning, batching)
 }
 
 /// Initialize performance subsystem

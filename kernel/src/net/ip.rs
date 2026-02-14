@@ -1,4 +1,7 @@
 //! IP layer implementation
+//!
+//! Handles IPv4 packet construction, parsing, routing, and fragmentation.
+//! Provides the foundation for TCP and UDP transport protocols.
 
 #![allow(static_mut_refs)]
 
@@ -135,6 +138,8 @@ static mut ROUTES: Vec<RouteEntry> = Vec::new();
 
 /// Add a route
 pub fn add_route(entry: RouteEntry) {
+    // SAFETY: ROUTES is a static mut Vec modified during single-threaded kernel
+    // init or controlled routing table updates. No concurrent access assumed.
     unsafe {
         ROUTES.push(entry);
     }
@@ -142,6 +147,8 @@ pub fn add_route(entry: RouteEntry) {
 
 /// Lookup route for destination
 pub fn lookup_route(dest: Ipv4Address) -> Option<RouteEntry> {
+    // SAFETY: ROUTES is a static mut Vec read during route lookup. Read-only access
+    // assumes no concurrent modification to the routing table.
     unsafe {
         for route in &ROUTES {
             let dest_masked = dest.to_u32() & route.netmask.to_u32();
@@ -159,13 +166,13 @@ pub fn lookup_route(dest: Ipv4Address) -> Option<RouteEntry> {
 pub fn send(dest: IpAddress, protocol: IpProtocol, data: &[u8]) -> Result<(), KernelError> {
     match dest {
         IpAddress::V4(dest_v4) => {
-            let src = Ipv4Address::LOCALHOST; // TODO: Get actual source address
+            let src = Ipv4Address::LOCALHOST; // TODO(phase4): Get source address from interface config
 
             let mut header = Ipv4Header::new(src, dest_v4, protocol);
             header.total_length = (Ipv4Header::MIN_SIZE + data.len()) as u16;
             header.calculate_checksum();
 
-            // TODO: Actually send packet through network device
+            // TODO(phase4): Route and send packet through network device
             super::update_stats_tx(header.total_length as usize);
 
             Ok(())

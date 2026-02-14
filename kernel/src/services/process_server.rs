@@ -528,6 +528,11 @@ pub fn init() {
     #[allow(unused_imports)]
     use crate::println;
 
+    // SAFETY: PROCESS_SERVER_PTR is a static mut pointer initialized
+    // to null. This block guards against double init, creates a
+    // ProcessServer via Box::leak for 'static lifetime, and stores
+    // the pointer with architecture-specific memory barriers. Called
+    // once during early boot before concurrent access.
     unsafe {
         if !PROCESS_SERVER_PTR.is_null() {
             println!("[PROCESS_SERVER] WARNING: Already initialized! Skipping re-initialization.");
@@ -557,12 +562,28 @@ pub fn init() {
     }
 }
 
-/// Get the global process server
-pub fn get_process_server() -> &'static ProcessServer {
+/// Try to get the global process server without panicking.
+///
+/// Returns `None` if the process server has not been initialized via [`init`].
+pub fn try_get_process_server() -> Option<&'static ProcessServer> {
+    // SAFETY: PROCESS_SERVER_PTR was set during init() via Box::leak,
+    // producing a valid 'static pointer. Once set, it is never modified
+    // or freed.
     unsafe {
         if PROCESS_SERVER_PTR.is_null() {
-            panic!("Process server not initialized");
+            None
+        } else {
+            Some(&*PROCESS_SERVER_PTR)
         }
-        &*PROCESS_SERVER_PTR
     }
+}
+
+/// Get the global process server.
+///
+/// Panics if the process server has not been initialized via [`init`].
+/// Prefer [`try_get_process_server`] in contexts where a panic is unacceptable.
+pub fn get_process_server() -> &'static ProcessServer {
+    // Panic is intentional: accessing the process server before init() is a
+    // programming error indicating a broken boot sequence.
+    try_get_process_server().expect("Process server not initialized: init() was not called")
 }

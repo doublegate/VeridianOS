@@ -6,7 +6,6 @@
 use crate::sched::task::TaskContext;
 
 /// Thread context trait
-#[allow(dead_code)]
 pub trait ThreadContext: Sized {
     /// Create a new empty context
     fn new() -> Self;
@@ -43,15 +42,12 @@ pub trait ThreadContext: Sized {
 }
 
 /// Architecture-specific thread context type alias
-#[allow(dead_code)]
 #[cfg(target_arch = "x86_64")]
 pub type ArchThreadContext = crate::arch::x86_64::context::X86_64Context;
 
-#[allow(dead_code)]
 #[cfg(target_arch = "aarch64")]
 pub type ArchThreadContext = crate::arch::aarch64::context::AArch64Context;
 
-#[allow(dead_code)]
 #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
 pub type ArchThreadContext = crate::arch::riscv::context::RiscVContext;
 
@@ -60,7 +56,6 @@ pub type ArchThreadContext = crate::arch::riscv::context::RiscVContext;
 /// # Safety
 /// This function must be called with interrupts disabled and
 /// both contexts must be valid.
-#[allow(dead_code)]
 pub unsafe fn switch_context(from: &mut ArchThreadContext, to: &ArchThreadContext) {
     #[cfg(target_arch = "x86_64")]
     crate::arch::x86_64::context::switch_context(from, to);
@@ -73,7 +68,6 @@ pub unsafe fn switch_context(from: &mut ArchThreadContext, to: &ArchThreadContex
 }
 
 /// Initialize FPU/SIMD for the current CPU
-#[allow(dead_code)]
 pub fn init_fpu() {
     #[cfg(target_arch = "x86_64")]
     crate::arch::x86_64::context::init_fpu();
@@ -86,9 +80,11 @@ pub fn init_fpu() {
 }
 
 /// Save FPU/SIMD state
-#[allow(dead_code)]
 pub fn save_fpu_state(state: &mut [u8]) {
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: The caller provides a byte slice large enough to hold FpuState
+    // (512 bytes, 16-byte aligned via repr(C, align(16))). The pointer cast from
+    // u8 to FpuState is valid because save_fpu_state writes all fields via FXSAVE.
     unsafe {
         crate::arch::x86_64::context::save_fpu_state(
             &mut *(state.as_mut_ptr() as *mut crate::arch::x86_64::context::FpuState),
@@ -98,13 +94,16 @@ pub fn save_fpu_state(state: &mut [u8]) {
     #[cfg(not(target_arch = "x86_64"))]
     let _ = state;
 
-    // TODO: Implement for other architectures
+    // TODO(phase3): Implement FPU save for AArch64 (FPSR/FPCR) and RISC-V
+    // (fcsr)
 }
 
 /// Restore FPU/SIMD state
-#[allow(dead_code)]
 pub fn restore_fpu_state(state: &[u8]) {
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: The caller provides a byte slice containing valid FpuState data
+    // previously saved by save_fpu_state. The pointer cast from u8 to FpuState
+    // is valid because the data was written via FXSAVE with proper alignment.
     unsafe {
         crate::arch::x86_64::context::restore_fpu_state(
             &*(state.as_ptr() as *const crate::arch::x86_64::context::FpuState),
@@ -114,5 +113,6 @@ pub fn restore_fpu_state(state: &[u8]) {
     #[cfg(not(target_arch = "x86_64"))]
     let _ = state;
 
-    // TODO: Implement for other architectures
+    // TODO(phase3): Implement FPU restore for AArch64 (FPSR/FPCR) and RISC-V
+    // (fcsr)
 }

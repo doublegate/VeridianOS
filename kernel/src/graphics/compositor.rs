@@ -95,8 +95,7 @@ impl Compositor {
 
     /// Render all windows
     pub fn render(&mut self) {
-        // TODO: Implement actual rendering
-        // For now, just iterate windows
+        // TODO(phase6): Composite windows to framebuffer via GPU
         for _window in &self.windows {
             // Would draw window to framebuffer
         }

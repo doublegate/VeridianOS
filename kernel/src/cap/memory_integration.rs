@@ -100,8 +100,8 @@ pub fn check_memory_access(
 
     super::manager::check_capability(cap, required_rights, cap_space)?;
 
-    // TODO: Check if the requested range falls within the capability's memory
-    // region This requires looking up the ObjectRef from the capability
+    // TODO(phase3): Validate requested range falls within capability's memory
+    // region
 
     Ok(())
 }
@@ -134,8 +134,7 @@ pub fn map_memory_with_capability(
         check_execute_permission(cap, cap_space)?;
     }
 
-    // TODO: Perform actual mapping through VMM
-    // vmm::map_pages(virt_addr, phys_addr, size, flags)?;
+    // TODO(phase3): Perform actual mapping through VMM
 
     Ok(())
 }
@@ -160,7 +159,7 @@ pub fn create_shared_memory(
     owner_cap_space: &CapabilitySpace,
     share_with: &[(ProcessId, Rights, &CapabilitySpace)],
 ) -> Result<(PhysicalAddress, Vec<CapabilityToken>), CapError> {
-    // TODO: Allocate physical memory for shared region
+    // TODO(phase3): Allocate physical memory for shared region
     let phys_addr = PhysicalAddress::new(0); // Placeholder
 
     let attributes = MemoryAttributes::normal();

@@ -188,7 +188,7 @@ pub struct Vfs {
     mounts: BTreeMap<String, Arc<dyn Filesystem>>,
 
     /// Current working directory for processes
-    /// TODO: Move this to per-process data
+    /// TODO(phase3): Move this to per-process data
     cwd: String,
 }
 
@@ -307,7 +307,11 @@ impl Vfs {
                 // Go back to parent directory
                 if path_stack.len() > 1 {
                     path_stack.pop();
-                    node = path_stack.last().unwrap().clone();
+                    // path_stack.len() > 1 was checked above, so last() is Some
+                    node = path_stack
+                        .last()
+                        .expect("path_stack empty after len check")
+                        .clone();
                 }
                 // If at root, stay at root
             } else {
@@ -405,19 +409,21 @@ impl Vfs {
 /// This avoids static mut Option issues and provides consistent behavior
 static mut VFS_PTR: *mut RwLock<Vfs> = core::ptr::null_mut();
 
-/// Get the VFS instance (unified for all architectures)
+/// Get the VFS instance (unified for all architectures).
+///
+/// Panics if the VFS has not been initialized via [`init`].
+/// Prefer [`try_get_vfs`] in contexts where a panic is unacceptable.
 pub fn get_vfs() -> &'static RwLock<Vfs> {
-    unsafe {
-        let ptr = core::ptr::read_volatile(&raw const VFS_PTR);
-        if ptr.is_null() {
-            panic!("VFS not initialized");
-        }
-        &*ptr
-    }
+    // Panic is intentional: accessing VFS before init() is a programming
+    // error indicating a broken boot sequence. Use try_get_vfs() for
+    // non-panicking access.
+    try_get_vfs().expect("VFS not initialized: init() was not called")
 }
 
 /// Try to get the VFS instance without panicking
 pub fn try_get_vfs() -> Option<&'static RwLock<Vfs>> {
+    // SAFETY: Same as get_vfs - read_volatile reads the latest pointer
+    // value. Returns None if VFS not yet initialized (null pointer).
     unsafe {
         let ptr = core::ptr::read_volatile(&raw const VFS_PTR);
         if ptr.is_null() {
@@ -435,6 +441,11 @@ pub fn init() {
 
     println!("[VFS] Initializing Virtual Filesystem...");
 
+    // SAFETY: VFS_PTR is a static mut pointer initialized to null.
+    // This block checks if already initialized (guards against double
+    // init), creates a Vfs via Box::leak for 'static lifetime, and
+    // stores the pointer with memory barriers for cross-architecture
+    // visibility. Called once during early boot before concurrent access.
     unsafe {
         if !core::ptr::read_volatile(&raw const VFS_PTR).is_null() {
             println!("[VFS] WARNING: VFS already initialized! Skipping re-initialization.");
@@ -657,4 +668,380 @@ pub fn append_file(path: &str, data: &[u8]) -> Result<usize, &'static str> {
 
     // Write at the end of the file
     node.write(current_size, data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: create a Vfs with a ramfs root filesystem already mounted.
+    fn make_vfs_with_root() -> Vfs {
+        let mut vfs = Vfs::new();
+        let ramfs = Arc::new(ramfs::RamFs::new());
+        vfs.mount_root(ramfs).expect("mount_root should succeed");
+        vfs
+    }
+
+    // --- Permissions tests ---
+
+    #[test]
+    fn test_permissions_default() {
+        let perm = Permissions::default();
+        assert!(perm.owner_read);
+        assert!(perm.owner_write);
+        assert!(perm.owner_exec);
+        assert!(perm.group_read);
+        assert!(!perm.group_write);
+        assert!(perm.group_exec);
+        assert!(perm.other_read);
+        assert!(!perm.other_write);
+        assert!(perm.other_exec);
+    }
+
+    #[test]
+    fn test_permissions_read_only() {
+        let perm = Permissions::read_only();
+        assert!(perm.owner_read);
+        assert!(!perm.owner_write);
+        assert!(!perm.owner_exec);
+        assert!(perm.group_read);
+        assert!(!perm.group_write);
+    }
+
+    #[test]
+    fn test_permissions_from_mode_755() {
+        let perm = Permissions::from_mode(0o755);
+        assert!(perm.owner_read);
+        assert!(perm.owner_write);
+        assert!(perm.owner_exec);
+        assert!(perm.group_read);
+        assert!(!perm.group_write);
+        assert!(perm.group_exec);
+        assert!(perm.other_read);
+        assert!(!perm.other_write);
+        assert!(perm.other_exec);
+    }
+
+    #[test]
+    fn test_permissions_from_mode_644() {
+        let perm = Permissions::from_mode(0o644);
+        assert!(perm.owner_read);
+        assert!(perm.owner_write);
+        assert!(!perm.owner_exec);
+        assert!(perm.group_read);
+        assert!(!perm.group_write);
+        assert!(!perm.group_exec);
+        assert!(perm.other_read);
+        assert!(!perm.other_write);
+        assert!(!perm.other_exec);
+    }
+
+    #[test]
+    fn test_permissions_from_mode_000() {
+        let perm = Permissions::from_mode(0o000);
+        assert!(!perm.owner_read);
+        assert!(!perm.owner_write);
+        assert!(!perm.owner_exec);
+        assert!(!perm.group_read);
+        assert!(!perm.other_read);
+    }
+
+    // --- Vfs construction tests ---
+
+    #[test]
+    fn test_vfs_new() {
+        let vfs = Vfs::new();
+        assert_eq!(vfs.get_cwd(), "/");
+    }
+
+    #[test]
+    fn test_vfs_default() {
+        let vfs = Vfs::default();
+        assert_eq!(vfs.get_cwd(), "/");
+    }
+
+    // --- Mount tests ---
+
+    #[test]
+    fn test_mount_root() {
+        let mut vfs = Vfs::new();
+        let ramfs = Arc::new(ramfs::RamFs::new());
+        let result = vfs.mount_root(ramfs);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_mount_root_twice_fails() {
+        let mut vfs = Vfs::new();
+        let ramfs1 = Arc::new(ramfs::RamFs::new());
+        let ramfs2 = Arc::new(ramfs::RamFs::new());
+
+        vfs.mount_root(ramfs1).unwrap();
+        let result = vfs.mount_root(ramfs2);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Root filesystem already mounted");
+    }
+
+    #[test]
+    fn test_mount_without_root_fails() {
+        let mut vfs = Vfs::new();
+        let ramfs = Arc::new(ramfs::RamFs::new());
+        let result = vfs.mount("/dev".into(), ramfs);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Root filesystem not mounted");
+    }
+
+    #[test]
+    fn test_mount_at_path() {
+        let mut vfs = make_vfs_with_root();
+        let devfs = Arc::new(devfs::DevFs::new());
+        let result = vfs.mount("/dev".into(), devfs);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_mount_duplicate_path_fails() {
+        let mut vfs = make_vfs_with_root();
+        let fs1 = Arc::new(ramfs::RamFs::new());
+        let fs2 = Arc::new(ramfs::RamFs::new());
+
+        vfs.mount("/mnt".into(), fs1).unwrap();
+        let result = vfs.mount("/mnt".into(), fs2);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Path already mounted");
+    }
+
+    // --- Unmount tests ---
+
+    #[test]
+    fn test_unmount() {
+        let mut vfs = make_vfs_with_root();
+        let fs = Arc::new(ramfs::RamFs::new());
+        vfs.mount("/mnt".into(), fs).unwrap();
+
+        let result = vfs.unmount("/mnt");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_unmount_nonexistent_fails() {
+        let mut vfs = make_vfs_with_root();
+        let result = vfs.unmount("/nonexistent");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Path not mounted");
+    }
+
+    // --- mount_by_type tests ---
+
+    #[test]
+    fn test_mount_by_type_ramfs() {
+        let mut vfs = make_vfs_with_root();
+        let result = vfs.mount_by_type("/tmp", "ramfs", 0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_mount_by_type_devfs() {
+        let mut vfs = make_vfs_with_root();
+        let result = vfs.mount_by_type("/dev", "devfs", 0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_mount_by_type_procfs() {
+        let mut vfs = make_vfs_with_root();
+        let result = vfs.mount_by_type("/proc", "procfs", 0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_mount_by_type_unknown_fails() {
+        let mut vfs = make_vfs_with_root();
+        let result = vfs.mount_by_type("/foo", "unknownfs", 0);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Unknown filesystem type");
+    }
+
+    #[test]
+    fn test_mount_by_type_root() {
+        let mut vfs = Vfs::new();
+        let result = vfs.mount_by_type("/", "ramfs", 0);
+        assert!(result.is_ok());
+    }
+
+    // --- Path resolution tests ---
+
+    #[test]
+    fn test_resolve_root_path() {
+        let vfs = make_vfs_with_root();
+        let result = vfs.resolve_path("/");
+        assert!(result.is_ok());
+        let node = result.unwrap();
+        assert_eq!(node.node_type(), NodeType::Directory);
+    }
+
+    #[test]
+    fn test_resolve_no_root_fails() {
+        let vfs = Vfs::new();
+        let result = vfs.resolve_path("/anything");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Root filesystem not mounted");
+    }
+
+    #[test]
+    fn test_resolve_nonexistent_path() {
+        let vfs = make_vfs_with_root();
+        let result = vfs.resolve_path("/nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_created_directory() {
+        let vfs = make_vfs_with_root();
+
+        // Create directory via the root node
+        let root = vfs.root_fs.as_ref().unwrap().root();
+        root.mkdir("testdir", Permissions::default()).unwrap();
+
+        let result = vfs.resolve_path("/testdir");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().node_type(), NodeType::Directory);
+    }
+
+    #[test]
+    fn test_resolve_nested_path() {
+        let vfs = make_vfs_with_root();
+
+        let root = vfs.root_fs.as_ref().unwrap().root();
+        let sub = root.mkdir("a", Permissions::default()).unwrap();
+        sub.mkdir("b", Permissions::default()).unwrap();
+
+        let result = vfs.resolve_path("/a/b");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().node_type(), NodeType::Directory);
+    }
+
+    #[test]
+    fn test_resolve_path_with_dot() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs.as_ref().unwrap().root();
+        root.mkdir("mydir", Permissions::default()).unwrap();
+
+        // "." should be ignored in path traversal
+        let result = vfs.resolve_path("/./mydir/.");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_resolve_path_with_dotdot() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs.as_ref().unwrap().root();
+        let sub = root.mkdir("parent", Permissions::default()).unwrap();
+        sub.mkdir("child", Permissions::default()).unwrap();
+
+        // /parent/child/.. should resolve to /parent
+        let result = vfs.resolve_path("/parent/child/..");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().node_type(), NodeType::Directory);
+    }
+
+    #[test]
+    fn test_resolve_dotdot_at_root() {
+        let vfs = make_vfs_with_root();
+
+        // Going up from root should stay at root
+        let result = vfs.resolve_path("/../..");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().node_type(), NodeType::Directory);
+    }
+
+    // --- mkdir and unlink tests ---
+
+    #[test]
+    fn test_mkdir_via_vfs() {
+        let vfs = make_vfs_with_root();
+        let result = vfs.mkdir("/newdir", Permissions::default());
+        assert!(result.is_ok());
+
+        // Verify it exists
+        let node = vfs.resolve_path("/newdir").unwrap();
+        assert_eq!(node.node_type(), NodeType::Directory);
+    }
+
+    #[test]
+    fn test_mkdir_invalid_path() {
+        let vfs = make_vfs_with_root();
+        let result = vfs.mkdir("no_slash", Permissions::default());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unlink_file() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs.as_ref().unwrap().root();
+        root.create("testfile", Permissions::default()).unwrap();
+
+        let result = vfs.unlink("/testfile");
+        assert!(result.is_ok());
+
+        // Should no longer exist
+        assert!(vfs.resolve_path("/testfile").is_err());
+    }
+
+    #[test]
+    fn test_unlink_nonexistent() {
+        let vfs = make_vfs_with_root();
+        let result = vfs.unlink("/ghost");
+        assert!(result.is_err());
+    }
+
+    // --- set_cwd tests ---
+
+    #[test]
+    fn test_set_cwd() {
+        let mut vfs = make_vfs_with_root();
+        let root = vfs.root_fs.as_ref().unwrap().root();
+        root.mkdir("home", Permissions::default()).unwrap();
+
+        let result = vfs.set_cwd(String::from("/home"));
+        assert!(result.is_ok());
+        assert_eq!(vfs.get_cwd(), "/home");
+    }
+
+    #[test]
+    fn test_set_cwd_not_directory_fails() {
+        let mut vfs = make_vfs_with_root();
+        let root = vfs.root_fs.as_ref().unwrap().root();
+        root.create("afile", Permissions::default()).unwrap();
+
+        let result = vfs.set_cwd(String::from("/afile"));
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Not a directory");
+    }
+
+    // --- sync tests ---
+
+    #[test]
+    fn test_sync_with_root() {
+        let vfs = make_vfs_with_root();
+        let result = vfs.sync();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_sync_without_root() {
+        let vfs = Vfs::new();
+        let result = vfs.sync();
+        assert!(result.is_ok()); // No root, but should not error
+    }
+
+    // --- NodeType tests ---
+
+    #[test]
+    fn test_node_type_equality() {
+        assert_eq!(NodeType::File, NodeType::File);
+        assert_eq!(NodeType::Directory, NodeType::Directory);
+        assert_ne!(NodeType::File, NodeType::Directory);
+        assert_ne!(NodeType::CharDevice, NodeType::BlockDevice);
+    }
 }

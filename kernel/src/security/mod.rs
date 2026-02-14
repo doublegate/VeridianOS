@@ -77,6 +77,9 @@ pub enum AccessType {
 /// Initialize security subsystem
 pub fn init() -> Result<(), KernelError> {
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: direct_uart::uart_write_str performs a raw MMIO write to the PL011 UART
+    // at 0x09000000. This is safe during kernel init as the UART is memory-mapped by
+    // QEMU's virt machine and no other code accesses it concurrently at this point.
     unsafe {
         crate::arch::aarch64::direct_uart::uart_write_str("[SECURITY] init start\n");
     }
@@ -88,6 +91,7 @@ pub fn init() -> Result<(), KernelError> {
     println!("[SECURITY] About to init memory_protection...");
     memory_protection::init()?;
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: Same as above - raw MMIO write to PL011 UART during single-threaded init.
     unsafe {
         crate::arch::aarch64::direct_uart::uart_write_str("[SECURITY] mem_prot done\n");
     }
@@ -96,6 +100,7 @@ pub fn init() -> Result<(), KernelError> {
 
     // Initialize authentication framework
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: Same as above - raw MMIO write to PL011 UART during single-threaded init.
     unsafe {
         crate::arch::aarch64::direct_uart::uart_write_str("[SECURITY] auth start\n");
     }
@@ -103,6 +108,7 @@ pub fn init() -> Result<(), KernelError> {
     println!("[SECURITY] About to init auth...");
     auth::init()?;
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: Same as above - raw MMIO write to PL011 UART during single-threaded init.
     unsafe {
         crate::arch::aarch64::direct_uart::uart_write_str("[SECURITY] auth done\n");
     }
@@ -138,6 +144,7 @@ pub fn init() -> Result<(), KernelError> {
     println!("[SECURITY] boot verify done");
 
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: Same as above - raw MMIO write to PL011 UART during single-threaded init.
     unsafe {
         crate::arch::aarch64::direct_uart::uart_write_str("[SECURITY] init complete\n");
     }

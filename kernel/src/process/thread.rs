@@ -88,7 +88,7 @@ impl ThreadLocalStorage {
 
     /// Allocate TLS area
     pub fn allocate(&mut self, size: usize) -> Result<(), &'static str> {
-        // TODO: Allocate memory for TLS
+        // TODO(phase3): Allocate actual memory pages for TLS area
         self.size = size;
         Ok(())
     }
@@ -367,6 +367,12 @@ impl Thread {
 
         // Update scheduler task state if linked
         if let Some(task_ptr) = self.get_task_ptr() {
+            // SAFETY: task_ptr is a NonNull<Task> obtained from
+            // get_task_ptr(), which returns a valid pointer to the
+            // scheduler's task. Writing the state field synchronizes the
+            // thread state with the scheduler's view. The pointer is valid
+            // because the task is not freed while the thread holds a
+            // reference to it.
             unsafe {
                 let task = task_ptr.as_ptr();
                 (*task).state = match new_state {
@@ -393,6 +399,10 @@ impl Thread {
 
         // Update scheduler task blocked_on field if linked
         if let Some(task_ptr) = self.get_task_ptr() {
+            // SAFETY: task_ptr is a NonNull<Task> from get_task_ptr(),
+            // pointing to the scheduler's task entry. Writing blocked_on
+            // records the blocking reason. The pointer remains valid because
+            // the task is not freed while the thread references it.
             unsafe {
                 let task = task_ptr.as_ptr();
                 (*task).blocked_on = reason;
@@ -510,7 +520,7 @@ impl ThreadBuilder {
 
     /// Build the thread
     pub fn build(self) -> Result<Thread, &'static str> {
-        // TODO: Allocate stacks from memory manager
+        // TODO(phase3): Allocate stacks from memory manager (VMM)
         let user_stack_base = 0x1000_0000; // Placeholder
         let kernel_stack_base = 0x2000_0000; // Placeholder
 

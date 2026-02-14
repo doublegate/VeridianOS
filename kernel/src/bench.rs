@@ -2,6 +2,9 @@
 //!
 //! Provides performance measurement capabilities for kernel subsystems
 
+// Benchmarking APIs are intentionally kept available even when not actively
+// called -- they are invoked on-demand via the `benchmarks` feature or from
+// integration benchmark binaries.
 #![allow(dead_code)]
 
 #[cfg(feature = "alloc")]
@@ -59,12 +62,16 @@ impl BenchmarkResult {
 /// Architecture-specific timestamp counter
 #[cfg(target_arch = "x86_64")]
 pub fn read_timestamp() -> u64 {
+    // SAFETY: RDTSC is a non-privileged x86_64 instruction that reads
+    // the Time Stamp Counter. No side effects; always safe to call.
     unsafe { core::arch::x86_64::_rdtsc() }
 }
 
 #[cfg(target_arch = "aarch64")]
 pub fn read_timestamp() -> u64 {
     let counter: u64;
+    // SAFETY: Reading CNTVCT_EL0 (virtual timer count) is a non-
+    // privileged AArch64 operation with no side effects.
     unsafe {
         core::arch::asm!(
             "mrs {}, CNTVCT_EL0",
@@ -77,6 +84,8 @@ pub fn read_timestamp() -> u64 {
 #[cfg(target_arch = "riscv64")]
 pub fn read_timestamp() -> u64 {
     let counter: u64;
+    // SAFETY: RDCYCLE reads the cycle counter CSR, a non-privileged
+    // read-only RISC-V operation with no side effects.
     unsafe {
         core::arch::asm!(
             "rdcycle {}",
@@ -211,6 +220,10 @@ impl Default for Bencher {
 pub fn black_box<T>(x: T) -> T {
     // This is a simple implementation that prevents the compiler
     // from optimizing away the value
+    // SAFETY: read_volatile reads the value from a valid stack reference.
+    // mem::forget prevents the original from being dropped (avoiding
+    // double-free). The volatile read prevents the compiler from
+    // optimizing away the benchmark computation.
     unsafe {
         let ret = core::ptr::read_volatile(&x);
         core::mem::forget(x);

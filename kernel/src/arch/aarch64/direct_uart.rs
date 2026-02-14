@@ -38,6 +38,9 @@ unsafe fn uart_write_bytes_asm(ptr: *const u8, len: usize) {
 
 /// Print a string directly to UART
 pub fn direct_print_str(s: &str) {
+    // SAFETY: s.as_ptr() and s.len() provide a valid byte buffer from the &str.
+    // uart_write_bytes_asm writes each byte to the PL011 UART at 0x09000000 via
+    // assembly, avoiding LLVM loop compilation issues on AArch64.
     unsafe {
         uart_write_bytes_asm(s.as_ptr(), s.len());
     }
@@ -84,6 +87,9 @@ pub fn direct_print_num(n: u64) {
         num /= 10;
     }
 
+    // SAFETY: buffer is a stack-allocated [u8; 20] and pos is bounded by the
+    // while loop to be within [0, buffer.len()). add(pos) yields a valid pointer
+    // within the buffer, and buffer.len() - pos is the remaining valid length.
     unsafe {
         uart_write_bytes_asm(buffer.as_ptr().add(pos), buffer.len() - pos);
     }

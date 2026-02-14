@@ -162,6 +162,13 @@ impl SlabAllocator {
             let obj_addr = base.as_u64() + (i * object_size) as u64;
             let obj_ptr = obj_addr as *mut FreeObject;
 
+            // SAFETY: `obj_ptr` is derived from `base` (the slab's base virtual address)
+            // plus a bounded offset `i * object_size` where `i < objects_per_slab` and
+            // `objects_per_slab = size / object_size`, so the pointer stays within the
+            // slab's allocated memory region [base, base + size). The slab memory was
+            // reserved during `init()` and is exclusively owned by this allocator.
+            // `obj_ptr` is non-null because `base` is a valid non-zero virtual address
+            // and the offset is bounded, so `NonNull::new_unchecked` is sound.
             unsafe {
                 (*obj_ptr).next = free_list;
                 free_list = Some(NonNull::new_unchecked(obj_ptr));
@@ -191,8 +198,8 @@ impl SlabAllocator {
                     .fallback
                     .lock()
                     .allocate_first_fit(layout)
-                    .unwrap()
-                    .as_ptr();
+                    .map(|ptr| ptr.as_ptr())
+                    .unwrap_or(core::ptr::null_mut());
             }
         }
 
@@ -213,6 +220,12 @@ impl SlabAllocator {
             if size <= class_size {
                 // Return to slab
                 // In real implementation, would need proper synchronization
+                // SAFETY: `ptr` was returned by a prior `allocate_first_fit` call on the
+                // same `fallback` allocator, so it is a valid, non-null, properly aligned
+                // pointer to an allocation of the given `layout`. The caller guarantees
+                // the pointer is no longer in use (standard dealloc contract).
+                // `NonNull::new_unchecked` is sound because `ptr` originated from
+                // `allocate_first_fit` which only returns non-null pointers.
                 unsafe {
                     self.fallback
                         .lock()
@@ -223,6 +236,10 @@ impl SlabAllocator {
         }
 
         // Large allocation - use fallback
+        // SAFETY: Same invariants as above -- `ptr` was returned by a prior
+        // `allocate_first_fit` call for this `layout`, so it is valid, non-null,
+        // and properly aligned. The caller guarantees exclusive ownership has been
+        // relinquished.
         unsafe {
             self.fallback
                 .lock()
@@ -241,6 +258,10 @@ impl SlabAllocator {
 
 /// Initialize the kernel heap
 pub fn init() -> Result<(), &'static str> {
+    // SAFETY: `uart_write_str` writes to the PL011 UART at a fixed MMIO address
+    // (0x09000000) that is always mapped on the QEMU virt machine. This is a
+    // simple register write with no memory safety implications beyond the MMIO
+    // access, which is valid at any point during kernel execution on AArch64.
     #[cfg(target_arch = "aarch64")]
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -249,6 +270,12 @@ pub fn init() -> Result<(), &'static str> {
     #[cfg(not(target_arch = "aarch64"))]
     println!("[HEAP] Initializing kernel heap at 0x{:x}", HEAP_START);
 
+    // SAFETY: We access `HEAP_MEMORY`, a static mut byte array in the kernel's BSS
+    // section. This function is called exactly once during kernel initialization
+    // (single-threaded boot context), so there are no concurrent accesses. The
+    // resulting `heap_start` pointer is valid for `heap_size` bytes and the memory
+    // does not overlap with any other allocation because it is a dedicated static
+    // array in the kernel binary.
     #[allow(unused_unsafe)]
     unsafe {
         let heap_start = core::ptr::addr_of_mut!(HEAP_MEMORY) as *mut u8;
@@ -263,6 +290,11 @@ pub fn init() -> Result<(), &'static str> {
                 heap_start, heap_size
             );
 
+            // SAFETY: `ALLOCATOR` is the global bump allocator. `heap_start` points to
+            // valid memory of at least `heap_size` bytes (the static HEAP_MEMORY array).
+            // This is called once during single-threaded boot, so no concurrent access.
+            // The `alloc` call uses a layout with size=8, align=8 which are valid (both
+            // powers of two, size > 0).
             unsafe {
                 use core::alloc::GlobalAlloc;
 
@@ -272,7 +304,8 @@ pub fn init() -> Result<(), &'static str> {
                 ALLOCATOR.init(heap_start, heap_size);
                 println!("[HEAP] ALLOCATOR.init() completed");
 
-                let test_layout = core::alloc::Layout::from_size_align(8, 8).unwrap();
+                let test_layout = core::alloc::Layout::from_size_align(8, 8)
+                    .expect("Layout(8, 8) is always valid: size and align are both powers of two");
                 let test_ptr = ALLOCATOR.alloc(test_layout);
                 if !test_ptr.is_null() {
                     println!("[HEAP] Test allocation successful at {:p}", test_ptr);
@@ -283,6 +316,10 @@ pub fn init() -> Result<(), &'static str> {
 
             println!("[HEAP] Initializing locked allocator...");
             let mut allocator = crate::get_allocator().lock();
+            // SAFETY: `heap_start` and `heap_size` describe valid, owned memory
+            // (the static HEAP_MEMORY array). The locked allocator's `init` requires
+            // the memory region to be unused and exclusively available, which is
+            // guaranteed because this runs once during single-threaded boot.
             unsafe {
                 allocator.init(heap_start, heap_size);
             }
@@ -311,6 +348,12 @@ pub fn init() -> Result<(), &'static str> {
             core::sync::atomic::fence(Ordering::SeqCst);
 
             // AArch64 memory barriers
+            // SAFETY: DSB SY (Data Synchronization Barrier) and ISB (Instruction
+            // Synchronization Barrier) are architectural barrier instructions that
+            // are always safe to execute at any exception level. They ensure all
+            // preceding memory operations complete before subsequent ones begin,
+            // which is required after writing to the allocator's atomic fields so
+            // that the allocator state is visible before any allocation attempts.
             unsafe {
                 core::arch::asm!("dsb sy", "isb", options(nomem, nostack));
             }
@@ -348,6 +391,10 @@ pub fn init() -> Result<(), &'static str> {
         }
 
         // x86_64: Use LockedHeap
+        // Note: The `init` call on LockedHeap is unsafe because it trusts the
+        // caller to provide valid memory. The outer unsafe block already
+        // establishes that `heap_start`/`heap_size` describe valid, exclusive
+        // memory from the static HEAP_MEMORY array.
         #[cfg(target_arch = "x86_64")]
         {
             let mut allocator = crate::get_allocator().lock();

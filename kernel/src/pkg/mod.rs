@@ -215,6 +215,11 @@ impl PackageManager {
         }
 
         // Extract header
+        // SAFETY: package_data.as_ptr() points to at least 64 bytes (checked above).
+        // read_unaligned is used because the byte buffer may not satisfy
+        // PackageHeader's alignment requirements. The resulting header is validated
+        // immediately via magic number and version checks before any fields are
+        // trusted.
         let header =
             unsafe { core::ptr::read_unaligned(package_data.as_ptr() as *const PackageHeader) };
 
@@ -311,6 +316,10 @@ impl PackageManager {
             });
         }
 
+        // SAFETY: package_data.as_ptr() points to at least 64 bytes (checked
+        // above). read_unaligned handles potentially misaligned byte buffers.
+        // The resulting header fields (offsets, sizes) are bounds-checked
+        // against package_data.len() before use.
         let header =
             unsafe { core::ptr::read_unaligned(package_data.as_ptr() as *const PackageHeader) };
 
@@ -385,6 +394,9 @@ static mut PACKAGE_MANAGER: Option<PackageManager> = None;
 
 /// Initialize package management system
 pub fn init() {
+    // SAFETY: PACKAGE_MANAGER is a static mut Option written once during
+    // single-threaded kernel initialization. No concurrent access occurs at
+    // this point in the boot sequence.
     unsafe {
         PACKAGE_MANAGER = Some(PackageManager::new());
     }
@@ -393,6 +405,10 @@ pub fn init() {
 
 /// Get global package manager
 pub fn get_package_manager() -> Option<&'static mut PackageManager> {
+    // SAFETY: PACKAGE_MANAGER is a static mut Option initialized once in init().
+    // The returned &'static mut reference is valid for the kernel's lifetime. In
+    // the current single-threaded kernel model, only one caller accesses this
+    // at a time.
     unsafe { PACKAGE_MANAGER.as_mut() }
 }
 
@@ -699,6 +715,9 @@ fn parse_version(version_str: &str) -> Version {
 // ============================================================================
 
 /// File entry in package archive
+///
+/// Phase 4 (package ecosystem) -- struct fields used during extraction
+/// but not directly accessed outside `extract_package_files`.
 #[allow(dead_code)]
 struct PackageFileEntry {
     path: String,

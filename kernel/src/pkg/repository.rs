@@ -3,6 +3,8 @@
 //! Implements HTTP-based package repository fetching for VeridianOS package
 //! manager. Uses the network stack for actual HTTP communication.
 
+// Phase 4 (package ecosystem) -- repository fetching is defined but not yet
+// wired to the network stack.
 #![allow(dead_code)]
 
 use alloc::{string::String, vec::Vec};

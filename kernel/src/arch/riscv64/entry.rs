@@ -1,4 +1,7 @@
-// RISC-V kernel entry point and panic handler
+//! RISC-V kernel entry point and panic handler.
+//!
+//! Provides `arch_early_init` for early architecture-specific setup and
+//! `arch_panic_handler` for kernel panic output via SBI console.
 
 use core::panic::PanicInfo;
 
@@ -9,7 +12,9 @@ pub fn arch_early_init() {
     println!("VeridianOS Kernel v{}", env!("CARGO_PKG_VERSION"));
     println!("Architecture: riscv64");
 
-    // Use SBI console output to confirm we finished arch_early_init
+    // SAFETY: sbi_putchar invokes the SBI legacy console putchar (ecall with
+    // a7=0x01). This is the standard RISC-V mechanism for early boot console
+    // output before the UART driver is initialized. Always safe to call.
     unsafe {
         // SBI console putchar
         sbi_putchar(b'I');

@@ -16,13 +16,15 @@ pub fn init() {
     let cr3 = read_cr3();
     println!("[x86_64 MMU] Current CR3: 0x{:x}", cr3.as_u64());
 
-    // TODO: Set up kernel page tables properly
-    // For now, we rely on bootloader's identity mapping
+    // TODO(phase3): Set up dedicated kernel page tables (currently relying on
+    // bootloader's identity mapping)
 }
 
 /// Read CR3 register (page table base)
 pub fn read_cr3() -> PhysicalAddress {
     let cr3: u64;
+    // SAFETY: Reading CR3 is a privileged operation that returns the physical
+    // address of the current page table root. Always accessible in kernel mode.
     unsafe {
         core::arch::asm!("mov {}, cr3", out(reg) cr3);
     }
@@ -31,6 +33,8 @@ pub fn read_cr3() -> PhysicalAddress {
 
 /// Write CR3 register (page table base)
 pub fn write_cr3(addr: PhysicalAddress) {
+    // SAFETY: Writing CR3 sets the page table root and flushes the TLB. The
+    // caller must ensure `addr` points to a valid, properly aligned PML4 table.
     unsafe {
         core::arch::asm!("mov cr3, {}", in(reg) addr.as_u64());
     }
@@ -38,6 +42,8 @@ pub fn write_cr3(addr: PhysicalAddress) {
 
 /// Invalidate TLB entry for virtual address
 pub fn invlpg(virt: VirtualAddress) {
+    // SAFETY: invlpg invalidates the TLB entry for the specified virtual address.
+    // This is a privileged, non-destructive operation that only affects caching.
     unsafe {
         core::arch::asm!("invlpg [{}]", in(reg) virt.as_u64());
     }
@@ -57,6 +63,8 @@ pub fn flush_tlb_address(addr: u64) {
 /// Read CR2 register (page fault address)
 pub fn read_cr2() -> VirtualAddress {
     let cr2: u64;
+    // SAFETY: Reading CR2 returns the faulting virtual address from the last
+    // page fault. Always accessible in kernel mode with no side effects.
     unsafe {
         core::arch::asm!("mov {}, cr2", out(reg) cr2);
     }
@@ -108,11 +116,13 @@ pub fn handle_page_fault(error_code: u32, faulting_address: VirtualAddress) {
     println!("  Reserved bit: {}", error.reserved_write());
     println!("  Instruction fetch: {}", error.instruction_fetch());
 
-    // TODO: Implement proper page fault handling
-    // - Check if it's a valid stack growth
-    // - Check if it's a valid heap access
-    // - Handle copy-on-write
-    // - Kill process if invalid access
+    // TODO(phase3): Implement proper page fault handling (stack growth, heap
+    // access, COW, process kill)
 
+    // Panic is intentional: an unhandled page fault means the CPU tried to
+    // access memory that has no valid mapping. Without a page fault handler
+    // (not yet implemented), continuing would cause undefined behavior.
+    // Once Phase 3 adds demand paging and COW, this will be replaced with
+    // proper fault resolution or process termination.
     panic!("Unhandled page fault at 0x{:x}", faulting_address.as_u64());
 }

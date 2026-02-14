@@ -231,6 +231,11 @@ fn load_dynamic_linker(
 
         // Copy segment data
         if segment.file_size > 0 {
+            // SAFETY: 'dest' points to freshly mapped pages at adjusted_vaddr
+            // (mapped in the loop above). 'src' is buffer.as_ptr() offset by
+            // file_offset, which is within the ELF buffer (validated by the
+            // segment parser). copy_nonoverlapping is valid because the mapped
+            // virtual pages and the ELF buffer do not overlap.
             unsafe {
                 let dest = adjusted_vaddr as *mut u8;
                 let src = buffer.as_ptr().add(segment.file_offset as usize);
@@ -240,6 +245,11 @@ fn load_dynamic_linker(
 
         // Zero BSS
         if segment.memory_size > segment.file_size {
+            // SAFETY: bss_start is within the mapped page range (pages were
+            // mapped for the full memory_size above). bss_size is the
+            // difference between memory_size and file_size, so write_bytes
+            // stays within the mapped region. Zeroing BSS is required by
+            // the ELF specification.
             unsafe {
                 let bss_start = (adjusted_vaddr + segment.file_size) as *mut u8;
                 let bss_size = (segment.memory_size - segment.file_size) as usize;
@@ -355,6 +365,9 @@ fn create_minimal_init() -> Result<ProcessId, &'static str> {
         memory_space.map_page(entry_point, page_flags)?;
 
         // AArch64: b . (14000000)
+        // SAFETY: entry_point was just mapped with USER | PRESENT flags above.
+        // Writing the AArch64 "b ." (branch-to-self) instruction at the
+        // entry point creates a minimal init process that spins in place.
         unsafe {
             let code_ptr = entry_point as *mut u32;
             *code_ptr = 0x14000000;
@@ -369,6 +382,9 @@ fn create_minimal_init() -> Result<ProcessId, &'static str> {
         memory_space.map_page(entry_point, page_flags)?;
 
         // RISC-V: j . (0000006f)
+        // SAFETY: entry_point was just mapped with USER | PRESENT flags above.
+        // Writing the RISC-V "j ." (jump-to-self) instruction at the entry
+        // point creates a minimal init process that spins in place.
         unsafe {
             let code_ptr = entry_point as *mut u32;
             *code_ptr = 0x0000006f;

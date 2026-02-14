@@ -3,6 +3,8 @@ use core::{fmt, ptr::write_volatile};
 use lazy_static::lazy_static;
 use spin::Mutex;
 
+/// VGA text-mode color palette. Not all variants are used but the full
+/// 16-color palette is defined per the VGA specification.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -69,6 +71,9 @@ impl Writer {
                 let col = self.column_position;
 
                 let color_code = self.color_code;
+                // SAFETY: The VGA buffer at 0xb8000 is memory-mapped I/O. write_volatile
+                // ensures the write is not optimized away. Row/col are bounds-checked by
+                // the new_line logic above ensuring we stay within the buffer.
                 unsafe {
                     write_volatile(
                         &mut self.buffer.chars[row][col],
@@ -86,6 +91,9 @@ impl Writer {
     fn new_line(&mut self) {
         for row in 1..BUFFER_HEIGHT {
             for col in 0..BUFFER_WIDTH {
+                // SAFETY: read_volatile and write_volatile access the VGA text buffer
+                // at 0xb8000. Row indices are bounded by BUFFER_HEIGHT (loop range 1..25),
+                // and col by BUFFER_WIDTH (0..80). row-1 is always >= 0 since row starts at 1.
                 let character = unsafe { core::ptr::read_volatile(&self.buffer.chars[row][col]) };
                 unsafe {
                     write_volatile(&mut self.buffer.chars[row - 1][col], character);
@@ -102,6 +110,8 @@ impl Writer {
             color_code: self.color_code,
         };
         for col in 0..BUFFER_WIDTH {
+            // SAFETY: write_volatile to VGA text buffer. Row is passed from
+            // new_line (always BUFFER_HEIGHT-1) or caller. Col bounded by BUFFER_WIDTH.
             unsafe {
                 write_volatile(&mut self.buffer.chars[row][col], blank);
             }
@@ -129,6 +139,10 @@ lazy_static! {
     pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer {
         column_position: 0,
         color_code: ColorCode::new(Color::White, Color::Black),
+        // SAFETY: 0xb8000 is the well-known physical address of the VGA text
+        // buffer, identity-mapped in kernel space. The cast to &'static mut
+        // Buffer is valid because the VGA buffer has static lifetime and is
+        // protected by the enclosing Mutex<Writer>.
         buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
     });
 }
@@ -140,6 +154,6 @@ pub fn _print(args: fmt::Arguments) {
     use x86_64::instructions::interrupts;
 
     interrupts::without_interrupts(|| {
-        WRITER.lock().write_fmt(args).unwrap();
+        WRITER.lock().write_fmt(args).expect("VGA write_fmt failed");
     });
 }

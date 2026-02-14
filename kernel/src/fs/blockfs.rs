@@ -463,12 +463,12 @@ impl BlockFsInner {
             return Err("Not a directory");
         }
 
-        // TODO: Parse directory entries from blocks
+        // TODO(phase4): Parse directory entries from on-disk block data
         Ok(Vec::new())
     }
 
     fn lookup_in_dir(&self, _dir_inode: u32, _name: &str) -> Result<u32, &'static str> {
-        // TODO: Implement directory lookup
+        // TODO(phase4): Implement directory entry lookup by name
         Err("Not found")
     }
 
@@ -483,7 +483,7 @@ impl BlockFsInner {
         let mode = permissions_to_mode(permissions, false);
         self.inode_table[inode_num as usize] = DiskInode::new(mode, 0, 0);
 
-        // TODO: Add directory entry to parent
+        // TODO(phase4): Add directory entry to parent inode
 
         Ok(inode_num)
     }
@@ -499,14 +499,14 @@ impl BlockFsInner {
         let mode = permissions_to_mode(permissions, true);
         self.inode_table[inode_num as usize] = DiskInode::new(mode, 0, 0);
 
-        // TODO: Add directory entry to parent
-        // TODO: Create . and .. entries
+        // TODO(phase4): Add directory entry to parent and create . and .. entries
 
         Ok(inode_num)
     }
 
     fn unlink_from_dir(&mut self, _parent: u32, _name: &str) -> Result<(), &'static str> {
-        // TODO: Implement file unlinking
+        // TODO(phase4): Implement file unlinking (remove dir entry, decrement link
+        // count)
         Ok(())
     }
 
@@ -517,7 +517,7 @@ impl BlockFsInner {
             .ok_or("Invalid inode")?;
 
         inode.size = size as u32;
-        // TODO: Free blocks beyond new size
+        // TODO(phase4): Free data blocks beyond the new truncated size
 
         Ok(())
     }
@@ -602,7 +602,7 @@ impl Filesystem for BlockFs {
     }
 
     fn sync(&self) -> Result<(), &'static str> {
-        // TODO: Sync to actual disk
+        // TODO(phase4): Sync dirty blocks and inodes to underlying block device
         Ok(())
     }
 }

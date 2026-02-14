@@ -26,6 +26,12 @@ impl RiscvScheduler {
         // For RISC-V, we bypass the lock during early boot
         // This is safe during single-threaded bootstrap
         RiscvSchedulerGuard {
+            // SAFETY: During RISC-V early boot, only a single hart (CPU) is
+            // active and interrupts are disabled, so there is no concurrent
+            // access to the inner Scheduler. The UnsafeCell is used to bypass
+            // spin::Mutex which causes deadlocks during RISC-V bootstrap.
+            // After SMP initialization, proper per-CPU schedulers should be
+            // used instead.
             scheduler: unsafe { &mut *self.inner.get() },
         }
     }
@@ -50,5 +56,11 @@ impl core::ops::DerefMut for RiscvSchedulerGuard<'_> {
     }
 }
 
+// SAFETY: RiscvScheduler uses UnsafeCell internally but is only accessed
+// during single-hart bootstrap on RISC-V where no concurrent access occurs.
+// The _lock_flag AtomicBool provides a synchronization primitive if needed
+// after SMP initialization.
 unsafe impl Send for RiscvScheduler {}
+// SAFETY: Same as Send -- the scheduler is accessed through the lock() method
+// which returns a guard, and during early boot only one hart is active.
 unsafe impl Sync for RiscvScheduler {}

@@ -101,6 +101,8 @@ impl X86_64Context {
             gs: 0x00,
 
             // Initialize with current CR3
+            // SAFETY: Reading CR3 is always valid in kernel mode. It returns
+            // the current page table base address. No side effects.
             cr3: unsafe {
                 let mut cr3: u64;
                 asm!("mov {}, cr3", out(reg) cr3);
@@ -121,7 +123,7 @@ impl crate::arch::context::ThreadContext for X86_64Context {
     fn init(&mut self, entry_point: usize, stack_pointer: usize, _kernel_stack: usize) {
         self.rip = entry_point as u64;
         self.rsp = stack_pointer as u64;
-        // TODO: Set up kernel stack in TSS
+        // TODO(phase3): Set up kernel stack in TSS for ring transitions
     }
 
     fn get_instruction_pointer(&self) -> usize {
@@ -141,12 +143,12 @@ impl crate::arch::context::ThreadContext for X86_64Context {
     }
 
     fn get_kernel_stack(&self) -> usize {
-        // TODO: Return from TSS
+        // TODO(phase3): Return kernel stack pointer from TSS
         0
     }
 
     fn set_kernel_stack(&mut self, _sp: usize) {
-        // TODO: Set in TSS
+        // TODO(phase3): Set kernel stack in TSS for ring transitions
     }
 
     fn set_return_value(&mut self, value: usize) {
@@ -268,6 +270,10 @@ pub unsafe extern "C" fn context_switch(current: *mut X86_64Context, next: *cons
 /// Switch context using the ThreadContext interface
 #[allow(dead_code)]
 pub fn switch_context(from: &mut X86_64Context, to: &X86_64Context) {
+    // SAFETY: Both `from` and `to` are valid references to X86_64Context
+    // structs. context_switch is an assembly routine that saves the current
+    // CPU state into `from` and restores state from `to`. Both contexts
+    // must have valid register values for safe execution.
     unsafe {
         context_switch(from as *mut _, to as *const _);
     }
@@ -276,6 +282,9 @@ pub fn switch_context(from: &mut X86_64Context, to: &X86_64Context) {
 /// Save FPU state
 #[allow(dead_code)]
 pub fn save_fpu_state(state: &mut FpuState) {
+    // SAFETY: `state` is a valid mutable reference to a FpuState struct.
+    // The FXSAVE instruction stores the FPU/SSE state into the provided
+    // 512-byte aligned memory region. FpuState is repr(C, align(16)).
     unsafe {
         asm!("fxsave [{}]", in(reg) state as *mut FpuState);
     }
@@ -284,6 +293,9 @@ pub fn save_fpu_state(state: &mut FpuState) {
 /// Restore FPU state
 #[allow(dead_code)]
 pub fn restore_fpu_state(state: &FpuState) {
+    // SAFETY: `state` is a valid reference to a FpuState struct containing
+    // previously saved FPU/SSE state. The FXRSTOR instruction restores the
+    // FPU/SSE state from the provided memory region.
     unsafe {
         asm!("fxrstor [{}]", in(reg) state as *const FpuState);
     }
@@ -292,6 +304,11 @@ pub fn restore_fpu_state(state: &FpuState) {
 /// Initialize FPU for current CPU
 #[allow(dead_code)]
 pub fn init_fpu() {
+    // SAFETY: FPU initialization modifies CR0 and CR4 control registers to
+    // enable floating point and SSE support. This must only be called once
+    // during early kernel initialization. The register modifications are
+    // standard x86_64 FPU setup: clear EM, set MP and NE in CR0, set
+    // OSFXSR and OSXMMEXCPT in CR4.
     unsafe {
         // Enable FPU
         asm!(
@@ -315,6 +332,9 @@ pub fn init_fpu() {
 /// Check if CPU supports XSAVE
 #[allow(dead_code)]
 pub fn has_xsave() -> bool {
+    // SAFETY: CPUID with leaf 1 is always valid on x86_64. We check
+    // bit 26 of ECX (XSAVE feature flag). The push/pop of RBX is
+    // required because CPUID clobbers RBX and Rust may use it.
     unsafe {
         let result: u32;
         asm!(
@@ -336,6 +356,9 @@ pub fn has_xsave() -> bool {
 #[allow(dead_code)]
 pub fn enable_xsave() {
     if has_xsave() {
+        // SAFETY: XSAVE support was verified by has_xsave() above.
+        // Setting the OSXSAVE bit (bit 18) in CR4 enables the OS to
+        // use XSAVE/XRSTOR instructions for extended state management.
         unsafe {
             asm!(
                 "mov rax, cr4",

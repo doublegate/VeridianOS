@@ -92,7 +92,6 @@ impl UnsafeBumpAllocator {
     }
 
     /// Get statistics about the allocator
-    #[allow(dead_code)]
     pub fn stats(&self) -> (usize, usize, usize) {
         let start = self.start.load(Ordering::Relaxed);
         let next = self.next.load(Ordering::Relaxed);
@@ -251,6 +250,10 @@ impl UnsafeBumpAllocatorGuard<'_> {
 
     /// Allocate memory using first fit (same as bump allocation)
     pub fn allocate_first_fit(&mut self, layout: Layout) -> Result<NonNull<u8>, ()> {
+        // SAFETY: self.inner.alloc returns either a valid heap pointer or null.
+        // The null check ensures NonNull::new_unchecked is only called with a
+        // non-null pointer. The allocator was initialized with a valid memory
+        // region via the unsafe init() method.
         unsafe {
             let ptr = self.inner.alloc(layout);
             if ptr.is_null() {

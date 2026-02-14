@@ -9,6 +9,9 @@
 //! - Memory space management
 //! - Capability integration
 
+// Process management is fully implemented but many functions are not yet
+// called from user-space syscall paths. Will be exercised once the process
+// lifecycle is driven by real user-space programs.
 #![allow(dead_code)]
 
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -21,6 +24,9 @@ extern crate alloc;
 use crate::println;
 
 // Re-export submodules
+pub mod creation;
+pub mod exit;
+pub mod fork;
 pub mod lifecycle;
 pub mod loader;
 pub mod memory;
@@ -91,7 +97,12 @@ pub fn init() {
             Ok(_pid) => {
                 println!("[PROCESS] Created init process with PID {}", _pid.0);
             }
-            Err(e) => panic!("[PROCESS] Failed to create init process: {}", e),
+            Err(_e) => {
+                // Log the error but do not panic. The bootstrap sequence
+                // creates its own init process as a fallback, so this path
+                // is recoverable. The legacy init() path is rarely used.
+                println!("[PROCESS] WARNING: Failed to create init process: {}", _e);
+            }
         }
     }
 
@@ -102,6 +113,9 @@ pub fn init() {
 pub fn current_process() -> Option<&'static Process> {
     // Get from current CPU's scheduler
     if let Some(task) = crate::sched::SCHEDULER.lock().current() {
+        // SAFETY: `task` is a NonNull<Task> returned by the scheduler's
+        // current() method. The scheduler guarantees the pointer is valid
+        // for the lifetime of the lock. We read pid to look up the process.
         unsafe {
             let task_ref = task.as_ref();
             table::get_process(task_ref.pid)
@@ -125,6 +139,10 @@ pub fn get_current_process() -> Option<&'static Process> {
 pub fn current_thread() -> Option<&'static Thread> {
     // Get from current CPU's scheduler
     if let Some(task) = crate::sched::SCHEDULER.lock().current() {
+        // SAFETY: `task` is a NonNull<Task> returned by the scheduler's
+        // current() method. The scheduler guarantees the pointer is valid
+        // for the lifetime of the lock. We read pid and tid to look up
+        // the thread via the process table.
         unsafe {
             let task_ref = task.as_ref();
             if let Some(process) = table::get_process(task_ref.pid) {
@@ -160,7 +178,7 @@ pub fn exit_thread(exit_code: i32) {
 }
 
 /// Terminate a specific thread
-pub fn terminate_thread(pid: ProcessId, tid: ThreadId) -> Result<(), &'static str> {
+pub fn terminate_thread(pid: ProcessId, tid: ThreadId) -> crate::error::KernelResult<()> {
     if let Some(process) = find_process(pid) {
         if let Some(thread) = process.get_thread(tid) {
             println!(
@@ -173,6 +191,10 @@ pub fn terminate_thread(pid: ProcessId, tid: ThreadId) -> Result<(), &'static st
 
             // Remove from scheduler if it has a task
             if let Some(task_ptr) = thread.get_task_ptr() {
+                // SAFETY: task_ptr is a NonNull<Task> stored in the thread.
+                // We set the task state to Dead so the scheduler will not
+                // run this task again. The thread was found via a valid
+                // process/thread lookup above.
                 unsafe {
                     let task = task_ptr.as_ptr();
                     (*task).state = ProcessState::Dead;
@@ -181,10 +203,10 @@ pub fn terminate_thread(pid: ProcessId, tid: ThreadId) -> Result<(), &'static st
 
             Ok(())
         } else {
-            Err("Thread not found")
+            Err(crate::error::KernelError::ThreadNotFound { tid: tid.0 })
         }
     } else {
-        Err("Process not found")
+        Err(crate::error::KernelError::ProcessNotFound { pid: pid.0 })
     }
 }
 
@@ -210,6 +232,9 @@ pub fn wake_thread(tid: ThreadId) {
 
             // Wake up in scheduler if it has a task
             if let Some(task_ptr) = thread.get_task_ptr() {
+                // SAFETY: task_ptr is a NonNull<Task> stored in the thread.
+                // We read the pid field to wake the process in the
+                // scheduler. The thread was found via the threads lock.
                 unsafe {
                     let task = task_ptr.as_ptr();
                     crate::sched::wake_up_process((*task).pid);
@@ -225,7 +250,7 @@ pub fn create_thread(
     stack_ptr: usize,
     arg: usize,
     tls_ptr: usize,
-) -> Result<ThreadId, &'static str> {
+) -> crate::error::KernelResult<ThreadId> {
     if let Some(process) = current_process() {
         let tid = alloc_tid();
 
@@ -265,18 +290,18 @@ pub fn create_thread(
             // For now, we'll skip this as it requires arch-specific code
             let _ = arg;
 
-            // Add thread to process
+            // Add thread to process (uses legacy &'static str, auto-converted)
             process.add_thread(thread)?;
         }
 
         Ok(tid)
     } else {
-        Err("No current process")
+        Err(crate::error::KernelError::ProcessNotFound { pid: 0 })
     }
 }
 
 /// Set thread CPU affinity
-pub fn set_thread_affinity(tid: ThreadId, cpu_mask: u64) -> Result<(), &'static str> {
+pub fn set_thread_affinity(tid: ThreadId, cpu_mask: u64) -> crate::error::KernelResult<()> {
     if let Some(process) = current_process() {
         if let Some(thread) = process.get_thread(tid) {
             thread
@@ -284,10 +309,10 @@ pub fn set_thread_affinity(tid: ThreadId, cpu_mask: u64) -> Result<(), &'static 
                 .store(cpu_mask as usize, Ordering::SeqCst);
             Ok(())
         } else {
-            Err("Thread not found")
+            Err(crate::error::KernelError::ThreadNotFound { tid: tid.0 })
         }
     } else {
-        Err("No current process")
+        Err(crate::error::KernelError::ProcessNotFound { pid: 0 })
     }
 }
 

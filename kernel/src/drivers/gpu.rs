@@ -154,6 +154,11 @@ impl GpuDriver {
 
     /// Get framebuffer as mutable slice
     fn framebuffer_mut(&mut self) -> &mut [u32] {
+        // SAFETY: framebuffer_addr points to a memory-mapped framebuffer region
+        // provided by the VBE/GOP firmware or set during initialization. The
+        // slice covers exactly (pitch * height / 4) u32 entries, which
+        // corresponds to the full framebuffer. We hold &mut self so no other
+        // reference to this data exists.
         unsafe {
             slice::from_raw_parts_mut(
                 self.framebuffer_addr as *mut u32,
@@ -295,9 +300,11 @@ pub fn init() -> Result<(), KernelError> {
     println!("[GPU] Initializing GPU driver...");
 
     // For now, create a simple framebuffer (would normally detect VBE/GOP)
-    // TODO: Detect actual framebuffer from bootloader
+    // TODO(phase6): Detect actual framebuffer from bootloader (VBE/GOP)
     let driver = GpuDriver::simple(0xFD000000, 1024, 768);
 
+    // SAFETY: GPU_DRIVER is a static mut Option written once during single-threaded
+    // init. No concurrent access is possible at this point in kernel bootstrap.
     unsafe {
         GPU_DRIVER = Some(driver);
     }
@@ -308,6 +315,10 @@ pub fn init() -> Result<(), KernelError> {
 
 /// Get global GPU driver
 pub fn get_driver() -> Option<&'static mut GpuDriver> {
+    // SAFETY: GPU_DRIVER is set once during init() and the returned mutable
+    // reference is only valid because the kernel is single-threaded during
+    // framebuffer access. In a multi-threaded context, this would need proper
+    // synchronization.
     unsafe { GPU_DRIVER.as_mut() }
 }
 

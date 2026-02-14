@@ -21,9 +21,6 @@ const REDHAT_VENDOR_ID: u16 = 0x1AF4;
 const VIRTIO_NET_LEGACY_DEVICE_ID: u16 = 0x1000;
 #[cfg(target_arch = "x86_64")]
 const VIRTIO_NET_MODERN_DEVICE_ID: u16 = 0x1041;
-#[allow(dead_code)]
-const PCI_CLASS_NETWORK: u8 = 0x02;
-
 /// Initialize and register all available network drivers
 #[allow(unused_assignments)]
 pub fn register_drivers() -> Result<(), KernelError> {
@@ -129,47 +126,36 @@ pub fn register_drivers() -> Result<(), KernelError> {
 }
 
 /// Try to register E1000 driver if hardware is present
-#[allow(dead_code)]
+///
+/// Called from the x86_64 PCI device scan path above.
+#[cfg(target_arch = "x86_64")]
 fn try_register_e1000(bar_address: u64) -> Result<(), KernelError> {
-    #[cfg(target_arch = "x86_64")]
-    {
-        use crate::drivers::e1000::E1000Driver;
+    use crate::drivers::e1000::E1000Driver;
 
-        println!(
-            "[NET-INTEGRATION] Initializing E1000 at 0x{:x}",
-            bar_address
-        );
+    println!(
+        "[NET-INTEGRATION] Initializing E1000 at 0x{:x}",
+        bar_address
+    );
 
-        match E1000Driver::new(bar_address as usize) {
-            Ok(driver) => {
-                let name = driver.name();
-                let mac = driver.mac_address();
+    match E1000Driver::new(bar_address as usize) {
+        Ok(driver) => {
+            let name = driver.name();
+            let mac = driver.mac_address();
 
-                // TODO: Register with network device registry
-                // device::register_device(Box::new(driver))?;
+            // TODO(phase4): Register E1000 with network device registry
 
-                println!(
-                    "[NET-INTEGRATION] E1000 initialized: {} (MAC: \
-                     {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
-                    name, mac.0[0], mac.0[1], mac.0[2], mac.0[3], mac.0[4], mac.0[5]
-                );
+            println!(
+                "[NET-INTEGRATION] E1000 initialized: {} (MAC: \
+                 {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+                name, mac.0[0], mac.0[1], mac.0[2], mac.0[3], mac.0[4], mac.0[5]
+            );
 
-                Ok(())
-            }
-            Err(_) => Err(KernelError::NotFound {
-                resource: "e1000_hardware",
-                id: 0,
-            }),
+            Ok(())
         }
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        let _ = bar_address;
-        Err(KernelError::NotFound {
-            resource: "e1000_unsupported_arch",
+        Err(_) => Err(KernelError::NotFound {
+            resource: "e1000_hardware",
             id: 0,
-        })
+        }),
     }
 }
 
@@ -187,8 +173,7 @@ fn try_register_virtio_net(bar_address: u64) -> Result<(), KernelError> {
             let _name = driver.name();
             let _mac = driver.mac_address();
 
-            // TODO: Register with network device registry
-            // device::register_device(Box::new(driver))?;
+            // TODO(phase4): Register VirtIO-Net with network device registry
 
             println!(
                 "[NET-INTEGRATION] VirtIO-Net initialized: {} (MAC: \

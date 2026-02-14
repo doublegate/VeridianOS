@@ -61,6 +61,12 @@ entry_point!(x86_64_kernel_entry, config = &BOOTLOADER_CONFIG);
 fn x86_64_kernel_entry(boot_info: &'static mut BootInfo) -> ! {
     // First thing: try direct serial output to prove we're running
     // This uses I/O ports which don't require memory mapping
+    // SAFETY: Direct I/O port writes to COM1 (0x3F8) for serial
+    // initialization. We are in kernel mode with full I/O privilege.
+    // Port programming follows standard 16550 UART initialization
+    // sequence: disable interrupts, set DLAB, set divisor, configure
+    // line control, enable FIFO, enable modem control. Each `out`
+    // instruction writes a single byte to the specified port.
     unsafe {
         // Initialize serial port at 0x3F8 (COM1)
         let base: u16 = 0x3F8;
@@ -95,6 +101,10 @@ fn x86_64_kernel_entry(boot_info: &'static mut BootInfo) -> ! {
 
     // Helper to output debug strings via serial
     fn serial_puts(s: &[u8]) {
+        // SAFETY: Reading the line status register (base+5) and writing
+        // data to the transmit register (base) are standard 16550 UART
+        // operations. We are in kernel mode with I/O privilege. The loop
+        // polls the transmit-buffer-empty bit (0x20) before each write.
         unsafe {
             let base: u16 = 0x3F8;
             for &b in s {
@@ -114,6 +124,11 @@ fn x86_64_kernel_entry(boot_info: &'static mut BootInfo) -> ! {
     serial_puts(b"PHYS_MEM...");
     if let Some(phys_mem_offset) = boot_info.physical_memory_offset.into_option() {
         serial_puts(b"OK\n");
+        // SAFETY: phys_mem_offset is the bootloader-provided physical
+        // memory mapping base. Adding 0xb8000 gives the VGA text buffer
+        // address. We write 5 u16 entries (character + attribute pairs)
+        // at consecutive offsets, which is within the 80x25 VGA buffer.
+        // write_volatile prevents the compiler from eliding these writes.
         unsafe {
             let vga_addr = phys_mem_offset + 0xb8000;
             let vga = vga_addr as *mut u16;
@@ -133,6 +148,9 @@ fn x86_64_kernel_entry(boot_info: &'static mut BootInfo) -> ! {
     serial_puts(b"BOOT_INFO...");
 
     // Store boot info for later use
+    // SAFETY: BOOT_INFO is a static mut Option that is written once
+    // during early boot before any other code accesses it. The
+    // bootloader guarantees boot_info is a valid &'static mut reference.
     unsafe {
         arch::x86_64::boot::BOOT_INFO = Some(boot_info);
     }
@@ -171,6 +189,10 @@ fn panic(info: &PanicInfo) -> ! {
 pub extern "C" fn kernel_main() -> ! {
     // Very early RISC-V debug output
     #[cfg(target_arch = "riscv64")]
+    // SAFETY: On the QEMU virt machine, the 16550-compatible UART is
+    // memory-mapped at 0x10000000. Writing bytes to this address
+    // outputs them to the serial console. write_volatile ensures the
+    // writes are not reordered or elided by the compiler.
     unsafe {
         // Direct write to UART at 0x10000000
         let uart_base = 0x1000_0000 as *mut u8;
@@ -209,7 +231,9 @@ fn kernel_main_impl() -> ! {
     // Run bootstrap
     bootstrap::run();
 
-    // Bootstrap should not return (unreachable but kept for safety)
+    // Panic is intentional: bootstrap::run() is `-> !` and must never return.
+    // If it does, the kernel is in an unrecoverable state with no scheduler
+    // running.
     panic!("Bootstrap returned unexpectedly!");
 }
 

@@ -36,12 +36,21 @@ impl<T> RwLock<T> {
 impl<T: ?Sized> RwLock<T> {
     pub fn read(&self) -> RwLockReadGuard<'_, T> {
         RwLockReadGuard {
+            // SAFETY: This single-threaded RwLock replacement is only
+            // used on AArch64 during kernel-mode init (no concurrent
+            // access). UnsafeCell::get() returns a valid pointer to
+            // the contained data. We create a shared reference since
+            // this is a read lock.
             data: unsafe { &*self.data.get() },
         }
     }
 
     pub fn write(&self) -> RwLockWriteGuard<'_, T> {
         RwLockWriteGuard {
+            // SAFETY: Same as read() - single-threaded init context.
+            // We create an exclusive reference since this is a write
+            // lock. No other references can exist simultaneously in
+            // the single-threaded init context.
             data: unsafe { &mut *self.data.get() },
         }
     }

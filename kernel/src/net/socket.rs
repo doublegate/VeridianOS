@@ -1,4 +1,8 @@
 //! Socket API implementation
+//!
+//! Provides BSD-style socket interface for TCP and UDP communication.
+//! Supports stream (TCP) and datagram (UDP) sockets with standard
+//! bind, listen, accept, connect, send, and receive operations.
 
 #![allow(clippy::manual_clamp)]
 
@@ -461,6 +465,8 @@ static mut NEXT_SOCKET_ID: usize = 1;
 pub fn init() -> Result<(), KernelError> {
     println!("[SOCKET] Initializing socket subsystem...");
 
+    // SAFETY: SOCKET_TABLE is a static mut Option<Vec> written once during
+    // single-threaded kernel init. No concurrent access at this point.
     unsafe {
         SOCKET_TABLE = Some(Vec::new());
     }
@@ -477,6 +483,10 @@ pub fn create_socket(
 ) -> Result<usize, KernelError> {
     let mut socket = Socket::new(domain, socket_type, protocol)?;
 
+    // SAFETY: NEXT_SOCKET_ID and SOCKET_TABLE are static mut globals accessed
+    // during socket creation. Single-threaded access assumed during kernel
+    // operation. NEXT_SOCKET_ID is monotonically incremented to provide unique
+    // socket IDs.
     unsafe {
         let id = NEXT_SOCKET_ID;
         NEXT_SOCKET_ID += 1;
@@ -497,6 +507,9 @@ pub fn create_socket(
 
 /// Get socket by ID
 pub fn get_socket(id: usize) -> Result<&'static Socket, KernelError> {
+    // SAFETY: SOCKET_TABLE is set during init(). Read-only access to find a socket
+    // by ID. The returned reference has 'static lifetime as the static Vec is never
+    // moved or dropped.
     unsafe {
         if let Some(ref table) = SOCKET_TABLE {
             table
@@ -517,6 +530,10 @@ pub fn get_socket(id: usize) -> Result<&'static Socket, KernelError> {
 
 /// Get mutable socket by ID
 pub fn get_socket_mut(id: usize) -> Result<&'static mut Socket, KernelError> {
+    // SAFETY: SOCKET_TABLE is set during init(). Mutable access assumes
+    // single-threaded operation or external synchronization. The returned
+    // mutable reference has 'static lifetime as the static Vec is never moved
+    // or dropped.
     unsafe {
         if let Some(ref mut table) = SOCKET_TABLE {
             table

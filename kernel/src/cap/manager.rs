@@ -281,7 +281,7 @@ impl CapabilityManager {
             .capabilities_revoked
             .fetch_add(1, Ordering::Relaxed);
 
-        // TODO: Notify all capability spaces of revocation
+        // TODO(phase3): Notify all capability spaces of revocation via IPC broadcast
 
         Ok(())
     }

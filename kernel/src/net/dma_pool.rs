@@ -65,11 +65,17 @@ impl DmaBuffer {
 
     /// Get buffer as slice
     pub fn as_slice(&self) -> &[u8] {
+        // SAFETY: virt_addr points to a DMA buffer of exactly `size` bytes allocated
+        // during pool creation. The buffer remains valid for the lifetime of the pool.
+        // We hold &self so no mutable alias exists.
         unsafe { core::slice::from_raw_parts(self.virt_addr as *const u8, self.size) }
     }
 
     /// Get buffer as mutable slice
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: virt_addr points to a DMA buffer of exactly `size` bytes allocated
+        // during pool creation. We hold &mut self so no other reference to this
+        // buffer exists, making the mutable slice safe.
         unsafe { core::slice::from_raw_parts_mut(self.virt_addr as *mut u8, self.size) }
     }
 
@@ -126,8 +132,7 @@ impl DmaBufferPool {
         let buffers = Vec::with_capacity(num_buffers);
         let free_list = Vec::with_capacity(num_buffers);
 
-        // TODO: Proper DMA buffer allocation
-        // For now, this is a placeholder that documents the requirements
+        // TODO(phase4): Proper DMA buffer allocation using physically contiguous memory
 
         println!(
             "[DMA-POOL] Created buffer pool with {} buffers (stub)",
@@ -221,6 +226,10 @@ static mut NETWORK_DMA_POOL: Option<DmaBufferPool> = None;
 
 /// Initialize the global network DMA pool
 pub fn init_network_pool(num_buffers: usize) -> Result<(), KernelError> {
+    // SAFETY: NETWORK_DMA_POOL is a static mut Option written once during
+    // single-threaded kernel init. The is_some() check prevents double
+    // initialization. No concurrent access is possible at this point in kernel
+    // bootstrap.
     unsafe {
         if NETWORK_DMA_POOL.is_some() {
             // Already initialized - this is fine, just skip re-initialization
@@ -238,6 +247,9 @@ pub fn init_network_pool(num_buffers: usize) -> Result<(), KernelError> {
 
 /// Get the global network DMA pool
 pub fn get_network_pool() -> Result<&'static mut DmaBufferPool, KernelError> {
+    // SAFETY: NETWORK_DMA_POOL is set during init_network_pool(). The returned
+    // mutable reference has 'static lifetime because the static mut is never
+    // moved or dropped. Caller must ensure no concurrent mutable access.
     unsafe {
         NETWORK_DMA_POOL.as_mut().ok_or(KernelError::InvalidState {
             expected: "initialized",

@@ -81,6 +81,8 @@ impl VersionReq {
 }
 
 /// Package resolution candidate
+///
+/// Phase 4 (package ecosystem) -- used by the SAT resolver internally.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct Candidate {

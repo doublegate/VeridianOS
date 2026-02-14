@@ -273,6 +273,11 @@ impl ThreadManager {
             thread.user_stack.set_sp(stack_top);
 
             // Store thread argument at top of stack
+            // SAFETY: `stack_top` is a virtual address within the
+            // user-space stack region that was just mapped above
+            // (stack_addr .. stack_addr + stack_size).  Writing
+            // one pointer-sized value at the top of the stack is
+            // within bounds.  The stack pages are mapped writable.
             unsafe {
                 let arg_ptr = stack_top as *mut *mut u8;
                 *arg_ptr = params.arg;
@@ -596,6 +601,14 @@ pub fn init() {
     #[allow(unused_imports)]
     use crate::println;
 
+    // SAFETY: THREAD_MANAGER_PTR is a global mutable pointer initialized
+    // exactly once during single-threaded bootstrap (before the scheduler
+    // starts).  The null check prevents double-initialization.  Box::leak
+    // produces a 'static reference that outlives the kernel.  Memory
+    // barriers (dsb/isb on AArch64, fence on RISC-V) ensure the pointer
+    // write is visible to all cores before any subsequent read in
+    // get_thread_manager().  x86_64 has strong memory ordering and needs
+    // no explicit barrier.
     unsafe {
         if !THREAD_MANAGER_PTR.is_null() {
             println!("[THREAD_API] Already initialized, skipping...");
@@ -624,14 +637,31 @@ pub fn init() {
     }
 }
 
-/// Get the global thread manager
-pub fn get_thread_manager() -> &'static ThreadManager {
+/// Try to get the global thread manager without panicking.
+///
+/// Returns `None` if the thread manager has not been initialized via [`init`].
+pub fn try_get_thread_manager() -> Option<&'static ThreadManager> {
+    // SAFETY: THREAD_MANAGER_PTR is set once in init() during
+    // single-threaded bootstrap and never modified afterward.
+    // The pointer came from Box::leak and points to a valid,
+    // heap-allocated ThreadManager with 'static lifetime.
     unsafe {
         if THREAD_MANAGER_PTR.is_null() {
-            panic!("Thread manager not initialized");
+            None
+        } else {
+            Some(&*THREAD_MANAGER_PTR)
         }
-        &*THREAD_MANAGER_PTR
     }
+}
+
+/// Get the global thread manager.
+///
+/// Panics if the thread manager has not been initialized via [`init`].
+/// Prefer [`try_get_thread_manager`] in contexts where a panic is unacceptable.
+pub fn get_thread_manager() -> &'static ThreadManager {
+    // Panic is intentional: calling code that depends on the thread manager
+    // before init() is a programming error indicating a broken boot sequence.
+    try_get_thread_manager().expect("Thread manager not initialized: init() was not called")
 }
 
 // Convenience functions
@@ -642,19 +672,23 @@ pub fn create_thread(
     arg: *mut u8,
     attributes: ThreadAttributes,
     process_id: ProcessId,
-) -> Result<Arc<ThreadHandle>, &'static str> {
+) -> crate::error::KernelResult<Arc<ThreadHandle>> {
     let params = ThreadCreateParams {
         entry_point,
         arg,
         attributes,
     };
 
-    get_thread_manager().create_thread(params, process_id)
+    get_thread_manager()
+        .create_thread(params, process_id)
+        .map_err(crate::error::KernelError::from)
 }
 
 /// Join a thread
-pub fn join_thread(thread_id: ThreadId) -> Result<*mut u8, &'static str> {
-    get_thread_manager().join_thread(thread_id)
+pub fn join_thread(thread_id: ThreadId) -> crate::error::KernelResult<*mut u8> {
+    get_thread_manager()
+        .join_thread(thread_id)
+        .map_err(crate::error::KernelError::from)
 }
 
 /// Exit current thread

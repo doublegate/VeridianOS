@@ -98,6 +98,8 @@ mod tests {
         let src = [1u8, 2, 3, 4, 5];
         let mut dest = [0u8; 5];
 
+        // SAFETY: Both `src` and `dest` are stack-allocated [u8; 5] arrays.
+        // The pointers are valid for exactly 5 bytes and do not overlap.
         unsafe {
             memcpy(
                 dest.as_mut_ptr() as *mut c_void,
@@ -113,6 +115,8 @@ mod tests {
     fn test_memset() {
         let mut buf = [0u8; 10];
 
+        // SAFETY: `buf` is a stack-allocated [u8; 10] array. The pointer
+        // is valid for exactly 10 bytes, matching the count argument.
         unsafe {
             memset(buf.as_mut_ptr() as *mut c_void, 0x42, 10);
         }
@@ -126,6 +130,8 @@ mod tests {
         let b = [1u8, 2, 3, 4, 5];
         let c = [1u8, 2, 3, 4, 6];
 
+        // SAFETY: `a`, `b`, and `c` are stack-allocated [u8; 5] arrays.
+        // All pointers are valid for exactly 5 bytes.
         unsafe {
             assert_eq!(
                 memcmp(a.as_ptr() as *const c_void, b.as_ptr() as *const c_void, 5),
@@ -140,6 +146,10 @@ mod tests {
     fn test_memmove_forward() {
         let mut buf = [1u8, 2, 3, 4, 5, 0, 0, 0];
 
+        // SAFETY: `buf` is a stack-allocated [u8; 8] array. Source starts
+        // at index 0 (5 bytes) and destination at index 3 (5 bytes to
+        // index 7). Both ranges are within the 8-byte buffer. Overlapping
+        // regions are handled correctly by memmove's forward copy path.
         unsafe {
             memmove(
                 buf.as_mut_ptr().add(3) as *mut c_void,
@@ -155,6 +165,10 @@ mod tests {
     fn test_memmove_backward() {
         let mut buf = [0u8, 0, 0, 1, 2, 3, 4, 5];
 
+        // SAFETY: `buf` is a stack-allocated [u8; 8] array. Source starts
+        // at index 3 (5 bytes to index 7) and destination at index 0 (5
+        // bytes). Both ranges are within the 8-byte buffer. Overlapping
+        // regions are handled correctly by memmove's backward copy path.
         unsafe {
             memmove(
                 buf.as_mut_ptr() as *mut c_void,

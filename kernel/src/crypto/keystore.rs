@@ -152,7 +152,7 @@ impl KeyStore {
     }
 
     fn current_time() -> u64 {
-        // TODO: Get actual system time
+        // TODO(phase3): Get actual system time from clock subsystem
         0
     }
 }
@@ -175,6 +175,11 @@ pub fn init() -> CryptoResult<()> {
 
 /// Get global key store
 pub fn get_keystore() -> &'static KeyStore {
+    // SAFETY: KEYSTORE_STORAGE is a function-local static mut Option lazily
+    // initialized on first access. The is_none() check ensures it is written at
+    // most once. The returned reference has 'static lifetime because
+    // function-local statics live for the program's duration. The KeyStore uses
+    // internal RwLock for thread-safe access.
     unsafe {
         static mut KEYSTORE_STORAGE: Option<KeyStore> = None;
 
@@ -182,7 +187,8 @@ pub fn get_keystore() -> &'static KeyStore {
             KEYSTORE_STORAGE = Some(KeyStore::new());
         }
 
-        KEYSTORE_STORAGE.as_ref().unwrap()
+        // is_none() check above guarantees Some
+        KEYSTORE_STORAGE.as_ref().expect("keystore not initialized")
     }
 }
 

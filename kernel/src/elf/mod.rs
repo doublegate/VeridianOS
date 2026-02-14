@@ -302,6 +302,11 @@ impl ElfLoader {
 
                 // Copy segment data from file
                 if segment.file_size > 0 {
+                    // SAFETY: The virtual address pages were just mapped above via
+                    // vas.map_page(). The source pointer is within the validated `data`
+                    // slice (file_offset + file_size <= data.len() checked by parse).
+                    // copy_nonoverlapping is appropriate since source (ELF data) and
+                    // destination (newly mapped pages) do not overlap.
                     unsafe {
                         let dest = segment.virtual_addr as *mut u8;
                         let src = data.as_ptr().add(segment.file_offset as usize);
@@ -311,6 +316,10 @@ impl ElfLoader {
 
                 // Zero BSS portion if memory size > file size
                 if segment.memory_size > segment.file_size {
+                    // SAFETY: The memory range [virtual_addr..virtual_addr+memory_size]
+                    // was mapped above. The BSS region starts after file_size bytes and
+                    // extends to memory_size, which is within the mapped page range.
+                    // write_bytes zeroes the uninitialized BSS section as required by ELF.
                     unsafe {
                         let bss_start = (segment.virtual_addr + segment.file_size) as *mut u8;
                         let bss_size = (segment.memory_size - segment.file_size) as usize;
@@ -410,6 +419,10 @@ impl ElfLoader {
             return Err(ElfError::InvalidMagic);
         }
 
+        // SAFETY: We verified data.len() >= size_of::<Elf64Header>() above.
+        // Elf64Header is #[repr(C)] with Copy, so reading it via pointer cast
+        // is valid as long as the data is large enough (which we checked).
+        // Alignment is not an issue because we dereference and copy immediately.
         let header = unsafe { *(data.as_ptr() as *const Elf64Header) };
 
         Ok(header)
@@ -468,6 +481,10 @@ impl ElfLoader {
                 return Err(ElfError::InvalidProgramHeader);
             }
 
+            // SAFETY: We verified offset + ph_size <= data.len() above.
+            // Elf64ProgramHeader is #[repr(C)] with Copy, so the pointer cast
+            // and dereference is valid for the checked bounds. The value is
+            // immediately copied out.
             let ph = unsafe { *(data[offset..].as_ptr() as *const Elf64ProgramHeader) };
 
             headers.push(ph);
@@ -547,6 +564,10 @@ impl ElfLoader {
                 break;
             }
 
+            // SAFETY: entry_offset + entry_size <= data.len() was checked above.
+            // i64 and u64 are primitive types that can be read from any byte
+            // alignment on the platforms we support. The values are copied out
+            // immediately.
             let tag = unsafe { *(data[entry_offset..].as_ptr() as *const i64) };
             let value = unsafe { *(data[entry_offset + 8..].as_ptr() as *const u64) };
 
@@ -614,6 +635,10 @@ impl ElfLoader {
                 // R_X86_64_RELATIVE (8)
                 8 => {
                     // Adjust by base address
+                    // SAFETY: target_addr = base_addr + reloc.offset. The caller
+                    // is responsible for ensuring the loaded binary's memory at
+                    // target_addr is mapped and writable. The relocation writes
+                    // a u64 value (base + addend) as specified by the ELF spec.
                     unsafe {
                         let ptr = target_addr as *mut u64;
                         *ptr = base_addr + reloc.addend as u64;
@@ -626,6 +651,9 @@ impl ElfLoader {
                         return Err(ElfError::InvalidSymbol);
                     }
                     let symbol = &symbols[reloc.symbol as usize];
+                    // SAFETY: target_addr points into the loaded binary's mapped
+                    // memory. The symbol index was bounds-checked above. Writing
+                    // symbol.value + addend implements the R_X86_64_64 relocation.
                     unsafe {
                         let ptr = target_addr as *mut u64;
                         *ptr = symbol.value + reloc.addend as u64;
@@ -638,6 +666,9 @@ impl ElfLoader {
                         return Err(ElfError::InvalidSymbol);
                     }
                     let symbol = &symbols[reloc.symbol as usize];
+                    // SAFETY: target_addr points into the loaded binary's mapped
+                    // memory. The symbol index was bounds-checked above. Writing
+                    // symbol.value implements the R_X86_64_GLOB_DAT relocation.
                     unsafe {
                         let ptr = target_addr as *mut u64;
                         *ptr = symbol.value;
@@ -650,6 +681,10 @@ impl ElfLoader {
                         return Err(ElfError::InvalidSymbol);
                     }
                     let symbol = &symbols[reloc.symbol as usize];
+                    // SAFETY: target_addr points into the loaded binary's mapped
+                    // memory. The symbol index was bounds-checked above. Writing
+                    // symbol.value implements the R_X86_64_JUMP_SLOT relocation
+                    // for the PLT (Procedure Linkage Table).
                     unsafe {
                         let ptr = target_addr as *mut u64;
                         *ptr = symbol.value;
@@ -686,6 +721,11 @@ impl ElfLoader {
             }
 
             // Parse symbol entry
+            // SAFETY: sym_offset + sym_entry_size (24) <= data.len() was checked
+            // above. Each field is read at its correct offset within the Elf64_Sym
+            // structure layout. The primitive types (u32, u16, u64) are copied out
+            // immediately. Alignment is handled by reading through pointer casts
+            // of packed ELF data.
             let name_idx = unsafe { *(data[sym_offset..].as_ptr() as *const u32) };
             let info = data[sym_offset + 4];
             let other = data[sym_offset + 5];
@@ -778,6 +818,11 @@ impl ElfLoader {
 
         // Copy file data
         if file_size > 0 {
+            // SAFETY: target_addr = base_addr + vaddr points to memory that the
+            // caller has mapped for loading. file_offset + file_size <= data.len()
+            // was validated above. from_raw_parts_mut creates a mutable slice over
+            // the target region for the copy. Source and destination do not overlap
+            // (ELF data buffer vs mapped load address).
             unsafe {
                 let src = &data[file_offset..file_offset + file_size];
                 let dst = slice::from_raw_parts_mut(target_addr, file_size);
@@ -787,6 +832,10 @@ impl ElfLoader {
 
         // Zero remaining memory (BSS)
         if mem_size > file_size {
+            // SAFETY: target_addr + file_size is within the mapped memory region
+            // (base_addr + vaddr .. base_addr + vaddr + mem_size). The BSS section
+            // (mem_size - file_size bytes) must be zeroed per the ELF specification.
+            // The memory was mapped by the caller for this segment.
             unsafe {
                 let bss_start = target_addr.add(file_size);
                 let bss_size = mem_size - file_size;
@@ -799,9 +848,7 @@ impl ElfLoader {
 
     /// Process relocations for a loaded binary
     pub fn process_relocations(&self, _data: &[u8], _base_addr: u64) -> Result<(), ElfError> {
-        // TODO: Implement relocation processing
-        // This is complex and architecture-specific
-        // For now, we only support position-independent executables
+        // TODO(phase3): Implement architecture-specific ELF relocation processing
         Ok(())
     }
 }
@@ -832,6 +879,354 @@ pub fn load_elf_from_file(path: &str) -> Result<ElfBinary, ElfError> {
     loader.parse(&buffer)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: build a minimal valid ELF64 header in a byte buffer.
+    /// Returns a Vec<u8> containing a valid ELF header + one LOAD program
+    /// header.
+    fn make_minimal_elf(
+        elf_type: u16,
+        machine: u16,
+        entry: u64,
+        vaddr: u64,
+        memsz: u64,
+    ) -> Vec<u8> {
+        let header_size = core::mem::size_of::<Elf64Header>();
+        let ph_size = core::mem::size_of::<Elf64ProgramHeader>();
+        let total_size = header_size + ph_size;
+        let mut buf = vec![0u8; total_size];
+
+        // ELF magic
+        buf[0] = 0x7f;
+        buf[1] = b'E';
+        buf[2] = b'L';
+        buf[3] = b'F';
+        // Class: 64-bit
+        buf[4] = 2;
+        // Data: little endian
+        buf[5] = 1;
+        // Version
+        buf[6] = 1;
+        // elf_type at offset 16
+        buf[16] = (elf_type & 0xFF) as u8;
+        buf[17] = ((elf_type >> 8) & 0xFF) as u8;
+        // machine at offset 18
+        buf[18] = (machine & 0xFF) as u8;
+        buf[19] = ((machine >> 8) & 0xFF) as u8;
+        // version2 at offset 20
+        buf[20] = 1;
+        // entry at offset 24
+        let entry_bytes = entry.to_le_bytes();
+        buf[24..32].copy_from_slice(&entry_bytes);
+        // phoff at offset 32 (program headers start right after header)
+        let phoff = (header_size as u64).to_le_bytes();
+        buf[32..40].copy_from_slice(&phoff);
+        // ehsize at offset 52
+        buf[52] = (header_size & 0xFF) as u8;
+        buf[53] = ((header_size >> 8) & 0xFF) as u8;
+        // phentsize at offset 54
+        buf[54] = (ph_size & 0xFF) as u8;
+        buf[55] = ((ph_size >> 8) & 0xFF) as u8;
+        // phnum at offset 56
+        buf[56] = 1;
+        buf[57] = 0;
+
+        // Program header (LOAD segment)
+        let ph_offset = header_size;
+        // p_type = PT_LOAD (1)
+        buf[ph_offset] = 1;
+        // p_flags at ph_offset + 4 (RWX = 7)
+        buf[ph_offset + 4] = 7;
+        // p_offset at ph_offset + 8
+        // p_vaddr at ph_offset + 16
+        let vaddr_bytes = vaddr.to_le_bytes();
+        buf[ph_offset + 16..ph_offset + 24].copy_from_slice(&vaddr_bytes);
+        // p_paddr at ph_offset + 24
+        buf[ph_offset + 24..ph_offset + 32].copy_from_slice(&vaddr_bytes);
+        // p_filesz at ph_offset + 32 (0 for simplicity)
+        // p_memsz at ph_offset + 40
+        let memsz_bytes = memsz.to_le_bytes();
+        buf[ph_offset + 40..ph_offset + 48].copy_from_slice(&memsz_bytes);
+        // p_align at ph_offset + 48
+        let align = 0x1000u64.to_le_bytes();
+        buf[ph_offset + 48..ph_offset + 56].copy_from_slice(&align);
+
+        buf
+    }
+
+    // --- ElfLoader basic tests ---
+
+    #[test]
+    fn test_elf_loader_new() {
+        let loader = ElfLoader::new();
+        // ElfLoader is a unit struct, just verify it can be created
+        let _ = loader;
+    }
+
+    #[test]
+    fn test_elf_loader_default() {
+        let loader = ElfLoader::default();
+        let _ = loader;
+    }
+
+    // --- Header validation tests ---
+
+    #[test]
+    fn test_parse_invalid_magic() {
+        let loader = ElfLoader::new();
+        let data = vec![0u8; 128]; // All zeros, no ELF magic
+        let result = loader.parse(&data);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ElfError::InvalidMagic));
+    }
+
+    #[test]
+    fn test_parse_too_small() {
+        let loader = ElfLoader::new();
+        let data = vec![0x7f, b'E', b'L', b'F']; // Just magic, too small for header
+        let result = loader.parse(&data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_wrong_class_32bit() {
+        let loader = ElfLoader::new();
+        let mut data = vec![0u8; 128];
+        // Set ELF magic
+        data[0] = 0x7f;
+        data[1] = b'E';
+        data[2] = b'L';
+        data[3] = b'F';
+        // Class = 32-bit (should be 64-bit)
+        data[4] = 1;
+        data[5] = 1; // Little endian
+        data[6] = 1; // Version
+
+        let result = loader.parse(&data);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ElfError::InvalidClass));
+    }
+
+    #[test]
+    fn test_parse_wrong_endian() {
+        let loader = ElfLoader::new();
+        let mut data = vec![0u8; 128];
+        data[0] = 0x7f;
+        data[1] = b'E';
+        data[2] = b'L';
+        data[3] = b'F';
+        data[4] = 2; // 64-bit
+        data[5] = 2; // Big endian (we only support little endian)
+        data[6] = 1;
+
+        let result = loader.parse(&data);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ElfError::InvalidData));
+    }
+
+    #[test]
+    fn test_parse_invalid_type_none() {
+        let loader = ElfLoader::new();
+        let mut data = vec![0u8; 128];
+        data[0..4].copy_from_slice(&ELF_MAGIC);
+        data[4] = 2; // 64-bit
+        data[5] = 1; // LE
+        data[6] = 1;
+        // elf_type = ET_NONE (0) at offset 16 -- already zero
+        data[18] = 62; // x86_64
+
+        let result = loader.parse(&data);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ElfError::InvalidType));
+    }
+
+    #[test]
+    fn test_parse_unsupported_machine() {
+        let loader = ElfLoader::new();
+        let mut data = vec![0u8; 128];
+        data[0..4].copy_from_slice(&ELF_MAGIC);
+        data[4] = 2;
+        data[5] = 1;
+        data[6] = 1;
+        data[16] = 2; // ET_EXEC
+                      // machine = 99 (unsupported)
+        data[18] = 99;
+
+        let result = loader.parse(&data);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ElfError::UnsupportedMachine));
+    }
+
+    // --- Successful parse tests ---
+
+    #[test]
+    fn test_parse_valid_executable_x86_64() {
+        let loader = ElfLoader::new();
+        let data = make_minimal_elf(2, 62, 0x401000, 0x400000, 0x1000);
+
+        let result = loader.parse(&data);
+        assert!(result.is_ok());
+
+        let binary = result.unwrap();
+        assert_eq!(binary.entry_point, 0x401000);
+        assert_eq!(binary.load_base, 0x400000);
+        assert_eq!(binary.load_size, 0x1000);
+        assert!(!binary.dynamic);
+        assert!(binary.interpreter.is_none());
+    }
+
+    #[test]
+    fn test_parse_valid_executable_aarch64() {
+        let loader = ElfLoader::new();
+        let data = make_minimal_elf(2, 183, 0x400000, 0x400000, 0x2000);
+
+        let result = loader.parse(&data);
+        assert!(result.is_ok());
+        let binary = result.unwrap();
+        assert_eq!(binary.entry_point, 0x400000);
+    }
+
+    #[test]
+    fn test_parse_valid_executable_riscv() {
+        let loader = ElfLoader::new();
+        let data = make_minimal_elf(2, 243, 0x10000, 0x10000, 0x4000);
+
+        let result = loader.parse(&data);
+        assert!(result.is_ok());
+        let binary = result.unwrap();
+        assert_eq!(binary.entry_point, 0x10000);
+    }
+
+    #[test]
+    fn test_parse_shared_object() {
+        let loader = ElfLoader::new();
+        // ET_DYN = 3
+        let data = make_minimal_elf(3, 62, 0x0, 0x0, 0x1000);
+
+        let result = loader.parse(&data);
+        assert!(result.is_ok());
+    }
+
+    // --- Segment parsing tests ---
+
+    #[test]
+    fn test_parse_segments_load() {
+        let loader = ElfLoader::new();
+        let data = make_minimal_elf(2, 62, 0x401000, 0x400000, 0x3000);
+
+        let binary = loader.parse(&data).unwrap();
+        assert_eq!(binary.segments.len(), 1);
+
+        let seg = &binary.segments[0];
+        assert_eq!(seg.segment_type, SegmentType::Load);
+        assert_eq!(seg.virtual_addr, 0x400000);
+        assert_eq!(seg.memory_size, 0x3000);
+    }
+
+    // --- Memory layout calculation tests ---
+
+    #[test]
+    fn test_calculate_memory_layout_empty() {
+        let loader = ElfLoader::new();
+        let headers: Vec<Elf64ProgramHeader> = vec![];
+
+        let result = loader.calculate_memory_layout(&headers);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_calculate_memory_layout_single_load() {
+        let loader = ElfLoader::new();
+        let headers = vec![Elf64ProgramHeader {
+            p_type: 1, // PT_LOAD
+            p_flags: 5,
+            p_offset: 0,
+            p_vaddr: 0x400000,
+            p_paddr: 0x400000,
+            p_filesz: 0x1000,
+            p_memsz: 0x2000,
+            p_align: 0x1000,
+        }];
+
+        let (base, size) = loader.calculate_memory_layout(&headers).unwrap();
+        assert_eq!(base, 0x400000);
+        assert_eq!(size, 0x2000);
+    }
+
+    #[test]
+    fn test_calculate_memory_layout_multiple_loads() {
+        let loader = ElfLoader::new();
+        let headers = vec![
+            Elf64ProgramHeader {
+                p_type: 1, // PT_LOAD
+                p_flags: 5,
+                p_offset: 0,
+                p_vaddr: 0x400000,
+                p_paddr: 0x400000,
+                p_filesz: 0x1000,
+                p_memsz: 0x1000,
+                p_align: 0x1000,
+            },
+            Elf64ProgramHeader {
+                p_type: 1, // PT_LOAD
+                p_flags: 6,
+                p_offset: 0x1000,
+                p_vaddr: 0x600000,
+                p_paddr: 0x600000,
+                p_filesz: 0x500,
+                p_memsz: 0x3000,
+                p_align: 0x1000,
+            },
+        ];
+
+        let (base, size) = loader.calculate_memory_layout(&headers).unwrap();
+        assert_eq!(base, 0x400000);
+        assert_eq!(size, (0x600000 + 0x3000 - 0x400000));
+    }
+
+    // --- read_string tests ---
+
+    #[test]
+    fn test_read_string_valid() {
+        let loader = ElfLoader::new();
+        let data = b"hello\0world\0";
+        let result = loader.read_string(data, 0);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_read_string_at_offset() {
+        let loader = ElfLoader::new();
+        let data = b"hello\0world\0";
+        let result = loader.read_string(data, 6);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "world");
+    }
+
+    #[test]
+    fn test_read_string_empty() {
+        let loader = ElfLoader::new();
+        let data = b"\0rest";
+        let result = loader.read_string(data, 0);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "");
+    }
+
+    // --- SegmentType tests ---
+
+    #[test]
+    fn test_segment_type_equality() {
+        assert_eq!(SegmentType::Null, SegmentType::Null);
+        assert_eq!(SegmentType::Load, SegmentType::Load);
+        assert_ne!(SegmentType::Load, SegmentType::Dynamic);
+        assert_eq!(SegmentType::Other(99), SegmentType::Other(99));
+        assert_ne!(SegmentType::Other(1), SegmentType::Other(2));
+    }
+}
+
 /// Execute an ELF binary
 pub fn exec_elf(path: &str) -> Result<u64, ElfError> {
     use crate::process::ProcessId;
@@ -846,7 +1241,7 @@ pub fn exec_elf(path: &str) -> Result<u64, ElfError> {
     }
 
     // Allocate memory for the program
-    let current_pid = ProcessId(1); // TODO: Get actual current PID
+    let current_pid = ProcessId(1); // TODO(phase3): Get actual current PID from scheduler
     let process =
         crate::process::get_process(current_pid).ok_or(ElfError::MemoryAllocationFailed)?;
 

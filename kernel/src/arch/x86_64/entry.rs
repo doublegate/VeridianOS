@@ -1,11 +1,16 @@
-// x86_64 kernel entry point and panic handler
+//! x86_64 kernel entry point and panic handler.
+//!
+//! Provides `arch_early_init` for architecture-specific setup (interrupt
+//! disable, SBI/PIC init) and `arch_panic_handler` for kernel panic output.
 
 use core::panic::PanicInfo;
 
 use crate::early_println;
 
 pub fn arch_early_init() {
-    // Disable interrupts immediately
+    // SAFETY: The cli instruction disables hardware interrupts. Required during
+    // early boot to prevent interrupt handlers from firing before the IDT is set
+    // up.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
     }

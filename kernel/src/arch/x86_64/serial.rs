@@ -1,4 +1,7 @@
-// Serial port driver for debugging
+//! x86_64 serial port driver for kernel debugging output.
+//!
+//! Uses the `uart_16550` crate to interface with COM1 at I/O port 0x3F8.
+//! Provides `serial_print!` and `serial_println!` macros for formatted output.
 
 use lazy_static::lazy_static;
 use spin::Mutex;

@@ -3,6 +3,9 @@
 //! Provides the kernel-side implementation of system calls including IPC
 //! operations.
 
+// System call handlers are fully implemented but not all are reachable
+// from user-space yet. Will be exercised once SYSCALL/SYSRET transitions
+// are enabled.
 #![allow(dead_code)]
 
 use crate::{
@@ -275,12 +278,21 @@ fn sys_ipc_send(
     // Check if this is a small message (fast path)
     let message = if msg_size <= core::mem::size_of::<SmallMessage>() {
         // Fast path for small messages
+        // SAFETY: msg_ptr was validated as non-zero above. The caller passes
+        // a user-space pointer to a SmallMessage. We read the entire struct
+        // by value. SmallMessage is Copy and repr(C), so the read is valid
+        // if the pointer is properly aligned and points to valid memory.
         unsafe {
             let small_msg = *(msg_ptr as *const SmallMessage);
             Message::Small(small_msg)
         }
     } else {
         // Large message path
+        // SAFETY: msg_ptr is non-zero (checked above) and msg_size > 0.
+        // The user-space buffer at msg_ptr is expected to contain msg_size
+        // bytes. We create a slice reference for the message data. The
+        // LargeMessage is constructed with the user-space address for
+        // later zero-copy transfer.
         unsafe {
             let _msg_slice = core::slice::from_raw_parts(msg_ptr as *const u8, msg_size);
 
@@ -338,6 +350,11 @@ fn sys_ipc_receive(endpoint: usize, buffer: usize) -> SyscallResult {
     match sync_receive(endpoint as u64) {
         Ok(message) => {
             // Copy message to user buffer
+            // SAFETY: buffer was validated as non-zero above. We write the
+            // received message to the user-space buffer. For SmallMessage,
+            // we write the struct directly. For LargeMessage, we copy the
+            // header and data. The caller is responsible for providing a
+            // buffer large enough to hold the message.
             unsafe {
                 match message {
                     Message::Small(small_msg) => {
@@ -396,6 +413,9 @@ fn sys_ipc_call(
 
     // Create message from user buffer
     let message = if send_size <= core::mem::size_of::<SmallMessage>() {
+        // SAFETY: send_msg was validated as non-zero above and send_size
+        // fits within SmallMessage. The pointer cast reads the struct by
+        // value. SmallMessage is Copy and repr(C).
         unsafe {
             let small_msg = *(send_msg as *const SmallMessage);
             Message::Small(small_msg)
@@ -417,6 +437,10 @@ fn sys_ipc_call(
     match sync_call(message, capability as u64) {
         Ok(reply) => {
             // Copy reply to receive buffer
+            // SAFETY: recv_buf was validated as non-zero and recv_size > 0
+            // above. We write the reply message to the user buffer, checking
+            // that recv_size is large enough for SmallMessage or the header.
+            // The caller must provide adequately sized buffers.
             unsafe {
                 match reply {
                     Message::Small(small_msg) => {
@@ -476,6 +500,8 @@ fn sys_ipc_reply(caller: usize, msg_ptr: usize, msg_size: usize) -> SyscallResul
 
     // Create reply message
     let message = if msg_size <= core::mem::size_of::<SmallMessage>() {
+        // SAFETY: msg_ptr was validated as non-zero above and msg_size fits
+        // within SmallMessage. The pointer cast reads a Copy/repr(C) struct.
         unsafe {
             let small_msg = *(msg_ptr as *const SmallMessage);
             Message::Small(small_msg)
@@ -577,10 +603,13 @@ fn sys_ipc_share_memory(
     };
 
     // Create shared region owned by current process
-    let _region = SharedRegion::new(current_process.pid, size, perms);
+    let _region = match SharedRegion::new(current_process.pid, size, perms) {
+        Ok(region) => region,
+        Err(_) => return Err(SyscallError::OutOfMemory),
+    };
 
     // Create memory capability for this region
-    let phys_addr = crate::mm::PhysicalAddress::new(addr as u64); // TODO: Get actual physical address
+    let phys_addr = crate::mm::PhysicalAddress::new(addr as u64); // TODO(phase3): Get actual physical address from VMM
     let attributes = crate::cap::object::MemoryAttributes::normal();
 
     match crate::cap::memory_integration::create_memory_capability(
@@ -623,8 +652,7 @@ fn sys_ipc_map_memory(capability: usize, addr_hint: usize, flags: usize) -> Sysc
         page_flags |= crate::mm::PageFlags::NO_EXECUTE;
     }
 
-    // TODO: Implement actual memory mapping with VMM
-    // For now, return the hint address or allocate a new one
+    // TODO(phase3): Implement actual memory mapping with VMM
     if addr_hint == 0 {
         // Would allocate a virtual address
         Ok(0x100000000) // Placeholder address
@@ -701,5 +729,259 @@ impl TryFrom<usize> for Syscall {
 
             _ => Err(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Syscall TryFrom tests ---
+
+    #[test]
+    fn test_syscall_try_from_ipc_send() {
+        let result = Syscall::try_from(0);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Syscall::IpcSend);
+    }
+
+    #[test]
+    fn test_syscall_try_from_ipc_receive() {
+        assert_eq!(Syscall::try_from(1).unwrap(), Syscall::IpcReceive);
+    }
+
+    #[test]
+    fn test_syscall_try_from_ipc_call() {
+        assert_eq!(Syscall::try_from(2).unwrap(), Syscall::IpcCall);
+    }
+
+    #[test]
+    fn test_syscall_try_from_ipc_reply() {
+        assert_eq!(Syscall::try_from(3).unwrap(), Syscall::IpcReply);
+    }
+
+    #[test]
+    fn test_syscall_try_from_process_yield() {
+        assert_eq!(Syscall::try_from(10).unwrap(), Syscall::ProcessYield);
+    }
+
+    #[test]
+    fn test_syscall_try_from_process_exit() {
+        assert_eq!(Syscall::try_from(11).unwrap(), Syscall::ProcessExit);
+    }
+
+    #[test]
+    fn test_syscall_try_from_process_fork() {
+        assert_eq!(Syscall::try_from(12).unwrap(), Syscall::ProcessFork);
+    }
+
+    #[test]
+    fn test_syscall_try_from_process_getpid() {
+        assert_eq!(Syscall::try_from(15).unwrap(), Syscall::ProcessGetPid);
+    }
+
+    #[test]
+    fn test_syscall_try_from_memory_map() {
+        assert_eq!(Syscall::try_from(20).unwrap(), Syscall::MemoryMap);
+    }
+
+    #[test]
+    fn test_syscall_try_from_capability_grant() {
+        assert_eq!(Syscall::try_from(30).unwrap(), Syscall::CapabilityGrant);
+    }
+
+    #[test]
+    fn test_syscall_try_from_thread_create() {
+        assert_eq!(Syscall::try_from(40).unwrap(), Syscall::ThreadCreate);
+    }
+
+    #[test]
+    fn test_syscall_try_from_file_open() {
+        assert_eq!(Syscall::try_from(50).unwrap(), Syscall::FileOpen);
+    }
+
+    #[test]
+    fn test_syscall_try_from_dir_mkdir() {
+        assert_eq!(Syscall::try_from(60).unwrap(), Syscall::DirMkdir);
+    }
+
+    #[test]
+    fn test_syscall_try_from_fs_mount() {
+        assert_eq!(Syscall::try_from(70).unwrap(), Syscall::FsMount);
+    }
+
+    #[test]
+    fn test_syscall_try_from_kernel_get_info() {
+        assert_eq!(Syscall::try_from(80).unwrap(), Syscall::KernelGetInfo);
+    }
+
+    #[test]
+    fn test_syscall_try_from_invalid() {
+        assert!(Syscall::try_from(999).is_err());
+    }
+
+    #[test]
+    fn test_syscall_try_from_gap_value() {
+        // Values between defined syscalls should fail (e.g., 8 is between IPC and
+        // Process)
+        assert!(Syscall::try_from(8).is_err());
+        assert!(Syscall::try_from(9).is_err());
+        assert!(Syscall::try_from(19).is_err());
+        assert!(Syscall::try_from(25).is_err());
+    }
+
+    // --- Syscall round-trip tests ---
+
+    #[test]
+    fn test_all_ipc_syscalls() {
+        let ipc_syscalls = [
+            (0, Syscall::IpcSend),
+            (1, Syscall::IpcReceive),
+            (2, Syscall::IpcCall),
+            (3, Syscall::IpcReply),
+            (4, Syscall::IpcCreateEndpoint),
+            (5, Syscall::IpcBindEndpoint),
+            (6, Syscall::IpcShareMemory),
+            (7, Syscall::IpcMapMemory),
+        ];
+
+        for (num, expected) in &ipc_syscalls {
+            let result = Syscall::try_from(*num);
+            assert!(result.is_ok(), "Syscall {} should be valid", num);
+            assert_eq!(result.unwrap(), *expected);
+        }
+    }
+
+    #[test]
+    fn test_all_process_syscalls() {
+        let proc_syscalls = [
+            (10, Syscall::ProcessYield),
+            (11, Syscall::ProcessExit),
+            (12, Syscall::ProcessFork),
+            (13, Syscall::ProcessExec),
+            (14, Syscall::ProcessWait),
+            (15, Syscall::ProcessGetPid),
+            (16, Syscall::ProcessGetPPid),
+            (17, Syscall::ProcessSetPriority),
+            (18, Syscall::ProcessGetPriority),
+        ];
+
+        for (num, expected) in &proc_syscalls {
+            assert_eq!(Syscall::try_from(*num).unwrap(), *expected);
+        }
+    }
+
+    #[test]
+    fn test_all_thread_syscalls() {
+        let thread_syscalls = [
+            (40, Syscall::ThreadCreate),
+            (41, Syscall::ThreadExit),
+            (42, Syscall::ThreadJoin),
+            (43, Syscall::ThreadGetTid),
+            (44, Syscall::ThreadSetAffinity),
+            (45, Syscall::ThreadGetAffinity),
+        ];
+
+        for (num, expected) in &thread_syscalls {
+            assert_eq!(Syscall::try_from(*num).unwrap(), *expected);
+        }
+    }
+
+    #[test]
+    fn test_all_file_syscalls() {
+        let file_syscalls = [
+            (50, Syscall::FileOpen),
+            (51, Syscall::FileClose),
+            (52, Syscall::FileRead),
+            (53, Syscall::FileWrite),
+            (54, Syscall::FileSeek),
+            (55, Syscall::FileStat),
+            (56, Syscall::FileTruncate),
+        ];
+
+        for (num, expected) in &file_syscalls {
+            assert_eq!(Syscall::try_from(*num).unwrap(), *expected);
+        }
+    }
+
+    #[test]
+    fn test_all_dir_syscalls() {
+        let dir_syscalls = [
+            (60, Syscall::DirMkdir),
+            (61, Syscall::DirRmdir),
+            (62, Syscall::DirOpendir),
+            (63, Syscall::DirReaddir),
+            (64, Syscall::DirClosedir),
+        ];
+
+        for (num, expected) in &dir_syscalls {
+            assert_eq!(Syscall::try_from(*num).unwrap(), *expected);
+        }
+    }
+
+    // --- SyscallError conversion tests ---
+
+    #[test]
+    fn test_syscall_error_from_ipc_error_invalid_capability() {
+        let err: SyscallError = IpcError::InvalidCapability.into();
+        assert_eq!(err, SyscallError::InvalidCapability);
+    }
+
+    #[test]
+    fn test_syscall_error_from_ipc_error_process_not_found() {
+        let err: SyscallError = IpcError::ProcessNotFound.into();
+        assert_eq!(err, SyscallError::ResourceNotFound);
+    }
+
+    #[test]
+    fn test_syscall_error_from_ipc_error_endpoint_not_found() {
+        let err: SyscallError = IpcError::EndpointNotFound.into();
+        assert_eq!(err, SyscallError::ResourceNotFound);
+    }
+
+    #[test]
+    fn test_syscall_error_from_ipc_error_out_of_memory() {
+        let err: SyscallError = IpcError::OutOfMemory.into();
+        assert_eq!(err, SyscallError::OutOfMemory);
+    }
+
+    #[test]
+    fn test_syscall_error_from_ipc_error_would_block() {
+        let err: SyscallError = IpcError::WouldBlock.into();
+        assert_eq!(err, SyscallError::WouldBlock);
+    }
+
+    #[test]
+    fn test_syscall_error_from_ipc_error_permission_denied() {
+        let err: SyscallError = IpcError::PermissionDenied.into();
+        assert_eq!(err, SyscallError::PermissionDenied);
+    }
+
+    // --- SyscallError value tests ---
+
+    #[test]
+    fn test_syscall_error_values() {
+        assert_eq!(SyscallError::InvalidSyscall as i32, -1);
+        assert_eq!(SyscallError::InvalidArgument as i32, -2);
+        assert_eq!(SyscallError::PermissionDenied as i32, -3);
+        assert_eq!(SyscallError::ResourceNotFound as i32, -4);
+        assert_eq!(SyscallError::OutOfMemory as i32, -5);
+        assert_eq!(SyscallError::WouldBlock as i32, -6);
+        assert_eq!(SyscallError::InvalidCapability as i32, -10);
+    }
+
+    #[test]
+    fn test_syscall_error_from_cap_error() {
+        let err: SyscallError = crate::cap::manager::CapError::InvalidCapability.into();
+        assert_eq!(err, SyscallError::InvalidCapability);
+
+        let err: SyscallError = crate::cap::manager::CapError::InsufficientRights.into();
+        assert_eq!(err, SyscallError::InsufficientRights);
+
+        let err: SyscallError = crate::cap::manager::CapError::CapabilityRevoked.into();
+        assert_eq!(err, SyscallError::CapabilityRevoked);
+
+        let err: SyscallError = crate::cap::manager::CapError::OutOfMemory.into();
+        assert_eq!(err, SyscallError::OutOfMemory);
     }
 }

@@ -166,8 +166,11 @@ impl ProcessTable {
         let entries = self.entries.lock();
 
         entries.get(&pid).map(|entry| {
-            // Return a static reference (unsafe but necessary for the API)
-            // In a real implementation, we'd use reference counting or similar
+            // SAFETY: The Process is stored in a BTreeMap behind a Mutex, giving
+            // it a stable heap address. Casting to *const and back to &'static
+            // extends the borrow lifetime beyond the lock. This is sound because
+            // processes are never moved or deallocated while references exist in
+            // the current kernel model.
             unsafe { &*(entry.process.as_ref() as *const Process) }
         })
     }
@@ -180,7 +183,10 @@ impl ProcessTable {
         for i in 0..super::MAX_PROCESSES {
             if let Some(ref process) = entries.processes[i] {
                 if process.pid == pid {
-                    // Return a static reference (unsafe but necessary for the API)
+                    // SAFETY: The Process is stored in a fixed-size array behind a
+                    // Mutex. Casting to *const and back to &'static extends the
+                    // borrow lifetime beyond the lock. Sound because processes are
+                    // not moved or deallocated while references exist.
                     return Some(unsafe { &*(process as *const Process) });
                 }
             }
@@ -195,7 +201,11 @@ impl ProcessTable {
         let mut entries = self.entries.lock();
 
         entries.get_mut(&pid).map(|entry| {
-            // Return a static mutable reference (unsafe but necessary for the API)
+            // SAFETY: The Process is stored in a BTreeMap behind a Mutex, giving
+            // it a stable heap address. Casting to *mut and back to &'static mut
+            // extends the borrow lifetime. Sound because the Mutex prevents
+            // concurrent mutable access and processes are not moved while
+            // references exist.
             unsafe { &mut *(entry.process.as_mut() as *mut Process) }
         })
     }

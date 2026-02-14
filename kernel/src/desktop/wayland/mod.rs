@@ -9,7 +9,8 @@
 //! - Asynchronous updates: No blocking on server
 //! - Security: No global coordinate space, isolated clients
 
-// Allow dead code for Wayland protocol structures not yet fully implemented
+// Phase 6 (desktop) -- Wayland protocol structures are defined but the
+// compositor is not yet connected to actual display hardware.
 #![allow(dead_code)]
 //! - Efficiency: Minimal data copies, GPU acceleration
 //!
@@ -133,8 +134,8 @@ impl WaylandClient {
     }
 
     fn handle_message(&self, _data: &[u8]) -> Result<Vec<u8>, KernelError> {
-        // TODO: Parse Wayland protocol message
-        // Format: object_id, opcode, size, arguments
+        // TODO(phase6): Parse Wayland protocol message (object_id, opcode, size,
+        // arguments)
 
         Ok(Vec::new())
     }

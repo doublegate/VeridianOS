@@ -122,10 +122,11 @@ struct RegionMapping {
 }
 
 impl SharedRegion {
-    /// Create a new shared memory region (simple version for tests)
-    pub fn new(owner: ProcessId, size: usize, _permissions: Permission) -> Self {
+    /// Create a new shared memory region (convenience wrapper).
+    ///
+    /// Returns an error if physical memory cannot be allocated for the region.
+    pub fn new(owner: ProcessId, size: usize, _permissions: Permission) -> Result<Self> {
         Self::new_with_policy(owner, size, CachePolicy::WriteBack, None)
-            .unwrap_or_else(|_| panic!("Failed to create shared region"))
     }
 
     /// Create a new shared memory region
@@ -139,8 +140,7 @@ impl SharedRegion {
         let page_size = PageSize::Small as usize;
         let size = size.div_ceil(page_size) * page_size;
 
-        // TODO: Allocate physical memory from frame allocator
-        // For now, use a placeholder address
+        // TODO(phase3): Allocate physical memory from frame allocator
         let physical_base = PhysicalAddress::new(0x100000);
 
         Ok(Self {
@@ -188,12 +188,8 @@ impl SharedRegion {
             return Err(IpcError::InvalidMemoryRegion);
         }
 
-        // TODO: Actually map pages in the process page table
-        // This would involve:
-        // 1. Validating the virtual address range is free
-        // 2. Creating page table entries
-        // 3. Setting appropriate permissions and cache policy
-        // 4. Flushing TLB if necessary
+        // TODO(phase3): Map pages in process page table with proper permissions and TLB
+        // flush
 
         mappings.insert(
             process,
@@ -217,11 +213,7 @@ impl SharedRegion {
                 return Err(IpcError::InvalidMemoryRegion);
             }
 
-            // TODO: Actually unmap pages from process page table
-            // This would involve:
-            // 1. Removing page table entries
-            // 2. Flushing TLB
-            // 3. Possibly freeing page table pages
+            // TODO(phase3): Unmap pages from process page table and flush TLB
 
             mapping.active = false;
             self.ref_count.fetch_sub(1, Ordering::Relaxed);
@@ -233,7 +225,7 @@ impl SharedRegion {
 
     /// Transfer ownership of region to another process
     pub fn transfer_ownership(&mut self, new_owner: ProcessId) -> Result<()> {
-        // TODO: Validate new owner exists and has appropriate permissions
+        // TODO(phase3): Validate new owner exists and has appropriate capabilities
         self.owner = new_owner;
         Ok(())
     }
@@ -293,15 +285,16 @@ impl SharedRegion {
         self.numa_node.unwrap_or(0) as usize
     }
 
-    /// Create a new shared memory region with specific NUMA node
+    /// Create a new shared memory region with specific NUMA node.
+    ///
+    /// Returns an error if physical memory cannot be allocated for the region.
     pub fn new_numa(
         owner: ProcessId,
         size: usize,
         _permissions: Permission,
         numa_node: usize,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::new_with_policy(owner, size, CachePolicy::WriteBack, Some(numa_node as u32))
-            .unwrap_or_else(|_| panic!("Failed to create NUMA region"))
     }
 }
 
@@ -398,7 +391,7 @@ impl SharedMemoryManager {
                 }
             }
 
-            // TODO: Free physical memory
+            // TODO(phase3): Free physical memory via frame allocator
             Ok(())
         } else {
             Err(IpcError::InvalidMemoryRegion)
@@ -420,12 +413,8 @@ pub fn zero_copy_transfer(
     _to_process: ProcessId,
     _manager: &SharedMemoryManager,
 ) -> Result<()> {
-    // TODO: Implement zero-copy transfer
-    // 1. Validate both processes have appropriate capabilities
-    // 2. Remap pages from source to destination
-    // 3. Update page tables
-    // 4. Invalidate TLBs
-    // 5. Update region mappings
+    // TODO(phase3): Implement zero-copy transfer (capability validation, page
+    // remap, TLB flush)
 
     Ok(())
 }

@@ -105,7 +105,10 @@ pub mod helpers {
             title_len: title.len() as u32,
         };
 
-        // Unsafe conversion of struct to bytes
+        // SAFETY: CreateWindowRequest is #[repr(C)] so its memory layout
+        // is well-defined. We create a byte slice view over the struct
+        // for size_of::<CreateWindowRequest>() bytes. The reference &req
+        // is valid for the entire scope, so the slice is valid.
         unsafe {
             let req_bytes = core::slice::from_raw_parts(
                 &req as *const _ as *const u8,
@@ -129,6 +132,10 @@ pub mod helpers {
             });
         }
 
+        // SAFETY: data.len() >= size_of::<CreateWindowResponse>() was
+        // validated above. read_unaligned handles any alignment issues.
+        // CreateWindowResponse is #[repr(C)] with Copy, so reading it
+        // from the byte buffer is valid.
         unsafe {
             let resp = core::ptr::read_unaligned(data.as_ptr() as *const CreateWindowResponse);
             Ok(resp.window_id)
@@ -154,6 +161,9 @@ pub mod helpers {
             pressed,
         };
 
+        // SAFETY: KeyEvent is #[repr(C)] so its memory layout is
+        // well-defined. We create a byte slice view over the struct
+        // for size_of::<KeyEvent>() bytes. The reference is valid.
         unsafe {
             let event_bytes = core::slice::from_raw_parts(
                 &event as *const _ as *const u8,
@@ -180,6 +190,9 @@ pub mod helpers {
             pressed,
         };
 
+        // SAFETY: MouseEvent is #[repr(C)] so its memory layout is
+        // well-defined. We create a byte slice view over the struct
+        // for size_of::<MouseEvent>() bytes. The reference is valid.
         unsafe {
             let event_bytes = core::slice::from_raw_parts(
                 &event as *const _ as *const u8,
@@ -201,8 +214,8 @@ pub const COMPOSITOR_ENDPOINT: EndpointId = 1002;
 pub fn init() -> Result<(), KernelError> {
     println!("[DESKTOP-IPC] Initializing desktop IPC protocol...");
 
-    // TODO: Register well-known endpoints
-    // TODO: Create IPC channels for window manager, input server, compositor
+    // TODO(phase6): Register well-known IPC endpoints for window manager, input
+    // server, and compositor
 
     println!("[DESKTOP-IPC] Desktop IPC protocol initialized");
     Ok(())

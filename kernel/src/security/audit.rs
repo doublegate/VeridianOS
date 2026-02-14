@@ -88,6 +88,10 @@ static mut AUDIT_ENABLED: bool = false;
 
 /// Log an audit event
 pub fn log_event(event: AuditEvent) {
+    // SAFETY: AUDIT_ENABLED, AUDIT_LOG, AUDIT_HEAD, and AUDIT_COUNT are static mut
+    // globals used as a circular buffer for audit events. Accessed during
+    // single-threaded kernel operation. AUDIT_HEAD is always kept in range [0,
+    // MAX_AUDIT_LOG) by the modulo operation.
     unsafe {
         if !AUDIT_ENABLED {
             return;
@@ -158,11 +162,15 @@ fn simple_hash(s: &str) -> u64 {
 
 /// Get audit log statistics
 pub fn get_stats() -> (usize, usize) {
+    // SAFETY: AUDIT_COUNT is a static mut counter read for diagnostic statistics.
+    // Single-threaded access assumed during kernel operation.
     unsafe { (AUDIT_COUNT, MAX_AUDIT_LOG) }
 }
 
 /// Enable audit logging
 pub fn enable() {
+    // SAFETY: AUDIT_ENABLED is a static mut bool toggled during single-threaded
+    // kernel init or controlled administrative operations.
     unsafe {
         AUDIT_ENABLED = true;
     }
@@ -171,6 +179,8 @@ pub fn enable() {
 
 /// Disable audit logging
 pub fn disable() {
+    // SAFETY: AUDIT_ENABLED is a static mut bool toggled during controlled
+    // administrative operations. Single-threaded access assumed.
     unsafe {
         AUDIT_ENABLED = false;
     }
@@ -182,6 +192,9 @@ pub fn init() -> Result<(), KernelError> {
     println!("[AUDIT] Initializing audit framework...");
 
     // Clear audit log
+    // SAFETY: AUDIT_HEAD and AUDIT_COUNT are static mut counters reset to zero
+    // during single-threaded kernel init. No concurrent readers at this point
+    // in bootstrap.
     unsafe {
         AUDIT_HEAD = 0;
         AUDIT_COUNT = 0;

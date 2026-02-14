@@ -1,4 +1,9 @@
-// Print module - delegates to architecture-specific implementations
+//! Kernel printing macros.
+//!
+//! Provides `print!` and `println!` macros that delegate to the
+//! architecture-specific serial/UART output. On x86_64 this writes to
+//! the VGA text buffer, on AArch64 to the PL011 UART, and on RISC-V
+//! to the 16550 UART via SBI.
 
 // x86_64 implementation
 #[cfg(target_arch = "x86_64")]

@@ -68,7 +68,7 @@ impl VfsNode for DevNode {
                 Ok(buffer.len())
             }
             _ => {
-                // TODO: Dispatch to actual device driver
+                // TODO(phase4): Dispatch read to actual device driver via driver registry
                 Err("Device not implemented")
             }
         }
@@ -88,7 +88,7 @@ impl VfsNode for DevNode {
                 Ok(data.len())
             }
             _ => {
-                // TODO: Dispatch to actual device driver
+                // TODO(phase4): Dispatch write to actual device driver via driver registry
                 Err("Device not implemented")
             }
         }

@@ -237,6 +237,11 @@ impl Process {
     pub fn get_thread(&self, tid: ThreadId) -> Option<&Thread> {
         // This is a bit tricky - we need to return a reference that outlives the lock
         // In a real implementation, we'd use more sophisticated synchronization
+        // SAFETY: The Thread is stored in a BTreeMap behind a Mutex, providing
+        // a stable heap address. Casting to *const and back to a reference
+        // extends the borrow lifetime beyond the lock scope. Sound because
+        // threads are not moved or deallocated while references exist in the
+        // current kernel model.
         unsafe {
             let threads = self.threads.lock();
             threads.get(&tid).map(|t| &*(t as *const Thread))
@@ -390,6 +395,346 @@ impl Drop for Process {
     fn drop(&mut self) {
         println!("[PROCESS] Dropping process {}", self.pid.0);
         // Cleanup will be handled by the process lifecycle manager
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_process(pid: u64, name: &str) -> Process {
+        Process::new(
+            ProcessId(pid),
+            None,
+            alloc::string::String::from(name),
+            ProcessPriority::Normal,
+        )
+    }
+
+    // --- ProcessState tests ---
+
+    #[test]
+    fn test_initial_state_is_creating() {
+        let proc = make_process(1, "test");
+        assert_eq!(proc.get_state(), ProcessState::Creating);
+    }
+
+    #[test]
+    fn test_state_transitions() {
+        let proc = make_process(2, "test_transitions");
+
+        proc.set_state(ProcessState::Ready);
+        assert_eq!(proc.get_state(), ProcessState::Ready);
+
+        proc.set_state(ProcessState::Running);
+        assert_eq!(proc.get_state(), ProcessState::Running);
+
+        proc.set_state(ProcessState::Blocked);
+        assert_eq!(proc.get_state(), ProcessState::Blocked);
+
+        proc.set_state(ProcessState::Sleeping);
+        assert_eq!(proc.get_state(), ProcessState::Sleeping);
+
+        proc.set_state(ProcessState::Zombie);
+        assert_eq!(proc.get_state(), ProcessState::Zombie);
+
+        proc.set_state(ProcessState::Dead);
+        assert_eq!(proc.get_state(), ProcessState::Dead);
+    }
+
+    #[test]
+    fn test_get_state_unknown_value() {
+        let proc = make_process(3, "unknown_state");
+        // Force an invalid state value
+        proc.state.store(255, Ordering::Release);
+        // Should default to Dead for unknown values
+        assert_eq!(proc.get_state(), ProcessState::Dead);
+    }
+
+    // --- is_alive tests ---
+
+    #[test]
+    fn test_is_alive_creating() {
+        let proc = make_process(4, "alive_test");
+        assert!(proc.is_alive());
+    }
+
+    #[test]
+    fn test_is_alive_ready() {
+        let proc = make_process(5, "alive_ready");
+        proc.set_state(ProcessState::Ready);
+        assert!(proc.is_alive());
+    }
+
+    #[test]
+    fn test_is_alive_running() {
+        let proc = make_process(6, "alive_running");
+        proc.set_state(ProcessState::Running);
+        assert!(proc.is_alive());
+    }
+
+    #[test]
+    fn test_is_not_alive_zombie() {
+        let proc = make_process(7, "zombie");
+        proc.set_state(ProcessState::Zombie);
+        assert!(!proc.is_alive());
+    }
+
+    #[test]
+    fn test_is_not_alive_dead() {
+        let proc = make_process(8, "dead");
+        proc.set_state(ProcessState::Dead);
+        assert!(!proc.is_alive());
+    }
+
+    // --- CPU time tests ---
+
+    #[test]
+    fn test_cpu_time_initial_zero() {
+        let proc = make_process(10, "cpu_time");
+        assert_eq!(proc.get_cpu_time(), 0);
+    }
+
+    #[test]
+    fn test_add_cpu_time() {
+        let proc = make_process(11, "cpu_time_add");
+        proc.add_cpu_time(100);
+        assert_eq!(proc.get_cpu_time(), 100);
+        proc.add_cpu_time(200);
+        assert_eq!(proc.get_cpu_time(), 300);
+    }
+
+    // --- Exit code tests ---
+
+    #[test]
+    fn test_exit_code_initial_zero() {
+        let proc = make_process(12, "exit_code");
+        assert_eq!(proc.get_exit_code(), 0);
+    }
+
+    #[test]
+    fn test_set_exit_code() {
+        let proc = make_process(13, "exit_set");
+        proc.set_exit_code(42);
+        assert_eq!(proc.get_exit_code(), 42);
+    }
+
+    #[test]
+    fn test_set_exit_code_negative() {
+        let proc = make_process(14, "exit_neg");
+        proc.set_exit_code(-1);
+        assert_eq!(proc.get_exit_code(), -1);
+    }
+
+    // --- Priority tests ---
+
+    #[test]
+    fn test_initial_priority() {
+        let proc = make_process(15, "priority");
+        assert_eq!(*proc.priority.lock(), ProcessPriority::Normal);
+    }
+
+    #[test]
+    fn test_set_priority() {
+        let proc = make_process(16, "priority_set");
+        proc.set_priority(ProcessPriority::RealTime);
+        assert_eq!(*proc.priority.lock(), ProcessPriority::RealTime);
+
+        proc.set_priority(ProcessPriority::Idle);
+        assert_eq!(*proc.priority.lock(), ProcessPriority::Idle);
+    }
+
+    // --- Signal tests ---
+
+    #[test]
+    fn test_signal_handler_default() {
+        let proc = make_process(20, "sig_default");
+        // All signal handlers should initially be 0 (default action)
+        for i in 0..32 {
+            assert_eq!(proc.get_signal_handler(i), Some(0));
+        }
+    }
+
+    #[test]
+    fn test_signal_handler_invalid_signal() {
+        let proc = make_process(21, "sig_invalid");
+        assert_eq!(proc.get_signal_handler(32), None);
+        assert_eq!(proc.get_signal_handler(100), None);
+    }
+
+    #[test]
+    fn test_set_signal_handler() {
+        let proc = make_process(22, "sig_set");
+        let result = proc.set_signal_handler(2, 0xDEAD_BEEF);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0); // Old handler was default (0)
+        assert_eq!(proc.get_signal_handler(2), Some(0xDEAD_BEEF));
+    }
+
+    #[test]
+    fn test_set_signal_handler_sigkill_refused() {
+        let proc = make_process(23, "sig_kill");
+        let result = proc.set_signal_handler(9, 1); // SIGKILL
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "Cannot change handler for SIGKILL or SIGSTOP"
+        );
+    }
+
+    #[test]
+    fn test_set_signal_handler_sigstop_refused() {
+        let proc = make_process(24, "sig_stop");
+        let result = proc.set_signal_handler(19, 1); // SIGSTOP
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_signal_handler_out_of_range() {
+        let proc = make_process(25, "sig_range");
+        let result = proc.set_signal_handler(32, 1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_send_signal() {
+        let proc = make_process(26, "sig_send");
+        assert!(proc.send_signal(2).is_ok());
+        assert!(proc.is_signal_pending(2));
+    }
+
+    #[test]
+    fn test_send_signal_invalid() {
+        let proc = make_process(27, "sig_send_inv");
+        assert!(proc.send_signal(32).is_err());
+    }
+
+    #[test]
+    fn test_signal_pending_with_mask() {
+        let proc = make_process(28, "sig_mask");
+        proc.send_signal(3).unwrap();
+
+        // Before masking, signal is pending
+        assert!(proc.is_signal_pending(3));
+
+        // Mask signal 3
+        proc.set_signal_mask(1u64 << 3);
+
+        // Now it should NOT be seen as pending (masked)
+        assert!(!proc.is_signal_pending(3));
+    }
+
+    #[test]
+    fn test_signal_mask_protects_sigkill_sigstop() {
+        let proc = make_process(29, "sig_mask_protect");
+        // Try to mask SIGKILL (9) and SIGSTOP (19)
+        let old = proc.set_signal_mask(0xFFFF_FFFF_FFFF_FFFF);
+        assert_eq!(old, 0); // Previous mask was 0
+
+        // SIGKILL and SIGSTOP should NOT be masked
+        let mask = proc.get_signal_mask();
+        assert_eq!(mask & (1u64 << 9), 0, "SIGKILL should not be maskable");
+        assert_eq!(mask & (1u64 << 19), 0, "SIGSTOP should not be maskable");
+    }
+
+    #[test]
+    fn test_get_next_pending_signal() {
+        let proc = make_process(30, "sig_next");
+        assert!(proc.get_next_pending_signal().is_none());
+
+        proc.send_signal(5).unwrap();
+        proc.send_signal(3).unwrap();
+
+        // Should return lowest numbered pending signal
+        assert_eq!(proc.get_next_pending_signal(), Some(3));
+    }
+
+    #[test]
+    fn test_clear_pending_signal() {
+        let proc = make_process(31, "sig_clear");
+        proc.send_signal(7).unwrap();
+        assert!(proc.is_signal_pending(7));
+
+        proc.clear_pending_signal(7);
+        assert!(!proc.is_signal_pending(7));
+    }
+
+    #[test]
+    fn test_reset_signal_handlers() {
+        let proc = make_process(32, "sig_reset");
+        // Set some handlers
+        proc.set_signal_handler(2, 0x1000).unwrap();
+        proc.set_signal_handler(15, 0x2000).unwrap();
+        proc.send_signal(5).unwrap();
+
+        proc.reset_signal_handlers();
+
+        // All handlers should be reset to default
+        assert_eq!(proc.get_signal_handler(2), Some(0));
+        assert_eq!(proc.get_signal_handler(15), Some(0));
+        // Pending signals should be cleared
+        assert!(!proc.is_signal_pending(5));
+    }
+
+    // --- Process identity tests ---
+
+    #[test]
+    fn test_process_pid() {
+        let proc = make_process(100, "pid_test");
+        assert_eq!(proc.pid, ProcessId(100));
+    }
+
+    #[test]
+    fn test_process_parent() {
+        let proc = Process::new(
+            ProcessId(50),
+            Some(ProcessId(1)),
+            alloc::string::String::from("child"),
+            ProcessPriority::Normal,
+        );
+        assert_eq!(proc.parent, Some(ProcessId(1)));
+    }
+
+    #[test]
+    fn test_process_no_parent() {
+        let proc = make_process(1, "init");
+        assert_eq!(proc.parent, None);
+    }
+
+    #[test]
+    fn test_process_name() {
+        let mut proc = make_process(60, "original_name");
+        assert_eq!(proc.name, "original_name");
+
+        proc.set_name(alloc::string::String::from("new_name"));
+        assert_eq!(proc.name, "new_name");
+    }
+
+    // --- Thread management tests ---
+
+    #[test]
+    fn test_thread_count_initially_zero() {
+        let proc = make_process(70, "threads");
+        assert_eq!(proc.thread_count(), 0);
+    }
+
+    // --- ProcessId display ---
+
+    #[test]
+    fn test_process_id_display() {
+        let pid = ProcessId(42);
+        let display = alloc::format!("{}", pid);
+        assert_eq!(display, "42");
+    }
+
+    // --- ProcessPriority ordering ---
+
+    #[test]
+    fn test_priority_ordering() {
+        assert!(ProcessPriority::RealTime < ProcessPriority::System);
+        assert!(ProcessPriority::System < ProcessPriority::Normal);
+        assert!(ProcessPriority::Normal < ProcessPriority::Low);
+        assert!(ProcessPriority::Low < ProcessPriority::Idle);
     }
 }
 

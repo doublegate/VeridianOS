@@ -61,7 +61,9 @@ _multiboot_entry:
 
 #[no_mangle]
 pub extern "C" fn multiboot_main(magic: u64, info_addr: u64) -> ! {
-    // Basic VGA output to show we got here
+    // SAFETY: 0xb8000 is the standard VGA text buffer address on x86 PCs.
+    // write_volatile ensures the write is not optimized away. The buffer is
+    // always mapped during early boot and each u16 encodes a character + attribute.
     unsafe {
         let vga = 0xb8000 as *mut u16;
         vga.write_volatile(0x0F4D); // 'M' for multiboot
@@ -70,13 +72,15 @@ pub extern "C" fn multiboot_main(magic: u64, info_addr: u64) -> ! {
 
     // Verify multiboot2 magic
     if magic != 0x36d76289 {
-        // Show error on VGA
+        // SAFETY: VGA text buffer at 0xb8000 is always mapped during early boot.
+        // write_volatile ensures the error indicator is displayed.
         unsafe {
             let vga = 0xb8000 as *mut u16;
             vga.offset(2).write_volatile(0x4F45); // 'E' in red (error)
             vga.offset(3).write_volatile(0x4F52); // 'R'
         }
         loop {
+            // SAFETY: hlt halts the CPU until the next interrupt. Safe in a panic loop.
             unsafe { core::arch::asm!("hlt") };
         }
     }
@@ -93,6 +97,8 @@ pub extern "C" fn multiboot_main(magic: u64, info_addr: u64) -> ! {
 
     // Set up minimal boot info structure
     // For now, we'll skip the full multiboot info parsing and use defaults
+    // SAFETY: BOOT_INFO is a static mut Option written once during early boot
+    // before any other code runs. No concurrent access is possible at this stage.
     unsafe {
         crate::arch::x86_64::boot::BOOT_INFO = None; // Multiboot doesn't use
                                                      // bootloader_api BootInfo

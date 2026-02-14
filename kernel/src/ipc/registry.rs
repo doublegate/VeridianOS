@@ -20,8 +20,15 @@ use super::{
     error::{IpcError, Result},
 };
 
-/// Global IPC registry using pointer pattern for all architectures
-/// This avoids static mut Option issues and provides consistent behavior
+/// Global IPC registry using pointer pattern for all architectures.
+/// This avoids static mut Option issues and provides consistent behavior.
+///
+/// SAFETY invariant: Once initialized (non-null), this pointer remains valid
+/// for the lifetime of the kernel. The pointed-to Mutex<IpcRegistry> is
+/// heap-allocated via Box::leak and never deallocated. All access must be
+/// through with_registry() or with_registry_mut() which check for null before
+/// dereferencing. The init() function ensures single initialization via null
+/// check with architecture-specific memory barriers.
 static mut IPC_REGISTRY_PTR: *mut Mutex<IpcRegistry> = core::ptr::null_mut();
 
 /// Initialize the IPC registry
@@ -29,6 +36,13 @@ pub fn init() {
     #[allow(unused_imports)]
     use crate::println;
 
+    // SAFETY: This function is called during single-threaded kernel initialization
+    // (bootstrap), so there is no concurrent access to IPC_REGISTRY_PTR. The null
+    // check prevents double initialization. Box::leak ensures the allocated
+    // Mutex<IpcRegistry> lives for the entire kernel lifetime (never deallocated).
+    // Architecture-specific memory barriers (DSB+ISB on AArch64, FENCE on RISC-V)
+    // ensure the pointer store is visible to all CPUs before any subsequent access.
+    // On x86_64, the strong memory model makes explicit barriers unnecessary.
     unsafe {
         if !IPC_REGISTRY_PTR.is_null() {
             println!("[IPC-REG] Registry already initialized, skipping...");
@@ -42,7 +56,9 @@ pub fn init() {
         let registry_box = alloc::boxed::Box::new(registry_mutex);
         let ptr = alloc::boxed::Box::leak(registry_box) as *mut Mutex<IpcRegistry>;
 
-        // Memory barriers before assignment
+        // SAFETY: Memory barriers ensure the heap allocation (pointed to by `ptr`)
+        // is fully committed to memory before we store the pointer, preventing other
+        // CPUs from seeing a non-null pointer to uninitialized memory.
         #[cfg(target_arch = "aarch64")]
         core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
         #[cfg(target_arch = "riscv64")]
@@ -50,7 +66,8 @@ pub fn init() {
 
         IPC_REGISTRY_PTR = ptr;
 
-        // Memory barriers after assignment
+        // SAFETY: Post-store barriers ensure the pointer write is visible to all CPUs
+        // before any subsequent code that might access the registry on other cores.
         #[cfg(target_arch = "aarch64")]
         core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
         #[cfg(target_arch = "riscv64")]
@@ -299,6 +316,11 @@ fn with_registry_mut<T, F>(f: F) -> Result<T>
 where
     F: FnOnce(&mut IpcRegistry) -> Result<T>,
 {
+    // SAFETY: IPC_REGISTRY_PTR is checked for null before dereferencing. Once set
+    // in init(), the pointer is never modified or deallocated (Box::leak ensures
+    // permanent allocation). The Mutex lock provides exclusive access to the inner
+    // IpcRegistry, preventing data races. The memory barriers in init() ensure
+    // the pointer store is visible to this CPU.
     unsafe {
         if IPC_REGISTRY_PTR.is_null() {
             return Err(IpcError::NotInitialized);
@@ -315,6 +337,10 @@ fn with_registry<T, F>(f: F) -> Result<T>
 where
     F: FnOnce(&IpcRegistry) -> Result<T>,
 {
+    // SAFETY: Same invariants as with_registry_mut(). IPC_REGISTRY_PTR is checked
+    // for null, was set once during init() via Box::leak (permanent allocation),
+    // and the Mutex lock serializes access. The shared reference to IpcRegistry is
+    // valid for the duration of the lock guard.
     unsafe {
         if IPC_REGISTRY_PTR.is_null() {
             return Err(IpcError::NotInitialized);
@@ -426,9 +452,15 @@ pub fn remove_process_endpoints(owner: ProcessId) -> Result<usize> {
 /// Lookup an endpoint by ID
 pub fn lookup_endpoint(id: EndpointId) -> Result<&'static Endpoint> {
     with_registry(|registry| {
-        // SAFETY: We're returning a reference with 'static lifetime, but the registry
-        // is a global static, so this is safe as long as endpoints aren't removed
-        // while references exist. In production, we'd use Arc or similar.
+        // SAFETY: We cast the registry reference to a raw pointer and dereference
+        // it to obtain a &'static Endpoint. This is sound because:
+        // 1. The registry is heap-allocated via Box::leak and lives for the kernel's
+        //    lifetime, so the Endpoint data it contains also has 'static lifetime.
+        // 2. The Endpoint reference is derived from data owned by the registry's
+        //    BTreeMap, which persists as long as the entry is not removed.
+        // CAVEAT: If the endpoint is removed from the registry while a &'static
+        // reference is held, this becomes a dangling reference. Production code
+        // should use reference counting (Arc) to prevent use-after-free.
         unsafe {
             let registry_ptr = registry as *const IpcRegistry;
             (*registry_ptr)

@@ -123,6 +123,11 @@ impl EnhancedElfLoader {
         }
 
         // Parse header using unsafe pointer cast
+        // SAFETY: We verified self.data.len() >= size_of::<Elf64Header>()
+        // above, and checked the ELF magic, class, and encoding fields.
+        // Elf64Header is #[repr(C)] with Copy, so reading via pointer
+        // cast is valid. Alignment is not an issue because we copy
+        // immediately via dereference.
         let header = unsafe { *(self.data.as_ptr() as *const Elf64Header) };
 
         // Validate type (must be executable or shared object)
@@ -185,6 +190,10 @@ impl EnhancedElfLoader {
         for i in 0..ph_count {
             let offset = ph_offset + (i * ph_size);
 
+            // SAFETY: We verified ph_offset + (ph_size * ph_count) <=
+            // self.data.len() above, so `offset` is within bounds.
+            // Elf64ProgramHeader is #[repr(C)] with Copy. The pointer
+            // is derived from a valid slice.
             let ph = unsafe { *(self.data[offset..].as_ptr() as *const Elf64ProgramHeader) };
             self.program_headers.push(ph);
 
@@ -262,6 +271,12 @@ impl EnhancedElfLoader {
                 let copy_size = ph.p_filesz as usize;
 
                 if src_offset + copy_size <= self.data.len() {
+                    // SAFETY: src_offset + copy_size is within self.data
+                    // bounds (checked above). dest (p_vaddr) was just mapped
+                    // into the process address space by map_page above. The
+                    // source (ELF file data) and destination (process memory)
+                    // do not overlap since they are in different address
+                    // ranges.
                     unsafe {
                         let dest = ph.p_vaddr as *mut u8;
                         let src = self.data.as_ptr().add(src_offset);
@@ -272,6 +287,10 @@ impl EnhancedElfLoader {
 
             // Zero BSS portion (memory size > file size)
             if ph.p_memsz > ph.p_filesz {
+                // SAFETY: The BSS region starts at p_vaddr + p_filesz and
+                // extends to p_vaddr + p_memsz. This entire range was
+                // mapped by map_page above (num_pages covers p_memsz).
+                // write_bytes zeroes the uninitialized data section.
                 unsafe {
                     let bss_start = (ph.p_vaddr + ph.p_filesz) as *mut u8;
                     let bss_size = (ph.p_memsz - ph.p_filesz) as usize;
@@ -352,6 +371,10 @@ impl EnhancedElfLoader {
         for env_str in args.env.iter().rev() {
             let bytes = env_str.as_bytes();
             sp -= (bytes.len() + 1) as u64; // +1 for null terminator
+                                            // SAFETY: sp points into the user stack region that was mapped
+                                            // above. We write bytes.len() + 1 bytes (string + null terminator).
+                                            // sp was decremented by that exact amount, staying within the
+                                            // mapped stack region (stack_top - stack_size to stack_top).
             unsafe {
                 let ptr = sp as *mut u8;
                 core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
@@ -365,6 +388,9 @@ impl EnhancedElfLoader {
         for arg_str in args.args.iter().rev() {
             let bytes = arg_str.as_bytes();
             sp -= (bytes.len() + 1) as u64;
+            // SAFETY: Same as environment string push - sp is within
+            // the mapped stack region and decremented by the exact
+            // number of bytes written.
             unsafe {
                 let ptr = sp as *mut u8;
                 core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
@@ -379,6 +405,8 @@ impl EnhancedElfLoader {
 
         // Push NULL terminator for envp
         sp -= 8;
+        // SAFETY: sp is 16-byte aligned (aligned above) and within the
+        // mapped stack. Writing a u64 zero as the envp NULL terminator.
         unsafe {
             *(sp as *mut u64) = 0;
         }
@@ -386,6 +414,9 @@ impl EnhancedElfLoader {
         // Push envp pointers
         for env_ptr in env_ptrs.iter().rev() {
             sp -= 8;
+            // SAFETY: sp is within the mapped stack and 8-byte aligned
+            // (all writes are 8-byte u64). env_ptr contains a valid
+            // address pointing to a string previously written to the stack.
             unsafe {
                 *(sp as *mut u64) = *env_ptr;
             }
@@ -393,6 +424,8 @@ impl EnhancedElfLoader {
 
         // Push NULL terminator for argv
         sp -= 8;
+        // SAFETY: sp is within the mapped stack and 8-byte aligned.
+        // Writing a u64 zero as the argv NULL terminator.
         unsafe {
             *(sp as *mut u64) = 0;
         }
@@ -400,6 +433,9 @@ impl EnhancedElfLoader {
         // Push argv pointers
         for arg_ptr in arg_ptrs.iter().rev() {
             sp -= 8;
+            // SAFETY: sp is within the mapped stack and 8-byte aligned.
+            // arg_ptr contains a valid address pointing to an argument
+            // string previously written to the stack.
             unsafe {
                 *(sp as *mut u64) = *arg_ptr;
             }
@@ -407,6 +443,8 @@ impl EnhancedElfLoader {
 
         // Push argc
         sp -= 8;
+        // SAFETY: sp is within the mapped stack and 8-byte aligned.
+        // Writing argc as the topmost stack entry for the C ABI.
         unsafe {
             *(sp as *mut u64) = args.args.len() as u64;
         }
@@ -635,6 +673,10 @@ fn load_interpreter(process: &Process, interp_path: &str) -> Result<VirtualAddre
 
         // Copy segment data
         if ph.p_filesz > 0 {
+            // SAFETY: seg_vaddr was just mapped into the process address
+            // space by map_page above. write_bytes zeroes the region as
+            // a placeholder (real data copy would need the interpreter
+            // file data). The size is bounded by p_filesz.
             unsafe {
                 let dest = seg_vaddr as *mut u8;
                 // Note: We'd need the original data here

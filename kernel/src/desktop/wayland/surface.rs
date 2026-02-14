@@ -33,7 +33,7 @@ impl Surface {
     }
 
     pub fn commit(&mut self) -> Result<(), KernelError> {
-        // TODO: Submit surface to compositor
+        // TODO(phase6): Submit surface to compositor for rendering
         Ok(())
     }
 }

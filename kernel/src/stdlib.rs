@@ -13,6 +13,10 @@ pub mod memory {
     use super::*;
 
     /// Allocate memory
+    ///
+    /// # Safety
+    /// Caller must eventually call `free` on the returned pointer (if non-null)
+    /// with the same allocator.  The returned memory is uninitialized.
     pub unsafe fn malloc(size: usize) -> *mut u8 {
         if size == 0 {
             return ptr::null_mut();
@@ -20,26 +24,39 @@ pub mod memory {
 
         // For now, use kernel allocator (in real implementation, use user-space
         // allocator)
+        // Layout::from_size_align(1, 1) is infallible (size=1, align=1 is always valid)
         let layout = core::alloc::Layout::from_size_align(size, 8)
-            .unwrap_or_else(|_| core::alloc::Layout::from_size_align(1, 1).unwrap());
+            .unwrap_or_else(|_| core::alloc::Layout::from_size_align(1, 1).expect("1-byte layout"));
 
         alloc::alloc::alloc(layout)
     }
 
     /// Allocate zeroed memory
+    ///
+    /// # Safety
+    /// Caller must eventually call `free` on the returned pointer (if
+    /// non-null). `count * size` must not overflow (saturating_mul is used
+    /// as a safeguard).
     pub unsafe fn calloc(count: usize, size: usize) -> *mut u8 {
         let total_size = count.saturating_mul(size);
         if total_size == 0 {
             return ptr::null_mut();
         }
 
+        // Layout::from_size_align(1, 1) is infallible (size=1, align=1 is always valid)
         let layout = core::alloc::Layout::from_size_align(total_size, 8)
-            .unwrap_or_else(|_| core::alloc::Layout::from_size_align(1, 1).unwrap());
+            .unwrap_or_else(|_| core::alloc::Layout::from_size_align(1, 1).expect("1-byte layout"));
 
         alloc::alloc::alloc_zeroed(layout)
     }
 
     /// Reallocate memory
+    ///
+    /// # Safety
+    /// `ptr` must be null or a pointer previously returned by
+    /// `malloc`/`calloc`. The old allocation is freed; do not use `ptr`
+    /// after this call. WARNING: current implementation assumes max 1KB old
+    /// allocation size.
     pub unsafe fn realloc(ptr: *mut u8, new_size: usize) -> *mut u8 {
         if ptr.is_null() {
             return malloc(new_size);
@@ -64,33 +81,51 @@ pub mod memory {
     }
 
     /// Free memory
+    ///
+    /// # Safety
+    /// `ptr` must be null or a pointer previously returned by `malloc`/`calloc`
+    /// that has not already been freed.  Double-free is undefined behavior.
     pub unsafe fn free(ptr: *mut u8) {
         if !ptr.is_null() {
             // In real implementation, we'd track allocation size
-            let layout = core::alloc::Layout::from_size_align(1, 1).unwrap();
+            // Layout(1, 1) is always valid: size > 0, align is power of 2
+            let layout = core::alloc::Layout::from_size_align(1, 1).expect("1-byte layout");
             alloc::alloc::dealloc(ptr, layout);
         }
     }
 
     /// Copy memory
+    ///
+    /// # Safety
+    /// `dest` and `src` must be valid for `n` bytes.  The regions must not
+    /// overlap; use `memmove` for overlapping copies.
     pub unsafe fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
         ptr::copy_nonoverlapping(src, dest, n);
         dest
     }
 
     /// Move memory (handles overlapping regions)
+    ///
+    /// # Safety
+    /// `dest` and `src` must be valid for `n` bytes.  Regions may overlap.
     pub unsafe fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
         ptr::copy(src, dest, n);
         dest
     }
 
     /// Set memory to value
+    ///
+    /// # Safety
+    /// `dest` must be valid for writing `n` bytes.
     pub unsafe fn memset(dest: *mut u8, value: i32, n: usize) -> *mut u8 {
         ptr::write_bytes(dest, value as u8, n);
         dest
     }
 
     /// Compare memory
+    ///
+    /// # Safety
+    /// Both `s1` and `s2` must be valid for reading `n` bytes.
     pub unsafe fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
         let slice1 = slice::from_raw_parts(s1, n);
         let slice2 = slice::from_raw_parts(s2, n);
@@ -112,6 +147,9 @@ pub mod string {
     use super::*;
 
     /// Calculate string length
+    ///
+    /// # Safety
+    /// `s` must point to a valid, NUL-terminated C string.
     pub unsafe fn strlen(s: *const u8) -> usize {
         let mut len = 0;
         while *s.add(len) != 0 {
@@ -121,6 +159,10 @@ pub mod string {
     }
 
     /// Copy string
+    ///
+    /// # Safety
+    /// `src` must be NUL-terminated.  `dest` must have room for the
+    /// entire source string including its NUL terminator.
     pub unsafe fn strcpy(dest: *mut u8, src: *const u8) -> *mut u8 {
         let mut i = 0;
         loop {
@@ -135,6 +177,10 @@ pub mod string {
     }
 
     /// Copy string with maximum length
+    ///
+    /// # Safety
+    /// `dest` must be valid for writing `n` bytes.  `src` must be valid
+    /// for reading up to `n` bytes or until a NUL terminator is found.
     pub unsafe fn strncpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
         let mut i = 0;
         while i < n {
@@ -156,6 +202,10 @@ pub mod string {
     }
 
     /// Concatenate strings
+    ///
+    /// # Safety
+    /// Both `dest` and `src` must be NUL-terminated.  `dest` must have
+    /// room for its current content plus the entirety of `src` plus NUL.
     pub unsafe fn strcat(dest: *mut u8, src: *const u8) -> *mut u8 {
         let dest_len = strlen(dest);
         strcpy(dest.add(dest_len), src);
@@ -163,6 +213,9 @@ pub mod string {
     }
 
     /// Compare strings
+    ///
+    /// # Safety
+    /// Both `s1` and `s2` must point to valid, NUL-terminated C strings.
     pub unsafe fn strcmp(s1: *const u8, s2: *const u8) -> i32 {
         let mut i = 0;
         loop {
@@ -182,6 +235,10 @@ pub mod string {
     }
 
     /// Compare strings with maximum length
+    ///
+    /// # Safety
+    /// Both `s1` and `s2` must be valid for reading up to `n` bytes
+    /// or until a NUL terminator is found.
     pub unsafe fn strncmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
         for i in 0..n {
             let c1 = *s1.add(i);
@@ -200,6 +257,9 @@ pub mod string {
     }
 
     /// Find character in string
+    ///
+    /// # Safety
+    /// `s` must point to a valid, NUL-terminated C string.
     pub unsafe fn strchr(s: *const u8, c: i32) -> *const u8 {
         let target = c as u8;
         let mut i = 0;
@@ -219,6 +279,10 @@ pub mod string {
     }
 
     /// Find substring in string
+    ///
+    /// # Safety
+    /// Both `haystack` and `needle` must point to valid, NUL-terminated C
+    /// strings.
     pub unsafe fn strstr(haystack: *const u8, needle: *const u8) -> *const u8 {
         let needle_len = strlen(needle);
         if needle_len == 0 {
@@ -248,6 +312,10 @@ pub mod io {
     use crate::fs::{get_vfs, OpenFlags};
 
     /// File handle
+    ///
+    /// Fields are accessed through raw pointer dereference in the io module's
+    /// read/write/seek/close functions, so the compiler cannot see direct
+    /// usage.
     #[allow(dead_code)]
     pub struct File {
         node: Arc<dyn crate::fs::VfsNode>,
@@ -297,6 +365,11 @@ pub mod io {
     }
 
     /// Close a file
+    ///
+    /// # Safety
+    /// `file` must be null or a pointer previously returned by `open`
+    /// that has not already been closed.  After this call, `file` is
+    /// dangling and must not be dereferenced.
     pub unsafe fn close(file: *mut File) -> i32 {
         if file.is_null() {
             return -1;
@@ -307,6 +380,10 @@ pub mod io {
     }
 
     /// Read from file
+    ///
+    /// # Safety
+    /// `file` must be a valid, open `File` pointer from `open`.
+    /// `buf` must be valid for writing `count` bytes.
     pub unsafe fn read(file: *mut File, buf: *mut u8, count: usize) -> isize {
         if file.is_null() || buf.is_null() {
             return -1;
@@ -325,6 +402,10 @@ pub mod io {
     }
 
     /// Write to file
+    ///
+    /// # Safety
+    /// `file` must be a valid, open `File` pointer from `open`.
+    /// `buf` must be valid for reading `count` bytes.
     pub unsafe fn write(file: *mut File, buf: *const u8, count: usize) -> isize {
         if file.is_null() || buf.is_null() {
             return -1;
@@ -343,6 +424,9 @@ pub mod io {
     }
 
     /// Seek in file
+    ///
+    /// # Safety
+    /// `file` must be a valid, open `File` pointer from `open`.
     pub unsafe fn seek(file: *mut File, offset: isize, whence: i32) -> isize {
         if file.is_null() {
             return -1;
@@ -441,16 +525,24 @@ pub mod process {
         // Process should never return after exit
         loop {
             #[cfg(target_arch = "x86_64")]
+            // SAFETY: `hlt` halts the CPU until the next interrupt.
+            // We are in an infinite loop after process exit, so this
+            // is a low-power idle.  No memory or register invariants.
             unsafe {
                 core::arch::asm!("hlt")
             }
 
             #[cfg(target_arch = "aarch64")]
+            // SAFETY: `wfi` (Wait For Interrupt) is the AArch64
+            // equivalent of x86 hlt.  Safe to execute at any
+            // privilege level; simply idles until an interrupt fires.
             unsafe {
                 core::arch::asm!("wfi")
             }
 
             #[cfg(target_arch = "riscv64")]
+            // SAFETY: `wfi` (Wait For Interrupt) idles the hart
+            // until the next interrupt.  No invariants required.
             unsafe {
                 core::arch::asm!("wfi")
             }
@@ -512,12 +604,14 @@ pub mod process {
     /// Returns -1 if there are no child processes or on error.
     ///
     /// # Safety
-    /// The `status` pointer must be either null or point to valid, writable
-    /// memory.
+    /// `status` must be either null or point to valid, writable, aligned
+    /// memory for a single `i32`.  If the pointer is invalid, writing the
+    /// exit status will corrupt memory or fault.
     pub unsafe fn wait(status: *mut i32) -> i32 {
         match crate::process::wait_for_child(None) {
             Ok((pid, exit_status)) => {
-                // Store exit status if pointer is valid
+                // SAFETY: Caller guarantees `status` is null or a valid
+                // writable i32 pointer.  We check for null before writing.
                 if !status.is_null() {
                     *status = exit_status;
                 }
@@ -608,6 +702,9 @@ pub mod time {
 
     /// Set boot time from RTC (call during system initialization)
     pub fn set_boot_time(seconds_since_epoch: u64) {
+        // SAFETY: BOOT_TIME_SECONDS is only written here and read in
+        // time().  This is called once during single-threaded early boot
+        // before the scheduler starts, so there is no data race.
         unsafe {
             BOOT_TIME_SECONDS = seconds_since_epoch;
         }
@@ -624,6 +721,9 @@ pub mod time {
         // Convert ticks to seconds since boot
         let seconds_since_boot = ticks / 1000;
 
+        // SAFETY: BOOT_TIME_SECONDS is written once during early boot
+        // (set_boot_time) before the scheduler starts.  After that it is
+        // read-only, so concurrent reads are safe.
         unsafe { BOOT_TIME_SECONDS + seconds_since_boot }
     }
 
@@ -669,11 +769,17 @@ pub mod error {
 
     /// Get error number
     pub fn get_errno() -> i32 {
+        // SAFETY: ERRNO is a per-process global.  In the current
+        // single-threaded-per-process model there is no data race.
+        // If multi-threaded processes are supported in the future,
+        // this must be replaced with thread-local storage.
         unsafe { ERRNO }
     }
 
     /// Set error number
     pub fn set_errno(errno: i32) {
+        // SAFETY: See get_errno -- single-threaded per-process model
+        // means no concurrent mutation.
         unsafe {
             ERRNO = errno;
         }
@@ -716,6 +822,10 @@ pub mod random {
 
     /// Set random seed
     pub fn srand(seed: u32) {
+        // SAFETY: SEED is a process-global mutable static used for the
+        // PRNG.  In the current single-threaded-per-process model there
+        // is no data race.  Must be replaced with TLS for multi-threaded
+        // processes.
         unsafe {
             SEED = seed;
         }
@@ -723,6 +833,9 @@ pub mod random {
 
     /// Generate random number
     pub fn rand() -> i32 {
+        // SAFETY: SEED is read and written atomically within a single
+        // thread (see srand safety comment).  The wrapping arithmetic
+        // cannot overflow.
         unsafe {
             SEED = SEED.wrapping_mul(1103515245).wrapping_add(12345);
             (SEED / 65536) as i32 % 32768

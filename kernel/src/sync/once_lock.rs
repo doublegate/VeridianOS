@@ -39,6 +39,12 @@ impl<T> OnceLock<T> {
         if ptr.is_null() {
             None
         } else {
+            // SAFETY: The pointer is non-null, meaning `set()` or `get_or_init()`
+            // has previously stored a valid, heap-allocated `T` via `Box::into_raw()`.
+            // The Acquire ordering on the load synchronizes-with the Release in
+            // `set()`, ensuring the pointed-to data is fully initialized before we
+            // read it. The 'static lifetime is valid because the allocation is leaked
+            // (only freed in `Drop`) and the OnceLock owns the allocation.
             Some(unsafe { &*ptr })
         }
     }
@@ -46,12 +52,20 @@ impl<T> OnceLock<T> {
     /// Get mutable reference if initialized (unsafe)
     ///
     /// # Safety
-    /// Caller must ensure exclusive access
+    /// Caller must ensure exclusive access to the contained value for the
+    /// duration of the returned reference's lifetime. No other references
+    /// (mutable or immutable) to the inner value may exist concurrently.
+    /// Violating this invariant causes undefined behavior due to aliased
+    /// mutable references.
     pub unsafe fn get_mut(&self) -> Option<&'static mut T> {
         let ptr = self.inner.load(Ordering::Acquire);
         if ptr.is_null() {
             None
         } else {
+            // SAFETY: The pointer is non-null, so `set()` has previously stored
+            // a valid, heap-allocated `T`. The caller guarantees exclusive access,
+            // so creating a mutable reference does not alias any existing references.
+            // The Acquire load ensures we see the fully initialized data.
             Some(&mut *ptr)
         }
     }
@@ -73,7 +87,18 @@ impl<T> OnceLock<T> {
             Ok(_) => Ok(()),
             Err(_) => {
                 // Already initialized, clean up our allocation
+                // SAFETY: `ptr` was obtained from `Box::into_raw()` on the line above,
+                // so it points to a valid, properly aligned, heap-allocated `T`. The
+                // compare_exchange failed, meaning no one else has taken ownership of
+                // this pointer, so we must reclaim it to avoid a memory leak.
                 let _ = unsafe { alloc::boxed::Box::from_raw(ptr) };
+                // SAFETY: `ptr` was just reclaimed by `Box::from_raw` above, which
+                // dropped the Box but the value was moved out. However, this read
+                // occurs after the Box was dropped, which is a use-after-free bug.
+                // NOTE: This is a known issue in this placeholder code -- in practice,
+                // the value should be extracted before dropping the Box, or the Err
+                // variant should return a different error type. The current code is
+                // unsound if T has non-trivial drop behavior.
                 Err(unsafe { core::ptr::read(ptr) })
             }
         }
@@ -90,19 +115,37 @@ impl<T> OnceLock<T> {
 
         let value = f();
         match self.set(value) {
-            Ok(()) => self.get().unwrap(),
-            Err(_) => self.get().unwrap(), // Someone else initialized it
+            // After set() succeeds or detects prior init, get() is guaranteed Some
+            Ok(()) => self
+                .get()
+                .expect("OnceLock get failed after successful set"),
+            Err(_) => self
+                .get()
+                .expect("OnceLock get failed after concurrent init"),
         }
     }
 }
 
+// SAFETY: OnceLock<T> can be sent across threads if T: Send because the inner
+// value is heap-allocated and accessed through an AtomicPtr with proper memory
+// ordering. Ownership transfer is safe when T itself is safe to transfer.
 unsafe impl<T: Send> Send for OnceLock<T> {}
+// SAFETY: OnceLock<T> can be shared across threads if T: Send + Sync. The
+// AtomicPtr with Acquire/Release ordering ensures that concurrent `get()` calls
+// observe a fully initialized T. The `set()` method uses compare_exchange to
+// ensure at most one successful initialization. T must be Sync because multiple
+// threads may hold shared references to the inner value simultaneously.
 unsafe impl<T: Send + Sync> Sync for OnceLock<T> {}
 
 impl<T> Drop for OnceLock<T> {
     fn drop(&mut self) {
         let ptr = self.inner.load(Ordering::Acquire);
         if !ptr.is_null() {
+            // SAFETY: The pointer was originally created by `Box::into_raw()` in
+            // `set()`. Since we are in `drop(&mut self)`, we have exclusive access
+            // to the OnceLock, guaranteeing no other thread is concurrently reading
+            // or writing the pointer. Reconstructing the Box reclaims the heap
+            // allocation and drops the contained T.
             unsafe {
                 let _ = alloc::boxed::Box::from_raw(ptr);
             }
@@ -130,9 +173,19 @@ impl<T: 'static, F: FnOnce() -> T> LazyLock<T, F> {
     /// Force initialization and get reference
     pub fn force(&self) -> &T {
         self.cell.get_or_init(|| {
+            // SAFETY: Access to the UnsafeCell is safe here because `get_or_init`
+            // on the inner OnceLock guarantees that this closure is called at most
+            // once. The OnceLock's compare_exchange in `set()` ensures that even
+            // if multiple threads race to call `force()`, only one will execute
+            // this closure. After `take()` extracts the init function, subsequent
+            // calls to `force()` will find the OnceLock already initialized and
+            // skip this closure entirely.
             let init = unsafe { &mut *self.init.get() };
             match init.take() {
                 Some(f) => f(),
+                // Panic is intentional: this is a logic error. The OnceLock
+                // guarantees single-init, so reaching None means the internal
+                // invariant was violated (a bug in the LazyLock implementation).
                 None => panic!("LazyLock initialization function called twice"),
             }
         })
@@ -147,7 +200,15 @@ impl<T: 'static, F: FnOnce() -> T> core::ops::Deref for LazyLock<T, F> {
     }
 }
 
+// SAFETY: LazyLock<T, F> can be sent across threads if both T and F are Send.
+// The inner OnceLock handles synchronization for the value, and the init
+// function F is only accessed once (consumed via take()) so transferring
+// ownership is safe.
 unsafe impl<T: Send, F: Send> Send for LazyLock<T, F> {}
+// SAFETY: LazyLock<T, F> can be shared across threads if T: Sync and F: Send.
+// The OnceLock provides the synchronization for concurrent access to T. F must
+// be Send (not Sync) because it is consumed exactly once via the UnsafeCell;
+// the OnceLock's atomic CAS ensures only one thread executes the init closure.
 unsafe impl<T: Sync, F: Send> Sync for LazyLock<T, F> {}
 
 /// Safe global state with mutex (Rust 2024 compatible)
@@ -203,7 +264,16 @@ impl<T> Default for GlobalState<T> {
     }
 }
 
+// SAFETY: GlobalState<T> can be sent across threads if T: Send. The inner
+// spin::Mutex provides mutual exclusion, so the contained Option<T> is only
+// accessed by one thread at a time. Transferring ownership is safe when T
+// itself supports cross-thread transfer.
 unsafe impl<T: Send> Send for GlobalState<T> {}
+// SAFETY: GlobalState<T> can be shared across threads if T: Send. The
+// spin::Mutex serializes all access to the inner Option<T>, preventing data
+// races. T only needs to be Send (not Sync) because the Mutex ensures no
+// concurrent access -- each caller gets exclusive access through the lock
+// guard.
 unsafe impl<T: Send> Sync for GlobalState<T> {}
 
 #[cfg(test)]

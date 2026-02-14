@@ -3,7 +3,8 @@
 //! Implements DHCPv4 protocol for obtaining IP addresses and network
 //! configuration.
 
-// Allow dead code for DHCP option codes and methods not yet fully utilized
+// DHCP protocol constants and methods are defined ahead of full network
+// stack integration. Needed once automatic network configuration is enabled.
 #![allow(dead_code)]
 
 use alloc::vec::Vec;
@@ -202,16 +203,19 @@ impl DhcpPacket {
             htype: bytes[1],
             hlen: bytes[2],
             hops: bytes[3],
-            xid: u32::from_be_bytes(bytes[4..8].try_into().unwrap()),
-            secs: u16::from_be_bytes(bytes[8..10].try_into().unwrap()),
-            flags: u16::from_be_bytes(bytes[10..12].try_into().unwrap()),
-            ciaddr: Ipv4Address(bytes[12..16].try_into().unwrap()),
-            yiaddr: Ipv4Address(bytes[16..20].try_into().unwrap()),
-            siaddr: Ipv4Address(bytes[20..24].try_into().unwrap()),
-            giaddr: Ipv4Address(bytes[24..28].try_into().unwrap()),
-            chaddr: bytes[28..44].try_into().unwrap(),
-            sname: bytes[44..108].try_into().unwrap(),
-            file: bytes[108..236].try_into().unwrap(),
+            // All try_into() calls below convert fixed-size slices to arrays.
+            // The length check above (bytes.len() >= 236) guarantees all slices
+            // are the correct size, so these conversions cannot fail.
+            xid: u32::from_be_bytes(bytes[4..8].try_into().expect("DHCP xid slice")),
+            secs: u16::from_be_bytes(bytes[8..10].try_into().expect("DHCP secs slice")),
+            flags: u16::from_be_bytes(bytes[10..12].try_into().expect("DHCP flags slice")),
+            ciaddr: Ipv4Address(bytes[12..16].try_into().expect("DHCP ciaddr slice")),
+            yiaddr: Ipv4Address(bytes[16..20].try_into().expect("DHCP yiaddr slice")),
+            siaddr: Ipv4Address(bytes[20..24].try_into().expect("DHCP siaddr slice")),
+            giaddr: Ipv4Address(bytes[24..28].try_into().expect("DHCP giaddr slice")),
+            chaddr: bytes[28..44].try_into().expect("DHCP chaddr slice"),
+            sname: bytes[44..108].try_into().expect("DHCP sname slice"),
+            file: bytes[108..236].try_into().expect("DHCP file slice"),
             options: Vec::new(),
         };
 
@@ -328,14 +332,14 @@ impl DhcpClient {
 
     /// Process DHCP OFFER
     pub fn process_offer(&mut self, _packet: &DhcpPacket) -> Result<(), KernelError> {
-        // TODO: Parse offer, extract IP and server ID
+        // TODO(phase4): Parse DHCP offer options to extract IP and server ID
         self.state = DhcpState::Requesting;
         Ok(())
     }
 
     /// Process DHCP ACK
     pub fn process_ack(&mut self, _packet: &DhcpPacket) -> Result<(), KernelError> {
-        // TODO: Parse ACK, configure interface
+        // TODO(phase4): Parse ACK options and configure network interface
         self.state = DhcpState::Bound;
 
         println!("[DHCP] Received ACK - IP address configured");
@@ -355,7 +359,7 @@ impl DhcpClient {
         let discover = self.create_discover();
         let _discover_bytes = discover.to_bytes();
 
-        // TODO: Send via UDP to 255.255.255.255:67
+        // TODO(phase4): Send DISCOVER via UDP broadcast to 255.255.255.255:67
         println!("[DHCP] Sending DISCOVER ({} bytes)", _discover_bytes.len());
 
         self.state = DhcpState::Selecting;

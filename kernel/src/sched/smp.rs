@@ -179,6 +179,11 @@ impl CpuTopology {
     fn detect_x86_64(&mut self) {
         use core::arch::x86_64::__cpuid;
 
+        // SAFETY: CPUID is an unprivileged instruction that queries CPU
+        // feature information. Leaf 0x1 returns basic processor info and
+        // leaf 0xB returns extended topology. Both are read-only operations
+        // with no side effects. max_cpuid() verifies leaf 0xB is supported
+        // before accessing it.
         unsafe {
             // Get basic CPU info
             let cpuid = __cpuid(0x1);
@@ -204,7 +209,9 @@ impl CpuTopology {
 
     #[cfg(target_arch = "aarch64")]
     fn detect_aarch64(&mut self) {
-        // Read MPIDR_EL1 for affinity information
+        // SAFETY: MPIDR_EL1 is a read-only system register accessible from
+        // EL1 (kernel mode) that provides the CPU's affinity information
+        // (thread, core, cluster, socket). Reading it has no side effects.
         unsafe {
             let mpidr: u64;
             core::arch::asm!("mrs {}, MPIDR_EL1", out(reg) mpidr);
@@ -283,6 +290,9 @@ static CPU_TOPOLOGY: Mutex<CpuTopology> = Mutex::new(CpuTopology {
 pub fn init() {
     #[cfg(target_arch = "aarch64")]
     {
+        // SAFETY: uart_write_str performs volatile writes to the UART MMIO
+        // register at 0x09000000, which is always mapped on the QEMU virt
+        // machine. No Rust memory is aliased.
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
             uart_write_str("[SMP] Initializing SMP support (simplified for AArch64)...\n");
@@ -338,6 +348,12 @@ fn wake_up_aps() {
 
 /// Initialize specific CPU
 pub fn init_cpu(cpu_id: u8) {
+    // SAFETY: PER_CPU_DATA is a static mut array accessed during CPU
+    // initialization. This function is called either during single-threaded
+    // BSP init or from the AP startup path where each CPU initializes only
+    // its own slot (indexed by cpu_id), so no concurrent write to the same
+    // index occurs. The cpu_id is bounds-checked by callers (cpu_up checks
+    // cpu_id < MAX_CPUS).
     unsafe {
         let cpu_info = CpuInfo::new(cpu_id);
 
@@ -374,6 +390,10 @@ pub fn init_cpu(cpu_id: u8) {
 /// Get per-CPU data for current CPU
 pub fn this_cpu() -> &'static PerCpuData {
     let cpu_id = current_cpu_id();
+    // SAFETY: PER_CPU_DATA is initialized during init_cpu() for each CPU
+    // before any code calls this_cpu(). Each CPU reads only its own slot.
+    // The 'static lifetime is valid because PER_CPU_DATA is a static array
+    // that lives for the entire kernel execution.
     unsafe {
         PER_CPU_DATA[cpu_id as usize]
             .as_ref()
@@ -383,6 +403,11 @@ pub fn this_cpu() -> &'static PerCpuData {
 
 /// Get per-CPU data for specific CPU
 pub fn per_cpu(cpu_id: u8) -> Option<&'static PerCpuData> {
+    // SAFETY: PER_CPU_DATA is a static array. Reading an element is safe
+    // because writes only occur during CPU initialization (init_cpu) which
+    // writes to a different index than any concurrent reader. The returned
+    // reference is valid for 'static because the array lives for the kernel's
+    // lifetime.
     unsafe { PER_CPU_DATA[cpu_id as usize].as_ref() }
 }
 
@@ -390,7 +415,9 @@ pub fn per_cpu(cpu_id: u8) -> Option<&'static PerCpuData> {
 pub fn current_cpu_id() -> u8 {
     #[cfg(target_arch = "x86_64")]
     {
-        // Read from APIC ID or use CPUID
+        // SAFETY: CPUID leaf 0x1 is an unprivileged read-only instruction.
+        // The initial APIC ID is in bits 31:24 of EBX. This is safe to call
+        // at any time on x86_64.
         unsafe {
             use core::arch::x86_64::__cpuid;
             let cpuid = __cpuid(0x1);
@@ -400,7 +427,9 @@ pub fn current_cpu_id() -> u8 {
 
     #[cfg(target_arch = "aarch64")]
     {
-        // Read from MPIDR_EL1
+        // SAFETY: MPIDR_EL1 is a read-only system register accessible from
+        // EL1 (kernel mode). Bits [7:0] (Aff0) contain the CPU thread ID
+        // within the core. Reading has no side effects.
         unsafe {
             let mpidr: u64;
             core::arch::asm!("mrs {}, MPIDR_EL1", out(reg) mpidr);
@@ -410,7 +439,10 @@ pub fn current_cpu_id() -> u8 {
 
     #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
     {
-        // Read hart ID
+        // SAFETY: mhartid is a read-only CSR that returns the hardware
+        // thread (hart) ID. It is always readable from M-mode. This may
+        // trap in S-mode if not delegated, but during bootstrap we run in
+        // M-mode or the SBI provides this value.
         unsafe {
             let hartid: usize;
             core::arch::asm!("csrr {}, mhartid", out(reg) hartid);
@@ -434,7 +466,11 @@ pub fn send_ipi(target_cpu: u8, vector: u8) {
 
     #[cfg(target_arch = "aarch64")]
     {
-        // Use GIC to send SGI (Software Generated Interrupt)
+        // SAFETY: GICD_SGIR is a memory-mapped I/O register at a fixed address
+        // on the QEMU virt machine GIC (Generic Interrupt Controller). Writing
+        // to it triggers a Software Generated Interrupt (SGI) on the target
+        // CPU(s). The address is always mapped and the write is a volatile
+        // MMIO operation that does not alias any Rust memory.
         unsafe {
             // GIC distributor base (QEMU virt machine)
             const GICD_BASE: usize = 0x0800_0000;
@@ -461,6 +497,11 @@ pub fn send_ipi(target_cpu: u8, vector: u8) {
 
         // SBI call to send IPI
         // Function ID 0x735049 ('sPI' in ASCII) for sbi_send_ipi
+        // SAFETY: This performs an SBI ecall to send an IPI to the target
+        // hart. The calling convention uses a0 (hart_mask), a1 (base),
+        // a7 (extension ID), a6 (function ID). The ecall is a supervisor-
+        // level trap to the SBI firmware which handles IPI delivery. The
+        // clobbered registers (a0, a1) are marked as lateout.
         unsafe {
             core::arch::asm!(
                 "ecall",
@@ -608,6 +649,10 @@ pub fn migrate_task(
     from_cpu: u8,
     to_cpu: u8,
 ) -> Result<(), &'static str> {
+    // SAFETY: task_ptr is a valid NonNull<Task> passed by the caller
+    // (cpu_down or load balancer). We only read task fields (cpu_affinity,
+    // state, sched_class) for migration eligibility checks. The task is not
+    // currently running on any CPU (verified by the Running state check).
     unsafe {
         let task = task_ptr.as_ref();
 
@@ -657,7 +702,11 @@ pub fn migrate_task(
             .fetch_add(1, Ordering::Relaxed);
         to_cpu_data.cpu_info.update_load();
 
-        // Update task's current CPU hint
+        // SAFETY: task_ptr is a valid NonNull<Task> that was just removed
+        // from the source CPU queue and enqueued on the destination. We
+        // update current_cpu to reflect the new CPU assignment. No other
+        // code is modifying this task concurrently because it was removed
+        // from the source queue under lock.
         unsafe {
             let task_mut = task_ptr.as_ptr();
             (*task_mut).current_cpu = Some(to_cpu);
@@ -729,6 +778,9 @@ pub fn find_least_loaded_cpu_with_affinity(affinity_mask: u64) -> u8 {
 
 #[cfg(target_arch = "x86_64")]
 fn max_cpuid() -> u32 {
+    // SAFETY: CPUID leaf 0 is always valid on x86_64 processors. It returns
+    // the maximum supported standard CPUID leaf number in EAX. This is a
+    // read-only instruction with no side effects.
     unsafe {
         use core::arch::x86_64::__cpuid;
         let cpuid = __cpuid(0);
@@ -775,7 +827,9 @@ fn create_cpu_idle_task(cpu_id: u8) {
     idle_task.cpu_affinity = super::task::CpuSet::single(cpu_id);
 
     // Get raw pointer to idle task
-    let idle_ptr = NonNull::new(Box::leak(idle_task) as *mut _).unwrap();
+    // Box::leak always returns a non-null pointer
+    let idle_ptr =
+        NonNull::new(Box::leak(idle_task) as *mut _).expect("Box::leak returned null (impossible)");
 
     // Initialize per-CPU scheduler with idle task
     if let Some(cpu_data) = per_cpu(cpu_id) {

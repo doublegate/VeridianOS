@@ -303,6 +303,9 @@ static mut FONT_MANAGER: Option<FontManager> = None;
 
 /// Initialize the font system
 pub fn init() -> Result<(), KernelError> {
+    // SAFETY: FONT_MANAGER is a static mut Option written at most once during
+    // single-threaded kernel initialization. The is_some() guard prevents
+    // double initialization. No concurrent access occurs during boot.
     unsafe {
         if FONT_MANAGER.is_some() {
             return Err(KernelError::InvalidState {
@@ -321,6 +324,10 @@ pub fn init() -> Result<(), KernelError> {
 
 /// Get the global font manager
 pub fn get_font_manager() -> Result<&'static mut FontManager, KernelError> {
+    // SAFETY: FONT_MANAGER is a static mut Option initialized once in init().
+    // The returned &'static mut reference is valid for the kernel's lifetime.
+    // In the current single-threaded kernel model, only one caller accesses
+    // this at a time.
     unsafe {
         FONT_MANAGER.as_mut().ok_or(KernelError::InvalidState {
             expected: "initialized",

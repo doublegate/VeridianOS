@@ -149,6 +149,10 @@ impl ReadyQueue {
 
     /// Add task to appropriate queue
     pub fn enqueue(&mut self, task: NonNull<Task>) -> bool {
+        // SAFETY: `task` is a valid NonNull<Task> provided by the scheduler.
+        // We read sched_class and priority to determine which sub-queue to
+        // use. The ReadyQueue is protected by a Mutex, ensuring exclusive
+        // access during this operation.
         unsafe {
             let task_ref = task.as_ref();
             match task_ref.sched_class {
@@ -222,6 +226,10 @@ impl ReadyQueue {
 
     /// Remove specific task from queues
     pub fn remove(&mut self, task: NonNull<Task>) -> bool {
+        // SAFETY: `task` is a valid NonNull<Task> provided by the caller
+        // (e.g., migrate_task). We read sched_class and priority to find
+        // the correct sub-queue for removal. The ReadyQueue Mutex ensures
+        // exclusive access.
         unsafe {
             let task_ref = task.as_ref();
             match task_ref.sched_class {
@@ -283,6 +291,9 @@ impl CfsRunQueue {
 
     /// Add task to CFS queue
     pub fn enqueue(&mut self, task: NonNull<Task>) {
+        // SAFETY: `task` is a valid NonNull<Task>. We read vruntime and
+        // priority to determine the insertion key and weight. The CFS queue
+        // is protected by a Mutex ensuring exclusive access.
         unsafe {
             let task_ref = task.as_ref();
             let vruntime = task_ref.vruntime.max(self.min_vruntime);
@@ -302,7 +313,11 @@ impl CfsRunQueue {
             self.min_vruntime = vruntime;
 
             // Get mutable reference to remove task
-            let tasks = self.tasks.get_mut(&vruntime).unwrap();
+            // get_mut cannot fail: vruntime was just retrieved from keys().next()
+            let tasks = self
+                .tasks
+                .get_mut(&vruntime)
+                .expect("vruntime key disappeared between lookup and access");
             let task = tasks.pop();
 
             if tasks.is_empty() {
@@ -310,6 +325,9 @@ impl CfsRunQueue {
             }
 
             if let Some(task) = task {
+                // SAFETY: task is a TaskPtr that was stored in the CFS queue.
+                // We read its priority to update total_weight. The CFS queue
+                // Mutex ensures exclusive access.
                 unsafe {
                     let task_ref = task.as_ptr().as_ref();
                     self.total_weight = self
@@ -326,6 +344,9 @@ impl CfsRunQueue {
 
     /// Remove specific task
     pub fn remove(&mut self, target: NonNull<Task>) -> bool {
+        // SAFETY: `target` is a valid NonNull<Task> provided by the caller.
+        // We read vruntime and priority to find and remove it from the BTreeMap.
+        // The CFS queue Mutex ensures exclusive access.
         unsafe {
             let task_ref = target.as_ref();
             let vruntime = task_ref.vruntime;
@@ -424,6 +445,12 @@ pub const MAX_CPUS: usize = 64;
 /// Get the global ready queue (architecture-specific)
 #[cfg(target_arch = "riscv64")]
 pub fn get_ready_queue() -> &'static mut ReadyQueue {
+    // SAFETY: READY_QUEUE_STATIC is a static mut that is initialized once
+    // during early boot (single-hart, no concurrency) via init_ready_queue()
+    // or lazily here. After initialization, it is only accessed through this
+    // function. On RISC-V, we use a static mut instead of spin::Mutex to
+    // avoid deadlocks during early bootstrap. The 'static lifetime is valid
+    // because the Box is leaked into the static.
     unsafe {
         if READY_QUEUE_STATIC.is_none() {
             // Initialize the ready queue
@@ -437,13 +464,19 @@ pub fn get_ready_queue() -> &'static mut ReadyQueue {
                 panic!("Cannot initialize ready queue without alloc feature");
             }
         }
-        READY_QUEUE_STATIC.as_mut().unwrap().as_mut()
+        READY_QUEUE_STATIC
+            .as_mut()
+            .expect("ready queue not initialized")
+            .as_mut()
     }
 }
 
 /// Initialize the ready queue for RISC-V
 #[cfg(target_arch = "riscv64")]
 pub fn init_ready_queue() {
+    // SAFETY: Called once during single-hart RISC-V bootstrap. No concurrent
+    // access to READY_QUEUE_STATIC is possible at this point. The `is_none`
+    // check prevents double initialization.
     unsafe {
         if READY_QUEUE_STATIC.is_none() {
             #[cfg(feature = "alloc")]

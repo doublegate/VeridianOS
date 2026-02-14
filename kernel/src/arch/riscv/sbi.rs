@@ -2,7 +2,9 @@
 //!
 //! Provides wrappers for SBI calls to interact with machine mode firmware.
 
-// Some SBI extension IDs are defined for future use
+// SBI extension IDs and function IDs are defined per the RISC-V SBI
+// specification for completeness. They will be needed as SBI call coverage
+// expands (e.g., HSM for multi-hart boot, SRST for system reset).
 #![allow(dead_code)]
 
 /// SBI extension IDs
@@ -35,6 +37,11 @@ fn sbi_call(extension: usize, function: usize, arg0: usize, arg1: usize, arg2: u
     let error: isize;
     let value: usize;
 
+    // SAFETY: The ecall instruction invokes an SBI call to machine-mode firmware.
+    // The register convention (a0-a2 for args, a6 for function, a7 for extension)
+    // is defined by the RISC-V SBI specification. The firmware returns results in
+    // a0 (error) and a1 (value). This is the standard interface for supervisor-
+    // to-machine mode communication on RISC-V.
     unsafe {
         core::arch::asm!(
             "ecall",

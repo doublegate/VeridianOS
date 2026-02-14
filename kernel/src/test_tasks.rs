@@ -2,6 +2,14 @@
 //!
 //! These tasks are designed to test that context switching works properly
 //! on all architectures, with special handling for AArch64's loop limitations.
+//!
+//! # Safety note (AArch64 UART calls)
+//!
+//! All `unsafe { uart_write_str(...) }` blocks in this file perform MMIO
+//! writes to the QEMU virt machine UART at 0x0900_0000.  This address is
+//! mapped and valid throughout kernel execution on this platform.  The
+//! function only writes bytes to the UART data register and cannot cause
+//! memory corruption.
 
 #![allow(clippy::fn_to_numeric_cast, function_casts_as_integer)]
 
@@ -14,6 +22,14 @@ pub extern "C" fn test_task_a() -> ! {
     {
         use crate::arch::aarch64::direct_uart::{direct_print_num, uart_write_str};
 
+        // SAFETY: The entire block is unsafe because:
+        // 1. uart_write_str performs MMIO writes to the QEMU virt UART (see
+        //    module-level safety note).
+        // 2. Inline asm! instructions implement a busy-wait delay loop using scratch
+        //    registers x0-x2.  These registers are caller-saved (volatile) in the
+        //    AArch64 calling convention and are not live across the asm blocks.  The
+        //    instructions (mov, sub, cbnz) have no side effects beyond register
+        //    modification and cannot fault.
         unsafe {
             let mut counter = 0u64;
 
@@ -72,6 +88,9 @@ pub extern "C" fn test_task_b() -> ! {
     {
         use crate::arch::aarch64::direct_uart::{direct_print_num, uart_write_str};
 
+        // SAFETY: Same rationale as test_task_a -- MMIO UART writes and
+        // scratch-register-only delay loop.  See module-level safety note
+        // for UART details and test_task_a for asm! rationale.
         unsafe {
             let mut counter = 0u64;
 
@@ -134,6 +153,7 @@ pub fn create_test_tasks() {
         #[cfg(not(target_arch = "aarch64"))]
         println!("[TEST] Creating test tasks for context switch verification");
 
+        // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
         #[cfg(target_arch = "aarch64")]
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -146,6 +166,7 @@ pub fn create_test_tasks() {
                 #[cfg(not(target_arch = "aarch64"))]
                 println!("[TEST] Created process A with PID {}", _pid_a.0);
 
+                // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
                 #[cfg(target_arch = "aarch64")]
                 unsafe {
                     use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -156,6 +177,7 @@ pub fn create_test_tasks() {
                     #[cfg(not(target_arch = "aarch64"))]
                     println!("[TEST] Failed to create thread for task A: {}", _e);
 
+                    // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
                     #[cfg(target_arch = "aarch64")]
                     unsafe {
                         use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -165,6 +187,7 @@ pub fn create_test_tasks() {
                     #[cfg(not(target_arch = "aarch64"))]
                     println!("[TEST] Created thread for task A");
 
+                    // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
                     #[cfg(target_arch = "aarch64")]
                     unsafe {
                         use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -176,6 +199,7 @@ pub fn create_test_tasks() {
                 #[cfg(not(target_arch = "aarch64"))]
                 println!("[TEST] Failed to create task A: {}", _e);
 
+                // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
                 #[cfg(target_arch = "aarch64")]
                 unsafe {
                     use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -190,6 +214,7 @@ pub fn create_test_tasks() {
                 #[cfg(not(target_arch = "aarch64"))]
                 println!("[TEST] Created process B with PID {}", _pid_b.0);
 
+                // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
                 #[cfg(target_arch = "aarch64")]
                 unsafe {
                     use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -200,6 +225,7 @@ pub fn create_test_tasks() {
                     #[cfg(not(target_arch = "aarch64"))]
                     println!("[TEST] Failed to create thread for task B: {}", _e);
 
+                    // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
                     #[cfg(target_arch = "aarch64")]
                     unsafe {
                         use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -209,6 +235,7 @@ pub fn create_test_tasks() {
                     #[cfg(not(target_arch = "aarch64"))]
                     println!("[TEST] Created thread for task B");
 
+                    // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
                     #[cfg(target_arch = "aarch64")]
                     unsafe {
                         use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -220,6 +247,7 @@ pub fn create_test_tasks() {
                 #[cfg(not(target_arch = "aarch64"))]
                 println!("[TEST] Failed to create task B: {}", _e);
 
+                // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
                 #[cfg(target_arch = "aarch64")]
                 unsafe {
                     use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -231,6 +259,7 @@ pub fn create_test_tasks() {
         #[cfg(not(target_arch = "aarch64"))]
         println!("[TEST] Test tasks created successfully");
 
+        // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
         #[cfg(target_arch = "aarch64")]
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -243,6 +272,7 @@ pub fn create_test_tasks() {
         #[cfg(not(target_arch = "aarch64"))]
         println!("[TEST] Cannot create test tasks: alloc feature not enabled");
 
+        // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
         #[cfg(target_arch = "aarch64")]
         unsafe {
             use crate::arch::aarch64::direct_uart::uart_write_str;

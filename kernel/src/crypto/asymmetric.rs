@@ -48,7 +48,7 @@ impl SigningKey {
     /// Sign a message
     pub fn sign(&self, message: &[u8]) -> CryptoResult<Signature> {
         // Simplified Ed25519 signing (stub)
-        // TODO: Implement full Ed25519 algorithm
+        // TODO(phase3): Implement full Ed25519 algorithm
         let mut sig_bytes = [0u8; 64];
 
         // Simple signature for demo (NOT SECURE - just for testing)
@@ -85,7 +85,7 @@ impl VerifyingKey {
     /// Verify a signature
     pub fn verify(&self, message: &[u8], signature: &Signature) -> CryptoResult<bool> {
         // Simplified Ed25519 verification (stub)
-        // TODO: Implement full Ed25519 algorithm
+        // TODO(phase3): Implement full Ed25519 algorithm
 
         // Simple verification for demo (NOT SECURE - just for testing)
         for (i, &byte) in message.iter().enumerate().take(32) {
@@ -137,7 +137,7 @@ impl KeyPair {
     /// Create key pair from seed
     pub fn from_seed(seed: &[u8; 32]) -> CryptoResult<Self> {
         // Simplified Ed25519 key generation (stub)
-        // TODO: Implement full Ed25519 algorithm
+        // TODO(phase3): Implement full Ed25519 algorithm
 
         let signing_key = SigningKey { bytes: *seed };
 
@@ -214,7 +214,7 @@ pub mod key_exchange {
         /// Get corresponding public key
         pub fn public_key(&self) -> PublicKey {
             // Simplified X25519 public key derivation (stub)
-            // TODO: Implement full X25519 algorithm
+            // TODO(phase3): Implement full X25519 algorithm
             let mut pub_bytes = [0u8; 32];
             for (i, &byte) in self.bytes.iter().enumerate() {
                 pub_bytes[i] = byte.wrapping_mul(9);
@@ -226,7 +226,7 @@ pub mod key_exchange {
         /// Perform key exchange
         pub fn exchange(&self, their_public: &PublicKey) -> CryptoResult<SharedSecret> {
             // Simplified X25519 key exchange (stub)
-            // TODO: Implement full X25519 algorithm
+            // TODO(phase3): Implement full X25519 algorithm
             let mut shared = [0u8; 32];
 
             for (i, (s, t)) in self.bytes.iter().zip(their_public.bytes.iter()).enumerate() {

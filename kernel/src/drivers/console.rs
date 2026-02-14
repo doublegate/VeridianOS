@@ -2,7 +2,8 @@
 //!
 //! Implements console drivers for VGA text mode and serial console.
 
-// Allow dead code for console driver features not yet fully utilized
+// Console driver provides VGA text mode and serial console. Not all color
+// variants and driver methods are exercised yet.
 #![allow(dead_code, static_mut_refs)]
 
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
@@ -128,6 +129,9 @@ impl VgaConsole {
     fn update_cursor(&self) {
         let pos = self.cursor_y * self.width + self.cursor_x;
 
+        // SAFETY: I/O port writes to the VGA CRT controller (0x3D4/0x3D5)
+        // are standard VGA cursor position updates. We are in kernel
+        // mode with I/O privileges. These ports are always safe to access.
         unsafe {
             // Cursor low byte
             crate::arch::outb(0x3D4, 0x0F);
@@ -152,6 +156,9 @@ impl ConsoleDevice for VgaConsole {
     fn clear(&mut self) -> Result<(), &'static str> {
         let blank = ConsoleChar::new(b' ', ConsoleColor::LightGray, ConsoleColor::Black);
 
+        // SAFETY: self.buffer points to the VGA text buffer at 0xB8000,
+        // which is width * height ConsoleChar entries (80*25 = 2000).
+        // We write exactly that many entries, staying within bounds.
         unsafe {
             for i in 0..(self.width * self.height) {
                 *self.buffer.add(i) = blank;
@@ -171,6 +178,8 @@ impl ConsoleDevice for VgaConsole {
         }
 
         let index = self.buffer_index(x, y);
+        // SAFETY: Bounds are checked above (x < width, y < height),
+        // so index is within the VGA buffer at 0xB8000.
         unsafe {
             *self.buffer.add(index) = ch;
         }
@@ -200,6 +209,10 @@ impl ConsoleDevice for VgaConsole {
     }
 
     fn scroll_up(&mut self) -> Result<(), &'static str> {
+        // SAFETY: All buffer accesses use buffer_index(x, y) where
+        // x < self.width and y < self.height. The VGA buffer at
+        // 0xB8000 is 80*25 = 2000 ConsoleChar entries. Moving lines
+        // and clearing the last line stays within bounds.
         unsafe {
             // Move all lines up by one
             for y in 1..self.height {
@@ -240,6 +253,8 @@ impl ConsoleDevice for VgaConsole {
     fn set_cursor_visible(&mut self, visible: bool) -> Result<(), &'static str> {
         self.cursor_visible = visible;
 
+        // SAFETY: I/O port writes to VGA CRT controller (0x3D4/0x3D5)
+        // for cursor shape control. Standard VGA register access.
         unsafe {
             // Set cursor shape
             crate::arch::outb(0x3D4, 0x0A);
@@ -291,6 +306,10 @@ impl SerialConsole {
 
     /// Initialize serial port
     fn init(&mut self) {
+        // SAFETY: Standard 16550 UART initialization sequence via I/O
+        // ports. We are in kernel mode with I/O privileges. The port
+        // base address (self.port) is set at construction to a valid
+        // COM port (0x3F8, 0x2F8, 0x3E8, or 0x2E8).
         unsafe {
             // Disable interrupts
             crate::arch::outb(self.port + 1, 0x00);
@@ -315,6 +334,9 @@ impl SerialConsole {
 
     /// Write a byte to serial port
     fn write_byte(&self, byte: u8) {
+        // SAFETY: Reading the line status register (port+5) and writing
+        // to the transmit register (port) are standard 16550 UART I/O
+        // operations. Kernel mode with I/O privileges.
         unsafe {
             // Wait for transmit holding register empty
             while (crate::arch::inb(self.port + 5) & 0x20) == 0 {
@@ -327,6 +349,8 @@ impl SerialConsole {
 
     /// Read a byte from serial port (non-blocking)
     fn read_byte(&self) -> Option<u8> {
+        // SAFETY: Reading line status (port+5) and data register (port)
+        // are standard 16550 UART I/O operations.
         unsafe {
             if (crate::arch::inb(self.port + 5) & 0x01) != 0 {
                 Some(crate::arch::inb(self.port))
@@ -520,7 +544,7 @@ impl Driver for ConsoleDriver {
 
     fn detach(&mut self, _device: &DeviceInfo) -> Result<(), &'static str> {
         crate::println!("[CONSOLE] Detaching from device: {}", _device.name);
-        // TODO: Remove specific console device
+        // TODO(phase4): Remove specific console device from device list
         Ok(())
     }
 
@@ -540,7 +564,7 @@ impl Driver for ConsoleDriver {
     }
 
     fn read(&mut self, _offset: u64, _buffer: &mut [u8]) -> Result<usize, &'static str> {
-        // TODO: Read input from console (keyboard)
+        // TODO(phase4): Read input from console keyboard driver
         Ok(0)
     }
 
@@ -611,6 +635,8 @@ pub fn init() {
     }
 
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    // SAFETY: Called once during early init before concurrent access.
+    // CONSOLE_DRIVER_STATIC is only written here and read later.
     unsafe {
         CONSOLE_DRIVER_STATIC = Some(Mutex::new(console_driver));
     }
@@ -636,6 +662,8 @@ pub fn get_console_driver() -> &'static Mutex<ConsoleDriver> {
     }
 
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    // SAFETY: CONSOLE_DRIVER_STATIC was set during init(). Once set,
+    // it is never modified. The Option is always Some after init.
     unsafe {
         CONSOLE_DRIVER_STATIC
             .as_ref()

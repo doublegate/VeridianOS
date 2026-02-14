@@ -55,6 +55,7 @@ pub mod arch;
 pub mod bootstrap;
 mod cap;
 pub mod crypto;
+#[cfg(feature = "phase6-desktop")]
 pub mod desktop;
 pub mod drivers;
 pub mod elf;
@@ -121,7 +122,10 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     test_framework::test_panic_handler(info)
 }
 
-/// Heap allocation error handler
+/// Heap allocation error handler.
+///
+/// Panic is intentional: heap allocation failure in a no_std kernel is
+/// unrecoverable. The alloc_error_handler ABI requires `-> !`.
 #[alloc_error_handler]
 fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     panic!("Allocation error: {:?}", layout);

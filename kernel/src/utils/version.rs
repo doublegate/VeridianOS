@@ -1,4 +1,7 @@
-//! Kernel version information.
+//! Kernel version information
+//!
+//! Provides compile-time version metadata including semantic version,
+//! git hash, and build timestamp. Accessible via the `SYS_VERSION` syscall.
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]

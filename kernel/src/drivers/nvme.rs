@@ -2,8 +2,9 @@
 //!
 //! High-performance storage driver for NVMe SSDs using the BlockDevice trait.
 
-// Allow dead code for hardware register definitions that are part of the NVMe spec
-// but not yet used in the current implementation
+// Hardware register offsets, command opcodes, and queue structures are defined
+// per the NVMe specification. Many are retained for completeness even if the
+// current stub driver only uses a subset.
 #![allow(dead_code)]
 
 use alloc::{vec, vec::Vec};
@@ -182,21 +183,29 @@ impl NvmeController {
 
     /// Read MMIO register
     fn read_reg(&self, offset: usize) -> u32 {
+        // SAFETY: Reading an NVMe MMIO register at mmio_base + offset. The mmio_base
+        // is the controller's BAR0 address from PCI configuration. read_volatile
+        // ensures the compiler does not elide or reorder this hardware register
+        // access.
         unsafe { core::ptr::read_volatile((self.mmio_base + offset) as *const u32) }
     }
 
     /// Write MMIO register
     fn write_reg(&self, offset: usize, value: u32) {
+        // SAFETY: Writing an NVMe MMIO register. Same invariants as read_reg.
         unsafe { core::ptr::write_volatile((self.mmio_base + offset) as *mut u32, value) }
     }
 
     /// Read 64-bit MMIO register
     fn read_reg64(&self, offset: usize) -> u64 {
+        // SAFETY: Reading a 64-bit NVMe MMIO register (e.g. CAP). Same invariants as
+        // read_reg.
         unsafe { core::ptr::read_volatile((self.mmio_base + offset) as *const u64) }
     }
 
     /// Write 64-bit MMIO register
     fn write_reg64(&self, offset: usize, value: u64) {
+        // SAFETY: Writing a 64-bit NVMe MMIO register. Same invariants as write_reg.
         unsafe { core::ptr::write_volatile((self.mmio_base + offset) as *mut u64, value) }
     }
 
@@ -259,8 +268,7 @@ impl NvmeController {
 
     /// Submit command to admin queue (stub)
     fn submit_admin_command(&mut self, _cmd: SubmissionQueueEntry) -> Result<(), KernelError> {
-        // TODO: Implement command submission
-        // This requires proper queue management and doorbell ringing
+        // TODO(phase4): Implement NVMe admin command submission with doorbell ringing
         Ok(())
     }
 
@@ -270,10 +278,8 @@ impl NvmeController {
         _start_block: u64,
         _buffer: &mut [u8],
     ) -> Result<(), KernelError> {
-        // TODO: Create I/O command
-        // TODO: Submit to I/O queue
-        // TODO: Wait for completion
-        // TODO: Copy data from DMA buffer
+        // TODO(phase4): Implement NVMe read: create I/O command, submit, wait, copy
+        // from DMA
 
         Ok(())
     }
@@ -284,10 +290,8 @@ impl NvmeController {
         _start_block: u64,
         _buffer: &[u8],
     ) -> Result<(), KernelError> {
-        // TODO: Create I/O command
-        // TODO: Copy data to DMA buffer
-        // TODO: Submit to I/O queue
-        // TODO: Wait for completion
+        // TODO(phase4): Implement NVMe write: copy to DMA, create I/O command, submit,
+        // wait
 
         Ok(())
     }

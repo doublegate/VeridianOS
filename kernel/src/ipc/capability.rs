@@ -253,19 +253,19 @@ impl CapabilityTable {
     /// Insert a capability into the table
     #[allow(clippy::result_unit_err)]
     pub fn insert(&mut self, _cap: IpcCapability) -> Result<(), ()> {
-        // TODO: Implement insertion
+        // TODO(phase3): Implement capability table insertion with BTreeMap storage
         Ok(())
     }
 
     /// Lookup a capability by ID
     pub fn lookup(&self, _id: u64) -> Option<&IpcCapability> {
-        // TODO: Implement lookup
+        // TODO(phase3): Implement capability table lookup
         None
     }
 
     /// Remove a capability from the table
     pub fn remove(&mut self, _id: u64) -> Option<IpcCapability> {
-        // TODO: Implement removal
+        // TODO(phase3): Implement capability table removal
         None
     }
 }

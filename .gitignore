@@ -244,3 +244,16 @@ docs/book/book/
 # QEMU test output
 /tmp/veridian-*
 
+# Disk images for UEFI testing
+*.fat
+*.efi
+
+# Rust-analyzer macro expansion artifacts
+proc-macro-srv/
+
+# Kernel memory dumps
+vmcore*
+
+# GDB server artifacts
+.gdbserver
+

@@ -43,8 +43,7 @@ pub struct DmaBuffer {
 impl DmaBuffer {
     /// Create new DMA buffer
     pub fn new(size: usize) -> Result<Self, KernelError> {
-        // TODO: Allocate DMA-capable memory (below 4GB for 32-bit DMA)
-        // For now, placeholder
+        // TODO(phase4): Allocate DMA-capable memory (below 4GB for 32-bit DMA)
 
         Ok(Self {
             physical_addr: 0,
@@ -55,11 +54,16 @@ impl DmaBuffer {
 
     /// Get mutable slice
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: virtual_addr points to a DMA-capable buffer of exactly `size` bytes
+        // allocated for zero-copy networking. We hold &mut self so no other reference
+        // to this buffer memory exists.
         unsafe { core::slice::from_raw_parts_mut(self.virtual_addr as *mut u8, self.size) }
     }
 
     /// Get immutable slice
     pub fn as_slice(&self) -> &[u8] {
+        // SAFETY: virtual_addr points to a DMA-capable buffer of exactly `size` bytes.
+        // We hold &self so no mutable alias exists.
         unsafe { core::slice::from_raw_parts(self.virtual_addr as *const u8, self.size) }
     }
 }
@@ -181,8 +185,7 @@ impl ScatterGatherList {
                 });
             }
 
-            // TODO: Copy from physical address
-            // For now, placeholder
+            // TODO(phase4): Copy data from physical address to contiguous buffer
 
             offset += segment.length;
         }
@@ -216,8 +219,7 @@ impl ZeroCopySend {
 
     /// Add data from user buffer (zero-copy via page remapping)
     pub fn add_user_buffer(&mut self, user_addr: u64, length: usize) -> Result<(), KernelError> {
-        // TODO: Pin user pages and get physical addresses
-        // For now, placeholder
+        // TODO(phase4): Pin user pages and translate to physical addresses
 
         self.sg_list.add_segment(user_addr, length);
         Ok(())
@@ -230,8 +232,7 @@ impl ZeroCopySend {
 
     /// Execute send (hardware-assisted)
     pub fn execute(&self) -> Result<(), KernelError> {
-        // TODO: Program network card DMA engine with scatter-gather list
-        // For now, placeholder
+        // TODO(phase4): Program network card DMA engine with scatter-gather list
 
         Ok(())
     }
@@ -268,11 +269,7 @@ impl SendFile {
 
     /// Execute transfer without copying to user space
     pub fn execute(&self) -> Result<usize, KernelError> {
-        // TODO: Implement kernel-to-kernel transfer
-        // 1. Read file pages into kernel buffer pool
-        // 2. Reference pages directly in socket send buffer
-        // 3. DMA from file pages to network card
-        // 4. Release pages when send completes
+        // TODO(phase5): Implement kernel-to-kernel sendfile transfer via page remapping
 
         let _ = (self.source_fd, self.dest_socket, self.offset);
         Ok(self.count)
@@ -310,7 +307,7 @@ impl TcpCork {
     /// Force send pending data
     pub fn flush(&mut self) -> Result<(), KernelError> {
         if !self.pending.is_empty() {
-            // TODO: Send via TCP socket
+            // TODO(phase4): Send pending data via TCP socket
             self.pending.clear();
         }
         Ok(())

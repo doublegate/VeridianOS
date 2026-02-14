@@ -79,6 +79,10 @@ pub fn ct_copy(dst: &mut [u8], src: &[u8], condition: u8) {
 #[inline(never)]
 pub fn ct_zero(data: &mut [u8]) {
     for byte in data.iter_mut() {
+        // SAFETY: `byte` is a valid mutable reference from the `data` slice, so the
+        // pointer derived from it is aligned, non-null, and points to initialized
+        // memory. write_volatile is used intentionally to prevent the compiler
+        // from optimizing away the zeroing of sensitive cryptographic data.
         unsafe {
             core::ptr::write_volatile(byte, 0);
         }

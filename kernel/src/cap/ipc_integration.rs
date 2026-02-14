@@ -39,7 +39,8 @@ pub fn create_endpoint_capability(
     rights: Rights,
     cap_space: &CapabilitySpace,
 ) -> Result<CapabilityToken, CapError> {
-    let object = ObjectRef::Process { pid: owner }; // TODO: Use proper endpoint object when available
+    // TODO(phase3): Use proper ObjectRef::Endpoint when available
+    let object = ObjectRef::Process { pid: owner };
 
     cap_manager().create_capability(object, rights, cap_space)
 }

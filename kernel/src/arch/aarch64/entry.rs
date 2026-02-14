@@ -1,10 +1,17 @@
-// AArch64 kernel entry point and panic handler
+//! AArch64 kernel entry point and panic handler.
+//!
+//! Provides `arch_early_init` for early architecture setup and
+//! `arch_panic_handler` for kernel panic output via direct UART.
 
 use core::panic::PanicInfo;
 
 pub fn arch_early_init() {
     use crate::arch::aarch64::direct_uart::uart_write_str;
 
+    // SAFETY: uart_write_str performs raw MMIO writes to the PL011 UART at
+    // 0x09000000 using assembly to bypass LLVM loop compilation issues on
+    // AArch64. The UART is memory-mapped by QEMU's virt machine and writing
+    // is non-destructive. Called during early single-threaded boot.
     unsafe {
         uart_write_str("[KERNEL] AArch64 kernel_main reached successfully\n");
         uart_write_str("[KERNEL] VeridianOS Kernel v");
@@ -18,6 +25,8 @@ pub fn arch_early_init() {
 pub fn arch_panic_handler(_info: &PanicInfo) {
     use crate::arch::aarch64::direct_uart::uart_write_str;
 
+    // SAFETY: uart_write_str performs raw MMIO writes to the PL011 UART at
+    // 0x09000000. Safe during panic as only diagnostic output is produced.
     unsafe {
         uart_write_str("\n[PANIC] Kernel panic occurred!\n");
 

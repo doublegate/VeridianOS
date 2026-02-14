@@ -108,12 +108,8 @@ impl Endpoint {
         // Check if there's a waiting receiver
         let mut receivers = self.waiting_receivers.lock();
         if let Some(_receiver) = receivers.pop() {
-            // Direct handoff to waiting receiver
-            drop(receivers); // Release lock before context switch
-
-            // TODO: Perform context switch to receiver
-            // TODO: Copy message to receiver's buffer
-            // This is where we'd achieve < 5μs latency
+            // TODO(phase3): Direct context switch to receiver for <5us latency
+            drop(receivers);
 
             Ok(())
         } else {
@@ -152,19 +148,16 @@ impl Endpoint {
         }
         drop(queue);
 
-        // No messages available, need to wait
+        // TODO(phase3): Block current process and yield CPU until message arrives
         let mut receivers = self.waiting_receivers.lock();
         receivers.push(WaitingProcess {
             pid: receiver,
             message: None,
-            timeout: 0, // Infinite wait for now
+            timeout: 0,
         });
         drop(receivers);
 
-        // TODO: Block current process and yield CPU
-        // TODO: Wake up when message arrives
-
-        Err(IpcError::WouldBlock) // Placeholder
+        Err(IpcError::WouldBlock)
     }
 
     #[cfg(not(feature = "alloc"))]
@@ -188,9 +181,7 @@ impl Endpoint {
             return Err(IpcError::ChannelFull);
         }
         queue.push_back(msg);
-
-        // TODO: Wake up any waiting receivers
-
+        // TODO(phase3): Wake up any waiting receivers
         Ok(())
     }
 
@@ -226,9 +217,8 @@ impl Endpoint {
     /// Close the endpoint
     pub fn close(&self) {
         self.active.store(false, Ordering::Release);
-
-        // TODO: Wake up all waiting processes with error
-        // TODO: Clean up resources
+        // TODO(phase3): Wake up all waiting processes with error and clean up
+        // resources
     }
 }
 
@@ -285,13 +275,7 @@ impl Channel {
 /// that fit entirely in CPU registers.
 #[inline(always)]
 pub fn fast_ipc_send(msg: &SmallMessage, _target: ProcessId) -> Result<()> {
-    // TODO: Implement fast path that:
-    // 1. Validates capability in O(1) time
-    // 2. Directly switches to target process
-    // 3. Copies registers without touching memory
-    // 4. Returns immediately
-
-    // Placeholder implementation
+    // TODO(phase3): Implement O(1) capability validation + direct register transfer
     if msg.capability == 0 {
         return Err(IpcError::InvalidCapability);
     }
@@ -301,12 +285,8 @@ pub fn fast_ipc_send(msg: &SmallMessage, _target: ProcessId) -> Result<()> {
 
 /// IPC call with reply (RPC-style)
 pub fn call_reply(_request: Message, _target: ProcessId) -> Result<Message> {
-    // TODO: Implement call/reply semantics
-    // 1. Send request
-    // 2. Block waiting for reply
-    // 3. Return reply message
-
-    Err(IpcError::WouldBlock) // Placeholder
+    // TODO(phase3): Implement call/reply semantics (send, block, return reply)
+    Err(IpcError::WouldBlock)
 }
 
 #[cfg(all(test, not(target_os = "none")))]

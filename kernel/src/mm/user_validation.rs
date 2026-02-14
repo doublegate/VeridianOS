@@ -23,9 +23,12 @@ pub fn translate_address(addr: usize) -> Option<PageTableEntry> {
     // Get the page table base address
     // This would normally come from the process's memory space
     // For now, we'll use the kernel page table as a placeholder
+    // SAFETY: get_kernel_page_table() returns a usize representing the physical
+    // address of the active kernel page table (CR3 on x86_64). Casting to
+    // *const PageTable and dereferencing is valid because the page table is
+    // identity-mapped in kernel space and has 'static lifetime.
     let page_table = unsafe {
-        // TODO: Get from process memory space
-        // For now, use kernel page table
+        // TODO(phase3): Get page table from process memory space
         &*(crate::mm::get_kernel_page_table() as *const PageTable)
     };
 
@@ -45,6 +48,9 @@ pub fn translate_address(addr: usize) -> Option<PageTableEntry> {
     }
 
     // Get L3 table
+    // SAFETY: l4_entry.addr() returns the physical address of the next-level
+    // page table. This address was set by the kernel's page table setup code
+    // and points to a valid PageTable in identity-mapped kernel memory.
     let l3_table = unsafe { &*(l4_entry.addr()?.as_u64() as *const PageTable) };
 
     let l3_entry = l3_table[l3_index];
@@ -58,6 +64,9 @@ pub fn translate_address(addr: usize) -> Option<PageTableEntry> {
     }
 
     // Get L2 table
+    // SAFETY: l3_entry.addr() returns the physical address of the next-level
+    // page table, set by kernel page table initialization. The address points
+    // to a valid PageTable in identity-mapped kernel memory.
     let l2_table = unsafe { &*(l3_entry.addr()?.as_u64() as *const PageTable) };
 
     let l2_entry = l2_table[l2_index];
@@ -71,6 +80,9 @@ pub fn translate_address(addr: usize) -> Option<PageTableEntry> {
     }
 
     // Get L1 table
+    // SAFETY: l2_entry.addr() returns the physical address of the final-level
+    // page table, set by kernel page table initialization. The address points
+    // to a valid PageTable in identity-mapped kernel memory.
     let l1_table = unsafe { &*(l2_entry.addr()?.as_u64() as *const PageTable) };
 
     let l1_entry = l1_table[l1_index];

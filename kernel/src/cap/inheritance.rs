@@ -198,8 +198,7 @@ pub fn exec_inherit_capabilities(
     old_space: &CapabilitySpace,
     new_space: &CapabilitySpace,
 ) -> Result<(), &'static str> {
-    // Only preserve capabilities marked with PRESERVE_EXEC flag
-    // TODO: Implement exec filtering
+    // TODO(phase3): Filter by PRESERVE_EXEC flag instead of Inheritable policy
     inherit_capabilities(old_space, new_space, InheritancePolicy::Inheritable)?;
     Ok(())
 }
@@ -218,11 +217,9 @@ pub fn create_initial_capabilities(
         .create_capability(process_obj, process_rights, cap_space)
         .map_err(|_| "Failed to create process capability")?;
 
-    // 2. Basic IPC receive capability
-    // TODO: Create default IPC endpoint for process
+    // TODO(phase3): Create default IPC endpoint capability for process
 
-    // 3. Basic memory capabilities for stack and heap
-    // TODO: Create memory capabilities for initial mappings
+    // TODO(phase3): Create memory capabilities for stack and heap initial mappings
 
     Ok(())
 }

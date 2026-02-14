@@ -39,7 +39,7 @@ impl Compositor {
     }
 
     pub fn composite(&self) -> Result<(), KernelError> {
-        // TODO: Composite all surfaces in Z-order to framebuffer
+        // TODO(phase6): Composite all surfaces in Z-order to framebuffer
         Ok(())
     }
 }

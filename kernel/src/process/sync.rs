@@ -60,7 +60,7 @@ impl WaitQueue {
             if let Some(process) = super::table::get_process(pid) {
                 if let Some(thread) = process.get_thread(tid) {
                     thread.set_state(super::thread::ThreadState::Ready);
-                    // TODO: Add to scheduler
+                    // TODO(phase3): Add thread to scheduler run queue
                     return true;
                 }
             }
@@ -77,7 +77,7 @@ impl WaitQueue {
             if let Some(process) = super::table::get_process(pid) {
                 if let Some(thread) = process.get_thread(tid) {
                     thread.set_state(super::thread::ThreadState::Ready);
-                    // TODO: Add to scheduler
+                    // TODO(phase3): Add thread to scheduler run queue
                     count += 1;
                 }
             }
@@ -158,12 +158,16 @@ impl Mutex {
         }
     }
 
-    /// Release the mutex
-    pub fn unlock(&self) {
+    /// Release the mutex.
+    ///
+    /// Returns `Err` if the calling thread does not own the lock. Callers
+    /// should handle this as a programming error rather than letting the
+    /// kernel panic inside a critical section.
+    pub fn unlock(&self) -> Result<(), &'static str> {
         // Verify we own the lock
         if let Some(thread) = super::current_thread() {
             if self.owner.load(Ordering::Relaxed) != thread.tid.0 {
-                panic!("Mutex::unlock called by non-owner");
+                return Err("Mutex::unlock called by non-owner");
             }
         }
 
@@ -173,6 +177,8 @@ impl Mutex {
         // Wake up one waiter
         #[cfg(feature = "alloc")]
         self.waiters.wake_one();
+
+        Ok(())
     }
 
     /// Check if mutex is locked
@@ -249,12 +255,16 @@ impl Semaphore {
         }
     }
 
-    /// Signal semaphore (V operation)
-    pub fn signal(&self) {
+    /// Signal semaphore (V operation).
+    ///
+    /// Returns `Err` if signalling would exceed the maximum count, indicating
+    /// a caller bug (more signals than waits). This avoids a kernel panic
+    /// inside what may be a lock-holding context.
+    pub fn signal(&self) -> Result<(), &'static str> {
         loop {
             let count = self.count.load(Ordering::Relaxed);
             if count >= self.max_count {
-                panic!("Semaphore overflow");
+                return Err("Semaphore overflow: count would exceed max_count");
             }
 
             if self
@@ -266,7 +276,7 @@ impl Semaphore {
                 #[cfg(feature = "alloc")]
                 self.waiters.wake_one();
 
-                return;
+                return Ok(());
             }
         }
     }
@@ -302,21 +312,30 @@ impl CondVar {
         }
     }
 
-    /// Wait on condition variable
-    pub fn wait(&self, mutex: &Mutex) {
+    /// Wait on condition variable.
+    ///
+    /// Returns `Err` if the mutex is not held by the caller. The caller
+    /// must hold the mutex before calling `wait`, as required by the
+    /// standard condition variable protocol.
+    pub fn wait(&self, mutex: &Mutex) -> Result<(), &'static str> {
         // Must hold the mutex
         if !mutex.is_locked() {
-            panic!("CondVar::wait called without holding mutex");
+            return Err("CondVar::wait called without holding mutex");
         }
 
         // Add to wait queue
         self.waiters.wait();
 
         // Release mutex before blocking
-        mutex.unlock();
+        // Ignore the unlock result here: we verified the mutex was locked
+        // above and we are the only thread that should be releasing it in
+        // this protocol. If unlock fails, we still need to re-acquire.
+        let _ = mutex.unlock();
 
         // We've been woken up, re-acquire mutex
         mutex.lock();
+
+        Ok(())
     }
 
     /// Signal one waiting thread

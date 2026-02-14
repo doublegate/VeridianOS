@@ -218,11 +218,15 @@ impl AtaDriver {
 
     /// Read ATA register
     fn read_register(&self, offset: u8) -> u8 {
+        // SAFETY: Reading an ATA register via I/O port at base_port + offset. The base
+        // port (e.g. 0x1F0 for primary IDE) is a standard x86 I/O port for ATA devices.
+        // We are in kernel mode with full I/O privilege.
         unsafe { crate::arch::inb(self.base_port + offset as u16) }
     }
 
     /// Write ATA register
     fn write_register(&self, offset: u8, value: u8) {
+        // SAFETY: Writing an ATA register. Same invariants as read_register.
         unsafe {
             crate::arch::outb(self.base_port + offset as u16, value);
         }
@@ -230,11 +234,14 @@ impl AtaDriver {
 
     /// Read data port
     fn read_data(&self) -> u16 {
+        // SAFETY: Reading the 16-bit ATA data port at base_port. This is the standard
+        // mechanism for reading sector data from an ATA drive.
         unsafe { crate::arch::inw(self.base_port) }
     }
 
     /// Write data port
     fn write_data(&self, value: u16) {
+        // SAFETY: Writing the 16-bit ATA data port. Same invariants as read_data.
         unsafe {
             crate::arch::outw(self.base_port, value);
         }
@@ -621,6 +628,8 @@ pub fn init() {
     }
 
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    // SAFETY: STORAGE_MANAGER_STATIC is written once during single-threaded init.
+    // No concurrent access is possible at this point in kernel bootstrap.
     unsafe {
         STORAGE_MANAGER_STATIC = Some(Mutex::new(storage_manager));
     }
@@ -675,6 +684,8 @@ pub fn get_storage_manager() -> &'static Mutex<StorageManager> {
     }
 
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    // SAFETY: STORAGE_MANAGER_STATIC is set once during init() and never modified after.
+    // The returned reference is 'static because the static lives for the program duration.
     unsafe {
         STORAGE_MANAGER_STATIC
             .as_ref()

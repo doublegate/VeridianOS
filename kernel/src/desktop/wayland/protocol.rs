@@ -15,7 +15,7 @@ pub struct MessageHeader {
 
 /// Parse message from bytes
 pub fn parse_message(_data: &[u8]) -> Result<Message, &'static str> {
-    // TODO: Implement protocol parsing
+    // TODO(phase6): Implement Wayland wire protocol message parsing
     Err("Not implemented")
 }
 

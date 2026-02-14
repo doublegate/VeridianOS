@@ -297,6 +297,10 @@ pub fn init() {
     let topology = NumaTopology::detect();
     let scheduler = NumaScheduler::new(topology);
 
+    // SAFETY: NUMA_SCHEDULER is a static mut that is initialized once during
+    // kernel boot via this init() function. No concurrent access occurs
+    // because this runs during single-threaded initialization. After init,
+    // only get_numa_scheduler() reads it (returning an immutable reference).
     unsafe {
         NUMA_SCHEDULER = Some(scheduler);
     }
@@ -306,6 +310,9 @@ pub fn init() {
 
 /// Get global NUMA scheduler
 pub fn get_numa_scheduler() -> Option<&'static NumaScheduler> {
+    // SAFETY: NUMA_SCHEDULER is initialized once during init() and never
+    // modified afterward. Reading it is safe because the static lives for
+    // the kernel's lifetime and we only return an immutable reference.
     unsafe { NUMA_SCHEDULER.as_ref() }
 }
 

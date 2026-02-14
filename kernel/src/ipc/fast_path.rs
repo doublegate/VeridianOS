@@ -39,14 +39,20 @@ pub fn fast_send(msg: &SmallMessage, target_pid: u64) -> Result<()> {
     // Check if target is waiting for message
     if target.state == ProcessState::Blocked {
         // Direct transfer path - this is the fast case
+        // SAFETY: The target process is in the Blocked state, meaning it is waiting
+        // for a message and its register context is saved and stable. The message
+        // capability has been validated above via validate_capability_fast(). The
+        // target reference is obtained from find_process_fast() which returns a
+        // valid &mut Process. Writing to the target's saved register context while
+        // it is blocked is safe because the process is not running and no other
+        // CPU can be modifying its context concurrently.
         unsafe {
             transfer_registers(msg, target);
         }
 
         // Wake up receiver and switch to it
         target.state = ProcessState::Ready;
-        // TODO: switch_to_process requires actual sched::Process
-        // switch_to_process(&*target);
+        // TODO(phase3): Implement direct process switch via scheduler
 
         // Update performance counters
         let elapsed = read_timestamp() - start;
@@ -84,20 +90,28 @@ pub fn fast_receive(endpoint: u64, timeout: Option<u64>) -> Result<SmallMessage>
 /// Fast capability validation using cached lookups
 #[inline(always)]
 fn validate_capability_fast(cap: u64) -> bool {
-    // TODO: Implement O(1) capability lookup
-    // For now, simple validation
+    // TODO(phase3): Implement O(1) capability lookup from per-CPU cache
     cap != 0 && cap < 0x10000
 }
 
 /// Fast process lookup
 #[inline(always)]
 fn find_process_fast(_pid: u64) -> Option<&'static mut Process> {
-    // TODO: Implement O(1) process table lookup
-    // This would use a direct array index or hash table
+    // TODO(phase3): Implement O(1) process table lookup via direct array index
     None
 }
 
 /// Transfer message via registers (architecture-specific)
+///
+/// # Safety
+/// Caller must ensure:
+/// - `target` refers to a process that is currently blocked and not running on
+///   any CPU, so its saved register context can be safely mutated.
+/// - `msg` contains valid message data with a previously validated capability
+///   token.
+/// - The target process's context structure (obtained via `get_context_mut()`)
+///   is properly initialized and its register fields correspond to the IPC
+///   register convention for the current architecture.
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 unsafe fn transfer_registers<P: ProcessExt>(msg: &SmallMessage, target: &mut P) {
@@ -117,6 +131,15 @@ unsafe fn transfer_registers<P: ProcessExt>(msg: &SmallMessage, target: &mut P) 
     ctx.r10 = msg.data[3];
 }
 
+/// # Safety
+/// Caller must ensure:
+/// - `target` refers to a process that is currently blocked and not running on
+///   any CPU, so its saved register context can be safely mutated.
+/// - `msg` contains valid message data with a previously validated capability
+///   token.
+/// - The target process's context structure (obtained via `get_context_mut()`)
+///   is properly initialized and its register fields correspond to the AArch64
+///   IPC register convention (X0-X6).
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn transfer_registers<P: ProcessExt>(msg: &SmallMessage, target: &mut P) {
@@ -131,6 +154,15 @@ unsafe fn transfer_registers<P: ProcessExt>(msg: &SmallMessage, target: &mut P) 
     ctx.x6 = msg.data[3];
 }
 
+/// # Safety
+/// Caller must ensure:
+/// - `target` refers to a process that is currently blocked and not running on
+///   any CPU, so its saved register context can be safely mutated.
+/// - `msg` contains valid message data with a previously validated capability
+///   token.
+/// - The target process's context structure (obtained via `get_context_mut()`)
+///   is properly initialized and its register fields correspond to the RISC-V
+///   IPC register convention (a0-a6).
 #[cfg(target_arch = "riscv64")]
 #[inline(always)]
 unsafe fn transfer_registers<P: ProcessExt>(msg: &SmallMessage, target: &mut P) {
@@ -167,13 +199,13 @@ fn read_message_from_registers() -> SmallMessage {
 
 /// Check for pending messages without blocking
 fn check_pending_message(_endpoint: u64) -> Option<SmallMessage> {
-    // TODO: Check message queue
+    // TODO(phase3): Check message queue for pending messages
     None
 }
 
 /// Yield CPU and wait for message or timeout
 fn yield_and_wait(_timeout: Option<u64>) -> Result<()> {
-    // TODO: Implement scheduler yield
+    // TODO(phase3): Implement scheduler yield with optional timeout
     Ok(())
 }
 
@@ -181,6 +213,10 @@ fn yield_and_wait(_timeout: Option<u64>) -> Result<()> {
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn read_timestamp() -> u64 {
+    // SAFETY: _rdtsc() is an intrinsic that reads the CPU's Time Stamp Counter
+    // register via the RDTSC instruction. This is always safe to call on x86_64
+    // processors, requires no special privilege level in kernel mode, and has no
+    // side effects beyond reading a monotonically increasing counter.
     unsafe { core::arch::x86_64::_rdtsc() }
 }
 
@@ -214,7 +250,11 @@ impl ProcessExt for Process {
 // For the actual sched::Process
 impl ProcessExt for crate::sched::Process {
     fn get_context_mut(&mut self) -> &mut ProcessContext {
-        // In real implementation, this would access the actual context
+        // In real implementation, this would access the actual context.
+        // SAFETY: DUMMY_CONTEXT is a static mut used as a placeholder until the
+        // real process context infrastructure is integrated. This is not thread-safe
+        // and is only acceptable as a temporary stub. In production, each process
+        // would have its own context stored in its PCB.
         static mut DUMMY_CONTEXT: ProcessContext = ProcessContext {
             #[cfg(target_arch = "x86_64")]
             rdi: 0,
@@ -261,6 +301,13 @@ impl ProcessExt for crate::sched::Process {
             #[cfg(target_arch = "riscv64")]
             a6: 0,
         };
+        // SAFETY: We obtain a raw pointer to DUMMY_CONTEXT via `&raw mut` and
+        // dereference it to produce a mutable reference. The static mut is
+        // zero-initialized with valid ProcessContext fields. This is a known data
+        // race hazard if called concurrently from multiple CPUs, but this is a
+        // temporary placeholder -- the real implementation will use per-process
+        // context stored in each PCB. The `&raw mut` pattern avoids creating an
+        // intermediate reference to the static mut, satisfying Rust 2024 rules.
         unsafe {
             let ptr = &raw mut DUMMY_CONTEXT;
             &mut *ptr

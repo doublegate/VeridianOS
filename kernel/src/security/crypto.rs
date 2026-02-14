@@ -88,11 +88,11 @@ pub fn hash(algorithm: HashAlgorithm, data: &[u8]) -> Result<[u8; MAX_HASH_SIZE]
             sha256_simple(data, &mut output[..32]);
         }
         HashAlgorithm::Sha512 => {
-            // TODO: Implement SHA-512
+            // TODO(phase3): Implement SHA-512 hash algorithm
             return Err(KernelError::NotImplemented { feature: "feature" });
         }
         HashAlgorithm::Blake3 => {
-            // TODO: Implement BLAKE3
+            // TODO(phase3): Implement BLAKE3 hash algorithm
             return Err(KernelError::NotImplemented { feature: "feature" });
         }
     }
@@ -229,13 +229,13 @@ pub fn encrypt(
 
     match algorithm {
         EncryptionAlgorithm::Aes256Gcm => {
-            // TODO: Implement AES-256-GCM
-            // For now, just copy data (NOT SECURE - placeholder only)
+            // TODO(phase3): Implement AES-256-GCM authenticated encryption
+            // Placeholder: copies data without encryption (NOT SECURE)
             ciphertext[..plaintext.len()].copy_from_slice(plaintext);
             Ok(plaintext.len() + 16)
         }
         EncryptionAlgorithm::ChaCha20Poly1305 => {
-            // TODO: Implement ChaCha20-Poly1305
+            // TODO(phase3): Implement ChaCha20-Poly1305 AEAD cipher
             Err(KernelError::NotImplemented { feature: "feature" })
         }
     }
@@ -258,8 +258,8 @@ pub fn decrypt(
 
     match algorithm {
         EncryptionAlgorithm::Aes256Gcm => {
-            // TODO: Implement AES-256-GCM
-            // For now, just copy data (NOT SECURE - placeholder only)
+            // TODO(phase3): Implement AES-256-GCM authenticated decryption
+            // Placeholder: copies data without decryption (NOT SECURE)
             let data_len = ciphertext.len() - 16;
             if plaintext.len() < data_len {
                 return Err(KernelError::InvalidArgument {
@@ -271,7 +271,7 @@ pub fn decrypt(
             Ok(data_len)
         }
         EncryptionAlgorithm::ChaCha20Poly1305 => {
-            // TODO: Implement ChaCha20-Poly1305
+            // TODO(phase3): Implement ChaCha20-Poly1305 AEAD decryption
             Err(KernelError::NotImplemented { feature: "feature" })
         }
     }
@@ -279,10 +279,12 @@ pub fn decrypt(
 
 /// Get random bytes from hardware RNG
 pub fn get_random_bytes(buffer: &mut [u8]) -> Result<(), KernelError> {
-    // TODO: Use hardware RNG (RDRAND on x86, etc.)
-    // For now, use a simple pseudo-random approach
+    // TODO(phase3): Use hardware RNG (RDRAND on x86_64, RNDR on AArch64)
     static mut SEED: u64 = 0x123456789ABCDEF0;
 
+    // SAFETY: SEED is a static mut u64 used as a pseudo-random state. Accessed
+    // during single-threaded kernel operation. The linear congruential generator
+    // updates SEED on each call to produce different byte sequences.
     unsafe {
         for byte in buffer.iter_mut() {
             SEED = SEED.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -295,8 +297,7 @@ pub fn get_random_bytes(buffer: &mut [u8]) -> Result<(), KernelError> {
 
 /// Key derivation from password using Argon2id
 pub fn derive_key(password: &[u8], salt: &[u8], output: &mut [u8]) -> Result<(), KernelError> {
-    // TODO: Implement Argon2id
-    // For now, simple PBKDF2-like approach
+    // TODO(phase3): Implement Argon2id key derivation function
     let temp = [0u8; 64];
     hash(HashAlgorithm::Sha256, password)?;
 
@@ -311,8 +312,8 @@ pub fn derive_key(password: &[u8], salt: &[u8], output: &mut [u8]) -> Result<(),
 pub fn init() -> Result<(), KernelError> {
     println!("[CRYPTO] Initializing cryptography subsystem...");
 
-    // TODO: Initialize hardware RNG
-    // TODO: Self-test cryptographic operations
+    // TODO(phase3): Initialize hardware RNG and run self-test on cryptographic
+    // operations
 
     println!("[CRYPTO] Cryptography subsystem initialized");
     Ok(())

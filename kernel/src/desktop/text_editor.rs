@@ -2,7 +2,8 @@
 //!
 //! Simple text editor with basic editing capabilities.
 
-// Allow dead code for editor fields not yet used in rendering
+// Phase 6 (desktop) -- editor fields and methods are defined but
+// rendering is not yet connected to the compositor.
 #![allow(dead_code)]
 
 use alloc::{format, string::String, vec, vec::Vec};

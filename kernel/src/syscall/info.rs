@@ -22,6 +22,9 @@ pub fn sys_get_kernel_info(buf: usize) -> SyscallResult {
     let version_info = get_version_info();
 
     // Copy the version info to the user buffer
+    // SAFETY: buf was validated as non-zero above. The caller must provide
+    // a valid, writable pointer to a KernelVersionInfo struct. The struct
+    // is Copy and repr(C), so the write through the pointer is well-defined.
     unsafe {
         let user_buf = buf as *mut KernelVersionInfo;
         *user_buf = version_info;

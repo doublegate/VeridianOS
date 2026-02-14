@@ -9,7 +9,10 @@ pub fn get_ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
-/// Increment timer ticks (called from timer interrupt)
+/// Increment timer ticks (called from timer interrupt handler).
+///
+/// Currently unused -- will be called from the x86_64 timer interrupt
+/// handler once APIC timer is fully configured.
 #[allow(dead_code)]
 pub fn tick() {
     TICKS.fetch_add(1, Ordering::Relaxed);
@@ -26,6 +29,10 @@ pub fn setup_timer(interval_ms: u32) {
     const PIT_FREQUENCY: u32 = 1193182; // Hz
     let divisor = PIT_FREQUENCY / (1000 / interval_ms);
 
+    // SAFETY: I/O port writes to the 8254 PIT (Programmable Interval Timer).
+    // Port 0x43 is the command register, port 0x40 is channel 0 data. The
+    // command 0x36 configures channel 0 for rate generator mode with
+    // lobyte/hibyte access. The divisor is split into low and high bytes.
     unsafe {
         use x86_64::instructions::port::Port;
 

@@ -190,8 +190,7 @@ impl UdpSocket {
             });
         }
 
-        // TODO: Actually receive data from network stack
-        // For now, return empty result
+        // TODO(phase4): Receive data from network stack socket buffer
         Ok((0, self.local))
     }
 

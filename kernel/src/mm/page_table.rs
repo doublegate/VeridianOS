@@ -200,6 +200,17 @@ impl PageTableHierarchy {
     pub const fn l4_addr(&self) -> PhysicalAddress {
         self.l4_table
     }
+
+    /// Create an empty page table hierarchy for unit tests.
+    ///
+    /// This avoids calling the frame allocator, which is unavailable
+    /// in the host test environment.
+    #[cfg(test)]
+    pub fn empty_for_test() -> Self {
+        Self {
+            l4_table: PhysicalAddress::new(0),
+        }
+    }
 }
 
 /// Virtual address breakdown for 4-level paging
@@ -246,6 +257,11 @@ impl ActivePageTable {
     #[cfg(target_arch = "aarch64")]
     pub fn current() -> Self {
         let ttbr0: u64;
+        // SAFETY: Reading TTBR0_EL1 (Translation Table Base Register 0) is a
+        // read-only operation on a system register that is always accessible at
+        // EL1 (kernel mode). It has no side effects beyond returning the current
+        // page table base address. The kernel always runs at EL1 when this is
+        // called, so the register access is valid.
         unsafe {
             core::arch::asm!("mrs {}, ttbr0_el1", out(reg) ttbr0);
         }
@@ -258,6 +274,11 @@ impl ActivePageTable {
     #[cfg(target_arch = "riscv64")]
     pub fn current() -> Self {
         let satp: u64;
+        // SAFETY: Reading the SATP (Supervisor Address Translation and Protection)
+        // CSR is a read-only operation on a control/status register that is always
+        // accessible in supervisor mode. It returns the current page table
+        // configuration with no side effects. The kernel runs in S-mode when this
+        // is called.
         unsafe {
             core::arch::asm!("csrr {}, satp", out(reg) satp);
         }
@@ -278,6 +299,13 @@ impl ActivePageTable {
 
         #[cfg(target_arch = "aarch64")]
         {
+            // SAFETY: Writing TTBR0_EL1 switches the active page table for EL0/EL1
+            // translations. `self.l4_table` must contain a valid physical address of
+            // a properly constructed page table hierarchy. The ISB ensures the
+            // pipeline is flushed so subsequent instructions use the new translation
+            // tables. This is only called from kernel context (EL1) where TTBR0_EL1
+            // is writable. The caller is responsible for ensuring the new page table
+            // maps all memory the kernel needs to continue executing.
             unsafe {
                 core::arch::asm!("msr ttbr0_el1, {}", in(reg) self.l4_table.as_u64());
                 core::arch::asm!("isb");
@@ -287,6 +315,11 @@ impl ActivePageTable {
         #[cfg(target_arch = "riscv64")]
         {
             let satp = (8 << 60) | (self.l4_table.as_u64() >> 12); // Mode 8 = Sv48
+                                                                   // SAFETY: Writing the SATP CSR switches the active page table in S-mode.
+                                                                   // Mode 8 selects Sv48 (4-level paging). `self.l4_table` must contain a
+                                                                   // valid physical address of a root page table. The caller is responsible
+                                                                   // for ensuring the new page table maps all memory the kernel needs to
+                                                                   // continue executing. We are in S-mode so SATP is writable.
             unsafe {
                 core::arch::asm!("csrw satp, {}", in(reg) satp);
             }
@@ -349,6 +382,10 @@ impl PageMapper {
         let breakdown = VirtualAddressBreakdown::new(page);
 
         // Get L4 table
+        // SAFETY: `self.l4_table` was provided by the caller of `PageMapper::new`
+        // who guaranteed it points to a valid, mapped, 4096-byte-aligned page table
+        // that remains valid for the lifetime of this PageMapper. No other mutable
+        // references to this table exist (exclusive access contract from `new`).
         let l4_table = unsafe { &mut *self.l4_table };
         let l4_entry = &mut l4_table[breakdown.l4_index];
 
@@ -359,7 +396,15 @@ impl PageMapper {
                 .map_err(|_| "Failed to allocate L3 table")?;
             l4_entry.set(frame, PageFlags::PRESENT | PageFlags::WRITABLE);
         }
-        let l3_phys = l4_entry.addr().unwrap();
+        // The entry was just set to PRESENT (either already was, or we set it above),
+        // so `addr()` is guaranteed to return `Some`.
+        let l3_phys = l4_entry.addr().ok_or("L4 entry not present after setup")?;
+        // SAFETY: `l3_phys` is the physical address extracted from a present page
+        // table entry. In a kernel with identity-mapped or physically-mapped memory,
+        // this physical address is directly accessible as a virtual address. The
+        // frame was either pre-existing (valid page table) or freshly allocated and
+        // zeroed. The resulting reference has exclusive access because we hold the
+        // only mutable reference to this page table hierarchy.
         let l3_table = unsafe { &mut *(l3_phys.as_u64() as *mut PageTable) };
         let l3_entry = &mut l3_table[breakdown.l3_index];
 
@@ -370,7 +415,11 @@ impl PageMapper {
                 .map_err(|_| "Failed to allocate L2 table")?;
             l3_entry.set(frame, PageFlags::PRESENT | PageFlags::WRITABLE);
         }
-        let l2_phys = l3_entry.addr().unwrap();
+        let l2_phys = l3_entry.addr().ok_or("L3 entry not present after setup")?;
+        // SAFETY: Same invariants as the L3 table dereference above. `l2_phys` is
+        // a physical address from a present page table entry, accessible via
+        // identity/physical mapping. Exclusive access is maintained through the
+        // page table hierarchy ownership.
         let l2_table = unsafe { &mut *(l2_phys.as_u64() as *mut PageTable) };
         let l2_entry = &mut l2_table[breakdown.l2_index];
 
@@ -381,7 +430,10 @@ impl PageMapper {
                 .map_err(|_| "Failed to allocate L1 table")?;
             l2_entry.set(frame, PageFlags::PRESENT | PageFlags::WRITABLE);
         }
-        let l1_phys = l2_entry.addr().unwrap();
+        let l1_phys = l2_entry.addr().ok_or("L2 entry not present after setup")?;
+        // SAFETY: Same invariants as L3 and L2 dereferences. `l1_phys` is a valid
+        // physical address from a present page table entry. The L1 table is the
+        // leaf level containing the final page mappings.
         let l1_table = unsafe { &mut *(l1_phys.as_u64() as *mut PageTable) };
 
         // Map the page
@@ -399,27 +451,45 @@ impl PageMapper {
         let breakdown = VirtualAddressBreakdown::new(page);
 
         // Walk the page table hierarchy
+        // SAFETY: `self.l4_table` was validated by the caller of `PageMapper::new`
+        // to point to a valid, mapped page table. Exclusive access is guaranteed by
+        // the PageMapper ownership contract.
         let l4_table = unsafe { &mut *self.l4_table };
         let l4_entry = &l4_table[breakdown.l4_index];
         if !l4_entry.is_present() {
             return Err("L4 entry not present");
         }
 
-        let l3_phys = l4_entry.addr().unwrap();
+        // `is_present()` returned true, so `addr()` is guaranteed to return `Some`.
+        let l3_phys = l4_entry
+            .addr()
+            .ok_or("L4 entry has no address despite being present")?;
+        // SAFETY: `l3_phys` is the physical address from a verified-present L4 entry.
+        // In the kernel's identity/physical memory mapping, this address is directly
+        // accessible. The page table it points to was either set up during boot or
+        // allocated by `map_page`, so it contains a valid PageTable structure.
         let l3_table = unsafe { &mut *(l3_phys.as_u64() as *mut PageTable) };
         let l3_entry = &l3_table[breakdown.l3_index];
         if !l3_entry.is_present() {
             return Err("L3 entry not present");
         }
 
-        let l2_phys = l3_entry.addr().unwrap();
+        let l2_phys = l3_entry
+            .addr()
+            .ok_or("L3 entry has no address despite being present")?;
+        // SAFETY: Same invariants as L3 dereference. `l2_phys` is from a verified-
+        // present L3 entry pointing to a valid L2 page table.
         let l2_table = unsafe { &mut *(l2_phys.as_u64() as *mut PageTable) };
         let l2_entry = &l2_table[breakdown.l2_index];
         if !l2_entry.is_present() {
             return Err("L2 entry not present");
         }
 
-        let l1_phys = l2_entry.addr().unwrap();
+        let l1_phys = l2_entry
+            .addr()
+            .ok_or("L2 entry has no address despite being present")?;
+        // SAFETY: Same invariants as above. `l1_phys` is from a verified-present L2
+        // entry pointing to a valid L1 (leaf) page table.
         let l1_table = unsafe { &mut *(l1_phys.as_u64() as *mut PageTable) };
 
         // Unmap the page
@@ -427,7 +497,7 @@ impl PageMapper {
         let frame = entry.frame().ok_or("Page not mapped")?;
         entry.clear();
 
-        // TODO: TLB flush
+        // TODO(phase3): TLB flush
 
         Ok(frame)
     }

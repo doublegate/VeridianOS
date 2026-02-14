@@ -58,7 +58,10 @@ pub unsafe extern "C" fn syscall_entry() {
     );
 }
 
-/// Initialize SYSCALL/SYSRET support
+/// Initialize SYSCALL/SYSRET support.
+///
+/// Called during system call subsystem initialization. Not called during
+/// early boot but will be invoked once user-space transitions are enabled.
 #[allow(dead_code)]
 pub fn init_syscall() {
     use x86_64::registers::{
@@ -66,6 +69,10 @@ pub fn init_syscall() {
         segmentation::SegmentSelector,
     };
 
+    // SAFETY: Writing MSRs to configure SYSCALL/SYSRET is required during
+    // kernel init for system call support. EFER, LSTAR, and STAR are x86_64
+    // model-specific registers that control the SYSCALL instruction behavior.
+    // This must be called with interrupts disabled during single-threaded init.
     unsafe {
         // Enable SYSCALL/SYSRET
         Efer::update(|flags| {
@@ -87,6 +94,6 @@ pub fn init_syscall() {
             SegmentSelector(0x08), // Kernel CS (ring 0)
             SegmentSelector(0x10), // Kernel SS (ring 0)
         )
-        .unwrap();
+        .expect("failed to configure STAR MSR segment selectors");
     }
 }

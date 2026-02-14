@@ -32,6 +32,10 @@ pub fn sys_open(path: usize, flags: usize, _mode: usize) -> SyscallResult {
     }
 
     // Get path string from user space
+    // SAFETY: path was validated as non-zero above. We read bytes one at a
+    // time from the user-space pointer until we find a null terminator or
+    // reach the 4096-byte limit. The caller must provide a valid, null-
+    // terminated string in mapped user memory.
     let path_bytes = unsafe {
         let mut bytes = Vec::new();
         let mut ptr = path as *const u8;
@@ -115,6 +119,9 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
     let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
 
     // Create buffer slice
+    // SAFETY: buffer was validated as non-zero above. The caller must
+    // provide a valid, writable user-space buffer of at least `count`
+    // bytes. from_raw_parts_mut creates a mutable slice for the read.
     let buffer_slice = unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, count) };
 
     // Read from file
@@ -147,6 +154,9 @@ pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
     let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
 
     // Create buffer slice
+    // SAFETY: buffer was validated as non-zero above. The caller must
+    // provide a valid, readable user-space buffer of at least `count`
+    // bytes. from_raw_parts creates an immutable slice for the write.
     let buffer_slice = unsafe { core::slice::from_raw_parts(buffer as *const u8, count) };
 
     // Write to file
@@ -210,7 +220,10 @@ pub fn sys_stat(fd: usize, stat_buf: usize) -> SyscallResult {
     match file_desc.node.metadata() {
         Ok(metadata) => {
             // Write metadata to user buffer
-            // For now, just write size and type
+            // SAFETY: stat_buf was validated as non-zero above. The caller
+            // must provide a valid, writable pointer to a FileStat struct.
+            // We write individual fields through the pointer. FileStat is
+            // repr(C) for stable layout.
             unsafe {
                 let buf = stat_buf as *mut FileStat;
                 (*buf).size = metadata.size;
@@ -265,6 +278,9 @@ pub fn sys_mkdir(path: usize, mode: usize) -> SyscallResult {
     }
 
     // Get path string
+    // SAFETY: path was validated as non-zero above. We read bytes from the
+    // user-space pointer until null terminator or 4096-byte limit. The
+    // caller must provide a valid null-terminated string.
     let path_bytes = unsafe {
         let mut bytes = Vec::new();
         let mut ptr = path as *const u8;
@@ -304,6 +320,9 @@ pub fn sys_rmdir(path: usize) -> SyscallResult {
     }
 
     // Get path string
+    // SAFETY: path was validated as non-zero above. We read bytes from the
+    // user-space pointer until null terminator or 4096-byte limit. The
+    // caller must provide a valid null-terminated string.
     let path_bytes = unsafe {
         let mut bytes = Vec::new();
         let mut ptr = path as *const u8;
@@ -350,6 +369,8 @@ pub fn sys_mount(
     }
 
     // Get mount point path
+    // SAFETY: mount_point was validated as non-zero above. We read bytes
+    // from the user-space pointer until null terminator or 4096-byte limit.
     let mount_path_bytes = unsafe {
         let mut bytes = Vec::new();
         let mut ptr = mount_point as *const u8;
@@ -371,6 +392,8 @@ pub fn sys_mount(
     };
 
     // Get filesystem type
+    // SAFETY: fs_type was validated as non-zero above. We read bytes from
+    // the user-space pointer until null terminator or 256-byte limit.
     let fs_type_bytes = unsafe {
         let mut bytes = Vec::new();
         let mut ptr = fs_type as *const u8;
@@ -412,6 +435,8 @@ pub fn sys_unmount(mount_point: usize) -> SyscallResult {
     }
 
     // Get mount point path
+    // SAFETY: mount_point was validated as non-zero above. We read bytes
+    // from the user-space pointer until null terminator or 4096-byte limit.
     let mount_path_bytes = unsafe {
         let mut bytes = Vec::new();
         let mut ptr = mount_point as *const u8;

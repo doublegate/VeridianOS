@@ -9,7 +9,8 @@
 //! cryptography:
 //! - **ML-DSA (FIPS 204)**: Module-Lattice-Based Digital Signature Algorithm
 
-// Allow dead code for cryptographic structures pending full implementation
+// Phase 3 (security hardening) -- cryptographic structures are defined but
+// not yet exercised by higher-level callers.
 #![allow(dead_code)]
 //!   - Replaces Dilithium after standardization
 //!   - Provides quantum-resistant digital signatures
@@ -95,7 +96,7 @@ impl DilithiumSigningKey {
     /// Sign a message
     pub fn sign(&self, message: &[u8]) -> CryptoResult<DilithiumSignature> {
         // Stub implementation of ML-DSA signing
-        // TODO: Implement full Dilithium algorithm
+        // TODO(phase3): Implement full ML-DSA (Dilithium) algorithm
 
         let sig_size = match self.level {
             DilithiumLevel::Level2 => 2420,
@@ -140,7 +141,7 @@ impl DilithiumVerifyingKey {
     /// Verify a signature
     pub fn verify(&self, _message: &[u8], signature: &DilithiumSignature) -> CryptoResult<bool> {
         // Stub implementation of ML-DSA verification
-        // TODO: Implement full Dilithium algorithm
+        // TODO(phase3): Implement full ML-DSA (Dilithium) algorithm
 
         // For stub, just check signature length matches
         let expected_size = match self.level {
@@ -217,7 +218,7 @@ impl KyberSecretKey {
     /// Decapsulate to get shared secret
     pub fn decapsulate(&self, ciphertext: &KyberCiphertext) -> CryptoResult<KyberSharedSecret> {
         // Stub implementation of ML-KEM decapsulation
-        // TODO: Implement full Kyber algorithm
+        // TODO(phase3): Implement full ML-KEM (Kyber) algorithm
 
         use super::hash::sha256;
 
@@ -239,7 +240,7 @@ impl KyberPublicKey {
     /// Encapsulate to generate shared secret and ciphertext
     pub fn encapsulate(&self) -> CryptoResult<(KyberCiphertext, KyberSharedSecret)> {
         // Stub implementation of ML-KEM encapsulation
-        // TODO: Implement full Kyber algorithm
+        // TODO(phase3): Implement full ML-KEM (Kyber) algorithm
 
         use super::{hash::sha256, random::get_random};
 

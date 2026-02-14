@@ -201,7 +201,10 @@ impl EndpointRegistry {
         let endpoints = self.endpoints.lock();
 
         endpoints.get(&id).map(|ep| {
-            // Return a static reference (unsafe but necessary)
+            // SAFETY: The Endpoint is stored in a BTreeMap behind a Mutex, so it has
+            // a stable address as long as it is not removed. The returned 'static
+            // reference is valid as long as the endpoint remains in the registry.
+            // Callers must not hold this reference across endpoint removal.
             unsafe { &*(ep as *const Endpoint) }
         })
     }

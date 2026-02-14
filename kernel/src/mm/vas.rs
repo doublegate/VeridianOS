@@ -346,6 +346,11 @@ impl VirtualAddressSpace {
         {
             // AArch64 TLB flush
             use cortex_a::asm::barrier;
+            // SAFETY: `tlbi vaae1is` invalidates all TLB entries matching the given
+            // virtual address across all inner-shareable cores (broadcast). The address
+            // is shifted right by 12 to form the required page-number operand. DSB SY
+            // and ISB ensure the invalidation completes before proceeding. These are
+            // architectural maintenance instructions always safe at EL1.
             unsafe {
                 core::arch::asm!("tlbi vaae1is, {}", in(reg) mapping.start.0 >> 12);
                 barrier::dsb(barrier::SY);
@@ -355,6 +360,9 @@ impl VirtualAddressSpace {
         #[cfg(target_arch = "riscv64")]
         {
             // RISC-V TLB flush
+            // SAFETY: `sfence.vma` with a specific address and zero ASID invalidates
+            // TLB entries for that virtual address. This is a supervisor-mode fence
+            // instruction always safe in S-mode, affecting only TLB caching.
             unsafe {
                 core::arch::asm!("sfence.vma {}, zero", in(reg) mapping.start.0);
             }
@@ -541,7 +549,7 @@ impl VirtualAddressSpace {
         self.next_mmap_addr
             .store(0x4000_0000_0000, Ordering::Release);
 
-        // TODO: Free page tables
+        // TODO(phase3): Free page tables
     }
 
     /// Clear user-space mappings only (for exec)
@@ -617,9 +625,7 @@ impl VirtualAddressSpace {
             .allocate_frames(1, None)
             .map_err(|_| "Failed to allocate frame")?;
 
-        // Map the page (architecture-specific)
-        // TODO: Implement architecture-specific page mapping
-        // For now, we'll just record the mapping
+        // TODO(phase3): Implement architecture-specific page mapping
 
         // Record the mapping
         #[cfg(feature = "alloc")]
@@ -651,4 +657,259 @@ pub struct VasStats {
     pub stack_size: usize,
     pub heap_size: usize,
     pub mapping_count: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- MappingType tests ---
+
+    #[test]
+    fn test_mapping_type_equality() {
+        assert_eq!(MappingType::Code, MappingType::Code);
+        assert_ne!(MappingType::Code, MappingType::Data);
+        assert_ne!(MappingType::Stack, MappingType::Heap);
+    }
+
+    // --- VirtualMapping tests ---
+
+    #[test]
+    fn test_virtual_mapping_new_code() {
+        let start = VirtualAddress(0x1000);
+        let mapping = VirtualMapping::new(start, 0x4000, MappingType::Code);
+
+        assert_eq!(mapping.start, start);
+        assert_eq!(mapping.size, 0x4000);
+        assert_eq!(mapping.mapping_type, MappingType::Code);
+        // Code should be PRESENT and USER, but not WRITABLE
+        assert!(mapping.flags.contains(PageFlags::PRESENT));
+        assert!(mapping.flags.contains(PageFlags::USER));
+        assert!(!mapping.flags.contains(PageFlags::WRITABLE));
+    }
+
+    #[test]
+    fn test_virtual_mapping_new_data() {
+        let mapping = VirtualMapping::new(VirtualAddress(0x2000), 0x1000, MappingType::Data);
+
+        assert!(mapping.flags.contains(PageFlags::PRESENT));
+        assert!(mapping.flags.contains(PageFlags::WRITABLE));
+        assert!(mapping.flags.contains(PageFlags::USER));
+    }
+
+    #[test]
+    fn test_virtual_mapping_new_stack() {
+        let mapping = VirtualMapping::new(VirtualAddress(0x3000), 0x2000, MappingType::Stack);
+
+        assert!(mapping.flags.contains(PageFlags::PRESENT));
+        assert!(mapping.flags.contains(PageFlags::WRITABLE));
+        assert!(mapping.flags.contains(PageFlags::USER));
+        assert!(mapping.flags.contains(PageFlags::NO_EXECUTE));
+    }
+
+    #[test]
+    fn test_virtual_mapping_new_heap() {
+        let mapping = VirtualMapping::new(VirtualAddress(0x4000), 0x10000, MappingType::Heap);
+
+        assert!(mapping.flags.contains(PageFlags::PRESENT));
+        assert!(mapping.flags.contains(PageFlags::WRITABLE));
+        assert!(mapping.flags.contains(PageFlags::USER));
+        assert!(mapping.flags.contains(PageFlags::NO_EXECUTE));
+    }
+
+    #[test]
+    fn test_virtual_mapping_new_device() {
+        let mapping = VirtualMapping::new(VirtualAddress(0xF000), 0x1000, MappingType::Device);
+
+        assert!(mapping.flags.contains(PageFlags::PRESENT));
+        assert!(mapping.flags.contains(PageFlags::WRITABLE));
+        assert!(mapping.flags.contains(PageFlags::NO_CACHE));
+        // Device memory should NOT have USER flag
+        assert!(!mapping.flags.contains(PageFlags::USER));
+    }
+
+    #[test]
+    fn test_virtual_mapping_contains() {
+        let mapping = VirtualMapping::new(VirtualAddress(0x1000), 0x3000, MappingType::Data);
+
+        // Start address - contained
+        assert!(mapping.contains(VirtualAddress(0x1000)));
+        // Middle address - contained
+        assert!(mapping.contains(VirtualAddress(0x2000)));
+        // Last byte before end - contained
+        assert!(mapping.contains(VirtualAddress(0x3FFF)));
+        // End address - NOT contained (exclusive)
+        assert!(!mapping.contains(VirtualAddress(0x4000)));
+        // Before start - NOT contained
+        assert!(!mapping.contains(VirtualAddress(0x0FFF)));
+        // Well past end - NOT contained
+        assert!(!mapping.contains(VirtualAddress(0x5000)));
+    }
+
+    #[test]
+    fn test_virtual_mapping_end() {
+        let mapping = VirtualMapping::new(VirtualAddress(0x1000), 0x3000, MappingType::Data);
+        assert_eq!(mapping.end(), VirtualAddress(0x4000));
+    }
+
+    #[test]
+    fn test_virtual_mapping_zero_size() {
+        let mapping = VirtualMapping::new(VirtualAddress(0x1000), 0, MappingType::File);
+        assert_eq!(mapping.end(), VirtualAddress(0x1000));
+        // A zero-sized mapping should not contain its start address
+        assert!(!mapping.contains(VirtualAddress(0x1000)));
+    }
+
+    // --- VirtualAddressSpace tests ---
+
+    #[test]
+    fn test_vas_default_values() {
+        let vas = VirtualAddressSpace::new();
+
+        // Check default page table root
+        assert_eq!(vas.get_page_table(), 0);
+
+        // Check default heap settings
+        let heap_break = vas.brk(None);
+        assert_eq!(heap_break, VirtualAddress(0x2000_0000_0000));
+
+        // Check default stack settings
+        assert_eq!(vas.stack_top(), 0x7FFF_FFFF_0000);
+    }
+
+    #[test]
+    fn test_vas_set_page_table() {
+        let vas = VirtualAddressSpace::new();
+        vas.set_page_table(0xDEAD_BEEF_0000);
+        assert_eq!(vas.get_page_table(), 0xDEAD_BEEF_0000);
+    }
+
+    #[test]
+    fn test_vas_brk_extend_heap() {
+        let vas = VirtualAddressSpace::new();
+
+        // Initial break
+        let initial = vas.brk(None);
+        assert_eq!(initial, VirtualAddress(0x2000_0000_0000));
+
+        // Extend the heap
+        let new_addr = VirtualAddress(0x2000_0001_0000);
+        let result = vas.brk(Some(new_addr));
+        assert_eq!(result, new_addr);
+
+        // Verify it persisted
+        let current = vas.brk(None);
+        assert_eq!(current, new_addr);
+    }
+
+    #[test]
+    fn test_vas_brk_refuses_shrink() {
+        let vas = VirtualAddressSpace::new();
+
+        // Extend the heap first
+        let extended = VirtualAddress(0x2000_0001_0000);
+        vas.brk(Some(extended));
+
+        // Try to shrink (should be ignored -- brk only grows)
+        let shrink_addr = VirtualAddress(0x2000_0000_0000);
+        let result = vas.brk(Some(shrink_addr));
+        // The break should remain at the extended address
+        assert_eq!(result, extended);
+    }
+
+    #[test]
+    fn test_vas_brk_refuses_below_heap_start() {
+        let vas = VirtualAddressSpace::new();
+
+        // Try to set break below heap start
+        let below_start = VirtualAddress(0x1000_0000_0000);
+        let result = vas.brk(Some(below_start));
+        // Should remain at initial break
+        assert_eq!(result, VirtualAddress(0x2000_0000_0000));
+    }
+
+    #[test]
+    fn test_vas_stack_top_get_set() {
+        let vas = VirtualAddressSpace::new();
+
+        let default_top = vas.stack_top();
+        assert_eq!(default_top, 0x7FFF_FFFF_0000);
+
+        vas.set_stack_top(0x7000_0000_0000);
+        assert_eq!(vas.stack_top(), 0x7000_0000_0000);
+    }
+
+    #[test]
+    fn test_vas_user_stack_base_and_size() {
+        let vas = VirtualAddressSpace::new();
+
+        let stack_size = vas.user_stack_size();
+        assert_eq!(stack_size, 8 * 1024 * 1024); // 8MB
+
+        let stack_base = vas.user_stack_base();
+        let expected_base = 0x7FFF_FFFF_0000 - 8 * 1024 * 1024;
+        assert_eq!(stack_base, expected_base);
+    }
+
+    #[test]
+    fn test_vas_clone_from() {
+        let source = VirtualAddressSpace::new();
+        source.set_page_table(0xCAFE_0000);
+        source.brk(Some(VirtualAddress(0x2000_0002_0000)));
+        source.set_stack_top(0x6000_0000_0000);
+
+        let mut target = VirtualAddressSpace::new();
+        target
+            .clone_from(&source)
+            .expect("clone_from should succeed");
+
+        assert_eq!(target.get_page_table(), 0xCAFE_0000);
+        assert_eq!(target.brk(None), VirtualAddress(0x2000_0002_0000));
+        assert_eq!(target.stack_top(), 0x6000_0000_0000);
+    }
+
+    #[test]
+    fn test_vas_mmap_advances_address() {
+        let vas = VirtualAddressSpace::new();
+
+        // First mmap should return the initial mmap address
+        let addr1 = vas.mmap(0x1000, MappingType::Data);
+        assert!(addr1.is_ok());
+        let addr1 = addr1.unwrap();
+        assert_eq!(addr1, VirtualAddress(0x4000_0000_0000));
+
+        // Second mmap should advance past the first (page-aligned)
+        let addr2 = vas.mmap(0x2000, MappingType::Data);
+        assert!(addr2.is_ok());
+        let addr2 = addr2.unwrap();
+        assert_eq!(addr2, VirtualAddress(0x4000_0000_1000));
+    }
+
+    #[test]
+    fn test_vas_mmap_page_alignment() {
+        let vas = VirtualAddressSpace::new();
+
+        // Request a non-page-aligned size
+        let addr = vas.mmap(100, MappingType::Code);
+        assert!(addr.is_ok());
+
+        // Next mmap should be at page-aligned offset
+        let addr2 = vas.mmap(100, MappingType::Code);
+        assert!(addr2.is_ok());
+        let diff = addr2.unwrap().as_u64() - addr.unwrap().as_u64();
+        assert_eq!(diff, 4096, "mmap allocations should be page-aligned");
+    }
+
+    // --- VasStats tests ---
+
+    #[test]
+    fn test_vas_stats_default() {
+        let stats = VasStats::default();
+        assert_eq!(stats.total_size, 0);
+        assert_eq!(stats.code_size, 0);
+        assert_eq!(stats.data_size, 0);
+        assert_eq!(stats.stack_size, 0);
+        assert_eq!(stats.heap_size, 0);
+        assert_eq!(stats.mapping_count, 0);
+    }
 }

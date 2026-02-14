@@ -1,3 +1,9 @@
+//! x86_64 architecture support.
+//!
+//! Provides hardware initialization (GDT, IDT, PIC), interrupt control,
+//! serial I/O (COM1 at 0x3F8), VGA text output, and I/O port primitives
+//! for the x86_64 platform.
+
 #![allow(clippy::missing_safety_doc)]
 
 pub mod boot;
@@ -14,9 +20,12 @@ pub mod syscall;
 pub mod timer;
 pub mod vga;
 
+/// Called from bootstrap on x86_64; appears unused on other architectures.
 #[allow(dead_code)]
 pub fn init() {
-    // Disable interrupts during initialization
+    // SAFETY: The cli instruction disables hardware interrupts. This is required
+    // during initialization to prevent interrupt handlers from firing before the
+    // IDT and PIC are properly configured. nomem/nostack confirm no memory access.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
     }
@@ -31,6 +40,10 @@ pub fn init() {
 
     // Initialize PIC (8259) before enabling interrupts
     println!("[ARCH] Initializing PIC...");
+    // SAFETY: I/O port writes to the 8259 PIC (ports 0x20/0x21 for PIC1,
+    // 0xA0/0xA1 for PIC2) are required to initialize the interrupt controller.
+    // The initialization sequence (ICW1-ICW4) is well-defined by the 8259 spec.
+    // All interrupts are masked (0xFF) at the end to prevent spurious IRQs.
     unsafe {
         use x86_64::instructions::port::Port;
 
@@ -75,6 +88,7 @@ pub fn init() {
     println!("[ARCH] Skipping interrupt enable for now");
 }
 
+/// Halt the CPU. Used by panic/shutdown paths.
 #[allow(dead_code)]
 pub fn halt() -> ! {
     use x86_64::instructions::hlt;
@@ -84,6 +98,8 @@ pub fn halt() -> ! {
     }
 }
 
+/// Enable hardware interrupts. Will be used once interrupt handlers are fully
+/// configured.
 #[allow(dead_code)]
 pub fn enable_interrupts() {
     x86_64::instructions::interrupts::enable();
@@ -112,12 +128,15 @@ pub fn idle() {
 }
 
 pub fn serial_init() -> uart_16550::SerialPort {
+    // SAFETY: SerialPort::new(0x3F8) creates a serial port handle for COM1
+    // at the standard I/O base address. The address is well-known and the
+    // port is initialized immediately after construction.
     let mut serial_port = unsafe { uart_16550::SerialPort::new(0x3F8) };
     serial_port.init();
     serial_port
 }
 
-/// Basic I/O port functions
+/// Basic I/O port functions -- used by PCI, console, and storage drivers.
 #[allow(dead_code)]
 pub unsafe fn outb(port: u16, value: u8) {
     x86_64::instructions::port::Port::new(port).write(value);
@@ -149,6 +168,8 @@ pub unsafe fn inl(port: u16) -> u32 {
 }
 
 mod interrupts {
+    /// Enable interrupts. Will be called once interrupt handlers are
+    /// registered.
     #[allow(dead_code)]
     pub unsafe fn enable() {
         x86_64::instructions::interrupts::enable();

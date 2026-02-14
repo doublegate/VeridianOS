@@ -1,4 +1,8 @@
-// Boot entry point for RISC-V 64
+//! RISC-V 64 boot entry point.
+//!
+//! Includes the assembly startup code (`boot.S`) and the Rust `_start_rust`
+//! entry that prints an early banner via SBI console putchar and calls
+//! `kernel_main`.
 
 use core::arch::global_asm;
 
@@ -7,7 +11,9 @@ global_asm!(include_str!("boot.S"));
 
 #[no_mangle]
 pub extern "C" fn _start_rust() -> ! {
-    // Use SBI console output to show we reached Rust code
+    // SAFETY: sbi_putchar invokes the SBI legacy console putchar (ecall with
+    // a7=0x01). Used for early boot output before any Rust infrastructure is
+    // available. Always safe to call from supervisor mode.
     unsafe {
         // SBI console putchar
         sbi_putchar(b'B');
@@ -21,6 +27,9 @@ pub extern "C" fn _start_rust() -> ! {
     extern "C" {
         fn kernel_main() -> !;
     }
+    // SAFETY: kernel_main is an extern "C" function defined in main.rs that
+    // performs the full kernel initialization. It is called exactly once after
+    // early boot setup is complete.
     unsafe { kernel_main() }
 }
 

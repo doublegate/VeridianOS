@@ -124,7 +124,8 @@ impl PtyMaster {
         let bytes_to_read = buffer.len().min(output.len());
 
         for i in 0..bytes_to_read {
-            buffer[i] = output.pop_front().unwrap();
+            // bytes_to_read <= output.len(), so pop_front cannot return None
+            buffer[i] = output.pop_front().expect("output buffer underrun");
         }
 
         Ok(bytes_to_read)
@@ -138,7 +139,7 @@ impl PtyMaster {
         for &byte in data {
             // Handle special characters if needed
             if flags.isig && byte == termios::VINTR_CHAR {
-                // TODO: Send SIGINT to foreground process group
+                // TODO(phase3): Send SIGINT to foreground process group
                 continue;
             }
 
@@ -157,7 +158,7 @@ impl PtyMaster {
     /// Set window size
     pub fn set_winsize(&self, winsize: Winsize) {
         *self.winsize.write() = winsize;
-        // TODO: Send SIGWINCH to foreground process group
+        // TODO(phase3): Send SIGWINCH to foreground process group
     }
 
     /// Get window size
@@ -209,7 +210,8 @@ impl PtySlave {
             let bytes_to_read = buffer.len().min(input.len());
 
             for i in 0..bytes_to_read {
-                buffer[i] = input.pop_front().unwrap();
+                // bytes_to_read <= input.len(), so pop_front cannot return None
+                buffer[i] = input.pop_front().expect("input buffer underrun");
             }
 
             Ok(bytes_to_read)

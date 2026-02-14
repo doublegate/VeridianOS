@@ -205,11 +205,15 @@ impl VirtioNetDriver {
 
     /// Read from MMIO register
     fn read_reg(&self, offset: usize) -> u32 {
+        // SAFETY: Reading a VirtIO MMIO register at mmio_base + offset. The mmio_base
+        // is the device's memory-mapped I/O base from the device tree or PCI BAR.
+        // read_volatile prevents compiler reordering of hardware register accesses.
         unsafe { core::ptr::read_volatile((self.mmio_base + offset) as *const u32) }
     }
 
     /// Write to MMIO register
     fn write_reg(&self, offset: usize, value: u32) {
+        // SAFETY: Writing a VirtIO MMIO register. Same invariants as read_reg.
         unsafe {
             core::ptr::write_volatile((self.mmio_base + offset) as *mut u32, value);
         }
@@ -299,12 +303,7 @@ impl VirtioNetDriver {
                     resource: "virtio_tx_descriptors",
                 })?;
 
-            // TODO: Proper implementation would:
-            // 1. Allocate DMA buffer from pool
-            // 2. Copy packet data to DMA buffer
-            // 3. Set up descriptor with DMA physical address
-            // 4. Add to available ring
-            // 5. Notify device via MMIO kick
+            // TODO(phase4): Complete virtqueue TX with DMA buffer allocation and MMIO kick
 
             // For now, just track statistics
             self.stats.tx_packets += 1;
@@ -338,11 +337,7 @@ impl VirtioNetDriver {
         if let Some(ref mut rx_queue) = self.rx_queue {
             // Check if there are any used buffers
             if let Some((desc_idx, len)) = rx_queue.get_used() {
-                // TODO: Proper implementation would:
-                // 1. Get DMA buffer address from descriptor
-                // 2. Create Packet from DMA buffer data
-                // 3. Free or recycle DMA buffer
-                // 4. Add new buffer to RX queue for next packet
+                // TODO(phase4): Complete virtqueue RX with DMA buffer retrieval and recycling
 
                 self.stats.rx_packets += 1;
                 self.stats.rx_bytes += len as u64;
@@ -435,8 +430,7 @@ impl NetworkDevice for VirtioNetDriver {
             });
         }
 
-        // TODO: Implement virtqueue-based transmission
-        // For now, just update statistics
+        // TODO(phase4): Implement virtqueue-based transmission
         self.stats.tx_packets += 1;
         self.stats.tx_bytes += packet.len() as u64;
 
@@ -449,7 +443,7 @@ impl NetworkDevice for VirtioNetDriver {
             return Ok(None);
         }
 
-        // TODO: Implement virtqueue-based reception
+        // TODO(phase4): Implement virtqueue-based reception
         Ok(None)
     }
 }

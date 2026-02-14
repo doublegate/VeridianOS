@@ -9,7 +9,10 @@ pub fn get_ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
-/// Increment timer ticks (called from timer interrupt)
+/// Increment timer ticks (called from timer interrupt handler).
+///
+/// Currently unused -- will be called from the AArch64 timer interrupt
+/// handler once the GIC (Generic Interrupt Controller) is configured.
 #[allow(dead_code)]
 pub fn tick() {
     TICKS.fetch_add(1, Ordering::Relaxed);
@@ -20,6 +23,12 @@ pub fn tick() {
 
 /// Setup timer for periodic interrupts
 pub fn setup_timer(interval_ms: u32) {
+    // SAFETY: These are AArch64 system register accesses for the generic timer:
+    // - CNTFRQ_EL0: reads the counter frequency (read-only)
+    // - CNTP_TVAL_EL0: sets the timer value for the physical timer
+    // - CNTP_CTL_EL0: enables the physical timer interrupt
+    // All are accessible in EL1 (kernel mode) and are the standard mechanism
+    // for configuring periodic timer interrupts on AArch64.
     unsafe {
         // Read counter frequency
         let cntfrq: u64;

@@ -127,6 +127,10 @@ impl StackCanary {
 
     /// Place canary on stack
     pub fn place(&self, stack_ptr: *mut u64) {
+        // SAFETY: The caller must ensure stack_ptr points to a valid, aligned, writable
+        // u64 location within the process's stack. This is used during process creation
+        // where the stack is freshly allocated and the canary location is computed from
+        // the known stack base.
         unsafe {
             *stack_ptr = self.value;
         }
@@ -134,6 +138,11 @@ impl StackCanary {
 
     /// Check canary on stack
     pub fn check(&self, stack_ptr: *const u64) -> bool {
+        // SAFETY: The caller must ensure stack_ptr points to a valid, aligned, readable
+        // u64 location where a canary was previously placed via place(). If the canary
+        // has been overwritten by a buffer overflow, this read is still safe (it
+        // returns valid u64 data), but the comparison will fail indicating
+        // corruption.
         unsafe { *stack_ptr == self.value }
     }
 }
@@ -258,6 +267,9 @@ static mut MEMORY_PROTECTION: Option<MemoryProtection> = None;
 
 /// Initialize memory protection
 pub fn init() -> Result<(), KernelError> {
+    // SAFETY: MEMORY_PROTECTION is a static mut Option written once during
+    // single-threaded kernel init. No concurrent access is possible at this
+    // point in kernel bootstrap.
     unsafe {
         MEMORY_PROTECTION = Some(MemoryProtection::new()?);
     }
@@ -268,6 +280,10 @@ pub fn init() -> Result<(), KernelError> {
 
 /// Get global memory protection instance
 pub fn get_memory_protection() -> &'static MemoryProtection {
+    // SAFETY: MEMORY_PROTECTION is set once during init() and the returned
+    // reference has 'static lifetime because the static mut is never moved or
+    // dropped. The kernel is single-threaded during early access; later access
+    // is read-only.
     unsafe {
         MEMORY_PROTECTION
             .as_ref()

@@ -155,6 +155,10 @@ impl crate::arch::context::ThreadContext for AArch64Context {
 
 /// Switch context using the ThreadContext interface
 pub fn switch_context(from: &mut AArch64Context, to: &AArch64Context) {
+    // SAFETY: Both `from` and `to` are valid references to AArch64Context structs
+    // with repr(C) layout. context_switch saves all registers from the current CPU
+    // state into `from` and restores them from `to`. Interrupts must be disabled
+    // by the caller to prevent concurrent access to the contexts.
     unsafe {
         context_switch(from as *mut _, to as *const _);
     }
@@ -253,6 +257,9 @@ pub unsafe extern "C" fn context_switch(current: *mut AArch64Context, next: *con
 
 /// Initialize FPU for current CPU
 pub fn init_fpu() {
+    // SAFETY: Sets the FPEN field in CPACR_EL1 to enable FPU/SIMD access from
+    // EL1 (kernel mode). The ISB ensures the change takes effect before any
+    // subsequent FPU instructions are executed. Always available in EL1.
     unsafe {
         // Enable FPU access from EL1
         asm!(
@@ -268,6 +275,8 @@ pub fn init_fpu() {
 /// Check if CPU supports SVE
 #[allow(dead_code)]
 pub fn has_sve() -> bool {
+    // SAFETY: Reading ID_AA64PFR0_EL1 is a read-only operation that reports
+    // processor feature information. Bits [35:32] indicate SVE support.
     unsafe {
         let mut id_aa64pfr0: u64;
         asm!("mrs {}, ID_AA64PFR0_EL1", out(reg) id_aa64pfr0);
@@ -279,6 +288,9 @@ pub fn has_sve() -> bool {
 #[allow(dead_code)]
 pub fn enable_sve() {
     if has_sve() {
+        // SAFETY: Sets the ZEN field in CPACR_EL1 to enable SVE access from EL1.
+        // Only called after has_sve() confirms SVE support. The ISB ensures the
+        // change takes effect before any subsequent SVE instructions.
         unsafe {
             asm!(
                 "mrs x0, CPACR_EL1",
@@ -294,6 +306,8 @@ pub fn enable_sve() {
 /// Get current exception level
 #[allow(dead_code)]
 pub fn current_el() -> u8 {
+    // SAFETY: Reading CurrentEL is a read-only operation that returns the
+    // current exception level. Bits [3:2] encode the EL (0-3). Always accessible.
     unsafe {
         let mut current_el: u64;
         asm!("mrs {}, CurrentEL", out(reg) current_el);

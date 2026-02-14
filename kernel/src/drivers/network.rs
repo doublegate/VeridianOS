@@ -24,7 +24,7 @@ impl NetworkPacket {
         Self {
             data,
             length,
-            timestamp: 0, // TODO: Get actual timestamp
+            timestamp: 0, // TODO(phase4): Get actual timestamp from clock subsystem
         }
     }
 }
@@ -147,7 +147,7 @@ impl EthernetDriver {
 
         // Simulate packet transmission
         for packet in tx_queue.drain(..) {
-            // TODO: Actual hardware transmission
+            // TODO(phase4): Transmit packet via actual hardware DMA
             stats.tx_packets += 1;
             stats.tx_bytes += packet.length as u64;
 
@@ -256,7 +256,7 @@ impl Driver for EthernetDriver {
 
     fn probe(&mut self, _device: &DeviceInfo) -> Result<(), &'static str> {
         crate::println!("[ETH] Probing device: {}", _device.name);
-        // TODO: Check if this is actually an Ethernet device
+        // TODO(phase4): Validate device is Ethernet via PCI class/subclass
         Ok(())
     }
 
@@ -264,7 +264,7 @@ impl Driver for EthernetDriver {
         crate::println!("[ETH] Attaching to device: {}", _device.name);
 
         // Initialize hardware
-        // TODO: Initialize actual Ethernet hardware
+        // TODO(phase4): Initialize actual Ethernet hardware via MMIO registers
 
         self.up()?;
 
@@ -292,11 +292,8 @@ impl Driver for EthernetDriver {
     fn handle_interrupt(&mut self, _irq: u8) -> Result<(), &'static str> {
         crate::println!("[ETH] Handling interrupt {} for {}", _irq, self.name);
 
-        // TODO: Handle actual hardware interrupts
-        // - Check interrupt status
-        // - Process received packets
-        // - Handle transmission completion
-        // - Handle errors
+        // TODO(phase4): Handle hardware interrupts (status check, RX/TX completion,
+        // errors)
 
         Ok(())
     }
@@ -593,6 +590,8 @@ pub fn init() {
     }
 
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    // SAFETY: NETWORK_MANAGER_STATIC is written once during single-threaded init.
+    // No concurrent access is possible at this point in kernel bootstrap.
     unsafe {
         NETWORK_MANAGER_STATIC = Some(NetworkManager::new());
     }
@@ -601,10 +600,13 @@ pub fn init() {
     let loopback = Arc::new(Mutex::new(LoopbackDriver::new()));
     get_network_manager()
         .register_interface(String::from("lo"), loopback.clone())
-        .unwrap();
+        .expect("failed to register loopback interface");
 
     // Bring up loopback interface
-    loopback.lock().up().unwrap();
+    loopback
+        .lock()
+        .up()
+        .expect("failed to bring up loopback interface");
 
     // Register Ethernet driver with driver framework
     let driver_framework = crate::services::driver_framework::get_driver_framework();
@@ -646,6 +648,8 @@ pub fn is_network_initialized() -> bool {
     }
 
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    // SAFETY: Reading NETWORK_MANAGER_STATIC to check initialization. The value is
+    // set once during init() and only read thereafter.
     unsafe {
         NETWORK_MANAGER_STATIC.is_some()
     }
@@ -661,6 +665,8 @@ pub fn get_network_manager() -> &'static NetworkManager {
     }
 
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    // SAFETY: NETWORK_MANAGER_STATIC is set once during init() and never modified after.
+    // The returned reference is 'static because the static lives for the program duration.
     unsafe {
         NETWORK_MANAGER_STATIC
             .as_ref()

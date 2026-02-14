@@ -65,7 +65,7 @@ impl SecureRandom {
         let mut entropy = [0u8; 32];
 
         // Skip RDRAND for now - it causes crashes with bootloader 0.11
-        // TODO: Re-enable RDRAND after proper CPUID feature detection
+        // TODO(phase3): Re-enable RDRAND after proper CPUID feature detection
         // #[cfg(target_arch = "x86_64")]
         // {
         //     if Self::try_rdrand(&mut entropy) {
@@ -84,6 +84,11 @@ impl SecureRandom {
     fn try_rdrand(dest: &mut [u8; 32]) -> bool {
         use core::arch::x86_64::_rdrand64_step;
 
+        // SAFETY: _rdrand64_step is an x86_64 RDRAND intrinsic that writes a
+        // hardware-generated random u64 into `value`. The function returns 0 on
+        // failure (RDRAND unavailable or underflow), which we check and bail out.
+        // dest is a valid &mut [u8; 32] and chunks_exact_mut(8) yields aligned 8-byte
+        // slices.
         unsafe {
             for chunk in dest.chunks_exact_mut(8) {
                 let mut value: u64 = 0;
@@ -102,6 +107,9 @@ impl SecureRandom {
         // This is simplified - real implementation would use multiple sources
 
         #[cfg(target_arch = "x86_64")]
+        // SAFETY: _rdtsc is an x86_64 intrinsic that reads the Time Stamp Counter
+        // register. It is always available on x86_64 processors and returns the
+        // current cycle count as a u64. No memory is accessed unsafely.
         unsafe {
             use core::arch::x86_64::_rdtsc;
             let mut counter = _rdtsc();
@@ -130,7 +138,7 @@ impl SecureRandom {
 
     fn next_byte(state: &mut RandomState) -> u8 {
         // Simple counter-based generator (improved with seed mixing)
-        // TODO: Implement ChaCha20 or similar CSPRNG
+        // TODO(phase3): Replace with ChaCha20 or similar CSPRNG
         state.counter = state.counter.wrapping_add(1);
 
         let index = (state.counter as usize) % 32;
@@ -154,6 +162,9 @@ static mut RNG_STORAGE: Option<SecureRandom> = None;
 /// Initialize random number generator
 pub fn init() -> CryptoResult<()> {
     let rng = SecureRandom::new()?;
+    // SAFETY: RNG_STORAGE is a static mut Option written once during
+    // single-threaded kernel initialization. No concurrent access is possible
+    // at this point in boot.
     unsafe {
         RNG_STORAGE = Some(rng);
     }
@@ -162,11 +173,17 @@ pub fn init() -> CryptoResult<()> {
 
 /// Get global random number generator
 pub fn get_random() -> &'static SecureRandom {
+    // SAFETY: RNG_STORAGE is a static mut Option lazily initialized on first
+    // access. The is_none() check ensures it is written at most once. The
+    // returned reference has 'static lifetime because the static mut is never
+    // moved or dropped. The SecureRandom uses internal Mutex for thread-safe
+    // random generation.
     unsafe {
         if RNG_STORAGE.is_none() {
             RNG_STORAGE = Some(SecureRandom::new().expect("Failed to create RNG"));
         }
-        RNG_STORAGE.as_ref().unwrap()
+        // is_none() check above guarantees Some
+        RNG_STORAGE.as_ref().expect("RNG not initialized")
     }
 }
 

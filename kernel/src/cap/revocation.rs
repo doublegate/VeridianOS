@@ -85,7 +85,7 @@ pub fn revoke_capability(cap: CapabilityToken) -> Result<(), &'static str> {
     // Mark as revoked in capability manager
     cap_manager().revoke(cap).ok();
 
-    // TODO: Notify all processes that might have this capability
+    // TODO(phase3): Notify all processes that might have this capability
     broadcast_revocation(cap);
 
     Ok(())
@@ -223,8 +223,7 @@ impl RevocationCache {
 pub fn sys_capability_revoke(cap_value: u64) -> Result<(), &'static str> {
     let cap = CapabilityToken::from_u64(cap_value);
 
-    // TODO: Check if caller has permission to revoke this capability
-    // For now, allow any process to revoke capabilities it owns
+    // TODO(phase3): Check if caller has permission to revoke this capability
 
     revoke_capability(cap)
 }

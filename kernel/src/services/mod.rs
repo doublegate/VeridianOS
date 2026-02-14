@@ -21,6 +21,12 @@ pub fn init() {
     use crate::println;
 
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: uart_write_str writes directly to the PL011 UART at
+    // 0x09000000 (QEMU virt machine). This is the AArch64 workaround
+    // for LLVM loop compilation bugs that cause println! to hang.
+    // The UART is memory-mapped and always accessible in kernel mode.
+    // All subsequent AArch64 unsafe blocks in this function use the
+    // same pattern for the same reason.
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[SERVICES] Initializing system services (AArch64)...\n");
@@ -36,6 +42,7 @@ pub fn init() {
     process_server::init();
 
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: Direct UART write - see first block in this function.
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[SERVICES] Process server initialized\n");
@@ -51,6 +58,7 @@ pub fn init() {
     driver_framework::init();
 
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: Direct UART write - see first block in this function.
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[SERVICES] Driver framework initialized\n");
@@ -66,6 +74,7 @@ pub fn init() {
     init_system::init();
 
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: Direct UART write - see first block in this function.
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[SERVICES] Init system initialized\n");
@@ -81,6 +90,7 @@ pub fn init() {
     crate::thread_api::init();
 
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: Direct UART write - see first block in this function.
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[SERVICES] Thread management initialized\n");
@@ -96,6 +106,7 @@ pub fn init() {
     crate::stdlib::init();
 
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: Direct UART write - see first block in this function.
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[SERVICES] Standard library initialized\n");
@@ -111,6 +122,7 @@ pub fn init() {
     shell::init();
 
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: Direct UART write - see first block in this function.
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[SERVICES] Shell initialized\n");

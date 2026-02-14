@@ -42,7 +42,7 @@ impl RamNode {
                 permissions,
                 uid: 0,
                 gid: 0,
-                created: 0, // TODO: Add timestamp
+                created: 0, // TODO(phase3): Use clock subsystem for timestamps
                 modified: 0,
                 accessed: 0,
             }),
@@ -90,7 +90,7 @@ impl VfsNode for RamNode {
         buffer[..bytes_to_read].copy_from_slice(&data[offset..offset + bytes_to_read]);
 
         // Update accessed time
-        self.metadata.write().accessed = 0; // TODO: Get current time
+        self.metadata.write().accessed = 0; // TODO(phase3): Use clock subsystem for timestamps
 
         Ok(bytes_to_read)
     }
@@ -116,7 +116,7 @@ impl VfsNode for RamNode {
         // Update metadata
         let mut metadata = self.metadata.write();
         metadata.size = file_data.len();
-        metadata.modified = 0; // TODO: Get current time
+        metadata.modified = 0; // TODO(phase3): Use clock subsystem for timestamps
 
         Ok(data.len())
     }
@@ -143,7 +143,7 @@ impl VfsNode for RamNode {
         entries.push(DirEntry {
             name: String::from(".."),
             node_type: NodeType::Directory,
-            inode: self.inode, // TODO: Track parent
+            inode: self.inode, // TODO(phase3): Track parent inode for proper ".." entries
         });
 
         // Add children
@@ -247,7 +247,7 @@ impl VfsNode for RamNode {
 
         let mut metadata = self.metadata.write();
         metadata.size = size;
-        metadata.modified = 0; // TODO: Get current time
+        metadata.modified = 0; // TODO(phase3): Use clock subsystem for timestamps
 
         Ok(())
     }
@@ -295,5 +295,391 @@ impl Filesystem for RamFs {
     fn sync(&self) -> Result<(), &'static str> {
         // RAM filesystem doesn't need syncing
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- RamFs construction tests ---
+
+    #[test]
+    fn test_ramfs_new() {
+        let fs = RamFs::new();
+        assert_eq!(fs.name(), "ramfs");
+        assert!(!fs.is_readonly());
+    }
+
+    #[test]
+    fn test_ramfs_default() {
+        let fs = RamFs::default();
+        assert_eq!(fs.name(), "ramfs");
+    }
+
+    #[test]
+    fn test_ramfs_root_is_directory() {
+        let fs = RamFs::new();
+        let root = fs.root();
+        assert_eq!(root.node_type(), NodeType::Directory);
+    }
+
+    #[test]
+    fn test_ramfs_sync() {
+        let fs = RamFs::new();
+        assert!(fs.sync().is_ok());
+    }
+
+    // --- File creation and I/O tests ---
+
+    #[test]
+    fn test_create_file() {
+        let fs = RamFs::new();
+        let root = fs.root();
+
+        let file = root.create("hello.txt", Permissions::default());
+        assert!(file.is_ok());
+        assert_eq!(file.unwrap().node_type(), NodeType::File);
+    }
+
+    #[test]
+    fn test_create_duplicate_file_fails() {
+        let fs = RamFs::new();
+        let root = fs.root();
+
+        root.create("dup.txt", Permissions::default()).unwrap();
+        let result = root.create("dup.txt", Permissions::default());
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "File already exists");
+    }
+
+    #[test]
+    fn test_write_and_read_file() {
+        let fs = RamFs::new();
+        let root = fs.root();
+
+        let file = root.create("data.txt", Permissions::default()).unwrap();
+
+        // Write data
+        let written = file.write(0, b"Hello, World!");
+        assert!(written.is_ok());
+        assert_eq!(written.unwrap(), 13);
+
+        // Read data back
+        let mut buf = vec![0u8; 20];
+        let read = file.read(0, &mut buf);
+        assert!(read.is_ok());
+        assert_eq!(read.unwrap(), 13);
+        assert_eq!(&buf[..13], b"Hello, World!");
+    }
+
+    #[test]
+    fn test_write_at_offset() {
+        let fs = RamFs::new();
+        let root = fs.root();
+        let file = root.create("offset.txt", Permissions::default()).unwrap();
+
+        // Write at offset 0
+        file.write(0, b"AAAA").unwrap();
+        // Overwrite middle bytes
+        file.write(1, b"BB").unwrap();
+
+        let mut buf = vec![0u8; 4];
+        file.read(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"ABBA");
+    }
+
+    #[test]
+    fn test_write_extends_file() {
+        let fs = RamFs::new();
+        let root = fs.root();
+        let file = root.create("extend.txt", Permissions::default()).unwrap();
+
+        // Write at offset beyond current size -- should zero-fill gap
+        file.write(5, b"end").unwrap();
+
+        let mut buf = vec![0u8; 8];
+        let n = file.read(0, &mut buf).unwrap();
+        assert_eq!(n, 8);
+        assert_eq!(&buf[..5], &[0, 0, 0, 0, 0]);
+        assert_eq!(&buf[5..8], b"end");
+    }
+
+    #[test]
+    fn test_read_at_offset_beyond_eof() {
+        let fs = RamFs::new();
+        let root = fs.root();
+        let file = root.create("eof.txt", Permissions::default()).unwrap();
+        file.write(0, b"short").unwrap();
+
+        let mut buf = vec![0u8; 10];
+        let n = file.read(100, &mut buf).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn test_read_partial() {
+        let fs = RamFs::new();
+        let root = fs.root();
+        let file = root.create("partial.txt", Permissions::default()).unwrap();
+        file.write(0, b"Hello, World!").unwrap();
+
+        // Read only 5 bytes
+        let mut buf = vec![0u8; 5];
+        let n = file.read(0, &mut buf).unwrap();
+        assert_eq!(n, 5);
+        assert_eq!(&buf, b"Hello");
+    }
+
+    #[test]
+    fn test_read_from_directory_fails() {
+        let fs = RamFs::new();
+        let root = fs.root();
+
+        let mut buf = vec![0u8; 10];
+        let result = root.read(0, &mut buf);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Not a file");
+    }
+
+    #[test]
+    fn test_write_to_directory_fails() {
+        let fs = RamFs::new();
+        let root = fs.root();
+
+        let result = root.write(0, b"data");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Not a file");
+    }
+
+    // --- File metadata tests ---
+
+    #[test]
+    fn test_file_metadata() {
+        let fs = RamFs::new();
+        let root = fs.root();
+        let file = root.create("meta.txt", Permissions::default()).unwrap();
+        file.write(0, b"content").unwrap();
+
+        let meta = file.metadata().unwrap();
+        assert_eq!(meta.node_type, NodeType::File);
+        assert_eq!(meta.size, 7);
+    }
+
+    #[test]
+    fn test_directory_metadata() {
+        let fs = RamFs::new();
+        let root = fs.root();
+        let meta = root.metadata().unwrap();
+        assert_eq!(meta.node_type, NodeType::Directory);
+    }
+
+    // --- Truncate tests ---
+
+    #[test]
+    fn test_truncate_file() {
+        let fs = RamFs::new();
+        let root = fs.root();
+        let file = root.create("trunc.txt", Permissions::default()).unwrap();
+        file.write(0, b"Hello, World!").unwrap();
+
+        // Truncate to 5 bytes
+        file.truncate(5).unwrap();
+
+        let meta = file.metadata().unwrap();
+        assert_eq!(meta.size, 5);
+
+        let mut buf = vec![0u8; 10];
+        let n = file.read(0, &mut buf).unwrap();
+        assert_eq!(n, 5);
+        assert_eq!(&buf[..5], b"Hello");
+    }
+
+    #[test]
+    fn test_truncate_to_zero() {
+        let fs = RamFs::new();
+        let root = fs.root();
+        let file = root.create("empty.txt", Permissions::default()).unwrap();
+        file.write(0, b"data").unwrap();
+
+        file.truncate(0).unwrap();
+        let meta = file.metadata().unwrap();
+        assert_eq!(meta.size, 0);
+    }
+
+    #[test]
+    fn test_truncate_directory_fails() {
+        let fs = RamFs::new();
+        let root = fs.root();
+        let result = root.truncate(0);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Not a file");
+    }
+
+    // --- Directory operations tests ---
+
+    #[test]
+    fn test_mkdir() {
+        let fs = RamFs::new();
+        let root = fs.root();
+
+        let dir = root.mkdir("subdir", Permissions::default());
+        assert!(dir.is_ok());
+        assert_eq!(dir.unwrap().node_type(), NodeType::Directory);
+    }
+
+    #[test]
+    fn test_mkdir_duplicate_fails() {
+        let fs = RamFs::new();
+        let root = fs.root();
+
+        root.mkdir("dup", Permissions::default()).unwrap();
+        let result = root.mkdir("dup", Permissions::default());
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Directory already exists");
+    }
+
+    #[test]
+    fn test_mkdir_on_file_fails() {
+        let fs = RamFs::new();
+        let root = fs.root();
+        let file = root.create("file", Permissions::default()).unwrap();
+
+        let result = file.mkdir("subdir", Permissions::default());
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Not a directory");
+    }
+
+    #[test]
+    fn test_lookup() {
+        let fs = RamFs::new();
+        let root = fs.root();
+
+        root.create("myfile", Permissions::default()).unwrap();
+
+        let found = root.lookup("myfile");
+        assert!(found.is_ok());
+        assert_eq!(found.unwrap().node_type(), NodeType::File);
+    }
+
+    #[test]
+    fn test_lookup_not_found() {
+        let fs = RamFs::new();
+        let root = fs.root();
+
+        let result = root.lookup("missing");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "File not found");
+    }
+
+    #[test]
+    fn test_lookup_on_file_fails() {
+        let fs = RamFs::new();
+        let root = fs.root();
+        let file = root.create("f", Permissions::default()).unwrap();
+
+        let result = file.lookup("anything");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Not a directory");
+    }
+
+    #[test]
+    fn test_readdir() {
+        let fs = RamFs::new();
+        let root = fs.root();
+
+        root.create("file1", Permissions::default()).unwrap();
+        root.mkdir("dir1", Permissions::default()).unwrap();
+
+        let entries = root.readdir().unwrap();
+        // Should have ".", "..", "file1", "dir1"
+        assert_eq!(entries.len(), 4);
+
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"."));
+        assert!(names.contains(&".."));
+        assert!(names.contains(&"file1"));
+        assert!(names.contains(&"dir1"));
+    }
+
+    #[test]
+    fn test_readdir_on_file_fails() {
+        let fs = RamFs::new();
+        let root = fs.root();
+        let file = root.create("f", Permissions::default()).unwrap();
+
+        let result = file.readdir();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Not a directory");
+    }
+
+    // --- Unlink tests ---
+
+    #[test]
+    fn test_unlink_file() {
+        let fs = RamFs::new();
+        let root = fs.root();
+
+        root.create("victim", Permissions::default()).unwrap();
+        let result = root.unlink("victim");
+        assert!(result.is_ok());
+
+        // Should no longer be found
+        assert!(root.lookup("victim").is_err());
+    }
+
+    #[test]
+    fn test_unlink_empty_directory() {
+        let fs = RamFs::new();
+        let root = fs.root();
+
+        root.mkdir("emptydir", Permissions::default()).unwrap();
+        let result = root.unlink("emptydir");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_unlink_nonempty_directory_fails() {
+        let fs = RamFs::new();
+        let root = fs.root();
+
+        let dir = root.mkdir("notempty", Permissions::default()).unwrap();
+        dir.create("child", Permissions::default()).unwrap();
+
+        let result = root.unlink("notempty");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Directory not empty");
+    }
+
+    #[test]
+    fn test_unlink_not_found() {
+        let fs = RamFs::new();
+        let root = fs.root();
+
+        let result = root.unlink("phantom");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "File not found");
+    }
+
+    #[test]
+    fn test_unlink_on_file_fails() {
+        let fs = RamFs::new();
+        let root = fs.root();
+        let file = root.create("f", Permissions::default()).unwrap();
+
+        let result = file.unlink("anything");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Not a directory");
+    }
+
+    #[test]
+    fn test_create_on_file_fails() {
+        let fs = RamFs::new();
+        let root = fs.root();
+        let file = root.create("f", Permissions::default()).unwrap();
+
+        let result = file.create("sub", Permissions::default());
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Not a directory");
     }
 }

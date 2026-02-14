@@ -24,6 +24,10 @@ impl EarlySerial {
 
     /// Initialize the serial port
     pub fn init(&mut self) {
+        // SAFETY: Direct I/O port writes to configure the 16550 UART at the
+        // base address (COM1 = 0x3F8). The initialization sequence (disable
+        // IRQs, set baud rate via DLAB, configure line control, enable FIFO,
+        // loopback test) is well-defined by the 16550 UART specification.
         unsafe {
             // Disable interrupts
             outb(self.base + 1, 0x00);
@@ -62,6 +66,9 @@ impl EarlySerial {
 
     /// Write a single byte
     pub fn write_byte(&mut self, byte: u8) {
+        // SAFETY: I/O port reads (line status register) and writes (transmit
+        // buffer) to the 16550 UART. The port must have been initialized first.
+        // We spin-wait until the transmit buffer is empty before sending.
         unsafe {
             // Wait for transmit buffer to be empty
             while (inb(self.base + 5) & 0x20) == 0 {
@@ -115,6 +122,10 @@ pub static mut EARLY_SERIAL: EarlySerial = EarlySerial::new();
 
 /// Initialize early serial output
 pub fn init() {
+    // SAFETY: EARLY_SERIAL is a static mut EarlySerial initialized once during
+    // early boot. addr_of_mut! avoids creating a mutable reference to the static
+    // mut, instead operating through a raw pointer. No concurrent access is
+    // possible during early single-threaded boot.
     unsafe {
         let serial = core::ptr::addr_of_mut!(EARLY_SERIAL);
         (*serial).init();
@@ -127,6 +138,10 @@ pub fn init() {
 #[allow(clippy::macro_metavars_in_unsafe)]
 macro_rules! early_print {
     ($($arg:tt)*) => {
+        // SAFETY: addr_of_mut! accesses the EARLY_SERIAL static mut through
+        // a raw pointer, avoiding a mutable reference. The write is safe
+        // because this macro is only used during early single-threaded boot
+        // before any concurrent access is possible.
         #[allow(clippy::macro_metavars_in_unsafe)]
         unsafe {
             use core::fmt::Write;

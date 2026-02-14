@@ -292,6 +292,9 @@ fn get_current_time() -> u64 {
     // For now, use the timestamp counter
     #[cfg(target_arch = "x86_64")]
     {
+        // SAFETY: _rdtsc() reads the x86_64 Time Stamp Counter via the RDTSC
+        // instruction. This is a read-only, side-effect-free operation that is always
+        // available in kernel mode and requires no special setup or preconditions.
         unsafe { core::arch::x86_64::_rdtsc() }
     }
 

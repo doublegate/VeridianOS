@@ -208,8 +208,7 @@ impl RpcServer {
                     params.push(((value >> (i * 8)) & 0xFF) as u8);
                 }
 
-                // Dispatch to service (for now, just echo back)
-                // TODO: Lookup service by method_id and dispatch
+                // TODO(phase3): Optimize service dispatch with direct method_id lookup
                 let services = self.services.read();
 
                 // Find service that handles this method
@@ -328,6 +327,11 @@ pub fn init() {
 
 /// Get global RPC registry
 pub fn get_registry() -> &'static RpcRegistry {
+    // SAFETY: REGISTRY_STORAGE is a function-local static mut Option lazily
+    // initialized on first access. The is_none() check ensures it is written at
+    // most once. The returned reference has 'static lifetime because
+    // function-local statics persist for the program's duration. The
+    // RpcRegistry uses internal Mutex for thread safety.
     unsafe {
         static mut REGISTRY_STORAGE: Option<RpcRegistry> = None;
 
@@ -335,7 +339,10 @@ pub fn get_registry() -> &'static RpcRegistry {
             REGISTRY_STORAGE = Some(RpcRegistry::new());
         }
 
-        REGISTRY_STORAGE.as_ref().unwrap()
+        // is_none() check above guarantees Some
+        REGISTRY_STORAGE
+            .as_ref()
+            .expect("RPC registry not initialized")
     }
 }
 

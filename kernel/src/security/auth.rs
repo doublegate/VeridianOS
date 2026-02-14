@@ -146,7 +146,7 @@ impl UserAccount {
             // Simplified TOTP verification
             // In production, use proper TOTP implementation
             let time_step = 30; // 30 second windows
-            let current_time = 0u64; // TODO: Get actual time
+            let current_time = 0u64; // TODO(phase3): Get actual system time from clock subsystem
 
             let time_counter = current_time / time_step;
 
@@ -346,6 +346,9 @@ static mut AUTH_MANAGER: Option<AuthManager> = None;
 
 /// Initialize authentication framework
 pub fn init() -> Result<(), KernelError> {
+    // SAFETY: AUTH_MANAGER is a static mut Option written once during
+    // single-threaded kernel init. No concurrent access is possible at this
+    // point in kernel bootstrap.
     unsafe {
         AUTH_MANAGER = Some(AuthManager::new());
     }
@@ -362,6 +365,10 @@ pub fn init() -> Result<(), KernelError> {
 
 /// Get global authentication manager
 pub fn get_auth_manager() -> &'static AuthManager {
+    // SAFETY: AUTH_MANAGER is set once during init() and the returned reference has
+    // 'static lifetime because the static mut is never moved or dropped. The
+    // AuthManager uses internal RwLock synchronization for thread-safe access
+    // to accounts.
     unsafe { AUTH_MANAGER.as_ref().expect("Auth manager not initialized") }
 }
 
