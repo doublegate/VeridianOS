@@ -141,10 +141,6 @@ pub fn init() {
         }
     }
 
-    // Initialize RISC-V ready queue to avoid spin lock issues
-    #[cfg(target_arch = "riscv64")]
-    super::queue::init_ready_queue();
-
     // Initialize SMP support
     smp::init();
 

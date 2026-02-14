@@ -376,20 +376,20 @@ fn create_minimal_init() -> Result<ProcessId, &'static str> {
     }
 
     #[cfg(target_arch = "riscv64")]
-    if let Some(process) = crate::process::get_process(pid) {
-        let mut memory_space = process.memory_space.lock();
-        let page_flags = crate::mm::PageFlags::PRESENT | crate::mm::PageFlags::USER;
-        memory_space.map_page(entry_point, page_flags)?;
-
-        // RISC-V: j . (0000006f)
-        // SAFETY: entry_point was just mapped with USER | PRESENT flags above.
-        // Writing the RISC-V "j ." (jump-to-self) instruction at the entry
-        // point creates a minimal init process that spins in place.
-        unsafe {
-            let code_ptr = entry_point as *mut u32;
-            *code_ptr = 0x0000006f;
-        }
+    {
+        // RISC-V: Cannot directly write to user-space virtual addresses during
+        // early boot because map_page() only records the mapping in a BTreeMap
+        // without creating hardware page table entries. With SATP in Bare mode,
+        // address 0x200000 maps to physical 0x200000, which is not RAM on the
+        // QEMU virt machine (RAM starts at 0x80000000). Writing there causes a
+        // store access fault and, with no trap handler (stvec) configured, the
+        // CPU reboots via OpenSBI.
+        //
+        // The init process PCB is created for bookkeeping. Actual user-space
+        // code loading will require proper page table activation in a future
+        // phase.
         println!("[LOADER] Minimal init process created (PID {})", pid.0);
+        println!("[LOADER] NOTE: RISC-V user-space init requires page table activation");
     }
 
     Ok(pid)

@@ -19,7 +19,7 @@ use super::VirtualAddress;
 // Static heap storage - kept in BSS for layout stability across all
 // architectures. x86_64 uses this directly; AArch64/RISC-V use fixed physical
 // addresses instead to avoid BSS/heap overlap issues.
-static mut HEAP_MEMORY: [u8; 2 * 1024 * 1024] = [0; 2 * 1024 * 1024];
+static mut HEAP_MEMORY: [u8; 4 * 1024 * 1024] = [0; 4 * 1024 * 1024];
 
 /// Kernel heap size (16 MB initially)
 pub const HEAP_SIZE: usize = 16 * 1024 * 1024;
@@ -279,9 +279,12 @@ pub fn init() -> Result<(), &'static str> {
     #[allow(unused_unsafe)]
     unsafe {
         let heap_start = core::ptr::addr_of_mut!(HEAP_MEMORY) as *mut u8;
-        let heap_size = 512 * 1024; // Size of HEAP_MEMORY (512KB)
+        let heap_size = 4 * 1024 * 1024; // Size of HEAP_MEMORY (4MB)
 
-        // RISC-V: Use lock-free UnsafeBumpAllocator
+        // RISC-V: Use UnsafeBumpAllocator (same as AArch64).
+        // LockedHeap's linked-list free list gets corrupted on RISC-V bare
+        // metal ("Hole list out of order?"), so we use the simpler bump
+        // allocator with a 4MB heap that provides ample space for boot.
         #[cfg(target_arch = "riscv64")]
         {
             println!("[HEAP] Initializing RISC-V UnsafeBumpAllocator");
@@ -293,33 +296,13 @@ pub fn init() -> Result<(), &'static str> {
             // SAFETY: `ALLOCATOR` is the global bump allocator. `heap_start` points to
             // valid memory of at least `heap_size` bytes (the static HEAP_MEMORY array).
             // This is called once during single-threaded boot, so no concurrent access.
-            // The `alloc` call uses a layout with size=8, align=8 which are valid (both
-            // powers of two, size > 0).
             unsafe {
-                use core::alloc::GlobalAlloc;
-
-                use crate::ALLOCATOR;
-
-                println!("[HEAP] Calling ALLOCATOR.init()...");
-                ALLOCATOR.init(heap_start, heap_size);
-                println!("[HEAP] ALLOCATOR.init() completed");
-
-                let test_layout = core::alloc::Layout::from_size_align(8, 8)
-                    .expect("Layout(8, 8) is always valid: size and align are both powers of two");
-                let test_ptr = ALLOCATOR.alloc(test_layout);
-                if !test_ptr.is_null() {
-                    println!("[HEAP] Test allocation successful at {:p}", test_ptr);
-                } else {
-                    println!("[HEAP] WARNING: Test allocation failed!");
-                }
+                crate::ALLOCATOR.init(heap_start, heap_size);
             }
 
-            println!("[HEAP] Initializing locked allocator...");
+            // Initialize locked allocator for compatibility
             let mut allocator = crate::get_allocator().lock();
-            // SAFETY: `heap_start` and `heap_size` describe valid, owned memory
-            // (the static HEAP_MEMORY array). The locked allocator's `init` requires
-            // the memory region to be unused and exclusively available, which is
-            // guaranteed because this runs once during single-threaded boot.
+            // SAFETY: Same memory region, called once during boot.
             unsafe {
                 allocator.init(heap_start, heap_size);
             }

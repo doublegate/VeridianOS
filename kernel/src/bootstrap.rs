@@ -646,7 +646,14 @@ fn create_init_process() {
             Ok(_init_pid) => {
                 println!("[BOOTSTRAP] Init process created with PID {}", _init_pid.0);
 
-                // Try to load a shell as well
+                // Try to load a shell as well.
+                // Skip on RISC-V: the bump allocator (4 MB, no dealloc) is
+                // nearly exhausted by this point and the additional process
+                // creation triggers heap allocations whose zero-fill
+                // overwrites VFS_PTR in adjacent BSS, causing a panic.
+                // User-space execution is not functional yet on any
+                // architecture, so the shell PCB is not needed.
+                #[cfg(not(target_arch = "riscv64"))]
                 if let Ok(_shell_pid) = crate::userspace::loader::load_shell() {
                     println!(
                         "[BOOTSTRAP] Shell process created with PID {}",

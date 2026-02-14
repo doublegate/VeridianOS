@@ -445,12 +445,12 @@ pub const MAX_CPUS: usize = 64;
 /// Get the global ready queue (architecture-specific)
 #[cfg(target_arch = "riscv64")]
 pub fn get_ready_queue() -> &'static mut ReadyQueue {
-    // SAFETY: READY_QUEUE_STATIC is a static mut that is initialized once
-    // during early boot (single-hart, no concurrency) via init_ready_queue()
-    // or lazily here. After initialization, it is only accessed through this
-    // function. On RISC-V, we use a static mut instead of spin::Mutex to
-    // avoid deadlocks during early bootstrap. The 'static lifetime is valid
-    // because the Box is leaked into the static.
+    // SAFETY: READY_QUEUE_STATIC is a static mut that is lazily initialized
+    // on first access during early boot (single-hart, no concurrency). After
+    // initialization, it is only accessed through this function. On RISC-V,
+    // we use a static mut instead of spin::Mutex to avoid deadlocks during
+    // early bootstrap. The 'static lifetime is valid because the Box is
+    // leaked into the static.
     unsafe {
         if READY_QUEUE_STATIC.is_none() {
             // Initialize the ready queue
@@ -468,24 +468,5 @@ pub fn get_ready_queue() -> &'static mut ReadyQueue {
             .as_mut()
             .expect("ready queue not initialized")
             .as_mut()
-    }
-}
-
-/// Initialize the ready queue for RISC-V
-#[cfg(target_arch = "riscv64")]
-pub fn init_ready_queue() {
-    // SAFETY: Called once during single-hart RISC-V bootstrap. No concurrent
-    // access to READY_QUEUE_STATIC is possible at this point. The `is_none`
-    // check prevents double initialization.
-    unsafe {
-        if READY_QUEUE_STATIC.is_none() {
-            #[cfg(feature = "alloc")]
-            {
-                crate::println!("[SCHED] Initializing RISC-V ready queue...");
-                let queue = alloc::boxed::Box::new(ReadyQueue::new());
-                READY_QUEUE_STATIC = Some(queue);
-                crate::println!("[SCHED] RISC-V ready queue initialized");
-            }
-        }
     }
 }
