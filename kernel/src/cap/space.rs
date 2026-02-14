@@ -9,6 +9,7 @@ use super::{
     token::{CapabilityToken, Rights},
     types::CapabilityId,
 };
+use crate::error::KernelError;
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -185,10 +186,12 @@ impl CapabilitySpace {
         cap: CapabilityToken,
         object: ObjectRef,
         rights: Rights,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), KernelError> {
         // Check quota before inserting
         if self.used.load(Ordering::Relaxed) >= self.quota {
-            return Err("Capability quota exceeded");
+            return Err(KernelError::ResourceExhausted {
+                resource: "capability quota",
+            });
         }
 
         let cap_id = cap.id() as usize;
@@ -197,7 +200,10 @@ impl CapabilitySpace {
         if cap_id < L1_SIZE {
             let mut entry = self.l1_table[cap_id].write();
             if entry.is_some() {
-                return Err("Capability slot already occupied");
+                return Err(KernelError::AlreadyExists {
+                    resource: "capability slot",
+                    id: cap_id as u64,
+                });
             }
             *entry = Some(CapabilityEntry::new(cap, object, rights));
             self.used.fetch_add(1, Ordering::Relaxed);
@@ -220,7 +226,10 @@ impl CapabilitySpace {
 
             let mut entry = l2_table[l2_index].write();
             if entry.is_some() {
-                return Err("Capability slot already occupied");
+                return Err(KernelError::AlreadyExists {
+                    resource: "capability slot",
+                    id: cap_id as u64,
+                });
             }
             *entry = Some(CapabilityEntry::new(cap, object, rights));
             self.used.fetch_add(1, Ordering::Relaxed);
@@ -229,7 +238,9 @@ impl CapabilitySpace {
         }
 
         #[cfg(not(feature = "alloc"))]
-        Err("Capability ID exceeds L1 table size")
+        Err(KernelError::ResourceExhausted {
+            resource: "L1 capability table",
+        })
     }
 
     /// Remove a capability from the space
@@ -311,7 +322,7 @@ impl CapabilitySpace {
     ///
     /// Copies all capabilities from the source space to this space.
     /// Used during fork() to give child process same capabilities as parent.
-    pub fn clone_from(&self, other: &Self) -> Result<(), &'static str> {
+    pub fn clone_from(&self, other: &Self) -> Result<(), KernelError> {
         // Clear existing capabilities first
         self.clear();
 
@@ -373,14 +384,17 @@ impl CapabilitySpace {
     }
 
     /// Revoke a specific capability by ID
-    pub fn revoke(&mut self, cap_id: CapabilityId) -> Result<(), &'static str> {
+    pub fn revoke(&mut self, cap_id: CapabilityId) -> Result<(), KernelError> {
         // Create a token with the given ID and current generation
         let token = CapabilityToken::from_id_and_generation(cap_id, self.generation());
 
         if self.remove(token).is_some() {
             Ok(())
         } else {
-            Err("Capability not found")
+            Err(KernelError::InvalidCapability {
+                cap_id: cap_id.0,
+                reason: crate::error::CapError::NotFound,
+            })
         }
     }
 
@@ -389,14 +403,16 @@ impl CapabilitySpace {
         &mut self,
         rights: Rights,
         object: ObjectRef,
-    ) -> Result<CapabilityId, &'static str> {
+    ) -> Result<CapabilityId, KernelError> {
         // Simple ID allocation - in real implementation this would use the global
         // manager
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
 
         if id > 0xFFFF_FFFF_FFFF {
-            return Err("Capability ID space exhausted");
+            return Err(KernelError::ResourceExhausted {
+                resource: "capability IDs",
+            });
         }
 
         let token = CapabilityToken::new(id, self.generation(), 0, 0);
@@ -412,7 +428,7 @@ impl CapabilitySpace {
 
     /// Iterate over all capabilities (for inheritance)
     #[cfg(feature = "alloc")]
-    pub fn iter_capabilities<F>(&self, mut f: F) -> Result<(), &'static str>
+    pub fn iter_capabilities<F>(&self, mut f: F) -> Result<(), KernelError>
     where
         F: FnMut(&CapabilityEntry) -> bool,
     {

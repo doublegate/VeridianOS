@@ -10,6 +10,7 @@ use core::{
 };
 
 use super::{FrameNumber, PageFlags, PhysicalAddress, VirtualAddress, FRAME_ALLOCATOR};
+use crate::error::KernelError;
 
 /// Number of entries in a page table
 pub const PAGE_TABLE_ENTRIES: usize = 512;
@@ -182,11 +183,14 @@ pub struct PageTableHierarchy {
 
 impl PageTableHierarchy {
     /// Create a new page table hierarchy
-    pub fn new() -> Result<Self, &'static str> {
+    pub fn new() -> Result<Self, KernelError> {
         let frame = FRAME_ALLOCATOR
             .lock()
             .allocate_frames(1, None)
-            .map_err(|_| "Failed to allocate L4 page table")?;
+            .map_err(|_| KernelError::OutOfMemory {
+                requested: 1,
+                available: 0,
+            })?;
 
         let l4_addr = PhysicalAddress::new(frame.as_u64() << 12);
 
@@ -378,7 +382,7 @@ impl PageMapper {
         frame: FrameNumber,
         flags: PageFlags,
         allocator: &mut impl FrameAllocator,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), KernelError> {
         let breakdown = VirtualAddressBreakdown::new(page);
 
         // Get L4 table
@@ -391,14 +395,21 @@ impl PageMapper {
 
         // Get or create L3 table
         if !l4_entry.is_present() {
-            let frame = allocator
-                .allocate_frames(1, None)
-                .map_err(|_| "Failed to allocate L3 table")?;
+            let frame =
+                allocator
+                    .allocate_frames(1, None)
+                    .map_err(|_| KernelError::OutOfMemory {
+                        requested: 1,
+                        available: 0,
+                    })?;
             l4_entry.set(frame, PageFlags::PRESENT | PageFlags::WRITABLE);
         }
         // The entry was just set to PRESENT (either already was, or we set it above),
         // so `addr()` is guaranteed to return `Some`.
-        let l3_phys = l4_entry.addr().ok_or("L4 entry not present after setup")?;
+        let l3_phys = l4_entry.addr().ok_or(KernelError::InvalidState {
+            expected: "L4 entry present",
+            actual: "not present",
+        })?;
         // SAFETY: `l3_phys` is the physical address extracted from a present page
         // table entry. In a kernel with identity-mapped or physically-mapped memory,
         // this physical address is directly accessible as a virtual address. The
@@ -410,12 +421,19 @@ impl PageMapper {
 
         // Get or create L2 table
         if !l3_entry.is_present() {
-            let frame = allocator
-                .allocate_frames(1, None)
-                .map_err(|_| "Failed to allocate L2 table")?;
+            let frame =
+                allocator
+                    .allocate_frames(1, None)
+                    .map_err(|_| KernelError::OutOfMemory {
+                        requested: 1,
+                        available: 0,
+                    })?;
             l3_entry.set(frame, PageFlags::PRESENT | PageFlags::WRITABLE);
         }
-        let l2_phys = l3_entry.addr().ok_or("L3 entry not present after setup")?;
+        let l2_phys = l3_entry.addr().ok_or(KernelError::InvalidState {
+            expected: "L3 entry present",
+            actual: "not present",
+        })?;
         // SAFETY: Same invariants as the L3 table dereference above. `l2_phys` is
         // a physical address from a present page table entry, accessible via
         // identity/physical mapping. Exclusive access is maintained through the
@@ -425,12 +443,19 @@ impl PageMapper {
 
         // Get or create L1 table
         if !l2_entry.is_present() {
-            let frame = allocator
-                .allocate_frames(1, None)
-                .map_err(|_| "Failed to allocate L1 table")?;
+            let frame =
+                allocator
+                    .allocate_frames(1, None)
+                    .map_err(|_| KernelError::OutOfMemory {
+                        requested: 1,
+                        available: 0,
+                    })?;
             l2_entry.set(frame, PageFlags::PRESENT | PageFlags::WRITABLE);
         }
-        let l1_phys = l2_entry.addr().ok_or("L2 entry not present after setup")?;
+        let l1_phys = l2_entry.addr().ok_or(KernelError::InvalidState {
+            expected: "L2 entry present",
+            actual: "not present",
+        })?;
         // SAFETY: Same invariants as L3 and L2 dereferences. `l1_phys` is a valid
         // physical address from a present page table entry. The L1 table is the
         // leaf level containing the final page mappings.
@@ -439,7 +464,10 @@ impl PageMapper {
         // Map the page
         let entry = &mut l1_table[breakdown.l1_index];
         if entry.is_present() {
-            return Err("Page already mapped");
+            return Err(KernelError::AlreadyExists {
+                resource: "page mapping",
+                id: page.as_u64(),
+            });
         }
         entry.set(frame, flags | PageFlags::PRESENT);
 
@@ -447,7 +475,7 @@ impl PageMapper {
     }
 
     /// Unmap a page
-    pub fn unmap_page(&mut self, page: VirtualAddress) -> Result<FrameNumber, &'static str> {
+    pub fn unmap_page(&mut self, page: VirtualAddress) -> Result<FrameNumber, KernelError> {
         let breakdown = VirtualAddressBreakdown::new(page);
 
         // Walk the page table hierarchy
@@ -457,13 +485,16 @@ impl PageMapper {
         let l4_table = unsafe { &mut *self.l4_table };
         let l4_entry = &l4_table[breakdown.l4_index];
         if !l4_entry.is_present() {
-            return Err("L4 entry not present");
+            return Err(KernelError::UnmappedMemory {
+                addr: page.as_u64() as usize,
+            });
         }
 
         // `is_present()` returned true, so `addr()` is guaranteed to return `Some`.
-        let l3_phys = l4_entry
-            .addr()
-            .ok_or("L4 entry has no address despite being present")?;
+        let l3_phys = l4_entry.addr().ok_or(KernelError::InvalidState {
+            expected: "L4 entry has address",
+            actual: "no address",
+        })?;
         // SAFETY: `l3_phys` is the physical address from a verified-present L4 entry.
         // In the kernel's identity/physical memory mapping, this address is directly
         // accessible. The page table it points to was either set up during boot or
@@ -471,33 +502,41 @@ impl PageMapper {
         let l3_table = unsafe { &mut *(l3_phys.as_u64() as *mut PageTable) };
         let l3_entry = &l3_table[breakdown.l3_index];
         if !l3_entry.is_present() {
-            return Err("L3 entry not present");
+            return Err(KernelError::UnmappedMemory {
+                addr: page.as_u64() as usize,
+            });
         }
 
-        let l2_phys = l3_entry
-            .addr()
-            .ok_or("L3 entry has no address despite being present")?;
+        let l2_phys = l3_entry.addr().ok_or(KernelError::InvalidState {
+            expected: "L3 entry has address",
+            actual: "no address",
+        })?;
         // SAFETY: Same invariants as L3 dereference. `l2_phys` is from a verified-
         // present L3 entry pointing to a valid L2 page table.
         let l2_table = unsafe { &mut *(l2_phys.as_u64() as *mut PageTable) };
         let l2_entry = &l2_table[breakdown.l2_index];
         if !l2_entry.is_present() {
-            return Err("L2 entry not present");
+            return Err(KernelError::UnmappedMemory {
+                addr: page.as_u64() as usize,
+            });
         }
 
-        let l1_phys = l2_entry
-            .addr()
-            .ok_or("L2 entry has no address despite being present")?;
+        let l1_phys = l2_entry.addr().ok_or(KernelError::InvalidState {
+            expected: "L2 entry has address",
+            actual: "no address",
+        })?;
         // SAFETY: Same invariants as above. `l1_phys` is from a verified-present L2
         // entry pointing to a valid L1 (leaf) page table.
         let l1_table = unsafe { &mut *(l1_phys.as_u64() as *mut PageTable) };
 
         // Unmap the page
         let entry = &mut l1_table[breakdown.l1_index];
-        let frame = entry.frame().ok_or("Page not mapped")?;
+        let frame = entry.frame().ok_or(KernelError::UnmappedMemory {
+            addr: page.as_u64() as usize,
+        })?;
         entry.clear();
 
-        // TODO(phase3): TLB flush
+        // TODO(future): TLB flush
 
         Ok(frame)
     }

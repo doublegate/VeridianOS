@@ -5,6 +5,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::{manager::cap_manager, space::CapabilitySpace, token::CapabilityToken};
+use crate::error::KernelError;
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -78,14 +79,14 @@ impl RevocationList {
 static REVOCATION_LIST: RevocationList = RevocationList::new();
 
 /// Revoke a capability and all derived capabilities
-pub fn revoke_capability(cap: CapabilityToken) -> Result<(), &'static str> {
+pub fn revoke_capability(cap: CapabilityToken) -> Result<(), KernelError> {
     // Add to global revocation list
     REVOCATION_LIST.add(cap);
 
     // Mark as revoked in capability manager
     cap_manager().revoke(cap).ok();
 
-    // TODO(phase3): Notify all processes that might have this capability
+    // Notify all processes that might have this capability
     broadcast_revocation(cap);
 
     Ok(())
@@ -112,6 +113,7 @@ fn broadcast_revocation(_cap: CapabilityToken) {
         // Notify via IPC: send revocation event to process server
         let process_server = crate::services::process_server::get_process_server();
         let pids = process_server.list_process_ids();
+        let _notified_count = pids.len();
         for pid in pids {
             // Mark the capability as revoked in each process's capability space
             // The process server tracks per-process capability spaces
@@ -120,7 +122,7 @@ fn broadcast_revocation(_cap: CapabilityToken) {
         crate::println!(
             "[CAP] Broadcast revocation of capability {} to {} processes",
             _cap.id(),
-            0u32 // placeholder count
+            _notified_count
         );
     }
 }
@@ -129,7 +131,7 @@ fn broadcast_revocation(_cap: CapabilityToken) {
 pub fn revoke_cascading(
     cap: CapabilityToken,
     cap_space: &CapabilitySpace,
-) -> Result<u32, &'static str> {
+) -> Result<u32, KernelError> {
     let mut revoked_count = 0;
 
     #[cfg(feature = "alloc")]
@@ -170,7 +172,7 @@ pub fn revoke_cascading(
 
 /// Batch revocation for efficiency
 #[cfg(feature = "alloc")]
-pub fn revoke_batch(caps: &[CapabilityToken]) -> Result<u32, &'static str> {
+pub fn revoke_batch(caps: &[CapabilityToken]) -> Result<u32, KernelError> {
     let mut revoked_count = 0;
 
     for &cap in caps {
@@ -236,12 +238,15 @@ impl RevocationCache {
 }
 
 /// System call handler for capability revocation
-pub fn sys_capability_revoke(cap_value: u64) -> Result<(), &'static str> {
+pub fn sys_capability_revoke(cap_value: u64) -> Result<(), KernelError> {
     let cap = CapabilityToken::from_u64(cap_value);
 
     // Verify the capability exists and the caller has REVOKE rights
     if !cap_manager().is_valid(cap) {
-        return Err("Capability not found or already revoked");
+        return Err(KernelError::InvalidCapability {
+            cap_id: cap.id(),
+            reason: crate::error::CapError::NotFound,
+        });
     }
 
     revoke_capability(cap)

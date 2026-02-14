@@ -250,39 +250,14 @@ impl Default for SchedulerMetrics {
 /// Global scheduler metrics
 pub static SCHEDULER_METRICS: SchedulerMetrics = SchedulerMetrics::new();
 
-/// Read CPU timestamp counter
-#[cfg(target_arch = "x86_64")]
+/// Read CPU timestamp counter.
+///
+/// Delegates to the centralized [`crate::arch::entropy::read_timestamp`]
+/// which provides architecture-specific implementations for x86_64 (RDTSC),
+/// AArch64 (CNTVCT_EL0), and RISC-V (rdcycle).
+#[inline]
 pub fn read_tsc() -> u64 {
-    // SAFETY: RDTSC is an unprivileged instruction on x86_64 that reads the
-    // processor's time-stamp counter. It has no side effects beyond returning
-    // a monotonically increasing counter value.
-    unsafe { core::arch::x86_64::_rdtsc() }
-}
-
-#[cfg(target_arch = "aarch64")]
-pub fn read_tsc() -> u64 {
-    // Read ARM generic timer counter
-    let cnt: u64;
-    // SAFETY: CNTVCT_EL0 is the virtual count register of the ARM generic
-    // timer. Reading it is always permitted from EL1 (kernel mode) and has
-    // no side effects. The register provides a monotonically increasing count.
-    unsafe {
-        core::arch::asm!("mrs {}, CNTVCT_EL0", out(reg) cnt);
-    }
-    cnt
-}
-
-#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-pub fn read_tsc() -> u64 {
-    // Read RISC-V time CSR
-    let time: u64;
-    // SAFETY: The `time` CSR is a read-only counter on RISC-V that provides
-    // the current wall-clock time. Reading it has no side effects and is
-    // permitted from supervisor mode.
-    unsafe {
-        core::arch::asm!("csrr {}, time", out(reg) time);
-    }
-    time
+    crate::arch::entropy::read_timestamp()
 }
 
 /// Print scheduler metrics

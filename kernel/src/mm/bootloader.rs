@@ -8,6 +8,7 @@
 use super::{
     frame_allocator::ReservedRegion, FrameNumber, MemoryRegion, FRAME_ALLOCATOR, FRAME_SIZE,
 };
+use crate::error::KernelError;
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -129,7 +130,7 @@ pub struct UefiMemoryDescriptor {
 }
 
 /// Process bootloader memory map and initialize frame allocator
-pub fn process_memory_map(regions: &[BootloaderMemoryRegion]) -> Result<(), &'static str> {
+pub fn process_memory_map(regions: &[BootloaderMemoryRegion]) -> Result<(), KernelError> {
     println!("[BOOT] Processing bootloader memory map...");
 
     let mut total_memory = 0u64;
@@ -168,7 +169,9 @@ pub fn process_memory_map(regions: &[BootloaderMemoryRegion]) -> Result<(), &'st
                 FRAME_ALLOCATOR
                     .lock()
                     .add_reserved_region(reserved)
-                    .map_err(|_| "Failed to add reserved region")?;
+                    .map_err(|_| KernelError::ResourceExhausted {
+                        resource: "reserved memory regions",
+                    })?;
 
                 reserved_count += 1;
             }
@@ -236,7 +239,7 @@ pub fn process_memory_map(regions: &[BootloaderMemoryRegion]) -> Result<(), &'st
 }
 
 /// Standard x86 memory regions to reserve
-pub fn reserve_standard_regions() -> Result<(), &'static str> {
+pub fn reserve_standard_regions() -> Result<(), KernelError> {
     let allocator = FRAME_ALLOCATOR.lock();
 
     // Reserve first megabyte (BIOS, IVT, BDA, etc.)
@@ -247,7 +250,9 @@ pub fn reserve_standard_regions() -> Result<(), &'static str> {
     };
     allocator
         .add_reserved_region(bios_region)
-        .map_err(|_| "Failed to reserve BIOS region")?;
+        .map_err(|_| KernelError::ResourceExhausted {
+            resource: "reserved memory regions",
+        })?;
 
     // Reserve common BIOS areas
     let video_region = ReservedRegion {
@@ -257,7 +262,9 @@ pub fn reserve_standard_regions() -> Result<(), &'static str> {
     };
     allocator
         .add_reserved_region(video_region)
-        .map_err(|_| "Failed to reserve video memory")?;
+        .map_err(|_| KernelError::ResourceExhausted {
+            resource: "reserved memory regions",
+        })?;
 
     // Reserve local APIC region (typically at 0xFEE00000)
     #[cfg(target_arch = "x86_64")]
@@ -270,7 +277,9 @@ pub fn reserve_standard_regions() -> Result<(), &'static str> {
         };
         allocator
             .add_reserved_region(apic_region)
-            .map_err(|_| "Failed to reserve APIC region")?;
+            .map_err(|_| KernelError::ResourceExhausted {
+                resource: "reserved memory regions",
+            })?;
     }
 
     Ok(())

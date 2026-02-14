@@ -7,7 +7,7 @@ use super::{
     space::{CapabilityEntry, CapabilitySpace},
     token::{CapabilityToken, Rights},
 };
-use crate::process::ProcessId;
+use crate::{error::KernelError, process::ProcessId};
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -68,7 +68,7 @@ pub fn inherit_capabilities(
     parent_space: &CapabilitySpace,
     child_space: &CapabilitySpace,
     policy: InheritancePolicy,
-) -> Result<u32, &'static str> {
+) -> Result<u32, KernelError> {
     let mut inherited_count = 0;
     let mut _skipped_count = 0;
 
@@ -187,7 +187,7 @@ pub fn inherit_capabilities(
 pub fn fork_inherit_capabilities(
     parent_space: &CapabilitySpace,
     child_space: &CapabilitySpace,
-) -> Result<(), &'static str> {
+) -> Result<(), KernelError> {
     // In fork, child gets exact copy of parent's capabilities
     inherit_capabilities(parent_space, child_space, InheritancePolicy::All)?;
     Ok(())
@@ -200,7 +200,7 @@ pub fn fork_inherit_capabilities(
 pub fn exec_inherit_capabilities(
     old_space: &CapabilitySpace,
     new_space: &CapabilitySpace,
-) -> Result<(), &'static str> {
+) -> Result<(), KernelError> {
     // Filter by PRESERVE_EXEC: only inherit capabilities explicitly marked
     // to survive exec. This is stricter than Inheritable policy.
     #[cfg(feature = "alloc")]
@@ -233,7 +233,7 @@ pub fn exec_inherit_capabilities(
 pub fn create_initial_capabilities(
     process_id: ProcessId,
     cap_space: &CapabilitySpace,
-) -> Result<(), &'static str> {
+) -> Result<(), KernelError> {
     // Create basic capabilities that every process needs
 
     // 1. Capability to access its own process info
@@ -241,7 +241,10 @@ pub fn create_initial_capabilities(
     let process_rights = Rights::READ | Rights::MODIFY;
     cap_manager()
         .create_capability(process_obj, process_rights, cap_space)
-        .map_err(|_| "Failed to create process capability")?;
+        .map_err(|_| KernelError::InvalidCapability {
+            cap_id: 0,
+            reason: crate::error::CapError::InvalidObject,
+        })?;
 
     // Create default IPC endpoint capability for the process to communicate
     #[cfg(feature = "alloc")]
@@ -252,7 +255,10 @@ pub fn create_initial_capabilities(
         let ipc_rights = Rights::READ | Rights::WRITE | Rights::EXECUTE;
         cap_manager()
             .create_capability(ipc_obj, ipc_rights, cap_space)
-            .map_err(|_| "Failed to create IPC capability")?;
+            .map_err(|_| KernelError::InvalidCapability {
+                cap_id: 0,
+                reason: crate::error::CapError::InvalidObject,
+            })?;
     }
 
     // Create memory capabilities for stack and heap regions
@@ -268,7 +274,10 @@ pub fn create_initial_capabilities(
         let stack_rights = Rights::READ | Rights::WRITE;
         cap_manager()
             .create_capability(stack_obj, stack_rights, cap_space)
-            .map_err(|_| "Failed to create stack capability")?;
+            .map_err(|_| KernelError::InvalidCapability {
+                cap_id: 0,
+                reason: crate::error::CapError::InvalidObject,
+            })?;
 
         // Heap capability (read + write, no execute for W^X)
         let heap_obj = super::object::ObjectRef::Memory {
@@ -279,7 +288,10 @@ pub fn create_initial_capabilities(
         let heap_rights = Rights::READ | Rights::WRITE;
         cap_manager()
             .create_capability(heap_obj, heap_rights, cap_space)
-            .map_err(|_| "Failed to create heap capability")?;
+            .map_err(|_| KernelError::InvalidCapability {
+                cap_id: 0,
+                reason: crate::error::CapError::InvalidObject,
+            })?;
     }
 
     Ok(())
@@ -310,7 +322,7 @@ pub fn inherit_for_syscall(
     syscall: &str,
     parent_space: &CapabilitySpace,
     child_space: &CapabilitySpace,
-) -> Result<(), &'static str> {
+) -> Result<(), KernelError> {
     match syscall {
         "fork" => fork_inherit_capabilities(parent_space, child_space),
         "exec" => exec_inherit_capabilities(parent_space, child_space),
@@ -319,7 +331,10 @@ pub fn inherit_for_syscall(
             inherit_capabilities(parent_space, child_space, InheritancePolicy::Inheritable)
                 .map(|_| ())
         }
-        _ => Err("Unknown syscall for capability inheritance"),
+        _ => Err(KernelError::InvalidArgument {
+            name: "syscall",
+            value: "unknown syscall for capability inheritance",
+        }),
     }
 }
 
@@ -402,22 +417,31 @@ pub fn delegate_capability(
     target_space: &CapabilitySpace,
     cap: CapabilityToken,
     new_rights: Option<Rights>,
-) -> Result<CapabilityToken, &'static str> {
+) -> Result<CapabilityToken, KernelError> {
     // Lookup capability in source space
-    let (object, source_rights) = source_space
-        .lookup_entry(cap)
-        .ok_or("Capability not found in source")?;
+    let (object, source_rights) =
+        source_space
+            .lookup_entry(cap)
+            .ok_or(KernelError::InvalidCapability {
+                cap_id: cap.id(),
+                reason: crate::error::CapError::NotFound,
+            })?;
 
     // Check if source has grant right
     if !source_rights.contains(Rights::GRANT) {
-        return Err("Source lacks grant permission");
+        return Err(KernelError::PermissionDenied {
+            operation: "delegate_capability",
+        });
     }
 
     // Determine rights for target
     let target_rights = if let Some(requested) = new_rights {
         // Can only grant rights that source has
         if !source_rights.contains(requested) {
-            return Err("Cannot grant rights not possessed");
+            return Err(KernelError::InsufficientRights {
+                required: requested.bits(),
+                actual: source_rights.bits(),
+            });
         }
         requested
     } else {
@@ -428,7 +452,9 @@ pub fn delegate_capability(
     // Create new capability for target
     // Generate new capability ID
     use super::token::alloc_cap_id;
-    let new_cap_id = alloc_cap_id().map_err(|_| "Out of capability IDs")?;
+    let new_cap_id = alloc_cap_id().map_err(|_| KernelError::ResourceExhausted {
+        resource: "capability IDs",
+    })?;
     let new_cap = CapabilityToken::from_parts(
         new_cap_id,
         0, // Object ID - not used for now
@@ -446,7 +472,7 @@ pub fn delegate_capability(
 pub fn cascading_revoke(
     space: &CapabilitySpace,
     parent_cap: CapabilityToken,
-) -> Result<usize, &'static str> {
+) -> Result<usize, KernelError> {
     // In a full implementation, this would:
     // 1. Track parent-child relationships
     // 2. Find all derived capabilities
@@ -457,6 +483,9 @@ pub fn cascading_revoke(
     if space.remove(parent_cap).is_some() {
         Ok(1)
     } else {
-        Err("Capability not found")
+        Err(KernelError::InvalidCapability {
+            cap_id: parent_cap.id(),
+            reason: crate::error::CapError::NotFound,
+        })
     }
 }

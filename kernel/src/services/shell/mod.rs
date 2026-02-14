@@ -416,7 +416,7 @@ impl Shell {
                 ) {
                     Ok(pid) => {
                         // Wait for the process to complete
-                        // TODO(phase3): Implement proper process waiting (waitpid)
+                        // TODO(future): Implement proper process waiting (waitpid)
                         crate::println!("Started process {} with PID {}", command, pid.0);
                         return CommandResult::Success(0);
                     }

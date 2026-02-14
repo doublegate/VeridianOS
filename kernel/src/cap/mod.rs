@@ -31,7 +31,6 @@ mod tests;
 // Re-export common types
 pub use manager::CapError;
 // Re-export ObjectRef for RAII tests and examples
-#[allow(unused_imports)]
 pub use object::ObjectRef;
 pub use space::CapabilitySpace;
 pub use token::{CapabilityToken, Rights};
@@ -83,9 +82,8 @@ pub fn init() {
         attributes: object::MemoryAttributes::normal(),
     };
 
-    if let Err(e) = kernel_space.insert(root_cap, root_object, Rights::ALL) {
-        kprint_rt!("[CAP] WARNING: Failed to create root capability: ");
-        kprint_rt!(e);
+    if let Err(_e) = kernel_space.insert(root_cap, root_object, Rights::ALL) {
+        kprint_rt!("[CAP] WARNING: Failed to create root capability");
         kprintln!();
     } else {
         ROOT_CAP.call_once(|| root_cap);

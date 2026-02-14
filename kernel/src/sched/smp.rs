@@ -15,6 +15,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use spin::Mutex;
 
 use super::{queue::ReadyQueue, scheduler::Scheduler, task::Task};
+use crate::error::KernelError;
 
 /// CPU information
 pub struct CpuInfo {
@@ -498,14 +499,20 @@ pub fn send_ipi(target_cpu: u8, vector: u8) {
 }
 
 /// CPU hotplug: bring CPU online
-pub fn cpu_up(cpu_id: u8) -> Result<(), &'static str> {
+pub fn cpu_up(cpu_id: u8) -> Result<(), KernelError> {
     if cpu_id >= MAX_CPUS as u8 {
-        return Err("Invalid CPU ID");
+        return Err(KernelError::InvalidArgument {
+            name: "cpu_id",
+            value: "exceeds MAX_CPUS",
+        });
     }
 
     if let Some(cpu_data) = per_cpu(cpu_id) {
         if cpu_data.cpu_info.is_online() {
-            return Err("CPU already online");
+            return Err(KernelError::AlreadyExists {
+                resource: "online CPU",
+                id: cpu_id as u64,
+            });
         }
     } else {
         init_cpu(cpu_id);
@@ -560,18 +567,26 @@ pub fn cpu_up(cpu_id: u8) -> Result<(), &'static str> {
         retries -= 1;
     }
 
-    Err("CPU failed to come online")
+    Err(KernelError::Timeout {
+        operation: "CPU online",
+        duration_ms: 100,
+    })
 }
 
 /// CPU hotplug: bring CPU offline
-pub fn cpu_down(cpu_id: u8) -> Result<(), &'static str> {
+pub fn cpu_down(cpu_id: u8) -> Result<(), KernelError> {
     if cpu_id == 0 {
-        return Err("Cannot offline BSP");
+        return Err(KernelError::PermissionDenied {
+            operation: "offline BSP (CPU 0)",
+        });
     }
 
     if let Some(cpu_data) = per_cpu(cpu_id) {
         if !cpu_data.cpu_info.is_online() {
-            return Err("CPU already offline");
+            return Err(KernelError::InvalidState {
+                expected: "online",
+                actual: "offline",
+            });
         }
 
         // Migrate all tasks from this CPU
@@ -582,7 +597,9 @@ pub fn cpu_down(cpu_id: u8) -> Result<(), &'static str> {
             // Find target CPU with lowest load
             let target_cpu = find_least_loaded_cpu();
             if target_cpu == cpu_id {
-                return Err("No other CPU available for migration");
+                return Err(KernelError::ResourceExhausted {
+                    resource: "available CPUs for migration",
+                });
             }
 
             // Migrate all tasks
@@ -614,7 +631,7 @@ pub fn cpu_down(cpu_id: u8) -> Result<(), &'static str> {
         println!("[SMP] CPU {} is now offline", cpu_id);
         Ok(())
     } else {
-        Err("CPU not initialized")
+        Err(KernelError::NotInitialized { subsystem: "CPU" })
     }
 }
 
@@ -623,7 +640,7 @@ pub fn migrate_task(
     task_ptr: core::ptr::NonNull<Task>,
     from_cpu: u8,
     to_cpu: u8,
-) -> Result<(), &'static str> {
+) -> Result<(), KernelError> {
     // SAFETY: task_ptr is a valid NonNull<Task> passed by the caller
     // (cpu_down or load balancer). We only read task fields (cpu_affinity,
     // state, sched_class) for migration eligibility checks. The task is not
@@ -633,17 +650,26 @@ pub fn migrate_task(
 
         // Check if migration is allowed
         if !task.cpu_affinity.contains(to_cpu) {
-            return Err("Task affinity prevents migration");
+            return Err(KernelError::InvalidArgument {
+                name: "cpu_affinity",
+                value: "task affinity prevents migration",
+            });
         }
 
         // Don't migrate running tasks
         if task.state == super::ProcessState::Running {
-            return Err("Cannot migrate running task");
+            return Err(KernelError::InvalidState {
+                expected: "not running",
+                actual: "running",
+            });
         }
 
         // Don't migrate idle tasks
         if task.sched_class == super::task::SchedClass::Idle {
-            return Err("Cannot migrate idle task");
+            return Err(KernelError::InvalidArgument {
+                name: "sched_class",
+                value: "cannot migrate idle task",
+            });
         }
     }
 
@@ -665,7 +691,10 @@ pub fn migrate_task(
     };
 
     if !removed {
-        return Err("Task not found in source CPU queue");
+        return Err(KernelError::NotFound {
+            resource: "task in source CPU queue",
+            id: from_cpu as u64,
+        });
     }
 
     // Add to destination CPU queue
@@ -697,7 +726,9 @@ pub fn migrate_task(
 
         Ok(())
     } else {
-        Err("Destination CPU not initialized")
+        Err(KernelError::NotInitialized {
+            subsystem: "destination CPU",
+        })
     }
 }
 

@@ -18,7 +18,7 @@ use super::{
     ProcessId,
 };
 #[allow(unused_imports)]
-use crate::{println, sched};
+use crate::{error::KernelError, println, sched};
 
 /// Exit current process
 pub fn exit_process(exit_code: i32) {
@@ -67,7 +67,7 @@ pub fn exit_process(exit_code: i32) {
 
 /// Wait for child process to exit
 #[cfg(feature = "alloc")]
-pub fn wait_process(pid: Option<ProcessId>) -> Result<(ProcessId, i32), &'static str> {
+pub fn wait_process(pid: Option<ProcessId>) -> Result<(ProcessId, i32), KernelError> {
     wait_process_with_options(pid, WaitOptions::default())
 }
 
@@ -98,8 +98,10 @@ impl WaitOptions {
 pub fn wait_process_with_options(
     pid: Option<ProcessId>,
     options: WaitOptions,
-) -> Result<(ProcessId, i32), &'static str> {
-    let current = super::current_process().ok_or("No current process")?;
+) -> Result<(ProcessId, i32), KernelError> {
+    let current = super::current_process().ok_or(KernelError::NotInitialized {
+        subsystem: "current process",
+    })?;
     let current_pid = current.pid;
 
     loop {
@@ -108,7 +110,10 @@ pub fn wait_process_with_options(
 
         // No children at all
         if children.is_empty() {
-            return Err("No child processes");
+            return Err(KernelError::NotFound {
+                resource: "child process",
+                id: 0,
+            });
         }
 
         // Check if any matching child exists
@@ -164,7 +169,9 @@ pub fn wait_process_with_options(
 
         // No matching child found
         if pid.is_some() && !matching_child_exists {
-            return Err("No matching child process");
+            return Err(KernelError::ProcessNotFound {
+                pid: pid.unwrap_or(ProcessId(0)).0,
+            });
         }
 
         // No zombie children found
@@ -198,7 +205,7 @@ pub fn wait_process_with_options(
         if let Some(signum) = current.get_next_pending_signal() {
             // Clear the signal and return EINTR
             current.clear_pending_signal(signum);
-            return Err("Interrupted by signal");
+            return Err(KernelError::WouldBlock);
         }
     }
 }
@@ -278,10 +285,13 @@ pub fn default_signal_action(signal: i32) -> SignalAction {
 }
 
 /// Send a signal to a process (kill syscall)
-pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), &'static str> {
+pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
     // Validate signal number
     if !(0..=31).contains(&signal) {
-        return Err("Invalid signal number");
+        return Err(KernelError::InvalidArgument {
+            name: "signal",
+            value: "signal number out of range (0-31)",
+        });
     }
 
     // Special case: signal 0 is used to check if process exists
@@ -289,14 +299,17 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), &'static str> {
         if table::get_process(pid).is_some() {
             return Ok(());
         } else {
-            return Err("Process not found");
+            return Err(KernelError::ProcessNotFound { pid: pid.0 });
         }
     }
 
-    let process = table::get_process(pid).ok_or("Process not found")?;
+    let process = table::get_process(pid).ok_or(KernelError::ProcessNotFound { pid: pid.0 })?;
 
     if !process.is_alive() {
-        return Err("Process already dead");
+        return Err(KernelError::InvalidState {
+            expected: "alive",
+            actual: "dead",
+        });
     }
 
     println!("[PROCESS] Sending signal {} to process {}", signal, pid.0);
@@ -380,7 +393,7 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), &'static str> {
 // ============================================================================
 
 /// Force terminate a process (used by SIGKILL and unhandled fatal signals)
-fn force_terminate_process(process: &Process) -> Result<(), &'static str> {
+fn force_terminate_process(process: &Process) -> Result<(), KernelError> {
     let _pid = process.pid;
     println!("[PROCESS] Force terminating process {}", _pid.0);
 
@@ -512,7 +525,7 @@ pub(super) fn cleanup_process(process: &Process) {
 
 /// Clean up a dead thread
 #[cfg(feature = "alloc")]
-pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), &'static str> {
+pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), KernelError> {
     // Remove thread from process
     let mut threads = process.threads.lock();
 
@@ -610,7 +623,7 @@ pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), &'static s
 
         Ok(())
     } else {
-        Err("Thread not found")
+        Err(KernelError::ThreadNotFound { tid: tid.0 })
     }
 }
 

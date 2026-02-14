@@ -186,7 +186,7 @@ pub struct Vfs {
     mounts: BTreeMap<String, Arc<dyn Filesystem>>,
 
     /// Current working directory for processes
-    /// TODO(phase3): Move this to per-process data
+    /// TODO(future): Move this to per-process data
     cwd: String,
 }
 

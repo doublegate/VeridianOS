@@ -259,7 +259,7 @@ impl SlabAllocator {
 // static SLAB_ALLOCATOR: SlabAllocator = SlabAllocator::new();
 
 /// Initialize the kernel heap
-pub fn init() -> Result<(), &'static str> {
+pub fn init() -> Result<(), crate::error::KernelError> {
     kprintln!("[HEAP] Initializing kernel heap");
 
     // SAFETY: We access `HEAP_MEMORY`, a static mut byte array in the kernel's BSS
@@ -293,13 +293,13 @@ pub fn init() -> Result<(), &'static str> {
             }
 
             // Initialize locked allocator for compatibility
-            let mut allocator = crate::get_allocator().lock();
-            // SAFETY: Same memory region, called once during boot.
-            unsafe {
-                allocator.init(heap_start, heap_size);
+            {
+                let mut allocator = crate::get_allocator().lock();
+                // SAFETY: Same memory region, called once during boot.
+                unsafe {
+                    allocator.init(heap_start, heap_size);
+                }
             }
-            #[allow(clippy::drop_non_drop)]
-            drop(allocator);
             println!("[HEAP] RISC-V heap initialization complete");
         }
 

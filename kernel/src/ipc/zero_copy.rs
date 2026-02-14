@@ -17,11 +17,15 @@ use super::{
     shared_memory::{Permission, SharedRegion},
 };
 use crate::{
+    arch::entropy::read_timestamp,
     mm::{PageFlags, PhysicalAddress, VirtualAddress},
     process::ProcessId,
 };
 
-/// Simple page table placeholder for IPC
+/// Minimal page table handle for IPC zero-copy transfers.
+///
+/// TODO(future): Replace with a reference to the real per-process page table
+/// from `mm::page_table` once the VMM integration is complete.
 struct PageTable {
     root: PhysicalAddress,
 }
@@ -269,7 +273,7 @@ pub fn grant_transfer_capability(
     _region_id: u64,
     _permissions: Permission,
 ) -> Result<u64> {
-    // TODO(phase3): Create transfer capability via capability system integration
+    // TODO(future): Create transfer capability via capability system integration
     Ok(0)
 }
 
@@ -351,26 +355,13 @@ fn validate_transfer_capability(_from: ProcessId, _to: ProcessId, _region: u64) 
     true
 }
 fn get_page_table(_pid: ProcessId) -> Result<PageTable> {
-    // TODO(phase3): Get page table from process table
+    // TODO(future): Get page table from process table
     Ok(PageTable::new())
 }
 fn allocate_virtual_range(_pt: &mut PageTable, _size: usize) -> Result<VirtualAddress> {
     Ok(VirtualAddress::new(0x200000))
 }
 fn flush_tlb_for_processes(_pids: &[ProcessId]) {}
-
-#[cfg(target_arch = "x86_64")]
-fn read_timestamp() -> u64 {
-    // SAFETY: _rdtsc() reads the x86_64 Time Stamp Counter via the RDTSC
-    // instruction. This is a read-only, side-effect-free operation that is always
-    // available in kernel mode and requires no special setup or preconditions.
-    unsafe { core::arch::x86_64::_rdtsc() }
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn read_timestamp() -> u64 {
-    0
-}
 
 /// Get zero-copy statistics
 pub fn get_zero_copy_stats() -> ZeroCopyStatsSummary {

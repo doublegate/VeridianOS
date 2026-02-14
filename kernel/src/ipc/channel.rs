@@ -108,7 +108,7 @@ impl Endpoint {
         // Check if there's a waiting receiver
         let mut receivers = self.waiting_receivers.lock();
         if let Some(_receiver) = receivers.pop() {
-            // TODO(phase3): Direct context switch to receiver for <5us latency
+            // TODO(future): Direct context switch to receiver for <5us latency
             drop(receivers);
 
             Ok(())
@@ -148,7 +148,7 @@ impl Endpoint {
         }
         drop(queue);
 
-        // TODO(phase3): Block current process and yield CPU until message arrives
+        // TODO(future): Block current process and yield CPU until message arrives
         let mut receivers = self.waiting_receivers.lock();
         receivers.push(WaitingProcess {
             pid: receiver,
@@ -181,7 +181,7 @@ impl Endpoint {
             return Err(IpcError::ChannelFull);
         }
         queue.push_back(msg);
-        // TODO(phase3): Wake up any waiting receivers
+        // TODO(future): Wake up any waiting receivers
         Ok(())
     }
 
@@ -217,7 +217,7 @@ impl Endpoint {
     /// Close the endpoint
     pub fn close(&self) {
         self.active.store(false, Ordering::Release);
-        // TODO(phase3): Wake up all waiting processes with error and clean up
+        // TODO(future): Wake up all waiting processes with error and clean up
         // resources
     }
 }
@@ -275,7 +275,7 @@ impl Channel {
 /// that fit entirely in CPU registers.
 #[inline(always)]
 pub fn fast_ipc_send(msg: &SmallMessage, _target: ProcessId) -> Result<()> {
-    // TODO(phase3): Implement O(1) capability validation + direct register transfer
+    // TODO(future): Implement O(1) capability validation + direct register transfer
     if msg.capability == 0 {
         return Err(IpcError::InvalidCapability);
     }
@@ -285,7 +285,7 @@ pub fn fast_ipc_send(msg: &SmallMessage, _target: ProcessId) -> Result<()> {
 
 /// IPC call with reply (RPC-style)
 pub fn call_reply(_request: Message, _target: ProcessId) -> Result<Message> {
-    // TODO(phase3): Implement call/reply semantics (send, block, return reply)
+    // TODO(future): Implement call/reply semantics (send, block, return reply)
     Err(IpcError::WouldBlock)
 }
 

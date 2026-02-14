@@ -17,6 +17,7 @@ use super::thread::{Thread, ThreadId};
 #[allow(unused_imports)]
 use crate::{
     cap::{CapabilityId, CapabilitySpace},
+    error::KernelError,
     fs::file::FileTable,
     ipc::EndpointId,
     mm::VirtualAddressSpace,
@@ -210,16 +211,21 @@ impl Process {
 
     /// Add a thread to this process
     #[cfg(feature = "alloc")]
-    pub fn add_thread(&self, thread: Thread) -> Result<(), &'static str> {
+    pub fn add_thread(&self, thread: Thread) -> Result<(), KernelError> {
         let tid = thread.tid;
         let mut threads = self.threads.lock();
 
         if threads.len() >= super::MAX_THREADS_PER_PROCESS {
-            return Err("Too many threads in process");
+            return Err(KernelError::ResourceExhausted {
+                resource: "threads per process",
+            });
         }
 
         if threads.contains_key(&tid) {
-            return Err("Thread ID already exists");
+            return Err(KernelError::AlreadyExists {
+                resource: "thread",
+                id: tid.0,
+            });
         }
 
         threads.insert(tid, thread);
@@ -313,13 +319,18 @@ impl Process {
 
     /// Set a signal handler
     /// handler: 0 = default, 1 = ignore, other = handler address
-    pub fn set_signal_handler(&self, signum: usize, handler: u64) -> Result<u64, &'static str> {
+    pub fn set_signal_handler(&self, signum: usize, handler: u64) -> Result<u64, KernelError> {
         if signum >= 32 {
-            return Err("Invalid signal number");
+            return Err(KernelError::InvalidArgument {
+                name: "signum",
+                value: "signal number out of range (0-31)",
+            });
         }
         // SIGKILL (9) and SIGSTOP (19) cannot be caught or ignored
         if signum == 9 || signum == 19 {
-            return Err("Cannot change handler for SIGKILL or SIGSTOP");
+            return Err(KernelError::PermissionDenied {
+                operation: "change handler for SIGKILL or SIGSTOP",
+            });
         }
         let mut handlers = self.signal_handlers.lock();
         let old = handlers[signum];
@@ -336,9 +347,12 @@ impl Process {
     }
 
     /// Send a signal to this process
-    pub fn send_signal(&self, signum: usize) -> Result<(), &'static str> {
+    pub fn send_signal(&self, signum: usize) -> Result<(), KernelError> {
         if signum >= 32 {
-            return Err("Invalid signal number");
+            return Err(KernelError::InvalidArgument {
+                name: "signum",
+                value: "signal number out of range (0-31)",
+            });
         }
         // Set the signal bit in pending signals
         let mask = 1u64 << signum;

@@ -301,16 +301,22 @@ impl SpectreMitigation {
     #[inline(always)]
     pub fn speculation_barrier() {
         #[cfg(target_arch = "x86_64")]
+        // SAFETY: LFENCE serializes instruction execution, preventing speculative
+        // reads past this point. No memory or stack effects.
         unsafe {
             core::arch::asm!("lfence", options(nomem, nostack));
         }
 
         #[cfg(target_arch = "aarch64")]
+        // SAFETY: CSDB (Consumption of Speculative Data Barrier) prevents
+        // speculative data access. No memory or stack effects.
         unsafe {
             core::arch::asm!("csdb", options(nomem, nostack));
         }
 
         #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+        // SAFETY: FENCE R,R orders prior reads before subsequent reads,
+        // serving as a speculation barrier. No memory or stack effects.
         unsafe {
             core::arch::asm!("fence r, r", options(nomem, nostack));
         }
@@ -383,6 +389,8 @@ impl Kpti {
         }
         let cr3 = self.kernel_cr3.load(Ordering::SeqCst);
         if cr3 != 0 {
+            // SAFETY: Writing CR3 switches the page table root. cr3 was
+            // previously set via set_kernel_cr3 and points to a valid PML4.
             unsafe {
                 core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack));
             }
@@ -397,6 +405,8 @@ impl Kpti {
         }
         let cr3 = self.user_cr3.load(Ordering::SeqCst);
         if cr3 != 0 {
+            // SAFETY: Writing CR3 switches the page table root. cr3 was
+            // previously set via set_user_cr3 and points to a valid PML4.
             unsafe {
                 core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack));
             }

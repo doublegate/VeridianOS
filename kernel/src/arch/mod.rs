@@ -35,4 +35,7 @@ pub mod context;
 // Architecture-independent memory barrier abstractions
 pub mod barriers;
 
+// Architecture-independent hardware entropy abstractions
+pub mod entropy;
+
 // Serial initialization is handled per-architecture

@@ -87,8 +87,8 @@ impl ThreadLocalStorage {
     }
 
     /// Allocate TLS area
-    pub fn allocate(&mut self, size: usize) -> Result<(), &'static str> {
-        // TODO(phase3): Allocate actual memory pages for TLS area
+    pub fn allocate(&mut self, size: usize) -> Result<(), crate::error::KernelError> {
+        // TODO(future): Allocate actual memory pages for TLS area
         self.size = size;
         Ok(())
     }
@@ -519,8 +519,8 @@ impl ThreadBuilder {
     }
 
     /// Build the thread
-    pub fn build(self) -> Result<Thread, &'static str> {
-        // TODO(phase3): Allocate stacks from memory manager (VMM)
+    pub fn build(self) -> Result<Thread, crate::error::KernelError> {
+        // TODO(future): Allocate stacks from memory manager (VMM)
         let user_stack_base = 0x1000_0000; // Placeholder
         let kernel_stack_base = 0x2000_0000; // Placeholder
 

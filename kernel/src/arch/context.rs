@@ -94,7 +94,7 @@ pub fn save_fpu_state(state: &mut [u8]) {
     #[cfg(not(target_arch = "x86_64"))]
     let _ = state;
 
-    // TODO(phase3): Implement FPU save for AArch64 (FPSR/FPCR) and RISC-V
+    // TODO(future): Implement FPU save for AArch64 (FPSR/FPCR) and RISC-V
     // (fcsr)
 }
 
@@ -113,6 +113,6 @@ pub fn restore_fpu_state(state: &[u8]) {
     #[cfg(not(target_arch = "x86_64"))]
     let _ = state;
 
-    // TODO(phase3): Implement FPU restore for AArch64 (FPSR/FPCR) and RISC-V
+    // TODO(future): Implement FPU restore for AArch64 (FPSR/FPCR) and RISC-V
     // (fcsr)
 }

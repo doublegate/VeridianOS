@@ -8,7 +8,7 @@
 use alloc::vec::Vec;
 use core::{panic::PanicInfo, time::Duration};
 
-use crate::{serial_print, serial_println};
+use crate::{error::KernelError, serial_print, serial_println};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -19,14 +19,14 @@ pub enum QemuExitCode {
 
 /// Trait that all testable functions must implement
 pub trait Testable {
-    fn run(&self) -> Result<(), &'static str>;
+    fn run(&self) -> Result<(), KernelError>;
 }
 
 impl<T> Testable for T
 where
-    T: Fn() -> Result<(), &'static str>,
+    T: Fn() -> Result<(), KernelError>,
 {
-    fn run(&self) -> Result<(), &'static str> {
+    fn run(&self) -> Result<(), KernelError> {
         serial_print!("{}...\t", core::any::type_name::<T>());
         match self() {
             Ok(()) => {
@@ -139,7 +139,7 @@ macro_rules! kernel_test {
     ($name:ident, $test:expr) => {
         #[test_case]
         const $name: &dyn $crate::test_framework::Testable =
-            &|| -> Result<(), &'static str> { $test };
+            &|| -> Result<(), $crate::error::KernelError> { $test };
     };
 }
 
@@ -230,37 +230,14 @@ pub struct BenchmarkResult {
     pub max_time_ns: u64,
 }
 
-/// Get current timestamp in nanoseconds (architecture-specific)
+/// Get current timestamp in nanoseconds (architecture-specific).
+///
+/// Delegates to the centralized [`crate::arch::entropy::read_timestamp`] which
+/// provides implementations for x86_64 (RDTSC), AArch64 (CNTVCT_EL0), and
+/// RISC-V (rdcycle).
 #[inline(always)]
 pub fn read_timestamp() -> u64 {
-    #[cfg(target_arch = "x86_64")]
-    // SAFETY: RDTSC is a non-privileged instruction available on all
-    // x86_64 processors. It reads the Time Stamp Counter with no side
-    // effects. The returned value is valid but may not be monotonic
-    // across CPUs.
-    unsafe {
-        use core::arch::x86_64::_rdtsc;
-        _rdtsc()
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    // SAFETY: Reading CNTVCT_EL0 (virtual timer count) is a non-
-    // privileged operation on AArch64. It has no side effects and
-    // returns the current virtual timer counter value.
-    unsafe {
-        let timestamp: u64;
-        core::arch::asm!("mrs {}, cntvct_el0", out(reg) timestamp);
-        timestamp
-    }
-
-    #[cfg(target_arch = "riscv64")]
-    // SAFETY: RDCYCLE reads the cycle counter CSR, which is a non-
-    // privileged read-only operation on RISC-V. It has no side effects.
-    unsafe {
-        let timestamp: u64;
-        core::arch::asm!("rdcycle {}", out(reg) timestamp);
-        timestamp
-    }
+    crate::arch::entropy::read_timestamp()
 }
 
 /// Convert CPU cycles to nanoseconds (approximate)
@@ -444,7 +421,7 @@ macro_rules! register_test {
 ///
 /// Available for test binaries that need timeout enforcement.
 #[allow(dead_code)]
-pub fn run_with_timeout<F>(f: F, timeout_cycles: u64) -> Result<(), &'static str>
+pub fn run_with_timeout<F>(f: F, timeout_cycles: u64) -> Result<(), KernelError>
 where
     F: FnOnce(),
 {
@@ -453,7 +430,10 @@ where
     let end = read_timestamp();
 
     if end.saturating_sub(start) > timeout_cycles {
-        Err("Test timeout exceeded")
+        Err(KernelError::Timeout {
+            operation: "test execution",
+            duration_ms: timeout_cycles / 2_000_000, // Approximate conversion from cycles to ms
+        })
     } else {
         Ok(())
     }

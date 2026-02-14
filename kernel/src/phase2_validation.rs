@@ -2,6 +2,8 @@
 //!
 //! End-to-end validation of all Phase 2 components working together.
 
+// On non-x86_64 architectures, println! is a no-op, making if/else branches
+// identical at the compiler level. The branches are semantically distinct.
 #![allow(clippy::redundant_pattern_matching, clippy::if_same_then_else)]
 
 use crate::userland::test_runner::run_phase2_validation;

@@ -20,7 +20,7 @@ use super::{
     error::{IpcError, Result},
     SmallMessage,
 };
-use crate::{process::pcb::ProcessState, sched::current_process};
+use crate::{arch::entropy::read_timestamp, process::pcb::ProcessState, sched::current_process};
 
 /// Performance counter for fast path operations
 static FAST_PATH_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -72,7 +72,7 @@ pub fn fast_send(msg: &SmallMessage, target_pid: u64) -> Result<()> {
 
         // Wake up receiver and switch to it
         target.state = ProcessState::Ready;
-        // TODO(phase3): Implement direct process switch via scheduler
+        // TODO(future): Implement direct process switch via scheduler
 
         // Update performance counters
         let elapsed = read_timestamp() - start;
@@ -104,7 +104,7 @@ pub fn fast_receive(endpoint: u64, timeout: Option<u64>) -> Result<SmallMessage>
     yield_and_wait(timeout)?;
 
     // When we wake up, message should be in our IPC register context.
-    // TODO(phase3): Read from the current task's saved IPC register set
+    // TODO(future): Read from the current task's saved IPC register set
     // once per-task IpcRegs storage is implemented.
     let regs = IpcRegs::default();
     Ok(read_message_from_regs(&regs))
@@ -113,14 +113,14 @@ pub fn fast_receive(endpoint: u64, timeout: Option<u64>) -> Result<SmallMessage>
 /// Fast capability validation using cached lookups
 #[inline(always)]
 fn validate_capability_fast(cap: u64) -> bool {
-    // TODO(phase3): Implement O(1) capability lookup from per-CPU cache
+    // TODO(future): Implement O(1) capability lookup from per-CPU cache
     cap != 0 && cap < 0x10000
 }
 
 /// Fast process lookup
 #[inline(always)]
 fn find_process_fast(_pid: u64) -> Option<&'static mut Process> {
-    // TODO(phase3): Implement O(1) process table lookup via direct array index
+    // TODO(future): Implement O(1) process table lookup via direct array index
     None
 }
 
@@ -152,30 +152,15 @@ fn read_message_from_regs(regs: &IpcRegs) -> SmallMessage {
     }
 }
 
-/// Read CPU timestamp counter
-#[inline(always)]
-fn read_timestamp() -> u64 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        // SAFETY: _rdtsc() reads the CPU's Time Stamp Counter via the RDTSC
-        // instruction. Always safe in kernel mode with no side effects.
-        unsafe { core::arch::x86_64::_rdtsc() }
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        0
-    }
-}
-
 /// Check for pending messages without blocking
 fn check_pending_message(_endpoint: u64) -> Option<SmallMessage> {
-    // TODO(phase3): Check message queue for pending messages
+    // TODO(future): Check message queue for pending messages
     None
 }
 
 /// Yield CPU and wait for message or timeout
 fn yield_and_wait(_timeout: Option<u64>) -> Result<()> {
-    // TODO(phase3): Implement scheduler yield with optional timeout
+    // TODO(future): Implement scheduler yield with optional timeout
     Ok(())
 }
 

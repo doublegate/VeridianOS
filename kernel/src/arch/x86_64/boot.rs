@@ -60,28 +60,16 @@ pub fn early_boot_init() {
     }
 }
 
-#[inline]
-unsafe fn outb(port: u16, value: u8) {
-    core::arch::asm!(
-        "out dx, al",
-        in("dx") port,
-        in("al") value,
-        options(nomem, nostack, preserves_flags)
-    );
-}
+// I/O port functions: delegate to the canonical implementations in
+// the parent module (arch/x86_64/mod.rs) to avoid duplication.
+use super::{inb, outb};
 
 #[inline]
 unsafe fn write_str(base: u16, s: &str) {
     for byte in s.bytes() {
         // Wait for transmit buffer to be empty
         loop {
-            let status: u8;
-            core::arch::asm!(
-                "in al, dx",
-                out("al") status,
-                in("dx") base + 5,
-                options(nomem, nostack, preserves_flags)
-            );
+            let status = inb(base + 5);
             if (status & 0x20) != 0 {
                 break;
             }

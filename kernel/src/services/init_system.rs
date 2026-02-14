@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use spin::RwLock;
 
-use crate::process::ProcessId;
+use crate::{error::KernelError, process::ProcessId};
 
 /// Service state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,7 +132,7 @@ impl Default for InitSystem {
 
 impl InitSystem {
     /// Initialize the init system
-    pub fn initialize(&self) -> Result<(), &'static str> {
+    pub fn initialize(&self) -> Result<(), KernelError> {
         crate::println!("[INIT] Initializing init system...");
 
         // Register core system services
@@ -152,11 +152,14 @@ impl InitSystem {
     }
 
     /// Register a service
-    pub fn register_service(&self, definition: ServiceDefinition) -> Result<(), &'static str> {
+    pub fn register_service(&self, definition: ServiceDefinition) -> Result<(), KernelError> {
         let name = definition.name.clone();
 
         if self.services.read().contains_key(&name) {
-            return Err("Service already registered");
+            return Err(KernelError::AlreadyExists {
+                resource: "service",
+                id: 0,
+            });
         }
 
         let info = ServiceInfo {
@@ -179,10 +182,13 @@ impl InitSystem {
     }
 
     /// Start a service
-    pub fn start_service(&self, name: &str) -> Result<(), &'static str> {
+    pub fn start_service(&self, name: &str) -> Result<(), KernelError> {
         let mut services = self.services.write();
 
-        let service = services.get_mut(name).ok_or("Service not found")?;
+        let service = services.get_mut(name).ok_or(KernelError::NotFound {
+            resource: "service",
+            id: 0,
+        })?;
 
         if service.state == ServiceState::Running {
             return Ok(()); // Already running
@@ -225,10 +231,13 @@ impl InitSystem {
     }
 
     /// Stop a service
-    pub fn stop_service(&self, name: &str) -> Result<(), &'static str> {
+    pub fn stop_service(&self, name: &str) -> Result<(), KernelError> {
         let mut services = self.services.write();
 
-        let service = services.get_mut(name).ok_or("Service not found")?;
+        let service = services.get_mut(name).ok_or(KernelError::NotFound {
+            resource: "service",
+            id: 0,
+        })?;
 
         if service.state != ServiceState::Running {
             return Ok(()); // Not running
@@ -279,7 +288,7 @@ impl InitSystem {
     }
 
     /// Restart a service
-    pub fn restart_service(&self, name: &str) -> Result<(), &'static str> {
+    pub fn restart_service(&self, name: &str) -> Result<(), KernelError> {
         self.stop_service(name)?;
         self.start_service(name)?;
         Ok(())
@@ -296,7 +305,7 @@ impl InitSystem {
     }
 
     /// Switch runlevel
-    pub fn switch_runlevel(&self, runlevel: Runlevel) -> Result<(), &'static str> {
+    pub fn switch_runlevel(&self, runlevel: Runlevel) -> Result<(), KernelError> {
         let current = self.current_runlevel.load(Ordering::SeqCst);
 
         if current == runlevel as u32 {
@@ -397,7 +406,7 @@ impl InitSystem {
     }
 
     /// Shutdown the system
-    pub fn shutdown(&self) -> Result<(), &'static str> {
+    pub fn shutdown(&self) -> Result<(), KernelError> {
         crate::println!("[INIT] System shutdown initiated");
         self.shutting_down.store(true, Ordering::SeqCst);
 
@@ -418,7 +427,7 @@ impl InitSystem {
     }
 
     /// Reboot the system
-    pub fn reboot(&self) -> Result<(), &'static str> {
+    pub fn reboot(&self) -> Result<(), KernelError> {
         crate::println!("[INIT] System reboot initiated");
 
         // Shutdown first
@@ -468,7 +477,7 @@ impl InitSystem {
 
     // Helper functions
 
-    fn register_core_services(&self) -> Result<(), &'static str> {
+    fn register_core_services(&self) -> Result<(), KernelError> {
         // Register console service
         self.register_service(ServiceDefinition {
             name: String::from("console"),
@@ -551,7 +560,7 @@ impl InitSystem {
         Ok(())
     }
 
-    fn compute_start_order(&self) -> Result<(), &'static str> {
+    fn compute_start_order(&self) -> Result<(), KernelError> {
         let services = self.services.read();
         let mut order = Vec::new();
         let mut visited = BTreeMap::new();
@@ -581,10 +590,13 @@ impl InitSystem {
         services: &BTreeMap<String, ServiceInfo>,
         visited: &mut BTreeMap<String, bool>,
         order: &mut Vec<String>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), KernelError> {
         if let Some(&in_progress) = visited.get(name) {
             if in_progress {
-                return Err("Circular dependency detected");
+                return Err(KernelError::InvalidArgument {
+                    name: "service dependency",
+                    value: "circular dependency detected",
+                });
             }
             return Ok(()); // Already visited
         }
@@ -605,7 +617,7 @@ impl InitSystem {
         Ok(())
     }
 
-    fn check_dependencies(&self, name: &str) -> Result<(), &'static str> {
+    fn check_dependencies(&self, name: &str) -> Result<(), KernelError> {
         let services = self.services.read();
 
         if let Some(service) = services.get(name) {
@@ -613,10 +625,16 @@ impl InitSystem {
                 if *dep_type == DependencyType::Requires {
                     if let Some(dep_service) = services.get(dep_name) {
                         if dep_service.state != ServiceState::Running {
-                            return Err("Required dependency not running");
+                            return Err(KernelError::InvalidState {
+                                expected: "running",
+                                actual: "not running",
+                            });
                         }
                     } else {
-                        return Err("Required dependency not found");
+                        return Err(KernelError::NotFound {
+                            resource: "required dependency",
+                            id: 0,
+                        });
                     }
                 }
             }

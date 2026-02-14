@@ -16,6 +16,7 @@ use alloc::{collections::BTreeMap, vec::Vec};
 use spin::Mutex;
 
 use super::{PageFlags, VirtualAddress};
+use crate::error::KernelError;
 
 /// Memory mapping types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,7 +135,7 @@ impl VirtualAddressSpace {
     }
 
     /// Initialize virtual address space
-    pub fn init(&mut self) -> Result<(), &'static str> {
+    pub fn init(&mut self) -> Result<(), KernelError> {
         use super::page_table::PageTableHierarchy;
 
         // Allocate L4 page table
@@ -149,7 +150,7 @@ impl VirtualAddressSpace {
     }
 
     /// Map kernel space into this address space
-    pub fn map_kernel_space(&mut self) -> Result<(), &'static str> {
+    pub fn map_kernel_space(&mut self) -> Result<(), KernelError> {
         // Kernel space is at 0xFFFF_8000_0000_0000 and above
         // This is typically shared across all address spaces
         // For now, we'll just record the mapping - actual page table updates
@@ -183,7 +184,7 @@ impl VirtualAddressSpace {
     }
 
     /// Clone from another address space
-    pub fn clone_from(&mut self, other: &Self) -> Result<(), &'static str> {
+    pub fn clone_from(&mut self, other: &Self) -> Result<(), KernelError> {
         // Copy page table root
         self.page_table_root.store(
             other.page_table_root.load(Ordering::Acquire),
@@ -265,7 +266,7 @@ impl VirtualAddressSpace {
         start: VirtualAddress,
         size: usize,
         mapping_type: MappingType,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), KernelError> {
         use super::FRAME_ALLOCATOR;
 
         // Align to page boundary
@@ -279,7 +280,10 @@ impl VirtualAddressSpace {
         // Check for overlaps
         for (_, existing) in mappings.iter() {
             if existing.contains(aligned_start) || existing.contains(mapping.end()) {
-                return Err("Address range already mapped");
+                return Err(KernelError::AlreadyExists {
+                    resource: "address range",
+                    id: aligned_start.0,
+                });
             }
         }
 
@@ -292,9 +296,13 @@ impl VirtualAddressSpace {
 
         // Allocate frames
         for _ in 0..num_pages {
-            let frame = frame_allocator
-                .allocate_frames(1, None)
-                .map_err(|_| "Failed to allocate physical frame")?;
+            let frame =
+                frame_allocator
+                    .allocate_frames(1, None)
+                    .map_err(|_| KernelError::OutOfMemory {
+                        requested: 4096,
+                        available: 0,
+                    })?;
             physical_frames.push(frame);
         }
 
@@ -316,7 +324,7 @@ impl VirtualAddressSpace {
         size: usize,
         mapping_type: MappingType,
         process_id: crate::process::ProcessId,
-    ) -> Result<crate::raii::MappedRegion, &'static str> {
+    ) -> Result<crate::raii::MappedRegion, KernelError> {
         // First map the region normally
         self.map_region(start, size, mapping_type)?;
 
@@ -333,11 +341,14 @@ impl VirtualAddressSpace {
 
     /// Unmap a region
     #[cfg(feature = "alloc")]
-    pub fn unmap_region(&self, start: VirtualAddress) -> Result<(), &'static str> {
+    pub fn unmap_region(&self, start: VirtualAddress) -> Result<(), KernelError> {
         use super::FRAME_ALLOCATOR;
 
         let mut mappings = self.mappings.lock();
-        let mapping = mappings.remove(&start).ok_or("Region not mapped")?;
+        let mapping = mappings.remove(&start).ok_or(KernelError::NotFound {
+            resource: "memory region",
+            id: start.0,
+        })?;
 
         // Flush TLB for the unmapped range
         crate::arch::tlb_flush_address(mapping.start.0);
@@ -353,7 +364,7 @@ impl VirtualAddressSpace {
 
     /// Unmap a region by address
     #[cfg(feature = "alloc")]
-    pub fn unmap(&self, start_addr: usize, _size: usize) -> Result<(), &'static str> {
+    pub fn unmap(&self, start_addr: usize, _size: usize) -> Result<(), KernelError> {
         self.unmap_region(VirtualAddress(start_addr as u64))
     }
 
@@ -374,7 +385,7 @@ impl VirtualAddressSpace {
         &self,
         size: usize,
         mapping_type: MappingType,
-    ) -> Result<VirtualAddress, &'static str> {
+    ) -> Result<VirtualAddress, KernelError> {
         let aligned_size = ((size + 4095) / 4096) * 4096;
         let addr = VirtualAddress(
             self.next_mmap_addr
@@ -402,7 +413,7 @@ impl VirtualAddressSpace {
 
     /// Clone address space (for fork)
     #[cfg(feature = "alloc")]
-    pub fn fork(&self) -> Result<Self, &'static str> {
+    pub fn fork(&self) -> Result<Self, KernelError> {
         let new_vas = Self::new();
 
         // Clone all mappings
@@ -439,30 +450,40 @@ impl VirtualAddressSpace {
         fault_addr: VirtualAddress,
         write: bool,
         user: bool,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), KernelError> {
         #[cfg(feature = "alloc")]
         {
             // Find the mapping for this address
             let mapping = self
                 .find_mapping(fault_addr)
-                .ok_or("Page fault in unmapped region")?;
+                .ok_or(KernelError::UnmappedMemory {
+                    addr: fault_addr.0 as usize,
+                })?;
 
             // Check permissions
             if write && !mapping.flags.contains(PageFlags::WRITABLE) {
-                return Err("Write to read-only page");
+                return Err(KernelError::PermissionDenied {
+                    operation: "write to read-only page",
+                });
             }
 
             if user && !mapping.flags.contains(PageFlags::USER) {
-                return Err("User access to kernel page");
+                return Err(KernelError::PermissionDenied {
+                    operation: "user access to kernel page",
+                });
             }
 
             // Check if this is a valid fault (e.g., COW, demand paging)
             // For now, we'll just return an error as we don't support these features yet
-            Err("Page fault handling not fully implemented")
+            Err(KernelError::NotImplemented {
+                feature: "page fault handling (COW/demand paging)",
+            })
         }
 
         #[cfg(not(feature = "alloc"))]
-        Err("Page fault handling requires alloc feature")
+        Err(KernelError::NotImplemented {
+            feature: "page fault handling (requires alloc)",
+        })
     }
 
     /// Get memory statistics
@@ -523,11 +544,11 @@ impl VirtualAddressSpace {
         self.next_mmap_addr
             .store(0x4000_0000_0000, Ordering::Release);
 
-        // TODO(phase3): Free page tables
+        // TODO(future): Free page tables
     }
 
     /// Clear user-space mappings only (for exec)
-    pub fn clear_user_space(&mut self) -> Result<(), &'static str> {
+    pub fn clear_user_space(&mut self) -> Result<(), KernelError> {
         #[cfg(feature = "alloc")]
         {
             use super::FRAME_ALLOCATOR;
@@ -590,16 +611,19 @@ impl VirtualAddressSpace {
     }
 
     /// Map a single page at a virtual address
-    pub fn map_page(&mut self, vaddr: usize, flags: PageFlags) -> Result<(), &'static str> {
+    pub fn map_page(&mut self, vaddr: usize, flags: PageFlags) -> Result<(), KernelError> {
         use super::{FRAME_ALLOCATOR, PAGE_SIZE};
 
         // Allocate a physical frame
         let frame = FRAME_ALLOCATOR
             .lock()
             .allocate_frames(1, None)
-            .map_err(|_| "Failed to allocate frame")?;
+            .map_err(|_| KernelError::OutOfMemory {
+                requested: 4096,
+                available: 0,
+            })?;
 
-        // TODO(phase3): Implement architecture-specific page mapping
+        // TODO(future): Implement architecture-specific page mapping
 
         // Record the mapping
         #[cfg(feature = "alloc")]

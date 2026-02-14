@@ -151,7 +151,7 @@ impl KeyStore {
     }
 
     fn current_time() -> u64 {
-        // TODO(phase3): Get actual system time from clock subsystem
+        // TODO(future): Get actual system time from clock subsystem
         0
     }
 }

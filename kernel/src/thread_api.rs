@@ -13,7 +13,10 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use spin::{Mutex, RwLock};
 
-use crate::process::{get_process, thread::ThreadId, ProcessId}; // Use the ThreadId from process::thread module
+use crate::{
+    error::KernelError,
+    process::{get_process, thread::ThreadId, ProcessId},
+}; // Use the ThreadId from process::thread module
 
 /// Thread priority levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,7 +218,7 @@ impl ThreadManager {
         &self,
         params: ThreadCreateParams,
         process_id: ProcessId,
-    ) -> Result<Arc<ThreadHandle>, &'static str> {
+    ) -> Result<Arc<ThreadHandle>, KernelError> {
         let thread_id = ThreadId(self.next_thread_id.fetch_add(1, Ordering::SeqCst));
 
         // Create thread handle
@@ -298,7 +301,7 @@ impl ThreadManager {
                 stack_addr
             );
         } else {
-            return Err("Process not found");
+            return Err(KernelError::ProcessNotFound { pid: process_id.0 });
         }
 
         Ok(handle)
@@ -310,11 +313,16 @@ impl ThreadManager {
     }
 
     /// Join a thread (wait for it to complete)
-    pub fn join_thread(&self, thread_id: ThreadId) -> Result<*mut u8, &'static str> {
-        let handle = self.get_thread(thread_id).ok_or("Thread not found")?;
+    pub fn join_thread(&self, thread_id: ThreadId) -> Result<*mut u8, KernelError> {
+        let handle = self
+            .get_thread(thread_id)
+            .ok_or(KernelError::ThreadNotFound { tid: thread_id.0 })?;
 
         if !handle.is_joinable() {
-            return Err("Thread is not joinable");
+            return Err(KernelError::InvalidState {
+                expected: "joinable",
+                actual: "detached",
+            });
         }
 
         // Wait for thread to complete
@@ -338,8 +346,10 @@ impl ThreadManager {
     }
 
     /// Detach a thread
-    pub fn detach_thread(&self, thread_id: ThreadId) -> Result<(), &'static str> {
-        let handle = self.get_thread(thread_id).ok_or("Thread not found")?;
+    pub fn detach_thread(&self, thread_id: ThreadId) -> Result<(), KernelError> {
+        let handle = self
+            .get_thread(thread_id)
+            .ok_or(KernelError::ThreadNotFound { tid: thread_id.0 })?;
 
         handle.detach();
         Ok(())
@@ -351,8 +361,10 @@ impl ThreadManager {
     /// is_cancel_requested() periodically and exit gracefully when cancelled.
     /// If the thread is blocked, it will be moved to Ready state to allow
     /// it to process the cancellation.
-    pub fn cancel_thread(&self, thread_id: ThreadId) -> Result<(), &'static str> {
-        let handle = self.get_thread(thread_id).ok_or("Thread not found")?;
+    pub fn cancel_thread(&self, thread_id: ThreadId) -> Result<(), KernelError> {
+        let handle = self
+            .get_thread(thread_id)
+            .ok_or(KernelError::ThreadNotFound { tid: thread_id.0 })?;
 
         // Set cancellation flag - thread should check this and exit gracefully
         handle.request_cancel();
@@ -386,8 +398,10 @@ impl ThreadManager {
         &self,
         thread_id: ThreadId,
         priority: ThreadPriority,
-    ) -> Result<(), &'static str> {
-        let handle = self.get_thread(thread_id).ok_or("Thread not found")?;
+    ) -> Result<(), KernelError> {
+        let handle = self
+            .get_thread(thread_id)
+            .ok_or(KernelError::ThreadNotFound { tid: thread_id.0 })?;
 
         // Update process thread priority
         if let Some(process) = get_process(handle.process_id) {
@@ -411,8 +425,10 @@ impl ThreadManager {
     }
 
     /// Get thread priority
-    pub fn get_thread_priority(&self, thread_id: ThreadId) -> Result<ThreadPriority, &'static str> {
-        let handle = self.get_thread(thread_id).ok_or("Thread not found")?;
+    pub fn get_thread_priority(&self, thread_id: ThreadId) -> Result<ThreadPriority, KernelError> {
+        let handle = self
+            .get_thread(thread_id)
+            .ok_or(KernelError::ThreadNotFound { tid: thread_id.0 })?;
 
         if let Some(process) = get_process(handle.process_id) {
             if let Some(thread) = process.get_thread(thread_id) {
@@ -428,12 +444,17 @@ impl ThreadManager {
             }
         }
 
-        Err("Thread context not found")
+        Err(KernelError::NotFound {
+            resource: "thread context",
+            id: thread_id.0,
+        })
     }
 
     /// Set CPU affinity for thread
-    pub fn set_cpu_affinity(&self, thread_id: ThreadId, cpu_mask: u64) -> Result<(), &'static str> {
-        let handle = self.get_thread(thread_id).ok_or("Thread not found")?;
+    pub fn set_cpu_affinity(&self, thread_id: ThreadId, cpu_mask: u64) -> Result<(), KernelError> {
+        let handle = self
+            .get_thread(thread_id)
+            .ok_or(KernelError::ThreadNotFound { tid: thread_id.0 })?;
 
         if let Some(process) = get_process(handle.process_id) {
             if let Some(thread) = process.get_thread(thread_id) {
@@ -447,11 +468,14 @@ impl ThreadManager {
             }
         }
 
-        Err("Thread context not found")
+        Err(KernelError::NotFound {
+            resource: "thread context",
+            id: thread_id.0,
+        })
     }
 
     /// Create thread-local storage key
-    pub fn create_tls_key(&self, destructor: Option<fn(*mut u8)>) -> Result<TlsKey, &'static str> {
+    pub fn create_tls_key(&self, destructor: Option<fn(*mut u8)>) -> Result<TlsKey, KernelError> {
         let key = TlsKey(self.next_tls_key.fetch_add(1, Ordering::SeqCst) as u32);
 
         if let Some(dtor) = destructor {
@@ -462,7 +486,7 @@ impl ThreadManager {
     }
 
     /// Delete thread-local storage key
-    pub fn delete_tls_key(&self, key: TlsKey) -> Result<(), &'static str> {
+    pub fn delete_tls_key(&self, key: TlsKey) -> Result<(), KernelError> {
         self.tls_destructors.write().remove(&key);
 
         // Remove from all thread contexts
@@ -487,8 +511,10 @@ impl ThreadManager {
         thread_id: ThreadId,
         key: TlsKey,
         value: *mut u8,
-    ) -> Result<(), &'static str> {
-        let handle = self.get_thread(thread_id).ok_or("Thread not found")?;
+    ) -> Result<(), KernelError> {
+        let handle = self
+            .get_thread(thread_id)
+            .ok_or(KernelError::ThreadNotFound { tid: thread_id.0 })?;
 
         if let Some(process) = get_process(handle.process_id) {
             if let Some(thread) = process.get_thread(thread_id) {
@@ -500,12 +526,17 @@ impl ThreadManager {
             }
         }
 
-        Err("Thread context not found")
+        Err(KernelError::NotFound {
+            resource: "thread context",
+            id: thread_id.0,
+        })
     }
 
     /// Get thread-local storage value
-    pub fn get_tls_value(&self, thread_id: ThreadId, key: TlsKey) -> Result<*mut u8, &'static str> {
-        let handle = self.get_thread(thread_id).ok_or("Thread not found")?;
+    pub fn get_tls_value(&self, thread_id: ThreadId, key: TlsKey) -> Result<*mut u8, KernelError> {
+        let handle = self
+            .get_thread(thread_id)
+            .ok_or(KernelError::ThreadNotFound { tid: thread_id.0 })?;
 
         if let Some(process) = get_process(handle.process_id) {
             if let Some(thread) = process.get_thread(thread_id) {
@@ -520,7 +551,10 @@ impl ThreadManager {
             }
         }
 
-        Err("Thread context not found")
+        Err(KernelError::NotFound {
+            resource: "thread context",
+            id: thread_id.0,
+        })
     }
 
     /// Get current thread ID from scheduler
@@ -540,8 +574,10 @@ impl ThreadManager {
     }
 
     /// Get thread statistics
-    pub fn get_thread_stats(&self, thread_id: ThreadId) -> Result<ThreadStats, &'static str> {
-        let handle = self.get_thread(thread_id).ok_or("Thread not found")?;
+    pub fn get_thread_stats(&self, thread_id: ThreadId) -> Result<ThreadStats, KernelError> {
+        let handle = self
+            .get_thread(thread_id)
+            .ok_or(KernelError::ThreadNotFound { tid: thread_id.0 })?;
 
         Ok(ThreadStats {
             id: thread_id,
@@ -640,16 +676,12 @@ pub fn create_thread(
         attributes,
     };
 
-    get_thread_manager()
-        .create_thread(params, process_id)
-        .map_err(crate::error::KernelError::from)
+    get_thread_manager().create_thread(params, process_id)
 }
 
 /// Join a thread
 pub fn join_thread(thread_id: ThreadId) -> crate::error::KernelResult<*mut u8> {
-    get_thread_manager()
-        .join_thread(thread_id)
-        .map_err(crate::error::KernelError::from)
+    get_thread_manager().join_thread(thread_id)
 }
 
 /// Exit current thread

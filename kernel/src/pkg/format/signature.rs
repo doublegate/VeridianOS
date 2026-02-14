@@ -34,10 +34,13 @@ impl PackageSignatures {
     }
 
     /// Deserialize signatures from bytes
-    pub fn from_bytes(data: &[u8]) -> Result<Self, &'static str> {
+    pub fn from_bytes(data: &[u8]) -> Result<Self, crate::error::KernelError> {
         if data.len() < 68 {
             // 64 (Ed25519) + 4 (length)
-            return Err("Invalid signature data");
+            return Err(crate::error::KernelError::InvalidArgument {
+                name: "signature_data",
+                value: "data too short (need >= 68 bytes)",
+            });
         }
 
         // Extract Ed25519 signature
@@ -48,7 +51,10 @@ impl PackageSignatures {
         let dil_len = u32::from_le_bytes([data[64], data[65], data[66], data[67]]) as usize;
 
         if data.len() < 68 + dil_len {
-            return Err("Invalid Dilithium signature length");
+            return Err(crate::error::KernelError::InvalidArgument {
+                name: "signature_data",
+                value: "invalid Dilithium signature length",
+            });
         }
 
         // Extract Dilithium signature

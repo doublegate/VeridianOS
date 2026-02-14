@@ -16,6 +16,7 @@ use super::{
 };
 use crate::{
     arch::context::ThreadContext,
+    error::KernelError,
     process::{thread::ThreadState, ProcessId as ProcId, ProcessState, ThreadId as ThrId},
 };
 
@@ -26,7 +27,7 @@ pub fn create_task(
     _entry_point: usize,
     stack_size: usize,
     priority: Priority,
-) -> Result<ProcId, &'static str> {
+) -> Result<ProcId, KernelError> {
     extern crate alloc;
     use alloc::string::String;
 
@@ -165,7 +166,7 @@ pub fn create_task_from_thread(
     process_id: ProcId,
     thread_id: ThrId,
     thread: &crate::process::Thread,
-) -> Result<NonNull<Task>, &'static str> {
+) -> Result<NonNull<Task>, KernelError> {
     extern crate alloc;
     use alloc::{boxed::Box, string::String};
 
@@ -240,7 +241,7 @@ pub fn schedule_thread(
     process_id: ProcId,
     thread_id: ThrId,
     thread: &crate::process::Thread,
-) -> Result<(), &'static str> {
+) -> Result<(), KernelError> {
     let task_ptr = create_task_from_thread(process_id, thread_id, thread)?;
 
     // Find best CPU for this task

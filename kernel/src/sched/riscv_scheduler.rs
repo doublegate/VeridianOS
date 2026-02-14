@@ -1,66 +1,35 @@
-//! RISC-V specific scheduler wrapper to bypass spin lock issues
+//! RISC-V specific scheduler wrapper using spin::Mutex for proper
+//! synchronization
 
-use core::{cell::UnsafeCell, sync::atomic::AtomicBool};
+use spin::Mutex;
 
 use super::scheduler::Scheduler;
 
-/// RISC-V safe scheduler wrapper
+/// RISC-V safe scheduler wrapper using spin::Mutex for proper locking.
+///
+/// Previously used UnsafeCell with manual Send/Sync impls, which was
+/// unsound because it returned &mut references without synchronization.
+/// Now delegates to spin::Mutex which provides correct locking.
 pub struct RiscvScheduler {
-    inner: UnsafeCell<Scheduler>,
-    _lock_flag: AtomicBool,
+    inner: Mutex<Scheduler>,
 }
 
 impl RiscvScheduler {
     /// Create new scheduler
-    #[allow(clippy::new_without_default)]
     pub const fn new() -> Self {
         Self {
-            inner: UnsafeCell::new(Scheduler::new()),
-            _lock_flag: AtomicBool::new(false),
+            inner: Mutex::new(Scheduler::new()),
         }
     }
 
-    /// Get a "lock" that just returns the inner scheduler
-    /// This bypasses the spin lock issue during bootstrap
-    pub fn lock(&self) -> RiscvSchedulerGuard<'_> {
-        // For RISC-V, we bypass the lock during early boot
-        // This is safe during single-threaded bootstrap
-        RiscvSchedulerGuard {
-            // SAFETY: During RISC-V early boot, only a single hart (CPU) is
-            // active and interrupts are disabled, so there is no concurrent
-            // access to the inner Scheduler. The UnsafeCell is used to bypass
-            // spin::Mutex which causes deadlocks during RISC-V bootstrap.
-            // After SMP initialization, proper per-CPU schedulers should be
-            // used instead.
-            scheduler: unsafe { &mut *self.inner.get() },
-        }
+    /// Acquire the scheduler lock and return a guard that derefs to Scheduler.
+    pub fn lock(&self) -> spin::MutexGuard<'_, Scheduler> {
+        self.inner.lock()
     }
 }
 
-/// Guard for RISC-V scheduler
-pub struct RiscvSchedulerGuard<'a> {
-    scheduler: &'a mut Scheduler,
-}
-
-impl core::ops::Deref for RiscvSchedulerGuard<'_> {
-    type Target = Scheduler;
-
-    fn deref(&self) -> &Self::Target {
-        self.scheduler
+impl Default for RiscvScheduler {
+    fn default() -> Self {
+        Self::new()
     }
 }
-
-impl core::ops::DerefMut for RiscvSchedulerGuard<'_> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.scheduler
-    }
-}
-
-// SAFETY: RiscvScheduler uses UnsafeCell internally but is only accessed
-// during single-hart bootstrap on RISC-V where no concurrent access occurs.
-// The _lock_flag AtomicBool provides a synchronization primitive if needed
-// after SMP initialization.
-unsafe impl Send for RiscvScheduler {}
-// SAFETY: Same as Send -- the scheduler is accessed through the lock() method
-// which returns a guard, and during early boot only one hart is active.
-unsafe impl Sync for RiscvScheduler {}

@@ -14,6 +14,7 @@ use alloc::{string::String, vec, vec::Vec};
 #[allow(unused_imports)]
 use crate::{
     elf::{ElfError, ElfLoader},
+    error::KernelError,
     fs::get_vfs,
     println,
     process::{lifecycle, ProcessId},
@@ -21,7 +22,7 @@ use crate::{
 
 /// Load and execute the init process
 #[cfg(feature = "alloc")]
-pub fn load_init_process() -> Result<ProcessId, &'static str> {
+pub fn load_init_process() -> Result<ProcessId, KernelError> {
     println!("[LOADER] Loading init process...");
 
     // Try to load init from various locations
@@ -56,19 +57,22 @@ pub fn load_user_program(
     path: &str,
     argv: &[&str],
     envp: &[&str],
-) -> Result<ProcessId, &'static str> {
+) -> Result<ProcessId, KernelError> {
     println!("[LOADER] Loading program: {}", path);
 
     // Open the file
     let file_node = get_vfs()
         .read()
         .open(path, crate::fs::file::OpenFlags::read_only())
-        .map_err(|_| "Failed to open program file")?;
+        .map_err(|_| KernelError::NotFound {
+            resource: "program file",
+            id: 0,
+        })?;
 
     // Get file size
     let metadata = file_node
         .metadata()
-        .map_err(|_| "Failed to get file metadata")?;
+        .map_err(|_| KernelError::FsError(crate::error::FsError::IoError))?;
     let file_size = metadata.size;
 
     // Read the entire file into memory
@@ -77,26 +81,20 @@ pub fn load_user_program(
 
     let bytes_read = file_node
         .read(0, &mut buffer)
-        .map_err(|_| "Failed to read program file")?;
+        .map_err(|_| KernelError::FsError(crate::error::FsError::IoError))?;
 
     if bytes_read != file_size {
-        return Err("Failed to read entire program file");
+        return Err(KernelError::FsError(crate::error::FsError::IoError));
     }
 
     // Create an ELF loader and parse the binary
     let loader = ElfLoader::new();
-    let binary = loader.parse(&buffer).map_err(|e| match e {
-        ElfError::InvalidMagic => "Invalid ELF magic number",
-        ElfError::InvalidClass => "Invalid ELF class",
-        ElfError::InvalidData => "Invalid ELF data encoding",
-        ElfError::InvalidType => "Invalid ELF type",
-        ElfError::UnsupportedMachine => "Unsupported machine architecture",
-        ElfError::InvalidProgramHeader => "Invalid program header",
-        ElfError::InvalidSymbol => "Invalid symbol",
-        ElfError::MemoryAllocationFailed => "Memory allocation failed",
-        ElfError::FileReadFailed => "File read failed",
-        ElfError::RelocationFailed => "Relocation failed",
-    })?;
+    let binary = loader
+        .parse(&buffer)
+        .map_err(|_| KernelError::InvalidArgument {
+            name: "elf_binary",
+            value: "failed to parse ELF",
+        })?;
 
     // Get the entry point
     let entry_point = binary.entry_point as usize;
@@ -131,7 +129,10 @@ pub fn load_user_program(
 
         // Verify the entry point matches
         if entry != binary.entry_point {
-            return Err("Entry point mismatch after loading");
+            return Err(KernelError::InvalidState {
+                expected: "matching entry point",
+                actual: "entry point mismatch after loading",
+            });
         }
 
         // Handle dynamic linking if needed
@@ -165,18 +166,21 @@ fn load_dynamic_linker(
     process: &crate::process::Process,
     interpreter_path: &str,
     _main_binary: &crate::elf::ElfBinary,
-) -> Result<u64, &'static str> {
+) -> Result<u64, KernelError> {
     use crate::mm::PageFlags;
 
     // Read the interpreter from filesystem
     let file_node = get_vfs()
         .read()
         .open(interpreter_path, crate::fs::file::OpenFlags::read_only())
-        .map_err(|_| "Failed to open interpreter")?;
+        .map_err(|_| KernelError::NotFound {
+            resource: "interpreter",
+            id: 0,
+        })?;
 
     let metadata = file_node
         .metadata()
-        .map_err(|_| "Failed to get interpreter metadata")?;
+        .map_err(|_| KernelError::FsError(crate::error::FsError::IoError))?;
     let file_size = metadata.size;
 
     let mut buffer = Vec::with_capacity(file_size);
@@ -184,13 +188,16 @@ fn load_dynamic_linker(
 
     file_node
         .read(0, &mut buffer)
-        .map_err(|_| "Failed to read interpreter")?;
+        .map_err(|_| KernelError::FsError(crate::error::FsError::IoError))?;
 
     // Parse the interpreter ELF
     let loader = ElfLoader::new();
     let interp_binary = loader
         .parse(&buffer)
-        .map_err(|_| "Failed to parse interpreter ELF")?;
+        .map_err(|_| KernelError::InvalidArgument {
+            name: "interpreter_elf",
+            value: "failed to parse interpreter ELF",
+        })?;
 
     // Load interpreter at a high address to avoid collision with main binary
     // Standard Linux ld.so loads at 0x7f00_0000_0000 region
@@ -224,9 +231,7 @@ fn load_dynamic_linker(
         // Map pages for this segment
         for i in 0..num_pages {
             let addr = page_start + (i as u64 * 0x1000);
-            memory_space
-                .map_page(addr as usize, flags)
-                .map_err(|_| "Failed to map interpreter page")?;
+            memory_space.map_page(addr as usize, flags)?;
         }
 
         // Copy segment data
@@ -280,7 +285,7 @@ fn setup_auxiliary_vector(
     _process: &crate::process::Process,
     main_binary: &crate::elf::ElfBinary,
     interp_base: u64,
-) -> Result<(), &'static str> {
+) -> Result<(), KernelError> {
     // Auxiliary vector types (from Linux elf.h)
     const AT_NULL: u64 = 0; // End of vector
     const AT_PHDR: u64 = 3; // Program headers for program
@@ -323,7 +328,7 @@ fn setup_auxiliary_vector(
 
 /// Create a minimal init process when no init binary is available
 #[cfg(feature = "alloc")]
-fn create_minimal_init() -> Result<ProcessId, &'static str> {
+fn create_minimal_init() -> Result<ProcessId, KernelError> {
     println!("[LOADER] Creating minimal init process");
 
     // Entry point for minimal init
@@ -397,7 +402,7 @@ fn create_minimal_init() -> Result<ProcessId, &'static str> {
 
 /// Load the shell program
 #[cfg(feature = "alloc")]
-pub fn load_shell() -> Result<ProcessId, &'static str> {
+pub fn load_shell() -> Result<ProcessId, KernelError> {
     println!("[LOADER] Loading shell...");
 
     // Try to load a shell
@@ -429,7 +434,7 @@ pub fn load_shell() -> Result<ProcessId, &'static str> {
 
 /// Create a minimal shell when no shell binary is available
 #[cfg(feature = "alloc")]
-fn create_minimal_shell() -> Result<ProcessId, &'static str> {
+fn create_minimal_shell() -> Result<ProcessId, KernelError> {
     // Similar to minimal init, but configured as a shell
     let entry_point = 0x300000;
 

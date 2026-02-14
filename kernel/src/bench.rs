@@ -59,40 +59,14 @@ impl BenchmarkResult {
     }
 }
 
-/// Architecture-specific timestamp counter
-#[cfg(target_arch = "x86_64")]
+/// Architecture-specific timestamp counter.
+///
+/// Re-exports the centralized [`crate::arch::entropy::read_timestamp`] which
+/// provides implementations for x86_64 (RDTSC), AArch64 (CNTVCT_EL0), and
+/// RISC-V (rdcycle).
+#[inline]
 pub fn read_timestamp() -> u64 {
-    // SAFETY: RDTSC is a non-privileged x86_64 instruction that reads
-    // the Time Stamp Counter. No side effects; always safe to call.
-    unsafe { core::arch::x86_64::_rdtsc() }
-}
-
-#[cfg(target_arch = "aarch64")]
-pub fn read_timestamp() -> u64 {
-    let counter: u64;
-    // SAFETY: Reading CNTVCT_EL0 (virtual timer count) is a non-
-    // privileged AArch64 operation with no side effects.
-    unsafe {
-        core::arch::asm!(
-            "mrs {}, CNTVCT_EL0",
-            out(reg) counter
-        );
-    }
-    counter
-}
-
-#[cfg(target_arch = "riscv64")]
-pub fn read_timestamp() -> u64 {
-    let counter: u64;
-    // SAFETY: RDCYCLE reads the cycle counter CSR, a non-privileged
-    // read-only RISC-V operation with no side effects.
-    unsafe {
-        core::arch::asm!(
-            "rdcycle {}",
-            out(reg) counter
-        );
-    }
-    counter
+    crate::arch::entropy::read_timestamp()
 }
 
 /// Convert cycles to nanoseconds (approximate)

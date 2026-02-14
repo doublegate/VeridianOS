@@ -13,7 +13,7 @@ use spin::Mutex;
 
 use super::{pcb::ProcessState, Process, ProcessId};
 #[allow(unused_imports)]
-use crate::println;
+use crate::{error::KernelError, println};
 
 /// Process table entry
 #[cfg(feature = "alloc")]
@@ -81,12 +81,15 @@ impl ProcessTable {
 
     /// Add a process to the table
     #[cfg(feature = "alloc")]
-    pub fn add_process(&self, process: Process) -> Result<ProcessId, &'static str> {
+    pub fn add_process(&self, process: Process) -> Result<ProcessId, KernelError> {
         let pid = process.pid;
         let mut entries = self.entries.lock();
 
         if entries.contains_key(&pid) {
-            return Err("Process ID already exists");
+            return Err(KernelError::AlreadyExists {
+                resource: "process",
+                id: pid.0,
+            });
         }
 
         entries.insert(
@@ -104,12 +107,14 @@ impl ProcessTable {
 
     /// Add a process to the table (no-alloc version)
     #[cfg(not(feature = "alloc"))]
-    pub fn add_process(&self, process: Process) -> Result<ProcessId, &'static str> {
+    pub fn add_process(&self, process: Process) -> Result<ProcessId, KernelError> {
         let pid = process.pid;
         let mut entries = self.entries.lock();
 
         if entries.count >= super::MAX_PROCESSES {
-            return Err("Process table full");
+            return Err(KernelError::ResourceExhausted {
+                resource: "process table",
+            });
         }
 
         // Find empty slot
@@ -123,7 +128,9 @@ impl ProcessTable {
             }
         }
 
-        Err("Process table full")
+        Err(KernelError::ResourceExhausted {
+            resource: "process table",
+        })
     }
 
     /// Remove a process from the table
@@ -315,7 +322,7 @@ pub fn get_process_mut(pid: ProcessId) -> Option<&'static mut Process> {
 }
 
 /// Add a process to the table
-pub fn add_process(process: Process) -> Result<ProcessId, &'static str> {
+pub fn add_process(process: Process) -> Result<ProcessId, KernelError> {
     PROCESS_TABLE.add_process(process)
 }
 

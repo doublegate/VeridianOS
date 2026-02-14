@@ -26,34 +26,26 @@ pub mod zero_copy;
 mod tests;
 
 // Re-export core types
-#[allow(unused_imports)]
 pub use async_channel::AsyncChannel;
-#[allow(unused_imports)]
 pub use capability::{EndpointId, IpcCapability, IpcPermissions, Permission, ProcessId};
-#[allow(unused_imports)]
 pub use channel::{Channel, Endpoint};
-#[allow(unused_imports)]
 pub use error::{IpcError, Result};
-#[allow(unused_imports)]
 pub use message::{LargeMessage, Message, SmallMessage};
-#[allow(unused_imports)]
-pub use perf::{cycles_to_ns, measure_ipc_operation, read_timestamp, IPC_PERF_STATS};
-#[allow(unused_imports)]
+pub use perf::{cycles_to_ns, measure_ipc_operation, IPC_PERF_STATS};
 pub use rate_limit::{RateLimits, RATE_LIMITER};
 // Re-export internal functions for tests
 #[cfg(test)]
 pub use registry::lookup_endpoint;
-#[allow(unused_imports)]
 pub use registry::{
     create_channel, create_endpoint, get_registry_stats, remove_process_endpoints,
     validate_capability,
 };
-#[allow(unused_imports)]
 pub use shared_memory::{Permissions, SharedRegion, TransferMode};
 #[cfg(test)]
 pub use sync::send_message;
-#[allow(unused_imports)]
 pub use sync::{sync_call, sync_receive, sync_reply, sync_send};
+
+pub use crate::arch::entropy::read_timestamp;
 
 /// IPC system initialization
 #[allow(dead_code)]

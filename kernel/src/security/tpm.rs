@@ -344,6 +344,7 @@ impl Tpm {
                 let loc_sts = base + locality_offset + mmio::CRB_LOC_STS;
                 let mut retries = 1000u32;
                 loop {
+                    // SAFETY: Reading TPM CRB locality status register via MMIO
                     let sts = unsafe { core::ptr::read_volatile(loc_sts as *const u32) };
                     if sts & 1 != 0 {
                         // Locality granted
@@ -390,6 +391,7 @@ impl Tpm {
         }
 
         // Trigger command processing
+        // SAFETY: Writing to TPM CRB_CTRL_START register to begin command execution
         unsafe {
             core::ptr::write_volatile(ctrl_start as *mut u32, mmio::CRB_START);
         }
@@ -397,6 +399,7 @@ impl Tpm {
         // Poll CRB_CTRL_START until it clears (command complete)
         let mut retries = 100_000u32;
         loop {
+            // SAFETY: Polling TPM CRB_CTRL_START register for command completion
             let start_val = unsafe { core::ptr::read_volatile(ctrl_start as *const u32) };
             if start_val == 0 {
                 break; // Command complete
@@ -408,6 +411,7 @@ impl Tpm {
         }
 
         // Check for error in CRB_CTRL_STS
+        // SAFETY: Reading TPM CRB status register to check for command errors
         let sts = unsafe { core::ptr::read_volatile(ctrl_sts as *const u32) };
         if sts & 1 != 0 {
             return Err(TpmError::CommandFailed);
@@ -416,6 +420,7 @@ impl Tpm {
         // Read response from data buffer
         // First read the response header to get the size
         let mut header_bytes = [0u8; 10];
+        // SAFETY: Reading TPM response header (10 bytes) from CRB data buffer via MMIO
         unsafe {
             for (i, byte) in header_bytes.iter_mut().enumerate() {
                 *byte = core::ptr::read_volatile((buf_addr + i) as *const u8);
@@ -434,6 +439,8 @@ impl Tpm {
         let mut response = vec![0u8; response_size];
         response[..10].copy_from_slice(&header_bytes);
         // Index-based loop required: each element reads from a different MMIO address
+        // SAFETY: Reading remaining TPM response bytes from CRB data buffer via MMIO.
+        // response_size is bounded to CRB_BUFFER_SIZE above.
         #[allow(clippy::needless_range_loop)]
         unsafe {
             for i in 10..response_size {

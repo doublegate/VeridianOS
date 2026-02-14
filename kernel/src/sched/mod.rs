@@ -64,7 +64,11 @@ pub use ipc_blocking::{
 #[cfg(feature = "alloc")]
 pub use load_balance::{balance_load, cleanup_dead_tasks};
 // ---- Re-exports: process compatibility ----
-pub use process_compat::{alloc_pid, current_process, find_process, switch_to_process, Process};
+pub use process_compat::{
+    alloc_pid, current_process, find_process, switch_to_process, TaskProcessAdapter,
+};
+/// Type alias for backward compatibility.
+pub type Process = TaskProcessAdapter;
 // ---- Re-exports: runtime ----
 pub use runtime::{has_ready_tasks, idle_task_entry, run, set_algorithm, start, timer_tick};
 pub use task::{Priority, SchedClass, SchedPolicy, Task};
@@ -74,7 +78,6 @@ pub use task_management::exit_task;
 pub use task_management::{create_task, create_task_from_thread, schedule_thread};
 
 // Export functions needed by tests
-#[allow(unused_imports)]
 pub use self::scheduler::should_preempt;
 // ---- Remaining items that stay in mod.rs ----
 

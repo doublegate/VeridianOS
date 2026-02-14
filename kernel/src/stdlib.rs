@@ -2,9 +2,6 @@
 //!
 //! Core library functions and utilities for user-space applications.
 
-// Allow missing safety docs - these are standard C-compatible functions
-#![allow(clippy::missing_safety_doc)]
-
 use alloc::{boxed::Box, format, string::String};
 use core::{ptr, slice};
 
@@ -522,37 +519,11 @@ pub mod process {
     /// Exit current process
     pub fn exit(status: i32) -> ! {
         crate::process::lifecycle::exit_process(status);
-        // Process should never return after exit
+        // Process should never return after exit.
+        // Use the arch-specific idle function to avoid duplicating
+        // inline asm that already exists in each arch module.
         loop {
-            #[cfg(target_arch = "x86_64")]
-            // SAFETY: `hlt` halts the CPU until the next interrupt.
-            // We are in an infinite loop after process exit, so this
-            // is a low-power idle.  No memory or register invariants.
-            unsafe {
-                core::arch::asm!("hlt")
-            }
-
-            #[cfg(target_arch = "aarch64")]
-            // SAFETY: `wfi` (Wait For Interrupt) is the AArch64
-            // equivalent of x86 hlt.  Safe to execute at any
-            // privilege level; simply idles until an interrupt fires.
-            unsafe {
-                core::arch::asm!("wfi")
-            }
-
-            #[cfg(target_arch = "riscv64")]
-            // SAFETY: `wfi` (Wait For Interrupt) idles the hart
-            // until the next interrupt.  No invariants required.
-            unsafe {
-                core::arch::asm!("wfi")
-            }
-
-            #[cfg(not(any(
-                target_arch = "x86_64",
-                target_arch = "aarch64",
-                target_arch = "riscv64"
-            )))]
-            core::hint::spin_loop();
+            crate::arch::idle();
         }
     }
 

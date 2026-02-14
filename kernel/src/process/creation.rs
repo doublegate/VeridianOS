@@ -18,7 +18,7 @@ use super::{
     ProcessId, ProcessPriority,
 };
 #[allow(unused_imports)]
-use crate::{arch::context::ThreadContext, println};
+use crate::{arch::context::ThreadContext, error::KernelError, println};
 
 /// Default stack sizes
 pub const DEFAULT_USER_STACK_SIZE: usize = 8 * 1024 * 1024; // 8MB
@@ -55,7 +55,7 @@ impl Default for ProcessCreateOptions {
 
 /// Create a new process
 #[cfg(feature = "alloc")]
-pub fn create_process(name: String, entry_point: usize) -> Result<ProcessId, &'static str> {
+pub fn create_process(name: String, entry_point: usize) -> Result<ProcessId, KernelError> {
     let options = ProcessCreateOptions {
         name,
         entry_point,
@@ -69,7 +69,7 @@ pub fn create_process(name: String, entry_point: usize) -> Result<ProcessId, &'s
 #[cfg(feature = "alloc")]
 pub fn create_process_with_options(
     options: ProcessCreateOptions,
-) -> Result<ProcessId, &'static str> {
+) -> Result<ProcessId, KernelError> {
     // Create the process
     let process = ProcessBuilder::new(options.name.clone())
         .parent(options.parent.unwrap_or(ProcessId(0)))
@@ -143,11 +143,11 @@ pub fn create_process_with_options(
 /// Replaces the current process image with a new program.
 /// This function does not return on success - the new program begins execution.
 #[cfg(feature = "alloc")]
-pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), &'static str> {
+pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), KernelError> {
     use crate::{elf::ElfLoader, fs};
 
-    let process = super::current_process().ok_or("No current process")?;
-    let current_thread = super::current_thread().ok_or("No current thread")?;
+    let process = super::current_process().ok_or(KernelError::ProcessNotFound { pid: 0 })?;
+    let current_thread = super::current_thread().ok_or(KernelError::ThreadNotFound { tid: 0 })?;
 
     println!(
         "[PROCESS] exec() called for process {} with path: {}",
@@ -155,7 +155,8 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), &'st
     );
 
     // Step 1: Load new program from filesystem
-    let file_data = fs::read_file(path).map_err(|_| "Failed to read executable file")?;
+    let file_data =
+        fs::read_file(path).map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
 
     // Step 2: Clear current address space and load new program
     let entry_point = {
@@ -221,17 +222,15 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), &'st
 }
 
 #[cfg(not(feature = "alloc"))]
-pub fn exec_process(_path: &str, _argv: &[&str], _envp: &[&str]) -> Result<(), &'static str> {
-    Err("exec requires alloc feature")
+pub fn exec_process(_path: &str, _argv: &[&str], _envp: &[&str]) -> Result<(), KernelError> {
+    Err(KernelError::NotImplemented {
+        feature: "exec (requires alloc)",
+    })
 }
 
 /// Setup stack for exec with arguments and environment
 #[cfg(feature = "alloc")]
-fn setup_exec_stack(
-    process: &Process,
-    argv: &[&str],
-    envp: &[&str],
-) -> Result<usize, &'static str> {
+fn setup_exec_stack(process: &Process, argv: &[&str], envp: &[&str]) -> Result<usize, KernelError> {
     let memory_space = process.memory_space.lock();
 
     // Get stack region (typically at end of user address space)

@@ -18,14 +18,15 @@ use super::{
     ProcessId,
 };
 #[allow(unused_imports)]
-use crate::{arch::context::ThreadContext, println};
+use crate::{arch::context::ThreadContext, error::KernelError, println};
 
 /// Fork current process
 #[cfg(feature = "alloc")]
-pub fn fork_process() -> Result<ProcessId, &'static str> {
-    let current_process = super::current_process().ok_or("No current process")?;
+pub fn fork_process() -> Result<ProcessId, KernelError> {
+    let current_process =
+        super::current_process().ok_or(KernelError::ProcessNotFound { pid: 0 })?;
 
-    let current_thread = super::current_thread().ok_or("No current thread")?;
+    let current_thread = super::current_thread().ok_or(KernelError::ThreadNotFound { tid: 0 })?;
 
     // Create new process as copy of current
     let new_process = ProcessBuilder::new(format!("{}-fork", current_process.name))

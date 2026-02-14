@@ -10,7 +10,6 @@ pub mod entry;
 pub mod serial;
 
 // Re-export context and timer from parent riscv module
-#[allow(unused_imports)]
 pub use super::riscv::{context, timer};
 
 /// Called from bootstrap on RISC-V via `crate::arch::init()`.

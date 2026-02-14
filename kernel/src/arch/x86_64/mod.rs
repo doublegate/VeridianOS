@@ -4,8 +4,6 @@
 //! serial I/O (COM1 at 0x3F8), VGA text output, and I/O port primitives
 //! for the x86_64 platform.
 
-#![allow(clippy::missing_safety_doc)]
-
 pub mod boot;
 pub mod bootstrap;
 pub mod context;
@@ -146,28 +144,58 @@ pub fn serial_init() -> uart_16550::SerialPort {
     serial_port
 }
 
-/// Basic I/O port functions -- used by PCI, console, and storage drivers
-/// via `crate::arch::outb()`.
+/// Write a byte to an x86_64 I/O port.
+///
+/// # Safety
+/// The caller must ensure `port` is a valid I/O port address for the
+/// intended device. Writing to an incorrect port can cause undefined
+/// hardware behavior.
 pub unsafe fn outb(port: u16, value: u8) {
     x86_64::instructions::port::Port::new(port).write(value);
 }
 
+/// Read a byte from an x86_64 I/O port.
+///
+/// # Safety
+/// The caller must ensure `port` is a valid I/O port address for the
+/// intended device. Reading from an incorrect port may return garbage
+/// or trigger hardware side effects.
 pub unsafe fn inb(port: u16) -> u8 {
     x86_64::instructions::port::Port::new(port).read()
 }
 
+/// Write a 16-bit word to an x86_64 I/O port.
+///
+/// # Safety
+/// The caller must ensure `port` is a valid I/O port address for the
+/// intended device and that the device expects a 16-bit write.
 pub unsafe fn outw(port: u16, value: u16) {
     x86_64::instructions::port::Port::new(port).write(value);
 }
 
+/// Read a 16-bit word from an x86_64 I/O port.
+///
+/// # Safety
+/// The caller must ensure `port` is a valid I/O port address for the
+/// intended device and that the device produces valid 16-bit reads.
 pub unsafe fn inw(port: u16) -> u16 {
     x86_64::instructions::port::Port::new(port).read()
 }
 
+/// Write a 32-bit dword to an x86_64 I/O port.
+///
+/// # Safety
+/// The caller must ensure `port` is a valid I/O port address for the
+/// intended device and that the device expects a 32-bit write.
 pub unsafe fn outl(port: u16, value: u32) {
     x86_64::instructions::port::Port::new(port).write(value);
 }
 
+/// Read a 32-bit dword from an x86_64 I/O port.
+///
+/// # Safety
+/// The caller must ensure `port` is a valid I/O port address for the
+/// intended device and that the device produces valid 32-bit reads.
 pub unsafe fn inl(port: u16) -> u32 {
     x86_64::instructions::port::Port::new(port).read()
 }

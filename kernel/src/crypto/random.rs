@@ -10,10 +10,9 @@
 //! - 96-bit nonce (fixed per reseed)
 //! - 32-bit counter incremented for each 64-byte block
 //!
-//! Entropy sources:
-//! - x86_64: RDRAND instruction (hardware RNG), TSC jitter
-//! - AArch64: Timer counter (CNTVCT_EL0) jitter
-//! - RISC-V: Timer counter (rdcycle) jitter
+//! Entropy sources (via `arch::entropy` abstraction):
+//! - Hardware RNG (RDRAND on x86_64, if available)
+//! - Timer-jitter entropy (architecture-independent fallback)
 //!
 //! Reseeding occurs every RESEED_INTERVAL calls to mix fresh entropy.
 
@@ -220,281 +219,36 @@ impl SecureRandom {
         output
     }
 
-    /// Collect entropy from hardware sources
+    /// Collect entropy from hardware sources.
+    ///
+    /// Uses the `arch::entropy` abstraction to avoid architecture-specific code
+    /// in this module. Tries hardware RNG first (RDRAND on x86_64), then falls
+    /// back to timer-jitter entropy.
     fn get_entropy() -> CryptoResult<[u8; 32]> {
-        let mut entropy = [0u8; 32];
+        use crate::arch::entropy;
 
-        #[cfg(target_arch = "x86_64")]
-        {
-            // Try RDRAND first for high-quality hardware entropy
-            if Self::try_rdrand(&mut entropy) {
-                return Ok(entropy);
-            }
-            // Fall back to TSC-based entropy
-            Self::timer_entropy(&mut entropy);
+        let mut result = [0u8; 32];
+
+        // Try hardware RNG first (only succeeds on x86_64 with RDRAND)
+        if entropy::try_hardware_rng(&mut result) {
+            return Ok(result);
         }
 
-        #[cfg(target_arch = "aarch64")]
-        {
-            Self::aarch64_timer_entropy(&mut entropy);
-        }
-
-        #[cfg(target_arch = "riscv64")]
-        {
-            Self::riscv_timer_entropy(&mut entropy);
-        }
-
-        #[cfg(not(any(
-            target_arch = "x86_64",
-            target_arch = "aarch64",
-            target_arch = "riscv64"
-        )))]
-        {
-            Self::fallback_entropy(&mut entropy);
-        }
-
-        Ok(entropy)
-    }
-
-    /// Try to use RDRAND instruction for hardware entropy (x86_64)
-    #[cfg(target_arch = "x86_64")]
-    fn try_rdrand(dest: &mut [u8; 32]) -> bool {
-        use core::arch::x86_64::_rdrand64_step;
-
-        // SAFETY: _rdrand64_step is an x86_64 RDRAND intrinsic that writes a
-        // hardware-generated random u64 into `value`. The function returns 0 on
-        // failure (RDRAND unavailable or underflow), which we check and bail out.
-        // dest is a valid &mut [u8; 32] and chunks_exact_mut(8) yields aligned 8-byte
-        // slices.
-        unsafe {
-            for chunk in dest.chunks_exact_mut(8) {
-                let mut value: u64 = 0;
-                // Try up to 10 times per word (RDRAND can transiently fail)
-                let mut attempts = 0;
-                let mut success = false;
-                while attempts < 10 {
-                    if _rdrand64_step(&mut value) != 0 {
-                        success = true;
-                        break;
-                    }
-                    attempts += 1;
-                }
-                if !success {
-                    return false; // RDRAND not available or consistently
-                                  // failing
-                }
-                chunk.copy_from_slice(&value.to_le_bytes());
-            }
-        }
-
-        true
-    }
-
-    /// TSC-based timer entropy for x86_64
-    #[cfg(target_arch = "x86_64")]
-    fn timer_entropy(dest: &mut [u8; 32]) {
-        // SAFETY: _rdtsc reads the Time Stamp Counter register. It is always
-        // available on x86_64 and returns the current cycle count as u64.
-        unsafe {
-            use core::arch::x86_64::_rdtsc;
-
-            // Collect multiple TSC samples with varying delays for jitter
-            let mut pool = [0u64; 4];
-            let mut sample = 0;
-            while sample < 4 {
-                let t1 = _rdtsc();
-                // Introduce variable delay via computation
-                let mut work: u64 = t1;
-                let mut j = 0u32;
-                while j < 100 + (sample as u32 * 37) {
-                    work = work
-                        .wrapping_mul(6364136223846793005)
-                        .wrapping_add(1442695040888963407);
-                    j += 1;
-                }
-                let t2 = _rdtsc();
-                // Mix timing jitter with computation result
-                pool[sample] = t1 ^ t2 ^ work;
-                sample += 1;
-            }
-
-            // Hash the pool to produce uniform output
-            let mut i = 0;
-            while i < 32 {
-                let pool_word = pool[i / 8];
-                let byte_idx = i % 8;
-                dest[i] = (pool_word >> (byte_idx * 8)) as u8;
-                i += 1;
-            }
-
-            // Additional mixing pass using LCG
-            let mut state = _rdtsc();
-            i = 0;
-            while i < 32 {
-                state = state
-                    .wrapping_mul(6364136223846793005)
-                    .wrapping_add(1442695040888963407);
-                dest[i] ^= (state >> 33) as u8;
-                i += 1;
-            }
-        }
-    }
-
-    /// Timer-based entropy for AArch64
-    #[cfg(target_arch = "aarch64")]
-    fn aarch64_timer_entropy(dest: &mut [u8; 32]) {
-        // Read CNTVCT_EL0 (virtual timer counter) for entropy
-        let read_timer = || -> u64 {
-            let val: u64;
-            // SAFETY: Reading CNTVCT_EL0 is a read-only operation that accesses
-            // the virtual timer count register. This is always safe to read from
-            // any exception level.
-            unsafe {
-                core::arch::asm!("mrs {}, cntvct_el0", out(reg) val);
-            }
-            val
-        };
-
-        let mut pool = [0u64; 4];
-        let mut sample = 0;
-        while sample < 4 {
-            let t1 = read_timer();
-            let mut work: u64 = t1;
-            let mut j = 0u32;
-            while j < 100 + (sample as u32 * 37) {
-                work = work
-                    .wrapping_mul(6364136223846793005)
-                    .wrapping_add(1442695040888963407);
-                j += 1;
-            }
-            let t2 = read_timer();
-            pool[sample] = t1 ^ t2 ^ work;
-            sample += 1;
-        }
-
-        let mut i = 0;
-        while i < 32 {
-            let pool_word = pool[i / 8];
-            let byte_idx = i % 8;
-            dest[i] = (pool_word >> (byte_idx * 8)) as u8;
-            i += 1;
-        }
-
-        // Additional mixing
-        let mut state = read_timer();
-        i = 0;
-        while i < 32 {
-            state = state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            dest[i] ^= (state >> 33) as u8;
-            i += 1;
-        }
-    }
-
-    /// Timer-based entropy for RISC-V
-    #[cfg(target_arch = "riscv64")]
-    fn riscv_timer_entropy(dest: &mut [u8; 32]) {
-        // Read rdcycle CSR for entropy
-        let read_cycle = || -> u64 {
-            let val: u64;
-            // SAFETY: Reading the cycle CSR is a read-only operation that
-            // accesses a performance counter. This is always safe.
-            unsafe {
-                core::arch::asm!("rdcycle {}", out(reg) val);
-            }
-            val
-        };
-
-        let mut pool = [0u64; 4];
-        let mut sample = 0;
-        while sample < 4 {
-            let t1 = read_cycle();
-            let mut work: u64 = t1;
-            let mut j = 0u32;
-            while j < 100 + (sample as u32 * 37) {
-                work = work
-                    .wrapping_mul(6364136223846793005)
-                    .wrapping_add(1442695040888963407);
-                j += 1;
-            }
-            let t2 = read_cycle();
-            pool[sample] = t1 ^ t2 ^ work;
-            sample += 1;
-        }
-
-        let mut i = 0;
-        while i < 32 {
-            let pool_word = pool[i / 8];
-            let byte_idx = i % 8;
-            dest[i] = (pool_word >> (byte_idx * 8)) as u8;
-            i += 1;
-        }
-
-        // Additional mixing
-        let mut state = read_cycle();
-        i = 0;
-        while i < 32 {
-            state = state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            dest[i] ^= (state >> 33) as u8;
-            i += 1;
-        }
-    }
-
-    /// Fallback entropy source (for architectures without specific support)
-    #[cfg(not(any(
-        target_arch = "x86_64",
-        target_arch = "aarch64",
-        target_arch = "riscv64"
-    )))]
-    fn fallback_entropy(dest: &mut [u8; 32]) {
-        // Use a counter-based approach with stack address mixing
-        let stack_var: u64 = 0;
-        let stack_addr = &stack_var as *const u64 as u64;
-        let mut counter: u64 = stack_addr;
-        let mut i = 0;
-        while i < 32 {
-            counter = counter
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407 + i as u64);
-            dest[i] = (counter >> 33) as u8;
-            i += 1;
-        }
+        // Fall back to timer-jitter entropy (works on all architectures)
+        entropy::collect_timer_entropy(&mut result);
+        Ok(result)
     }
 
     /// Reseed the CSPRNG state with fresh entropy
     fn reseed_state(state: &mut RandomState) {
+        use crate::arch::entropy;
+
         state.reseed_counter = 0;
 
-        // Collect fresh entropy
+        // Collect fresh entropy using the arch abstraction
         let mut fresh_entropy = [0u8; 32];
-
-        #[cfg(target_arch = "x86_64")]
-        {
-            if !Self::try_rdrand(&mut fresh_entropy) {
-                Self::timer_entropy(&mut fresh_entropy);
-            }
-        }
-
-        #[cfg(target_arch = "aarch64")]
-        {
-            Self::aarch64_timer_entropy(&mut fresh_entropy);
-        }
-
-        #[cfg(target_arch = "riscv64")]
-        {
-            Self::riscv_timer_entropy(&mut fresh_entropy);
-        }
-
-        #[cfg(not(any(
-            target_arch = "x86_64",
-            target_arch = "aarch64",
-            target_arch = "riscv64"
-        )))]
-        {
-            Self::fallback_entropy(&mut fresh_entropy);
+        if !entropy::try_hardware_rng(&mut fresh_entropy) {
+            entropy::collect_timer_entropy(&mut fresh_entropy);
         }
 
         // Mix fresh entropy with current key using SHA-256
@@ -521,40 +275,10 @@ impl SecureRandom {
 
     /// Mix accumulated entropy pool into the key
     fn mix_entropy_into_key(state: &mut RandomState) {
+        use crate::arch::entropy;
+
         // Collect a fresh entropy sample into the pool
-        let sample = {
-            #[cfg(target_arch = "x86_64")]
-            {
-                // SAFETY: _rdtsc reads the Time Stamp Counter, always safe on x86_64
-                unsafe { core::arch::x86_64::_rdtsc() }
-            }
-            #[cfg(target_arch = "aarch64")]
-            {
-                let val: u64;
-                // SAFETY: Reading CNTVCT_EL0 is always safe
-                unsafe {
-                    core::arch::asm!("mrs {}, cntvct_el0", out(reg) val);
-                }
-                val
-            }
-            #[cfg(target_arch = "riscv64")]
-            {
-                let val: u64;
-                // SAFETY: Reading cycle CSR is always safe
-                unsafe {
-                    core::arch::asm!("rdcycle {}", out(reg) val);
-                }
-                val
-            }
-            #[cfg(not(any(
-                target_arch = "x86_64",
-                target_arch = "aarch64",
-                target_arch = "riscv64"
-            )))]
-            {
-                state.counter as u64
-            }
-        };
+        let sample = entropy::read_timestamp();
 
         // Fold sample into entropy pool
         let sample_bytes = sample.to_le_bytes();

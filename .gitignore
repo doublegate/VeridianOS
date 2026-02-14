@@ -267,6 +267,12 @@ vmcore*
 # QEMU OVMF firmware copies
 OVMF*.fd
 
+# Agent output files
+*.output
+
+# Temporary build/test artifacts
+/tmp/
+
 # Plan files (Claude Code)
 .claude/plans/
 

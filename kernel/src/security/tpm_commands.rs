@@ -27,6 +27,8 @@
 
 use alloc::{vec, vec::Vec};
 
+use crate::error::KernelError;
+
 /// TPM Structure Tags (TPM_ST)
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -308,21 +310,33 @@ impl TpmGetRandomResponse {
     /// Parse a TPM2_GetRandom response.
     ///
     /// Format: header(10) + randomBytesCount(2) + randomBytes(N)
-    pub fn parse(data: &[u8]) -> Result<Self, &'static str> {
+    pub fn parse(data: &[u8]) -> Result<Self, KernelError> {
         if data.len() < 12 {
-            return Err("Response too short");
+            return Err(KernelError::InvalidArgument {
+                name: "tpm_response",
+                value: "response too short",
+            });
         }
 
-        let header = TpmResponseHeader::parse(data).ok_or("Invalid response header")?;
+        let header = TpmResponseHeader::parse(data).ok_or(KernelError::InvalidArgument {
+            name: "tpm_response",
+            value: "invalid response header",
+        })?;
 
         if !header.response_code().is_success() {
-            return Err("TPM command failed");
+            return Err(KernelError::HardwareError {
+                device: "TPM",
+                code: header.response_code() as u32,
+            });
         }
 
         let bytes_len = u16::from_be_bytes([data[10], data[11]]) as usize;
 
         if data.len() < 12 + bytes_len {
-            return Err("Invalid random bytes length");
+            return Err(KernelError::InvalidArgument {
+                name: "tpm_response",
+                value: "invalid random bytes length",
+            });
         }
 
         let random_bytes = data[12..12 + bytes_len].to_vec();
@@ -408,14 +422,23 @@ impl TpmPcrReadResponse {
     ///
     /// Format: header(10) + pcrUpdateCounter(4) + pcrSelectionOut(var) +
     ///         pcrValues: count(4) + [ size(2) + digest(N) ]*
-    pub fn parse(data: &[u8]) -> Result<Self, &'static str> {
+    pub fn parse(data: &[u8]) -> Result<Self, KernelError> {
         if data.len() < 14 {
-            return Err("Response too short for PCR_Read");
+            return Err(KernelError::InvalidArgument {
+                name: "tpm_pcr_response",
+                value: "response too short for PCR_Read",
+            });
         }
 
-        let header = TpmResponseHeader::parse(data).ok_or("Invalid response header")?;
+        let header = TpmResponseHeader::parse(data).ok_or(KernelError::InvalidArgument {
+            name: "tpm_pcr_response",
+            value: "invalid response header",
+        })?;
         if !header.response_code().is_success() {
-            return Err("TPM PCR_Read command failed");
+            return Err(KernelError::HardwareError {
+                device: "TPM",
+                code: header.response_code() as u32,
+            });
         }
 
         let pcr_update_counter = u32::from_be_bytes([data[10], data[11], data[12], data[13]]);
@@ -423,7 +446,10 @@ impl TpmPcrReadResponse {
         // Skip pcrSelectionOut: count(4) + [ hashAlg(2) + sizeOfSelect(1) + select(N) ]
         let mut offset = 14;
         if data.len() < offset + 4 {
-            return Err("Response too short for selection count");
+            return Err(KernelError::InvalidArgument {
+                name: "tpm_pcr_response",
+                value: "response too short for selection count",
+            });
         }
         let sel_count = u32::from_be_bytes([
             data[offset],
@@ -435,7 +461,10 @@ impl TpmPcrReadResponse {
 
         for _ in 0..sel_count {
             if data.len() < offset + 3 {
-                return Err("Response too short for selection entry");
+                return Err(KernelError::InvalidArgument {
+                    name: "tpm_pcr_response",
+                    value: "response too short for selection entry",
+                });
             }
             offset += 2; // hashAlg
             let select_size = data[offset] as usize;
@@ -444,7 +473,10 @@ impl TpmPcrReadResponse {
 
         // Parse pcrValues (TPML_DIGEST)
         if data.len() < offset + 4 {
-            return Err("Response too short for digest count");
+            return Err(KernelError::InvalidArgument {
+                name: "tpm_pcr_response",
+                value: "response too short for digest count",
+            });
         }
         let digest_count = u32::from_be_bytes([
             data[offset],
@@ -457,12 +489,18 @@ impl TpmPcrReadResponse {
         let mut pcr_values = Vec::with_capacity(digest_count);
         for _ in 0..digest_count {
             if data.len() < offset + 2 {
-                return Err("Response too short for digest size");
+                return Err(KernelError::InvalidArgument {
+                    name: "tpm_pcr_response",
+                    value: "response too short for digest size",
+                });
             }
             let digest_size = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
             offset += 2;
             if data.len() < offset + digest_size {
-                return Err("Response too short for digest data");
+                return Err(KernelError::InvalidArgument {
+                    name: "tpm_pcr_response",
+                    value: "response too short for digest data",
+                });
             }
             pcr_values.push(data[offset..offset + digest_size].to_vec());
             offset += digest_size;

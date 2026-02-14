@@ -1,8 +1,8 @@
 //! Process compatibility wrapper types
 //!
-//! Provides a `Process` struct that wraps the scheduler's `Task` representation
-//! to present a process-oriented view used by IPC, syscalls, and other kernel
-//! subsystems.
+//! Provides a [`TaskProcessAdapter`] struct that wraps the scheduler's `Task`
+//! representation to present a process-oriented view used by IPC, syscalls,
+//! and other kernel subsystems.
 
 use core::{
     ptr::NonNull,
@@ -12,11 +12,14 @@ use core::{
 use super::task::Task;
 use crate::process::{ProcessId, ProcessState};
 
-/// Process structure (compatibility wrapper)
+/// Process-oriented adapter for scheduler tasks.
 ///
 /// Bridges the scheduler's task-centric model with the rest of the kernel's
 /// process-centric view. Contains a reference back to the underlying `Task`.
-pub struct Process {
+///
+/// Previously named `Process`, renamed to `TaskProcessAdapter` to avoid
+/// confusion with `process::pcb::Process` (the full process control block).
+pub struct TaskProcessAdapter {
     pub pid: ProcessId,
     pub state: ProcessState,
     pub blocked_on: Option<u64>,
@@ -32,7 +35,7 @@ pub fn alloc_pid() -> ProcessId {
 }
 
 // Thread-safe current process storage using atomic pointer
-static CURRENT_PROCESS_PTR: AtomicPtr<Process> = AtomicPtr::new(core::ptr::null_mut());
+static CURRENT_PROCESS_PTR: AtomicPtr<TaskProcessAdapter> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Map a task state to a process state
 fn task_state_to_process_state(state: ProcessState) -> ProcessState {
@@ -49,19 +52,20 @@ fn task_state_to_process_state(state: ProcessState) -> ProcessState {
 
 /// Get the current process
 ///
-/// Returns a static mutable reference to a `Process` wrapper around the
-/// currently scheduled task. If no task is running, returns a dummy process.
+/// Returns a static mutable reference to a [`TaskProcessAdapter`] wrapper
+/// around the currently scheduled task. If no task is running, returns a
+/// dummy adapter.
 ///
 /// This function reuses a cached heap allocation to avoid allocating a new
-/// `Box<Process>` on every call. The first call allocates; subsequent calls
-/// update the existing allocation in-place.
-pub fn current_process() -> &'static mut Process {
+/// `Box<TaskProcessAdapter>` on every call. The first call allocates;
+/// subsequent calls update the existing allocation in-place.
+pub fn current_process() -> &'static mut TaskProcessAdapter {
     // Get from per-CPU scheduler
     if let Some(task_ptr) = super::SCHEDULER.lock().current() {
         // SAFETY: `task_ptr` is a valid NonNull<Task> returned by the scheduler
         // which owns and manages task lifetimes. The task remains valid while it
         // is the current task. We read task fields (pid, state, blocked_on) to
-        // populate a Process wrapper.
+        // populate a TaskProcessAdapter wrapper.
         unsafe {
             let task = task_ptr.as_ref();
 
@@ -84,8 +88,8 @@ pub fn current_process() -> &'static mut Process {
                     process.task = Some(task_ptr);
                     process
                 } else {
-                    // First call: allocate and leak a Process on the heap
-                    let process = Box::new(Process {
+                    // First call: allocate and leak a TaskProcessAdapter on the heap
+                    let process = Box::new(TaskProcessAdapter {
                         pid: task.pid,
                         state: task_state_to_process_state(task.state),
                         blocked_on: task.blocked_on,
@@ -100,7 +104,7 @@ pub fn current_process() -> &'static mut Process {
             #[cfg(not(feature = "alloc"))]
             {
                 // Without alloc, fall back to static storage
-                static mut CURRENT_PROCESS: Process = Process {
+                static mut CURRENT_PROCESS: TaskProcessAdapter = TaskProcessAdapter {
                     pid: ProcessId(0),
                     state: ProcessState::Running,
                     blocked_on: None,
@@ -140,8 +144,8 @@ pub fn current_process() -> &'static mut Process {
                     process.task = None;
                     process
                 } else {
-                    // First call: allocate and leak a dummy Process
-                    let dummy = Box::new(Process {
+                    // First call: allocate and leak a dummy TaskProcessAdapter
+                    let dummy = Box::new(TaskProcessAdapter {
                         pid: ProcessId(0),
                         state: ProcessState::Running,
                         blocked_on: None,
@@ -155,7 +159,7 @@ pub fn current_process() -> &'static mut Process {
 
             #[cfg(not(feature = "alloc"))]
             {
-                static mut DUMMY_PROCESS: Process = Process {
+                static mut DUMMY_PROCESS: TaskProcessAdapter = TaskProcessAdapter {
                     pid: ProcessId(0),
                     state: ProcessState::Running,
                     blocked_on: None,
@@ -171,7 +175,7 @@ pub fn current_process() -> &'static mut Process {
 }
 
 /// Switch to another process
-pub fn switch_to_process(target: &Process) {
+pub fn switch_to_process(target: &TaskProcessAdapter) {
     if let Some(task_ptr) = target.task {
         let mut scheduler = super::SCHEDULER.lock();
         scheduler.enqueue(task_ptr);
@@ -180,10 +184,10 @@ pub fn switch_to_process(target: &Process) {
 }
 
 // Thread-safe found process storage using atomic pointer
-static FOUND_PROCESS_PTR: AtomicPtr<Process> = AtomicPtr::new(core::ptr::null_mut());
+static FOUND_PROCESS_PTR: AtomicPtr<TaskProcessAdapter> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Find process by PID
-pub fn find_process(pid: ProcessId) -> Option<&'static mut Process> {
+pub fn find_process(pid: ProcessId) -> Option<&'static mut TaskProcessAdapter> {
     // First check if it's the current process (fast path)
     let current = current_process();
     if current.pid == pid {
@@ -197,8 +201,8 @@ pub fn find_process(pid: ProcessId) -> Option<&'static mut Process> {
         if let Some(process) = crate::process::table::get_process_mut(pid) {
             use alloc::boxed::Box;
 
-            // Create a Process wrapper for the scheduler
-            let found = Box::new(Process {
+            // Create a TaskProcessAdapter wrapper for the scheduler
+            let found = Box::new(TaskProcessAdapter {
                 pid: process.pid,
                 state: process.get_state(),
                 blocked_on: None, // Would need to be tracked

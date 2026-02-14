@@ -73,8 +73,9 @@ impl NumaTopology {
         }
         topo.cpus_per_node.push(cpus);
 
-        // Total system memory (placeholder)
-        topo.memory_per_node.push(16 * 1024 * 1024 * 1024); // 16GB
+        // TODO(future): Query actual memory from ACPI SRAT tables or firmware.
+        // Default to 16 GB when hardware topology is unavailable.
+        topo.memory_per_node.push(16 * 1024 * 1024 * 1024); // 16 GB
 
         // Distance matrix (self = 10, remote = 20)
         topo.distance_matrix.push(alloc::vec![10]);

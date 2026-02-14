@@ -140,7 +140,7 @@ impl SharedRegion {
         let page_size = PageSize::Small as usize;
         let size = size.div_ceil(page_size) * page_size;
 
-        // TODO(phase3): Allocate physical memory from frame allocator
+        // TODO(future): Allocate physical memory from frame allocator
         let physical_base = PhysicalAddress::new(0x100000);
 
         Ok(Self {
@@ -188,7 +188,7 @@ impl SharedRegion {
             return Err(IpcError::InvalidMemoryRegion);
         }
 
-        // TODO(phase3): Map pages in process page table with proper permissions and TLB
+        // TODO(future): Map pages in process page table with proper permissions and TLB
         // flush
 
         mappings.insert(
@@ -213,7 +213,7 @@ impl SharedRegion {
                 return Err(IpcError::InvalidMemoryRegion);
             }
 
-            // TODO(phase3): Unmap pages from process page table and flush TLB
+            // TODO(future): Unmap pages from process page table and flush TLB
 
             mapping.active = false;
             self.ref_count.fetch_sub(1, Ordering::Relaxed);
@@ -225,7 +225,7 @@ impl SharedRegion {
 
     /// Transfer ownership of region to another process
     pub fn transfer_ownership(&mut self, new_owner: ProcessId) -> Result<()> {
-        // TODO(phase3): Validate new owner exists and has appropriate capabilities
+        // TODO(future): Validate new owner exists and has appropriate capabilities
         self.owner = new_owner;
         Ok(())
     }
@@ -391,7 +391,7 @@ impl SharedMemoryManager {
                 }
             }
 
-            // TODO(phase3): Free physical memory via frame allocator
+            // TODO(future): Free physical memory via frame allocator
             Ok(())
         } else {
             Err(IpcError::InvalidMemoryRegion)
@@ -413,7 +413,7 @@ pub fn zero_copy_transfer(
     _to_process: ProcessId,
     _manager: &SharedMemoryManager,
 ) -> Result<()> {
-    // TODO(phase3): Implement zero-copy transfer (capability validation, page
+    // TODO(future): Implement zero-copy transfer (capability validation, page
     // remap, TLB flush)
 
     Ok(())

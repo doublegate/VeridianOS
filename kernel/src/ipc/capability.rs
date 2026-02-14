@@ -6,6 +6,8 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::error::KernelError;
+
 /// Global capability ID generator
 static CAPABILITY_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -251,21 +253,20 @@ impl CapabilityTable {
     }
 
     /// Insert a capability into the table
-    #[allow(clippy::result_unit_err)]
-    pub fn insert(&mut self, _cap: IpcCapability) -> Result<(), ()> {
-        // TODO(phase3): Implement capability table insertion with BTreeMap storage
+    pub fn insert(&mut self, _cap: IpcCapability) -> Result<(), KernelError> {
+        // TODO(future): Implement capability table insertion with BTreeMap storage
         Ok(())
     }
 
     /// Lookup a capability by ID
     pub fn lookup(&self, _id: u64) -> Option<&IpcCapability> {
-        // TODO(phase3): Implement capability table lookup
+        // TODO(future): Implement capability table lookup
         None
     }
 
     /// Remove a capability from the table
     pub fn remove(&mut self, _id: u64) -> Option<IpcCapability> {
-        // TODO(phase3): Implement capability table removal
+        // TODO(future): Implement capability table removal
         None
     }
 }

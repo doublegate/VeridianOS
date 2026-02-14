@@ -5,6 +5,8 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
+use crate::error::KernelError;
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -60,7 +62,7 @@ impl WaitQueue {
             if let Some(process) = super::table::get_process(pid) {
                 if let Some(thread) = process.get_thread(tid) {
                     thread.set_state(super::thread::ThreadState::Ready);
-                    // TODO(phase3): Add thread to scheduler run queue
+                    // TODO(future): Add thread to scheduler run queue
                     return true;
                 }
             }
@@ -77,7 +79,7 @@ impl WaitQueue {
             if let Some(process) = super::table::get_process(pid) {
                 if let Some(thread) = process.get_thread(tid) {
                     thread.set_state(super::thread::ThreadState::Ready);
-                    // TODO(phase3): Add thread to scheduler run queue
+                    // TODO(future): Add thread to scheduler run queue
                     count += 1;
                 }
             }
@@ -163,11 +165,13 @@ impl Mutex {
     /// Returns `Err` if the calling thread does not own the lock. Callers
     /// should handle this as a programming error rather than letting the
     /// kernel panic inside a critical section.
-    pub fn unlock(&self) -> Result<(), &'static str> {
+    pub fn unlock(&self) -> Result<(), KernelError> {
         // Verify we own the lock
         if let Some(thread) = super::current_thread() {
             if self.owner.load(Ordering::Relaxed) != thread.tid.0 {
-                return Err("Mutex::unlock called by non-owner");
+                return Err(KernelError::PermissionDenied {
+                    operation: "mutex_unlock",
+                });
             }
         }
 
@@ -260,11 +264,14 @@ impl Semaphore {
     /// Returns `Err` if signalling would exceed the maximum count, indicating
     /// a caller bug (more signals than waits). This avoids a kernel panic
     /// inside what may be a lock-holding context.
-    pub fn signal(&self) -> Result<(), &'static str> {
+    pub fn signal(&self) -> Result<(), KernelError> {
         loop {
             let count = self.count.load(Ordering::Relaxed);
             if count >= self.max_count {
-                return Err("Semaphore overflow: count would exceed max_count");
+                return Err(KernelError::InvalidState {
+                    expected: "count < max_count",
+                    actual: "semaphore overflow",
+                });
             }
 
             if self
@@ -317,10 +324,13 @@ impl CondVar {
     /// Returns `Err` if the mutex is not held by the caller. The caller
     /// must hold the mutex before calling `wait`, as required by the
     /// standard condition variable protocol.
-    pub fn wait(&self, mutex: &Mutex) -> Result<(), &'static str> {
+    pub fn wait(&self, mutex: &Mutex) -> Result<(), KernelError> {
         // Must hold the mutex
         if !mutex.is_locked() {
-            return Err("CondVar::wait called without holding mutex");
+            return Err(KernelError::InvalidState {
+                expected: "mutex locked",
+                actual: "mutex unlocked",
+            });
         }
 
         // Add to wait queue

@@ -674,13 +674,13 @@ fn load_interpreter(process: &Process, interp_path: &str) -> Result<VirtualAddre
         // Copy segment data
         if ph.p_filesz > 0 {
             // SAFETY: seg_vaddr was just mapped into the process address
-            // space by map_page above. write_bytes zeroes the region as
-            // a placeholder (real data copy would need the interpreter
-            // file data). The size is bounded by p_filesz.
+            // space by map_page above. write_bytes zeroes the region; the
+            // actual interpreter file data would need to be read from the
+            // VFS once full ELF dynamic linking is implemented. The size
+            // is bounded by p_filesz which comes from the ELF header.
+            // TODO(future): Copy real interpreter segment data from VFS.
             unsafe {
                 let dest = seg_vaddr as *mut u8;
-                // Note: We'd need the original data here
-                // For now, this is a placeholder
                 core::ptr::write_bytes(dest, 0, ph.p_filesz as usize);
             }
         }

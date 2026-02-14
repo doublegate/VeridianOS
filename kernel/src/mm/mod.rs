@@ -22,7 +22,6 @@ use alloc::vec::Vec;
 pub use frame_allocator::{
     FrameAllocatorError, FrameNumber, PhysicalAddress, PhysicalFrame, FRAME_ALLOCATOR, FRAME_SIZE,
 };
-#[allow(unused_imports)]
 pub use heap::init as init_heap;
 pub use user_validation::{is_user_addr_valid, translate_address as translate_user_address};
 pub use vas::VirtualAddressSpace;

@@ -2,6 +2,8 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::error::KernelError;
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -161,7 +163,7 @@ impl CapabilitySpace {
 
     /// Clone from another capability space
     #[cfg(feature = "alloc")]
-    pub fn clone_from(&mut self, other: &Self) -> Result<(), &'static str> {
+    pub fn clone_from(&mut self, other: &Self) -> Result<(), KernelError> {
         let other_caps = other.capabilities.lock();
         let mut self_caps = self.capabilities.lock();
 
@@ -188,10 +190,13 @@ impl CapabilitySpace {
 
     /// Insert a capability
     #[cfg(feature = "alloc")]
-    pub fn insert(&self, cap: Capability) -> Result<(), &'static str> {
+    pub fn insert(&self, cap: Capability) -> Result<(), KernelError> {
         let mut caps = self.capabilities.lock();
         if caps.contains_key(&cap.id) {
-            return Err("Capability ID already exists");
+            return Err(KernelError::AlreadyExists {
+                resource: "capability",
+                id: cap.id.0,
+            });
         }
         caps.insert(cap.id, cap);
         Ok(())

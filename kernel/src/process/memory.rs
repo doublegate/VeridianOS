@@ -10,7 +10,10 @@ extern crate alloc;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use crate::mm::{PageFlags, PhysicalAddress, VirtualAddress, PAGE_SIZE};
+use crate::{
+    error::KernelError,
+    mm::{PageFlags, PhysicalAddress, VirtualAddress, PAGE_SIZE},
+};
 
 /// Memory layout constants for user processes
 pub mod layout {
@@ -126,10 +129,10 @@ impl MemoryRegion {
 /// Process memory operations
 pub trait ProcessMemory {
     /// Allocate memory in process address space
-    fn allocate(&mut self, size: usize, flags: PageFlags) -> Result<VirtualAddress, &'static str>;
+    fn allocate(&mut self, size: usize, flags: PageFlags) -> Result<VirtualAddress, KernelError>;
 
     /// Free memory in process address space
-    fn free(&mut self, addr: VirtualAddress, size: usize) -> Result<(), &'static str>;
+    fn free(&mut self, addr: VirtualAddress, size: usize) -> Result<(), KernelError>;
 
     /// Map physical memory into process address space
     fn map_physical(
@@ -138,10 +141,10 @@ pub trait ProcessMemory {
         virt: VirtualAddress,
         size: usize,
         flags: PageFlags,
-    ) -> Result<(), &'static str>;
+    ) -> Result<(), KernelError>;
 
     /// Unmap memory from process address space
-    fn unmap(&mut self, virt: VirtualAddress, size: usize) -> Result<(), &'static str>;
+    fn unmap(&mut self, virt: VirtualAddress, size: usize) -> Result<(), KernelError>;
 
     /// Change memory protection
     fn protect(
@@ -149,13 +152,13 @@ pub trait ProcessMemory {
         addr: VirtualAddress,
         size: usize,
         flags: PageFlags,
-    ) -> Result<(), &'static str>;
+    ) -> Result<(), KernelError>;
 
     /// Grow the heap
-    fn grow_heap(&mut self, increment: usize) -> Result<VirtualAddress, &'static str>;
+    fn grow_heap(&mut self, increment: usize) -> Result<VirtualAddress, KernelError>;
 
     /// Grow the stack
-    fn grow_stack(&mut self, increment: usize) -> Result<(), &'static str>;
+    fn grow_stack(&mut self, increment: usize) -> Result<(), KernelError>;
 }
 
 /// Stack management for threads
@@ -172,9 +175,12 @@ pub struct ThreadStack {
 
 impl ThreadStack {
     /// Create a new thread stack
-    pub fn new(size: usize) -> Result<Self, &'static str> {
+    pub fn new(size: usize) -> Result<Self, KernelError> {
         if size < PAGE_SIZE * 2 {
-            return Err("Stack too small");
+            return Err(KernelError::InvalidArgument {
+                name: "stack size",
+                value: "stack too small (minimum 2 pages)",
+            });
         }
 
         // Allocate virtual address range for stack
@@ -238,24 +244,29 @@ impl ProcessHeap {
     }
 
     /// Set heap break (brk syscall)
-    pub fn set_brk(&mut self, new_brk: VirtualAddress) -> Result<VirtualAddress, &'static str> {
+    pub fn set_brk(&mut self, new_brk: VirtualAddress) -> Result<VirtualAddress, KernelError> {
         let new_size = new_brk.as_usize() - self.start.as_usize();
 
         if new_size > self.max_size {
-            return Err("Heap size limit exceeded");
+            return Err(KernelError::ResourceExhausted {
+                resource: "heap size limit",
+            });
         }
 
         if new_brk < self.start {
-            return Err("Invalid heap break");
+            return Err(KernelError::InvalidArgument {
+                name: "heap break",
+                value: "below heap start",
+            });
         }
 
-        // TODO(phase3): Actually allocate/free pages via VMM for heap expansion
+        // TODO(future): Actually allocate/free pages via VMM for heap expansion
         self.brk = new_brk;
         Ok(self.brk)
     }
 
     /// Grow heap by increment
-    pub fn grow(&mut self, increment: usize) -> Result<VirtualAddress, &'static str> {
+    pub fn grow(&mut self, increment: usize) -> Result<VirtualAddress, KernelError> {
         let new_brk = VirtualAddress::new((self.brk.as_usize() + increment) as u64);
         self.set_brk(new_brk)
     }

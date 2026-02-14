@@ -11,6 +11,7 @@ use super::{
     capability::ProcessId,
     error::{IpcError, Result},
 };
+use crate::arch::entropy::read_timestamp;
 
 /// Rate limiter for IPC operations
 pub struct RateLimiter {
@@ -288,20 +289,9 @@ pub static RATE_LIMITER: RateLimiter = RateLimiter::new();
 
 /// Get current time in nanoseconds
 fn get_current_time() -> u64 {
-    // In a real system, this would use a high-resolution timer
-    // For now, use the timestamp counter
-    #[cfg(target_arch = "x86_64")]
-    {
-        // SAFETY: _rdtsc() reads the x86_64 Time Stamp Counter via the RDTSC
-        // instruction. This is a read-only, side-effect-free operation that is always
-        // available in kernel mode and requires no special setup or preconditions.
-        unsafe { core::arch::x86_64::_rdtsc() }
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        0
-    }
+    // Uses the centralized hardware timestamp counter from arch::entropy.
+    // On x86_64 this reads RDTSC, on AArch64 CNTVCT_EL0, on RISC-V rdcycle.
+    read_timestamp()
 }
 
 #[cfg(all(test, not(target_os = "none")))]

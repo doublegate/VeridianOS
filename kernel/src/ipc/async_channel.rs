@@ -18,6 +18,7 @@ use super::{
     error::{IpcError, Result},
     message::Message,
 };
+use crate::arch::entropy::read_timestamp;
 
 /// Maximum messages in async channel
 pub const ASYNC_CHANNEL_SIZE: usize = 256;
@@ -419,20 +420,7 @@ impl Default for MessageBatch {
 
 // Placeholder functions for process management
 fn wake_process(_pid: ProcessId) {
-    // TODO(phase3): Implement process wakeup via scheduler
-}
-
-#[cfg(target_arch = "x86_64")]
-fn read_timestamp() -> u64 {
-    // SAFETY: _rdtsc() reads the x86_64 Time Stamp Counter via the RDTSC
-    // instruction. This is a read-only, side-effect-free operation that is always
-    // available in kernel mode and requires no special setup or preconditions.
-    unsafe { core::arch::x86_64::_rdtsc() }
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn read_timestamp() -> u64 {
-    0
+    // TODO(future): Implement process wakeup via scheduler
 }
 
 fn timestamp_to_ns(cycles: u64) -> u64 {

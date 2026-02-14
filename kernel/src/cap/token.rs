@@ -160,6 +160,12 @@ impl Rights {
         Self(self.0 & !other.0)
     }
 
+    /// Get raw bits as u16 (for error reporting)
+    #[inline]
+    pub fn bits(&self) -> u16 {
+        self.0 as u16
+    }
+
     /// Check if empty
     #[inline]
     pub fn is_empty(&self) -> bool {

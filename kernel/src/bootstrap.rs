@@ -525,7 +525,7 @@ pub fn kernel_init_main() {
     {
         use crate::elf::ElfLoader;
 
-        let ok = (|| -> Result<bool, &'static str> {
+        let ok = (|| -> Result<bool, crate::error::KernelError> {
             let loader = ElfLoader::new();
             // Build a minimal valid ELF64 header + one LOAD program header
             let header_size = core::mem::size_of::<crate::elf::Elf64Header>();
@@ -575,7 +575,13 @@ pub fn kernel_init_main() {
             buf[po + 24..po + 32].copy_from_slice(&0x400000u64.to_le_bytes()); // p_paddr
             buf[po + 40..po + 48].copy_from_slice(&0x1000u64.to_le_bytes()); // p_memsz
             buf[po + 48..po + 56].copy_from_slice(&0x1000u64.to_le_bytes()); // p_align
-            let binary = loader.parse(&buf).map_err(|_| "parse failed")?;
+            let binary =
+                loader
+                    .parse(&buf)
+                    .map_err(|_| crate::error::KernelError::InvalidArgument {
+                        name: "elf_data",
+                        value: "parse failed",
+                    })?;
             Ok(binary.entry_point == 0x401000 && !binary.segments.is_empty())
         })()
         .unwrap_or(false);
@@ -603,7 +609,7 @@ pub fn kernel_init_main() {
             object::MemoryAttributes, CapabilitySpace, CapabilityToken, ObjectRef, Rights,
         };
 
-        let ok = (|| -> Result<bool, &'static str> {
+        let ok = (|| -> Result<bool, crate::error::KernelError> {
             let space = CapabilitySpace::new();
             let token = CapabilityToken::new(1, 0, 0, 0);
             let object = ObjectRef::Memory {
@@ -644,7 +650,7 @@ pub fn kernel_init_main() {
             object::MemoryAttributes, CapabilitySpace, CapabilityToken, ObjectRef, Rights,
         };
 
-        let ok = (|| -> Result<bool, &'static str> {
+        let ok = (|| -> Result<bool, crate::error::KernelError> {
             // Create a space with quota of 2
             let space = CapabilitySpace::with_quota(2);
             let obj = ObjectRef::Memory {

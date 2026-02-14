@@ -9,7 +9,6 @@
 // Allow dead code for filesystem methods not yet called from higher layers
 #![allow(
     dead_code,
-    clippy::if_same_then_else,
     clippy::manual_div_ceil,
     clippy::slow_vector_initialization,
     clippy::manual_saturating_arithmetic,
@@ -138,10 +137,9 @@ impl DiskInode {
     pub fn node_type(&self) -> NodeType {
         if self.is_dir() {
             NodeType::Directory
-        } else if self.is_file() {
-            NodeType::File
         } else {
-            NodeType::File // Default
+            // Regular file or default for unrecognized inode modes
+            NodeType::File
         }
     }
 }

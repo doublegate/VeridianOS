@@ -7,7 +7,10 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use spin::RwLock;
 
-use crate::process::{ProcessId, ProcessPriority};
+use crate::{
+    error::KernelError,
+    process::{ProcessId, ProcessPriority},
+};
 
 /// Resource limits for a process
 #[derive(Debug, Clone)]
@@ -173,7 +176,7 @@ impl ProcessServer {
         gid: u32,
         command_line: Vec<String>,
         environment: Vec<String>,
-    ) -> Result<ProcessId, &'static str> {
+    ) -> Result<ProcessId, KernelError> {
         let pid = ProcessId(self.next_pid.fetch_add(1, Ordering::SeqCst));
 
         // Get parent's session and process group
@@ -234,7 +237,7 @@ impl ProcessServer {
     }
 
     /// Terminate a process
-    pub fn terminate_process(&self, pid: ProcessId, exit_code: i32) -> Result<(), &'static str> {
+    pub fn terminate_process(&self, pid: ProcessId, exit_code: i32) -> Result<(), KernelError> {
         let mut processes = self.processes.write();
 
         if let Some(process) = processes.get_mut(&pid.0) {
@@ -268,7 +271,7 @@ impl ProcessServer {
             );
             Ok(())
         } else {
-            Err("Process not found")
+            Err(KernelError::ProcessNotFound { pid: pid.0 })
         }
     }
 
@@ -277,7 +280,7 @@ impl ProcessServer {
         &self,
         parent_pid: ProcessId,
         specific_pid: Option<ProcessId>,
-    ) -> Result<(ProcessId, i32), &'static str> {
+    ) -> Result<(ProcessId, i32), KernelError> {
         let mut processes = self.processes.write();
 
         // Find zombie children
@@ -301,7 +304,10 @@ impl ProcessServer {
             crate::println!("[PROCESS_SERVER] Reaped zombie process {}", child_pid.0);
             Ok((child_pid, exit_code))
         } else {
-            Err("No zombie children found")
+            Err(KernelError::NotFound {
+                resource: "zombie children",
+                id: parent_pid.0,
+            })
         }
     }
 
@@ -320,12 +326,12 @@ impl ProcessServer {
         &self,
         pid: ProcessId,
         limits: ResourceLimits,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), KernelError> {
         if self.processes.read().contains_key(&pid.0) {
             self.resource_limits.write().insert(pid.0, limits);
             Ok(())
         } else {
-            Err("Process not found")
+            Err(KernelError::ProcessNotFound { pid: pid.0 })
         }
     }
 
@@ -335,7 +341,7 @@ impl ProcessServer {
     }
 
     /// Create a new session
-    pub fn create_session(&self, leader_pid: ProcessId) -> Result<u32, &'static str> {
+    pub fn create_session(&self, leader_pid: ProcessId) -> Result<u32, KernelError> {
         let sid = self.next_sid.fetch_add(1, Ordering::SeqCst) as u32;
 
         let session = Session {
@@ -360,7 +366,7 @@ impl ProcessServer {
         &self,
         leader_pid: ProcessId,
         session_id: u32,
-    ) -> Result<u32, &'static str> {
+    ) -> Result<u32, KernelError> {
         let pgid = self.next_pgid.fetch_add(1, Ordering::SeqCst) as u32;
 
         let pg = ProcessGroup {
@@ -375,7 +381,7 @@ impl ProcessServer {
     }
 
     /// Send signal to process
-    pub fn send_signal(&self, pid: ProcessId, signal: i32) -> Result<(), &'static str> {
+    pub fn send_signal(&self, pid: ProcessId, signal: i32) -> Result<(), KernelError> {
         if let Some(_process) = self.processes.read().get(&pid.0) {
             match signal {
                 9 => {
@@ -411,7 +417,7 @@ impl ProcessServer {
             }
             Ok(())
         } else {
-            Err("Process not found")
+            Err(KernelError::ProcessNotFound { pid: pid.0 })
         }
     }
 
@@ -505,9 +511,9 @@ impl ProcessServer {
     // Helper functions
 
     fn get_system_time(&self) -> u64 {
-        // Get current system time in microseconds
-        // For now, return a placeholder
-        0
+        // Read the hardware timestamp counter and convert to approximate
+        // microseconds (assumes 2 GHz clock: 1 cycle = 0.5 ns, 2000 cycles = 1 us).
+        crate::arch::entropy::read_timestamp() / 2000
     }
 
     fn remove_from_session_and_group(&self, pid: ProcessId) {
@@ -542,17 +548,17 @@ static PROCESS_SERVER: crate::sync::once_lock::OnceLock<ProcessServer> =
     crate::sync::once_lock::OnceLock::new();
 
 /// Initialize the process server
-#[allow(clippy::if_same_then_else)]
 pub fn init() {
     #[allow(unused_imports)]
     use crate::println;
 
     println!("[PROCESS_SERVER] Creating ProcessServer...");
-    if PROCESS_SERVER.set(ProcessServer::new()).is_err() {
+    let result = PROCESS_SERVER.set(ProcessServer::new());
+    if result.is_err() {
         println!("[PROCESS_SERVER] WARNING: Already initialized! Skipping re-initialization.");
-    } else {
-        println!("[PROCESS_SERVER] Process server initialized");
+        return;
     }
+    println!("[PROCESS_SERVER] Process server initialized");
 }
 
 /// Try to get the global process server without panicking.

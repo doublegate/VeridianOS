@@ -24,7 +24,7 @@ pub use super::{
 };
 use super::{pcb::Process, thread::Thread, ProcessPriority};
 #[allow(unused_imports)]
-use crate::{arch::context::ThreadContext, println, sched};
+use crate::{arch::context::ThreadContext, error::KernelError, println, sched};
 
 /// Create scheduler task for thread
 ///
@@ -36,10 +36,7 @@ use crate::{arch::context::ThreadContext, println, sched};
 ///    RISC-V/AArch64 FPU state) during deep boot call chains.
 /// 2. The scheduler stores a raw pointer to the Task, so it must outlive this
 ///    function — Box::into_raw provides stable heap ownership.
-pub(super) fn create_scheduler_task(
-    process: &Process,
-    thread: &Thread,
-) -> Result<(), &'static str> {
+pub(super) fn create_scheduler_task(process: &Process, thread: &Thread) -> Result<(), KernelError> {
     // Get thread context info
     let ctx = thread.context.lock();
     let instruction_pointer = ctx.get_instruction_pointer();
@@ -81,8 +78,11 @@ pub(super) fn create_scheduler_task(
             .load(core::sync::atomic::Ordering::Acquire);
 
         // Transfer ownership to raw pointer — scheduler takes ownership
-        let task_ptr = core::ptr::NonNull::new(alloc::boxed::Box::into_raw(task))
-            .ok_or("Failed to create task pointer")?;
+        let task_ptr = core::ptr::NonNull::new(alloc::boxed::Box::into_raw(task)).ok_or(
+            KernelError::ResourceExhausted {
+                resource: "task pointer allocation",
+            },
+        )?;
 
         // Add to scheduler
         let scheduler = sched::SCHEDULER.lock();

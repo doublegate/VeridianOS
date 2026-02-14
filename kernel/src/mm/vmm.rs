@@ -10,6 +10,7 @@ use super::{
     FrameAllocatorError, FrameNumber, PageFlags, PageSize, PhysicalAddress, VirtualAddress,
     FRAME_ALLOCATOR,
 };
+use crate::error::KernelError;
 
 /// Virtual memory manager for a process
 pub struct VirtualMemoryManager {
@@ -23,7 +24,7 @@ pub struct VirtualMemoryManager {
 
 impl VirtualMemoryManager {
     /// Create a new virtual memory manager
-    pub fn new() -> Result<Self, &'static str> {
+    pub fn new() -> Result<Self, KernelError> {
         let page_tables = PageTableHierarchy::new()?;
 
         Ok(Self {
@@ -34,7 +35,7 @@ impl VirtualMemoryManager {
     }
 
     /// Create a kernel virtual memory manager
-    pub fn new_kernel() -> Result<Self, &'static str> {
+    pub fn new_kernel() -> Result<Self, KernelError> {
         let page_tables = PageTableHierarchy::new()?;
 
         // Map kernel sections
@@ -51,7 +52,7 @@ impl VirtualMemoryManager {
     }
 
     /// Setup initial kernel mappings
-    fn setup_kernel_mappings(&mut self) -> Result<(), &'static str> {
+    fn setup_kernel_mappings(&mut self) -> Result<(), KernelError> {
         // Map kernel at higher half (0xFFFF_8000_0000_0000)
         // This implementation maps:
         // 1. Kernel code as read-only + execute
@@ -106,7 +107,7 @@ impl VirtualMemoryManager {
         phys: PhysicalAddress,
         flags: PageFlags,
         size: PageSize,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), KernelError> {
         // Get or create page mapper
         let mapper = self.get_or_create_mapper()?;
 
@@ -134,7 +135,7 @@ impl VirtualMemoryManager {
     }
 
     /// Get or create the page mapper
-    fn get_or_create_mapper(&mut self) -> Result<&mut PageMapper, &'static str> {
+    fn get_or_create_mapper(&mut self) -> Result<&mut PageMapper, KernelError> {
         if self.mapper.is_none() {
             // Map L4 table to a known virtual address for access
             // In a real implementation, this would use recursive mapping or physical memory
@@ -150,7 +151,9 @@ impl VirtualMemoryManager {
                 self.mapper = Some(PageMapper::new(l4_virt));
             }
         }
-        self.mapper.as_mut().ok_or("Failed to create mapper")
+        self.mapper.as_mut().ok_or(KernelError::NotInitialized {
+            subsystem: "VMM page mapper",
+        })
     }
 
     /// Map a 2MB large page
@@ -160,7 +163,7 @@ impl VirtualMemoryManager {
         virt: VirtualAddress,
         phys: PhysicalAddress,
         flags: PageFlags,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), KernelError> {
         // For large pages, we need to set the page directory entry directly
         // This is architecture-specific
         #[cfg(target_arch = "x86_64")]
@@ -195,7 +198,7 @@ impl VirtualMemoryManager {
         virt: VirtualAddress,
         phys: PhysicalAddress,
         flags: PageFlags,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), KernelError> {
         // For huge pages, we need to set the page directory pointer entry directly
         #[cfg(target_arch = "x86_64")]
         {
@@ -222,7 +225,7 @@ impl VirtualMemoryManager {
     }
 
     /// Unmap a virtual address
-    pub fn unmap(&mut self, virt: VirtualAddress) -> Result<(), &'static str> {
+    pub fn unmap(&mut self, virt: VirtualAddress) -> Result<(), KernelError> {
         let mapper = self.get_or_create_mapper()?;
 
         // Unmap the page
@@ -232,7 +235,10 @@ impl VirtualMemoryManager {
         FRAME_ALLOCATOR
             .lock()
             .free_frames(frame, 1)
-            .map_err(|_| "Failed to free frame")?;
+            .map_err(|_| KernelError::OutOfMemory {
+                requested: 1,
+                available: 0,
+            })?;
 
         // Flush TLB
         tlb::flush_address(virt);
@@ -245,7 +251,7 @@ impl VirtualMemoryManager {
     /// A guard page is an unmapped page that triggers a page fault on access,
     /// used to detect stack overflows. The page is left unmapped (no physical
     /// backing) so any read/write/execute will trap.
-    pub fn map_guard_page(&mut self, virt: VirtualAddress) -> Result<(), &'static str> {
+    pub fn map_guard_page(&mut self, virt: VirtualAddress) -> Result<(), KernelError> {
         // Ensure the address is not already mapped; if it is, unmap it
         if self.translate(virt).is_some() {
             self.unmap(virt)?;
@@ -290,7 +296,7 @@ impl VirtualMemoryManager {
     pub fn load_bootloader_mappings(
         &mut self,
         memory_map: &[super::MemoryRegion],
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), KernelError> {
         println!("[VMM] Loading bootloader memory mappings...");
 
         for region in memory_map {

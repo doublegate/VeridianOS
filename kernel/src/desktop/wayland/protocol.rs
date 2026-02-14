@@ -14,9 +14,11 @@ pub struct MessageHeader {
 }
 
 /// Parse message from bytes
-pub fn parse_message(_data: &[u8]) -> Result<Message, &'static str> {
+pub fn parse_message(_data: &[u8]) -> Result<Message, crate::error::KernelError> {
     // TODO(phase6): Implement Wayland wire protocol message parsing
-    Err("Not implemented")
+    Err(crate::error::KernelError::NotImplemented {
+        feature: "Wayland wire protocol message parsing",
+    })
 }
 
 /// Wayland message

@@ -6,6 +6,7 @@
 #![cfg(feature = "alloc")]
 
 use crate::{
+    error::KernelError,
     mm::{FRAME_ALLOCATOR, MappingType, VirtualAddress},
     process::{ProcessId, current_process},
     cap::{Rights, ObjectRef},
@@ -20,7 +21,7 @@ use spin::Mutex;
 /// 
 /// This function allocates a DMA buffer that is automatically
 /// freed when it goes out of scope.
-pub fn allocate_dma_buffer(size_in_pages: usize) -> Result<FramesGuard, &'static str> {
+pub fn allocate_dma_buffer(size_in_pages: usize) -> Result<FramesGuard, KernelError> {
     println!("[RAII Example] Allocating DMA buffer of {} pages", size_in_pages);
     
     // Allocate contiguous frames for DMA
@@ -35,7 +36,7 @@ pub fn allocate_dma_buffer(size_in_pages: usize) -> Result<FramesGuard, &'static
 /// Example: Temporary memory mapping
 /// 
 /// Maps a region temporarily for an operation, then automatically unmaps it.
-pub fn temporary_mapping_example(process_id: ProcessId) -> Result<(), &'static str> {
+pub fn temporary_mapping_example(process_id: ProcessId) -> Result<(), KernelError> {
     println!("[RAII Example] Creating temporary mapping");
     
     if let Some(process) = crate::process::find_process(process_id) {
@@ -66,7 +67,7 @@ pub fn temporary_mapping_example(process_id: ProcessId) -> Result<(), &'static s
 /// Creates a capability that is automatically revoked when no longer needed.
 pub fn scoped_capability_example(
     cap_space: Arc<Mutex<crate::cap::CapabilitySpace>>
-) -> Result<(), &'static str> {
+) -> Result<(), KernelError> {
     println!("[RAII Example] Creating scoped capability");
     
     // Create a temporary capability
@@ -92,7 +93,7 @@ pub fn scoped_capability_example(
 /// Example: Complex resource management
 /// 
 /// Demonstrates managing multiple resources with RAII.
-pub fn complex_resource_example() -> Result<(), &'static str> {
+pub fn complex_resource_example() -> Result<(), KernelError> {
     println!("[RAII Example] Complex resource management");
     
     // Allocate multiple resources
@@ -110,7 +111,10 @@ pub fn complex_resource_example() -> Result<(), &'static str> {
     let success = true; // Change to false to test cleanup
     
     if !success {
-        return Err("Operation failed");
+        return Err(KernelError::InvalidState {
+            expected: "success",
+            actual: "operation failed",
+        });
         // Even on early return, all RAII guards clean up properly
     }
     
@@ -127,7 +131,7 @@ pub fn complex_resource_example() -> Result<(), &'static str> {
 /// Example: Transaction-like operation with rollback
 /// 
 /// Uses RAII to ensure operations are rolled back on failure.
-pub fn transaction_example() -> Result<(), &'static str> {
+pub fn transaction_example() -> Result<(), KernelError> {
     println!("[RAII Example] Starting transaction");
     
     // Track allocated resources
@@ -148,7 +152,10 @@ pub fn transaction_example() -> Result<(), &'static str> {
             }
             Err(e) => {
                 println!("[RAII Example] Transaction failed at step {}: {:?}", i, e);
-                return Err("Transaction failed");
+                return Err(KernelError::OutOfMemory {
+                    requested: 1,
+                    available: 0,
+                });
                 // rollback guard executes here
             }
         }
@@ -188,7 +195,7 @@ pub fn lock_tracking_example() {
 /// 
 /// Shows how ProcessResources RAII guard ensures cleanup.
 #[cfg(feature = "alloc")]
-pub fn process_cleanup_example() -> Result<(), &'static str> {
+pub fn process_cleanup_example() -> Result<(), KernelError> {
     use crate::process::ThreadId;
     use alloc::vec;
     

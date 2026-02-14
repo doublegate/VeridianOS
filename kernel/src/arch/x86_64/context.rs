@@ -123,7 +123,7 @@ impl crate::arch::context::ThreadContext for X86_64Context {
     fn init(&mut self, entry_point: usize, stack_pointer: usize, _kernel_stack: usize) {
         self.rip = entry_point as u64;
         self.rsp = stack_pointer as u64;
-        // TODO(phase3): Set up kernel stack in TSS for ring transitions
+        // TODO(future): Set up kernel stack in TSS for ring transitions
     }
 
     fn get_instruction_pointer(&self) -> usize {
@@ -143,12 +143,12 @@ impl crate::arch::context::ThreadContext for X86_64Context {
     }
 
     fn get_kernel_stack(&self) -> usize {
-        // TODO(phase3): Return kernel stack pointer from TSS
+        // TODO(future): Return kernel stack pointer from TSS
         0
     }
 
     fn set_kernel_stack(&mut self, _sp: usize) {
-        // TODO(phase3): Set kernel stack in TSS for ring transitions
+        // TODO(future): Set kernel stack in TSS for ring transitions
     }
 
     fn set_return_value(&mut self, value: usize) {

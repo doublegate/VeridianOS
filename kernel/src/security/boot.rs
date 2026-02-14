@@ -308,12 +308,11 @@ fn verify_kernel_signature(
             // Verify the signature over the kernel hash
             match verifying_key.verify(kernel_hash, &sig) {
                 Ok(valid) => {
-                    #[allow(clippy::if_same_then_else)]
-                    if valid {
-                        println!("[SECBOOT] Ed25519 signature VALID");
-                    } else {
-                        println!("[SECBOOT] Ed25519 signature INVALID");
-                    }
+                    // Use a variable with underscore prefix so it's not
+                    // flagged as unused on architectures where println!
+                    // is a no-op (AArch64).
+                    let _status = if valid { "VALID" } else { "INVALID" };
+                    println!("[SECBOOT] Ed25519 signature {}", _status);
                     Ok(valid)
                 }
                 Err(_e) => {

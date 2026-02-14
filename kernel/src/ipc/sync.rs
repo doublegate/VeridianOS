@@ -16,6 +16,7 @@ use super::{
     message::Message,
 };
 use crate::{
+    arch::entropy::read_timestamp,
     process::{ProcessId, ProcessState},
     sched::{current_process, find_process},
 };
@@ -181,7 +182,7 @@ fn validate_send_capability(msg: &Message, endpoint_id: u64) -> Result<()> {
         },
     )?;
 
-    // TODO(phase3): Verify capability is for the specific endpoint_id
+    // TODO(future): Verify capability is for the specific endpoint_id
     let _ = endpoint_id;
 
     Ok(())
@@ -238,19 +239,6 @@ pub struct SyncStatsSummary {
     pub slow_path_count: u64,
     pub avg_latency_cycles: u64,
     pub fast_path_percentage: u64,
-}
-
-#[cfg(target_arch = "x86_64")]
-fn read_timestamp() -> u64 {
-    // SAFETY: _rdtsc() reads the x86_64 Time Stamp Counter via the RDTSC
-    // instruction. This is a read-only, side-effect-free operation that is always
-    // available in kernel mode and requires no special setup or preconditions.
-    unsafe { core::arch::x86_64::_rdtsc() }
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn read_timestamp() -> u64 {
-    0
 }
 
 #[cfg(all(test, not(target_os = "none")))]

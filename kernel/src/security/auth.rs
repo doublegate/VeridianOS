@@ -107,21 +107,33 @@ impl PasswordPolicy {
     ///
     /// Returns `Ok(())` if the password meets all requirements, or
     /// `Err` with a description of the first failing requirement.
-    pub fn validate_password(&self, password: &str) -> Result<(), &'static str> {
+    pub fn validate_password(&self, password: &str) -> Result<(), KernelError> {
         if password.len() < self.min_length {
-            return Err("password too short");
+            return Err(KernelError::InvalidArgument {
+                name: "password",
+                value: "too short",
+            });
         }
 
         if self.require_uppercase && !password.bytes().any(|b| b.is_ascii_uppercase()) {
-            return Err("password must contain an uppercase letter");
+            return Err(KernelError::InvalidArgument {
+                name: "password",
+                value: "must contain an uppercase letter",
+            });
         }
 
         if self.require_lowercase && !password.bytes().any(|b| b.is_ascii_lowercase()) {
-            return Err("password must contain a lowercase letter");
+            return Err(KernelError::InvalidArgument {
+                name: "password",
+                value: "must contain a lowercase letter",
+            });
         }
 
         if self.require_digit && !password.bytes().any(|b| b.is_ascii_digit()) {
-            return Err("password must contain a digit");
+            return Err(KernelError::InvalidArgument {
+                name: "password",
+                value: "must contain a digit",
+            });
         }
 
         if self.require_special
@@ -129,7 +141,10 @@ impl PasswordPolicy {
                 .bytes()
                 .any(|b| b.is_ascii_punctuation() || b == b' ')
         {
-            return Err("password must contain a special character");
+            return Err(KernelError::InvalidArgument {
+                name: "password",
+                value: "must contain a special character",
+            });
         }
 
         Ok(())
@@ -354,7 +369,7 @@ impl UserAccount {
         &mut self,
         new_password: &str,
         history_size: usize,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), KernelError> {
         // Check new password against history (simplified: exact reuse detection)
         let _new_hash_with_old_salts_match = self.password_history[..self.password_history_len]
             .iter()
@@ -375,7 +390,10 @@ impl UserAccount {
 
         // Correct approach: check if new password matches current password
         if self.verify_password(new_password) {
-            return Err("new password must differ from current password");
+            return Err(KernelError::InvalidArgument {
+                name: "password",
+                value: "must differ from current password",
+            });
         }
 
         // Save current hash to history (fixed-size ring buffer)
@@ -614,12 +632,7 @@ impl AuthManager {
     ) -> Result<UserId, KernelError> {
         // Validate password against policy
         let policy = *self.password_policy.read();
-        if let Err(reason) = policy.validate_password(password) {
-            return Err(KernelError::InvalidArgument {
-                name: "password",
-                value: reason,
-            });
-        }
+        policy.validate_password(password)?;
 
         let mut accounts = self.accounts.write();
 
@@ -735,12 +748,7 @@ impl AuthManager {
         let policy = *self.password_policy.read();
 
         // Validate new password against policy
-        if let Err(reason) = policy.validate_password(new_password) {
-            return Err(KernelError::InvalidArgument {
-                name: "new_password",
-                value: reason,
-            });
-        }
+        policy.validate_password(new_password)?;
 
         let mut accounts = self.accounts.write();
 
@@ -753,12 +761,7 @@ impl AuthManager {
             }
 
             // Change password with history check
-            account
-                .change_password(new_password, policy.history_size)
-                .map_err(|msg| KernelError::InvalidArgument {
-                    name: "password",
-                    value: msg,
-                })?;
+            account.change_password(new_password, policy.history_size)?;
 
             Ok(())
         } else {
@@ -904,7 +907,7 @@ pub fn get_auth_manager() -> &'static AuthManager {
 }
 
 /// Validate a password against the default policy (convenience function).
-pub fn validate_password(password: &str) -> Result<(), &'static str> {
+pub fn validate_password(password: &str) -> Result<(), KernelError> {
     PasswordPolicy::default_policy().validate_password(password)
 }
 

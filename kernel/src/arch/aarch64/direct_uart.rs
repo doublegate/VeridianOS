@@ -13,6 +13,12 @@ const UART0_BASE: usize = 0x0900_0000;
 /// Write bytes to UART using pure assembly - avoiding all Rust constructs
 ///
 /// This implementation uses pure inline assembly for the entire operation.
+///
+/// # Safety
+///
+/// `ptr` must point to a valid byte buffer of at least `len` bytes.
+/// The PL011 UART at address 0x09000000 must be memory-mapped and
+/// accessible (as on the QEMU virt machine).
 unsafe fn uart_write_bytes_asm(ptr: *const u8, len: usize) {
     // Use inline assembly to perform the entire operation
     // Pass UART address as an input rather than loading it in assembly
@@ -51,8 +57,10 @@ pub fn direct_print_str(s: &str) {
 ///
 /// # Safety
 ///
-/// This is safe to call as it only writes to the UART registers.
-#[allow(clippy::missing_safety_doc)]
+/// The caller must ensure that the PL011 UART at address 0x09000000
+/// is memory-mapped and accessible (as is the case on the QEMU virt
+/// machine). This function writes each byte of `s` directly to the
+/// UART data register via assembly MMIO stores.
 pub unsafe fn uart_write_str(s: &str) {
     uart_write_bytes_asm(s.as_ptr(), s.len());
 }

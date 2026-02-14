@@ -107,7 +107,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Last Updated**: February 14, 2026 (v0.3.2)
+**Last Updated**: February 14, 2026 (v0.3.3)
 
 ### Current Architecture Support
 
@@ -181,6 +181,16 @@ Released February 14, 2026. Comprehensive completion of both Phase 2 (User Space
 - **Authentication Hardening** — Real timestamps for MFA; PBKDF2-HMAC-SHA256 password hashing; password complexity enforcement; password history (prevent reuse); account expiration
 - **Capability System Phase 3** — ObjectRef::Endpoint in IPC integration; PRESERVE_EXEC filtering; default IPC/memory capabilities; process notification on revocation; permission checks; IPC broadcast for revocation
 - **Syscall Security + Fuzzing** — MAC checks before capability checks in syscall handlers; audit logging in syscall entry/exit; argument validation (pointer bounds, size limits); `FuzzTarget` trait with mutation-based fuzzer; ELF/IPC/FS/capability fuzz targets; crash detection via panic handler hooks
+
+### Technical Debt Remediation (v0.3.3)
+
+Released February 14, 2026. Comprehensive technical debt remediation across 4 parallel work streams:
+
+- **Soundness & Safety** — Fixed RiscvScheduler soundness issue (UnsafeCell to spin::Mutex), deleted 353-line dead `security::crypto` module, fixed 5 clippy suppressions, deduplicated x86_64 I/O port functions
+- **Error Type Migration** — Eliminated all remaining `Err("...")` string literals (96 to 0) and `Result<T, &str>` signatures (91 to 1 justified); 11 primary files + ~33 cascade files converted to typed `KernelError`
+- **Code Organization** — Split 3 files exceeding 1,500 lines: `crypto/post_quantum.rs` into directory (kyber/dilithium/hybrid), `security/mac.rs` into directory (parser extracted), `elf/types.rs` extracted; created `arch/entropy.rs` abstraction
+- **Comment & Annotation Cleanup** — 55 `TODO(phase3)` items triaged to zero (9 eliminated, 1 removed as already implemented, 45 reclassified), 15 unnecessary `#[allow(unused_imports)]` removed, `process_compat::Process` renamed to `TaskProcessAdapter`
+- **Net result**: 80 files changed, +1,024/-5,069 lines (net -4,045 lines), zero `Result<T, &str>` remaining, zero soundness bugs
 
 ### Phase 3: Security Hardening — Complete (v0.3.0, v0.3.2)
 
@@ -427,6 +437,7 @@ Security is a fundamental design principle:
 - [x] Phase 3: Security Hardening — Architecture cleanup, capability hardening, MAC/audit, memory hardening (2026-02-14, v0.3.0)
 - [x] Technical Debt Remediation — OnceLock soundness fix, 48 static mut eliminated, typed errors, panic-free syscalls (2026-02-14, v0.3.1)
 - [x] Phase 2 & Phase 3 Completion — 15 implementation sprints, full crypto/secure boot/TPM/MAC/audit/ELF/BlockFS/signals (2026-02-14, v0.3.2)
+- [x] Technical Debt Remediation — RiscvScheduler soundness fix, Result<T, &str> elimination (96 to 0), 3 large file splits, TODO(phase3) triage (2026-02-14, v0.3.3)
 
 ### Mid-term (2026)
 
