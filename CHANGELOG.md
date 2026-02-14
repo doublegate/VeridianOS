@@ -1,3 +1,85 @@
+## [0.3.0] - 2026-02-14
+
+### Architecture Leakage Reduction & Phase 3 Security Hardening
+
+**MILESTONE**: Comprehensive architecture cleanup reducing `cfg(target_arch)` usage by 46% outside `kernel/src/arch/`, expanded test suite from 12 to 22 init tests, and full Phase 3 security hardening including capability system improvements, MAC/audit wiring, memory hardening with speculation barriers, and crypto validation. All three architectures (x86_64, AArch64, RISC-V) verified: 22/22 tests pass, zero clippy warnings, cargo fmt clean.
+
+### Architecture Leakage Reduction (Sprints 1-3)
+
+#### Unified Print Infrastructure
+- Created `kprintln!`/`kprint!` macro family abstracting the AArch64 LLVM `format_args!()` bug
+- On AArch64: literal strings route to `direct_uart::uart_write_str()`; formatted output is a no-op
+- On x86_64/RISC-V: delegates to `serial::_serial_print(format_args!(...))`
+- Eliminated ~110 three-way `cfg(target_arch)` print blocks across bootstrap, heap, scheduler, and services
+
+#### IPC RegisterSet Abstraction
+- Replaced 21-field `ProcessContext` struct (7 per architecture, each individually `cfg`-gated) with architecture-neutral `IpcRegisterSet` trait
+- Each architecture implements the trait behind `arch::IpcRegisters`
+- Eliminated ~47 cfg attributes from IPC fast path
+
+#### Memory & Scheduler Consolidation
+- `HEAP_START`/`HEAP_SIZE` constants behind `arch::` re-exports
+- Timer setup and idle-loop abstractions moved into `arch::` functions
+- Scheduler `sched/init.rs` reduced from ~200 lines to ~30
+
+#### Net Result
+- `cfg(target_arch)` outside `arch/`: 379 -> 204 (46% reduction)
+- 34 kernel files modified, 975 insertions, 1,399 deletions (net -424 lines)
+
+### Phase 2 Test Expansion (Sprint 4)
+
+Expanded kernel-mode init test suite from 12 to 22 tests:
+
+| # | Test | Category |
+|---|------|----------|
+| 1-6 | VFS (mkdir, write, read, readdir, procfs, devfs) | Filesystem |
+| 7-12 | Shell (help, pwd, ls, env, echo, mkdir_verify) | Shell |
+| 13 | ELF header magic validation | ELF Loader |
+| 14 | ELF bad magic rejection | ELF Loader |
+| 15 | Capability insert + lookup round-trip | Capability |
+| 16 | IPC endpoint create | IPC |
+| 17 | Root capability exists after init | Security |
+| 18 | Capability quota enforcement | Security |
+| 19 | MAC user_t -> file_t read access | Security |
+| 20 | Audit event recording | Security |
+| 21 | Stack canary verify + corruption detect | Security |
+| 22 | SHA-256 NIST FIPS 180-4 test vector | Crypto |
+
+### Phase 3: Security Hardening (Sprints 5-7)
+
+#### Sprint 5 - Capability System
+- **Root capability bootstrap**: Memory-type capability with `rights=ALL` (0xFF), covering entire address space, created during `cap::init()`
+- **Resource quotas**: Per-process capability quota (`DEFAULT_CAP_QUOTA=256`) prevents unbounded allocation; `insert()` returns `QuotaExceeded` when limit reached
+- **Syscall enforcement**: `fork`/`exec`/`kill` require Process-type capability with appropriate rights; `mount`/`unmount` require Memory-type capability with Write rights
+- **Rights::ALL constant**: Covers all 8 right bits (Read, Write, Execute, Grant, Revoke, Delete, Modify, Create)
+
+#### Sprint 6 - MAC + Audit Activation
+- **MAC convenience functions**: `check_file_access()` and `check_ipc_access()` with automatic domain mapping (pid 0 -> system_t, pid 1 -> init_t, others -> user_t; paths mapped to file_t/device_t/system_t)
+- **VFS MAC integration**: `open()` and `mkdir()` now enforce MAC policy checks
+- **Audit event wiring**: Capability create/delegate/revoke, process create/exit all generate audit events
+- **AArch64 security refinement**: Selective init runs MAC + audit + boot verify (safe modules); skips memory_protection/auth/tpm (spinlock-dependent modules that deadlock on AArch64 bare metal)
+
+#### Sprint 7 - Memory Hardening + Crypto
+- **Speculation barriers**: `LFENCE` (x86_64), `CSDB` (AArch64), `FENCE.I` (RISC-V) called at syscall entry to mitigate Spectre-style transient execution attacks
+- **Guard pages**: `map_guard_page()` in VMM ensures unmapped pages trigger page faults for stack overflow detection
+- **Stack canary integration**: `StackCanary` + `GuardPage` initialized during process creation for main thread kernel stack
+- **Crypto validation**: `crypto::validate()` verifies SHA-256 against NIST FIPS 180-4 test vector (`SHA-256("abc")`)
+
+### Architecture Verification
+
+| Architecture | Build | Clippy | Format | Init Tests | BOOTOK | Stable Idle (30s) |
+|--------------|-------|--------|--------|-----------|--------|-------------------|
+| x86_64       | Pass  | Pass   | Pass   | 22/22     | Yes    | PASS              |
+| AArch64      | Pass  | Pass   | Pass   | 22/22     | Yes    | PASS              |
+| RISC-V 64    | Pass  | Pass   | Pass   | 22/22     | Yes    | PASS              |
+
+### Files Changed
+
+- 34 kernel files modified in primary commit (975 insertions, 1,399 deletions)
+- 1 file modified in follow-up fix (3 insertions, 2 deletions)
+
+---
+
 ## [0.2.5] - 2026-02-13
 
 ### RISC-V Crash Fix & Full Architecture Parity
@@ -1211,6 +1293,7 @@ While in pre-1.0 development:
 - **0.9.0** - Package management
 - **1.0.0** - First stable release
 
+[0.3.0]: https://github.com/doublegate/VeridianOS/compare/v0.2.5...v0.3.0
 [0.2.5]: https://github.com/doublegate/VeridianOS/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/doublegate/VeridianOS/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/doublegate/VeridianOS/compare/v0.2.2...v0.2.3

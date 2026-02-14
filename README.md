@@ -107,15 +107,15 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Last Updated**: February 13, 2026
+**Last Updated**: February 14, 2026
 
 ### Current Architecture Support
 
 | Architecture | Build | Boot | Init Tests | Stage 6 | Stable Idle (30s) | Status |
 |--------------|-------|------|-----------|---------|-------------------|--------|
-| x86_64       | ✅    | ✅   | 12/12     | ✅      | ✅ PASS           | **100% Functional** — UEFI boot via OVMF |
-| AArch64      | ✅    | ✅   | 12/12     | ✅      | ✅ PASS           | **100% Functional** — Direct kernel loading |
-| RISC-V 64    | ✅    | ✅   | 12/12     | ✅      | ✅ PASS           | **100% Functional** — OpenSBI boot |
+| x86_64       | ✅    | ✅   | 22/22     | ✅      | ✅ PASS           | **100% Functional** — UEFI boot via OVMF |
+| AArch64      | ✅    | ✅   | 22/22     | ✅      | ✅ PASS           | **100% Functional** — Direct kernel loading |
+| RISC-V 64    | ✅    | ✅   | 22/22     | ✅      | ✅ PASS           | **100% Functional** — OpenSBI boot |
 
 ### Phase 0: Foundation & Tooling — Complete (v0.1.0)
 
@@ -146,6 +146,17 @@ Released February 13, 2026. Comprehensive codebase quality improvement:
 - **39 files** cleaned of `#[allow(dead_code)]` with proper feature gating
 - **161 files changed** total
 
+### Phase 3: Security Hardening — Complete (v0.3.0)
+
+Released February 14, 2026. Architecture leakage reduction and comprehensive security hardening:
+
+- **Architecture Leakage Reduction** — `kprintln!`/`kprint!` macro family, `IpcRegisterSet` trait, heap/scheduler consolidation; `cfg(target_arch)` outside `arch/` reduced from 379 to 204 (46% reduction)
+- **Test Expansion** — Kernel-mode init tests expanded from 12 to 22, all passing on all architectures
+- **Capability System Hardening** — Root capability bootstrap, per-process resource quotas (256 cap limit), syscall enforcement (fork/exec/kill require Process cap)
+- **MAC + Audit** — MAC convenience functions wired into VFS `open()`/`mkdir()`, audit events for capability and process lifecycle
+- **Memory Hardening** — Speculation barriers (LFENCE/CSDB/FENCE.I) at syscall entry, guard pages in VMM, stack canary integration
+- **Crypto Validation** — SHA-256 NIST FIPS 180-4 test vector validation
+
 ### Phase 2: User Space Foundation — Runtime Verified (v0.2.3, parity v0.2.5)
 
 Started August 15, 2025. Architecturally complete August 16, 2025. Runtime activation verified February 13, 2026. Full multi-architecture boot parity achieved February 13, 2026 (v0.2.5) with RISC-V post-BOOTOK crash fix, heap sizing corrections, and 30-second stability tests passing on all architectures.
@@ -163,7 +174,7 @@ Implementation achievements:
 - **Init System** — Service management with dependencies and runlevels
 - **Shell Implementation** — 20+ built-in commands with environment management
 - **Driver Suite** — PCI/USB bus drivers, network drivers (Ethernet + loopback with TCP/IP stack), storage drivers (ATA/IDE), console drivers (VGA + serial)
-- **Runtime Init Tests** — 12 kernel-mode tests (6 VFS + 6 shell) verifying subsystem functionality at boot
+- **Runtime Init Tests** — 22 kernel-mode tests (6 VFS + 6 shell + 10 security/capability/crypto) verifying subsystem functionality at boot
 
 ### Technical Notes
 
@@ -377,10 +388,11 @@ Security is a fundamental design principle:
 - [x] Phase 2: User Space Foundation — Runtime verified (2025-08-16, v0.2.3)
 - [x] Technical Debt Remediation — 9/10 issues resolved (2026-02-13, v0.2.4)
 - [x] RISC-V Crash Fix & Architecture Parity — All 3 architectures stable (2026-02-13, v0.2.5)
+- [x] Phase 3: Security Hardening — Architecture cleanup, capability hardening, MAC/audit, memory hardening (2026-02-14, v0.3.0)
 
 ### Mid-term (2026)
 
-- [ ] Phase 3: Security Hardening (5–6 months) — SELinux policies, secure boot, audit framework
+- [x] Phase 3: Security Hardening — Complete (2026-02-14, v0.3.0)
 - [ ] Phase 4: Package Ecosystem & Self-Hosting (5–6 months) — Ports system, LLVM toolchain priority
 
 ### Long-term (2027+)
