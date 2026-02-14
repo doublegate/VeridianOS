@@ -111,11 +111,11 @@ experiments/   Non-normative exploratory work
 
 ### Current Architecture Support
 
-| Architecture | Build | Boot | Init Tests | Stage 6 | Status |
-|--------------|-------|------|-----------|---------|--------|
-| x86_64       | ✅    | ✅   | 12/12     | ✅      | **100% Functional** — UEFI boot with full Phase 2 runtime activation |
-| AArch64      | ✅    | ✅   | 12/12     | ✅      | **100% Functional** — Full Phase 2 runtime activation with BOOTOK |
-| RISC-V 64    | ✅    | ✅   | 12/12     | ✅      | **100% Functional** — Full Phase 2 runtime activation with BOOTOK |
+| Architecture | Build | Boot | Init Tests | Stage 6 | Stable Idle (30s) | Status |
+|--------------|-------|------|-----------|---------|-------------------|--------|
+| x86_64       | ✅    | ✅   | 12/12     | ✅      | ✅ PASS           | **100% Functional** — UEFI boot via OVMF |
+| AArch64      | ✅    | ✅   | 12/12     | ✅      | ✅ PASS           | **100% Functional** — Direct kernel loading |
+| RISC-V 64    | ✅    | ✅   | 12/12     | ✅      | ✅ PASS           | **100% Functional** — OpenSBI boot |
 
 ### Phase 0: Foundation & Tooling — Complete (v0.1.0)
 
@@ -146,9 +146,9 @@ Released February 13, 2026. Comprehensive codebase quality improvement:
 - **39 files** cleaned of `#[allow(dead_code)]` with proper feature gating
 - **161 files changed** total
 
-### Phase 2: User Space Foundation — Runtime Verified (v0.2.3)
+### Phase 2: User Space Foundation — Runtime Verified (v0.2.3, parity v0.2.5)
 
-Started August 15, 2025. Architecturally complete August 16, 2025. Runtime activation verified February 13, 2026. Full multi-architecture boot parity achieved February 13, 2026.
+Started August 15, 2025. Architecturally complete August 16, 2025. Runtime activation verified February 13, 2026. Full multi-architecture boot parity achieved February 13, 2026 (v0.2.5) with RISC-V post-BOOTOK crash fix, heap sizing corrections, and 30-second stability tests passing on all architectures.
 
 Implementation achievements:
 
@@ -376,6 +376,7 @@ Security is a fundamental design principle:
 - [x] Phase 1: Microkernel Core — Complete (2025-06-12, v0.2.1)
 - [x] Phase 2: User Space Foundation — Runtime verified (2025-08-16, v0.2.3)
 - [x] Technical Debt Remediation — 9/10 issues resolved (2026-02-13, v0.2.4)
+- [x] RISC-V Crash Fix & Architecture Parity — All 3 architectures stable (2026-02-13, v0.2.5)
 
 ### Mid-term (2026)
 

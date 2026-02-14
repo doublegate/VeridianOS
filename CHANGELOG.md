@@ -1,3 +1,45 @@
+## [0.2.5] - 2026-02-13
+
+### RISC-V Crash Fix & Full Architecture Parity
+
+**MILESTONE**: Resolved the RISC-V post-BOOTOK crash that caused the kernel to reboot via OpenSBI after passing all 12 kernel-mode init tests. All three architectures (x86_64, AArch64, RISC-V) now achieve full boot parity: 12/12 tests pass, BOOTOK is emitted, and the kernel enters a stable idle loop without crashes or reboots. 30-second stability tests pass on all architectures with zero panics.
+
+### Fixed
+
+- RISC-V store access fault from writing to unmapped virtual address 0x200000 in `create_minimal_init()`
+- Heap overflow corrupting VFS_PTR in BSS from `load_shell()` exhausting bump allocator
+- Heap size mismatch: HEAP_MEMORY static array was 2MB but heap_size variable was 512KB (now unified at 4MB)
+- RISC-V scheduler panic from eager `init_ready_queue()` allocation (now lazy, matching AArch64)
+
+### Changed
+
+- Kernel heap increased from 512KB to 4MB for all architectures
+- RISC-V init process creation no longer writes directly to user-space virtual addresses
+- ReadyQueue initialization on RISC-V is now lazy (on first access) instead of eager
+
+### Removed
+
+- Redundant `init_ready_queue()` function and call site in scheduler
+- Diagnostic test allocations in RISC-V heap initialization path
+
+#### Architecture Verification
+
+| Architecture | Build | Clippy | Format | Init Tests | BOOTOK | Stable Idle (30s) |
+|--------------|-------|--------|--------|-----------|--------|-------------------|
+| x86_64       | Pass  | Pass   | Pass   | 12/12     | Yes    | PASS              |
+| AArch64      | Pass  | Pass   | Pass   | 12/12     | Yes    | PASS              |
+| RISC-V 64    | Pass  | Pass   | Pass   | 12/12     | Yes    | PASS              |
+
+#### Files Changed
+
+- `kernel/src/userspace/loader.rs` -- Removed unsafe write to unmapped RISC-V address
+- `kernel/src/bootstrap.rs` -- Gated `load_shell()` to skip on RISC-V
+- `kernel/src/mm/heap.rs` -- Increased heap to 4MB, cleaned up debug allocations
+- `kernel/src/sched/init.rs` -- Removed RISC-V eager `init_ready_queue()` call
+- `kernel/src/sched/queue.rs` -- Removed `init_ready_queue()` function, updated SAFETY comment
+
+---
+
 ## [0.2.4] - 2026-02-13
 
 ### Comprehensive Technical Debt Remediation
@@ -1169,6 +1211,7 @@ While in pre-1.0 development:
 - **0.9.0** - Package management
 - **1.0.0** - First stable release
 
+[0.2.5]: https://github.com/doublegate/VeridianOS/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/doublegate/VeridianOS/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/doublegate/VeridianOS/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/doublegate/VeridianOS/compare/v0.2.1...v0.2.2
