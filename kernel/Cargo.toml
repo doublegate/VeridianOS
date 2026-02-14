@@ -9,7 +9,6 @@ repository.workspace = true
 [features]
 default = ["alloc"]
 alloc = []
-testing = []
 smp = []
 test-kernel = ["qemu-exit"]
 net_debug = []
@@ -17,9 +16,6 @@ benchmarks = []
 integration-tests = []
 qemu-exit = []
 # Phase-specific feature flags for gating stub/future code
-phase3-security = []
-phase4-packages = []
-phase5-optimization = []
 phase6-desktop = []
 
 [dependencies]

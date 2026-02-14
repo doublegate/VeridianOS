@@ -8,6 +8,8 @@ use alloc::{collections::BTreeMap, format, string::String, sync::Arc, vec, vec::
 
 use spin::RwLock;
 
+use crate::error::KernelError;
+
 #[cfg(target_arch = "aarch64")]
 pub mod bare_lock;
 pub mod blockdev;
@@ -126,36 +128,32 @@ pub trait VfsNode: Send + Sync {
     fn node_type(&self) -> NodeType;
 
     /// Read data from the node
-    fn read(&self, offset: usize, buffer: &mut [u8]) -> Result<usize, &'static str>;
+    fn read(&self, offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError>;
 
     /// Write data to the node
-    fn write(&self, offset: usize, data: &[u8]) -> Result<usize, &'static str>;
+    fn write(&self, offset: usize, data: &[u8]) -> Result<usize, KernelError>;
 
     /// Get metadata for the node
-    fn metadata(&self) -> Result<Metadata, &'static str>;
+    fn metadata(&self) -> Result<Metadata, KernelError>;
 
     /// List directory entries (if this is a directory)
-    fn readdir(&self) -> Result<Vec<DirEntry>, &'static str>;
+    fn readdir(&self) -> Result<Vec<DirEntry>, KernelError>;
 
     /// Look up a child node by name (if this is a directory)
-    fn lookup(&self, name: &str) -> Result<Arc<dyn VfsNode>, &'static str>;
+    fn lookup(&self, name: &str) -> Result<Arc<dyn VfsNode>, KernelError>;
 
     /// Create a new file in this directory
-    fn create(
-        &self,
-        name: &str,
-        permissions: Permissions,
-    ) -> Result<Arc<dyn VfsNode>, &'static str>;
+    fn create(&self, name: &str, permissions: Permissions)
+        -> Result<Arc<dyn VfsNode>, KernelError>;
 
     /// Create a new directory in this directory
-    fn mkdir(&self, name: &str, permissions: Permissions)
-        -> Result<Arc<dyn VfsNode>, &'static str>;
+    fn mkdir(&self, name: &str, permissions: Permissions) -> Result<Arc<dyn VfsNode>, KernelError>;
 
     /// Remove a file or empty directory
-    fn unlink(&self, name: &str) -> Result<(), &'static str>;
+    fn unlink(&self, name: &str) -> Result<(), KernelError>;
 
     /// Truncate the file to the specified size
-    fn truncate(&self, size: usize) -> Result<(), &'static str>;
+    fn truncate(&self, size: usize) -> Result<(), KernelError>;
 }
 
 /// Filesystem trait
@@ -170,7 +168,7 @@ pub trait Filesystem: Send + Sync {
     fn is_readonly(&self) -> bool;
 
     /// Sync filesystem to disk
-    fn sync(&self) -> Result<(), &'static str>;
+    fn sync(&self) -> Result<(), KernelError>;
 }
 
 /// Mount point information
@@ -211,22 +209,22 @@ impl Default for Vfs {
 
 impl Vfs {
     /// Mount the root filesystem
-    pub fn mount_root(&mut self, fs: Arc<dyn Filesystem>) -> Result<(), &'static str> {
+    pub fn mount_root(&mut self, fs: Arc<dyn Filesystem>) -> Result<(), KernelError> {
         if self.root_fs.is_some() {
-            return Err("Root filesystem already mounted");
+            return Err(KernelError::FsError(crate::error::FsError::AlreadyMounted));
         }
         self.root_fs = Some(fs);
         Ok(())
     }
 
     /// Mount a filesystem at the specified path
-    pub fn mount(&mut self, path: String, fs: Arc<dyn Filesystem>) -> Result<(), &'static str> {
+    pub fn mount(&mut self, path: String, fs: Arc<dyn Filesystem>) -> Result<(), KernelError> {
         if self.root_fs.is_none() {
-            return Err("Root filesystem not mounted");
+            return Err(KernelError::FsError(crate::error::FsError::NoRootFs));
         }
 
         if self.mounts.contains_key(&path) {
-            return Err("Path already mounted");
+            return Err(KernelError::FsError(crate::error::FsError::AlreadyMounted));
         }
 
         self.mounts.insert(path, fs);
@@ -239,13 +237,13 @@ impl Vfs {
         path: &str,
         fs_type: &str,
         _flags: u32,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), KernelError> {
         let fs: Arc<dyn Filesystem> = match fs_type {
             "ramfs" => Arc::new(ramfs::RamFs::new()),
             "devfs" => Arc::new(devfs::DevFs::new()),
             "procfs" => Arc::new(procfs::ProcFs::new()),
             "blockfs" => Arc::new(blockfs::BlockFs::new(10000, 1000)),
-            _ => return Err("Unknown filesystem type"),
+            _ => return Err(KernelError::FsError(crate::error::FsError::UnknownFsType)),
         };
 
         if path == "/" {
@@ -256,16 +254,19 @@ impl Vfs {
     }
 
     /// Unmount a filesystem at the specified path
-    pub fn unmount(&mut self, path: &str) -> Result<(), &'static str> {
+    pub fn unmount(&mut self, path: &str) -> Result<(), KernelError> {
         self.mounts
             .remove(path)
-            .ok_or("Path not mounted")
+            .ok_or(KernelError::FsError(crate::error::FsError::NotMounted))
             .map(|_| ())
     }
 
     /// Resolve a path to a VFS node
-    pub fn resolve_path(&self, path: &str) -> Result<Arc<dyn VfsNode>, &'static str> {
-        let root_fs = self.root_fs.as_ref().ok_or("Root filesystem not mounted")?;
+    pub fn resolve_path(&self, path: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        let root_fs = self
+            .root_fs
+            .as_ref()
+            .ok_or(KernelError::FsError(crate::error::FsError::NoRootFs))?;
 
         // Normalize path
         let path = if path.starts_with('/') {
@@ -292,7 +293,7 @@ impl Vfs {
         &self,
         mut node: Arc<dyn VfsNode>,
         path: &str,
-    ) -> Result<Arc<dyn VfsNode>, &'static str> {
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
         // Keep track of path components for parent traversal
         let mut path_stack: Vec<Arc<dyn VfsNode>> = Vec::new();
         path_stack.push(node.clone());
@@ -307,10 +308,14 @@ impl Vfs {
                 // Go back to parent directory
                 if path_stack.len() > 1 {
                     path_stack.pop();
-                    // path_stack.len() > 1 was checked above, so last() is Some
+                    // path_stack.len() > 1 was checked above, so last() always succeeds.
+                    // Use ok_or to return an error instead of panicking on the
+                    // impossible case.
                     node = path_stack
                         .last()
-                        .expect("path_stack empty after len check")
+                        .ok_or(KernelError::LegacyError {
+                            message: "internal error: path stack unexpectedly empty",
+                        })?
                         .clone();
                 }
                 // If at root, stay at root
@@ -330,13 +335,13 @@ impl Vfs {
     }
 
     /// Set current working directory
-    pub fn set_cwd(&mut self, path: String) -> Result<(), &'static str> {
+    pub fn set_cwd(&mut self, path: String) -> Result<(), KernelError> {
         // Verify the path exists and is a directory
         let node = self.resolve_path(&path)?;
         let metadata = node.metadata()?;
 
         if metadata.node_type != NodeType::Directory {
-            return Err("Not a directory");
+            return Err(KernelError::FsError(crate::error::FsError::NotADirectory));
         }
 
         self.cwd = path;
@@ -346,7 +351,7 @@ impl Vfs {
     /// Open a file
     ///
     /// Checks MAC policy before allowing access.
-    pub fn open(&self, path: &str, flags: OpenFlags) -> Result<Arc<dyn VfsNode>, &'static str> {
+    pub fn open(&self, path: &str, flags: OpenFlags) -> Result<Arc<dyn VfsNode>, KernelError> {
         // Determine access type from flags
         let access = if flags.write {
             crate::security::AccessType::Write
@@ -367,7 +372,7 @@ impl Vfs {
     /// Create a directory
     ///
     /// Checks MAC policy (Write access to file domain) before creating.
-    pub fn mkdir(&self, path: &str, permissions: Permissions) -> Result<(), &'static str> {
+    pub fn mkdir(&self, path: &str, permissions: Permissions) -> Result<(), KernelError> {
         // MAC check: creating a directory requires Write access
         let pid = crate::process::current_process()
             .map(|p| p.pid.0)
@@ -382,7 +387,7 @@ impl Vfs {
                 (&path[..pos], &path[pos + 1..])
             }
         } else {
-            return Err("Invalid path");
+            return Err(KernelError::FsError(crate::error::FsError::InvalidPath));
         };
 
         // Get parent directory
@@ -394,7 +399,7 @@ impl Vfs {
     }
 
     /// Remove a file or directory
-    pub fn unlink(&self, path: &str) -> Result<(), &'static str> {
+    pub fn unlink(&self, path: &str) -> Result<(), KernelError> {
         // Split path into parent and name
         let (parent_path, name) = if let Some(pos) = path.rfind('/') {
             if pos == 0 {
@@ -403,7 +408,7 @@ impl Vfs {
                 (&path[..pos], &path[pos + 1..])
             }
         } else {
-            return Err("Invalid path");
+            return Err(KernelError::FsError(crate::error::FsError::InvalidPath));
         };
 
         // Get parent directory
@@ -414,7 +419,7 @@ impl Vfs {
     }
 
     /// Sync all filesystems
-    pub fn sync(&self) -> Result<(), &'static str> {
+    pub fn sync(&self) -> Result<(), KernelError> {
         // Sync root filesystem
         if let Some(ref root) = self.root_fs {
             root.sync()?;
@@ -429,33 +434,23 @@ impl Vfs {
     }
 }
 
-/// Global VFS instance - using pointer pattern for all architectures
-/// This avoids static mut Option issues and provides consistent behavior
-static mut VFS_PTR: *mut RwLock<Vfs> = core::ptr::null_mut();
+/// Global VFS instance using OnceLock for safe initialization.
+static VFS_LOCK: crate::sync::once_lock::OnceLock<RwLock<Vfs>> =
+    crate::sync::once_lock::OnceLock::new();
 
 /// Get the VFS instance (unified for all architectures).
 ///
 /// Panics if the VFS has not been initialized via [`init`].
 /// Prefer [`try_get_vfs`] in contexts where a panic is unacceptable.
 pub fn get_vfs() -> &'static RwLock<Vfs> {
-    // Panic is intentional: accessing VFS before init() is a programming
-    // error indicating a broken boot sequence. Use try_get_vfs() for
-    // non-panicking access.
-    try_get_vfs().expect("VFS not initialized: init() was not called")
+    VFS_LOCK
+        .get()
+        .expect("VFS not initialized: init() was not called")
 }
 
 /// Try to get the VFS instance without panicking
 pub fn try_get_vfs() -> Option<&'static RwLock<Vfs>> {
-    // SAFETY: Same as get_vfs - read_volatile reads the latest pointer
-    // value. Returns None if VFS not yet initialized (null pointer).
-    unsafe {
-        let ptr = core::ptr::read_volatile(&raw const VFS_PTR);
-        if ptr.is_null() {
-            None
-        } else {
-            Some(&*ptr)
-        }
-    }
+    VFS_LOCK.get()
 }
 
 /// Initialize the VFS with a RAM filesystem as root
@@ -465,45 +460,16 @@ pub fn init() {
 
     println!("[VFS] Initializing Virtual Filesystem...");
 
-    // SAFETY: VFS_PTR is a static mut pointer initialized to null.
-    // This block checks if already initialized (guards against double
-    // init), creates a Vfs via Box::leak for 'static lifetime, and
-    // stores the pointer with memory barriers for cross-architecture
-    // visibility. Called once during early boot before concurrent access.
-    unsafe {
-        if !core::ptr::read_volatile(&raw const VFS_PTR).is_null() {
+    println!("[VFS] Creating VFS structure...");
+    let vfs = Vfs::new();
+    let vfs_lock = RwLock::new(vfs);
+
+    match VFS_LOCK.set(vfs_lock) {
+        Ok(()) => println!("[VFS] VFS initialized successfully"),
+        Err(_) => {
             println!("[VFS] WARNING: VFS already initialized! Skipping re-initialization.");
             return;
         }
-
-        println!("[VFS] Creating VFS structure...");
-
-        let mounts = BTreeMap::new();
-        let cwd = String::from("/");
-        let vfs = Vfs {
-            root_fs: None,
-            mounts,
-            cwd,
-        };
-        let vfs_lock = RwLock::new(vfs);
-        let vfs_box = alloc::boxed::Box::new(vfs_lock);
-        let ptr = alloc::boxed::Box::leak(vfs_box) as *mut RwLock<Vfs>;
-
-        // Memory barriers before assignment
-        #[cfg(target_arch = "aarch64")]
-        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
-        #[cfg(target_arch = "riscv64")]
-        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
-
-        core::ptr::write_volatile(&raw mut VFS_PTR, ptr);
-
-        // Memory barriers after assignment
-        #[cfg(target_arch = "aarch64")]
-        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
-        #[cfg(target_arch = "riscv64")]
-        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
-
-        println!("[VFS] VFS initialized successfully");
     }
 
     // Create and mount filesystems
@@ -593,7 +559,7 @@ pub fn init() {
 /// # Returns
 /// * `Ok(Vec<u8>)` - The file contents on success
 /// * `Err(&'static str)` - An error message on failure
-pub fn read_file(path: &str) -> Result<Vec<u8>, &'static str> {
+pub fn read_file(path: &str) -> Result<Vec<u8>, KernelError> {
     let vfs = get_vfs().read();
 
     // Resolve the path to a VFS node
@@ -604,7 +570,7 @@ pub fn read_file(path: &str) -> Result<Vec<u8>, &'static str> {
 
     // Ensure it's a file, not a directory
     if metadata.node_type != NodeType::File {
-        return Err("Not a file");
+        return Err(KernelError::FsError(crate::error::FsError::NotAFile));
     }
 
     // Allocate buffer for file contents
@@ -629,7 +595,7 @@ pub fn read_file(path: &str) -> Result<Vec<u8>, &'static str> {
 /// # Returns
 /// * `Ok(usize)` - The number of bytes written on success
 /// * `Err(&'static str)` - An error message on failure
-pub fn write_file(path: &str, data: &[u8]) -> Result<usize, &'static str> {
+pub fn write_file(path: &str, data: &[u8]) -> Result<usize, KernelError> {
     let vfs = get_vfs().read();
 
     // Try to resolve the path first
@@ -645,7 +611,7 @@ pub fn write_file(path: &str, data: &[u8]) -> Result<usize, &'static str> {
                     (&path[..pos], &path[pos + 1..])
                 }
             } else {
-                return Err("Invalid path");
+                return Err(KernelError::FsError(crate::error::FsError::InvalidPath));
             };
 
             // Get parent directory
@@ -670,7 +636,7 @@ pub fn file_exists(path: &str) -> bool {
 }
 
 /// Get file size without reading contents
-pub fn file_size(path: &str) -> Result<usize, &'static str> {
+pub fn file_size(path: &str) -> Result<usize, KernelError> {
     let vfs = get_vfs().read();
     let node = vfs.resolve_path(path)?;
     let metadata = node.metadata()?;
@@ -678,13 +644,13 @@ pub fn file_size(path: &str) -> Result<usize, &'static str> {
 }
 
 /// Copy a file from one location to another
-pub fn copy_file(src_path: &str, dst_path: &str) -> Result<usize, &'static str> {
+pub fn copy_file(src_path: &str, dst_path: &str) -> Result<usize, KernelError> {
     let data = read_file(src_path)?;
     write_file(dst_path, &data)
 }
 
 /// Append data to a file
-pub fn append_file(path: &str, data: &[u8]) -> Result<usize, &'static str> {
+pub fn append_file(path: &str, data: &[u8]) -> Result<usize, KernelError> {
     let vfs = get_vfs().read();
     let node = vfs.resolve_path(path)?;
     let metadata = node.metadata()?;
@@ -803,7 +769,10 @@ mod tests {
         vfs.mount_root(ramfs1).unwrap();
         let result = vfs.mount_root(ramfs2);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Root filesystem already mounted");
+        assert_eq!(
+            result.unwrap_err(),
+            KernelError::FsError(crate::error::FsError::AlreadyMounted)
+        );
     }
 
     #[test]
@@ -812,7 +781,10 @@ mod tests {
         let ramfs = Arc::new(ramfs::RamFs::new());
         let result = vfs.mount("/dev".into(), ramfs);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Root filesystem not mounted");
+        assert_eq!(
+            result.unwrap_err(),
+            KernelError::FsError(crate::error::FsError::NoRootFs)
+        );
     }
 
     #[test]
@@ -832,7 +804,10 @@ mod tests {
         vfs.mount("/mnt".into(), fs1).unwrap();
         let result = vfs.mount("/mnt".into(), fs2);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Path already mounted");
+        assert_eq!(
+            result.unwrap_err(),
+            KernelError::FsError(crate::error::FsError::AlreadyMounted)
+        );
     }
 
     // --- Unmount tests ---
@@ -852,7 +827,10 @@ mod tests {
         let mut vfs = make_vfs_with_root();
         let result = vfs.unmount("/nonexistent");
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Path not mounted");
+        assert_eq!(
+            result.unwrap_err(),
+            KernelError::FsError(crate::error::FsError::NotMounted)
+        );
     }
 
     // --- mount_by_type tests ---
@@ -883,7 +861,10 @@ mod tests {
         let mut vfs = make_vfs_with_root();
         let result = vfs.mount_by_type("/foo", "unknownfs", 0);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Unknown filesystem type");
+        assert_eq!(
+            result.unwrap_err(),
+            KernelError::FsError(crate::error::FsError::UnknownFsType)
+        );
     }
 
     #[test]
@@ -909,7 +890,10 @@ mod tests {
         let vfs = Vfs::new();
         let result = vfs.resolve_path("/anything");
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Root filesystem not mounted");
+        assert_eq!(
+            result.unwrap_err(),
+            KernelError::FsError(crate::error::FsError::NoRootFs)
+        );
     }
 
     #[test]
@@ -1040,7 +1024,10 @@ mod tests {
 
         let result = vfs.set_cwd(String::from("/afile"));
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Not a directory");
+        assert_eq!(
+            result.unwrap_err(),
+            KernelError::FsError(crate::error::FsError::NotADirectory)
+        );
     }
 
     // --- sync tests ---

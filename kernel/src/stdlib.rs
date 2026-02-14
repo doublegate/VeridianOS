@@ -342,7 +342,7 @@ pub mod io {
     pub const SEEK_END: i32 = 2;
 
     /// Open a file
-    pub fn open(path: &str, flags: i32) -> Result<*mut File, &'static str> {
+    pub fn open(path: &str, flags: i32) -> Result<*mut File, crate::error::KernelError> {
         let open_flags = if flags & O_RDWR != 0 {
             OpenFlags::read_write()
         } else if flags & O_WRONLY != 0 {
@@ -697,17 +697,14 @@ pub mod math {
 
 /// Time functions
 pub mod time {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
     /// Boot timestamp base (could be set from RTC on boot)
-    static mut BOOT_TIME_SECONDS: u64 = 0;
+    static BOOT_TIME_SECONDS: AtomicU64 = AtomicU64::new(0);
 
     /// Set boot time from RTC (call during system initialization)
     pub fn set_boot_time(seconds_since_epoch: u64) {
-        // SAFETY: BOOT_TIME_SECONDS is only written here and read in
-        // time().  This is called once during single-threaded early boot
-        // before the scheduler starts, so there is no data race.
-        unsafe {
-            BOOT_TIME_SECONDS = seconds_since_epoch;
-        }
+        BOOT_TIME_SECONDS.store(seconds_since_epoch, Ordering::Release);
     }
 
     /// Get current time in seconds since epoch
@@ -721,10 +718,7 @@ pub mod time {
         // Convert ticks to seconds since boot
         let seconds_since_boot = ticks / 1000;
 
-        // SAFETY: BOOT_TIME_SECONDS is written once during early boot
-        // (set_boot_time) before the scheduler starts.  After that it is
-        // read-only, so concurrent reads are safe.
-        unsafe { BOOT_TIME_SECONDS + seconds_since_boot }
+        BOOT_TIME_SECONDS.load(Ordering::Acquire) + seconds_since_boot
     }
 
     /// Sleep for seconds
@@ -765,24 +759,18 @@ pub mod error {
     pub const ENOSPC: i32 = 28; // No space left on device
     pub const EROFS: i32 = 30; // Read-only file system
 
-    static mut ERRNO: i32 = 0;
+    use core::sync::atomic::{AtomicI32, Ordering};
+
+    static ERRNO: AtomicI32 = AtomicI32::new(0);
 
     /// Get error number
     pub fn get_errno() -> i32 {
-        // SAFETY: ERRNO is a per-process global.  In the current
-        // single-threaded-per-process model there is no data race.
-        // If multi-threaded processes are supported in the future,
-        // this must be replaced with thread-local storage.
-        unsafe { ERRNO }
+        ERRNO.load(Ordering::Relaxed)
     }
 
     /// Set error number
     pub fn set_errno(errno: i32) {
-        // SAFETY: See get_errno -- single-threaded per-process model
-        // means no concurrent mutation.
-        unsafe {
-            ERRNO = errno;
-        }
+        ERRNO.store(errno, Ordering::Relaxed);
     }
 
     /// Get error string
@@ -818,28 +806,24 @@ pub mod error {
 
 /// Random number generation
 pub mod random {
-    static mut SEED: u32 = 1;
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    static SEED: AtomicU32 = AtomicU32::new(1);
 
     /// Set random seed
     pub fn srand(seed: u32) {
-        // SAFETY: SEED is a process-global mutable static used for the
-        // PRNG.  In the current single-threaded-per-process model there
-        // is no data race.  Must be replaced with TLS for multi-threaded
-        // processes.
-        unsafe {
-            SEED = seed;
-        }
+        SEED.store(seed, Ordering::Relaxed);
     }
 
     /// Generate random number
     pub fn rand() -> i32 {
-        // SAFETY: SEED is read and written atomically within a single
-        // thread (see srand safety comment).  The wrapping arithmetic
-        // cannot overflow.
-        unsafe {
-            SEED = SEED.wrapping_mul(1103515245).wrapping_add(12345);
-            (SEED / 65536) as i32 % 32768
-        }
+        let new_seed = SEED
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |s| {
+                Some(s.wrapping_mul(1103515245).wrapping_add(12345))
+            })
+            .unwrap_or(1);
+        let result = new_seed.wrapping_mul(1103515245).wrapping_add(12345);
+        (result / 65536) as i32 % 32768
     }
 
     /// Generate random number in range

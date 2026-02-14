@@ -2,9 +2,11 @@
 //!
 //! Provides tools for profiling, optimization, and performance analysis.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use crate::error::KernelError;
 
-/// Performance counters
+/// Performance counters (snapshot view)
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PerfCounters {
     pub syscalls: u64,
@@ -14,64 +16,49 @@ pub struct PerfCounters {
     pub ipc_messages: u64,
 }
 
-static mut COUNTERS: PerfCounters = PerfCounters {
-    syscalls: 0,
-    context_switches: 0,
-    page_faults: 0,
-    interrupts: 0,
-    ipc_messages: 0,
-};
+/// Atomic performance counters for safe concurrent access
+static SYSCALL_COUNT: AtomicU64 = AtomicU64::new(0);
+static CONTEXT_SWITCH_COUNT: AtomicU64 = AtomicU64::new(0);
+static PAGE_FAULT_COUNT: AtomicU64 = AtomicU64::new(0);
+static INTERRUPT_COUNT: AtomicU64 = AtomicU64::new(0);
+static IPC_MESSAGE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Increment syscall counter
 #[inline(always)]
 pub fn count_syscall() {
-    // SAFETY: COUNTERS is a static mut used as a simple global accumulator. All
-    // accesses are non-atomic wrapping increments on a single field. In the
-    // current single-core kernel, no concurrent mutation occurs. Minor races on
-    // SMP would only cause a missed count, not memory unsafety.
-    unsafe {
-        COUNTERS.syscalls = COUNTERS.syscalls.wrapping_add(1);
-    }
+    SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Increment context switch counter
 #[inline(always)]
 pub fn count_context_switch() {
-    // SAFETY: COUNTERS is a static mut global accumulator. The wrapping_add on a
-    // single u64 field is safe in the current single-core kernel. On SMP, a missed
-    // count is the worst outcome (no memory corruption).
-    unsafe {
-        COUNTERS.context_switches = COUNTERS.context_switches.wrapping_add(1);
-    }
+    CONTEXT_SWITCH_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Increment page fault counter
 #[inline(always)]
 pub fn count_page_fault() {
-    // SAFETY: COUNTERS is a static mut global accumulator. The wrapping_add on a
-    // single u64 field is safe in the current single-core kernel. On SMP, a missed
-    // count is the worst outcome (no memory corruption).
-    unsafe {
-        COUNTERS.page_faults = COUNTERS.page_faults.wrapping_add(1);
-    }
+    PAGE_FAULT_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Get performance statistics
+/// Get performance statistics as a point-in-time snapshot
 pub fn get_stats() -> PerfCounters {
-    // SAFETY: COUNTERS is a static mut read as a snapshot. The Copy on PerfCounters
-    // produces a consistent point-in-time value. Slight staleness on SMP is
-    // acceptable for diagnostic counters.
-    unsafe { COUNTERS }
+    PerfCounters {
+        syscalls: SYSCALL_COUNT.load(Ordering::Relaxed),
+        context_switches: CONTEXT_SWITCH_COUNT.load(Ordering::Relaxed),
+        page_faults: PAGE_FAULT_COUNT.load(Ordering::Relaxed),
+        interrupts: INTERRUPT_COUNT.load(Ordering::Relaxed),
+        ipc_messages: IPC_MESSAGE_COUNT.load(Ordering::Relaxed),
+    }
 }
 
 /// Reset performance counters
 pub fn reset_stats() {
-    // SAFETY: COUNTERS is a static mut reset to the default zero state. This is
-    // called from diagnostic paths only. In the current single-core kernel, no
-    // concurrent access occurs during reset.
-    unsafe {
-        COUNTERS = PerfCounters::default();
-    }
+    SYSCALL_COUNT.store(0, Ordering::Relaxed);
+    CONTEXT_SWITCH_COUNT.store(0, Ordering::Relaxed);
+    PAGE_FAULT_COUNT.store(0, Ordering::Relaxed);
+    INTERRUPT_COUNT.store(0, Ordering::Relaxed);
+    IPC_MESSAGE_COUNT.store(0, Ordering::Relaxed);
 }
 
 /// Performance profiler

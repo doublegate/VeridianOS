@@ -2,13 +2,15 @@
 //!
 //! Implements network device drivers including Ethernet, Wi-Fi, and loopback.
 
-#![allow(static_mut_refs)]
-
 use alloc::{boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec, vec::Vec};
 
 use spin::{Mutex, RwLock};
 
-use crate::services::driver_framework::{DeviceClass, DeviceInfo, DeviceStatus, Driver};
+use crate::{
+    error::KernelError,
+    services::driver_framework::{DeviceClass, DeviceInfo, DeviceStatus, Driver},
+    sync::once_lock::OnceLock,
+};
 
 /// Network packet buffer
 #[derive(Debug, Clone)]
@@ -87,19 +89,19 @@ pub trait NetworkDevice: Send + Sync {
     fn get_config(&self) -> InterfaceConfig;
 
     /// Set interface configuration
-    fn set_config(&mut self, config: InterfaceConfig) -> Result<(), &'static str>;
+    fn set_config(&mut self, config: InterfaceConfig) -> Result<(), KernelError>;
 
     /// Bring interface up
-    fn up(&mut self) -> Result<(), &'static str>;
+    fn up(&mut self) -> Result<(), KernelError>;
 
     /// Bring interface down
-    fn down(&mut self) -> Result<(), &'static str>;
+    fn down(&mut self) -> Result<(), KernelError>;
 
     /// Send a packet
-    fn send_packet(&mut self, packet: NetworkPacket) -> Result<(), &'static str>;
+    fn send_packet(&mut self, packet: NetworkPacket) -> Result<(), KernelError>;
 
     /// Receive a packet (non-blocking)
-    fn receive_packet(&mut self) -> Result<Option<NetworkPacket>, &'static str>;
+    fn receive_packet(&mut self) -> Result<Option<NetworkPacket>, KernelError>;
 
     /// Get interface statistics
     fn get_stats(&self) -> NetworkStats;
@@ -141,7 +143,7 @@ impl EthernetDriver {
     }
 
     /// Process transmitted packets
-    fn process_tx_queue(&mut self) -> Result<(), &'static str> {
+    fn process_tx_queue(&mut self) -> Result<(), KernelError> {
         let mut tx_queue = self.tx_queue.lock();
         let mut stats = self.stats.lock();
 
@@ -181,29 +183,32 @@ impl NetworkDevice for EthernetDriver {
         self.config.lock().clone()
     }
 
-    fn set_config(&mut self, config: InterfaceConfig) -> Result<(), &'static str> {
+    fn set_config(&mut self, config: InterfaceConfig) -> Result<(), KernelError> {
         *self.config.lock() = config;
         crate::println!("[ETH] Updated interface configuration for {}", self.name);
         Ok(())
     }
 
-    fn up(&mut self) -> Result<(), &'static str> {
+    fn up(&mut self) -> Result<(), KernelError> {
         self.config.lock().state = InterfaceState::Up;
         *self.enabled.lock() = true;
         crate::println!("[ETH] Interface {} is up", self.name);
         Ok(())
     }
 
-    fn down(&mut self) -> Result<(), &'static str> {
+    fn down(&mut self) -> Result<(), KernelError> {
         self.config.lock().state = InterfaceState::Down;
         *self.enabled.lock() = false;
         crate::println!("[ETH] Interface {} is down", self.name);
         Ok(())
     }
 
-    fn send_packet(&mut self, packet: NetworkPacket) -> Result<(), &'static str> {
+    fn send_packet(&mut self, packet: NetworkPacket) -> Result<(), KernelError> {
         if !*self.enabled.lock() {
-            return Err("Interface is down");
+            return Err(KernelError::InvalidState {
+                expected: "up",
+                actual: "down",
+            });
         }
 
         self.tx_queue.lock().push(packet);
@@ -211,7 +216,7 @@ impl NetworkDevice for EthernetDriver {
         Ok(())
     }
 
-    fn receive_packet(&mut self) -> Result<Option<NetworkPacket>, &'static str> {
+    fn receive_packet(&mut self) -> Result<Option<NetworkPacket>, KernelError> {
         if !*self.enabled.lock() {
             return Ok(None);
         }
@@ -254,13 +259,13 @@ impl Driver for EthernetDriver {
         device.class == DeviceClass::Network
     }
 
-    fn probe(&mut self, _device: &DeviceInfo) -> Result<(), &'static str> {
+    fn probe(&mut self, _device: &DeviceInfo) -> Result<(), KernelError> {
         crate::println!("[ETH] Probing device: {}", _device.name);
         // TODO(phase4): Validate device is Ethernet via PCI class/subclass
         Ok(())
     }
 
-    fn attach(&mut self, _device: &DeviceInfo) -> Result<(), &'static str> {
+    fn attach(&mut self, _device: &DeviceInfo) -> Result<(), KernelError> {
         crate::println!("[ETH] Attaching to device: {}", _device.name);
 
         // Initialize hardware
@@ -272,7 +277,7 @@ impl Driver for EthernetDriver {
         Ok(())
     }
 
-    fn detach(&mut self, _device: &DeviceInfo) -> Result<(), &'static str> {
+    fn detach(&mut self, _device: &DeviceInfo) -> Result<(), KernelError> {
         crate::println!("[ETH] Detaching from device: {}", _device.name);
 
         self.down()?;
@@ -281,15 +286,15 @@ impl Driver for EthernetDriver {
         Ok(())
     }
 
-    fn suspend(&mut self) -> Result<(), &'static str> {
+    fn suspend(&mut self) -> Result<(), KernelError> {
         self.down()
     }
 
-    fn resume(&mut self) -> Result<(), &'static str> {
+    fn resume(&mut self) -> Result<(), KernelError> {
         self.up()
     }
 
-    fn handle_interrupt(&mut self, _irq: u8) -> Result<(), &'static str> {
+    fn handle_interrupt(&mut self, _irq: u8) -> Result<(), KernelError> {
         crate::println!("[ETH] Handling interrupt {} for {}", _irq, self.name);
 
         // TODO(phase4): Handle hardware interrupts (status check, RX/TX completion,
@@ -298,7 +303,7 @@ impl Driver for EthernetDriver {
         Ok(())
     }
 
-    fn read(&mut self, _offset: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
+    fn read(&mut self, _offset: u64, buffer: &mut [u8]) -> Result<usize, KernelError> {
         // For network devices, reading could return received packets
         if let Some(packet) = self.receive_packet()? {
             let copy_len = buffer.len().min(packet.data.len());
@@ -309,14 +314,14 @@ impl Driver for EthernetDriver {
         }
     }
 
-    fn write(&mut self, _offset: u64, data: &[u8]) -> Result<usize, &'static str> {
+    fn write(&mut self, _offset: u64, data: &[u8]) -> Result<usize, KernelError> {
         // For network devices, writing sends packets
         let packet = NetworkPacket::new(data.to_vec());
         self.send_packet(packet)?;
         Ok(data.len())
     }
 
-    fn ioctl(&mut self, cmd: u32, _arg: u64) -> Result<u64, &'static str> {
+    fn ioctl(&mut self, cmd: u32, _arg: u64) -> Result<u64, KernelError> {
         match cmd {
             0x1000 => {
                 // Get interface status
@@ -331,7 +336,10 @@ impl Driver for EthernetDriver {
                 self.reset_stats();
                 Ok(0)
             }
-            _ => Err("Unknown ioctl command"),
+            _ => Err(KernelError::InvalidArgument {
+                name: "ioctl_cmd",
+                value: "unknown",
+            }),
         }
     }
 }
@@ -376,28 +384,31 @@ impl NetworkDevice for LoopbackDriver {
         self.config.lock().clone()
     }
 
-    fn set_config(&mut self, config: InterfaceConfig) -> Result<(), &'static str> {
+    fn set_config(&mut self, config: InterfaceConfig) -> Result<(), KernelError> {
         *self.config.lock() = config;
         Ok(())
     }
 
-    fn up(&mut self) -> Result<(), &'static str> {
+    fn up(&mut self) -> Result<(), KernelError> {
         self.config.lock().state = InterfaceState::Up;
         *self.enabled.lock() = true;
         crate::println!("[LOOP] Loopback interface is up");
         Ok(())
     }
 
-    fn down(&mut self) -> Result<(), &'static str> {
+    fn down(&mut self) -> Result<(), KernelError> {
         self.config.lock().state = InterfaceState::Down;
         *self.enabled.lock() = false;
         crate::println!("[LOOP] Loopback interface is down");
         Ok(())
     }
 
-    fn send_packet(&mut self, packet: NetworkPacket) -> Result<(), &'static str> {
+    fn send_packet(&mut self, packet: NetworkPacket) -> Result<(), KernelError> {
         if !*self.enabled.lock() {
-            return Err("Interface is down");
+            return Err(KernelError::InvalidState {
+                expected: "up",
+                actual: "down",
+            });
         }
 
         // Loopback immediately "receives" what it sends
@@ -411,7 +422,7 @@ impl NetworkDevice for LoopbackDriver {
         Ok(())
     }
 
-    fn receive_packet(&mut self) -> Result<Option<NetworkPacket>, &'static str> {
+    fn receive_packet(&mut self) -> Result<Option<NetworkPacket>, KernelError> {
         // Loopback doesn't queue packets
         Ok(None)
     }
@@ -446,41 +457,49 @@ impl Driver for LoopbackDriver {
         false // Loopback doesn't attach to hardware
     }
 
-    fn probe(&mut self, _device: &DeviceInfo) -> Result<(), &'static str> {
-        Err("Loopback doesn't probe hardware")
+    fn probe(&mut self, _device: &DeviceInfo) -> Result<(), KernelError> {
+        Err(KernelError::OperationNotSupported {
+            operation: "probe on loopback",
+        })
     }
 
-    fn attach(&mut self, _device: &DeviceInfo) -> Result<(), &'static str> {
-        Err("Loopback doesn't attach to hardware")
+    fn attach(&mut self, _device: &DeviceInfo) -> Result<(), KernelError> {
+        Err(KernelError::OperationNotSupported {
+            operation: "attach on loopback",
+        })
     }
 
-    fn detach(&mut self, _device: &DeviceInfo) -> Result<(), &'static str> {
-        Err("Loopback doesn't detach from hardware")
+    fn detach(&mut self, _device: &DeviceInfo) -> Result<(), KernelError> {
+        Err(KernelError::OperationNotSupported {
+            operation: "detach on loopback",
+        })
     }
 
-    fn suspend(&mut self) -> Result<(), &'static str> {
+    fn suspend(&mut self) -> Result<(), KernelError> {
         self.down()
     }
 
-    fn resume(&mut self) -> Result<(), &'static str> {
+    fn resume(&mut self) -> Result<(), KernelError> {
         self.up()
     }
 
-    fn handle_interrupt(&mut self, _irq: u8) -> Result<(), &'static str> {
-        Err("Loopback doesn't handle interrupts")
+    fn handle_interrupt(&mut self, _irq: u8) -> Result<(), KernelError> {
+        Err(KernelError::OperationNotSupported {
+            operation: "interrupt on loopback",
+        })
     }
 
-    fn read(&mut self, _offset: u64, _buffer: &mut [u8]) -> Result<usize, &'static str> {
+    fn read(&mut self, _offset: u64, _buffer: &mut [u8]) -> Result<usize, KernelError> {
         Ok(0) // No data to read from loopback
     }
 
-    fn write(&mut self, _offset: u64, data: &[u8]) -> Result<usize, &'static str> {
+    fn write(&mut self, _offset: u64, data: &[u8]) -> Result<usize, KernelError> {
         let packet = NetworkPacket::new(data.to_vec());
         self.send_packet(packet)?;
         Ok(data.len())
     }
 
-    fn ioctl(&mut self, cmd: u32, _arg: u64) -> Result<u64, &'static str> {
+    fn ioctl(&mut self, cmd: u32, _arg: u64) -> Result<u64, KernelError> {
         match cmd {
             0x1000 => Ok(if self.link_up() { 1 } else { 0 }),
             0x1001 => Ok(self.link_speed() as u64),
@@ -488,7 +507,10 @@ impl Driver for LoopbackDriver {
                 self.reset_stats();
                 Ok(0)
             }
-            _ => Err("Unknown ioctl command"),
+            _ => Err(KernelError::InvalidArgument {
+                name: "ioctl_cmd",
+                value: "unknown",
+            }),
         }
     }
 }
@@ -518,9 +540,12 @@ impl NetworkManager {
         &self,
         name: String,
         device: Arc<Mutex<dyn NetworkDevice>>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), KernelError> {
         if self.interfaces.read().contains_key(&name) {
-            return Err("Interface already exists");
+            return Err(KernelError::AlreadyExists {
+                resource: "network interface",
+                id: 0,
+            });
         }
 
         self.interfaces.write().insert(name.clone(), device);
@@ -529,12 +554,15 @@ impl NetworkManager {
     }
 
     /// Unregister a network interface
-    pub fn unregister_interface(&self, name: &str) -> Result<(), &'static str> {
+    pub fn unregister_interface(&self, name: &str) -> Result<(), KernelError> {
         if self.interfaces.write().remove(name).is_some() {
             crate::println!("[NET] Unregistered interface: {}", name);
             Ok(())
         } else {
-            Err("Interface not found")
+            Err(KernelError::NotFound {
+                resource: "network interface",
+                id: 0,
+            })
         }
     }
 
@@ -576,25 +604,11 @@ impl NetworkManager {
 }
 
 /// Global network manager instance
-#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-static NETWORK_MANAGER: spin::Once<NetworkManager> = spin::Once::new();
-
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-static mut NETWORK_MANAGER_STATIC: Option<NetworkManager> = None;
+static NETWORK_MANAGER: OnceLock<NetworkManager> = OnceLock::new();
 
 /// Initialize network subsystem
 pub fn init() {
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-    {
-        NETWORK_MANAGER.call_once(NetworkManager::new);
-    }
-
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-    // SAFETY: NETWORK_MANAGER_STATIC is written once during single-threaded init.
-    // No concurrent access is possible at this point in kernel bootstrap.
-    unsafe {
-        NETWORK_MANAGER_STATIC = Some(NetworkManager::new());
-    }
+    let _ = NETWORK_MANAGER.set(NetworkManager::new());
 
     // Create and register loopback interface
     let loopback = Arc::new(Mutex::new(LoopbackDriver::new()));
@@ -642,34 +656,12 @@ pub fn init() {
 
 /// Check if network manager has been initialized
 pub fn is_network_initialized() -> bool {
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-    {
-        NETWORK_MANAGER.get().is_some()
-    }
-
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-    // SAFETY: Reading NETWORK_MANAGER_STATIC to check initialization. The value is
-    // set once during init() and only read thereafter.
-    unsafe {
-        NETWORK_MANAGER_STATIC.is_some()
-    }
+    NETWORK_MANAGER.get().is_some()
 }
 
 /// Get the global network manager
 pub fn get_network_manager() -> &'static NetworkManager {
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-    {
-        NETWORK_MANAGER
-            .get()
-            .expect("Network manager not initialized")
-    }
-
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-    // SAFETY: NETWORK_MANAGER_STATIC is set once during init() and never modified after.
-    // The returned reference is 'static because the static lives for the program duration.
-    unsafe {
-        NETWORK_MANAGER_STATIC
-            .as_ref()
-            .expect("Network manager not initialized")
-    }
+    NETWORK_MANAGER
+        .get()
+        .expect("Network manager not initialized")
 }

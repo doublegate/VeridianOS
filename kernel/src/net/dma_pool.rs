@@ -5,10 +5,12 @@
 //! overhead.
 
 // Allow dead code for DMA pool fields pending driver integration
-#![allow(dead_code, static_mut_refs)]
+#![allow(dead_code)]
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
+
+use spin::Mutex;
 
 use crate::{error::KernelError, mm::PhysicalAddress};
 
@@ -222,40 +224,31 @@ pub struct DmaPoolStats {
 }
 
 /// Global DMA buffer pool for network operations
-static mut NETWORK_DMA_POOL: Option<DmaBufferPool> = None;
+static NETWORK_DMA_POOL: Mutex<Option<DmaBufferPool>> = Mutex::new(None);
 
 /// Initialize the global network DMA pool
 pub fn init_network_pool(num_buffers: usize) -> Result<(), KernelError> {
-    // SAFETY: NETWORK_DMA_POOL is a static mut Option written once during
-    // single-threaded kernel init. The is_some() check prevents double
-    // initialization. No concurrent access is possible at this point in kernel
-    // bootstrap.
-    unsafe {
-        if NETWORK_DMA_POOL.is_some() {
-            // Already initialized - this is fine, just skip re-initialization
-            println!("[DMA-POOL] Network DMA pool already initialized, skipping...");
-            return Ok(());
-        }
-
-        let pool = DmaBufferPool::new(num_buffers)?;
-        NETWORK_DMA_POOL = Some(pool);
-
-        println!("[DMA-POOL] Global network DMA pool initialized");
-        Ok(())
+    let mut pool_lock = NETWORK_DMA_POOL.lock();
+    if pool_lock.is_some() {
+        // Already initialized - this is fine, just skip re-initialization
+        println!("[DMA-POOL] Network DMA pool already initialized, skipping...");
+        return Ok(());
     }
+
+    let pool = DmaBufferPool::new(num_buffers)?;
+    *pool_lock = Some(pool);
+
+    println!("[DMA-POOL] Global network DMA pool initialized");
+    Ok(())
 }
 
-/// Get the global network DMA pool
-pub fn get_network_pool() -> Result<&'static mut DmaBufferPool, KernelError> {
-    // SAFETY: NETWORK_DMA_POOL is set during init_network_pool(). The returned
-    // mutable reference has 'static lifetime because the static mut is never
-    // moved or dropped. Caller must ensure no concurrent mutable access.
-    unsafe {
-        NETWORK_DMA_POOL.as_mut().ok_or(KernelError::InvalidState {
-            expected: "initialized",
-            actual: "uninitialized",
-        })
-    }
+/// Execute a closure with the global network DMA pool (mutable access)
+pub fn with_network_pool<R, F: FnOnce(&mut DmaBufferPool) -> R>(f: F) -> Result<R, KernelError> {
+    let mut pool_lock = NETWORK_DMA_POOL.lock();
+    pool_lock.as_mut().map(f).ok_or(KernelError::InvalidState {
+        expected: "initialized",
+        actual: "uninitialized",
+    })
 }
 
 #[cfg(test)]

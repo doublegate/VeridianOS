@@ -10,6 +10,7 @@ use spin::RwLock;
 #[cfg(target_arch = "aarch64")]
 use super::bare_lock::RwLock;
 use super::{DirEntry, Filesystem, Metadata, NodeType, Permissions, VfsNode};
+use crate::error::{FsError, KernelError};
 
 /// Device node
 struct DevNode {
@@ -48,7 +49,7 @@ impl VfsNode for DevNode {
         self.node_type
     }
 
-    fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, &'static str> {
+    fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
         // Special handling for common devices
         match self.name.as_str() {
             "null" => {
@@ -69,12 +70,14 @@ impl VfsNode for DevNode {
             }
             _ => {
                 // TODO(phase4): Dispatch read to actual device driver via driver registry
-                Err("Device not implemented")
+                Err(KernelError::OperationNotSupported {
+                    operation: "read on unimplemented device",
+                })
             }
         }
     }
 
-    fn write(&self, _offset: usize, data: &[u8]) -> Result<usize, &'static str> {
+    fn write(&self, _offset: usize, data: &[u8]) -> Result<usize, KernelError> {
         match self.name.as_str() {
             "null" => {
                 // /dev/null discards all data
@@ -89,12 +92,14 @@ impl VfsNode for DevNode {
             }
             _ => {
                 // TODO(phase4): Dispatch write to actual device driver via driver registry
-                Err("Device not implemented")
+                Err(KernelError::OperationNotSupported {
+                    operation: "write on unimplemented device",
+                })
             }
         }
     }
 
-    fn metadata(&self) -> Result<Metadata, &'static str> {
+    fn metadata(&self) -> Result<Metadata, KernelError> {
         Ok(Metadata {
             node_type: self.node_type,
             size: 0,
@@ -107,36 +112,44 @@ impl VfsNode for DevNode {
         })
     }
 
-    fn readdir(&self) -> Result<Vec<DirEntry>, &'static str> {
-        Err("Not a directory")
+    fn readdir(&self) -> Result<Vec<DirEntry>, KernelError> {
+        Err(KernelError::FsError(FsError::NotADirectory))
     }
 
-    fn lookup(&self, _name: &str) -> Result<Arc<dyn VfsNode>, &'static str> {
-        Err("Not a directory")
+    fn lookup(&self, _name: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(FsError::NotADirectory))
     }
 
     fn create(
         &self,
         _name: &str,
         _permissions: Permissions,
-    ) -> Result<Arc<dyn VfsNode>, &'static str> {
-        Err("Cannot create files in device")
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::OperationNotSupported {
+            operation: "create in device node",
+        })
     }
 
     fn mkdir(
         &self,
         _name: &str,
         _permissions: Permissions,
-    ) -> Result<Arc<dyn VfsNode>, &'static str> {
-        Err("Cannot create directories in device")
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::OperationNotSupported {
+            operation: "mkdir in device node",
+        })
     }
 
-    fn unlink(&self, _name: &str) -> Result<(), &'static str> {
-        Err("Cannot unlink device")
+    fn unlink(&self, _name: &str) -> Result<(), KernelError> {
+        Err(KernelError::OperationNotSupported {
+            operation: "unlink device node",
+        })
     }
 
-    fn truncate(&self, _size: usize) -> Result<(), &'static str> {
-        Err("Cannot truncate device")
+    fn truncate(&self, _size: usize) -> Result<(), KernelError> {
+        Err(KernelError::OperationNotSupported {
+            operation: "truncate device node",
+        })
     }
 }
 
@@ -191,15 +204,15 @@ impl VfsNode for DevRoot {
         NodeType::Directory
     }
 
-    fn read(&self, _offset: usize, _buffer: &mut [u8]) -> Result<usize, &'static str> {
-        Err("Cannot read directory")
+    fn read(&self, _offset: usize, _buffer: &mut [u8]) -> Result<usize, KernelError> {
+        Err(KernelError::FsError(FsError::IsADirectory))
     }
 
-    fn write(&self, _offset: usize, _data: &[u8]) -> Result<usize, &'static str> {
-        Err("Cannot write to directory")
+    fn write(&self, _offset: usize, _data: &[u8]) -> Result<usize, KernelError> {
+        Err(KernelError::FsError(FsError::IsADirectory))
     }
 
-    fn metadata(&self) -> Result<Metadata, &'static str> {
+    fn metadata(&self) -> Result<Metadata, KernelError> {
         Ok(Metadata {
             node_type: NodeType::Directory,
             size: 0,
@@ -212,7 +225,7 @@ impl VfsNode for DevRoot {
         })
     }
 
-    fn readdir(&self) -> Result<Vec<DirEntry>, &'static str> {
+    fn readdir(&self) -> Result<Vec<DirEntry>, KernelError> {
         let devices = self.devices.read();
         let mut entries = Vec::new();
 
@@ -239,36 +252,42 @@ impl VfsNode for DevRoot {
         Ok(entries)
     }
 
-    fn lookup(&self, name: &str) -> Result<Arc<dyn VfsNode>, &'static str> {
+    fn lookup(&self, name: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
         let devices = self.devices.read();
         devices
             .get(name)
             .map(|node| node.clone() as Arc<dyn VfsNode>)
-            .ok_or("Device not found")
+            .ok_or(KernelError::FsError(FsError::NotFound))
     }
 
     fn create(
         &self,
         _name: &str,
         _permissions: Permissions,
-    ) -> Result<Arc<dyn VfsNode>, &'static str> {
-        Err("Cannot create files in /dev")
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::OperationNotSupported {
+            operation: "create in /dev",
+        })
     }
 
     fn mkdir(
         &self,
         _name: &str,
         _permissions: Permissions,
-    ) -> Result<Arc<dyn VfsNode>, &'static str> {
-        Err("Cannot create directories in /dev")
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::OperationNotSupported {
+            operation: "mkdir in /dev",
+        })
     }
 
-    fn unlink(&self, _name: &str) -> Result<(), &'static str> {
-        Err("Cannot unlink from /dev")
+    fn unlink(&self, _name: &str) -> Result<(), KernelError> {
+        Err(KernelError::OperationNotSupported {
+            operation: "unlink in /dev",
+        })
     }
 
-    fn truncate(&self, _size: usize) -> Result<(), &'static str> {
-        Err("Cannot truncate directory")
+    fn truncate(&self, _size: usize) -> Result<(), KernelError> {
+        Err(KernelError::FsError(FsError::IsADirectory))
     }
 }
 
@@ -304,7 +323,7 @@ impl Filesystem for DevFs {
         false
     }
 
-    fn sync(&self) -> Result<(), &'static str> {
+    fn sync(&self) -> Result<(), KernelError> {
         Ok(())
     }
 }

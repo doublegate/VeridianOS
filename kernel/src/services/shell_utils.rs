@@ -7,6 +7,7 @@
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
 use super::shell::{BuiltinCommand, CommandResult, Shell};
+use crate::error::KernelError;
 
 /// Find command - search for files
 pub struct FindCommand;
@@ -257,7 +258,7 @@ impl BuiltinCommand for UniqCommand {
 
 // Helper functions
 
-fn find_files(start_path: &str, pattern: Option<&String>) -> Result<Vec<String>, &'static str> {
+fn find_files(start_path: &str, pattern: Option<&String>) -> Result<Vec<String>, KernelError> {
     let mut results = Vec::new();
 
     // Recursively search directory tree
@@ -265,7 +266,7 @@ fn find_files(start_path: &str, pattern: Option<&String>) -> Result<Vec<String>,
         path: &str,
         pattern: Option<&String>,
         results: &mut Vec<String>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), KernelError> {
         let vfs = crate::fs::get_vfs().read();
         let node = vfs.resolve_path(path)?;
 
@@ -302,14 +303,18 @@ fn find_files(start_path: &str, pattern: Option<&String>) -> Result<Vec<String>,
     Ok(results)
 }
 
-fn grep_file(pattern: &str, file_path: &str) -> Result<Vec<String>, &'static str> {
+fn grep_file(pattern: &str, file_path: &str) -> Result<Vec<String>, KernelError> {
     let vfs = crate::fs::get_vfs().read();
     let node = vfs.resolve_path(file_path)?;
 
     let mut buffer = [0u8; 4096];
     let bytes_read = node.read(0, &mut buffer)?;
 
-    let content = core::str::from_utf8(&buffer[..bytes_read]).map_err(|_| "Invalid UTF-8")?;
+    let content =
+        core::str::from_utf8(&buffer[..bytes_read]).map_err(|_| KernelError::InvalidArgument {
+            name: "file content",
+            value: "invalid UTF-8",
+        })?;
 
     let mut matches = Vec::new();
     for line in content.lines() {
@@ -321,14 +326,18 @@ fn grep_file(pattern: &str, file_path: &str) -> Result<Vec<String>, &'static str
     Ok(matches)
 }
 
-fn count_file(file_path: &str) -> Result<(usize, usize, usize), &'static str> {
+fn count_file(file_path: &str) -> Result<(usize, usize, usize), KernelError> {
     let vfs = crate::fs::get_vfs().read();
     let node = vfs.resolve_path(file_path)?;
 
     let mut buffer = [0u8; 4096];
     let bytes_read = node.read(0, &mut buffer)?;
 
-    let content = core::str::from_utf8(&buffer[..bytes_read]).map_err(|_| "Invalid UTF-8")?;
+    let content =
+        core::str::from_utf8(&buffer[..bytes_read]).map_err(|_| KernelError::InvalidArgument {
+            name: "file content",
+            value: "invalid UTF-8",
+        })?;
 
     let lines = content.lines().count();
     let words = content.split_whitespace().count();
@@ -337,28 +346,36 @@ fn count_file(file_path: &str) -> Result<(usize, usize, usize), &'static str> {
     Ok((lines, words, chars))
 }
 
-fn head_file(file_path: &str, num_lines: usize) -> Result<Vec<String>, &'static str> {
+fn head_file(file_path: &str, num_lines: usize) -> Result<Vec<String>, KernelError> {
     let vfs = crate::fs::get_vfs().read();
     let node = vfs.resolve_path(file_path)?;
 
     let mut buffer = [0u8; 4096];
     let bytes_read = node.read(0, &mut buffer)?;
 
-    let content = core::str::from_utf8(&buffer[..bytes_read]).map_err(|_| "Invalid UTF-8")?;
+    let content =
+        core::str::from_utf8(&buffer[..bytes_read]).map_err(|_| KernelError::InvalidArgument {
+            name: "file content",
+            value: "invalid UTF-8",
+        })?;
 
     let lines: Vec<String> = content.lines().take(num_lines).map(String::from).collect();
 
     Ok(lines)
 }
 
-fn tail_file(file_path: &str, num_lines: usize) -> Result<Vec<String>, &'static str> {
+fn tail_file(file_path: &str, num_lines: usize) -> Result<Vec<String>, KernelError> {
     let vfs = crate::fs::get_vfs().read();
     let node = vfs.resolve_path(file_path)?;
 
     let mut buffer = [0u8; 4096];
     let bytes_read = node.read(0, &mut buffer)?;
 
-    let content = core::str::from_utf8(&buffer[..bytes_read]).map_err(|_| "Invalid UTF-8")?;
+    let content =
+        core::str::from_utf8(&buffer[..bytes_read]).map_err(|_| KernelError::InvalidArgument {
+            name: "file content",
+            value: "invalid UTF-8",
+        })?;
 
     let all_lines: Vec<String> = content.lines().map(String::from).collect();
     let start = if all_lines.len() > num_lines {
@@ -370,7 +387,7 @@ fn tail_file(file_path: &str, num_lines: usize) -> Result<Vec<String>, &'static 
     Ok(all_lines[start..].to_vec())
 }
 
-fn diff_files(file1: &str, file2: &str) -> Result<Vec<String>, &'static str> {
+fn diff_files(file1: &str, file2: &str) -> Result<Vec<String>, KernelError> {
     let vfs = crate::fs::get_vfs().read();
 
     let node1 = vfs.resolve_path(file1)?;
@@ -383,9 +400,15 @@ fn diff_files(file1: &str, file2: &str) -> Result<Vec<String>, &'static str> {
     let bytes2 = node2.read(0, &mut buffer2)?;
 
     let content1 =
-        core::str::from_utf8(&buffer1[..bytes1]).map_err(|_| "Invalid UTF-8 in file1")?;
+        core::str::from_utf8(&buffer1[..bytes1]).map_err(|_| KernelError::InvalidArgument {
+            name: "file1 content",
+            value: "invalid UTF-8",
+        })?;
     let content2 =
-        core::str::from_utf8(&buffer2[..bytes2]).map_err(|_| "Invalid UTF-8 in file2")?;
+        core::str::from_utf8(&buffer2[..bytes2]).map_err(|_| KernelError::InvalidArgument {
+            name: "file2 content",
+            value: "invalid UTF-8",
+        })?;
 
     let lines1: Vec<&str> = content1.lines().collect();
     let lines2: Vec<&str> = content2.lines().collect();
@@ -410,14 +433,18 @@ fn diff_files(file1: &str, file2: &str) -> Result<Vec<String>, &'static str> {
     Ok(differences)
 }
 
-fn sort_file(file_path: &str) -> Result<Vec<String>, &'static str> {
+fn sort_file(file_path: &str) -> Result<Vec<String>, KernelError> {
     let vfs = crate::fs::get_vfs().read();
     let node = vfs.resolve_path(file_path)?;
 
     let mut buffer = [0u8; 4096];
     let bytes_read = node.read(0, &mut buffer)?;
 
-    let content = core::str::from_utf8(&buffer[..bytes_read]).map_err(|_| "Invalid UTF-8")?;
+    let content =
+        core::str::from_utf8(&buffer[..bytes_read]).map_err(|_| KernelError::InvalidArgument {
+            name: "file content",
+            value: "invalid UTF-8",
+        })?;
 
     let mut lines: Vec<String> = content.lines().map(String::from).collect();
     lines.sort();
@@ -425,14 +452,18 @@ fn sort_file(file_path: &str) -> Result<Vec<String>, &'static str> {
     Ok(lines)
 }
 
-fn uniq_file(file_path: &str) -> Result<Vec<String>, &'static str> {
+fn uniq_file(file_path: &str) -> Result<Vec<String>, KernelError> {
     let vfs = crate::fs::get_vfs().read();
     let node = vfs.resolve_path(file_path)?;
 
     let mut buffer = [0u8; 4096];
     let bytes_read = node.read(0, &mut buffer)?;
 
-    let content = core::str::from_utf8(&buffer[..bytes_read]).map_err(|_| "Invalid UTF-8")?;
+    let content =
+        core::str::from_utf8(&buffer[..bytes_read]).map_err(|_| KernelError::InvalidArgument {
+            name: "file content",
+            value: "invalid UTF-8",
+        })?;
 
     let mut unique_lines = Vec::new();
     let mut last_line: Option<String> = None;

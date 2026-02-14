@@ -86,20 +86,15 @@ impl<T> OnceLock<T> {
         ) {
             Ok(_) => Ok(()),
             Err(_) => {
-                // Already initialized, clean up our allocation
+                // Already initialized, reclaim our allocation and return the value.
                 // SAFETY: `ptr` was obtained from `Box::into_raw()` on the line above,
                 // so it points to a valid, properly aligned, heap-allocated `T`. The
                 // compare_exchange failed, meaning no one else has taken ownership of
                 // this pointer, so we must reclaim it to avoid a memory leak.
-                let _ = unsafe { alloc::boxed::Box::from_raw(ptr) };
-                // SAFETY: `ptr` was just reclaimed by `Box::from_raw` above, which
-                // dropped the Box but the value was moved out. However, this read
-                // occurs after the Box was dropped, which is a use-after-free bug.
-                // NOTE: This is a known issue in this placeholder code -- in practice,
-                // the value should be extracted before dropping the Box, or the Err
-                // variant should return a different error type. The current code is
-                // unsound if T has non-trivial drop behavior.
-                Err(unsafe { core::ptr::read(ptr) })
+                // We dereference the Box to extract the owned value before the Box
+                // is dropped, avoiding a use-after-free.
+                let boxed = unsafe { alloc::boxed::Box::from_raw(ptr) };
+                Err(*boxed)
             }
         }
     }

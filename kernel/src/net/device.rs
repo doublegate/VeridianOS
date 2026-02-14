@@ -8,6 +8,8 @@
 
 use alloc::{boxed::Box, string::String, vec::Vec};
 
+use spin::Mutex;
+
 use super::{MacAddress, Packet};
 use crate::error::KernelError;
 
@@ -71,7 +73,7 @@ pub enum DeviceState {
 }
 
 /// Network device trait
-pub trait NetworkDevice {
+pub trait NetworkDevice: Send {
     /// Get device name
     fn name(&self) -> &str;
 
@@ -267,28 +269,22 @@ impl NetworkDevice for EthernetDevice {
     }
 }
 
-/// Device registry
-static mut DEVICES: Option<Vec<Box<dyn NetworkDevice>>> = None;
+/// Device registry protected by Mutex for safe concurrent access
+static DEVICES: Mutex<Option<Vec<Box<dyn NetworkDevice>>>> = Mutex::new(None);
 
 /// Initialize device subsystem
 pub fn init() -> Result<(), KernelError> {
     println!("[NETDEV] Initializing network device subsystem...");
 
-    // SAFETY: DEVICES is a static mut Option<Vec> written once during
-    // single-threaded kernel init. The loopback device is immediately
-    // registered in the same block. No concurrent access is possible at this
-    // point in kernel bootstrap.
-    unsafe {
-        DEVICES = Some(Vec::new());
+    let mut devices_lock = DEVICES.lock();
+    let mut device_list = Vec::new();
 
-        // Create and register loopback device
-        let mut lo = LoopbackDevice::new();
-        lo.set_state(DeviceState::Up)?;
+    // Create and register loopback device
+    let mut lo = LoopbackDevice::new();
+    lo.set_state(DeviceState::Up)?;
+    device_list.push(Box::new(lo) as Box<dyn NetworkDevice>);
 
-        if let Some(ref mut devices) = DEVICES {
-            devices.push(Box::new(lo));
-        }
-    }
+    *devices_lock = Some(device_list);
 
     println!("[NETDEV] Network device subsystem initialized");
     Ok(())
@@ -296,66 +292,52 @@ pub fn init() -> Result<(), KernelError> {
 
 /// Register a network device
 pub fn register_device(device: Box<dyn NetworkDevice>) -> Result<(), KernelError> {
-    // SAFETY: DEVICES is a static mut Vec initialized during init(). Registration
-    // occurs during single-threaded kernel init or controlled driver loading.
-    unsafe {
-        if let Some(ref mut devices) = DEVICES {
-            println!("[NETDEV] Registering device: {}", device.name());
-            devices.push(device);
-            Ok(())
-        } else {
-            Err(KernelError::InvalidState {
-                expected: "initialized",
-                actual: "not_initialized",
-            })
-        }
+    let mut devices_lock = DEVICES.lock();
+    if let Some(ref mut devices) = *devices_lock {
+        println!("[NETDEV] Registering device: {}", device.name());
+        devices.push(device);
+        Ok(())
+    } else {
+        Err(KernelError::InvalidState {
+            expected: "initialized",
+            actual: "not_initialized",
+        })
     }
 }
 
-/// Get device by name
-pub fn get_device(name: &str) -> Option<&'static dyn NetworkDevice> {
-    // SAFETY: DEVICES is set during init() and the returned reference has 'static
-    // lifetime because the static mut Vec is never moved or dropped. Read-only
-    // access.
-    unsafe {
-        if let Some(ref devices) = DEVICES {
-            devices
-                .iter()
-                .find(|d| d.name() == name)
-                .map(|d| d.as_ref() as &'static dyn NetworkDevice)
-        } else {
-            None
-        }
+/// Execute a closure with a device by name (immutable access)
+pub fn with_device<R, F: FnOnce(&dyn NetworkDevice) -> R>(name: &str, f: F) -> Option<R> {
+    let devices_lock = DEVICES.lock();
+    if let Some(ref devices) = *devices_lock {
+        devices
+            .iter()
+            .find(|d| d.name() == name)
+            .map(|d| f(d.as_ref()))
+    } else {
+        None
     }
 }
 
-/// Get mutable device by name
-pub fn get_device_mut(name: &str) -> Option<&'static mut dyn NetworkDevice> {
-    // SAFETY: DEVICES is set during init(). Mutable access assumes single-threaded
-    // operation or external synchronization by the caller. The returned mutable
-    // reference has 'static lifetime as the static Vec is never moved or dropped.
-    unsafe {
-        if let Some(ref mut devices) = DEVICES {
-            devices
-                .iter_mut()
-                .find(|d| d.name() == name)
-                .map(|d| d.as_mut() as &'static mut dyn NetworkDevice)
-        } else {
-            None
-        }
+/// Execute a closure with a device by name (mutable access)
+pub fn with_device_mut<R, F: FnOnce(&mut dyn NetworkDevice) -> R>(name: &str, f: F) -> Option<R> {
+    let mut devices_lock = DEVICES.lock();
+    if let Some(ref mut devices) = *devices_lock {
+        devices
+            .iter_mut()
+            .find(|d| d.name() == name)
+            .map(|d| f(d.as_mut()))
+    } else {
+        None
     }
 }
 
 /// List all device names
 pub fn list_devices() -> Vec<String> {
-    // SAFETY: DEVICES is set during init(). Read-only access to enumerate device
-    // names.
-    unsafe {
-        if let Some(ref devices) = DEVICES {
-            devices.iter().map(|d| String::from(d.name())).collect()
-        } else {
-            Vec::new()
-        }
+    let devices_lock = DEVICES.lock();
+    if let Some(ref devices) = *devices_lock {
+        devices.iter().map(|d| String::from(d.name())).collect()
+    } else {
+        Vec::new()
     }
 }
 

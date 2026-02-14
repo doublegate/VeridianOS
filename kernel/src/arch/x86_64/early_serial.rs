@@ -118,6 +118,14 @@ unsafe fn outb(port: u16, value: u8) {
 }
 
 /// Global early serial port instance
+///
+/// SAFETY JUSTIFICATION: This static mut is intentionally kept because:
+/// 1. Used for early boot debugging output before heap is available
+/// 2. Required by early_print!/early_println! macros via addr_of_mut!
+/// 3. Only accessed during single-threaded early boot (before SMP init)
+/// 4. Cannot use OnceLock/Mutex as those require heap allocation
+/// 5. After boot, output switches to the proper serial driver
+#[allow(static_mut_refs)]
 pub static mut EARLY_SERIAL: EarlySerial = EarlySerial::new();
 
 /// Initialize early serial output

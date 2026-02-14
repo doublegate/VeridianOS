@@ -19,12 +19,12 @@
 //! 4. **Interleaving**: Distribute memory across nodes for bandwidth-intensive
 //!    workloads
 
-#![allow(static_mut_refs)]
-
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use spin::RwLock;
+
+use crate::sync::once_lock::OnceLock;
 
 /// NUMA node identifier
 pub type NodeId = u32;
@@ -290,30 +290,21 @@ fn detect_cpu_count() -> u32 {
 }
 
 /// Global NUMA scheduler instance
-static mut NUMA_SCHEDULER: Option<NumaScheduler> = None;
+static NUMA_SCHEDULER: OnceLock<NumaScheduler> = OnceLock::new();
 
 /// Initialize NUMA-aware scheduling
 pub fn init() {
     let topology = NumaTopology::detect();
     let scheduler = NumaScheduler::new(topology);
 
-    // SAFETY: NUMA_SCHEDULER is a static mut that is initialized once during
-    // kernel boot via this init() function. No concurrent access occurs
-    // because this runs during single-threaded initialization. After init,
-    // only get_numa_scheduler() reads it (returning an immutable reference).
-    unsafe {
-        NUMA_SCHEDULER = Some(scheduler);
-    }
+    let _ = NUMA_SCHEDULER.set(scheduler);
 
     crate::println!("[NUMA] Initialized NUMA-aware scheduler");
 }
 
 /// Get global NUMA scheduler
 pub fn get_numa_scheduler() -> Option<&'static NumaScheduler> {
-    // SAFETY: NUMA_SCHEDULER is initialized once during init() and never
-    // modified afterward. Reading it is safe because the static lives for
-    // the kernel's lifetime and we only return an immutable reference.
-    unsafe { NUMA_SCHEDULER.as_ref() }
+    NUMA_SCHEDULER.get()
 }
 
 #[cfg(test)]

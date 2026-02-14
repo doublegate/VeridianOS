@@ -3,9 +3,9 @@
 //! Provides bitmap font rendering with support for multiple font sizes and
 //! styles.
 
-#![allow(static_mut_refs)]
-
 use alloc::{vec, vec::Vec};
+
+use spin::Mutex;
 
 use crate::error::KernelError;
 
@@ -298,42 +298,35 @@ impl Default for FontManager {
     }
 }
 
-/// Global font manager
-static mut FONT_MANAGER: Option<FontManager> = None;
+/// Global font manager protected by Mutex
+static FONT_MANAGER: Mutex<Option<FontManager>> = Mutex::new(None);
 
 /// Initialize the font system
 pub fn init() -> Result<(), KernelError> {
-    // SAFETY: FONT_MANAGER is a static mut Option written at most once during
-    // single-threaded kernel initialization. The is_some() guard prevents
-    // double initialization. No concurrent access occurs during boot.
-    unsafe {
-        if FONT_MANAGER.is_some() {
-            return Err(KernelError::InvalidState {
-                expected: "uninitialized",
-                actual: "initialized",
-            });
-        }
-
-        let manager = FontManager::new();
-        FONT_MANAGER = Some(manager);
-
-        println!("[FONT] Font rendering system initialized");
-        Ok(())
+    let mut lock = FONT_MANAGER.lock();
+    if lock.is_some() {
+        return Err(KernelError::InvalidState {
+            expected: "uninitialized",
+            actual: "initialized",
+        });
     }
+
+    *lock = Some(FontManager::new());
+
+    println!("[FONT] Font rendering system initialized");
+    Ok(())
 }
 
-/// Get the global font manager
-pub fn get_font_manager() -> Result<&'static mut FontManager, KernelError> {
-    // SAFETY: FONT_MANAGER is a static mut Option initialized once in init().
-    // The returned &'static mut reference is valid for the kernel's lifetime.
-    // In the current single-threaded kernel model, only one caller accesses
-    // this at a time.
-    unsafe {
-        FONT_MANAGER.as_mut().ok_or(KernelError::InvalidState {
+/// Execute a closure with the font manager (mutable access)
+pub fn with_font_manager<R, F: FnOnce(&mut FontManager) -> R>(f: F) -> Result<R, KernelError> {
+    FONT_MANAGER
+        .lock()
+        .as_mut()
+        .map(f)
+        .ok_or(KernelError::InvalidState {
             expected: "initialized",
             actual: "uninitialized",
         })
-    }
 }
 
 #[cfg(test)]

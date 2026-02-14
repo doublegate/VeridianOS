@@ -267,8 +267,8 @@ pub unsafe extern "C" fn context_switch(current: *mut X86_64Context, next: *cons
     );
 }
 
-/// Switch context using the ThreadContext interface
-#[allow(dead_code)]
+/// Switch context using the ThreadContext interface.
+/// Called from `crate::arch::context::switch_context()`.
 pub fn switch_context(from: &mut X86_64Context, to: &X86_64Context) {
     // SAFETY: Both `from` and `to` are valid references to X86_64Context
     // structs. context_switch is an assembly routine that saves the current
@@ -279,8 +279,7 @@ pub fn switch_context(from: &mut X86_64Context, to: &X86_64Context) {
     }
 }
 
-/// Save FPU state
-#[allow(dead_code)]
+/// Save FPU state. Called from `crate::arch::context::save_fpu_state()`.
 pub fn save_fpu_state(state: &mut FpuState) {
     // SAFETY: `state` is a valid mutable reference to a FpuState struct.
     // The FXSAVE instruction stores the FPU/SSE state into the provided
@@ -290,8 +289,7 @@ pub fn save_fpu_state(state: &mut FpuState) {
     }
 }
 
-/// Restore FPU state
-#[allow(dead_code)]
+/// Restore FPU state. Called from `crate::arch::context::restore_fpu_state()`.
 pub fn restore_fpu_state(state: &FpuState) {
     // SAFETY: `state` is a valid reference to a FpuState struct containing
     // previously saved FPU/SSE state. The FXRSTOR instruction restores the
@@ -301,8 +299,8 @@ pub fn restore_fpu_state(state: &FpuState) {
     }
 }
 
-/// Initialize FPU for current CPU
-#[allow(dead_code)]
+/// Initialize FPU for current CPU. Called from
+/// `crate::arch::context::init_fpu()`.
 pub fn init_fpu() {
     // SAFETY: FPU initialization modifies CR0 and CR4 control registers to
     // enable floating point and SSE support. This must only be called once

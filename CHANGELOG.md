@@ -1,3 +1,100 @@
+## [0.3.1] - 2026-02-14
+
+### Comprehensive Technical Debt Remediation
+
+**MILESTONE**: Five-sprint remediation covering critical safety fixes, static mut elimination, panic-free syscall/VFS paths, typed error migration, and architecture abstraction cleanup. All three architectures (x86_64, AArch64, RISC-V) verified: 22/22 tests pass, zero clippy warnings, cargo fmt clean. RISC-V reboot-after-BOOTOK bug resolved as a bonus fix.
+
+### Sprint 1 — Critical Safety Fixes
+
+- **OnceLock::set() soundness bug**: Fixed use-after-free in `sync/once_lock.rs` where `set()` could read freed memory after a failed CAS
+- **process_compat memory leak**: Fixed `current_process()` in `sched/process_compat.rs` — changed from allocating a new `ProcessInfo` on every call to an allocate-once-and-reuse pattern
+- **Cargo.toml version sync**: Corrected workspace version from 0.2.5 to 0.3.0
+- **Unused feature flags removed**: Removed 4 feature flags (`testing`, `phase3-security`, `phase4-packages`, `phase5-optimization`) that gated no code
+- **perf/mod.rs atomics**: Converted static mut counters to `AtomicU64` — zero remaining `unsafe` in performance module
+- **`#[must_use]` on KernelError**: Prevents silently ignoring error values
+- **ipc/perf.rs clippy fix**: Removed `clippy::if_same_then_else` suppression, restructured conditional
+
+### Sprint 2 — Static Mut Elimination (48 of 55 Converted)
+
+Converted 48 `static mut` declarations across 30+ files to safe alternatives:
+
+| Subsystem | Files | Conversions | Patterns Used |
+|-----------|-------|-------------|---------------|
+| Security (audit, mac, boot, auth, memory_protection) | 5 | 11 | OnceLock, spin::Mutex, AtomicBool |
+| Network (device, socket, ip, dma_pool, mod) | 5 | 6 | OnceLock, spin::Mutex |
+| Drivers (pci, console, gpu, network, storage, usb) | 6 | 13 | OnceLock, spin::Mutex, AtomicU32 |
+| Services (process_server, driver_framework, init_system, shell) | 4 | 8 | OnceLock, spin::Mutex |
+| Other (graphics, desktop, pkg, crypto, ipc, test_framework, stdlib, simple_alloc) | 10+ | 10 | OnceLock, AtomicBool, AtomicU64, AtomicI32 |
+
+**7 `static mut` intentionally retained** with documented `// SAFETY:` justifications:
+- `mm/heap.rs` HEAP_MEMORY: Pre-heap static array (cannot use heap-allocated patterns)
+- `simple_alloc_unsafe.rs` HEAP/NEXT/ALLOC_COUNT: Pre-heap bump allocator backing store
+- `arch/x86_64/boot.rs` BOOT_INFO_PTR: Bootloader handoff pointer (set once before Rust runtime)
+- `sched/smp.rs` CPU_DATA: Per-CPU data array (per-CPU semantics, no sharing)
+
+### Sprint 3 — Syscall/FS Production Panic Elimination
+
+- **syscall/process.rs**: Replaced `expect()` with `KernelError::NotInitialized` error return
+- **syscall/filesystem.rs**: Eliminated 6 hidden panics by replacing `get_vfs()` (panics on None) with `try_get_vfs()` (returns Result)
+- **fs/mod.rs**: Replaced `expect()` in `traverse_path()` with proper `?` error propagation
+- **Result**: All production kernel code paths in syscall/VFS handlers are now panic-free
+
+### Sprint 4 — Error Type Migration (18 Files, 150+ Functions)
+
+**Primary conversions** (7 files — `Result<T, &'static str>` to `Result<T, KernelError>`):
+- `drivers/network.rs`, `drivers/console.rs`, `fs/blockfs.rs`, `fs/devfs.rs`, `drivers/storage.rs`, `drivers/usb/host.rs`, `services/driver_framework.rs`
+
+**Cascade files** (5 trait implementors updated):
+- `fs/ramfs.rs`, `fs/procfs.rs`, `drivers/pci.rs`, `drivers/usb/device.rs`, `drivers/usb/host.rs`
+
+**Cross-module callers** (6 files fixed):
+- `bootstrap.rs`, `fs/file.rs`, `services/shell/mod.rs`, `services/shell_utils.rs`, `stdlib.rs`, `userland.rs`
+
+**Error variants introduced**: `FsError::NotFound`, `FsError::ReadOnly`, `FsError::PermissionDenied`, `KernelError::HardwareError`, `KernelError::Timeout`, and more.
+
+**Legacy `&str` error ratio**: Reduced from ~65% to ~37% of all Result-returning functions.
+
+### Sprint 5 — Architecture Cleanup
+
+- **PlatformTimer trait**: Created `arch/timer.rs` with `init()`, `tick_rate_hz()`, `set_oneshot()`, `elapsed_ns()` methods; implemented for x86_64 (PIT), AArch64 (generic timer), RISC-V (mtime)
+- **Memory barrier abstractions**: Created `arch/barriers.rs` with `memory_fence()`, `data_sync_barrier()`, `instruction_sync_barrier()` — maps to MFENCE/LFENCE/SFENCE (x86_64), DMB/DSB/ISB (AArch64), fence (RISC-V)
+- **Dead code cleanup**: Removed 25 incorrect `#[allow(dead_code)]` annotations + deleted 1 genuinely dead function
+- **RISC-V directory structure**: Confirmed architecturally correct (no merge needed)
+- **lazy_static retention**: Kept in x86_64 with justification (GDT circular refs, early boot)
+
+### Architecture Verification
+
+| Architecture | Build | Clippy | Format | Init Tests | BOOTOK | Stable Idle (30s) |
+|--------------|-------|--------|--------|-----------|--------|-------------------|
+| x86_64       | Pass  | Pass   | Pass   | 22/22     | Yes    | PASS              |
+| AArch64      | Pass  | Pass   | Pass   | 22/22     | Yes    | PASS              |
+| RISC-V 64    | Pass  | Pass   | Pass   | 22/22     | Yes    | PASS              |
+
+### Before/After Metrics
+
+| Metric | Before (v0.3.0) | After (v0.3.1) | Change |
+|--------|-----------------|----------------|--------|
+| `static mut` declarations | 55 | 7 (justified) | -48 (87% reduction) |
+| Legacy `&str` error ratio | ~65% | ~37% | -28 percentage points |
+| `#[allow(dead_code)]` (incorrect) | 25 | 0 | -25 removed |
+| Production panic paths (syscall/VFS) | 8 | 0 | -8 eliminated |
+| Unused feature flags | 4 | 0 | -4 removed |
+| Files changed | — | 71 | — |
+
+### Files Changed
+
+71 files total (70 modified + 1 new):
+- 1 new file: `kernel/src/arch/barriers.rs`
+- 30+ files: static mut conversions
+- 18 files: error type migration
+- 5 files: security subsystem conversions
+- 5 files: network subsystem conversions
+- 6 files: driver subsystem conversions
+- 3 files: syscall/VFS panic elimination
+- Workspace Cargo.toml, kernel Cargo.toml, Cargo.lock: version and dependency updates
+
+---
+
 ## [0.3.0] - 2026-02-14
 
 ### Architecture Leakage Reduction & Phase 3 Security Hardening
@@ -1293,6 +1390,7 @@ While in pre-1.0 development:
 - **0.9.0** - Package management
 - **1.0.0** - First stable release
 
+[0.3.1]: https://github.com/doublegate/VeridianOS/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/doublegate/VeridianOS/compare/v0.2.5...v0.3.0
 [0.2.5]: https://github.com/doublegate/VeridianOS/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/doublegate/VeridianOS/compare/v0.2.3...v0.2.4

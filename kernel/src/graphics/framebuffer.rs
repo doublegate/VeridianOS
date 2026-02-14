@@ -1,7 +1,9 @@
 //! Framebuffer implementation
 
 // Allow dead code for framebuffer fields not yet used in rendering
-#![allow(dead_code, static_mut_refs)]
+#![allow(dead_code)]
+
+use spin::Mutex;
 
 use super::{Color, GraphicsContext, Rect};
 use crate::error::KernelError;
@@ -14,6 +16,13 @@ pub struct Framebuffer {
     bpp: u8,
     buffer: Option<*mut u32>,
 }
+
+// SAFETY: Framebuffer contains a raw pointer to memory-mapped framebuffer
+// memory that is shared via the Mutex<Framebuffer> wrapper. The pointer is
+// only accessed while the Mutex is held, preventing data races. The
+// underlying memory-mapped region is valid for the kernel's lifetime.
+unsafe impl Send for Framebuffer {}
+unsafe impl Sync for Framebuffer {}
 
 impl Framebuffer {
     pub const fn new() -> Self {
@@ -100,29 +109,25 @@ impl GraphicsContext for Framebuffer {
     }
 }
 
-static mut FRAMEBUFFER: Framebuffer = Framebuffer::new();
+static FRAMEBUFFER: Mutex<Framebuffer> = Mutex::new(Framebuffer::new());
 
-/// Get framebuffer instance
-pub fn get() -> &'static mut Framebuffer {
-    // SAFETY: FRAMEBUFFER is a static mut initialized at compile time via
-    // Framebuffer::new() (a const fn). The returned &'static mut reference is
-    // valid for the kernel's lifetime. In the current single-threaded kernel
-    // model, only one caller accesses this at a time.
-    unsafe { &mut FRAMEBUFFER }
+/// Execute a closure with the framebuffer (mutable access)
+pub fn with_framebuffer<R, F: FnOnce(&mut Framebuffer) -> R>(f: F) -> R {
+    f(&mut FRAMEBUFFER.lock())
 }
 
 /// Initialize framebuffer
+#[cfg_attr(target_arch = "aarch64", allow(unused_variables))]
 pub fn init() -> Result<(), KernelError> {
     println!("[FB] Initializing framebuffer...");
 
     // TODO(phase6): Get framebuffer info from bootloader (VBE/GOP detection)
-    let _fb = get();
-    // _fb.configure(1024, 768, null_mut()); // Would need actual buffer
+    let fb = FRAMEBUFFER.lock();
 
     println!(
         "[FB] Framebuffer initialized ({}x{})",
-        _fb.width(),
-        _fb.height()
+        fb.width(),
+        fb.height()
     );
     Ok(())
 }

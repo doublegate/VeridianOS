@@ -519,45 +519,20 @@ pub struct ProcessServerStats {
     pub process_groups: usize,
 }
 
-/// Global process server instance using pointer pattern for all architectures
-/// This avoids static mut Option issues and provides consistent behavior
-static mut PROCESS_SERVER_PTR: *mut ProcessServer = core::ptr::null_mut();
+/// Global process server instance using OnceLock for safe initialization.
+static PROCESS_SERVER: crate::sync::once_lock::OnceLock<ProcessServer> =
+    crate::sync::once_lock::OnceLock::new();
 
 /// Initialize the process server
+#[allow(clippy::if_same_then_else)]
 pub fn init() {
     #[allow(unused_imports)]
     use crate::println;
 
-    // SAFETY: PROCESS_SERVER_PTR is a static mut pointer initialized
-    // to null. This block guards against double init, creates a
-    // ProcessServer via Box::leak for 'static lifetime, and stores
-    // the pointer with architecture-specific memory barriers. Called
-    // once during early boot before concurrent access.
-    unsafe {
-        if !PROCESS_SERVER_PTR.is_null() {
-            println!("[PROCESS_SERVER] WARNING: Already initialized! Skipping re-initialization.");
-            return;
-        }
-
-        println!("[PROCESS_SERVER] Creating ProcessServer...");
-        let server = ProcessServer::new();
-        let server_box = alloc::boxed::Box::new(server);
-        let ptr = alloc::boxed::Box::leak(server_box) as *mut ProcessServer;
-
-        // Memory barriers before assignment
-        #[cfg(target_arch = "aarch64")]
-        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
-        #[cfg(target_arch = "riscv64")]
-        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
-
-        PROCESS_SERVER_PTR = ptr;
-
-        // Memory barriers after assignment
-        #[cfg(target_arch = "aarch64")]
-        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
-        #[cfg(target_arch = "riscv64")]
-        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
-
+    println!("[PROCESS_SERVER] Creating ProcessServer...");
+    if PROCESS_SERVER.set(ProcessServer::new()).is_err() {
+        println!("[PROCESS_SERVER] WARNING: Already initialized! Skipping re-initialization.");
+    } else {
         println!("[PROCESS_SERVER] Process server initialized");
     }
 }
@@ -566,16 +541,7 @@ pub fn init() {
 ///
 /// Returns `None` if the process server has not been initialized via [`init`].
 pub fn try_get_process_server() -> Option<&'static ProcessServer> {
-    // SAFETY: PROCESS_SERVER_PTR was set during init() via Box::leak,
-    // producing a valid 'static pointer. Once set, it is never modified
-    // or freed.
-    unsafe {
-        if PROCESS_SERVER_PTR.is_null() {
-            None
-        } else {
-            Some(&*PROCESS_SERVER_PTR)
-        }
-    }
+    PROCESS_SERVER.get()
 }
 
 /// Get the global process server.
@@ -583,7 +549,7 @@ pub fn try_get_process_server() -> Option<&'static ProcessServer> {
 /// Panics if the process server has not been initialized via [`init`].
 /// Prefer [`try_get_process_server`] in contexts where a panic is unacceptable.
 pub fn get_process_server() -> &'static ProcessServer {
-    // Panic is intentional: accessing the process server before init() is a
-    // programming error indicating a broken boot sequence.
-    try_get_process_server().expect("Process server not initialized: init() was not called")
+    PROCESS_SERVER
+        .get()
+        .expect("Process server not initialized: init() was not called")
 }

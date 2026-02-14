@@ -19,6 +19,15 @@ use super::VirtualAddress;
 // Static heap storage - kept in BSS for layout stability across all
 // architectures. x86_64 uses this directly; AArch64/RISC-V use fixed physical
 // addresses instead to avoid BSS/heap overlap issues.
+//
+// SAFETY JUSTIFICATION: This static mut is intentionally kept because:
+// 1. It provides the raw backing memory for the kernel heap allocator
+// 2. It must exist before the heap is initialized (pre-heap bootstrap)
+// 3. Only accessed via addr_of_mut!() in init(), never through &mut references
+// 4. After init, all access goes through the allocator's own synchronization
+// 5. Cannot use OnceLock/GlobalState as those require heap allocation
+//    themselves
+#[allow(static_mut_refs)]
 static mut HEAP_MEMORY: [u8; 4 * 1024 * 1024] = [0; 4 * 1024 * 1024];
 
 /// Kernel heap size (16 MB initially)

@@ -10,6 +10,7 @@ use spin::RwLock;
 #[cfg(target_arch = "aarch64")]
 use super::bare_lock::RwLock;
 use super::{DirEntry, Filesystem, Metadata, NodeType, Permissions, VfsNode};
+use crate::error::{FsError, KernelError};
 
 /// RAM filesystem node
 struct RamNode {
@@ -76,9 +77,9 @@ impl VfsNode for RamNode {
         self.node_type
     }
 
-    fn read(&self, offset: usize, buffer: &mut [u8]) -> Result<usize, &'static str> {
+    fn read(&self, offset: usize, buffer: &mut [u8]) -> Result<usize, crate::error::KernelError> {
         if self.node_type != NodeType::File {
-            return Err("Not a file");
+            return Err(KernelError::FsError(FsError::NotAFile));
         }
 
         let data = self.data.read();
@@ -95,9 +96,9 @@ impl VfsNode for RamNode {
         Ok(bytes_to_read)
     }
 
-    fn write(&self, offset: usize, data: &[u8]) -> Result<usize, &'static str> {
+    fn write(&self, offset: usize, data: &[u8]) -> Result<usize, crate::error::KernelError> {
         if self.node_type != NodeType::File {
-            return Err("Not a file");
+            return Err(KernelError::FsError(FsError::NotAFile));
         }
 
         let mut file_data = self.data.write();
@@ -121,13 +122,13 @@ impl VfsNode for RamNode {
         Ok(data.len())
     }
 
-    fn metadata(&self) -> Result<Metadata, &'static str> {
+    fn metadata(&self) -> Result<Metadata, crate::error::KernelError> {
         Ok(self.metadata.read().clone())
     }
 
-    fn readdir(&self) -> Result<Vec<DirEntry>, &'static str> {
+    fn readdir(&self) -> Result<Vec<DirEntry>, crate::error::KernelError> {
         if self.node_type != NodeType::Directory {
-            return Err("Not a directory");
+            return Err(KernelError::FsError(FsError::NotADirectory));
         }
 
         let children = self.children.read();
@@ -158,31 +159,31 @@ impl VfsNode for RamNode {
         Ok(entries)
     }
 
-    fn lookup(&self, name: &str) -> Result<Arc<dyn VfsNode>, &'static str> {
+    fn lookup(&self, name: &str) -> Result<Arc<dyn VfsNode>, crate::error::KernelError> {
         if self.node_type != NodeType::Directory {
-            return Err("Not a directory");
+            return Err(KernelError::FsError(FsError::NotADirectory));
         }
 
         let children = self.children.read();
         children
             .get(name)
             .map(|node| node.clone() as Arc<dyn VfsNode>)
-            .ok_or("File not found")
+            .ok_or(KernelError::FsError(FsError::NotFound))
     }
 
     fn create(
         &self,
         name: &str,
         permissions: Permissions,
-    ) -> Result<Arc<dyn VfsNode>, &'static str> {
+    ) -> Result<Arc<dyn VfsNode>, crate::error::KernelError> {
         if self.node_type != NodeType::Directory {
-            return Err("Not a directory");
+            return Err(KernelError::FsError(FsError::NotADirectory));
         }
 
         let mut children = self.children.write();
 
         if children.contains_key(name) {
-            return Err("File already exists");
+            return Err(KernelError::FsError(FsError::AlreadyExists));
         }
 
         let inode = NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -196,15 +197,15 @@ impl VfsNode for RamNode {
         &self,
         name: &str,
         permissions: Permissions,
-    ) -> Result<Arc<dyn VfsNode>, &'static str> {
+    ) -> Result<Arc<dyn VfsNode>, crate::error::KernelError> {
         if self.node_type != NodeType::Directory {
-            return Err("Not a directory");
+            return Err(KernelError::FsError(FsError::NotADirectory));
         }
 
         let mut children = self.children.write();
 
         if children.contains_key(name) {
-            return Err("Directory already exists");
+            return Err(KernelError::FsError(FsError::AlreadyExists));
         }
 
         let inode = NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -214,9 +215,9 @@ impl VfsNode for RamNode {
         Ok(new_dir as Arc<dyn VfsNode>)
     }
 
-    fn unlink(&self, name: &str) -> Result<(), &'static str> {
+    fn unlink(&self, name: &str) -> Result<(), crate::error::KernelError> {
         if self.node_type != NodeType::Directory {
-            return Err("Not a directory");
+            return Err(KernelError::FsError(FsError::NotADirectory));
         }
 
         let mut children = self.children.write();
@@ -226,20 +227,20 @@ impl VfsNode for RamNode {
                 // Check if directory is empty
                 let dir_children = node.children.read();
                 if !dir_children.is_empty() {
-                    return Err("Directory not empty");
+                    return Err(KernelError::FsError(FsError::DirectoryNotEmpty));
                 }
             }
 
             children.remove(name);
             Ok(())
         } else {
-            Err("File not found")
+            Err(KernelError::FsError(FsError::NotFound))
         }
     }
 
-    fn truncate(&self, size: usize) -> Result<(), &'static str> {
+    fn truncate(&self, size: usize) -> Result<(), crate::error::KernelError> {
         if self.node_type != NodeType::File {
-            return Err("Not a file");
+            return Err(KernelError::FsError(FsError::NotAFile));
         }
 
         let mut data = self.data.write();
@@ -292,7 +293,7 @@ impl Filesystem for RamFs {
         false
     }
 
-    fn sync(&self) -> Result<(), &'static str> {
+    fn sync(&self) -> Result<(), crate::error::KernelError> {
         // RAM filesystem doesn't need syncing
         Ok(())
     }
@@ -350,7 +351,10 @@ mod tests {
         root.create("dup.txt", Permissions::default()).unwrap();
         let result = root.create("dup.txt", Permissions::default());
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "File already exists");
+        assert_eq!(
+            result.unwrap_err(),
+            KernelError::FsError(FsError::AlreadyExists)
+        );
     }
 
     #[test]
@@ -439,7 +443,7 @@ mod tests {
         let mut buf = vec![0u8; 10];
         let result = root.read(0, &mut buf);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Not a file");
+        assert_eq!(result.unwrap_err(), KernelError::FsError(FsError::NotAFile));
     }
 
     #[test]
@@ -449,7 +453,7 @@ mod tests {
 
         let result = root.write(0, b"data");
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Not a file");
+        assert_eq!(result.unwrap_err(), KernelError::FsError(FsError::NotAFile));
     }
 
     // --- File metadata tests ---
@@ -513,7 +517,7 @@ mod tests {
         let root = fs.root();
         let result = root.truncate(0);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Not a file");
+        assert_eq!(result.unwrap_err(), KernelError::FsError(FsError::NotAFile));
     }
 
     // --- Directory operations tests ---
@@ -536,7 +540,10 @@ mod tests {
         root.mkdir("dup", Permissions::default()).unwrap();
         let result = root.mkdir("dup", Permissions::default());
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Directory already exists");
+        assert_eq!(
+            result.unwrap_err(),
+            KernelError::FsError(FsError::AlreadyExists)
+        );
     }
 
     #[test]
@@ -547,7 +554,10 @@ mod tests {
 
         let result = file.mkdir("subdir", Permissions::default());
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Not a directory");
+        assert_eq!(
+            result.unwrap_err(),
+            KernelError::FsError(FsError::NotADirectory)
+        );
     }
 
     #[test]
@@ -569,7 +579,7 @@ mod tests {
 
         let result = root.lookup("missing");
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "File not found");
+        assert_eq!(result.unwrap_err(), KernelError::FsError(FsError::NotFound));
     }
 
     #[test]
@@ -580,7 +590,10 @@ mod tests {
 
         let result = file.lookup("anything");
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Not a directory");
+        assert_eq!(
+            result.unwrap_err(),
+            KernelError::FsError(FsError::NotADirectory)
+        );
     }
 
     #[test]
@@ -610,7 +623,10 @@ mod tests {
 
         let result = file.readdir();
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Not a directory");
+        assert_eq!(
+            result.unwrap_err(),
+            KernelError::FsError(FsError::NotADirectory)
+        );
     }
 
     // --- Unlink tests ---
@@ -648,7 +664,10 @@ mod tests {
 
         let result = root.unlink("notempty");
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Directory not empty");
+        assert_eq!(
+            result.unwrap_err(),
+            KernelError::FsError(FsError::DirectoryNotEmpty)
+        );
     }
 
     #[test]
@@ -658,7 +677,7 @@ mod tests {
 
         let result = root.unlink("phantom");
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "File not found");
+        assert_eq!(result.unwrap_err(), KernelError::FsError(FsError::NotFound));
     }
 
     #[test]
@@ -669,7 +688,10 @@ mod tests {
 
         let result = file.unlink("anything");
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Not a directory");
+        assert_eq!(
+            result.unwrap_err(),
+            KernelError::FsError(FsError::NotADirectory)
+        );
     }
 
     #[test]
@@ -680,6 +702,9 @@ mod tests {
 
         let result = file.create("sub", Permissions::default());
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Not a directory");
+        assert_eq!(
+            result.unwrap_err(),
+            KernelError::FsError(FsError::NotADirectory)
+        );
     }
 }

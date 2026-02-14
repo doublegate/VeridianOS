@@ -7,8 +7,6 @@
 //! - [`host`]: USB host controller trait and UHCI controller implementation
 //! - [`transfer`]: USB transfer types and UHCI transfer descriptors
 
-#![allow(static_mut_refs)]
-
 mod device;
 mod host;
 mod transfer;
@@ -24,28 +22,15 @@ pub use host::{UhciController, UsbHostController};
 use spin::Mutex;
 pub use transfer::{UhciQh, UhciTd, UsbTransfer};
 
-/// Global USB bus instance
-#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-static USB_BUS: spin::Once<Mutex<UsbBus>> = spin::Once::new();
+use crate::sync::once_lock::OnceLock;
 
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-static mut USB_BUS_STATIC: Option<Mutex<UsbBus>> = None;
+/// Global USB bus instance
+static USB_BUS: OnceLock<Mutex<UsbBus>> = OnceLock::new();
 
 /// Initialize USB subsystem
 pub fn init() {
     let usb_bus = UsbBus::new();
-
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-    {
-        USB_BUS.call_once(|| Mutex::new(usb_bus));
-    }
-
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-    // SAFETY: USB_BUS_STATIC is written once during single-threaded init. No concurrent
-    // access is possible at this point in kernel bootstrap.
-    unsafe {
-        USB_BUS_STATIC = Some(Mutex::new(usb_bus));
-    }
+    let _ = USB_BUS.set(Mutex::new(usb_bus));
 
     // Add UHCI controller (placeholder)
     let uhci = UhciController::new(0); // No actual hardware for now
@@ -68,15 +53,5 @@ pub fn init() {
 
 /// Get the global USB bus
 pub fn get_usb_bus() -> &'static Mutex<UsbBus> {
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-    {
-        USB_BUS.get().expect("USB bus not initialized")
-    }
-
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-    // SAFETY: USB_BUS_STATIC is set once during init() and never modified after.
-    // The returned reference is 'static because the static lives for the program duration.
-    unsafe {
-        USB_BUS_STATIC.as_ref().expect("USB bus not initialized")
-    }
+    USB_BUS.get().expect("USB bus not initialized")
 }

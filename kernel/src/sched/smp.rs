@@ -273,6 +273,15 @@ pub const MAX_CPUS: usize = 16;
 const MAX_LOAD_FACTOR: u32 = 10;
 
 /// Per-CPU data array
+///
+/// SAFETY JUSTIFICATION: This static mut is intentionally kept because:
+/// 1. Each CPU slot is written exactly once during init_cpu() (single-writer
+///    per index)
+/// 2. After initialization, slots are only read (immutable access)
+/// 3. Each CPU accesses its own slot via cpu_id (no cross-CPU aliasing)
+/// 4. Using a Mutex here would cause deadlocks in scheduler hot paths
+/// 5. This is a pre-heap, per-CPU data structure that cannot use OnceLock
+#[allow(static_mut_refs)]
 static mut PER_CPU_DATA: [Option<PerCpuData>; MAX_CPUS] = [const { None }; MAX_CPUS];
 
 /// CPU topology
@@ -320,12 +329,9 @@ fn wake_up_aps() {
 
 /// Initialize specific CPU
 pub fn init_cpu(cpu_id: u8) {
-    // SAFETY: PER_CPU_DATA is a static mut array accessed during CPU
-    // initialization. This function is called either during single-threaded
-    // BSP init or from the AP startup path where each CPU initializes only
-    // its own slot (indexed by cpu_id), so no concurrent write to the same
-    // index occurs. The cpu_id is bounds-checked by callers (cpu_up checks
-    // cpu_id < MAX_CPUS).
+    // SAFETY: Each CPU slot is written exactly once during initialization.
+    // cpu_id is bounds-checked by callers (cpu_up checks cpu_id < MAX_CPUS).
+    // No concurrent write to the same index occurs.
     unsafe {
         let cpu_info = CpuInfo::new(cpu_id);
 
@@ -364,8 +370,7 @@ pub fn this_cpu() -> &'static PerCpuData {
     let cpu_id = current_cpu_id();
     // SAFETY: PER_CPU_DATA is initialized during init_cpu() for each CPU
     // before any code calls this_cpu(). Each CPU reads only its own slot.
-    // The 'static lifetime is valid because PER_CPU_DATA is a static array
-    // that lives for the entire kernel execution.
+    // After init, the slot is never modified again.
     unsafe {
         PER_CPU_DATA[cpu_id as usize]
             .as_ref()
@@ -375,11 +380,9 @@ pub fn this_cpu() -> &'static PerCpuData {
 
 /// Get per-CPU data for specific CPU
 pub fn per_cpu(cpu_id: u8) -> Option<&'static PerCpuData> {
-    // SAFETY: PER_CPU_DATA is a static array. Reading an element is safe
-    // because writes only occur during CPU initialization (init_cpu) which
-    // writes to a different index than any concurrent reader. The returned
-    // reference is valid for 'static because the array lives for the kernel's
-    // lifetime.
+    // SAFETY: PER_CPU_DATA slots are written once during init_cpu() and
+    // only read thereafter. The returned reference is valid for 'static
+    // because the array lives for the kernel's lifetime.
     unsafe { PER_CPU_DATA[cpu_id as usize].as_ref() }
 }
 

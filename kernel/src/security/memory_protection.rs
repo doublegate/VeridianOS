@@ -2,13 +2,13 @@
 //!
 //! Implements ASLR, stack canaries, and other memory protection mechanisms.
 
-#![allow(static_mut_refs, clippy::not_unsafe_ptr_arg_deref)]
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use spin::RwLock;
 
-use crate::{crypto::random::get_random, error::KernelError};
+use crate::{crypto::random::get_random, error::KernelError, sync::once_lock::OnceLock};
 
 /// ASLR (Address Space Layout Randomization) manager
 pub struct Aslr {
@@ -263,16 +263,16 @@ impl Default for MemoryProtection {
 }
 
 /// Global memory protection instance
-static mut MEMORY_PROTECTION: Option<MemoryProtection> = None;
+static MEMORY_PROTECTION: OnceLock<MemoryProtection> = OnceLock::new();
 
 /// Initialize memory protection
 pub fn init() -> Result<(), KernelError> {
-    // SAFETY: MEMORY_PROTECTION is a static mut Option written once during
-    // single-threaded kernel init. No concurrent access is possible at this
-    // point in kernel bootstrap.
-    unsafe {
-        MEMORY_PROTECTION = Some(MemoryProtection::new()?);
-    }
+    MEMORY_PROTECTION
+        .set(MemoryProtection::new()?)
+        .map_err(|_| KernelError::AlreadyExists {
+            resource: "memory_protection",
+            id: 0,
+        })?;
 
     crate::println!("[MEMORY-PROTECTION] ASLR, stack canaries, and guard pages enabled");
     Ok(())
@@ -280,15 +280,9 @@ pub fn init() -> Result<(), KernelError> {
 
 /// Get global memory protection instance
 pub fn get_memory_protection() -> &'static MemoryProtection {
-    // SAFETY: MEMORY_PROTECTION is set once during init() and the returned
-    // reference has 'static lifetime because the static mut is never moved or
-    // dropped. The kernel is single-threaded during early access; later access
-    // is read-only.
-    unsafe {
-        MEMORY_PROTECTION
-            .as_ref()
-            .expect("Memory protection not initialized")
-    }
+    MEMORY_PROTECTION
+        .get()
+        .expect("Memory protection not initialized")
 }
 
 #[cfg(test)]

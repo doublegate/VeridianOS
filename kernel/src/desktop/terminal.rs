@@ -9,7 +9,7 @@ use spin::RwLock;
 
 use crate::{
     desktop::{
-        font::{get_font_manager, FontSize, FontStyle},
+        font::{with_font_manager, FontSize, FontStyle},
         window_manager::{with_window_manager, InputEvent, WindowId},
     },
     error::KernelError,
@@ -264,15 +264,6 @@ impl TerminalEmulator {
         fb_width: usize,
         fb_height: usize,
     ) -> Result<(), KernelError> {
-        // Get font
-        let font_manager = get_font_manager()?;
-        let font = font_manager
-            .get_font(FontSize::Medium, FontStyle::Regular)
-            .ok_or(KernelError::NotFound {
-                resource: "font",
-                id: 0,
-            })?;
-
         // Clear framebuffer to background color
         for pixel in framebuffer.iter_mut() {
             *pixel = 0; // Black background
@@ -293,14 +284,18 @@ impl TerminalEmulator {
 
                     // Use font rendering (simplified - would need proper glyph rendering)
                     let char_str = cell.character.to_string();
-                    let _ = font.render_text(
-                        &char_str,
-                        framebuffer,
-                        fb_width,
-                        fb_height,
-                        screen_x,
-                        screen_y,
-                    );
+                    let _ = with_font_manager(|fm| {
+                        if let Some(font) = fm.get_font(FontSize::Medium, FontStyle::Regular) {
+                            let _ = font.render_text(
+                                &char_str,
+                                framebuffer,
+                                fb_width,
+                                fb_height,
+                                screen_x,
+                                screen_y,
+                            );
+                        }
+                    });
                 }
             }
         }

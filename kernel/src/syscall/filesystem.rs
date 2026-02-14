@@ -7,9 +7,15 @@
 
 use super::{SyscallError, SyscallResult};
 use crate::{
-    fs::{get_vfs, OpenFlags, Permissions, SeekFrom},
+    fs::{try_get_vfs, OpenFlags, Permissions, SeekFrom},
     process,
 };
+
+/// Helper to get the VFS instance, returning a syscall error instead of
+/// panicking if the VFS subsystem has not been initialized yet.
+fn vfs() -> Result<&'static spin::RwLock<crate::fs::Vfs>, SyscallError> {
+    try_get_vfs().ok_or(SyscallError::InvalidState)
+}
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -64,7 +70,7 @@ pub fn sys_open(path: usize, flags: usize, _mode: usize) -> SyscallResult {
     let open_flags = OpenFlags::from_bits(flags as u32).ok_or(SyscallError::InvalidArgument)?;
 
     // Open the file through VFS
-    match get_vfs().read().open(path_str, open_flags) {
+    match vfs()?.read().open(path_str, open_flags) {
         Ok(node) => {
             // Create file
             let file = crate::fs::file::File::new(node, open_flags);
@@ -303,7 +309,7 @@ pub fn sys_mkdir(path: usize, mode: usize) -> SyscallResult {
 
     // Create directory through VFS
     let permissions = Permissions::from_mode(mode as u32);
-    match get_vfs().read().mkdir(path_str, permissions) {
+    match vfs()?.read().mkdir(path_str, permissions) {
         Ok(_) => Ok(0),
         Err(_) => Err(SyscallError::InvalidState),
     }
@@ -344,7 +350,7 @@ pub fn sys_rmdir(path: usize) -> SyscallResult {
     };
 
     // Remove directory through VFS
-    match get_vfs().read().unlink(path_str) {
+    match vfs()?.read().unlink(path_str) {
         Ok(_) => Ok(0),
         Err(_) => Err(SyscallError::InvalidState),
     }
@@ -442,7 +448,7 @@ pub fn sys_mount(
     };
 
     // Mount filesystem
-    match get_vfs()
+    match vfs()?
         .write()
         .mount_by_type(mount_path, fs_type_str, flags as u32)
     {
@@ -512,7 +518,7 @@ pub fn sys_unmount(mount_point: usize) -> SyscallResult {
     };
 
     // Unmount filesystem
-    match get_vfs().write().unmount(mount_path) {
+    match vfs()?.write().unmount(mount_path) {
         Ok(_) => Ok(0),
         Err(_) => Err(SyscallError::InvalidState),
     }
@@ -522,7 +528,7 @@ pub fn sys_unmount(mount_point: usize) -> SyscallResult {
 ///
 /// Flushes all pending writes to disk
 pub fn sys_sync() -> SyscallResult {
-    match get_vfs().read().sync() {
+    match vfs()?.read().sync() {
         Ok(_) => Ok(0),
         Err(_) => Err(SyscallError::InvalidState),
     }

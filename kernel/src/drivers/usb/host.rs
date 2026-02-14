@@ -12,6 +12,7 @@ use super::{
     transfer::{UhciQh, UhciTd, UsbTransfer},
     UsbSpeed,
 };
+use crate::error::KernelError;
 
 /// USB host controller trait
 pub trait UsbHostController: Send + Sync {
@@ -19,35 +20,35 @@ pub trait UsbHostController: Send + Sync {
     fn name(&self) -> &str;
 
     /// Initialize the controller
-    fn init(&mut self) -> Result<(), &'static str>;
+    fn init(&mut self) -> Result<(), KernelError>;
 
     /// Reset the controller
-    fn reset(&mut self) -> Result<(), &'static str>;
+    fn reset(&mut self) -> Result<(), KernelError>;
 
     /// Get number of ports
     fn get_port_count(&self) -> u8;
 
     /// Check port status
-    fn get_port_status(&self, port: u8) -> Result<UsbPortStatus, &'static str>;
+    fn get_port_status(&self, port: u8) -> Result<UsbPortStatus, KernelError>;
 
     /// Reset port
-    fn reset_port(&mut self, port: u8) -> Result<(), &'static str>;
+    fn reset_port(&mut self, port: u8) -> Result<(), KernelError>;
 
     /// Enable port
-    fn enable_port(&mut self, port: u8) -> Result<(), &'static str>;
+    fn enable_port(&mut self, port: u8) -> Result<(), KernelError>;
 
     /// Disable port
-    fn disable_port(&mut self, port: u8) -> Result<(), &'static str>;
+    fn disable_port(&mut self, port: u8) -> Result<(), KernelError>;
 
     /// Perform USB transfer
     fn transfer(
         &mut self,
         device_address: u8,
         transfer: UsbTransfer,
-    ) -> Result<Vec<u8>, &'static str>;
+    ) -> Result<Vec<u8>, KernelError>;
 
     /// Set device address
-    fn set_device_address(&mut self, old_address: u8, new_address: u8) -> Result<(), &'static str>;
+    fn set_device_address(&mut self, old_address: u8, new_address: u8) -> Result<(), KernelError>;
 }
 
 /// UHCI register offsets
@@ -214,11 +215,17 @@ impl UhciController {
     }
 
     /// Allocate controller data structures
-    fn allocate_structures(&mut self) -> Result<(), &'static str> {
+    fn allocate_structures(&mut self) -> Result<(), KernelError> {
         // Allocate frame list (1024 entries * 4 bytes = 4KB, must be 4KB aligned)
         let frame_list_pages =
-            crate::mm::allocate_pages(1, None).map_err(|_| "Failed to allocate frame list")?;
-        let frame_list_frame = frame_list_pages.first().ok_or("Empty allocation")?;
+            crate::mm::allocate_pages(1, None).map_err(|_| KernelError::OutOfMemory {
+                requested: 4096,
+                available: 0,
+            })?;
+        let frame_list_frame = frame_list_pages.first().ok_or(KernelError::OutOfMemory {
+            requested: 4096,
+            available: 0,
+        })?;
         self.frame_list_phys = frame_list_frame.as_addr().as_u64();
 
         // Clear frame list
@@ -233,8 +240,15 @@ impl UhciController {
         }
 
         // Allocate control QH
-        let qh_pages = crate::mm::allocate_pages(1, None).map_err(|_| "Failed to allocate QH")?;
-        let qh_frame = qh_pages.first().ok_or("Empty allocation")?;
+        let qh_pages =
+            crate::mm::allocate_pages(1, None).map_err(|_| KernelError::OutOfMemory {
+                requested: 4096,
+                available: 0,
+            })?;
+        let qh_frame = qh_pages.first().ok_or(KernelError::OutOfMemory {
+            requested: 4096,
+            available: 0,
+        })?;
         self.control_qh_phys = qh_frame.as_addr().as_u64();
 
         // Initialize control QH
@@ -259,8 +273,14 @@ impl UhciController {
 
         // Allocate TD buffer (4KB for multiple TDs)
         let td_pages =
-            crate::mm::allocate_pages(1, None).map_err(|_| "Failed to allocate TD buffer")?;
-        let td_frame = td_pages.first().ok_or("Empty allocation")?;
+            crate::mm::allocate_pages(1, None).map_err(|_| KernelError::OutOfMemory {
+                requested: 4096,
+                available: 0,
+            })?;
+        let td_frame = td_pages.first().ok_or(KernelError::OutOfMemory {
+            requested: 4096,
+            available: 0,
+        })?;
         self.td_buffer_phys = td_frame.as_addr().as_u64();
 
         // Clear TD buffer
@@ -272,15 +292,21 @@ impl UhciController {
 
         // Allocate data buffer for transfers
         let data_pages =
-            crate::mm::allocate_pages(1, None).map_err(|_| "Failed to allocate data buffer")?;
-        let data_frame = data_pages.first().ok_or("Empty allocation")?;
+            crate::mm::allocate_pages(1, None).map_err(|_| KernelError::OutOfMemory {
+                requested: 4096,
+                available: 0,
+            })?;
+        let data_frame = data_pages.first().ok_or(KernelError::OutOfMemory {
+            requested: 4096,
+            available: 0,
+        })?;
         self.data_buffer_phys = data_frame.as_addr().as_u64();
 
         Ok(())
     }
 
     /// Wait for transfer completion with timeout
-    fn wait_for_transfer(&self, td_ptr: *mut UhciTd, timeout_ms: u32) -> Result<(), &'static str> {
+    fn wait_for_transfer(&self, td_ptr: *mut UhciTd, timeout_ms: u32) -> Result<(), KernelError> {
         let mut elapsed = 0u32;
         let poll_interval = 1; // 1ms per poll
 
@@ -292,7 +318,10 @@ impl UhciController {
 
             if !td.is_active() {
                 if td.has_error() {
-                    return Err("Transfer error");
+                    return Err(KernelError::HardwareError {
+                        device: "uhci",
+                        code: 1,
+                    });
                 }
                 return Ok(());
             }
@@ -304,7 +333,10 @@ impl UhciController {
             elapsed += poll_interval;
         }
 
-        Err("Transfer timeout")
+        Err(KernelError::Timeout {
+            operation: "usb transfer",
+            duration_ms: timeout_ms as u64,
+        })
     }
 }
 
@@ -313,7 +345,7 @@ impl UsbHostController for UhciController {
         &self.name
     }
 
-    fn init(&mut self) -> Result<(), &'static str> {
+    fn init(&mut self) -> Result<(), KernelError> {
         crate::println!(
             "[USB] Initializing UHCI controller at 0x{:x}",
             self.base_address
@@ -375,7 +407,7 @@ impl UsbHostController for UhciController {
         Ok(())
     }
 
-    fn reset(&mut self) -> Result<(), &'static str> {
+    fn reset(&mut self) -> Result<(), KernelError> {
         if self.base_address == 0 {
             return Ok(());
         }
@@ -424,9 +456,12 @@ impl UsbHostController for UhciController {
         self.port_count
     }
 
-    fn get_port_status(&self, port: u8) -> Result<UsbPortStatus, &'static str> {
+    fn get_port_status(&self, port: u8) -> Result<UsbPortStatus, KernelError> {
         if port == 0 || port > self.port_count {
-            return Err("Invalid port number");
+            return Err(KernelError::InvalidArgument {
+                name: "port",
+                value: "out of range",
+            });
         }
 
         // Return empty status for software emulation mode
@@ -457,9 +492,12 @@ impl UsbHostController for UhciController {
         })
     }
 
-    fn reset_port(&mut self, port: u8) -> Result<(), &'static str> {
+    fn reset_port(&mut self, port: u8) -> Result<(), KernelError> {
         if port == 0 || port > self.port_count {
-            return Err("Invalid port number");
+            return Err(KernelError::InvalidArgument {
+                name: "port",
+                value: "out of range",
+            });
         }
 
         if self.base_address == 0 {
@@ -493,9 +531,12 @@ impl UsbHostController for UhciController {
         Ok(())
     }
 
-    fn enable_port(&mut self, port: u8) -> Result<(), &'static str> {
+    fn enable_port(&mut self, port: u8) -> Result<(), KernelError> {
         if port == 0 || port > self.port_count {
-            return Err("Invalid port number");
+            return Err(KernelError::InvalidArgument {
+                name: "port",
+                value: "out of range",
+            });
         }
 
         if self.base_address == 0 {
@@ -513,13 +554,19 @@ impl UsbHostController for UhciController {
             crate::println!("[USB] Port {} enabled", port);
             Ok(())
         } else {
-            Err("Failed to enable port")
+            Err(KernelError::HardwareError {
+                device: "uhci",
+                code: 2,
+            })
         }
     }
 
-    fn disable_port(&mut self, port: u8) -> Result<(), &'static str> {
+    fn disable_port(&mut self, port: u8) -> Result<(), KernelError> {
         if port == 0 || port > self.port_count {
-            return Err("Invalid port number");
+            return Err(KernelError::InvalidArgument {
+                name: "port",
+                value: "out of range",
+            });
         }
 
         if self.base_address == 0 {
@@ -539,7 +586,7 @@ impl UsbHostController for UhciController {
         &mut self,
         device_address: u8,
         transfer: UsbTransfer,
-    ) -> Result<Vec<u8>, &'static str> {
+    ) -> Result<Vec<u8>, KernelError> {
         // Software emulation mode - return simulated responses
         if self.base_address == 0 || !self.initialized {
             return match transfer {
@@ -704,7 +751,7 @@ impl UsbHostController for UhciController {
         }
     }
 
-    fn set_device_address(&mut self, old_address: u8, new_address: u8) -> Result<(), &'static str> {
+    fn set_device_address(&mut self, old_address: u8, new_address: u8) -> Result<(), KernelError> {
         // SET_ADDRESS is a control transfer
         let transfer = UsbTransfer::Setup {
             request_type: 0x00, // Host to device, standard, device

@@ -279,17 +279,19 @@ pub fn decrypt(
 
 /// Get random bytes from hardware RNG
 pub fn get_random_bytes(buffer: &mut [u8]) -> Result<(), KernelError> {
-    // TODO(phase3): Use hardware RNG (RDRAND on x86_64, RNDR on AArch64)
-    static mut SEED: u64 = 0x123456789ABCDEF0;
+    use core::sync::atomic::{AtomicU64, Ordering};
 
-    // SAFETY: SEED is a static mut u64 used as a pseudo-random state. Accessed
-    // during single-threaded kernel operation. The linear congruential generator
-    // updates SEED on each call to produce different byte sequences.
-    unsafe {
-        for byte in buffer.iter_mut() {
-            SEED = SEED.wrapping_mul(6364136223846793005).wrapping_add(1);
-            *byte = (SEED >> 56) as u8;
-        }
+    // TODO(phase3): Use hardware RNG (RDRAND on x86_64, RNDR on AArch64)
+    static SEED: AtomicU64 = AtomicU64::new(0x123456789ABCDEF0);
+
+    for byte in buffer.iter_mut() {
+        let current = SEED
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |s| {
+                Some(s.wrapping_mul(6364136223846793005).wrapping_add(1))
+            })
+            .unwrap_or(0);
+        let next = current.wrapping_mul(6364136223846793005).wrapping_add(1);
+        *byte = (next >> 56) as u8;
     }
 
     Ok(())

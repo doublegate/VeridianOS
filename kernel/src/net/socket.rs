@@ -7,6 +7,7 @@
 #![allow(clippy::manual_clamp)]
 
 use alloc::{collections::VecDeque, vec::Vec};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use spin::Mutex;
 
@@ -458,18 +459,15 @@ pub enum SocketOption {
 }
 
 /// Socket table for managing all sockets
-static mut SOCKET_TABLE: Option<Vec<Socket>> = None;
-static mut NEXT_SOCKET_ID: usize = 1;
+static SOCKET_TABLE: Mutex<Option<Vec<Socket>>> = Mutex::new(None);
+static NEXT_SOCKET_ID: AtomicUsize = AtomicUsize::new(1);
 
 /// Initialize socket subsystem
 pub fn init() -> Result<(), KernelError> {
     println!("[SOCKET] Initializing socket subsystem...");
 
-    // SAFETY: SOCKET_TABLE is a static mut Option<Vec> written once during
-    // single-threaded kernel init. No concurrent access at this point.
-    unsafe {
-        SOCKET_TABLE = Some(Vec::new());
-    }
+    let mut table = SOCKET_TABLE.lock();
+    *table = Some(Vec::new());
 
     println!("[SOCKET] Socket subsystem initialized");
     Ok(())
@@ -483,72 +481,58 @@ pub fn create_socket(
 ) -> Result<usize, KernelError> {
     let mut socket = Socket::new(domain, socket_type, protocol)?;
 
-    // SAFETY: NEXT_SOCKET_ID and SOCKET_TABLE are static mut globals accessed
-    // during socket creation. Single-threaded access assumed during kernel
-    // operation. NEXT_SOCKET_ID is monotonically incremented to provide unique
-    // socket IDs.
-    unsafe {
-        let id = NEXT_SOCKET_ID;
-        NEXT_SOCKET_ID += 1;
+    let id = NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed);
+    socket.id = id;
 
-        socket.id = id;
-
-        if let Some(ref mut table) = SOCKET_TABLE {
-            table.push(socket);
-            Ok(id)
-        } else {
-            Err(KernelError::InvalidState {
-                expected: "initialized",
-                actual: "not_initialized",
-            })
-        }
+    let mut table = SOCKET_TABLE.lock();
+    if let Some(ref mut sockets) = *table {
+        sockets.push(socket);
+        Ok(id)
+    } else {
+        Err(KernelError::InvalidState {
+            expected: "initialized",
+            actual: "not_initialized",
+        })
     }
 }
 
-/// Get socket by ID
-pub fn get_socket(id: usize) -> Result<&'static Socket, KernelError> {
-    // SAFETY: SOCKET_TABLE is set during init(). Read-only access to find a socket
-    // by ID. The returned reference has 'static lifetime as the static Vec is never
-    // moved or dropped.
-    unsafe {
-        if let Some(ref table) = SOCKET_TABLE {
-            table
-                .iter()
-                .find(|s| s.id == id)
-                .ok_or(KernelError::InvalidArgument {
-                    name: "socket_id",
-                    value: "not_found",
-                })
-        } else {
-            Err(KernelError::InvalidState {
-                expected: "initialized",
-                actual: "not_initialized",
+/// Execute a closure with a socket by ID (immutable access)
+pub fn with_socket<R, F: FnOnce(&Socket) -> R>(id: usize, f: F) -> Result<R, KernelError> {
+    let table = SOCKET_TABLE.lock();
+    if let Some(ref sockets) = *table {
+        sockets
+            .iter()
+            .find(|s| s.id == id)
+            .map(f)
+            .ok_or(KernelError::InvalidArgument {
+                name: "socket_id",
+                value: "not_found",
             })
-        }
+    } else {
+        Err(KernelError::InvalidState {
+            expected: "initialized",
+            actual: "not_initialized",
+        })
     }
 }
 
-/// Get mutable socket by ID
-pub fn get_socket_mut(id: usize) -> Result<&'static mut Socket, KernelError> {
-    // SAFETY: SOCKET_TABLE is set during init(). Mutable access assumes
-    // single-threaded operation or external synchronization. The returned
-    // mutable reference has 'static lifetime as the static Vec is never moved
-    // or dropped.
-    unsafe {
-        if let Some(ref mut table) = SOCKET_TABLE {
-            table
-                .iter_mut()
-                .find(|s| s.id == id)
-                .ok_or(KernelError::InvalidArgument {
-                    name: "socket_id",
-                    value: "not_found",
-                })
-        } else {
-            Err(KernelError::InvalidState {
-                expected: "initialized",
-                actual: "not_initialized",
+/// Execute a closure with a socket by ID (mutable access)
+pub fn with_socket_mut<R, F: FnOnce(&mut Socket) -> R>(id: usize, f: F) -> Result<R, KernelError> {
+    let mut table = SOCKET_TABLE.lock();
+    if let Some(ref mut sockets) = *table {
+        sockets
+            .iter_mut()
+            .find(|s| s.id == id)
+            .map(f)
+            .ok_or(KernelError::InvalidArgument {
+                name: "socket_id",
+                value: "not_found",
             })
-        }
+    } else {
+        Err(KernelError::InvalidState {
+            expected: "initialized",
+            actual: "not_initialized",
+        })
     }
 }
 
@@ -644,8 +628,7 @@ pub fn queue_pending_connection(
 
 /// Close a socket by ID
 pub fn close_socket(id: usize) -> Result<(), KernelError> {
-    let socket = get_socket_mut(id)?;
-    socket.close()
+    with_socket_mut(id, |socket| socket.close())?
 }
 
 #[cfg(test)]

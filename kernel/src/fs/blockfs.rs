@@ -25,6 +25,7 @@ use spin::RwLock;
 #[cfg(target_arch = "aarch64")]
 use super::bare_lock::RwLock;
 use super::{DirEntry, Filesystem, Metadata, NodeType, Permissions, VfsNode};
+use crate::error::{FsError, KernelError};
 
 /// Block size (4KB)
 pub const BLOCK_SIZE: usize = 4096;
@@ -218,27 +219,27 @@ impl VfsNode for BlockFsNode {
             .unwrap_or(NodeType::File)
     }
 
-    fn read(&self, offset: usize, buffer: &mut [u8]) -> Result<usize, &'static str> {
+    fn read(&self, offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
         let fs = self.fs.read();
         fs.read_inode(self.inode_num, offset, buffer)
     }
 
-    fn write(&self, offset: usize, data: &[u8]) -> Result<usize, &'static str> {
+    fn write(&self, offset: usize, data: &[u8]) -> Result<usize, KernelError> {
         let mut fs = self.fs.write();
         fs.write_inode(self.inode_num, offset, data)
     }
 
-    fn metadata(&self) -> Result<Metadata, &'static str> {
+    fn metadata(&self) -> Result<Metadata, KernelError> {
         let fs = self.fs.read();
         fs.get_metadata(self.inode_num)
     }
 
-    fn readdir(&self) -> Result<Vec<DirEntry>, &'static str> {
+    fn readdir(&self) -> Result<Vec<DirEntry>, KernelError> {
         let fs = self.fs.read();
         fs.readdir(self.inode_num)
     }
 
-    fn lookup(&self, name: &str) -> Result<Arc<dyn VfsNode>, &'static str> {
+    fn lookup(&self, name: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
         let fs = self.fs.read();
         let child_inode = fs.lookup_in_dir(self.inode_num, name)?;
         Ok(Arc::new(BlockFsNode::new(child_inode, self.fs.clone())))
@@ -248,28 +249,24 @@ impl VfsNode for BlockFsNode {
         &self,
         name: &str,
         permissions: Permissions,
-    ) -> Result<Arc<dyn VfsNode>, &'static str> {
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
         let mut fs = self.fs.write();
         let new_inode = fs.create_file(self.inode_num, name, permissions)?;
         Ok(Arc::new(BlockFsNode::new(new_inode, self.fs.clone())))
     }
 
-    fn mkdir(
-        &self,
-        name: &str,
-        permissions: Permissions,
-    ) -> Result<Arc<dyn VfsNode>, &'static str> {
+    fn mkdir(&self, name: &str, permissions: Permissions) -> Result<Arc<dyn VfsNode>, KernelError> {
         let mut fs = self.fs.write();
         let new_inode = fs.create_directory(self.inode_num, name, permissions)?;
         Ok(Arc::new(BlockFsNode::new(new_inode, self.fs.clone())))
     }
 
-    fn unlink(&self, name: &str) -> Result<(), &'static str> {
+    fn unlink(&self, name: &str) -> Result<(), KernelError> {
         let mut fs = self.fs.write();
         fs.unlink_from_dir(self.inode_num, name)
     }
 
-    fn truncate(&self, size: usize) -> Result<(), &'static str> {
+    fn truncate(&self, size: usize) -> Result<(), KernelError> {
         let mut fs = self.fs.write();
         fs.truncate_inode(self.inode_num, size)
     }
@@ -334,11 +331,11 @@ impl BlockFsInner {
         inode_num: u32,
         offset: usize,
         buffer: &mut [u8],
-    ) -> Result<usize, &'static str> {
+    ) -> Result<usize, KernelError> {
         let inode = self
             .inode_table
             .get(inode_num as usize)
-            .ok_or("Invalid inode")?;
+            .ok_or(KernelError::FsError(FsError::NotFound))?;
 
         if offset >= inode.size as usize {
             return Ok(0);
@@ -381,7 +378,7 @@ impl BlockFsInner {
         inode_num: u32,
         offset: usize,
         data: &[u8],
-    ) -> Result<usize, &'static str> {
+    ) -> Result<usize, KernelError> {
         // Collect block information in multiple passes to avoid borrow conflicts
         let mut blocks_needed = Vec::new();
         let mut current_offset = offset;
@@ -408,7 +405,9 @@ impl BlockFsInner {
         for (block_idx, _, _) in &blocks_needed {
             let inode = &self.inode_table[inode_num as usize];
             let block_num = if inode.direct_blocks[*block_idx] == 0 {
-                let new_block = self.allocate_block().ok_or("No free blocks")?;
+                let new_block = self
+                    .allocate_block()
+                    .ok_or(KernelError::ResourceExhausted { resource: "blocks" })?;
                 self.inode_table[inode_num as usize].direct_blocks[*block_idx] = new_block;
                 self.inode_table[inode_num as usize].blocks += 1;
                 new_block
@@ -435,11 +434,11 @@ impl BlockFsInner {
         Ok(bytes_written)
     }
 
-    fn get_metadata(&self, inode_num: u32) -> Result<Metadata, &'static str> {
+    fn get_metadata(&self, inode_num: u32) -> Result<Metadata, KernelError> {
         let inode = self
             .inode_table
             .get(inode_num as usize)
-            .ok_or("Invalid inode")?;
+            .ok_or(KernelError::FsError(FsError::NotFound))?;
 
         Ok(Metadata {
             node_type: inode.node_type(),
@@ -453,23 +452,23 @@ impl BlockFsInner {
         })
     }
 
-    fn readdir(&self, inode_num: u32) -> Result<Vec<DirEntry>, &'static str> {
+    fn readdir(&self, inode_num: u32) -> Result<Vec<DirEntry>, KernelError> {
         let inode = self
             .inode_table
             .get(inode_num as usize)
-            .ok_or("Invalid inode")?;
+            .ok_or(KernelError::FsError(FsError::NotFound))?;
 
         if !inode.is_dir() {
-            return Err("Not a directory");
+            return Err(KernelError::FsError(FsError::NotADirectory));
         }
 
         // TODO(phase4): Parse directory entries from on-disk block data
         Ok(Vec::new())
     }
 
-    fn lookup_in_dir(&self, _dir_inode: u32, _name: &str) -> Result<u32, &'static str> {
+    fn lookup_in_dir(&self, _dir_inode: u32, _name: &str) -> Result<u32, KernelError> {
         // TODO(phase4): Implement directory entry lookup by name
-        Err("Not found")
+        Err(KernelError::FsError(FsError::NotFound))
     }
 
     fn create_file(
@@ -477,8 +476,10 @@ impl BlockFsInner {
         _parent: u32,
         _name: &str,
         permissions: Permissions,
-    ) -> Result<u32, &'static str> {
-        let inode_num = self.allocate_inode().ok_or("No free inodes")?;
+    ) -> Result<u32, KernelError> {
+        let inode_num = self
+            .allocate_inode()
+            .ok_or(KernelError::ResourceExhausted { resource: "inodes" })?;
 
         let mode = permissions_to_mode(permissions, false);
         self.inode_table[inode_num as usize] = DiskInode::new(mode, 0, 0);
@@ -493,8 +494,10 @@ impl BlockFsInner {
         _parent: u32,
         _name: &str,
         permissions: Permissions,
-    ) -> Result<u32, &'static str> {
-        let inode_num = self.allocate_inode().ok_or("No free inodes")?;
+    ) -> Result<u32, KernelError> {
+        let inode_num = self
+            .allocate_inode()
+            .ok_or(KernelError::ResourceExhausted { resource: "inodes" })?;
 
         let mode = permissions_to_mode(permissions, true);
         self.inode_table[inode_num as usize] = DiskInode::new(mode, 0, 0);
@@ -504,17 +507,17 @@ impl BlockFsInner {
         Ok(inode_num)
     }
 
-    fn unlink_from_dir(&mut self, _parent: u32, _name: &str) -> Result<(), &'static str> {
+    fn unlink_from_dir(&mut self, _parent: u32, _name: &str) -> Result<(), KernelError> {
         // TODO(phase4): Implement file unlinking (remove dir entry, decrement link
         // count)
         Ok(())
     }
 
-    fn truncate_inode(&mut self, inode_num: u32, size: usize) -> Result<(), &'static str> {
+    fn truncate_inode(&mut self, inode_num: u32, size: usize) -> Result<(), KernelError> {
         let inode = self
             .inode_table
             .get_mut(inode_num as usize)
-            .ok_or("Invalid inode")?;
+            .ok_or(KernelError::FsError(FsError::NotFound))?;
 
         inode.size = size as u32;
         // TODO(phase4): Free data blocks beyond the new truncated size
@@ -575,13 +578,19 @@ impl BlockFs {
         }
     }
 
-    pub fn format(block_count: u32, inode_count: u32) -> Result<Self, &'static str> {
+    pub fn format(block_count: u32, inode_count: u32) -> Result<Self, KernelError> {
         if block_count < 100 {
-            return Err("Block count too small");
+            return Err(KernelError::InvalidArgument {
+                name: "block_count",
+                value: "too small (minimum 100)",
+            });
         }
 
         if inode_count < 10 {
-            return Err("Inode count too small");
+            return Err(KernelError::InvalidArgument {
+                name: "inode_count",
+                value: "too small (minimum 10)",
+            });
         }
 
         Ok(Self::new(block_count, inode_count))
@@ -601,14 +610,14 @@ impl Filesystem for BlockFs {
         false
     }
 
-    fn sync(&self) -> Result<(), &'static str> {
+    fn sync(&self) -> Result<(), KernelError> {
         // TODO(phase4): Sync dirty blocks and inodes to underlying block device
         Ok(())
     }
 }
 
 /// Initialize BlockFS
-pub fn init() -> Result<(), &'static str> {
+pub fn init() -> Result<(), KernelError> {
     println!("[BLOCKFS] Initializing block-based filesystem...");
     println!("[BLOCKFS] Block size: {} bytes", BLOCK_SIZE);
     println!("[BLOCKFS] Inode size: {} bytes", size_of::<DiskInode>());

@@ -159,19 +159,19 @@ impl IpcPerfReport {
         println!("  Min: {} ns", self.min_latency_ns);
         println!("  Max: {} ns", self.max_latency_ns);
 
-        #[allow(clippy::if_same_then_else)]
-        if self.meets_phase1_targets() {
-            println!("\n✓ Meets Phase 1 targets (<5μs)");
+        let _phase1_status = if self.meets_phase1_targets() {
+            "\n[PASS] Meets Phase 1 targets (<5us)"
         } else {
-            println!("\n✗ Does not meet Phase 1 targets");
-        }
+            "\n[FAIL] Does not meet Phase 1 targets"
+        };
+        println!("{}", _phase1_status);
 
-        #[allow(clippy::if_same_then_else)]
-        if self.meets_phase5_targets() {
-            println!("✓ Meets Phase 5 targets (<1μs average)");
+        let _phase5_status = if self.meets_phase5_targets() {
+            "[PASS] Meets Phase 5 targets (<1us average)"
         } else {
-            println!("✗ Does not meet Phase 5 targets");
-        }
+            "[FAIL] Does not meet Phase 5 targets"
+        };
+        println!("{}", _phase5_status);
     }
 }
 

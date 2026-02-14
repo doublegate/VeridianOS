@@ -2,13 +2,15 @@
 //!
 //! Implements storage drivers including ATA/IDE, AHCI/SATA, and NVMe.
 
-#![allow(static_mut_refs)]
-
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
 use spin::Mutex;
 
-use crate::services::driver_framework::{DeviceClass, DeviceInfo, DeviceStatus, Driver};
+use crate::{
+    error::KernelError,
+    services::driver_framework::{DeviceClass, DeviceInfo, DeviceStatus, Driver},
+    sync::once_lock::OnceLock,
+};
 
 /// Storage device types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,18 +75,14 @@ pub trait StorageDevice: Send + Sync {
     fn reset_stats(&mut self);
 
     /// Read sectors
-    fn read_sectors(
-        &mut self,
-        lba: u64,
-        count: u32,
-        buffer: &mut [u8],
-    ) -> Result<u32, &'static str>;
+    fn read_sectors(&mut self, lba: u64, count: u32, buffer: &mut [u8])
+        -> Result<u32, KernelError>;
 
     /// Write sectors
-    fn write_sectors(&mut self, lba: u64, count: u32, data: &[u8]) -> Result<u32, &'static str>;
+    fn write_sectors(&mut self, lba: u64, count: u32, data: &[u8]) -> Result<u32, KernelError>;
 
     /// Flush cache
-    fn flush(&mut self) -> Result<(), &'static str>;
+    fn flush(&mut self) -> Result<(), KernelError>;
 
     /// Check if device is ready
     fn is_ready(&self) -> bool;
@@ -132,7 +130,7 @@ impl AtaDriver {
     }
 
     /// Initialize ATA device
-    pub fn init(&mut self) -> Result<(), &'static str> {
+    pub fn init(&mut self) -> Result<(), KernelError> {
         crate::println!(
             "[ATA] Initializing {} at port 0x{:x}",
             self.name,
@@ -151,7 +149,10 @@ impl AtaDriver {
         // Check if device exists
         let status = self.read_register(7);
         if status == 0 {
-            return Err("No device present");
+            return Err(KernelError::HardwareError {
+                device: "ata",
+                code: 0,
+            });
         }
 
         // Read identification data
@@ -248,7 +249,7 @@ impl AtaDriver {
     }
 
     /// Wait for device to not be busy
-    fn wait_busy(&self) -> Result<(), &'static str> {
+    fn wait_busy(&self) -> Result<(), KernelError> {
         for _ in 0..10000 {
             let status = self.read_register(7);
             if status & 0x80 == 0 {
@@ -260,11 +261,14 @@ impl AtaDriver {
                 core::hint::spin_loop();
             }
         }
-        Err("Device timeout")
+        Err(KernelError::Timeout {
+            operation: "ata wait busy",
+            duration_ms: 0,
+        })
     }
 
     /// Wait for device ready
-    fn wait_ready(&self) -> Result<(), &'static str> {
+    fn wait_ready(&self) -> Result<(), KernelError> {
         for _ in 0..10000 {
             let status = self.read_register(7);
             if status & 0x80 == 0 && status & 0x40 != 0 {
@@ -276,11 +280,14 @@ impl AtaDriver {
                 core::hint::spin_loop();
             }
         }
-        Err("Device not ready")
+        Err(KernelError::Timeout {
+            operation: "ata wait ready",
+            duration_ms: 0,
+        })
     }
 
     /// Select drive and set LBA
-    fn select_drive_lba(&self, lba: u64) -> Result<(), &'static str> {
+    fn select_drive_lba(&self, lba: u64) -> Result<(), KernelError> {
         let drive_select = if self.is_master { 0xE0 } else { 0xF0 };
 
         // LBA mode, drive select
@@ -316,9 +323,12 @@ impl StorageDevice for AtaDriver {
         lba: u64,
         count: u32,
         buffer: &mut [u8],
-    ) -> Result<u32, &'static str> {
+    ) -> Result<u32, KernelError> {
         if buffer.len() < (count * self.info.sector_size) as usize {
-            return Err("Buffer too small");
+            return Err(KernelError::InvalidArgument {
+                name: "buffer",
+                value: "too small for requested sector count",
+            });
         }
 
         let mut sectors_read = 0;
@@ -354,13 +364,18 @@ impl StorageDevice for AtaDriver {
         Ok(sectors_read)
     }
 
-    fn write_sectors(&mut self, lba: u64, count: u32, data: &[u8]) -> Result<u32, &'static str> {
+    fn write_sectors(&mut self, lba: u64, count: u32, data: &[u8]) -> Result<u32, KernelError> {
         if data.len() < (count * self.info.sector_size) as usize {
-            return Err("Data too small");
+            return Err(KernelError::InvalidArgument {
+                name: "data",
+                value: "too small for requested sector count",
+            });
         }
 
         if self.info.read_only {
-            return Err("Device is read-only");
+            return Err(KernelError::PermissionDenied {
+                operation: "write to read-only device",
+            });
         }
 
         let mut sectors_written = 0;
@@ -399,7 +414,7 @@ impl StorageDevice for AtaDriver {
         Ok(sectors_written)
     }
 
-    fn flush(&mut self) -> Result<(), &'static str> {
+    fn flush(&mut self) -> Result<(), KernelError> {
         // Send FLUSH CACHE command
         self.write_register(7, 0xE7);
         self.wait_ready()
@@ -434,14 +449,14 @@ impl Driver for AtaDriver {
             })
     }
 
-    fn probe(&mut self, _device: &DeviceInfo) -> Result<(), &'static str> {
+    fn probe(&mut self, _device: &DeviceInfo) -> Result<(), KernelError> {
         crate::println!("[ATA] Probing device: {}", _device.name);
 
         // Try to initialize the ATA device
         self.init()
     }
 
-    fn attach(&mut self, _device: &DeviceInfo) -> Result<(), &'static str> {
+    fn attach(&mut self, _device: &DeviceInfo) -> Result<(), KernelError> {
         crate::println!("[ATA] Attaching to device: {}", _device.name);
 
         // Device should already be initialized from probe
@@ -449,7 +464,7 @@ impl Driver for AtaDriver {
         Ok(())
     }
 
-    fn detach(&mut self, _device: &DeviceInfo) -> Result<(), &'static str> {
+    fn detach(&mut self, _device: &DeviceInfo) -> Result<(), KernelError> {
         crate::println!("[ATA] Detaching from device: {}", _device.name);
 
         // Flush any pending writes
@@ -459,7 +474,7 @@ impl Driver for AtaDriver {
         Ok(())
     }
 
-    fn suspend(&mut self) -> Result<(), &'static str> {
+    fn suspend(&mut self) -> Result<(), KernelError> {
         // Flush cache and put device in standby
         self.flush()?;
 
@@ -471,14 +486,14 @@ impl Driver for AtaDriver {
         Ok(())
     }
 
-    fn resume(&mut self) -> Result<(), &'static str> {
+    fn resume(&mut self) -> Result<(), KernelError> {
         // Device should wake up automatically on next access
         self.wait_ready()?;
         crate::println!("[ATA] Device resumed");
         Ok(())
     }
 
-    fn handle_interrupt(&mut self, _irq: u8) -> Result<(), &'static str> {
+    fn handle_interrupt(&mut self, _irq: u8) -> Result<(), KernelError> {
         crate::println!("[ATA] Handling interrupt {} for {}", _irq, self.name);
 
         // Read status to clear interrupt
@@ -489,13 +504,16 @@ impl Driver for AtaDriver {
             // ERR bit set
             let _error = self.read_register(1);
             crate::println!("[ATA] Error detected: 0x{:02x}", _error);
-            return Err("ATA error");
+            return Err(KernelError::HardwareError {
+                device: "ata",
+                code: _error as u32,
+            });
         }
 
         Ok(())
     }
 
-    fn read(&mut self, offset: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
+    fn read(&mut self, offset: u64, buffer: &mut [u8]) -> Result<usize, KernelError> {
         // Convert byte offset to sector
         let sector_size = self.info.sector_size as u64;
         let lba = offset / sector_size;
@@ -518,7 +536,7 @@ impl Driver for AtaDriver {
         Ok(copy_len)
     }
 
-    fn write(&mut self, offset: u64, data: &[u8]) -> Result<usize, &'static str> {
+    fn write(&mut self, offset: u64, data: &[u8]) -> Result<usize, KernelError> {
         // Convert byte offset to sector
         let sector_size = self.info.sector_size as u64;
         let lba = offset / sector_size;
@@ -526,11 +544,17 @@ impl Driver for AtaDriver {
 
         // For simplicity, require sector-aligned writes
         if sector_offset != 0 {
-            return Err("Non-aligned writes not supported");
+            return Err(KernelError::InvalidArgument {
+                name: "offset",
+                value: "must be sector-aligned",
+            });
         }
 
         if !data.len().is_multiple_of(sector_size as usize) {
-            return Err("Write size must be multiple of sector size");
+            return Err(KernelError::InvalidArgument {
+                name: "data length",
+                value: "must be multiple of sector size",
+            });
         }
 
         let sectors_to_write = data.len() / sector_size as usize;
@@ -539,7 +563,7 @@ impl Driver for AtaDriver {
         Ok(sectors_written as usize * sector_size as usize)
     }
 
-    fn ioctl(&mut self, cmd: u32, _arg: u64) -> Result<u64, &'static str> {
+    fn ioctl(&mut self, cmd: u32, _arg: u64) -> Result<u64, KernelError> {
         match cmd {
             0x3000 => {
                 // Get capacity
@@ -563,7 +587,10 @@ impl Driver for AtaDriver {
                 self.reset_stats();
                 Ok(0)
             }
-            _ => Err("Unknown ioctl command"),
+            _ => Err(KernelError::InvalidArgument {
+                name: "ioctl_cmd",
+                value: "unknown",
+            }),
         }
     }
 }
@@ -612,27 +639,12 @@ impl StorageManager {
 }
 
 /// Global storage manager instance
-#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-static STORAGE_MANAGER: spin::Once<Mutex<StorageManager>> = spin::Once::new();
-
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-static mut STORAGE_MANAGER_STATIC: Option<Mutex<StorageManager>> = None;
+static STORAGE_MANAGER: OnceLock<Mutex<StorageManager>> = OnceLock::new();
 
 /// Initialize storage subsystem
 pub fn init() {
     let storage_manager = StorageManager::new();
-
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-    {
-        STORAGE_MANAGER.call_once(|| Mutex::new(storage_manager));
-    }
-
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-    // SAFETY: STORAGE_MANAGER_STATIC is written once during single-threaded init.
-    // No concurrent access is possible at this point in kernel bootstrap.
-    unsafe {
-        STORAGE_MANAGER_STATIC = Some(Mutex::new(storage_manager));
-    }
+    let _ = STORAGE_MANAGER.set(Mutex::new(storage_manager));
 
     // Register ATA driver with driver framework
     let driver_framework = crate::services::driver_framework::get_driver_framework();
@@ -676,19 +688,7 @@ pub fn init() {
 
 /// Get the global storage manager
 pub fn get_storage_manager() -> &'static Mutex<StorageManager> {
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-    {
-        STORAGE_MANAGER
-            .get()
-            .expect("Storage manager not initialized")
-    }
-
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-    // SAFETY: STORAGE_MANAGER_STATIC is set once during init() and never modified after.
-    // The returned reference is 'static because the static lives for the program duration.
-    unsafe {
-        STORAGE_MANAGER_STATIC
-            .as_ref()
-            .expect("Storage manager not initialized")
-    }
+    STORAGE_MANAGER
+        .get()
+        .expect("Storage manager not initialized")
 }

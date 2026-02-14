@@ -594,45 +594,19 @@ impl InitSystem {
     }
 }
 
-/// Global init system using pointer pattern for all architectures
-/// This avoids static mut Option issues and provides consistent behavior
-static mut INIT_SYSTEM_PTR: *mut InitSystem = core::ptr::null_mut();
+/// Global init system using OnceLock for safe initialization.
+static INIT_SYSTEM: crate::sync::once_lock::OnceLock<InitSystem> =
+    crate::sync::once_lock::OnceLock::new();
 
 /// Initialize the init system
 pub fn init() {
     #[allow(unused_imports)]
     use crate::println;
 
-    // SAFETY: INIT_SYSTEM_PTR is a static mut pointer initialized to
-    // null. This block guards against double init, creates an
-    // InitSystem via Box::leak for 'static lifetime, and stores the
-    // pointer with architecture-specific memory barriers. Called once
-    // during early boot before concurrent access.
-    unsafe {
-        if !INIT_SYSTEM_PTR.is_null() {
-            println!("[INIT] Already initialized, skipping...");
-            return;
-        }
-
-        println!("[INIT] Creating new InitSystem...");
-        let init_system = alloc::boxed::Box::new(InitSystem::new());
-        let ptr = alloc::boxed::Box::leak(init_system) as *mut InitSystem;
-
-        // Memory barriers before assignment
-        #[cfg(target_arch = "aarch64")]
-        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
-        #[cfg(target_arch = "riscv64")]
-        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
-
-        INIT_SYSTEM_PTR = ptr;
-
-        // Memory barriers after assignment
-        #[cfg(target_arch = "aarch64")]
-        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
-        #[cfg(target_arch = "riscv64")]
-        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
-
-        println!("[INIT] Init system module loaded");
+    println!("[INIT] Creating new InitSystem...");
+    match INIT_SYSTEM.set(InitSystem::new()) {
+        Ok(()) => println!("[INIT] Init system module loaded"),
+        Err(_) => println!("[INIT] Already initialized, skipping..."),
     }
 }
 
@@ -640,16 +614,7 @@ pub fn init() {
 ///
 /// Returns `None` if the init system has not been initialized via [`init`].
 pub fn try_get_init_system() -> Option<&'static InitSystem> {
-    // SAFETY: INIT_SYSTEM_PTR was set during init() via Box::leak,
-    // producing a valid 'static pointer. Once set, it is never modified
-    // or freed.
-    unsafe {
-        if INIT_SYSTEM_PTR.is_null() {
-            None
-        } else {
-            Some(&*INIT_SYSTEM_PTR)
-        }
-    }
+    INIT_SYSTEM.get()
 }
 
 /// Get the global init system.
@@ -657,9 +622,9 @@ pub fn try_get_init_system() -> Option<&'static InitSystem> {
 /// Panics if the init system has not been initialized via [`init`].
 /// Prefer [`try_get_init_system`] in contexts where a panic is unacceptable.
 pub fn get_init_system() -> &'static InitSystem {
-    // Panic is intentional: accessing the init system before init() is a
-    // programming error indicating a broken boot sequence.
-    try_get_init_system().expect("Init system not initialized: init() was not called")
+    INIT_SYSTEM
+        .get()
+        .expect("Init system not initialized: init() was not called")
 }
 
 /// Run the init process

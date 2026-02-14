@@ -2,6 +2,10 @@
 
 //! Tracks and logs security-relevant events for compliance and forensics.
 
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use spin::Mutex;
+
 use crate::error::KernelError;
 
 /// Audit event type
@@ -80,29 +84,26 @@ fn read_timestamp_fallback() -> u64 {
 /// Maximum audit log size
 const MAX_AUDIT_LOG: usize = 4096;
 
-/// Audit log buffer (circular)
-static mut AUDIT_LOG: [Option<AuditEvent>; MAX_AUDIT_LOG] = [None; MAX_AUDIT_LOG];
-static mut AUDIT_HEAD: usize = 0;
-static mut AUDIT_COUNT: usize = 0;
-static mut AUDIT_ENABLED: bool = false;
+/// Audit log buffer (circular), protected by a Mutex
+static AUDIT_LOG: Mutex<[Option<AuditEvent>; MAX_AUDIT_LOG]> = Mutex::new([None; MAX_AUDIT_LOG]);
+static AUDIT_HEAD: AtomicUsize = AtomicUsize::new(0);
+static AUDIT_COUNT: AtomicUsize = AtomicUsize::new(0);
+static AUDIT_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Log an audit event
 pub fn log_event(event: AuditEvent) {
-    // SAFETY: AUDIT_ENABLED, AUDIT_LOG, AUDIT_HEAD, and AUDIT_COUNT are static mut
-    // globals used as a circular buffer for audit events. Accessed during
-    // single-threaded kernel operation. AUDIT_HEAD is always kept in range [0,
-    // MAX_AUDIT_LOG) by the modulo operation.
-    unsafe {
-        if !AUDIT_ENABLED {
-            return;
-        }
+    if !AUDIT_ENABLED.load(Ordering::Acquire) {
+        return;
+    }
 
-        AUDIT_LOG[AUDIT_HEAD] = Some(event);
-        AUDIT_HEAD = (AUDIT_HEAD + 1) % MAX_AUDIT_LOG;
+    let mut log = AUDIT_LOG.lock();
+    let head = AUDIT_HEAD.load(Ordering::Relaxed);
+    log[head] = Some(event);
+    AUDIT_HEAD.store((head + 1) % MAX_AUDIT_LOG, Ordering::Relaxed);
 
-        if AUDIT_COUNT < MAX_AUDIT_LOG {
-            AUDIT_COUNT += 1;
-        }
+    let count = AUDIT_COUNT.load(Ordering::Relaxed);
+    if count < MAX_AUDIT_LOG {
+        AUDIT_COUNT.store(count + 1, Ordering::Relaxed);
     }
 }
 
@@ -173,28 +174,18 @@ pub fn log_capability_op(pid: u64, cap_id: u64, result: i32) {
 
 /// Get audit log statistics
 pub fn get_stats() -> (usize, usize) {
-    // SAFETY: AUDIT_COUNT is a static mut counter read for diagnostic statistics.
-    // Single-threaded access assumed during kernel operation.
-    unsafe { (AUDIT_COUNT, MAX_AUDIT_LOG) }
+    (AUDIT_COUNT.load(Ordering::Relaxed), MAX_AUDIT_LOG)
 }
 
 /// Enable audit logging
 pub fn enable() {
-    // SAFETY: AUDIT_ENABLED is a static mut bool toggled during single-threaded
-    // kernel init or controlled administrative operations.
-    unsafe {
-        AUDIT_ENABLED = true;
-    }
+    AUDIT_ENABLED.store(true, Ordering::Release);
     println!("[AUDIT] Audit logging enabled");
 }
 
 /// Disable audit logging
 pub fn disable() {
-    // SAFETY: AUDIT_ENABLED is a static mut bool toggled during controlled
-    // administrative operations. Single-threaded access assumed.
-    unsafe {
-        AUDIT_ENABLED = false;
-    }
+    AUDIT_ENABLED.store(false, Ordering::Release);
     println!("[AUDIT] Audit logging disabled");
 }
 
@@ -203,13 +194,8 @@ pub fn init() -> Result<(), KernelError> {
     println!("[AUDIT] Initializing audit framework...");
 
     // Clear audit log
-    // SAFETY: AUDIT_HEAD and AUDIT_COUNT are static mut counters reset to zero
-    // during single-threaded kernel init. No concurrent readers at this point
-    // in bootstrap.
-    unsafe {
-        AUDIT_HEAD = 0;
-        AUDIT_COUNT = 0;
-    }
+    AUDIT_HEAD.store(0, Ordering::Relaxed);
+    AUDIT_COUNT.store(0, Ordering::Relaxed);
 
     // Enable auditing
     enable();

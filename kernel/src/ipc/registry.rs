@@ -20,60 +20,22 @@ use super::{
     error::{IpcError, Result},
 };
 
-/// Global IPC registry using pointer pattern for all architectures.
-/// This avoids static mut Option issues and provides consistent behavior.
-///
-/// SAFETY invariant: Once initialized (non-null), this pointer remains valid
-/// for the lifetime of the kernel. The pointed-to Mutex<IpcRegistry> is
-/// heap-allocated via Box::leak and never deallocated. All access must be
-/// through with_registry() or with_registry_mut() which check for null before
-/// dereferencing. The init() function ensures single initialization via null
-/// check with architecture-specific memory barriers.
-static mut IPC_REGISTRY_PTR: *mut Mutex<IpcRegistry> = core::ptr::null_mut();
+/// Global IPC registry using OnceLock for safe initialization.
+static IPC_REGISTRY: crate::sync::once_lock::OnceLock<Mutex<IpcRegistry>> =
+    crate::sync::once_lock::OnceLock::new();
 
 /// Initialize the IPC registry
 pub fn init() {
     #[allow(unused_imports)]
     use crate::println;
 
-    // SAFETY: This function is called during single-threaded kernel initialization
-    // (bootstrap), so there is no concurrent access to IPC_REGISTRY_PTR. The null
-    // check prevents double initialization. Box::leak ensures the allocated
-    // Mutex<IpcRegistry> lives for the entire kernel lifetime (never deallocated).
-    // Architecture-specific memory barriers (DSB+ISB on AArch64, FENCE on RISC-V)
-    // ensure the pointer store is visible to all CPUs before any subsequent access.
-    // On x86_64, the strong memory model makes explicit barriers unnecessary.
-    unsafe {
-        if !IPC_REGISTRY_PTR.is_null() {
-            println!("[IPC-REG] Registry already initialized, skipping...");
-            return;
-        }
+    println!("[IPC-REG] Initializing IPC registry...");
+    let registry = IpcRegistry::new();
+    let registry_mutex = Mutex::new(registry);
 
-        println!("[IPC-REG] Initializing IPC registry...");
-
-        let registry = IpcRegistry::new();
-        let registry_mutex = Mutex::new(registry);
-        let registry_box = alloc::boxed::Box::new(registry_mutex);
-        let ptr = alloc::boxed::Box::leak(registry_box) as *mut Mutex<IpcRegistry>;
-
-        // SAFETY: Memory barriers ensure the heap allocation (pointed to by `ptr`)
-        // is fully committed to memory before we store the pointer, preventing other
-        // CPUs from seeing a non-null pointer to uninitialized memory.
-        #[cfg(target_arch = "aarch64")]
-        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
-        #[cfg(target_arch = "riscv64")]
-        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
-
-        IPC_REGISTRY_PTR = ptr;
-
-        // SAFETY: Post-store barriers ensure the pointer write is visible to all CPUs
-        // before any subsequent code that might access the registry on other cores.
-        #[cfg(target_arch = "aarch64")]
-        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
-        #[cfg(target_arch = "riscv64")]
-        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
-
-        println!("[IPC-REG] Registry initialized successfully");
+    match IPC_REGISTRY.set(registry_mutex) {
+        Ok(()) => println!("[IPC-REG] Registry initialized successfully"),
+        Err(_) => println!("[IPC-REG] Registry already initialized, skipping..."),
     }
 }
 
@@ -316,20 +278,9 @@ fn with_registry_mut<T, F>(f: F) -> Result<T>
 where
     F: FnOnce(&mut IpcRegistry) -> Result<T>,
 {
-    // SAFETY: IPC_REGISTRY_PTR is checked for null before dereferencing. Once set
-    // in init(), the pointer is never modified or deallocated (Box::leak ensures
-    // permanent allocation). The Mutex lock provides exclusive access to the inner
-    // IpcRegistry, preventing data races. The memory barriers in init() ensure
-    // the pointer store is visible to this CPU.
-    unsafe {
-        if IPC_REGISTRY_PTR.is_null() {
-            return Err(IpcError::NotInitialized);
-        }
-
-        let registry_mutex = &*IPC_REGISTRY_PTR;
-        let mut registry_guard = registry_mutex.lock();
-        f(&mut *registry_guard)
-    }
+    let registry_mutex = IPC_REGISTRY.get().ok_or(IpcError::NotInitialized)?;
+    let mut registry_guard = registry_mutex.lock();
+    f(&mut *registry_guard)
 }
 
 /// Get an immutable reference to the global registry
@@ -337,19 +288,9 @@ fn with_registry<T, F>(f: F) -> Result<T>
 where
     F: FnOnce(&IpcRegistry) -> Result<T>,
 {
-    // SAFETY: Same invariants as with_registry_mut(). IPC_REGISTRY_PTR is checked
-    // for null, was set once during init() via Box::leak (permanent allocation),
-    // and the Mutex lock serializes access. The shared reference to IpcRegistry is
-    // valid for the duration of the lock guard.
-    unsafe {
-        if IPC_REGISTRY_PTR.is_null() {
-            return Err(IpcError::NotInitialized);
-        }
-
-        let registry_mutex = &*IPC_REGISTRY_PTR;
-        let registry_guard = registry_mutex.lock();
-        f(&*registry_guard)
-    }
+    let registry_mutex = IPC_REGISTRY.get().ok_or(IpcError::NotInitialized)?;
+    let registry_guard = registry_mutex.lock();
+    f(&*registry_guard)
 }
 
 /// Global registry access functions

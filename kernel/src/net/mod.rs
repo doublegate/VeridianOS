@@ -153,37 +153,29 @@ pub struct NetworkStats {
     pub errors: u64,
 }
 
-static mut STATS: NetworkStats = NetworkStats {
+static STATS: spin::Mutex<NetworkStats> = spin::Mutex::new(NetworkStats {
     packets_sent: 0,
     packets_received: 0,
     bytes_sent: 0,
     bytes_received: 0,
     errors: 0,
-};
+});
 
 /// Update network statistics
 pub fn update_stats_tx(bytes: usize) {
-    // SAFETY: STATS is a static mut NetworkStats struct updated during packet
-    // transmission. Single-threaded access assumed during kernel operation.
-    unsafe {
-        STATS.packets_sent += 1;
-        STATS.bytes_sent += bytes as u64;
-    }
+    let mut stats = STATS.lock();
+    stats.packets_sent += 1;
+    stats.bytes_sent += bytes as u64;
 }
 
 pub fn update_stats_rx(bytes: usize) {
-    // SAFETY: STATS is a static mut NetworkStats struct updated during packet
-    // reception. Single-threaded access assumed during kernel operation.
-    unsafe {
-        STATS.packets_received += 1;
-        STATS.bytes_received += bytes as u64;
-    }
+    let mut stats = STATS.lock();
+    stats.packets_received += 1;
+    stats.bytes_received += bytes as u64;
 }
 
 pub fn get_stats() -> NetworkStats {
-    // SAFETY: STATS is a static mut Copy type read for diagnostic output.
-    // Returns a copy, so no aliasing concerns.
-    unsafe { STATS }
+    *STATS.lock()
 }
 
 /// Initialize network stack

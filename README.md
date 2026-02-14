@@ -146,6 +146,17 @@ Released February 13, 2026. Comprehensive codebase quality improvement:
 - **39 files** cleaned of `#[allow(dead_code)]` with proper feature gating
 - **161 files changed** total
 
+### Technical Debt Remediation (v0.3.1)
+
+Released February 14, 2026. Comprehensive 5-sprint remediation covering safety, soundness, and architecture:
+
+- **Critical Safety** — Fixed OnceLock::set() use-after-free soundness bug, fixed process_compat memory leak, added `#[must_use]` to KernelError
+- **Static Mut Elimination** — Converted 48 of 55 `static mut` declarations to safe patterns (OnceLock, Mutex, Atomics); 7 retained with documented SAFETY justifications (pre-heap boot, per-CPU data)
+- **Panic-Free Syscalls** — Removed 8 production panic paths from syscall/VFS handlers via error propagation
+- **Error Type Migration** — Converted 150+ functions across 18 files from `&'static str` errors to typed `KernelError` (legacy ratio reduced from ~65% to ~37%)
+- **Architecture Abstractions** — PlatformTimer trait with 3 arch implementations, memory barrier abstractions (memory_fence, data_sync_barrier, instruction_sync_barrier)
+- **Dead Code Cleanup** — Removed 25 incorrect `#[allow(dead_code)]` annotations plus 1 dead function
+
 ### Phase 3: Security Hardening — Complete (v0.3.0)
 
 Released February 14, 2026. Architecture leakage reduction and comprehensive security hardening:
@@ -389,10 +400,12 @@ Security is a fundamental design principle:
 - [x] Technical Debt Remediation — 9/10 issues resolved (2026-02-13, v0.2.4)
 - [x] RISC-V Crash Fix & Architecture Parity — All 3 architectures stable (2026-02-13, v0.2.5)
 - [x] Phase 3: Security Hardening — Architecture cleanup, capability hardening, MAC/audit, memory hardening (2026-02-14, v0.3.0)
+- [x] Technical Debt Remediation — OnceLock soundness fix, 48 static mut eliminated, typed errors, panic-free syscalls (2026-02-14, v0.3.1)
 
 ### Mid-term (2026)
 
 - [x] Phase 3: Security Hardening — Complete (2026-02-14, v0.3.0)
+- [x] Technical Debt Remediation — Complete (2026-02-14, v0.3.1)
 - [ ] Phase 4: Package Ecosystem & Self-Hosting (5–6 months) — Ports system, LLVM toolchain priority
 
 ### Long-term (2027+)

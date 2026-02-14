@@ -2,13 +2,12 @@
 //!
 //! Provides cryptographically secure random number generation.
 
-#![allow(static_mut_refs)]
-
 use alloc::{vec, vec::Vec};
 
 use spin::Mutex;
 
 use super::CryptoResult;
+use crate::sync::once_lock::OnceLock;
 
 /// Secure random number generator
 pub struct SecureRandom {
@@ -157,34 +156,18 @@ impl Default for SecureRandom {
 }
 
 /// Global secure random number generator
-static mut RNG_STORAGE: Option<SecureRandom> = None;
+static RNG_STORAGE: OnceLock<SecureRandom> = OnceLock::new();
 
 /// Initialize random number generator
 pub fn init() -> CryptoResult<()> {
     let rng = SecureRandom::new()?;
-    // SAFETY: RNG_STORAGE is a static mut Option written once during
-    // single-threaded kernel initialization. No concurrent access is possible
-    // at this point in boot.
-    unsafe {
-        RNG_STORAGE = Some(rng);
-    }
+    let _ = RNG_STORAGE.set(rng);
     Ok(())
 }
 
 /// Get global random number generator
 pub fn get_random() -> &'static SecureRandom {
-    // SAFETY: RNG_STORAGE is a static mut Option lazily initialized on first
-    // access. The is_none() check ensures it is written at most once. The
-    // returned reference has 'static lifetime because the static mut is never
-    // moved or dropped. The SecureRandom uses internal Mutex for thread-safe
-    // random generation.
-    unsafe {
-        if RNG_STORAGE.is_none() {
-            RNG_STORAGE = Some(SecureRandom::new().expect("Failed to create RNG"));
-        }
-        // is_none() check above guarantees Some
-        RNG_STORAGE.as_ref().expect("RNG not initialized")
-    }
+    RNG_STORAGE.get_or_init(|| SecureRandom::new().expect("Failed to create RNG"))
 }
 
 /// Generate random bytes (convenience function)

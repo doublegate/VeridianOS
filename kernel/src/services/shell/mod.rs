@@ -250,14 +250,16 @@ impl Shell {
     }
 
     /// Set current working directory
-    pub fn set_cwd(&self, path: String) -> Result<(), &'static str> {
+    pub fn set_cwd(&self, path: String) -> Result<(), crate::error::KernelError> {
         // Verify directory exists using VFS
         let vfs = crate::fs::get_vfs().read();
         let node = vfs.resolve_path(&path)?;
         let metadata = node.metadata()?;
 
         if metadata.node_type != crate::fs::NodeType::Directory {
-            return Err("Not a directory");
+            return Err(crate::error::KernelError::FsError(
+                crate::error::FsError::NotADirectory,
+            ));
         }
 
         *self.cwd.write() = path;

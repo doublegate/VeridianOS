@@ -4,8 +4,6 @@
 //!
 //! Provides method-based RPC with service discovery and marshaling.
 
-#![allow(static_mut_refs)]
-
 use alloc::{
     collections::BTreeMap,
     string::{String, ToString},
@@ -15,6 +13,7 @@ use alloc::{
 use spin::RwLock;
 
 use super::{sync_receive, sync_send, EndpointId, IpcError, Message, SmallMessage};
+use crate::sync::once_lock::OnceLock;
 
 /// RPC method identifier
 pub type MethodId = u32;
@@ -325,25 +324,12 @@ pub fn init() {
     crate::println!("[RPC] RPC framework initialized (stub)");
 }
 
+/// Global RPC registry
+static REGISTRY_STORAGE: OnceLock<RpcRegistry> = OnceLock::new();
+
 /// Get global RPC registry
 pub fn get_registry() -> &'static RpcRegistry {
-    // SAFETY: REGISTRY_STORAGE is a function-local static mut Option lazily
-    // initialized on first access. The is_none() check ensures it is written at
-    // most once. The returned reference has 'static lifetime because
-    // function-local statics persist for the program's duration. The
-    // RpcRegistry uses internal Mutex for thread safety.
-    unsafe {
-        static mut REGISTRY_STORAGE: Option<RpcRegistry> = None;
-
-        if REGISTRY_STORAGE.is_none() {
-            REGISTRY_STORAGE = Some(RpcRegistry::new());
-        }
-
-        // is_none() check above guarantees Some
-        REGISTRY_STORAGE
-            .as_ref()
-            .expect("RPC registry not initialized")
-    }
+    REGISTRY_STORAGE.get_or_init(RpcRegistry::new)
 }
 
 #[cfg(test)]

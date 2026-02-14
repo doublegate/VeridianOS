@@ -6,6 +6,14 @@
 use bootloader_api::BootInfo;
 
 // Store boot info for later use (mutable reference for 0.11+ API)
+//
+// SAFETY JUSTIFICATION: This static mut is intentionally kept because:
+// 1. The bootloader crate API provides boot info as &'static mut BootInfo
+// 2. This must be stored before any kernel initialization (pre-heap)
+// 3. Written once during entry_point! macro callback, read-only afterwards
+// 4. Cannot use OnceLock as it requires heap (alloc) which isn't available yet
+// 5. The bootloader guarantees the reference is valid for the kernel lifetime
+#[allow(static_mut_refs)]
 pub static mut BOOT_INFO: Option<&'static mut BootInfo> = None;
 
 // Early initialization that must happen before kernel_main

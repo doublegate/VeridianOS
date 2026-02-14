@@ -9,7 +9,7 @@ use spin::RwLock;
 
 use crate::{
     desktop::{
-        font::{get_font_manager, FontSize, FontStyle},
+        font::{with_font_manager, FontSize, FontStyle},
         window_manager::{with_window_manager, InputEvent, WindowId},
     },
     error::KernelError,
@@ -257,18 +257,13 @@ impl FileManager {
             *pixel = 32; // Dark gray
         }
 
-        // Get font
-        let font_manager = get_font_manager()?;
-        let font = font_manager
-            .get_font(FontSize::Medium, FontStyle::Regular)
-            .ok_or(KernelError::NotFound {
-                resource: "font",
-                id: 0,
-            })?;
-
         // Render header
         let header = format!("File Manager - {}", self.current_path);
-        let _ = font.render_text(&header, framebuffer, fb_width, fb_height, 10, 10);
+        let _ = with_font_manager(|fm| {
+            if let Some(font) = fm.get_font(FontSize::Medium, FontStyle::Regular) {
+                let _ = font.render_text(&header, framebuffer, fb_width, fb_height, 10, 10);
+            }
+        });
 
         // Render entries
         let line_height = 20;
@@ -301,7 +296,11 @@ impl FileManager {
             };
 
             let entry_text = format!("{}{}", prefix, entry.name);
-            let _ = font.render_text(&entry_text, framebuffer, fb_width, fb_height, 15, y);
+            let _ = with_font_manager(|fm| {
+                if let Some(font) = fm.get_font(FontSize::Medium, FontStyle::Regular) {
+                    let _ = font.render_text(&entry_text, framebuffer, fb_width, fb_height, 15, y);
+                }
+            });
         }
 
         Ok(())

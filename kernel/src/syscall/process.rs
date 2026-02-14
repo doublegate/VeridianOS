@@ -290,11 +290,11 @@ pub fn sys_thread_setaffinity(tid: usize, cpuset_ptr: usize, cpuset_size: usize)
     // Extract CPU mask from cpuset (simplified)
     let cpu_mask = if cpuset_size >= 8 {
         // Slice is exactly 8 bytes (cpuset_size >= 8 checked above)
-        u64::from_le_bytes(
-            cpuset[0..8]
-                .try_into()
-                .expect("8-byte slice conversion failed"),
-        )
+        let bytes: [u8; 8] = match cpuset[0..8].try_into() {
+            Ok(b) => b,
+            Err(_) => return Err(SyscallError::InvalidArgument),
+        };
+        u64::from_le_bytes(bytes)
     } else {
         return Err(SyscallError::InvalidArgument);
     };

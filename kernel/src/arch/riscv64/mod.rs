@@ -13,8 +13,7 @@ pub mod serial;
 #[allow(unused_imports)]
 pub use super::riscv::{context, timer};
 
-/// Called from bootstrap on RISC-V; appears unused on other architectures.
-#[allow(dead_code)]
+/// Called from bootstrap on RISC-V via `crate::arch::init()`.
 pub fn init() {
     // Initialize SBI (Supervisor Binary Interface)
     super::riscv::sbi::init();
@@ -42,8 +41,7 @@ pub fn init() {
     println!("[RISCV64] Architecture initialization complete (interrupts disabled)");
 }
 
-/// Halt the CPU. Used by panic/shutdown paths.
-#[allow(dead_code)]
+/// Halt the CPU. Used by panic/shutdown paths via `crate::arch::halt()`.
 pub fn halt() -> ! {
     loop {
         // SAFETY: wfi (Wait For Interrupt) halts the CPU until an interrupt occurs.
@@ -64,7 +62,7 @@ pub fn enable_interrupts() {
 }
 
 /// Disable interrupts with RAII guard that restores the previous state on drop.
-#[allow(dead_code)]
+/// Called via `crate::arch::disable_interrupts()`.
 pub fn disable_interrupts() -> impl Drop {
     struct InterruptGuard {
         was_enabled: bool,
@@ -95,8 +93,8 @@ pub fn disable_interrupts() -> impl Drop {
     }
 }
 
-/// Idle the CPU until an interrupt. Called from the scheduler idle loop.
-#[allow(dead_code)]
+/// Idle the CPU until an interrupt. Called from the scheduler idle loop
+/// via `crate::arch::idle()`.
 pub fn idle() {
     // SAFETY: wfi (Wait For Interrupt) halts the CPU until an interrupt.
     // Non-destructive.
@@ -125,8 +123,8 @@ pub fn serial_init() -> crate::serial::Uart16550Compat {
 /// Kernel heap start address (16MB into QEMU virt RAM at 0x80000000)
 pub const HEAP_START: usize = 0x81000000;
 
-/// Flush TLB for a specific virtual address.
-#[allow(dead_code)]
+/// Flush TLB for a specific virtual address. Called via
+/// `crate::arch::tlb_flush_address()`.
 pub fn tlb_flush_address(addr: u64) {
     // SAFETY: `sfence.vma` with a specific address and zero ASID invalidates
     // all TLB entries for that address. Supervisor-mode instruction, safe in
@@ -136,8 +134,7 @@ pub fn tlb_flush_address(addr: u64) {
     }
 }
 
-/// Flush entire TLB.
-#[allow(dead_code)]
+/// Flush entire TLB. Called via `crate::arch::tlb_flush_all()`.
 pub fn tlb_flush_all() {
     // SAFETY: `sfence.vma` with no arguments flushes all TLB entries.
     // Supervisor-mode fence, safe in S-mode.
@@ -149,11 +146,11 @@ pub fn tlb_flush_all() {
 /// I/O port stubs for RISC-V -- RISC-V does not have I/O ports.
 /// These exist solely so that architecture-generic driver code compiles
 /// on all platforms without conditional compilation at every call site.
+/// Called via `crate::arch::outb()`, etc.
 ///
 /// # Safety
 ///
 /// These are no-op stubs for API compatibility. Safe to call on RISC-V.
-#[allow(dead_code, clippy::missing_safety_doc)]
 pub unsafe fn outb(_port: u16, _value: u8) {
     // No-op: RISC-V doesn't have I/O ports
 }
@@ -163,7 +160,6 @@ pub unsafe fn outb(_port: u16, _value: u8) {
 /// # Safety
 ///
 /// This is a no-op stub for API compatibility. Safe to call on RISC-V.
-#[allow(dead_code, clippy::missing_safety_doc)]
 pub unsafe fn inb(_port: u16) -> u8 {
     // No-op: RISC-V doesn't have I/O ports
     0
@@ -174,7 +170,6 @@ pub unsafe fn inb(_port: u16) -> u8 {
 /// # Safety
 ///
 /// This is a no-op stub for API compatibility. Safe to call on RISC-V.
-#[allow(dead_code, clippy::missing_safety_doc)]
 pub unsafe fn outw(_port: u16, _value: u16) {
     // No-op: RISC-V doesn't have I/O ports
 }
@@ -184,7 +179,6 @@ pub unsafe fn outw(_port: u16, _value: u16) {
 /// # Safety
 ///
 /// This is a no-op stub for API compatibility. Safe to call on RISC-V.
-#[allow(dead_code, clippy::missing_safety_doc)]
 pub unsafe fn inw(_port: u16) -> u16 {
     // No-op: RISC-V doesn't have I/O ports
     0
@@ -195,7 +189,6 @@ pub unsafe fn inw(_port: u16) -> u16 {
 /// # Safety
 ///
 /// This is a no-op stub for API compatibility. Safe to call on RISC-V.
-#[allow(dead_code, clippy::missing_safety_doc)]
 pub unsafe fn outl(_port: u16, _value: u32) {
     // No-op: RISC-V doesn't have I/O ports
 }
@@ -205,7 +198,6 @@ pub unsafe fn outl(_port: u16, _value: u32) {
 /// # Safety
 ///
 /// This is a no-op stub for API compatibility. Safe to call on RISC-V.
-#[allow(dead_code, clippy::missing_safety_doc)]
 pub unsafe fn inl(_port: u16) -> u32 {
     // No-op: RISC-V doesn't have I/O ports
     0

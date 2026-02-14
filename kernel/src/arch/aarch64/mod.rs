@@ -12,8 +12,7 @@ pub mod entry;
 pub mod serial;
 pub mod timer;
 
-/// Called from bootstrap on AArch64; appears unused on other architectures.
-#[allow(dead_code)]
+/// Called from bootstrap on AArch64 via `crate::arch::init()`.
 pub fn init() {
     // SAFETY: uart_write_str performs a raw MMIO write to the PL011 UART at
     // 0x09000000. This is safe during kernel init as the UART is memory-mapped
@@ -25,8 +24,7 @@ pub fn init() {
     // This will be expanded later
 }
 
-/// Halt the CPU. Used by panic/shutdown paths.
-#[allow(dead_code)]
+/// Halt the CPU. Used by panic/shutdown paths via `crate::arch::halt()`.
 pub fn halt() -> ! {
     loop {
         // SAFETY: wfe (Wait For Event) halts the CPU until an event or interrupt
@@ -37,8 +35,8 @@ pub fn halt() -> ! {
     }
 }
 
-/// Idle the CPU until an event. Called from the scheduler idle loop.
-#[allow(dead_code)]
+/// Idle the CPU until an event. Called from the scheduler idle loop
+/// via `crate::arch::idle()`.
 pub fn idle() {
     // SAFETY: wfe (Wait For Event) halts the CPU until an event or interrupt.
     // Used for idle loops to reduce power consumption. Non-destructive.
@@ -59,7 +57,7 @@ pub fn speculation_barrier() {
 }
 
 /// Disable interrupts with RAII guard that restores the previous state on drop.
-#[allow(dead_code)]
+/// Called via `crate::arch::disable_interrupts()`.
 pub fn disable_interrupts() -> impl Drop {
     struct InterruptGuard {
         was_enabled: bool,
@@ -91,6 +89,7 @@ pub fn disable_interrupts() -> impl Drop {
 }
 
 /// Serial initialization for compatibility with the arch-generic interface.
+/// Not currently called on AArch64 (serial is initialized differently).
 #[allow(dead_code)]
 pub fn serial_init() -> crate::serial::Pl011Uart {
     crate::serial::Pl011Uart::new(0x0900_0000)
@@ -99,8 +98,8 @@ pub fn serial_init() -> crate::serial::Pl011Uart {
 /// Kernel heap start address (16MB into QEMU virt RAM at 0x40000000)
 pub const HEAP_START: usize = 0x41000000;
 
-/// Flush TLB for a specific virtual address.
-#[allow(dead_code)]
+/// Flush TLB for a specific virtual address. Called via
+/// `crate::arch::tlb_flush_address()`.
 pub fn tlb_flush_address(addr: u64) {
     // SAFETY: `tlbi vae1` invalidates the TLB entry at EL1. Address is shifted
     // right by 12 for page-number format. DSB SY + ISB ensure completion.
@@ -112,8 +111,7 @@ pub fn tlb_flush_address(addr: u64) {
     }
 }
 
-/// Flush entire TLB.
-#[allow(dead_code)]
+/// Flush entire TLB. Called via `crate::arch::tlb_flush_all()`.
 pub fn tlb_flush_all() {
     // SAFETY: `tlbi vmalle1` invalidates all EL1 TLB entries. DSB SY + ISB
     // ensure completion. Architectural maintenance instructions, safe at EL1.
@@ -127,11 +125,11 @@ pub fn tlb_flush_all() {
 /// I/O port stubs for AArch64 -- ARM does not have I/O ports.
 /// These exist solely so that architecture-generic driver code compiles
 /// on all platforms without conditional compilation at every call site.
+/// Called via `crate::arch::outb()`, etc.
 ///
 /// # Safety
 ///
 /// These are no-op stubs for API compatibility. Safe to call on AArch64.
-#[allow(dead_code, clippy::missing_safety_doc)]
 pub unsafe fn outb(_port: u16, _value: u8) {
     // No-op: ARM doesn't have I/O ports
 }
@@ -141,7 +139,6 @@ pub unsafe fn outb(_port: u16, _value: u8) {
 /// # Safety
 ///
 /// This is a no-op stub for API compatibility. Safe to call on AArch64.
-#[allow(dead_code, clippy::missing_safety_doc)]
 pub unsafe fn inb(_port: u16) -> u8 {
     // No-op: ARM doesn't have I/O ports
     0
@@ -152,7 +149,6 @@ pub unsafe fn inb(_port: u16) -> u8 {
 /// # Safety
 ///
 /// This is a no-op stub for API compatibility. Safe to call on AArch64.
-#[allow(dead_code, clippy::missing_safety_doc)]
 pub unsafe fn outw(_port: u16, _value: u16) {
     // No-op: ARM doesn't have I/O ports
 }
@@ -162,7 +158,6 @@ pub unsafe fn outw(_port: u16, _value: u16) {
 /// # Safety
 ///
 /// This is a no-op stub for API compatibility. Safe to call on AArch64.
-#[allow(dead_code, clippy::missing_safety_doc)]
 pub unsafe fn inw(_port: u16) -> u16 {
     // No-op: ARM doesn't have I/O ports
     0
@@ -173,7 +168,6 @@ pub unsafe fn inw(_port: u16) -> u16 {
 /// # Safety
 ///
 /// This is a no-op stub for API compatibility. Safe to call on AArch64.
-#[allow(dead_code, clippy::missing_safety_doc)]
 pub unsafe fn outl(_port: u16, _value: u32) {
     // No-op: ARM doesn't have I/O ports
 }
@@ -183,7 +177,6 @@ pub unsafe fn outl(_port: u16, _value: u32) {
 /// # Safety
 ///
 /// This is a no-op stub for API compatibility. Safe to call on AArch64.
-#[allow(dead_code, clippy::missing_safety_doc)]
 pub unsafe fn inl(_port: u16) -> u32 {
     // No-op: ARM doesn't have I/O ports
     0

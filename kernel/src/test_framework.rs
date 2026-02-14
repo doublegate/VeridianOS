@@ -407,18 +407,20 @@ impl TestRegistry {
 
 #[cfg(feature = "alloc")]
 #[allow(dead_code)]
-pub static mut TEST_REGISTRY: Option<TestRegistry> = None;
+static TEST_REGISTRY: spin::Mutex<Option<TestRegistry>> = spin::Mutex::new(None);
 
 /// Initialize the test registry. Called once before tests run.
 #[cfg(feature = "alloc")]
 #[allow(dead_code)]
 pub fn init_test_registry() {
-    // SAFETY: This is called once during test initialization, before any
-    // tests run. No concurrent access to TEST_REGISTRY is possible at
-    // this point since tests run sequentially after init.
-    unsafe {
-        TEST_REGISTRY = Some(TestRegistry::new());
-    }
+    *TEST_REGISTRY.lock() = Some(TestRegistry::new());
+}
+
+/// Execute a closure with the test registry (mutable access)
+#[cfg(feature = "alloc")]
+#[allow(dead_code)]
+pub fn with_test_registry<R, F: FnOnce(&mut TestRegistry) -> R>(f: F) -> Option<R> {
+    TEST_REGISTRY.lock().as_mut().map(f)
 }
 
 #[cfg(feature = "alloc")]
@@ -428,10 +430,10 @@ macro_rules! register_test {
         #[allow(non_snake_case)]
         #[used]
         #[link_section = ".test_registry"]
-        static $name: fn() = || unsafe {
-            if let Some(registry) = &mut $crate::test_framework::TEST_REGISTRY {
+        static $name: fn() = || {
+            $crate::test_framework::with_test_registry(|registry| {
                 registry.register_test(stringify!($name), $name);
-            }
+            });
         };
     };
 }

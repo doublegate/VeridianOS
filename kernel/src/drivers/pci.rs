@@ -2,12 +2,14 @@
 //!
 //! Implements PCI bus enumeration and device management.
 
-#![allow(static_mut_refs)]
-
 use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 use core::mem;
 
-use crate::services::driver_framework::{Bus, DeviceClass, DeviceId, DeviceInfo, DeviceStatus};
+use crate::{
+    error::KernelError,
+    services::driver_framework::{Bus, DeviceClass, DeviceId, DeviceInfo, DeviceStatus},
+    sync::once_lock::OnceLock,
+};
 
 /// PCI configuration space registers (per PCI Local Bus Specification)
 #[repr(u16)]
@@ -238,7 +240,7 @@ impl PciBus {
 
     /// Enumerate all PCI devices
     #[allow(unused_assignments)]
-    pub fn enumerate_devices(&self) -> Result<(), &'static str> {
+    pub fn enumerate_devices(&self) -> Result<(), KernelError> {
         if self.enumerated.load(core::sync::atomic::Ordering::Acquire) {
             return Ok(());
         }
@@ -551,7 +553,7 @@ impl Bus for PciBus {
         device_infos
     }
 
-    fn read_config(&self, device: &DeviceInfo, offset: u16, size: u8) -> Result<u32, &'static str> {
+    fn read_config(&self, device: &DeviceInfo, offset: u16, size: u8) -> Result<u32, KernelError> {
         // Extract location from device address
         let address = device.address as u32;
         let bus = ((address >> 16) & 0xFF) as u8;
@@ -572,7 +574,10 @@ impl Bus for PciBus {
                 mem::transmute::<u16, PciConfigRegister>(offset)
             }) as u32),
             4 => Ok(self.read_config_dword(location, offset)),
-            _ => Err("Invalid size"),
+            _ => Err(KernelError::InvalidArgument {
+                name: "size",
+                value: "must be 1, 2, or 4",
+            }),
         }
     }
 
@@ -582,7 +587,7 @@ impl Bus for PciBus {
         offset: u16,
         value: u32,
         size: u8,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), KernelError> {
         // Extract location from device address
         let address = device.address as u32;
         let bus = ((address >> 16) & 0xFF) as u8;
@@ -606,13 +611,18 @@ impl Bus for PciBus {
                 self.write_config_dword(location, offset & !3, new_value);
             }
             4 => self.write_config_dword(location, offset, value),
-            _ => return Err("Invalid size"),
+            _ => {
+                return Err(KernelError::InvalidArgument {
+                    name: "size",
+                    value: "must be 1, 2, or 4",
+                })
+            }
         }
 
         Ok(())
     }
 
-    fn enable_device(&mut self, device: &DeviceInfo) -> Result<(), &'static str> {
+    fn enable_device(&mut self, device: &DeviceInfo) -> Result<(), KernelError> {
         // Enable I/O and memory space, bus mastering
         let current_command = self.read_config(device, PciConfigRegister::Command as u16, 2)?;
         let new_command = current_command
@@ -626,7 +636,7 @@ impl Bus for PciBus {
         Ok(())
     }
 
-    fn disable_device(&mut self, device: &DeviceInfo) -> Result<(), &'static str> {
+    fn disable_device(&mut self, device: &DeviceInfo) -> Result<(), KernelError> {
         // Disable I/O and memory space, bus mastering
         let current_command = self.read_config(device, PciConfigRegister::Command as u16, 2)?;
         let new_command = current_command
@@ -642,27 +652,12 @@ impl Bus for PciBus {
 }
 
 /// Global PCI bus instance
-#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-static PCI_BUS: spin::Once<spin::Mutex<PciBus>> = spin::Once::new();
-
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-static mut PCI_BUS_STATIC: Option<spin::Mutex<PciBus>> = None;
+static PCI_BUS: OnceLock<spin::Mutex<PciBus>> = OnceLock::new();
 
 /// Initialize PCI bus
 pub fn init() {
     let pci_bus = PciBus::new();
-
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-    {
-        PCI_BUS.call_once(|| spin::Mutex::new(pci_bus));
-    }
-
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-    // SAFETY: PCI_BUS_STATIC is a static mut Option written once during single-threaded
-    // init. No concurrent access is possible at this point in kernel bootstrap.
-    unsafe {
-        PCI_BUS_STATIC = Some(spin::Mutex::new(pci_bus));
-    }
+    let _ = PCI_BUS.set(spin::Mutex::new(pci_bus));
 
     // Register with driver framework
     let driver_framework = crate::services::driver_framework::get_driver_framework();
@@ -680,30 +675,10 @@ pub fn init() {
 
 /// Check if PCI bus has been initialized
 pub fn is_pci_initialized() -> bool {
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-    {
-        PCI_BUS.get().is_some()
-    }
-
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-    // SAFETY: Reading PCI_BUS_STATIC to check initialization. The value is set once
-    // during init() and only read thereafter, so no data race is possible.
-    unsafe {
-        PCI_BUS_STATIC.is_some()
-    }
+    PCI_BUS.get().is_some()
 }
 
 /// Get the global PCI bus
 pub fn get_pci_bus() -> &'static spin::Mutex<PciBus> {
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-    {
-        PCI_BUS.get().expect("PCI bus not initialized")
-    }
-
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-    // SAFETY: PCI_BUS_STATIC is set once during init() and never modified after.
-    // The returned reference is 'static because the static lives for the program duration.
-    unsafe {
-        PCI_BUS_STATIC.as_ref().expect("PCI bus not initialized")
-    }
+    PCI_BUS.get().expect("PCI bus not initialized")
 }

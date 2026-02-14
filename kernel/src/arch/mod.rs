@@ -32,4 +32,7 @@ pub mod timer;
 // Common context module
 pub mod context;
 
+// Architecture-independent memory barrier abstractions
+pub mod barriers;
+
 // Serial initialization is handled per-architecture

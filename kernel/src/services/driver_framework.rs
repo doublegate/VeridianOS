@@ -9,6 +9,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use spin::RwLock;
 
+use crate::error::KernelError;
+
 /// Device class
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceClass {
@@ -76,31 +78,31 @@ pub trait Driver: Send + Sync {
     fn supports_device(&self, device: &DeviceInfo) -> bool;
 
     /// Probe device
-    fn probe(&mut self, device: &DeviceInfo) -> Result<(), &'static str>;
+    fn probe(&mut self, device: &DeviceInfo) -> Result<(), KernelError>;
 
     /// Attach to device
-    fn attach(&mut self, device: &DeviceInfo) -> Result<(), &'static str>;
+    fn attach(&mut self, device: &DeviceInfo) -> Result<(), KernelError>;
 
     /// Detach from device
-    fn detach(&mut self, device: &DeviceInfo) -> Result<(), &'static str>;
+    fn detach(&mut self, device: &DeviceInfo) -> Result<(), KernelError>;
 
     /// Suspend device
-    fn suspend(&mut self) -> Result<(), &'static str>;
+    fn suspend(&mut self) -> Result<(), KernelError>;
 
     /// Resume device
-    fn resume(&mut self) -> Result<(), &'static str>;
+    fn resume(&mut self) -> Result<(), KernelError>;
 
     /// Handle interrupt
-    fn handle_interrupt(&mut self, irq: u8) -> Result<(), &'static str>;
+    fn handle_interrupt(&mut self, irq: u8) -> Result<(), KernelError>;
 
     /// Read from device
-    fn read(&mut self, offset: u64, buffer: &mut [u8]) -> Result<usize, &'static str>;
+    fn read(&mut self, offset: u64, buffer: &mut [u8]) -> Result<usize, KernelError>;
 
     /// Write to device
-    fn write(&mut self, offset: u64, data: &[u8]) -> Result<usize, &'static str>;
+    fn write(&mut self, offset: u64, data: &[u8]) -> Result<usize, KernelError>;
 
     /// Device control (ioctl)
-    fn ioctl(&mut self, cmd: u32, arg: u64) -> Result<u64, &'static str>;
+    fn ioctl(&mut self, cmd: u32, arg: u64) -> Result<u64, KernelError>;
 }
 
 /// Bus operations trait
@@ -112,7 +114,7 @@ pub trait Bus: Send + Sync {
     fn scan(&mut self) -> Vec<DeviceInfo>;
 
     /// Read configuration space
-    fn read_config(&self, device: &DeviceInfo, offset: u16, size: u8) -> Result<u32, &'static str>;
+    fn read_config(&self, device: &DeviceInfo, offset: u16, size: u8) -> Result<u32, KernelError>;
 
     /// Write configuration space
     fn write_config(
@@ -121,13 +123,13 @@ pub trait Bus: Send + Sync {
         offset: u16,
         value: u32,
         size: u8,
-    ) -> Result<(), &'static str>;
+    ) -> Result<(), KernelError>;
 
     /// Enable device
-    fn enable_device(&mut self, device: &DeviceInfo) -> Result<(), &'static str>;
+    fn enable_device(&mut self, device: &DeviceInfo) -> Result<(), KernelError>;
 
     /// Disable device
-    fn disable_device(&mut self, device: &DeviceInfo) -> Result<(), &'static str>;
+    fn disable_device(&mut self, device: &DeviceInfo) -> Result<(), KernelError>;
 }
 
 /// Driver framework
@@ -173,11 +175,14 @@ impl Default for DriverFramework {
 
 impl DriverFramework {
     /// Register a driver
-    pub fn register_driver(&self, driver: Box<dyn Driver>) -> Result<(), &'static str> {
+    pub fn register_driver(&self, driver: Box<dyn Driver>) -> Result<(), KernelError> {
         let name: String = driver.name().into();
 
         if self.drivers.read().contains_key(&name) {
-            return Err("Driver already registered");
+            return Err(KernelError::AlreadyExists {
+                resource: "driver",
+                id: 0,
+            });
         }
 
         crate::println!("[DRIVER_FRAMEWORK] Registering driver: {}", name);
@@ -190,7 +195,7 @@ impl DriverFramework {
     }
 
     /// Unregister a driver
-    pub fn unregister_driver(&self, name: &str) -> Result<(), &'static str> {
+    pub fn unregister_driver(&self, name: &str) -> Result<(), KernelError> {
         // Detach from all devices
         let devices_to_detach: Vec<u64> = self
             .bindings
@@ -211,11 +216,14 @@ impl DriverFramework {
     }
 
     /// Register a bus
-    pub fn register_bus(&self, bus: Box<dyn Bus>) -> Result<(), &'static str> {
+    pub fn register_bus(&self, bus: Box<dyn Bus>) -> Result<(), KernelError> {
         let name = bus.name().into();
 
         if self.buses.read().contains_key(&name) {
-            return Err("Bus already registered");
+            return Err(KernelError::AlreadyExists {
+                resource: "bus",
+                id: 0,
+            });
         }
 
         crate::println!("[DRIVER_FRAMEWORK] Registering bus: {}", name);
@@ -225,7 +233,7 @@ impl DriverFramework {
     }
 
     /// Scan all buses for devices
-    pub fn scan_buses(&self) -> Result<usize, &'static str> {
+    pub fn scan_buses(&self) -> Result<usize, KernelError> {
         let mut total_devices = 0;
 
         let mut buses = self.buses.write();
@@ -259,13 +267,16 @@ impl DriverFramework {
     }
 
     /// Probe a device with all drivers
-    fn probe_device(&self, device_id: u64) -> Result<(), &'static str> {
+    fn probe_device(&self, device_id: u64) -> Result<(), KernelError> {
         let device = self
             .devices
             .read()
             .get(&device_id)
             .cloned()
-            .ok_or("Device not found")?;
+            .ok_or(KernelError::NotFound {
+                resource: "device",
+                id: device_id,
+            })?;
 
         let mut drivers = self.drivers.write();
 
@@ -313,7 +324,7 @@ impl DriverFramework {
     }
 
     /// Probe a driver with all devices
-    fn probe_driver(&self, driver_name: &str) -> Result<(), &'static str> {
+    fn probe_driver(&self, driver_name: &str) -> Result<(), KernelError> {
         let devices: Vec<(u64, DeviceInfo)> = self
             .devices
             .read()
@@ -326,7 +337,10 @@ impl DriverFramework {
         {
             let drivers = self.drivers.read();
             if !drivers.contains_key(driver_name) {
-                return Err("Driver not found");
+                return Err(KernelError::NotFound {
+                    resource: "driver",
+                    id: 0,
+                });
             }
         }
 
@@ -393,14 +407,17 @@ impl DriverFramework {
     }
 
     /// Unbind device from driver
-    fn unbind_device(&self, device_id: u64) -> Result<(), &'static str> {
+    fn unbind_device(&self, device_id: u64) -> Result<(), KernelError> {
         if let Some(driver_name) = self.bindings.write().remove(&device_id) {
-            let device = self
-                .devices
-                .read()
-                .get(&device_id)
-                .cloned()
-                .ok_or("Device not found")?;
+            let device =
+                self.devices
+                    .read()
+                    .get(&device_id)
+                    .cloned()
+                    .ok_or(KernelError::NotFound {
+                        resource: "device",
+                        id: device_id,
+                    })?;
 
             if let Some(driver) = self.drivers.write().get_mut(&driver_name) {
                 driver.detach(&device)?;
@@ -429,7 +446,7 @@ impl DriverFramework {
     }
 
     /// Handle interrupt
-    pub fn handle_interrupt(&self, irq: u8) -> Result<(), &'static str> {
+    pub fn handle_interrupt(&self, irq: u8) -> Result<(), KernelError> {
         let handler_names = self
             .irq_handlers
             .read()
@@ -464,13 +481,16 @@ impl DriverFramework {
     }
 
     /// Enable device
-    pub fn enable_device(&self, device_id: u64) -> Result<(), &'static str> {
+    pub fn enable_device(&self, device_id: u64) -> Result<(), KernelError> {
         let device = self
             .devices
             .read()
             .get(&device_id)
             .cloned()
-            .ok_or("Device not found")?;
+            .ok_or(KernelError::NotFound {
+                resource: "device",
+                id: device_id,
+            })?;
 
         if let Some(bus) = self.buses.write().get_mut(&device.bus) {
             bus.enable_device(&device)?;
@@ -486,13 +506,16 @@ impl DriverFramework {
     }
 
     /// Disable device
-    pub fn disable_device(&self, device_id: u64) -> Result<(), &'static str> {
+    pub fn disable_device(&self, device_id: u64) -> Result<(), KernelError> {
         let device = self
             .devices
             .read()
             .get(&device_id)
             .cloned()
-            .ok_or("Device not found")?;
+            .ok_or(KernelError::NotFound {
+                resource: "device",
+                id: device_id,
+            })?;
 
         if let Some(bus) = self.buses.write().get_mut(&device.bus) {
             bus.disable_device(&device)?;
@@ -550,45 +573,19 @@ pub struct DriverFrameworkStats {
     pub suspended_devices: usize,
 }
 
-/// Global driver framework using pointer pattern for all architectures
-/// This avoids static mut Option issues and provides consistent behavior
-static mut DRIVER_FRAMEWORK_PTR: *mut DriverFramework = core::ptr::null_mut();
+/// Global driver framework using OnceLock for safe initialization.
+static DRIVER_FRAMEWORK: crate::sync::once_lock::OnceLock<DriverFramework> =
+    crate::sync::once_lock::OnceLock::new();
 
 /// Initialize the driver framework
 pub fn init() {
     #[allow(unused_imports)]
     use crate::println;
 
-    // SAFETY: DRIVER_FRAMEWORK_PTR is a static mut pointer initialized
-    // to null. This block guards against double init, creates a
-    // DriverFramework via Box::leak for 'static lifetime, and stores
-    // the pointer with architecture-specific memory barriers. Called
-    // once during early boot before concurrent access.
-    unsafe {
-        if !DRIVER_FRAMEWORK_PTR.is_null() {
-            println!("[DRIVER_FRAMEWORK] Already initialized, skipping...");
-            return;
-        }
-
-        println!("[DRIVER_FRAMEWORK] Creating new DriverFramework...");
-        let framework = alloc::boxed::Box::new(DriverFramework::new());
-        let ptr = alloc::boxed::Box::leak(framework) as *mut DriverFramework;
-
-        // Memory barriers before assignment
-        #[cfg(target_arch = "aarch64")]
-        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
-        #[cfg(target_arch = "riscv64")]
-        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
-
-        DRIVER_FRAMEWORK_PTR = ptr;
-
-        // Memory barriers after assignment
-        #[cfg(target_arch = "aarch64")]
-        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
-        #[cfg(target_arch = "riscv64")]
-        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
-
-        println!("[DRIVER_FRAMEWORK] Driver framework initialized");
+    println!("[DRIVER_FRAMEWORK] Creating new DriverFramework...");
+    match DRIVER_FRAMEWORK.set(DriverFramework::new()) {
+        Ok(()) => println!("[DRIVER_FRAMEWORK] Driver framework initialized"),
+        Err(_) => println!("[DRIVER_FRAMEWORK] Already initialized, skipping..."),
     }
 }
 
@@ -597,16 +594,7 @@ pub fn init() {
 /// Returns `None` if the driver framework has not been initialized via
 /// [`init`].
 pub fn try_get_driver_framework() -> Option<&'static DriverFramework> {
-    // SAFETY: DRIVER_FRAMEWORK_PTR was set during init() via Box::leak,
-    // producing a valid 'static pointer. Once set, it is never modified
-    // or freed.
-    unsafe {
-        if DRIVER_FRAMEWORK_PTR.is_null() {
-            None
-        } else {
-            Some(&*DRIVER_FRAMEWORK_PTR)
-        }
-    }
+    DRIVER_FRAMEWORK.get()
 }
 
 /// Get the global driver framework.
@@ -615,7 +603,7 @@ pub fn try_get_driver_framework() -> Option<&'static DriverFramework> {
 /// Prefer [`try_get_driver_framework`] in contexts where a panic is
 /// unacceptable.
 pub fn get_driver_framework() -> &'static DriverFramework {
-    // Panic is intentional: accessing the driver framework before init() is a
-    // programming error indicating a broken boot sequence.
-    try_get_driver_framework().expect("Driver framework not initialized: init() was not called")
+    DRIVER_FRAMEWORK
+        .get()
+        .expect("Driver framework not initialized: init() was not called")
 }

@@ -34,10 +34,27 @@ pub fn alloc_pid() -> ProcessId {
 // Thread-safe current process storage using atomic pointer
 static CURRENT_PROCESS_PTR: AtomicPtr<Process> = AtomicPtr::new(core::ptr::null_mut());
 
+/// Map a task state to a process state
+fn task_state_to_process_state(state: ProcessState) -> ProcessState {
+    match state {
+        ProcessState::Creating => ProcessState::Ready,
+        ProcessState::Ready => ProcessState::Ready,
+        ProcessState::Running => ProcessState::Running,
+        ProcessState::Blocked => ProcessState::Blocked,
+        ProcessState::Sleeping => ProcessState::Sleeping,
+        ProcessState::Zombie => ProcessState::Dead,
+        ProcessState::Dead => ProcessState::Dead,
+    }
+}
+
 /// Get the current process
 ///
 /// Returns a static mutable reference to a `Process` wrapper around the
 /// currently scheduled task. If no task is running, returns a dummy process.
+///
+/// This function reuses a cached heap allocation to avoid allocating a new
+/// `Box<Process>` on every call. The first call allocates; subsequent calls
+/// update the existing allocation in-place.
 pub fn current_process() -> &'static mut Process {
     // Get from per-CPU scheduler
     if let Some(task_ptr) = super::SCHEDULER.lock().current() {
@@ -48,40 +65,36 @@ pub fn current_process() -> &'static mut Process {
         unsafe {
             let task = task_ptr.as_ref();
 
-            // Allocate process wrapper on heap for thread safety
             #[cfg(feature = "alloc")]
             {
                 use alloc::boxed::Box;
-                let process = Box::new(Process {
-                    pid: task.pid,
-                    state: match task.state {
-                        ProcessState::Creating => ProcessState::Ready,
-                        ProcessState::Ready => ProcessState::Ready,
-                        ProcessState::Running => ProcessState::Running,
-                        ProcessState::Blocked => ProcessState::Blocked,
-                        ProcessState::Sleeping => ProcessState::Sleeping,
-                        ProcessState::Zombie => ProcessState::Dead,
-                        ProcessState::Dead => ProcessState::Dead,
-                    },
-                    blocked_on: task.blocked_on,
-                    task: Some(task_ptr),
-                });
 
-                let process_ptr = Box::into_raw(process);
-                let old_ptr = CURRENT_PROCESS_PTR.swap(process_ptr, Ordering::SeqCst);
-
-                // SAFETY: `old_ptr` was previously created via `Box::into_raw` in
-                // a prior call to this function, so it is valid to reconstruct
-                // and drop. The SeqCst swap ensures we have exclusive ownership.
-                if !old_ptr.is_null() {
-                    drop(Box::from_raw(old_ptr));
+                // Reuse the existing allocation if available, otherwise allocate once.
+                // SAFETY: CURRENT_PROCESS_PTR is only modified by this function.
+                // The pointer, if non-null, was created by Box::into_raw in a
+                // previous call and has not been freed. We update it in-place to
+                // avoid per-call allocation/deallocation churn.
+                let process_ptr = CURRENT_PROCESS_PTR.load(Ordering::SeqCst);
+                if !process_ptr.is_null() {
+                    // Update the existing allocation in-place
+                    let process = &mut *process_ptr;
+                    process.pid = task.pid;
+                    process.state = task_state_to_process_state(task.state);
+                    process.blocked_on = task.blocked_on;
+                    process.task = Some(task_ptr);
+                    process
+                } else {
+                    // First call: allocate and leak a Process on the heap
+                    let process = Box::new(Process {
+                        pid: task.pid,
+                        state: task_state_to_process_state(task.state),
+                        blocked_on: task.blocked_on,
+                        task: Some(task_ptr),
+                    });
+                    let new_ptr = Box::into_raw(process);
+                    CURRENT_PROCESS_PTR.store(new_ptr, Ordering::SeqCst);
+                    &mut *new_ptr
                 }
-
-                // SAFETY: `process_ptr` was just created via `Box::into_raw` and
-                // has not been deallocated. We hold it in the atomic for future
-                // cleanup. The reference is valid for 'static because the kernel
-                // manages this allocation's lifetime.
-                &mut *process_ptr
             }
 
             #[cfg(not(feature = "alloc"))]
@@ -100,15 +113,7 @@ pub fn current_process() -> &'static mut Process {
                 // intermediate reference to the static.
                 let current_ref = &mut *core::ptr::addr_of_mut!(CURRENT_PROCESS);
                 current_ref.pid = task.pid;
-                current_ref.state = match task.state {
-                    ProcessState::Creating => ProcessState::Ready,
-                    ProcessState::Ready => ProcessState::Ready,
-                    ProcessState::Running => ProcessState::Running,
-                    ProcessState::Blocked => ProcessState::Blocked,
-                    ProcessState::Sleeping => ProcessState::Sleeping,
-                    ProcessState::Zombie => ProcessState::Dead,
-                    ProcessState::Dead => ProcessState::Dead,
-                };
+                current_ref.state = task_state_to_process_state(task.state);
                 current_ref.blocked_on = task.blocked_on;
                 current_ref.task = Some(task_ptr);
 
@@ -116,31 +121,36 @@ pub fn current_process() -> &'static mut Process {
             }
         }
     } else {
-        // No current task, return dummy
-        // SAFETY: We allocate a dummy Process on the heap (or use a static
-        // fallback) and manage its lifetime through the CURRENT_PROCESS_PTR
-        // atomic. Old allocations are cleaned up on each call.
+        // No current task, return dummy process.
+        // SAFETY: We reuse the cached allocation if available, or allocate once.
+        // The pointer is managed through CURRENT_PROCESS_PTR and is never freed
+        // during normal operation (only at kernel shutdown via Drop if applicable).
         unsafe {
             #[cfg(feature = "alloc")]
             {
                 use alloc::boxed::Box;
-                let dummy = Box::new(Process {
-                    pid: ProcessId(0),
-                    state: ProcessState::Running,
-                    blocked_on: None,
-                    task: None,
-                });
 
-                let dummy_ptr = Box::into_raw(dummy);
-                let old_ptr = CURRENT_PROCESS_PTR.swap(dummy_ptr, Ordering::SeqCst);
-
-                // SAFETY: Same as above -- old_ptr was created via Box::into_raw.
-                if !old_ptr.is_null() {
-                    drop(Box::from_raw(old_ptr));
+                let process_ptr = CURRENT_PROCESS_PTR.load(Ordering::SeqCst);
+                if !process_ptr.is_null() {
+                    // Reuse existing allocation with dummy values
+                    let process = &mut *process_ptr;
+                    process.pid = ProcessId(0);
+                    process.state = ProcessState::Running;
+                    process.blocked_on = None;
+                    process.task = None;
+                    process
+                } else {
+                    // First call: allocate and leak a dummy Process
+                    let dummy = Box::new(Process {
+                        pid: ProcessId(0),
+                        state: ProcessState::Running,
+                        blocked_on: None,
+                        task: None,
+                    });
+                    let new_ptr = Box::into_raw(dummy);
+                    CURRENT_PROCESS_PTR.store(new_ptr, Ordering::SeqCst);
+                    &mut *new_ptr
                 }
-
-                // SAFETY: dummy_ptr was just created and has not been deallocated.
-                &mut *dummy_ptr
             }
 
             #[cfg(not(feature = "alloc"))]

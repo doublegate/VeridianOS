@@ -12,7 +12,7 @@ use spin::RwLock;
 
 use crate::{
     desktop::{
-        font::{get_font_manager, FontSize, FontStyle},
+        font::{with_font_manager, FontSize, FontStyle},
         window_manager::{with_window_manager, InputEvent, WindowId},
     },
     error::KernelError,
@@ -334,16 +334,7 @@ impl TextEditor {
             *pixel = 16; // Very dark gray
         }
 
-        // Get font
-        let font_manager = get_font_manager()?;
-        let font = font_manager
-            .get_font(FontSize::Medium, FontStyle::Regular)
-            .ok_or(KernelError::NotFound {
-                resource: "font",
-                id: 0,
-            })?;
-
-        // Render status bar
+        // Get font and render status bar
         let status = if let Some(ref path) = self.file_path {
             if self.modified {
                 format!(
@@ -368,7 +359,11 @@ impl TextEditor {
             )
         };
 
-        let _ = font.render_text(&status, framebuffer, fb_width, fb_height, 5, 5);
+        with_font_manager(|font_manager| {
+            if let Some(font) = font_manager.get_font(FontSize::Medium, FontStyle::Regular) {
+                let _ = font.render_text(&status, framebuffer, fb_width, fb_height, 5, 5);
+            }
+        })?;
 
         // Render text
         let char_height = 12;
@@ -387,7 +382,11 @@ impl TextEditor {
             let line_str: String = line.iter().collect();
 
             // Render line
-            let _ = font.render_text(&line_str, framebuffer, fb_width, fb_height, 5, y);
+            let _ = with_font_manager(|fm| {
+                if let Some(font) = fm.get_font(FontSize::Medium, FontStyle::Regular) {
+                    let _ = font.render_text(&line_str, framebuffer, fb_width, fb_height, 5, y);
+                }
+            });
 
             // Render cursor if on this line
             if i == self.cursor_line {

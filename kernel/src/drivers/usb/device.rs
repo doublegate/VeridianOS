@@ -9,7 +9,10 @@ use alloc::{boxed::Box, collections::BTreeMap, format, string::String, vec, vec:
 use spin::RwLock;
 
 use super::{host::UsbHostController, transfer::UsbTransfer};
-use crate::services::driver_framework::{Bus, DeviceClass, DeviceId, DeviceInfo, DeviceStatus};
+use crate::{
+    error::KernelError,
+    services::driver_framework::{Bus, DeviceClass, DeviceId, DeviceInfo, DeviceStatus},
+};
 
 /// USB device speeds
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,7 +223,7 @@ impl UsbBus {
     pub fn add_controller(
         &self,
         mut controller: Box<dyn UsbHostController>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), KernelError> {
         // Initialize the controller
         controller.init()?;
 
@@ -245,12 +248,15 @@ impl UsbBus {
     }
 
     /// Scan controller ports for devices
-    fn scan_controller_ports(&self, controller_index: usize) -> Result<(), &'static str> {
+    fn scan_controller_ports(&self, controller_index: usize) -> Result<(), KernelError> {
         let port_count = {
             let controllers = self.controllers.read();
             controllers
                 .get(controller_index)
-                .ok_or("Controller not found")?
+                .ok_or(KernelError::NotFound {
+                    resource: "usb controller",
+                    id: controller_index as u64,
+                })?
                 .get_port_count()
         };
 
@@ -264,12 +270,15 @@ impl UsbBus {
     }
 
     /// Scan a specific port
-    fn scan_port(&self, controller_index: usize, port: u8) -> Result<(), &'static str> {
+    fn scan_port(&self, controller_index: usize, port: u8) -> Result<(), KernelError> {
         let status = {
             let controllers = self.controllers.read();
             controllers
                 .get(controller_index)
-                .ok_or("Controller not found")?
+                .ok_or(KernelError::NotFound {
+                    resource: "usb controller",
+                    id: controller_index as u64,
+                })?
                 .get_port_status(port)?
         };
 
@@ -286,9 +295,13 @@ impl UsbBus {
         // Reset and enable port
         {
             let mut controllers = self.controllers.write();
-            let controller = controllers
-                .get_mut(controller_index)
-                .ok_or("Controller not found")?;
+            let controller =
+                controllers
+                    .get_mut(controller_index)
+                    .ok_or(KernelError::NotFound {
+                        resource: "usb controller",
+                        id: controller_index as u64,
+                    })?;
 
             controller.reset_port(port)?;
             controller.enable_port(port)?;
@@ -311,7 +324,7 @@ impl UsbBus {
         controller_index: usize,
         port: u8,
         speed: UsbSpeed,
-    ) -> Result<u8, &'static str> {
+    ) -> Result<u8, KernelError> {
         // Allocate device address
         let device_address = self
             .next_address
@@ -326,9 +339,13 @@ impl UsbBus {
         // Set device address
         {
             let mut controllers = self.controllers.write();
-            let controller = controllers
-                .get_mut(controller_index)
-                .ok_or("Controller not found")?;
+            let controller =
+                controllers
+                    .get_mut(controller_index)
+                    .ok_or(KernelError::NotFound {
+                        resource: "usb controller",
+                        id: controller_index as u64,
+                    })?;
 
             controller.set_device_address(0, device_address)?;
         }
@@ -360,7 +377,7 @@ impl UsbBus {
         controller_index: usize,
         address: u8,
         device: &mut UsbDevice,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), KernelError> {
         let transfer = UsbTransfer::Setup {
             request_type: 0x80, // Device to host, standard, device
             request: 0x06,      // GET_DESCRIPTOR
@@ -371,15 +388,22 @@ impl UsbBus {
 
         let response = {
             let mut controllers = self.controllers.write();
-            let controller = controllers
-                .get_mut(controller_index)
-                .ok_or("Controller not found")?;
+            let controller =
+                controllers
+                    .get_mut(controller_index)
+                    .ok_or(KernelError::NotFound {
+                        resource: "usb controller",
+                        id: controller_index as u64,
+                    })?;
 
             controller.transfer(address, transfer)?
         };
 
         if response.len() < 18 {
-            return Err("Device descriptor too short");
+            return Err(KernelError::HardwareError {
+                device: "usb",
+                code: 3,
+            });
         }
 
         // Parse device descriptor
@@ -427,7 +451,7 @@ impl UsbBus {
         controller_index: usize,
         address: u8,
         index: u8,
-    ) -> Result<String, &'static str> {
+    ) -> Result<String, KernelError> {
         let transfer = UsbTransfer::Setup {
             request_type: 0x80,
             request: 0x06,
@@ -438,20 +462,30 @@ impl UsbBus {
 
         let response = {
             let mut controllers = self.controllers.write();
-            let controller = controllers
-                .get_mut(controller_index)
-                .ok_or("Controller not found")?;
+            let controller =
+                controllers
+                    .get_mut(controller_index)
+                    .ok_or(KernelError::NotFound {
+                        resource: "usb controller",
+                        id: controller_index as u64,
+                    })?;
 
             controller.transfer(address, transfer)?
         };
 
         if response.len() < 2 {
-            return Err("String descriptor too short");
+            return Err(KernelError::HardwareError {
+                device: "usb",
+                code: 4,
+            });
         }
 
         let length = response[0] as usize;
         if length < 2 || response[1] != 0x03 {
-            return Err("Invalid string descriptor");
+            return Err(KernelError::HardwareError {
+                device: "usb",
+                code: 5,
+            });
         }
 
         // Convert UTF-16LE to UTF-8
@@ -474,7 +508,7 @@ impl UsbBus {
         _controller_index: usize,
         _address: u8,
         device: &mut UsbDevice,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), KernelError> {
         // For now, just create a default configuration
         let config = UsbConfiguration {
             value: 1,
@@ -565,10 +599,12 @@ impl Bus for UsbBus {
         _device: &DeviceInfo,
         _offset: u16,
         _size: u8,
-    ) -> Result<u32, &'static str> {
+    ) -> Result<u32, KernelError> {
         // USB devices don't have traditional config space
         // This could be used for reading descriptors
-        Err("USB devices don't support config space reads")
+        Err(KernelError::OperationNotSupported {
+            operation: "config space read on USB device",
+        })
     }
 
     fn write_config(
@@ -577,12 +613,14 @@ impl Bus for UsbBus {
         _offset: u16,
         _value: u32,
         _size: u8,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), KernelError> {
         // USB devices don't have traditional config space
-        Err("USB devices don't support config space writes")
+        Err(KernelError::OperationNotSupported {
+            operation: "config space write on USB device",
+        })
     }
 
-    fn enable_device(&mut self, device: &DeviceInfo) -> Result<(), &'static str> {
+    fn enable_device(&mut self, device: &DeviceInfo) -> Result<(), KernelError> {
         let address = device.address as u8;
 
         if let Some(usb_device) = self.devices.write().get_mut(&address) {
@@ -596,7 +634,7 @@ impl Bus for UsbBus {
         Ok(())
     }
 
-    fn disable_device(&mut self, device: &DeviceInfo) -> Result<(), &'static str> {
+    fn disable_device(&mut self, device: &DeviceInfo) -> Result<(), KernelError> {
         let address = device.address as u8;
 
         if let Some(usb_device) = self.devices.write().get_mut(&address) {

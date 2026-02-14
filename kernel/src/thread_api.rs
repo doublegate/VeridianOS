@@ -592,48 +592,19 @@ pub struct ThreadStats {
     pub name: String,
 }
 
-/// Global thread manager using pointer pattern for all architectures
-/// This avoids static mut Option issues and provides consistent behavior
-static mut THREAD_MANAGER_PTR: *mut ThreadManager = core::ptr::null_mut();
+/// Global thread manager using OnceLock for safe initialization.
+static THREAD_MANAGER: crate::sync::once_lock::OnceLock<ThreadManager> =
+    crate::sync::once_lock::OnceLock::new();
 
 /// Initialize the thread manager
 pub fn init() {
     #[allow(unused_imports)]
     use crate::println;
 
-    // SAFETY: THREAD_MANAGER_PTR is a global mutable pointer initialized
-    // exactly once during single-threaded bootstrap (before the scheduler
-    // starts).  The null check prevents double-initialization.  Box::leak
-    // produces a 'static reference that outlives the kernel.  Memory
-    // barriers (dsb/isb on AArch64, fence on RISC-V) ensure the pointer
-    // write is visible to all cores before any subsequent read in
-    // get_thread_manager().  x86_64 has strong memory ordering and needs
-    // no explicit barrier.
-    unsafe {
-        if !THREAD_MANAGER_PTR.is_null() {
-            println!("[THREAD_API] Already initialized, skipping...");
-            return;
-        }
-
-        println!("[THREAD_API] Creating new ThreadManager...");
-        let manager = alloc::boxed::Box::new(ThreadManager::new());
-        let ptr = alloc::boxed::Box::leak(manager) as *mut ThreadManager;
-
-        // Memory barriers before assignment
-        #[cfg(target_arch = "aarch64")]
-        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
-        #[cfg(target_arch = "riscv64")]
-        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
-
-        THREAD_MANAGER_PTR = ptr;
-
-        // Memory barriers after assignment
-        #[cfg(target_arch = "aarch64")]
-        core::arch::asm!("dsb sy", "isb", options(nostack, nomem, preserves_flags));
-        #[cfg(target_arch = "riscv64")]
-        core::arch::asm!("fence rw, rw", options(nostack, nomem, preserves_flags));
-
-        println!("[THREAD_API] Thread management APIs initialized");
+    println!("[THREAD_API] Creating new ThreadManager...");
+    match THREAD_MANAGER.set(ThreadManager::new()) {
+        Ok(()) => println!("[THREAD_API] Thread management APIs initialized"),
+        Err(_) => println!("[THREAD_API] Already initialized, skipping..."),
     }
 }
 
@@ -641,17 +612,7 @@ pub fn init() {
 ///
 /// Returns `None` if the thread manager has not been initialized via [`init`].
 pub fn try_get_thread_manager() -> Option<&'static ThreadManager> {
-    // SAFETY: THREAD_MANAGER_PTR is set once in init() during
-    // single-threaded bootstrap and never modified afterward.
-    // The pointer came from Box::leak and points to a valid,
-    // heap-allocated ThreadManager with 'static lifetime.
-    unsafe {
-        if THREAD_MANAGER_PTR.is_null() {
-            None
-        } else {
-            Some(&*THREAD_MANAGER_PTR)
-        }
-    }
+    THREAD_MANAGER.get()
 }
 
 /// Get the global thread manager.
@@ -659,9 +620,9 @@ pub fn try_get_thread_manager() -> Option<&'static ThreadManager> {
 /// Panics if the thread manager has not been initialized via [`init`].
 /// Prefer [`try_get_thread_manager`] in contexts where a panic is unacceptable.
 pub fn get_thread_manager() -> &'static ThreadManager {
-    // Panic is intentional: calling code that depends on the thread manager
-    // before init() is a programming error indicating a broken boot sequence.
-    try_get_thread_manager().expect("Thread manager not initialized: init() was not called")
+    THREAD_MANAGER
+        .get()
+        .expect("Thread manager not initialized: init() was not called")
 }
 
 // Convenience functions

@@ -7,6 +7,7 @@ use core::fmt;
 
 /// Main kernel error type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "kernel errors must be handled, not silently discarded"]
 pub enum KernelError {
     /// Memory-related errors
     OutOfMemory {

@@ -3,8 +3,6 @@
 //! Provides user authentication, password hashing, and multi-factor
 //! authentication.
 
-#![allow(static_mut_refs)]
-
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 use spin::RwLock;
@@ -12,6 +10,7 @@ use spin::RwLock;
 use crate::{
     crypto::hash::{sha256, Hash256},
     error::KernelError,
+    sync::once_lock::OnceLock,
 };
 
 /// User identifier
@@ -342,16 +341,16 @@ impl Default for AuthManager {
 }
 
 /// Global authentication manager
-static mut AUTH_MANAGER: Option<AuthManager> = None;
+static AUTH_MANAGER: OnceLock<AuthManager> = OnceLock::new();
 
 /// Initialize authentication framework
 pub fn init() -> Result<(), KernelError> {
-    // SAFETY: AUTH_MANAGER is a static mut Option written once during
-    // single-threaded kernel init. No concurrent access is possible at this
-    // point in kernel bootstrap.
-    unsafe {
-        AUTH_MANAGER = Some(AuthManager::new());
-    }
+    AUTH_MANAGER
+        .set(AuthManager::new())
+        .map_err(|_| KernelError::AlreadyExists {
+            resource: "auth_manager",
+            id: 0,
+        })?;
 
     // Create default root account
     let auth_manager = get_auth_manager();
@@ -365,11 +364,7 @@ pub fn init() -> Result<(), KernelError> {
 
 /// Get global authentication manager
 pub fn get_auth_manager() -> &'static AuthManager {
-    // SAFETY: AUTH_MANAGER is set once during init() and the returned reference has
-    // 'static lifetime because the static mut is never moved or dropped. The
-    // AuthManager uses internal RwLock synchronization for thread-safe access
-    // to accounts.
-    unsafe { AUTH_MANAGER.as_ref().expect("Auth manager not initialized") }
+    AUTH_MANAGER.get().expect("Auth manager not initialized")
 }
 
 #[cfg(test)]

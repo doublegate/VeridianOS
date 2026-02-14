@@ -4,13 +4,17 @@
 
 // Console driver provides VGA text mode and serial console. Not all color
 // variants and driver methods are exercised yet.
-#![allow(dead_code, static_mut_refs)]
+#![allow(dead_code)]
 
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
 use spin::Mutex;
 
-use crate::services::driver_framework::{DeviceClass, DeviceInfo, Driver};
+use crate::{
+    error::KernelError,
+    services::driver_framework::{DeviceClass, DeviceInfo, Driver},
+    sync::once_lock::OnceLock,
+};
 
 /// Console colors (VGA text mode)
 #[allow(dead_code)]
@@ -60,25 +64,25 @@ pub trait ConsoleDevice: Send + Sync {
     fn dimensions(&self) -> (usize, usize); // (width, height)
 
     /// Clear the screen
-    fn clear(&mut self) -> Result<(), &'static str>;
+    fn clear(&mut self) -> Result<(), KernelError>;
 
     /// Write a character at position
-    fn write_char(&mut self, x: usize, y: usize, ch: ConsoleChar) -> Result<(), &'static str>;
+    fn write_char(&mut self, x: usize, y: usize, ch: ConsoleChar) -> Result<(), KernelError>;
 
     /// Write a string at position
-    fn write_string(&mut self, x: usize, y: usize, s: &str, color: u8) -> Result<(), &'static str>;
+    fn write_string(&mut self, x: usize, y: usize, s: &str, color: u8) -> Result<(), KernelError>;
 
     /// Scroll up by one line
-    fn scroll_up(&mut self) -> Result<(), &'static str>;
+    fn scroll_up(&mut self) -> Result<(), KernelError>;
 
     /// Set cursor position
-    fn set_cursor(&mut self, x: usize, y: usize) -> Result<(), &'static str>;
+    fn set_cursor(&mut self, x: usize, y: usize) -> Result<(), KernelError>;
 
     /// Get cursor position
     fn get_cursor(&self) -> (usize, usize);
 
     /// Show/hide cursor
-    fn set_cursor_visible(&mut self, visible: bool) -> Result<(), &'static str>;
+    fn set_cursor_visible(&mut self, visible: bool) -> Result<(), KernelError>;
 }
 
 /// VGA text mode console driver
@@ -153,7 +157,7 @@ impl ConsoleDevice for VgaConsole {
         (self.width, self.height)
     }
 
-    fn clear(&mut self) -> Result<(), &'static str> {
+    fn clear(&mut self) -> Result<(), KernelError> {
         let blank = ConsoleChar::new(b' ', ConsoleColor::LightGray, ConsoleColor::Black);
 
         // SAFETY: self.buffer points to the VGA text buffer at 0xB8000,
@@ -172,9 +176,12 @@ impl ConsoleDevice for VgaConsole {
         Ok(())
     }
 
-    fn write_char(&mut self, x: usize, y: usize, ch: ConsoleChar) -> Result<(), &'static str> {
+    fn write_char(&mut self, x: usize, y: usize, ch: ConsoleChar) -> Result<(), KernelError> {
         if x >= self.width || y >= self.height {
-            return Err("Position out of bounds");
+            return Err(KernelError::InvalidArgument {
+                name: "position",
+                value: "out of bounds",
+            });
         }
 
         let index = self.buffer_index(x, y);
@@ -187,12 +194,15 @@ impl ConsoleDevice for VgaConsole {
         Ok(())
     }
 
-    fn write_string(&mut self, x: usize, y: usize, s: &str, color: u8) -> Result<(), &'static str> {
+    fn write_string(&mut self, x: usize, y: usize, s: &str, color: u8) -> Result<(), KernelError> {
         let mut pos_x = x;
         let pos_y = y;
 
         if pos_y >= self.height {
-            return Err("Y position out of bounds");
+            return Err(KernelError::InvalidArgument {
+                name: "y_position",
+                value: "out of bounds",
+            });
         }
 
         for byte in s.bytes() {
@@ -208,7 +218,7 @@ impl ConsoleDevice for VgaConsole {
         Ok(())
     }
 
-    fn scroll_up(&mut self) -> Result<(), &'static str> {
+    fn scroll_up(&mut self) -> Result<(), KernelError> {
         // SAFETY: All buffer accesses use buffer_index(x, y) where
         // x < self.width and y < self.height. The VGA buffer at
         // 0xB8000 is 80*25 = 2000 ConsoleChar entries. Moving lines
@@ -234,9 +244,12 @@ impl ConsoleDevice for VgaConsole {
         Ok(())
     }
 
-    fn set_cursor(&mut self, x: usize, y: usize) -> Result<(), &'static str> {
+    fn set_cursor(&mut self, x: usize, y: usize) -> Result<(), KernelError> {
         if x >= self.width || y >= self.height {
-            return Err("Cursor position out of bounds");
+            return Err(KernelError::InvalidArgument {
+                name: "cursor_position",
+                value: "out of bounds",
+            });
         }
 
         self.cursor_x = x;
@@ -250,7 +263,7 @@ impl ConsoleDevice for VgaConsole {
         (self.cursor_x, self.cursor_y)
     }
 
-    fn set_cursor_visible(&mut self, visible: bool) -> Result<(), &'static str> {
+    fn set_cursor_visible(&mut self, visible: bool) -> Result<(), KernelError> {
         self.cursor_visible = visible;
 
         // SAFETY: I/O port writes to VGA CRT controller (0x3D4/0x3D5)
@@ -380,7 +393,7 @@ impl ConsoleDevice for SerialConsole {
         (self.width, self.height)
     }
 
-    fn clear(&mut self) -> Result<(), &'static str> {
+    fn clear(&mut self) -> Result<(), KernelError> {
         // Send ANSI clear screen sequence
         self.write_str("\x1b[2J\x1b[H");
         self.cursor_x = 0;
@@ -388,7 +401,7 @@ impl ConsoleDevice for SerialConsole {
         Ok(())
     }
 
-    fn write_char(&mut self, x: usize, y: usize, ch: ConsoleChar) -> Result<(), &'static str> {
+    fn write_char(&mut self, x: usize, y: usize, ch: ConsoleChar) -> Result<(), KernelError> {
         // Position cursor and write character
         self.write_str(&alloc::format!(
             "\x1b[{};{}H{}",
@@ -399,27 +412,24 @@ impl ConsoleDevice for SerialConsole {
         Ok(())
     }
 
-    fn write_string(
-        &mut self,
-        x: usize,
-        y: usize,
-        s: &str,
-        _color: u8,
-    ) -> Result<(), &'static str> {
+    fn write_string(&mut self, x: usize, y: usize, s: &str, _color: u8) -> Result<(), KernelError> {
         // Position cursor and write string
         self.write_str(&alloc::format!("\x1b[{};{}H{}", y + 1, x + 1, s));
         Ok(())
     }
 
-    fn scroll_up(&mut self) -> Result<(), &'static str> {
+    fn scroll_up(&mut self) -> Result<(), KernelError> {
         // Send ANSI scroll up sequence
         self.write_str("\x1b[S");
         Ok(())
     }
 
-    fn set_cursor(&mut self, x: usize, y: usize) -> Result<(), &'static str> {
+    fn set_cursor(&mut self, x: usize, y: usize) -> Result<(), KernelError> {
         if x >= self.width || y >= self.height {
-            return Err("Cursor position out of bounds");
+            return Err(KernelError::InvalidArgument {
+                name: "cursor_position",
+                value: "out of bounds",
+            });
         }
 
         self.cursor_x = x;
@@ -434,7 +444,7 @@ impl ConsoleDevice for SerialConsole {
         (self.cursor_x, self.cursor_y)
     }
 
-    fn set_cursor_visible(&mut self, visible: bool) -> Result<(), &'static str> {
+    fn set_cursor_visible(&mut self, visible: bool) -> Result<(), KernelError> {
         if visible {
             self.write_str("\x1b[?25h"); // Show cursor
         } else {
@@ -474,9 +484,12 @@ impl ConsoleDriver {
     }
 
     /// Set active console device
-    pub fn set_active_device(&mut self, index: usize) -> Result<(), &'static str> {
+    pub fn set_active_device(&mut self, index: usize) -> Result<(), KernelError> {
         if index >= self.devices.len() {
-            return Err("Invalid device index");
+            return Err(KernelError::InvalidArgument {
+                name: "device_index",
+                value: "out of range",
+            });
         }
 
         self.active_device = index;
@@ -517,12 +530,12 @@ impl Driver for ConsoleDriver {
         matches!(device.class, DeviceClass::Display | DeviceClass::Serial)
     }
 
-    fn probe(&mut self, _device: &DeviceInfo) -> Result<(), &'static str> {
+    fn probe(&mut self, _device: &DeviceInfo) -> Result<(), KernelError> {
         crate::println!("[CONSOLE] Probing device: {}", _device.name);
         Ok(())
     }
 
-    fn attach(&mut self, device: &DeviceInfo) -> Result<(), &'static str> {
+    fn attach(&mut self, device: &DeviceInfo) -> Result<(), KernelError> {
         crate::println!("[CONSOLE] Attaching to device: {}", device.name);
 
         match device.class {
@@ -536,48 +549,55 @@ impl Driver for ConsoleDriver {
                 let serial_console = SerialConsole::new(0x3F8);
                 self.add_device(Box::new(serial_console));
             }
-            _ => return Err("Unsupported device class"),
+            _ => {
+                return Err(KernelError::OperationNotSupported {
+                    operation: "attach unsupported device class",
+                })
+            }
         }
 
         Ok(())
     }
 
-    fn detach(&mut self, _device: &DeviceInfo) -> Result<(), &'static str> {
+    fn detach(&mut self, _device: &DeviceInfo) -> Result<(), KernelError> {
         crate::println!("[CONSOLE] Detaching from device: {}", _device.name);
         // TODO(phase4): Remove specific console device from device list
         Ok(())
     }
 
-    fn suspend(&mut self) -> Result<(), &'static str> {
+    fn suspend(&mut self) -> Result<(), KernelError> {
         crate::println!("[CONSOLE] Suspending console driver");
         Ok(())
     }
 
-    fn resume(&mut self) -> Result<(), &'static str> {
+    fn resume(&mut self) -> Result<(), KernelError> {
         crate::println!("[CONSOLE] Resuming console driver");
         Ok(())
     }
 
-    fn handle_interrupt(&mut self, _irq: u8) -> Result<(), &'static str> {
+    fn handle_interrupt(&mut self, _irq: u8) -> Result<(), KernelError> {
         crate::println!("[CONSOLE] Handling interrupt {} for console", _irq);
         Ok(())
     }
 
-    fn read(&mut self, _offset: u64, _buffer: &mut [u8]) -> Result<usize, &'static str> {
+    fn read(&mut self, _offset: u64, _buffer: &mut [u8]) -> Result<usize, KernelError> {
         // TODO(phase4): Read input from console keyboard driver
         Ok(0)
     }
 
-    fn write(&mut self, _offset: u64, data: &[u8]) -> Result<usize, &'static str> {
+    fn write(&mut self, _offset: u64, data: &[u8]) -> Result<usize, KernelError> {
         if let Ok(s) = core::str::from_utf8(data) {
             self.write_to_all(s);
             Ok(data.len())
         } else {
-            Err("Invalid UTF-8 data")
+            Err(KernelError::InvalidArgument {
+                name: "data",
+                value: "invalid UTF-8",
+            })
         }
     }
 
-    fn ioctl(&mut self, cmd: u32, arg: u64) -> Result<u64, &'static str> {
+    fn ioctl(&mut self, cmd: u32, arg: u64) -> Result<u64, KernelError> {
         match cmd {
             0x2000 => {
                 // Get active device index
@@ -599,17 +619,16 @@ impl Driver for ConsoleDriver {
                 }
                 Ok(0)
             }
-            _ => Err("Unknown ioctl command"),
+            _ => Err(KernelError::InvalidArgument {
+                name: "ioctl_cmd",
+                value: "unknown",
+            }),
         }
     }
 }
 
 /// Global console driver instance
-#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-static CONSOLE_DRIVER: spin::Once<Mutex<ConsoleDriver>> = spin::Once::new();
-
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-static mut CONSOLE_DRIVER_STATIC: Option<Mutex<ConsoleDriver>> = None;
+static CONSOLE_DRIVER: OnceLock<Mutex<ConsoleDriver>> = OnceLock::new();
 
 /// Initialize console subsystem
 pub fn init() {
@@ -629,17 +648,7 @@ pub fn init() {
         device.set_cursor_visible(true).ok();
     }
 
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-    {
-        CONSOLE_DRIVER.call_once(|| Mutex::new(console_driver));
-    }
-
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-    // SAFETY: Called once during early init before concurrent access.
-    // CONSOLE_DRIVER_STATIC is only written here and read later.
-    unsafe {
-        CONSOLE_DRIVER_STATIC = Some(Mutex::new(console_driver));
-    }
+    let _ = CONSOLE_DRIVER.set(Mutex::new(console_driver));
 
     // Register with driver framework
     let driver_framework = crate::services::driver_framework::get_driver_framework();
@@ -654,19 +663,7 @@ pub fn init() {
 
 /// Get the global console driver
 pub fn get_console_driver() -> &'static Mutex<ConsoleDriver> {
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-    {
-        CONSOLE_DRIVER
-            .get()
-            .expect("Console driver not initialized")
-    }
-
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-    // SAFETY: CONSOLE_DRIVER_STATIC was set during init(). Once set,
-    // it is never modified. The Option is always Some after init.
-    unsafe {
-        CONSOLE_DRIVER_STATIC
-            .as_ref()
-            .expect("Console driver not initialized")
-    }
+    CONSOLE_DRIVER
+        .get()
+        .expect("Console driver not initialized")
 }

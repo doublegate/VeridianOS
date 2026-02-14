@@ -67,10 +67,12 @@ pub mod test_programs {
             crate::println!("Filesystem test: exercising VFS...");
 
             // Write a file
-            crate::fs::write_file("/tmp/fs_test.txt", b"VFS works").map_err(String::from)?;
+            crate::fs::write_file("/tmp/fs_test.txt", b"VFS works")
+                .map_err(|e| alloc::format!("{}", e))?;
 
             // Read it back
-            let data = crate::fs::read_file("/tmp/fs_test.txt").map_err(String::from)?;
+            let data =
+                crate::fs::read_file("/tmp/fs_test.txt").map_err(|e| alloc::format!("{}", e))?;
             if data != b"VFS works" {
                 return Err(String::from("Read data mismatch"));
             }
@@ -78,8 +80,10 @@ pub mod test_programs {
 
             // List /tmp
             let vfs = crate::fs::get_vfs().read();
-            let node = vfs.resolve_path("/tmp").map_err(String::from)?;
-            let entries = node.readdir().map_err(String::from)?;
+            let node = vfs
+                .resolve_path("/tmp")
+                .map_err(|e| alloc::format!("{}", e))?;
+            let entries = node.readdir().map_err(|e| alloc::format!("{}", e))?;
             let found = entries.iter().any(|e| e.name == "fs_test.txt");
             if !found {
                 return Err(String::from("File not found in directory listing"));

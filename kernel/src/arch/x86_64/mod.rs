@@ -20,8 +20,7 @@ pub mod syscall;
 pub mod timer;
 pub mod vga;
 
-/// Called from bootstrap on x86_64; appears unused on other architectures.
-#[allow(dead_code)]
+/// Called from bootstrap on x86_64 via `crate::arch::init()`.
 pub fn init() {
     // SAFETY: The cli instruction disables hardware interrupts. This is required
     // during initialization to prevent interrupt handlers from firing before the
@@ -88,8 +87,7 @@ pub fn init() {
     println!("[ARCH] Skipping interrupt enable for now");
 }
 
-/// Halt the CPU. Used by panic/shutdown paths.
-#[allow(dead_code)]
+/// Halt the CPU. Used by panic/shutdown paths via `crate::arch::halt()`.
 pub fn halt() -> ! {
     use x86_64::instructions::hlt;
     interrupts::disable();
@@ -148,33 +146,28 @@ pub fn serial_init() -> uart_16550::SerialPort {
     serial_port
 }
 
-/// Basic I/O port functions -- used by PCI, console, and storage drivers.
-#[allow(dead_code)]
+/// Basic I/O port functions -- used by PCI, console, and storage drivers
+/// via `crate::arch::outb()`.
 pub unsafe fn outb(port: u16, value: u8) {
     x86_64::instructions::port::Port::new(port).write(value);
 }
 
-#[allow(dead_code)]
 pub unsafe fn inb(port: u16) -> u8 {
     x86_64::instructions::port::Port::new(port).read()
 }
 
-#[allow(dead_code)]
 pub unsafe fn outw(port: u16, value: u16) {
     x86_64::instructions::port::Port::new(port).write(value);
 }
 
-#[allow(dead_code)]
 pub unsafe fn inw(port: u16) -> u16 {
     x86_64::instructions::port::Port::new(port).read()
 }
 
-#[allow(dead_code)]
 pub unsafe fn outl(port: u16, value: u32) {
     x86_64::instructions::port::Port::new(port).write(value);
 }
 
-#[allow(dead_code)]
 pub unsafe fn inl(port: u16) -> u32 {
     x86_64::instructions::port::Port::new(port).read()
 }
@@ -182,8 +175,8 @@ pub unsafe fn inl(port: u16) -> u32 {
 /// Kernel heap start address (mapped by bootloader 0.9)
 pub const HEAP_START: usize = 0x444444440000;
 
-/// Flush TLB for a specific virtual address.
-#[allow(dead_code)]
+/// Flush TLB for a specific virtual address. Called via
+/// `crate::arch::tlb_flush_address()`.
 pub fn tlb_flush_address(addr: u64) {
     // SAFETY: `invlpg` invalidates the TLB entry for the page containing the
     // given virtual address. Privileged, no side effects beyond TLB.
@@ -192,8 +185,7 @@ pub fn tlb_flush_address(addr: u64) {
     }
 }
 
-/// Flush entire TLB.
-#[allow(dead_code)]
+/// Flush entire TLB. Called via `crate::arch::tlb_flush_all()`.
 pub fn tlb_flush_all() {
     // SAFETY: Reloading CR3 with its current value flushes all non-global TLB
     // entries. Privileged, no memory side effects.
@@ -205,14 +197,7 @@ pub fn tlb_flush_all() {
 }
 
 mod interrupts {
-    /// Enable interrupts. Will be called once interrupt handlers are
-    /// registered.
-    #[allow(dead_code)]
-    pub unsafe fn enable() {
-        x86_64::instructions::interrupts::enable();
-    }
-
-    #[allow(dead_code)]
+    /// Disable hardware interrupts. Called from `halt()`.
     pub fn disable() {
         x86_64::instructions::interrupts::disable();
     }

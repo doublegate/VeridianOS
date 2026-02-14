@@ -4,9 +4,11 @@
 //! framebuffer access
 
 // Allow dead code for GPU mode info fields not yet fully utilized
-#![allow(dead_code, static_mut_refs)]
+#![allow(dead_code)]
 
 use core::slice;
+
+use spin::Mutex;
 
 use crate::{error::KernelError, graphics::Color};
 
@@ -292,8 +294,8 @@ impl GpuDriver {
     }
 }
 
-/// Global GPU driver instance
-static mut GPU_DRIVER: Option<GpuDriver> = None;
+/// Global GPU driver instance protected by Mutex
+static GPU_DRIVER: Mutex<Option<GpuDriver>> = Mutex::new(None);
 
 /// Initialize GPU driver
 pub fn init() -> Result<(), KernelError> {
@@ -303,23 +305,15 @@ pub fn init() -> Result<(), KernelError> {
     // TODO(phase6): Detect actual framebuffer from bootloader (VBE/GOP)
     let driver = GpuDriver::simple(0xFD000000, 1024, 768);
 
-    // SAFETY: GPU_DRIVER is a static mut Option written once during single-threaded
-    // init. No concurrent access is possible at this point in kernel bootstrap.
-    unsafe {
-        GPU_DRIVER = Some(driver);
-    }
+    *GPU_DRIVER.lock() = Some(driver);
 
     println!("[GPU] GPU driver initialized (1024x768)");
     Ok(())
 }
 
-/// Get global GPU driver
-pub fn get_driver() -> Option<&'static mut GpuDriver> {
-    // SAFETY: GPU_DRIVER is set once during init() and the returned mutable
-    // reference is only valid because the kernel is single-threaded during
-    // framebuffer access. In a multi-threaded context, this would need proper
-    // synchronization.
-    unsafe { GPU_DRIVER.as_mut() }
+/// Execute a closure with the GPU driver (mutable access)
+pub fn with_driver<R, F: FnOnce(&mut GpuDriver) -> R>(f: F) -> Option<R> {
+    GPU_DRIVER.lock().as_mut().map(f)
 }
 
 #[cfg(test)]

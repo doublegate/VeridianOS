@@ -294,7 +294,7 @@ pub fn kernel_init_main() {
 
     // Test 2: Write file via VFS create + write
     {
-        let ok = (|| -> Result<(), &'static str> {
+        let ok = (|| -> Result<(), crate::error::KernelError> {
             let vfs = fs::get_vfs().read();
             let parent = vfs.resolve_path("/tmp/test_init")?;
             let file = parent.create("hello.txt", fs::Permissions::default())?;
@@ -307,7 +307,7 @@ pub fn kernel_init_main() {
 
     // Test 3: Read file back and verify contents
     {
-        let ok = (|| -> Result<bool, &'static str> {
+        let ok = (|| -> Result<bool, crate::error::KernelError> {
             let vfs = fs::get_vfs().read();
             let dir = vfs.resolve_path("/tmp/test_init")?;
             let file = dir.lookup("hello.txt")?;
@@ -321,7 +321,7 @@ pub fn kernel_init_main() {
 
     // Test 4: List directory entries
     {
-        let ok = (|| -> Result<bool, &'static str> {
+        let ok = (|| -> Result<bool, crate::error::KernelError> {
             let vfs = fs::get_vfs().read();
             let node = vfs.resolve_path("/tmp/test_init")?;
             let entries = node.readdir()?;

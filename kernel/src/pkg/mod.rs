@@ -3,13 +3,15 @@
 //! VeridianOS package manager for installing, updating, and managing software
 //! packages.
 
-#![allow(static_mut_refs, clippy::unwrap_or_default)]
+#![allow(clippy::unwrap_or_default)]
 
 pub mod format;
 pub mod repository;
 pub mod resolver;
 
 use alloc::{collections::BTreeMap, string::String, vec, vec::Vec};
+
+use spin::Mutex;
 
 use crate::error::KernelError;
 
@@ -389,27 +391,18 @@ impl Default for PackageManager {
     }
 }
 
-/// Global package manager instance
-static mut PACKAGE_MANAGER: Option<PackageManager> = None;
+/// Global package manager instance protected by Mutex
+static PACKAGE_MANAGER: Mutex<Option<PackageManager>> = Mutex::new(None);
 
 /// Initialize package management system
 pub fn init() {
-    // SAFETY: PACKAGE_MANAGER is a static mut Option written once during
-    // single-threaded kernel initialization. No concurrent access occurs at
-    // this point in the boot sequence.
-    unsafe {
-        PACKAGE_MANAGER = Some(PackageManager::new());
-    }
+    *PACKAGE_MANAGER.lock() = Some(PackageManager::new());
     crate::println!("[PKG] Package management system initialized");
 }
 
-/// Get global package manager
-pub fn get_package_manager() -> Option<&'static mut PackageManager> {
-    // SAFETY: PACKAGE_MANAGER is a static mut Option initialized once in init().
-    // The returned &'static mut reference is valid for the kernel's lifetime. In
-    // the current single-threaded kernel model, only one caller accesses this
-    // at a time.
-    unsafe { PACKAGE_MANAGER.as_mut() }
+/// Execute a closure with the package manager (mutable access)
+pub fn with_package_manager<R, F: FnOnce(&mut PackageManager) -> R>(f: F) -> Option<R> {
+    PACKAGE_MANAGER.lock().as_mut().map(f)
 }
 
 // ============================================================================

@@ -1,7 +1,5 @@
 //! Ready queue management for scheduler
 
-#![allow(static_mut_refs)]
-
 #[cfg(feature = "alloc")]
 extern crate alloc;
 #[cfg(feature = "alloc")]
@@ -430,7 +428,15 @@ const NUM_NORMAL_PRIORITIES: usize = 4;
 pub static READY_QUEUE: Mutex<ReadyQueue> = Mutex::new(ReadyQueue::new());
 
 /// Global ready queue for RISC-V (avoiding spin::Mutex issues)
+///
+/// SAFETY JUSTIFICATION: This static mut is intentionally kept because:
+/// 1. RISC-V early boot cannot use spin::Mutex without deadlocking
+/// 2. Lazily initialized once on first access (single-hart at boot)
+/// 3. After initialization, accessed only through get_ready_queue()
+/// 4. Cannot use OnceLock because it requires heap (Box) which may not be
+///    available when the scheduler first needs to run
 #[cfg(target_arch = "riscv64")]
+#[allow(static_mut_refs)]
 pub static mut READY_QUEUE_STATIC: Option<alloc::boxed::Box<ReadyQueue>> = None;
 
 /// Per-CPU ready queues for SMP
@@ -444,6 +450,7 @@ pub const MAX_CPUS: usize = 64;
 
 /// Get the global ready queue (architecture-specific)
 #[cfg(target_arch = "riscv64")]
+#[allow(static_mut_refs)]
 pub fn get_ready_queue() -> &'static mut ReadyQueue {
     // SAFETY: READY_QUEUE_STATIC is a static mut that is lazily initialized
     // on first access during early boot (single-hart, no concurrency). After

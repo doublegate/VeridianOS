@@ -3,9 +3,9 @@
 //! Handles IPv4 packet construction, parsing, routing, and fragmentation.
 //! Provides the foundation for TCP and UDP transport protocols.
 
-#![allow(static_mut_refs)]
-
 use alloc::vec::Vec;
+
+use spin::Mutex;
 
 use super::{IpAddress, Ipv4Address};
 use crate::error::KernelError;
@@ -133,30 +133,23 @@ pub struct RouteEntry {
     pub interface: usize,
 }
 
-/// Simple routing table
-static mut ROUTES: Vec<RouteEntry> = Vec::new();
+/// Simple routing table protected by Mutex
+static ROUTES: Mutex<Vec<RouteEntry>> = Mutex::new(Vec::new());
 
 /// Add a route
 pub fn add_route(entry: RouteEntry) {
-    // SAFETY: ROUTES is a static mut Vec modified during single-threaded kernel
-    // init or controlled routing table updates. No concurrent access assumed.
-    unsafe {
-        ROUTES.push(entry);
-    }
+    ROUTES.lock().push(entry);
 }
 
 /// Lookup route for destination
 pub fn lookup_route(dest: Ipv4Address) -> Option<RouteEntry> {
-    // SAFETY: ROUTES is a static mut Vec read during route lookup. Read-only access
-    // assumes no concurrent modification to the routing table.
-    unsafe {
-        for route in &ROUTES {
-            let dest_masked = dest.to_u32() & route.netmask.to_u32();
-            let route_masked = route.destination.to_u32() & route.netmask.to_u32();
+    let routes = ROUTES.lock();
+    for route in routes.iter() {
+        let dest_masked = dest.to_u32() & route.netmask.to_u32();
+        let route_masked = route.destination.to_u32() & route.netmask.to_u32();
 
-            if dest_masked == route_masked {
-                return Some(route.clone());
-            }
+        if dest_masked == route_masked {
+            return Some(route.clone());
         }
     }
     None

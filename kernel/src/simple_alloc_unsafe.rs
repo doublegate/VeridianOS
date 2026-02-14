@@ -111,9 +111,12 @@ unsafe impl GlobalAlloc for UnsafeBumpAllocator {
         // Debug output for first allocation attempt
         #[cfg(target_arch = "riscv64")]
         {
-            static mut FIRST_ALLOC: bool = true;
-            if FIRST_ALLOC {
-                FIRST_ALLOC = false;
+            use core::sync::atomic::AtomicBool;
+            static FIRST_ALLOC: AtomicBool = AtomicBool::new(true);
+            if FIRST_ALLOC
+                .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
                 let uart = 0x10000000 as *mut u8;
                 let msg = b"[ALLOC] First allocation attempt\n";
                 for &byte in msg {

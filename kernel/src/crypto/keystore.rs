@@ -2,13 +2,12 @@
 //!
 //! Secure storage and management of cryptographic keys.
 
-#![allow(static_mut_refs)]
-
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 use spin::RwLock;
 
 use super::{CryptoError, CryptoResult};
+use crate::sync::once_lock::OnceLock;
 
 /// Key identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -173,23 +172,12 @@ pub fn init() -> CryptoResult<()> {
     Ok(())
 }
 
+/// Global key store
+static KEYSTORE_STORAGE: OnceLock<KeyStore> = OnceLock::new();
+
 /// Get global key store
 pub fn get_keystore() -> &'static KeyStore {
-    // SAFETY: KEYSTORE_STORAGE is a function-local static mut Option lazily
-    // initialized on first access. The is_none() check ensures it is written at
-    // most once. The returned reference has 'static lifetime because
-    // function-local statics live for the program's duration. The KeyStore uses
-    // internal RwLock for thread-safe access.
-    unsafe {
-        static mut KEYSTORE_STORAGE: Option<KeyStore> = None;
-
-        if KEYSTORE_STORAGE.is_none() {
-            KEYSTORE_STORAGE = Some(KeyStore::new());
-        }
-
-        // is_none() check above guarantees Some
-        KEYSTORE_STORAGE.as_ref().expect("keystore not initialized")
-    }
+    KEYSTORE_STORAGE.get_or_init(KeyStore::new)
 }
 
 #[cfg(test)]

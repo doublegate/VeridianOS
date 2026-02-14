@@ -8,6 +8,7 @@ use spin::RwLock;
 #[cfg(target_arch = "aarch64")]
 use super::bare_lock::RwLock;
 use super::VfsNode;
+use crate::error::{FsError, KernelError};
 
 /// File descriptor number
 pub type FileDescriptor = usize;
@@ -136,9 +137,11 @@ impl File {
     }
 
     /// Read from the file
-    pub fn read(&self, buffer: &mut [u8]) -> Result<usize, &'static str> {
+    pub fn read(&self, buffer: &mut [u8]) -> Result<usize, KernelError> {
         if !self.flags.read {
-            return Err("File not opened for reading");
+            return Err(KernelError::PermissionDenied {
+                operation: "read file not opened for reading",
+            });
         }
 
         let mut pos = self.position.write();
@@ -148,9 +151,11 @@ impl File {
     }
 
     /// Write to the file
-    pub fn write(&self, data: &[u8]) -> Result<usize, &'static str> {
+    pub fn write(&self, data: &[u8]) -> Result<usize, KernelError> {
         if !self.flags.write {
-            return Err("File not opened for writing");
+            return Err(KernelError::PermissionDenied {
+                operation: "write file not opened for writing",
+            });
         }
 
         let mut pos = self.position.write();
@@ -167,7 +172,7 @@ impl File {
     }
 
     /// Seek to a position in the file
-    pub fn seek(&self, from: SeekFrom) -> Result<usize, &'static str> {
+    pub fn seek(&self, from: SeekFrom) -> Result<usize, KernelError> {
         let mut pos = self.position.write();
 
         let new_pos = match from {
@@ -175,23 +180,34 @@ impl File {
             SeekFrom::Current(offset) => {
                 if offset < 0 {
                     pos.checked_sub((-offset) as usize)
-                        .ok_or("Seek before start of file")?
+                        .ok_or(KernelError::InvalidArgument {
+                            name: "offset",
+                            value: "seek before start of file",
+                        })?
                 } else {
-                    pos.checked_add(offset as usize).ok_or("Seek overflow")?
+                    pos.checked_add(offset as usize)
+                        .ok_or(KernelError::InvalidArgument {
+                            name: "offset",
+                            value: "seek overflow",
+                        })?
                 }
             }
             SeekFrom::End(offset) => {
                 let metadata = self.node.metadata()?;
                 if offset < 0 {
-                    metadata
-                        .size
-                        .checked_sub((-offset) as usize)
-                        .ok_or("Seek before start of file")?
+                    metadata.size.checked_sub((-offset) as usize).ok_or(
+                        KernelError::InvalidArgument {
+                            name: "offset",
+                            value: "seek before start of file",
+                        },
+                    )?
                 } else {
-                    metadata
-                        .size
-                        .checked_add(offset as usize)
-                        .ok_or("Seek overflow")?
+                    metadata.size.checked_add(offset as usize).ok_or(
+                        KernelError::InvalidArgument {
+                            name: "offset",
+                            value: "seek overflow",
+                        },
+                    )?
                 }
             }
         };
@@ -260,7 +276,7 @@ impl Default for FileTable {
 
 impl FileTable {
     /// Open a file and return a file descriptor
-    pub fn open(&self, file: Arc<File>) -> Result<FileDescriptor, &'static str> {
+    pub fn open(&self, file: Arc<File>) -> Result<FileDescriptor, KernelError> {
         self.open_with_flags(file, false)
     }
 
@@ -269,7 +285,7 @@ impl FileTable {
         &self,
         file: Arc<File>,
         cloexec: bool,
-    ) -> Result<FileDescriptor, &'static str> {
+    ) -> Result<FileDescriptor, KernelError> {
         let mut files = self.files.write();
         let mut next_fd = self.next_fd.write();
 
@@ -286,7 +302,7 @@ impl FileTable {
         // No empty slot, append new one
         let fd = *next_fd;
         if fd >= 1024 {
-            return Err("Too many open files");
+            return Err(KernelError::FsError(FsError::TooManyOpenFiles));
         }
 
         files.push(Some(entry));
@@ -310,11 +326,11 @@ impl FileTable {
     }
 
     /// Close a file descriptor
-    pub fn close(&self, fd: FileDescriptor) -> Result<(), &'static str> {
+    pub fn close(&self, fd: FileDescriptor) -> Result<(), KernelError> {
         let mut files = self.files.write();
 
         if fd >= files.len() {
-            return Err("Invalid file descriptor");
+            return Err(KernelError::FsError(FsError::BadFileDescriptor));
         }
 
         if let Some(entry) = files[fd].take() {
@@ -324,37 +340,43 @@ impl FileTable {
             }
             Ok(())
         } else {
-            Err("File descriptor not open")
+            Err(KernelError::FsError(FsError::BadFileDescriptor))
         }
     }
 
     /// Duplicate a file descriptor
-    pub fn dup(&self, fd: FileDescriptor) -> Result<FileDescriptor, &'static str> {
-        let file = self.get(fd).ok_or("Invalid file descriptor")?;
+    pub fn dup(&self, fd: FileDescriptor) -> Result<FileDescriptor, KernelError> {
+        let file = self
+            .get(fd)
+            .ok_or(KernelError::FsError(FsError::BadFileDescriptor))?;
         file.inc_ref();
         // Duplicated FDs don't inherit close-on-exec
         self.open(file)
     }
 
     /// Duplicate a file descriptor with close-on-exec flag
-    pub fn dup_cloexec(&self, fd: FileDescriptor) -> Result<FileDescriptor, &'static str> {
-        let file = self.get(fd).ok_or("Invalid file descriptor")?;
+    pub fn dup_cloexec(&self, fd: FileDescriptor) -> Result<FileDescriptor, KernelError> {
+        let file = self
+            .get(fd)
+            .ok_or(KernelError::FsError(FsError::BadFileDescriptor))?;
         file.inc_ref();
         self.open_with_flags(file, true)
     }
 
     /// Replace a file descriptor with another
-    pub fn dup2(&self, old_fd: FileDescriptor, new_fd: FileDescriptor) -> Result<(), &'static str> {
+    pub fn dup2(&self, old_fd: FileDescriptor, new_fd: FileDescriptor) -> Result<(), KernelError> {
         // If old_fd == new_fd, just return success without doing anything
         if old_fd == new_fd {
             // Verify old_fd is valid
             if self.get(old_fd).is_none() {
-                return Err("Invalid file descriptor");
+                return Err(KernelError::FsError(FsError::BadFileDescriptor));
             }
             return Ok(());
         }
 
-        let file = self.get(old_fd).ok_or("Invalid file descriptor")?;
+        let file = self
+            .get(old_fd)
+            .ok_or(KernelError::FsError(FsError::BadFileDescriptor))?;
         file.inc_ref();
 
         let mut files = self.files.write();
@@ -383,13 +405,18 @@ impl FileTable {
         old_fd: FileDescriptor,
         new_fd: FileDescriptor,
         cloexec: bool,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), KernelError> {
         // dup3 with same fds is an error (unlike dup2)
         if old_fd == new_fd {
-            return Err("old_fd and new_fd cannot be the same");
+            return Err(KernelError::InvalidArgument {
+                name: "new_fd",
+                value: "cannot be same as old_fd in dup3",
+            });
         }
 
-        let file = self.get(old_fd).ok_or("Invalid file descriptor")?;
+        let file = self
+            .get(old_fd)
+            .ok_or(KernelError::FsError(FsError::BadFileDescriptor))?;
         file.inc_ref();
 
         let mut files = self.files.write();
@@ -410,33 +437,33 @@ impl FileTable {
     }
 
     /// Set close-on-exec flag for a file descriptor
-    pub fn set_cloexec(&self, fd: FileDescriptor, cloexec: bool) -> Result<(), &'static str> {
+    pub fn set_cloexec(&self, fd: FileDescriptor, cloexec: bool) -> Result<(), KernelError> {
         let mut files = self.files.write();
 
         if fd >= files.len() {
-            return Err("Invalid file descriptor");
+            return Err(KernelError::FsError(FsError::BadFileDescriptor));
         }
 
         if let Some(entry) = files[fd].as_mut() {
             entry.cloexec = cloexec;
             Ok(())
         } else {
-            Err("File descriptor not open")
+            Err(KernelError::FsError(FsError::BadFileDescriptor))
         }
     }
 
     /// Get close-on-exec flag for a file descriptor
-    pub fn get_cloexec(&self, fd: FileDescriptor) -> Result<bool, &'static str> {
+    pub fn get_cloexec(&self, fd: FileDescriptor) -> Result<bool, KernelError> {
         let files = self.files.read();
 
         if fd >= files.len() {
-            return Err("Invalid file descriptor");
+            return Err(KernelError::FsError(FsError::BadFileDescriptor));
         }
 
         if let Some(entry) = files[fd].as_ref() {
             Ok(entry.cloexec)
         } else {
-            Err("File descriptor not open")
+            Err(KernelError::FsError(FsError::BadFileDescriptor))
         }
     }
 

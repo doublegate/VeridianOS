@@ -2,6 +2,8 @@
 
 //! Verifies the integrity of the boot chain using cryptographic signatures.
 
+use spin::Mutex;
+
 use super::crypto::{hash, HashAlgorithm};
 use crate::error::KernelError;
 
@@ -39,33 +41,29 @@ impl SecureBootConfig {
     }
 }
 
-static mut CONFIG: SecureBootConfig = SecureBootConfig::default();
+static CONFIG: Mutex<SecureBootConfig> = Mutex::new(SecureBootConfig::default());
 
 /// Verify secure boot chain
 pub fn verify() -> Result<(), KernelError> {
-    // SAFETY: CONFIG is a static mut SecureBootConfig read during single-threaded
-    // kernel init. It is only written by enable()/disable() which also run
-    // during init. No concurrent access is possible at this point in the
-    // bootstrap sequence.
-    unsafe {
-        if !CONFIG.enabled {
-            println!("[SECBOOT] Secure boot disabled");
-            return Ok(());
-        }
+    let config = CONFIG.lock();
 
-        println!("[SECBOOT] Verifying secure boot chain...");
-
-        // TODO(phase3): Verify bootloader and kernel signatures, check TPM measurements
-
-        if CONFIG.enforce {
-            // In enforce mode, fail if we can't verify
-            println!("[SECBOOT] Secure boot enforcement not yet implemented");
-            return Err(KernelError::NotImplemented { feature: "feature" });
-        }
-
-        println!("[SECBOOT] Secure boot verification complete (non-enforcing)");
-        Ok(())
+    if !config.enabled {
+        println!("[SECBOOT] Secure boot disabled");
+        return Ok(());
     }
+
+    println!("[SECBOOT] Verifying secure boot chain...");
+
+    // TODO(phase3): Verify bootloader and kernel signatures, check TPM measurements
+
+    if config.enforce {
+        // In enforce mode, fail if we can't verify
+        println!("[SECBOOT] Secure boot enforcement not yet implemented");
+        return Err(KernelError::NotImplemented { feature: "feature" });
+    }
+
+    println!("[SECBOOT] Secure boot verification complete (non-enforcing)");
+    Ok(())
 }
 
 /// Compute kernel hash for verification
@@ -81,24 +79,17 @@ pub fn compute_kernel_hash() -> Result<[u8; 32], KernelError> {
 
 /// Enable secure boot
 pub fn enable(enforce: bool) {
-    // SAFETY: CONFIG is a static mut SecureBootConfig written during
-    // single-threaded kernel init or controlled administrative operations. No
-    // concurrent readers.
-    unsafe {
-        CONFIG.enabled = true;
-        CONFIG.enforce = enforce;
-    }
+    let mut config = CONFIG.lock();
+    config.enabled = true;
+    config.enforce = enforce;
     println!("[SECBOOT] Secure boot enabled (enforce={})", enforce);
 }
 
 /// Disable secure boot
 pub fn disable() {
-    // SAFETY: CONFIG is a static mut SecureBootConfig written during controlled
-    // administrative operations. Single-threaded access assumed.
-    unsafe {
-        CONFIG.enabled = false;
-        CONFIG.enforce = false;
-    }
+    let mut config = CONFIG.lock();
+    config.enabled = false;
+    config.enforce = false;
     println!("[SECBOOT] Secure boot disabled");
 }
 

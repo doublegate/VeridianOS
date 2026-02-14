@@ -7,6 +7,7 @@
 use alloc::{format, string::String, sync::Arc, vec::Vec};
 
 use super::{DirEntry, Filesystem, Metadata, NodeType, Permissions, VfsNode};
+use crate::error::{FsError, KernelError};
 
 /// ProcFS node types
 enum ProcNodeType {
@@ -55,7 +56,7 @@ impl VfsNode for ProcNode {
         }
     }
 
-    fn read(&self, offset: usize, buffer: &mut [u8]) -> Result<usize, &'static str> {
+    fn read(&self, offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
         let content = match &self.node_type {
             ProcNodeType::SystemFile(name) => {
                 match name.as_str() {
@@ -150,7 +151,7 @@ impl VfsNode for ProcNode {
                     _ => String::new(),
                 }
             }
-            _ => return Err("Cannot read this file"),
+            _ => return Err(KernelError::FsError(FsError::NotAFile)),
         };
 
         let bytes = content.as_bytes();
@@ -163,11 +164,11 @@ impl VfsNode for ProcNode {
         Ok(bytes_to_read)
     }
 
-    fn write(&self, _offset: usize, _data: &[u8]) -> Result<usize, &'static str> {
-        Err("ProcFS is read-only")
+    fn write(&self, _offset: usize, _data: &[u8]) -> Result<usize, KernelError> {
+        Err(KernelError::FsError(FsError::ReadOnly))
     }
 
-    fn metadata(&self) -> Result<Metadata, &'static str> {
+    fn metadata(&self) -> Result<Metadata, KernelError> {
         let node_type = match &self.node_type {
             ProcNodeType::Root | ProcNodeType::ProcessDir(_) => NodeType::Directory,
             _ => NodeType::File,
@@ -185,7 +186,7 @@ impl VfsNode for ProcNode {
         })
     }
 
-    fn readdir(&self) -> Result<Vec<DirEntry>, &'static str> {
+    fn readdir(&self) -> Result<Vec<DirEntry>, KernelError> {
         let mut entries = Vec::new();
 
         entries.push(DirEntry {
@@ -258,13 +259,13 @@ impl VfsNode for ProcNode {
                     inode: 0,
                 });
             }
-            _ => return Err("Not a directory"),
+            _ => return Err(KernelError::FsError(FsError::NotADirectory)),
         }
 
         Ok(entries)
     }
 
-    fn lookup(&self, name: &str) -> Result<Arc<dyn VfsNode>, &'static str> {
+    fn lookup(&self, name: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
         match &self.node_type {
             ProcNodeType::Root => {
                 // Check for system files
@@ -279,7 +280,7 @@ impl VfsNode for ProcNode {
                             // TODO(phase3): Validate PID against process table before creating node
                             Ok(Arc::new(ProcNode::new_process_dir(pid)) as Arc<dyn VfsNode>)
                         } else {
-                            Err("File not found")
+                            Err(KernelError::FsError(FsError::NotFound))
                         }
                     }
                 }
@@ -289,9 +290,9 @@ impl VfsNode for ProcNode {
                     *pid,
                     String::from(name),
                 )) as Arc<dyn VfsNode>),
-                _ => Err("File not found"),
+                _ => Err(KernelError::FsError(FsError::NotFound)),
             },
-            _ => Err("Not a directory"),
+            _ => Err(KernelError::FsError(FsError::NotADirectory)),
         }
     }
 
@@ -299,24 +300,24 @@ impl VfsNode for ProcNode {
         &self,
         _name: &str,
         _permissions: Permissions,
-    ) -> Result<Arc<dyn VfsNode>, &'static str> {
-        Err("ProcFS is read-only")
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(FsError::ReadOnly))
     }
 
     fn mkdir(
         &self,
         _name: &str,
         _permissions: Permissions,
-    ) -> Result<Arc<dyn VfsNode>, &'static str> {
-        Err("ProcFS is read-only")
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(FsError::ReadOnly))
     }
 
-    fn unlink(&self, _name: &str) -> Result<(), &'static str> {
-        Err("ProcFS is read-only")
+    fn unlink(&self, _name: &str) -> Result<(), KernelError> {
+        Err(KernelError::FsError(FsError::ReadOnly))
     }
 
-    fn truncate(&self, _size: usize) -> Result<(), &'static str> {
-        Err("ProcFS is read-only")
+    fn truncate(&self, _size: usize) -> Result<(), KernelError> {
+        Err(KernelError::FsError(FsError::ReadOnly))
     }
 }
 
@@ -352,7 +353,7 @@ impl Filesystem for ProcFs {
         true
     }
 
-    fn sync(&self) -> Result<(), &'static str> {
+    fn sync(&self) -> Result<(), KernelError> {
         Ok(())
     }
 }
