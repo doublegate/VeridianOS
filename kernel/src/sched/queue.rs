@@ -431,13 +431,18 @@ pub static READY_QUEUE: Mutex<ReadyQueue> = Mutex::new(ReadyQueue::new());
 ///
 /// SAFETY JUSTIFICATION: This static mut is intentionally kept because:
 /// 1. RISC-V early boot cannot use spin::Mutex without deadlocking
-/// 2. Lazily initialized once on first access (single-hart at boot)
-/// 3. After initialization, accessed only through get_ready_queue()
-/// 4. Cannot use OnceLock because it requires heap (Box) which may not be
-///    available when the scheduler first needs to run
+/// 2. Const-initialized in BSS (zero-init matches ReadyQueue::new())
+/// 3. After boot, accessed only through get_ready_queue()
+/// 4. Cannot use OnceLock because it may not be available when the scheduler
+///    first needs to run
+///
+/// NOTE: Previously used Option<Box<ReadyQueue>> with lazy initialization,
+/// but Box::new(ReadyQueue::new()) places ~72KB on the stack in debug mode
+/// before heap-allocating, which corrupted the bump allocator on RISC-V.
+/// Const-initializing directly in BSS avoids all heap/stack issues.
 #[cfg(target_arch = "riscv64")]
 #[allow(static_mut_refs)]
-pub static mut READY_QUEUE_STATIC: Option<alloc::boxed::Box<ReadyQueue>> = None;
+pub static mut READY_QUEUE_STATIC: ReadyQueue = ReadyQueue::new();
 
 /// Per-CPU ready queues for SMP
 #[cfg(feature = "smp")]
@@ -452,28 +457,10 @@ pub const MAX_CPUS: usize = 64;
 #[cfg(target_arch = "riscv64")]
 #[allow(static_mut_refs)]
 pub fn get_ready_queue() -> &'static mut ReadyQueue {
-    // SAFETY: READY_QUEUE_STATIC is a static mut that is lazily initialized
-    // on first access during early boot (single-hart, no concurrency). After
-    // initialization, it is only accessed through this function. On RISC-V,
-    // we use a static mut instead of spin::Mutex to avoid deadlocks during
-    // early bootstrap. The 'static lifetime is valid because the Box is
-    // leaked into the static.
-    unsafe {
-        if READY_QUEUE_STATIC.is_none() {
-            // Initialize the ready queue
-            #[cfg(feature = "alloc")]
-            {
-                let queue = alloc::boxed::Box::new(ReadyQueue::new());
-                READY_QUEUE_STATIC = Some(queue);
-            }
-            #[cfg(not(feature = "alloc"))]
-            {
-                panic!("Cannot initialize ready queue without alloc feature");
-            }
-        }
-        READY_QUEUE_STATIC
-            .as_mut()
-            .expect("ready queue not initialized")
-            .as_mut()
-    }
+    // SAFETY: READY_QUEUE_STATIC is a const-initialized static mut in BSS.
+    // On RISC-V, we use a static mut instead of spin::Mutex to avoid
+    // deadlocks during early bootstrap. Single-hart boot ensures no
+    // concurrent access during initialization. The 'static lifetime is
+    // valid because the static lives for the kernel's lifetime.
+    unsafe { &mut READY_QUEUE_STATIC }
 }

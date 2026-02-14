@@ -482,80 +482,194 @@ impl ChaCha20Poly1305 {
         output
     }
 
-    /// Poly1305 MAC
+    /// Poly1305 MAC - RFC 8439 Section 2.5
+    ///
+    /// Implements Poly1305 using 5-limb representation (26 bits each) for
+    /// proper arithmetic in GF(2^130-5). This avoids overflow in 130-bit
+    /// multiplication by using u64 limbs that hold intermediate products.
     fn poly1305_mac(&self, key: &[u8; 32], message: &[u8]) -> [u8; 16] {
-        // Clamp r
-        let mut r = [0u8; 16];
-        r.copy_from_slice(&key[..16]);
-        r[3] &= 15;
-        r[7] &= 15;
-        r[11] &= 15;
-        r[15] &= 15;
-        r[4] &= 252;
-        r[8] &= 252;
-        r[12] &= 252;
+        // Clamp r per RFC 8439 Section 2.5.1
+        let mut r_bytes = [0u8; 16];
+        r_bytes.copy_from_slice(&key[..16]);
+        r_bytes[3] &= 15;
+        r_bytes[7] &= 15;
+        r_bytes[11] &= 15;
+        r_bytes[15] &= 15;
+        r_bytes[4] &= 252;
+        r_bytes[8] &= 252;
+        r_bytes[12] &= 252;
 
-        let s = &key[16..32];
+        // Convert r to 5 limbs of 26 bits each (little-endian)
+        let r0 = (u32::from_le_bytes([r_bytes[0], r_bytes[1], r_bytes[2], r_bytes[3]])) & 0x3ffffff;
+        let r1 =
+            (u32::from_le_bytes([r_bytes[3], r_bytes[4], r_bytes[5], r_bytes[6]]) >> 2) & 0x3ffffff;
+        let r2 =
+            (u32::from_le_bytes([r_bytes[6], r_bytes[7], r_bytes[8], r_bytes[9]]) >> 4) & 0x3ffffff;
+        let r3 = (u32::from_le_bytes([r_bytes[9], r_bytes[10], r_bytes[11], r_bytes[12]]) >> 6)
+            & 0x3ffffff;
+        let r4 = (u32::from_le_bytes([r_bytes[12], r_bytes[13], r_bytes[14], r_bytes[15]]) >> 8)
+            & 0x3ffffff;
 
-        // Convert r to integer (little-endian)
-        let mut r_int = [0u64; 3];
-        r_int[0] = u64::from_le_bytes([r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]]);
-        r_int[1] = u64::from_le_bytes([r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15]]);
+        // Precompute 5*r for reduction: when multiplying, terms above 2^130
+        // get multiplied by 5 and folded back (since 2^130 = 5 mod p).
+        let s1 = r1.wrapping_mul(5);
+        let s2 = r2.wrapping_mul(5);
+        let s3 = r3.wrapping_mul(5);
+        let s4 = r4.wrapping_mul(5);
 
-        // Accumulator
-        let mut acc = [0u64; 3];
+        // Accumulator in 5 limbs of 26 bits
+        let mut h0: u32 = 0;
+        let mut h1: u32 = 0;
+        let mut h2: u32 = 0;
+        let mut h3: u32 = 0;
+        let mut h4: u32 = 0;
 
         // Process 16-byte blocks
         for chunk in message.chunks(16) {
+            // Read block as little-endian and add high bit
             let mut block = [0u8; 17];
             block[..chunk.len()].copy_from_slice(chunk);
-            block[chunk.len()] = 1; // Append 0x01 byte
+            block[chunk.len()] = 1; // Append 0x01 byte (hibit)
 
-            // Add block to accumulator
-            let n0 = u64::from_le_bytes([
-                block[0], block[1], block[2], block[3], block[4], block[5], block[6], block[7],
-            ]);
-            let n1 = u64::from_le_bytes([
-                block[8], block[9], block[10], block[11], block[12], block[13], block[14],
-                block[15],
-            ]);
-            let n2 = block[16] as u64;
+            // Convert to 5 limbs and add to accumulator
+            let t0 = u32::from_le_bytes([block[0], block[1], block[2], block[3]]);
+            let t1 = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
+            let t2 = u32::from_le_bytes([block[8], block[9], block[10], block[11]]);
+            let t3 = u32::from_le_bytes([block[12], block[13], block[14], block[15]]);
 
-            // acc += n
-            let (sum0, carry0) = acc[0].overflowing_add(n0);
-            let (sum1, carry1) = acc[1].overflowing_add(n1);
-            let carry1 = carry1 as u64 + carry0 as u64;
-            let sum2 = acc[2].wrapping_add(n2).wrapping_add(carry1);
-            acc[0] = sum0;
-            acc[1] = sum1;
-            acc[2] = sum2;
+            h0 = h0.wrapping_add(t0 & 0x3ffffff);
+            h1 = h1.wrapping_add(((t0 >> 26) | (t1 << 6)) & 0x3ffffff);
+            h2 = h2.wrapping_add(((t1 >> 20) | (t2 << 12)) & 0x3ffffff);
+            h3 = h3.wrapping_add(((t2 >> 14) | (t3 << 18)) & 0x3ffffff);
+            h4 = h4.wrapping_add((t3 >> 8) | ((block[16] as u32) << 24));
 
-            // acc *= r (simplified for 130-bit arithmetic)
-            // This is a simplified version - full implementation would need proper 130-bit
-            // modular arithmetic
-            let r0 = r_int[0] as u128;
-            let r1 = r_int[1] as u128;
+            // h *= r (mod 2^130 - 5)
+            // Full schoolbook multiplication with 5*r reduction
+            let d0 = (h0 as u64)
+                .wrapping_mul(r0 as u64)
+                .wrapping_add((h1 as u64).wrapping_mul(s4 as u64))
+                .wrapping_add((h2 as u64).wrapping_mul(s3 as u64))
+                .wrapping_add((h3 as u64).wrapping_mul(s2 as u64))
+                .wrapping_add((h4 as u64).wrapping_mul(s1 as u64));
+            let d1 = (h0 as u64)
+                .wrapping_mul(r1 as u64)
+                .wrapping_add((h1 as u64).wrapping_mul(r0 as u64))
+                .wrapping_add((h2 as u64).wrapping_mul(s4 as u64))
+                .wrapping_add((h3 as u64).wrapping_mul(s3 as u64))
+                .wrapping_add((h4 as u64).wrapping_mul(s2 as u64));
+            let d2 = (h0 as u64)
+                .wrapping_mul(r2 as u64)
+                .wrapping_add((h1 as u64).wrapping_mul(r1 as u64))
+                .wrapping_add((h2 as u64).wrapping_mul(r0 as u64))
+                .wrapping_add((h3 as u64).wrapping_mul(s4 as u64))
+                .wrapping_add((h4 as u64).wrapping_mul(s3 as u64));
+            let d3 = (h0 as u64)
+                .wrapping_mul(r3 as u64)
+                .wrapping_add((h1 as u64).wrapping_mul(r2 as u64))
+                .wrapping_add((h2 as u64).wrapping_mul(r1 as u64))
+                .wrapping_add((h3 as u64).wrapping_mul(r0 as u64))
+                .wrapping_add((h4 as u64).wrapping_mul(s4 as u64));
+            let d4 = (h0 as u64)
+                .wrapping_mul(r4 as u64)
+                .wrapping_add((h1 as u64).wrapping_mul(r3 as u64))
+                .wrapping_add((h2 as u64).wrapping_mul(r2 as u64))
+                .wrapping_add((h3 as u64).wrapping_mul(r1 as u64))
+                .wrapping_add((h4 as u64).wrapping_mul(r0 as u64));
 
-            let t0 = (acc[0] as u128) * r0;
-            let t1 = (acc[0] as u128) * r1 + (acc[1] as u128) * r0;
-            let t2 = (acc[1] as u128) * r1 + (acc[2] as u128) * r0;
-
-            acc[0] = t0 as u64;
-            acc[1] = ((t0 >> 64) + t1) as u64;
-            acc[2] = ((t1 >> 64) + t2) as u64;
-
-            // Partial reduction mod 2^130 - 5
-            let carry = acc[2] >> 2;
-            acc[2] &= 3;
-            acc[0] = acc[0].wrapping_add(carry.wrapping_mul(5));
+            // Carry propagation
+            let mut c: u32;
+            c = (d0 >> 26) as u32;
+            h0 = d0 as u32 & 0x3ffffff;
+            let d1 = d1.wrapping_add(c as u64);
+            c = (d1 >> 26) as u32;
+            h1 = d1 as u32 & 0x3ffffff;
+            let d2 = d2.wrapping_add(c as u64);
+            c = (d2 >> 26) as u32;
+            h2 = d2 as u32 & 0x3ffffff;
+            let d3 = d3.wrapping_add(c as u64);
+            c = (d3 >> 26) as u32;
+            h3 = d3 as u32 & 0x3ffffff;
+            let d4 = d4.wrapping_add(c as u64);
+            c = (d4 >> 26) as u32;
+            h4 = d4 as u32 & 0x3ffffff;
+            // Reduction: carry from top limb wraps with factor 5
+            h0 = h0.wrapping_add(c.wrapping_mul(5));
+            c = h0 >> 26;
+            h0 &= 0x3ffffff;
+            h1 = h1.wrapping_add(c);
         }
 
-        // Final reduction and add s
-        let s0 = u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]);
-        let s1 = u64::from_le_bytes([s[8], s[9], s[10], s[11], s[12], s[13], s[14], s[15]]);
+        // Final reduction mod 2^130-5
+        let mut c: u32;
+        c = h1 >> 26;
+        h1 &= 0x3ffffff;
+        h2 = h2.wrapping_add(c);
+        c = h2 >> 26;
+        h2 &= 0x3ffffff;
+        h3 = h3.wrapping_add(c);
+        c = h3 >> 26;
+        h3 &= 0x3ffffff;
+        h4 = h4.wrapping_add(c);
+        c = h4 >> 26;
+        h4 &= 0x3ffffff;
+        h0 = h0.wrapping_add(c.wrapping_mul(5));
+        c = h0 >> 26;
+        h0 &= 0x3ffffff;
+        h1 = h1.wrapping_add(c);
 
-        let (result0, carry) = acc[0].overflowing_add(s0);
-        let result1 = acc[1].wrapping_add(s1).wrapping_add(carry as u64);
+        // Compute h + -(2^130-5) = h - p
+        let mut g0 = h0.wrapping_add(5);
+        c = g0 >> 26;
+        g0 &= 0x3ffffff;
+        let mut g1 = h1.wrapping_add(c);
+        c = g1 >> 26;
+        g1 &= 0x3ffffff;
+        let mut g2 = h2.wrapping_add(c);
+        c = g2 >> 26;
+        g2 &= 0x3ffffff;
+        let mut g3 = h3.wrapping_add(c);
+        c = g3 >> 26;
+        g3 &= 0x3ffffff;
+        let g4 = h4.wrapping_add(c).wrapping_sub(1 << 26);
+
+        // Select h if h < p, else g = h - p
+        // If g4 has bit 31 set (negative), mask = 0xffffffff, use h
+        let mask = (g4 >> 31).wrapping_sub(1); // 0 if g4 negative, 0xffffffff if positive
+        g0 &= mask;
+        g1 &= mask;
+        g2 &= mask;
+        g3 &= mask;
+        let nmask = !mask;
+        h0 = (h0 & nmask) | g0;
+        h1 = (h1 & nmask) | g1;
+        h2 = (h2 & nmask) | g2;
+        h3 = (h3 & nmask) | g3;
+
+        // Reassemble h into two 64-bit words and add s
+        let s_bytes = &key[16..32];
+        let s0 = u64::from_le_bytes([
+            s_bytes[0], s_bytes[1], s_bytes[2], s_bytes[3], s_bytes[4], s_bytes[5], s_bytes[6],
+            s_bytes[7],
+        ]);
+        let s1_val = u64::from_le_bytes([
+            s_bytes[8],
+            s_bytes[9],
+            s_bytes[10],
+            s_bytes[11],
+            s_bytes[12],
+            s_bytes[13],
+            s_bytes[14],
+            s_bytes[15],
+        ]);
+
+        let mut f: u64;
+        f = (h0 as u64) | ((h1 as u64) << 26) | ((h2 as u64) << 52);
+        let low = f;
+        f = ((h2 as u64) >> 12) | ((h3 as u64) << 14) | ((h4 as u64) << 40);
+        let high = f;
+
+        let (result0, carry_bit) = low.overflowing_add(s0);
+        let result1 = high.wrapping_add(s1_val).wrapping_add(carry_bit as u64);
 
         let mut tag = [0u8; 16];
         tag[..8].copy_from_slice(&result0.to_le_bytes());

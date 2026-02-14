@@ -453,10 +453,130 @@ impl Shell {
     }
 
     fn read_line(&self) -> String {
-        // Simple line reading - in a real shell this would handle editing, history,
-        // etc. For now, just return a placeholder
-        String::from("help") // TODO(phase3): Implement line editing with
-                             // keyboard input
+        let mut line = String::new();
+
+        loop {
+            let ch = Self::read_char();
+
+            match ch {
+                Some(b'\r') | Some(b'\n') => {
+                    // Enter pressed - submit the line
+                    crate::print!("\n");
+                    break;
+                }
+                Some(0x7f) | Some(0x08) => {
+                    // Backspace/Delete
+                    if !line.is_empty() {
+                        line.pop();
+                        // Erase character on terminal: backspace, space, backspace
+                        crate::print!("\x08 \x08");
+                    }
+                }
+                Some(3) => {
+                    // Ctrl-C: cancel current line
+                    crate::print!("^C\n");
+                    line.clear();
+                    break;
+                }
+                Some(4) => {
+                    // Ctrl-D: EOF -- return "exit" if line is empty
+                    if line.is_empty() {
+                        line = String::from("exit");
+                        crate::print!("\n");
+                        break;
+                    }
+                }
+                Some(ch) if (0x20..0x7f).contains(&ch) => {
+                    // Printable ASCII character
+                    line.push(ch as char);
+                    crate::print!("{}", ch as char);
+                }
+                None => {
+                    // No input available -- yield to scheduler briefly
+                    // On bare metal, this spins waiting for input
+                    core::hint::spin_loop();
+                }
+                _ => {
+                    // Ignore other control characters
+                }
+            }
+        }
+
+        line
+    }
+
+    /// Read a single byte from the architecture-specific serial/UART input.
+    fn read_char() -> Option<u8> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            // Read from COM1 serial port (0x3F8)
+            // Check if data is available (Line Status Register bit 0)
+            let status: u8;
+            unsafe {
+                core::arch::asm!(
+                    "in al, dx",
+                    out("al") status,
+                    in("dx") 0x3FDu16,
+                    options(nomem, nostack)
+                );
+            }
+            if (status & 1) != 0 {
+                let data: u8;
+                unsafe {
+                    core::arch::asm!(
+                        "in al, dx",
+                        out("al") data,
+                        in("dx") 0x3F8u16,
+                        options(nomem, nostack)
+                    );
+                }
+                Some(data)
+            } else {
+                None
+            }
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            // Read from PL011 UART at 0x0900_0000 (QEMU virt)
+            const UART_BASE: usize = 0x0900_0000;
+            const UART_FR: usize = UART_BASE + 0x18; // Flag register
+            const UART_DR: usize = UART_BASE; // Data register (offset 0x00)
+
+            // SAFETY: Reading MMIO registers for PL011 UART. The QEMU virt
+            // machine maps UART at this address. volatile_read prevents
+            // compiler reordering.
+            unsafe {
+                let flags = core::ptr::read_volatile(UART_FR as *const u32);
+                if (flags & (1 << 4)) == 0 {
+                    // RXFE bit clear = data available
+                    let data = core::ptr::read_volatile(UART_DR as *const u32);
+                    Some((data & 0xFF) as u8)
+                } else {
+                    None
+                }
+            }
+        }
+
+        #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+        {
+            // Read via SBI console_getchar (legacy extension)
+            let result: isize;
+            unsafe {
+                core::arch::asm!(
+                    "li a7, 0x02",  // SBI_CONSOLE_GETCHAR
+                    "ecall",
+                    out("a0") result,
+                    out("a7") _,
+                    options(nomem)
+                );
+            }
+            if result >= 0 {
+                Some(result as u8)
+            } else {
+                None
+            }
+        }
     }
 
     fn add_to_history(&self, command: String) {

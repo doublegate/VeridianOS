@@ -10,6 +10,7 @@ pub mod audit;
 pub mod auth;
 pub mod boot;
 pub mod crypto;
+pub mod fuzzing;
 pub mod mac;
 pub mod memory_protection;
 pub mod tpm;

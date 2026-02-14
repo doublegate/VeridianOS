@@ -43,9 +43,9 @@ impl RamNode {
                 permissions,
                 uid: 0,
                 gid: 0,
-                created: 0, // TODO(phase3): Use clock subsystem for timestamps
-                modified: 0,
-                accessed: 0,
+                created: crate::arch::timer::get_timestamp_secs(),
+                modified: crate::arch::timer::get_timestamp_secs(),
+                accessed: crate::arch::timer::get_timestamp_secs(),
             }),
             inode,
         }
@@ -63,9 +63,9 @@ impl RamNode {
                 permissions,
                 uid: 0,
                 gid: 0,
-                created: 0,
-                modified: 0,
-                accessed: 0,
+                created: crate::arch::timer::get_timestamp_secs(),
+                modified: crate::arch::timer::get_timestamp_secs(),
+                accessed: crate::arch::timer::get_timestamp_secs(),
             }),
             inode,
         }
@@ -91,7 +91,7 @@ impl VfsNode for RamNode {
         buffer[..bytes_to_read].copy_from_slice(&data[offset..offset + bytes_to_read]);
 
         // Update accessed time
-        self.metadata.write().accessed = 0; // TODO(phase3): Use clock subsystem for timestamps
+        self.metadata.write().accessed = crate::arch::timer::get_timestamp_secs();
 
         Ok(bytes_to_read)
     }
@@ -117,7 +117,7 @@ impl VfsNode for RamNode {
         // Update metadata
         let mut metadata = self.metadata.write();
         metadata.size = file_data.len();
-        metadata.modified = 0; // TODO(phase3): Use clock subsystem for timestamps
+        metadata.modified = crate::arch::timer::get_timestamp_secs();
 
         Ok(data.len())
     }
@@ -248,7 +248,7 @@ impl VfsNode for RamNode {
 
         let mut metadata = self.metadata.write();
         metadata.size = size;
-        metadata.modified = 0; // TODO(phase3): Use clock subsystem for timestamps
+        metadata.modified = crate::arch::timer::get_timestamp_secs();
 
         Ok(())
     }

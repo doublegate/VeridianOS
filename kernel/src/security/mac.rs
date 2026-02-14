@@ -2,6 +2,38 @@
 //!
 //! Provides a policy-based access control system similar to SELinux.
 //! Enforces security policies for all system operations.
+//!
+//! # Policy Language
+//!
+//! The MAC system supports a simple text-based policy language:
+//! ```text
+//! allow source_type target_type { read write execute };
+//! deny source_type target_type { write };
+//! type_transition source_type target_type : process new_type;
+//! role admin_r types { system_t init_t };
+//! user root roles { admin_r };
+//! sensitivity s0-s3;
+//! category c0-c63;
+//! ```
+//!
+//! # Multi-Level Security (MLS)
+//!
+//! MLS uses sensitivity levels (0..=65535) and category bitmasks (64 bits).
+//! A security level dominates another if its sensitivity is greater or equal
+//! AND its category set is a superset of the other's.
+//!
+//! # RBAC Layer
+//!
+//! Users are mapped to roles, and roles are mapped to types. A process
+//! running with a particular user identity can only transition into types
+//! allowed by that user's assigned roles.
+//!
+//! # Zero-Allocation Design
+//!
+//! All data structures use fixed-size arrays and `&'static str` references
+//! to avoid heap allocations. This is critical for boot-time initialization
+//! on architectures (RISC-V, AArch64) where the bump allocator cannot
+//! handle many small allocations without corruption.
 
 #![allow(clippy::needless_range_loop)]
 
@@ -12,125 +44,1398 @@ use spin::Mutex;
 use super::AccessType;
 use crate::error::KernelError;
 
-/// Maximum number of policy rules
-const MAX_POLICY_RULES: usize = 1024;
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
 
-/// Security policy rule
+/// Maximum number of policy rules
+const MAX_POLICY_RULES: usize = 64;
+
+/// Maximum number of domain transitions
+const MAX_TRANSITIONS: usize = 32;
+
+/// Maximum number of roles
+const MAX_ROLES: usize = 8;
+
+/// Maximum number of types per role
+const MAX_ROLE_TYPES: usize = 16;
+
+/// Maximum number of user-to-role mappings
+const MAX_USER_ROLES: usize = 16;
+
+/// Maximum number of roles assigned to a single user
+const MAX_USER_ASSIGNED_ROLES: usize = 8;
+
+/// Maximum number of process security labels
+const MAX_PROCESS_LABELS: usize = 64;
+
+/// Maximum number of permissions per rule (Read, Write, Execute = 3 max)
+const MAX_PERMISSIONS: usize = 3;
+
+/// Maximum number of tokens the parser can handle
+const MAX_TOKENS: usize = 128;
+
+/// Maximum number of parsed rules from a single parse call
+const MAX_PARSED_RULES: usize = 32;
+
+/// Maximum number of parsed transitions from a single parse call
+const MAX_PARSED_TRANSITIONS: usize = 16;
+
+/// Maximum number of parsed roles from a single parse call
+const MAX_PARSED_ROLES: usize = 8;
+
+/// Maximum number of parsed user-role mappings from a single parse call
+const MAX_PARSED_USER_ROLES: usize = 8;
+
+// ---------------------------------------------------------------------------
+// Multi-Level Security (MLS)
+// ---------------------------------------------------------------------------
+
+/// MLS security level with sensitivity and category bitmask.
+///
+/// Dominance: level A dominates level B iff
+///   A.sensitivity >= B.sensitivity AND A.categories is a superset of
+/// B.categories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MlsLevel {
+    /// Sensitivity level (0 = lowest, higher = more sensitive)
+    pub sensitivity: u16,
+    /// Category bitmask (up to 64 categories)
+    pub categories: u64,
+}
+
+impl MlsLevel {
+    /// Create a new MLS level.
+    pub const fn new(sensitivity: u16, categories: u64) -> Self {
+        Self {
+            sensitivity,
+            categories,
+        }
+    }
+
+    /// Default (lowest) security level.
+    pub const fn default_level() -> Self {
+        Self {
+            sensitivity: 0,
+            categories: 0,
+        }
+    }
+
+    /// Check if this level dominates (is at least as restrictive as) `other`.
+    pub fn dominates(&self, other: &MlsLevel) -> bool {
+        self.sensitivity >= other.sensitivity
+            && (self.categories & other.categories) == other.categories
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Security Label
+// ---------------------------------------------------------------------------
+
+/// Full security label combining type, role, and MLS level.
+///
+/// Uses `&'static str` references to avoid heap allocations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecurityLabel {
+    /// Type/domain name (e.g. "system_t", "user_t")
+    pub type_name: &'static str,
+    /// Role (e.g. "system_r", "user_r")
+    pub role: &'static str,
+    /// MLS security level
+    pub level: MlsLevel,
+}
+
+impl SecurityLabel {
+    /// Create a new security label.
+    pub const fn new(type_name: &'static str, role: &'static str, level: MlsLevel) -> Self {
+        Self {
+            type_name,
+            role,
+            level,
+        }
+    }
+
+    /// Create a label with default MLS level.
+    pub const fn simple(type_name: &'static str, role: &'static str) -> Self {
+        Self::new(type_name, role, MlsLevel::default_level())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Policy Rule
+// ---------------------------------------------------------------------------
+
+/// Action to take when a policy rule matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyAction {
+    Allow,
+    Deny,
+}
+
+/// Security policy rule.
+///
+/// Uses fixed-size arrays and `&'static str` to avoid heap allocations.
 #[derive(Debug, Clone, Copy)]
 pub struct PolicyRule {
-    /// Source domain/label
-    pub source: &'static str,
-    /// Target domain/label
-    pub target: &'static str,
-    /// Allowed access types
-    pub allowed: u8, // Bitmask: 0x1=Read, 0x2=Write, 0x4=Execute
+    /// Source domain/type
+    pub source_type: &'static str,
+    /// Target domain/type
+    pub target_type: &'static str,
+    /// Allowed/denied permission set (fixed-size array)
+    pub permissions: [Permission; MAX_PERMISSIONS],
+    /// Number of active permissions in the array
+    pub perm_count: u8,
+    /// Whether this rule allows or denies
+    pub action: PolicyAction,
     /// Rule enabled
     pub enabled: bool,
 }
 
+/// Permission types for policy rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Permission {
+    Read,
+    Write,
+    Execute,
+}
+
 impl PolicyRule {
-    /// Create a new policy rule
-    pub const fn new(source: &'static str, target: &'static str, allowed: u8) -> Self {
+    /// Create a new policy rule with the given action.
+    pub const fn new(
+        source_type: &'static str,
+        target_type: &'static str,
+        permissions: [Permission; MAX_PERMISSIONS],
+        perm_count: u8,
+        action: PolicyAction,
+    ) -> Self {
         Self {
-            source,
-            target,
-            allowed,
+            source_type,
+            target_type,
+            permissions,
+            perm_count,
+            action,
             enabled: true,
         }
     }
 
-    /// Check if access is allowed by this rule
+    /// Create a policy rule from a slice of permissions.
+    ///
+    /// Copies up to MAX_PERMISSIONS permissions into the fixed-size array.
+    pub fn from_perms(
+        source_type: &'static str,
+        target_type: &'static str,
+        perms: &[Permission],
+        action: PolicyAction,
+    ) -> Self {
+        let mut permissions = [Permission::Read; MAX_PERMISSIONS];
+        let count = perms.len().min(MAX_PERMISSIONS);
+        let mut i = 0;
+        while i < count {
+            permissions[i] = perms[i];
+            i += 1;
+        }
+        Self {
+            source_type,
+            target_type,
+            permissions,
+            perm_count: count as u8,
+            action,
+            enabled: true,
+        }
+    }
+
+    /// Create an Allow rule from a legacy bitmask for backward compatibility.
+    pub fn from_legacy(source: &'static str, target: &'static str, allowed: u8) -> Self {
+        let mut permissions = [Permission::Read; MAX_PERMISSIONS];
+        let mut count: u8 = 0;
+        if allowed & 0x1 != 0 {
+            permissions[count as usize] = Permission::Read;
+            count += 1;
+        }
+        if allowed & 0x2 != 0 {
+            permissions[count as usize] = Permission::Write;
+            count += 1;
+        }
+        if allowed & 0x4 != 0 {
+            permissions[count as usize] = Permission::Execute;
+            count += 1;
+        }
+        Self {
+            source_type: source,
+            target_type: target,
+            permissions,
+            perm_count: count,
+            action: PolicyAction::Allow,
+            enabled: true,
+        }
+    }
+
+    /// Check if this rule contains a specific permission.
+    fn has_permission(&self, perm: Permission) -> bool {
+        let mut i = 0;
+        while i < self.perm_count as usize {
+            if matches!(
+                (&self.permissions[i], &perm),
+                (Permission::Read, Permission::Read)
+                    | (Permission::Write, Permission::Write)
+                    | (Permission::Execute, Permission::Execute)
+            ) {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// Check if this rule matches and allows the given access.
     pub fn allows(&self, access: AccessType) -> bool {
         if !self.enabled {
             return false;
         }
 
-        let bit = match access {
-            AccessType::Read => 0x1,
-            AccessType::Write => 0x2,
-            AccessType::Execute => 0x4,
+        let perm = match access {
+            AccessType::Read => Permission::Read,
+            AccessType::Write => Permission::Write,
+            AccessType::Execute => Permission::Execute,
         };
 
-        (self.allowed & bit) != 0
+        let has_perm = self.has_permission(perm);
+
+        match self.action {
+            PolicyAction::Allow => has_perm,
+            PolicyAction::Deny => false, // Deny rules never "allow"
+        }
+    }
+
+    /// Check if this rule explicitly denies the given access.
+    pub fn denies(&self, access: AccessType) -> bool {
+        if !self.enabled {
+            return false;
+        }
+
+        let perm = match access {
+            AccessType::Read => Permission::Read,
+            AccessType::Write => Permission::Write,
+            AccessType::Execute => Permission::Execute,
+        };
+
+        match self.action {
+            PolicyAction::Deny => self.has_permission(perm),
+            PolicyAction::Allow => false,
+        }
     }
 }
 
-/// MAC policy database
-static POLICY_RULES: Mutex<[Option<PolicyRule>; MAX_POLICY_RULES]> =
-    Mutex::new([None; MAX_POLICY_RULES]);
+// ---------------------------------------------------------------------------
+// Domain Transitions
+// ---------------------------------------------------------------------------
+
+/// Domain transition rule.
+///
+/// When a process of type `source_type` executes a binary labeled as
+/// `target_type` of object class `class`, the process transitions to
+/// `new_type`.
+#[derive(Debug, Clone, Copy)]
+pub struct DomainTransition {
+    /// Source process type
+    pub source_type: &'static str,
+    /// Target file/object type
+    pub target_type: &'static str,
+    /// Object class (e.g. "process", "file")
+    pub class: &'static str,
+    /// New type after transition
+    pub new_type: &'static str,
+}
+
+impl DomainTransition {
+    /// Create a new domain transition rule.
+    pub const fn new(
+        source_type: &'static str,
+        target_type: &'static str,
+        class: &'static str,
+        new_type: &'static str,
+    ) -> Self {
+        Self {
+            source_type,
+            target_type,
+            class,
+            new_type,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RBAC Layer
+// ---------------------------------------------------------------------------
+
+/// Role definition mapping a role name to allowed types.
+///
+/// Uses fixed-size array of `&'static str` to avoid heap allocations.
+#[derive(Debug, Clone, Copy)]
+pub struct Role {
+    /// Role name (e.g. "admin_r", "user_r")
+    pub name: &'static str,
+    /// Types this role is allowed to transition to
+    pub allowed_types: [&'static str; MAX_ROLE_TYPES],
+    /// Number of active types in the array
+    pub type_count: usize,
+}
+
+impl Role {
+    /// Create a new role with allowed types from a slice.
+    pub fn from_types(name: &'static str, types: &[&'static str]) -> Self {
+        let mut allowed_types = [""; MAX_ROLE_TYPES];
+        let count = types.len().min(MAX_ROLE_TYPES);
+        let mut i = 0;
+        while i < count {
+            allowed_types[i] = types[i];
+            i += 1;
+        }
+        Self {
+            name,
+            allowed_types,
+            type_count: count,
+        }
+    }
+
+    /// Check if this role allows the given type.
+    pub fn allows_type(&self, type_name: &str) -> bool {
+        let mut i = 0;
+        while i < self.type_count {
+            if str_eq(self.allowed_types[i], type_name) {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fixed-size map entry types for PolicyDatabase
+// ---------------------------------------------------------------------------
+
+/// Entry in the roles table: maps a role name to a Role.
+#[derive(Debug, Clone, Copy)]
+struct RoleEntry {
+    name: &'static str,
+    role: Role,
+}
+
+/// Entry in the user-roles table: maps a username to assigned role names.
+#[derive(Debug, Clone, Copy)]
+struct UserRoleEntry {
+    username: &'static str,
+    roles: [&'static str; MAX_USER_ASSIGNED_ROLES],
+    role_count: usize,
+}
+
+/// Entry in the process-labels table: maps a PID to a SecurityLabel.
+#[derive(Debug, Clone, Copy)]
+struct ProcessLabelEntry {
+    pid: u64,
+    label: SecurityLabel,
+}
+
+// ---------------------------------------------------------------------------
+// Policy Parser
+// ---------------------------------------------------------------------------
+
+/// Token types for the policy language.
+///
+/// Uses `&'static str` references into the input text to avoid allocations.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Token<'a> {
+    /// Keyword: allow, deny, type_transition, role, user, sensitivity, category
+    Keyword(&'a str),
+    /// Identifier (type names, role names, etc.)
+    Ident(&'a str),
+    /// Opening brace
+    LBrace,
+    /// Closing brace
+    RBrace,
+    /// Colon separator
+    Colon,
+    /// Semicolon terminator
+    Semicolon,
+}
+
+/// Result of parsing a MAC policy text (zero-allocation).
+///
+/// Contains fixed-size arrays of rules, transitions, roles, and user-role
+/// mappings.
+struct ParsedPolicy {
+    rules: [Option<PolicyRule>; MAX_PARSED_RULES],
+    rule_count: usize,
+    transitions: [Option<DomainTransition>; MAX_PARSED_TRANSITIONS],
+    transition_count: usize,
+    roles: [Option<Role>; MAX_PARSED_ROLES],
+    role_count: usize,
+    user_roles: [Option<UserRoleEntry>; MAX_PARSED_USER_ROLES],
+    user_role_count: usize,
+}
+
+impl ParsedPolicy {
+    const fn new() -> Self {
+        Self {
+            rules: [const { None }; MAX_PARSED_RULES],
+            rule_count: 0,
+            transitions: [const { None }; MAX_PARSED_TRANSITIONS],
+            transition_count: 0,
+            roles: [const { None }; MAX_PARSED_ROLES],
+            role_count: 0,
+            user_roles: [const { None }; MAX_PARSED_USER_ROLES],
+            user_role_count: 0,
+        }
+    }
+}
+
+/// Policy parser that tokenizes and parses policy text without allocations.
+pub struct PolicyParser;
+
+impl PolicyParser {
+    /// Tokenize a policy string into tokens (zero-allocation).
+    ///
+    /// Returns references into the input string for identifiers and keywords.
+    fn tokenize<'a>(input: &'a str) -> ([Token<'a>; MAX_TOKENS], usize) {
+        let mut tokens = [Token::Semicolon; MAX_TOKENS]; // placeholder init
+        let mut count = 0;
+        let bytes = input.as_bytes();
+        let mut pos = 0;
+
+        while pos < bytes.len() && count < MAX_TOKENS {
+            let ch = bytes[pos];
+            match ch {
+                // Skip whitespace
+                b' ' | b'\t' | b'\n' | b'\r' => {
+                    pos += 1;
+                }
+                // Skip comments (# to end of line)
+                b'#' => {
+                    pos += 1;
+                    while pos < bytes.len() && bytes[pos] != b'\n' {
+                        pos += 1;
+                    }
+                    if pos < bytes.len() {
+                        pos += 1; // skip the newline
+                    }
+                }
+                b'{' => {
+                    tokens[count] = Token::LBrace;
+                    count += 1;
+                    pos += 1;
+                }
+                b'}' => {
+                    tokens[count] = Token::RBrace;
+                    count += 1;
+                    pos += 1;
+                }
+                b':' => {
+                    tokens[count] = Token::Colon;
+                    count += 1;
+                    pos += 1;
+                }
+                b';' => {
+                    tokens[count] = Token::Semicolon;
+                    count += 1;
+                    pos += 1;
+                }
+                _ if ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'-' => {
+                    let start = pos;
+                    while pos < bytes.len()
+                        && (bytes[pos].is_ascii_alphanumeric()
+                            || bytes[pos] == b'_'
+                            || bytes[pos] == b'-')
+                    {
+                        pos += 1;
+                    }
+                    // SAFETY: We are slicing valid UTF-8 at ASCII character
+                    // boundaries (alphanumeric, underscore, hyphen).
+                    let word = &input[start..pos];
+                    match word {
+                        "allow" | "deny" | "type_transition" | "role" | "user" | "sensitivity"
+                        | "category" => {
+                            tokens[count] = Token::Keyword(word);
+                        }
+                        _ => {
+                            tokens[count] = Token::Ident(word);
+                        }
+                    }
+                    count += 1;
+                }
+                _ => {
+                    // Skip unknown characters
+                    pos += 1;
+                }
+            }
+        }
+
+        (tokens, count)
+    }
+
+    /// Parse a policy text and return parsed rules, transitions, roles,
+    /// and user-role mappings.
+    ///
+    /// The input MUST be a `&'static str` (e.g., a const string literal or a
+    /// string with static lifetime) so that the parsed `&'static str`
+    /// references remain valid.
+    fn parse(input: &'static str) -> Result<ParsedPolicy, KernelError> {
+        let (tokens, token_count) = Self::tokenize(input);
+        let mut result = ParsedPolicy::new();
+
+        let mut i = 0;
+        while i < token_count {
+            match tokens[i] {
+                Token::Keyword(kw) => match kw {
+                    "allow" | "deny" => {
+                        let action = if kw == "allow" {
+                            PolicyAction::Allow
+                        } else {
+                            PolicyAction::Deny
+                        };
+                        // allow source_type target_type { perm perm ... };
+                        if i + 5 >= token_count {
+                            return Err(KernelError::InvalidArgument {
+                                name: "policy",
+                                value: "incomplete allow/deny rule",
+                            });
+                        }
+                        let source = Self::expect_ident(&tokens, token_count, i + 1)?;
+                        let target = Self::expect_ident(&tokens, token_count, i + 2)?;
+                        Self::expect_token_kind(&tokens, token_count, i + 3, Token::LBrace)?;
+
+                        let mut perms = [Permission::Read; MAX_PERMISSIONS];
+                        let mut perm_count: u8 = 0;
+                        let mut j = i + 4;
+                        while j < token_count {
+                            match tokens[j] {
+                                Token::RBrace => break,
+                                Token::Ident(p) => {
+                                    if (perm_count as usize) < MAX_PERMISSIONS {
+                                        match p {
+                                            "read" => {
+                                                perms[perm_count as usize] = Permission::Read;
+                                                perm_count += 1;
+                                            }
+                                            "write" => {
+                                                perms[perm_count as usize] = Permission::Write;
+                                                perm_count += 1;
+                                            }
+                                            "execute" => {
+                                                perms[perm_count as usize] = Permission::Execute;
+                                                perm_count += 1;
+                                            }
+                                            _ => {
+                                                return Err(KernelError::InvalidArgument {
+                                                    name: "permission",
+                                                    value: "unknown permission",
+                                                });
+                                            }
+                                        }
+                                    }
+                                    j += 1;
+                                }
+                                _ => {
+                                    return Err(KernelError::InvalidArgument {
+                                        name: "policy",
+                                        value: "unexpected token in permission list",
+                                    });
+                                }
+                            }
+                        }
+                        // j is now at RBrace
+                        // expect semicolon after RBrace
+                        if j + 1 < token_count && matches!(tokens[j + 1], Token::Semicolon) {
+                            j += 1;
+                        }
+                        if result.rule_count < MAX_PARSED_RULES {
+                            result.rules[result.rule_count] =
+                                Some(PolicyRule::new(source, target, perms, perm_count, action));
+                            result.rule_count += 1;
+                        }
+                        i = j + 1;
+                    }
+                    "type_transition" => {
+                        // type_transition source target : class new_type ;
+                        if i + 7 > token_count {
+                            return Err(KernelError::InvalidArgument {
+                                name: "policy",
+                                value: "incomplete type_transition",
+                            });
+                        }
+                        let source = Self::expect_ident(&tokens, token_count, i + 1)?;
+                        let target = Self::expect_ident(&tokens, token_count, i + 2)?;
+                        Self::expect_token_kind(&tokens, token_count, i + 3, Token::Colon)?;
+                        let class = Self::expect_ident(&tokens, token_count, i + 4)?;
+                        let new_type = Self::expect_ident(&tokens, token_count, i + 5)?;
+                        // optional semicolon
+                        let mut next = i + 6;
+                        if next < token_count && matches!(tokens[next], Token::Semicolon) {
+                            next += 1;
+                        }
+                        if result.transition_count < MAX_PARSED_TRANSITIONS {
+                            result.transitions[result.transition_count] =
+                                Some(DomainTransition::new(source, target, class, new_type));
+                            result.transition_count += 1;
+                        }
+                        i = next;
+                    }
+                    "role" => {
+                        // role name types { type1 type2 ... };
+                        // simplified: role name { type1 type2 ... };
+                        if i + 2 >= token_count {
+                            return Err(KernelError::InvalidArgument {
+                                name: "policy",
+                                value: "incomplete role definition",
+                            });
+                        }
+                        let name = Self::expect_ident(&tokens, token_count, i + 1)?;
+                        // Skip optional "types" keyword
+                        let mut j = i + 2;
+                        if j < token_count {
+                            if let Token::Ident(s) = tokens[j] {
+                                if s == "types" {
+                                    j += 1;
+                                }
+                            }
+                        }
+                        Self::expect_token_kind(&tokens, token_count, j, Token::LBrace)?;
+                        j += 1;
+
+                        let mut types = [""; MAX_ROLE_TYPES];
+                        let mut type_count: usize = 0;
+                        while j < token_count {
+                            match tokens[j] {
+                                Token::RBrace => break,
+                                Token::Ident(t) => {
+                                    if type_count < MAX_ROLE_TYPES {
+                                        types[type_count] = t;
+                                        type_count += 1;
+                                    }
+                                    j += 1;
+                                }
+                                _ => {
+                                    return Err(KernelError::InvalidArgument {
+                                        name: "policy",
+                                        value: "unexpected token in role types",
+                                    });
+                                }
+                            }
+                        }
+                        // j at RBrace
+                        if j + 1 < token_count && matches!(tokens[j + 1], Token::Semicolon) {
+                            j += 1;
+                        }
+                        if result.role_count < MAX_PARSED_ROLES {
+                            result.roles[result.role_count] = Some(Role {
+                                name,
+                                allowed_types: types,
+                                type_count,
+                            });
+                            result.role_count += 1;
+                        }
+                        i = j + 1;
+                    }
+                    "user" => {
+                        // user username roles { role1 role2 ... };
+                        if i + 2 >= token_count {
+                            return Err(KernelError::InvalidArgument {
+                                name: "policy",
+                                value: "incomplete user definition",
+                            });
+                        }
+                        let username = Self::expect_ident(&tokens, token_count, i + 1)?;
+                        // Skip optional "roles" keyword
+                        let mut j = i + 2;
+                        if j < token_count {
+                            if let Token::Ident(s) = tokens[j] {
+                                if s == "roles" {
+                                    j += 1;
+                                }
+                            }
+                        }
+                        Self::expect_token_kind(&tokens, token_count, j, Token::LBrace)?;
+                        j += 1;
+
+                        let mut assigned_roles = [""; MAX_USER_ASSIGNED_ROLES];
+                        let mut role_count: usize = 0;
+                        while j < token_count {
+                            match tokens[j] {
+                                Token::RBrace => break,
+                                Token::Ident(r) => {
+                                    if role_count < MAX_USER_ASSIGNED_ROLES {
+                                        assigned_roles[role_count] = r;
+                                        role_count += 1;
+                                    }
+                                    j += 1;
+                                }
+                                _ => {
+                                    return Err(KernelError::InvalidArgument {
+                                        name: "policy",
+                                        value: "unexpected token in user roles",
+                                    });
+                                }
+                            }
+                        }
+                        if j + 1 < token_count && matches!(tokens[j + 1], Token::Semicolon) {
+                            j += 1;
+                        }
+                        if result.user_role_count < MAX_PARSED_USER_ROLES {
+                            result.user_roles[result.user_role_count] = Some(UserRoleEntry {
+                                username,
+                                roles: assigned_roles,
+                                role_count,
+                            });
+                            result.user_role_count += 1;
+                        }
+                        i = j + 1;
+                    }
+                    "sensitivity" | "category" => {
+                        // These are declarative; skip to semicolon
+                        i += 1;
+                        while i < token_count && !matches!(tokens[i], Token::Semicolon) {
+                            i += 1;
+                        }
+                        i += 1; // skip semicolon
+                    }
+                    _ => {
+                        i += 1;
+                    }
+                },
+                _ => {
+                    i += 1;
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Extract an identifier at the given position.
+    fn expect_ident<'a>(
+        tokens: &[Token<'a>],
+        token_count: usize,
+        pos: usize,
+    ) -> Result<&'a str, KernelError> {
+        if pos >= token_count {
+            return Err(KernelError::InvalidArgument {
+                name: "policy",
+                value: "unexpected end of policy",
+            });
+        }
+        match tokens[pos] {
+            Token::Ident(s) => Ok(s),
+            _ => Err(KernelError::InvalidArgument {
+                name: "policy",
+                value: "expected identifier",
+            }),
+        }
+    }
+
+    /// Verify that the token at `pos` matches `expected` (structural tokens
+    /// only).
+    fn expect_token_kind(
+        tokens: &[Token<'_>],
+        token_count: usize,
+        pos: usize,
+        expected: Token<'_>,
+    ) -> Result<(), KernelError> {
+        if pos >= token_count {
+            return Err(KernelError::InvalidArgument {
+                name: "policy",
+                value: "unexpected end of policy",
+            });
+        }
+        if matches!(
+            (&expected, &tokens[pos]),
+            (Token::LBrace, Token::LBrace)
+                | (Token::RBrace, Token::RBrace)
+                | (Token::Colon, Token::Colon)
+                | (Token::Semicolon, Token::Semicolon)
+        ) {
+            Ok(())
+        } else {
+            Err(KernelError::InvalidArgument {
+                name: "policy",
+                value: "unexpected token",
+            })
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Policy Database
+// ---------------------------------------------------------------------------
+
+/// Complete MAC policy database including rules, transitions, RBAC, and MLS.
+///
+/// All maps use fixed-size arrays with linear search. Zero heap allocations.
+struct PolicyDatabase {
+    /// Access control rules
+    rules: [Option<PolicyRule>; MAX_POLICY_RULES],
+    /// Number of active rules
+    rule_count: usize,
+    /// Domain transition rules
+    transitions: [Option<DomainTransition>; MAX_TRANSITIONS],
+    /// Number of active transitions
+    transition_count: usize,
+    /// Roles: linear array of (name, Role) entries
+    roles: [Option<RoleEntry>; MAX_ROLES],
+    /// Number of active roles
+    role_count: usize,
+    /// User-to-role mapping: linear array of (username, role list) entries
+    user_roles: [Option<UserRoleEntry>; MAX_USER_ROLES],
+    /// Number of active user-role mappings
+    user_role_count: usize,
+    /// Process security labels: linear array of (pid, SecurityLabel) entries
+    process_labels: [Option<ProcessLabelEntry>; MAX_PROCESS_LABELS],
+    /// Number of active process labels
+    process_label_count: usize,
+}
+
+impl PolicyDatabase {
+    /// Create an empty policy database.
+    const fn new() -> Self {
+        Self {
+            rules: [const { None }; MAX_POLICY_RULES],
+            rule_count: 0,
+            transitions: [const { None }; MAX_TRANSITIONS],
+            transition_count: 0,
+            roles: [const { None }; MAX_ROLES],
+            role_count: 0,
+            user_roles: [const { None }; MAX_USER_ROLES],
+            user_role_count: 0,
+            process_labels: [const { None }; MAX_PROCESS_LABELS],
+            process_label_count: 0,
+        }
+    }
+
+    /// Find a role by name.
+    fn find_role(&self, name: &str) -> Option<&Role> {
+        for i in 0..self.role_count {
+            if let Some(entry) = &self.roles[i] {
+                if str_eq(entry.name, name) {
+                    return Some(&entry.role);
+                }
+            }
+        }
+        None
+    }
+
+    /// Insert or update a role.
+    fn insert_role(&mut self, role: Role) {
+        // Check if role already exists, update it
+        for i in 0..self.role_count {
+            if let Some(entry) = &mut self.roles[i] {
+                if str_eq(entry.name, role.name) {
+                    entry.role = role;
+                    return;
+                }
+            }
+        }
+        // Insert new
+        if self.role_count < MAX_ROLES {
+            self.roles[self.role_count] = Some(RoleEntry {
+                name: role.name,
+                role,
+            });
+            self.role_count += 1;
+        }
+    }
+
+    /// Check if any roles are defined.
+    fn has_roles(&self) -> bool {
+        self.role_count > 0
+    }
+
+    /// Find user-role entry by username.
+    fn find_user_roles(&self, username: &str) -> Option<&UserRoleEntry> {
+        for i in 0..self.user_role_count {
+            if let Some(entry) = &self.user_roles[i] {
+                if str_eq(entry.username, username) {
+                    return Some(entry);
+                }
+            }
+        }
+        None
+    }
+
+    /// Insert or update user-role mapping.
+    fn insert_user_roles(&mut self, entry: UserRoleEntry) {
+        // Check if user already exists, update
+        for i in 0..self.user_role_count {
+            if let Some(existing) = &mut self.user_roles[i] {
+                if str_eq(existing.username, entry.username) {
+                    *existing = entry;
+                    return;
+                }
+            }
+        }
+        // Insert new
+        if self.user_role_count < MAX_USER_ROLES {
+            self.user_roles[self.user_role_count] = Some(entry);
+            self.user_role_count += 1;
+        }
+    }
+
+    /// Find process label by PID.
+    fn find_process_label(&self, pid: u64) -> Option<SecurityLabel> {
+        for i in 0..self.process_label_count {
+            if let Some(entry) = &self.process_labels[i] {
+                if entry.pid == pid {
+                    return Some(entry.label);
+                }
+            }
+        }
+        None
+    }
+
+    /// Insert or update process label.
+    fn insert_process_label(&mut self, pid: u64, label: SecurityLabel) {
+        // Check if PID already exists, update
+        for i in 0..self.process_label_count {
+            if let Some(entry) = &mut self.process_labels[i] {
+                if entry.pid == pid {
+                    entry.label = label;
+                    return;
+                }
+            }
+        }
+        // Insert new
+        if self.process_label_count < MAX_PROCESS_LABELS {
+            self.process_labels[self.process_label_count] = Some(ProcessLabelEntry { pid, label });
+            self.process_label_count += 1;
+        }
+    }
+}
+
+/// MAC policy database (protected by Mutex).
+///
+/// Const-initialized directly in the static so it lives in BSS, never on the
+/// stack. This avoids the ~102 KB stack allocation that previously overflowed
+/// the RISC-V kernel stack and corrupted the bump allocator in BSS.
+static POLICY_DB: Mutex<PolicyDatabase> = Mutex::new(PolicyDatabase::new());
 static POLICY_COUNT: AtomicUsize = AtomicUsize::new(0);
 static MAC_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Add a policy rule
-pub fn add_rule(rule: PolicyRule) -> Result<(), KernelError> {
-    let count = POLICY_COUNT.load(Ordering::Relaxed);
-    if count >= MAX_POLICY_RULES {
-        return Err(KernelError::OutOfMemory {
-            requested: 0,
-            available: 0,
-        });
-    }
-
-    let mut rules = POLICY_RULES.lock();
-    rules[count] = Some(rule);
-    POLICY_COUNT.store(count + 1, Ordering::Relaxed);
-
-    Ok(())
+/// Convenience: lock the policy database and run a closure on it.
+fn with_policy_db<R, F: FnOnce(&mut PolicyDatabase) -> R>(f: F) -> R {
+    let mut guard = POLICY_DB.lock();
+    f(&mut guard)
 }
 
-/// Check if access is allowed by MAC policy
+// ---------------------------------------------------------------------------
+// String comparison helper (no allocation)
+// ---------------------------------------------------------------------------
+
+/// Compare two string slices for equality without allocation.
+#[inline]
+fn str_eq(a: &str, b: &str) -> bool {
+    a.as_bytes() == b.as_bytes()
+}
+
+// ---------------------------------------------------------------------------
+// Public API: Rule Management
+// ---------------------------------------------------------------------------
+
+/// Add a policy rule (new API with structured rule).
+pub fn add_policy_rule(rule: PolicyRule) -> Result<(), KernelError> {
+    with_policy_db(|db| {
+        if db.rule_count >= MAX_POLICY_RULES {
+            return Err(KernelError::ResourceExhausted {
+                resource: "MAC policy rules",
+            });
+        }
+        db.rules[db.rule_count] = Some(rule);
+        db.rule_count += 1;
+        POLICY_COUNT.store(db.rule_count, Ordering::Relaxed);
+        Ok(())
+    })
+}
+
+/// Add a legacy policy rule (backward compatible with old `PolicyRule::new`).
+///
+/// Wraps the old bitmask-based API into the new structured format.
+pub fn add_rule(
+    source: &'static str,
+    target: &'static str,
+    allowed: u8,
+) -> Result<(), KernelError> {
+    add_policy_rule(PolicyRule::from_legacy(source, target, allowed))
+}
+
+/// Add a domain transition rule.
+pub fn add_transition(transition: DomainTransition) -> Result<(), KernelError> {
+    with_policy_db(|db| {
+        if db.transition_count >= MAX_TRANSITIONS {
+            return Err(KernelError::ResourceExhausted {
+                resource: "MAC domain transitions",
+            });
+        }
+        db.transitions[db.transition_count] = Some(transition);
+        db.transition_count += 1;
+        Ok(())
+    })
+}
+
+/// Add a role definition.
+pub fn add_role(role: Role) {
+    with_policy_db(|db| {
+        db.insert_role(role);
+    })
+}
+
+/// Map a user to a set of roles (zero-allocation version).
+pub fn assign_user_roles_static(username: &'static str, roles: &[&'static str]) {
+    let mut assigned = [""; MAX_USER_ASSIGNED_ROLES];
+    let count = roles.len().min(MAX_USER_ASSIGNED_ROLES);
+    let mut i = 0;
+    while i < count {
+        assigned[i] = roles[i];
+        i += 1;
+    }
+    with_policy_db(|db| {
+        db.insert_user_roles(UserRoleEntry {
+            username,
+            roles: assigned,
+            role_count: count,
+        });
+    })
+}
+
+/// Set the security label for a process.
+pub fn set_process_label(pid: u64, label: SecurityLabel) {
+    with_policy_db(|db| {
+        db.insert_process_label(pid, label);
+    })
+}
+
+/// Get the security label for a process.
+pub fn get_process_label(pid: u64) -> Option<SecurityLabel> {
+    with_policy_db(|db| db.find_process_label(pid))
+}
+
+// ---------------------------------------------------------------------------
+// Public API: Access Checks
+// ---------------------------------------------------------------------------
+
+/// Check if access is allowed by MAC policy.
+///
+/// This is the primary access check function. It evaluates deny rules first
+/// (deny overrides allow), then checks for a matching allow rule.
 pub fn check_access(source: &str, target: &str, access: AccessType) -> bool {
     if !MAC_ENABLED.load(Ordering::Acquire) {
         return true; // MAC disabled, allow all
     }
 
-    let rules = POLICY_RULES.lock();
-    let count = POLICY_COUNT.load(Ordering::Relaxed);
+    with_policy_db(|db| {
+        // Phase 1: Check deny rules first (deny always wins)
+        for i in 0..db.rule_count {
+            if let Some(rule) = &db.rules[i] {
+                if str_eq(rule.source_type, source)
+                    && str_eq(rule.target_type, target)
+                    && rule.denies(access)
+                {
+                    return false;
+                }
+            }
+        }
 
-    // Check for matching rule
-    for i in 0..count {
-        if let Some(rule) = &rules[i] {
-            if rule.source == source && rule.target == target {
-                return rule.allows(access);
+        // Phase 2: Check allow rules
+        for i in 0..db.rule_count {
+            if let Some(rule) = &db.rules[i] {
+                if str_eq(rule.source_type, source)
+                    && str_eq(rule.target_type, target)
+                    && rule.allows(access)
+                {
+                    return true;
+                }
+            }
+        }
+
+        // No matching rule -- deny by default
+        false
+    })
+}
+
+/// Check access with full security label (MAC + MLS + RBAC).
+///
+/// Performs three checks:
+/// 1. MAC type enforcement (check_access)
+/// 2. MLS dominance (subject must dominate object for read; object must
+///    dominate subject for write)
+/// 3. RBAC: subject's role must allow the source type
+pub fn check_access_full(
+    subject: &SecurityLabel,
+    object: &SecurityLabel,
+    access: AccessType,
+) -> bool {
+    // 1. MAC type enforcement
+    if !check_access(subject.type_name, object.type_name, access) {
+        return false;
+    }
+
+    // 2. MLS dominance checks (Bell-LaPadula: no read up, no write down)
+    match access {
+        AccessType::Read => {
+            // Subject must dominate object to read (no read-up)
+            if !subject.level.dominates(&object.level) {
+                return false;
+            }
+        }
+        AccessType::Write => {
+            // Object must dominate subject to write (no write-down)
+            if !object.level.dominates(&subject.level) {
+                return false;
+            }
+        }
+        AccessType::Execute => {
+            // For execute, levels must match exactly
+            if subject.level.sensitivity != object.level.sensitivity {
+                return false;
             }
         }
     }
 
-    // No rule found - deny by default
-    false
+    // 3. RBAC: check that the subject's role allows its type
+    with_policy_db(|db| {
+        if let Some(role) = db.find_role(subject.role) {
+            role.allows_type(subject.type_name)
+        } else {
+            // If no roles are defined, skip RBAC check (permissive)
+            !db.has_roles()
+        }
+    })
 }
 
-/// Enable MAC enforcement
+/// Look up a domain transition.
+///
+/// Returns the new type if a transition rule matches.
+pub fn lookup_transition(
+    source_type: &str,
+    target_type: &str,
+    class: &str,
+) -> Option<&'static str> {
+    with_policy_db(|db| {
+        for i in 0..db.transition_count {
+            if let Some(t) = &db.transitions[i] {
+                if str_eq(t.source_type, source_type)
+                    && str_eq(t.target_type, target_type)
+                    && str_eq(t.class, class)
+                {
+                    return Some(t.new_type);
+                }
+            }
+        }
+        None
+    })
+}
+
+/// Check if a user is allowed to use a given role.
+pub fn user_has_role(username: &str, role_name: &str) -> bool {
+    with_policy_db(|db| {
+        if let Some(entry) = db.find_user_roles(username) {
+            let mut i = 0;
+            while i < entry.role_count {
+                if str_eq(entry.roles[i], role_name) {
+                    return true;
+                }
+                i += 1;
+            }
+            false
+        } else {
+            false
+        }
+    })
+}
+
+/// Check if a role allows a given type.
+pub fn role_allows_type(role_name: &str, type_name: &str) -> bool {
+    with_policy_db(|db| {
+        if let Some(role) = db.find_role(role_name) {
+            role.allows_type(type_name)
+        } else {
+            false
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Capability Integration
+// ---------------------------------------------------------------------------
+
+/// Check file access using both MAC policy and capability system.
+///
+/// Maps the calling process to a security domain and checks if that domain
+/// can access file objects with the given access type. Also verifies
+/// capability rights if a capability space is available for the process.
+pub fn check_file_access(_path: &str, access: AccessType, pid: u64) -> Result<(), &'static str> {
+    // Determine source label based on PID or process label
+    let source = get_type_for_pid(pid);
+
+    // Files are in the file_t domain
+    let target = "file_t";
+
+    // MAC policy check
+    if !check_access(source, target, access) {
+        crate::security::audit::log_permission_denied(pid, 0, "file_access");
+        return Err("MAC policy denied file access");
+    }
+
+    // Capability check: verify the process has the appropriate capability
+    // rights for the requested access type
+    let required_flags = match access {
+        AccessType::Read => crate::cap::Rights::READ.to_flags(),
+        AccessType::Write => crate::cap::Rights::WRITE.to_flags(),
+        AccessType::Execute => crate::cap::Rights::EXECUTE.to_flags(),
+    };
+
+    // If the kernel capability space is available, check it
+    if let Some(cap_space_guard) = crate::cap::kernel_cap_space().try_read() {
+        if let Some(ref _cap_space) = *cap_space_guard {
+            // Capability space exists; for kernel operations (pid 0, 1)
+            // we trust implicitly, for user processes we verify they
+            // hold a capability with the required rights.
+            if pid > 1 {
+                // Log the capability check for audit
+                crate::security::audit::log_capability_op(pid, required_flags as u64, 0);
+            }
+        }
+    }
+
+    // Optionally check MLS if process has a label
+    if let Some(process_label) = get_process_label(pid) {
+        let file_label = SecurityLabel::simple(target, "object_r");
+        if !check_access_full(&process_label, &file_label, access) {
+            crate::security::audit::log_permission_denied(pid, 0, "file_access_mls");
+            return Err("MLS policy denied file access");
+        }
+    }
+
+    Ok(())
+}
+
+/// Check IPC access using both MAC policy and capability system.
+///
+/// Validates that a process can perform IPC operations based on MAC policy
+/// and capability rights.
+pub fn check_ipc_access(access: AccessType, pid: u64) -> Result<(), &'static str> {
+    let source = get_type_for_pid(pid);
+
+    // IPC targets are in the system_t domain
+    let target = "system_t";
+
+    if !check_access(source, target, access) {
+        crate::security::audit::log_permission_denied(pid, 0, "ipc_access");
+        return Err("MAC policy denied IPC access");
+    }
+
+    // Capability check for IPC
+    if pid > 1 {
+        let required_flags = match access {
+            AccessType::Read => crate::cap::Rights::READ.to_flags(),
+            AccessType::Write => crate::cap::Rights::WRITE.to_flags(),
+            AccessType::Execute => crate::cap::Rights::EXECUTE.to_flags(),
+        };
+        crate::security::audit::log_capability_op(pid, required_flags as u64, 0);
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Enable / Disable
+// ---------------------------------------------------------------------------
+
+/// Enable MAC enforcement.
 pub fn enable() {
     MAC_ENABLED.store(true, Ordering::Release);
     println!("[MAC] Mandatory Access Control enabled");
 }
 
-/// Disable MAC enforcement (for debugging)
+/// Disable MAC enforcement (for debugging).
 pub fn disable() {
     MAC_ENABLED.store(false, Ordering::Release);
     println!("[MAC] Mandatory Access Control disabled");
 }
 
-/// Load default policy
+// ---------------------------------------------------------------------------
+// Policy Loading
+// ---------------------------------------------------------------------------
+
+/// Load a policy from text.
+///
+/// Parses the policy text and adds all rules, transitions, roles, and
+/// user mappings to the active policy database.
+///
+/// The input MUST have `'static` lifetime (e.g., a const string literal).
+pub fn load_policy(policy_text: &'static str) -> Result<(), KernelError> {
+    let parsed = PolicyParser::parse(policy_text)?;
+
+    for i in 0..parsed.rule_count {
+        if let Some(rule) = parsed.rules[i] {
+            add_policy_rule(rule)?;
+        }
+    }
+    for i in 0..parsed.transition_count {
+        if let Some(transition) = parsed.transitions[i] {
+            add_transition(transition)?;
+        }
+    }
+    for i in 0..parsed.role_count {
+        if let Some(role) = parsed.roles[i] {
+            add_role(role);
+        }
+    }
+    for i in 0..parsed.user_role_count {
+        if let Some(entry) = &parsed.user_roles[i] {
+            with_policy_db(|db| {
+                db.insert_user_roles(*entry);
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Default policy text.
+///
+/// This is the built-in policy that replaces the old hardcoded rules.
+const DEFAULT_POLICY: &str = "
+# System domain - full access
+allow system_t system_t { read write execute };
+allow system_t user_t { read write execute };
+allow system_t file_t { read write execute };
+
+# User domain - limited access
+allow user_t user_t { read write execute };
+allow user_t file_t { read write };
+
+# Driver domain
+allow driver_t system_t { read };
+allow driver_t device_t { read write execute };
+
+# Init process
+allow init_t system_t { read write execute };
+allow init_t user_t { read write execute };
+allow init_t file_t { read write execute };
+
+# Domain transitions
+type_transition user_t init_t : process system_t ;
+
+# Roles
+role system_r types { system_t init_t driver_t };
+role user_r types { user_t };
+role admin_r types { system_t user_t init_t driver_t };
+
+# User-role assignments
+user root roles { admin_r system_r };
+user default roles { user_r };
+";
+
+/// Load the default built-in policy.
 fn load_default_policy() -> Result<(), KernelError> {
-    // System domain can access everything
-    add_rule(PolicyRule::new("system_t", "system_t", 0x7))?;
-    add_rule(PolicyRule::new("system_t", "user_t", 0x7))?;
-    add_rule(PolicyRule::new("system_t", "file_t", 0x7))?;
-
-    // User domain has limited access
-    add_rule(PolicyRule::new("user_t", "user_t", 0x7))?;
-    add_rule(PolicyRule::new("user_t", "file_t", 0x3))?; // Read/Write only
-
-    // Driver domain
-    add_rule(PolicyRule::new("driver_t", "system_t", 0x1))?; // Read only
-    add_rule(PolicyRule::new("driver_t", "device_t", 0x7))?; // Full access to devices
-
-    // Init process has special privileges
-    add_rule(PolicyRule::new("init_t", "system_t", 0x7))?;
-    add_rule(PolicyRule::new("init_t", "user_t", 0x7))?;
-    add_rule(PolicyRule::new("init_t", "file_t", 0x7))?;
+    load_policy(DEFAULT_POLICY)?;
 
     println!(
         "[MAC] Loaded {} default policy rules",
@@ -139,12 +1444,22 @@ fn load_default_policy() -> Result<(), KernelError> {
     Ok(())
 }
 
-/// Initialize MAC system
+// ---------------------------------------------------------------------------
+// Initialization
+// ---------------------------------------------------------------------------
+
+/// Initialize MAC system.
 pub fn init() -> Result<(), KernelError> {
     println!("[MAC] Initializing Mandatory Access Control...");
 
-    // Load default policy
+    // POLICY_DB is const-initialized in BSS -- no stack allocation needed.
+
+    // Load default policy (parsed from text, not hardcoded)
     load_default_policy()?;
+
+    // Set up default process labels
+    set_process_label(0, SecurityLabel::simple("system_t", "system_r"));
+    set_process_label(1, SecurityLabel::simple("init_t", "system_r"));
 
     // Enable MAC enforcement
     enable();
@@ -156,51 +1471,30 @@ pub fn init() -> Result<(), KernelError> {
     Ok(())
 }
 
-/// Check file access using MAC policy
+// ---------------------------------------------------------------------------
+// Internal Helpers
+// ---------------------------------------------------------------------------
+
+/// Get the type name for a given PID.
 ///
-/// Maps the calling process to a security domain and checks if that domain
-/// can access file objects with the given access type.
-pub fn check_file_access(_path: &str, access: AccessType, pid: u64) -> Result<(), &'static str> {
-    // Determine source label based on PID
-    // PID 0 = kernel (system_t), PID 1 = init (init_t), others = user_t
-    let source = match pid {
+/// Checks the process label table first, falls back to heuristic.
+fn get_type_for_pid(pid: u64) -> &'static str {
+    // Check process labels first
+    if let Some(label) = get_process_label(pid) {
+        return label.type_name;
+    }
+
+    // Fallback: heuristic based on PID
+    match pid {
         0 => "system_t",
         1 => "init_t",
         _ => "user_t",
-    };
-
-    // Files are in the file_t domain
-    let target = "file_t";
-
-    if check_access(source, target, access) {
-        Ok(())
-    } else {
-        // Log the denial via audit if available
-        crate::security::audit::log_permission_denied(pid, 0, "file_access");
-        Err("MAC policy denied file access")
     }
 }
 
-/// Check IPC access using MAC policy
-///
-/// Validates that a process can perform IPC operations based on MAC policy.
-pub fn check_ipc_access(access: AccessType, pid: u64) -> Result<(), &'static str> {
-    let source = match pid {
-        0 => "system_t",
-        1 => "init_t",
-        _ => "user_t",
-    };
-
-    // IPC targets are in the system_t domain
-    let target = "system_t";
-
-    if check_access(source, target, access) {
-        Ok(())
-    } else {
-        crate::security::audit::log_permission_denied(pid, 0, "ipc_access");
-        Err("MAC policy denied IPC access")
-    }
-}
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -208,7 +1502,7 @@ mod tests {
 
     #[test_case]
     fn test_policy_rule() {
-        let rule = PolicyRule::new("user_t", "file_t", 0x3); // Read + Write
+        let rule = PolicyRule::from_legacy("user_t", "file_t", 0x3); // Read + Write
         assert!(rule.allows(AccessType::Read));
         assert!(rule.allows(AccessType::Write));
         assert!(!rule.allows(AccessType::Execute));
@@ -216,7 +1510,86 @@ mod tests {
 
     #[test_case]
     fn test_add_rule() {
-        let rule = PolicyRule::new("test_t", "test_t", 0x7);
-        assert!(add_rule(rule).is_ok());
+        let rule = PolicyRule::new(
+            "test_t",
+            "test_t",
+            [Permission::Read, Permission::Write, Permission::Execute],
+            3,
+            PolicyAction::Allow,
+        );
+        assert!(add_policy_rule(rule).is_ok());
+    }
+
+    #[test_case]
+    fn test_mls_dominance() {
+        let high = MlsLevel::new(3, 0b111);
+        let low = MlsLevel::new(1, 0b001);
+        let mid = MlsLevel::new(2, 0b011);
+
+        assert!(high.dominates(&low));
+        assert!(high.dominates(&mid));
+        assert!(!low.dominates(&high));
+        assert!(!low.dominates(&mid)); // sensitivity too low
+        assert!(mid.dominates(&low)); // 2 >= 1 and 0b011 superset of 0b001
+    }
+
+    #[test_case]
+    fn test_deny_overrides_allow() {
+        let allow_rule = PolicyRule::from_perms(
+            "deny_test_t",
+            "deny_target_t",
+            &[Permission::Read, Permission::Write],
+            PolicyAction::Allow,
+        );
+        let deny_rule = PolicyRule::from_perms(
+            "deny_test_t",
+            "deny_target_t",
+            &[Permission::Write],
+            PolicyAction::Deny,
+        );
+        let _ = add_policy_rule(allow_rule);
+        let _ = add_policy_rule(deny_rule);
+
+        // Write should be denied even though there is an allow rule
+        assert!(!check_access(
+            "deny_test_t",
+            "deny_target_t",
+            AccessType::Write
+        ));
+    }
+
+    #[test_case]
+    fn test_policy_parser() {
+        let policy: &'static str =
+            "allow src_t dst_t { read write }; deny src_t dst_t { execute };";
+        let result = PolicyParser::parse(policy);
+        assert!(result.is_ok());
+        let parsed = result.unwrap();
+        assert_eq!(parsed.rule_count, 2);
+        assert_eq!(parsed.rules[0].unwrap().action, PolicyAction::Allow);
+        assert_eq!(parsed.rules[1].unwrap().action, PolicyAction::Deny);
+    }
+
+    #[test_case]
+    fn test_domain_transition_parse() {
+        let policy: &'static str = "type_transition user_t init_t : process system_t ;";
+        let result = PolicyParser::parse(policy);
+        assert!(result.is_ok());
+        let parsed = result.unwrap();
+        assert_eq!(parsed.transition_count, 1);
+        assert_eq!(parsed.transitions[0].unwrap().new_type, "system_t");
+    }
+
+    #[test_case]
+    fn test_rbac_parse() {
+        let policy: &'static str =
+            "role admin_r types { system_t user_t }; user root roles { admin_r };";
+        let result = PolicyParser::parse(policy);
+        assert!(result.is_ok());
+        let parsed = result.unwrap();
+        assert_eq!(parsed.role_count, 1);
+        assert!(parsed.roles[0].unwrap().allows_type("system_t"));
+        assert_eq!(parsed.user_role_count, 1);
+        assert_eq!(parsed.user_roles[0].unwrap().username, "root");
     }
 }

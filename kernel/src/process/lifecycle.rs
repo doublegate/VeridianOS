@@ -30,53 +30,64 @@ use crate::{arch::context::ThreadContext, println, sched};
 ///
 /// This is a shared helper used by both process creation and forking.
 /// It bridges the process/thread model with the scheduler's task model.
+///
+/// The Task is heap-allocated (Box) for two reasons:
+/// 1. Avoids stack overflow on architectures with large context structs (e.g.,
+///    RISC-V/AArch64 FPU state) during deep boot call chains.
+/// 2. The scheduler stores a raw pointer to the Task, so it must outlive this
+///    function — Box::into_raw provides stable heap ownership.
 pub(super) fn create_scheduler_task(
     process: &Process,
     thread: &Thread,
 ) -> Result<(), &'static str> {
-    // Create a sched::Task from our Thread
     // Get thread context info
     let ctx = thread.context.lock();
     let instruction_pointer = ctx.get_instruction_pointer();
     let stack_pointer = ctx.get_stack_pointer();
     drop(ctx);
 
-    // Create a sched::Task using the constructor
+    // Heap-allocate the Task to avoid stack overflow and provide a stable
+    // pointer for the scheduler (which outlives this function).
     #[cfg(feature = "alloc")]
-    let mut task = sched::task::Task::new(
-        process.pid,
-        thread.tid,
-        process.name.clone(),
-        instruction_pointer,
-        stack_pointer,
-        process.memory_space.lock().get_page_table() as usize,
-    );
+    {
+        let name = process.name.clone();
+        let page_table = process.memory_space.lock().get_page_table() as usize;
 
-    // Update task fields based on thread/process state
-    task.priority = match *process.priority.lock() {
-        ProcessPriority::RealTime => sched::task::Priority::RealTimeHigh,
-        ProcessPriority::System => sched::task::Priority::SystemHigh,
-        ProcessPriority::Normal => sched::task::Priority::UserNormal,
-        ProcessPriority::Low => sched::task::Priority::UserLow,
-        ProcessPriority::Idle => sched::task::Priority::Idle,
-    };
+        let mut task = alloc::boxed::Box::new(sched::task::Task::new(
+            process.pid,
+            thread.tid,
+            name,
+            instruction_pointer,
+            stack_pointer,
+            page_table,
+        ));
 
-    task.sched_class = match *process.priority.lock() {
-        ProcessPriority::RealTime => sched::task::SchedClass::RealTime,
-        _ => sched::task::SchedClass::Normal,
-    };
+        // Update task fields based on thread/process state
+        task.priority = match *process.priority.lock() {
+            ProcessPriority::RealTime => sched::task::Priority::RealTimeHigh,
+            ProcessPriority::System => sched::task::Priority::SystemHigh,
+            ProcessPriority::Normal => sched::task::Priority::UserNormal,
+            ProcessPriority::Low => sched::task::Priority::UserLow,
+            ProcessPriority::Idle => sched::task::Priority::Idle,
+        };
 
-    task.time_slice = thread
-        .time_slice
-        .load(core::sync::atomic::Ordering::Acquire);
+        task.sched_class = match *process.priority.lock() {
+            ProcessPriority::RealTime => sched::task::SchedClass::RealTime,
+            _ => sched::task::SchedClass::Normal,
+        };
 
-    // Get task pointer
-    let task_ptr = core::ptr::NonNull::new(&task as *const _ as *mut _)
-        .ok_or("Failed to create task pointer")?;
+        task.time_slice = thread
+            .time_slice
+            .load(core::sync::atomic::Ordering::Acquire);
 
-    // Add to scheduler
-    let scheduler = sched::SCHEDULER.lock();
-    scheduler.enqueue(task_ptr);
+        // Transfer ownership to raw pointer — scheduler takes ownership
+        let task_ptr = core::ptr::NonNull::new(alloc::boxed::Box::into_raw(task))
+            .ok_or("Failed to create task pointer")?;
+
+        // Add to scheduler
+        let scheduler = sched::SCHEDULER.lock();
+        scheduler.enqueue(task_ptr);
+    }
 
     Ok(())
 }

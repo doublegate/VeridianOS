@@ -28,7 +28,7 @@ use super::VirtualAddress;
 // 5. Cannot use OnceLock/GlobalState as those require heap allocation
 //    themselves
 #[allow(static_mut_refs)]
-static mut HEAP_MEMORY: [u8; 4 * 1024 * 1024] = [0; 4 * 1024 * 1024];
+static mut HEAP_MEMORY: [u8; 8 * 1024 * 1024] = [0; 8 * 1024 * 1024];
 
 /// Kernel heap size (16 MB initially)
 pub const HEAP_SIZE: usize = 16 * 1024 * 1024;
@@ -271,7 +271,7 @@ pub fn init() -> Result<(), &'static str> {
     #[allow(unused_unsafe)]
     unsafe {
         let heap_start = core::ptr::addr_of_mut!(HEAP_MEMORY) as *mut u8;
-        let heap_size = 4 * 1024 * 1024; // Size of HEAP_MEMORY (4MB)
+        let heap_size = 8 * 1024 * 1024; // Size of HEAP_MEMORY (8MB)
 
         // RISC-V: Use UnsafeBumpAllocator (same as AArch64).
         // LockedHeap's linked-list free list gets corrupted on RISC-V bare

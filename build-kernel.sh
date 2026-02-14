@@ -55,8 +55,11 @@ build_arch() {
         if [ "$arch" == "x86_64" ]; then
             echo -e "${YELLOW}Creating bootable disk image for x86_64...${NC}"
 
-            KERNEL_PATH="target/$target/$BUILD_DIR/veridian-kernel"
-            OUTPUT_DIR="target/$target/$BUILD_DIR"
+            # Cargo strips directory prefix and .json suffix from custom target specs
+            # e.g. "targets/x86_64-veridian.json" -> output at "target/x86_64-veridian/"
+            TARGET_DIR=$(basename "$target" .json)
+            KERNEL_PATH="target/$TARGET_DIR/$BUILD_DIR/veridian-kernel"
+            OUTPUT_DIR="target/$TARGET_DIR/$BUILD_DIR"
 
             # Use the isolated build script to avoid workspace config conflicts
             if ./tools/build-bootimage.sh "$KERNEL_PATH" "$OUTPUT_DIR"; then

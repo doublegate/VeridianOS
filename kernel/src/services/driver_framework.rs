@@ -4,12 +4,37 @@
 
 #![allow(clippy::unwrap_or_default)]
 
-use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use spin::RwLock;
 
 use crate::error::KernelError;
+
+/// Device event for hot-plug notifications.
+#[derive(Debug, Clone)]
+pub enum DeviceEvent {
+    /// A new device was added to the system.
+    Added(DeviceInfo),
+    /// A device was removed from the system.
+    Removed(u64),
+    /// A device's status changed.
+    StateChanged {
+        device_id: u64,
+        old: DeviceStatus,
+        new: DeviceStatus,
+    },
+}
+
+/// Trait for receiving device hot-plug events.
+///
+/// Implementors register with the driver framework via
+/// [`DriverFramework::register_event_listener`] and will receive callbacks
+/// whenever devices are added, removed, or change state.
+pub trait DeviceEventListener: Send + Sync {
+    /// Called when a device event occurs.
+    fn on_event(&self, event: &DeviceEvent);
+}
 
 /// Device class
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +176,9 @@ pub struct DriverFramework {
 
     /// IRQ handlers
     irq_handlers: RwLock<BTreeMap<u8, Vec<String>>>, // IRQ -> driver names
+
+    /// Event listeners for device hot-plug notifications
+    event_listeners: RwLock<Vec<Arc<dyn DeviceEventListener>>>,
 }
 
 impl DriverFramework {
@@ -163,6 +191,7 @@ impl DriverFramework {
             bindings: RwLock::new(BTreeMap::new()),
             next_device_id: AtomicU64::new(1),
             irq_handlers: RwLock::new(BTreeMap::new()),
+            event_listeners: RwLock::new(Vec::new()),
         }
     }
 }
@@ -531,6 +560,157 @@ impl DriverFramework {
     /// Get all registered drivers
     pub fn get_drivers(&self) -> Vec<String> {
         self.drivers.read().keys().cloned().collect()
+    }
+
+    /// Register an event listener for device hot-plug notifications.
+    pub fn register_event_listener(&self, listener: Arc<dyn DeviceEventListener>) {
+        self.event_listeners.write().push(listener);
+    }
+
+    /// Unregister all event listeners (used during shutdown).
+    pub fn clear_event_listeners(&self) {
+        self.event_listeners.write().clear();
+    }
+
+    /// Notify all registered listeners of a device event.
+    fn notify_listeners(&self, event: &DeviceEvent) {
+        let listeners = self.event_listeners.read();
+        for listener in listeners.iter() {
+            listener.on_event(event);
+        }
+    }
+
+    /// Add a new device to the system (hot-plug).
+    ///
+    /// Assigns a unique device ID, registers the device, fires an `Added`
+    /// event, and attempts to auto-probe a matching driver.
+    pub fn add_device(&self, mut device: DeviceInfo) -> Result<u64, KernelError> {
+        device.id = self.next_device_id.fetch_add(1, Ordering::SeqCst);
+        let device_id = device.id;
+
+        crate::println!(
+            "[DRIVER_FRAMEWORK] Hot-plug: adding device {} (id={})",
+            device.name,
+            device_id
+        );
+
+        self.devices.write().insert(device_id, device.clone());
+
+        // Fire Added event
+        self.notify_listeners(&DeviceEvent::Added(device));
+
+        // Try to find a driver for this device
+        self.probe_device(device_id)?;
+
+        Ok(device_id)
+    }
+
+    /// Remove a device from the system (hot-unplug).
+    ///
+    /// Unbinds any attached driver, fires a `Removed` event, and removes the
+    /// device from the registry.
+    pub fn remove_device(&self, device_id: u64) -> Result<(), KernelError> {
+        // Unbind driver if bound
+        if self.bindings.read().contains_key(&device_id) {
+            self.unbind_device(device_id)?;
+        }
+
+        // Remove device and fire event
+        let removed = self.devices.write().remove(&device_id);
+
+        if let Some(_dev) = removed {
+            crate::println!(
+                "[DRIVER_FRAMEWORK] Hot-unplug: removed device (id={})",
+                device_id
+            );
+            self.notify_listeners(&DeviceEvent::Removed(device_id));
+            Ok(())
+        } else {
+            Err(KernelError::NotFound {
+                resource: "device",
+                id: device_id,
+            })
+        }
+    }
+
+    /// Update a device's status and fire a StateChanged event.
+    pub fn update_device_status(
+        &self,
+        device_id: u64,
+        new_status: DeviceStatus,
+    ) -> Result<(), KernelError> {
+        let old_status = {
+            let mut devices = self.devices.write();
+            let dev = devices.get_mut(&device_id).ok_or(KernelError::NotFound {
+                resource: "device",
+                id: device_id,
+            })?;
+            let old = dev.status;
+            dev.status = new_status;
+            old
+        };
+
+        if old_status != new_status {
+            self.notify_listeners(&DeviceEvent::StateChanged {
+                device_id,
+                old: old_status,
+                new: new_status,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Read from a device through its bound driver.
+    pub fn read_device(
+        &self,
+        device_id: u64,
+        offset: u64,
+        buffer: &mut [u8],
+    ) -> Result<usize, KernelError> {
+        let driver_name =
+            self.bindings
+                .read()
+                .get(&device_id)
+                .cloned()
+                .ok_or(KernelError::NotFound {
+                    resource: "device binding",
+                    id: device_id,
+                })?;
+
+        let mut drivers = self.drivers.write();
+        let driver = drivers.get_mut(&driver_name).ok_or(KernelError::NotFound {
+            resource: "driver",
+            id: 0,
+        })?;
+
+        driver.read(offset, buffer)
+    }
+
+    /// Write to a device through its bound driver.
+    pub fn write_device(
+        &self,
+        device_id: u64,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<usize, KernelError> {
+        let driver_name =
+            self.bindings
+                .read()
+                .get(&device_id)
+                .cloned()
+                .ok_or(KernelError::NotFound {
+                    resource: "device binding",
+                    id: device_id,
+                })?;
+
+        let mut drivers = self.drivers.write();
+        let driver = drivers.get_mut(&driver_name).ok_or(KernelError::NotFound {
+            resource: "driver",
+            id: 0,
+        })?;
+
+        driver.write(offset, data)
     }
 
     /// Get statistics

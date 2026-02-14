@@ -16,7 +16,7 @@
     clippy::implicit_saturating_sub
 )]
 
-use alloc::{sync::Arc, vec, vec::Vec};
+use alloc::{string::String, sync::Arc, vec, vec::Vec};
 use core::mem::size_of;
 
 #[cfg(not(target_arch = "aarch64"))]
@@ -144,6 +144,73 @@ impl DiskInode {
             NodeType::File // Default
         }
     }
+}
+
+/// Size of the fixed header in a DiskDirEntry (inode + rec_len + name_len +
+/// file_type)
+pub const DIR_ENTRY_HEADER_SIZE: usize = 8;
+
+/// On-disk directory entry (ext2-style variable-length record)
+///
+/// Layout:
+///   - inode:     4 bytes (inode number, 0 = deleted entry)
+///   - rec_len:   2 bytes (total record length, always 4-byte aligned)
+///   - name_len:  1 byte  (actual name length)
+///   - file_type: 1 byte  (1=file, 2=directory)
+///   - name:      up to 255 bytes
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DiskDirEntry {
+    pub inode: u32,
+    pub rec_len: u16,
+    pub name_len: u8,
+    pub file_type: u8,
+    pub name: [u8; 255],
+}
+
+impl DiskDirEntry {
+    /// File type constant for regular files
+    pub const FT_REG_FILE: u8 = 1;
+    /// File type constant for directories
+    pub const FT_DIR: u8 = 2;
+
+    /// Create a new directory entry
+    pub fn new(inode: u32, name: &str, file_type: u8) -> Self {
+        let name_bytes = name.as_bytes();
+        let name_len = name_bytes.len().min(MAX_FILENAME_LEN) as u8;
+        let rec_len = align4(DIR_ENTRY_HEADER_SIZE + name_len as usize) as u16;
+
+        let mut entry = Self {
+            inode,
+            rec_len,
+            name_len,
+            file_type,
+            name: [0u8; 255],
+        };
+
+        let copy_len = name_len as usize;
+        entry.name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+        entry
+    }
+
+    /// Get the name as a string slice
+    pub fn name_str(&self) -> &str {
+        let slice = &self.name[..self.name_len as usize];
+        core::str::from_utf8(slice).unwrap_or("")
+    }
+
+    /// Convert file_type to NodeType
+    pub fn node_type(&self) -> NodeType {
+        match self.file_type {
+            Self::FT_DIR => NodeType::Directory,
+            _ => NodeType::File,
+        }
+    }
+}
+
+/// Align a value up to the next 4-byte boundary
+fn align4(val: usize) -> usize {
+    (val + 3) & !3
 }
 
 /// Block allocation bitmap
@@ -288,7 +355,11 @@ impl BlockFsInner {
         inode_table.resize(inode_count as usize, DiskInode::new(0, 0, 0));
 
         // Initialize root directory (inode 0)
-        inode_table[0] = DiskInode::new(0x41ED, 0, 0); // Directory, rwxr-xr-x
+        // links_count = 2: one for itself (".") and one from the parent (root is its
+        // own parent)
+        let mut root_inode = DiskInode::new(0x41ED, 0, 0); // Directory, rwxr-xr-x
+        root_inode.links_count = 2;
+        inode_table[0] = root_inode;
 
         // Initialize block storage
         let mut block_data = Vec::new();
@@ -296,12 +367,18 @@ impl BlockFsInner {
             block_data.push(vec![0u8; BLOCK_SIZE]);
         }
 
-        Self {
+        let mut fs = Self {
             superblock,
             block_bitmap,
             inode_table,
             block_data,
-        }
+        };
+
+        // Create "." and ".." entries in the root directory (both point to inode 0)
+        let _ = fs.write_dir_entry(0, 0, ".", DiskDirEntry::FT_DIR);
+        let _ = fs.write_dir_entry(0, 0, "..", DiskDirEntry::FT_DIR);
+
+        fs
     }
 
     fn allocate_inode(&mut self) -> Option<u32> {
@@ -462,21 +539,88 @@ impl BlockFsInner {
             return Err(KernelError::FsError(FsError::NotADirectory));
         }
 
-        // TODO(phase4): Parse directory entries from on-disk block data
-        Ok(Vec::new())
+        let mut entries = Vec::new();
+        let dir_size = inode.size as usize;
+
+        // Iterate through direct blocks that contain directory entries
+        for i in 0..12 {
+            let block_num = inode.direct_blocks[i];
+            if block_num == 0 {
+                break;
+            }
+
+            let block_start = i * BLOCK_SIZE;
+            if block_start >= dir_size {
+                break;
+            }
+
+            let block = &self.block_data[block_num as usize];
+            let block_end = BLOCK_SIZE.min(dir_size - block_start);
+            let mut offset = 0;
+
+            while offset + DIR_ENTRY_HEADER_SIZE <= block_end {
+                let entry = self.read_dir_entry(block, offset);
+                let rec_len = entry.rec_len as usize;
+
+                // rec_len must be at least the header size and 4-byte aligned
+                if rec_len < DIR_ENTRY_HEADER_SIZE || !rec_len.is_multiple_of(4) {
+                    break;
+                }
+
+                // Skip deleted entries (inode == 0) but still advance
+                if entry.inode != 0 && entry.name_len > 0 {
+                    entries.push(DirEntry {
+                        name: String::from(entry.name_str()),
+                        node_type: entry.node_type(),
+                        inode: entry.inode as u64,
+                    });
+                }
+
+                offset += rec_len;
+            }
+        }
+
+        Ok(entries)
     }
 
-    fn lookup_in_dir(&self, _dir_inode: u32, _name: &str) -> Result<u32, KernelError> {
-        // TODO(phase4): Implement directory entry lookup by name
-        Err(KernelError::FsError(FsError::NotFound))
+    fn lookup_in_dir(&self, dir_inode: u32, name: &str) -> Result<u32, KernelError> {
+        // Validate inode exists and is a directory (scoped borrow)
+        {
+            let inode = self
+                .inode_table
+                .get(dir_inode as usize)
+                .ok_or(KernelError::FsError(FsError::NotFound))?;
+
+            if !inode.is_dir() {
+                return Err(KernelError::FsError(FsError::NotADirectory));
+            }
+        }
+
+        match self.find_dir_entry(dir_inode, name) {
+            Some((entry, _, _)) => Ok(entry.inode),
+            None => Err(KernelError::FsError(FsError::NotFound)),
+        }
     }
 
     fn create_file(
         &mut self,
-        _parent: u32,
-        _name: &str,
+        parent: u32,
+        name: &str,
         permissions: Permissions,
     ) -> Result<u32, KernelError> {
+        // Check name length
+        if name.is_empty() || name.len() > MAX_FILENAME_LEN {
+            return Err(KernelError::InvalidArgument {
+                name: "filename",
+                value: "empty or exceeds maximum length",
+            });
+        }
+
+        // Check if the name already exists in the parent directory
+        if self.find_dir_entry(parent, name).is_some() {
+            return Err(KernelError::FsError(FsError::AlreadyExists));
+        }
+
         let inode_num = self
             .allocate_inode()
             .ok_or(KernelError::ResourceExhausted { resource: "inodes" })?;
@@ -484,45 +628,420 @@ impl BlockFsInner {
         let mode = permissions_to_mode(permissions, false);
         self.inode_table[inode_num as usize] = DiskInode::new(mode, 0, 0);
 
-        // TODO(phase4): Add directory entry to parent inode
+        // Add directory entry to parent
+        if let Err(e) = self.write_dir_entry(parent, inode_num, name, DiskDirEntry::FT_REG_FILE) {
+            // Roll back inode allocation on failure
+            self.inode_table[inode_num as usize].links_count = 0;
+            self.superblock.free_inodes += 1;
+            return Err(e);
+        }
 
         Ok(inode_num)
     }
 
     fn create_directory(
         &mut self,
-        _parent: u32,
-        _name: &str,
+        parent: u32,
+        name: &str,
         permissions: Permissions,
     ) -> Result<u32, KernelError> {
+        // Check name length
+        if name.is_empty() || name.len() > MAX_FILENAME_LEN {
+            return Err(KernelError::InvalidArgument {
+                name: "dirname",
+                value: "empty or exceeds maximum length",
+            });
+        }
+
+        // Check if the name already exists in the parent directory
+        if self.find_dir_entry(parent, name).is_some() {
+            return Err(KernelError::FsError(FsError::AlreadyExists));
+        }
+
         let inode_num = self
             .allocate_inode()
             .ok_or(KernelError::ResourceExhausted { resource: "inodes" })?;
 
         let mode = permissions_to_mode(permissions, true);
-        self.inode_table[inode_num as usize] = DiskInode::new(mode, 0, 0);
+        let mut new_inode = DiskInode::new(mode, 0, 0);
+        // Directories start with link count 2 (parent's entry + self ".")
+        new_inode.links_count = 2;
+        self.inode_table[inode_num as usize] = new_inode;
 
-        // TODO(phase4): Add directory entry to parent and create . and .. entries
+        // Create "." entry (self-reference) in the new directory
+        if let Err(e) = self.write_dir_entry(inode_num, inode_num, ".", DiskDirEntry::FT_DIR) {
+            self.inode_table[inode_num as usize].links_count = 0;
+            self.superblock.free_inodes += 1;
+            return Err(e);
+        }
+
+        // Create ".." entry (parent reference) in the new directory
+        if let Err(e) = self.write_dir_entry(inode_num, parent, "..", DiskDirEntry::FT_DIR) {
+            self.inode_table[inode_num as usize].links_count = 0;
+            self.superblock.free_inodes += 1;
+            return Err(e);
+        }
+
+        // Add entry for the new directory in the parent directory
+        if let Err(e) = self.write_dir_entry(parent, inode_num, name, DiskDirEntry::FT_DIR) {
+            self.inode_table[inode_num as usize].links_count = 0;
+            self.superblock.free_inodes += 1;
+            return Err(e);
+        }
+
+        // Increment parent's link count (for the ".." entry pointing back)
+        self.inode_table[parent as usize].links_count += 1;
 
         Ok(inode_num)
     }
 
-    fn unlink_from_dir(&mut self, _parent: u32, _name: &str) -> Result<(), KernelError> {
-        // TODO(phase4): Implement file unlinking (remove dir entry, decrement link
-        // count)
+    fn unlink_from_dir(&mut self, parent: u32, name: &str) -> Result<(), KernelError> {
+        // Cannot unlink "." or ".."
+        if name == "." || name == ".." {
+            return Err(KernelError::InvalidArgument {
+                name: "filename",
+                value: "cannot unlink . or ..",
+            });
+        }
+
+        // Find the entry in the parent directory
+        let (entry, block_idx, offset) = self
+            .find_dir_entry(parent, name)
+            .ok_or(KernelError::FsError(FsError::NotFound))?;
+
+        let target_inode = entry.inode;
+        let is_dir = entry.file_type == DiskDirEntry::FT_DIR;
+
+        // If unlinking a directory, check that it is empty (only "." and ".." entries)
+        if is_dir {
+            let child_entries = self.readdir(target_inode)?;
+            let non_dot_count = child_entries
+                .iter()
+                .filter(|e| e.name != "." && e.name != "..")
+                .count();
+            if non_dot_count > 0 {
+                return Err(KernelError::FsError(FsError::DirectoryNotEmpty));
+            }
+        }
+
+        // Get the block number from the parent inode (scoped borrow)
+        let block_num = {
+            let parent_inode = self
+                .inode_table
+                .get(parent as usize)
+                .ok_or(KernelError::FsError(FsError::NotFound))?;
+            let bn = parent_inode.direct_blocks[block_idx];
+            if bn == 0 {
+                return Err(KernelError::FsError(FsError::IoError));
+            }
+            bn
+        };
+
+        // Zero out the inode field in the on-disk entry to mark it deleted
+        let block = &mut self.block_data[block_num as usize];
+        block[offset] = 0;
+        block[offset + 1] = 0;
+        block[offset + 2] = 0;
+        block[offset + 3] = 0;
+
+        // Decrement link count on the target inode
+        if let Some(target) = self.inode_table.get_mut(target_inode as usize) {
+            if target.links_count > 0 {
+                target.links_count -= 1;
+            }
+
+            // If unlinking a directory, also decrement parent link count (for "..")
+            if is_dir {
+                if let Some(p) = self.inode_table.get_mut(parent as usize) {
+                    if p.links_count > 0 {
+                        p.links_count -= 1;
+                    }
+                }
+            }
+
+            // If links reach 0, free all data blocks
+            if self.inode_table[target_inode as usize].links_count == 0 {
+                self.free_inode_blocks(target_inode);
+            }
+        }
+
         Ok(())
     }
 
     fn truncate_inode(&mut self, inode_num: u32, size: usize) -> Result<(), KernelError> {
-        let inode = self
-            .inode_table
-            .get_mut(inode_num as usize)
-            .ok_or(KernelError::FsError(FsError::NotFound))?;
+        let old_size = {
+            let inode = self
+                .inode_table
+                .get(inode_num as usize)
+                .ok_or(KernelError::FsError(FsError::NotFound))?;
+            inode.size as usize
+        };
 
-        inode.size = size as u32;
-        // TODO(phase4): Free data blocks beyond the new truncated size
+        // Set the new size
+        self.inode_table[inode_num as usize].size = size as u32;
+
+        // Free data blocks that are fully beyond the new size
+        if size < old_size {
+            // First block index that is no longer needed
+            let first_free_block = if size == 0 {
+                0
+            } else {
+                (size + BLOCK_SIZE - 1) / BLOCK_SIZE
+            };
+
+            // Collect block numbers to free (to avoid borrow conflicts)
+            let mut blocks_to_free = Vec::new();
+            for i in first_free_block..12 {
+                let block_num = self.inode_table[inode_num as usize].direct_blocks[i];
+                if block_num != 0 {
+                    blocks_to_free.push((i, block_num));
+                }
+            }
+
+            // Free the blocks
+            for (idx, block_num) in blocks_to_free {
+                self.free_block(block_num);
+                self.inode_table[inode_num as usize].direct_blocks[idx] = 0;
+                if self.inode_table[inode_num as usize].blocks > 0 {
+                    self.inode_table[inode_num as usize].blocks -= 1;
+                }
+            }
+
+            // If truncating to non-zero size within a block, zero the tail of that block
+            if size > 0 {
+                let tail_block_idx = (size - 1) / BLOCK_SIZE;
+                let block_num = self.inode_table[inode_num as usize].direct_blocks[tail_block_idx];
+                if block_num != 0 {
+                    let zero_from = size % BLOCK_SIZE;
+                    if zero_from > 0 {
+                        let block = &mut self.block_data[block_num as usize];
+                        for byte in &mut block[zero_from..BLOCK_SIZE] {
+                            *byte = 0;
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(())
+    }
+
+    // --- Helper methods for directory entry operations ---
+
+    /// Read a DiskDirEntry from a block at the given byte offset.
+    ///
+    /// Parses the fixed header fields and name bytes from raw block data.
+    fn read_dir_entry(&self, block: &[u8], offset: usize) -> DiskDirEntry {
+        let inode = u32::from_le_bytes([
+            block[offset],
+            block[offset + 1],
+            block[offset + 2],
+            block[offset + 3],
+        ]);
+        let rec_len = u16::from_le_bytes([block[offset + 4], block[offset + 5]]);
+        let name_len = block[offset + 6];
+        let file_type = block[offset + 7];
+
+        let mut name = [0u8; 255];
+        let actual_name_len = (name_len as usize).min(MAX_FILENAME_LEN);
+        let available = block.len() - (offset + DIR_ENTRY_HEADER_SIZE);
+        let copy_len = actual_name_len.min(available);
+        name[..copy_len].copy_from_slice(
+            &block[offset + DIR_ENTRY_HEADER_SIZE..offset + DIR_ENTRY_HEADER_SIZE + copy_len],
+        );
+
+        DiskDirEntry {
+            inode,
+            rec_len,
+            name_len,
+            file_type,
+            name,
+        }
+    }
+
+    /// Find a directory entry by name within a directory inode.
+    ///
+    /// Returns the entry, the direct block index, and the byte offset within
+    /// that block where the entry starts. Returns None if not found.
+    fn find_dir_entry(&self, dir_inode: u32, name: &str) -> Option<(DiskDirEntry, usize, usize)> {
+        let inode = self.inode_table.get(dir_inode as usize)?;
+
+        if !inode.is_dir() {
+            return None;
+        }
+
+        let dir_size = inode.size as usize;
+
+        for i in 0..12 {
+            let block_num = inode.direct_blocks[i];
+            if block_num == 0 {
+                break;
+            }
+
+            let block_start = i * BLOCK_SIZE;
+            if block_start >= dir_size {
+                break;
+            }
+
+            let block = &self.block_data[block_num as usize];
+            let block_end = BLOCK_SIZE.min(dir_size - block_start);
+            let mut offset = 0;
+
+            while offset + DIR_ENTRY_HEADER_SIZE <= block_end {
+                let entry = self.read_dir_entry(block, offset);
+                let rec_len = entry.rec_len as usize;
+
+                if rec_len < DIR_ENTRY_HEADER_SIZE || !rec_len.is_multiple_of(4) {
+                    break;
+                }
+
+                if entry.inode != 0 && entry.name_len > 0 && entry.name_str() == name {
+                    return Some((entry, i, offset));
+                }
+
+                offset += rec_len;
+            }
+        }
+
+        None
+    }
+
+    /// Write a new directory entry into a directory inode's data blocks.
+    ///
+    /// Appends the entry at the end of the directory's current content.
+    /// Allocates a new data block if needed.
+    fn write_dir_entry(
+        &mut self,
+        dir_inode: u32,
+        target_inode: u32,
+        name: &str,
+        file_type: u8,
+    ) -> Result<(), KernelError> {
+        let entry = DiskDirEntry::new(target_inode, name, file_type);
+        let entry_size = align4(DIR_ENTRY_HEADER_SIZE + entry.name_len as usize);
+
+        let dir_size = self.inode_table[dir_inode as usize].size as usize;
+
+        // Determine which block to write into and at what offset
+        let block_idx = dir_size / BLOCK_SIZE;
+        let offset_in_block = dir_size % BLOCK_SIZE;
+
+        if block_idx >= 12 {
+            return Err(KernelError::ResourceExhausted {
+                resource: "directory direct blocks",
+            });
+        }
+
+        // Check if the entry fits in the current block
+        if offset_in_block + entry_size > BLOCK_SIZE {
+            // Need a new block; current block cannot fit this entry
+            let next_block_idx = block_idx + 1;
+            if next_block_idx >= 12 {
+                return Err(KernelError::ResourceExhausted {
+                    resource: "directory direct blocks",
+                });
+            }
+
+            // Allocate a new block if not already present
+            if self.inode_table[dir_inode as usize].direct_blocks[next_block_idx] == 0 {
+                let new_block = self
+                    .allocate_block()
+                    .ok_or(KernelError::ResourceExhausted { resource: "blocks" })?;
+                self.inode_table[dir_inode as usize].direct_blocks[next_block_idx] = new_block;
+                self.inode_table[dir_inode as usize].blocks += 1;
+            }
+
+            // Write at the start of the new block
+            self.serialize_dir_entry(dir_inode, next_block_idx, 0, &entry, entry_size)?;
+
+            // Update directory size to include any padding in the old block plus the new
+            // entry
+            let new_size = (next_block_idx * BLOCK_SIZE) + entry_size;
+            self.inode_table[dir_inode as usize].size = new_size as u32;
+        } else {
+            // Allocate the first block if needed (empty directory)
+            if self.inode_table[dir_inode as usize].direct_blocks[block_idx] == 0 {
+                let new_block = self
+                    .allocate_block()
+                    .ok_or(KernelError::ResourceExhausted { resource: "blocks" })?;
+                self.inode_table[dir_inode as usize].direct_blocks[block_idx] = new_block;
+                self.inode_table[dir_inode as usize].blocks += 1;
+            }
+
+            self.serialize_dir_entry(dir_inode, block_idx, offset_in_block, &entry, entry_size)?;
+
+            // Update directory size
+            let new_size = dir_size + entry_size;
+            self.inode_table[dir_inode as usize].size = new_size as u32;
+        }
+
+        Ok(())
+    }
+
+    /// Serialize a DiskDirEntry into a specific block at a given offset.
+    fn serialize_dir_entry(
+        &mut self,
+        dir_inode: u32,
+        block_idx: usize,
+        offset: usize,
+        entry: &DiskDirEntry,
+        entry_size: usize,
+    ) -> Result<(), KernelError> {
+        let block_num = self.inode_table[dir_inode as usize].direct_blocks[block_idx];
+        if block_num == 0 {
+            return Err(KernelError::FsError(FsError::IoError));
+        }
+
+        let block = &mut self.block_data[block_num as usize];
+
+        // Write inode (4 bytes, little-endian)
+        let inode_bytes = entry.inode.to_le_bytes();
+        block[offset..offset + 4].copy_from_slice(&inode_bytes);
+
+        // Write rec_len (2 bytes, little-endian) - use the padded entry_size
+        let rec_len_bytes = (entry_size as u16).to_le_bytes();
+        block[offset + 4..offset + 6].copy_from_slice(&rec_len_bytes);
+
+        // Write name_len (1 byte)
+        block[offset + 6] = entry.name_len;
+
+        // Write file_type (1 byte)
+        block[offset + 7] = entry.file_type;
+
+        // Write name bytes
+        let name_len = entry.name_len as usize;
+        block[offset + DIR_ENTRY_HEADER_SIZE..offset + DIR_ENTRY_HEADER_SIZE + name_len]
+            .copy_from_slice(&entry.name[..name_len]);
+
+        // Zero-fill any padding bytes between name end and rec_len boundary
+        let name_end = offset + DIR_ENTRY_HEADER_SIZE + name_len;
+        let rec_end = offset + entry_size;
+        for byte in &mut block[name_end..rec_end] {
+            *byte = 0;
+        }
+
+        Ok(())
+    }
+
+    /// Free all data blocks belonging to an inode.
+    fn free_inode_blocks(&mut self, inode_num: u32) {
+        // Collect blocks to free
+        let mut blocks_to_free = Vec::new();
+        for i in 0..12 {
+            let block_num = self.inode_table[inode_num as usize].direct_blocks[i];
+            if block_num != 0 {
+                blocks_to_free.push(i);
+            }
+        }
+
+        for i in blocks_to_free {
+            let block_num = self.inode_table[inode_num as usize].direct_blocks[i];
+            self.free_block(block_num);
+            self.inode_table[inode_num as usize].direct_blocks[i] = 0;
+        }
+
+        self.inode_table[inode_num as usize].blocks = 0;
+        self.inode_table[inode_num as usize].size = 0;
     }
 }
 

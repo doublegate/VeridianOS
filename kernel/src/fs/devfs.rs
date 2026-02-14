@@ -69,9 +69,27 @@ impl VfsNode for DevNode {
                 Ok(buffer.len())
             }
             _ => {
-                // TODO(phase4): Dispatch read to actual device driver via driver registry
+                // Dispatch read to registered device driver via driver framework
+                if let Some(fw) = crate::services::driver_framework::try_get_driver_framework() {
+                    // Look up device by major/minor number
+                    let devices = fw.list_devices();
+                    for dev in &devices {
+                        if let Some(ref driver_name) = dev.driver {
+                            // Match device name to our device node name
+                            if dev.name == self.name {
+                                // Device has a bound driver -- attempt read via framework
+                                return fw.read_device(dev.id, _offset as u64, buffer).map_err(
+                                    |_| KernelError::OperationNotSupported {
+                                        operation: "device read failed",
+                                    },
+                                );
+                            }
+                            let _ = driver_name; // suppress unused warning
+                        }
+                    }
+                }
                 Err(KernelError::OperationNotSupported {
-                    operation: "read on unimplemented device",
+                    operation: "read on unregistered device",
                 })
             }
         }
@@ -91,9 +109,24 @@ impl VfsNode for DevNode {
                 Ok(data.len())
             }
             _ => {
-                // TODO(phase4): Dispatch write to actual device driver via driver registry
+                // Dispatch write to registered device driver via driver framework
+                if let Some(fw) = crate::services::driver_framework::try_get_driver_framework() {
+                    let devices = fw.list_devices();
+                    for dev in &devices {
+                        if let Some(ref driver_name) = dev.driver {
+                            if dev.name == self.name {
+                                return fw.write_device(dev.id, _offset as u64, data).map_err(
+                                    |_| KernelError::OperationNotSupported {
+                                        operation: "device write failed",
+                                    },
+                                );
+                            }
+                            let _ = driver_name;
+                        }
+                    }
+                }
                 Err(KernelError::OperationNotSupported {
-                    operation: "write on unimplemented device",
+                    operation: "write on unregistered device",
                 })
             }
         }

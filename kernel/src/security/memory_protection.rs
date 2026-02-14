@@ -4,7 +4,7 @@
 
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use spin::RwLock;
 
@@ -16,30 +16,46 @@ pub struct Aslr {
     entropy_pool: RwLock<[u64; 16]>,
     /// Counter for mixing
     counter: AtomicU64,
+    /// Whether the entropy pool has been seeded
+    seeded: AtomicBool,
 }
 
 impl Aslr {
-    /// Create new ASLR instance
+    /// Create new ASLR instance (lightweight — defers CSPRNG to first use)
+    ///
+    /// Entropy seeding is deferred to `ensure_seeded()` to avoid deep crypto
+    /// call chains during early boot, which can overflow the small x86_64
+    /// kernel stack in debug mode.
     pub fn new() -> Result<Self, KernelError> {
-        let mut entropy_pool = [0u64; 16];
+        Ok(Self {
+            entropy_pool: RwLock::new([0u64; 16]),
+            counter: AtomicU64::new(0),
+            seeded: AtomicBool::new(false),
+        })
+    }
 
-        // Fill with secure random data
-        // Use index-based loop instead of iter_mut() to avoid AArch64 LLVM hang
-        let rng = get_random();
-        let mut i = 0;
-        while i < 16 {
-            entropy_pool[i] = rng.next_u64();
-            i += 1;
+    /// Seed the entropy pool from the CSPRNG (called lazily on first use)
+    fn ensure_seeded(&self) {
+        if self.seeded.load(Ordering::Acquire) {
+            return;
         }
 
-        Ok(Self {
-            entropy_pool: RwLock::new(entropy_pool),
-            counter: AtomicU64::new(0),
-        })
+        let rng = get_random();
+        let mut pool = self.entropy_pool.write();
+        // Double-check after acquiring write lock
+        if !self.seeded.load(Ordering::Relaxed) {
+            let mut i = 0;
+            while i < 16 {
+                pool[i] = rng.next_u64();
+                i += 1;
+            }
+            self.seeded.store(true, Ordering::Release);
+        }
     }
 
     /// Randomize address for given address space region
     pub fn randomize_address(&self, base: usize, region_type: RegionType) -> usize {
+        self.ensure_seeded();
         let entropy = {
             let pool = self.entropy_pool.read();
             let index = (self.counter.fetch_add(1, Ordering::Relaxed) % 16) as usize;
@@ -183,12 +199,226 @@ impl GuardPage {
     }
 }
 
+/// W^X (Write XOR Execute) policy enforcement.
+///
+/// Ensures no memory page is both writable and executable simultaneously.
+pub struct WxPolicy {
+    enabled: bool,
+    violations: AtomicU64,
+}
+
+impl WxPolicy {
+    pub fn new() -> Self {
+        Self {
+            enabled: true,
+            violations: AtomicU64::new(0),
+        }
+    }
+
+    /// Check whether a page flags combination violates W^X.
+    ///
+    /// Returns `true` if the flags are safe (not both writable and executable).
+    pub fn check_flags(&self, writable: bool, executable: bool) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        if writable && executable {
+            self.violations.fetch_add(1, Ordering::Relaxed);
+            false
+        } else {
+            true
+        }
+    }
+
+    /// Get the number of detected W^X violations.
+    pub fn violation_count(&self) -> u64 {
+        self.violations.load(Ordering::Relaxed)
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+}
+
+impl Default for WxPolicy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// DEP (Data Execution Prevention) / NX enforcement.
+///
+/// Tracks pages that should have the NX bit set and provides helpers
+/// for ensuring data pages are not executable.
+pub struct DepEnforcement {
+    enabled: bool,
+}
+
+impl DepEnforcement {
+    pub fn new() -> Self {
+        Self { enabled: true }
+    }
+
+    /// Determine whether a page at the given address should have NX set.
+    ///
+    /// Data, heap, and stack pages should always be non-executable.
+    pub fn should_set_nx(&self, region: RegionType) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        matches!(
+            region,
+            RegionType::Stack | RegionType::Heap | RegionType::Mmap
+        )
+    }
+
+    /// Apply NX bit to page table entry flags.
+    ///
+    /// Returns the flags with NO_EXECUTE added if the region type warrants it.
+    pub fn enforce_flags(&self, flags: u64, region: RegionType) -> u64 {
+        if self.should_set_nx(region) {
+            // NX bit is bit 63 on x86_64 page table entries
+            flags | (1u64 << 63)
+        } else {
+            flags
+        }
+    }
+}
+
+impl Default for DepEnforcement {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Spectre v1 mitigation helpers.
+pub struct SpectreMitigation;
+
+impl SpectreMitigation {
+    /// Insert a speculation barrier after a bounds check.
+    ///
+    /// On x86_64 this emits LFENCE, on AArch64 CSDB, on RISC-V FENCE.
+    #[inline(always)]
+    pub fn speculation_barrier() {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!("lfence", options(nomem, nostack));
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("csdb", options(nomem, nostack));
+        }
+
+        #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+        unsafe {
+            core::arch::asm!("fence r, r", options(nomem, nostack));
+        }
+    }
+
+    /// Bounds-checked array access with speculation barrier.
+    ///
+    /// Returns the value at `index` if in bounds, otherwise returns the
+    /// default value. Always inserts a speculation barrier after the check.
+    pub fn safe_array_access<T: Copy + Default>(arr: &[T], index: usize) -> T {
+        if index < arr.len() {
+            Self::speculation_barrier();
+            arr[index]
+        } else {
+            Self::speculation_barrier();
+            T::default()
+        }
+    }
+}
+
+/// KPTI (Kernel Page Table Isolation) support for Meltdown mitigation.
+///
+/// On x86_64, this manages separate kernel and user page tables so that
+/// kernel memory is not mapped in user-space page tables.
+pub struct Kpti {
+    /// Whether KPTI is enabled
+    enabled: bool,
+    /// Address of user page table (CR3 value for user mode)
+    user_cr3: AtomicU64,
+    /// Address of kernel page table (CR3 value for kernel mode)
+    kernel_cr3: AtomicU64,
+}
+
+impl Kpti {
+    pub fn new() -> Self {
+        Self {
+            // KPTI is only relevant on x86_64
+            enabled: cfg!(target_arch = "x86_64"),
+            user_cr3: AtomicU64::new(0),
+            kernel_cr3: AtomicU64::new(0),
+        }
+    }
+
+    /// Set page table addresses for KPTI.
+    pub fn set_page_tables(&self, kernel_cr3: u64, user_cr3: u64) {
+        self.kernel_cr3.store(kernel_cr3, Ordering::SeqCst);
+        self.user_cr3.store(user_cr3, Ordering::SeqCst);
+    }
+
+    /// Check if KPTI is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Get the kernel page table address.
+    pub fn kernel_cr3(&self) -> u64 {
+        self.kernel_cr3.load(Ordering::SeqCst)
+    }
+
+    /// Get the user page table address.
+    pub fn user_cr3(&self) -> u64 {
+        self.user_cr3.load(Ordering::SeqCst)
+    }
+
+    /// Switch to kernel page table (called on syscall entry / interrupt).
+    #[cfg(target_arch = "x86_64")]
+    pub fn switch_to_kernel(&self) {
+        if !self.enabled {
+            return;
+        }
+        let cr3 = self.kernel_cr3.load(Ordering::SeqCst);
+        if cr3 != 0 {
+            unsafe {
+                core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack));
+            }
+        }
+    }
+
+    /// Switch to user page table (called on syscall exit / iret).
+    #[cfg(target_arch = "x86_64")]
+    pub fn switch_to_user(&self) {
+        if !self.enabled {
+            return;
+        }
+        let cr3 = self.user_cr3.load(Ordering::SeqCst);
+        if cr3 != 0 {
+            unsafe {
+                core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack));
+            }
+        }
+    }
+}
+
+impl Default for Kpti {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Memory protection manager
 pub struct MemoryProtection {
     aslr: Aslr,
     stack_canaries_enabled: bool,
     guard_pages_enabled: bool,
     dep_enabled: bool, // Data Execution Prevention
+    wx_policy: WxPolicy,
+    dep_enforcement: DepEnforcement,
+    kpti: Kpti,
 }
 
 impl MemoryProtection {
@@ -199,6 +429,9 @@ impl MemoryProtection {
             stack_canaries_enabled: true,
             guard_pages_enabled: true,
             dep_enabled: true,
+            wx_policy: WxPolicy::new(),
+            dep_enforcement: DepEnforcement::new(),
+            kpti: Kpti::new(),
         })
     }
 
@@ -253,6 +486,21 @@ impl MemoryProtection {
         } else {
             None
         }
+    }
+
+    /// Get W^X policy reference
+    pub fn wx_policy(&self) -> &WxPolicy {
+        &self.wx_policy
+    }
+
+    /// Get DEP enforcement reference
+    pub fn dep_enforcement(&self) -> &DepEnforcement {
+        &self.dep_enforcement
+    }
+
+    /// Get KPTI reference
+    pub fn kpti(&self) -> &Kpti {
+        &self.kpti
     }
 }
 

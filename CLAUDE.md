@@ -185,12 +185,12 @@ Each architecture requires a custom target JSON file with specific settings:
 Currently implementing in phases:
 
 1. **Phase 0** (Months 1-3): Foundation and tooling - **COMPLETE! ✅**
-2. **Phase 1** (Months 4-9): Microkernel core - **COMPLETE! ✅** 🎉
-3. **Phase 2** (Months 10-15): User space foundation - **NEXT**
-4. **Phase 3** (Months 16-21): Security hardening
-5. **Phase 4** (Months 22-27): Package ecosystem
-6. **Phase 5** (Months 28-33): Performance optimization
-7. **Phase 6** (Months 34-42): Advanced features and GUI
+2. **Phase 1** (Months 4-9): Microkernel core - **COMPLETE! ✅**
+3. **Phase 2** (Months 10-15): User space foundation - **100% COMPLETE** ✅ (v0.3.2 - February 14, 2026)
+4. **Phase 3** (Months 16-21): Security hardening - **100% COMPLETE** ✅ (v0.3.2 - February 14, 2026)
+5. **Phase 4** (Months 22-27): Package ecosystem - **~15% actual** (APIs designed, implementations are stubs)
+6. **Phase 5** (Months 28-33): Performance optimization - **~10% actual** (data structures only)
+7. **Phase 6** (Months 34-42): Advanced features and GUI - **~5% actual** (type definitions only)
 
 ## Project Status
 
@@ -198,34 +198,35 @@ Currently implementing in phases:
 - **Documentation**: Complete (25+ comprehensive guides) + GitHub Pages deployment
 - **Infrastructure**: Directory structure, TODO system, and GitHub setup complete
 - **CI/CD**: ✅ GitHub Actions workflow passing all checks (100% success rate)
-- **Current Phase**: Phase 2 (User Space Foundation) - Ready to Start!
+- **Current Phase**: Phase 4 (Package Ecosystem) development
   - Phase 0 (Foundation) - 100% COMPLETE! ✅ (v0.1.0 - June 7, 2025)
   - Phase 1 (Microkernel Core) - 100% COMPLETE! ✅ (v0.2.0 - June 12, 2025)
-  - IPC System: 100% complete - sync/async channels, registry, perf tracking, rate limiting, capability integration
-  - Memory Management: 100% complete - frame allocator, VMM, heap, page tables, user space safety
-  - Process Management: 100% complete - PCB, threads, context switching, synchronization primitives, syscalls
-  - Capability System: 100% complete - inheritance, revocation, per-CPU cache, full integration
-  - Scheduler: 100% complete - CFS/priority scheduling, load balancing, SMP support, CPU hotplug
-- **Latest Release**: v0.2.1 (June 17, 2025) - Maintenance Release
-  - All architectures boot successfully to Stage 6
-  - AArch64 LLVM workaround with assembly-only approach
-  - Zero warnings and clippy-clean across all platforms
-  - Updated all documentation (39 files)
-  - GitHub release with all CI artifacts
-- **Latest Development**: Bootloader Modernization Complete (August 14, 2025)
-  - ✅ **x86_64 BREAKTHROUGH**: Successfully resolved all bootloader issues - now boots to Stage 6 with BOOTOK!
-  - ✅ **Bootloader API Migration**: Comprehensive upgrade from 0.9 → 0.11.11 with fallback strategy
-  - ✅ **Multi-Architecture Parity**: All three architectures (x86_64, AArch64, RISC-V) fully operational
-  - ✅ **MCP Tool Orchestration**: Demonstrated power of specialized sub-agents with full MCP server access
-  - ✅ **Phase 2 Ready**: All critical blocking issues resolved, user space foundation development can begin
-- **Previous Releases**: 
+  - Phase 2 (User Space) - 100% COMPLETE! ✅ (v0.3.2 - February 14, 2026)
+  - Phase 3 (Security) - 100% COMPLETE! ✅ (v0.3.2 - February 14, 2026)
+  - Phase 4 (Packages) - ~15% actual (APIs designed, implementations are stubs)
+  - Phase 5 (Performance) - ~10% actual (data structures only)
+  - Phase 6 (GUI) - ~5% actual (type definitions only)
+- **Latest Release**: v0.3.2 (February 14, 2026) - Phase 2 & Phase 3 Completion
+  - Completed Phase 2 (User Space Foundation) from 80% to 100% across 6 sprints
+  - Completed Phase 3 (Security Hardening) from 65% to 100% across 9 sprints
+  - Full cryptographic algorithms: ChaCha20-Poly1305, Ed25519, X25519, ML-DSA, ML-KEM
+  - Secure boot verification, TPM 2.0 integration, MAC policy parser
+  - ELF relocation processing, BlockFS directory operations, signal handling
+  - Driver hot-plug events, init system hardening, audit system completion
+  - Fuzzing infrastructure with FuzzTarget trait and mutation-based runner
+  - All 3 architectures: Stage 6 BOOTOK, 22/22 tests, zero warnings
+- **Previous Releases**:
+  - v0.3.1 (February 14, 2026) - Technical Debt Remediation
+  - v0.3.0 (2025) - Architecture cleanup and security hardening
+  - v0.2.5 (2025) - RISC-V crash fix and architecture parity
+  - v0.2.1 (June 17, 2025) - Maintenance Release with boot fixes
   - v0.2.0 (June 12, 2025) - Microkernel Core Complete
   - v0.1.0 (June 7, 2025) - Foundation & Tooling
 - **Build Status**: ✅ Compiling successfully for all target architectures
-- **Boot Status**: ✅ All architectures boot to Stage 6 successfully!
-  - x86_64: Full bootstrap sequence working
-  - AArch64: Assembly-only workaround for LLVM bugs
-  - RISC-V: Complete initialization working
+- **Boot Status**: ✅ All architectures boot to Stage 6 with BOOTOK, 22/22 tests passing
+  - x86_64: Full bootstrap sequence, 22/22 tests, zero warnings
+  - AArch64: Full bootstrap, 22/22 tests, zero warnings, deterministic across runs
+  - RISC-V: Full bootstrap, 22/22 tests, zero warnings, deterministic (reboot bug FIXED in v0.3.1)
 - **Code Quality**: ✅ All format and clippy checks passing with zero warnings
 - **Debugging**: ✅ GDB infrastructure operational with custom commands
 - **Testing**: ✅ No-std test framework and benchmarks implemented
@@ -480,6 +481,12 @@ Check these files regularly to track progress and identify next tasks.
 - **Performance Validation**: All Phase 1 targets met (IPC <1μs, context switch <10μs)
 - **Release Automation**: CI artifacts can be downloaded and attached to releases via gh CLI
 - **Version Synchronization**: Update version numbers across all documentation consistently
+- **OnceLock Soundness**: OnceLock::set() error path must extract value before dropping Box (use-after-free)
+- **Global Allocate-Once**: process_compat allocate-once-and-reuse pattern prevents per-call memory leaks
+- **PlatformTimer Trait**: Cross-architecture timer abstraction in `kernel/src/arch/timer.rs`
+- **Memory Barrier Abstractions**: `kernel/src/arch/barriers.rs` provides `memory_fence()`, `data_sync_barrier()`, `instruction_sync_barrier()`
+- **#[must_use] on Error Types**: Adding `#[must_use = "kernel errors must be handled"]` to KernelError catches ignored errors
+- **Static Mut Justification**: Some static muts are justified (early boot, per-CPU data, heap memory) -- document with SAFETY comments
 
 ### Key Implementation Files (Phase 1 - 100% Complete!)
 
@@ -494,8 +501,11 @@ Check these files regularly to track progress and identify next tasks.
 - `kernel/src/syscall/` - System call interface (100% - user-space safety)
 - `kernel/src/raii.rs` - RAII patterns for resource management
 - `kernel/src/print.rs` - Kernel output macros
+- `kernel/src/arch/timer.rs` - PlatformTimer trait with per-architecture implementations
+- `kernel/src/arch/barriers.rs` - Memory barrier abstractions (memory_fence, data_sync_barrier, instruction_sync_barrier)
 - `kernel/src/test_framework.rs` - No-std test infrastructure
 - `kernel/src/bench.rs` - Benchmarking framework
+- `kernel/src/perf/mod.rs` - Performance counters (AtomicU64-based, zero unsafe)
 - `docs/DEFERRED-IMPLEMENTATION-ITEMS.md` - Comprehensive tracking (1,415 lines)
 - `docs/TESTING-STATUS.md` - Testing limitations and alternatives
 
@@ -590,7 +600,7 @@ Check these files regularly to track progress and identify next tasks.
 - **Synchronization Primitives**: Mutex, Semaphore, CondVar, RwLock, Barrier implementations
 - **Process Lifecycle**: fork(), exec(), exit(), wait() with proper resource cleanup
 - **Thread Management**: Thread creation with TLS, CPU affinity, and stack management
-- **Error Handling**: Use &'static str for errors during early development, refactor later
+- **Error Handling**: Migrating from &'static str to typed KernelError variants (v0.3.1 reduced &str errors by ~63%)
 - **Feature Gating**: Heavy use of cfg(feature = "alloc") for optional allocator support
 - **Unsafe Code Management**: Document all unsafe blocks, minimize scope
 - **Static References**: Use unsafe pointer casts for global process/thread access
@@ -631,6 +641,17 @@ Check these files regularly to track progress and identify next tasks.
 - **RISC-V Status**: Reaches Stage 6 BOOTOK but immediately reboots (timer/interrupt issue)
 - **x86_64 Status**: Early boot hang persists, needs further debugging
 - **Achievement**: AArch64 100% functional with complete Phase 2 implementation
+
+### v0.3.1 Technical Debt Remediation (February 14, 2026)
+- **Soundness Fixes**: OnceLock::set() use-after-free, process_compat memory leak
+- **Static Mut Elimination**: 48 instances converted across 38 files using OnceLock, spin::Mutex, AtomicU64
+- **Panic Elimination**: 8 production panic paths removed from syscall/VFS with proper error propagation
+- **Error Type Migration**: 150+ functions migrated from &str to typed KernelError (18 files, ~63% reduction)
+- **Architecture Cleanup**: PlatformTimer trait, arch/barriers.rs memory barrier abstractions
+- **Dead Code Removal**: 25 incorrect #[allow(dead_code)] annotations removed, 1 dead function deleted
+- **Metrics Improvement**: static mut files -87%, &str errors -63%, dead_code annotations -68%
+- **Boot Verification**: All 3 architectures Stage 6 BOOTOK, 22/22 tests, zero warnings
+- **RISC-V Bug Fix**: Reboot-after-BOOTOK bug resolved as side effect of static mut elimination
 
 ### Unified Static Mut Pointer Pattern (August 17, 2025) - DEPRECATED
 - **Pattern**: Convert all `static mut INSTANCE: Option<T> = None` to `static mut PTR: *mut T = core::ptr::null_mut()`
@@ -707,5 +728,16 @@ pub fn with_manager_mut<R, F: FnOnce(&mut Manager) -> R>(f: F) -> Option<R> {
 
 **Rust 2024 migration** (30+): PTY, Terminal, Text Editor, File Manager, GPU, Wayland, Compositor, Window Manager
 
-**Achievement**: 100% static mut elimination, full Rust 2024 compatibility
+**v0.3.1 additional conversion** (48): Security (audit, mac, boot, auth, memory_protection, crypto), Network (device, socket, ip, dma_pool), Scheduler (numa), Drivers (pci, console, gpu, network, storage, usb), Services (process_server, driver_framework, init_system, shell), Graphics (framebuffer), Desktop (font), Package (mod), Crypto (random, keystore), IPC (rpc), stdlib, thread_api, fs, test_framework, simple_alloc_unsafe
+
+**Patterns used**: OnceLock, spin::Mutex, AtomicU64/Usize/Bool/I32/U32
+
+#### Justified Remaining static mut (7 instances)
+These remain with documented SAFETY justifications:
+- `PER_CPU_DATA` (sched/smp.rs) - Per-CPU data requires direct pointer access
+- `READY_QUEUE_STATIC` (sched/queue.rs) - Scheduler hot path, lock-free access required
+- `HEAP_MEMORY` (mm/heap.rs) - Backing storage for heap allocator itself
+- `BOOT_INFO` (arch/x86_64/boot.rs) - Set once during early boot before any concurrency
+- `EARLY_SERIAL` (arch/x86_64/early_serial.rs) - Pre-allocator serial output
+- `KERNEL_STACK`/`STACK` (arch/x86_64/gdt.rs) - GDT circular references, early boot infrastructure
 

@@ -57,7 +57,8 @@ pub struct ServiceDefinition {
     pub max_restarts: u32,
     pub timeout_ms: u32,
     pub dependencies: Vec<(String, DependencyType)>,
-    pub start_level: u32, // 0-99, lower starts first
+    pub start_level: u32,          // 0-99, lower starts first
+    pub stop_timeout: Option<u32>, // Seconds to wait before SIGKILL (default: 10)
 }
 
 /// Service runtime information
@@ -242,7 +243,32 @@ impl InitSystem {
             // Send SIGTERM
             process_server.send_signal(pid, 15)?;
 
-            // TODO(phase3): Wait for process to exit with configurable timeout
+            // Wait for process to exit with timeout
+            let timeout_secs = service.definition.stop_timeout.unwrap_or(10) as u64;
+            let start = crate::arch::timer::get_timestamp_secs();
+
+            loop {
+                // Check if process has exited
+                if process_server.wait_for_child(pid, None).is_ok() {
+                    break; // Process exited
+                }
+
+                // Check timeout
+                let elapsed = crate::arch::timer::get_timestamp_secs().saturating_sub(start);
+                if elapsed >= timeout_secs {
+                    // Timeout: send SIGKILL
+                    crate::println!(
+                        "[INIT] Service {} did not stop within {}s, sending SIGKILL",
+                        name,
+                        timeout_secs
+                    );
+                    let _ = process_server.send_signal(pid, 9); // SIGKILL
+                    break;
+                }
+
+                core::hint::spin_loop();
+            }
+
             service.state = ServiceState::Stopped;
             service.pid = None;
 
@@ -339,13 +365,27 @@ impl InitSystem {
                 if should_restart && service.restart_count < service.definition.max_restarts {
                     service.state = ServiceState::Restarting;
                     service.restart_count += 1;
+                    // Exponential backoff: base_delay * 2^min(count, 5)
+                    let base_delay_ms = service.definition.restart_delay_ms as u64;
+                    let exponent = core::cmp::min(service.restart_count, 5);
+                    let delay_ms = base_delay_ms.saturating_mul(1u64 << exponent);
                     crate::println!(
-                        "[INIT] Scheduling restart for service {} (attempt {})",
+                        "[INIT] Scheduling restart for service {} (attempt {}, delay {}ms)",
                         service.definition.name,
-                        service.restart_count
+                        service.restart_count,
+                        delay_ms
                     );
-                    // TODO(phase3): Schedule restart with configurable back-off
-                    // delay
+                    // Approximate delay via timer-based wait
+                    let target = crate::arch::timer::get_timestamp_ms().saturating_add(delay_ms);
+                    let svc_name = service.definition.name.clone();
+                    drop(services); // Release lock before spinning
+                                    // Wait until delay elapsed
+                    while crate::arch::timer::get_timestamp_ms() < target {
+                        core::hint::spin_loop();
+                    }
+                    // Restart the service
+                    let _ = self.start_service(&svc_name);
+                    return; // services lock was dropped
                 } else if service.restart_count >= service.definition.max_restarts {
                     service.state = ServiceState::Failed;
                     service.last_error = Some(String::from("Max restart attempts exceeded"));
@@ -387,9 +427,41 @@ impl InitSystem {
         // Switch to runlevel 6 (reboot)
         self.switch_runlevel(Runlevel::Reboot)?;
 
-        // TODO(phase3): Trigger actual system reboot via architecture-specific
-        // mechanism
         crate::println!("[INIT] System rebooting...");
+
+        // Architecture-specific reboot
+        #[cfg(target_arch = "x86_64")]
+        {
+            // Pulse the keyboard controller reset line (port 0xFE to 0x64)
+            unsafe {
+                use x86_64::instructions::port::Port;
+                let mut port: Port<u8> = Port::new(0x64);
+                port.write(0xFE);
+            }
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            // PSCI SYSTEM_RESET (function ID 0x84000009)
+            unsafe {
+                core::arch::asm!("ldr x0, =0x84000009", "hvc #0", options(nomem, nostack));
+            }
+        }
+
+        #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+        {
+            // SBI system reset (SRST extension, function 0)
+            unsafe {
+                core::arch::asm!(
+                    "li a7, 0x53525354", // SRST extension ID
+                    "li a6, 0",          // Function 0: system_reset
+                    "li a0, 0",          // Reset type: shutdown
+                    "li a1, 0",          // Reason: no reason
+                    "ecall",
+                    options(nomem, nostack)
+                );
+            }
+        }
 
         Ok(())
     }
@@ -413,6 +485,7 @@ impl InitSystem {
             timeout_ms: 5000,
             dependencies: vec![],
             start_level: 10,
+            stop_timeout: None,
         })?;
 
         // Register logger service
@@ -431,6 +504,7 @@ impl InitSystem {
             timeout_ms: 5000,
             dependencies: vec![],
             start_level: 5,
+            stop_timeout: None,
         })?;
 
         // Register device manager
@@ -449,6 +523,7 @@ impl InitSystem {
             timeout_ms: 10000,
             dependencies: vec![(String::from("logger"), DependencyType::After)],
             start_level: 15,
+            stop_timeout: None,
         })?;
 
         // Register network service
@@ -470,6 +545,7 @@ impl InitSystem {
                 (String::from("logger"), DependencyType::After),
             ],
             start_level: 20,
+            stop_timeout: None,
         })?;
 
         Ok(())
@@ -589,8 +665,7 @@ impl InitSystem {
     }
 
     fn get_system_time(&self) -> u64 {
-        // TODO(phase3): Get actual system time from clock subsystem
-        0
+        crate::arch::timer::get_timestamp_secs()
     }
 }
 
@@ -654,10 +729,22 @@ pub fn run_init() -> ! {
         // Clean up any orphaned zombies
         process_server.reap_zombies();
 
-        // Sleep for a bit
-        // TODO(phase3): Use proper wait/signal mechanism instead of spin loop
-        for _ in 0..1000000 {
-            core::hint::spin_loop();
+        // Sleep for ~100ms using timer-based delay then arch halt
+        let wake_time = crate::arch::timer::get_timestamp_ms().saturating_add(100);
+        while crate::arch::timer::get_timestamp_ms() < wake_time {
+            // Use architecture-specific halt/wfi to avoid burning CPU
+            #[cfg(target_arch = "x86_64")]
+            x86_64::instructions::hlt();
+
+            #[cfg(target_arch = "aarch64")]
+            unsafe {
+                core::arch::asm!("wfi", options(nomem, nostack));
+            }
+
+            #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+            unsafe {
+                core::arch::asm!("wfi", options(nomem, nostack));
+            }
         }
     }
 }

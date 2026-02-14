@@ -484,6 +484,24 @@ impl ProcessServer {
         }
     }
 
+    /// List all active process IDs
+    pub fn list_process_ids(&self) -> Vec<ProcessId> {
+        self.processes
+            .read()
+            .keys()
+            .map(|&pid| ProcessId(pid))
+            .collect()
+    }
+
+    /// Notify a process that a capability has been revoked
+    pub fn notify_capability_revoked(&self, _pid: ProcessId, _cap_id: u64) {
+        // Mark the capability as revoked in the process's capability space.
+        // In the current design, revocation is tracked globally in the
+        // RevocationList, so per-process notification is a best-effort signal
+        // that the process should re-validate its cached capabilities.
+        crate::security::audit::log_capability_op(_pid.0, _cap_id, 2); // 2 = revoke
+    }
+
     // Helper functions
 
     fn get_system_time(&self) -> u64 {

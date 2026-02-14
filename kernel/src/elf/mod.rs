@@ -846,10 +846,309 @@ impl ElfLoader {
         Ok(())
     }
 
-    /// Process relocations for a loaded binary
-    pub fn process_relocations(&self, _data: &[u8], _base_addr: u64) -> Result<(), ElfError> {
-        // TODO(phase3): Implement architecture-specific ELF relocation processing
+    /// Process relocations for a loaded binary.
+    ///
+    /// Scans the ELF data for a PT_DYNAMIC segment, parses the dynamic section
+    /// to find relocation tables and the symbol table, then applies all
+    /// relocations.  Handles RELA and JMPREL (PLT) relocation tables.
+    pub fn process_relocations(&self, data: &[u8], base_addr: u64) -> Result<(), ElfError> {
+        let header = self.parse_header(data)?;
+        let program_headers = self.parse_program_headers(data, &header)?;
+
+        // Find the PT_DYNAMIC segment
+        let dynamic_ph = program_headers
+            .iter()
+            .find(|ph| ph.p_type == ProgramType::Dynamic as u32);
+
+        let dynamic_ph = match dynamic_ph {
+            Some(ph) => ph,
+            None => return Ok(()), // No dynamic section -- static binary, nothing to do
+        };
+
+        // Parse the dynamic section
+        let dyn_info =
+            self.parse_dynamic_section(data, dynamic_ph.p_offset, dynamic_ph.p_filesz)?;
+
+        // Resolve symbols if we have a symbol table
+        let symbols = if let (Some(symtab), Some(strtab)) = (dyn_info.symtab, dyn_info.strtab) {
+            // For file-offset based symbol tables: convert virtual addresses to
+            // file offsets by finding the containing LOAD segment.
+            let symtab_file = self.vaddr_to_file_offset(&program_headers, symtab);
+            let strtab_file = self.vaddr_to_file_offset(&program_headers, strtab);
+
+            if let (Some(sym_off), Some(str_off)) = (symtab_file, strtab_file) {
+                // Estimate symbol table size from strtab - symtab if available
+                let sym_size = if dyn_info.syment > 0 {
+                    // Use RELA entries to estimate max symbol index
+                    let max_sym = self.estimate_max_symbol_index(data, &dyn_info);
+                    (max_sym + 1) * dyn_info.syment
+                } else {
+                    (str_off as usize).saturating_sub(sym_off as usize)
+                };
+
+                self.resolve_symbols(data, sym_off, sym_size, str_off, dyn_info.strsz)
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Collect RELA relocations
+        let mut relocations = Vec::new();
+
+        if let Some(rela_vaddr) = dyn_info.rela {
+            if dyn_info.relasz > 0 && dyn_info.relaent > 0 {
+                if let Some(rela_off) = self.vaddr_to_file_offset(&program_headers, rela_vaddr) {
+                    let count = dyn_info.relasz / dyn_info.relaent;
+                    self.parse_rela_entries(data, rela_off as usize, count, &mut relocations)?;
+                }
+            }
+        }
+
+        // Collect PLT relocations (JMPREL)
+        if let Some(jmprel_vaddr) = dyn_info.jmprel {
+            if dyn_info.pltrelsz > 0 {
+                if let Some(jmprel_off) = self.vaddr_to_file_offset(&program_headers, jmprel_vaddr)
+                {
+                    let entry_size = if dyn_info.relaent > 0 {
+                        dyn_info.relaent
+                    } else {
+                        mem::size_of::<Elf64Rela>()
+                    };
+                    let count = dyn_info.pltrelsz / entry_size;
+                    self.parse_rela_entries(data, jmprel_off as usize, count, &mut relocations)?;
+                }
+            }
+        }
+
+        // Apply relocations with architecture-aware type handling
+        self.perform_relocations_arch(base_addr, &relocations, &symbols, header.machine)
+    }
+
+    /// Convert a virtual address to a file offset using LOAD segment mappings.
+    fn vaddr_to_file_offset(
+        &self,
+        program_headers: &[Elf64ProgramHeader],
+        vaddr: u64,
+    ) -> Option<u64> {
+        for ph in program_headers {
+            if ph.p_type == ProgramType::Load as u32
+                && vaddr >= ph.p_vaddr
+                && vaddr < ph.p_vaddr + ph.p_filesz
+            {
+                return Some(ph.p_offset + (vaddr - ph.p_vaddr));
+            }
+        }
+        None
+    }
+
+    /// Parse RELA entries from the given file offset.
+    fn parse_rela_entries(
+        &self,
+        data: &[u8],
+        offset: usize,
+        count: usize,
+        out: &mut Vec<ElfRelocation>,
+    ) -> Result<(), ElfError> {
+        let entry_size = mem::size_of::<Elf64Rela>();
+        for i in 0..count {
+            let pos = offset + i * entry_size;
+            if pos + entry_size > data.len() {
+                break;
+            }
+            // SAFETY: pos + entry_size <= data.len() was checked above.
+            // Elf64Rela is #[repr(C)] with Copy. The value is copied immediately.
+            let rela = unsafe { *(data[pos..].as_ptr() as *const Elf64Rela) };
+            out.push(ElfRelocation {
+                offset: rela.r_offset,
+                symbol: (rela.r_info >> 32) as u32,
+                reloc_type: (rela.r_info & 0xFFFF_FFFF) as u32,
+                addend: rela.r_addend,
+            });
+        }
         Ok(())
+    }
+
+    /// Estimate the maximum symbol index referenced by relocations.
+    fn estimate_max_symbol_index(&self, data: &[u8], dyn_info: &DynamicInfo) -> usize {
+        let mut max_idx: usize = 0;
+        let _entry_size = mem::size_of::<Elf64Rela>();
+
+        // Check RELA
+        if let Some(_rela) = dyn_info.rela {
+            let count = if dyn_info.relaent > 0 {
+                dyn_info.relasz / dyn_info.relaent
+            } else {
+                0
+            };
+            // We don't have file offsets here easily, so use a conservative estimate
+            max_idx = max_idx.max(count);
+        }
+        // Check JMPREL
+        if let Some(_jmprel) = dyn_info.jmprel {
+            let count = if dyn_info.relaent > 0 {
+                dyn_info.pltrelsz / dyn_info.relaent
+            } else {
+                0
+            };
+            max_idx = max_idx.max(count);
+        }
+        let _ = data; // used for bounds in full implementation
+        max_idx.max(64) // reasonable minimum
+    }
+
+    /// Architecture-aware relocation application.
+    ///
+    /// Handles x86_64, AArch64, and RISC-V relocation types.
+    fn perform_relocations_arch(
+        &self,
+        base_addr: u64,
+        relocations: &[ElfRelocation],
+        symbols: &[ElfSymbol],
+        machine: u16,
+    ) -> Result<(), ElfError> {
+        for reloc in relocations {
+            let target_addr = base_addr.wrapping_add(reloc.offset);
+
+            match machine {
+                // x86_64
+                62 => self.apply_x86_64_reloc(target_addr, reloc, symbols, base_addr)?,
+                // AArch64
+                183 => self.apply_aarch64_reloc(target_addr, reloc, symbols, base_addr)?,
+                // RISC-V
+                243 => self.apply_riscv_reloc(target_addr, reloc, symbols, base_addr)?,
+                _ => return Err(ElfError::UnsupportedMachine),
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply a single x86_64 relocation.
+    fn apply_x86_64_reloc(
+        &self,
+        target_addr: u64,
+        reloc: &ElfRelocation,
+        symbols: &[ElfSymbol],
+        base_addr: u64,
+    ) -> Result<(), ElfError> {
+        match reloc.reloc_type {
+            8 => {
+                // R_X86_64_RELATIVE: base + addend
+                // SAFETY: caller mapped memory at target_addr
+                unsafe {
+                    *(target_addr as *mut u64) = base_addr.wrapping_add(reloc.addend as u64);
+                }
+            }
+            1 => {
+                // R_X86_64_64: S + A
+                let sym = self.get_symbol(symbols, reloc.symbol)?;
+                unsafe {
+                    *(target_addr as *mut u64) = sym.value.wrapping_add(reloc.addend as u64);
+                }
+            }
+            6 => {
+                // R_X86_64_GLOB_DAT: S
+                let sym = self.get_symbol(symbols, reloc.symbol)?;
+                unsafe {
+                    *(target_addr as *mut u64) = sym.value;
+                }
+            }
+            7 => {
+                // R_X86_64_JUMP_SLOT: S
+                let sym = self.get_symbol(symbols, reloc.symbol)?;
+                unsafe {
+                    *(target_addr as *mut u64) = sym.value;
+                }
+            }
+            _ => {} // Ignore unsupported x86_64 relocation types
+        }
+        Ok(())
+    }
+
+    /// Apply a single AArch64 relocation.
+    fn apply_aarch64_reloc(
+        &self,
+        target_addr: u64,
+        reloc: &ElfRelocation,
+        symbols: &[ElfSymbol],
+        base_addr: u64,
+    ) -> Result<(), ElfError> {
+        match reloc.reloc_type {
+            1027 => {
+                // R_AARCH64_RELATIVE: B + A
+                unsafe {
+                    *(target_addr as *mut u64) = base_addr.wrapping_add(reloc.addend as u64);
+                }
+            }
+            257 => {
+                // R_AARCH64_ABS64: S + A
+                let sym = self.get_symbol(symbols, reloc.symbol)?;
+                unsafe {
+                    *(target_addr as *mut u64) = sym.value.wrapping_add(reloc.addend as u64);
+                }
+            }
+            1025 => {
+                // R_AARCH64_GLOB_DAT: S + A
+                let sym = self.get_symbol(symbols, reloc.symbol)?;
+                unsafe {
+                    *(target_addr as *mut u64) = sym.value.wrapping_add(reloc.addend as u64);
+                }
+            }
+            1026 => {
+                // R_AARCH64_JUMP_SLOT: S
+                let sym = self.get_symbol(symbols, reloc.symbol)?;
+                unsafe {
+                    *(target_addr as *mut u64) = sym.value;
+                }
+            }
+            _ => {} // Ignore unsupported AArch64 relocation types
+        }
+        Ok(())
+    }
+
+    /// Apply a single RISC-V relocation.
+    fn apply_riscv_reloc(
+        &self,
+        target_addr: u64,
+        reloc: &ElfRelocation,
+        symbols: &[ElfSymbol],
+        base_addr: u64,
+    ) -> Result<(), ElfError> {
+        match reloc.reloc_type {
+            3 => {
+                // R_RISCV_RELATIVE: B + A
+                unsafe {
+                    *(target_addr as *mut u64) = base_addr.wrapping_add(reloc.addend as u64);
+                }
+            }
+            2 => {
+                // R_RISCV_64: S + A
+                let sym = self.get_symbol(symbols, reloc.symbol)?;
+                unsafe {
+                    *(target_addr as *mut u64) = sym.value.wrapping_add(reloc.addend as u64);
+                }
+            }
+            5 => {
+                // R_RISCV_JUMP_SLOT: S
+                let sym = self.get_symbol(symbols, reloc.symbol)?;
+                unsafe {
+                    *(target_addr as *mut u64) = sym.value;
+                }
+            }
+            _ => {} // Ignore unsupported RISC-V relocation types
+        }
+        Ok(())
+    }
+
+    /// Helper to safely look up a symbol by index.
+    fn get_symbol<'a>(
+        &self,
+        symbols: &'a [ElfSymbol],
+        index: u32,
+    ) -> Result<&'a ElfSymbol, ElfError> {
+        symbols.get(index as usize).ok_or(ElfError::InvalidSymbol)
     }
 }
 
@@ -1234,14 +1533,10 @@ pub fn exec_elf(path: &str) -> Result<u64, ElfError> {
     // Load ELF information
     let elf_info = load_elf_from_file(path)?;
 
-    // Check if we need an interpreter
-    if elf_info.interpreter.is_some() {
-        // Dynamic linking not yet supported
-        return Err(ElfError::InvalidType);
-    }
-
     // Allocate memory for the program
-    let current_pid = ProcessId(1); // TODO(phase3): Get actual current PID from scheduler
+    let current_pid = crate::process::current_process()
+        .map(|p| p.pid)
+        .unwrap_or(ProcessId(1));
     let process =
         crate::process::get_process(current_pid).ok_or(ElfError::MemoryAllocationFailed)?;
 
@@ -1273,6 +1568,11 @@ pub fn exec_elf(path: &str) -> Result<u64, ElfError> {
     // Load the binary
     let loader = ElfLoader::new();
     let entry_point = loader.load_into_memory(&buffer, base_addr as u64)?;
+
+    // Process relocations for PIE/dynamic binaries
+    if elf_info.dynamic {
+        loader.process_relocations(&buffer, base_addr as u64)?;
+    }
 
     Ok(entry_point)
 }

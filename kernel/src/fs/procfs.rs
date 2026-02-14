@@ -277,8 +277,13 @@ impl VfsNode for ProcNode {
                     _ => {
                         // Try to parse as PID
                         if let Ok(pid) = name.parse::<u64>() {
-                            // TODO(phase3): Validate PID against process table before creating node
-                            Ok(Arc::new(ProcNode::new_process_dir(pid)) as Arc<dyn VfsNode>)
+                            // Validate PID exists in process table
+                            if crate::process::get_process(crate::process::ProcessId(pid)).is_some()
+                            {
+                                Ok(Arc::new(ProcNode::new_process_dir(pid)) as Arc<dyn VfsNode>)
+                            } else {
+                                Err(KernelError::FsError(FsError::NotFound))
+                            }
                         } else {
                             Err(KernelError::FsError(FsError::NotFound))
                         }

@@ -291,7 +291,8 @@ impl CapabilityManager {
         // Audit log: capability revocation
         crate::security::audit::log_capability_op(0, cap.id(), 0);
 
-        // TODO(phase3): Notify all capability spaces of revocation via IPC broadcast
+        // Notify all processes of revocation via the revocation subsystem
+        super::revocation::broadcast_capability_revoked(cap);
 
         Ok(())
     }

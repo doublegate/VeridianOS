@@ -264,3 +264,9 @@ vmcore*
 # GDB server artifacts
 .gdbserver
 
+# QEMU OVMF firmware copies
+OVMF*.fd
+
+# Plan files (Claude Code)
+.claude/plans/
+

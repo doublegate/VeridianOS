@@ -107,7 +107,6 @@ pub fn create_process_with_options(
 
         // Add main thread to scheduler
         if let Some(thread) = process.get_thread(tid) {
-            // Create a scheduler task for this thread
             create_scheduler_task(process, thread)?;
         }
     }

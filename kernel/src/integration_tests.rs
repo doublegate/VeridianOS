@@ -77,19 +77,16 @@ fn test_security_mac_with_filesystem() {
 fn test_crypto_hashing() {
     security::init().expect("Security init failed");
 
-    // Test SHA-256 hashing
+    // Test SHA-256 hashing (using new crypto module)
     let data = b"Hello, VeridianOS!";
-    let mut hash = [0u8; 32];
-
-    security::crypto::sha256(data, &mut hash);
+    let hash = crate::crypto::hash::sha256(data);
 
     // Hash should not be all zeros
-    assert_ne!(hash, [0u8; 32]);
+    assert_ne!(hash.as_bytes(), &[0u8; 32]);
 
     // Same input should produce same hash
-    let mut hash2 = [0u8; 32];
-    security::crypto::sha256(data, &mut hash2);
-    assert_eq!(hash, hash2);
+    let hash2 = crate::crypto::hash::sha256(data);
+    assert_eq!(hash.as_bytes(), hash2.as_bytes());
 }
 
 /// Test process creation with capability inheritance
@@ -230,14 +227,15 @@ fn test_security_audit() {
     security::init().expect("Security init failed");
 
     // Log a test event
-    let event = security::audit::AuditEvent {
-        event_type: security::audit::AuditEventType::FileAccess,
-        timestamp: 123456,
-        pid: 1,
-        uid: 1000,
-        result: 0,
-        data: 0,
-    };
+    let event = security::audit::AuditEvent::new(
+        security::audit::AuditEventType::FileAccess,
+        1,
+        1000,
+        security::audit::AuditAction::Read,
+        "/test/file",
+        true,
+        "",
+    );
 
     security::audit::log_event(event);
 

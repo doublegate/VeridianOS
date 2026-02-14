@@ -193,13 +193,39 @@ pub fn fork_inherit_capabilities(
     Ok(())
 }
 
-/// Exec inheritance - filter capabilities based on preserve flags
+/// Exec inheritance - filter capabilities by PRESERVE_EXEC flag
+///
+/// Only capabilities marked with PRESERVE_EXEC survive an exec call.
+/// This prevents privilege escalation across exec boundaries.
 pub fn exec_inherit_capabilities(
     old_space: &CapabilitySpace,
     new_space: &CapabilitySpace,
 ) -> Result<(), &'static str> {
-    // TODO(phase3): Filter by PRESERVE_EXEC flag instead of Inheritable policy
-    inherit_capabilities(old_space, new_space, InheritancePolicy::Inheritable)?;
+    // Filter by PRESERVE_EXEC: only inherit capabilities explicitly marked
+    // to survive exec. This is stricter than Inheritable policy.
+    #[cfg(feature = "alloc")]
+    {
+        let mut _inherited = 0u32;
+        for cap_id in 0..256 {
+            if let Some(entry) = old_space.get_entry(cap_id) {
+                // Only preserve capabilities with PRESERVE_EXEC flag
+                if (entry.inheritance_flags & InheritanceFlags::PRESERVE_EXEC) != 0 {
+                    let rights = if (entry.inheritance_flags & InheritanceFlags::REDUCE_RIGHTS) != 0
+                    {
+                        reduce_rights_for_inheritance(entry.rights)
+                    } else {
+                        entry.rights
+                    };
+                    let _ = new_space.insert(entry.capability, entry.object.clone(), rights);
+                    _inherited += 1;
+                }
+            }
+        }
+    }
+    #[cfg(not(feature = "alloc"))]
+    {
+        inherit_capabilities(old_space, new_space, InheritancePolicy::Inheritable)?;
+    }
     Ok(())
 }
 
@@ -217,9 +243,44 @@ pub fn create_initial_capabilities(
         .create_capability(process_obj, process_rights, cap_space)
         .map_err(|_| "Failed to create process capability")?;
 
-    // TODO(phase3): Create default IPC endpoint capability for process
+    // Create default IPC endpoint capability for the process to communicate
+    #[cfg(feature = "alloc")]
+    {
+        use alloc::sync::Arc;
+        let endpoint = Arc::new(crate::ipc::channel::Endpoint::new(process_id));
+        let ipc_obj = super::object::ObjectRef::Endpoint { endpoint };
+        let ipc_rights = Rights::READ | Rights::WRITE | Rights::EXECUTE;
+        cap_manager()
+            .create_capability(ipc_obj, ipc_rights, cap_space)
+            .map_err(|_| "Failed to create IPC capability")?;
+    }
 
-    // TODO(phase3): Create memory capabilities for stack and heap initial mappings
+    // Create memory capabilities for stack and heap regions
+    {
+        use super::object::MemoryAttributes;
+
+        // Stack capability (read + write, no execute for W^X)
+        let stack_obj = super::object::ObjectRef::Memory {
+            base: 0,        // Actual address assigned during process setup
+            size: 0x100000, // 1MB default stack
+            attributes: MemoryAttributes::normal(),
+        };
+        let stack_rights = Rights::READ | Rights::WRITE;
+        cap_manager()
+            .create_capability(stack_obj, stack_rights, cap_space)
+            .map_err(|_| "Failed to create stack capability")?;
+
+        // Heap capability (read + write, no execute for W^X)
+        let heap_obj = super::object::ObjectRef::Memory {
+            base: 0,         // Actual address assigned during process setup
+            size: 0x1000000, // 16MB default heap
+            attributes: MemoryAttributes::normal(),
+        };
+        let heap_rights = Rights::READ | Rights::WRITE;
+        cap_manager()
+            .create_capability(heap_obj, heap_rights, cap_space)
+            .map_err(|_| "Failed to create heap capability")?;
+    }
 
     Ok(())
 }

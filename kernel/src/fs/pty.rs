@@ -139,7 +139,11 @@ impl PtyMaster {
         for &byte in data {
             // Handle special characters if needed
             if flags.isig && byte == termios::VINTR_CHAR {
-                // TODO(phase3): Send SIGINT to foreground process group
+                // Send SIGINT to controlling process
+                if let Some(pid) = *self.controller.read() {
+                    let process_server = crate::services::process_server::get_process_server();
+                    let _ = process_server.send_signal(pid, 2); // SIGINT = 2
+                }
                 continue;
             }
 
@@ -158,7 +162,11 @@ impl PtyMaster {
     /// Set window size
     pub fn set_winsize(&self, winsize: Winsize) {
         *self.winsize.write() = winsize;
-        // TODO(phase3): Send SIGWINCH to foreground process group
+        // Send SIGWINCH to controlling process
+        if let Some(pid) = *self.controller.read() {
+            let process_server = crate::services::process_server::get_process_server();
+            let _ = process_server.send_signal(pid, 28); // SIGWINCH = 28
+        }
     }
 
     /// Get window size

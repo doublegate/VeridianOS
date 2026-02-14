@@ -8,10 +8,86 @@
 // are enabled.
 #![allow(dead_code)]
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use crate::{
     ipc::{sync_call, sync_receive, sync_reply, sync_send, IpcError, Message, SmallMessage},
     sched,
 };
+
+/// Maximum valid user-space address (128 TB boundary for x86_64)
+const USER_SPACE_END: usize = 0x0000_7FFF_FFFF_FFFF;
+
+/// Maximum allowed buffer size for syscall arguments (256 MB)
+const MAX_BUFFER_SIZE: usize = 256 * 1024 * 1024;
+
+/// Validate that a user-space pointer and size are within bounds
+#[inline]
+fn validate_user_pointer(ptr: usize, size: usize) -> Result<(), SyscallError> {
+    if ptr == 0 {
+        return Err(SyscallError::InvalidPointer);
+    }
+    if size > MAX_BUFFER_SIZE {
+        return Err(SyscallError::InvalidArgument);
+    }
+    // Check for overflow and that the entire range is in user space
+    let end = ptr.checked_add(size).ok_or(SyscallError::InvalidPointer)?;
+    if end > USER_SPACE_END {
+        return Err(SyscallError::AccessDenied);
+    }
+    Ok(())
+}
+
+/// Syscall rate limiter using token bucket algorithm
+struct SyscallRateLimiter {
+    /// Tokens available (scaled by 1000 for precision)
+    tokens: AtomicU64,
+    /// Maximum tokens (burst capacity)
+    max_tokens: u64,
+    /// Last refill timestamp
+    last_refill: AtomicU64,
+}
+
+impl SyscallRateLimiter {
+    const fn new() -> Self {
+        Self {
+            tokens: AtomicU64::new(10_000), // Start with 10k tokens
+            max_tokens: 10_000,
+            last_refill: AtomicU64::new(0),
+        }
+    }
+
+    /// Check if a syscall is allowed (returns true if within rate limit)
+    fn check(&self) -> bool {
+        // Refill tokens based on elapsed time
+        let now = crate::arch::timer::read_hw_timestamp();
+        let last = self.last_refill.load(Ordering::Relaxed);
+        let elapsed = now.saturating_sub(last);
+
+        // Refill ~1000 tokens per tick (generous rate)
+        if elapsed > 0 {
+            self.last_refill.store(now, Ordering::Relaxed);
+            let current = self.tokens.load(Ordering::Relaxed);
+            let new_tokens = core::cmp::min(current + elapsed, self.max_tokens);
+            self.tokens.store(new_tokens, Ordering::Relaxed);
+        }
+
+        // Try to consume a token
+        let current = self.tokens.load(Ordering::Relaxed);
+        if current > 0 {
+            self.tokens.fetch_sub(1, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+static SYSCALL_RATE_LIMITER: SyscallRateLimiter = SyscallRateLimiter::new();
+
+/// Syscall statistics for monitoring
+static SYSCALL_COUNT: AtomicU64 = AtomicU64::new(0);
+static SYSCALL_ERRORS: AtomicU64 = AtomicU64::new(0);
 
 // Import process syscalls module
 mod process;
@@ -173,10 +249,31 @@ pub extern "C" fn syscall_handler(
     // Prevents speculative execution of kernel code with user-controlled values.
     crate::arch::speculation_barrier();
 
+    // Track syscall count
+    SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    // Rate limiting check
+    if !SYSCALL_RATE_LIMITER.check() {
+        SYSCALL_ERRORS.fetch_add(1, Ordering::Relaxed);
+        return SyscallError::WouldBlock as i32 as isize;
+    }
+
+    // Get caller PID for audit logging
+    let caller_pid = crate::process::current_process()
+        .map(|p| p.pid.0)
+        .unwrap_or(0);
+
     let result = match Syscall::try_from(syscall_num) {
         Ok(syscall) => handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5),
         Err(_) => Err(SyscallError::InvalidSyscall),
     };
+
+    // Audit log: syscall with result
+    let success = result.is_ok();
+    if !success {
+        SYSCALL_ERRORS.fetch_add(1, Ordering::Relaxed);
+    }
+    crate::security::audit::log_syscall(caller_pid, 0, syscall_num, success);
 
     match result {
         Ok(value) => value as isize,
@@ -261,10 +358,8 @@ fn sys_ipc_send(
     msg_size: usize,
     _flags: usize,
 ) -> SyscallResult {
-    // Validate arguments
-    if msg_ptr == 0 || msg_size == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
+    // Validate user-space pointer bounds
+    validate_user_pointer(msg_ptr, msg_size)?;
 
     // Get current process's capability space
     let current_process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;

@@ -16,7 +16,7 @@ pub enum HashAlgorithm {
 }
 
 /// 256-bit hash output
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hash256(pub [u8; 32]);
 
 /// 512-bit hash output
@@ -104,80 +104,95 @@ const SHA256_H0: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
-/// SHA-256 hash - Full FIPS 180-4 implementation
-pub fn sha256(data: &[u8]) -> Hash256 {
-    let mut h = SHA256_H0;
+/// Process a single SHA-256 block (64 bytes)
+fn sha256_process_block(h: &mut [u32; 8], block: &[u8]) {
+    let mut w = [0u32; 64];
 
-    // Pre-processing: adding padding bits
-    let mut padded = Vec::from(data);
-    let original_len_bits = (data.len() as u64) * 8;
-
-    // Append bit '1' to message (as byte 0x80)
-    padded.push(0x80);
-
-    // Append zeros until message length is 448 mod 512 (56 mod 64 bytes)
-    while (padded.len() % 64) != 56 {
-        padded.push(0x00);
+    // Copy block into first 16 words of message schedule
+    for (i, word_bytes) in block.chunks(4).enumerate().take(16) {
+        w[i] = u32::from_be_bytes([word_bytes[0], word_bytes[1], word_bytes[2], word_bytes[3]]);
     }
 
-    // Append original length in bits as 64-bit big-endian
-    padded.extend_from_slice(&original_len_bits.to_be_bytes());
+    // Extend the first 16 words into the remaining 48 words
+    for i in 16..64 {
+        let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+        let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16]
+            .wrapping_add(s0)
+            .wrapping_add(w[i - 7])
+            .wrapping_add(s1);
+    }
 
-    // Process each 512-bit (64-byte) block
-    for chunk in padded.chunks(64) {
-        let mut w = [0u32; 64];
+    // Initialize working variables
+    let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
+        (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
 
-        // Copy chunk into first 16 words of message schedule
-        for (i, word_bytes) in chunk.chunks(4).enumerate() {
-            w[i] = u32::from_be_bytes([word_bytes[0], word_bytes[1], word_bytes[2], word_bytes[3]]);
-        }
+    // Compression function main loop
+    for i in 0..64 {
+        let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+        let ch = (e & f) ^ ((!e) & g);
+        let temp1 = hh
+            .wrapping_add(s1)
+            .wrapping_add(ch)
+            .wrapping_add(SHA256_K[i])
+            .wrapping_add(w[i]);
+        let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+        let maj = (a & b) ^ (a & c) ^ (b & c);
+        let temp2 = s0.wrapping_add(maj);
 
-        // Extend the first 16 words into the remaining 48 words
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
+        hh = g;
+        g = f;
+        f = e;
+        e = d.wrapping_add(temp1);
+        d = c;
+        c = b;
+        b = a;
+        a = temp1.wrapping_add(temp2);
+    }
 
-        // Initialize working variables
-        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
-            (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+    // Add compressed chunk to current hash value
+    h[0] = h[0].wrapping_add(a);
+    h[1] = h[1].wrapping_add(b);
+    h[2] = h[2].wrapping_add(c);
+    h[3] = h[3].wrapping_add(d);
+    h[4] = h[4].wrapping_add(e);
+    h[5] = h[5].wrapping_add(f);
+    h[6] = h[6].wrapping_add(g);
+    h[7] = h[7].wrapping_add(hh);
+}
 
-        // Compression function main loop
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(SHA256_K[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(maj);
+/// SHA-256 hash - Zero-allocation streaming implementation (FIPS 180-4)
+pub fn sha256(data: &[u8]) -> Hash256 {
+    let mut h = SHA256_H0;
+    let original_len_bits = (data.len() as u64) * 8;
 
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
+    // Process all complete 64-byte blocks directly from input (no copy)
+    let full_blocks = data.len() / 64;
+    for i in 0..full_blocks {
+        sha256_process_block(&mut h, &data[i * 64..(i + 1) * 64]);
+    }
 
-        // Add compressed chunk to current hash value
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(hh);
+    // Handle the final partial block + padding on the stack (max 128 bytes)
+    let remainder = data.len() % 64;
+    let mut final_buf = [0u8; 128]; // At most 2 blocks needed for padding
+    final_buf[..remainder].copy_from_slice(&data[full_blocks * 64..]);
+
+    // Append bit '1' (0x80)
+    final_buf[remainder] = 0x80;
+
+    let padded_len = remainder + 1;
+
+    if padded_len <= 56 {
+        // Padding + length fit in one block
+        final_buf[56..64].copy_from_slice(&original_len_bits.to_be_bytes());
+        sha256_process_block(&mut h, &final_buf[..64]);
+    } else {
+        // Need two blocks: first block with padding, second with length
+        sha256_process_block(&mut h, &final_buf[..64]);
+        // Second block: zeros + length
+        final_buf[64..120].fill(0);
+        final_buf[120..128].copy_from_slice(&original_len_bits.to_be_bytes());
+        sha256_process_block(&mut h, &final_buf[64..128]);
     }
 
     // Produce the final hash value (big-endian)
@@ -286,89 +301,103 @@ const SHA512_H0: [u64; 8] = [
     0x5be0cd19137e2179,
 ];
 
-/// SHA-512 hash - Full FIPS 180-4 implementation
-pub fn sha512(data: &[u8]) -> Hash512 {
-    let mut h = SHA512_H0;
+/// Process a single SHA-512 block (128 bytes)
+fn sha512_process_block(h: &mut [u64; 8], block: &[u8]) {
+    let mut w = [0u64; 80];
 
-    // Pre-processing: adding padding bits
-    let mut padded = Vec::from(data);
-    let original_len_bits = (data.len() as u128) * 8;
-
-    // Append bit '1' to message (as byte 0x80)
-    padded.push(0x80);
-
-    // Append zeros until message length is 896 mod 1024 (112 mod 128 bytes)
-    while (padded.len() % 128) != 112 {
-        padded.push(0x00);
+    // Copy block into first 16 words of message schedule
+    for (i, word_bytes) in block.chunks(8).enumerate().take(16) {
+        w[i] = u64::from_be_bytes([
+            word_bytes[0],
+            word_bytes[1],
+            word_bytes[2],
+            word_bytes[3],
+            word_bytes[4],
+            word_bytes[5],
+            word_bytes[6],
+            word_bytes[7],
+        ]);
     }
 
-    // Append original length in bits as 128-bit big-endian
-    padded.extend_from_slice(&original_len_bits.to_be_bytes());
+    // Extend the first 16 words into the remaining 64 words
+    for i in 16..80 {
+        let s0 = w[i - 15].rotate_right(1) ^ w[i - 15].rotate_right(8) ^ (w[i - 15] >> 7);
+        let s1 = w[i - 2].rotate_right(19) ^ w[i - 2].rotate_right(61) ^ (w[i - 2] >> 6);
+        w[i] = w[i - 16]
+            .wrapping_add(s0)
+            .wrapping_add(w[i - 7])
+            .wrapping_add(s1);
+    }
 
-    // Process each 1024-bit (128-byte) block
-    for chunk in padded.chunks(128) {
-        let mut w = [0u64; 80];
+    // Initialize working variables
+    let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
+        (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
 
-        // Copy chunk into first 16 words of message schedule
-        for (i, word_bytes) in chunk.chunks(8).enumerate() {
-            w[i] = u64::from_be_bytes([
-                word_bytes[0],
-                word_bytes[1],
-                word_bytes[2],
-                word_bytes[3],
-                word_bytes[4],
-                word_bytes[5],
-                word_bytes[6],
-                word_bytes[7],
-            ]);
-        }
+    // Compression function main loop
+    for i in 0..80 {
+        let s1 = e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41);
+        let ch = (e & f) ^ ((!e) & g);
+        let temp1 = hh
+            .wrapping_add(s1)
+            .wrapping_add(ch)
+            .wrapping_add(SHA512_K[i])
+            .wrapping_add(w[i]);
+        let s0 = a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39);
+        let maj = (a & b) ^ (a & c) ^ (b & c);
+        let temp2 = s0.wrapping_add(maj);
 
-        // Extend the first 16 words into the remaining 64 words
-        for i in 16..80 {
-            let s0 = w[i - 15].rotate_right(1) ^ w[i - 15].rotate_right(8) ^ (w[i - 15] >> 7);
-            let s1 = w[i - 2].rotate_right(19) ^ w[i - 2].rotate_right(61) ^ (w[i - 2] >> 6);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
+        hh = g;
+        g = f;
+        f = e;
+        e = d.wrapping_add(temp1);
+        d = c;
+        c = b;
+        b = a;
+        a = temp1.wrapping_add(temp2);
+    }
 
-        // Initialize working variables
-        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
-            (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+    // Add compressed chunk to current hash value
+    h[0] = h[0].wrapping_add(a);
+    h[1] = h[1].wrapping_add(b);
+    h[2] = h[2].wrapping_add(c);
+    h[3] = h[3].wrapping_add(d);
+    h[4] = h[4].wrapping_add(e);
+    h[5] = h[5].wrapping_add(f);
+    h[6] = h[6].wrapping_add(g);
+    h[7] = h[7].wrapping_add(hh);
+}
 
-        // Compression function main loop
-        for i in 0..80 {
-            let s1 = e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41);
-            let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(SHA512_K[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(maj);
+/// SHA-512 hash - Zero-allocation streaming implementation (FIPS 180-4)
+pub fn sha512(data: &[u8]) -> Hash512 {
+    let mut h = SHA512_H0;
+    let original_len_bits = (data.len() as u128) * 8;
 
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
+    // Process all complete 128-byte blocks directly from input (no copy)
+    let full_blocks = data.len() / 128;
+    for i in 0..full_blocks {
+        sha512_process_block(&mut h, &data[i * 128..(i + 1) * 128]);
+    }
 
-        // Add compressed chunk to current hash value
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(hh);
+    // Handle the final partial block + padding on the stack (max 256 bytes)
+    let remainder = data.len() % 128;
+    let mut final_buf = [0u8; 256]; // At most 2 blocks needed for padding
+    final_buf[..remainder].copy_from_slice(&data[full_blocks * 128..]);
+
+    // Append bit '1' (0x80)
+    final_buf[remainder] = 0x80;
+
+    let padded_len = remainder + 1;
+
+    if padded_len <= 112 {
+        // Padding + length fit in one block
+        final_buf[112..128].copy_from_slice(&original_len_bits.to_be_bytes());
+        sha512_process_block(&mut h, &final_buf[..128]);
+    } else {
+        // Need two blocks
+        sha512_process_block(&mut h, &final_buf[..128]);
+        final_buf[128..240].fill(0);
+        final_buf[240..256].copy_from_slice(&original_len_bits.to_be_bytes());
+        sha512_process_block(&mut h, &final_buf[128..256]);
     }
 
     // Produce the final hash value (big-endian)

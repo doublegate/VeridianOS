@@ -39,10 +39,18 @@ pub fn create_endpoint_capability(
     rights: Rights,
     cap_space: &CapabilitySpace,
 ) -> Result<CapabilityToken, CapError> {
-    // TODO(phase3): Use proper ObjectRef::Endpoint when available
-    let object = ObjectRef::Process { pid: owner };
-
-    cap_manager().create_capability(object, rights, cap_space)
+    // Use ObjectRef::Endpoint with an Arc<Endpoint> when alloc is available
+    #[cfg(feature = "alloc")]
+    {
+        let endpoint = alloc::sync::Arc::new(crate::ipc::channel::Endpoint::new(owner));
+        let object = ObjectRef::Endpoint { endpoint };
+        cap_manager().create_capability(object, rights, cap_space)
+    }
+    #[cfg(not(feature = "alloc"))]
+    {
+        let object = ObjectRef::Process { pid: owner };
+        cap_manager().create_capability(object, rights, cap_space)
+    }
 }
 
 /// Check if process has permission to send to endpoint

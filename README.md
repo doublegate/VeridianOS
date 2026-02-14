@@ -107,7 +107,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Last Updated**: February 14, 2026
+**Last Updated**: February 14, 2026 (v0.3.2)
 
 ### Current Architecture Support
 
@@ -157,9 +157,34 @@ Released February 14, 2026. Comprehensive 5-sprint remediation covering safety, 
 - **Architecture Abstractions** — PlatformTimer trait with 3 arch implementations, memory barrier abstractions (memory_fence, data_sync_barrier, instruction_sync_barrier)
 - **Dead Code Cleanup** — Removed 25 incorrect `#[allow(dead_code)]` annotations plus 1 dead function
 
-### Phase 3: Security Hardening — Complete (v0.3.0)
+### Phase 2 & Phase 3 Completion (v0.3.2)
 
-Released February 14, 2026. Architecture leakage reduction and comprehensive security hardening:
+Released February 14, 2026. Comprehensive completion of both Phase 2 (User Space Foundation: 80% to 100%) and Phase 3 (Security Hardening: 65% to 100%) across 15 implementation sprints:
+
+**Phase 2 Sprints (6):**
+
+- **Clock/Timestamp Infrastructure** — `get_timestamp_secs()`/`get_timestamp_ms()` wrappers; RamFS/ProcFS/DevFS timestamp integration; VFS `list_mounts()`; init system and shell uptime using real timers
+- **BlockFS Directory Operations** — ext2-style `DiskDirEntry` parsing; `readdir()`, `lookup_in_dir()`, `create_file()`, `create_directory()` with `.`/`..`, `unlink_from_dir()`, `truncate_inode()` block freeing
+- **Signal Handling + Shell Input** — PTY signal delivery (SIGINT, SIGWINCH); architecture-conditional serial input (x86_64 port I/O, AArch64 UART MMIO, RISC-V SBI getchar); touch command implementation
+- **ELF Relocation Processing** — `process_relocations()` with AArch64 (R_AARCH64_RELATIVE/GLOB_DAT/JUMP_SLOT/ABS64) and RISC-V (R_RISCV_RELATIVE/64/JUMP_SLOT) types; PIE binary support; dynamic linker bootstrap delegation
+- **Driver Hot-Plug Event System** — `DeviceEvent` enum (Added/Removed/StateChanged); `DeviceEventListener` trait; publish-subscribe notification; auto-probe on device addition
+- **Init System Hardening** — Service wait timeout with SIGKILL; exponential backoff restart (base_delay * 2^min(count,5)); architecture-specific reboot (x86_64 keyboard controller 0xFE, AArch64 PSCI, RISC-V SBI reset); timer-based sleep replacing spin loops
+
+**Phase 3 Sprints (9):**
+
+- **Cryptographic Algorithms** — ChaCha20-Poly1305 AEAD (RFC 8439); Ed25519 sign/verify (RFC 8032); X25519 key exchange (RFC 7748); ML-DSA/Dilithium sign/verify (FIPS 204); ML-KEM/Kyber encapsulate/decapsulate (FIPS 203); ChaCha20-based CSPRNG with hardware entropy seeding
+- **Secure Boot Verification** — Kernel image SHA-256 hashing via linker symbols; Ed25519 signature verification; measured boot with measurement log; TPM PCR extension; certificate chain validation
+- **TPM Integration** — MMIO-based TPM 2.0 communication; locality management; command marshaling (TPM2_Startup, PCR_Extend, PCR_Read, GetRandom); `seal_key()`/`unseal_key()` for TPM-backed storage
+- **MAC Policy System** — Text-based policy language parser (`allow source target { perms };`); domain transitions; RBAC layer (users to roles to types); MLS support (sensitivity + categories + dominance); `SecurityLabel` struct replacing `&'static str` labels
+- **Audit System Completion** — Event filtering by type; structured format (timestamp, PID, UID, action, target, result); VFS-backed persistent storage; binary serialization; wired into syscall dispatch, capability ops, MAC decisions; real-time alert hooks
+- **Memory Protection Hardening** — ChaCha20 CSPRNG-based ASLR entropy; DEP/NX enforcement via page table NX bits; guard page integration with VMM; W^X enforcement; stack guard pages; Spectre v1 barriers (LFENCE/CSDB); KPTI (separate kernel/user page tables on x86_64)
+- **Authentication Hardening** — Real timestamps for MFA; PBKDF2-HMAC-SHA256 password hashing; password complexity enforcement; password history (prevent reuse); account expiration
+- **Capability System Phase 3** — ObjectRef::Endpoint in IPC integration; PRESERVE_EXEC filtering; default IPC/memory capabilities; process notification on revocation; permission checks; IPC broadcast for revocation
+- **Syscall Security + Fuzzing** — MAC checks before capability checks in syscall handlers; audit logging in syscall entry/exit; argument validation (pointer bounds, size limits); `FuzzTarget` trait with mutation-based fuzzer; ELF/IPC/FS/capability fuzz targets; crash detection via panic handler hooks
+
+### Phase 3: Security Hardening — Complete (v0.3.0, v0.3.2)
+
+Initial release February 14, 2026 (v0.3.0). Fully completed February 14, 2026 (v0.3.2). Architecture leakage reduction and comprehensive security hardening:
 
 - **Architecture Leakage Reduction** — `kprintln!`/`kprint!` macro family, `IpcRegisterSet` trait, heap/scheduler consolidation; `cfg(target_arch)` outside `arch/` reduced from 379 to 204 (46% reduction)
 - **Test Expansion** — Kernel-mode init tests expanded from 12 to 22, all passing on all architectures
@@ -168,7 +193,7 @@ Released February 14, 2026. Architecture leakage reduction and comprehensive sec
 - **Memory Hardening** — Speculation barriers (LFENCE/CSDB/FENCE.I) at syscall entry, guard pages in VMM, stack canary integration
 - **Crypto Validation** — SHA-256 NIST FIPS 180-4 test vector validation
 
-### Phase 2: User Space Foundation — Runtime Verified (v0.2.3, parity v0.2.5)
+### Phase 2: User Space Foundation — Complete (v0.2.3, parity v0.2.5, completed v0.3.2)
 
 Started August 15, 2025. Architecturally complete August 16, 2025. Runtime activation verified February 13, 2026. Full multi-architecture boot parity achieved February 13, 2026 (v0.2.5) with RISC-V post-BOOTOK crash fix, heap sizing corrections, and 30-second stability tests passing on all architectures.
 
@@ -401,10 +426,12 @@ Security is a fundamental design principle:
 - [x] RISC-V Crash Fix & Architecture Parity — All 3 architectures stable (2026-02-13, v0.2.5)
 - [x] Phase 3: Security Hardening — Architecture cleanup, capability hardening, MAC/audit, memory hardening (2026-02-14, v0.3.0)
 - [x] Technical Debt Remediation — OnceLock soundness fix, 48 static mut eliminated, typed errors, panic-free syscalls (2026-02-14, v0.3.1)
+- [x] Phase 2 & Phase 3 Completion — 15 implementation sprints, full crypto/secure boot/TPM/MAC/audit/ELF/BlockFS/signals (2026-02-14, v0.3.2)
 
 ### Mid-term (2026)
 
-- [x] Phase 3: Security Hardening — Complete (2026-02-14, v0.3.0)
+- [x] Phase 2: User Space Foundation — 100% Complete (2026-02-14, v0.3.2)
+- [x] Phase 3: Security Hardening — 100% Complete (2026-02-14, v0.3.2)
 - [x] Technical Debt Remediation — Complete (2026-02-14, v0.3.1)
 - [ ] Phase 4: Package Ecosystem & Self-Hosting (5–6 months) — Ports system, LLVM toolchain priority
 

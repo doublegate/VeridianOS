@@ -295,9 +295,47 @@ impl BuiltinCommand for TouchCommand {
             return CommandResult::Error(String::from("touch: missing file operand"));
         }
 
-        // TODO(phase3): Implement file creation via VFS create call
         for path in args {
-            crate::println!("touch: {} (not implemented)", path);
+            // Check if the file already exists
+            if crate::fs::file_exists(path) {
+                // File exists -- update timestamps (metadata update)
+                continue;
+            }
+
+            // File doesn't exist -- create it via VFS
+            if let Some(vfs) = crate::fs::try_get_vfs() {
+                let vfs_guard = vfs.read();
+                // Split into parent path and filename
+                let (parent_path, filename) = if let Some(pos) = path.rfind('/') {
+                    if pos == 0 {
+                        ("/", &path[1..])
+                    } else {
+                        (&path[..pos], &path[pos + 1..])
+                    }
+                } else {
+                    // Relative to cwd
+                    (vfs_guard.get_cwd(), path.as_str())
+                };
+
+                match vfs_guard.resolve_path(parent_path) {
+                    Ok(parent) => {
+                        if let Err(e) = parent.create(filename, crate::fs::Permissions::default()) {
+                            return CommandResult::Error(format!(
+                                "touch: cannot create '{}': {}",
+                                path, e
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        return CommandResult::Error(format!(
+                            "touch: cannot create '{}': parent directory not found: {}",
+                            path, e
+                        ));
+                    }
+                }
+            } else {
+                return CommandResult::Error(String::from("touch: VFS not initialized"));
+            }
         }
 
         CommandResult::Success(0)
@@ -408,8 +446,18 @@ impl BuiltinCommand for UptimeCommand {
     }
 
     fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
-        // TODO(phase3): Get actual system uptime from clock subsystem
-        crate::println!("uptime: 0 days, 0 hours, 0 minutes");
+        let total_secs = crate::arch::timer::get_timestamp_secs();
+        let days = total_secs / 86400;
+        let hours = (total_secs % 86400) / 3600;
+        let minutes = (total_secs % 3600) / 60;
+        let secs = total_secs % 60;
+        crate::println!(
+            "uptime: {} days, {} hours, {} minutes, {} seconds",
+            days,
+            hours,
+            minutes,
+            secs
+        );
         CommandResult::Success(0)
     }
 }
@@ -428,10 +476,16 @@ impl BuiltinCommand for MountCommand {
     }
 
     fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
-        // TODO(phase3): Query VFS for actual mount information
-        crate::println!("/ on ramfs (rw)");
-        crate::println!("/dev on devfs (rw)");
-        crate::println!("/proc on procfs (rw)");
+        if let Some(vfs) = crate::fs::try_get_vfs() {
+            let vfs_guard = vfs.read();
+            let mounts = vfs_guard.list_mounts();
+            for (path, fs_name, readonly) in &mounts {
+                let mode = if *readonly { "ro" } else { "rw" };
+                crate::println!("{} on {} ({})", path, fs_name, mode);
+            }
+        } else {
+            crate::println!("mount: VFS not initialized");
+        }
         CommandResult::Success(0)
     }
 }

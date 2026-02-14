@@ -141,73 +141,30 @@ unsafe impl GlobalAlloc for UnsafeBumpAllocator {
         let alloc_size = layout.size();
         let alloc_align = layout.align();
 
-        // AArch64: Simple load-store path (no CAS, no iterators)
+        // Simple load-store path for bump allocation.
         // Safe during single-core boot - no concurrent access possible.
-        #[cfg(target_arch = "aarch64")]
+        // AArch64 and RISC-V both use this path since they run on the
+        // UnsafeBumpAllocator which is only used during single-threaded boot.
         {
-            let current_next = self.next.load(Ordering::Relaxed);
+            let current_next = self.next.load(Ordering::SeqCst);
             let align = if alloc_align > 8 { 8 } else { alloc_align };
             let mask = align - 1;
             let aligned_next = (current_next + mask) & !mask;
 
-            let alloc_end = aligned_next + alloc_size;
+            let alloc_end = match aligned_next.checked_add(alloc_size) {
+                Some(end) => end,
+                None => return ptr::null_mut(),
+            };
             if alloc_end > start + size {
                 return ptr::null_mut();
             }
 
-            self.next.store(alloc_end, Ordering::Relaxed);
+            self.next.store(alloc_end, Ordering::SeqCst);
             self.allocations.fetch_add(1, Ordering::Relaxed);
 
             let allocated_ptr = aligned_next as *mut u8;
             core::ptr::write_bytes(allocated_ptr, 0, alloc_size);
             allocated_ptr
-        }
-
-        // RISC-V: CAS-based path for correctness
-        #[cfg(not(target_arch = "aarch64"))]
-        {
-            let max_retries = 100;
-            let mut retry_count = 0;
-
-            loop {
-                let current_next = self.next.load(Ordering::SeqCst);
-                let align = if alloc_align > 8 { 8 } else { alloc_align };
-                let mask = align - 1;
-                let aligned_next = (current_next + mask) & !mask;
-
-                let alloc_end = match aligned_next.checked_add(alloc_size) {
-                    Some(end) => {
-                        if end > start + size {
-                            return ptr::null_mut();
-                        }
-                        end
-                    }
-                    None => return ptr::null_mut(),
-                };
-
-                match self.next.compare_exchange_weak(
-                    current_next,
-                    alloc_end,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                ) {
-                    Ok(_) => {
-                        let allocated_ptr = aligned_next as *mut u8;
-                        core::ptr::write_bytes(allocated_ptr, 0, alloc_size);
-                        self.allocations.fetch_add(1, Ordering::Relaxed);
-                        return allocated_ptr;
-                    }
-                    Err(_) => {
-                        retry_count += 1;
-                        if retry_count >= max_retries {
-                            return ptr::null_mut();
-                        }
-                        for _ in 0..(retry_count * 10) {
-                            core::hint::spin_loop();
-                        }
-                    }
-                }
-            }
         }
     }
 

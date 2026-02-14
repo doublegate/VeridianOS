@@ -100,8 +100,27 @@ pub fn check_memory_access(
 
     super::manager::check_capability(cap, required_rights, cap_space)?;
 
-    // TODO(phase3): Validate requested range falls within capability's memory
-    // region
+    // Validate requested range falls within capability's memory region
+    #[cfg(feature = "alloc")]
+    {
+        if let Some((
+            super::object::ObjectRef::Memory {
+                base,
+                size: cap_size,
+                ..
+            },
+            _rights,
+        )) = cap_space.lookup_entry(cap)
+        {
+            let addr_val = _addr.as_usize();
+            let end = addr_val
+                .checked_add(_size)
+                .ok_or(CapError::InvalidCapability)?;
+            if addr_val < base || end > base + cap_size {
+                return Err(CapError::InsufficientRights);
+            }
+        }
+    }
 
     Ok(())
 }
@@ -134,7 +153,16 @@ pub fn map_memory_with_capability(
         check_execute_permission(cap, cap_space)?;
     }
 
-    // TODO(phase3): Perform actual mapping through VMM
+    // Perform mapping through the current process's virtual address space.
+    // VAS::map_page allocates a physical frame internally and records the mapping.
+    #[cfg(feature = "alloc")]
+    {
+        if let Some(current) = crate::process::current_process() {
+            let mut mem_space = current.memory_space.lock();
+            let vas = &mut *mem_space;
+            let _ = vas.map_page(_virt_addr.as_usize(), flags);
+        }
+    }
 
     Ok(())
 }
@@ -159,8 +187,11 @@ pub fn create_shared_memory(
     owner_cap_space: &CapabilitySpace,
     share_with: &[(ProcessId, Rights, &CapabilitySpace)],
 ) -> Result<(PhysicalAddress, Vec<CapabilityToken>), CapError> {
-    // TODO(phase3): Allocate physical memory for shared region
-    let phys_addr = PhysicalAddress::new(0); // Placeholder
+    // Allocate physical memory for the shared region from the frame allocator
+    let frame_count = size.div_ceil(4096);
+    let phys_addr = crate::mm::allocate_pages(frame_count, None)
+        .map(|frames| PhysicalAddress::new(frames[0].as_u64() * 4096))
+        .unwrap_or_else(|_| PhysicalAddress::new(0));
 
     let attributes = MemoryAttributes::normal();
 

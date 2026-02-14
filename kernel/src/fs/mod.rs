@@ -418,6 +418,29 @@ impl Vfs {
         parent.unlink(name)
     }
 
+    /// List all mount points and their filesystem types.
+    ///
+    /// Returns a vector of `(path, fs_name, readonly)` tuples.
+    pub fn list_mounts(&self) -> Vec<(String, String, bool)> {
+        let mut result = Vec::new();
+
+        // Root filesystem
+        if let Some(ref root) = self.root_fs {
+            result.push((
+                String::from("/"),
+                String::from(root.name()),
+                root.is_readonly(),
+            ));
+        }
+
+        // Mounted filesystems
+        for (path, fs) in &self.mounts {
+            result.push((path.clone(), String::from(fs.name()), fs.is_readonly()));
+        }
+
+        result
+    }
+
     /// Sync all filesystems
     pub fn sync(&self) -> Result<(), KernelError> {
         // Sync root filesystem
