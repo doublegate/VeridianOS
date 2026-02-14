@@ -160,6 +160,17 @@ fn simple_hash(s: &str) -> u64 {
     hash
 }
 
+/// Log a capability operation (create, revoke, derive)
+pub fn log_capability_op(pid: u64, cap_id: u64, result: i32) {
+    log_event(AuditEvent::new(
+        AuditEventType::CapabilityOp,
+        pid,
+        0,
+        result,
+        cap_id,
+    ));
+}
+
 /// Get audit log statistics
 pub fn get_stats() -> (usize, usize) {
     // SAFETY: AUDIT_COUNT is a static mut counter read for diagnostic statistics.

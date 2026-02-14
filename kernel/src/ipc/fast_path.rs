@@ -2,6 +2,15 @@
 //!
 //! Achieves < 5μs latency by minimizing memory access and using direct register
 //! transfers.
+//!
+//! ## Register mapping
+//!
+//! The IPC register convention maps to architecture registers as follows:
+//! - x86_64:  RDI, RSI, RDX, RCX, R8, R9, R10
+//! - AArch64: X0, X1, X2, X3, X4, X5, X6
+//! - RISC-V:  a0, a1, a2, a3, a4, a5, a6
+//!
+//! All share the same semantic layout (see `IPC_REG_*` constants below).
 
 #![allow(dead_code)]
 
@@ -16,6 +25,26 @@ use crate::{process::pcb::ProcessState, sched::current_process};
 /// Performance counter for fast path operations
 static FAST_PATH_COUNT: AtomicU64 = AtomicU64::new(0);
 static FAST_PATH_CYCLES: AtomicU64 = AtomicU64::new(0);
+
+// IPC register semantic indices (architecture-neutral)
+const IPC_REG_CAP: usize = 0; // Capability token
+const IPC_REG_OPCODE: usize = 1; // Operation code
+const IPC_REG_FLAGS: usize = 2; // Flags
+const IPC_REG_DATA0: usize = 3; // Data word 0
+const IPC_REG_DATA1: usize = 4; // Data word 1
+const IPC_REG_DATA2: usize = 5; // Data word 2
+const IPC_REG_DATA3: usize = 6; // Data word 3
+
+/// Architecture-neutral IPC register set.
+///
+/// Holds the 7 registers used for fast-path IPC message transfer.
+/// The layout is the same on all architectures; only the physical register
+/// names differ (see module-level documentation).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct IpcRegs {
+    regs: [u64; 7],
+}
 
 /// Fast path IPC send for small messages
 ///
@@ -39,16 +68,7 @@ pub fn fast_send(msg: &SmallMessage, target_pid: u64) -> Result<()> {
     // Check if target is waiting for message
     if target.state == ProcessState::Blocked {
         // Direct transfer path - this is the fast case
-        // SAFETY: The target process is in the Blocked state, meaning it is waiting
-        // for a message and its register context is saved and stable. The message
-        // capability has been validated above via validate_capability_fast(). The
-        // target reference is obtained from find_process_fast() which returns a
-        // valid &mut Process. Writing to the target's saved register context while
-        // it is blocked is safe because the process is not running and no other
-        // CPU can be modifying its context concurrently.
-        unsafe {
-            transfer_registers(msg, target);
-        }
+        transfer_registers(msg, &mut target.context);
 
         // Wake up receiver and switch to it
         target.state = ProcessState::Ready;
@@ -83,8 +103,11 @@ pub fn fast_receive(endpoint: u64, timeout: Option<u64>) -> Result<SmallMessage>
     // Yield CPU and wait for message
     yield_and_wait(timeout)?;
 
-    // When we wake up, message should be in registers
-    Ok(read_message_from_registers())
+    // When we wake up, message should be in our IPC register context.
+    // TODO(phase3): Read from the current task's saved IPC register set
+    // once per-task IpcRegs storage is implemented.
+    let regs = IpcRegs::default();
+    Ok(read_message_from_regs(&regs))
 }
 
 /// Fast capability validation using cached lookups
@@ -101,100 +124,47 @@ fn find_process_fast(_pid: u64) -> Option<&'static mut Process> {
     None
 }
 
-/// Transfer message via registers (architecture-specific)
-///
-/// # Safety
-/// Caller must ensure:
-/// - `target` refers to a process that is currently blocked and not running on
-///   any CPU, so its saved register context can be safely mutated.
-/// - `msg` contains valid message data with a previously validated capability
-///   token.
-/// - The target process's context structure (obtained via `get_context_mut()`)
-///   is properly initialized and its register fields correspond to the IPC
-///   register convention for the current architecture.
-#[cfg(target_arch = "x86_64")]
+/// Transfer message into target's IPC registers (architecture-neutral)
 #[inline(always)]
-unsafe fn transfer_registers<P: ProcessExt>(msg: &SmallMessage, target: &mut P) {
-    // On x86_64, we use specific registers for IPC
-    // RDI = capability
-    // RSI = opcode
-    // RDX = flags
-    // RCX, R8, R9, R10, R11 = data[0..4]
-
-    let ctx = target.get_context_mut();
-    ctx.rdi = msg.capability;
-    ctx.rsi = msg.opcode as u64;
-    ctx.rdx = msg.flags as u64;
-    ctx.rcx = msg.data[0];
-    ctx.r8 = msg.data[1];
-    ctx.r9 = msg.data[2];
-    ctx.r10 = msg.data[3];
+fn transfer_registers(msg: &SmallMessage, regs: &mut IpcRegs) {
+    regs.regs[IPC_REG_CAP] = msg.capability;
+    regs.regs[IPC_REG_OPCODE] = msg.opcode as u64;
+    regs.regs[IPC_REG_FLAGS] = msg.flags as u64;
+    regs.regs[IPC_REG_DATA0] = msg.data[0];
+    regs.regs[IPC_REG_DATA1] = msg.data[1];
+    regs.regs[IPC_REG_DATA2] = msg.data[2];
+    regs.regs[IPC_REG_DATA3] = msg.data[3];
 }
 
-/// # Safety
-/// Caller must ensure:
-/// - `target` refers to a process that is currently blocked and not running on
-///   any CPU, so its saved register context can be safely mutated.
-/// - `msg` contains valid message data with a previously validated capability
-///   token.
-/// - The target process's context structure (obtained via `get_context_mut()`)
-///   is properly initialized and its register fields correspond to the AArch64
-///   IPC register convention (X0-X6).
-#[cfg(target_arch = "aarch64")]
+/// Read message from IPC registers (architecture-neutral)
 #[inline(always)]
-unsafe fn transfer_registers<P: ProcessExt>(msg: &SmallMessage, target: &mut P) {
-    // On AArch64, use X0-X7 for IPC
-    let ctx = target.get_context_mut();
-    ctx.x0 = msg.capability;
-    ctx.x1 = msg.opcode as u64;
-    ctx.x2 = msg.flags as u64;
-    ctx.x3 = msg.data[0];
-    ctx.x4 = msg.data[1];
-    ctx.x5 = msg.data[2];
-    ctx.x6 = msg.data[3];
-}
-
-/// # Safety
-/// Caller must ensure:
-/// - `target` refers to a process that is currently blocked and not running on
-///   any CPU, so its saved register context can be safely mutated.
-/// - `msg` contains valid message data with a previously validated capability
-///   token.
-/// - The target process's context structure (obtained via `get_context_mut()`)
-///   is properly initialized and its register fields correspond to the RISC-V
-///   IPC register convention (a0-a6).
-#[cfg(target_arch = "riscv64")]
-#[inline(always)]
-unsafe fn transfer_registers<P: ProcessExt>(msg: &SmallMessage, target: &mut P) {
-    // On RISC-V, use a0-a7 for IPC
-    let ctx = target.get_context_mut();
-    ctx.a0 = msg.capability;
-    ctx.a1 = msg.opcode as u64;
-    ctx.a2 = msg.flags as u64;
-    ctx.a3 = msg.data[0];
-    ctx.a4 = msg.data[1];
-    ctx.a5 = msg.data[2];
-    ctx.a6 = msg.data[3];
-}
-
-/// Read message from current process registers
-#[cfg(target_arch = "x86_64")]
-#[inline(always)]
-fn read_message_from_registers() -> SmallMessage {
-    let current = current_process();
-    let ctx = current.get_context_mut();
+fn read_message_from_regs(regs: &IpcRegs) -> SmallMessage {
     SmallMessage {
-        capability: ctx.rdi,
-        opcode: ctx.rsi as u32,
-        flags: ctx.rdx as u32,
-        data: [ctx.rcx, ctx.r8, ctx.r9, ctx.r10],
+        capability: regs.regs[IPC_REG_CAP],
+        opcode: regs.regs[IPC_REG_OPCODE] as u32,
+        flags: regs.regs[IPC_REG_FLAGS] as u32,
+        data: [
+            regs.regs[IPC_REG_DATA0],
+            regs.regs[IPC_REG_DATA1],
+            regs.regs[IPC_REG_DATA2],
+            regs.regs[IPC_REG_DATA3],
+        ],
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-fn read_message_from_registers() -> SmallMessage {
-    // Placeholder for other architectures
-    SmallMessage::new(0, 0)
+/// Read CPU timestamp counter
+#[inline(always)]
+fn read_timestamp() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: _rdtsc() reads the CPU's Time Stamp Counter via the RDTSC
+        // instruction. Always safe in kernel mode with no side effects.
+        unsafe { core::arch::x86_64::_rdtsc() }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        0
+    }
 }
 
 /// Check for pending messages without blocking
@@ -209,158 +179,13 @@ fn yield_and_wait(_timeout: Option<u64>) -> Result<()> {
     Ok(())
 }
 
-/// Read CPU timestamp counter
-#[cfg(target_arch = "x86_64")]
-#[inline(always)]
-fn read_timestamp() -> u64 {
-    // SAFETY: _rdtsc() is an intrinsic that reads the CPU's Time Stamp Counter
-    // register via the RDTSC instruction. This is always safe to call on x86_64
-    // processors, requires no special privilege level in kernel mode, and has no
-    // side effects beyond reading a monotonically increasing counter.
-    unsafe { core::arch::x86_64::_rdtsc() }
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-#[inline(always)]
-fn read_timestamp() -> u64 {
-    // Fallback for other architectures
-    0
-}
-
-// Extension trait for process context access
-trait ProcessExt {
-    fn get_context_mut(&mut self) -> &mut ProcessContext;
-}
-
-// Placeholder process context
+// Placeholder process type for fast-path IPC
 #[allow(dead_code)]
 struct Process {
     pid: u64,
     state: ProcessState,
     blocked_on: Option<u64>,
-    context: ProcessContext,
-}
-
-impl ProcessExt for Process {
-    fn get_context_mut(&mut self) -> &mut ProcessContext {
-        &mut self.context
-    }
-}
-
-// For the actual sched::Process
-impl ProcessExt for crate::sched::Process {
-    fn get_context_mut(&mut self) -> &mut ProcessContext {
-        // In real implementation, this would access the actual context.
-        // SAFETY: DUMMY_CONTEXT is a static mut used as a placeholder until the
-        // real process context infrastructure is integrated. This is not thread-safe
-        // and is only acceptable as a temporary stub. In production, each process
-        // would have its own context stored in its PCB.
-        static mut DUMMY_CONTEXT: ProcessContext = ProcessContext {
-            #[cfg(target_arch = "x86_64")]
-            rdi: 0,
-            #[cfg(target_arch = "x86_64")]
-            rsi: 0,
-            #[cfg(target_arch = "x86_64")]
-            rdx: 0,
-            #[cfg(target_arch = "x86_64")]
-            rcx: 0,
-            #[cfg(target_arch = "x86_64")]
-            r8: 0,
-            #[cfg(target_arch = "x86_64")]
-            r9: 0,
-            #[cfg(target_arch = "x86_64")]
-            r10: 0,
-
-            #[cfg(target_arch = "aarch64")]
-            x0: 0,
-            #[cfg(target_arch = "aarch64")]
-            x1: 0,
-            #[cfg(target_arch = "aarch64")]
-            x2: 0,
-            #[cfg(target_arch = "aarch64")]
-            x3: 0,
-            #[cfg(target_arch = "aarch64")]
-            x4: 0,
-            #[cfg(target_arch = "aarch64")]
-            x5: 0,
-            #[cfg(target_arch = "aarch64")]
-            x6: 0,
-
-            #[cfg(target_arch = "riscv64")]
-            a0: 0,
-            #[cfg(target_arch = "riscv64")]
-            a1: 0,
-            #[cfg(target_arch = "riscv64")]
-            a2: 0,
-            #[cfg(target_arch = "riscv64")]
-            a3: 0,
-            #[cfg(target_arch = "riscv64")]
-            a4: 0,
-            #[cfg(target_arch = "riscv64")]
-            a5: 0,
-            #[cfg(target_arch = "riscv64")]
-            a6: 0,
-        };
-        // SAFETY: We obtain a raw pointer to DUMMY_CONTEXT via `&raw mut` and
-        // dereference it to produce a mutable reference. The static mut is
-        // zero-initialized with valid ProcessContext fields. This is a known data
-        // race hazard if called concurrently from multiple CPUs, but this is a
-        // temporary placeholder -- the real implementation will use per-process
-        // context stored in each PCB. The `&raw mut` pattern avoids creating an
-        // intermediate reference to the static mut, satisfying Rust 2024 rules.
-        unsafe {
-            let ptr = &raw mut DUMMY_CONTEXT;
-            &mut *ptr
-        }
-    }
-}
-
-#[repr(C)]
-struct ProcessContext {
-    #[cfg(target_arch = "x86_64")]
-    rdi: u64,
-    #[cfg(target_arch = "x86_64")]
-    rsi: u64,
-    #[cfg(target_arch = "x86_64")]
-    rdx: u64,
-    #[cfg(target_arch = "x86_64")]
-    rcx: u64,
-    #[cfg(target_arch = "x86_64")]
-    r8: u64,
-    #[cfg(target_arch = "x86_64")]
-    r9: u64,
-    #[cfg(target_arch = "x86_64")]
-    r10: u64,
-
-    #[cfg(target_arch = "aarch64")]
-    x0: u64,
-    #[cfg(target_arch = "aarch64")]
-    x1: u64,
-    #[cfg(target_arch = "aarch64")]
-    x2: u64,
-    #[cfg(target_arch = "aarch64")]
-    x3: u64,
-    #[cfg(target_arch = "aarch64")]
-    x4: u64,
-    #[cfg(target_arch = "aarch64")]
-    x5: u64,
-    #[cfg(target_arch = "aarch64")]
-    x6: u64,
-
-    #[cfg(target_arch = "riscv64")]
-    a0: u64,
-    #[cfg(target_arch = "riscv64")]
-    a1: u64,
-    #[cfg(target_arch = "riscv64")]
-    a2: u64,
-    #[cfg(target_arch = "riscv64")]
-    a3: u64,
-    #[cfg(target_arch = "riscv64")]
-    a4: u64,
-    #[cfg(target_arch = "riscv64")]
-    a5: u64,
-    #[cfg(target_arch = "riscv64")]
-    a6: u64,
+    context: IpcRegs,
 }
 
 /// Get performance statistics

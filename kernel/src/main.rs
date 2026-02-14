@@ -222,11 +222,7 @@ fn kernel_main_impl() -> ! {
     arch::riscv64::entry::arch_early_init();
 
     // Use unified bootstrap initialization
-    #[cfg(target_arch = "x86_64")]
-    early_println!("[EARLY] Starting bootstrap initialization...");
-
-    #[cfg(not(target_arch = "x86_64"))]
-    boot_println!("[EARLY] Starting bootstrap initialization...");
+    kprintln!("[EARLY] Starting bootstrap initialization...");
 
     // Run bootstrap
     bootstrap::run();

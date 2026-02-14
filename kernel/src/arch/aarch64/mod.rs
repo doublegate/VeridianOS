@@ -47,6 +47,17 @@ pub fn idle() {
     }
 }
 
+/// Speculation barrier to mitigate Spectre-style attacks.
+/// Uses CSDB (Consumption of Speculative Data Barrier) on AArch64.
+#[inline(always)]
+pub fn speculation_barrier() {
+    // SAFETY: csdb prevents speculative use of data loaded before the barrier.
+    // No side effects beyond constraining speculative execution.
+    unsafe {
+        core::arch::asm!("csdb", options(nostack, nomem, preserves_flags));
+    }
+}
+
 /// Disable interrupts with RAII guard that restores the previous state on drop.
 #[allow(dead_code)]
 pub fn disable_interrupts() -> impl Drop {
@@ -83,6 +94,34 @@ pub fn disable_interrupts() -> impl Drop {
 #[allow(dead_code)]
 pub fn serial_init() -> crate::serial::Pl011Uart {
     crate::serial::Pl011Uart::new(0x0900_0000)
+}
+
+/// Kernel heap start address (16MB into QEMU virt RAM at 0x40000000)
+pub const HEAP_START: usize = 0x41000000;
+
+/// Flush TLB for a specific virtual address.
+#[allow(dead_code)]
+pub fn tlb_flush_address(addr: u64) {
+    // SAFETY: `tlbi vae1` invalidates the TLB entry at EL1. Address is shifted
+    // right by 12 for page-number format. DSB SY + ISB ensure completion.
+    unsafe {
+        let page_addr = addr >> 12;
+        core::arch::asm!("tlbi vae1, {}", in(reg) page_addr);
+        core::arch::asm!("dsb sy");
+        core::arch::asm!("isb");
+    }
+}
+
+/// Flush entire TLB.
+#[allow(dead_code)]
+pub fn tlb_flush_all() {
+    // SAFETY: `tlbi vmalle1` invalidates all EL1 TLB entries. DSB SY + ISB
+    // ensure completion. Architectural maintenance instructions, safe at EL1.
+    unsafe {
+        core::arch::asm!("tlbi vmalle1");
+        core::arch::asm!("dsb sy");
+        core::arch::asm!("isb");
+    }
 }
 
 /// I/O port stubs for AArch64 -- ARM does not have I/O ports.

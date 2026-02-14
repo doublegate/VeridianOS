@@ -10,19 +10,7 @@ use super::scheduler;
 /// This transfers control to the scheduler, which will run the current task
 /// (bootstrap or idle) and never return.
 pub fn start() -> ! {
-    #[cfg(not(target_arch = "aarch64"))]
-    println!("[SCHED] Starting scheduler execution");
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: uart_write_str performs a volatile write to the UART MMIO
-        // register at 0x09000000, which is always mapped on the QEMU virt
-        // machine. No Rust memory is aliased.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[SCHED] Starting scheduler execution\n");
-        }
-    }
+    kprintln!("[SCHED] Starting scheduler execution");
 
     #[cfg(target_arch = "aarch64")]
     {
@@ -75,17 +63,7 @@ pub fn has_ready_tasks() -> bool {
 
 /// Run scheduler main loop (called by idle task)
 pub fn run() -> ! {
-    #[cfg(not(target_arch = "aarch64"))]
-    println!("[SCHED] Entering scheduler main loop");
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: UART MMIO write to 0x09000000. No Rust memory aliased.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[SCHED] Entering scheduler main loop\n");
-        }
-    }
+    kprintln!("[SCHED] Entering scheduler main loop");
 
     let mut balance_counter = 0u64;
 

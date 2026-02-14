@@ -344,12 +344,36 @@ impl Vfs {
     }
 
     /// Open a file
-    pub fn open(&self, path: &str, _flags: OpenFlags) -> Result<Arc<dyn VfsNode>, &'static str> {
+    ///
+    /// Checks MAC policy before allowing access.
+    pub fn open(&self, path: &str, flags: OpenFlags) -> Result<Arc<dyn VfsNode>, &'static str> {
+        // Determine access type from flags
+        let access = if flags.write {
+            crate::security::AccessType::Write
+        } else {
+            crate::security::AccessType::Read
+        };
+
+        // Get current process PID for MAC check (0 = kernel context)
+        let pid = crate::process::current_process()
+            .map(|p| p.pid.0)
+            .unwrap_or(0);
+
+        crate::security::mac::check_file_access(path, access, pid)?;
+
         self.resolve_path(path)
     }
 
     /// Create a directory
+    ///
+    /// Checks MAC policy (Write access to file domain) before creating.
     pub fn mkdir(&self, path: &str, permissions: Permissions) -> Result<(), &'static str> {
+        // MAC check: creating a directory requires Write access
+        let pid = crate::process::current_process()
+            .map(|p| p.pid.0)
+            .unwrap_or(0);
+        crate::security::mac::check_file_access(path, crate::security::AccessType::Write, pid)?;
+
         // Split path into parent and name
         let (parent_path, name) = if let Some(pos) = path.rfind('/') {
             if pos == 0 {

@@ -154,6 +154,7 @@ impl From<crate::cap::manager::CapError> for SyscallError {
             crate::cap::manager::CapError::AlreadyExists => SyscallError::CapabilityAlreadyExists,
             crate::cap::manager::CapError::NotFound => SyscallError::CapabilityNotFound,
             crate::cap::manager::CapError::IdExhausted => SyscallError::OutOfMemory,
+            crate::cap::manager::CapError::QuotaExceeded => SyscallError::OutOfMemory,
         }
     }
 }
@@ -168,6 +169,10 @@ pub extern "C" fn syscall_handler(
     arg4: usize,
     arg5: usize,
 ) -> isize {
+    // Speculation barrier at syscall entry to mitigate Spectre-style attacks.
+    // Prevents speculative execution of kernel code with user-controlled values.
+    crate::arch::speculation_barrier();
+
     let result = match Syscall::try_from(syscall_num) {
         Ok(syscall) => handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5),
         Err(_) => Err(SyscallError::InvalidSyscall),

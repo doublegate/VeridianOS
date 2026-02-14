@@ -150,133 +150,45 @@ pub fn create_test_tasks() {
 
         use crate::process;
 
-        #[cfg(not(target_arch = "aarch64"))]
-        println!("[TEST] Creating test tasks for context switch verification");
-
-        // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[TEST] Creating test tasks for context switch verification\n");
-        }
+        kprintln!("[TEST] Creating test tasks for context switch verification");
 
         // Create Task A
         match process::lifecycle::create_process(String::from("test_task_a"), 0) {
             Ok(_pid_a) => {
-                #[cfg(not(target_arch = "aarch64"))]
-                println!("[TEST] Created process A with PID {}", _pid_a.0);
-
-                // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
-                #[cfg(target_arch = "aarch64")]
-                unsafe {
-                    use crate::arch::aarch64::direct_uart::uart_write_str;
-                    uart_write_str("[TEST] Created process A\n");
-                }
+                kprintln!("[TEST] Created process A");
 
                 if let Err(_e) = process::create_thread(test_task_a as usize, 0, 0, 0) {
-                    #[cfg(not(target_arch = "aarch64"))]
-                    println!("[TEST] Failed to create thread for task A: {}", _e);
-
-                    // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
-                    #[cfg(target_arch = "aarch64")]
-                    unsafe {
-                        use crate::arch::aarch64::direct_uart::uart_write_str;
-                        uart_write_str("[TEST] Failed to create thread for task A\n");
-                    }
+                    kprintln!("[TEST] Failed to create thread for task A");
                 } else {
-                    #[cfg(not(target_arch = "aarch64"))]
-                    println!("[TEST] Created thread for task A");
-
-                    // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
-                    #[cfg(target_arch = "aarch64")]
-                    unsafe {
-                        use crate::arch::aarch64::direct_uart::uart_write_str;
-                        uart_write_str("[TEST] Created thread for task A\n");
-                    }
+                    kprintln!("[TEST] Created thread for task A");
                 }
             }
             Err(_e) => {
-                #[cfg(not(target_arch = "aarch64"))]
-                println!("[TEST] Failed to create task A: {}", _e);
-
-                // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
-                #[cfg(target_arch = "aarch64")]
-                unsafe {
-                    use crate::arch::aarch64::direct_uart::uart_write_str;
-                    uart_write_str("[TEST] Failed to create task A\n");
-                }
+                kprintln!("[TEST] Failed to create task A");
             }
         }
 
         // Create Task B
         match process::lifecycle::create_process(String::from("test_task_b"), 0) {
             Ok(_pid_b) => {
-                #[cfg(not(target_arch = "aarch64"))]
-                println!("[TEST] Created process B with PID {}", _pid_b.0);
-
-                // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
-                #[cfg(target_arch = "aarch64")]
-                unsafe {
-                    use crate::arch::aarch64::direct_uart::uart_write_str;
-                    uart_write_str("[TEST] Created process B\n");
-                }
+                kprintln!("[TEST] Created process B");
 
                 if let Err(_e) = process::create_thread(test_task_b as usize, 0, 0, 0) {
-                    #[cfg(not(target_arch = "aarch64"))]
-                    println!("[TEST] Failed to create thread for task B: {}", _e);
-
-                    // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
-                    #[cfg(target_arch = "aarch64")]
-                    unsafe {
-                        use crate::arch::aarch64::direct_uart::uart_write_str;
-                        uart_write_str("[TEST] Failed to create thread for task B\n");
-                    }
+                    kprintln!("[TEST] Failed to create thread for task B");
                 } else {
-                    #[cfg(not(target_arch = "aarch64"))]
-                    println!("[TEST] Created thread for task B");
-
-                    // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
-                    #[cfg(target_arch = "aarch64")]
-                    unsafe {
-                        use crate::arch::aarch64::direct_uart::uart_write_str;
-                        uart_write_str("[TEST] Created thread for task B\n");
-                    }
+                    kprintln!("[TEST] Created thread for task B");
                 }
             }
             Err(_e) => {
-                #[cfg(not(target_arch = "aarch64"))]
-                println!("[TEST] Failed to create task B: {}", _e);
-
-                // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
-                #[cfg(target_arch = "aarch64")]
-                unsafe {
-                    use crate::arch::aarch64::direct_uart::uart_write_str;
-                    uart_write_str("[TEST] Failed to create task B\n");
-                }
+                kprintln!("[TEST] Failed to create task B");
             }
         }
 
-        #[cfg(not(target_arch = "aarch64"))]
-        println!("[TEST] Test tasks created successfully");
-
-        // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[TEST] Test tasks created successfully\n");
-        }
+        kprintln!("[TEST] Test tasks created successfully");
     }
 
     #[cfg(not(feature = "alloc"))]
     {
-        #[cfg(not(target_arch = "aarch64"))]
-        println!("[TEST] Cannot create test tasks: alloc feature not enabled");
-
-        // SAFETY: MMIO write to QEMU virt UART (see module-level safety note).
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[TEST] Cannot create test tasks: alloc feature not enabled\n");
-        }
+        kprintln!("[TEST] Cannot create test tasks: alloc feature not enabled");
     }
 }

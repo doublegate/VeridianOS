@@ -169,6 +169,52 @@ pub fn init() -> Result<(), KernelError> {
     Ok(())
 }
 
+/// Check file access using MAC policy
+///
+/// Maps the calling process to a security domain and checks if that domain
+/// can access file objects with the given access type.
+pub fn check_file_access(_path: &str, access: AccessType, pid: u64) -> Result<(), &'static str> {
+    // Determine source label based on PID
+    // PID 0 = kernel (system_t), PID 1 = init (init_t), others = user_t
+    let source = match pid {
+        0 => "system_t",
+        1 => "init_t",
+        _ => "user_t",
+    };
+
+    // Files are in the file_t domain
+    let target = "file_t";
+
+    if check_access(source, target, access) {
+        Ok(())
+    } else {
+        // Log the denial via audit if available
+        crate::security::audit::log_permission_denied(pid, 0, "file_access");
+        Err("MAC policy denied file access")
+    }
+}
+
+/// Check IPC access using MAC policy
+///
+/// Validates that a process can perform IPC operations based on MAC policy.
+pub fn check_ipc_access(access: AccessType, pid: u64) -> Result<(), &'static str> {
+    let source = match pid {
+        0 => "system_t",
+        1 => "init_t",
+        _ => "user_t",
+    };
+
+    // IPC targets are in the system_t domain
+    let target = "system_t";
+
+    if check_access(source, target, access) {
+        Ok(())
+    } else {
+        crate::security::audit::log_permission_denied(pid, 0, "ipc_access");
+        Err("MAC policy denied IPC access")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

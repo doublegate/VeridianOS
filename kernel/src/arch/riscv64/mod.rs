@@ -103,11 +103,47 @@ pub fn idle() {
     unsafe { core::arch::asm!("wfi") };
 }
 
+/// Speculation barrier to mitigate Spectre-style attacks.
+/// Uses FENCE.I on RISC-V which synchronizes instruction and data streams.
+#[inline(always)]
+pub fn speculation_barrier() {
+    // SAFETY: fence.i ensures instruction cache coherence and acts as a
+    // speculation barrier by serializing instruction fetch. No side effects
+    // beyond pipeline synchronization.
+    unsafe {
+        core::arch::asm!("fence.i", options(nostack, nomem));
+    }
+}
+
 pub fn serial_init() -> crate::serial::Uart16550Compat {
     // QEMU virt machine places 16550 UART at 0x10000000
     let mut uart = crate::serial::Uart16550Compat::new(0x1000_0000);
     uart.init();
     uart
+}
+
+/// Kernel heap start address (16MB into QEMU virt RAM at 0x80000000)
+pub const HEAP_START: usize = 0x81000000;
+
+/// Flush TLB for a specific virtual address.
+#[allow(dead_code)]
+pub fn tlb_flush_address(addr: u64) {
+    // SAFETY: `sfence.vma` with a specific address and zero ASID invalidates
+    // all TLB entries for that address. Supervisor-mode instruction, safe in
+    // S-mode.
+    unsafe {
+        core::arch::asm!("sfence.vma {}, zero", in(reg) addr);
+    }
+}
+
+/// Flush entire TLB.
+#[allow(dead_code)]
+pub fn tlb_flush_all() {
+    // SAFETY: `sfence.vma` with no arguments flushes all TLB entries.
+    // Supervisor-mode fence, safe in S-mode.
+    unsafe {
+        core::arch::asm!("sfence.vma");
+    }
 }
 
 /// I/O port stubs for RISC-V -- RISC-V does not have I/O ports.

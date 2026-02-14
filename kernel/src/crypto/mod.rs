@@ -58,6 +58,23 @@ pub enum CryptoError {
     InsufficientEntropy,
 }
 
+/// Validate crypto primitives against known test vectors (NIST FIPS 180-4).
+///
+/// Returns true if all test vectors pass, false otherwise.
+pub fn validate() -> bool {
+    // NIST FIPS 180-4 SHA-256 test vector: SHA-256("abc")
+    // Expected: ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61
+    // f20015ad
+    let expected: [u8; 32] = [
+        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22,
+        0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00,
+        0x15, 0xad,
+    ];
+
+    let result = hash::sha256(b"abc");
+    result.as_bytes() == &expected
+}
+
 impl core::fmt::Display for CryptoError {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         match self {

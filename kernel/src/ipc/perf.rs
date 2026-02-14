@@ -246,12 +246,13 @@ pub mod bench {
     use super::*;
 
     /// Run a performance test
-    pub fn run_perf_test<F>(_name: &str, iterations: usize, mut f: F)
+    pub fn run_perf_test<F>(name: &str, iterations: usize, mut f: F)
     where
         F: FnMut(),
     {
-        #[cfg(target_arch = "x86_64")]
-        println!("\nRunning performance test: {}", _name);
+        kprintln!("\nRunning performance test:");
+        kprint_rt!(name);
+        kprintln!();
 
         // Warmup
         for _ in 0..10 {
@@ -266,29 +267,31 @@ pub mod bench {
         let total_cycles = read_timestamp() - start;
         let avg_cycles = total_cycles / iterations as u64;
 
-        #[cfg(target_arch = "x86_64")]
         let avg_ns = cycles_to_ns(avg_cycles);
-        #[cfg(not(target_arch = "x86_64"))]
-        let _avg_ns = cycles_to_ns(avg_cycles);
 
-        #[cfg(target_arch = "x86_64")]
-        {
-            println!("  Iterations: {}", iterations);
-            println!("  Average: {} cycles ({} ns)", avg_cycles, avg_ns);
+        kprintln!("  Iterations:");
+        kprint_u64!(iterations);
+        kprintln!();
+        kprintln!("  Average cycles:");
+        kprint_u64!(avg_cycles);
+        kprintln!();
+        kprintln!("  Average ns:");
+        kprint_u64!(avg_ns);
+        kprintln!();
 
-            if avg_ns < 1000 {
-                println!("  ✓ Sub-microsecond performance!");
-            }
+        if avg_ns < 1000 {
+            kprintln!("  Sub-microsecond performance!");
         }
     }
 
     /// Measure IPC throughput
-    pub fn measure_throughput<F>(_name: &str, duration_ms: u64, mut f: F) -> u64
+    pub fn measure_throughput<F>(name: &str, duration_ms: u64, mut f: F) -> u64
     where
         F: FnMut(),
     {
-        #[cfg(target_arch = "x86_64")]
-        println!("\nMeasuring throughput: {}", _name);
+        kprintln!("\nMeasuring throughput:");
+        kprint_rt!(name);
+        kprintln!();
 
         let duration_cycles = duration_ms * 2_000_000; // Assuming 2GHz
         let start = read_timestamp();
@@ -301,15 +304,12 @@ pub mod bench {
 
         let actual_duration_ms = cycles_to_ns(read_timestamp() - start) / 1_000_000;
 
-        #[cfg(target_arch = "x86_64")]
-        {
-            println!("  Operations: {}", operations);
-            println!("  Duration: {} ms", actual_duration_ms);
-            println!(
-                "  Throughput: {} ops/sec",
-                (operations * 1000) / actual_duration_ms
-            );
-        }
+        kprintln!("  Operations:");
+        kprint_u64!(operations);
+        kprintln!();
+        kprintln!("  Duration ms:");
+        kprint_u64!(actual_duration_ms);
+        kprintln!();
 
         (operations * 1000) / actual_duration_ms
     }

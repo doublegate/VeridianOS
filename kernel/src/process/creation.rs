@@ -112,6 +112,25 @@ pub fn create_process_with_options(
         }
     }
 
+    // Memory hardening: stack canary + guard page for new process
+    // Skip on AArch64 where spin::Mutex in the RNG hangs on bare metal
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        use crate::security::memory_protection::{GuardPage, StackCanary};
+
+        // Create stack canary for the main thread
+        let _canary = StackCanary::new();
+
+        // Set up guard page below kernel stack to detect overflow
+        let _guard = GuardPage::new(
+            options.kernel_stack_size, // guard at bottom of stack region
+            4096,                      // one 4KB guard page
+        );
+    }
+
+    // Audit log: process creation
+    crate::security::audit::log_process_create(pid.0, 0, 0);
+
     println!(
         "[PROCESS] Created process {} ({}) with main thread {}",
         pid.0, options.name, tid.0

@@ -111,19 +111,7 @@ pub fn block_process(pid: ProcessId) {
                 }
             }
 
-            #[cfg(not(target_arch = "aarch64"))]
-            println!("[SCHED] Blocked process {} and all its threads", pid.0);
-
-            #[cfg(target_arch = "aarch64")]
-            {
-                // SAFETY: uart_write_str writes to the UART MMIO register which
-                // is always mapped at 0x09000000 on the QEMU virt machine. This
-                // is a simple volatile write that does not alias any Rust memory.
-                unsafe {
-                    use crate::arch::aarch64::direct_uart::uart_write_str;
-                    uart_write_str("[SCHED] Blocked process and all its threads\n");
-                }
-            }
+            kprintln!("[SCHED] Blocked process and all its threads");
         }
     }
 

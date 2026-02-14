@@ -366,15 +366,41 @@ pub fn sys_setpriority(which: usize, who: usize, priority: usize) -> SyscallResu
         return Err(SyscallError::InvalidArgument);
     }
 
+    let current = current_process().ok_or(SyscallError::InvalidState)?;
+
     let pid = if who == 0 {
-        // Current process
-        if let Some(process) = current_process() {
-            process.pid
-        } else {
-            return Err(SyscallError::ResourceNotFound);
-        }
+        current.pid
     } else {
-        ProcessId(who as u64)
+        let target_pid = ProcessId(who as u64);
+
+        // Modifying another process's priority requires MODIFY right
+        // on a Process capability for that process
+        if target_pid != current.pid {
+            let cap_space = current.capability_space.lock();
+            let has_permission = {
+                let mut found = false;
+                #[cfg(feature = "alloc")]
+                {
+                    let _ = cap_space.iter_capabilities(|entry| {
+                        if let crate::cap::ObjectRef::Process { pid: cap_pid } = &entry.object {
+                            if *cap_pid == target_pid
+                                && entry.rights.contains(crate::cap::Rights::MODIFY)
+                            {
+                                found = true;
+                                return false; // stop iteration
+                            }
+                        }
+                        true // continue
+                    });
+                }
+                found
+            };
+            if !has_permission {
+                return Err(SyscallError::PermissionDenied);
+            }
+        }
+
+        target_pid
     };
 
     // Convert priority to our internal representation

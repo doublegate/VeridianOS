@@ -2,7 +2,7 @@
 //!
 //! Provides per-process capability tables with O(1) lookup.
 
-use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use super::{
     object::ObjectRef,
@@ -81,6 +81,9 @@ pub struct CapSpaceStats {
     pub misses: AtomicU64,
 }
 
+/// Default capability quota per process
+pub const DEFAULT_CAP_QUOTA: usize = 256;
+
 /// Per-process capability space
 pub struct CapabilitySpace {
     /// Fast lookup table (L1) - for first 256 capabilities
@@ -93,13 +96,24 @@ pub struct CapabilitySpace {
     /// Generation counter for this space
     generation: AtomicU8,
 
+    /// Maximum number of capabilities allowed in this space
+    quota: usize,
+
+    /// Number of capabilities currently in this space
+    used: AtomicUsize,
+
     /// Statistics
     stats: CapSpaceStats,
 }
 
 impl CapabilitySpace {
-    /// Create a new capability space
+    /// Create a new capability space with default quota
     pub fn new() -> Self {
+        Self::with_quota(DEFAULT_CAP_QUOTA)
+    }
+
+    /// Create a new capability space with a specific quota
+    pub fn with_quota(quota: usize) -> Self {
         // Initialize L1 table with None values
         let l1_table = Box::new(core::array::from_fn(|_| RwLock::new(None)));
 
@@ -108,8 +122,20 @@ impl CapabilitySpace {
             #[cfg(feature = "alloc")]
             l2_tables: RwLock::new(BTreeMap::new()),
             generation: AtomicU8::new(0),
+            quota,
+            used: AtomicUsize::new(0),
             stats: CapSpaceStats::default(),
         }
+    }
+
+    /// Get the current number of capabilities in this space
+    pub fn used(&self) -> usize {
+        self.used.load(Ordering::Relaxed)
+    }
+
+    /// Get the quota for this space
+    pub fn quota(&self) -> usize {
+        self.quota
     }
 
     /// O(1) lookup of capability
@@ -160,6 +186,11 @@ impl CapabilitySpace {
         object: ObjectRef,
         rights: Rights,
     ) -> Result<(), &'static str> {
+        // Check quota before inserting
+        if self.used.load(Ordering::Relaxed) >= self.quota {
+            return Err("Capability quota exceeded");
+        }
+
         let cap_id = cap.id() as usize;
 
         // Fast path: insert into L1 table
@@ -169,6 +200,7 @@ impl CapabilitySpace {
                 return Err("Capability slot already occupied");
             }
             *entry = Some(CapabilityEntry::new(cap, object, rights));
+            self.used.fetch_add(1, Ordering::Relaxed);
             self.stats.total_caps.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
@@ -191,6 +223,7 @@ impl CapabilitySpace {
                 return Err("Capability slot already occupied");
             }
             *entry = Some(CapabilityEntry::new(cap, object, rights));
+            self.used.fetch_add(1, Ordering::Relaxed);
             self.stats.total_caps.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
@@ -208,6 +241,7 @@ impl CapabilitySpace {
             let mut entry = self.l1_table[cap_id].write();
             if let Some(cap_entry) = entry.take() {
                 if cap_entry.capability == cap {
+                    self.used.fetch_sub(1, Ordering::Relaxed);
                     self.stats.total_caps.fetch_sub(1, Ordering::Relaxed);
                     return Some(cap_entry.object);
                 }
@@ -226,6 +260,7 @@ impl CapabilitySpace {
                 let mut entry = l2_table[l2_index].write();
                 if let Some(cap_entry) = entry.take() {
                     if cap_entry.capability == cap {
+                        self.used.fetch_sub(1, Ordering::Relaxed);
                         self.stats.total_caps.fetch_sub(1, Ordering::Relaxed);
                         return Some(cap_entry.object);
                     }
@@ -268,6 +303,7 @@ impl CapabilitySpace {
             self.l2_tables.write().clear();
         }
 
+        self.used.store(0, Ordering::Relaxed);
         self.stats.total_caps.store(0, Ordering::Relaxed);
     }
 

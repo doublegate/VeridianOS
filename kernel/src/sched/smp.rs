@@ -288,40 +288,12 @@ static CPU_TOPOLOGY: Mutex<CpuTopology> = Mutex::new(CpuTopology {
 
 /// Initialize SMP support
 pub fn init() {
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: uart_write_str performs volatile writes to the UART MMIO
-        // register at 0x09000000, which is always mapped on the QEMU virt
-        // machine. No Rust memory is aliased.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[SMP] Initializing SMP support (simplified for AArch64)...\n");
-            // Skip complex SMP initialization for AArch64
-            // Just initialize BSP with minimal setup
-            uart_write_str("[SMP] SMP initialized (BSP only for AArch64)\n");
-        }
-        return;
-    }
+    kprintln!("[SMP] Initializing SMP support (BSP only)...");
 
-    #[cfg(target_arch = "riscv64")]
-    {
-        println!("[SMP] Initializing SMP support (simplified for RISC-V)...");
-        // Skip complex SMP initialization for RISC-V
-        // Just initialize BSP with minimal setup
-        println!("[SMP] SMP initialized (BSP only for RISC-V)");
-        return;
-    }
+    // All architectures currently use simplified BSP-only initialization.
+    // Complex topology detection and AP wakeup deferred to Phase 3+.
 
-    // Simplified x86_64 SMP init for bootloader 0.11 compatibility
-    // Skip complex topology detection and AP wakeup for now
-    #[cfg(target_arch = "x86_64")]
-    {
-        println!("[SMP] Initializing SMP support (simplified for x86_64)...");
-        // Skip CPU topology detection which uses CPUID
-        // Skip init_cpu(0) which accesses large PER_CPU_DATA array
-        // Skip wake_up_aps() which tries to wake secondary CPUs
-        println!("[SMP] SMP initialized (BSP only for x86_64)");
-    }
+    kprintln!("[SMP] SMP initialized (BSP only)");
 }
 
 /// Wake up all Application Processors

@@ -357,6 +357,8 @@ pub fn sys_rmdir(path: usize) -> SyscallResult {
 /// - mount_point: Where to mount the filesystem
 /// - fs_type: Filesystem type string
 /// - flags: Mount flags
+///
+/// This is a privileged operation requiring a kernel-level capability.
 pub fn sys_mount(
     _device: usize,
     mount_point: usize,
@@ -366,6 +368,31 @@ pub fn sys_mount(
     // Validate pointers
     if mount_point == 0 || fs_type == 0 {
         return Err(SyscallError::InvalidPointer);
+    }
+
+    // Mount is a privileged operation - verify the calling process has
+    // a Memory capability with WRITE rights (needed to modify the VFS tree)
+    let current = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let cap_space = current.capability_space.lock();
+    let has_mount_perm = {
+        let mut found = false;
+        #[cfg(feature = "alloc")]
+        {
+            let _ = cap_space.iter_capabilities(|entry| {
+                if matches!(entry.object, crate::cap::ObjectRef::Memory { .. })
+                    && entry.rights.contains(crate::cap::Rights::WRITE)
+                    && entry.rights.contains(crate::cap::Rights::CREATE)
+                {
+                    found = true;
+                    return false;
+                }
+                true
+            });
+        }
+        found
+    };
+    if !has_mount_perm {
+        return Err(SyscallError::PermissionDenied);
     }
 
     // Get mount point path
@@ -428,10 +455,37 @@ pub fn sys_mount(
 ///
 /// # Arguments
 /// - mount_point: Mount point to unmount
+///
+/// This is a privileged operation requiring a kernel-level capability.
 pub fn sys_unmount(mount_point: usize) -> SyscallResult {
     // Validate pointer
     if mount_point == 0 {
         return Err(SyscallError::InvalidPointer);
+    }
+
+    // Unmount is a privileged operation - verify the calling process has
+    // a Memory capability with WRITE rights (needed to modify the VFS tree)
+    let current = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let cap_space = current.capability_space.lock();
+    let has_unmount_perm = {
+        let mut found = false;
+        #[cfg(feature = "alloc")]
+        {
+            let _ = cap_space.iter_capabilities(|entry| {
+                if matches!(entry.object, crate::cap::ObjectRef::Memory { .. })
+                    && entry.rights.contains(crate::cap::Rights::WRITE)
+                    && entry.rights.contains(crate::cap::Rights::CREATE)
+                {
+                    found = true;
+                    return false;
+                }
+                true
+            });
+        }
+        found
+    };
+    if !has_unmount_perm {
+        return Err(SyscallError::PermissionDenied);
     }
 
     // Get mount point path

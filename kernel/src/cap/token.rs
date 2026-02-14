@@ -127,6 +127,9 @@ impl Rights {
     pub const MODIFY: Self = Self(1 << 6);
     pub const CREATE: Self = Self(1 << 7);
 
+    /// All rights combined
+    pub const ALL: Self = Self(0xFF);
+
     /// Create new rights
     #[inline]
     pub fn new(rights: u32) -> Self {

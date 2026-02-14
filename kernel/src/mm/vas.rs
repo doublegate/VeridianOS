@@ -340,33 +340,7 @@ impl VirtualAddressSpace {
         let mapping = mappings.remove(&start).ok_or("Region not mapped")?;
 
         // Flush TLB for the unmapped range
-        #[cfg(target_arch = "x86_64")]
-        crate::arch::mmu::flush_tlb_address(mapping.start.0);
-        #[cfg(target_arch = "aarch64")]
-        {
-            // AArch64 TLB flush
-            use cortex_a::asm::barrier;
-            // SAFETY: `tlbi vaae1is` invalidates all TLB entries matching the given
-            // virtual address across all inner-shareable cores (broadcast). The address
-            // is shifted right by 12 to form the required page-number operand. DSB SY
-            // and ISB ensure the invalidation completes before proceeding. These are
-            // architectural maintenance instructions always safe at EL1.
-            unsafe {
-                core::arch::asm!("tlbi vaae1is, {}", in(reg) mapping.start.0 >> 12);
-                barrier::dsb(barrier::SY);
-                barrier::isb(barrier::SY);
-            }
-        }
-        #[cfg(target_arch = "riscv64")]
-        {
-            // RISC-V TLB flush
-            // SAFETY: `sfence.vma` with a specific address and zero ASID invalidates
-            // TLB entries for that virtual address. This is a supervisor-mode fence
-            // instruction always safe in S-mode, affecting only TLB caching.
-            unsafe {
-                core::arch::asm!("sfence.vma {}, zero", in(reg) mapping.start.0);
-            }
-        }
+        crate::arch::tlb_flush_address(mapping.start.0);
 
         // Free the physical frames
         let frame_allocator = FRAME_ALLOCATOR.lock();

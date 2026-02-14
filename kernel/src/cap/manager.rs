@@ -30,6 +30,7 @@ pub enum CapError {
     AlreadyExists,
     NotFound,
     IdExhausted,
+    QuotaExceeded,
 }
 
 /// ID allocator for capability IDs
@@ -202,6 +203,9 @@ impl CapabilityManager {
             .capabilities_created
             .fetch_add(1, Ordering::Relaxed);
 
+        // Audit log: capability creation
+        crate::security::audit::log_capability_op(0, id, 0);
+
         Ok(cap)
     }
 
@@ -257,6 +261,9 @@ impl CapabilityManager {
             .capabilities_delegated
             .fetch_add(1, Ordering::Relaxed);
 
+        // Audit log: capability delegation
+        crate::security::audit::log_capability_op(0, cap.id(), 0);
+
         Ok(new_cap)
     }
 
@@ -280,6 +287,9 @@ impl CapabilityManager {
         self.stats
             .capabilities_revoked
             .fetch_add(1, Ordering::Relaxed);
+
+        // Audit log: capability revocation
+        crate::security::audit::log_capability_op(0, cap.id(), 0);
 
         // TODO(phase3): Notify all capability spaces of revocation via IPC broadcast
 

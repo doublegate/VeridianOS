@@ -158,45 +158,16 @@ pub struct MemoryRegion {
 /// Initialize the memory management subsystem
 #[allow(unused_variables, unused_assignments)]
 pub fn init(memory_map: &[MemoryRegion]) {
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: `uart_write_str` performs MMIO writes to the PL011 UART at
-        // 0x09000000, which is always mapped on the QEMU virt machine. This is a
-        // fire-and-forget write with no memory safety implications.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[MM] Starting memory management initialization\n");
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    println!("[MM] Initializing memory management...");
+    kprintln!("[MM] Initializing memory management...");
 
     // Initialize frame allocator with available memory regions
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: MMIO write to PL011 UART -- always safe on QEMU virt.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[MM] Getting frame allocator lock...\n");
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    println!("[MM] Getting frame allocator lock...");
+    kprintln!("[MM] Getting frame allocator lock...");
 
     // Get frame allocator lock and initialize memory regions
     {
         let mut allocator = FRAME_ALLOCATOR.lock();
 
-        #[cfg(target_arch = "aarch64")]
-        {
-            // SAFETY: MMIO write to PL011 UART -- always safe on QEMU virt.
-            unsafe {
-                use crate::arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[MM] Frame allocator locked successfully\n");
-            }
-        }
-        #[cfg(not(target_arch = "aarch64"))]
-        println!("[MM] Frame allocator locked successfully");
+        kprintln!("[MM] Frame allocator locked successfully");
 
         #[allow(unused_assignments)]
         let mut total_memory = 0u64;
@@ -204,23 +175,7 @@ pub fn init(memory_map: &[MemoryRegion]) {
         let mut usable_memory = 0u64;
 
         for (idx, region) in memory_map.iter().enumerate() {
-            #[cfg(target_arch = "aarch64")]
-            {
-                // Simple progress indicator for AArch64
-                // SAFETY: MMIO write to PL011 UART -- always safe on QEMU virt.
-                unsafe {
-                    use crate::arch::aarch64::direct_uart::uart_write_str;
-                    uart_write_str("[MM] Processing memory region\n");
-                }
-            }
-            #[cfg(not(target_arch = "aarch64"))]
-            println!(
-                "[MM] Processing region {}: start=0x{:x}, size={} MB, usable={}",
-                idx,
-                region.start,
-                region.size / (1024 * 1024),
-                region.usable
-            );
+            kprintln!("[MM] Processing memory region");
 
             total_memory += region.size;
 
@@ -233,74 +188,25 @@ pub fn init(memory_map: &[MemoryRegion]) {
                 // Use region index as NUMA node for now
                 let numa_node = idx.min(7); // Max 8 NUMA nodes
 
-                #[cfg(not(target_arch = "aarch64"))]
-                println!("[MM] About to call init_numa_node for node {}", numa_node);
+                kprintln!("[MM] Initializing NUMA node");
 
                 if let Err(_e) = allocator.init_numa_node(numa_node, start_frame, frame_count) {
-                    #[cfg(target_arch = "aarch64")]
-                    {
-                        // SAFETY: MMIO write to PL011 UART -- always safe on QEMU virt.
-                        unsafe {
-                            use crate::arch::aarch64::direct_uart::uart_write_str;
-                            uart_write_str("[MM] Warning: Failed to initialize memory region\n");
-                        }
-                    }
-                    #[cfg(not(target_arch = "aarch64"))]
-                    println!("[MM] Warning: Failed to initialize memory region {}", idx);
+                    kprintln!("[MM] Warning: Failed to initialize memory region");
                 } else {
-                    #[cfg(target_arch = "aarch64")]
-                    {
-                        // SAFETY: MMIO write to PL011 UART -- always safe on QEMU virt.
-                        unsafe {
-                            use crate::arch::aarch64::direct_uart::uart_write_str;
-                            uart_write_str("[MM] Memory region initialized\n");
-                        }
-                    }
-                    #[cfg(not(target_arch = "aarch64"))]
-                    println!(
-                        "[MM] Initialized {} MB at 0x{:x} (NUMA node {})",
-                        region.size / (1024 * 1024),
-                        region.start,
-                        numa_node
-                    );
+                    kprintln!("[MM] Memory region initialized");
                 }
             }
         }
 
         drop(allocator); // Release lock before getting stats
 
-        #[cfg(target_arch = "aarch64")]
-        {
-            // SAFETY: MMIO write to PL011 UART -- always safe on QEMU virt.
-            unsafe {
-                use crate::arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[MM] Memory initialization complete\n");
-            }
-        }
-        #[cfg(not(target_arch = "aarch64"))]
-        {
-            println!("[MM] Allocator lock dropped");
-            println!(
-                "[MM] Memory initialized: {} MB total, {} MB usable",
-                total_memory / (1024 * 1024),
-                usable_memory / (1024 * 1024)
-            );
-        }
+        kprintln!("[MM] Memory initialization complete");
     } // End of allocator block
 }
 
 /// Initialize with default memory map for testing
 pub fn init_default() {
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: MMIO write to PL011 UART -- always safe on QEMU virt.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[MM] Using default memory map for initialization\n");
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    println!("[MM] init_default called");
+    kprintln!("[MM] Using default memory map for initialization");
 
     // Architecture-specific default memory maps
     #[cfg(target_arch = "x86_64")]
@@ -324,29 +230,11 @@ pub fn init_default() {
         usable: true,
     }];
 
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: MMIO write to PL011 UART -- always safe on QEMU virt.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[MM] Calling init with default memory map\n");
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    println!("[MM] Calling init with default memory map");
+    kprintln!("[MM] Calling init with default memory map");
 
     init(&default_map);
 
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: MMIO write to PL011 UART -- always safe on QEMU virt.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[MM] init returned successfully\n");
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    println!("[MM] init returned successfully");
+    kprintln!("[MM] init returned successfully");
 
     // Initialize heap allocator after frame allocator is ready
     init_heap().expect("Heap initialization failed");

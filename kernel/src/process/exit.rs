@@ -23,6 +23,9 @@ use crate::{println, sched};
 /// Exit current process
 pub fn exit_process(exit_code: i32) {
     if let Some(process) = super::current_process() {
+        // Audit log: process exit
+        crate::security::audit::log_process_exit(process.pid.0, exit_code);
+
         println!(
             "[PROCESS] Process {} exiting with code {}",
             process.pid.0, exit_code

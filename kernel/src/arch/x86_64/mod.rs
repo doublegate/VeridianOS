@@ -127,6 +127,18 @@ pub fn idle() {
     x86_64::instructions::hlt();
 }
 
+/// Speculation barrier to mitigate Spectre-style attacks.
+/// Uses LFENCE which serializes instruction execution on Intel/AMD.
+#[inline(always)]
+pub fn speculation_barrier() {
+    // SAFETY: lfence is a serializing instruction that prevents speculative
+    // execution of subsequent instructions until all prior instructions
+    // complete. No side effects beyond pipeline serialization.
+    unsafe {
+        core::arch::asm!("lfence", options(nostack, nomem, preserves_flags));
+    }
+}
+
 pub fn serial_init() -> uart_16550::SerialPort {
     // SAFETY: SerialPort::new(0x3F8) creates a serial port handle for COM1
     // at the standard I/O base address. The address is well-known and the
@@ -165,6 +177,31 @@ pub unsafe fn outl(port: u16, value: u32) {
 #[allow(dead_code)]
 pub unsafe fn inl(port: u16) -> u32 {
     x86_64::instructions::port::Port::new(port).read()
+}
+
+/// Kernel heap start address (mapped by bootloader 0.9)
+pub const HEAP_START: usize = 0x444444440000;
+
+/// Flush TLB for a specific virtual address.
+#[allow(dead_code)]
+pub fn tlb_flush_address(addr: u64) {
+    // SAFETY: `invlpg` invalidates the TLB entry for the page containing the
+    // given virtual address. Privileged, no side effects beyond TLB.
+    unsafe {
+        core::arch::asm!("invlpg [{}]", in(reg) addr);
+    }
+}
+
+/// Flush entire TLB.
+#[allow(dead_code)]
+pub fn tlb_flush_all() {
+    // SAFETY: Reloading CR3 with its current value flushes all non-global TLB
+    // entries. Privileged, no memory side effects.
+    unsafe {
+        let cr3: u64;
+        core::arch::asm!("mov {}, cr3", out(reg) cr3);
+        core::arch::asm!("mov cr3, {}", in(reg) cr3);
+    }
 }
 
 mod interrupts {

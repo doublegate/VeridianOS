@@ -24,15 +24,8 @@ static mut HEAP_MEMORY: [u8; 4 * 1024 * 1024] = [0; 4 * 1024 * 1024];
 /// Kernel heap size (16 MB initially)
 pub const HEAP_SIZE: usize = 16 * 1024 * 1024;
 
-/// Kernel heap start address
-#[cfg(target_arch = "x86_64")]
-pub const HEAP_START: usize = 0x444444440000; // Address mapped by bootloader 0.9
-
-#[cfg(target_arch = "aarch64")]
-pub const HEAP_START: usize = 0x41000000; // 16MB into QEMU virt RAM (starts at 0x40000000)
-
-#[cfg(target_arch = "riscv64")]
-pub const HEAP_START: usize = 0x81000000; // 16MB into QEMU virt RAM (starts at 0x80000000)
+/// Kernel heap start address (re-exported from architecture module)
+pub const HEAP_START: usize = crate::arch::HEAP_START;
 
 /// Slab allocator for efficient small allocations (x86_64 only, uses
 /// LockedHeap)
@@ -258,17 +251,7 @@ impl SlabAllocator {
 
 /// Initialize the kernel heap
 pub fn init() -> Result<(), &'static str> {
-    // SAFETY: `uart_write_str` writes to the PL011 UART at a fixed MMIO address
-    // (0x09000000) that is always mapped on the QEMU virt machine. This is a
-    // simple register write with no memory safety implications beyond the MMIO
-    // access, which is valid at any point during kernel execution on AArch64.
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        use crate::arch::aarch64::direct_uart::uart_write_str;
-        uart_write_str("[HEAP] Initializing kernel heap\n");
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    println!("[HEAP] Initializing kernel heap at 0x{:x}", HEAP_START);
+    kprintln!("[HEAP] Initializing kernel heap");
 
     // SAFETY: We access `HEAP_MEMORY`, a static mut byte array in the kernel's BSS
     // section. This function is called exactly once during kernel initialization

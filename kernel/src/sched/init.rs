@@ -14,158 +14,40 @@ use crate::error::KernelResult;
 /// This is used during early boot to initialize the scheduler with a
 /// bootstrap task that will complete kernel initialization.
 pub fn init_with_bootstrap(bootstrap_task: NonNull<Task>) -> KernelResult<()> {
-    #[cfg(not(target_arch = "aarch64"))]
-    println!("[SCHED] Initializing scheduler with bootstrap task...");
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: uart_write_str performs a volatile write to the UART MMIO
-        // register at 0x09000000, which is always mapped on the QEMU virt
-        // machine. No Rust memory is aliased.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[SCHED] Initializing scheduler with bootstrap task...\n");
-        }
-    }
+    kprintln!("[SCHED] Initializing scheduler with bootstrap task...");
 
     // Initialize SMP support
-    #[cfg(not(target_arch = "aarch64"))]
-    println!("[SCHED] About to initialize SMP...");
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: Same as above -- UART MMIO write.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[SCHED] About to initialize SMP...\n");
-        }
-    }
-
+    kprintln!("[SCHED] About to initialize SMP...");
     smp::init();
-
-    #[cfg(not(target_arch = "aarch64"))]
-    println!("[SCHED] SMP initialization complete");
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: Same as above -- UART MMIO write.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[SCHED] SMP initialization complete\n");
-        }
-    }
+    kprintln!("[SCHED] SMP initialization complete");
 
     // Initialize scheduler with bootstrap task
-    #[cfg(not(target_arch = "aarch64"))]
-    println!("[SCHED] About to get scheduler lock...");
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: Same as above -- UART MMIO write.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[SCHED] About to get scheduler lock...\n");
-        }
-    }
-
+    kprintln!("[SCHED] About to get scheduler lock...");
     super::SCHEDULER.lock().init(bootstrap_task);
-
-    #[cfg(not(target_arch = "aarch64"))]
-    println!("[SCHED] Scheduler init complete");
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: Same as above -- UART MMIO write.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[SCHED] Scheduler init complete\n");
-        }
-    }
+    kprintln!("[SCHED] Scheduler init complete");
 
     // Set up timer interrupt for preemption
-    #[cfg(not(target_arch = "aarch64"))]
-    println!("[SCHED] About to setup preemption timer...");
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: Same as above -- UART MMIO write.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[SCHED] About to setup preemption timer...\n");
-        }
-    }
-
+    kprintln!("[SCHED] About to setup preemption timer...");
     setup_preemption_timer();
+    kprintln!("[SCHED] Preemption timer setup complete");
 
-    #[cfg(not(target_arch = "aarch64"))]
-    println!("[SCHED] Preemption timer setup complete");
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: Same as above -- UART MMIO write.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[SCHED] Preemption timer setup complete\n");
-        }
-    }
-
-    #[cfg(not(target_arch = "aarch64"))]
-    println!("[SCHED] Scheduler initialized with bootstrap task");
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: Same as above -- UART MMIO write.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[SCHED] Scheduler initialized with bootstrap task\n");
-        }
-    }
+    kprintln!("[SCHED] Scheduler initialized with bootstrap task");
 
     Ok(())
 }
 
 /// Initialize scheduler normally (after bootstrap)
 pub fn init() {
-    #[cfg(target_arch = "x86_64")]
-    println!("[SCHED] Initializing scheduler...");
-
-    // Skip println for RISC-V to avoid serial issues
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: UART MMIO write to 0x09000000 on QEMU virt machine.
-        // No Rust memory aliased.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[SCHED] Initializing scheduler...\n");
-        }
-    }
+    kprintln!("[SCHED] Initializing scheduler...");
 
     // Initialize SMP support
     smp::init();
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: Same as above -- UART MMIO write.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[SCHED] Skipping idle task creation for AArch64\n");
-            uart_write_str("[SCHED] Scheduler initialized (minimal for AArch64)\n");
-        }
-    }
-
-    #[cfg(target_arch = "riscv64")]
-    {
-        // Skip println for RISC-V to avoid serial issues
-        // Scheduler initialized (minimal for RISC-V)
-    }
 
     // Skip complex scheduler setup on all architectures for now.
     // kernel_init_main() tests run before sched::init() and don't need the
     // scheduler. The idle task creation and PIT timer setup can hang or panic
     // during early boot.
-    #[cfg(target_arch = "x86_64")]
-    println!("[SCHED] Scheduler initialized (minimal for x86_64)");
+    kprintln!("[SCHED] Scheduler initialized (minimal)");
 }
 
 /// Set up preemption timer
@@ -174,34 +56,14 @@ fn setup_preemption_timer() {
     {
         // Configure timer for 10ms tick (100Hz)
         crate::arch::x86_64::timer::setup_timer(10);
-        #[cfg(not(target_arch = "aarch64"))]
-        println!("[SCHED] x86_64 timer configured for preemptive scheduling");
-
-        #[cfg(target_arch = "aarch64")]
-        {
-            // SAFETY: Same as above -- UART MMIO write.
-            unsafe {
-                use crate::arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[SCHED] x86_64 timer configured for preemptive scheduling\n");
-            }
-        }
+        kprintln!("[SCHED] x86_64 timer configured for preemptive scheduling");
     }
 
     #[cfg(target_arch = "aarch64")]
     {
         // Configure generic timer for 10ms tick
         crate::arch::aarch64::timer::setup_timer(10);
-        #[cfg(not(target_arch = "aarch64"))]
-        println!("[SCHED] AArch64 timer configured for preemptive scheduling");
-
-        #[cfg(target_arch = "aarch64")]
-        {
-            // SAFETY: Same as above -- UART MMIO write.
-            unsafe {
-                use crate::arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[SCHED] AArch64 timer configured for preemptive scheduling\n");
-            }
-        }
+        kprintln!("[SCHED] AArch64 timer configured for preemptive scheduling");
     }
 
     #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
@@ -212,16 +74,6 @@ fn setup_preemption_timer() {
         // (stvec) is registered yet. Enabling STIE without stvec causes
         // the CPU to jump to address 0 on timer fire, rebooting the system.
         crate::arch::riscv::timer::setup_timer(10);
-        #[cfg(not(target_arch = "aarch64"))]
-        println!("[SCHED] RISC-V timer configured for preemptive scheduling");
-
-        #[cfg(target_arch = "aarch64")]
-        {
-            // SAFETY: Same as above -- UART MMIO write.
-            unsafe {
-                use crate::arch::aarch64::direct_uart::uart_write_str;
-                uart_write_str("[SCHED] RISC-V timer configured for preemptive scheduling\n");
-            }
-        }
+        kprintln!("[SCHED] RISC-V timer configured for preemptive scheduling");
     }
 }

@@ -37,35 +37,63 @@ pub use space::CapabilitySpace;
 pub use token::{CapabilityToken, Rights};
 pub use types::CapabilityId;
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
+use spin::RwLock;
+
+/// Kernel's capability space - holds the root capability and kernel-level caps.
+/// Uses a large quota since the kernel may need to create caps for all
+/// processes.
+static KERNEL_CAP_SPACE: RwLock<Option<CapabilitySpace>> = RwLock::new(None);
+
+/// Get a reference to the kernel's capability space
+pub fn kernel_cap_space() -> &'static RwLock<Option<CapabilitySpace>> {
+    &KERNEL_CAP_SPACE
+}
+
+/// The root capability token (Memory, ALL rights, generation 0, slot 1)
+static ROOT_CAP: spin::Once<CapabilityToken> = spin::Once::new();
+
+/// Get the root capability token
+pub fn root_capability() -> Option<CapabilityToken> {
+    ROOT_CAP.get().copied()
+}
+
 pub fn init() {
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: uart_write_str performs a raw MMIO write to the PL011 UART at
-        // 0x09000000. This is safe during kernel init as the UART is memory-mapped
-        // by QEMU's virt machine and the write is non-destructive.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[CAP] Initializing capability system...\n");
-        }
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    println!("[CAP] Initializing capability system...");
+    kprintln!("[CAP] Initializing capability system...");
 
     // The global capability manager is already initialized as a static
 
-    // TODO(phase3): Create root capability for kernel and initial capability spaces
-    // for core processes
+    // Create kernel capability space with unlimited quota
+    let kernel_space = CapabilitySpace::with_quota(4096);
 
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: uart_write_str performs a raw MMIO write to the PL011 UART at
-        // 0x09000000. This is safe during kernel init as the UART is memory-mapped
-        // by QEMU's virt machine and the write is non-destructive.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[CAP] Capability system initialized\n");
-        }
+    // Create root capability: Memory type, ALL rights, generation 0
+    let root_cap = CapabilityToken::new(
+        1, // ID 1 (ID 0 is null)
+        0, // generation 0
+        0, // type: Memory
+        Rights::ALL.to_flags(),
+    );
+
+    // Insert root capability into kernel space
+    let root_object = object::ObjectRef::Memory {
+        base: 0,
+        size: usize::MAX,
+        attributes: object::MemoryAttributes::normal(),
+    };
+
+    if let Err(e) = kernel_space.insert(root_cap, root_object, Rights::ALL) {
+        kprint_rt!("[CAP] WARNING: Failed to create root capability: ");
+        kprint_rt!(e);
+        kprintln!();
+    } else {
+        ROOT_CAP.call_once(|| root_cap);
+        kprintln!("[CAP] Root capability created (id=1, rights=ALL)");
     }
-    #[cfg(not(target_arch = "aarch64"))]
-    println!("[CAP] Capability system initialized");
+
+    // Store kernel capability space
+    *KERNEL_CAP_SPACE.write() = Some(kernel_space);
+
+    kprintln!("[CAP] Capability system initialized");
 }

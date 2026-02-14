@@ -57,19 +57,7 @@ pub fn cleanup_dead_tasks() {
                 drop(task_box);
             }
 
-            #[cfg(not(target_arch = "aarch64"))]
-            println!("[SCHED] Cleaned up dead task");
-
-            #[cfg(target_arch = "aarch64")]
-            {
-                // SAFETY: uart_write_str writes to the UART MMIO register at
-                // 0x09000000 on the QEMU virt machine. This is always mapped
-                // and does not alias Rust memory.
-                unsafe {
-                    use crate::arch::aarch64::direct_uart::uart_write_str;
-                    uart_write_str("[SCHED] Cleaned up dead task\n");
-                }
-            }
+            kprintln!("[SCHED] Cleaned up dead task");
         } else {
             i += 1;
         }
@@ -112,20 +100,7 @@ pub fn balance_load() {
         let tasks_to_migrate = ((imbalance / 20) as u32).min(3); // Migrate up to 3 tasks
 
         if tasks_to_migrate > 0 {
-            #[cfg(not(target_arch = "aarch64"))]
-            println!(
-                "[SCHED] Load balancing: CPU {} (load={}) -> CPU {} (load={}), migrating {} tasks",
-                busiest_cpu, max_load, idlest_cpu, min_load, tasks_to_migrate
-            );
-
-            #[cfg(target_arch = "aarch64")]
-            {
-                // SAFETY: UART MMIO write to 0x09000000. No Rust memory aliased.
-                unsafe {
-                    use crate::arch::aarch64::direct_uart::uart_write_str;
-                    uart_write_str("[SCHED] Load balancing: migrating tasks\n");
-                }
-            }
+            kprintln!("[SCHED] Load balancing: migrating tasks");
 
             // Record load balance metric
             metrics::SCHEDULER_METRICS.record_load_balance();
@@ -213,17 +188,7 @@ fn migrate_tasks(source_cpu: u8, target_cpu: u8, count: u32) {
         }
 
         if migrated > 0 {
-            #[cfg(not(target_arch = "aarch64"))]
-            println!("[SCHED] Successfully migrated {} tasks", migrated);
-
-            #[cfg(target_arch = "aarch64")]
-            {
-                // SAFETY: UART MMIO write to 0x09000000. No Rust memory aliased.
-                unsafe {
-                    use crate::arch::aarch64::direct_uart::uart_write_str;
-                    uart_write_str("[SCHED] Successfully migrated tasks\n");
-                }
-            }
+            kprintln!("[SCHED] Successfully migrated tasks");
 
             // Record migration metrics
             for _ in 0..migrated {

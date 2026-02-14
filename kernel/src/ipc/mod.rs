@@ -58,41 +58,10 @@ pub use sync::{sync_call, sync_receive, sync_reply, sync_send};
 /// IPC system initialization
 #[allow(dead_code)]
 pub fn init() {
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: uart_write_str performs raw MMIO writes to the PL011 UART at
-        // 0x09000000 (QEMU virt machine). This is safe during early boot because:
-        // 1. The UART is memory-mapped at a fixed, known address on the virt platform.
-        // 2. Writing to the UART transmit register is a side-effect-free output
-        //    operation that does not corrupt any kernel state.
-        // 3. This runs during single-threaded initialization, so no concurrent access.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[IPC] Initializing IPC system...\n");
-            uart_write_str("[IPC] About to initialize registry...\n");
-        }
-    }
-    #[cfg(target_arch = "x86_64")]
-    println!("[IPC] Initializing IPC system...");
-
-    // Skip println for RISC-V to avoid potential serial deadlock
+    kprintln!("[IPC] Initializing IPC system...");
 
     // Initialize the global IPC registry
     registry::init();
 
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: Same as above -- raw MMIO writes to the PL011 UART for diagnostic
-        // output during initialization. The UART address is fixed at 0x09000000 for
-        // the QEMU virt machine, and writing is a safe, non-destructive operation.
-        unsafe {
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-            uart_write_str("[IPC] Registry initialized\n");
-            uart_write_str("[IPC] IPC system initialized\n");
-        }
-    }
-    #[cfg(target_arch = "x86_64")]
-    println!("[IPC] IPC system initialized");
-
-    // Skip println for RISC-V to avoid potential serial deadlock
+    kprintln!("[IPC] IPC system initialized");
 }
