@@ -9,6 +9,7 @@ use alloc::{string::String, vec, vec::Vec};
 
 pub mod pkg_config;
 pub mod syscall_api;
+pub mod toolchain;
 
 /// Return the sysroot path for the VeridianOS SDK.
 #[allow(dead_code)]

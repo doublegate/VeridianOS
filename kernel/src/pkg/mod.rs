@@ -7,7 +7,9 @@
 
 #![allow(clippy::unwrap_or_default)]
 
+pub mod compliance;
 pub mod database;
+pub mod ecosystem;
 pub mod format;
 pub mod manifest;
 pub mod ports;
@@ -15,6 +17,8 @@ pub mod repository;
 pub mod reproducible;
 pub mod resolver;
 pub mod sdk;
+pub mod statistics;
+pub mod testing;
 pub mod toml_parser;
 
 use alloc::{collections::BTreeMap, string::String, vec, vec::Vec};

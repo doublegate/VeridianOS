@@ -107,7 +107,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Last Updated**: February 15, 2026 (v0.3.7)
+**Last Updated**: February 15, 2026 (v0.3.8)
 
 ### Current Architecture Support
 
@@ -181,6 +181,16 @@ Released February 14, 2026. Comprehensive completion of both Phase 2 (User Space
 - **Authentication Hardening** — Real timestamps for MFA; PBKDF2-HMAC-SHA256 password hashing; password complexity enforcement; password history (prevent reuse); account expiration
 - **Capability System Phase 3** — ObjectRef::Endpoint in IPC integration; PRESERVE_EXEC filtering; default IPC/memory capabilities; process notification on revocation; permission checks; IPC broadcast for revocation
 - **Syscall Security + Fuzzing** — MAC checks before capability checks in syscall handlers; audit logging in syscall entry/exit; argument validation (pointer bounds, size limits); `FuzzTarget` trait with mutation-based fuzzer; ELF/IPC/FS/capability fuzz targets; crash detection via panic handler hooks
+
+### Phase 4 Groups 3+4 - Toolchain, Testing, Compliance, Ecosystem (v0.3.8)
+
+Released February 15, 2026. Three parallel implementation sprints advancing Phase 4 to ~95%:
+
+- **Toolchain Manager** -- Toolchain registry, cross-compiler config, linker script generation, CMake toolchain files
+- **Testing + Compliance** -- Package test framework, security scanner (9 patterns), license detection and compatibility checking, dependency graph analysis with cycle detection
+- **Statistics + Ecosystem** -- Package stats collector, update notifications, CVE advisory checking, core package ecosystem definitions (base-system, dev-tools, drivers, apps)
+
+5 new files (+2,350 lines). All 3 architectures: Stage 6 BOOTOK, 22/22 tests, zero warnings.
 
 ### Phase 4 Package Ecosystem Group 2 - Ports Build, Reproducible Builds, Security (v0.3.7)
 
@@ -508,13 +518,14 @@ Security is a fundamental design principle:
 - [x] Critical Architecture Boot Fixes — x86_64 CSPRNG double fault, RISC-V frame allocator memory map, boot stack overflow; all 3 architectures now fully boot (2026-02-15, v0.3.5)
 - [x] Phase 4 Group 1 — Repository infrastructure, package removal enhancements, binary delta updates, config file tracking, RISC-V JAL fix (2026-02-15, v0.3.6)
 - [x] Phase 4 Group 2 — Ports build execution with SHA-256 checksums, reproducible builds infrastructure, repository security scanning (2026-02-15, v0.3.7)
+- [x] Phase 4 Groups 3+4 — Toolchain manager, package testing, license compliance, dependency graph, ecosystem definitions (2026-02-15, v0.3.8)
 
 ### Mid-term (2026)
 
 - [x] Phase 2: User Space Foundation — 100% Complete (2026-02-14, v0.3.2)
 - [x] Phase 3: Security Hardening — 100% Complete (2026-02-14, v0.3.2)
 - [x] Technical Debt Remediation — Complete (2026-02-14, v0.3.1)
-- [ ] Phase 4: Package Ecosystem & Self-Hosting (5-6 months) — ~85% complete: transaction system, DPLL SAT resolver, ports build execution, reproducible builds, repository security, SDK types, shell commands, package syscalls
+- [ ] Phase 4: Package Ecosystem & Self-Hosting (5-6 months) — ~95% complete: transaction system, DPLL SAT resolver, ports build, reproducible builds, repository security, toolchain manager, testing framework, license compliance, ecosystem definitions
 
 ### Long-term (2027+)
 

@@ -1,3 +1,63 @@
+## [0.3.8] - 2026-02-15
+
+### Phase 4 Groups 3+4 - Toolchain, Testing, Compliance, Ecosystem
+
+Advances Phase 4 (Package Ecosystem) from ~85% to ~95% with 3 parallel implementation sprints covering SDK toolchain management, package testing and security scanning, license compliance, and ecosystem package definitions. Phase 4 now only needs Sprint 3B (SDK Generator + Plugin + Async) and Sprint 5 (Docs + Finalization) to reach 100%.
+
+7 kernel source files changed, 5 new files created (+2,350 lines).
+
+---
+
+### Added
+
+#### Sprint 3A: Toolchain Manager + Cross-Compiler + Linker (`kernel/src/pkg/sdk/toolchain.rs` -- NEW, ~550 LOC)
+- `VeridianTarget` struct with compile-time constants for x86_64, AArch64, RISC-V target triples
+- `Toolchain` struct with name, version, target triple, bin/sysroot paths, component list
+- `ToolchainComponent` enum: Compiler, Linker, Assembler, Debugger, Profiler
+- `ToolchainRegistry` with BTreeMap storage: register, get, list, remove, set_default, get_default
+- `CrossCompilerConfig` struct with CC/CXX/AR/LD/RANLIB/STRIP env var mappings
+- `generate_cross_env()` producing complete cross-compilation environment (CFLAGS, pkg-config, VeridianOS-specific vars)
+- `LinkerConfig` with architecture-appropriate page sizes and flags
+- `generate_linker_script()` producing complete linker scripts with architecture-specific entry points and load addresses
+- `CMakeToolchainFile` generator for CMAKE_SYSTEM_NAME, CMAKE_C_COMPILER, etc.
+
+#### Sprint 4A: Package Testing + Security Scanning + License Compliance
+**kernel/src/pkg/testing.rs** (NEW, ~556 LOC):
+- `PackageTest` struct with test name, type (Smoke/Unit/Integration), command, timeout, expected exit code
+- `TestRunner` struct with add_test(), run_all(), run_single() (process spawning deferred to user-space)
+- `PackageSecurityScanner` with 9 default patterns across 4 categories:
+  - SuspiciousPath: /etc/shadow, /dev/mem, /proc/kcore, /dev/kmem
+  - ExcessiveCapability: CAP_SYS_ADMIN, CAP_NET_RAW, CAP_SYS_RAWIO
+  - UnsafePattern: setuid binaries, world-writable files
+- scan_paths(), scan_capabilities(), scan_hashes() methods
+
+**kernel/src/pkg/compliance.rs** (NEW, ~526 LOC):
+- `License` enum: MIT, Apache2, GPL2, GPL3, LGPL21, BSD2, BSD3, ISC, MPL2, Proprietary, Unknown
+- `detect_license()` keyword matching on full license text
+- `LicenseCompatibility::is_compatible()` checking pairwise license compatibility
+- `check_compatibility()` for dependency tree license validation
+- `DependencyGraph` with find_reverse_deps(), detect_circular_deps() (DFS), dependency_depth()
+
+#### Sprint 4B: Statistics + Update Notifications + Ecosystem Definitions
+**kernel/src/pkg/statistics.rs** (NEW, ~292 LOC):
+- `StatsCollector` with record_install/update/download, get_most_installed, total_packages
+- `check_for_updates()` comparing installed vs available PackageMetadata versions
+- `SecurityAdvisory` with CVE tracking and check_advisories() for installed packages
+- No-std case-insensitive string matching for security keyword detection
+
+**kernel/src/pkg/ecosystem.rs** (NEW, ~421 LOC):
+- `PackageSet` and `PackageDefinition` types with 12-variant `PackageCategory` enum
+- `get_base_system_packages()`: base-system, dev-tools, system-libs package sets
+- `get_essential_apps()`: editors, file-management, network-tools, system-monitor
+- `get_driver_packages(arch)`: architecture-specific driver sets (virtio, i915, e1000, nvme, sd-mmc, ps2, usb-hid)
+
+### Build Verification
+- x86_64: Stage 6 BOOTOK, 22/22 tests, zero warnings
+- AArch64: Stage 6 BOOTOK, 22/22 tests, zero warnings
+- RISC-V: Stage 6 BOOTOK, 22/22 tests, zero warnings
+
+---
+
 ## [0.3.7] - 2026-02-15
 
 ### Phase 4 Package Ecosystem Group 2 - Ports Build, Reproducible Builds, Repository Security
