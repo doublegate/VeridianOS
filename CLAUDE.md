@@ -206,13 +206,15 @@ Currently implementing in phases:
   - Phase 4 (Packages) - ~75% (package manager, resolver, ports system, SDK types implemented)
   - Phase 5 (Performance) - ~10% actual (data structures only)
   - Phase 6 (GUI) - ~5% actual (type definitions only)
-- **Latest Release**: v0.3.4 (February 15, 2026) - Phase 1-3 Integration + Phase 4 Package Ecosystem
-  - Closed Phase 1-3 integration gaps: IPC-scheduler bridge, VMM-page table, capability validation, FPU context, thread memory, shared memory, zero-copy
-  - Phase 4 package ecosystem ~75%: transaction system, DPLL SAT resolver, ports framework, SDK types, shell commands, syscalls
-  - Page fault handler, ELF dynamic linker, waitpid, per-process CWD as Phase 4 prerequisites
-  - 42 files changed, 15 new files, +7,581/-424 lines
-  - AArch64 and RISC-V: Stage 6 BOOTOK, 22/22 tests, zero warnings
+- **Latest Release**: v0.3.5 (February 15, 2026) - Critical Architecture Boot Fixes
+  - x86_64: Added CPUID check for RDRAND support (prevents #UD -> double fault on qemu64)
+  - RISC-V: Fixed frame allocator start address from 0x88000000 (end of RAM) to 0x80E00000
+  - RISC-V: Restricted stack canary RNG usage to x86_64 only (no stvec during creation)
+  - x86_64: Increased boot stack from 64KB to 256KB (debug build stack overflow at Stage 4)
+  - 4 files changed, +67/-21 lines
+  - All 3 architectures: Stage 6 BOOTOK, 22/22 tests, zero warnings
 - **Previous Releases**:
+  - v0.3.4 (February 15, 2026) - Phase 1-3 Integration + Phase 4 Package Ecosystem
   - v0.3.3 (February 14, 2026) - Comprehensive Technical Debt Remediation
   - v0.3.2 (February 14, 2026) - Phase 2 & Phase 3 Completion
   - v0.3.1 (February 14, 2026) - Technical Debt Remediation

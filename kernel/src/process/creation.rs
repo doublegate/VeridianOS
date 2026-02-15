@@ -111,9 +111,11 @@ pub fn create_process_with_options(
         }
     }
 
-    // Memory hardening: stack canary + guard page for new process
-    // Skip on AArch64 where spin::Mutex in the RNG hangs on bare metal
-    #[cfg(not(target_arch = "aarch64"))]
+    // Memory hardening: stack canary + guard page for new process.
+    // Only on x86_64 which has a proper LockedHeap allocator and trap
+    // handler. AArch64 hangs on spin::Mutex in the RNG, and RISC-V has
+    // no stvec trap handler so any fault during RNG init causes a reboot.
+    #[cfg(target_arch = "x86_64")]
     {
         use crate::security::memory_protection::{GuardPage, StackCanary};
 

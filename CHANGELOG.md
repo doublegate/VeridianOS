@@ -1,3 +1,53 @@
+## [0.3.5] - 2026-02-15
+
+### Critical Architecture Boot Fixes
+
+**BUG FIX RELEASE**: Resolves 3 architecture-specific boot issues that prevented x86_64 from booting and caused RISC-V instability. After these fixes, all three architectures boot to Stage 6 BOOTOK with 22/22 tests passing and zero warnings.
+
+4 kernel source files changed (+67/-21 lines).
+
+---
+
+### Bug Fixes
+
+#### 1. x86_64: CSPRNG Double Fault (`kernel/src/arch/entropy.rs`)
+
+- **Root Cause**: The `try_hardware_rng()` function executed the `RDRAND` instruction unconditionally. QEMU's default CPU model (`qemu64`) does not support RDRAND, so the instruction triggered `#UD` (Invalid Opcode exception). Since no `#UD` handler existed in the IDT at the point where CSPRNG initialization runs during early boot, the exception cascaded to a double fault, halting the kernel at Stage 2.
+- **Fix**: Added `cpu_has_rdrand()` function that queries CPUID leaf 1, ECX bit 30 (the RDRAND feature flag) before executing RDRAND. When RDRAND is unavailable, the function returns `false` and the existing timer-jitter entropy collection path is used instead.
+- **Impact**: x86_64 boots successfully on CPU models without RDRAND support, including QEMU's default `qemu64`.
+
+#### 2. RISC-V: Frame Allocator Memory Region (`kernel/src/mm/mod.rs`)
+
+- **Root Cause**: The frame allocator was configured with a memory start address of `0x88000000`, which is the END of QEMU's 128MB RAM region (`0x80000000`-`0x88000000`). Every frame allocation returned addresses to non-existent physical memory. Store access faults to these addresses were handled by OpenSBI, which reset the hart, causing the kernel to reboot immediately after any memory allocation.
+- **Fix**: Changed the RISC-V memory map start from `0x88000000` to `0x80E00000` (after the kernel image ending at `~0x80D2C000`, with approximately 1MB safety margin). Adjusted the region size to `0x88000000 - 0x80E00000` (~114MB), correctly spanning the usable RAM after the kernel.
+- **Impact**: RISC-V frame allocations now reference valid physical memory, eliminating spurious store access faults and hart resets.
+
+#### 3. RISC-V: Stack Canary RNG Guard (`kernel/src/process/creation.rs`)
+
+- **Root Cause**: Stack canary and guard page creation during `create_process_with_options()` invoked the RNG subsystem on RISC-V. Since RISC-V has no `stvec` trap handler installed at the point of process creation, any fault during RNG initialization (e.g., from the memory region bug above or from spin lock contention) caused an unhandled exception that reset the hart.
+- **Fix**: Changed the conditional compilation guard from `#[cfg(not(target_arch = "aarch64"))]` to `#[cfg(target_arch = "x86_64")]`, restricting stack canary and guard page RNG usage to x86_64, which has a proper `LockedHeap` allocator and IDT trap handler infrastructure.
+- **Impact**: RISC-V process creation no longer triggers faults through RNG calls during early initialization.
+
+#### 4. x86_64: Boot Stack Overflow (`kernel/src/bootstrap.rs`)
+
+- **Root Cause**: The boot stack allocated for post-heap initialization was 64KB. In debug builds (unoptimized), the capability system initialization in `CapabilitySpace::with_quota()` constructs a `[RwLock<Option<CapabilityEntry>>; 256]` array (~20KB) on the stack before boxing it. Combined with deep, unoptimized call frames from security module initialization, total stack usage exceeded 64KB, causing a silent stack overflow and hang at Stage 4.
+- **Fix**: Increased `BOOT_STACK_SIZE` from 64KB to 256KB. Updated documentation comments to accurately describe the 128KB UEFI-provided stack and the reasons for the larger heap-allocated replacement stack.
+- **Impact**: x86_64 debug builds no longer overflow the boot stack during capability and security subsystem initialization.
+
+---
+
+### Boot Verification
+
+| Architecture | Build | Boot | Init Tests | Stage 6 | Status |
+|--------------|-------|------|-----------|---------|--------|
+| x86_64       | Pass  | Pass | 22/22     | BOOTOK  | **100% Functional** |
+| AArch64      | Pass  | Pass | 22/22     | BOOTOK  | **100% Functional** |
+| RISC-V 64    | Pass  | Pass | 22/22     | BOOTOK  | **100% Functional** |
+
+All architectures verified with zero clippy warnings and clean `cargo fmt`.
+
+---
+
 ## [0.3.4] - 2026-02-15
 
 ### Phase 1-3 Integration + Phase 4 Package Ecosystem

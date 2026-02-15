@@ -107,7 +107,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Last Updated**: February 15, 2026 (v0.3.4)
+**Last Updated**: February 15, 2026 (v0.3.5)
 
 ### Current Architecture Support
 
@@ -181,6 +181,17 @@ Released February 14, 2026. Comprehensive completion of both Phase 2 (User Space
 - **Authentication Hardening** — Real timestamps for MFA; PBKDF2-HMAC-SHA256 password hashing; password complexity enforcement; password history (prevent reuse); account expiration
 - **Capability System Phase 3** — ObjectRef::Endpoint in IPC integration; PRESERVE_EXEC filtering; default IPC/memory capabilities; process notification on revocation; permission checks; IPC broadcast for revocation
 - **Syscall Security + Fuzzing** — MAC checks before capability checks in syscall handlers; audit logging in syscall entry/exit; argument validation (pointer bounds, size limits); `FuzzTarget` trait with mutation-based fuzzer; ELF/IPC/FS/capability fuzz targets; crash detection via panic handler hooks
+
+### Critical Architecture Boot Fixes (v0.3.5)
+
+Released February 15, 2026. Resolves 3 architecture-specific boot issues:
+
+- **x86_64 CSPRNG Double Fault** -- Added CPUID check for RDRAND support before use; prevents `#UD` -> double fault on CPU models without RDRAND (e.g., QEMU `qemu64`)
+- **RISC-V Frame Allocator** -- Fixed memory start address from `0x88000000` (end of RAM) to `0x80E00000` (after kernel image); frame allocations now reference valid physical memory
+- **RISC-V Stack Canary Guard** -- Restricted RNG usage during process creation to x86_64 only; prevents unhandled faults on RISC-V (no `stvec` trap handler during creation)
+- **x86_64 Boot Stack Overflow** -- Increased boot stack from 64KB to 256KB; prevents silent overflow from `CapabilitySpace` array construction (~20KB) in debug builds
+
+4 files changed (+67/-21 lines). All 3 architectures: Stage 6 BOOTOK, 22/22 tests, zero warnings.
 
 ### Phase 1-3 Integration + Phase 4 Package Ecosystem (v0.3.4)
 
@@ -472,6 +483,7 @@ Security is a fundamental design principle:
 - [x] Phase 2 & Phase 3 Completion — 15 implementation sprints, full crypto/secure boot/TPM/MAC/audit/ELF/BlockFS/signals (2026-02-14, v0.3.2)
 - [x] Technical Debt Remediation — RiscvScheduler soundness fix, Result<T, &str> elimination (96 to 0), 3 large file splits, TODO(phase3) triage (2026-02-14, v0.3.3)
 - [x] Phase 1-3 Integration + Phase 4 Package Ecosystem — IPC-scheduler bridge, VMM-page table integration, capability validation, FPU context, DPLL SAT resolver, ports system, SDK types, package shell commands (2026-02-15, v0.3.4)
+- [x] Critical Architecture Boot Fixes — x86_64 CSPRNG double fault, RISC-V frame allocator memory map, boot stack overflow; all 3 architectures now fully boot (2026-02-15, v0.3.5)
 
 ### Mid-term (2026)
 

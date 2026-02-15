@@ -225,8 +225,13 @@ pub fn init_default() {
 
     #[cfg(target_arch = "riscv64")]
     let default_map = [MemoryRegion {
-        start: 0x88000000,       // 2.125GB (after kernel at 0x80200000)
-        size: 128 * 1024 * 1024, // 128MB
+        // QEMU virt machine: RAM at 0x80000000, kernel loaded at 0x80200000.
+        // __kernel_end is at ~0x80D2C000 (includes BSS + 128KB stack).
+        // Start frame allocation well after the kernel image to avoid
+        // corrupting kernel data. 0x80E00000 provides ~1MB safety margin.
+        // End of RAM at 0x88000000 (128MB), giving ~114MB for frames.
+        start: 0x80E00000,
+        size: 0x88000000 - 0x80E00000, // ~114MB until end of 128MB RAM
         usable: true,
     }];
 

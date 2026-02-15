@@ -61,20 +61,56 @@ pub fn read_timestamp() -> u64 {
     }
 }
 
+/// Check whether the CPU supports the RDRAND instruction.
+///
+/// Queries CPUID leaf 1 and tests ECX bit 30 (RDRAND feature flag).
+/// Returns `false` if CPUID is unavailable or the bit is not set.
+#[cfg(target_arch = "x86_64")]
+fn cpu_has_rdrand() -> bool {
+    // SAFETY: CPUID with EAX=1 is a read-only, side-effect-free instruction
+    // that returns CPU feature information. It is always available on x86_64
+    // (CPUID support is mandatory in long mode). RBX is saved and restored
+    // because LLVM reserves it as a frame pointer and CPUID clobbers it.
+    let ecx: u32;
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "mov eax, 1",
+            "cpuid",
+            "pop rbx",
+            out("ecx") ecx,
+            out("eax") _,
+            out("edx") _,
+            options(nomem, preserves_flags),
+        );
+    }
+    (ecx & (1 << 30)) != 0
+}
+
 /// Attempt to read 32 bytes from a hardware random number generator.
 ///
 /// Returns `true` if the hardware RNG was available and `dest` was filled,
 /// `false` if hardware RNG is unavailable (in which case `dest` is unmodified).
 ///
-/// * **x86_64**: Uses `RDRAND` instruction with retry logic.
+/// * **x86_64**: Uses `RDRAND` instruction with retry logic. Falls back to
+///   `false` if the CPU does not support RDRAND (checked via CPUID).
 /// * **AArch64/RISC-V**: No dedicated hardware RNG; always returns `false`.
 pub fn try_hardware_rng(dest: &mut [u8; 32]) -> bool {
     #[cfg(target_arch = "x86_64")]
     {
+        // Check CPUID before executing RDRAND. Without this guard, executing
+        // RDRAND on a CPU that lacks the feature triggers #UD (Invalid Opcode),
+        // which cascades to a double fault during early boot.
+        if !cpu_has_rdrand() {
+            return false;
+        }
+
         use core::arch::x86_64::_rdrand64_step;
 
         // SAFETY: _rdrand64_step is an x86_64 RDRAND intrinsic that writes a
         // hardware-generated random u64 into `value`. Returns 0 on failure.
+        // We have verified RDRAND support via CPUID above, so the instruction
+        // will not fault.
         unsafe {
             for chunk in dest.chunks_exact_mut(8) {
                 let mut value: u64 = 0;

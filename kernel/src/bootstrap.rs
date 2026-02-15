@@ -90,10 +90,14 @@ pub const BOOTSTRAP_TID: u64 = 0;
 /// Switch to a larger heap-allocated stack to avoid stack overflow during
 /// the remainder of kernel initialization.
 ///
-/// The UEFI bootloader provides a small stack (~32KB). In debug mode,
-/// security module initialization creates multi-KB structs on the stack
-/// which overflow this limit. After the heap allocator is ready (Stage 2),
-/// we allocate a larger stack and switch to it.
+/// The UEFI bootloader provides a 128KB stack (configured via
+/// `BOOTLOADER_CONFIG.kernel_stack_size`). In debug mode, the Stage 3+
+/// initialization chain constructs large arrays on the stack before
+/// boxing them (e.g., `CapabilitySpace` allocates a 256-entry L1 table
+/// of `RwLock<Option<CapabilityEntry>>` -- ~20KB on the stack) and
+/// security modules create multi-KB structs. These deep, unoptimized
+/// call chains overflow 128KB. After the heap allocator is ready
+/// (Stage 2), we allocate a 256KB stack and switch to it.
 ///
 /// This function does NOT return — it calls `kernel_init_stage3_onwards()`
 /// on the new stack via inline assembly.
@@ -220,14 +224,15 @@ pub fn kernel_init() -> KernelResult<()> {
         crate::println!("[BOOTSTRAP] CSPRNG initialized (test: {})", v);
     }
 
-    // x86_64: The UEFI-provided boot stack is small (~32KB). In debug mode,
-    // deep init call chains overflow it (e.g., security modules construct
-    // multi-KB structs on the stack). Switch to a larger heap-allocated stack
-    // now that the allocator is ready. switch_to_heap_stack does NOT return —
-    // it continues boot on the new stack via kernel_init_stage3_onwards.
+    // x86_64: The UEFI-provided boot stack is 128KB. In debug mode, deep
+    // init call chains overflow it (CapabilitySpace L1 table ~20KB on
+    // stack, security module structs, etc.). Switch to a 256KB
+    // heap-allocated stack now that the allocator is ready.
+    // switch_to_heap_stack does NOT return -- it continues boot on the
+    // new stack via kernel_init_stage3_onwards.
     #[cfg(target_arch = "x86_64")]
     {
-        const BOOT_STACK_SIZE: usize = 64 * 1024; // 64KB
+        const BOOT_STACK_SIZE: usize = 256 * 1024; // 256KB
         switch_to_heap_stack(BOOT_STACK_SIZE);
         // UNREACHABLE on x86_64: switch_to_heap_stack diverges
     }
@@ -767,11 +772,9 @@ fn create_init_process() {
                 kprintln!("[BOOTSTRAP] Init process created successfully");
 
                 // Try to load a shell as well.
-                // Skip on RISC-V: the bump allocator (4 MB, no dealloc) is
-                // nearly exhausted by this point and the additional process
-                // creation triggers heap allocations whose zero-fill
-                // overwrites VFS_PTR in adjacent BSS, causing a panic.
-                // User-space execution is not functional yet on any
+                // Skip on RISC-V: the bump allocator cannot free memory,
+                // so loading a second process needlessly consumes heap
+                // space. User-space execution is not functional yet on any
                 // architecture, so the shell PCB is not needed.
                 #[cfg(not(target_arch = "riscv64"))]
                 if let Ok(_shell_pid) = crate::userspace::loader::load_shell() {
