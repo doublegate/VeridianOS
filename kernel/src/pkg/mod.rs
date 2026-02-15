@@ -12,6 +12,7 @@ pub mod format;
 pub mod manifest;
 pub mod ports;
 pub mod repository;
+pub mod reproducible;
 pub mod resolver;
 pub mod sdk;
 pub mod toml_parser;

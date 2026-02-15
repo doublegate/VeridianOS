@@ -115,19 +115,35 @@ impl PortCollection {
 
     /// Synchronise the collection from the ports tree on disk.
     ///
-    /// In a full implementation this would scan `/usr/ports/` via the VFS,
-    /// reading each `Portfile.toml` to populate category and port data.
+    /// First attempts to scan `/usr/ports/` via the VFS to discover real
+    /// ports. If the VFS is not available or no ports are found, falls back
+    /// to a set of well-known demo ports so the framework is exercisable
+    /// even without a real filesystem.
+    ///
     /// Returns the number of ports discovered.
     pub fn sync_collection(&mut self) -> Result<usize, KernelError> {
-        // In a running system:
-        // 1. Walk /usr/ports/<category>/<port>/Portfile.toml
-        // 2. Parse each Portfile.toml header to extract name + category
-        // 3. Populate self.categories
-
         crate::println!("[PORTS] Syncing port collection from /usr/ports/ ...");
 
-        // Register a set of well-known ports for demonstration so the
-        // framework is exercisable even without a real filesystem.
+        // Try scanning the VFS first
+        let vfs_count = self.scan_ports_directory();
+
+        if vfs_count > 0 {
+            // VFS scan found ports -- use those
+            self.last_sync = crate::arch::timer::get_timestamp_secs();
+
+            crate::println!(
+                "[PORTS] Sync complete (VFS): {} ports in {} categories",
+                self.total_ports(),
+                self.category_count()
+            );
+
+            return Ok(vfs_count);
+        }
+
+        // Fallback: register a set of well-known ports for demonstration
+        // so the framework is exercisable even without a real filesystem.
+        crate::println!("[PORTS] No VFS ports found, loading demo ports");
+
         let demo_ports: &[(&str, &str)] = &[
             ("core", "coreutils"),
             ("core", "bash"),
@@ -159,12 +175,88 @@ impl PortCollection {
         self.last_sync = crate::arch::timer::get_timestamp_secs();
 
         crate::println!(
-            "[PORTS] Sync complete: {} ports in {} categories",
+            "[PORTS] Sync complete (demo): {} ports in {} categories",
             self.total_ports(),
             self.category_count()
         );
 
         Ok(count)
+    }
+
+    /// Scan the `/usr/ports/` directory tree via VFS to discover ports.
+    ///
+    /// Expects the layout `/usr/ports/<category>/<port_name>/`. Each
+    /// sub-directory under a category is registered as a port in that
+    /// category. Returns the number of ports discovered (0 if VFS is
+    /// unavailable or the directory does not exist).
+    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
+    fn scan_ports_directory(&mut self) -> usize {
+        let vfs_lock = match crate::fs::try_get_vfs() {
+            Some(lock) => lock,
+            None => {
+                crate::println!("[PORTS] VFS not available, skipping directory scan");
+                return 0;
+            }
+        };
+
+        let vfs = vfs_lock.read();
+        let ports_root = match vfs.resolve_path("/usr/ports") {
+            Ok(node) => node,
+            Err(_) => {
+                crate::println!("[PORTS] /usr/ports not found in VFS");
+                return 0;
+            }
+        };
+
+        // List category directories
+        let category_entries = match ports_root.readdir() {
+            Ok(entries) => entries,
+            Err(_) => {
+                crate::println!("[PORTS] Cannot list /usr/ports directory");
+                return 0;
+            }
+        };
+
+        let mut total = 0;
+
+        for cat_entry in &category_entries {
+            // Only process directories (categories)
+            if cat_entry.node_type != crate::fs::NodeType::Directory {
+                continue;
+            }
+
+            let category = &cat_entry.name;
+            let cat_path = alloc::format!("/usr/ports/{}", category);
+
+            // List port directories within this category
+            let cat_node = match vfs.resolve_path(&cat_path) {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+
+            let port_entries = match cat_node.readdir() {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+
+            for port_entry in &port_entries {
+                if port_entry.node_type != crate::fs::NodeType::Directory {
+                    continue;
+                }
+
+                self.add_port(category, &port_entry.name);
+                total += 1;
+            }
+        }
+
+        if total > 0 {
+            crate::println!(
+                "[PORTS] VFS scan discovered {} ports under /usr/ports/",
+                total
+            );
+        }
+
+        total
     }
 
     /// Return the timestamp (seconds) of the last successful sync.

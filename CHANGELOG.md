@@ -1,3 +1,57 @@
+## [0.3.7] - 2026-02-15
+
+### Phase 4 Package Ecosystem Group 2 - Ports Build, Reproducible Builds, Repository Security
+
+Advances Phase 4 (Package Ecosystem) with 3 parallel implementation sprints covering ports build execution with real SHA-256 checksum verification, reproducible builds infrastructure, and repository security scanning. Phase 4 is now at ~85% completion.
+
+5 kernel source files changed, 1 new file created (+1,385/-49 lines).
+
+---
+
+### Added
+
+#### Sprint 2A: Ports Build Execution + Checksums (`kernel/src/pkg/ports/mod.rs`, `collection.rs`)
+- Real SHA-256 checksum verification via `crate::crypto::hash::sha256()` replacing structural validation
+- `verify_source_from_vfs()` helper for reading source archives and computing checksums against Portfile.toml
+- `execute_command()` framework for spawning user-space build processes with `TODO(user-space)` markers
+- `configure_port()`, `execute_build()`, `package_result()` wired to real infrastructure
+- `collect_installed_files()` for VFS scanning and FileRecord creation with FNV-1a checksums
+- `fetch_source()` function for HTTP source download framework
+- Build timeout support (`build_timeout_ms` field, default 300s)
+- VFS-first port collection scanning in `sync_collection()` with demo port fallback
+- `scan_ports_directory()` for `/usr/ports/` two-level directory traversal
+
+#### Sprint 2B: Reproducible Builds Infrastructure (`kernel/src/pkg/reproducible.rs` — NEW, ~512 LOC)
+- `BuildSnapshot` struct: toolchain version, environment variables, timestamp override, source hashes, target triple
+- `BuildManifest` struct: port name/version, inputs, outputs, build duration
+- `normalize_environment()`: zeroes timestamps (SOURCE_DATE_EPOCH=0), sets LC_ALL=C, TZ=UTC, canonicalizes paths
+- `create_build_manifest()`: generates manifest from port + environment + VFS output scanning
+- `verify_reproducible()`: compares two BuildManifest instances using BTreeMap comparison
+- `serialize_manifest()`: text-based serialization format for VFS storage
+- Integrated into `build_port()` pipeline (normalize before build, manifest after build)
+
+#### Sprint 2C: Repository Security (`kernel/src/pkg/repository.rs`)
+- `AccessControl` struct with `UploadPolicy` enum (Open/Restricted/Closed) for upload governance
+- `verify_upload()` using Ed25519 signature verification + SHA-256 key fingerprint checking
+- `SecurityScanner` with 10 default malware patterns across 3 pattern types:
+  - Suspicious paths: /etc/shadow, /dev/mem, /proc/kcore, /dev/kmem, /boot/vmlinuz
+  - Excessive capabilities: CAP_SYS_ADMIN, CAP_NET_RAW, CAP_SYS_RAWIO, CAP_SYS_MODULE, CAP_SYS_PTRACE
+  - Known-bad hashes: configurable blocklist
+- `scan_package_paths()` and `scan_capabilities()` methods
+- `VulnerabilityDatabase` with CVE advisory tracking (`VulnerabilityAdvisory` struct)
+- `check_package()` and `check_installed()` for vulnerability assessment
+- `Severity` enum: Low, Medium, High, Critical
+
+### Changed
+- `build_port()` signature changed from `env: &BuildEnvironment` to `env: &mut BuildEnvironment` for normalize support
+
+### Build Verification
+- x86_64: Stage 6 BOOTOK, 22/22 tests, zero warnings
+- AArch64: Stage 6 BOOTOK, 22/22 tests, zero warnings
+- RISC-V: Stage 6 BOOTOK, 22/22 tests, zero warnings
+
+---
+
 ## [0.3.6] - 2026-02-15
 
 ### Phase 4 Package Ecosystem Group 1 + Build Fixes

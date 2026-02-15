@@ -107,7 +107,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Last Updated**: February 15, 2026 (v0.3.6)
+**Last Updated**: February 15, 2026 (v0.3.7)
 
 ### Current Architecture Support
 
@@ -181,6 +181,16 @@ Released February 14, 2026. Comprehensive completion of both Phase 2 (User Space
 - **Authentication Hardening** — Real timestamps for MFA; PBKDF2-HMAC-SHA256 password hashing; password complexity enforcement; password history (prevent reuse); account expiration
 - **Capability System Phase 3** — ObjectRef::Endpoint in IPC integration; PRESERVE_EXEC filtering; default IPC/memory capabilities; process notification on revocation; permission checks; IPC broadcast for revocation
 - **Syscall Security + Fuzzing** — MAC checks before capability checks in syscall handlers; audit logging in syscall entry/exit; argument validation (pointer bounds, size limits); `FuzzTarget` trait with mutation-based fuzzer; ELF/IPC/FS/capability fuzz targets; crash detection via panic handler hooks
+
+### Phase 4 Package Ecosystem Group 2 - Ports Build, Reproducible Builds, Security (v0.3.7)
+
+Released February 15, 2026. Three parallel implementation sprints advancing Phase 4 to ~85%:
+
+- **Ports Build Execution** -- Real SHA-256 checksum verification, `execute_command()` framework for build steps, VFS-first port collection scanning
+- **Reproducible Builds** -- `BuildSnapshot`/`BuildManifest` types, environment normalization (zeroed timestamps, canonical paths), manifest comparison and serialization
+- **Repository Security** -- Access control with Ed25519 upload verification, malware pattern scanning (10 default patterns), CVE vulnerability database
+
+5 files changed (+1,385/-49 lines), 1 new file. All 3 architectures: Stage 6 BOOTOK, 22/22 tests, zero warnings.
 
 ### Phase 4 Package Ecosystem Group 1 + Build Fixes (v0.3.6)
 
@@ -497,13 +507,14 @@ Security is a fundamental design principle:
 - [x] Phase 1-3 Integration + Phase 4 Package Ecosystem — IPC-scheduler bridge, VMM-page table integration, capability validation, FPU context, DPLL SAT resolver, ports system, SDK types, package shell commands (2026-02-15, v0.3.4)
 - [x] Critical Architecture Boot Fixes — x86_64 CSPRNG double fault, RISC-V frame allocator memory map, boot stack overflow; all 3 architectures now fully boot (2026-02-15, v0.3.5)
 - [x] Phase 4 Group 1 — Repository infrastructure, package removal enhancements, binary delta updates, config file tracking, RISC-V JAL fix (2026-02-15, v0.3.6)
+- [x] Phase 4 Group 2 — Ports build execution with SHA-256 checksums, reproducible builds infrastructure, repository security scanning (2026-02-15, v0.3.7)
 
 ### Mid-term (2026)
 
 - [x] Phase 2: User Space Foundation — 100% Complete (2026-02-14, v0.3.2)
 - [x] Phase 3: Security Hardening — 100% Complete (2026-02-14, v0.3.2)
 - [x] Technical Debt Remediation — Complete (2026-02-14, v0.3.1)
-- [ ] Phase 4: Package Ecosystem & Self-Hosting (5-6 months) — ~75% complete: transaction system, DPLL SAT resolver, ports framework, SDK types, shell commands, package syscalls
+- [ ] Phase 4: Package Ecosystem & Self-Hosting (5-6 months) — ~85% complete: transaction system, DPLL SAT resolver, ports build execution, reproducible builds, repository security, SDK types, shell commands, package syscalls
 
 ### Long-term (2027+)
 

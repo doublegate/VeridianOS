@@ -860,3 +860,379 @@ impl Default for RepositoryConfig {
         Self::new()
     }
 }
+
+// ============================================================================
+// Repository Access Control
+// ============================================================================
+
+/// Policy governing who may upload packages to a repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadPolicy {
+    /// Anyone can upload packages.
+    Open,
+    /// Only uploaders whose Ed25519 public key fingerprint is in the
+    /// allowed list may upload.
+    Restricted,
+    /// No uploads are accepted.
+    Closed,
+}
+
+/// Controls which uploaders are permitted to push packages to a repository.
+#[derive(Debug, Clone)]
+pub struct AccessControl {
+    /// SHA-256 fingerprints of allowed Ed25519 public keys.
+    allowed_uploaders: Vec<[u8; 32]>,
+    /// Current upload policy.
+    pub upload_policy: UploadPolicy,
+}
+
+impl AccessControl {
+    /// Create a new access control with the given policy.
+    pub fn new(policy: UploadPolicy) -> Self {
+        Self {
+            allowed_uploaders: Vec::new(),
+            upload_policy: policy,
+        }
+    }
+
+    /// Register an uploader by their Ed25519 public key fingerprint.
+    pub fn add_uploader(&mut self, key_fingerprint: [u8; 32]) {
+        if !self.allowed_uploaders.contains(&key_fingerprint) {
+            self.allowed_uploaders.push(key_fingerprint);
+        }
+    }
+
+    /// Remove an uploader. Returns `true` if the fingerprint was present.
+    pub fn remove_uploader(&mut self, key_fingerprint: &[u8; 32]) -> bool {
+        if let Some(pos) = self
+            .allowed_uploaders
+            .iter()
+            .position(|fp| fp == key_fingerprint)
+        {
+            self.allowed_uploaders.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Verify that an upload is authorized and properly signed.
+    ///
+    /// Checks the upload policy, uploader identity (for `Restricted`), and
+    /// Ed25519 signature over the package data.
+    pub fn verify_upload(
+        &self,
+        package_data: &[u8],
+        signature: &[u8],
+        uploader_key: &[u8],
+    ) -> Result<(), crate::error::KernelError> {
+        use crate::error::KernelError;
+
+        // Policy gate
+        match self.upload_policy {
+            UploadPolicy::Open => { /* skip identity check */ }
+            UploadPolicy::Closed => {
+                return Err(KernelError::PermissionDenied {
+                    operation: "upload package",
+                });
+            }
+            UploadPolicy::Restricted => {
+                let fingerprint = crate::crypto::hash::sha256(uploader_key);
+                if !self.allowed_uploaders.contains(fingerprint.as_bytes()) {
+                    return Err(KernelError::PermissionDenied {
+                        operation: "upload package",
+                    });
+                }
+            }
+        }
+
+        // Signature verification
+        let sig = crate::crypto::asymmetric::Signature::from_bytes(signature).map_err(|_| {
+            KernelError::PermissionDenied {
+                operation: "upload package",
+            }
+        })?;
+        let vk =
+            crate::crypto::asymmetric::VerifyingKey::from_bytes(uploader_key).map_err(|_| {
+                KernelError::PermissionDenied {
+                    operation: "upload package",
+                }
+            })?;
+
+        match vk.verify(package_data, &sig) {
+            Ok(true) => Ok(()),
+            _ => Err(KernelError::PermissionDenied {
+                operation: "upload package",
+            }),
+        }
+    }
+}
+
+impl Default for AccessControl {
+    fn default() -> Self {
+        Self::new(UploadPolicy::Restricted)
+    }
+}
+
+// ============================================================================
+// Package Security Scanning
+// ============================================================================
+
+/// Classification of a malware detection pattern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatternType {
+    /// File path pattern (e.g. accessing sensitive system files).
+    SuspiciousPath,
+    /// Requesting dangerous capabilities.
+    ExcessiveCapability,
+    /// File matches a known malware hash.
+    KnownBadHash,
+}
+
+/// Severity level for security findings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Severity {
+    /// Low-risk finding.
+    Low,
+    /// Medium-risk finding.
+    Medium,
+    /// High-risk finding.
+    High,
+    /// Critical-risk finding.
+    Critical,
+}
+
+/// A pattern used to detect suspicious content in a package.
+#[derive(Debug, Clone)]
+pub struct MalwarePattern {
+    /// What kind of pattern this is.
+    pub pattern_type: PatternType,
+    /// Human-readable description.
+    pub description: String,
+    /// Severity if matched.
+    pub severity: Severity,
+    /// The actual pattern to match (path substring, capability name, or hex
+    /// hash).
+    pub pattern: String,
+}
+
+/// A security finding produced by the scanner.
+#[derive(Debug, Clone)]
+pub struct MalwareFinding {
+    /// Severity of the finding.
+    pub severity: Severity,
+    /// Description of the issue.
+    pub description: String,
+    /// Which file triggered the match.
+    pub file_path: String,
+    /// The pattern that was matched.
+    pub pattern_matched: String,
+}
+
+/// Scans packages for suspicious paths, excessive capabilities, and known-bad
+/// hashes.
+#[derive(Debug, Clone)]
+pub struct SecurityScanner {
+    /// Registered detection patterns.
+    patterns: Vec<MalwarePattern>,
+}
+
+impl SecurityScanner {
+    /// Create a new scanner pre-loaded with default suspicious patterns.
+    pub fn new() -> Self {
+        let mut scanner = Self {
+            patterns: Vec::new(),
+        };
+        scanner.add_default_patterns();
+        scanner
+    }
+
+    /// Populate the scanner with well-known suspicious patterns.
+    pub fn add_default_patterns(&mut self) {
+        // High-severity sensitive file paths
+        let sensitive_paths = [
+            "/etc/shadow",
+            "/etc/passwd",
+            "/dev/mem",
+            "/dev/kmem",
+            "/proc/kcore",
+        ];
+        for path in &sensitive_paths {
+            self.patterns.push(MalwarePattern {
+                pattern_type: PatternType::SuspiciousPath,
+                description: alloc::format!("Access to sensitive path: {}", path),
+                severity: Severity::High,
+                pattern: String::from(*path),
+            });
+        }
+
+        // Medium-severity capability requests
+        let dangerous_caps = ["CAP_SYS_ADMIN", "CAP_NET_RAW", "CAP_SYS_PTRACE"];
+        for cap in &dangerous_caps {
+            self.patterns.push(MalwarePattern {
+                pattern_type: PatternType::ExcessiveCapability,
+                description: alloc::format!("Excessive capability request: {}", cap),
+                severity: Severity::Medium,
+                pattern: String::from(*cap),
+            });
+        }
+
+        // Medium-severity permission patterns
+        let perm_patterns = ["setuid", "world-writable"];
+        for pat in &perm_patterns {
+            self.patterns.push(MalwarePattern {
+                pattern_type: PatternType::SuspiciousPath,
+                description: alloc::format!("Suspicious permission pattern: {}", pat),
+                severity: Severity::Medium,
+                pattern: String::from(*pat),
+            });
+        }
+    }
+
+    /// Register an additional detection pattern.
+    pub fn add_pattern(&mut self, pattern: MalwarePattern) {
+        self.patterns.push(pattern);
+    }
+
+    /// Scan a list of file paths against `SuspiciousPath` patterns.
+    pub fn scan_package_paths(&self, file_paths: &[&str]) -> Vec<MalwareFinding> {
+        let mut findings = Vec::new();
+        for path in file_paths {
+            for pat in &self.patterns {
+                if pat.pattern_type != PatternType::SuspiciousPath {
+                    continue;
+                }
+                if path.contains(pat.pattern.as_str()) {
+                    findings.push(MalwareFinding {
+                        severity: pat.severity,
+                        description: pat.description.clone(),
+                        file_path: String::from(*path),
+                        pattern_matched: pat.pattern.clone(),
+                    });
+                }
+            }
+        }
+        findings
+    }
+
+    /// Scan requested capabilities against `ExcessiveCapability` patterns.
+    pub fn scan_capabilities(&self, requested_caps: &[&str]) -> Vec<MalwareFinding> {
+        let mut findings = Vec::new();
+        for cap in requested_caps {
+            for pat in &self.patterns {
+                if pat.pattern_type != PatternType::ExcessiveCapability {
+                    continue;
+                }
+                if *cap == pat.pattern.as_str() {
+                    findings.push(MalwareFinding {
+                        severity: pat.severity,
+                        description: pat.description.clone(),
+                        file_path: String::new(),
+                        pattern_matched: pat.pattern.clone(),
+                    });
+                }
+            }
+        }
+        findings
+    }
+}
+
+impl Default for SecurityScanner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
+// Vulnerability Tracking
+// ============================================================================
+
+/// A vulnerability advisory for one or more packages.
+#[derive(Debug, Clone)]
+pub struct VulnerabilityAdvisory {
+    /// CVE or advisory identifier (e.g. "CVE-2024-12345").
+    pub id: String,
+    /// Affected packages as `(package_name, affected_version_range)` pairs.
+    pub affected_packages: Vec<(String, String)>,
+    /// Severity of the vulnerability.
+    pub severity: Severity,
+    /// Human-readable description.
+    pub description: String,
+    /// Version that fixes the vulnerability, if known.
+    pub fixed_version: Option<String>,
+}
+
+/// Database of known vulnerability advisories.
+#[derive(Debug, Clone)]
+pub struct VulnerabilityDatabase {
+    /// All registered advisories.
+    advisories: Vec<VulnerabilityAdvisory>,
+}
+
+impl VulnerabilityDatabase {
+    /// Create an empty vulnerability database.
+    pub fn new() -> Self {
+        Self {
+            advisories: Vec::new(),
+        }
+    }
+
+    /// Add an advisory to the database.
+    pub fn add_advisory(&mut self, advisory: VulnerabilityAdvisory) {
+        self.advisories.push(advisory);
+    }
+
+    /// Check whether an installed package has known vulnerabilities.
+    ///
+    /// Uses simple equality matching on the package name and substring
+    /// matching on the version range string.
+    pub fn check_package(&self, name: &str, version: &str) -> Vec<&VulnerabilityAdvisory> {
+        self.advisories
+            .iter()
+            .filter(|adv| {
+                adv.affected_packages.iter().any(|(pkg_name, ver_range)| {
+                    pkg_name == name
+                        && (ver_range == "*"
+                            || ver_range == version
+                            || version.contains(ver_range.as_str()))
+                })
+            })
+            .collect()
+    }
+
+    /// Batch-check a set of installed packages.
+    ///
+    /// Takes `(name, version)` pairs and returns matching advisories together
+    /// with the affected package name.
+    pub fn check_installed<'a>(
+        &'a self,
+        installed: &'a [(String, String)],
+    ) -> Vec<(&'a str, &'a VulnerabilityAdvisory)> {
+        let mut results = Vec::new();
+        for (name, version) in installed {
+            for adv in self.check_package(name, version) {
+                results.push((name.as_str(), adv));
+            }
+        }
+        results
+    }
+
+    /// Total number of advisories in the database.
+    pub fn advisory_count(&self) -> usize {
+        self.advisories.len()
+    }
+
+    /// Number of `Critical`-severity advisories.
+    pub fn critical_count(&self) -> usize {
+        self.advisories
+            .iter()
+            .filter(|a| a.severity == Severity::Critical)
+            .count()
+    }
+}
+
+impl Default for VulnerabilityDatabase {
+    fn default() -> Self {
+        Self::new()
+    }
+}
