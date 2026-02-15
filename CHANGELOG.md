@@ -1,3 +1,64 @@
+## [0.3.9] - 2026-02-15
+
+### Phase 4 Completion + Userland Bridge: Ring 0 to Ring 3 Transitions
+
+Completes Phase 4 (Package Ecosystem) to 100% and implements the Userland Bridge -- the first successful Ring 0 to Ring 3 to Ring 0 round-trip in VeridianOS history. An embedded init binary runs in user mode, writes "VeridianOS init started" via SYSCALL, and exits cleanly.
+
+17 files changed, 5 new files created.
+
+---
+
+### Added
+
+#### Userland Bridge: GDT + SYSCALL/SYSRET MSR Configuration (`kernel/src/arch/x86_64/`)
+- Ring 3 code segment (selector 0x30, GDT index 6) and data segment (selector 0x28, GDT index 5)
+- `init_syscall()` now called during boot: configures EFER, LSTAR, STAR, SFMASK, KernelGsBase MSRs
+- `PerCpuData` struct with `kernel_rsp`/`user_rsp` fields accessed via GS segment in `syscall_entry`
+- SYSCALL ABI register mapping fix: xchg chain rotates rax/rdi/rsi/rdx correctly from SYSCALL to C convention
+
+#### Userland Bridge: Embedded Init Binary (`kernel/src/userspace/embedded.rs` -- NEW)
+- 57-byte x86_64 machine code init process: writes "VeridianOS init started\n" via sys_write(1, ...) then sys_exit(0)
+- `init_code_bytes()` returns raw machine code for direct page mapping
+- ELF64 header builder with proper Program Header for user-space loading
+
+#### Userland Bridge: Ring 3 Entry (`kernel/src/arch/x86_64/usermode.rs` -- NEW, ~490 LOC)
+- `enter_usermode()` -- pushes iretq frame (SS/RSP/RFLAGS/CS/RIP) and transitions to Ring 3
+- `map_user_page()` -- 4-level page table walker that maps user-accessible pages with frame allocation
+- `is_page_table_frame()` -- walks PML4->PDPT->PD->PT to detect bootloader page table pages
+- `allocate_safe_frame()` -- allocates frames from frame allocator, skipping any that overlap active page table pages (fixes critical page table corruption bug where bootloader page table frames were not marked as reserved)
+- `try_enter_usermode()` -- orchestrates the full user-mode entry: BOOT_INFO offset, CR3 reading, frame allocation, page mapping, init code copy, per-CPU kernel_rsp setup, iretq
+
+#### Userland Bridge: Syscall Backends (`kernel/src/syscall/`)
+- `sys_write` (SYS_FILEWRITE=53): serial fallback for fd 1/2 via `write_byte_sync()` with user pointer validation
+- `sys_read` (SYS_FILEREAD=52): serial input for fd 0 via architecture-conditional port I/O
+- `sys_exit` (SYS_EXIT=0): process termination with status code logging
+
+#### Phase 4 Finalization
+- `kernel/src/pkg/sdk/generator.rs` (NEW) -- SDK packaging framework with SdkComponent/SdkManifest types
+- `kernel/src/pkg/plugin.rs` (NEW) -- PackagePlugin trait with PluginManager lifecycle (load/init/hooks/cleanup)
+- `kernel/src/pkg/async_types.rs` (NEW) -- AsyncRuntime trait, TaskHandle, Channel, Timer type definitions
+- PHASE4_TODO.md updated from ~75% to 100% complete (all checkboxes marked)
+
+### Fixed
+
+- **Critical: Page table corruption on x86_64** -- Bootloader (v0.11.15) page table frames not marked as reserved in memory map. Frame allocator returned PML4 page (CR3=0x101000) as user stack frame, causing recursive page faults and triple fault. Fixed with `allocate_safe_frame()` that walks page table hierarchy and consumes conflicting frames.
+- **SYSCALL register mapping** -- SYSCALL ABI puts args in rdi/rsi/rdx/r10/r8/r9 but C convention expects rdi/rsi/rdx/rcx/r8/r9. The old mapping was incorrect; fixed with xchg chain through rax as accumulator.
+
+### Changed
+
+- `bootstrap.rs` -- Stage 6 now calls `try_enter_usermode()` on x86_64 after BOOTOK; skips PCB creation for direct usermode path
+- `gdt.rs` -- GDT now has 7 entries: null, kernel CS, kernel DS, TSS (2 entries), user data, user code
+- `context.rs` -- Added `X86_64Context::new_user()` for Ring 3 context initialization
+- `idt.rs` -- Page fault, double fault, GPF handlers now include raw serial diagnostics (bypasses spinlock)
+- Reduced verbose `[USERMODE]` debug output to single summary line
+
+### Build Verification
+- x86_64: Stage 6 BOOTOK, 22/22 tests, zero warnings, user-mode init runs
+- AArch64: Stage 6 BOOTOK, 22/22 tests, zero warnings
+- RISC-V: Stage 6 BOOTOK, 22/22 tests, zero warnings
+
+---
+
 ## [0.3.8] - 2026-02-15
 
 ### Phase 4 Groups 3+4 - Toolchain, Testing, Compliance, Ecosystem

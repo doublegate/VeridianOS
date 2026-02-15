@@ -113,6 +113,63 @@ impl X86_64Context {
             fpu_state: core::ptr::null_mut(),
         }
     }
+
+    /// Create a user-mode context for a process.
+    ///
+    /// Uses Ring 3 segment selectors (CS=0x33, SS/DS/ES=0x2B) and enables
+    /// interrupts (RFLAGS IF bit). The CR3 is set to the current page table
+    /// so the process initially shares the kernel's address space (with
+    /// user-accessible mappings added separately).
+    #[allow(dead_code)]
+    pub fn new_user(entry_point: usize, stack_pointer: usize) -> Self {
+        Self {
+            // Clear all general purpose registers
+            r15: 0,
+            r14: 0,
+            r13: 0,
+            r12: 0,
+            r11: 0,
+            r10: 0,
+            r9: 0,
+            r8: 0,
+            rdi: 0,
+            rsi: 0,
+            rbp: 0,
+            rbx: 0,
+            rdx: 0,
+            rcx: 0,
+            rax: 0,
+
+            // Set stack pointer
+            rsp: stack_pointer as u64,
+
+            // Set instruction pointer to user entry point
+            rip: entry_point as u64,
+
+            // RFLAGS with IF set (interrupts enabled in user mode)
+            rflags: 0x202,
+
+            // Ring 3 segment selectors
+            cs: 0x33, // User code segment (GDT offset 0x30 + RPL 3)
+            ss: 0x2B, // User data segment (GDT offset 0x28 + RPL 3)
+            ds: 0x2B,
+            es: 0x2B,
+            fs: 0x00,
+            gs: 0x00,
+
+            // Use current page table (caller must ensure user mappings exist)
+            // SAFETY: Reading CR3 is always valid in kernel mode. It returns
+            // the current page table base address. No side effects.
+            cr3: unsafe {
+                let mut cr3: u64;
+                asm!("mov {}, cr3", out(reg) cr3);
+                cr3
+            },
+
+            // No FPU state initially
+            fpu_state: core::ptr::null_mut(),
+        }
+    }
 }
 
 impl crate::arch::context::ThreadContext for X86_64Context {

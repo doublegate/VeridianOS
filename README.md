@@ -107,7 +107,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Last Updated**: February 15, 2026 (v0.3.8)
+**Last Updated**: February 15, 2026 (v0.3.9)
 
 ### Current Architecture Support
 
@@ -181,6 +181,25 @@ Released February 14, 2026. Comprehensive completion of both Phase 2 (User Space
 - **Authentication Hardening** — Real timestamps for MFA; PBKDF2-HMAC-SHA256 password hashing; password complexity enforcement; password history (prevent reuse); account expiration
 - **Capability System Phase 3** — ObjectRef::Endpoint in IPC integration; PRESERVE_EXEC filtering; default IPC/memory capabilities; process notification on revocation; permission checks; IPC broadcast for revocation
 - **Syscall Security + Fuzzing** — MAC checks before capability checks in syscall handlers; audit logging in syscall entry/exit; argument validation (pointer bounds, size limits); `FuzzTarget` trait with mutation-based fuzzer; ELF/IPC/FS/capability fuzz targets; crash detection via panic handler hooks
+
+### Phase 4 Completion + Userland Bridge (v0.3.9)
+
+Released February 15, 2026. Completes Phase 4 (Package Ecosystem) to 100% and implements the Userland Bridge for Ring 0 to Ring 3 transitions:
+
+**Userland Bridge (5 sprints):**
+
+- **GDT User Segments** -- Ring 3 code/data segments (0x30/0x28), SYSCALL/SYSRET MSR configuration (EFER, LSTAR, STAR, SFMASK, KernelGsBase)
+- **Embedded Init Binary** -- x86_64 machine code init process (57 bytes) using SYSCALL for sys_write + sys_exit, with ELF header generation
+- **Ring 3 Entry via iretq** -- `enter_usermode()` pushing SS/RSP/RFLAGS/CS/RIP frame; page table walker with safe frame allocation (skips bootloader page table pages)
+- **Syscall Backends** -- sys_write serial fallback for fd 1/2, sys_read serial input for fd 0, sys_exit process termination
+- **Integration** -- Full Ring 0 -> Ring 3 -> SYSCALL -> Ring 0 path verified; init binary prints "VeridianOS init started" via serial
+
+**Phase 4 Finalization:**
+
+- SDK Generator, Plugin System, Async Runtime type definitions
+- PHASE4_TODO.md updated to 100% complete
+
+17 files changed, 5 new files. All 3 architectures: Stage 6 BOOTOK, 22/22 tests, zero warnings.
 
 ### Phase 4 Groups 3+4 - Toolchain, Testing, Compliance, Ecosystem (v0.3.8)
 
@@ -519,13 +538,14 @@ Security is a fundamental design principle:
 - [x] Phase 4 Group 1 — Repository infrastructure, package removal enhancements, binary delta updates, config file tracking, RISC-V JAL fix (2026-02-15, v0.3.6)
 - [x] Phase 4 Group 2 — Ports build execution with SHA-256 checksums, reproducible builds infrastructure, repository security scanning (2026-02-15, v0.3.7)
 - [x] Phase 4 Groups 3+4 — Toolchain manager, package testing, license compliance, dependency graph, ecosystem definitions (2026-02-15, v0.3.8)
+- [x] Phase 4 Completion + Userland Bridge — SDK generator, plugin system, async types, Ring 3 entry via iretq, SYSCALL/SYSRET path, embedded init binary (2026-02-15, v0.3.9)
 
 ### Mid-term (2026)
 
 - [x] Phase 2: User Space Foundation — 100% Complete (2026-02-14, v0.3.2)
 - [x] Phase 3: Security Hardening — 100% Complete (2026-02-14, v0.3.2)
 - [x] Technical Debt Remediation — Complete (2026-02-14, v0.3.1)
-- [ ] Phase 4: Package Ecosystem & Self-Hosting (5-6 months) — ~95% complete: transaction system, DPLL SAT resolver, ports build, reproducible builds, repository security, toolchain manager, testing framework, license compliance, ecosystem definitions
+- [x] Phase 4: Package Ecosystem & Self-Hosting — 100% Complete (2026-02-15, v0.3.9)
 
 ### Long-term (2027+)
 

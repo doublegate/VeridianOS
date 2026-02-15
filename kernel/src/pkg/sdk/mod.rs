@@ -7,6 +7,7 @@
 #[cfg(feature = "alloc")]
 use alloc::{string::String, vec, vec::Vec};
 
+pub mod generator;
 pub mod pkg_config;
 pub mod syscall_api;
 pub mod toolchain;

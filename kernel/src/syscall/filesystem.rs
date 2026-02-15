@@ -2,6 +2,12 @@
 //!
 //! Provides kernel-side implementation of filesystem operations including
 //! file I/O, directory management, and filesystem management.
+//!
+//! For fd 0 (stdin), fd 1 (stdout), and fd 2 (stderr), the read/write
+//! syscalls fall back to serial UART I/O when the process does not yet
+//! have a file descriptor table entry for those descriptors. This enables
+//! early user-space binaries (e.g., the embedded init) to produce output
+//! and read input before a full VFS-backed console is available.
 
 #![allow(clippy::unnecessary_cast)]
 
@@ -10,6 +16,142 @@ use crate::{
     fs::{try_get_vfs, OpenFlags, Permissions, SeekFrom},
     process,
 };
+
+// ---------------------------------------------------------------------------
+// Architecture-specific serial I/O helpers for syscall fallback
+// ---------------------------------------------------------------------------
+
+/// Write a single byte to the serial UART.
+///
+/// Used as a fallback when stdout/stderr file descriptors are not yet set up
+/// in the process's file table.
+fn serial_write_byte(byte: u8) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use core::fmt::Write;
+        // Use the kernel's initialized serial port (COM1 at 0x3F8).
+        // This goes through the uart_16550 driver with proper FIFO handling.
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            crate::arch::x86_64::serial::SERIAL1
+                .lock()
+                .write_char(byte as char)
+                .ok();
+        });
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Direct MMIO write to PL011 UART data register (QEMU virt machine).
+        const UART_DR: usize = 0x0900_0000;
+        // SAFETY: The PL011 UART data register at 0x09000000 is memory-mapped
+        // I/O on the QEMU virt machine. Writing a byte transmits a character.
+        // volatile_write ensures the compiler does not elide the store.
+        unsafe {
+            core::ptr::write_volatile(UART_DR as *mut u8, byte);
+        }
+    }
+
+    #[cfg(target_arch = "riscv64")]
+    {
+        // SBI legacy console putchar (function 0x01).
+        // SAFETY: The ecall instruction invokes the SBI console putchar
+        // interface. a0 holds the character, a7 holds the function ID.
+        // This is the standard mechanism for RISC-V console output.
+        unsafe {
+            core::arch::asm!(
+                "ecall",
+                in("a0") byte as usize,
+                in("a7") 0x01usize,
+                options(nostack, nomem)
+            );
+        }
+    }
+}
+
+/// Try to read a single byte from the serial UART (non-blocking).
+///
+/// Returns `Some(byte)` if data is available, `None` otherwise.
+/// Used as a fallback when the stdin file descriptor is not yet set up.
+fn serial_try_read_byte() -> Option<u8> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // Check Line Status Register (base + 5) bit 0 for data ready,
+        // then read from data register (base + 0) at COM1 (0x3F8).
+        let status: u8;
+        // SAFETY: Reading the Line Status Register at I/O port 0x3FD.
+        // This is a well-defined 16550 UART register read.
+        unsafe {
+            core::arch::asm!(
+                "in al, dx",
+                out("al") status,
+                in("dx") 0x3FDu16,
+                options(nomem, nostack)
+            );
+        }
+        if (status & 1) != 0 {
+            let data: u8;
+            // SAFETY: Reading the data register at I/O port 0x3F8.
+            // The LSR check above confirmed data is available.
+            unsafe {
+                core::arch::asm!(
+                    "in al, dx",
+                    out("al") data,
+                    in("dx") 0x3F8u16,
+                    options(nomem, nostack)
+                );
+            }
+            Some(data)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        const UART_BASE: usize = 0x0900_0000;
+        const UART_FR: usize = UART_BASE + 0x18; // Flag register
+        const UART_DR: usize = UART_BASE; // Data register
+
+        // SAFETY: Reading PL011 UART MMIO registers. The QEMU virt machine
+        // maps the UART at this address. volatile_read prevents reordering.
+        unsafe {
+            let flags = core::ptr::read_volatile(UART_FR as *const u32);
+            if (flags & (1 << 4)) == 0 {
+                // RXFE bit clear = data available
+                let data = core::ptr::read_volatile(UART_DR as *const u32);
+                Some((data & 0xFF) as u8)
+            } else {
+                None
+            }
+        }
+    }
+
+    #[cfg(target_arch = "riscv64")]
+    {
+        // SBI legacy console getchar (function 0x02).
+        let result: isize;
+        // SAFETY: The ecall invokes SBI console_getchar. Returns the
+        // character in a0, or -1 if no data is available.
+        unsafe {
+            core::arch::asm!(
+                "li a7, 0x02",
+                "ecall",
+                out("a0") result,
+                out("a7") _,
+                options(nomem)
+            );
+        }
+        if result >= 0 {
+            Some(result as u8)
+        } else {
+            None
+        }
+    }
+}
+
+/// Maximum buffer size for serial I/O fallback (64 KB).
+/// Prevents unbounded kernel-side loops for large writes.
+const SERIAL_IO_MAX_SIZE: usize = 64 * 1024;
 
 /// Helper to get the VFS instance, returning a syscall error instead of
 /// panicking if the VFS subsystem has not been initialized yet.
@@ -111,26 +253,79 @@ pub fn sys_close(fd: usize) -> SyscallResult {
 ///
 /// # Returns
 /// Number of bytes actually read
+///
+/// For fd 0 (stdin), if the process does not have a file descriptor table
+/// entry, falls back to polling-mode serial UART input. This allows the
+/// embedded shell to accept keyboard input before a full console subsystem
+/// is initialized.
 pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
     // Validate buffer
     if buffer == 0 {
         return Err(SyscallError::InvalidPointer);
     }
+    if count == 0 {
+        return Ok(0);
+    }
 
-    // Get current process
-    let process = process::current_process().ok_or(SyscallError::InvalidState)?;
+    // For stdin (fd 0), try file table first, then fall back to serial
+    if fd == 0 {
+        // Try the file table first if we have a process context
+        if let Some(proc) = process::current_process() {
+            let file_table = proc.file_table.lock();
+            if let Some(file_desc) = file_table.get(fd) {
+                // SAFETY: buffer is non-zero (checked above). The caller
+                // must provide a valid, writable buffer of at least `count`
+                // bytes. from_raw_parts_mut creates a mutable slice.
+                let buffer_slice =
+                    unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, count) };
+                return match file_desc.read(buffer_slice) {
+                    Ok(bytes_read) => Ok(bytes_read),
+                    Err(_) => Err(SyscallError::InvalidState),
+                };
+            }
+        }
 
-    // Get file descriptor
-    let file_table = process.file_table.lock();
+        // Fallback: read from serial UART (polling mode, line-buffered)
+        let read_count = count.min(SERIAL_IO_MAX_SIZE);
+        // SAFETY: buffer is non-zero (checked above). We limit the size
+        // via SERIAL_IO_MAX_SIZE. The caller must provide a valid writable
+        // buffer of at least `count` bytes. During early bring-up this
+        // may be a kernel-space address from the embedded init binary.
+        let buffer_slice =
+            unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, read_count) };
+
+        let mut bytes_read = 0;
+        for slot in buffer_slice.iter_mut() {
+            // Spin-wait for a byte to become available
+            let byte = loop {
+                if let Some(b) = serial_try_read_byte() {
+                    break b;
+                }
+                core::hint::spin_loop();
+            };
+
+            *slot = byte;
+            bytes_read += 1;
+
+            // Line-buffered: stop after newline or carriage return
+            if byte == b'\n' || byte == b'\r' {
+                break;
+            }
+        }
+
+        return Ok(bytes_read);
+    }
+
+    // Non-stdin: use file table normally
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file_table = proc.file_table.lock();
     let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
 
-    // Create buffer slice
     // SAFETY: buffer was validated as non-zero above. The caller must
     // provide a valid, writable user-space buffer of at least `count`
     // bytes. from_raw_parts_mut creates a mutable slice for the read.
     let buffer_slice = unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, count) };
 
-    // Read from file
     match file_desc.read(buffer_slice) {
         Ok(bytes_read) => Ok(bytes_read),
         Err(_) => Err(SyscallError::InvalidState),
@@ -146,26 +341,65 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
 ///
 /// # Returns
 /// Number of bytes actually written
+///
+/// For fd 1 (stdout) and fd 2 (stderr), if the process does not have a
+/// file descriptor table entry, falls back to writing directly to the
+/// serial UART. This is the critical path for the embedded init binary
+/// which calls `syscall(53, 1, buf_ptr, len)` before a full VFS-backed
+/// console is available.
 pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
     // Validate buffer
     if buffer == 0 {
         return Err(SyscallError::InvalidPointer);
     }
+    if count == 0 {
+        return Ok(0);
+    }
 
-    // Get current process
-    let process = process::current_process().ok_or(SyscallError::InvalidState)?;
+    // For stdout (fd 1) and stderr (fd 2), try file table first, then
+    // fall back to serial output
+    if fd == 1 || fd == 2 {
+        // Try the file table first if we have a process context
+        if let Some(proc) = process::current_process() {
+            let file_table = proc.file_table.lock();
+            if let Some(file_desc) = file_table.get(fd) {
+                // SAFETY: buffer is non-zero (checked above). The caller
+                // must provide a valid, readable buffer of at least `count`
+                // bytes. from_raw_parts creates an immutable slice.
+                let buffer_slice =
+                    unsafe { core::slice::from_raw_parts(buffer as *const u8, count) };
+                return match file_desc.write(buffer_slice) {
+                    Ok(bytes_written) => Ok(bytes_written),
+                    Err(_) => Err(SyscallError::InvalidState),
+                };
+            }
+        }
 
-    // Get file descriptor
-    let file_table = process.file_table.lock();
+        // Fallback: write directly to serial UART
+        let write_count = count.min(SERIAL_IO_MAX_SIZE);
+        // SAFETY: buffer is non-zero (checked above). We limit the size
+        // via SERIAL_IO_MAX_SIZE. The caller must provide a valid readable
+        // buffer of at least `count` bytes. During early bring-up this
+        // may be a kernel-space address from the embedded init binary.
+        let buffer_slice = unsafe { core::slice::from_raw_parts(buffer as *const u8, write_count) };
+
+        for &byte in buffer_slice {
+            serial_write_byte(byte);
+        }
+
+        return Ok(write_count);
+    }
+
+    // Non-stdout/stderr: use file table normally
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file_table = proc.file_table.lock();
     let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
 
-    // Create buffer slice
     // SAFETY: buffer was validated as non-zero above. The caller must
     // provide a valid, readable user-space buffer of at least `count`
     // bytes. from_raw_parts creates an immutable slice for the write.
     let buffer_slice = unsafe { core::slice::from_raw_parts(buffer as *const u8, count) };
 
-    // Write to file
     match file_desc.write(buffer_slice) {
         Ok(bytes_written) => Ok(bytes_written),
         Err(_) => Err(SyscallError::InvalidState),

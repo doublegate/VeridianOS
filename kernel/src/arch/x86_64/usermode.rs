@@ -1,0 +1,459 @@
+//! User-mode entry point for x86_64
+//!
+//! Provides `enter_usermode()` which pushes the iretq frame and transitions
+//! the CPU from Ring 0 to Ring 3. Also provides `map_user_page()` for
+//! creating user-accessible page table entries through the bootloader's
+//! physical memory mapping.
+
+use core::arch::asm;
+
+/// Enter user mode for the first time via iretq.
+///
+/// The iretq instruction pops SS, RSP, RFLAGS, CS, RIP from the stack
+/// and transitions the CPU to the privilege level specified in the CS
+/// selector's RPL field.
+///
+/// # Arguments
+/// - `entry_point`: User-space RIP (entry point of the user program)
+/// - `user_stack`: User-space RSP (top of user stack)
+/// - `user_cs`: User code segment selector with RPL=3 (0x33)
+/// - `user_ss`: User data segment selector with RPL=3 (0x2B)
+///
+/// # Safety
+/// - `entry_point` must be a valid user-space address with executable code
+///   mapped
+/// - `user_stack` must be a valid user-space stack address, 16-byte aligned
+/// - The correct page tables must be loaded in CR3 with USER-accessible
+///   mappings
+/// - Per-CPU data (`kernel_rsp`) must be set before calling this, otherwise the
+///   first syscall or interrupt will crash due to invalid kernel stack
+/// - The GDT must contain valid Ring 3 segments at the specified selectors
+pub unsafe fn enter_usermode(entry_point: u64, user_stack: u64, user_cs: u64, user_ss: u64) -> ! {
+    // SAFETY: We build the iretq frame on the current kernel stack.
+    // iretq expects (from top of stack): RIP, CS, RFLAGS, RSP, SS.
+    // We set DS and ES to the user data selector and clear FS/GS.
+    // RFLAGS = 0x202: bit 1 (reserved, always 1) + bit 9 (IF = interrupts enabled).
+    // The caller guarantees all arguments point to valid mapped memory and
+    // the GDT/TSS/per-CPU data are properly configured.
+    asm!(
+        // Set data segment registers to user data selector
+        "mov ds, {ss:r}",
+        "mov es, {ss:r}",
+        // Clear FS and GS (will be set up later for TLS if needed)
+        "xor eax, eax",
+        "mov fs, ax",
+        "mov gs, ax",
+        // Build iretq frame on current kernel stack:
+        //   [RSP+0]  RIP    - user entry point
+        //   [RSP+8]  CS     - user code segment (Ring 3)
+        //   [RSP+16] RFLAGS - IF set (0x202)
+        //   [RSP+24] RSP    - user stack pointer
+        //   [RSP+32] SS     - user stack segment (Ring 3)
+        "push {ss}",       // SS
+        "push {rsp}",      // RSP (user stack)
+        "push {rflags}",   // RFLAGS (IF enabled)
+        "push {cs}",       // CS
+        "push {rip}",      // RIP (entry point)
+        "iretq",
+        ss = in(reg) user_ss,
+        rsp = in(reg) user_stack,
+        rflags = in(reg) 0x202u64,
+        cs = in(reg) user_cs,
+        rip = in(reg) entry_point,
+        options(noreturn)
+    );
+}
+
+/// Physical memory offset provided by the bootloader.
+///
+/// All physical memory is mapped at virtual address `phys_addr + PHYS_OFFSET`.
+/// Initialized during `try_enter_usermode()` from BOOT_INFO.
+static PHYS_OFFSET: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Get the physical memory offset, or 0 if not yet initialized.
+///
+/// Used by kernel subsystems that need to convert physical addresses to
+/// virtual addresses after the initial user-mode setup.
+#[allow(dead_code)]
+fn phys_offset() -> u64 {
+    PHYS_OFFSET.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Convert a physical address to a virtual address via the bootloader's
+/// physical memory mapping.
+///
+/// Returns `None` if the physical memory offset has not been initialized.
+/// Used by kernel subsystems that need to access physical memory after
+/// the initial user-mode setup.
+#[allow(dead_code)]
+fn phys_to_virt(phys: u64) -> Option<u64> {
+    let offset = phys_offset();
+    if offset == 0 {
+        return None;
+    }
+    Some(phys + offset)
+}
+
+/// Page table entry flags for x86_64 4-level paging.
+const PTE_PRESENT: u64 = 1 << 0;
+const PTE_WRITABLE: u64 = 1 << 1;
+const PTE_USER: u64 = 1 << 2;
+
+/// Extract the physical address of the next-level page table from a PTE.
+///
+/// The physical address is stored in bits 12..51 of the entry.
+fn pte_phys_addr(entry: u64) -> u64 {
+    entry & 0x000F_FFFF_FFFF_F000
+}
+
+/// Map a single 4KiB page in the current page tables with USER access.
+///
+/// Walks the 4-level page table hierarchy (PML4 -> PDPT -> PD -> PT),
+/// allocating intermediate tables as needed from the frame allocator.
+/// The leaf entry maps `virt_addr` to `phys_frame_addr` with the given flags.
+///
+/// # Safety
+/// - `phys_offset_val` must be the correct bootloader physical memory offset
+/// - `virt_addr` must be page-aligned (4KiB)
+/// - `phys_frame_addr` must be a valid, page-aligned physical address
+/// - The caller must ensure no conflicting mapping exists
+unsafe fn map_user_page(
+    phys_offset_val: u64,
+    virt_addr: u64,
+    phys_frame_addr: u64,
+    flags: u64,
+) -> Result<(), &'static str> {
+    // Read current CR3 to get the PML4 physical address
+    let cr3: u64;
+    // SAFETY: Reading CR3 is always valid in kernel mode.
+    asm!("mov {}, cr3", out(reg) cr3);
+    let pml4_phys = cr3 & 0x000F_FFFF_FFFF_F000;
+
+    // Extract page table indices from the virtual address
+    let pml4_idx = ((virt_addr >> 39) & 0x1FF) as usize;
+    let pdpt_idx = ((virt_addr >> 30) & 0x1FF) as usize;
+    let pd_idx = ((virt_addr >> 21) & 0x1FF) as usize;
+    let pt_idx = ((virt_addr >> 12) & 0x1FF) as usize;
+
+    // Walk PML4 -> PDPT
+    let pml4_virt = (pml4_phys + phys_offset_val) as *mut u64;
+    let pml4_entry = pml4_virt.add(pml4_idx);
+    let pdpt_phys = ensure_table_present(pml4_entry, phys_offset_val)?;
+
+    // Walk PDPT -> PD
+    let pdpt_virt = (pdpt_phys + phys_offset_val) as *mut u64;
+    let pdpt_entry = pdpt_virt.add(pdpt_idx);
+    let pd_phys = ensure_table_present(pdpt_entry, phys_offset_val)?;
+
+    // Walk PD -> PT
+    let pd_virt = (pd_phys + phys_offset_val) as *mut u64;
+    let pd_entry = pd_virt.add(pd_idx);
+    let pt_phys = ensure_table_present(pd_entry, phys_offset_val)?;
+
+    // Set the leaf PT entry
+    let pt_virt = (pt_phys + phys_offset_val) as *mut u64;
+    let pt_entry = pt_virt.add(pt_idx);
+    // SAFETY: pt_entry points into a valid page table mapped via the physical
+    // memory offset. We write the leaf mapping: physical frame + flags.
+    pt_entry.write_volatile(phys_frame_addr | flags);
+
+    // Flush TLB for this address
+    // SAFETY: invlpg invalidates the TLB entry for virt_addr. No side effects.
+    asm!("invlpg [{}]", in(reg) virt_addr);
+
+    Ok(())
+}
+
+/// Ensure a page table entry at `entry_ptr` is present. If not, allocate
+/// a new zeroed frame for the next-level table and write the entry.
+///
+/// Returns the physical address of the next-level table.
+///
+/// # Safety
+/// - `entry_ptr` must point to a valid page table entry in mapped memory
+/// - `phys_offset_val` must be the correct physical memory offset
+unsafe fn ensure_table_present(
+    entry_ptr: *mut u64,
+    phys_offset_val: u64,
+) -> Result<u64, &'static str> {
+    // SAFETY: entry_ptr was computed from a valid page table base + index,
+    // both within the physical memory mapping provided by the bootloader.
+    let entry = entry_ptr.read_volatile();
+
+    if (entry & PTE_PRESENT) != 0 {
+        // Table already exists. Ensure USER bit is set on intermediate entries
+        // so user-mode accesses can traverse the hierarchy.
+        let updated = entry | PTE_USER | PTE_WRITABLE;
+        if updated != entry {
+            // SAFETY: Updating flags on an existing present entry is safe.
+            // We only add USER and WRITABLE bits to intermediate tables.
+            entry_ptr.write_volatile(updated);
+        }
+        Ok(pte_phys_addr(entry))
+    } else {
+        // Allocate a new frame for the next-level table
+        let frame = crate::mm::FRAME_ALLOCATOR
+            .lock()
+            .allocate_frames(1, None)
+            .map_err(|_| "frame allocation failed")?;
+        let frame_phys = frame.as_u64() * crate::mm::FRAME_SIZE as u64;
+
+        // Zero the new table
+        let frame_virt = (frame_phys + phys_offset_val) as *mut u8;
+        // SAFETY: frame_virt points to a freshly allocated 4KiB frame mapped
+        // via the physical memory offset. write_bytes zeroes the entire page.
+        core::ptr::write_bytes(frame_virt, 0, 4096);
+
+        // Write the entry: physical address + PRESENT + WRITABLE + USER
+        let new_entry = frame_phys | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
+        // SAFETY: entry_ptr points to a valid PTE slot. Writing a new entry
+        // that points to our freshly zeroed frame is safe.
+        entry_ptr.write_volatile(new_entry);
+
+        Ok(frame_phys)
+    }
+}
+
+/// Check if a physical address is used by the active page table hierarchy.
+///
+/// Walks PML4 → PDPT → PD → PT and returns true if `phys` matches any
+/// page-table frame's base address. This is O(n) in the number of page table
+/// pages (~1000 for a typical bootloader mapping).
+///
+/// # Safety
+/// - `phys_offset` must be the bootloader's physical memory offset
+/// - `pml4_phys` must be a valid PML4 physical address (from CR3)
+unsafe fn is_page_table_frame(phys_offset: u64, pml4_phys: u64, phys: u64) -> bool {
+    if phys == pml4_phys {
+        return true;
+    }
+
+    let pml4_virt = (pml4_phys + phys_offset) as *const u64;
+    for i in 0..512 {
+        // SAFETY: pml4_virt + i is within the PML4 page, mapped via phys_offset.
+        let pml4_entry = pml4_virt.add(i).read_volatile();
+        if (pml4_entry & PTE_PRESENT) == 0 {
+            continue;
+        }
+        let pdpt_phys = pte_phys_addr(pml4_entry);
+        if phys == pdpt_phys {
+            return true;
+        }
+
+        let pdpt_virt = (pdpt_phys + phys_offset) as *const u64;
+        for j in 0..512 {
+            // SAFETY: pdpt_virt + j is within the PDPT page.
+            let pdpt_entry = pdpt_virt.add(j).read_volatile();
+            if (pdpt_entry & PTE_PRESENT) == 0 {
+                continue;
+            }
+            if (pdpt_entry & (1 << 7)) != 0 {
+                continue; // 1GiB huge page
+            }
+            let pd_phys = pte_phys_addr(pdpt_entry);
+            if phys == pd_phys {
+                return true;
+            }
+
+            let pd_virt = (pd_phys + phys_offset) as *const u64;
+            for k in 0..512 {
+                // SAFETY: pd_virt + k is within the PD page.
+                let pd_entry = pd_virt.add(k).read_volatile();
+                if (pd_entry & PTE_PRESENT) == 0 {
+                    continue;
+                }
+                if (pd_entry & (1 << 7)) != 0 {
+                    continue; // 2MiB huge page
+                }
+                let pt_phys = pte_phys_addr(pd_entry);
+                if phys == pt_phys {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Allocate a physical frame that does not overlap with any active page table
+/// page. Frames that are page table pages are allocated (to consume them from
+/// the free pool) but not returned.
+///
+/// # Safety
+/// - `phys_offset` and `pml4_phys` must be valid (see `is_page_table_frame`)
+unsafe fn allocate_safe_frame(
+    phys_offset: u64,
+    pml4_phys: u64,
+    count: usize,
+) -> Result<crate::mm::FrameNumber, &'static str> {
+    use crate::mm::{FRAME_ALLOCATOR, FRAME_SIZE};
+
+    // Try up to 8192 times (enough to skip the ~1050 page table frames)
+    for _ in 0..8192 {
+        let frame = FRAME_ALLOCATOR
+            .lock()
+            .allocate_frames(count, None)
+            .map_err(|_| "frame allocation failed")?;
+        let phys = frame.as_u64() * FRAME_SIZE as u64;
+
+        // Check all allocated frames in the range
+        let mut overlaps = false;
+        for f in 0..count as u64 {
+            if is_page_table_frame(phys_offset, pml4_phys, phys + f * FRAME_SIZE as u64) {
+                overlaps = true;
+                break;
+            }
+        }
+
+        if !overlaps {
+            return Ok(frame);
+        }
+        // Frame overlaps a page table page — leave it allocated (consumed)
+        // so the allocator won't return it again, and try the next one.
+    }
+
+    Err("could not find non-page-table frame after 8192 attempts")
+}
+
+/// Attempt to enter user mode with the embedded init binary.
+///
+/// This function:
+/// 1. Retrieves the physical memory offset from BOOT_INFO
+/// 2. Allocates physical frames for user code and stack
+/// 3. Maps them at user-accessible virtual addresses in the current page tables
+/// 4. Copies the embedded INIT_CODE machine code to the code page
+/// 5. Sets up the per-CPU kernel_rsp for syscall/interrupt return
+/// 6. Transitions to Ring 3 via iretq
+///
+/// On success, this function does not return (enters user mode).
+/// On failure, returns an error string for the caller to log.
+pub fn try_enter_usermode() -> Result<(), &'static str> {
+    use crate::{mm::FRAME_SIZE, userspace::embedded};
+
+    // Step 1: Get the physical memory offset from BOOT_INFO
+    // SAFETY: BOOT_INFO is a static mut written once during early boot
+    // (in main.rs) and only read afterwards. At this point we are in
+    // single-threaded Stage 6 bootstrap, so no data race is possible.
+    // We use addr_of! to avoid creating a direct reference to the static mut.
+    let phys_offset_val = unsafe {
+        let boot_info_ptr = core::ptr::addr_of!(crate::arch::x86_64::boot::BOOT_INFO);
+        let boot_info = (*boot_info_ptr).as_ref().ok_or("BOOT_INFO not available")?;
+        boot_info
+            .physical_memory_offset
+            .into_option()
+            .ok_or("physical memory offset not available")?
+    };
+
+    PHYS_OFFSET.store(phys_offset_val, core::sync::atomic::Ordering::Relaxed);
+
+    // Step 1b: Read CR3 to identify page table frames that must not be
+    // allocated for user-space use (the bootloader doesn't mark them as
+    // reserved in the memory map).
+    let cr3_val: u64;
+    // SAFETY: Reading CR3 is always valid in kernel mode.
+    unsafe {
+        asm!("mov {}, cr3", out(reg) cr3_val);
+    }
+    let pml4_phys = cr3_val & 0x000F_FFFF_FFFF_F000;
+
+    // Step 2: Get the embedded init code
+    let init_code = embedded::init_code_bytes();
+
+    // Step 3: Allocate physical frames, skipping any that are page table pages.
+    // One frame for code (mapped at 0x400000)
+    // One frame for stack (mapped at 0x7FFFF000, stack grows down from 0x80000000)
+    // SAFETY: phys_offset_val and pml4_phys are valid (verified above).
+    let code_frame = unsafe {
+        allocate_safe_frame(phys_offset_val, pml4_phys, 1)
+            .map_err(|_| "failed to allocate code frame")?
+    };
+    let code_phys = code_frame.as_u64() * FRAME_SIZE as u64;
+
+    let stack_frame = unsafe {
+        allocate_safe_frame(phys_offset_val, pml4_phys, 1)
+            .map_err(|_| "failed to allocate stack frame")?
+    };
+    let stack_phys = stack_frame.as_u64() * FRAME_SIZE as u64;
+
+    // Step 4: Map pages in the current page tables
+    // Code page at 0x400000 (PRESENT + WRITABLE + USER, executable)
+    let code_vaddr: u64 = 0x40_0000;
+    let stack_vaddr: u64 = 0x7FFF_F000;
+
+    // SAFETY: We have verified that phys_offset_val is the correct bootloader
+    // mapping offset. The virtual addresses are in the user-space range (below
+    // 0x0000_8000_0000_0000) and do not conflict with kernel mappings. The
+    // physical frames were just allocated and are valid.
+    unsafe {
+        map_user_page(
+            phys_offset_val,
+            code_vaddr,
+            code_phys,
+            PTE_PRESENT | PTE_WRITABLE | PTE_USER,
+        )?;
+
+        map_user_page(
+            phys_offset_val,
+            stack_vaddr,
+            stack_phys,
+            PTE_PRESENT | PTE_WRITABLE | PTE_USER,
+        )?;
+    }
+
+    // Step 5: Copy init code to the code page
+    // Access the code frame through the physical memory mapping
+    let code_virt_via_phys = phys_offset_val + code_phys;
+    // SAFETY: code_virt_via_phys points to a freshly allocated, zeroed frame
+    // accessible through the bootloader's physical memory mapping. We copy
+    // init_code.len() bytes (< 4096) into the frame.
+    unsafe {
+        let dest = code_virt_via_phys as *mut u8;
+        core::ptr::copy_nonoverlapping(init_code.as_ptr(), dest, init_code.len());
+    }
+
+    // Step 6: Set up per-CPU kernel_rsp
+    // Allocate a dedicated kernel stack for syscall/interrupt return
+    // SAFETY: phys_offset_val and pml4_phys are valid.
+    let kernel_stack_frame = unsafe {
+        allocate_safe_frame(phys_offset_val, pml4_phys, 4)
+            .map_err(|_| "failed to allocate kernel stack")?
+    };
+    let kernel_stack_phys = kernel_stack_frame.as_u64() * FRAME_SIZE as u64;
+    let kernel_stack_top = phys_offset_val + kernel_stack_phys + (4 * FRAME_SIZE as u64);
+
+    // Write kernel_rsp to per-CPU data so syscall_entry can find it
+    let per_cpu = crate::arch::x86_64::syscall::per_cpu_data_ptr();
+    // SAFETY: per_cpu_data_ptr() returns a valid pointer to the static
+    // PerCpuData. We are in single-threaded bootstrap context. Setting
+    // kernel_rsp before entering user mode is required for syscall_entry
+    // to have a valid kernel stack.
+    unsafe {
+        (*per_cpu).kernel_rsp = kernel_stack_top;
+    }
+
+    // Step 7: Enter user mode
+    // User entry point = start of code at 0x400000
+    // User stack pointer = top of stack page at 0x80000000 (grows down from top of
+    // page)
+    let user_entry = code_vaddr;
+    let user_stack = stack_vaddr + FRAME_SIZE as u64; // Top of the stack page
+    let user_cs: u64 = 0x33; // User code segment (GDT index 6, RPL 3)
+    let user_ss: u64 = 0x2B; // User data segment (GDT index 5, RPL 3)
+
+    crate::println!(
+        "[USERMODE] Entering Ring 3: entry={:#x} stack={:#x}",
+        user_entry,
+        user_stack,
+    );
+
+    // SAFETY: All preconditions for enter_usermode are met:
+    // - entry_point (0x400000) has executable code mapped with USER access
+    // - user_stack (0x80000000) points to the top of a mapped user stack page
+    // - CS/SS are valid Ring 3 selectors from the GDT
+    // - CR3 contains page tables with USER-accessible mappings
+    // - Per-CPU kernel_rsp is set for syscall/interrupt return
+    unsafe {
+        enter_usermode(user_entry, user_stack, user_cs, user_ss);
+    }
+}

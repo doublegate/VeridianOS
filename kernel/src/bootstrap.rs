@@ -161,6 +161,20 @@ extern "C" fn kernel_init_stage3_onwards() -> ! {
     kprintln!("[KERNEL] Boot sequence complete!");
     kprintln!("BOOTOK");
 
+    // Attempt user-mode entry via iretq. On success, the CPU transitions
+    // to Ring 3 and this function never returns. On failure, we fall
+    // through to the scheduler.
+    kprintln!("[BOOTSTRAP] Attempting user-mode entry...");
+    match crate::arch::x86_64::usermode::try_enter_usermode() {
+        Ok(()) => {
+            // unreachable: enter_usermode() is -> !
+        }
+        Err(e) => {
+            kprintln!("[BOOTSTRAP] User-mode entry deferred: {}", e);
+            kprintln!("[BOOTSTRAP] Falling through to scheduler");
+        }
+    }
+
     // Transfer control to scheduler
     sched::start();
 }
@@ -294,6 +308,19 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
         kprintln!("[BOOTSTRAP] Initializing VFS...");
         fs::init();
         kprintln!("[BOOTSTRAP] VFS initialized");
+    }
+
+    // Populate the RamFS with embedded init and shell binaries so that
+    // load_init_process() finds real ELF executables at /sbin/init and
+    // /bin/vsh instead of falling back to stub processes.
+    #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+    {
+        kprintln!("[BOOTSTRAP] Populating initramfs with embedded binaries...");
+        if let Err(e) = crate::userspace::embedded::populate_initramfs() {
+            kprintln!("[BOOTSTRAP] Warning: Failed to populate initramfs: {:?}", e);
+        } else {
+            kprintln!("[BOOTSTRAP] Initramfs populated successfully");
+        }
     }
 
     // Initialize services (process server, driver framework, etc.)
@@ -766,27 +793,40 @@ fn report_test(name: &str, ok: bool, passed: &mut u32, failed: &mut u32) {
 fn create_init_process() {
     #[cfg(feature = "alloc")]
     {
-        // Try to load init from the filesystem
-        match crate::userspace::load_init_process() {
-            Ok(_init_pid) => {
-                kprintln!("[BOOTSTRAP] Init process created successfully");
+        // On x86_64, skip process creation entirely. The thread builder
+        // in create_process_with_options() zeroes the kernel stack by
+        // writing to its physical address as a virtual address, which
+        // page faults because the bootloader does not identity-map low
+        // physical memory. Instead, try_enter_usermode() (called after
+        // BOOTOK) handles all memory setup and mode switching directly.
+        #[cfg(target_arch = "x86_64")]
+        {
+            kprintln!("[BOOTSTRAP] Skipping PCB creation (direct usermode path)");
+        }
 
-                // Try to load a shell as well.
-                // Skip on RISC-V: the bump allocator cannot free memory,
-                // so loading a second process needlessly consumes heap
-                // space. User-space execution is not functional yet on any
-                // architecture, so the shell PCB is not needed.
-                #[cfg(not(target_arch = "riscv64"))]
-                if let Ok(_shell_pid) = crate::userspace::loader::load_shell() {
-                    kprintln!("[BOOTSTRAP] Shell process created successfully");
+        // On non-x86_64, use the ELF loader path (which creates a process
+        // with the appropriate entry point for the architecture).
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            match crate::userspace::load_init_process() {
+                Ok(_init_pid) => {
+                    kprintln!("[BOOTSTRAP] Init process created successfully");
+
+                    // Skip on RISC-V: the bump allocator cannot free memory,
+                    // so loading a second process needlessly consumes heap
+                    // space. User-space execution is not functional yet on any
+                    // architecture, so the shell PCB is not needed.
+                    #[cfg(not(target_arch = "riscv64"))]
+                    if let Ok(_shell_pid) = crate::userspace::loader::load_shell() {
+                        kprintln!("[BOOTSTRAP] Shell process created successfully");
+                    }
                 }
-            }
-            Err(_e) => {
-                kprintln!("[BOOTSTRAP] Failed to create init process, using fallback");
-                // Fall back to creating a minimal test process
-                use alloc::string::String;
-                if let Ok(_pid) = process::lifecycle::create_process(String::from("init"), 0) {
-                    kprintln!("[BOOTSTRAP] Created fallback init process");
+                Err(_e) => {
+                    kprintln!("[BOOTSTRAP] Failed to create init process, using fallback");
+                    use alloc::string::String;
+                    if let Ok(_pid) = process::lifecycle::create_process(String::from("init"), 0) {
+                        kprintln!("[BOOTSTRAP] Created fallback init process");
+                    }
                 }
             }
         }

@@ -106,10 +106,25 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
 ///
 /// # Arguments
 /// - exit_code: Process exit code
+///
+/// Marks the current thread as exited and removes it from the scheduler.
+/// If no current thread is found (e.g., called from a context without a
+/// proper task), halts the CPU as a last resort.
 pub fn sys_exit(exit_code: usize) -> SyscallResult {
+    // exit_thread will call sched::exit_task which should never return.
+    // However, if current_thread() returns None, exit_thread returns
+    // silently, so we handle that case with a halt loop.
     exit_thread(exit_code as i32);
-    // Should never reach here
-    unreachable!("exit_thread returned");
+
+    // If we reach here, there was no current thread context.
+    // Log the anomaly and halt -- there is nothing else to do.
+    crate::println!(
+        "[SYSCALL] sys_exit: no current thread found, halting (code={})",
+        exit_code
+    );
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 /// Wait for a child process to terminate

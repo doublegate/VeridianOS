@@ -41,10 +41,14 @@ extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) -> ! {
-    // A double fault is unrecoverable. Log what we can and halt forever.
-    // We intentionally avoid panic!() here because the panic handler itself
-    // could trigger another exception on a corrupted stack, causing a
-    // triple fault and immediate CPU reset with no diagnostic output.
+    // Raw serial output first (bypasses spinlock to avoid deadlock in interrupt
+    // context) SAFETY: Writing to COM1 data register at I/O port 0x3F8 is safe
+    // for diagnostics.
+    unsafe {
+        for &b in b"FATAL:DF\n" {
+            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nomem, nostack));
+        }
+    }
     println!("FATAL: DOUBLE FAULT");
     println!("{:#?}", stack_frame);
 
@@ -57,15 +61,57 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
-    use x86_64::registers::control::Cr2;
-
-    // Log full diagnostic information before halting. Using panic!() in an
-    // interrupt handler risks a double fault if the panic machinery touches
-    // the faulting page or overflows the interrupt stack.
-    println!("FATAL: PAGE FAULT");
-    println!("Accessed Address: {:?}", Cr2::read());
-    println!("Error Code: {:?}", error_code);
-    println!("{:#?}", stack_frame);
+    // Raw serial diagnostic (bypasses spinlock, safe in any context)
+    // SAFETY: Writing to COM1 data register at I/O port 0x3F8 for diagnostics.
+    unsafe {
+        // Print "PF:" header
+        for &b in b"PF@" {
+            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nomem, nostack));
+        }
+        // Print CR2 as hex (faulting address)
+        let cr2_val: u64;
+        core::arch::asm!("mov {}, cr2", out(reg) cr2_val, options(nomem, nostack));
+        for shift in (0..16).rev() {
+            let nibble = ((cr2_val >> (shift * 4)) & 0xF) as u8;
+            let ch = if nibble < 10 {
+                b'0' + nibble
+            } else {
+                b'a' + nibble - 10
+            };
+            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") ch, options(nomem, nostack));
+        }
+        // Print error code bits
+        let ec = error_code.bits();
+        for &b in b" ec=" {
+            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nomem, nostack));
+        }
+        for shift in (0..4).rev() {
+            let nibble = ((ec >> (shift * 4)) & 0xF) as u8;
+            let ch = if nibble < 10 {
+                b'0' + nibble
+            } else {
+                b'a' + nibble - 10
+            };
+            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") ch, options(nomem, nostack));
+        }
+        // Print RIP from stack frame
+        let rip_val = stack_frame.instruction_pointer.as_u64();
+        for &b in b" rip=" {
+            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nomem, nostack));
+        }
+        for shift in (0..16).rev() {
+            let nibble = ((rip_val >> (shift * 4)) & 0xF) as u8;
+            let ch = if nibble < 10 {
+                b'0' + nibble
+            } else {
+                b'a' + nibble - 10
+            };
+            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") ch, options(nomem, nostack));
+        }
+        for &b in b"\n" {
+            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nomem, nostack));
+        }
+    }
 
     loop {
         x86_64::instructions::hlt();
@@ -76,8 +122,13 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    // GPF is typically unrecoverable in kernel mode. Log and halt rather
-    // than panic, which could cause a double fault in interrupt context.
+    // Raw serial output first (bypasses spinlock)
+    // SAFETY: Writing to COM1 data register at I/O port 0x3F8 for diagnostics.
+    unsafe {
+        for &b in b"FATAL:GP\n" {
+            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nomem, nostack));
+        }
+    }
     println!("FATAL: GENERAL PROTECTION FAULT");
     println!("Error Code: {:#x}", error_code);
     println!("{:#?}", stack_frame);

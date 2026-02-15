@@ -42,24 +42,42 @@ lazy_static! {
 lazy_static! {
     static ref GDT: (GlobalDescriptorTable, Selectors) = {
         let mut gdt = GlobalDescriptorTable::new();
-        let code_selector = gdt.append(Descriptor::kernel_code_segment());
-        let data_selector = gdt.append(Descriptor::kernel_data_segment());
-        let tss_selector = gdt.append(Descriptor::tss_segment(&TSS));
+        let code_selector = gdt.append(Descriptor::kernel_code_segment());     // 0x08
+        let data_selector = gdt.append(Descriptor::kernel_data_segment());     // 0x10
+        let tss_selector = gdt.append(Descriptor::tss_segment(&TSS));          // 0x18 (2 entries)
+        let user_data_selector = gdt.append(Descriptor::user_data_segment());  // 0x28 (+ RPL 3 = 0x2B)
+        let user_code_selector = gdt.append(Descriptor::user_code_segment());  // 0x30 (+ RPL 3 = 0x33)
         (
             gdt,
             Selectors {
                 code_selector,
                 data_selector,
                 tss_selector,
+                user_data_selector,
+                user_code_selector,
             },
         )
     };
 }
 
-struct Selectors {
-    code_selector: SegmentSelector,
-    data_selector: SegmentSelector,
-    tss_selector: SegmentSelector,
+/// GDT segment selectors for kernel and user mode.
+///
+/// Layout:
+/// - 0x00: Null descriptor
+/// - 0x08: Kernel code segment (Ring 0)
+/// - 0x10: Kernel data segment (Ring 0)
+/// - 0x18: TSS (occupies 2 entries, 0x18-0x20)
+/// - 0x28: User data segment (Ring 3, selector 0x2B with RPL)
+/// - 0x30: User code segment (Ring 3, selector 0x33 with RPL)
+///
+/// The user data/code order matches SYSRET expectations:
+/// SYSRET computes SS = STAR[63:48]+8, CS = STAR[63:48]+16.
+pub struct Selectors {
+    pub code_selector: SegmentSelector,
+    pub data_selector: SegmentSelector,
+    pub tss_selector: SegmentSelector,
+    pub user_data_selector: SegmentSelector,
+    pub user_code_selector: SegmentSelector,
 }
 
 pub fn init() {
@@ -78,4 +96,12 @@ pub fn init() {
         DS::set_reg(GDT.1.data_selector);
         load_tss(GDT.1.tss_selector);
     }
+}
+
+/// Returns a reference to the GDT selectors (kernel and user mode).
+///
+/// Must only be called after `init()` has been called. The lazy_static
+/// ensures the GDT is initialized on first access.
+pub fn selectors() -> &'static Selectors {
+    &GDT.1
 }

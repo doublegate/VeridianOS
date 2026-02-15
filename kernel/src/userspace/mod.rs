@@ -6,6 +6,7 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+pub mod embedded;
 pub mod enhanced_loader;
 pub mod loader;
 

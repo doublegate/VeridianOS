@@ -7,11 +7,13 @@
 
 #![allow(clippy::unwrap_or_default)]
 
+pub mod async_types;
 pub mod compliance;
 pub mod database;
 pub mod ecosystem;
 pub mod format;
 pub mod manifest;
+pub mod plugin;
 pub mod ports;
 pub mod repository;
 pub mod reproducible;

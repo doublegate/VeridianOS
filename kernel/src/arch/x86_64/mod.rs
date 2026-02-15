@@ -16,6 +16,7 @@ pub mod multiboot;
 pub mod serial;
 pub mod syscall;
 pub mod timer;
+pub mod usermode;
 pub mod vga;
 
 /// Called from bootstrap on x86_64 via `crate::arch::init()`.
@@ -30,6 +31,12 @@ pub fn init() {
     println!("[ARCH] Starting GDT init...");
     gdt::init();
     println!("[ARCH] GDT initialized");
+
+    // Initialize SYSCALL/SYSRET support (must be after GDT init so that
+    // STAR MSR references valid user-mode selectors in the loaded GDT)
+    println!("[ARCH] Initializing SYSCALL/SYSRET...");
+    syscall::init_syscall();
+    println!("[ARCH] SYSCALL/SYSRET initialized");
 
     println!("[ARCH] Starting IDT init...");
     idt::init();
