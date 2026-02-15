@@ -61,8 +61,8 @@ _start:
     # Set up stack - use __stack_top from linker script
     la sp, __stack_top
 
-    # Jump to Rust code
-    jal _start_rust
+    # Jump to Rust code (use `call` for 32-bit range; `jal` only reaches +/-1MB)
+    call _start_rust
 
     # Hang if we return
 1:

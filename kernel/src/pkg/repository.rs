@@ -5,7 +5,6 @@
 
 // Phase 4 (package ecosystem) -- repository fetching is defined but not yet
 // wired to the network stack.
-#![allow(dead_code)]
 
 use alloc::{string::String, vec::Vec};
 
@@ -13,6 +12,7 @@ use super::{Dependency, PackageId, PackageMetadata, Version};
 
 /// HTTP request type
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 enum HttpMethod {
     Get,
     Head,
@@ -20,7 +20,7 @@ enum HttpMethod {
 
 /// HTTP response
 #[derive(Debug)]
-struct HttpResponse {
+pub struct HttpResponse {
     status_code: u16,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
@@ -41,7 +41,7 @@ impl HttpResponse {
 }
 
 /// HTTP client for repository communication
-struct HttpClient {
+pub struct HttpClient {
     /// Base URL for the repository
     base_url: String,
     /// Connection timeout in milliseconds
@@ -273,11 +273,10 @@ impl HttpClient {
 
 /// HTTP errors
 #[derive(Debug)]
-enum HttpError {
+pub enum HttpError {
     ConnectionFailed,
     InvalidResponse,
     ResponseTooLarge,
-    #[allow(dead_code)]
     Timeout,
     NetworkError,
 }
@@ -534,5 +533,330 @@ impl Default for Repository {
             String::from("https://packages.veridian.org"),
             true,
         )
+    }
+}
+
+// ============================================================================
+// Repository Index
+// ============================================================================
+
+/// Server-side repository metadata index.
+///
+/// Describes all packages available in a repository, signed for integrity.
+/// Serialized as a simple JSON-like format for transmission.
+pub struct RepositoryIndex {
+    /// Index format version
+    pub version: u32,
+    /// Timestamp when the index was generated (seconds since epoch)
+    pub generated_at: u64,
+    /// Package entries in the index
+    pub entries: Vec<RepositoryIndexEntry>,
+    /// Ed25519 signature over the serialized entries
+    pub signature: Vec<u8>,
+}
+
+/// A single entry in the repository index.
+#[derive(Debug, Clone)]
+pub struct RepositoryIndexEntry {
+    /// Package name
+    pub name: String,
+    /// Package version string
+    pub version: String,
+    /// SHA-256 hash of the .vpkg file
+    pub hash: [u8; 32],
+    /// Size of the .vpkg file in bytes
+    pub size: u64,
+    /// Package description
+    pub description: String,
+    /// License identifier
+    pub license: String,
+}
+
+impl RepositoryIndex {
+    /// Create a new empty index.
+    pub fn new() -> Self {
+        Self {
+            version: 1,
+            generated_at: crate::arch::timer::get_timestamp_secs(),
+            entries: Vec::new(),
+            signature: Vec::new(),
+        }
+    }
+
+    /// Generate a repository index from a list of package metadata.
+    pub fn generate(packages: &[super::PackageMetadata]) -> Self {
+        let mut index = Self::new();
+        for pkg in packages {
+            index.entries.push(RepositoryIndexEntry {
+                name: pkg.name.clone(),
+                version: alloc::format!(
+                    "{}.{}.{}",
+                    pkg.version.major,
+                    pkg.version.minor,
+                    pkg.version.patch
+                ),
+                hash: [0u8; 32], // Hash populated when package file is available
+                size: 0,
+                description: pkg.description.clone(),
+                license: pkg.license.clone(),
+            });
+        }
+        index
+    }
+
+    /// Serialize the index to bytes (simple JSON format).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"{\"version\":");
+        let version_str = alloc::format!("{}", self.version);
+        buf.extend_from_slice(version_str.as_bytes());
+        buf.extend_from_slice(b",\"generated_at\":");
+        let ts_str = alloc::format!("{}", self.generated_at);
+        buf.extend_from_slice(ts_str.as_bytes());
+        buf.extend_from_slice(b",\"packages\":[");
+        for (i, entry) in self.entries.iter().enumerate() {
+            if i > 0 {
+                buf.push(b',');
+            }
+            let entry_json = alloc::format!(
+                "{{\"name\":\"{}\",\"version\":\"{}\",\"size\":{},\"description\":\"{}\",\"\
+                 license\":\"{}\"}}",
+                entry.name,
+                entry.version,
+                entry.size,
+                entry.description,
+                entry.license
+            );
+            buf.extend_from_slice(entry_json.as_bytes());
+        }
+        buf.extend_from_slice(b"]}");
+        buf
+    }
+
+    /// Verify the Ed25519 signature over the index data.
+    ///
+    /// Uses `crate::crypto::asymmetric::Ed25519` for real verification.
+    pub fn verify_signature(&self, public_key: &[u8]) -> bool {
+        if self.signature.is_empty() || public_key.is_empty() {
+            return false;
+        }
+
+        let content = self.to_bytes();
+
+        // Use real Ed25519 verification
+        let sig = match crate::crypto::asymmetric::Signature::from_bytes(&self.signature) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let vk = match crate::crypto::asymmetric::VerifyingKey::from_bytes(public_key) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+
+        matches!(vk.verify(&content, &sig), Ok(true))
+    }
+}
+
+impl Default for RepositoryIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
+// Mirror Management
+// ============================================================================
+
+/// Status of a mirror.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MirrorStatus {
+    /// Mirror is available and responding
+    Online,
+    /// Mirror is not responding
+    Offline,
+    /// Mirror status is unknown (not yet checked)
+    Unknown,
+}
+
+/// Metadata about a repository mirror.
+#[derive(Debug, Clone)]
+pub struct MirrorMetadata {
+    /// Mirror URL
+    pub url: String,
+    /// Priority (lower = preferred)
+    pub priority: u32,
+    /// Geographic region hint
+    pub region: String,
+    /// Timestamp of last successful sync
+    pub last_sync: u64,
+    /// Current mirror status
+    pub status: MirrorStatus,
+}
+
+/// Manages multiple mirrors for a repository, providing failover.
+pub struct MirrorManager {
+    /// Available mirrors sorted by priority
+    mirrors: Vec<MirrorMetadata>,
+}
+
+impl MirrorManager {
+    /// Create a new mirror manager.
+    pub fn new() -> Self {
+        Self {
+            mirrors: Vec::new(),
+        }
+    }
+
+    /// Add a mirror to the manager.
+    pub fn add_mirror(&mut self, mirror: MirrorMetadata) {
+        self.mirrors.push(mirror);
+        // Keep sorted by priority (lower first)
+        self.mirrors.sort_by_key(|m| m.priority);
+    }
+
+    /// Remove a mirror by URL.
+    pub fn remove_mirror(&mut self, url: &str) -> bool {
+        if let Some(pos) = self.mirrors.iter().position(|m| m.url == url) {
+            self.mirrors.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Select the best available mirror.
+    ///
+    /// Returns the highest-priority mirror that is not offline.
+    /// Falls back to the first mirror if all are offline.
+    pub fn select_best_mirror(&self) -> Option<&MirrorMetadata> {
+        // Prefer online mirrors by priority, fall back to any mirror
+        self.mirrors
+            .iter()
+            .find(|m| m.status != MirrorStatus::Offline)
+            .or(self.mirrors.first())
+    }
+
+    /// Mark a mirror as offline after a failed connection.
+    pub fn mark_offline(&mut self, url: &str) {
+        if let Some(mirror) = self.mirrors.iter_mut().find(|m| m.url == url) {
+            mirror.status = MirrorStatus::Offline;
+        }
+    }
+
+    /// Mark a mirror as online after a successful connection.
+    pub fn mark_online(&mut self, url: &str) {
+        if let Some(mirror) = self.mirrors.iter_mut().find(|m| m.url == url) {
+            mirror.status = MirrorStatus::Online;
+            mirror.last_sync = crate::arch::timer::get_timestamp_secs();
+        }
+    }
+
+    /// List all mirrors.
+    pub fn list_mirrors(&self) -> &[MirrorMetadata] {
+        &self.mirrors
+    }
+
+    /// Return the number of mirrors.
+    pub fn mirror_count(&self) -> usize {
+        self.mirrors.len()
+    }
+}
+
+impl Default for MirrorManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
+// Repository Configuration
+// ============================================================================
+
+/// Configuration for multi-repository management.
+pub struct RepositoryConfig {
+    /// Configured repositories
+    repositories: Vec<RepositoryEntry>,
+}
+
+/// A single repository entry in the configuration.
+#[derive(Debug, Clone)]
+pub struct RepositoryEntry {
+    /// Repository name
+    pub name: String,
+    /// Repository URL
+    pub url: String,
+    /// Whether this repository is enabled
+    pub enabled: bool,
+    /// Whether this repository is trusted
+    pub trusted: bool,
+    /// Priority (lower = checked first)
+    pub priority: u32,
+    /// Mirror manager for this repository
+    pub mirrors: Vec<MirrorMetadata>,
+}
+
+impl RepositoryConfig {
+    /// Create a new empty configuration.
+    pub fn new() -> Self {
+        Self {
+            repositories: Vec::new(),
+        }
+    }
+
+    /// Add a repository.
+    pub fn add_repository(&mut self, entry: RepositoryEntry) {
+        self.repositories.push(entry);
+        self.repositories.sort_by_key(|r| r.priority);
+    }
+
+    /// Remove a repository by name.
+    pub fn remove_repository(&mut self, name: &str) -> bool {
+        if let Some(pos) = self.repositories.iter().position(|r| r.name == name) {
+            self.repositories.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Enable a repository.
+    pub fn enable_repository(&mut self, name: &str) -> bool {
+        if let Some(repo) = self.repositories.iter_mut().find(|r| r.name == name) {
+            repo.enabled = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Disable a repository.
+    pub fn disable_repository(&mut self, name: &str) -> bool {
+        if let Some(repo) = self.repositories.iter_mut().find(|r| r.name == name) {
+            repo.enabled = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// List all enabled repositories.
+    pub fn enabled_repositories(&self) -> Vec<&RepositoryEntry> {
+        self.repositories.iter().filter(|r| r.enabled).collect()
+    }
+
+    /// List all repositories.
+    pub fn all_repositories(&self) -> &[RepositoryEntry] {
+        &self.repositories
+    }
+
+    /// Get a repository by name.
+    pub fn get_repository(&self, name: &str) -> Option<&RepositoryEntry> {
+        self.repositories.iter().find(|r| r.name == name)
+    }
+}
+
+impl Default for RepositoryConfig {
+    fn default() -> Self {
+        Self::new()
     }
 }

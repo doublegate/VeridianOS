@@ -30,6 +30,18 @@ use alloc::{collections::BTreeMap, string::String, vec, vec::Vec};
 
 use crate::error::KernelError;
 
+/// Record of a tracked configuration file
+#[cfg(feature = "alloc")]
+#[derive(Clone)]
+pub struct ConfigRecord {
+    /// Absolute path of the configuration file
+    pub path: String,
+    /// SHA-256 hash at install time
+    pub original_hash: [u8; 32],
+    /// Whether the user has modified this file since install
+    pub is_user_modified: bool,
+}
+
 /// On-disk package database
 #[cfg(feature = "alloc")]
 pub struct PackageDatabase {
@@ -39,6 +51,8 @@ pub struct PackageDatabase {
     db_path: String,
     /// Whether database has unsaved changes
     dirty: bool,
+    /// Tracked configuration files per package
+    config_files: BTreeMap<String, Vec<ConfigRecord>>,
 }
 
 /// A single record in the package database
@@ -66,6 +80,7 @@ impl PackageDatabase {
             packages: BTreeMap::new(),
             db_path: String::from(db_path),
             dirty: false,
+            config_files: BTreeMap::new(),
         }
     }
 
@@ -156,6 +171,53 @@ impl PackageDatabase {
     /// Return whether the database has unsaved changes.
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    // ------------------------------------------------------------------
+    // Configuration tracking
+    // ------------------------------------------------------------------
+
+    /// Record a configuration file for a package.
+    pub fn track_config_file(&mut self, package: &str, config: ConfigRecord) {
+        let configs = self.config_files.entry(String::from(package)).or_default();
+        // Replace existing entry for the same path
+        if let Some(pos) = configs.iter().position(|c| c.path == config.path) {
+            configs[pos] = config;
+        } else {
+            configs.push(config);
+        }
+        self.dirty = true;
+    }
+
+    /// Check whether a config file has been modified by the user.
+    pub fn is_config_modified(&self, package: &str, path: &str) -> bool {
+        self.config_files
+            .get(package)
+            .and_then(|configs| configs.iter().find(|c| c.path == path))
+            .map(|c| c.is_user_modified)
+            .unwrap_or(false)
+    }
+
+    /// List all tracked config files for a package.
+    pub fn list_config_files(&self, package: &str) -> &[ConfigRecord] {
+        self.config_files.get(package).map_or(&[], |v| v.as_slice())
+    }
+
+    /// Find orphan packages (packages with zero reverse dependencies).
+    ///
+    /// A package is an orphan if no other installed package depends on it.
+    pub fn find_orphans(&self) -> Vec<String> {
+        let mut orphans = Vec::new();
+        for name in self.packages.keys() {
+            let is_depended_on = self
+                .packages
+                .values()
+                .any(|record| record.dependencies.iter().any(|dep| dep == name));
+            if !is_depended_on {
+                orphans.push(name.clone());
+            }
+        }
+        orphans
     }
 
     // ------------------------------------------------------------------

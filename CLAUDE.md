@@ -2,24 +2,6 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 🔒 RULE #1 - ALWAYS CHECK AND READ BEFORE WRITING
-
-**CRITICAL**: ALWAYS check for existence and read from existing files BEFORE attempting to update or write to them. This prevents file corruption, data loss, and wasted time.
-
-**Implementation Protocol**:
-
-1. **Check Existence**: Use `Read`, `Glob`, or `LS` tools to verify file exists
-2. **Read Current Content**: Always read the existing file content first
-3. **Analyze Structure**: Understand current format, sections, and organization
-4. **Plan Changes**: Determine what needs to be modified, added, or updated
-5. **Execute Update**: Use `Edit` or `MultiEdit` for modifications, or `Write` only after reading
-
-**Tools Usage Priority**:
-
-- ✅ **ALWAYS**: `Read` → `Edit`/`MultiEdit` (for existing files)
-- ✅ **CONDITIONAL**: `Read` → `Write` (only if complete rewrite needed after reading)
-- ❌ **NEVER**: Direct `Write` without prior `Read` (unless explicitly creating new file)
-
 ## VeridianOS Overview
 
 VeridianOS is a next-generation microkernel operating system written entirely in Rust, emphasizing security, modularity, and formal verification. It uses capability-based security and runs all drivers in user space for maximum isolation.
@@ -186,104 +168,36 @@ Currently implementing in phases:
 
 1. **Phase 0** (Months 1-3): Foundation and tooling - **COMPLETE! ✅**
 2. **Phase 1** (Months 4-9): Microkernel core - **COMPLETE! ✅**
-3. **Phase 2** (Months 10-15): User space foundation - **100% COMPLETE** ✅ (v0.3.2 - February 14, 2026)
-4. **Phase 3** (Months 16-21): Security hardening - **100% COMPLETE** ✅ (v0.3.2 - February 14, 2026)
-5. **Phase 4** (Months 22-27): Package ecosystem - **~75%** (package manager, resolver, ports system, SDK types implemented)
+3. **Phase 2** (Months 10-15): User space foundation - **100% COMPLETE** ✅ (v0.3.2)
+4. **Phase 3** (Months 16-21): Security hardening - **100% COMPLETE** ✅ (v0.3.2)
+5. **Phase 4** (Months 22-27): Package ecosystem - **~80%** (package manager, resolver, ports, SDK, repository, delta updates)
 6. **Phase 5** (Months 28-33): Performance optimization - **~10% actual** (data structures only)
 7. **Phase 6** (Months 34-42): Advanced features and GUI - **~5% actual** (type definitions only)
 
 ## Project Status
 
-- **Repository**: <https://github.com/doublegate/VeridianOS>
-- **Documentation**: Complete (25+ comprehensive guides) + GitHub Pages deployment
-- **Infrastructure**: Directory structure, TODO system, and GitHub setup complete
-- **CI/CD**: ✅ GitHub Actions workflow passing all checks (100% success rate)
-- **Current Phase**: Phase 4 (Package Ecosystem) development
-  - Phase 0 (Foundation) - 100% COMPLETE! ✅ (v0.1.0 - June 7, 2025)
-  - Phase 1 (Microkernel Core) - 100% COMPLETE! ✅ (v0.2.0 - June 12, 2025)
-  - Phase 2 (User Space) - 100% COMPLETE! ✅ (v0.3.2 - February 14, 2026)
-  - Phase 3 (Security) - 100% COMPLETE! ✅ (v0.3.2 - February 14, 2026)
-  - Phase 4 (Packages) - ~75% (package manager, resolver, ports system, SDK types implemented)
-  - Phase 5 (Performance) - ~10% actual (data structures only)
-  - Phase 6 (GUI) - ~5% actual (type definitions only)
-- **Latest Release**: v0.3.5 (February 15, 2026) - Critical Architecture Boot Fixes
-  - x86_64: Added CPUID check for RDRAND support (prevents #UD -> double fault on qemu64)
-  - RISC-V: Fixed frame allocator start address from 0x88000000 (end of RAM) to 0x80E00000
-  - RISC-V: Restricted stack canary RNG usage to x86_64 only (no stvec during creation)
-  - x86_64: Increased boot stack from 64KB to 256KB (debug build stack overflow at Stage 4)
-  - 4 files changed, +67/-21 lines
-  - All 3 architectures: Stage 6 BOOTOK, 22/22 tests, zero warnings
-- **Previous Releases**:
-  - v0.3.4 (February 15, 2026) - Phase 1-3 Integration + Phase 4 Package Ecosystem
-  - v0.3.3 (February 14, 2026) - Comprehensive Technical Debt Remediation
-  - v0.3.2 (February 14, 2026) - Phase 2 & Phase 3 Completion
-  - v0.3.1 (February 14, 2026) - Technical Debt Remediation
-  - v0.3.0 (2025) - Architecture cleanup and security hardening
-  - v0.2.5 (2025) - RISC-V crash fix and architecture parity
-  - v0.2.1 (June 17, 2025) - Maintenance Release with boot fixes
-  - v0.2.0 (June 12, 2025) - Microkernel Core Complete
-  - v0.1.0 (June 7, 2025) - Foundation & Tooling
-- **Build Status**: ✅ Compiling successfully for all target architectures
-- **Boot Status**: ✅ All architectures boot to Stage 6 with BOOTOK, 22/22 tests passing
-  - x86_64: Full bootstrap sequence, 22/22 tests, zero warnings
-  - AArch64: Full bootstrap, 22/22 tests, zero warnings, deterministic across runs
-  - RISC-V: Full bootstrap, 22/22 tests, zero warnings, deterministic (reboot bug FIXED in v0.3.1)
-- **Code Quality**: ✅ All format and clippy checks passing with zero warnings
-- **Debugging**: ✅ GDB infrastructure operational with custom commands
-- **Testing**: ✅ No-std test framework and benchmarks implemented
-- **Documentation**: ✅ Rustdoc and mdBook configured with automatic deployment
-- **Version Control**: ✅ Git hooks, PR templates, and release automation ready
-- **Phase 1 Completion**: June 12, 2025 - All microkernel core components complete!
-  - Completed in just 5 days (June 8-12, 2025)!
-  - All subsystems 100% implemented with comprehensive tracking
-  - Performance targets achieved (IPC <1μs, context switch <10μs)
-  - Builds successfully for all architectures with zero warnings
-  - Boot issues resolved in v0.2.1 maintenance release
+| Area | Status |
+|------|--------|
+| **Repository** | <https://github.com/doublegate/VeridianOS> |
+| **Latest Release** | v0.3.6 (February 15, 2026) - Phase 4 Group 1: Repository, Delta, Config, Removal |
+| **Build** | ✅ All 3 architectures compile, zero warnings |
+| **Boot** | ✅ All 3 architectures Stage 6 BOOTOK, 22/22 tests |
+| **CI/CD** | ✅ GitHub Actions 100% pass rate |
+| **Documentation** | ✅ 25+ guides, GitHub Pages, mdBook, Rustdoc |
+
+**Previous Releases**: v0.3.5, v0.3.4, v0.3.3, v0.3.2, v0.3.1, v0.3.0, v0.2.5, v0.2.1, v0.2.0, v0.1.0
 
 ## Implementation Status
 
-### Phase 1 Progress (100% COMPLETE! 🎉)
+### Phase 1 (100% COMPLETE! 🎉)
 
-- **Memory Management**: 100% complete
-  - Hybrid frame allocator (bitmap + buddy system)
-  - NUMA-aware allocation with per-node allocators
-  - Virtual memory manager with 4-level page tables
-  - Kernel heap allocator with slab design
-  - Reserved memory tracking and zone management
-  - Architecture-specific MMU operations (CR3, TTBR0, SATP)
-
-- **IPC System**: 100% complete
-  - Synchronous/asynchronous channels with ring buffers
-  - Zero-copy transfers with shared memory mappings
-  - Fast path IPC with register-based transfer (<1μs achieved)
-  - Capability passing with 64-bit tokens
-  - Global registry with O(1) lookup
-  - Rate limiting and comprehensive error handling
-
-- **Process Management**: 100% complete
-  - Process Control Block (PCB) with atomic state management
-  - Thread Control Block (TCB) with full ThreadContext trait
-  - Context switching for all architectures (x86_64, AArch64, RISC-V)
-  - Synchronization primitives (Mutex, Semaphore, CondVar, RwLock, Barrier)
-  - Process system calls (fork, exec, exit, wait, getpid, thread operations)
-  - Thread-local storage (TLS) implementation
-  - CPU affinity and NUMA awareness
-
-- **Capability System**: 100% complete
-  - 64-bit packed capability tokens with generation counters
-  - Two-level capability space with O(1) lookup performance
-  - Rights management (read, write, execute, grant, derive, manage)
-  - Object references for memory, process, thread, endpoint objects
-  - Basic operations: create, lookup, validate, revoke
-  - Full IPC integration with permission validation
-  - Memory operation capability checks
-  - System call capability enforcement
-
-- **Scheduler**: 100% complete
-  - Round-robin scheduling with time slice management
-  - Load balancing framework for multi-core systems
-  - Comprehensive metrics tracking (context switches, CPU time)
-  - Idle task management and CPU affinity support
+| Subsystem | Key Features |
+|-----------|-------------|
+| **Memory Management** | Hybrid bitmap+buddy allocator, NUMA-aware, 4-level page tables, slab heap, zone management |
+| **IPC System** | Sync/async channels, zero-copy, fast path <1μs, capability passing, O(1) registry |
+| **Process Management** | PCB/TCB, context switching (all archs), synchronization primitives, TLS, NUMA |
+| **Capability System** | 64-bit tokens, two-level O(1) lookup, rights management, IPC+syscall integration |
+| **Scheduler** | Round-robin, load balancing, metrics tracking, idle task, CPU affinity |
 
 ### Driver Framework
 
@@ -292,21 +206,20 @@ Currently implementing in phases:
 - Interrupt forwarding from kernel to user-space drivers
 - DMA buffer management with IOMMU protection
 
-### Technical Decisions Made
-- **Language**: Rust-only implementation for memory safety
-- **Architecture**: Microkernel with user-space drivers
-- **Security Model**: Capability-based access control
-- **Target Platforms**: x86_64, AArch64, and RISC-V
-- **Memory Model**: Zero-copy IPC with shared memory
-- **Cryptography**: Post-quantum ready with ML-KEM and ML-DSA support
+### Technical Decisions
+
+| Decision | Choice |
+|----------|--------|
+| Language | Rust-only for memory safety |
+| Architecture | Microkernel with user-space drivers |
+| Security | Capability-based access control |
+| Platforms | x86_64, AArch64, RISC-V |
+| Memory | Zero-copy IPC with shared memory |
+| Crypto | Post-quantum ready (ML-KEM, ML-DSA) |
 
 ### Network Stack Architecture (Future)
-- lwIP integration for initial implementation
-- Custom Rust network stack planned for later phases
-- User-space networking with kernel bypass
-- DPDK support for high-performance networking
-- eBPF for programmable packet processing
-
+- lwIP integration initially, custom Rust stack later
+- User-space networking with kernel bypass, DPDK, eBPF
 
 ## Common Development Tasks
 
@@ -326,37 +239,24 @@ Currently implementing in phases:
 
 ### Debugging Kernel Panics
 
-- Use QEMU with `-s -S` flags for GDB debugging
+- Use QEMU with `-s -S` flags for GDB debugging (server on :1234, start paused)
 - Enable verbose logging with `RUST_LOG=trace`
 - Check serial output for panic messages
 - Use `addr2line` for stack trace analysis
 - Run `just debug-<arch>` for automated GDB sessions
-- Custom GDB commands available for kernel inspection
+- Use `gdb-multiarch` for cross-architecture debugging
+- GDB scripts in `scripts/gdb/` with custom commands (kernel-symbols, break-panic, examine-stack, walk-page-table)
+- Documentation: `docs/GDB-DEBUGGING.md`
 
 ### Debug Directory
 
-The `debug/` directory contains debugging tools and logs:
-
-- **kernel-debug.sh**: Run kernel with debug output saved to timestamped logs
-- **gdb-kernel.sh**: Start GDB debugging session with proper symbols
-- **kernel.gdb**: GDB initialization with custom commands
-- **clean-logs.sh**: Clean up old debug logs
-- All debug logs are saved with timestamps for later analysis
-- Directory is gitignored to avoid committing temporary files
-
-Example usage:
+The `debug/` directory contains debugging tools and logs (gitignored):
 
 ```bash
-# Run kernel with debug output
-./debug/kernel-debug.sh x86_64 60
-
-# Start GDB debugging session
-./debug/gdb-kernel.sh
-
-# Clean logs older than 7 days
-./debug/clean-logs.sh 7
+./debug/kernel-debug.sh x86_64 60   # Run kernel with debug output
+./debug/gdb-kernel.sh               # Start GDB debugging session
+./debug/clean-logs.sh 7             # Clean logs older than 7 days
 ```
-
 
 ### AArch64-Specific Notes
 
@@ -368,15 +268,7 @@ Example usage:
 
 ## TODO System
 
-Comprehensive task tracking is maintained in the `to-dos/` directory:
-
-- **MASTER_TODO.md**: Overall project status and quick links
-- **PHASE[0-6]_TODO.md**: Detailed tasks for each development phase
-- **TESTING_TODO.md**: Testing strategy and test tracking
-- **ISSUES_TODO.md**: Bug tracking and known issues
-- **RELEASE_TODO.md**: Release planning and version milestones
-
-Check these files regularly to track progress and identify next tasks.
+Task tracking in `to-dos/`: MASTER_TODO.md, PHASE[0-6]_TODO.md, TESTING_TODO.md, ISSUES_TODO.md, RELEASE_TODO.md
 
 ## VeridianOS-Specific Development Patterns
 
@@ -395,16 +287,19 @@ Check these files regularly to track progress and identify next tasks.
 
 ### IPC Development Patterns
 
-- **Message Types**: SmallMessage (≤64 bytes) for fast path, LargeMessage for bulk data
-- **Fast Path Design**: Use register-based transfer for <5μs latency
-- **Architecture Abstraction**: Separate register mappings for x86_64, AArch64, RISC-V
-- **Capability Tokens**: 64-bit format with generation counter for revocation
-- **Error Handling**: Use Result with IpcError for all fallible operations
-- **Performance Tracking**: CPU timestamp counters for latency measurement
-- **Process Integration**: Extension traits for accessing process context
-- **Zero-Copy Design**: SharedRegion with page remapping for large transfers
-- **Type Aliases**: Use ProcessId = u64 for clarity
-- **Result Imports**: Import from error module: `use super::error::Result;`
+| Pattern | Details |
+|---------|---------|
+| Message types | SmallMessage (<=64 bytes) fast path, LargeMessage for bulk |
+| Fast path | Register-based transfer, <1μs latency |
+| Architecture | Separate register mappings per arch |
+| Capability tokens | 64-bit with generation counter for revocation |
+| Zero-copy | SharedRegion with page remapping |
+| Registry | Global O(1) lookup, lock-free async ring buffers |
+| Rate limiting | Token bucket algorithm for DoS protection |
+| NUMA | Built-in awareness from the start |
+| Error handling | Result with IpcError, detailed typed errors |
+| Type aliases | ProcessId = u64; import from `super::error::Result` |
+| API migration | Restore tests when refactoring; consistent parameter order (id, owner, capacity) |
 
 ### Architecture-Specific Details
 
@@ -414,10 +309,21 @@ Check these files regularly to track progress and identify next tasks.
 
 ### CI/CD Configuration
 
-- GitHub Actions with job consolidation for efficiency
-- Caching of cargo registry and target directories
+- GitHub Actions with job consolidation, cargo caching, RUSTFLAGS="-D warnings"
 - Security audit with rustsec/audit-check action
-- RUSTFLAGS="-D warnings" for strict checking
+- Custom targets need -Zbuild-std; cancel-in-progress to prevent duplicate runs
+- CI artifacts: `gh run download <run-id> --dir <dir>`, `gh release upload <tag> <files...> --clobber`
+- AArch64: prefix unused vars with underscore (println! is no-op on non-x86_64)
+
+### Clippy Fix Patterns
+
+| Pattern | Fix |
+|---------|-----|
+| new_without_default | Add Default impl |
+| manual_flatten | Use iter().flatten() |
+| Unused vars on non-x86_64 | `#[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]` |
+| Unused imports in public APIs | `#[allow(unused_imports)]` for re-exports |
+| Empty loop | Replace `loop {}` with `panic!("message")` |
 
 ### Development Workflow in Distrobox
 
@@ -425,17 +331,6 @@ Check these files regularly to track progress and identify next tasks.
 - User memory location: `/home/parobek/.claude/CLAUDE.md` (global user memory)
 - Install git and gh in Ubuntu containers
 - Use project-local paths for all file operations
-
-### GDB Debugging Setup
-
-- Debug scripts: `scripts/debug-<arch>.sh` for each architecture
-- GDB configuration files in `scripts/gdb/` directory
-- Custom commands for kernel-specific inspection
-- Automated QEMU+GDB integration with symbol loading
-- Architecture-specific memory examination commands
-- String arguments in GDB commands must be quoted
-- Use `just debug-<arch>` commands for easy debugging
-- Documentation: `docs/GDB-DEBUGGING.md`
 
 ### Key Design Documents
 
@@ -448,224 +343,92 @@ Check these files regularly to track progress and identify next tasks.
 
 ### Performance Targets
 
-- **IPC**: < 1μs (small messages), < 5μs (large transfers)
-- **Context Switch**: < 10μs
-- **Memory Allocation**: < 1μs
-- **Capability Lookup**: O(1)
-- **Process Support**: 1000+ concurrent processes
-- **Kernel Size**: < 15,000 lines of code
+| Metric | Target | Achieved |
+|--------|--------|----------|
+| IPC (small) | < 1μs | ✅ <1μs |
+| IPC (large) | < 5μs | ✅ |
+| Context switch | < 10μs | ✅ |
+| Memory alloc | < 1μs | ✅ |
+| Capability lookup | O(1) | ✅ |
+| Process support | 1000+ | ✅ |
+| Kernel size | < 15K LOC | ✅ ~15K |
 
 ### Documentation Organization
 
 - **GitHub Pages**: <https://doublegate.github.io/VeridianOS/>
 - **mdBook Source**: `docs/book/src/` directory
 - **Building**: Run `mdbook build` in `docs/book/` directory
-- **Content Sources**: Integrated from phase docs, design docs, and technical specs
-- **TODO System**: Comprehensive task tracking in `to-dos/` directory
-  - `MASTER_TODO.md`: Overall project status and quick links
-  - `PHASE[0-6]_TODO.md`: Detailed tasks for each development phase
-  - `TESTING_TODO.md`: Testing strategy and test tracking
-  - `ISSUES_TODO.md`: Bug tracking and known issues
-  - `RELEASE_TODO.md`: Release planning and version milestones
 
 ### Key Technical Patterns Learned
 
-- **R_X86_64_32S Relocation**: Kernel must be in top 2GB of address space for ±2GB addressing
-- **Kernel Code Model**: Required for x86_64 higher-half kernels above 2GB boundary
-- **PIC Initialization**: Must mask interrupts during init to prevent double faults
-- **Static Heap**: Use static arrays in kernel binary rather than arbitrary addresses
-- **Testing Limitations**: no_std kernel testing blocked by duplicate lang items in Rust toolchain
-- **Build Target Strategy**: Standard targets more compatible than custom JSON specs
-- **Documentation Consolidation**: Single authoritative deferred items document essential
-- **API Migration**: Systematic approach needed when changing core APIs
-- **Memory Safety**: User-kernel boundary validation critical for security
-- **Performance Validation**: All Phase 1 targets met (IPC <1μs, context switch <10μs)
-- **Release Automation**: CI artifacts can be downloaded and attached to releases via gh CLI
-- **Version Synchronization**: Update version numbers across all documentation consistently
-- **OnceLock Soundness**: OnceLock::set() error path must extract value before dropping Box (use-after-free)
-- **Global Allocate-Once**: process_compat allocate-once-and-reuse pattern prevents per-call memory leaks
-- **PlatformTimer Trait**: Cross-architecture timer abstraction in `kernel/src/arch/timer.rs`
-- **Memory Barrier Abstractions**: `kernel/src/arch/barriers.rs` provides `memory_fence()`, `data_sync_barrier()`, `instruction_sync_barrier()`
-- **#[must_use] on Error Types**: Adding `#[must_use = "kernel errors must be handled"]` to KernelError catches ignored errors
-- **Static Mut Justification**: Some static muts are justified (early boot, per-CPU data, heap memory) -- document with SAFETY comments
+| Pattern | Details |
+|---------|---------|
+| R_X86_64_32S relocation | Kernel must be in top 2GB for +/-2GB addressing |
+| Kernel code model | Required for x86_64 higher-half kernels |
+| PIC initialization | Must mask interrupts during init to prevent double faults |
+| Static heap | Use static arrays in kernel binary, not arbitrary addresses |
+| Testing limitation | no_std kernel testing blocked by duplicate lang items |
+| Build targets | Standard targets more compatible than custom JSON specs |
+| OnceLock soundness | set() error path must extract value before dropping Box |
+| Global allocate-once | process_compat allocate-once-and-reuse prevents leaks |
+| PlatformTimer | Cross-arch timer abstraction in `kernel/src/arch/timer.rs` |
+| Memory barriers | `arch/barriers.rs`: memory_fence(), data_sync_barrier(), instruction_sync_barrier() |
+| #[must_use] on errors | Catches ignored KernelError at compile time |
+| Static mut justification | 7 justified remain (early boot, per-CPU, heap) -- document with SAFETY |
 
-### Key Implementation Files (Phase 1 - 100% Complete!)
+### Key Implementation Files
 
-- `kernel/src/arch/` - Architecture-specific implementations (100% - all working!)
-  - `arch/aarch64/direct_uart.rs` - Assembly-only UART for LLVM workaround
-  - `arch/aarch64/safe_iter.rs` - Loop-free utilities for AArch64
-- `kernel/src/mm/` - Memory management implementation (100% - hybrid allocator, VMM, VAS)
-- `kernel/src/ipc/` - Inter-process communication implementation (100% - fast path <1μs)
-- `kernel/src/process/` - Process management implementation (100% - full lifecycle)
-- `kernel/src/sched/` - Scheduler implementation (100% - CFS, SMP, load balancing)
-- `kernel/src/cap/` - Capability system (100% - inheritance, revocation, cache)
-- `kernel/src/syscall/` - System call interface (100% - user-space safety)
-- `kernel/src/raii.rs` - RAII patterns for resource management
-- `kernel/src/print.rs` - Kernel output macros
-- `kernel/src/arch/timer.rs` - PlatformTimer trait with per-architecture implementations
-- `kernel/src/arch/barriers.rs` - Memory barrier abstractions (memory_fence, data_sync_barrier, instruction_sync_barrier)
-- `kernel/src/test_framework.rs` - No-std test infrastructure
-- `kernel/src/bench.rs` - Benchmarking framework
-- `kernel/src/perf/mod.rs` - Performance counters (AtomicU64-based, zero unsafe)
-- `docs/DEFERRED-IMPLEMENTATION-ITEMS.md` - Comprehensive tracking (1,415 lines)
-- `docs/TESTING-STATUS.md` - Testing limitations and alternatives
+| Path | Purpose |
+|------|---------|
+| `kernel/src/arch/` | Architecture-specific (aarch64/direct_uart.rs, safe_iter.rs) |
+| `kernel/src/mm/` | Memory management (hybrid allocator, VMM, VAS) |
+| `kernel/src/ipc/` | IPC (fast path <1μs) |
+| `kernel/src/process/` | Process management (full lifecycle) |
+| `kernel/src/sched/` | Scheduler (CFS, SMP, load balancing) |
+| `kernel/src/cap/` | Capability system (inheritance, revocation, cache) |
+| `kernel/src/syscall/` | System call interface |
+| `kernel/src/arch/timer.rs` | PlatformTimer trait |
+| `kernel/src/arch/barriers.rs` | Memory barrier abstractions |
+| `kernel/src/test_framework.rs` | No-std test infrastructure |
+| `kernel/src/perf/mod.rs` | Performance counters (AtomicU64) |
+| `docs/DEFERRED-IMPLEMENTATION-ITEMS.md` | Deferred item tracking |
 
-## OS-Specific CI/CD Patterns
+## Memory Allocator Design
 
-### Custom Target Requirements
-- **Custom Targets Need -Zbuild-std**: Custom targets require building std library from source
-- **Architecture-Specific Testing**: Run tests conditionally based on target architecture
-- **QEMU Integration**: Set up automated testing with architecture emulators
-- **Target Spec Validation**: Validate custom target specifications against built-in targets
-- **Dead Code Warnings**: Add #[allow(dead_code)] for architecture-specific functions
-- **Stable Feature Flags**: Remove feature flags that have been stabilized (like const_mut_refs)
-- **Workflow Optimization**: Use environment variables for reusable values (BUILD_STD_FLAGS)
-- **Concurrency Control**: Add cancel-in-progress to prevent duplicate runs
-- **Documentation Pipeline**: Include mdBook building and rustdoc with custom themes
-- **Release Artifacts**: Create comprehensive packages with kernel, symbols, and docs
-- **Artifact Download**: Use `gh run download <run-id> --dir <dir>` to fetch CI artifacts
-- **Release Asset Upload**: Use `gh release upload <tag> <files...> --clobber` to add artifacts
-- **AArch64 Compilation**: Unused variables cause failures with -D warnings, prefix with underscore
-- **Cross-Architecture Issues**: println! may be no-op on some targets, causing unused variable warnings
+| Component | Details |
+|-----------|---------|
+| Hybrid allocator | Bitmap (<512 frames) + buddy (large), threshold-based switching |
+| NUMA | Per-node allocators for locality |
+| Zones | DMA (0-16MB), Normal, High |
+| Page tables | 4-level (x86_64/AArch64), Sv48 (RISC-V) |
+| TLB | Shootdown required for cross-CPU updates |
+| Slab | For kernel objects with cache awareness |
+| Reserved memory | Track regions with overlap checking, filter allocations |
+| Feature gating | cfg(feature = "alloc") for allocator-dependent code |
 
-### Clippy Fix Patterns
-- **Formatting Issues**: Remove extra blank lines, fix line breaks in println! macros
-- **Clippy new_without_default**: Add Default impl for structs with new() methods
-- **Clippy manual_flatten**: Use iter().flatten() instead of nested if let Some loops
-- **Unused Variables on Non-x86_64**: println! is no-op, use #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
-- **Unused Imports in Public APIs**: Use #[allow(unused_imports)] for re-exported types
-- **Macro Expression Issues**: Wrap println! in blocks when used in match expressions
-- **Empty Loop Warning**: Replace `loop {}` with `panic!("message")` to satisfy clippy
-- **Unused Variables**: Prefix with underscore (_var) to indicate intentional non-use
+## Process Management Design
 
-## Microkernel IPC Development Patterns
+| Component | Details |
+|-----------|---------|
+| PCB | Atomic state management, thread-safe operations |
+| Thread context | Architecture-independent trait for context switching |
+| Process table | Global O(1) lookup via BTreeMap |
+| Context switch | Save/restore all archs with FPU handling |
+| Synchronization | Mutex, Semaphore, CondVar, RwLock, Barrier |
+| Lifecycle | fork(), exec(), exit(), wait() with resource cleanup |
+| Thread mgmt | TLS, CPU affinity, stack management, guard pages |
+| Error handling | Typed KernelError variants (no &str errors remain) |
+| Priority | Mapping between syscall and internal scheduler priorities |
 
-### IPC Architecture Design
-- **Registry Pattern**: Global registry with O(1) lookup for endpoints and channels
-- **Lock-Free Async**: Use lock-free ring buffers for async channels
-- **Performance Measurement**: Track CPU cycles for latency measurement
-- **Rate Limiting**: Token bucket algorithm for DoS protection
-- **Zero-Copy Design**: Shared memory regions with page remapping
-- **Fast Path Optimization**: Register-based transfer for small messages (≤64 bytes)
-- **NUMA Awareness**: Build in NUMA support from the start
-- **Message Size Optimization**: Small messages for register transfer, large for memory
-- **Architecture Abstractions**: Separate register mappings per architecture
-- **Error Handling**: Comprehensive Result<T> types with detailed errors
-- **Capability Integration**: 64-bit tokens with generation counters
+## Architecture History (Key Decisions)
 
-### IPC API Migration Patterns
-- **Test Restoration**: When refactoring, restore tests rather than deleting them
-- **API Migration**: When changing APIs, systematically update all tests and benchmarks
-- **Method Naming**: Use descriptive names like send_async vs send for clarity
-- **Constructor Parameters**: Maintain consistent parameter order (id, owner, capacity)
+**Bootstrap refactoring** (Aug 2025): Simplified bootstrap.rs to ~150 lines; each arch has own entry.rs, bootstrap.rs, serial.rs. Print macros unified in print.rs.
 
-## Memory Allocator Implementation
+**Static mut evolution**: Raw pointer pattern with Box::leak (Aug 2025) --> **SUPERSEDED** by Rust 2024 GlobalState pattern (Nov 2025). See current pattern below.
 
-### Hybrid Allocator Design
-- **Hybrid Allocator**: Combine bitmap (small) and buddy (large) allocators
-- **Threshold Selection**: Switch allocators at optimal frame count (e.g., 512 frames)
-- **NUMA Support**: Per-node allocators for locality
-- **Statistics Tracking**: Track allocation patterns for optimization
-- **Feature Gating**: Use cfg(feature = "alloc") for allocator-dependent code
-- **Array Initialization**: Use const patterns for non-Copy types in arrays
-- **Zone Management**: DMA, Normal, High memory zones
-- **Page Table Management**: 4-level for x86_64/AArch64, Sv48 for RISC-V
-- **TLB Shootdown**: Required for cross-CPU virtual memory updates
-- **Slab Allocator**: For kernel objects with cache awareness
-- **Reserved Memory Handling**: Track reserved regions with overlap checking
-- **Reserved Region Structure**: Start/end frames with description for debugging
-- **Allocation Filtering**: Check allocated frames against reserved list
+**v0.3.1 tech debt** (Feb 2026): OnceLock use-after-free fix, 48 static mut eliminated, 8 panic paths removed, 150+ functions migrated to typed errors, PlatformTimer trait + memory barrier abstractions.
 
-## Kernel Debugging Infrastructure
-
-### GDB Script Organization
-- **Script Structure**: Create scripts/gdb/ with common and arch-specific configs
-- **Debug Launch Scripts**: Create executable debug scripts for easy debugging
-- **Custom GDB Commands**: Implement architecture-specific memory examination
-- **Symbol Loading**: Use kernel-symbols command with architecture parameter
-- **Breakpoint Helpers**: Create break-panic, break-main, break-boot commands
-- **Memory Inspection**: Implement examine-stack, examine-uart, walk-page-table commands
-- **Documentation**: Always document debugging workflows and custom commands
-- **QEMU GDB Server**: Use -s -S flags (server on :1234, start paused)
-- **Multiarch GDB**: Use gdb-multiarch for cross-architecture debugging
-- **String Arguments in GDB**: Quote string arguments to avoid symbol interpretation
-
-## Process Management Implementation
-
-### Process Control Architecture
-- **Process Control Block**: Use atomic state management with thread-safe operations
-- **Thread Context Trait**: Define architecture-independent interface for context switching
-- **Process Table Design**: Global table with O(1) lookup using BTreeMap or fixed array
-- **Context Switching**: Implement save/restore for all architectures with proper FPU handling
-- **System Call Integration**: Complete syscall interface for process/thread operations
-- **Synchronization Primitives**: Mutex, Semaphore, CondVar, RwLock, Barrier implementations
-- **Process Lifecycle**: fork(), exec(), exit(), wait() with proper resource cleanup
-- **Thread Management**: Thread creation with TLS, CPU affinity, and stack management
-- **Error Handling**: Migrating from &'static str to typed KernelError variants (v0.3.1 reduced &str errors by ~63%)
-- **Feature Gating**: Heavy use of cfg(feature = "alloc") for optional allocator support
-- **Unsafe Code Management**: Document all unsafe blocks, minimize scope
-- **Static References**: Use unsafe pointer casts for global process/thread access
-- **Priority Mapping**: Convert between syscall priorities and internal scheduler priorities
-- **Deferred Implementation Tracking**: Document all TODOs and stubs for future work
-
-## Recent Architecture Refactoring (August 13, 2025)
-
-### Bootstrap Simplification
-- **Refactored**: Simplified bootstrap.rs from 439 lines to ~150 lines
-- **Architecture Separation**: Created dedicated entry.rs and bootstrap.rs for each architecture
-- **Module Organization**: Each architecture (x86_64, AArch64, RISC-V) has its own:
-  - `entry.rs`: Early initialization and panic handling
-  - `bootstrap.rs`: Stage-specific output functions
-  - `serial.rs`: Architecture-specific serial implementations
-- **Print Consolidation**: Unified print macros in main print.rs module
-- **Build Status**: All three architectures compile successfully
-- **Boot Testing**: AArch64 and RISC-V boot through Stage 3 successfully
-
-### Gemini CLI Integration
-- **Added**: Gemini CLI support for AI-assisted development (commit 0f77faa)
-- **GEMINI.md**: Created for AI context about the project
-- **GitHub Workflows**: Added automated PR reviews and issue triage
-- **Integration**: Enhances development workflow with AI assistance
-
-### x86_64 Bootloader Diagnosis (August 14, 2025)
-- **Issue Identified**: x86_64 architecture doesn't boot due to bootloader 0.9 limitations
-- **Root Cause**: Bootloader 0.9 cannot handle higher-half kernels (0xffffffff80000000+)
-- **Current Status**: AArch64 and RISC-V boot to Stage 6 successfully, x86_64 blocked
-- **Solutions Available**: Upgrade to bootloader 0.10+, switch to GRUB/Limine, or custom boot stub
-- **Architecture Differences**: x86_64 requires bootloader, AArch64/RISC-V use direct QEMU loading
-- **Implementation Added**: VGA/serial debug output, entry_point! macro, symbol conflict fixes
-
-### Phase 2 Architecture-Specific Fixes (August 16-17, 2025)
-- **AArch64 Static Mut Fix**: Resolved hangs by using pointer-based approach with Box::leak pattern
-- **Memory Barriers**: DSB SY and ISB instructions required for AArch64 static pointer initialization
-- **Services Fixed**: ThreadManager, InitSystem, DriverFramework all use pointer approach
-- **RISC-V Status**: Reaches Stage 6 BOOTOK but immediately reboots (timer/interrupt issue)
-- **x86_64 Status**: Early boot hang persists, needs further debugging
-- **Achievement**: AArch64 100% functional with complete Phase 2 implementation
-
-### v0.3.1 Technical Debt Remediation (February 14, 2026)
-- **Soundness Fixes**: OnceLock::set() use-after-free, process_compat memory leak
-- **Static Mut Elimination**: 48 instances converted across 38 files using OnceLock, spin::Mutex, AtomicU64
-- **Panic Elimination**: 8 production panic paths removed from syscall/VFS with proper error propagation
-- **Error Type Migration**: 150+ functions migrated from &str to typed KernelError (18 files, ~63% reduction)
-- **Architecture Cleanup**: PlatformTimer trait, arch/barriers.rs memory barrier abstractions
-- **Dead Code Removal**: 25 incorrect #[allow(dead_code)] annotations removed, 1 dead function deleted
-- **Metrics Improvement**: static mut files -87%, &str errors -63%, dead_code annotations -68%
-- **Boot Verification**: All 3 architectures Stage 6 BOOTOK, 22/22 tests, zero warnings
-- **RISC-V Bug Fix**: Reboot-after-BOOTOK bug resolved as side effect of static mut elimination
-
-### Unified Static Mut Pointer Pattern (August 17, 2025) - DEPRECATED
-- **Pattern**: Convert all `static mut INSTANCE: Option<T> = None` to `static mut PTR: *mut T = core::ptr::null_mut()`
-- **Implementation**: Use Box::leak pattern: `Box::leak(Box::new(instance)) as *mut T`
-- **Memory Barriers**:
-  - AArch64: `dsb sy` and `isb` instructions before and after assignment
-  - RISC-V: `fence rw, rw` instruction before and after assignment
-  - x86_64: No explicit barriers needed
-- **Modules Converted**: VFS, IPC Registry, Process Server, Shell, Thread API, Init System, Driver Framework
-- **Result**: Eliminated architecture-specific static mut issues, AArch64 now boots to Stage 6
-- **Status**: **SUPERSEDED** by Rust 2024 safe patterns (November 2025)
-
-### Rust 2024 Safe Global State Pattern (November 19, 2025) - CURRENT
+### Rust 2024 Safe Global State Pattern - CURRENT
 **RECOMMENDED PATTERN**: Complete elimination of `static mut` for Rust 2024 compatibility.
 
 #### GlobalState Pattern (Most Common)
@@ -741,4 +504,3 @@ These remain with documented SAFETY justifications:
 - `BOOT_INFO` (arch/x86_64/boot.rs) - Set once during early boot before any concurrency
 - `EARLY_SERIAL` (arch/x86_64/early_serial.rs) - Pre-allocator serial output
 - `KERNEL_STACK`/`STACK` (arch/x86_64/gdt.rs) - GDT circular references, early boot infrastructure
-

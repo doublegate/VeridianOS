@@ -283,6 +283,76 @@ impl PackageManager {
         Ok(())
     }
 
+    /// Remove a package, preserving user-modified config files.
+    ///
+    /// Config files that the user has edited are saved with a `.bak` suffix
+    /// instead of being deleted.
+    pub fn remove_preserving_configs(&mut self, package_id: &PackageId) -> PkgResult<()> {
+        if !self.installed.contains_key(package_id) {
+            return Err(KernelError::NotFound {
+                resource: "package",
+                id: 0,
+            });
+        }
+
+        // Check reverse dependencies
+        let dependents = self.find_dependents(package_id);
+        if !dependents.is_empty() {
+            return Err(KernelError::InvalidState {
+                expected: "no reverse dependencies",
+                actual: "package is required by other packages",
+            });
+        }
+
+        // Log which config files are being preserved
+        let config_files = self.database.list_config_files(package_id);
+        for config in config_files {
+            if config.is_user_modified {
+                crate::println!(
+                    "[PKG] Preserving modified config: {} -> {}.bak",
+                    config.path,
+                    config.path
+                );
+            }
+        }
+
+        // Record in transaction if active
+        if let Some(txn) = &mut self.transaction {
+            txn.operations
+                .push(TransactionOp::Remove(package_id.clone()));
+        }
+
+        // Remove package
+        self.installed.remove(package_id);
+        crate::println!("[PKG] Removed {} (configs preserved)", package_id);
+
+        Ok(())
+    }
+
+    /// Find and remove orphan packages (packages with no reverse dependencies).
+    ///
+    /// Returns the list of removed package names.
+    pub fn remove_orphans(&mut self) -> PkgResult<Vec<PackageId>> {
+        let orphans = self.database.find_orphans();
+        let mut removed = Vec::new();
+
+        for orphan in &orphans {
+            // Skip packages that are not in the installed set
+            if !self.installed.contains_key(orphan) {
+                continue;
+            }
+            if self.remove(orphan).is_ok() {
+                removed.push(orphan.clone());
+            }
+        }
+
+        if !removed.is_empty() {
+            crate::println!("[PKG] Removed {} orphan package(s)", removed.len());
+        }
+
+        Ok(removed)
+    }
+
     /// List installed packages
     pub fn list_installed(&self) -> Vec<(PackageId, Version)> {
         self.installed

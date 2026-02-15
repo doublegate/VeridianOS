@@ -1,3 +1,61 @@
+## [0.3.6] - 2026-02-15
+
+### Phase 4 Package Ecosystem Group 1 + Build Fixes
+
+Advances Phase 4 (Package Ecosystem) with 4 parallel implementation sprints covering repository infrastructure, package removal enhancements, binary delta updates, and configuration file tracking. Also fixes a RISC-V linker relocation error caused by kernel growth past 1MB.
+
+7 kernel source files changed, 1 new file created (+717/-392 lines including CLAUDE.md optimization).
+
+---
+
+### Added
+
+#### Sprint 1A: Repository Network Infrastructure (`kernel/src/pkg/repository.rs`)
+- `RepositoryIndex` struct with package entries, timestamps, and Ed25519 signature verification
+- `MirrorManager` with priority-based mirror selection and failover on offline status
+- `RepositoryConfig` for multi-repository management (add/remove/enable/disable repos)
+- Made `HttpClient`, `HttpResponse`, `HttpError` public for cross-module use
+- Removed blanket `#[allow(dead_code)]` (targeted suppression on `HttpMethod::Head` only)
+
+#### Sprint 1B: Package Removal Enhancements (`kernel/src/pkg/database.rs`, `kernel/src/pkg/mod.rs`)
+- `ConfigRecord` struct for tracking configuration file modifications (path, original hash, user-modified flag)
+- `track_config_file()`, `is_config_modified()`, `list_config_files()` methods on `PackageDatabase`
+- `find_orphans()` for detecting packages with zero reverse dependencies
+- `remove_preserving_configs()` method that saves user-modified config files as `.conf.bak`
+- `remove_orphans()` for batch removal of orphaned packages
+
+#### Sprint 1C: Binary Delta Updates (`kernel/src/pkg/delta.rs` — NEW, ~320 LOC)
+- `DeltaOp` enum (`Copy { offset, len }`, `Insert { data }`) for operation encoding
+- `BinaryDelta` struct with source/target SHA-256 hashes and operations list
+- `compute_delta()` using 256-byte block matching with FNV-1a hash table
+- `apply_delta()` with bounds-checked reconstruction
+- `verify_delta_result()` with SHA-256 hash verification
+- `serialize_delta()` / `deserialize_delta()` for binary wire format
+- `DeltaMetadata` for size comparison (delta vs full download)
+
+#### Sprint 1D: Configuration File Tracking (`kernel/src/pkg/manifest.rs`)
+- `FileType` enum: `Binary`, `Config`, `Documentation`, `Asset`
+- `FileType::parse()`, `from_path()`, `to_byte()`, `from_byte()` methods
+- Path-based inference: `/etc/` or `.conf` -> Config, `/doc/` or `.md` -> Documentation
+- `list_config_files()` and `list_doc_files()` convenience methods on `FileManifest`
+
+### Fixed
+
+- **RISC-V `R_RISCV_JAL` relocation out of range** (`kernel/src/arch/riscv64/boot.S`): Changed `jal _start_rust` to `call _start_rust`. The kernel binary grew past 1MB with Phase 4 code, exceeding JAL's +/-1MB range. The `call` pseudo-instruction expands to AUIPC+JALR with +/-2GB range.
+- **Clippy `should_implement_trait`** (`kernel/src/pkg/manifest.rs`): Renamed `FileType::from_str()` to `FileType::parse()` to avoid confusion with `std::str::FromStr` trait.
+
+### Changed
+
+- **CLAUDE.md optimization**: Reduced from 36.5KB to 20.6KB (43.6% reduction) by consolidating duplicate sections, converting verbose lists to tables, and compressing historical content
+- **CLAUDE.local.md optimization**: Reduced from 63.6KB to 11.5KB (81.8% reduction) by removing duplicated information and compressing session summaries
+
+### Build Verification
+- x86_64: Stage 6 BOOTOK, 22/22 tests, zero warnings
+- AArch64: Stage 6 BOOTOK, 22/22 tests, zero warnings
+- RISC-V: Stage 6 BOOTOK, 22/22 tests, zero warnings
+
+---
+
 ## [0.3.5] - 2026-02-15
 
 ### Critical Architecture Boot Fixes

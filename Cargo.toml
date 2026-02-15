@@ -13,7 +13,7 @@ members = [
 # "tools/*",
 
 [workspace.package]
-version = "0.3.5"
+version = "0.3.6"
 authors = ["VeridianOS Contributors"]
 edition = "2021"
 license = "MIT OR Apache-2.0"

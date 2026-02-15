@@ -12,6 +12,85 @@ use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 use crate::error::KernelError;
 
+/// Type classification for files installed by a package.
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileType {
+    /// Regular binary/executable file
+    Binary,
+    /// Configuration file (preserved on upgrade/remove)
+    Config,
+    /// Documentation file
+    Documentation,
+    /// Static asset (images, fonts, data files)
+    Asset,
+}
+
+#[cfg(feature = "alloc")]
+impl FileType {
+    /// Parse a file type from a string identifier.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "config" | "conf" | "cfg" => Self::Config,
+            "doc" | "documentation" | "man" => Self::Documentation,
+            "asset" | "data" | "resource" => Self::Asset,
+            _ => Self::Binary,
+        }
+    }
+
+    /// Infer file type from a file path based on common patterns.
+    pub fn from_path(path: &str) -> Self {
+        if path.contains("/etc/")
+            || path.ends_with(".conf")
+            || path.ends_with(".cfg")
+            || path.ends_with(".ini")
+            || path.ends_with(".toml")
+            || path.ends_with(".yaml")
+            || path.ends_with(".json")
+        {
+            Self::Config
+        } else if path.contains("/doc/")
+            || path.contains("/man/")
+            || path.ends_with(".md")
+            || path.ends_with(".txt")
+            || path.ends_with(".html")
+            || path.ends_with(".1")
+        {
+            Self::Documentation
+        } else if path.contains("/share/")
+            || path.ends_with(".png")
+            || path.ends_with(".svg")
+            || path.ends_with(".ico")
+            || path.ends_with(".ttf")
+            || path.ends_with(".otf")
+        {
+            Self::Asset
+        } else {
+            Self::Binary
+        }
+    }
+
+    /// Convert to a byte for serialization.
+    pub fn to_byte(self) -> u8 {
+        match self {
+            Self::Binary => 0,
+            Self::Config => 1,
+            Self::Documentation => 2,
+            Self::Asset => 3,
+        }
+    }
+
+    /// Parse from a byte.
+    pub fn from_byte(b: u8) -> Self {
+        match b {
+            1 => Self::Config,
+            2 => Self::Documentation,
+            3 => Self::Asset,
+            _ => Self::Binary,
+        }
+    }
+}
+
 /// A record of files installed by a package
 #[cfg(feature = "alloc")]
 pub struct FileManifest {
@@ -29,6 +108,8 @@ pub struct FileRecord {
     pub size: u64,
     /// Simple hash for integrity checking
     pub checksum: u64,
+    /// Type classification of this file
+    pub file_type: FileType,
 }
 
 #[cfg(feature = "alloc")]
@@ -99,6 +180,32 @@ impl FileManifest {
     /// the actual files.
     pub fn remove_package(&mut self, package: &str) -> Option<Vec<FileRecord>> {
         self.entries.remove(package)
+    }
+
+    /// List only configuration files for a package.
+    pub fn list_config_files(&self, package: &str) -> Vec<&FileRecord> {
+        self.entries
+            .get(package)
+            .map(|records| {
+                records
+                    .iter()
+                    .filter(|r| r.file_type == FileType::Config)
+                    .collect()
+            })
+            .unwrap_or_else(Vec::new)
+    }
+
+    /// List only documentation files for a package.
+    pub fn list_doc_files(&self, package: &str) -> Vec<&FileRecord> {
+        self.entries
+            .get(package)
+            .map(|records| {
+                records
+                    .iter()
+                    .filter(|r| r.file_type == FileType::Documentation)
+                    .collect()
+            })
+            .unwrap_or_else(Vec::new)
     }
 
     /// Return the total number of tracked packages.

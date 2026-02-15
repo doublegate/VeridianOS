@@ -107,7 +107,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Last Updated**: February 15, 2026 (v0.3.5)
+**Last Updated**: February 15, 2026 (v0.3.6)
 
 ### Current Architecture Support
 
@@ -181,6 +181,18 @@ Released February 14, 2026. Comprehensive completion of both Phase 2 (User Space
 - **Authentication Hardening** — Real timestamps for MFA; PBKDF2-HMAC-SHA256 password hashing; password complexity enforcement; password history (prevent reuse); account expiration
 - **Capability System Phase 3** — ObjectRef::Endpoint in IPC integration; PRESERVE_EXEC filtering; default IPC/memory capabilities; process notification on revocation; permission checks; IPC broadcast for revocation
 - **Syscall Security + Fuzzing** — MAC checks before capability checks in syscall handlers; audit logging in syscall entry/exit; argument validation (pointer bounds, size limits); `FuzzTarget` trait with mutation-based fuzzer; ELF/IPC/FS/capability fuzz targets; crash detection via panic handler hooks
+
+### Phase 4 Package Ecosystem Group 1 + Build Fixes (v0.3.6)
+
+Released February 15, 2026. Four parallel implementation sprints advancing Phase 4:
+
+- **Repository Infrastructure** -- Repository index with Ed25519 verification, mirror manager with failover, multi-repo configuration
+- **Package Removal** -- Config file preservation on remove/upgrade, orphan package detection and batch removal
+- **Binary Delta Updates** -- Block-matching delta computation/application with SHA-256 verification for incremental downloads
+- **Config File Tracking** -- FileType classification (Binary/Config/Documentation/Asset) with path-based inference
+- **RISC-V Build Fix** -- Changed `jal` to `call` in boot.S (kernel grew past JAL's 1MB range)
+
+7 files changed (+717/-392 lines), 1 new file. All 3 architectures: Stage 6 BOOTOK, 22/22 tests, zero warnings.
 
 ### Critical Architecture Boot Fixes (v0.3.5)
 
@@ -484,6 +496,7 @@ Security is a fundamental design principle:
 - [x] Technical Debt Remediation — RiscvScheduler soundness fix, Result<T, &str> elimination (96 to 0), 3 large file splits, TODO(phase3) triage (2026-02-14, v0.3.3)
 - [x] Phase 1-3 Integration + Phase 4 Package Ecosystem — IPC-scheduler bridge, VMM-page table integration, capability validation, FPU context, DPLL SAT resolver, ports system, SDK types, package shell commands (2026-02-15, v0.3.4)
 - [x] Critical Architecture Boot Fixes — x86_64 CSPRNG double fault, RISC-V frame allocator memory map, boot stack overflow; all 3 architectures now fully boot (2026-02-15, v0.3.5)
+- [x] Phase 4 Group 1 — Repository infrastructure, package removal enhancements, binary delta updates, config file tracking, RISC-V JAL fix (2026-02-15, v0.3.6)
 
 ### Mid-term (2026)
 
