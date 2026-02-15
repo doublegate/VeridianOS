@@ -29,7 +29,7 @@ mod signature;
 
 // Re-export public types
 pub use compression::{compress, decompress};
-pub use signature::PackageSignatures;
+pub use signature::{PackageSignatures, SignaturePolicy, TrustLevel, TrustedKey, TrustedKeyRing};
 
 /// Package file magic number
 pub const VPKG_MAGIC: [u8; 4] = *b"VPKG";

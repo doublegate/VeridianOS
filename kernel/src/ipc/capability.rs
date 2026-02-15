@@ -4,6 +4,9 @@
 //! for IPC operations. They are the foundation of VeridianOS security model.
 #![allow(dead_code)]
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::KernelError;
@@ -239,35 +242,99 @@ impl IpcLimits {
     }
 }
 
-/// Capability lookup table for O(1) access
+/// Capability lookup table with BTreeMap-backed storage
 ///
-/// This will be expanded to use perfect hashing in production
+/// Provides O(log n) lookup for capability tokens. Uses BTreeMap
+/// when the alloc feature is available, with a no-op fallback.
 pub struct CapabilityTable {
-    // Placeholder - will implement proper lookup structure
+    /// Capability storage keyed by capability ID
+    #[cfg(feature = "alloc")]
+    capabilities: alloc::collections::BTreeMap<u64, IpcCapability>,
 }
 
 impl CapabilityTable {
     /// Create a new capability table
     pub fn new() -> Self {
-        Self {}
+        Self {
+            #[cfg(feature = "alloc")]
+            capabilities: alloc::collections::BTreeMap::new(),
+        }
     }
 
     /// Insert a capability into the table
+    #[cfg(feature = "alloc")]
+    pub fn insert(&mut self, cap: IpcCapability) -> Result<(), KernelError> {
+        let id = cap.id();
+        if self.capabilities.contains_key(&id) {
+            return Err(KernelError::AlreadyExists {
+                resource: "ipc_capability",
+                id,
+            });
+        }
+        self.capabilities.insert(id, cap);
+        Ok(())
+    }
+
+    /// Insert a capability into the table (no-alloc stub)
+    #[cfg(not(feature = "alloc"))]
     pub fn insert(&mut self, _cap: IpcCapability) -> Result<(), KernelError> {
-        // TODO(future): Implement capability table insertion with BTreeMap storage
         Ok(())
     }
 
     /// Lookup a capability by ID
+    #[cfg(feature = "alloc")]
+    pub fn lookup(&self, id: u64) -> Option<&IpcCapability> {
+        self.capabilities.get(&id)
+    }
+
+    /// Lookup a capability by ID (no-alloc stub)
+    #[cfg(not(feature = "alloc"))]
     pub fn lookup(&self, _id: u64) -> Option<&IpcCapability> {
-        // TODO(future): Implement capability table lookup
         None
     }
 
     /// Remove a capability from the table
+    #[cfg(feature = "alloc")]
+    pub fn remove(&mut self, id: u64) -> Option<IpcCapability> {
+        self.capabilities.remove(&id)
+    }
+
+    /// Remove a capability from the table (no-alloc stub)
+    #[cfg(not(feature = "alloc"))]
     pub fn remove(&mut self, _id: u64) -> Option<IpcCapability> {
-        // TODO(future): Implement capability table removal
         None
+    }
+
+    /// Validate that a capability has the specified permission
+    #[cfg(feature = "alloc")]
+    pub fn validate_permission(&self, cap_id: u64, perm: Permission) -> bool {
+        self.capabilities
+            .get(&cap_id)
+            .map(|cap| cap.has_permission(perm))
+            .unwrap_or(false)
+    }
+
+    /// Validate permission (no-alloc stub)
+    #[cfg(not(feature = "alloc"))]
+    pub fn validate_permission(&self, _cap_id: u64, _perm: Permission) -> bool {
+        false
+    }
+
+    /// Get number of capabilities in the table
+    #[cfg(feature = "alloc")]
+    pub fn len(&self) -> usize {
+        self.capabilities.len()
+    }
+
+    /// Get number of capabilities (no-alloc stub)
+    #[cfg(not(feature = "alloc"))]
+    pub fn len(&self) -> usize {
+        0
+    }
+
+    /// Check if table is empty
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 

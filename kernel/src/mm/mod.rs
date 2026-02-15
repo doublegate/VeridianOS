@@ -8,6 +8,7 @@
 pub mod bootloader;
 pub mod frame_allocator;
 pub mod heap;
+pub mod page_fault;
 pub mod page_table;
 pub mod user_validation;
 pub mod vas;

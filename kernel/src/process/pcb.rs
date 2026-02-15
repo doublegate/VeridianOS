@@ -799,12 +799,44 @@ impl ProcessBuilder {
         self
     }
 
-    /// Build the process
+    /// Build the process.
+    ///
+    /// Note: The VAS is created but not initialized (no page table root).
+    /// Callers that need a real address space must call
+    /// `memory_space.lock().init()` afterwards (as
+    /// `create_process_with_options` does), or clone from an existing
+    /// address space (as `fork_process` does).
     pub fn build(self) -> Process {
         let pid = super::alloc_pid();
         let mut process = Process::new(pid, self.parent, self.name, self.priority);
         process.uid = self.uid;
         process.gid = self.gid;
         process
+    }
+
+    /// Build the process with an initialized address space.
+    ///
+    /// Allocates a root page table frame and maps kernel regions into the
+    /// new address space. This is the preferred method for creating
+    /// standalone processes (not forked from an existing process).
+    pub fn build_with_address_space(self) -> Result<Process, KernelError> {
+        let pid = super::alloc_pid();
+        let mut process = Process::new(pid, self.parent, self.name, self.priority);
+        process.uid = self.uid;
+        process.gid = self.gid;
+
+        // Initialize the virtual address space with a real page table root
+        // and kernel space mappings
+        {
+            let mut memory_space = process.memory_space.lock();
+            memory_space.init()?;
+        }
+
+        println!(
+            "[PROCESS] Created process {} with initialized address space",
+            pid.0
+        );
+
+        Ok(process)
     }
 }

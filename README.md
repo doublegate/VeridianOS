@@ -107,7 +107,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Last Updated**: February 14, 2026 (v0.3.3)
+**Last Updated**: February 15, 2026 (v0.3.4)
 
 ### Current Architecture Support
 
@@ -181,6 +181,39 @@ Released February 14, 2026. Comprehensive completion of both Phase 2 (User Space
 - **Authentication Hardening** — Real timestamps for MFA; PBKDF2-HMAC-SHA256 password hashing; password complexity enforcement; password history (prevent reuse); account expiration
 - **Capability System Phase 3** — ObjectRef::Endpoint in IPC integration; PRESERVE_EXEC filtering; default IPC/memory capabilities; process notification on revocation; permission checks; IPC broadcast for revocation
 - **Syscall Security + Fuzzing** — MAC checks before capability checks in syscall handlers; audit logging in syscall entry/exit; argument validation (pointer bounds, size limits); `FuzzTarget` trait with mutation-based fuzzer; ELF/IPC/FS/capability fuzz targets; crash detection via panic handler hooks
+
+### Phase 1-3 Integration + Phase 4 Package Ecosystem (v0.3.4)
+
+Released February 15, 2026. Two-track release closing Phase 1-3 integration gaps and advancing Phase 4 to ~75% across 14 implementation sprints:
+
+**Phase 1-3 Integration Gaps Closed (7 sprints):**
+
+- **IPC-Scheduler Bridge** -- IPC sync_send/sync_receive now block via scheduler instead of returning ChannelFull/NoMessage; sync_reply wakes blocked senders; async channels wake endpoint waiters after enqueue
+- **VMM-Page Table Integration** -- map_region/unmap_region write to real architecture page tables via PageMapper; VAS operations allocate/free physical frames via frame allocator
+- **Capability Validation** -- IPC capability validation performs two-level check against process capability space; fast path process lookup uses real process table
+- **FPU Context Switching** -- NEON Q0-Q31 save/restore on AArch64; F/D extension f0-f31 save/restore on RISC-V
+- **Thread Memory** -- Thread creation allocates real stack frames with guard pages; TLS allocation uses real frame allocation with architecture-specific register setup (FS_BASE/TPIDR_EL0/tp)
+- **Shared Memory** -- Regions allocate/free physical frames and flush TLB; transfer_ownership validates target process; unmap properly frees frames
+- **Zero-Copy IPC** -- Uses real ProcessPageTable with VAS delegation; allocate_virtual_range uses VAS mmap instead of hardcoded address
+
+**Phase 4 Package Ecosystem (7 sprints, ~75% complete):**
+
+- **Transaction System** -- Package manager with atomic install/remove/upgrade operations and rollback support
+- **DPLL SAT Resolver** -- Dependency resolver with version ranges, virtual packages, conflict detection, and backtracking
+- **Ports Framework** -- 6 build types (Autotools, CMake, Meson, Cargo, Make, Custom); port collection management with 6 standard categories
+- **SDK Types** -- ToolchainInfo, BuildTarget, SdkConfig; typed syscall API wrappers for 6 subsystems; package configuration with .pc file generation
+- **Shell Commands** -- install, remove, update, upgrade, list, search, info, verify
+- **Package Syscalls** -- SYS_PKG_INSTALL (90) through SYS_PKG_UPDATE (94)
+- **Crypto Hardening** -- Real Ed25519 signature verification with trust policies for packages
+
+**Phase 4 Prerequisites:**
+
+- Page fault handler framework with demand paging and stack growth
+- ELF dynamic linker support with auxiliary vector and PT_INTERP parsing
+- Process waitpid infrastructure with WNOHANG and POSIX wstatus encoding
+- Per-process working directory with path normalization
+
+42 files changed (+7,581/-424 lines), 15 new files. AArch64 and RISC-V boot to Stage 6 BOOTOK with 22/22 tests passing.
 
 ### Technical Debt Remediation (v0.3.3)
 
@@ -438,13 +471,14 @@ Security is a fundamental design principle:
 - [x] Technical Debt Remediation — OnceLock soundness fix, 48 static mut eliminated, typed errors, panic-free syscalls (2026-02-14, v0.3.1)
 - [x] Phase 2 & Phase 3 Completion — 15 implementation sprints, full crypto/secure boot/TPM/MAC/audit/ELF/BlockFS/signals (2026-02-14, v0.3.2)
 - [x] Technical Debt Remediation — RiscvScheduler soundness fix, Result<T, &str> elimination (96 to 0), 3 large file splits, TODO(phase3) triage (2026-02-14, v0.3.3)
+- [x] Phase 1-3 Integration + Phase 4 Package Ecosystem — IPC-scheduler bridge, VMM-page table integration, capability validation, FPU context, DPLL SAT resolver, ports system, SDK types, package shell commands (2026-02-15, v0.3.4)
 
 ### Mid-term (2026)
 
 - [x] Phase 2: User Space Foundation — 100% Complete (2026-02-14, v0.3.2)
 - [x] Phase 3: Security Hardening — 100% Complete (2026-02-14, v0.3.2)
 - [x] Technical Debt Remediation — Complete (2026-02-14, v0.3.1)
-- [ ] Phase 4: Package Ecosystem & Self-Hosting (5–6 months) — Ports system, LLVM toolchain priority
+- [ ] Phase 4: Package Ecosystem & Self-Hosting (5-6 months) — ~75% complete: transaction system, DPLL SAT resolver, ports framework, SDK types, shell commands, package syscalls
 
 ### Long-term (2027+)
 

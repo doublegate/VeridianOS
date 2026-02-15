@@ -129,7 +129,11 @@ pub fn sync_reply(reply: Message, caller: u64) -> Result<()> {
     }
 
     // Send reply directly
-    sync_send(reply, caller)
+    sync_send(reply, caller)?;
+
+    // Wake the caller process after reply is sent
+    crate::sched::ipc_blocking::wake_up_process(ProcessId(caller));
+    Ok(())
 }
 
 /// Slow path for synchronous send
@@ -137,10 +141,25 @@ fn sync_send_slow_path(msg: Message, target_endpoint: u64) -> Result<()> {
     // Validate send capability
     validate_send_capability(&msg, target_endpoint)?;
 
-    // Use message passing subsystem
+    // Use message passing subsystem with retry-on-full blocking
     #[cfg(feature = "alloc")]
     {
-        crate::ipc::message_passing::send_to_endpoint(msg, target_endpoint)
+        const MAX_RETRIES: u32 = 3;
+        for _attempt in 0..MAX_RETRIES {
+            match crate::ipc::message_passing::send_to_endpoint(msg, target_endpoint) {
+                Ok(()) => {
+                    // Wake any processes waiting on this endpoint
+                    crate::sched::ipc_blocking::wake_up_endpoint_waiters(target_endpoint);
+                    return Ok(());
+                }
+                Err(IpcError::ChannelFull) => {
+                    // Block until space available
+                    crate::sched::ipc_blocking::block_on_ipc(target_endpoint);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(IpcError::ChannelFull)
     }
     #[cfg(not(feature = "alloc"))]
     {

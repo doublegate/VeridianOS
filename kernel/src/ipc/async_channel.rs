@@ -118,6 +118,9 @@ impl AsyncChannel {
                     }
                 }
 
+                // Also wake any processes blocked on this channel's endpoint
+                crate::sched::ipc_blocking::wake_up_endpoint_waiters(self.id);
+
                 Ok(())
             }
             Err(_) => {
@@ -418,9 +421,9 @@ impl Default for MessageBatch {
     }
 }
 
-// Placeholder functions for process management
-fn wake_process(_pid: ProcessId) {
-    // TODO(future): Implement process wakeup via scheduler
+// Process wakeup via scheduler
+fn wake_process(pid: ProcessId) {
+    crate::sched::ipc_blocking::wake_up_process(pid);
 }
 
 fn timestamp_to_ns(cycles: u64) -> u64 {

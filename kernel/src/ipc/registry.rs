@@ -173,7 +173,8 @@ impl IpcRegistry {
         None
     }
 
-    /// Validate a capability
+    /// Validate a capability (Level 1: registry, Level 2: process capability
+    /// space)
     #[cfg(feature = "alloc")]
     pub fn validate_capability(
         &self,
@@ -184,13 +185,25 @@ impl IpcRegistry {
             .capability_lookups
             .fetch_add(1, Ordering::Relaxed);
 
-        // Check if process owns this capability
+        // Level 1: Check if process owns this capability in the registry
         if let Some(process_caps) = self.process_endpoints.get(&process) {
             if let Some(stored_cap) = process_caps.get(&capability.target()) {
                 // Verify generation matches
                 if stored_cap.generation() == capability.generation() {
                     self.stats.capability_hits.fetch_add(1, Ordering::Relaxed);
-                    return Ok(());
+
+                    // Level 2: Cross-validate against process's capability space
+                    if let Some(real_process) = crate::process::table::get_process(process) {
+                        let cap_space = real_process.capability_space.lock();
+                        let cap_token = crate::cap::CapabilityToken::from_u64(capability.id());
+                        if cap_space.lookup(cap_token).is_some() {
+                            return Ok(());
+                        }
+                        // Cap space doesn't have it - fall through to error
+                    } else {
+                        // Process table not available (early boot) - trust Level 1
+                        return Ok(());
+                    }
                 }
             }
         }

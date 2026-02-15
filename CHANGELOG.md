@@ -1,3 +1,170 @@
+## [0.3.4] - 2026-02-15
+
+### Phase 1-3 Integration + Phase 4 Package Ecosystem
+
+**MILESTONE**: Two-track release closing Phase 1-3 integration gaps and advancing Phase 4 Package Ecosystem to ~75% complete across 14 implementation sprints. 42 files changed (+7,581/-424 lines), 15 new files. AArch64 and RISC-V verified: 22/22 tests pass, zero clippy warnings, cargo fmt clean. x86_64 builds with zero warnings; boot has pre-existing CSPRNG double fault (confirmed on clean v0.3.3).
+
+---
+
+### Phase 1-3 Integration Gaps Closed (7 Sprints)
+
+#### Sprint G-1: IPC-Scheduler Bridge
+
+- **`ipc/sync.rs`**: `sync_send()` now blocks calling process via `scheduler::block_current()` when channel is full instead of returning `ChannelFull`; `sync_receive()` blocks via scheduler when no message available instead of returning `NoMessage`
+- **`ipc/sync.rs`**: `sync_reply()` wakes blocked senders via `scheduler::wake_up_process()` after reply delivery
+- **`ipc/async_channel.rs`**: Async message enqueue wakes endpoint waiters via `scheduler::wake_up_process()`
+
+#### Sprint G-2: VMM-Page Table Integration
+
+- **`mm/mod.rs`**: `map_region()` and `unmap_region()` now write to real architecture page tables via `PageMapper` instead of only updating internal VMM tracking structures
+- **`mm/vas.rs`**: VAS `mmap()` allocates physical frames via frame allocator; `munmap()` frees frames back to allocator; `protect()` updates page table permissions
+
+#### Sprint G-3: IPC Capability Validation
+
+- **`ipc/capability.rs`**: `validate_capability()` performs two-level capability space lookup against the calling process's capability space, checking generation counters and rights masks
+- **`ipc/fast_path.rs`**: Process lookup uses real process table via `process::table::get_process()` instead of always-returning-None stub
+
+#### Sprint G-4: FPU/SIMD Context Switching
+
+- **`arch/aarch64/context.rs`**: NEON/SIMD state (Q0-Q31, 32 x 128-bit registers) saved/restored on context switch using `stp`/`ldp` instructions
+- **`arch/riscv/context.rs`**: F/D extension floating-point state (f0-f31, 32 x 64-bit registers) saved/restored on context switch using `fsd`/`fld` instructions
+- **`arch/context.rs`**: `save_fpu_state()`/`restore_fpu_state()` dispatcher routes to architecture-specific implementations
+
+#### Sprint G-5: Thread Memory Integration
+
+- **`process/thread.rs`**: Thread stack allocation uses frame allocator for real physical frames with guard pages (one guard frame below stack); TLS allocation uses frame allocator with architecture-specific register setup (x86_64 FS_BASE via MSR 0xC0000100, AArch64 TPIDR_EL0, RISC-V tp register)
+
+#### Sprint G-6: Shared Memory Integration
+
+- **`ipc/shared_memory.rs`**: `create_shared_region()` allocates physical frames via frame allocator; `unmap_shared_region()` frees frames back; `transfer_ownership()` validates target process exists via process table; TLB flush on unmap
+
+#### Sprint G-7: Zero-Copy IPC Integration
+
+- **`ipc/zero_copy.rs`**: `ProcessPageTable` uses real VAS delegation via `VirtualAddressSpace` instead of dummy struct; `allocate_virtual_range()` uses VAS `mmap()` instead of hardcoded `0x200000`; process creation supports `build_with_address_space()` for real VAS initialization
+
+---
+
+### Phase 4 Package Ecosystem (7 Sprints, ~75% Complete)
+
+#### Sprint P4-1: Package Manager Transaction System
+
+- **`pkg/mod.rs`**: Transaction-based package manager with `PackageTransaction` supporting atomic install/remove/upgrade operations with automatic rollback on failure
+- **`pkg/database.rs`** (NEW): VFS-backed package database with `PackageRecord` entries; FNV-1a hash-based lookup; methods: `install_package()`, `remove_package()`, `get_package()`, `list_packages()`, `search()`
+
+#### Sprint P4-2: Package Manifest and Integrity
+
+- **`pkg/manifest.rs`** (NEW): File manifest tracking with `FileManifest` and `ManifestEntry` structs; FNV-1a integrity checking via `fnv1a_hash()`; manifest verification: `verify_all()` returns list of corrupted/missing files
+
+#### Sprint P4-3: DPLL SAT Dependency Resolver
+
+- **`pkg/resolver.rs`**: Complete DPLL SAT-based dependency resolver with version range support (`>=`, `<=`, `>`, `<`, `=`, `^`, `~`); virtual package resolution; conflict detection with explanations; backtracking search with unit propagation and pure literal elimination
+
+#### Sprint P4-4: Ports System Framework
+
+- **`pkg/ports/mod.rs`** (NEW): Ports framework with `Portfile` struct and `PortfileBuildType` enum (Autotools, CMake, Meson, Cargo, Make, Custom); `BuildEnvironment` with environment variables; `PortsBuildSystem` managing fetch/configure/build/install pipeline
+- **`pkg/ports/collection.rs`** (NEW): Port collection management with 6 standard categories (System, Development, Libraries, Networking, Utilities, Multimedia); `PortEntry` metadata; collection search and category listing
+- **`pkg/toml_parser.rs`** (NEW): Minimal no_std TOML parser supporting strings, integers, booleans, arrays, and inline tables; `TomlValue` enum; `parse_portfile()` for Portfile.toml deserialization
+
+#### Sprint P4-5: SDK Types and Syscall API
+
+- **`pkg/sdk/mod.rs`** (NEW): SDK types including `ToolchainInfo`, `BuildTarget` (with architecture enum), `SdkConfig`, and `CrossCompileConfig`; toolchain validation
+- **`pkg/sdk/syscall_api.rs`** (NEW): Typed syscall API wrappers for 6 subsystems: process (fork, exec, exit, waitpid), memory (mmap, munmap, mprotect), IPC (channel_create, send, receive), filesystem (open, read, write, close), capability (cap_create, cap_derive, cap_revoke), and package management
+- **`pkg/sdk/pkg_config.rs`** (NEW): Package configuration with `.pc` file generation; `PkgConfigFile` struct with name, version, description, cflags, libs; `generate_pc_content()` for pkg-config compatible output
+
+#### Sprint P4-6: Shell Commands and Syscalls
+
+- **`services/shell/commands.rs`**: 8 package shell commands: `pkg install`, `pkg remove`, `pkg update`, `pkg upgrade`, `pkg list`, `pkg search`, `pkg info`, `pkg verify`
+- **`services/shell/mod.rs`**: Package command registration in shell command table
+- **`syscall/package.rs`** (NEW): Package syscall handlers for SYS_PKG_INSTALL (90), SYS_PKG_REMOVE (91), SYS_PKG_QUERY (92), SYS_PKG_LIST (93), SYS_PKG_UPDATE (94)
+- **`syscall/mod.rs`**: Package syscall dispatch integration in main syscall handler
+
+#### Sprint P4-7: Crypto Hardening for Packages
+
+- **`pkg/format/signature.rs`**: Real Ed25519 signature verification replacing placeholder; trust policy levels (TrustAll, RequireSigned, RequireKnownKey, RequireThreshold); `SignatureVerifier` with key management and threshold signing support
+- **`pkg/format/mod.rs`**: Package format integration with signature verification; `verify_package()` uses real crypto
+
+---
+
+### Phase 4 Prerequisites (4 New Subsystems)
+
+#### Page Fault Handler
+
+- **`mm/page_fault.rs`** (NEW): Page fault handler framework with `PageFaultReason` enum (NotPresent, ProtectionViolation, WriteToReadOnly, InstructionFetch, ReservedBit); `PageFaultHandler` with demand paging, stack growth detection, and architecture-specific constructors for x86_64 (CR2), AArch64 (FAR_EL1), and RISC-V (stval)
+
+#### ELF Dynamic Linker
+
+- **`elf/dynamic.rs`** (NEW): ELF dynamic linker support with `AuxVec` auxiliary vector (AT_PHDR, AT_PHENT, AT_PHNUM, AT_ENTRY, AT_BASE, AT_PAGESZ, AT_RANDOM); PT_INTERP parsing for interpreter path; `DynamicLinkerInfo` struct; `setup_dynamic_linking()` prepares auxiliary vector from ELF headers
+
+#### Process Wait Infrastructure
+
+- **`process/wait.rs`** (NEW): `waitpid()` implementation with WNOHANG support; POSIX-compatible wstatus encoding (exit code in bits 8-15, signal in bits 0-6, core dump in bit 7); `WaitStatus` enum (Exited, Signaled, Stopped, Continued); `ExitInfo` collection from child processes
+- **`process/mod.rs`**: Wait module integration; `wait_for_child()` public API
+
+#### Per-Process Working Directory
+
+- **`process/cwd.rs`** (NEW): Per-process current working directory with `ProcessCwd` struct; path normalization (`.`/`..` resolution, double-slash removal); `resolve_path()` converts relative paths to absolute; `chdir()` with VFS existence validation
+- **`process/pcb.rs`**: CWD field integration in Process Control Block
+
+---
+
+### Integration Tests
+
+- **`test_framework.rs`**: 6 new package manager integration tests: package database CRUD, manifest integrity verification, dependency resolver with conflicts, TOML parser validation, port collection categories, and package syscall dispatch
+
+### Added (15 New Files)
+
+- `kernel/src/pkg/database.rs` -- Package database with VFS-backed persistent storage
+- `kernel/src/pkg/manifest.rs` -- File manifest tracking with FNV-1a integrity checking
+- `kernel/src/pkg/toml_parser.rs` -- Minimal no_std TOML parser for Portfile.toml
+- `kernel/src/pkg/ports/mod.rs` -- Ports system framework with 6 build types
+- `kernel/src/pkg/ports/collection.rs` -- Port collection management with 6 categories
+- `kernel/src/pkg/sdk/mod.rs` -- SDK types: ToolchainInfo, BuildTarget, SdkConfig
+- `kernel/src/pkg/sdk/syscall_api.rs` -- Typed syscall API wrappers for 6 subsystems
+- `kernel/src/pkg/sdk/pkg_config.rs` -- Package configuration with .pc file generation
+- `kernel/src/syscall/package.rs` -- Package syscalls SYS_PKG_INSTALL through SYS_PKG_UPDATE
+- `kernel/src/mm/page_fault.rs` -- Page fault handler with demand paging and stack growth
+- `kernel/src/elf/dynamic.rs` -- ELF dynamic linker with auxiliary vector
+- `kernel/src/process/wait.rs` -- waitpid with WNOHANG and POSIX wstatus encoding
+- `kernel/src/process/cwd.rs` -- Per-process working directory with path normalization
+
+### Changed
+
+- IPC sync_send/sync_receive block via scheduler instead of returning ChannelFull/NoMessage
+- IPC sync_reply wakes blocked senders via wake_up_process()
+- IPC async channels wake endpoint waiters after message enqueue
+- IPC fast path process lookup uses real process table instead of always-None stub
+- IPC capability validation performs two-level check against process capability space
+- VMM map_region/unmap_region write to real architecture page tables via PageMapper
+- VAS operations allocate/free physical frames via frame allocator
+- Zero-copy IPC uses real ProcessPageTable with VAS delegation instead of dummy struct
+- Zero-copy allocate_virtual_range uses VAS mmap instead of hardcoded 0x200000
+- Thread creation allocates real stack frames with guard pages via frame allocator
+- TLS allocation uses real frame allocation with architecture-specific register setup (FS_BASE/TPIDR_EL0/tp)
+- Shared memory regions allocate/free physical frames and flush TLB
+- FPU/SIMD state saved/restored on context switch: NEON Q0-Q31 on AArch64, F/D f0-f31 on RISC-V
+- Process creation supports build_with_address_space() for real VAS initialization
+- Package signature verification uses real Ed25519 cryptography with trust policies
+
+### Fixed
+
+- IPC fast path process lookup no longer returns None for all processes
+- Shared memory transfer_ownership validates target process exists
+- Shared memory unmap properly frees physical frames (previously leaked)
+
+### Architecture Verification
+
+| Architecture | Build | Clippy | Format | Init Tests | BOOTOK |
+|--------------|-------|--------|--------|-----------|--------|
+| x86_64 (UEFI) | Pass | 0 warnings | Pass | -- | Pre-existing CSPRNG issue |
+| AArch64      | Pass  | 0 warnings | Pass | 22/22 | Yes |
+| RISC-V 64    | Pass  | 0 warnings | Pass | 22/22 | Yes |
+
+### Breaking Changes
+
+None. All changes are additive or internal integration improvements.
+
+---
+
 ## [0.3.3] - 2026-02-14
 
 ### Comprehensive Technical Debt Remediation

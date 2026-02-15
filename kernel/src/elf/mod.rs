@@ -6,6 +6,7 @@
 
 #![allow(clippy::slow_vector_initialization, clippy::unnecessary_cast)]
 
+pub mod dynamic;
 pub mod types;
 
 // Re-export all types for backward compatibility

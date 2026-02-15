@@ -420,6 +420,111 @@ pub fn has_d_extension() -> bool {
     }
 }
 
+/// Save FPU state (F/D extension registers)
+///
+/// Saves f0-f31 and fcsr if the D extension is available.
+pub fn save_fpu_state(state: &mut FpuState) {
+    if !has_d_extension() {
+        return;
+    }
+    // SAFETY: Saves all 32 double-precision FP registers via FSD instructions.
+    // The FpuState struct has repr(C, align(16)) layout with f: [f64; 32].
+    // The D extension is confirmed available by the has_d_extension() check above.
+    unsafe {
+        let base = state.f.as_mut_ptr() as *mut u8;
+        asm!(
+            "fsd f0,  0({base})",
+            "fsd f1,  8({base})",
+            "fsd f2,  16({base})",
+            "fsd f3,  24({base})",
+            "fsd f4,  32({base})",
+            "fsd f5,  40({base})",
+            "fsd f6,  48({base})",
+            "fsd f7,  56({base})",
+            "fsd f8,  64({base})",
+            "fsd f9,  72({base})",
+            "fsd f10, 80({base})",
+            "fsd f11, 88({base})",
+            "fsd f12, 96({base})",
+            "fsd f13, 104({base})",
+            "fsd f14, 112({base})",
+            "fsd f15, 120({base})",
+            "fsd f16, 128({base})",
+            "fsd f17, 136({base})",
+            "fsd f18, 144({base})",
+            "fsd f19, 152({base})",
+            "fsd f20, 160({base})",
+            "fsd f21, 168({base})",
+            "fsd f22, 176({base})",
+            "fsd f23, 184({base})",
+            "fsd f24, 192({base})",
+            "fsd f25, 200({base})",
+            "fsd f26, 208({base})",
+            "fsd f27, 216({base})",
+            "fsd f28, 224({base})",
+            "fsd f29, 232({base})",
+            "fsd f30, 240({base})",
+            "fsd f31, 248({base})",
+            base = in(reg) base,
+        );
+        let fcsr: u32;
+        asm!("frcsr {fcsr}", fcsr = out(reg) fcsr);
+        state.fcsr = fcsr;
+    }
+}
+
+/// Restore FPU state (F/D extension registers)
+///
+/// Restores f0-f31 and fcsr if the D extension is available.
+pub fn restore_fpu_state(state: &FpuState) {
+    if !has_d_extension() {
+        return;
+    }
+    // SAFETY: Restores all 32 double-precision FP registers via FLD instructions.
+    // The FpuState struct has repr(C, align(16)) layout with f: [f64; 32].
+    // The D extension is confirmed available by the has_d_extension() check above.
+    unsafe {
+        let fcsr = state.fcsr;
+        asm!("fscsr {fcsr}", fcsr = in(reg) fcsr);
+        let base = state.f.as_ptr() as *const u8;
+        asm!(
+            "fld f0,  0({base})",
+            "fld f1,  8({base})",
+            "fld f2,  16({base})",
+            "fld f3,  24({base})",
+            "fld f4,  32({base})",
+            "fld f5,  40({base})",
+            "fld f6,  48({base})",
+            "fld f7,  56({base})",
+            "fld f8,  64({base})",
+            "fld f9,  72({base})",
+            "fld f10, 80({base})",
+            "fld f11, 88({base})",
+            "fld f12, 96({base})",
+            "fld f13, 104({base})",
+            "fld f14, 112({base})",
+            "fld f15, 120({base})",
+            "fld f16, 128({base})",
+            "fld f17, 136({base})",
+            "fld f18, 144({base})",
+            "fld f19, 152({base})",
+            "fld f20, 160({base})",
+            "fld f21, 168({base})",
+            "fld f22, 176({base})",
+            "fld f23, 184({base})",
+            "fld f24, 192({base})",
+            "fld f25, 200({base})",
+            "fld f26, 208({base})",
+            "fld f27, 216({base})",
+            "fld f28, 224({base})",
+            "fld f29, 232({base})",
+            "fld f30, 240({base})",
+            "fld f31, 248({base})",
+            base = in(reg) base,
+        );
+    }
+}
+
 /// Get current hart (hardware thread) ID
 ///
 /// Currently unused but retained for future SMP support where

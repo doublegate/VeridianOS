@@ -31,7 +31,7 @@ use alloc::{
 use commands::{
     CatCommand, CdCommand, ClearCommand, EchoCommand, EnvCommand, ExitCommand, ExportCommand,
     HelpCommand, HistoryCommand, KillCommand, LsCommand, LsmodCommand, MkdirCommand, MountCommand,
-    PsCommand, PwdCommand, RmCommand, TouchCommand, UnsetCommand, UptimeCommand,
+    PkgCommand, PsCommand, PwdCommand, RmCommand, TouchCommand, UnsetCommand, UptimeCommand,
 };
 use spin::RwLock;
 pub use state::{get_shell, init, run_shell, try_get_shell};
@@ -351,6 +351,9 @@ impl Shell {
         builtins.insert("env".into(), Box::new(EnvCommand));
         builtins.insert("export".into(), Box::new(ExportCommand));
         builtins.insert("unset".into(), Box::new(UnsetCommand));
+
+        // Package management
+        builtins.insert("pkg".into(), Box::new(PkgCommand));
 
         // Shell commands
         builtins.insert("history".into(), Box::new(HistoryCommand));

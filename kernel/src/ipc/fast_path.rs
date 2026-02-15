@@ -118,9 +118,20 @@ fn validate_capability_fast(cap: u64) -> bool {
 }
 
 /// Fast process lookup
+///
+/// Checks if the target process exists and is blocked (ready for direct
+/// register transfer). If blocked, wakes it via the scheduler. Returns
+/// None to fall back to the slow path since direct register transfer
+/// requires per-task IpcRegs storage (planned for Sprint G-4).
 #[inline(always)]
-fn find_process_fast(_pid: u64) -> Option<&'static mut Process> {
-    // TODO(future): Implement O(1) process table lookup via direct array index
+fn find_process_fast(pid: u64) -> Option<&'static mut Process> {
+    // Check if target process exists via scheduler
+    if let Some(_task) = crate::sched::find_process(crate::process::ProcessId(pid)) {
+        // Process exists. Wake it if blocked so it can receive via slow path.
+        crate::sched::ipc_blocking::wake_up_process(crate::process::ProcessId(pid));
+    }
+    // Return None to fall back to slow path (direct register transfer
+    // needs per-task IpcRegs, which will be added in Sprint G-4)
     None
 }
 

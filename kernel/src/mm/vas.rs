@@ -15,8 +15,43 @@ use alloc::{collections::BTreeMap, vec::Vec};
 
 use spin::Mutex;
 
-use super::{PageFlags, VirtualAddress};
+use super::{
+    page_table::{FrameAllocator as PageFrameAllocator, PageMapper},
+    FrameAllocatorError, FrameNumber, PageFlags, VirtualAddress, FRAME_ALLOCATOR,
+};
 use crate::error::KernelError;
+
+/// Frame allocator wrapper implementing the page_table::FrameAllocator trait.
+/// Delegates to the global FRAME_ALLOCATOR.
+struct VasFrameAllocator;
+
+impl PageFrameAllocator for VasFrameAllocator {
+    fn allocate_frames(
+        &mut self,
+        count: usize,
+        numa_node: Option<usize>,
+    ) -> Result<FrameNumber, FrameAllocatorError> {
+        FRAME_ALLOCATOR.lock().allocate_frames(count, numa_node)
+    }
+}
+
+/// Create a PageMapper from a page table root physical address.
+///
+/// # Safety
+///
+/// The `page_table_root` must be a valid physical address of a properly
+/// initialized L4 page table. The physical address must be identity-mapped
+/// or accessible via the kernel's physical memory map so that it can be
+/// dereferenced as a pointer. The caller must ensure exclusive access to
+/// the page table hierarchy for the duration of the returned PageMapper's
+/// use.
+unsafe fn create_mapper_from_root(page_table_root: u64) -> PageMapper {
+    let l4_ptr = page_table_root as *mut super::page_table::PageTable;
+    // SAFETY: The caller guarantees that `page_table_root` is a valid,
+    // identity-mapped physical address of an L4 page table. The pointer
+    // is valid for the lifetime of this PageMapper usage.
+    unsafe { PageMapper::new(l4_ptr) }
+}
 
 /// Memory mapping types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,30 +256,44 @@ impl VirtualAddressSpace {
     pub fn destroy(&mut self) {
         #[cfg(feature = "alloc")]
         {
-            use super::FRAME_ALLOCATOR;
+            let pt_root = self.page_table_root.load(Ordering::Acquire);
 
-            // First unmap all regions and free their physical frames
+            // First unmap all regions from page tables and free physical frames
             let mut mappings = self.mappings.lock();
+
+            // Unmap from architecture page tables if we have a valid root
+            if pt_root != 0 {
+                // SAFETY: `pt_root` is a non-zero physical address of an L4
+                // page table set during VAS::init(). The address is identity-
+                // mapped in the kernel's physical memory window. We have
+                // `&mut self`, ensuring exclusive access.
+                let mut mapper = unsafe { create_mapper_from_root(pt_root) };
+
+                for (_, mapping) in mappings.iter() {
+                    let num_pages = mapping.size / 4096;
+                    for i in 0..num_pages {
+                        let vaddr = VirtualAddress(mapping.start.0 + (i as u64) * 4096);
+                        let _ = mapper.unmap_page(vaddr);
+                    }
+                }
+            }
+
+            // Free physical frames for each mapping
             for (_, mapping) in mappings.iter() {
-                // Free the physical frames
                 let allocator = FRAME_ALLOCATOR.lock();
                 for &frame in &mapping.physical_frames {
                     let _ = allocator.free_frames(frame, 1);
                 }
-
-                // Unmap from page tables
-                // Note: In a real implementation, we would need the page mapper
-                // for this VAS to unmap the pages. For now, we'll just flush
-                // TLB.
             }
 
             // Clear all mappings
             mappings.clear();
 
-            // Free the page table structures themselves
-            // Note: This would require walking the page table hierarchy
-            // and freeing intermediate table pages. For now, we just
-            // clear our tracking structures.
+            // Flush entire TLB since we destroyed the whole address space
+            crate::arch::tlb_flush_all();
+
+            // TODO(future): Free page table structures themselves by walking
+            // the hierarchy and freeing intermediate table pages.
         }
     }
 
@@ -267,8 +316,6 @@ impl VirtualAddressSpace {
         size: usize,
         mapping_type: MappingType,
     ) -> Result<(), KernelError> {
-        use super::FRAME_ALLOCATOR;
-
         // Align to page boundary
         let aligned_start = VirtualAddress(start.0 & !(4096 - 1));
         let aligned_size = ((size + 4095) / 4096) * 4096;
@@ -291,24 +338,48 @@ impl VirtualAddressSpace {
         let num_pages = aligned_size / 4096;
         let mut physical_frames = Vec::with_capacity(num_pages);
 
-        // Get frame allocator
-        let frame_allocator = FRAME_ALLOCATOR.lock();
-
-        // Allocate frames
-        for _ in 0..num_pages {
-            let frame =
-                frame_allocator
-                    .allocate_frames(1, None)
-                    .map_err(|_| KernelError::OutOfMemory {
+        // Allocate all frames first (hold FRAME_ALLOCATOR lock briefly)
+        {
+            let frame_allocator = FRAME_ALLOCATOR.lock();
+            for _ in 0..num_pages {
+                let frame = frame_allocator.allocate_frames(1, None).map_err(|_| {
+                    KernelError::OutOfMemory {
                         requested: 4096,
                         available: 0,
-                    })?;
-            physical_frames.push(frame);
+                    }
+                })?;
+                physical_frames.push(frame);
+            }
+        } // Drop frame allocator lock before page table operations
+
+        // Wire mappings into the architecture page table
+        let pt_root = self.page_table_root.load(Ordering::Acquire);
+        if pt_root != 0 {
+            // SAFETY: `pt_root` is a non-zero physical address of an L4 page
+            // table that was set during VAS::init() or inherited from a valid
+            // parent address space. The address is identity-mapped in the
+            // kernel's physical memory window. We hold the mappings lock,
+            // ensuring exclusive page table modification for this VAS.
+            let mut mapper = unsafe { create_mapper_from_root(pt_root) };
+            let mut alloc = VasFrameAllocator;
+
+            for (i, &frame) in physical_frames.iter().enumerate() {
+                let vaddr = VirtualAddress(aligned_start.0 + (i as u64) * 4096);
+                // Intermediate page tables may need frame allocation, which
+                // VasFrameAllocator provides by locking FRAME_ALLOCATOR
+                // internally. This is safe because we already dropped our
+                // earlier lock on FRAME_ALLOCATOR above.
+                mapper.map_page(vaddr, frame, mapping.flags, &mut alloc)?;
+            }
+
+            // Flush TLB for the entire mapped range
+            for i in 0..num_pages {
+                let vaddr = aligned_start.0 + (i as u64) * 4096;
+                crate::arch::tlb_flush_address(vaddr);
+            }
         }
 
-        // Map pages to frames in page table
-        // Note: In a real implementation, we would need to map the page table
-        // into virtual memory to modify it. For now, we'll just store the mapping.
+        // Record the mapping in our tracking structure
         let mut mapping = mapping;
         mapping.physical_frames = physical_frames;
 
@@ -342,16 +413,37 @@ impl VirtualAddressSpace {
     /// Unmap a region
     #[cfg(feature = "alloc")]
     pub fn unmap_region(&self, start: VirtualAddress) -> Result<(), KernelError> {
-        use super::FRAME_ALLOCATOR;
-
         let mut mappings = self.mappings.lock();
         let mapping = mappings.remove(&start).ok_or(KernelError::NotFound {
             resource: "memory region",
             id: start.0,
         })?;
 
-        // Flush TLB for the unmapped range
-        crate::arch::tlb_flush_address(mapping.start.0);
+        let num_pages = mapping.size / 4096;
+
+        // Unmap each page from the architecture page table
+        let pt_root = self.page_table_root.load(Ordering::Acquire);
+        if pt_root != 0 {
+            // SAFETY: `pt_root` is a non-zero physical address of an L4 page
+            // table set during VAS::init(). The address is identity-mapped in
+            // the kernel's physical memory window. We hold the mappings lock,
+            // ensuring exclusive page table modification for this VAS.
+            let mut mapper = unsafe { create_mapper_from_root(pt_root) };
+
+            for i in 0..num_pages {
+                let vaddr = VirtualAddress(mapping.start.0 + (i as u64) * 4096);
+                // Ignore errors from unmap_page -- the page may not have been
+                // installed in the hardware table (e.g., if map_region was
+                // called before the page table root was set).
+                let _ = mapper.unmap_page(vaddr);
+            }
+        }
+
+        // Flush TLB for each page in the unmapped range
+        for i in 0..num_pages {
+            let vaddr = mapping.start.0 + (i as u64) * 4096;
+            crate::arch::tlb_flush_address(vaddr);
+        }
 
         // Free the physical frames
         let frame_allocator = FRAME_ALLOCATOR.lock();
@@ -521,10 +613,27 @@ impl VirtualAddressSpace {
     pub fn clear(&mut self) {
         #[cfg(feature = "alloc")]
         {
-            use super::FRAME_ALLOCATOR;
+            let pt_root = self.page_table_root.load(Ordering::Acquire);
 
             // Get all mappings to free their frames
             let mappings = self.mappings.get_mut();
+
+            // Unmap from architecture page tables if we have a valid root
+            if pt_root != 0 {
+                // SAFETY: `pt_root` is a non-zero physical address of an L4
+                // page table set during VAS::init(). The address is identity-
+                // mapped in the kernel's physical memory window. We have
+                // `&mut self`, ensuring exclusive access.
+                let mut mapper = unsafe { create_mapper_from_root(pt_root) };
+
+                for (_, mapping) in mappings.iter() {
+                    let num_pages = mapping.size / 4096;
+                    for i in 0..num_pages {
+                        let vaddr = VirtualAddress(mapping.start.0 + (i as u64) * 4096);
+                        let _ = mapper.unmap_page(vaddr);
+                    }
+                }
+            }
 
             // Free physical frames for each mapping
             for (_, mapping) in mappings.iter() {
@@ -536,6 +645,9 @@ impl VirtualAddressSpace {
 
             // Clear all mappings
             mappings.clear();
+
+            // Flush entire TLB since we cleared all mappings
+            crate::arch::tlb_flush_all();
         }
 
         // Reset metadata
@@ -544,26 +656,48 @@ impl VirtualAddressSpace {
         self.next_mmap_addr
             .store(0x4000_0000_0000, Ordering::Release);
 
-        // TODO(future): Free page tables
+        // TODO(future): Free page table structures
     }
 
     /// Clear user-space mappings only (for exec)
     pub fn clear_user_space(&mut self) -> Result<(), KernelError> {
         #[cfg(feature = "alloc")]
         {
-            use super::FRAME_ALLOCATOR;
-
+            let pt_root = self.page_table_root.load(Ordering::Acquire);
             let mappings = self.mappings.get_mut();
             let mut to_remove = Vec::new();
 
             // Find all user-space mappings (below kernel space)
             const KERNEL_SPACE_START: u64 = 0xFFFF_8000_0000_0000;
 
-            for (addr, mapping) in mappings.iter() {
+            for (addr, _mapping) in mappings.iter() {
                 if addr.0 < KERNEL_SPACE_START {
                     to_remove.push(*addr);
+                }
+            }
 
-                    // Free physical frames
+            // Unmap user-space pages from architecture page tables
+            if pt_root != 0 {
+                // SAFETY: `pt_root` is a non-zero physical address of an L4
+                // page table set during VAS::init(). The address is identity-
+                // mapped in the kernel's physical memory window. We have
+                // `&mut self`, ensuring exclusive access.
+                let mut mapper = unsafe { create_mapper_from_root(pt_root) };
+
+                for addr in &to_remove {
+                    if let Some(mapping) = mappings.get(addr) {
+                        let num_pages = mapping.size / 4096;
+                        for i in 0..num_pages {
+                            let vaddr = VirtualAddress(mapping.start.0 + (i as u64) * 4096);
+                            let _ = mapper.unmap_page(vaddr);
+                        }
+                    }
+                }
+            }
+
+            // Free physical frames and remove mappings
+            for addr in &to_remove {
+                if let Some(mapping) = mappings.get(addr) {
                     let frame_allocator = FRAME_ALLOCATOR.lock();
                     for frame in &mapping.physical_frames {
                         frame_allocator.free_frames(*frame, 1).ok();
@@ -571,10 +705,12 @@ impl VirtualAddressSpace {
                 }
             }
 
-            // Remove user-space mappings
             for addr in to_remove {
                 mappings.remove(&addr);
             }
+
+            // Flush TLB for user-space changes
+            crate::arch::tlb_flush_all();
         }
 
         // Reset user-space metadata
@@ -612,33 +748,46 @@ impl VirtualAddressSpace {
 
     /// Map a single page at a virtual address
     pub fn map_page(&mut self, vaddr: usize, flags: PageFlags) -> Result<(), KernelError> {
-        use super::{FRAME_ALLOCATOR, PAGE_SIZE};
+        use super::PAGE_SIZE;
 
-        // Allocate a physical frame
-        let frame = FRAME_ALLOCATOR
-            .lock()
-            .allocate_frames(1, None)
-            .map_err(|_| KernelError::OutOfMemory {
-                requested: 4096,
-                available: 0,
-            })?;
+        // Allocate a physical frame (drop lock before page table operations)
+        let frame = {
+            FRAME_ALLOCATOR
+                .lock()
+                .allocate_frames(1, None)
+                .map_err(|_| KernelError::OutOfMemory {
+                    requested: 4096,
+                    available: 0,
+                })?
+        };
 
-        // TODO(future): Implement architecture-specific page mapping
+        let vaddr_obj = VirtualAddress(vaddr as u64);
+
+        // Install the mapping in the architecture page table
+        let pt_root = self.page_table_root.load(Ordering::Acquire);
+        if pt_root != 0 {
+            // SAFETY: `pt_root` is a non-zero physical address of an L4 page
+            // table set during VAS::init(). The address is identity-mapped in
+            // the kernel's physical memory window. We have `&mut self`,
+            // ensuring exclusive access to this VAS and its page tables.
+            let mut mapper = unsafe { create_mapper_from_root(pt_root) };
+            let mut alloc = VasFrameAllocator;
+            mapper.map_page(vaddr_obj, frame, flags, &mut alloc)?;
+            crate::arch::tlb_flush_address(vaddr as u64);
+        }
 
         // Record the mapping
         #[cfg(feature = "alloc")]
         {
             let mut mappings = self.mappings.lock();
-            let vaddr_aligned = VirtualAddress(vaddr as u64);
 
-            if let Some(mapping) = mappings.get_mut(&vaddr_aligned) {
+            if let Some(mapping) = mappings.get_mut(&vaddr_obj) {
                 mapping.physical_frames.push(frame);
             } else {
-                let mut new_mapping =
-                    VirtualMapping::new(vaddr_aligned, PAGE_SIZE, MappingType::Data);
+                let mut new_mapping = VirtualMapping::new(vaddr_obj, PAGE_SIZE, MappingType::Data);
                 new_mapping.physical_frames.push(frame);
                 new_mapping.flags = flags;
-                mappings.insert(vaddr_aligned, new_mapping);
+                mappings.insert(vaddr_obj, new_mapping);
             }
         }
 

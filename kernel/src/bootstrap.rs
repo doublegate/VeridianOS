@@ -315,6 +315,7 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
         kprintln!("[BOOTSTRAP] Initializing package manager...");
         pkg::init();
         kprintln!("[BOOTSTRAP] Package manager initialized");
+        kprintln!("[PKGMGR] Package manager v0.4.0 ready");
     }
 
     // Initialize network stack

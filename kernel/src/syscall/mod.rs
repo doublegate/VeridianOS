@@ -101,6 +101,10 @@ use self::filesystem::*;
 mod info;
 use self::info::*;
 
+// Import package syscalls module
+mod package;
+use self::package::*;
+
 // Import user space utilities
 mod userspace;
 
@@ -168,6 +172,13 @@ pub enum Syscall {
 
     // Kernel information
     KernelGetInfo = 80,
+
+    // Package management
+    PkgInstall = 90,
+    PkgRemove = 91,
+    PkgQuery = 92,
+    PkgList = 93,
+    PkgUpdate = 94,
 }
 
 /// System call result type
@@ -340,6 +351,13 @@ fn handle_syscall(
 
         // Kernel information
         Syscall::KernelGetInfo => sys_get_kernel_info(arg1),
+
+        // Package management
+        Syscall::PkgInstall => sys_pkg_install(arg1, arg2),
+        Syscall::PkgRemove => sys_pkg_remove(arg1, arg2),
+        Syscall::PkgQuery => sys_pkg_query(arg1, arg2),
+        Syscall::PkgList => sys_pkg_list(arg1, arg2),
+        Syscall::PkgUpdate => sys_pkg_update(arg1),
 
         _ => Err(SyscallError::InvalidSyscall),
     }
@@ -826,6 +844,13 @@ impl TryFrom<usize> for Syscall {
 
             // Kernel information
             80 => Ok(Syscall::KernelGetInfo),
+
+            // Package management
+            90 => Ok(Syscall::PkgInstall),
+            91 => Ok(Syscall::PkgRemove),
+            92 => Ok(Syscall::PkgQuery),
+            93 => Ok(Syscall::PkgList),
+            94 => Ok(Syscall::PkgUpdate),
 
             _ => Err(()),
         }

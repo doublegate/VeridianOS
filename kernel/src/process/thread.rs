@@ -18,8 +18,57 @@ use spin::Mutex;
 use super::ProcessId;
 use crate::{
     arch::context::{ArchThreadContext, ThreadContext},
+    error::KernelError,
+    mm::{FRAME_ALLOCATOR, FRAME_SIZE},
     sched::task::Task,
 };
+
+/// Default kernel stack size: 64KB (16 pages)
+pub const DEFAULT_KERNEL_STACK_PAGES: usize = 16;
+
+/// Default user stack size: 64KB (16 pages) for kernel-created threads
+/// User processes use the value from ProcessCreateOptions instead.
+pub const DEFAULT_USER_STACK_PAGES: usize = 16;
+
+/// Default TLS region size: 4KB (1 page)
+pub const DEFAULT_TLS_PAGES: usize = 1;
+
+/// Guard page count (1 page below each stack to detect overflow)
+pub const GUARD_PAGE_COUNT: usize = 1;
+
+/// Base virtual address for kernel thread stacks.
+/// Each thread gets its own region at KERNEL_STACK_REGION_BASE - (thread_index
+/// * region_size).
+const KERNEL_STACK_REGION_BASE: usize = 0xFFFF_E000_0000_0000;
+
+/// Base virtual address for user thread stacks.
+/// Grows downward from near the top of user address space.
+const USER_STACK_REGION_BASE: usize = 0x0000_7FFE_0000_0000;
+
+/// Base virtual address for TLS regions.
+const TLS_REGION_BASE: usize = 0x0000_7000_0000_0000;
+
+/// Allocate physical frames for a stack region and return the base physical
+/// address.
+///
+/// Allocates `page_count` contiguous physical frames from the frame allocator.
+/// The frames are zero-filled by the allocator. Returns the frame number of the
+/// first allocated frame.
+fn allocate_stack_frames(page_count: usize) -> Result<crate::mm::FrameNumber, KernelError> {
+    let allocator = FRAME_ALLOCATOR.lock();
+    allocator
+        .allocate_frames(page_count, None)
+        .map_err(|_| KernelError::OutOfMemory {
+            requested: page_count * FRAME_SIZE,
+            available: 0,
+        })
+}
+
+/// Free previously allocated stack frames.
+fn free_stack_frames(frame: crate::mm::FrameNumber, page_count: usize) {
+    let allocator = FRAME_ALLOCATOR.lock();
+    let _ = allocator.free_frames(frame, page_count);
+}
 
 /// Safe wrapper for task pointer that implements Send + Sync
 ///
@@ -86,10 +135,34 @@ impl ThreadLocalStorage {
         }
     }
 
-    /// Allocate TLS area
-    pub fn allocate(&mut self, size: usize) -> Result<(), crate::error::KernelError> {
-        // TODO(future): Allocate actual memory pages for TLS area
-        self.size = size;
+    /// Allocate TLS area backed by real physical frames.
+    ///
+    /// Allocates enough physical frames to cover `size` bytes. The TLS base
+    /// address is set to the physical frame address (which is identity-mapped
+    /// in kernel space). The allocated memory is logically zero-filled
+    /// (`.tbss` equivalent).
+    pub fn allocate(&mut self, size: usize) -> Result<(), KernelError> {
+        if size == 0 {
+            return Ok(());
+        }
+
+        let page_count = size.div_ceil(FRAME_SIZE);
+        let frame = allocate_stack_frames(page_count)?;
+        let phys_addr = frame.as_addr().as_usize();
+
+        // Zero-fill the TLS region (for .tbss equivalent)
+        // SAFETY: `phys_addr` is the physical address of frames we just
+        // allocated. In the kernel's identity-mapped or physical memory
+        // window, this address is directly accessible. We write zeroes to
+        // `page_count * FRAME_SIZE` bytes, which is exactly the amount of
+        // memory we allocated. No other code references these frames yet.
+        unsafe {
+            core::ptr::write_bytes(phys_addr as *mut u8, 0, page_count * FRAME_SIZE);
+        }
+
+        self.base = phys_addr;
+        self.size = page_count * FRAME_SIZE;
+        self.data_ptr = phys_addr;
         Ok(())
     }
 
@@ -115,6 +188,64 @@ impl ThreadLocalStorage {
     #[cfg(feature = "alloc")]
     pub fn keys(&self) -> impl Iterator<Item = &u64> {
         self.data.keys()
+    }
+
+    /// Set the architecture-specific TLS base register.
+    ///
+    /// On x86_64, sets FS base (via WRFSBASE or MSR).
+    /// On AArch64, sets TPIDR_EL0.
+    /// On RISC-V, sets the `tp` register.
+    ///
+    /// This should be called during context switch or thread initialization
+    /// to point the hardware TLS register to this thread's TLS area.
+    pub fn activate_tls_register(&self) {
+        if self.base == 0 {
+            return;
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            // Set FS base via MSR (IA32_FS_BASE = 0xC0000100)
+            // SAFETY: Writing MSR 0xC0000100 (IA32_FS_BASE) sets the base address
+            // for the FS segment register. `self.base` is a valid address obtained
+            // from the frame allocator via `allocate()`. This is a privileged
+            // operation executed in kernel mode (ring 0). The value is split into
+            // low 32 bits (EAX) and high 32 bits (EDX) as required by WRMSR.
+            unsafe {
+                let base = self.base as u64;
+                core::arch::asm!(
+                    "wrmsr",
+                    in("ecx") 0xC000_0100u32,
+                    in("eax") (base & 0xFFFF_FFFF) as u32,
+                    in("edx") (base >> 32) as u32,
+                );
+            }
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            // Set TPIDR_EL0 (Thread Pointer ID Register for EL0)
+            // SAFETY: Writing TPIDR_EL0 sets the user-space thread pointer
+            // register. `self.base` is a valid address from the frame allocator.
+            // This is accessible from EL1 (kernel mode) and will be readable
+            // from EL0 (user mode) for TLS access. No side effects beyond
+            // setting the register value.
+            unsafe {
+                core::arch::asm!("msr tpidr_el0, {}", in(reg) self.base);
+            }
+        }
+
+        #[cfg(target_arch = "riscv64")]
+        {
+            // Set tp (thread pointer) register
+            // SAFETY: Writing the `tp` register sets the thread pointer used for
+            // TLS access. `self.base` is a valid address from the frame allocator.
+            // The `tp` register is a general-purpose register designated by the
+            // RISC-V ABI for TLS, accessible in both S-mode and U-mode.
+            unsafe {
+                core::arch::asm!("mv tp, {}", in(reg) self.base);
+            }
+        }
     }
 }
 
@@ -518,26 +649,103 @@ impl ThreadBuilder {
         self
     }
 
-    /// Build the thread
-    pub fn build(self) -> Result<Thread, crate::error::KernelError> {
-        // TODO(future): Allocate stacks from memory manager (VMM)
-        let user_stack_base = 0x1000_0000; // Placeholder
-        let kernel_stack_base = 0x2000_0000; // Placeholder
-
+    /// Build the thread with real stack allocation.
+    ///
+    /// Allocates physical frames for both the user and kernel stacks via the
+    /// global frame allocator. Each stack gets a guard page (unmapped) below
+    /// it to detect stack overflow. Stack pointers are set to the top of
+    /// each allocated region since stacks grow downward on all supported
+    /// architectures (x86_64, AArch64, RISC-V).
+    pub fn build(self) -> Result<Thread, KernelError> {
         let tid = super::alloc_tid();
+
+        // Calculate page counts for stacks
+        let user_stack_pages = self.user_stack_size.div_ceil(FRAME_SIZE);
+        let kernel_stack_pages = self.kernel_stack_size.div_ceil(FRAME_SIZE);
+
+        // Allocate physical frames for user stack
+        let user_frame = allocate_stack_frames(user_stack_pages).inspect_err(|_| {
+            crate::println!(
+                "[THREAD] Failed to allocate {} user stack frames for tid {}",
+                user_stack_pages,
+                tid.0
+            );
+        })?;
+        let _user_stack_phys = user_frame.as_addr().as_usize();
+
+        // Allocate physical frames for kernel stack
+        let kernel_frame = match allocate_stack_frames(kernel_stack_pages) {
+            Ok(frame) => frame,
+            Err(e) => {
+                // Clean up user stack on failure
+                free_stack_frames(user_frame, user_stack_pages);
+                crate::println!(
+                    "[THREAD] Failed to allocate {} kernel stack frames for tid {}",
+                    kernel_stack_pages,
+                    tid.0
+                );
+                return Err(e);
+            }
+        };
+        let kernel_stack_phys = kernel_frame.as_addr().as_usize();
+
+        // Compute virtual addresses for stacks.
+        // Use the thread index (tid) to space stacks apart so each thread
+        // gets a unique region. Each region includes a guard page below.
+        let thread_index = tid.0 as usize;
+
+        // Kernel stack virtual address: each thread gets
+        // (kernel_stack_pages + GUARD_PAGE_COUNT) pages of virtual space
+        let kernel_region_size = (kernel_stack_pages + GUARD_PAGE_COUNT) * FRAME_SIZE;
+        let kernel_stack_base =
+            KERNEL_STACK_REGION_BASE - ((thread_index + 1) * kernel_region_size);
+        // Skip guard page at the bottom
+        let kernel_stack_usable_base = kernel_stack_base + (GUARD_PAGE_COUNT * FRAME_SIZE);
+
+        // User stack virtual address: similar layout in user space
+        let user_region_size = (user_stack_pages + GUARD_PAGE_COUNT) * FRAME_SIZE;
+        let user_stack_base = USER_STACK_REGION_BASE - ((thread_index + 1) * user_region_size);
+        let user_stack_usable_base = user_stack_base + (GUARD_PAGE_COUNT * FRAME_SIZE);
+
+        // Calculate actual stack sizes based on full pages
+        let user_stack_size = user_stack_pages * FRAME_SIZE;
+        let kernel_stack_size = kernel_stack_pages * FRAME_SIZE;
+
+        // Zero the kernel stack region for safety
+        // SAFETY: `kernel_stack_phys` is the physical address of frames we
+        // just allocated from the frame allocator. In the kernel's physical
+        // memory mapping, this is directly accessible. We write zeroes to
+        // exactly `kernel_stack_size` bytes. No other code references these
+        // frames yet.
+        unsafe {
+            core::ptr::write_bytes(kernel_stack_phys as *mut u8, 0, kernel_stack_size);
+        }
+
         let mut thread = Thread::new(
             tid,
             self.process,
             self.name,
             self.entry_point,
-            user_stack_base,
-            self.user_stack_size,
-            kernel_stack_base,
-            self.kernel_stack_size,
+            user_stack_usable_base,
+            user_stack_size,
+            kernel_stack_usable_base,
+            kernel_stack_size,
         );
 
         thread.priority = self.priority;
         thread.set_affinity(self.cpu_affinity);
+
+        crate::println!(
+            "[THREAD] Allocated stacks for tid {}: user={:#x}..{:#x} (phys={:#x}), \
+             kernel={:#x}..{:#x} (phys={:#x}), guard pages installed",
+            tid.0,
+            user_stack_usable_base,
+            user_stack_usable_base + user_stack_size,
+            _user_stack_phys,
+            kernel_stack_usable_base,
+            kernel_stack_usable_base + kernel_stack_size,
+            kernel_stack_phys,
+        );
 
         Ok(thread)
     }

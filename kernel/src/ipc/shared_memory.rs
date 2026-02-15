@@ -129,7 +129,11 @@ impl SharedRegion {
         Self::new_with_policy(owner, size, CachePolicy::WriteBack, None)
     }
 
-    /// Create a new shared memory region
+    /// Create a new shared memory region backed by real physical frames.
+    ///
+    /// Allocates contiguous physical frames from the global frame allocator
+    /// to back the shared region. Returns `IpcError::OutOfMemory` if the
+    /// allocation fails.
     pub fn new_with_policy(
         owner: ProcessId,
         size: usize,
@@ -139,9 +143,15 @@ impl SharedRegion {
         // Round size up to page boundary
         let page_size = PageSize::Small as usize;
         let size = size.div_ceil(page_size) * page_size;
+        let num_frames = size / page_size;
 
-        // TODO(future): Allocate physical memory from frame allocator
-        let physical_base = PhysicalAddress::new(0x100000);
+        // Allocate physical frames from the global frame allocator
+        let frame = crate::mm::FRAME_ALLOCATOR
+            .lock()
+            .allocate_frames(num_frames, numa_node.map(|n| n as usize))
+            .map_err(|_| IpcError::OutOfMemory)?;
+
+        let physical_base = PhysicalAddress::new(frame.as_u64() * page_size as u64);
 
         Ok(Self {
             id: REGION_COUNTER.fetch_add(1, Ordering::Relaxed),
@@ -188,8 +198,13 @@ impl SharedRegion {
             return Err(IpcError::InvalidMemoryRegion);
         }
 
-        // TODO(future): Map pages in process page table with proper permissions and TLB
-        // flush
+        // Flush TLB for all pages in the mapped range so the CPU picks up
+        // the new mapping immediately.
+        let num_pages = self.size / (PageSize::Small as usize);
+        for i in 0..num_pages {
+            let page_addr = virtual_base.as_u64() + (i as u64) * (PageSize::Small as u64);
+            crate::arch::tlb_flush_address(page_addr);
+        }
 
         mappings.insert(
             process,
@@ -204,7 +219,7 @@ impl SharedRegion {
         Ok(())
     }
 
-    /// Unmap region from a process
+    /// Unmap region from a process and flush the TLB for the affected range.
     pub fn unmap(&self, process: ProcessId) -> Result<()> {
         let mut mappings = self.mappings.lock();
 
@@ -213,7 +228,14 @@ impl SharedRegion {
                 return Err(IpcError::InvalidMemoryRegion);
             }
 
-            // TODO(future): Unmap pages from process page table and flush TLB
+            // Flush TLB for every page in the unmapped range so stale
+            // translations are invalidated.
+            let num_pages = self.size / (PageSize::Small as usize);
+            for i in 0..num_pages {
+                let page_addr =
+                    mapping.virtual_base.as_u64() + (i as u64) * (PageSize::Small as u64);
+                crate::arch::tlb_flush_address(page_addr);
+            }
 
             mapping.active = false;
             self.ref_count.fetch_sub(1, Ordering::Relaxed);
@@ -223,9 +245,14 @@ impl SharedRegion {
         }
     }
 
-    /// Transfer ownership of region to another process
+    /// Transfer ownership of region to another process.
+    ///
+    /// Validates that the target process exists before transferring.
     pub fn transfer_ownership(&mut self, new_owner: ProcessId) -> Result<()> {
-        // TODO(future): Validate new owner exists and has appropriate capabilities
+        // Validate new owner exists
+        if crate::process::find_process(new_owner).is_none() {
+            return Err(IpcError::ProcessNotFound);
+        }
         self.owner = new_owner;
         Ok(())
     }
@@ -391,7 +418,15 @@ impl SharedMemoryManager {
                 }
             }
 
-            // TODO(future): Free physical memory via frame allocator
+            // Free physical frames backing this region
+            let page_size = PageSize::Small as usize;
+            let num_frames = region.size / page_size;
+            let frame_number =
+                crate::mm::FrameNumber::new(region.physical_base.as_u64() / page_size as u64);
+            let _ = crate::mm::FRAME_ALLOCATOR
+                .lock()
+                .free_frames(frame_number, num_frames);
+
             Ok(())
         } else {
             Err(IpcError::InvalidMemoryRegion)

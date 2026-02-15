@@ -25,6 +25,7 @@ use crate::println;
 
 // Re-export submodules
 pub mod creation;
+pub mod cwd;
 pub mod exit;
 pub mod fork;
 pub mod lifecycle;
@@ -34,6 +35,7 @@ pub mod pcb;
 pub mod sync;
 pub mod table;
 pub mod thread;
+pub mod wait;
 
 // Re-export common types
 pub use lifecycle::{exec_process, fork_process, wait_process as wait_for_child};
@@ -245,6 +247,10 @@ pub fn wake_thread(tid: ThreadId) {
 }
 
 /// Create a new thread in the current process
+///
+/// Allocates real stack frames for the thread via the frame allocator using
+/// [`ThreadBuilder`]. If `stack_ptr` is non-zero, it overrides the user stack
+/// pointer. If `tls_ptr` is non-zero, it sets the TLS base address.
 pub fn create_thread(
     entry_point: usize,
     stack_ptr: usize,
@@ -252,31 +258,21 @@ pub fn create_thread(
     tls_ptr: usize,
 ) -> crate::error::KernelResult<ThreadId> {
     if let Some(process) = current_process() {
-        let tid = alloc_tid();
-
         #[cfg(feature = "alloc")]
         {
             use alloc::string::String;
-            // Create thread with provided parameters
-            // Note: Thread::new requires more parameters including stack info
-            // For now, use default stack sizes
-            let user_stack_base = 0x1000_0000; // Placeholder - should allocate
-            let user_stack_size = 1024 * 1024; // 1MB
-            let kernel_stack_base = 0x2000_0000; // Placeholder - should allocate
-            let kernel_stack_size = 64 * 1024; // 64KB
 
-            let thread = Thread::new(
-                tid,
-                process.pid,
-                String::from("user_thread"),
-                entry_point,
-                user_stack_base,
-                user_stack_size,
-                kernel_stack_base,
-                kernel_stack_size,
-            );
+            use thread::ThreadBuilder;
 
-            // Override the stack pointer if provided
+            // Build thread with real stack allocation via ThreadBuilder
+            let thread = ThreadBuilder::new(process.pid, String::from("user_thread"), entry_point)
+                .user_stack_size(1024 * 1024) // 1MB user stack
+                .kernel_stack_size(64 * 1024) // 64KB kernel stack
+                .build()?;
+
+            let tid = thread.tid;
+
+            // Override the stack pointer if provided by caller
             if stack_ptr != 0 {
                 thread.user_stack.set_sp(stack_ptr);
             }
@@ -290,11 +286,19 @@ pub fn create_thread(
             // For now, we'll skip this as it requires arch-specific code
             let _ = arg;
 
-            // Add thread to process (uses legacy &'static str, auto-converted)
+            // Add thread to process
             process.add_thread(thread)?;
+
+            Ok(tid)
         }
 
-        Ok(tid)
+        #[cfg(not(feature = "alloc"))]
+        {
+            let _ = (entry_point, stack_ptr, arg, tls_ptr);
+            Err(crate::error::KernelError::NotImplemented {
+                feature: "create_thread (requires alloc)",
+            })
+        }
     } else {
         Err(crate::error::KernelError::ProcessNotFound { pid: 0 })
     }

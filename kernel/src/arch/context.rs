@@ -91,11 +91,23 @@ pub fn save_fpu_state(state: &mut [u8]) {
         );
     }
 
-    #[cfg(not(target_arch = "x86_64"))]
-    let _ = state;
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: The byte slice must be large enough and aligned for AArch64 FpuState.
+        // The cast is valid because save_fpu_state writes all fields via STP.
+        let fpu =
+            unsafe { &mut *(state.as_mut_ptr() as *mut crate::arch::aarch64::context::FpuState) };
+        crate::arch::aarch64::context::save_fpu_state(fpu);
+    }
 
-    // TODO(future): Implement FPU save for AArch64 (FPSR/FPCR) and RISC-V
-    // (fcsr)
+    #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+    {
+        // SAFETY: The byte slice must be large enough and aligned for RISC-V FpuState.
+        // The cast is valid because save_fpu_state writes all fields via FSD.
+        let fpu =
+            unsafe { &mut *(state.as_mut_ptr() as *mut crate::arch::riscv::context::FpuState) };
+        crate::arch::riscv::context::save_fpu_state(fpu);
+    }
 }
 
 /// Restore FPU/SIMD state
@@ -110,9 +122,17 @@ pub fn restore_fpu_state(state: &[u8]) {
         );
     }
 
-    #[cfg(not(target_arch = "x86_64"))]
-    let _ = state;
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: The byte slice contains valid FpuState data from save_fpu_state.
+        let fpu = unsafe { &*(state.as_ptr() as *const crate::arch::aarch64::context::FpuState) };
+        crate::arch::aarch64::context::restore_fpu_state(fpu);
+    }
 
-    // TODO(future): Implement FPU restore for AArch64 (FPSR/FPCR) and RISC-V
-    // (fcsr)
+    #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+    {
+        // SAFETY: The byte slice contains valid FpuState data from save_fpu_state.
+        let fpu = unsafe { &*(state.as_ptr() as *const crate::arch::riscv::context::FpuState) };
+        crate::arch::riscv::context::restore_fpu_state(fpu);
+    }
 }

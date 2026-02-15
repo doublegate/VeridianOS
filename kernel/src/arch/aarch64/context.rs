@@ -272,6 +272,78 @@ pub fn init_fpu() {
     }
 }
 
+/// Save FPU/NEON state to the given FpuState buffer
+///
+/// Saves all 32 SIMD registers (Q0-Q31) plus FPCR and FPSR.
+pub fn save_fpu_state(state: &mut FpuState) {
+    // SAFETY: Saves all NEON/FP registers to the provided FpuState structure.
+    // The structure is repr(C, align(16)) ensuring proper alignment for STP.
+    // FPCR and FPSR are system registers read via MRS.
+    unsafe {
+        let base = state.v.as_mut_ptr() as *mut u64;
+        asm!(
+            "stp q0,  q1,  [{base}]",
+            "stp q2,  q3,  [{base}, #32]",
+            "stp q4,  q5,  [{base}, #64]",
+            "stp q6,  q7,  [{base}, #96]",
+            "stp q8,  q9,  [{base}, #128]",
+            "stp q10, q11, [{base}, #160]",
+            "stp q12, q13, [{base}, #192]",
+            "stp q14, q15, [{base}, #224]",
+            "stp q16, q17, [{base}, #256]",
+            "stp q18, q19, [{base}, #288]",
+            "stp q20, q21, [{base}, #320]",
+            "stp q22, q23, [{base}, #352]",
+            "stp q24, q25, [{base}, #384]",
+            "stp q26, q27, [{base}, #416]",
+            "stp q28, q29, [{base}, #448]",
+            "stp q30, q31, [{base}, #480]",
+            base = in(reg) base,
+        );
+        let mut fpcr: u32;
+        let mut fpsr: u32;
+        asm!("mrs {fpcr:x}, FPCR", fpcr = out(reg) fpcr);
+        asm!("mrs {fpsr:x}, FPSR", fpsr = out(reg) fpsr);
+        state.fpcr = fpcr;
+        state.fpsr = fpsr;
+    }
+}
+
+/// Restore FPU/NEON state from the given FpuState buffer
+///
+/// Restores all 32 SIMD registers (Q0-Q31) plus FPCR and FPSR.
+pub fn restore_fpu_state(state: &FpuState) {
+    // SAFETY: Restores all NEON/FP registers from the provided FpuState structure.
+    // The structure is repr(C, align(16)) ensuring proper alignment for LDP.
+    // FPCR and FPSR are system registers written via MSR.
+    unsafe {
+        let fpcr = state.fpcr;
+        let fpsr = state.fpsr;
+        asm!("msr FPCR, {fpcr:x}", fpcr = in(reg) fpcr);
+        asm!("msr FPSR, {fpsr:x}", fpsr = in(reg) fpsr);
+        let base = state.v.as_ptr() as *const u64;
+        asm!(
+            "ldp q0,  q1,  [{base}]",
+            "ldp q2,  q3,  [{base}, #32]",
+            "ldp q4,  q5,  [{base}, #64]",
+            "ldp q6,  q7,  [{base}, #96]",
+            "ldp q8,  q9,  [{base}, #128]",
+            "ldp q10, q11, [{base}, #160]",
+            "ldp q12, q13, [{base}, #192]",
+            "ldp q14, q15, [{base}, #224]",
+            "ldp q16, q17, [{base}, #256]",
+            "ldp q18, q19, [{base}, #288]",
+            "ldp q20, q21, [{base}, #320]",
+            "ldp q22, q23, [{base}, #352]",
+            "ldp q24, q25, [{base}, #384]",
+            "ldp q26, q27, [{base}, #416]",
+            "ldp q28, q29, [{base}, #448]",
+            "ldp q30, q31, [{base}, #480]",
+            base = in(reg) base,
+        );
+    }
+}
+
 /// Check if CPU supports SVE
 #[allow(dead_code)]
 pub fn has_sve() -> bool {
