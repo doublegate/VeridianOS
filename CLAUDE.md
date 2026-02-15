@@ -34,13 +34,6 @@ cargo build --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std
 # Standard bare metal targets for other architectures
 cargo build --target aarch64-unknown-none -p veridian-kernel
 cargo build --target riscv64gc-unknown-none-elf -p veridian-kernel
-
-# Run with QEMU (x86_64)
-cargo run --target x86_64-unknown-none -p veridian-kernel -- -serial stdio -display none
-
-# Run other architectures
-qemu-system-aarch64 -M virt -cpu cortex-a57 -kernel target/aarch64-unknown-none/debug/veridian-kernel -serial stdio -display none
-qemu-system-riscv64 -M virt -kernel target/riscv64gc-unknown-none-elf/debug/veridian-kernel -serial stdio -display none
 ```
 
 #### Important Notes
@@ -49,18 +42,108 @@ qemu-system-riscv64 -M virt -kernel target/riscv64gc-unknown-none-elf/debug/veri
 - Kernel is linked at 0xFFFFFFFF80100000 (top 2GB of virtual memory)
 - AArch64 and RISC-V use standard bare metal targets
 
+### Running in QEMU (VERIFIED — Read This Carefully!)
+
+**QEMU version: 10.2** — stricter about drive conflicts than older versions.
+
+#### x86_64 (UEFI boot — requires OVMF + disk image)
+
+x86_64 uses UEFI boot via bootloader 0.11+. It **CANNOT** use `-kernel` flag directly.
+You MUST first build the UEFI disk image, then boot from it.
+
+```bash
+# Step 1: Build (creates UEFI disk image automatically)
+./build-kernel.sh x86_64 dev
+
+# Step 2: Run with OVMF firmware + disk image
+qemu-system-x86_64 \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
+    -drive format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
+    -serial stdio -display none -m 256M
+
+# With debug exit device (for test scripts):
+qemu-system-x86_64 \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
+    -drive format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    -serial stdio -display none -m 256M
+
+# With GDB debugging (paused, connect on :1234):
+qemu-system-x86_64 \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
+    -drive format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
+    -serial stdio -display none -m 256M -s -S
+```
+
+**⚠️ COMMON x86_64 MISTAKES (QEMU 10.2):**
+- **DO NOT** use `-kernel target/.../veridian-kernel` — fails with "Error loading uncompressed kernel without PVH ELF Note"
+- **DO NOT** use `-bios` instead of `-drive if=pflash` — different semantics
+- **DO NOT** pass positional arguments after flags — QEMU 10.2 treats them as implicit drives, causing "drive with bus=0, unit=0 (index=0) exists"
+- **DO NOT** use `-cdrom` alongside `-drive` on the same bus/index
+- **DO NOT** use `cargo run` for x86_64 — the runner in .cargo/config.toml is `bootimage runner` which is not the correct flow
+
+#### AArch64 (direct kernel boot)
+
+AArch64 boots directly with `-kernel` flag. No disk image or firmware needed.
+
+```bash
+# Step 1: Build
+./build-kernel.sh aarch64 dev
+
+# Step 2: Run
+qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \
+    -kernel target/aarch64-unknown-none/debug/veridian-kernel \
+    -serial stdio -display none
+
+# With GDB debugging:
+qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \
+    -kernel target/aarch64-unknown-none/debug/veridian-kernel \
+    -serial stdio -display none -s -S
+```
+
+#### RISC-V 64 (direct kernel boot with OpenSBI)
+
+RISC-V boots with OpenSBI firmware (provided by QEMU) + kernel.
+
+```bash
+# Step 1: Build
+./build-kernel.sh riscv64 dev
+
+# Step 2: Run (OpenSBI loads automatically with -bios default)
+qemu-system-riscv64 -M virt -m 256M -bios default \
+    -kernel target/riscv64gc-unknown-none-elf/debug/veridian-kernel \
+    -serial stdio -display none
+
+# With GDB debugging:
+qemu-system-riscv64 -M virt -m 256M -bios default \
+    -kernel target/riscv64gc-unknown-none-elf/debug/veridian-kernel \
+    -serial stdio -display none -s -S
+```
+
+#### Expected Output (All Architectures)
+
+All three architectures should boot through 6 stages and print:
+```
+BOOTOK
+```
+followed by 27/27 tests passing and a second `BOOTOK` after Stage 6 (user space transition).
+x86_64 additionally shows "Attempting user-mode entry..." (Ring 3 via SYSCALL/SYSRET).
+
+#### Quick Reference Table
+
+| Arch | Boot Method | Firmware | Kernel Flag | Image |
+|------|------------|----------|-------------|-------|
+| x86_64 | UEFI disk | OVMF.4m.fd via `-drive if=pflash` | N/A (use `-drive format=raw,file=...uefi.img`) | `target/x86_64-veridian/debug/veridian-uefi.img` |
+| AArch64 | Direct | None | `-kernel` | `target/aarch64-unknown-none/debug/veridian-kernel` |
+| RISC-V | OpenSBI | `-bios default` | `-kernel` | `target/riscv64gc-unknown-none-elf/debug/veridian-kernel` |
+
 ### Testing
 
 ```bash
 # IMPORTANT: Automated tests currently blocked by Rust toolchain limitation
 # See docs/TESTING-STATUS.md for full explanation
 
-# Manual test running (individual tests only)
-cargo test --test basic_boot --target x86_64-unknown-none --no-run
-./kernel/run-tests.sh  # Individual test runner script
-
-# Manual kernel testing
-cargo run --target x86_64-unknown-none -p veridian-kernel -- -serial stdio -display none
+# Manual kernel testing — use the QEMU commands above (NOT cargo run)
 
 # Format and lint checks (always run these)
 cargo fmt --all
@@ -181,7 +264,7 @@ Currently implementing in phases:
 | **Repository** | <https://github.com/doublegate/VeridianOS> |
 | **Latest Release** | v0.3.9 (February 15, 2026) - Phase 4 100% Complete + Userland Bridge (Ring 3 entry) |
 | **Build** | ✅ All 3 architectures compile, zero warnings |
-| **Boot** | ✅ All 3 architectures Stage 6 BOOTOK, 22/22 tests |
+| **Boot** | ✅ All 3 architectures Stage 6 BOOTOK, 27/27 tests |
 | **CI/CD** | ✅ GitHub Actions 100% pass rate |
 | **Documentation** | ✅ 25+ guides, GitHub Pages, mdBook, Rustdoc |
 

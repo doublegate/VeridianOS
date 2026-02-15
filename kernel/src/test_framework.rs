@@ -806,6 +806,235 @@ pub fn test_version_comparison() -> Result<(), KernelError> {
     Ok(())
 }
 
+/// Test delta compute and apply roundtrip.
+///
+/// Computes a binary delta between two similar byte slices, applies the delta
+/// to the original, and verifies the result matches the new data. Also checks
+/// that the delta contains non-empty operations.
+#[cfg(feature = "alloc")]
+#[allow(dead_code)]
+pub fn test_pkg_delta_compute_apply() -> Result<(), KernelError> {
+    use crate::pkg::delta::{apply_delta, compute_delta};
+
+    let old_data = b"Hello, World! This is the original content of the package.";
+    let new_data = b"Hello, World! This is the updated content of the package.";
+
+    let delta = compute_delta(old_data, new_data);
+    let result = apply_delta(old_data, &delta)?;
+
+    if result.as_slice() != new_data {
+        return Err(KernelError::InvalidState {
+            expected: "delta apply matches new data",
+            actual: "delta apply produced different output",
+        });
+    }
+
+    // Verify delta is non-empty (contains at least one operation)
+    if delta.operations.is_empty() {
+        return Err(KernelError::InvalidState {
+            expected: "non-empty delta operations",
+            actual: "empty delta",
+        });
+    }
+
+    Ok(())
+}
+
+/// Test reproducible build manifest comparison.
+///
+/// Creates two build manifests with identical outputs but different build
+/// durations, and verifies that `verify_reproducible` considers them
+/// reproducible (since only output hashes matter, not wall-clock time).
+#[cfg(feature = "alloc")]
+#[allow(dead_code)]
+pub fn test_pkg_reproducible_manifest() -> Result<(), KernelError> {
+    use alloc::string::String;
+
+    use crate::pkg::reproducible::{verify_reproducible, BuildInputs, BuildManifest, BuildOutputs};
+
+    // Create two identical manifests with different build durations
+    let mut inputs = BuildInputs::new();
+    inputs
+        .source_hashes
+        .push((String::from("main.rs"), [0xAB; 32]));
+
+    let mut outputs = BuildOutputs::new();
+    outputs
+        .file_hashes
+        .push((String::from("output.bin"), [0xCD; 32]));
+    outputs.total_size = 1024;
+    outputs.file_count = 1;
+
+    let manifest_a = BuildManifest {
+        port_name: String::from("test-port"),
+        port_version: String::from("1.0.0"),
+        inputs: inputs.clone(),
+        outputs: outputs.clone(),
+        build_duration_ms: 100,
+    };
+    let manifest_b = BuildManifest {
+        port_name: String::from("test-port"),
+        port_version: String::from("1.0.0"),
+        inputs,
+        outputs,
+        build_duration_ms: 200, // Different duration but same outputs
+    };
+
+    let result = verify_reproducible(&manifest_a, &manifest_b);
+    if !result.is_reproducible() {
+        return Err(KernelError::InvalidState {
+            expected: "builds are reproducible",
+            actual: "reproducibility check failed",
+        });
+    }
+
+    Ok(())
+}
+
+/// Test license detection from text.
+///
+/// Verifies that `detect_license` correctly identifies MIT and GPL licenses
+/// from representative text snippets, and that `LicenseCompatibility` reports
+/// MIT and Apache-2.0 as compatible.
+#[cfg(feature = "alloc")]
+#[allow(dead_code)]
+pub fn test_pkg_license_detection() -> Result<(), KernelError> {
+    use crate::pkg::compliance::{detect_license, License, LicenseCompatibility};
+
+    // Test MIT detection
+    let mit_text = "Permission is hereby granted, free of charge, to any person obtaining a copy \
+                    of this software and associated documentation files";
+    let detected = detect_license(mit_text);
+    if detected != License::MIT {
+        return Err(KernelError::InvalidState {
+            expected: "MIT license detected",
+            actual: "wrong license detected",
+        });
+    }
+
+    // Test GPL detection
+    let gpl_text = "This program is free software: you can redistribute it and/or modify it under \
+                    the terms of the GNU General Public License";
+    let detected = detect_license(gpl_text);
+    // Should detect some GPL variant (GPL3 default for generic GPL text)
+    if detected != License::GPL2 && detected != License::GPL3 {
+        return Err(KernelError::InvalidState {
+            expected: "GPL license detected",
+            actual: "wrong license detected",
+        });
+    }
+
+    // Test compatibility: MIT + Apache2 should be compatible
+    if !LicenseCompatibility::is_compatible(&License::MIT, &License::Apache2) {
+        return Err(KernelError::InvalidState {
+            expected: "MIT compatible with Apache-2.0",
+            actual: "compatibility check failed",
+        });
+    }
+
+    Ok(())
+}
+
+/// Test package security scanner.
+///
+/// Creates a `PackageSecurityScanner`, scans suspicious file paths (including
+/// `/etc/shadow` and `/dev/mem`), and verifies that high-severity findings are
+/// produced. Also scans excessive capabilities and checks for findings.
+#[cfg(feature = "alloc")]
+#[allow(dead_code)]
+pub fn test_pkg_security_scan() -> Result<(), KernelError> {
+    use crate::pkg::testing::{PackageSecurityScanner, ScanSeverity};
+
+    let scanner = PackageSecurityScanner::new();
+
+    // Scan suspicious paths - should flag /etc/shadow access
+    let paths = ["/etc/shadow", "/usr/bin/app", "/dev/mem"];
+    let findings = scanner.scan_paths(&paths);
+
+    // Should find at least one high-severity finding for /etc/shadow or /dev/mem
+    let has_high = findings
+        .iter()
+        .any(|f| matches!(f.severity, ScanSeverity::High | ScanSeverity::Critical));
+
+    if !has_high {
+        return Err(KernelError::InvalidState {
+            expected: "high severity finding for suspicious paths",
+            actual: "no high severity findings",
+        });
+    }
+
+    // Scan excessive capabilities
+    let caps = ["CAP_SYS_ADMIN", "CAP_NET_RAW"];
+    let cap_findings = scanner.scan_capabilities(&caps);
+
+    if cap_findings.is_empty() {
+        return Err(KernelError::InvalidState {
+            expected: "findings for excessive capabilities",
+            actual: "no capability findings",
+        });
+    }
+
+    Ok(())
+}
+
+/// Test ecosystem package definitions.
+///
+/// Verifies that the base system, essential apps, and driver package
+/// definitions are non-empty and well-formed: each set has a name and
+/// at least one package.
+#[cfg(feature = "alloc")]
+#[allow(dead_code)]
+pub fn test_pkg_ecosystem_definitions() -> Result<(), KernelError> {
+    use crate::pkg::ecosystem::{
+        get_base_system_packages, get_driver_packages, get_essential_apps,
+    };
+
+    // Base system should have at least 3 package sets
+    let base = get_base_system_packages();
+    if base.len() < 3 {
+        return Err(KernelError::InvalidState {
+            expected: "at least 3 base system package sets",
+            actual: "too few base package sets",
+        });
+    }
+
+    // Essential apps should exist
+    let apps = get_essential_apps();
+    if apps.is_empty() {
+        return Err(KernelError::InvalidState {
+            expected: "non-empty essential apps list",
+            actual: "empty essential apps",
+        });
+    }
+
+    // Driver packages should exist for x86_64
+    let drivers = get_driver_packages("x86_64");
+    if drivers.is_empty() {
+        return Err(KernelError::InvalidState {
+            expected: "non-empty x86_64 driver packages",
+            actual: "empty driver packages",
+        });
+    }
+
+    // Each package set should have a name and at least one package
+    for set in &base {
+        if set.name.is_empty() {
+            return Err(KernelError::InvalidState {
+                expected: "non-empty package set name",
+                actual: "empty name",
+            });
+        }
+        if set.packages.is_empty() {
+            return Err(KernelError::InvalidState {
+                expected: "non-empty packages in set",
+                actual: "empty packages",
+            });
+        }
+    }
+
+    Ok(())
+}
+
 // ===== Test Timeout Support =====
 
 /// Run a test with a timeout (uses architecture-specific timer)

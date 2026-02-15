@@ -747,6 +747,39 @@ pub fn kernel_init_main() {
         report_test("crypto_sha256_vector", ok, &mut passed, &mut failed);
     }
 
+    // --- Phase 4 Package Ecosystem Tests ---
+    kprintln!("[INIT] Phase 4 package ecosystem tests:");
+
+    // Test 23: Delta compute/apply roundtrip
+    {
+        let ok = crate::test_framework::test_pkg_delta_compute_apply().is_ok();
+        report_test("pkg_delta_roundtrip", ok, &mut passed, &mut failed);
+    }
+
+    // Test 24: Reproducible build manifest comparison
+    {
+        let ok = crate::test_framework::test_pkg_reproducible_manifest().is_ok();
+        report_test("pkg_reproducible_manifest", ok, &mut passed, &mut failed);
+    }
+
+    // Test 25: License detection from text
+    {
+        let ok = crate::test_framework::test_pkg_license_detection().is_ok();
+        report_test("pkg_license_detection", ok, &mut passed, &mut failed);
+    }
+
+    // Test 26: Security scanner path and capability checks
+    {
+        let ok = crate::test_framework::test_pkg_security_scan().is_ok();
+        report_test("pkg_security_scan", ok, &mut passed, &mut failed);
+    }
+
+    // Test 27: Ecosystem package definitions
+    {
+        let ok = crate::test_framework::test_pkg_ecosystem_definitions().is_ok();
+        report_test("pkg_ecosystem_defs", ok, &mut passed, &mut failed);
+    }
+
     // --- Summary ---
     print_summary(passed, failed);
 }

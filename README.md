@@ -113,9 +113,9 @@ experiments/   Non-normative exploratory work
 
 | Architecture | Build | Boot | Init Tests | Stage 6 | Stable Idle (30s) | Status |
 |--------------|-------|------|-----------|---------|-------------------|--------|
-| x86_64       | ✅    | ✅   | 22/22     | ✅      | ✅ PASS           | **100% Functional** — UEFI boot via OVMF |
-| AArch64      | ✅    | ✅   | 22/22     | ✅      | ✅ PASS           | **100% Functional** — Direct kernel loading |
-| RISC-V 64    | ✅    | ✅   | 22/22     | ✅      | ✅ PASS           | **100% Functional** — OpenSBI boot |
+| x86_64       | ✅    | ✅   | 27/27     | ✅      | ✅ PASS           | **100% Functional** — UEFI boot via OVMF |
+| AArch64      | ✅    | ✅   | 27/27     | ✅      | ✅ PASS           | **100% Functional** — Direct kernel loading |
+| RISC-V 64    | ✅    | ✅   | 27/27     | ✅      | ✅ PASS           | **100% Functional** — OpenSBI boot |
 
 ### Phase 0: Foundation & Tooling — Complete (v0.1.0)
 
@@ -199,7 +199,7 @@ Released February 15, 2026. Completes Phase 4 (Package Ecosystem) to 100% and im
 - SDK Generator, Plugin System, Async Runtime type definitions
 - PHASE4_TODO.md updated to 100% complete
 
-17 files changed, 5 new files. All 3 architectures: Stage 6 BOOTOK, 22/22 tests, zero warnings.
+22 files changed, 5 new files. All 3 architectures: Stage 6 BOOTOK, 27/27 tests (5 new Phase 4 tests), zero warnings.
 
 ### Phase 4 Groups 3+4 - Toolchain, Testing, Compliance, Ecosystem (v0.3.8)
 

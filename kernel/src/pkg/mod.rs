@@ -10,6 +10,7 @@
 pub mod async_types;
 pub mod compliance;
 pub mod database;
+pub mod delta;
 pub mod ecosystem;
 pub mod format;
 pub mod manifest;

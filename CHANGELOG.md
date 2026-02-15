@@ -4,11 +4,16 @@
 
 Completes Phase 4 (Package Ecosystem) to 100% and implements the Userland Bridge -- the first successful Ring 0 to Ring 3 to Ring 0 round-trip in VeridianOS history. An embedded init binary runs in user mode, writes "VeridianOS init started" via SYSCALL, and exits cleanly.
 
-17 files changed, 5 new files created.
+22 files changed, 5 new files created (+2,413/-202 lines).
 
 ---
 
 ### Added
+
+#### Sprint 5: Syscall API Documentation + Phase 4 Boot Tests
+- `kernel/src/pkg/sdk/syscall_api.rs` -- Comprehensive doc comments on all 19 syscall wrappers with usage examples, error sections, and `TODO(user-space)` markers
+- `kernel/src/test_framework.rs` -- 5 new Phase 4 boot tests (Tests 23-27): delta roundtrip, reproducible builds, license detection, security scanning, ecosystem definitions
+- `kernel/src/bootstrap.rs` -- Tests 23-27 wired into boot test sequence; test count now 27/27
 
 #### Userland Bridge: GDT + SYSCALL/SYSRET MSR Configuration (`kernel/src/arch/x86_64/`)
 - Ring 3 code segment (selector 0x30, GDT index 6) and data segment (selector 0x28, GDT index 5)
@@ -53,9 +58,9 @@ Completes Phase 4 (Package Ecosystem) to 100% and implements the Userland Bridge
 - Reduced verbose `[USERMODE]` debug output to single summary line
 
 ### Build Verification
-- x86_64: Stage 6 BOOTOK, 22/22 tests, zero warnings, user-mode init runs
-- AArch64: Stage 6 BOOTOK, 22/22 tests, zero warnings
-- RISC-V: Stage 6 BOOTOK, 22/22 tests, zero warnings
+- x86_64: Stage 6 BOOTOK, 27/27 tests, zero warnings, user-mode init runs
+- AArch64: Stage 6 BOOTOK, 27/27 tests, zero warnings
+- RISC-V: Stage 6 BOOTOK, 27/27 tests, zero warnings
 
 ---
 

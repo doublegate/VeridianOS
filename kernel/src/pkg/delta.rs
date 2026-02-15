@@ -245,8 +245,7 @@ pub fn deserialize_delta(data: &[u8]) -> Result<BinaryDelta, KernelError> {
     source_hash.copy_from_slice(&data[0..32]);
     target_hash.copy_from_slice(&data[32..64]);
 
-    let op_count =
-        u32::from_le_bytes([data[64], data[65], data[66], data[67]]) as usize;
+    let op_count = u32::from_le_bytes([data[64], data[65], data[66], data[67]]) as usize;
 
     let mut operations = Vec::with_capacity(op_count);
     let mut pos = 68;
@@ -271,13 +270,13 @@ pub fn deserialize_delta(data: &[u8]) -> Result<BinaryDelta, KernelError> {
                         value: "truncated_copy",
                     });
                 }
-                let offset = u32::from_le_bytes([
-                    data[pos], data[pos + 1], data[pos + 2], data[pos + 3],
-                ]) as usize;
+                let offset =
+                    u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                        as usize;
                 pos += 4;
-                let len = u32::from_le_bytes([
-                    data[pos], data[pos + 1], data[pos + 2], data[pos + 3],
-                ]) as usize;
+                let len =
+                    u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                        as usize;
                 pos += 4;
                 operations.push(DeltaOp::Copy { offset, len });
             }
@@ -289,9 +288,9 @@ pub fn deserialize_delta(data: &[u8]) -> Result<BinaryDelta, KernelError> {
                         value: "truncated_insert_len",
                     });
                 }
-                let len = u32::from_le_bytes([
-                    data[pos], data[pos + 1], data[pos + 2], data[pos + 3],
-                ]) as usize;
+                let len =
+                    u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                        as usize;
                 pos += 4;
                 if pos + len > data.len() {
                     return Err(KernelError::InvalidArgument {
