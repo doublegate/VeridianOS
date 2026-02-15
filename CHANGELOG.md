@@ -1,3 +1,48 @@
+## [0.4.0] - 2026-02-15
+
+### Phase 4 Package Ecosystem: 100% Complete -- Milestone Release
+
+Marks the formal completion of Phase 4 (Package Ecosystem) with comprehensive syscall API documentation, 5 new Phase 4 boot tests (27/27 total), and version bump to 0.4.0. This is the milestone release for the entire Phase 4 development track spanning v0.3.4 through v0.4.0.
+
+8 files changed (+1,294/-103 lines).
+
+---
+
+### Added
+
+- `kernel/src/pkg/sdk/syscall_api.rs` -- Comprehensive doc comments on all 19 syscall wrappers: `sys_fork`, `sys_exec`, `sys_exit`, `sys_wait`, `sys_getpid`, `sys_mmap`, `sys_munmap`, `sys_ipc_send`, `sys_ipc_receive`, `sys_open`, `sys_read`, `sys_write`, `sys_close`, `sys_cap_create`, `sys_cap_grant`, `sys_cap_revoke`, `sys_pkg_install`, `sys_pkg_remove`, `sys_pkg_query`. Each wrapper includes `# Arguments`, `# Returns`, `# Errors` (with specific `SyscallError` variants), `# Examples` (with `no_run` code blocks), and `TODO(user-space)` markers (+878 lines of documentation)
+- `kernel/src/test_framework.rs` -- 5 new Phase 4 boot tests (Tests 23-27): `test_pkg_delta_compute_apply` (delta roundtrip), `test_pkg_reproducible_manifest` (build manifest comparison), `test_pkg_license_detection` (MIT/GPL detection + compatibility), `test_pkg_security_scan` (suspicious path/capability scanning), `test_pkg_ecosystem_definitions` (base system/app/driver package sets)
+- `kernel/src/bootstrap.rs` -- Tests 23-27 wired into boot test sequence under `[INIT] Phase 4 package ecosystem tests:` section; total boot test count now 27/27
+
+### Changed
+
+- `Cargo.toml` -- Version bumped from 0.3.9 to 0.4.0 (Phase 4 milestone)
+- `kernel/src/pkg/mod.rs` -- Added `pub mod delta;` module declaration (was missing)
+- `kernel/src/pkg/delta.rs` -- Module visibility fixes
+
+### Build Verification
+- x86_64: Stage 6 BOOTOK, 27/27 tests, zero warnings, user-mode init runs
+- AArch64: Stage 6 BOOTOK, 27/27 tests, zero warnings
+- RISC-V: Stage 6 BOOTOK, 27/27 tests, zero warnings
+
+### Phase 4 Summary (v0.3.4 through v0.4.0)
+
+Phase 4 was completed across 8 releases with 12 sprints in 5 dependency groups:
+
+| Release | Sprints | Key Deliverables |
+|---------|---------|------------------|
+| v0.3.4 | P4-1 to P4-7 | Package manager, DPLL SAT resolver, ports framework, SDK types, shell commands |
+| v0.3.5 | -- | Critical boot fixes (x86_64 CSPRNG, RISC-V frame allocator) |
+| v0.3.6 | 1A-1D | Repository infrastructure, delta updates, config tracking, orphan detection |
+| v0.3.7 | 2A-2C | Ports build execution, reproducible builds, repository security |
+| v0.3.8 | 3A, 4A-4B | Toolchain manager, testing/compliance, statistics/ecosystem |
+| v0.3.9 | 3B, UB-1 to UB-5 | SDK generator, plugin system, async types, Userland Bridge (Ring 3 entry) |
+| v0.4.0 | 5 | Syscall API documentation, Phase 4 boot tests (27/27) |
+
+Total: ~50 new kernel source files, ~15,000+ lines of code, covering package management, dependency resolution, ports build system, SDK toolchain, security scanning, license compliance, ecosystem definitions, and syscall API.
+
+---
+
 ## [0.3.9] - 2026-02-15
 
 ### Phase 4 Completion + Userland Bridge: Ring 0 to Ring 3 Transitions

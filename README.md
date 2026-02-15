@@ -107,7 +107,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Last Updated**: February 15, 2026 (v0.3.9)
+**Last Updated**: February 15, 2026 (v0.4.0)
 
 ### Current Architecture Support
 
@@ -181,6 +181,12 @@ Released February 14, 2026. Comprehensive completion of both Phase 2 (User Space
 - **Authentication Hardening** — Real timestamps for MFA; PBKDF2-HMAC-SHA256 password hashing; password complexity enforcement; password history (prevent reuse); account expiration
 - **Capability System Phase 3** — ObjectRef::Endpoint in IPC integration; PRESERVE_EXEC filtering; default IPC/memory capabilities; process notification on revocation; permission checks; IPC broadcast for revocation
 - **Syscall Security + Fuzzing** — MAC checks before capability checks in syscall handlers; audit logging in syscall entry/exit; argument validation (pointer bounds, size limits); `FuzzTarget` trait with mutation-based fuzzer; ELF/IPC/FS/capability fuzz targets; crash detection via panic handler hooks
+
+### Phase 4 Milestone (v0.4.0)
+
+Released February 15, 2026. Formal Phase 4 milestone with comprehensive syscall API documentation (19 wrappers fully documented with examples, errors, and arguments) and 5 new Phase 4 boot tests bringing the total to 27/27. Version bump to 0.4.0 marks Phase 4 as complete.
+
+8 files changed (+1,294/-103 lines). All 3 architectures: Stage 6 BOOTOK, 27/27 tests, zero warnings.
 
 ### Phase 4 Completion + Userland Bridge (v0.3.9)
 
@@ -539,13 +545,14 @@ Security is a fundamental design principle:
 - [x] Phase 4 Group 2 — Ports build execution with SHA-256 checksums, reproducible builds infrastructure, repository security scanning (2026-02-15, v0.3.7)
 - [x] Phase 4 Groups 3+4 — Toolchain manager, package testing, license compliance, dependency graph, ecosystem definitions (2026-02-15, v0.3.8)
 - [x] Phase 4 Completion + Userland Bridge — SDK generator, plugin system, async types, Ring 3 entry via iretq, SYSCALL/SYSRET path, embedded init binary (2026-02-15, v0.3.9)
+- [x] Phase 4 Milestone — Comprehensive syscall API documentation, 5 new Phase 4 boot tests (27/27), formal version bump (2026-02-15, v0.4.0)
 
 ### Mid-term (2026)
 
 - [x] Phase 2: User Space Foundation — 100% Complete (2026-02-14, v0.3.2)
 - [x] Phase 3: Security Hardening — 100% Complete (2026-02-14, v0.3.2)
 - [x] Technical Debt Remediation — Complete (2026-02-14, v0.3.1)
-- [x] Phase 4: Package Ecosystem & Self-Hosting — 100% Complete (2026-02-15, v0.3.9)
+- [x] Phase 4: Package Ecosystem & Self-Hosting — 100% Complete (2026-02-15, v0.4.0)
 
 ### Long-term (2027+)
 
