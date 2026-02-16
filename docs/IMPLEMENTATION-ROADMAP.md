@@ -1,7 +1,7 @@
 # VeridianOS Implementation Roadmap
 
-**Last Updated**: June 17, 2025  
-**Latest Release**: v0.2.1 - Maintenance release with all three architectures booting to Stage 6
+**Last Updated**: February 15, 2026
+**Latest Release**: v0.4.1 (February 15, 2026) - Phase 4 complete, userland bridge, 27/27 boot tests
 
 ## Executive Summary
 
@@ -10,13 +10,13 @@ This document provides a detailed technical roadmap for implementing VeridianOS 
 ## Phase Timeline Overview
 
 ```
-Phase 0: Foundation (2-3 months) - 100% Complete ━━━━━━━━━━━━ ✅
-Phase 1: Microkernel Core (4-5 months) - 100% Complete ━━━━━━━━━━━━ ✅
-Phase 2: User Space Foundation (5-6 months) - 0% Complete ░░░░░░░░░░░░
-Phase 3: Security Hardening (5-6 months) - 0% Complete ░░░░░░░░░░░░
-Phase 4: Package Ecosystem (5-6 months) - 0% Complete ░░░░░░░░░░░░
-Phase 5: Performance Optimization (5-6 months) - 0% Complete ░░░░░░░░░░░░
-Phase 6: Advanced Features (8-9 months) - 0% Complete ░░░░░░░░░░░░
+Phase 0: Foundation (2-3 months) - 100% Complete ━━━━━━━━━━━━ ✅ (v0.1.0)
+Phase 1: Microkernel Core (4-5 months) - 100% Complete ━━━━━━━━━━━━ ✅ (v0.2.0)
+Phase 2: User Space Foundation (5-6 months) - 100% Complete ━━━━━━━━━━━━ ✅ (v0.3.2)
+Phase 3: Security Hardening (5-6 months) - 100% Complete ━━━━━━━━━━━━ ✅ (v0.3.2)
+Phase 4: Package Ecosystem (5-6 months) - 100% Complete ━━━━━━━━━━━━ ✅ (v0.4.1)
+Phase 5: Performance Optimization (5-6 months) - ~10% Complete ━░░░░░░░░░░░ (data structures only)
+Phase 6: Advanced Features (8-9 months) - ~5% Complete ░░░░░░░░░░░░ (type definitions only)
 ```
 
 ## Technical Architecture Decisions

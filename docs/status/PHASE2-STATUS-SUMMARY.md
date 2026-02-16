@@ -1,6 +1,8 @@
 # Phase 2 Status Summary - August 17, 2025
 
-## Current Architecture Status
+**Note (February 15, 2026)**: This is a historical snapshot from August 17, 2025. All issues described below have been fully resolved. All three architectures now boot to Stage 6 BOOTOK with 27/27 tests and zero warnings. The static mut pattern issues were resolved in v0.3.1 (48 static mut eliminated), the x86_64 boot hang was resolved in v0.3.0/v0.3.5, and the RISC-V frame allocator issues were resolved in v0.3.5.
+
+## Architecture Status (August 17, 2025 - HISTORICAL)
 
 ### AArch64
 - **Boot Progress**: Reaches Stage 4 (Kernel Services)

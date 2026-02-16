@@ -50,12 +50,12 @@ VeridianOS exists to explore and demonstrate:
 
 VeridianOS intentionally does **not** aim to be:
 
-- A POSIX-compatible operating system
+- A natively POSIX-based operating system (a POSIX compatibility layer is planned for future phases to support software porting, but native APIs remain capability-based)
 - A Linux replacement or distribution
 - A performance-first microbenchmark platform
 - A feature-complete general-purpose OS
 
-These exclusions are deliberate and protect architectural clarity.
+These exclusions are deliberate and protect architectural clarity. Where future compatibility layers are mentioned (e.g., POSIX, Wayland), they will be implemented as user-space libraries that translate to native capability-based interfaces, never as kernel-level compromises.
 
 ---
 
@@ -107,252 +107,66 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Last Updated**: February 15, 2026 (v0.4.1)
+**Latest Release**: v0.4.1 (February 15, 2026)
 
-### Current Architecture Support
+### Architecture Support
 
 | Architecture | Build | Boot | Init Tests | Stage 6 | Stable Idle (30s) | Status |
 |--------------|-------|------|-----------|---------|-------------------|--------|
-| x86_64       | ✅    | ✅   | 27/27     | ✅      | ✅ PASS           | **100% Functional** — UEFI boot via OVMF |
-| AArch64      | ✅    | ✅   | 27/27     | ✅      | ✅ PASS           | **100% Functional** — Direct kernel loading |
-| RISC-V 64    | ✅    | ✅   | 27/27     | ✅      | ✅ PASS           | **100% Functional** — OpenSBI boot |
-
-### Phase 0: Foundation & Tooling — Complete (v0.1.0)
-
-Released June 7, 2025.
-
-### Phase 1: Microkernel Core — Complete (v0.2.1)
-
-Started June 8, 2025. Completed June 12, 2025. Maintenance release v0.2.1 on June 17, 2025.
-
-Core subsystems implemented:
-
-- **IPC System** — Synchronous/asynchronous channels, registry, performance tracking, rate limiting, capability integration
-- **Memory Management** — Frame allocator, virtual memory, page tables, bootloader integration, VAS cleanup
-- **Process Management** — PCB, threads, context switching, synchronization primitives, syscalls
-- **Scheduler** — CFS, SMP support, load balancing, CPU hotplug, task management
-- **Capability System** — Tokens, rights, space management, inheritance, revocation, per-CPU cache
-- **Test Framework** — `no_std` test framework with benchmarks, IPC/scheduler/process tests
-
-### Technical Debt Remediation (v0.2.4)
-
-Released February 13, 2026. Comprehensive codebase quality improvement:
-
-- **550 `// SAFETY:` comments** added across 122 files (0.9% to 84.5% coverage)
-- **180 new unit tests** across 7 modules (70 to 250 total)
-- **5 god objects split** into focused submodules (0 files >1000 LOC remaining)
-- **201 TODO/FIXME/HACK** comments triaged with phase tags
-- **204 files** with module-level documentation (up from ~60)
-- **39 files** cleaned of `#[allow(dead_code)]` with proper feature gating
-- **161 files changed** total
-
-### Technical Debt Remediation (v0.3.1)
-
-Released February 14, 2026. Comprehensive 5-sprint remediation covering safety, soundness, and architecture:
-
-- **Critical Safety** — Fixed OnceLock::set() use-after-free soundness bug, fixed process_compat memory leak, added `#[must_use]` to KernelError
-- **Static Mut Elimination** — Converted 48 of 55 `static mut` declarations to safe patterns (OnceLock, Mutex, Atomics); 7 retained with documented SAFETY justifications (pre-heap boot, per-CPU data)
-- **Panic-Free Syscalls** — Removed 8 production panic paths from syscall/VFS handlers via error propagation
-- **Error Type Migration** — Converted 150+ functions across 18 files from `&'static str` errors to typed `KernelError` (legacy ratio reduced from ~65% to ~37%)
-- **Architecture Abstractions** — PlatformTimer trait with 3 arch implementations, memory barrier abstractions (memory_fence, data_sync_barrier, instruction_sync_barrier)
-- **Dead Code Cleanup** — Removed 25 incorrect `#[allow(dead_code)]` annotations plus 1 dead function
-
-### Phase 2 & Phase 3 Completion (v0.3.2)
-
-Released February 14, 2026. Comprehensive completion of both Phase 2 (User Space Foundation: 80% to 100%) and Phase 3 (Security Hardening: 65% to 100%) across 15 implementation sprints:
-
-**Phase 2 Sprints (6):**
-
-- **Clock/Timestamp Infrastructure** — `get_timestamp_secs()`/`get_timestamp_ms()` wrappers; RamFS/ProcFS/DevFS timestamp integration; VFS `list_mounts()`; init system and shell uptime using real timers
-- **BlockFS Directory Operations** — ext2-style `DiskDirEntry` parsing; `readdir()`, `lookup_in_dir()`, `create_file()`, `create_directory()` with `.`/`..`, `unlink_from_dir()`, `truncate_inode()` block freeing
-- **Signal Handling + Shell Input** — PTY signal delivery (SIGINT, SIGWINCH); architecture-conditional serial input (x86_64 port I/O, AArch64 UART MMIO, RISC-V SBI getchar); touch command implementation
-- **ELF Relocation Processing** — `process_relocations()` with AArch64 (R_AARCH64_RELATIVE/GLOB_DAT/JUMP_SLOT/ABS64) and RISC-V (R_RISCV_RELATIVE/64/JUMP_SLOT) types; PIE binary support; dynamic linker bootstrap delegation
-- **Driver Hot-Plug Event System** — `DeviceEvent` enum (Added/Removed/StateChanged); `DeviceEventListener` trait; publish-subscribe notification; auto-probe on device addition
-- **Init System Hardening** — Service wait timeout with SIGKILL; exponential backoff restart (base_delay * 2^min(count,5)); architecture-specific reboot (x86_64 keyboard controller 0xFE, AArch64 PSCI, RISC-V SBI reset); timer-based sleep replacing spin loops
-
-**Phase 3 Sprints (9):**
-
-- **Cryptographic Algorithms** — ChaCha20-Poly1305 AEAD (RFC 8439); Ed25519 sign/verify (RFC 8032); X25519 key exchange (RFC 7748); ML-DSA/Dilithium sign/verify (FIPS 204); ML-KEM/Kyber encapsulate/decapsulate (FIPS 203); ChaCha20-based CSPRNG with hardware entropy seeding
-- **Secure Boot Verification** — Kernel image SHA-256 hashing via linker symbols; Ed25519 signature verification; measured boot with measurement log; TPM PCR extension; certificate chain validation
-- **TPM Integration** — MMIO-based TPM 2.0 communication; locality management; command marshaling (TPM2_Startup, PCR_Extend, PCR_Read, GetRandom); `seal_key()`/`unseal_key()` for TPM-backed storage
-- **MAC Policy System** — Text-based policy language parser (`allow source target { perms };`); domain transitions; RBAC layer (users to roles to types); MLS support (sensitivity + categories + dominance); `SecurityLabel` struct replacing `&'static str` labels
-- **Audit System Completion** — Event filtering by type; structured format (timestamp, PID, UID, action, target, result); VFS-backed persistent storage; binary serialization; wired into syscall dispatch, capability ops, MAC decisions; real-time alert hooks
-- **Memory Protection Hardening** — ChaCha20 CSPRNG-based ASLR entropy; DEP/NX enforcement via page table NX bits; guard page integration with VMM; W^X enforcement; stack guard pages; Spectre v1 barriers (LFENCE/CSDB); KPTI (separate kernel/user page tables on x86_64)
-- **Authentication Hardening** — Real timestamps for MFA; PBKDF2-HMAC-SHA256 password hashing; password complexity enforcement; password history (prevent reuse); account expiration
-- **Capability System Phase 3** — ObjectRef::Endpoint in IPC integration; PRESERVE_EXEC filtering; default IPC/memory capabilities; process notification on revocation; permission checks; IPC broadcast for revocation
-- **Syscall Security + Fuzzing** — MAC checks before capability checks in syscall handlers; audit logging in syscall entry/exit; argument validation (pointer bounds, size limits); `FuzzTarget` trait with mutation-based fuzzer; ELF/IPC/FS/capability fuzz targets; crash detection via panic handler hooks
-
-### Technical Debt Remediation (v0.4.1)
-
-Released February 15, 2026. Cross-cutting remediation across 58 kernel source files:
-
-- **Bootstrap Refactoring** -- `kernel_init_main()` refactored from 370-line monolith to 24-line dispatcher with 6 focused helpers; guarded `unwrap()` on `BOOT_ALLOCATOR` lock replaced with contextual `expect()`
-- **Error Handling Audit** -- 22 `let _ =` patterns in security-critical subsystems upgraded to log warnings (auth RNG, SIGCHLD delivery, frame leaks, capability inheritance, network registration, database persistence)
-- **Dead Code Consolidation** -- 157 per-item `#[allow(dead_code)]` in `pkg/` replaced with 11 module-level `#![allow(dead_code)]` directives
-- **String Error Elimination** -- 7 remaining `Err("...")` in `arch/x86_64/usermode.rs` converted to typed `KernelError` variants
-- **TODO Reclassification** -- 35 `TODO(phase4)` reclassified to `TODO(future)`, 12 untagged TODOs given phase markers
-
-58 files changed (+407/-352 lines). All 3 architectures: Stage 6 BOOTOK, 27/27 tests, zero warnings.
-
-### Phase 4 Milestone (v0.4.0)
-
-Released February 15, 2026. Formal Phase 4 milestone with comprehensive syscall API documentation (19 wrappers fully documented with examples, errors, and arguments) and 5 new Phase 4 boot tests bringing the total to 27/27. Version bump to 0.4.0 marks Phase 4 as complete.
-
-8 files changed (+1,294/-103 lines). All 3 architectures: Stage 6 BOOTOK, 27/27 tests, zero warnings.
-
-### Phase 4 Completion + Userland Bridge (v0.3.9)
-
-Released February 15, 2026. Completes Phase 4 (Package Ecosystem) to 100% and implements the Userland Bridge for Ring 0 to Ring 3 transitions:
-
-**Userland Bridge (5 sprints):**
-
-- **GDT User Segments** -- Ring 3 code/data segments (0x30/0x28), SYSCALL/SYSRET MSR configuration (EFER, LSTAR, STAR, SFMASK, KernelGsBase)
-- **Embedded Init Binary** -- x86_64 machine code init process (57 bytes) using SYSCALL for sys_write + sys_exit, with ELF header generation
-- **Ring 3 Entry via iretq** -- `enter_usermode()` pushing SS/RSP/RFLAGS/CS/RIP frame; page table walker with safe frame allocation (skips bootloader page table pages)
-- **Syscall Backends** -- sys_write serial fallback for fd 1/2, sys_read serial input for fd 0, sys_exit process termination
-- **Integration** -- Full Ring 0 -> Ring 3 -> SYSCALL -> Ring 0 path verified; init binary prints "VeridianOS init started" via serial
-
-**Phase 4 Finalization:**
-
-- SDK Generator, Plugin System, Async Runtime type definitions
-- PHASE4_TODO.md updated to 100% complete
-
-22 files changed, 5 new files. All 3 architectures: Stage 6 BOOTOK, 27/27 tests (5 new Phase 4 tests), zero warnings.
-
-### Phase 4 Groups 3+4 - Toolchain, Testing, Compliance, Ecosystem (v0.3.8)
-
-Released February 15, 2026. Three parallel implementation sprints advancing Phase 4 to ~95%:
-
-- **Toolchain Manager** -- Toolchain registry, cross-compiler config, linker script generation, CMake toolchain files
-- **Testing + Compliance** -- Package test framework, security scanner (9 patterns), license detection and compatibility checking, dependency graph analysis with cycle detection
-- **Statistics + Ecosystem** -- Package stats collector, update notifications, CVE advisory checking, core package ecosystem definitions (base-system, dev-tools, drivers, apps)
-
-5 new files (+2,350 lines). All 3 architectures: Stage 6 BOOTOK, 22/22 tests, zero warnings.
-
-### Phase 4 Package Ecosystem Group 2 - Ports Build, Reproducible Builds, Security (v0.3.7)
-
-Released February 15, 2026. Three parallel implementation sprints advancing Phase 4 to ~85%:
-
-- **Ports Build Execution** -- Real SHA-256 checksum verification, `execute_command()` framework for build steps, VFS-first port collection scanning
-- **Reproducible Builds** -- `BuildSnapshot`/`BuildManifest` types, environment normalization (zeroed timestamps, canonical paths), manifest comparison and serialization
-- **Repository Security** -- Access control with Ed25519 upload verification, malware pattern scanning (10 default patterns), CVE vulnerability database
-
-5 files changed (+1,385/-49 lines), 1 new file. All 3 architectures: Stage 6 BOOTOK, 22/22 tests, zero warnings.
-
-### Phase 4 Package Ecosystem Group 1 + Build Fixes (v0.3.6)
-
-Released February 15, 2026. Four parallel implementation sprints advancing Phase 4:
-
-- **Repository Infrastructure** -- Repository index with Ed25519 verification, mirror manager with failover, multi-repo configuration
-- **Package Removal** -- Config file preservation on remove/upgrade, orphan package detection and batch removal
-- **Binary Delta Updates** -- Block-matching delta computation/application with SHA-256 verification for incremental downloads
-- **Config File Tracking** -- FileType classification (Binary/Config/Documentation/Asset) with path-based inference
-- **RISC-V Build Fix** -- Changed `jal` to `call` in boot.S (kernel grew past JAL's 1MB range)
-
-7 files changed (+717/-392 lines), 1 new file. All 3 architectures: Stage 6 BOOTOK, 22/22 tests, zero warnings.
-
-### Critical Architecture Boot Fixes (v0.3.5)
-
-Released February 15, 2026. Resolves 3 architecture-specific boot issues:
-
-- **x86_64 CSPRNG Double Fault** -- Added CPUID check for RDRAND support before use; prevents `#UD` -> double fault on CPU models without RDRAND (e.g., QEMU `qemu64`)
-- **RISC-V Frame Allocator** -- Fixed memory start address from `0x88000000` (end of RAM) to `0x80E00000` (after kernel image); frame allocations now reference valid physical memory
-- **RISC-V Stack Canary Guard** -- Restricted RNG usage during process creation to x86_64 only; prevents unhandled faults on RISC-V (no `stvec` trap handler during creation)
-- **x86_64 Boot Stack Overflow** -- Increased boot stack from 64KB to 256KB; prevents silent overflow from `CapabilitySpace` array construction (~20KB) in debug builds
-
-4 files changed (+67/-21 lines). All 3 architectures: Stage 6 BOOTOK, 22/22 tests, zero warnings.
-
-### Phase 1-3 Integration + Phase 4 Package Ecosystem (v0.3.4)
-
-Released February 15, 2026. Two-track release closing Phase 1-3 integration gaps and advancing Phase 4 to ~75% across 14 implementation sprints:
-
-**Phase 1-3 Integration Gaps Closed (7 sprints):**
-
-- **IPC-Scheduler Bridge** -- IPC sync_send/sync_receive now block via scheduler instead of returning ChannelFull/NoMessage; sync_reply wakes blocked senders; async channels wake endpoint waiters after enqueue
-- **VMM-Page Table Integration** -- map_region/unmap_region write to real architecture page tables via PageMapper; VAS operations allocate/free physical frames via frame allocator
-- **Capability Validation** -- IPC capability validation performs two-level check against process capability space; fast path process lookup uses real process table
-- **FPU Context Switching** -- NEON Q0-Q31 save/restore on AArch64; F/D extension f0-f31 save/restore on RISC-V
-- **Thread Memory** -- Thread creation allocates real stack frames with guard pages; TLS allocation uses real frame allocation with architecture-specific register setup (FS_BASE/TPIDR_EL0/tp)
-- **Shared Memory** -- Regions allocate/free physical frames and flush TLB; transfer_ownership validates target process; unmap properly frees frames
-- **Zero-Copy IPC** -- Uses real ProcessPageTable with VAS delegation; allocate_virtual_range uses VAS mmap instead of hardcoded address
-
-**Phase 4 Package Ecosystem (7 sprints, ~75% complete):**
-
-- **Transaction System** -- Package manager with atomic install/remove/upgrade operations and rollback support
-- **DPLL SAT Resolver** -- Dependency resolver with version ranges, virtual packages, conflict detection, and backtracking
-- **Ports Framework** -- 6 build types (Autotools, CMake, Meson, Cargo, Make, Custom); port collection management with 6 standard categories
-- **SDK Types** -- ToolchainInfo, BuildTarget, SdkConfig; typed syscall API wrappers for 6 subsystems; package configuration with .pc file generation
-- **Shell Commands** -- install, remove, update, upgrade, list, search, info, verify
-- **Package Syscalls** -- SYS_PKG_INSTALL (90) through SYS_PKG_UPDATE (94)
-- **Crypto Hardening** -- Real Ed25519 signature verification with trust policies for packages
-
-**Phase 4 Prerequisites:**
-
-- Page fault handler framework with demand paging and stack growth
-- ELF dynamic linker support with auxiliary vector and PT_INTERP parsing
-- Process waitpid infrastructure with WNOHANG and POSIX wstatus encoding
-- Per-process working directory with path normalization
-
-42 files changed (+7,581/-424 lines), 15 new files. AArch64 and RISC-V boot to Stage 6 BOOTOK with 22/22 tests passing.
-
-### Technical Debt Remediation (v0.3.3)
-
-Released February 14, 2026. Comprehensive technical debt remediation across 4 parallel work streams:
-
-- **Soundness & Safety** — Fixed RiscvScheduler soundness issue (UnsafeCell to spin::Mutex), deleted 353-line dead `security::crypto` module, fixed 5 clippy suppressions, deduplicated x86_64 I/O port functions
-- **Error Type Migration** — Eliminated all remaining `Err("...")` string literals (96 to 0) and `Result<T, &str>` signatures (91 to 1 justified); 11 primary files + ~33 cascade files converted to typed `KernelError`
-- **Code Organization** — Split 3 files exceeding 1,500 lines: `crypto/post_quantum.rs` into directory (kyber/dilithium/hybrid), `security/mac.rs` into directory (parser extracted), `elf/types.rs` extracted; created `arch/entropy.rs` abstraction
-- **Comment & Annotation Cleanup** — 55 `TODO(phase3)` items triaged to zero (9 eliminated, 1 removed as already implemented, 45 reclassified), 15 unnecessary `#[allow(unused_imports)]` removed, `process_compat::Process` renamed to `TaskProcessAdapter`
-- **Net result**: 80 files changed, +1,024/-5,069 lines (net -4,045 lines), zero `Result<T, &str>` remaining, zero soundness bugs
-
-### Phase 3: Security Hardening — Complete (v0.3.0, v0.3.2)
-
-Initial release February 14, 2026 (v0.3.0). Fully completed February 14, 2026 (v0.3.2). Architecture leakage reduction and comprehensive security hardening:
-
-- **Architecture Leakage Reduction** — `kprintln!`/`kprint!` macro family, `IpcRegisterSet` trait, heap/scheduler consolidation; `cfg(target_arch)` outside `arch/` reduced from 379 to 204 (46% reduction)
-- **Test Expansion** — Kernel-mode init tests expanded from 12 to 22, all passing on all architectures
-- **Capability System Hardening** — Root capability bootstrap, per-process resource quotas (256 cap limit), syscall enforcement (fork/exec/kill require Process cap)
-- **MAC + Audit** — MAC convenience functions wired into VFS `open()`/`mkdir()`, audit events for capability and process lifecycle
-- **Memory Hardening** — Speculation barriers (LFENCE/CSDB/FENCE.I) at syscall entry, guard pages in VMM, stack canary integration
-- **Crypto Validation** — SHA-256 NIST FIPS 180-4 test vector validation
-
-### Phase 2: User Space Foundation — Complete (v0.2.3, parity v0.2.5, completed v0.3.2)
-
-Started August 15, 2025. Architecturally complete August 16, 2025. Runtime activation verified February 13, 2026. Full multi-architecture boot parity achieved February 13, 2026 (v0.2.5) with RISC-V post-BOOTOK crash fix, heap sizing corrections, and 30-second stability tests passing on all architectures.
-
-Implementation achievements:
-
-- **Virtual Filesystem (VFS) Layer** — Mount points, ramfs, devfs (`/dev`), procfs (`/proc`)
-- **File Descriptors & Operations** — POSIX-style operations with full syscall suite (open, read, write, close, seek, mkdir, etc.)
-- **Live System Information** — `/proc` with real process and memory stats
-- **Device Abstraction** — `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/console`
-- **Process Server** — Complete process management with resource handling
-- **ELF Loader** — Dynamic linking support for user-space applications
-- **Thread Management** — Complete APIs with TLS and scheduling policies
-- **Standard Library** — C-compatible foundation for user-space
-- **Init System** — Service management with dependencies and runlevels
-- **Shell Implementation** — 20+ built-in commands with environment management
-- **Driver Suite** — PCI/USB bus drivers, network drivers (Ethernet + loopback with TCP/IP stack), storage drivers (ATA/IDE), console drivers (VGA + serial)
-- **Runtime Init Tests** — 22 kernel-mode tests (6 VFS + 6 shell + 10 security/capability/crypto) verifying subsystem functionality at boot
+| x86_64       | ✅    | ✅   | 27/27     | ✅      | ✅ PASS           | **100% Functional** -- UEFI boot via OVMF |
+| AArch64      | ✅    | ✅   | 27/27     | ✅      | ✅ PASS           | **100% Functional** -- Direct kernel loading |
+| RISC-V 64    | ✅    | ✅   | 27/27     | ✅      | ✅ PASS           | **100% Functional** -- OpenSBI boot |
+
+### Development Phases
+
+| Phase | Description | Status | Version | Date |
+|-------|-------------|--------|---------|------|
+| 0 | Foundation and Tooling | **Complete** | v0.1.0 | Jun 2025 |
+| 1 | Microkernel Core | **Complete** | v0.2.1 | Jun 2025 |
+| 2 | User Space Foundation | **Complete** | v0.3.2 | Feb 2026 |
+| 3 | Security Hardening | **Complete** | v0.3.2 | Feb 2026 |
+| 4 | Package Ecosystem | **Complete** | v0.4.0 | Feb 2026 |
+| 5 | Performance Optimization | Planned | -- | -- |
+| 6 | Advanced Features and GUI | Planned | -- | -- |
+
+For detailed release notes, see [Release History](docs/RELEASE-HISTORY.md).
+
+### What Is Built
+
+Phases 0 through 4 are complete. The kernel provides:
+
+- **IPC** -- Synchronous/asynchronous channels with zero-copy fast path (<1us)
+- **Memory Management** -- Hybrid bitmap+buddy allocator, NUMA-aware, 4-level page tables
+- **Process Management** -- Full lifecycle with context switching on all architectures
+- **Scheduler** -- CFS with SMP support, load balancing, CPU affinity
+- **Capability System** -- 64-bit unforgeable tokens, two-level O(1) lookup, revocation
+- **VFS** -- ramfs, devfs, procfs, blockfs with POSIX-style file operations
+- **Security** -- MAC, secure boot, TPM 2.0, ASLR, W^X, Spectre barriers, KPTI, post-quantum crypto
+- **Package Manager** -- DPLL SAT resolver, ports system, reproducible builds, Ed25519 signing
+- **Userland Bridge** -- Ring 0 to Ring 3 transitions with SYSCALL/SYSRET on x86_64
+
+### What Comes Next
+
+- **Phase 5: Performance Optimization** -- Sub-microsecond IPC, lock-free kernel paths, DPDK networking, NVMe optimization, profiling tools
+- **Phase 6: Advanced Features** -- Wayland compositor, desktop environment, multimedia, virtualization, cloud-native features, POSIX compatibility layer
 
 ### Technical Notes
 
-**AArch64 FP/NEON fix**: Root cause of AArch64 VFS read hangs identified and resolved. LLVM emits NEON/SIMD instructions (`movi v0.2d`, `str q0`) for buffer zeroing on buffers >= 16 bytes. Without CPACR_EL1.FPEN enabled, these instructions trap silently. Fixed by enabling FP/NEON in `boot.S` before entering Rust code.
+**AArch64 FP/NEON fix**: LLVM emits NEON/SIMD instructions (`movi v0.2d`, `str q0`) for buffer zeroing on buffers >= 16 bytes. Without CPACR_EL1.FPEN enabled, these instructions trap silently. Fixed by enabling FP/NEON in `boot.S` before entering Rust code.
 
-**UnsafeBumpAllocator on AArch64**: AArch64 now uses the same lock-free bump allocator as RISC-V, with a simple load-store allocation path (no CAS) and direct atomic initialization with DSB SY/ISB memory barriers.
+**UnsafeBumpAllocator on AArch64**: AArch64 uses the same lock-free bump allocator as RISC-V, with a simple load-store allocation path (no CAS) and direct atomic initialization with DSB SY/ISB memory barriers.
 
 **bare_lock::RwLock**: UnsafeCell-based single-threaded RwLock replacement for AArch64 bare metal, used in VFS filesystem modules to avoid `spin::RwLock` CAS spinlock hangs without proper exclusive monitor configuration.
 
 **AArch64 LLVM workaround**: AArch64 uses an assembly-only approach to bypass a critical LLVM loop compilation bug. All `println!` and `boot_println!` macros are no-ops on AArch64; critical messages use direct UART character writes. See [README - LLVM Bug](kernel/src/arch/aarch64/README_LLVM_BUG.md) for details.
 
-**DEEP-RECOMMENDATIONS**: All 9 of 9 recommendations complete — bootstrap circular dependency fix, AArch64 calling convention, atomic operations, capability overflow, user pointer validation, custom test framework, error type migration, RAII patterns, and Phase 2 readiness.
-
 ### Maturity
 
-VeridianOS is an active research system. Core architectural concepts are stable; subsystems evolve deliberately.
+VeridianOS is an active research system. Phases 0 through 4 are architecturally stable; Phase 5 (performance) and Phase 6 (advanced features) are next.
 
 Historical status is recorded in:
 
+- [`RELEASE-HISTORY.md`](docs/RELEASE-HISTORY.md) -- Detailed per-release notes
 - [`PROJECT-STATUS.md`](docs/status/PROJECT-STATUS.md)
 - [`PHASE2-STATUS-SUMMARY.md`](docs/status/PHASE2-STATUS-SUMMARY.md)
 - [`BOOTLOADER-UPGRADE-STATUS.md`](docs/status/BOOTLOADER-UPGRADE-STATUS.md)
@@ -540,36 +354,20 @@ Security is a fundamental design principle:
 
 ## Technical Roadmap
 
-### Near-term (2025)
+### Completed (2025-2026)
 
-- [x] Phase 0: Foundation — Complete (2025-06-07)
-- [x] Phase 1: Microkernel Core — Complete (2025-06-12, v0.2.1)
-- [x] Phase 2: User Space Foundation — Runtime verified (2025-08-16, v0.2.3)
-- [x] Technical Debt Remediation — 9/10 issues resolved (2026-02-13, v0.2.4)
-- [x] RISC-V Crash Fix & Architecture Parity — All 3 architectures stable (2026-02-13, v0.2.5)
-- [x] Phase 3: Security Hardening — Architecture cleanup, capability hardening, MAC/audit, memory hardening (2026-02-14, v0.3.0)
-- [x] Technical Debt Remediation — OnceLock soundness fix, 48 static mut eliminated, typed errors, panic-free syscalls (2026-02-14, v0.3.1)
-- [x] Phase 2 & Phase 3 Completion — 15 implementation sprints, full crypto/secure boot/TPM/MAC/audit/ELF/BlockFS/signals (2026-02-14, v0.3.2)
-- [x] Technical Debt Remediation — RiscvScheduler soundness fix, Result<T, &str> elimination (96 to 0), 3 large file splits, TODO(phase3) triage (2026-02-14, v0.3.3)
-- [x] Phase 1-3 Integration + Phase 4 Package Ecosystem — IPC-scheduler bridge, VMM-page table integration, capability validation, FPU context, DPLL SAT resolver, ports system, SDK types, package shell commands (2026-02-15, v0.3.4)
-- [x] Critical Architecture Boot Fixes — x86_64 CSPRNG double fault, RISC-V frame allocator memory map, boot stack overflow; all 3 architectures now fully boot (2026-02-15, v0.3.5)
-- [x] Phase 4 Group 1 — Repository infrastructure, package removal enhancements, binary delta updates, config file tracking, RISC-V JAL fix (2026-02-15, v0.3.6)
-- [x] Phase 4 Group 2 — Ports build execution with SHA-256 checksums, reproducible builds infrastructure, repository security scanning (2026-02-15, v0.3.7)
-- [x] Phase 4 Groups 3+4 — Toolchain manager, package testing, license compliance, dependency graph, ecosystem definitions (2026-02-15, v0.3.8)
-- [x] Phase 4 Completion + Userland Bridge — SDK generator, plugin system, async types, Ring 3 entry via iretq, SYSCALL/SYSRET path, embedded init binary (2026-02-15, v0.3.9)
-- [x] Phase 4 Milestone — Comprehensive syscall API documentation, 5 new Phase 4 boot tests (27/27), formal version bump (2026-02-15, v0.4.0)
+- [x] **Phase 0**: Foundation and Tooling (v0.1.0, Jun 2025)
+- [x] **Phase 1**: Microkernel Core (v0.2.1, Jun 2025)
+- [x] **Phase 2**: User Space Foundation (v0.3.2, Feb 2026)
+- [x] **Phase 3**: Security Hardening (v0.3.2, Feb 2026)
+- [x] **Phase 4**: Package Ecosystem and Self-Hosting (v0.4.0, Feb 2026)
 
-### Mid-term (2026)
+### Upcoming
 
-- [x] Phase 2: User Space Foundation — 100% Complete (2026-02-14, v0.3.2)
-- [x] Phase 3: Security Hardening — 100% Complete (2026-02-14, v0.3.2)
-- [x] Technical Debt Remediation — Complete (2026-02-14, v0.3.1)
-- [x] Phase 4: Package Ecosystem & Self-Hosting — 100% Complete (2026-02-15, v0.4.0)
+- [ ] **Phase 5**: Performance Optimization (5-6 months) -- Sub-microsecond IPC, lock-free kernel paths, DPDK networking, NVMe optimization
+- [ ] **Phase 6**: Advanced Features (8-9 months) -- Wayland compositor, desktop environment, multimedia, virtualization, cloud-native, POSIX compatibility layer
 
-### Long-term (2027+)
-
-- [ ] Phase 5: Performance Optimization (5–6 months) — Sub-microsecond IPC, lock-free kernel paths, DPDK networking
-- [ ] Phase 6: Advanced Features (8–9 months) — Wayland compositor, desktop environment, cloud-native features
+See [Release History](docs/RELEASE-HISTORY.md) for detailed per-release notes.
 
 ---
 

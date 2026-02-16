@@ -64,18 +64,20 @@ This is acceptable for a research system focused on durability.
 
 ---
 
-## 4. Explicit Non-Goals
+## 4. Explicit Non-Goals and Bounded Compatibility
 
 ### Choice
-VeridianOS explicitly avoids POSIX compatibility and general-purpose OS goals.
+VeridianOS native APIs are capability-based, not POSIX-based. The kernel does not implement POSIX semantics.
 
 ### Rationale
-Compatibility layers obscure authority, blur isolation boundaries, and impose legacy semantics.
+Embedding compatibility semantics into the kernel would obscure authority, blur isolation boundaries, and impose legacy constraints on the core architecture.
 
-Explicit non-goals prevent accidental scope expansion and protect architectural clarity.
+However, POSIX compatibility is planned as a **user-space translation layer** (similar to Fuchsia's fdio or Redox's relibc) in future development phases. This layer maps POSIX file descriptors to capabilities, translates POSIX process semantics to capability-based spawning, and provides familiar APIs for software porting -- all without compromising kernel-level architectural invariants.
+
+Explicit non-goals protect architectural clarity while still allowing future compatibility through well-bounded user-space libraries.
 
 ### Trade-Off
-The system is not immediately usable for conventional workloads.
+The system is not immediately usable for conventional workloads. POSIX compatibility, when added, will be a convenience layer rather than a native interface.
 
 This is intentional.
 

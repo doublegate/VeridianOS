@@ -1,7 +1,7 @@
 # Issues and Bug Tracking TODO
 
-**Purpose**: Central tracking for all bugs, issues, and defects  
-**Last Updated**: 2025-06-17
+**Purpose**: Central tracking for all bugs, issues, and defects
+**Last Updated**: February 15, 2026
 
 ## 🐛 Issue Categories
 
@@ -21,18 +21,15 @@
 ## 🚨 Critical Issues (P0)
 
 ### ISSUE-0012: x86_64 Boot Hang
-- **Status**: Open (Critical - Blocks x86_64 Development)
+- **Status**: RESOLVED (Fixed across v0.3.0 through v0.3.5)
 - **Component**: Kernel/Boot
 - **Reported**: 2025-06-13
-- **Last Updated**: 2025-01-17
+- **Resolved**: February 15, 2026 (v0.3.5)
 - **Reporter**: Boot Testing
-- **Assignee**: TBD
 - **Description**: x86_64 kernel hangs very early in boot with no serial output
-- **Impact**: x86_64 platform early boot unusable
-- **Workaround**: Use RISC-V or AArch64 for testing
-- **Update (2025-06-15)**: Fixed to use full bootstrap from main.rs but still hangs early
-- **Progress**: Context switching and memory mapping now work! See ISSUE-0015 and ISSUE-0016
-- **Pre-Phase 2 Status**: Identified as one of two critical blockers for Phase 2 development
+- **Root Cause**: Multiple issues - bootloader upgrade needed, CSPRNG CPUID check missing (RDRAND on QEMU qemu64 CPU), boot stack too small (64KB insufficient for debug builds with ~20KB CapabilitySpace on stack)
+- **Fix**: Bootloader upgrade (v0.3.0), CPUID RDRAND check with timer-jitter fallback + 256KB boot stack (v0.3.5)
+- **Verification**: x86_64 now boots to Stage 6 BOOTOK with 27/27 tests and zero warnings
 
 ### ISSUE-0013: AArch64 Function Call Hang
 - **Status**: RESOLVED ✅
@@ -49,32 +46,26 @@
 - **Note**: What appeared to be an LLVM bug was actually incorrect stack setup
 
 ### ISSUE-0017: AArch64 Bootstrap Completion
-- **Status**: Open
+- **Status**: RESOLVED
 - **Component**: Kernel/Bootstrap
 - **Reported**: 2025-06-17
+- **Resolved**: August 2025 (v0.3.0 bootstrap refactoring)
 - **Reporter**: Implementation Session
-- **Assignee**: TBD
 - **Description**: AArch64 bootstrap returns at Stage 6 instead of transitioning to scheduler
-- **Impact**: Kernel panics with "Bootstrap returned unexpectedly!" after successful init
 - **Root Cause**: Early return in bootstrap.rs for AArch64 at Stage 6
-- **Workaround**: None - needs proper implementation
-- **Fix Plan**: See to-dos/AARCH64-FIXES-TODO.md for complete implementation plan
+- **Fix**: Bootstrap refactoring simplified bootstrap.rs to ~150 lines with per-arch entry.rs/bootstrap.rs/serial.rs modules. AArch64 now completes full boot sequence.
+- **Verification**: AArch64 boots to Stage 6 BOOTOK with 27/27 tests and zero warnings
 
 ### ISSUE-0018: RISC-V Frame Allocator Lock Hang
-- **Status**: Open (Regression)
+- **Status**: RESOLVED
 - **Component**: Kernel/Memory Management
 - **Reported**: 2025-06-17
+- **Resolved**: February 2026 (v0.3.1 static mut elimination + v0.3.5 memory region fix)
 - **Reporter**: Stack Setup Audit
-- **Assignee**: TBD
 - **Description**: RISC-V kernel restarts when trying to acquire frame allocator lock
-- **Impact**: RISC-V cannot boot past memory initialization
-- **Symptoms**: 
-  - Kernel prints "Getting frame allocator lock..." then restarts
-  - Boot sequence repeats indefinitely
-  - Was previously working (booted to Stage 6)
-- **Root Cause**: Unknown - likely mutex/lock initialization issue
-- **Workaround**: None currently
-- **Notes**: Not related to stack setup - occurs with both original and improved boot.S
+- **Root Cause**: Static mut initialization issues causing lock state corruption; also memory start was set to 0x88000000 (END of 128MB RAM) instead of after kernel end
+- **Fix**: Static mut elimination (v0.3.1) resolved lock issues. Frame allocator memory start changed to 0x80E00000 (v0.3.5).
+- **Verification**: RISC-V boots to Stage 6 BOOTOK with 27/27 tests and zero warnings
 
 ### ISSUE-0014: Context Switching Not Connected
 - **Status**: RESOLVED ✅
