@@ -107,7 +107,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.4.6 (February 16, 2026)
+**Latest Release**: v0.4.7 (February 16, 2026)
 
 ### Architecture Support
 
@@ -145,7 +145,7 @@ Phases 0 through 4 are complete. The kernel provides:
 - **Security** -- MAC, secure boot, TPM 2.0, ASLR, W^X, Spectre barriers, KPTI, post-quantum crypto
 - **Package Manager** -- DPLL SAT resolver, ports system, reproducible builds, Ed25519 signing
 - **Interactive Shell (vsh)** -- Bash/Fish-parity serial console shell with pipes, redirections, variable expansion, globbing, tab completion, job control, scripting (if/for/while/case), functions, aliases
-- **Framebuffer Display** -- 1280x800 text console via UEFI framebuffer (x86_64) and ramfb (AArch64/RISC-V), ANSI color support, PS/2 keyboard input via controller polling
+- **Framebuffer Display** -- 1280x800 text console via UEFI framebuffer (x86_64) and ramfb (AArch64/RISC-V), ANSI color support, PS/2 keyboard input via controller polling, glyph cache, pixel ring buffer, write-combining (PAT) on x86_64
 - **Userland Bridge** -- Ring 0 to Ring 3 transitions with SYSCALL/SYSRET on x86_64
 
 ### What Comes Next

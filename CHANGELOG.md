@@ -1,3 +1,81 @@
+## [0.4.7] - 2026-02-16
+
+### Fbcon: Glyph Cache, Pixel Ring Buffer, and Write-Combining (PAT)
+
+Three performance optimizations that eliminate remaining bottlenecks in the framebuffer console rendering pipeline. Glyph rendering drops from 128 per-pixel bit-extraction + branch operations to a single 512-byte memcpy per glyph. Scrolling drops from a ~3MB RAM memmove to an O(1) ring pointer advance. MMIO flush throughput increases 5-150x on x86_64 via write-combining page attributes.
+
+8 files changed, +604/-117 lines (2 new files).
+
+---
+
+### Added
+
+#### MSR Primitives (`kernel/src/arch/x86_64/msr.rs`, NEW, 59 lines)
+
+- Extracted `rdmsr()`, `wrmsr()`, `phys_to_virt()` from `apic.rs` into a shared module
+- Public API for use by both APIC and PAT subsystems
+
+#### Page Attribute Table / Write-Combining (`kernel/src/arch/x86_64/pat.rs`, NEW, 170 lines)
+
+- `cpu_has_pat()`: CPUID leaf 1 EDX bit 16 check for PAT support
+- `init()`: Reprograms PAT entry 1 from Write-Through to Write-Combining (0x01)
+- `apply_write_combining()`: Walks active PML4 page tables, sets PWT=1/PCD=0/PAT=0 on framebuffer PTEs, flushes TLB per page
+- FreeBSD benchmarks show 5-150x faster MMIO writes (200 MB/s UC to 1200+ MB/s WC)
+
+### Changed
+
+#### Glyph Cache (`kernel/src/graphics/fbcon.rs`)
+
+- Pre-renders all 256 glyphs as `[u32; 128]` pixel arrays (128KB) for the current (fg, bg) color pair
+- Cache hit: `copy_nonoverlapping` of 32 bytes per glyph row (16 rows = 512 bytes total) instead of 128 per-pixel bit-extraction + conditional
+- Cache rebuilt on color change (~300us one-time cost, rare -- typically 0-3 times per command)
+- OOM fallback to uncached per-pixel path if 128KB allocation fails
+
+#### Pixel Ring Buffer (`kernel/src/graphics/fbcon.rs`)
+
+- New `pixel_ring_offset` field tracks logical screen start in back-buffer
+- `scroll_up()` advances ring pointer (O(1)) instead of ~3MB `core::ptr::copy` memmove
+- `pixel_row_offset()` helper computes ring-adjusted byte offset per logical text row
+- `blit_to_framebuffer()` performs two-chunk linearizing copy to handle ring wrap
+- `render_glyph_to_buf()` uses ring-adjusted offsets for all pixel writes
+- `clear()` resets ring offset to 0
+- All CSI K (Erase in Line) fast-paths updated with ring-adjusted offsets
+
+#### APIC Refactoring (`kernel/src/arch/x86_64/apic.rs`)
+
+- Replaced ~60 lines of private `rdmsr`/`wrmsr`/`phys_to_virt` with `use super::msr::*` import
+- No functional changes; identical behavior
+
+#### Bootstrap PAT Integration (`kernel/src/bootstrap.rs`)
+
+- `pat::init()` called after arch initialization (reprograms PAT MSR)
+- `pat::apply_write_combining()` called after fbcon init (modifies framebuffer page table entries)
+- Serial log: `[BOOTSTRAP] PAT configured (WC available)` and `[BOOTSTRAP] Framebuffer WC enabled (N pages)`
+
+#### Shell Flush Integration (`kernel/src/services/shell/mod.rs`, `kernel/src/arch/x86_64/entry.rs`)
+
+- `fbcon::flush()` calls at shell prompt, after command execution, on keystroke echo, and in panic handler
+- Ensures framebuffer display stays current at every I/O boundary
+
+### Performance Impact
+
+| Optimization | Before | After |
+|-------------|--------|-------|
+| 1 glyph render | 128 bit-ops + 128 branches + 128 writes | 16 memcpys of 32 bytes (cache hit) |
+| 160-col line | 20,480 bit-ops + branches | 2,560 memcpys of 32 bytes |
+| scroll_up() RAM | ~3MB memmove (~1-2ms) | Ring pointer advance (O(1)) |
+| `help` (14 scrolls) RAM | 14 x ~2ms = ~28ms | 14 x ~0us = ~0ms |
+| MMIO write throughput (x86_64) | ~200 MB/s (UC) | ~1200+ MB/s (WC) |
+| 4MB full blit (x86_64) | ~20ms | ~3ms |
+
+### Build Verification
+
+- x86_64: Stage 6 BOOTOK, 29/29 tests, zero clippy warnings, PAT/WC active
+- AArch64: Stage 6 BOOTOK, 29/29 tests, zero clippy warnings
+- RISC-V: Stage 6 BOOTOK, 29/29 tests, zero clippy warnings
+
+---
+
 ## [0.4.6] - 2026-02-16
 
 ### Framebuffer Console Performance Optimization
