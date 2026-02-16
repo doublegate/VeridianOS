@@ -1,9 +1,10 @@
 //! x86_64 architecture support.
 //!
-//! Provides hardware initialization (GDT, IDT, PIC), interrupt control,
+//! Provides hardware initialization (GDT, IDT, PIC, APIC), interrupt control,
 //! serial I/O (COM1 at 0x3F8), VGA text output, and I/O port primitives
 //! for the x86_64 platform.
 
+pub mod apic;
 pub mod boot;
 pub mod bootstrap;
 pub mod context;
@@ -87,6 +88,15 @@ pub fn init() {
     println!("[ARCH] Starting MMU init...");
     mmu::init();
     println!("[ARCH] MMU initialized");
+
+    // Initialize Local APIC + I/O APIC (additive to PIC -- PIC remains as
+    // fallback). APIC init is non-fatal: if it fails the kernel continues
+    // with PIC-only interrupt routing.
+    println!("[ARCH] Initializing APIC...");
+    match apic::init() {
+        Ok(()) => println!("[ARCH] APIC initialized"),
+        Err(e) => println!("[ARCH] APIC init skipped: {}", e),
+    }
 
     // Don't enable interrupts yet - they're all masked
     println!("[ARCH] Skipping interrupt enable for now");

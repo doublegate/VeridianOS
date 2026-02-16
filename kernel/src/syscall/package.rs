@@ -5,7 +5,7 @@
 //! `pkg::PackageManager` singleton after validating arguments and
 //! checking capabilities.
 
-use super::{SyscallError, SyscallResult};
+use super::{validate_user_ptr_typed, validate_user_string_ptr, SyscallError, SyscallResult};
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -16,14 +16,13 @@ use alloc::{string::String, vec::Vec};
 ///
 /// Returns the string contents up to `max_len` bytes.
 fn read_user_string(ptr: usize, max_len: usize) -> Result<String, SyscallError> {
-    if ptr == 0 {
-        return Err(SyscallError::InvalidPointer);
-    }
+    // Validate pointer is in user space
+    validate_user_string_ptr(ptr)?;
 
-    // SAFETY: ptr was validated as non-zero above. We read bytes one at a
-    // time from the user-space pointer until we find a null terminator or
-    // reach the max_len limit. The caller must provide a valid, null-
-    // terminated string in mapped user memory.
+    // SAFETY: ptr was validated as non-null and in user-space above. We read
+    // bytes one at a time from the user-space pointer until we find a null
+    // terminator or reach the max_len limit. The caller must provide a valid,
+    // null-terminated string in mapped user memory.
     let bytes = unsafe {
         let mut buf = Vec::new();
         let mut p = ptr as *const u8;
@@ -160,9 +159,12 @@ pub fn sys_pkg_list(buf_ptr: usize, _buf_size: usize) -> SyscallResult {
 
     // If a buffer was provided, write the count there
     if buf_ptr != 0 {
-        // SAFETY: buf_ptr was validated as non-zero. The caller must provide
-        // a valid, writable pointer to a usize-sized buffer in mapped user
-        // memory. We write a single usize value (the package count).
+        // Validate buffer pointer is in user space and aligned for usize
+        validate_user_ptr_typed::<usize>(buf_ptr)?;
+
+        // SAFETY: buf_ptr was validated as non-null, in user-space, properly
+        // sized and aligned for usize above. We write a single usize value
+        // (the package count).
         unsafe {
             let out = buf_ptr as *mut usize;
             *out = count;

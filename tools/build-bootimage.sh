@@ -59,6 +59,36 @@ fi
 echo "Kernel: $FULL_KERNEL_PATH"
 echo "Output: $FULL_OUTPUT_DIR"
 
+# Strip debug info from the kernel ELF before creating the disk image.
+# Debug builds include ~30MB of DWARF sections that the bootloader must
+# read into UEFI memory. UEFI firmware on QEMU with default RAM (128MB)
+# runs out of resources trying to AllocatePages for a 45MB ELF file.
+# Stripping reduces the file to ~5MB (loadable segments only), well within
+# UEFI memory limits while preserving all code and data sections.
+STRIPPED_KERNEL="${FULL_KERNEL_PATH}.stripped"
+if command -v llvm-objcopy &>/dev/null; then
+    echo "Stripping debug info (llvm-objcopy)..."
+    llvm-objcopy --strip-debug "$FULL_KERNEL_PATH" "$STRIPPED_KERNEL"
+elif command -v rust-objcopy &>/dev/null; then
+    echo "Stripping debug info (rust-objcopy)..."
+    rust-objcopy --strip-debug "$FULL_KERNEL_PATH" "$STRIPPED_KERNEL"
+elif command -v objcopy &>/dev/null; then
+    echo "Stripping debug info (objcopy)..."
+    objcopy --strip-debug "$FULL_KERNEL_PATH" "$STRIPPED_KERNEL"
+else
+    echo -e "${YELLOW}Warning: No objcopy found, using unstripped kernel (may fail with UEFI OUT_OF_RESOURCES)${NC}"
+    STRIPPED_KERNEL="$FULL_KERNEL_PATH"
+fi
+
+if [ "$STRIPPED_KERNEL" != "$FULL_KERNEL_PATH" ]; then
+    ORIG_SIZE=$(stat -c%s "$FULL_KERNEL_PATH" 2>/dev/null || stat -f%z "$FULL_KERNEL_PATH")
+    STRIP_SIZE=$(stat -c%s "$STRIPPED_KERNEL" 2>/dev/null || stat -f%z "$STRIPPED_KERNEL")
+    echo "  Original: $(( ORIG_SIZE / 1024 / 1024 ))MB -> Stripped: $(( STRIP_SIZE / 1024 / 1024 ))MB"
+fi
+
+# Use the stripped kernel for disk image creation
+FULL_KERNEL_PATH="$STRIPPED_KERNEL"
+
 # Copy builder source to temp directory (to avoid workspace config)
 echo "Preparing bootimage builder..."
 rm -rf "$BUILD_DIR"

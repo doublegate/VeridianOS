@@ -34,7 +34,8 @@ pub use manager::CapError;
 pub use object::ObjectRef;
 pub use space::CapabilitySpace;
 pub use token::{CapabilityToken, Rights};
-pub use types::CapabilityId;
+#[allow(unused_imports)]
+pub use types::{CapabilityId, CapabilityType, InterruptCapability};
 
 #[cfg(feature = "alloc")]
 extern crate alloc;

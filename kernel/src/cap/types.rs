@@ -54,6 +54,88 @@ pub enum CapabilityType {
     Network = 6,
     /// Time capability - access to timers/clocks
     Time = 7,
+    /// Interrupt capability - manage hardware IRQ lines (M-001)
+    Interrupt = 8,
+}
+
+/// Interrupt capability for managing hardware IRQ lines (M-001).
+///
+/// Grants fine-grained control over a specific interrupt line. Each
+/// permission flag controls a distinct operation:
+///
+/// - `can_enable`: Permission to enable (unmask) the IRQ line.
+/// - `can_disable`: Permission to disable (mask) the IRQ line.
+/// - `can_handle`: Permission to register a handler for the IRQ.
+///
+/// This integrates with the capability-based security model so that
+/// user-space drivers must hold an `InterruptCapability` before they
+/// can manage any interrupt line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterruptCapability {
+    /// The IRQ number this capability controls.
+    pub irq_number: u32,
+    /// Whether this capability allows enabling the IRQ.
+    pub can_enable: bool,
+    /// Whether this capability allows disabling the IRQ.
+    pub can_disable: bool,
+    /// Whether this capability allows registering a handler.
+    pub can_handle: bool,
+}
+
+impl InterruptCapability {
+    /// Create a new interrupt capability with full permissions.
+    pub fn new(irq_number: u32) -> Self {
+        Self {
+            irq_number,
+            can_enable: true,
+            can_disable: true,
+            can_handle: true,
+        }
+    }
+
+    /// Create a read-only interrupt capability (can handle but not toggle).
+    pub fn handle_only(irq_number: u32) -> Self {
+        Self {
+            irq_number,
+            can_enable: false,
+            can_disable: false,
+            can_handle: true,
+        }
+    }
+
+    /// Create an interrupt capability with specific permissions.
+    pub fn with_permissions(
+        irq_number: u32,
+        can_enable: bool,
+        can_disable: bool,
+        can_handle: bool,
+    ) -> Self {
+        Self {
+            irq_number,
+            can_enable,
+            can_disable,
+            can_handle,
+        }
+    }
+
+    /// Check if this capability grants a specific permission.
+    ///
+    /// Maps capability permissions to interrupt operations:
+    /// - `READ` right: can handle (receive) interrupts
+    /// - `WRITE` right: can enable/disable the IRQ line
+    /// - `EXECUTE` right: can register a handler
+    pub fn check_permission(&self, perms: CapabilityPermissions) -> bool {
+        if perms.has(CapabilityPermissions::READ) && !self.can_handle {
+            return false;
+        }
+        if perms.has(CapabilityPermissions::WRITE) && !(self.can_enable && self.can_disable) {
+            return false;
+        }
+        if perms.has(CapabilityPermissions::EXECUTE) && !self.can_handle {
+            return false;
+        }
+        true
+    }
 }
 
 /// Capability permissions

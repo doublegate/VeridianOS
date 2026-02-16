@@ -4,5 +4,6 @@
 //! shared across RISC-V 32-bit and 64-bit variants.
 
 pub mod context;
+pub mod plic;
 pub mod sbi;
 pub mod timer;

@@ -9,13 +9,19 @@ pub mod bootstrap;
 pub mod entry;
 pub mod serial;
 
-// Re-export context and timer from parent riscv module
-pub use super::riscv::{context, timer};
+// Re-export context, PLIC, and timer from parent riscv module
+pub use super::riscv::{context, plic, timer};
 
 /// Called from bootstrap on RISC-V via `crate::arch::init()`.
 pub fn init() {
     // Initialize SBI (Supervisor Binary Interface)
     super::riscv::sbi::init();
+
+    // Initialize PLIC (all sources disabled, threshold at 0).
+    // This is safe before stvec is configured because no sources are enabled.
+    if let Err(e) = super::riscv::plic::init() {
+        println!("[RISCV64] WARNING: PLIC initialization failed: {}", e);
+    }
 
     // IMPORTANT: Do NOT enable interrupts during early boot!
     // There is no trap handler (stvec) set up yet, so any interrupt

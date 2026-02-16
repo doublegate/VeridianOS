@@ -11,7 +11,11 @@
 
 #![allow(clippy::unnecessary_cast)]
 
-use super::{SyscallError, SyscallResult};
+#[allow(unused_imports)]
+use super::{
+    validate_user_buffer, validate_user_ptr_typed, validate_user_string_ptr, SyscallError,
+    SyscallResult,
+};
 use crate::{
     fs::{try_get_vfs, OpenFlags, Permissions, SeekFrom},
     process,
@@ -174,13 +178,11 @@ use alloc::vec::Vec;
 /// # Returns
 /// File descriptor on success
 pub fn sys_open(path: usize, flags: usize, _mode: usize) -> SyscallResult {
-    // Validate path pointer
-    if path == 0 {
-        return Err(SyscallError::InvalidPointer);
-    }
+    // Validate path pointer is in user space
+    validate_user_string_ptr(path)?;
 
     // Get path string from user space
-    // SAFETY: path was validated as non-zero above. We read bytes one at a
+    // SAFETY: path was validated as non-null and in user-space above. We read
     // time from the user-space pointer until we find a null terminator or
     // reach the 4096-byte limit. The caller must provide a valid, null-
     // terminated string in mapped user memory.
@@ -259,13 +261,11 @@ pub fn sys_close(fd: usize) -> SyscallResult {
 /// embedded shell to accept keyboard input before a full console subsystem
 /// is initialized.
 pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
-    // Validate buffer
-    if buffer == 0 {
-        return Err(SyscallError::InvalidPointer);
-    }
     if count == 0 {
         return Ok(0);
     }
+    // Validate buffer is in user space
+    validate_user_buffer(buffer, count)?;
 
     // For stdin (fd 0), try file table first, then fall back to serial
     if fd == 0 {
@@ -348,13 +348,11 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
 /// which calls `syscall(53, 1, buf_ptr, len)` before a full VFS-backed
 /// console is available.
 pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
-    // Validate buffer
-    if buffer == 0 {
-        return Err(SyscallError::InvalidPointer);
-    }
     if count == 0 {
         return Ok(0);
     }
+    // Validate buffer is in user space
+    validate_user_buffer(buffer, count)?;
 
     // For stdout (fd 1) and stderr (fd 2), try file table first, then
     // fall back to serial output
@@ -444,10 +442,8 @@ pub fn sys_seek(fd: usize, offset: isize, whence: usize) -> SyscallResult {
 /// - fd: File descriptor
 /// - stat_buf: Buffer to write stat structure
 pub fn sys_stat(fd: usize, stat_buf: usize) -> SyscallResult {
-    // Validate buffer
-    if stat_buf == 0 {
-        return Err(SyscallError::InvalidPointer);
-    }
+    // Validate stat buffer pointer is in user space and aligned for FileStat
+    validate_user_ptr_typed::<FileStat>(stat_buf)?;
 
     // Get current process
     let process = process::current_process().ok_or(SyscallError::InvalidState)?;
@@ -512,13 +508,11 @@ pub fn sys_truncate(fd: usize, size: usize) -> SyscallResult {
 /// - path: Path to new directory
 /// - mode: Directory permissions
 pub fn sys_mkdir(path: usize, mode: usize) -> SyscallResult {
-    // Validate path
-    if path == 0 {
-        return Err(SyscallError::InvalidPointer);
-    }
+    // Validate path pointer is in user space
+    validate_user_string_ptr(path)?;
 
     // Get path string
-    // SAFETY: path was validated as non-zero above. We read bytes from the
+    // SAFETY: path was validated as non-null and in user-space above. We read
     // user-space pointer until null terminator or 4096-byte limit. The
     // caller must provide a valid null-terminated string.
     let path_bytes = unsafe {
@@ -554,15 +548,13 @@ pub fn sys_mkdir(path: usize, mode: usize) -> SyscallResult {
 /// # Arguments
 /// - path: Path to directory to remove
 pub fn sys_rmdir(path: usize) -> SyscallResult {
-    // Validate path
-    if path == 0 {
-        return Err(SyscallError::InvalidPointer);
-    }
+    // Validate path pointer is in user space
+    validate_user_string_ptr(path)?;
 
     // Get path string
-    // SAFETY: path was validated as non-zero above. We read bytes from the
-    // user-space pointer until null terminator or 4096-byte limit. The
-    // caller must provide a valid null-terminated string.
+    // SAFETY: path was validated as non-null and in user-space above. We read
+    // bytes from the user-space pointer until null terminator or 4096-byte
+    // limit. The caller must provide a valid null-terminated string.
     let path_bytes = unsafe {
         let mut bytes = Vec::new();
         let mut ptr = path as *const u8;
@@ -605,10 +597,9 @@ pub fn sys_mount(
     fs_type: usize,
     flags: usize,
 ) -> SyscallResult {
-    // Validate pointers
-    if mount_point == 0 || fs_type == 0 {
-        return Err(SyscallError::InvalidPointer);
-    }
+    // Validate mount_point and fs_type string pointers are in user space
+    validate_user_string_ptr(mount_point)?;
+    validate_user_string_ptr(fs_type)?;
 
     // Mount is a privileged operation - verify the calling process has
     // a Memory capability with WRITE rights (needed to modify the VFS tree)
@@ -698,10 +689,8 @@ pub fn sys_mount(
 ///
 /// This is a privileged operation requiring a kernel-level capability.
 pub fn sys_unmount(mount_point: usize) -> SyscallResult {
-    // Validate pointer
-    if mount_point == 0 {
-        return Err(SyscallError::InvalidPointer);
-    }
+    // Validate mount_point string pointer is in user space
+    validate_user_string_ptr(mount_point)?;
 
     // Unmount is a privileged operation - verify the calling process has
     // a Memory capability with WRITE rights (needed to modify the VFS tree)

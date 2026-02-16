@@ -2,6 +2,26 @@
 //!
 //! Provides the kernel-side implementation of system calls including IPC
 //! operations.
+//!
+//! # User-Space Pointer Validation Contract
+//!
+//! Every syscall handler that accepts a user-space pointer **must** call
+//! [`validate_user_pointer`] (or the typed [`validate_user_buffer`]) before
+//! dereferencing it. The validation enforces:
+//!
+//! 1. **Non-null** -- the pointer is not zero.
+//! 2. **User-space range** -- the entire `[ptr, ptr+size)` region falls within
+//!    the architecture-specific user-space address range (below
+//!    [`USER_SPACE_END`]).
+//! 3. **No arithmetic overflow** -- `ptr + size` does not wrap around.
+//! 4. **Size cap** -- the buffer size does not exceed [`MAX_BUFFER_SIZE`] (256
+//!    MB).
+//! 5. **Alignment** -- for typed access via [`validate_user_ptr_typed`], the
+//!    pointer is suitably aligned for `T`.
+//!
+//! Handlers that read null-terminated strings from user space must still pass
+//! the base pointer through validation with a minimum size of 1 before
+//! beginning the byte-by-byte scan.
 
 // System call handlers are fully implemented but not all are reachable
 // from user-space yet. Will be exercised once SYSCALL/SYSRET transitions
@@ -15,13 +35,22 @@ use crate::{
     sched,
 };
 
-/// Maximum valid user-space address (128 TB boundary for x86_64)
+/// Maximum valid user-space address.
+///
+/// On x86_64 this is the canonical upper bound of user space (128 TB).
+/// AArch64 and RISC-V use the same logical split for the QEMU virt machine.
 const USER_SPACE_END: usize = 0x0000_7FFF_FFFF_FFFF;
 
-/// Maximum allowed buffer size for syscall arguments (256 MB)
+/// Maximum allowed buffer size for syscall arguments (256 MB).
 const MAX_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 
-/// Validate that a user-space pointer and size are within bounds
+/// Validate that a user-space pointer and size are within bounds.
+///
+/// Checks:
+/// - `ptr` is non-null
+/// - `size` does not exceed [`MAX_BUFFER_SIZE`]
+/// - `ptr + size` does not overflow
+/// - the entire range `[ptr, ptr+size)` is below [`USER_SPACE_END`]
 #[inline]
 fn validate_user_pointer(ptr: usize, size: usize) -> Result<(), SyscallError> {
     if ptr == 0 {
@@ -36,6 +65,47 @@ fn validate_user_pointer(ptr: usize, size: usize) -> Result<(), SyscallError> {
         return Err(SyscallError::AccessDenied);
     }
     Ok(())
+}
+
+/// Validate a user-space buffer of `len` bytes starting at `ptr`.
+///
+/// This is the canonical entry point for all syscall handlers that accept
+/// user-space memory regions. It combines null, range, overflow, and size
+/// checks in a single call.
+///
+/// # Errors
+///
+/// - [`SyscallError::InvalidPointer`] if `ptr` is null or overflows.
+/// - [`SyscallError::InvalidArgument`] if `len` exceeds [`MAX_BUFFER_SIZE`].
+/// - [`SyscallError::AccessDenied`] if the range extends into kernel space.
+#[inline]
+pub(crate) fn validate_user_buffer(ptr: usize, len: usize) -> Result<(), SyscallError> {
+    validate_user_pointer(ptr, len)
+}
+
+/// Validate a user-space pointer for a typed access of `T`.
+///
+/// In addition to the range checks performed by [`validate_user_pointer`],
+/// this verifies that `ptr` is aligned to `core::mem::align_of::<T>()`.
+#[inline]
+pub(crate) fn validate_user_ptr_typed<T>(ptr: usize) -> Result<(), SyscallError> {
+    let size = core::mem::size_of::<T>();
+    validate_user_pointer(ptr, size)?;
+    let align = core::mem::align_of::<T>();
+    if !ptr.is_multiple_of(align) {
+        return Err(SyscallError::InvalidPointer);
+    }
+    Ok(())
+}
+
+/// Validate a user-space pointer for a null-terminated string read.
+///
+/// Checks that `ptr` is non-null and that at least the first byte falls
+/// within user-space. Callers must additionally re-validate on each page
+/// crossing during the byte-by-byte scan.
+#[inline]
+fn validate_user_string_ptr(ptr: usize) -> Result<(), SyscallError> {
+    validate_user_pointer(ptr, 1)
 }
 
 /// Syscall rate limiter using token bucket algorithm
@@ -104,6 +174,10 @@ use self::info::*;
 // Import package syscalls module
 mod package;
 use self::package::*;
+
+// Import time syscalls module
+mod time;
+use self::time::*;
 
 // Import user space utilities
 mod userspace;
@@ -179,6 +253,11 @@ pub enum Syscall {
     PkgQuery = 92,
     PkgList = 93,
     PkgUpdate = 94,
+
+    // Time management
+    TimeGetUptime = 100,
+    TimeCreateTimer = 101,
+    TimeCancelTimer = 102,
 }
 
 /// System call result type
@@ -359,6 +438,11 @@ fn handle_syscall(
         Syscall::PkgList => sys_pkg_list(arg1, arg2),
         Syscall::PkgUpdate => sys_pkg_update(arg1),
 
+        // Time management
+        Syscall::TimeGetUptime => sys_time_get_uptime(),
+        Syscall::TimeCreateTimer => sys_time_create_timer(arg1, arg2, arg3),
+        Syscall::TimeCancelTimer => sys_time_cancel_timer(arg1),
+
         _ => Err(SyscallError::InvalidSyscall),
     }
 }
@@ -446,9 +530,8 @@ fn sys_ipc_send(
 /// - endpoint: Endpoint to receive from
 /// - buffer: Buffer to receive message into
 fn sys_ipc_receive(endpoint: usize, buffer: usize) -> SyscallResult {
-    if buffer == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
+    // Validate receive buffer can hold at least a SmallMessage
+    validate_user_buffer(buffer, core::mem::size_of::<SmallMessage>())?;
 
     // Get current process's capability space
     let current_process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
@@ -524,10 +607,12 @@ fn sys_ipc_call(
     recv_buf: usize,
     recv_size: usize,
 ) -> SyscallResult {
-    // Validate arguments
-    if send_msg == 0 || send_size == 0 || recv_buf == 0 || recv_size == 0 {
+    // Validate send and receive buffers are in user space
+    if send_size == 0 || recv_size == 0 {
         return Err(SyscallError::InvalidArgument);
     }
+    validate_user_buffer(send_msg, send_size)?;
+    validate_user_buffer(recv_buf, recv_size)?;
 
     // Create message from user buffer
     let message = if send_size <= core::mem::size_of::<SmallMessage>() {
@@ -611,10 +696,11 @@ fn sys_ipc_call(
 
 /// IPC reply to a previous call
 fn sys_ipc_reply(caller: usize, msg_ptr: usize, msg_size: usize) -> SyscallResult {
-    // Validate arguments
-    if msg_ptr == 0 || msg_size == 0 {
+    // Validate reply message buffer
+    if msg_size == 0 {
         return Err(SyscallError::InvalidArgument);
     }
+    validate_user_buffer(msg_ptr, msg_size)?;
 
     // Create reply message
     let message = if msg_size <= core::mem::size_of::<SmallMessage>() {
@@ -664,9 +750,8 @@ fn sys_ipc_create_endpoint(_permissions: usize) -> SyscallResult {
 
 /// Bind endpoint to a name
 fn sys_ipc_bind_endpoint(endpoint_id: usize, name_ptr: usize) -> SyscallResult {
-    if name_ptr == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
+    // Validate name pointer is in user space (at least 1 byte for a string)
+    validate_user_string_ptr(name_ptr)?;
 
     // For now, just validate the endpoint exists
     // In a real implementation, this would register the endpoint with a name
@@ -686,10 +771,11 @@ fn sys_ipc_share_memory(
 ) -> SyscallResult {
     use crate::ipc::shared_memory::{Permissions, SharedRegion};
 
-    // Validate arguments
-    if addr == 0 || size == 0 {
+    // Validate the shared region address is in user space
+    if size == 0 {
         return Err(SyscallError::InvalidArgument);
     }
+    validate_user_buffer(addr, size)?;
 
     // Get current process and capability space
     let current_process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
@@ -851,6 +937,11 @@ impl TryFrom<usize> for Syscall {
             92 => Ok(Syscall::PkgQuery),
             93 => Ok(Syscall::PkgList),
             94 => Ok(Syscall::PkgUpdate),
+
+            // Time management
+            100 => Ok(Syscall::TimeGetUptime),
+            101 => Ok(Syscall::TimeCreateTimer),
+            102 => Ok(Syscall::TimeCancelTimer),
 
             _ => Err(()),
         }

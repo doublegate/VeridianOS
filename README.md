@@ -107,7 +107,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.4.1 (February 15, 2026)
+**Latest Release**: v0.4.2 (February 15, 2026)
 
 ### Architecture Support
 
@@ -139,7 +139,8 @@ Phases 0 through 4 are complete. The kernel provides:
 - **Memory Management** -- Hybrid bitmap+buddy allocator, NUMA-aware, 4-level page tables
 - **Process Management** -- Full lifecycle with context switching on all architectures
 - **Scheduler** -- CFS with SMP support, load balancing, CPU affinity
-- **Capability System** -- 64-bit unforgeable tokens, two-level O(1) lookup, revocation
+- **Capability System** -- 64-bit unforgeable tokens, two-level O(1) lookup, revocation, interrupt capabilities
+- **Interrupt Controllers** -- x86_64 APIC (Local + I/O), AArch64 GICv2, RISC-V PLIC with unified IRQ abstraction
 - **VFS** -- ramfs, devfs, procfs, blockfs with POSIX-style file operations
 - **Security** -- MAC, secure boot, TPM 2.0, ASLR, W^X, Spectre barriers, KPTI, post-quantum crypto
 - **Package Manager** -- DPLL SAT resolver, ports system, reproducible builds, Ed25519 signing

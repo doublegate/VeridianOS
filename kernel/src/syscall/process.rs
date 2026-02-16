@@ -5,7 +5,7 @@
 
 use core::slice;
 
-use super::{SyscallError, SyscallResult};
+use super::{validate_user_buffer, validate_user_string_ptr, SyscallError, SyscallResult};
 use crate::process::{
     create_thread, current_process, exec_process, exit_thread, fork_process, get_thread_tid,
     set_thread_affinity, wait_for_child, ProcessId, ProcessPriority, ThreadId,
@@ -52,15 +52,14 @@ pub fn sys_fork() -> SyscallResult {
 pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallResult {
     use crate::syscall::userspace::{copy_string_array_from_user, copy_string_from_user};
 
-    // Validate pointers
-    if path_ptr == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
+    // Validate path pointer is in user space
+    validate_user_string_ptr(path_ptr)?;
 
     // Copy path from user space
-    // SAFETY: path_ptr was validated as non-zero above. copy_string_from_user
-    // reads a null-terminated string from the user-space pointer with length
-    // bounds checking. The caller must provide valid mapped user memory.
+    // SAFETY: path_ptr was validated as non-null and in user-space above.
+    // copy_string_from_user reads a null-terminated string from the user-space
+    // pointer with length bounds checking. The caller must provide valid mapped
+    // user memory.
     let path = unsafe { copy_string_from_user(path_ptr)? };
 
     // Parse argv and envp arrays from user space
@@ -196,8 +195,15 @@ pub fn sys_thread_create(
     arg: usize,
     tls_ptr: usize,
 ) -> SyscallResult {
-    if entry_point == 0 || stack_ptr == 0 {
-        return Err(SyscallError::InvalidArgument);
+    // Validate entry point and stack pointer are in user space.
+    // Entry point needs at least 1 byte (code); stack needs at least
+    // pointer-sized space to hold a return address.
+    validate_user_buffer(entry_point, 1)?;
+    validate_user_buffer(stack_ptr, core::mem::size_of::<usize>())?;
+
+    // TLS pointer is optional (0 means none)
+    if tls_ptr != 0 {
+        validate_user_buffer(tls_ptr, 1)?;
     }
 
     match create_thread(entry_point, stack_ptr, arg, tls_ptr) {
@@ -286,9 +292,10 @@ pub fn sys_thread_join(tid: usize, retval_ptr: usize) -> SyscallResult {
 /// - cpuset_ptr: Pointer to CPU set
 /// - cpuset_size: Size of CPU set
 pub fn sys_thread_setaffinity(tid: usize, cpuset_ptr: usize, cpuset_size: usize) -> SyscallResult {
-    if cpuset_ptr == 0 || cpuset_size == 0 {
+    if cpuset_size == 0 {
         return Err(SyscallError::InvalidArgument);
     }
+    validate_user_buffer(cpuset_ptr, cpuset_size)?;
 
     let target_tid = if tid == 0 {
         get_thread_tid()

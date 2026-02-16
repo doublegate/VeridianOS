@@ -9,6 +9,7 @@ pub mod bootstrap;
 pub mod context;
 pub mod direct_uart;
 pub mod entry;
+pub mod gic;
 pub mod serial;
 pub mod timer;
 
@@ -21,7 +22,17 @@ pub fn init() {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[ARCH] Performing AArch64-specific initialization\n");
     }
-    // This will be expanded later
+
+    // Initialize the GIC (Generic Interrupt Controller)
+    if let Err(_e) = gic::init() {
+        // SAFETY: uart_write_str performs a raw MMIO write to the PL011 UART.
+        // Safe during kernel init on QEMU virt machine.
+        unsafe {
+            crate::arch::aarch64::direct_uart::uart_write_str(
+                "[ARCH] WARNING: GIC initialization failed\n",
+            );
+        }
+    }
 }
 
 /// Halt the CPU. Used by panic/shutdown paths via `crate::arch::halt()`.
