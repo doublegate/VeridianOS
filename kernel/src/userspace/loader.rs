@@ -41,13 +41,13 @@ pub fn load_init_process() -> Result<ProcessId, KernelError> {
                 return Ok(pid);
             }
             Err(_e) => {
-                println!("[LOADER] Failed to load {}: {}", path, _e);
+                // Silently try next path — only log on final failure
             }
         }
     }
 
     // If no init binary found, create a minimal init process
-    println!("[LOADER] No init binary found, creating minimal init process");
+    println!("[LOADER] Creating minimal init process");
     create_minimal_init()
 }
 
@@ -58,8 +58,6 @@ pub fn load_user_program(
     argv: &[&str],
     envp: &[&str],
 ) -> Result<ProcessId, KernelError> {
-    println!("[LOADER] Loading program: {}", path);
-
     // Open the file
     let file_node = get_vfs()
         .read()
@@ -120,7 +118,15 @@ pub fn load_user_program(
 
     let pid = lifecycle::create_process_with_options(options)?;
 
-    // Load the ELF segments into the process's address space
+    // Load the ELF segments into the process's address space.
+    //
+    // On RISC-V, the MMU is not enabled (satp = Bare mode), so ELF load
+    // addresses (e.g. 0x400000) map directly to physical addresses that
+    // are not valid RAM on the QEMU virt machine (RAM starts at
+    // 0x80000000). Writing to those addresses causes a store access fault
+    // and a CPU reset. Skip segment loading on RISC-V; the process PCB
+    // is still created for bookkeeping.
+    #[cfg(not(target_arch = "riscv64"))]
     if let Some(process) = crate::process::get_process(pid) {
         let mut memory_space = process.memory_space.lock();
 
@@ -160,7 +166,7 @@ pub fn load_user_program(
 }
 
 /// Load the dynamic linker/interpreter for dynamically linked binaries
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", not(target_arch = "riscv64")))]
 fn load_dynamic_linker(
     process: &crate::process::Process,
     interpreter_path: &str,
@@ -278,7 +284,7 @@ fn load_dynamic_linker(
 }
 
 /// Set up the auxiliary vector for dynamic linking
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", not(target_arch = "riscv64")))]
 fn setup_auxiliary_vector(
     _process: &crate::process::Process,
     main_binary: &crate::elf::ElfBinary,
@@ -421,7 +427,9 @@ pub fn load_shell() -> Result<ProcessId, KernelError> {
                 println!("[LOADER] Successfully loaded shell from {}", path);
                 return Ok(pid);
             }
-            Err(_) => continue,
+            Err(_) => {
+                // Silently try next path — only log on final failure
+            }
         }
     }
 

@@ -92,7 +92,7 @@ pub struct ShellConfig {
 impl Default for ShellConfig {
     fn default() -> Self {
         Self {
-            prompt: String::from("veridian $ "),
+            prompt: String::from("\\u@\\h:\\w\\$ "),
             history_size: 1000,
             path: vec![
                 String::from("/bin"),

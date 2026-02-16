@@ -539,6 +539,87 @@ pub fn init() {
 
         println!("[VFS] Created standard directories");
 
+        // Create standard subdirectories
+        {
+            let vfs = get_vfs();
+            let vfs_guard = vfs.read();
+            if let Some(ref root_fs) = vfs_guard.root_fs {
+                let root = root_fs.root();
+
+                // /usr subdirectories
+                if let Ok(usr) = root.lookup("usr") {
+                    usr.mkdir("bin", Permissions::default()).ok();
+                    usr.mkdir("sbin", Permissions::default()).ok();
+                    usr.mkdir("lib", Permissions::default()).ok();
+                    usr.mkdir("share", Permissions::default()).ok();
+                    usr.mkdir("local", Permissions::default()).ok();
+                }
+
+                // /var subdirectories
+                if let Ok(var) = root.lookup("var") {
+                    var.mkdir("log", Permissions::default()).ok();
+                    var.mkdir("tmp", Permissions::default()).ok();
+                    var.mkdir("run", Permissions::default()).ok();
+                    var.mkdir("cache", Permissions::default()).ok();
+                }
+
+                // /home/root (root user home directory)
+                if let Ok(home) = root.lookup("home") {
+                    home.mkdir("root", Permissions::default()).ok();
+                }
+            }
+        }
+
+        // Populate /etc with basic configuration files
+        {
+            let vfs = get_vfs();
+            let vfs_guard = vfs.read();
+            if let Some(ref root_fs) = vfs_guard.root_fs {
+                let root = root_fs.root();
+                if let Ok(etc) = root.lookup("etc") {
+                    // /etc/hostname
+                    if let Ok(f) = etc.create("hostname", Permissions::default()) {
+                        f.write(0, b"veridian\n").ok();
+                    }
+
+                    // /etc/os-release
+                    if let Ok(f) = etc.create("os-release", Permissions::default()) {
+                        f.write(
+                            0,
+                            b"NAME=\"VeridianOS\"\nVERSION=\"0.4.3\"\nID=veridian\nPRETTY_NAME=\"VeridianOS v0.4.3\"\n",
+                        )
+                        .ok();
+                    }
+
+                    // /etc/passwd (minimal)
+                    if let Ok(f) = etc.create("passwd", Permissions::read_only()) {
+                        f.write(0, b"root:x:0:0:root:/root:/bin/vsh\n").ok();
+                    }
+
+                    // /etc/group (minimal)
+                    if let Ok(f) = etc.create("group", Permissions::read_only()) {
+                        f.write(0, b"root:x:0:root\n").ok();
+                    }
+
+                    // /etc/shells
+                    if let Ok(f) = etc.create("shells", Permissions::read_only()) {
+                        f.write(0, b"/bin/vsh\n").ok();
+                    }
+
+                    // /etc/motd (message of the day)
+                    if let Ok(f) = etc.create("motd", Permissions::read_only()) {
+                        f.write(
+                            0,
+                            b"Welcome to VeridianOS - a capability-based microkernel OS\n",
+                        )
+                        .ok();
+                    }
+                }
+            }
+        }
+
+        println!("[VFS] Populated /etc and subdirectories");
+
         // Create DevFS and mount at /dev
         println!("[VFS] Creating device filesystem...");
         let devfs = devfs::DevFs::new();

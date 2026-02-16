@@ -262,13 +262,13 @@ Currently implementing in phases:
 | Area | Status |
 |------|--------|
 | **Repository** | <https://github.com/doublegate/VeridianOS> |
-| **Latest Release** | v0.4.3 (February 15, 2026) - Phase 4.5: Interactive shell (vsh) with Bash/Fish-parity features |
+| **Latest Release** | v0.4.4 (February 16, 2026) - Shell usability fixes, RISC-V ELF loading crash fix, VFS population |
 | **Build** | ✅ All 3 architectures compile, zero warnings |
 | **Boot** | ✅ All 3 architectures Stage 6 BOOTOK, 27/27 tests |
 | **CI/CD** | ✅ GitHub Actions 100% pass rate |
 | **Documentation** | ✅ 25+ guides, GitHub Pages, mdBook, Rustdoc |
 
-**Previous Releases**: v0.4.1, v0.4.0, v0.3.9, v0.3.8, v0.3.7, v0.3.6, v0.3.5, v0.3.4, v0.3.3, v0.3.2, v0.3.1, v0.3.0, v0.2.5, v0.2.1, v0.2.0, v0.1.0
+**Previous Releases**: v0.4.3, v0.4.2, v0.4.1, v0.4.0, v0.3.9, v0.3.8, v0.3.7, v0.3.6, v0.3.5, v0.3.4, v0.3.3, v0.3.2, v0.3.1, v0.3.0, v0.2.5, v0.2.1, v0.2.0, v0.1.0
 
 ## Implementation Status
 

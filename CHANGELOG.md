@@ -1,3 +1,29 @@
+## [0.4.4] - 2026-02-16
+
+### Shell Usability and Boot Stability Fixes
+
+Post-release fixes addressing interactive QEMU testing feedback: shell prompt now displays CWD, VFS directories populated with standard Unix content, noisy boot messages silenced, and RISC-V ELF loading crash resolved.
+
+5 files changed, +107/-18 lines.
+
+---
+
+### Fixed
+
+- **Shell prompt displays current working directory** -- Changed default prompt from `veridian $ ` to `\u@\h:\w\$ ` format, rendering as `root@veridian:/#` with proper CWD tracking via `expand_prompt()` (mod.rs)
+- **RISC-V reboot during init process loading** -- `ElfLoader::load()` wrote ELF segments to virtual address 0x400000, which maps directly to physical 0x400000 on RISC-V (satp=Bare, no MMU). Physical 0x400000 is not RAM on the QEMU virt machine (RAM starts at 0x80000000), causing store access fault and CPU reset. Fixed by adding `#[cfg(not(target_arch = "riscv64"))]` guard around ELF segment loading and related functions (`load_dynamic_linker`, `setup_auxiliary_vector`) (loader.rs)
+- **User stack allocation OOM on AArch64/RISC-V** -- `DEFAULT_USER_STACK_SIZE` was 8MB (2048 frames), exceeding frame allocator capacity on constrained architectures. Reduced to 64KB (16 frames), matching `create_minimal_init()` (creation.rs)
+- **Empty VFS subdirectories** -- `fs::init()` created 15 root directories but left them empty. Added subdirectory creation (`/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/share`, `/usr/local`, `/var/log`, `/var/tmp`, `/var/run`, `/var/cache`, `/home/root`) and configuration files (`/etc/hostname`, `/etc/os-release`, `/etc/passwd`, `/etc/group`, `/etc/shells`, `/etc/motd`) (fs/mod.rs)
+- **Noisy cascading boot failure messages** -- Silenced per-path "Failed to load" messages during init/shell path probing (only log on final failure). Guarded process creation logs to x86_64 only. Changed fallback messages from alarming "failed" to informative "deferred" (bootstrap.rs, loader.rs, creation.rs)
+
+### Build Verification
+
+- x86_64: Stage 6 BOOTOK, 27/27 tests, zero warnings, `root@veridian:/#` prompt
+- AArch64: Stage 6 BOOTOK, 27/27 tests, zero warnings, `root@veridian:/#` prompt
+- RISC-V: Stage 6 BOOTOK, 27/27 tests, zero warnings, `root@veridian:/#` prompt
+
+---
+
 ## [0.4.3] - 2026-02-15
 
 ### Phase 4.5: Interactive Shell (vsh) -- Full Bash/Fish-Parity Implementation

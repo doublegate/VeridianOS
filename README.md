@@ -107,7 +107,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.4.3 (February 15, 2026)
+**Latest Release**: v0.4.4 (February 16, 2026)
 
 ### Architecture Support
 

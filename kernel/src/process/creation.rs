@@ -21,7 +21,7 @@ use super::{
 use crate::{arch::context::ThreadContext, error::KernelError, println};
 
 /// Default stack sizes
-pub const DEFAULT_USER_STACK_SIZE: usize = 8 * 1024 * 1024; // 8MB
+pub const DEFAULT_USER_STACK_SIZE: usize = 64 * 1024; // 64KB
 pub const DEFAULT_KERNEL_STACK_SIZE: usize = 64 * 1024; // 64KB
 
 /// Process creation options
@@ -132,6 +132,8 @@ pub fn create_process_with_options(
     // Audit log: process creation
     crate::security::audit::log_process_create(pid.0, 0, 0);
 
+    // Log process creation only on x86_64 (other archs have noisy boot)
+    #[cfg(target_arch = "x86_64")]
     println!(
         "[PROCESS] Created process {} ({}) with main thread {}",
         pid.0, options.name, tid.0

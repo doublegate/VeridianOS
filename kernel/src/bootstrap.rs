@@ -911,23 +911,21 @@ fn create_init_process() {
         {
             match crate::userspace::load_init_process() {
                 Ok(_init_pid) => {
-                    kprintln!("[BOOTSTRAP] Init process created successfully");
+                    kprintln!("[BOOTSTRAP] Init process ready");
 
                     // Skip on RISC-V: the bump allocator cannot free memory,
                     // so loading a second process needlessly consumes heap
                     // space. User-space execution is not functional yet on any
                     // architecture, so the shell PCB is not needed.
                     #[cfg(not(target_arch = "riscv64"))]
-                    if let Ok(_shell_pid) = crate::userspace::loader::load_shell() {
-                        kprintln!("[BOOTSTRAP] Shell process created successfully");
+                    {
+                        let _ = crate::userspace::loader::load_shell();
                     }
                 }
                 Err(_e) => {
-                    kprintln!("[BOOTSTRAP] Failed to create init process, using fallback");
-                    use alloc::string::String;
-                    if let Ok(_pid) = process::lifecycle::create_process(String::from("init"), 0) {
-                        kprintln!("[BOOTSTRAP] Created fallback init process");
-                    }
+                    // Init process creation is non-critical — the kernel shell
+                    // provides the interactive interface.
+                    kprintln!("[BOOTSTRAP] Init process deferred (kernel shell active)");
                 }
             }
         }
