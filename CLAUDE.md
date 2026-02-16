@@ -87,13 +87,23 @@ qemu-system-x86_64 \
     -serial stdio -display none -m 256M -s -S
 ```
 
-**⚠️ COMMON x86_64 MISTAKES (QEMU 10.2):**
-- **DO NOT** use `-kernel target/.../veridian-kernel` — fails with "Error loading uncompressed kernel without PVH ELF Note"
+**⚠️ COMMON MISTAKES (QEMU 10.2 — ALL ARCHITECTURES):**
+- **DO NOT** use `timeout` command to wrap QEMU — causes "drive with bus=0, unit=0 (index=0) exists" on ALL architectures. Instead, run QEMU in background with `</dev/null > logfile 2>&1 &`, sleep, then `kill $PID`. Example:
+  ```bash
+  qemu-system-x86_64 ... </dev/null > /tmp/VeridianOS/boot.log 2>&1 &
+  QEMU_PID=$!
+  sleep 30
+  kill $QEMU_PID 2>/dev/null
+  wait $QEMU_PID 2>/dev/null
+  grep "BOOTOK" /tmp/VeridianOS/boot.log
+  ```
+- **DO NOT** use `-kernel target/.../veridian-kernel` for x86_64 — fails with "Error loading uncompressed kernel without PVH ELF Note"
 - **DO NOT** use `-bios` instead of `-drive if=pflash` — different semantics
 - **DO NOT** pass positional arguments after flags — QEMU 10.2 treats them as implicit drives, causing "drive with bus=0, unit=0 (index=0) exists"
 - **DO NOT** use `-drive format=raw,file=...` without explicit drive ID — on QEMU 10.2 this can conflict with the pflash drive. Use `-drive id=disk0,if=none,format=raw,file=... -device ide-hd,drive=disk0` instead.
 - **DO NOT** use `-cdrom` alongside `-drive` on the same bus/index
 - **DO NOT** use `cargo run` for x86_64 — the runner in .cargo/config.toml is `bootimage runner` which is not the correct flow
+- **ALWAYS** `pkill -9 -f qemu-system` and `sleep 3` before re-running QEMU if a previous instance may still hold a disk lock
 
 **Keyboard input**: PS/2 keyboard works via polling (ports 0x64/0x60). The APIC takes over from the PIC so IRQ-based keyboard does not work, but polling does. Input is accepted from both the QEMU graphical window (keyboard) and the serial terminal simultaneously.
 
@@ -288,13 +298,13 @@ Currently implementing in phases:
 | Area | Status |
 |------|--------|
 | **Repository** | <https://github.com/doublegate/VeridianOS> |
-| **Latest Release** | v0.4.5 (February 16, 2026) - Framebuffer display, PS/2 keyboard input, graphics infrastructure |
+| **Latest Release** | v0.4.6 (February 16, 2026) - Framebuffer console performance optimization (back-buffer, text cell ring, dirty tracking) |
 | **Build** | ✅ All 3 architectures compile, zero warnings |
 | **Boot** | ✅ All 3 architectures Stage 6 BOOTOK, 29/29 tests (fbcon + keyboard driver) |
 | **CI/CD** | ✅ GitHub Actions 100% pass rate |
 | **Documentation** | ✅ 25+ guides, GitHub Pages, mdBook, Rustdoc |
 
-**Previous Releases**: v0.4.4, v0.4.3, v0.4.2, v0.4.1, v0.4.0, v0.3.9, v0.3.8, v0.3.7, v0.3.6, v0.3.5, v0.3.4, v0.3.3, v0.3.2, v0.3.1, v0.3.0, v0.2.5, v0.2.1, v0.2.0, v0.1.0
+**Previous Releases**: v0.4.5, v0.4.4, v0.4.3, v0.4.2, v0.4.1, v0.4.0, v0.3.9, v0.3.8, v0.3.7, v0.3.6, v0.3.5, v0.3.4, v0.3.3, v0.3.2, v0.3.1, v0.3.0, v0.2.5, v0.2.1, v0.2.0, v0.1.0
 
 ## Implementation Status
 

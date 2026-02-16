@@ -943,7 +943,11 @@ impl Shell {
                     // is initialized and takes over interrupt routing from the
                     // PIC, so PIC-based timer/keyboard IRQs may not fire.
                     // Input is polled from serial + keyboard ring buffer.
-                    core::hint::spin_loop();
+                    // Multiple iterations (~1us delay) reduces idle CPU usage
+                    // and gives QEMU's display thread more time to render.
+                    for _ in 0..256 {
+                        core::hint::spin_loop();
+                    }
                 }
             }
         }

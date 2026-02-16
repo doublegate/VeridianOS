@@ -255,14 +255,18 @@ pub fn kernel_init() -> KernelResult<()> {
             } else {
                 crate::graphics::fbcon::FbPixelFormat::Rgb
             };
-            crate::graphics::fbcon::init(
-                fb_info.buffer,
-                fb_info.width,
-                fb_info.height,
-                fb_info.stride,
-                fb_info.bpp,
-                format,
-            );
+            // SAFETY: fb_info.buffer is the UEFI-provided framebuffer,
+            // valid for stride * height bytes and mapped for the kernel lifetime.
+            unsafe {
+                crate::graphics::fbcon::init(
+                    fb_info.buffer,
+                    fb_info.width,
+                    fb_info.height,
+                    fb_info.stride,
+                    fb_info.bpp,
+                    format,
+                );
+            }
             kprintln!("[BOOTSTRAP] Framebuffer console initialized");
         }
     }
@@ -274,14 +278,18 @@ pub fn kernel_init() -> KernelResult<()> {
     {
         match crate::drivers::ramfb::init(1024, 768) {
             Ok(fb_ptr) => {
-                crate::graphics::fbcon::init(
-                    fb_ptr,
-                    1024,
-                    768,
-                    1024 * 4, // stride = width * bpp
-                    4,        // bytes per pixel
-                    crate::graphics::fbcon::FbPixelFormat::Rgb,
-                );
+                // SAFETY: fb_ptr from ramfb init is valid for stride * height
+                // bytes and mapped for the kernel lifetime.
+                unsafe {
+                    crate::graphics::fbcon::init(
+                        fb_ptr,
+                        1024,
+                        768,
+                        1024 * 4, // stride = width * bpp
+                        4,        // bytes per pixel
+                        crate::graphics::fbcon::FbPixelFormat::Rgb,
+                    );
+                }
                 kprintln!("[BOOTSTRAP] ramfb + fbcon initialized (1024x768)");
             }
             Err(_) => {

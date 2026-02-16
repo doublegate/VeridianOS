@@ -4,10 +4,23 @@
 //! (or ramfb-provided) pixel framebuffer. Supports cursor tracking, newlines,
 //! tab stops, backspace, scrolling, and basic ANSI color escape sequences.
 //!
+//! # Performance architecture
+//!
+//! All rendering goes through a three-layer pipeline to minimize slow MMIO
+//! writes to QEMU-intercepted framebuffer memory:
+//!
+//! 1. **Text cell grid** — character/color pairs in a ring buffer. Scrolling is
+//!    O(cols) (advance ring pointer + clear one row of cells).
+//! 2. **RAM back-buffer** — full pixel buffer in kernel heap (~4MB). Glyph
+//!    rendering writes here (fast regular-memory writes).
+//! 3. **Hardware framebuffer** — MMIO memory. Touched once per `_fbcon_print`
+//!    call, only for rows that changed (dirty row tracking).
+//!
 //! Thread-safety: The global `FBCON` is protected by a spinlock. Interrupt
 //! handlers must NOT call `_fbcon_print` (use raw serial output for
 //! diagnostics in ISRs).
 
+use alloc::{vec, vec::Vec};
 use core::{
     fmt,
     sync::atomic::{AtomicBool, Ordering},
@@ -43,25 +56,64 @@ enum EscapeState {
     Csi,
 }
 
+/// Maximum text rows supported by the console.
+const MAX_ROWS: usize = 64;
+/// Maximum text columns supported by the console.
+const MAX_COLS: usize = 192;
+
+/// A single character cell in the text grid.
+#[derive(Clone, Copy)]
+struct TextCell {
+    ch: u8,
+    fg: (u8, u8, u8),
+    bg: (u8, u8, u8),
+}
+
+impl TextCell {
+    const fn blank(fg: (u8, u8, u8), bg: (u8, u8, u8)) -> Self {
+        Self { ch: b' ', fg, bg }
+    }
+}
+
 /// Framebuffer console state.
 pub struct FramebufferConsole {
+    // Hardware framebuffer (MMIO, slow in QEMU)
     fb_ptr: *mut u8,
     width: usize,
     height: usize,
     stride: usize,
     bpp: usize,
     pixel_format: FbPixelFormat,
+
+    // Text grid dimensions
     cols: usize,
     rows: usize,
+
+    // Cursor
     cursor_col: usize,
     cursor_row: usize,
+
+    // Colors
     fg_color: (u8, u8, u8),
     bg_color: (u8, u8, u8),
     default_fg: (u8, u8, u8),
     default_bg: (u8, u8, u8),
+
+    // ANSI escape parser
     esc_state: EscapeState,
     esc_params: [u8; 16],
     esc_param_idx: usize,
+
+    // Text cell ring buffer (Phase 2)
+    cells: Vec<TextCell>,
+    ring_start: usize,
+
+    // RAM back-buffer (Phase 1) — `None` if allocation failed (fallback to direct MMIO)
+    back_buf: Option<Vec<u8>>,
+
+    // Dirty tracking (Phase 1+2)
+    dirty_rows: [bool; MAX_ROWS],
+    dirty_all: bool,
 }
 
 // SAFETY: FramebufferConsole is only accessed through the FBCON spinlock.
@@ -98,6 +150,18 @@ impl FramebufferConsole {
         bpp: usize,
         pixel_format: FbPixelFormat,
     ) -> Self {
+        let cols = (width / FONT_WIDTH).min(MAX_COLS);
+        let rows = (height / FONT_HEIGHT).min(MAX_ROWS);
+
+        // Allocate text cell grid
+        let cell_count = MAX_ROWS * MAX_COLS;
+        let cells = vec![TextCell::blank(DEFAULT_FG, DEFAULT_BG); cell_count];
+
+        // Allocate RAM back-buffer. If heap is exhausted, fall back to
+        // direct MMIO rendering (same as old behavior).
+        let buf_size = stride * height;
+        let back_buf = try_alloc_vec(buf_size).ok();
+
         Self {
             fb_ptr,
             width,
@@ -105,8 +169,8 @@ impl FramebufferConsole {
             stride,
             bpp,
             pixel_format,
-            cols: width / FONT_WIDTH,
-            rows: height / FONT_HEIGHT,
+            cols,
+            rows,
             cursor_col: 0,
             cursor_row: 0,
             fg_color: DEFAULT_FG,
@@ -116,91 +180,255 @@ impl FramebufferConsole {
             esc_state: EscapeState::Normal,
             esc_params: [0; 16],
             esc_param_idx: 0,
+            cells,
+            ring_start: 0,
+            back_buf,
+            dirty_rows: [false; MAX_ROWS],
+            dirty_all: true, // Force initial full blit
         }
     }
 
-    /// Write a single pixel at (x, y) with the given RGB color.
-    ///
-    /// Uses a single 32-bit write instead of four byte writes for performance.
-    /// The framebuffer is regular RAM (not MMIO registers), so volatile writes
-    /// are not necessary for correctness.
-    #[inline(always)]
-    fn write_pixel(&self, x: usize, y: usize, r: u8, g: u8, b: u8) {
-        if x >= self.width || y >= self.height {
-            return;
+    /// Zero the hardware framebuffer and back-buffer on initial setup.
+    /// This clears any UEFI boot garbage from the screen.
+    fn clear_hw_and_backbuf(&mut self) {
+        let total_bytes = self.stride * self.height;
+        // SAFETY: fb_ptr is valid for total_bytes (caller guarantees).
+        unsafe {
+            core::ptr::write_bytes(self.fb_ptr, 0, total_bytes);
         }
-        let offset = y * self.stride + x * self.bpp;
-        let word = match self.pixel_format {
+        if let Some(ref mut buf) = self.back_buf {
+            // SAFETY: buf is exactly total_bytes in size.
+            unsafe {
+                core::ptr::write_bytes(buf.as_mut_ptr(), 0, buf.len());
+            }
+        }
+        self.dirty_all = false; // Screen is already clear
+    }
+
+    /// Map a logical text row (0 = top of screen) to the physical ring index.
+    #[inline(always)]
+    fn phys_row(&self, logical_row: usize) -> usize {
+        (self.ring_start + logical_row) % MAX_ROWS
+    }
+
+    /// Get a reference to a text cell.
+    #[inline(always)]
+    fn cell(&self, logical_row: usize, col: usize) -> &TextCell {
+        let idx = self.phys_row(logical_row) * MAX_COLS + col;
+        &self.cells[idx]
+    }
+
+    /// Compute the flat index for a text cell.
+    #[inline(always)]
+    fn cell_idx(&self, logical_row: usize, col: usize) -> usize {
+        self.phys_row(logical_row) * MAX_COLS + col
+    }
+
+    /// Mark a logical text row as dirty (needs re-rendering on next blit).
+    #[inline(always)]
+    fn mark_dirty(&mut self, logical_row: usize) {
+        if logical_row < MAX_ROWS {
+            self.dirty_rows[logical_row] = true;
+        }
+    }
+
+    /// Convert an RGB triple to a u32 pixel word in the framebuffer's format.
+    #[inline(always)]
+    fn color_to_word(&self, r: u8, g: u8, b: u8) -> u32 {
+        match self.pixel_format {
             FbPixelFormat::Bgr => u32::from_ne_bytes([b, g, r, 0]),
             FbPixelFormat::Rgb => u32::from_ne_bytes([r, g, b, 0]),
-        };
-        // SAFETY: The framebuffer pointer and dimensions come from the
-        // bootloader (UEFI) or ramfb init. The offset is bounds-checked
-        // above. The pixel address is 4-byte aligned (stride and bpp are
-        // both multiples of 4).
-        unsafe {
-            (self.fb_ptr.add(offset) as *mut u32).write(word);
         }
     }
 
-    /// Render a glyph at pixel position (px, py).
-    fn render_glyph(&self, ch: u8, px: usize, py: usize) {
+    /// Render a single glyph to the back-buffer (or directly to HW FB if no
+    /// back-buffer is available). Writes 8x16 = 128 pixels.
+    ///
+    /// Phase 3 optimization: computes row base pointer once, writes u32
+    /// directly without per-pixel bounds checks (caller ensures in-bounds).
+    fn render_glyph_to_buf(
+        &mut self,
+        ch: u8,
+        px: usize,
+        py: usize,
+        fg: (u8, u8, u8),
+        bg: (u8, u8, u8),
+    ) {
+        let fg_word = self.color_to_word(fg.0, fg.1, fg.2);
+        let bg_word = self.color_to_word(bg.0, bg.1, bg.2);
         let glyph_data = font8x16::glyph(ch);
-        let (fg_r, fg_g, fg_b) = self.fg_color;
-        let (bg_r, bg_g, bg_b) = self.bg_color;
+        let stride = self.stride;
+        let bpp = self.bpp;
+
+        let buf_ptr = match self.back_buf {
+            Some(ref mut buf) => buf.as_mut_ptr(),
+            None => self.fb_ptr,
+        };
 
         for (row, &bits) in glyph_data.iter().enumerate() {
-            for col in 0..FONT_WIDTH {
-                let is_set = (bits >> (7 - col)) & 1 != 0;
-                if is_set {
-                    self.write_pixel(px + col, py + row, fg_r, fg_g, fg_b);
-                } else {
-                    self.write_pixel(px + col, py + row, bg_r, bg_g, bg_b);
+            let y = py + row;
+            if y >= self.height {
+                break;
+            }
+            let base = y * stride + px * bpp;
+            // SAFETY: px is < cols * FONT_WIDTH <= width, y is < height,
+            // and the buffer is stride * height bytes. Each row writes
+            // 8 * 4 = 32 bytes starting at `base`, which is within bounds.
+            unsafe {
+                let ptr = buf_ptr.add(base) as *mut u32;
+                for col in 0..FONT_WIDTH {
+                    let word = if (bits >> (7 - col)) & 1 != 0 {
+                        fg_word
+                    } else {
+                        bg_word
+                    };
+                    ptr.add(col).write(word);
                 }
             }
         }
     }
 
-    /// Scroll the framebuffer up by one text row (FONT_HEIGHT pixels).
-    fn scroll_up(&self) {
-        let row_bytes = self.stride * FONT_HEIGHT;
-        let total_bytes = self.stride * self.height;
+    /// Render one logical text row from the cell grid to the back-buffer.
+    ///
+    /// Phase 3 optimization: detects blank rows (all spaces with default bg)
+    /// and uses memset instead of rendering individual glyphs.
+    fn render_row_to_backbuf(&mut self, logical_row: usize) {
+        let py = logical_row * FONT_HEIGHT;
 
-        // SAFETY: Copying within the framebuffer to shift content up by one
-        // text row. The source and destination regions overlap, but copy()
-        // handles overlapping regions correctly (memmove semantics).
-        unsafe {
-            core::ptr::copy(
-                self.fb_ptr.add(row_bytes),
-                self.fb_ptr,
-                total_bytes - row_bytes,
-            );
+        // Check if the row is all blank cells with black bg (common case for
+        // empty rows after scroll).
+        let mut all_blank_black = true;
+        for col in 0..self.cols {
+            let c = self.cell(logical_row, col);
+            if c.ch != b' ' || c.bg != (0, 0, 0) {
+                all_blank_black = false;
+                break;
+            }
         }
 
-        // Clear the last row. When bg is black (0,0,0), use write_bytes
-        // (memset) for maximum speed. Otherwise fall back to per-pixel writes.
-        let last_row_start = self.stride * (self.height - FONT_HEIGHT);
-        let clear_bytes = self.stride * FONT_HEIGHT;
-        if self.bg_color == (0, 0, 0) {
-            // SAFETY: Zeroing the last row of the framebuffer.
+        if all_blank_black {
+            // Fast path: zero the pixel region with memset
+            let row_start = py * self.stride;
+            let row_bytes = FONT_HEIGHT * self.stride;
+            let buf_ptr = match self.back_buf {
+                Some(ref mut buf) => buf.as_mut_ptr(),
+                None => self.fb_ptr,
+            };
+            // SAFETY: row_start + row_bytes <= stride * height = buffer size.
             unsafe {
-                core::ptr::write_bytes(self.fb_ptr.add(last_row_start), 0, clear_bytes);
+                core::ptr::write_bytes(buf_ptr.add(row_start), 0, row_bytes);
+            }
+            return;
+        }
+
+        // Check if the row is all blank cells with uniform non-black bg
+        let first_bg = self.cell(logical_row, 0).bg;
+        let mut all_blank_uniform = true;
+        for col in 0..self.cols {
+            let c = self.cell(logical_row, col);
+            if c.ch != b' ' || c.bg != first_bg {
+                all_blank_uniform = false;
+                break;
+            }
+        }
+
+        if all_blank_uniform {
+            // Fill with uniform bg color
+            let bg_word = self.color_to_word(first_bg.0, first_bg.1, first_bg.2);
+            let buf_ptr = match self.back_buf {
+                Some(ref mut buf) => buf.as_mut_ptr(),
+                None => self.fb_ptr,
+            };
+            let stride = self.stride;
+            for row in 0..FONT_HEIGHT {
+                let y = py + row;
+                if y >= self.height {
+                    break;
+                }
+                // SAFETY: writing within buffer bounds (checked by y < height).
+                unsafe {
+                    let base = y * stride;
+                    let ptr = buf_ptr.add(base) as *mut u32;
+                    for x in 0..self.width {
+                        ptr.add(x).write(bg_word);
+                    }
+                }
+            }
+            return;
+        }
+
+        // General case: render each cell's glyph
+        for col in 0..self.cols {
+            let c = *self.cell(logical_row, col);
+            self.render_glyph_to_buf(c.ch, col * FONT_WIDTH, py, c.fg, c.bg);
+        }
+    }
+
+    /// Blit dirty regions from back-buffer to the hardware framebuffer.
+    ///
+    /// This is the ONLY place that writes to HW MMIO (besides the fallback
+    /// path when no back-buffer is available). Called once per `_fbcon_print`.
+    fn blit_to_framebuffer(&mut self) {
+        let back_buf = match self.back_buf {
+            Some(ref buf) => buf.as_ptr(),
+            None => return, // No back-buffer — rendering went directly to HW FB
+        };
+
+        if self.dirty_all {
+            // Render all visible rows from cells to back-buffer, then blit all
+            for row in 0..self.rows {
+                self.render_row_to_backbuf(row);
+            }
+            // Single large copy to HW FB
+            let total_bytes = self.stride * self.height;
+            // SAFETY: back_buf and fb_ptr are both `total_bytes` in size,
+            // and they do not overlap (back_buf is heap, fb_ptr is MMIO).
+            unsafe {
+                core::ptr::copy_nonoverlapping(back_buf, self.fb_ptr, total_bytes);
+            }
+            self.dirty_all = false;
+            for flag in self.dirty_rows[..self.rows].iter_mut() {
+                *flag = false;
             }
         } else {
-            let (bg_r, bg_g, bg_b) = self.bg_color;
-            let word = match self.pixel_format {
-                FbPixelFormat::Bgr => u32::from_ne_bytes([bg_b, bg_g, bg_r, 0]),
-                FbPixelFormat::Rgb => u32::from_ne_bytes([bg_r, bg_g, bg_b, 0]),
-            };
-            // SAFETY: Writing within the last row of the framebuffer.
-            unsafe {
-                let row_ptr = self.fb_ptr.add(last_row_start) as *mut u32;
-                let pixel_count = self.width * FONT_HEIGHT;
-                for i in 0..pixel_count {
-                    row_ptr.add(i).write(word);
+            // Render and blit only dirty rows
+            let stride = self.stride;
+            let row_pixels = FONT_HEIGHT * stride;
+            for row in 0..self.rows {
+                if self.dirty_rows[row] {
+                    self.render_row_to_backbuf(row);
+                    let offset = row * FONT_HEIGHT * stride;
+                    // SAFETY: offset + row_pixels <= stride * height.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            back_buf.add(offset),
+                            self.fb_ptr.add(offset),
+                            row_pixels,
+                        );
+                    }
+                    self.dirty_rows[row] = false;
                 }
             }
         }
+    }
+
+    /// Scroll the text grid up by one row using ring-buffer advancement.
+    ///
+    /// Phase 2: O(cols) cell operations instead of ~4MB memory copy.
+    fn scroll_up(&mut self) {
+        // The row that was at the top is recycled to become the new bottom
+        let old_top_phys = self.ring_start;
+        self.ring_start = (self.ring_start + 1) % MAX_ROWS;
+
+        // Clear the recycled row (now the last visible row)
+        let new_bottom_phys = old_top_phys;
+        let base = new_bottom_phys * MAX_COLS;
+        for col in 0..self.cols {
+            self.cells[base + col] = TextCell::blank(self.fg_color, self.bg_color);
+        }
+
+        // Full re-render needed since row mapping changed
+        self.dirty_all = true;
     }
 
     /// Write a character at the current cursor position and advance.
@@ -238,9 +466,11 @@ impl FramebufferConsole {
                 // Backspace
                 if self.cursor_col > 0 {
                     self.cursor_col -= 1;
-                    let px = self.cursor_col * FONT_WIDTH;
-                    let py = self.cursor_row * FONT_HEIGHT;
-                    self.render_glyph(b' ', px, py);
+                    let fg = self.fg_color;
+                    let bg = self.bg_color;
+                    let idx = self.cell_idx(self.cursor_row, self.cursor_col);
+                    self.cells[idx] = TextCell { ch: b' ', fg, bg };
+                    self.mark_dirty(self.cursor_row);
                 }
             }
             0x1B => {
@@ -250,10 +480,13 @@ impl FramebufferConsole {
                 self.esc_params = [0; 16];
             }
             _ => {
-                // Printable character
-                let px = self.cursor_col * FONT_WIDTH;
-                let py = self.cursor_row * FONT_HEIGHT;
-                self.render_glyph(ch, px, py);
+                // Printable character — update text cell
+                let fg = self.fg_color;
+                let bg = self.bg_color;
+                let idx = self.cell_idx(self.cursor_row, self.cursor_col);
+                self.cells[idx] = TextCell { ch, fg, bg };
+                self.mark_dirty(self.cursor_row);
+
                 self.cursor_col += 1;
                 if self.cursor_col >= self.cols {
                     self.cursor_col = 0;
@@ -366,15 +599,18 @@ impl FramebufferConsole {
             b'K' => {
                 // Erase in Line (param 0 = cursor to end, 1 = start to cursor, 2 = whole line)
                 let param = self.esc_params[0];
-                let py = self.cursor_row * FONT_HEIGHT;
                 let (start_col, end_col) = match param {
                     1 => (0, self.cursor_col),
                     2 => (0, self.cols),
                     _ => (self.cursor_col, self.cols), // 0 or default
                 };
+                let fg = self.fg_color;
+                let bg = self.bg_color;
                 for col in start_col..end_col {
-                    self.render_glyph(b' ', col * FONT_WIDTH, py);
+                    let idx = self.cell_idx(self.cursor_row, col);
+                    self.cells[idx] = TextCell { ch: b' ', fg, bg };
                 }
+                self.mark_dirty(self.cursor_row);
                 self.esc_state = EscapeState::Normal;
             }
             _ => {
@@ -414,31 +650,20 @@ impl FramebufferConsole {
         }
     }
 
-    /// Clear the entire framebuffer.
+    /// Clear the entire screen — reset text cells and cursor.
     fn clear(&mut self) {
-        let total_bytes = self.stride * self.height;
-        if self.bg_color == (0, 0, 0) {
-            // SAFETY: Zeroing the entire framebuffer.
-            unsafe {
-                core::ptr::write_bytes(self.fb_ptr, 0, total_bytes);
-            }
-        } else {
-            let (bg_r, bg_g, bg_b) = self.bg_color;
-            let word = match self.pixel_format {
-                FbPixelFormat::Bgr => u32::from_ne_bytes([bg_b, bg_g, bg_r, 0]),
-                FbPixelFormat::Rgb => u32::from_ne_bytes([bg_r, bg_g, bg_b, 0]),
-            };
-            // SAFETY: Writing within the framebuffer bounds.
-            unsafe {
-                let ptr = self.fb_ptr as *mut u32;
-                let pixel_count = self.width * self.height;
-                for i in 0..pixel_count {
-                    ptr.add(i).write(word);
-                }
+        let fg = self.fg_color;
+        let bg = self.bg_color;
+        let blank = TextCell { ch: b' ', fg, bg };
+        for row in 0..self.rows {
+            for col in 0..self.cols {
+                let idx = self.cell_idx(row, col);
+                self.cells[idx] = blank;
             }
         }
         self.cursor_col = 0;
         self.cursor_row = 0;
+        self.dirty_all = true;
     }
 }
 
@@ -455,7 +680,12 @@ impl fmt::Write for FramebufferConsole {
 ///
 /// Must be called after the framebuffer is available (after UEFI boot
 /// on x86_64, or after ramfb init on AArch64/RISC-V).
-pub fn init(
+///
+/// # Safety
+///
+/// `fb_ptr` must point to a valid framebuffer of at least `stride * height`
+/// bytes, mapped for the kernel's lifetime.
+pub unsafe fn init(
     fb_ptr: *mut u8,
     width: usize,
     height: usize,
@@ -464,7 +694,7 @@ pub fn init(
     format: FbPixelFormat,
 ) {
     let mut fbcon = FramebufferConsole::new(fb_ptr, width, height, stride, bpp, format);
-    fbcon.clear();
+    fbcon.clear_hw_and_backbuf();
     *FBCON.lock() = Some(fbcon);
 }
 
@@ -479,6 +709,10 @@ pub fn enable_output() {
 ///
 /// Silently returns if fbcon has not been initialized yet or if output
 /// has not been enabled (boot messages go to serial only for performance).
+///
+/// All text is written to the cell grid and back-buffer (fast RAM), then
+/// dirty regions are blitted to the hardware framebuffer (slow MMIO) in
+/// a single pass at the end.
 pub fn _fbcon_print(args: fmt::Arguments) {
     if !FBCON_OUTPUT_ENABLED.load(Ordering::Relaxed) {
         return;
@@ -487,10 +721,22 @@ pub fn _fbcon_print(args: fmt::Arguments) {
     let mut guard = FBCON.lock();
     if let Some(ref mut fbcon) = *guard {
         let _ = fbcon.write_fmt(args);
+        fbcon.blit_to_framebuffer();
     }
 }
 
 /// Check if the framebuffer console has been initialized.
 pub fn is_initialized() -> bool {
     FBCON.lock().is_some()
+}
+
+/// Try to allocate a Vec<u8> of the given size, zeroed.
+/// Returns Err if allocation fails (OOM).
+fn try_alloc_vec(size: usize) -> Result<Vec<u8>, ()> {
+    let mut v = Vec::new();
+    if v.try_reserve_exact(size).is_err() {
+        return Err(());
+    }
+    v.resize(size, 0);
+    Ok(v)
 }

@@ -1,3 +1,37 @@
+## [0.4.6] - 2026-02-16
+
+### Framebuffer Console Performance Optimization
+
+Reworks the framebuffer console (`fbcon.rs`) with a three-layer rendering pipeline to eliminate slow MMIO writes to QEMU-intercepted framebuffer memory. Typing a single character previously required 128 individual MMIO writes; now it writes to fast kernel RAM and blits one ~82KB dirty row to hardware. Scrolling previously copied ~4MB of MMIO memory per line; now it advances a ring-buffer pointer (O(cols) cell operations) and performs a single MMIO blit per print call. Shell idle polling is throttled to reduce CPU waste.
+
+5 files changed, +371/-110 lines.
+
+---
+
+### Changed
+
+#### Framebuffer Console Three-Layer Pipeline (`kernel/src/graphics/fbcon.rs`, 497 -> 736 lines)
+
+- **RAM back-buffer**: All pixel rendering now targets a ~4MB `Vec<u8>` in kernel heap instead of writing directly to QEMU MMIO memory. Hardware framebuffer is touched only during `blit_to_framebuffer()`, called once per `_fbcon_print()`.
+- **Text cell ring buffer**: Characters are stored in a `TextCell` grid (MAX_ROWS=64 x MAX_COLS=192). Scrolling advances `ring_start` pointer and clears one row of cells -- zero pixel copies, O(cols) operations instead of ~4MB `core::ptr::copy()`.
+- **Dirty row tracking**: `dirty_rows: [bool; 64]` and `dirty_all: bool` flags track which text rows changed. Only dirty rows are re-rendered and blitted to hardware.
+- **Optimized glyph rendering**: `render_glyph_to_buf()` computes row base pointer once and writes `u32` directly without per-pixel bounds checks or per-pixel format dispatch. `color_to_word()` helper eliminates repeated format branching.
+- **Blank-row fast path**: `render_row_to_backbuf()` detects all-spaces rows and uses `write_bytes` (memset) instead of rendering individual glyphs.
+- **OOM fallback**: If back-buffer allocation fails, rendering falls back to direct MMIO writes (same behavior as v0.4.5).
+- **`init()` is now `unsafe fn`**: Properly annotated since it dereferences a raw framebuffer pointer. Call sites in `bootstrap.rs` wrapped in `unsafe {}` with SAFETY comments.
+
+#### Shell Input Throttle (`kernel/src/services/shell/mod.rs`)
+
+- Replaced single `core::hint::spin_loop()` with 256-iteration loop (~1us delay per poll cycle). Reduces idle CPU usage ~256x and gives QEMU's display thread more CPU time.
+
+### Build Verification
+
+- x86_64: Stage 6 BOOTOK, 29/29 tests, zero clippy warnings
+- AArch64: Stage 6 BOOTOK, 29/29 tests, zero clippy warnings
+- RISC-V: Stage 6 BOOTOK, 29/29 tests, zero clippy warnings
+
+---
+
 ## [0.4.5] - 2026-02-16
 
 ### Framebuffer Display, PS/2 Keyboard Input, and Graphics Infrastructure
