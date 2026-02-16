@@ -160,7 +160,13 @@ pub fn map_memory_with_capability(
         if let Some(current) = crate::process::current_process() {
             let mut mem_space = current.memory_space.lock();
             let vas = &mut *mem_space;
-            let _ = vas.map_page(_virt_addr.as_usize(), flags);
+            if let Err(_e) = vas.map_page(_virt_addr.as_usize(), flags) {
+                crate::println!(
+                    "[CAP-MEM] Warning: failed to map page at 0x{:x}: {:?}",
+                    _virt_addr.as_usize(),
+                    _e
+                );
+            }
         }
     }
 

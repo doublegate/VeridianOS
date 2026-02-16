@@ -122,7 +122,7 @@ unsafe fn map_user_page(
     virt_addr: u64,
     phys_frame_addr: u64,
     flags: u64,
-) -> Result<(), &'static str> {
+) -> Result<(), crate::error::KernelError> {
     // Read current CR3 to get the PML4 physical address
     let cr3: u64;
     // SAFETY: Reading CR3 is always valid in kernel mode.
@@ -175,7 +175,7 @@ unsafe fn map_user_page(
 unsafe fn ensure_table_present(
     entry_ptr: *mut u64,
     phys_offset_val: u64,
-) -> Result<u64, &'static str> {
+) -> Result<u64, crate::error::KernelError> {
     // SAFETY: entry_ptr was computed from a valid page table base + index,
     // both within the physical memory mapping provided by the bootloader.
     let entry = entry_ptr.read_volatile();
@@ -195,7 +195,9 @@ unsafe fn ensure_table_present(
         let frame = crate::mm::FRAME_ALLOCATOR
             .lock()
             .allocate_frames(1, None)
-            .map_err(|_| "frame allocation failed")?;
+            .map_err(|_| crate::error::KernelError::ResourceExhausted {
+                resource: "physical frames",
+            })?;
         let frame_phys = frame.as_u64() * crate::mm::FRAME_SIZE as u64;
 
         // Zero the new table
@@ -216,7 +218,7 @@ unsafe fn ensure_table_present(
 
 /// Check if a physical address is used by the active page table hierarchy.
 ///
-/// Walks PML4 → PDPT → PD → PT and returns true if `phys` matches any
+/// Walks PML4 -> PDPT -> PD -> PT and returns true if `phys` matches any
 /// page-table frame's base address. This is O(n) in the number of page table
 /// pages (~1000 for a typical bootloader mapping).
 ///
@@ -286,7 +288,7 @@ unsafe fn allocate_safe_frame(
     phys_offset: u64,
     pml4_phys: u64,
     count: usize,
-) -> Result<crate::mm::FrameNumber, &'static str> {
+) -> Result<crate::mm::FrameNumber, crate::error::KernelError> {
     use crate::mm::{FRAME_ALLOCATOR, FRAME_SIZE};
 
     // Try up to 8192 times (enough to skip the ~1050 page table frames)
@@ -294,7 +296,9 @@ unsafe fn allocate_safe_frame(
         let frame = FRAME_ALLOCATOR
             .lock()
             .allocate_frames(count, None)
-            .map_err(|_| "frame allocation failed")?;
+            .map_err(|_| crate::error::KernelError::ResourceExhausted {
+                resource: "physical frames",
+            })?;
         let phys = frame.as_u64() * FRAME_SIZE as u64;
 
         // Check all allocated frames in the range
@@ -309,11 +313,13 @@ unsafe fn allocate_safe_frame(
         if !overlaps {
             return Ok(frame);
         }
-        // Frame overlaps a page table page — leave it allocated (consumed)
+        // Frame overlaps a page table page -- leave it allocated (consumed)
         // so the allocator won't return it again, and try the next one.
     }
 
-    Err("could not find non-page-table frame after 8192 attempts")
+    Err(crate::error::KernelError::ResourceExhausted {
+        resource: "non-page-table frames",
+    })
 }
 
 /// Attempt to enter user mode with the embedded init binary.
@@ -327,8 +333,8 @@ unsafe fn allocate_safe_frame(
 /// 6. Transitions to Ring 3 via iretq
 ///
 /// On success, this function does not return (enters user mode).
-/// On failure, returns an error string for the caller to log.
-pub fn try_enter_usermode() -> Result<(), &'static str> {
+/// On failure, returns a KernelError for the caller to log.
+pub fn try_enter_usermode() -> Result<(), crate::error::KernelError> {
     use crate::{mm::FRAME_SIZE, userspace::embedded};
 
     // Step 1: Get the physical memory offset from BOOT_INFO
@@ -338,11 +344,17 @@ pub fn try_enter_usermode() -> Result<(), &'static str> {
     // We use addr_of! to avoid creating a direct reference to the static mut.
     let phys_offset_val = unsafe {
         let boot_info_ptr = core::ptr::addr_of!(crate::arch::x86_64::boot::BOOT_INFO);
-        let boot_info = (*boot_info_ptr).as_ref().ok_or("BOOT_INFO not available")?;
-        boot_info
-            .physical_memory_offset
-            .into_option()
-            .ok_or("physical memory offset not available")?
+        let boot_info =
+            (*boot_info_ptr)
+                .as_ref()
+                .ok_or(crate::error::KernelError::NotInitialized {
+                    subsystem: "BOOT_INFO",
+                })?;
+        boot_info.physical_memory_offset.into_option().ok_or(
+            crate::error::KernelError::NotInitialized {
+                subsystem: "physical memory offset",
+            },
+        )?
     };
 
     PHYS_OFFSET.store(phys_offset_val, core::sync::atomic::Ordering::Relaxed);
@@ -364,16 +376,10 @@ pub fn try_enter_usermode() -> Result<(), &'static str> {
     // One frame for code (mapped at 0x400000)
     // One frame for stack (mapped at 0x7FFFF000, stack grows down from 0x80000000)
     // SAFETY: phys_offset_val and pml4_phys are valid (verified above).
-    let code_frame = unsafe {
-        allocate_safe_frame(phys_offset_val, pml4_phys, 1)
-            .map_err(|_| "failed to allocate code frame")?
-    };
+    let code_frame = unsafe { allocate_safe_frame(phys_offset_val, pml4_phys, 1)? };
     let code_phys = code_frame.as_u64() * FRAME_SIZE as u64;
 
-    let stack_frame = unsafe {
-        allocate_safe_frame(phys_offset_val, pml4_phys, 1)
-            .map_err(|_| "failed to allocate stack frame")?
-    };
+    let stack_frame = unsafe { allocate_safe_frame(phys_offset_val, pml4_phys, 1)? };
     let stack_phys = stack_frame.as_u64() * FRAME_SIZE as u64;
 
     // Step 4: Map pages in the current page tables
@@ -415,10 +421,7 @@ pub fn try_enter_usermode() -> Result<(), &'static str> {
     // Step 6: Set up per-CPU kernel_rsp
     // Allocate a dedicated kernel stack for syscall/interrupt return
     // SAFETY: phys_offset_val and pml4_phys are valid.
-    let kernel_stack_frame = unsafe {
-        allocate_safe_frame(phys_offset_val, pml4_phys, 4)
-            .map_err(|_| "failed to allocate kernel stack")?
-    };
+    let kernel_stack_frame = unsafe { allocate_safe_frame(phys_offset_val, pml4_phys, 4)? };
     let kernel_stack_phys = kernel_stack_frame.as_u64() * FRAME_SIZE as u64;
     let kernel_stack_top = phys_offset_val + kernel_stack_phys + (4 * FRAME_SIZE as u64);
 

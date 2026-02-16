@@ -427,7 +427,12 @@ fn force_terminate_process(process: &Process) -> Result<(), KernelError> {
     if let Some(parent_pid) = process.parent {
         if let Some(parent) = table::get_process(parent_pid) {
             // Send SIGCHLD to parent
-            let _ = parent.send_signal(signals::SIGCHLD as usize);
+            if let Err(_e) = parent.send_signal(signals::SIGCHLD as usize) {
+                println!(
+                    "[PROCESS] Warning: Failed to send SIGCHLD to parent {}: {:?}",
+                    parent_pid.0, _e
+                );
+            }
 
             if parent.get_state() == ProcessState::Blocked {
                 parent.set_state(ProcessState::Ready);

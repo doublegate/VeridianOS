@@ -8,6 +8,8 @@
 //! This module defines the type-safe contract, state machine, and plugin
 //! registry that the kernel uses to manage plugin metadata.
 
+#![allow(dead_code)]
+
 #[cfg(feature = "alloc")]
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
@@ -19,7 +21,6 @@ use crate::error::{KernelError, KernelResult};
 
 /// Lifecycle hook points at which a plugin can execute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum PluginHook {
     /// Invoked before a package is installed.
     PreInstall,
@@ -39,7 +40,6 @@ pub enum PluginHook {
     Verify,
 }
 
-#[allow(dead_code)]
 impl PluginHook {
     /// Return a short string identifier for this hook.
     pub fn as_str(&self) -> &'static str {
@@ -65,7 +65,6 @@ impl PluginHook {
 /// Each capability maps to a kernel-level permission check during plugin
 /// invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum PluginCapability {
     /// Read/write access to the filesystem.
     FileSystemAccess,
@@ -79,7 +78,6 @@ pub enum PluginCapability {
     ServiceControl,
 }
 
-#[allow(dead_code)]
 impl PluginCapability {
     /// Return a short string identifier for this capability.
     pub fn as_str(&self) -> &'static str {
@@ -101,7 +99,6 @@ impl PluginCapability {
 /// and the hooks it supports.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct PluginMetadata {
     /// Unique plugin name.
     pub name: String,
@@ -116,7 +113,6 @@ pub struct PluginMetadata {
 }
 
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 impl PluginMetadata {
     /// Create a new plugin metadata with the given identity.
     pub fn new(name: &str, version: &str, description: &str) -> Self {
@@ -160,7 +156,6 @@ impl PluginMetadata {
 
 /// Lifecycle state of a loaded plugin instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum PluginState {
     /// Plugin is registered but not yet loaded into memory.
     Unloaded,
@@ -181,7 +176,6 @@ pub enum PluginState {
 /// A registered plugin instance combining metadata and runtime state.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct PluginInstance {
     /// Descriptive metadata for this plugin.
     pub metadata: PluginMetadata,
@@ -190,7 +184,6 @@ pub struct PluginInstance {
 }
 
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 impl PluginInstance {
     /// Create a new plugin instance in the `Unloaded` state.
     pub fn new(metadata: PluginMetadata) -> Self {
@@ -257,14 +250,12 @@ impl PluginInstance {
 /// that declare support for a given hook point.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct PluginManager {
     /// Registered plugins, keyed by plugin name.
     plugins: BTreeMap<String, PluginInstance>,
 }
 
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 impl PluginManager {
     /// Create a new empty plugin manager.
     pub fn new() -> Self {

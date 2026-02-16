@@ -163,6 +163,8 @@ impl UhciController {
     }
 
     /// Read a 32-bit register
+    /// Completes the register-width API alongside
+    /// read_reg16/write_reg16/write_reg32.
     #[allow(dead_code)]
     #[cfg(target_arch = "x86_64")]
     fn read_reg32(&self, offset: u16) -> u32 {
@@ -171,6 +173,8 @@ impl UhciController {
         unsafe { inl((self.base_address as u16).wrapping_add(offset)) }
     }
 
+    /// Completes the register-width API alongside
+    /// read_reg16/write_reg16/write_reg32.
     #[allow(dead_code)]
     #[cfg(not(target_arch = "x86_64"))]
     fn read_reg32(&self, offset: u16) -> u32 {

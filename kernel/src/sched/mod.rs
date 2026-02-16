@@ -87,7 +87,7 @@ pub(crate) use crate::process::ProcessState;
 pub(crate) use crate::process::{ProcessId, ThreadId};
 
 /// Get the current thread ID
-/// TODO: Implement proper current thread tracking
+/// TODO(phase5): Implement proper current thread tracking
 pub fn get_current_thread_id() -> u64 {
     // For now, return a dummy value
     // In a real implementation, this would track the currently running thread

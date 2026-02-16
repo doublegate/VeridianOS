@@ -294,7 +294,9 @@ pub fn notify_parent(child_pid: ProcessId, status: WaitStatus) {
     // Send SIGCHLD to the parent.
     if let Some(parent) = super::table::get_process(parent_pid) {
         use super::exit::signals::SIGCHLD;
-        let _ = parent.send_signal(SIGCHLD as usize);
+        if let Err(_e) = parent.send_signal(SIGCHLD as usize) {
+            crate::kprintln!("[PROCESS] Warning: Failed to send SIGCHLD to parent");
+        }
 
         // Wake parent if blocked.
         if parent.get_state() == ProcessState::Blocked {

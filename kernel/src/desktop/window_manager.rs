@@ -283,7 +283,13 @@ impl WindowManager {
                 if pressed {
                     // Click - focus window at position
                     if let Some(window_id) = self.window_at_position(x, y) {
-                        let _ = self.focus_window(window_id);
+                        if let Err(_e) = self.focus_window(window_id) {
+                            crate::println!(
+                                "[WM] Warning: failed to focus window {}: {:?}",
+                                window_id,
+                                _e
+                            );
+                        }
 
                         // Send click event to window
                         self.queue_event(WindowEvent { window_id, event });

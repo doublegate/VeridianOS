@@ -268,7 +268,7 @@ impl NvmeController {
 
     /// Submit command to admin queue (stub)
     fn submit_admin_command(&mut self, _cmd: SubmissionQueueEntry) -> Result<(), KernelError> {
-        // TODO(phase4): Implement NVMe admin command submission with doorbell ringing
+        // TODO(future): Implement NVMe admin command submission with doorbell ringing
         Ok(())
     }
 
@@ -278,7 +278,7 @@ impl NvmeController {
         _start_block: u64,
         _buffer: &mut [u8],
     ) -> Result<(), KernelError> {
-        // TODO(phase4): Implement NVMe read: create I/O command, submit, wait, copy
+        // TODO(future): Implement NVMe read: create I/O command, submit, wait, copy
         // from DMA
 
         Ok(())
@@ -290,7 +290,7 @@ impl NvmeController {
         _start_block: u64,
         _buffer: &[u8],
     ) -> Result<(), KernelError> {
-        // TODO(phase4): Implement NVMe write: copy to DMA, create I/O command, submit,
+        // TODO(future): Implement NVMe write: copy to DMA, create I/O command, submit,
         // wait
 
         Ok(())

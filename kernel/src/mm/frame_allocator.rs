@@ -934,7 +934,14 @@ impl FrameAllocator {
     /// Deallocate a single frame (wrapper for free_frames)
     pub fn deallocate_frame(&self, frame: PhysicalAddress) {
         let frame_num = FrameNumber::new(frame.as_u64() / FRAME_SIZE as u64);
-        let _ = self.free_frames(frame_num, 1);
+        if let Err(_e) = self.free_frames(frame_num, 1) {
+            #[cfg(not(target_arch = "aarch64"))]
+            println!(
+                "[FrameAllocator] Warning: Failed to deallocate frame at {:#x}: {:?}",
+                frame.as_u64(),
+                _e
+            );
+        }
     }
 }
 

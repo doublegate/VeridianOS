@@ -373,8 +373,18 @@ impl BlockFsInner {
         };
 
         // Create "." and ".." entries in the root directory (both point to inode 0)
-        let _ = fs.write_dir_entry(0, 0, ".", DiskDirEntry::FT_DIR);
-        let _ = fs.write_dir_entry(0, 0, "..", DiskDirEntry::FT_DIR);
+        if let Err(_e) = fs.write_dir_entry(0, 0, ".", DiskDirEntry::FT_DIR) {
+            crate::println!(
+                "[BLOCKFS] Warning: failed to create '.' root dir entry: {:?}",
+                _e
+            );
+        }
+        if let Err(_e) = fs.write_dir_entry(0, 0, "..", DiskDirEntry::FT_DIR) {
+            crate::println!(
+                "[BLOCKFS] Warning: failed to create '..' root dir entry: {:?}",
+                _e
+            );
+        }
 
         fs
     }
@@ -1128,7 +1138,7 @@ impl Filesystem for BlockFs {
     }
 
     fn sync(&self) -> Result<(), KernelError> {
-        // TODO(phase4): Sync dirty blocks and inodes to underlying block device
+        // TODO(future): Sync dirty blocks and inodes to underlying block device
         Ok(())
     }
 }

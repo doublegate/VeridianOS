@@ -328,7 +328,11 @@ impl UserAccount {
 
         let rng = get_random();
         let mut salt = [0u8; 32];
-        let _ = rng.fill_bytes(&mut salt);
+        if let Err(_e) = rng.fill_bytes(&mut salt) {
+            crate::kprintln!(
+                "[AUTH] Warning: RNG fill_bytes failed for password salt, using zeroed salt"
+            );
+        }
 
         let hash = pbkdf2_hmac_sha256(password.as_bytes(), &salt, Self::PBKDF2_ITERATIONS);
 
@@ -426,7 +430,9 @@ impl UserAccount {
 
         let rng = get_random();
         let mut secret = [0u8; 32];
-        let _ = rng.fill_bytes(&mut secret);
+        if let Err(_e) = rng.fill_bytes(&mut secret) {
+            crate::kprintln!("[AUTH] Warning: RNG fill_bytes failed for MFA secret");
+        }
 
         self.mfa_secret = Some(secret);
         self.mfa_enabled = true;
@@ -889,7 +895,9 @@ pub fn init() -> Result<(), KernelError> {
 
     // Create default root account (uses relaxed policy for initial setup)
     let auth_manager = get_auth_manager();
-    let _ = auth_manager.create_user("root", "veridian");
+    if let Err(_e) = auth_manager.create_user("root", "veridian") {
+        crate::kprintln!("[AUTH] Warning: Failed to create default root account");
+    }
 
     crate::println!("[AUTH] Authentication framework initialized");
     crate::println!("[AUTH] Default root user created (password: veridian)");

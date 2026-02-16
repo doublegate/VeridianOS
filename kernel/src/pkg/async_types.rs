@@ -8,13 +8,14 @@
 //! user-space process execution. This module provides the type definitions
 //! that both kernel scheduler primitives and user-space runtimes agree upon.
 
+#![allow(dead_code)]
+
 // ============================================================================
 // TaskState
 // ============================================================================
 
 /// Execution state of an asynchronous task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum TaskState {
     /// Task has been created but is waiting to be scheduled.
     Pending,
@@ -28,7 +29,6 @@ pub enum TaskState {
     Failed,
 }
 
-#[allow(dead_code)]
 impl TaskState {
     /// Returns `true` if this state is terminal (the task will not run again).
     pub fn is_terminal(&self) -> bool {
@@ -45,7 +45,6 @@ impl TaskState {
 /// Higher priority tasks are scheduled before lower priority tasks when
 /// contending for CPU time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[allow(dead_code)]
 pub enum TaskPriority {
     /// Background tasks with the lowest scheduling priority.
     Low,
@@ -57,7 +56,6 @@ pub enum TaskPriority {
     Critical,
 }
 
-#[allow(dead_code)]
 impl TaskPriority {
     /// Return a numeric priority level (0 = Low, 3 = Critical).
     pub fn as_u8(&self) -> u8 {
@@ -79,7 +77,6 @@ impl TaskPriority {
 /// Combines the task's unique identifier with its current state and priority,
 /// allowing the caller to inspect and manage task lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct TaskHandle {
     /// Unique task identifier.
     pub id: u64,
@@ -89,7 +86,6 @@ pub struct TaskHandle {
     pub priority: TaskPriority,
 }
 
-#[allow(dead_code)]
 impl TaskHandle {
     /// Create a new task handle in the `Pending` state with `Normal` priority.
     pub fn new(id: u64) -> Self {
@@ -121,7 +117,6 @@ impl TaskHandle {
 
 /// Configuration for an asynchronous communication channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct ChannelConfig {
     /// Maximum number of messages the channel can buffer.
     pub capacity: usize,
@@ -129,7 +124,6 @@ pub struct ChannelConfig {
     pub allow_broadcast: bool,
 }
 
-#[allow(dead_code)]
 impl ChannelConfig {
     /// Create a point-to-point channel configuration with the given capacity.
     pub fn new(capacity: usize) -> Self {
@@ -155,7 +149,6 @@ impl ChannelConfig {
 
 /// Determines whether a timer fires once or repeatedly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum TimerMode {
     /// Fire once after the specified duration.
     OneShot,
@@ -165,7 +158,6 @@ pub enum TimerMode {
 
 /// Specification for an asynchronous timer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct TimerSpec {
     /// Duration or interval in milliseconds.
     pub duration_ms: u64,
@@ -173,7 +165,6 @@ pub struct TimerSpec {
     pub mode: TimerMode,
 }
 
-#[allow(dead_code)]
 impl TimerSpec {
     /// Create a one-shot timer that fires after the given duration.
     pub fn one_shot(duration_ms: u64) -> Self {
@@ -201,7 +192,6 @@ impl TimerSpec {
 /// Provides tuning parameters that the kernel uses when allocating scheduler
 /// resources for a process's async runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct AsyncRuntimeConfig {
     /// Maximum number of concurrent async tasks.
     pub max_tasks: usize,
@@ -211,7 +201,6 @@ pub struct AsyncRuntimeConfig {
     pub timer_resolution_ms: u64,
 }
 
-#[allow(dead_code)]
 impl AsyncRuntimeConfig {
     /// Create a configuration with sensible defaults.
     ///

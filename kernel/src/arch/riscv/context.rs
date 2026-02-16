@@ -406,9 +406,8 @@ pub fn has_f_extension() -> bool {
 
 /// Check if CPU supports D extension
 ///
-/// Currently unused but retained for future FPU context switching
-/// and feature detection during SMP bring-up.
-#[allow(dead_code)]
+/// Called by save_fpu_state() and restore_fpu_state() to check
+/// for double-precision FP register availability.
 pub fn has_d_extension() -> bool {
     // Check misa register
     // SAFETY: Reading the misa CSR is a read-only operation that reports

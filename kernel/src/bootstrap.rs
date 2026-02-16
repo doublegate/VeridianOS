@@ -421,7 +421,25 @@ pub fn kernel_init_main() {
     let mut passed = 0u32;
     let mut failed = 0u32;
 
-    // --- VFS Tests ---
+    run_vfs_tests(&mut passed, &mut failed);
+
+    // Shell tests may short-circuit if shell is unavailable
+    if !run_shell_tests(&mut passed, &mut failed) {
+        return;
+    }
+
+    run_elf_tests(&mut passed, &mut failed);
+    run_capability_tests(&mut passed, &mut failed);
+    run_security_tests(&mut passed, &mut failed);
+    run_phase4_tests(&mut passed, &mut failed);
+
+    // --- Summary ---
+    print_summary(passed, failed);
+}
+
+/// Run VFS boot tests (tests 1-6).
+#[cfg(feature = "alloc")]
+fn run_vfs_tests(passed: &mut u32, failed: &mut u32) {
     kprintln!("[INIT] VFS tests:");
 
     // Test 1: Create directory
@@ -430,7 +448,7 @@ pub fn kernel_init_main() {
             .read()
             .mkdir("/tmp/test_init", fs::Permissions::default())
             .is_ok();
-        report_test("vfs_mkdir", ok, &mut passed, &mut failed);
+        report_test("vfs_mkdir", ok, passed, failed);
     }
 
     // Test 2: Write file via VFS create + write
@@ -443,7 +461,7 @@ pub fn kernel_init_main() {
             Ok(())
         })()
         .is_ok();
-        report_test("vfs_write_file", ok, &mut passed, &mut failed);
+        report_test("vfs_write_file", ok, passed, failed);
     }
 
     // Test 3: Read file back and verify contents
@@ -457,7 +475,7 @@ pub fn kernel_init_main() {
             Ok(&buf[..n] == b"Hello VeridianOS")
         })()
         .unwrap_or(false);
-        report_test("vfs_read_verify", ok, &mut passed, &mut failed);
+        report_test("vfs_read_verify", ok, passed, failed);
     }
 
     // Test 4: List directory entries
@@ -469,31 +487,37 @@ pub fn kernel_init_main() {
             Ok(entries.iter().any(|e| e.name == "hello.txt"))
         })()
         .unwrap_or(false);
-        report_test("vfs_readdir", ok, &mut passed, &mut failed);
+        report_test("vfs_readdir", ok, passed, failed);
     }
 
     // Test 5: /proc is mounted
     {
         let ok = fs::get_vfs().read().resolve_path("/proc").is_ok();
-        report_test("vfs_procfs", ok, &mut passed, &mut failed);
+        report_test("vfs_procfs", ok, passed, failed);
     }
 
     // Test 6: /dev is mounted
     {
         let ok = fs::get_vfs().read().resolve_path("/dev").is_ok();
-        report_test("vfs_devfs", ok, &mut passed, &mut failed);
+        report_test("vfs_devfs", ok, passed, failed);
     }
+}
 
-    // --- Shell Tests ---
+/// Run shell boot tests (tests 7-12).
+///
+/// Returns `false` if the shell is unavailable, in which case the caller
+/// should print the summary and return early.
+#[cfg(feature = "alloc")]
+fn run_shell_tests(passed: &mut u32, failed: &mut u32) -> bool {
     kprintln!("[INIT] Shell tests:");
 
     let shell = match services::shell::try_get_shell() {
         Some(s) => s,
         None => {
             kprintln!("  shell unavailable [failed]");
-            failed += 6;
-            print_summary(passed, failed);
-            return;
+            *failed += 6;
+            print_summary(*passed, *failed);
+            return false;
         }
     };
 
@@ -503,7 +527,7 @@ pub fn kernel_init_main() {
             shell.execute_command("help"),
             services::shell::CommandResult::Success(_)
         );
-        report_test("shell_help", ok, &mut passed, &mut failed);
+        report_test("shell_help", ok, passed, failed);
     }
 
     // Test 8: pwd command
@@ -512,7 +536,7 @@ pub fn kernel_init_main() {
             shell.execute_command("pwd"),
             services::shell::CommandResult::Success(_)
         );
-        report_test("shell_pwd", ok, &mut passed, &mut failed);
+        report_test("shell_pwd", ok, passed, failed);
     }
 
     // Test 9: ls / command
@@ -521,7 +545,7 @@ pub fn kernel_init_main() {
             shell.execute_command("ls /"),
             services::shell::CommandResult::Success(_)
         );
-        report_test("shell_ls", ok, &mut passed, &mut failed);
+        report_test("shell_ls", ok, passed, failed);
     }
 
     // Test 10: env command
@@ -530,7 +554,7 @@ pub fn kernel_init_main() {
             shell.execute_command("env"),
             services::shell::CommandResult::Success(_)
         );
-        report_test("shell_env", ok, &mut passed, &mut failed);
+        report_test("shell_env", ok, passed, failed);
     }
 
     // Test 11: echo command
@@ -539,7 +563,7 @@ pub fn kernel_init_main() {
             shell.execute_command("echo hello"),
             services::shell::CommandResult::Success(_)
         );
-        report_test("shell_echo", ok, &mut passed, &mut failed);
+        report_test("shell_echo", ok, passed, failed);
     }
 
     // Test 12: mkdir + verification via VFS
@@ -548,10 +572,15 @@ pub fn kernel_init_main() {
             shell.execute_command("mkdir /tmp/shell_test"),
             services::shell::CommandResult::Success(_)
         ) && fs::file_exists("/tmp/shell_test");
-        report_test("shell_mkdir_verify", ok, &mut passed, &mut failed);
+        report_test("shell_mkdir_verify", ok, passed, failed);
     }
 
-    // --- ELF Tests ---
+    true
+}
+
+/// Run ELF boot tests (tests 13-14).
+#[cfg(feature = "alloc")]
+fn run_elf_tests(passed: &mut u32, failed: &mut u32) {
     kprintln!("[INIT] ELF tests:");
 
     // Test 13: Parse a valid minimal ELF64 executable header
@@ -618,7 +647,7 @@ pub fn kernel_init_main() {
             Ok(binary.entry_point == 0x401000 && !binary.segments.is_empty())
         })()
         .unwrap_or(false);
-        report_test("elf_parse_valid", ok, &mut passed, &mut failed);
+        report_test("elf_parse_valid", ok, passed, failed);
     }
 
     // Test 14: Reject invalid ELF magic
@@ -630,10 +659,13 @@ pub fn kernel_init_main() {
             let bad_data = alloc::vec![0u8; 128]; // all zeros = no ELF magic
             loader.parse(&bad_data).is_err()
         };
-        report_test("elf_reject_bad_magic", ok, &mut passed, &mut failed);
+        report_test("elf_reject_bad_magic", ok, passed, failed);
     }
+}
 
-    // --- Capability Tests ---
+/// Run capability boot tests (tests 15-18).
+#[cfg(feature = "alloc")]
+fn run_capability_tests(passed: &mut u32, failed: &mut u32) {
     kprintln!("[INIT] Capability tests:");
 
     // Test 15: Create a capability token, insert into space, lookup succeeds
@@ -652,11 +684,14 @@ pub fn kernel_init_main() {
             };
             let rights = Rights::READ | Rights::WRITE;
             space.insert(token, object, rights)?;
-            let found = space.lookup(token);
-            Ok(found.is_some() && found.unwrap().contains(Rights::READ))
+            if let Some(found_rights) = space.lookup(token) {
+                Ok(found_rights.contains(Rights::READ))
+            } else {
+                Ok(false)
+            }
         })()
         .unwrap_or(false);
-        report_test("cap_insert_lookup", ok, &mut passed, &mut failed);
+        report_test("cap_insert_lookup", ok, passed, failed);
     }
 
     // Test 16: IPC endpoint create + capability validate
@@ -668,13 +703,13 @@ pub fn kernel_init_main() {
             Ok(endpoint_id > 0)
         })()
         .unwrap_or(false);
-        report_test("ipc_endpoint_create", ok, &mut passed, &mut failed);
+        report_test("ipc_endpoint_create", ok, passed, failed);
     }
 
     // Test 17: Root capability exists after cap::init()
     {
         let ok = cap::root_capability().is_some();
-        report_test("cap_root_exists", ok, &mut passed, &mut failed);
+        report_test("cap_root_exists", ok, passed, failed);
     }
 
     // Test 18: Capability quota enforcement
@@ -705,13 +740,17 @@ pub fn kernel_init_main() {
             Ok(third_result.is_err())
         })()
         .unwrap_or(false);
-        report_test("cap_quota_enforced", ok, &mut passed, &mut failed);
+        report_test("cap_quota_enforced", ok, passed, failed);
     }
+}
 
+/// Run security boot tests (tests 19-22).
+#[cfg(feature = "alloc")]
+fn run_security_tests(passed: &mut u32, failed: &mut u32) {
     // Test 19: MAC policy allows user_t -> file_t Read
     {
         let ok = security::mac::check_file_access("/test", security::AccessType::Read, 100).is_ok();
-        report_test("mac_user_file_read", ok, &mut passed, &mut failed);
+        report_test("mac_user_file_read", ok, passed, failed);
     }
 
     // Test 20: Audit log records events after enable
@@ -721,7 +760,7 @@ pub fn kernel_init_main() {
         security::audit::log_process_create(0, 0, 0);
         let (count, _max) = security::audit::get_stats();
         let ok = count > 0;
-        report_test("audit_has_events", ok, &mut passed, &mut failed);
+        report_test("audit_has_events", ok, passed, failed);
     }
 
     // Test 21: Stack canary verify/mismatch logic
@@ -738,50 +777,50 @@ pub fn kernel_init_main() {
         stack_slot ^= 1;
         let corrupted = stack_slot != canary_val;
         let ok = intact && corrupted;
-        report_test("stack_canary_verify", ok, &mut passed, &mut failed);
+        report_test("stack_canary_verify", ok, passed, failed);
     }
 
     // Test 22: SHA-256 NIST test vector passes
     {
         let ok = crate::crypto::validate();
-        report_test("crypto_sha256_vector", ok, &mut passed, &mut failed);
+        report_test("crypto_sha256_vector", ok, passed, failed);
     }
+}
 
-    // --- Phase 4 Package Ecosystem Tests ---
+/// Run Phase 4 package ecosystem boot tests (tests 23-27).
+#[cfg(feature = "alloc")]
+fn run_phase4_tests(passed: &mut u32, failed: &mut u32) {
     kprintln!("[INIT] Phase 4 package ecosystem tests:");
 
     // Test 23: Delta compute/apply roundtrip
     {
         let ok = crate::test_framework::test_pkg_delta_compute_apply().is_ok();
-        report_test("pkg_delta_roundtrip", ok, &mut passed, &mut failed);
+        report_test("pkg_delta_roundtrip", ok, passed, failed);
     }
 
     // Test 24: Reproducible build manifest comparison
     {
         let ok = crate::test_framework::test_pkg_reproducible_manifest().is_ok();
-        report_test("pkg_reproducible_manifest", ok, &mut passed, &mut failed);
+        report_test("pkg_reproducible_manifest", ok, passed, failed);
     }
 
     // Test 25: License detection from text
     {
         let ok = crate::test_framework::test_pkg_license_detection().is_ok();
-        report_test("pkg_license_detection", ok, &mut passed, &mut failed);
+        report_test("pkg_license_detection", ok, passed, failed);
     }
 
     // Test 26: Security scanner path and capability checks
     {
         let ok = crate::test_framework::test_pkg_security_scan().is_ok();
-        report_test("pkg_security_scan", ok, &mut passed, &mut failed);
+        report_test("pkg_security_scan", ok, passed, failed);
     }
 
     // Test 27: Ecosystem package definitions
     {
         let ok = crate::test_framework::test_pkg_ecosystem_definitions().is_ok();
-        report_test("pkg_ecosystem_defs", ok, &mut passed, &mut failed);
+        report_test("pkg_ecosystem_defs", ok, passed, failed);
     }
-
-    // --- Summary ---
-    print_summary(passed, failed);
 }
 
 #[cfg(not(feature = "alloc"))]

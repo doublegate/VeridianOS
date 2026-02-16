@@ -505,7 +505,6 @@ impl EnhancedElfLoader {
 }
 
 /// Load and execute an ELF program
-#[allow(unused_variables)]
 pub fn load_and_execute(path: &str, args: ProgramArgs) -> Result<ProcessId, KernelError> {
     println!("[ELF-LOADER] Loading program: {}", path);
 
@@ -578,7 +577,7 @@ pub fn load_and_execute(path: &str, args: ProgramArgs) -> Result<ProcessId, Kern
     // Get the process and load program
     if let Some(process) = crate::process::get_process(pid) {
         // Load program segments into process memory
-        let entry = loader.load(&process)?;
+        let _entry = loader.load(&process)?;
 
         // Setup arguments on stack
         loader.setup_args(&process, &args)?;
@@ -593,7 +592,7 @@ pub fn load_and_execute(path: &str, args: ProgramArgs) -> Result<ProcessId, Kern
 
         println!(
             "[ELF-LOADER] Program loaded and ready to execute (PID {}, entry 0x{:x})",
-            pid.0, entry.0
+            pid.0, _entry.0
         );
     }
 

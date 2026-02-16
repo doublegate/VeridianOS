@@ -626,7 +626,7 @@ impl Scheduler {
             if let Some(_current) = self.current {
                 // Save current context and switch to next
                 // For now, we'll just update the task pointer
-                // TODO: Implement actual context save/restore
+                // TODO(phase5): Implement actual context save/restore
             } else {
                 // First task, load its context directly
                 // This happens when scheduler starts with bootstrap task

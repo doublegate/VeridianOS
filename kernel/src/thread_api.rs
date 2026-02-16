@@ -393,11 +393,10 @@ impl ThreadManager {
     }
 
     /// Set thread priority
-    #[allow(unused_variables)]
     pub fn set_thread_priority(
         &self,
         thread_id: ThreadId,
-        priority: ThreadPriority,
+        _priority: ThreadPriority,
     ) -> Result<(), KernelError> {
         let handle = self
             .get_thread(thread_id)
@@ -419,7 +418,7 @@ impl ThreadManager {
         crate::println!(
             "[THREAD] Set thread {} priority to {:?}",
             thread_id.0,
-            priority
+            _priority
         );
         Ok(())
     }

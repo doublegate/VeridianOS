@@ -4,6 +4,12 @@
 //! setup for building user-space packages targeting VeridianOS. Supports
 //! x86_64, AArch64, and RISC-V architectures with appropriate defaults for
 //! each target.
+//!
+//! NOTE: Many types in this module are forward declarations for user-space
+//! APIs. They will be exercised when user-space process execution is
+//! functional. See TODO(user-space) markers for specific activation points.
+
+#![allow(dead_code)]
 
 #[cfg(feature = "alloc")]
 use alloc::{
@@ -22,7 +28,6 @@ use crate::error::{KernelError, KernelResult};
 
 /// Describes a supported VeridianOS build target at compile time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct VeridianTarget {
     /// Target triple (e.g. "x86_64-veridian").
     pub triple: &'static str,
@@ -32,7 +37,6 @@ pub struct VeridianTarget {
     pub features: &'static str,
 }
 
-#[allow(dead_code)]
 impl VeridianTarget {
     /// x86_64 target with soft-float and no red zone for kernel safety.
     pub const X86_64: VeridianTarget = VeridianTarget {
@@ -89,7 +93,6 @@ impl VeridianTarget {
 /// Identifies a single component within a toolchain installation.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum ToolchainComponent {
     /// A compiler for the given programming language (e.g. "c", "c++", "rust").
     Compiler { language: String },
@@ -110,7 +113,6 @@ pub enum ToolchainComponent {
 /// A registered toolchain containing one or more components.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Toolchain {
     /// Human-readable name (e.g. "veridian-gcc-13").
     pub name: String,
@@ -127,7 +129,6 @@ pub struct Toolchain {
 }
 
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 impl Toolchain {
     /// Create a new toolchain with the given identity and paths.
     pub fn new(
@@ -167,7 +168,6 @@ impl Toolchain {
 /// Registry of known toolchains, keyed by name.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ToolchainRegistry {
     /// All registered toolchains.
     toolchains: BTreeMap<String, Toolchain>,
@@ -176,7 +176,6 @@ pub struct ToolchainRegistry {
 }
 
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 impl ToolchainRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
@@ -256,7 +255,6 @@ impl Default for ToolchainRegistry {
 /// Cross-compilation tool paths for a specific target.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct CrossCompilerConfig {
     /// Path to the C compiler.
     pub cc: String,
@@ -273,7 +271,6 @@ pub struct CrossCompilerConfig {
 }
 
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 impl CrossCompilerConfig {
     /// Produce a cross-compiler configuration with sensible defaults for the
     /// given target triple. Uses GNU-style tool naming conventions.
@@ -313,7 +310,6 @@ impl CrossCompilerConfig {
 /// Generate a complete set of cross-compilation environment variables for the
 /// given target, including compiler paths, flags, and pkg-config hints.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn generate_cross_env(target: &str) -> BTreeMap<String, String> {
     let cross = CrossCompilerConfig::for_target(target);
     let mut env = cross.to_env_vars();
@@ -365,7 +361,6 @@ pub fn generate_cross_env(target: &str) -> BTreeMap<String, String> {
 /// Linker configuration for a specific target architecture.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct LinkerConfig {
     /// Path to the linker binary.
     pub linker_path: String,
@@ -378,7 +373,6 @@ pub struct LinkerConfig {
 }
 
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 impl LinkerConfig {
     /// Produce a linker configuration with sensible defaults for the given
     /// target triple.
@@ -427,7 +421,6 @@ impl LinkerConfig {
 /// - aarch64: loaded at `0x40080000` (QEMU virt)
 /// - riscv64: loaded at `0x80200000` (OpenSBI payload)
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn generate_linker_script(target: &str) -> String {
     let (entry, origin) = match target {
         "x86_64-veridian" | "x86_64-unknown-none" => ("_start", "0xFFFFFFFF80100000"),
@@ -490,14 +483,12 @@ pub fn generate_linker_script(target: &str) -> String {
 /// Generates a CMake toolchain file for cross-compiling to VeridianOS.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct CMakeToolchainFile {
     /// Target triple to generate the toolchain file for.
     pub target: String,
 }
 
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 impl CMakeToolchainFile {
     /// Create a new generator for the given target triple.
     pub fn new(target: &str) -> Self {

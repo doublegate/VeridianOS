@@ -48,7 +48,6 @@ pub use sync::{sync_call, sync_receive, sync_reply, sync_send};
 pub use crate::arch::entropy::read_timestamp;
 
 /// IPC system initialization
-#[allow(dead_code)]
 pub fn init() {
     kprintln!("[IPC] Initializing IPC system...");
 

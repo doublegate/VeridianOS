@@ -168,7 +168,7 @@ pub fn wake_up_process(pid: ProcessId) {
         if let Some(cpu_data) = smp::per_cpu(cpu_id) {
             if cpu_data.cpu_info.is_online() {
                 // Check if the scheduler has this task
-                // TODO: Per-CPU schedulers not yet implemented, using global scheduler
+                // TODO(phase5): Per-CPU schedulers not yet implemented, using global scheduler
                 let sched = super::SCHEDULER.lock();
 
                 // Search through the scheduler's tasks

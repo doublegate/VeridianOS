@@ -271,7 +271,13 @@ impl InitSystem {
                         name,
                         timeout_secs
                     );
-                    let _ = process_server.send_signal(pid, 9); // SIGKILL
+                    if let Err(_e) = process_server.send_signal(pid, 9) {
+                        crate::println!(
+                            "[INIT] Warning: SIGKILL to PID {} failed: {:?}",
+                            pid.0,
+                            _e
+                        );
+                    }
                     break;
                 }
 
@@ -393,7 +399,13 @@ impl InitSystem {
                         core::hint::spin_loop();
                     }
                     // Restart the service
-                    let _ = self.start_service(&svc_name);
+                    if let Err(_e) = self.start_service(&svc_name) {
+                        crate::println!(
+                            "[INIT] Warning: failed to restart service {}: {:?}",
+                            svc_name,
+                            _e
+                        );
+                    }
                     return; // services lock was dropped
                 } else if service.restart_count >= service.definition.max_restarts {
                     service.state = ServiceState::Failed;

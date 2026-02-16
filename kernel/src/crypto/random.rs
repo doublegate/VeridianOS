@@ -124,14 +124,18 @@ impl SecureRandom {
     /// Generate random u64
     pub fn next_u64(&self) -> u64 {
         let mut bytes = [0u8; 8];
-        let _ = self.fill_bytes(&mut bytes);
+        if let Err(_e) = self.fill_bytes(&mut bytes) {
+            crate::println!("[CSPRNG] Warning: fill_bytes failed in next_u64: {:?}", _e);
+        }
         u64::from_le_bytes(bytes)
     }
 
     /// Generate random u32
     pub fn next_u32(&self) -> u32 {
         let mut bytes = [0u8; 4];
-        let _ = self.fill_bytes(&mut bytes);
+        if let Err(_e) = self.fill_bytes(&mut bytes) {
+            crate::println!("[CSPRNG] Warning: fill_bytes failed in next_u32: {:?}", _e);
+        }
         u32::from_le_bytes(bytes)
     }
 
@@ -326,7 +330,12 @@ pub fn random_bytes(count: usize) -> Vec<u8> {
     let mut bytes = vec![0u8; count];
 
     let rng = get_random();
-    let _ = rng.fill_bytes(&mut bytes);
+    if let Err(_e) = rng.fill_bytes(&mut bytes) {
+        crate::println!(
+            "[CSPRNG] Warning: fill_bytes failed in random_bytes: {:?}",
+            _e
+        );
+    }
 
     bytes
 }

@@ -43,7 +43,7 @@ pub struct DmaBuffer {
 impl DmaBuffer {
     /// Create new DMA buffer
     pub fn new(size: usize) -> Result<Self, KernelError> {
-        // TODO(phase4): Allocate DMA-capable memory (below 4GB for 32-bit DMA)
+        // TODO(future): Allocate DMA-capable memory (below 4GB for 32-bit DMA)
 
         Ok(Self {
             physical_addr: 0,
@@ -185,7 +185,7 @@ impl ScatterGatherList {
                 });
             }
 
-            // TODO(phase4): Copy data from physical address to contiguous buffer
+            // TODO(future): Copy data from physical address to contiguous buffer
 
             offset += segment.length;
         }
@@ -219,7 +219,7 @@ impl ZeroCopySend {
 
     /// Add data from user buffer (zero-copy via page remapping)
     pub fn add_user_buffer(&mut self, user_addr: u64, length: usize) -> Result<(), KernelError> {
-        // TODO(phase4): Pin user pages and translate to physical addresses
+        // TODO(future): Pin user pages and translate to physical addresses
 
         self.sg_list.add_segment(user_addr, length);
         Ok(())
@@ -232,7 +232,7 @@ impl ZeroCopySend {
 
     /// Execute send (hardware-assisted)
     pub fn execute(&self) -> Result<(), KernelError> {
-        // TODO(phase4): Program network card DMA engine with scatter-gather list
+        // TODO(future): Program network card DMA engine with scatter-gather list
 
         Ok(())
     }
@@ -307,7 +307,7 @@ impl TcpCork {
     /// Force send pending data
     pub fn flush(&mut self) -> Result<(), KernelError> {
         if !self.pending.is_empty() {
-            // TODO(phase4): Send pending data via TCP socket
+            // TODO(future): Send pending data via TCP socket
             self.pending.clear();
         }
         Ok(())

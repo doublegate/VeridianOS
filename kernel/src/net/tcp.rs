@@ -82,7 +82,7 @@ impl TcpConnection {
 
         // Send SYN
         self.state = TcpState::SynSent;
-        // TODO(phase4): Construct and send SYN packet via IP layer
+        // TODO(future): Construct and send SYN packet via IP layer
 
         Ok(())
     }
@@ -109,7 +109,7 @@ impl TcpConnection {
             });
         }
 
-        // TODO(phase4): Segment data and send via TCP with retransmission
+        // TODO(future): Segment data and send via TCP with retransmission
 
         Ok(data.len())
     }
@@ -123,7 +123,7 @@ impl TcpConnection {
             });
         }
 
-        // TODO(phase4): Receive reassembled data from TCP receive buffer
+        // TODO(future): Receive reassembled data from TCP receive buffer
 
         Ok(0)
     }
@@ -299,8 +299,7 @@ pub fn process_packet(
     let src_port = u16::from_be_bytes([data[0], data[1]]);
     let dst_port = u16::from_be_bytes([data[2], data[3]]);
     let seq_num = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-    #[allow(unused_variables)]
-    let ack_num = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
+    let _ack_num = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
     let data_offset = ((data[12] >> 4) * 4) as usize;
     let flags = TcpFlags::new(data[13]);
     let _window = u16::from_be_bytes([data[14], data[15]]);
@@ -311,8 +310,7 @@ pub fn process_packet(
     let _local = SocketAddr::new(dst_addr, dst_port);
 
     // Find socket by remote address match
-    #[allow(unused_variables)]
-    for (socket_id, state) in connections.iter_mut() {
+    for (_socket_id, state) in connections.iter_mut() {
         if state.connection.remote == remote
             || (state.connection.state == TcpState::Listen
                 && state.connection.local.port() == dst_port)
@@ -361,7 +359,7 @@ pub fn process_packet(
             #[cfg(feature = "net_debug")]
             println!(
                 "[TCP] Processed packet for socket {}: seq={} ack={} flags={:02x}",
-                socket_id, seq_num, ack_num, flags.0
+                _socket_id, seq_num, _ack_num, flags.0
             );
 
             return Ok(());

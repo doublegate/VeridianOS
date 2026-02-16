@@ -5,6 +5,12 @@
 //! test definitions; actual process spawning is deferred to user-space.
 //! The security scanner checks package file paths and requested capabilities
 //! against known-suspicious patterns before installation.
+//!
+//! NOTE: Many types in this module are forward declarations for user-space
+//! APIs. They will be exercised when user-space process execution is
+//! functional. See TODO(user-space) markers for specific activation points.
+
+#![allow(dead_code)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -19,7 +25,6 @@ use alloc::{string::String, vec::Vec};
 /// Classification of package tests.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum TestType {
     /// Quick smoke tests to verify basic functionality.
     Smoke,
@@ -32,7 +37,6 @@ pub enum TestType {
 #[cfg(feature = "alloc")]
 impl TestType {
     /// Parse a test type from a string identifier.
-    #[allow(dead_code)]
     pub fn parse(s: &str) -> Self {
         match s {
             "smoke" => Self::Smoke,
@@ -43,7 +47,6 @@ impl TestType {
     }
 
     /// Return a human-readable name.
-    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Smoke => "smoke",
@@ -56,7 +59,6 @@ impl TestType {
 /// Definition of a single package test.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct PackageTest {
     /// Name of the test.
     pub test_name: String,
@@ -73,7 +75,6 @@ pub struct PackageTest {
 #[cfg(feature = "alloc")]
 impl PackageTest {
     /// Create a new package test definition.
-    #[allow(dead_code)]
     pub fn new(
         test_name: String,
         test_type: TestType,
@@ -91,7 +92,6 @@ impl PackageTest {
     }
 
     /// Validate that this test definition is well-formed.
-    #[allow(dead_code)]
     pub fn validate(&self) -> Result<(), crate::error::KernelError> {
         if self.test_name.is_empty() {
             return Err(crate::error::KernelError::InvalidArgument {
@@ -118,7 +118,6 @@ impl PackageTest {
 /// Result of executing a single package test.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct TestResult {
     /// Name of the test that was executed.
     pub test_name: String,
@@ -139,7 +138,6 @@ impl TestResult {
     /// Create a placeholder result for a test that has not yet been executed.
     ///
     /// Used when actual process spawning is deferred to user-space.
-    #[allow(dead_code)]
     fn deferred(test_name: &str) -> Self {
         Self {
             test_name: String::from(test_name),
@@ -157,7 +155,6 @@ impl TestResult {
 /// Actual process spawning is deferred to user-space. The runner validates
 /// test definitions and creates placeholder results.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub struct TestRunner {
     /// Registered test definitions.
     tests: Vec<PackageTest>,
@@ -168,7 +165,6 @@ pub struct TestRunner {
 #[cfg(feature = "alloc")]
 impl TestRunner {
     /// Create a new empty test runner.
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             tests: Vec::new(),
@@ -179,7 +175,6 @@ impl TestRunner {
     /// Add a test definition to the runner.
     ///
     /// Returns an error if the test definition is invalid.
-    #[allow(dead_code)]
     pub fn add_test(&mut self, test: PackageTest) -> Result<(), crate::error::KernelError> {
         test.validate()?;
         self.tests.push(test);
@@ -192,7 +187,6 @@ impl TestRunner {
     /// validates test definitions and creates placeholder `TestResult` entries
     /// with `TODO(user-space)` markers. When user-space process execution is
     /// available, this will spawn test processes and capture real output.
-    #[allow(dead_code)]
     pub fn run_all(&mut self) -> Vec<TestResult> {
         self.results.clear();
 
@@ -210,7 +204,6 @@ impl TestRunner {
     /// Run a single test by name and return its result.
     ///
     /// Returns `None` if no test with the given name is registered.
-    #[allow(dead_code)]
     pub fn run_single(&mut self, name: &str) -> Option<TestResult> {
         let test = self.tests.iter().find(|t| t.test_name == name)?;
         // TODO(user-space): Spawn process from test.command
@@ -220,25 +213,21 @@ impl TestRunner {
     }
 
     /// Return the number of registered tests.
-    #[allow(dead_code)]
     pub fn test_count(&self) -> usize {
         self.tests.len()
     }
 
     /// Return accumulated test results.
-    #[allow(dead_code)]
     pub fn results(&self) -> &[TestResult] {
         &self.results
     }
 
     /// Count how many tests passed.
-    #[allow(dead_code)]
     pub fn pass_count(&self) -> usize {
         self.results.iter().filter(|r| r.passed).count()
     }
 
     /// Count how many tests failed.
-    #[allow(dead_code)]
     pub fn fail_count(&self) -> usize {
         self.results.iter().filter(|r| !r.passed).count()
     }
@@ -256,7 +245,6 @@ impl Default for TestRunner {
 /// Looks up test definitions for the given package name and executes them
 /// through a `TestRunner`. Returns an empty list if the package has no tests.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn run_package_tests(package: &str) -> Vec<TestResult> {
     // TODO(user-space): Load test definitions from package metadata or
     // test manifest file at /usr/local/packages/<package>/tests.toml.
@@ -288,7 +276,6 @@ pub fn run_package_tests(package: &str) -> Vec<TestResult> {
 /// vulnerability tracking. This type is for pre-install package scanning.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[allow(dead_code)]
 pub enum ScanSeverity {
     /// Low-risk finding (informational).
     Low,
@@ -303,7 +290,6 @@ pub enum ScanSeverity {
 #[cfg(feature = "alloc")]
 impl ScanSeverity {
     /// Return a human-readable label.
-    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Low => "low",
@@ -317,7 +303,6 @@ impl ScanSeverity {
 /// Classification of scan pattern types.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum ScanPatternType {
     /// File path that accesses sensitive system locations.
     SuspiciousPath,
@@ -332,7 +317,6 @@ pub enum ScanPatternType {
 /// A pattern used to detect suspicious content in a package.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ScanPattern {
     /// Human-readable name for this pattern.
     pub name: String,
@@ -347,7 +331,6 @@ pub struct ScanPattern {
 /// A security finding produced by the package scanner.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct SecurityFinding {
     /// Severity of the finding.
     pub severity: ScanSeverity,
@@ -365,7 +348,6 @@ pub struct SecurityFinding {
 /// suspicious patterns before the package is installed. This is distinct
 /// from `repository::SecurityScanner` which operates at the repository level.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub struct PackageSecurityScanner {
     /// Registered scan patterns.
     patterns: Vec<ScanPattern>,
@@ -374,7 +356,6 @@ pub struct PackageSecurityScanner {
 #[cfg(feature = "alloc")]
 impl PackageSecurityScanner {
     /// Create a new scanner pre-loaded with default suspicious patterns.
-    #[allow(dead_code)]
     pub fn new() -> Self {
         let mut scanner = Self {
             patterns: Vec::new(),
@@ -384,13 +365,11 @@ impl PackageSecurityScanner {
     }
 
     /// Register an additional scan pattern.
-    #[allow(dead_code)]
     pub fn add_pattern(&mut self, pattern: ScanPattern) {
         self.patterns.push(pattern);
     }
 
     /// Return the number of registered patterns.
-    #[allow(dead_code)]
     pub fn pattern_count(&self) -> usize {
         self.patterns.len()
     }
@@ -399,7 +378,6 @@ impl PackageSecurityScanner {
     ///
     /// Checks each file path against all `ScanPatternType::SuspiciousPath`
     /// and `ScanPatternType::UnsafePattern` patterns.
-    #[allow(dead_code)]
     pub fn scan_paths(&self, file_paths: &[&str]) -> Vec<SecurityFinding> {
         let mut findings = Vec::new();
 
@@ -429,7 +407,6 @@ impl PackageSecurityScanner {
     ///
     /// Checks each requested capability against all
     /// `ScanPatternType::ExcessiveCapability` patterns.
-    #[allow(dead_code)]
     pub fn scan_capabilities(&self, requested_caps: &[&str]) -> Vec<SecurityFinding> {
         let mut findings = Vec::new();
 
@@ -455,7 +432,6 @@ impl PackageSecurityScanner {
     /// Scan file hashes against known-bad hash patterns.
     ///
     /// `file_hashes` is a list of `(file_path, hex_hash)` pairs.
-    #[allow(dead_code)]
     pub fn scan_hashes(&self, file_hashes: &[(&str, &str)]) -> Vec<SecurityFinding> {
         let mut findings = Vec::new();
 
@@ -479,7 +455,6 @@ impl PackageSecurityScanner {
     }
 
     /// Check if any finding is at or above the given severity threshold.
-    #[allow(dead_code)]
     pub fn has_findings_at_severity(
         findings: &[SecurityFinding],
         min_severity: ScanSeverity,

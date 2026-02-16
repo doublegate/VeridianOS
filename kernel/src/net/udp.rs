@@ -190,7 +190,7 @@ impl UdpSocket {
             });
         }
 
-        // TODO(phase4): Receive data from network stack socket buffer
+        // TODO(future): Receive data from network stack socket buffer
         Ok((0, self.local))
     }
 
@@ -296,13 +296,11 @@ pub fn process_packet(
     // Extract payload
     let payload = &data[UdpHeader::SIZE..header.length as usize];
     let src = SocketAddr::new(src_addr, header.source_port);
-    #[allow(unused_variables)]
-    let dst = SocketAddr::new(dst_addr, header.dest_port);
+    let _dst = SocketAddr::new(dst_addr, header.dest_port);
 
     // Find matching socket by destination port
     let mut sockets = UDP_SOCKETS.lock();
-    #[allow(unused_variables)]
-    for (socket_id, sock_buf) in sockets.iter_mut() {
+    for (_socket_id, sock_buf) in sockets.iter_mut() {
         if sock_buf.local_addr.port() == header.dest_port || sock_buf.local_addr.port() == 0 {
             // Check queue size
             if sock_buf.recv_queue.len() < sock_buf.max_queue_size {
@@ -316,14 +314,14 @@ pub fn process_packet(
                     "[UDP] Queued {} bytes from {:?} for socket {} (port {})",
                     payload.len(),
                     src,
-                    socket_id,
-                    dst.port()
+                    _socket_id,
+                    _dst.port()
                 );
 
                 return Ok(());
             } else {
                 #[cfg(feature = "net_debug")]
-                println!("[UDP] Socket {} queue full, dropping packet", socket_id);
+                println!("[UDP] Socket {} queue full, dropping packet", _socket_id);
                 return Err(KernelError::ResourceExhausted {
                     resource: "udp_queue",
                 });

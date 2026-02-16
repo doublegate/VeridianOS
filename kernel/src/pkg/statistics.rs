@@ -3,6 +3,12 @@
 //! Tracks package installation metrics, detects available updates by comparing
 //! installed vs available package versions, and checks installed packages
 //! against security advisories.
+//!
+//! NOTE: Many types in this module are forward declarations for user-space
+//! APIs. They will be exercised when user-space process execution is
+//! functional. See TODO(user-space) markers for specific activation points.
+
+#![allow(dead_code)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -20,7 +26,6 @@ use super::{PackageMetadata, Version};
 /// Per-package usage and installation statistics.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct PackageStats {
     /// Number of times this package has been installed
     pub install_count: u64,
@@ -35,7 +40,6 @@ pub struct PackageStats {
 #[cfg(feature = "alloc")]
 impl PackageStats {
     /// Create a new zeroed statistics entry.
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             install_count: 0,
@@ -55,7 +59,6 @@ impl Default for PackageStats {
 
 /// Collects and queries per-package statistics.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub struct StatsCollector {
     /// Per-package statistics keyed by package name.
     stats: BTreeMap<String, PackageStats>,
@@ -64,7 +67,6 @@ pub struct StatsCollector {
 #[cfg(feature = "alloc")]
 impl StatsCollector {
     /// Create a new empty stats collector.
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             stats: BTreeMap::new(),
@@ -72,7 +74,6 @@ impl StatsCollector {
     }
 
     /// Record a package installation event.
-    #[allow(dead_code)]
     pub fn record_install(&mut self, package_name: &str, timestamp: u64) {
         let entry = self
             .stats
@@ -83,7 +84,6 @@ impl StatsCollector {
     }
 
     /// Record a package update event.
-    #[allow(dead_code)]
     pub fn record_update(&mut self, package_name: &str, timestamp: u64) {
         let entry = self
             .stats
@@ -93,7 +93,6 @@ impl StatsCollector {
     }
 
     /// Record a package download event.
-    #[allow(dead_code)]
     pub fn record_download(&mut self, package_name: &str) {
         let entry = self
             .stats
@@ -103,14 +102,12 @@ impl StatsCollector {
     }
 
     /// Retrieve statistics for a specific package, if any.
-    #[allow(dead_code)]
     pub fn get_stats(&self, package_name: &str) -> Option<&PackageStats> {
         self.stats.get(package_name)
     }
 
     /// Return the top `n` most-installed packages sorted by install count
     /// (descending).
-    #[allow(dead_code)]
     pub fn get_most_installed(&self, n: usize) -> Vec<(&str, u64)> {
         let mut entries: Vec<(&str, u64)> = self
             .stats
@@ -123,7 +120,6 @@ impl StatsCollector {
     }
 
     /// Return the total number of tracked packages.
-    #[allow(dead_code)]
     pub fn total_packages(&self) -> usize {
         self.stats.len()
     }
@@ -143,7 +139,6 @@ impl Default for StatsCollector {
 /// Notification that an installed package has a newer version available.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct UpdateNotification {
     /// Package name
     pub package: String,
@@ -163,7 +158,6 @@ pub struct UpdateNotification {
 /// A notification is flagged as a security update if the available
 /// package's description contains "security" (case-insensitive).
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn check_for_updates(
     installed: &[PackageMetadata],
     available: &[PackageMetadata],
@@ -238,7 +232,6 @@ fn to_ascii_lower(b: u8) -> u8 {
 
 /// Severity level for a security advisory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[allow(dead_code)]
 pub enum AdvisorySeverity {
     /// Low impact
     Low,
@@ -254,7 +247,6 @@ pub enum AdvisorySeverity {
 /// packages.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct SecurityAdvisory {
     /// Advisory identifier (e.g. "VSA-2026-001")
     pub id: String,
@@ -273,7 +265,6 @@ pub struct SecurityAdvisory {
 /// Returns all advisories that affect at least one installed package (matched
 /// by name).
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn check_advisories(
     installed: &[PackageMetadata],
     advisories: &[SecurityAdvisory],

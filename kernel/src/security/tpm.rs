@@ -315,7 +315,7 @@ impl Tpm {
     /// emulation.
     #[cfg(target_arch = "x86_64")]
     fn try_detect_mmio(&self, _base: usize) -> Option<usize> {
-        // TODO: map the TPM MMIO page via the VMM before probing.
+        // TODO(future): Map the TPM MMIO page via the VMM before probing.
         // For now, skip the probe to avoid page faults on higher-half kernels
         // where physical address 0xFED40000 is not mapped.
         crate::println!("[TPM] x86_64 TPM MMIO probe skipped (page not mapped)");

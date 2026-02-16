@@ -157,25 +157,24 @@ impl VirtualMemoryManager {
     }
 
     /// Map a 2MB large page
-    #[allow(unused_variables)]
     fn map_large_page(
         &mut self,
-        virt: VirtualAddress,
-        phys: PhysicalAddress,
-        flags: PageFlags,
+        _virt: VirtualAddress,
+        _phys: PhysicalAddress,
+        _flags: PageFlags,
     ) -> Result<(), KernelError> {
         // For large pages, we need to set the page directory entry directly
         // This is architecture-specific
         #[cfg(target_arch = "x86_64")]
         {
             // Large page mappings use the HUGE flag
-            let _frame = FrameNumber::new(phys.as_u64() >> 21);
-            let _large_flags = flags | PageFlags::HUGE;
+            let _frame = FrameNumber::new(_phys.as_u64() >> 21);
+            let _large_flags = _flags | PageFlags::HUGE;
             // Would map at PD level instead of PT level
             println!(
                 "[VMM] Mapping large page 0x{:x} -> 0x{:x}",
-                virt.as_u64(),
-                phys.as_u64()
+                _virt.as_u64(),
+                _phys.as_u64()
             );
         }
 
@@ -183,8 +182,8 @@ impl VirtualMemoryManager {
         {
             println!(
                 "[VMM] Mapping large page 0x{:x} -> 0x{:x}",
-                virt.as_u64(),
-                phys.as_u64()
+                _virt.as_u64(),
+                _phys.as_u64()
             );
         }
 
@@ -192,23 +191,22 @@ impl VirtualMemoryManager {
     }
 
     /// Map a 1GB huge page
-    #[allow(unused_variables)]
     fn map_huge_page(
         &mut self,
-        virt: VirtualAddress,
-        phys: PhysicalAddress,
-        flags: PageFlags,
+        _virt: VirtualAddress,
+        _phys: PhysicalAddress,
+        _flags: PageFlags,
     ) -> Result<(), KernelError> {
         // For huge pages, we need to set the page directory pointer entry directly
         #[cfg(target_arch = "x86_64")]
         {
             // Huge page mappings at PDP level
-            let _frame = FrameNumber::new(phys.as_u64() >> 30);
-            let _huge_flags = flags | PageFlags::HUGE;
+            let _frame = FrameNumber::new(_phys.as_u64() >> 30);
+            let _huge_flags = _flags | PageFlags::HUGE;
             println!(
                 "[VMM] Mapping huge page 0x{:x} -> 0x{:x}",
-                virt.as_u64(),
-                phys.as_u64()
+                _virt.as_u64(),
+                _phys.as_u64()
             );
         }
 
@@ -216,8 +214,8 @@ impl VirtualMemoryManager {
         {
             println!(
                 "[VMM] Mapping huge page 0x{:x} -> 0x{:x}",
-                virt.as_u64(),
-                phys.as_u64()
+                _virt.as_u64(),
+                _phys.as_u64()
             );
         }
 

@@ -677,7 +677,9 @@ impl PackageManager {
         crate::println!("[PKG] Transaction committed ({} operations)", _op_count);
 
         // Persist to on-disk database
-        let _ = self.database.save();
+        if let Err(_e) = self.database.save() {
+            crate::println!("[PKG] Warning: failed to persist database: {:?}", _e);
+        }
         Ok(())
     }
 
@@ -1087,7 +1089,7 @@ fn extract_package_files(package_id: &str, data: &[u8]) -> PkgResult<()> {
 
     let install_base = alloc::format!("/usr/local/packages/{}", package_id);
 
-    #[allow(unused_variables)]
+    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
     for file_idx in 0..num_files {
         // Read path length
         if pos + 2 > data.len() {

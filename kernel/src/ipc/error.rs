@@ -45,7 +45,6 @@ pub enum IpcError {
 
 impl IpcError {
     /// Get a static string description of the error
-    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::InvalidCapability => "Invalid or revoked capability",

@@ -142,7 +142,13 @@ impl PtyMaster {
                 // Send SIGINT to controlling process
                 if let Some(pid) = *self.controller.read() {
                     let process_server = crate::services::process_server::get_process_server();
-                    let _ = process_server.send_signal(pid, 2); // SIGINT = 2
+                    if let Err(_e) = process_server.send_signal(pid, 2) {
+                        crate::println!(
+                            "[PTY] Warning: failed to send SIGINT to PID {}: {:?}",
+                            pid.0,
+                            _e
+                        );
+                    }
                 }
                 continue;
             }
@@ -165,7 +171,13 @@ impl PtyMaster {
         // Send SIGWINCH to controlling process
         if let Some(pid) = *self.controller.read() {
             let process_server = crate::services::process_server::get_process_server();
-            let _ = process_server.send_signal(pid, 28); // SIGWINCH = 28
+            if let Err(_e) = process_server.send_signal(pid, 28) {
+                crate::println!(
+                    "[PTY] Warning: failed to send SIGWINCH to PID {}: {:?}",
+                    pid.0,
+                    _e
+                );
+            }
         }
     }
 

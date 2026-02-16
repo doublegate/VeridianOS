@@ -254,7 +254,13 @@ fn signal_segv(info: &PageFaultInfo) -> Result<(), KernelError> {
         // Attempt to deliver SIGSEGV to the process.
         if let Some(process) = crate::process::current_process() {
             use crate::process::exit::signals::SIGSEGV;
-            let _ = crate::process::exit::kill_process(process.pid, SIGSEGV);
+            if let Err(_e) = crate::process::exit::kill_process(process.pid, SIGSEGV) {
+                kprintln!(
+                    "[MM] Warning: Failed to deliver SIGSEGV to pid {}: {:?}",
+                    process.pid,
+                    _e
+                );
+            }
         }
     }
 

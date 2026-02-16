@@ -3,6 +3,12 @@
 //! Provides pkg-config compatible metadata generation for installed packages,
 //! allowing build systems to discover compiler and linker flags required to
 //! use a given library.
+//!
+//! NOTE: Many types in this module are forward declarations for user-space
+//! APIs. They will be exercised when user-space process execution is
+//! functional. See TODO(user-space) markers for specific activation points.
+
+#![allow(dead_code)]
 
 #[cfg(feature = "alloc")]
 use alloc::{format, string::String, vec::Vec};
@@ -10,7 +16,6 @@ use alloc::{format, string::String, vec::Vec};
 /// A single include search path.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct IncludePath {
     /// Filesystem path to the include directory.
     pub path: String,
@@ -21,7 +26,6 @@ pub struct IncludePath {
 /// A library dependency.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct LibraryPath {
     /// Directory containing the library.
     pub path: String,
@@ -35,7 +39,6 @@ pub struct LibraryPath {
 /// installed library package.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct PkgConfig {
     /// Package name.
     pub name: String,
@@ -59,7 +62,6 @@ impl PkgConfig {
     ///
     /// The output follows the standard pkg-config format with `Name`,
     /// `Version`, `Description`, `Cflags`, and `Libs` fields.
-    #[allow(dead_code)]
     pub fn generate_pkg_config(&self) -> String {
         let sysroot = super::get_sysroot();
 
@@ -119,7 +121,6 @@ impl PkgConfig {
     /// In a full implementation this would query the VFS for `.pc` files under
     /// the sysroot. Currently returns built-in configurations for core
     /// VeridianOS libraries.
-    #[allow(dead_code)]
     pub fn find_package(name: &str) -> Option<PkgConfig> {
         let sysroot = super::get_sysroot();
         let triple = super::get_target_triple();
@@ -166,7 +167,6 @@ impl PkgConfig {
     }
 
     /// Create `IncludePath` entries from the stored include directories.
-    #[allow(dead_code)]
     pub fn include_paths(&self) -> Vec<IncludePath> {
         self.include_dirs
             .iter()
@@ -179,7 +179,6 @@ impl PkgConfig {
 
     /// Create `LibraryPath` entries from the stored library directories and
     /// names.
-    #[allow(dead_code)]
     pub fn library_paths(&self) -> Vec<LibraryPath> {
         let mut result = Vec::new();
         for dir in &self.lib_dirs {

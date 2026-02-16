@@ -201,7 +201,12 @@ pub fn init() -> Result<(), KernelError> {
     socket::init()?;
 
     // Register hardware network drivers
-    let _ = integration::register_drivers(); // Non-fatal if no hardware found
+    if let Err(_e) = integration::register_drivers() {
+        println!(
+            "[NET] Warning: driver registration failed (non-fatal): {:?}",
+            _e
+        );
+    }
 
     println!("[NET] Network stack initialized");
     Ok(())

@@ -29,7 +29,13 @@ pub fn tick() {
         unsafe {
             let time: u64;
             core::arch::asm!("rdtime {}", out(reg) time);
-            let _ = sbi::set_timer(time + interval);
+            let result = sbi::set_timer(time + interval);
+            if !result.is_ok() {
+                crate::println!(
+                    "[TIMER] Warning: SBI set_timer failed in tick handler: error {}",
+                    result.error
+                );
+            }
         }
     }
 

@@ -3,6 +3,12 @@
 //! Provides license detection from text, compatibility checking between
 //! license pairs, and dependency graph operations including reverse
 //! dependency lookup, circular dependency detection, and depth calculation.
+//!
+//! NOTE: Many types in this module are forward declarations for user-space
+//! APIs. They will be exercised when user-space process execution is
+//! functional. See TODO(user-space) markers for specific activation points.
+
+#![allow(dead_code)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -16,7 +22,6 @@ use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 /// Known open-source and proprietary license identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum License {
     /// MIT License
     MIT,
@@ -45,7 +50,6 @@ pub enum License {
 #[cfg(feature = "alloc")]
 impl License {
     /// Return the SPDX-style identifier string.
-    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MIT => "MIT",
@@ -63,7 +67,6 @@ impl License {
     }
 
     /// Parse a license from an SPDX-style identifier string.
-    #[allow(dead_code)]
     pub fn from_spdx(s: &str) -> Self {
         match s.trim() {
             "MIT" => Self::MIT,
@@ -81,13 +84,11 @@ impl License {
     }
 
     /// Return whether this license is copyleft (restricts derivative works).
-    #[allow(dead_code)]
     pub fn is_copyleft(self) -> bool {
         matches!(self, Self::GPL2 | Self::GPL3 | Self::LGPL21 | Self::MPL2)
     }
 
     /// Return whether this license is permissive.
-    #[allow(dead_code)]
     pub fn is_permissive(self) -> bool {
         matches!(
             self,
@@ -101,7 +102,6 @@ impl License {
 /// Uses keyword matching to identify the license. Returns `License::Unknown`
 /// if no known license pattern is matched.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn detect_license(text: &str) -> License {
     // Normalize to lowercase for case-insensitive matching
     let lower = text.to_lowercase();
@@ -183,7 +183,6 @@ pub fn detect_license(text: &str) -> License {
 /// A conflict between two package licenses.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct LicenseConflict {
     /// Name of the first package.
     pub package_a: String,
@@ -202,7 +201,6 @@ pub struct LicenseConflict {
 /// Determines whether two licenses can coexist in the same dependency tree
 /// based on their distribution requirements.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub struct LicenseCompatibility;
 
 #[cfg(feature = "alloc")]
@@ -215,7 +213,6 @@ impl LicenseCompatibility {
     /// - Permissive licenses (MIT, BSD, ISC, Apache2) are compatible with
     ///   everything except Proprietary.
     /// - Unknown licenses are treated as compatible (best-effort).
-    #[allow(dead_code)]
     pub fn is_compatible(a: &License, b: &License) -> bool {
         // Unknown is treated as compatible (best-effort)
         if *a == License::Unknown || *b == License::Unknown {
@@ -247,7 +244,6 @@ impl LicenseCompatibility {
 /// Returns `Ok(())` if all pairs are compatible, or `Err` with a list of
 /// conflicts found.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn check_compatibility(deps: &[(String, License)]) -> Result<(), Vec<LicenseConflict>> {
     let mut conflicts = Vec::new();
 
@@ -292,7 +288,6 @@ pub fn check_compatibility(deps: &[(String, License)]) -> Result<(), Vec<License
 /// Supports reverse dependency lookup, circular dependency detection, and
 /// dependency depth calculation.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub struct DependencyGraph {
     /// Adjacency list: package -> list of its dependencies.
     nodes: BTreeMap<String, Vec<String>>,
@@ -301,7 +296,6 @@ pub struct DependencyGraph {
 #[cfg(feature = "alloc")]
 impl DependencyGraph {
     /// Create a new empty dependency graph.
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             nodes: BTreeMap::new(),
@@ -309,7 +303,6 @@ impl DependencyGraph {
     }
 
     /// Add a package node to the graph (with no dependencies initially).
-    #[allow(dead_code)]
     pub fn add_package(&mut self, name: &str) {
         self.nodes
             .entry(String::from(name))
@@ -319,7 +312,6 @@ impl DependencyGraph {
     /// Add a dependency edge: `package` depends on `dependency`.
     ///
     /// Both nodes are created if they do not already exist.
-    #[allow(dead_code)]
     pub fn add_dependency(&mut self, package: &str, dependency: &str) {
         self.nodes
             .entry(String::from(package))
@@ -333,7 +325,6 @@ impl DependencyGraph {
 
     /// Find all packages that depend on the given package (reverse
     /// dependencies).
-    #[allow(dead_code)]
     pub fn find_reverse_deps(&self, package: &str) -> Vec<String> {
         let mut reverse = Vec::new();
         for (node, deps) in &self.nodes {
@@ -348,7 +339,6 @@ impl DependencyGraph {
     ///
     /// Returns a list of cycles, where each cycle is a list of package names
     /// forming the cycle. An empty result means no cycles exist.
-    #[allow(dead_code)]
     pub fn detect_circular_deps(&self) -> Vec<Vec<String>> {
         let mut cycles = Vec::new();
         let mut visited: BTreeMap<String, bool> = BTreeMap::new();
@@ -408,7 +398,6 @@ impl DependencyGraph {
     /// The depth is the longest path from any root (a package with no
     /// reverse dependencies) to this package. Returns 0 if the package
     /// is a root or is not in the graph.
-    #[allow(dead_code)]
     pub fn dependency_depth(&self, package: &str) -> usize {
         if !self.nodes.contains_key(package) {
             return 0;
@@ -433,7 +422,6 @@ impl DependencyGraph {
     }
 
     /// Find root nodes (packages that no other package depends on).
-    #[allow(dead_code)]
     pub fn find_roots(&self) -> Vec<String> {
         let mut roots = Vec::new();
         for node in self.nodes.keys() {
@@ -500,19 +488,16 @@ impl DependencyGraph {
     }
 
     /// Return the total number of packages in the graph.
-    #[allow(dead_code)]
     pub fn package_count(&self) -> usize {
         self.nodes.len()
     }
 
     /// Return the total number of dependency edges.
-    #[allow(dead_code)]
     pub fn edge_count(&self) -> usize {
         self.nodes.values().map(|deps| deps.len()).sum()
     }
 
     /// Return the direct dependencies of a package.
-    #[allow(dead_code)]
     pub fn dependencies(&self, package: &str) -> Option<&[String]> {
         self.nodes.get(package).map(|v| v.as_slice())
     }

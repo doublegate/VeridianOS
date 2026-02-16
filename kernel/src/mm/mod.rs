@@ -273,7 +273,13 @@ pub fn translate_address(
 /// Free a physical frame
 pub fn free_frame(frame: PhysicalAddress) {
     let frame_num = FrameNumber::new(frame.as_u64() / FRAME_SIZE as u64);
-    let _ = FRAME_ALLOCATOR.lock().free_frames(frame_num, 1);
+    if let Err(_e) = FRAME_ALLOCATOR.lock().free_frames(frame_num, 1) {
+        kprintln!(
+            "[MM] Warning: Failed to free frame at {:#x}: {:?}",
+            frame.as_u64(),
+            _e
+        );
+    }
 }
 
 /// Placeholder types for IPC integration

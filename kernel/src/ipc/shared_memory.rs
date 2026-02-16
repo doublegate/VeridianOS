@@ -423,9 +423,14 @@ impl SharedMemoryManager {
             let num_frames = region.size / page_size;
             let frame_number =
                 crate::mm::FrameNumber::new(region.physical_base.as_u64() / page_size as u64);
-            let _ = crate::mm::FRAME_ALLOCATOR
+            if let Err(_e) = crate::mm::FRAME_ALLOCATOR
                 .lock()
-                .free_frames(frame_number, num_frames);
+                .free_frames(frame_number, num_frames)
+            {
+                crate::kprintln!(
+                    "[IPC] Warning: Failed to free physical frames for shared memory region"
+                );
+            }
 
             Ok(())
         } else {

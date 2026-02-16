@@ -13,7 +13,7 @@ use alloc::{string::String, vec, vec::Vec};
 
 #[allow(unused_imports)]
 use crate::{
-    elf::{ElfError, ElfLoader},
+    elf::ElfLoader,
     error::KernelError,
     fs::get_vfs,
     println,
@@ -142,12 +142,11 @@ pub fn load_user_program(
                 println!("[LOADER] Loading interpreter: {}", interpreter);
 
                 // Load the dynamic linker/interpreter
-                #[allow(unused_variables)]
-                let interp_entry = load_dynamic_linker(process, interpreter, &binary)?;
+                let _interp_entry = load_dynamic_linker(process, interpreter, &binary)?;
 
                 // When dynamic linking is used, execution starts at the interpreter
                 // The interpreter will then load the main program
-                println!("[LOADER] Interpreter loaded, entry: 0x{:x}", interp_entry);
+                println!("[LOADER] Interpreter loaded, entry: 0x{:x}", _interp_entry);
             }
         }
 
@@ -280,7 +279,6 @@ fn load_dynamic_linker(
 
 /// Set up the auxiliary vector for dynamic linking
 #[cfg(feature = "alloc")]
-#[allow(unused_variables)]
 fn setup_auxiliary_vector(
     _process: &crate::process::Process,
     main_binary: &crate::elf::ElfBinary,
@@ -300,7 +298,7 @@ fn setup_auxiliary_vector(
     const AT_EGID: u64 = 14; // Effective group ID
 
     // Build auxiliary vector entries
-    let auxv: Vec<(u64, u64)> = vec![
+    let _auxv: Vec<(u64, u64)> = vec![
         (AT_PAGESZ, 0x1000),                           // Page size
         (AT_BASE, interp_base),                        // Interpreter base
         (AT_ENTRY, main_binary.entry_point),           // Main program entry
@@ -320,7 +318,7 @@ fn setup_auxiliary_vector(
 
     println!(
         "[LOADER] Auxiliary vector prepared with {} entries",
-        auxv.len()
+        _auxv.len()
     );
 
     Ok(())

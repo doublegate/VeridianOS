@@ -26,7 +26,7 @@ const VIRTIO_NET_MODERN_DEVICE_ID: u16 = 0x1041;
 pub fn register_drivers() -> Result<(), KernelError> {
     println!("[NET-INTEGRATION] Scanning for network devices...");
 
-    #[allow(unused_variables)]
+    #[allow(unused_variables)] // Used on x86_64/riscv64; AArch64 println! is no-op
     let mut device_count = 0;
 
     // Only x86_64 has PCI support
@@ -41,7 +41,12 @@ pub fn register_drivers() -> Result<(), KernelError> {
             let bus = pci_bus.lock();
 
             // Ensure PCI enumeration is complete
-            let _ = bus.enumerate_devices();
+            if let Err(_e) = bus.enumerate_devices() {
+                crate::println!(
+                    "[NET-INTEGRATION] Warning: PCI enumeration failed: {:?}",
+                    _e
+                );
+            }
 
             // Search for Intel E1000 network cards
             let e1000_devices = bus.find_devices_by_id(INTEL_VENDOR_ID, E1000_DEVICE_ID);
@@ -142,7 +147,7 @@ fn try_register_e1000(bar_address: u64) -> Result<(), KernelError> {
             let name = driver.name();
             let mac = driver.mac_address();
 
-            // TODO(phase4): Register E1000 with network device registry
+            // TODO(future): Register E1000 with network device registry
 
             println!(
                 "[NET-INTEGRATION] E1000 initialized: {} (MAC: \
@@ -173,7 +178,7 @@ fn try_register_virtio_net(bar_address: u64) -> Result<(), KernelError> {
             let _name = driver.name();
             let _mac = driver.mac_address();
 
-            // TODO(phase4): Register VirtIO-Net with network device registry
+            // TODO(future): Register VirtIO-Net with network device registry
 
             println!(
                 "[NET-INTEGRATION] VirtIO-Net initialized: {} (MAC: \

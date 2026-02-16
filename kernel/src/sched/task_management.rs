@@ -35,10 +35,10 @@ pub fn create_task(
     let pid = super::process_compat::alloc_pid();
     let tid = task::alloc_tid();
 
-    // TODO: Allocate stack
+    // TODO(future): Allocate stack
     let stack_base = 0; // Placeholder
 
-    // TODO: Create page table
+    // TODO(future): Create page table
     let page_table = 0; // Placeholder
 
     // Create task
@@ -53,7 +53,7 @@ pub fn create_task(
 
     new_task.priority = priority;
 
-    // TODO: Add to task table
+    // TODO(future): Add to task table
     // For now, just enqueue it
     // let task_ptr = NonNull::new(&mut new_task as *mut _).unwrap();
     // SCHEDULER.enqueue(task_ptr);
@@ -121,13 +121,13 @@ pub fn exit_task(exit_code: i32) {
             // Clean up scheduler data structures
             // Remove from ready queue if present
             if let Some(_ready_link) = (*task_mut).ready_link {
-                // TODO: Remove from ready queue
+                // TODO(future): Remove from ready queue
                 (*task_mut).ready_link = None;
             }
 
             // Remove from wait queue if blocked
             if let Some(_wait_link) = (*task_mut).wait_link {
-                // TODO: Remove from wait queue
+                // TODO(future): Remove from wait queue
                 (*task_mut).wait_link = None;
             }
 

@@ -3,6 +3,12 @@
 //! Provides toolchain information, build target configuration, and sysroot
 //! management for building VeridianOS packages. These types define the SDK
 //! contract for user-space library and application development.
+//!
+//! NOTE: Many types in this module are forward declarations for user-space
+//! APIs. They will be exercised when user-space process execution is
+//! functional. See TODO(user-space) markers for specific activation points.
+
+#![allow(dead_code)]
 
 #[cfg(feature = "alloc")]
 use alloc::{string::String, vec, vec::Vec};
@@ -13,13 +19,11 @@ pub mod syscall_api;
 pub mod toolchain;
 
 /// Return the sysroot path for the VeridianOS SDK.
-#[allow(dead_code)]
 pub fn get_sysroot() -> &'static str {
     "/usr/veridian"
 }
 
 /// Return the target triple for the current architecture.
-#[allow(dead_code)]
 pub fn get_target_triple() -> &'static str {
     #[cfg(target_arch = "x86_64")]
     {
@@ -37,7 +41,6 @@ pub fn get_target_triple() -> &'static str {
 
 /// Build target specification.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum BuildTarget {
     /// Build for the host architecture.
     Native,
@@ -49,7 +52,6 @@ pub enum BuildTarget {
 /// Information about the active toolchain.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ToolchainInfo {
     /// Path to the compiler binary.
     pub compiler_path: String,
@@ -66,7 +68,6 @@ pub struct ToolchainInfo {
 #[cfg(feature = "alloc")]
 impl ToolchainInfo {
     /// Return toolchain information for the current architecture.
-    #[allow(dead_code)]
     pub fn current() -> Self {
         let triple = String::from(get_target_triple());
         let sysroot = String::from(get_sysroot());
@@ -84,7 +85,6 @@ impl ToolchainInfo {
 /// SDK configuration controlling compiler and linker flags.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct SdkConfig {
     /// Default C compiler flags.
     pub default_cflags: Vec<String>,
@@ -101,13 +101,11 @@ pub struct SdkConfig {
 #[cfg(feature = "alloc")]
 impl SdkConfig {
     /// Create a new SDK configuration with sensible defaults.
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::for_target(BuildTarget::Native)
     }
 
     /// Create an SDK configuration for a specific build target.
-    #[allow(dead_code)]
     pub fn for_target(target: BuildTarget) -> Self {
         let sysroot = String::from(get_sysroot());
 

@@ -3,6 +3,12 @@
 //! Type-safe wrappers defining the VeridianOS system call interface. These are
 //! contract definitions for user-space libraries; the actual implementations
 //! use architecture-specific syscall instructions at runtime.
+//!
+//! NOTE: Many types in this module are forward declarations for user-space
+//! APIs. They will be exercised when user-space process execution is
+//! functional. See TODO(user-space) markers for specific activation points.
+
+#![allow(dead_code)]
 
 #[cfg(feature = "alloc")]
 use alloc::string::String;
@@ -10,7 +16,6 @@ use core::fmt;
 
 /// Error codes returned by VeridianOS system calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum SyscallError {
     /// One or more arguments are invalid.
     InvalidArgument,
@@ -61,13 +66,11 @@ impl fmt::Display for SyscallError {
 }
 
 /// Result type for system call operations.
-#[allow(dead_code)]
 pub type SyscallResult<T> = Result<T, SyscallError>;
 
 /// Basic package information returned by `sys_pkg_query`.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct PackageInfo {
     /// Package name.
     pub name: String,
@@ -127,7 +130,6 @@ pub struct PackageInfo {
 ///     }
 /// }
 /// ```
-#[allow(dead_code)]
 pub fn sys_fork() -> SyscallResult<u64> {
     // TODO(user-space): Requires user-space process execution.
     // Implementation will use architecture-specific syscall instruction
@@ -196,7 +198,6 @@ pub fn sys_fork() -> SyscallResult<u64> {
 ///     let exit_code = sys_wait(pid).expect("wait failed");
 /// }
 /// ```
-#[allow(dead_code)]
 pub fn sys_exec(_path: &str, _args: &[&str]) -> SyscallResult<()> {
     // TODO(user-space): Requires user-space process execution.
     // Implementation will use architecture-specific syscall instruction
@@ -237,7 +238,6 @@ pub fn sys_exec(_path: &str, _args: &[&str]) -> SyscallResult<()> {
 ///
 /// // Exit with error code (this line is unreachable)
 /// ```
-#[allow(dead_code)]
 pub fn sys_exit(_code: i32) -> ! {
     // TODO(user-space): Requires user-space process execution.
     // Implementation will use architecture-specific syscall instruction
@@ -300,7 +300,6 @@ pub fn sys_exit(_code: i32) -> ! {
 ///     // exit_code == 42
 /// }
 /// ```
-#[allow(dead_code)]
 pub fn sys_wait(_pid: u64) -> SyscallResult<i32> {
     // TODO(user-space): Requires user-space process execution.
     // Implementation will use architecture-specific syscall instruction
@@ -332,7 +331,6 @@ pub fn sys_wait(_pid: u64) -> SyscallResult<i32> {
 /// let my_pid = sys_getpid();
 /// // my_pid is the unique identifier for this process
 /// ```
-#[allow(dead_code)]
 pub fn sys_getpid() -> u64 {
     // TODO(user-space): Requires user-space process execution.
     // Implementation will use architecture-specific syscall instruction
@@ -400,7 +398,6 @@ pub fn sys_getpid() -> u64 {
 /// // Allocate a 64 KiB guard-page-bounded region
 /// let region = sys_mmap(0, 65536, prot_rw).expect("mmap failed");
 /// ```
-#[allow(dead_code)]
 pub fn sys_mmap(_addr: usize, _len: usize, _prot: u32) -> SyscallResult<usize> {
     // TODO(user-space): Requires user-space process execution.
     // Implementation will use architecture-specific syscall instruction
@@ -451,7 +448,6 @@ pub fn sys_mmap(_addr: usize, _len: usize, _prot: u32) -> SyscallResult<usize> {
 /// sys_munmap(addr, 4096).expect("munmap failed");
 /// // Accessing `addr` after this point causes a page fault
 /// ```
-#[allow(dead_code)]
 pub fn sys_munmap(_addr: usize, _len: usize) -> SyscallResult<()> {
     // TODO(user-space): Requires user-space process execution.
     // Implementation will use architecture-specific syscall instruction
@@ -515,7 +511,6 @@ pub fn sys_munmap(_addr: usize, _len: usize) -> SyscallResult<()> {
 /// let message = b"hello from sender";
 /// sys_ipc_send(endpoint, message).expect("ipc send failed");
 /// ```
-#[allow(dead_code)]
 pub fn sys_ipc_send(_endpoint: u64, _msg: &[u8]) -> SyscallResult<()> {
     // TODO(user-space): Requires user-space process execution.
     // Implementation will use architecture-specific syscall instruction
@@ -574,7 +569,6 @@ pub fn sys_ipc_send(_endpoint: u64, _msg: &[u8]) -> SyscallResult<()> {
 /// let received = &buf[..bytes];
 /// // Process the received message data
 /// ```
-#[allow(dead_code)]
 pub fn sys_ipc_receive(_endpoint: u64, _buf: &mut [u8]) -> SyscallResult<usize> {
     // TODO(user-space): Requires user-space process execution.
     // Implementation will use architecture-specific syscall instruction
@@ -646,7 +640,6 @@ pub fn sys_ipc_receive(_endpoint: u64, _buf: &mut [u8]) -> SyscallResult<usize> 
 /// sys_close(fd).expect("close failed");
 /// sys_close(fd_new).expect("close failed");
 /// ```
-#[allow(dead_code)]
 pub fn sys_open(_path: &str, _flags: u32) -> SyscallResult<u64> {
     // TODO(user-space): Requires user-space process execution.
     // Implementation will use architecture-specific syscall instruction
@@ -704,7 +697,6 @@ pub fn sys_open(_path: &str, _flags: u32) -> SyscallResult<u64> {
 /// let data = &buf[..bytes];
 /// sys_close(fd).expect("close failed");
 /// ```
-#[allow(dead_code)]
 pub fn sys_read(_fd: u64, _buf: &mut [u8]) -> SyscallResult<usize> {
     // TODO(user-space): Requires user-space process execution.
     // Implementation will use architecture-specific syscall instruction
@@ -764,7 +756,6 @@ pub fn sys_read(_fd: u64, _buf: &mut [u8]) -> SyscallResult<usize> {
 /// let stdout_fd = 1;
 /// sys_write(stdout_fd, b"Hello, VeridianOS!\n").expect("write to stdout failed");
 /// ```
-#[allow(dead_code)]
 pub fn sys_write(_fd: u64, _data: &[u8]) -> SyscallResult<usize> {
     // TODO(user-space): Requires user-space process execution.
     // Implementation will use architecture-specific syscall instruction
@@ -812,7 +803,6 @@ pub fn sys_write(_fd: u64, _data: &[u8]) -> SyscallResult<usize> {
 /// let result = sys_close(fd);
 /// assert!(result.is_err());
 /// ```
-#[allow(dead_code)]
 pub fn sys_close(_fd: u64) -> SyscallResult<()> {
     // TODO(user-space): Requires user-space process execution.
     // Implementation will use architecture-specific syscall instruction
@@ -875,7 +865,6 @@ pub fn sys_close(_fd: u64) -> SyscallResult<()> {
 /// // Create a read-write-grant capability
 /// let cap_rwg = sys_cap_create(0x01 | 0x02 | 0x08).expect("cap_create failed");
 /// ```
-#[allow(dead_code)]
 pub fn sys_cap_create(_rights: u64) -> SyscallResult<u64> {
     // TODO(user-space): Requires user-space process execution.
     // Implementation will use architecture-specific syscall instruction
@@ -930,7 +919,6 @@ pub fn sys_cap_create(_rights: u64) -> SyscallResult<u64> {
 /// let target_pid: u64 = 42;
 /// sys_cap_grant(cap, target_pid).expect("cap_grant failed");
 /// ```
-#[allow(dead_code)]
 pub fn sys_cap_grant(_cap: u64, _target: u64) -> SyscallResult<()> {
     // TODO(user-space): Requires user-space process execution.
     // Implementation will use architecture-specific syscall instruction
@@ -982,7 +970,6 @@ pub fn sys_cap_grant(_cap: u64, _target: u64) -> SyscallResult<()> {
 /// // Revoke the capability -- process 42's derived copy is also revoked
 /// sys_cap_revoke(cap).expect("cap_revoke failed");
 /// ```
-#[allow(dead_code)]
 pub fn sys_cap_revoke(_cap: u64) -> SyscallResult<()> {
     // TODO(user-space): Requires user-space process execution.
     // Implementation will use architecture-specific syscall instruction
@@ -1051,7 +1038,6 @@ pub fn sys_cap_revoke(_cap: u64) -> SyscallResult<()> {
 /// // Install with version constraint
 /// sys_pkg_install("openssl>=3.0.0").expect("install failed");
 /// ```
-#[allow(dead_code)]
 pub fn sys_pkg_install(_name: &str) -> SyscallResult<()> {
     // TODO(user-space): Requires user-space process execution.
     // Implementation will use architecture-specific syscall instruction
@@ -1104,7 +1090,6 @@ pub fn sys_pkg_install(_name: &str) -> SyscallResult<()> {
 /// // Remove a package (config files are preserved)
 /// sys_pkg_remove("libfoo").expect("remove failed");
 /// ```
-#[allow(dead_code)]
 pub fn sys_pkg_remove(_name: &str) -> SyscallResult<()> {
     // TODO(user-space): Requires user-space process execution.
     // Implementation will use architecture-specific syscall instruction
@@ -1160,7 +1145,6 @@ pub fn sys_pkg_remove(_name: &str) -> SyscallResult<()> {
 /// }
 /// ```
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn sys_pkg_query(_name: &str) -> SyscallResult<PackageInfo> {
     // TODO(user-space): Requires user-space process execution.
     // Implementation will use architecture-specific syscall instruction

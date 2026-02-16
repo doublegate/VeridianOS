@@ -216,7 +216,14 @@ pub fn exec_inherit_capabilities(
                     } else {
                         entry.rights
                     };
-                    let _ = new_space.insert(entry.capability, entry.object.clone(), rights);
+                    if let Err(_e) =
+                        new_space.insert(entry.capability, entry.object.clone(), rights)
+                    {
+                        crate::println!(
+                            "[CAP] Warning: failed to inherit capability during exec: {:?}",
+                            _e
+                        );
+                    }
                     _inherited += 1;
                 }
             }

@@ -9,6 +9,8 @@
 //! Currently the generator validates manifests and produces placeholder package
 //! bytes.
 
+#![allow(dead_code)]
+
 #[cfg(feature = "alloc")]
 use alloc::{format, string::String, vec::Vec};
 
@@ -20,7 +22,6 @@ use crate::error::{KernelError, KernelResult};
 
 /// Identifies a category of files within an SDK package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum SdkComponent {
     /// C/C++ header files for the VeridianOS API.
     Headers,
@@ -36,7 +37,6 @@ pub enum SdkComponent {
     Examples,
 }
 
-#[allow(dead_code)]
 impl SdkComponent {
     /// Return a short identifier for this component.
     pub fn as_str(&self) -> &'static str {
@@ -73,7 +73,6 @@ impl SdkComponent {
 /// to be considered valid.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct SdkManifest {
     /// SDK version string (semver).
     pub version: String,
@@ -86,7 +85,6 @@ pub struct SdkManifest {
 }
 
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 impl SdkManifest {
     /// Create a new empty SDK manifest with the given version.
     pub fn new(version: &str) -> Self {
@@ -144,7 +142,6 @@ impl SdkManifest {
 /// the paths to include.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct SdkPackageSpec {
     /// The SDK manifest describing version, targets, and components.
     pub manifest: SdkManifest,
@@ -159,7 +156,6 @@ pub struct SdkPackageSpec {
 }
 
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 impl SdkPackageSpec {
     /// Create a new package spec from a manifest with empty path lists.
     pub fn new(manifest: SdkManifest) -> Self {
@@ -207,7 +203,6 @@ impl SdkPackageSpec {
 /// currently produces a placeholder package containing only the manifest
 /// metadata and generated pkg-config content.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn generate_sdk(spec: &SdkPackageSpec) -> KernelResult<Vec<u8>> {
     // Step 1: Validate the manifest
     spec.manifest.validate()?;
@@ -265,7 +260,6 @@ pub fn generate_sdk(spec: &SdkPackageSpec) -> KernelResult<Vec<u8>> {
 /// Produces output compatible with the `pkg-config` tool, defining the
 /// prefix, include, and library paths for a named component.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn generate_pkg_config_content(
     name: &str,
     version: &str,

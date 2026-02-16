@@ -32,7 +32,9 @@ pub fn init() {
     network::init();
     console::init();
     storage::init();
-    let _ = gpu::init();
+    if let Err(_e) = gpu::init() {
+        crate::println!("[DRIVERS] Warning: GPU init failed: {:?}", _e);
+    }
 
     crate::println!("[DRIVERS] Device drivers initialized");
 }

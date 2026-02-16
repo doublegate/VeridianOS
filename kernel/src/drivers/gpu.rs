@@ -224,7 +224,9 @@ impl GpuDriver {
 
     /// Clear the screen
     pub fn clear(&mut self, color: Color) {
-        let _ = self.fill_rect(0, 0, self.width, self.height, color);
+        if let Err(_e) = self.fill_rect(0, 0, self.width, self.height, color) {
+            crate::println!("[GPU] Warning: fill_rect failed during clear: {:?}", _e);
+        }
     }
 
     /// Convert Color to pixel value based on format

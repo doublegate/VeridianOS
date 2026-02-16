@@ -58,7 +58,7 @@ impl NumaTopology {
 
     /// Detect NUMA topology from hardware
     pub fn detect() -> Self {
-        // TODO: Query ACPI SRAT/SLIT tables for actual topology
+        // TODO(future): Query ACPI SRAT/SLIT tables for actual topology
         // For now, assume single-node UMA system
 
         let mut topo = Self::new();
@@ -237,7 +237,7 @@ impl NumaScheduler {
             return 0;
         }
 
-        // TODO: Query actual CPU load from scheduler
+        // TODO(phase5): Query actual CPU load from scheduler
         // For now, round-robin within node
         cpus[0]
     }
@@ -285,7 +285,7 @@ impl NumaScheduler {
 
 /// Detect number of CPUs in the system
 fn detect_cpu_count() -> u32 {
-    // TODO: Query ACPI MADT table for actual CPU count
+    // TODO(future): Query ACPI MADT table for actual CPU count
     // For now, assume 8 CPUs
     8
 }
@@ -298,7 +298,9 @@ pub fn init() {
     let topology = NumaTopology::detect();
     let scheduler = NumaScheduler::new(topology);
 
-    let _ = NUMA_SCHEDULER.set(scheduler);
+    if NUMA_SCHEDULER.set(scheduler).is_err() {
+        crate::kprintln!("[NUMA] Warning: NUMA scheduler already initialized, skipping");
+    }
 
     crate::println!("[NUMA] Initialized NUMA-aware scheduler");
 }

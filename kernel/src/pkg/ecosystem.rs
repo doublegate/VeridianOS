@@ -4,6 +4,12 @@
 //! applications, and architecture-specific driver packages. These are
 //! specifications describing what the ecosystem WILL contain, not compiled
 //! software.
+//!
+//! NOTE: Many types in this module are forward declarations for user-space
+//! APIs. They will be exercised when user-space process execution is
+//! functional. See TODO(user-space) markers for specific activation points.
+
+#![allow(dead_code)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -18,7 +24,6 @@ use alloc::{string::String, vec, vec::Vec};
 /// A named set of related packages (e.g. "base-system", "dev-tools").
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct PackageSet {
     /// Set name (e.g. "base-system")
     pub name: String,
@@ -31,7 +36,6 @@ pub struct PackageSet {
 /// Definition of a single package within a set.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct PackageDefinition {
     /// Package name
     pub name: String,
@@ -45,7 +49,6 @@ pub struct PackageDefinition {
 
 /// Functional categories for packages in the ecosystem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum PackageCategory {
     /// Core base system packages (kernel, init, shell)
     Base,
@@ -114,7 +117,6 @@ fn pkgset(name: &str, description: &str, packages: Vec<PackageDefinition>) -> Pa
 /// - `dev-tools`: compiler toolchain, build tools
 /// - `system-libs`: core libraries
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn get_base_system_packages() -> Vec<PackageSet> {
     vec![
         pkgset(
@@ -253,7 +255,6 @@ pub fn get_base_system_packages() -> Vec<PackageSet> {
 /// - `network-tools`: networking utilities
 /// - `system-monitor`: system monitoring
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn get_essential_apps() -> Vec<PackageSet> {
     vec![
         pkgset(
@@ -332,7 +333,6 @@ pub fn get_essential_apps() -> Vec<PackageSet> {
 ///
 /// Supported architecture strings: `"x86_64"`, `"aarch64"`, `"riscv64"`.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn get_driver_packages(arch: &str) -> Vec<PackageSet> {
     let mut sets = Vec::new();
 
