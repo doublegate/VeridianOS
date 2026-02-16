@@ -111,11 +111,35 @@ pub fn halt() -> ! {
     }
 }
 
-/// Enable hardware interrupts. Will be used once interrupt handlers are fully
-/// configured.
-#[allow(dead_code)]
+/// Enable hardware interrupts.
 pub fn enable_interrupts() {
     x86_64::instructions::interrupts::enable();
+}
+
+/// Unmask the keyboard IRQ (IRQ1) on PIC1.
+///
+/// Reads the current PIC1 data mask, clears bit 1, and writes it back.
+/// This allows the keyboard interrupt (vector 33) to fire.
+pub fn enable_keyboard_irq() {
+    // SAFETY: Reading and writing the PIC1 data port (0x21) to unmask
+    // IRQ1 (keyboard). This is a standard PIC operation.
+    unsafe {
+        use x86_64::instructions::port::Port;
+        let mut pic1_data = Port::<u8>::new(0x21);
+        let mask = pic1_data.read();
+        pic1_data.write(mask & !0x02); // Clear bit 1 (IRQ1 = keyboard)
+    }
+}
+
+/// Unmask the timer IRQ (IRQ0) on PIC1.
+pub fn enable_timer_irq() {
+    // SAFETY: Reading and writing PIC1 data port to unmask IRQ0.
+    unsafe {
+        use x86_64::instructions::port::Port;
+        let mut pic1_data = Port::<u8>::new(0x21);
+        let mask = pic1_data.read();
+        pic1_data.write(mask & !0x01); // Clear bit 0 (IRQ0 = timer)
+    }
 }
 
 pub fn disable_interrupts() -> impl Drop {

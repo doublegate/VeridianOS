@@ -938,85 +938,20 @@ impl Shell {
                     }
                 }
                 None => {
-                    // No input available — yield to scheduler briefly
+                    // No input available — yield CPU briefly.
+                    // We use spin_loop() rather than hlt/wfi because the APIC
+                    // is initialized and takes over interrupt routing from the
+                    // PIC, so PIC-based timer/keyboard IRQs may not fire.
+                    // Input is polled from serial + keyboard ring buffer.
                     core::hint::spin_loop();
                 }
             }
         }
     }
 
-    /// Read a single byte from the architecture-specific serial/UART input.
+    /// Read a single byte from any available input source (keyboard + serial).
     fn read_char() -> Option<u8> {
-        #[cfg(target_arch = "x86_64")]
-        {
-            // Read from COM1 serial port (0x3F8)
-            // Check if data is available (Line Status Register bit 0)
-            let status: u8;
-            unsafe {
-                core::arch::asm!(
-                    "in al, dx",
-                    out("al") status,
-                    in("dx") 0x3FDu16,
-                    options(nomem, nostack)
-                );
-            }
-            if (status & 1) != 0 {
-                let data: u8;
-                unsafe {
-                    core::arch::asm!(
-                        "in al, dx",
-                        out("al") data,
-                        in("dx") 0x3F8u16,
-                        options(nomem, nostack)
-                    );
-                }
-                Some(data)
-            } else {
-                None
-            }
-        }
-
-        #[cfg(target_arch = "aarch64")]
-        {
-            // Read from PL011 UART at 0x0900_0000 (QEMU virt)
-            const UART_BASE: usize = 0x0900_0000;
-            const UART_FR: usize = UART_BASE + 0x18; // Flag register
-            const UART_DR: usize = UART_BASE; // Data register (offset 0x00)
-
-            // SAFETY: Reading MMIO registers for PL011 UART. The QEMU virt
-            // machine maps UART at this address. volatile_read prevents
-            // compiler reordering.
-            unsafe {
-                let flags = core::ptr::read_volatile(UART_FR as *const u32);
-                if (flags & (1 << 4)) == 0 {
-                    // RXFE bit clear = data available
-                    let data = core::ptr::read_volatile(UART_DR as *const u32);
-                    Some((data & 0xFF) as u8)
-                } else {
-                    None
-                }
-            }
-        }
-
-        #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-        {
-            // Read via SBI console_getchar (legacy extension)
-            let result: isize;
-            unsafe {
-                core::arch::asm!(
-                    "li a7, 0x02",  // SBI_CONSOLE_GETCHAR
-                    "ecall",
-                    out("a0") result,
-                    out("a7") _,
-                    options(nomem)
-                );
-            }
-            if result >= 0 {
-                Some(result as u8)
-            } else {
-                None
-            }
-        }
+        crate::drivers::input::read_char()
     }
 
     /// Handle a signal delivered to the shell or its foreground job.

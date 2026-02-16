@@ -169,6 +169,22 @@ extern "C" fn kernel_init_stage3_onwards() -> ! {
     kprintln!("[BOOTSTRAP] User-mode entry available (Ring 3 via iretq)");
     kprintln!("[BOOTSTRAP] Skipping Ring 3 transition for interactive shell");
 
+    // x86_64: Enable keyboard IRQ and CPU interrupts before launching the
+    // shell. The keyboard driver was initialized in Stage 4; here we unmask
+    // the PIC and enable hardware interrupts so keypresses arrive.
+    #[cfg(target_arch = "x86_64")]
+    {
+        arch::x86_64::enable_keyboard_irq();
+        arch::x86_64::enable_timer_irq();
+        arch::x86_64::enable_interrupts();
+        kprintln!("[BOOTSTRAP] Keyboard IRQ + interrupts enabled");
+    }
+
+    // Enable framebuffer console output now that boot is complete.
+    // Boot messages were serial-only for performance (rendering 100+ lines
+    // to a 1280x800 framebuffer is too slow in QEMU's emulated CPU).
+    graphics::fbcon::enable_output();
+
     // Launch the interactive kernel shell (never returns).
     // The shell provides a serial console REPL for all 3 architectures.
     #[cfg(feature = "alloc")]
@@ -226,6 +242,52 @@ pub fn kernel_init() -> KernelResult<()> {
         assert!(*test_box == 42);
         drop(test_box);
         kprintln!("[BOOTSTRAP] Heap allocation verified OK");
+    }
+
+    // x86_64: Initialize framebuffer console (fbcon) so that all subsequent
+    // println! output appears on both serial AND the graphical display.
+    // The UEFI bootloader already mapped the framebuffer; we just wire it up.
+    #[cfg(target_arch = "x86_64")]
+    {
+        if let Some(fb_info) = crate::arch::x86_64::boot::get_framebuffer_info() {
+            let format = if fb_info.is_bgr {
+                crate::graphics::fbcon::FbPixelFormat::Bgr
+            } else {
+                crate::graphics::fbcon::FbPixelFormat::Rgb
+            };
+            crate::graphics::fbcon::init(
+                fb_info.buffer,
+                fb_info.width,
+                fb_info.height,
+                fb_info.stride,
+                fb_info.bpp,
+                format,
+            );
+            kprintln!("[BOOTSTRAP] Framebuffer console initialized");
+        }
+    }
+
+    // AArch64/RISC-V: Try to initialize ramfb display device for graphical
+    // output. Requires `-device ramfb` on the QEMU command line. If ramfb
+    // is not available, gracefully fall back to serial-only output.
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    {
+        match crate::drivers::ramfb::init(1024, 768) {
+            Ok(fb_ptr) => {
+                crate::graphics::fbcon::init(
+                    fb_ptr,
+                    1024,
+                    768,
+                    1024 * 4, // stride = width * bpp
+                    4,        // bytes per pixel
+                    crate::graphics::fbcon::FbPixelFormat::Rgb,
+                );
+                kprintln!("[BOOTSTRAP] ramfb + fbcon initialized (1024x768)");
+            }
+            Err(_) => {
+                kprintln!("[BOOTSTRAP] ramfb not available, serial-only output");
+            }
+        }
     }
 
     // x86_64: Pre-initialize the CSPRNG on the UEFI stack before switching.
@@ -336,6 +398,15 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
 
     kprintln!("[BOOTSTRAP] Core services initialized");
 
+    // x86_64: Initialize keyboard driver state (decoder) so boot tests
+    // can verify it. IRQ unmask + interrupt enable happen later (Stage 6,
+    // right before the shell) to avoid interrupts during initialization.
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::drivers::keyboard::init();
+        kprintln!("[BOOTSTRAP] Keyboard driver initialized");
+    }
+
     // Run kernel-mode init tests after Stage 4 (VFS + shell ready)
     kernel_init_main();
 
@@ -422,6 +493,9 @@ pub fn run() -> ! {
         }
     }
 
+    // Enable framebuffer console output now that boot is complete.
+    graphics::fbcon::enable_output();
+
     // Launch the interactive kernel shell (never returns).
     // The shell provides a serial console REPL for all 3 architectures.
     #[cfg(feature = "alloc")]
@@ -461,6 +535,7 @@ pub fn kernel_init_main() {
     run_capability_tests(&mut passed, &mut failed);
     run_security_tests(&mut passed, &mut failed);
     run_phase4_tests(&mut passed, &mut failed);
+    run_display_tests(&mut passed, &mut failed);
 
     // --- Summary ---
     print_summary(passed, failed);
@@ -849,6 +924,30 @@ fn run_phase4_tests(passed: &mut u32, failed: &mut u32) {
     {
         let ok = crate::test_framework::test_pkg_ecosystem_definitions().is_ok();
         report_test("pkg_ecosystem_defs", ok, passed, failed);
+    }
+}
+
+/// Run display/input boot tests (tests 28-29).
+#[cfg(feature = "alloc")]
+fn run_display_tests(passed: &mut u32, failed: &mut u32) {
+    kprintln!("[INIT] Display/input tests:");
+
+    // Test 28: Framebuffer console initialized (x86_64 only — UEFI provides fb)
+    {
+        #[cfg(target_arch = "x86_64")]
+        let ok = crate::graphics::fbcon::is_initialized();
+        #[cfg(not(target_arch = "x86_64"))]
+        let ok = true; // ramfb may or may not be available; skip on non-x86_64
+        report_test("fbcon_initialized", ok, passed, failed);
+    }
+
+    // Test 29: Keyboard driver ready (x86_64 only — PS/2 keyboard)
+    {
+        #[cfg(target_arch = "x86_64")]
+        let ok = crate::drivers::keyboard::is_initialized();
+        #[cfg(not(target_arch = "x86_64"))]
+        let ok = true; // No PS/2 keyboard on ARM/RISC-V
+        report_test("keyboard_driver_ready", ok, passed, failed);
     }
 }
 

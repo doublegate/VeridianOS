@@ -25,6 +25,8 @@ lazy_static! {
         }
         // Add timer interrupt handler (IRQ0 = interrupt 32)
         idt[32].set_handler_fn(timer_interrupt_handler);
+        // Add keyboard interrupt handler (IRQ1 = interrupt 33)
+        idt[33].set_handler_fn(keyboard_interrupt_handler);
         idt
     };
 }
@@ -146,5 +148,23 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
         use x86_64::instructions::port::Port;
         let mut pic_command: Port<u8> = Port::new(0x20);
         pic_command.write(0x20); // EOI command
+    }
+}
+
+extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    // Read scancode from PS/2 data port (0x60) and forward to keyboard driver.
+    // This handler must NOT call println! or acquire any spinlock used by
+    // the serial/fbcon output path.
+    // SAFETY: Port 0x60 is the PS/2 keyboard data port. Reading it clears
+    // the keyboard controller's output buffer.
+    let scancode: u8 = unsafe {
+        use x86_64::instructions::port::Port;
+        Port::<u8>::new(0x60).read()
+    };
+    crate::drivers::keyboard::handle_scancode(scancode);
+    // SAFETY: EOI to PIC1 (port 0x20) acknowledges the keyboard interrupt.
+    unsafe {
+        use x86_64::instructions::port::Port;
+        Port::<u8>::new(0x20).write(0x20);
     }
 }

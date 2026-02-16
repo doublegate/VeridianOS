@@ -60,6 +60,43 @@ pub fn early_boot_init() {
     }
 }
 
+/// Framebuffer information extracted from BootInfo.
+pub struct BootFramebufferInfo {
+    pub buffer: *mut u8,
+    pub width: usize,
+    pub height: usize,
+    /// Stride in bytes (bytes per scanline)
+    pub stride: usize,
+    /// Bytes per pixel (typically 4 for BGRA)
+    pub bpp: usize,
+    /// Pixel format (BGR or RGB)
+    pub is_bgr: bool,
+}
+
+/// Extract framebuffer information from the UEFI boot info.
+///
+/// Returns `None` if BootInfo is unavailable or has no framebuffer.
+/// The returned pointer is already a valid virtual address (the bootloader
+/// maps the framebuffer with `Mapping::Dynamic`).
+pub fn get_framebuffer_info() -> Option<BootFramebufferInfo> {
+    // SAFETY: BOOT_INFO is a static mut written once during early boot
+    // (in the entry_point! callback) and read-only afterwards. We are in
+    // single-threaded kernel init context (Stage 2+, before scheduler).
+    #[allow(static_mut_refs)]
+    let boot_info = unsafe { BOOT_INFO.as_mut()? };
+    let fb = boot_info.framebuffer.as_mut()?;
+    let info = fb.info();
+    let buffer_ptr = fb.buffer_mut().as_mut_ptr();
+    Some(BootFramebufferInfo {
+        buffer: buffer_ptr,
+        width: info.width,
+        height: info.height,
+        stride: info.stride * info.bytes_per_pixel,
+        bpp: info.bytes_per_pixel,
+        is_bgr: matches!(info.pixel_format, bootloader_api::info::PixelFormat::Bgr),
+    })
+}
+
 // I/O port functions: delegate to the canonical implementations in
 // the parent module (arch/x86_64/mod.rs) to avoid duplication.
 use super::{inb, outb};

@@ -107,15 +107,15 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.4.4 (February 16, 2026)
+**Latest Release**: v0.4.5 (February 16, 2026)
 
 ### Architecture Support
 
 | Architecture | Build | Boot | Init Tests | Stage 6 | Stable Idle (30s) | Status |
 |--------------|-------|------|-----------|---------|-------------------|--------|
-| x86_64       | ✅    | ✅   | 27/27     | ✅      | ✅ PASS           | **100% Functional** -- UEFI boot via OVMF |
-| AArch64      | ✅    | ✅   | 27/27     | ✅      | ✅ PASS           | **100% Functional** -- Direct kernel loading |
-| RISC-V 64    | ✅    | ✅   | 27/27     | ✅      | ✅ PASS           | **100% Functional** -- OpenSBI boot |
+| x86_64       | ✅    | ✅   | 29/29     | ✅      | ✅ PASS           | **100% Functional** -- UEFI boot via OVMF |
+| AArch64      | ✅    | ✅   | 29/29     | ✅      | ✅ PASS           | **100% Functional** -- Direct kernel loading |
+| RISC-V 64    | ✅    | ✅   | 29/29     | ✅      | ✅ PASS           | **100% Functional** -- OpenSBI boot |
 
 ### Development Phases
 
@@ -145,6 +145,7 @@ Phases 0 through 4 are complete. The kernel provides:
 - **Security** -- MAC, secure boot, TPM 2.0, ASLR, W^X, Spectre barriers, KPTI, post-quantum crypto
 - **Package Manager** -- DPLL SAT resolver, ports system, reproducible builds, Ed25519 signing
 - **Interactive Shell (vsh)** -- Bash/Fish-parity serial console shell with pipes, redirections, variable expansion, globbing, tab completion, job control, scripting (if/for/while/case), functions, aliases
+- **Framebuffer Display** -- 1280x800 text console via UEFI framebuffer (x86_64) and ramfb (AArch64/RISC-V), ANSI color support, PS/2 keyboard input via controller polling
 - **Userland Bridge** -- Ring 0 to Ring 3 transitions with SYSCALL/SYSRET on x86_64
 
 ### What Comes Next

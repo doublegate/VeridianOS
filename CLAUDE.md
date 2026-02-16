@@ -55,23 +55,35 @@ You MUST first build the UEFI disk image, then boot from it.
 # Step 1: Build (creates UEFI disk image automatically)
 ./build-kernel.sh x86_64 dev
 
-# Step 2: Run with OVMF firmware + disk image
+# Step 2: Run with OVMF firmware + disk image (serial only)
 qemu-system-x86_64 \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
-    -drive format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
+    -drive id=disk0,if=none,format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
+    -device ide-hd,drive=disk0 \
     -serial stdio -display none -m 256M
+
+# With framebuffer display (1280x800 BGR via UEFI GOP):
+# Remove -display none to see graphical output. Dual output: serial + framebuffer.
+# PS/2 keyboard works via polling (port 0x64/0x60). Input from both serial and keyboard.
+qemu-system-x86_64 \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
+    -drive id=disk0,if=none,format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
+    -device ide-hd,drive=disk0 \
+    -serial stdio -m 256M
 
 # With debug exit device (for test scripts):
 qemu-system-x86_64 \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
-    -drive format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
+    -drive id=disk0,if=none,format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
+    -device ide-hd,drive=disk0 \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -serial stdio -display none -m 256M
 
 # With GDB debugging (paused, connect on :1234):
 qemu-system-x86_64 \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
-    -drive format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
+    -drive id=disk0,if=none,format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
+    -device ide-hd,drive=disk0 \
     -serial stdio -display none -m 256M -s -S
 ```
 
@@ -79,8 +91,11 @@ qemu-system-x86_64 \
 - **DO NOT** use `-kernel target/.../veridian-kernel` — fails with "Error loading uncompressed kernel without PVH ELF Note"
 - **DO NOT** use `-bios` instead of `-drive if=pflash` — different semantics
 - **DO NOT** pass positional arguments after flags — QEMU 10.2 treats them as implicit drives, causing "drive with bus=0, unit=0 (index=0) exists"
+- **DO NOT** use `-drive format=raw,file=...` without explicit drive ID — on QEMU 10.2 this can conflict with the pflash drive. Use `-drive id=disk0,if=none,format=raw,file=... -device ide-hd,drive=disk0` instead.
 - **DO NOT** use `-cdrom` alongside `-drive` on the same bus/index
 - **DO NOT** use `cargo run` for x86_64 — the runner in .cargo/config.toml is `bootimage runner` which is not the correct flow
+
+**Keyboard input**: PS/2 keyboard works via polling (ports 0x64/0x60). The APIC takes over from the PIC so IRQ-based keyboard does not work, but polling does. Input is accepted from both the QEMU graphical window (keyboard) and the serial terminal simultaneously.
 
 #### AArch64 (direct kernel boot)
 
@@ -90,10 +105,15 @@ AArch64 boots directly with `-kernel` flag. No disk image or firmware needed.
 # Step 1: Build
 ./build-kernel.sh aarch64 dev
 
-# Step 2: Run
+# Step 2a: Run (serial only)
 qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \
     -kernel target/aarch64-unknown-none/debug/veridian-kernel \
     -serial stdio -display none
+
+# Step 2b: Run with ramfb display (graphical framebuffer console):
+qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \
+    -kernel target/aarch64-unknown-none/debug/veridian-kernel \
+    -device ramfb -serial stdio
 
 # With GDB debugging:
 qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \
@@ -109,10 +129,15 @@ RISC-V boots with OpenSBI firmware (provided by QEMU) + kernel.
 # Step 1: Build
 ./build-kernel.sh riscv64 dev
 
-# Step 2: Run (OpenSBI loads automatically with -bios default)
+# Step 2a: Run (serial only, OpenSBI loads automatically with -bios default)
 qemu-system-riscv64 -M virt -m 256M -bios default \
     -kernel target/riscv64gc-unknown-none-elf/debug/veridian-kernel \
     -serial stdio -display none
+
+# Step 2b: Run with ramfb display (graphical framebuffer console):
+qemu-system-riscv64 -M virt -m 256M -bios default \
+    -kernel target/riscv64gc-unknown-none-elf/debug/veridian-kernel \
+    -device ramfb -serial stdio
 
 # With GDB debugging:
 qemu-system-riscv64 -M virt -m 256M -bios default \
@@ -126,16 +151,17 @@ All three architectures should boot through 6 stages and print:
 ```
 BOOTOK
 ```
-followed by 27/27 tests passing and a second `BOOTOK` after Stage 6 (user space transition).
+followed by 29/29 tests passing (including `fbcon_initialized` and `keyboard_driver_ready`) and a second `BOOTOK` after Stage 6 (user space transition).
 x86_64 additionally shows "Attempting user-mode entry..." (Ring 3 via SYSCALL/SYSRET).
+With graphical display enabled, output appears on both the serial terminal and the QEMU framebuffer window simultaneously.
 
 #### Quick Reference Table
 
-| Arch | Boot Method | Firmware | Kernel Flag | Image |
-|------|------------|----------|-------------|-------|
-| x86_64 | UEFI disk | OVMF.4m.fd via `-drive if=pflash` | N/A (use `-drive format=raw,file=...uefi.img`) | `target/x86_64-veridian/debug/veridian-uefi.img` |
-| AArch64 | Direct | None | `-kernel` | `target/aarch64-unknown-none/debug/veridian-kernel` |
-| RISC-V | OpenSBI | `-bios default` | `-kernel` | `target/riscv64gc-unknown-none-elf/debug/veridian-kernel` |
+| Arch | Boot Method | Firmware | Kernel Flag | Image | Display |
+|------|------------|----------|-------------|-------|---------|
+| x86_64 | UEFI disk | OVMF.4m.fd via `-drive if=pflash` | N/A (use `-drive id=disk0,if=none,...` + `-device ide-hd,drive=disk0`) | `target/x86_64-veridian/debug/veridian-uefi.img` | UEFI GOP framebuffer (1280x800 BGR); remove `-display none` |
+| AArch64 | Direct | None | `-kernel` | `target/aarch64-unknown-none/debug/veridian-kernel` | Add `-device ramfb` for graphical display |
+| RISC-V | OpenSBI | `-bios default` | `-kernel` | `target/riscv64gc-unknown-none-elf/debug/veridian-kernel` | Add `-device ramfb` for graphical display |
 
 ### Testing
 
@@ -262,13 +288,13 @@ Currently implementing in phases:
 | Area | Status |
 |------|--------|
 | **Repository** | <https://github.com/doublegate/VeridianOS> |
-| **Latest Release** | v0.4.4 (February 16, 2026) - Shell usability fixes, RISC-V ELF loading crash fix, VFS population |
+| **Latest Release** | v0.4.5 (February 16, 2026) - Framebuffer display, PS/2 keyboard input, graphics infrastructure |
 | **Build** | ✅ All 3 architectures compile, zero warnings |
-| **Boot** | ✅ All 3 architectures Stage 6 BOOTOK, 27/27 tests |
+| **Boot** | ✅ All 3 architectures Stage 6 BOOTOK, 29/29 tests (fbcon + keyboard driver) |
 | **CI/CD** | ✅ GitHub Actions 100% pass rate |
 | **Documentation** | ✅ 25+ guides, GitHub Pages, mdBook, Rustdoc |
 
-**Previous Releases**: v0.4.3, v0.4.2, v0.4.1, v0.4.0, v0.3.9, v0.3.8, v0.3.7, v0.3.6, v0.3.5, v0.3.4, v0.3.3, v0.3.2, v0.3.1, v0.3.0, v0.2.5, v0.2.1, v0.2.0, v0.1.0
+**Previous Releases**: v0.4.4, v0.4.3, v0.4.2, v0.4.1, v0.4.0, v0.3.9, v0.3.8, v0.3.7, v0.3.6, v0.3.5, v0.3.4, v0.3.3, v0.3.2, v0.3.1, v0.3.0, v0.2.5, v0.2.1, v0.2.0, v0.1.0
 
 ## Implementation Status
 

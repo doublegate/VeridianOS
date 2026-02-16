@@ -6,9 +6,12 @@
 pub mod console;
 pub mod e1000;
 pub mod gpu;
+pub mod input;
+pub mod keyboard;
 pub mod network;
 pub mod nvme;
 pub mod pci;
+pub mod ramfb;
 pub mod storage;
 pub mod usb;
 pub mod virtio_net;

@@ -1,3 +1,75 @@
+## [0.4.5] - 2026-02-16
+
+### Framebuffer Display, PS/2 Keyboard Input, and Graphics Infrastructure
+
+Adds framebuffer-based text console output and keyboard input so the shell works without serial. On x86_64, the UEFI-provided 1280x800 framebuffer is wired to a new fbcon text renderer with ANSI color support. PS/2 keyboard input works via direct controller polling (bypassing APIC/PIC routing). AArch64 and RISC-V gain a ramfb display driver via QEMU's fw_cfg interface. The `print!` macro now dual-outputs to both serial and framebuffer. Two new boot tests verify display and keyboard initialization.
+
+5 new kernel source files (+2,208 lines), 10 modified files (+237/-91 lines). Total: ~2,354 net new lines.
+
+---
+
+### Added
+
+#### Framebuffer Console (2 new files, +1,707 lines)
+
+- **`kernel/src/graphics/font8x16.rs`** (1,213 lines) -- VGA ROM 8x16 bitmap font
+  - `pub const FONT_8X16: [[u8; 16]; 256]` -- Complete 256-glyph character set (~4KB static data)
+  - Full ASCII printable range (0x20-0x7E) plus box-drawing characters
+  - `pub fn glyph(ch: u8) -> &'static [u8; 16]` accessor
+
+- **`kernel/src/graphics/fbcon.rs`** (494 lines) -- Framebuffer text console with ANSI support
+  - `FramebufferConsole` struct: renders 8x16 glyphs onto pixel framebuffer
+  - For 1280x800 display: 160 columns x 50 rows of text
+  - Optimized `write_pixel()`: single u32 write per pixel (not 4 volatile byte writes)
+  - Optimized `scroll_up()`: `core::ptr::copy()` for scroll + `write_bytes` memset for clearing
+  - `FBCON_OUTPUT_ENABLED` AtomicBool: boot messages serial-only, enabled before shell launch
+  - ANSI escape code support: `\x1b[30m`-`\x1b[37m` foreground, `\x1b[40m`-`\x1b[47m` background, `\x1b[0m` reset, `\x1b[2J` clear, `\x1b[H` cursor home
+  - `impl core::fmt::Write` for `write!()`/`writeln!()` integration
+  - `pub fn is_initialized() -> bool` for boot test
+
+#### PS/2 Keyboard Driver (1 new file, +145 lines)
+
+- **`kernel/src/drivers/keyboard.rs`** (145 lines) -- PS/2 keyboard driver with lock-free ring buffer
+  - `KeyBuffer`: `[u8; 256]` SPSC ring buffer with `AtomicUsize` head/tail
+  - Uses `pc-keyboard` crate (already in Cargo.toml) for scancode decoding
+  - `pub fn handle_scancode(scancode: u8)` -- called from polling path and IRQ handler
+  - `pub fn read_key() -> Option<u8>` -- non-blocking read from ring buffer
+  - `pub fn is_initialized() -> bool` -- for boot test
+
+#### Input Multiplexer (1 new file, +149 lines)
+
+- **`kernel/src/drivers/input.rs`** (149 lines) -- Unified character input from keyboard and serial
+  - `pub fn read_char() -> Option<u8>` -- checks all input sources per architecture
+  - x86_64: polls PS/2 controller (port 0x64/0x60), then keyboard ring buffer, then serial COM1
+  - AArch64: PL011 UART at 0x09000000
+  - RISC-V: SBI console_getchar (legacy extension 0x02)
+  - PS/2 polling bypasses APIC/PIC interrupt routing issue
+
+#### ramfb Display Driver (1 new file, +207 lines)
+
+- **`kernel/src/drivers/ramfb.rs`** (207 lines) -- QEMU ramfb virtual display for AArch64/RISC-V
+  - `FwCfg` struct: MMIO-based fw_cfg access at 0x09020000
+  - `RamfbConfig` packed struct: addr, fourcc, flags, width, height, stride
+  - `pub fn init(width: u32, height: u32) -> Result<*mut u8, KernelError>` -- configures ramfb via fw_cfg
+  - Requires `-device ramfb` on QEMU command line
+
+### Changed
+
+- **Dual-output `print!` macro** (print.rs) -- x86_64 `print!`/`println!` now output to both serial AND framebuffer console. `_fbcon_print()` silently returns if fbcon not initialized or output disabled
+- **Deferred fbcon rendering** (bootstrap.rs) -- `FBCON_OUTPUT_ENABLED` starts false; all boot messages go serial-only. `enable_output()` called just before shell launch to avoid rendering 100+ boot log lines to the 1280x800 framebuffer (too slow in QEMU's emulated CPU)
+- **Shell input unified** (shell/mod.rs) -- Replaced per-architecture inline serial reads with `crate::drivers::input::read_char()` delegation. Reduced shell/mod.rs by ~70 lines
+- **Keyboard IRQ handler registered** (idt.rs) -- Vector 33 keyboard interrupt handler at IDT, reads port 0x60 and sends EOI. PIC IRQ1 unmasked in bootstrap
+- **BootInfo framebuffer access** (boot.rs) -- New `get_framebuffer_info()` extracts UEFI framebuffer pointer, dimensions, stride, pixel format from bootloader BootInfo
+- **PIC IRQ unmasking** (arch/x86_64/mod.rs) -- `enable_keyboard_irq()` and `enable_timer_irq()` unmask PIC IRQ1 and IRQ0. `enable_interrupts()` wrapper for `sti`
+
+### Build Verification
+
+- x86_64: Stage 6 BOOTOK, 29/29 tests, zero warnings, `root@veridian:/#` prompt
+- AArch64: Stage 6 BOOTOK, 29/29 tests, zero warnings, `root@veridian:/#` prompt
+- RISC-V: Stage 6 BOOTOK, 29/29 tests, zero warnings, `root@veridian:/#` prompt
+
+---
+
 ## [0.4.4] - 2026-02-16
 
 ### Shell Usability and Boot Stability Fixes

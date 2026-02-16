@@ -11,13 +11,13 @@
 //! bug. The `kprintln!` macro handles arch dispatch internally,
 //! eliminating the need for per-call-site `cfg(target_arch)` blocks.
 
-// x86_64 implementation
+// x86_64 implementation — dual output: serial + framebuffer console
 #[cfg(target_arch = "x86_64")]
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => ({
-        // Skip VGA for now due to early boot issues, only use serial
         $crate::serial::_serial_print(format_args!($($arg)*));
+        $crate::graphics::fbcon::_fbcon_print(format_args!($($arg)*));
     });
 }
 
