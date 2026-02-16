@@ -28,31 +28,26 @@ macro_rules! println {
     ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
 }
 
-// AArch64 implementation - severely limited due to LLVM bug
+// AArch64 implementation - uses DirectUartWriter (assembly-based byte output)
+// to bypass LLVM loop-compilation bug. The write_str() implementation calls
+// uart_write_bytes_asm() which is a pure assembly loop, so LLVM's optimizer
+// cannot miscompile the critical byte-output path. The core::fmt machinery
+// drives the formatting but each write_str() call goes through safe assembly.
 #[cfg(target_arch = "aarch64")]
 #[macro_export]
 macro_rules! print {
-    ($s:literal) => {{
-        // Placeholder - real printing must use uart_write_str
-        // due to LLVM bug that causes hangs with any loops/iterators
-    }};
-    ($($arg:tt)*) => {{
-        // Cannot support formatting on AArch64 due to LLVM bug
-    }};
+    ($($arg:tt)*) => ({
+        use core::fmt::Write;
+        let mut _w = $crate::arch::aarch64::direct_uart::DirectUartWriter;
+        let _ = _w.write_fmt(format_args!($($arg)*));
+    });
 }
 
 #[cfg(target_arch = "aarch64")]
 #[macro_export]
 macro_rules! println {
-    () => {{
-        // Placeholder - use direct_uart for newlines
-    }};
-    ($s:literal) => {{
-        // Placeholder - use direct_uart for actual output
-    }};
-    ($($arg:tt)*) => {{
-        // Cannot support formatting on AArch64 due to LLVM bug
-    }};
+    () => ($crate::print!("\n"));
+    ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
 }
 
 // RISC-V implementation

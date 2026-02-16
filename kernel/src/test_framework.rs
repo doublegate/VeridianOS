@@ -1035,6 +1035,251 @@ pub fn test_pkg_ecosystem_definitions() -> Result<(), KernelError> {
     Ok(())
 }
 
+// ===== Shell Infrastructure Tests =====
+
+/// Test ANSI escape sequence parser.
+///
+/// Feeds ESC[A (arrow up) and ESC[B (arrow down) byte sequences
+/// into the parser and verifies correct event output.
+#[allow(dead_code)]
+pub fn test_shell_ansi_parser() -> Result<(), KernelError> {
+    use crate::services::shell::ansi::{AnsiEvent, AnsiParser};
+
+    let mut parser = AnsiParser::new();
+
+    // Feed ESC[A (arrow up) byte by byte
+    let r1 = parser.feed(0x1B); // ESC
+    let r2 = parser.feed(b'[');
+    let r3 = parser.feed(b'A');
+
+    // Only the last byte should produce an event
+    if r1.is_some() || r2.is_some() {
+        return Err(KernelError::InvalidState {
+            expected: "no event for partial escape sequence",
+            actual: "event emitted too early",
+        });
+    }
+    match r3 {
+        Some(AnsiEvent::ArrowUp) => {}
+        _ => {
+            return Err(KernelError::InvalidState {
+                expected: "ArrowUp event",
+                actual: "wrong or missing event",
+            });
+        }
+    }
+
+    // Feed ESC[B (arrow down)
+    parser.feed(0x1B);
+    parser.feed(b'[');
+    match parser.feed(b'B') {
+        Some(AnsiEvent::ArrowDown) => {}
+        _ => {
+            return Err(KernelError::InvalidState {
+                expected: "ArrowDown event",
+                actual: "wrong or missing event",
+            });
+        }
+    }
+
+    // Regular character should pass through immediately
+    match parser.feed(b'x') {
+        Some(AnsiEvent::Char(b'x')) => {}
+        _ => {
+            return Err(KernelError::InvalidState {
+                expected: "Char('x') event",
+                actual: "wrong or missing event",
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Test shell variable expansion.
+///
+/// Verifies that `$VAR`, `${VAR}`, `${VAR:-default}`, `$?`, and tilde
+/// expansion work correctly.
+#[cfg(feature = "alloc")]
+#[allow(dead_code)]
+pub fn test_shell_variable_expansion() -> Result<(), KernelError> {
+    use alloc::{collections::BTreeMap, string::String};
+
+    use crate::services::shell::expand::expand_variables;
+
+    let mut env = BTreeMap::new();
+    env.insert(String::from("HOME"), String::from("/root"));
+    env.insert(String::from("USER"), String::from("admin"));
+
+    // Simple variable expansion
+    let result = expand_variables("hello $USER", &env, 0);
+    if !result.contains("admin") {
+        return Err(KernelError::InvalidState {
+            expected: "hello admin",
+            actual: "variable not expanded",
+        });
+    }
+
+    // Braced variable with default
+    let result = expand_variables("${MISSING:-fallback}", &env, 0);
+    if !result.contains("fallback") {
+        return Err(KernelError::InvalidState {
+            expected: "fallback value",
+            actual: "default not applied",
+        });
+    }
+
+    // Tilde expansion
+    let result = expand_variables("~/docs", &env, 0);
+    if !result.contains("/root") {
+        return Err(KernelError::InvalidState {
+            expected: "/root/docs",
+            actual: "tilde not expanded",
+        });
+    }
+
+    Ok(())
+}
+
+/// Test shell glob pattern matching.
+///
+/// Verifies that `*`, `?`, and `[abc]` patterns match correctly
+/// against test strings.
+#[allow(dead_code)]
+pub fn test_shell_glob_match() -> Result<(), KernelError> {
+    use crate::services::shell::glob::glob_match;
+
+    // Star matches any sequence
+    if !glob_match("*.txt", "hello.txt") {
+        return Err(KernelError::InvalidState {
+            expected: "*.txt matches hello.txt",
+            actual: "no match",
+        });
+    }
+
+    // Question mark matches single char
+    if !glob_match("?.rs", "a.rs") {
+        return Err(KernelError::InvalidState {
+            expected: "?.rs matches a.rs",
+            actual: "no match",
+        });
+    }
+    if glob_match("?.rs", "ab.rs") {
+        return Err(KernelError::InvalidState {
+            expected: "?.rs should NOT match ab.rs",
+            actual: "false match",
+        });
+    }
+
+    // Character class
+    if !glob_match("[abc].rs", "b.rs") {
+        return Err(KernelError::InvalidState {
+            expected: "[abc].rs matches b.rs",
+            actual: "no match",
+        });
+    }
+
+    // No match
+    if glob_match("*.txt", "hello.rs") {
+        return Err(KernelError::InvalidState {
+            expected: "*.txt should NOT match hello.rs",
+            actual: "false match",
+        });
+    }
+
+    Ok(())
+}
+
+/// Test kernel pipe create and read/write roundtrip.
+///
+/// Creates a pipe via `create_pipe()`, writes data to the writer end,
+/// reads it back from the reader end, and verifies data integrity.
+#[cfg(feature = "alloc")]
+#[allow(dead_code)]
+pub fn test_shell_pipe_roundtrip() -> Result<(), KernelError> {
+    use crate::fs::pipe::create_pipe;
+
+    let (reader, writer) = create_pipe()?;
+
+    // Write some data
+    let data = b"hello pipe";
+    let written = writer.write(data)?;
+    if written != data.len() {
+        return Err(KernelError::InvalidState {
+            expected: "wrote all bytes",
+            actual: "partial write",
+        });
+    }
+
+    // Read it back
+    let mut buf = [0u8; 32];
+    let read_count = reader.read(&mut buf)?;
+    if read_count != data.len() {
+        return Err(KernelError::InvalidState {
+            expected: "read all bytes",
+            actual: "wrong read count",
+        });
+    }
+
+    if &buf[..read_count] != data {
+        return Err(KernelError::InvalidState {
+            expected: "data matches",
+            actual: "data mismatch",
+        });
+    }
+
+    Ok(())
+}
+
+/// Test shell redirect parsing.
+///
+/// Verifies that `>`, `>>`, `<`, and `2>` tokens are correctly
+/// extracted from command token streams.
+#[cfg(feature = "alloc")]
+#[allow(dead_code)]
+pub fn test_shell_redirect_parse() -> Result<(), KernelError> {
+    use alloc::{string::String, vec};
+
+    use crate::services::shell::redirect::{parse_redirections, Redirection};
+
+    let tokens = vec![
+        String::from("echo"),
+        String::from("hello"),
+        String::from(">"),
+        String::from("/tmp/out.txt"),
+    ];
+
+    let (cmd_tokens, redirections) = parse_redirections(&tokens);
+
+    // Command should be ["echo", "hello"]
+    if cmd_tokens.len() != 2 {
+        return Err(KernelError::InvalidState {
+            expected: "2 command tokens",
+            actual: "wrong token count",
+        });
+    }
+
+    // Should have one stdout redirection
+    if redirections.len() != 1 {
+        return Err(KernelError::InvalidState {
+            expected: "1 redirection",
+            actual: "wrong redirection count",
+        });
+    }
+
+    match &redirections[0] {
+        Redirection::StdoutTo(path) if path == "/tmp/out.txt" => {}
+        _ => {
+            return Err(KernelError::InvalidState {
+                expected: "StdoutTo(/tmp/out.txt)",
+                actual: "wrong redirection type",
+            });
+        }
+    }
+
+    Ok(())
+}
+
 // ===== Test Timeout Support =====
 
 /// Run a test with a timeout (uses architecture-specific timer)

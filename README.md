@@ -107,7 +107,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.4.2 (February 15, 2026)
+**Latest Release**: v0.4.3 (February 15, 2026)
 
 ### Architecture Support
 
@@ -144,6 +144,7 @@ Phases 0 through 4 are complete. The kernel provides:
 - **VFS** -- ramfs, devfs, procfs, blockfs with POSIX-style file operations
 - **Security** -- MAC, secure boot, TPM 2.0, ASLR, W^X, Spectre barriers, KPTI, post-quantum crypto
 - **Package Manager** -- DPLL SAT resolver, ports system, reproducible builds, Ed25519 signing
+- **Interactive Shell (vsh)** -- Bash/Fish-parity serial console shell with pipes, redirections, variable expansion, globbing, tab completion, job control, scripting (if/for/while/case), functions, aliases
 - **Userland Bridge** -- Ring 0 to Ring 3 transitions with SYSCALL/SYSRET on x86_64
 
 ### What Comes Next
@@ -159,7 +160,7 @@ Phases 0 through 4 are complete. The kernel provides:
 
 **bare_lock::RwLock**: UnsafeCell-based single-threaded RwLock replacement for AArch64 bare metal, used in VFS filesystem modules to avoid `spin::RwLock` CAS spinlock hangs without proper exclusive monitor configuration.
 
-**AArch64 LLVM workaround**: AArch64 uses an assembly-only approach to bypass a critical LLVM loop compilation bug. All `println!` and `boot_println!` macros are no-ops on AArch64; critical messages use direct UART character writes. See [README - LLVM Bug](kernel/src/arch/aarch64/README_LLVM_BUG.md) for details.
+**AArch64 LLVM workaround**: AArch64 bypasses a critical LLVM loop-compilation bug by routing `print!`/`println!` through `DirectUartWriter`, which uses `uart_write_bytes_asm()` -- a pure assembly loop that LLVM cannot miscompile. The `kprintln!` macro provides an alternative path using `direct_print_str()` for literal-only output. See [README - LLVM Bug](kernel/src/arch/aarch64/README_LLVM_BUG.md) for details.
 
 ### Maturity
 

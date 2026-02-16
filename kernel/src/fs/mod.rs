@@ -16,6 +16,7 @@ pub mod blockdev;
 pub mod blockfs;
 pub mod devfs;
 pub mod file;
+pub mod pipe;
 pub mod procfs;
 pub mod pty;
 pub mod ramfs;

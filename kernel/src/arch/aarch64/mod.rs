@@ -12,6 +12,7 @@ pub mod entry;
 pub mod gic;
 pub mod serial;
 pub mod timer;
+pub mod usermode;
 
 /// Called from bootstrap on AArch64 via `crate::arch::init()`.
 pub fn init() {

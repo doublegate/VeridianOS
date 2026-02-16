@@ -95,6 +95,8 @@ pub enum KernelError {
     },
     /// Operation would block
     WouldBlock,
+    /// Broken pipe: write end closed or read end closed
+    BrokenPipe,
     /// Subsystem not initialized (called before init())
     NotInitialized {
         subsystem: &'static str,
@@ -264,6 +266,7 @@ impl fmt::Display for KernelError {
                 write!(f, "Feature not implemented: {}", feature)
             }
             Self::WouldBlock => write!(f, "Operation would block"),
+            Self::BrokenPipe => write!(f, "Broken pipe"),
             Self::FsError(e) => write!(f, "Filesystem error: {:?}", e),
             Self::NotInitialized { subsystem } => {
                 write!(f, "Subsystem not initialized: {}", subsystem)

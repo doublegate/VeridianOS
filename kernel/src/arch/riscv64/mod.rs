@@ -8,6 +8,7 @@ pub mod boot;
 pub mod bootstrap;
 pub mod entry;
 pub mod serial;
+pub mod usermode;
 
 // Re-export context, PLIC, and timer from parent riscv module
 pub use super::riscv::{context, plic, timer};

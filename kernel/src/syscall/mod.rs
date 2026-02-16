@@ -254,10 +254,21 @@ pub enum Syscall {
     PkgList = 93,
     PkgUpdate = 94,
 
+    // Extended filesystem operations
+    FileDup = 57,
+    FileDup2 = 58,
+    FilePipe = 59,
+
     // Time management
     TimeGetUptime = 100,
     TimeCreateTimer = 101,
     TimeCancelTimer = 102,
+
+    // Extended process operations
+    ProcessGetcwd = 110,
+    ProcessChdir = 111,
+    FileIoctl = 112,
+    ProcessKill = 113,
 }
 
 /// System call result type
@@ -418,6 +429,9 @@ fn handle_syscall(
         Syscall::FileSeek => sys_seek(arg1, arg2 as isize, arg3),
         Syscall::FileStat => sys_stat(arg1, arg2),
         Syscall::FileTruncate => sys_truncate(arg1, arg2),
+        Syscall::FileDup => sys_dup(arg1),
+        Syscall::FileDup2 => sys_dup2(arg1, arg2),
+        Syscall::FilePipe => sys_pipe(arg1),
 
         // Directory operations
         Syscall::DirMkdir => sys_mkdir(arg1, arg2),
@@ -437,6 +451,12 @@ fn handle_syscall(
         Syscall::PkgQuery => sys_pkg_query(arg1, arg2),
         Syscall::PkgList => sys_pkg_list(arg1, arg2),
         Syscall::PkgUpdate => sys_pkg_update(arg1),
+
+        // Extended process operations
+        Syscall::ProcessGetcwd => sys_getcwd(arg1, arg2),
+        Syscall::ProcessChdir => sys_chdir(arg1),
+        Syscall::FileIoctl => sys_ioctl(arg1, arg2, arg3),
+        Syscall::ProcessKill => sys_kill(arg1, arg2),
 
         // Time management
         Syscall::TimeGetUptime => sys_time_get_uptime(),
@@ -915,6 +935,9 @@ impl TryFrom<usize> for Syscall {
             54 => Ok(Syscall::FileSeek),
             55 => Ok(Syscall::FileStat),
             56 => Ok(Syscall::FileTruncate),
+            57 => Ok(Syscall::FileDup),
+            58 => Ok(Syscall::FileDup2),
+            59 => Ok(Syscall::FilePipe),
 
             // Directory operations
             60 => Ok(Syscall::DirMkdir),
@@ -942,6 +965,12 @@ impl TryFrom<usize> for Syscall {
             100 => Ok(Syscall::TimeGetUptime),
             101 => Ok(Syscall::TimeCreateTimer),
             102 => Ok(Syscall::TimeCancelTimer),
+
+            // Extended process operations
+            110 => Ok(Syscall::ProcessGetcwd),
+            111 => Ok(Syscall::ProcessChdir),
+            112 => Ok(Syscall::FileIoctl),
+            113 => Ok(Syscall::ProcessKill),
 
             _ => Err(()),
         }

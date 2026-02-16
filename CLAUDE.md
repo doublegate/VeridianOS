@@ -262,7 +262,7 @@ Currently implementing in phases:
 | Area | Status |
 |------|--------|
 | **Repository** | <https://github.com/doublegate/VeridianOS> |
-| **Latest Release** | v0.4.2 (February 15, 2026) - Hardware abstraction: interrupt controllers, IRQ framework, timer management, syscall hardening |
+| **Latest Release** | v0.4.3 (February 15, 2026) - Phase 4.5: Interactive shell (vsh) with Bash/Fish-parity features |
 | **Build** | ✅ All 3 architectures compile, zero warnings |
 | **Boot** | ✅ All 3 architectures Stage 6 BOOTOK, 27/27 tests |
 | **CI/CD** | ✅ GitHub Actions 100% pass rate |

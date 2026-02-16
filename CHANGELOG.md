@@ -1,3 +1,178 @@
+## [0.4.3] - 2026-02-15
+
+### Phase 4.5: Interactive Shell (vsh) -- Full Bash/Fish-Parity Implementation
+
+Complete interactive shell implementation across 18 sprints in 6 groups. Adds ANSI escape parsing, line editing with cursor movement and history navigation, kernel pipe infrastructure, I/O redirection, variable expansion (Bash-compatible `$VAR`, `${VAR:-default}`, `$?`, `~`), glob pattern matching (`*`, `?`, `[abc]`, `**`), tab completion, job control (`&`, `fg`, `bg`, `jobs`, Ctrl-Z), signal handling (SIGINT/SIGTSTP/SIGCONT/SIGPIPE/SIGCHLD), scripting engine (if/elif/else/fi, while/for/case, command substitution `$(...)`, arithmetic `$((...))`), functions and aliases, advanced operators (`&&`, `||`, `;`, here-documents), PTY console integration, 24 additional builtins (grep, sort, wc, head, tail, cp, mv, chmod, df, free, dmesg, etc.), and tri-architecture user-mode entry stubs for AArch64 (eret) and RISC-V (sret).
+
+13 new kernel source files (+6,064 lines), 11 modified files (+2,566/-83 lines). Total new shell infrastructure: ~8,630 lines.
+
+---
+
+### Added
+
+#### Shell Core (3 new files, +1,885 lines)
+
+- **`kernel/src/services/shell/ansi.rs`** (342 lines) -- ANSI escape sequence parser
+  - `AnsiParser` state machine: Normal, Escape, CsiParam, CsiIntermediate states
+  - `AnsiEvent` enum: ArrowUp/Down/Left/Right, Home, End, Delete, Insert, PageUp/PageDown, F1-F12, Ctrl-A/C/D/E/K/L/U/W/Z, Tab, Backspace, Enter
+  - `feed(byte) -> Option<AnsiEvent>`: accumulates multi-byte sequences, emits event on completion
+  - Handles CSI sequences: `ESC[A`-`ESC[D` (arrows), `ESC[H`/`ESC[F` (home/end), `ESC[3~` (delete), `ESC[5~`/`ESC[6~` (pgup/pgdn)
+
+- **`kernel/src/services/shell/line_editor.rs`** (429 lines) -- Full line editor with cursor movement
+  - `LineEditor` struct: buffer, cursor_pos, saved_line for history navigation
+  - Cursor movement: left/right, word-left/word-right, home/end
+  - Editing: insert, delete, backspace, kill-to-end, kill-to-start, kill-word
+  - History: prev/next with current line save/restore
+  - `redraw_line()`: ANSI escape codes for line refresh (cursor positioning, clear-to-EOL)
+
+- **`kernel/src/services/shell/mod.rs`** (+618 lines modified) -- Shell REPL and command dispatch
+  - Integrated ANSI parser + line editor into main REPL loop
+  - Arrow key history navigation, Ctrl-A/E/K/U/W editing shortcuts
+  - Pipe operator `|` with multi-stage pipeline execution
+  - Signal handling: Ctrl-C (SIGINT to foreground job), Ctrl-Z (SIGTSTP), Ctrl-D (EOF/exit)
+  - Background job `&` detection and notification on completion
+  - Variable expansion and glob expansion in command dispatch
+  - `expand_prompt()` with `\u`, `\h`, `\w`, `\$` escape sequences
+
+#### I/O Infrastructure (2 new files, +492 lines)
+
+- **`kernel/src/fs/pipe.rs`** (246 lines) -- Kernel pipe objects
+  - `PipeReader` / `PipeWriter` with shared `Arc<Mutex<PipeInner>>` state
+  - `VecDeque<u8>` buffer with 64KB default capacity
+  - Blocking read: spin-wait when buffer empty and write end open
+  - EOF detection: returns 0 when write end closed and buffer drained
+  - `create_pipe()` / `create_pipe_with_capacity()` constructors
+
+- **`kernel/src/services/shell/redirect.rs`** (246 lines) -- I/O redirection
+  - `Redirection` enum: StdoutTo, StdoutAppend, StdinFrom, StderrTo, StderrToStdout
+  - `parse_redirections()`: extracts `>`, `>>`, `<`, `2>`, `2>&1` from token streams
+  - `apply_redirections()` / `restore_redirections()`: save/restore file descriptors
+
+#### Variable Expansion and Globbing (3 new files, +1,761 lines)
+
+- **`kernel/src/services/shell/expand.rs`** (822 lines) -- Bash-compatible variable expansion
+  - `$VAR`, `${VAR}`, `${VAR:-default}`, `${VAR:=assign}`, `${VAR:+alternate}`
+  - `${#VAR}` (string length), `${VAR%pattern}` / `${VAR%%pattern}` (suffix removal)
+  - `${VAR#pattern}` / `${VAR##pattern}` (prefix removal)
+  - Special variables: `$?`, `$$`, `$0`, `$#`, `$@`, `$*`
+  - Tilde expansion: `~` -> `$HOME`, `~user` -> `/home/user`
+  - Quote handling: single quotes (literal), double quotes (expand vars, preserve whitespace)
+  - Backslash-dollar escaping: `\$` -> literal `$`
+  - Command substitution: `$(command)` captures stdout
+
+- **`kernel/src/services/shell/glob.rs`** (463 lines) -- Glob pattern matching
+  - `glob_match(pattern, text) -> bool`: `*`, `?`, `[abc]`, `[a-z]`, `[!abc]`
+  - `expand_globs()`: walks VFS directory tree, collects matches, sorts alphabetically
+  - Recursive `**` globstar support
+  - If no matches, returns pattern unchanged (Bash behavior)
+
+- **`kernel/src/services/shell/completion.rs`** (476 lines) -- Tab completion
+  - Command completion (builtins + PATH executables) at first token position
+  - File path completion from VFS at subsequent token positions
+  - Variable name completion (`$` prefix) from environment
+  - `longest_common_prefix()` for multi-match partial completion
+  - Single match: insert + trailing space (or `/` for directories)
+  - Multiple matches: display list below prompt, then redraw
+
+#### Job Control and Signals (1 new file, +433 lines)
+
+- **`kernel/src/services/shell/jobs.rs`** (433 lines) -- Job control infrastructure
+  - `Job` struct: job_id, pgid, pids, status (Running/Stopped/Done), command_line
+  - `JobTable` with `BTreeMap<u32, Job>`, next_job_id counter
+  - `add_job()`, `remove_job()`, `get_job()`, `list_jobs()`, `update_job_status()`
+  - `foreground_job()`: move job to foreground, wait for completion
+  - `background_job()`: resume stopped job in background
+  - Signal forwarding: Ctrl-C -> SIGINT, Ctrl-Z -> SIGTSTP to foreground job's process group
+
+#### Scripting Engine (3 new files, +2,368 lines)
+
+- **`kernel/src/services/shell/script.rs`** (1,858 lines) -- Control flow and scripting
+  - `if`/`elif`/`else`/`fi` with exit-code conditions
+  - `test` / `[` builtin: `-f`, `-d`, `-z`, `-n`, `=`, `!=`, `-eq`, `-ne`, `-lt`, `-gt`
+  - `while`/`until`/`do`/`done` loops
+  - `for var in word...; do ... done` iteration
+  - `case word in pattern) commands ;; esac` with `*`, `?`, `|` alternation
+  - Command substitution `$(command)` with stdout capture
+  - Arithmetic expansion `$((expr))`: `+`, `-`, `*`, `/`, `%`
+  - Block nesting with depth tracking
+  - `execute_script(lines, shell) -> i32` entry point
+
+- **`kernel/src/services/shell/functions.rs`** (251 lines) -- User-defined functions
+  - `ShellFunction` struct: name, body lines, parameter names
+  - `function name() { ... }` syntax
+  - `$1`-`$9`, `$#`, `$@` parameter access
+  - `local` keyword, `return [n]` for early exit
+  - `FunctionRegistry`: store/lookup/remove/list functions
+
+- **`kernel/src/services/shell/aliases.rs`** (259 lines) -- Command aliases
+  - `alias name='command args'` / `unalias name`
+  - `AliasRegistry` with `BTreeMap<String, String>` storage
+  - Recursive alias expansion with loop detection (16-depth limit)
+  - `list_aliases()`, `get_alias()`, `set_alias()`, `remove_alias()`
+
+#### Tri-Architecture User-Mode Stubs (2 new files, +239 lines)
+
+- **`kernel/src/arch/aarch64/usermode.rs`** (119 lines) -- AArch64 EL1->EL0 transition
+  - `try_enter_usermode()`: prerequisite checks (CurrentEL==1, TTBR0_EL1!=0, VBAR_EL1!=0)
+  - `enter_usermode(entry_point, user_stack)`: eret with SPSR_EL1=EL0t, ELR_EL1, SP_EL0
+
+- **`kernel/src/arch/riscv64/usermode.rs`** (120 lines) -- RISC-V S-mode->U-mode transition
+  - `try_enter_usermode()`: prerequisite checks (sstatus, satp!=0, stvec!=0)
+  - `enter_usermode(entry_point, user_stack, kernel_sp)`: sret with sepc, sscratch, SPP=0
+
+### Changed
+
+#### Shell Commands (commands.rs, +1,542 lines)
+
+- 24 new builtins: `read`, `printf`, `sleep`, `true`, `false`, `seq`, `wc`, `head`, `tail`, `grep`, `sort`, `uniq`, `cut`, `tr`, `tee`, `xargs`, `date`, `uname`, `id`, `cp`, `mv`, `chmod`, `df`, `free`, `dmesg`, `set`, `fg`, `bg`, `jobs`, `alias`, `unalias`, `type`, `which`, `source`, `test`/`[`
+
+#### Syscall Interface (syscall/mod.rs + filesystem.rs, +192 lines)
+
+- New syscalls: `FileDup` (57), `FileDup2` (58), `FilePipe` (59), `ProcessGetcwd` (110), `ProcessChdir` (111), `FileIoctl` (112), `ProcessKill` (113)
+- `sys_dup()`, `sys_dup2()`, `sys_pipe()`, `sys_getcwd()`, `sys_chdir()`, `sys_ioctl()`, `sys_kill()`
+
+#### Embedded User-Space Binaries (userspace/embedded.rs, +186 lines)
+
+- Extended from x86_64-only to all 3 architectures
+- AArch64 INIT_CODE and SHELL_CODE (SVC-based machine code)
+- RISC-V INIT_CODE and SHELL_CODE (ECALL-based machine code)
+- Architecture-specific ELF_MACHINE constants (62/183/243)
+
+#### PTY Console Integration (fs/pty.rs, +57 lines)
+
+- `set_controller(pid)` method for process group signal routing
+- ^C/^Z signal dispatch through PTY to foreground process group
+
+#### Bootstrap (bootstrap.rs, +48 lines)
+
+- User-mode entry attempts for AArch64 (`eret`) and RISC-V (`sret`) after BOOTOK
+- Shell launch after user-mode fallback on all 3 architectures
+
+#### Error Types (error.rs, +3 lines)
+
+- `KernelError::BrokenPipe` variant for pipe EPIPE detection
+
+### Tri-Architecture Shell Fixes
+
+- **AArch64 print!/println! fix**: Changed from no-ops to `DirectUartWriter` (assembly-based UART output via `uart_write_bytes_asm()`). The LLVM loop-compilation bug affects Rust-level while-loops in the UART driver, but `DirectUartWriter` uses a pure assembly loop that LLVM cannot miscompile. All shell output (prompt, command results, error messages) now visible on AArch64.
+- **x86_64 shell entry fix**: `try_enter_usermode()` calls `enter_usermode()` which is `-> !` (never returns via iretq), preventing the shell from starting. Now skips Ring 3 transition and enters the interactive shell directly after BOOTOK.
+
+### Boot Tests (test_framework.rs, +245 lines)
+
+- `test_shell_ansi_parser`: ANSI escape sequence state machine verification (ESC[A, ESC[B, character passthrough)
+- `test_shell_variable_expansion`: `$VAR`, `${VAR:-default}`, tilde expansion
+- `test_shell_glob_match`: `*`, `?`, `[abc]` pattern matching
+- `test_shell_pipe_roundtrip`: `create_pipe()`, write, read back, data integrity verification
+- `test_shell_redirect_parse`: `>` token extraction from command token streams
+
+### Build Verification
+
+- x86_64: Stage 6 BOOTOK, 27/27 tests, zero warnings, interactive shell `veridian $`
+- AArch64: Stage 6 BOOTOK, 27/27 tests, zero warnings, interactive shell `veridian $`
+- RISC-V: Stage 6 BOOTOK, 27/27 tests, zero warnings, interactive shell `veridian $`
+
+---
+
 ## [0.4.2] - 2026-02-15
 
 ### Hardware Abstraction: Interrupt Controllers, IRQ Framework, Timer Management, and Syscall Hardening

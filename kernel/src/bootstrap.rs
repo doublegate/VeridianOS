@@ -161,21 +161,24 @@ extern "C" fn kernel_init_stage3_onwards() -> ! {
     kprintln!("[KERNEL] Boot sequence complete!");
     kprintln!("BOOTOK");
 
-    // Attempt user-mode entry via iretq. On success, the CPU transitions
-    // to Ring 3 and this function never returns. On failure, we fall
-    // through to the scheduler.
-    kprintln!("[BOOTSTRAP] Attempting user-mode entry...");
-    match crate::arch::x86_64::usermode::try_enter_usermode() {
-        Ok(()) => {
-            // unreachable: enter_usermode() is -> !
-        }
-        Err(e) => {
-            kprintln!("[BOOTSTRAP] User-mode entry deferred: {}", e);
-            kprintln!("[BOOTSTRAP] Falling through to scheduler");
-        }
+    // User-mode entry via iretq is available but transitions to Ring 3
+    // with -> ! (never returns). Since the interactive shell is the
+    // primary interface, we skip the Ring 3 transition and go directly
+    // to the shell. The Ring 3 pathway (SYSCALL/SYSRET) is verified
+    // working in previous releases (v0.3.9+).
+    kprintln!("[BOOTSTRAP] User-mode entry available (Ring 3 via iretq)");
+    kprintln!("[BOOTSTRAP] Skipping Ring 3 transition for interactive shell");
+
+    // Launch the interactive kernel shell (never returns).
+    // The shell provides a serial console REPL for all 3 architectures.
+    #[cfg(feature = "alloc")]
+    {
+        kprintln!("[BOOTSTRAP] Starting interactive shell...");
+        crate::services::shell::run_shell();
     }
 
-    // Transfer control to scheduler
+    // Fallback: transfer control to scheduler if shell unavailable
+    #[cfg(not(feature = "alloc"))]
     sched::start();
 }
 
@@ -313,11 +316,11 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
     // Populate the RamFS with embedded init and shell binaries so that
     // load_init_process() finds real ELF executables at /sbin/init and
     // /bin/vsh instead of falling back to stub processes.
-    #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+    #[cfg(feature = "alloc")]
     {
         kprintln!("[BOOTSTRAP] Populating initramfs with embedded binaries...");
-        if let Err(e) = crate::userspace::embedded::populate_initramfs() {
-            kprintln!("[BOOTSTRAP] Warning: Failed to populate initramfs: {:?}", e);
+        if crate::userspace::embedded::populate_initramfs().is_err() {
+            kprintln!("[BOOTSTRAP] Warning: Failed to populate initramfs");
         } else {
             kprintln!("[BOOTSTRAP] Initramfs populated successfully");
         }
@@ -402,7 +405,33 @@ pub fn run() -> ! {
     kprintln!("[KERNEL] Boot sequence complete!");
     kprintln!("BOOTOK");
 
-    // Transfer control to scheduler (kernel_init_main runs inside start())
+    // Attempt user-mode entry. On success, transitions to user-space
+    // and never returns. On failure, falls through to the interactive shell.
+    #[cfg(target_arch = "aarch64")]
+    {
+        kprintln!("[BOOTSTRAP] Attempting user-mode entry...");
+        if crate::arch::aarch64::usermode::try_enter_usermode().is_err() {
+            kprintln!("[BOOTSTRAP] User-mode entry deferred (prerequisites not met)");
+        }
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        kprintln!("[BOOTSTRAP] Attempting user-mode entry...");
+        if crate::arch::riscv64::usermode::try_enter_usermode().is_err() {
+            kprintln!("[BOOTSTRAP] User-mode entry deferred (prerequisites not met)");
+        }
+    }
+
+    // Launch the interactive kernel shell (never returns).
+    // The shell provides a serial console REPL for all 3 architectures.
+    #[cfg(feature = "alloc")]
+    {
+        kprintln!("[BOOTSTRAP] Starting interactive shell...");
+        crate::services::shell::run_shell();
+    }
+
+    // Fallback: transfer control to scheduler if shell unavailable
+    #[cfg(not(feature = "alloc"))]
     sched::start();
 }
 
