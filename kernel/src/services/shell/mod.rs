@@ -178,6 +178,7 @@ impl Shell {
     pub fn run(&self) -> ! {
         crate::println!("VeridianOS Shell v1.0");
         crate::println!("Type 'help' for available commands");
+        crate::graphics::fbcon::flush();
 
         *self.running.write() = true;
 
@@ -189,6 +190,7 @@ impl Shell {
             // Display prompt
             let _prompt = self.expand_prompt();
             crate::print!("{}", _prompt);
+            crate::graphics::fbcon::flush();
 
             // Read command
             let command_line = self.read_line();
@@ -222,6 +224,8 @@ impl Shell {
                     break;
                 }
             }
+
+            crate::graphics::fbcon::flush();
 
             // Notify the user about completed background jobs
             self.notify_completed_jobs();
@@ -821,14 +825,17 @@ impl Shell {
                     match result {
                         Some(line_editor::EditResult::Done) => {
                             crate::print!("\n");
+                            crate::graphics::fbcon::flush();
                             return editor.line();
                         }
                         Some(line_editor::EditResult::Cancel) => {
                             crate::print!("^C\n");
+                            crate::graphics::fbcon::flush();
                             return String::new();
                         }
                         Some(line_editor::EditResult::Eof) => {
                             crate::print!("\n");
+                            crate::graphics::fbcon::flush();
                             return String::from("exit");
                         }
                         Some(line_editor::EditResult::ClearScreen) => {
@@ -844,6 +851,7 @@ impl Shell {
                             if pos < len {
                                 crate::print!("\x1b[{}D", len - pos);
                             }
+                            crate::graphics::fbcon::flush();
                         }
                         Some(line_editor::EditResult::TabComplete) => {
                             let line = editor.line();
@@ -921,9 +929,11 @@ impl Shell {
                                     }
                                 }
                             }
+                            crate::graphics::fbcon::flush();
                         }
                         Some(line_editor::EditResult::Suspend) => {
                             crate::print!("^Z\n");
+                            crate::graphics::fbcon::flush();
                             // Attempt to suspend the foreground job. In the
                             // kernel shell there is no true foreground process
                             // to SIGTSTP, so we print the indicator and return
@@ -934,7 +944,9 @@ impl Shell {
                             // command and re-prompt.
                             return String::new();
                         }
-                        Some(line_editor::EditResult::Continue) | None => {}
+                        Some(line_editor::EditResult::Continue) | None => {
+                            crate::graphics::fbcon::flush();
+                        }
                     }
                 }
                 None => {

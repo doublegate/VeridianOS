@@ -24,4 +24,5 @@ pub fn arch_early_init() {
 
 pub fn arch_panic_handler(info: &PanicInfo) {
     println!("[KERNEL PANIC] {}", info);
+    crate::graphics::fbcon::flush();
 }

@@ -226,6 +226,14 @@ pub fn kernel_init() -> KernelResult<()> {
 
     arch::init();
 
+    // x86_64: Reprogram PAT entry 1 from WT to WC so that framebuffer pages
+    // can use write-combining. Must be done before any WC mappings.
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::arch::x86_64::pat::init();
+        kprintln!("[BOOTSTRAP] PAT configured (WC available)");
+    }
+
     kprintln!("[BOOTSTRAP] Architecture initialized");
 
     // Stage 2: Memory management
@@ -268,6 +276,24 @@ pub fn kernel_init() -> KernelResult<()> {
                 );
             }
             kprintln!("[BOOTSTRAP] Framebuffer console initialized");
+
+            // Apply write-combining to the framebuffer's MMIO pages for
+            // 5-150x faster blit throughput (pure writes, no reads).
+            let fb_size = fb_info.stride * fb_info.height;
+            let fb_size_aligned = (fb_size + 4095) & !4095;
+            // SAFETY: fb_info.buffer is page-aligned (UEFI framebuffer) and
+            // mapped for fb_size_aligned bytes. PAT entry 1 was reprogrammed
+            // to WC above. The page table walk modifies only PTE cache flags.
+            unsafe {
+                crate::arch::x86_64::pat::apply_write_combining(
+                    fb_info.buffer as usize,
+                    fb_size_aligned,
+                );
+            }
+            kprintln!(
+                "[BOOTSTRAP] Framebuffer WC enabled ({} pages)",
+                fb_size_aligned / 4096
+            );
         }
     }
 

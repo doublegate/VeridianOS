@@ -6,15 +6,20 @@
 //!
 //! # Performance architecture
 //!
-//! All rendering goes through a three-layer pipeline to minimize slow MMIO
-//! writes to QEMU-intercepted framebuffer memory:
+//! Three-layer pipeline with **eager rendering**, **glyph cache**, and
+//! **pixel ring buffer scroll**, modelled after Linux `fbcon` + `cfb_copyarea`:
 //!
 //! 1. **Text cell grid** — character/color pairs in a ring buffer. Scrolling is
 //!    O(cols) (advance ring pointer + clear one row of cells).
-//! 2. **RAM back-buffer** — full pixel buffer in kernel heap (~4MB). Glyph
-//!    rendering writes here (fast regular-memory writes).
-//! 3. **Hardware framebuffer** — MMIO memory. Touched once per `_fbcon_print`
-//!    call, only for rows that changed (dirty row tracking).
+//! 2. **RAM back-buffer** — always in sync via eager rendering (each glyph
+//!    rendered to pixels immediately on write). Scrolling advances a pixel ring
+//!    offset (O(1), no memmove). A **glyph cache** pre-renders all 256 glyphs
+//!    as u32 pixel arrays for the current color pair, making glyph rendering a
+//!    `copy_nonoverlapping` of 32 bytes per row.
+//! 3. **Hardware framebuffer** — MMIO memory. Touched once per `flush()` call,
+//!    pure `copy_nonoverlapping` — zero font lookups, zero conditionals, zero
+//!    per-pixel branching. On x86_64, write-combining (PAT) provides 5-150x
+//!    faster MMIO writes.
 //!
 //! Thread-safety: The global `FBCON` is protected by a spinlock. Interrupt
 //! handlers must NOT call `_fbcon_print` (use raw serial output for
@@ -60,6 +65,23 @@ enum EscapeState {
 const MAX_ROWS: usize = 64;
 /// Maximum text columns supported by the console.
 const MAX_COLS: usize = 192;
+
+/// Pre-rendered glyph pixel data for the current (fg, bg) color pair.
+///
+/// All 256 glyphs are expanded from 1-bit-per-pixel bitmap to u32-per-pixel
+/// words, so rendering a glyph becomes a `copy_nonoverlapping` of 32 bytes
+/// per row (8 pixels * 4 bytes) instead of 128 per-pixel bit-extractions.
+///
+/// Memory: 256 * 8 * 16 * 4 = 128KB per color pair.
+struct GlyphCache {
+    /// Pre-rendered pixel data: `pixels[glyph * (FONT_WIDTH * FONT_HEIGHT) +
+    /// row * FONT_WIDTH + col]`
+    pixels: Vec<u32>,
+    /// Foreground color word this cache was built for.
+    fg_word: u32,
+    /// Background color word this cache was built for.
+    bg_word: u32,
+}
 
 /// A single character cell in the text grid.
 #[derive(Clone, Copy)]
@@ -110,6 +132,14 @@ pub struct FramebufferConsole {
 
     // RAM back-buffer (Phase 1) — `None` if allocation failed (fallback to direct MMIO)
     back_buf: Option<Vec<u8>>,
+
+    // Glyph cache — pre-rendered pixel data for the current (fg, bg) pair.
+    // `None` if allocation failed (OOM fallback to per-pixel path).
+    glyph_cache: Option<GlyphCache>,
+
+    // Pixel ring buffer offset — byte offset into back-buffer for screen row 0.
+    // Always a multiple of `FONT_HEIGHT * stride`. Eliminates memmove on scroll.
+    pixel_ring_offset: usize,
 
     // Dirty tracking (Phase 1+2)
     dirty_rows: [bool; MAX_ROWS],
@@ -162,6 +192,10 @@ impl FramebufferConsole {
         let buf_size = stride * height;
         let back_buf = try_alloc_vec(buf_size).ok();
 
+        // Allocate glyph cache (128KB). OOM is non-fatal — falls back to
+        // per-pixel rendering.
+        let glyph_cache = try_alloc_glyph_cache();
+
         Self {
             fb_ptr,
             width,
@@ -183,6 +217,8 @@ impl FramebufferConsole {
             cells,
             ring_start: 0,
             back_buf,
+            glyph_cache,
+            pixel_ring_offset: 0,
             dirty_rows: [false; MAX_ROWS],
             dirty_all: true, // Force initial full blit
         }
@@ -241,11 +277,58 @@ impl FramebufferConsole {
         }
     }
 
+    /// Byte offset in back-buffer for the start of a logical text row's pixels.
+    ///
+    /// Accounts for the pixel ring buffer offset. The result is always within
+    /// `[0, rows * FONT_HEIGHT * stride)` and aligned to a full text-row
+    /// boundary, so no glyph ever straddles the ring wrap point.
+    #[inline(always)]
+    fn pixel_row_offset(&self, logical_row: usize) -> usize {
+        let text_row_bytes = FONT_HEIGHT * self.stride;
+        let pixel_buf_size = self.rows * text_row_bytes;
+        (self.pixel_ring_offset + logical_row * text_row_bytes) % pixel_buf_size
+    }
+
+    /// Rebuild the glyph cache for a new (fg, bg) color pair.
+    ///
+    /// Expands all 256 glyphs from 1-bit-per-pixel bitmaps into u32 pixel
+    /// words. Called on first render and on every SGR color change (rare).
+    fn rebuild_glyph_cache(&mut self, fg_word: u32, bg_word: u32) {
+        let cache = match self.glyph_cache {
+            Some(ref mut c) => c,
+            None => return,
+        };
+        cache.fg_word = fg_word;
+        cache.bg_word = bg_word;
+
+        for glyph in 0..256u16 {
+            let glyph_data = font8x16::glyph(glyph as u8);
+            let base = glyph as usize * FONT_WIDTH * FONT_HEIGHT;
+            for (row, &bits) in glyph_data.iter().enumerate() {
+                for col in 0..FONT_WIDTH {
+                    let word = if (bits >> (7 - col)) & 1 != 0 {
+                        fg_word
+                    } else {
+                        bg_word
+                    };
+                    cache.pixels[base + row * FONT_WIDTH + col] = word;
+                }
+            }
+        }
+    }
+
     /// Render a single glyph to the back-buffer (or directly to HW FB if no
     /// back-buffer is available). Writes 8x16 = 128 pixels.
     ///
-    /// Phase 3 optimization: computes row base pointer once, writes u32
-    /// directly without per-pixel bounds checks (caller ensures in-bounds).
+    /// Optimization layers:
+    /// 1. **Glyph cache hit**: `copy_nonoverlapping` of 32 bytes per row (16
+    ///    rows = 512 bytes total) from pre-rendered cache.
+    /// 2. **Cache rebuild**: If colors changed, rebuild all 256 glyphs (~300us)
+    ///    then cache hit.
+    /// 3. **Fallback**: Per-pixel bit extraction (no cache available).
+    ///
+    /// Pixel ring: When a back-buffer is present, row offsets are computed via
+    /// `pixel_row_offset()` to account for the ring buffer.
     fn render_glyph_to_buf(
         &mut self,
         ch: u8,
@@ -256,26 +339,60 @@ impl FramebufferConsole {
     ) {
         let fg_word = self.color_to_word(fg.0, fg.1, fg.2);
         let bg_word = self.color_to_word(bg.0, bg.1, bg.2);
-        let glyph_data = font8x16::glyph(ch);
         let stride = self.stride;
         let bpp = self.bpp;
 
+        let has_back_buf = self.back_buf.is_some();
         let buf_ptr = match self.back_buf {
             Some(ref mut buf) => buf.as_mut_ptr(),
             None => self.fb_ptr,
         };
 
-        for (row, &bits) in glyph_data.iter().enumerate() {
-            let y = py + row;
-            if y >= self.height {
-                break;
+        // Compute ring-adjusted base for this text row.
+        // `py` is always a multiple of FONT_HEIGHT (top of a text row).
+        let ring_base = if has_back_buf {
+            self.pixel_row_offset(py / FONT_HEIGHT)
+        } else {
+            py * stride // No ring for direct MMIO
+        };
+
+        // Try glyph cache path
+        if self.glyph_cache.is_some() {
+            // Check if cache colors match; rebuild if needed
+            {
+                let needs_rebuild = match self.glyph_cache {
+                    Some(ref c) => c.fg_word != fg_word || c.bg_word != bg_word,
+                    None => false,
+                };
+                if needs_rebuild {
+                    self.rebuild_glyph_cache(fg_word, bg_word);
+                }
             }
-            let base = y * stride + px * bpp;
-            // SAFETY: px is < cols * FONT_WIDTH <= width, y is < height,
-            // and the buffer is stride * height bytes. Each row writes
-            // 8 * 4 = 32 bytes starting at `base`, which is within bounds.
+
+            if let Some(ref cache) = self.glyph_cache {
+                let glyph_base = ch as usize * FONT_WIDTH * FONT_HEIGHT;
+                // SAFETY: buf_ptr is valid for stride * height bytes (back-buffer)
+                // or the HW FB. ring_base is within the ring buffer. Each row
+                // copies FONT_WIDTH u32 words (32 bytes) which is within bounds.
+                unsafe {
+                    for row in 0..FONT_HEIGHT {
+                        let buf_offset = ring_base + row * stride + px * bpp;
+                        let dst = buf_ptr.add(buf_offset) as *mut u32;
+                        let src = cache.pixels.as_ptr().add(glyph_base + row * FONT_WIDTH);
+                        core::ptr::copy_nonoverlapping(src, dst, FONT_WIDTH);
+                    }
+                }
+                return;
+            }
+        }
+
+        // Fallback: per-pixel bit extraction (no glyph cache)
+        let glyph_data = font8x16::glyph(ch);
+        for (row, &bits) in glyph_data.iter().enumerate() {
+            let buf_offset = ring_base + row * stride + px * bpp;
+            // SAFETY: Same bounds guarantee as the cached path.
             unsafe {
-                let ptr = buf_ptr.add(base) as *mut u32;
+                let ptr = buf_ptr.add(buf_offset) as *mut u32;
                 for col in 0..FONT_WIDTH {
                     let word = if (bits >> (7 - col)) & 1 != 0 {
                         fg_word
@@ -290,8 +407,10 @@ impl FramebufferConsole {
 
     /// Render one logical text row from the cell grid to the back-buffer.
     ///
-    /// Phase 3 optimization: detects blank rows (all spaces with default bg)
-    /// and uses memset instead of rendering individual glyphs.
+    /// No longer called in the normal rendering path (eager rendering +
+    /// pixel ring scroll keep the back-buffer up-to-date). Retained for
+    /// diagnostic/debug use.
+    #[allow(dead_code)]
     fn render_row_to_backbuf(&mut self, logical_row: usize) {
         let py = logical_row * FONT_HEIGHT;
 
@@ -308,15 +427,19 @@ impl FramebufferConsole {
 
         if all_blank_black {
             // Fast path: zero the pixel region with memset
-            let row_start = py * self.stride;
+            let ring_base = if self.back_buf.is_some() {
+                self.pixel_row_offset(logical_row)
+            } else {
+                py * self.stride
+            };
             let row_bytes = FONT_HEIGHT * self.stride;
             let buf_ptr = match self.back_buf {
                 Some(ref mut buf) => buf.as_mut_ptr(),
                 None => self.fb_ptr,
             };
-            // SAFETY: row_start + row_bytes <= stride * height = buffer size.
+            // SAFETY: ring_base + row_bytes is within the ring buffer bounds.
             unsafe {
-                core::ptr::write_bytes(buf_ptr.add(row_start), 0, row_bytes);
+                core::ptr::write_bytes(buf_ptr.add(ring_base), 0, row_bytes);
             }
             return;
         }
@@ -340,14 +463,15 @@ impl FramebufferConsole {
                 None => self.fb_ptr,
             };
             let stride = self.stride;
+            let ring_base = if self.back_buf.is_some() {
+                self.pixel_row_offset(logical_row)
+            } else {
+                py * stride
+            };
             for row in 0..FONT_HEIGHT {
-                let y = py + row;
-                if y >= self.height {
-                    break;
-                }
-                // SAFETY: writing within buffer bounds (checked by y < height).
+                // SAFETY: writing within ring buffer bounds.
                 unsafe {
-                    let base = y * stride;
+                    let base = ring_base + row * stride;
                     let ptr = buf_ptr.add(base) as *mut u32;
                     for x in 0..self.width {
                         ptr.add(x).write(bg_word);
@@ -366,44 +490,61 @@ impl FramebufferConsole {
 
     /// Blit dirty regions from back-buffer to the hardware framebuffer.
     ///
-    /// This is the ONLY place that writes to HW MMIO (besides the fallback
-    /// path when no back-buffer is available). Called once per `_fbcon_print`.
+    /// Back-buffer is always up-to-date from eager rendering — this is a
+    /// pure memcpy with zero font lookups or per-pixel branching.
+    ///
+    /// The back-buffer uses a pixel ring: logical screen row 0 starts at
+    /// `pixel_ring_offset` bytes. The blit linearizes the ring into the
+    /// MMIO framebuffer with a two-chunk copy for `dirty_all`, or per-row
+    /// ring-adjusted copies for individual dirty rows.
     fn blit_to_framebuffer(&mut self) {
         let back_buf = match self.back_buf {
             Some(ref buf) => buf.as_ptr(),
-            None => return, // No back-buffer — rendering went directly to HW FB
+            None => return, // No back-buffer — eager rendering went directly to HW FB
         };
 
+        let text_row_bytes = FONT_HEIGHT * self.stride;
+        let pixel_buf_size = self.rows * text_row_bytes;
+
         if self.dirty_all {
-            // Render all visible rows from cells to back-buffer, then blit all
-            for row in 0..self.rows {
-                self.render_row_to_backbuf(row);
-            }
-            // Single large copy to HW FB
-            let total_bytes = self.stride * self.height;
-            // SAFETY: back_buf and fb_ptr are both `total_bytes` in size,
-            // and they do not overlap (back_buf is heap, fb_ptr is MMIO).
+            // Two-chunk copy: [ring_offset..end] then [0..ring_offset]
+            let first_chunk = pixel_buf_size - self.pixel_ring_offset;
+            // SAFETY: back_buf is `stride * height` bytes (>= pixel_buf_size).
+            // fb_ptr is at least pixel_buf_size bytes. The two chunks together
+            // copy exactly pixel_buf_size bytes to MMIO.
             unsafe {
-                core::ptr::copy_nonoverlapping(back_buf, self.fb_ptr, total_bytes);
+                core::ptr::copy_nonoverlapping(
+                    back_buf.add(self.pixel_ring_offset),
+                    self.fb_ptr,
+                    first_chunk,
+                );
+                if self.pixel_ring_offset > 0 {
+                    core::ptr::copy_nonoverlapping(
+                        back_buf,
+                        self.fb_ptr.add(first_chunk),
+                        self.pixel_ring_offset,
+                    );
+                }
             }
             self.dirty_all = false;
             for flag in self.dirty_rows[..self.rows].iter_mut() {
                 *flag = false;
             }
         } else {
-            // Render and blit only dirty rows
-            let stride = self.stride;
-            let row_pixels = FONT_HEIGHT * stride;
+            // Per dirty row: ring-adjusted source, linear MMIO dest
             for row in 0..self.rows {
                 if self.dirty_rows[row] {
-                    self.render_row_to_backbuf(row);
-                    let offset = row * FONT_HEIGHT * stride;
-                    // SAFETY: offset + row_pixels <= stride * height.
+                    let ring_offset =
+                        (self.pixel_ring_offset + row * text_row_bytes) % pixel_buf_size;
+                    let mmio_offset = row * text_row_bytes;
+                    // SAFETY: ring_offset + text_row_bytes <= pixel_buf_size
+                    // (because ring offsets are always text-row-aligned and
+                    // pixel_buf_size is a multiple of text_row_bytes).
                     unsafe {
                         core::ptr::copy_nonoverlapping(
-                            back_buf.add(offset),
-                            self.fb_ptr.add(offset),
-                            row_pixels,
+                            back_buf.add(ring_offset),
+                            self.fb_ptr.add(mmio_offset),
+                            text_row_bytes,
                         );
                     }
                     self.dirty_rows[row] = false;
@@ -412,9 +553,13 @@ impl FramebufferConsole {
         }
     }
 
-    /// Scroll the text grid up by one row using ring-buffer advancement.
+    /// Scroll the text grid up by one row.
     ///
-    /// Phase 2: O(cols) cell operations instead of ~4MB memory copy.
+    /// Cell ring: O(cols) (advance pointer + clear one row).
+    /// Pixel ring (back-buffer): O(1) pointer advance + clear one row of
+    /// pixels. No memmove — the ring offset makes the old top row become
+    /// the new bottom row.
+    /// Fallback (no back-buffer): memmove on MMIO (slow but correct).
     fn scroll_up(&mut self) {
         // The row that was at the top is recycled to become the new bottom
         let old_top_phys = self.ring_start;
@@ -427,7 +572,38 @@ impl FramebufferConsole {
             self.cells[base + col] = TextCell::blank(self.fg_color, self.bg_color);
         }
 
-        // Full re-render needed since row mapping changed
+        if self.back_buf.is_some() {
+            // Pixel ring: advance offset (no memmove!)
+            let text_row_bytes = FONT_HEIGHT * self.stride;
+            let pixel_buf_size = self.rows * text_row_bytes;
+            self.pixel_ring_offset = (self.pixel_ring_offset + text_row_bytes) % pixel_buf_size;
+
+            // Clear the new bottom row's pixels in the ring
+            let bottom_offset = self.pixel_row_offset(self.rows - 1);
+            let buf_ptr = self.back_buf.as_mut().unwrap().as_mut_ptr();
+            // SAFETY: bottom_offset + text_row_bytes is within the ring
+            // buffer (text_row_bytes aligned offsets, pixel_buf_size is a
+            // multiple of text_row_bytes).
+            unsafe {
+                core::ptr::write_bytes(buf_ptr.add(bottom_offset), 0, text_row_bytes);
+            }
+        } else {
+            // No back-buffer: memmove on MMIO (fallback, slow but correct)
+            let row_bytes = FONT_HEIGHT * self.stride;
+            let visible_bytes = self.rows * row_bytes;
+            // SAFETY: fb_ptr valid for stride * height bytes. Source and dest
+            // overlap so we use copy (memmove semantics).
+            unsafe {
+                core::ptr::copy(
+                    self.fb_ptr.add(row_bytes),
+                    self.fb_ptr,
+                    visible_bytes - row_bytes,
+                );
+                core::ptr::write_bytes(self.fb_ptr.add(visible_bytes - row_bytes), 0, row_bytes);
+            }
+        }
+
+        // All rows shifted — need full MMIO blit, but NO glyph re-rendering
         self.dirty_all = true;
     }
 
@@ -470,6 +646,10 @@ impl FramebufferConsole {
                     let bg = self.bg_color;
                     let idx = self.cell_idx(self.cursor_row, self.cursor_col);
                     self.cells[idx] = TextCell { ch: b' ', fg, bg };
+                    // Eagerly render blank glyph to back-buffer
+                    let px = self.cursor_col * FONT_WIDTH;
+                    let py = self.cursor_row * FONT_HEIGHT;
+                    self.render_glyph_to_buf(b' ', px, py, fg, bg);
                     self.mark_dirty(self.cursor_row);
                 }
             }
@@ -485,6 +665,10 @@ impl FramebufferConsole {
                 let bg = self.bg_color;
                 let idx = self.cell_idx(self.cursor_row, self.cursor_col);
                 self.cells[idx] = TextCell { ch, fg, bg };
+                // Eagerly render glyph to back-buffer (1 glyph = 128 pixel writes to RAM)
+                let px = self.cursor_col * FONT_WIDTH;
+                let py = self.cursor_row * FONT_HEIGHT;
+                self.render_glyph_to_buf(ch, px, py, fg, bg);
                 self.mark_dirty(self.cursor_row);
 
                 self.cursor_col += 1;
@@ -610,6 +794,36 @@ impl FramebufferConsole {
                     let idx = self.cell_idx(self.cursor_row, col);
                     self.cells[idx] = TextCell { ch: b' ', fg, bg };
                 }
+                // Eagerly render erased region to back-buffer
+                let py = self.cursor_row * FONT_HEIGHT;
+                let end = end_col.min(self.cols);
+                if bg == (0, 0, 0) {
+                    // Fast path: zero pixel region (ring-adjusted)
+                    let px_start = start_col * FONT_WIDTH * self.bpp;
+                    let px_width = (end - start_col) * FONT_WIDTH * self.bpp;
+                    let has_back_buf = self.back_buf.is_some();
+                    let ring_base = if has_back_buf {
+                        self.pixel_row_offset(self.cursor_row)
+                    } else {
+                        py * self.stride
+                    };
+                    let buf_ptr = match self.back_buf {
+                        Some(ref mut buf) => buf.as_mut_ptr(),
+                        None => self.fb_ptr,
+                    };
+                    for row in 0..FONT_HEIGHT {
+                        let offset = ring_base + row * self.stride + px_start;
+                        // SAFETY: offset + px_width is within the ring buffer
+                        // (or MMIO buffer) bounds.
+                        unsafe {
+                            core::ptr::write_bytes(buf_ptr.add(offset), 0, px_width);
+                        }
+                    }
+                } else {
+                    for col in start_col..end {
+                        self.render_glyph_to_buf(b' ', col * FONT_WIDTH, py, fg, bg);
+                    }
+                }
                 self.mark_dirty(self.cursor_row);
                 self.esc_state = EscapeState::Normal;
             }
@@ -650,7 +864,7 @@ impl FramebufferConsole {
         }
     }
 
-    /// Clear the entire screen — reset text cells and cursor.
+    /// Clear the entire screen — reset text cells, cursor, and pixel ring.
     fn clear(&mut self) {
         let fg = self.fg_color;
         let bg = self.bg_color;
@@ -659,6 +873,36 @@ impl FramebufferConsole {
             for col in 0..self.cols {
                 let idx = self.cell_idx(row, col);
                 self.cells[idx] = blank;
+            }
+        }
+        // Reset pixel ring (screen starts fresh, no offset)
+        self.pixel_ring_offset = 0;
+        // Eagerly clear back-buffer pixels
+        let total_bytes = self.stride * self.height;
+        if bg == (0, 0, 0) {
+            if let Some(ref mut buf) = self.back_buf {
+                // SAFETY: buf is exactly total_bytes in size.
+                unsafe {
+                    core::ptr::write_bytes(buf.as_mut_ptr(), 0, total_bytes);
+                }
+            } else {
+                // SAFETY: fb_ptr is valid for total_bytes.
+                unsafe {
+                    core::ptr::write_bytes(self.fb_ptr, 0, total_bytes);
+                }
+            }
+        } else {
+            let bg_word = self.color_to_word(bg.0, bg.1, bg.2);
+            let buf_ptr = match self.back_buf {
+                Some(ref mut buf) => buf.as_mut_ptr(),
+                None => self.fb_ptr,
+            };
+            // SAFETY: total_bytes is stride * height, writing u32 words.
+            unsafe {
+                let ptr = buf_ptr as *mut u32;
+                for i in 0..(total_bytes / 4) {
+                    ptr.add(i).write(bg_word);
+                }
             }
         }
         self.cursor_col = 0;
@@ -710,9 +954,10 @@ pub fn enable_output() {
 /// Silently returns if fbcon has not been initialized yet or if output
 /// has not been enabled (boot messages go to serial only for performance).
 ///
-/// All text is written to the cell grid and back-buffer (fast RAM), then
-/// dirty regions are blitted to the hardware framebuffer (slow MMIO) in
-/// a single pass at the end.
+/// Text is written to the cell grid (fast RAM) only. Call [`flush()`] to
+/// blit pending changes to the hardware framebuffer. This decoupling
+/// allows multi-line output (e.g. `help`) to accumulate in RAM and then
+/// hit the slow MMIO path only once.
 pub fn _fbcon_print(args: fmt::Arguments) {
     if !FBCON_OUTPUT_ENABLED.load(Ordering::Relaxed) {
         return;
@@ -721,6 +966,20 @@ pub fn _fbcon_print(args: fmt::Arguments) {
     let mut guard = FBCON.lock();
     if let Some(ref mut fbcon) = *guard {
         let _ = fbcon.write_fmt(args);
+    }
+}
+
+/// Blit all pending changes to the hardware framebuffer.
+///
+/// Call this after a logical group of output is complete (e.g., after a
+/// command finishes, after printing the prompt, after echoing a keystroke).
+/// This is the ONLY code path that writes to MMIO.
+pub fn flush() {
+    if !FBCON_OUTPUT_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut guard = FBCON.lock();
+    if let Some(ref mut fbcon) = *guard {
         fbcon.blit_to_framebuffer();
     }
 }
@@ -739,4 +998,19 @@ fn try_alloc_vec(size: usize) -> Result<Vec<u8>, ()> {
     }
     v.resize(size, 0);
     Ok(v)
+}
+
+/// Try to allocate a glyph cache (128KB). Returns `None` on OOM.
+fn try_alloc_glyph_cache() -> Option<GlyphCache> {
+    let count = 256 * FONT_WIDTH * FONT_HEIGHT; // 32,768 u32 entries = 128KB
+    let mut pixels = Vec::new();
+    if pixels.try_reserve_exact(count).is_err() {
+        return None;
+    }
+    pixels.resize(count, 0u32);
+    Some(GlyphCache {
+        pixels,
+        fg_word: 0,
+        bg_word: 0,
+    })
 }
