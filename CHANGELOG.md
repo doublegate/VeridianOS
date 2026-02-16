@@ -1,3 +1,62 @@
+## [0.4.1] - 2026-02-15
+
+### Technical Debt Remediation: Error Handling, Bootstrap Refactoring, and Dead Code Cleanup
+
+Comprehensive cross-cutting technical debt remediation across 58 kernel source files, improving error handling observability, eliminating dead code annotations, refactoring the bootstrap dispatcher, and converting string-based errors to typed `KernelError` variants.
+
+58 files changed, +407/-352 lines.
+
+---
+
+### Changed
+
+#### Wave 1: Structural Remediation (4 parallel agents, non-overlapping file sets)
+
+**TODO Reclassification** (20 files)
+- Reclassified 35 `TODO(phase4)` comments to `TODO(future)` across `net/`, `drivers/`, `sched/`, `security/` modules (phase 4 complete, these are future-phase work)
+- Tagged 12 untagged `TODO` comments with appropriate phase markers (`TODO(future)`, `TODO(phase5)`, `TODO(phase6)`)
+
+**`pkg/` Dead Code Consolidation** (12 files)
+- Replaced 157 per-item `#[allow(dead_code)]` annotations with 11 module-level `#![allow(dead_code)]` directives across `pkg/async_types.rs`, `pkg/compliance.rs`, `pkg/ecosystem.rs`, `pkg/plugin.rs`, `pkg/statistics.rs`, `pkg/testing.rs`, `pkg/sdk/generator.rs`, `pkg/sdk/mod.rs`, `pkg/sdk/pkg_config.rs`, `pkg/sdk/syscall_api.rs`, `pkg/sdk/toolchain.rs`
+- Net reduction of ~146 annotation lines
+
+**Annotation Fixes** (6 files)
+- Converted 7 `Err("...")` string literal errors to typed `KernelError` variants in `arch/x86_64/usermode.rs` (`ResourceExhausted`, `NotInitialized`)
+- Removed 3 unnecessary `#[allow(dead_code)]` annotations from `ipc/error.rs`, `ipc/mod.rs`, `sched/ipc_blocking.rs`
+- Added architecture-conditional `#[allow(unused_variables)]` on `arch/riscv/context.rs` for `entry_point`/`stack_pointer`
+
+**Bootstrap Refactoring** (4 files)
+- Refactored `kernel_init_main()` in `bootstrap.rs` from 370-line monolith to 24-line dispatcher calling 6 focused helper functions: `init_hardware()`, `init_memory()`, `init_process_management()`, `init_kernel_services()`, `activate_scheduler()`, `transition_to_userspace()`
+- Fixed guarded `unwrap()` on `BOOT_ALLOCATOR` lock in `mm/frame_allocator.rs` (replaced raw `unwrap()` with `expect()` providing context)
+- Improved 3 `let _ =` patterns in `mm/mod.rs`, `mm/page_fault.rs`, `mm/vmm.rs` to log or handle errors
+- Fixed 2 `unused_variables` warnings in `mm/vmm.rs`
+
+#### Wave 2: `let _ =` Error Handling Audit (2 parallel agents, non-overlapping file sets)
+
+**Security / Process / IPC / Scheduler** (7 changes across 6 files)
+- `security/auth.rs`: 3 patterns improved -- RNG failures during salt generation, MFA secret generation, and root account creation now log warnings instead of silently discarding errors
+- `process/wait.rs` + `process/exit.rs`: SIGCHLD signal delivery failures now logged (previously silently dropped)
+- `ipc/shared_memory.rs`: Physical frame deallocation failure on region cleanup now logged (prevents silent frame leaks)
+- `sched/numa.rs`: Double-init detection for `NUMA_SCHEDULER` uses `.is_err()` pattern (also fixed `redundant_pattern_matching` clippy lint)
+
+**Crypto / FS / Syscall / Drivers / Desktop / Net / Services / Pkg** (15 changes across 12 files)
+- `crypto/random.rs`: CSPRNG `fill_bytes` failures during key generation now logged
+- `fs/blockfs.rs`: Root directory creation failure during filesystem init now logged; inode write-back errors now logged
+- `fs/pty.rs`: Signal delivery failures to PTY foreground processes now logged
+- `cap/inheritance.rs` + `cap/memory_integration.rs`: Capability inheritance failures and page mapping errors now logged
+- `drivers/mod.rs` + `drivers/gpu.rs`: PCI device enumeration errors and GPU initialization failures now logged
+- `desktop/window_manager.rs`: Window focus-change errors now logged
+- `net/integration.rs` + `net/mod.rs`: Network device registration and DHCP client start failures now logged
+- `services/init_system.rs`: SIGKILL delivery and service restart failures now logged
+- `pkg/mod.rs`: Database persistence failure after package removal now logged
+
+### Build Verification
+- x86_64: Stage 6 BOOTOK, 27/27 tests, zero warnings
+- AArch64: Stage 6 BOOTOK, 27/27 tests, zero warnings
+- RISC-V: Stage 6 BOOTOK, 27/27 tests, zero warnings
+
+---
+
 ## [0.4.0] - 2026-02-15
 
 ### Phase 4 Package Ecosystem: 100% Complete -- Milestone Release

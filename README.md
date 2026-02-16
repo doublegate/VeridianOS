@@ -107,7 +107,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Last Updated**: February 15, 2026 (v0.4.0)
+**Last Updated**: February 15, 2026 (v0.4.1)
 
 ### Current Architecture Support
 
@@ -181,6 +181,18 @@ Released February 14, 2026. Comprehensive completion of both Phase 2 (User Space
 - **Authentication Hardening** — Real timestamps for MFA; PBKDF2-HMAC-SHA256 password hashing; password complexity enforcement; password history (prevent reuse); account expiration
 - **Capability System Phase 3** — ObjectRef::Endpoint in IPC integration; PRESERVE_EXEC filtering; default IPC/memory capabilities; process notification on revocation; permission checks; IPC broadcast for revocation
 - **Syscall Security + Fuzzing** — MAC checks before capability checks in syscall handlers; audit logging in syscall entry/exit; argument validation (pointer bounds, size limits); `FuzzTarget` trait with mutation-based fuzzer; ELF/IPC/FS/capability fuzz targets; crash detection via panic handler hooks
+
+### Technical Debt Remediation (v0.4.1)
+
+Released February 15, 2026. Cross-cutting remediation across 58 kernel source files:
+
+- **Bootstrap Refactoring** -- `kernel_init_main()` refactored from 370-line monolith to 24-line dispatcher with 6 focused helpers; guarded `unwrap()` on `BOOT_ALLOCATOR` lock replaced with contextual `expect()`
+- **Error Handling Audit** -- 22 `let _ =` patterns in security-critical subsystems upgraded to log warnings (auth RNG, SIGCHLD delivery, frame leaks, capability inheritance, network registration, database persistence)
+- **Dead Code Consolidation** -- 157 per-item `#[allow(dead_code)]` in `pkg/` replaced with 11 module-level `#![allow(dead_code)]` directives
+- **String Error Elimination** -- 7 remaining `Err("...")` in `arch/x86_64/usermode.rs` converted to typed `KernelError` variants
+- **TODO Reclassification** -- 35 `TODO(phase4)` reclassified to `TODO(future)`, 12 untagged TODOs given phase markers
+
+58 files changed (+407/-352 lines). All 3 architectures: Stage 6 BOOTOK, 27/27 tests, zero warnings.
 
 ### Phase 4 Milestone (v0.4.0)
 
