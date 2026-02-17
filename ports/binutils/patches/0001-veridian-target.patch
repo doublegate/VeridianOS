@@ -15,141 +15,128 @@ Modified files:
   - gas/configure.tgt: Set ELF object format for veridian targets.
   - ld/configure.tgt: Set linker emulations for veridian targets.
 ---
- bfd/config.bfd    | 22 ++++++++++++++++++++++
- config.sub        |  3 +++
+ config.sub        |  3 ++-
+ bfd/config.bfd    | 21 +++++++++++++++++++++
  gas/configure.tgt |  3 +++
- ld/configure.tgt  | 15 +++++++++++++++
- 4 files changed, 43 insertions(+)
+ ld/configure.tgt  | 12 ++++++++++++
+ 4 files changed, 38 insertions(+), 1 deletion(-)
 
-diff --git a/config.sub b/config.sub
-index 38f3d037a78..c91e5327b01 100755
 --- a/config.sub
 +++ b/config.sub
-@@ -1743,6 +1743,9 @@ case $os in
- 	     | -sim | -xray | -os68k* | -none | -v88r* \
- 	     | -windows* | -osx | -abug | -netware* | -os9* \
- 	     | -macos* | -mpw* | -magic* | -mmixware* | -mon960* | -lnews*)
-+		;;
-+	-veridian*)
-+		# VeridianOS -- capability-based microkernel
+@@ -1768,7 +1768,8 @@
+ 	     | onefs* | tirtos* | phoenix* | fuchsia* | redox* | bme* \
+ 	     | midnightbsd* | amdhsa* | unleashed* | emscripten* | wasi* \
+ 	     | nsk* | powerunix* | genode* | zvmoe* | qnx* | emx* | zephyr* \
+-	     | fiwix* | mlibc* | cos* | mbr* | ironclad* )
++	     | fiwix* | mlibc* | cos* | mbr* | ironclad* \
++	     | veridian* )
  		;;
- 	-mac*)
- 		os=`echo "$os" | sed -e 's|mac|macos|'`
-diff --git a/bfd/config.bfd b/bfd/config.bfd
-index 6e4960f5c9a..f8a2d3b1e7c 100644
+ 	# This one is extra strict with allowed versions
+ 	sco3.2v2 | sco3.2v[4-9]* | sco5v6*)
 --- a/bfd/config.bfd
 +++ b/bfd/config.bfd
-@@ -221,6 +221,12 @@ case "${targ}" in
+@@ -284,6 +284,11 @@
+     targ_selvecs="aarch64_elf64_be_vec aarch64_elf32_le_vec aarch64_elf32_be_vec arm_elf32_le_vec arm_elf32_be_vec"
      want64=true
      ;;
-
 +  aarch64-*-veridian*)
 +    targ_defvec=aarch64_elf64_le_vec
 +    targ_selvecs="aarch64_elf64_be_vec aarch64_elf32_le_vec aarch64_elf32_be_vec"
 +    want64=true
 +    ;;
-+
-   aarch64-*-linux* | aarch64-*-netbsd*)
+   aarch64-*-linux* | aarch64-*-netbsd* | aarch64-*-nto* | aarch64-*-gnu*)
      targ_defvec=aarch64_elf64_le_vec
      targ_selvecs="aarch64_elf64_be_vec aarch64_elf32_le_vec aarch64_elf32_be_vec arm_elf32_le_vec arm_elf32_be_vec aarch64_pei_le_vec aarch64_pe_le_vec"
-@@ -652,6 +658,12 @@ case "${targ}" in
+@@ -710,6 +715,11 @@
+     targ_selvecs="i386_elf32_vec iamcu_elf32_vec i386_coff_vec i386_pei_vec x86_64_pe_vec x86_64_pei_vec"
      want64=true
      ;;
-
 +  x86_64-*-veridian*)
 +    targ_defvec=x86_64_elf64_vec
 +    targ_selvecs=i386_elf32_vec
 +    want64=true
 +    ;;
-+
-   x86_64-*-linux-* | x86_64-*-linux-gnu*)
+   x86_64-*-linux-*)
      targ_defvec=x86_64_elf64_vec
-     targ_selvecs="i386_elf32_vec iamcu_elf32_vec x86_64_elf32_vec"
-@@ -1341,6 +1353,16 @@ case "${targ}" in
-     want64=true
+     targ_selvecs="i386_elf32_vec iamcu_elf32_vec x86_64_elf32_vec i386_pei_vec x86_64_pe_vec x86_64_pei_vec"
+@@ -1227,6 +1237,16 @@
      ;;
 
+ #ifdef BFD64
 +  riscv64-*-veridian*)
-+    targ_defvec=elf64_littleriscv_vec
-+    targ_selvecs="elf32_littleriscv_vec elf64_bigriscv_vec elf32_bigriscv_vec"
++    targ_defvec=riscv_elf64_vec
++    targ_selvecs="riscv_elf32_vec riscv_elf64_be_vec riscv_elf32_be_vec"
 +    want64=true
 +    ;;
 +  riscv32-*-veridian*)
-+    targ_defvec=elf32_littleriscv_vec
-+    targ_selvecs="elf64_littleriscv_vec elf32_bigriscv_vec elf64_bigriscv_vec"
++    targ_defvec=riscv_elf32_vec
++    targ_selvecs="riscv_elf64_vec riscv_elf32_be_vec riscv_elf64_be_vec"
++    want64=true
 +    ;;
-+
-   riscv64-*-linux*)
-     targ_defvec=elf64_littleriscv_vec
-     targ_selvecs="elf32_littleriscv_vec elf64_bigriscv_vec elf32_bigriscv_vec"
-diff --git a/gas/configure.tgt b/gas/configure.tgt
-index 2c8e0d9f13b..b5e7a2c4d61 100644
+   riscvbe-*-* | riscv32be*-*-*)
+     targ_defvec=riscv_elf32_be_vec
+     targ_selvecs="riscv_elf32_vec riscv_elf64_vec riscv_elf32_be_vec riscv_elf64_be_vec riscv64_pei_vec"
 --- a/gas/configure.tgt
 +++ b/gas/configure.tgt
-@@ -52,6 +52,7 @@ case ${generic_target} in
-   aarch64*-*-haiku*)			fmt=elf em=haiku ;;
-   aarch64*-*-fuchsia*)			fmt=elf ;;
-   aarch64*-*-elf* | aarch64*-*-rtems*)	fmt=elf ;;
-+  aarch64*-*-veridian*)			fmt=elf ;;
-
+@@ -138,6 +138,7 @@
+   aarch64*-*-netbsd*)			fmt=elf em=nbsd;;
+   aarch64*-*-nto*)			fmt=elf;;
+   aarch64*-*-openbsd*)			fmt=elf;;
++  aarch64*-*-veridian*)			fmt=elf;;
+   aarch64*-*-pe* | aarch64*-*-mingw*)	fmt=coff em=pepaarch64 ;;
    alpha-*-*vms*)			fmt=evax ;;
-   alpha-*-osf*)				fmt=ecoff em=osf ;;
-@@ -178,6 +179,7 @@ case ${generic_target} in
-   i386-*-gnu*)				fmt=elf em=gnu ;;
-   i386-*-msdos*)			fmt=aout em=dpx2 ;;
-   i386-*-elf*)				fmt=elf ;;
+   alpha-*-osf*)				fmt=ecoff ;;
+@@ -266,6 +267,7 @@
+   i386-*-nto-qnx*)			fmt=elf ;;
+   i386-*-*nt*)				fmt=coff em=pe ;;
+   i386-*-rdos*)				fmt=elf ;;
 +  i386-*-veridian*)			fmt=elf ;;
-   i386-*-nacl*)				fmt=elf em=nacl ;;
+   i386-*-darwin*)			fmt=macho ;;
 
    ia16-*-elf*)				fmt=elf ;;
-@@ -280,6 +282,7 @@ case ${generic_target} in
+@@ -375,6 +377,7 @@
    pru-*-*)				fmt=elf ;;
 
-   riscv*-*-haiku*)			fmt=elf em=haiku ;;
+   riscv*-*-haiku*)			fmt=elf endian=little em=haiku ;;
 +  riscv*-*-veridian*)			fmt=elf ;;
    riscv*-*-*)				fmt=elf ;;
 
    rx-*-linux*)				fmt=elf em=linux ;;
-diff --git a/ld/configure.tgt b/ld/configure.tgt
-index 1a3e5b7c9d4..d2f8c0a1e6b 100644
 --- a/ld/configure.tgt
 +++ b/ld/configure.tgt
-@@ -56,6 +56,11 @@ aarch64-*-elf* | aarch64-*-rtems* | aarch64-*-genode*)
- 			targ_extra_emuls="aarch64elfb aarch64elf32 aarch64elf32b armelfb armelf"
- 			targ_extra_libpath=$targ_extra_emuls
+@@ -98,6 +98,10 @@
+ aarch64-*-fuchsia*)	targ_emul=aarch64elf
+ 			targ_extra_emuls="aarch64elfb armelf armelfb"
  			;;
 +aarch64-*-veridian*)	targ_emul=aarch64elf
 +			targ_extra_emuls="aarch64elfb aarch64elf32 aarch64elf32b"
 +			targ_extra_libpath=$targ_extra_emuls
 +			;;
-+
  aarch64_be-*-linux-gnu_ilp32)
  			targ_emul=aarch64linux32b
  			targ_extra_libpath="aarch64linuxb aarch64linux aarch64linux32 armelfb_linux_eabi armelf_linux_eabi"
-@@ -434,6 +439,11 @@ x86_64-*-elf* | x86_64-*-rtems* | x86_64-*-genode*)
- 			targ_extra_emuls="elf_i386 elf32_x86_64"
- 			targ_extra_libpath=$targ_extra_emuls
- 			;;
-+x86_64-*-veridian*)	targ_emul=elf_x86_64
-+			targ_extra_emuls="elf_i386"
-+			targ_extra_libpath=$targ_extra_emuls
-+			;;
-+
- x86_64-*-linux-gnux32)
- 			targ_emul=elf32_x86_64
- 			targ_extra_emuls="elf_x86_64 elf_i386 elf_iamcu"
-@@ -803,6 +813,11 @@ riscv64-*-elf* | riscv64-*-rtems*)
- 			targ_extra_emuls="elf64lriscv_lp64f elf64lriscv_lp64 elf32lriscv elf32lriscv_ilp32f elf32lriscv_ilp32"
+@@ -829,6 +833,10 @@
+ 			targ_extra_emuls="elf64lriscv elf32briscv elf64briscv"
  			targ_extra_libpath=$targ_extra_emuls
  			;;
 +riscv64-*-veridian*)	targ_emul=elf64lriscv
 +			targ_extra_emuls="elf64lriscv_lp64f elf64lriscv_lp64 elf32lriscv"
 +			targ_extra_libpath=$targ_extra_emuls
 +			;;
-+
- riscv64-*-linux*)
- 			targ_emul=elf64lriscv
- 			targ_extra_emuls="elf64lriscv_lp64f elf64lriscv_lp64 elf32lriscv elf32lriscv_ilp32f elf32lriscv_ilp32"
+ riscv64be*-*-linux*)	targ_emul=elf64briscv
+ 			targ_extra_emuls="elf64briscv_lp64f elf64briscv_lp64 elf32briscv elf32briscv_ilp32f elf32briscv_ilp32 elf64lriscv elf64lriscv_lp64f elf64lriscv_lp64 elf32lriscv elf32lriscv_ilp32f elf32lriscv_ilp32"
+ 			targ_extra_libpath=$targ_extra_emuls
+@@ -1042,6 +1050,10 @@
+ 			targ_extra_libpath="elf_i386 elf_iamcu elf32_x86_64"
+ 			tdir_elf_i386=`echo ${targ_alias} | sed -e 's/x86_64/i386/'`
+ 			;;
++x86_64-*-veridian*)	targ_emul=elf_x86_64
++			targ_extra_emuls="elf_i386"
++			targ_extra_libpath=$targ_extra_emuls
++			;;
+ x86_64-*-dragonfly*)	targ_emul=elf_x86_64
+ 			targ_extra_emuls="elf_i386 elf_iamcu"
+ 			;;
 --
 2.47.1
 

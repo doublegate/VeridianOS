@@ -150,7 +150,7 @@ check_prerequisites() {
 
     local missing=()
 
-    for cmd in gcc g++ make tar wget sha256sum patch bison flex texinfo \
+    for cmd in gcc g++ make tar wget sha256sum patch bison flex \
                makeinfo xz gzip; do
         if ! command -v "${cmd}" &>/dev/null; then
             missing+=("${cmd}")

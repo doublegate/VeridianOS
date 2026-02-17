@@ -64,6 +64,12 @@ CFLAGS  = -std=c11
 CFLAGS += -nostdlib -nostdinc -ffreestanding
 CFLAGS += -isystem $(INCDIR)
 CFLAGS += -isystem $(SYS_INCDIR)
+# Re-add GCC's freestanding headers (stdint.h, stddef.h, float.h, limits.h)
+# which -nostdinc strips.
+GCC_INCDIR := $(shell $(CC) -print-file-name=include 2>/dev/null)
+ifneq ($(GCC_INCDIR),include)
+CFLAGS += -isystem $(GCC_INCDIR)
+endif
 CFLAGS += -Wall -Wextra -Wpedantic
 CFLAGS += -Wno-unused-parameter
 CFLAGS += -fno-stack-protector
@@ -87,6 +93,9 @@ endif
 ASFLAGS  = -nostdlib -nostdinc -ffreestanding
 ASFLAGS += -isystem $(INCDIR)
 ASFLAGS += -isystem $(SYS_INCDIR)
+ifneq ($(GCC_INCDIR),include)
+ASFLAGS += -isystem $(GCC_INCDIR)
+endif
 ASFLAGS += -g
 
 # Architecture-specific assembler flags

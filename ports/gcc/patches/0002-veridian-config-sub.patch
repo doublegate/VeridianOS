@@ -8,26 +8,24 @@ tree).  This patch mirrors the change made to binutils' config.sub so
 that GCC's configure scripts can parse x86_64-veridian,
 aarch64-veridian, and riscv64-veridian target triples.
 
-The entry is added right after the long list of recognized OS names
-(ending with -mon960*, -lnews*) and before the -mac* rewrite rule.
+The entry is added at the end of the long list of recognized OS names,
+just before the closing parenthesis.
 ---
- config.sub | 3 +++
- 1 file changed, 3 insertions(+)
+ config.sub | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
 
-diff --git a/config.sub b/config.sub
-index 38f3d037a78..c91e5327b01 100755
 --- a/config.sub
 +++ b/config.sub
-@@ -1743,6 +1743,9 @@ case $os in
- 	     | -sim | -xray | -os68k* | -none | -v88r* \
- 	     | -windows* | -osx | -abug | -netware* | -os9* \
- 	     | -macos* | -mpw* | -magic* | -mmixware* | -mon960* | -lnews*)
-+		;;
-+	-veridian*)
-+		# VeridianOS -- capability-based microkernel
+@@ -1749,7 +1749,8 @@
+ 	     | onefs* | tirtos* | phoenix* | fuchsia* | redox* | bme* \
+ 	     | midnightbsd* | amdhsa* | unleashed* | emscripten* | wasi* \
+ 	     | nsk* | powerunix* | genode* | zvmoe* | qnx* | emx* | zephyr* \
+-	     | fiwix* )
++	     | fiwix* \
++	     | veridian* )
  		;;
- 	-mac*)
- 		os=`echo "$os" | sed -e 's|mac|macos|'`
+ 	# This one is extra strict with allowed versions
+ 	sco3.2v2 | sco3.2v[4-9]* | sco5v6*)
 --
 2.47.1
 

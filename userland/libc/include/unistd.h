@@ -112,8 +112,20 @@ pid_t fork(void);
 /** Replace the current process image. */
 int execve(const char *pathname, char *const argv[], char *const envp[]);
 
+/** Execute a file with argument vector. */
+int execv(const char *pathname, char *const argv[]);
+
 /** Convenience: search PATH for the file. */
 int execvp(const char *file, char *const argv[]);
+
+/** Execute with argument list (variadic). */
+int execl(const char *pathname, const char *arg, ...);
+
+/** Execute with argument list, search PATH. */
+int execlp(const char *file, const char *arg, ...);
+
+/** Execute with argument list and environment. */
+int execle(const char *pathname, const char *arg, ...);
 
 /** Terminate the calling process immediately. */
 void _exit(int status) __attribute__((noreturn));
