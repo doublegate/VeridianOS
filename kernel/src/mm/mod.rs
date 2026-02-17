@@ -211,8 +211,13 @@ pub fn init_default() {
     // Architecture-specific default memory maps
     #[cfg(target_arch = "x86_64")]
     let default_map = [MemoryRegion {
-        start: 0x100000,         // 1MB
-        size: 128 * 1024 * 1024, // 128MB
+        // Start at 32MB to avoid bootloader structures:
+        //   - Page tables at 0x101000 (frame 257)
+        //   - GDT at 0x18d3000 (frame 6355, ~25MB)
+        //   - Various UEFI-allocated structures in 0-32MB range
+        // With 256MB QEMU RAM, this gives ~224MB of allocatable frames.
+        start: 0x2000000,                    // 32MB
+        size: 256 * 1024 * 1024 - 0x2000000, // Up to 256MB
         usable: true,
     }];
 

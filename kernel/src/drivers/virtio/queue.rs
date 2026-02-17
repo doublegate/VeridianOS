@@ -18,8 +18,10 @@ use core::sync::atomic::{self, Ordering};
 
 use crate::mm::{FrameNumber, FRAME_ALLOCATOR, FRAME_SIZE};
 
-/// Default queue size (power of 2, common for QEMU virtio devices)
-pub const DEFAULT_QUEUE_SIZE: u16 = 128;
+/// Default queue size (power of 2, must match QEMU's virtio-blk queue size).
+/// Legacy virtio requires the driver to use the exact queue size reported by
+/// the device. QEMU's virtio-blk reports 256.
+pub const DEFAULT_QUEUE_SIZE: u16 = 256;
 
 /// Descriptor flag: buffer continues via the `next` field
 pub const VIRTQ_DESC_F_NEXT: u16 = 1;
@@ -158,12 +160,6 @@ impl VirtQueue {
             })?;
 
         let phys_base = first_frame.as_u64() * FRAME_SIZE as u64;
-
-        // On x86_64, physical memory is identity-mapped at a known offset.
-        // For bare-metal (non-bootloader) contexts, low physical addresses
-        // are often identity-mapped. We use the physical address directly
-        // since the frame allocator returns addresses in the identity-mapped
-        // region accessible to the kernel.
         let virt_base = phys_to_kernel_virt(phys_base);
 
         // Zero the entire allocation

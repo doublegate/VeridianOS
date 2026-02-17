@@ -239,13 +239,11 @@ impl VirtioBlkDevice {
     pub fn new(io_base: u16) -> Result<Self, KernelError> {
         let transport = VirtioPciTransport::new(io_base);
 
-        // Step 1-2: Begin initialization
+        // Step 1-2: Begin initialization (reset + ACKNOWLEDGE + DRIVER)
         transport.begin_init();
 
-        // Step 3: Read device features
+        // Step 3: Read and negotiate features
         let device_features = transport.read_device_features();
-
-        // Negotiate features: accept SIZE_MAX, SEG_MAX, RO, BLK_SIZE, FLUSH
         let accepted = device_features
             & (features::VIRTIO_BLK_F_SIZE_MAX
                 | features::VIRTIO_BLK_F_SEG_MAX
@@ -282,9 +280,9 @@ impl VirtioBlkDevice {
         let capacity_sectors = transport.read_device_config_u64(0);
 
         crate::println!(
-            "[VIRTIO-BLK] Initialized: {} sectors ({} MB), {}",
+            "[VIRTIO-BLK] Initialized: {} sectors ({} KB), {}",
             capacity_sectors,
-            capacity_sectors * BLOCK_SIZE as u64 / (1024 * 1024),
+            capacity_sectors * BLOCK_SIZE as u64 / 1024,
             if read_only { "read-only" } else { "read-write" }
         );
 
@@ -639,13 +637,8 @@ fn init_x86_64() {
             }
         };
 
-        // Enable bus mastering for DMA (read-modify-write PCI command register)
+        // Enable I/O space, memory space, and bus mastering
         enable_bus_master(device);
-
-        crate::println!(
-            "[VIRTIO-BLK] Initializing device at I/O base 0x{:04x}",
-            io_base
-        );
 
         match VirtioBlkDevice::new(io_base) {
             Ok(dev) => {
@@ -664,7 +657,7 @@ fn init_x86_64() {
     crate::println!("[VIRTIO-BLK] No virtio-blk devices found on PCI bus");
 }
 
-/// Enable PCI bus mastering for a device (required for DMA).
+/// Enable PCI I/O space, memory space, and bus mastering for a device.
 #[cfg(target_arch = "x86_64")]
 fn enable_bus_master(device: &crate::drivers::pci::PciDevice) {
     let loc = device.location;
@@ -672,13 +665,13 @@ fn enable_bus_master(device: &crate::drivers::pci::PciDevice) {
 
     // SAFETY: Reading and writing PCI configuration space via mechanism #1
     // (ports 0xCF8/0xCFC). We are in kernel mode with full I/O privilege.
-    // This is the same pattern used by
-    // PciBus::read_config_dword/write_config_dword.
     unsafe {
         crate::arch::outl(0xCF8, config_addr);
         let cmd = crate::arch::inl(0xCFC);
-        // Set bit 2 (Bus Master Enable) and bit 1 (Memory Space Enable)
-        let new_cmd = cmd | 0x06;
+        // Set bit 0 (I/O Space), bit 1 (Memory Space), bit 2 (Bus Master)
+        // Only modify the lower 16 bits (Command register); preserve upper
+        // 16 bits (Status register) as zeros to avoid W1C side-effects.
+        let new_cmd = (cmd & 0xFFFF) | 0x07;
         crate::arch::outl(0xCF8, config_addr);
         crate::arch::outl(0xCFC, new_cmd);
     }

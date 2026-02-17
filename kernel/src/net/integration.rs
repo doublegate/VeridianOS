@@ -137,12 +137,21 @@ pub fn register_drivers() -> Result<(), KernelError> {
 fn try_register_e1000(bar_address: u64) -> Result<(), KernelError> {
     use crate::drivers::e1000::E1000Driver;
 
+    // The BAR address is physical — convert to virtual via the bootloader's
+    // physical memory offset mapping.
+    let virt_addr = crate::arch::x86_64::msr::phys_to_virt(bar_address as usize).ok_or(
+        KernelError::NotFound {
+            resource: "e1000_mmio_mapping",
+            id: 0,
+        },
+    )?;
+
     println!(
-        "[NET-INTEGRATION] Initializing E1000 at 0x{:x}",
-        bar_address
+        "[NET-INTEGRATION] Initializing E1000 at phys 0x{:x} (virt 0x{:x})",
+        bar_address, virt_addr
     );
 
-    match E1000Driver::new(bar_address as usize) {
+    match E1000Driver::new(virt_addr) {
         Ok(driver) => {
             let name = driver.name();
             let mac = driver.mac_address();

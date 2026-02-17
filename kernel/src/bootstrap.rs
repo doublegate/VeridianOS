@@ -422,6 +422,28 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
         }
     }
 
+    // Initialize driver framework first (needed by PCI init), then
+    // PCI bus and virtio-blk for disk access.
+    // Must happen after VFS init so TAR loading can populate the filesystem.
+    #[cfg(feature = "alloc")]
+    {
+        kprintln!("[BOOTSTRAP] Initializing PCI + virtio-blk...");
+        services::driver_framework::init();
+        crate::drivers::pci::init();
+        // Enumerate PCI devices so virtio-blk can find its device
+        {
+            let pci_bus = crate::drivers::pci::get_pci_bus().lock();
+            let _ = pci_bus.enumerate_devices();
+        }
+        crate::drivers::virtio::blk::init();
+        kprintln!("[BOOTSTRAP] PCI + virtio-blk initialized");
+
+        // If a virtio-blk disk is attached, read it as a TAR archive
+        // and load its contents into the VFS. This is how cross-compiled
+        // user-space binaries get into the filesystem at boot.
+        load_rootfs_from_disk();
+    }
+
     // Initialize services (process server, driver framework, etc.)
     #[cfg(feature = "alloc")]
     {
@@ -541,6 +563,72 @@ pub fn run() -> ! {
     // Fallback: transfer control to scheduler if shell unavailable
     #[cfg(not(feature = "alloc"))]
     sched::start();
+}
+
+/// Load a rootfs TAR archive from virtio-blk into the VFS.
+///
+/// If a virtio-blk device is attached (via QEMU `-drive ... -device
+/// virtio-blk-pci,...`), read its entire contents into memory and parse as a
+/// TAR archive, creating files and directories in the RamFS. This is the
+/// primary mechanism for getting cross-compiled user-space binaries into the
+/// filesystem at boot.
+#[cfg(feature = "alloc")]
+fn load_rootfs_from_disk() {
+    use crate::drivers::virtio::blk;
+
+    if !blk::is_initialized() {
+        kprintln!("[ROOTFS] No virtio-blk device, skipping disk load");
+        return;
+    }
+
+    let device = match blk::get_device() {
+        Some(dev) => dev,
+        None => {
+            kprintln!("[ROOTFS] virtio-blk device not available");
+            return;
+        }
+    };
+
+    let mut dev = device.lock();
+    let total_sectors = dev.capacity_sectors();
+    let total_bytes = total_sectors as usize * blk::BLOCK_SIZE;
+
+    if total_sectors == 0 {
+        kprintln!("[ROOTFS] Disk is empty (0 sectors)");
+        return;
+    }
+
+    kprintln!(
+        "[ROOTFS] Reading {} sectors ({} KB) from virtio-blk...",
+        total_sectors,
+        total_bytes / 1024
+    );
+
+    // Allocate buffer for entire disk contents
+    let mut disk_data = alloc::vec![0u8; total_bytes];
+
+    // Read all sectors
+    for sector in 0..total_sectors {
+        let offset = sector as usize * blk::BLOCK_SIZE;
+        if let Err(_e) = dev.read_block(sector, &mut disk_data[offset..offset + blk::BLOCK_SIZE]) {
+            kprintln!("[ROOTFS] Read error at sector");
+            return;
+        }
+    }
+
+    // Release the device lock before calling into VFS
+    drop(dev);
+
+    kprintln!("[ROOTFS] Disk read complete, parsing TAR archive...");
+
+    match crate::fs::tar::load_tar_to_vfs(&disk_data) {
+        Ok(_count) => {
+            kprintln!("[ROOTFS] Loaded entries from disk into VFS");
+        }
+        Err(_e) => {
+            kprintln!("[ROOTFS] TAR parse error");
+        }
+    }
 }
 
 /// Kernel-mode init function

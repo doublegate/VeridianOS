@@ -229,6 +229,7 @@ out/
 *.sublime-workspace
 
 # Archive files (temporary)
+*.tar
 *.tar.gz
 *.tar.xz
 *.zip
