@@ -194,12 +194,13 @@ pub fn parse_shebang(data: &[u8]) -> Option<(String, Option<String>)> {
     }
 }
 
-/// Search for an executable by name in standard PATH directories
+/// Search for an executable by name in PATH directories
 ///
 /// If `name` contains a `/`, it is treated as an explicit path and returned
-/// as-is (if it exists in the VFS). Otherwise, the function searches
-/// `/bin`, `/usr/bin`, and `/usr/local/bin` in order, returning the first
-/// match.
+/// as-is (if it exists in the VFS). Otherwise, the function first checks the
+/// current process's `env_vars` for a `PATH` entry (colon-separated list of
+/// directories). If no `PATH` environment variable is set, it falls back to
+/// the default search directories: `/bin`, `/usr/bin`, `/usr/local/bin`.
 #[cfg(feature = "alloc")]
 pub fn search_path(name: &str) -> Option<String> {
     use crate::fs;
@@ -212,13 +213,32 @@ pub fn search_path(name: &str) -> Option<String> {
         return None;
     }
 
-    // Standard search directories (simple PATH without $PATH env variable)
-    const SEARCH_DIRS: &[&str] = &["/bin", "/usr/bin", "/usr/local/bin"];
+    // Try to read PATH from the current process's environment variables.
+    let path_env: Option<String> = super::current_process().and_then(|proc| {
+        let env = proc.env_vars.lock();
+        env.get("PATH").cloned()
+    });
 
-    for dir in SEARCH_DIRS {
-        let full_path = format!("{}/{}", dir, name);
-        if fs::file_exists(&full_path) {
-            return Some(full_path);
+    if let Some(ref path_val) = path_env {
+        // Search each colon-separated directory in PATH.
+        for dir in path_val.split(':') {
+            if dir.is_empty() {
+                continue;
+            }
+            let full_path = format!("{}/{}", dir, name);
+            if fs::file_exists(&full_path) {
+                return Some(full_path);
+            }
+        }
+    } else {
+        // Fallback: standard search directories when no PATH env is set.
+        const DEFAULT_SEARCH_DIRS: &[&str] = &["/bin", "/usr/bin", "/usr/local/bin"];
+
+        for dir in DEFAULT_SEARCH_DIRS {
+            let full_path = format!("{}/{}", dir, name);
+            if fs::file_exists(&full_path) {
+                return Some(full_path);
+            }
         }
     }
 
@@ -350,6 +370,21 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
     // Step 3: Setup new stack with arguments, environment, and aux vector
     let stack_top = setup_exec_stack(process, argv, envp, aux_vector.as_deref())?;
 
+    // Step 3b: Populate the process's env_vars BTreeMap from envp.
+    // This makes environment variables available to kernel-side lookups
+    // (e.g. PATH resolution in search_path()) without reading user memory.
+    {
+        let mut env_map = process.env_vars.lock();
+        env_map.clear();
+        for &env_str in envp {
+            if let Some(eq_pos) = env_str.find('=') {
+                let key = String::from(&env_str[..eq_pos]);
+                let value = String::from(&env_str[eq_pos + 1..]);
+                env_map.insert(key, value);
+            }
+        }
+    }
+
     // Step 4: Reset thread context to new entry point
     {
         let mut ctx = current_thread.context.lock();
@@ -363,6 +398,20 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
 
         // Clear return value (argc is passed differently)
         ctx.set_return_value(0);
+    }
+
+    // Step 4b: Sync scheduler Task context with the updated thread context.
+    // The scheduler has its own TaskContext (set at task creation) which must
+    // match the thread's new entry point/stack, otherwise the scheduler will
+    // resume at the old (pre-exec) address.
+    {
+        let sched = crate::sched::scheduler::current_scheduler().lock();
+        if let Some(task_ptr) = sched.current() {
+            // SAFETY: We are the currently running task and hold the scheduler
+            // lock, so no other CPU will modify this Task concurrently.
+            let task = unsafe { &mut *task_ptr.as_ptr() };
+            task.context = crate::sched::task::TaskContext::new(final_entry as usize, stack_top);
+        }
     }
 
     // Step 5: Close file descriptors marked close-on-exec

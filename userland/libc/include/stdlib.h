@@ -127,6 +127,37 @@ typedef struct { long quot; long rem; } ldiv_t;
 div_t div(int numer, int denom);
 ldiv_t ldiv(long numer, long denom);
 
+/* ========================================================================= */
+/* Temporary files                                                           */
+/* ========================================================================= */
+
+/**
+ * Create a unique temporary file from a template.
+ *
+ * The last six characters of template must be "XXXXXX" and will be
+ * replaced to produce a unique filename.  The file is opened with
+ * O_CREAT | O_EXCL | O_RDWR, mode 0600.
+ *
+ * @param tmpl  Mutable path ending in "XXXXXX".
+ * @return Open file descriptor on success, -1 on error.
+ */
+int mkstemp(char *tmpl);
+
+/* ========================================================================= */
+/* Command execution                                                         */
+/* ========================================================================= */
+
+/**
+ * Execute a command via the shell.
+ *
+ * If command is NULL, returns non-zero (shell is available).
+ * Otherwise fork/exec "/bin/sh -c command" and return the exit status.
+ *
+ * @param command  Shell command string, or NULL to test shell availability.
+ * @return Exit status of the command, or -1 on error.
+ */
+int system(const char *command);
+
 #ifdef __cplusplus
 }
 #endif

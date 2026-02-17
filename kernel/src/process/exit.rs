@@ -49,9 +49,18 @@ pub fn exit_process(exit_code: i32) {
         // Mark process as zombie (parent needs to reap)
         process.set_state(ProcessState::Zombie);
 
-        // Wake up parent if waiting
+        // Notify parent: send SIGCHLD and wake if blocked
         if let Some(parent_pid) = process.parent {
             if let Some(parent) = table::get_process(parent_pid) {
+                // Send SIGCHLD to parent (POSIX: delivered on child exit)
+                if let Err(_e) = parent.send_signal(signals::SIGCHLD as usize) {
+                    println!(
+                        "[PROCESS] Warning: Failed to send SIGCHLD to parent {}: {:?}",
+                        parent_pid.0, _e
+                    );
+                }
+
+                // Wake parent if it is blocked (e.g. in waitpid)
                 let parent_state = parent.get_state();
                 if parent_state == ProcessState::Blocked {
                     parent.set_state(ProcessState::Ready);
@@ -180,22 +189,20 @@ pub fn wait_process_with_options(
             return Ok((ProcessId(0), 0));
         }
 
-        // Block current process until a child changes state
-        // The child will wake us up when it exits (see exit_process)
-        current.set_state(ProcessState::Blocked);
-
-        // Register for child termination notification
-        // This is done by setting up a wait queue entry
+        // Block current process until a child changes state.
+        // Use the scheduler's block_process() which properly updates the
+        // task, thread, and process states and triggers a reschedule.
+        // The child will wake us via sched::wake_up_process() when it exits
+        // (see exit_process / force_terminate_process).
         println!(
             "[PROCESS] Process {} blocking in wait() for child {}",
             current_pid.0,
             pid.map_or(-1, |p| p.0 as i64)
         );
 
-        // Yield to scheduler - we're now blocked
-        sched::yield_cpu();
+        sched::block_process(current_pid);
 
-        // When we wake up, loop back to check for zombie children
+        // When we wake up, loop back to check for zombie children.
         // The wakeup can come from:
         // 1. A child exiting (sets parent to Ready and calls wake_up_process)
         // 2. A signal being delivered to this process

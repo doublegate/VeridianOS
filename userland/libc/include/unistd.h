@@ -81,6 +81,27 @@ int access(const char *pathname, int mode);
 /** Read the target of a symbolic link. */
 ssize_t readlink(const char *pathname, char *buf, size_t bufsiz);
 
+/** Create a hard link. */
+int link(const char *oldpath, const char *newpath);
+
+/** Create a symbolic link. */
+int symlink(const char *target, const char *linkpath);
+
+/** Truncate a file to a specified length (by path). */
+int truncate(const char *path, off_t length);
+
+/** Truncate a file to a specified length (by fd). */
+int ftruncate(int fd, off_t length);
+
+/** Read from fd at offset without changing file position. */
+ssize_t pread(int fd, void *buf, size_t count, off_t offset);
+
+/** Write to fd at offset without changing file position. */
+ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
+
+/** Resolve a pathname to an absolute path. */
+char *realpath(const char *path, char *resolved_path);
+
 /* ========================================================================= */
 /* Process control                                                           */
 /* ========================================================================= */

@@ -1673,3 +1673,440 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
 
     Ok(total_written)
 }
+
+// ============================================================================
+// Self-hosting syscalls (Phase 4A: Tiers 1)
+// ============================================================================
+
+/// AT_FDCWD sentinel: use process current working directory.
+const AT_FDCWD: usize = usize::MAX; // -1 as usize
+
+/// Create a hard link (syscall 155).
+///
+/// Creates a new directory entry `new_path` pointing to the same file as
+/// `old_path`. Both paths must be on the same filesystem.
+pub fn sys_link(old_ptr: usize, new_ptr: usize) -> SyscallResult {
+    let old_path = read_user_path(old_ptr)?;
+    let new_path = read_user_path(new_ptr)?;
+
+    let vfs_lock = vfs()?;
+    let vfs_guard = vfs_lock.read();
+
+    // Resolve the old path to get the target node
+    let target = vfs_guard
+        .resolve_path(&old_path)
+        .map_err(|_| SyscallError::ResourceNotFound)?;
+
+    // Split new_path into parent dir + name
+    let (parent_path, link_name) = split_path(&new_path)?;
+
+    let parent = vfs_guard
+        .resolve_path(&parent_path)
+        .map_err(|_| SyscallError::ResourceNotFound)?;
+
+    parent
+        .link(&link_name, target)
+        .map_err(|_| SyscallError::InvalidArgument)?;
+
+    Ok(0)
+}
+
+/// Create a symbolic link (syscall 156).
+///
+/// Creates a symlink at `link_path` pointing to `target`.
+pub fn sys_symlink(target_ptr: usize, link_ptr: usize) -> SyscallResult {
+    let target = read_user_path(target_ptr)?;
+    let link_path = read_user_path(link_ptr)?;
+
+    let vfs_lock = vfs()?;
+    let vfs_guard = vfs_lock.read();
+
+    let (parent_path, link_name) = split_path(&link_path)?;
+
+    let parent = vfs_guard
+        .resolve_path(&parent_path)
+        .map_err(|_| SyscallError::ResourceNotFound)?;
+
+    parent
+        .symlink(&link_name, &target)
+        .map_err(|_| SyscallError::InvalidArgument)?;
+
+    Ok(0)
+}
+
+/// Change file permissions by path (syscall 185).
+pub fn sys_chmod(path_ptr: usize, mode: usize) -> SyscallResult {
+    let path = read_user_path(path_ptr)?;
+
+    let vfs_lock = vfs()?;
+    let vfs_guard = vfs_lock.read();
+    let node = vfs_guard
+        .resolve_path(&path)
+        .map_err(|_| SyscallError::ResourceNotFound)?;
+
+    let perms = Permissions::from_mode(mode as u32);
+    node.chmod(perms)
+        .map_err(|_| SyscallError::InvalidArgument)?;
+
+    Ok(0)
+}
+
+/// Change file permissions by fd (syscall 186).
+pub fn sys_fchmod(fd: usize, mode: usize) -> SyscallResult {
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file_table = proc.file_table.lock();
+    let file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+
+    let perms = Permissions::from_mode(mode as u32);
+    file.node
+        .chmod(perms)
+        .map_err(|_| SyscallError::InvalidArgument)?;
+
+    Ok(0)
+}
+
+/// Set file creation mask (syscall 187).
+///
+/// Returns the previous umask value.
+pub fn sys_umask(mask: usize) -> SyscallResult {
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let old = proc
+        .umask
+        .swap(mask as u32 & 0o777, core::sync::atomic::Ordering::AcqRel);
+    Ok(old as usize)
+}
+
+/// Truncate a file by path (syscall 188).
+pub fn sys_truncate_path(path_ptr: usize, size: usize) -> SyscallResult {
+    let path = read_user_path(path_ptr)?;
+
+    let vfs_lock = vfs()?;
+    let vfs_guard = vfs_lock.read();
+    let node = vfs_guard
+        .resolve_path(&path)
+        .map_err(|_| SyscallError::ResourceNotFound)?;
+
+    node.truncate(size)
+        .map_err(|_| SyscallError::InvalidArgument)?;
+
+    Ok(0)
+}
+
+/// Poll file descriptors for readiness (syscall 189).
+///
+/// Simplified implementation: checks each fd for readability/writability
+/// and returns immediately (no blocking).
+///
+/// # Arguments
+/// - `fds_ptr`: Pointer to array of PollFd structs.
+/// - `nfds`: Number of entries.
+/// - `_timeout_ms`: Timeout in milliseconds (ignored — always returns
+///   immediately).
+pub fn sys_poll(fds_ptr: usize, nfds: usize, _timeout_ms: usize) -> SyscallResult {
+    if nfds == 0 {
+        return Ok(0);
+    }
+    if nfds > 256 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    validate_user_buffer(fds_ptr, nfds * core::mem::size_of::<PollFd>())?;
+
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file_table = proc.file_table.lock();
+    let mut ready_count = 0usize;
+
+    for i in 0..nfds {
+        // SAFETY: fds_ptr was validated above and PollFd is repr(C).
+        let pollfd = unsafe { &mut *((fds_ptr as *mut PollFd).add(i)) };
+        pollfd.revents = 0;
+
+        if pollfd.fd < 0 {
+            continue;
+        }
+
+        if let Some(_file) = file_table.get(pollfd.fd as usize) {
+            // Simplified: files/pipes are always readable and writable for now.
+            // A proper implementation would check pipe buffer state.
+            if pollfd.events & POLLIN != 0 {
+                pollfd.revents |= POLLIN;
+            }
+            if pollfd.events & POLLOUT != 0 {
+                pollfd.revents |= POLLOUT;
+            }
+            if pollfd.revents != 0 {
+                ready_count += 1;
+            }
+        } else {
+            pollfd.revents = POLLNVAL;
+            ready_count += 1;
+        }
+    }
+
+    Ok(ready_count)
+}
+
+/// Poll event flags
+const POLLIN: i16 = 0x001;
+const POLLOUT: i16 = 0x004;
+const POLLNVAL: i16 = 0x020;
+
+/// Poll file descriptor structure (matches C struct pollfd).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
+
+/// Resolve a path relative to a directory fd.
+///
+/// If `dirfd == AT_FDCWD`, uses the process CWD. Otherwise resolves the
+/// path relative to the directory referred to by dirfd.
+fn resolve_at_path(dirfd: usize, path: &str) -> Result<alloc::string::String, SyscallError> {
+    use alloc::string::String;
+
+    if path.starts_with('/') {
+        // Absolute path — dirfd is irrelevant
+        return Ok(String::from(path));
+    }
+
+    if dirfd == AT_FDCWD {
+        // Relative to CWD
+        let cwd = if let Some(vfs_lock) = try_get_vfs() {
+            let vfs_guard = vfs_lock.read();
+            String::from(vfs_guard.get_cwd())
+        } else {
+            String::from("/")
+        };
+        if cwd.ends_with('/') {
+            Ok(alloc::format!("{}{}", cwd, path))
+        } else {
+            Ok(alloc::format!("{}/{}", cwd, path))
+        }
+    } else {
+        // Relative to directory fd — for now treat as relative to CWD.
+        // Full implementation would look up the fd, verify it's a directory,
+        // and resolve relative to its path.
+        let cwd = if let Some(vfs_lock) = try_get_vfs() {
+            let vfs_guard = vfs_lock.read();
+            String::from(vfs_guard.get_cwd())
+        } else {
+            String::from("/")
+        };
+        if cwd.ends_with('/') {
+            Ok(alloc::format!("{}{}", cwd, path))
+        } else {
+            Ok(alloc::format!("{}/{}", cwd, path))
+        }
+    }
+}
+
+/// Open a file relative to a directory fd (syscall 190).
+pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> SyscallResult {
+    let rel_path = read_user_path(path_ptr)?;
+    let abs_path = resolve_at_path(dirfd, &rel_path)?;
+
+    // Delegate to sys_open using the resolved absolute path.
+    // We write the path to a temporary kernel buffer, then call the existing
+    // sys_open logic. Since sys_open reads from a user pointer, we use the
+    // VFS directly instead.
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let open_flags = OpenFlags::from_bits(flags as u32).ok_or(SyscallError::InvalidArgument)?;
+
+    match vfs()?.read().open(&abs_path, open_flags) {
+        Ok(node) => {
+            let file = crate::fs::file::File::new(node, open_flags);
+            let file_table = proc.file_table.lock();
+            match file_table.open(alloc::sync::Arc::new(file)) {
+                Ok(fd_num) => Ok(fd_num),
+                Err(_) => Err(SyscallError::OutOfMemory),
+            }
+        }
+        Err(_) => {
+            // If O_CREAT, create the file
+            if open_flags.create {
+                let perms = Permissions::from_mode(mode as u32);
+                let (parent_path, name) = split_path(&abs_path)?;
+                let vfs_guard = vfs()?.read();
+                let parent = vfs_guard
+                    .resolve_path(&parent_path)
+                    .map_err(|_| SyscallError::ResourceNotFound)?;
+                match parent.create(&name, perms) {
+                    Ok(node) => {
+                        let file = crate::fs::file::File::new(node, open_flags);
+                        let file_table = proc.file_table.lock();
+                        match file_table.open(alloc::sync::Arc::new(file)) {
+                            Ok(fd_num) => Ok(fd_num),
+                            Err(_) => Err(SyscallError::OutOfMemory),
+                        }
+                    }
+                    Err(_) => Err(SyscallError::ResourceNotFound),
+                }
+            } else {
+                Err(SyscallError::ResourceNotFound)
+            }
+        }
+    }
+}
+
+/// Stat a file relative to a directory fd (syscall 191).
+pub fn sys_fstatat(dirfd: usize, path_ptr: usize, stat_buf: usize, _flags: usize) -> SyscallResult {
+    let rel_path = read_user_path(path_ptr)?;
+    let abs_path = resolve_at_path(dirfd, &rel_path)?;
+
+    validate_user_ptr_typed::<FileStat>(stat_buf)?;
+
+    let vfs_lock = vfs()?;
+    let vfs_guard = vfs_lock.read();
+    let node = vfs_guard
+        .resolve_path(&abs_path)
+        .map_err(|_| SyscallError::ResourceNotFound)?;
+
+    match node.metadata() {
+        Ok(metadata) => {
+            // SAFETY: stat_buf was validated above.
+            unsafe {
+                let buf = stat_buf as *mut FileStat;
+                (*buf).size = metadata.size;
+                (*buf).mode = match metadata.node_type {
+                    crate::fs::NodeType::File => 0o100644,
+                    crate::fs::NodeType::Directory => 0o040755,
+                    crate::fs::NodeType::CharDevice => 0o020666,
+                    crate::fs::NodeType::BlockDevice => 0o060666,
+                    _ => 0,
+                };
+                (*buf).uid = metadata.uid;
+                (*buf).gid = metadata.gid;
+                (*buf).created = metadata.created;
+                (*buf).modified = metadata.modified;
+                (*buf).accessed = metadata.accessed;
+            }
+            Ok(0)
+        }
+        Err(_) => Err(SyscallError::InvalidState),
+    }
+}
+
+/// Unlink a file relative to a directory fd (syscall 192).
+///
+/// If flags contains AT_REMOVEDIR (0x200), acts like rmdir.
+pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, _flags: usize) -> SyscallResult {
+    let rel_path = read_user_path(path_ptr)?;
+    let abs_path = resolve_at_path(dirfd, &rel_path)?;
+
+    let vfs_lock = vfs()?;
+    vfs_lock
+        .read()
+        .unlink(&abs_path)
+        .map_err(|_| SyscallError::ResourceNotFound)?;
+
+    Ok(0)
+}
+
+/// Create a directory relative to a directory fd (syscall 193).
+pub fn sys_mkdirat(dirfd: usize, path_ptr: usize, mode: usize) -> SyscallResult {
+    let rel_path = read_user_path(path_ptr)?;
+    let abs_path = resolve_at_path(dirfd, &rel_path)?;
+
+    let permissions = Permissions::from_mode(mode as u32);
+    vfs()?
+        .read()
+        .mkdir(&abs_path, permissions)
+        .map_err(|_| SyscallError::InvalidState)?;
+
+    Ok(0)
+}
+
+/// Rename a file relative to directory fds (syscall 194).
+pub fn sys_renameat(
+    olddirfd: usize,
+    old_ptr: usize,
+    newdirfd: usize,
+    new_ptr: usize,
+) -> SyscallResult {
+    let old_rel = read_user_path(old_ptr)?;
+    let new_rel = read_user_path(new_ptr)?;
+    let old_abs = resolve_at_path(olddirfd, &old_rel)?;
+    let new_abs = resolve_at_path(newdirfd, &new_rel)?;
+
+    // Rename as copy + delete
+    let data = crate::fs::read_file(&old_abs).map_err(|_| SyscallError::ResourceNotFound)?;
+    crate::fs::write_file(&new_abs, &data).map_err(|_| SyscallError::InvalidState)?;
+    vfs()?
+        .read()
+        .unlink(&old_abs)
+        .map_err(|_| SyscallError::InvalidState)?;
+
+    Ok(0)
+}
+
+/// Read from a file descriptor at a given offset without changing position
+/// (syscall 195).
+pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> SyscallResult {
+    if count == 0 {
+        return Ok(0);
+    }
+    validate_user_buffer(buf, count)?;
+
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file_table = proc.file_table.lock();
+    let file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+
+    // Read directly at offset through the VfsNode, bypassing File position
+    // SAFETY: buf was validated above.
+    let buffer_slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, count) };
+    match file.node.read(offset, buffer_slice) {
+        Ok(n) => Ok(n),
+        Err(_) => Err(SyscallError::InvalidState),
+    }
+}
+
+/// Write to a file descriptor at a given offset without changing position
+/// (syscall 196).
+pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> SyscallResult {
+    if count == 0 {
+        return Ok(0);
+    }
+    validate_user_buffer(buf, count)?;
+
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file_table = proc.file_table.lock();
+    let file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+
+    // Write directly at offset through the VfsNode, bypassing File position
+    // SAFETY: buf was validated above.
+    let buffer_slice = unsafe { core::slice::from_raw_parts(buf as *const u8, count) };
+    match file.node.write(offset, buffer_slice) {
+        Ok(n) => Ok(n),
+        Err(_) => Err(SyscallError::InvalidState),
+    }
+}
+
+/// Helper: split a path into (parent_dir, basename).
+fn split_path(path: &str) -> Result<(alloc::string::String, alloc::string::String), SyscallError> {
+    use alloc::string::String;
+
+    if let Some(pos) = path.rfind('/') {
+        let parent = if pos == 0 {
+            String::from("/")
+        } else {
+            String::from(&path[..pos])
+        };
+        let name = String::from(&path[pos + 1..]);
+        if name.is_empty() {
+            return Err(SyscallError::InvalidArgument);
+        }
+        Ok((parent, name))
+    } else {
+        // No slash — parent is CWD
+        let cwd = if let Some(vfs_lock) = try_get_vfs() {
+            let vfs_guard = vfs_lock.read();
+            String::from(vfs_guard.get_cwd())
+        } else {
+            String::from("/")
+        };
+        Ok((cwd, String::from(path)))
+    }
+}

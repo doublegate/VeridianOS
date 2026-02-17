@@ -20,6 +20,7 @@ pub mod pipe;
 pub mod procfs;
 pub mod pty;
 pub mod ramfs;
+pub mod tar;
 
 pub use file::{File, FileDescriptor, FileTable, OpenFlags, SeekFrom};
 
@@ -155,6 +156,32 @@ pub trait VfsNode: Send + Sync {
 
     /// Truncate the file to the specified size
     fn truncate(&self, size: usize) -> Result<(), KernelError>;
+
+    /// Create a hard link to this node
+    fn link(&self, _name: &str, _target: Arc<dyn VfsNode>) -> Result<(), KernelError> {
+        Err(KernelError::NotImplemented {
+            feature: "hard links",
+        })
+    }
+
+    /// Create a symbolic link in this directory
+    fn symlink(&self, _name: &str, _target: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::NotImplemented {
+            feature: "symbolic links",
+        })
+    }
+
+    /// Read the target of a symbolic link
+    fn readlink(&self) -> Result<String, KernelError> {
+        Err(KernelError::NotImplemented {
+            feature: "readlink",
+        })
+    }
+
+    /// Change permissions on this node
+    fn chmod(&self, _permissions: Permissions) -> Result<(), KernelError> {
+        Err(KernelError::NotImplemented { feature: "chmod" })
+    }
 }
 
 /// Filesystem trait
@@ -531,7 +558,7 @@ pub fn init() {
                 root.mkdir("root", Permissions::default()).ok();
                 root.mkdir("sbin", Permissions::default()).ok();
                 root.mkdir("sys", Permissions::default()).ok();
-                root.mkdir("tmp", Permissions::default()).ok();
+                root.mkdir("tmp", Permissions::from_mode(0o777)).ok();
                 root.mkdir("usr", Permissions::default()).ok();
                 root.mkdir("var", Permissions::default()).ok();
             }

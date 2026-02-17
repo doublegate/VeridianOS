@@ -146,6 +146,9 @@ pub struct Process {
 
     /// Signal mask (blocked signals)
     pub signal_mask: AtomicU64,
+
+    /// File creation mask (umask). Default 0o022.
+    pub umask: AtomicU32,
 }
 
 /// Memory usage statistics
@@ -192,6 +195,7 @@ impl Process {
             signal_handlers: Mutex::new([0u64; 32]),
             pending_signals: AtomicU64::new(0),
             signal_mask: AtomicU64::new(0),
+            umask: AtomicU32::new(0o022),
         }
     }
 

@@ -5,9 +5,12 @@
 //! - `sys_munmap` (21): Unmap a memory region
 //! - `sys_mprotect` (22): Change page protection flags
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
 use super::{validate_user_pointer, SyscallError, SyscallResult};
 use crate::{
-    mm::{vas::MappingType, VirtualAddress},
+    mm::{vas::MappingType, VirtualAddress, PAGE_SIZE},
     process,
 };
 
@@ -116,8 +119,8 @@ pub fn sys_mmap(
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
 
     let is_anonymous = flags & MAP_ANONYMOUS != 0;
-    let _fd = if !is_anonymous { fd_offset >> 32 } else { 0 };
-    let _offset = if !is_anonymous {
+    let fd = if !is_anonymous { fd_offset >> 32 } else { 0 };
+    let offset = if !is_anonymous {
         fd_offset & 0xFFFF_FFFF
     } else {
         0
@@ -126,19 +129,58 @@ pub fn sys_mmap(
     let mapping_type = prot_to_mapping_type(prot, shared);
     let memory_space = proc.memory_space.lock();
 
-    if is_fixed {
+    let mapped_addr = if is_fixed {
         // MAP_FIXED: map at the exact requested address
         memory_space
             .map_region(VirtualAddress(addr as u64), length, mapping_type)
             .map_err(|_| SyscallError::OutOfMemory)?;
-        Ok(addr)
+        addr
     } else {
         // Kernel-chosen address: use VAS.mmap() which bumps next_mmap_addr
         let vaddr = memory_space
             .mmap(length, mapping_type)
             .map_err(|_| SyscallError::OutOfMemory)?;
-        Ok(vaddr.as_usize())
+        vaddr.as_usize()
+    };
+
+    // For file-backed mappings, read file contents into the mapped pages
+    if !is_anonymous {
+        let file_table = proc.file_table.lock();
+        if let Some(file) = file_table.get(fd) {
+            // Read file data for the requested range
+            let aligned_len = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let mut buf = alloc::vec![0u8; aligned_len];
+            // Seek to the requested offset and read
+            let _ = file.seek(crate::fs::file::SeekFrom::Start(offset));
+            let _bytes_read = file.read(&mut buf).unwrap_or(0);
+
+            // Write file data into the mapped region via physical memory.
+            // The pages are mapped in the process's page tables. We walk the
+            // page tables to find the physical frames and write through the
+            // kernel's identity-mapped physical window.
+            let pt_root = memory_space.get_page_table();
+            if pt_root != 0 {
+                let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
+                for page_off in (0..aligned_len).step_by(PAGE_SIZE) {
+                    let vaddr = mapped_addr + page_off;
+                    if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64))
+                    {
+                        let phys_addr = frame.as_u64() << 12;
+                        let copy_len = PAGE_SIZE.min(buf.len() - page_off);
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                buf[page_off..].as_ptr(),
+                                phys_addr as *mut u8,
+                                copy_len,
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
+
+    Ok(mapped_addr)
 }
 
 /// Unmap a memory region (syscall 21).

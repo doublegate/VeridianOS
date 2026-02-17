@@ -124,3 +124,141 @@ int isatty(int fd)
     errno = ENOTTY;
     return 0;
 }
+
+/* ========================================================================= */
+/* Path resolution                                                           */
+/* ========================================================================= */
+
+/* PATH_MAX -- no <limits.h> yet, define locally. */
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
+/*
+ * realpath: resolve a pathname to an absolute, canonical form.
+ *
+ * Handles:
+ *   - Relative paths (prepend cwd)
+ *   - "." (current directory)
+ *   - ".." (parent directory)
+ *   - Consecutive slashes
+ *   - Trailing slashes
+ *
+ * Does NOT follow symlinks (no readlink loop) -- adequate for early userland.
+ * If resolved_path is NULL, a buffer is malloc'd for the caller to free.
+ */
+char *realpath(const char *path, char *resolved_path)
+{
+    if (!path || *path == '\0') {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    char *buf = resolved_path;
+    if (!buf) {
+        buf = (char *)malloc(PATH_MAX);
+        if (!buf) {
+            errno = ENOMEM;
+            return NULL;
+        }
+    }
+
+    /*
+     * Build the absolute path in a working buffer, then copy resolved
+     * components into buf.
+     */
+    char work[PATH_MAX];
+
+    if (path[0] != '/') {
+        /* Relative path: prepend cwd. */
+        if (!getcwd(work, sizeof(work))) {
+            if (!resolved_path) free(buf);
+            return NULL;  /* errno set by getcwd */
+        }
+        size_t cwdlen = strlen(work);
+        if (cwdlen + 1 + strlen(path) + 1 > sizeof(work)) {
+            if (!resolved_path) free(buf);
+            errno = ENAMETOOLONG;
+            return NULL;
+        }
+        work[cwdlen] = '/';
+        strcpy(work + cwdlen + 1, path);
+    } else {
+        if (strlen(path) >= sizeof(work)) {
+            if (!resolved_path) free(buf);
+            errno = ENAMETOOLONG;
+            return NULL;
+        }
+        strcpy(work, path);
+    }
+
+    /*
+     * Now walk through 'work' component by component, building the
+     * canonical result in 'buf'.
+     */
+    buf[0] = '/';
+    buf[1] = '\0';
+    size_t blen = 1;
+
+    const char *p = work;
+    while (*p) {
+        /* Skip slashes. */
+        while (*p == '/')
+            p++;
+        if (*p == '\0')
+            break;
+
+        /* Find end of this component. */
+        const char *end = p;
+        while (*end && *end != '/')
+            end++;
+        size_t clen = (size_t)(end - p);
+
+        if (clen == 1 && p[0] == '.') {
+            /* "." -- stay in current directory. */
+        } else if (clen == 2 && p[0] == '.' && p[1] == '.') {
+            /* ".." -- go up one level. */
+            if (blen > 1) {
+                /* Remove trailing slash if present. */
+                if (buf[blen - 1] == '/')
+                    blen--;
+                /* Remove last component. */
+                while (blen > 1 && buf[blen - 1] != '/')
+                    blen--;
+                /* Keep the root slash. */
+                if (blen == 0)
+                    blen = 1;
+                buf[blen] = '\0';
+            }
+        } else {
+            /* Normal component -- append. */
+            /* Ensure trailing slash on current buf. */
+            if (blen > 1 && buf[blen - 1] != '/') {
+                if (blen + 1 >= PATH_MAX) {
+                    if (!resolved_path) free(buf);
+                    errno = ENAMETOOLONG;
+                    return NULL;
+                }
+                buf[blen++] = '/';
+            }
+            if (blen + clen >= PATH_MAX) {
+                if (!resolved_path) free(buf);
+                errno = ENAMETOOLONG;
+                return NULL;
+            }
+            memcpy(buf + blen, p, clen);
+            blen += clen;
+            buf[blen] = '\0';
+        }
+
+        p = end;
+    }
+
+    /* Ensure we never return an empty string. */
+    if (blen == 0) {
+        buf[0] = '/';
+        buf[1] = '\0';
+    }
+
+    return buf;
+}

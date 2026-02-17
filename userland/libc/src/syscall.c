@@ -398,3 +398,113 @@ int ioctl(int fd, unsigned long request, void *argp)
     return (int)__syscall_ret(
         veridian_syscall3(SYS_FILE_IOCTL, fd, request, argp));
 }
+
+/* ========================================================================= */
+/* Filesystem: link, symlink, chmod, umask, truncate, poll, pread/pwrite     */
+/* ========================================================================= */
+
+int link(const char *oldpath, const char *newpath)
+{
+    return (int)__syscall_ret(
+        veridian_syscall2(SYS_FILE_LINK, oldpath, newpath));
+}
+
+int symlink(const char *target, const char *linkpath)
+{
+    return (int)__syscall_ret(
+        veridian_syscall2(SYS_FILE_SYMLINK, target, linkpath));
+}
+
+int chmod(const char *pathname, mode_t mode)
+{
+    return (int)__syscall_ret(
+        veridian_syscall2(SYS_FILE_CHMOD, pathname, mode));
+}
+
+int fchmod(int fd, mode_t mode)
+{
+    return (int)__syscall_ret(
+        veridian_syscall2(SYS_FILE_FCHMOD, fd, mode));
+}
+
+mode_t umask(mode_t mask)
+{
+    return (mode_t)veridian_syscall1(SYS_PROCESS_UMASK, mask);
+}
+
+int truncate(const char *path, off_t length)
+{
+    return (int)__syscall_ret(
+        veridian_syscall2(SYS_FILE_TRUNCATE_PATH, path, length));
+}
+
+int ftruncate(int fd, off_t length)
+{
+    return (int)__syscall_ret(
+        veridian_syscall2(SYS_FILE_TRUNCATE, fd, length));
+}
+
+ssize_t pread(int fd, void *buf, size_t count, off_t offset)
+{
+    return (ssize_t)__syscall_ret(
+        veridian_syscall4(SYS_FILE_PREAD, fd, buf, count, offset));
+}
+
+ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset)
+{
+    return (ssize_t)__syscall_ret(
+        veridian_syscall4(SYS_FILE_PWRITE, fd, buf, count, offset));
+}
+
+/* ========================================================================= */
+/* *at() family: openat, fstatat, unlinkat, mkdirat, renameat               */
+/* ========================================================================= */
+
+int openat(int dirfd, const char *pathname, int flags, ...)
+{
+    mode_t mode = 0;
+    if (flags & O_CREAT) {
+        __builtin_va_list ap;
+        __builtin_va_start(ap, flags);
+        mode = __builtin_va_arg(ap, mode_t);
+        __builtin_va_end(ap);
+    }
+    return (int)__syscall_ret(
+        veridian_syscall4(SYS_FILE_OPENAT, dirfd, pathname, flags, mode));
+}
+
+int fstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags)
+{
+    return (int)__syscall_ret(
+        veridian_syscall4(SYS_FILE_FSTATAT, dirfd, pathname, statbuf, flags));
+}
+
+int unlinkat(int dirfd, const char *pathname, int flags)
+{
+    return (int)__syscall_ret(
+        veridian_syscall3(SYS_FILE_UNLINKAT, dirfd, pathname, flags));
+}
+
+int mkdirat(int dirfd, const char *pathname, mode_t mode)
+{
+    return (int)__syscall_ret(
+        veridian_syscall3(SYS_FILE_MKDIRAT, dirfd, pathname, mode));
+}
+
+int renameat(int olddirfd, const char *oldpath,
+             int newdirfd, const char *newpath)
+{
+    return (int)__syscall_ret(
+        veridian_syscall4(SYS_FILE_RENAMEAT, olddirfd, oldpath,
+                          newdirfd, newpath));
+}
+
+/* ========================================================================= */
+/* poll                                                                      */
+/* ========================================================================= */
+
+int poll(struct pollfd *fds, unsigned long nfds, int timeout)
+{
+    return (int)__syscall_ret(
+        veridian_syscall3(SYS_FILE_POLL, fds, nfds, timeout));
+}

@@ -61,6 +61,13 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
         new_caps.clone_from(&current_caps)?;
     }
 
+    // Clone file table so child inherits stdin/stdout/stderr and pipes
+    {
+        let parent_ft = current_process.file_table.lock();
+        let child_ft = parent_ft.clone_for_fork();
+        *new_process.file_table.lock() = child_ft;
+    }
+
     // Inherit environment variables from parent
     #[cfg(feature = "alloc")]
     {

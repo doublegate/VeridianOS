@@ -153,6 +153,34 @@ extern "C" {
 #define SYS_READV               183
 #define SYS_WRITEV              184
 
+/* Filesystem link/symlink/chmod (155-156, 185-196) */
+#define SYS_FILE_LINK           155
+#define SYS_FILE_SYMLINK        156
+#define SYS_FILE_CHMOD          185
+#define SYS_FILE_FCHMOD         186
+#define SYS_PROCESS_UMASK       187
+#define SYS_FILE_TRUNCATE_PATH  188
+#define SYS_FILE_POLL           189
+#define SYS_FILE_OPENAT         190
+#define SYS_FILE_FSTATAT        191
+#define SYS_FILE_UNLINKAT       192
+#define SYS_FILE_MKDIRAT        193
+#define SYS_FILE_RENAMEAT       194
+#define SYS_FILE_PREAD          195
+#define SYS_FILE_PWRITE         196
+
+/* AT_* constants for *at() syscalls */
+#define AT_FDCWD                (-100)
+#define AT_REMOVEDIR            0x200
+#define AT_SYMLINK_NOFOLLOW     0x100
+
+/* poll() event flags */
+#define POLLIN                  0x0001
+#define POLLOUT                 0x0004
+#define POLLERR                 0x0008
+#define POLLHUP                 0x0010
+#define POLLNVAL                0x0020
+
 /* ========================================================================= */
 /* Architecture-Specific Syscall Wrappers                                    */
 /* ========================================================================= */

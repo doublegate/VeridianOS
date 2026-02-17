@@ -63,16 +63,35 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
-    // Raw serial diagnostic (bypasses spinlock, safe in any context)
+    // SAFETY: Read CR2 (faulting address) before any code that might trigger
+    // another page fault, which would overwrite CR2.
+    let cr2_val: u64 = unsafe {
+        let val: u64;
+        core::arch::asm!("mov {}, cr2", out(reg) val, options(nomem, nostack));
+        val
+    };
+
+    let ec = error_code.bits();
+    let rip_val = stack_frame.instruction_pointer.as_u64();
+    let was_user = ec & 4 != 0; // U/S bit
+
+    // Attempt to resolve via demand paging framework.
+    // Only safe if this is NOT a kernel fault while the VAS lock is held
+    // (which would deadlock). Kernel page faults in practice only occur
+    // during early boot or from bugs — those fall through to the halt path.
+    let info = crate::mm::page_fault::from_x86_64(ec, cr2_val, rip_val);
+    if let Ok(()) = crate::mm::page_fault::handle_page_fault(info) {
+        // Fault resolved (demand page, CoW, or stack growth) — resume.
+        return;
+    }
+
+    // Unresolvable fault — print diagnostics via raw serial, then halt or
+    // kill the process.
     // SAFETY: Writing to COM1 data register at I/O port 0x3F8 for diagnostics.
     unsafe {
-        // Print "PF:" header
         for &b in b"PF@" {
             core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nomem, nostack));
         }
-        // Print CR2 as hex (faulting address)
-        let cr2_val: u64;
-        core::arch::asm!("mov {}, cr2", out(reg) cr2_val, options(nomem, nostack));
         for shift in (0..16).rev() {
             let nibble = ((cr2_val >> (shift * 4)) & 0xF) as u8;
             let ch = if nibble < 10 {
@@ -82,8 +101,6 @@ extern "x86-interrupt" fn page_fault_handler(
             };
             core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") ch, options(nomem, nostack));
         }
-        // Print error code bits
-        let ec = error_code.bits();
         for &b in b" ec=" {
             core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nomem, nostack));
         }
@@ -96,8 +113,6 @@ extern "x86-interrupt" fn page_fault_handler(
             };
             core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") ch, options(nomem, nostack));
         }
-        // Print RIP from stack frame
-        let rip_val = stack_frame.instruction_pointer.as_u64();
         for &b in b" rip=" {
             core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nomem, nostack));
         }
@@ -115,8 +130,26 @@ extern "x86-interrupt" fn page_fault_handler(
         }
     }
 
-    loop {
-        x86_64::instructions::hlt();
+    if was_user {
+        // User-mode fault: SIGSEGV was already attempted by signal_segv().
+        // Kill the process and return — the scheduler will pick the next task.
+        println!(
+            "SEGFAULT: pid={:?} addr={:#x} ec={:#x} rip={:#x}",
+            crate::process::current_process().map(|p| p.pid),
+            cr2_val,
+            ec,
+            rip_val,
+        );
+    } else {
+        // Kernel fault — unrecoverable. Print and halt.
+        println!(
+            "FATAL: kernel page fault at {:#x} ec={:#x} rip={:#x}",
+            cr2_val, ec, rip_val
+        );
+        println!("{:#?}", stack_frame);
+        loop {
+            x86_64::instructions::hlt();
+        }
     }
 }
 
@@ -141,6 +174,14 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 }
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    // Notify the scheduler of a timer tick for preemptive scheduling.
+    // Use try_lock to avoid deadlock: if the scheduler lock is already held
+    // (e.g., we interrupted mid-schedule), skip the tick — the holder will
+    // complete its scheduling decision and release the lock.
+    if let Some(mut sched) = crate::sched::scheduler::current_scheduler().try_lock() {
+        sched.tick();
+    }
+
     // SAFETY: Writing the EOI (End of Interrupt) byte (0x20) to the master
     // PIC command port (0x20) is required to acknowledge the timer interrupt.
     // Failing to send EOI would mask all further IRQs at this priority level.

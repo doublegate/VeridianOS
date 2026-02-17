@@ -326,8 +326,24 @@ pub enum Syscall {
     FileReadlink = 152,
     FileAccess = 153,
     FileRename = 154,
+    FileLink = 155,
+    FileSymlink = 156,
     FileUnlink = 157,
     FileFcntl = 158,
+
+    // New filesystem ops for self-hosting (Phase 4A)
+    FileChmod = 185,
+    FileFchmod = 186,
+    ProcessUmask = 187,
+    FileTruncatePath = 188,
+    FilePoll = 189,
+    FileOpenat = 190,
+    FileFstatat = 191,
+    FileUnlinkat = 192,
+    FileMkdirat = 193,
+    FileRenameat = 194,
+    FilePread = 195,
+    FilePwrite = 196,
 }
 
 /// System call result type
@@ -573,8 +589,24 @@ fn handle_syscall(
         Syscall::FileReadlink => sys_readlink(arg1, arg2, arg3),
         Syscall::FileAccess => sys_access(arg1, arg2),
         Syscall::FileRename => sys_rename(arg1, arg2),
+        Syscall::FileLink => sys_link(arg1, arg2),
+        Syscall::FileSymlink => sys_symlink(arg1, arg2),
         Syscall::FileUnlink => sys_unlink(arg1),
         Syscall::FileFcntl => sys_fcntl(arg1, arg2, arg3),
+
+        // Self-hosting filesystem ops
+        Syscall::FileChmod => sys_chmod(arg1, arg2),
+        Syscall::FileFchmod => sys_fchmod(arg1, arg2),
+        Syscall::ProcessUmask => sys_umask(arg1),
+        Syscall::FileTruncatePath => sys_truncate_path(arg1, arg2),
+        Syscall::FilePoll => sys_poll(arg1, arg2, arg3),
+        Syscall::FileOpenat => sys_openat(arg1, arg2, arg3, arg4),
+        Syscall::FileFstatat => sys_fstatat(arg1, arg2, arg3, arg4),
+        Syscall::FileUnlinkat => sys_unlinkat(arg1, arg2, arg3),
+        Syscall::FileMkdirat => sys_mkdirat(arg1, arg2, arg3),
+        Syscall::FileRenameat => sys_renameat(arg1, arg2, arg3, arg4),
+        Syscall::FilePread => sys_pread(arg1, arg2, arg3, arg4),
+        Syscall::FilePwrite => sys_pwrite(arg1, arg2, arg3, arg4),
 
         _ => Err(SyscallError::InvalidSyscall),
     }
@@ -1129,8 +1161,24 @@ impl TryFrom<usize> for Syscall {
             152 => Ok(Syscall::FileReadlink),
             153 => Ok(Syscall::FileAccess),
             154 => Ok(Syscall::FileRename),
+            155 => Ok(Syscall::FileLink),
+            156 => Ok(Syscall::FileSymlink),
             157 => Ok(Syscall::FileUnlink),
             158 => Ok(Syscall::FileFcntl),
+
+            // Self-hosting filesystem ops
+            185 => Ok(Syscall::FileChmod),
+            186 => Ok(Syscall::FileFchmod),
+            187 => Ok(Syscall::ProcessUmask),
+            188 => Ok(Syscall::FileTruncatePath),
+            189 => Ok(Syscall::FilePoll),
+            190 => Ok(Syscall::FileOpenat),
+            191 => Ok(Syscall::FileFstatat),
+            192 => Ok(Syscall::FileUnlinkat),
+            193 => Ok(Syscall::FileMkdirat),
+            194 => Ok(Syscall::FileRenameat),
+            195 => Ok(Syscall::FilePread),
+            196 => Ok(Syscall::FilePwrite),
 
             _ => Err(()),
         }

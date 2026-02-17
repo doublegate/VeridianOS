@@ -64,4 +64,10 @@
 /** Illegal seek */
 #define ESPIPE          114
 
+/** Filename too long */
+#define ENAMETOOLONG    115
+
+/** Too many levels of symbolic links */
+#define ELOOP           116
+
 #endif /* _ERRNO_H */

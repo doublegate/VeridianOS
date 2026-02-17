@@ -11,8 +11,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <errno.h>
 #include <signal.h>
+#include <sys/wait.h>
 
 /* ========================================================================= */
 /* Memory allocator                                                          */
@@ -412,4 +414,83 @@ ldiv_t ldiv(long numer, long denom)
     result.quot = numer / denom;
     result.rem  = numer % denom;
     return result;
+}
+
+/* ========================================================================= */
+/* Temporary files                                                           */
+/* ========================================================================= */
+
+int mkstemp(char *template)
+{
+    static const char chars[] =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    size_t len = strlen(template);
+
+    if (len < 6) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    /* Verify trailing XXXXXX. */
+    char *suffix = template + len - 6;
+    for (int i = 0; i < 6; i++) {
+        if (suffix[i] != 'X') {
+            errno = EINVAL;
+            return -1;
+        }
+    }
+
+    /*
+     * Try up to 100 random names before giving up.
+     * Each attempt replaces the 6 suffix chars with random characters
+     * from the alphanumeric set, then tries O_CREAT|O_EXCL to ensure
+     * uniqueness.
+     */
+    for (int attempt = 0; attempt < 100; attempt++) {
+        for (int i = 0; i < 6; i++)
+            suffix[i] = chars[(unsigned int)rand() % (sizeof(chars) - 1)];
+
+        int fd = open(template, O_CREAT | O_EXCL | O_RDWR, 0600);
+        if (fd >= 0)
+            return fd;
+
+        /* EEXIST means name collision -- retry with new random suffix. */
+        if (errno != EEXIST)
+            return -1;
+    }
+
+    errno = EEXIST;
+    return -1;
+}
+
+/* ========================================================================= */
+/* Command execution                                                         */
+/* ========================================================================= */
+
+int system(const char *command)
+{
+    if (!command)
+        return 1;  /* Shell is available. */
+
+    pid_t pid = fork();
+    if (pid < 0)
+        return -1;
+
+    if (pid == 0) {
+        /* Child: exec the shell. */
+        char *argv[4];
+        argv[0] = "sh";
+        argv[1] = "-c";
+        argv[2] = (char *)command;
+        argv[3] = NULL;
+        execve("/bin/sh", argv, environ);
+        _exit(127);  /* execve failed. */
+    }
+
+    /* Parent: wait for the child. */
+    int status;
+    if (waitpid(pid, &status, 0) < 0)
+        return -1;
+
+    return status;
 }
