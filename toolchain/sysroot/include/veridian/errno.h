@@ -85,11 +85,161 @@ extern "C" {
 #define ESRCH               19  /* SyscallError::ProcessNotFound = -19 */
 
 /* ========================================================================= */
+/* Additional POSIX Error Codes                                              */
+/* ========================================================================= */
+
+/*
+ * These error codes are required by GCC, make, and other POSIX utilities.
+ * The kernel may not return all of them, but they must be defined for
+ * source compatibility.  Values 20+ are unambiguous additions.
+ */
+
+/** File exists */
+#define EEXIST              20
+
+/** Bad file descriptor */
+#define EBADF               21
+
+/** I/O error */
+#define EIO                 22
+
+/** No such device or address */
+#define ENXIO               23
+
+/** Argument list too long */
+#define E2BIG               24
+
+/** Exec format error */
+#define ENOEXEC             25
+
+/** No child processes */
+#define ECHILD              26
+
+/** Device or resource busy */
+#define EBUSY               27
+
+/** Not a directory */
+#define ENOTDIR             28
+
+/** Is a directory */
+#define EISDIR              29
+
+/** Too many open files */
+#define EMFILE              30
+
+/** File table overflow */
+#define ENFILE              31
+
+/** Not a typewriter (inappropriate ioctl) */
+#define ENOTTY              32
+
+/** Text file busy */
+#define ETXTBSY             33
+
+/** File too large */
+#define EFBIG               34
+
+/** No space left on device */
+#define ENOSPC              35
+
+/** Illegal seek */
+#define ESPIPE              36
+
+/** Read-only file system */
+#define EROFS               37
+
+/** Too many links */
+#define EMLINK              38
+
+/** Broken pipe */
+#define EPIPE               39
+
+/** Math argument out of domain */
+#define EDOM                40
+
+/** Math result not representable */
+#define ERANGE              41
+
+/** Resource deadlock would occur */
+#define EDEADLK             42
+
+/** File name too long */
+#define ENAMETOOLONG        43
+
+/** No record locks available */
+#define ENOLCK              44
+
+/** Directory not empty */
+#define ENOTEMPTY           45
+
+/** Too many symbolic links encountered */
+#define ELOOP               46
+
+/** No message of desired type */
+#define ENOMSG              47
+
+/** Cross-device link */
+#define EXDEV               48
+
+/** Connection refused */
+#define ECONNREFUSED        49
+
+/** Connection reset by peer */
+#define ECONNRESET          50
+
+/** No buffer space available */
+#define ENOBUFS             51
+
+/** Protocol not supported */
+#define EPROTONOSUPPORT     52
+
+/** Operation not supported */
+#define ENOTSUP             53
+#define EOPNOTSUPP          ENOTSUP
+
+/** Address already in use */
+#define EADDRINUSE          54
+
+/** Address not available */
+#define EADDRNOTAVAIL       55
+
+/** Network is unreachable */
+#define ENETUNREACH         56
+
+/** Connection timed out */
+#define ETIMEDOUT           57
+
+/** Operation already in progress */
+#define EALREADY            58
+
+/** Operation now in progress */
+#define EINPROGRESS         59
+
+/** Socket operation on non-socket */
+#define ENOTSOCK            60
+
+/** Destination address required */
+#define EDESTADDRREQ        61
+
+/** Message too long */
+#define EMSGSIZE            62
+
+/** Protocol wrong type for socket */
+#define EPROTOTYPE          63
+
+/** Transport endpoint is not connected */
+#define ENOTCONN            64
+
+/** Transport endpoint is already connected */
+#define EISCONN             65
+
+/* ========================================================================= */
 /* POSIX-Compatible Aliases                                                  */
 /* ========================================================================= */
 
 /** Same as EAGAIN (POSIX compatibility) */
 #define EWOULDBLOCK         EAGAIN
+#define EDEADLOCK           EDEADLK
 
 /* ========================================================================= */
 /* errno access                                                              */

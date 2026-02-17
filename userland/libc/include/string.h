@@ -81,8 +81,30 @@ size_t strcspn(const char *s, const char *reject);
 /** Duplicate a string (malloc-allocated). */
 char *strdup(const char *s);
 
+/** Duplicate at most n bytes of a string (malloc-allocated). */
+char *strndup(const char *s, size_t n);
+
 /** Return a string describing the given errno value. */
 char *strerror(int errnum);
+
+/** Thread-safe version of strerror. */
+int strerror_r(int errnum, char *buf, size_t buflen);
+
+/** Copy n bytes from src to dest, return pointer past last written byte. */
+void *mempcpy(void *dest, const void *src, size_t n);
+
+/** Find first occurrence of needle (of length needlelen) in haystack. */
+void *memmem(const void *haystack, size_t haystacklen,
+             const void *needle, size_t needlelen);
+
+/** Compare two strings ignoring case. */
+int strcasecmp(const char *s1, const char *s2);
+
+/** Compare at most n characters of two strings ignoring case. */
+int strncasecmp(const char *s1, const char *s2, size_t n);
+
+/** Find first occurrence of any byte in accept in s. */
+char *strpbrk(const char *s, const char *accept);
 
 /* ========================================================================= */
 /* Tokenization                                                              */

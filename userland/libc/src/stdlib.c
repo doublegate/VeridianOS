@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <signal.h>
+#include <ctype.h>
 #include <sys/wait.h>
 
 /* ========================================================================= */
@@ -414,6 +415,88 @@ ldiv_t ldiv(long numer, long denom)
     result.quot = numer / denom;
     result.rem  = numer % denom;
     return result;
+}
+
+/* ========================================================================= */
+/* String-to-floating-point conversions                                      */
+/* ========================================================================= */
+
+double strtod(const char *nptr, char **endptr)
+{
+    const char *s = nptr;
+    double result = 0.0;
+    int neg = 0;
+
+    /* Skip whitespace. */
+    while (isspace((unsigned char)*s))
+        s++;
+
+    /* Optional sign. */
+    if (*s == '-') {
+        neg = 1;
+        s++;
+    } else if (*s == '+') {
+        s++;
+    }
+
+    /* Integer part. */
+    while (*s >= '0' && *s <= '9') {
+        result = result * 10.0 + (*s - '0');
+        s++;
+    }
+
+    /* Fractional part. */
+    if (*s == '.') {
+        s++;
+        double frac = 0.1;
+        while (*s >= '0' && *s <= '9') {
+            result += (*s - '0') * frac;
+            frac *= 0.1;
+            s++;
+        }
+    }
+
+    /* Exponent. */
+    if (*s == 'e' || *s == 'E') {
+        s++;
+        int exp_neg = 0;
+        if (*s == '-') {
+            exp_neg = 1;
+            s++;
+        } else if (*s == '+') {
+            s++;
+        }
+
+        int exp = 0;
+        while (*s >= '0' && *s <= '9') {
+            exp = exp * 10 + (*s - '0');
+            s++;
+        }
+
+        double factor = 1.0;
+        for (int i = 0; i < exp; i++)
+            factor *= 10.0;
+
+        if (exp_neg)
+            result /= factor;
+        else
+            result *= factor;
+    }
+
+    if (endptr)
+        *endptr = (char *)s;
+
+    return neg ? -result : result;
+}
+
+float strtof(const char *nptr, char **endptr)
+{
+    return (float)strtod(nptr, endptr);
+}
+
+double atof(const char *nptr)
+{
+    return strtod(nptr, NULL);
 }
 
 /* ========================================================================= */

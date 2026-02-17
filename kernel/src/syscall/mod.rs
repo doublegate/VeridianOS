@@ -344,6 +344,12 @@ pub enum Syscall {
     FileRenameat = 194,
     FilePread = 195,
     FilePwrite = 196,
+
+    // Ownership and device node syscalls
+    FileChown = 197,
+    FileFchown = 198,
+    FileMknod = 199,
+    FileSelect = 200,
 }
 
 /// System call result type
@@ -607,6 +613,10 @@ fn handle_syscall(
         Syscall::FileRenameat => sys_renameat(arg1, arg2, arg3, arg4),
         Syscall::FilePread => sys_pread(arg1, arg2, arg3, arg4),
         Syscall::FilePwrite => sys_pwrite(arg1, arg2, arg3, arg4),
+        Syscall::FileChown => sys_chown(arg1, arg2, arg3),
+        Syscall::FileFchown => sys_fchown(arg1, arg2, arg3),
+        Syscall::FileMknod => sys_mknod(arg1, arg2, arg3),
+        Syscall::FileSelect => sys_select(arg1, arg2, arg3, arg4, arg5),
 
         _ => Err(SyscallError::InvalidSyscall),
     }
@@ -1179,6 +1189,10 @@ impl TryFrom<usize> for Syscall {
             194 => Ok(Syscall::FileRenameat),
             195 => Ok(Syscall::FilePread),
             196 => Ok(Syscall::FilePwrite),
+            197 => Ok(Syscall::FileChown),
+            198 => Ok(Syscall::FileFchown),
+            199 => Ok(Syscall::FileMknod),
+            200 => Ok(Syscall::FileSelect),
 
             _ => Err(()),
         }

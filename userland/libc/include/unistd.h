@@ -192,6 +192,15 @@ int gethostname(char *name, size_t len);
 /** Check if fd refers to a terminal. */
 int isatty(int fd);
 
+/** Change ownership of a file. */
+int chown(const char *pathname, uid_t owner, gid_t group);
+
+/** Change ownership of a file (by fd). */
+int fchown(int fd, uid_t owner, gid_t group);
+
+/** Change ownership of a symlink (no follow). */
+int lchown(const char *pathname, uid_t owner, gid_t group);
+
 #ifdef __cplusplus
 }
 #endif

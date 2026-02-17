@@ -216,8 +216,12 @@ pub fn sys_open(path: usize, flags: usize, _mode: usize) -> SyscallResult {
     // Open the file through VFS
     match vfs()?.read().open(path_str, open_flags) {
         Ok(node) => {
-            // Create file
-            let file = crate::fs::file::File::new(node, open_flags);
+            // Create file with path stored for dirfd resolution
+            let file = crate::fs::file::File::new_with_path(
+                node,
+                open_flags,
+                alloc::string::String::from(path_str),
+            );
 
             // Add to process file table
             let file_table = process.file_table.lock();
@@ -452,34 +456,17 @@ pub fn sys_stat(fd: usize, stat_buf: usize) -> SyscallResult {
     let file_table = process.file_table.lock();
     let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
 
-    // Get metadata
-    match file_desc.node.metadata() {
-        Ok(metadata) => {
-            // Write metadata to user buffer
-            // SAFETY: stat_buf was validated as non-zero above. The caller
-            // must provide a valid, writable pointer to a FileStat struct.
-            // We write individual fields through the pointer. FileStat is
-            // repr(C) for stable layout.
-            unsafe {
-                let buf = stat_buf as *mut FileStat;
-                (*buf).size = metadata.size;
-                (*buf).mode = match metadata.node_type {
-                    crate::fs::NodeType::File => 0o100644,
-                    crate::fs::NodeType::Directory => 0o040755,
-                    crate::fs::NodeType::CharDevice => 0o020666,
-                    crate::fs::NodeType::BlockDevice => 0o060666,
-                    _ => 0,
-                };
-                (*buf).uid = metadata.uid;
-                (*buf).gid = metadata.gid;
-                (*buf).created = metadata.created;
-                (*buf).modified = metadata.modified;
-                (*buf).accessed = metadata.accessed;
-            }
-            Ok(0)
-        }
-        Err(_) => Err(SyscallError::InvalidState),
+    // Get metadata and write to user buffer
+    let metadata = file_desc
+        .node
+        .metadata()
+        .map_err(|_| SyscallError::InvalidState)?;
+    let stat = fill_stat(&metadata);
+    // SAFETY: stat_buf was validated as non-null, in user-space, and aligned.
+    unsafe {
+        core::ptr::write(stat_buf as *mut FileStat, stat);
     }
+    Ok(0)
 }
 
 /// Truncate a file
@@ -757,16 +744,53 @@ pub fn sys_sync() -> SyscallResult {
     }
 }
 
-// File stat structure for userspace
+/// File stat structure for userspace.
+///
+/// Layout matches the C `struct stat` in `veridian/stat.h` exactly.
+/// All fields use fixed-size types matching the C typedefs in
+/// `veridian/types.h`.
 #[repr(C)]
 struct FileStat {
-    size: usize,
-    mode: u32,
-    uid: u32,
-    gid: u32,
-    created: u64,
-    modified: u64,
-    accessed: u64,
+    st_dev: u64,     // dev_t
+    st_ino: u64,     // ino_t
+    st_mode: u32,    // mode_t
+    st_nlink: u64,   // nlink_t
+    st_uid: u32,     // uid_t
+    st_gid: u32,     // gid_t
+    st_rdev: u64,    // dev_t
+    st_size: i64,    // off_t
+    st_blksize: i64, // blksize_t
+    st_blocks: i64,  // blkcnt_t
+    st_atime: i64,   // time_t
+    st_mtime: i64,   // time_t
+    st_ctime: i64,   // time_t
+}
+
+/// Helper: populate a FileStat from VFS metadata.
+fn fill_stat(metadata: &crate::fs::Metadata) -> FileStat {
+    let mode = match metadata.node_type {
+        crate::fs::NodeType::File => 0o100644,
+        crate::fs::NodeType::Directory => 0o040755,
+        crate::fs::NodeType::CharDevice => 0o020666,
+        crate::fs::NodeType::BlockDevice => 0o060666,
+        _ => 0,
+    };
+    let size = metadata.size as i64;
+    FileStat {
+        st_dev: 0,
+        st_ino: 0,
+        st_mode: mode,
+        st_nlink: 1,
+        st_uid: metadata.uid,
+        st_gid: metadata.gid,
+        st_rdev: 0,
+        st_size: size,
+        st_blksize: 4096,
+        st_blocks: (size + 511) / 512,
+        st_atime: metadata.accessed as i64,
+        st_mtime: metadata.modified as i64,
+        st_ctime: metadata.created as i64,
+    }
 }
 
 // ============================================================================
@@ -1122,30 +1146,13 @@ pub fn sys_stat_path(path_ptr: usize, stat_buf: usize) -> SyscallResult {
         .resolve_path(&path)
         .map_err(|_| SyscallError::ResourceNotFound)?;
 
-    match node.metadata() {
-        Ok(metadata) => {
-            // SAFETY: stat_buf was validated as non-null, in user-space, and
-            // aligned for FileStat above. We write metadata fields.
-            unsafe {
-                let buf = stat_buf as *mut FileStat;
-                (*buf).size = metadata.size;
-                (*buf).mode = match metadata.node_type {
-                    crate::fs::NodeType::File => 0o100644,
-                    crate::fs::NodeType::Directory => 0o040755,
-                    crate::fs::NodeType::CharDevice => 0o020666,
-                    crate::fs::NodeType::BlockDevice => 0o060666,
-                    _ => 0,
-                };
-                (*buf).uid = metadata.uid;
-                (*buf).gid = metadata.gid;
-                (*buf).created = metadata.created;
-                (*buf).modified = metadata.modified;
-                (*buf).accessed = metadata.accessed;
-            }
-            Ok(0)
-        }
-        Err(_) => Err(SyscallError::InvalidState),
+    let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
+    let stat = fill_stat(&metadata);
+    // SAFETY: stat_buf was validated as non-null, in user-space, and aligned.
+    unsafe {
+        core::ptr::write(stat_buf as *mut FileStat, stat);
     }
+    Ok(0)
 }
 
 /// Stat a file by path without following symlinks (syscall 151).
@@ -1679,7 +1686,8 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
 // ============================================================================
 
 /// AT_FDCWD sentinel: use process current working directory.
-const AT_FDCWD: usize = usize::MAX; // -1 as usize
+/// Must match the C-side `#define AT_FDCWD (-100)` in syscall.h.
+const AT_FDCWD: usize = (-100isize) as usize;
 
 /// Create a hard link (syscall 155).
 ///
@@ -1886,19 +1894,23 @@ fn resolve_at_path(dirfd: usize, path: &str) -> Result<alloc::string::String, Sy
             Ok(alloc::format!("{}/{}", cwd, path))
         }
     } else {
-        // Relative to directory fd — for now treat as relative to CWD.
-        // Full implementation would look up the fd, verify it's a directory,
-        // and resolve relative to its path.
-        let cwd = if let Some(vfs_lock) = try_get_vfs() {
-            let vfs_guard = vfs_lock.read();
-            String::from(vfs_guard.get_cwd())
+        // Relative to directory fd — look up the fd in the file table
+        let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+        let file_table = proc.file_table.lock();
+        let file = file_table.get(dirfd).ok_or(SyscallError::InvalidArgument)?;
+
+        // Use the stored path if available, otherwise fall back to "/"
+        let dir_path = if let Some(ref p) = file.path {
+            String::from(p.as_str())
         } else {
+            // No stored path — fall back to root (best effort)
             String::from("/")
         };
-        if cwd.ends_with('/') {
-            Ok(alloc::format!("{}{}", cwd, path))
+
+        if dir_path.ends_with('/') {
+            Ok(alloc::format!("{}{}", dir_path, path))
         } else {
-            Ok(alloc::format!("{}/{}", cwd, path))
+            Ok(alloc::format!("{}/{}", dir_path, path))
         }
     }
 }
@@ -1964,29 +1976,13 @@ pub fn sys_fstatat(dirfd: usize, path_ptr: usize, stat_buf: usize, _flags: usize
         .resolve_path(&abs_path)
         .map_err(|_| SyscallError::ResourceNotFound)?;
 
-    match node.metadata() {
-        Ok(metadata) => {
-            // SAFETY: stat_buf was validated above.
-            unsafe {
-                let buf = stat_buf as *mut FileStat;
-                (*buf).size = metadata.size;
-                (*buf).mode = match metadata.node_type {
-                    crate::fs::NodeType::File => 0o100644,
-                    crate::fs::NodeType::Directory => 0o040755,
-                    crate::fs::NodeType::CharDevice => 0o020666,
-                    crate::fs::NodeType::BlockDevice => 0o060666,
-                    _ => 0,
-                };
-                (*buf).uid = metadata.uid;
-                (*buf).gid = metadata.gid;
-                (*buf).created = metadata.created;
-                (*buf).modified = metadata.modified;
-                (*buf).accessed = metadata.accessed;
-            }
-            Ok(0)
-        }
-        Err(_) => Err(SyscallError::InvalidState),
+    let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
+    let stat = fill_stat(&metadata);
+    // SAFETY: stat_buf was validated above.
+    unsafe {
+        core::ptr::write(stat_buf as *mut FileStat, stat);
     }
+    Ok(0)
 }
 
 /// Unlink a file relative to a directory fd (syscall 192).
@@ -2109,4 +2105,65 @@ fn split_path(path: &str) -> Result<(alloc::string::String, alloc::string::Strin
         };
         Ok((cwd, String::from(path)))
     }
+}
+
+// =========================================================================
+// Ownership and device node syscalls (197-200)
+// =========================================================================
+
+/// Change ownership of a file by path (syscall 197).
+///
+/// Stub: accepts but ignores — no real UID/GID enforcement yet.
+pub fn sys_chown(path_ptr: usize, uid: usize, gid: usize) -> SyscallResult {
+    let _path = read_user_path(path_ptr)?;
+    let _uid = uid as u32;
+    let _gid = gid as u32;
+    // No-op: accept but don't enforce ownership changes
+    Ok(0)
+}
+
+/// Change ownership of a file by file descriptor (syscall 198).
+///
+/// Stub: accepts but ignores — no real UID/GID enforcement yet.
+pub fn sys_fchown(fd: usize, uid: usize, gid: usize) -> SyscallResult {
+    let _fd = fd;
+    let _uid = uid as u32;
+    let _gid = gid as u32;
+    // Verify fd is valid
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file_table = proc.file_table.lock();
+    let _file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+    // No-op: accept but don't enforce ownership changes
+    Ok(0)
+}
+
+/// Create a special or ordinary file (syscall 199).
+///
+/// Stub: returns EPERM — device file creation not supported.
+pub fn sys_mknod(path_ptr: usize, _mode: usize, _dev: usize) -> SyscallResult {
+    let _path = read_user_path(path_ptr)?;
+    Err(SyscallError::PermissionDenied)
+}
+
+/// Synchronous I/O multiplexing (syscall 200).
+///
+/// Thin wrapper that converts select-style arguments to poll().
+pub fn sys_select(
+    nfds: usize,
+    readfds_ptr: usize,
+    writefds_ptr: usize,
+    exceptfds_ptr: usize,
+    timeout_ptr: usize,
+) -> SyscallResult {
+    // Delegate to poll with a simplified implementation.
+    // The user-space select() in libc converts fd_sets to pollfd
+    // arrays and calls poll() directly. This kernel-side select
+    // is provided for completeness but may not be called if libc
+    // does the conversion itself.
+    let _ = (nfds, readfds_ptr, writefds_ptr, exceptfds_ptr, timeout_ptr);
+
+    // For now, return 0 (no fds ready, immediate timeout).
+    // The libc select() implementation uses poll() directly,
+    // so this kernel path is not critical.
+    Ok(0)
 }

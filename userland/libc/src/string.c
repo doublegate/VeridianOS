@@ -262,6 +262,107 @@ char *strdup(const char *s)
     return d;
 }
 
+char *strndup(const char *s, size_t n)
+{
+    size_t len = strnlen(s, n);
+    char *d = (char *)malloc(len + 1);
+    if (d) {
+        memcpy(d, s, len);
+        d[len] = '\0';
+    }
+    return d;
+}
+
+char *strpbrk(const char *s, const char *accept)
+{
+    while (*s) {
+        const char *a = accept;
+        while (*a) {
+            if (*s == *a)
+                return (char *)s;
+            a++;
+        }
+        s++;
+    }
+    return NULL;
+}
+
+/* ========================================================================= */
+/* Case-insensitive comparison                                               */
+/* ========================================================================= */
+
+int strcasecmp(const char *s1, const char *s2)
+{
+    while (*s1 && *s2) {
+        int c1 = tolower((unsigned char)*s1);
+        int c2 = tolower((unsigned char)*s2);
+        if (c1 != c2)
+            return c1 - c2;
+        s1++;
+        s2++;
+    }
+    return tolower((unsigned char)*s1) - tolower((unsigned char)*s2);
+}
+
+int strncasecmp(const char *s1, const char *s2, size_t n)
+{
+    while (n && *s1 && *s2) {
+        int c1 = tolower((unsigned char)*s1);
+        int c2 = tolower((unsigned char)*s2);
+        if (c1 != c2)
+            return c1 - c2;
+        s1++;
+        s2++;
+        n--;
+    }
+    if (n == 0)
+        return 0;
+    return tolower((unsigned char)*s1) - tolower((unsigned char)*s2);
+}
+
+/* ========================================================================= */
+/* Extended memory operations                                                */
+/* ========================================================================= */
+
+void *mempcpy(void *dest, const void *src, size_t n)
+{
+    memcpy(dest, src, n);
+    return (char *)dest + n;
+}
+
+void *memmem(const void *haystack, size_t haystacklen,
+             const void *needle, size_t needlelen)
+{
+    if (needlelen == 0)
+        return (void *)haystack;
+    if (needlelen > haystacklen)
+        return NULL;
+
+    const unsigned char *h = (const unsigned char *)haystack;
+    const unsigned char *n = (const unsigned char *)needle;
+
+    for (size_t i = 0; i <= haystacklen - needlelen; i++) {
+        if (h[i] == n[0] && memcmp(h + i, n, needlelen) == 0)
+            return (void *)(h + i);
+    }
+    return NULL;
+}
+
+int strerror_r(int errnum, char *buf, size_t buflen)
+{
+    const char *msg = strerror(errnum);
+    size_t len = strlen(msg);
+    if (len >= buflen) {
+        if (buflen > 0) {
+            memcpy(buf, msg, buflen - 1);
+            buf[buflen - 1] = '\0';
+        }
+        return ERANGE;
+    }
+    memcpy(buf, msg, len + 1);
+    return 0;
+}
+
 /* ========================================================================= */
 /* Tokenization                                                              */
 /* ========================================================================= */
@@ -386,6 +487,17 @@ unsigned long strtoul(const char *nptr, char **endptr, int base)
 {
     /* Reuse strtol logic; cast handles the unsigned case for simple use. */
     return (unsigned long)strtol(nptr, endptr, base);
+}
+
+long long strtoll(const char *nptr, char **endptr, int base)
+{
+    /* On 64-bit platforms, long == long long.  Delegate to strtol. */
+    return (long long)strtol(nptr, endptr, base);
+}
+
+unsigned long long strtoull(const char *nptr, char **endptr, int base)
+{
+    return (unsigned long long)strtoul(nptr, endptr, base);
 }
 
 int atoi(const char *nptr)

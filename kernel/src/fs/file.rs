@@ -1,6 +1,6 @@
 //! File descriptors and file operations
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{string::String, sync::Arc, vec::Vec};
 
 #[cfg(not(target_arch = "aarch64"))]
 use spin::RwLock;
@@ -123,6 +123,10 @@ pub struct File {
 
     /// Reference count
     pub refcount: RwLock<usize>,
+
+    /// Absolute path this file was opened with (for dirfd resolution in *at
+    /// syscalls)
+    pub path: Option<String>,
 }
 
 impl File {
@@ -133,6 +137,18 @@ impl File {
             flags,
             position: RwLock::new(0),
             refcount: RwLock::new(1),
+            path: None,
+        }
+    }
+
+    /// Create a new file structure with a known path
+    pub fn new_with_path(node: Arc<dyn VfsNode>, flags: OpenFlags, path: String) -> Self {
+        Self {
+            node,
+            flags,
+            position: RwLock::new(0),
+            refcount: RwLock::new(1),
+            path: Some(path),
         }
     }
 

@@ -15,17 +15,21 @@ extern "C" {
 #endif
 
 /*
- * jmp_buf layout for x86_64 (8 64-bit slots):
- *   [0] rbx
- *   [1] rbp
- *   [2] r12
- *   [3] r13
- *   [4] r14
- *   [5] r15
- *   [6] rsp  (stack pointer after setjmp returns)
- *   [7] rip  (return address)
+ * jmp_buf layout is architecture-specific:
+ *
+ * x86_64 (8 slots): rbx, rbp, r12-r15, rsp, rip
+ * AArch64 (14 slots): x19-x28, x29(fp), x30(lr), sp, reserved
+ * RISC-V (14 slots): ra, sp, s0-s11
  */
+#if defined(__x86_64__) || defined(_M_X64)
 typedef long jmp_buf[8];
+#elif defined(__aarch64__)
+typedef long jmp_buf[14];
+#elif defined(__riscv) && __riscv_xlen == 64
+typedef long jmp_buf[14];
+#else
+#error "Unsupported architecture for setjmp"
+#endif
 
 /**
  * Save the calling environment for later use by longjmp.

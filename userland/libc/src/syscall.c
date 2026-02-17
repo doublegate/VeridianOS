@@ -508,3 +508,36 @@ int poll(struct pollfd *fds, unsigned long nfds, int timeout)
     return (int)__syscall_ret(
         veridian_syscall3(SYS_FILE_POLL, fds, nfds, timeout));
 }
+
+/* ========================================================================= */
+/* Ownership                                                                 */
+/* ========================================================================= */
+
+int chown(const char *pathname, uid_t owner, gid_t group)
+{
+    return (int)__syscall_ret(
+        veridian_syscall3(SYS_FILE_CHOWN, pathname, owner, group));
+}
+
+int fchown(int fd, uid_t owner, gid_t group)
+{
+    return (int)__syscall_ret(
+        veridian_syscall3(SYS_FILE_FCHOWN, fd, owner, group));
+}
+
+int lchown(const char *pathname, uid_t owner, gid_t group)
+{
+    /* Same as chown — symlink following not implemented */
+    return (int)__syscall_ret(
+        veridian_syscall3(SYS_FILE_CHOWN, pathname, owner, group));
+}
+
+/* ========================================================================= */
+/* Device nodes                                                              */
+/* ========================================================================= */
+
+int mknod(const char *pathname, mode_t mode, dev_t dev)
+{
+    return (int)__syscall_ret(
+        veridian_syscall3(SYS_FILE_MKNOD, pathname, mode, dev));
+}

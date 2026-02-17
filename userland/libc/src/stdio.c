@@ -813,6 +813,288 @@ done_sscanf:
 }
 
 /* ========================================================================= */
+/* Formatted input: vfscanf (core engine for fscanf/scanf)                   */
+/* ========================================================================= */
+
+int vfscanf(FILE *stream, const char *fmt, va_list ap)
+{
+    int matched = 0;
+
+    while (*fmt) {
+        if (isspace((unsigned char)*fmt)) {
+            /* Skip whitespace in format and input. */
+            int c;
+            while ((c = fgetc(stream)) != EOF && isspace(c))
+                ;
+            if (c != EOF)
+                ungetc(c, stream);
+            fmt++;
+            continue;
+        }
+
+        if (*fmt != '%') {
+            /* Literal match. */
+            int c = fgetc(stream);
+            if (c == EOF || c != *fmt)
+                break;
+            fmt++;
+            continue;
+        }
+        fmt++; /* skip '%' */
+
+        switch (*fmt) {
+        case 'd': {
+            int *p = va_arg(ap, int *);
+            /* Skip whitespace. */
+            int c;
+            while ((c = fgetc(stream)) != EOF && isspace(c))
+                ;
+            if (c == EOF)
+                goto done_vfscanf;
+
+            /* Read digits into a small buffer. */
+            char numbuf[24];
+            int ni = 0;
+            if (c == '-' || c == '+') {
+                numbuf[ni++] = (char)c;
+                c = fgetc(stream);
+            }
+            while (c != EOF && c >= '0' && c <= '9' && ni < 23) {
+                numbuf[ni++] = (char)c;
+                c = fgetc(stream);
+            }
+            if (c != EOF)
+                ungetc(c, stream);
+            if (ni == 0 || (ni == 1 && (numbuf[0] == '-' || numbuf[0] == '+')))
+                goto done_vfscanf;
+            numbuf[ni] = '\0';
+            *p = (int)strtol(numbuf, NULL, 10);
+            matched++;
+            break;
+        }
+        case 's': {
+            char *p = va_arg(ap, char *);
+            int c;
+            while ((c = fgetc(stream)) != EOF && isspace(c))
+                ;
+            if (c == EOF)
+                goto done_vfscanf;
+            while (c != EOF && !isspace(c)) {
+                *p++ = (char)c;
+                c = fgetc(stream);
+            }
+            if (c != EOF)
+                ungetc(c, stream);
+            *p = '\0';
+            matched++;
+            break;
+        }
+        case 'c': {
+            char *p = va_arg(ap, char *);
+            int c = fgetc(stream);
+            if (c == EOF)
+                goto done_vfscanf;
+            *p = (char)c;
+            matched++;
+            break;
+        }
+        default:
+            goto done_vfscanf;
+        }
+        fmt++;
+    }
+
+done_vfscanf:
+    return matched;
+}
+
+int fscanf(FILE *stream, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int ret = vfscanf(stream, fmt, ap);
+    va_end(ap);
+    return ret;
+}
+
+int scanf(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int ret = vfscanf(stdin, fmt, ap);
+    va_end(ap);
+    return ret;
+}
+
+/* ========================================================================= */
+/* Ungetc                                                                    */
+/* ========================================================================= */
+
+int ungetc(int c, FILE *stream)
+{
+    if (c == EOF || !stream)
+        return EOF;
+
+    __ensure_buf(stream);
+    if (stream->buf == NULL)
+        return EOF;
+
+    /* If the buffer has space at the front, push back. */
+    if (stream->buf_pos > 0) {
+        stream->buf[--stream->buf_pos] = (unsigned char)c;
+    } else {
+        /* Shift buffer contents right to make room. */
+        if (stream->buf_len >= stream->buf_size)
+            return EOF;
+        memmove(stream->buf + 1, stream->buf, stream->buf_len);
+        stream->buf[0] = (unsigned char)c;
+        stream->buf_len++;
+    }
+
+    stream->flags &= ~__FILE_EOF;
+    return (unsigned char)c;
+}
+
+/* ========================================================================= */
+/* Buffer control                                                            */
+/* ========================================================================= */
+
+int setvbuf(FILE *stream, char *buf, int mode, size_t size)
+{
+    if (!stream)
+        return -1;
+
+    /* Validate mode. */
+    if (mode != _IOFBF && mode != _IOLBF && mode != _IONBF)
+        return -1;
+
+    /* Flush any existing buffered data. */
+    if (stream->flags & __FILE_WRITE)
+        fflush(stream);
+
+    /* Free old buffer if we own it. */
+    if (stream->flags & __FILE_MYBUF) {
+        free(stream->buf);
+        stream->flags &= ~__FILE_MYBUF;
+    }
+
+    stream->buf_mode = mode;
+    stream->buf_pos = 0;
+    stream->buf_len = 0;
+
+    if (mode == _IONBF) {
+        stream->buf = NULL;
+        stream->buf_size = 0;
+    } else if (buf) {
+        stream->buf = (unsigned char *)buf;
+        stream->buf_size = size;
+    } else {
+        stream->buf = (unsigned char *)malloc(size ? size : BUFSIZ);
+        if (stream->buf) {
+            stream->buf_size = size ? size : BUFSIZ;
+            stream->flags |= __FILE_MYBUF;
+        } else {
+            stream->buf_mode = _IONBF;
+            stream->buf_size = 0;
+        }
+    }
+    return 0;
+}
+
+void setbuf(FILE *stream, char *buf)
+{
+    setvbuf(stream, buf, buf ? _IOFBF : _IONBF, BUFSIZ);
+}
+
+void setlinebuf(FILE *stream)
+{
+    setvbuf(stream, NULL, _IOLBF, BUFSIZ);
+}
+
+/* ========================================================================= */
+/* Temporary files                                                           */
+/* ========================================================================= */
+
+static int __tmpnam_counter = 0;
+
+FILE *tmpfile(void)
+{
+    char tmpl[] = "/tmp/tmpXXXXXX";
+    int fd = mkstemp(tmpl);
+    if (fd < 0)
+        return NULL;
+
+    /* Unlink immediately so the file disappears on close. */
+    unlink(tmpl);
+
+    FILE *f = fdopen(fd, "w+b");
+    if (!f) {
+        close(fd);
+        return NULL;
+    }
+    return f;
+}
+
+char *tmpnam(char *s)
+{
+    static char __tmpnam_buf[L_tmpnam];
+    char *buf = s ? s : __tmpnam_buf;
+
+    snprintf(buf, L_tmpnam, "/tmp/tmp%06d", __tmpnam_counter++);
+    return buf;
+}
+
+/* ========================================================================= */
+/* File descriptor / FILE stream bridging                                    */
+/* ========================================================================= */
+
+int fileno(FILE *stream)
+{
+    if (!stream) {
+        errno = EBADF;
+        return -1;
+    }
+    return stream->fd;
+}
+
+FILE *fdopen(int fd, const char *mode)
+{
+    if (fd < 0) {
+        errno = EBADF;
+        return NULL;
+    }
+
+    int fflags = 0;
+    switch (mode[0]) {
+    case 'r':
+        fflags = __FILE_READ;
+        break;
+    case 'w':
+        fflags = __FILE_WRITE;
+        break;
+    case 'a':
+        fflags = __FILE_WRITE | __FILE_APPEND;
+        break;
+    default:
+        errno = EINVAL;
+        return NULL;
+    }
+
+    if (mode[1] == '+' || (mode[1] && mode[2] == '+'))
+        fflags |= __FILE_READ | __FILE_WRITE;
+
+    FILE *f = (FILE *)malloc(sizeof(FILE));
+    if (!f)
+        return NULL;
+
+    memset(f, 0, sizeof(FILE));
+    f->fd = fd;
+    f->flags = fflags;
+    f->buf_mode = _IOFBF;
+    return f;
+}
+
+/* ========================================================================= */
 /* Misc file operations                                                      */
 /* ========================================================================= */
 

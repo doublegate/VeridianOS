@@ -99,6 +99,9 @@ int fgetc(FILE *stream);
 /** Write one character. */
 int fputc(int c, FILE *stream);
 
+/** Push a character back onto the input stream. */
+int ungetc(int c, FILE *stream);
+
 /** Macro aliases. */
 #define getc(stream)        fgetc(stream)
 #define putc(c, stream)     fputc((c), (stream))
@@ -189,6 +192,49 @@ int vsprintf(char *buf, const char *fmt, va_list ap);
 /** Read formatted input from a string. */
 int sscanf(const char *str, const char *fmt, ...)
     __attribute__((format(scanf, 2, 3)));
+
+/** Read formatted input from a FILE stream. */
+int fscanf(FILE *stream, const char *fmt, ...)
+    __attribute__((format(scanf, 2, 3)));
+
+/** Read formatted input from stdin. */
+int scanf(const char *fmt, ...)
+    __attribute__((format(scanf, 1, 2)));
+
+/** va_list variant of fscanf. */
+int vfscanf(FILE *stream, const char *fmt, va_list ap);
+
+/* ========================================================================= */
+/* Buffer control                                                            */
+/* ========================================================================= */
+
+/** Set stream buffering mode. */
+int setvbuf(FILE *stream, char *buf, int mode, size_t size);
+
+/** Set stream buffer (convenience wrapper for setvbuf). */
+void setbuf(FILE *stream, char *buf);
+
+/** Set line buffering on a stream. */
+void setlinebuf(FILE *stream);
+
+/* ========================================================================= */
+/* Temporary files                                                           */
+/* ========================================================================= */
+
+/** Maximum length of a tmpnam-generated path. */
+#define L_tmpnam        20
+
+/** Create a temporary file (opened with "w+b"). */
+FILE *tmpfile(void);
+
+/** Generate a unique temporary filename. */
+char *tmpnam(char *s);
+
+/** Get file descriptor number from FILE stream. */
+int fileno(FILE *stream);
+
+/** Open a stream from an existing file descriptor. */
+FILE *fdopen(int fd, const char *mode);
 
 /* ========================================================================= */
 /* Misc                                                                      */

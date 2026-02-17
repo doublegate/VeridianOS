@@ -169,6 +169,12 @@ extern "C" {
 #define SYS_FILE_PREAD          195
 #define SYS_FILE_PWRITE         196
 
+/* Ownership and device node syscalls (197-200) */
+#define SYS_FILE_CHOWN          197
+#define SYS_FILE_FCHOWN         198
+#define SYS_FILE_MKNOD          199
+#define SYS_FILE_SELECT         200
+
 /* AT_* constants for *at() syscalls */
 #define AT_FDCWD                (-100)
 #define AT_REMOVEDIR            0x200

@@ -162,6 +162,16 @@ int chmod(const char *pathname, mode_t mode);
  */
 mode_t umask(mode_t mask);
 
+/**
+ * Create a special (or ordinary) file.
+ *
+ * @param pathname  Path for the new node.
+ * @param mode      File type and permission bits.
+ * @param dev       Device number (for S_IFBLK/S_IFCHR).
+ * @return 0 on success, -1 on error.
+ */
+int mknod(const char *pathname, mode_t mode, dev_t dev);
+
 #ifdef __cplusplus
 }
 #endif

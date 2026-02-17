@@ -90,6 +90,21 @@ long strtol(const char *nptr, char **endptr, int base);
 /** Convert string to unsigned long. */
 unsigned long strtoul(const char *nptr, char **endptr, int base);
 
+/** Convert string to long long. */
+long long strtoll(const char *nptr, char **endptr, int base);
+
+/** Convert string to unsigned long long. */
+unsigned long long strtoull(const char *nptr, char **endptr, int base);
+
+/** Convert string to double. */
+double strtod(const char *nptr, char **endptr);
+
+/** Convert string to float. */
+float strtof(const char *nptr, char **endptr);
+
+/** Convert string to double (convenience). */
+double atof(const char *nptr);
+
 /* ========================================================================= */
 /* Pseudo-random number generation                                           */
 /* ========================================================================= */
