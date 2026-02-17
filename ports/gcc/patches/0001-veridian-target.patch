@@ -1,0 +1,232 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VeridianOS <veridian@veridian-os.org>
+Date: Mon, 17 Feb 2026 00:00:00 +0000
+Subject: [PATCH 1/2] Add VeridianOS target support to GCC
+
+Teach GCC 14.2.0 to recognize x86_64-veridian, aarch64-veridian,
+and riscv64-veridian as valid cross-compilation targets.
+
+New files:
+  - gcc/config/veridian.h: VeridianOS target OS header defining
+    __veridian__, startup file specs, and linker defaults.
+  - gcc/config/t-veridian: VeridianOS makefile fragment (no multilib).
+
+Modified files:
+  - gcc/config.gcc: Add veridian target cases for x86_64, aarch64,
+    and riscv64, wiring in the veridian.h header and t-veridian
+    makefile fragment.
+  - libgcc/config.host: Add libgcc support (crtbegin/crtend) for
+    all three veridian architectures.
+  - fixincludes/mkfixinc.sh: Skip fixincludes for veridian targets
+    (VeridianOS provides its own headers).
+---
+ fixincludes/mkfixinc.sh |  3 +++
+ gcc/config.gcc          | 24 ++++++++++++++++++++++
+ gcc/config/t-veridian   |  8 ++++++++
+ gcc/config/veridian.h   | 70 +++++++++++++++++++++++++++++++++++++++++++++++++
+ libgcc/config.host      | 15 ++++++++++++++
+ 5 files changed, 120 insertions(+)
+ create mode 100644 gcc/config/t-veridian
+ create mode 100644 gcc/config/veridian.h
+
+diff --git a/gcc/config.gcc b/gcc/config.gcc
+index 648b1f24e5a..a2c9d4f7b31 100644
+--- a/gcc/config.gcc
++++ b/gcc/config.gcc
+@@ -1128,6 +1128,14 @@ aarch64*-*-elf | aarch64*-*-fuchsia* | aarch64*-*-rtems*)
+ 	tmake_file="${tmake_file} aarch64/t-aarch64"
+ 	use_gcc_stdint=wrap
+ 	;;
++aarch64*-*-veridian*)
++	tm_file="${tm_file} dbxelf.h elfos.h newlib-stdint.h"
++	tm_file="${tm_file} aarch64/aarch64-elf.h aarch64/aarch64-errata.h veridian.h"
++	tmake_file="${tmake_file} aarch64/t-aarch64 t-veridian"
++	use_gcc_stdint=wrap
++	;;
+ aarch64*-*-linux*)
+ 	tm_file="${tm_file} dbxelf.h elfos.h gnu-user.h linux.h glibc-stdint.h"
+ 	tm_file="${tm_file} aarch64/aarch64-elf.h aarch64/aarch64-errata.h aarch64/aarch64-linux.h"
+@@ -2048,6 +2056,14 @@ x86_64-*-elf*)
+ 	tmake_file="${tmake_file} i386/t-x86_64-elf"
+ 	use_gcc_stdint=wrap
+ 	;;
++x86_64-*-veridian*)
++	tm_file="${tm_file} i386/unix.h i386/att.h elfos.h newlib-stdint.h i386/i386elf.h i386/x86-64.h veridian.h"
++	tmake_file="${tmake_file} i386/t-x86_64-elf t-veridian"
++	use_gcc_stdint=wrap
++	;;
++i[34567]86-*-veridian*)
++	tm_file="${tm_file} i386/unix.h i386/att.h elfos.h newlib-stdint.h i386/i386elf.h veridian.h"
++	tmake_file="${tmake_file} t-veridian"
++	use_gcc_stdint=wrap
++	;;
+ x86_64-*-linux* | x86_64-*-kfreebsd*-gnu)
+ 	tm_file="${tm_file} i386/unix.h i386/att.h dbxelf.h elfos.h gnu-user.h linux.h"
+ 	tm_file="${tm_file} glibc-stdint.h i386/x86-64.h i386/gnu-user-common.h"
+@@ -2783,6 +2799,12 @@ riscv*-*-elf* | riscv*-*-rtems*)
+ 	tmake_file="${tmake_file} riscv/t-riscv"
+ 	use_gcc_stdint=wrap
+ 	;;
++riscv*-*-veridian*)
++	tm_file="${tm_file} dbxelf.h elfos.h newlib-stdint.h"
++	tm_file="${tm_file} riscv/elf.h veridian.h"
++	tmake_file="${tmake_file} riscv/t-riscv t-veridian"
++	use_gcc_stdint=wrap
++	;;
+ riscv*-*-linux*)
+ 	tm_file="${tm_file} dbxelf.h elfos.h gnu-user.h linux.h glibc-stdint.h"
+ 	tm_file="${tm_file} riscv/linux.h"
+diff --git a/gcc/config/veridian.h b/gcc/config/veridian.h
+new file mode 100644
+index 0000000000000..b3c8e7f2a1d5e
+--- /dev/null
++++ b/gcc/config/veridian.h
+@@ -0,0 +1,70 @@
++/* Target configuration for VeridianOS.
++   Copyright (C) 2026 Free Software Foundation, Inc.
++
++   This file is part of GCC.
++
++   GCC is free software; you can redistribute it and/or modify it
++   under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3, or (at your option)
++   any later version.
++
++   GCC is distributed in the hope that it will be useful, but WITHOUT
++   ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
++   or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public
++   License for more details.
++
++   Under Section 7 of GPL version 3, you are granted additional
++   permissions described in the GCC Runtime Library Exception, version
++   3.1, as published by the Free Software Foundation.
++
++   You should have received a copy of the GNU General Public License
++   and a copy of the GCC Runtime Library Exception along with this
++   program; see the files COPYING3 and COPYING.RUNTIME respectively.
++   If not, see <http://www.gnu.org/licenses/>.  */
++
++/* VeridianOS -- capability-based microkernel operating system.
++
++   This header defines the target OS builtins, link specs, and startup
++   file references for VeridianOS.  It is included last in the tm_file
++   list so that it can override settings from architecture-specific
++   headers.  */
++
++#undef  TARGET_OS_CPP_BUILTINS
++#define TARGET_OS_CPP_BUILTINS()        \
++  do {                                  \
++    builtin_define ("__veridian__");     \
++    builtin_define ("__unix__");         \
++    builtin_assert ("system=veridian"); \
++    builtin_assert ("system=unix");     \
++    builtin_assert ("system=posix");    \
++  } while (0)
++
++/* Use standard ELF sections.  */
++#define OBJECT_FORMAT_ELF
++
++/* Default linker emulation -- overridden per-arch where needed.  */
++#undef  GNU_USER_LINK_EMULATION
++#define GNU_USER_LINK_EMULATION "elf_x86_64"
++
++/* C runtime startup files.  crt0.o is provided by the VeridianOS libc
++   (userland/libc/crt0.S).  crti.o and crtn.o bracket .init/.fini.  */
++#undef  STARTFILE_SPEC
++#define STARTFILE_SPEC "crt0.o%s crti.o%s crtbegin.o%s"
++
++#undef  ENDFILE_SPEC
++#define ENDFILE_SPEC "crtend.o%s crtn.o%s"
++
++/* Link against the VeridianOS C library.  */
++#undef  LIB_SPEC
++#define LIB_SPEC "-lc"
++
++/* Linker flags: 4 KiB page size (all three architectures), static by
++   default since VeridianOS does not yet have a dynamic linker.  */
++#undef  LINK_SPEC
++#define LINK_SPEC "-z max-page-size=4096 %{!shared: %{!static: -static}}"
++
++/* Simplify the GCC internal link sequence -- no crt* magic beyond what
++   STARTFILE_SPEC / ENDFILE_SPEC already request.  */
++#undef  LINK_GCC_C_SEQUENCE_SPEC
++#define LINK_GCC_C_SEQUENCE_SPEC "%G %L"
++
++/* No multilib support.  */
++#undef  MULTILIB_DEFAULTS
++#define MULTILIB_DEFAULTS { "" }
++
++/* Thread model -- single for now (no pthreads yet).  */
++#undef  THREAD_MODEL_SPEC
++#define THREAD_MODEL_SPEC "single"
+diff --git a/gcc/config/t-veridian b/gcc/config/t-veridian
+new file mode 100644
+index 0000000000000..a7d1b3e5f8c92
+--- /dev/null
++++ b/gcc/config/t-veridian
+@@ -0,0 +1,8 @@
++# Makefile fragment for VeridianOS targets.
++#
++# No extra multilib configurations -- VeridianOS uses a single ABI per
++# architecture (LP64 for all three: x86_64, AArch64, RISC-V 64).
++
++MULTILIB_OPTIONS =
++MULTILIB_DIRNAMES =
++MULTILIB_OSDIRNAMES =
+diff --git a/libgcc/config.host b/libgcc/config.host
+index 9dbe2b4a17c..e5f0c3d8a29 100644
+--- a/libgcc/config.host
++++ b/libgcc/config.host
+@@ -378,6 +378,11 @@ aarch64*-*-elf | aarch64*-*-rtems*)
+ 	extra_parts="$extra_parts crtbegin.o crtend.o crti.o crtn.o"
+ 	extra_parts="$extra_parts crtfastmath.o"
+ 	;;
++aarch64*-*-veridian*)
++	extra_parts="crtbegin.o crtend.o"
++	tmake_file="${tmake_file} ${cpu_type}/t-aarch64"
++	tmake_file="${tmake_file} t-crtstuff"
++	;;
+ aarch64*-*-linux*)
+ 	extra_parts="$extra_parts crtfastmath.o"
+ 	md_unwind_header=aarch64/linux-unwind.h
+@@ -738,6 +743,11 @@ x86_64-*-elf* | x86_64-*-rtems*)
+ 	extra_parts="$extra_parts crtprec32.o crtprec64.o crtprec80.o crtfastmath.o"
+ 	tmake_file="${tmake_file} i386/t-crtstuff"
+ 	;;
++x86_64-*-veridian*)
++	extra_parts="crtbegin.o crtend.o"
++	tmake_file="${tmake_file} i386/t-crtstuff"
++	tmake_file="${tmake_file} t-crtstuff"
++	;;
+ x86_64-*-linux* | x86_64-*-kfreebsd*-gnu)
+ 	extra_parts="$extra_parts crtprec32.o crtprec64.o crtprec80.o crtfastmath.o"
+ 	tmake_file="${tmake_file} i386/t-crtstuff"
+@@ -1270,6 +1280,11 @@ riscv*-*-elf* | riscv*-*-rtems*)
+ 	extra_parts="$extra_parts crtbegin.o crtend.o crti.o crtn.o"
+ 	tmake_file="${tmake_file} ${cpu_type}/t-crtstuff"
+ 	;;
++riscv*-*-veridian*)
++	extra_parts="crtbegin.o crtend.o"
++	tmake_file="${tmake_file} ${cpu_type}/t-crtstuff"
++	tmake_file="${tmake_file} t-crtstuff"
++	;;
+ riscv*-*-linux*)
+ 	extra_parts="$extra_parts crtfastmath.o"
+ 	tmake_file="${tmake_file} ${cpu_type}/t-crtstuff"
+diff --git a/fixincludes/mkfixinc.sh b/fixincludes/mkfixinc.sh
+index 0d96c377ee6..d4a7f1c2b38 100755
+--- a/fixincludes/mkfixinc.sh
++++ b/fixincludes/mkfixinc.sh
+@@ -14,6 +14,9 @@ case $machine in
+     *-*-vxworks7*)
+ 	;;
+
++    *-veridian*)
++	exit 0
++	;;
+     *-*-linux* | \
+     *-*-gnu* | \
+     *-*-k*bsd*-gnu | \
+--
+2.47.1
+

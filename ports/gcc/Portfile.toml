@@ -1,0 +1,45 @@
+# Portfile.toml -- GCC (Stage 1, C only) for VeridianOS
+#
+# Stage 1 cross-compiler: C language only, no shared libraries, no threads.
+# This is sufficient to build a libc and the rest of the bootstrap toolchain.
+# A stage 2 build with C++ and full runtime support can be done once libc is
+# available in the sysroot.
+
+[port]
+name = "gcc"
+version = "14.2.0"
+description = "GNU Compiler Collection -- stage 1 cross-compiler (C only)"
+homepage = "https://gcc.gnu.org/"
+license = "GPL-3.0-or-later"
+category = "devel"
+build_type = "autotools"
+
+[sources]
+urls = [
+    "https://ftp.gnu.org/gnu/gcc/gcc-14.2.0/gcc-14.2.0.tar.xz",
+    "https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz",
+    "https://ftp.gnu.org/gnu/mpfr/mpfr-4.2.1.tar.xz",
+    "https://ftp.gnu.org/gnu/mpc/mpc-1.3.1.tar.gz"
+]
+checksums = [
+    "a7b39bc69cbf9e25826c5a60ab26477001f7c08d85cec04bc0e29cabed6f3cc9",
+    "a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898",
+    "277807353a6726978996945af13e52829e3abd7a9a5b7fb2793894e18f1fcbb2",
+    "ab642492f5cf882b74aa0cb730cd410a81edcdbec895183ce930e706c1c759b8"
+]
+
+[dependencies]
+build = ["binutils"]
+runtime = []
+
+[build]
+patches = [
+    "patches/0001-veridian-target.patch",
+    "patches/0002-veridian-config-sub.patch"
+]
+steps = [
+    "cd gcc-14.2.0 && ln -sf ../gmp-6.3.0 gmp && ln -sf ../mpfr-4.2.1 mpfr && ln -sf ../mpc-1.3.1 mpc",
+    "mkdir -p build && cd build && ../gcc-14.2.0/configure --target=$VERIDIAN_TARGET --prefix=/usr --with-sysroot=/opt/veridian-sysroot --enable-languages=c --disable-shared --disable-threads --disable-multilib --disable-libssp --disable-libquadmath --disable-libgomp --disable-libatomic --disable-libstdcxx --disable-nls --with-newlib --without-headers",
+    "cd build && make -j$(nproc) all-gcc all-target-libgcc",
+    "cd build && make install-gcc install-target-libgcc DESTDIR=$PKG_DIR"
+]

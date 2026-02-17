@@ -191,6 +191,166 @@ pub fn drain_pipe(reader: &PipeReader) -> Vec<u8> {
     result
 }
 
+// ============================================================================
+// VfsNode adapters for pipe ends (used by pipe2 syscall)
+// ============================================================================
+
+use super::{DirEntry, Metadata, NodeType, Permissions, VfsNode};
+
+/// VfsNode adapter wrapping the read end of a pipe.
+pub struct PipeReadNode {
+    reader: Arc<Mutex<PipeReader>>,
+}
+
+impl PipeReadNode {
+    /// Create a new PipeReadNode from a PipeReader.
+    pub fn new(reader: PipeReader) -> Self {
+        Self {
+            reader: Arc::new(Mutex::new(reader)),
+        }
+    }
+}
+
+impl VfsNode for PipeReadNode {
+    fn node_type(&self) -> NodeType {
+        NodeType::CharDevice
+    }
+
+    fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
+        self.reader.lock().try_read(buffer)
+    }
+
+    fn write(&self, _offset: usize, _data: &[u8]) -> Result<usize, KernelError> {
+        Err(KernelError::PermissionDenied {
+            operation: "write to pipe read end",
+        })
+    }
+
+    fn metadata(&self) -> Result<Metadata, KernelError> {
+        Ok(Metadata {
+            size: 0,
+            node_type: NodeType::CharDevice,
+            permissions: Permissions::from_mode(0o444),
+            uid: 0,
+            gid: 0,
+            created: 0,
+            modified: 0,
+            accessed: 0,
+        })
+    }
+
+    fn readdir(&self) -> Result<Vec<DirEntry>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn lookup(&self, _name: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn create(
+        &self,
+        _name: &str,
+        _permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn mkdir(
+        &self,
+        _name: &str,
+        _permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn unlink(&self, _name: &str) -> Result<(), KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn truncate(&self, _size: usize) -> Result<(), KernelError> {
+        Err(KernelError::PermissionDenied {
+            operation: "truncate pipe",
+        })
+    }
+}
+
+/// VfsNode adapter wrapping the write end of a pipe.
+pub struct PipeWriteNode {
+    writer: Arc<Mutex<PipeWriter>>,
+}
+
+impl PipeWriteNode {
+    /// Create a new PipeWriteNode from a PipeWriter.
+    pub fn new(writer: PipeWriter) -> Self {
+        Self {
+            writer: Arc::new(Mutex::new(writer)),
+        }
+    }
+}
+
+impl VfsNode for PipeWriteNode {
+    fn node_type(&self) -> NodeType {
+        NodeType::CharDevice
+    }
+
+    fn read(&self, _offset: usize, _buffer: &mut [u8]) -> Result<usize, KernelError> {
+        Err(KernelError::PermissionDenied {
+            operation: "read from pipe write end",
+        })
+    }
+
+    fn write(&self, _offset: usize, data: &[u8]) -> Result<usize, KernelError> {
+        self.writer.lock().write(data)
+    }
+
+    fn metadata(&self) -> Result<Metadata, KernelError> {
+        Ok(Metadata {
+            size: 0,
+            node_type: NodeType::CharDevice,
+            permissions: Permissions::from_mode(0o222),
+            uid: 0,
+            gid: 0,
+            created: 0,
+            modified: 0,
+            accessed: 0,
+        })
+    }
+
+    fn readdir(&self) -> Result<Vec<DirEntry>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn lookup(&self, _name: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn create(
+        &self,
+        _name: &str,
+        _permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn mkdir(
+        &self,
+        _name: &str,
+        _permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn unlink(&self, _name: &str) -> Result<(), KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn truncate(&self, _size: usize) -> Result<(), KernelError> {
+        Err(KernelError::PermissionDenied {
+            operation: "truncate pipe",
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,0 +1,126 @@
+/*
+ * VeridianOS libc -- unistd.c
+ *
+ * Copyright (c) 2025-2026 VeridianOS Contributors
+ * SPDX-License-Identifier: MIT OR Apache-2.0
+ *
+ * POSIX-like functions that are not direct 1:1 syscall wrappers.
+ * The raw syscall wrappers (read, write, fork, etc.) are in syscall.c.
+ * This file provides composite functions built on top of them.
+ */
+
+#include <unistd.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <time.h>
+
+/* ========================================================================= */
+/* Sleep                                                                     */
+/* ========================================================================= */
+
+unsigned int sleep(unsigned int seconds)
+{
+    struct timespec req = { .tv_sec = (time_t)seconds, .tv_nsec = 0 };
+    struct timespec rem = { 0, 0 };
+
+    if (nanosleep(&req, &rem) == 0)
+        return 0;
+
+    /* If interrupted, return remaining seconds (rounded up). */
+    return (unsigned int)rem.tv_sec + (rem.tv_nsec > 0 ? 1 : 0);
+}
+
+int usleep(unsigned int usec)
+{
+    struct timespec req;
+    req.tv_sec  = (time_t)(usec / 1000000);
+    req.tv_nsec = (long)(usec % 1000000) * 1000;
+    return nanosleep(&req, NULL);
+}
+
+/* ========================================================================= */
+/* exec family                                                               */
+/* ========================================================================= */
+
+/*
+ * execvp: search PATH for the program.
+ * This is a simplified implementation that only looks in a few
+ * hard-coded directories if there is no '/' in the filename.
+ */
+int execvp(const char *file, char *const argv[])
+{
+    /* If file contains a slash, use it directly. */
+    if (strchr(file, '/'))
+        return execve(file, argv, environ);
+
+    /* Search a basic PATH. */
+    static const char *search_dirs[] = {
+        "/bin", "/usr/bin", "/sbin", "/usr/sbin", NULL
+    };
+
+    /* Try PATH from environment first. */
+    const char *path_env = getenv("PATH");
+    if (path_env) {
+        char buf[256];
+        const char *p = path_env;
+        while (*p) {
+            const char *end = p;
+            while (*end && *end != ':')
+                end++;
+            size_t dirlen = (size_t)(end - p);
+            if (dirlen > 0 && dirlen + 1 + strlen(file) + 1 <= sizeof(buf)) {
+                memcpy(buf, p, dirlen);
+                buf[dirlen] = '/';
+                strcpy(buf + dirlen + 1, file);
+                execve(buf, argv, environ);
+                /* If execve returns, the file wasn't found/executable. */
+            }
+            if (*end == ':')
+                end++;
+            p = end;
+        }
+    } else {
+        /* Fallback: search hard-coded directories. */
+        for (int i = 0; search_dirs[i]; i++) {
+            char buf[256];
+            size_t dlen = strlen(search_dirs[i]);
+            size_t flen = strlen(file);
+            if (dlen + 1 + flen + 1 > sizeof(buf))
+                continue;
+            memcpy(buf, search_dirs[i], dlen);
+            buf[dlen] = '/';
+            memcpy(buf + dlen + 1, file, flen + 1);
+            execve(buf, argv, environ);
+        }
+    }
+
+    errno = ENOENT;
+    return -1;
+}
+
+/* ========================================================================= */
+/* Miscellaneous                                                             */
+/* ========================================================================= */
+
+int gethostname(char *name, size_t len)
+{
+    static const char hostname[] = "veridian";
+    size_t n = sizeof(hostname);
+    if (n > len)
+        n = len;
+    memcpy(name, hostname, n);
+    return 0;
+}
+
+int isatty(int fd)
+{
+    /*
+     * Minimal heuristic: fds 0-2 are TTYs.
+     * A real implementation would use ioctl(fd, TIOCGWINSZ, ...).
+     */
+    if (fd >= 0 && fd <= 2)
+        return 1;
+    errno = ENOTTY;
+    return 0;
+}

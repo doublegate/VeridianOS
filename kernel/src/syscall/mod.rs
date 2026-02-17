@@ -179,6 +179,18 @@ use self::package::*;
 mod time;
 use self::time::*;
 
+// Import signal syscalls module
+mod signal;
+use self::signal::*;
+
+// Import debug syscalls module
+mod debug;
+use self::debug::*;
+
+// Import memory syscalls module
+mod memory;
+use self::memory::*;
+
 // Import user space utilities
 mod userspace;
 
@@ -218,6 +230,8 @@ pub enum Syscall {
     // Memory management
     MemoryMap = 20,
     MemoryUnmap = 21,
+    MemoryProtect = 22,
+    MemoryBrk = 23,
 
     // Capability management
     CapabilityGrant = 30,
@@ -238,6 +252,8 @@ pub enum Syscall {
     DirOpendir = 62,
     DirReaddir = 63,
     DirClosedir = 64,
+    FilePipe2 = 65,
+    FileDup3 = 66,
 
     // Filesystem management
     FsMount = 70,
@@ -269,6 +285,49 @@ pub enum Syscall {
     ProcessChdir = 111,
     FileIoctl = 112,
     ProcessKill = 113,
+
+    // Signal management
+    SigAction = 120,
+    SigProcmask = 121,
+    SigSuspend = 122,
+    SigReturn = 123,
+
+    // POSIX time syscalls
+    ClockGettime = 160,
+    ClockGetres = 161,
+    Nanosleep = 162,
+    Gettimeofday = 163,
+
+    // Identity syscalls
+    Getuid = 170,
+    Geteuid = 171,
+    Getgid = 172,
+    Getegid = 173,
+    Setuid = 174,
+    Setgid = 175,
+
+    // Process group / session syscalls
+    Setpgid = 176,
+    Getpgid = 177,
+    Getpgrp = 178,
+    Setsid = 179,
+    Getsid = 180,
+
+    // Scatter/gather I/O
+    Readv = 183,
+    Writev = 184,
+
+    // Debug / tracing
+    Ptrace = 140,
+
+    // Extended filesystem operations (Phase 4B)
+    FileStatPath = 150,
+    FileLstat = 151,
+    FileReadlink = 152,
+    FileAccess = 153,
+    FileRename = 154,
+    FileUnlink = 157,
+    FileFcntl = 158,
 }
 
 /// System call result type
@@ -433,9 +492,20 @@ fn handle_syscall(
         Syscall::FileDup2 => sys_dup2(arg1, arg2),
         Syscall::FilePipe => sys_pipe(arg1),
 
+        // Memory management
+        Syscall::MemoryMap => sys_mmap(arg1, arg2, arg3, arg4, arg5),
+        Syscall::MemoryUnmap => sys_munmap(arg1, arg2),
+        Syscall::MemoryProtect => sys_mprotect(arg1, arg2, arg3),
+        Syscall::MemoryBrk => sys_brk(arg1),
+
         // Directory operations
         Syscall::DirMkdir => sys_mkdir(arg1, arg2),
         Syscall::DirRmdir => sys_rmdir(arg1),
+        Syscall::DirOpendir => sys_opendir(arg1),
+        Syscall::DirReaddir => sys_readdir(arg1, arg2, arg3),
+        Syscall::DirClosedir => sys_closedir(arg1),
+        Syscall::FilePipe2 => sys_pipe2(arg1, arg2),
+        Syscall::FileDup3 => sys_dup3(arg1, arg2, arg3),
 
         // Filesystem management
         Syscall::FsMount => sys_mount(arg1, arg2, arg3, arg4),
@@ -462,6 +532,49 @@ fn handle_syscall(
         Syscall::TimeGetUptime => sys_time_get_uptime(),
         Syscall::TimeCreateTimer => sys_time_create_timer(arg1, arg2, arg3),
         Syscall::TimeCancelTimer => sys_time_cancel_timer(arg1),
+
+        // Signal management
+        Syscall::SigAction => sys_sigaction(arg1, arg2, arg3),
+        Syscall::SigProcmask => sys_sigprocmask(arg1, arg2, arg3),
+        Syscall::SigSuspend => sys_sigsuspend(arg1),
+        Syscall::SigReturn => sys_sigreturn(arg1),
+
+        // POSIX time syscalls
+        Syscall::ClockGettime => sys_clock_gettime(arg1, arg2),
+        Syscall::ClockGetres => sys_clock_getres(arg1, arg2),
+        Syscall::Nanosleep => sys_nanosleep(arg1, arg2),
+        Syscall::Gettimeofday => sys_gettimeofday(arg1, arg2),
+
+        // Identity syscalls
+        Syscall::Getuid => sys_getuid(),
+        Syscall::Geteuid => sys_geteuid(),
+        Syscall::Getgid => sys_getgid(),
+        Syscall::Getegid => sys_getegid(),
+        Syscall::Setuid => sys_setuid(arg1),
+        Syscall::Setgid => sys_setgid(arg1),
+
+        // Process group / session syscalls
+        Syscall::Setpgid => sys_setpgid(arg1, arg2),
+        Syscall::Getpgid => sys_getpgid(arg1),
+        Syscall::Getpgrp => sys_getpgrp(),
+        Syscall::Setsid => sys_setsid(),
+        Syscall::Getsid => sys_getsid(arg1),
+
+        // Scatter/gather I/O
+        Syscall::Readv => sys_readv(arg1, arg2, arg3),
+        Syscall::Writev => sys_writev(arg1, arg2, arg3),
+
+        // Debug / tracing
+        Syscall::Ptrace => sys_ptrace(arg1, arg2, arg3, arg4),
+
+        // Extended filesystem operations
+        Syscall::FileStatPath => sys_stat_path(arg1, arg2),
+        Syscall::FileLstat => sys_lstat(arg1, arg2),
+        Syscall::FileReadlink => sys_readlink(arg1, arg2, arg3),
+        Syscall::FileAccess => sys_access(arg1, arg2),
+        Syscall::FileRename => sys_rename(arg1, arg2),
+        Syscall::FileUnlink => sys_unlink(arg1),
+        Syscall::FileFcntl => sys_fcntl(arg1, arg2, arg3),
 
         _ => Err(SyscallError::InvalidSyscall),
     }
@@ -914,6 +1027,8 @@ impl TryFrom<usize> for Syscall {
             // Memory management
             20 => Ok(Syscall::MemoryMap),
             21 => Ok(Syscall::MemoryUnmap),
+            22 => Ok(Syscall::MemoryProtect),
+            23 => Ok(Syscall::MemoryBrk),
 
             // Capability management
             30 => Ok(Syscall::CapabilityGrant),
@@ -945,6 +1060,8 @@ impl TryFrom<usize> for Syscall {
             62 => Ok(Syscall::DirOpendir),
             63 => Ok(Syscall::DirReaddir),
             64 => Ok(Syscall::DirClosedir),
+            65 => Ok(Syscall::FilePipe2),
+            66 => Ok(Syscall::FileDup3),
 
             // Filesystem management
             70 => Ok(Syscall::FsMount),
@@ -971,6 +1088,49 @@ impl TryFrom<usize> for Syscall {
             111 => Ok(Syscall::ProcessChdir),
             112 => Ok(Syscall::FileIoctl),
             113 => Ok(Syscall::ProcessKill),
+
+            // Signal management
+            120 => Ok(Syscall::SigAction),
+            121 => Ok(Syscall::SigProcmask),
+            122 => Ok(Syscall::SigSuspend),
+            123 => Ok(Syscall::SigReturn),
+
+            // Debug / tracing
+            140 => Ok(Syscall::Ptrace),
+
+            // POSIX time syscalls
+            160 => Ok(Syscall::ClockGettime),
+            161 => Ok(Syscall::ClockGetres),
+            162 => Ok(Syscall::Nanosleep),
+            163 => Ok(Syscall::Gettimeofday),
+
+            // Identity syscalls
+            170 => Ok(Syscall::Getuid),
+            171 => Ok(Syscall::Geteuid),
+            172 => Ok(Syscall::Getgid),
+            173 => Ok(Syscall::Getegid),
+            174 => Ok(Syscall::Setuid),
+            175 => Ok(Syscall::Setgid),
+
+            // Process group / session syscalls
+            176 => Ok(Syscall::Setpgid),
+            177 => Ok(Syscall::Getpgid),
+            178 => Ok(Syscall::Getpgrp),
+            179 => Ok(Syscall::Setsid),
+            180 => Ok(Syscall::Getsid),
+
+            // Scatter/gather I/O
+            183 => Ok(Syscall::Readv),
+            184 => Ok(Syscall::Writev),
+
+            // Extended filesystem operations
+            150 => Ok(Syscall::FileStatPath),
+            151 => Ok(Syscall::FileLstat),
+            152 => Ok(Syscall::FileReadlink),
+            153 => Ok(Syscall::FileAccess),
+            154 => Ok(Syscall::FileRename),
+            157 => Ok(Syscall::FileUnlink),
+            158 => Ok(Syscall::FileFcntl),
 
             _ => Err(()),
         }

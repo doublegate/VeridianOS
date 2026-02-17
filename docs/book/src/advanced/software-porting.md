@@ -20,9 +20,9 @@ VeridianOS supports software for all target architectures:
 
 | Architecture | Status | Target Triple |
 |--------------|--------|---------------|
-| **x86_64** | ✅ Full Support | `x86_64-unknown-veridian` |
-| **AArch64** | ✅ Full Support | `aarch64-unknown-veridian` |
-| **RISC-V** | ✅ Full Support | `riscv64gc-unknown-veridian` |
+| **x86_64** | ✅ Full Support | `x86_64-veridian` |
+| **AArch64** | ✅ Full Support | `aarch64-veridian` |
+| **RISC-V** | ✅ Full Support | `riscv64gc-veridian` |
 
 ## Cross-Compilation Setup
 
@@ -39,7 +39,7 @@ sudo tar -xf veridian-toolchain-latest.tar.xz -C /opt/
 export PATH="/opt/veridian-toolchain/bin:$PATH"
 
 # Verify installation
-x86_64-unknown-veridian-gcc --version
+x86_64-veridian-gcc --version
 ```
 
 ### Sysroot Configuration
@@ -66,11 +66,11 @@ Configure your build environment for cross-compilation:
 # Create build script
 cat > build-for-veridian.sh << 'EOF'
 #!/bin/bash
-export CC="x86_64-unknown-veridian-gcc"
-export CXX="x86_64-unknown-veridian-g++"
-export AR="x86_64-unknown-veridian-ar"
-export STRIP="x86_64-unknown-veridian-strip"
-export RANLIB="x86_64-unknown-veridian-ranlib"
+export CC="x86_64-veridian-gcc"
+export CXX="x86_64-veridian-g++"
+export AR="x86_64-veridian-ar"
+export STRIP="x86_64-veridian-strip"
+export RANLIB="x86_64-veridian-ranlib"
 
 export CFLAGS="-O2 -pipe"
 export CXXFLAGS="$CFLAGS"
@@ -146,7 +146,7 @@ Most UNIX utilities compile with minimal or no changes:
 ```bash
 # Example: Porting GNU Coreutils
 cd coreutils-9.4
-./configure --host=x86_64-unknown-veridian \
+./configure --host=x86_64-veridian \
            --prefix=/usr \
            --disable-nls \
            --enable-static-link
@@ -161,7 +161,7 @@ make DESTDIR=$VERIDIAN_SYSROOT install
 ```bash
 # Vim
 cd vim-9.0
-./configure --host=x86_64-unknown-veridian \
+./configure --host=x86_64-veridian \
            --with-features=huge \
            --disable-gui \
            --enable-static-link
@@ -170,7 +170,7 @@ make -j$(nproc)
 # GCC (as a cross-compiler)
 cd gcc-13.2.0
 mkdir build && cd build
-../configure --target=x86_64-unknown-veridian \
+../configure --target=x86_64-veridian \
            --prefix=/usr \
            --enable-languages=c,c++ \
            --disable-multilib
@@ -182,7 +182,7 @@ make -j$(nproc)
 ```bash
 # cURL
 cd curl-8.4.0
-./configure --host=x86_64-unknown-veridian \
+./configure --host=x86_64-veridian \
            --prefix=/usr \
            --with-ssl \
            --disable-shared \
@@ -191,7 +191,7 @@ make -j$(nproc)
 
 # OpenSSH
 cd openssh-9.5p1
-./configure --host=x86_64-unknown-veridian \
+./configure --host=x86_64-veridian \
            --prefix=/usr \
            --disable-strip \
            --with-sandbox=no
@@ -204,7 +204,7 @@ make -j$(nproc)
 
 ```bash
 cd Python-3.12.0
-./configure --host=x86_64-unknown-veridian \
+./configure --host=x86_64-veridian \
            --build=x86_64-linux-gnu \
            --prefix=/usr \
            --disable-shared \
@@ -238,7 +238,7 @@ GOOS=veridian GOARCH=amd64 ./make.bash
 ```bash
 # SQLite
 cd sqlite-autoconf-3430200
-./configure --host=x86_64-unknown-veridian \
+./configure --host=x86_64-veridian \
            --prefix=/usr \
            --enable-static \
            --disable-shared
@@ -246,7 +246,7 @@ make -j$(nproc)
 
 # PostgreSQL (client libraries)
 cd postgresql-16.0
-./configure --host=x86_64-unknown-veridian \
+./configure --host=x86_64-veridian \
            --prefix=/usr \
            --without-readline \
            --disable-shared
@@ -373,9 +373,9 @@ set(CMAKE_SYSTEM_NAME VeridianOS)
 set(CMAKE_SYSTEM_VERSION 1.0)
 set(CMAKE_SYSTEM_PROCESSOR x86_64)
 
-set(CMAKE_C_COMPILER x86_64-unknown-veridian-gcc)
-set(CMAKE_CXX_COMPILER x86_64-unknown-veridian-g++)
-set(CMAKE_ASM_COMPILER x86_64-unknown-veridian-gcc)
+set(CMAKE_C_COMPILER x86_64-veridian-gcc)
+set(CMAKE_CXX_COMPILER x86_64-veridian-g++)
+set(CMAKE_ASM_COMPILER x86_64-veridian-gcc)
 
 set(CMAKE_FIND_ROOT_PATH ${VERIDIAN_SYSROOT})
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
@@ -398,11 +398,11 @@ Create `veridian-cross.txt`:
 
 ```ini
 [binaries]
-c = 'x86_64-unknown-veridian-gcc'
-cpp = 'x86_64-unknown-veridian-g++'
-ar = 'x86_64-unknown-veridian-ar'
-strip = 'x86_64-unknown-veridian-strip'
-pkgconfig = 'x86_64-unknown-veridian-pkg-config'
+c = 'x86_64-veridian-gcc'
+cpp = 'x86_64-veridian-g++'
+ar = 'x86_64-veridian-ar'
+strip = 'x86_64-veridian-strip'
+pkgconfig = 'x86_64-veridian-pkg-config'
 
 [host_machine]
 system = 'veridian'
@@ -596,7 +596,7 @@ sha256 = "..."
 [build]
 system = "autotools"
 configure_args = [
-    "--host=x86_64-unknown-veridian",
+    "--host=x86_64-veridian",
     "--with-features=huge",
     "--disable-gui",
     "--enable-static-link"
@@ -650,7 +650,7 @@ performance:
 ```bash
 # Problem: undefined reference to `fork`
 # Solution: Use posix_spawn or disable fork-dependent features
-CFLAGS="-DNO_FORK" ./configure --host=x86_64-unknown-veridian
+CFLAGS="-DNO_FORK" ./configure --host=x86_64-veridian
 ```
 
 **2. Missing Headers**
@@ -671,10 +671,10 @@ veridian-capability-request entropy ./application
 
 ```bash
 # Check for undefined symbols
-x86_64-unknown-veridian-nm -u binary | grep -v "^ *U _"
+x86_64-veridian-nm -u binary | grep -v "^ *U _"
 
 # Verify library dependencies
-x86_64-unknown-veridian-ldd binary
+x86_64-veridian-ldd binary
 
 # Trace system calls during execution
 veridian-strace ./binary

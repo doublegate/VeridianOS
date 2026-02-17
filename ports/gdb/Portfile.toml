@@ -1,0 +1,29 @@
+# Portfile.toml -- GDB for VeridianOS
+#
+# The GNU Debugger supports source-level debugging of C, C++, and Rust
+# programs. Built with Python scripting support disabled to simplify the
+# bootstrap (Python can be added as an optional dependency later).
+
+[port]
+name = "gdb"
+version = "15.1"
+description = "GNU Debugger -- source-level debugger for C, C++, Rust, and more"
+homepage = "https://www.gnu.org/software/gdb/"
+license = "GPL-3.0-or-later"
+category = "devel"
+build_type = "autotools"
+
+[sources]
+urls = ["https://ftp.gnu.org/gnu/gdb/gdb-15.1.tar.xz"]
+checksums = ["38254eacd4572134bca9c5a5aa4d4ca564cbbd30c369d881f733fb6b903354f2"]
+
+[dependencies]
+build = ["binutils"]
+runtime = []
+
+[build]
+steps = [
+    "mkdir -p build && cd build && ../configure --target=x86_64-veridian --prefix=/usr --with-sysroot=/opt/veridian-sysroot --disable-nls --disable-werror --without-python --with-expat --with-system-readline --enable-tui",
+    "cd build && make -j$(nproc)",
+    "cd build && make install DESTDIR=$PKG_DIR"
+]

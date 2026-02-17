@@ -31,7 +31,7 @@ Phase 4 establishes a comprehensive package management ecosystem for VeridianOS,
 
 ### Phase 4A: Cross-Compilation Foundation (Months 1-3)
 - LLVM/GCC target implementation for VeridianOS
-- Custom target triples: `{x86_64,aarch64,riscv64}-unknown-veridian`
+- Custom target triples: `{x86_64,aarch64,riscv64}-veridian`
 - CMake toolchain files and build system support
 
 ### Phase 4B: Bootstrap Environment (Months 4-6)
@@ -832,8 +832,8 @@ RUST_BACKTRACE = "1"
 --- a/src/librustc_target/spec/mod.rs
 +++ b/src/librustc_target/spec/mod.rs
 @@ -1000,6 +1000,7 @@
-     ("x86_64-unknown-veridian", x86_64_unknown_veridian),
-+    ("aarch64-unknown-veridian", aarch64_unknown_veridian),
+     ("x86_64-veridian", x86_64_unknown_veridian),
++    ("aarch64-veridian", aarch64_unknown_veridian),
 """
 ```
 

@@ -147,9 +147,9 @@ All three analyses emphasize keeping the microkernel minimal:
 **Multi-Architecture Support** (All sources):
 1. **LLVM Priority**: Unified backend for C/C++/Rust
 2. **Target Configuration**:
-   - `x86_64-unknown-veridian`
-   - `aarch64-unknown-veridian`
-   - `riscv64-unknown-veridian`
+   - `x86_64-veridian`
+   - `aarch64-veridian`
+   - `riscv64-veridian`
 3. **Language Support Order**:
    - C/C++ (via Clang/GCC)
    - Rust (native target)

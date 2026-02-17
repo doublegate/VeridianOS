@@ -808,23 +808,16 @@ pub fn sys_dup2(old_fd: usize, new_fd: usize) -> SyscallResult {
 
 /// Create a pipe
 ///
+/// Creates a pipe and allocates real file descriptors for both ends.
+///
 /// # Arguments
 /// - pipe_fds_ptr: Pointer to a [usize; 2] array to receive [read_fd, write_fd]
 ///
 /// # Returns
 /// 0 on success
 pub fn sys_pipe(pipe_fds_ptr: usize) -> SyscallResult {
-    // Validate the output pointer for two usize values
-    validate_user_buffer(pipe_fds_ptr, 2 * core::mem::size_of::<usize>())?;
-
-    // Create the pipe
-    let (_reader, _writer) =
-        crate::fs::pipe::create_pipe().map_err(|_| SyscallError::OutOfMemory)?;
-
-    // In a full implementation, we would allocate file descriptors for the
-    // pipe reader and writer, then write the fd numbers to the user buffer.
-    // For now, return success (the kernel shell uses pipes directly).
-    Ok(0)
+    // Delegate to pipe2 with no flags
+    sys_pipe2(pipe_fds_ptr, 0)
 }
 
 /// Get current working directory
@@ -910,10 +903,156 @@ pub fn sys_chdir(path_ptr: usize) -> SyscallResult {
 ///
 /// # Returns
 /// Command-specific return value
-pub fn sys_ioctl(_fd: usize, _cmd: usize, _arg: usize) -> SyscallResult {
-    // Stub: ioctl dispatches to device-specific handlers.
-    // Will be wired to PTY and device drivers in later sprints.
-    Err(SyscallError::InvalidSyscall)
+pub fn sys_ioctl(_fd: usize, cmd: usize, arg: usize) -> SyscallResult {
+    // Terminal ioctl constants (matching Linux values)
+    const TCGETS: usize = 0x5401;
+    const TCSETSW: usize = 0x5403;
+    const TIOCGWINSZ: usize = 0x5413;
+    const TIOCSWINSZ: usize = 0x5414;
+    const TIOCGPGRP: usize = 0x540F;
+    const TIOCSPGRP: usize = 0x5410;
+
+    match cmd {
+        TIOCGWINSZ => {
+            // Return terminal window size (default 80x24)
+            if arg == 0 {
+                return Err(SyscallError::InvalidPointer);
+            }
+            validate_user_ptr_typed::<Winsize>(arg)?;
+
+            let ws = Winsize {
+                ws_row: 24,
+                ws_col: 80,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            // SAFETY: arg was validated as aligned, non-null, and in user space.
+            unsafe {
+                core::ptr::write(arg as *mut Winsize, ws);
+            }
+            Ok(0)
+        }
+        TIOCSWINSZ => {
+            // Set window size -- accept silently (no real terminal to resize)
+            if arg == 0 {
+                return Err(SyscallError::InvalidPointer);
+            }
+            validate_user_ptr_typed::<Winsize>(arg)?;
+            Ok(0)
+        }
+        TCGETS => {
+            // Get terminal attributes -- return a default termios
+            if arg == 0 {
+                return Err(SyscallError::InvalidPointer);
+            }
+            validate_user_ptr_typed::<Termios>(arg)?;
+
+            let termios = Termios::default_console();
+            // SAFETY: arg was validated above.
+            unsafe {
+                core::ptr::write(arg as *mut Termios, termios);
+            }
+            Ok(0)
+        }
+        TCSETSW => {
+            // Set terminal attributes (drain first) -- accept silently
+            if arg == 0 {
+                return Err(SyscallError::InvalidPointer);
+            }
+            validate_user_ptr_typed::<Termios>(arg)?;
+            Ok(0)
+        }
+        TIOCGPGRP => {
+            // Get foreground process group
+            if arg == 0 {
+                return Err(SyscallError::InvalidPointer);
+            }
+            validate_user_ptr_typed::<i32>(arg)?;
+            let pgid = if let Some(proc) = process::current_process() {
+                proc.pgid.load(core::sync::atomic::Ordering::Acquire) as i32
+            } else {
+                1
+            };
+            // SAFETY: arg was validated above.
+            unsafe {
+                core::ptr::write(arg as *mut i32, pgid);
+            }
+            Ok(0)
+        }
+        TIOCSPGRP => {
+            // Set foreground process group -- accept silently
+            if arg == 0 {
+                return Err(SyscallError::InvalidPointer);
+            }
+            validate_user_ptr_typed::<i32>(arg)?;
+            Ok(0)
+        }
+        _ => {
+            // ENOTTY -- not a terminal or unsupported ioctl
+            Err(SyscallError::InvalidArgument)
+        }
+    }
+}
+
+/// Terminal window size structure (matches C struct winsize).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Winsize {
+    ws_row: u16,
+    ws_col: u16,
+    ws_xpixel: u16,
+    ws_ypixel: u16,
+}
+
+/// Terminal attributes structure (matches C struct termios, simplified).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Termios {
+    c_iflag: u32,
+    c_oflag: u32,
+    c_cflag: u32,
+    c_lflag: u32,
+    c_cc: [u8; 32],
+    c_ispeed: u32,
+    c_ospeed: u32,
+}
+
+impl Termios {
+    /// Return default console termios (cooked mode, echo on).
+    fn default_console() -> Self {
+        // Common flag values matching Linux defaults
+        const ICRNL: u32 = 0o0000400;
+        const OPOST: u32 = 0o0000001;
+        const ONLCR: u32 = 0o0000004;
+        const CS8: u32 = 0o0000060;
+        const CREAD: u32 = 0o0000200;
+        const HUPCL: u32 = 0o0002000;
+        const ECHO: u32 = 0o0000010;
+        const ECHOE: u32 = 0o0000020;
+        const ECHOK: u32 = 0o0000040;
+        const ICANON: u32 = 0o0000002;
+        const ISIG: u32 = 0o0000001;
+        const IEXTEN: u32 = 0o0100000;
+
+        let mut cc = [0u8; 32];
+        cc[0] = 3; // VINTR = Ctrl-C
+        cc[1] = 28; // VQUIT = Ctrl-backslash
+        cc[2] = 127; // VERASE = DEL
+        cc[3] = 21; // VKILL = Ctrl-U
+        cc[4] = 4; // VEOF = Ctrl-D
+        cc[5] = 0; // VTIME
+        cc[6] = 1; // VMIN
+
+        Self {
+            c_iflag: ICRNL,
+            c_oflag: OPOST | ONLCR,
+            c_cflag: CS8 | CREAD | HUPCL,
+            c_lflag: ECHO | ECHOE | ECHOK | ICANON | ISIG | IEXTEN,
+            c_cc: cc,
+            c_ispeed: 38400,
+            c_ospeed: 38400,
+        }
+    }
 }
 
 /// Send a signal to a process
@@ -930,4 +1069,607 @@ pub fn sys_kill(pid: usize, signal: usize) -> SyscallResult {
         Ok(()) => Ok(0),
         Err(_) => Err(SyscallError::ProcessNotFound),
     }
+}
+
+// ============================================================================
+// Extended filesystem syscalls (Phase 4B)
+// ============================================================================
+
+/// Helper: read a NUL-terminated path from user space into an alloc::String.
+#[cfg(feature = "alloc")]
+fn read_user_path(ptr: usize) -> Result<alloc::string::String, SyscallError> {
+    validate_user_string_ptr(ptr)?;
+
+    // SAFETY: ptr was validated as non-null and in user-space above. We read
+    // bytes until null terminator or 4096-byte limit. The caller must provide
+    // a valid null-terminated string in mapped user memory.
+    let bytes = unsafe {
+        let mut v = Vec::new();
+        let mut p = ptr as *const u8;
+        for _ in 0..4096 {
+            let b = *p;
+            if b == 0 {
+                break;
+            }
+            v.push(b);
+            p = p.add(1);
+        }
+        v
+    };
+
+    core::str::from_utf8(&bytes)
+        .map(alloc::string::String::from)
+        .map_err(|_| SyscallError::InvalidArgument)
+}
+
+/// Stat a file by path (syscall 150).
+///
+/// Like `sys_stat` but takes a path instead of an fd.
+///
+/// # Arguments
+/// - `path_ptr`: Pointer to NUL-terminated path string.
+/// - `stat_buf`: Pointer to `FileStat` output buffer.
+///
+/// # Returns
+/// 0 on success.
+pub fn sys_stat_path(path_ptr: usize, stat_buf: usize) -> SyscallResult {
+    validate_user_ptr_typed::<FileStat>(stat_buf)?;
+    let path = read_user_path(path_ptr)?;
+
+    let vfs_lock = vfs()?;
+    let vfs_guard = vfs_lock.read();
+    let node = vfs_guard
+        .resolve_path(&path)
+        .map_err(|_| SyscallError::ResourceNotFound)?;
+
+    match node.metadata() {
+        Ok(metadata) => {
+            // SAFETY: stat_buf was validated as non-null, in user-space, and
+            // aligned for FileStat above. We write metadata fields.
+            unsafe {
+                let buf = stat_buf as *mut FileStat;
+                (*buf).size = metadata.size;
+                (*buf).mode = match metadata.node_type {
+                    crate::fs::NodeType::File => 0o100644,
+                    crate::fs::NodeType::Directory => 0o040755,
+                    crate::fs::NodeType::CharDevice => 0o020666,
+                    crate::fs::NodeType::BlockDevice => 0o060666,
+                    _ => 0,
+                };
+                (*buf).uid = metadata.uid;
+                (*buf).gid = metadata.gid;
+                (*buf).created = metadata.created;
+                (*buf).modified = metadata.modified;
+                (*buf).accessed = metadata.accessed;
+            }
+            Ok(0)
+        }
+        Err(_) => Err(SyscallError::InvalidState),
+    }
+}
+
+/// Stat a file by path without following symlinks (syscall 151).
+///
+/// Currently identical to `sys_stat_path` since VeridianOS does not yet
+/// support symbolic links.
+///
+/// # Arguments
+/// - `path_ptr`: Pointer to NUL-terminated path string.
+/// - `stat_buf`: Pointer to `FileStat` output buffer.
+///
+/// # Returns
+/// 0 on success.
+pub fn sys_lstat(path_ptr: usize, stat_buf: usize) -> SyscallResult {
+    // No symlinks yet -- lstat behaves identically to stat
+    sys_stat_path(path_ptr, stat_buf)
+}
+
+/// Read the target of a symbolic link (syscall 152).
+///
+/// # Arguments
+/// - `path_ptr`: Pointer to NUL-terminated symlink path.
+/// - `buf`: Buffer to receive the link target.
+/// - `bufsiz`: Size of the buffer.
+///
+/// # Returns
+/// Number of bytes written to `buf`, or error.
+pub fn sys_readlink(path_ptr: usize, buf: usize, bufsiz: usize) -> SyscallResult {
+    let _path = read_user_path(path_ptr)?;
+    if bufsiz == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    validate_user_buffer(buf, bufsiz)?;
+
+    // TODO(phase5): Implement symlink resolution in VFS. For now,
+    // all paths are concrete -- no symlinks exist.
+    Err(SyscallError::InvalidSyscall)
+}
+
+/// Check file accessibility (syscall 153).
+///
+/// Tests whether the calling process can access the file at `path_ptr`
+/// with the requested mode bits (R=4, W=2, X=1, F_OK=0).
+///
+/// # Arguments
+/// - `path_ptr`: Pointer to NUL-terminated path.
+/// - `mode`: Access mode to check (bitmask of R_OK|W_OK|X_OK or F_OK=0).
+///
+/// # Returns
+/// 0 if accessible, error otherwise.
+pub fn sys_access(path_ptr: usize, mode: usize) -> SyscallResult {
+    let path = read_user_path(path_ptr)?;
+
+    let vfs_lock = vfs()?;
+    let vfs_guard = vfs_lock.read();
+
+    // Check if the file exists (F_OK = 0)
+    let node = vfs_guard
+        .resolve_path(&path)
+        .map_err(|_| SyscallError::ResourceNotFound)?;
+
+    // For non-zero mode, check permissions against metadata
+    if mode != 0 {
+        let _metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
+        // TODO(phase5): Check actual file permissions against the calling
+        // process's uid/gid. For now, all access checks pass if the file
+        // exists.
+    }
+
+    Ok(0)
+}
+
+/// Rename a file or directory (syscall 154).
+///
+/// # Arguments
+/// - `old_ptr`: Pointer to NUL-terminated old path.
+/// - `new_ptr`: Pointer to NUL-terminated new path.
+///
+/// # Returns
+/// 0 on success.
+pub fn sys_rename(old_ptr: usize, new_ptr: usize) -> SyscallResult {
+    let old_path = read_user_path(old_ptr)?;
+    let new_path = read_user_path(new_ptr)?;
+
+    // Rename as copy + delete (VFS has no native rename)
+    // Use the free-standing fs helpers which handle locking internally.
+    let data = crate::fs::read_file(&old_path).map_err(|_| SyscallError::ResourceNotFound)?;
+    crate::fs::write_file(&new_path, &data).map_err(|_| SyscallError::InvalidState)?;
+
+    let vfs_lock = vfs()?;
+    vfs_lock
+        .read()
+        .unlink(&old_path)
+        .map_err(|_| SyscallError::InvalidState)?;
+
+    Ok(0)
+}
+
+/// Remove a file (not a directory) (syscall 157).
+///
+/// # Arguments
+/// - `path_ptr`: Pointer to NUL-terminated path.
+///
+/// # Returns
+/// 0 on success.
+pub fn sys_unlink(path_ptr: usize) -> SyscallResult {
+    let path = read_user_path(path_ptr)?;
+
+    let vfs_lock = vfs()?;
+    let vfs_guard = vfs_lock.read();
+
+    match vfs_guard.unlink(&path) {
+        Ok(()) => Ok(0),
+        Err(_) => Err(SyscallError::ResourceNotFound),
+    }
+}
+
+/// File descriptor control (syscall 158).
+///
+/// Implements POSIX fcntl operations using the FileTable's cloexec API.
+///
+/// # Arguments
+/// - `fd`: File descriptor.
+/// - `cmd`: Command (F_DUPFD=0, F_GETFD=1, F_SETFD=2, F_GETFL=3, F_SETFL=4).
+/// - `arg`: Command-specific argument.
+///
+/// # Returns
+/// Command-specific value on success.
+pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
+    const F_DUPFD: usize = 0;
+    const F_GETFD: usize = 1;
+    const F_SETFD: usize = 2;
+    const F_GETFL: usize = 3;
+    const F_SETFL: usize = 4;
+    const FD_CLOEXEC: usize = 1;
+
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file_table = proc.file_table.lock();
+
+    match cmd {
+        F_DUPFD => {
+            // Duplicate fd to lowest available >= arg
+            match file_table.dup(fd) {
+                Ok(new_fd) => Ok(new_fd),
+                Err(_) => Err(SyscallError::InvalidArgument),
+            }
+        }
+        F_GETFD => {
+            // Get close-on-exec flag via FileTable API
+            match file_table.get_cloexec(fd) {
+                Ok(cloexec) => Ok(if cloexec { FD_CLOEXEC } else { 0 }),
+                Err(_) => Err(SyscallError::InvalidArgument),
+            }
+        }
+        F_SETFD => {
+            // Set close-on-exec flag via FileTable API
+            let cloexec = arg & FD_CLOEXEC != 0;
+            file_table
+                .set_cloexec(fd, cloexec)
+                .map_err(|_| SyscallError::InvalidArgument)?;
+            Ok(0)
+        }
+        F_GETFL => {
+            // Get file status flags from the File struct
+            let file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+            let mut flags: usize = 0;
+            if file.flags.read && file.flags.write {
+                flags |= 0x0002; // O_RDWR
+            } else if file.flags.write {
+                flags |= 0x0001; // O_WRONLY
+            }
+            // else O_RDONLY = 0
+            if file.flags.append {
+                flags |= 0x0400; // O_APPEND
+            }
+            Ok(flags)
+        }
+        F_SETFL => {
+            // Set file status flags -- only O_APPEND and O_NONBLOCK can be
+            // changed after open. We validate the fd exists but the actual
+            // flag mutation requires mutable access to the File struct which
+            // is behind an Arc. This is a no-op for now (flags are set at
+            // open time and not typically changed).
+            let _file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+            Ok(0)
+        }
+        _ => Err(SyscallError::InvalidArgument),
+    }
+}
+
+/// Create a pipe with flags (syscall 65).
+///
+/// Creates a pipe, wraps both ends as VfsNode-backed File objects,
+/// allocates file descriptors in the calling process's file table,
+/// and writes [read_fd, write_fd] to the user buffer.
+///
+/// # Arguments
+/// - `pipe_fds_ptr`: Pointer to `[usize; 2]` to receive [read_fd, write_fd].
+/// - `flags`: O_CLOEXEC (0x2000) | O_NONBLOCK (0x1000).
+///
+/// # Returns
+/// 0 on success.
+pub fn sys_pipe2(pipe_fds_ptr: usize, flags: usize) -> SyscallResult {
+    validate_user_buffer(pipe_fds_ptr, 2 * core::mem::size_of::<usize>())?;
+
+    let cloexec = flags & 0x2000 != 0;
+
+    // Create the pipe
+    let (reader, writer) = crate::fs::pipe::create_pipe().map_err(|_| SyscallError::OutOfMemory)?;
+
+    // Wrap pipe ends as VfsNode objects
+    let read_node: alloc::sync::Arc<dyn crate::fs::VfsNode> =
+        alloc::sync::Arc::new(crate::fs::pipe::PipeReadNode::new(reader));
+    let write_node: alloc::sync::Arc<dyn crate::fs::VfsNode> =
+        alloc::sync::Arc::new(crate::fs::pipe::PipeWriteNode::new(writer));
+
+    // Create File objects
+    let read_file = crate::fs::file::File::new(read_node, OpenFlags::read_only());
+    let write_file = crate::fs::file::File::new(write_node, OpenFlags::write_only());
+
+    // Allocate file descriptors in the calling process's file table
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file_table = proc.file_table.lock();
+
+    let read_fd = file_table
+        .open_with_flags(alloc::sync::Arc::new(read_file), cloexec)
+        .map_err(|_| SyscallError::OutOfMemory)?;
+
+    let write_fd = file_table
+        .open_with_flags(alloc::sync::Arc::new(write_file), cloexec)
+        .map_err(|_| {
+            // Clean up read fd on failure
+            let _ = file_table.close(read_fd);
+            SyscallError::OutOfMemory
+        })?;
+
+    // Write [read_fd, write_fd] to user buffer
+    // SAFETY: pipe_fds_ptr was validated above as non-null and in user
+    // space with sufficient size for two usize values.
+    unsafe {
+        let fds = pipe_fds_ptr as *mut usize;
+        *fds = read_fd;
+        *fds.add(1) = write_fd;
+    }
+
+    Ok(0)
+}
+
+/// Duplicate a file descriptor with flags (syscall 66).
+///
+/// Uses FileTable::dup3() which atomically sets the close-on-exec flag
+/// on the new descriptor.
+///
+/// # Arguments
+/// - `old_fd`: Source file descriptor.
+/// - `new_fd`: Target file descriptor number.
+/// - `flags`: O_CLOEXEC (0x2000) only.
+///
+/// # Returns
+/// The new file descriptor number on success.
+pub fn sys_dup3(old_fd: usize, new_fd: usize, flags: usize) -> SyscallResult {
+    // old_fd and new_fd must differ
+    if old_fd == new_fd {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    // Only O_CLOEXEC is valid
+    if flags & !0x2000 != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let cloexec = flags & 0x2000 != 0;
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file_table = proc.file_table.lock();
+
+    file_table
+        .dup3(old_fd, new_fd, cloexec)
+        .map_err(|_| SyscallError::InvalidArgument)?;
+
+    Ok(new_fd)
+}
+
+/// Open a directory for reading (syscall 62).
+///
+/// # Arguments
+/// - `path_ptr`: Pointer to NUL-terminated directory path.
+///
+/// # Returns
+/// Directory handle (fd) on success.
+pub fn sys_opendir(path_ptr: usize) -> SyscallResult {
+    let path = read_user_path(path_ptr)?;
+
+    let vfs_lock = vfs()?;
+    let vfs_guard = vfs_lock.read();
+
+    // Verify path exists and is a directory
+    let node = vfs_guard
+        .resolve_path(&path)
+        .map_err(|_| SyscallError::ResourceNotFound)?;
+
+    let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
+    if metadata.node_type != crate::fs::NodeType::Directory {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    // Open as a file descriptor using read-only flags
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file = crate::fs::file::File::new(node, OpenFlags::read_only());
+    let file_table = proc.file_table.lock();
+    match file_table.open(alloc::sync::Arc::new(file)) {
+        Ok(fd) => Ok(fd),
+        Err(_) => Err(SyscallError::OutOfMemory),
+    }
+}
+
+/// Read a directory entry (syscall 63).
+///
+/// Reads entries from the VFS node via VfsNode::readdir(). Uses the
+/// file's position (via seek) as an index into the directory entry list.
+/// Returns one entry per call; returns 0 when all entries have been read.
+///
+/// The entry is written as a NUL-terminated name string followed by a
+/// single byte indicating the node type (0=file, 1=dir, 2=chardev,
+/// 3=blockdev, 4=symlink, 5=pipe).
+///
+/// # Arguments
+/// - `fd`: Directory file descriptor (from opendir).
+/// - `entry_buf`: Buffer to receive directory entry name + type byte.
+/// - `buf_size`: Size of the buffer.
+///
+/// # Returns
+/// Length of entry name (not including NUL or type byte), or 0 if no more
+/// entries.
+pub fn sys_readdir(fd: usize, entry_buf: usize, buf_size: usize) -> SyscallResult {
+    if buf_size == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    validate_user_buffer(entry_buf, buf_size)?;
+
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file_table = proc.file_table.lock();
+    let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+
+    // Read all directory entries from the VFS node
+    let entries = file_desc
+        .node
+        .readdir()
+        .map_err(|_| SyscallError::InvalidArgument)?;
+
+    // Use the file position as the current entry index
+    let pos = file_desc.tell();
+    if pos >= entries.len() {
+        return Ok(0); // No more entries
+    }
+
+    let entry = &entries[pos];
+    let name_bytes = entry.name.as_bytes();
+
+    // Need space for name + NUL + type byte
+    if name_bytes.len() + 2 > buf_size {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    // Write entry name + NUL terminator + node type byte to user buffer
+    // SAFETY: entry_buf was validated above as non-null and in user space
+    // with sufficient size. We write name_bytes.len() + 2 bytes total.
+    unsafe {
+        let dst = entry_buf as *mut u8;
+        core::ptr::copy_nonoverlapping(name_bytes.as_ptr(), dst, name_bytes.len());
+        *dst.add(name_bytes.len()) = 0; // NUL terminator
+        *dst.add(name_bytes.len() + 1) = match entry.node_type {
+            crate::fs::NodeType::File => 0,
+            crate::fs::NodeType::Directory => 1,
+            crate::fs::NodeType::CharDevice => 2,
+            crate::fs::NodeType::BlockDevice => 3,
+            crate::fs::NodeType::Symlink => 4,
+            crate::fs::NodeType::Pipe => 5,
+            _ => 0,
+        };
+    }
+
+    // Advance the file position to the next entry
+    let _ = file_desc.seek(crate::fs::SeekFrom::Start(pos + 1));
+
+    Ok(name_bytes.len())
+}
+
+/// Close a directory handle (syscall 64).
+///
+/// # Arguments
+/// - `fd`: Directory file descriptor to close.
+///
+/// # Returns
+/// 0 on success.
+pub fn sys_closedir(fd: usize) -> SyscallResult {
+    // Closing a directory fd is the same as closing any fd
+    sys_close(fd)
+}
+
+// ============================================================================
+// Scatter/gather I/O syscalls (183-184)
+// ============================================================================
+
+/// POSIX iovec structure layout (matches C struct iovec).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Iovec {
+    iov_base: usize,
+    iov_len: usize,
+}
+
+/// Maximum number of iovec entries per readv/writev call.
+const IOV_MAX: usize = 1024;
+
+/// Read from a file descriptor into multiple buffers (SYS_READV = 183).
+///
+/// # Arguments
+/// - `fd`: File descriptor to read from.
+/// - `iov_ptr`: Pointer to an array of `struct iovec`.
+/// - `iovcnt`: Number of iovec entries.
+///
+/// # Returns
+/// Total number of bytes read across all buffers.
+pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
+    if iovcnt == 0 {
+        return Ok(0);
+    }
+    if iovcnt > IOV_MAX {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    // Validate the iovec array itself
+    let iov_size = iovcnt * core::mem::size_of::<Iovec>();
+    validate_user_buffer(iov_ptr, iov_size)?;
+
+    let mut total_read = 0usize;
+
+    for i in 0..iovcnt {
+        // SAFETY: iov_ptr was validated above. Each Iovec is repr(C) with
+        // known size. We read iov entries one at a time within bounds.
+        let iov = unsafe {
+            let ptr = (iov_ptr as *const Iovec).add(i);
+            core::ptr::read(ptr)
+        };
+
+        if iov.iov_len == 0 {
+            continue;
+        }
+
+        // Delegate to existing sys_read for each segment
+        match sys_read(fd, iov.iov_base, iov.iov_len) {
+            Ok(n) => {
+                total_read += n;
+                // Short read means EOF or no more data available
+                if n < iov.iov_len {
+                    break;
+                }
+            }
+            Err(e) => {
+                // If we already read some data, return what we have
+                if total_read > 0 {
+                    break;
+                }
+                return Err(e);
+            }
+        }
+    }
+
+    Ok(total_read)
+}
+
+/// Write to a file descriptor from multiple buffers (SYS_WRITEV = 184).
+///
+/// # Arguments
+/// - `fd`: File descriptor to write to.
+/// - `iov_ptr`: Pointer to an array of `struct iovec`.
+/// - `iovcnt`: Number of iovec entries.
+///
+/// # Returns
+/// Total number of bytes written across all buffers.
+pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
+    if iovcnt == 0 {
+        return Ok(0);
+    }
+    if iovcnt > IOV_MAX {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    // Validate the iovec array itself
+    let iov_size = iovcnt * core::mem::size_of::<Iovec>();
+    validate_user_buffer(iov_ptr, iov_size)?;
+
+    let mut total_written = 0usize;
+
+    for i in 0..iovcnt {
+        // SAFETY: iov_ptr was validated above. Each Iovec is repr(C) with
+        // known size. We read iov entries one at a time within bounds.
+        let iov = unsafe {
+            let ptr = (iov_ptr as *const Iovec).add(i);
+            core::ptr::read(ptr)
+        };
+
+        if iov.iov_len == 0 {
+            continue;
+        }
+
+        // Delegate to existing sys_write for each segment
+        match sys_write(fd, iov.iov_base, iov.iov_len) {
+            Ok(n) => {
+                total_written += n;
+                // Short write means buffer full or error
+                if n < iov.iov_len {
+                    break;
+                }
+            }
+            Err(e) => {
+                // If we already wrote some data, return what we have
+                if total_written > 0 {
+                    break;
+                }
+                return Err(e);
+            }
+        }
+    }
+
+    Ok(total_written)
 }

@@ -1,0 +1,29 @@
+# Portfile.toml -- GNU Make for VeridianOS
+#
+# GNU Make is the standard build automation tool. It reads Makefiles to
+# determine how to build programs and libraries. Required by nearly every
+# autotools-based package in the bootstrap chain.
+
+[port]
+name = "make"
+version = "4.4.1"
+description = "GNU Make -- build automation tool"
+homepage = "https://www.gnu.org/software/make/"
+license = "GPL-3.0-or-later"
+category = "devel"
+build_type = "autotools"
+
+[sources]
+urls = ["https://ftp.gnu.org/gnu/make/make-4.4.1.tar.gz"]
+checksums = ["dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3"]
+
+[dependencies]
+build = []
+runtime = []
+
+[build]
+steps = [
+    "./configure --host=x86_64-veridian --prefix=/usr --disable-nls --without-guile",
+    "make -j$(nproc)",
+    "make install DESTDIR=$PKG_DIR"
+]

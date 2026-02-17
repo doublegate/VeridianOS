@@ -32,6 +32,7 @@ pub mod lifecycle;
 pub mod loader;
 pub mod memory;
 pub mod pcb;
+pub mod signal_delivery;
 pub mod sync;
 pub mod table;
 pub mod thread;

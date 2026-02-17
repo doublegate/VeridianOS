@@ -14,6 +14,7 @@ pub mod pci;
 pub mod ramfb;
 pub mod storage;
 pub mod usb;
+pub mod virtio;
 pub mod virtio_net;
 
 pub use console::{ConsoleDevice, ConsoleDriver, SerialConsole, VgaConsole};
@@ -35,6 +36,7 @@ pub fn init() {
     network::init();
     console::init();
     storage::init();
+    virtio::blk::init();
     if let Err(_e) = gpu::init() {
         crate::println!("[DRIVERS] Warning: GPU init failed: {:?}", _e);
     }

@@ -474,6 +474,120 @@ impl PageMapper {
         Ok(())
     }
 
+    /// Look up the physical frame mapped at a virtual address.
+    ///
+    /// Walks the page table hierarchy and returns the frame number and flags
+    /// of the L1 (leaf) entry if the page is present at all four levels.
+    pub fn translate_page(
+        &self,
+        page: VirtualAddress,
+    ) -> Result<(FrameNumber, PageFlags), KernelError> {
+        let breakdown = VirtualAddressBreakdown::new(page);
+
+        // SAFETY: Same invariants as other PageMapper methods — self.l4_table
+        // was validated by the caller of PageMapper::new.
+        let l4_table = unsafe { &*self.l4_table };
+        let l4_entry = &l4_table[breakdown.l4_index];
+        if !l4_entry.is_present() {
+            return Err(KernelError::UnmappedMemory {
+                addr: page.as_u64() as usize,
+            });
+        }
+
+        let l3_phys = l4_entry.addr().ok_or(KernelError::InvalidState {
+            expected: "L4 entry has address",
+            actual: "no address",
+        })?;
+        // SAFETY: l3_phys is from a present L4 entry, identity-mapped.
+        let l3_table = unsafe { &*(l3_phys.as_u64() as *const PageTable) };
+        let l3_entry = &l3_table[breakdown.l3_index];
+        if !l3_entry.is_present() {
+            return Err(KernelError::UnmappedMemory {
+                addr: page.as_u64() as usize,
+            });
+        }
+
+        let l2_phys = l3_entry.addr().ok_or(KernelError::InvalidState {
+            expected: "L3 entry has address",
+            actual: "no address",
+        })?;
+        // SAFETY: l2_phys is from a present L3 entry, identity-mapped.
+        let l2_table = unsafe { &*(l2_phys.as_u64() as *const PageTable) };
+        let l2_entry = &l2_table[breakdown.l2_index];
+        if !l2_entry.is_present() {
+            return Err(KernelError::UnmappedMemory {
+                addr: page.as_u64() as usize,
+            });
+        }
+
+        let l1_phys = l2_entry.addr().ok_or(KernelError::InvalidState {
+            expected: "L2 entry has address",
+            actual: "no address",
+        })?;
+        // SAFETY: l1_phys is from a present L2 entry, identity-mapped.
+        let l1_table = unsafe { &*(l1_phys.as_u64() as *const PageTable) };
+        let entry = &l1_table[breakdown.l1_index];
+
+        let frame = entry.frame().ok_or(KernelError::UnmappedMemory {
+            addr: page.as_u64() as usize,
+        })?;
+
+        Ok((frame, entry.flags()))
+    }
+
+    /// Update the flags on an existing page table entry without changing the
+    /// mapped frame.
+    ///
+    /// Returns the old flags on success.
+    pub fn update_page_flags(
+        &mut self,
+        page: VirtualAddress,
+        new_flags: PageFlags,
+    ) -> Result<PageFlags, KernelError> {
+        let breakdown = VirtualAddressBreakdown::new(page);
+
+        // SAFETY: Same invariants as other PageMapper methods.
+        let l4_table = unsafe { &*self.l4_table };
+        let l4_entry = &l4_table[breakdown.l4_index];
+        if !l4_entry.is_present() {
+            return Err(KernelError::UnmappedMemory {
+                addr: page.as_u64() as usize,
+            });
+        }
+
+        let l3_phys = l3_phys_from_entry(l4_entry, page)?;
+        let l3_table = unsafe { &*(l3_phys as *const PageTable) };
+        let l3_entry = &l3_table[breakdown.l3_index];
+        if !l3_entry.is_present() {
+            return Err(KernelError::UnmappedMemory {
+                addr: page.as_u64() as usize,
+            });
+        }
+
+        let l2_phys = l3_phys_from_entry(l3_entry, page)?;
+        let l2_table = unsafe { &*(l2_phys as *const PageTable) };
+        let l2_entry = &l2_table[breakdown.l2_index];
+        if !l2_entry.is_present() {
+            return Err(KernelError::UnmappedMemory {
+                addr: page.as_u64() as usize,
+            });
+        }
+
+        let l1_phys = l3_phys_from_entry(l2_entry, page)?;
+        // SAFETY: l1_phys is from a present L2 entry, identity-mapped.
+        // We need mutable access to update the entry.
+        let l1_table = unsafe { &mut *(l1_phys as *mut PageTable) };
+        let entry = &mut l1_table[breakdown.l1_index];
+
+        let frame = entry.frame().ok_or(KernelError::UnmappedMemory {
+            addr: page.as_u64() as usize,
+        })?;
+
+        let old_flags = entry.flags();
+        entry.set(frame, new_flags | PageFlags::PRESENT);
+        Ok(old_flags)
+    }
+
     /// Unmap a page
     pub fn unmap_page(&mut self, page: VirtualAddress) -> Result<FrameNumber, KernelError> {
         let breakdown = VirtualAddressBreakdown::new(page);
@@ -540,6 +654,17 @@ impl PageMapper {
 
         Ok(frame)
     }
+}
+
+/// Extract a physical address from a present page table entry.
+/// Returns the address as a raw u64 suitable for casting to a pointer.
+fn l3_phys_from_entry(entry: &PageTableEntry, page: VirtualAddress) -> Result<u64, KernelError> {
+    entry
+        .addr()
+        .map(|a| a.as_u64())
+        .ok_or(KernelError::UnmappedMemory {
+            addr: page.as_u64() as usize,
+        })
 }
 
 /// Frame allocator trait for page mapper

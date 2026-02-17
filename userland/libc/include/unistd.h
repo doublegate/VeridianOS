@@ -1,0 +1,178 @@
+/*
+ * VeridianOS libc -- <unistd.h>
+ *
+ * Copyright (c) 2025-2026 VeridianOS Contributors
+ * SPDX-License-Identifier: MIT OR Apache-2.0
+ *
+ * POSIX symbolic constants and function declarations for process control,
+ * file I/O, and miscellaneous system interfaces.
+ */
+
+#ifndef _UNISTD_H
+#define _UNISTD_H
+
+#include <sys/types.h>
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ========================================================================= */
+/* Standard file descriptors                                                 */
+/* ========================================================================= */
+
+#ifndef STDIN_FILENO
+#define STDIN_FILENO    0
+#define STDOUT_FILENO   1
+#define STDERR_FILENO   2
+#endif
+
+/* ========================================================================= */
+/* Seek whence values                                                        */
+/* ========================================================================= */
+
+#ifndef SEEK_SET
+#define SEEK_SET        0
+#define SEEK_CUR        1
+#define SEEK_END        2
+#endif
+
+/* ========================================================================= */
+/* File I/O                                                                  */
+/* ========================================================================= */
+
+/** Read up to count bytes from fd into buf. */
+ssize_t read(int fd, void *buf, size_t count);
+
+/** Write up to count bytes from buf to fd. */
+ssize_t write(int fd, const void *buf, size_t count);
+
+/** Reposition read/write offset of fd. */
+off_t lseek(int fd, off_t offset, int whence);
+
+/** Close a file descriptor. */
+int close(int fd);
+
+/** Duplicate a file descriptor. */
+int dup(int oldfd);
+
+/** Duplicate a file descriptor to a specific number. */
+int dup2(int oldfd, int newfd);
+
+/** Create a pipe. */
+int pipe(int pipefd[2]);
+
+/** Delete a name from the filesystem. */
+int unlink(const char *pathname);
+
+/** Delete a name / decrement link count. */
+int rmdir(const char *pathname);
+
+/** Check file accessibility. */
+int access(const char *pathname, int mode);
+
+/* access() mode flags */
+#define F_OK    0   /* Test for existence */
+#define R_OK    4   /* Test for read permission */
+#define W_OK    2   /* Test for write permission */
+#define X_OK    1   /* Test for execute permission */
+
+/** Read the target of a symbolic link. */
+ssize_t readlink(const char *pathname, char *buf, size_t bufsiz);
+
+/* ========================================================================= */
+/* Process control                                                           */
+/* ========================================================================= */
+
+/** Create a child process (copy of the caller). */
+pid_t fork(void);
+
+/** Replace the current process image. */
+int execve(const char *pathname, char *const argv[], char *const envp[]);
+
+/** Convenience: search PATH for the file. */
+int execvp(const char *file, char *const argv[]);
+
+/** Terminate the calling process immediately. */
+void _exit(int status) __attribute__((noreturn));
+
+/** Return the process ID of the calling process. */
+pid_t getpid(void);
+
+/** Return the parent process ID. */
+pid_t getppid(void);
+
+/** Yield the processor. */
+int sched_yield(void);
+
+/* ========================================================================= */
+/* Working directory                                                         */
+/* ========================================================================= */
+
+/** Get the current working directory. */
+char *getcwd(char *buf, size_t size);
+
+/** Change the working directory. */
+int chdir(const char *path);
+
+/* ========================================================================= */
+/* User / group identity                                                     */
+/* ========================================================================= */
+
+uid_t getuid(void);
+uid_t geteuid(void);
+gid_t getgid(void);
+gid_t getegid(void);
+int setuid(uid_t uid);
+int setgid(gid_t gid);
+
+/* ========================================================================= */
+/* Process groups and sessions                                               */
+/* ========================================================================= */
+
+int setpgid(pid_t pid, pid_t pgid);
+pid_t getpgid(pid_t pid);
+pid_t getpgrp(void);
+pid_t setsid(void);
+pid_t getsid(pid_t pid);
+
+/* ========================================================================= */
+/* Memory management                                                         */
+/* ========================================================================= */
+
+/** Set the program break (end of the data segment). */
+int brk(void *addr);
+
+/** Increment the program break by increment bytes. */
+void *sbrk(intptr_t increment);
+
+/* ========================================================================= */
+/* Sleep                                                                     */
+/* ========================================================================= */
+
+/** Sleep for the specified number of seconds. */
+unsigned int sleep(unsigned int seconds);
+
+/** Sleep for the specified number of microseconds. */
+int usleep(unsigned int usec);
+
+/* ========================================================================= */
+/* Host identification                                                       */
+/* ========================================================================= */
+
+/** Get the hostname. */
+int gethostname(char *name, size_t len);
+
+/* ========================================================================= */
+/* Miscellaneous                                                             */
+/* ========================================================================= */
+
+/** Check if fd refers to a terminal. */
+int isatty(int fd);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* _UNISTD_H */

@@ -13,8 +13,8 @@
 pub use super::exit::wait_process;
 pub use super::{
     creation::{
-        create_process, create_process_with_options, exec_process, ProcessCreateOptions,
-        DEFAULT_KERNEL_STACK_SIZE, DEFAULT_USER_STACK_SIZE,
+        create_process, create_process_with_options, exec_process, parse_shebang, search_path,
+        ProcessCreateOptions, DEFAULT_KERNEL_STACK_SIZE, DEFAULT_USER_STACK_SIZE,
     },
     exit::{
         cleanup_thread, default_signal_action, exit_process, get_process_stats, kill_process,

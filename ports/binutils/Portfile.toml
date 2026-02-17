@@ -1,0 +1,31 @@
+# Portfile.toml -- GNU Binutils for VeridianOS
+#
+# Provides the core binary utilities: assembler (as), linker (ld), archiver
+# (ar), symbol table lister (nm), object copy/translate (objcopy), object
+# dump/disassembly (objdump), and strip. This is the first package in the
+# bootstrap toolchain and has no port dependencies.
+
+[port]
+name = "binutils"
+version = "2.43"
+description = "GNU binary utilities -- assembler, linker, and object file tools"
+homepage = "https://www.gnu.org/software/binutils/"
+license = "GPL-3.0-or-later"
+category = "devel"
+build_type = "autotools"
+
+[sources]
+urls = ["https://ftp.gnu.org/gnu/binutils/binutils-2.43.tar.xz"]
+checksums = ["b53606f443ac8f01d1d5fc9c39497f2af322d99e14cea5c0b4b124d630379365"]
+
+[dependencies]
+build = []
+runtime = []
+
+[build]
+patches = ["patches/0001-veridian-target.patch"]
+steps = [
+    "mkdir -p build && cd build && ../configure --target=$VERIDIAN_TARGET --prefix=/usr --with-sysroot=/opt/veridian-sysroot --disable-nls --disable-werror --enable-deterministic-archives --enable-new-dtags --enable-default-hash-style=gnu",
+    "cd build && make -j$(nproc)",
+    "cd build && make install DESTDIR=$PKG_DIR"
+]

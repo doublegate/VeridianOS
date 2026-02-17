@@ -198,6 +198,8 @@ pub enum FsError {
     BadFileDescriptor,
     /// Operation not supported on this node type
     NotSupported,
+    /// File size exceeds maximum supported limit
+    FileTooLarge,
 }
 
 /// Result type alias for kernel operations

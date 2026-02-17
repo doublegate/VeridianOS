@@ -61,6 +61,38 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
         new_caps.clone_from(&current_caps)?;
     }
 
+    // Inherit environment variables from parent
+    #[cfg(feature = "alloc")]
+    {
+        let parent_env = current_process.env_vars.lock();
+        let mut child_env = new_process.env_vars.lock();
+        for (key, value) in parent_env.iter() {
+            child_env.insert(key.clone(), value.clone());
+        }
+    }
+
+    // Inherit uid, gid, pgid, sid from parent
+    // (ProcessBuilder doesn't copy these, so do it manually)
+    // uid/gid are non-atomic, but the new_process is not yet visible
+    // to other threads, so this is safe.
+    // SAFETY: new_process is not yet added to the process table, so no
+    // other thread can access it concurrently.
+    {
+        // pgid and sid are inherited from parent per POSIX
+        let parent_pgid = current_process
+            .pgid
+            .load(core::sync::atomic::Ordering::Acquire);
+        let parent_sid = current_process
+            .sid
+            .load(core::sync::atomic::Ordering::Acquire);
+        new_process
+            .pgid
+            .store(parent_pgid, core::sync::atomic::Ordering::Release);
+        new_process
+            .sid
+            .store(parent_sid, core::sync::atomic::Ordering::Release);
+    }
+
     // Create thread in new process matching current thread
     let new_thread = {
         let ctx = current_thread.context.lock();

@@ -1,0 +1,30 @@
+# Portfile.toml -- LLVM + Clang for VeridianOS
+#
+# LLVM compiler infrastructure and the Clang C/C++/Objective-C frontend.
+# Built as a cross-compiler targeting VeridianOS. Only the essential
+# sub-projects (llvm, clang, lld) are enabled to keep build times
+# reasonable during bootstrap.
+
+[port]
+name = "llvm"
+version = "19.1.0"
+description = "LLVM compiler infrastructure with Clang and LLD"
+homepage = "https://llvm.org/"
+license = "Apache-2.0"
+category = "devel"
+build_type = "cmake"
+
+[sources]
+urls = ["https://github.com/llvm/llvm-project/releases/download/llvmorg-19.1.0/llvm-project-19.1.0.src.tar.xz"]
+checksums = ["5042522b49945bc560ff9206f25fb87980a9b89b914193ca00d961511ff0673c"]
+
+[dependencies]
+build = ["cmake"]
+runtime = []
+
+[build]
+steps = [
+    "cmake -S llvm-project-19.1.0.src/llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DLLVM_ENABLE_PROJECTS=\"clang;lld\" -DLLVM_TARGETS_TO_BUILD=\"X86;AArch64;RISCV\" -DLLVM_DEFAULT_TARGET_TRIPLE=x86_64-veridian -DDEFAULT_SYSROOT=/opt/veridian-sysroot -DLLVM_ENABLE_ASSERTIONS=OFF -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_TERMINFO=OFF -DCLANG_DEFAULT_LINKER=lld -DCLANG_DEFAULT_RTLIB=compiler-rt",
+    "cmake --build build -- -j$(nproc)",
+    "DESTDIR=$PKG_DIR cmake --install build"
+]

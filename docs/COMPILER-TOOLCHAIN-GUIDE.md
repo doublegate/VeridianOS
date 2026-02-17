@@ -51,9 +51,9 @@ llvm/lib/Target/VeridianOS/
 
 # Target triple registration
 Triple::VeridianOS:
-  - x86_64-unknown-veridian
-  - aarch64-unknown-veridian
-  - riscv64-unknown-veridian
+  - x86_64-veridian
+  - aarch64-veridian
+  - riscv64-veridian
 ```
 
 Implementation steps:
@@ -98,8 +98,8 @@ libcxx = { version = "17.0" }
 cmake -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_TARGETS_TO_BUILD="X86;AArch64;RISCV" \
-  -DLLVM_DEFAULT_TARGET_TRIPLE=x86_64-unknown-veridian \
-  -DLLVM_HOST_TRIPLE=x86_64-unknown-veridian \
+  -DLLVM_DEFAULT_TARGET_TRIPLE=x86_64-veridian \
+  -DLLVM_HOST_TRIPLE=x86_64-veridian \
   -DCMAKE_CROSSCOMPILING=ON \
   -DCMAKE_INSTALL_PREFIX=/usr \
   ../llvm
@@ -186,14 +186,14 @@ pub mod fs {
 **Cargo Configuration:**
 ```toml
 # .cargo/config.toml
-[target.x86_64-unknown-veridian]
+[target.x86_64-veridian]
 linker = "veridian-ld"
 rustflags = ["-C", "target-feature=+crt-static"]
 
-[target.aarch64-unknown-veridian]
+[target.aarch64-veridian]
 linker = "veridian-ld"
 
-[target.riscv64gc-unknown-veridian]
+[target.riscv64gc-veridian]
 linker = "veridian-ld"
 ```
 
@@ -338,8 +338,8 @@ set(CMAKE_AR llvm-ar)
 set(CMAKE_RANLIB llvm-ranlib)
 
 # Multi-arch support
-set(CMAKE_C_COMPILER_TARGET x86_64-unknown-veridian)
-set(CMAKE_CXX_COMPILER_TARGET x86_64-unknown-veridian)
+set(CMAKE_C_COMPILER_TARGET x86_64-veridian)
+set(CMAKE_CXX_COMPILER_TARGET x86_64-veridian)
 ```
 
 ### Autotools Support
@@ -464,7 +464,7 @@ TARGETS = $(ARCHS:%=test-%)
 all: $(TARGETS)
 
 test-%: test.c
-	clang --target=$*-unknown-veridian test.c -o $@
+	clang --target=$*-veridian test.c -o $@
 	file $@ | grep -q $*
 	@echo "✓ Built for $*"
 
@@ -509,7 +509,7 @@ set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -flto=thin")
         "name": "VeridianOS",
         "compilerPath": "/usr/bin/clang",
         "compilerArgs": [
-            "--target=x86_64-unknown-veridian",
+            "--target=x86_64-veridian",
             "-isystem/usr/include/veridian"
         ],
         "intelliSenseMode": "clang-x64",

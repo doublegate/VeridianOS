@@ -15,9 +15,10 @@
     clippy::implicit_saturating_sub
 )]
 
-use alloc::{string::String, sync::Arc, vec, vec::Vec};
+use alloc::{collections::BTreeSet, string::String, sync::Arc, vec, vec::Vec};
 use core::mem::size_of;
 
+use spin::Mutex;
 #[cfg(not(target_arch = "aarch64"))]
 use spin::RwLock;
 
@@ -29,11 +30,135 @@ use crate::error::{FsError, KernelError};
 /// Block size (4KB)
 pub const BLOCK_SIZE: usize = 4096;
 
+/// Number of direct block pointers in a DiskInode
+pub const DIRECT_BLOCKS: usize = 12;
+
+/// Number of block pointers that fit in one indirect block (4096 / 4 = 1024)
+pub const PTRS_PER_BLOCK: usize = BLOCK_SIZE / size_of::<u32>();
+
+/// Maximum file size addressable via direct blocks only: 12 * 4KB = 48KB
+pub const DIRECT_MAX_BLOCKS: usize = DIRECT_BLOCKS;
+
+/// Maximum file size addressable via direct + single indirect:
+/// 12 + 1024 = 1036 blocks = ~4MB
+pub const SINGLE_INDIRECT_MAX_BLOCKS: usize = DIRECT_BLOCKS + PTRS_PER_BLOCK;
+
+/// Maximum file size addressable via direct + single + double indirect:
+/// 12 + 1024 + 1024*1024 = 1_049_612 blocks = ~4GB
+pub const DOUBLE_INDIRECT_MAX_BLOCKS: usize =
+    DIRECT_BLOCKS + PTRS_PER_BLOCK + PTRS_PER_BLOCK * PTRS_PER_BLOCK;
+
 /// Magic number for BlockFS
 pub const BLOCKFS_MAGIC: u32 = 0x424C4B46; // "BLKF"
 
 /// Maximum filename length
 pub const MAX_FILENAME_LEN: usize = 255;
+
+/// Number of 512-byte virtio sectors per 4KB BlockFS block
+const SECTORS_PER_BLOCK: usize = BLOCK_SIZE / 512;
+
+// ---------------------------------------------------------------------------
+// Disk backend trait -- abstracts block-level I/O for persistence
+// ---------------------------------------------------------------------------
+
+/// Trait for a block-level disk backend that BlockFS can sync to.
+///
+/// Operates on BlockFS-sized blocks (4KB). Implementations are responsible for
+/// translating to the underlying device's sector size (typically 512 bytes).
+pub trait DiskBackend: Send + Sync {
+    /// Read a single 4KB block from the disk.
+    ///
+    /// `block_num` is the 0-based BlockFS block index.
+    /// `buf` must be at least `BLOCK_SIZE` (4096) bytes.
+    fn read_block(&self, block_num: u64, buf: &mut [u8]) -> Result<(), KernelError>;
+
+    /// Write a single 4KB block to the disk.
+    ///
+    /// `block_num` is the 0-based BlockFS block index.
+    /// `data` must be at least `BLOCK_SIZE` (4096) bytes.
+    fn write_block(&self, block_num: u64, data: &[u8]) -> Result<(), KernelError>;
+
+    /// Total capacity in BlockFS-sized blocks (4KB each).
+    fn block_count(&self) -> u64;
+
+    /// Whether the device is read-only.
+    fn is_read_only(&self) -> bool;
+}
+
+/// Adapter that wraps the global virtio-blk device as a `DiskBackend`.
+///
+/// Translates 4KB BlockFS blocks into 512-byte virtio sector reads/writes.
+pub struct VirtioBlockBackend;
+
+impl DiskBackend for VirtioBlockBackend {
+    fn read_block(&self, block_num: u64, buf: &mut [u8]) -> Result<(), KernelError> {
+        if buf.len() < BLOCK_SIZE {
+            return Err(KernelError::InvalidArgument {
+                name: "buf",
+                value: "buffer must be at least 4096 bytes",
+            });
+        }
+
+        let device_lock =
+            crate::drivers::virtio::blk::get_device().ok_or(KernelError::NotInitialized {
+                subsystem: "virtio-blk",
+            })?;
+        let mut device = device_lock.lock();
+
+        let base_sector = block_num * SECTORS_PER_BLOCK as u64;
+        for i in 0..SECTORS_PER_BLOCK {
+            let sector = base_sector + i as u64;
+            let offset = i * 512;
+            device.read_block(sector, &mut buf[offset..offset + 512])?;
+        }
+
+        Ok(())
+    }
+
+    fn write_block(&self, block_num: u64, data: &[u8]) -> Result<(), KernelError> {
+        if data.len() < BLOCK_SIZE {
+            return Err(KernelError::InvalidArgument {
+                name: "data",
+                value: "data must be at least 4096 bytes",
+            });
+        }
+
+        let device_lock =
+            crate::drivers::virtio::blk::get_device().ok_or(KernelError::NotInitialized {
+                subsystem: "virtio-blk",
+            })?;
+        let mut device = device_lock.lock();
+
+        let base_sector = block_num * SECTORS_PER_BLOCK as u64;
+        for i in 0..SECTORS_PER_BLOCK {
+            let sector = base_sector + i as u64;
+            let offset = i * 512;
+            device.write_block(sector, &data[offset..offset + 512])?;
+        }
+
+        Ok(())
+    }
+
+    fn block_count(&self) -> u64 {
+        match crate::drivers::virtio::blk::get_device() {
+            Some(lock) => {
+                let device = lock.lock();
+                device.capacity_sectors() / SECTORS_PER_BLOCK as u64
+            }
+            None => 0,
+        }
+    }
+
+    fn is_read_only(&self) -> bool {
+        match crate::drivers::virtio::blk::get_device() {
+            Some(lock) => {
+                let device = lock.lock();
+                device.is_read_only()
+            }
+            None => true, // No device = effectively read-only
+        }
+    }
+}
 
 /// Superblock structure
 #[repr(C)]
@@ -342,7 +467,14 @@ pub struct BlockFsInner {
     superblock: Superblock,
     block_bitmap: BlockBitmap,
     inode_table: Vec<DiskInode>,
-    block_data: Vec<Vec<u8>>, // Simulated block storage
+    block_data: Vec<Vec<u8>>, // In-memory block storage (RAM cache)
+    /// Set of block indices that have been modified since the last sync.
+    /// Used to track which blocks need to be written to the disk backend.
+    dirty_blocks: BTreeSet<usize>,
+    /// Optional disk backend for persistence. When `Some`, `sync()` writes
+    /// dirty blocks to this device. When `None`, BlockFS operates as a pure
+    /// RAM filesystem (all data lost on reboot).
+    disk: Option<Arc<Mutex<dyn DiskBackend>>>,
 }
 
 impl BlockFsInner {
@@ -370,6 +502,8 @@ impl BlockFsInner {
             block_bitmap,
             inode_table,
             block_data,
+            dirty_blocks: BTreeSet::new(),
+            disk: None,
         };
 
         // Create "." and ".." entries in the root directory (both point to inode 0)
@@ -409,7 +543,244 @@ impl BlockFsInner {
     fn free_block(&mut self, block: u32) {
         self.block_bitmap.free_block(block);
         self.superblock.free_blocks += 1;
+        // Freed blocks no longer need syncing (data is logically gone)
+        self.dirty_blocks.remove(&(block as usize));
     }
+
+    /// Mark a block as dirty so it will be written to the disk backend on sync.
+    fn mark_dirty(&mut self, block_num: u32) {
+        self.dirty_blocks.insert(block_num as usize);
+    }
+
+    /// Sync all dirty blocks and metadata to the disk backend.
+    ///
+    /// If no disk backend is configured, this is a no-op. Returns the number
+    /// of blocks synced on success.
+    fn sync_to_disk(&mut self) -> Result<usize, KernelError> {
+        let disk = match self.disk {
+            Some(ref d) => d.clone(),
+            None => return Ok(0), // No backend -- pure RAM mode
+        };
+
+        let backend = disk.lock();
+        if backend.is_read_only() {
+            return Err(KernelError::FsError(FsError::ReadOnly));
+        }
+
+        let device_blocks = backend.block_count();
+        let mut synced = 0usize;
+
+        // Write all dirty data blocks
+        let dirty: Vec<usize> = self.dirty_blocks.iter().copied().collect();
+        for block_idx in &dirty {
+            if *block_idx >= self.block_data.len() {
+                continue; // Skip invalid indices
+            }
+            if (*block_idx as u64) >= device_blocks {
+                // Block beyond device capacity -- skip but warn
+                crate::println!(
+                    "[BLOCKFS] Warning: dirty block {} exceeds device capacity {}",
+                    block_idx,
+                    device_blocks
+                );
+                continue;
+            }
+            backend.write_block(*block_idx as u64, &self.block_data[*block_idx])?;
+            synced += 1;
+        }
+
+        // Clear dirty set after successful write
+        self.dirty_blocks.clear();
+
+        // Update superblock write time
+        self.superblock.write_time = crate::arch::timer::read_hw_timestamp();
+
+        Ok(synced)
+    }
+
+    /// Load filesystem data from the disk backend into memory.
+    ///
+    /// Reads all data blocks from disk into the in-memory `block_data` array.
+    /// This should be called after attaching a disk backend to populate the
+    /// in-memory cache with persisted data.
+    fn load_from_disk(&mut self) -> Result<usize, KernelError> {
+        let disk = match self.disk {
+            Some(ref d) => d.clone(),
+            None => return Ok(0),
+        };
+
+        let backend = disk.lock();
+        let device_blocks = backend.block_count();
+        let fs_blocks = self.block_data.len() as u64;
+        let blocks_to_read = fs_blocks.min(device_blocks) as usize;
+        let mut loaded = 0usize;
+
+        for block_idx in 0..blocks_to_read {
+            backend.read_block(block_idx as u64, &mut self.block_data[block_idx])?;
+            loaded += 1;
+        }
+
+        Ok(loaded)
+    }
+
+    // --- Indirect block helpers ---
+
+    /// Read a u32 block pointer from position `index` within an indirect block.
+    fn read_block_ptr(&self, indirect_block: u32, index: usize) -> u32 {
+        let block = &self.block_data[indirect_block as usize];
+        let off = index * size_of::<u32>();
+        u32::from_le_bytes([block[off], block[off + 1], block[off + 2], block[off + 3]])
+    }
+
+    /// Write a u32 block pointer at position `index` within an indirect block.
+    fn write_block_ptr(&mut self, indirect_block: u32, index: usize, value: u32) {
+        let off = index * size_of::<u32>();
+        let bytes = value.to_le_bytes();
+        self.block_data[indirect_block as usize][off..off + 4].copy_from_slice(&bytes);
+        self.mark_dirty(indirect_block);
+    }
+
+    /// Resolve a logical block index to a physical block number for reading.
+    ///
+    /// Returns `Some(physical_block)` if the block is allocated, `None` if it
+    /// falls in a sparse hole or exceeds the addressing range.
+    fn resolve_block(&self, inode: &DiskInode, logical_block: usize) -> Option<u32> {
+        if logical_block < DIRECT_BLOCKS {
+            // Direct block
+            let blk = inode.direct_blocks[logical_block];
+            if blk == 0 {
+                None
+            } else {
+                Some(blk)
+            }
+        } else if logical_block < SINGLE_INDIRECT_MAX_BLOCKS {
+            // Single indirect
+            let indirect = inode.indirect_block;
+            if indirect == 0 {
+                return None;
+            }
+            let idx = logical_block - DIRECT_BLOCKS;
+            let blk = self.read_block_ptr(indirect, idx);
+            if blk == 0 {
+                None
+            } else {
+                Some(blk)
+            }
+        } else if logical_block < DOUBLE_INDIRECT_MAX_BLOCKS {
+            // Double indirect
+            let dbl_indirect = inode.double_indirect_block;
+            if dbl_indirect == 0 {
+                return None;
+            }
+            let rel = logical_block - SINGLE_INDIRECT_MAX_BLOCKS;
+            let l1_idx = rel / PTRS_PER_BLOCK;
+            let l2_idx = rel % PTRS_PER_BLOCK;
+            let l1_block = self.read_block_ptr(dbl_indirect, l1_idx);
+            if l1_block == 0 {
+                return None;
+            }
+            let blk = self.read_block_ptr(l1_block, l2_idx);
+            if blk == 0 {
+                None
+            } else {
+                Some(blk)
+            }
+        } else {
+            // Beyond double indirect range (triple indirect not implemented)
+            None
+        }
+    }
+
+    /// Ensure a logical block index has a physical block allocated, creating
+    /// indirect blocks as needed. Returns the physical block number.
+    fn ensure_block(&mut self, inode_num: u32, logical_block: usize) -> Result<u32, KernelError> {
+        if logical_block < DIRECT_BLOCKS {
+            // Direct block
+            let blk = self.inode_table[inode_num as usize].direct_blocks[logical_block];
+            if blk != 0 {
+                return Ok(blk);
+            }
+            let new_blk = self
+                .allocate_block()
+                .ok_or(KernelError::ResourceExhausted { resource: "blocks" })?;
+            self.inode_table[inode_num as usize].direct_blocks[logical_block] = new_blk;
+            self.inode_table[inode_num as usize].blocks += 1;
+            self.mark_dirty(new_blk);
+            Ok(new_blk)
+        } else if logical_block < SINGLE_INDIRECT_MAX_BLOCKS {
+            // Single indirect
+            let mut indirect = self.inode_table[inode_num as usize].indirect_block;
+            if indirect == 0 {
+                indirect = self
+                    .allocate_block()
+                    .ok_or(KernelError::ResourceExhausted { resource: "blocks" })?;
+                // Zero the new indirect block (already zeroed by block_data init,
+                // but be explicit for safety after reuse)
+                for byte in &mut self.block_data[indirect as usize] {
+                    *byte = 0;
+                }
+                self.mark_dirty(indirect);
+                self.inode_table[inode_num as usize].indirect_block = indirect;
+                self.inode_table[inode_num as usize].blocks += 1;
+            }
+            let idx = logical_block - DIRECT_BLOCKS;
+            let blk = self.read_block_ptr(indirect, idx);
+            if blk != 0 {
+                return Ok(blk);
+            }
+            let new_blk = self
+                .allocate_block()
+                .ok_or(KernelError::ResourceExhausted { resource: "blocks" })?;
+            self.write_block_ptr(indirect, idx, new_blk);
+            self.mark_dirty(new_blk);
+            self.inode_table[inode_num as usize].blocks += 1;
+            Ok(new_blk)
+        } else if logical_block < DOUBLE_INDIRECT_MAX_BLOCKS {
+            // Double indirect
+            let mut dbl_indirect = self.inode_table[inode_num as usize].double_indirect_block;
+            if dbl_indirect == 0 {
+                dbl_indirect = self
+                    .allocate_block()
+                    .ok_or(KernelError::ResourceExhausted { resource: "blocks" })?;
+                for byte in &mut self.block_data[dbl_indirect as usize] {
+                    *byte = 0;
+                }
+                self.mark_dirty(dbl_indirect);
+                self.inode_table[inode_num as usize].double_indirect_block = dbl_indirect;
+                self.inode_table[inode_num as usize].blocks += 1;
+            }
+            let rel = logical_block - SINGLE_INDIRECT_MAX_BLOCKS;
+            let l1_idx = rel / PTRS_PER_BLOCK;
+            let l2_idx = rel % PTRS_PER_BLOCK;
+            let mut l1_block = self.read_block_ptr(dbl_indirect, l1_idx);
+            if l1_block == 0 {
+                l1_block = self
+                    .allocate_block()
+                    .ok_or(KernelError::ResourceExhausted { resource: "blocks" })?;
+                for byte in &mut self.block_data[l1_block as usize] {
+                    *byte = 0;
+                }
+                self.mark_dirty(l1_block);
+                self.write_block_ptr(dbl_indirect, l1_idx, l1_block);
+                self.inode_table[inode_num as usize].blocks += 1;
+            }
+            let blk = self.read_block_ptr(l1_block, l2_idx);
+            if blk != 0 {
+                return Ok(blk);
+            }
+            let new_blk = self
+                .allocate_block()
+                .ok_or(KernelError::ResourceExhausted { resource: "blocks" })?;
+            self.write_block_ptr(l1_block, l2_idx, new_blk);
+            self.mark_dirty(new_blk);
+            self.inode_table[inode_num as usize].blocks += 1;
+            Ok(new_blk)
+        } else {
+            Err(KernelError::FsError(FsError::FileTooLarge))
+        }
+    }
+
+    // --- Inode I/O ---
 
     fn read_inode(
         &self,
@@ -428,30 +799,30 @@ impl BlockFsInner {
 
         let to_read = buffer.len().min(inode.size as usize - offset);
         let mut bytes_read = 0;
+        let mut current_offset = offset;
 
-        // Read from direct blocks
-        for i in 0..12 {
-            if bytes_read >= to_read {
-                break;
-            }
+        while bytes_read < to_read {
+            let logical_block = current_offset / BLOCK_SIZE;
+            let block_offset = current_offset % BLOCK_SIZE;
 
-            let block_num = inode.direct_blocks[i];
-            if block_num == 0 {
-                break;
-            }
-
-            let block_offset = if offset > i * BLOCK_SIZE {
-                offset - i * BLOCK_SIZE
-            } else {
-                0
-            };
-
-            if block_offset < BLOCK_SIZE {
-                let block = &self.block_data[block_num as usize];
-                let copy_len = (BLOCK_SIZE - block_offset).min(to_read - bytes_read);
-                buffer[bytes_read..bytes_read + copy_len]
-                    .copy_from_slice(&block[block_offset..block_offset + copy_len]);
-                bytes_read += copy_len;
+            match self.resolve_block(inode, logical_block) {
+                Some(block_num) => {
+                    let block = &self.block_data[block_num as usize];
+                    let copy_len = (BLOCK_SIZE - block_offset).min(to_read - bytes_read);
+                    buffer[bytes_read..bytes_read + copy_len]
+                        .copy_from_slice(&block[block_offset..block_offset + copy_len]);
+                    bytes_read += copy_len;
+                    current_offset += copy_len;
+                }
+                None => {
+                    // Sparse hole or beyond addressing range -- fill with zeros
+                    let copy_len = (BLOCK_SIZE - block_offset).min(to_read - bytes_read);
+                    for byte in &mut buffer[bytes_read..bytes_read + copy_len] {
+                        *byte = 0;
+                    }
+                    bytes_read += copy_len;
+                    current_offset += copy_len;
+                }
             }
         }
 
@@ -465,41 +836,31 @@ impl BlockFsInner {
         data: &[u8],
     ) -> Result<usize, KernelError> {
         // Collect block information in multiple passes to avoid borrow conflicts
-        let mut blocks_needed = Vec::new();
+        let mut blocks_needed: Vec<(usize, usize, usize)> = Vec::new();
         let mut current_offset = offset;
         let mut bytes_remaining = data.len();
 
-        // Determine which blocks we need
+        // Determine which blocks we need (up to double-indirect limit)
         while bytes_remaining > 0 {
-            let block_idx = current_offset / BLOCK_SIZE;
-            if block_idx >= 12 {
-                break; // Beyond direct blocks
+            let logical_block = current_offset / BLOCK_SIZE;
+            if logical_block >= DOUBLE_INDIRECT_MAX_BLOCKS {
+                break; // Beyond addressable range
             }
 
             let block_offset = current_offset % BLOCK_SIZE;
             let copy_len = (BLOCK_SIZE - block_offset).min(bytes_remaining);
 
-            blocks_needed.push((block_idx, block_offset, copy_len));
+            blocks_needed.push((logical_block, block_offset, copy_len));
 
             bytes_remaining -= copy_len;
             current_offset += copy_len;
         }
 
-        // Allocate any missing blocks and collect block numbers
-        let mut block_numbers = Vec::new();
-        for (block_idx, _, _) in &blocks_needed {
-            let inode = &self.inode_table[inode_num as usize];
-            let block_num = if inode.direct_blocks[*block_idx] == 0 {
-                let new_block = self
-                    .allocate_block()
-                    .ok_or(KernelError::ResourceExhausted { resource: "blocks" })?;
-                self.inode_table[inode_num as usize].direct_blocks[*block_idx] = new_block;
-                self.inode_table[inode_num as usize].blocks += 1;
-                new_block
-            } else {
-                inode.direct_blocks[*block_idx]
-            };
-            block_numbers.push(block_num);
+        // Ensure all required blocks are allocated and collect physical block numbers
+        let mut block_numbers: Vec<u32> = Vec::new();
+        for (logical_block, _, _) in &blocks_needed {
+            let phys_block = self.ensure_block(inode_num, *logical_block)?;
+            block_numbers.push(phys_block);
         }
 
         // Write data to blocks
@@ -508,6 +869,7 @@ impl BlockFsInner {
             let block_num = block_numbers[i];
             self.block_data[block_num as usize][*block_offset..*block_offset + *copy_len]
                 .copy_from_slice(&data[bytes_written..bytes_written + *copy_len]);
+            self.mark_dirty(block_num);
             bytes_written += *copy_len;
         }
 
@@ -751,6 +1113,7 @@ impl BlockFsInner {
         block[offset + 1] = 0;
         block[offset + 2] = 0;
         block[offset + 3] = 0;
+        self.mark_dirty(block_num);
 
         // Decrement link count on the target inode
         if let Some(target) = self.inode_table.get_mut(target_inode as usize) {
@@ -790,48 +1153,218 @@ impl BlockFsInner {
 
         // Free data blocks that are fully beyond the new size
         if size < old_size {
-            // First block index that is no longer needed
+            // First logical block index that is no longer needed
             let first_free_block = if size == 0 {
                 0
             } else {
                 (size + BLOCK_SIZE - 1) / BLOCK_SIZE
             };
 
-            // Collect block numbers to free (to avoid borrow conflicts)
-            let mut blocks_to_free = Vec::new();
-            for i in first_free_block..12 {
+            // Free direct blocks beyond the new size
+            let direct_start = first_free_block.min(DIRECT_BLOCKS);
+            for i in direct_start..DIRECT_BLOCKS {
                 let block_num = self.inode_table[inode_num as usize].direct_blocks[i];
                 if block_num != 0 {
-                    blocks_to_free.push((i, block_num));
+                    self.free_block(block_num);
+                    self.inode_table[inode_num as usize].direct_blocks[i] = 0;
+                    if self.inode_table[inode_num as usize].blocks > 0 {
+                        self.inode_table[inode_num as usize].blocks -= 1;
+                    }
                 }
             }
 
-            // Free the blocks
-            for (idx, block_num) in blocks_to_free {
-                self.free_block(block_num);
-                self.inode_table[inode_num as usize].direct_blocks[idx] = 0;
-                if self.inode_table[inode_num as usize].blocks > 0 {
-                    self.inode_table[inode_num as usize].blocks -= 1;
-                }
-            }
+            // Free single-indirect blocks beyond the new size
+            self.truncate_single_indirect(inode_num, first_free_block);
 
-            // If truncating to non-zero size within a block, zero the tail of that block
+            // Free double-indirect blocks beyond the new size
+            self.truncate_double_indirect(inode_num, first_free_block);
+
+            // If truncating to non-zero size within a block, zero the tail
             if size > 0 {
-                let tail_block_idx = (size - 1) / BLOCK_SIZE;
-                let block_num = self.inode_table[inode_num as usize].direct_blocks[tail_block_idx];
-                if block_num != 0 {
+                let tail_logical_block = (size - 1) / BLOCK_SIZE;
+                // Resolve using the inode (borrow scoped to avoid conflicts)
+                let phys_block = {
+                    let inode = &self.inode_table[inode_num as usize];
+                    self.resolve_block(inode, tail_logical_block)
+                };
+                if let Some(block_num) = phys_block {
                     let zero_from = size % BLOCK_SIZE;
                     if zero_from > 0 {
                         let block = &mut self.block_data[block_num as usize];
                         for byte in &mut block[zero_from..BLOCK_SIZE] {
                             *byte = 0;
                         }
+                        self.mark_dirty(block_num);
                     }
                 }
             }
         }
 
         Ok(())
+    }
+
+    /// Free single-indirect data blocks at or beyond `first_free_block`.
+    /// Also frees the indirect block itself if it becomes fully empty.
+    fn truncate_single_indirect(&mut self, inode_num: u32, first_free_block: usize) {
+        let indirect = self.inode_table[inode_num as usize].indirect_block;
+        if indirect == 0 {
+            return;
+        }
+
+        // If all indirect entries are being freed
+        if first_free_block <= DIRECT_BLOCKS {
+            // Free every data block referenced by the indirect block
+            for idx in 0..PTRS_PER_BLOCK {
+                let blk = self.read_block_ptr(indirect, idx);
+                if blk != 0 {
+                    self.free_block(blk);
+                    if self.inode_table[inode_num as usize].blocks > 0 {
+                        self.inode_table[inode_num as usize].blocks -= 1;
+                    }
+                }
+            }
+            // Free the indirect block itself
+            self.free_block(indirect);
+            self.inode_table[inode_num as usize].indirect_block = 0;
+            if self.inode_table[inode_num as usize].blocks > 0 {
+                self.inode_table[inode_num as usize].blocks -= 1;
+            }
+        } else if first_free_block < SINGLE_INDIRECT_MAX_BLOCKS {
+            // Partial free within the single-indirect range
+            let start_idx = first_free_block - DIRECT_BLOCKS;
+            let mut any_remain = false;
+            for idx in 0..PTRS_PER_BLOCK {
+                if idx >= start_idx {
+                    let blk = self.read_block_ptr(indirect, idx);
+                    if blk != 0 {
+                        self.free_block(blk);
+                        self.write_block_ptr(indirect, idx, 0);
+                        if self.inode_table[inode_num as usize].blocks > 0 {
+                            self.inode_table[inode_num as usize].blocks -= 1;
+                        }
+                    }
+                } else {
+                    let blk = self.read_block_ptr(indirect, idx);
+                    if blk != 0 {
+                        any_remain = true;
+                    }
+                }
+            }
+            // If no entries remain, free the indirect block itself
+            if !any_remain {
+                self.free_block(indirect);
+                self.inode_table[inode_num as usize].indirect_block = 0;
+                if self.inode_table[inode_num as usize].blocks > 0 {
+                    self.inode_table[inode_num as usize].blocks -= 1;
+                }
+            }
+        }
+        // If first_free_block >= SINGLE_INDIRECT_MAX_BLOCKS, nothing in the
+        // single-indirect range needs freeing.
+    }
+
+    /// Free double-indirect data blocks at or beyond `first_free_block`.
+    /// Also frees level-1 indirect blocks and the double-indirect block itself
+    /// if they become fully empty.
+    fn truncate_double_indirect(&mut self, inode_num: u32, first_free_block: usize) {
+        let dbl_indirect = self.inode_table[inode_num as usize].double_indirect_block;
+        if dbl_indirect == 0 {
+            return;
+        }
+
+        // Logical block range covered by double indirect:
+        //   [SINGLE_INDIRECT_MAX_BLOCKS .. DOUBLE_INDIRECT_MAX_BLOCKS)
+
+        if first_free_block <= SINGLE_INDIRECT_MAX_BLOCKS {
+            // Free everything in double-indirect range
+            for l1_idx in 0..PTRS_PER_BLOCK {
+                let l1_block = self.read_block_ptr(dbl_indirect, l1_idx);
+                if l1_block != 0 {
+                    // Free all data blocks in this L1 indirect block
+                    for l2_idx in 0..PTRS_PER_BLOCK {
+                        let data_blk = self.read_block_ptr(l1_block, l2_idx);
+                        if data_blk != 0 {
+                            self.free_block(data_blk);
+                            if self.inode_table[inode_num as usize].blocks > 0 {
+                                self.inode_table[inode_num as usize].blocks -= 1;
+                            }
+                        }
+                    }
+                    // Free the L1 indirect block itself
+                    self.free_block(l1_block);
+                    if self.inode_table[inode_num as usize].blocks > 0 {
+                        self.inode_table[inode_num as usize].blocks -= 1;
+                    }
+                }
+            }
+            // Free the double-indirect block itself
+            self.free_block(dbl_indirect);
+            self.inode_table[inode_num as usize].double_indirect_block = 0;
+            if self.inode_table[inode_num as usize].blocks > 0 {
+                self.inode_table[inode_num as usize].blocks -= 1;
+            }
+        } else if first_free_block < DOUBLE_INDIRECT_MAX_BLOCKS {
+            // Partial free within the double-indirect range
+            let rel = first_free_block - SINGLE_INDIRECT_MAX_BLOCKS;
+            let first_l1 = rel / PTRS_PER_BLOCK;
+            let first_l2 = rel % PTRS_PER_BLOCK;
+            let mut any_l1_remain = false;
+
+            for l1_idx in 0..PTRS_PER_BLOCK {
+                let l1_block = self.read_block_ptr(dbl_indirect, l1_idx);
+                if l1_block == 0 {
+                    continue;
+                }
+
+                if l1_idx < first_l1 {
+                    // Entirely before the truncation point -- keep
+                    any_l1_remain = true;
+                    continue;
+                }
+
+                let l2_start = if l1_idx == first_l1 { first_l2 } else { 0 };
+
+                let mut any_l2_remain = false;
+                for l2_idx in 0..PTRS_PER_BLOCK {
+                    if l2_idx >= l2_start {
+                        let data_blk = self.read_block_ptr(l1_block, l2_idx);
+                        if data_blk != 0 {
+                            self.free_block(data_blk);
+                            self.write_block_ptr(l1_block, l2_idx, 0);
+                            if self.inode_table[inode_num as usize].blocks > 0 {
+                                self.inode_table[inode_num as usize].blocks -= 1;
+                            }
+                        }
+                    } else {
+                        let data_blk = self.read_block_ptr(l1_block, l2_idx);
+                        if data_blk != 0 {
+                            any_l2_remain = true;
+                        }
+                    }
+                }
+
+                if !any_l2_remain {
+                    // Free the now-empty L1 indirect block
+                    self.free_block(l1_block);
+                    self.write_block_ptr(dbl_indirect, l1_idx, 0);
+                    if self.inode_table[inode_num as usize].blocks > 0 {
+                        self.inode_table[inode_num as usize].blocks -= 1;
+                    }
+                } else {
+                    any_l1_remain = true;
+                }
+            }
+
+            if !any_l1_remain {
+                self.free_block(dbl_indirect);
+                self.inode_table[inode_num as usize].double_indirect_block = 0;
+                if self.inode_table[inode_num as usize].blocks > 0 {
+                    self.inode_table[inode_num as usize].blocks -= 1;
+                }
+            }
+        }
+        // If first_free_block >= DOUBLE_INDIRECT_MAX_BLOCKS, nothing in the
+        // double-indirect range needs freeing.
     }
 
     // --- Helper methods for directory entry operations ---
@@ -1028,25 +1561,26 @@ impl BlockFsInner {
             *byte = 0;
         }
 
+        self.mark_dirty(block_num);
+
         Ok(())
     }
 
-    /// Free all data blocks belonging to an inode.
+    /// Free all data blocks belonging to an inode (direct + indirect).
     fn free_inode_blocks(&mut self, inode_num: u32) {
-        // Collect blocks to free
-        let mut blocks_to_free = Vec::new();
-        for i in 0..12 {
+        // Free direct blocks
+        for i in 0..DIRECT_BLOCKS {
             let block_num = self.inode_table[inode_num as usize].direct_blocks[i];
             if block_num != 0 {
-                blocks_to_free.push(i);
+                self.free_block(block_num);
+                self.inode_table[inode_num as usize].direct_blocks[i] = 0;
             }
         }
 
-        for i in blocks_to_free {
-            let block_num = self.inode_table[inode_num as usize].direct_blocks[i];
-            self.free_block(block_num);
-            self.inode_table[inode_num as usize].direct_blocks[i] = 0;
-        }
+        // Free single-indirect and double-indirect blocks (first_free_block=0 frees
+        // all)
+        self.truncate_single_indirect(inode_num, 0);
+        self.truncate_double_indirect(inode_num, 0);
 
         self.inode_table[inode_num as usize].blocks = 0;
         self.inode_table[inode_num as usize].size = 0;
@@ -1122,6 +1656,42 @@ impl BlockFs {
 
         Ok(Self::new(block_count, inode_count))
     }
+
+    /// Attach a disk backend for persistent storage.
+    ///
+    /// When a disk backend is attached, `sync()` will write all dirty blocks
+    /// to the device. Without a backend, BlockFS operates as a pure RAM
+    /// filesystem.
+    ///
+    /// If `load` is true, existing data is read from the disk into memory.
+    pub fn set_disk_backend(
+        &self,
+        backend: Arc<Mutex<dyn DiskBackend>>,
+        load: bool,
+    ) -> Result<(), KernelError> {
+        let mut inner = self.inner.write();
+        inner.disk = Some(backend);
+
+        if load {
+            let loaded = inner.load_from_disk()?;
+            crate::println!("[BLOCKFS] Loaded {} blocks from disk backend", loaded);
+        }
+
+        Ok(())
+    }
+
+    /// Detach the disk backend. Outstanding dirty blocks will NOT be flushed;
+    /// call `sync()` first if persistence is needed.
+    pub fn detach_disk_backend(&self) {
+        let mut inner = self.inner.write();
+        inner.disk = None;
+    }
+
+    /// Get the number of dirty blocks pending sync.
+    pub fn dirty_block_count(&self) -> usize {
+        let inner = self.inner.read();
+        inner.dirty_blocks.len()
+    }
 }
 
 impl Filesystem for BlockFs {
@@ -1138,18 +1708,46 @@ impl Filesystem for BlockFs {
     }
 
     fn sync(&self) -> Result<(), KernelError> {
-        // TODO(future): Sync dirty blocks and inodes to underlying block device
+        let mut inner = self.inner.write();
+        let synced = inner.sync_to_disk()?;
+        if synced > 0 {
+            crate::println!("[BLOCKFS] Synced {} dirty blocks to disk", synced);
+        }
         Ok(())
     }
 }
 
 /// Initialize BlockFS
 pub fn init() -> Result<(), KernelError> {
-    println!("[BLOCKFS] Initializing block-based filesystem...");
-    println!("[BLOCKFS] Block size: {} bytes", BLOCK_SIZE);
-    println!("[BLOCKFS] Inode size: {} bytes", size_of::<DiskInode>());
-    println!("[BLOCKFS] BlockFS initialized");
+    crate::println!("[BLOCKFS] Initializing block-based filesystem...");
+    crate::println!("[BLOCKFS] Block size: {} bytes", BLOCK_SIZE);
+    crate::println!("[BLOCKFS] Inode size: {} bytes", size_of::<DiskInode>());
+    crate::println!("[BLOCKFS] BlockFS initialized");
     Ok(())
+}
+
+/// Try to attach the virtio-blk device as a disk backend for the given
+/// BlockFS instance. Returns `true` if a device was found and attached.
+///
+/// This should be called after both the BlockFS and virtio-blk driver have
+/// been initialized.
+pub fn attach_virtio_backend(fs: &BlockFs, load_from_disk: bool) -> bool {
+    if !crate::drivers::virtio::blk::is_initialized() {
+        crate::println!("[BLOCKFS] No virtio-blk device available; operating in RAM-only mode");
+        return false;
+    }
+
+    let backend = Arc::new(Mutex::new(VirtioBlockBackend));
+    match fs.set_disk_backend(backend, load_from_disk) {
+        Ok(()) => {
+            crate::println!("[BLOCKFS] Attached virtio-blk disk backend for persistence");
+            true
+        }
+        Err(e) => {
+            crate::println!("[BLOCKFS] Failed to attach virtio-blk backend: {:?}", e);
+            false
+        }
+    }
 }
 
 #[cfg(test)]

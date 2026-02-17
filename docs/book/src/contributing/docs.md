@@ -72,7 +72,7 @@ fn example_function() -> Result<(), Error> {
 
 ```bash
 # Shell commands
-cargo build --target x86_64-unknown-veridian
+cargo build --target x86_64-veridian
 ```
 
 ```c

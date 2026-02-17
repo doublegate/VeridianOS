@@ -29,7 +29,7 @@ pub struct BuildSnapshot {
     pub timestamp_override: Option<u64>,
     /// (filename, SHA-256 hash) pairs for source files
     pub source_hashes: Vec<(String, [u8; 32])>,
-    /// Target triple (e.g., "x86_64-unknown-veridian")
+    /// Target triple (e.g., "x86_64-veridian")
     pub target_triple: String,
 }
 

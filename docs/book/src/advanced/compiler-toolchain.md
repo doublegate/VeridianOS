@@ -48,7 +48,7 @@ VeridianOS uses **Clang/LLVM** as the primary C/C++ compiler with custom Veridia
 clang hello.c -o hello
 
 # Cross-compilation
-clang --target=aarch64-unknown-veridian hello.c -o hello-arm64
+clang --target=aarch64-veridian hello.c -o hello-arm64
 
 # C++ with full standard library
 clang++ -std=c++20 app.cpp -o app -lstdc++
@@ -317,7 +317,7 @@ install(TARGETS myapp
 
 ```bash
 # Configure script with VeridianOS detection
-./configure --host=x86_64-unknown-veridian \
+./configure --host=x86_64-veridian \
            --with-veridian-capabilities \
            --enable-ipc-integration
 
@@ -361,12 +361,12 @@ VeridianOS supports **full cross-compilation** between all supported architectur
 
 ```bash
 # Cross-compile C/C++ for different architectures
-clang --target=aarch64-unknown-veridian hello.c -o hello-arm64
-clang --target=riscv64-unknown-veridian hello.c -o hello-riscv
+clang --target=aarch64-veridian hello.c -o hello-arm64
+clang --target=riscv64-veridian hello.c -o hello-riscv
 
 # Cross-compile Rust
-cargo build --target aarch64-unknown-veridian
-cargo build --target riscv64gc-unknown-veridian
+cargo build --target aarch64-veridian
+cargo build --target riscv64gc-veridian
 
 # Cross-compile Go
 GOOS=veridian GOARCH=arm64 go build hello.go
@@ -416,7 +416,7 @@ clang --sysroot=$VERIDIAN_SYSROOT hello.c -o hello
 clang -flto=thin -O3 *.c -o optimized-app
 
 # LTO with specific targets
-clang -flto=thin --target=aarch64-unknown-veridian -O3 app.c -o app
+clang -flto=thin --target=aarch64-veridian -O3 app.c -o app
 ```
 
 ### Profile-Guided Optimization (PGO)
@@ -492,7 +492,7 @@ veridian-prof --ipc ./myapp             # Profile IPC performance
         "name": "VeridianOS",
         "compilerPath": "/usr/bin/clang",
         "compilerArgs": [
-            "--target=x86_64-unknown-veridian",
+            "--target=x86_64-veridian",
             "-isystem/usr/include/veridian"
         ],
         "intelliSenseMode": "clang-x64",
@@ -507,12 +507,12 @@ veridian-prof --ipc ./myapp             # Profile IPC performance
 
 ```toml
 # .cargo/config.toml
-[target.x86_64-unknown-veridian]
+[target.x86_64-veridian]
 linker = "veridian-ld"
 rustflags = ["-C", "target-feature=+crt-static"]
 
 [build]
-target = "x86_64-unknown-veridian"
+target = "x86_64-veridian"
 ```
 
 ### CLion/IntelliJ
@@ -740,7 +740,7 @@ clang -v hello.c -o hello
 clang -print-search-dirs
 
 # Show target information
-clang --target=aarch64-unknown-veridian -print-targets
+clang --target=aarch64-veridian -print-targets
 
 # Debug linking
 clang -Wl,--verbose hello.c -o hello
@@ -771,8 +771,8 @@ distcc clang hello.c -o hello
 clang -march=native -mtune=native -O3 app.c -o app
 
 # Architecture-specific flags
-clang --target=aarch64-unknown-veridian -mcpu=cortex-a72 app.c -o app
-clang --target=riscv64-unknown-veridian -mcpu=rocket app.c -o app
+clang --target=aarch64-veridian -mcpu=cortex-a72 app.c -o app
+clang --target=riscv64-veridian -mcpu=rocket app.c -o app
 
 # Memory optimization
 clang -Os -flto=thin app.c -o app    # Optimize for size

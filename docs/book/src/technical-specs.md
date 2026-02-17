@@ -246,9 +246,9 @@ struct MessageHeader {
 
 ```bash
 # Supported target triples
-x86_64-unknown-veridian
-aarch64-unknown-veridian
-riscv64gc-unknown-veridian
+x86_64-veridian
+aarch64-veridian
+riscv64gc-veridian
 ```
 
 ### Build Options

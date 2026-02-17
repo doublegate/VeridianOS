@@ -142,10 +142,98 @@ pub fn create_process_with_options(
     Ok(pid)
 }
 
+/// Parse a shebang (#!) line from the beginning of a file
+///
+/// If the data starts with `#!`, extracts the interpreter path and optional
+/// argument from the first line (up to 256 bytes or first newline).
+///
+/// # Examples
+/// - `#!/bin/sh\n`        -> Some(("/bin/sh", None))
+/// - `#!/bin/sh -e\n`     -> Some(("/bin/sh", Some("-e")))
+/// - `#!/usr/bin/env python3\n` -> Some(("/usr/bin/env", Some("python3")))
+/// - `\x7fELF...`         -> None (not a shebang)
+#[cfg(feature = "alloc")]
+pub fn parse_shebang(data: &[u8]) -> Option<(String, Option<String>)> {
+    // Must start with #!
+    if data.len() < 2 || data[0] != b'#' || data[1] != b'!' {
+        return None;
+    }
+
+    // Find end of first line, capped at 256 bytes
+    let max_len = data.len().min(256);
+    let line_end = data[2..max_len]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|pos| pos + 2)
+        .unwrap_or(max_len);
+
+    // Extract the shebang line content (after #!)
+    let line = core::str::from_utf8(&data[2..line_end]).ok()?;
+    let line = line.trim();
+
+    if line.is_empty() {
+        return None;
+    }
+
+    // Split into interpreter and optional argument
+    // Only split on the first whitespace -- the rest is a single argument
+    if let Some(space_pos) = line.find([' ', '\t']) {
+        let interpreter = line[..space_pos].trim();
+        let arg = line[space_pos + 1..].trim();
+        if interpreter.is_empty() {
+            return None;
+        }
+        let opt_arg = if arg.is_empty() {
+            None
+        } else {
+            Some(String::from(arg))
+        };
+        Some((String::from(interpreter), opt_arg))
+    } else {
+        Some((String::from(line), None))
+    }
+}
+
+/// Search for an executable by name in standard PATH directories
+///
+/// If `name` contains a `/`, it is treated as an explicit path and returned
+/// as-is (if it exists in the VFS). Otherwise, the function searches
+/// `/bin`, `/usr/bin`, and `/usr/local/bin` in order, returning the first
+/// match.
+#[cfg(feature = "alloc")]
+pub fn search_path(name: &str) -> Option<String> {
+    use crate::fs;
+
+    // If name already contains a slash, treat it as a path
+    if name.contains('/') {
+        if fs::file_exists(name) {
+            return Some(String::from(name));
+        }
+        return None;
+    }
+
+    // Standard search directories (simple PATH without $PATH env variable)
+    const SEARCH_DIRS: &[&str] = &["/bin", "/usr/bin", "/usr/local/bin"];
+
+    for dir in SEARCH_DIRS {
+        let full_path = format!("{}/{}", dir, name);
+        if fs::file_exists(&full_path) {
+            return Some(full_path);
+        }
+    }
+
+    None
+}
+
 /// Execute a new program in current process
 ///
 /// Replaces the current process image with a new program.
 /// This function does not return on success - the new program begins execution.
+///
+/// Supports shebang (`#!`) scripts: if the file starts with `#!`, the
+/// interpreter specified on the shebang line is executed instead, with the
+/// script path prepended to the argument list. Also supports PATH search --
+/// if the path does not start with `/`, standard directories are searched.
 #[cfg(feature = "alloc")]
 pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), KernelError> {
     use crate::{elf::ElfLoader, fs};
@@ -153,14 +241,52 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
     let process = super::current_process().ok_or(KernelError::ProcessNotFound { pid: 0 })?;
     let current_thread = super::current_thread().ok_or(KernelError::ThreadNotFound { tid: 0 })?;
 
+    // Resolve path via PATH search if it doesn't start with '/'
+    let resolved_path = if !path.starts_with('/') {
+        search_path(path).ok_or(KernelError::FsError(crate::error::FsError::NotFound))?
+    } else {
+        String::from(path)
+    };
+
     println!(
         "[PROCESS] exec() called for process {} with path: {}",
-        process.pid.0, path
+        process.pid.0, resolved_path
     );
 
     // Step 1: Load new program from filesystem
-    let file_data =
-        fs::read_file(path).map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
+    let file_data = fs::read_file(&resolved_path)
+        .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
+
+    // Step 1b: Check for shebang (#!) and delegate to interpreter if found
+    if let Some((interpreter, opt_arg)) = parse_shebang(&file_data) {
+        println!(
+            "[PROCESS] Shebang detected: interpreter={}, arg={:?}",
+            interpreter, opt_arg
+        );
+
+        // Build new argv: [interpreter, opt_arg?, script_path, original_argv[1..]]
+        let mut new_argv: Vec<&str> = Vec::new();
+        let interp_ref: &str = &interpreter;
+        new_argv.push(interp_ref);
+
+        // Borrow opt_arg for the lifetime of this block
+        let opt_arg_string;
+        if let Some(ref arg) = opt_arg {
+            opt_arg_string = arg.clone();
+            new_argv.push(&opt_arg_string);
+        }
+
+        let resolved_ref: &str = &resolved_path;
+        new_argv.push(resolved_ref);
+
+        // Append original argv[1..] (skip argv[0] which was the script name)
+        if argv.len() > 1 {
+            new_argv.extend_from_slice(&argv[1..]);
+        }
+
+        // Recursively exec the interpreter
+        return exec_process(&interpreter, &new_argv, envp);
+    }
 
     // Step 2: Clear current address space and load new program
     let entry_point = {
@@ -176,15 +302,61 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
         ElfLoader::load(&file_data, &mut memory_space)?
     };
 
-    // Step 3: Setup new stack with arguments and environment
-    let stack_top = setup_exec_stack(process, argv, envp)?;
+    // Step 2b: Check for dynamic linking
+    let (final_entry, aux_vector) = {
+        let loader = ElfLoader::new();
+        let elf_binary = loader
+            .parse(&file_data)
+            .map_err(|_| KernelError::InvalidArgument {
+                name: "elf",
+                value: "failed to parse ELF for dynamic linking check",
+            })?;
+
+        if elf_binary.dynamic && elf_binary.interpreter.is_some() {
+            // Dynamically linked -- load interpreter and build aux vector
+            let dyn_info = crate::elf::dynamic::prepare_dynamic_linking(
+                &file_data,
+                &elf_binary,
+                elf_binary.load_base,
+            )?
+            .ok_or(KernelError::InvalidArgument {
+                name: "dynamic",
+                value: "binary has interpreter but prepare_dynamic_linking returned None",
+            })?;
+
+            // Load interpreter LOAD segments into the process address space.
+            // The interpreter is a separate ELF loaded at its own base address
+            // (distinct from the main binary) to avoid overlap.
+            let interp_data = fs::read_file(&dyn_info.interp_path)
+                .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
+            {
+                let mut memory_space = process.memory_space.lock();
+                let _interp_entry = ElfLoader::load(&interp_data, &mut memory_space)?;
+            }
+
+            println!(
+                "[PROCESS] Dynamic binary: interpreter={}, interp_base={:#x}, interp_entry={:#x}",
+                dyn_info.interp_path, dyn_info.interp_base, dyn_info.interp_entry
+            );
+
+            // Entry point is the interpreter, not the main binary
+            (dyn_info.interp_entry, Some(dyn_info.aux_vector))
+        } else {
+            // Statically linked -- use binary entry directly, no aux vector
+            (entry_point, None)
+        }
+    };
+
+    // Step 3: Setup new stack with arguments, environment, and aux vector
+    let stack_top = setup_exec_stack(process, argv, envp, aux_vector.as_deref())?;
 
     // Step 4: Reset thread context to new entry point
     {
         let mut ctx = current_thread.context.lock();
 
-        // Set new instruction pointer to program entry
-        ctx.set_instruction_pointer(entry_point as usize);
+        // Set new instruction pointer to program entry (interpreter entry
+        // for dynamically linked binaries, binary entry for static)
+        ctx.set_instruction_pointer(final_entry as usize);
 
         // Set stack pointer to new stack top
         ctx.set_stack_pointer(stack_top);
@@ -205,8 +377,8 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
     // Step 7: Update process name to reflect new executable
     #[cfg(feature = "alloc")]
     {
-        // Extract filename from path
-        let _name = path.rsplit('/').next().unwrap_or(path);
+        // Extract filename from resolved path
+        let _name = resolved_path.rsplit('/').next().unwrap_or(&resolved_path);
         // Note: Can't directly modify process.name since it's behind shared ref
         // In a full impl, we'd need interior mutability here
         println!(
@@ -217,7 +389,7 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
 
     println!(
         "[PROCESS] exec() completed for process {}, entry: {:#x}",
-        process.pid.0, entry_point
+        process.pid.0, final_entry
     );
 
     // The actual execution resumes when we return to user mode
@@ -232,65 +404,221 @@ pub fn exec_process(_path: &str, _argv: &[&str], _envp: &[&str]) -> Result<(), K
     })
 }
 
-/// Setup stack for exec with arguments and environment
+/// Write a value to a user-space stack address via the physical memory window.
+///
+/// The process's page tables map `vaddr` to a physical frame. We look up the
+/// mapping and write through the identity-mapped physical address.
+///
+/// # Safety
+///
+/// `vaddr` must be a valid mapped address in the process's VAS with write
+/// permissions. The caller must ensure no concurrent access to this memory.
 #[cfg(feature = "alloc")]
-fn setup_exec_stack(process: &Process, argv: &[&str], envp: &[&str]) -> Result<usize, KernelError> {
+unsafe fn write_to_user_stack(
+    memory_space: &crate::mm::VirtualAddressSpace,
+    vaddr: usize,
+    value: usize,
+) {
+    use crate::mm::VirtualAddress;
+
+    let pt_root = memory_space.get_page_table();
+    if pt_root == 0 {
+        return;
+    }
+
+    // SAFETY: pt_root is a valid identity-mapped L4 page table address.
+    let mapper = unsafe { super::super::mm::vas::create_mapper_from_root_pub(pt_root) };
+    if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64)) {
+        let page_offset = vaddr & 0xFFF;
+        let phys_addr = (frame.as_u64() << 12) + page_offset as u64;
+        // SAFETY: phys_addr is identity-mapped and points to a valid writable
+        // page within the process's stack region.
+        unsafe {
+            core::ptr::write(phys_addr as *mut usize, value);
+        }
+    }
+}
+
+/// Write a byte slice to a user-space stack address via the physical memory
+/// window.
+///
+/// # Safety
+///
+/// Same requirements as `write_to_user_stack`. The range
+/// `[vaddr, vaddr+data.len())` must be within a single mapped page.
+#[cfg(feature = "alloc")]
+unsafe fn write_bytes_to_user_stack(
+    memory_space: &crate::mm::VirtualAddressSpace,
+    vaddr: usize,
+    data: &[u8],
+) {
+    use crate::mm::VirtualAddress;
+
+    let pt_root = memory_space.get_page_table();
+    if pt_root == 0 {
+        return;
+    }
+
+    // SAFETY: pt_root is a valid identity-mapped L4 page table address.
+    let mapper = unsafe { super::super::mm::vas::create_mapper_from_root_pub(pt_root) };
+    if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64)) {
+        let page_offset = vaddr & 0xFFF;
+        let phys_addr = (frame.as_u64() << 12) + page_offset as u64;
+        // SAFETY: phys_addr is identity-mapped and the destination has
+        // at least data.len() bytes available within the page.
+        unsafe {
+            core::ptr::copy_nonoverlapping(data.as_ptr(), phys_addr as *mut u8, data.len());
+        }
+    }
+}
+
+/// Setup stack for exec with arguments, environment, and optional auxiliary
+/// vector.
+///
+/// Writes the full argc/argv/envp/auxv layout to the user stack via the
+/// physical memory window. The layout (growing downward from stack_top) is:
+///
+/// ```text
+/// [high addresses]
+///   envp strings (null-terminated)
+///   argv strings (null-terminated)
+///   padding (16-byte alignment)
+///   AT_NULL (0, 0)           <- auxv terminator (if present)
+///   auxv[N-1] (type, value)
+///   ...
+///   auxv[0] (type, value)
+///   NULL                     <- envp[N]
+///   envp[N-1] pointer
+///   ...
+///   envp[0] pointer
+///   NULL                     <- argv[argc]
+///   argv[argc-1] pointer
+///   ...
+///   argv[0] pointer
+///   argc (usize)             <- SP (returned)
+/// [low addresses]
+/// ```
+#[cfg(feature = "alloc")]
+fn setup_exec_stack(
+    process: &Process,
+    argv: &[&str],
+    envp: &[&str],
+    aux_vector: Option<&[crate::elf::dynamic::AuxVecEntry]>,
+) -> Result<usize, KernelError> {
     let memory_space = process.memory_space.lock();
 
-    // Get stack region (typically at end of user address space)
+    // Get stack region
     let stack_base = memory_space.user_stack_base();
     let stack_size = memory_space.user_stack_size();
     let stack_top = stack_base + stack_size;
 
-    // Layout: [env strings] [arg strings] [env pointers] [arg pointers] [argc]
-    // Stack grows downward, so we start from top
+    // ---- Phase 1: Write strings from the top of the stack downward ----
+    let mut string_sp = stack_top;
 
-    let mut sp = stack_top;
+    // Write envp strings and record their user-space addresses
+    let mut envp_addrs: Vec<usize> = Vec::with_capacity(envp.len());
+    for &env in envp.iter().rev() {
+        let bytes = env.as_bytes();
+        string_sp -= bytes.len() + 1; // +1 for null terminator
+                                      // SAFETY: string_sp is within the stack mapping. We write the string
+                                      // bytes followed by a null terminator.
+        unsafe {
+            write_bytes_to_user_stack(&memory_space, string_sp, bytes);
+            write_bytes_to_user_stack(&memory_space, string_sp + bytes.len(), &[0]);
+        }
+        envp_addrs.push(string_sp);
+    }
+    envp_addrs.reverse();
 
-    // Align stack to 16 bytes
+    // Write argv strings and record their user-space addresses
+    let mut argv_addrs: Vec<usize> = Vec::with_capacity(argv.len());
+    for &arg in argv.iter().rev() {
+        let bytes = arg.as_bytes();
+        string_sp -= bytes.len() + 1;
+        // SAFETY: string_sp is within the stack mapping.
+        unsafe {
+            write_bytes_to_user_stack(&memory_space, string_sp, bytes);
+            write_bytes_to_user_stack(&memory_space, string_sp + bytes.len(), &[0]);
+        }
+        argv_addrs.push(string_sp);
+    }
+    argv_addrs.reverse();
+
+    // ---- Phase 2: Align and write pointer arrays ----
+    // Align to 16 bytes
+    let mut sp = string_sp & !0xF;
+
+    // Ensure space for: argc + argv ptrs + NULL + envp ptrs + NULL + auxv entries
+    // Each auxv entry is 2 usizes (type, value)
+    let auxv_slots = aux_vector.map(|v| v.len() * 2).unwrap_or(0);
+    let ptrs_needed = 1 + argv.len() + 1 + envp.len() + 1 + auxv_slots;
+    sp -= ptrs_needed * core::mem::size_of::<usize>();
+    // Re-align to 16 bytes (ABI requirement)
     sp &= !0xF;
 
-    // Reserve space for strings and pointers
-    // Calculate total string size
-    let argv_total: usize = argv.iter().map(|s| s.len() + 1).sum();
-    let envp_total: usize = envp.iter().map(|s| s.len() + 1).sum();
+    let mut write_pos = sp;
 
-    // Push null terminator for envp array
-    sp -= core::mem::size_of::<usize>();
+    // Write argc
+    // SAFETY: write_pos is within the stack region.
+    unsafe {
+        write_to_user_stack(&memory_space, write_pos, argv.len());
+    }
+    write_pos += core::mem::size_of::<usize>();
 
-    // Push envp pointers (will be filled in)
-    let envp_ptrs_start = sp - (envp.len() * core::mem::size_of::<usize>());
-    sp = envp_ptrs_start;
+    // Write argv pointers
+    for &addr in &argv_addrs {
+        // SAFETY: write_pos is within the stack region.
+        unsafe {
+            write_to_user_stack(&memory_space, write_pos, addr);
+        }
+        write_pos += core::mem::size_of::<usize>();
+    }
+    // NULL terminator for argv
+    // SAFETY: write_pos is within the stack region.
+    unsafe {
+        write_to_user_stack(&memory_space, write_pos, 0);
+    }
+    write_pos += core::mem::size_of::<usize>();
 
-    // Push null terminator for argv array
-    sp -= core::mem::size_of::<usize>();
+    // Write envp pointers
+    for &addr in &envp_addrs {
+        // SAFETY: write_pos is within the stack region.
+        unsafe {
+            write_to_user_stack(&memory_space, write_pos, addr);
+        }
+        write_pos += core::mem::size_of::<usize>();
+    }
+    // NULL terminator for envp
+    // SAFETY: write_pos is within the stack region.
+    unsafe {
+        write_to_user_stack(&memory_space, write_pos, 0);
+    }
+    write_pos += core::mem::size_of::<usize>();
 
-    // Push argv pointers (will be filled in)
-    let argv_ptrs_start = sp - (argv.len() * core::mem::size_of::<usize>());
-    sp = argv_ptrs_start;
-
-    // Push argc
-    sp -= core::mem::size_of::<usize>();
-
-    // Reserve space for strings
-    sp -= argv_total + envp_total;
-
-    // Align final sp to 16 bytes
-    sp &= !0xF;
-
-    // Note: In a full implementation, we would actually copy the strings
-    // and pointers to the stack. For now, we just set up the layout.
-
-    // The actual argument passing will be handled by the C runtime (crt0)
-    // which expects argc at sp, argv at sp+8, envp at sp+16 (for 64-bit)
-
-    // Store argc at stack pointer
-    let _argc = argv.len();
-    // In real implementation: unsafe { *(sp as *mut usize) = argc; }
+    // Write auxiliary vector (if present, for dynamically linked binaries)
+    if let Some(auxv) = aux_vector {
+        for entry in auxv {
+            // Each aux entry is two usize values: type, value
+            // SAFETY: write_pos is within the stack region, reserved in
+            // ptrs_needed calculation above.
+            unsafe {
+                write_to_user_stack(&memory_space, write_pos, entry.type_id as usize);
+            }
+            write_pos += core::mem::size_of::<usize>();
+            // SAFETY: write_pos is within the stack region.
+            unsafe {
+                write_to_user_stack(&memory_space, write_pos, entry.value as usize);
+            }
+            write_pos += core::mem::size_of::<usize>();
+        }
+    }
 
     println!(
         "[PROCESS] Stack setup: base={:#x}, top={:#x}, sp={:#x}, argc={}",
-        stack_base, stack_top, sp, _argc
+        stack_base,
+        stack_top,
+        sp,
+        argv.len()
     );
 
     Ok(sp)

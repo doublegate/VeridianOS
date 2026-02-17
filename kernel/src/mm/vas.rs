@@ -53,6 +53,16 @@ unsafe fn create_mapper_from_root(page_table_root: u64) -> PageMapper {
     unsafe { PageMapper::new(l4_ptr) }
 }
 
+/// Public wrapper around `create_mapper_from_root` for use by other kernel
+/// modules (e.g., process creation for writing to user stack).
+///
+/// # Safety
+///
+/// Same requirements as [`create_mapper_from_root`].
+pub unsafe fn create_mapper_from_root_pub(page_table_root: u64) -> PageMapper {
+    unsafe { create_mapper_from_root(page_table_root) }
+}
+
 /// Memory mapping types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MappingType {
@@ -218,26 +228,106 @@ impl VirtualAddressSpace {
         Ok(())
     }
 
-    /// Clone from another address space
+    /// Clone from another address space (deep copy for fork).
+    ///
+    /// Allocates a new L4 page table for this VAS, copies kernel-space L4
+    /// entries directly (shared kernel mapping), and for each user-space page
+    /// in the parent, allocates a new physical frame, copies the 4KB content,
+    /// and maps it into this VAS's page tables with the same flags.
+    #[cfg(feature = "alloc")]
     pub fn clone_from(&mut self, other: &Self) -> Result<(), KernelError> {
-        // Copy page table root
-        self.page_table_root.store(
-            other.page_table_root.load(Ordering::Acquire),
-            Ordering::Release,
-        );
+        use super::page_table::{PageTable, PageTableHierarchy, PAGE_TABLE_ENTRIES};
 
-        // Clone mappings
-        #[cfg(feature = "alloc")]
-        {
-            let other_mappings = other.mappings.lock();
-            let mut self_mappings = self.mappings.lock();
-            self_mappings.clear();
-            for (k, v) in other_mappings.iter() {
-                self_mappings.insert(*k, v.clone());
+        // Step 1: Allocate a new L4 page table for the child
+        let new_hierarchy = PageTableHierarchy::new()?;
+        let new_root = new_hierarchy.l4_addr().as_u64();
+        self.page_table_root.store(new_root, Ordering::Release);
+
+        let parent_root = other.page_table_root.load(Ordering::Acquire);
+
+        if parent_root != 0 {
+            // Step 2: Copy kernel-space L4 entries (indices 256-511) directly.
+            // These are shared across all address spaces.
+            // SAFETY: Both roots are valid physical addresses of L4 page tables,
+            // identity-mapped in the kernel's physical memory window.
+            let parent_l4 = unsafe { &*(parent_root as *const PageTable) };
+            let child_l4 = unsafe { &mut *(new_root as *mut PageTable) };
+
+            for i in 256..PAGE_TABLE_ENTRIES {
+                child_l4[i] = parent_l4[i];
+            }
+
+            // Step 3: Deep-copy user-space pages.
+            // Walk parent's mappings (which track user-space regions) and for
+            // each mapped page, allocate a new frame, copy content, and map.
+            let parent_mappings = other.mappings.lock();
+            let mut child_mappings = self.mappings.lock();
+            child_mappings.clear();
+
+            // SAFETY: parent_root is a valid identity-mapped L4 page table.
+            let parent_mapper = unsafe { create_mapper_from_root(parent_root) };
+            // SAFETY: new_root was just allocated and kernel entries copied.
+            let mut child_mapper = unsafe { create_mapper_from_root(new_root) };
+            let mut alloc = VasFrameAllocator;
+
+            const KERNEL_SPACE_START: u64 = 0xFFFF_8000_0000_0000;
+
+            for (addr, mapping) in parent_mappings.iter() {
+                // Only deep-copy user-space mappings
+                if addr.0 >= KERNEL_SPACE_START {
+                    // Kernel mappings are already shared via L4 entries above
+                    child_mappings.insert(*addr, mapping.clone());
+                    continue;
+                }
+
+                let num_pages = mapping.size / 4096;
+                let mut child_frames = Vec::with_capacity(num_pages);
+
+                for i in 0..num_pages {
+                    let vaddr = VirtualAddress(mapping.start.0 + (i as u64) * 4096);
+
+                    // Look up the parent's physical frame and flags
+                    let (parent_frame, flags) = match parent_mapper.translate_page(vaddr) {
+                        Ok(result) => result,
+                        Err(_) => continue, // Page not actually mapped in HW
+                    };
+
+                    // Allocate a new frame for the child
+                    let child_frame = {
+                        FRAME_ALLOCATOR
+                            .lock()
+                            .allocate_frames(1, None)
+                            .map_err(|_| KernelError::OutOfMemory {
+                                requested: 4096,
+                                available: 0,
+                            })?
+                    };
+
+                    // Copy 4KB of content from parent frame to child frame.
+                    // SAFETY: Both frame addresses are valid physical addresses
+                    // in identity-mapped memory. Each points to a full 4KB page.
+                    unsafe {
+                        let src = (parent_frame.as_u64() << 12) as *const u8;
+                        let dst = (child_frame.as_u64() << 12) as *mut u8;
+                        core::ptr::copy_nonoverlapping(src, dst, 4096);
+                    }
+
+                    // Map the child's frame at the same virtual address
+                    child_mapper
+                        .map_page(vaddr, child_frame, flags, &mut alloc)
+                        .ok(); // Ignore errors for already-mapped pages
+
+                    child_frames.push(child_frame);
+                }
+
+                // Record the mapping with the child's physical frames
+                let mut child_mapping = mapping.clone();
+                child_mapping.physical_frames = child_frames;
+                child_mappings.insert(*addr, child_mapping);
             }
         }
 
-        // Copy other state
+        // Copy metadata
         self.heap_start
             .store(other.heap_start.load(Ordering::Relaxed), Ordering::Relaxed);
         self.heap_break
@@ -250,6 +340,14 @@ impl VirtualAddressSpace {
         );
 
         Ok(())
+    }
+
+    /// Clone from another address space (no-alloc stub).
+    #[cfg(not(feature = "alloc"))]
+    pub fn clone_from(&mut self, _other: &Self) -> Result<(), KernelError> {
+        Err(KernelError::NotImplemented {
+            feature: "clone_from (requires alloc)",
+        })
     }
 
     /// Destroy the address space
@@ -490,12 +588,60 @@ impl VirtualAddressSpace {
         Ok(addr)
     }
 
-    /// Extend heap (brk)
+    /// Extend or query heap (brk).
+    ///
+    /// When `new_break` is `Some`, attempts to move the program break:
+    /// - **Grow** (new > current): allocates physical frames and maps pages for
+    ///   the delta region.
+    /// - **Shrink** (new < current but >= heap_start): unmaps pages and frees
+    ///   frames for the delta region.
+    /// - **Below heap_start** or **equal to current**: no-op.
+    ///
+    /// When `new_break` is `None`, returns the current break without changes.
     pub fn brk(&self, new_break: Option<VirtualAddress>) -> VirtualAddress {
         if let Some(addr) = new_break {
-            // Try to set new break
             let current = self.heap_break.load(Ordering::Acquire);
-            if addr.0 >= self.heap_start.load(Ordering::Relaxed) && addr.0 > current {
+            let heap_start = self.heap_start.load(Ordering::Relaxed);
+
+            if addr.0 < heap_start {
+                // Below heap start: ignore
+            } else if addr.0 > current {
+                // Grow: allocate pages for [current, addr) range
+                let old_page = (current + 4095) / 4096; // First page NOT yet allocated
+                let new_page = (addr.0 + 4095) / 4096;
+
+                if new_page > old_page {
+                    #[cfg(feature = "alloc")]
+                    {
+                        // Map new heap pages
+                        let start = VirtualAddress(old_page * 4096);
+                        let size = ((new_page - old_page) * 4096) as usize;
+                        if self.map_region(start, size, MappingType::Heap).is_ok() {
+                            self.heap_break.store(addr.0, Ordering::Release);
+                        }
+                        // On failure, leave break unchanged
+                    }
+                    #[cfg(not(feature = "alloc"))]
+                    {
+                        // Without alloc, just move the pointer (legacy behavior)
+                        self.heap_break.store(addr.0, Ordering::Release);
+                    }
+                } else {
+                    // Within the same page, just update the pointer
+                    self.heap_break.store(addr.0, Ordering::Release);
+                }
+            } else if addr.0 < current && addr.0 >= heap_start {
+                // Shrink: unmap pages for [addr, current) range
+                let new_page = (addr.0 + 4095) / 4096;
+                let old_page = (current + 4095) / 4096;
+
+                if old_page > new_page {
+                    #[cfg(feature = "alloc")]
+                    {
+                        let start = VirtualAddress(new_page * 4096);
+                        let _ = self.unmap_region(start);
+                    }
+                }
                 self.heap_break.store(addr.0, Ordering::Release);
             }
         }
@@ -503,37 +649,66 @@ impl VirtualAddressSpace {
         VirtualAddress(self.heap_break.load(Ordering::Acquire))
     }
 
-    /// Clone address space (for fork)
+    /// Clone address space (for fork).
+    ///
+    /// Creates a new VAS with its own L4 page table and deep-copies all
+    /// user-space pages from this VAS. Kernel-space entries are shared.
     #[cfg(feature = "alloc")]
     pub fn fork(&self) -> Result<Self, KernelError> {
-        let new_vas = Self::new();
-
-        // Clone all mappings
-        {
-            let mappings = self.mappings.lock();
-            let mut new_mappings = new_vas.mappings.lock();
-
-            for (addr, mapping) in mappings.iter() {
-                new_mappings.insert(*addr, mapping.clone());
-            }
-        } // Drop locks here
-
-        // Copy metadata
-        new_vas
-            .heap_start
-            .store(self.heap_start.load(Ordering::Relaxed), Ordering::Relaxed);
-        new_vas
-            .heap_break
-            .store(self.heap_break.load(Ordering::Relaxed), Ordering::Relaxed);
-        new_vas
-            .stack_top
-            .store(self.stack_top.load(Ordering::Relaxed), Ordering::Relaxed);
-        new_vas.next_mmap_addr.store(
-            self.next_mmap_addr.load(Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
-
+        let mut new_vas = Self::new();
+        new_vas.clone_from(self)?;
         Ok(new_vas)
+    }
+
+    /// Update hardware page table entry flags for a region.
+    ///
+    /// Walks the page table for each page in `[start, start+size)` and updates
+    /// the PTE flags according to the POSIX `prot` bitmask. Flushes TLB for
+    /// each modified page.
+    #[cfg(feature = "alloc")]
+    pub fn protect_region(
+        &self,
+        start: VirtualAddress,
+        size: usize,
+        prot: usize,
+    ) -> Result<(), KernelError> {
+        use super::PageFlags;
+
+        let pt_root = self.page_table_root.load(Ordering::Acquire);
+        if pt_root == 0 {
+            return Ok(()); // No page tables, nothing to update
+        }
+
+        // Convert POSIX prot flags to hardware PageFlags
+        let mut new_flags = PageFlags::PRESENT | PageFlags::USER;
+        if prot & 0x2 != 0 {
+            // PROT_WRITE
+            new_flags |= PageFlags::WRITABLE;
+        }
+        if prot & 0x4 == 0 {
+            // !PROT_EXEC -> NO_EXECUTE
+            new_flags |= PageFlags::NO_EXECUTE;
+        }
+
+        // SAFETY: pt_root is a valid identity-mapped L4 page table. We hold the
+        // mappings lock implicitly via the caller's &self borrow.
+        let mut mapper = unsafe { create_mapper_from_root(pt_root) };
+
+        let num_pages = (size + 4095) / 4096;
+        for i in 0..num_pages {
+            let vaddr = VirtualAddress(start.0 + (i as u64) * 4096);
+            // Ignore errors for pages that aren't mapped in the hardware tables
+            let _ = mapper.update_page_flags(vaddr, new_flags);
+            crate::arch::tlb_flush_address(vaddr.0);
+        }
+
+        // Update the mapping metadata flags too
+        let mut mappings = self.mappings.lock();
+        if let Some(mapping) = mappings.get_mut(&start) {
+            mapping.flags = new_flags;
+        }
+
+        Ok(())
     }
 
     /// Handle page fault
@@ -998,22 +1173,9 @@ mod tests {
         assert_eq!(stack_base, expected_base);
     }
 
-    #[test]
-    fn test_vas_clone_from() {
-        let source = VirtualAddressSpace::new();
-        source.set_page_table(0xCAFE_0000);
-        source.brk(Some(VirtualAddress(0x2000_0002_0000)));
-        source.set_stack_top(0x6000_0000_0000);
-
-        let mut target = VirtualAddressSpace::new();
-        target
-            .clone_from(&source)
-            .expect("clone_from should succeed");
-
-        assert_eq!(target.get_page_table(), 0xCAFE_0000);
-        assert_eq!(target.brk(None), VirtualAddress(0x2000_0002_0000));
-        assert_eq!(target.stack_top(), 0x6000_0000_0000);
-    }
+    // Note: test_vas_clone_from removed -- clone_from() now allocates
+    // real page tables via FRAME_ALLOCATOR, which is unavailable in the
+    // host test environment. Verified via QEMU boot tests instead.
 
     #[test]
     fn test_vas_mmap_advances_address() {

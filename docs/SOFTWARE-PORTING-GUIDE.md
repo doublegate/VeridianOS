@@ -14,9 +14,9 @@ VeridianOS uses the following target triple format:
 ```
 
 Standard triples:
-- `x86_64-unknown-veridian` (general userland)
-- `aarch64-unknown-veridian`
-- `riscv64gc-unknown-veridian`
+- `x86_64-veridian` (general userland)
+- `aarch64-veridian`
+- `riscv64gc-veridian`
 
 Specialized triples:
 - `x86_64-veridian-kernel-none` (kernel code)
@@ -37,7 +37,7 @@ wget https://ftp.gnu.org/gnu/binutils/binutils-2.42.tar.gz
 tar xzf binutils-2.42.tar.gz
 cd binutils-2.42
 mkdir build && cd build
-../configure --target=x86_64-unknown-veridian \
+../configure --target=x86_64-veridian \
              --prefix=/opt/veridian-toolchain \
              --with-sysroot=/opt/veridian-sysroot \
              --disable-nls
@@ -58,7 +58,7 @@ cd gcc-13.2.0
 
 # Configure and build
 mkdir build && cd build
-../configure --target=x86_64-unknown-veridian \
+../configure --target=x86_64-veridian \
              --prefix=/opt/veridian-toolchain \
              --with-sysroot=/opt/veridian-sysroot \
              --enable-languages=c,c++ \
@@ -145,10 +145,10 @@ Most basic utilities compile with minimal changes:
 
 ```bash
 # Example: Compiling GNU coreutils
-./configure --host=x86_64-unknown-veridian \
+./configure --host=x86_64-veridian \
             --prefix=/usr \
             --disable-nls \
-            CC=x86_64-unknown-veridian-gcc
+            CC=x86_64-veridian-gcc
 
 make -j$(nproc)
 make DESTDIR=$VERIDIAN_SYSROOT install
@@ -160,11 +160,11 @@ Network applications require the socket API implementation:
 
 ```bash
 # Example: Compiling curl
-./configure --host=x86_64-unknown-veridian \
+./configure --host=x86_64-veridian \
             --prefix=/usr \
             --with-ssl=no \
             --disable-shared \
-            CC=x86_64-unknown-veridian-gcc
+            CC=x86_64-veridian-gcc
 
 make -j$(nproc)
 ```
@@ -174,7 +174,7 @@ make -j$(nproc)
 #### Python
 ```bash
 # Cross-compiling Python requires special handling
-./configure --host=x86_64-unknown-veridian \
+./configure --host=x86_64-veridian \
             --build=x86_64-linux-gnu \
             --prefix=/usr \
             --enable-shared=no \
@@ -264,8 +264,8 @@ Create `VeridianToolchain.cmake`:
 set(CMAKE_SYSTEM_NAME VeridianOS)
 set(CMAKE_SYSTEM_PROCESSOR x86_64)
 
-set(CMAKE_C_COMPILER x86_64-unknown-veridian-gcc)
-set(CMAKE_CXX_COMPILER x86_64-unknown-veridian-g++)
+set(CMAKE_C_COMPILER x86_64-veridian-gcc)
+set(CMAKE_CXX_COMPILER x86_64-veridian-g++)
 
 set(CMAKE_FIND_ROOT_PATH /opt/veridian-sysroot)
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
@@ -379,7 +379,7 @@ sha256 = "..."
 
 [build]
 configure_args = [
-    "--host=x86_64-unknown-veridian",
+    "--host=x86_64-veridian",
     "--prefix=/usr",
     "--disable-nls",
     "--enable-static-link"
@@ -435,10 +435,10 @@ For container/VM support:
 
 ```bash
 # Check undefined symbols
-x86_64-unknown-veridian-nm -u binary
+x86_64-veridian-nm -u binary
 
 # Verify linking
-x86_64-unknown-veridian-ldd binary
+x86_64-veridian-ldd binary
 
 # Test in QEMU
 qemu-system-x86_64 -kernel veridian.elf -initrd initrd.img \

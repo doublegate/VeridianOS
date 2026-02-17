@@ -127,6 +127,16 @@ pub struct Process {
     /// Group ID (for future use)
     pub gid: u32,
 
+    /// Process group ID (initialized to pid)
+    pub pgid: AtomicU64,
+
+    /// Session ID (initialized to pid)
+    pub sid: AtomicU64,
+
+    /// Environment variables (populated during exec, inherited on fork)
+    #[cfg(feature = "alloc")]
+    pub env_vars: Mutex<alloc::collections::BTreeMap<String, String>>,
+
     /// Signal handlers (signal number -> handler action)
     /// 0 = default, 1 = ignore, other values = handler address
     pub signal_handlers: Mutex<[u64; 32]>,
@@ -176,6 +186,9 @@ impl Process {
             created_at: crate::arch::timer::get_ticks(),
             uid: 0,
             gid: 0,
+            pgid: AtomicU64::new(pid.0),
+            sid: AtomicU64::new(pid.0),
+            env_vars: Mutex::new(BTreeMap::new()),
             signal_handlers: Mutex::new([0u64; 32]),
             pending_signals: AtomicU64::new(0),
             signal_mask: AtomicU64::new(0),

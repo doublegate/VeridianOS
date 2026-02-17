@@ -8,7 +8,7 @@ use core::slice;
 use super::{validate_user_buffer, validate_user_string_ptr, SyscallError, SyscallResult};
 use crate::process::{
     create_thread, current_process, exec_process, exit_thread, fork_process, get_thread_tid,
-    set_thread_affinity, wait_for_child, ProcessId, ProcessPriority, ThreadId,
+    set_thread_affinity, ProcessId, ProcessPriority, ThreadId,
 };
 
 /// Fork the current process
@@ -131,9 +131,9 @@ pub fn sys_exit(exit_code: usize) -> SyscallResult {
 /// # Arguments
 /// - pid: PID of child to wait for (-1 for any child)
 /// - status_ptr: Pointer to store exit status
-/// - options: Wait options (WNOHANG, etc.)
-pub fn sys_wait(pid: isize, status_ptr: usize, _options: usize) -> SyscallResult {
-    use crate::syscall::userspace::copy_to_user;
+/// - options: Wait options bitmask (WNOHANG=1, WUNTRACED=2, WCONTINUED=8)
+pub fn sys_wait(pid: isize, status_ptr: usize, options: usize) -> SyscallResult {
+    use crate::{process::exit::WaitOptions, syscall::userspace::copy_to_user};
 
     let wait_pid = if pid == -1 {
         None
@@ -143,7 +143,18 @@ pub fn sys_wait(pid: isize, status_ptr: usize, _options: usize) -> SyscallResult
         return Err(SyscallError::InvalidArgument);
     };
 
-    match wait_for_child(wait_pid) {
+    // Parse options bitmask into WaitOptions struct
+    const WNOHANG: usize = 1;
+    const WUNTRACED: usize = 2;
+    const WCONTINUED: usize = 8;
+
+    let wait_options = WaitOptions {
+        no_hang: (options & WNOHANG) != 0,
+        untraced: (options & WUNTRACED) != 0,
+        continued: (options & WCONTINUED) != 0,
+    };
+
+    match crate::process::exit::wait_process_with_options(wait_pid, wait_options) {
         Ok((child_pid, exit_status)) => {
             // Write exit status to user space if pointer provided
             if status_ptr != 0 {
@@ -465,6 +476,201 @@ pub fn sys_setpriority(which: usize, who: usize, priority: usize) -> SyscallResu
         Ok(0)
     } else {
         Err(SyscallError::ResourceNotFound)
+    }
+}
+
+// ============================================================================
+// Identity syscalls (170-175)
+// ============================================================================
+
+/// Get real user ID (SYS_GETUID = 170)
+pub fn sys_getuid() -> SyscallResult {
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    Ok(proc.uid as usize)
+}
+
+/// Get effective user ID (SYS_GETEUID = 171)
+///
+/// VeridianOS does not yet distinguish real/effective UIDs, so this returns
+/// the same value as getuid.
+pub fn sys_geteuid() -> SyscallResult {
+    sys_getuid()
+}
+
+/// Get real group ID (SYS_GETGID = 172)
+pub fn sys_getgid() -> SyscallResult {
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    Ok(proc.gid as usize)
+}
+
+/// Get effective group ID (SYS_GETEGID = 173)
+pub fn sys_getegid() -> SyscallResult {
+    sys_getgid()
+}
+
+/// Set user ID (SYS_SETUID = 174)
+///
+/// Only uid 0 (root) can change to a different UID. Non-root processes
+/// may only "set" their uid to the current value (a no-op).
+pub fn sys_setuid(uid: usize) -> SyscallResult {
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    let current_uid = proc.uid;
+    let new_uid = uid as u32;
+
+    // Non-root can only set uid to current value (no-op)
+    if current_uid != 0 && new_uid != current_uid {
+        return Err(SyscallError::PermissionDenied);
+    }
+
+    // If already the requested uid, nothing to do
+    if new_uid == current_uid {
+        return Ok(0);
+    }
+
+    // Root changing uid: get mutable reference via process table
+    let pid = proc.pid;
+    if let Some(proc_mut) = crate::process::table::get_process_mut(pid) {
+        proc_mut.uid = new_uid;
+        Ok(0)
+    } else {
+        Err(SyscallError::InvalidState)
+    }
+}
+
+/// Set group ID (SYS_SETGID = 175)
+///
+/// Only uid 0 (root) can change to a different GID. Non-root processes
+/// may only "set" their gid to the current value (a no-op).
+pub fn sys_setgid(gid: usize) -> SyscallResult {
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    let current_uid = proc.uid;
+    let current_gid = proc.gid;
+    let new_gid = gid as u32;
+
+    // Non-root can only set gid to current value (no-op)
+    if current_uid != 0 && new_gid != current_gid {
+        return Err(SyscallError::PermissionDenied);
+    }
+
+    // If already the requested gid, nothing to do
+    if new_gid == current_gid {
+        return Ok(0);
+    }
+
+    // Root changing gid: get mutable reference via process table
+    let pid = proc.pid;
+    if let Some(proc_mut) = crate::process::table::get_process_mut(pid) {
+        proc_mut.gid = new_gid;
+        Ok(0)
+    } else {
+        Err(SyscallError::InvalidState)
+    }
+}
+
+// ============================================================================
+// Process group / session syscalls (176-180)
+// ============================================================================
+
+/// Set process group ID (SYS_SETPGID = 176)
+///
+/// # Arguments
+/// - `pid`: Target process (0 = calling process)
+/// - `pgid`: New process group (0 = use pid as pgid)
+pub fn sys_setpgid(pid: usize, pgid: usize) -> SyscallResult {
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+
+    let target_pid = if pid == 0 {
+        proc.pid
+    } else {
+        ProcessId(pid as u64)
+    };
+    let new_pgid = if pgid == 0 { target_pid.0 } else { pgid as u64 };
+
+    // Can only set pgid for self or children
+    if target_pid != proc.pid {
+        // Check if target is a child
+        #[cfg(feature = "alloc")]
+        {
+            let children = proc.children.lock();
+            if !children.contains(&target_pid) {
+                return Err(SyscallError::PermissionDenied);
+            }
+        }
+    }
+
+    // Apply to the target process
+    if let Some(target) = crate::process::table::get_process(target_pid) {
+        target
+            .pgid
+            .store(new_pgid, core::sync::atomic::Ordering::Release);
+        Ok(0)
+    } else {
+        Err(SyscallError::ProcessNotFound)
+    }
+}
+
+/// Get process group ID (SYS_GETPGID = 177)
+///
+/// # Arguments
+/// - `pid`: Target process (0 = calling process)
+pub fn sys_getpgid(pid: usize) -> SyscallResult {
+    let target_pid = if pid == 0 {
+        let proc = current_process().ok_or(SyscallError::InvalidState)?;
+        proc.pid
+    } else {
+        ProcessId(pid as u64)
+    };
+
+    if let Some(target) = crate::process::table::get_process(target_pid) {
+        Ok(target.pgid.load(core::sync::atomic::Ordering::Acquire) as usize)
+    } else {
+        Err(SyscallError::ProcessNotFound)
+    }
+}
+
+/// Get process group ID of calling process (SYS_GETPGRP = 178)
+pub fn sys_getpgrp() -> SyscallResult {
+    sys_getpgid(0)
+}
+
+/// Create a new session (SYS_SETSID = 179)
+///
+/// Makes the calling process the session leader and process group leader
+/// of a new session. The process must not already be a process group leader.
+pub fn sys_setsid() -> SyscallResult {
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+
+    // Process must not already be a process group leader
+    let current_pgid = proc.pgid.load(core::sync::atomic::Ordering::Acquire);
+    if current_pgid == proc.pid.0 {
+        return Err(SyscallError::PermissionDenied);
+    }
+
+    // Set both pgid and sid to our pid (new session + group leader)
+    proc.pgid
+        .store(proc.pid.0, core::sync::atomic::Ordering::Release);
+    proc.sid
+        .store(proc.pid.0, core::sync::atomic::Ordering::Release);
+
+    Ok(proc.pid.0 as usize)
+}
+
+/// Get session ID (SYS_GETSID = 180)
+///
+/// # Arguments
+/// - `pid`: Target process (0 = calling process)
+pub fn sys_getsid(pid: usize) -> SyscallResult {
+    let target_pid = if pid == 0 {
+        let proc = current_process().ok_or(SyscallError::InvalidState)?;
+        proc.pid
+    } else {
+        ProcessId(pid as u64)
+    };
+
+    if let Some(target) = crate::process::table::get_process(target_pid) {
+        Ok(target.sid.load(core::sync::atomic::Ordering::Acquire) as usize)
+    } else {
+        Err(SyscallError::ProcessNotFound)
     }
 }
 

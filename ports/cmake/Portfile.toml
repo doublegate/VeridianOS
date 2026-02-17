@@ -1,0 +1,29 @@
+# Portfile.toml -- CMake for VeridianOS
+#
+# CMake is a cross-platform build system generator. It uses its own
+# bootstrap script rather than autotools or a pre-existing CMake
+# installation, making it straightforward to build from scratch.
+
+[port]
+name = "cmake"
+version = "3.30.2"
+description = "Cross-platform build system generator"
+homepage = "https://cmake.org/"
+license = "BSD-3-Clause"
+category = "devel"
+build_type = "custom"
+
+[sources]
+urls = ["https://github.com/Kitware/CMake/releases/download/v3.30.2/cmake-3.30.2.tar.gz"]
+checksums = ["46074c781eccebc433e98f0bbfa265ca3fd4381f245ca3b140e7711531d60db2"]
+
+[dependencies]
+build = ["make"]
+runtime = []
+
+[build]
+steps = [
+    "./bootstrap --prefix=/usr --parallel=$(nproc) --no-qt-gui --system-curl=OFF --system-zlib=OFF -- -DCMAKE_USE_OPENSSL=OFF",
+    "make -j$(nproc)",
+    "make install DESTDIR=$PKG_DIR"
+]

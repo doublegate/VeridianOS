@@ -122,6 +122,10 @@ impl BuiltinCommand for CdCommand {
 
         match shell.set_cwd(target.clone()) {
             Ok(()) => {
+                // Synchronize VFS CWD so resolve_path() handles relative paths
+                if let Some(vfs_lock) = crate::fs::try_get_vfs() {
+                    let _ = vfs_lock.write().set_cwd(shell.get_cwd());
+                }
                 shell.set_env(String::from("PWD"), target);
                 CommandResult::Success(0)
             }

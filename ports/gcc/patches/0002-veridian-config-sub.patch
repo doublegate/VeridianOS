@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VeridianOS <veridian@veridian-os.org>
+Date: Mon, 17 Feb 2026 00:00:00 +0000
+Subject: [PATCH 2/2] Recognize veridian as a valid OS in GCC's config.sub
+
+GCC ships its own copy of config.sub (at the top level of the source
+tree).  This patch mirrors the change made to binutils' config.sub so
+that GCC's configure scripts can parse x86_64-veridian,
+aarch64-veridian, and riscv64-veridian target triples.
+
+The entry is added right after the long list of recognized OS names
+(ending with -mon960*, -lnews*) and before the -mac* rewrite rule.
+---
+ config.sub | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/config.sub b/config.sub
+index 38f3d037a78..c91e5327b01 100755
+--- a/config.sub
++++ b/config.sub
+@@ -1743,6 +1743,9 @@ case $os in
+ 	     | -sim | -xray | -os68k* | -none | -v88r* \
+ 	     | -windows* | -osx | -abug | -netware* | -os9* \
+ 	     | -macos* | -mpw* | -magic* | -mmixware* | -mon960* | -lnews*)
++		;;
++	-veridian*)
++		# VeridianOS -- capability-based microkernel
+ 		;;
+ 	-mac*)
+ 		os=`echo "$os" | sed -e 's|mac|macos|'`
+--
+2.47.1
+

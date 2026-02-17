@@ -1,0 +1,27 @@
+# Portfile.toml -- Meson for VeridianOS
+#
+# Meson is a fast, user-friendly build system that generates Ninja build
+# files. It is written in Python and installed via pip. Meson is required
+# by many modern C/C++ libraries (e.g., glib, systemd, Mesa).
+
+[port]
+name = "meson"
+version = "1.5.1"
+description = "Fast and user-friendly build system generator"
+homepage = "https://mesonbuild.com/"
+license = "Apache-2.0"
+category = "devel"
+build_type = "custom"
+
+[sources]
+urls = ["https://github.com/mesonbuild/meson/releases/download/1.5.1/meson-1.5.1.tar.gz"]
+checksums = ["567e533adf255de73a2de35049b99923caf872a455af9ce03e01077e0d384bed"]
+
+[dependencies]
+build = []
+runtime = []
+
+[build]
+steps = [
+    "python3 -m pip install --prefix=/usr --root=$PKG_DIR --no-deps --no-build-isolation ."
+]

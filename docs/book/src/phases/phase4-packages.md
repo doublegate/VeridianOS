@@ -156,7 +156,7 @@ Build for different architectures:
 vports setup-cross aarch64
 
 # Build for AArch64
-vports build --target=aarch64-unknown-veridian firefox
+vports build --target=aarch64-veridian firefox
 ```
 
 ## Repository Infrastructure
