@@ -191,6 +191,7 @@ impl Shell {
             let _prompt = self.expand_prompt();
             crate::print!("{}", _prompt);
             crate::graphics::fbcon::flush();
+            crate::graphics::fbcon::update_cursor();
 
             // Read command
             let command_line = self.read_line();
@@ -944,8 +945,15 @@ impl Shell {
                             // command and re-prompt.
                             return String::new();
                         }
-                        Some(line_editor::EditResult::Continue) | None => {
-                            crate::graphics::fbcon::flush();
+                        Some(line_editor::EditResult::Continue) => {
+                            let row = crate::graphics::fbcon::cursor_row();
+                            crate::graphics::fbcon::flush_row(row);
+                            crate::graphics::fbcon::update_cursor();
+                        }
+                        None => {
+                            // Incomplete escape sequence (e.g., first byte of
+                            // arrow key).
+                            // No visible change yet — skip MMIO update.
                         }
                     }
                 }

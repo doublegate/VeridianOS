@@ -1896,7 +1896,7 @@ impl BuiltinCommand for UnameCommand {
             parts.push("veridian");
         }
         if show_release {
-            parts.push("0.4.2");
+            parts.push("0.4.8");
         }
         if show_machine {
             #[cfg(target_arch = "x86_64")]
@@ -1927,7 +1927,7 @@ impl BuiltinCommand for FreeCommand {
 
         let total_kb = (stats.total_frames * page_size) / 1024;
         let free_kb = (stats.free_frames * page_size) / 1024;
-        let used_kb = total_kb - free_kb;
+        let used_kb = total_kb.saturating_sub(free_kb);
         let cached_kb = (stats.cached_frames * page_size) / 1024;
 
         crate::println!(

@@ -56,7 +56,8 @@ You MUST first build the UEFI disk image, then boot from it.
 ./build-kernel.sh x86_64 dev
 
 # Step 2: Run with OVMF firmware + disk image (serial only)
-qemu-system-x86_64 \
+# ALWAYS use -enable-kvm for hardware acceleration (TCG is ~100x slower).
+qemu-system-x86_64 -enable-kvm \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
     -drive id=disk0,if=none,format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
     -device ide-hd,drive=disk0 \
@@ -65,14 +66,14 @@ qemu-system-x86_64 \
 # With framebuffer display (1280x800 BGR via UEFI GOP):
 # Remove -display none to see graphical output. Dual output: serial + framebuffer.
 # PS/2 keyboard works via polling (port 0x64/0x60). Input from both serial and keyboard.
-qemu-system-x86_64 \
+qemu-system-x86_64 -enable-kvm \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
     -drive id=disk0,if=none,format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
     -device ide-hd,drive=disk0 \
     -serial stdio -m 256M
 
 # With debug exit device (for test scripts):
-qemu-system-x86_64 \
+qemu-system-x86_64 -enable-kvm \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
     -drive id=disk0,if=none,format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
     -device ide-hd,drive=disk0 \
@@ -80,7 +81,7 @@ qemu-system-x86_64 \
     -serial stdio -display none -m 256M
 
 # With GDB debugging (paused, connect on :1234):
-qemu-system-x86_64 \
+qemu-system-x86_64 -enable-kvm \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
     -drive id=disk0,if=none,format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
     -device ide-hd,drive=disk0 \
@@ -90,7 +91,7 @@ qemu-system-x86_64 \
 **⚠️ COMMON MISTAKES (QEMU 10.2 — ALL ARCHITECTURES):**
 - **DO NOT** use `timeout` command to wrap QEMU — causes "drive with bus=0, unit=0 (index=0) exists" on ALL architectures. Instead, run QEMU in background with `</dev/null > logfile 2>&1 &`, sleep, then `kill $PID`. Example:
   ```bash
-  qemu-system-x86_64 ... </dev/null > /tmp/VeridianOS/boot.log 2>&1 &
+  qemu-system-x86_64 -enable-kvm ... </dev/null > /tmp/VeridianOS/boot.log 2>&1 &
   QEMU_PID=$!
   sleep 30
   kill $QEMU_PID 2>/dev/null
@@ -104,12 +105,14 @@ qemu-system-x86_64 \
 - **DO NOT** use `-cdrom` alongside `-drive` on the same bus/index
 - **DO NOT** use `cargo run` for x86_64 — the runner in .cargo/config.toml is `bootimage runner` which is not the correct flow
 - **ALWAYS** `pkill -9 -f qemu-system` and `sleep 3` before re-running QEMU if a previous instance may still hold a disk lock
+- **ALWAYS** use `-enable-kvm` for x86_64 — without KVM, QEMU uses TCG (software emulation) which is ~100x slower. Framebuffer MMIO writes take ~5s per full blit under TCG vs instant with KVM. Debug builds are unusable without KVM.
 
 **Keyboard input**: PS/2 keyboard works via polling (ports 0x64/0x60). The APIC takes over from the PIC so IRQ-based keyboard does not work, but polling does. Input is accepted from both the QEMU graphical window (keyboard) and the serial terminal simultaneously.
 
 #### AArch64 (direct kernel boot)
 
 AArch64 boots directly with `-kernel` flag. No disk image or firmware needed.
+Note: `-enable-kvm` is only available for the host architecture (x86_64). AArch64/RISC-V use TCG on x86_64 hosts.
 
 ```bash
 # Step 1: Build
@@ -134,6 +137,7 @@ qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \
 #### RISC-V 64 (direct kernel boot with OpenSBI)
 
 RISC-V boots with OpenSBI firmware (provided by QEMU) + kernel.
+Note: `-enable-kvm` is only available for the host architecture (x86_64). AArch64/RISC-V use TCG on x86_64 hosts.
 
 ```bash
 # Step 1: Build
@@ -167,11 +171,11 @@ With graphical display enabled, output appears on both the serial terminal and t
 
 #### Quick Reference Table
 
-| Arch | Boot Method | Firmware | Kernel Flag | Image | Display |
-|------|------------|----------|-------------|-------|---------|
-| x86_64 | UEFI disk | OVMF.4m.fd via `-drive if=pflash` | N/A (use `-drive id=disk0,if=none,...` + `-device ide-hd,drive=disk0`) | `target/x86_64-veridian/debug/veridian-uefi.img` | UEFI GOP framebuffer (1280x800 BGR); remove `-display none` |
-| AArch64 | Direct | None | `-kernel` | `target/aarch64-unknown-none/debug/veridian-kernel` | Add `-device ramfb` for graphical display |
-| RISC-V | OpenSBI | `-bios default` | `-kernel` | `target/riscv64gc-unknown-none-elf/debug/veridian-kernel` | Add `-device ramfb` for graphical display |
+| Arch | Boot Method | Firmware | Kernel Flag | Image | Display | KVM |
+|------|------------|----------|-------------|-------|---------|-----|
+| x86_64 | UEFI disk | OVMF.4m.fd via `-drive if=pflash` | N/A (use `-drive id=disk0,if=none,...` + `-device ide-hd,drive=disk0`) | `target/x86_64-veridian/debug/veridian-uefi.img` | UEFI GOP framebuffer (1280x800 BGR); remove `-display none` | `-enable-kvm` (REQUIRED) |
+| AArch64 | Direct | None | `-kernel` | `target/aarch64-unknown-none/debug/veridian-kernel` | Add `-device ramfb` for graphical display | N/A (TCG on x86 host) |
+| RISC-V | OpenSBI | `-bios default` | `-kernel` | `target/riscv64gc-unknown-none-elf/debug/veridian-kernel` | Add `-device ramfb` for graphical display | N/A (TCG on x86 host) |
 
 ### Testing
 
@@ -298,7 +302,7 @@ Currently implementing in phases:
 | Area | Status |
 |------|--------|
 | **Repository** | <https://github.com/doublegate/VeridianOS> |
-| **Latest Release** | v0.4.7 (February 16, 2026) - Fbcon glyph cache, pixel ring buffer, write-combining (PAT) |
+| **Latest Release** | v0.4.8 (February 16, 2026) - Fbcon scroll fix, KVM acceleration, version consistency |
 | **Build** | ✅ All 3 architectures compile, zero warnings |
 | **Boot** | ✅ All 3 architectures Stage 6 BOOTOK, 29/29 tests (fbcon + keyboard driver) |
 | **CI/CD** | ✅ GitHub Actions 100% pass rate |

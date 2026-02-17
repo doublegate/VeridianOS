@@ -114,7 +114,27 @@ mod x86_64_impl {
                                 }
                             }
                         }
-                        DecodedKey::RawKey(_) => {}
+                        DecodedKey::RawKey(key) => {
+                            use pc_keyboard::KeyCode;
+                            let seq: &[u8] = match key {
+                                KeyCode::ArrowUp => b"\x1b[A",
+                                KeyCode::ArrowDown => b"\x1b[B",
+                                KeyCode::ArrowRight => b"\x1b[C",
+                                KeyCode::ArrowLeft => b"\x1b[D",
+                                KeyCode::Home => b"\x1b[H",
+                                KeyCode::End => b"\x1b[F",
+                                KeyCode::Delete => b"\x1b[3~",
+                                _ => b"",
+                            };
+                            // SAFETY: handle_scancode is the sole producer
+                            // (called from IRQ1 with interrupts disabled).
+                            #[allow(static_mut_refs)]
+                            unsafe {
+                                for &byte in seq {
+                                    KEY_BUFFER.push(byte);
+                                }
+                            }
+                        }
                     }
                 }
             }

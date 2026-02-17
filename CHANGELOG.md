@@ -1,3 +1,62 @@
+## [0.4.8] - 2026-02-16
+
+### Fbcon Scroll Fix, KVM Acceleration, Version Consistency
+
+Fixes the framebuffer console scroll rendering bug (stale screen after scroll), separates incomplete escape sequence handling to eliminate unnecessary MMIO, fixes the `free` command overflow panic, adds FBCON diagnostic output, mandates KVM acceleration for x86_64 QEMU, and synchronizes all version strings to v0.4.8.
+
+7 files changed, +291/-134 lines.
+
+---
+
+### Fixed
+
+#### Scroll Rendering Bug (`kernel/src/graphics/fbcon.rs`)
+
+- **Root cause**: `scroll_up()` marked only the bottom row dirty after memmove, leaving 49 rows of stale MMIO content. Screen appeared frozen after any command that scrolled.
+- **Fix**: Restored `self.dirty_all = true` in `scroll_up()`. Safe because per-keystroke input now uses `flush_row()` (ignores dirty_all), and `flush()` with dirty_all runs only at command boundaries.
+- Updated doc comments to reflect corrected dirty tracking behavior.
+
+#### `free` Command Panic (`kernel/src/services/shell/commands.rs`)
+
+- **Root cause**: `total_kb - free_kb` panicked on underflow when frame counts were inconsistent.
+- **Fix**: Changed to `total_kb.saturating_sub(free_kb)`.
+
+#### Unnecessary MMIO on Incomplete Escape Sequences (`kernel/src/services/shell/mod.rs`)
+
+- Separated `None` from `EditResult::Continue` in the input match arm.
+- Arrow keys generate 3-byte ANSI sequences; first 2 bytes returned `None` (incomplete). Previously triggered 2 unnecessary `flush_row()` + `update_cursor()` calls (~160KB MMIO) per arrow key press for zero visible change.
+
+### Added
+
+#### FBCON Diagnostic (`kernel/src/graphics/fbcon.rs`)
+
+- `init()` now prints `[FBCON] WxH stride=S bpp=B back_buf=OK|FAILED glyph_cache=OK|FAILED` to serial.
+- Confirms back-buffer and glyph cache allocation status at boot time.
+
+### Changed
+
+#### KVM Acceleration Required for x86_64 (`CLAUDE.md`)
+
+- All x86_64 QEMU commands now include `-enable-kvm`.
+- Without KVM, QEMU uses TCG (software CPU emulation) which is ~100x slower -- framebuffer MMIO blits take ~5s per full screen under TCG vs instant with KVM.
+- Debug builds are unusable without KVM acceleration.
+- Added KVM column to quick reference table.
+
+#### Version Strings Synchronized
+
+- `Cargo.toml`: 0.4.7 -> 0.4.8
+- `uname -r` (commands.rs): 0.4.2 -> 0.4.8
+- `/etc/os-release` (fs/mod.rs): 0.4.3 -> 0.4.8
+
+### Build Verification
+
+- x86_64: Stage 6 BOOTOK, 29/29 tests, zero warnings, `[FBCON] back_buf=OK glyph_cache=OK`
+- AArch64: Stage 6 BOOTOK, 29/29 tests, zero warnings
+- RISC-V: Stage 6 BOOTOK, 29/29 tests, zero warnings
+- Interactive shell verified with KVM: all commands (`help`, `ls`, `clear`, `cat`, `free`, arrow keys) respond instantly
+
+---
+
 ## [0.4.7] - 2026-02-16
 
 ### Fbcon: Glyph Cache, Pixel Ring Buffer, and Write-Combining (PAT)
