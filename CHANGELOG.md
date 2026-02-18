@@ -1,3 +1,201 @@
+## [0.4.9] - 2026-02-18
+
+### Self-Hosting Infrastructure, Complete libc, and User-Space Execution Fixes
+
+Major milestone release implementing the complete self-hosting roadmap (Tiers 0-5), fixing five critical kernel bugs, adding 30+ new syscalls, implementing a full C standard library, building cross-compilation toolchain infrastructure, establishing a virtio-blk driver with TAR rootfs support, and fixing both dev-build diagnostic noise and a release-build double fault in user-space execution.
+
+209 files changed, +24,573/-8,618 lines, 11 commits since v0.4.8.
+
+---
+
+### Added
+
+#### Self-Hosting Documentation (`docs/SELF-HOSTING-STATUS.md`, NEW, 197 lines)
+
+- Complete Tier 0-5 implementation plan for VeridianOS self-hosting capability
+- Tracks progress from current state to native GCC compilation on VeridianOS
+- Links each tier to specific kernel subsystems and libc requirements
+
+#### Cross-Compilation and Porting Documentation
+
+- `docs/CROSS-COMPILATION.md` (NEW, 320 lines): Step-by-step cross-compilation guide
+- `docs/PORTING-GUIDE.md` (NEW, 366 lines): Software porting guide for GCC, Make, autotools
+- `docs/SDK-REFERENCE.md` (NEW, 560 lines): Comprehensive SDK reference with syscall wrappers
+- `docs/TESTING-E2E.md` (NEW, 279 lines): End-to-end testing framework documentation
+
+#### Virtio-blk Driver (`kernel/src/drivers/virtio/`, NEW, 1,340 lines)
+
+- Full virtio-blk PCI driver implementation (`blk.rs` 704 lines, `queue.rs` 387 lines, `mod.rs` 249 lines)
+- Synchronous block I/O with 128-entry virtqueue descriptor rings
+- DMA buffer management for disk operations
+- QEMU integration: attach `rootfs.tar` via virtio-blk for loading user-space binaries at boot
+
+#### TAR Filesystem Loader (`kernel/src/fs/tar.rs`, NEW, 392 lines)
+
+- Reads POSIX ustar TAR archives from virtio-blk device into RamFS at boot
+- Recursive directory creation with metadata preservation (mode, uid, gid, timestamps)
+- Enables loading cross-compiled C binaries from disk image without embedding in kernel
+
+#### Complete C Standard Library (`userland/libc/`, 11 source files, 25+ headers)
+
+Source files (5,869 lines total):
+- `stdio.c` (1,162 lines): Full file I/O; rewrote fwrite() to write full buffers (21 syscalls -> 1)
+- `stdlib.c` (606 lines): malloc/free, atoi, strtol, qsort, bsearch, system(), mkstemp()
+- `string.c` (511 lines): All standard string operations
+- `syscall.c` (543 lines): Syscall wrappers for 50+ system calls
+- `unistd.c` (264 lines): POSIX functions (read, write, fork, exec, pipe, dup, etc.)
+- `time.c` (206 lines): time, gettimeofday, clock_gettime, sleep, nanosleep
+- `getopt.c` (224 lines): getopt and getopt_long command-line parsing
+- `dirent.c` (146 lines): opendir, readdir, closedir
+- `select.c` (117 lines): I/O multiplexing
+- `setjmp_*.S` (266 lines): Architecture-specific setjmp/longjmp for x86_64, AArch64, RISC-V
+- Plus: `signal.c`, `termios.c`, `locale.c`, `mman.c`, `resource.c`, `ctype.c`, `errno.c`
+
+Headers (3,384 lines): Full standard and POSIX header set including stdio.h, stdlib.h,
+string.h, unistd.h, fcntl.h, signal.h, time.h, errno.h, termios.h, sys/types.h,
+sys/stat.h, sys/wait.h, sys/mman.h, sys/select.h, and more.
+
+#### Math Library (`userland/libm/`, NEW, 670 lines)
+
+- Pure-software implementations: sin, cos, sqrt, pow, log, exp, ceil, floor, fabs, fmod
+- No hardware FPU dependency; usable on all three target architectures
+
+#### Cross-Compiler Build Infrastructure
+
+Build scripts (`scripts/`, 1,467 lines):
+- `build-cross-toolchain.sh` (556 lines): Builds binutils 2.43 + GCC 14.2 Stage 2 cross-compiler
+- `build-sysroot.sh` (421 lines): Assembles sysroot with headers, CRT files, and libraries
+- `build-rootfs.sh` (160 lines): Packages compiled programs into TAR rootfs image
+- `cross-compile-test.sh` (330 lines): End-to-end cross-compilation verification
+
+Toolchain support (`toolchain/`, 1,724 lines):
+- CMake toolchain files for x86_64, AArch64, RISC-V; Meson cross-compilation config files
+- CRT files (crt0.S, crti.S, crtn.S) for all three architectures (599 lines)
+- Sysroot headers: errno.h, fcntl.h, mman.h, signal.h, stat.h, syscall.h, types.h
+
+Port definitions (`ports/`, 8 entries): binutils, gcc (with veridian-target patches),
+cmake, gdb, llvm, make, meson, pkg-config
+
+#### Signal Delivery (`kernel/src/process/signal_delivery.rs`, NEW, 657 lines)
+
+- x86_64 signal frame construction and trampoline for async signal delivery
+- Signal mask manipulation (block, unblock, set with sigprocmask)
+- Signal handler registration and invocation from user space
+- Restartable system call infrastructure (SA_RESTART)
+- AArch64 and RISC-V stubs prepared for future implementation
+
+#### 30+ New Syscalls (`kernel/src/syscall/`, +1,598 lines)
+
+- Filesystem (17): link, symlink, readlink, chmod, fchmod, umask, truncate, ftruncate,
+  openat, fstatat, unlinkat, mkdirat, renameat, pread, pwrite, select, pipe
+- Process (8): getcwd, chdir, getuid, getgid, geteuid, getegid, getpgid, setpgid, kill
+- Memory: File-backed mmap (was anonymous-only; now reads file contents into mapped pages)
+- Debugging (`syscall/debug.rs`, NEW, 274 lines): SYS_DEBUG_PRINT, SYS_DEBUG_BACKTRACE, SYS_DEBUG_INFO
+
+#### User-Space Test Programs (`userland/tests/`, 6 C programs)
+
+- `minimal.c` (148 lines): Comprehensive syscall test suite (write, exit, getpid, sync points)
+- `hello.c`, `write_test.c`, `exit_test.c`, `getpid_test.c`: Individual syscall verification
+- `sh.c` (864 lines): Full POSIX shell implementation in C
+
+#### BlockFS Enhancements (`kernel/src/fs/blockfs.rs`, +752 lines)
+
+- ext2-style directory entries with inode numbers; hard link support with reference counting
+- Symlink creation and resolution; directory tree navigation for VFS population
+
+#### Pipe Infrastructure (`kernel/src/fs/pipe.rs`, NEW, 160 lines)
+
+- Anonymous pipes for IPC; blocking read/write semantics integrated with VFS file table
+
+### Fixed
+
+#### Five Critical Kernel Bugs (Tier 0 Self-Hosting Prerequisites)
+
+1. **Page fault handler halts machine** (`arch/x86_64/idt.rs`)
+   - Root cause: Handler entered infinite halt loop; 432-line demand-paging framework never called
+   - Fix: Wire IDT handler to call `handle_page_fault()` with CR2 extraction and error code decoding
+   - Impact: Heap/stack demand paging now works; no longer panics on valid page faults
+
+2. **fork() doesn't clone file table** (`process/fork.rs`)
+   - Root cause: `fork_process()` never called `file_table.clone_for_fork()`; child got empty FileTable
+   - Fix: Clone parent file table after creating new process; existing clone_for_fork() now utilized
+   - Impact: Child processes have correct stdin/stdout/stderr; pipes work across fork
+
+3. **exec() doesn't update scheduler Task** (`process/creation.rs`)
+   - Root cause: `thread.context` updated but scheduler's `Task` struct retained pre-exec entry point
+   - Fix: Update `task.context` to new binary entry point after exec
+   - Impact: Exec'd programs start at their actual entry point, not the caller's
+
+4. **Timer interrupt doesn't preempt** (`arch/x86_64/idt.rs`)
+   - Root cause: Timer handler only sent EOI, never called `timer_tick()`; preemption was dead code
+   - Fix: Call `sched::runtime::timer_tick()` before EOI using try_lock to avoid deadlock
+   - Impact: Preemptive multitasking now actually preempts
+
+5. **File-backed mmap returns zero pages** (`syscall/memory.rs`)
+   - Root cause: sys_mmap() used `_fd` and `_offset` (underscore-prefixed, unused); all paths zero-filled
+   - Fix: When `!is_anonymous`, look up fd, read file contents, map pages with actual data
+   - Impact: Dynamically linked executables can load shared libraries
+
+#### Dev Build Diagnostic Noise
+
+- Root cause: fwrite() called fputc() in loop, producing 21 individual 1-byte write() syscalls
+  for "Hello from VeridianOS!"; each syscall triggered 4 diagnostic log lines (84+ total)
+- Fix: Rewrote fwrite() to write full buffers (95% syscall reduction); removed all diagnostic
+  logging from syscall/mod.rs and syscall/filesystem.rs
+- Result: Clean output, zero diagnostic spam, professional performance
+
+#### Release Build Double Fault (`kernel/src/arch/x86_64/usermode.rs`)
+
+- Root cause: opt-level 3 allocated saved RSP to RAX; `xor eax, eax` (zeroing FS/GS) clobbered
+  RAX, yielding RSP = 0; immediate double fault when popping callee-saved registers
+- Critical fix: explicit register allocation `in("rcx") rsp, in("rdx") cr3` prevents optimizer
+  from choosing clobberable RAX for the RSP/CR3 saves
+- Additional mitigations: `#[inline(never)]`, `compiler_fence(SeqCst)`, stack canary
+  (0xDEADBEEFCAFEBABE), `black_box()` on critical loads
+- Verified at opt-level 1, 2, s, z, and 3; restored opt-level = 3 in Cargo.toml
+
+#### User-Space Stack Setup (`kernel/src/process/creation.rs`)
+
+- Fixed argc/argv/envp layout and stack alignment for libc-linked binaries
+- Added guard pages and proper stack growth configuration
+
+### Changed
+
+#### Performance: CR3 Switching Removed (`kernel/src/arch/x86_64/syscall.rs`)
+
+- Eliminated 2x CR3 switch + TLB flushes per syscall (~500-2,000 cycles saved)
+- Process page tables already contain complete kernel mapping (L4 entries 256-511 from boot tables)
+- Also resolved GP faults during CR3 restore on syscall return path
+
+#### Optimization Level Restored
+
+- `Cargo.toml`: restored `opt-level = 3` after verifying all release-build fixes work
+
+#### Documentation and Build System Reorganization
+
+- Archived obsolete Rust user-space stubs to `ref_docs/archived-libveridian/`
+- Removed outdated `drivers/` and `services/` Cargo workspace entries
+- Migrated user-space programs from Rust Cargo workspace to C with Makefile build system
+
+### Build Verification
+
+- x86_64: Stage 6 BOOTOK, 29/29 tests, zero warnings; /bin/minimal executes successfully
+- AArch64: Stage 6 BOOTOK, 29/29 tests, zero warnings
+- RISC-V: Stage 6 BOOTOK, 29/29 tests, zero warnings
+- Release build verified at opt-level 1, 2, s, z, and 3
+- Zero clippy warnings across all architectures
+- Cross-compiler build succeeds: binutils 2.43 + GCC 14.2 Stage 2
+
+### Statistics
+
+- Files changed: 209
+- Insertions: +24,573
+- Deletions: -8,618
+- Net: +15,955 lines
+- Commits: 11 (since v0.4.8)
+
+---
+
 ## [0.4.8] - 2026-02-16
 
 ### Fbcon Scroll Fix, KVM Acceleration, Version Consistency

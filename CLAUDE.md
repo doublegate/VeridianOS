@@ -302,7 +302,7 @@ Currently implementing in phases:
 | Area | Status |
 |------|--------|
 | **Repository** | <https://github.com/doublegate/VeridianOS> |
-| **Latest Release** | v0.4.8 (February 16, 2026) - Fbcon scroll fix, KVM acceleration, version consistency |
+| **Latest Release** | v0.4.9 (February 18, 2026) - Self-hosting infra, complete libc, virtio-blk, 30+ syscalls, user-space exec fixes |
 | **Build** | ✅ All 3 architectures compile, zero warnings |
 | **Boot** | ✅ All 3 architectures Stage 6 BOOTOK, 29/29 tests (fbcon + keyboard driver) |
 | **CI/CD** | ✅ GitHub Actions 100% pass rate |
