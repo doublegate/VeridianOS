@@ -52,7 +52,7 @@ overflow-checks = true
 
 [profile.release]
 panic = "abort"
-opt-level = 3
+opt-level = 3  # Full optimization (default for production)
 lto = "thin"
 codegen-units = 1
 

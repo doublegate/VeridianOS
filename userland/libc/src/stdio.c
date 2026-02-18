@@ -321,14 +321,66 @@ size_t fwrite(const void *ptr, size_t size, size_t count, FILE *stream)
     if (total == 0)
         return 0;
 
+    if (!stream || !(stream->flags & __FILE_WRITE))
+        return 0;
+
     const unsigned char *p = (const unsigned char *)ptr;
     size_t done = 0;
 
+    /* Unbuffered: write directly to fd. */
+    if (stream->buf_mode == _IONBF) {
+        while (done < total) {
+            ssize_t r = write(stream->fd, p + done, total - done);
+            if (r <= 0) {
+                stream->flags |= __FILE_ERROR;
+                break;
+            }
+            done += (size_t)r;
+        }
+        return done / size;
+    }
+
+    /* Buffered: try to use buffer efficiently. */
+    __ensure_buf(stream);
+    if (stream->buf == NULL) {
+        /* Fallback to direct write if buffer alloc failed. */
+        while (done < total) {
+            ssize_t r = write(stream->fd, p + done, total - done);
+            if (r <= 0) {
+                stream->flags |= __FILE_ERROR;
+                break;
+            }
+            done += (size_t)r;
+        }
+        return done / size;
+    }
+
+    /* Write data to buffer, flushing as needed. */
     while (done < total) {
-        if (fputc(*p, stream) == EOF)
-            break;
-        p++;
-        done++;
+        size_t avail = stream->buf_size - stream->buf_pos;
+        size_t chunk = (total - done < avail) ? (total - done) : avail;
+
+        memcpy(stream->buf + stream->buf_pos, p + done, chunk);
+        stream->buf_pos += chunk;
+        done += chunk;
+
+        /* Flush on buffer full. */
+        if (stream->buf_pos >= stream->buf_size) {
+            if (__flush_write(stream) == EOF) {
+                stream->flags |= __FILE_ERROR;
+                break;
+            }
+        }
+    }
+
+    /* For line-buffered streams, flush if we wrote a newline. */
+    if (stream->buf_mode == _IOLBF && done > 0) {
+        for (size_t i = 0; i < done; i++) {
+            if (p[i] == '\n') {
+                __flush_write(stream);
+                break;
+            }
+        }
     }
 
     return done / size;

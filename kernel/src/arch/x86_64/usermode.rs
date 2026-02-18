@@ -22,6 +22,16 @@ pub static BOOT_RETURN_RSP: AtomicU64 = AtomicU64::new(0);
 /// Saved bootstrap CR3 for returning after a user process exits.
 pub static BOOT_RETURN_CR3: AtomicU64 = AtomicU64::new(0);
 
+/// Stack canary for detecting corruption of the boot context.
+/// Set to a known value when the boot context is saved, verified before
+/// restore. A mismatch indicates stack corruption (buffer overflow,
+/// use-after-free, etc.).
+static BOOT_STACK_CANARY: AtomicU64 = AtomicU64::new(0);
+
+/// Magic value for the boot stack canary.
+/// Chosen to be unlikely to appear naturally in memory.
+const BOOT_CANARY_MAGIC: u64 = 0xDEAD_BEEF_CAFE_BABE;
+
 /// Enter user mode for the first time via iretq.
 ///
 /// The iretq instruction pops SS, RSP, RFLAGS, CS, RIP from the stack
@@ -121,6 +131,12 @@ pub unsafe extern "C" fn enter_usermode_returnable(
         "push r14",
         "push r15",
 
+        // FIX 3: Set stack canary BEFORE saving boot context
+        // Load canary magic value and store to global
+        "mov rax, {canary_magic}",
+        "lea r12, [rip + {boot_canary}]",
+        "mov [r12], rax",
+
         // Save boot CR3 to global
         "mov rax, cr3",
         "lea r12, [rip + {boot_cr3}]",
@@ -154,6 +170,8 @@ pub unsafe extern "C" fn enter_usermode_returnable(
 
         boot_cr3 = sym BOOT_RETURN_CR3,
         boot_rsp = sym BOOT_RETURN_RSP,
+        boot_canary = sym BOOT_STACK_CANARY,
+        canary_magic = const BOOT_CANARY_MAGIC,
     );
 }
 
@@ -172,12 +190,63 @@ pub unsafe extern "C" fn enter_usermode_returnable(
 /// - Must only be called when `BOOT_RETURN_RSP` and `BOOT_RETURN_CR3` are valid
 /// - Must be called from kernel mode on the kernel stack set by syscall_entry
 /// - The saved boot stack frame must still be intact
+///
+/// # Implementation Notes
+/// - `#[inline(never)]` prevents aggressive optimization that could corrupt the
+///   stack frame restoration in release builds
+/// - `compiler_fence` ensures loads complete before subsequent operations
+/// - `black_box` prevents constant propagation and reordering of critical
+///   values
+#[inline(never)]
 pub unsafe fn boot_return_to_kernel() -> ! {
     // RAW SERIAL DIAGNOSTIC: Trace boot return entry
     crate::arch::x86_64::idt::raw_serial_str(b"[BOOT_RETURN ENTRY]\n");
 
-    let rsp = BOOT_RETURN_RSP.load(Ordering::SeqCst);
-    let cr3 = BOOT_RETURN_CR3.load(Ordering::SeqCst);
+    // FIX 2 & 6: Use black_box to force compiler to treat values as opaque,
+    // preventing optimization assumptions. Follow with compiler fence to
+    // prevent instruction reordering across this boundary.
+    //
+    // CRITICAL FIX: The release optimizer was reusing RAX after `xor eax,eax`
+    // (used to zero FS/GS) to load RSP, which set RSP=0 and caused a double
+    // fault. We now use inline assembly with explicit register constraints
+    // to force RSP into a register that won't be clobbered, and keep CR3
+    // separate. The asm! block below uses `inout` constraints to prevent
+    // the compiler from reusing these registers.
+    let rsp: u64;
+    let cr3: u64;
+    let canary: u64;
+
+    // Load values with explicit register assignments to prevent optimization
+    asm!(
+        "mov {rsp}, [{rsp_addr}]",
+        "mov {cr3}, [{cr3_addr}]",
+        "mov {canary}, [{canary_addr}]",
+        rsp = out(reg) rsp,
+        cr3 = out(reg) cr3,
+        canary = out(reg) canary,
+        rsp_addr = in(reg) &BOOT_RETURN_RSP,
+        cr3_addr = in(reg) &BOOT_RETURN_CR3,
+        canary_addr = in(reg) &BOOT_STACK_CANARY,
+        options(nostack, preserves_flags)
+    );
+
+    // Apply black_box to prevent further optimization
+    let rsp = core::hint::black_box(rsp);
+    let cr3 = core::hint::black_box(cr3);
+    let canary = core::hint::black_box(canary);
+    core::sync::atomic::compiler_fence(Ordering::SeqCst);
+
+    // FIX 3: Validate stack canary before restoring context
+    // If the canary doesn't match, the boot stack has been corrupted
+    if canary != BOOT_CANARY_MAGIC {
+        crate::arch::x86_64::idt::raw_serial_str(b"[BOOT_RETURN] FATAL: Stack canary mismatch!\n");
+        crate::arch::x86_64::idt::raw_serial_str(b"Expected: 0x");
+        crate::arch::x86_64::idt::raw_serial_hex(BOOT_CANARY_MAGIC);
+        crate::arch::x86_64::idt::raw_serial_str(b"\nGot:      0x");
+        crate::arch::x86_64::idt::raw_serial_hex(canary);
+        crate::arch::x86_64::idt::raw_serial_str(b"\n");
+        panic!("Stack canary mismatch - boot context corrupted");
+    }
 
     // NOTE: Cannot use println! here - would access locks/memory with wrong CR3
     // crate::println!("[BOOT-RETURN] RSP={:#x} CR3={:#x}", rsp, cr3);
@@ -185,6 +254,7 @@ pub unsafe fn boot_return_to_kernel() -> ! {
     // Clear the boot return context (one-shot)
     BOOT_RETURN_RSP.store(0, Ordering::SeqCst);
     BOOT_RETURN_CR3.store(0, Ordering::SeqCst);
+    BOOT_STACK_CANARY.store(0, Ordering::SeqCst);
 
     // SAFETY: cr3 is the boot page table address saved before entering user
     // mode. rsp points to the stack with 6 callee-saved registers and the
@@ -193,16 +263,22 @@ pub unsafe fn boot_return_to_kernel() -> ! {
     // clearing GS so we don't corrupt KERNEL_GS_BASE. After restoring RSP
     // and popping registers, ret returns to the caller of
     // enter_usermode_returnable.
+    //
+    // CRITICAL FIX FOR OPT-LEVEL S/Z/3: The optimizer was allocating RSP
+    // to RAX, which then got clobbered by `xor eax,eax` used for zeroing
+    // FS/GS. We now explicitly allocate RSP to RCX and CR3 to RDX, both
+    // of which are preserved across the segment register operations. This
+    // is the ONLY way to prevent the optimizer from reusing RAX.
     asm!(
-        "mov cr3, {cr3}",     // Restore boot page tables
+        "mov cr3, rdx",       // Restore boot page tables (CR3 in RDX)
         "swapgs",              // Balance syscall_entry's swapgs (before touching GS!)
         "mov ax, 0x10",       // Kernel data segment (GDT index 2, RPL 0)
         "mov ds, ax",         // Restore kernel DS
         "mov es, ax",         // Restore kernel ES
-        "xor eax, eax",       // Zero FS and GS
+        "xor eax, eax",       // Zero FS and GS (clobbers RAX but NOT RCX/RDX!)
         "mov fs, ax",
         "mov gs, ax",
-        "mov rsp, {rsp}",     // Restore saved boot RSP
+        "mov rsp, rcx",       // Restore saved boot RSP (RSP in RCX, safe!)
         "pop r15",
         "pop r14",
         "pop r13",
@@ -210,8 +286,8 @@ pub unsafe fn boot_return_to_kernel() -> ! {
         "pop rbx",
         "pop rbp",
         "ret",                 // Return to caller of enter_usermode_returnable
-        cr3 = in(reg) cr3,
-        rsp = in(reg) rsp,
+        in("rcx") rsp,        // RSP MUST be in RCX (preserved across xor eax,eax)
+        in("rdx") cr3,        // CR3 MUST be in RDX (preserved across xor eax,eax)
         options(noreturn)
     );
 }

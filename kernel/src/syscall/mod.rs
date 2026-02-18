@@ -427,20 +427,6 @@ pub extern "C" fn syscall_handler(
     arg4: usize,
     arg5: usize,
 ) -> isize {
-    // DIAGNOSTIC: Log syscall entry (only for write syscall to reduce noise)
-    #[cfg(target_arch = "x86_64")]
-    {
-        if syscall_num == Syscall::FileWrite as usize {
-            unsafe {
-                crate::arch::x86_64::idt::raw_serial_str(b"[SYSCALL_HANDLER] num=");
-                crate::arch::x86_64::idt::raw_serial_hex(syscall_num as u64);
-                crate::arch::x86_64::idt::raw_serial_str(b" (FileWrite) arg1=");
-                crate::arch::x86_64::idt::raw_serial_hex(arg1 as u64);
-                crate::arch::x86_64::idt::raw_serial_str(b"\n");
-            }
-        }
-    }
-
     // Speculation barrier at syscall entry to mitigate Spectre-style attacks.
     // Prevents speculative execution of kernel code with user-controlled values.
     crate::arch::speculation_barrier();

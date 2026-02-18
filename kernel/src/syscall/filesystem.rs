@@ -352,18 +352,6 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
 /// which calls `syscall(53, 1, buf_ptr, len)` before a full VFS-backed
 /// console is available.
 pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
-    // DIAGNOSTIC: Log entry to sys_write
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[SYS_WRITE ENTRY] fd=");
-        crate::arch::x86_64::idt::raw_serial_hex(fd as u64);
-        crate::arch::x86_64::idt::raw_serial_str(b" buf=");
-        crate::arch::x86_64::idt::raw_serial_hex(buffer as u64);
-        crate::arch::x86_64::idt::raw_serial_str(b" count=");
-        crate::arch::x86_64::idt::raw_serial_hex(count as u64);
-        crate::arch::x86_64::idt::raw_serial_str(b"\n");
-    }
-
     if count == 0 {
         return Ok(0);
     }
@@ -389,18 +377,6 @@ pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
             }
         }
 
-        // DIAGNOSTIC: Log fallback path entry
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            crate::arch::x86_64::idt::raw_serial_str(b"[WRITE_FALLBACK] fd=");
-            crate::arch::x86_64::idt::raw_serial_hex(fd as u64);
-            crate::arch::x86_64::idt::raw_serial_str(b" buf=");
-            crate::arch::x86_64::idt::raw_serial_hex(buffer as u64);
-            crate::arch::x86_64::idt::raw_serial_str(b" count=");
-            crate::arch::x86_64::idt::raw_serial_hex(count as u64);
-            crate::arch::x86_64::idt::raw_serial_str(b"\n");
-        }
-
         // Fallback: write directly to serial UART
         let write_count = count.min(SERIAL_IO_MAX_SIZE);
         // SAFETY: buffer is non-zero (checked above). We limit the size
@@ -408,21 +384,6 @@ pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
         // buffer of at least `count` bytes. During early bring-up this
         // may be a kernel-space address from the embedded init binary.
         let buffer_slice = unsafe { core::slice::from_raw_parts(buffer as *const u8, write_count) };
-
-        // DIAGNOSTIC: Log first few bytes
-        #[cfg(target_arch = "x86_64")]
-        {
-            let preview_len = write_count.min(32);
-            unsafe {
-                crate::arch::x86_64::idt::raw_serial_str(b"[WRITE_CONTENT] ");
-            }
-            for &byte in buffer_slice.iter().take(preview_len) {
-                serial_write_byte(byte);
-            }
-            unsafe {
-                crate::arch::x86_64::idt::raw_serial_str(b"\n");
-            }
-        }
 
         for &byte in buffer_slice {
             serial_write_byte(byte);
