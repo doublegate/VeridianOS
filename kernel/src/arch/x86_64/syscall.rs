@@ -66,22 +66,6 @@ pub fn per_cpu_data_ptr() -> *mut PerCpuData {
 #[unsafe(naked)]
 pub unsafe extern "C" fn syscall_entry() {
     core::arch::naked_asm!(
-        // RAW SERIAL DIAGNOSTIC: Trace syscall_entry (before swapgs)
-        // SAFETY: This writes directly to COM1 port 0x3F8 before any stack
-        // or register manipulations. Uses only dx and al which are scratch
-        // registers for this purpose.
-        "push rax",                  // Save rax (syscall number)
-        "push rdx",                  // Save rdx
-        "mov al, 0x53",              // 'S'
-        "mov dx, 0x3F8",
-        "out dx, al",
-        "mov al, 0x43",              // 'C'
-        "out dx, al",
-        "mov al, 0x0a",              // '\n'
-        "out dx, al",
-        "pop rdx",                   // Restore rdx
-        "pop rax",                   // Restore rax
-
         // Save user context on kernel stack
         "swapgs",                    // Switch to kernel GS
         "mov gs:[0x8], rsp",        // Save user RSP in per-CPU data (offset 0x8)
@@ -124,23 +108,6 @@ pub unsafe extern "C" fn syscall_entry() {
         "mov rcx, rax",              // rcx = arg3 (old rdx)
         "mov r9, r8",                // r9 = arg5 (must precede r8 overwrite)
         "mov r8, r10",               // r8 = arg4
-
-        // RAW SERIAL: Trace before calling handler
-        "push rax",
-        "push rdx",
-        "mov al, 0x48",              // 'H'
-        "mov dx, 0x3F8",
-        "out dx, al",
-        "mov al, 0x41",              // 'A'
-        "out dx, al",
-        "mov al, 0x4E",              // 'N'
-        "out dx, al",
-        "mov al, 0x44",              // 'D'
-        "out dx, al",
-        "mov al, 0x0a",              // '\n'
-        "out dx, al",
-        "pop rdx",
-        "pop rax",
 
         "call {handler}",
 

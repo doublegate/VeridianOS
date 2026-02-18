@@ -112,10 +112,28 @@ pub fn create_process_with_options(
             let vaddr = user_base + i * 4096;
             memory_space.map_page(vaddr, stack_flags)?;
         }
+
+        // Update VAS stack_top to match the main thread's actual allocated stack
+        // This ensures setup_exec_stack() uses the correct stack range
+        memory_space.set_stack_top(user_base + user_size);
     }
 
     // Add thread to process
     process.add_thread(main_thread)?;
+
+    // Setup user stack with arguments and environment
+    // Convert String vectors to &str slices for setup_exec_stack
+    let argv_refs: Vec<&str> = options.argv.iter().map(|s| s.as_str()).collect();
+    let envp_refs: Vec<&str> = options.envp.iter().map(|s| s.as_str()).collect();
+
+    // Get the process before adding to table so we can set up the stack
+    let stack_top = setup_exec_stack(&process, &argv_refs, &envp_refs, None)?;
+
+    // Update the thread context with the adjusted stack pointer
+    if let Some(thread) = process.get_thread(tid) {
+        let mut ctx = thread.context.lock();
+        ctx.set_stack_pointer(stack_top);
+    }
 
     // Add process to process table
     table::add_process(process)?;
@@ -585,6 +603,20 @@ fn setup_exec_stack(
     sp -= ptrs_needed * core::mem::size_of::<usize>();
     // Re-align to 16 bytes (ABI requirement)
     sp &= !0xF;
+
+    // DIAGNOSTIC: Check if sp is still within stack bounds
+    if sp < stack_base {
+        crate::kprintln!(
+            "[STACK_SETUP] OVERFLOW! sp={:#x} < stack_base={:#x}, need {} bytes",
+            sp,
+            stack_base,
+            stack_top - sp
+        );
+        return Err(KernelError::OutOfMemory {
+            requested: stack_top - sp,
+            available: stack_size,
+        });
+    }
 
     let mut write_pos = sp;
 

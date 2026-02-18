@@ -673,7 +673,7 @@ fn test_user_binary_load() {
 
     kprintln!("[EXEC-TEST] First test returned, trying /bin/sh...");
 
-    // Test 2: /bin/sh -c "echo SHELL_TEST_PASS" (libc-linked shell)
+    // Test 2: /bin/sh (shell with command execution)
     let vfs = get_vfs().read();
     match vfs.resolve_path("/bin/sh") {
         Ok(_node) => {
@@ -699,7 +699,7 @@ fn test_user_binary_load() {
         }
         Err(_) => {
             drop(vfs);
-            kprintln!("[EXEC-TEST] /bin/sh not found in VFS");
+            kprintln!("[EXEC-TEST] /bin/hello not found in VFS");
         }
     }
 }
@@ -742,12 +742,14 @@ fn run_user_process(pid: crate::process::ProcessId) {
         }
     };
 
-    let entry_point = {
+    let (entry_point, user_stack_ptr) = {
         use crate::arch::context::ThreadContext;
-        thread.context.lock().get_instruction_pointer() as u64
+        let ctx = thread.context.lock();
+        (
+            ctx.get_instruction_pointer() as u64,
+            ctx.get_stack_pointer() as u64,
+        )
     };
-    // User stack top (stack grows down from top)
-    let user_stack_top = thread.user_stack.top() as u64;
 
     // Drop locks before entering user mode
     drop(threads);
@@ -760,8 +762,79 @@ fn run_user_process(pid: crate::process::ProcessId) {
     kprintln!(
         "[RUN_USER_PROC] entry={:#x} stack={:#x} cr3={:#x}",
         entry_point,
-        user_stack_top,
+        user_stack_ptr,
         pt_root
+    );
+
+    // Verify entry point and stack are mapped in the process's page tables
+    // SAFETY: pt_root is a valid L4 page table address from the process's VAS.
+    unsafe {
+        use crate::mm::{vas::create_mapper_from_root_pub, VirtualAddress};
+        let mapper = create_mapper_from_root_pub(pt_root);
+
+        // Check entry point mapping
+        let entry_page = VirtualAddress(entry_point & !0xFFF);
+        match mapper.translate_page(entry_page) {
+            Ok((frame, flags)) => {
+                kprintln!(
+                    "[RUN_USER_PROC] Entry OK: VA={:#x} -> frame={:#x} flags={:?}",
+                    entry_point,
+                    frame.as_u64() << 12,
+                    flags
+                );
+            }
+            Err(_) => {
+                kprintln!(
+                    "[RUN_USER_PROC] FATAL: Entry point {:#x} NOT MAPPED!",
+                    entry_point
+                );
+                return;
+            }
+        }
+
+        // Check stack mapping
+        let stack_page = VirtualAddress((user_stack_ptr - 16) & !0xFFF);
+        match mapper.translate_page(stack_page) {
+            Ok((frame, flags)) => {
+                kprintln!(
+                    "[RUN_USER_PROC] Stack OK: VA={:#x} -> frame={:#x} flags={:?}",
+                    user_stack_ptr,
+                    frame.as_u64() << 12,
+                    flags
+                );
+            }
+            Err(_) => {
+                kprintln!(
+                    "[RUN_USER_PROC] FATAL: Stack {:#x} NOT MAPPED!",
+                    user_stack_ptr
+                );
+                return;
+            }
+        }
+    }
+
+    // DIAGNOSTIC: Dump first few pages of the process's address space
+    unsafe {
+        use crate::mm::{vas::create_mapper_from_root_pub, VirtualAddress};
+        let mapper = create_mapper_from_root_pub(pt_root);
+
+        for page_addr in (0x400000..=0x410000).step_by(0x1000) {
+            if let Ok((frame, flags)) = mapper.translate_page(VirtualAddress(page_addr)) {
+                kprintln!(
+                    "[RUN_USER_PROC] Page {:#x} -> frame={:#x} flags={:?}",
+                    page_addr,
+                    frame.as_u64() << 12,
+                    flags
+                );
+            }
+        }
+    }
+
+    kprintln!(
+        "[RUN_USER_PROC] Before enter CS/DS/SS={}/{}/{}",
+        user_cs,
+        0x10,
+        user_ss
     );
 
     // Enter Ring 3 via iretq with returnable context.
@@ -780,7 +853,7 @@ fn run_user_process(pid: crate::process::ProcessId) {
     unsafe {
         crate::arch::x86_64::usermode::enter_usermode_returnable(
             entry_point,
-            user_stack_top,
+            user_stack_ptr,
             user_cs,
             user_ss,
             pt_root,
