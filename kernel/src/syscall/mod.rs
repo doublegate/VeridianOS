@@ -427,12 +427,28 @@ pub extern "C" fn syscall_handler(
     arg4: usize,
     arg5: usize,
 ) -> isize {
+    // RAW SERIAL DIAGNOSTIC: Entered handler
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[HANDLER ENTRY]\n");
+    }
+
     // Speculation barrier at syscall entry to mitigate Spectre-style attacks.
     // Prevents speculative execution of kernel code with user-controlled values.
     crate::arch::speculation_barrier();
 
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[AFTER BARRIER]\n");
+    }
+
     // Track syscall count
     SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[AFTER COUNT]\n");
+    }
 
     // Rate limiting check
     if !SYSCALL_RATE_LIMITER.check() {
@@ -440,15 +456,35 @@ pub extern "C" fn syscall_handler(
         return SyscallError::WouldBlock as i32 as isize;
     }
 
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[AFTER RATE]\n");
+    }
+
     // Get caller PID for audit logging
-    let caller_pid = crate::process::current_process()
+    let _caller_pid = crate::process::current_process()
         .map(|p| p.pid.0)
         .unwrap_or(0);
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[AFTER PID]\n");
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[BEFORE DISPATCH]\n");
+    }
 
     let result = match Syscall::try_from(syscall_num) {
         Ok(syscall) => handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5),
         Err(_) => Err(SyscallError::InvalidSyscall),
     };
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[AFTER DISPATCH]\n");
+    }
 
     // Audit log: syscall with result.
     // Safe to call even from syscall context - uses try_lock() with graceful
@@ -457,7 +493,26 @@ pub extern "C" fn syscall_handler(
     if !success {
         SYSCALL_ERRORS.fetch_add(1, Ordering::Relaxed);
     }
-    crate::security::audit::log_syscall(caller_pid, 0, syscall_num, success);
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[BEFORE AUDIT]\n");
+    }
+
+    // TEMPORARY: Audit logging disabled during syscall due to VFS access with CR3
+    // switch. TODO(user-space): Re-enable after resolving VFS heap access from
+    // switched CR3 context. crate::security::audit::log_syscall(caller_pid, 0,
+    // syscall_num, success);
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[AFTER AUDIT (skipped)]\n");
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[HANDLER RETURN]\n");
+    }
 
     match result {
         Ok(value) => value as isize,

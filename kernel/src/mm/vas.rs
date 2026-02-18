@@ -262,8 +262,21 @@ impl VirtualAddressSpace {
             let boot_l4 = &*(super::phys_to_virt_addr(boot_l4_phys) as *const PageTable);
             let new_l4 = &mut *(super::phys_to_virt_addr(new_root) as *mut PageTable);
 
+            let mut copied_count = 0;
             for i in 256..PAGE_TABLE_ENTRIES {
-                new_l4[i] = boot_l4[i];
+                if boot_l4[i].is_present() {
+                    new_l4[i] = boot_l4[i];
+                    copied_count += 1;
+                }
+            }
+
+            // Diagnostic: Confirm kernel mapping is complete
+            #[cfg(target_arch = "x86_64")]
+            if copied_count > 0 {
+                crate::println!(
+                    "[VAS] Copied {} kernel L4 entries from boot tables to new process page tables",
+                    copied_count
+                );
             }
         }
 

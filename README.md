@@ -1,4 +1,5 @@
 <!-- markdownlint-disable MD033 -->
+
 # VeridianOS
 
 <div align="center">
@@ -19,7 +20,7 @@
 
 **VeridianOS** is a research operating system written in Rust, focused on **correctness, isolation, and explicit architectural invariants**. It is intended as **executable documentation of high-assurance systems design**, not as a production OS or a general-purpose hobby kernel.
 
-The project explores how capability-oriented design, strong isolation boundaries, and disciplined use of unsafe code can be combined to produce systems that are *auditable, teachable, and resilient to failure*. VeridianOS features a capability-based security model, zero-copy IPC, and multi-architecture support with an emphasis on reliability and deterministic behavior.
+The project explores how capability-oriented design, strong isolation boundaries, and disciplined use of unsafe code can be combined to produce systems that are _auditable, teachable, and resilient to failure_. VeridianOS features a capability-based security model, zero-copy IPC, and multi-architecture support with an emphasis on reliability and deterministic behavior.
 
 ### Key Features
 
@@ -77,7 +78,7 @@ See [Invariants](docs/invariants.md) for the authoritative list.
 
 VeridianOS uses a microkernel architecture with the following key components:
 
-```
+```text
 ┌─────────────────────────────────────────────┐
 │              User Applications              │
 ├─────────────────────────────────────────────┤
@@ -93,7 +94,7 @@ VeridianOS uses a microkernel architecture with the following key components:
 
 ## Repository Structure
 
-```
+```text
 kernel/        Trusted computing base
 drivers/       Hardware interaction behind explicit privilege boundaries
 services/      Capability-mediated system services
@@ -111,23 +112,23 @@ experiments/   Non-normative exploratory work
 
 ### Architecture Support
 
-| Architecture | Build | Boot | Init Tests | Stage 6 | Stable Idle (30s) | Status |
-|--------------|-------|------|-----------|---------|-------------------|--------|
-| x86_64       | ✅    | ✅   | 29/29     | ✅      | ✅ PASS           | **100% Functional** -- UEFI boot via OVMF |
-| AArch64      | ✅    | ✅   | 29/29     | ✅      | ✅ PASS           | **100% Functional** -- Direct kernel loading |
-| RISC-V 64    | ✅    | ✅   | 29/29     | ✅      | ✅ PASS           | **100% Functional** -- OpenSBI boot |
+| Architecture | Build | Boot | Init Tests | Stage 6 | Stable Idle (30s) | Status                                       |
+| ------------ | ----- | ---- | ---------- | ------- | ----------------- | -------------------------------------------- |
+| x86_64       | ✅    | ✅   | 29/29      | ✅      | ✅ PASS           | **100% Functional** -- UEFI boot via OVMF    |
+| AArch64      | ✅    | ✅   | 29/29      | ✅      | ✅ PASS           | **100% Functional** -- Direct kernel loading |
+| RISC-V 64    | ✅    | ✅   | 29/29      | ✅      | ✅ PASS           | **100% Functional** -- OpenSBI boot          |
 
 ### Development Phases
 
-| Phase | Description | Status | Version | Date |
-|-------|-------------|--------|---------|------|
-| 0 | Foundation and Tooling | **Complete** | v0.1.0 | Jun 2025 |
-| 1 | Microkernel Core | **Complete** | v0.2.1 | Jun 2025 |
-| 2 | User Space Foundation | **Complete** | v0.3.2 | Feb 2026 |
-| 3 | Security Hardening | **Complete** | v0.3.2 | Feb 2026 |
-| 4 | Package Ecosystem | **Complete** | v0.4.0 | Feb 2026 |
-| 5 | Performance Optimization | Planned | -- | -- |
-| 6 | Advanced Features and GUI | Planned | -- | -- |
+| Phase | Description               | Status       | Version | Date     |
+| ----- | ------------------------- | ------------ | ------- | -------- |
+| 0     | Foundation and Tooling    | **Complete** | v0.1.0  | Jun 2025 |
+| 1     | Microkernel Core          | **Complete** | v0.2.1  | Jun 2025 |
+| 2     | User Space Foundation     | **Complete** | v0.3.2  | Feb 2026 |
+| 3     | Security Hardening        | **Complete** | v0.3.2  | Feb 2026 |
+| 4     | Package Ecosystem         | **Complete** | v0.4.0  | Feb 2026 |
+| 5     | Performance Optimization  | Planned      | --      | --       |
+| 6     | Advanced Features and GUI | Planned      | --      | --       |
 
 For detailed release notes, see [Release History](docs/RELEASE-HISTORY.md).
 
@@ -306,11 +307,12 @@ See [PROJECT-STATUS.md](docs/PROJECT-STATUS.md) for detailed status information 
 2. [Architecture](docs/architecture.md) — System architecture
 
 Helpful diagrams:
+
 - [Mermaid - Architecture Capability Flow](docs/diagrams/architecture-capability-flow.mmd)
 - [Mermaid - Kernal Entry Points](docs/diagrams/kernel-entry-points.mmd)
 
-3. [Kernel Entry Points](docs/kernel-entry-points.md) — Kernel entry points
-4. [Capability Flow](docs/capability-flow.md) — Capability flow into services and drivers
+1. [Kernel Entry Points](docs/kernel-entry-points.md) — Kernel entry points
+2. [Capability Flow](docs/capability-flow.md) — Capability flow into services and drivers
 
 ---
 

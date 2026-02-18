@@ -40,6 +40,11 @@ pub(super) static PER_CPU_AREA: PerCpuDataCell = PerCpuDataCell(UnsafeCell::new(
     user_rsp: 0,
 }));
 
+// CR3 switching removed: Process page tables now contain complete kernel
+// mapping (L4 entries 256-511 copied from boot tables), so syscalls run
+// with user CR3 active. This eliminates the GP fault on CR3 restore that
+// occurred when switching back to incompatible user page tables.
+
 /// Get a mutable pointer to the per-CPU data.
 ///
 /// Used to update `kernel_rsp` on context switch and to set up KernelGsBase
@@ -79,8 +84,12 @@ pub unsafe extern "C" fn syscall_entry() {
 
         // Save user context on kernel stack
         "swapgs",                    // Switch to kernel GS
-        "mov gs:[0x8], rsp",        // Save user RSP in per-CPU data
-        "mov rsp, gs:[0x0]",        // Load kernel RSP from per-CPU data
+        "mov gs:[0x8], rsp",        // Save user RSP in per-CPU data (offset 0x8)
+        "mov rsp, gs:[0x0]",        // Load kernel RSP from per-CPU data (offset 0x0)
+
+        // CR3 switching removed: Process page tables contain complete kernel
+        // mapping, so we can access kernel data structures directly without
+        // switching to boot page tables.
 
         // Save all user registers.
         // rcx and r11 are clobbered by SYSCALL (RIP / RFLAGS), saved first.
@@ -115,6 +124,24 @@ pub unsafe extern "C" fn syscall_entry() {
         "mov rcx, rax",              // rcx = arg3 (old rdx)
         "mov r9, r8",                // r9 = arg5 (must precede r8 overwrite)
         "mov r8, r10",               // r8 = arg4
+
+        // RAW SERIAL: Trace before calling handler
+        "push rax",
+        "push rdx",
+        "mov al, 0x48",              // 'H'
+        "mov dx, 0x3F8",
+        "out dx, al",
+        "mov al, 0x41",              // 'A'
+        "out dx, al",
+        "mov al, 0x4E",              // 'N'
+        "out dx, al",
+        "mov al, 0x44",              // 'D'
+        "out dx, al",
+        "mov al, 0x0a",              // '\n'
+        "out dx, al",
+        "pop rdx",
+        "pop rax",
+
         "call {handler}",
 
         // Restore user registers (reverse order of saves).
@@ -134,7 +161,7 @@ pub unsafe extern "C" fn syscall_entry() {
         "pop r11",                   // User RFLAGS
         "pop rcx",                   // User RIP
 
-        // Restore user stack and return
+        // Restore user stack and return (no CR3 switching)
         "mov rsp, gs:[0x8]",        // Restore user RSP
         "swapgs",                    // Switch back to user GS
         "sysretq",
@@ -212,6 +239,11 @@ pub fn init_syscall() {
     // KernelGsBase is swapped with GsBase on the `swapgs` instruction.
     // After swapgs in syscall_entry, GS points to our PerCpuData so the
     // assembly can read kernel_rsp from gs:[0x0] and save user_rsp to gs:[0x8].
+    //
+    // CR3 initialization removed: Process page tables now contain complete
+    // kernel mappings (L4 entries 256-511), so syscalls run with user CR3
+    // and can directly access kernel data structures.
+
     let per_cpu_addr = per_cpu_data_ptr() as u64;
     KernelGsBase::write(x86_64::VirtAddr::new(per_cpu_addr));
 }
