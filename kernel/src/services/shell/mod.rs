@@ -272,6 +272,7 @@ impl Shell {
     /// and subshell grouping (`(cmd1; cmd2)`).
     pub fn execute_command(&self, command_line: &str) -> CommandResult {
         let trimmed = command_line.trim();
+        crate::println!("[SHELL-EXEC] command_line='{}'", trimmed);
         if trimmed.is_empty() {
             return CommandResult::Success(0);
         }
@@ -345,6 +346,7 @@ impl Shell {
 
         // --- Phase 8: Check built-in commands ---
         if let Some(builtin) = self.builtins.read().get(command) {
+            crate::println!("[SHELL-EXEC] Found builtin: {}", command);
             let result = builtin.execute(args, self);
 
             // Apply output redirections if any
@@ -362,7 +364,17 @@ impl Shell {
         }
 
         // --- Phase 9: Try external command ---
-        self.execute_external_command(command, args)
+        crate::println!("[SHELL-EXEC] Trying external command: {}", command);
+        let result = self.execute_external_command(command, args);
+        match &result {
+            CommandResult::Success(code) => {
+                crate::println!("[SHELL-EXEC] Result: Success({})", code)
+            }
+            CommandResult::Error(msg) => crate::println!("[SHELL-EXEC] Result: Error({})", msg),
+            CommandResult::NotFound => crate::println!("[SHELL-EXEC] Result: NotFound"),
+            CommandResult::Exit(code) => crate::println!("[SHELL-EXEC] Result: Exit({})", code),
+        }
+        result
     }
 
     /// Try to split and execute a command list using `;`, `&&`, or `||`.
@@ -762,6 +774,7 @@ impl Shell {
 
             // Check if file exists using VFS
             if let Ok(_node) = crate::fs::get_vfs().read().resolve_path(&full_path) {
+                crate::println!("[SHELL] Found executable: {}", full_path);
                 // Load and execute the program
                 match crate::userspace::load_user_program(
                     &full_path,
@@ -773,10 +786,13 @@ impl Shell {
                         .collect::<Vec<_>>(),
                 ) {
                     Ok(pid) => {
-                        // Wait for the process to complete
-                        // TODO(future): Implement proper process waiting (waitpid)
-                        crate::println!("Started process {} with PID {}", command, pid.0);
-                        return CommandResult::Success(0);
+                        crate::println!("[SHELL] Process {} created, about to run", pid.0);
+                        // Run the user process directly like bootstrap does.
+                        // This transfers control to Ring 3 via iretq and returns
+                        // when the process exits via sys_exit.
+                        let exit_code = run_user_process_from_shell(pid);
+                        crate::println!("[SHELL] Process {} exited with code {}", pid.0, exit_code);
+                        return CommandResult::Success(exit_code);
                     }
                     Err(e) => {
                         return CommandResult::Error(format!(
@@ -1068,6 +1084,126 @@ impl Shell {
         // Limit history size
         while history.len() > self.config.history_size {
             history.remove(0);
+        }
+    }
+}
+
+/// Run a user process directly from the shell, similar to bootstrap's approach.
+///
+/// This function transfers control to Ring 3 via iretq and returns when the
+/// process exits. Unlike wait_for_child(), this doesn't block the shell's
+/// process context or depend on scheduler wakeup semantics.
+///
+/// Returns the process's exit code.
+fn run_user_process_from_shell(pid: crate::process::ProcessId) -> i32 {
+    use crate::process::get_process;
+
+    crate::println!("[SHELL] run_user_process_from_shell: pid={}", pid.0);
+
+    let process = match get_process(pid) {
+        Some(p) => p,
+        None => {
+            crate::println!("[SHELL] Error: Process {} not found", pid.0);
+            return 1;
+        }
+    };
+
+    // Architecture-specific user-mode entry
+    #[cfg(target_arch = "x86_64")]
+    {
+        // Get the process's page table root (physical address for CR3)
+        let vas = process.memory_space.lock();
+        let pt_root = vas.get_page_table();
+        if pt_root == 0 {
+            drop(vas);
+            crate::println!("[SHELL] Error: Process {} has no page table", pid.0);
+            return 1;
+        }
+
+        // Get entry point and user stack from the process's first thread
+        let threads = process.threads.lock();
+        let thread = match threads.values().next() {
+            Some(t) => t,
+            None => {
+                drop(threads);
+                drop(vas);
+                crate::println!("[SHELL] Error: Process {} has no threads", pid.0);
+                return 1;
+            }
+        };
+
+        let (entry_point, user_stack_ptr) = {
+            use crate::arch::context::ThreadContext;
+            let ctx = thread.context.lock();
+            (
+                ctx.get_instruction_pointer() as u64,
+                ctx.get_stack_pointer() as u64,
+            )
+        };
+
+        // Drop locks before entering user mode
+        drop(threads);
+        drop(vas);
+
+        crate::println!(
+            "[SHELL] Entering Ring 3: entry={:#x} stack={:#x}",
+            entry_point,
+            user_stack_ptr
+        );
+
+        // User CS and SS selectors (Ring 3)
+        let user_cs: u64 = 0x33; // GDT index 6, RPL 3
+        let user_ss: u64 = 0x2B; // GDT index 5, RPL 3
+
+        // Enter Ring 3 via iretq with returnable context.
+        // When the user process calls sys_exit, this call returns normally
+        // with the exit code.
+        //
+        // SAFETY: All preconditions for enter_usermode_returnable are met:
+        // - entry_point is in the process's user-space page tables
+        // - user_stack_ptr points to the top of the user stack
+        // - CS/SS are valid Ring 3 selectors from the GDT
+        // - pt_root is a valid L4 page table with kernel mappings preserved
+        // - kernel_rsp_ptr points to the per-CPU kernel_rsp field
+        let kernel_rsp_ptr = crate::arch::x86_64::syscall::per_cpu_data_ptr() as u64;
+        unsafe {
+            crate::arch::x86_64::usermode::enter_usermode_returnable(
+                entry_point,
+                user_stack_ptr,
+                user_cs,
+                user_ss,
+                pt_root,
+                kernel_rsp_ptr,
+            );
+        }
+
+        crate::println!("[SHELL] Returned from Ring 3");
+
+        // When we return here, the process has exited. Get the exit code.
+        match get_process(pid) {
+            Some(p) => p.get_exit_code(),
+            None => 0, // Process was cleaned up, assume successful exit
+        }
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        // For AArch64 and RISC-V, user-mode entry is not yet implemented in the shell.
+        // Fall back to yielding and waiting (this will still freeze, but at least
+        // it compiles and shows what needs to be done).
+        crate::println!(
+            "[SHELL] Warning: Direct user-mode entry not implemented on this architecture"
+        );
+        crate::println!("[SHELL] Attempting scheduler-based wait (may freeze)...");
+
+        crate::sched::yield_cpu();
+
+        match crate::process::wait_for_child(Some(pid)) {
+            Ok((_child_pid, exit_code)) => exit_code,
+            Err(e) => {
+                crate::println!("[SHELL] Error waiting for process: {:?}", e);
+                1
+            }
         }
     }
 }

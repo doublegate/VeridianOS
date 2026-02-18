@@ -117,6 +117,42 @@ const SHELL_CODE: &[u8] = &[
 ];
 
 // ---------------------------------------------------------------------------
+// x86_64 machine code for the hello test program
+// ---------------------------------------------------------------------------
+
+/// x86_64 machine code for the minimal hello test program.
+///
+/// Writes "Hello from VeridianOS!\n" to stdout, then exits with code 0.
+///
+/// Disassembly:
+/// ```text
+///   0: bf 01 00 00 00          mov  edi, 1           ; fd = stdout
+///   5: 48 8d 35 15 00 00 00    lea  rsi, [rip+0x15]  ; buf = &msg
+///  12: ba 18 00 00 00          mov  edx, 24          ; len = 24
+///  17: b8 35 00 00 00          mov  eax, 53          ; SYS_WRITE (FileWrite)
+///  22: 0f 05                   syscall
+///  24: 31 ff                   xor  edi, edi         ; exit_code = 0
+///  26: b8 0b 00 00 00          mov  eax, 11          ; SYS_EXIT (ProcessExit)
+///  31: 0f 05                   syscall
+///  33: "Hello from VeridianOS!\n"
+/// ```
+#[cfg(target_arch = "x86_64")]
+const HELLO_CODE: &[u8] = &[
+    // mov edi, 1
+    0xBF, 0x01, 0x00, 0x00, 0x00,
+    // lea rsi, [rip+0x15]  (displacement = 33 - 12 = 21 = 0x15)
+    0x48, 0x8D, 0x35, 0x15, 0x00, 0x00, 0x00, // mov edx, 24
+    0xBA, 0x18, 0x00, 0x00, 0x00, // mov eax, 53  (FileWrite)
+    0xB8, 0x35, 0x00, 0x00, 0x00, // syscall
+    0x0F, 0x05, // xor edi, edi
+    0x31, 0xFF, // mov eax, 11  (ProcessExit)
+    0xB8, 0x0B, 0x00, 0x00, 0x00, // syscall
+    0x0F, 0x05, // msg: "Hello from VeridianOS!\n" (24 bytes)
+    b'H', b'e', b'l', b'l', b'o', b' ', b'f', b'r', b'o', b'm', b' ', b'V', b'e', b'r', b'i', b'd',
+    b'i', b'a', b'n', b'O', b'S', b'!', b'\n',
+];
+
+// ---------------------------------------------------------------------------
 // AArch64 machine code for the init process
 // ---------------------------------------------------------------------------
 
@@ -401,6 +437,9 @@ pub fn populate_initramfs() -> Result<(), crate::error::KernelError> {
     let init_elf = build_minimal_elf(INIT_CODE, LOAD_ADDR);
     let shell_elf = build_minimal_elf(SHELL_CODE, LOAD_ADDR);
 
+    #[cfg(target_arch = "x86_64")]
+    let hello_elf = build_minimal_elf(HELLO_CODE, LOAD_ADDR);
+
     // /sbin and /bin are already created by fs::init(), but guard against
     // them being absent. Ignore AlreadyExists errors.
     let vfs = fs::get_vfs().read();
@@ -413,6 +452,10 @@ pub fn populate_initramfs() -> Result<(), crate::error::KernelError> {
 
     // Write shell binary to /bin/vsh
     fs::write_file("/bin/vsh", &shell_elf)?;
+
+    // Write hello test program to /bin/hello (x86_64 only for now)
+    #[cfg(target_arch = "x86_64")]
+    fs::write_file("/bin/hello", &hello_elf)?;
 
     Ok(())
 }
