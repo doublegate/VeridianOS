@@ -131,15 +131,16 @@ unsafe fn write_to_user_stack(
         return;
     }
 
-    // SAFETY: pt_root is a valid identity-mapped L4 page table address.
     let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
     if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64)) {
         let page_offset = vaddr & 0xFFF;
         let phys_addr = (frame.as_u64() << 12) + page_offset as u64;
-        // SAFETY: phys_addr is identity-mapped and points to a valid writable
-        // page within the process's stack region.
+        // SAFETY: phys_addr is converted to a kernel-accessible virtual
+        // address via phys_to_virt_addr (required on x86_64 where physical
+        // memory is mapped at a dynamic offset, not identity-mapped).
         unsafe {
-            core::ptr::write(phys_addr as *mut usize, value);
+            let virt = crate::mm::phys_to_virt_addr(phys_addr);
+            core::ptr::write(virt as *mut usize, value);
         }
     }
 }
@@ -163,15 +164,16 @@ unsafe fn write_bytes_to_user_stack(
         return;
     }
 
-    // SAFETY: pt_root is a valid identity-mapped L4 page table address.
     let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
     if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64)) {
         let page_offset = vaddr & 0xFFF;
         let phys_addr = (frame.as_u64() << 12) + page_offset as u64;
-        // SAFETY: phys_addr is identity-mapped and the destination has
-        // at least data.len() bytes available within the page.
+        // SAFETY: phys_addr is converted to a kernel-accessible virtual
+        // address via phys_to_virt_addr. The destination has at least
+        // data.len() bytes available within the page.
         unsafe {
-            core::ptr::copy_nonoverlapping(data.as_ptr(), phys_addr as *mut u8, data.len());
+            let virt = crate::mm::phys_to_virt_addr(phys_addr);
+            core::ptr::copy_nonoverlapping(data.as_ptr(), virt as *mut u8, data.len());
         }
     }
 }
@@ -195,14 +197,16 @@ unsafe fn read_from_user_stack(
         return None;
     }
 
-    // SAFETY: pt_root is a valid identity-mapped L4 page table address.
     let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
     if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64)) {
         let page_offset = vaddr & 0xFFF;
         let phys_addr = (frame.as_u64() << 12) + page_offset as u64;
-        // SAFETY: phys_addr is identity-mapped and points to a valid readable
-        // location in the process's address space.
-        Some(unsafe { core::ptr::read(phys_addr as *const usize) })
+        // SAFETY: phys_addr is converted to a kernel-accessible virtual
+        // address via phys_to_virt_addr for reading.
+        Some(unsafe {
+            let virt = crate::mm::phys_to_virt_addr(phys_addr);
+            core::ptr::read(virt as *const usize)
+        })
     } else {
         None
     }
@@ -227,15 +231,15 @@ unsafe fn read_bytes_from_user_stack(
         return false;
     }
 
-    // SAFETY: pt_root is a valid identity-mapped L4 page table address.
     let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
     if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64)) {
         let page_offset = vaddr & 0xFFF;
         let phys_addr = (frame.as_u64() << 12) + page_offset as u64;
-        // SAFETY: phys_addr is identity-mapped and readable. We copy exactly
-        // buf.len() bytes.
+        // SAFETY: phys_addr is converted to a kernel-accessible virtual
+        // address via phys_to_virt_addr. We copy exactly buf.len() bytes.
         unsafe {
-            core::ptr::copy_nonoverlapping(phys_addr as *const u8, buf.as_mut_ptr(), buf.len());
+            let virt = crate::mm::phys_to_virt_addr(phys_addr);
+            core::ptr::copy_nonoverlapping(virt as *const u8, buf.as_mut_ptr(), buf.len());
         }
         true
     } else {

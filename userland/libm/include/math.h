@@ -27,6 +27,7 @@
 #define M_LN10      2.30258509299404568402
 #define M_SQRT2     1.41421356237309504880
 #define M_SQRT1_2   0.70710678118654752440
+#define M_SQRT3     1.73205080756887729353
 #define M_2_SQRTPI  1.12837916709551257390
 
 /* ========================================================================= */
@@ -80,6 +81,25 @@ double exp(double x);
 /* Trigonometric */
 double sin(double x);
 double cos(double x);
+double tan(double x);
+double asin(double x);
+double acos(double x);
+double atan(double x);
+double atan2(double y, double x);
+
+/* Logarithmic variants */
+double log10(double x);
+double log2(double x);
+
+/* Rounding and value manipulation */
+double round(double x);
+double trunc(double x);
+double copysign(double x, double y);
+double fmin(double x, double y);
+double fmax(double x, double y);
+double remainder(double x, double y);
+double fdim(double x, double y);
+double hypot(double x, double y);
 
 /* Decomposition */
 double frexp(double x, int *exp);
@@ -93,5 +113,25 @@ double modf(double x, double *iptr);
 float fabsf(float x);
 float floorf(float x);
 float ceilf(float x);
+float sqrtf(float x);
+float sinf(float x);
+float cosf(float x);
+float tanf(float x);
+float asinf(float x);
+float acosf(float x);
+float atanf(float x);
+float atan2f(float y, float x);
+float logf(float x);
+float log10f(float x);
+float log2f(float x);
+float expf(float x);
+float powf(float base, float exp);
+float fmodf(float x, float y);
+float roundf(float x);
+float truncf(float x);
+float copysignf(float x, float y);
+float fminf(float x, float y);
+float fmaxf(float x, float y);
+float hypotf(float x, float y);
 
 #endif /* _VERIDIAN_MATH_H */

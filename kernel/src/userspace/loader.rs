@@ -23,8 +23,6 @@ use crate::{
 /// Load and execute the init process
 #[cfg(feature = "alloc")]
 pub fn load_init_process() -> Result<ProcessId, KernelError> {
-    println!("[LOADER] Loading init process...");
-
     // Try to load init from various locations
     let init_paths = [
         "/sbin/init",
@@ -37,7 +35,7 @@ pub fn load_init_process() -> Result<ProcessId, KernelError> {
     for path in &init_paths {
         match load_user_program(path, &[], &[]) {
             Ok(pid) => {
-                println!("[LOADER] Successfully loaded init from {}", path);
+                println!("[LOADER] init from {} (PID {})", path, pid.0);
                 return Ok(pid);
             }
             Err(_e) => {
@@ -47,7 +45,6 @@ pub fn load_init_process() -> Result<ProcessId, KernelError> {
     }
 
     // If no init binary found, create a minimal init process
-    println!("[LOADER] Creating minimal init process");
     create_minimal_init()
 }
 
@@ -58,6 +55,14 @@ pub fn load_user_program(
     argv: &[&str],
     envp: &[&str],
 ) -> Result<ProcessId, KernelError> {
+    // RAW SERIAL DEBUG
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[LOAD_USER_PROG] path=");
+        crate::arch::x86_64::idt::raw_serial_str(path.as_bytes());
+        crate::arch::x86_64::idt::raw_serial_str(b"\n");
+    }
+
     // Open the file
     let file_node = get_vfs()
         .read()
@@ -118,6 +123,13 @@ pub fn load_user_program(
 
     let pid = lifecycle::create_process_with_options(options)?;
 
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[LOAD_USER_PROG] created pid=");
+        crate::arch::x86_64::idt::raw_serial_hex(pid.0);
+        crate::arch::x86_64::idt::raw_serial_str(b"\n");
+    }
+
     // Load the ELF segments into the process's address space.
     //
     // On RISC-V, the MMU is not enabled (satp = Bare mode), so ELF load
@@ -143,23 +155,11 @@ pub fn load_user_program(
 
         // Handle dynamic linking if needed
         if binary.dynamic {
-            println!("[LOADER] Program requires dynamic linking");
             if let Some(interpreter) = &binary.interpreter {
-                println!("[LOADER] Loading interpreter: {}", interpreter);
-
                 // Load the dynamic linker/interpreter
                 let _interp_entry = load_dynamic_linker(process, interpreter, &binary)?;
-
-                // When dynamic linking is used, execution starts at the interpreter
-                // The interpreter will then load the main program
-                println!("[LOADER] Interpreter loaded, entry: 0x{:x}", _interp_entry);
             }
         }
-
-        println!(
-            "[LOADER] Successfully loaded program: {} (PID {})",
-            name, pid.0
-        );
     }
 
     Ok(pid)
@@ -275,11 +275,6 @@ fn load_dynamic_linker(
     // This provides information about the main program to the dynamic linker
     setup_auxiliary_vector(process, _main_binary, interp_base)?;
 
-    println!(
-        "[LOADER] Dynamic linker loaded at 0x{:x}, entry: 0x{:x}",
-        interp_base, interp_entry
-    );
-
     Ok(interp_entry)
 }
 
@@ -322,19 +317,12 @@ fn setup_auxiliary_vector(
     // after the environment pointers. For now, we just prepare the data.
     // The actual stack setup happens in the setup_args function.
 
-    println!(
-        "[LOADER] Auxiliary vector prepared with {} entries",
-        _auxv.len()
-    );
-
     Ok(())
 }
 
 /// Create a minimal init process when no init binary is available
 #[cfg(feature = "alloc")]
 fn create_minimal_init() -> Result<ProcessId, KernelError> {
-    println!("[LOADER] Creating minimal init process");
-
     // Entry point for minimal init
     let entry_point = 0x200000; // User-space address
 
@@ -358,13 +346,9 @@ fn create_minimal_init() -> Result<ProcessId, KernelError> {
     // proper memory mapping.
     #[cfg(target_arch = "x86_64")]
     {
-        // x86_64 with bootloader 0.11: Cannot directly access user-space addresses
-        // The kernel boots to Stage 6 successfully, which demonstrates full
-        // initialization
-        println!("[LOADER] Minimal init process created (PID {})", pid.0);
-        println!(
-            "[LOADER] NOTE: x86_64 user-space init requires bootloader physical memory mapping"
-        );
+        // x86_64 with bootloader 0.11: Cannot directly access user-space
+        // addresses. Actual user-space execution uses the ELF loader +
+        // iretq path.
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -381,7 +365,6 @@ fn create_minimal_init() -> Result<ProcessId, KernelError> {
             let code_ptr = entry_point as *mut u32;
             *code_ptr = 0x14000000;
         }
-        println!("[LOADER] Minimal init process created (PID {})", pid.0);
     }
 
     #[cfg(target_arch = "riscv64")]
@@ -397,8 +380,6 @@ fn create_minimal_init() -> Result<ProcessId, KernelError> {
         // The init process PCB is created for bookkeeping. Actual user-space
         // code loading will require proper page table activation in a future
         // phase.
-        println!("[LOADER] Minimal init process created (PID {})", pid.0);
-        println!("[LOADER] NOTE: RISC-V user-space init requires page table activation");
     }
 
     Ok(pid)
@@ -407,8 +388,6 @@ fn create_minimal_init() -> Result<ProcessId, KernelError> {
 /// Load the shell program
 #[cfg(feature = "alloc")]
 pub fn load_shell() -> Result<ProcessId, KernelError> {
-    println!("[LOADER] Loading shell...");
-
     // Try to load a shell
     let shell_paths = [
         "/bin/vsh",  // VeridianOS shell
@@ -424,7 +403,6 @@ pub fn load_shell() -> Result<ProcessId, KernelError> {
             &["PATH=/bin:/usr/bin", "HOME=/", "TERM=veridian"],
         ) {
             Ok(pid) => {
-                println!("[LOADER] Successfully loaded shell from {}", path);
                 return Ok(pid);
             }
             Err(_) => {
@@ -434,7 +412,6 @@ pub fn load_shell() -> Result<ProcessId, KernelError> {
     }
 
     // If no shell found, create a minimal shell
-    println!("[LOADER] No shell binary found, creating minimal shell");
     create_minimal_shell()
 }
 

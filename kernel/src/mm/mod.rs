@@ -18,6 +18,7 @@ pub mod vmm;
 extern crate alloc;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // Re-export commonly used types
 pub use frame_allocator::{
@@ -29,6 +30,27 @@ pub use vas::VirtualAddressSpace;
 
 /// Page size constant (4KB)
 pub const PAGE_SIZE: usize = 4096;
+
+/// Physical memory offset: virtual = physical + PHYS_MEM_OFFSET.
+///
+/// On x86_64 with bootloader 0.11, physical memory is mapped at a dynamic
+/// offset provided by the bootloader. On AArch64 and RISC-V, physical
+/// memory is identity-mapped (offset = 0).
+static PHYS_MEM_OFFSET: AtomicU64 = AtomicU64::new(0);
+
+/// Set the physical memory offset (called once during early boot).
+pub fn set_phys_mem_offset(offset: u64) {
+    PHYS_MEM_OFFSET.store(offset, Ordering::Release);
+}
+
+/// Convert a physical address to a virtual pointer.
+///
+/// On x86_64, adds the bootloader's physical memory mapping offset.
+/// On AArch64/RISC-V, returns the address unchanged (identity-mapped).
+#[inline]
+pub fn phys_to_virt_addr(phys: u64) -> u64 {
+    phys + PHYS_MEM_OFFSET.load(Ordering::Acquire)
+}
 
 /// Virtual memory address
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

@@ -454,3 +454,217 @@ double modf(double x, double *iptr)
     }
     return frac;
 }
+
+/* ========================================================================= */
+/* Additional trigonometric functions                                         */
+/* ========================================================================= */
+
+double tan(double x)
+{
+    double s = sin(x);
+    double c = cos(x);
+    if (c == 0.0)
+        return (s >= 0.0) ? HUGE_VAL : -HUGE_VAL;
+    return s / c;
+}
+
+/*
+ * atan -- Arctangent via Taylor series with range reduction.
+ * atan(x) for |x| <= 1:  x - x^3/3 + x^5/5 - x^7/7 + ...
+ * For |x| > 1: atan(x) = pi/2 - atan(1/x)
+ */
+double atan(double x)
+{
+    if (isnan(x))
+        return NAN;
+    if (isinf(x))
+        return (x > 0.0) ? M_PI_2 : -M_PI_2;
+
+    int neg = 0;
+    if (x < 0.0) {
+        neg = 1;
+        x = -x;
+    }
+
+    int recip = 0;
+    if (x > 1.0) {
+        recip = 1;
+        x = 1.0 / x;
+    }
+
+    /* Further reduction: if x > tan(pi/12) ~ 0.2679, use
+     * atan(x) = pi/6 + atan((x - 1/sqrt(3)) / (1 + x/sqrt(3))) */
+    int reduced = 0;
+    if (x > 0.2679491924311227) {
+        reduced = 1;
+        x = (x * M_SQRT3 - 1.0) / (M_SQRT3 + x);
+    }
+
+    /* Taylor series for small x */
+    double x2 = x * x;
+    double term = x;
+    double sum = x;
+    for (int i = 1; i <= 25; i++) {
+        term *= -x2;
+        sum += term / (double)(2 * i + 1);
+        if (fabs(term) < 1e-16)
+            break;
+    }
+
+    if (reduced)
+        sum += M_PI / 6.0;
+    if (recip)
+        sum = M_PI_2 - sum;
+    if (neg)
+        sum = -sum;
+
+    return sum;
+}
+
+double atan2(double y, double x)
+{
+    if (isnan(x) || isnan(y))
+        return NAN;
+
+    if (x > 0.0)
+        return atan(y / x);
+    if (x < 0.0) {
+        if (y >= 0.0)
+            return atan(y / x) + M_PI;
+        else
+            return atan(y / x) - M_PI;
+    }
+    /* x == 0 */
+    if (y > 0.0)
+        return M_PI_2;
+    if (y < 0.0)
+        return -M_PI_2;
+    return 0.0;
+}
+
+double asin(double x)
+{
+    if (isnan(x) || x < -1.0 || x > 1.0)
+        return NAN;
+    if (x == 1.0)
+        return M_PI_2;
+    if (x == -1.0)
+        return -M_PI_2;
+
+    /* asin(x) = atan(x / sqrt(1 - x^2)) */
+    return atan(x / sqrt(1.0 - x * x));
+}
+
+double acos(double x)
+{
+    if (isnan(x) || x < -1.0 || x > 1.0)
+        return NAN;
+    /* acos(x) = pi/2 - asin(x) */
+    return M_PI_2 - asin(x);
+}
+
+/* ========================================================================= */
+/* Logarithmic variants                                                      */
+/* ========================================================================= */
+
+double log10(double x)
+{
+    return log(x) * M_LOG10E;
+}
+
+double log2(double x)
+{
+    return log(x) * M_LOG2E;
+}
+
+/* ========================================================================= */
+/* Rounding and value manipulation                                           */
+/* ========================================================================= */
+
+double round(double x)
+{
+    if (isnan(x) || isinf(x))
+        return x;
+    if (x >= 0.0)
+        return floor(x + 0.5);
+    else
+        return ceil(x - 0.5);
+}
+
+double trunc(double x)
+{
+    if (isnan(x) || isinf(x))
+        return x;
+    if (x >= 0.0)
+        return floor(x);
+    else
+        return ceil(x);
+}
+
+double copysign(double x, double y)
+{
+    double_bits dbx, dby;
+    dbx.d = x;
+    dby.d = y;
+    dbx.u = (dbx.u & ~(1ULL << 63)) | (dby.u & (1ULL << 63));
+    return dbx.d;
+}
+
+double fmin(double x, double y)
+{
+    if (isnan(x)) return y;
+    if (isnan(y)) return x;
+    return (x < y) ? x : y;
+}
+
+double fmax(double x, double y)
+{
+    if (isnan(x)) return y;
+    if (isnan(y)) return x;
+    return (x > y) ? x : y;
+}
+
+double remainder(double x, double y)
+{
+    if (isnan(x) || isnan(y) || isinf(x) || y == 0.0)
+        return NAN;
+    double q = round(x / y);
+    return x - q * y;
+}
+
+double fdim(double x, double y)
+{
+    if (isnan(x) || isnan(y))
+        return NAN;
+    return (x > y) ? (x - y) : 0.0;
+}
+
+double hypot(double x, double y)
+{
+    return sqrt(x * x + y * y);
+}
+
+/* ========================================================================= */
+/* Float (single-precision) wrappers                                         */
+/* ========================================================================= */
+
+float sqrtf(float x)  { return (float)sqrt((double)x); }
+float sinf(float x)   { return (float)sin((double)x); }
+float cosf(float x)   { return (float)cos((double)x); }
+float tanf(float x)   { return (float)tan((double)x); }
+float asinf(float x)  { return (float)asin((double)x); }
+float acosf(float x)  { return (float)acos((double)x); }
+float atanf(float x)  { return (float)atan((double)x); }
+float atan2f(float y, float x) { return (float)atan2((double)y, (double)x); }
+float logf(float x)   { return (float)log((double)x); }
+float log10f(float x) { return (float)log10((double)x); }
+float log2f(float x)  { return (float)log2((double)x); }
+float expf(float x)   { return (float)exp((double)x); }
+float powf(float b, float e) { return (float)pow((double)b, (double)e); }
+float fmodf(float x, float y) { return (float)fmod((double)x, (double)y); }
+float roundf(float x) { return (float)round((double)x); }
+float truncf(float x) { return (float)trunc((double)x); }
+float copysignf(float x, float y) { return (float)copysign((double)x, (double)y); }
+float fminf(float x, float y) { return (float)fmin((double)x, (double)y); }
+float fmaxf(float x, float y) { return (float)fmax((double)x, (double)y); }
+float hypotf(float x, float y) { return (float)hypot((double)x, (double)y); }

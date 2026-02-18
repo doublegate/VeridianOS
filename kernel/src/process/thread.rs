@@ -152,12 +152,13 @@ impl ThreadLocalStorage {
 
         // Zero-fill the TLS region (for .tbss equivalent)
         // SAFETY: `phys_addr` is the physical address of frames we just
-        // allocated. In the kernel's identity-mapped or physical memory
-        // window, this address is directly accessible. We write zeroes to
-        // `page_count * FRAME_SIZE` bytes, which is exactly the amount of
-        // memory we allocated. No other code references these frames yet.
+        // allocated. On x86_64, physical memory is mapped at a dynamic
+        // offset, so we convert via phys_to_virt_addr(). We write zeroes
+        // to `page_count * FRAME_SIZE` bytes, exactly what we allocated.
+        // No other code references these frames yet.
         unsafe {
-            core::ptr::write_bytes(phys_addr as *mut u8, 0, page_count * FRAME_SIZE);
+            let virt = crate::mm::phys_to_virt_addr(phys_addr as u64);
+            core::ptr::write_bytes(virt as *mut u8, 0, page_count * FRAME_SIZE);
         }
 
         self.base = phys_addr;
@@ -713,12 +714,14 @@ impl ThreadBuilder {
 
         // Zero the kernel stack region for safety
         // SAFETY: `kernel_stack_phys` is the physical address of frames we
-        // just allocated from the frame allocator. In the kernel's physical
-        // memory mapping, this is directly accessible. We write zeroes to
-        // exactly `kernel_stack_size` bytes. No other code references these
-        // frames yet.
+        // just allocated from the frame allocator. On x86_64 with bootloader
+        // 0.11, physical memory is mapped at a dynamic offset (not identity-
+        // mapped), so we must convert via phys_to_virt_addr(). We write
+        // zeroes to exactly `kernel_stack_size` bytes. No other code
+        // references these frames yet.
         unsafe {
-            core::ptr::write_bytes(kernel_stack_phys as *mut u8, 0, kernel_stack_size);
+            let virt = crate::mm::phys_to_virt_addr(kernel_stack_phys as u64);
+            core::ptr::write_bytes(virt as *mut u8, 0, kernel_stack_size);
         }
 
         let mut thread = Thread::new(

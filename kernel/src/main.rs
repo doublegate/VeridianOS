@@ -124,6 +124,11 @@ fn x86_64_kernel_entry(boot_info: &'static mut BootInfo) -> ! {
     serial_puts(b"PHYS_MEM...");
     if let Some(phys_mem_offset) = boot_info.physical_memory_offset.into_option() {
         serial_puts(b"OK\n");
+
+        // Store the physical memory offset for the MM subsystem.
+        // This must happen before any page table manipulation.
+        mm::set_phys_mem_offset(phys_mem_offset);
+
         // SAFETY: phys_mem_offset is the bootloader-provided physical
         // memory mapping base. Adding 0xb8000 gives the VGA text buffer
         // address. We write 5 u16 entries (character + attribute pairs)

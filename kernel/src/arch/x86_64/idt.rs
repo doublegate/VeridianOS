@@ -157,19 +157,67 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    // Raw serial output first (bypasses spinlock)
-    // SAFETY: Writing to COM1 data register at I/O port 0x3F8 for diagnostics.
+    // All output via raw serial to avoid spinlock deadlocks.
+    // SAFETY: Writing to COM1 data register at I/O port 0x3F8 is safe for
+    // diagnostics. We bypass the serial spinlock because we may have
+    // interrupted code that holds it.
     unsafe {
-        for &b in b"FATAL:GP\n" {
-            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nomem, nostack));
-        }
+        raw_serial_str(b"FATAL:GP err=0x");
+        raw_serial_hex(error_code);
+        raw_serial_str(b"\n");
+
+        // Read the saved interrupt frame directly from the stack.
+        // The x86_64 CPU pushes [SS, RSP, RFLAGS, CS, RIP] and the error
+        // code. The x86-interrupt calling convention passes us a reference
+        // to the saved frame. We cast through the InterruptStackFrame
+        // (which is a repr(C) wrapper around the saved values) to get at
+        // the raw u64 fields. The frame layout (from low address):
+        //   [0]: RIP, [1]: CS, [2]: RFLAGS, [3]: RSP, [4]: SS
+        let frame_base = &stack_frame as *const _ as *const u64;
+        raw_serial_str(b"RIP=0x");
+        raw_serial_hex(core::ptr::read_volatile(frame_base));
+        raw_serial_str(b" CS=0x");
+        raw_serial_hex(core::ptr::read_volatile(frame_base.add(1)));
+        raw_serial_str(b"\n");
+        raw_serial_str(b"RFLAGS=0x");
+        raw_serial_hex(core::ptr::read_volatile(frame_base.add(2)));
+        raw_serial_str(b"\nRSP=0x");
+        raw_serial_hex(core::ptr::read_volatile(frame_base.add(3)));
+        raw_serial_str(b" SS=0x");
+        raw_serial_hex(core::ptr::read_volatile(frame_base.add(4)));
+        raw_serial_str(b"\n");
     }
-    println!("FATAL: GENERAL PROTECTION FAULT");
-    println!("Error Code: {:#x}", error_code);
-    println!("{:#?}", stack_frame);
 
     loop {
         x86_64::instructions::hlt();
+    }
+}
+
+/// Write a byte string to COM1 serial, bypassing all locks.
+///
+/// # Safety
+/// Port 0x3F8 must be a valid COM1 data register.
+pub(crate) unsafe fn raw_serial_str(s: &[u8]) {
+    for &b in s {
+        core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nomem, nostack));
+    }
+}
+
+/// Write a u64 as hex to COM1 serial, bypassing all locks.
+///
+/// # Safety
+/// Port 0x3F8 must be a valid COM1 data register.
+pub(crate) unsafe fn raw_serial_hex(val: u64) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    // Print 16 hex digits (skip leading zeros after first nonzero)
+    let mut started = false;
+    for i in (0..16).rev() {
+        let nibble = ((val >> (i * 4)) & 0xF) as usize;
+        if nibble != 0 || started || i == 0 {
+            started = true;
+            let b = HEX[nibble];
+            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nomem, nostack));
+        }
     }
 }
 

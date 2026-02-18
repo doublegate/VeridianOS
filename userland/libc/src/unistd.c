@@ -14,6 +14,7 @@
 #include <string.h>
 #include <errno.h>
 #include <time.h>
+#include <sys/ioctl.h>
 
 /* ========================================================================= */
 /* Sleep                                                                     */
@@ -115,13 +116,12 @@ int gethostname(char *name, size_t len)
 
 int isatty(int fd)
 {
-    /*
-     * Minimal heuristic: fds 0-2 are TTYs.
-     * A real implementation would use ioctl(fd, TIOCGWINSZ, ...).
-     */
-    if (fd >= 0 && fd <= 2)
+    struct winsize ws;
+    if (ioctl(fd, TIOCGWINSZ, &ws) == 0)
         return 1;
-    errno = ENOTTY;
+    /* ioctl failed — check if errno suggests "not a terminal" */
+    if (errno != ENOTTY)
+        errno = ENOTTY;
     return 0;
 }
 

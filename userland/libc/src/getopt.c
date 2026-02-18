@@ -118,3 +118,107 @@ int getopt(int argc, char *const argv[], const char *optstring)
 
     return (unsigned char)c;
 }
+
+/* ========================================================================= */
+/* getopt_long                                                               */
+/* ========================================================================= */
+
+int getopt_long(int argc, char *const argv[], const char *optstring,
+                const struct option *longopts, int *longindex)
+{
+    optarg = NULL;
+
+    if (optind >= argc)
+        return -1;
+
+    const char *arg = argv[optind];
+
+    if (!arg || arg[0] != '-' || arg[1] == '\0')
+        return -1;
+
+    /* "--" terminates option scanning. */
+    if (arg[1] == '-' && arg[2] == '\0') {
+        optind++;
+        return -1;
+    }
+
+    /* Long option: starts with "--" */
+    if (arg[1] == '-' && arg[2] != '\0') {
+        const char *name = arg + 2;
+
+        /* Find '=' separator if present: --name=value */
+        const char *eq = NULL;
+        size_t name_len = 0;
+        for (const char *p = name; *p; p++) {
+            if (*p == '=') {
+                eq = p;
+                name_len = (size_t)(p - name);
+                break;
+            }
+        }
+        if (!eq)
+            name_len = strlen(name);
+
+        /* Search longopts for a match. */
+        int match_idx = -1;
+        for (int i = 0; longopts[i].name; i++) {
+            if (strlen(longopts[i].name) == name_len &&
+                memcmp(longopts[i].name, name, name_len) == 0) {
+                match_idx = i;
+                break;
+            }
+        }
+
+        if (match_idx < 0) {
+            if (opterr)
+                fprintf(stderr, "%s: unrecognized option '--%.*s'\n",
+                        argv[0], (int)name_len, name);
+            optind++;
+            return '?';
+        }
+
+        if (longindex)
+            *longindex = match_idx;
+
+        const struct option *opt = &longopts[match_idx];
+
+        /* Handle argument. */
+        if (opt->has_arg == no_argument) {
+            if (eq) {
+                if (opterr)
+                    fprintf(stderr, "%s: option '--%s' doesn't allow an argument\n",
+                            argv[0], opt->name);
+                optind++;
+                return '?';
+            }
+        } else if (opt->has_arg == required_argument) {
+            if (eq) {
+                optarg = (char *)(eq + 1);
+            } else {
+                optind++;
+                if (optind >= argc) {
+                    if (opterr)
+                        fprintf(stderr, "%s: option '--%s' requires an argument\n",
+                                argv[0], opt->name);
+                    return '?';
+                }
+                optarg = (char *)argv[optind];
+            }
+        } else {
+            /* optional_argument: only accept --name=value form */
+            if (eq)
+                optarg = (char *)(eq + 1);
+        }
+
+        optind++;
+
+        if (opt->flag) {
+            *opt->flag = opt->val;
+            return 0;
+        }
+        return opt->val;
+    }
+
+    /* Short option: delegate to getopt(). */
+    return getopt(argc, argv, optstring);
+}

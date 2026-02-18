@@ -1,9 +1,9 @@
 #!/bin/bash
-# build-rootfs.sh — Cross-compile test programs and package into rootfs.tar
+# build-rootfs.sh — Cross-compile user-space programs and package into rootfs.tar
 #
 # Usage: ./scripts/build-rootfs.sh [toolchain-prefix]
 #
-# Creates a TAR archive containing /bin/<test programs> for loading into
+# Creates a TAR archive containing /bin/<programs> for loading into
 # VeridianOS via the virtio-blk TAR loader at boot time.
 #
 # QEMU usage:
@@ -21,6 +21,8 @@ STRIP="${TOOLCHAIN_PREFIX}/bin/x86_64-veridian-strip"
 SYSROOT="${TOOLCHAIN_PREFIX}/sysroot"
 
 TESTS_DIR="${PROJECT_ROOT}/userland/tests"
+PROGRAMS_DIR="${PROJECT_ROOT}/userland/programs"
+LIBC_DIR="${PROJECT_ROOT}/userland/libc"
 BUILD_DIR="${PROJECT_ROOT}/target/rootfs-build"
 ROOTFS_TAR="${PROJECT_ROOT}/target/rootfs.tar"
 
@@ -34,55 +36,110 @@ fi
 echo "=== VeridianOS rootfs builder ==="
 echo "Compiler:  $CC"
 echo "Sysroot:   $SYSROOT"
-echo "Tests dir: $TESTS_DIR"
 echo ""
 
 # Clean and create build directory
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR/bin"
 
+# =========================================================================
 # Common compiler flags
-CFLAGS="-static -O2 --sysroot=${SYSROOT}"
+# =========================================================================
 
-# Compile each test program
-PROGRAMS=()
+LIBC_INCDIR="${LIBC_DIR}/include"
+SYS_INCDIR="${SYSROOT}/usr/include"
+LIBC_LIBDIR="${SYSROOT}/usr/lib"
+CRT0="${SYSROOT}/usr/lib/crt0.o"
+
+# Flags for libc-linked programs
+CFLAGS_LIBC="-std=c11 -static -O2"
+CFLAGS_LIBC+=" -nostdinc -isystem ${LIBC_INCDIR} -isystem ${SYS_INCDIR}"
+CFLAGS_LIBC+=" -fno-stack-protector -ffreestanding"
+CFLAGS_LIBC+=" -mno-red-zone -mcmodel=small"
+CFLAGS_LIBC+=" -Wall -Wextra -Wno-unused-parameter"
+
+LDFLAGS_LIBC="-static -nostdlib -L${LIBC_LIBDIR}"
+
+# Flags for no-libc programs
+CFLAGS_MINIMAL="-nostdlib -nostdinc -ffreestanding -static -O2"
+CFLAGS_MINIMAL+=" -mno-red-zone -mcmodel=small -Wall -Wextra"
+
+BUILT_COUNT=0
+
+# =========================================================================
+# Helper: compile a libc-linked program
+# =========================================================================
+compile_libc_program() {
+    local name="$1"
+    local src="$2"
+    local out="$BUILD_DIR/bin/$name"
+
+    echo -n "  Compiling $name... "
+    if "$CC" $CFLAGS_LIBC $LDFLAGS_LIBC -o "$out" "$CRT0" "$src" -lc 2>&1; then
+        "$STRIP" "$out" 2>/dev/null || true
+        local size
+        size=$(stat -c%s "$out" 2>/dev/null || stat -f%z "$out" 2>/dev/null)
+        echo "OK ($(( size / 1024 )) KB)"
+        BUILT_COUNT=$((BUILT_COUNT + 1))
+    else
+        echo "FAILED"
+    fi
+}
+
+# =========================================================================
+# 1. Compile user-space programs from programs/
+# =========================================================================
+echo "--- User-space programs ---"
+
+# Shell (/bin/sh)
+if [ -f "${PROGRAMS_DIR}/sh/sh.c" ]; then
+    compile_libc_program "sh" "${PROGRAMS_DIR}/sh/sh.c"
+fi
+
+# =========================================================================
+# 2. Compile test programs from tests/
+# =========================================================================
+echo "--- Test programs ---"
+
 for src in "$TESTS_DIR"/*.c; do
+    [ -f "$src" ] || continue
     name="$(basename "$src" .c)"
     out="$BUILD_DIR/bin/$name"
 
-    # minimal.c provides its own _start -- use -nostdlib -nostdinc
     if [ "$name" = "minimal" ]; then
-        EXTRA_FLAGS="-nostdlib -nostdinc -ffreestanding"
+        # minimal.c provides its own _start -- no libc
+        echo -n "  Compiling $name... "
+        if "$CC" $CFLAGS_MINIMAL -o "$out" "$src" 2>&1; then
+            "$STRIP" "$out" 2>/dev/null || true
+            local_size=$(stat -c%s "$out" 2>/dev/null || stat -f%z "$out" 2>/dev/null)
+            echo "OK ($(( local_size / 1024 )) KB)"
+            BUILT_COUNT=$((BUILT_COUNT + 1))
+        else
+            echo "FAILED"
+        fi
     else
-        EXTRA_FLAGS=""
-    fi
-
-    echo -n "  Compiling $name... "
-    if "$CC" $CFLAGS $EXTRA_FLAGS -o "$out" "$src" 2>&1; then
-        # Strip debug info to reduce size
-        "$STRIP" "$out" 2>/dev/null || true
-        size=$(stat -c%s "$out" 2>/dev/null || stat -f%z "$out" 2>/dev/null)
-        echo "OK ($(( size / 1024 )) KB)"
-        PROGRAMS+=("$name")
-    else
-        echo "FAILED"
+        compile_libc_program "$name" "$src"
     fi
 done
 
 echo ""
 
-if [ ${#PROGRAMS[@]} -eq 0 ]; then
+if [ "$BUILT_COUNT" -eq 0 ]; then
     echo "ERROR: No programs compiled successfully."
     exit 1
 fi
 
-# Create the TAR archive
-# The TAR loader in the kernel expects paths like /bin/hello, so we
-# create the archive from the build directory root with relative paths.
-echo "Creating rootfs.tar with ${#PROGRAMS[@]} programs..."
+# =========================================================================
+# 3. Create the TAR archive
+# =========================================================================
+
+echo "Creating rootfs.tar with $BUILT_COUNT programs..."
 cd "$BUILD_DIR"
 tar cf "$ROOTFS_TAR" bin/
 cd "$PROJECT_ROOT"
+
+# Also copy to project root for convenience
+cp "$ROOTFS_TAR" "${PROJECT_ROOT}/rootfs.tar"
 
 # Show contents
 echo ""

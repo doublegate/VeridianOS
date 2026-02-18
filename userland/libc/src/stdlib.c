@@ -546,6 +546,33 @@ int mkstemp(char *template)
     return -1;
 }
 
+char *mktemp(char *template)
+{
+    static const char chars[] =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    size_t len = strlen(template);
+
+    if (len < 6) {
+        errno = EINVAL;
+        template[0] = '\0';
+        return template;
+    }
+
+    char *suffix = template + len - 6;
+    for (int i = 0; i < 6; i++) {
+        if (suffix[i] != 'X') {
+            errno = EINVAL;
+            template[0] = '\0';
+            return template;
+        }
+    }
+
+    for (int i = 0; i < 6; i++)
+        suffix[i] = chars[(unsigned int)rand() % (sizeof(chars) - 1)];
+
+    return template;
+}
+
 /* ========================================================================= */
 /* Command execution                                                         */
 /* ========================================================================= */

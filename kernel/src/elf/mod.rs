@@ -26,6 +26,113 @@ impl Default for ElfLoader {
     }
 }
 
+/// Write data to user-space virtual addresses through the physical memory
+/// window.
+///
+/// User-space VAs (e.g., 0x400000) are only mapped in the process's page
+/// tables, not the kernel's CR3. This function translates each page through
+/// the process's page tables and writes via `phys_to_virt_addr()`.
+fn write_to_user_pages(
+    vas: &crate::mm::VirtualAddressSpace,
+    user_vaddr: u64,
+    data: &[u8],
+) -> Result<(), crate::error::KernelError> {
+    use crate::mm::{phys_to_virt_addr, vas::create_mapper_from_root_pub, VirtualAddress};
+
+    let pt_root = vas.get_page_table();
+    if pt_root == 0 {
+        return Err(crate::error::KernelError::InvalidArgument {
+            name: "vas",
+            value: "page table root is 0",
+        });
+    }
+
+    // SAFETY: pt_root is a valid L4 page table address set during VAS::init().
+    let mapper = unsafe { create_mapper_from_root_pub(pt_root) };
+    let mut offset = 0usize;
+
+    while offset < data.len() {
+        let vaddr = user_vaddr + offset as u64;
+        let page_vaddr = vaddr & !0xFFF;
+        let in_page_offset = (vaddr & 0xFFF) as usize;
+        let bytes_in_page = core::cmp::min(0x1000 - in_page_offset, data.len() - offset);
+
+        let (frame, _flags) = mapper
+            .translate_page(VirtualAddress(page_vaddr))
+            .map_err(|_| crate::error::KernelError::InvalidArgument {
+                name: "vaddr",
+                value: "page not mapped in VAS",
+            })?;
+
+        let phys_base = frame.as_u64() << 12;
+        let virt = phys_to_virt_addr(phys_base + in_page_offset as u64);
+
+        // SAFETY: virt points into the kernel's physical memory window at the
+        // physical frame backing the user page. We copy exactly bytes_in_page
+        // bytes, which does not exceed the page boundary.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                data.as_ptr().add(offset),
+                virt as *mut u8,
+                bytes_in_page,
+            );
+        }
+
+        offset += bytes_in_page;
+    }
+
+    Ok(())
+}
+
+/// Zero user-space memory through the physical memory window.
+///
+/// Same approach as `write_to_user_pages` but fills with zeroes (for BSS).
+fn zero_user_pages(
+    vas: &crate::mm::VirtualAddressSpace,
+    user_vaddr: u64,
+    size: usize,
+) -> Result<(), crate::error::KernelError> {
+    use crate::mm::{phys_to_virt_addr, vas::create_mapper_from_root_pub, VirtualAddress};
+
+    let pt_root = vas.get_page_table();
+    if pt_root == 0 {
+        return Err(crate::error::KernelError::InvalidArgument {
+            name: "vas",
+            value: "page table root is 0",
+        });
+    }
+
+    let mapper = unsafe { create_mapper_from_root_pub(pt_root) };
+    let mut offset = 0usize;
+
+    while offset < size {
+        let vaddr = user_vaddr + offset as u64;
+        let page_vaddr = vaddr & !0xFFF;
+        let in_page_offset = (vaddr & 0xFFF) as usize;
+        let bytes_in_page = core::cmp::min(0x1000 - in_page_offset, size - offset);
+
+        let (frame, _flags) = mapper
+            .translate_page(VirtualAddress(page_vaddr))
+            .map_err(|_| crate::error::KernelError::InvalidArgument {
+                name: "vaddr",
+                value: "page not mapped in VAS",
+            })?;
+
+        let phys_base = frame.as_u64() << 12;
+        let virt = phys_to_virt_addr(phys_base + in_page_offset as u64);
+
+        // SAFETY: virt points into the kernel's physical memory window.
+        // We zero exactly bytes_in_page bytes within the page boundary.
+        unsafe {
+            core::ptr::write_bytes(virt as *mut u8, 0, bytes_in_page);
+        }
+
+        offset += bytes_in_page;
+    }
+
+    Ok(())
+}
+
 impl ElfLoader {
     /// Create a new ELF loader
     pub fn new() -> Self {
@@ -72,31 +179,21 @@ impl ElfLoader {
                     vas.map_page(addr as usize, flags)?;
                 }
 
-                // Copy segment data from file
+                // Copy segment data from file via physical memory window.
+                // User-space VAs (e.g. 0x400000) are only mapped in the
+                // process's page tables, not the kernel's CR3. We translate
+                // each page through the process's page tables and write via
+                // phys_to_virt_addr().
                 if segment.file_size > 0 {
-                    // SAFETY: The virtual address pages were just mapped above via
-                    // vas.map_page(). The source pointer is within the validated `data`
-                    // slice (file_offset + file_size <= data.len() checked by parse).
-                    // copy_nonoverlapping is appropriate since source (ELF data) and
-                    // destination (newly mapped pages) do not overlap.
-                    unsafe {
-                        let dest = segment.virtual_addr as *mut u8;
-                        let src = data.as_ptr().add(segment.file_offset as usize);
-                        core::ptr::copy_nonoverlapping(src, dest, segment.file_size as usize);
-                    }
+                    let src_slice = &data[segment.file_offset as usize
+                        ..(segment.file_offset + segment.file_size) as usize];
+                    write_to_user_pages(vas, segment.virtual_addr, src_slice)?;
                 }
 
                 // Zero BSS portion if memory size > file size
                 if segment.memory_size > segment.file_size {
-                    // SAFETY: The memory range [virtual_addr..virtual_addr+memory_size]
-                    // was mapped above. The BSS region starts after file_size bytes and
-                    // extends to memory_size, which is within the mapped page range.
-                    // write_bytes zeroes the uninitialized BSS section as required by ELF.
-                    unsafe {
-                        let bss_start = (segment.virtual_addr + segment.file_size) as *mut u8;
-                        let bss_size = (segment.memory_size - segment.file_size) as usize;
-                        core::ptr::write_bytes(bss_start, 0, bss_size);
-                    }
+                    let bss_size = (segment.memory_size - segment.file_size) as usize;
+                    zero_user_pages(vas, segment.virtual_addr + segment.file_size, bss_size)?;
                 }
             }
         }

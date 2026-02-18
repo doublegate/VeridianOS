@@ -158,6 +158,18 @@ ldiv_t ldiv(long numer, long denom);
  */
 int mkstemp(char *tmpl);
 
+/**
+ * Generate a unique temporary filename (deprecated -- prefer mkstemp).
+ *
+ * Replaces the trailing "XXXXXX" in template with random characters.
+ * Does NOT create the file.  Subject to race conditions.
+ *
+ * @param tmpl  Mutable path ending in "XXXXXX".
+ * @return template on success (modified in place), or template with
+ *         first byte set to '\0' on error.
+ */
+char *mktemp(char *tmpl);
+
 /* ========================================================================= */
 /* Command execution                                                         */
 /* ========================================================================= */

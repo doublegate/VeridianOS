@@ -18,7 +18,7 @@ use super::{
     ProcessId, ProcessPriority,
 };
 #[allow(unused_imports)]
-use crate::{arch::context::ThreadContext, error::KernelError, println};
+use crate::{arch::context::ThreadContext, error::KernelError};
 
 /// Default stack sizes
 pub const DEFAULT_USER_STACK_SIZE: usize = 64 * 1024; // 64KB
@@ -95,6 +95,25 @@ pub fn create_process_with_options(
 
     let tid = main_thread.tid;
 
+    // Map the user stack pages into the process's VAS page tables.
+    // ThreadBuilder::build() allocates physical frames for the user stack
+    // but does not map them. We call vas.map_page() for each page, which
+    // allocates new physical frames and creates the PTE entries.
+    {
+        let user_base = main_thread.user_stack.base;
+        let user_size = main_thread.user_stack.size;
+        let num_pages = user_size / 4096;
+        let mut memory_space = process.memory_space.lock();
+        let stack_flags = crate::mm::PageFlags::PRESENT
+            | crate::mm::PageFlags::USER
+            | crate::mm::PageFlags::WRITABLE
+            | crate::mm::PageFlags::NO_EXECUTE;
+        for i in 0..num_pages {
+            let vaddr = user_base + i * 4096;
+            memory_space.map_page(vaddr, stack_flags)?;
+        }
+    }
+
     // Add thread to process
     process.add_thread(main_thread)?;
 
@@ -131,13 +150,6 @@ pub fn create_process_with_options(
 
     // Audit log: process creation
     crate::security::audit::log_process_create(pid.0, 0, 0);
-
-    // Log process creation only on x86_64 (other archs have noisy boot)
-    #[cfg(target_arch = "x86_64")]
-    println!(
-        "[PROCESS] Created process {} ({}) with main thread {}",
-        pid.0, options.name, tid.0
-    );
 
     Ok(pid)
 }
@@ -268,22 +280,12 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
         String::from(path)
     };
 
-    println!(
-        "[PROCESS] exec() called for process {} with path: {}",
-        process.pid.0, resolved_path
-    );
-
     // Step 1: Load new program from filesystem
     let file_data = fs::read_file(&resolved_path)
         .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
 
     // Step 1b: Check for shebang (#!) and delegate to interpreter if found
     if let Some((interpreter, opt_arg)) = parse_shebang(&file_data) {
-        println!(
-            "[PROCESS] Shebang detected: interpreter={}, arg={:?}",
-            interpreter, opt_arg
-        );
-
         // Build new argv: [interpreter, opt_arg?, script_path, original_argv[1..]]
         let mut new_argv: Vec<&str> = Vec::new();
         let interp_ref: &str = &interpreter;
@@ -354,11 +356,6 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
                 let _interp_entry = ElfLoader::load(&interp_data, &mut memory_space)?;
             }
 
-            println!(
-                "[PROCESS] Dynamic binary: interpreter={}, interp_base={:#x}, interp_entry={:#x}",
-                dyn_info.interp_path, dyn_info.interp_base, dyn_info.interp_entry
-            );
-
             // Entry point is the interpreter, not the main binary
             (dyn_info.interp_entry, Some(dyn_info.aux_vector))
         } else {
@@ -423,24 +420,6 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
     // Step 6: Reset signal handlers to defaults
     process.reset_signal_handlers();
 
-    // Step 7: Update process name to reflect new executable
-    #[cfg(feature = "alloc")]
-    {
-        // Extract filename from resolved path
-        let _name = resolved_path.rsplit('/').next().unwrap_or(&resolved_path);
-        // Note: Can't directly modify process.name since it's behind shared ref
-        // In a full impl, we'd need interior mutability here
-        println!(
-            "[PROCESS] Process {} now executing: {}",
-            process.pid.0, _name
-        );
-    }
-
-    println!(
-        "[PROCESS] exec() completed for process {}, entry: {:#x}",
-        process.pid.0, final_entry
-    );
-
     // The actual execution resumes when we return to user mode
     // The modified thread context will cause execution at the new entry point
     Ok(())
@@ -475,15 +454,16 @@ unsafe fn write_to_user_stack(
         return;
     }
 
-    // SAFETY: pt_root is a valid identity-mapped L4 page table address.
     let mapper = unsafe { super::super::mm::vas::create_mapper_from_root_pub(pt_root) };
     if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64)) {
         let page_offset = vaddr & 0xFFF;
         let phys_addr = (frame.as_u64() << 12) + page_offset as u64;
-        // SAFETY: phys_addr is identity-mapped and points to a valid writable
-        // page within the process's stack region.
+        // SAFETY: phys_addr is converted to a kernel-accessible virtual
+        // address via phys_to_virt_addr (required on x86_64 where physical
+        // memory is mapped at a dynamic offset, not identity-mapped).
         unsafe {
-            core::ptr::write(phys_addr as *mut usize, value);
+            let virt = crate::mm::phys_to_virt_addr(phys_addr);
+            core::ptr::write(virt as *mut usize, value);
         }
     }
 }
@@ -508,15 +488,16 @@ unsafe fn write_bytes_to_user_stack(
         return;
     }
 
-    // SAFETY: pt_root is a valid identity-mapped L4 page table address.
     let mapper = unsafe { super::super::mm::vas::create_mapper_from_root_pub(pt_root) };
     if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64)) {
         let page_offset = vaddr & 0xFFF;
         let phys_addr = (frame.as_u64() << 12) + page_offset as u64;
-        // SAFETY: phys_addr is identity-mapped and the destination has
-        // at least data.len() bytes available within the page.
+        // SAFETY: phys_addr is converted to a kernel-accessible virtual
+        // address via phys_to_virt_addr. The destination has at least
+        // data.len() bytes available within the page.
         unsafe {
-            core::ptr::copy_nonoverlapping(data.as_ptr(), phys_addr as *mut u8, data.len());
+            let virt = crate::mm::phys_to_virt_addr(phys_addr);
+            core::ptr::copy_nonoverlapping(data.as_ptr(), virt as *mut u8, data.len());
         }
     }
 }
@@ -661,14 +642,6 @@ fn setup_exec_stack(
             write_pos += core::mem::size_of::<usize>();
         }
     }
-
-    println!(
-        "[PROCESS] Stack setup: base={:#x}, top={:#x}, sp={:#x}, argc={}",
-        stack_base,
-        stack_top,
-        sp,
-        argv.len()
-    );
 
     Ok(sp)
 }

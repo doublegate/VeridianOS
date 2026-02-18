@@ -194,8 +194,15 @@ impl PageTableHierarchy {
 
         let l4_addr = PhysicalAddress::new(frame.as_u64() << 12);
 
-        // Zero the table (in real implementation, would map and clear)
-        // For now, assume it's zeroed
+        // Zero the L4 table so all entries start as "not present".
+        // Without this, garbage data in the frame looks like valid page
+        // table entries, causing the mapper to follow bogus pointers.
+        // SAFETY: The virtual address is computed via phys_to_virt_addr
+        // which adds the bootloader's physical memory mapping offset.
+        unsafe {
+            let virt = super::phys_to_virt_addr(l4_addr.as_u64());
+            core::ptr::write_bytes(virt as *mut u8, 0, 4096);
+        }
 
         Ok(Self { l4_table: l4_addr })
     }
@@ -393,6 +400,14 @@ impl PageMapper {
         let l4_table = unsafe { &mut *self.l4_table };
         let l4_entry = &mut l4_table[breakdown.l4_index];
 
+        // Intermediate page table entries must include USER if the leaf
+        // mapping is user-accessible. x86_64 checks USER on all 4 levels.
+        let intermediate_flags = if flags.contains(PageFlags::USER) {
+            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER
+        } else {
+            PageFlags::PRESENT | PageFlags::WRITABLE
+        };
+
         // Get or create L3 table
         if !l4_entry.is_present() {
             let frame =
@@ -402,7 +417,19 @@ impl PageMapper {
                         requested: 1,
                         available: 0,
                     })?;
-            l4_entry.set(frame, PageFlags::PRESENT | PageFlags::WRITABLE);
+            // Zero the new page table frame before use
+            // SAFETY: phys_to_virt_addr converts the physical frame address
+            // to a valid virtual address in the kernel's memory mapping.
+            unsafe {
+                let virt = super::phys_to_virt_addr(frame.as_u64() << 12);
+                core::ptr::write_bytes(virt as *mut u8, 0, 4096);
+            }
+            l4_entry.set(frame, intermediate_flags);
+        } else if flags.contains(PageFlags::USER) && !l4_entry.flags().contains(PageFlags::USER) {
+            // Existing entry needs USER bit added for user-space child mapping
+            let current_flags = l4_entry.flags();
+            let addr = l4_entry.addr().unwrap();
+            l4_entry.set_addr(addr, current_flags | PageFlags::USER);
         }
         // The entry was just set to PRESENT (either already was, or we set it above),
         // so `addr()` is guaranteed to return `Some`.
@@ -410,13 +437,11 @@ impl PageMapper {
             expected: "L4 entry present",
             actual: "not present",
         })?;
-        // SAFETY: `l3_phys` is the physical address extracted from a present page
-        // table entry. In a kernel with identity-mapped or physically-mapped memory,
-        // this physical address is directly accessible as a virtual address. The
-        // frame was either pre-existing (valid page table) or freshly allocated and
-        // zeroed. The resulting reference has exclusive access because we hold the
-        // only mutable reference to this page table hierarchy.
-        let l3_table = unsafe { &mut *(l3_phys.as_u64() as *mut PageTable) };
+        // SAFETY: phys_to_virt_addr converts the physical address to the
+        // corresponding virtual address. The frame is either pre-existing
+        // (valid page table) or freshly allocated and zeroed above.
+        let l3_table =
+            unsafe { &mut *(super::phys_to_virt_addr(l3_phys.as_u64()) as *mut PageTable) };
         let l3_entry = &mut l3_table[breakdown.l3_index];
 
         // Get or create L2 table
@@ -428,17 +453,23 @@ impl PageMapper {
                         requested: 1,
                         available: 0,
                     })?;
-            l3_entry.set(frame, PageFlags::PRESENT | PageFlags::WRITABLE);
+            // Zero the new page table frame before use
+            unsafe {
+                let virt = super::phys_to_virt_addr(frame.as_u64() << 12);
+                core::ptr::write_bytes(virt as *mut u8, 0, 4096);
+            }
+            l3_entry.set(frame, intermediate_flags);
+        } else if flags.contains(PageFlags::USER) && !l3_entry.flags().contains(PageFlags::USER) {
+            let current_flags = l3_entry.flags();
+            let addr = l3_entry.addr().unwrap();
+            l3_entry.set_addr(addr, current_flags | PageFlags::USER);
         }
         let l2_phys = l3_entry.addr().ok_or(KernelError::InvalidState {
             expected: "L3 entry present",
             actual: "not present",
         })?;
-        // SAFETY: Same invariants as the L3 table dereference above. `l2_phys` is
-        // a physical address from a present page table entry, accessible via
-        // identity/physical mapping. Exclusive access is maintained through the
-        // page table hierarchy ownership.
-        let l2_table = unsafe { &mut *(l2_phys.as_u64() as *mut PageTable) };
+        let l2_table =
+            unsafe { &mut *(super::phys_to_virt_addr(l2_phys.as_u64()) as *mut PageTable) };
         let l2_entry = &mut l2_table[breakdown.l2_index];
 
         // Get or create L1 table
@@ -450,16 +481,23 @@ impl PageMapper {
                         requested: 1,
                         available: 0,
                     })?;
-            l2_entry.set(frame, PageFlags::PRESENT | PageFlags::WRITABLE);
+            // Zero the new page table frame before use
+            unsafe {
+                let virt = super::phys_to_virt_addr(frame.as_u64() << 12);
+                core::ptr::write_bytes(virt as *mut u8, 0, 4096);
+            }
+            l2_entry.set(frame, intermediate_flags);
+        } else if flags.contains(PageFlags::USER) && !l2_entry.flags().contains(PageFlags::USER) {
+            let current_flags = l2_entry.flags();
+            let addr = l2_entry.addr().unwrap();
+            l2_entry.set_addr(addr, current_flags | PageFlags::USER);
         }
         let l1_phys = l2_entry.addr().ok_or(KernelError::InvalidState {
             expected: "L2 entry present",
             actual: "not present",
         })?;
-        // SAFETY: Same invariants as L3 and L2 dereferences. `l1_phys` is a valid
-        // physical address from a present page table entry. The L1 table is the
-        // leaf level containing the final page mappings.
-        let l1_table = unsafe { &mut *(l1_phys.as_u64() as *mut PageTable) };
+        let l1_table =
+            unsafe { &mut *(super::phys_to_virt_addr(l1_phys.as_u64()) as *mut PageTable) };
 
         // Map the page
         let entry = &mut l1_table[breakdown.l1_index];
@@ -498,8 +536,8 @@ impl PageMapper {
             expected: "L4 entry has address",
             actual: "no address",
         })?;
-        // SAFETY: l3_phys is from a present L4 entry, identity-mapped.
-        let l3_table = unsafe { &*(l3_phys.as_u64() as *const PageTable) };
+        let l3_table =
+            unsafe { &*(super::phys_to_virt_addr(l3_phys.as_u64()) as *const PageTable) };
         let l3_entry = &l3_table[breakdown.l3_index];
         if !l3_entry.is_present() {
             return Err(KernelError::UnmappedMemory {
@@ -511,8 +549,8 @@ impl PageMapper {
             expected: "L3 entry has address",
             actual: "no address",
         })?;
-        // SAFETY: l2_phys is from a present L3 entry, identity-mapped.
-        let l2_table = unsafe { &*(l2_phys.as_u64() as *const PageTable) };
+        let l2_table =
+            unsafe { &*(super::phys_to_virt_addr(l2_phys.as_u64()) as *const PageTable) };
         let l2_entry = &l2_table[breakdown.l2_index];
         if !l2_entry.is_present() {
             return Err(KernelError::UnmappedMemory {
@@ -524,8 +562,8 @@ impl PageMapper {
             expected: "L2 entry has address",
             actual: "no address",
         })?;
-        // SAFETY: l1_phys is from a present L2 entry, identity-mapped.
-        let l1_table = unsafe { &*(l1_phys.as_u64() as *const PageTable) };
+        let l1_table =
+            unsafe { &*(super::phys_to_virt_addr(l1_phys.as_u64()) as *const PageTable) };
         let entry = &l1_table[breakdown.l1_index];
 
         let frame = entry.frame().ok_or(KernelError::UnmappedMemory {
@@ -556,7 +594,7 @@ impl PageMapper {
         }
 
         let l3_phys = l3_phys_from_entry(l4_entry, page)?;
-        let l3_table = unsafe { &*(l3_phys as *const PageTable) };
+        let l3_table = unsafe { &*(super::phys_to_virt_addr(l3_phys as u64) as *const PageTable) };
         let l3_entry = &l3_table[breakdown.l3_index];
         if !l3_entry.is_present() {
             return Err(KernelError::UnmappedMemory {
@@ -565,7 +603,7 @@ impl PageMapper {
         }
 
         let l2_phys = l3_phys_from_entry(l3_entry, page)?;
-        let l2_table = unsafe { &*(l2_phys as *const PageTable) };
+        let l2_table = unsafe { &*(super::phys_to_virt_addr(l2_phys as u64) as *const PageTable) };
         let l2_entry = &l2_table[breakdown.l2_index];
         if !l2_entry.is_present() {
             return Err(KernelError::UnmappedMemory {
@@ -574,9 +612,8 @@ impl PageMapper {
         }
 
         let l1_phys = l3_phys_from_entry(l2_entry, page)?;
-        // SAFETY: l1_phys is from a present L2 entry, identity-mapped.
-        // We need mutable access to update the entry.
-        let l1_table = unsafe { &mut *(l1_phys as *mut PageTable) };
+        let l1_table =
+            unsafe { &mut *(super::phys_to_virt_addr(l1_phys as u64) as *mut PageTable) };
         let entry = &mut l1_table[breakdown.l1_index];
 
         let frame = entry.frame().ok_or(KernelError::UnmappedMemory {
@@ -609,11 +646,8 @@ impl PageMapper {
             expected: "L4 entry has address",
             actual: "no address",
         })?;
-        // SAFETY: `l3_phys` is the physical address from a verified-present L4 entry.
-        // In the kernel's identity/physical memory mapping, this address is directly
-        // accessible. The page table it points to was either set up during boot or
-        // allocated by `map_page`, so it contains a valid PageTable structure.
-        let l3_table = unsafe { &mut *(l3_phys.as_u64() as *mut PageTable) };
+        let l3_table =
+            unsafe { &mut *(super::phys_to_virt_addr(l3_phys.as_u64()) as *mut PageTable) };
         let l3_entry = &l3_table[breakdown.l3_index];
         if !l3_entry.is_present() {
             return Err(KernelError::UnmappedMemory {
@@ -625,9 +659,8 @@ impl PageMapper {
             expected: "L3 entry has address",
             actual: "no address",
         })?;
-        // SAFETY: Same invariants as L3 dereference. `l2_phys` is from a verified-
-        // present L3 entry pointing to a valid L2 page table.
-        let l2_table = unsafe { &mut *(l2_phys.as_u64() as *mut PageTable) };
+        let l2_table =
+            unsafe { &mut *(super::phys_to_virt_addr(l2_phys.as_u64()) as *mut PageTable) };
         let l2_entry = &l2_table[breakdown.l2_index];
         if !l2_entry.is_present() {
             return Err(KernelError::UnmappedMemory {
@@ -639,9 +672,8 @@ impl PageMapper {
             expected: "L2 entry has address",
             actual: "no address",
         })?;
-        // SAFETY: Same invariants as above. `l1_phys` is from a verified-present L2
-        // entry pointing to a valid L1 (leaf) page table.
-        let l1_table = unsafe { &mut *(l1_phys.as_u64() as *mut PageTable) };
+        let l1_table =
+            unsafe { &mut *(super::phys_to_virt_addr(l1_phys.as_u64()) as *mut PageTable) };
 
         // Unmap the page
         let entry = &mut l1_table[breakdown.l1_index];

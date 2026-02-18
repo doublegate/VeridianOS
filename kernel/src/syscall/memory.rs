@@ -157,7 +157,7 @@ pub fn sys_mmap(
             // Write file data into the mapped region via physical memory.
             // The pages are mapped in the process's page tables. We walk the
             // page tables to find the physical frames and write through the
-            // kernel's identity-mapped physical window.
+            // kernel's physical memory window (phys_to_virt_addr).
             let pt_root = memory_space.get_page_table();
             if pt_root != 0 {
                 let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
@@ -166,11 +166,12 @@ pub fn sys_mmap(
                     if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64))
                     {
                         let phys_addr = frame.as_u64() << 12;
+                        let virt = crate::mm::phys_to_virt_addr(phys_addr);
                         let copy_len = PAGE_SIZE.min(buf.len() - page_off);
                         unsafe {
                             core::ptr::copy_nonoverlapping(
                                 buf[page_off..].as_ptr(),
-                                phys_addr as *mut u8,
+                                virt as *mut u8,
                                 copy_len,
                             );
                         }
