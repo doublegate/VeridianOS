@@ -433,19 +433,32 @@ fn get_audit_timestamp() -> u64 {
 /// Events are checked against the active filter. If accepted, they are
 /// stored in the circular in-memory buffer and optionally written to
 /// persistent storage.
+///
+/// Uses try_lock() with graceful degradation to avoid deadlocks when called
+/// from syscall return paths or interrupt contexts. If locks are held,
+/// the event is skipped rather than blocking.
 pub fn log_event(event: AuditEvent) {
     if !AUDIT_ENABLED.load(Ordering::Acquire) {
         return;
     }
 
-    // Check filter
-    {
-        let filter = AUDIT_FILTER.lock();
-        if !filter.is_enabled(event.event_type) {
+    // Try to acquire filter lock without blocking. If lock contention occurs,
+    // skip this event to avoid deadlock during syscall return path or
+    // interrupt context. This is safe because audit logging is best-effort.
+    let filter = match AUDIT_FILTER.try_lock() {
+        Some(f) => f,
+        None => {
+            // Lock contention - skip event to avoid deadlock
             AUDIT_STATS.record_filtered();
             return;
         }
+    };
+
+    if !filter.is_enabled(event.event_type) {
+        AUDIT_STATS.record_filtered();
+        return;
     }
+    drop(filter); // Release early
 
     // Record statistics
     AUDIT_STATS.record_event(event.event_type);
@@ -458,16 +471,19 @@ pub fn log_event(event: AuditEvent) {
     // Write to persistent storage (best-effort, don't fail if VFS not ready)
     persist_event(&event);
 
-    // Store in circular buffer
-    let mut log = AUDIT_LOG.lock();
-    let head = AUDIT_HEAD.load(Ordering::Relaxed);
-    log[head] = Some(event);
-    AUDIT_HEAD.store((head + 1) % MAX_AUDIT_LOG, Ordering::Relaxed);
+    // Store in circular buffer with try_lock. If the buffer lock is held,
+    // the event is dropped (acceptable for non-critical events).
+    if let Some(mut log) = AUDIT_LOG.try_lock() {
+        let head = AUDIT_HEAD.load(Ordering::Relaxed);
+        log[head] = Some(event);
+        AUDIT_HEAD.store((head + 1) % MAX_AUDIT_LOG, Ordering::Relaxed);
 
-    let count = AUDIT_COUNT.load(Ordering::Relaxed);
-    if count < MAX_AUDIT_LOG {
-        AUDIT_COUNT.store(count + 1, Ordering::Relaxed);
+        let count = AUDIT_COUNT.load(Ordering::Relaxed);
+        if count < MAX_AUDIT_LOG {
+            AUDIT_COUNT.store(count + 1, Ordering::Relaxed);
+        }
     }
+    // If try_lock fails, event is dropped (graceful degradation)
 }
 
 /// Check if an event is critical enough to trigger alerts.

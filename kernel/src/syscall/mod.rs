@@ -450,7 +450,9 @@ pub extern "C" fn syscall_handler(
         Err(_) => Err(SyscallError::InvalidSyscall),
     };
 
-    // Audit log: syscall with result
+    // Audit log: syscall with result.
+    // Safe to call even from syscall context - uses try_lock() with graceful
+    // fallback if locks are held, preventing deadlocks during syscall return.
     let success = result.is_ok();
     if !success {
         SYSCALL_ERRORS.fetch_add(1, Ordering::Relaxed);

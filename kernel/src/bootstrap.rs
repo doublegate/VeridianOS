@@ -495,6 +495,14 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
 
     kprintln!("[BOOTSTRAP] Scheduler activated - entering main scheduling loop");
 
+    // Phase 4A: Try to load a user-space binary from the rootfs.
+    // This is the critical gate for self-hosting -- verifies that cross-compiled
+    // ELF binaries can be loaded and scheduled on VeridianOS.
+    #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+    {
+        test_user_binary_load();
+    }
+
     Ok(())
 }
 
@@ -628,6 +636,156 @@ fn load_rootfs_from_disk() {
         Err(_e) => {
             kprintln!("[ROOTFS] TAR parse error");
         }
+    }
+}
+
+/// Phase 4A gate test: try to load user-space ELF binaries from rootfs.
+///
+/// This verifies the full pipeline: VFS file read -> ELF parse -> process
+/// creation -> VAS page mapping -> ELF segment loading.
+///
+/// Tests both `/bin/minimal` (no-libc) and `/bin/sh -c "echo ..."`
+/// (libc-linked).
+#[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+fn test_user_binary_load() {
+    use crate::fs::get_vfs;
+
+    // Test 1: /bin/minimal (no-libc, provides its own _start)
+    let vfs = get_vfs().read();
+    match vfs.resolve_path("/bin/minimal") {
+        Ok(_node) => {
+            drop(vfs);
+            match crate::userspace::load_user_program("/bin/minimal", &["minimal"], &["PATH=/bin"])
+            {
+                Ok(pid) => {
+                    run_user_process(pid);
+                }
+                Err(e) => {
+                    kprintln!("[EXEC-TEST] /bin/minimal FAILED: {:?}", e);
+                }
+            }
+        }
+        Err(_) => {
+            drop(vfs);
+            kprintln!("[EXEC-TEST] /bin/minimal not found in VFS (no rootfs.tar?)");
+        }
+    }
+
+    kprintln!("[EXEC-TEST] First test returned, trying /bin/sh...");
+
+    // Test 2: /bin/sh -c "echo SHELL_TEST_PASS" (libc-linked shell)
+    let vfs = get_vfs().read();
+    match vfs.resolve_path("/bin/sh") {
+        Ok(_node) => {
+            drop(vfs);
+            kprintln!("[EXEC-TEST] /bin/sh found, calling load_user_program...");
+            match crate::userspace::load_user_program(
+                "/bin/sh",
+                &["sh", "-c", "echo SHELL_TEST_PASS"],
+                &["PATH=/bin:/usr/bin", "HOME=/", "TERM=veridian"],
+            ) {
+                Ok(pid) => {
+                    kprintln!(
+                        "[EXEC-TEST] load_user_program returned pid={}, calling \
+                         run_user_process...",
+                        pid.0
+                    );
+                    run_user_process(pid);
+                }
+                Err(e) => {
+                    kprintln!("[EXEC-TEST] /bin/sh FAILED: {:?}", e);
+                }
+            }
+        }
+        Err(_) => {
+            drop(vfs);
+            kprintln!("[EXEC-TEST] /bin/sh not found in VFS");
+        }
+    }
+}
+
+/// Switch to a user process's address space and enter Ring 3.
+///
+/// Uses `enter_usermode_returnable` which saves the boot context (callee-saved
+/// registers, RSP, CR3) before iretq. When the user process calls `sys_exit`,
+/// the boot context is restored and this function returns normally, allowing
+/// sequential execution of multiple user-mode programs during bootstrap.
+#[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+fn run_user_process(pid: crate::process::ProcessId) {
+    use crate::process::get_process;
+
+    kprintln!("[RUN_USER_PROC] pid={}", pid.0);
+
+    let process = match get_process(pid) {
+        Some(p) => p,
+        None => {
+            kprintln!("[RUN_USER_PROC] process not found");
+            return;
+        }
+    };
+
+    // Get the process's page table root (physical address for CR3)
+    let vas = process.memory_space.lock();
+    let pt_root = vas.get_page_table();
+    if pt_root == 0 {
+        kprintln!("[RUN_USER_PROC] pt_root=0");
+        return;
+    }
+
+    // Get entry point and user stack from the process's first thread
+    let threads = process.threads.lock();
+    let thread = match threads.values().next() {
+        Some(t) => t,
+        None => {
+            kprintln!("[RUN_USER_PROC] no threads");
+            return;
+        }
+    };
+
+    let entry_point = {
+        use crate::arch::context::ThreadContext;
+        thread.context.lock().get_instruction_pointer() as u64
+    };
+    // User stack top (stack grows down from top)
+    let user_stack_top = thread.user_stack.top() as u64;
+
+    // Drop locks before entering user mode
+    drop(threads);
+    drop(vas);
+
+    // User CS and SS selectors (Ring 3)
+    let user_cs: u64 = 0x33; // GDT index 6, RPL 3
+    let user_ss: u64 = 0x2B; // GDT index 5, RPL 3
+
+    kprintln!(
+        "[RUN_USER_PROC] entry={:#x} stack={:#x} cr3={:#x}",
+        entry_point,
+        user_stack_top,
+        pt_root
+    );
+
+    // Enter Ring 3 via iretq with returnable context.
+    // The naked function saves callee-saved registers, RSP, and CR3 to
+    // globals, sets per-CPU kernel_rsp, switches CR3, and does iretq.
+    // When the user process calls sys_exit, boot_return_to_kernel()
+    // restores the saved context and this call "returns" normally.
+    //
+    // SAFETY: All preconditions for enter_usermode_returnable are met:
+    // - entry_point is in the process's user-space page tables
+    // - user_stack_top points to the top of the user stack
+    // - CS/SS are valid Ring 3 selectors from the GDT
+    // - pt_root is a valid L4 page table with kernel mappings preserved
+    // - kernel_rsp_ptr points to the per-CPU kernel_rsp field
+    let kernel_rsp_ptr = crate::arch::x86_64::syscall::per_cpu_data_ptr() as u64;
+    unsafe {
+        crate::arch::x86_64::usermode::enter_usermode_returnable(
+            entry_point,
+            user_stack_top,
+            user_cs,
+            user_ss,
+            pt_root,
+            kernel_rsp_ptr,
+        );
     }
 }
 

@@ -4,8 +4,23 @@
 //! the CPU from Ring 0 to Ring 3. Also provides `map_user_page()` for
 //! creating user-accessible page table entries through the bootloader's
 //! physical memory mapping.
+//!
+//! `enter_usermode_returnable()` is a variant that saves the boot context
+//! (callee-saved registers, RSP, CR3) so that `sys_exit` can restore it
+//! and effectively "return" to the caller, allowing sequential user-mode
+//! program execution during bootstrap.
 
-use core::arch::asm;
+use core::{
+    arch::asm,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+/// Saved bootstrap RSP for returning after a user process exits.
+/// Set by `enter_usermode_returnable()`, consumed by `boot_return_to_kernel()`.
+pub static BOOT_RETURN_RSP: AtomicU64 = AtomicU64::new(0);
+
+/// Saved bootstrap CR3 for returning after a user process exits.
+pub static BOOT_RETURN_CR3: AtomicU64 = AtomicU64::new(0);
 
 /// Enter user mode for the first time via iretq.
 ///
@@ -39,10 +54,12 @@ pub unsafe fn enter_usermode(entry_point: u64, user_stack: u64, user_cs: u64, us
         // Set data segment registers to user data selector
         "mov ds, {ss:r}",
         "mov es, {ss:r}",
-        // Clear FS and GS (will be set up later for TLS if needed)
-        "xor eax, eax",
-        "mov fs, ax",
-        "mov gs, ax",
+        // Clear FS and GS (will be set up later for TLS if needed).
+        // Use a dedicated zero operand to avoid clobbering other operands
+        // (the compiler may place rflags in eax, so "xor eax, eax" would
+        // destroy it).
+        "mov fs, {zero:x}",
+        "mov gs, {zero:x}",
         // Build iretq frame on current kernel stack:
         //   [RSP+0]  RIP    - user entry point
         //   [RSP+8]  CS     - user code segment (Ring 3)
@@ -60,8 +77,151 @@ pub unsafe fn enter_usermode(entry_point: u64, user_stack: u64, user_cs: u64, us
         rflags = in(reg) 0x202u64,
         cs = in(reg) user_cs,
         rip = in(reg) entry_point,
+        zero = in(reg) 0u64,
         options(noreturn)
     );
+}
+
+/// Enter user mode with the ability to return when the process exits.
+///
+/// Saves callee-saved registers and the current RSP/CR3 to globals before
+/// performing iretq. When the user process calls `sys_exit`, the
+/// `boot_return_to_kernel()` function restores the saved context, making
+/// this function appear to return normally.
+///
+/// # Arguments
+/// - `entry_point`: User-space RIP
+/// - `user_stack`: User-space RSP
+/// - `user_cs`: User CS selector (Ring 3)
+/// - `user_ss`: User SS selector (Ring 3)
+/// - `process_cr3`: Physical address of the process's L4 page table
+/// - `kernel_rsp_ptr`: Pointer to per-CPU kernel_rsp (written after context
+///   save)
+///
+/// # Safety
+/// Same requirements as `enter_usermode`, plus:
+/// - `process_cr3` must be a valid L4 page table with both user and kernel
+///   mappings
+/// - `kernel_rsp_ptr` must point to a valid u64 for storing the kernel RSP
+#[unsafe(naked)]
+pub unsafe extern "C" fn enter_usermode_returnable(
+    _entry_point: u64,    // rdi
+    _user_stack: u64,     // rsi
+    _user_cs: u64,        // rdx
+    _user_ss: u64,        // rcx
+    _process_cr3: u64,    // r8
+    _kernel_rsp_ptr: u64, // r9
+) {
+    core::arch::naked_asm!(
+        // Save callee-saved registers (System V ABI)
+        "push rbp",
+        "push rbx",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
+
+        // Save boot CR3 to global
+        "mov rax, cr3",
+        "lea r12, [rip + {boot_cr3}]",
+        "mov [r12], rax",
+
+        // Save boot RSP to global (points past callee-saved pushes)
+        "lea r12, [rip + {boot_rsp}]",
+        "mov [r12], rsp",
+
+        // Update per-CPU kernel_rsp via pointer passed in r9
+        "mov [r9], rsp",
+
+        // Switch to process page tables
+        "mov cr3, r8",
+
+        // Set segment registers for user mode
+        "mov ds, ecx",
+        "mov es, ecx",
+        "xor eax, eax",
+        "mov fs, ax",
+        "mov gs, ax",
+
+        // Build iretq frame on stack
+        "push rcx",       // SS
+        "push rsi",       // RSP (user stack)
+        "push 0x202",     // RFLAGS (IF enabled)
+        "push rdx",       // CS
+        "push rdi",       // RIP (entry point)
+
+        "iretq",
+
+        boot_cr3 = sym BOOT_RETURN_CR3,
+        boot_rsp = sym BOOT_RETURN_RSP,
+    );
+}
+
+/// Restore the boot context saved by `enter_usermode_returnable` and return
+/// to the bootstrap code.
+///
+/// Called from `sys_exit` after cleaning up the exiting process. This function:
+/// 1. Restores the boot CR3 (switching back to boot page tables)
+/// 2. Restores kernel segment registers (DS, ES, FS, GS cleared)
+/// 3. Does `swapgs` to balance the swapgs from `syscall_entry`
+/// 4. Restores RSP to the saved value (past the callee-saved pushes)
+/// 5. Pops callee-saved registers and returns to the caller of
+///    `enter_usermode_returnable`
+///
+/// # Safety
+/// - Must only be called when `BOOT_RETURN_RSP` and `BOOT_RETURN_CR3` are valid
+/// - Must be called from kernel mode on the kernel stack set by syscall_entry
+/// - The saved boot stack frame must still be intact
+pub unsafe fn boot_return_to_kernel() -> ! {
+    // RAW SERIAL DIAGNOSTIC: Trace boot return entry
+    crate::arch::x86_64::idt::raw_serial_str(b"[BOOT_RETURN ENTRY]\n");
+
+    let rsp = BOOT_RETURN_RSP.load(Ordering::SeqCst);
+    let cr3 = BOOT_RETURN_CR3.load(Ordering::SeqCst);
+
+    // NOTE: Cannot use println! here - would access locks/memory with wrong CR3
+    // crate::println!("[BOOT-RETURN] RSP={:#x} CR3={:#x}", rsp, cr3);
+
+    // Clear the boot return context (one-shot)
+    BOOT_RETURN_RSP.store(0, Ordering::SeqCst);
+    BOOT_RETURN_CR3.store(0, Ordering::SeqCst);
+
+    // SAFETY: cr3 is the boot page table address saved before entering user
+    // mode. rsp points to the stack with 6 callee-saved registers and the
+    // return address below them. We restore kernel segment registers and
+    // balance the swapgs from syscall_entry. The swapgs must come BEFORE
+    // clearing GS so we don't corrupt KERNEL_GS_BASE. After restoring RSP
+    // and popping registers, ret returns to the caller of
+    // enter_usermode_returnable.
+    asm!(
+        "mov cr3, {cr3}",     // Restore boot page tables
+        "swapgs",              // Balance syscall_entry's swapgs (before touching GS!)
+        "mov ax, 0x10",       // Kernel data segment (GDT index 2, RPL 0)
+        "mov ds, ax",         // Restore kernel DS
+        "mov es, ax",         // Restore kernel ES
+        "xor eax, eax",       // Zero FS and GS
+        "mov fs, ax",
+        "mov gs, ax",
+        "mov rsp, {rsp}",     // Restore saved boot RSP
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop rbx",
+        "pop rbp",
+        "ret",                 // Return to caller of enter_usermode_returnable
+        cr3 = in(reg) cr3,
+        rsp = in(reg) rsp,
+        options(noreturn)
+    );
+}
+
+/// Check whether a boot return context is available.
+///
+/// Returns `true` if `enter_usermode_returnable` has saved a boot context
+/// that `boot_return_to_kernel` can restore.
+pub fn has_boot_return_context() -> bool {
+    BOOT_RETURN_RSP.load(Ordering::SeqCst) != 0
 }
 
 /// Physical memory offset provided by the bootloader.

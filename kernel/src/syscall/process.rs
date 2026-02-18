@@ -7,8 +7,8 @@ use core::slice;
 
 use super::{validate_user_buffer, validate_user_string_ptr, SyscallError, SyscallResult};
 use crate::process::{
-    create_thread, current_process, exec_process, exit_thread, fork_process, get_thread_tid,
-    set_thread_affinity, ProcessId, ProcessPriority, ThreadId,
+    create_thread, current_process, exec_process, exit::exit_process, exit_thread, fork_process,
+    get_thread_tid, set_thread_affinity, ProcessId, ProcessPriority, ThreadId,
 };
 
 /// Fork the current process
@@ -110,17 +110,46 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
 /// If no current thread is found (e.g., called from a context without a
 /// proper task), halts the CPU as a last resort.
 pub fn sys_exit(exit_code: usize) -> SyscallResult {
-    // exit_thread will call sched::exit_task which should never return.
-    // However, if current_thread() returns None, exit_thread returns
-    // silently, so we handle that case with a halt loop.
+    // RAW SERIAL DIAGNOSTIC: Trace sys_exit entry
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[SYS_EXIT ENTRY] code=");
+        crate::arch::x86_64::idt::raw_serial_hex(exit_code as u64);
+        crate::arch::x86_64::idt::raw_serial_str(b"\n");
+    }
+
+    // Check for boot return context FIRST, before exit_thread/exit_process.
+    // Both of those call sched::exit_task() which does a context switch and
+    // never returns, preventing boot_return_to_kernel from being reached.
+    #[cfg(target_arch = "x86_64")]
+    {
+        let has_ctx = crate::arch::x86_64::usermode::has_boot_return_context();
+        crate::println!("[SYS_EXIT] code={}, boot_ctx={}", exit_code, has_ctx);
+        if has_ctx {
+            // SAFETY: The boot return context was saved by
+            // enter_usermode_returnable and is still valid on the
+            // bootstrap stack. This restores CR3, RSP, callee-saved
+            // registers, and returns to the caller of
+            // enter_usermode_returnable.
+            //
+            // We skip exit_thread/exit_process here. The process resources
+            // (page tables, stacks) will be leaked during boot testing,
+            // which is acceptable since this path is only used for sequential
+            // process execution during bootstrap.
+            unsafe {
+                crate::arch::x86_64::usermode::boot_return_to_kernel();
+            }
+        }
+    }
+
+    // Normal path: exit_thread calls sched::exit_task (never returns).
     exit_thread(exit_code as i32);
 
-    // If we reach here, there was no current thread context.
-    // Log the anomaly and halt -- there is nothing else to do.
-    crate::println!(
-        "[SYSCALL] sys_exit: no current thread found, halting (code={})",
-        exit_code
-    );
+    // exit_thread returned, meaning current_thread() was None.
+    // Fall back to exit_process which calls sched::exit_task too.
+    exit_process(exit_code as i32);
+
+    // No boot context, no scheduler — halt as a last resort.
     loop {
         core::hint::spin_loop();
     }

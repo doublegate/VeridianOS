@@ -27,7 +27,7 @@ pub struct PerCpuData {
 }
 
 #[repr(transparent)]
-struct PerCpuDataCell(UnsafeCell<PerCpuData>);
+pub(super) struct PerCpuDataCell(UnsafeCell<PerCpuData>);
 
 // SAFETY: Per-CPU data is only accessed via GS register from the current CPU
 // during syscall entry/exit. On a single-CPU system (our current QEMU config),
@@ -35,7 +35,7 @@ struct PerCpuDataCell(UnsafeCell<PerCpuData>);
 // `mov gs:[offset]` which does not go through Rust's aliasing rules.
 unsafe impl Sync for PerCpuDataCell {}
 
-static PER_CPU_AREA: PerCpuDataCell = PerCpuDataCell(UnsafeCell::new(PerCpuData {
+pub(super) static PER_CPU_AREA: PerCpuDataCell = PerCpuDataCell(UnsafeCell::new(PerCpuData {
     kernel_rsp: 0,
     user_rsp: 0,
 }));
@@ -61,6 +61,22 @@ pub fn per_cpu_data_ptr() -> *mut PerCpuData {
 #[unsafe(naked)]
 pub unsafe extern "C" fn syscall_entry() {
     core::arch::naked_asm!(
+        // RAW SERIAL DIAGNOSTIC: Trace syscall_entry (before swapgs)
+        // SAFETY: This writes directly to COM1 port 0x3F8 before any stack
+        // or register manipulations. Uses only dx and al which are scratch
+        // registers for this purpose.
+        "push rax",                  // Save rax (syscall number)
+        "push rdx",                  // Save rdx
+        "mov al, 0x53",              // 'S'
+        "mov dx, 0x3F8",
+        "out dx, al",
+        "mov al, 0x43",              // 'C'
+        "out dx, al",
+        "mov al, 0x0a",              // '\n'
+        "out dx, al",
+        "pop rdx",                   // Restore rdx
+        "pop rax",                   // Restore rax
+
         // Save user context on kernel stack
         "swapgs",                    // Switch to kernel GS
         "mov gs:[0x8], rsp",        // Save user RSP in per-CPU data
