@@ -356,12 +356,12 @@ pub fn init() -> Result<(), KernelError> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_submission_queue_entry_size() {
         assert_eq!(core::mem::size_of::<SubmissionQueueEntry>(), 64);
     }
 
-    #[test_case]
+    #[test]
     fn test_completion_queue_entry_size() {
         assert_eq!(core::mem::size_of::<CompletionQueueEntry>(), 16);
     }

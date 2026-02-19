@@ -196,7 +196,7 @@ pub fn init() -> Result<(), KernelError> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_ipv4_header() {
         let src = Ipv4Address::new(192, 168, 1, 1);
         let dst = Ipv4Address::new(192, 168, 1, 2);
@@ -208,7 +208,7 @@ mod tests {
         assert_eq!(header.destination, dst);
     }
 
-    #[test_case]
+    #[test]
     fn test_ipv4_header_roundtrip() {
         let src = Ipv4Address::new(10, 0, 0, 1);
         let dst = Ipv4Address::new(10, 0, 0, 2);

@@ -654,7 +654,7 @@ pub mod hash_alg {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_startup_command() {
         let cmd = TpmStartupCommand::new(TpmStartupType::Clear);
         let bytes = cmd.to_bytes();
@@ -675,7 +675,7 @@ mod tests {
         assert_eq!(u16::from_be_bytes([bytes[10], bytes[11]]), 0x0000);
     }
 
-    #[test_case]
+    #[test]
     fn test_shutdown_command() {
         let cmd = TpmShutdownCommand::new(TpmShutdownType::State);
         let bytes = cmd.to_bytes();
@@ -690,7 +690,7 @@ mod tests {
         assert_eq!(u16::from_be_bytes([bytes[10], bytes[11]]), 0x0001);
     }
 
-    #[test_case]
+    #[test]
     fn test_get_random_command() {
         let cmd = TpmGetRandomCommand::new(32);
         let bytes = cmd.to_bytes();
@@ -699,7 +699,7 @@ mod tests {
         assert_eq!(u16::from_be_bytes([bytes[10], bytes[11]]), 32);
     }
 
-    #[test_case]
+    #[test]
     fn test_pcr_extend_command() {
         let digest = [0xABu8; 32];
         let cmd = TpmPcrExtendCommand::new(7, &digest);
@@ -721,7 +721,7 @@ mod tests {
         );
     }
 
-    #[test_case]
+    #[test]
     fn test_response_header_parsing() {
         let data = [
             0x80, 0x01, // Tag
@@ -733,7 +733,7 @@ mod tests {
         assert!(header.response_code().is_success());
     }
 
-    #[test_case]
+    #[test]
     fn test_marshal_command_generic() {
         let params = [0x01, 0x02, 0x03, 0x04];
         let bytes = marshal_command(
@@ -749,7 +749,7 @@ mod tests {
         );
     }
 
-    #[test_case]
+    #[test]
     fn test_parse_response() {
         let data = [
             0x80, 0x01, // Tag
@@ -763,7 +763,7 @@ mod tests {
         assert_eq!(payload, &[0xDE, 0xAD, 0xBE, 0xEF]);
     }
 
-    #[test_case]
+    #[test]
     fn test_get_random_response_parse() {
         let data = [
             0x80, 0x01, // Tag
@@ -777,7 +777,7 @@ mod tests {
         assert_eq!(response.random_bytes, vec![0xDE, 0xAD, 0xBE, 0xEF]);
     }
 
-    #[test_case]
+    #[test]
     fn test_self_test_command() {
         let cmd = TpmSelfTestCommand::new(true);
         let bytes = cmd.to_bytes();

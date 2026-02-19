@@ -204,6 +204,8 @@ mod manager_tests {
     }
 }
 
+// revocation_tests require process_server::init() which cannot run on host.
+#[cfg(target_os = "none")]
 mod revocation_tests {
     use super::*;
 
@@ -290,7 +292,7 @@ mod integration_tests {
         let cap_space = space::CapabilitySpace::new();
 
         // Create IPC endpoint capability
-        let endpoint_id = crate::ipc::EndpointId(123);
+        let endpoint_id: crate::ipc::EndpointId = 123;
         let owner = ProcessId(456);
         let rights = ipc_integration::IpcRights::SEND | ipc_integration::IpcRights::RECEIVE;
 
@@ -309,7 +311,7 @@ mod integration_tests {
         let cap_space = space::CapabilitySpace::new();
 
         // Create memory capability
-        let phys_addr = crate::mm::PhysAddr::new(0x1000);
+        let phys_addr = 0x1000usize;
         let size = 4096;
         let attrs = object::MemoryAttributes::normal();
         let rights =

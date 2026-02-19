@@ -139,7 +139,7 @@ pub fn memory_barrier() {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_ct_eq_bytes() {
         let a = [1u8, 2, 3, 4];
         let b = [1u8, 2, 3, 4];
@@ -149,7 +149,7 @@ mod tests {
         assert_eq!(ct_eq_bytes(&a, &c), 0);
     }
 
-    #[test_case]
+    #[test]
     fn test_ct_select() {
         assert_eq!(ct_select_u8(1, 0xAA, 0x55), 0xAA);
         assert_eq!(ct_select_u8(0, 0xAA, 0x55), 0x55);
@@ -158,7 +158,7 @@ mod tests {
         assert_eq!(ct_select_u32(0, 0x12345678, 0xABCDEF00), 0xABCDEF00);
     }
 
-    #[test_case]
+    #[test]
     fn test_ct_copy() {
         let mut dst = [0u8; 4];
         let src = [1u8, 2, 3, 4];
@@ -170,7 +170,7 @@ mod tests {
         assert_eq!(dst, [1, 2, 3, 4]); // Should not change
     }
 
-    #[test_case]
+    #[test]
     fn test_ct_cmp() {
         let a = [1u8, 2, 3];
         let b = [1u8, 2, 3];

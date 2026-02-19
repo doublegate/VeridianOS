@@ -127,7 +127,7 @@ impl FrameNumber {
 
 /// Physical memory address
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PhysicalAddress(u64);
+pub struct PhysicalAddress(pub u64);
 
 impl PhysicalAddress {
     pub const fn new(addr: u64) -> Self {
@@ -342,8 +342,12 @@ struct BuddyBlock {
 
 impl BuddyAllocator {
     fn new(start_frame: FrameNumber, frame_count: usize) -> Self {
-        // Round down to power of 2
-        let total_frames = frame_count.next_power_of_two() / 2;
+        // Round down to nearest power of 2 (keep as-is if already power of 2)
+        let total_frames = if frame_count.is_power_of_two() {
+            frame_count
+        } else {
+            frame_count.next_power_of_two() / 2
+        };
 
         let mut allocator = Self {
             free_lists: Default::default(),

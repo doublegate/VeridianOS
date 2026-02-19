@@ -510,11 +510,17 @@ fn persist_event(event: &AuditEvent) {
     let serialized = event.serialize();
     let bytes = serialized.as_bytes();
 
-    // Try to append to the audit log file; ignore errors if VFS is not
-    // mounted or the path does not exist yet.
-    if crate::fs::append_file(AUDIT_LOG_PATH, bytes).is_ok() {
-        AUDIT_STATS.record_persisted();
+    // VFS is only available on bare-metal; skip persistence in host tests.
+    #[cfg(not(test))]
+    {
+        // Try to append to the audit log file; ignore errors if VFS is not
+        // mounted or the path does not exist yet.
+        if crate::fs::append_file(AUDIT_LOG_PATH, bytes).is_ok() {
+            AUDIT_STATS.record_persisted();
+        }
     }
+    #[cfg(test)]
+    let _ = bytes;
 }
 
 // ---------------------------------------------------------------------------
@@ -827,7 +833,7 @@ fn _simple_hash(s: &str) -> u64 {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_audit_event() {
         let event = AuditEvent::new(
             AuditEventType::ProcessCreate,
@@ -843,14 +849,15 @@ mod tests {
         assert!(event.result);
     }
 
-    #[test_case]
+    #[test]
     fn test_log_event() {
+        enable(); // Auditing is disabled by default; must enable before logging
         log_process_create(456, 1000, 0);
         let (count, _) = get_stats();
         assert!(count > 0);
     }
 
-    #[test_case]
+    #[test]
     fn test_audit_filter() {
         let mut filter = AuditFilter::deny_all();
         assert!(!filter.is_enabled(AuditEventType::ProcessCreate));
@@ -863,7 +870,7 @@ mod tests {
         assert!(!filter.is_enabled(AuditEventType::ProcessCreate));
     }
 
-    #[test_case]
+    #[test]
     fn test_event_serialization() {
         let event = AuditEvent::new(
             AuditEventType::FileAccess,

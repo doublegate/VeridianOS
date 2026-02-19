@@ -213,7 +213,7 @@ pub fn register_device(device: Box<dyn NetworkDevice>) -> Result<(), KernelError
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_integration_init() {
         // Basic smoke test
         let result = register_drivers();

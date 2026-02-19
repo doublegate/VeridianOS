@@ -390,7 +390,7 @@ mod tests {
     use super::*;
     use crate::net::Ipv4Address;
 
-    #[test_case]
+    #[test]
     fn test_udp_header() {
         let header = UdpHeader::new(8080, 80, 100);
         assert_eq!(header.source_port, 8080);
@@ -398,7 +398,7 @@ mod tests {
         assert_eq!(header.length, 108); // 8 + 100
     }
 
-    #[test_case]
+    #[test]
     fn test_udp_header_roundtrip() {
         let header = UdpHeader::new(1234, 5678, 50);
         let bytes = header.to_bytes();
@@ -409,7 +409,7 @@ mod tests {
         assert_eq!(parsed.length, 58);
     }
 
-    #[test_case]
+    #[test]
     fn test_udp_socket() {
         let mut socket = UdpSocket::new();
         let addr = SocketAddr::v4(Ipv4Address::LOCALHOST, 8080);

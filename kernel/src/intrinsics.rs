@@ -93,7 +93,7 @@ pub unsafe extern "C" fn memcmp(s1: *const c_void, s2: *const c_void, n: usize) 
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_memcpy() {
         let src = [1u8, 2, 3, 4, 5];
         let mut dest = [0u8; 5];
@@ -111,7 +111,7 @@ mod tests {
         assert_eq!(dest, src);
     }
 
-    #[test_case]
+    #[test]
     fn test_memset() {
         let mut buf = [0u8; 10];
 
@@ -124,7 +124,7 @@ mod tests {
         assert_eq!(buf, [0x42u8; 10]);
     }
 
-    #[test_case]
+    #[test]
     fn test_memcmp() {
         let a = [1u8, 2, 3, 4, 5];
         let b = [1u8, 2, 3, 4, 5];
@@ -142,7 +142,7 @@ mod tests {
         }
     }
 
-    #[test_case]
+    #[test]
     fn test_memmove_forward() {
         let mut buf = [1u8, 2, 3, 4, 5, 0, 0, 0];
 
@@ -161,7 +161,7 @@ mod tests {
         assert_eq!(buf, [1, 2, 3, 1, 2, 3, 4, 5]);
     }
 
-    #[test_case]
+    #[test]
     fn test_memmove_backward() {
         let mut buf = [0u8, 0, 0, 1, 2, 3, 4, 5];
 

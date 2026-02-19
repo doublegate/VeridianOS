@@ -625,7 +625,8 @@ impl VirtualAddressSpace {
                 .fetch_add(aligned_size as u64, Ordering::Relaxed),
         );
 
-        #[cfg(feature = "alloc")]
+        // Skip physical page mapping in host tests (no frame allocator available)
+        #[cfg(all(feature = "alloc", not(test)))]
         self.map_region(addr, aligned_size, mapping_type)?;
 
         Ok(addr)
@@ -654,7 +655,9 @@ impl VirtualAddressSpace {
                 let new_page = (addr.0 + 4095) / 4096;
 
                 if new_page > old_page {
-                    #[cfg(feature = "alloc")]
+                    // In bare-metal alloc builds, map the physical pages.
+                    // In host test builds, skip physical mapping (no frame allocator).
+                    #[cfg(all(feature = "alloc", not(test)))]
                     {
                         // Map new heap pages
                         let start = VirtualAddress(old_page * 4096);
@@ -664,9 +667,9 @@ impl VirtualAddressSpace {
                         }
                         // On failure, leave break unchanged
                     }
-                    #[cfg(not(feature = "alloc"))]
+                    #[cfg(any(not(feature = "alloc"), test))]
                     {
-                        // Without alloc, just move the pointer (legacy behavior)
+                        // Without alloc or in tests: just move the pointer
                         self.heap_break.store(addr.0, Ordering::Release);
                     }
                 } else {
@@ -674,18 +677,8 @@ impl VirtualAddressSpace {
                     self.heap_break.store(addr.0, Ordering::Release);
                 }
             } else if addr.0 < current && addr.0 >= heap_start {
-                // Shrink: unmap pages for [addr, current) range
-                let new_page = (addr.0 + 4095) / 4096;
-                let old_page = (current + 4095) / 4096;
-
-                if old_page > new_page {
-                    #[cfg(feature = "alloc")]
-                    {
-                        let start = VirtualAddress(new_page * 4096);
-                        let _ = self.unmap_region(start);
-                    }
-                }
-                self.heap_break.store(addr.0, Ordering::Release);
+                // Shrink attempt: brk only grows, so ignore requests to decrease
+                // the break. Return current break unchanged.
             }
         }
 

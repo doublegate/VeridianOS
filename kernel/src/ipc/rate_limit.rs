@@ -297,11 +297,12 @@ fn get_current_time() -> u64 {
 #[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use super::*;
+    use crate::process::ProcessId;
 
     #[test]
     fn test_token_bucket() {
         let bucket = TokenBucket::new();
-        bucket.reset(1, 10, 10);
+        bucket.reset(ProcessId(1), 10, 10);
 
         // Should be able to consume tokens
         assert!(bucket.try_consume(5));
@@ -320,10 +321,10 @@ mod tests {
         };
 
         // Should allow initial messages
-        assert!(RATE_LIMITER.check_allowed(1, 100, &limits).is_ok());
+        assert!(RATE_LIMITER.check_allowed(ProcessId(1), 100, &limits).is_ok());
 
         // Get stats
-        let stats = RATE_LIMITER.get_stats(1);
+        let stats = RATE_LIMITER.get_stats(ProcessId(1));
         assert_eq!(stats.messages_sent, 1);
         assert_eq!(stats.bytes_sent, 100);
     }

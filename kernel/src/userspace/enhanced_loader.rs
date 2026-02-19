@@ -736,7 +736,7 @@ pub fn init() -> Result<(), KernelError> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_program_args() {
         let mut args = ProgramArgs::new();
         args.add_arg(String::from("test"));
@@ -746,14 +746,14 @@ mod tests {
         assert_eq!(args.env.len(), 1);
     }
 
-    #[test_case]
+    #[test]
     fn test_elf_magic_check() {
         // Valid ELF magic
         let data = vec![0x7f, b'E', b'L', b'F'];
         assert_eq!(&data[0..4], &[0x7f, b'E', b'L', b'F']);
     }
 
-    #[test_case]
+    #[test]
     fn test_program_args_default() {
         let args = ProgramArgs::default();
         assert_eq!(args.args.len(), 0);

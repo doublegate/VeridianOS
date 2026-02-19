@@ -302,6 +302,7 @@ impl Filesystem for RamFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     // --- RamFs construction tests ---
 
@@ -352,7 +353,7 @@ mod tests {
         let result = root.create("dup.txt", Permissions::default());
         assert!(result.is_err());
         assert_eq!(
-            result.unwrap_err(),
+            result.err().expect("expected Err"),
             KernelError::FsError(FsError::AlreadyExists)
         );
     }
@@ -541,7 +542,7 @@ mod tests {
         let result = root.mkdir("dup", Permissions::default());
         assert!(result.is_err());
         assert_eq!(
-            result.unwrap_err(),
+            result.err().expect("expected Err"),
             KernelError::FsError(FsError::AlreadyExists)
         );
     }
@@ -555,7 +556,7 @@ mod tests {
         let result = file.mkdir("subdir", Permissions::default());
         assert!(result.is_err());
         assert_eq!(
-            result.unwrap_err(),
+            result.err().expect("expected Err"),
             KernelError::FsError(FsError::NotADirectory)
         );
     }
@@ -579,7 +580,7 @@ mod tests {
 
         let result = root.lookup("missing");
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), KernelError::FsError(FsError::NotFound));
+        assert_eq!(result.err().expect("expected Err"), KernelError::FsError(FsError::NotFound));
     }
 
     #[test]
@@ -591,7 +592,7 @@ mod tests {
         let result = file.lookup("anything");
         assert!(result.is_err());
         assert_eq!(
-            result.unwrap_err(),
+            result.err().expect("expected Err"),
             KernelError::FsError(FsError::NotADirectory)
         );
     }
@@ -624,7 +625,7 @@ mod tests {
         let result = file.readdir();
         assert!(result.is_err());
         assert_eq!(
-            result.unwrap_err(),
+            result.err().expect("expected Err"),
             KernelError::FsError(FsError::NotADirectory)
         );
     }
@@ -665,7 +666,7 @@ mod tests {
         let result = root.unlink("notempty");
         assert!(result.is_err());
         assert_eq!(
-            result.unwrap_err(),
+            result.err().expect("expected Err"),
             KernelError::FsError(FsError::DirectoryNotEmpty)
         );
     }
@@ -689,7 +690,7 @@ mod tests {
         let result = file.unlink("anything");
         assert!(result.is_err());
         assert_eq!(
-            result.unwrap_err(),
+            result.err().expect("expected Err"),
             KernelError::FsError(FsError::NotADirectory)
         );
     }
@@ -703,7 +704,7 @@ mod tests {
         let result = file.create("sub", Permissions::default());
         assert!(result.is_err());
         assert_eq!(
-            result.unwrap_err(),
+            result.err().expect("expected Err"),
             KernelError::FsError(FsError::NotADirectory)
         );
     }

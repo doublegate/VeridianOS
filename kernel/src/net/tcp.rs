@@ -408,7 +408,7 @@ mod tests {
     use super::*;
     use crate::net::Ipv4Address;
 
-    #[test_case]
+    #[test]
     fn test_tcp_flags() {
         let mut flags = TcpFlags::new(0);
         flags.set(TcpFlags::SYN);
@@ -416,7 +416,7 @@ mod tests {
         assert!(!flags.has(TcpFlags::ACK));
     }
 
-    #[test_case]
+    #[test]
     fn test_tcp_connection() {
         let local = SocketAddr::v4(Ipv4Address::LOCALHOST, 8080);
         let remote = SocketAddr::v4(Ipv4Address::new(192, 168, 1, 1), 80);

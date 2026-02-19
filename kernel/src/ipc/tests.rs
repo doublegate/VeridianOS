@@ -10,9 +10,10 @@ use crate::ipc::{
     capability::{IpcCapability, IpcPermissions, Permission},
     channel::{Channel, Endpoint},
     message::{flags, permissions, LargeMessage, SmallMessage},
-    shared_memory::{CachePolicy, SharedRegion, VirtualAddress},
-    zero_copy::Permission as ZeroPermission,
+    shared_memory::{CachePolicy, SharedRegion, Permission as ZeroPermission},
 };
+use crate::mm::VirtualAddress;
+use crate::process::ProcessId;
 
 #[test]
 fn test_small_message_creation() {
@@ -92,7 +93,7 @@ fn test_capability_derivation() {
 
 #[test]
 fn test_endpoint_async_communication() {
-    let endpoint = Endpoint::new(1);
+    let endpoint = Endpoint::new(ProcessId(1));
 
     // Send multiple messages
     for i in 0..5 {
@@ -113,7 +114,7 @@ fn test_endpoint_async_communication() {
 
 #[test]
 fn test_channel_bidirectional() {
-    let channel = Channel::new(1, 100);
+    let channel = Channel::new(ProcessId(1), 100);
 
     // Send on one end
     let msg1 = Message::small(0x1111, 10);
@@ -125,20 +126,22 @@ fn test_channel_bidirectional() {
     assert_eq!(received.opcode(), 10);
 }
 
+// Requires FRAME_ALLOCATOR initialization (bare-metal only)
+#[cfg(target_os = "none")]
 #[test]
 fn test_shared_region_mapping() {
-    let region = SharedRegion::new(1, 8192, CachePolicy::WriteBack, None).unwrap();
+    let region = SharedRegion::new_with_policy(ProcessId(1), 8192, CachePolicy::WriteBack, None).unwrap();
 
     // Map to process 2
     let vaddr = VirtualAddress::new(0x1000_0000);
-    assert!(region.map(2, vaddr, ZeroPermission::Read).is_ok());
+    assert!(region.map(ProcessId(2), vaddr, ZeroPermission::Read).is_ok());
 
     // Should be able to get mapping
-    assert_eq!(region.get_mapping(2), Some(vaddr));
+    assert_eq!(region.get_mapping(ProcessId(2)), Some(vaddr));
 
     // Can't map same process twice
     let vaddr2 = VirtualAddress::new(0x2000_0000);
-    assert!(region.map(2, vaddr2, ZeroPermission::Write).is_err());
+    assert!(region.map(ProcessId(2), vaddr2, ZeroPermission::Write).is_err());
 }
 
 #[test]

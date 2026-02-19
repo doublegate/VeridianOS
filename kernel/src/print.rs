@@ -11,8 +11,23 @@
 //! bug. The `kprintln!` macro handles arch dispatch internally,
 //! eliminating the need for per-call-site `cfg(target_arch)` blocks.
 
-// x86_64 implementation — dual output: serial + framebuffer console
-#[cfg(target_arch = "x86_64")]
+// Host target (x86_64-unknown-linux-gnu, for coverage/unit tests):
+// Kernel serial/UART hardware is not available; use no-op to avoid SIGSEGV.
+#[cfg(not(target_os = "none"))]
+#[macro_export]
+macro_rules! print {
+    ($($arg:tt)*) => ({ let _ = format_args!($($arg)*); });
+}
+
+#[cfg(not(target_os = "none"))]
+#[macro_export]
+macro_rules! println {
+    () => ({});
+    ($($arg:tt)*) => ({ let _ = format_args!($($arg)*); });
+}
+
+// x86_64 bare-metal — dual output: serial + framebuffer console
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => ({
@@ -21,7 +36,7 @@ macro_rules! print {
     });
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[macro_export]
 macro_rules! println {
     () => ($crate::print!("\n"));

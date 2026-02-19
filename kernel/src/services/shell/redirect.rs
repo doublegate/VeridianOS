@@ -163,6 +163,7 @@ pub fn read_stdin_redirect(
 #[cfg(test)]
 mod tests {
     use alloc::string::ToString;
+    use alloc::vec;
 
     use super::*;
 

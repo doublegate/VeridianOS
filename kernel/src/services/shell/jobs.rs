@@ -277,6 +277,8 @@ impl JobTable {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
 
     #[test]

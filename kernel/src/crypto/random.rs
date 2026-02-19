@@ -344,7 +344,7 @@ pub fn random_bytes(count: usize) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_random_generation() {
         let rng = SecureRandom::new().unwrap();
         let mut bytes1 = [0u8; 16];

@@ -378,7 +378,7 @@ pub fn init() -> Result<(), KernelError> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_dhcp_packet_creation() {
         let mac = MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
         let packet = DhcpPacket::new(DhcpMessageType::Discover, mac, 0x12345678);
@@ -388,7 +388,7 @@ mod tests {
         assert_eq!(packet.hlen, 6);
     }
 
-    #[test_case]
+    #[test]
     fn test_dhcp_serialization() {
         let mac = MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
         let mut packet = DhcpPacket::new(DhcpMessageType::Discover, mac, 0x12345678);

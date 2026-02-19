@@ -3,14 +3,14 @@
 //! This module provides tests that verify proper interaction between
 //! different kernel subsystems.
 
-#![cfg(test)]
+#![cfg(all(test, target_os = "none"))]
 
 use alloc::vec::Vec;
 
 use crate::{cap, error::KernelError, fs, ipc, net, process, security};
 
 /// Test IPC with capability validation
-#[test_case]
+#[test]
 fn test_ipc_with_capabilities() {
     // Initialize required subsystems
     cap::init();
@@ -33,7 +33,7 @@ fn test_ipc_with_capabilities() {
 }
 
 /// Test network socket with IPC integration
-#[test_case]
+#[test]
 fn test_network_socket_with_ipc() {
     // Initialize subsystems
     ipc::init();
@@ -56,7 +56,7 @@ fn test_network_socket_with_ipc() {
 }
 
 /// Test security MAC with file system operations
-#[test_case]
+#[test]
 fn test_security_mac_with_filesystem() {
     // Initialize subsystems
     security::init().expect("Security init failed");
@@ -73,7 +73,7 @@ fn test_security_mac_with_filesystem() {
 }
 
 /// Test cryptographic hashing (security subsystem)
-#[test_case]
+#[test]
 fn test_crypto_hashing() {
     security::init().expect("Security init failed");
 
@@ -90,7 +90,7 @@ fn test_crypto_hashing() {
 }
 
 /// Test process creation with capability inheritance
-#[test_case]
+#[test]
 fn test_process_with_capabilities() {
     // Initialize subsystems
     cap::init();
@@ -109,7 +109,7 @@ fn test_process_with_capabilities() {
 }
 
 /// Test IPC message passing between processes
-#[test_case]
+#[test]
 fn test_ipc_message_passing() {
     // Initialize subsystems
     process::init_without_init_process().expect("Process init failed");
@@ -132,7 +132,7 @@ fn test_ipc_message_passing() {
 }
 
 /// Test network packet creation and statistics
-#[test_case]
+#[test]
 fn test_network_packet_stats() {
     net::init().expect("Network init failed");
 
@@ -150,7 +150,7 @@ fn test_network_packet_stats() {
 }
 
 /// Test IP routing table
-#[test_case]
+#[test]
 fn test_ip_routing() {
     net::init().expect("Network init failed");
 
@@ -166,7 +166,7 @@ fn test_ip_routing() {
 }
 
 /// Test TCP connection state transitions
-#[test_case]
+#[test]
 fn test_tcp_state_machine() {
     net::init().expect("Network init failed");
 
@@ -189,7 +189,7 @@ fn test_tcp_state_machine() {
 }
 
 /// Test UDP socket operations
-#[test_case]
+#[test]
 fn test_udp_socket_operations() {
     net::init().expect("Network init failed");
 
@@ -208,7 +208,7 @@ fn test_udp_socket_operations() {
 }
 
 /// Test network device loopback
-#[test_case]
+#[test]
 fn test_loopback_device() {
     net::init().expect("Network init failed");
 
@@ -222,7 +222,7 @@ fn test_loopback_device() {
 }
 
 /// Test security audit logging
-#[test_case]
+#[test]
 fn test_security_audit() {
     security::init().expect("Security init failed");
 
@@ -243,7 +243,7 @@ fn test_security_audit() {
 }
 
 /// Test package manager operations
-#[test_case]
+#[test]
 fn test_package_manager() {
     crate::pkg::init().expect("Package init failed");
 
@@ -266,7 +266,7 @@ fn test_package_manager() {
 }
 
 /// Test graphics framebuffer initialization
-#[test_case]
+#[test]
 fn test_graphics_framebuffer() {
     crate::graphics::init().expect("Graphics init failed");
 
@@ -275,7 +275,7 @@ fn test_graphics_framebuffer() {
 }
 
 /// Test performance monitoring
-#[test_case]
+#[test]
 fn test_performance_monitoring() {
     crate::perf::init().expect("Perf init failed");
 
@@ -286,7 +286,7 @@ fn test_performance_monitoring() {
 }
 
 /// Test VFS mount operations
-#[test_case]
+#[test]
 fn test_vfs_operations() {
     fs::init();
 
@@ -302,7 +302,7 @@ fn test_vfs_operations() {
 
 /// Integration test: Full workflow
 /// Tests a complete workflow involving multiple subsystems
-#[test_case]
+#[test]
 fn test_full_integration_workflow() {
     // Initialize all subsystems in order
     cap::init();

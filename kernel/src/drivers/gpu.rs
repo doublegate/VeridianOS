@@ -322,7 +322,7 @@ pub fn with_driver<R, F: FnOnce(&mut GpuDriver) -> R>(f: F) -> Option<R> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_pixel_format() {
         let driver = GpuDriver::simple(0x1000000, 800, 600);
         let color = Color {

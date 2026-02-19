@@ -1754,7 +1754,7 @@ pub fn attach_virtio_backend(fs: &BlockFs, load_from_disk: bool) -> bool {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_superblock_creation() {
         let sb = Superblock::new(10000, 1000);
         assert_eq!(sb.magic, BLOCKFS_MAGIC);
@@ -1763,7 +1763,7 @@ mod tests {
         assert_eq!(sb.inode_count, 1000);
     }
 
-    #[test_case]
+    #[test]
     fn test_block_bitmap() {
         let mut bitmap = BlockBitmap::new(100);
 
@@ -1774,7 +1774,7 @@ mod tests {
         assert!(!bitmap.is_allocated(block1));
     }
 
-    #[test_case]
+    #[test]
     fn test_blockfs_format() {
         let fs = BlockFs::format(1000, 100).unwrap();
         assert_eq!(fs.name(), "blockfs");

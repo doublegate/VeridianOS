@@ -1029,13 +1029,13 @@ pub fn pcr_read(pcr_index: PcrIndex) -> Result<[u8; 32], TpmError> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_tpm_creation() {
         let tpm = Tpm::new();
         assert!(!tpm.initialized);
     }
 
-    #[test_case]
+    #[test]
     fn test_soft_pcr_extend() {
         let mut bank = SoftPcrBank::new();
         let measurement = [0x42u8; 32];
@@ -1050,7 +1050,7 @@ mod tests {
         assert_ne!(bank.read(0), [0u8; 32]);
     }
 
-    #[test_case]
+    #[test]
     fn test_xor_keystream_roundtrip() {
         let key = [0xABu8; 32];
         let plaintext = b"Hello, VeridianOS TPM!";

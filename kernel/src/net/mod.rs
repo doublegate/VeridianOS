@@ -216,20 +216,20 @@ pub fn init() -> Result<(), KernelError> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_ipv4_address() {
         let addr = Ipv4Address::new(192, 168, 1, 1);
         assert_eq!(addr.0, [192, 168, 1, 1]);
     }
 
-    #[test_case]
+    #[test]
     fn test_mac_address() {
         let mac = MacAddress::new([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
         assert_eq!(mac.0[0], 0x00);
         assert_eq!(mac.0[5], 0x55);
     }
 
-    #[test_case]
+    #[test]
     fn test_packet() {
         let data = b"Hello, Network!";
         let pkt = Packet::from_bytes(data);

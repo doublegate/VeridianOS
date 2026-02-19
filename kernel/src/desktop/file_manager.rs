@@ -342,7 +342,7 @@ pub fn with_file_manager<R, F: FnOnce(&RwLock<FileManager>) -> R>(f: F) -> Optio
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_file_entry_creation() {
         let entry = FileEntry {
             name: String::from("test.txt"),

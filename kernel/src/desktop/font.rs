@@ -333,14 +333,14 @@ pub fn with_font_manager<R, F: FnOnce(&mut FontManager) -> R>(f: F) -> Result<R,
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_font_creation() {
         let font = Font::new("Test", FontSize::Medium, FontStyle::Regular);
         assert_eq!(font.name, "Test");
         assert_eq!(font.size, FontSize::Medium);
     }
 
-    #[test_case]
+    #[test]
     fn test_glyph_pixel_operations() {
         let mut glyph = Glyph::new('A', 8, 12);
         assert!(!glyph.get_pixel(0, 0));
@@ -352,7 +352,7 @@ mod tests {
         assert!(!glyph.get_pixel(0, 0));
     }
 
-    #[test_case]
+    #[test]
     fn test_text_measurement() {
         let font = Font::new("Test", FontSize::Medium, FontStyle::Regular);
         let width = font.measure_text("Hello");

@@ -434,6 +434,7 @@ fn timestamp_to_ns(cycles: u64) -> u64 {
 #[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use super::*;
+    use crate::process::ProcessId;
 
     #[test]
     fn test_ring_buffer() {
@@ -449,7 +450,7 @@ mod tests {
 
     #[test]
     fn test_async_channel() {
-        let channel = AsyncChannel::new(1, 1, 10);
+        let channel = AsyncChannel::new(1, ProcessId(1), 10);
         let msg = Message::small(0x1234, 42);
 
         // Test send/receive
@@ -461,7 +462,7 @@ mod tests {
 
     #[test]
     fn test_channel_full() {
-        let channel = AsyncChannel::new(1, 1, 2);
+        let channel = AsyncChannel::new(1, ProcessId(1), 2);
         let msg = Message::small(0x1234, 42);
 
         // Fill channel

@@ -44,13 +44,13 @@ impl ProcessCwd {
 
     /// Create a `ProcessCwd` with a specific initial directory.
     pub fn with_path(path: &str) -> Result<Self, KernelError> {
-        let normalized = normalize_path(path);
-        if !normalized.starts_with('/') {
+        if !path.starts_with('/') {
             return Err(KernelError::InvalidArgument {
                 name: "path",
                 value: "initial CWD must be an absolute path",
             });
         }
+        let normalized = normalize_path(path);
         Ok(Self { path: normalized })
     }
 

@@ -636,7 +636,7 @@ mod tests {
     use super::*;
     use crate::net::Ipv4Address;
 
-    #[test_case]
+    #[test]
     fn test_socket_creation() {
         let socket =
             Socket::new(SocketDomain::Inet, SocketType::Stream, SocketProtocol::Tcp).unwrap();
@@ -644,7 +644,7 @@ mod tests {
         assert_eq!(socket.socket_type, SocketType::Stream);
     }
 
-    #[test_case]
+    #[test]
     fn test_socket_bind() {
         let mut socket =
             Socket::new(SocketDomain::Inet, SocketType::Stream, SocketProtocol::Tcp).unwrap();

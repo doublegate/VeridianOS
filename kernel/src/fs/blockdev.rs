@@ -103,7 +103,7 @@ mod tests {
 
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_ram_block_device() {
         let mut dev = RamBlockDevice::new(String::from("test"), 512, 100);
 

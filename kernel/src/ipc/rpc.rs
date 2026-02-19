@@ -336,12 +336,12 @@ pub fn get_registry() -> &'static RpcRegistry {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_rpc_registry() {
         let registry = RpcRegistry::new();
-        registry.register(String::from("test_service"), EndpointId(42));
+        registry.register(String::from("test_service"), 42u64);
 
         let found = registry.lookup("test_service");
-        assert_eq!(found, Some(EndpointId(42)));
+        assert_eq!(found, Some(42u64));
     }
 }

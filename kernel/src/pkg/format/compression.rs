@@ -334,12 +334,14 @@ mod zstd {
         output.extend_from_slice(&ZSTD_MAGIC.to_le_bytes());
 
         // Frame header descriptor (simplified)
-        output.push(0x60); // Single segment, content size present (1 byte)
+        // Bits 7-6 = content_size_flag: 0=1byte, 1=2bytes, 2=4bytes, 3=8bytes
+        // Use flag=0 (bits 7-6 = 00) for 1-byte content size: FHD = 0x20
+        output.push(0x20); // Single segment, content size present (1 byte, flag=0)
         output.push(input.len() as u8); // Content size (for small inputs)
 
-        // For larger inputs, use 4-byte content size
+        // For larger inputs, use 4-byte content size (flag=2, bits 7-6 = 10: FHD = 0xA0)
         if input.len() > 255 {
-            output[4] = 0x64; // 4-byte content size
+            output[4] = 0xA0; // 4-byte content size, flag=2
             output.pop();
             output.extend_from_slice(&(input.len() as u32).to_le_bytes());
         }
@@ -348,13 +350,15 @@ mod zstd {
         let compressed = compress_block_rle(input);
 
         // Block header (3 bytes): size + type
-        let block_size = compressed.len();
-        let block_header = if compressed.len() >= input.len() {
-            // Raw block (type 0)
-            ((input.len() as u32) << 3) | 0x00
+        // Bit 0 = Last_Block, bits [2:1] = Block_Type, bits [31:3] = Block_Size
+        //   Block_Type: 0=Raw, 1=RLE, 2=Compressed
+        //   For Compressed (type 2 = 0b10): bits [2:1] = 10 → value = (1<<2) = 0x04
+        let (block_header, actual_data_len) = if compressed.len() >= input.len() {
+            // Raw block (type 0, bits [2:1] = 00)
+            (((input.len() as u32) << 3) | 0x00, input.len())
         } else {
-            // Compressed block (type 2)
-            ((block_size as u32) << 3) | 0x02
+            // Compressed block (type 2, bits [2:1] = 10 → bit 2 set = 0x04)
+            ((((compressed.len()) as u32) << 3) | 0x04, compressed.len())
         };
 
         output.push((block_header & 0xFF) as u8);
@@ -367,8 +371,9 @@ mod zstd {
             output.extend_from_slice(&compressed);
         }
 
-        // End block marker (last block flag)
-        let flag_idx = output.len() - (block_size + 3);
+        // Set the Last_Block flag (bit 0) on the block header we just wrote.
+        // The block header starts at output.len() - (actual_data_len + 3).
+        let flag_idx = output.len() - (actual_data_len + 3);
         output[flag_idx] |= 0x01;
 
         Ok(output)

@@ -451,12 +451,12 @@ pub fn with_text_editor<R, F: FnOnce(&RwLock<TextEditor>) -> R>(f: F) -> Option<
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_char_insertion() {
         // Would test character insertion here
     }
 
-    #[test_case]
+    #[test]
     fn test_newline_insertion() {
         // Would test newline handling
     }

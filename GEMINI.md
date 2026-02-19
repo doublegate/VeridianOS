@@ -1,61 +1,84 @@
-## Project Overview
+# VeridianOS Project Context
 
-This directory contains the source code for VeridianOS, a modern microkernel operating system written in Rust. The project's goal is to create a secure, modular, and high-performance OS suitable for a wide range of applications.
+VeridianOS is a research microkernel operating system written in Rust, strictly prioritizing **correctness, isolation, and explicit architectural invariants**. It demonstrates how capability-based security, strong isolation boundaries, and disciplined `unsafe` code usage can create a resilient system.
 
-VeridianOS features a capability-based security model, zero-copy IPC, and supports multiple architectures, including x86_64, AArch64, and RISC-V. The kernel is designed to be minimal, with most services implemented as user-space processes.
+## 1. Current Status & Roadmap (v0.4.9)
 
-The project is under active development and is organized into a series of phases, with the initial phases focused on establishing the core kernel features.
+-   **Phase 4 (Package Ecosystem)**: **COMPLETE**. Includes package manager, SDK, and repository infra.
+-   **Phase 4.5 (Interactive Shell - vsh)**: **COMPLETE**. Tri-architecture shell prompt (`root@veridian:/#`) is operational.
+-   **Phase 5 (Performance Optimization)**: **IN PROGRESS (~10%)**. Focus is on kernel memory management, scheduler tuning, and IPC optimization.
+-   **Phase 6 (Advanced Features)**: **PLANNED (~5%)**. GUI, advanced drivers, virtualization.
 
-## Building and Running
+**Latest Release (v0.4.9 - Feb 18, 2026):**
+-   **Self-hosting Infrastructure**: Tiers 0-5 complete, including virtio-blk driver and TAR rootfs loader.
+-   **System Stability**: Fixed user-space execution GP faults, removed CR3 switching for ~2000 cycle syscall savings.
+-   **Graphics**: Framebuffer console (fbcon) with glyph cache, pixel ring buffer, and x86_64 PAT (Write-Combining) support.
 
-The project uses `cargo` for building and `just` as a command runner to simplify common tasks.
+## 2. Architectural Invariants (Non-Negotiable)
 
-**Key Commands:**
+Adherence to `docs/invariants.md` is mandatory.
+1.  **Authority Is Explicit**: No component performs an action without an explicit capability. No ambient authority.
+2.  **Isolation Boundaries**: Enforced by design (kernel vs. user-space), not convention.
+3.  **Memory Ownership**: Every region has a clear owner; transfer is explicit and kernel-mediated.
+4.  **TCB Is Minimal**: Only code that *must* be trusted stays in the kernel. Drivers and services live in user-space.
 
-*   **Install dependencies:**
-    ```bash
-    ./scripts/install-deps.sh
-    ```
+## 3. Unsafe Code Policy
 
-*   **Build the kernel for all architectures:**
-    ```bash
-    ./build-kernel.sh all dev
-    ```
+**Strict Adherence Required (`docs/unsafe-policy.md`):**
+-   **Exceptional**: Never use `unsafe` for convenience or premature optimization.
+-   **Localized**: Keep unsafe blocks minimal.
+-   **Documented**: Every `unsafe` block **MUST** have a `// SAFETY:` comment explaining:
+    1.  Which invariant it upholds.
+    2.  Why safe Rust is insufficient.
+    3.  The specific preconditions being satisfied.
 
-*   **Build for a specific architecture (e.g., x86_64):**
-    ```bash
-    ./build-kernel.sh x86_64 dev
-    ```
+## 4. Development Workflow
 
-*   **Run the kernel in QEMU (x86_64):**
-    ```bash
-    just run
-    ```
+### Build & Run
+-   **Standard Build**: `./build-kernel.sh all dev` (Builds x86_64, AArch64, RISC-V).
+-   **Justfile Shortcuts**:
+    -   `just build` (Default x86_64 release)
+    -   `just run` (Run x86_64 in QEMU)
+-   **QEMU (v10.2+)**:
+    -   **x86_64**: Requires UEFI (`OVMF.fd`) and disk image. **ALWAYS use `-enable-kvm`**.
+    -   **AArch64**: `qemu-system-aarch64 -M virt -cpu cortex-a72 -kernel ...`
+    -   **RISC-V**: `qemu-system-riscv64 -M virt -m 256M -bios default -kernel ...`
+    -   **⚠️ Pitfall**: NEVER use `timeout` to wrap QEMU; it causes drive conflicts in v10.2.
 
-*   **Run tests:**
-    ```bash
-    just test
-    ```
+### Testing
+-   **Tri-Arch Boot**: All 3 architectures must pass 29/29 boot tests (including `fbcon_initialized`).
+-   **Linting**: `just fmt-check` and `just clippy` **MUST** pass before submission. Zero warnings allowed.
 
-*   **Run benchmarks:**
-    ```bash
-    just bench
-    ```
+## 5. Coding Standards & Patterns
 
-*   **Format the code:**
-    ```bash
-    just fmt
-    ```
+### Error Handling
+-   **Kernel**: Use specific `KernelError` enums. No string-based errors or `Err("...")`.
+-   **Userland**: Use `thiserror` for library errors.
+-   **General**: No `unwrap()` or `expect()` in production code. Handle all `Result`s.
 
-*   **Run the linter:**
-    ```bash
-    just clippy
-    ```
+### Global State
+-   **Avoid `static mut`**. Use the **GlobalState** pattern (wrapped in `OnceLock` or `RwLock`) for Rust 2024 compatibility.
+-   **Remaining `static mut`**: Only 7 justified instances remain (early boot, per-CPU, heap).
 
-## Development Conventions
+### Implementation Patterns
 
-*   **Code Style:** The project follows the standard Rust formatting guidelines, enforced by `rustfmt`.
-*   **Linting:** `clippy` is used to catch common mistakes and improve code quality. All warnings are treated as errors.
-*   **Testing:** The project has a custom `no_std` testing framework. Integration tests are located in the `kernel/tests` directory and are run using `just test`.
-*   **Contributions:** The `CONTRIBUTING.md` file outlines the process for contributing to the project, including the development workflow and pull request process.
-*   **Documentation:** The `docs/` directory contains extensive documentation on the project's architecture, development guide, and API reference.
+#### Performance Optimization (Phase 5)
+-   **Syscalls**: CR3 switching is removed; syscalls run with user CR3 to avoid TLB flushes.
+-   **Graphics**: Use `fbcon` back-buffer and pixel ring buffers to minimize MMIO writes.
+-   **Memory**: Implement per-CPU page lists and NUMA-aware allocations.
+
+#### Hardware Abstraction
+-   **AArch64**: Use `DirectUartWriter` (assembly-based) for output to bypass LLVM loop-compilation bugs.
+-   **Interrupts**: Use the unified IRQ framework and `PlatformTimer` trait for cross-arch parity.
+
+## 6. Directory Structure
+
+-   `kernel/`: Core microkernel (TCB).
+    -   `src/arch/`: Architecture-specific code. Note `safe_iter.rs` for AArch64.
+    -   `src/mm/`: Hybrid bitmap+buddy allocator, NUMA-aware paging.
+    -   `src/ipc/`: Zero-copy IPC (<1μs latency).
+    -   `src/cap/`: Two-level O(1) capability lookup.
+-   `drivers/`: User-space drivers (isolated processes).
+-   `services/`: System services (VFS, Init, Network).
+-   `libs/`: `veridian-abi` (Syscalls), `veridian-std` (Libc).
+-   `userland/`: `vsh` (Interactive Shell), `minimal` (Test binary).

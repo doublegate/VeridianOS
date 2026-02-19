@@ -254,7 +254,7 @@ impl Channel {
 
     /// Send a message asynchronously
     pub fn send(&self, msg: Message) -> Result<()> {
-        self.send_endpoint.send_async(msg)
+        self.receive_endpoint.send_async(msg)
     }
 
     /// Receive a message asynchronously
@@ -292,23 +292,24 @@ pub fn call_reply(_request: Message, _target: ProcessId) -> Result<Message> {
 #[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use super::*;
+    use crate::process::ProcessId;
 
     #[test]
     fn test_endpoint_creation() {
-        let endpoint = Endpoint::new(1);
-        assert_eq!(endpoint.owner, 1);
+        let endpoint = Endpoint::new(ProcessId(1));
+        assert_eq!(endpoint.owner, ProcessId(1));
         assert!(endpoint.active.load(Ordering::Relaxed));
     }
 
     #[test]
     fn test_channel_creation() {
-        let channel = Channel::new(1, 100);
+        let channel = Channel::new(ProcessId(1), 100);
         assert_ne!(channel.send_id(), channel.receive_id());
     }
 
     #[test]
     fn test_async_send_receive() {
-        let endpoint = Endpoint::new(1);
+        let endpoint = Endpoint::new(ProcessId(1));
         let msg = Message::small(0x1234, 42);
 
         assert!(endpoint.send_async(msg).is_ok());

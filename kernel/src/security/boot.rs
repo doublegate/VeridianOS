@@ -630,7 +630,10 @@ pub fn print_measurement_log() {
 mod tests {
     use super::*;
 
-    #[test_case]
+    // Requires valid kernel address space (linker-defined addresses only map on
+    // bare-metal; reading them on the host causes SIGSEGV).
+    #[cfg(target_os = "none")]
+    #[test]
     fn test_kernel_hash() {
         let hash = compute_kernel_hash();
         assert!(hash.is_ok());
@@ -639,13 +642,13 @@ mod tests {
         assert_ne!(h, [0u8; 32]);
     }
 
-    #[test_case]
+    #[test]
     fn test_verify_disabled() {
         // Should succeed when disabled (default)
         assert!(verify().is_ok());
     }
 
-    #[test_case]
+    #[test]
     fn test_boot_measurement_log() {
         let mut log = BootMeasurementLog::new();
         assert!(log.is_empty());
@@ -663,7 +666,7 @@ mod tests {
         assert_eq!(m.pcr_index, Some(0));
     }
 
-    #[test_case]
+    #[test]
     fn test_measure_boot_stage() {
         let data = b"test boot stage data";
         let result = measure_boot_stage("test_boot", data, None);

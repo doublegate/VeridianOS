@@ -1021,9 +1021,8 @@ mod tests {
     fn test_resolve_no_root_fails() {
         let vfs = Vfs::new();
         let result = vfs.resolve_path("/anything");
-        assert!(result.is_err());
         assert_eq!(
-            result.unwrap_err(),
+            result.err().expect("expected error"),
             KernelError::FsError(crate::error::FsError::NoRootFs)
         );
     }

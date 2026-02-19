@@ -1087,7 +1087,7 @@ fn get_type_for_pid(pid: u64) -> &'static str {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_policy_rule() {
         let rule = PolicyRule::from_legacy("user_t", "file_t", 0x3); // Read + Write
         assert!(rule.allows(AccessType::Read));
@@ -1095,7 +1095,7 @@ mod tests {
         assert!(!rule.allows(AccessType::Execute));
     }
 
-    #[test_case]
+    #[test]
     fn test_add_rule() {
         let rule = PolicyRule::new(
             "test_t",
@@ -1107,7 +1107,7 @@ mod tests {
         assert!(add_policy_rule(rule).is_ok());
     }
 
-    #[test_case]
+    #[test]
     fn test_mls_dominance() {
         let high = MlsLevel::new(3, 0b111);
         let low = MlsLevel::new(1, 0b001);
@@ -1120,7 +1120,7 @@ mod tests {
         assert!(mid.dominates(&low)); // 2 >= 1 and 0b011 superset of 0b001
     }
 
-    #[test_case]
+    #[test]
     fn test_deny_overrides_allow() {
         let allow_rule = PolicyRule::from_perms(
             "deny_test_t",
@@ -1137,15 +1137,21 @@ mod tests {
         let _ = add_policy_rule(allow_rule);
         let _ = add_policy_rule(deny_rule);
 
+        // MAC must be enabled for rules to be evaluated; without it check_access
+        // returns true (allow all) regardless of the policy database.
+        let was_enabled = MAC_ENABLED.load(Ordering::Acquire);
+        MAC_ENABLED.store(true, Ordering::Release);
+
         // Write should be denied even though there is an allow rule
-        assert!(!check_access(
-            "deny_test_t",
-            "deny_target_t",
-            AccessType::Write
-        ));
+        let result = check_access("deny_test_t", "deny_target_t", AccessType::Write);
+
+        // Restore previous state
+        MAC_ENABLED.store(was_enabled, Ordering::Release);
+
+        assert!(!result);
     }
 
-    #[test_case]
+    #[test]
     fn test_policy_parser() {
         let policy: &'static str =
             "allow src_t dst_t { read write }; deny src_t dst_t { execute };";
@@ -1157,7 +1163,7 @@ mod tests {
         assert_eq!(parsed.rules[1].unwrap().action, PolicyAction::Deny);
     }
 
-    #[test_case]
+    #[test]
     fn test_domain_transition_parse() {
         let policy: &'static str = "type_transition user_t init_t : process system_t ;";
         let result = PolicyParser::parse(policy);
@@ -1167,7 +1173,7 @@ mod tests {
         assert_eq!(parsed.transitions[0].unwrap().new_type, "system_t");
     }
 
-    #[test_case]
+    #[test]
     fn test_rbac_parse() {
         let policy: &'static str =
             "role admin_r types { system_t user_t }; user root roles { admin_r };";

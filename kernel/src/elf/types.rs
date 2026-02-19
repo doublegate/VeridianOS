@@ -189,6 +189,7 @@ pub enum SegmentType {
 }
 
 /// ELF binary information
+#[derive(Debug)]
 pub struct ElfBinary {
     pub entry_point: u64,
     pub load_base: u64,
