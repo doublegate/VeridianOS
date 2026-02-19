@@ -327,7 +327,7 @@ jobs:
               uses: dtolnay/rust-toolchain@nightly
               with:
                   toolchain: ${{ env.RUST_TOOLCHAIN }}
-                  components: llvm-tools-preview
+                  components: llvm-tools-preview, rust-src
             - name: Cache dependencies
               uses: actions/cache@v4
               with:
@@ -344,31 +344,46 @@ jobs:
             - name: Install cargo-llvm-cov
               uses: taiki-e/install-action@cargo-llvm-cov
             - name: Generate coverage report
+              # The kernel is #![no_std] bare-metal, so we must run coverage on
+              # the HOST target (x86_64-unknown-linux-gnu), not the bare-metal
+              # target. This captures only the #[cfg(test)] unit test blocks that
+              # are host-compilable.
+              #
+              # Key flags:
+              #   --lib              : only the library target (not bare-metal [[bin]])
+              #   --features alloc   : enable alloc feature so test modules compile
+              #   -p veridian-kernel : explicit package (avoid workspace bare-metal bins)
+              #   no --target flag   : use host (x86_64-unknown-linux-gnu) so tests run
+              #
+              # RUSTFLAGS is cleared so the global "-D warnings" and any bare-metal
+              # flags from .cargo/config.toml do not interfere with host compilation.
+              # CARGO_BUILD_TARGET overrides the .cargo/config.toml default target
+              # (x86_64-unknown-none) for this step only.
+              env:
+                  RUSTFLAGS: ""
+                  CARGO_BUILD_TARGET: ""
               run: |
-                  # Run library tests on host target with coverage instrumentation.
-                  # The kernel is #![no_std] bare-metal, so only host-compatible
-                  # unit tests are captured. Coverage will grow as test infrastructure
-                  # matures through future development phases.
                   cargo llvm-cov \
-                    --all-features \
-                    --workspace \
+                    --lib \
+                    --features alloc \
+                    -p veridian-kernel \
                     --lcov \
-                    --output-path lcov.info \
-                    --ignore-filename-regex '(tests/|test_|bench)' \
-                    2>&1 || {
-                      echo "Coverage generation produced warnings (expected for no_std kernel)"
-                      # Create minimal lcov if generation fails entirely
-                      if [ ! -f lcov.info ]; then
-                        echo "TN:" > lcov.info
-                        echo "end_of_record" >> lcov.info
-                      fi
-                    }
+                    --output-path lcov.info
+            - name: Verify coverage file is non-empty
+              run: |
+                  if [ ! -f lcov.info ] || [ ! -s lcov.info ]; then
+                    echo "ERROR: lcov.info is missing or empty — no coverage data generated"
+                    exit 1
+                  fi
+                  echo "Coverage file size: $(wc -c < lcov.info) bytes"
+                  echo "DA lines (instrumented): $(grep -c '^DA:' lcov.info || true)"
             - name: Upload coverage to Codecov
               uses: codecov/codecov-action@v5
               with:
                   token: ${{ secrets.CODECOV_TOKEN }}
                   slug: doublegate/VeridianOS
                   files: lcov.info
+                  flags: unittests
                   fail_ci_if_error: false
                   verbose: true
 

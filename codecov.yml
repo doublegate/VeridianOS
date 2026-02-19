@@ -1,0 +1,42 @@
+# Codecov configuration for VeridianOS
+#
+# Coverage is generated from host-target (#[cfg(test)]) unit tests only.
+# The kernel is #![no_std] bare-metal; bare-metal targets cannot run on CI
+# runners. Coverage will grow as host-compatible unit test coverage expands.
+# Architecture-specific code (arch/) is excluded because it requires hardware
+# or bare-metal targets to compile meaningfully.
+
+coverage:
+    status:
+        project:
+            default:
+                # Accept any non-zero coverage; 1% threshold prevents flapping
+                # on PRs that touch untested code paths.
+                target: auto
+                threshold: 1%
+                # Do not fail CI on coverage drops during early development.
+                informational: true
+        patch:
+            default:
+                target: auto
+                threshold: 1%
+                informational: true
+
+# Paths excluded from coverage reports.
+# arch/ contains bare-metal hardware code not reachable from host unit tests.
+# test_framework.rs is test infrastructure, not production code.
+# bench.rs / ipc_latency / context_switch are benchmark harnesses.
+ignore:
+    - "kernel/src/arch/"
+    - "kernel/src/test_framework.rs"
+    - "kernel/src/test_config.rs"
+    - "kernel/src/bench.rs"
+    - "kernel/benches/"
+    - "kernel/tests/"
+    - "tools/"
+
+comment:
+    layout: "reach,diff,flags,files"
+    behavior: default
+    require_changes: false
+    require_base: false
