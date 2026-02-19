@@ -357,16 +357,18 @@ jobs:
               #
               # RUSTFLAGS is cleared so the global "-D warnings" and any bare-metal
               # flags from .cargo/config.toml do not interfere with host compilation.
-              # CARGO_BUILD_TARGET overrides the .cargo/config.toml default target
-              # (x86_64-unknown-none) for this step only.
+              # --target x86_64-unknown-linux-gnu explicitly overrides the
+              # .cargo/config.toml default (x86_64-unknown-none) for this step.
+              # Setting CARGO_BUILD_TARGET="" causes cargo to receive --target ''
+              # (empty string) which is rejected with "error: target was empty".
               env:
                   RUSTFLAGS: ""
-                  CARGO_BUILD_TARGET: ""
               run: |
                   cargo llvm-cov \
                     --lib \
                     --features alloc \
                     -p veridian-kernel \
+                    --target x86_64-unknown-linux-gnu \
                     --lcov \
                     --output-path lcov.info
             - name: Verify coverage file is non-empty
