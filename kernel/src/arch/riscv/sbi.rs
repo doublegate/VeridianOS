@@ -135,7 +135,7 @@ pub fn init() {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_sbi_probe() {
         // Timer extension should be available on most platforms
         let has_timer = probe_extension(SBI_EXT_TIMER);

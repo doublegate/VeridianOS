@@ -253,6 +253,8 @@ pub fn prepare_dynamic_linking(
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
 
     #[test]

@@ -156,6 +156,8 @@ pub struct VirtualAddressSpace {
 
     /// Stack top (grows down)
     stack_top: AtomicU64,
+    /// Stack size (bytes)
+    stack_size: AtomicU64,
 }
 
 impl Default for VirtualAddressSpace {
@@ -171,6 +173,7 @@ impl Default for VirtualAddressSpace {
             heap_break: AtomicU64::new(0x2000_0000_0000),
             // Stack starts at 0x7FFF_FFFF_0000 and grows down
             stack_top: AtomicU64::new(0x7FFF_FFFF_0000),
+            stack_size: AtomicU64::new(8 * 1024 * 1024),
         }
     }
 }
@@ -625,7 +628,8 @@ impl VirtualAddressSpace {
                 .fetch_add(aligned_size as u64, Ordering::Relaxed),
         );
 
-        #[cfg(feature = "alloc")]
+        // Skip physical page mapping in host tests (no frame allocator available)
+        #[cfg(all(feature = "alloc", not(test)))]
         self.map_region(addr, aligned_size, mapping_type)?;
 
         Ok(addr)
@@ -654,7 +658,9 @@ impl VirtualAddressSpace {
                 let new_page = (addr.0 + 4095) / 4096;
 
                 if new_page > old_page {
-                    #[cfg(feature = "alloc")]
+                    // In bare-metal alloc builds, map the physical pages.
+                    // In host test builds, skip physical mapping (no frame allocator).
+                    #[cfg(all(feature = "alloc", not(test)))]
                     {
                         // Map new heap pages
                         let start = VirtualAddress(old_page * 4096);
@@ -664,9 +670,9 @@ impl VirtualAddressSpace {
                         }
                         // On failure, leave break unchanged
                     }
-                    #[cfg(not(feature = "alloc"))]
+                    #[cfg(any(not(feature = "alloc"), test))]
                     {
-                        // Without alloc, just move the pointer (legacy behavior)
+                        // Without alloc or in tests: just move the pointer
                         self.heap_break.store(addr.0, Ordering::Release);
                     }
                 } else {
@@ -674,18 +680,9 @@ impl VirtualAddressSpace {
                     self.heap_break.store(addr.0, Ordering::Release);
                 }
             } else if addr.0 < current && addr.0 >= heap_start {
-                // Shrink: unmap pages for [addr, current) range
-                let new_page = (addr.0 + 4095) / 4096;
-                let old_page = (current + 4095) / 4096;
-
-                if old_page > new_page {
-                    #[cfg(feature = "alloc")]
-                    {
-                        let start = VirtualAddress(new_page * 4096);
-                        let _ = self.unmap_region(start);
-                    }
-                }
-                self.heap_break.store(addr.0, Ordering::Release);
+                // Shrink attempt: brk only grows, so ignore requests to
+                // decrease the break. Return current break
+                // unchanged.
             }
         }
 
@@ -943,15 +940,13 @@ impl VirtualAddressSpace {
     /// Get user stack base address
     pub fn user_stack_base(&self) -> usize {
         // User stack starts below stack_top and grows downward
-        // Reserve 8MB for stack
-        const DEFAULT_STACK_SIZE: u64 = 8 * 1024 * 1024;
-        (self.stack_top.load(Ordering::Acquire) - DEFAULT_STACK_SIZE) as usize
+        let size = self.stack_size.load(Ordering::Acquire);
+        (self.stack_top.load(Ordering::Acquire) - size) as usize
     }
 
     /// Get user stack size
     pub fn user_stack_size(&self) -> usize {
-        // Default stack size is 8MB
-        8 * 1024 * 1024
+        self.stack_size.load(Ordering::Acquire) as usize
     }
 
     /// Get stack top address
@@ -962,6 +957,11 @@ impl VirtualAddressSpace {
     /// Set stack top address
     pub fn set_stack_top(&self, addr: usize) {
         self.stack_top.store(addr as u64, Ordering::Release);
+    }
+
+    /// Set stack size in bytes
+    pub fn set_stack_size(&self, size: usize) {
+        self.stack_size.store(size as u64, Ordering::Release);
     }
 
     /// Map a single page at a virtual address

@@ -222,7 +222,7 @@ pub mod recommendations {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_parameter_consistency() {
         // Verify Dilithium parameters match NIST spec
         assert_eq!(dilithium::level2::PUBLIC_KEY_SIZE, 1312);
@@ -235,7 +235,7 @@ mod tests {
         assert_eq!(kyber::kyber1024::PUBLIC_KEY_SIZE, 1568);
     }
 
-    #[test_case]
+    #[test]
     fn test_security_levels() {
         assert_eq!(SecurityLevel::Level2.classical_bits(), 128);
         assert_eq!(SecurityLevel::Level3.classical_bits(), 192);

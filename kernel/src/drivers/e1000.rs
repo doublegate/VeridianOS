@@ -409,7 +409,7 @@ pub fn init() -> Result<(), KernelError> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_e1000_constants() {
         assert_eq!(E1000_VENDOR_ID, 0x8086);
         assert_eq!(E1000_DEVICE_ID, 0x100E);

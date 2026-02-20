@@ -458,7 +458,7 @@ pub fn init() -> Result<(), KernelError> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_virtio_constants() {
         assert_eq!(VIRTIO_NET_F_MAC, 1 << 5);
         assert_eq!(VIRTIO_NET_F_STATUS, 1 << 16);

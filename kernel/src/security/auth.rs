@@ -927,7 +927,7 @@ pub fn validate_password(password: &str) -> Result<(), KernelError> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_password_hashing() {
         let account = UserAccount::new(1000, "test", "password123");
 
@@ -935,7 +935,7 @@ mod tests {
         assert!(!account.verify_password("wrongpassword"));
     }
 
-    #[test_case]
+    #[test]
     fn test_authentication() {
         let auth = AuthManager::new();
 
@@ -952,7 +952,7 @@ mod tests {
         );
     }
 
-    #[test_case]
+    #[test]
     fn test_account_locking() {
         let auth = AuthManager::new();
 
@@ -970,7 +970,7 @@ mod tests {
         );
     }
 
-    #[test_case]
+    #[test]
     fn test_pbkdf2_hmac_sha256() {
         // Test that PBKDF2 produces consistent output
         let salt = [0x42u8; 32];
@@ -983,7 +983,7 @@ mod tests {
         assert_ne!(hash1, hash3);
     }
 
-    #[test_case]
+    #[test]
     fn test_hmac_sha256() {
         // Basic HMAC test: same key+message = same output
         let key = b"secret_key";
@@ -997,7 +997,7 @@ mod tests {
         assert_ne!(h1, h3);
     }
 
-    #[test_case]
+    #[test]
     fn test_password_policy_validation() {
         let policy = PasswordPolicy::default_policy();
 
@@ -1017,7 +1017,7 @@ mod tests {
         assert!(policy.validate_password("Abcdefg1").is_ok());
     }
 
-    #[test_case]
+    #[test]
     fn test_account_expiration() {
         let mut account = UserAccount::new(1000, "exptest", "password");
 
@@ -1032,7 +1032,7 @@ mod tests {
         assert_eq!(account.expires_at, Some(0));
     }
 
-    #[test_case]
+    #[test]
     fn test_password_change_reuse() {
         let mut account = UserAccount::new(1000, "chgtest", "original");
 

@@ -214,6 +214,7 @@ pub fn create_task_from_thread(
     // Copy thread context - create new task context from thread context
     let thread_ctx = thread.context.lock();
     new_task.context = TaskContext::new(entry_point, kernel_stack_top);
+    new_task.tls_base = thread_ctx.tls_base();
     drop(thread_ctx);
 
     // Set user stack

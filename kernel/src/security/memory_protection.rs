@@ -547,7 +547,7 @@ pub fn get_memory_protection() -> &'static MemoryProtection {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_aslr_randomization() {
         let aslr = Aslr::new().unwrap();
 
@@ -563,7 +563,7 @@ mod tests {
         assert_eq!(addr2 & 0xFFF, 0);
     }
 
-    #[test_case]
+    #[test]
     fn test_stack_canary() {
         let canary = StackCanary::new();
         let value = canary.value();

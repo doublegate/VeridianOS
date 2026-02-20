@@ -289,12 +289,17 @@ pub fn sys_thread_join(tid: usize, retval_ptr: usize) -> SyscallResult {
                 (
                     thread.get_state(),
                     thread.exit_code.load(core::sync::atomic::Ordering::Acquire),
+                    thread.detached.load(core::sync::atomic::Ordering::Acquire),
                 )
             })
         };
 
         match thread_state {
-            Some((crate::process::thread::ThreadState::Zombie, exit_code)) => {
+            Some((crate::process::thread::ThreadState::Zombie, exit_code, detached)) => {
+                if detached {
+                    return Err(SyscallError::InvalidState); // cannot join
+                                                            // detached thread
+                }
                 // Thread has exited, clean it up
                 if crate::process::lifecycle::cleanup_thread(current, target_tid).is_err() {
                     return Err(SyscallError::InvalidState);

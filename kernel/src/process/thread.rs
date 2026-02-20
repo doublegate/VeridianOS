@@ -4,13 +4,13 @@
 //! stack and CPU context but shares memory and other resources with its
 //! process.
 
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
-use alloc::string::String;
+use alloc::{string::String, sync::Arc};
 use core::ptr::NonNull;
 
 use spin::Mutex;
@@ -22,6 +22,35 @@ use crate::{
     mm::{FRAME_ALLOCATOR, FRAME_SIZE},
     sched::task::Task,
 };
+
+/// Per-thread filesystem view (cwd + umask).
+#[cfg(feature = "alloc")]
+#[derive(Debug)]
+pub struct ThreadFs {
+    pub cwd: Mutex<alloc::string::String>,
+    pub umask: AtomicU32,
+}
+
+#[cfg(feature = "alloc")]
+impl ThreadFs {
+    pub fn new_root() -> Arc<Self> {
+        Arc::new(Self {
+            cwd: Mutex::new(alloc::string::String::from("/")),
+            umask: AtomicU32::new(0o022),
+        })
+    }
+
+    pub fn clone_shared(src: &Arc<Self>) -> Arc<Self> {
+        src.clone()
+    }
+
+    pub fn clone_copy(src: &Arc<Self>) -> Arc<Self> {
+        Arc::new(Self {
+            cwd: Mutex::new(src.cwd.lock().clone()),
+            umask: AtomicU32::new(src.umask.load(Ordering::Acquire)),
+        })
+    }
+}
 
 /// Default kernel stack size: 64KB (16 pages)
 pub const DEFAULT_KERNEL_STACK_PAGES: usize = 16;
@@ -167,6 +196,24 @@ impl ThreadLocalStorage {
         Ok(())
     }
 
+    /// Install a user-provided TLS base (arch_prctl/TPIDR_EL0/tp).
+    pub fn install_base(&mut self, base: usize) {
+        self.base = base;
+        self.data_ptr = base;
+        // size is unknown when provided by user; leave as-is
+    }
+
+    /// Set architecture TLS base register value (for user mode)
+    pub fn set_tls_base(&mut self, base: usize) {
+        self.base = base;
+        self.data_ptr = base;
+    }
+
+    /// Get TLS base register value
+    pub fn tls_base(&self) -> usize {
+        self.base
+    }
+
     /// Set TLS value for key
     #[cfg(feature = "alloc")]
     pub fn set_value(&mut self, key: u64, value: u64) {
@@ -309,6 +356,14 @@ pub struct Thread {
 
     /// Scheduler task pointer (if scheduled)
     pub task_ptr: Mutex<TaskPtr>,
+
+    /// clear_tid pointer for CLONE_CHILD_CLEARTID
+    pub clear_tid: AtomicUsize,
+    /// Detached flag (pthread_detach)
+    pub detached: AtomicBool,
+    /// Filesystem view (cwd, umask)
+    #[cfg(feature = "alloc")]
+    pub fs: Arc<ThreadFs>,
 }
 
 /// Stack information
@@ -379,6 +434,7 @@ impl Thread {
         user_stack_size: usize,
         kernel_stack_base: usize,
         kernel_stack_size: usize,
+        fs: Arc<ThreadFs>,
     ) -> Self {
         // Create context using ThreadContext trait
         let mut context = <ArchThreadContext as ThreadContext>::new();
@@ -406,6 +462,9 @@ impl Thread {
             priority: 2, // Normal priority
             fpu_used: AtomicU32::new(0),
             task_ptr: Mutex::new(TaskPtr(None)),
+            clear_tid: AtomicUsize::new(0),
+            detached: AtomicBool::new(false),
+            fs,
         }
     }
 
@@ -597,6 +656,12 @@ impl Thread {
         self.cpu_time.store(0, Ordering::Relaxed);
         self.time_slice.store(10, Ordering::Relaxed); // Default time slice
     }
+
+    /// Get filesystem view (cwd/umask)
+    #[cfg(feature = "alloc")]
+    pub fn fs(&self) -> Arc<ThreadFs> {
+        self.fs.clone()
+    }
 }
 
 /// Thread builder for convenient thread creation
@@ -609,6 +674,9 @@ pub struct ThreadBuilder {
     kernel_stack_size: usize,
     priority: u8,
     cpu_affinity: usize,
+    clear_tid: usize,
+    tls_base: Option<usize>,
+    fs: Option<Arc<ThreadFs>>,
 }
 
 #[cfg(feature = "alloc")]
@@ -623,6 +691,9 @@ impl ThreadBuilder {
             kernel_stack_size: 64 * 1024, // 64KB default
             priority: 2,
             cpu_affinity: usize::MAX,
+            clear_tid: 0,
+            tls_base: None,
+            fs: None,
         }
     }
 
@@ -647,6 +718,24 @@ impl ThreadBuilder {
     /// Set CPU affinity
     pub fn cpu_affinity(mut self, mask: usize) -> Self {
         self.cpu_affinity = mask;
+        self
+    }
+
+    /// Set clear_tid pointer for CLONE_CHILD_CLEARTID
+    pub fn clear_tid(mut self, ptr: usize) -> Self {
+        self.clear_tid = ptr;
+        self
+    }
+
+    /// Set filesystem view (cwd/umask) for the new thread
+    pub fn fs(mut self, fs: Arc<ThreadFs>) -> Self {
+        self.fs = Some(fs);
+        self
+    }
+
+    /// Set TLS base for the new thread (CLONE_SETTLS / arch_prctl semantics)
+    pub fn tls_base(mut self, base: usize) -> Self {
+        self.tls_base = Some(base);
         self
     }
 
@@ -733,10 +822,18 @@ impl ThreadBuilder {
             user_stack_size,
             kernel_stack_usable_base,
             kernel_stack_size,
+            self.fs.unwrap_or_else(ThreadFs::new_root),
         );
 
         thread.priority = self.priority;
         thread.set_affinity(self.cpu_affinity);
+        thread.clear_tid.store(self.clear_tid, Ordering::Release);
+        if let Some(base) = self.tls_base {
+            let mut tls = thread.tls.lock();
+            tls.set_tls_base(base);
+            // Seed the arch context with the TLS base so the first user entry sees it
+            thread.context.lock().set_tls_base(base as u64);
+        }
 
         crate::println!(
             "[THREAD] Allocated stacks for tid {}: user={:#x}..{:#x} (phys={:#x}), \

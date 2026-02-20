@@ -136,7 +136,7 @@ pub fn init() -> Result<(), KernelError> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_framebuffer_create() {
         let fb = Framebuffer::new();
         assert_eq!(fb.width(), 0);

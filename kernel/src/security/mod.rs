@@ -104,7 +104,7 @@ pub fn init() -> Result<(), KernelError> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_security_context() {
         let ctx1 = SecurityContext::new("user_t", 1000, 1000, SecurityLevel::Unclassified);
         let ctx2 = SecurityContext::new("system_t", 0, 0, SecurityLevel::Secret);

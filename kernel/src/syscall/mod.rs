@@ -192,7 +192,12 @@ mod memory;
 use self::memory::*;
 
 // Import user space utilities
+mod arch_prctl;
+mod futex;
+mod thread_clone;
 mod userspace;
+pub use futex::sys_futex_wake;
+pub use userspace::copy_to_user;
 
 /// System call numbers
 #[repr(usize)]
@@ -226,6 +231,7 @@ pub enum Syscall {
     ThreadGetTid = 43,
     ThreadSetAffinity = 44,
     ThreadGetAffinity = 45,
+    ThreadClone = 46,
 
     // Memory management
     MemoryMap = 20,
@@ -350,6 +356,9 @@ pub enum Syscall {
     FileFchown = 198,
     FileMknod = 199,
     FileSelect = 200,
+    FutexWait = 201,
+    FutexWake = 202,
+    ArchPrctl = 203,
 }
 
 /// System call result type
@@ -507,6 +516,7 @@ fn handle_syscall(
         Syscall::ThreadGetTid => sys_gettid(),
         Syscall::ThreadSetAffinity => sys_thread_setaffinity(arg1, arg2, arg3),
         Syscall::ThreadGetAffinity => sys_thread_getaffinity(arg1, arg2, arg3),
+        Syscall::ThreadClone => thread_clone::sys_thread_clone(arg1, arg2, arg3, arg4, arg5),
 
         // Filesystem operations
         Syscall::FileOpen => sys_open(arg1, arg2, arg3),
@@ -623,6 +633,12 @@ fn handle_syscall(
         Syscall::FileFchown => sys_fchown(arg1, arg2, arg3),
         Syscall::FileMknod => sys_mknod(arg1, arg2, arg3),
         Syscall::FileSelect => sys_select(arg1, arg2, arg3, arg4, arg5),
+        // Futex entrypoint: dispatch all futex ops (wait/wake/requeue/bitset/wake_op)
+        Syscall::FutexWait => {
+            futex::sys_futex_dispatch(arg1, arg2, arg3, arg4, arg5).map(|v| v as usize)
+        }
+        Syscall::FutexWake => futex::sys_futex_wake(arg1, arg2, arg3).map(|v| v as usize),
+        Syscall::ArchPrctl => arch_prctl::sys_arch_prctl(arg1, arg2).map(|v| v as usize),
 
         _ => Err(SyscallError::InvalidSyscall),
     }
@@ -1089,6 +1105,7 @@ impl TryFrom<usize> for Syscall {
             43 => Ok(Syscall::ThreadGetTid),
             44 => Ok(Syscall::ThreadSetAffinity),
             45 => Ok(Syscall::ThreadGetAffinity),
+            46 => Ok(Syscall::ThreadClone),
 
             // Filesystem operations
             50 => Ok(Syscall::FileOpen),
@@ -1199,6 +1216,9 @@ impl TryFrom<usize> for Syscall {
             198 => Ok(Syscall::FileFchown),
             199 => Ok(Syscall::FileMknod),
             200 => Ok(Syscall::FileSelect),
+            201 => Ok(Syscall::FutexWait),
+            202 => Ok(Syscall::FutexWake),
+            203 => Ok(Syscall::ArchPrctl),
 
             _ => Err(()),
         }

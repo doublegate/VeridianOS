@@ -462,6 +462,7 @@ pub fn zero_copy_transfer(
 #[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use super::*;
+    use crate::process::ProcessId;
 
     #[test]
     fn test_permission_flags() {
@@ -478,18 +479,24 @@ mod tests {
         assert!(Permission::ReadWriteExecute.can_execute());
     }
 
+    // These tests require the global FRAME_ALLOCATOR to be initialized with
+    // physical memory, which is only available on bare-metal targets.
+    #[cfg(target_os = "none")]
     #[test]
     fn test_shared_region_creation() {
-        let region = SharedRegion::new_with_policy(1, 4096, CachePolicy::WriteBack, None).unwrap();
+        let region =
+            SharedRegion::new_with_policy(ProcessId(1), 4096, CachePolicy::WriteBack, None)
+                .unwrap();
         assert_eq!(region.size(), 4096);
-        assert_eq!(region.owner, 1);
+        assert_eq!(region.owner, ProcessId(1));
     }
 
+    #[cfg(target_os = "none")]
     #[test]
     fn test_memory_manager() {
         let manager = SharedMemoryManager::new(4);
         let id = manager
-            .create_region(1, 8192, CachePolicy::WriteBack, Some(0))
+            .create_region(ProcessId(1), 8192, CachePolicy::WriteBack, Some(0))
             .unwrap();
 
         assert!(manager.get_region(id).is_some());

@@ -391,14 +391,14 @@ pub fn get_window_manager() -> Result<(), KernelError> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_window_creation() {
         let wm = WindowManager::new();
         let id = wm.create_window(0, 0, 640, 480, 1).unwrap();
         assert_eq!(id, 1);
     }
 
-    #[test_case]
+    #[test]
     fn test_window_focus() {
         let wm = WindowManager::new();
         let id1 = wm.create_window(0, 0, 640, 480, 1).unwrap();
@@ -411,7 +411,7 @@ mod tests {
         assert_eq!(*wm.focused_window.read(), Some(id2));
     }
 
-    #[test_case]
+    #[test]
     fn test_window_at_position() {
         let wm = WindowManager::new();
         let id = wm.create_window(100, 100, 200, 150, 1).unwrap();

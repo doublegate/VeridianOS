@@ -74,7 +74,7 @@ pub fn init() -> Result<(), KernelError> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_color() {
         let c = Color::rgb(128, 64, 32);
         assert_eq!(c.r, 128);
@@ -83,7 +83,7 @@ mod tests {
         assert_eq!(c.a, 255);
     }
 
-    #[test_case]
+    #[test]
     fn test_color_to_u32() {
         let c = Color::rgb(255, 0, 128);
         let u = c.to_u32();

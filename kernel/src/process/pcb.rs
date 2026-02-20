@@ -609,7 +609,9 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err(),
-            "Cannot change handler for SIGKILL or SIGSTOP"
+            KernelError::PermissionDenied {
+                operation: "change handler for SIGKILL or SIGSTOP",
+            }
         );
     }
 

@@ -314,14 +314,14 @@ pub fn get_numa_scheduler() -> Option<&'static NumaScheduler> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_topology_detection() {
         let topo = NumaTopology::detect();
         assert!(topo.node_count > 0);
         assert!(!topo.cpus_per_node.is_empty());
     }
 
-    #[test_case]
+    #[test]
     fn test_node_load() {
         let load = NodeLoad::new();
         assert_eq!(load.process_count.load(Ordering::Relaxed), 0);
@@ -333,7 +333,7 @@ mod tests {
         assert_eq!(load.process_count.load(Ordering::Relaxed), 0);
     }
 
-    #[test_case]
+    #[test]
     fn test_numa_scheduler() {
         let topo = NumaTopology::detect();
         let scheduler = NumaScheduler::new(topo);

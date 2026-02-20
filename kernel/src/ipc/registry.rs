@@ -438,18 +438,19 @@ pub fn get_registry_stats() -> Result<RegistryStatsSummary> {
 #[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use super::*;
+    use crate::process::ProcessId;
 
     #[test]
     fn test_registry_init() {
         init();
-        let result = create_endpoint(1);
+        let result = create_endpoint(ProcessId(1));
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_endpoint_creation() {
         init();
-        let (id, cap) = create_endpoint(1).unwrap();
+        let (id, cap) = create_endpoint(ProcessId(1)).unwrap();
         assert_eq!(cap.target(), id);
         assert!(cap.has_permission(super::super::capability::Permission::Send));
     }
@@ -457,7 +458,7 @@ mod tests {
     #[test]
     fn test_channel_creation() {
         init();
-        let (send_id, recv_id, send_cap, recv_cap) = create_channel(1, 100).unwrap();
+        let (send_id, recv_id, send_cap, recv_cap) = create_channel(ProcessId(1), 100).unwrap();
         assert_ne!(send_id, recv_id);
         assert!(send_cap.has_permission(super::super::capability::Permission::Send));
         assert!(!send_cap.has_permission(super::super::capability::Permission::Receive));

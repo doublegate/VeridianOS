@@ -2,9 +2,10 @@
 //!
 //! This module demonstrates the usage of RAII patterns in the kernel.
 
-#![cfg(test)]
+#![cfg(all(test, target_os = "none"))]
 
 use crate::{
+    defer,
     mm::{FrameAllocatorError, FRAME_ALLOCATOR},
     println,
     process::{current_process, ProcessId},

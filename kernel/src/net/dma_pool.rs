@@ -255,13 +255,13 @@ pub fn with_network_pool<R, F: FnOnce(&mut DmaBufferPool) -> R>(f: F) -> Result<
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_dma_pool_creation() {
         let pool = DmaBufferPool::new(16);
         assert!(pool.is_ok());
     }
 
-    #[test_case]
+    #[test]
     fn test_buffer_reference_counting() {
         let buffer = DmaBuffer::new(0x1000, PhysicalAddress(0x2000), 2048, 0);
         assert!(buffer.is_free());

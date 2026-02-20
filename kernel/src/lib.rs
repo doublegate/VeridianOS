@@ -4,18 +4,22 @@
 //! and exports necessary items for testing.
 
 #![no_std]
-#![cfg_attr(test, no_main)]
+#![cfg_attr(all(test, target_os = "none"), no_main)]
 #![feature(custom_test_frameworks)]
 #![feature(abi_x86_interrupt)]
-#![feature(alloc_error_handler)]
+#![cfg_attr(target_os = "none", feature(alloc_error_handler))]
 // naked_functions is stable since Rust 1.88.0, no feature flag needed
-#![test_runner(crate::test_runner)]
-#![reexport_test_harness_main = "test_main"]
+// Custom test runner only for bare-metal; host target uses standard #[test] harness.
+#![cfg_attr(target_os = "none", test_runner(crate::test_runner))]
+#![cfg_attr(target_os = "none", reexport_test_harness_main = "test_main")]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-#[cfg(target_arch = "x86_64")]
+// On bare-metal targets use the custom kernel heap allocators.
+// On host (x86_64-unknown-linux-gnu) for coverage/testing, delegate to the
+// system allocator so that test code using Vec/String/alloc compiles and runs.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 use linked_list_allocator::LockedHeap;
 
 #[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
@@ -23,7 +27,7 @@ mod simple_alloc_unsafe;
 #[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
 use simple_alloc_unsafe::{LockedUnsafeBumpAllocator, UnsafeBumpAllocator};
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
@@ -34,8 +38,15 @@ pub static ALLOCATOR: UnsafeBumpAllocator = UnsafeBumpAllocator::new();
 #[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
 pub static LOCKED_ALLOCATOR: LockedUnsafeBumpAllocator = LockedUnsafeBumpAllocator::empty();
 
+// Host target: use the system allocator so unit tests can allocate normally.
+#[cfg(not(target_os = "none"))]
+extern crate std;
+#[cfg(not(target_os = "none"))]
+#[global_allocator]
+static SYSTEM_ALLOCATOR: std::alloc::System = std::alloc::System;
+
 /// Get a reference to the global allocator
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub fn get_allocator() -> &'static LockedHeap {
     &ALLOCATOR
 }
@@ -110,7 +121,7 @@ pub use test_framework::{
     Testable,
 };
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "none"))]
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     test_main();
@@ -119,7 +130,7 @@ pub extern "C" fn _start() -> ! {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "none"))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     test_framework::test_panic_handler(info)
@@ -129,6 +140,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 ///
 /// Panic is intentional: heap allocation failure in a no_std kernel is
 /// unrecoverable. The alloc_error_handler ABI requires `-> !`.
+#[cfg(target_os = "none")]
 #[alloc_error_handler]
 fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     panic!("Allocation error: {:?}", layout);

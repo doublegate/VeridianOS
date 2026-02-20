@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VeridianOS <dev@veridianos.org>
+Date: Fri, 20 Feb 2026 00:00:00 +0000
+Subject: [PATCH] Support Veridian OS triple
+
+Add a new OS type `veridian` so LLVM toolchains can target
+`*-veridian` and `*-veridian-user` without being rejected by the
+triple parser or printer.
+
+---
+ llvm/include/llvm/ADT/Triple.h | 3 +++
+ llvm/lib/Support/Triple.cpp    | 8 ++++++++
+ 2 files changed, 11 insertions(+)
+
+diff --git a/llvm/include/llvm/ADT/Triple.h b/llvm/include/llvm/ADT/Triple.h
+index 1234567890..abcdef1234 100644
+--- a/llvm/include/llvm/ADT/Triple.h
++++ b/llvm/include/llvm/ADT/Triple.h
+@@ -94,6 +94,7 @@ public:
+     PS5,
+     WatchOS,
+     DriverKit,
++    Veridian,
+     LastOSType = Veridian
+   };
+
+@@ -785,6 +786,7 @@ private:
+     case PS5:          return "ps5";
+     case WatchOS:      return "watchos";
+     case DriverKit:    return "driverkit";
++    case Veridian:     return "veridian";
+     }
+     llvm_unreachable("Invalid OSType");
+   }
+@@ -799,6 +801,7 @@ private:
+           .Cases("ps4", PS4, PS5)
+           .Cases("watchos", "watchos simulator", WatchOS)
+           .Cases("driverkit", DriverKit)
++          .Case("veridian", Veridian)
+           .Default(UnknownOS)) {
+       return false;
+     }
+diff --git a/llvm/lib/Support/Triple.cpp b/llvm/lib/Support/Triple.cpp
+index 1234567890..abcdef1234 100644
+--- a/llvm/lib/Support/Triple.cpp
++++ b/llvm/lib/Support/Triple.cpp
+@@ -362,6 +362,7 @@ StringRef Triple::getOSTypeName(OSType Kind) {
+   case PS5:          return "ps5";
+   case WatchOS:      return "watchos";
+   case DriverKit:    return "driverkit";
++  case Veridian:     return "veridian";
+   }
+   llvm_unreachable("Invalid OSType");
+ }
+@@ -402,6 +403,7 @@ static Triple::OSType parseOS(StringRef OSName) {
+       .Case("ps4", Triple::PS4)
+       .Case("ps5", Triple::PS5)
+       .Case("driverkit", Triple::DriverKit)
++      .Case("veridian", Triple::Veridian)
+       .Default(Triple::UnknownOS);
+ }
+
+@@ -1081,6 +1083,7 @@ bool Triple::isOSVersionOnly(OSType Kind) {
+   case PS5:
+   case WatchOS:
+   case DriverKit:
++  case Veridian:
+     return false;
+   }
+   llvm_unreachable("Invalid OSType");
+@@ -1152,6 +1155,7 @@ bool Triple::getOSVersion(unsigned &Major, unsigned &Minor,
+   case PS5:
+   case WatchOS:
+   case DriverKit:
++  case Veridian:
+     // Those don't support versions.
+     return true;
+   }
+--
+2.44.0
+

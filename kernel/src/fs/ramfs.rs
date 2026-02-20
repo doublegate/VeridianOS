@@ -20,6 +20,9 @@ struct RamNode {
     /// File data (for files)
     data: RwLock<Vec<u8>>,
 
+    /// Symlink target (for symlinks)
+    symlink_target: RwLock<Option<String>>,
+
     /// Children (for directories)
     children: RwLock<BTreeMap<String, Arc<RamNode>>>,
 
@@ -36,6 +39,7 @@ impl RamNode {
         Self {
             node_type: NodeType::File,
             data: RwLock::new(Vec::new()),
+            symlink_target: RwLock::new(None),
             children: RwLock::new(BTreeMap::new()),
             metadata: RwLock::new(Metadata {
                 node_type: NodeType::File,
@@ -56,11 +60,34 @@ impl RamNode {
         Self {
             node_type: NodeType::Directory,
             data: RwLock::new(Vec::new()),
+            symlink_target: RwLock::new(None),
             children: RwLock::new(BTreeMap::new()),
             metadata: RwLock::new(Metadata {
                 node_type: NodeType::Directory,
                 size: 0,
                 permissions,
+                uid: 0,
+                gid: 0,
+                created: crate::arch::timer::get_timestamp_secs(),
+                modified: crate::arch::timer::get_timestamp_secs(),
+                accessed: crate::arch::timer::get_timestamp_secs(),
+            }),
+            inode,
+        }
+    }
+
+    /// Create a new symlink node
+    fn new_symlink(inode: u64, target: String) -> Self {
+        let size = target.len();
+        Self {
+            node_type: NodeType::Symlink,
+            data: RwLock::new(Vec::new()),
+            symlink_target: RwLock::new(Some(target)),
+            children: RwLock::new(BTreeMap::new()),
+            metadata: RwLock::new(Metadata {
+                node_type: NodeType::Symlink,
+                size,
+                permissions: Permissions::read_only(),
                 uid: 0,
                 gid: 0,
                 created: crate::arch::timer::get_timestamp_secs(),
@@ -252,6 +279,36 @@ impl VfsNode for RamNode {
 
         Ok(())
     }
+
+    fn symlink(&self, name: &str, target: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        if self.node_type != NodeType::Directory {
+            return Err(KernelError::FsError(FsError::NotADirectory));
+        }
+
+        let mut children = self.children.write();
+        if children.contains_key(name) {
+            return Err(KernelError::FsError(FsError::AlreadyExists));
+        }
+
+        let inode = NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let new_link = Arc::new(RamNode::new_symlink(inode, target.into()));
+        children.insert(String::from(name), new_link.clone());
+        Ok(new_link as Arc<dyn VfsNode>)
+    }
+
+    fn readlink(&self) -> Result<String, KernelError> {
+        if self.node_type != NodeType::Symlink {
+            return Err(KernelError::FsError(FsError::NotASymlink));
+        }
+
+        let target = self
+            .symlink_target
+            .read()
+            .as_ref()
+            .cloned()
+            .ok_or(KernelError::FsError(FsError::NotASymlink))?;
+        Ok(target)
+    }
 }
 
 /// Global inode counter
@@ -301,6 +358,8 @@ impl Filesystem for RamFs {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
 
     // --- RamFs construction tests ---
@@ -350,9 +409,8 @@ mod tests {
 
         root.create("dup.txt", Permissions::default()).unwrap();
         let result = root.create("dup.txt", Permissions::default());
-        assert!(result.is_err());
         assert_eq!(
-            result.unwrap_err(),
+            result.err().expect("expected error"),
             KernelError::FsError(FsError::AlreadyExists)
         );
     }
@@ -539,9 +597,8 @@ mod tests {
 
         root.mkdir("dup", Permissions::default()).unwrap();
         let result = root.mkdir("dup", Permissions::default());
-        assert!(result.is_err());
         assert_eq!(
-            result.unwrap_err(),
+            result.err().expect("expected error"),
             KernelError::FsError(FsError::AlreadyExists)
         );
     }
@@ -553,9 +610,8 @@ mod tests {
         let file = root.create("file", Permissions::default()).unwrap();
 
         let result = file.mkdir("subdir", Permissions::default());
-        assert!(result.is_err());
         assert_eq!(
-            result.unwrap_err(),
+            result.err().expect("expected error"),
             KernelError::FsError(FsError::NotADirectory)
         );
     }
@@ -578,8 +634,10 @@ mod tests {
         let root = fs.root();
 
         let result = root.lookup("missing");
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), KernelError::FsError(FsError::NotFound));
+        assert_eq!(
+            result.err().expect("expected error"),
+            KernelError::FsError(FsError::NotFound)
+        );
     }
 
     #[test]
@@ -589,9 +647,8 @@ mod tests {
         let file = root.create("f", Permissions::default()).unwrap();
 
         let result = file.lookup("anything");
-        assert!(result.is_err());
         assert_eq!(
-            result.unwrap_err(),
+            result.err().expect("expected error"),
             KernelError::FsError(FsError::NotADirectory)
         );
     }
@@ -701,9 +758,8 @@ mod tests {
         let file = root.create("f", Permissions::default()).unwrap();
 
         let result = file.create("sub", Permissions::default());
-        assert!(result.is_err());
         assert_eq!(
-            result.unwrap_err(),
+            result.err().expect("expected error"),
             KernelError::FsError(FsError::NotADirectory)
         );
     }

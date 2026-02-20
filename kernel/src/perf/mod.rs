@@ -124,7 +124,7 @@ pub fn init() -> Result<(), KernelError> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_counters() {
         reset_stats();
         count_syscall();
@@ -134,7 +134,7 @@ mod tests {
         assert_eq!(stats.context_switches, 1);
     }
 
-    #[test_case]
+    #[test]
     fn test_profiler() {
         let p = Profiler::start("test");
         // Do some work

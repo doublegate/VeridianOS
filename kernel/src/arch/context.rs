@@ -34,6 +34,12 @@ pub trait ThreadContext: Sized {
     /// Set return value (for syscalls, fork, etc.)
     fn set_return_value(&mut self, value: usize);
 
+    /// Set user TLS base for this context (FS/TP).
+    fn set_tls_base(&mut self, base: u64);
+
+    /// Get user TLS base stored in this context.
+    fn tls_base(&self) -> u64;
+
     /// Clone the context
     fn clone_from(&mut self, other: &Self);
 

@@ -1141,7 +1141,7 @@ impl Default for DependencyResolver {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_version_req_parsing() {
         let req = VersionReq::parse("1.2.3");
         assert!(matches!(req, VersionReq::Exact(_)));
@@ -1153,7 +1153,7 @@ mod tests {
         assert!(matches!(req, VersionReq::Any));
     }
 
-    #[test_case]
+    #[test]
     fn test_version_satisfies() {
         let v123 = Version::new(1, 2, 3);
         let v100 = Version::new(1, 0, 0);
@@ -1167,7 +1167,7 @@ mod tests {
         assert!(req.satisfies(&v100));
     }
 
-    #[test_case]
+    #[test]
     fn test_simple_resolution() {
         let mut resolver = DependencyResolver::new();
 
@@ -1184,7 +1184,7 @@ mod tests {
         assert_eq!(packages.len(), 1);
     }
 
-    #[test_case]
+    #[test]
     fn test_caret_version_req() {
         let req = VersionReq::parse("^1.2.3");
         assert!(req.satisfies(&Version::new(1, 2, 3)));
@@ -1193,7 +1193,7 @@ mod tests {
         assert!(!req.satisfies(&Version::new(1, 2, 2)));
     }
 
-    #[test_case]
+    #[test]
     fn test_caret_zero_major() {
         let req = VersionReq::parse("^0.2.3");
         assert!(req.satisfies(&Version::new(0, 2, 3)));
@@ -1202,7 +1202,7 @@ mod tests {
         assert!(!req.satisfies(&Version::new(1, 0, 0)));
     }
 
-    #[test_case]
+    #[test]
     fn test_tilde_version_req() {
         let req = VersionReq::parse("~1.2.3");
         assert!(req.satisfies(&Version::new(1, 2, 3)));
@@ -1211,7 +1211,7 @@ mod tests {
         assert!(!req.satisfies(&Version::new(2, 0, 0)));
     }
 
-    #[test_case]
+    #[test]
     fn test_compound_version_req() {
         let req = VersionReq::parse(">=1.2.0, <2.0.0");
         assert!(req.satisfies(&Version::new(1, 2, 0)));
@@ -1220,14 +1220,14 @@ mod tests {
         assert!(!req.satisfies(&Version::new(1, 1, 9)));
     }
 
-    #[test_case]
+    #[test]
     fn test_satisfies_range_function() {
         assert!(satisfies_range(&Version::new(1, 5, 0), "^1.2"));
         assert!(!satisfies_range(&Version::new(2, 0, 0), "^1.2"));
         assert!(satisfies_range(&Version::new(1, 2, 5), "~1.2.3"));
     }
 
-    #[test_case]
+    #[test]
     fn test_conflict_detection() {
         let mut resolver = DependencyResolver::new();
 
@@ -1254,7 +1254,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test_case]
+    #[test]
     fn test_transitive_dependencies() {
         let mut resolver = DependencyResolver::new();
 
@@ -1289,7 +1289,7 @@ mod tests {
         assert_eq!(packages.len(), 3);
     }
 
-    #[test_case]
+    #[test]
     fn test_virtual_package_provides() {
         let mut resolver = DependencyResolver::new();
 
@@ -1326,7 +1326,7 @@ mod tests {
         assert!(packages.iter().any(|(p, _)| p == "postfix"));
     }
 
-    #[test_case]
+    #[test]
     fn test_resolve_upgrade() {
         let mut resolver = DependencyResolver::new();
 
@@ -1347,7 +1347,7 @@ mod tests {
         assert_eq!(upgrades[0].1, Version::new(2, 0, 0));
     }
 
-    #[test_case]
+    #[test]
     fn test_sat_conflict_resolution() {
         let mut resolver = DependencyResolver::new();
 
@@ -1392,7 +1392,7 @@ mod tests {
         assert_eq!(pkg_a_ver.1.major, lib_ver.1.major);
     }
 
-    #[test_case]
+    #[test]
     fn test_flexible_version_parsing() {
         // ^1 should parse as ^1.0.0
         let req = VersionReq::parse("^1");

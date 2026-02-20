@@ -177,11 +177,11 @@ impl PackageHeader {
 
 #[cfg(test)]
 mod tests {
-    use alloc::vec;
+    use alloc::{vec, vec::Vec};
 
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_header_creation() {
         let header = PackageHeader::new(PackageType::Binary, Compression::Zstd, 1024, 4096, 128);
 
@@ -190,14 +190,14 @@ mod tests {
         assert_eq!(header.get_compression(), Some(Compression::Zstd));
     }
 
-    #[test_case]
+    #[test]
     fn test_compression_enum() {
         assert_eq!(Compression::from_u8(0), Some(Compression::None));
         assert_eq!(Compression::from_u8(1), Some(Compression::Zstd));
         assert_eq!(Compression::from_u8(99), None);
     }
 
-    #[test_case]
+    #[test]
     fn test_signature_serialization() {
         let sigs = PackageSignatures {
             ed25519_sig: [0x42; 64],
@@ -211,7 +211,7 @@ mod tests {
         assert_eq!(restored.dilithium_sig, sigs.dilithium_sig);
     }
 
-    #[test_case]
+    #[test]
     fn test_lz4_compression_roundtrip() {
         let original = b"Hello, World! This is a test of LZ4 compression. \
                         It should compress and decompress correctly.";
@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(decompressed, original);
     }
 
-    #[test_case]
+    #[test]
     fn test_zstd_compression_roundtrip() {
         let original = b"Test data for Zstd compression. \
                         AAAAAAAAAA BBBBBBBBBB CCCCCCCCCC repetitive data.";
@@ -233,7 +233,7 @@ mod tests {
         assert_eq!(decompressed, original);
     }
 
-    #[test_case]
+    #[test]
     fn test_brotli_compression_roundtrip() {
         let original = b"Brotli compression test with some repeated patterns \
                         and varied content for better compression testing.";
@@ -244,7 +244,7 @@ mod tests {
         assert_eq!(decompressed, original);
     }
 
-    #[test_case]
+    #[test]
     fn test_no_compression() {
         let original = b"Uncompressed data";
 
@@ -255,7 +255,7 @@ mod tests {
         assert_eq!(decompressed, original);
     }
 
-    #[test_case]
+    #[test]
     fn test_empty_input() {
         let empty: &[u8] = &[];
 
@@ -272,7 +272,7 @@ mod tests {
         assert!(none_result.is_empty());
     }
 
-    #[test_case]
+    #[test]
     fn test_highly_compressible_data() {
         // Create highly repetitive data
         let mut original = Vec::with_capacity(10000);

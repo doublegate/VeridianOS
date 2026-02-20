@@ -3,7 +3,7 @@
 //! This module configures the custom test framework to bypass lang_items
 //! conflicts.
 
-#![cfg(test)]
+#![cfg(all(test, target_os = "none"))]
 
 use crate::test_framework;
 

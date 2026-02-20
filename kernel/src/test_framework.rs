@@ -314,7 +314,7 @@ impl BenchmarkRunner {
 #[macro_export]
 macro_rules! kernel_bench {
     ($name:ident, $body:expr) => {
-        #[test_case]
+        #[test]
         fn $name() {
             use $crate::test_framework::{cycles_to_ns, read_timestamp, BenchmarkRunner};
             let runner = BenchmarkRunner::new();

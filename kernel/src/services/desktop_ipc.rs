@@ -225,7 +225,7 @@ pub fn init() -> Result<(), KernelError> {
 mod tests {
     use super::{helpers::*, *};
 
-    #[test_case]
+    #[test]
     fn test_create_window_message() {
         let msg = create_window_message(100, 200, 800, 600, "Test Window");
 
@@ -233,7 +233,7 @@ mod tests {
         assert!(msg.len() > core::mem::size_of::<CreateWindowRequest>());
     }
 
-    #[test_case]
+    #[test]
     fn test_keyboard_event() {
         let msg = keyboard_event_message(65, 0, true); // 'A' key pressed
 

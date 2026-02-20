@@ -193,14 +193,14 @@ pub fn with_display<R, F: FnOnce(&WaylandDisplay) -> R>(f: F) -> Option<R> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_display_creation() {
         let display = WaylandDisplay::new();
         assert_eq!(display.globals.read().len(), 3); // compositor, shm,
                                                      // xdg_wm_base
     }
 
-    #[test_case]
+    #[test]
     fn test_client_connection() {
         let display = WaylandDisplay::new();
         let client_id = display.connect_client().unwrap();
@@ -209,7 +209,7 @@ mod tests {
         assert!(display.disconnect_client(client_id).is_ok());
     }
 
-    #[test_case]
+    #[test]
     fn test_object_creation() {
         let client = WaylandClient::new(1);
         let obj_id = client.create_object("wl_surface");

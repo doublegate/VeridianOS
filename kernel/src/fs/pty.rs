@@ -413,14 +413,14 @@ fn get_pty_master(id: u32) -> Option<Arc<PtyMaster>> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_pty_creation() {
         let mut manager = PtyManager::new();
         let result = manager.create_pty();
         assert!(result.is_ok());
     }
 
-    #[test_case]
+    #[test]
     fn test_pty_read_write() {
         let master = PtyMaster::new(0);
         let slave = PtySlave::new(0, 0);
@@ -433,7 +433,7 @@ mod tests {
         // This is a simplified test
     }
 
-    #[test_case]
+    #[test]
     fn test_winsize() {
         let master = PtyMaster::new(0);
         let winsize = Winsize {

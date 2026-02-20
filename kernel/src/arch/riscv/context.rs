@@ -231,12 +231,30 @@ impl crate::arch::context::ThreadContext for RiscVContext {
         self.a0 = value; // a0 is return register
     }
 
+    fn set_tls_base(&mut self, base: u64) {
+        // For user-mode TLS, use tp register
+        self.tp = base as usize;
+    }
+
+    fn tls_base(&self) -> u64 {
+        self.tp as u64
+    }
+
     fn clone_from(&mut self, other: &Self) {
         *self = other.clone();
     }
 
     fn to_task_context(&self) -> TaskContext {
         TaskContext::RiscV(self.clone())
+    }
+
+    fn set_tls_base(&mut self, base: u64) {
+        // Use tp as TLS for user
+        self.tp = base as usize;
+    }
+
+    fn tls_base(&self) -> u64 {
+        self.tp as u64
     }
 }
 

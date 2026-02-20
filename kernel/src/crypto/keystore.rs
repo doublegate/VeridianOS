@@ -182,9 +182,11 @@ pub fn get_keystore() -> &'static KeyStore {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_keystore_operations() {
         let store = KeyStore::new();
 

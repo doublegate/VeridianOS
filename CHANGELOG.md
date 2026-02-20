@@ -1,3 +1,21 @@
+## [Unreleased]
+
+### Kernel
+- Hardened futex paths: strict user-pointer validation, alignment checks, wake/requeue correctness, and consistent return types in the syscall handler.
+- Threading: CLONE_FS per-thread cwd/umask sharing, TLS-preserving clone/pthread trampoline, validated parent/child TID writes, scheduler task creation aligned with the builder API.
+- AArch64/RISC-V virtio-mmio: fail-fast feature negotiation to avoid partially initialized block devices.
+- ELF loader/exec: multi-LOAD binaries keep stack mappings; arch TLS wired through `arch_prctl` on all arches.
+
+### Filesystem
+- BlockFS symlink/readlink implemented; UTF-8 decode failures now surface `InvalidPath`.
+
+### Tooling & Targets
+- Installed rustup targets (x86_64-unknown-none, aarch64-unknown-none, riscv64gc-unknown-none-elf); LLVM triple patched for `-veridian`.
+
+### Docs & Repo
+- README updated with recent kernel highlights; .gitignore extended for build/artifact dirs; `cargo fmt` applied.
+
+---
 ## [0.4.9] - 2026-02-18
 
 ### Self-Hosting Infrastructure, Complete libc, and User-Space Execution Fixes

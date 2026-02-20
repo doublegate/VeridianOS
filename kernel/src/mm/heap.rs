@@ -370,7 +370,7 @@ pub fn init() -> Result<(), crate::error::KernelError> {
         // caller to provide valid memory. The outer unsafe block already
         // establishes that `heap_start`/`heap_size` describe valid, exclusive
         // memory from the static HEAP_MEMORY array.
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
             let mut allocator = crate::get_allocator().lock();
             allocator.init(heap_start, heap_size);

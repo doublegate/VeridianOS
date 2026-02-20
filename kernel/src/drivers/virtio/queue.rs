@@ -117,6 +117,14 @@ pub struct VirtQueue {
 
     /// First frame allocated (for freeing)
     first_frame: FrameNumber,
+
+    /// Physical base address of the queue allocation
+    phys_base: u64,
+
+    /// Offsets of sub-structures from phys_base
+    desc_offset: usize,
+    avail_offset: usize,
+    used_offset: usize,
 }
 
 impl VirtQueue {
@@ -198,12 +206,29 @@ impl VirtQueue {
             queue_pfn: (phys_base / FRAME_SIZE as u64) as u32,
             num_frames,
             first_frame,
+            phys_base,
+            desc_offset: 0,
+            avail_offset: desc_size,
+            used_offset,
         })
     }
 
     /// Get the physical page frame number for the QUEUE_ADDRESS register.
     pub fn pfn(&self) -> u32 {
         self.queue_pfn
+    }
+
+    /// Physical addresses for mmio transports (virtio-mmio expects 64-bit phys)
+    pub fn phys_desc(&self) -> u64 {
+        self.phys_base + self.desc_offset as u64
+    }
+
+    pub fn phys_avail(&self) -> u64 {
+        self.phys_base + self.avail_offset as u64
+    }
+
+    pub fn phys_used(&self) -> u64 {
+        self.phys_base + self.used_offset as u64
     }
 
     /// Get the queue size.

@@ -316,6 +316,32 @@ impl Vfs {
         self.traverse_path(root_fs.root(), &path)
     }
 
+    /// Resolve a path to a VFS node using an explicit cwd (per-thread FS
+    /// state).
+    pub fn resolve_from(&self, path: &str, cwd: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        let root_fs = self
+            .root_fs
+            .as_ref()
+            .ok_or(KernelError::FsError(crate::error::FsError::NoRootFs))?;
+
+        let path = if path.starts_with('/') {
+            path.into()
+        } else if cwd.ends_with('/') {
+            format!("{}{}", cwd, path)
+        } else {
+            format!("{}/{}", cwd, path)
+        };
+
+        for (mount_path, fs) in self.mounts.iter().rev() {
+            if path.starts_with(mount_path) {
+                let relative_path = &path[mount_path.len()..];
+                return self.traverse_path(fs.root(), relative_path);
+            }
+        }
+
+        self.traverse_path(root_fs.root(), &path)
+    }
+
     /// Traverse a path from a starting node
     fn traverse_path(
         &self,
@@ -1021,9 +1047,8 @@ mod tests {
     fn test_resolve_no_root_fails() {
         let vfs = Vfs::new();
         let result = vfs.resolve_path("/anything");
-        assert!(result.is_err());
         assert_eq!(
-            result.unwrap_err(),
+            result.err().expect("expected error"),
             KernelError::FsError(crate::error::FsError::NoRootFs)
         );
     }

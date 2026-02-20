@@ -858,11 +858,16 @@ pub fn sys_getcwd(buf: usize, size: usize) -> SyscallResult {
     }
     validate_user_buffer(buf, size)?;
 
-    let cwd = if let Some(vfs) = try_get_vfs() {
-        let vfs_guard = vfs.read();
-        alloc::string::String::from(vfs_guard.get_cwd())
-    } else {
-        alloc::string::String::from("/")
+    let cwd = {
+        let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
+        #[cfg(feature = "alloc")]
+        {
+            thread.fs().cwd.lock().clone()
+        }
+        #[cfg(not(feature = "alloc"))]
+        {
+            alloc::string::String::from("/")
+        }
     };
 
     let cwd_bytes = cwd.as_bytes();
@@ -891,30 +896,28 @@ pub fn sys_getcwd(buf: usize, size: usize) -> SyscallResult {
 pub fn sys_chdir(path_ptr: usize) -> SyscallResult {
     validate_user_string_ptr(path_ptr)?;
 
-    // SAFETY: path_ptr was validated as non-null and in user-space above. We read
-    // bytes until null terminator or 4096-byte limit.
-    let path_bytes = unsafe {
-        let mut bytes = alloc::vec::Vec::new();
-        let mut ptr = path_ptr as *const u8;
-        for _ in 0..4096 {
-            let byte = *ptr;
-            if byte == 0 {
-                break;
-            }
-            bytes.push(byte);
-            ptr = ptr.add(1);
-        }
-        bytes
-    };
-
-    let path_str = core::str::from_utf8(&path_bytes).map_err(|_| SyscallError::InvalidArgument)?;
-
-    match vfs()?
-        .write()
-        .set_cwd(alloc::string::String::from(path_str))
+    let path = read_user_path(path_ptr)?;
+    let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
+    #[cfg(not(feature = "alloc"))]
     {
-        Ok(()) => Ok(0),
-        Err(_) => Err(SyscallError::InvalidArgument),
+        let _ = (path, thread);
+        return Err(SyscallError::InvalidState);
+    }
+    #[cfg(feature = "alloc")]
+    {
+        let cwd = thread.fs().cwd.lock().clone();
+        let vfs_lock = vfs()?;
+        let vfs_guard = vfs_lock.read();
+        let node = vfs_guard
+            .resolve_from(&path, &cwd)
+            .map_err(|_| SyscallError::ResourceNotFound)?;
+        if node.node_type() != crate::fs::NodeType::Directory {
+            return Err(SyscallError::InvalidArgument);
+        }
+        // Update per-thread cwd
+        let normalized = crate::process::cwd::resolve_path(&path, &cwd);
+        *thread.fs().cwd.lock() = normalized;
+        Ok(0)
     }
 }
 
@@ -1111,7 +1114,7 @@ fn read_user_path(ptr: usize) -> Result<alloc::string::String, SyscallError> {
         let mut v = Vec::new();
         let mut p = ptr as *const u8;
         for _ in 0..4096 {
-            let b = *p;
+            let b = core::ptr::read_volatile(p);
             if b == 0 {
                 break;
             }
@@ -1181,15 +1184,32 @@ pub fn sys_lstat(path_ptr: usize, stat_buf: usize) -> SyscallResult {
 /// # Returns
 /// Number of bytes written to `buf`, or error.
 pub fn sys_readlink(path_ptr: usize, buf: usize, bufsiz: usize) -> SyscallResult {
-    let _path = read_user_path(path_ptr)?;
+    let path = read_user_path(path_ptr)?;
     if bufsiz == 0 {
         return Err(SyscallError::InvalidArgument);
     }
     validate_user_buffer(buf, bufsiz)?;
 
-    // TODO(phase5): Implement symlink resolution in VFS. For now,
-    // all paths are concrete -- no symlinks exist.
-    Err(SyscallError::InvalidSyscall)
+    let vfs_lock = vfs()?;
+    let vfs_guard = vfs_lock.read();
+
+    let node = vfs_guard
+        .resolve_path(&path)
+        .map_err(|_| SyscallError::ResourceNotFound)?;
+
+    // readlink operates on the link itself, not the target
+    let target = node.readlink().map_err(|_| SyscallError::InvalidArgument)?;
+
+    let bytes = target.as_bytes();
+    let to_copy = core::cmp::min(bytes.len(), bufsiz);
+
+    // SAFETY: buffer validated above.
+    unsafe {
+        crate::syscall::userspace::copy_slice_to_user(buf, &bytes[..to_copy])
+            .map_err(|_| SyscallError::InvalidArgument)?;
+    }
+
+    Ok(to_copy)
 }
 
 /// Check file accessibility (syscall 153).
@@ -1777,11 +1797,20 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> SyscallResult {
 ///
 /// Returns the previous umask value.
 pub fn sys_umask(mask: usize) -> SyscallResult {
-    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let old = proc
-        .umask
-        .swap(mask as u32 & 0o777, core::sync::atomic::Ordering::AcqRel);
-    Ok(old as usize)
+    let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
+    #[cfg(feature = "alloc")]
+    {
+        let old = thread
+            .fs()
+            .umask
+            .swap(mask as u32 & 0o777, core::sync::atomic::Ordering::AcqRel);
+        Ok(old as usize)
+    }
+    #[cfg(not(feature = "alloc"))]
+    {
+        let _ = (mask, thread);
+        Err(SyscallError::InvalidState)
+    }
 }
 
 /// Truncate a file by path (syscall 188).

@@ -298,13 +298,13 @@ pub fn with_gpu_manager<R, F: FnOnce(&GpuManager) -> R>(f: F) -> Option<R> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_gpu_enumeration() {
         let devices = GpuDevice::enumerate();
         assert!(!devices.is_empty());
     }
 
-    #[test_case]
+    #[test]
     fn test_command_buffer() {
         let mut cb = CommandBuffer::new();
         cb.draw(3, 1);
@@ -312,7 +312,7 @@ mod tests {
         assert_eq!(cb.commands.len(), 2);
     }
 
-    #[test_case]
+    #[test]
     fn test_vulkan_instance() {
         let instance = vulkan::VulkanInstance::new();
         let devices = instance.enumerate_physical_devices();

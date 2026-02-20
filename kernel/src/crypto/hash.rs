@@ -538,16 +538,21 @@ pub fn verify_hash(algorithm: HashAlgorithm, data: &[u8], expected: &[u8]) -> Cr
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_sha256() {
         let data = b"Hello, VeridianOS!";
         let hash = sha256(data);
         assert_eq!(hash.as_bytes().len(), 32);
     }
 
-    #[test_case]
+    #[test]
     fn test_hash_hex() {
-        let hash = Hash256([0x12, 0x34, 0x56, 0x78] + [0; 28]);
+        let mut bytes = [0u8; 32];
+        bytes[0] = 0x12;
+        bytes[1] = 0x34;
+        bytes[2] = 0x56;
+        bytes[3] = 0x78;
+        let hash = Hash256(bytes);
         let hex = hash.to_hex();
         assert!(hex.starts_with("12345678"));
     }

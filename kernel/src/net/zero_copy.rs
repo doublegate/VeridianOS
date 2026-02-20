@@ -371,7 +371,7 @@ pub static ZERO_COPY_STATS: ZeroCopyStats = ZeroCopyStats::new();
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_dma_buffer_pool() {
         let pool = DmaBufferPool::new(2048, 10);
         let stats = pool.stats();
@@ -386,7 +386,7 @@ mod tests {
         assert_eq!(stats.in_use, 1);
     }
 
-    #[test_case]
+    #[test]
     fn test_scatter_gather() {
         let mut sg = ScatterGatherList::new();
         sg.add_segment(0x1000, 512);
@@ -396,7 +396,7 @@ mod tests {
         assert_eq!(sg.segments().len(), 2);
     }
 
-    #[test_case]
+    #[test]
     fn test_zero_copy_stats() {
         let stats = ZeroCopyStats::new();
         stats.record_zero_copy(1000);

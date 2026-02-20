@@ -273,9 +273,11 @@ unsafe impl<T: Send> Sync for GlobalState<T> {}
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::String;
+
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_once_lock() {
         let lock = OnceLock::new();
         assert!(lock.get().is_none());
@@ -287,13 +289,13 @@ mod tests {
         assert!(lock.set(100).is_err());
     }
 
-    #[test_case]
+    #[test]
     fn test_lazy_lock() {
         let lazy = LazyLock::new(|| 42);
         assert_eq!(*lazy, 42);
     }
 
-    #[test_case]
+    #[test]
     fn test_global_state() {
         let state = GlobalState::new();
         assert!(state.init(String::from("hello")).is_ok());

@@ -144,7 +144,7 @@ pub fn init() -> Result<(), KernelError> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_compositor_create_window() {
         let mut comp = Compositor::new();
         let id = comp.create_window(
@@ -159,7 +159,7 @@ mod tests {
         assert!(comp.get_window(id).is_some());
     }
 
-    #[test_case]
+    #[test]
     fn test_compositor_destroy_window() {
         let mut comp = Compositor::new();
         let id = comp.create_window(

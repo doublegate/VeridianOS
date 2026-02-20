@@ -408,13 +408,13 @@ pub fn with_terminal_manager<R, F: FnOnce(&TerminalManager) -> R>(f: F) -> Optio
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_cell_default() {
         let cell = Cell::default();
         assert_eq!(cell.character, ' ');
     }
 
-    #[test_case]
+    #[test]
     fn test_terminal_dimensions() {
         assert_eq!(TERMINAL_COLS, 80);
         assert_eq!(TERMINAL_ROWS, 24);

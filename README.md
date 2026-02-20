@@ -149,6 +149,12 @@ Phases 0 through 4 are complete. The kernel provides:
 - **Framebuffer Display** -- 1280x800 text console via UEFI framebuffer (x86_64) and ramfb (AArch64/RISC-V), ANSI color support, PS/2 keyboard input via controller polling, glyph cache, pixel ring buffer, write-combining (PAT) on x86_64
 - **Userland Bridge** -- Ring 0 to Ring 3 transitions with SYSCALL/SYSRET on x86_64
 
+### Recent Kernel Updates (Phase 4)
+- Futex/threads: wait/wake/requeue validation, futex pointer gating, CLONE_FS per-thread cwd/umask sharing, TLS-preserving clone/pthread trampoline, child-cleartid wake.
+- Virtio: AArch64/RISC-V virtio-mmio probing now fails fast on feature negotiation errors to avoid partial init.
+- Filesystem/exec: BlockFS symlink/readlink works; ELF loader handles multi-LOAD binaries while retaining stack mappings; per-thread FS state wired through syscalls.
+- Tooling: LLVM triple patched for `-veridian`; rustup targets installed for x86_64/aarch64/riscv64; `arch_prctl` TLS wired on all arches.
+
 ### What Comes Next
 
 - **Phase 5: Performance Optimization** -- Sub-microsecond IPC, lock-free kernel paths, DPDK networking, NVMe optimization, profiling tools

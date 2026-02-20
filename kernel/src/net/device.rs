@@ -345,7 +345,7 @@ pub fn list_devices() -> Vec<String> {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_loopback_device() {
         let mut lo = LoopbackDevice::new();
         assert_eq!(lo.state(), DeviceState::Down);
@@ -354,7 +354,7 @@ mod tests {
         assert_eq!(lo.state(), DeviceState::Up);
     }
 
-    #[test_case]
+    #[test]
     fn test_device_capabilities() {
         let caps = DeviceCapabilities::default();
         assert_eq!(caps.max_transmission_unit, 1500);

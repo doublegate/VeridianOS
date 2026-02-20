@@ -789,7 +789,7 @@ impl SymmetricCipher for ChaCha20Poly1305 {
 mod tests {
     use super::*;
 
-    #[test_case]
+    #[test]
     fn test_aes256gcm_encrypt_decrypt() {
         let key = [0x42u8; 32];
         let cipher = Aes256Gcm::new(&key).unwrap();

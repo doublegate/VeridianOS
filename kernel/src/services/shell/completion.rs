@@ -298,6 +298,8 @@ fn list_directory_entries(dir_path: &str) -> Vec<(String, bool)> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
 
     // ---- longest_common_prefix ----
