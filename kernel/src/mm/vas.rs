@@ -156,6 +156,8 @@ pub struct VirtualAddressSpace {
 
     /// Stack top (grows down)
     stack_top: AtomicU64,
+    /// Stack size (bytes)
+    stack_size: AtomicU64,
 }
 
 impl Default for VirtualAddressSpace {
@@ -171,6 +173,7 @@ impl Default for VirtualAddressSpace {
             heap_break: AtomicU64::new(0x2000_0000_0000),
             // Stack starts at 0x7FFF_FFFF_0000 and grows down
             stack_top: AtomicU64::new(0x7FFF_FFFF_0000),
+            stack_size: AtomicU64::new(8 * 1024 * 1024),
         }
     }
 }
@@ -937,15 +940,13 @@ impl VirtualAddressSpace {
     /// Get user stack base address
     pub fn user_stack_base(&self) -> usize {
         // User stack starts below stack_top and grows downward
-        // Reserve 8MB for stack
-        const DEFAULT_STACK_SIZE: u64 = 8 * 1024 * 1024;
-        (self.stack_top.load(Ordering::Acquire) - DEFAULT_STACK_SIZE) as usize
+        let size = self.stack_size.load(Ordering::Acquire);
+        (self.stack_top.load(Ordering::Acquire) - size) as usize
     }
 
     /// Get user stack size
     pub fn user_stack_size(&self) -> usize {
-        // Default stack size is 8MB
-        8 * 1024 * 1024
+        self.stack_size.load(Ordering::Acquire) as usize
     }
 
     /// Get stack top address
@@ -956,6 +957,11 @@ impl VirtualAddressSpace {
     /// Set stack top address
     pub fn set_stack_top(&self, addr: usize) {
         self.stack_top.store(addr as u64, Ordering::Release);
+    }
+
+    /// Set stack size in bytes
+    pub fn set_stack_size(&self, size: usize) {
+        self.stack_size.store(size as u64, Ordering::Release);
     }
 
     /// Map a single page at a virtual address

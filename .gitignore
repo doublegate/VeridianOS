@@ -17,6 +17,8 @@ Thumbs.db
 
 # Build artifacts
 target/
+build/
+artifacts/
 *.o
 *.a
 *.so
@@ -40,6 +42,7 @@ build_output.log
 *.bin
 *.img
 *.iso
+images/
 
 # QEMU
 *.qcow2
@@ -284,4 +287,3 @@ OVMF*.fd
 
 # Plan files (Claude Code)
 .claude/plans/
-

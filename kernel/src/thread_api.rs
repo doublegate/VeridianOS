@@ -15,7 +15,11 @@ use spin::{Mutex, RwLock};
 
 use crate::{
     error::KernelError,
-    process::{get_process, thread::ThreadId, ProcessId},
+    process::{
+        get_process,
+        thread::{ThreadFs, ThreadId},
+        ProcessId,
+    },
 }; // Use the ThreadId from process::thread module
 
 /// Thread priority levels
@@ -269,6 +273,7 @@ impl ThreadManager {
                 stack_size,
                 kernel_stack_addr,
                 kernel_stack_size,
+                ThreadFs::new_root(),
             );
 
             // Set stack pointer to top of stack (with argument)

@@ -15,7 +15,13 @@
     clippy::implicit_saturating_sub
 )]
 
-use alloc::{collections::BTreeSet, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{
+    collections::BTreeSet,
+    string::{String, ToString},
+    sync::Arc,
+    vec,
+    vec::Vec,
+};
 use core::mem::size_of;
 
 use spin::Mutex;
@@ -259,11 +265,16 @@ impl DiskInode {
         (self.mode & 0x8000) != 0
     }
 
+    pub fn is_symlink(&self) -> bool {
+        (self.mode & 0xA000) == 0xA000
+    }
+
     pub fn node_type(&self) -> NodeType {
         if self.is_dir() {
             NodeType::Directory
+        } else if self.is_symlink() {
+            NodeType::Symlink
         } else {
-            // Regular file or default for unrecognized inode modes
             NodeType::File
         }
     }
@@ -296,6 +307,8 @@ impl DiskDirEntry {
     pub const FT_REG_FILE: u8 = 1;
     /// File type constant for directories
     pub const FT_DIR: u8 = 2;
+    /// File type constant for symlinks
+    pub const FT_SYMLINK: u8 = 7;
 
     /// Create a new directory entry
     pub fn new(inode: u32, name: &str, file_type: u8) -> Self {
@@ -326,6 +339,7 @@ impl DiskDirEntry {
     pub fn node_type(&self) -> NodeType {
         match self.file_type {
             Self::FT_DIR => NodeType::Directory,
+            Self::FT_SYMLINK => NodeType::Symlink,
             _ => NodeType::File,
         }
     }
@@ -459,6 +473,16 @@ impl VfsNode for BlockFsNode {
     fn truncate(&self, size: usize) -> Result<(), KernelError> {
         let mut fs = self.fs.write();
         fs.truncate_inode(self.inode_num, size)
+    }
+
+    fn symlink(&self, _name: &str, _target: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::NotImplemented {
+            feature: "blockfs symlink",
+        })
+    }
+
+    fn readlink(&self) -> Result<String, KernelError> {
+        Err(KernelError::FsError(FsError::NotASymlink))
     }
 }
 
@@ -1065,6 +1089,45 @@ impl BlockFsInner {
         Ok(inode_num)
     }
 
+    fn create_symlink(
+        &mut self,
+        parent: u32,
+        name: &str,
+        target: &str,
+    ) -> Result<u32, KernelError> {
+        if name.is_empty() || name.len() > MAX_FILENAME_LEN {
+            return Err(KernelError::InvalidArgument {
+                name: "symlink",
+                value: "empty or too long",
+            });
+        }
+        if self.find_dir_entry(parent, name).is_some() {
+            return Err(KernelError::FsError(FsError::AlreadyExists));
+        }
+
+        let inode_num = self
+            .allocate_inode()
+            .ok_or(KernelError::ResourceExhausted { resource: "inodes" })?;
+
+        // Symlink inode: mode 0o120000 | 0o777 (rwx for all)
+        let mut inode = DiskInode::new(0o120000 | 0o777, 0, 0);
+        inode.links_count = 1;
+        inode.size = target.len() as u32;
+        self.inode_table[inode_num as usize] = inode;
+
+        // Store target contents as file data
+        self.write_inode(inode_num, 0, target.as_bytes())?;
+
+        // Add dir entry in parent
+        if let Err(e) = self.write_dir_entry(parent, inode_num, name, DiskDirEntry::FT_SYMLINK) {
+            self.inode_table[inode_num as usize].links_count = 0;
+            self.superblock.free_inodes += 1;
+            return Err(e);
+        }
+
+        Ok(inode_num)
+    }
+
     fn unlink_from_dir(&mut self, parent: u32, name: &str) -> Result<(), KernelError> {
         // Cannot unlink "." or ".."
         if name == "." || name == ".." {
@@ -1201,6 +1264,23 @@ impl BlockFsInner {
         }
 
         Ok(())
+    }
+
+    fn read_symlink(&self, inode_num: u32) -> Result<String, KernelError> {
+        let inode = self
+            .inode_table
+            .get(inode_num as usize)
+            .ok_or(KernelError::FsError(FsError::NotFound))?;
+        if !inode.is_symlink() {
+            return Err(KernelError::FsError(FsError::NotASymlink));
+        }
+
+        let mut buf = vec![0u8; inode.size as usize];
+        let read = self.read_inode(inode_num, 0, &mut buf)?;
+        buf.truncate(read);
+        let s =
+            core::str::from_utf8(&buf).map_err(|_| KernelError::FsError(FsError::InvalidPath))?;
+        Ok(s.to_string())
     }
 
     /// Free single-indirect data blocks at or beyond `first_free_block`.

@@ -179,6 +179,12 @@ The self-hosting effort follows a tiered plan to build VeridianOS toward compili
 
 The native GCC infrastructure (T5-3) uses Canadian cross-compilation: a 13-step pipeline that rebuilds GCC with C++ support (Stage 2.5), then cross-compiles binutils and GCC as static binaries targeting VeridianOS (`build=linux, host=veridian, target=veridian`). See [`scripts/build-native-gcc.sh`](scripts/build-native-gcc.sh) for the 936-line build script.
 
+### Recent Kernel Updates (Phase 4)
+- Futex/threads: wait/wake/requeue validation, futex pointer gating, CLONE_FS per-thread cwd/umask sharing, TLS-preserving clone/pthread trampoline, child-cleartid wake.
+- Virtio: AArch64/RISC-V virtio-mmio probing now fails fast on feature negotiation errors to avoid partial init.
+- Filesystem/exec: BlockFS symlink/readlink works; ELF loader handles multi-LOAD binaries while retaining stack mappings; per-thread FS state wired through syscalls.
+- Tooling: LLVM triple patched for `-veridian`; rustup targets installed for x86_64/aarch64/riscv64; `arch_prctl` TLS wired on all arches.
+
 ### What Comes Next
 
 - **Self-Hosting Tier 6-7** -- Merge native GCC from test-codex branch, verify native compilation on VeridianOS, achieve full self-hosting

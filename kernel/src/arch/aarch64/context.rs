@@ -26,6 +26,8 @@ pub struct AArch64Context {
     /// Thread pointer registers
     pub tpidr_el0: u64,
     pub tpidr_el1: u64,
+    /// Saved TLS base for EL0
+    pub tls_base: u64,
 
     /// Translation table base register
     pub ttbr0_el1: u64,
@@ -68,6 +70,7 @@ impl AArch64Context {
             // Thread pointers
             tpidr_el0: 0,
             tpidr_el1: 0,
+            tls_base: 0,
 
             // Will be set to actual page table
             ttbr0_el1: 0,
@@ -144,12 +147,30 @@ impl crate::arch::context::ThreadContext for AArch64Context {
         self.x[0] = value as u64; // x0 is return register
     }
 
+    fn set_tls_base(&mut self, base: u64) {
+        self.tls_base = base;
+        self.tpidr_el0 = base;
+    }
+
+    fn tls_base(&self) -> u64 {
+        self.tls_base
+    }
+
     fn clone_from(&mut self, other: &Self) {
         *self = other.clone();
     }
 
     fn to_task_context(&self) -> TaskContext {
         TaskContext::AArch64(self.clone())
+    }
+
+    fn set_tls_base(&mut self, base: u64) {
+        self.tls_base = base;
+        self.tpidr_el0 = base;
+    }
+
+    fn tls_base(&self) -> u64 {
+        self.tls_base
     }
 }
 

@@ -136,6 +136,9 @@ pid_t getpid(void);
 /** Return the parent process ID. */
 pid_t getppid(void);
 
+/** Return the thread ID of the calling thread. */
+pid_t gettid(void);
+
 /** Yield the processor. */
 int sched_yield(void);
 

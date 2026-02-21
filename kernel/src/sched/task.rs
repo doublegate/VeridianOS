@@ -187,6 +187,8 @@ pub struct Task {
     pub last_cpu: Option<u8>,
     /// Number of times this task has been migrated
     pub migrations: u32,
+    /// TLS base snapshot for context switch
+    pub tls_base: u64,
 }
 
 impl Task {
@@ -224,6 +226,7 @@ impl Task {
             thread_ref: None,
             last_cpu: None,
             migrations: 0,
+            tls_base: 0,
         }
     }
 

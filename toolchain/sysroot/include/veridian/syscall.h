@@ -55,13 +55,14 @@ extern "C" {
 #define SYS_CAPABILITY_GRANT    30
 #define SYS_CAPABILITY_REVOKE   31
 
-/* Thread management (40-45) */
+/* Thread management (40-46) */
 #define SYS_THREAD_CREATE       40
 #define SYS_THREAD_EXIT         41
 #define SYS_THREAD_JOIN         42
 #define SYS_THREAD_GETTID       43
 #define SYS_THREAD_SET_AFFINITY 44
 #define SYS_THREAD_GET_AFFINITY 45
+#define SYS_THREAD_CLONE        46
 
 /* Filesystem operations (50-59) */
 #define SYS_FILE_OPEN           50
@@ -175,6 +176,11 @@ extern "C" {
 #define SYS_FILE_MKNOD          199
 #define SYS_FILE_SELECT         200
 
+/* Futex + arch-specific control (201-203) */
+#define SYS_FUTEX_WAIT          201
+#define SYS_FUTEX_WAKE          202
+#define SYS_ARCH_PRCTL          203
+
 /* AT_* constants for *at() syscalls */
 #define AT_FDCWD                (-100)
 #define AT_REMOVEDIR            0x200
@@ -186,6 +192,31 @@ extern "C" {
 #define POLLERR                 0x0008
 #define POLLHUP                 0x0010
 #define POLLNVAL                0x0020
+
+/* clone(2) flags (subset aligned with kernel) */
+#define CLONE_VM                0x00000100
+#define CLONE_FS                0x00000200
+#define CLONE_FILES             0x00000400
+#define CLONE_SIGHAND           0x00000800
+#define CLONE_THREAD            0x00010000
+#define CLONE_SETTLS            0x00080000
+#define CLONE_PARENT_SETTID     0x00100000
+#define CLONE_CHILD_CLEARTID    0x00200000
+#define CLONE_CHILD_SETTID      0x01000000
+
+/* arch_prctl codes (x86_64 compatible) */
+#define ARCH_SET_FS             0x1002
+#define ARCH_GET_FS             0x1003
+
+/* Futex operations (subset) */
+#define FUTEX_WAIT              0
+#define FUTEX_WAKE              1
+#define FUTEX_REQUEUE           3
+#define FUTEX_WAIT_BITSET       9
+#define FUTEX_WAKE_OP           5
+#define FUTEX_PRIVATE_FLAG      0x80
+#define FUTEX_CLOCK_REALTIME    0x100
+#define FUTEX_BITSET_MATCH_ANY  0xFFFFFFFF
 
 /* ========================================================================= */
 /* Architecture-Specific Syscall Wrappers                                    */

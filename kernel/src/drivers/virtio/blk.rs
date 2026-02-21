@@ -29,7 +29,7 @@ use spin::Mutex;
 
 use super::{
     queue::{VirtQueue, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE},
-    VirtioPciTransport,
+    VirtioPciTransport, VirtioTransport,
 };
 use crate::{
     error::KernelError,
@@ -44,7 +44,7 @@ pub const BLOCK_SIZE: usize = 512;
 const MAX_SECTORS_PER_REQ: usize = 256;
 
 /// Virtio-blk feature bits (virtio spec 5.2.3)
-mod features {
+pub mod features {
     /// Maximum size of any single segment is in `size_max`.
     pub const VIRTIO_BLK_F_SIZE_MAX: u32 = 1 << 1;
     /// Maximum number of segments in a request is in `seg_max`.
@@ -215,8 +215,8 @@ impl Drop for RequestBuffer {
 ///
 /// Manages a single virtio-blk PCI device with one request virtqueue (queue 0).
 pub struct VirtioBlkDevice {
-    /// PCI transport handle
-    transport: VirtioPciTransport,
+    /// Transport handle (PCI or MMIO)
+    transport: VirtioTransport,
     /// Request virtqueue (queue index 0)
     queue: VirtQueue,
     /// Device capacity in 512-byte sectors
@@ -237,7 +237,7 @@ impl VirtioBlkDevice {
     /// 4. Set FEATURES_OK + DRIVER_OK
     /// 5. Read device configuration (capacity)
     pub fn new(io_base: u16) -> Result<Self, KernelError> {
-        let transport = VirtioPciTransport::new(io_base);
+        let transport = VirtioTransport::Pci(VirtioPciTransport::new(io_base));
 
         // Step 1-2: Begin initialization (reset + ACKNOWLEDGE + DRIVER)
         transport.begin_init();
@@ -261,7 +261,6 @@ impl VirtioBlkDevice {
         transport.select_queue(0);
         let queue_size = transport.read_queue_size();
         if queue_size == 0 {
-            transport.set_failed();
             return Err(KernelError::HardwareError {
                 device: "virtio-blk",
                 code: 0x01, // Queue size is zero -- no queue available
@@ -270,6 +269,8 @@ impl VirtioBlkDevice {
 
         let queue = VirtQueue::new(queue_size)?;
         transport.write_queue_address(queue.pfn());
+        transport.write_queue_phys(queue.phys_desc(), queue.phys_avail(), queue.phys_used());
+        transport.set_queue_ready();
 
         // Step 6: Set DRIVER_OK -- device is live
         transport.set_driver_ok();
@@ -293,6 +294,23 @@ impl VirtioBlkDevice {
             read_only,
             features: accepted,
         })
+    }
+
+    /// Construct from an MMIO transport + queue (used on AArch64/RISC-V).
+    pub fn from_mmio(
+        transport: crate::drivers::virtio::mmio::VirtioMmioTransport,
+        queue: VirtQueue,
+        capacity_sectors: u64,
+        read_only: bool,
+        features: u32,
+    ) -> Self {
+        Self {
+            transport: VirtioTransport::Mmio(transport),
+            queue,
+            capacity_sectors,
+            read_only,
+            features,
+        }
     }
 
     /// Get device capacity in 512-byte sectors.
@@ -572,16 +590,10 @@ static VIRTIO_BLK: OnceLock<Mutex<VirtioBlkDevice>> = OnceLock::new();
 /// would be needed instead).
 pub fn init() {
     #[cfg(target_arch = "x86_64")]
-    {
-        init_x86_64();
-    }
+    init_x86_64();
 
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        // TODO(future): Implement virtio-mmio transport for AArch64 and RISC-V.
-        // These architectures use memory-mapped virtio rather than PCI I/O ports.
-        crate::println!("[VIRTIO-BLK] Not available on this architecture (PCI I/O only)");
-    }
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    init_mmio();
 }
 
 /// x86_64 PCI-based virtio-blk initialization.
@@ -655,6 +667,27 @@ fn init_x86_64() {
     }
 
     crate::println!("[VIRTIO-BLK] No virtio-blk devices found on PCI bus");
+}
+
+/// AArch64 / RISC-V virtio-mmio initialization.
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+fn init_mmio() {
+    use crate::drivers::virtio::mmio::{try_init_mmio_blk, DEFAULT_BASES};
+
+    // Probe the standard virtio-mmio base addresses exposed by QEMU virt.
+    for base in DEFAULT_BASES {
+        match try_init_mmio_blk(base) {
+            Ok(dev) => {
+                if VIRTIO_BLK.set(Mutex::new(dev)).is_ok() {
+                    crate::println!("[VIRTIO-BLK/MMIO] Device initialized at base {:#x}", base);
+                    return;
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+
+    crate::println!("[VIRTIO-BLK/MMIO] No virtio-blk mmio device detected");
 }
 
 /// Enable PCI I/O space, memory space, and bus mastering for a device.

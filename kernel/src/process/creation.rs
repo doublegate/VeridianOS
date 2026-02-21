@@ -116,6 +116,7 @@ pub fn create_process_with_options(
         // Update VAS stack_top to match the main thread's actual allocated stack
         // This ensures setup_exec_stack() uses the correct stack range
         memory_space.set_stack_top(user_base + user_size);
+        memory_space.set_stack_size(user_size);
     }
 
     // Add thread to process
@@ -337,6 +338,27 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
 
         // Reinitialize the address space for the new program
         memory_space.init()?;
+
+        // Re-map the main thread's user stack into the fresh VAS. `clear()`
+        // removed all user mappings; without this, the new image would return
+        // to an unmapped stack (the /bin/sh crash).
+        if let Some(main_tid) = process.get_main_thread_id() {
+            if let Some(main_thread) = process.get_thread(main_tid) {
+                let user_base = main_thread.user_stack.base;
+                let user_size = main_thread.user_stack.size;
+                let flags = crate::mm::PageFlags::PRESENT
+                    | crate::mm::PageFlags::USER
+                    | crate::mm::PageFlags::WRITABLE
+                    | crate::mm::PageFlags::NO_EXECUTE;
+                let pages = user_size / 4096;
+                for i in 0..pages {
+                    let vaddr = user_base + i * 4096;
+                    memory_space.map_page(vaddr, flags)?;
+                }
+                memory_space.set_stack_top(user_base + user_size);
+                memory_space.set_stack_size(user_size);
+            }
+        }
 
         // Load ELF segments into address space and get entry point
         ElfLoader::load(&file_data, &mut memory_space)?

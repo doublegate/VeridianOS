@@ -177,6 +177,21 @@ impl ElfLoader {
                     }
 
                     vas.map_page(addr as usize, flags)?;
+
+                    // Optional: sanity check that the page resolves in the mapper
+                    #[cfg(feature = "alloc")]
+                    {
+                        use crate::mm::{vas::create_mapper_from_root_pub, VirtualAddress};
+                        let pt_root = vas.get_page_table();
+                        if pt_root != 0 {
+                            let mapper = unsafe { create_mapper_from_root_pub(pt_root) };
+                            mapper.translate_page(VirtualAddress(addr)).map_err(|_| {
+                                crate::error::KernelError::UnmappedMemory {
+                                    addr: addr as usize,
+                                }
+                            })?;
+                        }
+                    }
                 }
 
                 // Copy segment data from file via physical memory window.
@@ -195,6 +210,38 @@ impl ElfLoader {
                     let bss_size = (segment.memory_size - segment.file_size) as usize;
                     zero_user_pages(vas, segment.virtual_addr + segment.file_size, bss_size)?;
                 }
+            }
+        }
+
+        // Sanity-check that the entry point is mapped and executable
+        #[cfg(feature = "alloc")]
+        {
+            let pt_root = vas.get_page_table();
+            if pt_root == 0 {
+                return Err(crate::error::KernelError::InvalidArgument {
+                    name: "vas",
+                    value: "page table root is 0",
+                });
+            }
+
+            // SAFETY: pt_root was validated non-zero above.
+            let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
+            use crate::mm::VirtualAddress;
+
+            let entry_page = VirtualAddress(binary.entry_point & !0xFFF);
+            let (_, flags) = mapper.translate_page(entry_page).map_err(|_| {
+                crate::error::KernelError::UnmappedMemory {
+                    addr: binary.entry_point as usize,
+                }
+            })?;
+
+            // Require PRESENT|USER and executable (i.e., not NO_EXECUTE)
+            use crate::mm::PageFlags;
+            let needed = PageFlags::PRESENT | PageFlags::USER;
+            if !flags.contains(needed) || flags.contains(PageFlags::NO_EXECUTE) {
+                return Err(crate::error::KernelError::PermissionDenied {
+                    operation: "execute entry point",
+                });
             }
         }
 

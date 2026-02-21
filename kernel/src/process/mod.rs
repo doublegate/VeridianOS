@@ -166,7 +166,7 @@ pub fn yield_thread() {
 
 /// Exit current thread
 pub fn exit_thread(exit_code: i32) {
-    if let Some(thread) = current_thread() {
+    if let (Some(thread), Some(process)) = (current_thread(), current_process()) {
         println!(
             "[PROCESS] Thread {} exiting with code {}",
             thread.tid.0, exit_code
@@ -174,6 +174,22 @@ pub fn exit_thread(exit_code: i32) {
 
         // Mark thread as exited with state synchronization
         thread.set_exited(exit_code);
+
+        // If detached, clean up immediately (no join will occur)
+        if thread.detached.load(core::sync::atomic::Ordering::Acquire) {
+            let _ = crate::process::exit::cleanup_thread(&process, thread.tid);
+        }
+
+        // Handle CLONE_CHILD_CLEARTID: clear *clear_tid and futex wake
+        let clear_ptr = thread.clear_tid.load(core::sync::atomic::Ordering::Acquire);
+        if clear_ptr != 0 {
+            unsafe {
+                // Ignore copy_to_user errors here; best effort
+                let _ = crate::syscall::copy_to_user(clear_ptr, &0u32);
+            }
+            // Wake futex waiters on that address
+            let _ = crate::syscall::sys_futex_wake(clear_ptr, 1, 0);
+        }
 
         // Never return - schedule another thread
         crate::sched::exit_task(exit_code);

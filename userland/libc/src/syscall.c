@@ -19,6 +19,7 @@
 #include <veridian/stat.h>
 #include <veridian/fcntl.h>
 #include <veridian/mman.h>
+#include <time.h>
 #include <errno.h>
 #include <stddef.h>
 
@@ -203,6 +204,34 @@ pid_t getpid(void)
 pid_t getppid(void)
 {
     return (pid_t)veridian_syscall0(SYS_PROCESS_GETPPID);
+}
+
+pid_t gettid(void)
+{
+    return (pid_t)veridian_syscall0(SYS_THREAD_GETTID);
+}
+
+/*
+ * Low-level thread creation (kernel thread_clone).
+ * Shared-address-space threads must set CLONE_VM|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD.
+ */
+long veridian_thread_clone(unsigned long flags,
+                           void *newsp,
+                           int *parent_tidptr,
+                           int *child_tidptr,
+                           void *tls)
+{
+    return __syscall_ret(veridian_syscall5(SYS_THREAD_CLONE,
+                                           flags,
+                                           (long)newsp,
+                                           (long)parent_tidptr,
+                                           (long)child_tidptr,
+                                           (long)tls));
+}
+
+int arch_prctl(int code, unsigned long addr)
+{
+    return (int)__syscall_ret(veridian_syscall2(SYS_ARCH_PRCTL, code, addr));
 }
 
 pid_t waitpid(pid_t pid, int *wstatus, int options)
@@ -507,6 +536,43 @@ int poll(struct pollfd *fds, unsigned long nfds, int timeout)
 {
     return (int)__syscall_ret(
         veridian_syscall3(SYS_FILE_POLL, fds, nfds, timeout));
+}
+
+/* ========================================================================= */
+/* Futex primitives (kernel-provided, pthread uses)                          */
+/* ========================================================================= */
+
+int futex_wait(int *uaddr, int expected, const struct timespec *timeout)
+{
+    uint64_t ticks = 0;
+    if (timeout) {
+        ticks = (uint64_t)timeout->tv_sec * 1000ULL +
+                (uint64_t)(timeout->tv_nsec / 1000000ULL);
+    }
+    return (int)__syscall_ret(
+        veridian_syscall5(SYS_FUTEX_WAIT,
+                          uaddr,
+                          expected,
+                          timeout ? &ticks : 0,
+                          timeout ? sizeof(uint64_t) : 0,
+                          0));
+}
+
+int futex_wake(int *uaddr, int count)
+{
+    return (int)__syscall_ret(
+        veridian_syscall3(SYS_FUTEX_WAKE, uaddr, count, 0));
+}
+
+int futex_requeue(int *uaddr, int wake_count, int *uaddr2, int requeue_count)
+{
+    return (int)__syscall_ret(
+        veridian_syscall5(SYS_FUTEX_WAIT,
+                          uaddr,
+                          wake_count,
+                          uaddr2,
+                          requeue_count,
+                          FUTEX_REQUEUE));
 }
 
 /* ========================================================================= */

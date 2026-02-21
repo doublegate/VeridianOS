@@ -331,19 +331,244 @@ fn deliver_signal_to_handler(
 
     #[cfg(target_arch = "aarch64")]
     {
-        // Stub: AArch64 signal delivery not yet implemented
-        let _ = (process, thread, signum, handler);
-        println!("[SIGNAL] AArch64 signal delivery not yet implemented");
-        Ok(false)
+        deliver_signal_aarch64(process, thread, signum, handler)
     }
 
     #[cfg(target_arch = "riscv64")]
     {
-        // Stub: RISC-V signal delivery not yet implemented
-        let _ = (process, thread, signum, handler);
-        println!("[SIGNAL] RISC-V signal delivery not yet implemented");
-        Ok(false)
+        deliver_signal_riscv(process, thread, signum, handler)
     }
+}
+
+// ---------------- AArch64 implementation -----------------
+
+#[cfg(all(feature = "alloc", target_arch = "aarch64"))]
+fn deliver_signal_aarch64(
+    process: &Process,
+    thread: &Thread,
+    signum: usize,
+    handler: u64,
+) -> Result<bool, KernelError> {
+    use crate::mm::VirtualAddress;
+
+    // Build a minimal signal frame: save general-purpose regs + PC/SP + PSTATE
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Aarch64SignalFrame {
+        trampoline_ret: u64,
+        signum: u64,
+        saved_mask: u64,
+        // GPRs x0-x30 (x30 = LR)
+        regs: [u64; 31],
+        sp: u64,
+        pc: u64,
+        pstate: u64,
+    }
+
+    // Trampoline: add x0, sp, #0 ; mov w8, #SYS_SIGRETURN ; svc #0 ; brk #0
+    const TRAMPOLINE: [u32; 4] = [
+        0x910003e0, // add x0, sp, #0
+        0x52800000, // mov w8,#0 (patched below)
+        0xd4000001, // svc #0
+        0xd4200000, // brk #0
+    ];
+
+    let mut ctx = thread.context.lock();
+    let memory_space = process.memory_space.lock();
+
+    let saved_pc = ctx.program_counter();
+    let saved_sp = ctx.stack_pointer();
+
+    // Allocate space on user stack: frame + trampoline, 16-byte aligned
+    let frame_size = core::mem::size_of::<Aarch64SignalFrame>();
+    let tramp_size = core::mem::size_of::<TRAMPOLINE>();
+    let total = frame_size + tramp_size;
+    let mut sp = (saved_sp - total) & !0xF; // maintain 16-byte alignment
+
+    // Write frame
+    let mut regs = [0u64; 31];
+    regs.copy_from_slice(&ctx.x);
+    let frame = Aarch64SignalFrame {
+        trampoline_ret: sp as u64 + frame_size as u64, // trampoline immediately after frame
+        signum: signum as u64,
+        saved_mask: process
+            .signal_mask
+            .load(core::sync::atomic::Ordering::Acquire),
+        regs,
+        sp: saved_sp as u64,
+        pc: saved_pc as u64,
+        pstate: ctx.spsr,
+    };
+
+    unsafe {
+        write_bytes_to_user_stack(
+            &memory_space,
+            sp,
+            core::slice::from_raw_parts(
+                &frame as *const _ as *const u8,
+                core::mem::size_of::<Aarch64SignalFrame>(),
+            ),
+        );
+    }
+
+    // Patch trampoline SYS_SIGRETURN number
+    let mut tramp = TRAMPOLINE;
+    tramp[1] = 0x52800000 | ((SYS_SIGRETURN as u32) << 5); // mov w8,#SYS_SIGRETURN
+
+    unsafe {
+        write_bytes_to_user_stack(
+            &memory_space,
+            sp + frame_size,
+            core::slice::from_raw_parts(tramp.as_ptr() as *const u8, tramp_size),
+        );
+    }
+
+    // Redirect execution to handler; set x0=signum, x1=&frame
+    ctx.x[0] = signum as u64;
+    ctx.x[1] = sp as u64;
+    ctx.sp = sp as u64;
+    ctx.pc = handler;
+    ctx.elr = handler;
+    ctx.x[30] = frame.trampoline_ret; // LR
+
+    Ok(true)
+}
+
+#[cfg(not(all(feature = "alloc", target_arch = "aarch64")))]
+fn deliver_signal_aarch64(
+    _process: &Process,
+    _thread: &Thread,
+    _signum: usize,
+    _handler: u64,
+) -> Result<bool, KernelError> {
+    Ok(false)
+}
+
+// ---------------- RISC-V implementation -----------------
+
+#[cfg(all(feature = "alloc", target_arch = "riscv64"))]
+fn deliver_signal_riscv(
+    process: &Process,
+    thread: &Thread,
+    signum: usize,
+    handler: u64,
+) -> Result<bool, KernelError> {
+    // Minimal frame: save x1-x31, pc, sstatus
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct RiscvSignalFrame {
+        trampoline_ret: u64,
+        signum: u64,
+        saved_mask: u64,
+        regs: [u64; 31], // x1..x31 (x0 is zero)
+        pc: u64,
+        sstatus: u64,
+    }
+
+    const TRAMPOLINE: [u32; 4] = [
+        0x00010513, // addi a0, sp, 0   (frame ptr via sp)
+        0x00000893, // addi a7, x0, imm (patched below with SYS_SIGRETURN)
+        0x00000073, // ecall
+        0x00100073, // ebreak
+    ];
+
+    let mut ctx = thread.context.lock();
+    let memory_space = process.memory_space.lock();
+
+    let saved_pc = ctx.program_counter();
+    let saved_sp = ctx.stack_pointer();
+
+    let frame_size = core::mem::size_of::<RiscvSignalFrame>();
+    let tramp_size = core::mem::size_of::<TRAMPOLINE>();
+    let total = frame_size + tramp_size;
+    let mut sp = (saved_sp - total) & !0xF;
+
+    let regs = [
+        ctx.ra as u64,
+        ctx.sp as u64,
+        ctx.gp as u64,
+        ctx.tp as u64,
+        ctx.t0 as u64,
+        ctx.t1 as u64,
+        ctx.t2 as u64,
+        ctx.s0 as u64,
+        ctx.s1 as u64,
+        ctx.a0 as u64,
+        ctx.a1 as u64,
+        ctx.a2 as u64,
+        ctx.a3 as u64,
+        ctx.a4 as u64,
+        ctx.a5 as u64,
+        ctx.a6 as u64,
+        ctx.a7 as u64,
+        ctx.s2 as u64,
+        ctx.s3 as u64,
+        ctx.s4 as u64,
+        ctx.s5 as u64,
+        ctx.s6 as u64,
+        ctx.s7 as u64,
+        ctx.s8 as u64,
+        ctx.s9 as u64,
+        ctx.s10 as u64,
+        ctx.s11 as u64,
+        ctx.t3 as u64,
+        ctx.t4 as u64,
+        ctx.t5 as u64,
+        ctx.t6 as u64,
+    ];
+
+    let frame = RiscvSignalFrame {
+        trampoline_ret: sp as u64 + frame_size as u64,
+        signum: signum as u64,
+        saved_mask: process
+            .signal_mask
+            .load(core::sync::atomic::Ordering::Acquire),
+        regs,
+        pc: saved_pc as u64,
+        sstatus: ctx.sstatus as u64,
+    };
+
+    unsafe {
+        write_bytes_to_user_stack(
+            &memory_space,
+            sp,
+            core::slice::from_raw_parts(
+                &frame as *const _ as *const u8,
+                core::mem::size_of::<RiscvSignalFrame>(),
+            ),
+        );
+    }
+
+    let mut tramp = TRAMPOLINE;
+    tramp[1] = 0x00000893 | ((SYS_SIGRETURN as u32) << 20); // addi a7,x0,SYS_SIGRETURN
+
+    unsafe {
+        write_bytes_to_user_stack(
+            &memory_space,
+            sp + frame_size,
+            core::slice::from_raw_parts(tramp.as_ptr() as *const u8, tramp_size),
+        );
+    }
+
+    // Set a0 (arg0) = signum, a1 = &frame
+    ctx.a0 = signum as usize;
+    ctx.a1 = sp;
+    ctx.sp = sp;
+    ctx.pc = handler as usize;
+    ctx.sepc = handler as usize;
+    ctx.ra = frame.trampoline_ret as usize;
+
+    Ok(true)
+}
+
+#[cfg(not(all(feature = "alloc", target_arch = "riscv64")))]
+fn deliver_signal_riscv(
+    _process: &Process,
+    _thread: &Thread,
+    _signum: usize,
+    _handler: u64,
+) -> Result<bool, KernelError> {
+    Ok(false)
 }
 
 /// x86_64 signal delivery implementation.
@@ -517,18 +742,12 @@ pub fn restore_signal_frame(
 
     #[cfg(target_arch = "aarch64")]
     {
-        let _ = (process, thread, frame_ptr);
-        Err(KernelError::NotImplemented {
-            feature: "signal frame restore (aarch64)",
-        })
+        restore_signal_frame_aarch64(process, thread, frame_ptr)
     }
 
     #[cfg(target_arch = "riscv64")]
     {
-        let _ = (process, thread, frame_ptr);
-        Err(KernelError::NotImplemented {
-            feature: "signal frame restore (riscv64)",
-        })
+        restore_signal_frame_riscv(process, thread, frame_ptr)
     }
 }
 
@@ -594,6 +813,142 @@ fn restore_signal_frame_x86_64(
     println!(
         "[SIGNAL] Restored signal frame for process {}, resuming at {:#x}",
         process.pid.0, frame.rip
+    );
+
+    Ok(())
+}
+
+#[cfg(all(feature = "alloc", target_arch = "aarch64"))]
+fn restore_signal_frame_aarch64(
+    process: &Process,
+    thread: &Thread,
+    frame_ptr: usize,
+) -> Result<(), KernelError> {
+    use core::sync::atomic::Ordering;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Aarch64SignalFrame {
+        trampoline_ret: u64,
+        signum: u64,
+        saved_mask: u64,
+        regs: [u64; 31],
+        sp: u64,
+        pc: u64,
+        pstate: u64,
+    }
+
+    let memory_space = process.memory_space.lock();
+    let mut buf = [0u8; core::mem::size_of::<Aarch64SignalFrame>()];
+    let ok = unsafe { read_bytes_from_user_stack(&memory_space, frame_ptr, &mut buf) };
+    if !ok {
+        return Err(KernelError::InvalidArgument {
+            name: "frame_ptr",
+            value: "could not read signal frame from user stack",
+        });
+    }
+
+    let frame: Aarch64SignalFrame =
+        unsafe { core::ptr::read(buf.as_ptr() as *const Aarch64SignalFrame) };
+
+    {
+        let mut ctx = thread.context.lock();
+        ctx.x.copy_from_slice(&frame.regs);
+        ctx.sp = frame.sp;
+        ctx.pc = frame.pc;
+        ctx.elr = frame.pc;
+        ctx.spsr = frame.pstate;
+    }
+
+    let restored_mask = frame.saved_mask & !((1u64 << 9) | (1u64 << 19));
+    process.signal_mask.store(restored_mask, Ordering::Release);
+
+    println!(
+        "[SIGNAL] Restored signal frame (aarch64) for process {}, pc={:#x}",
+        process.pid.0, frame.pc
+    );
+
+    Ok(())
+}
+
+#[cfg(all(feature = "alloc", target_arch = "riscv64"))]
+fn restore_signal_frame_riscv(
+    process: &Process,
+    thread: &Thread,
+    frame_ptr: usize,
+) -> Result<(), KernelError> {
+    use core::sync::atomic::Ordering;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct RiscvSignalFrame {
+        trampoline_ret: u64,
+        signum: u64,
+        saved_mask: u64,
+        regs: [u64; 31],
+        pc: u64,
+        sstatus: u64,
+    }
+
+    let memory_space = process.memory_space.lock();
+    let mut buf = [0u8; core::mem::size_of::<RiscvSignalFrame>()];
+    let ok = unsafe { read_bytes_from_user_stack(&memory_space, frame_ptr, &mut buf) };
+    if !ok {
+        return Err(KernelError::InvalidArgument {
+            name: "frame_ptr",
+            value: "could not read signal frame from user stack",
+        });
+    }
+
+    let frame: RiscvSignalFrame =
+        unsafe { core::ptr::read(buf.as_ptr() as *const RiscvSignalFrame) };
+
+    {
+        let mut ctx = thread.context.lock();
+        let r = frame.regs;
+        // x1..x31 mapping (see delivery)
+        ctx.ra = r[0] as usize;
+        ctx.sp = r[1] as usize;
+        ctx.gp = r[2] as usize;
+        ctx.tp = r[3] as usize;
+        ctx.t0 = r[4] as usize;
+        ctx.t1 = r[5] as usize;
+        ctx.t2 = r[6] as usize;
+        ctx.s0 = r[7] as usize;
+        ctx.s1 = r[8] as usize;
+        ctx.a0 = r[9] as usize;
+        ctx.a1 = r[10] as usize;
+        ctx.a2 = r[11] as usize;
+        ctx.a3 = r[12] as usize;
+        ctx.a4 = r[13] as usize;
+        ctx.a5 = r[14] as usize;
+        ctx.a6 = r[15] as usize;
+        ctx.a7 = r[16] as usize;
+        ctx.s2 = r[17] as usize;
+        ctx.s3 = r[18] as usize;
+        ctx.s4 = r[19] as usize;
+        ctx.s5 = r[20] as usize;
+        ctx.s6 = r[21] as usize;
+        ctx.s7 = r[22] as usize;
+        ctx.s8 = r[23] as usize;
+        ctx.s9 = r[24] as usize;
+        ctx.s10 = r[25] as usize;
+        ctx.s11 = r[26] as usize;
+        ctx.t3 = r[27] as usize;
+        ctx.t4 = r[28] as usize;
+        ctx.t5 = r[29] as usize;
+        ctx.t6 = r[30] as usize;
+        ctx.pc = frame.pc as usize;
+        ctx.sepc = frame.pc as usize;
+        ctx.sstatus = frame.sstatus as usize;
+    }
+
+    let restored_mask = frame.saved_mask & !((1u64 << 9) | (1u64 << 19));
+    process.signal_mask.store(restored_mask, Ordering::Release);
+
+    println!(
+        "[SIGNAL] Restored signal frame (riscv) for process {}, pc={:#x}",
+        process.pid.0, frame.pc
     );
 
     Ok(())

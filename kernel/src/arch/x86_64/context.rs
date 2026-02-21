@@ -47,6 +47,9 @@ pub struct X86_64Context {
 
     /// Floating point state pointer
     pub fpu_state: *mut FpuState,
+
+    /// TLS base (FS base for user)
+    pub tls_base: u64,
 }
 
 /// x86_64 FPU/SSE/AVX state
@@ -111,6 +114,8 @@ impl X86_64Context {
 
             // Will be allocated if FPU is used
             fpu_state: core::ptr::null_mut(),
+
+            tls_base: 0,
         }
     }
 
@@ -168,6 +173,7 @@ impl X86_64Context {
 
             // No FPU state initially
             fpu_state: core::ptr::null_mut(),
+            tls_base: 0,
         }
     }
 }
@@ -197,6 +203,14 @@ impl crate::arch::context::ThreadContext for X86_64Context {
 
     fn set_stack_pointer(&mut self, sp: usize) {
         self.rsp = sp as u64;
+    }
+
+    fn set_tls_base(&mut self, base: u64) {
+        self.tls_base = base;
+    }
+
+    fn tls_base(&self) -> u64 {
+        self.tls_base
     }
 
     fn get_kernel_stack(&self) -> usize {
@@ -250,6 +264,13 @@ pub unsafe extern "C" fn context_switch(current: *mut X86_64Context, next: *cons
         // Save stack pointer
         "mov [rdi + 0x78], rsp",
 
+        // Save FS base (TLS)
+        "mov ecx, 0xC0000100",
+        "rdmsr",
+        "shl rdx, 32",
+        "or rax, rdx",
+        "mov [rdi + 0x98], rax",
+
         // Save return address as RIP
         "mov rax, [rsp]",
         "mov [rdi + 0x80], rax",
@@ -302,6 +323,13 @@ pub unsafe extern "C" fn context_switch(current: *mut X86_64Context, next: *cons
 
         // Push return address
         "push qword ptr [rsi + 0x80]",
+
+        // Restore FS base (TLS)
+        "mov ecx, 0xC0000100",
+        "mov rax, [rsi + 0x98]",
+        "mov rdx, rax",
+        "shr rdx, 32",
+        "wrmsr",
 
         // Finally load rsi
         "mov rsi, [rsi + 0x48]",
@@ -454,6 +482,7 @@ impl Default for X86_64Context {
             gs: 0x00,
             cr3: 0,
             fpu_state: core::ptr::null_mut(),
+            tls_base: 0,
         }
     }
 }

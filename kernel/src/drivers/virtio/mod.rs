@@ -21,6 +21,7 @@
 #![allow(dead_code)]
 
 pub mod blk;
+pub mod mmio;
 pub mod queue;
 
 /// Virtio vendor ID (Red Hat, Inc.)
@@ -31,6 +32,99 @@ pub const VIRTIO_VENDOR_ID: u16 = 0x1AF4;
 pub const VIRTIO_BLK_DEVICE_ID_LEGACY: u16 = 0x1001;
 /// Modern device ID (virtio 1.0+, transitional)
 pub const VIRTIO_BLK_DEVICE_ID_MODERN: u16 = 0x1042;
+
+/// Unified transport enum for virtio-blk
+#[derive(Debug, Clone, Copy)]
+pub enum VirtioTransport {
+    Pci(VirtioPciTransport),
+    Mmio(crate::drivers::virtio::mmio::VirtioMmioTransport),
+}
+
+impl VirtioTransport {
+    pub fn begin_init(&self) {
+        match self {
+            Self::Pci(p) => p.begin_init(),
+            Self::Mmio(m) => m.begin_init(),
+        }
+    }
+
+    pub fn write_guest_features(&self, features: u32) {
+        match self {
+            Self::Pci(p) => p.write_guest_features(features),
+            Self::Mmio(m) => m.write_driver_features(features),
+        }
+    }
+
+    pub fn read_device_features(&self) -> u32 {
+        match self {
+            Self::Pci(p) => p.read_device_features(),
+            Self::Mmio(m) => m.read_device_features(),
+        }
+    }
+
+    pub fn set_features_ok(&self) -> bool {
+        match self {
+            Self::Pci(p) => p.set_features_ok(),
+            Self::Mmio(m) => m.set_features_ok(),
+        }
+    }
+
+    pub fn select_queue(&self, idx: u16) {
+        match self {
+            Self::Pci(p) => p.select_queue(idx),
+            Self::Mmio(m) => m.select_queue(idx),
+        }
+    }
+
+    pub fn read_queue_size(&self) -> u16 {
+        match self {
+            Self::Pci(p) => p.read_queue_size(),
+            Self::Mmio(m) => m.read_queue_size_max(),
+        }
+    }
+
+    pub fn write_queue_address(&self, pfn: u32) {
+        match self {
+            Self::Pci(p) => p.write_queue_address(pfn),
+            Self::Mmio(_) => {} // mmio uses 64-bit phys addresses via write_queue_phys
+        }
+    }
+
+    pub fn write_queue_phys(&self, desc: u64, avail: u64, used: u64) {
+        match self {
+            Self::Pci(_) => {}
+            Self::Mmio(m) => m.write_queue_phys(desc, avail, used),
+        }
+    }
+
+    pub fn set_queue_ready(&self) {
+        match self {
+            Self::Pci(_) => {}
+            Self::Mmio(m) => m.set_queue_ready(),
+        }
+    }
+
+    pub fn set_driver_ok(&self) {
+        match self {
+            Self::Pci(p) => p.set_driver_ok(),
+            Self::Mmio(m) => m.set_driver_ok(),
+        }
+    }
+
+    pub fn notify_queue(&self, idx: u16) {
+        match self {
+            Self::Pci(p) => p.notify_queue(idx),
+            Self::Mmio(m) => m.notify_queue(idx),
+        }
+    }
+
+    pub fn read_device_config_u64(&self, offset: u16) -> u64 {
+        match self {
+            Self::Pci(p) => p.read_device_config_u64(offset),
+            Self::Mmio(m) => m.read_config_u64(offset as usize),
+        }
+    }
+}
 
 /// Virtio device status flags (virtio spec 2.1)
 pub mod status {
