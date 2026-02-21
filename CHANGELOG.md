@@ -1,8 +1,8 @@
 ## [Unreleased]
 
-### CI/CD, Code Quality, and Shell Correctness Fixes
+### Native GCC Toolchain, CI/CD Fixes, Documentation, and Shell Correctness
 
-5 commits since v0.4.9, 88 files changed, +792/-424 lines. Focuses on CI pipeline correctness (Codecov coverage, GitHub Pages deployment), shell pattern-matching compliance, and code formatting.
+10 commits since v0.4.9. Canadian cross-compilation infrastructure for native GCC on VeridianOS (T5-3), CI pipeline correctness (Codecov coverage, GitHub Pages deployment, clippy deduplication), shell pattern-matching compliance, branch comparison documentation, and code formatting.
 
 ---
 
@@ -26,6 +26,16 @@
 - Root cause: `CARGO_BUILD_TARGET=""` passed an empty string to cargo as `--target ''`, which cargo rejects.
 - Fix: Removed the env var override; pass `--target x86_64-unknown-linux-gnu` directly to `cargo llvm-cov`.
 
+**Coverage `.cargo/config.toml` access guard** (`.github/workflows/ci.yml`)
+- Root cause: The coverage step attempted to read `.cargo/config.toml` to unset the bare-metal target, but the file is gitignored and may not exist in CI.
+- Fix: Added a file-existence guard before accessing `.cargo/config.toml` in the coverage step.
+
+#### CI Quick Checks: Duplicate `panic_impl` (`.github/workflows/ci.yml`)
+
+**`--bins` clippy flag caused duplicate `panic_impl`** on host target
+- Root cause: Running `cargo clippy --bins` on the host target pulled in both the kernel's `#[panic_handler]` and the standard library's, causing a duplicate lang item error.
+- Fix: Removed `--bins` from the Quick Checks clippy invocation.
+
 #### Shell Glob and Parameter Expansion Pattern Matching (`kernel/src/services/shell/`)
 
 **`glob_match("*", "a/b")` incorrectly returned `true`** (`glob.rs`)
@@ -38,6 +48,25 @@
 - Impact: 5 test failures resolved; host-target test count now 646/646.
 
 ### Added
+
+#### Native GCC Cross-Compilation Script (T5-3)
+
+- `scripts/build-native-gcc.sh` (NEW, 936 lines): Canadian cross-compilation infrastructure for building a GCC binary that runs natively on VeridianOS
+  - 13-step pipeline: Stage 2.5 cross-GCC rebuild with C++ support (GCC 14.2 requires C++), then native binutils and GCC cross-compiled as static binaries
+  - Build configuration: `build=linux, host=veridian, target=veridian`
+  - Options: `--arch`, `--cross-prefix`, `--jobs`, `--skip-stage25`
+  - Output: `target/native-toolchain.tar` containing `/usr/bin/{as,ld,gcc,cc1,cpp,...}`
+- `ports/gcc/Portfile.toml`: Updated with native build configuration documenting the Canadian cross process, Stage 2.5 rebuild requirements, and static linking strategy
+
+#### Documentation
+
+- `docs/BRANCH-COMPARISON-TEST-CODEX.md` (NEW): Detailed analysis of test-codex branch (118 files, +3,443/-428) mapping T6-0 through T6-5 implementations to pending plan items, with merge strategy and conflict expectations
+- Updated `to-dos/MASTER_TODO.md`: v0.4.9 status, 29/29 boot tests, 646/646 host-target tests, Codecov integration, Phase 4.5 section, self-hosting roadmap (Tiers 0-5 complete, Tier 6 coded on test-codex)
+- Updated `to-dos/RELEASE_TODO.md`: Marked v0.3.x and v0.4.x as RELEASED, rewrote v0.5.0/v0.6.0 targets for self-hosting Tiers 6-7
+- Updated `to-dos/ISSUES_TODO.md`: Added 4 resolved CI issues (ISSUE-0019 through ISSUE-0022), updated statistics to 18 total/0 open
+- Updated `to-dos/TESTING_TODO.md`: 29/29 boot tests, 646/646 host-target tests
+
+#### Other New Files
 
 - `AGENTS.md` (NEW, 75 lines): Agent configuration for Codex/multi-agent development
 - `codecov.yml` (NEW, 42 lines): Codecov configuration with informational status checks

@@ -98,8 +98,11 @@ VeridianOS uses a microkernel architecture with the following key components:
 kernel/        Trusted computing base
 drivers/       Hardware interaction behind explicit privilege boundaries
 services/      Capability-mediated system services
-userland/      Intentionally constrained user processes
+userland/      User processes, C library (libc), math library (libm), test programs
 boot/          Bootloader and early initialization
+scripts/       Build infrastructure (cross-toolchain, sysroot, rootfs, native GCC)
+toolchain/     CRT files, sysroot headers, CMake/Meson cross-compilation configs
+ports/         Port definitions for external software (binutils, gcc, make, etc.)
 docs/          Canonical specifications
 experiments/   Non-normative exploratory work
 ```
@@ -108,7 +111,14 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.4.9 (February 18, 2026)
+**Latest Release**: v0.4.9 (February 18, 2026) | **Releases Published**: 24 (v0.1.0 through v0.4.9)
+
+| Metric | Value |
+| ------ | ----- |
+| Build | 0 errors, 0 warnings across all 3 architectures |
+| Boot Tests | 29/29 (all architectures, Stage 6 BOOTOK) |
+| Host-Target Unit Tests | 646/646 passing |
+| CI Pipeline | 10/10 jobs passing (GitHub Actions + Codecov) |
 
 ### Architecture Support
 
@@ -145,13 +155,33 @@ Phases 0 through 4 are complete. The kernel provides:
 - **VFS** -- ramfs, devfs, procfs, blockfs with POSIX-style file operations
 - **Security** -- MAC, secure boot, TPM 2.0, ASLR, W^X, Spectre barriers, KPTI, post-quantum crypto
 - **Package Manager** -- DPLL SAT resolver, ports system, reproducible builds, Ed25519 signing
-- **Interactive Shell (vsh)** -- Bash/Fish-parity serial console shell with pipes, redirections, variable expansion, globbing, tab completion, job control, scripting (if/for/while/case), functions, aliases
-- **Framebuffer Display** -- 1280x800 text console via UEFI framebuffer (x86_64) and ramfb (AArch64/RISC-V), ANSI color support, PS/2 keyboard input via controller polling, glyph cache, pixel ring buffer, write-combining (PAT) on x86_64
-- **Userland Bridge** -- Ring 0 to Ring 3 transitions with SYSCALL/SYSRET on x86_64
+- **Interactive Shell (vsh)** -- Bash/Fish-parity serial console shell with 24+ builtins, pipes, redirections, variable expansion, globbing, tab completion, job control, scripting (if/for/while/case), functions, aliases
+- **Framebuffer Display** -- 1280x800 text console via UEFI GOP framebuffer (x86_64) and ramfb (AArch64/RISC-V), ANSI color support, PS/2 keyboard input via controller polling, glyph cache, pixel ring buffer, write-combining (PAT) on x86_64
+- **Userland Bridge** -- Ring 0 to Ring 3 transitions with SYSCALL/SYSRET on x86_64, 30+ system calls
+- **Complete C Library** -- 17 source files (6,547 LOC), full stdio/stdlib/string/unistd, architecture-specific setjmp/longjmp, 50+ syscall wrappers
+- **Cross-Compilation Toolchain** -- binutils 2.43 + GCC 14.2 Stage 2 cross-compiler, sysroot with headers and CRT files, CMake/Meson toolchain files
+- **Virtio-blk Driver** -- Block I/O with TAR rootfs loader for cross-compiled user-space binaries
+
+### Self-Hosting Roadmap
+
+The self-hosting effort follows a tiered plan to build VeridianOS toward compiling its own software natively:
+
+| Tier | Description | Status |
+| ---- | ----------- | ------ |
+| 0 | Kernel infrastructure (syscalls, ELF loader, virtio-blk) | **Complete** |
+| 1 | C standard library (stdio, stdlib, string, unistd, math) | **Complete** |
+| 2 | Cross-compilation toolchain (binutils 2.43 + GCC 14.2) | **Complete** |
+| 3 | User-space execution (`/bin/minimal` verified, process lifecycle) | **Complete** |
+| 4 | Sysroot and CRT files (crt0.S, crti.S, crtn.S, all 3 architectures) | **Complete** |
+| 5 | Cross-compiled programs running on VeridianOS | **Complete** |
+| 6 | Native GCC on VeridianOS (Canadian cross-compilation) | Coded (test-codex branch) |
+| 7 | Full self-hosting (compile GCC with native GCC) | Planned |
+
+The native GCC infrastructure (T5-3) uses Canadian cross-compilation: a 13-step pipeline that rebuilds GCC with C++ support (Stage 2.5), then cross-compiles binutils and GCC as static binaries targeting VeridianOS (`build=linux, host=veridian, target=veridian`). See [`scripts/build-native-gcc.sh`](scripts/build-native-gcc.sh) for the 936-line build script.
 
 ### What Comes Next
 
-- **Self-Hosting (Active)** -- Cross-compiled C binaries running on VeridianOS (`/bin/minimal` verified), 646 host-target unit tests passing with Codecov integration, multi-LOAD-segment ELF loading for `/bin/sh` in progress
+- **Self-Hosting Tier 6-7** -- Merge native GCC from test-codex branch, verify native compilation on VeridianOS, achieve full self-hosting
 - **Phase 5: Performance Optimization** -- Sub-microsecond IPC, lock-free kernel paths, DPDK networking, NVMe optimization, profiling tools
 - **Phase 6: Advanced Features** -- Wayland compositor, desktop environment, multimedia, virtualization, cloud-native features, POSIX compatibility layer
 
@@ -357,9 +387,15 @@ Security is a fundamental design principle:
 - [x] **Phase 2**: User Space Foundation (v0.3.2, Feb 2026)
 - [x] **Phase 3**: Security Hardening (v0.3.2, Feb 2026)
 - [x] **Phase 4**: Package Ecosystem and Self-Hosting (v0.4.0, Feb 2026)
+- [x] **Self-Hosting Tiers 0-5**: Complete libc, cross-toolchain, user-space execution (v0.4.9, Feb 2026)
+
+### In Progress
+
+- [ ] **Self-Hosting Tier 6**: Native GCC on VeridianOS via Canadian cross-compilation (coded on test-codex branch)
 
 ### Upcoming
 
+- [ ] **Self-Hosting Tier 7**: Full self-hosting (compile GCC with native GCC)
 - [ ] **Phase 5**: Performance Optimization (5-6 months) -- Sub-microsecond IPC, lock-free kernel paths, DPDK networking, NVMe optimization
 - [ ] **Phase 6**: Advanced Features (8-9 months) -- Wayland compositor, desktop environment, multimedia, virtualization, cloud-native, POSIX compatibility layer
 

@@ -275,6 +275,13 @@ OVMF*.fd
 # Temporary build/test artifacts
 /tmp/
 
+# Cross-compilation and self-hosting toolchain artifacts
+# Note: target/ (line 19) already covers target/native-toolchain.tar,
+# target/rootfs-build/, target/rootfs.tar, etc.
+# Build scripts use /tmp/veridian-* for intermediate work (outside project).
+# Cross-toolchain installs to /opt/veridian/toolchain (outside project).
+# *.tar (line 230) covers rootfs.tar copied to project root by build-rootfs.sh.
+
 # Plan files (Claude Code)
 .claude/plans/
 
