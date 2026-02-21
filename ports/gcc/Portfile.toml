@@ -1,14 +1,21 @@
-# Portfile.toml -- GCC (Stage 1, C only) for VeridianOS
+# Portfile.toml -- GCC for VeridianOS
 #
-# Stage 1 cross-compiler: C language only, no shared libraries, no threads.
-# This is sufficient to build a libc and the rest of the bootstrap toolchain.
-# A stage 2 build with C++ and full runtime support can be done once libc is
-# available in the sysroot.
+# This port defines two build variants:
+#
+# 1. Cross-compiler (default [build] section):
+#    Stage 1 cross-compiler: C language only, no shared libraries, no threads.
+#    Sufficient to build a libc and the rest of the bootstrap toolchain.
+#    Built via: scripts/build-cross-toolchain.sh
+#
+# 2. Native compiler ([native_build] section):
+#    Canadian cross-compiled GCC that runs ON VeridianOS, targeting VeridianOS.
+#    Requires the cross-toolchain (Stage 2.5 with C++ support) as a prerequisite.
+#    Built via: scripts/build-native-gcc.sh
 
 [port]
 name = "gcc"
 version = "14.2.0"
-description = "GNU Compiler Collection -- stage 1 cross-compiler (C only)"
+description = "GNU Compiler Collection -- cross-compiler and native compiler for VeridianOS"
 homepage = "https://gcc.gnu.org/"
 license = "GPL-3.0-or-later"
 category = "devel"
@@ -43,3 +50,72 @@ steps = [
     "cd build && make -j$(nproc) all-gcc all-target-libgcc",
     "cd build && make install-gcc install-target-libgcc DESTDIR=$PKG_DIR"
 ]
+
+# ---------------------------------------------------------------------------
+# Native build: Canadian cross-compilation (build=linux, host=veridian,
+# target=veridian).  Produces a GCC binary that runs on VeridianOS.
+#
+# Prerequisites:
+#   - Cross-toolchain with C++ support (Stage 2.5)
+#   - Sysroot with headers, CRT objects, and libc.a
+#
+# Build script: scripts/build-native-gcc.sh
+# ---------------------------------------------------------------------------
+[native_build]
+description = "Native GCC (runs on VeridianOS, targets VeridianOS)"
+method = "canadian-cross"
+script = "scripts/build-native-gcc.sh"
+
+# Stage 2.5: Cross-compiler upgrade to add C++ support.
+# Required because GCC 14.2 is written in C++ and the Canadian cross
+# needs x86_64-veridian-g++ as the host compiler.
+[native_build.stage25]
+description = "Rebuild cross-GCC with --enable-languages=c,c++ --disable-hosted-libstdcxx"
+produces = "x86_64-veridian-g++"
+
+# Native binutils: Canadian cross-compiled assembler, linker, etc.
+[native_build.binutils]
+configure_flags = [
+    "--build=x86_64-pc-linux-gnu",
+    "--host=x86_64-veridian",
+    "--target=x86_64-veridian",
+    "--prefix=/usr",
+    "--with-sysroot=/",
+    "--disable-nls",
+    "--disable-werror",
+    "--disable-gdb",
+    "--disable-gdbserver",
+    "--disable-sim",
+    "--disable-readline",
+]
+env = { LDFLAGS = "-static", CFLAGS = "-O2 -static" }
+
+# Native GCC: Canadian cross-compiled C compiler.
+[native_build.gcc]
+configure_flags = [
+    "--build=x86_64-pc-linux-gnu",
+    "--host=x86_64-veridian",
+    "--target=x86_64-veridian",
+    "--prefix=/usr",
+    "--with-sysroot=/",
+    "--enable-languages=c",
+    "--disable-bootstrap",
+    "--disable-shared",
+    "--disable-threads",
+    "--disable-multilib",
+    "--disable-libssp",
+    "--disable-libquadmath",
+    "--disable-libgomp",
+    "--disable-libatomic",
+    "--disable-libstdcxx",
+    "--disable-nls",
+    "--disable-plugin",
+    "--disable-libcc1",
+    "--with-newlib",
+]
+env = { LDFLAGS = "-static", CFLAGS = "-O2 -static", CXXFLAGS = "-O2 -static -fno-exceptions -fno-rtti" }
+notes = """
+The native GCC is statically linked because VeridianOS has no dynamic linker.
+GMP, MPFR, and MPC are built in-tree (symlinked into the GCC source tree).
+--disable-bootstrap is required because we cannot run VeridianOS binaries on Linux.
+"""
