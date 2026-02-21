@@ -98,11 +98,12 @@ VeridianOS uses a microkernel architecture with the following key components:
 kernel/        Trusted computing base
 drivers/       Hardware interaction behind explicit privilege boundaries
 services/      Capability-mediated system services
-userland/      User processes, C library (libc), math library (libm), test programs
+userland/      User processes, libc, libm, Rust std port, vpkg, test programs
 boot/          Bootloader and early initialization
-scripts/       Build infrastructure (cross-toolchain, sysroot, rootfs, native GCC)
+targets/       Rust target JSON specs (kernel and user-space, all 3 architectures)
+scripts/       Build infrastructure (cross-toolchain, sysroot, rootfs, native GCC/make/ninja)
 toolchain/     CRT files, sysroot headers, CMake/Meson cross-compilation configs
-ports/         Port definitions for external software (binutils, gcc, make, etc.)
+ports/         Port definitions for external software (binutils, gcc, make, ninja, etc.)
 docs/          Canonical specifications
 experiments/   Non-normative exploratory work
 ```
@@ -178,7 +179,7 @@ The self-hosting effort follows a tiered plan to build VeridianOS toward compili
 | 4 | Sysroot and CRT files (crt0.S, crti.S, crtn.S, all 3 architectures) | **Complete** |
 | 5 | Cross-compiled programs running on VeridianOS | **Complete** |
 | 6 | Thread support, signal delivery, virtio-MMIO, multi-LOAD ELF, native GCC | **Complete** (merged from test-codex) |
-| 7 | Full self-hosting (compile GCC with native GCC) | Planned |
+| 7 | Full self-hosting (Rust std port, native GCC, make/ninja, vpkg) | **In Progress** |
 
 Tier 6 was developed on the test-codex branch and merged to main with a comprehensive audit pass fixing 8 critical bugs. The native GCC infrastructure (T5-3) uses Canadian cross-compilation: a 13-step pipeline that rebuilds GCC with C++ support (Stage 2.5), then cross-compiles binutils and GCC as static binaries targeting VeridianOS (`build=linux, host=veridian, target=veridian`). See [`scripts/build-native-gcc.sh`](scripts/build-native-gcc.sh) for the 936-line build script.
 
@@ -191,7 +192,7 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### What Comes Next
 
-- **Self-Hosting Tier 7** -- Verify native GCC compilation on VeridianOS, achieve full self-hosting (compile GCC with native GCC)
+- **Self-Hosting Tier 7** -- Rust user-space targets, std port, static native GCC/make/ninja, vpkg user-space migration
 - **Phase 5: Performance Optimization** -- Sub-microsecond IPC, lock-free kernel paths, DPDK networking, NVMe optimization, profiling tools
 - **Phase 6: Advanced Features** -- Wayland compositor, desktop environment, multimedia, virtualization, cloud-native features, POSIX compatibility layer
 
@@ -402,7 +403,7 @@ Security is a fundamental design principle:
 
 ### In Progress
 
-- [ ] **Self-Hosting Tier 7**: Full self-hosting (compile GCC with native GCC on VeridianOS)
+- [ ] **Self-Hosting Tier 7**: Rust std port, native GCC/make/ninja, vpkg migration -- full self-hosting loop
 
 ### Upcoming
 

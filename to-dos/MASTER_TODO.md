@@ -1,6 +1,6 @@
 # VeridianOS Master TODO List
 
-**Last Updated**: 2026-02-20 (Phase 4 Complete, Tier 6 coded on test-codex)
+**Last Updated**: 2026-02-21 (Phase 4 Complete, Tier 6 COMPLETE, Tier 7 in progress)
 
 ## Project Overview Status
 
@@ -31,9 +31,9 @@
 
 ### Self-Hosting Status
 - **Tiers 0-5**: ALL COMPLETE (v0.4.9)
-- **Tier 6 (T6-0 through T6-5)**: Coded on `test-codex` branch, pending merge + QEMU validation
-- **Tier 7 (T7-1 through T7-5)**: Not yet started
-- See `docs/BRANCH-COMPARISON-TEST-CODEX.md` for test-codex analysis
+- **Tier 6 (T6-0 through T6-5)**: COMPLETE -- merged from test-codex, audited, tri-arch BOOTOK
+- **Tier 7 (T7-1 through T7-5)**: In progress
+- See `docs/SELF-HOSTING-STATUS.md` for detailed status
 
 ## Detailed Feature Status
 
@@ -97,26 +97,26 @@
 - [x] Control flow (if/elif/else/fi, while, for, case), functions, aliases, advanced operators
 - [x] 24+ builtins, console/PTY integration, boot tests (29/29)
 
-### Self-Hosting Roadmap: Tiers 0-5 COMPLETE, Tier 6 on `test-codex`
+### Self-Hosting Roadmap: Tiers 0-6 COMPLETE, Tier 7 in progress
 - [x] Tier 0: Critical kernel bug fixes (page fault, fork, exec, timer, mmap)
 - [x] Tier 1: 79+ syscalls for GCC toolchain
 - [x] Tier 2: Complete libc (17 source files, 6,547 LOC, 25+ headers)
 - [x] Tier 3: TAR rootfs loader, virtio-blk PCI, PATH resolution, /tmp
 - [x] Tier 4: User-space shell, libm, wait queues, SIGCHLD
 - [x] Tier 5: GCC cross-compiler (binutils 2.43 + GCC 14.2), sysroot, rootfs
-- [ ] **Tier 6: Platform completeness** (T6-0 through T6-5 coded on `test-codex`, needs merge + QEMU validation)
-  - [ ] T6-0: ELF multi-LOAD handling (Phase 4A blocker for /bin/sh) [CODED]
-  - [ ] T6-1: readlink() full VFS implementation [CODED]
-  - [ ] T6-2: AArch64/RISC-V signal delivery [CODED]
-  - [ ] T6-3: Virtio-MMIO disk driver for AArch64/RISC-V [CODED]
-  - [ ] T6-4: LLVM triple patch [CODED]
-  - [ ] T6-5: Thread support -- clone()/futex()/pthread [CODED]
-- [ ] **Tier 7: Full self-hosting loop** (not yet started)
-  - [ ] T7-1: Rust user-space target JSON
-  - [ ] T7-2: Rust std port (minimal)
-  - [ ] T7-3: Native GCC on VeridianOS
-  - [ ] T7-4: make/ninja cross-compiled
-  - [ ] T7-5: vpkg user-space migration
+- [x] **Tier 6: Platform completeness** (merged from test-codex, audited, tri-arch BOOTOK)
+  - [x] T6-0: ELF multi-LOAD handling (multi-segment binaries like /bin/sh)
+  - [x] T6-1: readlink() full VFS implementation (BlockFS + RamFS symlinks)
+  - [x] T6-2: AArch64/RISC-V signal delivery (full signal frame save/restore)
+  - [x] T6-3: Virtio-MMIO disk driver for AArch64/RISC-V
+  - [x] T6-4: LLVM triple patch (veridian OS enum)
+  - [x] T6-5: Thread support -- clone()/futex()/pthread (1,145 lines kernel + 556 lines libc)
+- [ ] **Tier 7: Full self-hosting loop** (in progress)
+  - [ ] T7-1: Rust user-space target JSON (x86_64, aarch64, riscv64)
+  - [ ] T7-2: Rust std port (platform layer for VeridianOS syscalls)
+  - [ ] T7-3: Native GCC on VeridianOS (static cross-build)
+  - [ ] T7-4: make/ninja cross-compiled (static binaries)
+  - [ ] T7-5: vpkg user-space migration (kernel → user-space binary)
 
 ### Phase 5: Performance Optimization (~10% actual)
 - [x] NUMA-aware scheduling data structures (sched/numa.rs)
@@ -162,7 +162,7 @@
 
 Currently tracking **0 critical issues**. All architectures boot cleanly with zero warnings.
 
-**Pending**: `/bin/sh` (2-LOAD-segment ELF) GP faults on `iretq` on `main` -- fix coded on `test-codex` branch (T6-0). Not classified as a regression since `/bin/sh` has never worked on `main`.
+Tier 6 merge (T6-0) resolved the `/bin/sh` multi-LOAD-segment GP fault. The `test-codex` branch has been merged, audited (8 critical bugs fixed), and deleted.
 
 See [ISSUES_TODO.md](ISSUES_TODO.md) for full issue history (18 resolved, 0 open).
 

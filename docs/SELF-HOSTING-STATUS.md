@@ -1,6 +1,6 @@
 # VeridianOS Self-Hosting Status
 
-Last updated: February 2026 (v0.4.8)
+Last updated: February 21, 2026 (post-v0.4.9, Tier 6 complete)
 
 ## Definition
 
@@ -13,185 +13,144 @@ operating system. For VeridianOS, full self-hosting means:
 3. The build system (cargo, make, cmake) runs natively
 4. Source code can be edited and stored persistently on-disk
 
-## Current Status: Cross-Compilation Only
+## Current Status: Tiers 0-6 Complete, Tier 7 In Progress
 
-As of v0.4.8, VeridianOS is strictly a cross-compiled project. All kernel and
-user-space development happens on a Linux host.
+As of v0.4.9+, VeridianOS has completed all prerequisite infrastructure for
+self-hosting (Tiers 0-6) and is actively implementing the self-hosting loop
+(Tier 7).
+
+### Tier Completion Summary
+
+| Tier | Name | Status | Key Deliverables |
+|------|------|--------|-----------------|
+| 0 | Critical bug fixes | COMPLETE | Page fault handler, fork/exec, timer, mmap |
+| 1 | Syscall surface | COMPLETE | 79+ syscalls for GCC toolchain compatibility |
+| 2 | C library | COMPLETE | 17 source files, 6,547 LOC, 25+ headers |
+| 3 | Rootfs infrastructure | COMPLETE | TAR rootfs loader, virtio-blk PCI, PATH, /tmp |
+| 4 | User-space foundation | COMPLETE | User-space shell, libm, wait queues, SIGCHLD |
+| 5 | Cross-compiler | COMPLETE | binutils 2.43 + GCC 14.2 Stage 2 + libgcc |
+| 6 | Platform completeness | COMPLETE | ELF multi-LOAD, readlink, signals, MMIO, threads |
+| 7 | Self-hosting loop | IN PROGRESS | Rust targets, std port, native GCC, make/ninja, vpkg |
 
 ### What Works Today
 
-| Component              | Status | Notes                                         |
-|------------------------|--------|-----------------------------------------------|
-| Kernel (3 architectures) | Working | Builds on Linux via `cargo build` with custom targets |
-| Kernel shell (vsh)     | Working | Interactive shell with 24+ builtins, runs in kernel space |
-| Boot to shell prompt   | Working | All 3 architectures reach `root@veridian:/#`  |
-| Framebuffer console    | Working | x86_64 (UEFI GOP), AArch64/RISC-V (ramfb)    |
-| PS/2 keyboard input    | Working | Polling-based, x86_64 only                    |
-| Serial I/O             | Working | All 3 architectures, UART-based               |
-| In-memory filesystem   | Working | RamFS, DevFS, ProcFS -- volatile only         |
-| Process fork/exec      | Working | Capability inheritance on fork, ELF loading on exec |
-| IPC system             | Working | Sync/async channels, fast path under 1 microsecond |
-| Package manager        | Working | In-kernel, VFS-backed database, DPLL resolver |
-| Syscall interface      | Working | 55 syscalls implemented across 7 categories   |
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Kernel (3 architectures) | Working | x86_64, AArch64, RISC-V -- all Stage 6 BOOTOK |
+| Interactive shell (vsh) | Working | 24+ builtins, job control, scripting, ANSI escape |
+| Framebuffer console | Working | x86_64 (UEFI GOP 1280x800), AArch64/RISC-V (ramfb) |
+| PS/2 keyboard + serial | Working | Dual input, multiplexed |
+| VFS + filesystems | Working | RamFS, DevFS, ProcFS, BlockFS (ext2-style dirs) |
+| Process fork/exec | Working | ELF multi-LOAD segments (T6-0), capability inheritance |
+| IPC system | Working | Sync/async, zero-copy, fast path <1us |
+| Package manager | Working | In-kernel vpkg, DPLL SAT resolver, VFS-backed DB |
+| Syscall interface | Working | 79+ syscalls across 7 categories |
+| Custom libc | Working | 17 source files, 25+ headers, tri-arch setjmp |
+| libm | Working | Math library for floating-point operations |
+| virtio-blk (PCI) | Working | x86_64 disk I/O for rootfs.tar loading |
+| virtio-MMIO (T6-3) | Working | AArch64/RISC-V disk I/O |
+| Symlinks/readlink (T6-1) | Working | Full VFS implementation in RamFS + BlockFS |
+| Signal delivery (T6-2) | Working | Full signal frame save/restore on all 3 architectures |
+| Threads (T6-5) | Working | clone()/futex()/arch_prctl + pthread library |
+| ELF multi-LOAD (T6-0) | Working | Multi-segment binaries (e.g., /bin/sh) load correctly |
+| LLVM triple (T6-4) | Working | `veridian` OS enum in LLVM Triple.cpp patch |
+| GCC cross-compiler | Working | binutils 2.43 + GCC 14.2, static sysroot |
 
-### What Cannot Run on VeridianOS Yet
+### Remaining for Full Self-Hosting (Tier 7)
 
-| Component              | Status    | Notes                                      |
-|------------------------|-----------|--------------------------------------------|
-| Any C/C++ compiler     | Not available | No libc, no ELF dynamic linker          |
-| Rust compiler (rustc)  | Not available | Requires libc, LLVM, and file I/O       |
-| Text editor            | Not available | Shell builtins only; no vi/nano/ed      |
-| Persistent file storage| Not available | No disk driver, no on-disk filesystem   |
-| Network access         | Not available | No network stack or socket API          |
-| Dynamic linking        | Not available | No ld.so or equivalent                  |
-| User-space programs    | Limited   | Shell runs in kernel space; user-mode stubs exist |
+| Component | Status | Notes |
+|-----------|--------|-------|
+| T7-1: Rust user-space targets | In progress | Target JSON for std-enabled userland |
+| T7-2: Rust std port | In progress | Platform layer bridging std to VeridianOS syscalls |
+| T7-3: Native GCC | In progress | Static cross-build of GCC for VeridianOS |
+| T7-4: make/ninja | In progress | Static cross-compiled build tools |
+| T7-5: vpkg migration | In progress | Kernel pkg manager to user-space binary |
+| On-disk filesystem | Not started | Persistent storage (ext2 or custom) |
+| Dynamic linker | Not started | ld.so equivalent for shared libraries |
+| Network stack | Not started | Socket API and TCP/IP |
+| Text editor | Not started | vi/nano/ed for source editing |
 
-## Blockers for Self-Hosting
+## Self-Hosting Architecture
 
-The following components must be implemented before VeridianOS can approach
-self-hosting. They are listed in approximate dependency order.
+### Bootstrap Path
 
-### 1. Persistent Filesystem
+```
+Cross-compiler (host Linux)
+    |
+    v
+Static GCC binary (T7-3) --> runs ON VeridianOS
+    |
+    v
+Static make/ninja (T7-4) --> builds projects ON VeridianOS
+    |
+    v
+gcc hello.c -o hello && ./hello  <-- SELF-HOSTING MILESTONE
+    |
+    v
+Build VeridianOS kernel ON VeridianOS  <-- FULL SELF-HOSTING
+```
 
-**Priority: Critical**
+### Key Infrastructure
 
-Without persistent storage, source code and build artifacts cannot survive a
-reboot. This requires:
+| Layer | Component | Location |
+|-------|-----------|----------|
+| Kernel | Syscall interface (79+) | `kernel/src/syscall/` |
+| Kernel | Thread support (clone/futex) | `kernel/src/syscall/{futex,thread_clone,arch_prctl}.rs` |
+| Kernel | ELF loader (multi-LOAD) | `kernel/src/elf/mod.rs` |
+| Kernel | Signal delivery (tri-arch) | `kernel/src/process/signal_delivery.rs` |
+| Kernel | Virtio-blk (PCI + MMIO) | `kernel/src/drivers/virtio/` |
+| Userland | C library (libc) | `userland/libc/` (17 src, 25+ headers) |
+| Userland | Math library (libm) | `userland/libm/` |
+| Userland | pthread library | `userland/libc/src/pthread.c` + header |
+| Userland | Rust std port | `userland/rust-std/` (T7-2) |
+| Userland | vpkg package manager | `userland/programs/vpkg/` (T7-5) |
+| Toolchain | Cross-compiler | `scripts/build-native-gcc.sh` (936 lines) |
+| Toolchain | Native GCC build | `scripts/build-native-gcc-static.sh` (T7-3) |
+| Toolchain | Native make/ninja | `scripts/build-native-{make,ninja}.sh` (T7-4) |
+| Toolchain | Sysroot | `toolchain/sysroot/` |
+| Ports | GCC, binutils, LLVM, make | `ports/` (Portfiles + patches) |
+| Targets | Kernel targets | `targets/{x86_64,aarch64,riscv64gc}-veridian.json` |
+| Targets | User-space targets | `targets/{x86_64,aarch64,riscv64gc}-veridian-user.json` (T7-1) |
 
-- Block device driver (virtio-blk for QEMU, or AHCI/NVMe for real hardware)
-- On-disk filesystem implementation (ext2 as a starting point, or a custom
-  journaling filesystem)
-- VFS integration to mount block-backed filesystems alongside RamFS
+## Tier 6 Completion Details
 
-**Estimated effort:** Major -- requires disk I/O path through the entire stack
-from hardware interrupts to VFS operations.
+Tier 6 was implemented on the `test-codex` branch, merged to `main` on
+February 21, 2026, and audited with 8 critical bug fixes:
 
-### 2. C Library (libc)
+| Item | Description | Lines | Key Files |
+|------|-------------|-------|-----------|
+| T6-0 | ELF multi-LOAD handling | +71 | elf/mod.rs, process/creation.rs |
+| T6-1 | readlink() VFS implementation | +304 | fs/{blockfs,ramfs,mod}.rs, syscall/filesystem.rs |
+| T6-2 | AArch64/RISC-V signal delivery | +387 | process/signal_delivery.rs |
+| T6-3 | Virtio-MMIO disk driver | +365 | drivers/virtio/{mmio,queue,mod}.rs |
+| T6-4 | LLVM triple patch | +81 | ports/llvm/patches/ |
+| T6-5 | Thread support | +1,145 | syscall/{futex,thread_clone,arch_prctl}.rs, libc/pthread |
 
-**Priority: Critical**
-
-Nearly all Unix software depends on a C library. VeridianOS needs a libc port
-that implements the syscall wrappers and standard library functions.
-
-Candidate libraries:
-
-| Library | Pros                            | Cons                              |
-|---------|---------------------------------|-----------------------------------|
-| musl    | Small, static-linking friendly, clean codebase | Needs full POSIX syscall surface |
-| newlib  | Designed for embedded/OS bringup, minimal syscall needs | Less complete POSIX support |
-| custom  | Tailored to VeridianOS capabilities | Enormous effort, compatibility risk |
-
-Recommended approach: Start with a newlib port (minimal syscall surface), then
-migrate to musl once the syscall interface matures.
-
-**Estimated effort:** Medium to large -- syscall stubs exist, but the shim
-layer between libc expectations and VeridianOS capabilities needs careful
-design.
-
-### 3. Dynamic Linker
-
-**Priority: High**
-
-A dynamic linker (`ld.so` equivalent) is needed for:
-
-- Shared library support (`libc.so`, `libm.so`, etc.)
-- Reducing binary size (static linking duplicates library code)
-- Runtime symbol resolution
-
-The ELF loader in the kernel already handles basic relocation processing for
-AArch64 and RISC-V. Extending this to full dynamic linking requires:
-
-- PLT/GOT resolution
-- `DT_NEEDED` dependency loading
-- `dlopen`/`dlsym` API
-
-**Estimated effort:** Large -- dynamic linking is complex and must be correct
-for all three architectures.
-
-### 4. Compiler Backend
-
-**Priority: High (after libc)**
-
-Self-hosting requires a compiler that runs on VeridianOS. Options:
-
-| Compiler | Approach                                 | Difficulty |
-|----------|------------------------------------------|------------|
-| GCC      | Port via Portfile (stage 1 C-only exists) | High -- GCC requires a working libc and POSIX environment |
-| LLVM/Clang | Port via Portfile (cmake-based build)  | High -- similar POSIX requirements, but LLVM is the project's preferred backend |
-| TCC      | Tiny C Compiler, minimal dependencies    | Medium -- good bootstrap candidate, limited optimization |
-| mrustc   | Bootstrap Rust compiler written in C++   | Very high -- experimental, but enables Rust self-hosting |
-
-Recommended bootstrap path:
-
-1. Port TCC (minimal C compiler) as the first native compiler
-2. Use TCC to build a minimal GCC or LLVM
-3. Use the native GCC/LLVM to build rustc
-
-**Estimated effort:** Very large -- compiler porting is one of the hardest
-self-hosting milestones.
-
-### 5. Build System Tooling
-
-**Priority: Medium (after compiler)**
-
-Building the kernel and user space requires:
-
-- `make` or `ninja` (build orchestration)
-- `cargo` (Rust package manager and build tool)
-- Shell scripting support (the kernel shell `vsh` partially covers this)
-- `git` or equivalent (source control, optional for initial self-hosting)
-
-### 6. User-Space Shell Migration
-
-**Priority: Medium**
-
-The current shell (`vsh`) runs in kernel space. For a proper self-hosted
-system, the shell must run as a user-space process with:
-
-- Proper SYSCALL/SYSRET transitions (stubs exist for all 3 architectures)
-- File descriptor inheritance across fork/exec
-- Per-process environment variables and working directory
-
-## Realistic Timeline and Milestones
-
-Self-hosting is a long-term goal. The following milestones represent the
-approximate order of work:
-
-| Milestone                        | Phase | Dependencies                | Status       |
-|----------------------------------|-------|-----------------------------|--------------|
-| Block device driver (virtio-blk) | 5     | Memory-mapped I/O           | Not started  |
-| On-disk filesystem (ext2)        | 5     | Block device driver         | Not started  |
-| Newlib port (minimal libc)       | 5     | Syscall wrappers, VFS       | Not started  |
-| User-space shell                 | 5-6   | fork/exec, fd inheritance   | Stubs exist  |
-| TCC port (bootstrap C compiler)  | 6     | libc, persistent filesystem | Not started  |
-| GNU Make port                    | 6     | libc, persistent filesystem | Portfile exists |
-| GCC/LLVM native build            | 6     | TCC or cross-built stage 1  | Portfiles exist |
-| Cargo/rustc native build         | 6+    | LLVM, libc, filesystem      | Not started  |
-| Full self-hosting                | 7+    | All of the above            | Not started  |
-
-Conservative estimate: Self-hosting is a Phase 6-7 goal, likely 12-18 months
-of focused development from the current state.
+Post-merge audit fixes (commit `f7482a7`):
+- pthread_create double-free in error path
+- blockfs readlink delegation bug
+- RISC-V virtio-mmio base addresses (0x10001000, stride 0x1000)
+- AArch64 virtio-mmio stride (0x200, not 0x2000)
+- PCI init gated to x86_64 only (AArch64/RISC-V inl() stubs return 0)
+- AArch64/RISC-V context TLS field and signal delivery method fixes
+- arch_prctl consolidated from 3 duplicate implementations to 1
 
 ## How to Contribute
 
-Self-hosting is one of the most impactful areas for contribution. If you are
-interested in helping:
+Self-hosting is one of the most impactful areas for contribution:
 
-1. **Block device driver**: Implement a virtio-blk driver as a user-space
-   process following the existing driver framework in `kernel/src/drivers/`.
+1. **On-disk filesystem**: Implement ext2 read/write in the VFS layer.
+   Reference: `kernel/src/fs/ramfs.rs` and `kernel/src/fs/blockfs.rs`.
 
-2. **Filesystem implementation**: Implement ext2 read/write support in the VFS
-   layer. The RamFS implementation in `kernel/src/fs/` serves as a reference.
+2. **Dynamic linker**: Extend the ELF loader for PLT/GOT, DT_NEEDED, dlopen.
+   Reference: `kernel/src/elf/` directory.
 
-3. **Libc port**: Start with newlib's `libgloss` syscall stubs targeting
-   VeridianOS's syscall numbers (see `kernel/src/syscall/mod.rs`).
+3. **Rust std port**: Help implement platform bindings in `userland/rust-std/`.
+   Reference: `kernel/src/syscall/mod.rs` for syscall numbers.
 
-4. **Testing**: Run the existing Portfile build steps for binutils and GCC
-   using the cross-compiler toolchain and report issues.
+4. **Testing**: Build and test cross-compiled binaries using the GCC toolchain.
+   Reference: `scripts/build-native-gcc.sh`.
 
-5. **Documentation**: Improve the porting guides and syscall reference as you
-   discover gaps.
+5. **Network stack**: Implement TCP/IP and socket API for network-dependent tools.
 
-See `CONTRIBUTING.md` in the repository root for general contribution
-guidelines. Join the project's issue tracker on GitHub to coordinate with
-other contributors.
+See `CONTRIBUTING.md` for general guidelines.

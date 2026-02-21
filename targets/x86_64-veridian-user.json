@@ -1,0 +1,31 @@
+{
+  "llvm-target": "x86_64-unknown-linux-gnu",
+  "data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
+  "arch": "x86_64",
+  "target-endian": "little",
+  "target-pointer-width": "64",
+  "target-c-int-width": "32",
+  "os": "veridian",
+  "env": "gnu",
+  "vendor": "unknown",
+  "executables": true,
+  "linker-flavor": "gcc",
+  "linker": "x86_64-veridian-gcc",
+  "panic-strategy": "abort",
+  "features": "+sse2",
+  "relocation-model": "static",
+  "position-independent-executables": false,
+  "has-thread-local": true,
+  "max-atomic-width": 64,
+  "pre-link-args": {
+    "gcc": [
+      "-nostdlib",
+      "-static"
+    ]
+  },
+  "post-link-args": {
+    "gcc": [
+      "-lgcc"
+    ]
+  }
+}

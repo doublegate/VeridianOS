@@ -1,0 +1,16 @@
+[package]
+name = "veridian-std"
+version = "0.1.0"
+edition = "2021"
+authors = ["VeridianOS Contributors"]
+license = "MIT OR Apache-2.0"
+description = "VeridianOS platform layer for Rust std (syscall bridge)"
+repository = "https://github.com/doublegate/VeridianOS"
+
+[lib]
+name = "veridian_std"
+path = "src/lib.rs"
+
+# This is a no_std crate that provides the platform layer.
+# It bridges Rust user-space code to VeridianOS syscalls.
+# It does NOT depend on the kernel crate -- it uses raw syscall numbers.

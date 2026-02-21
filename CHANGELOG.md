@@ -1,10 +1,64 @@
 ## [Unreleased]
 
-### Tier 6 Self-Hosting, Native GCC Toolchain, CI/CD Fixes, and Shell Correctness
+### Tier 6 Complete, Tier 7 Self-Hosting Loop In Progress
 
-Tier 6 self-hosting features merged from test-codex branch (T6-0 through T6-5): multi-LOAD ELF segments, full readlink() implementation, AArch64/RISC-V signal delivery, virtio-MMIO transport for all architectures, LLVM triple patch for veridian OS, and thread support (clone/futex/pthread). Post-merge audit fixed 8 critical bugs across 17 files. Also includes Canadian cross-compilation infrastructure for native GCC (T5-3), CI pipeline corrections, shell pattern-matching compliance, and code formatting.
+**Tier 6 COMPLETE**: All 6 items merged from test-codex branch, audited (8 critical bugs fixed), and validated on all 3 architectures (tri-arch BOOTOK). The test-codex branch has been deleted.
+
+**Tier 7 IN PROGRESS**: Rust user-space target specifications (T7-1), Rust std platform port (T7-2), static native GCC build scripts (T7-3), cross-compiled make/ninja (T7-4), and vpkg user-space migration (T7-5).
+
+Previous [Unreleased] content: Tier 6 self-hosting features (T6-0 through T6-5), post-merge audit, Canadian cross-compilation infrastructure for native GCC (T5-3), CI pipeline corrections, shell pattern-matching compliance, and code formatting.
 
 ---
+
+### Added
+
+#### T7-1: Rust User-Space Target Specifications (3 new files)
+
+- `targets/x86_64-veridian-user.json`: User-space Rust target with `os: "veridian"`, `env: "gnu"`, SSE enabled, `linker-flavor: "gcc"`, `has-thread-local: true`, linked via `x86_64-veridian-gcc`. Differs from kernel target: no disable-redzone, no kernel code-model, no `-mmx,-sse,-sse2` restrictions.
+- `targets/aarch64-veridian-user.json`: AArch64 user-space target with NEON/FP enabled, linked via `aarch64-veridian-gcc`, hard-float ABI.
+- `targets/riscv64gc-veridian-user.json`: RISC-V user-space target with `features: "+m,+a,+f,+d,+c"` (GC extensions), linked via `riscv64-veridian-gcc`, LP64D ABI.
+
+#### T7-2: Rust std Platform Port (`userland/rust-std/`, 14 new files, ~1,830 lines)
+
+- `src/sys/veridian/mod.rs` (594 lines): Raw syscall wrappers (`syscall0` through `syscall6`) using `core::arch::asm!` for x86_64 (`syscall`), AArch64 (`svc #0`), and RISC-V (`ecall`). All 79+ syscall number constants. `SyscallError` enum with `repr(i32)` matching kernel error codes.
+- `src/sys/veridian/fs.rs` (233 lines): File I/O via syscalls 50-66, 150-157 -- `open`, `close`, `read`, `write`, `seek`, `stat`, `unlink`, `rename`, `mkdir`, `rmdir`, `readdir`. `Stat` struct definition matching kernel layout.
+- `src/sys/veridian/io.rs` (76 lines): Standard I/O abstractions -- `stdin`/`stdout`/`stderr` (fd 0/1/2), `write_all` retry loop, `print`/`println`/`eprint`/`eprintln` helpers.
+- `src/sys/veridian/process.rs` (141 lines): Process management -- `exit`, `fork`, `execve`, `waitpid`, `getpid`, `getppid`, `getcwd`, `chdir`, `kill`.
+- `src/sys/veridian/thread.rs` (157 lines): Thread primitives -- `clone` with `CLONE_VM`/`CLONE_THREAD` flags, `futex_wait`/`futex_wake`, `thread_exit`, `gettid`.
+- `src/sys/veridian/time.rs` (118 lines): Time operations -- `clock_gettime`/`clock_getres`/`nanosleep`/`gettimeofday` + convenience `sleep_ms`/`sleep`.
+- `src/sys/veridian/alloc.rs` (143 lines): Memory allocation -- `mmap`/`munmap`/`mprotect`/`brk` + convenience `alloc_pages`/`free_pages`.
+- `src/sys/veridian/os.rs` (130 lines): OS information -- `getuid`/`geteuid`/`getgid`/`getegid`, `getenv_from_envp`, `kernel_info`.
+- `src/sys/veridian/net.rs` (82 lines): Network stub module (awaiting TCP/IP stack implementation).
+- `Cargo.toml`, `build.sh`, `README.md`, `src/lib.rs`, `src/sys/mod.rs`: Crate structure, build infrastructure, and documentation.
+
+#### T7-3: Static Native GCC Build Scripts (2 new files, ~780 lines)
+
+- `scripts/build-native-gcc-static.sh` (540 lines): 5-phase Canadian cross-compilation pipeline for building static GCC binaries that run natively on VeridianOS. Phase 1: verify cross-compiler (`x86_64-veridian-gcc`). Phase 2: static binutils (`as`, `ld`, `ar`, `nm`, `objdump`, `objcopy`, `ranlib`, `readelf`, `strip`, `strings`, `size`, `addr2line`). Phase 3: static `libgcc.a`. Phase 4: static GCC (`gcc`, `cc1`, `cpp`, `collect2`, `lto-wrapper`). Phase 5: package into `target/native-toolchain.tar`. Supports `--arch`, `--cross-prefix`, `--jobs`, `--skip-binutils` options.
+- `scripts/package-native-toolchain.sh` (240 lines): Packages built native toolchain into TAR rootfs format for virtio-blk boot loading. Verifies binaries, creates directory hierarchy, generates manifest.
+
+#### T7-4: Cross-Compiled make/ninja Build Tools (4 new files, ~980 lines)
+
+- `scripts/build-native-make.sh` (268 lines): GNU Make 4.4.1 static cross-compilation -- downloads source, configures with `--host=x86_64-veridian`, builds with `LDFLAGS="-static"`, installs to sysroot.
+- `scripts/build-native-ninja.sh` (334 lines): Ninja 1.12.1 direct source compilation (bypasses `configure.py` which lacks cross-compilation support) -- compiles each `.cc` file individually with cross-compiler, links statically.
+- `scripts/build-native-tools.sh` (378 lines): Master orchestrator script for building all native tools (make + ninja + optional coreutils). Runs builds sequentially, validates outputs, generates summary report.
+- `ports/ninja/Portfile.toml` (NEW): Port definition for Ninja 1.12.1 with source URL, SHA256, dependencies, and native build configuration.
+
+#### T7-5: vpkg User-Space Package Manager (`userland/programs/vpkg/`, 7 new files, ~1,025 lines)
+
+- `vpkg.h` (200 lines): Type definitions (`vpkg_pkg_t`, `vpkg_db_t`, `vpkg_version_t`), error codes (VPKG_OK through VPKG_ERR_SYSCALL), constants (MAX_PKG_NAME 64, MAX_DEPENDS 32, DB path `/var/db/vpkg/packages.db`).
+- `main.c` (164 lines): Entry point with argument parsing and command dispatch -- `install`, `remove`, `search`, `list`, `info`, `update`.
+- `database.c` (239 lines): Binary package database with magic "VPDB", version tracking, add/remove/find/iterate operations, automatic directory creation via `SYS_MKDIR`.
+- `install.c` (101 lines): Package installation via `SYS_PKG_INSTALL` (syscall 90) with duplicate checking and database registration.
+- `remove.c` (107 lines): Package removal via `SYS_PKG_REMOVE` (syscall 91) with reverse dependency checking.
+- `query.c` (214 lines): Search/list/info/update via `SYS_PKG_QUERY` (92), `SYS_PKG_LIST` (93), `SYS_PKG_UPDATE` (94).
+- `Makefile` (~85 lines): Cross-compilation for x86_64, AArch64, and RISC-V with sysroot integration.
+
+#### Documentation Updates
+
+- `docs/SELF-HOSTING-STATUS.md`: Complete rewrite reflecting post-v0.4.9 state -- Tier 0-6 completion table, "What Works Today" inventory, Tier 7 remaining work, bootstrap path diagram, key infrastructure paths, Tier 6 audit details, contribution guide.
+- `toolchain/README.md`: Added native GCC build documentation, build tools section, output layout, scripts reference.
+- `ports/make/Portfile.toml`: Added `[native_build]` section documenting static cross-compilation approach with `LDFLAGS="-static"`.
+- `to-dos/MASTER_TODO.md`: Updated date to 2026-02-21, Tier 6 marked COMPLETE with all checkmarks, Tier 7 marked "in progress", fixed known issues section.
 
 ### Fixed
 

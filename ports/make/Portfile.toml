@@ -27,3 +27,29 @@ steps = [
     "make -j$(nproc)",
     "make install DESTDIR=$PKG_DIR"
 ]
+
+# ---------------------------------------------------------------------------
+# Native (static) cross-compilation build.
+#
+# Produces a statically linked `make` binary that runs on VeridianOS.
+# Uses Canadian cross-compilation: build=linux, host=veridian.
+#
+# Build script: scripts/build-native-make.sh
+# ---------------------------------------------------------------------------
+[native_build]
+description = "Static GNU Make for VeridianOS (cross-compiled from Linux)"
+method = "canadian-cross"
+script = "scripts/build-native-make.sh"
+configure_flags = [
+    "--build=x86_64-pc-linux-gnu",
+    "--host=x86_64-veridian",
+    "--prefix=/usr",
+    "--disable-nls",
+    "--without-guile",
+]
+env = { LDFLAGS = "-static", CFLAGS = "-O2 -static" }
+notes = """
+GNU Make is statically linked because VeridianOS has no dynamic linker.
+Guile support is disabled to avoid the Guile dependency chain.
+NLS is disabled since VeridianOS does not yet have locale support.
+"""

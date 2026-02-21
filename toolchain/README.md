@@ -193,6 +193,117 @@ Ensure `PKG_CONFIG_SYSROOT_DIR` and `PKG_CONFIG_LIBDIR` are set correctly.
 The CMake toolchain files set these automatically. For Meson, they are
 configured in the `[properties]` section of the cross file.
 
+## Building the Native GCC Toolchain
+
+The native toolchain runs ON VeridianOS to compile C programs natively.
+All binaries are statically linked since VeridianOS has no dynamic linker.
+
+### Build Pipeline
+
+The toolchain is built through Canadian cross-compilation (build=Linux,
+host=VeridianOS, target=VeridianOS).  The full pipeline is:
+
+```
+1. Cross-toolchain     scripts/build-cross-toolchain.sh
+   (builds Linux->VeridianOS cross-compiler: gcc, binutils, libgcc)
+
+2. Sysroot             scripts/build-sysroot.sh
+   (installs kernel headers, libc headers, CRT objects, libc.a)
+
+3. Native GCC          scripts/build-native-gcc.sh
+   (Canadian cross: builds GCC that runs ON VeridianOS)
+   Includes Stage 2.5 (cross-g++ needed because GCC is written in C++)
+
+4. Static native GCC   scripts/build-native-gcc-static.sh
+   (streamlined static build using existing cross-compiler)
+   Produces: gcc, cc1, as, ld, ar, ranlib, nm, objcopy, strip
+
+5. Package             scripts/package-native-toolchain.sh
+   (creates rootfs TAR for virtio-blk boot loading)
+```
+
+### Quick Start
+
+```bash
+# Step 1: Build the cross-compiler (if not already done)
+./scripts/build-cross-toolchain.sh
+
+# Step 2: Build the static native GCC
+./scripts/build-native-gcc-static.sh
+
+# Step 3: Package into rootfs TAR
+./scripts/package-native-toolchain.sh
+```
+
+### Build Tools (make, ninja)
+
+In addition to the compiler, self-hosting requires build automation tools.
+
+```bash
+# Build make and ninja (and optionally coreutils)
+./scripts/build-native-tools.sh
+
+# Or build individually:
+./scripts/build-native-make.sh       # GNU Make 4.4.1
+./scripts/build-native-ninja.sh      # Ninja 1.12.1
+
+# Build everything including coreutils essentials
+./scripts/build-native-tools.sh --with-coreutils
+```
+
+### Output Layout
+
+The native toolchain staging directory has this layout:
+
+```
+target/native-gcc-static/
+  usr/
+    bin/
+      gcc               # GCC compiler driver
+      cc -> gcc         # Symlink for compatibility
+      as                # GNU assembler
+      ld                # GNU linker
+      ar                # Archiver
+      ranlib            # Archive index
+      nm                # Symbol lister
+      objcopy           # Object copy/translate
+      strip             # Strip symbols
+    lib/
+      libc.a            # VeridianOS C library
+      crt0.o            # C runtime startup
+      crti.o            # Init prologue
+      crtn.o            # Init epilogue
+      gcc/x86_64-veridian/14.2.0/
+        libgcc.a        # GCC runtime library
+        crtbegin.o      # GCC init
+        crtend.o        # GCC fini
+        include/        # GCC internal headers (stdarg.h, stddef.h, ...)
+    libexec/
+      gcc/x86_64-veridian/14.2.0/
+        cc1             # C compiler proper
+        collect2        # Linker wrapper
+    include/
+      stdio.h           # libc headers
+      stdlib.h
+      string.h
+      veridian/         # Kernel syscall headers
+      sys/              # POSIX sys/ headers
+```
+
+### Scripts Reference
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/build-cross-toolchain.sh` | Build Linux-hosted cross-compiler |
+| `scripts/build-sysroot.sh` | Populate sysroot with headers and libc |
+| `scripts/build-native-gcc.sh` | Full Canadian cross (Stage 2.5 + native GCC) |
+| `scripts/build-native-gcc-static.sh` | Streamlined static native GCC build |
+| `scripts/package-native-toolchain.sh` | Package native GCC into rootfs TAR |
+| `scripts/build-native-make.sh` | Cross-compile GNU Make for VeridianOS |
+| `scripts/build-native-ninja.sh` | Cross-compile Ninja for VeridianOS |
+| `scripts/build-native-tools.sh` | Orchestrate building all native tools |
+| `scripts/build-rootfs.sh` | Build user-space rootfs TAR |
+
 ## File Listing
 
 ```
