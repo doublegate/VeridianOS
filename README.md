@@ -157,10 +157,13 @@ Phases 0 through 4 are complete. The kernel provides:
 - **Package Manager** -- DPLL SAT resolver, ports system, reproducible builds, Ed25519 signing
 - **Interactive Shell (vsh)** -- Bash/Fish-parity serial console shell with 24+ builtins, pipes, redirections, variable expansion, globbing, tab completion, job control, scripting (if/for/while/case), functions, aliases
 - **Framebuffer Display** -- 1280x800 text console via UEFI GOP framebuffer (x86_64) and ramfb (AArch64/RISC-V), ANSI color support, PS/2 keyboard input via controller polling, glyph cache, pixel ring buffer, write-combining (PAT) on x86_64
-- **Userland Bridge** -- Ring 0 to Ring 3 transitions with SYSCALL/SYSRET on x86_64, 30+ system calls
+- **Userland Bridge** -- Ring 0 to Ring 3 transitions with SYSCALL/SYSRET on x86_64, 35+ system calls (including clone, futex, arch_prctl, readlink)
 - **Complete C Library** -- 17 source files (6,547 LOC), full stdio/stdlib/string/unistd, architecture-specific setjmp/longjmp, 50+ syscall wrappers
 - **Cross-Compilation Toolchain** -- binutils 2.43 + GCC 14.2 Stage 2 cross-compiler, sysroot with headers and CRT files, CMake/Meson toolchain files
-- **Virtio-blk Driver** -- Block I/O with TAR rootfs loader for cross-compiled user-space binaries
+- **Virtio-blk Driver** -- Block I/O with TAR rootfs loader for cross-compiled user-space binaries; virtio-MMIO transport on AArch64/RISC-V, PCI on x86_64
+- **Thread Support** -- clone() with CLONE_VM/CLONE_FS/CLONE_THREAD/CLONE_SETTLS, futex (WAIT/WAKE/REQUEUE/BITSET), POSIX pthread library (create/join/detach/mutex/cond/TLS)
+- **Signal Delivery** -- Full signal frames and trampolines on all three architectures (x86_64, AArch64, RISC-V) with sigreturn context restoration
+- **Symlink Support** -- Full readlink() implementation across BlockFS and RamFS with VFS-level dispatch
 
 ### Self-Hosting Roadmap
 
@@ -174,20 +177,21 @@ The self-hosting effort follows a tiered plan to build VeridianOS toward compili
 | 3 | User-space execution (`/bin/minimal` verified, process lifecycle) | **Complete** |
 | 4 | Sysroot and CRT files (crt0.S, crti.S, crtn.S, all 3 architectures) | **Complete** |
 | 5 | Cross-compiled programs running on VeridianOS | **Complete** |
-| 6 | Native GCC on VeridianOS (Canadian cross-compilation) | Coded (test-codex branch) |
+| 6 | Thread support, signal delivery, virtio-MMIO, multi-LOAD ELF, native GCC | **Complete** (merged from test-codex) |
 | 7 | Full self-hosting (compile GCC with native GCC) | Planned |
 
-The native GCC infrastructure (T5-3) uses Canadian cross-compilation: a 13-step pipeline that rebuilds GCC with C++ support (Stage 2.5), then cross-compiles binutils and GCC as static binaries targeting VeridianOS (`build=linux, host=veridian, target=veridian`). See [`scripts/build-native-gcc.sh`](scripts/build-native-gcc.sh) for the 936-line build script.
+Tier 6 was developed on the test-codex branch and merged to main with a comprehensive audit pass fixing 8 critical bugs. The native GCC infrastructure (T5-3) uses Canadian cross-compilation: a 13-step pipeline that rebuilds GCC with C++ support (Stage 2.5), then cross-compiles binutils and GCC as static binaries targeting VeridianOS (`build=linux, host=veridian, target=veridian`). See [`scripts/build-native-gcc.sh`](scripts/build-native-gcc.sh) for the 936-line build script.
 
-### Recent Kernel Updates (Phase 4)
-- Futex/threads: wait/wake/requeue validation, futex pointer gating, CLONE_FS per-thread cwd/umask sharing, TLS-preserving clone/pthread trampoline, child-cleartid wake.
-- Virtio: AArch64/RISC-V virtio-mmio probing now fails fast on feature negotiation errors to avoid partial init.
+### Recent Kernel Updates (Tier 6 Self-Hosting)
+- Futex/threads: wait/wake/requeue validation, futex bitset filtering, CLONE_FS per-thread cwd/umask sharing, TLS-preserving clone/pthread trampoline, child-cleartid wake.
+- Virtio: AArch64/RISC-V virtio-mmio transport (replaces PCI-only); probing fails fast on feature negotiation errors; PCI gated to x86_64 only.
 - Filesystem/exec: BlockFS symlink/readlink works; ELF loader handles multi-LOAD binaries while retaining stack mappings; per-thread FS state wired through syscalls.
+- Signals: Full signal frame construction and sigreturn on AArch64 (x0-x30, NEON q0-q31) and RISC-V (x1-x31, f0-f31) with architecture-specific trampolines.
 - Tooling: LLVM triple patched for `-veridian`; rustup targets installed for x86_64/aarch64/riscv64; `arch_prctl` TLS wired on all arches.
 
 ### What Comes Next
 
-- **Self-Hosting Tier 6-7** -- Merge native GCC from test-codex branch, verify native compilation on VeridianOS, achieve full self-hosting
+- **Self-Hosting Tier 7** -- Verify native GCC compilation on VeridianOS, achieve full self-hosting (compile GCC with native GCC)
 - **Phase 5: Performance Optimization** -- Sub-microsecond IPC, lock-free kernel paths, DPDK networking, NVMe optimization, profiling tools
 - **Phase 6: Advanced Features** -- Wayland compositor, desktop environment, multimedia, virtualization, cloud-native features, POSIX compatibility layer
 
@@ -394,14 +398,14 @@ Security is a fundamental design principle:
 - [x] **Phase 3**: Security Hardening (v0.3.2, Feb 2026)
 - [x] **Phase 4**: Package Ecosystem and Self-Hosting (v0.4.0, Feb 2026)
 - [x] **Self-Hosting Tiers 0-5**: Complete libc, cross-toolchain, user-space execution (v0.4.9, Feb 2026)
+- [x] **Self-Hosting Tier 6**: Thread support, signal delivery, virtio-MMIO, multi-LOAD ELF, LLVM triple, native GCC infrastructure (merged from test-codex, Feb 2026)
 
 ### In Progress
 
-- [ ] **Self-Hosting Tier 6**: Native GCC on VeridianOS via Canadian cross-compilation (coded on test-codex branch)
+- [ ] **Self-Hosting Tier 7**: Full self-hosting (compile GCC with native GCC on VeridianOS)
 
 ### Upcoming
 
-- [ ] **Self-Hosting Tier 7**: Full self-hosting (compile GCC with native GCC)
 - [ ] **Phase 5**: Performance Optimization (5-6 months) -- Sub-microsecond IPC, lock-free kernel paths, DPDK networking, NVMe optimization
 - [ ] **Phase 6**: Advanced Features (8-9 months) -- Wayland compositor, desktop environment, multimedia, virtualization, cloud-native, POSIX compatibility layer
 

@@ -1,12 +1,46 @@
 ## [Unreleased]
 
-### Native GCC Toolchain, CI/CD Fixes, Documentation, and Shell Correctness
+### Tier 6 Self-Hosting, Native GCC Toolchain, CI/CD Fixes, and Shell Correctness
 
-10 commits since v0.4.9. Canadian cross-compilation infrastructure for native GCC on VeridianOS (T5-3), CI pipeline correctness (Codecov coverage, GitHub Pages deployment, clippy deduplication), shell pattern-matching compliance, branch comparison documentation, and code formatting.
+Tier 6 self-hosting features merged from test-codex branch (T6-0 through T6-5): multi-LOAD ELF segments, full readlink() implementation, AArch64/RISC-V signal delivery, virtio-MMIO transport for all architectures, LLVM triple patch for veridian OS, and thread support (clone/futex/pthread). Post-merge audit fixed 8 critical bugs across 17 files. Also includes Canadian cross-compilation infrastructure for native GCC (T5-3), CI pipeline corrections, shell pattern-matching compliance, and code formatting.
 
 ---
 
 ### Fixed
+
+#### Post-Merge Audit: 8 Critical Bug Fixes (`f7482a7`, 17 files, +878/-188)
+
+**pthread double-free** (`userland/libc/src/pthread.c`)
+- Root cause: `pthread_join()` called `free(raw)` on the raw pointer instead of `free(stack)`, freeing the thread structure instead of the allocated stack.
+- Fix: Changed to `free(stack)` to correctly free the stack allocation.
+
+**RISC-V virtio-mmio addresses** (`kernel/src/drivers/virtio/mmio.rs`)
+- Root cause: RISC-V virtio-mmio probe used AArch64 addresses (0x0A000000) instead of QEMU virt machine RISC-V addresses (0x10001000+).
+- Fix: Corrected base address to 0x10001000 with 0x1000 stride for RISC-V.
+
+**AArch64 virtio-mmio stride** (`kernel/src/drivers/virtio/mmio.rs`)
+- Root cause: AArch64 virtio-mmio probe used 0x2000 stride between devices instead of the correct 0x200.
+- Fix: Corrected stride to 0x200 for AArch64.
+
+**PCI enumeration on non-x86_64** (`kernel/src/drivers/virtio/mod.rs`)
+- Root cause: PCI enumeration called `inl()`/`outl()` on AArch64/RISC-V where port I/O stubs return 0, causing spurious device detection.
+- Fix: Gated PCI enumeration to `#[cfg(target_arch = "x86_64")]` only; AArch64/RISC-V use virtio-mmio exclusively.
+
+**BlockFS readlink unconditional error** (`kernel/src/fs/blockfs.rs`)
+- Root cause: `readlink()` returned `NotASymlink` unconditionally instead of checking the inode type and returning the symlink target.
+- Fix: Implemented proper symlink detection and target retrieval from BlockFS inodes.
+
+**AArch64/RISC-V context duplicate `tls_base` methods** (`kernel/src/arch/{aarch64,riscv}/context.rs`)
+- Root cause: Merge introduced duplicate `tls_base`/`set_tls_base` method definitions in both architecture context modules.
+- Fix: Removed duplicate method implementations, keeping the correct versions.
+
+**Signal delivery method name mismatches** (`kernel/src/process/signal_delivery.rs`)
+- Root cause: AArch64/RISC-V signal delivery functions referenced methods with incorrect names after refactoring.
+- Fix: Corrected method names to match the actual context trait implementations.
+
+**Futex bitset filtering** (`kernel/src/syscall/futex.rs`)
+- Root cause: `FUTEX_WAIT_BITSET`/`FUTEX_WAKE_BITSET` operations ignored the bitset mask, waking all waiters regardless of their registered bitset.
+- Fix: Implemented proper bitset AND-filtering so only waiters whose bitset overlaps with the wake bitset are unblocked.
 
 #### Codecov Coverage: 0% to Real Data (3 commits)
 
@@ -49,6 +83,42 @@
 
 ### Added
 
+#### Tier 6 Self-Hosting: test-codex Merge (`376dbca`, 36 files, +2,718/-83)
+
+**T6-0: Multi-LOAD ELF Segment Handling** (`kernel/src/elf/mod.rs`)
+- ELF loader now correctly handles binaries with multiple LOAD segments (e.g., /bin/sh with separate text and data segments)
+- Preserves existing stack mappings when loading additional segments
+- Fixes the /bin/sh GP fault that occurred with single-segment-only loading
+
+**T6-1: Full readlink() Implementation** (`kernel/src/fs/blockfs.rs`, `kernel/src/fs/mod.rs`, `kernel/src/syscall/filesystem.rs`)
+- Complete `readlink()` syscall with BlockFS symlink support and RamFS symlink resolution
+- VFS-level readlink dispatch to underlying filesystem implementations
+- Returns actual symlink target paths instead of stub errors
+
+**T6-2: AArch64/RISC-V Signal Delivery** (`kernel/src/process/signal_delivery.rs`, +387 lines)
+- Full signal frame construction for AArch64 (saving x0-x30, sp, pc, pstate, NEON q0-q31)
+- Full signal frame construction for RISC-V (saving x1-x31, pc, fcsr, f0-f31)
+- Architecture-specific signal trampolines that invoke `rt_sigreturn` after handler returns
+- `sigreturn` implementation restoring full context on both architectures
+
+**T6-3: Virtio-MMIO Transport** (`kernel/src/drivers/virtio/mmio.rs` NEW, 246 lines)
+- Memory-mapped virtio transport for AArch64 and RISC-V (replaces PCI-only virtio)
+- MMIO device probe at architecture-specific base addresses (AArch64: 0x0A000000, RISC-V: 0x10001000)
+- Feature negotiation, virtqueue setup, and interrupt handling via MMIO registers
+- Integrated with existing virtio-blk driver for disk I/O on all architectures
+
+**T6-4: LLVM Triple Patch** (`ports/llvm/patches/0001-add-veridian-triple.patch`, 81 lines)
+- Patch adding `x86_64-unknown-veridian`, `aarch64-unknown-veridian`, and `riscv64-unknown-veridian` target triples to LLVM
+- Enables `rustup target add` for VeridianOS cross-compilation targets
+
+**T6-5: Thread Support — clone/futex/pthread** (5 new files, +1,145 lines)
+- `kernel/src/syscall/thread_clone.rs` (NEW, 173 lines): `clone()` syscall with `CLONE_VM`, `CLONE_FS`, `CLONE_FILES`, `CLONE_THREAD`, `CLONE_SETTLS`, `CLONE_PARENT_SETTID`, `CLONE_CHILD_CLEARTID` flags
+- `kernel/src/syscall/futex.rs` (NEW, 399 lines): `futex()` syscall with `WAIT`, `WAKE`, `REQUEUE`, `WAIT_BITSET`, `WAKE_BITSET` operations
+- `kernel/src/syscall/arch_prctl.rs` (NEW, 70 lines): `arch_prctl()` for TLS base (FS/GS) manipulation on x86_64, wired to TPIDR_EL0 on AArch64 and tp register on RISC-V
+- `userland/libc/src/pthread.c` (NEW, 473 lines): POSIX threads library — `pthread_create`, `pthread_join`, `pthread_detach`, `pthread_mutex_*`, `pthread_cond_*`, `pthread_key_*` (TLS), `pthread_once`
+- `userland/libc/include/pthread.h` (NEW, 83 lines): POSIX threads header with all type definitions and function declarations
+- `kernel/src/process/thread.rs` (+101 lines): Per-thread FS state (`CLONE_FS` cwd/umask sharing), TLS-preserving clone trampoline, child-cleartid futex wake on thread exit
+
 #### Native GCC Cross-Compilation Script (T5-3)
 
 - `scripts/build-native-gcc.sh` (NEW, 936 lines): Canadian cross-compilation infrastructure for building a GCC binary that runs natively on VeridianOS
@@ -74,6 +144,20 @@
 - `ref_docs/redox-capability-fd-bridge.md` (NEW, 51 lines): Research notes on Redox capability-fd bridging
 
 ### Changed
+
+#### Virtio Driver Architecture (test-codex merge + audit)
+
+- Virtio driver stack now supports both PCI (x86_64) and MMIO (AArch64/RISC-V) transports
+- PCI enumeration gated to `#[cfg(target_arch = "x86_64")]` -- AArch64/RISC-V use virtio-mmio exclusively
+- Virtio-mmio probing fails fast on feature negotiation errors to avoid partial initialization
+- Virtqueue setup improved with proper memory barrier sequencing for MMIO transport
+
+#### Process and Thread Infrastructure (test-codex merge + audit)
+
+- Process creation supports `CLONE_FS` flag for per-thread cwd/umask sharing
+- Thread exit performs child-cleartid futex wake for `pthread_join()` support
+- `arch_prctl` TLS base manipulation wired on all three architectures (FS/GS on x86_64, TPIDR_EL0 on AArch64, tp on RISC-V)
+- Context structures on x86_64 extended with TLS base field for clone/thread support
 
 #### Code Formatting (`cargo fmt`, 10 files)
 
