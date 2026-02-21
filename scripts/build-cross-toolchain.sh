@@ -467,7 +467,7 @@ build_gcc_stage2() {
                 --target="$(target_triple)" \
                 --prefix="${PREFIX}" \
                 --with-sysroot="${PREFIX}/sysroot" \
-                --enable-languages=c \
+                --enable-languages=c,c++ \
                 --disable-shared \
                 --disable-threads \
                 --disable-multilib \

@@ -100,8 +100,23 @@ struct tm {
 /** Convert time_t to broken-down UTC time. */
 struct tm *gmtime(const time_t *timep);
 
+/** Convert time_t to broken-down local time. */
+struct tm *localtime(const time_t *timep);
+
 /** Convert broken-down time back to time_t. */
 time_t mktime(struct tm *tm);
+
+/** Format time as a string (e.g. "Wed Jun 30 21:49:08 1993\n"). */
+char *ctime(const time_t *timep);
+
+/** Format broken-down time as a string. */
+char *asctime(const struct tm *tm);
+
+/** Format time into a string buffer. */
+size_t strftime(char *s, size_t max, const char *format, const struct tm *tm);
+
+/** Compute the difference between two times. */
+double difftime(time_t time1, time_t time0);
 
 #ifdef __cplusplus
 }

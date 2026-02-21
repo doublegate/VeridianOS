@@ -236,6 +236,22 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
 #define SIG_UNBLOCK     1   /* Remove signals from current mask */
 #define SIG_SETMASK     2   /* Replace current mask entirely */
 
+/**
+ * Examine pending signals.
+ *
+ * @param set   Receives the set of pending signals.
+ * @return 0 on success, -1 on error.
+ */
+int sigpending(sigset_t *set);
+
+/**
+ * Wait for a signal.
+ *
+ * @param set   Set of signals to wait for.
+ * @return -1 with errno EINTR when a signal is delivered.
+ */
+int sigsuspend(const sigset_t *mask);
+
 #ifdef __cplusplus
 }
 #endif

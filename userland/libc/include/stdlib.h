@@ -26,6 +26,11 @@ extern "C" {
 /** Maximum value returned by rand(). */
 #define RAND_MAX        2147483647
 
+/** Maximum bytes in a multibyte character for the current locale. */
+#ifndef MB_CUR_MAX
+#define MB_CUR_MAX      1   /* Single-byte locale only */
+#endif
+
 /* ========================================================================= */
 /* Memory allocation                                                         */
 /* ========================================================================= */
@@ -73,6 +78,9 @@ int setenv(const char *name, const char *value, int overwrite);
 
 /** Remove an environment variable. */
 int unsetenv(const char *name);
+
+/** Insert or reset a NAME=VALUE environment string. */
+int putenv(char *string);
 
 /* ========================================================================= */
 /* String-to-number conversions                                              */
@@ -184,6 +192,19 @@ char *mktemp(char *tmpl);
  * @return Exit status of the command, or -1 on error.
  */
 int system(const char *command);
+
+/* ========================================================================= */
+/* System information                                                        */
+/* ========================================================================= */
+
+/**
+ * Get system load averages.
+ *
+ * @param loadavg  Array to fill with 1, 5, 15-minute load averages.
+ * @param nelem    Number of elements to fill (up to 3).
+ * @return Number of averages returned, or -1 on error.
+ */
+int getloadavg(double loadavg[], int nelem);
 
 #ifdef __cplusplus
 }

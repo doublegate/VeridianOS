@@ -19,6 +19,14 @@ extern "C" {
 #endif
 
 /* ========================================================================= */
+/* POSIX version                                                             */
+/* ========================================================================= */
+
+/* Claim basic POSIX.1-2001 compliance so that portable software recognizes  */
+/* our standard function signatures (e.g. getcwd) and skips legacy fallbacks */
+#define _POSIX_VERSION  200112L
+
+/* ========================================================================= */
 /* Standard file descriptors                                                 */
 /* ========================================================================= */
 
@@ -163,6 +171,12 @@ gid_t getegid(void);
 int setuid(uid_t uid);
 int setgid(gid_t gid);
 
+/** Get login name of the user. */
+char *getlogin(void);
+
+/** Get the hostname. */
+int gethostname(char *name, size_t len);
+
 /* ========================================================================= */
 /* Process groups and sessions                                               */
 /* ========================================================================= */
@@ -193,12 +207,49 @@ unsigned int sleep(unsigned int seconds);
 /** Sleep for the specified number of microseconds. */
 int usleep(unsigned int usec);
 
+/** Set an alarm timer (deliver SIGALRM after seconds). */
+unsigned int alarm(unsigned int seconds);
+
 /* ========================================================================= */
-/* Host identification                                                       */
+/* sysconf                                                                   */
 /* ========================================================================= */
 
-/** Get the hostname. */
-int gethostname(char *name, size_t len);
+/** sysconf name values */
+#define _SC_ARG_MAX             0
+#define _SC_CLK_TCK             2
+#define _SC_NPROCESSORS_CONF    83
+#define _SC_NPROCESSORS_ONLN    84
+#define _SC_PAGESIZE            30
+#define _SC_PAGE_SIZE           _SC_PAGESIZE
+#define _SC_OPEN_MAX            4
+
+/** Get configurable system variables. */
+long sysconf(int name);
+
+/* ========================================================================= */
+/* pathconf                                                                  */
+/* ========================================================================= */
+
+/** pathconf name values */
+#define _PC_LINK_MAX            0
+#define _PC_MAX_CANON           1
+#define _PC_MAX_INPUT           2
+#define _PC_NAME_MAX            3
+#define _PC_PATH_MAX            4
+#define _PC_PIPE_BUF            5
+#define _PC_CHOWN_RESTRICTED    6
+#define _PC_NO_TRUNC            7
+#define _PC_VDISABLE            8
+#define _PC_SYNC_IO             9
+#define _PC_ASYNC_IO            10
+#define _PC_PRIO_IO             11
+#define _PC_FILESIZEBITS        12
+
+/** Get configurable pathname variables. */
+long pathconf(const char *path, int name);
+
+/** Get configurable pathname variables (by fd). */
+long fpathconf(int fd, int name);
 
 /* ========================================================================= */
 /* Miscellaneous                                                             */

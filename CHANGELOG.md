@@ -4,7 +4,7 @@
 
 **Tier 6 COMPLETE**: All 6 items merged from test-codex branch, audited (8 critical bugs fixed), and validated on all 3 architectures (tri-arch BOOTOK). The test-codex branch has been deleted.
 
-**Tier 7 IN PROGRESS**: Rust user-space target specifications (T7-1), Rust std platform port (T7-2), static native GCC build scripts (T7-3), cross-compiled make/ninja (T7-4), and vpkg user-space migration (T7-5).
+**Tier 7 T7-1 through T7-5 COMPLETE**: Rust user-space target specifications (T7-1), Rust std platform port (T7-2), static native GCC via Canadian cross-compilation (T7-3), cross-compiled make/ninja (T7-4), and vpkg user-space migration (T7-5). Remaining: integration testing and bootstrap verification.
 
 Previous [Unreleased] content: Tier 6 self-hosting features (T6-0 through T6-5), post-merge audit, Canadian cross-compilation infrastructure for native GCC (T5-3), CI pipeline corrections, shell pattern-matching compliance, and code formatting.
 
@@ -52,6 +52,55 @@ Previous [Unreleased] content: Tier 6 self-hosting features (T6-0 through T6-5),
 - `remove.c` (107 lines): Package removal via `SYS_PKG_REMOVE` (syscall 91) with reverse dependency checking.
 - `query.c` (214 lines): Search/list/info/update via `SYS_PKG_QUERY` (92), `SYS_PKG_LIST` (93), `SYS_PKG_UPDATE` (94).
 - `Makefile` (~85 lines): Cross-compilation for x86_64, AArch64, and RISC-V with sysroot integration.
+
+#### T7-3 Completion: libc Expansion for Canadian Cross-Compilation (25+ new headers, 2 new source files)
+
+The static native GCC build (T7-3) required significant libc expansion to satisfy GCC/binutils configure scripts and compilation. This work adds POSIX-compatible headers and stub implementations enabling cross-compilation of complex software.
+
+**New libc headers (`userland/libc/include/`):**
+- `alloca.h`: `alloca()` macro (stack allocation)
+- `ar.h`: Archive file format constants (`ARMAG`, `ARFMAG`, `ar_hdr`)
+- `arpa/inet.h`: `inet_addr`, `inet_ntop`, `inet_pton`, `htons`/`ntohs`/`htonl`/`ntohl`
+- `assert.h`: `assert()` macro with `__FILE__`/`__LINE__` diagnostics
+- `dlfcn.h`: Dynamic linking stubs (`dlopen`, `dlsym`, `dlclose`, `dlerror`, `RTLD_*`)
+- `fnmatch.h`: Filename pattern matching (`fnmatch`, `FNM_*` flags)
+- `glob.h`: Path globbing (`glob`, `globfree`, `glob_t`, `GLOB_*` flags)
+- `grp.h`: Group database (`getgrgid`, `getgrnam`, `getgrent`, `group` struct)
+- `inttypes.h`: Integer format macros (`PRId8`-`PRId64`, `PRIu8`-`PRIu64`, `PRIx8`-`PRIx64`, `SCN*` variants)
+- `memory.h`: Legacy header (includes `string.h`)
+- `netdb.h`: Network database (`getaddrinfo`, `freeaddrinfo`, `gai_strerror`, `addrinfo` struct)
+- `netinet/in.h`: IPv4/IPv6 types (`in_addr`, `in6_addr`, `sockaddr_in`, `sockaddr_in6`), byte-order macros, `IPPROTO_*`, `INADDR_*`
+- `pwd.h`: Password database (`getpwuid`, `getpwnam`, `getpwent`, `passwd` struct)
+- `spawn.h`: POSIX spawn declarations (`posix_spawn`, `posix_spawnp`, `posix_spawn_file_actions_*`, `posix_spawnattr_*`)
+- `strings.h`: String operations (`ffs`, `strcasecmp`, `strncasecmp`, `bcopy`, `bzero`, `bcmp`)
+- `sys/file.h`: File locking constants (`LOCK_SH`, `LOCK_EX`, `LOCK_UN`, `LOCK_NB`, `flock`)
+- `sys/param.h`: System parameters (`PAGE_SIZE`, `MAXPATHLEN`, `MIN`/`MAX` macros, `NBBY`, `NOFILE`)
+- `sys/sdt.h`: SystemTap/DTrace probe stubs (no-op `DTRACE_PROBE*` and `STAP_PROBE*` macros) -- required by libgcc unwinder
+- `sys/socket.h`: Socket types (`socket`, `bind`, `listen`, `accept`, `connect`, `send`, `recv`, `AF_*`, `SOCK_*`, `SOL_*`)
+- `sys/sysinfo.h`: System information (`sysinfo` struct, `get_nprocs`, `get_nprocs_conf`)
+- `sys/time.h`: Time structures (`timeval`, `timezone`, `gettimeofday`, `settimeofday`, `ITIMER_*`)
+- `sys/un.h`: Unix domain socket address (`sockaddr_un`, `SUN_LEN`)
+- `utime.h`: File access/modification times (`utimbuf`, `utime`)
+
+**Modified libc headers:**
+- `stdlib.h`: Added `MB_CUR_MAX`, `mblen`, `mbtowc`, `wctomb`, `mbstowcs`, `wcstombs` declarations
+- `time.h`: Added `timespec` struct, `timer_create`, `timer_delete`, `timer_settime`, `timer_gettime`, `timer_getoverrun`, `CLOCK_*` constants
+- `unistd.h`: Added `pathconf`, `fpathconf`, `alarm`, `_PC_*` constants (PATH_MAX, NAME_MAX, LINK_MAX, etc.)
+
+**New source files:**
+- `posix_stubs.c`: POSIX function stubs -- `putchar`, `sysconf`, `getloadavg`, `sigpending`, `posix_spawn` family, `ffs`
+- `posix_stubs2.c`: Extended POSIX stubs -- `pathconf`, multibyte functions (`mblen`, `mbtowc`, `wctomb`, `mbstowcs`, `wcstombs`), math implementations (`ldexp`/`ldexpf`, `frexp`/`frexpf`, `fabs`/`fabsf`, `floor`/`floorf`, `ceil`/`ceilf`, `log`, `exp`, `sqrt`/`sqrtf`, `pow`, `modf`), socket stubs, `alarm`, `freopen`, `getaddrinfo`/`freeaddrinfo`
+
+**Modified sysroot headers (`toolchain/sysroot/include/veridian/`):**
+- `fcntl.h`: Added `O_NOFOLLOW`, `O_DIRECTORY`, `O_CLOEXEC`, `O_NOCTTY`, `O_NONBLOCK`, `O_SYNC`, `O_DSYNC`; `F_DUPFD`, `F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL`, `FD_CLOEXEC`
+- `signal.h`: Added `SIGBUS`, `SIGPOLL`, `SIGPROF`, `SIGSYS`, `SIGTRAP`, `SIGURG`, `SIGVTALRM`, `SIGXCPU`, `SIGXFSZ`, `SIGWINCH`
+- `stat.h`: Added `S_ISVTX`, `S_IFLNK`, `S_IFSOCK`, `S_ISBLK`, `S_ISCHR`, `S_ISFIFO`, `S_ISLNK`, `S_ISSOCK` macros
+
+**Build infrastructure:**
+- `scripts/build-native-gcc-static.sh`: Added CONFIG_SITE mechanism for autoconf cross-compilation cache (solves endianness detection without executing target binaries), removed redundant `config.cache` approach, added info logging for CONFIG_SITE path
+- `scripts/build-native-make.sh`: Added missing header workarounds for cross-compilation
+- `scripts/build-cross-toolchain.sh`: Minor fix
+- `userland/libm/include/math.h`: Added `extern "C"` guards for C++ compatibility (required for libstdc++ `cmath` inclusion)
 
 #### Documentation Updates
 

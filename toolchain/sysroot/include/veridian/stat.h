@@ -33,8 +33,11 @@ struct stat {
     blksize_t   st_blksize; /* Preferred I/O block size */
     blkcnt_t    st_blocks;  /* Number of 512-byte blocks allocated */
     time_t      st_atime;   /* Last access time */
+    long        st_atimensec; /* Nanoseconds for st_atime */
     time_t      st_mtime;   /* Last modification time */
+    long        st_mtimensec; /* Nanoseconds for st_mtime */
     time_t      st_ctime;   /* Last status change time */
+    long        st_ctimensec; /* Nanoseconds for st_ctime */
 };
 
 /* ========================================================================= */

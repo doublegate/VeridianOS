@@ -56,6 +56,10 @@
 #define isnormal(x) (__builtin_isnormal(x))
 #define signbit(x)  (__builtin_signbit(x))
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ========================================================================= */
 /* Function declarations -- double precision                                 */
 /* ========================================================================= */
@@ -133,5 +137,9 @@ float copysignf(float x, float y);
 float fminf(float x, float y);
 float fmaxf(float x, float y);
 float hypotf(float x, float y);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _VERIDIAN_MATH_H */

@@ -220,6 +220,36 @@ extract_source() {
 }
 
 # ---------------------------------------------------------------------------
+# Patch config.sub to recognize veridian OS
+# ---------------------------------------------------------------------------
+patch_config_sub() {
+    step "Patching config.sub for VeridianOS"
+
+    local srcdir="${BUILD_BASE}/sources/make-${MAKE_VERSION}"
+
+    # Find all config.sub files in the source tree
+    local patched=0
+    for cs in "${srcdir}"/build-aux/config.sub "${srcdir}"/config.sub; do
+        [[ -f "${cs}" ]] || continue
+        if grep -q "veridian" "${cs}" 2>/dev/null; then
+            info "Already patched: ${cs}"
+        else
+            # Add veridian after the last OS entry (fiwix/mlibc)
+            sed -i 's/| fiwix\* | mlibc\* )/| fiwix* | mlibc* \\\n\t     | veridian* )/' "${cs}" 2>/dev/null \
+                || sed -i 's/| fiwix\* )/| fiwix* \\\n\t     | veridian* )/' "${cs}" 2>/dev/null \
+                || warn "Could not patch ${cs}"
+            patched=$((patched + 1))
+        fi
+    done
+
+    if [[ ${patched} -gt 0 ]]; then
+        success "Patched ${patched} config.sub file(s)"
+    else
+        info "No config.sub files needed patching"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Build GNU Make
 # ---------------------------------------------------------------------------
 build_make() {
@@ -322,6 +352,7 @@ main() {
     verify_cross_compiler
     download_source
     extract_source
+    patch_config_sub
     build_make
     install_make
     print_summary

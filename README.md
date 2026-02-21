@@ -159,8 +159,8 @@ Phases 0 through 4 are complete. The kernel provides:
 - **Interactive Shell (vsh)** -- Bash/Fish-parity serial console shell with 24+ builtins, pipes, redirections, variable expansion, globbing, tab completion, job control, scripting (if/for/while/case), functions, aliases
 - **Framebuffer Display** -- 1280x800 text console via UEFI GOP framebuffer (x86_64) and ramfb (AArch64/RISC-V), ANSI color support, PS/2 keyboard input via controller polling, glyph cache, pixel ring buffer, write-combining (PAT) on x86_64
 - **Userland Bridge** -- Ring 0 to Ring 3 transitions with SYSCALL/SYSRET on x86_64, 35+ system calls (including clone, futex, arch_prctl, readlink)
-- **Complete C Library** -- 17 source files (6,547 LOC), full stdio/stdlib/string/unistd, architecture-specific setjmp/longjmp, 50+ syscall wrappers
-- **Cross-Compilation Toolchain** -- binutils 2.43 + GCC 14.2 Stage 2 cross-compiler, sysroot with headers and CRT files, CMake/Meson toolchain files
+- **Complete C Library** -- 19 source files, full stdio/stdlib/string/unistd, architecture-specific setjmp/longjmp, 50+ syscall wrappers, 25+ POSIX-compatible headers (network, system, POSIX, C standard), math library (ldexp, frexp, log, exp, sqrt, pow, fabs, floor, ceil, modf)
+- **Cross-Compilation Toolchain** -- binutils 2.43 + GCC 14.2 Stage 2 cross-compiler, sysroot with headers and CRT files, CMake/Meson toolchain files; static native GCC toolchain (gcc, cc1, as, ld, ar) via Canadian cross-compilation for on-target self-hosting
 - **Virtio-blk Driver** -- Block I/O with TAR rootfs loader for cross-compiled user-space binaries; virtio-MMIO transport on AArch64/RISC-V, PCI on x86_64
 - **Thread Support** -- clone() with CLONE_VM/CLONE_FS/CLONE_THREAD/CLONE_SETTLS, futex (WAIT/WAKE/REQUEUE/BITSET), POSIX pthread library (create/join/detach/mutex/cond/TLS)
 - **Signal Delivery** -- Full signal frames and trampolines on all three architectures (x86_64, AArch64, RISC-V) with sigreturn context restoration
@@ -179,9 +179,9 @@ The self-hosting effort follows a tiered plan to build VeridianOS toward compili
 | 4 | Sysroot and CRT files (crt0.S, crti.S, crtn.S, all 3 architectures) | **Complete** |
 | 5 | Cross-compiled programs running on VeridianOS | **Complete** |
 | 6 | Thread support, signal delivery, virtio-MMIO, multi-LOAD ELF, native GCC | **Complete** (merged from test-codex) |
-| 7 | Full self-hosting (Rust std port, native GCC, make/ninja, vpkg) | **In Progress** |
+| 7 | Full self-hosting (Rust std port, native GCC, make/ninja, vpkg) | **In Progress** (T7-1 through T7-5 complete) |
 
-Tier 6 was developed on the test-codex branch and merged to main with a comprehensive audit pass fixing 8 critical bugs. The native GCC infrastructure (T5-3) uses Canadian cross-compilation: a 13-step pipeline that rebuilds GCC with C++ support (Stage 2.5), then cross-compiles binutils and GCC as static binaries targeting VeridianOS (`build=linux, host=veridian, target=veridian`). See [`scripts/build-native-gcc.sh`](scripts/build-native-gcc.sh) for the 936-line build script.
+Tier 6 was developed on the test-codex branch and merged to main with a comprehensive audit pass fixing 8 critical bugs. Tier 7 provides the complete self-hosting toolchain: T7-1 (Rust user-space target specs), T7-2 (Rust std platform port), T7-3 (static native GCC via Canadian cross-compilation), T7-4 (GNU Make + Ninja), and T7-5 (vpkg package manager). The native GCC toolchain (T7-3) uses CONFIG_SITE-based autoconf caching to solve endianness detection in Canadian cross builds (`build=linux, host=veridian, target=veridian`), producing statically-linked gcc, cc1, as, ld, ar, and related tools totaling ~91 MB.
 
 ### Recent Kernel Updates (Tier 6 Self-Hosting)
 - Futex/threads: wait/wake/requeue validation, futex bitset filtering, CLONE_FS per-thread cwd/umask sharing, TLS-preserving clone/pthread trampoline, child-cleartid wake.
@@ -192,7 +192,7 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### What Comes Next
 
-- **Self-Hosting Tier 7** -- Rust user-space targets, std port, static native GCC/make/ninja, vpkg user-space migration
+- **Self-Hosting Tier 7 completion** -- T7-1 through T7-5 complete (Rust user-space targets, std port, static native GCC 14.2 via Canadian cross, make/ninja, vpkg); remaining: integration testing and bootstrap verification
 - **Phase 5: Performance Optimization** -- Sub-microsecond IPC, lock-free kernel paths, DPDK networking, NVMe optimization, profiling tools
 - **Phase 6: Advanced Features** -- Wayland compositor, desktop environment, multimedia, virtualization, cloud-native features, POSIX compatibility layer
 
@@ -403,7 +403,7 @@ Security is a fundamental design principle:
 
 ### In Progress
 
-- [ ] **Self-Hosting Tier 7**: Rust std port, native GCC/make/ninja, vpkg migration -- full self-hosting loop
+- [ ] **Self-Hosting Tier 7**: T7-1 through T7-5 complete (Rust user-space targets, std port, static native GCC 14.2, make/ninja, vpkg) -- integration testing and bootstrap verification remaining
 
 ### Upcoming
 

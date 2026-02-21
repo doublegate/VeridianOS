@@ -71,6 +71,30 @@ extern "C" {
 /** Duplicate fd with close-on-exec set */
 #define F_DUPFD_CLOEXEC 1030
 
+/** Get record lock */
+#define F_GETLK         5
+/** Set record lock (blocking) */
+#define F_SETLK         6
+/** Set record lock (wait) */
+#define F_SETLKW        7
+
+/* ========================================================================= */
+/* File Lock Types                                                           */
+/* ========================================================================= */
+
+#define F_RDLCK         0   /* Read (shared) lock */
+#define F_WRLCK         1   /* Write (exclusive) lock */
+#define F_UNLCK         2   /* Unlock */
+
+/** POSIX advisory record lock structure. */
+struct flock {
+    short l_type;       /* F_RDLCK, F_WRLCK, or F_UNLCK */
+    short l_whence;     /* SEEK_SET, SEEK_CUR, SEEK_END */
+    off_t l_start;      /* Offset where the lock begins */
+    off_t l_len;        /* Size of the locked area; 0 means to EOF */
+    pid_t l_pid;        /* PID of the process holding the lock */
+};
+
 /* ========================================================================= */
 /* File Descriptor Flags                                                     */
 /* ========================================================================= */

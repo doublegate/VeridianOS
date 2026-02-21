@@ -217,6 +217,39 @@ setup_vars() {
 
     # Log file
     LOG_DIR="${BUILD_BASE}/logs"
+
+    # -----------------------------------------------------------------------
+    # CONFIG_SITE: Pre-seed autoconf cache variables for cross-compilation.
+    # This is the standard autoconf mechanism for Canadian cross builds.
+    # Every sub-configure (including gcc/) reads CONFIG_SITE automatically
+    # from the environment, solving the "unknown endianness" problem where
+    # AC_C_BIGENDIAN tries to run a cross-compiled test binary.
+    # -----------------------------------------------------------------------
+    mkdir -p "${BUILD_BASE}"
+    SITE_CONFIG="${BUILD_BASE}/veridian-site.config"
+    cat > "${SITE_CONFIG}" <<'SITE_EOF'
+# Autoconf site defaults for VeridianOS cross-compilation
+# x86_64 is little-endian
+ac_cv_c_bigendian=no
+
+# Working directory functions
+ac_cv_func_chown_works=yes
+ac_cv_func_getgroups_works=yes
+ac_cv_func_working_mktime=yes
+ac_cv_func_mmap_fixed_mapped=no
+ac_cv_func_posix_getgroups=yes
+ac_cv_have_decl_getrlimit=no
+ac_cv_have_decl_strsignal=no
+ac_cv_sys_largefile_source=no
+
+# VeridianOS doesn't have /dev/zero yet
+ac_cv_dev_zero=no
+
+# No procfs
+ac_cv_file__proc_self_maps=no
+SITE_EOF
+    export CONFIG_SITE="${SITE_CONFIG}"
+    info "CONFIG_SITE set to ${SITE_CONFIG}"
 }
 
 # ---------------------------------------------------------------------------
@@ -440,6 +473,25 @@ apply_patches() {
     ln -sfn "${srcdir}/mpfr-${MPFR_VERSION}" "${gcc_src}/mpfr"
     ln -sfn "${srcdir}/mpc-${MPC_VERSION}"   "${gcc_src}/mpc"
 
+    # Copy GCC's patched config.sub (with veridian OS support) into
+    # GMP/MPFR/MPC source trees.  These have their own config.sub that
+    # doesn't recognize "veridian" as an OS, causing configure failures.
+    # Copy GCC's patched config.sub (with veridian support) to ALL
+    # config.sub files in GMP/MPFR/MPC.  Some packages have them in
+    # sub-directories (e.g., mpc/build-aux/config.sub).
+    local gcc_config_sub="${gcc_src}/config.sub"
+    if [[ -f "${gcc_config_sub}" ]] && grep -q "veridian" "${gcc_config_sub}"; then
+        while IFS= read -r -d '' cs; do
+            if ! grep -q "veridian" "${cs}"; then
+                cp "${gcc_config_sub}" "${cs}"
+                info "Patched config.sub: ${cs#${srcdir}/}"
+            fi
+        done < <(find "${srcdir}/gmp-${GMP_VERSION}" \
+                      "${srcdir}/mpfr-${MPFR_VERSION}" \
+                      "${srcdir}/mpc-${MPC_VERSION}" \
+                      -name "config.sub" -print0 2>/dev/null)
+    fi
+
     success "Patches applied"
 }
 
@@ -488,7 +540,7 @@ phase2_build_static_binutils() {
                 RANLIB="${CROSS_RANLIB}" \
                 STRIP="${CROSS_STRIP}" \
                 LDFLAGS="-static" \
-                CFLAGS="-O2 -static" \
+                CFLAGS="-O2 -static -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types" \
                 CXXFLAGS="-O2 -static" \
                 2>&1 | tee "${LOG_DIR}/binutils-configure.log"
         )
@@ -557,8 +609,10 @@ phase3_build_static_libgcc() {
         info "  build  = ${BUILD_TRIPLE}"
         info "  host   = ${TARGET}"
         info "  target = ${TARGET}"
+        info "  CONFIG_SITE = ${CONFIG_SITE}"
         (
             cd "${builddir}"
+
             "${srcdir}/configure" \
                 --build="${BUILD_TRIPLE}" \
                 --host="${TARGET}" \
@@ -586,6 +640,8 @@ phase3_build_static_libgcc() {
                 --disable-libsanitizer \
                 --disable-libvtv \
                 --with-newlib \
+                --disable-fixincludes \
+                ac_cv_c_bigendian=no \
                 CC="${CROSS_CC}" \
                 CXX="${CROSS_CXX}" \
                 AR="${CROSS_AR}" \
@@ -604,7 +660,7 @@ phase3_build_static_libgcc() {
                 OBJDUMP_FOR_TARGET="${CROSS_PREFIX}/bin/${TARGET}-objdump" \
                 STRIP_FOR_TARGET="${CROSS_STRIP}" \
                 LDFLAGS="-static" \
-                CFLAGS="-O2 -static" \
+                CFLAGS="-O2 -static -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types" \
                 CXXFLAGS="-O2 -static -fno-exceptions -fno-rtti" \
                 CFLAGS_FOR_BUILD="-O2" \
                 CXXFLAGS_FOR_BUILD="-O2" \
