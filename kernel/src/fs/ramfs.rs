@@ -301,8 +301,9 @@ impl Filesystem for RamFs {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use alloc::vec;
+
+    use super::*;
 
     // --- RamFs construction tests ---
 
@@ -580,7 +581,10 @@ mod tests {
 
         let result = root.lookup("missing");
         assert!(result.is_err());
-        assert_eq!(result.err().expect("expected Err"), KernelError::FsError(FsError::NotFound));
+        assert_eq!(
+            result.err().expect("expected Err"),
+            KernelError::FsError(FsError::NotFound)
+        );
     }
 
     #[test]

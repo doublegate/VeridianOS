@@ -484,7 +484,9 @@ mod tests {
     #[cfg(target_os = "none")]
     #[test]
     fn test_shared_region_creation() {
-        let region = SharedRegion::new_with_policy(ProcessId(1), 4096, CachePolicy::WriteBack, None).unwrap();
+        let region =
+            SharedRegion::new_with_policy(ProcessId(1), 4096, CachePolicy::WriteBack, None)
+                .unwrap();
         assert_eq!(region.size(), 4096);
         assert_eq!(region.owner, ProcessId(1));
     }

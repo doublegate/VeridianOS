@@ -1059,8 +1059,9 @@ pub fn load_elf_from_file(path: &str) -> Result<ElfBinary, ElfError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use alloc::vec;
+
+    use super::*;
 
     /// Helper: build a minimal valid ELF64 header in a byte buffer.
     /// Returns a Vec<u8> containing a valid ELF header + one LOAD program

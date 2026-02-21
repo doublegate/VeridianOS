@@ -1392,10 +1392,11 @@ pub mod key_exchange {
     }
 }
 
-// Asymmetric crypto tests require bare-metal execution: the custom Ed25519/X25519
-// scalar reduction uses i64 arithmetic that can overflow in debug builds on
-// non-reduced random inputs, and the results are only guaranteed correct with
-// properly bounded scalar inputs produced by the kernel PRNG.
+// Asymmetric crypto tests require bare-metal execution: the custom
+// Ed25519/X25519 scalar reduction uses i64 arithmetic that can overflow in
+// debug builds on non-reduced random inputs, and the results are only
+// guaranteed correct with properly bounded scalar inputs produced by the kernel
+// PRNG.
 #[cfg(all(test, target_os = "none"))]
 mod tests {
     use super::*;

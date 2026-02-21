@@ -321,7 +321,9 @@ mod tests {
         };
 
         // Should allow initial messages
-        assert!(RATE_LIMITER.check_allowed(ProcessId(1), 100, &limits).is_ok());
+        assert!(RATE_LIMITER
+            .check_allowed(ProcessId(1), 100, &limits)
+            .is_ok());
 
         // Get stats
         let stats = RATE_LIMITER.get_stats(ProcessId(1));

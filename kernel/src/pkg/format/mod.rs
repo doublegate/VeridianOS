@@ -177,8 +177,7 @@ impl PackageHeader {
 
 #[cfg(test)]
 mod tests {
-    use alloc::vec;
-    use alloc::vec::Vec;
+    use alloc::{vec, vec::Vec};
 
     use super::*;
 

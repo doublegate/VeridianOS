@@ -151,6 +151,7 @@ Phases 0 through 4 are complete. The kernel provides:
 
 ### What Comes Next
 
+- **Self-Hosting (Active)** -- Cross-compiled C binaries running on VeridianOS (`/bin/minimal` verified), 646 host-target unit tests passing with Codecov integration, multi-LOAD-segment ELF loading for `/bin/sh` in progress
 - **Phase 5: Performance Optimization** -- Sub-microsecond IPC, lock-free kernel paths, DPDK networking, NVMe optimization, profiling tools
 - **Phase 6: Advanced Features** -- Wayland compositor, desktop environment, multimedia, virtualization, cloud-native features, POSIX compatibility layer
 
@@ -184,7 +185,7 @@ Normative truth lives in this README and `docs/`.
 ### Prerequisites
 
 - Rust nightly-2025-11-15 or later
-- QEMU 8.0+ (for testing)
+- QEMU 9.0+ (10.2+ recommended; for testing)
 - 8GB RAM (16GB recommended)
 - 20GB free disk space
 
@@ -215,33 +216,23 @@ cargo build --target targets/x86_64-veridian.json \
     -p veridian-kernel \
     -Zbuild-std=core,compiler_builtins,alloc
 
-# Run in QEMU (x86_64 - requires UEFI disk image)
-# First build the UEFI image:
-./tools/build-bootimage.sh \
-    target/x86_64-veridian/debug/veridian-kernel \
-    target/x86_64-veridian/debug
-
-# Then boot with OVMF firmware:
-qemu-system-x86_64 \
-    -bios /usr/share/edk2/x64/OVMF.4m.fd \
-    -drive format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
-    -serial stdio \
-    -display none
+# Run in QEMU (x86_64 - UEFI boot, requires OVMF)
+# build-kernel.sh creates the UEFI disk image automatically
+qemu-system-x86_64 -enable-kvm \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
+    -drive id=disk0,if=none,format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
+    -device ide-hd,drive=disk0 \
+    -serial stdio -display none -m 256M
 
 # Run in QEMU (AArch64)
-qemu-system-aarch64 \
-    -M virt \
-    -cpu cortex-a57 \
+qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \
     -kernel target/aarch64-unknown-none/debug/veridian-kernel \
-    -serial stdio \
-    -display none
+    -serial stdio -display none
 
 # Run in QEMU (RISC-V)
-qemu-system-riscv64 \
-    -M virt \
+qemu-system-riscv64 -M virt -m 256M -bios default \
     -kernel target/riscv64gc-unknown-none-elf/debug/veridian-kernel \
-    -serial stdio \
-    -display none
+    -serial stdio -display none
 ```
 
 For detailed build instructions, see [BUILD-INSTRUCTIONS.md](docs/BUILD-INSTRUCTIONS.md).

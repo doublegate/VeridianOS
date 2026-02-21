@@ -677,8 +677,9 @@ impl VirtualAddressSpace {
                     self.heap_break.store(addr.0, Ordering::Release);
                 }
             } else if addr.0 < current && addr.0 >= heap_start {
-                // Shrink attempt: brk only grows, so ignore requests to decrease
-                // the break. Return current break unchanged.
+                // Shrink attempt: brk only grows, so ignore requests to
+                // decrease the break. Return current break
+                // unchanged.
             }
         }
 

@@ -1,3 +1,63 @@
+## [Unreleased]
+
+### CI/CD, Code Quality, and Shell Correctness Fixes
+
+5 commits since v0.4.9, 88 files changed, +792/-424 lines. Focuses on CI pipeline correctness (Codecov coverage, GitHub Pages deployment), shell pattern-matching compliance, and code formatting.
+
+---
+
+### Fixed
+
+#### Codecov Coverage: 0% to Real Data (3 commits)
+
+**GitHub Pages OIDC deployment 401** (`.github/workflows/ci.yml`)
+- Root cause: `actions/deploy-pages@v4` requires all three OIDC conditions: `permissions.pages: write`, `permissions.id-token: write`, AND `environment: { name: github-pages }`. The deploy-docs job was missing `contents: read` and the `environment:` block entirely, causing the OIDC token issuer to reject with HTTP 401.
+- Fix: Added `permissions.contents: read` and `environment: { name: github-pages, url: ... }` to the deploy-docs job.
+
+**Codecov always reporting 0%** (`.github/workflows/ci.yml`, `codecov.yml` NEW)
+- Root cause #1: `.cargo/config.toml` sets `target = "x86_64-unknown-none"` globally; the coverage job inherited this bare-metal target and tried to execute tests that require QEMU on an ubuntu-latest runner. Tests silently produced no data.
+- Root cause #2: `--workspace` pulled in seven bare-metal `[[test]]` entries (`basic_boot`, `ipc_integration_tests`, etc.) with `harness = false` and `#![no_std]` that cannot execute on a Linux host.
+- Root cause #3: Global `RUSTFLAGS: "-D warnings"` turned host-target dead-code warnings into compile errors before instrumentation.
+- Root cause #4: A `|| { echo "TN:\nend_of_record" > lcov.info }` fallback silently created an empty LCOV file, masking all failures.
+- Fix: Rewrote coverage step with `--lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu`, cleared RUSTFLAGS, removed silent fallback, added non-empty verification guard.
+- Created `codecov.yml` with `informational: true` status checks and ignore patterns for arch-specific stubs, test framework, and build tools.
+
+**Coverage "error: target was empty"** (`.github/workflows/ci.yml`)
+- Root cause: `CARGO_BUILD_TARGET=""` passed an empty string to cargo as `--target ''`, which cargo rejects.
+- Fix: Removed the env var override; pass `--target x86_64-unknown-linux-gnu` directly to `cargo llvm-cov`.
+
+#### Shell Glob and Parameter Expansion Pattern Matching (`kernel/src/services/shell/`)
+
+**`glob_match("*", "a/b")` incorrectly returned `true`** (`glob.rs`)
+- Root cause: The `*` backtracking algorithm in `glob_match_recursive` did not check whether the character being consumed by `*` was `/`. Per POSIX filename expansion, `*` must not match `/`.
+- Fix: Added `if txt[star_ti] == '/' { return false; }` guards at both backtrack sites (character-class branch and literal-mismatch branch).
+
+**Parameter expansion suffix/prefix removal failed for non-edge wildcards** (`expand.rs`)
+- Root cause: `remove_suffix_shortest/longest` and `remove_prefix_shortest/longest` only handled `*` at the start or end of the pattern (via `strip_prefix('*')` / `strip_suffix('*')`). Patterns like `.*` (star at end of suffix pattern) or `/*/` (star in middle) were not matched.
+- Fix: Added `pattern_match()` function implementing POSIX parameter expansion pattern matching (where `*` and `?` match any character including `/`). Rewrote all four removal functions to iterate over all possible suffix/prefix lengths using `pattern_match()`.
+- Impact: 5 test failures resolved; host-target test count now 646/646.
+
+### Added
+
+- `AGENTS.md` (NEW, 75 lines): Agent configuration for Codex/multi-agent development
+- `codecov.yml` (NEW, 42 lines): Codecov configuration with informational status checks
+- `docs/phase4-status-analysis.md` (NEW, 50 lines): Phase 4 implementation status analysis
+- `ref_docs/redox-capability-fd-bridge.md` (NEW, 51 lines): Research notes on Redox capability-fd bridging
+
+### Changed
+
+#### Code Formatting (`cargo fmt`, 10 files)
+
+Applied `rustfmt` formatting corrections across kernel source:
+- `crypto/asymmetric.rs`: Comment line-wrapping for 100-char width
+- `elf/mod.rs`, `fs/ramfs.rs`: Import grouping (extern crate before local imports)
+- `ipc/rate_limit.rs`, `ipc/shared_memory.rs`, `ipc/tests.rs`: Long-line wrapping for assert macros and constructor calls; import consolidation (`use crate::{ ipc::{ ... }, mm::..., process::... }`)
+- `mm/vas.rs`: Comment line-wrapping
+- `pkg/format/compression.rs`, `pkg/format/mod.rs`: Comment wrapping, import consolidation
+- `services/shell/redirect.rs`: Import consolidation
+
+---
+
 ## [0.4.9] - 2026-02-18
 
 ### Self-Hosting Infrastructure, Complete libc, and User-Space Execution Fixes

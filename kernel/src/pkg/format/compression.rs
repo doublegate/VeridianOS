@@ -339,7 +339,8 @@ mod zstd {
         output.push(0x20); // Single segment, content size present (1 byte, flag=0)
         output.push(input.len() as u8); // Content size (for small inputs)
 
-        // For larger inputs, use 4-byte content size (flag=2, bits 7-6 = 10: FHD = 0xA0)
+        // For larger inputs, use 4-byte content size (flag=2, bits 7-6 = 10: FHD =
+        // 0xA0)
         if input.len() > 255 {
             output[4] = 0xA0; // 4-byte content size, flag=2
             output.pop();

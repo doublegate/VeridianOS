@@ -36,8 +36,6 @@ target/
 # Build logs
 build_output.log
 
-# IDE (duplicate removed - already defined above)
-
 # Kernel images
 *.bin
 *.img
@@ -49,6 +47,7 @@ build_output.log
 # Coverage reports
 coverage/
 *.lcov
+lcov.info
 tarpaulin-report.html
 
 # Documentation build
@@ -170,7 +169,6 @@ worktrees/
 
 # ISO build artifacts
 iso_build/
-*.iso
 
 # Python build artifacts
 *.pyc
