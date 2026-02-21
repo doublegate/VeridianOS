@@ -100,9 +100,10 @@ jobs:
             - name: Check formatting
               run: cargo fmt --all -- --check
             - name: Run clippy
-              run: |
-                  cargo clippy --lib --all-features -- -D warnings ${{ env.CLIPPY_ALLOW }}
-                  cargo clippy --bins --all-features -- -D warnings ${{ env.CLIPPY_ALLOW }}
+              # Only check --lib here; main.rs has #[panic_handler] which conflicts
+              # with std's panic_impl on the host target. The bin target is already
+              # validated by the build-and-test job on all 3 bare-metal targets.
+              run: cargo clippy --lib --all-features -- -D warnings ${{ env.CLIPPY_ALLOW }}
 
     # Build and test for all architectures
     build-and-test:
