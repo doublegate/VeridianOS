@@ -3,6 +3,7 @@
 //! Provides a unidirectional byte stream between a writer and a reader.
 //! Used by the shell's `|` operator and the `pipe` syscall.
 
+// Kernel pipe objects -- exercised via shell pipe operator and pipe syscall
 #![allow(dead_code)]
 
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};

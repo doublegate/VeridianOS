@@ -436,7 +436,7 @@ impl VirtualAddressSpace {
             // Flush entire TLB since we destroyed the whole address space
             crate::arch::tlb_flush_all();
 
-            // TODO(future): Free page table structures themselves by walking
+            // TODO(phase5): Free page table structures themselves by walking
             // the hierarchy and freeing intermediate table pages.
         }
     }
@@ -871,7 +871,7 @@ impl VirtualAddressSpace {
         self.next_mmap_addr
             .store(0x4000_0000_0000, Ordering::Release);
 
-        // TODO(future): Free page table structures
+        // TODO(phase5): Free page table structures
     }
 
     /// Clear user-space mappings only (for exec)

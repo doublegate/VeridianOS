@@ -144,7 +144,7 @@ impl VfsNode for RamNode {
         entries.push(DirEntry {
             name: String::from(".."),
             node_type: NodeType::Directory,
-            inode: self.inode, // TODO(future): Track parent inode for proper ".." entries
+            inode: self.inode, // TODO(phase5): Track parent inode for proper ".." entries
         });
 
         // Add children

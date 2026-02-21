@@ -3,6 +3,7 @@
 //! Provides efficient data transfer between processes without copying by
 //! remapping pages and using shared memory regions.
 
+// Zero-copy IPC -- exercised for large data transfers
 #![allow(dead_code)]
 
 #[cfg(feature = "alloc")]
@@ -271,7 +272,7 @@ pub fn grant_transfer_capability(
     _region_id: u64,
     _permissions: Permission,
 ) -> Result<u64> {
-    // TODO(future): Create transfer capability via capability system integration
+    // TODO(phase5): Create transfer capability via capability system integration
     Ok(0)
 }
 

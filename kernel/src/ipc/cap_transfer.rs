@@ -74,7 +74,7 @@ pub fn transfer_capability(
 ///
 /// This function should be called when a process receives an IPC message
 /// to properly handle any transferred capabilities.
-#[allow(dead_code)]
+#[allow(dead_code)] // IPC capability transfer API
 pub fn receive_capability(
     msg: &Message,
     receiver_cap_space: &CapabilitySpace,
@@ -103,7 +103,7 @@ pub fn receive_capability(
 ///
 /// This allows the original owner to revoke a capability they previously
 /// granted through IPC.
-#[allow(dead_code)]
+#[allow(dead_code)] // IPC capability revocation API
 pub fn revoke_transferred_capability(
     cap_token: CapabilityToken,
     owner_cap_space: &CapabilitySpace,

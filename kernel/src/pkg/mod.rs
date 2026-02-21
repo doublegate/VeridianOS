@@ -914,7 +914,7 @@ fn verify_dilithium_signature(message: &[u8], signature: &[u8], public_key: &[u8
         return false;
     }
 
-    // TODO(future): Full Dilithium algebraic verification:
+    // TODO(phase5): Full Dilithium algebraic verification:
     // 1. Decode public key (rho, t1)
     // 2. Decode signature (c_tilde, z, h)
     // 3. Compute A from rho using SHAKE-128
@@ -1058,7 +1058,7 @@ fn parse_version(version_str: &str) -> Version {
 ///
 /// Phase 4 (package ecosystem) -- struct fields used during extraction
 /// but not directly accessed outside `extract_package_files`.
-#[allow(dead_code)]
+#[allow(dead_code)] // Package format documentation struct -- fields describe archive layout
 struct PackageFileEntry {
     path: String,
     size: u64,

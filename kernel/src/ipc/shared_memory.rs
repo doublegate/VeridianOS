@@ -3,6 +3,7 @@
 //! Provides high-performance shared memory regions for large data transfers
 //! between processes without copying.
 
+// Shared memory IPC -- used for zero-copy large transfers
 #![allow(dead_code)]
 
 #[cfg(feature = "alloc")]
@@ -453,7 +454,7 @@ pub fn zero_copy_transfer(
     _to_process: ProcessId,
     _manager: &SharedMemoryManager,
 ) -> Result<()> {
-    // TODO(future): Implement zero-copy transfer (capability validation, page
+    // TODO(phase5): Implement zero-copy transfer (capability validation, page
     // remap, TLB flush)
 
     Ok(())

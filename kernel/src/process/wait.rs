@@ -3,6 +3,7 @@
 //! Provides `waitpid`-style semantics for parent processes to wait on children.
 //! Implements a global wait queue with notification and zombie collection.
 
+// waitpid infrastructure -- exercised via SYS_WAIT syscall
 #![allow(dead_code)]
 
 #[cfg(feature = "alloc")]

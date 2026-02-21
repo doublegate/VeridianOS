@@ -313,7 +313,7 @@ pub mod io {
     /// Fields are accessed through raw pointer dereference in the io module's
     /// read/write/seek/close functions, so the compiler cannot see direct
     /// usage.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Fields accessed via raw pointer dereference
     pub struct File {
         node: Arc<dyn crate::fs::VfsNode>,
         position: usize,

@@ -45,6 +45,7 @@
 //!
 //! For the MMIO register layout, see [`mmio`].
 
+// Virtio transport layer -- PCI and MMIO backends for device drivers
 #![allow(dead_code)]
 
 pub mod blk;

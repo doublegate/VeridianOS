@@ -2,9 +2,8 @@
 //!
 //! High-performance storage driver for NVMe SSDs using the BlockDevice trait.
 
-// Hardware register offsets, command opcodes, and queue structures are defined
-// per the NVMe specification. Many are retained for completeness even if the
-// current stub driver only uses a subset.
+// Future-phase driver: NVMe hardware register offsets, command opcodes, and
+// queue structures defined per the NVMe specification. Retained for completeness.
 #![allow(dead_code)]
 
 use alloc::{vec, vec::Vec};
@@ -268,7 +267,7 @@ impl NvmeController {
 
     /// Submit command to admin queue (stub)
     fn submit_admin_command(&mut self, _cmd: SubmissionQueueEntry) -> Result<(), KernelError> {
-        // TODO(future): Implement NVMe admin command submission with doorbell ringing
+        // TODO(phase6): Implement NVMe admin command submission with doorbell ringing
         Ok(())
     }
 
@@ -278,7 +277,7 @@ impl NvmeController {
         _start_block: u64,
         _buffer: &mut [u8],
     ) -> Result<(), KernelError> {
-        // TODO(future): Implement NVMe read: create I/O command, submit, wait, copy
+        // TODO(phase6): Implement NVMe read: create I/O command, submit, wait, copy
         // from DMA
 
         Ok(())
@@ -290,7 +289,7 @@ impl NvmeController {
         _start_block: u64,
         _buffer: &[u8],
     ) -> Result<(), KernelError> {
-        // TODO(future): Implement NVMe write: copy to DMA, create I/O command, submit,
+        // TODO(phase6): Implement NVMe write: copy to DMA, create I/O command, submit,
         // wait
 
         Ok(())

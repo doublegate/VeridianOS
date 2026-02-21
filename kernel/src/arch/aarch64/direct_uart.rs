@@ -7,7 +7,7 @@
 use core::fmt;
 
 /// UART base address for QEMU virt machine
-#[allow(dead_code)]
+#[allow(dead_code)] // Hardware constant -- address used in assembly below
 const UART0_BASE: usize = 0x0900_0000;
 
 /// Write bytes to UART using pure assembly - avoiding all Rust constructs

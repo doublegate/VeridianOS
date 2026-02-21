@@ -3,6 +3,7 @@
 //! Implements a hybrid allocator combining bitmap (for small allocations)
 //! and buddy system (for large allocations) with NUMA awareness.
 
+// Frame allocator -- bitmap+buddy hybrid, exercised during boot and page fault
 #![allow(dead_code)]
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};

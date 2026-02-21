@@ -3,6 +3,7 @@
 //! Handles parsing and processing of memory maps from various bootloaders
 //! (GRUB, UEFI, custom bootloader, etc.)
 
+// Bootloader memory map integration -- used during early boot
 #![allow(dead_code)]
 
 use super::{

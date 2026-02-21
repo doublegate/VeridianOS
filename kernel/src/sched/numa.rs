@@ -58,7 +58,7 @@ impl NumaTopology {
 
     /// Detect NUMA topology from hardware
     pub fn detect() -> Self {
-        // TODO(future): Query ACPI SRAT/SLIT tables for actual topology
+        // TODO(phase5): Query ACPI SRAT/SLIT tables for actual topology
         // For now, assume single-node UMA system
 
         let mut topo = Self::new();
@@ -73,7 +73,7 @@ impl NumaTopology {
         }
         topo.cpus_per_node.push(cpus);
 
-        // TODO(future): Query actual memory from ACPI SRAT tables or firmware.
+        // TODO(phase5): Query actual memory from ACPI SRAT tables or firmware.
         // Default to 16 GB when hardware topology is unavailable.
         topo.memory_per_node.push(16 * 1024 * 1024 * 1024); // 16 GB
 
@@ -285,7 +285,7 @@ impl NumaScheduler {
 
 /// Detect number of CPUs in the system
 fn detect_cpu_count() -> u32 {
-    // TODO(future): Query ACPI MADT table for actual CPU count
+    // TODO(phase5): Query ACPI MADT table for actual CPU count
     // For now, assume 8 CPUs
     8
 }

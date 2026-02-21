@@ -287,7 +287,63 @@ trait Profiler {
 - [Intel Optimization Manual](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html)
 - [ARM Optimization Guide](https://developer.arm.com/documentation/102234/latest/)
 
+## From Code Audit
+
+The following items were recategorized from `TODO(future)` to `TODO(phase5)` based on their content (performance optimization, memory management, scheduler, IPC fast path, allocator improvements, NUMA, cache, lock-free).
+
+### IPC Optimization
+- `ipc/channel.rs` - Direct context switch to receiver for <5us latency
+- `ipc/channel.rs` - Block current process and yield CPU until message arrives
+- `ipc/channel.rs` - Wake up any waiting receivers
+- `ipc/channel.rs` - Wake up all waiting processes with error and clean up
+- `ipc/channel.rs` - O(1) capability validation + direct register transfer
+- `ipc/channel.rs` - Implement call/reply semantics (send, block, return reply)
+- `ipc/fast_path.rs` - Direct process switch via scheduler
+- `ipc/fast_path.rs` - Read from current task's saved IPC register set
+- `ipc/fast_path.rs` - O(1) capability lookup from per-CPU cache
+- `ipc/fast_path.rs` - Check message queue for pending messages
+- `ipc/fast_path.rs` - Scheduler yield with optional timeout
+- `ipc/rpc.rs` - Optimize service dispatch with direct method_id lookup
+- `ipc/sync.rs` - Verify capability is for the specific endpoint_id
+- `ipc/shared_memory.rs` - Implement zero-copy transfer (capability validation, page remap, TLB flush)
+- `ipc/zero_copy.rs` - Create transfer capability via capability system integration
+
+### Memory Management
+- `mm/vas.rs` - Free page table structures by walking hierarchy (2 instances)
+- `mm/page_table.rs` - TLB flush after unmap
+- `mm/user_validation.rs` - Get page table from process memory space
+- `arch/x86_64/mmu.rs` - Set up dedicated kernel page tables
+- `arch/x86_64/mmu.rs` - Proper page fault handling (stack growth, heap, COW)
+- `process/memory.rs` - Actually allocate/free pages via VMM for heap expansion
+- `syscall/mod.rs` - Get actual physical address from VMM
+- `syscall/mod.rs` - Implement actual memory mapping with VMM
+
+### Scheduler and Process Management
+- `sched/numa.rs` - Query ACPI SRAT/SLIT tables for actual NUMA topology
+- `sched/numa.rs` - Query actual memory from ACPI SRAT tables or firmware
+- `sched/numa.rs` - Query ACPI MADT table for actual CPU count
+- `sched/task_management.rs` - Allocate stack for new task
+- `sched/task_management.rs` - Create page table for new task
+- `sched/task_management.rs` - Add to task table
+- `sched/task_management.rs` - Remove from ready queue
+- `sched/task_management.rs` - Remove from wait queue
+- `process/sync.rs` - Add thread to scheduler run queue (2 instances)
+- `arch/x86_64/context.rs` - Set up kernel stack in TSS for ring transitions
+- `arch/x86_64/context.rs` - Return kernel stack pointer from TSS
+- `arch/x86_64/context.rs` - Set kernel stack in TSS for ring transitions
+
+### Filesystem and Infrastructure
+- `fs/mod.rs` - Move CWD to per-process data
+- `fs/ramfs.rs` - Track parent inode for proper ".." entries
+- `pkg/sdk/pkg_config.rs` - Query VFS for pkgconfig files
+- `services/shell/expand.rs` - Full stdout capture requires process pipe infrastructure
+
+### Security and Crypto
+- `security/tpm.rs` - Map TPM MMIO page via VMM before probing
+- `crypto/keystore.rs` - Get actual system time from clock subsystem
+- `pkg/mod.rs` - Full Dilithium algebraic verification
+
 ---
 
-**Previous Phase**: [Phase 4 - Package Ecosystem](PHASE4_TODO.md)  
+**Previous Phase**: [Phase 4 - Package Ecosystem](PHASE4_TODO.md)
 **Next Phase**: [Phase 6 - Advanced Features](PHASE6_TODO.md)

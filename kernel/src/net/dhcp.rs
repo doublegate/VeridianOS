@@ -332,14 +332,14 @@ impl DhcpClient {
 
     /// Process DHCP OFFER
     pub fn process_offer(&mut self, _packet: &DhcpPacket) -> Result<(), KernelError> {
-        // TODO(future): Parse DHCP offer options to extract IP and server ID
+        // TODO(phase6): Parse DHCP offer options to extract IP and server ID
         self.state = DhcpState::Requesting;
         Ok(())
     }
 
     /// Process DHCP ACK
     pub fn process_ack(&mut self, _packet: &DhcpPacket) -> Result<(), KernelError> {
-        // TODO(future): Parse ACK options and configure network interface
+        // TODO(phase6): Parse ACK options and configure network interface
         self.state = DhcpState::Bound;
 
         println!("[DHCP] Received ACK - IP address configured");
@@ -359,7 +359,7 @@ impl DhcpClient {
         let discover = self.create_discover();
         let _discover_bytes = discover.to_bytes();
 
-        // TODO(future): Send DISCOVER via UDP broadcast to 255.255.255.255:67
+        // TODO(phase6): Send DISCOVER via UDP broadcast to 255.255.255.255:67
         println!("[DHCP] Sending DISCOVER ({} bytes)", _discover_bytes.len());
 
         self.state = DhcpState::Selecting;

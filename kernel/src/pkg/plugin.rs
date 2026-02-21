@@ -8,6 +8,7 @@
 //! This module defines the type-safe contract, state machine, and plugin
 //! registry that the kernel uses to manage plugin metadata.
 
+// Plugin contract types -- see NOTE above
 #![allow(dead_code)]
 
 #[cfg(feature = "alloc")]

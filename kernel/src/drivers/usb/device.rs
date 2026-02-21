@@ -25,7 +25,7 @@ pub enum UsbSpeed {
 }
 
 /// USB device classes
-#[allow(dead_code)]
+#[allow(dead_code)] // Hardware constants per USB specification
 pub mod usb_classes {
     pub const AUDIO: u8 = 0x01;
     pub const CDC: u8 = 0x02; // Communications and CDC Control

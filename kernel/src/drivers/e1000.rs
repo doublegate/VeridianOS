@@ -3,9 +3,8 @@
 //! This driver supports the Intel E1000 Gigabit Ethernet controller,
 //! commonly found in QEMU and VirtualBox virtual machines.
 
-// Hardware register offsets, descriptor structs, and initialization constants
-// are defined per the Intel E1000 specification. Many are retained for
-// completeness even if the current driver only uses a subset.
+// Future-phase driver: Intel E1000 hardware register offsets and descriptor
+// structs defined per the Intel E1000 specification. Retained for completeness.
 #![allow(dead_code)]
 
 use crate::{

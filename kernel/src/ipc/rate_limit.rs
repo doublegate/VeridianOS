@@ -3,6 +3,7 @@
 //! Provides rate limiting for IPC operations to prevent DoS attacks
 //! and ensure fair resource usage.
 
+// IPC rate limiting -- DoS prevention for IPC operations
 #![allow(dead_code)]
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};

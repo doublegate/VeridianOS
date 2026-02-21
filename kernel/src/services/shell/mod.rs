@@ -998,7 +998,7 @@ impl Shell {
     ///
     /// Dispatches to the appropriate handler based on the signal number.
     /// Uses POSIX signal constants from `crate::process::exit::signals`.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Signal handling -- wired when job control is fully active
     fn handle_signal(&self, signum: i32) {
         use crate::process::exit::signals;
 

@@ -3,6 +3,7 @@
 //! Complete virtual memory management for VeridianOS with proper page table
 //! support.
 
+// Virtual memory manager -- process address space management
 #![allow(dead_code)]
 
 use super::{

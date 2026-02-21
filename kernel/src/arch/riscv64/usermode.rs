@@ -93,7 +93,7 @@ pub fn try_enter_usermode() -> Result<(), crate::error::KernelError> {
 ///   mappings
 /// - stvec must be configured for U-mode ecall handling
 /// - sscratch must contain the kernel stack pointer
-#[allow(dead_code)]
+#[allow(dead_code)] // User-space transition API -- used when user processes are launched
 pub unsafe fn enter_usermode(entry_point: u64, user_stack: u64, kernel_sp: u64) -> ! {
     asm!(
         // Save kernel stack pointer in sscratch for ecall handler

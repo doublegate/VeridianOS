@@ -355,7 +355,7 @@ Currently no low priority issues.
 - **Verified**: 18
 - **Closed**: 0
 
-### Current Architecture Boot Status (v0.4.9)
+### Current Architecture Boot Status (v0.5.0)
 - **x86_64**: Stage 6 BOOTOK, 29/29 tests, zero warnings, interactive shell, /bin/minimal executes
 - **AArch64**: Stage 6 BOOTOK, 29/29 tests, zero warnings, interactive shell
 - **RISC-V**: Stage 6 BOOTOK, 29/29 tests, zero warnings, interactive shell

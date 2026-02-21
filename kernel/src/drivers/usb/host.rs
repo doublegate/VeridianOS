@@ -51,8 +51,8 @@ pub trait UsbHostController: Send + Sync {
     fn set_device_address(&mut self, old_address: u8, new_address: u8) -> Result<(), KernelError>;
 }
 
-/// UHCI register offsets
-#[allow(dead_code)]
+/// UHCI register offsets (per USB UHCI specification)
+#[allow(dead_code)] // Hardware register definitions
 mod uhci_regs {
     pub const USBCMD: u16 = 0x00; // USB Command Register
     pub const USBSTS: u16 = 0x02; // USB Status Register
@@ -165,7 +165,7 @@ impl UhciController {
     /// Read a 32-bit register
     /// Completes the register-width API alongside
     /// read_reg16/write_reg16/write_reg32.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Register-width API completeness
     #[cfg(target_arch = "x86_64")]
     fn read_reg32(&self, offset: u16) -> u32 {
         use crate::arch::x86_64::inl;
@@ -175,7 +175,7 @@ impl UhciController {
 
     /// Completes the register-width API alongside
     /// read_reg16/write_reg16/write_reg32.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Register-width API completeness
     #[cfg(not(target_arch = "x86_64"))]
     fn read_reg32(&self, offset: u16) -> u32 {
         let addr = (self.base_address as usize) + (offset as usize);

@@ -96,7 +96,7 @@ pub fn try_enter_usermode() -> Result<(), crate::error::KernelError> {
 /// - `user_stack` must be a valid user-space stack address, 16-byte aligned
 /// - TTBR0_EL1 must point to page tables with User-accessible mappings
 /// - VBAR_EL1 must be configured for EL0 exception handling
-#[allow(dead_code)]
+#[allow(dead_code)] // User-space transition API -- used when user processes are launched
 pub unsafe fn enter_usermode(entry_point: u64, user_stack: u64) -> ! {
     // Set SPSR_EL1: return to EL0t (EL0 using SP_EL0)
     // Bits: M[3:0]=0b0000 (EL0t), DAIF cleared (interrupts enabled)

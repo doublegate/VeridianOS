@@ -7,7 +7,7 @@ pub type Result<T> = core::result::Result<T, IpcError>;
 
 /// IPC error types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
+#[allow(dead_code)] // Public error enum -- variants used across IPC subsystem
 pub enum IpcError {
     /// Invalid or revoked capability
     InvalidCapability,
@@ -67,7 +67,7 @@ impl IpcError {
     }
 
     /// Convert error to a numeric code for system calls
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Syscall interface API
     pub fn to_errno(self) -> i32 {
         match self {
             Self::InvalidCapability => -1,

@@ -7,7 +7,7 @@
 use core::fmt;
 
 pub struct Uart16550Compat {
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Stored for future direct MMIO access (currently uses SBI)
     base_addr: usize,
 }
 

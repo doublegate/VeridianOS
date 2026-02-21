@@ -2,17 +2,17 @@
 
 VeridianOS is a research microkernel operating system written in Rust, strictly prioritizing **correctness, isolation, and explicit architectural invariants**. It demonstrates how capability-based security, strong isolation boundaries, and disciplined `unsafe` code usage can create a resilient system.
 
-## 1. Current Status & Roadmap (v0.4.9)
+## 1. Current Status & Roadmap (v0.5.0)
 
 -   **Phase 4 (Package Ecosystem)**: **COMPLETE**. Includes package manager, SDK, and repository infra.
 -   **Phase 4.5 (Interactive Shell - vsh)**: **COMPLETE**. Tri-architecture shell prompt (`root@veridian:/#`) is operational.
 -   **Phase 5 (Performance Optimization)**: **IN PROGRESS (~10%)**. Focus is on kernel memory management, scheduler tuning, and IPC optimization.
 -   **Phase 6 (Advanced Features)**: **PLANNED (~5%)**. GUI, advanced drivers, virtualization.
 
-**Latest Release (v0.4.9 - Feb 18, 2026):**
--   **Self-hosting Infrastructure**: Tiers 0-5 complete, including virtio-blk driver and TAR rootfs loader.
--   **System Stability**: Fixed user-space execution GP faults, removed CR3 switching for ~2000 cycle syscall savings.
--   **Graphics**: Framebuffer console (fbcon) with glyph cache, pixel ring buffer, and x86_64 PAT (Write-Combining) support.
+**Latest Release (v0.5.0 - Feb 21, 2026):**
+-   **Self-hosting Toolchain Complete**: Tiers 0-7 all complete -- Rust targets, std port, native GCC 14.2, make/ninja, vpkg.
+-   **User-Space Foundation**: Fixed exec return path (iretq), fork verification, fd 0/1/2 auto-open, console blocking read, shell bootstrap.
+-   **Code Quality**: dead_code audit with justification comments, TODO(future) recategorized to phase5/phase6.
 
 ## 2. Architectural Invariants (Non-Negotiable)
 

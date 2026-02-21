@@ -62,7 +62,7 @@ impl WaitQueue {
             if let Some(process) = super::table::get_process(pid) {
                 if let Some(thread) = process.get_thread(tid) {
                     thread.set_state(super::thread::ThreadState::Ready);
-                    // TODO(future): Add thread to scheduler run queue
+                    // TODO(phase5): Add thread to scheduler run queue
                     return true;
                 }
             }
@@ -79,7 +79,7 @@ impl WaitQueue {
             if let Some(process) = super::table::get_process(pid) {
                 if let Some(thread) = process.get_thread(tid) {
                     thread.set_state(super::thread::ThreadState::Ready);
-                    // TODO(future): Add thread to scheduler run queue
+                    // TODO(phase5): Add thread to scheduler run queue
                     count += 1;
                 }
             }

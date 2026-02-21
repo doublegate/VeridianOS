@@ -12,6 +12,7 @@
 //!
 //! All share the same semantic layout (see `IPC_REG_*` constants below).
 
+// Fast-path IPC -- register-based transfer for <5us latency
 #![allow(dead_code)]
 
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -72,7 +73,7 @@ pub fn fast_send(msg: &SmallMessage, target_pid: u64) -> Result<()> {
 
         // Wake up receiver and switch to it
         target.state = ProcessState::Ready;
-        // TODO(future): Implement direct process switch via scheduler
+        // TODO(phase5): Implement direct process switch via scheduler
 
         // Update performance counters
         let elapsed = read_timestamp() - start;
@@ -104,7 +105,7 @@ pub fn fast_receive(endpoint: u64, timeout: Option<u64>) -> Result<SmallMessage>
     yield_and_wait(timeout)?;
 
     // When we wake up, message should be in our IPC register context.
-    // TODO(future): Read from the current task's saved IPC register set
+    // TODO(phase5): Read from the current task's saved IPC register set
     // once per-task IpcRegs storage is implemented.
     let regs = IpcRegs::default();
     Ok(read_message_from_regs(&regs))
@@ -113,7 +114,7 @@ pub fn fast_receive(endpoint: u64, timeout: Option<u64>) -> Result<SmallMessage>
 /// Fast capability validation using cached lookups
 #[inline(always)]
 fn validate_capability_fast(cap: u64) -> bool {
-    // TODO(future): Implement O(1) capability lookup from per-CPU cache
+    // TODO(phase5): Implement O(1) capability lookup from per-CPU cache
     cap != 0 && cap < 0x10000
 }
 
@@ -165,18 +166,17 @@ fn read_message_from_regs(regs: &IpcRegs) -> SmallMessage {
 
 /// Check for pending messages without blocking
 fn check_pending_message(_endpoint: u64) -> Option<SmallMessage> {
-    // TODO(future): Check message queue for pending messages
+    // TODO(phase5): Check message queue for pending messages
     None
 }
 
 /// Yield CPU and wait for message or timeout
 fn yield_and_wait(_timeout: Option<u64>) -> Result<()> {
-    // TODO(future): Implement scheduler yield with optional timeout
+    // TODO(phase5): Implement scheduler yield with optional timeout
     Ok(())
 }
 
-// Placeholder process type for fast-path IPC
-#[allow(dead_code)]
+// Placeholder process type for fast-path IPC (Sprint G-4)
 struct Process {
     pid: u64,
     state: ProcessState,

@@ -101,8 +101,7 @@ pub fn disable_interrupts() -> impl Drop {
 }
 
 /// Serial initialization for compatibility with the arch-generic interface.
-/// Not currently called on AArch64 (serial is initialized differently).
-#[allow(dead_code)]
+#[allow(dead_code)] // Arch-generic interface -- AArch64 serial initialized differently
 pub fn serial_init() -> crate::serial::Pl011Uart {
     crate::serial::Pl011Uart::new(0x0900_0000)
 }

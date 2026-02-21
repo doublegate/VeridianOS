@@ -1,6 +1,6 @@
 # VeridianOS Self-Hosting Status
 
-Last updated: February 21, 2026 (post-v0.4.9, Tier 6 complete)
+Last updated: February 21, 2026 (v0.5.0, Tiers 0-7 complete)
 
 ## Definition
 
@@ -13,11 +13,10 @@ operating system. For VeridianOS, full self-hosting means:
 3. The build system (cargo, make, cmake) runs natively
 4. Source code can be edited and stored persistently on-disk
 
-## Current Status: Tiers 0-6 Complete, Tier 7 In Progress
+## Current Status: Tiers 0-7 COMPLETE
 
-As of v0.4.9+, VeridianOS has completed all prerequisite infrastructure for
-self-hosting (Tiers 0-6) and is actively implementing the self-hosting loop
-(Tier 7).
+As of v0.5.0, VeridianOS has completed all self-hosting infrastructure
+(Tiers 0-7) including the full self-hosting loop.
 
 ### Tier Completion Summary
 
@@ -30,7 +29,7 @@ self-hosting (Tiers 0-6) and is actively implementing the self-hosting loop
 | 4 | User-space foundation | COMPLETE | User-space shell, libm, wait queues, SIGCHLD |
 | 5 | Cross-compiler | COMPLETE | binutils 2.43 + GCC 14.2 Stage 2 + libgcc |
 | 6 | Platform completeness | COMPLETE | ELF multi-LOAD, readlink, signals, MMIO, threads |
-| 7 | Self-hosting loop | IN PROGRESS | Rust targets, std port, native GCC, make/ninja, vpkg |
+| 7 | Self-hosting loop | COMPLETE | Rust targets, std port, native GCC, make/ninja, vpkg |
 
 ### What Works Today
 

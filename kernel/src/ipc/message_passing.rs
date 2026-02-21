@@ -3,6 +3,7 @@
 //! This module provides the core message passing functionality between
 //! processes, including message queues, delivery, and process synchronization.
 
+// Core message passing -- exercised via syscall IPC paths
 #![allow(dead_code)]
 
 #[cfg(feature = "alloc")]

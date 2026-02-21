@@ -207,7 +207,7 @@ impl RpcServer {
                     params.push(((value >> (i * 8)) & 0xFF) as u8);
                 }
 
-                // TODO(future): Optimize service dispatch with direct method_id lookup
+                // TODO(phase5): Optimize service dispatch with direct method_id lookup
                 let services = self.services.read();
 
                 // Find service that handles this method

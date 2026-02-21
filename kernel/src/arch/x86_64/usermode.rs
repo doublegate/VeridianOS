@@ -310,7 +310,7 @@ static PHYS_OFFSET: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU6
 ///
 /// Used by kernel subsystems that need to convert physical addresses to
 /// virtual addresses after the initial user-mode setup.
-#[allow(dead_code)]
+#[allow(dead_code)] // Helper for phys_to_virt below
 fn phys_offset() -> u64 {
     PHYS_OFFSET.load(core::sync::atomic::Ordering::Relaxed)
 }
@@ -321,7 +321,7 @@ fn phys_offset() -> u64 {
 /// Returns `None` if the physical memory offset has not been initialized.
 /// Used by kernel subsystems that need to access physical memory after
 /// the initial user-mode setup.
-#[allow(dead_code)]
+#[allow(dead_code)] // Physical-to-virtual conversion for page table manipulation
 fn phys_to_virt(phys: u64) -> Option<u64> {
     let offset = phys_offset();
     if offset == 0 {

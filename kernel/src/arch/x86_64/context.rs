@@ -125,7 +125,7 @@ impl X86_64Context {
     /// interrupts (RFLAGS IF bit). The CR3 is set to the current page table
     /// so the process initially shares the kernel's address space (with
     /// user-accessible mappings added separately).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // User-space process creation API
     pub fn new_user(entry_point: usize, stack_pointer: usize) -> Self {
         Self {
             // Clear all general purpose registers
@@ -186,7 +186,7 @@ impl crate::arch::context::ThreadContext for X86_64Context {
     fn init(&mut self, entry_point: usize, stack_pointer: usize, _kernel_stack: usize) {
         self.rip = entry_point as u64;
         self.rsp = stack_pointer as u64;
-        // TODO(future): Set up kernel stack in TSS for ring transitions
+        // TODO(phase5): Set up kernel stack in TSS for ring transitions
     }
 
     fn get_instruction_pointer(&self) -> usize {
@@ -214,12 +214,12 @@ impl crate::arch::context::ThreadContext for X86_64Context {
     }
 
     fn get_kernel_stack(&self) -> usize {
-        // TODO(future): Return kernel stack pointer from TSS
+        // TODO(phase5): Return kernel stack pointer from TSS
         0
     }
 
     fn set_kernel_stack(&mut self, _sp: usize) {
-        // TODO(future): Set kernel stack in TSS for ring transitions
+        // TODO(phase5): Set kernel stack in TSS for ring transitions
     }
 
     fn set_return_value(&mut self, value: usize) {
@@ -413,7 +413,7 @@ pub fn init_fpu() {
 }
 
 /// Check if CPU supports XSAVE
-#[allow(dead_code)]
+#[allow(dead_code)] // CPU feature detection API -- used when extended state mgmt is enabled
 pub fn has_xsave() -> bool {
     // SAFETY: CPUID with leaf 1 is always valid on x86_64. We check
     // bit 26 of ECX (XSAVE feature flag). The push/pop of RBX is
@@ -436,7 +436,7 @@ pub fn has_xsave() -> bool {
 }
 
 /// Enable XSAVE if supported
-#[allow(dead_code)]
+#[allow(dead_code)] // CPU feature detection API -- used when extended state mgmt is enabled
 pub fn enable_xsave() {
     if has_xsave() {
         // SAFETY: XSAVE support was verified by has_xsave() above.

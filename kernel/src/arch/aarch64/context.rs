@@ -358,7 +358,7 @@ pub fn restore_fpu_state(state: &FpuState) {
 }
 
 /// Check if CPU supports SVE
-#[allow(dead_code)]
+#[allow(dead_code)] // CPU feature detection API
 pub fn has_sve() -> bool {
     // SAFETY: Reading ID_AA64PFR0_EL1 is a read-only operation that reports
     // processor feature information. Bits [35:32] indicate SVE support.
@@ -370,7 +370,7 @@ pub fn has_sve() -> bool {
 }
 
 /// Enable SVE if supported
-#[allow(dead_code)]
+#[allow(dead_code)] // CPU feature detection API
 pub fn enable_sve() {
     if has_sve() {
         // SAFETY: Sets the ZEN field in CPACR_EL1 to enable SVE access from EL1.
@@ -389,7 +389,7 @@ pub fn enable_sve() {
 }
 
 /// Get current exception level
-#[allow(dead_code)]
+#[allow(dead_code)] // CPU feature detection API
 pub fn current_el() -> u8 {
     // SAFETY: Reading CurrentEL is a read-only operation that returns the
     // current exception level. Bits [3:2] encode the EL (0-3). Always accessible.

@@ -250,7 +250,7 @@ pub struct Vfs {
     mounts: BTreeMap<String, Arc<dyn Filesystem>>,
 
     /// Current working directory for processes
-    /// TODO(future): Move this to per-process data
+    /// TODO(phase5): Move this to per-process data
     cwd: String,
 }
 
@@ -675,7 +675,7 @@ pub fn init() {
                     if let Ok(f) = etc.create("os-release", Permissions::default()) {
                         f.write(
                             0,
-                            b"NAME=\"VeridianOS\"\nVERSION=\"0.4.8\"\nID=veridian\nPRETTY_NAME=\"VeridianOS v0.4.8\"\n",
+                            b"NAME=\"VeridianOS\"\nVERSION=\"0.5.0\"\nID=veridian\nPRETTY_NAME=\"VeridianOS v0.5.0\"\n",
                         )
                         .ok();
                     }

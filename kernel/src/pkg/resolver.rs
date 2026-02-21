@@ -466,7 +466,7 @@ impl SatSolver {
 /// Fields `package_id`, `version`, and `provides` are stored for metadata
 /// lookup and virtual-package resolution during dependency encoding.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[allow(dead_code)] // SAT resolver internal state -- fields used during dependency encoding
 struct Candidate {
     package_id: PackageId,
     version: Version,

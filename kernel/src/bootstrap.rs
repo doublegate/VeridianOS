@@ -185,6 +185,42 @@ extern "C" fn kernel_init_stage3_onwards() -> ! {
     // to a 1280x800 framebuffer is too slow in QEMU's emulated CPU).
     graphics::fbcon::enable_output();
 
+    // Attempt to run /bin/sh in Ring 3 (x86_64 only).
+    // If the user-space shell exits or fails to load, fall back to the
+    // kernel-space shell. AArch64/RISC-V lack user-mode entry support
+    // and always use the kernel shell.
+    #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+    {
+        let vfs = crate::fs::get_vfs().read();
+        if vfs.resolve_path("/bin/sh").is_ok() {
+            drop(vfs);
+            kprintln!("[BOOTSTRAP] Attempting user-space shell (/bin/sh)...");
+            match crate::userspace::load_user_program(
+                "/bin/sh",
+                &["sh"],
+                &["PATH=/bin:/usr/bin", "HOME=/", "TERM=veridian"],
+            ) {
+                Ok(pid) => {
+                    kprintln!(
+                        "[BOOTSTRAP] /bin/sh loaded (pid={}), entering Ring 3",
+                        pid.0
+                    );
+                    run_user_process(pid);
+                    kprintln!("[BOOTSTRAP] User shell exited, falling back to kernel shell");
+                }
+                Err(e) => {
+                    kprintln!(
+                        "[BOOTSTRAP] /bin/sh load failed: {:?}, using kernel shell",
+                        e
+                    );
+                }
+            }
+        } else {
+            drop(vfs);
+            kprintln!("[BOOTSTRAP] /bin/sh not in VFS, using kernel shell");
+        }
+    }
+
     // Launch the interactive kernel shell (never returns).
     // The shell provides a serial console REPL for all 3 architectures.
     #[cfg(feature = "alloc")]
@@ -683,9 +719,61 @@ fn test_user_binary_load() {
         }
     }
 
-    kprintln!("[EXEC-TEST] First test returned, trying /bin/sh...");
+    kprintln!("[EXEC-TEST] First test returned, trying /bin/fork_test...");
 
-    // Test 2: /bin/sh (shell with command execution)
+    // Test 2: /bin/fork_test (fork + waitpid)
+    let vfs = get_vfs().read();
+    match vfs.resolve_path("/bin/fork_test") {
+        Ok(_node) => {
+            drop(vfs);
+            match crate::userspace::load_user_program(
+                "/bin/fork_test",
+                &["fork_test"],
+                &["PATH=/bin"],
+            ) {
+                Ok(pid) => {
+                    run_user_process(pid);
+                }
+                Err(e) => {
+                    kprintln!("[EXEC-TEST] /bin/fork_test FAILED: {:?}", e);
+                }
+            }
+        }
+        Err(_) => {
+            drop(vfs);
+            kprintln!("[EXEC-TEST] /bin/fork_test not found in VFS");
+        }
+    }
+
+    kprintln!("[EXEC-TEST] fork_test returned, trying /bin/exec_test...");
+
+    // Test 3: /bin/exec_test (fork + exec + waitpid)
+    let vfs = get_vfs().read();
+    match vfs.resolve_path("/bin/exec_test") {
+        Ok(_node) => {
+            drop(vfs);
+            match crate::userspace::load_user_program(
+                "/bin/exec_test",
+                &["exec_test"],
+                &["PATH=/bin"],
+            ) {
+                Ok(pid) => {
+                    run_user_process(pid);
+                }
+                Err(e) => {
+                    kprintln!("[EXEC-TEST] /bin/exec_test FAILED: {:?}", e);
+                }
+            }
+        }
+        Err(_) => {
+            drop(vfs);
+            kprintln!("[EXEC-TEST] /bin/exec_test not found in VFS");
+        }
+    }
+
+    kprintln!("[EXEC-TEST] exec_test returned, trying /bin/sh...");
+
+    // Test 4: /bin/sh (shell with command execution)
     let vfs = get_vfs().read();
     match vfs.resolve_path("/bin/sh") {
         Ok(_node) => {

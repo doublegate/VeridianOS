@@ -260,7 +260,7 @@ impl ProcessHeap {
             });
         }
 
-        // TODO(future): Actually allocate/free pages via VMM for heap expansion
+        // TODO(phase5): Actually allocate/free pages via VMM for heap expansion
         self.brk = new_brk;
         Ok(self.brk)
     }

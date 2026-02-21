@@ -21,7 +21,7 @@ lazy_static! {
         tss.privilege_stack_table[0] = {
             const STACK_SIZE: usize = 4096 * 5;
             #[repr(align(16))]
-            #[allow(dead_code)]
+            #[allow(dead_code)] // Alignment wrapper -- field accessed via raw pointer
             struct AlignedStack([u8; STACK_SIZE]);
             static mut KERNEL_STACK: AlignedStack = AlignedStack([0; STACK_SIZE]);
 
@@ -34,7 +34,7 @@ lazy_static! {
         tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
             const STACK_SIZE: usize = 4096 * 5;
             #[repr(align(16))]
-            #[allow(dead_code)]
+            #[allow(dead_code)] // Alignment wrapper -- field accessed via raw pointer
             struct AlignedStack([u8; STACK_SIZE]);
             static mut STACK: AlignedStack = AlignedStack([0; STACK_SIZE]);
 

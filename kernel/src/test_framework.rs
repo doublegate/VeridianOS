@@ -4,6 +4,10 @@
 //! environment by using serial output and QEMU exit codes to report test
 //! results.
 
+// Test infrastructure -- functions are invoked from test binaries, not
+// from the main kernel path.
+#![allow(dead_code)]
+
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 use core::{panic::PanicInfo, time::Duration};
@@ -212,7 +216,6 @@ macro_rules! kernel_assert_ne {
 /// Trait for benchmarkable functions
 ///
 /// Intentionally kept available for on-demand benchmark binaries.
-#[allow(dead_code)]
 pub trait Benchmark {
     fn run(&self, iterations: u64) -> Duration;
     fn warmup(&self, iterations: u64);
@@ -335,14 +338,12 @@ macro_rules! kernel_bench {
 /// Used by the `testing` feature when test binaries register
 /// their tests via the `register_test!` macro.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub struct TestRegistry {
     tests: Vec<(&'static str, fn())>,
     benchmarks: Vec<(&'static str, fn())>,
 }
 
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 impl TestRegistry {
     pub const fn new() -> Self {
         Self {
@@ -383,19 +384,16 @@ impl TestRegistry {
 }
 
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 static TEST_REGISTRY: spin::Mutex<Option<TestRegistry>> = spin::Mutex::new(None);
 
 /// Initialize the test registry. Called once before tests run.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn init_test_registry() {
     *TEST_REGISTRY.lock() = Some(TestRegistry::new());
 }
 
 /// Execute a closure with the test registry (mutable access)
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn with_test_registry<R, F: FnOnce(&mut TestRegistry) -> R>(f: F) -> Option<R> {
     TEST_REGISTRY.lock().as_mut().map(f)
 }
@@ -423,7 +421,6 @@ macro_rules! register_test {
 /// installs it (with signature verification disabled), verifies it appears
 /// in the installed list, removes it, and verifies it is gone.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn test_package_install_remove() -> Result<(), KernelError> {
     use alloc::string::String;
 
@@ -501,7 +498,6 @@ pub fn test_package_install_remove() -> Result<(), KernelError> {
 /// Creates a DependencyResolver with packages that have transitive
 /// dependencies, resolves them, and verifies the correct topological order.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn test_package_dependency_resolution() -> Result<(), KernelError> {
     use alloc::string::String;
 
@@ -575,7 +571,6 @@ pub fn test_package_dependency_resolution() -> Result<(), KernelError> {
 /// Begins a transaction, simulates package state changes, rolls back,
 /// and verifies the original state is restored.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn test_package_transaction_rollback() -> Result<(), KernelError> {
     use crate::pkg::PackageManager;
 
@@ -617,7 +612,6 @@ pub fn test_package_transaction_rollback() -> Result<(), KernelError> {
 /// Parses sample TOML content and verifies key-value pairs are correctly
 /// extracted for strings, integers, booleans, and sections.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn test_toml_parsing() -> Result<(), KernelError> {
     use crate::pkg::toml_parser::{parse_toml, TomlValue};
 
@@ -687,7 +681,6 @@ name = \"test-package\"\nversion = \"1.2.3\"\nenabled = true\ncount = 42\n\n[bui
 /// Registers multiple packages in the resolver, searches by query, and
 /// verifies matching results are returned.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn test_package_search() -> Result<(), KernelError> {
     use alloc::string::String;
 
@@ -749,7 +742,6 @@ pub fn test_package_search() -> Result<(), KernelError> {
 /// Verifies that Version implements correct ordering for semantic versioning:
 /// 1.0.0 < 1.1.0 < 1.1.1 < 2.0.0, etc.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn test_version_comparison() -> Result<(), KernelError> {
     use crate::pkg::Version;
 
@@ -812,7 +804,6 @@ pub fn test_version_comparison() -> Result<(), KernelError> {
 /// to the original, and verifies the result matches the new data. Also checks
 /// that the delta contains non-empty operations.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn test_pkg_delta_compute_apply() -> Result<(), KernelError> {
     use crate::pkg::delta::{apply_delta, compute_delta};
 
@@ -846,7 +837,6 @@ pub fn test_pkg_delta_compute_apply() -> Result<(), KernelError> {
 /// durations, and verifies that `verify_reproducible` considers them
 /// reproducible (since only output hashes matter, not wall-clock time).
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn test_pkg_reproducible_manifest() -> Result<(), KernelError> {
     use alloc::string::String;
 
@@ -897,7 +887,6 @@ pub fn test_pkg_reproducible_manifest() -> Result<(), KernelError> {
 /// from representative text snippets, and that `LicenseCompatibility` reports
 /// MIT and Apache-2.0 as compatible.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn test_pkg_license_detection() -> Result<(), KernelError> {
     use crate::pkg::compliance::{detect_license, License, LicenseCompatibility};
 
@@ -941,7 +930,6 @@ pub fn test_pkg_license_detection() -> Result<(), KernelError> {
 /// `/etc/shadow` and `/dev/mem`), and verifies that high-severity findings are
 /// produced. Also scans excessive capabilities and checks for findings.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn test_pkg_security_scan() -> Result<(), KernelError> {
     use crate::pkg::testing::{PackageSecurityScanner, ScanSeverity};
 
@@ -983,7 +971,6 @@ pub fn test_pkg_security_scan() -> Result<(), KernelError> {
 /// definitions are non-empty and well-formed: each set has a name and
 /// at least one package.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn test_pkg_ecosystem_definitions() -> Result<(), KernelError> {
     use crate::pkg::ecosystem::{
         get_base_system_packages, get_driver_packages, get_essential_apps,
@@ -1041,7 +1028,6 @@ pub fn test_pkg_ecosystem_definitions() -> Result<(), KernelError> {
 ///
 /// Feeds ESC[A (arrow up) and ESC[B (arrow down) byte sequences
 /// into the parser and verifies correct event output.
-#[allow(dead_code)]
 pub fn test_shell_ansi_parser() -> Result<(), KernelError> {
     use crate::services::shell::ansi::{AnsiEvent, AnsiParser};
 
@@ -1101,7 +1087,6 @@ pub fn test_shell_ansi_parser() -> Result<(), KernelError> {
 /// Verifies that `$VAR`, `${VAR}`, `${VAR:-default}`, `$?`, and tilde
 /// expansion work correctly.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn test_shell_variable_expansion() -> Result<(), KernelError> {
     use alloc::{collections::BTreeMap, string::String};
 
@@ -1145,7 +1130,6 @@ pub fn test_shell_variable_expansion() -> Result<(), KernelError> {
 ///
 /// Verifies that `*`, `?`, and `[abc]` patterns match correctly
 /// against test strings.
-#[allow(dead_code)]
 pub fn test_shell_glob_match() -> Result<(), KernelError> {
     use crate::services::shell::glob::glob_match;
 
@@ -1195,7 +1179,6 @@ pub fn test_shell_glob_match() -> Result<(), KernelError> {
 /// Creates a pipe via `create_pipe()`, writes data to the writer end,
 /// reads it back from the reader end, and verifies data integrity.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn test_shell_pipe_roundtrip() -> Result<(), KernelError> {
     use crate::fs::pipe::create_pipe;
 
@@ -1236,7 +1219,6 @@ pub fn test_shell_pipe_roundtrip() -> Result<(), KernelError> {
 /// Verifies that `>`, `>>`, `<`, and `2>` tokens are correctly
 /// extracted from command token streams.
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn test_shell_redirect_parse() -> Result<(), KernelError> {
     use alloc::{string::String, vec};
 
@@ -1285,7 +1267,6 @@ pub fn test_shell_redirect_parse() -> Result<(), KernelError> {
 /// Run a test with a timeout (uses architecture-specific timer)
 ///
 /// Available for test binaries that need timeout enforcement.
-#[allow(dead_code)]
 pub fn run_with_timeout<F>(f: F, timeout_cycles: u64) -> Result<(), KernelError>
 where
     F: FnOnce(),

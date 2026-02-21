@@ -114,14 +114,32 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
         .cpu_affinity(current_thread.get_affinity())
         .build()?;
 
-        // Copy thread context and set return value to 0 for child
+        // Copy thread context and set return value to 0 for child.
+        //
+        // NOTE: This clones the ThreadContext as it was at process creation
+        // (exec/loader), NOT the live register state during this fork syscall.
+        // The live registers (RIP after SYSCALL, current RSP, etc.) are saved
+        // on the kernel stack by syscall_entry assembly and are not reflected
+        // here. For fork to work end-to-end, the syscall entry path would need
+        // to capture the user register frame into the ThreadContext, or the
+        // fork handler would need to read the saved registers from the kernel
+        // stack frame. This is deferred until the scheduler implements real
+        // context switching (TODO(phase5) in scheduler.rs:629).
         {
             let mut new_ctx = thread.context.lock();
-            // Clone context manually
             *new_ctx = (*ctx).clone();
 
-            // Set return value to 0 for child
+            // Set return value to 0 for child (fork returns 0 in child)
             new_ctx.set_return_value(0);
+
+            #[cfg(target_arch = "x86_64")]
+            println!(
+                "[FORK] Child {} context: RIP={:#x} RSP={:#x} RAX={}",
+                new_pid.0,
+                new_ctx.get_instruction_pointer(),
+                new_ctx.get_stack_pointer(),
+                0 // RAX was just set to 0
+            );
         } // Drop lock here
 
         thread

@@ -2,7 +2,7 @@
 //!
 //! Implements console drivers for VGA text mode and serial console.
 
-// Console driver provides VGA text mode and serial console. Not all color
+// Future-phase driver: Console VGA text mode and serial console. Not all color
 // variants and driver methods are exercised yet.
 #![allow(dead_code)]
 
@@ -17,7 +17,6 @@ use crate::{
 };
 
 /// Console colors (VGA text mode)
-#[allow(dead_code)]
 #[repr(u8)]
 pub enum ConsoleColor {
     Black = 0,
@@ -561,7 +560,7 @@ impl Driver for ConsoleDriver {
 
     fn detach(&mut self, _device: &DeviceInfo) -> Result<(), KernelError> {
         crate::println!("[CONSOLE] Detaching from device: {}", _device.name);
-        // TODO(future): Remove specific console device from device list
+        // TODO(phase6): Remove specific console device from device list
         Ok(())
     }
 
@@ -581,7 +580,7 @@ impl Driver for ConsoleDriver {
     }
 
     fn read(&mut self, _offset: u64, _buffer: &mut [u8]) -> Result<usize, KernelError> {
-        // TODO(future): Read input from console keyboard driver
+        // TODO(phase6): Read input from console keyboard driver
         Ok(0)
     }
 

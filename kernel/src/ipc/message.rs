@@ -4,6 +4,7 @@
 //! Small messages (≤64 bytes) are passed via registers for optimal performance,
 //! while large messages use shared memory for zero-copy transfers.
 
+// Core IPC message types -- used by sync/async/fast_path callers
 #![allow(dead_code)]
 
 use core::mem::size_of;

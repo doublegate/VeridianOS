@@ -13,7 +13,7 @@ use crate::{
 
 /// PCI configuration space registers (per PCI Local Bus Specification)
 #[repr(u16)]
-#[allow(dead_code)]
+#[allow(dead_code)] // Hardware register definitions per PCI specification
 pub enum PciConfigRegister {
     VendorId = 0x00,
     DeviceId = 0x02,
@@ -45,7 +45,7 @@ pub enum PciConfigRegister {
 }
 
 /// PCI class codes (per PCI specification)
-#[allow(dead_code)]
+#[allow(dead_code)] // Hardware constants per PCI specification
 pub mod class_codes {
     pub const UNCLASSIFIED: u8 = 0x00;
     pub const MASS_STORAGE: u8 = 0x01;
@@ -69,7 +69,7 @@ pub mod class_codes {
 }
 
 /// PCI command register flags (per PCI specification)
-#[allow(dead_code)]
+#[allow(dead_code)] // Hardware constants per PCI specification
 pub mod command_flags {
     pub const IO_SPACE: u16 = 1 << 0;
     pub const MEMORY_SPACE: u16 = 1 << 1;

@@ -3,6 +3,7 @@
 //! This module handles physical and virtual memory management,
 //! including page tables, allocators, and memory protection.
 
+// Memory management core -- many APIs exercised at boot and during allocation
 #![allow(dead_code)]
 
 pub mod bootloader;

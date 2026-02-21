@@ -4,6 +4,7 @@
 //! whose bodies are stored as sequences of command lines to be interpreted
 //! by the shell when invoked.
 
+// Shell user-defined functions -- API complete, not yet wired to executor
 #![allow(dead_code)]
 
 use alloc::{collections::BTreeMap, string::String, vec::Vec};

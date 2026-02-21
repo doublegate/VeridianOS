@@ -106,8 +106,8 @@ for src in "$TESTS_DIR"/*.c; do
     name="$(basename "$src" .c)"
     out="$BUILD_DIR/bin/$name"
 
-    if [ "$name" = "minimal" ]; then
-        # minimal.c provides its own _start -- no libc
+    if [ "$name" = "minimal" ] || [ "$name" = "fork_test" ] || [ "$name" = "exec_test" ]; then
+        # These provide their own _start -- no libc
         echo -n "  Compiling $name... "
         if "$CC" $CFLAGS_MINIMAL -o "$out" "$src" 2>&1; then
             "$STRIP" "$out" 2>/dev/null || true
@@ -130,7 +130,37 @@ if [ "$BUILT_COUNT" -eq 0 ]; then
 fi
 
 # =========================================================================
-# 3. Create the TAR archive
+# 3. Validate all binaries are statically linked (no PT_INTERP)
+# =========================================================================
+echo "--- Static linking validation ---"
+READELF="${TOOLCHAIN_PREFIX}/bin/x86_64-veridian-readelf"
+if [ ! -x "$READELF" ]; then
+    # Fall back to host readelf
+    READELF="readelf"
+fi
+
+VALIDATION_FAILED=0
+for bin in "$BUILD_DIR"/bin/*; do
+    [ -f "$bin" ] || continue
+    name="$(basename "$bin")"
+    if "$READELF" -l "$bin" 2>/dev/null | grep -q 'INTERP'; then
+        echo "  ERROR: $name is dynamically linked (has PT_INTERP segment)"
+        VALIDATION_FAILED=1
+    else
+        echo "  $name: statically linked OK"
+    fi
+done
+
+if [ "$VALIDATION_FAILED" -ne 0 ]; then
+    echo ""
+    echo "ERROR: Some binaries are dynamically linked."
+    echo "Ensure -static is in both CFLAGS and LDFLAGS."
+    exit 1
+fi
+echo ""
+
+# =========================================================================
+# 4. Create the TAR archive
 # =========================================================================
 
 echo "Creating rootfs.tar with $BUILT_COUNT programs..."

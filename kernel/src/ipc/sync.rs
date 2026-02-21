@@ -3,6 +3,7 @@
 //! Provides blocking send/receive operations with direct handoff between
 //! processes.
 
+// Synchronous IPC -- exercised via syscall IPC paths
 #![allow(dead_code)]
 
 #[cfg(feature = "alloc")]
@@ -201,7 +202,7 @@ fn validate_send_capability(msg: &Message, endpoint_id: u64) -> Result<()> {
         },
     )?;
 
-    // TODO(future): Verify capability is for the specific endpoint_id
+    // TODO(phase5): Verify capability is for the specific endpoint_id
     let _ = endpoint_id;
 
     Ok(())

@@ -391,7 +391,7 @@ impl FramebufferConsole {
     /// No longer called in the normal rendering path (eager rendering +
     /// pixel ring scroll keep the back-buffer up-to-date). Retained for
     /// diagnostic/debug use.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Diagnostic/debug utility
     fn render_row_to_backbuf(&mut self, logical_row: usize) {
         let py = logical_row * FONT_HEIGHT;
 

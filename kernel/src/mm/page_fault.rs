@@ -4,6 +4,7 @@
 //! copy-on-write, and stack growth. Architecture-specific trap handlers
 //! construct a [`PageFaultInfo`] and delegate to [`handle_page_fault`].
 
+// Page fault handler -- demand paging, CoW, stack growth
 #![allow(dead_code)]
 
 #[cfg(feature = "alloc")]

@@ -28,7 +28,7 @@ pub fn translate_address(addr: usize) -> Option<PageTableEntry> {
     // *const PageTable and dereferencing is valid because the page table is
     // identity-mapped in kernel space and has 'static lifetime.
     let page_table = unsafe {
-        // TODO(future): Get page table from process memory space
+        // TODO(phase5): Get page table from process memory space
         &*(crate::mm::get_kernel_page_table() as *const PageTable)
     };
 

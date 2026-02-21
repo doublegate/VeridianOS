@@ -21,6 +21,7 @@
 //! -drive file=disk.img,if=none,id=vd0,format=raw -device virtio-blk-pci,drive=vd0
 //! ```
 
+// Virtio-blk driver -- exercised when block device is attached
 #![allow(dead_code)]
 
 use core::sync::atomic::{self, Ordering};

@@ -3,6 +3,7 @@
 //! Provides both synchronous (blocking) and asynchronous (non-blocking)
 //! communication channels between processes.
 
+// IPC channel infrastructure -- exercised via send/receive syscalls
 #![allow(dead_code)]
 
 #[cfg(feature = "alloc")]
@@ -108,7 +109,7 @@ impl Endpoint {
         // Check if there's a waiting receiver
         let mut receivers = self.waiting_receivers.lock();
         if let Some(_receiver) = receivers.pop() {
-            // TODO(future): Direct context switch to receiver for <5us latency
+            // TODO(phase5): Direct context switch to receiver for <5us latency
             drop(receivers);
 
             Ok(())
@@ -148,7 +149,7 @@ impl Endpoint {
         }
         drop(queue);
 
-        // TODO(future): Block current process and yield CPU until message arrives
+        // TODO(phase5): Block current process and yield CPU until message arrives
         let mut receivers = self.waiting_receivers.lock();
         receivers.push(WaitingProcess {
             pid: receiver,
@@ -181,7 +182,7 @@ impl Endpoint {
             return Err(IpcError::ChannelFull);
         }
         queue.push_back(msg);
-        // TODO(future): Wake up any waiting receivers
+        // TODO(phase5): Wake up any waiting receivers
         Ok(())
     }
 
@@ -217,7 +218,7 @@ impl Endpoint {
     /// Close the endpoint
     pub fn close(&self) {
         self.active.store(false, Ordering::Release);
-        // TODO(future): Wake up all waiting processes with error and clean up
+        // TODO(phase5): Wake up all waiting processes with error and clean up
         // resources
     }
 }
@@ -275,7 +276,7 @@ impl Channel {
 /// that fit entirely in CPU registers.
 #[inline(always)]
 pub fn fast_ipc_send(msg: &SmallMessage, _target: ProcessId) -> Result<()> {
-    // TODO(future): Implement O(1) capability validation + direct register transfer
+    // TODO(phase5): Implement O(1) capability validation + direct register transfer
     if msg.capability == 0 {
         return Err(IpcError::InvalidCapability);
     }
@@ -285,7 +286,7 @@ pub fn fast_ipc_send(msg: &SmallMessage, _target: ProcessId) -> Result<()> {
 
 /// IPC call with reply (RPC-style)
 pub fn call_reply(_request: Message, _target: ProcessId) -> Result<Message> {
-    // TODO(future): Implement call/reply semantics (send, block, return reply)
+    // TODO(phase5): Implement call/reply semantics (send, block, return reply)
     Err(IpcError::WouldBlock)
 }
 

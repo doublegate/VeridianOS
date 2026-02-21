@@ -3,7 +3,7 @@
 //! Supports VBE (VESA BIOS Extensions) and GOP (Graphics Output Protocol) for
 //! framebuffer access
 
-// Allow dead code for GPU mode info fields not yet fully utilized
+// Future-phase driver: GPU mode info fields not yet fully utilized
 #![allow(dead_code)]
 
 use core::slice;

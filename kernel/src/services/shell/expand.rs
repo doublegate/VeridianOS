@@ -6,6 +6,7 @@
 //! variables (`$?`, `$$`, `$0`), tilde expansion, quote handling,
 //! backslash-dollar escaping, and command substitution (`$(command)`).
 
+// Shell variable expansion -- not all expansion paths exercised yet
 #![allow(dead_code)]
 
 use alloc::{
@@ -523,7 +524,7 @@ fn execute_substitution_command(command: &str) -> String {
                 .map(|shell| shell.get_cwd())
                 .unwrap_or_else(|| String::from("/"))
         }
-        // TODO(future): Full stdout capture requires process pipe infrastructure.
+        // TODO(phase5): Full stdout capture requires process pipe infrastructure.
         // Other commands return empty string for now.
         _ => String::new(),
     }

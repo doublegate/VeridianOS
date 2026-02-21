@@ -96,7 +96,7 @@ impl Deref for FrameGuard {
 /// RAII wrapper for multiple frames
 pub struct FramesGuard {
     frames: Vec<PhysicalFrame>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Cached count for diagnostics/debugging
     count: usize,
     allocator: &'static FrameAllocator,
 }
@@ -297,7 +297,7 @@ impl Drop for ProcessResources {
 /// RAII lock guard that logs acquisition and release
 pub struct TrackedMutexGuard<'a, T> {
     guard: MutexGuard<'a, T>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used in Drop impl for logging
     name: &'static str,
 }
 

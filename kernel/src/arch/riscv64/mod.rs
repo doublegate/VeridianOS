@@ -58,7 +58,7 @@ pub fn halt() -> ! {
 }
 
 /// Enable supervisor interrupts. Requires stvec to be configured first.
-#[allow(dead_code)]
+#[allow(dead_code)] // Interrupt API -- used when trap handler is configured
 pub fn enable_interrupts() {
     // SAFETY: csrsi sets the SIE bit in sstatus, enabling supervisor interrupts.
     // The caller must ensure a trap handler (stvec) is properly configured.

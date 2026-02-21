@@ -399,9 +399,9 @@ pub fn init_fpu() {
 
 /// Check if CPU supports F extension
 ///
-/// Currently unused but retained for future FPU context switching
-/// and feature detection during SMP bring-up.
-#[allow(dead_code)]
+/// Retained for future FPU context switching and feature detection
+/// during SMP bring-up.
+#[allow(dead_code)] // CPU feature detection API
 pub fn has_f_extension() -> bool {
     // Check misa register
     // SAFETY: Reading the misa CSR is a read-only operation that reports
@@ -535,9 +535,9 @@ pub fn restore_fpu_state(state: &FpuState) {
 
 /// Get current hart (hardware thread) ID
 ///
-/// Currently unused but retained for future SMP support where
-/// hart identification is needed for per-CPU data structures.
-#[allow(dead_code)]
+/// Retained for future SMP support where hart identification is
+/// needed for per-CPU data structures.
+#[allow(dead_code)] // SMP API -- needed for multi-hart support
 pub fn hart_id() -> usize {
     // SAFETY: Reading the mhartid CSR is a read-only operation that returns the
     // current hardware thread ID. Always accessible in M-mode with no side effects.

@@ -26,7 +26,7 @@ impl NetworkPacket {
         Self {
             data,
             length,
-            timestamp: 0, // TODO(future): Get actual timestamp from clock subsystem
+            timestamp: 0, // TODO(phase6): Get actual timestamp from clock subsystem
         }
     }
 }
@@ -117,7 +117,7 @@ pub trait NetworkDevice: Send + Sync {
 }
 
 /// Ethernet driver implementation
-#[allow(dead_code)]
+#[allow(dead_code)] // Future-phase driver stub
 pub struct EthernetDriver {
     name: String,
     config: Mutex<InterfaceConfig>,
@@ -149,7 +149,7 @@ impl EthernetDriver {
 
         // Simulate packet transmission
         for packet in tx_queue.drain(..) {
-            // TODO(future): Transmit packet via actual hardware DMA
+            // TODO(phase6): Transmit packet via actual hardware DMA
             stats.tx_packets += 1;
             stats.tx_bytes += packet.length as u64;
 
@@ -261,7 +261,7 @@ impl Driver for EthernetDriver {
 
     fn probe(&mut self, _device: &DeviceInfo) -> Result<(), KernelError> {
         crate::println!("[ETH] Probing device: {}", _device.name);
-        // TODO(future): Validate device is Ethernet via PCI class/subclass
+        // TODO(phase6): Validate device is Ethernet via PCI class/subclass
         Ok(())
     }
 
@@ -269,7 +269,7 @@ impl Driver for EthernetDriver {
         crate::println!("[ETH] Attaching to device: {}", _device.name);
 
         // Initialize hardware
-        // TODO(future): Initialize actual Ethernet hardware via MMIO registers
+        // TODO(phase6): Initialize actual Ethernet hardware via MMIO registers
 
         self.up()?;
 
@@ -297,7 +297,7 @@ impl Driver for EthernetDriver {
     fn handle_interrupt(&mut self, _irq: u8) -> Result<(), KernelError> {
         crate::println!("[ETH] Handling interrupt {} for {}", _irq, self.name);
 
-        // TODO(future): Handle hardware interrupts (status check, RX/TX completion,
+        // TODO(phase6): Handle hardware interrupts (status check, RX/TX completion,
         // errors)
 
         Ok(())

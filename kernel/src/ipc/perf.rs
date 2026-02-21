@@ -3,6 +3,7 @@
 //! This module provides functions for measuring IPC performance
 //! to ensure we meet our latency targets.
 
+// IPC performance measurement -- used by benchmark infrastructure
 #![allow(dead_code)]
 
 use core::sync::atomic::{AtomicU64, Ordering};

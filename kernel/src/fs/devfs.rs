@@ -32,7 +32,7 @@ impl DevNode {
         }
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Block device creation API -- used when block devices are registered
     fn new_block(name: String, major: u32, minor: u32) -> Self {
         Self {
             name,
@@ -67,6 +67,85 @@ impl VfsNode for DevNode {
                     *byte = (crate::read_timestamp() & 0xFF) as u8;
                 }
                 Ok(buffer.len())
+            }
+            "console" | "tty0" => {
+                // Blocking read from serial console
+                #[cfg(target_arch = "x86_64")]
+                {
+                    // Poll COM1 for input with a timeout to prevent infinite blocking
+                    let mut bytes_read = 0usize;
+                    let max_spins: u64 = 10_000_000; // ~100ms at typical clock rates
+
+                    for byte_slot in buffer.iter_mut() {
+                        let mut spins: u64 = 0;
+                        loop {
+                            // Check LSR (Line Status Register) for data ready
+                            let lsr: u8;
+                            // SAFETY: Reading port 0x3FD (COM1 Line Status Register)
+                            // is a side-effect-free I/O operation that checks whether
+                            // data is available in the serial receive buffer.
+                            unsafe {
+                                core::arch::asm!(
+                                    "in al, dx",
+                                    out("al") lsr,
+                                    in("dx") 0x3FDu16,
+                                    options(nomem, nostack)
+                                );
+                            }
+                            if lsr & 1 != 0 {
+                                // Data available -- read it
+                                let data: u8;
+                                // SAFETY: Reading port 0x3F8 (COM1 data register)
+                                // retrieves one byte from the serial receive buffer.
+                                // The LSR check above confirmed data is available.
+                                unsafe {
+                                    core::arch::asm!(
+                                        "in al, dx",
+                                        out("al") data,
+                                        in("dx") 0x3F8u16,
+                                        options(nomem, nostack)
+                                    );
+                                }
+                                *byte_slot = data;
+                                bytes_read += 1;
+                                break;
+                            }
+
+                            spins += 1;
+                            if spins >= max_spins {
+                                // Timeout -- return what we have so far
+                                return Ok(bytes_read);
+                            }
+                            core::hint::spin_loop();
+                        }
+
+                        // After first byte, only continue if more data immediately available
+                        if bytes_read > 0 {
+                            let lsr: u8;
+                            // SAFETY: Same as above -- reading COM1 LSR to check for
+                            // additional buffered data after the first byte.
+                            unsafe {
+                                core::arch::asm!(
+                                    "in al, dx",
+                                    out("al") lsr,
+                                    in("dx") 0x3FDu16,
+                                    options(nomem, nostack)
+                                );
+                            }
+                            if lsr & 1 == 0 {
+                                break; // No more data immediately available
+                            }
+                        }
+                    }
+
+                    Ok(bytes_read)
+                }
+                // Non-x86_64: no serial port polling available, return EOF
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    let _ = buffer;
+                    Ok(0)
+                }
             }
             _ => {
                 // Dispatch read to registered device driver via driver framework

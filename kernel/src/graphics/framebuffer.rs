@@ -1,6 +1,6 @@
 //! Framebuffer implementation
 
-// Allow dead code for framebuffer fields not yet used in rendering
+// Phase 6 graphics: framebuffer fields not yet used in rendering
 #![allow(dead_code)]
 
 use spin::Mutex;

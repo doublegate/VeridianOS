@@ -12,7 +12,7 @@
 - [ ] **Phase 5: Performance Optimization** - ~10% (data structures, NUMA scheduler, zero-copy networking)
 - [ ] **Phase 6: Advanced Features & GUI** - ~5% (type definitions only, Wayland/GPU framework stubs)
 
-## Current Version: v0.4.9 (February 18, 2026)
+## Current Version: v0.5.0 (February 21, 2026)
 
 ### Build Status
 - **x86_64**: 0 errors, 0 warnings, Stage 6 BOOTOK, 29/29 tests
@@ -32,7 +32,7 @@
 ### Self-Hosting Status
 - **Tiers 0-5**: ALL COMPLETE (v0.4.9)
 - **Tier 6 (T6-0 through T6-5)**: COMPLETE -- merged from test-codex, audited, tri-arch BOOTOK
-- **Tier 7 (T7-1 through T7-5)**: In progress
+- **Tier 7 (T7-1 through T7-5)**: COMPLETE (v0.5.0)
 - See `docs/SELF-HOSTING-STATUS.md` for detailed status
 
 ## Detailed Feature Status
@@ -192,6 +192,7 @@ See [REMEDIATION_TODO.md](REMEDIATION_TODO.md) for 37 identified gaps from Phase
 
 | Version | Date | Summary |
 |---------|------|---------|
+| v0.5.0 | Feb 21, 2026 | Self-hosting T7 complete, user-space foundation (exec/fork/fd/shell), dead_code audit |
 | v0.4.9 | Feb 18, 2026 | Self-hosting Tiers 0-5, complete libc, virtio-blk, 30+ syscalls, user-space exec |
 | v0.4.8 | Feb 16, 2026 | Fbcon scroll fix, KVM acceleration, version sync |
 | v0.4.7 | Feb 16, 2026 | Fbcon glyph cache, pixel ring buffer, write-combining (PAT) |

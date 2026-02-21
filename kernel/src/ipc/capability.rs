@@ -2,6 +2,7 @@
 //!
 //! Capabilities are unforgeable tokens that grant specific permissions
 //! for IPC operations. They are the foundation of VeridianOS security model.
+// IPC capability management -- core security model
 #![allow(dead_code)]
 
 #[cfg(feature = "alloc")]

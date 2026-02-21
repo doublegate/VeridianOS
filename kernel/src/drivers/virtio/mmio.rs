@@ -20,6 +20,7 @@
 //! virtqueues. For x86_64, the PCI transport in `mod.rs` is used instead.
 //! See [`super::VirtioTransport`] for the unified transport enum.
 
+// Virtio MMIO transport -- AArch64/RISC-V device access
 #![allow(dead_code)]
 
 use core::ptr;

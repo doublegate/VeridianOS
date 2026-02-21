@@ -1,16 +1,30 @@
 ## [Unreleased]
 
-### Tier 6 Complete, Tier 7 Self-Hosting Loop In Progress
+---
+
+## [v0.5.0] - 2026-02-21
+
+### v0.5.0: Self-Hosting Toolchain Complete + User-Space Foundation
+
+Major milestone release completing the Tier 7 self-hosting toolchain (T7-1 through T7-5) and solidifying user-space process lifecycle infrastructure. 130 files changed across 10 implementation sprints.
 
 **Tier 6 COMPLETE**: All 6 items merged from test-codex branch, audited (8 critical bugs fixed), and validated on all 3 architectures (tri-arch BOOTOK). The test-codex branch has been deleted.
 
-**Tier 7 T7-1 through T7-5 COMPLETE**: Rust user-space target specifications (T7-1), Rust std platform port (T7-2), static native GCC via Canadian cross-compilation (T7-3), cross-compiled make/ninja (T7-4), and vpkg user-space migration (T7-5). Remaining: integration testing and bootstrap verification.
-
-Previous [Unreleased] content: Tier 6 self-hosting features (T6-0 through T6-5), post-merge audit, Canadian cross-compilation infrastructure for native GCC (T5-3), CI pipeline corrections, shell pattern-matching compliance, and code formatting.
+**Tier 7 T7-1 through T7-5 COMPLETE**: Rust user-space target specifications (T7-1), Rust std platform port (T7-2), static native GCC via Canadian cross-compilation (T7-3), cross-compiled make/ninja (T7-4), and vpkg user-space migration (T7-5).
 
 ---
 
 ### Added
+
+#### User-Space Process Lifecycle (S3-S7)
+
+- `userland/tests/fork_test.c`: fork+waitpid test binary -- child writes "CHILD_OK", exits 42, parent verifies status and writes "FORK_TEST_PASS"
+- `userland/tests/exec_test.c`: fork+execve test binary -- child execve("/bin/minimal"), parent waitpid, writes "EXEC_TEST_PASS"
+- Console blocking read: `/dev/console` and `/dev/tty0` read() now blocks via COM1 serial polling (LSR at 0x3FD) with 100ms timeout fallback
+- Auto-open fd 0/1/2: New processes automatically get stdin/stdout/stderr opened to `/dev/console` in `loader.rs`
+- User-space shell bootstrap: `bootstrap.rs` attempts `/bin/sh` in Ring 3 (x86_64 only) before falling back to kernel shell
+
+#### Self-Hosting Tier 7 Infrastructure (T7-1 through T7-5)
 
 #### T7-1: Rust User-Space Target Specifications (3 new files)
 
@@ -110,6 +124,22 @@ The static native GCC build (T7-3) required significant libc expansion to satisf
 - `to-dos/MASTER_TODO.md`: Updated date to 2026-02-21, Tier 6 marked COMPLETE with all checkmarks, Tier 7 marked "in progress", fixed known issues section.
 
 ### Fixed
+
+#### v0.5.0 Sprint Fixes (S1-S7)
+
+**ELF loader dynamic binary fix** (`kernel/src/userspace/loader.rs`)
+- Root cause: `load_dynamic_linker()` returned `_interp_entry` but the value was discarded -- process entry point remained the main binary's, which expects a dynamic linker to have initialized GOT/PLT, causing GP fault on iretq.
+- Fix: When `binary.dynamic == true` and interpreter loads, update process entry point to `interp_entry`. When interpreter cannot be loaded (no ld.so in rootfs), log a clear warning instead of silent GP fault.
+
+**exec() return path fix** (`kernel/src/syscall/process.rs`)
+- Root cause: `sys_exec()` had `unreachable!("exec_process returned on success")`. The SYSRET path pops saved pre-exec registers from the kernel stack, so even without the panic, SYSRET would jump to old code, not the new entry point.
+- Fix: After exec succeeds, extract new entry point and stack from ThreadContext, undo syscall_entry's swapgs, and enter user mode via iretq (enter_usermode) -- bypassing SYSRET entirely.
+
+**fork() context documentation** (`kernel/src/process/fork.rs`)
+- Documented limitation: ThreadContext cloned during fork reflects process creation state, NOT live CPU registers during the fork syscall. Added diagnostic logging for child context (RIP, RSP, RAX).
+
+**Static linking validation** (`scripts/build-rootfs.sh`)
+- Added post-build `readelf -l` validation to verify all rootfs binaries have no PT_INTERP segment (truly statically linked).
 
 #### Post-Merge Audit: 8 Critical Bug Fixes (`f7482a7`, 17 files, +878/-188)
 
@@ -247,6 +277,25 @@ The static native GCC build (T7-3) required significant libc expansion to satisf
 - `ref_docs/redox-capability-fd-bridge.md` (NEW, 51 lines): Research notes on Redox capability-fd bridging
 
 ### Changed
+
+#### dead_code Audit and Cleanup (S8)
+
+- Reduced `#[allow(dead_code)]` annotations from 161 to 137 across the kernel (24 removed, remaining justified)
+- Added justification comments to all remaining instances explaining why each is retained (APIC registers, GIC registers, USB/driver stubs, conditionally compiled code)
+- Categories: APIC registers (~15), GIC registers (~4), USB/driver stubs (~5-7), conditionally compiled (~5-10), genuinely needed for future phases
+
+#### TODO(future) Categorization (S9)
+
+- Recategorized 79 `TODO(future)` comments into `TODO(phase5)` or `TODO(phase6)` across 36 kernel source files
+- Lock-free, performance, cache, NUMA items -> `TODO(phase5)`
+- Network, TCP/IP, GPU, USB, NVMe, dynamic linking items -> `TODO(phase6)`
+- Updated `to-dos/PHASE5_TODO.md` and `to-dos/PHASE6_TODO.md` with "From Code Audit" sections
+
+#### Version Bump
+
+- Cargo.toml: 0.4.9 -> 0.5.0
+- uname command output: 0.4.8 -> 0.5.0
+- /etc/os-release: 0.4.8 -> 0.5.0
 
 #### Virtio Driver Architecture (test-codex merge + audit)
 

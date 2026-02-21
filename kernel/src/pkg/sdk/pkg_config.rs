@@ -8,6 +8,7 @@
 //! APIs. They will be exercised when user-space process execution is
 //! functional. See TODO(user-space) markers for specific activation points.
 
+// User-space SDK forward declarations -- see module doc TODO(user-space)
 #![allow(dead_code)]
 
 #[cfg(feature = "alloc")]
@@ -160,7 +161,7 @@ impl PkgConfig {
                 cflags: alloc::vec![format!("--target={}", triple)],
             }),
             _ => {
-                // TODO(future): query VFS for /usr/veridian/lib/pkgconfig/<name>.pc
+                // TODO(phase5): query VFS for /usr/veridian/lib/pkgconfig/<name>.pc
                 None
             }
         }

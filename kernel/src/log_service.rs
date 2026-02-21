@@ -16,6 +16,7 @@
 //! The buffer holds up to [`LOG_BUFFER_CAPACITY`] entries. Once full it wraps
 //! around and silently overwrites the oldest entries.
 
+// Log service module -- complete API not yet wired into kernel boot sequence
 #![allow(dead_code)]
 
 use spin::Mutex;

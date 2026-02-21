@@ -1900,7 +1900,7 @@ impl BuiltinCommand for UnameCommand {
             parts.push("veridian");
         }
         if show_release {
-            parts.push("0.4.8");
+            parts.push("0.5.0");
         }
         if show_machine {
             #[cfg(target_arch = "x86_64")]

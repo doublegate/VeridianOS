@@ -303,7 +303,7 @@ impl VirtioNetDriver {
                     resource: "virtio_tx_descriptors",
                 })?;
 
-            // TODO(future): Complete virtqueue TX with DMA buffer allocation and MMIO kick
+            // TODO(phase6): Complete virtqueue TX with DMA buffer allocation and MMIO kick
 
             // For now, just track statistics
             self.stats.tx_packets += 1;
@@ -337,7 +337,7 @@ impl VirtioNetDriver {
         if let Some(ref mut rx_queue) = self.rx_queue {
             // Check if there are any used buffers
             if let Some((desc_idx, len)) = rx_queue.get_used() {
-                // TODO(future): Complete virtqueue RX with DMA buffer retrieval and recycling
+                // TODO(phase6): Complete virtqueue RX with DMA buffer retrieval and recycling
 
                 self.stats.rx_packets += 1;
                 self.stats.rx_bytes += len as u64;
@@ -430,7 +430,7 @@ impl NetworkDevice for VirtioNetDriver {
             });
         }
 
-        // TODO(future): Implement virtqueue-based transmission
+        // TODO(phase6): Implement virtqueue-based transmission
         self.stats.tx_packets += 1;
         self.stats.tx_bytes += packet.len() as u64;
 
@@ -443,7 +443,7 @@ impl NetworkDevice for VirtioNetDriver {
             return Ok(None);
         }
 
-        // TODO(future): Implement virtqueue-based reception
+        // TODO(phase6): Implement virtqueue-based reception
         Ok(None)
     }
 }

@@ -2,6 +2,7 @@
 //!
 //! Handles x86_64-specific paging setup and management.
 
+// x86_64 MMU support -- paging setup and management
 #![allow(dead_code)]
 
 use crate::mm::{PhysicalAddress, VirtualAddress};
@@ -16,7 +17,7 @@ pub fn init() {
     let cr3 = read_cr3();
     println!("[x86_64 MMU] Current CR3: 0x{:x}", cr3.as_u64());
 
-    // TODO(future): Set up dedicated kernel page tables (currently relying on
+    // TODO(phase5): Set up dedicated kernel page tables (currently relying on
     // bootloader's identity mapping)
 }
 
@@ -116,7 +117,7 @@ pub fn handle_page_fault(error_code: u32, faulting_address: VirtualAddress) {
     println!("  Reserved bit: {}", error.reserved_write());
     println!("  Instruction fetch: {}", error.instruction_fetch());
 
-    // TODO(future): Implement proper page fault handling (stack growth, heap
+    // TODO(phase5): Implement proper page fault handling (stack growth, heap
     // access, COW, process kill)
 
     // Panic is intentional: an unhandled page fault means the CPU tried to

@@ -159,13 +159,13 @@ pub fn lookup_route(dest: Ipv4Address) -> Option<RouteEntry> {
 pub fn send(dest: IpAddress, protocol: IpProtocol, data: &[u8]) -> Result<(), KernelError> {
     match dest {
         IpAddress::V4(dest_v4) => {
-            let src = Ipv4Address::LOCALHOST; // TODO(future): Get source address from interface config
+            let src = Ipv4Address::LOCALHOST; // TODO(phase6): Get source address from interface config
 
             let mut header = Ipv4Header::new(src, dest_v4, protocol);
             header.total_length = (Ipv4Header::MIN_SIZE + data.len()) as u16;
             header.calculate_checksum();
 
-            // TODO(future): Route and send packet through network device
+            // TODO(phase6): Route and send packet through network device
             super::update_stats_tx(header.total_length as usize);
 
             Ok(())

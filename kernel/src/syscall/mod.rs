@@ -1010,7 +1010,7 @@ fn sys_ipc_share_memory(
     };
 
     // Create memory capability for this region
-    let phys_addr = crate::mm::PhysicalAddress::new(addr as u64); // TODO(future): Get actual physical address from VMM
+    let phys_addr = crate::mm::PhysicalAddress::new(addr as u64); // TODO(phase5): Get actual physical address from VMM
     let attributes = crate::cap::object::MemoryAttributes::normal();
 
     match crate::cap::memory_integration::create_memory_capability(
@@ -1053,7 +1053,7 @@ fn sys_ipc_map_memory(capability: usize, addr_hint: usize, flags: usize) -> Sysc
         page_flags |= crate::mm::PageFlags::NO_EXECUTE;
     }
 
-    // TODO(future): Implement actual memory mapping with VMM
+    // TODO(phase5): Implement actual memory mapping with VMM
     if addr_hint == 0 {
         // Would allocate a virtual address
         Ok(0x100000000) // Placeholder address

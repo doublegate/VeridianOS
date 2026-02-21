@@ -112,7 +112,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.4.9 (February 18, 2026) | **Releases Published**: 24 (v0.1.0 through v0.4.9)
+**Latest Release**: v0.5.0 (February 21, 2026) | **Releases Published**: 25 (v0.1.0 through v0.5.0)
 
 | Metric | Value |
 | ------ | ----- |
@@ -179,7 +179,7 @@ The self-hosting effort follows a tiered plan to build VeridianOS toward compili
 | 4 | Sysroot and CRT files (crt0.S, crti.S, crtn.S, all 3 architectures) | **Complete** |
 | 5 | Cross-compiled programs running on VeridianOS | **Complete** |
 | 6 | Thread support, signal delivery, virtio-MMIO, multi-LOAD ELF, native GCC | **Complete** (merged from test-codex) |
-| 7 | Full self-hosting (Rust std port, native GCC, make/ninja, vpkg) | **In Progress** (T7-1 through T7-5 complete) |
+| 7 | Full self-hosting (Rust std port, native GCC, make/ninja, vpkg) | **Complete** (v0.5.0) |
 
 Tier 6 was developed on the test-codex branch and merged to main with a comprehensive audit pass fixing 8 critical bugs. Tier 7 provides the complete self-hosting toolchain: T7-1 (Rust user-space target specs), T7-2 (Rust std platform port), T7-3 (static native GCC via Canadian cross-compilation), T7-4 (GNU Make + Ninja), and T7-5 (vpkg package manager). The native GCC toolchain (T7-3) uses CONFIG_SITE-based autoconf caching to solve endianness detection in Canadian cross builds (`build=linux, host=veridian, target=veridian`), producing statically-linked gcc, cc1, as, ld, ar, and related tools totaling ~91 MB.
 
@@ -192,7 +192,6 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### What Comes Next
 
-- **Self-Hosting Tier 7 completion** -- T7-1 through T7-5 complete (Rust user-space targets, std port, static native GCC 14.2 via Canadian cross, make/ninja, vpkg); remaining: integration testing and bootstrap verification
 - **Phase 5: Performance Optimization** -- Sub-microsecond IPC, lock-free kernel paths, DPDK networking, NVMe optimization, profiling tools
 - **Phase 6: Advanced Features** -- Wayland compositor, desktop environment, multimedia, virtualization, cloud-native features, POSIX compatibility layer
 
@@ -400,10 +399,7 @@ Security is a fundamental design principle:
 - [x] **Phase 4**: Package Ecosystem and Self-Hosting (v0.4.0, Feb 2026)
 - [x] **Self-Hosting Tiers 0-5**: Complete libc, cross-toolchain, user-space execution (v0.4.9, Feb 2026)
 - [x] **Self-Hosting Tier 6**: Thread support, signal delivery, virtio-MMIO, multi-LOAD ELF, LLVM triple, native GCC infrastructure (merged from test-codex, Feb 2026)
-
-### In Progress
-
-- [ ] **Self-Hosting Tier 7**: T7-1 through T7-5 complete (Rust user-space targets, std port, static native GCC 14.2, make/ninja, vpkg) -- integration testing and bootstrap verification remaining
+- [x] **Self-Hosting Tier 7**: Full self-hosting toolchain -- Rust user-space targets, std port, static native GCC 14.2 via Canadian cross-compilation, GNU Make + Ninja, vpkg package manager (v0.5.0, Feb 2026)
 
 ### Upcoming
 

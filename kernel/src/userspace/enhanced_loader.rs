@@ -49,7 +49,7 @@ impl Default for ProgramArgs {
 }
 
 /// ELF loader for user space programs
-#[allow(dead_code)]
+#[allow(dead_code)] // Alternative ELF loader -- fields used in load methods below
 pub struct EnhancedElfLoader {
     /// ELF file data
     data: Vec<u8>,
@@ -677,7 +677,7 @@ fn load_interpreter(process: &Process, interp_path: &str) -> Result<VirtualAddre
             // actual interpreter file data would need to be read from the
             // VFS once full ELF dynamic linking is implemented. The size
             // is bounded by p_filesz which comes from the ELF header.
-            // TODO(future): Copy real interpreter segment data from VFS.
+            // TODO(phase6): Copy real interpreter segment data from VFS.
             unsafe {
                 let dest = seg_vaddr as *mut u8;
                 core::ptr::write_bytes(dest, 0, ph.p_filesz as usize);

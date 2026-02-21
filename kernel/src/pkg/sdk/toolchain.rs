@@ -9,6 +9,7 @@
 //! APIs. They will be exercised when user-space process execution is
 //! functional. See TODO(user-space) markers for specific activation points.
 
+// User-space SDK forward declarations -- see module doc TODO(user-space)
 #![allow(dead_code)]
 
 #[cfg(feature = "alloc")]

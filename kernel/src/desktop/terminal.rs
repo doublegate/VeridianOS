@@ -48,9 +48,9 @@ impl Color {
 #[derive(Debug, Clone, Copy)]
 struct Cell {
     character: char,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Rendering field -- used when terminal display is connected
     foreground: Color,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Rendering field -- used when terminal display is connected
     background: Color,
 }
 

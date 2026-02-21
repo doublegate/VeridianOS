@@ -11,9 +11,9 @@ pub fn get_ticks() -> u64 {
 
 /// Increment timer ticks (called from timer interrupt handler).
 ///
-/// Currently unused -- will be called from the AArch64 timer interrupt
-/// handler once the GIC (Generic Interrupt Controller) is configured.
-#[allow(dead_code)]
+/// Will be called from the AArch64 timer interrupt handler once the GIC
+/// is configured.
+#[allow(dead_code)] // Timer interrupt callback -- not yet wired
 pub fn tick() {
     TICKS.fetch_add(1, Ordering::Relaxed);
 

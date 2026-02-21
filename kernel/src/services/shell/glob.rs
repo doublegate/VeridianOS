@@ -11,6 +11,7 @@
 //! - `[a-z]` matches a character range
 //! - `[!abc]` / `[^abc]` negated character class
 
+// Shell glob matching -- not all pattern types exercised yet
 #![allow(dead_code)]
 
 use alloc::{

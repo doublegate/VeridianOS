@@ -92,7 +92,7 @@ pub trait StorageDevice: Send + Sync {
 }
 
 /// ATA (IDE) driver implementation
-#[allow(dead_code)]
+#[allow(dead_code)] // Future-phase driver stub
 pub struct AtaDriver {
     name: String,
     base_port: u16,

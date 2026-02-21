@@ -19,7 +19,7 @@ use crate::{
 
 /// File entry in the browser
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[allow(dead_code)] // Phase 6 GUI stub
 struct FileEntry {
     name: String,
     node_type: NodeType,
@@ -28,7 +28,7 @@ struct FileEntry {
 }
 
 /// File manager state
-#[allow(dead_code)]
+#[allow(dead_code)] // Phase 6 GUI stub
 pub struct FileManager {
     /// Window ID
     window_id: WindowId,

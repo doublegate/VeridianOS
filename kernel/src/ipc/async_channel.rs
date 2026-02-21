@@ -3,6 +3,7 @@
 //! This module provides high-performance async channels using lock-free
 //! ring buffers and event notification for efficient message passing.
 
+// Async IPC channels -- lock-free ring buffer implementation
 #![allow(dead_code)]
 
 #[cfg(feature = "alloc")]

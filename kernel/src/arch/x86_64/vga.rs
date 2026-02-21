@@ -5,7 +5,7 @@ use spin::Mutex;
 
 /// VGA text-mode color palette. Not all variants are used but the full
 /// 16-color palette is defined per the VGA specification.
-#[allow(dead_code)]
+#[allow(dead_code)] // Full VGA color palette per specification
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Color {

@@ -9,6 +9,7 @@
 //! Currently the generator validates manifests and produces placeholder package
 //! bytes.
 
+// User-space SDK forward declarations -- see module doc TODO(user-space)
 #![allow(dead_code)]
 
 #[cfg(feature = "alloc")]

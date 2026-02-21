@@ -48,7 +48,7 @@ const GICC_BASE: usize = 0x0801_0000;
 const GICD_CTLR: usize = 0x000;
 /// Interrupt Controller Type Register -- reports number of interrupt lines.
 const GICD_TYPER: usize = 0x004;
-/// Distributor Implementer Identification Register.
+// Hardware register definition -- retained for completeness per ARM GICv2 spec
 #[allow(dead_code)]
 const GICD_IIDR: usize = 0x008;
 /// Interrupt Group Registers (one bit per interrupt).
@@ -57,10 +57,9 @@ const GICD_IGROUPR: usize = 0x080;
 const GICD_ISENABLER: usize = 0x100;
 /// Interrupt Clear-Enable Registers (one bit per interrupt).
 const GICD_ICENABLER: usize = 0x180;
-/// Interrupt Set-Pending Registers (one bit per interrupt).
+// Hardware register definitions -- retained for completeness per ARM GICv2 spec
 #[allow(dead_code)]
 const GICD_ISPENDR: usize = 0x200;
-/// Interrupt Clear-Pending Registers (one bit per interrupt).
 #[allow(dead_code)]
 const GICD_ICPENDR: usize = 0x280;
 /// Interrupt Priority Registers (one byte per interrupt).
@@ -99,7 +98,7 @@ const GIC_SPURIOUS_IRQ: u32 = 1023;
 const DEFAULT_SPI_PRIORITY: u8 = 0xA0;
 
 /// Physical timer PPI on QEMU virt machine (INTID 30).
-#[allow(dead_code)]
+#[allow(dead_code)] // Hardware constant -- needed when timer interrupts are enabled
 pub const TIMER_PPI: u32 = 30;
 
 // ---------------------------------------------------------------------------

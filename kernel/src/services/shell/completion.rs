@@ -8,6 +8,7 @@
 //! The completer operates on the current input line and cursor position,
 //! returning a sorted list of matching candidates.
 
+// Shell tab completion -- wired progressively across sprints
 #![allow(dead_code)]
 
 use alloc::{

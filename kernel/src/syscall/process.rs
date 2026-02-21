@@ -6,6 +6,8 @@
 use core::slice;
 
 use super::{validate_user_buffer, validate_user_string_ptr, SyscallError, SyscallResult};
+#[cfg(target_arch = "x86_64")]
+use crate::arch::context::ThreadContext;
 use crate::process::{
     create_thread, current_process, exec_process, exit::exit_process, exit_thread, fork_process,
     get_thread_tid, set_thread_affinity, ProcessId, ProcessPriority, ThreadId,
@@ -92,10 +94,44 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
     let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
     let envp_refs: Vec<&str> = envp.iter().map(|s| s.as_str()).collect();
 
+    // Drop the capability space lock before exec_process, which diverges
+    // via enter_usermode (-> !) on success, leaking any held lock guards.
+    drop(old_cap_space);
+
     match exec_process(&path, &argv_refs, &envp_refs) {
         Ok(_) => {
-            // exec should not return on success
-            unreachable!("exec_process returned on success");
+            // exec succeeded. The current process's address space has been
+            // replaced with the new program image. We cannot return via
+            // SYSRET because the kernel stack holds pre-exec register values
+            // (old RIP, RSP). Enter user mode directly via iretq.
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: current_thread() returns the thread that called exec.
+            // Its context was updated by exec_process with the new entry
+            // point and stack pointer. swapgs undoes the swapgs from
+            // syscall_entry so GS_BASE/KERNEL_GS_BASE are correct for
+            // user mode. enter_usermode builds an iretq frame and
+            // transitions to Ring 3.
+            unsafe {
+                let current_thread =
+                    crate::process::current_thread().expect("no current thread after exec");
+                let ctx = current_thread.context.lock();
+                let entry = ctx.get_instruction_pointer() as u64;
+                let stack = ctx.get_stack_pointer() as u64;
+                drop(ctx);
+
+                // Undo the swapgs from syscall_entry so GS_BASE and
+                // KERNEL_GS_BASE are correct for user mode.
+                core::arch::asm!("swapgs");
+
+                crate::arch::x86_64::usermode::enter_usermode(
+                    entry, stack, 0x33, // User CS (Ring 3)
+                    0x2B, // User SS (Ring 3)
+                );
+            }
+
+            // Non-x86_64: exec not yet supported for user-mode entry
+            #[cfg(not(target_arch = "x86_64"))]
+            Err(SyscallError::InvalidState)
         }
         Err(_) => Err(SyscallError::ResourceNotFound),
     }

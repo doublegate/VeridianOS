@@ -12,7 +12,7 @@ use super::{Dependency, PackageId, PackageMetadata, Version};
 
 /// HTTP request type
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
+#[allow(dead_code)] // Network API stub -- used when network stack is available
 enum HttpMethod {
     Get,
     Head,

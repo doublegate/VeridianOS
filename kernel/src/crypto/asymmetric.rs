@@ -307,7 +307,7 @@ impl Fe {
 
     /// Compute square root: self^((p+3)/8) for p = 2^255 - 19
     /// Returns Some(root) if self is a quadratic residue, None otherwise
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Ed25519 field arithmetic -- needed for point decompression
     fn sqrt(&self) -> Option<Fe> {
         // p = 2^255 - 19, (p+3)/8 = 2^252 - 2
         // We use the formula: if v = a^((p-5)/8), then

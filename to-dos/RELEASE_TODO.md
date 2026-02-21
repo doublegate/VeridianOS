@@ -1,9 +1,9 @@
 # Release Management TODO
 
 **Purpose**: Track release planning, milestones, and deployment tasks
-**Last Updated**: February 20, 2026
-**Current Version**: v0.4.9 (Released February 18, 2026)
-**Current Status**: Phases 0-4.5 Complete. Self-hosting Tiers 0-5 operational. 24 releases published (v0.1.0 through v0.4.9). Tier 6 coded on `test-codex` branch.
+**Last Updated**: February 21, 2026
+**Current Version**: v0.5.0 (Released February 21, 2026)
+**Current Status**: Phases 0-4.5 Complete. Self-hosting Tiers 0-7 COMPLETE. 25 releases published (v0.1.0 through v0.5.0).
 
 ## 🎯 Release Strategy
 
@@ -116,16 +116,18 @@ Following Semantic Versioning (SemVer):
 - [x] Self-hosting: complete libc (17 files, 6,547 LOC), GCC cross-compiler, virtio-blk, TAR rootfs
 - [x] User-space exec: /bin/minimal runs, CR3 switching removed (~2000 cycles/syscall saved)
 
-#### v0.5.0 - Self-Hosting + Performance (NEXT)
-**Target Date**: Q2 2026
-**Phase**: Self-hosting Tiers 6-7 + Phase 5
-**Goals**:
-- [ ] Merge `test-codex` Tier 6 work (T6-0 through T6-5) + QEMU validation
-- [ ] Native GCC on VeridianOS (T7-3)
-- [ ] make/ninja cross-compiled (T7-4)
-- [ ] Kernel-wide performance optimization
-- [ ] Lock-free algorithms (RCU, wait-free queues)
-- [ ] Benchmarking suite
+#### v0.5.0 - Self-Hosting Complete + User-Space Foundation -- RELEASED
+**Released**: February 21, 2026
+**Phase**: Self-hosting Tiers 6-7 COMPLETE + User-Space Foundation
+**Achievements**:
+- [x] Merge `test-codex` Tier 6 work (T6-0 through T6-5) + QEMU validation
+- [x] Native GCC on VeridianOS (T7-3) -- static GCC 14.2 via Canadian cross-compilation
+- [x] make/ninja cross-compiled (T7-4) -- GNU Make 4.4.1 + Ninja 1.12.1
+- [x] vpkg user-space package manager (T7-5)
+- [x] Rust user-space targets + std port (T7-1, T7-2)
+- [x] ELF loader dynamic binary fix, fork verification
+- [x] Console blocking read, fd 0/1/2 auto-open, user-space shell bootstrap
+- [x] dead_code audit, TODO(future) recategorization to phase5/phase6
 
 #### v0.6.0 - Rust Self-Hosting + Advanced Features
 **Target Date**: Q3 2026

@@ -82,7 +82,7 @@ impl TcpConnection {
 
         // Send SYN
         self.state = TcpState::SynSent;
-        // TODO(future): Construct and send SYN packet via IP layer
+        // TODO(phase6): Construct and send SYN packet via IP layer
 
         Ok(())
     }
@@ -109,7 +109,7 @@ impl TcpConnection {
             });
         }
 
-        // TODO(future): Segment data and send via TCP with retransmission
+        // TODO(phase6): Segment data and send via TCP with retransmission
 
         Ok(data.len())
     }
@@ -123,7 +123,7 @@ impl TcpConnection {
             });
         }
 
-        // TODO(future): Receive reassembled data from TCP receive buffer
+        // TODO(phase6): Receive reassembled data from TCP receive buffer
 
         Ok(0)
     }

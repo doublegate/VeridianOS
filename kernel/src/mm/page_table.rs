@@ -2,6 +2,7 @@
 //!
 //! Provides page table structures and operations for 4-level paging
 
+// Page table management -- 4-level paging for all architectures
 #![allow(dead_code)]
 
 use core::{
@@ -682,7 +683,7 @@ impl PageMapper {
         })?;
         entry.clear();
 
-        // TODO(future): TLB flush
+        // TODO(phase5): TLB flush
 
         Ok(frame)
     }

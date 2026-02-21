@@ -123,6 +123,42 @@ pub fn load_user_program(
 
     let pid = lifecycle::create_process_with_options(options)?;
 
+    // Open /dev/console for stdin(0), stdout(1), stderr(2)
+    if let Some(process) = crate::process::get_process(pid) {
+        let vfs = get_vfs().read();
+        if let Ok(console_node) = vfs.resolve_path("/dev/console") {
+            use alloc::sync::Arc;
+
+            use crate::fs::file::{File, OpenFlags};
+
+            let ft = process.file_table.lock();
+
+            // fd 0 = stdin (read-only)
+            let stdin_file = Arc::new(File::new_with_path(
+                console_node.clone(),
+                OpenFlags::read_only(),
+                String::from("/dev/console"),
+            ));
+            let _ = ft.open(stdin_file);
+
+            // fd 1 = stdout (write-only)
+            let stdout_file = Arc::new(File::new_with_path(
+                console_node.clone(),
+                OpenFlags::write_only(),
+                String::from("/dev/console"),
+            ));
+            let _ = ft.open(stdout_file);
+
+            // fd 2 = stderr (write-only)
+            let stderr_file = Arc::new(File::new_with_path(
+                console_node,
+                OpenFlags::write_only(),
+                String::from("/dev/console"),
+            ));
+            let _ = ft.open(stderr_file);
+        }
+    }
+
     #[cfg(target_arch = "x86_64")]
     unsafe {
         crate::arch::x86_64::idt::raw_serial_str(b"[LOAD_USER_PROG] created pid=");
@@ -156,8 +192,34 @@ pub fn load_user_program(
         // Handle dynamic linking if needed
         if binary.dynamic {
             if let Some(interpreter) = &binary.interpreter {
-                // Load the dynamic linker/interpreter
-                let _interp_entry = load_dynamic_linker(process, interpreter, &binary)?;
+                match load_dynamic_linker(process, interpreter, &binary) {
+                    Ok(interp_entry) => {
+                        // Update process entry point to the interpreter.
+                        // The dynamic linker will initialize GOT/PLT then jump
+                        // to the main binary's entry point.
+                        if let Some(main_tid) = process.get_main_thread_id() {
+                            if let Some(thread) = process.get_thread(main_tid) {
+                                use crate::arch::context::ThreadContext;
+                                let mut ctx = thread.context.lock();
+                                ctx.set_instruction_pointer(interp_entry as usize);
+                            }
+                        }
+                    }
+                    Err(_e) => {
+                        // No dynamic linker available in rootfs -- warn and
+                        // fall through to the main entry point. The binary
+                        // will likely GP fault due to uninitialized GOT/PLT.
+                        println!(
+                            "[LOADER] WARNING: dynamic binary requires interpreter '{}' but it \
+                             could not be loaded; proceeding with main entry (expect GP fault)",
+                            interpreter
+                        );
+                    }
+                }
+            } else {
+                println!(
+                    "[LOADER] WARNING: binary is dynamically linked but has no interpreter set"
+                );
             }
         }
     }

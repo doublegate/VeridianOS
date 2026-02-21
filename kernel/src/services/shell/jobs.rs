@@ -4,6 +4,7 @@
 //! formatting. Each job represents a pipeline or command group that
 //! can be suspended, resumed, or run in the background.
 
+// Shell job control -- background jobs not yet fully wired to scheduler
 #![allow(dead_code)]
 
 use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
