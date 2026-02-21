@@ -368,19 +368,19 @@ jobs:
               env:
                   RUSTFLAGS: ""
               run: |
-                  # Temporarily remove [unstable] build-std from .cargo/config.toml.
-                  # When build-std is active, cargo builds core from source for all
-                  # targets including the host. The standard test harness links std
-                  # (which has its own core), producing "duplicate lang item" errors.
-                  # Removing [unstable] lets the host-target test build use the
-                  # pre-compiled std from the toolchain instead.
-                  cp .cargo/config.toml .cargo/config.toml.coverage-bak
-                  python3 -c "
+                  # .cargo/config.toml is gitignored, so it may not exist in CI.
+                  # If present, temporarily remove [unstable] build-std to prevent
+                  # "duplicate lang item" errors when compiling for the host target
+                  # (build-std builds core from source, conflicting with std's core).
+                  if [ -f .cargo/config.toml ]; then
+                    cp .cargo/config.toml .cargo/config.toml.coverage-bak
+                    python3 -c "
                   import re
                   content = open('.cargo/config.toml').read()
                   content = re.sub(r'\[unstable\].*?(?=\n\[|\Z)', '', content, flags=re.DOTALL)
                   open('.cargo/config.toml', 'w').write(content)
                   "
+                  fi
                   cargo llvm-cov \
                     --lib \
                     --features alloc \
@@ -388,8 +388,10 @@ jobs:
                     --target x86_64-unknown-linux-gnu \
                     --lcov \
                     --output-path lcov.info
-                  # Restore original config
-                  mv .cargo/config.toml.coverage-bak .cargo/config.toml
+                  # Restore original config if backed up
+                  if [ -f .cargo/config.toml.coverage-bak ]; then
+                    mv .cargo/config.toml.coverage-bak .cargo/config.toml
+                  fi
             - name: Verify coverage file is non-empty
               run: |
                   if [ ! -f lcov.info ] || [ ! -s lcov.info ]; then
