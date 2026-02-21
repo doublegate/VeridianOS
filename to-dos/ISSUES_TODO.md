@@ -1,7 +1,7 @@
 # Issues and Bug Tracking TODO
 
 **Purpose**: Central tracking for all bugs, issues, and defects
-**Last Updated**: February 15, 2026
+**Last Updated**: February 20, 2026
 
 ## 🐛 Issue Categories
 
@@ -19,6 +19,50 @@
 - **Compatibility**: Hardware or software compatibility issue
 
 ## 🚨 Critical Issues (P0)
+
+Currently no critical issues. All 18 historical issues resolved.
+
+---
+
+## Resolved Issues (Full History)
+
+### ISSUE-0019: CI Quick Checks Duplicate panic_impl
+- **Status**: RESOLVED
+- **Component**: CI/Build
+- **Reported**: February 20, 2026
+- **Resolved**: February 20, 2026 (commit `1ac66f4`)
+- **Reporter**: CI Pipeline
+- **Description**: Quick Checks job failed with `error[E0152]: found duplicate lang item 'panic_impl'` because `cargo clippy --bins` compiled `main.rs` on the host target where `#[panic_handler]` conflicts with std's `panic_impl`
+- **Fix**: Removed `--bins` clippy invocation from Quick Checks; `--lib` only for host-target quick check. Bare-metal bin targets validated by build-and-test jobs.
+
+### ISSUE-0020: CI Coverage .cargo/config.toml Missing
+- **Status**: RESOLVED
+- **Component**: CI/Coverage
+- **Reported**: February 20, 2026
+- **Resolved**: February 20, 2026 (commit `c41da93`)
+- **Reporter**: CI Pipeline
+- **Description**: Code Coverage job failed with `cp: cannot stat '.cargo/config.toml': No such file or directory` because `.cargo/` is gitignored and the config file doesn't exist in CI checkout
+- **Fix**: Wrapped backup/strip/restore operations in `if [ -f .cargo/config.toml ]` guards
+
+### ISSUE-0021: Codecov Reporting 0% Coverage
+- **Status**: RESOLVED
+- **Component**: CI/Coverage
+- **Reported**: February 19, 2026
+- **Resolved**: February 19, 2026 (commits `cae214c`, `11facbe`)
+- **Reporter**: CI Pipeline
+- **Description**: Codecov always reported 0% despite tests passing. Multiple root causes: (1) bare-metal target inherited from .cargo/config.toml, (2) `--workspace` pulled in no_std test entries, (3) `RUSTFLAGS="-D warnings"` broke host-target build, (4) silent fallback created empty LCOV file
+- **Fix**: Rewrote coverage step with `--lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu`; cleared RUSTFLAGS; removed silent fallback; added non-empty verification
+
+### ISSUE-0022: GitHub Pages OIDC Deployment 401
+- **Status**: RESOLVED
+- **Component**: CI/Deployment
+- **Reported**: February 19, 2026
+- **Resolved**: February 19, 2026 (commit `b1036f0`)
+- **Reporter**: CI Pipeline
+- **Description**: `actions/deploy-pages@v4` returned HTTP 401 because the deploy-docs job was missing `contents: read` permission and `environment: { name: github-pages }` block required for OIDC token issuance
+- **Fix**: Added `permissions.contents: read` and `environment:` block to deploy-docs job
+
+---
 
 ### ISSUE-0012: x86_64 Boot Hang
 - **Status**: RESOLVED (Fixed across v0.3.0 through v0.3.5)
@@ -102,7 +146,12 @@ Currently no high priority issues.
 
 ## 🟡 Medium Priority Issues (P2)
 
-Currently no medium priority issues.
+### PENDING: /bin/sh ELF Multi-LOAD GP Fault
+- **Status**: Fix coded on `test-codex` branch (T6-0), pending merge + QEMU validation
+- **Component**: Kernel/ELF Loader
+- **Description**: `/bin/sh` (2 LOAD segments, 41 KB) GP faults during `iretq` before any syscall. Single-segment `/bin/minimal` works fine.
+- **Root cause**: ELF loader does not correctly handle multi-segment binaries (stack mapping lost during second LOAD segment mapping)
+- **Fix**: `test-codex` branch adds multi-LOAD handling with stack preservation in `elf/mod.rs` and `process/creation.rs`
 
 ## 🟢 Low Priority Issues (P3)
 
@@ -299,19 +348,17 @@ Currently no low priority issues.
 ## 📊 Issue Statistics
 
 ### Overall Status
-- **Total Issues**: 11
+- **Total Issues**: 18
 - **Open Issues**: 0
 - **In Progress**: 0
-- **Fixed**: 11
-- **Verified**: 11 ✅
+- **Fixed**: 18
+- **Verified**: 18
 - **Closed**: 0
 
-### Current Architecture Boot Status
-- **x86_64**: Boots through all subsystems, hangs at process init (expected)
-- **RISC-V**: Boots through all subsystems, hangs at process init (mutex fix applied)
-- **AArch64**: Boot issue - kernel_main not reached from _start_rust
-
-**Note**: Memory management implementation completed with no outstanding issues!
+### Current Architecture Boot Status (v0.4.9)
+- **x86_64**: Stage 6 BOOTOK, 29/29 tests, zero warnings, interactive shell, /bin/minimal executes
+- **AArch64**: Stage 6 BOOTOK, 29/29 tests, zero warnings, interactive shell
+- **RISC-V**: Stage 6 BOOTOK, 29/29 tests, zero warnings, interactive shell
 
 ### By Component
 | Component | Open | In Progress | Fixed | Total |
@@ -323,16 +370,16 @@ Currently no low priority issues.
 | Tools | 0 | 0 | 1 | 1 |
 | Documentation | 0 | 0 | 0 | 0 |
 | Build System | 0 | 0 | 2 | 2 |
-| CI/Security | 0 | 0 | 1 | 1 |
+| CI/CD | 0 | 0 | 5 | 5 |
 
 ### By Type
-| Type | Count | Percentage |
-|------|-------|------------|
-| Bug | 0 | 0% |
-| Regression | 0 | 0% |
-| Performance | 0 | 0% |
-| Security | 0 | 0% |
-| Compatibility | 0 | 0% |
+| Type | Open | Fixed | Total |
+|------|------|-------|-------|
+| Bug | 0 | 14 | 14 |
+| CI/CD | 0 | 4 | 4 |
+| Regression | 0 | 0 | 0 |
+| Performance | 0 | 0 | 0 |
+| Security | 0 | 0 | 0 |
 
 ## 🔄 Regressions
 

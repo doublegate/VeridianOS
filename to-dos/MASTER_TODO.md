@@ -1,6 +1,6 @@
 # VeridianOS Master TODO List
 
-**Last Updated**: 2026-02-15 (Phase 4 Complete, Phases 0-4 Audited)
+**Last Updated**: 2026-02-20 (Phase 4 Complete, Tier 6 coded on test-codex)
 
 ## Project Overview Status
 
@@ -12,12 +12,14 @@
 - [ ] **Phase 5: Performance Optimization** - ~10% (data structures, NUMA scheduler, zero-copy networking)
 - [ ] **Phase 6: Advanced Features & GUI** - ~5% (type definitions only, Wayland/GPU framework stubs)
 
-## Current Version: v0.4.1 (February 15, 2026)
+## Current Version: v0.4.9 (February 18, 2026)
 
 ### Build Status
-- **x86_64**: 0 errors, 0 warnings, Stage 6 BOOTOK, 27/27 tests
-- **AArch64**: 0 errors, 0 warnings, Stage 6 BOOTOK, 27/27 tests
-- **RISC-V**: 0 errors, 0 warnings, Stage 6 BOOTOK, 27/27 tests
+- **x86_64**: 0 errors, 0 warnings, Stage 6 BOOTOK, 29/29 tests
+- **AArch64**: 0 errors, 0 warnings, Stage 6 BOOTOK, 29/29 tests
+- **RISC-V**: 0 errors, 0 warnings, Stage 6 BOOTOK, 29/29 tests
+- **Host-target unit tests**: 646/646 passing (Codecov integrated)
+- **CI pipeline**: 10/10 jobs passing
 
 ### Code Quality Metrics
 - static mut: 7 justified instances (early boot, per-CPU, heap backing)
@@ -26,6 +28,12 @@
 - #[allow(dead_code)]: ~42 instances
 - SAFETY comment coverage: >100% (410/389 unsafe blocks)
 - Soundness bugs: 0
+
+### Self-Hosting Status
+- **Tiers 0-5**: ALL COMPLETE (v0.4.9)
+- **Tier 6 (T6-0 through T6-5)**: Coded on `test-codex` branch, pending merge + QEMU validation
+- **Tier 7 (T7-1 through T7-5)**: Not yet started
+- See `docs/BRANCH-COMPARISON-TEST-CODEX.md` for test-codex analysis
 
 ## Detailed Feature Status
 
@@ -81,6 +89,35 @@
 - [x] Security scanning, license compliance, statistics
 - [x] Ecosystem: core packages, essential apps, driver packages
 
+### Phase 4.5: Interactive Shell (100% COMPLETE)
+- [x] Wire shell to boot, ANSI escape parser, line editor
+- [x] Pipe infrastructure, I/O redirection, new syscalls (dup, dup2, pipe, getcwd, chdir, ioctl, kill)
+- [x] Variable expansion ($VAR, ${VAR:-default}, $?, $$, tilde), glob matching, tab completion
+- [x] Job control (&, fg, bg, jobs), signal handling (SIGTSTP, SIGCONT, SIGPIPE)
+- [x] Control flow (if/elif/else/fi, while, for, case), functions, aliases, advanced operators
+- [x] 24+ builtins, console/PTY integration, boot tests (29/29)
+
+### Self-Hosting Roadmap: Tiers 0-5 COMPLETE, Tier 6 on `test-codex`
+- [x] Tier 0: Critical kernel bug fixes (page fault, fork, exec, timer, mmap)
+- [x] Tier 1: 79+ syscalls for GCC toolchain
+- [x] Tier 2: Complete libc (17 source files, 6,547 LOC, 25+ headers)
+- [x] Tier 3: TAR rootfs loader, virtio-blk PCI, PATH resolution, /tmp
+- [x] Tier 4: User-space shell, libm, wait queues, SIGCHLD
+- [x] Tier 5: GCC cross-compiler (binutils 2.43 + GCC 14.2), sysroot, rootfs
+- [ ] **Tier 6: Platform completeness** (T6-0 through T6-5 coded on `test-codex`, needs merge + QEMU validation)
+  - [ ] T6-0: ELF multi-LOAD handling (Phase 4A blocker for /bin/sh) [CODED]
+  - [ ] T6-1: readlink() full VFS implementation [CODED]
+  - [ ] T6-2: AArch64/RISC-V signal delivery [CODED]
+  - [ ] T6-3: Virtio-MMIO disk driver for AArch64/RISC-V [CODED]
+  - [ ] T6-4: LLVM triple patch [CODED]
+  - [ ] T6-5: Thread support -- clone()/futex()/pthread [CODED]
+- [ ] **Tier 7: Full self-hosting loop** (not yet started)
+  - [ ] T7-1: Rust user-space target JSON
+  - [ ] T7-2: Rust std port (minimal)
+  - [ ] T7-3: Native GCC on VeridianOS
+  - [ ] T7-4: make/ninja cross-compiled
+  - [ ] T7-5: vpkg user-space migration
+
 ### Phase 5: Performance Optimization (~10% actual)
 - [x] NUMA-aware scheduling data structures (sched/numa.rs)
 - [x] Zero-copy networking framework (net/zero_copy.rs)
@@ -125,7 +162,9 @@
 
 Currently tracking **0 critical issues**. All architectures boot cleanly with zero warnings.
 
-See [ISSUES_TODO.md](ISSUES_TODO.md) for full issue history (14 resolved, 0 open).
+**Pending**: `/bin/sh` (2-LOAD-segment ELF) GP faults on `iretq` on `main` -- fix coded on `test-codex` branch (T6-0). Not classified as a regression since `/bin/sh` has never worked on `main`.
+
+See [ISSUES_TODO.md](ISSUES_TODO.md) for full issue history (18 resolved, 0 open).
 
 ## Remediation
 
@@ -153,8 +192,17 @@ See [REMEDIATION_TODO.md](REMEDIATION_TODO.md) for 37 identified gaps from Phase
 
 | Version | Date | Summary |
 |---------|------|---------|
-| v0.4.1 | Feb 15, 2026 | Userland bridge, ring 3 entry, SYSCALL/SYSRET |
+| v0.4.9 | Feb 18, 2026 | Self-hosting Tiers 0-5, complete libc, virtio-blk, 30+ syscalls, user-space exec |
+| v0.4.8 | Feb 16, 2026 | Fbcon scroll fix, KVM acceleration, version sync |
+| v0.4.7 | Feb 16, 2026 | Fbcon glyph cache, pixel ring buffer, write-combining (PAT) |
+| v0.4.6 | Feb 16, 2026 | Fbcon performance: back-buffer, text cell ring, dirty row tracking |
+| v0.4.5 | Feb 16, 2026 | Framebuffer display, PS/2 keyboard, input multiplexer, ramfb, 29/29 tests |
+| v0.4.4 | Feb 16, 2026 | Shell usability: CWD prompt, VFS population, RISC-V ELF fix |
+| v0.4.3 | Feb 15, 2026 | Phase 4.5: Interactive Shell (vsh) -- 18 sprints, tri-arch shell prompt |
+| v0.4.2 | Feb 15, 2026 | Hardware abstraction: interrupt controllers, IRQ framework, timer management |
+| v0.4.1 | Feb 15, 2026 | Tech debt: bootstrap refactor, dead_code consolidation |
 | v0.4.0 | Feb 15, 2026 | Phase 4 complete: toolchain, testing, compliance, ecosystem |
+| v0.3.9 | Feb 15, 2026 | Phase 4 100% + Userland Bridge: Ring 3 entry, SYSCALL/SYSRET |
 | v0.3.8 | Feb 15, 2026 | Phase 4 Groups 3+4 |
 | v0.3.7 | Feb 15, 2026 | Phase 4 Group 2 |
 | v0.3.6 | Feb 15, 2026 | Phase 4 Group 1 |

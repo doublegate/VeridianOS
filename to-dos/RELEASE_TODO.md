@@ -1,9 +1,9 @@
 # Release Management TODO
 
 **Purpose**: Track release planning, milestones, and deployment tasks
-**Last Updated**: February 15, 2026
-**Current Version**: v0.4.1 (Released February 15, 2026)
-**Current Status**: Phases 0-4 Complete. 15 releases published (v0.1.0 through v0.4.1).
+**Last Updated**: February 20, 2026
+**Current Version**: v0.4.9 (Released February 18, 2026)
+**Current Status**: Phases 0-4.5 Complete. Self-hosting Tiers 0-5 operational. 24 releases published (v0.1.0 through v0.4.9). Tier 6 coded on `test-codex` branch.
 
 ## 🎯 Release Strategy
 
@@ -96,79 +96,46 @@ Following Semantic Versioning (SemVer):
   - [x] Cascading revocation ✅
   - [x] Per-CPU cache ✅
 
-#### v0.3.0 - User Space Foundation (NEXT)
-**Target Date**: Q1 2026  
-**Phase**: 2  
-**Pre-requisites** (9 fixes remaining):
-- [ ] Complete AArch64 bootstrap process (currently bypassed)
-- [ ] Fix x86_64 early boot hang (ISSUE-0012)
-- [ ] Implement kernel stack in TSS for x86_64
-- [ ] Complete APIC module for x86_64
-- [ ] Implement Thread Local Storage (TLS) for all architectures
-- [ ] Complete RISC-V UART initialization
-- [ ] Expand RISC-V SBI module
-- [ ] Fix test framework lang items conflict
-- [ ] Update target JSON files
-**Goals**:
-- [ ] User process creation and management
-- [ ] Init system implementation
-- [ ] Basic shell (vsh)
-- [ ] User-space driver framework
-- [ ] Initial system calls
+#### v0.3.x - User Space Foundation -- RELEASED (v0.3.0 through v0.3.9)
+**Released**: February 14-15, 2026
+**Phase**: 2-3 COMPLETE
+**Achievements**:
+- [x] VFS: RamFS, DevFS, ProcFS, BlockFS with ext2-style directories
+- [x] ELF loader, driver framework, init system, shell
+- [x] Full crypto suite (ChaCha20, Ed25519, X25519, ML-DSA, ML-KEM)
+- [x] MAC policy, RBAC/MLS, audit system, memory protection (ASLR, DEP/NX, W^X)
+- [x] Ring 3 user-space entry, SYSCALL/SYSRET
 
-#### v0.4.0 - Driver Framework
-**Target Date**: Q2 2026  
-**Phase**: 2  
-**Goals**:
-- [ ] Storage drivers (AHCI, NVMe)
-- [ ] Network drivers (e1000, virtio)
-- [ ] Virtual filesystem (VFS)
-- [ ] Device management
+#### v0.4.x - Package Ecosystem + Interactive Shell + Self-Hosting -- RELEASED (v0.4.0 through v0.4.9)
+**Released**: February 15-18, 2026
+**Phase**: 4 + 4.5 COMPLETE, Self-hosting Tiers 0-5 COMPLETE
+**Achievements**:
+- [x] Package manager, DPLL dependency resolver, ports system, SDK
+- [x] Interactive shell (vsh): 18 sprints, 24+ builtins, pipes, redirection, job control, scripting
+- [x] Framebuffer console: UEFI GOP (x86_64), ramfb (AArch64/RISC-V), PS/2 keyboard
+- [x] Self-hosting: complete libc (17 files, 6,547 LOC), GCC cross-compiler, virtio-blk, TAR rootfs
+- [x] User-space exec: /bin/minimal runs, CR3 switching removed (~2000 cycles/syscall saved)
 
-#### v0.5.0 - Drivers and Services
-**Target Date**: Q2 2026  
-**Phase**: 2-3  
+#### v0.5.0 - Self-Hosting + Performance (NEXT)
+**Target Date**: Q2 2026
+**Phase**: Self-hosting Tiers 6-7 + Phase 5
 **Goals**:
-- [ ] Storage drivers (AHCI, NVMe)
-- [ ] Network drivers (e1000, virtio)
-- [ ] Core system services
-- [ ] Init system operational
-
-#### v0.6.0 - Security Features
-**Target Date**: Q3 2026  
-**Phase**: 3  
-**Goals**:
-- [ ] Secure boot implementation
-- [ ] MAC system working
-- [ ] Audit framework
-- [ ] Basic crypto support
-
-#### v0.7.0 - Package System
-**Target Date**: Q4 2026  
-**Phase**: 4  
-**Goals**:
-- [ ] Package manager working
-- [ ] SDK available
-- [ ] Repository infrastructure
-- [ ] Developer tools
-
-#### v0.8.0 - Performance
-**Target Date**: Q1 2027  
-**Phase**: 5  
-**Goals**:
-- [ ] Major optimizations complete
+- [ ] Merge `test-codex` Tier 6 work (T6-0 through T6-5) + QEMU validation
+- [ ] Native GCC on VeridianOS (T7-3)
+- [ ] make/ninja cross-compiled (T7-4)
+- [ ] Kernel-wide performance optimization
+- [ ] Lock-free algorithms (RCU, wait-free queues)
 - [ ] Benchmarking suite
-- [ ] Performance monitoring
-- [ ] Scalability improvements
 
-#### v0.9.0 - GUI and Advanced Features
-**Target Date**: Q2 2027  
-**Phase**: 6  
+#### v0.6.0 - Rust Self-Hosting + Advanced Features
+**Target Date**: Q3 2026
+**Phase**: Self-hosting Tier 7 + Phase 6
 **Goals**:
+- [ ] Rust user-space target JSON (T7-1)
+- [ ] Rust std port (T7-2)
+- [ ] vpkg user-space migration (T7-5)
 - [ ] Wayland compositor
 - [ ] Basic desktop environment
-- [ ] Container runtime
-- [ ] Core applications
 
 ### v1.0.0 - First Stable Release
 **Target Date**: Q3 2027  
@@ -260,21 +227,14 @@ Following Semantic Versioning (SemVer):
 
 ## 🎯 Next Release Planning
 
-### v0.2.2 - Maintenance Release (If Needed)
-**Target**: As needed  
-**Focus**: Bug fixes and stability improvements
-- Additional fixes as discovered
-- Performance optimizations
-- Documentation updates
-
-### v0.3.0 - User Space Foundation
-**Target**: Q1 2026  
-**Current Status**: Planning phase
+### v0.5.0 - Self-Hosting Tier 6 + Performance
+**Target**: Q2 2026
+**Current Status**: Tier 6 coded on `test-codex`, needs merge + QEMU validation
 **Key Deliverables**:
-- User process creation
-- Init system
-- Basic shell
-- System call interface
+- Merge `test-codex` branch (T6-0 through T6-5)
+- QEMU-validate all Tier 6 items
+- Native GCC on VeridianOS (T7-3)
+- Performance optimization sprint
 
 ## 🔧 Release Artifacts
 
@@ -390,22 +350,21 @@ Thanks to all contributors!
 
 ## 📅 Release Calendar
 
-### 2025
-- Q2: v0.1.0 (Foundation)
-- Q3: v0.2.0 (Core Kernel)
-- Q4: v0.3.0 (Multi-arch)
+### 2025 (Completed)
+- Q2: v0.1.0 (Foundation), v0.2.0 (Core Kernel), v0.2.1 (Boot Fixes)
+- Q4: v0.2.5, v0.3.0 (Architecture cleanup)
 
-### 2026
-- Q1: v0.4.0 (User Space)
-- Q2: v0.5.0 (Drivers)
-- Q3: v0.6.0 (Security)
-- Q4: v0.7.0 (Packages)
+### 2026 (Completed + In Progress)
+- Q1: v0.3.1 through v0.4.9 (User Space, Security, Packages, Shell, Self-hosting Tiers 0-5)
+- Q2: v0.5.0 (Self-hosting Tier 6 + Performance) -- PLANNED
+- Q3: v0.6.0 (Rust self-hosting + Advanced features) -- PLANNED
+- Q4: v0.7.0 (Full self-hosting loop) -- PLANNED
 
 ### 2027
-- Q1: v0.8.0 (Performance)
+- Q1: v0.8.0 (Performance + Polish)
 - Q2: v0.9.0 (GUI)
 - Q3: v1.0.0 (Stable)
-- Q4: v1.1.0 (Polish)
+- Q4: v1.1.0 (LTS candidate)
 
 ## 🔗 Release Resources
 

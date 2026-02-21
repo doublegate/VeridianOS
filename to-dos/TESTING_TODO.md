@@ -1,9 +1,10 @@
 # Testing TODO
 
 **Purpose**: Track all testing activities across the project lifecycle
-**Last Updated**: February 15, 2026
-**Phase 0-4 Status**: All complete. 27/27 boot tests passing on all 3 architectures.
-**Current Status**: Boot test suite operational. Automated unit test execution still blocked by Rust toolchain lang items limitation. Testing via QEMU boot verification is the primary validation method.
+**Last Updated**: February 20, 2026
+**Phase 0-4.5 Status**: All complete. 29/29 boot tests passing on all 3 architectures.
+**Host-Target Tests**: 646/646 passing via `cargo llvm-cov --lib --target x86_64-unknown-linux-gnu`. Codecov integrated.
+**Current Status**: Boot test suite operational (29/29). Host-target unit tests operational (646/646). Automated bare-metal test execution still blocked by Rust toolchain lang items limitation. Testing via QEMU boot verification is the primary validation method for kernel functionality.
 
 ## 🧪 Testing Strategy Overview
 
