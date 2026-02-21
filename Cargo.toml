@@ -3,11 +3,14 @@ resolver = "2"
 members = [
     "kernel",
 ]
+exclude = [
+    "userland/rust-std",
+]
 # Note: tools/bootimage-builder is excluded from workspace
 # It must be built separately as a host tool (not bare metal)
 # Future members when they have Cargo.toml files:
 # "drivers/*",
-# "services/*", 
+# "services/*",
 # "libs/*",
 # "userland/*",
 # "tools/*",

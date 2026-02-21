@@ -850,7 +850,7 @@ print_summary() {
     echo ""
 
     echo "Installed libraries:"
-    for f in "${OUTPUT_DIR}/usr/lib/"*.{a,o} "${OUTPUT_DIR}/usr/lib/gcc/${TARGET}/${GCC_VERSION}/"*.{a,o} 2>/dev/null; do
+    for f in "${OUTPUT_DIR}/usr/lib/"*.a "${OUTPUT_DIR}/usr/lib/"*.o "${OUTPUT_DIR}/usr/lib/gcc/${TARGET}/${GCC_VERSION}/"*.a "${OUTPUT_DIR}/usr/lib/gcc/${TARGET}/${GCC_VERSION}/"*.o; do
         [[ -f "${f}" ]] || continue
         local name
         name="$(basename "${f}")"

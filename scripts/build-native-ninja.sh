@@ -164,8 +164,7 @@ verify_cross_compiler() {
     step "Verifying cross-compiler"
 
     if [[ ! -x "${CROSS_CXX}" ]]; then
-        die "Cross C++ compiler not found at ${CROSS_CXX}."
-        die "Ninja requires C++.  Run scripts/build-native-gcc.sh (Stage 2.5) first."
+        die "Cross C++ compiler not found at ${CROSS_CXX}.  Ninja requires C++.  Run scripts/build-native-gcc.sh (Stage 2.5) first."
     fi
 
     if [[ ! -f "${SYSROOT}/usr/lib/libc.a" ]]; then
