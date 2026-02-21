@@ -177,7 +177,7 @@ pub fn exit_thread(exit_code: i32) {
 
         // If detached, clean up immediately (no join will occur)
         if thread.detached.load(core::sync::atomic::Ordering::Acquire) {
-            let _ = crate::process::exit::cleanup_thread(&process, thread.tid);
+            let _ = crate::process::exit::cleanup_thread(process, thread.tid);
         }
 
         // Handle CLONE_CHILD_CLEARTID: clear *clear_tid and futex wake

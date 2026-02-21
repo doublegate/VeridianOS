@@ -1,16 +1,27 @@
-//! Virtqueue implementation
+//! Split virtqueue implementation for virtio devices.
 //!
-//! Implements the split virtqueue data structure used by legacy virtio devices.
+//! Implements the split virtqueue data structure used by legacy and
+//! transitional virtio devices, as specified in the
+//! [virtio specification, section 2.7](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html).
+//!
 //! A virtqueue consists of three physically contiguous regions:
 //!
-//! 1. **Descriptor table** -- array of `VirtqDesc` entries describing data
-//!    buffers
-//! 2. **Available ring** -- driver-to-device: ring of descriptor chain heads
-//! 3. **Used ring** -- device-to-driver: ring of completed descriptor chain
-//!    heads
+//! 1. **Descriptor table** -- array of [`VirtqDesc`] entries describing data
+//!    buffers (16 bytes each)
+//! 2. **Available ring** ([`VirtqAvail`]) -- driver-to-device: ring of
+//!    descriptor chain heads
+//! 3. **Used ring** ([`VirtqUsed`]) -- device-to-driver: ring of completed
+//!    descriptor chain heads
 //!
 //! Memory layout follows the virtio specification: descriptors at the base,
 //! available ring immediately after, used ring page-aligned after that.
+//!
+//! # Thread Safety
+//!
+//! `VirtQueue` is **not** internally synchronized. It implements `Send` and
+//! `Sync` only because it is always held behind a `Mutex` in the virtio-blk
+//! driver (`VIRTIO_BLK: OnceLock<Mutex<VirtioBlkDevice>>`). Callers MUST NOT
+//! access a `VirtQueue` from multiple threads without external synchronization.
 
 #![allow(dead_code)]
 
@@ -313,7 +324,15 @@ impl VirtQueue {
     /// The caller must call `kick()` (via the transport) after one or more
     /// `push_avail()` calls to notify the device.
     pub fn push_avail(&mut self, desc_head: u16) {
+        debug_assert!(
+            (desc_head as usize) < self.size as usize,
+            "push_avail: descriptor index {} out of bounds (queue size {})",
+            desc_head,
+            self.size
+        );
         // SAFETY: self.avail points to valid VirtqAvail memory we own.
+        // ring_idx is reduced modulo self.size, so it is always in bounds.
+        // desc_head is asserted to be < self.size above.
         unsafe {
             let avail = &mut *self.avail;
             let ring_idx = avail.idx as usize % self.size as usize;
@@ -372,14 +391,28 @@ impl Drop for VirtQueue {
     }
 }
 
-// SAFETY: VirtQueue manages raw pointers to memory it owns exclusively.
-// The physical DMA buffers are not shared with other Rust objects. Access
-// is serialized by the caller (the blk driver holds VirtQueue behind a Mutex).
+// SAFETY: VirtQueue manages raw pointers (`desc`, `avail`, `used`) to
+// physically contiguous DMA memory that it owns exclusively. These pointers
+// are not aliased by any other Rust object. Sending a VirtQueue to another
+// thread is safe because the pointed-to memory is valid from allocation
+// until Drop, and the virtio device accesses it via physical (not virtual)
+// addresses.
+//
+// IMPORTANT: VirtQueue itself is NOT internally synchronized. Callers MUST
+// hold it behind a Mutex (or equivalent) to prevent concurrent access.
+// In VeridianOS, VirtioBlkDevice wraps VirtQueue in a spin::Mutex inside
+// the global VIRTIO_BLK OnceLock.
 unsafe impl Send for VirtQueue {}
-// SAFETY: VirtQueue is always accessed behind a Mutex (in the global
-// VIRTIO_BLK OnceLock<Mutex<VirtioBlkDevice>>), so only one thread can
-// access the raw pointers at a time. The pointers themselves are stable
-// (allocated once, freed only on drop).
+// SAFETY: Shared references to VirtQueue are safe because the type is always
+// accessed behind a Mutex (specifically, the global VIRTIO_BLK
+// OnceLock<Mutex<VirtioBlkDevice>>). Only one thread can hold &mut VirtQueue
+// at a time through the Mutex guard. The raw pointers themselves are stable
+// (allocated once in new(), freed only in drop()) and never modified after
+// construction.
+//
+// IMPORTANT: If VirtQueue is ever used outside a Mutex, this impl is UNSOUND.
+// Do not remove the Mutex wrapper without replacing these impls with proper
+// internal synchronization.
 unsafe impl Sync for VirtQueue {}
 
 /// Align `value` up to the next multiple of `align`.

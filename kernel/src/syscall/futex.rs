@@ -1,10 +1,12 @@
-//! Futex syscall handlers (FUTEX_WAIT, FUTEX_WAKE).
+//! Futex syscall handlers (FUTEX_WAIT, FUTEX_WAKE, FUTEX_REQUEUE,
+//! FUTEX_WAKE_OP).
 //!
-//! Implements per-process futex wait queues keyed by user virtual address. The
-//! implementation enforces:
+//! Implements Linux-compatible futex (fast userspace mutex) operations keyed by
+//! per-process user virtual address.  The implementation enforces:
 //! - 32-bit aligned futex words
 //! - Per-process isolation (same address in different processes does not alias)
 //! - Atomic re-check of expected value before sleeping
+//! - Bitset-aware wake filtering for `FUTEX_WAIT_BITSET` / `FUTEX_WAKE` callers
 
 use alloc::{collections::BTreeMap, vec::Vec};
 
@@ -44,25 +46,54 @@ const FUTEX_REQUEUE: u32 = 3;
 const FUTEX_WAIT_BITSET: u32 = 9;
 const FUTEX_WAKE_OP: u32 = 5;
 
+/// Special bitset value that matches any waiter, equivalent to plain
+/// `FUTEX_WAKE`.  Linux defines this as `FUTEX_BITSET_MATCH_ANY`.
+const FUTEX_WAIT_BITSET_MATCH_ANY: u32 = 0xFFFF_FFFF;
+
 // Futex wait queue keyed by (pid, uaddr)
 type FutexKey = (u64, usize);
 
 struct FutexWaiter {
     task: core::ptr::NonNull<sched::task::Task>,
     priority: u8,
+    /// Bitset supplied by the waiting thread.  A waker only unblocks this
+    /// waiter when `wake_bitset & waiter.bitset != 0`.
+    bitset: u32,
 }
 
+// SAFETY: FutexWaiter holds a NonNull<Task> that is only accessed while the
+// FUTEX_TABLE lock is held or by the scheduler after the waiter has been
+// dequeued.  Send/Sync are required so the BTreeMap can live in a static
+// Mutex, which is safe because all accesses are serialised by the spinlock.
 unsafe impl Send for FutexWaiter {}
 unsafe impl Sync for FutexWaiter {}
 
 static FUTEX_TABLE: Mutex<BTreeMap<FutexKey, Vec<FutexWaiter>>> = Mutex::new(BTreeMap::new());
 
-/// FUTEX_WAIT (optionally with relative timeout in ticks)
+/// Perform a `FUTEX_WAIT` or `FUTEX_WAIT_BITSET` operation.
 ///
-/// `op` is the raw futex operation field. For FUTEX_WAIT_BITSET the caller
-/// passes the bitset mask in `aux` (val3). For plain FUTEX_WAIT the `aux`
-/// parameter is treated as the timeout length (must match sizeof(u64) when a
-/// timeout pointer is provided).
+/// Atomically checks that `*uaddr == expected` and, if so, suspends the
+/// calling thread on the per-process wait queue keyed by `uaddr`.  The thread
+/// is woken by a corresponding `FUTEX_WAKE` (or `FUTEX_WAKE_OP` /
+/// `FUTEX_REQUEUE`) call, by a timeout, or by an incoming signal.
+///
+/// # Arguments
+///
+/// * `uaddr`       - User-space address of a 32-bit aligned futex word.
+/// * `expected`    - Value that `*uaddr` must equal for the wait to proceed.
+/// * `timeout_ptr` - Optional pointer to a `u64` timeout value (ticks). Zero
+///   means no timeout.
+/// * `aux`         - For `FUTEX_WAIT_BITSET`: the 32-bit bitset mask (must be
+///   non-zero).  For plain `FUTEX_WAIT`: must be `sizeof(u64)` when a timeout
+///   is supplied.
+/// * `op`          - Raw futex operation field (includes command + flags).
+///
+/// # Returns
+///
+/// `Ok(0)` on successful wake, or an error:
+/// - `InvalidArgument` if alignment / argument validation fails.
+/// - `WouldBlock` if `*uaddr != expected` or if the timeout expired.
+/// - `Interrupted` if a signal was pending when the thread woke.
 pub fn sys_futex_wait(
     uaddr: usize,
     expected: u32,
@@ -74,11 +105,13 @@ pub fn sys_futex_wait(
     if uaddr == 0 || uaddr & 0x3 != 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    // Must reside in user space
+    // Must reside in user space (single validation -- no duplicate call)
     validate_user_ptr(uaddr as *const u32, core::mem::size_of::<u32>())?;
 
-    // Validate user memory and read current value
-    validate_user_ptr(uaddr as *const u32, core::mem::size_of::<u32>())?;
+    // SAFETY: `uaddr` has been validated as a properly-aligned, mapped,
+    // user-space pointer to a u32.  We use `read_volatile` because another
+    // thread sharing this address space may concurrently modify the futex
+    // word; a non-volatile read could be elided or reordered by the compiler.
     let cur = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
     if cur != expected {
         return Err(SyscallError::WouldBlock);
@@ -93,7 +126,7 @@ pub fn sys_futex_wait(
         }
         mask
     } else {
-        0xFFFF_FFFF // match-any mask (Linux's FUTEX_BITSET_MATCH_ANY)
+        FUTEX_WAIT_BITSET_MATCH_ANY
     };
 
     // Optional timeout: expect a u64 ticks value
@@ -104,6 +137,9 @@ pub fn sys_futex_wait(
             return Err(SyscallError::InvalidArgument);
         }
         validate_user_ptr(timeout_ptr as *const u64, core::mem::size_of::<u64>())?;
+        // SAFETY: `timeout_ptr` has been validated as a properly-aligned,
+        // mapped, user-space pointer to a u64.  Volatile read is used because
+        // the caller could theoretically share this memory with another thread.
         let rel = unsafe { core::ptr::read_volatile(timeout_ptr as *const u64) };
         // If op uses absolute time (FUTEX_CLOCK_REALTIME bit), treat rel as absolute
         // ticks
@@ -126,7 +162,9 @@ pub fn sys_futex_wait(
         let sched = crate::sched::scheduler::current_scheduler();
         let slock = sched.lock();
         let task = slock.current().ok_or(SyscallError::InvalidState)?;
-        // mark state blocked
+        // SAFETY: We hold the scheduler lock, which guarantees exclusive
+        // access to the current task's state field.  The pointer is valid
+        // because it was obtained from the scheduler's active task list.
         unsafe {
             (*task.as_ptr()).state = process::ProcessState::Blocked;
         }
@@ -134,11 +172,17 @@ pub fn sys_futex_wait(
     };
 
     {
+        // SAFETY: We hold the scheduler lock above (now dropped), and the
+        // task pointer remains valid because the task is Blocked and cannot
+        // be freed while it is on a wait queue.  Reading priority is safe
+        // because we are the only thread that can modify our own task while
+        // it is in the Blocked state.
         let prio = unsafe { (*task_ptr.as_ptr()).priority as u8 };
         let mut table = FUTEX_TABLE.lock();
         table.entry(key).or_default().push(FutexWaiter {
             task: task_ptr,
             priority: prio,
+            bitset: bitset_mask,
         });
     }
 
@@ -177,22 +221,45 @@ pub fn sys_futex_wait(
         }
     }
 
-    let _ = bitset_mask; // reserved for FUTEX_WAIT_BITSET wake filtering
-
     Ok(0)
 }
 
-/// FUTEX_WAKE
+/// Perform a `FUTEX_WAKE` operation, waking up to `num_wake` threads
+/// waiting on the futex word at `uaddr`.
+///
+/// Only waiters whose bitset overlaps with `wake_bitset` are eligible.
+/// A `wake_bitset` of `FUTEX_WAIT_BITSET_MATCH_ANY` (0xFFFF_FFFF) wakes
+/// any waiter regardless of its individual bitset.
+///
+/// # Arguments
+///
+/// * `uaddr`        - User-space address of the 32-bit aligned futex word.
+/// * `num_wake`     - Maximum number of waiters to wake.
+/// * `wake_bitset`  - Bitset mask for selective waking.  Pass
+///   `FUTEX_WAIT_BITSET_MATCH_ANY` for unconditional wake.
+///
+/// # Returns
+///
+/// `Ok(n)` where `n` is the number of waiters actually woken, or an error
+/// if argument validation fails.
 pub fn sys_futex_wake(
     uaddr: usize,
     num_wake: usize,
-    _unused: usize,
+    wake_bitset: usize,
 ) -> Result<isize, SyscallError> {
     if uaddr == 0 || uaddr & 0x3 != 0 {
         return Err(SyscallError::InvalidArgument);
     }
 
     validate_user_ptr(uaddr as *const u32, core::mem::size_of::<u32>())?;
+
+    // Interpret the wake bitset: 0 means the caller did not supply one
+    // (plain FUTEX_WAKE), so default to match-any.
+    let wake_bits: u32 = if wake_bitset == 0 {
+        FUTEX_WAIT_BITSET_MATCH_ANY
+    } else {
+        wake_bitset as u32
+    };
 
     let pid = process::current_process()
         .ok_or(SyscallError::InvalidState)?
@@ -207,11 +274,17 @@ pub fn sys_futex_wake(
         if let Some(waiters) = table.get_mut(&key) {
             // Sort by priority descending, then FIFO
             waiters.sort_by(|a, b| b.priority.cmp(&a.priority));
-            let count = core::cmp::min(num_wake, waiters.len());
-            for _ in 0..count {
-                let w = waiters.remove(0);
-                to_wake.push(w.task);
-                woken += 1;
+
+            // Drain eligible waiters whose bitset overlaps with wake_bits
+            let mut i = 0;
+            while i < waiters.len() && woken < num_wake {
+                if waiters[i].bitset & wake_bits != 0 {
+                    let w = waiters.remove(i);
+                    to_wake.push(w.task);
+                    woken += 1;
+                } else {
+                    i += 1;
+                }
             }
             if waiters.is_empty() {
                 table.remove(&key);
@@ -219,11 +292,15 @@ pub fn sys_futex_wake(
         }
     }
 
-    // Wake tasks (simple FIFO; future: priority-based selection)
+    // Wake tasks outside the table lock to minimise lock hold time
     if woken > 0 {
         let scheduler = crate::sched::scheduler::current_scheduler();
         let slock = scheduler.lock();
         for task_ptr in to_wake {
+            // SAFETY: `task_ptr` was obtained from the futex wait queue and
+            // is guaranteed to be valid because blocked tasks are not freed
+            // while they reside on a wait queue.  We transition the task
+            // from Blocked -> Ready and re-enqueue it in the scheduler.
             unsafe {
                 (*task_ptr.as_ptr()).state = process::ProcessState::Ready;
             }
@@ -234,14 +311,25 @@ pub fn sys_futex_wake(
     Ok(woken as isize)
 }
 
-/// FUTEX dispatcher (matches Linux parameter order)
+/// Top-level futex dispatcher matching the Linux `futex(2)` parameter order.
 ///
-/// Args:
-/// - `uaddr`: user futex word
-/// - `val`: expected (for WAIT) or wake count (for WAKE/REQUEUE)
-/// - `uaddr2`: secondary futex for REQUEUE/WAKE_OP
-/// - `val3`: requeue count or timeout len/bitset depending on op
-/// - `op`: futex operation + flags
+/// Decodes the operation from the `op` field and delegates to the appropriate
+/// handler.  Validates alignment and user-space addresses up front.
+///
+/// # Arguments
+///
+/// * `uaddr`  - Primary futex word address (must be 4-byte aligned, in user
+///   space).
+/// * `val`    - Interpretation depends on operation: expected value (WAIT),
+///   wake count (WAKE/REQUEUE), etc.
+/// * `uaddr2` - Secondary futex address for `FUTEX_REQUEUE` / `FUTEX_WAKE_OP`.
+/// * `val3`   - Auxiliary value: requeue count, timeout size, or bitset.
+/// * `op`     - Futex operation code plus optional flags (e.g.
+///   `FUTEX_CLOCK_REALTIME`).
+///
+/// # Returns
+///
+/// Depends on the sub-operation; see individual handler documentation.
 pub fn sys_futex_dispatch(
     uaddr: usize,
     val: usize,
@@ -272,8 +360,28 @@ pub fn sys_futex_dispatch(
     }
 }
 
-/// FUTEX_WAKE_OP (limited implementation): perform atomic op on uaddr2 then
-/// wake up to val waiters on uaddr.
+/// Perform a `FUTEX_WAKE_OP` operation: atomically apply an arithmetic
+/// operation to `*uaddr2`, compare the old value against `cmparg`, and
+/// conditionally wake waiters on `uaddr`.
+///
+/// The `op` parameter encodes both the arithmetic operation and the
+/// comparison in a packed format compatible with Linux:
+/// ```text
+/// op = oparg[15:0] | (op_code[3:0] << 24) | (cmp_code[3:0] << 28)
+/// ```
+///
+/// # Arguments
+///
+/// * `uaddr`  - Primary futex word to wake on (if comparison passes).
+/// * `wake`   - Maximum number of waiters to wake on `uaddr`.
+/// * `uaddr2` - Futex word to modify atomically.
+/// * `op`     - Packed operation + comparison + argument.
+/// * `_unused` - Reserved (unused).
+///
+/// # Returns
+///
+/// `Ok(n)` where `n` is the number of waiters woken, or `Ok(0)` if the
+/// comparison failed.
 pub fn sys_futex_wake_op(
     uaddr: usize,
     wake: usize,
@@ -295,8 +403,9 @@ pub fn sys_futex_wake_op(
     let oparg = (op as u32) & FUTEX_OPARG_MASK;
     let cmparg = ((op >> 12) & FUTEX_OPARG_MASK as usize) as u32;
 
-    // Apply operation atomically on uaddr2
-    validate_user_ptr(uaddr2 as *const u32, core::mem::size_of::<u32>())?;
+    // SAFETY: `uaddr2` has been validated as a properly-aligned, mapped,
+    // user-space pointer.  Volatile read is required because another thread
+    // may concurrently modify this memory location.
     let cur = unsafe { core::ptr::read_volatile(uaddr2 as *const u32) };
     let new_val = match op_code {
         FUTEX_OP_SET => oparg,
@@ -306,6 +415,9 @@ pub fn sys_futex_wake_op(
         FUTEX_OP_XOR => cur ^ oparg,
         _ => return Err(SyscallError::InvalidArgument),
     };
+    // SAFETY: Same validation as above.  Volatile write is required because
+    // other threads may be reading this memory concurrently (e.g. in a
+    // FUTEX_WAIT spin).
     unsafe {
         core::ptr::write_volatile(uaddr2 as *mut u32, new_val);
     }
@@ -321,16 +433,32 @@ pub fn sys_futex_wake_op(
         _ => false,
     };
 
-    // If compare passes, wake
+    // If compare passes, wake (use match-any bitset for WAKE_OP)
     if cmp_ok {
-        sys_futex_wake(uaddr, wake, 0)
+        sys_futex_wake(uaddr, wake, FUTEX_WAIT_BITSET_MATCH_ANY as usize)
     } else {
         Ok(0)
     }
 }
 
-/// FUTEX_REQUEUE (wake up to wake_count at uaddr, then move up to requeue_count
-/// waiters to uaddr2)
+/// Perform a `FUTEX_REQUEUE` operation: wake up to `wake_count` threads on
+/// `uaddr`, then move up to `requeue_count` remaining waiters from `uaddr`
+/// to `uaddr2`.
+///
+/// This is used by `pthread_cond_broadcast` and similar primitives to
+/// efficiently transfer waiters from a condition variable's futex to a
+/// mutex's futex without thundering-herd wakeups.
+///
+/// # Arguments
+///
+/// * `uaddr`         - Source futex word address.
+/// * `wake_count`    - Maximum number of waiters to wake immediately.
+/// * `uaddr2`        - Destination futex word address for requeued waiters.
+/// * `requeue_count` - Maximum number of waiters to move to `uaddr2`.
+///
+/// # Returns
+///
+/// `Ok(n)` where `n` is the total number of waiters woken plus requeued.
 pub fn sys_futex_requeue(
     uaddr: usize,
     wake_count: usize,
@@ -388,6 +516,9 @@ pub fn sys_futex_requeue(
         let scheduler = crate::sched::scheduler::current_scheduler();
         let slock = scheduler.lock();
         for task_ptr in to_wake {
+            // SAFETY: `task_ptr` was obtained from the futex wait queue and
+            // is valid because blocked tasks are not freed while on a queue.
+            // We transition Blocked -> Ready and re-enqueue.
             unsafe {
                 (*task_ptr.as_ptr()).state = process::ProcessState::Ready;
             }

@@ -1,14 +1,30 @@
 /*
  * VeridianOS libc -- pthread.c
  *
- * POSIX-ish threading primitives built on SYS_THREAD_CLONE, SYS_THREAD_JOIN,
- * and SYS_FUTEX. This is designed to be good enough for toolchains (GCC,
- * make/ninja) and libc userspace without depending on kernel-side helper
- * threads.
+ * Minimal POSIX pthreads implementation for VeridianOS self-hosting.
+ *
+ * This provides a subset of POSIX threading primitives sufficient for
+ * cross-compiling toolchains (GCC, binutils) and build systems (make, ninja)
+ * on VeridianOS. It does NOT aim for full POSIX compliance -- only the
+ * primitives actually used by self-hosting toolchain code are implemented.
+ *
+ * Threading model:
+ *   - Threads are created via SYS_THREAD_CLONE (Linux clone-style semantics).
+ *   - Synchronization uses SYS_FUTEX (futex_wait / futex_wake / futex_requeue).
+ *   - Thread joining uses SYS_THREAD_JOIN with CLONE_CHILD_CLEARTID for
+ *     robust exit notification.
+ *   - No kernel-side helper threads are required.
+ *
+ * Limitations:
+ *   - No thread cancellation (pthread_cancel is not implemented).
+ *   - No robust mutexes or priority inheritance.
+ *   - No thread-local storage keys (pthread_key_create et al. are stubs).
+ *   - Condition variable timedwait does not handle clock selection.
  */
 
 #include <pthread.h>
 #include <errno.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
@@ -110,18 +126,31 @@ static void ensure_main_tcb(void)
     main_tcb_ready = 1;
 }
 
-/* Spinlock for internal lists */
+/* Spinlock for internal lists.
+ *
+ * Uses an atomic exchange for the fast path, falling back to futex_wait when
+ * contended. The futex return value is checked: EINTR (spurious wakeup or
+ * signal) causes a retry, and EWOULDBLOCK (value changed) is expected and
+ * also retries. Any other error breaks out to retry the CAS -- the worst
+ * case is spinning, which is acceptable for a short critical section.
+ */
 static int global_lock = 0;
 static inline void lock_global(void)
 {
     while (__atomic_exchange_n(&global_lock, 1, __ATOMIC_ACQUIRE)) {
-        futex_wait(&global_lock, 1, NULL);
+        int r = futex_wait(&global_lock, 1, NULL);
+        if (r == -1 && errno != EINTR && errno != EWOULDBLOCK) {
+            /* Unexpected futex error -- fall through to retry the CAS.
+             * For a short critical section this degenerates to a spinlock,
+             * which is acceptable. */
+        }
     }
 }
 static inline void unlock_global(void)
 {
     __atomic_store_n(&global_lock, 0, __ATOMIC_RELEASE);
-    futex_wake(&global_lock, 1);
+    int r = futex_wake(&global_lock, 1);
+    (void)r; /* Wake failure is benign: worst case a waiter spins once. */
 }
 
 /* Simple registry of live TCBs */
@@ -194,6 +223,21 @@ int pthread_mutex_destroy(pthread_mutex_t *mutex)
     return 0;
 }
 
+/*
+ * pthread_mutex_lock -- acquire a mutex, blocking if necessary.
+ *
+ * Futex-based mutex implementation:
+ *   state == 0: unlocked
+ *   state == 1: locked
+ *
+ *   Fast path: atomic CAS 0 -> 1. If the mutex is uncontended this is a
+ *   single atomic instruction with no syscall overhead.
+ *
+ *   Slow path: if the CAS fails (mutex is held), we call futex_wait() to
+ *   sleep until the holder calls futex_wake() in pthread_mutex_unlock().
+ *   On wakeup we retry the CAS -- spurious wakeups and races between
+ *   multiple waiters are handled by the retry loop.
+ */
 int pthread_mutex_lock(pthread_mutex_t *mutex)
 {
     int err = ensure_futex_ready();
@@ -201,11 +245,13 @@ int pthread_mutex_lock(pthread_mutex_t *mutex)
         return err;
     }
 
+    /* Fast path: uncontended lock */
     int expected = 0;
     if (__atomic_compare_exchange_n(&mutex->state, &expected, 1, false,
                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
         return 0;
     }
+    /* Slow path: contended -- sleep on the futex until the lock is released */
     while (1) {
         expected = 0;
         if (__atomic_compare_exchange_n(&mutex->state, &expected, 1, false,
@@ -231,6 +277,18 @@ int pthread_mutex_trylock(pthread_mutex_t *mutex)
     return EBUSY;
 }
 
+/*
+ * pthread_mutex_unlock -- release a mutex and wake one waiter.
+ *
+ * Atomically stores 0 (unlocked) with release ordering to ensure all
+ * preceding critical section writes are visible before the lock appears
+ * free. Then calls futex_wake() to unblock at most one waiter sleeping
+ * in pthread_mutex_lock().
+ *
+ * We always call futex_wake() even if there might be no waiters, because
+ * tracking the "contended" state would require a 3-state protocol. The
+ * wake syscall on an empty wait queue is cheap (returns 0 immediately).
+ */
 int pthread_mutex_unlock(pthread_mutex_t *mutex)
 {
     int err = ensure_futex_ready();
@@ -338,6 +396,31 @@ static void child_trampoline(struct pthread_control *tcb)
     __builtin_unreachable();
 }
 
+/*
+ * pthread_create -- create a new thread.
+ *
+ * Stack allocation strategy:
+ *   We malloc(stack_size + 16) to guarantee 16-byte alignment for the ABI
+ *   (x86_64 System V, AArch64 AAPCS64). The raw malloc'd pointer is saved
+ *   in tcb->stack_alloc for later free(); the aligned pointer is used as
+ *   the usable stack base.
+ *
+ * TCB (Thread Control Block) setup:
+ *   A heap-allocated pthread_control struct holds per-thread metadata: the
+ *   stack pointers, detach state, return value, start routine, and the
+ *   exit_futex used by CLONE_CHILD_CLEARTID for join notification.
+ *
+ * Clone syscall usage:
+ *   We call veridian_thread_clone() with CLONE_VM | CLONE_FS | CLONE_FILES |
+ *   CLONE_SIGHAND | CLONE_THREAD (shared address space, file table, and
+ *   signal handlers) plus CLONE_SETTLS (set the thread pointer to the TCB),
+ *   CLONE_CHILD_CLEARTID (kernel zeroes exit_futex on exit and does a futex
+ *   wake, enabling join), CLONE_CHILD_SETTID and CLONE_PARENT_SETTID (kernel
+ *   writes the new TID into the TCB).
+ *
+ * The TCB is registered in the global TCB list only AFTER the clone syscall
+ * succeeds, so that a failed clone never leaves a dangling registry entry.
+ */
 int pthread_create(pthread_t *thread,
                    const pthread_attr_t *attr,
                    void *(*start_routine)(void *),
@@ -350,7 +433,9 @@ int pthread_create(pthread_t *thread,
     ensure_main_tcb();
 
     size_t stack_size = (attr && attr->stack_size) ? attr->stack_size : (1024 * 1024);
-    /* Manual 16-byte alignment */
+
+    /* Allocate stack_size + 16 bytes so we can manually align to a 16-byte
+     * boundary. Save the raw pointer for free(). */
     void *raw = malloc(stack_size + 16);
     if (!raw) {
         return ENOMEM;
@@ -360,7 +445,7 @@ int pthread_create(pthread_t *thread,
 
     struct pthread_control *tcb = calloc(1, sizeof(*tcb));
     if (!tcb) {
-        free(stack);
+        free(raw);  /* free the original malloc'd pointer, not the aligned one */
         return ENOMEM;
     }
     tcb->stack = stack;
@@ -371,7 +456,8 @@ int pthread_create(pthread_t *thread,
     tcb->arg = arg;
     tcb->exit_futex = 0;
 
-    /* Reserve space to push start_routine and arg for the kernel entry */
+    /* Set up the child stack: push start_routine and arg at the top so the
+     * kernel entry trampoline can pop them. Stack grows downward. */
     void **child_stack_top = (void **)((uint8_t *)stack + stack_size);
     *(--child_stack_top) = arg;
     *(--child_stack_top) = (void *)start_routine;
@@ -379,24 +465,27 @@ int pthread_create(pthread_t *thread,
                           CLONE_THREAD | CLONE_SETTLS |
                           CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID | CLONE_PARENT_SETTID;
 
+    /* NOTE: register_tcb() is intentionally NOT called here -- it is called
+     * below, only after clone succeeds, to avoid leaving a dangling TCB
+     * registry entry on failure. */
     long ret = veridian_thread_clone(flags,
                                      child_stack_top,
                                      (int *)&tcb->tid,
                                      (int *)&tcb->tid,
                                      tcb);
     if (ret < 0) {
-        int err = errno;
+        int clone_err = errno;
         free(raw);
         free(tcb);
-        return err ? err : (int)-ret;
+        return clone_err ? clone_err : (int)-ret;
     }
 
     if (ret == 0) {
-        /* Child path */
+        /* Child path -- never returns */
         child_trampoline(tcb);
     }
 
-    /* Parent path */
+    /* Parent path: clone succeeded, now register the TCB. */
     tcb->tid = (pthread_t)ret;
     register_tcb(tcb);
     if (thread) {
@@ -405,6 +494,19 @@ int pthread_create(pthread_t *thread,
     return 0;
 }
 
+/*
+ * pthread_join -- wait for a thread to terminate and retrieve its return value.
+ *
+ * Futex-based wait mechanism:
+ *   The target thread was created with CLONE_CHILD_CLEARTID, so when it exits
+ *   the kernel atomically zeroes its exit_futex and performs a futex wake on
+ *   that address. SYS_THREAD_JOIN blocks the caller until that wake occurs
+ *   (or returns immediately if the thread has already exited).
+ *
+ *   After the join syscall returns, we read the return value from the TCB
+ *   (which the child wrote before calling SYS_THREAD_EXIT), then unregister
+ *   and free the TCB and its stack allocation.
+ */
 int pthread_join(pthread_t thread, void **retval)
 {
     ensure_main_tcb();

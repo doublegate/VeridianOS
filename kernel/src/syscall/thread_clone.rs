@@ -24,15 +24,46 @@ const CLONE_PARENT_SETTID: usize = 0x0010_0000;
 const CLONE_CHILD_CLEARTID: usize = 0x0020_0000;
 const CLONE_CHILD_SETTID: usize = 0x0100_0000;
 
-/// Create a new thread sharing the current process resources.
+/// Upper bound of the user-space address range.  Any stack pointer must be
+/// strictly below this address.  The value matches the canonical user-space
+/// limit on x86_64; AArch64 and RISC-V use the same logical limit via
+/// `validate_user_ptr`.
+const USER_SPACE_END: usize = 0x0000_8000_0000_0000;
+
+/// Create a new thread sharing the current process's address space and
+/// resources, following the Linux `clone(2)` semantics for thread creation.
 ///
-/// Args:
-/// - flags: must include CLONE_VM|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD
-///   (optional CLONE_FS)
-/// - newsp: user stack pointer for new thread
-/// - parent_tid: (ignored for now)
-/// - child_tid: (ignored for now)
-/// - tls: TLS base pointer for new thread (arch-specific FS/TP base)
+/// The new thread shares the parent's virtual memory (`CLONE_VM`), file
+/// descriptor table (`CLONE_FILES`), signal handlers (`CLONE_SIGHAND`), and
+/// thread group (`CLONE_THREAD`).  These four flags are mandatory.  Optional
+/// flags include:
+///
+/// - `CLONE_FS` — share current working directory and umask.  If not set the
+///   child gets an independent copy.
+/// - `CLONE_SETTLS` — set the TLS base register (FS on x86_64, TPIDR_EL0 on
+///   AArch64, `tp` on RISC-V) to `tls`.
+/// - `CLONE_PARENT_SETTID` — write the child's TID to `*parent_tid_ptr` in the
+///   parent's address space before the child starts running.
+/// - `CLONE_CHILD_SETTID` — write the child's TID to `*child_tid_ptr` in the
+///   child's address space.
+/// - `CLONE_CHILD_CLEARTID` — register `child_tid_ptr` so that when the child
+///   exits, the kernel zeroes `*child_tid_ptr` and performs a `FUTEX_WAKE` on
+///   that address (used by `pthread_join`).
+///
+/// # Arguments
+///
+/// * `flags`          - Combination of `CLONE_*` flags.
+/// * `newsp`          - User-space stack pointer for the new thread (must be
+///   non-zero and within user space).
+/// * `parent_tid_ptr` - Address to write child TID if `CLONE_PARENT_SETTID`.
+/// * `child_tid_ptr`  - Address for `CLONE_CHILD_SETTID` /
+///   `CLONE_CHILD_CLEARTID`.
+/// * `tls`            - TLS base if `CLONE_SETTLS` is set.
+///
+/// # Returns
+///
+/// `Ok(tid)` with the new thread's TID on success, or a `SyscallError` on
+/// failure.
 pub fn sys_thread_clone(
     flags: usize,
     newsp: usize,
@@ -64,6 +95,13 @@ pub fn sys_thread_clone(
 
     // Basic user stack validation
     if newsp == 0 {
+        return Err(SyscallError::InvalidPointer);
+    }
+    // Ensure the stack pointer is within the user-space address range.
+    // Kernel addresses (>= 0x0000_8000_0000_0000 on x86_64) must be
+    // rejected to prevent a malicious caller from running a thread with
+    // a kernel-space stack.
+    if newsp >= USER_SPACE_END {
         return Err(SyscallError::InvalidPointer);
     }
 
@@ -154,20 +192,43 @@ pub fn sys_thread_clone(
     // Mark ready
     proc.set_state(ProcessState::Ready);
 
-    // Parent_tid write
+    // CLONE_PARENT_SETTID: write the child's TID into the parent's address
+    // space at `parent_tid_ptr`.  This happens in the parent's context
+    // (before the child is scheduled) so the parent can observe the TID
+    // immediately after clone returns.
     if flags & CLONE_PARENT_SETTID != 0 {
+        // SAFETY: `parent_tid_ptr` was validated above via `validate_user_ptr`.
+        // `copy_to_user` performs its own bounds check as a defence-in-depth
+        // measure.  The write is a single u32 which is naturally aligned.
         unsafe {
             crate::syscall::userspace::copy_to_user(parent_tid_ptr, &(tid.0 as u32))
                 .map_err(|_| SyscallError::InvalidPointer)?;
         }
     }
 
+    // CLONE_CHILD_SETTID: write the child's TID into `child_tid_ptr`.
+    // TODO(tier7): On Linux this write happens in the *child's* address
+    // space after the child begins execution.  Because CLONE_VM is
+    // mandatory here (shared address space), writing from the parent
+    // context is equivalent.  For full fork() support (separate address
+    // spaces) this would need to be deferred to the child's first
+    // scheduling quantum.
     if flags & CLONE_CHILD_SETTID != 0 {
+        // SAFETY: `child_tid_ptr` was validated above via `validate_user_ptr`.
+        // The pointer targets shared user memory (CLONE_VM is set).
         unsafe {
             crate::syscall::userspace::copy_to_user(child_tid_ptr, &(tid.0 as u32))
                 .map_err(|_| SyscallError::InvalidPointer)?;
         }
     }
+
+    // TODO(tier7): CLONE_CHILD_CLEARTID is registered via `builder.clear_tid()`
+    // above.  On thread exit the kernel should:
+    //   1. Write 0 to `*child_tid_ptr` (in the thread's address space).
+    //   2. Perform a FUTEX_WAKE on `child_tid_ptr` to unblock any `pthread_join`
+    //      waiters.
+    // This is currently handled by the thread exit path if the clear_tid
+    // field is set; verify integration in the exit syscall.
 
     Ok(tid.0 as usize)
 }

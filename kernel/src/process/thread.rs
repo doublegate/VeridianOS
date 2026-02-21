@@ -23,16 +23,33 @@ use crate::{
     sched::task::Task,
 };
 
-/// Per-thread filesystem view (cwd + umask).
+/// Per-thread filesystem state for CLONE_FS support.
+///
+/// Each thread has a reference-counted `ThreadFs` that holds the thread's
+/// current working directory (cwd) and file creation mask (umask). When
+/// `CLONE_FS` is set during `clone()`, the parent and child share the same
+/// `Arc<ThreadFs>`, so changes to cwd or umask in one thread are visible
+/// to the other. When `CLONE_FS` is not set, the child receives an
+/// independent copy (via [`clone_copy`](Self::clone_copy)).
+///
+/// This mirrors the Linux kernel's `struct fs_struct` semantics.
 #[cfg(feature = "alloc")]
 #[derive(Debug)]
 pub struct ThreadFs {
+    /// Current working directory path. Protected by a spinlock because
+    /// it can be read from syscall paths (getcwd) and modified from
+    /// others (chdir) concurrently.
     pub cwd: Mutex<alloc::string::String>,
+    /// File creation mask (umask). Atomic because it can be read/written
+    /// from concurrent syscall paths without holding a lock.
     pub umask: AtomicU32,
 }
 
 #[cfg(feature = "alloc")]
 impl ThreadFs {
+    /// Create a new root filesystem state with cwd="/" and umask=0o022.
+    ///
+    /// Used for the initial thread of a new process.
     pub fn new_root() -> Arc<Self> {
         Arc::new(Self {
             cwd: Mutex::new(alloc::string::String::from("/")),
@@ -40,10 +57,19 @@ impl ThreadFs {
         })
     }
 
+    /// Share the filesystem state (CLONE_FS semantics).
+    ///
+    /// Returns a clone of the `Arc`, so parent and child reference the
+    /// same underlying `ThreadFs`. Changes to cwd or umask in either
+    /// thread are visible to the other.
     pub fn clone_shared(src: &Arc<Self>) -> Arc<Self> {
         src.clone()
     }
 
+    /// Copy the filesystem state (non-CLONE_FS semantics).
+    ///
+    /// Creates a new independent `ThreadFs` with the same cwd and umask
+    /// values. Subsequent changes in either thread are isolated.
     pub fn clone_copy(src: &Arc<Self>) -> Arc<Self> {
         Arc::new(Self {
             cwd: Mutex::new(src.cwd.lock().clone()),
@@ -664,7 +690,32 @@ impl Thread {
     }
 }
 
-/// Thread builder for convenient thread creation
+/// Builder for creating new threads with specific configurations.
+///
+/// `ThreadBuilder` follows the builder pattern to construct a `Thread`
+/// with custom stack sizes, priority, CPU affinity, TLS base, and
+/// filesystem state. The [`build`](Self::build) method allocates physical
+/// frames for both user and kernel stacks, assigns virtual address regions
+/// with guard pages, and initializes the thread's CPU context.
+///
+/// # Example
+///
+/// ```ignore
+/// let thread = ThreadBuilder::new(pid, "worker".into(), entry_fn as usize)
+///     .user_stack_size(2 * 1024 * 1024)  // 2 MB user stack
+///     .priority(3)
+///     .cpu_affinity(0x3)                  // CPUs 0 and 1
+///     .build()?;
+/// ```
+///
+/// # Defaults
+///
+/// - User stack: 1 MB
+/// - Kernel stack: 64 KB
+/// - Priority: 2 (normal)
+/// - CPU affinity: all CPUs (usize::MAX)
+/// - TLS base: None (no TLS)
+/// - Filesystem state: new root ("/", umask 0o022)
 #[cfg(feature = "alloc")]
 pub struct ThreadBuilder {
     process: ProcessId,
@@ -681,7 +732,12 @@ pub struct ThreadBuilder {
 
 #[cfg(feature = "alloc")]
 impl ThreadBuilder {
-    /// Create a new thread builder
+    /// Create a new thread builder with required parameters.
+    ///
+    /// # Arguments
+    /// - `process`: The parent process ID that owns this thread.
+    /// - `name`: Human-readable thread name (for debugging/logging).
+    /// - `entry_point`: Virtual address where thread execution begins.
     pub fn new(process: ProcessId, name: String, entry_point: usize) -> Self {
         Self {
             process,
@@ -727,13 +783,23 @@ impl ThreadBuilder {
         self
     }
 
-    /// Set filesystem view (cwd/umask) for the new thread
+    /// Set the filesystem view (cwd/umask) for the new thread.
+    ///
+    /// When creating a thread via `clone()` with `CLONE_FS`, pass a
+    /// shared `Arc<ThreadFs>` from the parent. Without `CLONE_FS`, pass
+    /// a copy via [`ThreadFs::clone_copy`]. If not set, the builder
+    /// defaults to a new root filesystem state.
     pub fn fs(mut self, fs: Arc<ThreadFs>) -> Self {
         self.fs = Some(fs);
         self
     }
 
-    /// Set TLS base for the new thread (CLONE_SETTLS / arch_prctl semantics)
+    /// Set the TLS (Thread-Local Storage) base address for the new thread.
+    ///
+    /// This corresponds to `CLONE_SETTLS` on Linux or `arch_prctl(ARCH_SET_FS)`
+    /// on x86_64. The base address is written into the architecture-specific
+    /// TLS register (FS base on x86_64, TPIDR_EL0 on AArch64, tp on RISC-V)
+    /// when the thread is first scheduled.
     pub fn tls_base(mut self, base: usize) -> Self {
         self.tls_base = Some(base);
         self

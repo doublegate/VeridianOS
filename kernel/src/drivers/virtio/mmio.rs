@@ -1,8 +1,24 @@
 //! Virtio MMIO transport (virtio 1.0 legacy-compatible)
 //!
-//! Supports the common virtio-mmio register set used by QEMU `-machine virt` on
-//! AArch64/RISC-V. This is a minimal implementation sufficient for virtio-blk
-//! using split virtqueues.
+//! Implements the virtio-over-MMIO transport layer as defined in the
+//! [virtio specification, section 4.2](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html).
+//! This is the transport used on AArch64 and RISC-V QEMU `virt` machines,
+//! where virtio devices are memory-mapped rather than behind PCI.
+//!
+//! # Default MMIO Base Addresses
+//!
+//! The `DEFAULT_BASES` array lists the first four virtio-mmio device regions
+//! for QEMU's `virt` machine. Each region is 0x200 bytes (512 bytes) and
+//! contains the standard virtio-mmio register set at the offsets defined in
+//! the `regs` module. Valid register offsets range from 0x000 to 0x0A4.
+//! Device-specific configuration space starts at offset 0x100 (modern) or
+//! STATUS + 0x14 (legacy).
+//!
+//! # Usage
+//!
+//! This is a minimal implementation sufficient for virtio-blk using split
+//! virtqueues. For x86_64, the PCI transport in `mod.rs` is used instead.
+//! See [`super::VirtioTransport`] for the unified transport enum.
 
 #![allow(dead_code)]
 
@@ -13,10 +29,33 @@ use crate::{
     error::KernelError,
 };
 
-/// Default virtio-mmio base addresses for QEMU virt machine (first device).
+/// Default virtio-mmio base addresses for QEMU's `virt` machine.
+///
+/// The two architectures use different memory maps:
+///
+/// - **AArch64**: virtio-mmio devices start at 0x0A00_0000 with 0x200 stride
+///   (up to 32 devices, each 512 bytes). See QEMU `hw/arm/virt.c`.
+/// - **RISC-V**: virtio-mmio devices start at 0x1000_1000 with 0x1000 stride
+///   (up to 8 devices, each 4 KB). See QEMU `hw/riscv/virt.c`.
+///
+/// We probe the first four slots; this is sufficient for virtio-blk discovery.
+#[cfg(target_arch = "aarch64")]
+pub const DEFAULT_BASES: [usize; 4] = [0x0a00_0000, 0x0a00_0200, 0x0a00_0400, 0x0a00_0600];
+
+#[cfg(target_arch = "riscv64")]
+pub const DEFAULT_BASES: [usize; 4] = [0x1000_1000, 0x1000_2000, 0x1000_3000, 0x1000_4000];
+
+/// Fallback for other architectures (should not be reached; MMIO transport is
+/// only used on AArch64 and RISC-V).
+#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
 pub const DEFAULT_BASES: [usize; 4] = [0x0a00_0000, 0x0a00_2000, 0x0a00_4000, 0x0a00_6000];
 
-/// MMIO register offsets (per virtio spec 4.2.2, legacy interface)
+/// MMIO register offsets (per virtio spec 4.2.2, legacy interface).
+///
+/// Valid offsets range from 0x000 (MAGIC) to 0x0A4 (QUEUE_USED_HIGH).
+/// Each register is 32 bits wide unless noted otherwise. The caller must
+/// ensure that `base + offset` falls within the 0x200-byte MMIO region
+/// mapped for the device.
 mod regs {
     pub const MAGIC: usize = 0x000; // Magic value "virt"
     pub const VERSION: usize = 0x004; // 1 = legacy, 2 = modern
@@ -52,6 +91,19 @@ mod status {
     pub const FAILED: u32 = 128;
 }
 
+/// Handle for a single virtio-mmio device.
+///
+/// Wraps the kernel-virtual base address of a virtio-mmio register region
+/// and provides typed read/write accessors. The base address must point to
+/// a valid 0x200-byte MMIO region that is mapped in the kernel's address
+/// space (identity-mapped on AArch64/RISC-V, or via the physical memory
+/// window on x86_64).
+///
+/// # Safety Invariant
+///
+/// The `base` address must remain valid and mapped for the lifetime of this
+/// struct. All register accesses use volatile reads/writes to prevent the
+/// compiler from reordering or eliding MMIO operations.
 #[derive(Debug, Clone, Copy)]
 pub struct VirtioMmioTransport {
     base: usize,
@@ -76,6 +128,7 @@ impl VirtioMmioTransport {
 
     #[inline]
     fn write16(&self, offset: usize, value: u16) {
+        // SAFETY: base + offset is an MMIO region mapped in the kernel's phys window.
         unsafe { ptr::write_volatile((self.base + offset) as *mut u16, value) }
     }
 

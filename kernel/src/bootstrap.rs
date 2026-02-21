@@ -422,21 +422,33 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
         }
     }
 
-    // Initialize driver framework first (needed by PCI init), then
-    // PCI bus and virtio-blk for disk access.
+    // Initialize driver framework first (needed by PCI/virtio init), then
+    // the appropriate transport (PCI on x86_64, MMIO on AArch64/RISC-V) and
+    // virtio-blk for disk access.
     // Must happen after VFS init so TAR loading can populate the filesystem.
     #[cfg(feature = "alloc")]
     {
-        kprintln!("[BOOTSTRAP] Initializing PCI + virtio-blk...");
+        kprintln!("[BOOTSTRAP] Initializing drivers + virtio-blk...");
         services::driver_framework::init();
-        crate::drivers::pci::init();
-        // Enumerate PCI devices so virtio-blk can find its device
+
+        // PCI bus enumeration is x86_64-only. AArch64/RISC-V use MMIO transport
+        // for virtio devices (probed in blk::init() via init_mmio()). The I/O
+        // port stubs on non-x86 return 0, which would make every PCI slot appear
+        // populated (vendor_id 0 != 0xFFFF), causing 8192 phantom device scans.
+        #[cfg(target_arch = "x86_64")]
         {
-            let pci_bus = crate::drivers::pci::get_pci_bus().lock();
-            let _ = pci_bus.enumerate_devices();
+            crate::drivers::pci::init();
+            // Enumerate PCI devices so virtio-blk can find its device
+            {
+                let pci_bus = crate::drivers::pci::get_pci_bus().lock();
+                let _ = pci_bus.enumerate_devices();
+            }
         }
+
+        // blk::init() dispatches to PCI probe on x86_64, MMIO probe on
+        // AArch64/RISC-V.
         crate::drivers::virtio::blk::init();
-        kprintln!("[BOOTSTRAP] PCI + virtio-blk initialized");
+        kprintln!("[BOOTSTRAP] Drivers + virtio-blk initialized");
 
         // If a virtio-blk disk is attached, read it as a TAR archive
         // and load its contents into the VFS. This is how cross-compiled

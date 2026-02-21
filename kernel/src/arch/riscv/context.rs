@@ -247,15 +247,6 @@ impl crate::arch::context::ThreadContext for RiscVContext {
     fn to_task_context(&self) -> TaskContext {
         TaskContext::RiscV(self.clone())
     }
-
-    fn set_tls_base(&mut self, base: u64) {
-        // Use tp as TLS for user
-        self.tp = base as usize;
-    }
-
-    fn tls_base(&self) -> u64 {
-        self.tp as u64
-    }
 }
 
 /// Switch context using the ThreadContext interface

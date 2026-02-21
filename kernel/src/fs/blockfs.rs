@@ -475,14 +475,29 @@ impl VfsNode for BlockFsNode {
         fs.truncate_inode(self.inode_num, size)
     }
 
+    /// Create a symbolic link in this BlockFS directory.
+    ///
+    /// Currently returns `NotImplemented`. BlockFS has full symlink
+    /// infrastructure in `BlockFsInner::create_symlink` (which allocates
+    /// an inode with mode 0o120777 and stores the target as file data),
+    /// but the VfsNode interface is not yet wired up. This will be
+    /// connected in a future sprint.
     fn symlink(&self, _name: &str, _target: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
         Err(KernelError::NotImplemented {
             feature: "blockfs symlink",
         })
     }
 
+    /// Read the target of a symbolic link in BlockFS.
+    ///
+    /// Delegates to `BlockFsInner::read_symlink` which checks whether
+    /// this inode has the symlink mode bit set (0xA000) and, if so, reads
+    /// the target path from the inode's data blocks.
+    ///
+    /// Returns `FsError::NotASymlink` if this node is not a symlink.
     fn readlink(&self) -> Result<String, KernelError> {
-        Err(KernelError::FsError(FsError::NotASymlink))
+        let fs = self.fs.read();
+        fs.read_symlink(self.inode_num)
     }
 }
 
@@ -1089,6 +1104,19 @@ impl BlockFsInner {
         Ok(inode_num)
     }
 
+    /// Create a symbolic link inode in the given parent directory.
+    ///
+    /// Allocates a new inode with symlink mode (0o120777), stores `target`
+    /// as the inode's file data (the symlink target path), and adds a
+    /// directory entry of type `FT_SYMLINK` in the parent.
+    ///
+    /// # Arguments
+    /// - `parent`: Inode number of the parent directory.
+    /// - `name`: Name of the symlink entry in the parent directory.
+    /// - `target`: The target path that the symlink points to.
+    ///
+    /// # Returns
+    /// The inode number of the newly created symlink.
     fn create_symlink(
         &mut self,
         parent: u32,
@@ -1266,6 +1294,16 @@ impl BlockFsInner {
         Ok(())
     }
 
+    /// Read the target of a symlink inode.
+    ///
+    /// Reads the inode's data content (which contains the symlink target
+    /// path stored at creation time) and returns it as a `String`.
+    ///
+    /// # Returns
+    /// - `Ok(String)`: The symlink target path.
+    /// - `Err(FsError::NotASymlink)`: The inode is not a symlink.
+    /// - `Err(FsError::NotFound)`: The inode does not exist.
+    /// - `Err(FsError::InvalidPath)`: The stored target is not valid UTF-8.
     fn read_symlink(&self, inode_num: u32) -> Result<String, KernelError> {
         let inode = self
             .inode_table

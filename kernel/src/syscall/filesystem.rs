@@ -1176,13 +1176,30 @@ pub fn sys_lstat(path_ptr: usize, stat_buf: usize) -> SyscallResult {
 
 /// Read the target of a symbolic link (syscall 152).
 ///
+/// Reads the target path that a symbolic link points to, without following
+/// the link. The target string is written to the user-space buffer `buf`
+/// and is NOT null-terminated (matching POSIX readlink(2) semantics).
+///
+/// If the target string is longer than `bufsiz`, it is silently truncated
+/// to `bufsiz` bytes. The caller should allocate a buffer of at least
+/// `PATH_MAX` bytes to avoid truncation.
+///
 /// # Arguments
-/// - `path_ptr`: Pointer to NUL-terminated symlink path.
-/// - `buf`: Buffer to receive the link target.
-/// - `bufsiz`: Size of the buffer.
+/// - `path_ptr`: Pointer to a NUL-terminated path in user space that names the
+///   symbolic link to read.
+/// - `buf`: Pointer to a user-space buffer to receive the link target.
+/// - `bufsiz`: Size of the buffer in bytes. Must be > 0.
 ///
 /// # Returns
-/// Number of bytes written to `buf`, or error.
+/// - `Ok(n)`: Number of bytes written to `buf` (not null-terminated). This is
+///   `min(target.len(), bufsiz)`.
+/// - `Err(InvalidArgument)`: `bufsiz` is 0, or the node is not a symlink.
+/// - `Err(ResourceNotFound)`: The path does not exist.
+///
+/// # Errors
+/// - If the VFS node at `path` does not support `readlink()` (i.e., is not a
+///   symbolic link), the VfsNode default implementation returns
+///   `NotImplemented`, which is mapped to `InvalidArgument` here.
 pub fn sys_readlink(path_ptr: usize, buf: usize, bufsiz: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
     if bufsiz == 0 {
@@ -1197,13 +1214,16 @@ pub fn sys_readlink(path_ptr: usize, buf: usize, bufsiz: usize) -> SyscallResult
         .resolve_path(&path)
         .map_err(|_| SyscallError::ResourceNotFound)?;
 
-    // readlink operates on the link itself, not the target
+    // readlink operates on the link node itself; if the node is not a
+    // symlink, readlink() returns NotImplemented or NotASymlink.
     let target = node.readlink().map_err(|_| SyscallError::InvalidArgument)?;
 
     let bytes = target.as_bytes();
     let to_copy = core::cmp::min(bytes.len(), bufsiz);
 
-    // SAFETY: buffer validated above.
+    // SAFETY: buf was validated above as non-null and in user space with
+    // at least bufsiz bytes. We copy at most bufsiz bytes of the target
+    // string. copy_slice_to_user handles the raw pointer write.
     unsafe {
         crate::syscall::userspace::copy_slice_to_user(buf, &bytes[..to_copy])
             .map_err(|_| SyscallError::InvalidArgument)?;

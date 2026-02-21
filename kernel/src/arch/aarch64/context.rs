@@ -95,6 +95,7 @@ impl Default for AArch64Context {
             elr: 0,
             tpidr_el0: 0,
             tpidr_el1: 0,
+            tls_base: 0,
             ttbr0_el1: 0,
             fp_regs: FpuState {
                 v: [[0; 2]; 32],
@@ -162,15 +163,6 @@ impl crate::arch::context::ThreadContext for AArch64Context {
 
     fn to_task_context(&self) -> TaskContext {
         TaskContext::AArch64(self.clone())
-    }
-
-    fn set_tls_base(&mut self, base: u64) {
-        self.tls_base = base;
-        self.tpidr_el0 = base;
-    }
-
-    fn tls_base(&self) -> u64 {
-        self.tls_base
     }
 }
 

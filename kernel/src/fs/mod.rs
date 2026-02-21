@@ -164,14 +164,50 @@ pub trait VfsNode: Send + Sync {
         })
     }
 
-    /// Create a symbolic link in this directory
+    /// Create a symbolic link in this directory.
+    ///
+    /// Creates a new symlink entry named `name` in this directory node
+    /// that points to `target`. The target path is stored as the symlink's
+    /// data content and is not validated (it may be relative or absolute,
+    /// and the target need not exist).
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns `NotImplemented` for filesystems that do not support
+    /// symbolic links (e.g., DevFS, ProcFS). Filesystems that support
+    /// symlinks (e.g., RamFS, BlockFS) override this method.
+    ///
+    /// # Arguments
+    /// - `name`: The name of the symlink entry to create in this directory.
+    /// - `target`: The target path that the symlink points to.
+    ///
+    /// # Returns
+    /// An `Arc<dyn VfsNode>` representing the newly created symlink node.
     fn symlink(&self, _name: &str, _target: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
         Err(KernelError::NotImplemented {
             feature: "symbolic links",
         })
     }
 
-    /// Read the target of a symbolic link
+    /// Read the target of a symbolic link.
+    ///
+    /// If this node is a symbolic link, returns the target path as a
+    /// `String`. The target is the raw path stored when the symlink was
+    /// created and is not resolved or canonicalized.
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns `NotImplemented` for filesystem nodes that are not symbolic
+    /// links or for filesystems that do not support symlinks. Callers
+    /// should check `node_type() == NodeType::Symlink` before calling, or
+    /// handle the error.
+    ///
+    /// # Returns
+    /// - `Ok(String)`: The symlink target path.
+    /// - `Err(NotImplemented)`: This node is not a symlink or the filesystem
+    ///   does not support readlink.
+    /// - `Err(FsError(NotASymlink))`: The node exists but is not a symlink
+    ///   (used by BlockFS for type-checked readlink).
     fn readlink(&self) -> Result<String, KernelError> {
         Err(KernelError::NotImplemented {
             feature: "readlink",

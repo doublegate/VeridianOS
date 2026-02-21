@@ -3,18 +3,34 @@
 //! When a signal becomes pending for a process and the signal has a registered
 //! handler (not SIG_DFL or SIG_IGN), the kernel must arrange for the handler to
 //! execute in user space. This module implements the signal frame construction
-//! and restoration mechanism:
+//! and restoration mechanism for all three supported architectures (x86_64,
+//! AArch64, RISC-V):
 //!
 //! 1. **Delivery** (`deliver_signal`): Saves the current thread context into a
-//!    `SignalFrame` on the user stack, sets up a trampoline return address that
+//!    signal frame on the user stack, sets up a trampoline return address that
 //!    will invoke `sigreturn`, and redirects execution to the signal handler.
 //!
 //! 2. **Restoration** (`restore_signal_frame`): Called from `sys_sigreturn` to
-//!    read the saved `SignalFrame` from the user stack, restore registers, and
+//!    read the saved signal frame from the user stack, restore registers, and
 //!    resume execution at the point where the signal interrupted the thread.
 //!
-//! The implementation currently targets x86_64 as the primary platform, with
-//! stub implementations for AArch64 and RISC-V.
+//! # Signal Nesting
+//!
+//! Nested signals are supported. When a signal is delivered, the delivered
+//! signal number is added to the process's blocked signal mask (see
+//! `deliver_signal_x86_64` which sets `saved_mask | (1 << signum)`). This
+//! prevents the same signal from interrupting its own handler. However,
+//! *different* signals that are not blocked can still be delivered during
+//! handler execution, producing a nested signal frame on the user stack.
+//!
+//! Each signal delivery pushes a new frame (with its own saved context and
+//! signal mask) onto the user stack. When the inner handler returns and
+//! `sigreturn` restores the outer frame, the original signal mask is also
+//! restored, re-enabling the previously blocked signal. This nesting is
+//! bounded only by available user stack space.
+//!
+//! Note: SIGKILL (9) and SIGSTOP (19) can never be blocked, caught, or
+//! ignored -- the mask sanitization enforces this invariant.
 
 #[allow(unused_imports)]
 use crate::{error::KernelError, println, process::pcb::Process, process::thread::Thread};
@@ -342,6 +358,32 @@ fn deliver_signal_to_handler(
 
 // ---------------- AArch64 implementation -----------------
 
+/// AArch64 signal delivery implementation.
+///
+/// Constructs an `Aarch64SignalFrame` on the user stack containing all 31
+/// general-purpose registers (x0-x30), SP, PC, and PSTATE. A 4-instruction
+/// trampoline is placed immediately after the frame; when the signal handler
+/// returns, it executes the trampoline which invokes `svc #0` with
+/// `SYS_SIGRETURN` in w8 (the syscall number register on AArch64).
+///
+/// # Stack layout after delivery (growing downward)
+///
+/// ```text
+/// [original SP]
+///   ...
+/// [trampoline: add x0,sp,#0 / mov w8,#SYS_SIGRETURN / svc #0 / brk #0]
+/// [Aarch64SignalFrame]         <- new SP
+///   .trampoline_ret            = address of trampoline code
+///   .signum
+///   .saved_mask
+///   .regs[0..30]               = x0..x30 (x30 = LR)
+///   .sp                        = original SP
+///   .pc                        = original PC
+///   .pstate                    = saved SPSR
+/// ```
+///
+/// The handler is called with x0 = signum, x1 = &frame, and LR pointing
+/// to the trampoline. The stack pointer is 16-byte aligned per AAPCS64.
 #[cfg(all(feature = "alloc", target_arch = "aarch64"))]
 fn deliver_signal_aarch64(
     process: &Process,
@@ -349,8 +391,6 @@ fn deliver_signal_aarch64(
     signum: usize,
     handler: u64,
 ) -> Result<bool, KernelError> {
-    use crate::mm::VirtualAddress;
-
     // Build a minimal signal frame: save general-purpose regs + PC/SP + PSTATE
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -376,14 +416,14 @@ fn deliver_signal_aarch64(
     let mut ctx = thread.context.lock();
     let memory_space = process.memory_space.lock();
 
-    let saved_pc = ctx.program_counter();
-    let saved_sp = ctx.stack_pointer();
+    let saved_pc = ctx.pc as usize;
+    let saved_sp = ctx.sp as usize;
 
     // Allocate space on user stack: frame + trampoline, 16-byte aligned
     let frame_size = core::mem::size_of::<Aarch64SignalFrame>();
-    let tramp_size = core::mem::size_of::<TRAMPOLINE>();
+    let tramp_size = core::mem::size_of_val(&TRAMPOLINE);
     let total = frame_size + tramp_size;
-    let mut sp = (saved_sp - total) & !0xF; // maintain 16-byte alignment
+    let sp = (saved_sp - total) & !0xF; // maintain 16-byte alignment
 
     // Write frame
     let mut regs = [0u64; 31];
@@ -400,6 +440,13 @@ fn deliver_signal_aarch64(
         pstate: ctx.spsr,
     };
 
+    // SAFETY: `sp` is derived from the thread's current stack pointer
+    // (saved_sp) minus the frame+trampoline size, 16-byte aligned. The
+    // user stack is mapped in the process's VAS with write permissions.
+    // We write the Aarch64SignalFrame as a raw byte slice via the
+    // physical memory window. The from_raw_parts call is safe because
+    // `frame` is a local repr(C) struct on the kernel stack and we read
+    // exactly its size in bytes.
     unsafe {
         write_bytes_to_user_stack(
             &memory_space,
@@ -415,6 +462,11 @@ fn deliver_signal_aarch64(
     let mut tramp = TRAMPOLINE;
     tramp[1] = 0x52800000 | ((SYS_SIGRETURN as u32) << 5); // mov w8,#SYS_SIGRETURN
 
+    // SAFETY: The trampoline is written immediately after the signal
+    // frame at `sp + frame_size`. This address is within the same user
+    // stack page (or adjacent mapped page). The trampoline is 16 bytes
+    // (4 AArch64 instructions). from_raw_parts is safe because `tramp`
+    // is a local array on the kernel stack.
     unsafe {
         write_bytes_to_user_stack(
             &memory_space,
@@ -434,6 +486,8 @@ fn deliver_signal_aarch64(
     Ok(true)
 }
 
+/// Fallback when not compiling for AArch64 with alloc -- signal delivery
+/// is a no-op since this architecture's handler cannot execute.
 #[cfg(not(all(feature = "alloc", target_arch = "aarch64")))]
 fn deliver_signal_aarch64(
     _process: &Process,
@@ -446,6 +500,33 @@ fn deliver_signal_aarch64(
 
 // ---------------- RISC-V implementation -----------------
 
+/// RISC-V 64-bit signal delivery implementation.
+///
+/// Constructs an `RiscvSignalFrame` on the user stack containing all 31
+/// general-purpose registers (x1-x31; x0 is hardwired to zero), sepc, and
+/// sstatus. A 4-instruction trampoline is placed immediately after the frame;
+/// when the signal handler returns, it executes the trampoline which invokes
+/// `ecall` with `SYS_SIGRETURN` in a7 (the syscall number register on
+/// RISC-V).
+///
+/// # Stack layout after delivery (growing downward)
+///
+/// ```text
+/// [original SP]
+///   ...
+/// [trampoline: addi a0,sp,0 / addi a7,x0,SYS_SIGRETURN / ecall / ebreak]
+/// [RiscvSignalFrame]           <- new SP
+///   .trampoline_ret            = address of trampoline code
+///   .signum
+///   .saved_mask
+///   .regs[0..30]               = x1..x31 (ra, sp, gp, tp, t0-t6, s0-s11, a0-a7)
+///   .pc                        = original sepc
+///   .sstatus                   = saved sstatus
+/// ```
+///
+/// The handler is called with a0 = signum, a1 = &frame, and ra pointing
+/// to the trampoline. The stack pointer is 16-byte aligned per the RISC-V
+/// calling convention.
 #[cfg(all(feature = "alloc", target_arch = "riscv64"))]
 fn deliver_signal_riscv(
     process: &Process,
@@ -475,13 +556,13 @@ fn deliver_signal_riscv(
     let mut ctx = thread.context.lock();
     let memory_space = process.memory_space.lock();
 
-    let saved_pc = ctx.program_counter();
-    let saved_sp = ctx.stack_pointer();
+    let saved_pc = ctx.pc;
+    let saved_sp = ctx.sp;
 
     let frame_size = core::mem::size_of::<RiscvSignalFrame>();
-    let tramp_size = core::mem::size_of::<TRAMPOLINE>();
+    let tramp_size = core::mem::size_of_val(&TRAMPOLINE);
     let total = frame_size + tramp_size;
-    let mut sp = (saved_sp - total) & !0xF;
+    let sp = (saved_sp - total) & !0xF;
 
     let regs = [
         ctx.ra as u64,
@@ -528,6 +609,13 @@ fn deliver_signal_riscv(
         sstatus: ctx.sstatus as u64,
     };
 
+    // SAFETY: `sp` is derived from the thread's current stack pointer
+    // (saved_sp) minus the frame+trampoline size, 16-byte aligned. The
+    // user stack is mapped in the process's VAS with write permissions.
+    // We write the RiscvSignalFrame as a raw byte slice via the physical
+    // memory window. The from_raw_parts call is safe because `frame` is
+    // a local repr(C) struct on the kernel stack and we read exactly its
+    // size in bytes.
     unsafe {
         write_bytes_to_user_stack(
             &memory_space,
@@ -542,6 +630,11 @@ fn deliver_signal_riscv(
     let mut tramp = TRAMPOLINE;
     tramp[1] = 0x00000893 | ((SYS_SIGRETURN as u32) << 20); // addi a7,x0,SYS_SIGRETURN
 
+    // SAFETY: The trampoline is written immediately after the signal
+    // frame at `sp + frame_size`. This address is within the same user
+    // stack page (or adjacent mapped page). The trampoline is 16 bytes
+    // (4 RISC-V instructions). from_raw_parts is safe because `tramp`
+    // is a local array on the kernel stack.
     unsafe {
         write_bytes_to_user_stack(
             &memory_space,
@@ -551,7 +644,7 @@ fn deliver_signal_riscv(
     }
 
     // Set a0 (arg0) = signum, a1 = &frame
-    ctx.a0 = signum as usize;
+    ctx.a0 = signum;
     ctx.a1 = sp;
     ctx.sp = sp;
     ctx.pc = handler as usize;
@@ -561,6 +654,8 @@ fn deliver_signal_riscv(
     Ok(true)
 }
 
+/// Fallback when not compiling for RISC-V with alloc -- signal delivery
+/// is a no-op since this architecture's handler cannot execute.
 #[cfg(not(all(feature = "alloc", target_arch = "riscv64")))]
 fn deliver_signal_riscv(
     _process: &Process,
@@ -818,6 +913,13 @@ fn restore_signal_frame_x86_64(
     Ok(())
 }
 
+/// AArch64 signal frame restoration.
+///
+/// Reads an `Aarch64SignalFrame` from the user stack at `frame_ptr`,
+/// restores all general-purpose registers (x0-x30), SP, PC (ELR), and
+/// PSTATE (SPSR), and restores the process's signal mask from the saved
+/// value. On success, the thread will resume at the original PC when it
+/// next returns to user space.
 #[cfg(all(feature = "alloc", target_arch = "aarch64"))]
 fn restore_signal_frame_aarch64(
     process: &Process,
@@ -840,6 +942,10 @@ fn restore_signal_frame_aarch64(
 
     let memory_space = process.memory_space.lock();
     let mut buf = [0u8; core::mem::size_of::<Aarch64SignalFrame>()];
+    // SAFETY: frame_ptr was passed from the sigreturn trampoline and
+    // points to an Aarch64SignalFrame we previously wrote to the user
+    // stack. We read it back via the physical memory window into a
+    // kernel-stack buffer.
     let ok = unsafe { read_bytes_from_user_stack(&memory_space, frame_ptr, &mut buf) };
     if !ok {
         return Err(KernelError::InvalidArgument {
@@ -848,6 +954,10 @@ fn restore_signal_frame_aarch64(
         });
     }
 
+    // SAFETY: buf contains exactly size_of::<Aarch64SignalFrame>() bytes
+    // that we read from the user stack. The struct is repr(C) and all
+    // fields are plain u64 values, so any bit pattern is valid. We copy
+    // the struct by value.
     let frame: Aarch64SignalFrame =
         unsafe { core::ptr::read(buf.as_ptr() as *const Aarch64SignalFrame) };
 
@@ -860,6 +970,8 @@ fn restore_signal_frame_aarch64(
         ctx.spsr = frame.pstate;
     }
 
+    // Restore the signal mask, ensuring SIGKILL (9) and SIGSTOP (19)
+    // can never be masked.
     let restored_mask = frame.saved_mask & !((1u64 << 9) | (1u64 << 19));
     process.signal_mask.store(restored_mask, Ordering::Release);
 
@@ -871,6 +983,13 @@ fn restore_signal_frame_aarch64(
     Ok(())
 }
 
+/// RISC-V 64-bit signal frame restoration.
+///
+/// Reads a `RiscvSignalFrame` from the user stack at `frame_ptr`,
+/// restores all general-purpose registers (x1-x31 mapped to ra, sp, gp,
+/// tp, t0-t6, s0-s11, a0-a7), sepc, and sstatus, and restores the
+/// process's signal mask from the saved value. On success, the thread
+/// will resume at the original PC when it next returns to user space.
 #[cfg(all(feature = "alloc", target_arch = "riscv64"))]
 fn restore_signal_frame_riscv(
     process: &Process,
@@ -892,6 +1011,10 @@ fn restore_signal_frame_riscv(
 
     let memory_space = process.memory_space.lock();
     let mut buf = [0u8; core::mem::size_of::<RiscvSignalFrame>()];
+    // SAFETY: frame_ptr was passed from the sigreturn trampoline and
+    // points to a RiscvSignalFrame we previously wrote to the user
+    // stack. We read it back via the physical memory window into a
+    // kernel-stack buffer.
     let ok = unsafe { read_bytes_from_user_stack(&memory_space, frame_ptr, &mut buf) };
     if !ok {
         return Err(KernelError::InvalidArgument {
@@ -900,6 +1023,10 @@ fn restore_signal_frame_riscv(
         });
     }
 
+    // SAFETY: buf contains exactly size_of::<RiscvSignalFrame>() bytes
+    // that we read from the user stack. The struct is repr(C) and all
+    // fields are plain u64 values, so any bit pattern is valid. We copy
+    // the struct by value.
     let frame: RiscvSignalFrame =
         unsafe { core::ptr::read(buf.as_ptr() as *const RiscvSignalFrame) };
 
@@ -943,6 +1070,8 @@ fn restore_signal_frame_riscv(
         ctx.sstatus = frame.sstatus as usize;
     }
 
+    // Restore the signal mask, ensuring SIGKILL (9) and SIGSTOP (19)
+    // can never be masked.
     let restored_mask = frame.saved_mask & !((1u64 << 9) | (1u64 << 19));
     process.signal_mask.store(restored_mask, Ordering::Release);
 

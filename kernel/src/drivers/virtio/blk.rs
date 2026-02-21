@@ -670,6 +670,10 @@ fn init_x86_64() {
 }
 
 /// AArch64 / RISC-V virtio-mmio initialization.
+///
+/// Probes the architecture-specific MMIO base addresses for a virtio-blk
+/// device. On AArch64, these are at 0x0A00_0000 with 0x200 stride; on
+/// RISC-V, at 0x1000_1000 with 0x1000 stride. See [`super::mmio::DEFAULT_BASES`].
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 fn init_mmio() {
     use crate::drivers::virtio::mmio::{try_init_mmio_blk, DEFAULT_BASES};

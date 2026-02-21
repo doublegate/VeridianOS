@@ -1,10 +1,35 @@
-//! Virtio transport layer
+//! Virtio subsystem -- transport layer and device drivers.
 //!
-//! Shared virtio transport types and PCI-based device discovery for virtio
-//! devices. Implements the legacy (transitional) virtio PCI interface as
-//! described in the virtio 1.0 specification, section 4.1 (PCI transport).
+//! This module provides the virtio transport abstraction for VeridianOS,
+//! supporting two transport backends:
+//!
+//! - **PCI transport** ([`VirtioPciTransport`]): Used on **x86_64**, where
+//!   virtio devices appear as PCI devices with vendor ID 0x1AF4 (Red Hat). The
+//!   driver accesses device registers via BAR0 I/O port space.
+//!
+//! - **MMIO transport** ([`mmio::VirtioMmioTransport`]): Used on **AArch64**
+//!   and **RISC-V**, where QEMU's `virt` machine exposes virtio devices as
+//!   memory-mapped regions starting at 0x0A00_0000.
+//!
+//! Both transports are unified behind the [`VirtioTransport`] enum, which
+//! provides a common interface for device initialization, feature negotiation,
+//! queue setup, and notification.
+//!
+//! # Architecture
+//!
+//! ```text
+//!   VirtioTransport (enum)
+//!     |-- Pci(VirtioPciTransport)      -- x86_64 via I/O ports (BAR0)
+//!     |-- Mmio(VirtioMmioTransport)    -- AArch64/RISC-V via MMIO
+//!     |
+//!     +-- VirtQueue (queue.rs)         -- split virtqueue (shared)
+//!     +-- VirtioBlkDevice (blk.rs)     -- block device driver (shared)
+//! ```
 //!
 //! # Legacy PCI Layout (BAR0 I/O Space)
+//!
+//! The PCI transport uses the legacy (transitional) virtio PCI interface as
+//! described in the virtio 1.0 specification, section 4.1:
 //!
 //! | Offset | Size | Name            |
 //! |--------|------|-----------------|
@@ -17,6 +42,8 @@
 //! | 0x12   | 1    | device_status   |
 //! | 0x13   | 1    | isr_status      |
 //! | 0x14+  | var  | device config   |
+//!
+//! For the MMIO register layout, see [`mmio`].
 
 #![allow(dead_code)]
 
