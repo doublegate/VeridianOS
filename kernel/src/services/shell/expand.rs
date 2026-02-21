@@ -296,38 +296,55 @@ fn is_var_char(ch: char) -> bool {
 // Pattern matching helpers for suffix/prefix removal
 // ---------------------------------------------------------------------------
 
-/// Remove the shortest trailing substring that matches `pattern`.
+/// Glob-like pattern match for parameter expansion.
 ///
-/// This is a simplified implementation: the pattern is treated as a literal
-/// suffix. A leading `*` in the pattern acts as a wildcard anchor (matches
-/// anything before the literal part).
+/// Unlike filename glob where `*` does not match `/`, parameter expansion
+/// patterns allow `*` and `?` to match ANY character (POSIX spec).
+fn pattern_match(pattern: &str, text: &str) -> bool {
+    let pat = pattern.as_bytes();
+    let txt = text.as_bytes();
+    let (plen, tlen) = (pat.len(), txt.len());
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let mut star_pi: Option<usize> = None;
+    let mut star_ti = 0usize;
+
+    while ti < tlen {
+        if pi < plen && (pat[pi] == b'?' || pat[pi] == txt[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < plen && pat[pi] == b'*' {
+            star_pi = Some(pi);
+            star_ti = ti;
+            pi += 1;
+        } else if let Some(sp) = star_pi {
+            pi = sp + 1;
+            star_ti += 1;
+            ti = star_ti;
+        } else {
+            return false;
+        }
+    }
+
+    while pi < plen && pat[pi] == b'*' {
+        pi += 1;
+    }
+    pi == plen
+}
+
+/// Remove the shortest trailing substring that matches `pattern`.
 fn remove_suffix_shortest(value: &str, pattern: &str) -> String {
     if pattern.is_empty() {
         return value.to_string();
     }
-
-    // Pattern starts with '*' — match the literal tail as suffix
-    if let Some(literal) = pattern.strip_prefix('*') {
-        if literal.is_empty() {
-            // "*" alone — shortest suffix is a single char
-            if value.is_empty() {
-                return String::new();
-            }
-            // Remove the last character (shortest match of *)
-            let mut s = value.to_string();
-            s.pop();
-            return s;
+    // Try suffixes from shortest to longest (scan from end toward start)
+    for (i, _) in value.char_indices().rev() {
+        if pattern_match(pattern, &value[i..]) {
+            return value[..i].to_string();
         }
-        // Remove shortest suffix that ends with `literal`
-        if let Some(pos) = value.rfind(literal) {
-            return value[..pos].to_string();
-        }
-        return value.to_string();
     }
-
-    // No wildcard — exact suffix match
-    if let Some(rest) = value.strip_suffix(pattern) {
-        return rest.to_string();
+    // Try the entire string as suffix
+    if pattern_match(pattern, value) {
+        return String::new();
     }
     value.to_string()
 }
@@ -337,22 +354,14 @@ fn remove_suffix_longest(value: &str, pattern: &str) -> String {
     if pattern.is_empty() {
         return value.to_string();
     }
-
-    if let Some(literal) = pattern.strip_prefix('*') {
-        if literal.is_empty() {
-            // "**" / "%%" with "*" — longest suffix is everything
-            return String::new();
-        }
-        // Remove from the first occurrence of literal to end
-        if let Some(pos) = value.find(literal) {
-            return value[..pos].to_string();
-        }
-        return value.to_string();
+    // Try the entire string first (longest), then shorter
+    if pattern_match(pattern, value) {
+        return String::new();
     }
-
-    // No wildcard — exact suffix match
-    if let Some(rest) = value.strip_suffix(pattern) {
-        return rest.to_string();
+    for (i, _) in value.char_indices() {
+        if pattern_match(pattern, &value[i..]) {
+            return value[..i].to_string();
+        }
     }
     value.to_string()
 }
@@ -362,26 +371,16 @@ fn remove_prefix_shortest(value: &str, pattern: &str) -> String {
     if pattern.is_empty() {
         return value.to_string();
     }
-
-    // Pattern ends with '*' — match literal head as prefix
-    if let Some(literal) = pattern.strip_suffix('*') {
-        if literal.is_empty() {
-            // Single char removal (shortest match of *)
-            if value.is_empty() {
-                return String::new();
-            }
-            return value[1..].to_string();
+    // Try prefixes from shortest to longest (skip empty prefix at 0)
+    for i in value
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain(core::iter::once(value.len()))
+        .skip(1)
+    {
+        if pattern_match(pattern, &value[..i]) {
+            return value[i..].to_string();
         }
-        // Remove prefix up through first occurrence of literal
-        if let Some(rest) = value.strip_prefix(literal) {
-            return rest.to_string();
-        }
-        return value.to_string();
-    }
-
-    // No wildcard — exact prefix match
-    if let Some(rest) = value.strip_prefix(pattern) {
-        return rest.to_string();
     }
     value.to_string()
 }
@@ -391,22 +390,15 @@ fn remove_prefix_longest(value: &str, pattern: &str) -> String {
     if pattern.is_empty() {
         return value.to_string();
     }
-
-    if let Some(literal) = pattern.strip_suffix('*') {
-        if literal.is_empty() {
-            // Everything is removed
-            return String::new();
-        }
-        // Remove from start through last occurrence of literal
-        if let Some(pos) = value.rfind(literal) {
-            return value[pos + literal.len()..].to_string();
-        }
-        return value.to_string();
+    // Try prefixes from longest to shortest
+    if pattern_match(pattern, value) {
+        return String::new();
     }
-
-    // No wildcard — exact prefix match
-    if let Some(rest) = value.strip_prefix(pattern) {
-        return rest.to_string();
+    for (i, _) in value.char_indices().rev() {
+        let end = i + value[i..].chars().next().map_or(0, |c| c.len_utf8());
+        if pattern_match(pattern, &value[..end]) {
+            return value[end..].to_string();
+        }
     }
     value.to_string()
 }

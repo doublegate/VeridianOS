@@ -125,7 +125,10 @@ fn glob_match_recursive(pat: &[char], pi: usize, txt: &[char], ti: usize) -> boo
                 pi += end;
                 ti += 1;
             } else if let Some(sp) = star_pi {
-                // Backtrack: let '*' consume one more character
+                // Backtrack: let '*' consume one more character, but not '/'
+                if txt[star_ti] == '/' {
+                    return false;
+                }
                 pi = sp + 1;
                 star_ti += 1;
                 ti = star_ti;
@@ -137,7 +140,10 @@ fn glob_match_recursive(pat: &[char], pi: usize, txt: &[char], ti: usize) -> boo
             pi += 1;
             ti += 1;
         } else if let Some(sp) = star_pi {
-            // Mismatch — backtrack to last '*'
+            // Mismatch — backtrack to last '*', but '*' must not consume '/'
+            if txt[star_ti] == '/' {
+                return false;
+            }
             pi = sp + 1;
             star_ti += 1;
             ti = star_ti;
