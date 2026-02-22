@@ -5,20 +5,19 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  *
  * Terminal I/O functions.  These wrap the ioctl syscall for
- * TCGETS/TCSETS operations.
+ * TCGETS/TCSETS operations using the real kernel terminal state.
  */
 
 #include <termios.h>
 #include <errno.h>
-#include <string.h>
 
-/* ioctl request codes for terminal get/set */
+/* ioctl request codes for terminal get/set (matching Linux values) */
 #define TCGETS  0x5401
 #define TCSETS  0x5402
 #define TCSETSW 0x5403
 #define TCSETSF 0x5404
 
-/* Forward declaration — ioctl is in syscall.c */
+/* Forward declaration -- ioctl is in syscall.c */
 extern int ioctl(int fd, unsigned long request, ...);
 
 int tcgetattr(int fd, struct termios *termios_p)
@@ -28,41 +27,33 @@ int tcgetattr(int fd, struct termios *termios_p)
         return -1;
     }
 
-    /*
-     * Stub: return a reasonable default for a serial console.
-     * A real implementation would ioctl(fd, TCGETS, termios_p).
-     */
-    memset(termios_p, 0, sizeof(*termios_p));
-    termios_p->c_iflag = ICRNL | IXON;
-    termios_p->c_oflag = OPOST | ONLCR;
-    termios_p->c_cflag = CS8 | CREAD | CLOCAL;
-    termios_p->c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK | IEXTEN;
-
-    termios_p->c_cc[VINTR]  = 3;    /* ^C */
-    termios_p->c_cc[VQUIT]  = 28;   /* ^\ */
-    termios_p->c_cc[VERASE] = 127;  /* DEL */
-    termios_p->c_cc[VKILL]  = 21;   /* ^U */
-    termios_p->c_cc[VEOF]   = 4;    /* ^D */
-    termios_p->c_cc[VMIN]   = 1;
-    termios_p->c_cc[VTIME]  = 0;
-    termios_p->c_cc[VSTART] = 17;   /* ^Q */
-    termios_p->c_cc[VSTOP]  = 19;   /* ^S */
-    termios_p->c_cc[VSUSP]  = 26;   /* ^Z */
-
-    termios_p->c_ispeed = B9600;
-    termios_p->c_ospeed = B9600;
-
-    return 0;
+    return ioctl(fd, TCGETS, termios_p);
 }
 
 int tcsetattr(int fd, int optional_actions, const struct termios *termios_p)
 {
-    (void)fd;
-    (void)optional_actions;
-    (void)termios_p;
+    if (!termios_p) {
+        errno = EINVAL;
+        return -1;
+    }
 
-    /* Stub: accept but ignore. */
-    return 0;
+    unsigned long request;
+    switch (optional_actions) {
+    case TCSANOW:
+        request = TCSETS;
+        break;
+    case TCSADRAIN:
+        request = TCSETSW;
+        break;
+    case TCSAFLUSH:
+        request = TCSETSF;
+        break;
+    default:
+        errno = EINVAL;
+        return -1;
+    }
+
+    return ioctl(fd, request, (void *)termios_p);
 }
 
 speed_t cfgetispeed(const struct termios *termios_p)
@@ -93,6 +84,35 @@ int cfsetospeed(struct termios *termios_p, speed_t speed)
     }
     termios_p->c_ospeed = speed;
     return 0;
+}
+
+void cfmakeraw(struct termios *termios_p)
+{
+    if (!termios_p)
+        return;
+
+    /* Clear input flags: no break processing, no CR-to-NL, no parity,
+     * no strip, no flow control */
+    termios_p->c_iflag &= ~(unsigned int)(IGNBRK | BRKINT | PARMRK | ISTRIP |
+                                           INLCR | IGNCR | ICRNL | IXON);
+
+    /* Clear output flags: disable post-processing */
+    termios_p->c_oflag &= ~(unsigned int)OPOST;
+
+    /* Clear local flags: disable echo, canonical mode, extended input,
+     * signal generation */
+    termios_p->c_lflag &= ~(unsigned int)(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+
+    /* Clear control flags: character size mask and parity */
+    termios_p->c_cflag &= ~(unsigned int)(CSIZE | PARENB);
+
+    /* Set 8-bit characters */
+    termios_p->c_cflag |= CS8;
+
+    /* Set raw-mode control characters: read returns after 1 byte,
+     * no timeout */
+    termios_p->c_cc[VMIN]  = 1;
+    termios_p->c_cc[VTIME] = 0;
 }
 
 int tcsendbreak(int fd, int duration)

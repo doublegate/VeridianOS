@@ -193,6 +193,9 @@ int tcsetpgrp(int fd, pid_t pgrp);
 /** Get the foreground process group ID. */
 pid_t tcgetpgrp(int fd);
 
+/** Set terminal to raw mode (non-POSIX, BSD/GNU extension). */
+void cfmakeraw(struct termios *termios_p);
+
 #ifdef __cplusplus
 }
 #endif

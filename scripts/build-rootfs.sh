@@ -72,10 +72,11 @@ BUILT_COUNT=0
 compile_libc_program() {
     local name="$1"
     local src="$2"
+    local extra_libs="${3:-}"   # Optional extra libraries (e.g. "-lcurses")
     local out="$BUILD_DIR/bin/$name"
 
     echo -n "  Compiling $name... "
-    if "$CC" $CFLAGS_LIBC $LDFLAGS_LIBC -o "$out" "$CRT0" "$src" -lc 2>&1; then
+    if "$CC" $CFLAGS_LIBC $LDFLAGS_LIBC -o "$out" "$CRT0" "$src" $extra_libs -lc 2>&1; then
         "$STRIP" "$out" 2>/dev/null || true
         local size
         size=$(stat -c%s "$out" 2>/dev/null || stat -f%z "$out" 2>/dev/null)
@@ -94,6 +95,16 @@ echo "--- User-space programs ---"
 # Shell (/bin/sh)
 if [ -f "${PROGRAMS_DIR}/sh/sh.c" ]; then
     compile_libc_program "sh" "${PROGRAMS_DIR}/sh/sh.c"
+fi
+
+# sysinfo (system information display, inspired by fastfetch)
+if [ -f "${PROGRAMS_DIR}/sysinfo/sysinfo.c" ]; then
+    compile_libc_program "sysinfo" "${PROGRAMS_DIR}/sysinfo/sysinfo.c"
+fi
+
+# edit (nano-inspired text editor)
+if [ -f "${PROGRAMS_DIR}/edit/edit.c" ]; then
+    compile_libc_program "edit" "${PROGRAMS_DIR}/edit/edit.c" "-lcurses"
 fi
 
 # =========================================================================

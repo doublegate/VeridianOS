@@ -289,7 +289,7 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
             }
         }
 
-        // Fallback: read from serial UART (polling mode, line-buffered)
+        // Fallback: read from serial UART, respecting terminal state.
         let read_count = count.min(SERIAL_IO_MAX_SIZE);
         // SAFETY: buffer is non-zero (checked above). We limit the size
         // via SERIAL_IO_MAX_SIZE. The caller must provide a valid writable
@@ -297,6 +297,9 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
         // may be a kernel-space address from the embedded init binary.
         let buffer_slice =
             unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, read_count) };
+
+        let canonical = crate::drivers::terminal::is_canonical_mode();
+        let echo = crate::drivers::terminal::is_echo_enabled();
 
         let mut bytes_read = 0;
         for slot in buffer_slice.iter_mut() {
@@ -308,11 +311,22 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
                 core::hint::spin_loop();
             };
 
+            // Echo if enabled
+            if echo {
+                serial_write_byte(byte);
+            }
+
             *slot = byte;
             bytes_read += 1;
 
-            // Line-buffered: stop after newline or carriage return
-            if byte == b'\n' || byte == b'\r' {
+            // In canonical mode, stop after newline or carriage return.
+            // In raw mode, return immediately after each character (VMIN=1).
+            if canonical {
+                if byte == b'\n' || byte == b'\r' {
+                    break;
+                }
+            } else {
+                // Raw mode: return after first character
                 break;
             }
         }
@@ -923,6 +937,11 @@ pub fn sys_chdir(path_ptr: usize) -> SyscallResult {
 
 /// I/O control operations on a file descriptor
 ///
+/// Handles terminal ioctls (TCGETS, TCSETS, TCSETSW, TCSETSF, TIOCGWINSZ,
+/// etc.) using the real terminal state from `drivers::terminal`. Changes
+/// to terminal attributes (e.g., clearing ICANON for raw mode) take effect
+/// immediately and are visible to subsequent console reads.
+///
 /// # Arguments
 /// - fd: File descriptor
 /// - cmd: I/O control command
@@ -931,62 +950,89 @@ pub fn sys_chdir(path_ptr: usize) -> SyscallResult {
 /// # Returns
 /// Command-specific return value
 pub fn sys_ioctl(_fd: usize, cmd: usize, arg: usize) -> SyscallResult {
-    // Terminal ioctl constants (matching Linux values)
-    const TCGETS: usize = 0x5401;
-    const TCSETSW: usize = 0x5403;
-    const TIOCGWINSZ: usize = 0x5413;
-    const TIOCSWINSZ: usize = 0x5414;
-    const TIOCGPGRP: usize = 0x540F;
-    const TIOCSPGRP: usize = 0x5410;
+    use crate::drivers::terminal::{
+        self, KernelTermios, KernelWinsize, TCGETS, TCSETS, TCSETSF, TCSETSW, TIOCGPGRP,
+        TIOCGWINSZ, TIOCSPGRP, TIOCSWINSZ,
+    };
 
     match cmd {
         TIOCGWINSZ => {
-            // Return terminal window size (default 80x24)
+            // Return terminal window size from real terminal state
             if arg == 0 {
                 return Err(SyscallError::InvalidPointer);
             }
-            validate_user_ptr_typed::<Winsize>(arg)?;
+            validate_user_ptr_typed::<KernelWinsize>(arg)?;
 
-            let ws = Winsize {
-                ws_row: 24,
-                ws_col: 80,
-                ws_xpixel: 0,
-                ws_ypixel: 0,
-            };
+            let ws = terminal::get_winsize_snapshot();
             // SAFETY: arg was validated as aligned, non-null, and in user space.
             unsafe {
-                core::ptr::write(arg as *mut Winsize, ws);
+                core::ptr::write(arg as *mut KernelWinsize, ws);
             }
             Ok(0)
         }
         TIOCSWINSZ => {
-            // Set window size -- accept silently (no real terminal to resize)
+            // Set window size in terminal state
             if arg == 0 {
                 return Err(SyscallError::InvalidPointer);
             }
-            validate_user_ptr_typed::<Winsize>(arg)?;
+            validate_user_ptr_typed::<KernelWinsize>(arg)?;
+
+            // SAFETY: arg was validated as aligned, non-null, and in user space.
+            let ws = unsafe { core::ptr::read(arg as *const KernelWinsize) };
+            terminal::set_winsize(&ws);
             Ok(0)
         }
         TCGETS => {
-            // Get terminal attributes -- return a default termios
+            // Get terminal attributes from real terminal state
             if arg == 0 {
                 return Err(SyscallError::InvalidPointer);
             }
-            validate_user_ptr_typed::<Termios>(arg)?;
+            validate_user_ptr_typed::<KernelTermios>(arg)?;
 
-            let termios = Termios::default_console();
+            let termios = terminal::get_termios_snapshot();
             // SAFETY: arg was validated above.
             unsafe {
-                core::ptr::write(arg as *mut Termios, termios);
+                core::ptr::write(arg as *mut KernelTermios, termios);
             }
             Ok(0)
         }
-        TCSETSW => {
-            // Set terminal attributes (drain first) -- accept silently
+        TCSETS => {
+            // Set terminal attributes immediately
             if arg == 0 {
                 return Err(SyscallError::InvalidPointer);
             }
-            validate_user_ptr_typed::<Termios>(arg)?;
+            validate_user_ptr_typed::<KernelTermios>(arg)?;
+
+            // SAFETY: arg was validated as aligned, non-null, and in user space.
+            let new_termios = unsafe { core::ptr::read(arg as *const KernelTermios) };
+            terminal::set_termios(&new_termios);
+            Ok(0)
+        }
+        TCSETSW => {
+            // Set terminal attributes after draining output.
+            // For serial console, output is always drained (synchronous),
+            // so this is equivalent to TCSETS.
+            if arg == 0 {
+                return Err(SyscallError::InvalidPointer);
+            }
+            validate_user_ptr_typed::<KernelTermios>(arg)?;
+
+            // SAFETY: arg was validated above.
+            let new_termios = unsafe { core::ptr::read(arg as *const KernelTermios) };
+            terminal::set_termios(&new_termios);
+            Ok(0)
+        }
+        TCSETSF => {
+            // Set terminal attributes after draining output and flushing input.
+            // For serial console, no input buffer to flush, so equivalent to TCSETS.
+            if arg == 0 {
+                return Err(SyscallError::InvalidPointer);
+            }
+            validate_user_ptr_typed::<KernelTermios>(arg)?;
+
+            // SAFETY: arg was validated above.
+            let new_termios = unsafe { core::ptr::read(arg as *const KernelTermios) };
+            terminal::set_termios(&new_termios);
             Ok(0)
         }
         TIOCGPGRP => {
@@ -1017,67 +1063,6 @@ pub fn sys_ioctl(_fd: usize, cmd: usize, arg: usize) -> SyscallResult {
         _ => {
             // ENOTTY -- not a terminal or unsupported ioctl
             Err(SyscallError::InvalidArgument)
-        }
-    }
-}
-
-/// Terminal window size structure (matches C struct winsize).
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Winsize {
-    ws_row: u16,
-    ws_col: u16,
-    ws_xpixel: u16,
-    ws_ypixel: u16,
-}
-
-/// Terminal attributes structure (matches C struct termios, simplified).
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Termios {
-    c_iflag: u32,
-    c_oflag: u32,
-    c_cflag: u32,
-    c_lflag: u32,
-    c_cc: [u8; 32],
-    c_ispeed: u32,
-    c_ospeed: u32,
-}
-
-impl Termios {
-    /// Return default console termios (cooked mode, echo on).
-    fn default_console() -> Self {
-        // Common flag values matching Linux defaults
-        const ICRNL: u32 = 0o0000400;
-        const OPOST: u32 = 0o0000001;
-        const ONLCR: u32 = 0o0000004;
-        const CS8: u32 = 0o0000060;
-        const CREAD: u32 = 0o0000200;
-        const HUPCL: u32 = 0o0002000;
-        const ECHO: u32 = 0o0000010;
-        const ECHOE: u32 = 0o0000020;
-        const ECHOK: u32 = 0o0000040;
-        const ICANON: u32 = 0o0000002;
-        const ISIG: u32 = 0o0000001;
-        const IEXTEN: u32 = 0o0100000;
-
-        let mut cc = [0u8; 32];
-        cc[0] = 3; // VINTR = Ctrl-C
-        cc[1] = 28; // VQUIT = Ctrl-backslash
-        cc[2] = 127; // VERASE = DEL
-        cc[3] = 21; // VKILL = Ctrl-U
-        cc[4] = 4; // VEOF = Ctrl-D
-        cc[5] = 0; // VTIME
-        cc[6] = 1; // VMIN
-
-        Self {
-            c_iflag: ICRNL,
-            c_oflag: OPOST | ONLCR,
-            c_cflag: CS8 | CREAD | HUPCL,
-            c_lflag: ECHO | ECHOE | ECHOK | ICANON | ISIG | IEXTEN,
-            c_cc: cc,
-            c_ispeed: 38400,
-            c_ospeed: 38400,
         }
     }
 }

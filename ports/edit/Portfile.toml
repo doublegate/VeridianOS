@@ -1,0 +1,46 @@
+# Portfile.toml -- edit (nano-inspired text editor) for VeridianOS
+#
+# A purpose-built text editor for VeridianOS, inspired by GNU nano.
+# Provides full-screen TUI editing with file open/save, search,
+# cut/paste, and nano-compatible key bindings using the VeridianOS
+# curses library (libcurses.a).
+#
+# This is NOT a port of the upstream GNU nano project (which is a
+# large autotools project with many dependencies). Instead, it is
+# a minimal, VeridianOS-native implementation (~600 lines of C)
+# that provides the essential nano editing experience.
+
+[port]
+name = "edit"
+version = "1.0.0"
+description = "Nano-inspired text editor for VeridianOS"
+homepage = "https://github.com/doublegate/VeridianOS"
+license = "MIT OR Apache-2.0"
+category = "editors"
+build_type = "simple"
+
+[sources]
+urls = []
+# Source lives in-tree: userland/programs/edit/edit.c
+local_path = "userland/programs/edit/"
+
+[dependencies]
+build = ["libcurses"]
+runtime = []
+
+[build]
+steps = [
+    "$CC $CFLAGS $LDFLAGS -o $PKG_DIR/bin/edit $CRT0 userland/programs/edit/edit.c -lcurses -lc",
+]
+
+[native_build]
+description = "Static nano-inspired editor for VeridianOS (cross-compiled from Linux)"
+method = "direct"
+script = "scripts/build-rootfs.sh"
+configure_flags = []
+env = { LDFLAGS = "-static -nostdlib", CFLAGS = "-std=c11 -static -O2 -nostdinc -ffreestanding -fno-stack-protector -mno-red-zone -mcmodel=small" }
+notes = """
+edit is compiled as part of build-rootfs.sh alongside /bin/sh, sysinfo,
+and other user-space programs. It links against the VeridianOS libc
+(crt0.o + libc.a) and libcurses (libcurses.a) for terminal UI.
+"""

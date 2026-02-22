@@ -1,0 +1,46 @@
+# Portfile.toml -- sysinfo for VeridianOS
+#
+# A purpose-built system information display tool for VeridianOS,
+# inspired by fastfetch/neofetch. Reads /proc files (cpuinfo, meminfo,
+# uptime, version) and calls uname() to display a formatted summary
+# with an ASCII logo sidebar and ANSI colours.
+#
+# This is NOT a port of the upstream fastfetch project (which is a large
+# C/CMake project with many Linux-specific dependencies). Instead, it is
+# a minimal, VeridianOS-native implementation that provides similar
+# functionality using only the OS's available /proc filesystem and libc.
+
+[port]
+name = "sysinfo"
+version = "1.0.0"
+description = "System information display for VeridianOS (inspired by fastfetch)"
+homepage = "https://github.com/doublegate/VeridianOS"
+license = "MIT OR Apache-2.0"
+category = "utils"
+build_type = "simple"
+
+[sources]
+urls = []
+# Source lives in-tree: userland/programs/sysinfo/sysinfo.c
+local_path = "userland/programs/sysinfo/"
+
+[dependencies]
+build = []
+runtime = []
+
+[build]
+steps = [
+    "$CC $CFLAGS $LDFLAGS -o $PKG_DIR/bin/sysinfo $CRT0 userland/programs/sysinfo/sysinfo.c -lc",
+]
+
+[native_build]
+description = "Static sysinfo for VeridianOS (cross-compiled from Linux)"
+method = "direct"
+script = "scripts/build-rootfs.sh"
+configure_flags = []
+env = { LDFLAGS = "-static -nostdlib", CFLAGS = "-std=c11 -static -O2 -nostdinc -ffreestanding -fno-stack-protector -mno-red-zone -mcmodel=small" }
+notes = """
+sysinfo is compiled as part of build-rootfs.sh alongside /bin/sh and
+other user-space programs. It links against the VeridianOS libc (crt0.o + libc.a).
+No external dependencies required.
+"""

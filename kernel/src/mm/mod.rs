@@ -234,13 +234,16 @@ pub fn init_default() {
     // Architecture-specific default memory maps
     #[cfg(target_arch = "x86_64")]
     let default_map = [MemoryRegion {
-        // Start at 32MB to avoid bootloader structures:
-        //   - Page tables at 0x101000 (frame 257)
-        //   - GDT at 0x18d3000 (frame 6355, ~25MB)
-        //   - Various UEFI-allocated structures in 0-32MB range
-        // With 256MB QEMU RAM, this gives ~224MB of allocatable frames.
-        start: 0x2000000,                    // 32MB
-        size: 256 * 1024 * 1024 - 0x2000000, // Up to 256MB
+        // Start at 144MB to avoid the kernel image (including 128MB BSS heap):
+        //   - Kernel .text/.rodata/.data: ~6MB at 0x100000-0x700000
+        //   - Kernel .bss (128MB heap): ~128MB at 0x6A2000-0x86C9000
+        //   - UEFI bootloader structures in 0-32MB range
+        //   - Safety margin: ~10MB above BSS end
+        // With QEMU -m 256M this gives ~112MB of allocatable frames.
+        // With QEMU -m 512M, frames above 256MB are unused (safe: allocator
+        // only tracks up to `size` bytes, not beyond).
+        start: 0x9000000,                    // 144MB
+        size: 256 * 1024 * 1024 - 0x9000000, // Up to 256MB
         usable: true,
     }];
 

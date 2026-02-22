@@ -69,21 +69,188 @@ impl VfsNode for DevNode {
                 Ok(buffer.len())
             }
             "console" | "tty0" => {
-                // Blocking read from serial console
+                // Read from serial console, respecting terminal state (ICANON, ECHO).
+                //
+                // Canonical mode (ICANON set, default): buffer until newline/EOF,
+                // support VERASE (backspace), return full line.
+                // Raw mode (ICANON cleared): return characters immediately per
+                // VMIN/VTIME settings.
                 #[cfg(target_arch = "x86_64")]
                 {
-                    // Poll COM1 for input with a timeout to prevent infinite blocking
-                    let mut bytes_read = 0usize;
-                    let max_spins: u64 = 10_000_000; // ~100ms at typical clock rates
+                    use crate::drivers::terminal;
 
-                    for byte_slot in buffer.iter_mut() {
-                        let mut spins: u64 = 0;
+                    let canonical = terminal::is_canonical_mode();
+                    let echo = terminal::is_echo_enabled();
+                    let verase = terminal::get_verase();
+                    let vmin = terminal::get_vmin() as usize;
+
+                    if canonical {
+                        // Canonical mode: line-buffered with editing support.
+                        // Buffer characters until newline, CR, or EOF (Ctrl-D).
+                        // Support backspace (VERASE) to erase last character.
+                        let mut line_buf: [u8; 4096] = [0u8; 4096];
+                        let mut line_len: usize = 0;
+                        let max_spins: u64 = 100_000_000; // ~1s
+
                         loop {
-                            // Check LSR (Line Status Register) for data ready
+                            let mut spins: u64 = 0;
+                            let byte = loop {
+                                let lsr: u8;
+                                // SAFETY: Reading COM1 LSR (port 0x3FD).
+                                unsafe {
+                                    core::arch::asm!(
+                                        "in al, dx",
+                                        out("al") lsr,
+                                        in("dx") 0x3FDu16,
+                                        options(nomem, nostack)
+                                    );
+                                }
+                                if lsr & 1 != 0 {
+                                    let data: u8;
+                                    // SAFETY: Reading COM1 data register (port 0x3F8).
+                                    unsafe {
+                                        core::arch::asm!(
+                                            "in al, dx",
+                                            out("al") data,
+                                            in("dx") 0x3F8u16,
+                                            options(nomem, nostack)
+                                        );
+                                    }
+                                    break data;
+                                }
+                                spins += 1;
+                                if spins >= max_spins {
+                                    // Timeout with no data
+                                    if line_len > 0 {
+                                        let copy_len = line_len.min(buffer.len());
+                                        buffer[..copy_len].copy_from_slice(&line_buf[..copy_len]);
+                                        return Ok(copy_len);
+                                    }
+                                    return Ok(0);
+                                }
+                                core::hint::spin_loop();
+                            };
+
+                            // Handle special characters in canonical mode
+                            if byte == verase || byte == 8 {
+                                // Backspace: erase last character
+                                if line_len > 0 {
+                                    line_len -= 1;
+                                    if echo {
+                                        // Echo backspace-space-backspace
+                                        for &b in &[8u8, b' ', 8u8] {
+                                            // SAFETY: Writing COM1 data register.
+                                            unsafe {
+                                                while {
+                                                    let s: u8;
+                                                    core::arch::asm!(
+                                                        "in al, dx",
+                                                        out("al") s,
+                                                        in("dx") 0x3FDu16,
+                                                        options(nomem, nostack)
+                                                    );
+                                                    s & 0x20 == 0
+                                                } {
+                                                    core::hint::spin_loop();
+                                                }
+                                                core::arch::asm!(
+                                                    "out dx, al",
+                                                    in("al") b,
+                                                    in("dx") 0x3F8u16,
+                                                    options(nomem, nostack)
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+
+                            // CR -> NL conversion (c_iflag ICRNL)
+                            let byte = if byte == b'\r' { b'\n' } else { byte };
+
+                            // Store in line buffer
+                            if line_len < line_buf.len() {
+                                line_buf[line_len] = byte;
+                                line_len += 1;
+                            }
+
+                            // Echo the character
+                            if echo {
+                                let echo_byte = byte;
+                                // SAFETY: Writing COM1 data register.
+                                unsafe {
+                                    while {
+                                        let s: u8;
+                                        core::arch::asm!(
+                                            "in al, dx",
+                                            out("al") s,
+                                            in("dx") 0x3FDu16,
+                                            options(nomem, nostack)
+                                        );
+                                        s & 0x20 == 0
+                                    } {
+                                        core::hint::spin_loop();
+                                    }
+                                    core::arch::asm!(
+                                        "out dx, al",
+                                        in("al") echo_byte,
+                                        in("dx") 0x3F8u16,
+                                        options(nomem, nostack)
+                                    );
+                                    // Also echo CR after NL for terminal display
+                                    if echo_byte == b'\n' {
+                                        while {
+                                            let s: u8;
+                                            core::arch::asm!(
+                                                "in al, dx",
+                                                out("al") s,
+                                                in("dx") 0x3FDu16,
+                                                options(nomem, nostack)
+                                            );
+                                            s & 0x20 == 0
+                                        } {
+                                            core::hint::spin_loop();
+                                        }
+                                        core::arch::asm!(
+                                            "out dx, al",
+                                            in("al") b'\r',
+                                            in("dx") 0x3F8u16,
+                                            options(nomem, nostack)
+                                        );
+                                    }
+                                }
+                            }
+
+                            // Line complete on newline or EOF
+                            if byte == b'\n' || byte == 4 {
+                                // Ctrl-D (EOF)
+                                let copy_len = line_len.min(buffer.len());
+                                buffer[..copy_len].copy_from_slice(&line_buf[..copy_len]);
+                                return Ok(copy_len);
+                            }
+                        }
+                    } else {
+                        // Raw mode (non-canonical): return characters immediately.
+                        // VMIN controls minimum chars, VTIME controls timeout.
+                        let target = if vmin == 0 { 1 } else { vmin.min(buffer.len()) };
+                        let max_spins: u64 = if terminal::get_vtime() > 0 {
+                            // VTIME is in tenths of a second; approximate with spin count
+                            (terminal::get_vtime() as u64) * 10_000_000
+                        } else if vmin == 0 {
+                            // VMIN=0, VTIME=0: pure non-blocking
+                            1
+                        } else {
+                            // VMIN>0, VTIME=0: block indefinitely
+                            u64::MAX
+                        };
+
+                        let mut bytes_read = 0usize;
+                        let mut total_spins: u64 = 0;
+
+                        while bytes_read < target {
                             let lsr: u8;
-                            // SAFETY: Reading port 0x3FD (COM1 Line Status Register)
-                            // is a side-effect-free I/O operation that checks whether
-                            // data is available in the serial receive buffer.
+                            // SAFETY: Reading COM1 LSR (port 0x3FD).
                             unsafe {
                                 core::arch::asm!(
                                     "in al, dx",
@@ -93,11 +260,8 @@ impl VfsNode for DevNode {
                                 );
                             }
                             if lsr & 1 != 0 {
-                                // Data available -- read it
                                 let data: u8;
-                                // SAFETY: Reading port 0x3F8 (COM1 data register)
-                                // retrieves one byte from the serial receive buffer.
-                                // The LSR check above confirmed data is available.
+                                // SAFETY: Reading COM1 data register (port 0x3F8).
                                 unsafe {
                                     core::arch::asm!(
                                         "in al, dx",
@@ -106,39 +270,47 @@ impl VfsNode for DevNode {
                                         options(nomem, nostack)
                                     );
                                 }
-                                *byte_slot = data;
+                                buffer[bytes_read] = data;
                                 bytes_read += 1;
-                                break;
-                            }
 
-                            spins += 1;
-                            if spins >= max_spins {
-                                // Timeout -- return what we have so far
-                                return Ok(bytes_read);
+                                // Echo if enabled (even in raw mode)
+                                if echo {
+                                    // SAFETY: Writing COM1 data register.
+                                    unsafe {
+                                        while {
+                                            let s: u8;
+                                            core::arch::asm!(
+                                                "in al, dx",
+                                                out("al") s,
+                                                in("dx") 0x3FDu16,
+                                                options(nomem, nostack)
+                                            );
+                                            s & 0x20 == 0
+                                        } {
+                                            core::hint::spin_loop();
+                                        }
+                                        core::arch::asm!(
+                                            "out dx, al",
+                                            in("al") data,
+                                            in("dx") 0x3F8u16,
+                                            options(nomem, nostack)
+                                        );
+                                    }
+                                }
+
+                                // Reset timeout after each character
+                                total_spins = 0;
+                            } else {
+                                total_spins += 1;
+                                if total_spins >= max_spins {
+                                    break;
+                                }
+                                core::hint::spin_loop();
                             }
-                            core::hint::spin_loop();
                         }
 
-                        // After first byte, only continue if more data immediately available
-                        if bytes_read > 0 {
-                            let lsr: u8;
-                            // SAFETY: Same as above -- reading COM1 LSR to check for
-                            // additional buffered data after the first byte.
-                            unsafe {
-                                core::arch::asm!(
-                                    "in al, dx",
-                                    out("al") lsr,
-                                    in("dx") 0x3FDu16,
-                                    options(nomem, nostack)
-                                );
-                            }
-                            if lsr & 1 == 0 {
-                                break; // No more data immediately available
-                            }
-                        }
+                        Ok(bytes_read)
                     }
-
-                    Ok(bytes_read)
                 }
                 // Non-x86_64: no serial port polling available, return EOF
                 #[cfg(not(target_arch = "x86_64"))]

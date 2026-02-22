@@ -13,6 +13,7 @@ pub mod nvme;
 pub mod pci;
 pub mod ramfb;
 pub mod storage;
+pub mod terminal;
 pub mod usb;
 pub mod virtio;
 pub mod virtio_net;
@@ -27,6 +28,9 @@ pub use usb::{UsbBus, UsbDevice};
 /// Initialize all drivers
 pub fn init() {
     crate::println!("[DRIVERS] Initializing device drivers...");
+
+    // Initialize terminal state (before console, so read paths can query it)
+    terminal::init();
 
     // Initialize bus drivers
     pci::init();

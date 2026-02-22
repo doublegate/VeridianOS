@@ -1,0 +1,81 @@
+# Portfile.toml -- libcurses for VeridianOS
+#
+# Minimal curses implementation for VeridianOS (ANSI escape sequence based).
+# Provides core curses/ncurses API via termios raw mode and VT100 escape
+# sequences. Sufficient for nano and basic TUI applications.
+#
+# This is NOT a full ncurses replacement -- it implements the commonly used
+# subset (~90 functions) needed for text editors and simple TUI apps.
+# The terminal is assumed to be VT100/xterm compatible (serial or QEMU).
+
+[port]
+name = "libcurses"
+version = "1.0.0"
+description = "Minimal curses library for VeridianOS (ANSI/VT100-based)"
+homepage = "https://github.com/doublegate/VeridianOS"
+license = "MIT OR Apache-2.0"
+category = "lib"
+build_type = "custom"
+
+[sources]
+# Source is in-tree: userland/libcurses/
+urls = []
+checksums = []
+
+[dependencies]
+build = []
+runtime = []
+
+[build]
+steps = [
+    """
+    CC=${TOOLCHAIN}/bin/x86_64-veridian-gcc
+    AR=${TOOLCHAIN}/bin/x86_64-veridian-ar
+    RANLIB=${TOOLCHAIN}/bin/x86_64-veridian-ranlib
+    SYSROOT=${TOOLCHAIN}/sysroot
+
+    $CC -c -static -O2 -Wall -Wextra -Wno-unused-parameter \
+        -fno-stack-protector -ffreestanding -mno-red-zone -mcmodel=small \
+        -nostdinc -isystem ${SYSROOT}/usr/include \
+        -I userland/libcurses \
+        -o curses.o userland/libcurses/curses.c
+
+    $AR rcs libcurses.a curses.o
+    $RANLIB libcurses.a
+
+    cp libcurses.a ${SYSROOT}/usr/lib/libcurses.a
+    ln -sf libcurses.a ${SYSROOT}/usr/lib/libncurses.a
+    ln -sf libcurses.a ${SYSROOT}/usr/lib/libncursesw.a
+    cp userland/libcurses/curses.h ${SYSROOT}/usr/include/curses.h
+    cp userland/libcurses/ncurses.h ${SYSROOT}/usr/include/ncurses.h
+    """,
+]
+
+[native_build]
+description = "Minimal curses library for VeridianOS"
+method = "in-tree"
+notes = """
+This is a custom curses implementation (~1500 lines) written for VeridianOS.
+It uses ANSI escape sequences over the serial terminal for all rendering.
+No terminfo/termcap database is needed -- the terminal is assumed to be
+VT100-compatible (which QEMU serial and xterm both are).
+
+Implemented features:
+  - Window management (newwin, delwin, subwin, derwin)
+  - Virtual screen buffer with diff-based refresh
+  - Input in raw/cbreak mode with escape sequence parsing
+  - Arrow keys, Home/End, PgUp/PgDn, F1-F12, Backspace, Delete
+  - 8 basic ANSI colors with COLOR_PAIR support
+  - Attributes: bold, underline, reverse, dim, blink
+  - Scrolling, insert/delete line/char, borders/boxes
+  - Alternate screen buffer (smcup/rmcup)
+  - Cursor visibility control
+
+Not implemented (stubs return OK or do nothing):
+  - terminfo/termcap database
+  - Mouse support
+  - Wide character support (wchar_t)
+  - Soft labels (SLK)
+  - Pad functions
+  - Programmatic color redefinition
+"""

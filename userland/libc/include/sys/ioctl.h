@@ -18,6 +18,14 @@ extern "C" {
 /* Terminal ioctl requests                                                   */
 /* ========================================================================= */
 
+/** Get terminal attributes (struct termios). */
+#define TCGETS      0x5401
+/** Set terminal attributes immediately. */
+#define TCSETS      0x5402
+/** Set terminal attributes after draining output. */
+#define TCSETSW     0x5403
+/** Set terminal attributes after draining output + flushing input. */
+#define TCSETSF     0x5404
 /** Get terminal window size. */
 #define TIOCGWINSZ  0x5413
 /** Set terminal window size. */
