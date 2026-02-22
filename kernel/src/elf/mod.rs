@@ -154,12 +154,30 @@ impl ElfLoader {
                 })?;
 
         // Process each LOAD segment
+        let mut _load_idx = 0u32;
         for segment in &binary.segments {
             if segment.segment_type == SegmentType::Load {
                 // Calculate page-aligned addresses
                 let page_start = segment.virtual_addr & !0xFFF;
                 let page_end = (segment.virtual_addr + segment.memory_size + 0xFFF) & !0xFFF;
                 let num_pages = ((page_end - page_start) / 0x1000) as usize;
+
+                // Diagnostic: log each LOAD segment for multi-LOAD debugging
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    crate::arch::x86_64::idt::raw_serial_str(b"[ELF] LOAD#");
+                    crate::arch::x86_64::idt::raw_serial_hex(_load_idx as u64);
+                    crate::arch::x86_64::idt::raw_serial_str(b" va=0x");
+                    crate::arch::x86_64::idt::raw_serial_hex(segment.virtual_addr);
+                    crate::arch::x86_64::idt::raw_serial_str(b" memsz=0x");
+                    crate::arch::x86_64::idt::raw_serial_hex(segment.memory_size);
+                    crate::arch::x86_64::idt::raw_serial_str(b" pages=0x");
+                    crate::arch::x86_64::idt::raw_serial_hex(num_pages as u64);
+                    crate::arch::x86_64::idt::raw_serial_str(b" flags=0x");
+                    crate::arch::x86_64::idt::raw_serial_hex(segment.flags as u64);
+                    crate::arch::x86_64::idt::raw_serial_str(b"\n");
+                }
+                _load_idx += 1;
 
                 // Map pages for this segment
                 for i in 0..num_pages {

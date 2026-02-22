@@ -177,7 +177,7 @@ use alloc::vec::Vec;
 ///
 /// # Returns
 /// File descriptor on success
-pub fn sys_open(path: usize, flags: usize, _mode: usize) -> SyscallResult {
+pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
     // Validate path pointer is in user space
     validate_user_string_ptr(path)?;
 
@@ -230,7 +230,34 @@ pub fn sys_open(path: usize, flags: usize, _mode: usize) -> SyscallResult {
                 Err(_) => Err(SyscallError::OutOfMemory),
             }
         }
-        Err(_) => Err(SyscallError::ResourceNotFound),
+        Err(_) => {
+            // If O_CREAT is set, create the file in its parent directory
+            if open_flags.create {
+                let perms = Permissions::from_mode(mode as u32);
+                let (parent_path, name) = split_path(path_str)?;
+                let vfs_guard = vfs()?.read();
+                let parent = vfs_guard
+                    .resolve_path(&parent_path)
+                    .map_err(|_| SyscallError::ResourceNotFound)?;
+                match parent.create(&name, perms) {
+                    Ok(node) => {
+                        let file = crate::fs::file::File::new_with_path(
+                            node,
+                            open_flags,
+                            alloc::string::String::from(path_str),
+                        );
+                        let file_table = process.file_table.lock();
+                        match file_table.open(alloc::sync::Arc::new(file)) {
+                            Ok(fd_num) => Ok(fd_num),
+                            Err(_) => Err(SyscallError::OutOfMemory),
+                        }
+                    }
+                    Err(_) => Err(SyscallError::ResourceNotFound),
+                }
+            } else {
+                Err(SyscallError::ResourceNotFound)
+            }
+        }
     }
 }
 

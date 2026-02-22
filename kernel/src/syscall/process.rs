@@ -135,6 +135,18 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
                     }
                 }
 
+                // Diagnostic: print entry/stack/CR3 before usermode transition
+                // so multi-LOAD ELF GP faults can be correlated.
+                crate::arch::x86_64::idt::raw_serial_str(b"[EXEC] entry=0x");
+                crate::arch::x86_64::idt::raw_serial_hex(entry);
+                crate::arch::x86_64::idt::raw_serial_str(b" stack=0x");
+                crate::arch::x86_64::idt::raw_serial_hex(stack);
+                let diag_cr3: u64;
+                core::arch::asm!("mov {}, cr3", out(reg) diag_cr3);
+                crate::arch::x86_64::idt::raw_serial_str(b" cr3=0x");
+                crate::arch::x86_64::idt::raw_serial_hex(diag_cr3);
+                crate::arch::x86_64::idt::raw_serial_str(b"\n");
+
                 // Undo the swapgs from syscall_entry so GS_BASE and
                 // KERNEL_GS_BASE are correct for user mode.
                 core::arch::asm!("swapgs");

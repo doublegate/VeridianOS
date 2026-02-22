@@ -1017,7 +1017,20 @@ impl VirtualAddressSpace {
             // ensuring exclusive access to this VAS and its page tables.
             let mut mapper = unsafe { create_mapper_from_root(pt_root) };
             let mut alloc = VasFrameAllocator;
-            mapper.map_page(vaddr_obj, frame, flags, &mut alloc)?;
+            match mapper.map_page(vaddr_obj, frame, flags, &mut alloc) {
+                Ok(()) => {}
+                Err(KernelError::AlreadyExists { .. }) => {
+                    // Page already mapped by a previous segment (e.g.,
+                    // overlapping LOAD segments sharing a boundary page).
+                    // Update flags to the union of old and new, then free
+                    // the unused frame we just allocated.
+                    let _ = mapper.update_page_flags(vaddr_obj, flags);
+                    let _ = FRAME_ALLOCATOR.lock().free_frames(frame, 1);
+                    crate::arch::tlb_flush_address(vaddr as u64);
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            }
             crate::arch::tlb_flush_address(vaddr as u64);
         }
 
