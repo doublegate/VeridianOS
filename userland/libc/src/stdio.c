@@ -1160,3 +1160,55 @@ int remove(const char *pathname)
         return 0;
     return rmdir(pathname);
 }
+
+/* ========================================================================= */
+/* POSIX getdelim / getline                                                  */
+/* ========================================================================= */
+
+ssize_t getdelim(char **lineptr, size_t *n, int delim, FILE *stream)
+{
+    if (!lineptr || !n || !stream) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    /* Initial allocation if caller passes NULL or zero-size buffer. */
+    if (*lineptr == NULL || *n == 0) {
+        *n = 128;
+        *lineptr = (char *)malloc(*n);
+        if (!*lineptr) {
+            errno = ENOMEM;
+            return -1;
+        }
+    }
+
+    size_t pos = 0;
+    int c;
+    while ((c = fgetc(stream)) != EOF) {
+        /* Grow buffer if needed (leave room for NUL). */
+        if (pos + 1 >= *n) {
+            size_t new_size = *n * 2;
+            char *tmp = (char *)realloc(*lineptr, new_size);
+            if (!tmp) {
+                errno = ENOMEM;
+                return -1;
+            }
+            *lineptr = tmp;
+            *n = new_size;
+        }
+        (*lineptr)[pos++] = (char)c;
+        if (c == delim)
+            break;
+    }
+
+    if (pos == 0 && c == EOF)
+        return -1;
+
+    (*lineptr)[pos] = '\0';
+    return (ssize_t)pos;
+}
+
+ssize_t getline(char **lineptr, size_t *n, FILE *stream)
+{
+    return getdelim(lineptr, n, '\n', stream);
+}

@@ -119,6 +119,22 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
                 let stack = ctx.get_stack_pointer() as u64;
                 drop(ctx);
 
+                // Switch CR3 to the new page tables created by exec_process.
+                // exec_process calls memory_space.init() which creates a new
+                // L4 page table with kernel mappings, then maps ELF segments
+                // and user stack into it. But it does NOT switch CR3 — the
+                // CPU still uses the old (cleared) page tables. We must load
+                // the new CR3 before iretq, otherwise the user entry point
+                // is unmapped and causes a page fault.
+                if let Some(proc) = crate::process::current_process() {
+                    let memory_space = proc.memory_space.lock();
+                    let new_cr3 = memory_space.get_page_table();
+                    drop(memory_space);
+                    if new_cr3 != 0 {
+                        core::arch::asm!("mov cr3, {}", in(reg) new_cr3);
+                    }
+                }
+
                 // Undo the swapgs from syscall_entry so GS_BASE and
                 // KERNEL_GS_BASE are correct for user mode.
                 core::arch::asm!("swapgs");
@@ -146,14 +162,6 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
 /// If no current thread is found (e.g., called from a context without a
 /// proper task), halts the CPU as a last resort.
 pub fn sys_exit(exit_code: usize) -> SyscallResult {
-    // RAW SERIAL DIAGNOSTIC: Trace sys_exit entry
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[SYS_EXIT ENTRY] code=");
-        crate::arch::x86_64::idt::raw_serial_hex(exit_code as u64);
-        crate::arch::x86_64::idt::raw_serial_str(b"\n");
-    }
-
     // Check for boot return context FIRST, before exit_thread/exit_process.
     // Both of those call sched::exit_task() which does a context switch and
     // never returns, preventing boot_return_to_kernel from being reached.
@@ -162,16 +170,37 @@ pub fn sys_exit(exit_code: usize) -> SyscallResult {
         let has_ctx = crate::arch::x86_64::usermode::has_boot_return_context();
         crate::println!("[SYS_EXIT] code={}, boot_ctx={}", exit_code, has_ctx);
         if has_ctx {
+            // Mark the process as Zombie and notify parent before returning
+            // to the boot context. This is needed for nested child execution:
+            // when a forked child exits, the parent's wait loop must find it
+            // as a Zombie to reap it.
+            if let Some(process) = current_process() {
+                process.set_exit_code(exit_code as i32);
+
+                #[cfg(feature = "alloc")]
+                {
+                    let threads = process.threads.lock();
+                    for (_, thread) in threads.iter() {
+                        thread.set_state(crate::process::thread::ThreadState::Zombie);
+                    }
+                }
+
+                process.set_state(crate::process::pcb::ProcessState::Zombie);
+
+                // Wake parent if blocked in waitpid
+                if let Some(parent_pid) = process.parent {
+                    if let Some(parent) = crate::process::table::get_process(parent_pid) {
+                        if parent.get_state() == crate::process::pcb::ProcessState::Blocked {
+                            parent.set_state(crate::process::pcb::ProcessState::Ready);
+                            crate::sched::wake_up_process(parent_pid);
+                        }
+                    }
+                }
+            }
+
             // SAFETY: The boot return context was saved by
-            // enter_usermode_returnable and is still valid on the
-            // bootstrap stack. This restores CR3, RSP, callee-saved
-            // registers, and returns to the caller of
-            // enter_usermode_returnable.
-            //
-            // We skip exit_thread/exit_process here. The process resources
-            // (page tables, stacks) will be leaked during boot testing,
-            // which is acceptable since this path is only used for sequential
-            // process execution during bootstrap.
+            // enter_usermode_returnable (or enter_forked_child_returnable)
+            // and is still valid on the kernel stack.
             unsafe {
                 crate::arch::x86_64::usermode::boot_return_to_kernel();
             }
@@ -219,13 +248,12 @@ pub fn sys_wait(pid: isize, status_ptr: usize, options: usize) -> SyscallResult 
         continued: (options & WCONTINUED) != 0,
     };
 
-    match crate::process::exit::wait_process_with_options(wait_pid, wait_options) {
+    let wait_result = crate::process::exit::wait_process_with_options(wait_pid, wait_options);
+
+    match wait_result {
         Ok((child_pid, exit_status)) => {
             // Write exit status to user space if pointer provided
             if status_ptr != 0 {
-                // SAFETY: status_ptr is a non-zero user-space pointer.
-                // copy_to_user validates the pointer and copies the i32
-                // exit status value to the user buffer.
                 unsafe {
                     copy_to_user(status_ptr, &exit_status)?;
                 }

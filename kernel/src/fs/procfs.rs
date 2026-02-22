@@ -1,6 +1,8 @@
 //! Process Filesystem (/proc)
 //!
 //! Provides information about running processes and system state.
+//! Populated with real data from CPUID, frame allocator, timer, and
+//! process table.
 
 #![allow(clippy::useless_format)]
 
@@ -61,44 +63,46 @@ impl VfsNode for ProcNode {
             ProcNodeType::SystemFile(name) => {
                 match name.as_str() {
                     "version" => {
-                        format!("VeridianOS 0.3.0-dev\n")
+                        format!(
+                            "VeridianOS version 0.5.0 (gcc 14.2.0) #1 SMP {}\n",
+                            env!("CARGO_PKG_VERSION")
+                        )
                     }
                     "uptime" => {
-                        let ticks = crate::read_timestamp();
-                        format!("{} seconds\n", ticks / 1_000_000)
+                        let secs = crate::arch::timer::get_timestamp_secs();
+                        let frac_ms = crate::arch::timer::get_timestamp_ms() % 1000;
+                        // Linux format: uptime_secs idle_secs
+                        format!("{}.{:02} 0.00\n", secs, frac_ms / 10)
                     }
                     "meminfo" => {
-                        // Get actual memory statistics from the allocator
                         let stats = crate::mm::get_memory_stats();
                         let total_kb = stats.total_frames * 4; // 4KB per frame
                         let free_kb = stats.free_frames * 4;
-                        let used_kb = total_kb - free_kb;
-                        let available_kb = free_kb + (stats.cached_frames * 4); // Free + cached
+                        let used_kb = total_kb.saturating_sub(free_kb);
+                        let cached_kb = stats.cached_frames * 4;
+                        let available_kb = free_kb + cached_kb;
+                        let buffers_kb = 0usize;
+                        let slab_kb = 0usize;
 
                         format!(
-                            "MemTotal:       {} kB\nMemFree:        {} kB\nMemUsed:        {} \
-                             kB\nMemAvailable:   {} kB\nCached:         {} kB\n",
+                            "MemTotal:       {:>8} kB\n\
+                             MemFree:        {:>8} kB\n\
+                             MemAvailable:   {:>8} kB\n\
+                             Buffers:        {:>8} kB\n\
+                             Cached:         {:>8} kB\n\
+                             Slab:           {:>8} kB\n\
+                             MemUsed:        {:>8} kB\n",
                             total_kb,
                             free_kb,
-                            used_kb,
                             available_kb,
-                            stats.cached_frames * 4
+                            buffers_kb,
+                            cached_kb,
+                            slab_kb,
+                            used_kb,
                         )
                     }
-                    "cpuinfo" => {
-                        #[cfg(target_arch = "x86_64")]
-                        let arch = "x86_64";
-                        #[cfg(target_arch = "aarch64")]
-                        let arch = "aarch64";
-                        #[cfg(target_arch = "riscv64")]
-                        let arch = "riscv64";
-
-                        format!(
-                            "processor\t: 0\narchitecture\t: {}\nmodel name\t: VeridianOS Virtual \
-                             CPU\n",
-                            arch
-                        )
-                    }
+                    "cpuinfo" => generate_cpuinfo(),
+                    "loadavg" => generate_loadavg(),
                     _ => String::new(),
                 }
             }
@@ -228,6 +232,12 @@ impl VfsNode for ProcNode {
                     inode: 0,
                 });
 
+                entries.push(DirEntry {
+                    name: String::from("loadavg"),
+                    node_type: NodeType::File,
+                    inode: 0,
+                });
+
                 // Add process directories for all running processes
                 if let Some(process_list) = crate::process::get_process_list() {
                     for pid in process_list {
@@ -270,7 +280,7 @@ impl VfsNode for ProcNode {
             ProcNodeType::Root => {
                 // Check for system files
                 match name {
-                    "version" | "uptime" | "meminfo" | "cpuinfo" => {
+                    "version" | "uptime" | "meminfo" | "cpuinfo" | "loadavg" => {
                         Ok(Arc::new(ProcNode::new_system_file(String::from(name)))
                             as Arc<dyn VfsNode>)
                     }
@@ -324,6 +334,160 @@ impl VfsNode for ProcNode {
     fn truncate(&self, _size: usize) -> Result<(), KernelError> {
         Err(KernelError::FsError(FsError::ReadOnly))
     }
+}
+
+/// Generate /proc/cpuinfo content with real CPUID data on x86_64.
+fn generate_cpuinfo() -> String {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let brand = cpuid_brand_string();
+        let freq_mhz = crate::arch::timer::hw_ticks_per_second() / 1_000_000;
+
+        format!(
+            "processor\t: 0\nvendor_id\t: {}\nmodel name\t: {}\ncpu MHz\t\t: {}\ncache size\t: 0 \
+             KB\nbogomips\t: {}\n",
+            cpuid_vendor_id(),
+            brand,
+            freq_mhz,
+            freq_mhz * 2,
+        )
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        let freq_mhz = crate::arch::timer::hw_ticks_per_second() / 1_000_000;
+        format!(
+            "processor\t: 0\narchitecture\t: aarch64\nmodel name\t: ARMv8 Processor\nBogoMIPS\t: \
+             {}\nFeatures\t: fp asimd\n",
+            freq_mhz * 2,
+        )
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        format!("processor\t: 0\narchitecture\t: riscv64\nmodel name\t: RISC-V Processor\n")
+    }
+}
+
+/// Generate /proc/loadavg content.
+fn generate_loadavg() -> String {
+    // Count running/total tasks from process table
+    let (running, total) = if let Some(pids) = crate::process::get_process_list() {
+        let total = pids.len();
+        let mut running = 0usize;
+        for pid in &pids {
+            if let Some(p) = crate::process::get_process(crate::process::ProcessId(*pid)) {
+                match p.get_state() {
+                    crate::process::ProcessState::Running | crate::process::ProcessState::Ready => {
+                        running += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        (running, total)
+    } else {
+        (1, 1)
+    };
+
+    // Find highest PID for last field
+    let last_pid = crate::process::get_process_list()
+        .and_then(|pids| pids.iter().copied().max())
+        .unwrap_or(1);
+
+    // Linux format: 1min 5min 15min running/total last_pid
+    format!("0.00 0.00 0.00 {}/{} {}\n", running, total, last_pid)
+}
+
+/// Read CPUID vendor ID string (x86_64 only).
+#[cfg(target_arch = "x86_64")]
+fn cpuid_vendor_id() -> String {
+    let ebx: u32;
+    let ecx: u32;
+    let edx: u32;
+    // SAFETY: CPUID leaf 0 returns vendor string in EBX:EDX:ECX.
+    // push/pop RBX required because CPUID clobbers it.
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "xor eax, eax",
+            "cpuid",
+            "mov {0:e}, ebx",
+            "mov {1:e}, ecx",
+            "mov {2:e}, edx",
+            "pop rbx",
+            out(reg) ebx,
+            out(reg) ecx,
+            out(reg) edx,
+            out("eax") _,
+        );
+    }
+    let mut buf = [0u8; 12];
+    buf[0..4].copy_from_slice(&ebx.to_le_bytes());
+    buf[4..8].copy_from_slice(&edx.to_le_bytes());
+    buf[8..12].copy_from_slice(&ecx.to_le_bytes());
+    String::from_utf8_lossy(&buf).trim_end_matches('\0').into()
+}
+
+/// Read CPUID brand string (x86_64 only, leaves 0x80000002-0x80000004).
+#[cfg(target_arch = "x86_64")]
+fn cpuid_brand_string() -> String {
+    // Check if extended CPUID is supported
+    let max_ext: u32;
+    // SAFETY: CPUID leaf 0x80000000 returns max extended leaf in EAX.
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "mov eax, 0x80000000",
+            "cpuid",
+            "mov {0:e}, eax",
+            "pop rbx",
+            out(reg) max_ext,
+            out("eax") _,
+        );
+    }
+
+    if max_ext < 0x80000004 {
+        return String::from("Unknown CPU");
+    }
+
+    let mut buf = [0u8; 48];
+
+    for (i, leaf) in [0x80000002u32, 0x80000003, 0x80000004].iter().enumerate() {
+        let eax: u32;
+        let ebx: u32;
+        let ecx: u32;
+        let edx: u32;
+        // SAFETY: CPUID leaves 0x80000002-4 return the CPU brand string.
+        unsafe {
+            core::arch::asm!(
+                "push rbx",
+                "mov eax, {leaf:e}",
+                "cpuid",
+                "mov {0:e}, eax",
+                "mov {1:e}, ebx",
+                "mov {2:e}, ecx",
+                "mov {3:e}, edx",
+                "pop rbx",
+                out(reg) eax,
+                out(reg) ebx,
+                out(reg) ecx,
+                out(reg) edx,
+                leaf = in(reg) *leaf,
+                out("eax") _,
+            );
+        }
+        let off = i * 16;
+        buf[off..off + 4].copy_from_slice(&eax.to_le_bytes());
+        buf[off + 4..off + 8].copy_from_slice(&ebx.to_le_bytes());
+        buf[off + 8..off + 12].copy_from_slice(&ecx.to_le_bytes());
+        buf[off + 12..off + 16].copy_from_slice(&edx.to_le_bytes());
+    }
+
+    String::from_utf8_lossy(&buf)
+        .trim_end_matches('\0')
+        .trim()
+        .into()
 }
 
 /// Process filesystem

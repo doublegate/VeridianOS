@@ -55,14 +55,6 @@ pub fn load_user_program(
     argv: &[&str],
     envp: &[&str],
 ) -> Result<ProcessId, KernelError> {
-    // RAW SERIAL DEBUG
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[LOAD_USER_PROG] path=");
-        crate::arch::x86_64::idt::raw_serial_str(path.as_bytes());
-        crate::arch::x86_64::idt::raw_serial_str(b"\n");
-    }
-
     // Open the file
     let file_node = get_vfs()
         .read()
@@ -157,13 +149,6 @@ pub fn load_user_program(
             ));
             let _ = ft.open(stderr_file);
         }
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[LOAD_USER_PROG] created pid=");
-        crate::arch::x86_64::idt::raw_serial_hex(pid.0);
-        crate::arch::x86_64::idt::raw_serial_str(b"\n");
     }
 
     // Load the ELF segments into the process's address space.

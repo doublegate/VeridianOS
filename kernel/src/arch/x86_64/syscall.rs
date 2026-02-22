@@ -9,9 +9,73 @@
 
 #![allow(function_casts_as_integer)]
 
-use core::cell::UnsafeCell;
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use crate::syscall::syscall_handler;
+
+/// Saved user register frame from SYSCALL entry.
+///
+/// This struct matches the exact push order in `syscall_entry` assembly.
+/// After all pushes, RSP points to this layout (lowest address = first field).
+/// The struct is used by `fork_process()` to capture the live register state
+/// of the parent at the moment of the fork() syscall, so the child gets a
+/// copy of the parent's actual CPU registers rather than the stale
+/// ThreadContext from process creation time.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SyscallFrame {
+    pub r9: u64,  // arg6 (pushed last)
+    pub r8: u64,  // arg5
+    pub r10: u64, // arg4
+    pub rdx: u64, // arg3
+    pub rsi: u64, // arg2
+    pub rdi: u64, // arg1
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub rbx: u64,
+    pub rbp: u64,
+    pub r11: u64, // User RFLAGS (clobbered by SYSCALL)
+    pub rcx: u64, // User RIP (clobbered by SYSCALL)
+}
+
+/// Kernel stack pointer after all user registers are saved in syscall_entry.
+/// Points to a valid `SyscallFrame` during syscall handler execution.
+/// Set to 0 outside of syscall context.
+static SYSCALL_FRAME_PTR: AtomicU64 = AtomicU64::new(0);
+
+/// Get a reference to the saved syscall register frame.
+///
+/// Only valid during syscall handler execution. Returns `None` if called
+/// outside of a syscall context.
+///
+/// # Safety
+/// The returned reference points to the kernel stack. It is valid only while
+/// the syscall handler is executing (before registers are popped on return).
+pub fn get_syscall_frame() -> Option<&'static SyscallFrame> {
+    let ptr = SYSCALL_FRAME_PTR.load(Ordering::Acquire);
+    if ptr == 0 {
+        return None;
+    }
+    // SAFETY: SYSCALL_FRAME_PTR is set by syscall_entry to point to the
+    // kernel stack after all registers are pushed. The pointer is valid
+    // for the duration of the syscall handler. The SyscallFrame layout
+    // matches the exact push order in the assembly.
+    Some(unsafe { &*(ptr as *const SyscallFrame) })
+}
+
+/// Get the user RSP saved by syscall_entry into per-CPU data.
+///
+/// Only valid during syscall handler execution.
+pub fn get_saved_user_rsp() -> u64 {
+    // SAFETY: PER_CPU_AREA.user_rsp is set by syscall_entry (mov gs:[0x8], rsp)
+    // before switching to the kernel stack. It is valid during syscall handling.
+    unsafe { (*PER_CPU_AREA.0.get()).user_rsp }
+}
 
 /// Per-CPU data accessed via GS segment register during syscall entry/exit.
 ///
@@ -95,6 +159,12 @@ pub unsafe extern "C" fn syscall_entry() {
         "push r8",                   // arg5
         "push r9",                   // arg6
 
+        // Save frame pointer for fork() register capture.
+        // RSP now points to the complete SyscallFrame on the kernel stack.
+        // fork_process() reads this to give the child a copy of the parent's
+        // live registers instead of the stale ThreadContext from exec/load.
+        "mov [{frame_ptr}], rsp",
+
         // Rearrange registers from SYSCALL ABI to C calling convention.
         //
         // SYSCALL ABI:  rax=number, rdi=arg1, rsi=arg2, rdx=arg3, r10=arg4, r8=arg5
@@ -110,6 +180,10 @@ pub unsafe extern "C" fn syscall_entry() {
         "mov r8, r10",               // r8 = arg4
 
         "call {handler}",
+
+        // Clear frame pointer now that handler has returned.
+        // This prevents stale pointer use outside syscall context.
+        "mov qword ptr [{frame_ptr}], 0",
 
         // Restore user registers (reverse order of saves).
         // rax holds the syscall return value and is NOT restored.
@@ -133,7 +207,8 @@ pub unsafe extern "C" fn syscall_entry() {
         "swapgs",                    // Switch back to user GS
         "sysretq",
 
-        handler = sym syscall_handler
+        handler = sym syscall_handler,
+        frame_ptr = sym SYSCALL_FRAME_PTR,
     );
 }
 

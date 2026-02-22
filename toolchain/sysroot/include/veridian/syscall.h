@@ -181,6 +181,9 @@ extern "C" {
 #define SYS_FUTEX_WAKE          202
 #define SYS_ARCH_PRCTL          203
 
+/* System information (204) */
+#define SYS_PROCESS_UNAME       204
+
 /* AT_* constants for *at() syscalls */
 #define AT_FDCWD                (-100)
 #define AT_REMOVEDIR            0x200

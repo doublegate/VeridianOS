@@ -59,6 +59,41 @@ static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 /// Thread ID allocator
 static NEXT_TID: AtomicU64 = AtomicU64::new(1);
 
+/// Boot-launched process tracking.
+///
+/// During bootstrap, user processes are launched via
+/// `enter_usermode_returnable()` without registering them in the scheduler.
+/// When these processes make syscalls (e.g., fork), `current_process()` queries
+/// the scheduler which only knows about the idle task (pid=0). These atomics
+/// provide a fallback: the bootstrap wrapper sets them before entering user
+/// mode, and `current_process()`/`current_thread()` check them when the
+/// scheduler returns no valid process.
+///
+/// Using atomics avoids the SCHEDULER lock entirely, which is critical because
+/// acquiring the lock from the bootstrap stack corrupts SSE alignment (movaps
+/// GP fault).
+static BOOT_CURRENT_PID: AtomicU64 = AtomicU64::new(0);
+static BOOT_CURRENT_TID: AtomicU64 = AtomicU64::new(0);
+
+/// Register a boot-launched process as the current process.
+///
+/// Called from the bootstrap wrapper before entering user mode via
+/// `enter_usermode_returnable()`. This allows `current_process()` and
+/// `current_thread()` to return the correct process/thread during syscalls.
+pub fn set_boot_current(pid: ProcessId, tid: ThreadId) {
+    BOOT_CURRENT_PID.store(pid.0, Ordering::Release);
+    BOOT_CURRENT_TID.store(tid.0, Ordering::Release);
+}
+
+/// Clear the boot-launched process tracking.
+///
+/// Called from the bootstrap wrapper after the user process exits and control
+/// returns to the kernel bootstrap code.
+pub fn clear_boot_current() {
+    BOOT_CURRENT_PID.store(0, Ordering::Release);
+    BOOT_CURRENT_TID.store(0, Ordering::Release);
+}
+
 /// Allocate a new process ID
 pub fn alloc_pid() -> ProcessId {
     ProcessId(NEXT_PID.fetch_add(1, Ordering::Relaxed))
@@ -121,11 +156,22 @@ pub fn current_process() -> Option<&'static Process> {
         // for the lifetime of the lock. We read pid to look up the process.
         unsafe {
             let task_ref = task.as_ref();
-            table::get_process(task_ref.pid)
+            if let Some(proc) = table::get_process(task_ref.pid) {
+                return Some(proc);
+            }
         }
-    } else {
-        None
     }
+
+    // Fallback: check boot-launched process atomics.
+    // During bootstrap, user processes run via enter_usermode_returnable()
+    // without scheduler registration. The bootstrap wrapper sets these
+    // atomics so syscalls (fork, wait, etc.) can find the calling process.
+    let boot_pid = BOOT_CURRENT_PID.load(Ordering::Acquire);
+    if boot_pid != 0 {
+        return table::get_process(ProcessId(boot_pid));
+    }
+
+    None
 }
 
 /// Find process by ID
@@ -149,14 +195,23 @@ pub fn current_thread() -> Option<&'static Thread> {
         unsafe {
             let task_ref = task.as_ref();
             if let Some(process) = table::get_process(task_ref.pid) {
-                process.get_thread(task_ref.tid)
-            } else {
-                None
+                if let Some(thread) = process.get_thread(task_ref.tid) {
+                    return Some(thread);
+                }
             }
         }
-    } else {
-        None
     }
+
+    // Fallback: check boot-launched process atomics.
+    let boot_pid = BOOT_CURRENT_PID.load(Ordering::Acquire);
+    let boot_tid = BOOT_CURRENT_TID.load(Ordering::Acquire);
+    if boot_pid != 0 {
+        if let Some(process) = table::get_process(ProcessId(boot_pid)) {
+            return process.get_thread(ThreadId(boot_tid));
+        }
+    }
+
+    None
 }
 
 /// Yield current thread

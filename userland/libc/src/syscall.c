@@ -19,6 +19,7 @@
 #include <veridian/stat.h>
 #include <veridian/fcntl.h>
 #include <veridian/mman.h>
+#include <sys/utsname.h>
 #include <time.h>
 #include <errno.h>
 #include <stddef.h>
@@ -606,4 +607,18 @@ int mknod(const char *pathname, mode_t mode, dev_t dev)
 {
     return (int)__syscall_ret(
         veridian_syscall3(SYS_FILE_MKNOD, pathname, mode, dev));
+}
+
+/* ========================================================================= */
+/* System information                                                        */
+/* ========================================================================= */
+
+int uname(struct utsname *buf)
+{
+    if (!buf) {
+        errno = EFAULT;
+        return -1;
+    }
+    return (int)__syscall_ret(
+        veridian_syscall1(SYS_PROCESS_UNAME, buf));
 }

@@ -14,6 +14,12 @@
 #include <stddef.h>
 #include <stdarg.h>
 
+/* ssize_t for getline/getdelim -- avoid pulling in veridian/types.h */
+#ifndef __ssize_t_defined
+#define __ssize_t_defined
+typedef long ssize_t;
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -245,6 +251,23 @@ int remove(const char *pathname);
 
 /** Rename a file. */
 int rename(const char *oldpath, const char *newpath);
+
+/* ========================================================================= */
+/* POSIX extensions                                                          */
+/* ========================================================================= */
+
+/**
+ * Read an entire line from stream, allocating or resizing the buffer
+ * as needed.  On success *lineptr contains the line (including newline)
+ * and *n holds the buffer size.  Returns the number of characters read
+ * (including newline, excluding NUL), or -1 on failure or EOF.
+ */
+ssize_t getline(char **lineptr, size_t *n, FILE *stream);
+
+/**
+ * Read until delimiter, allocating/resizing buffer as needed.
+ */
+ssize_t getdelim(char **lineptr, size_t *n, int delim, FILE *stream);
 
 #ifdef __cplusplus
 }

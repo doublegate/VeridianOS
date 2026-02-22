@@ -26,7 +26,7 @@ pub static BOOT_RETURN_CR3: AtomicU64 = AtomicU64::new(0);
 /// Set to a known value when the boot context is saved, verified before
 /// restore. A mismatch indicates stack corruption (buffer overflow,
 /// use-after-free, etc.).
-static BOOT_STACK_CANARY: AtomicU64 = AtomicU64::new(0);
+pub static BOOT_STACK_CANARY: AtomicU64 = AtomicU64::new(0);
 
 /// Magic value for the boot stack canary.
 /// Chosen to be unlikely to appear naturally in memory.
@@ -131,6 +131,16 @@ pub unsafe extern "C" fn enter_usermode_returnable(
         "push r14",
         "push r15",
 
+        // Alignment padding: after 6 pushes from function entry (RSP was
+        // 16n+8 after the CALL), RSP is now 16n+8 - 48 = 16m+8 (mod 16 = 8).
+        // syscall_entry loads kernel_rsp, pushes 14 registers (112 bytes,
+        // alignment-neutral), then does CALL handler. For the handler to get
+        // the ABI-required RSP mod 16 = 8, the loaded kernel_rsp must be
+        // mod 16 = 0. Adding 8 bytes of padding achieves this:
+        //   16m+8 - 8 = 16m (mod 16 = 0).
+        // boot_return_to_kernel must skip this padding when restoring RSP.
+        "sub rsp, 8",
+
         // FIX 3: Set stack canary BEFORE saving boot context
         // Load canary magic value and store to global
         "mov rax, {canary_magic}",
@@ -142,11 +152,13 @@ pub unsafe extern "C" fn enter_usermode_returnable(
         "lea r12, [rip + {boot_cr3}]",
         "mov [r12], rax",
 
-        // Save boot RSP to global (points past callee-saved pushes)
+        // Save boot RSP to global (includes alignment padding)
         "lea r12, [rip + {boot_rsp}]",
         "mov [r12], rsp",
 
         // Update per-CPU kernel_rsp via pointer passed in r9
+        // This value is 16-byte aligned, ensuring syscall handlers get
+        // correct SSE alignment for movaps instructions.
         "mov [r9], rsp",
 
         // Switch to process page tables
@@ -165,6 +177,79 @@ pub unsafe extern "C" fn enter_usermode_returnable(
         "push 0x202",     // RFLAGS (IF enabled)
         "push rdx",       // CS
         "push rdi",       // RIP (entry point)
+
+        "iretq",
+
+        boot_cr3 = sym BOOT_RETURN_CR3,
+        boot_rsp = sym BOOT_RETURN_RSP,
+        boot_canary = sym BOOT_STACK_CANARY,
+        canary_magic = const BOOT_CANARY_MAGIC,
+    );
+}
+
+/// Like `enter_usermode_returnable`, but sets RAX=0 before iretq.
+///
+/// Used for running forked child processes inline from the wait loop.
+/// The forked child expects RAX=0 as the fork() return value indicating
+/// it's the child process.
+///
+/// # Safety
+/// Same preconditions as `enter_usermode_returnable`.
+#[unsafe(naked)]
+pub unsafe extern "C" fn enter_forked_child_returnable(
+    _entry_point: u64,    // rdi
+    _user_stack: u64,     // rsi
+    _user_cs: u64,        // rdx
+    _user_ss: u64,        // rcx
+    _process_cr3: u64,    // r8
+    _kernel_rsp_ptr: u64, // r9
+) {
+    core::arch::naked_asm!(
+        "push rbp",
+        "push rbx",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
+        "sub rsp, 8",
+
+        // Set stack canary
+        "mov rax, {canary_magic}",
+        "lea r12, [rip + {boot_canary}]",
+        "mov [r12], rax",
+
+        // Save boot CR3 to global
+        "mov rax, cr3",
+        "lea r12, [rip + {boot_cr3}]",
+        "mov [r12], rax",
+
+        // Save boot RSP to global
+        "lea r12, [rip + {boot_rsp}]",
+        "mov [r12], rsp",
+
+        // Update per-CPU kernel_rsp
+        "mov [r9], rsp",
+
+        // Switch to child's page tables
+        "mov cr3, r8",
+
+        // Set segment registers for user mode
+        "mov ds, ecx",
+        "mov es, ecx",
+        "xor eax, eax",
+        "mov fs, ax",
+        "mov gs, ax",
+
+        // Build iretq frame on stack
+        "push rcx",       // SS
+        "push rsi",       // RSP (user stack)
+        "push 0x202",     // RFLAGS (IF enabled)
+        "push rdx",       // CS
+        "push rdi",       // RIP (entry point)
+
+        // RAX = 0 for fork() child return value
+        // (already 0 from xor eax,eax above, but be explicit)
+        "xor eax, eax",
 
         "iretq",
 
@@ -257,8 +342,9 @@ pub unsafe fn boot_return_to_kernel() -> ! {
     BOOT_STACK_CANARY.store(0, Ordering::SeqCst);
 
     // SAFETY: cr3 is the boot page table address saved before entering user
-    // mode. rsp points to the stack with 6 callee-saved registers and the
-    // return address below them. We restore kernel segment registers and
+    // mode. rsp points to the stack with 8 bytes of alignment padding and
+    // 6 callee-saved registers, with the return address below them. We
+    // restore kernel segment registers and
     // balance the swapgs from syscall_entry. The swapgs must come BEFORE
     // clearing GS so we don't corrupt KERNEL_GS_BASE. After restoring RSP
     // and popping registers, ret returns to the caller of
@@ -279,6 +365,7 @@ pub unsafe fn boot_return_to_kernel() -> ! {
         "mov fs, ax",
         "mov gs, ax",
         "mov rsp, rcx",       // Restore saved boot RSP (RSP in RCX, safe!)
+        "add rsp, 8",         // Skip alignment padding from enter_usermode_returnable
         "pop r15",
         "pop r14",
         "pop r13",

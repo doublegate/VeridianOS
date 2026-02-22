@@ -165,3 +165,61 @@ int flock(int fd, int operation)
 }
 
 /* gethostname() is already implemented in unistd.c */
+
+/* ========================================================================= */
+/* regex stubs -- return REG_NOSYS until a real engine is implemented         */
+/* ========================================================================= */
+
+#include <regex.h>
+#include <string.h>
+
+int regcomp(regex_t *preg, const char *pattern, int cflags)
+{
+    (void)pattern;
+    (void)cflags;
+    if (preg) {
+        preg->re_nsub = 0;
+        preg->__internal = (void *)0;
+    }
+    return REG_NOSYS;
+}
+
+int regexec(const regex_t *preg, const char *string,
+            size_t nmatch, regmatch_t pmatch[], int eflags)
+{
+    (void)preg;
+    (void)string;
+    (void)nmatch;
+    (void)pmatch;
+    (void)eflags;
+    return REG_NOMATCH;
+}
+
+void regfree(regex_t *preg)
+{
+    if (preg)
+        preg->__internal = (void *)0;
+}
+
+size_t regerror(int errcode, const regex_t *preg,
+                char *errbuf, size_t errbuf_size)
+{
+    (void)preg;
+    static const char *msgs[] = {
+        [0]           = "Success",
+        [REG_NOMATCH] = "No match",
+        [REG_BADPAT]  = "Invalid pattern",
+        [REG_NOSYS]   = "Function not implemented",
+    };
+    const char *msg = "Unknown error";
+    if (errcode >= 0 && errcode <= REG_NOSYS && msgs[errcode])
+        msg = msgs[errcode];
+
+    size_t len = strlen(msg) + 1;
+    if (errbuf && errbuf_size > 0) {
+        size_t copy = (len < errbuf_size) ? len : errbuf_size;
+        memcpy(errbuf, msg, copy - 1);
+        errbuf[copy - 1] = '\0';
+    }
+    return len;
+}

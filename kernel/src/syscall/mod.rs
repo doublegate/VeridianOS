@@ -359,6 +359,9 @@ pub enum Syscall {
     FutexWait = 201,
     FutexWake = 202,
     ArchPrctl = 203,
+
+    // System information
+    ProcessUname = 204,
 }
 
 /// System call result type
@@ -639,6 +642,7 @@ fn handle_syscall(
         }
         Syscall::FutexWake => futex::sys_futex_wake(arg1, arg2, arg3).map(|v| v as usize),
         Syscall::ArchPrctl => arch_prctl::sys_arch_prctl(arg1, arg2).map(|v| v as usize),
+        Syscall::ProcessUname => sys_uname(arg1),
 
         _ => Err(SyscallError::InvalidSyscall),
     }

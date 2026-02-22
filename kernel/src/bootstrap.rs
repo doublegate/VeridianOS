@@ -205,7 +205,7 @@ extern "C" fn kernel_init_stage3_onwards() -> ! {
                         "[BOOTSTRAP] /bin/sh loaded (pid={}), entering Ring 3",
                         pid.0
                     );
-                    run_user_process(pid);
+                    run_user_process_scheduled(pid);
                     kprintln!("[BOOTSTRAP] User shell exited, falling back to kernel shell");
                 }
                 Err(e) => {
@@ -706,20 +706,17 @@ fn test_user_binary_load() {
             match crate::userspace::load_user_program("/bin/minimal", &["minimal"], &["PATH=/bin"])
             {
                 Ok(pid) => {
-                    run_user_process(pid);
+                    run_user_process_scheduled(pid);
                 }
                 Err(e) => {
-                    kprintln!("[EXEC-TEST] /bin/minimal FAILED: {:?}", e);
+                    kprintln!("[BOOT] /bin/minimal FAILED: {:?}", e);
                 }
             }
         }
         Err(_) => {
             drop(vfs);
-            kprintln!("[EXEC-TEST] /bin/minimal not found in VFS (no rootfs.tar?)");
         }
     }
-
-    kprintln!("[EXEC-TEST] First test returned, trying /bin/fork_test...");
 
     // Test 2: /bin/fork_test (fork + waitpid)
     let vfs = get_vfs().read();
@@ -732,20 +729,17 @@ fn test_user_binary_load() {
                 &["PATH=/bin"],
             ) {
                 Ok(pid) => {
-                    run_user_process(pid);
+                    run_user_process_scheduled(pid);
                 }
                 Err(e) => {
-                    kprintln!("[EXEC-TEST] /bin/fork_test FAILED: {:?}", e);
+                    kprintln!("[BOOT] /bin/fork_test FAILED: {:?}", e);
                 }
             }
         }
         Err(_) => {
             drop(vfs);
-            kprintln!("[EXEC-TEST] /bin/fork_test not found in VFS");
         }
     }
-
-    kprintln!("[EXEC-TEST] fork_test returned, trying /bin/exec_test...");
 
     // Test 3: /bin/exec_test (fork + exec + waitpid)
     let vfs = get_vfs().read();
@@ -758,48 +752,38 @@ fn test_user_binary_load() {
                 &["PATH=/bin"],
             ) {
                 Ok(pid) => {
-                    run_user_process(pid);
+                    run_user_process_scheduled(pid);
                 }
                 Err(e) => {
-                    kprintln!("[EXEC-TEST] /bin/exec_test FAILED: {:?}", e);
+                    kprintln!("[BOOT] /bin/exec_test FAILED: {:?}", e);
                 }
             }
         }
         Err(_) => {
             drop(vfs);
-            kprintln!("[EXEC-TEST] /bin/exec_test not found in VFS");
         }
     }
-
-    kprintln!("[EXEC-TEST] exec_test returned, trying /bin/sh...");
 
     // Test 4: /bin/sh (shell with command execution)
     let vfs = get_vfs().read();
     match vfs.resolve_path("/bin/sh") {
         Ok(_node) => {
             drop(vfs);
-            kprintln!("[EXEC-TEST] /bin/sh found, calling load_user_program...");
             match crate::userspace::load_user_program(
                 "/bin/sh",
                 &["sh", "-c", "echo SHELL_TEST_PASS"],
                 &["PATH=/bin:/usr/bin", "HOME=/", "TERM=veridian"],
             ) {
                 Ok(pid) => {
-                    kprintln!(
-                        "[EXEC-TEST] load_user_program returned pid={}, calling \
-                         run_user_process...",
-                        pid.0
-                    );
-                    run_user_process(pid);
+                    run_user_process_scheduled(pid);
                 }
                 Err(e) => {
-                    kprintln!("[EXEC-TEST] /bin/sh FAILED: {:?}", e);
+                    kprintln!("[BOOT] /bin/sh FAILED: {:?}", e);
                 }
             }
         }
         Err(_) => {
             drop(vfs);
-            kprintln!("[EXEC-TEST] /bin/hello not found in VFS");
         }
     }
 }
@@ -810,25 +794,23 @@ fn test_user_binary_load() {
 /// registers, RSP, CR3) before iretq. When the user process calls `sys_exit`,
 /// the boot context is restored and this function returns normally, allowing
 /// sequential execution of multiple user-mode programs during bootstrap.
+///
+/// `#[inline(never)]` ensures the compiler generates a proper call frame with
+/// correct stack alignment, preventing SSE `movaps` GP faults in callers.
+#[inline(never)]
 #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
 fn run_user_process(pid: crate::process::ProcessId) {
     use crate::process::get_process;
 
-    kprintln!("[RUN_USER_PROC] pid={}", pid.0);
-
     let process = match get_process(pid) {
         Some(p) => p,
-        None => {
-            kprintln!("[RUN_USER_PROC] process not found");
-            return;
-        }
+        None => return,
     };
 
     // Get the process's page table root (physical address for CR3)
     let vas = process.memory_space.lock();
     let pt_root = vas.get_page_table();
     if pt_root == 0 {
-        kprintln!("[RUN_USER_PROC] pt_root=0");
         return;
     }
 
@@ -836,10 +818,7 @@ fn run_user_process(pid: crate::process::ProcessId) {
     let threads = process.threads.lock();
     let thread = match threads.values().next() {
         Some(t) => t,
-        None => {
-            kprintln!("[RUN_USER_PROC] no threads");
-            return;
-        }
+        None => return,
     };
 
     let (entry_point, user_stack_ptr) = {
@@ -859,83 +838,24 @@ fn run_user_process(pid: crate::process::ProcessId) {
     let user_cs: u64 = 0x33; // GDT index 6, RPL 3
     let user_ss: u64 = 0x2B; // GDT index 5, RPL 3
 
-    kprintln!(
-        "[RUN_USER_PROC] entry={:#x} stack={:#x} cr3={:#x}",
-        entry_point,
-        user_stack_ptr,
-        pt_root
-    );
-
-    // Verify entry point and stack are mapped in the process's page tables
+    // Verify entry point and stack are mapped before entering Ring 3
     // SAFETY: pt_root is a valid L4 page table address from the process's VAS.
     unsafe {
         use crate::mm::{vas::create_mapper_from_root_pub, VirtualAddress};
         let mapper = create_mapper_from_root_pub(pt_root);
 
-        // Check entry point mapping
         let entry_page = VirtualAddress(entry_point & !0xFFF);
-        match mapper.translate_page(entry_page) {
-            Ok((frame, flags)) => {
-                kprintln!(
-                    "[RUN_USER_PROC] Entry OK: VA={:#x} -> frame={:#x} flags={:?}",
-                    entry_point,
-                    frame.as_u64() << 12,
-                    flags
-                );
-            }
-            Err(_) => {
-                kprintln!(
-                    "[RUN_USER_PROC] FATAL: Entry point {:#x} NOT MAPPED!",
-                    entry_point
-                );
-                return;
-            }
+        if mapper.translate_page(entry_page).is_err() {
+            kprintln!("[BOOT] FATAL: entry {:#x} not mapped", entry_point);
+            return;
         }
 
-        // Check stack mapping
         let stack_page = VirtualAddress((user_stack_ptr - 16) & !0xFFF);
-        match mapper.translate_page(stack_page) {
-            Ok((frame, flags)) => {
-                kprintln!(
-                    "[RUN_USER_PROC] Stack OK: VA={:#x} -> frame={:#x} flags={:?}",
-                    user_stack_ptr,
-                    frame.as_u64() << 12,
-                    flags
-                );
-            }
-            Err(_) => {
-                kprintln!(
-                    "[RUN_USER_PROC] FATAL: Stack {:#x} NOT MAPPED!",
-                    user_stack_ptr
-                );
-                return;
-            }
+        if mapper.translate_page(stack_page).is_err() {
+            kprintln!("[BOOT] FATAL: stack {:#x} not mapped", user_stack_ptr);
+            return;
         }
     }
-
-    // DIAGNOSTIC: Dump first few pages of the process's address space
-    unsafe {
-        use crate::mm::{vas::create_mapper_from_root_pub, VirtualAddress};
-        let mapper = create_mapper_from_root_pub(pt_root);
-
-        for page_addr in (0x400000..=0x410000).step_by(0x1000) {
-            if let Ok((frame, flags)) = mapper.translate_page(VirtualAddress(page_addr)) {
-                kprintln!(
-                    "[RUN_USER_PROC] Page {:#x} -> frame={:#x} flags={:?}",
-                    page_addr,
-                    frame.as_u64() << 12,
-                    flags
-                );
-            }
-        }
-    }
-
-    kprintln!(
-        "[RUN_USER_PROC] Before enter CS/DS/SS={}/{}/{}",
-        user_cs,
-        0x10,
-        user_ss
-    );
 
     // Enter Ring 3 via iretq with returnable context.
     // The naked function saves callee-saved registers, RSP, and CR3 to
@@ -960,6 +880,169 @@ fn run_user_process(pid: crate::process::ProcessId) {
             kernel_rsp_ptr,
         );
     }
+}
+
+/// Wrapper that registers a boot-launched user process before entering user
+/// mode, so that `current_process()` / `current_thread()` return the correct
+/// values during syscalls (required for fork, wait, etc.).
+///
+/// Uses lock-free atomics (`BOOT_CURRENT_PID`/`BOOT_CURRENT_TID` in
+/// `process/mod.rs`) instead of modifying the scheduler. Acquiring the
+/// SCHEDULER lock from the bootstrap stack corrupts SSE alignment (the
+/// `movaps` in `Task::new()` requires 16-byte alignment, but the lock
+/// cycle shifts RSP by 8 on the second invocation, causing a GP fault).
+///
+/// `#[inline(never)]` prevents the compiler from inlining this into
+/// `test_user_binary_load`, which would change that function's stack frame
+/// layout between invocations and corrupt SSE alignment for subsequent
+/// `Process::new()` calls.
+#[inline(never)]
+#[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+fn run_user_process_scheduled(pid: crate::process::ProcessId) {
+    use crate::process::get_process;
+
+    // Look up the process's first thread ID so current_thread() works.
+    let tid = if let Some(proc) = get_process(pid) {
+        let threads = proc.threads.lock();
+        threads.values().next().map(|t| t.tid)
+    } else {
+        None
+    };
+
+    if let Some(tid) = tid {
+        // Register as the current boot process (atomic, no locks).
+        crate::process::set_boot_current(pid, tid);
+
+        run_user_process(pid);
+
+        // Clear after user process exits and control returns here.
+        crate::process::clear_boot_current();
+    } else {
+        // Process not found or no threads -- run without tracking.
+        run_user_process(pid);
+    }
+}
+
+/// Run a forked child process inline from the parent's wait loop.
+///
+/// Called from `wait_process_with_options` when in boot execution mode (no
+/// preemptive scheduler). The child was created by fork() and is Ready but
+/// has never been scheduled. This function:
+/// 1. Saves and restores the parent's boot return context (BOOT_RETURN globals)
+/// 2. Saves and restores the parent's BOOT_CURRENT PID/TID
+/// 3. Handles swapgs rebalancing (we're inside a syscall handler)
+/// 4. Runs the child to completion via `enter_forked_child_returnable`
+///
+/// Returns `true` if the child was run, `false` if not in boot context.
+#[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+pub fn boot_run_forked_child(
+    child_pid: crate::process::ProcessId,
+    parent_pid: crate::process::ProcessId,
+    parent_tid: crate::process::thread::ThreadId,
+) -> bool {
+    use core::sync::atomic::Ordering;
+
+    use crate::{
+        arch::{
+            context::ThreadContext,
+            x86_64::usermode::{BOOT_RETURN_CR3, BOOT_RETURN_RSP, BOOT_STACK_CANARY},
+        },
+        process::get_process,
+    };
+
+    if !crate::arch::x86_64::usermode::has_boot_return_context() {
+        return false;
+    }
+
+    let child = match get_process(child_pid) {
+        Some(p) => p,
+        None => return false,
+    };
+
+    // Extract child's thread context and page table root
+    let (entry, stack, child_tid) = {
+        let threads = child.threads.lock();
+        match threads.values().next() {
+            Some(t) => {
+                let ctx = t.context.lock();
+                (
+                    ctx.get_instruction_pointer() as u64,
+                    ctx.get_stack_pointer() as u64,
+                    t.tid,
+                )
+            }
+            None => return false,
+        }
+    };
+
+    let cr3 = {
+        let vas = child.memory_space.lock();
+        vas.get_page_table()
+    };
+
+    if cr3 == 0 {
+        return false;
+    }
+
+    // Save parent's boot return context
+    let saved_rsp = BOOT_RETURN_RSP.load(Ordering::SeqCst);
+    let saved_cr3 = BOOT_RETURN_CR3.load(Ordering::SeqCst);
+    let saved_canary = BOOT_STACK_CANARY.load(Ordering::SeqCst);
+
+    // Save parent's per-CPU state. The child's syscall_entry and
+    // enter_forked_child_returnable will overwrite both fields:
+    // - kernel_rsp (gs:[0x0]): enter_forked_child_returnable writes new value
+    // - user_rsp (gs:[0x8]): child's syscall_entry writes child's user RSP
+    // Without restoring these, the parent's sysretq uses wrong RSP and
+    // the parent's next syscall uses a stale kernel stack pointer.
+    let per_cpu = crate::arch::x86_64::syscall::per_cpu_data_ptr();
+    let saved_kernel_rsp = unsafe { (*per_cpu).kernel_rsp };
+    let saved_user_rsp = unsafe { (*per_cpu).user_rsp };
+
+    // Set child as the current boot process
+    crate::process::set_boot_current(child_pid, child_tid);
+
+    // Rebalance swapgs: we're inside a syscall handler where GS.base = per_cpu_data
+    // and KernelGsBase = 0 (from parent's syscall_entry swapgs). enter_usermode
+    // needs KernelGsBase = per_cpu_data so the child's syscall_entry can load
+    // kernel_rsp. swapgs swaps them: GS.base → 0, KernelGsBase → per_cpu_data.
+    unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) };
+
+    let kernel_rsp_ptr = per_cpu as u64;
+    unsafe {
+        crate::arch::x86_64::usermode::enter_forked_child_returnable(
+            entry,
+            stack,
+            0x33,
+            0x2B,
+            cr3,
+            kernel_rsp_ptr,
+        );
+    }
+
+    // Child exited, boot_return_to_kernel brought us back here.
+    // boot_return_to_kernel did swapgs (balancing child's syscall_entry swapgs)
+    // and zeroed GS. Now: GS.base=0, KernelGsBase=per_cpu_data.
+    // swapgs to restore parent's syscall handler state: GS.base=per_cpu_data.
+    unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) };
+
+    // Restore parent's per-CPU state so:
+    // - parent's sysretq uses the correct user RSP
+    // - parent's next syscall uses the correct kernel stack
+    unsafe {
+        (*per_cpu).kernel_rsp = saved_kernel_rsp;
+        (*per_cpu).user_rsp = saved_user_rsp;
+    }
+
+    // Restore parent as current boot process
+    crate::process::set_boot_current(parent_pid, parent_tid);
+
+    // Restore parent's boot return context
+    BOOT_RETURN_RSP.store(saved_rsp, Ordering::SeqCst);
+    BOOT_RETURN_CR3.store(saved_cr3, Ordering::SeqCst);
+    BOOT_STACK_CANARY.store(saved_canary, Ordering::SeqCst);
+
+    true
 }
 
 /// Kernel-mode init function

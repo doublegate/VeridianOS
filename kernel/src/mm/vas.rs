@@ -202,10 +202,11 @@ impl VirtualAddressSpace {
     /// Map kernel space into this address space.
     ///
     /// Copies the upper-half L4 entries (indices 256-511) from the current
-    /// (boot) page tables into this VAS's L4. This shares the kernel's
-    /// physical memory mapping, code, data, heap, and MMIO regions with
-    /// the new process, so that the kernel remains accessible after a CR3
-    /// switch.
+    /// (boot) page tables into this VAS's L4, plus the bootloader's physical
+    /// memory mapping entry (which may be in the lower half). This shares the
+    /// kernel's code, data, heap, MMIO, and physical memory access with the
+    /// new process, so that the kernel remains accessible during syscalls
+    /// (which run with the user's CR3).
     pub fn map_kernel_space(&mut self) -> Result<(), KernelError> {
         use super::page_table::{PageTable, PAGE_TABLE_ENTRIES};
 
@@ -270,6 +271,19 @@ impl VirtualAddressSpace {
                     new_l4[i] = boot_l4[i];
                 }
             }
+
+            // Also copy the bootloader's physical memory mapping L4 entry.
+            // On x86_64, PHYS_MEM_OFFSET is typically in the lower half
+            // (e.g. 0x180_0000_0000 = L4 index 3). Without this, syscalls
+            // running with the user's CR3 cannot access physical memory via
+            // phys_to_virt_addr(), causing page faults in kernel code.
+            let phys_offset = super::PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Acquire);
+            if phys_offset != 0 {
+                let phys_l4_idx = ((phys_offset >> 39) & 0x1FF) as usize;
+                if phys_l4_idx < 256 && boot_l4[phys_l4_idx].is_present() {
+                    new_l4[phys_l4_idx] = boot_l4[phys_l4_idx];
+                }
+            }
         }
 
         Ok(())
@@ -301,6 +315,16 @@ impl VirtualAddressSpace {
 
             for i in 256..PAGE_TABLE_ENTRIES {
                 child_l4[i] = parent_l4[i];
+            }
+
+            // Also copy the bootloader's physical memory mapping L4 entry
+            // (may be in the lower half, e.g. L4 index 3 for 0x180_0000_0000).
+            let phys_offset = super::PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Acquire);
+            if phys_offset != 0 {
+                let phys_l4_idx = ((phys_offset >> 39) & 0x1FF) as usize;
+                if phys_l4_idx < 256 {
+                    child_l4[phys_l4_idx] = parent_l4[phys_l4_idx];
+                }
             }
 
             // Step 3: Deep-copy user-space pages.
@@ -350,11 +374,14 @@ impl VirtualAddressSpace {
                     };
 
                     // Copy 4KB of content from parent frame to child frame.
-                    // SAFETY: Both frame addresses are valid physical addresses
-                    // in identity-mapped memory. Each points to a full 4KB page.
+                    // SAFETY: Both frame addresses are physical and must be
+                    // converted to virtual addresses via the bootloader's
+                    // physical memory mapping before access.
                     unsafe {
-                        let src = (parent_frame.as_u64() << 12) as *const u8;
-                        let dst = (child_frame.as_u64() << 12) as *mut u8;
+                        let src_phys = parent_frame.as_u64() << 12;
+                        let dst_phys = child_frame.as_u64() << 12;
+                        let src = super::phys_to_virt_addr(src_phys) as *const u8;
+                        let dst = super::phys_to_virt_addr(dst_phys) as *mut u8;
                         core::ptr::copy_nonoverlapping(src, dst, 4096);
                     }
 

@@ -156,7 +156,12 @@ pub fn wait_process_with_options(
                         current_pid.0, child_pid.0, exit_code
                     );
 
-                    return Ok((*child_pid, exit_code));
+                    // Encode as POSIX wait status:
+                    // Normal exit: low 7 bits = 0, bits 8-15 = exit code
+                    // WIFEXITED(s) = (s & 0x7f) == 0
+                    // WEXITSTATUS(s) = (s >> 8) & 0xff
+                    let wait_status = (exit_code & 0xff) << 8;
+                    return Ok((*child_pid, wait_status));
                 }
 
                 // Check for stopped child if WUNTRACED is set
@@ -189,11 +194,44 @@ pub fn wait_process_with_options(
             return Ok((ProcessId(0), 0));
         }
 
-        // Block current process until a child changes state.
-        // Use the scheduler's block_process() which properly updates the
-        // task, thread, and process states and triggers a reschedule.
-        // The child will wake us via sched::wake_up_process() when it exits
-        // (see exit_process / force_terminate_process).
+        // Boot execution model: no preemptive scheduler to context-switch
+        // to the child. If we find a Ready child (just forked, never run),
+        // run it inline to completion. After it exits, loop back to reap
+        // the zombie.
+        #[cfg(target_arch = "x86_64")]
+        {
+            let mut ran_child = false;
+            for child_pid in &children {
+                let matches_filter = pid.is_none() || pid == Some(*child_pid);
+                if !matches_filter {
+                    continue;
+                }
+                if let Some(child) = table::get_process(*child_pid) {
+                    if child.get_state() == ProcessState::Ready {
+                        // Get parent's thread ID for BOOT_CURRENT restore
+                        let parent_tid = current
+                            .threads
+                            .lock()
+                            .values()
+                            .next()
+                            .map(|t| t.tid)
+                            .unwrap_or(super::thread::ThreadId(current_pid.0));
+                        ran_child = crate::bootstrap::boot_run_forked_child(
+                            *child_pid,
+                            current_pid,
+                            parent_tid,
+                        );
+                        break;
+                    }
+                }
+            }
+            if ran_child {
+                // Child ran to completion, loop back to reap
+                continue;
+            }
+        }
+
+        // Normal scheduler path: block and wait for child to wake us.
         println!(
             "[PROCESS] Process {} blocking in wait() for child {}",
             current_pid.0,
@@ -203,9 +241,6 @@ pub fn wait_process_with_options(
         sched::block_process(current_pid);
 
         // When we wake up, loop back to check for zombie children.
-        // The wakeup can come from:
-        // 1. A child exiting (sets parent to Ready and calls wake_up_process)
-        // 2. A signal being delivered to this process
         current.set_state(ProcessState::Running);
 
         // Check if we were interrupted by a signal

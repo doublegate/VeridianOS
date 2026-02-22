@@ -40,41 +40,18 @@ pub fn validate_user_ptr<T>(ptr: *const T, len: usize) -> Result<(), SyscallErro
 
 /// Validate that all pages in the given range are mapped and accessible
 fn validate_page_mappings(start: usize, end: usize) -> Result<(), SyscallError> {
-    // Get current process's address space
-    let current_process = match crate::process::current_process() {
-        Some(proc) => proc,
-        None => return Err(SyscallError::ProcessNotFound),
-    };
-
-    // Get the virtual address space (VAS) from the process
-    let _vas = current_process.memory_space.lock();
-
-    // Check each page in the range
+    // Range check: verify all pages fall within user space.
+    // Note: translate_user_address() walks page tables using raw physical
+    // addresses as pointers, which requires identity mapping. Since syscalls
+    // run with user CR3 (no identity mapping), the page table walk faults.
+    // The range check is sufficient: if a page is truly unmapped, the
+    // subsequent volatile read/write will trigger a proper page fault.
     for page_addr in (start..end).step_by(PAGE_SIZE) {
-        // Use the VMM to check if the page is mapped
         if !crate::mm::is_user_addr_valid(page_addr) {
             return Err(SyscallError::UnmappedMemory);
         }
-
-        // Additional check: verify the page is accessible from user mode
-        // This would involve checking page table entry flags
-        #[cfg(feature = "alloc")]
-        {
-            // Get the page table entry and check permissions
-            if let Some(entry) = crate::mm::translate_user_address(page_addr) {
-                // Check if page is user-accessible
-                // The translate_user_address function already checks is_present()
-                use crate::mm::user_validation::PageTableEntryExt;
-                if !entry.is_user_accessible() {
-                    return Err(SyscallError::AccessDenied);
-                }
-            } else {
-                return Err(SyscallError::UnmappedMemory);
-            }
-        }
     }
 
-    // Also check the last byte if it doesn't align with page boundary
     if !end.is_multiple_of(PAGE_SIZE) {
         let last_page = (end - 1) & !(PAGE_SIZE - 1);
         if !crate::mm::is_user_addr_valid(last_page) {

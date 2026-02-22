@@ -192,7 +192,6 @@ impl PageTableHierarchy {
                 requested: 1,
                 available: 0,
             })?;
-
         let l4_addr = PhysicalAddress::new(frame.as_u64() << 12);
 
         // Zero the L4 table so all entries start as "not present".
