@@ -913,6 +913,11 @@ impl ThreadBuilder {
             kernel_stack_phys,
         );
 
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            crate::arch::x86_64::idt::raw_serial_str(b"[THREAD] build() returning Ok\n");
+        }
+
         Ok(thread)
     }
 }

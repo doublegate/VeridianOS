@@ -287,6 +287,28 @@ impl BitmapAllocator {
         Err(FrameAllocatorError::OutOfMemory)
     }
 
+    /// Mark a specific frame as allocated (reserved) so it won't be handed out.
+    /// Used to protect boot page table frames from being overwritten.
+    fn mark_used(&self, frame: FrameNumber) -> Result<()> {
+        let frame_num = frame.as_u64();
+        let start = self.start_frame.as_u64();
+        if frame_num < start || frame_num >= start + self.total_frames as u64 {
+            // Frame is outside our range -- nothing to do
+            return Ok(());
+        }
+        let offset = (frame_num - start) as usize;
+        let word_idx = offset / 64;
+        let bit_idx = offset % 64;
+
+        let mut bitmap = self.bitmap.lock();
+        if bitmap[word_idx] & (1 << bit_idx) != 0 {
+            // Frame is currently free -- mark as allocated
+            bitmap[word_idx] &= !(1 << bit_idx);
+            self.free_frames.fetch_sub(1, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
     /// Free previously allocated frames
     fn free(&self, frame: FrameNumber, count: usize) -> Result<()> {
         let offset = (frame.as_u64() - self.start_frame.as_u64()) as usize;
@@ -844,6 +866,16 @@ impl FrameAllocator {
         }
 
         Err(FrameAllocatorError::OutOfMemory)
+    }
+
+    /// Mark a specific physical frame as used (reserved) so it won't be
+    /// allocated. Used to protect boot page table frames from being
+    /// overwritten by the frame allocator.
+    pub fn mark_frame_used(&self, frame: FrameNumber) -> Result<()> {
+        for allocator in self.bitmap_allocators.iter().flatten() {
+            allocator.mark_used(frame)?;
+        }
+        Ok(())
     }
 
     /// Free frames back to the allocator

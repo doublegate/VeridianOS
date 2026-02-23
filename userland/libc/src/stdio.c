@@ -399,6 +399,14 @@ int fseek(FILE *stream, long offset, int whence)
     if (stream->flags & __FILE_WRITE)
         fflush(stream);
 
+    /* For SEEK_CUR: the kernel file position is ahead of the logical
+       stream position by (buf_len - buf_pos) unconsumed bytes in the
+       read buffer.  Adjust the offset so lseek reaches the correct
+       absolute position. */
+    if (whence == SEEK_CUR && stream->buf_len > 0) {
+        offset -= (long)(stream->buf_len - stream->buf_pos);
+    }
+
     /* Discard read buffer. */
     stream->buf_pos = 0;
     stream->buf_len = 0;
@@ -806,9 +814,8 @@ int sscanf(const char *str, const char *fmt, ...)
     int matched = 0;
     const char *s = str;
 
-    while (*fmt) {
+    while (*fmt && *s) {
         if (isspace((unsigned char)*fmt)) {
-            /* Skip whitespace in both format and input. */
             while (isspace((unsigned char)*s))
                 s++;
             fmt++;
@@ -816,7 +823,6 @@ int sscanf(const char *str, const char *fmt, ...)
         }
 
         if (*fmt != '%') {
-            /* Literal match. */
             if (*s != *fmt)
                 break;
             s++;
@@ -825,20 +831,86 @@ int sscanf(const char *str, const char *fmt, ...)
         }
         fmt++; /* skip '%' */
 
-        /* Skip assignment suppression (not implemented). */
+        /* Parse length modifier. */
+        int length = 0; /* 0=int, 1=long, 2=long long, -1=short, -2=char */
+        if (*fmt == 'l') {
+            fmt++;
+            if (*fmt == 'l') { length = 2; fmt++; }
+            else { length = 1; }
+        } else if (*fmt == 'h') {
+            fmt++;
+            if (*fmt == 'h') { length = -2; fmt++; }
+            else { length = -1; }
+        } else if (*fmt == 'z' || *fmt == 'j') {
+            length = 1; /* size_t / intmax_t = long on LP64 */
+            fmt++;
+        }
 
         switch (*fmt) {
-        case 'd': {
-            int *p = va_arg(ap, int *);
+        case 'd':
+        case 'i': {
             while (isspace((unsigned char)*s)) s++;
-            long val = strtol(s, (char **)&s, 10);
-            *p = (int)val;
+            const char *prev = s;
+            long long val = strtoll(s, (char **)&s, 10);
+            if (s == prev) goto done_sscanf;
+            switch (length) {
+            case 2:  *va_arg(ap, long long *) = val; break;
+            case 1:  *va_arg(ap, long *) = (long)val; break;
+            case -1: *va_arg(ap, short *) = (short)val; break;
+            case -2: *va_arg(ap, signed char *) = (signed char)val; break;
+            default: *va_arg(ap, int *) = (int)val; break;
+            }
+            matched++;
+            break;
+        }
+        case 'u': {
+            while (isspace((unsigned char)*s)) s++;
+            const char *prev = s;
+            unsigned long long val = strtoull(s, (char **)&s, 10);
+            if (s == prev) goto done_sscanf;
+            switch (length) {
+            case 2:  *va_arg(ap, unsigned long long *) = val; break;
+            case 1:  *va_arg(ap, unsigned long *) = (unsigned long)val; break;
+            case -1: *va_arg(ap, unsigned short *) = (unsigned short)val; break;
+            case -2: *va_arg(ap, unsigned char *) = (unsigned char)val; break;
+            default: *va_arg(ap, unsigned int *) = (unsigned int)val; break;
+            }
+            matched++;
+            break;
+        }
+        case 'x':
+        case 'X': {
+            while (isspace((unsigned char)*s)) s++;
+            if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+                s += 2;
+            const char *prev = s;
+            unsigned long long val = strtoull(s, (char **)&s, 16);
+            if (s == prev) goto done_sscanf;
+            switch (length) {
+            case 2:  *va_arg(ap, unsigned long long *) = val; break;
+            case 1:  *va_arg(ap, unsigned long *) = (unsigned long)val; break;
+            default: *va_arg(ap, unsigned int *) = (unsigned int)val; break;
+            }
+            matched++;
+            break;
+        }
+        case 'o': {
+            while (isspace((unsigned char)*s)) s++;
+            const char *prev = s;
+            unsigned long long val = strtoull(s, (char **)&s, 8);
+            if (s == prev) goto done_sscanf;
+            switch (length) {
+            case 2:  *va_arg(ap, unsigned long long *) = val; break;
+            case 1:  *va_arg(ap, unsigned long *) = (unsigned long)val; break;
+            default: *va_arg(ap, unsigned int *) = (unsigned int)val; break;
+            }
             matched++;
             break;
         }
         case 's': {
             char *p = va_arg(ap, char *);
             while (isspace((unsigned char)*s)) s++;
+            if (!*s) goto done_sscanf;
             while (*s && !isspace((unsigned char)*s))
                 *p++ = *s++;
             *p = '\0';
@@ -850,7 +922,20 @@ int sscanf(const char *str, const char *fmt, ...)
             if (*s) {
                 *p = *s++;
                 matched++;
+            } else {
+                goto done_sscanf;
             }
+            break;
+        }
+        case 'n': {
+            int *p = va_arg(ap, int *);
+            *p = (int)(s - str);
+            /* %n does not increment matched */
+            break;
+        }
+        case '%': {
+            if (*s != '%') goto done_sscanf;
+            s++;
             break;
         }
         default:

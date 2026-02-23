@@ -149,6 +149,11 @@ pub struct Process {
 
     /// File creation mask (umask). Default 0o022.
     pub umask: AtomicU32,
+
+    /// TLS FS_BASE address for x86_64 (Thread-Local Storage).
+    /// Set by exec_process when loading an ELF with PT_TLS segment.
+    /// Read by sys_exec before enter_usermode to set MSR 0xC0000100.
+    pub tls_fs_base: AtomicU64,
 }
 
 /// Memory usage statistics
@@ -196,6 +201,7 @@ impl Process {
             pending_signals: AtomicU64::new(0),
             signal_mask: AtomicU64::new(0),
             umask: AtomicU32::new(0o022),
+            tls_fs_base: AtomicU64::new(0),
         }
     }
 

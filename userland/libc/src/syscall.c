@@ -329,8 +329,14 @@ void *sbrk(intptr_t increment)
 void *mmap(void *addr, size_t length, int prot, int flags,
            int fd, off_t offset)
 {
-    long ret = veridian_syscall6(SYS_MEMORY_MAP, addr, length,
-                                  prot, flags, fd, offset);
+    /* Pack fd and offset into a single arg5 to match kernel's unpacking:
+     *   fd     = fd_offset >> 32
+     *   offset = fd_offset & 0xFFFFFFFF
+     * The kernel syscall ABI only passes 5 arguments, so we must encode
+     * both values into one parameter. */
+    long fd_offset = ((long)(unsigned int)fd << 32) | ((unsigned long)offset & 0xFFFFFFFF);
+    long ret = veridian_syscall5(SYS_MEMORY_MAP, addr, length,
+                                  prot, flags, (void *)fd_offset);
     if (ret < 0) {
         errno = (int)(-ret);
         return MAP_FAILED;

@@ -287,3 +287,4 @@ OVMF*.fd
 
 # Plan files (Claude Code)
 .claude/plans/
+a.out

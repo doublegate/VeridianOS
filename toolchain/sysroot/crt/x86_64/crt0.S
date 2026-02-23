@@ -14,10 +14,8 @@
  *   ...         -> envp[0]    (pointer)
  *   ...         -> NULL       (envp terminator)
  *
- * Calling convention to main():
- *   %rdi = argc (int)
- *   %rsi = argv (char **)
- *   %rdx = envp (char **)
+ * _start passes the raw stack pointer to __libc_start_main(), which
+ * processes .init_array (C++ static constructors) before calling main().
  */
 
 .section .text
@@ -28,19 +26,8 @@ _start:
     /* Clear the frame pointer for clean backtraces. */
     xorl    %ebp, %ebp
 
-    /* Load argc from the top of the stack. */
-    movq    (%rsp), %rdi
-
-    /* argv = rsp + 8 (pointer to the first argument string pointer). */
-    leaq    8(%rsp), %rsi
-
-    /*
-     * envp = argv + (argc + 1) * 8
-     *      = rsp + 8 + (argc + 1) * 8
-     *      = rsp + 16 + argc * 8
-     * We skip past argc pointers plus the NULL terminator.
-     */
-    leaq    16(%rsp,%rdi,8), %rdx
+    /* Pass the raw stack pointer to __libc_start_main. */
+    movq    %rsp, %rdi
 
     /*
      * Align the stack to a 16-byte boundary before the call.
@@ -49,16 +36,8 @@ _start:
      */
     andq    $-16, %rsp
 
-    /* Call main(argc, argv, envp). */
-    call    main
-
-    /*
-     * main() returned in %eax.  Pass it to SYS_PROCESS_EXIT (syscall 11).
-     * Argument goes in %rdi, syscall number in %rax.
-     */
-    movl    %eax, %edi
-    movq    $11, %rax           /* SYS_PROCESS_EXIT */
-    syscall
+    /* __libc_start_main processes .init_array, calls main(), and exits. */
+    call    __libc_start_main
 
     /* Should never reach here.  Trigger an invalid-opcode exception. */
     ud2

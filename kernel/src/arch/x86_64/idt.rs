@@ -43,16 +43,20 @@ extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) -> ! {
-    // Raw serial output first (bypasses spinlock to avoid deadlock in interrupt
-    // context) SAFETY: Writing to COM1 data register at I/O port 0x3F8 is safe
+    // Raw serial output ONLY -- println! uses spinlocks which deadlock in
+    // interrupt context, causing re-entrant DF cascades.
+    // SAFETY: Writing to COM1 data register at I/O port 0x3F8 is safe
     // for diagnostics.
     unsafe {
-        for &b in b"FATAL:DF\n" {
-            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nomem, nostack));
-        }
+        raw_serial_str(b"FATAL:DF rip=0x");
+        // Print the instruction pointer from the exception frame
+        let rip = stack_frame.instruction_pointer.as_u64();
+        raw_serial_hex(rip);
+        raw_serial_str(b" rsp=0x");
+        let rsp = stack_frame.stack_pointer.as_u64();
+        raw_serial_hex(rsp);
+        raw_serial_str(b"\n");
     }
-    println!("FATAL: DOUBLE FAULT");
-    println!("{:#?}", stack_frame);
 
     loop {
         x86_64::instructions::hlt();
@@ -75,71 +79,113 @@ extern "x86-interrupt" fn page_fault_handler(
     let rip_val = stack_frame.instruction_pointer.as_u64();
     let was_user = ec & 4 != 0; // U/S bit
 
+    // Early diagnostic: raw serial before ANY other work to catch cascading faults
+    unsafe {
+        raw_serial_str(b"PF! cr2=0x");
+        raw_serial_hex(cr2_val);
+        raw_serial_str(b" ec=0x");
+        raw_serial_hex(ec);
+        raw_serial_str(b" rip=0x");
+        raw_serial_hex(rip_val);
+        // Print current PID to identify which process faulted
+        let pf_pid = crate::process::current_process()
+            .map(|p| p.pid.0)
+            .unwrap_or(0xDEAD);
+        raw_serial_str(b" pid=0x");
+        raw_serial_hex(pf_pid);
+        raw_serial_str(b"\n");
+    }
+
     // Attempt to resolve via demand paging framework.
-    // Only safe if this is NOT a kernel fault while the VAS lock is held
-    // (which would deadlock). Kernel page faults in practice only occur
-    // during early boot or from bugs — those fall through to the halt path.
-    let info = crate::mm::page_fault::from_x86_64(ec, cr2_val, rip_val);
-    if let Ok(()) = crate::mm::page_fault::handle_page_fault(info) {
-        // Fault resolved (demand page, CoW, or stack growth) — resume.
-        return;
+    // Skip demand paging for NULL dereferences (addr < PAGE_SIZE) since no
+    // valid mapping can exist there, and the demand paging code may GP fault
+    // while iterating the VAS mappings from interrupt context.
+    if cr2_val >= 0x1000 {
+        let info = crate::mm::page_fault::from_x86_64(ec, cr2_val, rip_val);
+        if let Ok(()) = crate::mm::page_fault::handle_page_fault(info) {
+            // Fault resolved (demand page, CoW, or stack growth) — resume.
+            return;
+        }
     }
 
     // Unresolvable fault — print diagnostics via raw serial, then halt or
     // kill the process.
     // SAFETY: Writing to COM1 data register at I/O port 0x3F8 for diagnostics.
     unsafe {
-        for &b in b"PF@" {
-            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nomem, nostack));
-        }
-        for shift in (0..16).rev() {
-            let nibble = ((cr2_val >> (shift * 4)) & 0xF) as u8;
-            let ch = if nibble < 10 {
-                b'0' + nibble
-            } else {
-                b'a' + nibble - 10
-            };
-            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") ch, options(nomem, nostack));
-        }
-        for &b in b" ec=" {
-            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nomem, nostack));
-        }
-        for shift in (0..4).rev() {
-            let nibble = ((ec >> (shift * 4)) & 0xF) as u8;
-            let ch = if nibble < 10 {
-                b'0' + nibble
-            } else {
-                b'a' + nibble - 10
-            };
-            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") ch, options(nomem, nostack));
-        }
-        for &b in b" rip=" {
-            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nomem, nostack));
-        }
-        for shift in (0..16).rev() {
-            let nibble = ((rip_val >> (shift * 4)) & 0xF) as u8;
-            let ch = if nibble < 10 {
-                b'0' + nibble
-            } else {
-                b'a' + nibble - 10
-            };
-            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") ch, options(nomem, nostack));
-        }
-        for &b in b"\n" {
-            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nomem, nostack));
-        }
+        raw_serial_str(b"PF@0x");
+        raw_serial_hex(cr2_val);
+        raw_serial_str(b" ec=0x");
+        raw_serial_hex(ec);
+        raw_serial_str(b" rip=0x");
+        raw_serial_hex(rip_val);
+        raw_serial_str(b"\n");
     }
 
     if was_user {
-        // User-mode fault: SIGSEGV was already attempted by signal_segv().
-        // Kill the process and return — the scheduler will pick the next task.
-        println!(
-            "SEGFAULT: pid={:?} addr={:#x} ec={:#x} rip={:#x}",
-            crate::process::current_process().map(|p| p.pid),
-            cr2_val,
-            ec,
-            rip_val,
-        );
+        // User-mode fault: unresolvable. Kill the process directly.
+        // Cannot call sys_exit() from interrupt context (it uses println!
+        // and locks which risk deadlock). Instead, mark the process as
+        // Zombie and call boot_return_to_kernel directly.
+        unsafe {
+            raw_serial_str(b"SEGFAULT pid=0x");
+            raw_serial_hex(
+                crate::process::current_process()
+                    .map(|p| p.pid.0)
+                    .unwrap_or(0xDEAD),
+            );
+            raw_serial_str(b" addr=0x");
+            raw_serial_hex(cr2_val);
+            raw_serial_str(b" rip=0x");
+            raw_serial_hex(rip_val);
+            raw_serial_str(b"\n");
+        }
+
+        // Dump user stack to identify the call chain at crash time.
+        // Since we don't switch CR3, user pages are mapped.
+        unsafe {
+            let user_rsp = stack_frame.stack_pointer.as_u64();
+            raw_serial_str(b"  RSP=0x");
+            raw_serial_hex(user_rsp);
+            raw_serial_str(b"\n");
+            // Dump first 12 qwords from the user stack
+            if user_rsp > 0x1000 && user_rsp < 0x0000_8000_0000_0000 {
+                for i in 0u64..12 {
+                    let addr = user_rsp + i * 8;
+                    let val = *(addr as *const u64);
+                    raw_serial_str(b"  [RSP+0x");
+                    raw_serial_hex(i * 8);
+                    raw_serial_str(b"]=0x");
+                    raw_serial_hex(val);
+                    raw_serial_str(b"\n");
+                }
+            }
+        }
+
+        // Mark process as Zombie before returning to boot context.
+        // Only use atomic state operations (set_exit_code, set_state).
+        // Do NOT iterate threads BTreeMap or look up parent via
+        // get_process() — those BTreeMap operations GP fault from
+        // interrupt context on the TSS stack.
+        if let Some(process) = crate::process::current_process() {
+            process.set_exit_code(128 + 11); // SIGSEGV
+            process.set_state(crate::process::pcb::ProcessState::Zombie);
+        }
+
+        // Return to boot context.
+        // The page fault handler runs in interrupt context (no swapgs on
+        // entry). boot_return_to_kernel expects the swapgs state from
+        // syscall_entry. Do swapgs first to balance boot_return's swapgs.
+        if crate::arch::x86_64::usermode::has_boot_return_context() {
+            unsafe {
+                raw_serial_str(b"[PF_KILL] boot_return\n");
+                core::arch::asm!("swapgs", options(nomem, nostack));
+                crate::arch::x86_64::usermode::boot_return_to_kernel();
+            }
+        }
+        // No boot context — halt.
+        loop {
+            x86_64::instructions::hlt();
+        }
     } else {
         // Kernel fault — unrecoverable. Print and halt.
         println!(

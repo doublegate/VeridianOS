@@ -213,6 +213,16 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
     // Convert flags
     let open_flags = OpenFlags::from_bits(flags as u32).ok_or(SyscallError::InvalidArgument)?;
 
+    // Diagnostic: print open attempts for debugging file access issues
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[OPEN] ");
+        crate::arch::x86_64::idt::raw_serial_str(&path_bytes[..path_bytes.len().min(80)]);
+        crate::arch::x86_64::idt::raw_serial_str(b" flags=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(flags as u64);
+        crate::arch::x86_64::idt::raw_serial_str(b"\n");
+    }
+
     // Open the file through VFS
     match vfs()?.read().open(path_str, open_flags) {
         Ok(node) => {
@@ -225,22 +235,70 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
 
             // Add to process file table
             let file_table = process.file_table.lock();
-            match file_table.open(alloc::sync::Arc::new(file)) {
-                Ok(fd_num) => Ok(fd_num),
+            let arc_file = alloc::sync::Arc::new(file);
+            match file_table.open(arc_file.clone()) {
+                Ok(fd_num) => {
+                    // Trace fd number and file size for debugging
+                    #[cfg(target_arch = "x86_64")]
+                    if fd_num >= 3 {
+                        let sz = arc_file.node.metadata().map(|m| m.size).unwrap_or(0);
+                        unsafe {
+                            crate::arch::x86_64::idt::raw_serial_str(b"  -> fd=");
+                            crate::arch::x86_64::idt::raw_serial_hex(fd_num as u64);
+                            crate::arch::x86_64::idt::raw_serial_str(b" sz=0x");
+                            crate::arch::x86_64::idt::raw_serial_hex(sz as u64);
+                            crate::arch::x86_64::idt::raw_serial_str(b"\n");
+                        }
+                    }
+                    Ok(fd_num)
+                }
                 Err(_) => Err(SyscallError::OutOfMemory),
             }
         }
-        Err(_) => {
+        Err(_e) => {
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                crate::arch::x86_64::idt::raw_serial_str(b"[OPEN] FAIL: ");
+                crate::arch::x86_64::idt::raw_serial_str(&path_bytes[..path_bytes.len().min(60)]);
+                crate::arch::x86_64::idt::raw_serial_str(b"\n");
+            }
             // If O_CREAT is set, create the file in its parent directory
             if open_flags.create {
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    crate::arch::x86_64::idt::raw_serial_str(b"[CREAT] flags=create\n");
+                }
                 let perms = Permissions::from_mode(mode as u32);
                 let (parent_path, name) = split_path(path_str)?;
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    crate::arch::x86_64::idt::raw_serial_str(b"[CREAT] parent=");
+                    crate::arch::x86_64::idt::raw_serial_str(parent_path.as_bytes());
+                    crate::arch::x86_64::idt::raw_serial_str(b" name=");
+                    crate::arch::x86_64::idt::raw_serial_str(name.as_bytes());
+                    crate::arch::x86_64::idt::raw_serial_str(b"\n");
+                }
                 let vfs_guard = vfs()?.read();
-                let parent = vfs_guard
-                    .resolve_path(&parent_path)
-                    .map_err(|_| SyscallError::ResourceNotFound)?;
+                let parent = match vfs_guard.resolve_path(&parent_path) {
+                    Ok(p) => p,
+                    Err(_e) => {
+                        #[cfg(target_arch = "x86_64")]
+                        unsafe {
+                            crate::arch::x86_64::idt::raw_serial_str(b"[CREAT] resolve_path FAIL\n");
+                        }
+                        return Err(SyscallError::ResourceNotFound);
+                    }
+                };
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    crate::arch::x86_64::idt::raw_serial_str(b"[CREAT] parent resolved OK\n");
+                }
                 match parent.create(&name, perms) {
                     Ok(node) => {
+                        #[cfg(target_arch = "x86_64")]
+                        unsafe {
+                            crate::arch::x86_64::idt::raw_serial_str(b"[CREAT] file created OK\n");
+                        }
                         let file = crate::fs::file::File::new_with_path(
                             node,
                             open_flags,
@@ -252,7 +310,13 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
                             Err(_) => Err(SyscallError::OutOfMemory),
                         }
                     }
-                    Err(_) => Err(SyscallError::ResourceNotFound),
+                    Err(_e) => {
+                        #[cfg(target_arch = "x86_64")]
+                        unsafe {
+                            crate::arch::x86_64::idt::raw_serial_str(b"[CREAT] create() FAIL\n");
+                        }
+                        Err(SyscallError::ResourceNotFound)
+                    }
                 }
             } else {
                 Err(SyscallError::ResourceNotFound)
@@ -266,6 +330,16 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
 /// # Arguments
 /// - fd: File descriptor to close
 pub fn sys_close(fd: usize) -> SyscallResult {
+    // DEBUG: trace close for high fds
+    #[cfg(target_arch = "x86_64")]
+    if fd >= 3 {
+        unsafe {
+            crate::arch::x86_64::idt::raw_serial_str(b"[CL] fd=");
+            crate::arch::x86_64::idt::raw_serial_hex(fd as u64);
+            crate::arch::x86_64::idt::raw_serial_str(b"\n");
+        }
+    }
+
     // Get current process
     let process = process::current_process().ok_or(SyscallError::InvalidState)?;
 
@@ -371,8 +445,31 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
     // bytes. from_raw_parts_mut creates a mutable slice for the read.
     let buffer_slice = unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, count) };
 
+    // DEBUG: dump position + first 4 bytes for ld archive reads (fd >= 3)
+    let pre_pos = file_desc.tell();
+
     match file_desc.read(buffer_slice) {
-        Ok(bytes_read) => Ok(bytes_read),
+        Ok(bytes_read) => {
+            if fd >= 3 && bytes_read >= 4 {
+                unsafe {
+                    crate::arch::x86_64::idt::raw_serial_str(b"[RD] ");
+                    crate::arch::x86_64::idt::raw_serial_hex(fd as u64);
+                    crate::arch::x86_64::idt::raw_serial_str(b" @");
+                    crate::arch::x86_64::idt::raw_serial_hex(pre_pos as u64);
+                    crate::arch::x86_64::idt::raw_serial_str(b" n=");
+                    crate::arch::x86_64::idt::raw_serial_hex(bytes_read as u64);
+                    crate::arch::x86_64::idt::raw_serial_str(b" [");
+                    for i in 0..4.min(bytes_read) {
+                        crate::arch::x86_64::idt::raw_serial_hex(buffer_slice[i] as u64);
+                        if i < 3 {
+                            crate::arch::x86_64::idt::raw_serial_str(b" ");
+                        }
+                    }
+                    crate::arch::x86_64::idt::raw_serial_str(b"]\n");
+                }
+            }
+            Ok(bytes_read)
+        }
         Err(_) => Err(SyscallError::InvalidState),
     }
 }
@@ -476,8 +573,40 @@ pub fn sys_seek(fd: usize, offset: isize, whence: usize) -> SyscallResult {
 
     // Perform seek
     match file_desc.seek(seek_from) {
-        Ok(new_pos) => Ok(new_pos as usize),
-        Err(_) => Err(SyscallError::InvalidState),
+        Ok(new_pos) => {
+            // DEBUG: trace seeks on high fds (ld archive processing)
+            #[cfg(target_arch = "x86_64")]
+            if fd >= 3 {
+                unsafe {
+                    crate::arch::x86_64::idt::raw_serial_str(b"[SK] ");
+                    crate::arch::x86_64::idt::raw_serial_hex(fd as u64);
+                    crate::arch::x86_64::idt::raw_serial_str(b" w=");
+                    crate::arch::x86_64::idt::raw_serial_hex(whence as u64);
+                    crate::arch::x86_64::idt::raw_serial_str(b" off=");
+                    crate::arch::x86_64::idt::raw_serial_hex(offset as u64);
+                    crate::arch::x86_64::idt::raw_serial_str(b" ->pos=");
+                    crate::arch::x86_64::idt::raw_serial_hex(new_pos as u64);
+                    crate::arch::x86_64::idt::raw_serial_str(b"\n");
+                }
+            }
+            Ok(new_pos as usize)
+        }
+        Err(_) => {
+            // Trace failed seeks too (for ld debugging)
+            #[cfg(target_arch = "x86_64")]
+            if fd >= 3 {
+                unsafe {
+                    crate::arch::x86_64::idt::raw_serial_str(b"[SK-ERR] ");
+                    crate::arch::x86_64::idt::raw_serial_hex(fd as u64);
+                    crate::arch::x86_64::idt::raw_serial_str(b" w=");
+                    crate::arch::x86_64::idt::raw_serial_hex(whence as u64);
+                    crate::arch::x86_64::idt::raw_serial_str(b" off=");
+                    crate::arch::x86_64::idt::raw_serial_hex(offset as u64);
+                    crate::arch::x86_64::idt::raw_serial_str(b"\n");
+                }
+            }
+            Err(SyscallError::InvalidState)
+        }
     }
 }
 
@@ -503,6 +632,21 @@ pub fn sys_stat(fd: usize, stat_buf: usize) -> SyscallResult {
         .metadata()
         .map_err(|_| SyscallError::InvalidState)?;
     let stat = fill_stat(&metadata);
+
+    // DEBUG: trace fstat for high fds (ld archive processing)
+    #[cfg(target_arch = "x86_64")]
+    if fd >= 3 {
+        unsafe {
+            crate::arch::x86_64::idt::raw_serial_str(b"[STAT] fd=");
+            crate::arch::x86_64::idt::raw_serial_hex(fd as u64);
+            crate::arch::x86_64::idt::raw_serial_str(b" sz=");
+            crate::arch::x86_64::idt::raw_serial_hex(stat.st_size as u64);
+            crate::arch::x86_64::idt::raw_serial_str(b" mode=");
+            crate::arch::x86_64::idt::raw_serial_hex(stat.st_mode as u64);
+            crate::arch::x86_64::idt::raw_serial_str(b"\n");
+        }
+    }
+
     // SAFETY: stat_buf was validated as non-null, in user-space, and aligned.
     unsafe {
         core::ptr::write(stat_buf as *mut FileStat, stat);
@@ -976,11 +1120,23 @@ pub fn sys_chdir(path_ptr: usize) -> SyscallResult {
 ///
 /// # Returns
 /// Command-specific return value
-pub fn sys_ioctl(_fd: usize, cmd: usize, arg: usize) -> SyscallResult {
+pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
     use crate::drivers::terminal::{
         self, KernelTermios, KernelWinsize, TCGETS, TCSETS, TCSETSF, TCSETSW, TIOCGPGRP,
         TIOCGWINSZ, TIOCSPGRP, TIOCSWINSZ,
     };
+
+    // Terminal ioctls are only valid on terminal fds (0=stdin, 1=stdout,
+    // 2=stderr which are connected to the serial console). Regular files
+    // opened via open() must return ENOTTY so that isatty() returns false
+    // and BFD/stdio treat them as seekable files, not terminal streams.
+    let is_terminal_cmd = matches!(
+        cmd,
+        TIOCGWINSZ | TIOCSWINSZ | TCGETS | TCSETS | TCSETSW | TCSETSF | TIOCGPGRP | TIOCSPGRP
+    );
+    if is_terminal_cmd && fd > 2 {
+        return Err(SyscallError::InvalidArgument);
+    }
 
     match cmd {
         TIOCGWINSZ => {
@@ -1262,9 +1418,23 @@ pub fn sys_access(path_ptr: usize, mode: usize) -> SyscallResult {
     let vfs_guard = vfs_lock.read();
 
     // Check if the file exists (F_OK = 0)
-    let node = vfs_guard
-        .resolve_path(&path)
-        .map_err(|_| SyscallError::ResourceNotFound)?;
+    let result = vfs_guard.resolve_path(&path);
+
+    // Diagnostic: log access() calls to trace GCC's tool discovery
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[ACCESS] ");
+        for &b in path.as_bytes() {
+            crate::arch::x86_64::idt::raw_serial_str(&[b]);
+        }
+        if result.is_ok() {
+            crate::arch::x86_64::idt::raw_serial_str(b" OK\n");
+        } else {
+            crate::arch::x86_64::idt::raw_serial_str(b" ENOENT\n");
+        }
+    }
+
+    let node = result.map_err(|_| SyscallError::ResourceNotFound)?;
 
     // For non-zero mode, check permissions against metadata
     if mode != 0 {

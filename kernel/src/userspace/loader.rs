@@ -115,6 +115,11 @@ pub fn load_user_program(
 
     let pid = lifecycle::create_process_with_options(options)?;
 
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[LOADER] pid created, opening fds\n");
+    }
+
     // Open /dev/console for stdin(0), stdout(1), stderr(2)
     if let Some(process) = crate::process::get_process(pid) {
         let vfs = get_vfs().read();
@@ -163,6 +168,11 @@ pub fn load_user_program(
     if let Some(process) = crate::process::get_process(pid) {
         let mut memory_space = process.memory_space.lock();
 
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            crate::arch::x86_64::idt::raw_serial_str(b"[LOADER] loading ELF segments\n");
+        }
+
         // Use the ELF loader to load the binary into the process's address space
         let entry = ElfLoader::load(&buffer, &mut *memory_space)?;
 
@@ -207,6 +217,11 @@ pub fn load_user_program(
                 );
             }
         }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[LOADER] load complete, returning pid\n");
     }
 
     Ok(pid)

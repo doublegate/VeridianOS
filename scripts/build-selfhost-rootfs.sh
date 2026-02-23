@@ -65,6 +65,7 @@ mkdir -p "$BUILD_DIR/usr/include/arpa"
 mkdir -p "$BUILD_DIR/usr/include/netinet"
 mkdir -p "$BUILD_DIR/usr/src"
 mkdir -p "$BUILD_DIR/tmp"
+mkdir -p "$BUILD_DIR/var/tmp"
 
 # =========================================================================
 # Common compiler flags (same as build-rootfs.sh)
@@ -256,7 +257,7 @@ done
 echo ""
 echo "--- Creating rootfs-selfhost.tar ---"
 cd "$BUILD_DIR"
-tar cf "$ROOTFS_TAR" bin/ usr/ tmp/
+tar cf "$ROOTFS_TAR" bin/ usr/ tmp/ var/
 cd "$PROJECT_ROOT"
 
 # Show summary
@@ -279,10 +280,20 @@ echo "    -drive file=target/rootfs-selfhost.tar,if=none,id=vd0,format=raw \\"
 echo "    -device virtio-blk-pci,drive=vd0 \\"
 echo "    -serial stdio -display none -m 512M"
 echo ""
-echo "Self-hosting test commands (run inside VeridianOS):"
-echo "  gcc -static -nostdinc -isystem /usr/include \\"
+echo "Self-hosting test commands (run inside VeridianOS, step-by-step):"
+echo "  # Step 1: Compile C to assembly"
+echo "  /usr/libexec/gcc/x86_64-veridian/14.2.0/cc1 -isystem /usr/include \\"
 echo "    -isystem /usr/lib/gcc/x86_64-veridian/14.2.0/include \\"
-echo "    -B /usr/lib/gcc/x86_64-veridian/14.2.0 \\"
-echo "    -L /usr/lib -L /usr/lib/gcc/x86_64-veridian/14.2.0 \\"
-echo "    /usr/src/selfhost_test.c -o /tmp/selfhost_test"
+echo "    /usr/src/selfhost_test.c -o /tmp/test.s -quiet"
+echo "  # Step 2: Assemble"
+echo "  /usr/bin/as -o /tmp/test.o /tmp/test.s"
+echo "  # Step 3: Link with CRT startup objects"
+echo "  /usr/bin/ld -static -o /tmp/selfhost_test \\"
+echo "    /usr/lib/crt0.o /usr/lib/crti.o \\"
+echo "    /usr/lib/gcc/x86_64-veridian/14.2.0/crtbegin.o \\"
+echo "    /tmp/test.o -L/usr/lib -L/usr/lib/gcc/x86_64-veridian/14.2.0 \\"
+echo "    -lc -lgcc \\"
+echo "    /usr/lib/gcc/x86_64-veridian/14.2.0/crtend.o /usr/lib/crtn.o"
+echo "  # Step 4: Run"
 echo "  /tmp/selfhost_test"
+echo "  # Expected output: SELF_HOSTED_PASS"

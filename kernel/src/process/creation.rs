@@ -95,6 +95,12 @@ pub fn create_process_with_options(
 
     let tid = main_thread.tid;
 
+    // === DEBUG: Bisect DF location ===
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[CRE] A-tid\n");
+    }
+
     // Map the user stack pages into the process's VAS page tables.
     // ThreadBuilder::build() allocates physical frames for the user stack
     // but does not map them. We call vas.map_page() for each page, which
@@ -103,12 +109,29 @@ pub fn create_process_with_options(
         let user_base = main_thread.user_stack.base;
         let user_size = main_thread.user_stack.size;
         let num_pages = user_size / 4096;
+
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            crate::arch::x86_64::idt::raw_serial_str(b"[CRE] A1-pre-lock\n");
+        }
+
         let mut memory_space = process.memory_space.lock();
+
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            crate::arch::x86_64::idt::raw_serial_str(b"[CRE] A2-locked\n");
+        }
         let stack_flags = crate::mm::PageFlags::PRESENT
             | crate::mm::PageFlags::USER
             | crate::mm::PageFlags::WRITABLE
             | crate::mm::PageFlags::NO_EXECUTE;
         for i in 0..num_pages {
+            #[cfg(target_arch = "x86_64")]
+            if i == 0 {
+                unsafe {
+                    crate::arch::x86_64::idt::raw_serial_str(b"[CRE] A3-first-map\n");
+                }
+            }
             let vaddr = user_base + i * 4096;
             memory_space.map_page(vaddr, stack_flags)?;
         }
@@ -119,8 +142,18 @@ pub fn create_process_with_options(
         memory_space.set_stack_size(user_size);
     }
 
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[CRE] B-stack-mapped\n");
+    }
+
     // Add thread to process
     process.add_thread(main_thread)?;
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[CRE] C-thread-added\n");
+    }
 
     // Setup user stack with arguments and environment
     // Convert String vectors to &str slices for setup_exec_stack
@@ -130,14 +163,29 @@ pub fn create_process_with_options(
     // Get the process before adding to table so we can set up the stack
     let stack_top = setup_exec_stack(&process, &argv_refs, &envp_refs, None)?;
 
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[CRE] D-exec-stack\n");
+    }
+
     // Update the thread context with the adjusted stack pointer
     if let Some(thread) = process.get_thread(tid) {
         let mut ctx = thread.context.lock();
         ctx.set_stack_pointer(stack_top);
     }
 
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[CRE] E-ctx-updated\n");
+    }
+
     // Add process to process table
     table::add_process(process)?;
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[CRE] F-in-table\n");
+    }
 
     // Mark process as ready
     if let Some(process) = table::get_process(pid) {
@@ -147,6 +195,11 @@ pub fn create_process_with_options(
         if let Some(thread) = process.get_thread(tid) {
             create_scheduler_task(process, thread)?;
         }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[CRE] G-scheduled\n");
     }
 
     // Memory hardening: stack canary + guard page for new process.
@@ -167,8 +220,18 @@ pub fn create_process_with_options(
         );
     }
 
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[CRE] H-hardened\n");
+    }
+
     // Audit log: process creation
     crate::security::audit::log_process_create(pid.0, 0, 0);
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[CRE] I-done\n");
+    }
 
     Ok(pid)
 }
@@ -303,6 +366,20 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
     let file_data = fs::read_file(&resolved_path)
         .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
 
+    // Diagnostic: dump first 32 bytes of file_data + total size
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[EXEC-DATA] sz=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(file_data.len() as u64);
+        crate::arch::x86_64::idt::raw_serial_str(b" first32=");
+        let show = core::cmp::min(32, file_data.len());
+        for i in 0..show {
+            crate::arch::x86_64::idt::raw_serial_hex(file_data[i] as u64);
+            crate::arch::x86_64::idt::raw_serial_str(b" ");
+        }
+        crate::arch::x86_64::idt::raw_serial_str(b"\n");
+    }
+
     // Step 1b: Check for shebang (#!) and delegate to interpreter if found
     if let Some((interpreter, opt_arg)) = parse_shebang(&file_data) {
         // Build new argv: [interpreter, opt_arg?, script_path, original_argv[1..]]
@@ -403,6 +480,91 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
             (entry_point, None)
         }
     };
+
+    // Step 2c: Set up TLS (Thread-Local Storage) if the ELF has a PT_TLS segment.
+    //
+    // x86_64 uses TLS variant II: %fs points to the Thread Control Block (TCB)
+    // at the END of the TLS block. TLS variables are at negative offsets from %fs.
+    // Layout: [tls_data | tls_bss | TCB_self_pointer]
+    //                                ^--- %fs base points here
+    //
+    // We allocate the TLS block via mmap in the process's VAS, copy the TLS
+    // template from the already-mapped PT_TLS segment, write a self-pointer
+    // at the TCB, and store the FS_BASE for the syscall/enter_usermode path.
+    #[cfg(target_arch = "x86_64")]
+    {
+        let loader = ElfLoader::new();
+        let elf_binary = loader.parse(&file_data).ok();
+        if let Some(ref binary) = elf_binary {
+            if let Some(tls_seg) = binary
+                .segments
+                .iter()
+                .find(|s| s.segment_type == crate::elf::types::SegmentType::Tls)
+            {
+                let tls_memsz = tls_seg.memory_size as usize;
+                let tls_filesz = tls_seg.file_size as usize;
+                // The TLS block needs: tls_memsz (data+bss) + 8 (TCB self-pointer),
+                // aligned up to 16 bytes.
+                let tcb_size = 8usize; // self-pointer
+                let tls_block_size = ((tls_memsz + tcb_size) + 15) & !15;
+
+                // Allocate user-space memory for TLS via mmap
+                let memory_space = process.memory_space.lock();
+                let tls_alloc = memory_space.mmap(
+                    tls_block_size,
+                    crate::mm::vas::MappingType::Data,
+                );
+                if let Ok(tls_base_vaddr) = tls_alloc {
+                    let tls_base = tls_base_vaddr.as_usize();
+
+                    // The TCB (and %fs) points to: tls_base + tls_memsz
+                    let tcb_addr = tls_base + tls_memsz;
+
+                    // Copy TLS init data from the already-loaded PT_TLS segment.
+                    // The template lives at tls_vaddr in the process's VAS (already
+                    // mapped by the LOAD segment that contains the TLS section).
+                    // We read from the ELF file data and write to the new TLS block.
+                    if tls_filesz > 0 {
+                        let tls_file_offset = tls_seg.file_offset as usize;
+                        if tls_file_offset + tls_filesz <= file_data.len() {
+                            let tls_init = &file_data[tls_file_offset..tls_file_offset + tls_filesz];
+                            let _ = crate::elf::write_to_user_pages(
+                                &memory_space,
+                                tls_base as u64,
+                                tls_init,
+                            );
+                        }
+                    }
+                    // BSS portion (tls_memsz - tls_filesz) is already zero from mmap
+
+                    // Write TCB self-pointer: *(u64*)tcb_addr = tcb_addr
+                    // This is needed because %fs:0 must return the TCB address itself.
+                    let self_ptr_bytes = (tcb_addr as u64).to_le_bytes();
+                    let _ = crate::elf::write_to_user_pages(
+                        &memory_space,
+                        tcb_addr as u64,
+                        &self_ptr_bytes,
+                    );
+
+                    drop(memory_space);
+
+                    // Store FS_BASE in the process for later use by enter_usermode
+                    process.tls_fs_base.store(tcb_addr as u64, core::sync::atomic::Ordering::Release);
+
+                    // Diagnostic
+                    unsafe {
+                        crate::arch::x86_64::idt::raw_serial_str(b"[TLS] base=0x");
+                        crate::arch::x86_64::idt::raw_serial_hex(tls_base as u64);
+                        crate::arch::x86_64::idt::raw_serial_str(b" tcb=0x");
+                        crate::arch::x86_64::idt::raw_serial_hex(tcb_addr as u64);
+                        crate::arch::x86_64::idt::raw_serial_str(b" memsz=0x");
+                        crate::arch::x86_64::idt::raw_serial_hex(tls_memsz as u64);
+                        crate::arch::x86_64::idt::raw_serial_str(b"\n");
+                    }
+                }
+            }
+        }
+    }
 
     // Step 3: Setup new stack with arguments, environment, and aux vector
     let stack_top = setup_exec_stack(process, argv, envp, aux_vector.as_deref())?;

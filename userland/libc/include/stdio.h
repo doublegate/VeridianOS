@@ -47,6 +47,9 @@ extern "C" {
 #define SEEK_END        2
 #endif
 
+/** File position type (for fgetpos/fsetpos). */
+typedef long fpos_t;
+
 /** Buffering modes for setvbuf(). */
 #define _IOFBF          0   /* Fully buffered */
 #define _IOLBF          1   /* Line buffered */
@@ -95,6 +98,9 @@ int fclose(FILE *stream);
 /** Flush buffered output to the underlying fd. */
 int fflush(FILE *stream);
 
+/** Reopen a stream with a different file or mode. */
+FILE *freopen(const char *pathname, const char *mode, FILE *stream);
+
 /* ========================================================================= */
 /* Character I/O                                                             */
 /* ========================================================================= */
@@ -108,11 +114,19 @@ int fputc(int c, FILE *stream);
 /** Push a character back onto the input stream. */
 int ungetc(int c, FILE *stream);
 
-/** Macro aliases. */
+/** Function declarations (required by C++ <cstdio>). */
+int getc(FILE *stream);
+int putc(int c, FILE *stream);
+int getchar(void);
+int putchar(int c);
+
+/** Macro overrides for C (not applied in C++ to avoid conflicts). */
+#ifndef __cplusplus
 #define getc(stream)        fgetc(stream)
 #define putc(c, stream)     fputc((c), (stream))
 #define getchar()           fgetc(stdin)
 #define putchar(c)          fputc((c), stdout)
+#endif
 
 /* ========================================================================= */
 /* String I/O                                                                */
@@ -149,6 +163,12 @@ long ftell(FILE *stream);
 
 /** Reset stream to beginning. */
 void rewind(FILE *stream);
+
+/** Get stream position (for fsetpos). */
+int fgetpos(FILE *stream, fpos_t *pos);
+
+/** Set stream position (from fgetpos). */
+int fsetpos(FILE *stream, const fpos_t *pos);
 
 /* ========================================================================= */
 /* Error / EOF queries                                                       */
@@ -209,6 +229,12 @@ int scanf(const char *fmt, ...)
 
 /** va_list variant of fscanf. */
 int vfscanf(FILE *stream, const char *fmt, va_list ap);
+
+/** va_list variant of scanf. */
+int vscanf(const char *fmt, va_list ap);
+
+/** va_list variant of sscanf. */
+int vsscanf(const char *str, const char *fmt, va_list ap);
 
 /* ========================================================================= */
 /* Buffer control                                                            */

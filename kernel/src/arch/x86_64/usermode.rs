@@ -60,17 +60,27 @@ pub unsafe fn enter_usermode(entry_point: u64, user_stack: u64, user_cs: u64, us
     // RFLAGS = 0x202: bit 1 (reserved, always 1) + bit 9 (IF = interrupts enabled).
     // The caller guarantees all arguments point to valid mapped memory and
     // the GDT/TSS/per-CPU data are properly configured.
+    //
+    // If the process has TLS (fs_base != 0), set FS_BASE via wrmsr AFTER
+    // clearing the FS selector. Writing 0 to FS zeros FS_BASE, so the
+    // wrmsr must come after to re-establish TLS.
+    let fs_base = crate::process::current_process()
+        .map(|p| p.tls_fs_base.load(core::sync::atomic::Ordering::Acquire))
+        .unwrap_or(0);
+
+    let fs_lo = fs_base as u32;
+    let fs_hi = (fs_base >> 32) as u32;
+
     asm!(
         // Set data segment registers to user data selector
         "mov ds, {ss:r}",
         "mov es, {ss:r}",
-        // Clear FS and GS (will be set up later for TLS if needed).
-        // Use a dedicated zero operand to avoid clobbering other operands
-        // (the compiler may place rflags in eax, so "xor eax, eax" would
-        // destroy it).
+        // Clear FS and GS. Writing 0 to FS zeros FS_BASE (MSR 0xC0000100).
         "mov fs, {zero:x}",
         "mov gs, {zero:x}",
-        // Build iretq frame on current kernel stack:
+        // Build iretq frame on current kernel stack FIRST, before wrmsr.
+        // wrmsr clobbers eax/ecx/edx which may overlap with compiler-allocated
+        // operand registers, so all push instructions must come before wrmsr.
         //   [RSP+0]  RIP    - user entry point
         //   [RSP+8]  CS     - user code segment (Ring 3)
         //   [RSP+16] RFLAGS - IF set (0x202)
@@ -81,6 +91,18 @@ pub unsafe fn enter_usermode(entry_point: u64, user_stack: u64, user_cs: u64, us
         "push {rflags}",   // RFLAGS (IF enabled)
         "push {cs}",       // CS
         "push {rip}",      // RIP (entry point)
+        // Now restore FS_BASE for TLS if non-zero. All operand values are safely
+        // on the stack, so clobbering eax/ecx/edx for wrmsr is fine.
+        "test {fs_hi:e}, {fs_hi:e}",
+        "jnz 2f",
+        "test {fs_lo:e}, {fs_lo:e}",
+        "jz 3f",
+        "2:",
+        "mov ecx, 0xC0000100",
+        "mov eax, {fs_lo:e}",
+        "mov edx, {fs_hi:e}",
+        "wrmsr",
+        "3:",
         "iretq",
         ss = in(reg) user_ss,
         rsp = in(reg) user_stack,
@@ -88,6 +110,8 @@ pub unsafe fn enter_usermode(entry_point: u64, user_stack: u64, user_cs: u64, us
         cs = in(reg) user_cs,
         rip = in(reg) entry_point,
         zero = in(reg) 0u64,
+        fs_lo = in(reg) fs_lo,
+        fs_hi = in(reg) fs_hi,
         options(noreturn)
     );
 }
@@ -187,69 +211,115 @@ pub unsafe extern "C" fn enter_usermode_returnable(
     );
 }
 
-/// Like `enter_usermode_returnable`, but sets RAX=0 before iretq.
+/// All GPRs needed to resume a forked child in user mode.
 ///
-/// Used for running forked child processes inline from the wait loop.
-/// The forked child expects RAX=0 as the fork() return value indicating
-/// it's the child process.
+/// Built by `boot_run_forked_child` from the child's `X86_64Context`
+/// (which captured the parent's live registers at fork time).
+/// Passed to `enter_forked_child_returnable` so it can restore every
+/// register before `iretq`, not just RAX/RIP/RSP.
+#[repr(C)]
+pub struct ForkChildRegs {
+    pub rip: u64,    // offset  0
+    pub rsp: u64,    // offset  8
+    pub rflags: u64, // offset 16
+    pub rax: u64,    // offset 24
+    pub rbx: u64,    // offset 32
+    pub rcx: u64,    // offset 40
+    pub rdx: u64,    // offset 48
+    pub rsi: u64,    // offset 56
+    pub rdi: u64,    // offset 64
+    pub rbp: u64,    // offset 72
+    pub r8: u64,     // offset 80
+    pub r9: u64,     // offset 88
+    pub r10: u64,    // offset 96
+    pub r11: u64,    // offset 104
+    pub r12: u64,    // offset 112
+    pub r13: u64,    // offset 120
+    pub r14: u64,    // offset 128
+    pub r15: u64,    // offset 136
+}
+
+/// Enter user mode for a forked child, restoring ALL GPRs from `regs`.
+///
+/// Used by `boot_run_forked_child` to dispatch a forked child inline
+/// from the parent's wait loop.  The child resumes at the instruction
+/// after fork() with every register matching the parent's state at the
+/// moment of the SYSCALL, except RAX which is 0 (fork child return).
 ///
 /// # Safety
 /// Same preconditions as `enter_usermode_returnable`.
+/// `regs` must point to a valid `ForkChildRegs` that remains accessible
+/// after the CR3 switch (kernel mapping must cover it).
 #[unsafe(naked)]
 pub unsafe extern "C" fn enter_forked_child_returnable(
-    _entry_point: u64,    // rdi
-    _user_stack: u64,     // rsi
-    _user_cs: u64,        // rdx
-    _user_ss: u64,        // rcx
-    _process_cr3: u64,    // r8
-    _kernel_rsp_ptr: u64, // r9
+    _regs: *const ForkChildRegs, // rdi
+    _process_cr3: u64,           // rsi
+    _kernel_rsp_ptr: u64,        // rdx
 ) {
     core::arch::naked_asm!(
+        // ---- save boot context (same layout as enter_usermode_returnable) ----
         "push rbp",
         "push rbx",
         "push r12",
         "push r13",
         "push r14",
         "push r15",
-        "sub rsp, 8",
+        "sub rsp, 8",          // alignment padding
 
         // Set stack canary
         "mov rax, {canary_magic}",
         "lea r12, [rip + {boot_canary}]",
         "mov [r12], rax",
 
-        // Save boot CR3 to global
+        // Save boot CR3
         "mov rax, cr3",
         "lea r12, [rip + {boot_cr3}]",
         "mov [r12], rax",
 
-        // Save boot RSP to global
+        // Save boot RSP
         "lea r12, [rip + {boot_rsp}]",
         "mov [r12], rsp",
 
+        // Stash regs pointer in r15 (already saved on boot stack)
+        "mov r15, rdi",
+
         // Update per-CPU kernel_rsp
-        "mov [r9], rsp",
+        "mov [rdx], rsp",
 
         // Switch to child's page tables
-        "mov cr3, r8",
+        "mov cr3, rsi",
 
         // Set segment registers for user mode
-        "mov ds, ecx",
-        "mov es, ecx",
+        "mov eax, 0x2B",
+        "mov ds, ax",
+        "mov es, ax",
         "xor eax, eax",
         "mov fs, ax",
         "mov gs, ax",
 
-        // Build iretq frame on stack
-        "push rcx",       // SS
-        "push rsi",       // RSP (user stack)
-        "push 0x202",     // RFLAGS (IF enabled)
-        "push rdx",       // CS
-        "push rdi",       // RIP (entry point)
+        // ---- build iretq frame from ForkChildRegs ----
+        "push 0x2B",                    // SS  (user data segment)
+        "push qword ptr [r15 + 8]",    // RSP (user stack)
+        "push qword ptr [r15 + 16]",   // RFLAGS
+        "push 0x33",                    // CS  (user code segment)
+        "push qword ptr [r15 + 0]",    // RIP (entry point)
 
-        // RAX = 0 for fork() child return value
-        // (already 0 from xor eax,eax above, but be explicit)
-        "xor eax, eax",
+        // ---- restore ALL GPRs from struct (r15 = pointer, loaded last) ----
+        "mov rax, [r15 + 24]",
+        "mov rbx, [r15 + 32]",
+        "mov rcx, [r15 + 40]",
+        "mov rdx, [r15 + 48]",
+        "mov rsi, [r15 + 56]",
+        "mov rdi, [r15 + 64]",
+        "mov rbp, [r15 + 72]",
+        "mov r8,  [r15 + 80]",
+        "mov r9,  [r15 + 88]",
+        "mov r10, [r15 + 96]",
+        "mov r11, [r15 + 104]",
+        "mov r12, [r15 + 112]",
+        "mov r13, [r15 + 120]",
+        "mov r14, [r15 + 128]",
+        "mov r15, [r15 + 136]",        // pointer gone — must be last
 
         "iretq",
 

@@ -38,6 +38,11 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
 
     // Clone address space
     {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            crate::arch::x86_64::idt::raw_serial_str(b"[FORK] clone_from start\n");
+        }
+
         let current_space = current_process.memory_space.lock();
         let mut new_space = new_process.memory_space.lock();
 
@@ -50,6 +55,11 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
         // - Memory zone integration for CoW tracking
         // The current implementation is correct, just less memory efficient.
         new_space.clone_from(&current_space)?;
+
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            crate::arch::x86_64::idt::raw_serial_str(b"[FORK] clone_from done\n");
+        }
     }
 
     // Clone capabilities

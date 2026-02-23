@@ -201,6 +201,12 @@ extern "C" fn kernel_init_stage3_onwards() -> ! {
                 &["PATH=/bin:/usr/bin", "HOME=/", "TERM=veridian"],
             ) {
                 Ok(pid) => {
+                    // Raw serial: safe even if kprintln! holds locks
+                    unsafe {
+                        crate::arch::x86_64::idt::raw_serial_str(
+                            b"[BOOTSTRAP] /bin/sh loaded, entering Ring 3\n",
+                        );
+                    }
                     kprintln!(
                         "[BOOTSTRAP] /bin/sh loaded (pid={}), entering Ring 3",
                         pid.0
@@ -276,6 +282,11 @@ pub fn kernel_init() -> KernelResult<()> {
     kprintln!("[BOOTSTRAP] Stage 2: Memory management");
 
     mm::init_default();
+
+    // Reserve boot page table frames so the frame allocator doesn't hand
+    // them out, which would corrupt kernel address space mappings.
+    #[cfg(target_arch = "x86_64")]
+    mm::reserve_boot_page_table_frames();
 
     kprintln!("[BOOTSTRAP] Memory management initialized");
 
@@ -375,13 +386,16 @@ pub fn kernel_init() -> KernelResult<()> {
 
     // x86_64: The UEFI-provided boot stack is 128KB. In debug mode, deep
     // init call chains overflow it (CapabilitySpace L1 table ~20KB on
-    // stack, security module structs, etc.). Switch to a 256KB
+    // stack, security module structs, etc.). Switch to a 1MB
     // heap-allocated stack now that the allocator is ready.
+    // 256KB was insufficient when the selfhost rootfs TAR (43MB, 114 entries)
+    // is loaded, as the subsequent process creation + page table walking
+    // pushes the stack over the limit.
     // switch_to_heap_stack does NOT return -- it continues boot on the
     // new stack via kernel_init_stage3_onwards.
     #[cfg(target_arch = "x86_64")]
     {
-        const BOOT_STACK_SIZE: usize = 256 * 1024; // 256KB
+        const BOOT_STACK_SIZE: usize = 1024 * 1024; // 1MB (selfhost rootfs needs deep call chains)
         switch_to_heap_stack(BOOT_STACK_SIZE);
         // UNREACHABLE on x86_64: switch_to_heap_stack diverges
     }
@@ -814,6 +828,26 @@ fn run_user_process(pid: crate::process::ProcessId) {
         }
     }
 
+    // Set FS_BASE (MSR 0xC0000100) for TLS if the process has a PT_TLS segment.
+    {
+        let fs_base = process.tls_fs_base.load(core::sync::atomic::Ordering::Acquire);
+        if fs_base != 0 {
+            unsafe {
+                crate::arch::x86_64::idt::raw_serial_str(b"[BOOT] FS_BASE=0x");
+                crate::arch::x86_64::idt::raw_serial_hex(fs_base);
+                crate::arch::x86_64::idt::raw_serial_str(b"\n");
+                let lo = fs_base as u32;
+                let hi = (fs_base >> 32) as u32;
+                core::arch::asm!(
+                    "wrmsr",
+                    in("ecx") 0xC000_0100u32, // IA32_FS_BASE
+                    in("eax") lo,
+                    in("edx") hi,
+                );
+            }
+        }
+    }
+
     // Enter Ring 3 via iretq with returnable context.
     // The naked function saves callee-saved registers, RSP, and CR3 to
     // globals, sets per-CPU kernel_rsp, switches CR3, and does iretq.
@@ -900,9 +934,8 @@ pub fn boot_run_forked_child(
     use core::sync::atomic::Ordering;
 
     use crate::{
-        arch::{
-            context::ThreadContext,
-            x86_64::usermode::{BOOT_RETURN_CR3, BOOT_RETURN_RSP, BOOT_STACK_CANARY},
+        arch::x86_64::usermode::{
+            BOOT_RETURN_CR3, BOOT_RETURN_RSP, BOOT_STACK_CANARY, ForkChildRegs,
         },
         process::get_process,
     };
@@ -916,17 +949,35 @@ pub fn boot_run_forked_child(
         None => return false,
     };
 
-    // Extract child's thread context and page table root
-    let (entry, stack, child_tid) = {
+    // Extract ALL registers from child's ThreadContext into ForkChildRegs.
+    // fork() captured the parent's live registers; we must restore every one
+    // so the child resumes with correct callee-saved regs, not garbage.
+    let (regs, child_tid) = {
         let threads = child.threads.lock();
         match threads.values().next() {
             Some(t) => {
                 let ctx = t.context.lock();
-                (
-                    ctx.get_instruction_pointer() as u64,
-                    ctx.get_stack_pointer() as u64,
-                    t.tid,
-                )
+                let r = ForkChildRegs {
+                    rip: ctx.rip,
+                    rsp: ctx.rsp,
+                    rflags: ctx.rflags,
+                    rax: ctx.rax,
+                    rbx: ctx.rbx,
+                    rcx: ctx.rcx,
+                    rdx: ctx.rdx,
+                    rsi: ctx.rsi,
+                    rdi: ctx.rdi,
+                    rbp: ctx.rbp,
+                    r8: ctx.r8,
+                    r9: ctx.r9,
+                    r10: ctx.r10,
+                    r11: ctx.r11,
+                    r12: ctx.r12,
+                    r13: ctx.r13,
+                    r14: ctx.r14,
+                    r15: ctx.r15,
+                };
+                (r, t.tid)
             }
             None => return false,
         }
@@ -966,12 +1017,23 @@ pub fn boot_run_forked_child(
     unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) };
 
     let kernel_rsp_ptr = per_cpu as u64;
+
+    // Diagnostic: show key registers being passed to child
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[CHILD_DISPATCH] rip=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(regs.rip);
+        crate::arch::x86_64::idt::raw_serial_str(b" rsp=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(regs.rsp);
+        crate::arch::x86_64::idt::raw_serial_str(b" rbx=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(regs.rbx);
+        crate::arch::x86_64::idt::raw_serial_str(b" rbp=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(regs.rbp);
+        crate::arch::x86_64::idt::raw_serial_str(b"\n");
+    }
+
     unsafe {
         crate::arch::x86_64::usermode::enter_forked_child_returnable(
-            entry,
-            stack,
-            0x33,
-            0x2B,
+            &regs,
             cr3,
             kernel_rsp_ptr,
         );

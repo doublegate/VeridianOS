@@ -80,15 +80,31 @@ int sigpending(sigset_t *set)
 typedef struct { int _flags; } posix_spawnattr_t;
 typedef struct { int _a; int _u; void *_p; } posix_spawn_file_actions_t;
 
+/* Forward declarations */
+extern pid_t fork(void);
+extern int execve(const char *path, char *const argv[], char *const envp[]);
+extern int execvp(const char *file, char *const argv[]);
+extern void _exit(int status);
+
 int posix_spawn(pid_t *pid, const char *path,
                 const posix_spawn_file_actions_t *fa,
                 const posix_spawnattr_t *attr,
                 char *const argv[], char *const envp[])
 {
-    (void)pid; (void)path; (void)fa; (void)attr;
-    (void)argv; (void)envp;
-    /* Stub: spawning not supported yet */
-    return 38; /* ENOSYS */
+    (void)fa; (void)attr; /* file_actions and attrs not yet supported */
+
+    pid_t child = fork();
+    if (child < 0)
+        return errno;
+    if (child == 0) {
+        /* Child: exec the program */
+        execve(path, argv, envp);
+        _exit(127); /* exec failed */
+    }
+    /* Parent: return child PID */
+    if (pid)
+        *pid = child;
+    return 0;
 }
 
 int posix_spawnp(pid_t *pid, const char *file,
@@ -96,9 +112,30 @@ int posix_spawnp(pid_t *pid, const char *file,
                  const posix_spawnattr_t *attr,
                  char *const argv[], char *const envp[])
 {
-    (void)pid; (void)file; (void)fa; (void)attr;
-    (void)argv; (void)envp;
-    return 38; /* ENOSYS */
+    (void)fa; (void)attr;
+
+    pid_t child = fork();
+    if (child < 0)
+        return errno;
+    if (child == 0) {
+        /* Child: search PATH for the executable */
+        /* execvp ignores envp -- use execve with resolved path instead.
+         * For now, if file contains '/', use execve directly; otherwise
+         * use execvp which searches PATH. */
+        if (file && file[0] == '/') {
+            execve(file, argv, envp);
+        } else {
+            /* execvp searches PATH but doesn't pass envp; however for
+             * GCC's use case the child inherits the parent's environment
+             * which is sufficient. */
+            (void)envp;
+            execvp(file, argv);
+        }
+        _exit(127);
+    }
+    if (pid)
+        *pid = child;
+    return 0;
 }
 
 int posix_spawnattr_init(posix_spawnattr_t *attr)
@@ -635,3 +672,100 @@ double modf(double x, double *iptr)
 }
 
 /* strtod/strtof/strtold already defined in stdlib.c -- not duplicated here */
+
+/* ========================================================================= */
+/* Locale-aware string functions (C/POSIX locale only)                       */
+/* ========================================================================= */
+
+extern int strcmp(const char *s1, const char *s2);
+extern unsigned long strlen(const char *s);
+
+/* strcoll: locale-aware string compare -- in C locale, same as strcmp */
+int strcoll(const char *s1, const char *s2)
+{
+    return strcmp(s1, s2);
+}
+
+/* strxfrm: locale-aware string transform -- in C locale, just copy */
+unsigned long strxfrm(char *dest, const char *src, unsigned long n)
+{
+    unsigned long len = strlen(src);
+    if (dest && n > 0) {
+        unsigned long copy = len < n ? len : n - 1;
+        for (unsigned long i = 0; i < copy; i++)
+            dest[i] = src[i];
+        if (copy < n)
+            dest[copy] = '\0';
+    }
+    return len;
+}
+
+/* ========================================================================= */
+/* stdio functions needed by C++ <cstdio>                                    */
+/* ========================================================================= */
+
+/* Forward declare FILE and streams (match stdio.h) */
+struct _FILE;
+typedef struct _FILE FILE;
+extern FILE *stdin;
+extern FILE *stdout;
+extern FILE *stderr;
+extern int fgetc(FILE *stream);
+extern int fputc(int c, FILE *stream);
+extern long ftell(FILE *stream);
+extern int fseek(FILE *stream, long offset, int whence);
+
+typedef long fpos_t;
+
+int getc(FILE *stream)
+{
+    return fgetc(stream);
+}
+
+int putc(int c, FILE *stream)
+{
+    return fputc(c, stream);
+}
+
+int getchar(void)
+{
+    return fgetc(stdin);
+}
+
+/* Note: putchar with write() already exists above for non-FILE usage.
+   This version uses FILE-based fputc for C++ <cstdio> compatibility.
+   The linker will use whichever is pulled in first. */
+
+int fgetpos(FILE *stream, fpos_t *pos)
+{
+    if (!stream || !pos)
+        return -1;
+    long p = ftell(stream);
+    if (p < 0)
+        return -1;
+    *pos = (fpos_t)p;
+    return 0;
+}
+
+int fsetpos(FILE *stream, const fpos_t *pos)
+{
+    if (!stream || !pos)
+        return -1;
+    return fseek(stream, (long)*pos, 0 /* SEEK_SET */);
+}
+
+/* vscanf/vsscanf: minimal stubs -- return 0 (no items matched) */
+extern int vfscanf(FILE *stream, const char *fmt, __builtin_va_list ap);
+
+int vscanf(const char *fmt, __builtin_va_list ap)
+{
+    return vfscanf(stdin, fmt, ap);
+}
+
+/* Minimal vsscanf stub -- GCC's configure tests need it to exist,
+   but the actual compilation pipeline doesn't call it. */
+int vsscanf(const char *str, const char *fmt, __builtin_va_list ap)
+{
+    (void)str; (void)fmt; (void)ap;
+    return 0;
+}

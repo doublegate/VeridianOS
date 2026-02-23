@@ -53,6 +53,11 @@ static inline size_t align_up(size_t n)
     return (n + ALLOC_ALIGN - 1) & ~(ALLOC_ALIGN - 1);
 }
 
+/*
+ * DIAGNOSTIC: Bump allocator (never reuses freed memory).
+ * This eliminates free-list corruption as a possible crash cause.
+ * Once the root cause is found, restore the free-list allocator above.
+ */
 void *malloc(size_t size)
 {
     if (size == 0)
@@ -60,70 +65,24 @@ void *malloc(size_t size)
 
     size = align_up(size);
 
-    /* Search free list (first fit). */
-    block_header_t **prev = &free_list;
-    block_header_t *blk = free_list;
-
-    while (blk) {
-        if (blk->size >= size) {
-            /* Found a large enough block. */
-            if (blk->size >= size + HEADER_SIZE + ALLOC_ALIGN) {
-                /* Split: carve off the requested size and keep the rest. */
-                block_header_t *rest = (block_header_t *)
-                    ((char *)blk + HEADER_SIZE + size);
-                rest->size = blk->size - size - HEADER_SIZE;
-                rest->next = blk->next;
-                *prev = rest;
-                blk->size = size;
-            } else {
-                /* Use the whole block. */
-                *prev = blk->next;
-            }
-            blk->next = NULL;
-            return (char *)blk + HEADER_SIZE;
-        }
-        prev = &blk->next;
-        blk = blk->next;
-    }
-
-    /* No suitable free block -- ask the kernel for more memory. */
     size_t total = HEADER_SIZE + size;
-    if (total < SBRK_MIN)
-        total = SBRK_MIN;
-
     void *mem = sbrk((intptr_t)total);
     if (mem == (void *)-1) {
         errno = ENOMEM;
         return NULL;
     }
 
-    blk = (block_header_t *)mem;
-    blk->size = total - HEADER_SIZE;
+    block_header_t *blk = (block_header_t *)mem;
+    blk->size = size;
     blk->next = NULL;
-
-    /* If we got more than requested, split off the excess. */
-    if (blk->size > size + HEADER_SIZE + ALLOC_ALIGN) {
-        block_header_t *rest = (block_header_t *)
-            ((char *)blk + HEADER_SIZE + size);
-        rest->size = blk->size - size - HEADER_SIZE;
-        rest->next = free_list;
-        free_list = rest;
-        blk->size = size;
-    }
 
     return (char *)blk + HEADER_SIZE;
 }
 
 void free(void *ptr)
 {
-    if (!ptr)
-        return;
-
-    block_header_t *blk = (block_header_t *)((char *)ptr - HEADER_SIZE);
-
-    /* Prepend to free list (no coalescing for simplicity). */
-    blk->next = free_list;
-    free_list = blk;
+    (void)ptr;
+    /* Bump allocator: no-op free for diagnostic purposes. */
 }
 
 void *calloc(size_t count, size_t size)

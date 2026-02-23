@@ -147,12 +147,13 @@ pub fn sys_mmap(
     if !is_anonymous {
         let file_table = proc.file_table.lock();
         if let Some(file) = file_table.get(fd) {
-            // Read file data for the requested range
+            // Read file data for the requested range.
+            // IMPORTANT: Read directly from the VFS node at the specified offset
+            // instead of using file.seek()+file.read(), which would corrupt the
+            // shared File position used by user-space stdio (fread/fseek).
             let aligned_len = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
             let mut buf = alloc::vec![0u8; aligned_len];
-            // Seek to the requested offset and read
-            let _ = file.seek(crate::fs::file::SeekFrom::Start(offset));
-            let _bytes_read = file.read(&mut buf).unwrap_or(0);
+            let _bytes_read = file.node.read(offset, &mut buf).unwrap_or(0);
 
             // Write file data into the mapped region via physical memory.
             // The pages are mapped in the process's page tables. We walk the
@@ -179,6 +180,26 @@ pub fn sys_mmap(
                 }
             }
         }
+    }
+
+    // Diagnostic: trace all mmap calls
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[MMAP] addr=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(mapped_addr as u64);
+        crate::arch::x86_64::idt::raw_serial_str(b" len=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(length as u64);
+        crate::arch::x86_64::idt::raw_serial_str(b" flags=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(flags as u64);
+        if !is_anonymous {
+            crate::arch::x86_64::idt::raw_serial_str(b" fd=");
+            crate::arch::x86_64::idt::raw_serial_hex(fd as u64);
+            crate::arch::x86_64::idt::raw_serial_str(b" off=0x");
+            crate::arch::x86_64::idt::raw_serial_hex(offset as u64);
+        } else {
+            crate::arch::x86_64::idt::raw_serial_str(b" ANON");
+        }
+        crate::arch::x86_64::idt::raw_serial_str(b"\n");
     }
 
     Ok(mapped_addr)
@@ -290,5 +311,16 @@ pub fn sys_brk(addr: usize) -> SyscallResult {
     };
 
     let result = memory_space.brk(new_break);
+
+    // Diagnostic: trace brk calls for debugging malloc/heap issues
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[BRK] req=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(addr as u64);
+        crate::arch::x86_64::idt::raw_serial_str(b" ret=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(result.0);
+        crate::arch::x86_64::idt::raw_serial_str(b"\n");
+    }
+
     Ok(result.as_usize())
 }

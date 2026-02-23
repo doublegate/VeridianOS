@@ -32,7 +32,7 @@ impl Default for ElfLoader {
 /// User-space VAs (e.g., 0x400000) are only mapped in the process's page
 /// tables, not the kernel's CR3. This function translates each page through
 /// the process's page tables and writes via `phys_to_virt_addr()`.
-fn write_to_user_pages(
+pub fn write_to_user_pages(
     vas: &crate::mm::VirtualAddressSpace,
     user_vaddr: u64,
     data: &[u8],
@@ -261,6 +261,14 @@ impl ElfLoader {
                     operation: "execute entry point",
                 });
             }
+        }
+
+        // Diagnostic: log the parsed entry point
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            crate::arch::x86_64::idt::raw_serial_str(b"[ELF] entry=0x");
+            crate::arch::x86_64::idt::raw_serial_hex(binary.entry_point);
+            crate::arch::x86_64::idt::raw_serial_str(b"\n");
         }
 
         Ok(binary.entry_point)

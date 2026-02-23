@@ -79,17 +79,21 @@ impl OpenFlags {
     }
 
     /// Create from bits (for syscall interface)
+    ///
+    /// Flag values MUST match `<veridian/fcntl.h>` in the sysroot -- that is
+    /// the ABI contract user-space programs (including GCC) are compiled against.
     pub fn from_bits(bits: u32) -> Option<Self> {
-        // Standard POSIX O_* flags
-        const O_RDONLY: u32 = 0x0000;
-        const O_WRONLY: u32 = 0x0001;
-        const O_RDWR: u32 = 0x0002;
-        const O_CREAT: u32 = 0x0040;
-        const O_EXCL: u32 = 0x0080;
+        // VeridianOS ABI flags (from veridian/fcntl.h in sysroot)
+        const O_RDONLY: u32 = 0x0001;
+        const O_WRONLY: u32 = 0x0002;
+        const O_RDWR: u32 = 0x0003;
+        const O_ACCMODE: u32 = 0x0003;
+        const O_CREAT: u32 = 0x0100;
         const O_TRUNC: u32 = 0x0200;
         const O_APPEND: u32 = 0x0400;
+        const O_EXCL: u32 = 0x0800;
 
-        let access_mode = bits & 0x3;
+        let access_mode = bits & O_ACCMODE;
 
         Some(Self {
             read: access_mode == O_RDONLY || access_mode == O_RDWR,

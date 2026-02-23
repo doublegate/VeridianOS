@@ -18,11 +18,22 @@ use crate::process::{
 /// Creates a new process that is a copy of the current process.
 /// Returns the PID of the child in the parent, and 0 in the child.
 pub fn sys_fork() -> SyscallResult {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[FORK] start\n");
+    }
+
     // Get current process before forking
     let current = current_process().ok_or(SyscallError::InvalidState)?;
 
     match fork_process() {
         Ok(child_pid) => {
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                crate::arch::x86_64::idt::raw_serial_str(b"[FORK] ok pid=");
+                crate::arch::x86_64::idt::raw_serial_hex(child_pid.0 as u64);
+                crate::arch::x86_64::idt::raw_serial_str(b"\n");
+            }
             // In parent process, inherit capabilities to child
             if let Some(child_process) = crate::process::get_process(child_pid) {
                 let parent_cap_space = current.capability_space.lock();
@@ -52,6 +63,13 @@ pub fn sys_fork() -> SyscallResult {
 /// - argv_ptr: Pointer to argument array
 /// - envp_ptr: Pointer to environment array
 pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallResult {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[SYS_EXEC] path_ptr=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(path_ptr as u64);
+        crate::arch::x86_64::idt::raw_serial_str(b"\n");
+    }
+
     use crate::syscall::userspace::{copy_string_array_from_user, copy_string_from_user};
 
     // Validate path pointer is in user space
@@ -64,11 +82,41 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
     // user memory.
     let path = unsafe { copy_string_from_user(path_ptr)? };
 
+    // Diagnostic: print the actual exec path string
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[SYS_EXEC] path=\"");
+        for &b in path.as_bytes() {
+            crate::arch::x86_64::idt::raw_serial_str(&[b]);
+        }
+        crate::arch::x86_64::idt::raw_serial_str(b"\"\n");
+    }
+
     // Parse argv and envp arrays from user space
     // SAFETY: argv_ptr and envp_ptr are user-space pointers to null-terminated
     // arrays of string pointers. copy_string_array_from_user handles null
     // pointer checks internally and bounds-checks string lengths.
     let argv = unsafe { copy_string_array_from_user(argv_ptr)? };
+
+    // Diagnostic: dump argc and full argv for cc1/as/ld
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[SYS_EXEC] argc=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(argv.len() as u64);
+        crate::arch::x86_64::idt::raw_serial_str(b"\n");
+        // Dump all argv entries for tool invocations
+        if path.contains("cc1") || path.contains("/as") || path.contains("/ld") {
+            for (i, arg) in argv.iter().enumerate() {
+                crate::arch::x86_64::idt::raw_serial_str(b"  argv[");
+                crate::arch::x86_64::idt::raw_serial_hex(i as u64);
+                crate::arch::x86_64::idt::raw_serial_str(b"]=\"");
+                for &b in arg.as_bytes() {
+                    crate::arch::x86_64::idt::raw_serial_str(&[b]);
+                }
+                crate::arch::x86_64::idt::raw_serial_str(b"\"\n");
+            }
+        }
+    }
 
     let envp = unsafe { copy_string_array_from_user(envp_ptr)? };
 
@@ -147,6 +195,26 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
                 crate::arch::x86_64::idt::raw_serial_hex(diag_cr3);
                 crate::arch::x86_64::idt::raw_serial_str(b"\n");
 
+                // Set FS_BASE (MSR 0xC0000100) for TLS if the process has one.
+                // Must be done BEFORE enter_usermode since iretq doesn't
+                // restore FS_BASE. wrmsr uses ECX=MSR, EDX:EAX=value.
+                if let Some(proc) = crate::process::current_process() {
+                    let fs_base = proc.tls_fs_base.load(core::sync::atomic::Ordering::Acquire);
+                    if fs_base != 0 {
+                        crate::arch::x86_64::idt::raw_serial_str(b"[EXEC] FS_BASE=0x");
+                        crate::arch::x86_64::idt::raw_serial_hex(fs_base);
+                        crate::arch::x86_64::idt::raw_serial_str(b"\n");
+                        let lo = fs_base as u32;
+                        let hi = (fs_base >> 32) as u32;
+                        core::arch::asm!(
+                            "wrmsr",
+                            in("ecx") 0xC000_0100u32, // IA32_FS_BASE
+                            in("eax") lo,
+                            in("edx") hi,
+                        );
+                    }
+                }
+
                 // Undo the swapgs from syscall_entry so GS_BASE and
                 // KERNEL_GS_BASE are correct for user mode.
                 core::arch::asm!("swapgs");
@@ -161,7 +229,17 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
             #[cfg(not(target_arch = "x86_64"))]
             Err(SyscallError::InvalidState)
         }
-        Err(_) => Err(SyscallError::ResourceNotFound),
+        Err(_e) => {
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                crate::arch::x86_64::idt::raw_serial_str(b"[SYS_EXEC] FAIL: ");
+                for &b in path.as_bytes() {
+                    crate::arch::x86_64::idt::raw_serial_str(&[b]);
+                }
+                crate::arch::x86_64::idt::raw_serial_str(b"\n");
+            }
+            Err(SyscallError::ResourceNotFound)
+        }
     }
 }
 

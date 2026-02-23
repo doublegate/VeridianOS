@@ -227,25 +227,115 @@ pub fn init(memory_map: &[MemoryRegion]) {
     } // End of allocator block
 }
 
+/// Translate a kernel virtual address to its physical address by walking
+/// the boot page tables (CR3). Returns the physical address, or 0 on failure.
+///
+/// This is needed to find the kernel's actual physical extent, since UEFI
+/// may load the kernel at any physical address.
+#[cfg(target_arch = "x86_64")]
+fn translate_kernel_vaddr(vaddr: u64) -> u64 {
+    let cr3: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack));
+    }
+    let phys_offset = PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Acquire);
+    let l4_phys = cr3 & !0xFFF;
+
+    // L4 index
+    let l4_idx = ((vaddr >> 39) & 0x1FF) as usize;
+    let l4_virt = (l4_phys + phys_offset) as *const u64;
+    let l4_entry = unsafe { core::ptr::read_volatile(l4_virt.add(l4_idx)) };
+    if l4_entry & 1 == 0 {
+        return 0;
+    }
+
+    // L3 index
+    let l3_phys = l4_entry & 0x000F_FFFF_FFFF_F000;
+    let l3_idx = ((vaddr >> 30) & 0x1FF) as usize;
+    let l3_virt = (l3_phys + phys_offset) as *const u64;
+    let l3_entry = unsafe { core::ptr::read_volatile(l3_virt.add(l3_idx)) };
+    if l3_entry & 1 == 0 {
+        return 0;
+    }
+    if l3_entry & (1 << 7) != 0 {
+        // 1GB huge page
+        return (l3_entry & 0x000F_FFFF_C000_0000) | (vaddr & 0x3FFF_FFFF);
+    }
+
+    // L2 index
+    let l2_phys = l3_entry & 0x000F_FFFF_FFFF_F000;
+    let l2_idx = ((vaddr >> 21) & 0x1FF) as usize;
+    let l2_virt = (l2_phys + phys_offset) as *const u64;
+    let l2_entry = unsafe { core::ptr::read_volatile(l2_virt.add(l2_idx)) };
+    if l2_entry & 1 == 0 {
+        return 0;
+    }
+    if l2_entry & (1 << 7) != 0 {
+        // 2MB huge page
+        return (l2_entry & 0x000F_FFFF_FFE0_0000) | (vaddr & 0x1F_FFFF);
+    }
+
+    // L1 index
+    let l1_phys = l2_entry & 0x000F_FFFF_FFFF_F000;
+    let l1_idx = ((vaddr >> 12) & 0x1FF) as usize;
+    let l1_virt = (l1_phys + phys_offset) as *const u64;
+    let l1_entry = unsafe { core::ptr::read_volatile(l1_virt.add(l1_idx)) };
+    if l1_entry & 1 == 0 {
+        return 0;
+    }
+
+    (l1_entry & 0x000F_FFFF_FFFF_F000) | (vaddr & 0xFFF)
+}
+
 /// Initialize with default memory map for testing
 pub fn init_default() {
     kprintln!("[MM] Using default memory map for initialization");
 
     // Architecture-specific default memory maps
     #[cfg(target_arch = "x86_64")]
-    let default_map = [MemoryRegion {
-        // Start at 144MB to avoid the kernel image (including 128MB BSS heap):
-        //   - Kernel .text/.rodata/.data: ~6MB at 0x100000-0x700000
-        //   - Kernel .bss (128MB heap): ~128MB at 0x6A2000-0x86C9000
-        //   - UEFI bootloader structures in 0-32MB range
-        //   - Safety margin: ~10MB above BSS end
-        // With QEMU -m 256M this gives ~112MB of allocatable frames.
-        // With QEMU -m 512M, frames above 256MB are unused (safe: allocator
-        // only tracks up to `size` bytes, not beyond).
-        start: 0x9000000,                    // 144MB
-        size: 256 * 1024 * 1024 - 0x9000000, // Up to 256MB
-        usable: true,
-    }];
+    let default_map = {
+        // Determine the kernel's physical end address by translating
+        // __kernel_end through the boot page tables. UEFI may load the
+        // kernel at any physical address, so we cannot hard-code the
+        // frame allocator start.
+        extern "C" {
+            static __kernel_end: u8;
+        }
+        let kernel_end_virt = unsafe { &__kernel_end as *const u8 as u64 };
+        let kernel_end_phys = translate_kernel_vaddr(kernel_end_virt);
+
+        // Round up to next 2MB boundary for safety margin, then add 2MB
+        let alloc_start = if kernel_end_phys != 0 {
+            let aligned = (kernel_end_phys + 0x1FFFFF) & !0x1FFFFF; // Round up to 2MB
+            let start = aligned + 0x200000; // 2MB safety margin
+            kprintln!(
+                "[MM] Kernel ends at phys {:#x}, allocator starts at {:#x} ({} MB)",
+                kernel_end_phys,
+                start,
+                start / (1024 * 1024)
+            );
+            start
+        } else {
+            // Fallback: conservative start at 256MB
+            kprintln!("[MM] WARNING: Could not find kernel physical end, using 256MB start");
+            256 * 1024 * 1024
+        };
+
+        // Total usable RAM: 512MB (QEMU -m 512M). Allocate from after
+        // kernel to 512MB.
+        let ram_end: u64 = 512 * 1024 * 1024;
+        let size = if alloc_start < ram_end {
+            ram_end - alloc_start
+        } else {
+            0
+        };
+
+        [MemoryRegion {
+            start: alloc_start,
+            size,
+            usable: true,
+        }]
+    };
 
     #[cfg(target_arch = "aarch64")]
     let default_map = [MemoryRegion {
@@ -274,6 +364,103 @@ pub fn init_default() {
 
     // Initialize heap allocator after frame allocator is ready
     init_heap().expect("Heap initialization failed");
+}
+
+/// Walk the boot page tables (CR3) and mark all intermediate table frames
+/// as reserved in the frame allocator. This prevents the allocator from
+/// handing out frames that the bootloader used for page tables, which would
+/// corrupt kernel address space mappings when those frames are overwritten.
+///
+/// Reserves page table frames for both:
+/// - Kernel-space L4 entries (256..512): kernel code, heap, stacks, MMIO
+/// - Physical memory mapping L4 entry (lower half): used by phys_to_virt_addr()
+///
+/// Must be called AFTER init_default() (frame allocator is ready).
+#[cfg(target_arch = "x86_64")]
+pub fn reserve_boot_page_table_frames() {
+    let cr3: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack));
+    }
+    let l4_phys = cr3 & !0xFFF; // Mask flags
+
+    let phys_offset = PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Acquire);
+    let mut reserved_count = 0u32;
+
+    // Reserve the L4 table frame itself
+    let l4_frame = FrameNumber::new(l4_phys / FRAME_SIZE as u64);
+    let _ = FRAME_ALLOCATOR.lock().mark_frame_used(l4_frame);
+    reserved_count += 1;
+
+    let l4_virt = (l4_phys + phys_offset) as *const u64;
+
+    // Helper: walk one L4 entry's subtree (L3 → L2 → L1) and reserve all
+    // intermediate page table frames.
+    let mut reserve_l4_subtree = |l4_idx: usize| {
+        let l4_entry = unsafe { core::ptr::read_volatile(l4_virt.add(l4_idx)) };
+        if l4_entry & 1 == 0 {
+            return; // Not present
+        }
+        let l3_phys = l4_entry & 0x000F_FFFF_FFFF_F000;
+        let l3_frame = FrameNumber::new(l3_phys / FRAME_SIZE as u64);
+        let _ = FRAME_ALLOCATOR.lock().mark_frame_used(l3_frame);
+        reserved_count += 1;
+
+        // Walk L3 entries
+        let l3_virt = (l3_phys + phys_offset) as *const u64;
+        for l3_idx in 0..512 {
+            let l3_entry = unsafe { core::ptr::read_volatile(l3_virt.add(l3_idx)) };
+            if l3_entry & 1 == 0 {
+                continue;
+            }
+            if l3_entry & (1 << 7) != 0 {
+                continue; // 1GB huge page, no L2 table
+            }
+            let l2_phys = l3_entry & 0x000F_FFFF_FFFF_F000;
+            let l2_frame = FrameNumber::new(l2_phys / FRAME_SIZE as u64);
+            let _ = FRAME_ALLOCATOR.lock().mark_frame_used(l2_frame);
+            reserved_count += 1;
+
+            // Walk L2 entries
+            let l2_virt = (l2_phys + phys_offset) as *const u64;
+            for l2_idx in 0..512 {
+                let l2_entry = unsafe { core::ptr::read_volatile(l2_virt.add(l2_idx)) };
+                if l2_entry & 1 == 0 {
+                    continue;
+                }
+                if l2_entry & (1 << 7) != 0 {
+                    continue; // 2MB huge page, no L1 table
+                }
+                let l1_phys = l2_entry & 0x000F_FFFF_FFFF_F000;
+                let l1_frame = FrameNumber::new(l1_phys / FRAME_SIZE as u64);
+                let _ = FRAME_ALLOCATOR.lock().mark_frame_used(l1_frame);
+                reserved_count += 1;
+            }
+        }
+    };
+
+    // Reserve kernel-half page table frames (L4 entries 256..512)
+    for l4_idx in 256..512 {
+        reserve_l4_subtree(l4_idx);
+    }
+
+    // Reserve physical memory mapping page table frames.
+    // The bootloader maps all physical memory at PHYS_MEM_OFFSET, which
+    // occupies one or more L4 entries in the lower half. Without reserving
+    // these, the frame allocator can hand out page table frames used by
+    // the physical memory mapping, corrupting it when those frames are
+    // overwritten (e.g., during fork's clone_from deep copy).
+    if phys_offset != 0 {
+        let phys_l4_idx = ((phys_offset >> 39) & 0x1FF) as usize;
+        if phys_l4_idx < 256 {
+            reserve_l4_subtree(phys_l4_idx);
+        }
+    }
+
+    kprintln!(
+        "[MM] Reserved {} boot page table frames from frame allocator",
+        reserved_count
+    );
 }
 
 /// Translate virtual address to physical address
