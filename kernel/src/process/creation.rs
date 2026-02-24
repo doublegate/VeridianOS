@@ -95,12 +95,6 @@ pub fn create_process_with_options(
 
     let tid = main_thread.tid;
 
-    // === DEBUG: Bisect DF location ===
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[CRE] A-tid\n");
-    }
-
     // Map the user stack pages into the process's VAS page tables.
     // ThreadBuilder::build() allocates physical frames for the user stack
     // but does not map them. We call vas.map_page() for each page, which
@@ -110,28 +104,13 @@ pub fn create_process_with_options(
         let user_size = main_thread.user_stack.size;
         let num_pages = user_size / 4096;
 
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            crate::arch::x86_64::idt::raw_serial_str(b"[CRE] A1-pre-lock\n");
-        }
-
         let mut memory_space = process.memory_space.lock();
 
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            crate::arch::x86_64::idt::raw_serial_str(b"[CRE] A2-locked\n");
-        }
         let stack_flags = crate::mm::PageFlags::PRESENT
             | crate::mm::PageFlags::USER
             | crate::mm::PageFlags::WRITABLE
             | crate::mm::PageFlags::NO_EXECUTE;
         for i in 0..num_pages {
-            #[cfg(target_arch = "x86_64")]
-            if i == 0 {
-                unsafe {
-                    crate::arch::x86_64::idt::raw_serial_str(b"[CRE] A3-first-map\n");
-                }
-            }
             let vaddr = user_base + i * 4096;
             memory_space.map_page(vaddr, stack_flags)?;
         }
@@ -142,18 +121,8 @@ pub fn create_process_with_options(
         memory_space.set_stack_size(user_size);
     }
 
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[CRE] B-stack-mapped\n");
-    }
-
     // Add thread to process
     process.add_thread(main_thread)?;
-
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[CRE] C-thread-added\n");
-    }
 
     // Setup user stack with arguments and environment
     // Convert String vectors to &str slices for setup_exec_stack
@@ -163,29 +132,14 @@ pub fn create_process_with_options(
     // Get the process before adding to table so we can set up the stack
     let stack_top = setup_exec_stack(&process, &argv_refs, &envp_refs, None)?;
 
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[CRE] D-exec-stack\n");
-    }
-
     // Update the thread context with the adjusted stack pointer
     if let Some(thread) = process.get_thread(tid) {
         let mut ctx = thread.context.lock();
         ctx.set_stack_pointer(stack_top);
     }
 
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[CRE] E-ctx-updated\n");
-    }
-
     // Add process to process table
     table::add_process(process)?;
-
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[CRE] F-in-table\n");
-    }
 
     // Mark process as ready
     if let Some(process) = table::get_process(pid) {
@@ -195,11 +149,6 @@ pub fn create_process_with_options(
         if let Some(thread) = process.get_thread(tid) {
             create_scheduler_task(process, thread)?;
         }
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[CRE] G-scheduled\n");
     }
 
     // Memory hardening: stack canary + guard page for new process.
@@ -220,18 +169,8 @@ pub fn create_process_with_options(
         );
     }
 
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[CRE] H-hardened\n");
-    }
-
     // Audit log: process creation
     crate::security::audit::log_process_create(pid.0, 0, 0);
-
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[CRE] I-done\n");
-    }
 
     Ok(pid)
 }
@@ -365,20 +304,6 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
     // Step 1: Load new program from filesystem
     let file_data = fs::read_file(&resolved_path)
         .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
-
-    // Diagnostic: dump first 32 bytes of file_data + total size
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[EXEC-DATA] sz=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(file_data.len() as u64);
-        crate::arch::x86_64::idt::raw_serial_str(b" first32=");
-        let show = core::cmp::min(32, file_data.len());
-        for byte in file_data.iter().take(show) {
-            crate::arch::x86_64::idt::raw_serial_hex(*byte as u64);
-            crate::arch::x86_64::idt::raw_serial_str(b" ");
-        }
-        crate::arch::x86_64::idt::raw_serial_str(b"\n");
-    }
 
     // Step 1b: Check for shebang (#!) and delegate to interpreter if found
     if let Some((interpreter, opt_arg)) = parse_shebang(&file_data) {
@@ -551,17 +476,6 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
                     process
                         .tls_fs_base
                         .store(tcb_addr as u64, core::sync::atomic::Ordering::Release);
-
-                    // Diagnostic
-                    unsafe {
-                        crate::arch::x86_64::idt::raw_serial_str(b"[TLS] base=0x");
-                        crate::arch::x86_64::idt::raw_serial_hex(tls_base as u64);
-                        crate::arch::x86_64::idt::raw_serial_str(b" tcb=0x");
-                        crate::arch::x86_64::idt::raw_serial_hex(tcb_addr as u64);
-                        crate::arch::x86_64::idt::raw_serial_str(b" memsz=0x");
-                        crate::arch::x86_64::idt::raw_serial_hex(tls_memsz as u64);
-                        crate::arch::x86_64::idt::raw_serial_str(b"\n");
-                    }
                 }
             }
         }
@@ -617,6 +531,7 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
     // Step 5: Close file descriptors marked close-on-exec
     {
         let file_table = process.file_table.lock();
+
         file_table.close_on_exec();
     }
 

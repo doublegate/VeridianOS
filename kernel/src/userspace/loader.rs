@@ -120,40 +120,48 @@ pub fn load_user_program(
         crate::arch::x86_64::idt::raw_serial_str(b"[LOADER] pid created, opening fds\n");
     }
 
-    // Open /dev/console for stdin(0), stdout(1), stderr(2)
+    // Open /dev/console for stdin(0), stdout(1), stderr(2).
+    // Try VFS first; fall back to a direct serial console node if /dev/console
+    // is not yet mounted (ensures fds 0/1/2 are always occupied so that
+    // pipe()/open() don't claim those slots).
     if let Some(process) = crate::process::get_process(pid) {
-        let vfs = get_vfs().read();
-        if let Ok(console_node) = vfs.resolve_path("/dev/console") {
-            use alloc::sync::Arc;
+        use alloc::sync::Arc;
 
-            use crate::fs::file::{File, OpenFlags};
+        use crate::fs::file::{File, OpenFlags};
 
-            let ft = process.file_table.lock();
+        let console_node: Arc<dyn crate::fs::VfsNode> = {
+            let vfs = get_vfs().read();
+            match vfs.resolve_path("/dev/console") {
+                Ok(node) => node,
+                Err(_) => Arc::new(SerialConsoleNode),
+            }
+        };
 
-            // fd 0 = stdin (read-only)
-            let stdin_file = Arc::new(File::new_with_path(
-                console_node.clone(),
-                OpenFlags::read_only(),
-                String::from("/dev/console"),
-            ));
-            let _ = ft.open(stdin_file);
+        let ft = process.file_table.lock();
 
-            // fd 1 = stdout (write-only)
-            let stdout_file = Arc::new(File::new_with_path(
-                console_node.clone(),
-                OpenFlags::write_only(),
-                String::from("/dev/console"),
-            ));
-            let _ = ft.open(stdout_file);
+        // fd 0 = stdin (read-only)
+        let stdin_file = Arc::new(File::new_with_path(
+            console_node.clone(),
+            OpenFlags::read_only(),
+            String::from("/dev/console"),
+        ));
+        let _ = ft.open(stdin_file);
 
-            // fd 2 = stderr (write-only)
-            let stderr_file = Arc::new(File::new_with_path(
-                console_node,
-                OpenFlags::write_only(),
-                String::from("/dev/console"),
-            ));
-            let _ = ft.open(stderr_file);
-        }
+        // fd 1 = stdout (write-only)
+        let stdout_file = Arc::new(File::new_with_path(
+            console_node.clone(),
+            OpenFlags::write_only(),
+            String::from("/dev/console"),
+        ));
+        let _ = ft.open(stdout_file);
+
+        // fd 2 = stderr (write-only)
+        let stderr_file = Arc::new(File::new_with_path(
+            console_node,
+            OpenFlags::write_only(),
+            String::from("/dev/console"),
+        ));
+        let _ = ft.open(stderr_file);
     }
 
     // Load the ELF segments into the process's address space.
@@ -495,4 +503,110 @@ fn create_minimal_shell() -> Result<ProcessId, KernelError> {
     };
 
     lifecycle::create_process_with_options(options)
+}
+
+/// Lightweight serial console VFS node used as a fallback when /dev/console
+/// is not available. Provides serial UART I/O for stdin/stdout/stderr so
+/// that fds 0/1/2 are always occupied in the process file table.
+#[cfg(feature = "alloc")]
+struct SerialConsoleNode;
+
+#[cfg(feature = "alloc")]
+impl crate::fs::VfsNode for SerialConsoleNode {
+    fn node_type(&self) -> crate::fs::NodeType {
+        crate::fs::NodeType::CharDevice
+    }
+
+    fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
+        // Blocking read from serial (same logic as sys_read stdin fallback)
+        let mut count = 0;
+        for slot in buffer.iter_mut() {
+            loop {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    let status: u8;
+                    unsafe {
+                        core::arch::asm!("in al, dx", out("al") status, in("dx") 0x3FDu16);
+                    }
+                    if (status & 1) != 0 {
+                        let byte: u8;
+                        unsafe {
+                            core::arch::asm!("in al, dx", out("al") byte, in("dx") 0x3F8u16);
+                        }
+                        *slot = byte;
+                        count += 1;
+                        break;
+                    }
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    // Non-x86: return bytes read so far (EOF)
+                    return Ok(count);
+                }
+                core::hint::spin_loop();
+            }
+        }
+        Ok(count)
+    }
+
+    fn write(&self, _offset: usize, data: &[u8]) -> Result<usize, KernelError> {
+        for &byte in data {
+            crate::print!("{}", byte as char);
+        }
+        Ok(data.len())
+    }
+
+    fn metadata(&self) -> Result<crate::fs::Metadata, KernelError> {
+        Ok(crate::fs::Metadata {
+            node_type: crate::fs::NodeType::CharDevice,
+            size: 0,
+            permissions: crate::fs::Permissions::from_mode(0o666),
+            uid: 0,
+            gid: 0,
+            created: 0,
+            modified: 0,
+            accessed: 0,
+            inode: 0,
+        })
+    }
+
+    fn readdir(&self) -> Result<Vec<crate::fs::DirEntry>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn lookup(&self, _name: &str) -> Result<alloc::sync::Arc<dyn crate::fs::VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn create(
+        &self,
+        _name: &str,
+        _permissions: crate::fs::Permissions,
+    ) -> Result<alloc::sync::Arc<dyn crate::fs::VfsNode>, KernelError> {
+        Err(KernelError::OperationNotSupported {
+            operation: "create on serial console",
+        })
+    }
+
+    fn mkdir(
+        &self,
+        _name: &str,
+        _permissions: crate::fs::Permissions,
+    ) -> Result<alloc::sync::Arc<dyn crate::fs::VfsNode>, KernelError> {
+        Err(KernelError::OperationNotSupported {
+            operation: "mkdir on serial console",
+        })
+    }
+
+    fn unlink(&self, _name: &str) -> Result<(), KernelError> {
+        Err(KernelError::OperationNotSupported {
+            operation: "unlink on serial console",
+        })
+    }
+
+    fn truncate(&self, _size: usize) -> Result<(), KernelError> {
+        Err(KernelError::OperationNotSupported {
+            operation: "truncate on serial console",
+        })
+    }
 }

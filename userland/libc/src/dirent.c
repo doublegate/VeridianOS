@@ -82,7 +82,8 @@ struct dirent *readdir(DIR *dirp)
      * into the user-supplied buffer.  Returns 0 on success with data,
      * -ENOENT at end-of-directory, or a negative errno on error.
      */
-    long ret = veridian_syscall2(SYS_DIR_READDIR, dirp->fd, &dirp->entry);
+    long ret = veridian_syscall3(SYS_DIR_READDIR, dirp->fd, &dirp->entry,
+                                sizeof(struct dirent));
     if (ret < 0) {
         if (ret == -ENOENT || ret == 0) {
             /* End of directory */

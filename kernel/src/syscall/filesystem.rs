@@ -213,16 +213,6 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
     // Convert flags
     let open_flags = OpenFlags::from_bits(flags as u32).ok_or(SyscallError::InvalidArgument)?;
 
-    // Diagnostic: print open attempts for debugging file access issues
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[OPEN] ");
-        crate::arch::x86_64::idt::raw_serial_str(&path_bytes[..path_bytes.len().min(80)]);
-        crate::arch::x86_64::idt::raw_serial_str(b" flags=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(flags as u64);
-        crate::arch::x86_64::idt::raw_serial_str(b"\n");
-    }
-
     // Open the file through VFS
     match vfs()?.read().open(path_str, open_flags) {
         Ok(node) => {
@@ -235,72 +225,25 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
 
             // Add to process file table
             let file_table = process.file_table.lock();
-            let arc_file = alloc::sync::Arc::new(file);
-            match file_table.open(arc_file.clone()) {
-                Ok(fd_num) => {
-                    // Trace fd number and file size for debugging
-                    #[cfg(target_arch = "x86_64")]
-                    if fd_num >= 3 {
-                        let sz = arc_file.node.metadata().map(|m| m.size).unwrap_or(0);
-                        unsafe {
-                            crate::arch::x86_64::idt::raw_serial_str(b"  -> fd=");
-                            crate::arch::x86_64::idt::raw_serial_hex(fd_num as u64);
-                            crate::arch::x86_64::idt::raw_serial_str(b" sz=0x");
-                            crate::arch::x86_64::idt::raw_serial_hex(sz as u64);
-                            crate::arch::x86_64::idt::raw_serial_str(b"\n");
-                        }
-                    }
-                    Ok(fd_num)
-                }
+            match file_table.open(alloc::sync::Arc::new(file)) {
+                Ok(fd_num) => Ok(fd_num),
                 Err(_) => Err(SyscallError::OutOfMemory),
             }
         }
-        Err(_e) => {
-            #[cfg(target_arch = "x86_64")]
-            unsafe {
-                crate::arch::x86_64::idt::raw_serial_str(b"[OPEN] FAIL: ");
-                crate::arch::x86_64::idt::raw_serial_str(&path_bytes[..path_bytes.len().min(60)]);
-                crate::arch::x86_64::idt::raw_serial_str(b"\n");
-            }
+        Err(_) => {
             // If O_CREAT is set, create the file in its parent directory
             if open_flags.create {
-                #[cfg(target_arch = "x86_64")]
-                unsafe {
-                    crate::arch::x86_64::idt::raw_serial_str(b"[CREAT] flags=create\n");
-                }
                 let perms = Permissions::from_mode(mode as u32);
                 let (parent_path, name) = split_path(path_str)?;
-                #[cfg(target_arch = "x86_64")]
-                unsafe {
-                    crate::arch::x86_64::idt::raw_serial_str(b"[CREAT] parent=");
-                    crate::arch::x86_64::idt::raw_serial_str(parent_path.as_bytes());
-                    crate::arch::x86_64::idt::raw_serial_str(b" name=");
-                    crate::arch::x86_64::idt::raw_serial_str(name.as_bytes());
-                    crate::arch::x86_64::idt::raw_serial_str(b"\n");
-                }
                 let vfs_guard = vfs()?.read();
                 let parent = match vfs_guard.resolve_path(&parent_path) {
                     Ok(p) => p,
-                    Err(_e) => {
-                        #[cfg(target_arch = "x86_64")]
-                        unsafe {
-                            crate::arch::x86_64::idt::raw_serial_str(
-                                b"[CREAT] resolve_path FAIL\n",
-                            );
-                        }
+                    Err(_) => {
                         return Err(SyscallError::ResourceNotFound);
                     }
                 };
-                #[cfg(target_arch = "x86_64")]
-                unsafe {
-                    crate::arch::x86_64::idt::raw_serial_str(b"[CREAT] parent resolved OK\n");
-                }
                 match parent.create(&name, perms) {
                     Ok(node) => {
-                        #[cfg(target_arch = "x86_64")]
-                        unsafe {
-                            crate::arch::x86_64::idt::raw_serial_str(b"[CREAT] file created OK\n");
-                        }
                         let file = crate::fs::file::File::new_with_path(
                             node,
                             open_flags,
@@ -312,13 +255,7 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
                             Err(_) => Err(SyscallError::OutOfMemory),
                         }
                     }
-                    Err(_e) => {
-                        #[cfg(target_arch = "x86_64")]
-                        unsafe {
-                            crate::arch::x86_64::idt::raw_serial_str(b"[CREAT] create() FAIL\n");
-                        }
-                        Err(SyscallError::ResourceNotFound)
-                    }
+                    Err(_) => Err(SyscallError::ResourceNotFound),
                 }
             } else {
                 Err(SyscallError::ResourceNotFound)
@@ -332,16 +269,6 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
 /// # Arguments
 /// - fd: File descriptor to close
 pub fn sys_close(fd: usize) -> SyscallResult {
-    // DEBUG: trace close for high fds
-    #[cfg(target_arch = "x86_64")]
-    if fd >= 3 {
-        unsafe {
-            crate::arch::x86_64::idt::raw_serial_str(b"[CL] fd=");
-            crate::arch::x86_64::idt::raw_serial_hex(fd as u64);
-            crate::arch::x86_64::idt::raw_serial_str(b"\n");
-        }
-    }
-
     // Get current process
     let process = process::current_process().ok_or(SyscallError::InvalidState)?;
 
@@ -447,31 +374,8 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
     // bytes. from_raw_parts_mut creates a mutable slice for the read.
     let buffer_slice = unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, count) };
 
-    // DEBUG: dump position + first 4 bytes for ld archive reads (fd >= 3)
-    let pre_pos = file_desc.tell();
-
     match file_desc.read(buffer_slice) {
-        Ok(bytes_read) => {
-            if fd >= 3 && bytes_read >= 4 {
-                unsafe {
-                    crate::arch::x86_64::idt::raw_serial_str(b"[RD] ");
-                    crate::arch::x86_64::idt::raw_serial_hex(fd as u64);
-                    crate::arch::x86_64::idt::raw_serial_str(b" @");
-                    crate::arch::x86_64::idt::raw_serial_hex(pre_pos as u64);
-                    crate::arch::x86_64::idt::raw_serial_str(b" n=");
-                    crate::arch::x86_64::idt::raw_serial_hex(bytes_read as u64);
-                    crate::arch::x86_64::idt::raw_serial_str(b" [");
-                    for (i, &byte) in buffer_slice.iter().enumerate().take(4.min(bytes_read)) {
-                        crate::arch::x86_64::idt::raw_serial_hex(byte as u64);
-                        if i < 3 {
-                            crate::arch::x86_64::idt::raw_serial_str(b" ");
-                        }
-                    }
-                    crate::arch::x86_64::idt::raw_serial_str(b"]\n");
-                }
-            }
-            Ok(bytes_read)
-        }
+        Ok(bytes_read) => Ok(bytes_read),
         Err(_) => Err(SyscallError::InvalidState),
     }
 }
@@ -575,40 +479,8 @@ pub fn sys_seek(fd: usize, offset: isize, whence: usize) -> SyscallResult {
 
     // Perform seek
     match file_desc.seek(seek_from) {
-        Ok(new_pos) => {
-            // DEBUG: trace seeks on high fds (ld archive processing)
-            #[cfg(target_arch = "x86_64")]
-            if fd >= 3 {
-                unsafe {
-                    crate::arch::x86_64::idt::raw_serial_str(b"[SK] ");
-                    crate::arch::x86_64::idt::raw_serial_hex(fd as u64);
-                    crate::arch::x86_64::idt::raw_serial_str(b" w=");
-                    crate::arch::x86_64::idt::raw_serial_hex(whence as u64);
-                    crate::arch::x86_64::idt::raw_serial_str(b" off=");
-                    crate::arch::x86_64::idt::raw_serial_hex(offset as u64);
-                    crate::arch::x86_64::idt::raw_serial_str(b" ->pos=");
-                    crate::arch::x86_64::idt::raw_serial_hex(new_pos as u64);
-                    crate::arch::x86_64::idt::raw_serial_str(b"\n");
-                }
-            }
-            Ok(new_pos as usize)
-        }
-        Err(_) => {
-            // Trace failed seeks too (for ld debugging)
-            #[cfg(target_arch = "x86_64")]
-            if fd >= 3 {
-                unsafe {
-                    crate::arch::x86_64::idt::raw_serial_str(b"[SK-ERR] ");
-                    crate::arch::x86_64::idt::raw_serial_hex(fd as u64);
-                    crate::arch::x86_64::idt::raw_serial_str(b" w=");
-                    crate::arch::x86_64::idt::raw_serial_hex(whence as u64);
-                    crate::arch::x86_64::idt::raw_serial_str(b" off=");
-                    crate::arch::x86_64::idt::raw_serial_hex(offset as u64);
-                    crate::arch::x86_64::idt::raw_serial_str(b"\n");
-                }
-            }
-            Err(SyscallError::InvalidState)
-        }
+        Ok(new_pos) => Ok(new_pos as usize),
+        Err(_) => Err(SyscallError::InvalidState),
     }
 }
 
@@ -634,20 +506,6 @@ pub fn sys_stat(fd: usize, stat_buf: usize) -> SyscallResult {
         .metadata()
         .map_err(|_| SyscallError::InvalidState)?;
     let stat = fill_stat(&metadata);
-
-    // DEBUG: trace fstat for high fds (ld archive processing)
-    #[cfg(target_arch = "x86_64")]
-    if fd >= 3 {
-        unsafe {
-            crate::arch::x86_64::idt::raw_serial_str(b"[STAT] fd=");
-            crate::arch::x86_64::idt::raw_serial_hex(fd as u64);
-            crate::arch::x86_64::idt::raw_serial_str(b" sz=");
-            crate::arch::x86_64::idt::raw_serial_hex(stat.st_size as u64);
-            crate::arch::x86_64::idt::raw_serial_str(b" mode=");
-            crate::arch::x86_64::idt::raw_serial_hex(stat.st_mode as u64);
-            crate::arch::x86_64::idt::raw_serial_str(b"\n");
-        }
-    }
 
     // SAFETY: stat_buf was validated as non-null, in user-space, and aligned.
     unsafe {
@@ -1313,37 +1171,17 @@ pub fn sys_stat_path(path_ptr: usize, stat_buf: usize) -> SyscallResult {
     validate_user_ptr_typed::<FileStat>(stat_buf)?;
     let path = read_user_path(path_ptr)?;
 
-    // Diagnostic: log stat_path calls to trace cc1 include directory checks
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[STATP] ");
-        crate::arch::x86_64::idt::raw_serial_str(path.as_bytes());
-    }
-
     let vfs_lock = vfs()?;
     let vfs_guard = vfs_lock.read();
     let node = match vfs_guard.resolve_path(&path) {
         Ok(n) => n,
-        Err(_e) => {
-            #[cfg(target_arch = "x86_64")]
-            unsafe {
-                crate::arch::x86_64::idt::raw_serial_str(b" FAIL\n");
-            }
+        Err(_) => {
             return Err(SyscallError::ResourceNotFound);
         }
     };
 
     let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
     let stat = fill_stat(&metadata);
-
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b" mode=");
-        crate::arch::x86_64::idt::raw_serial_hex(stat.st_mode as u64);
-        crate::arch::x86_64::idt::raw_serial_str(b" sz=");
-        crate::arch::x86_64::idt::raw_serial_hex(stat.st_size as u64);
-        crate::arch::x86_64::idt::raw_serial_str(b"\n");
-    }
 
     // SAFETY: stat_buf was validated as non-null, in user-space, and aligned.
     unsafe {
@@ -1445,20 +1283,6 @@ pub fn sys_access(path_ptr: usize, mode: usize) -> SyscallResult {
 
     // Check if the file exists (F_OK = 0)
     let result = vfs_guard.resolve_path(&path);
-
-    // Diagnostic: log access() calls to trace GCC's tool discovery
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[ACCESS] ");
-        for &b in path.as_bytes() {
-            crate::arch::x86_64::idt::raw_serial_str(&[b]);
-        }
-        if result.is_ok() {
-            crate::arch::x86_64::idt::raw_serial_str(b" OK\n");
-        } else {
-            crate::arch::x86_64::idt::raw_serial_str(b" ENOENT\n");
-        }
-    }
 
     let node = result.map_err(|_| SyscallError::ResourceNotFound)?;
 
@@ -1598,13 +1422,13 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
 /// and writes [read_fd, write_fd] to the user buffer.
 ///
 /// # Arguments
-/// - `pipe_fds_ptr`: Pointer to `[usize; 2]` to receive [read_fd, write_fd].
+/// - `pipe_fds_ptr`: Pointer to `[i32; 2]` to receive [read_fd, write_fd].
 /// - `flags`: O_CLOEXEC (0x2000) | O_NONBLOCK (0x1000).
 ///
 /// # Returns
 /// 0 on success.
 pub fn sys_pipe2(pipe_fds_ptr: usize, flags: usize) -> SyscallResult {
-    validate_user_buffer(pipe_fds_ptr, 2 * core::mem::size_of::<usize>())?;
+    validate_user_buffer(pipe_fds_ptr, 2 * core::mem::size_of::<i32>())?;
 
     let cloexec = flags & 0x2000 != 0;
 
@@ -1637,13 +1461,13 @@ pub fn sys_pipe2(pipe_fds_ptr: usize, flags: usize) -> SyscallResult {
             SyscallError::OutOfMemory
         })?;
 
-    // Write [read_fd, write_fd] to user buffer
+    // Write [read_fd, write_fd] to user buffer as i32 (C int).
     // SAFETY: pipe_fds_ptr was validated above as non-null and in user
-    // space with sufficient size for two usize values.
+    // space with sufficient size for two i32 values.
     unsafe {
-        let fds = pipe_fds_ptr as *mut usize;
-        *fds = read_fd;
-        *fds.add(1) = write_fd;
+        let fds = pipe_fds_ptr as *mut i32;
+        *fds = read_fd as i32;
+        *fds.add(1) = write_fd as i32;
     }
 
     Ok(0)

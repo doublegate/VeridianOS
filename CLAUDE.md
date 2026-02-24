@@ -2,6 +2,22 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Rule #1: NEVER chain pkill with other commands
+
+**CRITICAL**: `pkill` MUST always be run as its own separate, standalone Bash command. NEVER combine `pkill` with any subsequent commands using `&&`, `;`, `||`, or any other chaining operator. When `pkill` finds no matching process it returns exit code 1, which prevents chained commands from executing. Always run `pkill` first, wait for it to complete, then run the next command in a separate Bash invocation.
+
+```bash
+# CORRECT: Two separate Bash calls
+pkill -9 -f qemu-system    # Call 1 (may return exit code 1, that's OK)
+sleep 2                     # Call 1 can include sleep
+
+qemu-system-x86_64 ...     # Call 2 (separate invocation)
+
+# WRONG: Chained together (WILL FAIL when pkill returns non-zero)
+pkill -9 -f qemu-system; sleep 2; qemu-system-x86_64 ...
+pkill -9 -f qemu-system && qemu-system-x86_64 ...
+```
+
 ## VeridianOS Overview
 
 VeridianOS is a next-generation microkernel operating system written entirely in Rust, emphasizing security, modularity, and formal verification. It uses capability-based security and runs all drivers in user space for maximum isolation.

@@ -467,34 +467,6 @@ pub extern "C" fn syscall_handler(
         Err(_) => Err(SyscallError::InvalidSyscall),
     };
 
-    // Diagnostic: trace all syscalls for user programs (PID >= 5)
-    #[cfg(target_arch = "x86_64")]
-    if _caller_pid >= 5 {
-        unsafe {
-            crate::arch::x86_64::idt::raw_serial_str(b"SC[");
-            crate::arch::x86_64::idt::raw_serial_hex(_caller_pid);
-            crate::arch::x86_64::idt::raw_serial_str(b"] ");
-            crate::arch::x86_64::idt::raw_serial_hex(syscall_num as u64);
-            crate::arch::x86_64::idt::raw_serial_str(b"=");
-            let rv = match &result {
-                Ok(v) => *v as u64,
-                Err(e) => (*e as i32) as u64,
-            };
-            crate::arch::x86_64::idt::raw_serial_hex(rv);
-            // For mmap calls, also print the packed fd_offset arg
-            if syscall_num == 20 {
-                crate::arch::x86_64::idt::raw_serial_str(b" mmap(len=");
-                crate::arch::x86_64::idt::raw_serial_hex(arg2 as u64);
-                crate::arch::x86_64::idt::raw_serial_str(b",flags=");
-                crate::arch::x86_64::idt::raw_serial_hex(arg4 as u64);
-                crate::arch::x86_64::idt::raw_serial_str(b",fd_off=");
-                crate::arch::x86_64::idt::raw_serial_hex(arg5 as u64);
-                crate::arch::x86_64::idt::raw_serial_str(b")");
-            }
-            crate::arch::x86_64::idt::raw_serial_str(b"\n");
-        }
-    }
-
     // Audit log: syscall with result.
     // Safe to call even from syscall context - uses try_lock() with graceful
     // fallback if locks are held, preventing deadlocks during syscall return.
@@ -504,30 +476,9 @@ pub extern "C" fn syscall_handler(
     }
 
     // TEMPORARY: Audit logging disabled during syscall due to VFS access with CR3
-    // switch. TODO(user-space): Re-enable after resolving VFS heap access from
+    // switch. TODO(phase5): Re-enable after resolving VFS heap access from
     // switched CR3 context. crate::security::audit::log_syscall(caller_pid, 0,
     // syscall_num, success);
-
-    // Diagnostic: for fork syscall, print the return value and saved user RIP
-    // before the sysretq restores RCX. This confirms the parent gets the right
-    // return value and the saved frame's RCX (user RIP) hasn't been corrupted.
-    #[cfg(target_arch = "x86_64")]
-    if syscall_num == 12 {
-        // SYS_PROCESS_FORK
-        unsafe {
-            crate::arch::x86_64::idt::raw_serial_str(b"[FORK_RET] val=0x");
-            let ret_val = match &result {
-                Ok(v) => *v as u64,
-                Err(e) => (*e as i32) as u64,
-            };
-            crate::arch::x86_64::idt::raw_serial_hex(ret_val);
-            if let Some(frame) = crate::arch::x86_64::syscall::get_syscall_frame() {
-                crate::arch::x86_64::idt::raw_serial_str(b" rcx=0x");
-                crate::arch::x86_64::idt::raw_serial_hex(frame.rcx);
-            }
-            crate::arch::x86_64::idt::raw_serial_str(b"\n");
-        }
-    }
 
     match result {
         Ok(value) => value as isize,

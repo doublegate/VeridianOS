@@ -767,6 +767,58 @@ fn test_user_binary_load() {
 
     // Test 3: /bin/exec_test -- SKIPPED: multi-LOAD ELF GP fault (TODO(phase5))
     // Test 4: /bin/sh -- SKIPPED: multi-LOAD ELF GP fault (TODO(phase5))
+
+    // Coreutils validation suite (progressive complexity).
+    // Each program exercises different syscall combinations.
+    // Expected output markers: ECHO_PASS (from echo's stdout),
+    // CAT_PASS (from cat_test.txt), WC output, LS output,
+    // sorted output, PIPELINE_PASS (from pipeline_test).
+    let env = &["PATH=/bin:/usr/bin"];
+
+    // Test 5: /bin/echo -- argv + write (simplest coreutil)
+    boot_run_program("/bin/echo", &["echo", "ECHO_PASS"], env);
+
+    // Test 6: /bin/cat -- file open/read/write/close
+    boot_run_program("/bin/cat", &["cat", "/usr/src/cat_test.txt"], env);
+
+    // Test 7: /bin/wc -- ctype + getopt + printf formatting
+    boot_run_program("/bin/wc", &["wc", "/usr/src/wc_test.txt"], env);
+
+    // Test 8: /bin/ls -- opendir/readdir/stat/qsort
+    boot_run_program("/bin/ls", &["ls", "/usr/src/"], env);
+
+    // Test 9: /bin/sort -- malloc/realloc + qsort + function pointers
+    boot_run_program("/bin/sort", &["sort", "/usr/src/sort_test.txt"], env);
+
+    // Test 10: /bin/pipeline_test -- capstone: fork/exec/pipe/dup2/waitpid
+    // Depends on /bin/cat and /bin/sort being in rootfs.
+    boot_run_program("/bin/pipeline_test", &["pipeline_test"], env);
+}
+
+/// Helper: load and run a user-space program during boot, logging pass/fail.
+#[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+fn boot_run_program(path: &str, argv: &[&str], envp: &[&str]) {
+    use crate::fs::get_vfs;
+
+    let vfs = get_vfs().read();
+    match vfs.resolve_path(path) {
+        Ok(_node) => {
+            drop(vfs);
+            match crate::userspace::load_user_program(path, argv, envp) {
+                Ok(pid) => {
+                    kprintln!("[BOOT] Running {}", path);
+                    run_user_process_scheduled(pid);
+                }
+                Err(e) => {
+                    kprintln!("[BOOT] {} load FAILED: {:?}", path, e);
+                }
+            }
+        }
+        Err(_) => {
+            drop(vfs);
+            kprintln!("[BOOT] {} not found in VFS, skipping", path);
+        }
+    }
 }
 
 /// Switch to a user process's address space and enter Ring 3.
