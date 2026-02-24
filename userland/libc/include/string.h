@@ -123,6 +123,33 @@ size_t strxfrm(char *dest, const char *src, size_t n);
 /** Split a string into tokens (not thread-safe). */
 char *strtok(char *str, const char *delim);
 
+/** Thread-safe strtok. */
+char *strtok_r(char *str, const char *delim, char **saveptr);
+
+/** Extract token from string (BSD). */
+char *strsep(char **stringp, const char *delim);
+
+/** Copy string, returning pointer to end of dest. */
+char *stpcpy(char *dest, const char *src);
+
+/** Copy at most n chars, returning pointer to end of dest. */
+char *stpncpy(char *dest, const char *src, size_t n);
+
+/** Return string describing signal number. */
+char *strsignal(int sig);
+
+/** Find first occurrence of c in s, or end-of-string NUL. */
+char *strchrnul(const char *s, int c);
+
+/** Case-insensitive strstr. */
+char *strcasestr(const char *haystack, const char *needle);
+
+/** Copy src to sized buffer dest of size dstsize (BSD). */
+size_t strlcpy(char *dest, const char *src, size_t dstsize);
+
+/** Append src to sized buffer dest of size dstsize (BSD). */
+size_t strlcat(char *dest, const char *src, size_t dstsize);
+
 #ifdef __cplusplus
 }
 #endif

@@ -26,6 +26,43 @@ struct hostent {
 #define h_addr h_addr_list[0]
 
 struct hostent *gethostbyname(const char *name);
+struct hostent *gethostbyaddr(const void *addr, socklen_t len, int type);
+
+/* h_errno error codes */
+extern int h_errno;
+
+#define HOST_NOT_FOUND  1
+#define TRY_AGAIN       2
+#define NO_RECOVERY     3
+#define NO_DATA         4
+#define NO_ADDRESS      NO_DATA
+
+/** Return string describing h_errno value. */
+const char *hstrerror(int err);
+
+/* Service entry */
+struct servent {
+    char  *s_name;       /* Official service name */
+    char **s_aliases;    /* Alias list */
+    int    s_port;       /* Port number (network byte order) */
+    char  *s_proto;      /* Protocol to use */
+};
+
+struct servent *getservbyname(const char *name, const char *proto);
+struct servent *getservbyport(int port, const char *proto);
+void setservent(int stayopen);
+void endservent(void);
+struct servent *getservent(void);
+
+/* Protocol entry */
+struct protoent {
+    char  *p_name;       /* Official protocol name */
+    char **p_aliases;    /* Alias list */
+    int    p_proto;      /* Protocol number */
+};
+
+struct protoent *getprotobyname(const char *name);
+struct protoent *getprotobynumber(int proto);
 
 /* getaddrinfo flags */
 #define AI_PASSIVE      0x01
@@ -40,10 +77,18 @@ struct hostent *gethostbyname(const char *name);
 #define EAI_FAIL        -4
 #define EAI_MEMORY      -10
 #define EAI_FAMILY      -6
+#define EAI_AGAIN       -3
+#define EAI_BADFLAGS    -1
+#define EAI_SOCKTYPE    -7
+#define EAI_SYSTEM      -11
+#define EAI_OVERFLOW    -12
 
 /* Name info flags */
 #define NI_NUMERICHOST  1
 #define NI_NUMERICSERV  2
+#define NI_NOFQDN       4
+#define NI_NAMEREQD     8
+#define NI_DGRAM        16
 #define NI_MAXHOST      1025
 #define NI_MAXSERV      32
 

@@ -11,6 +11,7 @@
 #define _STDLIB_H
 
 #include <stddef.h>
+#include <alloca.h>
 
 #ifdef __cplusplus
 extern "C" {

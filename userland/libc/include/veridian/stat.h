@@ -12,6 +12,7 @@
 #define VERIDIAN_STAT_H
 
 #include <veridian/types.h>
+#include <time.h>  /* struct timespec */
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,13 +33,15 @@ struct stat {
     off_t       st_size;    /* File size in bytes */
     blksize_t   st_blksize; /* Preferred I/O block size */
     blkcnt_t    st_blocks;  /* Number of 512-byte blocks allocated */
-    time_t      st_atime;   /* Last access time */
-    long        st_atimensec; /* Nanoseconds for st_atime */
-    time_t      st_mtime;   /* Last modification time */
-    long        st_mtimensec; /* Nanoseconds for st_mtime */
-    time_t      st_ctime;   /* Last status change time */
-    long        st_ctimensec; /* Nanoseconds for st_ctime */
+    struct timespec st_atim; /* Last access time */
+    struct timespec st_mtim; /* Last modification time */
+    struct timespec st_ctim; /* Last status change time */
 };
+
+/* POSIX compatibility: st_atime is shorthand for st_atim.tv_sec */
+#define st_atime st_atim.tv_sec
+#define st_mtime st_mtim.tv_sec
+#define st_ctime st_ctim.tv_sec
 
 /* ========================================================================= */
 /* File Type Masks                                                           */

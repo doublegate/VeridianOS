@@ -21,7 +21,12 @@ extern "C" {
 #define SOCK_STREAM     1   /* Sequenced, reliable, connection-based */
 #define SOCK_DGRAM      2   /* Connectionless, unreliable datagrams */
 #define SOCK_RAW        3   /* Raw protocol interface */
+#define SOCK_RDM        4   /* Reliably-delivered messages */
 #define SOCK_SEQPACKET  5   /* Sequenced, reliable, connection-based, fixed-length */
+
+/* Socket type modifiers */
+#define SOCK_CLOEXEC    02000000
+#define SOCK_NONBLOCK   00004000
 
 /* Address families */
 #define AF_UNSPEC       0
@@ -40,8 +45,19 @@ extern "C" {
 /* Socket options */
 #define SOL_SOCKET      1
 #define SO_REUSEADDR    2
+#define SO_TYPE         3
 #define SO_ERROR        4
+#define SO_DONTROUTE    5
+#define SO_BROADCAST    6
+#define SO_SNDBUF       7
+#define SO_RCVBUF       8
 #define SO_KEEPALIVE    9
+#define SO_OOBINLINE    10
+#define SO_LINGER       13
+#define SO_RCVTIMEO     20
+#define SO_SNDTIMEO     21
+#define SO_BINDTODEVICE 25
+#define SO_REUSEPORT    15
 
 /* Shutdown modes */
 #define SHUT_RD         0

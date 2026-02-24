@@ -34,6 +34,13 @@ int getopt(int argc, char *const argv[], const char *optstring)
 {
     optarg = NULL;
 
+    /* glibc compatibility: setting optind=0 resets getopt state.
+     * BusyBox relies on this to re-initialize between applet calls. */
+    if (optind == 0) {
+        optind = 1;
+        __optpos = 0;
+    }
+
     if (optind >= argc)
         return -1;
 
@@ -127,6 +134,15 @@ int getopt_long(int argc, char *const argv[], const char *optstring,
                 const struct option *longopts, int *longindex)
 {
     optarg = NULL;
+
+    /* glibc compatibility: setting optind=0 resets getopt state.
+     * BusyBox relies on this to re-initialize between applet calls.
+     * Must be checked here (not only in getopt()) because early-exit
+     * paths below bypass the getopt() delegation at the bottom. */
+    if (optind == 0) {
+        optind = 1;
+        __optpos = 0;
+    }
 
     if (optind >= argc)
         return -1;

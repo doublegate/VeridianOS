@@ -47,6 +47,12 @@ extern "C" {
 /** Signal that stopped the child (meaningful only when WIFSTOPPED). */
 #define WSTOPSIG(s)     (((s) >> 8) & 0xFF)
 
+/** True if the child produced a core dump (meaningful only when WIFSIGNALED). */
+#define WCOREDUMP(s)    ((s) & 0x80)
+
+/** True if the child has continued (Linux extension). */
+#define WIFCONTINUED(s) ((s) == 0xFFFF)
+
 /* ========================================================================= */
 /* waitpid() option flags                                                    */
 /* ========================================================================= */

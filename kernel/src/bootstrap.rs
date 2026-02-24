@@ -793,6 +793,83 @@ fn test_user_binary_load() {
     // Test 10: /bin/pipeline_test -- capstone: fork/exec/pipe/dup2/waitpid
     // Depends on /bin/cat and /bin/sort being in rootfs.
     boot_run_program("/bin/pipeline_test", &["pipeline_test"], env);
+
+    // BusyBox smoke tests (only if /bin/busybox exists in rootfs).
+    // BusyBox applets are installed as symlinks that resolve to copies
+    // of the busybox binary; the TAR loader expands symlinks as file copies.
+    {
+        let vfs = get_vfs().read();
+        let has_busybox = vfs.resolve_path("/bin/busybox").is_ok();
+        drop(vfs);
+        if has_busybox {
+            kprintln!("[BOOT] BusyBox detected -- running applet smoke tests");
+            // BusyBox version banner
+            boot_run_program("/bin/busybox", &["busybox"], env);
+            // Basic applets via symlinks (these are copies of busybox)
+            boot_run_program("/bin/echo", &["echo", "BUSYBOX_ECHO_PASS"], env);
+            boot_run_program("/bin/pwd", &["pwd"], env);
+            boot_run_program("/bin/uname", &["uname", "-a"], env);
+            boot_run_program("/bin/ls", &["ls", "/bin/"], env);
+            boot_run_program("/bin/cat", &["cat", "/usr/src/cat_test.txt"], env);
+            boot_run_program("/usr/bin/wc", &["wc", "/usr/src/wc_test.txt"], env);
+            boot_run_program("/usr/bin/sort", &["sort", "/usr/src/sort_test.txt"], env);
+            boot_run_program("/bin/true", &["true"], env);
+            boot_run_program("/bin/false", &["false"], env);
+
+            // ash shell tests (Sprint B-4): verify shell features
+            kprintln!("[BOOT] ash shell scripted tests");
+            // 1. Basic command execution via -c
+            boot_run_program("/bin/ash", &["ash", "-c", "echo ASH_BASIC_PASS"], env);
+            // 2. Variable expansion
+            boot_run_program(
+                "/bin/ash",
+                &["ash", "-c", "X=veridian; echo ASH_VAR_${X}_PASS"],
+                env,
+            );
+            // 3. Exit status
+            boot_run_program(
+                "/bin/ash",
+                &["ash", "-c", "false; echo ASH_EXIT_$?_PASS"],
+                env,
+            );
+            // 4. Conditional (test -f)
+            boot_run_program(
+                "/bin/ash",
+                &["ash", "-c", "test -f /bin/busybox && echo ASH_COND_PASS"],
+                env,
+            );
+            // 5. Pipe
+            boot_run_program("/bin/ash", &["ash", "-c", "echo ASH_PIPE_PASS | cat"], env);
+            // 6. Redirect (write + read back)
+            boot_run_program(
+                "/bin/ash",
+                &[
+                    "ash",
+                    "-c",
+                    "echo ASH_REDIR_PASS > /tmp/redir.txt; cat /tmp/redir.txt",
+                ],
+                env,
+            );
+            // 7. For loop
+            boot_run_program(
+                "/bin/ash",
+                &["ash", "-c", "for i in A B C; do echo LOOP_$i; done"],
+                env,
+            );
+            // 8. Command substitution
+            boot_run_program(
+                "/bin/ash",
+                &["ash", "-c", "D=$(pwd); echo ASH_SUBST_${D}_PASS"],
+                env,
+            );
+            // 9. Comprehensive test script (if present in rootfs)
+            boot_run_program("/bin/ash", &["ash", "/usr/src/busybox_test.sh"], env);
+
+            // Interactive ash (last -- will sit at prompt until killed)
+            kprintln!("[BOOT] Starting interactive ash shell");
+            boot_run_program("/bin/ash", &["ash"], env);
+        }
+    }
 }
 
 /// Helper: load and run a user-space program during boot, logging pass/fail.

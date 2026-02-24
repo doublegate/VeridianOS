@@ -22,6 +22,7 @@ struct utsname {
     char release[_UTSNAME_LENGTH];    /* OS release */
     char version[_UTSNAME_LENGTH];    /* OS version */
     char machine[_UTSNAME_LENGTH];    /* Hardware identifier */
+    char domainname[_UTSNAME_LENGTH]; /* NIS/YP domain name (Linux extension) */
 };
 
 /**

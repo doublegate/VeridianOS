@@ -384,6 +384,54 @@ impl FileTable {
         self.open_with_flags(file, true)
     }
 
+    /// Duplicate fd to the lowest available fd >= min_fd (for F_DUPFD)
+    pub fn dup_at_least(
+        &self,
+        fd: FileDescriptor,
+        min_fd: FileDescriptor,
+        cloexec: bool,
+    ) -> Result<FileDescriptor, KernelError> {
+        let file = self
+            .get(fd)
+            .ok_or(KernelError::FsError(FsError::BadFileDescriptor))?;
+        file.inc_ref();
+
+        let mut files = self.files.write();
+        let mut next_fd = self.next_fd.write();
+
+        let entry = FileEntry { file, cloexec };
+
+        // Ensure the vector is large enough to scan from min_fd
+        while files.len() <= min_fd {
+            files.push(None);
+        }
+        if *next_fd <= min_fd {
+            *next_fd = min_fd;
+        }
+
+        // Find the lowest empty slot >= min_fd
+        for slot_fd in min_fd..files.len() {
+            if files[slot_fd].is_none() {
+                files[slot_fd] = Some(entry);
+                return Ok(slot_fd);
+            }
+        }
+
+        // No empty slot found in existing range; append new one
+        let new_fd = *next_fd;
+        if new_fd >= 1024 {
+            return Err(KernelError::FsError(FsError::TooManyOpenFiles));
+        }
+
+        // Ensure vector has capacity up to new_fd
+        while files.len() <= new_fd {
+            files.push(None);
+        }
+        files[new_fd] = Some(entry);
+        *next_fd = new_fd + 1;
+        Ok(new_fd)
+    }
+
     /// Replace a file descriptor with another
     pub fn dup2(&self, old_fd: FileDescriptor, new_fd: FileDescriptor) -> Result<(), KernelError> {
         // If old_fd == new_fd, just return success without doing anything

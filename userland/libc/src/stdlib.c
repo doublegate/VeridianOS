@@ -23,12 +23,15 @@
 /* ========================================================================= */
 
 /*
- * Simple free-list allocator.  Each allocation is prefixed with a header
- * that records the block size.  free() puts the block on a singly-linked
- * free list.  malloc() scans the free list (first-fit) before falling
- * back to sbrk().
+ * Free-list allocator with coalescing.
  *
- * This is intentionally simple -- good enough for early userland.
+ * Each allocation is prefixed with a header that records the block size.
+ * free() inserts blocks into an address-sorted singly-linked free list
+ * and coalesces adjacent free blocks to reduce fragmentation.  malloc()
+ * scans the free list (first-fit) before falling back to sbrk().
+ *
+ * This replaces the earlier bump allocator (where free was a no-op)
+ * which caused ash shell and other BusyBox applets to OOM instantly.
  */
 
 /* Alignment: all allocations are aligned to this boundary. */
@@ -55,10 +58,40 @@ static inline size_t align_up(size_t n)
 }
 
 /*
- * DIAGNOSTIC: Bump allocator (never reuses freed memory).
- * This eliminates free-list corruption as a possible crash cause.
- * Once the root cause is found, restore the free-list allocator above.
+ * Insert a freed block into the free list, sorted by address.
+ * Coalesces with adjacent free blocks when possible.
  */
+static void free_insert(block_header_t *blk)
+{
+    block_header_t *prev_blk = NULL;
+    block_header_t *cur = free_list;
+
+    /* Walk to find insertion point (address order). */
+    while (cur && cur < blk) {
+        prev_blk = cur;
+        cur = cur->next;
+    }
+
+    /* Try to coalesce blk with the next free block (cur). */
+    if (cur && (char *)blk + HEADER_SIZE + blk->size == (char *)cur) {
+        blk->size += HEADER_SIZE + cur->size;
+        blk->next = cur->next;
+    } else {
+        blk->next = cur;
+    }
+
+    /* Try to coalesce the previous free block with blk. */
+    if (prev_blk &&
+        (char *)prev_blk + HEADER_SIZE + prev_blk->size == (char *)blk) {
+        prev_blk->size += HEADER_SIZE + blk->size;
+        prev_blk->next = blk->next;
+    } else if (prev_blk) {
+        prev_blk->next = blk;
+    } else {
+        free_list = blk;
+    }
+}
+
 void *malloc(size_t size)
 {
     if (size == 0)
@@ -66,7 +99,42 @@ void *malloc(size_t size)
 
     size = align_up(size);
 
+    /* First-fit search on the free list. */
+    block_header_t *prev = NULL;
+    block_header_t *cur = free_list;
+
+    while (cur) {
+        if (cur->size >= size) {
+            /* Found a fit.  Split if remainder is large enough. */
+            if (cur->size >= size + HEADER_SIZE + ALLOC_ALIGN) {
+                block_header_t *rem =
+                    (block_header_t *)((char *)cur + HEADER_SIZE + size);
+                rem->size = cur->size - size - HEADER_SIZE;
+                rem->next = cur->next;
+                if (prev)
+                    prev->next = rem;
+                else
+                    free_list = rem;
+                cur->size = size;
+            } else {
+                /* Use the whole block (no split). */
+                if (prev)
+                    prev->next = cur->next;
+                else
+                    free_list = cur->next;
+            }
+            cur->next = NULL;
+            return (char *)cur + HEADER_SIZE;
+        }
+        prev = cur;
+        cur = cur->next;
+    }
+
+    /* No suitable free block.  Extend the heap via sbrk(). */
     size_t total = HEADER_SIZE + size;
+    if (total < SBRK_MIN)
+        total = SBRK_MIN;
+
     void *mem = sbrk((intptr_t)total);
     if (mem == (void *)-1) {
         errno = ENOMEM;
@@ -74,16 +142,29 @@ void *malloc(size_t size)
     }
 
     block_header_t *blk = (block_header_t *)mem;
-    blk->size = size;
+    blk->size = total - HEADER_SIZE;
     blk->next = NULL;
+
+    /* If sbrk gave us more than needed, free the remainder. */
+    if (blk->size > size + HEADER_SIZE + ALLOC_ALIGN) {
+        block_header_t *rem =
+            (block_header_t *)((char *)blk + HEADER_SIZE + size);
+        rem->size = blk->size - size - HEADER_SIZE;
+        rem->next = NULL;
+        blk->size = size;
+        free_insert(rem);
+    }
 
     return (char *)blk + HEADER_SIZE;
 }
 
 void free(void *ptr)
 {
-    (void)ptr;
-    /* Bump allocator: no-op free for diagnostic purposes. */
+    if (!ptr)
+        return;
+
+    block_header_t *blk = (block_header_t *)((char *)ptr - HEADER_SIZE);
+    free_insert(blk);
 }
 
 void *calloc(size_t count, size_t size)
@@ -109,14 +190,54 @@ void *realloc(void *ptr, size_t size)
         return NULL;
     }
 
+    size = align_up(size);
     block_header_t *blk = (block_header_t *)((char *)ptr - HEADER_SIZE);
+
     if (blk->size >= size)
         return ptr;     /* Current block is big enough. */
 
+    /*
+     * Try to grow in place by coalescing with an adjacent free block.
+     * This avoids a copy when the next block in memory is free and
+     * large enough to satisfy the request.
+     */
+    block_header_t *next_addr =
+        (block_header_t *)((char *)blk + HEADER_SIZE + blk->size);
+    block_header_t *fprev = NULL;
+    block_header_t *fcur = free_list;
+
+    while (fcur) {
+        if (fcur == next_addr) {
+            size_t combined = blk->size + HEADER_SIZE + fcur->size;
+            if (combined >= size) {
+                /* Remove fcur from free list. */
+                if (fprev)
+                    fprev->next = fcur->next;
+                else
+                    free_list = fcur->next;
+                blk->size = combined;
+
+                /* Split if significantly larger than needed. */
+                if (blk->size > size + HEADER_SIZE + ALLOC_ALIGN) {
+                    block_header_t *rem =
+                        (block_header_t *)((char *)blk + HEADER_SIZE + size);
+                    rem->size = blk->size - size - HEADER_SIZE;
+                    rem->next = NULL;
+                    blk->size = size;
+                    free_insert(rem);
+                }
+                return ptr;     /* Grew in place -- no copy needed. */
+            }
+            break;
+        }
+        fprev = fcur;
+        fcur = fcur->next;
+    }
+
+    /* Cannot grow in place.  Allocate, copy, free. */
     void *newp = malloc(size);
     if (!newp)
         return NULL;
-
     memcpy(newp, ptr, blk->size);
     free(ptr);
     return newp;

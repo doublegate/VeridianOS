@@ -62,6 +62,7 @@ typedef volatile int sig_atomic_t;
 
 /** Number of signals (1-based, signal 0 is reserved for error checking) */
 #define _NSIG       32
+#define NSIG        _NSIG
 
 /* ========================================================================= */
 /* Signal Handler Types                                                      */

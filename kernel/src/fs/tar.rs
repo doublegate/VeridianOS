@@ -2,10 +2,10 @@
 //!
 //! Parses ustar-format TAR archives from an in-memory byte buffer and
 //! creates corresponding files and directories in the VFS (RamFS).
-//! Supports regular files (typeflag '0' or '\0') and directories
-//! (typeflag '5').
+//! Supports regular files (typeflag '0' or '\0'), directories
+//! (typeflag '5'), and symlinks (typeflag '2', resolved as file copies).
 
-use alloc::string::String;
+use alloc::{string::String, vec::Vec};
 
 use crate::{
     error::KernelError,
@@ -29,8 +29,13 @@ mod field {
     pub const SIZE_OFF: usize = 124;
     pub const SIZE_LEN: usize = 12;
 
-    /// Type flag (1 byte): '0' or '\0' = regular file, '5' = directory.
+    /// Type flag (1 byte): '0' or '\0' = regular file, '2' = symlink, '5' =
+    /// directory.
     pub const TYPE_OFF: usize = 156;
+
+    /// Link name for symlinks/hard links (100 bytes, null-terminated ASCII).
+    pub const LINK_OFF: usize = 157;
+    pub const LINK_LEN: usize = 100;
 
     /// Name prefix for paths > 100 chars (155 bytes, null-terminated).
     pub const PREFIX_OFF: usize = 345;
@@ -132,6 +137,9 @@ pub fn load_tar_to_vfs(data: &[u8]) -> Result<usize, KernelError> {
 
     let mut offset: usize = 0;
     let mut count: usize = 0;
+    // Deferred symlinks: (symlink_path, target_path, mode) for second-pass
+    // resolution.
+    let mut deferred_symlinks: Vec<(String, String, u32)> = Vec::new();
 
     while offset + BLOCK_SIZE <= data.len() {
         let header = &data[offset..offset + BLOCK_SIZE];
@@ -240,12 +248,118 @@ pub fn load_tar_to_vfs(data: &[u8]) -> Result<usize, KernelError> {
                 let data_blocks = size.div_ceil(BLOCK_SIZE);
                 offset += data_blocks * BLOCK_SIZE;
             }
+            b'2' => {
+                // Symbolic link entry -- resolve as a file copy of the target.
+                // BusyBox uses symlinks (e.g. /bin/ash -> busybox) for its
+                // multi-call binary. Since VeridianOS VFS has no native symlink
+                // nodes, we copy the target file's contents to the new path.
+                let link_target_raw =
+                    parse_str(&header[field::LINK_OFF..field::LINK_OFF + field::LINK_LEN]);
+
+                // Resolve the link target to an absolute path.
+                let link_target = if link_target_raw.starts_with('/') {
+                    String::from(link_target_raw)
+                } else {
+                    // Relative symlink: resolve relative to the symlink's parent dir.
+                    if let Some(pos) = path.rfind('/') {
+                        let parent_dir = if pos == 0 { "/" } else { &path[..pos] };
+                        let mut abs = String::from(parent_dir);
+                        abs.push('/');
+                        abs.push_str(link_target_raw);
+                        abs
+                    } else {
+                        let mut abs = String::from("/");
+                        abs.push_str(link_target_raw);
+                        abs
+                    }
+                };
+
+                // Ensure parent directories for the symlink path exist.
+                if let Some(pos) = path.rfind('/') {
+                    if pos > 0 {
+                        ensure_parent_dirs(&path[..pos])?;
+                    }
+                }
+
+                // Read the target file's contents and copy them.
+                let vfs = get_vfs().read();
+                match vfs.resolve_path(&link_target) {
+                    Ok(target_node) => {
+                        // Read target file data (up to 4MB limit for safety).
+                        let target_size = target_node.metadata().map(|m| m.size).unwrap_or(0);
+                        if target_size > 0 && target_size <= 4 * 1024 * 1024 {
+                            let mut buf = alloc::vec![0u8; target_size];
+                            if let Ok(bytes_read) = target_node.read(0, &mut buf) {
+                                let (parent_path, file_name) = split_path(&path)?;
+                                let parent = vfs.resolve_path(parent_path)?;
+                                let _ = parent.unlink(file_name);
+                                let node = parent
+                                    .create(file_name, Permissions::from_mode(mode as u32))?;
+                                node.write(0, &buf[..bytes_read])?;
+                                count += 1;
+                            }
+                        } else if target_size == 0 {
+                            // Empty target -- create empty file.
+                            let (parent_path, file_name) = split_path(&path)?;
+                            let parent = vfs.resolve_path(parent_path)?;
+                            let _ = parent.unlink(file_name);
+                            let _ =
+                                parent.create(file_name, Permissions::from_mode(mode as u32))?;
+                            count += 1;
+                        }
+                    }
+                    Err(_) => {
+                        // Target doesn't exist yet -- defer to a second pass.
+                        deferred_symlinks.push((path.clone(), link_target, mode as u32));
+                    }
+                }
+
+                // Symlinks have no data blocks in the archive.
+                let data_blocks = size.div_ceil(BLOCK_SIZE);
+                offset += data_blocks * BLOCK_SIZE;
+            }
             _ => {
-                // Unsupported type (symlink, hard link, etc.) -- skip data.
+                // Unsupported type (hard link, etc.) -- skip data.
                 let data_blocks = size.div_ceil(BLOCK_SIZE);
                 offset += data_blocks * BLOCK_SIZE;
             }
         }
+    }
+
+    // Second pass: resolve deferred symlinks (targets that appeared after the
+    // link).
+    for (sym_path, target_path, sym_mode) in &deferred_symlinks {
+        if let Some(pos) = sym_path.rfind('/') {
+            if pos > 0 {
+                let _ = ensure_parent_dirs(&sym_path[..pos]);
+            }
+        }
+
+        let vfs = get_vfs().read();
+        if let Ok(target_node) = vfs.resolve_path(target_path) {
+            let target_size = target_node.metadata().map(|m| m.size).unwrap_or(0);
+            if target_size > 0 && target_size <= 4 * 1024 * 1024 {
+                let mut buf = alloc::vec![0u8; target_size];
+                if let Ok(bytes_read) = target_node.read(0, &mut buf) {
+                    if let Ok((parent_path, file_name)) = split_path(sym_path) {
+                        if let Ok(parent) = vfs.resolve_path(parent_path) {
+                            let _ = parent.unlink(file_name);
+                            if let Ok(node) =
+                                parent.create(file_name, Permissions::from_mode(*sym_mode))
+                            {
+                                let _ = node.write(0, &buf[..bytes_read]);
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !deferred_symlinks.is_empty() {
+        let resolved = deferred_symlinks.len();
+        println!("[TAR] Resolved {} deferred symlinks", resolved);
     }
 
     println!("[TAR] Loaded {} entries into VFS", count);

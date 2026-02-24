@@ -267,6 +267,12 @@ int fchown(int fd, uid_t owner, gid_t group);
 /** Change ownership of a symlink (no follow). */
 int lchown(const char *pathname, uid_t owner, gid_t group);
 
+/* ========================================================================= */
+/* getopt (POSIX requires these in unistd.h)                                 */
+/* ========================================================================= */
+
+#include <getopt.h>
+
 #ifdef __cplusplus
 }
 #endif

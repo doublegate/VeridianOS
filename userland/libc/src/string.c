@@ -416,6 +416,20 @@ char *strerror(int errnum)
     case EFAULT:    return (char *)"Bad address";
     case EACCES:    return (char *)"Permission denied";
     case ESRCH:     return (char *)"No such process";
+    case EEXIST:    return (char *)"File exists";
+    case EBADF:     return (char *)"Bad file descriptor";
+    case EIO:       return (char *)"Input/output error";
+    case ENOEXEC:   return (char *)"Exec format error";
+    case ECHILD:    return (char *)"No child processes";
+    case EBUSY:     return (char *)"Device or resource busy";
+    case ENOTDIR:   return (char *)"Not a directory";
+    case EISDIR:    return (char *)"Is a directory";
+    case EMFILE:    return (char *)"Too many open files";
+    case ENOSPC:    return (char *)"No space left on device";
+    case EPIPE:     return (char *)"Broken pipe";
+    case ERANGE:    return (char *)"Numerical result out of range";
+    case ENOTTY:    return (char *)"Inappropriate ioctl for device";
+    case ENOTEMPTY: return (char *)"Directory not empty";
     default:        return (char *)"Unknown error";
     }
 }

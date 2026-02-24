@@ -216,6 +216,11 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
     // Open the file through VFS
     match vfs()?.read().open(path_str, open_flags) {
         Ok(node) => {
+            // Handle O_TRUNC on existing files
+            if open_flags.truncate {
+                let _ = node.truncate(0);
+            }
+
             // Create file with path stored for dirfd resolution
             let file = crate::fs::file::File::new_with_path(
                 node,
@@ -1359,6 +1364,7 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
     const F_SETFD: usize = 2;
     const F_GETFL: usize = 3;
     const F_SETFL: usize = 4;
+    const F_DUPFD_CLOEXEC: usize = 1030;
     const FD_CLOEXEC: usize = 1;
 
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
@@ -1367,7 +1373,14 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
     match cmd {
         F_DUPFD => {
             // Duplicate fd to lowest available >= arg
-            match file_table.dup(fd) {
+            match file_table.dup_at_least(fd, arg, false) {
+                Ok(new_fd) => Ok(new_fd),
+                Err(_) => Err(SyscallError::InvalidArgument),
+            }
+        }
+        F_DUPFD_CLOEXEC => {
+            // Duplicate fd to lowest available >= arg, with close-on-exec
+            match file_table.dup_at_least(fd, arg, true) {
                 Ok(new_fd) => Ok(new_fd),
                 Err(_) => Err(SyscallError::InvalidArgument),
             }
@@ -1389,14 +1402,16 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
         }
         F_GETFL => {
             // Get file status flags from the File struct
+            // Flag values must match veridian/fcntl.h ABI
             let file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
             let mut flags: usize = 0;
             if file.flags.read && file.flags.write {
-                flags |= 0x0002; // O_RDWR
+                flags |= 0x0003; // O_RDWR
             } else if file.flags.write {
-                flags |= 0x0001; // O_WRONLY
+                flags |= 0x0002; // O_WRONLY
+            } else if file.flags.read {
+                flags |= 0x0001; // O_RDONLY
             }
-            // else O_RDONLY = 0
             if file.flags.append {
                 flags |= 0x0400; // O_APPEND
             }

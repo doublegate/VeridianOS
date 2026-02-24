@@ -295,6 +295,16 @@ ssize_t getline(char **lineptr, size_t *n, FILE *stream);
  */
 ssize_t getdelim(char **lineptr, size_t *n, int delim, FILE *stream);
 
+/* ========================================================================= */
+/* Process I/O                                                               */
+/* ========================================================================= */
+
+/** Open a pipe to/from a process. */
+FILE *popen(const char *command, const char *type);
+
+/** Close a pipe opened by popen(). */
+int pclose(FILE *stream);
+
 #ifdef __cplusplus
 }
 #endif

@@ -37,6 +37,9 @@ extern "C" {
 #define O_EXCL          0x0800  /* Fail if file already exists (with O_CREAT) */
 #define O_NONBLOCK      0x1000  /* Non-blocking mode */
 #define O_CLOEXEC       0x2000  /* Close-on-exec flag */
+#define O_NOCTTY        0x4000  /* Do not become controlling terminal */
+#define O_DIRECTORY     0x8000  /* Must be a directory */
+#define O_NOFOLLOW     0x10000  /* Do not follow symlinks */
 
 /* Aliases */
 #define O_NDELAY        O_NONBLOCK
