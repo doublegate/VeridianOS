@@ -4,9 +4,9 @@
  * Copyright (c) 2025-2026 VeridianOS Contributors
  * SPDX-License-Identifier: MIT OR Apache-2.0
  *
- * Minimal POSIX regular expression support (stub implementation).
- * Provides types and function declarations; actual pattern matching
- * returns REG_NOSYS until a real regex engine is implemented.
+ * POSIX regular expression support (BRE and ERE).
+ * Provides types, constants, and function declarations.
+ * Implementation in libc/src/regex.c (recursive backtracking NFA).
  */
 
 #ifndef _REGEX_H
