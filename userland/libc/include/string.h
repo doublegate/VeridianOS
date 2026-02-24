@@ -106,6 +106,30 @@ int strncasecmp(const char *s1, const char *s2, size_t n);
 /** Find first occurrence of any byte in accept in s. */
 char *strpbrk(const char *s, const char *accept);
 
+/** Version-aware string comparison. */
+int strverscmp(const char *s1, const char *s2);
+
+/** Find first occurrence (or end) of c in s. */
+char *strchrnul(const char *s, int c);
+
+/** Extract token from string (reentrant). */
+char *strtok_r(char *str, const char *delim, char **saveptr);
+
+/** Extract token from string, modifying stringp. */
+char *strsep(char **stringp, const char *delim);
+
+/** Copy string, returning pointer to end. */
+char *stpcpy(char *dest, const char *src);
+
+/** Copy at most n chars, returning pointer to end. */
+char *stpncpy(char *dest, const char *src, size_t n);
+
+/** Case-insensitive substring search. */
+char *strcasestr(const char *haystack, const char *needle);
+
+/** Return string describing signal. */
+char *strsignal(int sig);
+
 /* ========================================================================= */
 /* Locale-aware string operations                                            */
 /* ========================================================================= */

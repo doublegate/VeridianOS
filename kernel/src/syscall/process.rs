@@ -207,6 +207,11 @@ pub fn sys_exit(exit_code: usize) -> SyscallResult {
             // to the boot context. This is needed for nested child execution:
             // when a forked child exits, the parent's wait loop must find it
             // as a Zombie to reap it.
+            //
+            // CRITICAL: We must also call cleanup_process to close all file
+            // descriptors. Without this, pipe write ends are never closed,
+            // so the parent's pipe read never gets EOF -- causing hangs in
+            // command substitution `$(cmd)` where the parent waits for EOF.
             if let Some(process) = current_process() {
                 process.set_exit_code(exit_code as i32);
 
@@ -217,6 +222,11 @@ pub fn sys_exit(exit_code: usize) -> SyscallResult {
                         thread.set_state(crate::process::thread::ThreadState::Zombie);
                     }
                 }
+
+                // Close all file descriptors (pipes, files, etc.) BEFORE
+                // marking as Zombie. This ensures pipe write_closed is set
+                // so parent reads get EOF.
+                crate::process::exit::cleanup_process(process);
 
                 process.set_state(crate::process::pcb::ProcessState::Zombie);
 

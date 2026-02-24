@@ -170,6 +170,7 @@ gid_t getgid(void);
 gid_t getegid(void);
 int setuid(uid_t uid);
 int setgid(gid_t gid);
+int getgroups(int size, gid_t list[]);
 
 /** Get login name of the user. */
 char *getlogin(void);

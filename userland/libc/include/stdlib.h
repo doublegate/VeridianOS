@@ -83,6 +83,9 @@ int unsetenv(const char *name);
 /** Insert or reset a NAME=VALUE environment string. */
 int putenv(char *string);
 
+/** Clear the entire environment. */
+int clearenv(void);
+
 /* ========================================================================= */
 /* String-to-number conversions                                              */
 /* ========================================================================= */

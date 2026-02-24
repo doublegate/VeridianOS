@@ -112,7 +112,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.5.1 (February 23, 2026) | **Releases Published**: 26 (v0.1.0 through v0.5.1)
+**Latest Release**: v0.5.2 (February 24, 2026) | **Releases Published**: 27 (v0.1.0 through v0.5.2)
 
 | Metric | Value |
 | ------ | ----- |
@@ -162,6 +162,7 @@ Phases 0 through 4 are complete. The kernel provides:
 - **Complete C Library** -- 19 source files, full stdio/stdlib/string/unistd, architecture-specific setjmp/longjmp, 50+ syscall wrappers, 25+ POSIX-compatible headers (network, system, POSIX, C standard), math library (ldexp, frexp, log, exp, sqrt, pow, fabs, floor, ceil, modf)
 - **Cross-Compilation Toolchain** -- binutils 2.43 + GCC 14.2 Stage 2 cross-compiler, sysroot with headers and CRT files, CMake/Meson toolchain files; static native GCC toolchain (gcc, cc1, as, ld, ar) via Canadian cross-compilation for on-target self-hosting
 - **Coreutils** -- 6 progressively complex POSIX utilities cross-compiled and verified on VeridianOS: echo, cat, wc, ls, sort, and pipeline_test (capstone fork/exec/pipe/waitpid exercise)
+- **BusyBox 1.36.1** -- 95 applets cross-compiled with ash shell support; EPIPE/BrokenPipe handling for multi-pipe commands (`yes | head -n 1`), float printf (`%f/%g/%e`) for `seq`, pipe read improvements for command substitution
 - **Virtio-blk Driver** -- Block I/O with TAR rootfs loader for cross-compiled user-space binaries; virtio-MMIO transport on AArch64/RISC-V, PCI on x86_64
 - **Thread Support** -- clone() with CLONE_VM/CLONE_FS/CLONE_THREAD/CLONE_SETTLS, futex (WAIT/WAKE/REQUEUE/BITSET), POSIX pthread library (create/join/detach/mutex/cond/TLS)
 - **Signal Delivery** -- Full signal frames and trampolines on all three architectures (x86_64, AArch64, RISC-V) with sigreturn context restoration
@@ -402,6 +403,7 @@ Security is a fundamental design principle:
 - [x] **Self-Hosting Tier 6**: Thread support, signal delivery, virtio-MMIO, multi-LOAD ELF, LLVM triple, native GCC infrastructure (merged from test-codex, Feb 2026)
 - [x] **Self-Hosting Tier 7**: Full self-hosting toolchain -- Rust user-space targets, std port, static native GCC 14.2 via Canadian cross-compilation, GNU Make + Ninja, vpkg package manager (v0.5.0, Feb 2026)
 - [x] **Coreutils + Toolchain Validation**: 6 progressive POSIX coreutils (echo, cat, wc, ls, sort, pipeline_test) cross-compiled and verified on-target, pipe fd corruption fix, tri-arch clippy clean (v0.5.1, Feb 2026)
+- [x] **BusyBox Integration**: BusyBox 1.36.1 cross-compiled with 95 applets and ash shell, EPIPE handling for multi-pipe pipelines, float printf for seq, pipe read improvements (v0.5.2, Feb 2026)
 
 ### Upcoming
 

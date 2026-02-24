@@ -2,6 +2,71 @@
 
 ---
 
+## [v0.5.2] - 2026-02-24
+
+### v0.5.2: BusyBox Sprints B-5/B-6/B-7 -- EPIPE Handling, Float Printf, Pipe Improvements
+
+Fixes three critical issues discovered during BusyBox 1.36.1 integration testing (95 applets with ash shell). Adds proper EPIPE/BrokenPipe handling for multi-pipe commands, implements `%f/%g/%e` float formatting in libc printf, and improves pipe read behavior for command substitution. Extends libc headers for BusyBox compatibility.
+
+---
+
+### Added
+
+#### SyscallError Variants for Pipe/FD Handling
+
+- `kernel/src/syscall/mod.rs`: Added `SyscallError::BrokenPipe` (-39, maps to EPIPE) and `SyscallError::BadFileDescriptor` (-21, maps to EBADF). Previously pipe write failures returned generic `InvalidState`, causing writers to retry indefinitely on closed pipes.
+
+#### Float Printf Formatting (`userland/libc/src/stdio.c`)
+
+- Implemented `__format_double()` (~170 lines) in `vsnprintf()` supporting `%f`, `%g`, and `%e` format specifiers. BusyBox `seq` internally uses `printf("%g")` for number formatting; without this, `seq 1 3` produced empty output. The implementation handles field width, precision, sign flags, and left/right alignment.
+
+#### Boot Test Expansion (`kernel/src/bootstrap.rs`)
+
+- Added `seq 1 3` boot test verifying float printf output (`1\n2\n3`).
+- Added `echo hello | cat` pipe boot test verifying multi-process pipeline through BusyBox ash.
+- Fixed AArch64 unused variable warning in boot test dispatch.
+
+#### libc Header Extensions for BusyBox Compatibility
+
+- `userland/libc/include/stdio.h`: Added `off_t` typedef, `fseeko`/`ftello`, `dprintf`, `vasprintf`, `popen`/`pclose` declarations.
+- `userland/libc/include/stdlib.h`: Added `clearenv` declaration.
+- `userland/libc/include/string.h`: Added 8 new function declarations for BusyBox string handling.
+- `userland/libc/include/time.h`: Added `clock_settime`, `localtime_r`, `strptime` declarations.
+- `userland/libc/include/unistd.h`: Added `getgroups` declaration.
+- `userland/libc/include/grp.h`: Added `getgrouplist` declaration.
+- `userland/libc/include/veridian/stat.h`: Added `utimensat`, `futimens` declarations.
+- `userland/libc/src/posix_stubs3.c`: Added `strptime` and `futimens` stub implementations.
+
+### Fixed
+
+#### EPIPE/BrokenPipe Handling in sys_write (Sprint B-5)
+
+- **Root cause**: `sys_write()` on a pipe with no readers returned `SyscallError::InvalidState`, which libc mapped to a generic error. Write-heavy programs like `yes` in `yes | head -n 1` would loop forever because the writer never received a signal to stop.
+- **Fix**: `kernel/src/syscall/filesystem.rs` now detects `BrokenPipe` errors from pipe writes and returns `SyscallError::BrokenPipe` (-39). libc maps this to EPIPE, causing the writing process to terminate or handle the error. Boot-context pipe reads also gained retry logic for command substitution patterns.
+
+#### Process Cleanup in Boot-Context Exit (Sprint B-7)
+
+- **Root cause**: `sys_exit()` in boot execution context did not call `cleanup_process()`, leaving zombie entries in the process table and leaked pipe file descriptors.
+- **Fix**: `kernel/src/syscall/process.rs` now calls `cleanup_process()` for boot-context exits. `kernel/src/process/exit.rs` changed `cleanup_process` visibility to `pub` to support this.
+
+### Changed
+
+#### BusyBox Build Infrastructure
+
+- `scripts/build-busybox-rootfs.sh`: Fixed config phase to properly copy `veridian_defconfig` to the BusyBox build directory before `make olddefconfig`.
+- `busybox/veridian_defconfig`: Cleaned up empty `EXTRA_LDFLAGS=""` and `EXTRA_LDLIBS=""` entries that caused build warnings.
+
+### Infrastructure
+
+- Version bumped: Cargo.toml (0.5.1 -> 0.5.2), uname (0.5.1 -> 0.5.2), /etc/os-release (0.5.1 -> 0.5.2).
+
+### Known Limitations
+
+- `$(pwd)` returns empty for builtins in boot execution model (builtins run in kernel context, not as forked processes).
+- BusyBox ash shell requires full rootfs with `/bin/busybox` symlinks; boot-context testing uses individual applet invocation.
+
+---
+
 ## [v0.5.1] - 2026-02-23
 
 ### v0.5.1: Progressive Coreutils + Toolchain Validation + Tri-Architecture Clippy Clean

@@ -691,7 +691,7 @@ fn load_rootfs_from_disk() {
     for sector in 0..total_sectors {
         let offset = sector as usize * blk::BLOCK_SIZE;
         if let Err(_e) = dev.read_block(sector, &mut disk_data[offset..offset + blk::BLOCK_SIZE]) {
-            kprintln!("[ROOTFS] Read error at sector");
+            kprintln!("[ROOTFS] Read error at sector {}/{}", sector, total_sectors);
             return;
         }
     }
@@ -862,7 +862,15 @@ fn test_user_binary_load() {
                 &["ash", "-c", "D=$(pwd); echo ASH_SUBST_${D}_PASS"],
                 env,
             );
-            // 9. Comprehensive test script (if present in rootfs)
+            // 9. seq (B-6: float formatting -- seq uses printf %f internally)
+            boot_run_program("/usr/bin/seq", &["seq", "1", "3"], env);
+            // 10. Pipe with head (validates pipe + EPIPE handling)
+            boot_run_program(
+                "/bin/ash",
+                &["ash", "-c", "echo PIPE_HEAD_PASS | head -n 1"],
+                env,
+            );
+            // 12. Comprehensive test script (if present in rootfs)
             boot_run_program("/bin/ash", &["ash", "/usr/src/busybox_test.sh"], env);
 
             // Interactive ash (last -- will sit at prompt until killed)

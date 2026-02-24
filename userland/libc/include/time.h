@@ -40,6 +40,15 @@ int clock_gettime(clockid_t clk_id, struct timespec *tp);
  */
 int clock_getres(clockid_t clk_id, struct timespec *res);
 
+/**
+ * Set the time of the specified clock.
+ *
+ * @param clk_id   CLOCK_REALTIME, etc.
+ * @param tp       New time value.
+ * @return 0 on success, -1 on error.
+ */
+int clock_settime(clockid_t clk_id, const struct timespec *tp);
+
 /* ========================================================================= */
 /* Sleep                                                                     */
 /* ========================================================================= */
@@ -103,6 +112,9 @@ struct tm *gmtime(const time_t *timep);
 /** Convert time_t to broken-down local time. */
 struct tm *localtime(const time_t *timep);
 
+/** Thread-safe version of localtime. */
+struct tm *localtime_r(const time_t *timep, struct tm *result);
+
 /** Convert broken-down time back to time_t. */
 time_t mktime(struct tm *tm);
 
@@ -114,6 +126,9 @@ char *asctime(const struct tm *tm);
 
 /** Format time into a string buffer. */
 size_t strftime(char *s, size_t max, const char *format, const struct tm *tm);
+
+/** Parse time string according to format. */
+char *strptime(const char *s, const char *format, struct tm *tm);
 
 /** Compute the difference between two times. */
 double difftime(time_t time1, time_t time0);

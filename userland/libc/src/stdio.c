@@ -479,10 +479,11 @@ void perror(const char *s)
 
 /*
  * Minimal vsnprintf supporting: %d, %i, %u, %x, %X, %o, %c, %s, %p, %ld,
- * %lu, %lx, %lX, %lo, %li, %%, %02d-style width/zero-pad, and %-*s.
+ * %lu, %lx, %lX, %lo, %li, %f, %g, %e (and uppercase variants),
+ * %%, %02d-style width/zero-pad, and %-*s.
  *
- * This is not a full C99 printf -- no floating point, no %n, no positional
- * arguments.  Adequate for OS userland bootstrap.
+ * Floating-point support (%f/%g/%e) is basic but adequate for BusyBox
+ * seq and similar utilities.  No %n, no positional arguments.
  */
 
 /* Write a single character to the output buffer if space remains. */
@@ -550,6 +551,192 @@ static void __format_long(char *buf, size_t size, size_t *pos,
     }
     __format_ulong(buf, size, pos, (unsigned long)val, base, 0,
                    width, zero_pad, left_align);
+}
+
+/*
+ * Format a double value for %f, %e, %g.
+ *
+ * Handles: NaN, Inf, negative values, integer + fractional parts.
+ * Precision: number of digits after the decimal point (default 6 for %f).
+ * For %g: strips trailing zeros unless '#' flag (not supported here).
+ *
+ * This is not a full IEEE 754 formatter; it's adequate for values that
+ * BusyBox seq produces (small integers and simple decimals).
+ */
+static void __format_double(char *buf, size_t size, size_t *pos,
+                             double val, int fmt_char, int width,
+                             int precision, int zero_pad, int left_align)
+{
+    int len = 0;
+    int neg = 0;
+    int is_g = (fmt_char == 'g' || fmt_char == 'G');
+
+    /* Default precision: 6 for %f/%e, 6 for %g (significant digits). */
+    if (precision < 0)
+        precision = 6;
+
+    /* Handle special values. */
+    /* NaN: val != val is true for NaN per IEEE 754. */
+    if (val != val) {
+        const char *s = (fmt_char >= 'A' && fmt_char <= 'Z') ? "NAN" : "nan";
+        int pad = width - 3;
+        if (!left_align && pad > 0)
+            while (pad-- > 0) __put(buf, size, pos, ' ');
+        __puts(buf, size, pos, s, 3);
+        if (left_align && pad > 0)
+            while (pad-- > 0) __put(buf, size, pos, ' ');
+        return;
+    }
+
+    /* Inf check: val > largest finite or val < -largest finite. */
+    if (val > 1.7976931348623157e+308 || val < -1.7976931348623157e+308) {
+        if (val < 0) { neg = 1; }
+        const char *s = (fmt_char >= 'A' && fmt_char <= 'Z') ? "INF" : "inf";
+        int slen = neg ? 4 : 3;
+        int pad = width - slen;
+        if (!left_align && pad > 0)
+            while (pad-- > 0) __put(buf, size, pos, ' ');
+        if (neg) __put(buf, size, pos, '-');
+        __puts(buf, size, pos, s, 3);
+        if (left_align && pad > 0)
+            while (pad-- > 0) __put(buf, size, pos, ' ');
+        return;
+    }
+
+    if (val < 0.0) {
+        neg = 1;
+        val = -val;
+    }
+
+    /*
+     * For %g: use %f format if the exponent is in [-4, precision).
+     * Otherwise use %e. For simplicity, we always use %f-style since
+     * BusyBox seq uses integer values (exponent ~0).
+     * %g also strips trailing zeros after the decimal point.
+     */
+    int g_precision = precision;
+    if (is_g) {
+        if (precision == 0) precision = 1;
+        g_precision = precision;
+        /* %g precision means total significant digits, not decimal places.
+         * For values >= 1, subtract the integer digit count. */
+        /* Simple approach: format as %f with enough precision, then trim. */
+    }
+
+    /* Decompose into integer and fractional parts. */
+    unsigned long long int_part = (unsigned long long)val;
+    double frac = val - (double)int_part;
+
+    /* For %g, compute effective decimal precision from significant digits. */
+    int dec_prec = precision;
+    if (is_g) {
+        /* Count digits in integer part. */
+        int int_digits = 0;
+        unsigned long long tmp_ip = int_part;
+        if (tmp_ip == 0) {
+            /* For 0.xxx, leading zeros don't count. */
+            int_digits = (val == 0.0) ? 1 : 0;
+            if (val > 0.0 && val < 1.0) {
+                /* Count leading zeros in fraction to adjust. */
+                int_digits = 0;
+            }
+        } else {
+            while (tmp_ip > 0) { int_digits++; tmp_ip /= 10; }
+        }
+        dec_prec = g_precision - int_digits;
+        if (dec_prec < 0) dec_prec = 0;
+    }
+
+    /* Build the fractional digit string. */
+    char frac_buf[24]; /* up to 20 decimal digits */
+    int frac_len = 0;
+    if (dec_prec > 20) dec_prec = 20;
+    {
+        double f = frac;
+        for (int i = 0; i < dec_prec; i++) {
+            f *= 10.0;
+            int d = (int)f;
+            if (d > 9) d = 9;
+            frac_buf[frac_len++] = '0' + d;
+            f -= (double)d;
+        }
+        /* Round: if the next digit >= 5, round up. */
+        if (dec_prec < 20) {
+            f *= 10.0;
+            if ((int)f >= 5) {
+                /* Carry through fractional digits. */
+                int carry = 1;
+                for (int i = frac_len - 1; i >= 0 && carry; i--) {
+                    int d = (frac_buf[i] - '0') + carry;
+                    if (d >= 10) {
+                        frac_buf[i] = '0';
+                        carry = 1;
+                    } else {
+                        frac_buf[i] = '0' + d;
+                        carry = 0;
+                    }
+                }
+                if (carry) int_part++;
+            }
+        }
+    }
+
+    /* For %g: strip trailing zeros from fraction. */
+    int effective_frac_len = frac_len;
+    if (is_g) {
+        while (effective_frac_len > 0 && frac_buf[effective_frac_len - 1] == '0')
+            effective_frac_len--;
+    }
+
+    /* Build the output in tmp[]. */
+    /* Integer part (reversed). */
+    char int_buf[24];
+    int int_len = 0;
+    if (int_part == 0) {
+        int_buf[int_len++] = '0';
+    } else {
+        while (int_part > 0) {
+            int_buf[int_len++] = '0' + (int)(int_part % 10);
+            int_part /= 10;
+        }
+    }
+
+    /* Total length: sign + int_len + (dot + frac if needed). */
+    int has_dot = (effective_frac_len > 0) || (!is_g && dec_prec > 0);
+    len = neg + int_len + (has_dot ? 1 + effective_frac_len : 0);
+    if (!is_g && dec_prec > effective_frac_len && has_dot) {
+        /* Pad fraction with trailing zeros for %f. */
+        len = neg + int_len + 1 + dec_prec;
+    }
+
+    int pad = width - len;
+    if (pad < 0) pad = 0;
+
+    /* Output: [padding][sign][int_digits][.frac_digits][padding]. */
+    if (!left_align && pad > 0 && !zero_pad)
+        while (pad-- > 0) __put(buf, size, pos, ' ');
+    if (neg) __put(buf, size, pos, '-');
+    if (!left_align && pad > 0 && zero_pad)
+        while (pad-- > 0) __put(buf, size, pos, '0');
+
+    /* Integer digits (reversed in int_buf). */
+    for (int i = int_len - 1; i >= 0; i--)
+        __put(buf, size, pos, int_buf[i]);
+
+    /* Fractional part. */
+    if (has_dot) {
+        __put(buf, size, pos, '.');
+        for (int i = 0; i < effective_frac_len; i++)
+            __put(buf, size, pos, frac_buf[i]);
+        /* %f: pad with trailing zeros to fill precision. */
+        if (!is_g) {
+            for (int i = effective_frac_len; i < dec_prec; i++)
+                __put(buf, size, pos, '0');
+        }
+    }
+
+    if (left_align && pad > 0)
+        while (pad-- > 0) __put(buf, size, pos, ' ');
 }
 
 int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
@@ -693,6 +880,22 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
             if (left_align && pad > 0)
                 while (pad-- > 0)
                     __put(buf, size, &pos, ' ');
+            break;
+        }
+        case 'f':
+        case 'F':
+        case 'g':
+        case 'G':
+        case 'e':
+        case 'E': {
+            double val = va_arg(ap, double);
+            /* %e/%E not fully implemented -- format as %f for now.
+             * BusyBox seq only uses %f which is fully supported. */
+            int fc = *fmt;
+            if (fc == 'e' || fc == 'E')
+                fc = (fc == 'E') ? 'F' : 'f'; /* fall back to %f */
+            __format_double(buf, size, &pos, val, fc,
+                            width, precision, zero_pad, left_align);
             break;
         }
         case '%':

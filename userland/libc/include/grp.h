@@ -23,6 +23,7 @@ struct group {
 
 struct group *getgrnam(const char *name);
 struct group *getgrgid(gid_t gid);
+int getgrouplist(const char *user, gid_t group, gid_t *groups, int *ngroups);
 
 #ifdef __cplusplus
 }

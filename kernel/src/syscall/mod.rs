@@ -399,6 +399,10 @@ pub enum SyscallError {
     UnmappedMemory = -17,
     AccessDenied = -18,
     ProcessNotFound = -19,
+
+    // POSIX I/O errors
+    BadFileDescriptor = -21,
+    BrokenPipe = -39,
 }
 
 impl From<IpcError> for SyscallError {

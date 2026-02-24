@@ -49,7 +49,7 @@ CONFIG_STATIC=y
 # CONFIG_FEATURE_SHARED_BUSYBOX is not set
 CONFIG_CROSS_COMPILER_PREFIX="/opt/veridian/toolchain/bin/x86_64-veridian-"
 CONFIG_SYSROOT="/opt/veridian/toolchain/sysroot"
-CONFIG_EXTRA_CFLAGS=""
+CONFIG_EXTRA_CFLAGS="-D__linux__ -Wno-error=implicit-function-declaration"
 CONFIG_EXTRA_LDFLAGS=""
 CONFIG_EXTRA_LDLIBS=""
 # CONFIG_USE_PORTABLE_CODE is not set

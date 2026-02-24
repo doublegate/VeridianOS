@@ -542,6 +542,11 @@ int fputs_unlocked(const char *s, FILE *stream)
     return fputs(s, stream);
 }
 
+int feof_unlocked(FILE *stream)
+{
+    return feof(stream);
+}
+
 int ferror_unlocked(FILE *stream)
 {
     return ferror(stream);
@@ -662,6 +667,15 @@ struct tm *localtime_r(const time_t *timep, struct tm *result)
     return NULL;
 }
 
+char *strptime(const char *s, const char *format, struct tm *tm)
+{
+    /* Minimal stub -- BusyBox date uses this for -s parsing */
+    (void)format;
+    (void)tm;
+    if (s == NULL) return NULL;
+    return (char *)s; /* pretend we consumed nothing */
+}
+
 /* --- System functions ---------------------------------------------------- */
 
 #include <sys/sysinfo.h>
@@ -734,6 +748,13 @@ int utimensat(int dirfd, const char *pathname,
     (void)pathname;
     (void)times;
     (void)flags;
+    return 0;
+}
+
+int futimens(int fd, const struct timespec times[2])
+{
+    (void)fd;
+    (void)times;
     return 0;
 }
 

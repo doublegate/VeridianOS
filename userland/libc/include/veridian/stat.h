@@ -161,6 +161,15 @@ int mkdir(const char *pathname, mode_t mode);
 int chmod(const char *pathname, mode_t mode);
 
 /**
+ * Change file permission bits by file descriptor.
+ *
+ * @param fd    Open file descriptor.
+ * @param mode  New permission bits.
+ * @return 0 on success, -1 on error.
+ */
+int fchmod(int fd, mode_t mode);
+
+/**
  * Set the file mode creation mask.
  *
  * @param mask  New umask value.
@@ -177,6 +186,27 @@ mode_t umask(mode_t mask);
  * @return 0 on success, -1 on error.
  */
 int mknod(const char *pathname, mode_t mode, dev_t dev);
+
+/**
+ * Change file timestamps with nanosecond precision.
+ *
+ * @param dirfd     Directory fd (or AT_FDCWD).
+ * @param pathname  Path to the file.
+ * @param times     Array of 2 timespec (access, modification).
+ * @param flags     0 or AT_SYMLINK_NOFOLLOW.
+ * @return 0 on success, -1 on error.
+ */
+int utimensat(int dirfd, const char *pathname,
+              const struct timespec times[2], int flags);
+
+/**
+ * Change file timestamps by fd with nanosecond precision.
+ *
+ * @param fd     Open file descriptor.
+ * @param times  Array of 2 timespec (access, modification).
+ * @return 0 on success, -1 on error.
+ */
+int futimens(int fd, const struct timespec times[2]);
 
 #ifdef __cplusplus
 }

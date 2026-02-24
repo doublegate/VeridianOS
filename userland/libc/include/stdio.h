@@ -20,6 +20,12 @@
 typedef long ssize_t;
 #endif
 
+/* off_t for fseeko/ftello -- avoid pulling in veridian/types.h */
+#ifndef __off_t_defined
+#define __off_t_defined
+typedef long off_t;
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -158,8 +164,14 @@ size_t fwrite(const void *ptr, size_t size, size_t count, FILE *stream);
 /** Set stream position. */
 int fseek(FILE *stream, long offset, int whence);
 
+/** Set stream position (large file). */
+int fseeko(FILE *stream, off_t offset, int whence);
+
 /** Get stream position. */
 long ftell(FILE *stream);
+
+/** Get stream position (large file). */
+off_t ftello(FILE *stream);
 
 /** Reset stream to beginning. */
 void rewind(FILE *stream);
@@ -210,6 +222,15 @@ int vprintf(const char *fmt, va_list ap);
 int vfprintf(FILE *stream, const char *fmt, va_list ap);
 int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap);
 int vsprintf(char *buf, const char *fmt, va_list ap);
+int vasprintf(char **strp, const char *fmt, va_list ap);
+
+/** Write formatted output to a file descriptor. */
+int dprintf(int fd, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+
+/** Open a process for reading/writing. */
+FILE *popen(const char *command, const char *type);
+int pclose(FILE *stream);
 
 /* ========================================================================= */
 /* Formatted input                                                           */
@@ -304,6 +325,25 @@ FILE *popen(const char *command, const char *type);
 
 /** Close a pipe opened by popen(). */
 int pclose(FILE *stream);
+
+/* ========================================================================= */
+/* Unlocked stdio (thread-unsafe fast path)                                  */
+/* ========================================================================= */
+
+/*
+ * VeridianOS has no per-FILE locking, so unlocked variants are identical
+ * to the regular ones.  BusyBox redefines fgetc/fputs/etc. to these when
+ * HAVE_UNLOCKED_STDIO / HAVE_UNLOCKED_LINE_OPS are set.
+ */
+int    getc_unlocked(FILE *stream);
+int    putc_unlocked(int c, FILE *stream);
+int    getchar_unlocked(void);
+int    putchar_unlocked(int c);
+int    feof_unlocked(FILE *stream);
+int    ferror_unlocked(FILE *stream);
+int    fileno_unlocked(FILE *stream);
+char  *fgets_unlocked(char *s, int n, FILE *stream);
+int    fputs_unlocked(const char *s, FILE *stream);
 
 #ifdef __cplusplus
 }

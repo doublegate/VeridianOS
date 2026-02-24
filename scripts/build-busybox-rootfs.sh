@@ -151,7 +151,8 @@ phase_config() {
         exit 1
     fi
 
-    cp "$BB_DEFCONFIG" "$BB_SRC/.config"
+    # Copy defconfig to BUILD dir (not source tree, to keep source clean)
+    cp "$BB_DEFCONFIG" "$BB_BUILD/.config"
     # Run oldconfig to resolve dependencies (non-interactive: accept defaults)
     cd "$BB_SRC"
     yes '' | make oldconfig O="$BB_BUILD" 2>&1 | tail -5

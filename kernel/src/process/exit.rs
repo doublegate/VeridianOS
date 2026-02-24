@@ -487,7 +487,7 @@ fn force_terminate_process(process: &Process) -> Result<(), KernelError> {
 }
 
 /// Clean up process resources
-pub(super) fn cleanup_process(process: &Process) {
+pub fn cleanup_process(process: &Process) {
     println!(
         "[PROCESS] Cleaning up resources for process {}",
         process.pid.0
