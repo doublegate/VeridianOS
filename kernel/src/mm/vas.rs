@@ -675,6 +675,11 @@ impl VirtualAddressSpace {
         Ok(addr)
     }
 
+    /// Return the base address of the user heap region.
+    pub fn heap_start_addr(&self) -> u64 {
+        self.heap_start.load(Ordering::Relaxed)
+    }
+
     /// Extend or query heap (brk).
     ///
     /// When `new_break` is `Some`, attempts to move the program break:

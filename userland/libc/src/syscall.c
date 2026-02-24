@@ -285,46 +285,116 @@ int chdir(const char *path)
 /*
  * brk/sbrk are implemented here because they directly map to SYS_MEMORY_BRK.
  * The malloc implementation in stdlib.c uses sbrk() from here.
+ *
+ * DESIGN NOTES (B-9 hardening for cc1-scale workloads):
+ *
+ * 1. __brk_cur tracks the *kernel-visible* program break (what the kernel
+ *    last confirmed via sys_brk).
+ * 2. __brk_committed tracks the highest address the kernel has page-mapped.
+ *    When sbrk() is called with a small increment, we round up to a full
+ *    page boundary and ask the kernel for the rounded-up address. This means
+ *    subsequent small sbrk() calls that fit within the already-committed
+ *    region can be satisfied without any syscall at all.
+ * 3. brk() uses Linux-style failure detection: the kernel always returns the
+ *    current break, so failure is detected by comparing the return value to
+ *    the requested address rather than checking for a negative value.
  */
 
-static void *__brk_cur = NULL;
+#define PAGE_SIZE_LIBC  4096
+#define BRK_CHUNK_SIZE  (64 * 1024)   /* 64KB pre-allocation granularity */
+
+static void *__brk_cur       = NULL;  /* Logical break: next byte to hand out */
+static void *__brk_committed = NULL;  /* Kernel-committed break (page-aligned) */
+
+/*
+ * Internal: ensure the kernel break is at least `target`.
+ * Returns 0 on success, -1 on failure (sets errno).
+ */
+static int __brk_ensure(void *target)
+{
+    if (__brk_committed && target <= __brk_committed)
+        return 0;  /* Already committed. */
+
+    /* Round up to page boundary. */
+    unsigned long t = (unsigned long)target;
+    unsigned long aligned = (t + PAGE_SIZE_LIBC - 1) & ~(PAGE_SIZE_LIBC - 1);
+
+    /* Commit at least BRK_CHUNK_SIZE beyond the current committed point
+     * to amortize syscalls.  This means many small sbrk() calls can be
+     * satisfied from the already-committed region without any syscall. */
+    unsigned long cur = (unsigned long)(__brk_committed ? __brk_committed : __brk_cur);
+    unsigned long chunked = (cur + BRK_CHUNK_SIZE + PAGE_SIZE_LIBC - 1) & ~(PAGE_SIZE_LIBC - 1);
+    if (chunked > aligned)
+        aligned = chunked;
+
+    long ret = veridian_syscall1(SYS_MEMORY_BRK, (long)aligned);
+    if (ret < 0 || (unsigned long)ret < t) {
+        /* Kernel could not satisfy even the minimum request.
+         * Try the exact target without chunk rounding. */
+        unsigned long exact = (t + PAGE_SIZE_LIBC - 1) & ~(PAGE_SIZE_LIBC - 1);
+        ret = veridian_syscall1(SYS_MEMORY_BRK, (long)exact);
+        if (ret < 0 || (unsigned long)ret < t) {
+            errno = ENOMEM;
+            return -1;
+        }
+    }
+    __brk_committed = (void *)(unsigned long)ret;
+    return 0;
+}
+
+/*
+ * Internal: query the current program break from the kernel and initialize
+ * tracking state. Called once lazily on first brk/sbrk use.
+ */
+static int __brk_init(void)
+{
+    if (__brk_cur)
+        return 0;
+
+    long cur = veridian_syscall1(SYS_MEMORY_BRK, 0);
+    if (cur <= 0) {
+        errno = ENOMEM;
+        return -1;
+    }
+    __brk_cur = (void *)cur;
+    __brk_committed = (void *)cur;
+    return 0;
+}
 
 int brk(void *addr)
 {
-    long ret = veridian_syscall1(SYS_MEMORY_BRK, addr);
-    if (ret < 0) {
-        errno = (int)(-ret);
+    if (__brk_init() < 0)
         return -1;
-    }
-    __brk_cur = (void *)ret;
+
+    if (__brk_ensure(addr) < 0)
+        return -1;
+
+    __brk_cur = addr;
     return 0;
 }
 
 void *sbrk(intptr_t increment)
 {
-    if (__brk_cur == NULL) {
-        /* Query current break. */
-        long cur = veridian_syscall1(SYS_MEMORY_BRK, 0);
-        if (cur < 0) {
-            errno = ENOMEM;
-            return (void *)-1;
-        }
-        __brk_cur = (void *)cur;
-    }
+    if (__brk_init() < 0)
+        return (void *)-1;
 
     if (increment == 0)
         return __brk_cur;
 
     void *old = __brk_cur;
-    void *requested = (char *)__brk_cur + increment;
-    long new_brk = veridian_syscall1(SYS_MEMORY_BRK, (long)requested);
-    if (new_brk < 0 || (void *)new_brk != requested) {
-        /* BRK returns the current (unchanged) break on failure,
-         * not a negative error code. Detect by comparing. */
-        errno = ENOMEM;
-        return (void *)-1;
+    void *target = (char *)__brk_cur + increment;
+
+    /* Negative increment (shrink): just move the logical pointer. */
+    if (increment < 0) {
+        __brk_cur = target;
+        return old;
     }
-    __brk_cur = (void *)new_brk;
+
+    /* Positive increment (grow): ensure kernel has committed enough pages. */
+    if (__brk_ensure(target) < 0)
+        return (void *)-1;
+
+    __brk_cur = target;
     return old;
 }
 

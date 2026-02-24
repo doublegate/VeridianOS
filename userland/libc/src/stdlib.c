@@ -37,8 +37,15 @@
 /* Alignment: all allocations are aligned to this boundary. */
 #define ALLOC_ALIGN     16
 
-/* Minimum sbrk increment (avoid many small brk calls). */
-#define SBRK_MIN        4096
+/*
+ * Minimum sbrk increment.  Small allocations round up to SBRK_MIN_SMALL
+ * to reduce syscall frequency; large allocations (>= 128 KiB) round up to
+ * SBRK_MIN_LARGE so cc1-scale 1-10 MiB blocks don't fragment the heap
+ * into many small sbrk regions.
+ */
+#define SBRK_MIN_SMALL  4096
+#define SBRK_MIN_LARGE  (128 * 1024)
+#define LARGE_THRESHOLD (128 * 1024)
 
 typedef struct block_header {
     size_t                  size;   /* Usable size (excluding header) */
@@ -132,8 +139,9 @@ void *malloc(size_t size)
 
     /* No suitable free block.  Extend the heap via sbrk(). */
     size_t total = HEADER_SIZE + size;
-    if (total < SBRK_MIN)
-        total = SBRK_MIN;
+    size_t sbrk_min = (size >= LARGE_THRESHOLD) ? SBRK_MIN_LARGE : SBRK_MIN_SMALL;
+    if (total < sbrk_min)
+        total = sbrk_min;
 
     void *mem = sbrk((intptr_t)total);
     if (mem == (void *)-1) {

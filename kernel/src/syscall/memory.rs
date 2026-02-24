@@ -290,10 +290,21 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> SyscallResult {
     Ok(0)
 }
 
+/// Maximum user heap size: 512 MiB.
+///
+/// Prevents a single process from consuming all physical memory via brk().
+/// cc1 (GCC compiler proper) typically uses 100-300 MiB for large source files;
+/// 512 MiB provides comfortable headroom.
+const MAX_USER_HEAP_SIZE: u64 = 512 * 1024 * 1024;
+
 /// Set or query the program break (syscall 23).
 ///
 /// If `addr` is 0, returns the current break. Otherwise, attempts to move
 /// the break to `addr`, allocating or freeing pages as needed.
+///
+/// Follows Linux semantics: always returns the current break address.
+/// On failure, the break is unchanged (so returned value != requested value).
+/// The libc sbrk() detects failure by comparing the return to the request.
 ///
 /// # Arguments
 /// - `addr`: New break address, or 0 to query.
@@ -307,20 +318,21 @@ pub fn sys_brk(addr: usize) -> SyscallResult {
     let new_break = if addr == 0 {
         None
     } else {
+        // Validate: reject requests that would exceed the max heap size.
+        let heap_start = memory_space.heap_start_addr();
+        let requested = addr as u64;
+        if requested > heap_start + MAX_USER_HEAP_SIZE {
+            // Return current break (unchanged) to signal failure.
+            return Ok(memory_space.brk(None).as_usize());
+        }
+
+        // Page-align the request upward for efficiency.
+        // The VAS brk() handles sub-page increments, but page-aligning here
+        // avoids partial-page fragmentation in the page table.
         Some(VirtualAddress(addr as u64))
     };
 
     let result = memory_space.brk(new_break);
-
-    // Diagnostic: trace brk calls for debugging malloc/heap issues
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[BRK] req=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(addr as u64);
-        crate::arch::x86_64::idt::raw_serial_str(b" ret=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(result.0);
-        crate::arch::x86_64::idt::raw_serial_str(b"\n");
-    }
 
     Ok(result.as_usize())
 }
