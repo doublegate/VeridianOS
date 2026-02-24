@@ -113,12 +113,17 @@ jobs:
         strategy:
             matrix:
                 include:
-                    - target: x86_64-unknown-none
+                    - target: targets/x86_64-veridian.json
                       arch: x86_64
+                      # Custom target with kernel code model + linker script
+                      # Required for higher-half kernel at 0xFFFFFFFF80100000
+                      target_dir: x86_64-veridian
                     - target: aarch64-unknown-none
                       arch: aarch64
+                      target_dir: aarch64-unknown-none
                     - target: riscv64gc-unknown-none-elf
                       arch: riscv64gc
+                      target_dir: riscv64gc-unknown-none-elf
         steps:
             - uses: actions/checkout@v4
             - name: Install Rust
@@ -163,9 +168,9 @@ jobs:
                   else
                     OBJCOPY="objcopy"
                   fi
-                  cp target/${{ matrix.target }}/release/veridian-kernel artifacts/veridian-kernel-${{ matrix.arch }}
-                  if [ -f "target/${{ matrix.target }}/release/veridian-kernel" ]; then
-                    $OBJCOPY --only-keep-debug target/${{ matrix.target }}/release/veridian-kernel \
+                  cp target/${{ matrix.target_dir }}/release/veridian-kernel artifacts/veridian-kernel-${{ matrix.arch }}
+                  if [ -f "target/${{ matrix.target_dir }}/release/veridian-kernel" ]; then
+                    $OBJCOPY --only-keep-debug target/${{ matrix.target_dir }}/release/veridian-kernel \
                       artifacts/symbols/veridian-kernel-${{ matrix.arch }}.debug || {
                       echo "Warning: Failed to extract debug symbols"
                       touch artifacts/symbols/veridian-kernel-${{ matrix.arch }}.debug
