@@ -2,12 +2,12 @@
 # build-selfhost-rootfs.sh -- Build rootfs with native GCC toolchain for self-hosting test
 #
 # Creates a TAR archive containing:
-#   - /bin/ programs (from regular rootfs)
+#   - /bin/ programs (from regular rootfs + coreutils)
 #   - /usr/bin/gcc, /usr/bin/as, /usr/bin/ld (native toolchain)
 #   - /usr/libexec/gcc/x86_64-veridian/14.2.0/cc1, collect2
 #   - /usr/lib/ (libc.a, libgcc.a, crt*.o)
 #   - /usr/include/ (C headers)
-#   - /usr/src/selfhost_test.c (test source file)
+#   - /usr/src/ (selfhost test source, coreutils source, test data)
 #
 # Usage: ./scripts/build-selfhost-rootfs.sh [toolchain-prefix]
 #
@@ -27,6 +27,7 @@ SYSROOT="${TOOLCHAIN_PREFIX}/sysroot"
 NATIVE_GCC_DIR="${PROJECT_ROOT}/target/native-gcc-static"
 TESTS_DIR="${PROJECT_ROOT}/userland/tests"
 PROGRAMS_DIR="${PROJECT_ROOT}/userland/programs"
+COREUTILS_DIR="${PROJECT_ROOT}/userland/coreutils"
 LIBC_DIR="${PROJECT_ROOT}/userland/libc"
 BUILD_DIR="${PROJECT_ROOT}/target/rootfs-selfhost-build"
 ROOTFS_TAR="${PROJECT_ROOT}/target/rootfs-selfhost.tar"
@@ -117,6 +118,19 @@ fi
 if [ -f "${PROGRAMS_DIR}/sysinfo/sysinfo.c" ]; then
     compile_libc_program "sysinfo" "${PROGRAMS_DIR}/sysinfo/sysinfo.c"
 fi
+
+# =========================================================================
+# 1b. Compile coreutils
+# =========================================================================
+echo "--- Coreutils ---"
+
+for src in "$COREUTILS_DIR"/*.c; do
+    [ -f "$src" ] || continue
+    name="$(basename "$src" .c)"
+    compile_libc_program "$name" "$src"
+done
+
+echo ""
 
 # =========================================================================
 # 2. Compile test programs
@@ -246,7 +260,7 @@ SPECEOF
 echo "  + /usr/lib/gcc/x86_64-veridian/14.2.0/specs (linker=ld)"
 
 # =========================================================================
-# 4. Copy test source file for on-OS compilation
+# 4. Copy source files for on-OS compilation
 # =========================================================================
 echo "--- Test source ---"
 for src in "$TESTS_DIR"/selfhost_*.c; do
@@ -255,6 +269,33 @@ for src in "$TESTS_DIR"/selfhost_*.c; do
     cp "$src" "$BUILD_DIR/usr/src/$name"
     echo "  + /usr/src/$name"
 done
+
+# Copy coreutils source (for self-hosted recompilation on VeridianOS)
+echo "--- Coreutils source ---"
+for src in "$COREUTILS_DIR"/*.c; do
+    [ -f "$src" ] || continue
+    name="$(basename "$src")"
+    cp "$src" "$BUILD_DIR/usr/src/$name"
+    echo "  + /usr/src/$name"
+done
+
+# =========================================================================
+# 4b. Create test data files for coreutils verification
+# =========================================================================
+echo "--- Test data ---"
+
+# cat_test.txt: known content ending with CAT_PASS
+printf 'Hello from VeridianOS\nCAT_PASS\n' > "$BUILD_DIR/usr/src/cat_test.txt"
+echo "  + /usr/src/cat_test.txt"
+
+# wc_test.txt: exactly 3 lines, 5 words, 24 bytes
+# "one two\nthree four\nfive\n" = 8 + 11 + 5 = 24 bytes
+printf 'one two\nthree four\nfive\n' > "$BUILD_DIR/usr/src/wc_test.txt"
+echo "  + /usr/src/wc_test.txt"
+
+# sort_test.txt: unsorted lines
+printf 'cherry\napple\nbanana\n' > "$BUILD_DIR/usr/src/sort_test.txt"
+echo "  + /usr/src/sort_test.txt"
 
 # =========================================================================
 # 5. Validate all binaries in /bin and /usr/bin are statically linked
@@ -308,6 +349,14 @@ echo "    -device ide-hd,drive=disk0 \\"
 echo "    -drive file=target/rootfs-selfhost.tar,if=none,id=vd0,format=raw \\"
 echo "    -device virtio-blk-pci,drive=vd0 \\"
 echo "    -serial stdio -display none -m 512M"
+echo ""
+echo "Coreutils verification (cross-compiled, run inside VeridianOS):"
+echo "  /bin/echo ECHO_PASS                # -> ECHO_PASS"
+echo "  /bin/cat /usr/src/cat_test.txt      # -> ends with CAT_PASS"
+echo "  /bin/wc /usr/src/wc_test.txt        # -> 3 lines, 5 words, 24 bytes"
+echo "  /bin/ls /usr/src/                    # -> lists test files"
+echo "  /bin/sort /usr/src/sort_test.txt     # -> apple, banana, cherry"
+echo "  /bin/pipeline_test                   # -> SUBTEST[1-3]_PASS + PIPELINE_PASS"
 echo ""
 echo "Self-hosting test commands (run inside VeridianOS, step-by-step):"
 echo "  # Step 1: Compile C to assembly"
