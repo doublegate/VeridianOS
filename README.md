@@ -112,7 +112,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.5.2 (February 24, 2026) | **Releases Published**: 27 (v0.1.0 through v0.5.2)
+**Latest Release**: v0.5.3 (February 24, 2026) | **Releases Published**: 28 (v0.1.0 through v0.5.3)
 
 | Metric | Value |
 | ------ | ----- |
@@ -162,7 +162,7 @@ Phases 0 through 4 are complete. The kernel provides:
 - **Complete C Library** -- 19 source files, full stdio/stdlib/string/unistd, architecture-specific setjmp/longjmp, 50+ syscall wrappers, 25+ POSIX-compatible headers (network, system, POSIX, C standard), math library (ldexp, frexp, log, exp, sqrt, pow, fabs, floor, ceil, modf)
 - **Cross-Compilation Toolchain** -- binutils 2.43 + GCC 14.2 Stage 2 cross-compiler, sysroot with headers and CRT files, CMake/Meson toolchain files; static native GCC toolchain (gcc, cc1, as, ld, ar) via Canadian cross-compilation for on-target self-hosting
 - **Coreutils** -- 6 progressively complex POSIX utilities cross-compiled and verified on VeridianOS: echo, cat, wc, ls, sort, and pipeline_test (capstone fork/exec/pipe/waitpid exercise)
-- **BusyBox 1.36.1** -- 95 applets cross-compiled with ash shell support; EPIPE/BrokenPipe handling for multi-pipe commands (`yes | head -n 1`), float printf (`%f/%g/%e`) for `seq`, pipe read improvements for command substitution
+- **BusyBox 1.36.1** -- 95 applets cross-compiled with ash shell support; EPIPE/BrokenPipe handling for multi-pipe commands (`yes | head -n 1`), float printf (`%f/%g/%e`) for `seq`, ash interactive mode (isatty/ENOTTY, sysconf, exec family, fnmatch/glob, tcgetpgrp), process lifecycle hardening for 213+ sequential execs (zombie reaping, MAX_PROCESSES=1024, fd leak detection), ARG_MAX enforcement (128KB), strftime (28 format specifiers), popen/pclose
 - **POSIX Regex Engine** -- 1291-line BRE/ERE regex library (`regex.h`/`regcomp`/`regexec`/`regfree`) with recursive backtracking NFA, supports `. * + ? ^ $ [...] | () {m,n}`, 12 POSIX character classes ([:alpha:], [:digit:], etc.), enables grep/sed/awk/find BusyBox applets
 - **Native Compilation Infrastructure** -- 384MB kernel heap, frame allocator emergency fallback, 8MB user-space stack growth, map_kernel_error translation layer, hardened sbrk/brk with 64KB chunk pre-allocation, page-aligned requests, local break tracking, 512MB per-process heap limit
 - **Virtio-blk Driver** -- Block I/O with TAR rootfs loader for cross-compiled user-space binaries; virtio-MMIO transport on AArch64/RISC-V, PCI on x86_64
@@ -196,6 +196,7 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### What Comes Next
 
+- **BusyBox Phase C Verification** -- QEMU boot testing of native compilation infrastructure (cc1/as/ld execution on VeridianOS)
 - **Phase 5: Performance Optimization** -- Sub-microsecond IPC, lock-free kernel paths, DPDK networking, NVMe optimization, profiling tools
 - **Phase 6: Advanced Features** -- Wayland compositor, desktop environment, multimedia, virtualization, cloud-native features, POSIX compatibility layer
 

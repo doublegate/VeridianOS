@@ -2,6 +2,84 @@
 
 ---
 
+## [v0.5.3] - 2026-02-24
+
+### v0.5.3: BusyBox B-10/B-11/B-13/B-18 -- Ash Compatibility, Process Lifecycle Hardening, ARG_MAX, POSIX libc
+
+Major release spanning BusyBox sprints B-10 through B-18. Implements ash shell compatibility (isatty detection, sysconf, exec family, fnmatch/glob), hardens process lifecycle for 213+ sequential exec workloads (zombie reaping, process count limits, fd leak detection), enforces POSIX ARG_MAX (128KB) in execve, and adds strftime (28 format specifiers) plus popen/pclose to libc. 35 files changed, +3475/-206 lines since v0.5.2.
+
+---
+
+### Added
+
+#### Ash Shell Compatibility (Sprint B-10)
+
+- `kernel/src/syscall/userspace.rs`: Fixed `sys_ioctl()` to return `ENOTTY` (`NotATerminal=-32`) for non-terminal file descriptors instead of `EINVAL`. BusyBox ash calls `isatty()` (which calls `ioctl(TCGETS)`) on stdin to decide interactive vs. non-interactive mode; incorrect errno caused ash to skip prompt display.
+- `userland/libc/src/posix_stubs.c`: Added `sysconf()` implementation with `_SC_CLK_TCK=100`, `_SC_OPEN_MAX=256`, `_SC_ARG_MAX=131072`. Ash time builtin and libbb duration calculation depend on `_SC_CLK_TCK` for tick-to-second conversion.
+- `userland/libc/src/unistd.c`: Implemented `execv()`, `execl()`, `execlp()`, `execle()` -- all delegating to the `execve` syscall. Ash uses `execlp()` for child command dispatch and `execl()` for `/bin/sh -c` invocations.
+- `userland/libc/src/posix_stubs.c`: Complete `fnmatch()` rewrite with `[abc]` character classes, `[a-z]` ranges, `[!abc]` negation, `FNM_PATHNAME`, `FNM_PERIOD`, `FNM_CASEFOLD` flag support. Previous stub only handled `*` and `?`.
+- `userland/libc/src/posix_stubs.c`: Implemented `glob()` and `globfree()` with directory scanning via `opendir`/`readdir`, `fnmatch()` matching, and `GLOB_NOSORT`/`GLOB_NOCHECK`/`GLOB_DOOFFS`/`GLOB_APPEND`/`GLOB_ERR` flag support.
+- `userland/libc/src/termios.c`: Fixed `tcgetpgrp()` to return `getpgrp()` instead of 0, preventing ash from entering an infinite `SIGTTIN` loop on startup.
+
+#### Process Lifecycle Hardening (Sprint B-11)
+
+- `kernel/src/process/creation.rs`: Reduced `MAX_PROCESSES` from 4096 to 1024 with enforcement in both `fork_process()` and `create_process_with_options()` paths. Returns `KernelError::ResourceExhausted` mapped to `EAGAIN` per POSIX `fork()` semantics.
+- `kernel/src/process/fork.rs`: Added process count validation in fork path with `ResourceLimitExceeded` error propagation.
+- `kernel/src/bootstrap.rs`: Boot-context zombie reaping -- `run_user_process_scheduled()` removes zombie entries from the process table after each program completes, preventing unbounded table growth across 213+ sequential GCC invocations. New `boot_reap_orphan_zombies()` sweeps zombie processes orphaned to init (PID 1) after each `boot_run_program()` call.
+- `kernel/src/process/exit.rs`: Added fd leak detection -- `cleanup_process()` logs a warning when a process exits with more than 3 open fds (stdin/stdout/stderr expected), aiding diagnosis during native compilation workloads.
+- `kernel/src/process/mod.rs`: Exposed `remove_process()` for boot zombie reaping and added `process_count()` accessor for limit enforcement.
+- `kernel/src/syscall/mod.rs`: New `SyscallError::ResourceLimitExceeded` (-79) variant for general resource limit errors.
+
+#### ARG_MAX Enforcement in execve (Sprint B-13)
+
+- `kernel/src/syscall/process.rs`: Added cumulative `ARG_MAX=131072` (128KB) check across argv+envp in execve, plus `MAX_ARGS=32768` per-array element limit. New `copy_string_array_from_user_tracked()` with shared byte counter ensures combined argument and environment size cannot exceed POSIX limits.
+- `kernel/src/syscall/mod.rs`: New `SyscallError::ArgumentListTooLong` (-24, maps to `E2BIG` errno).
+- `userland/libc/include/veridian/errno.h`: Added `E2BIG=7` (argument list too long) errno constant.
+- BusyBox 213-file link step uses approximately 8KB of arguments, well within the 128KB limit.
+
+#### strftime and popen/pclose (Sprint B-18)
+
+- `userland/libc/src/posix_stubs3.c`: Implemented `strftime()` with 28 format specifiers (`%Y`, `%m`, `%d`, `%H`, `%M`, `%S`, `%A`/`%a`, `%B`/`%b`, `%p`, `%Z`, `%j`, `%u`/`%w`, `%U`/`%W`, `%T`, `%F`, `%R`, `%c`, `%x`, `%X`, `%D`, `%e`, `%G`, `%g`, `%V`, `%%`, `%n`, `%t`). BusyBox date applet depends on strftime for output formatting.
+- `userland/libc/src/posix_stubs3.c`: Implemented `popen()` and `pclose()` using fork/exec/pipe internally. Supports "r" (read from command stdout) and "w" (write to command stdin) modes. Up to 16 concurrent popen streams tracked. Enables BusyBox applets that use command substitution via popen.
+
+#### Phase C Boot Test Infrastructure (Sprints B-15/B-16)
+
+- `kernel/src/bootstrap.rs`: Added boot test dispatch for native compilation verification -- single-file compilation test (Phase C-1) and full 213-file BusyBox native build test (Phase C-3). Code-complete, pending QEMU boot verification.
+
+#### Additional libc Functions
+
+- `userland/libc/src/posix_stubs2.c`: Added `getpgrp()` implementation via `SYS_GETPID` syscall.
+- `userland/libc/include/veridian/errno.h`: Added `ENOTTY=25` (not a terminal) errno constant.
+
+### Verified (Sprint B-12)
+
+- `mkstemp()`, `tmpfile()`, `tmpnam()`, `fflush()`, `setvbuf()` -- all correctly implemented and verified working for GCC temporary file operations during native compilation.
+
+### Verified (Sprint B-14)
+
+- Signal handling infrastructure -- already complete from prior work. No additional changes needed.
+
+### Changed
+
+#### Process Table Management
+
+- `kernel/src/process/mod.rs`: `remove_process()` made public for boot-context zombie reaping. Added `process_count()` accessor.
+- `kernel/src/syscall/filesystem.rs`: Updated `sys_ioctl()` TCGETS path to return `NotATerminal` instead of `InvalidArgument`.
+
+### Infrastructure
+
+- Version bumped: Cargo.toml (0.5.2 -> 0.5.3), uname (0.5.2 -> 0.5.3), /etc/os-release (0.5.2 -> 0.5.3).
+- 5 commits since v0.5.2, 35 files changed, +3475/-206 lines.
+- Sprints covered: B-10, B-11, B-12 (verified), B-13, B-14 (verified), B-15, B-16, B-18.
+
+### Known Limitations
+
+- Phase C native compilation boot tests (B-15/B-16) are code-complete but require QEMU boot verification with the native toolchain rootfs.
+- `$(pwd)` returns empty for builtins in boot execution model.
+- BusyBox ash interactive mode requires full rootfs with `/bin/busybox` symlinks.
+
+---
+
 ## [v0.5.2] - 2026-02-24
 
 ### v0.5.2: BusyBox B-5/B-6/B-7/B-8/B-9/B-17 -- EPIPE, Float Printf, Native Compilation, POSIX Regex
