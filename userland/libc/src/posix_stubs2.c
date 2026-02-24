@@ -34,16 +34,25 @@ int putchar(int c)
 /* sysconf                                                                   */
 /* ========================================================================= */
 
+#define _SC_CLK_TCK           2
+#define _SC_OPEN_MAX          4
 #define _SC_NPROCESSORS_ONLN  84
 #define _SC_PAGESIZE          30
+#define _SC_ARG_MAX           0
 
 long sysconf(int name)
 {
     switch (name) {
+    case _SC_CLK_TCK:
+        return 100; /* 100 Hz tick (standard for POSIX) */
     case _SC_NPROCESSORS_ONLN:
         return 1; /* Single CPU for now */
     case _SC_PAGESIZE:
         return 4096;
+    case _SC_OPEN_MAX:
+        return 256;
+    case _SC_ARG_MAX:
+        return 131072; /* 128 KiB */
     default:
         return -1;
     }

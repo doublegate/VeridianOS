@@ -9,6 +9,15 @@ use super::SyscallError;
 /// Maximum string length we'll copy from user space
 const MAX_USER_STRING_LEN: usize = 4096;
 
+/// Maximum combined size of argv + envp data passed to execve (128 KB).
+/// Matches ARG_MAX in userland/libc/include/limits.h.
+const ARG_MAX: usize = 131072;
+
+/// Maximum number of individual arguments or environment variables in a
+/// single string array (argv or envp). Prevents DoS from massive counts
+/// of tiny strings that would individually pass size checks.
+const MAX_ARGS: usize = 32768;
+
 /// User space memory range constants
 const USER_SPACE_START: usize = 0x0000_0000_0000_0000;
 const USER_SPACE_END: usize = 0x0000_7FFF_FFFF_FFFF; // 128TB
@@ -165,6 +174,27 @@ pub unsafe fn copy_slice_to_user(user_ptr: usize, data: &[u8]) -> Result<(), Sys
 /// # Safety
 /// This function reads from user-provided pointers and must validate them
 pub unsafe fn copy_string_array_from_user(array_ptr: usize) -> Result<Vec<String>, SyscallError> {
+    let mut cumulative = 0usize;
+    copy_string_array_from_user_tracked(array_ptr, &mut cumulative)
+}
+
+/// Copy a null-terminated string array from user space with cumulative
+/// ARG_MAX tracking.
+///
+/// `cumulative_bytes` tracks the total size of all argument and environment
+/// data across multiple calls (argv + envp). The total includes string
+/// bytes (with NUL terminators) plus 8 bytes per pointer. If the running
+/// total exceeds ARG_MAX (131072 bytes), returns `ArgumentListTooLong`.
+///
+/// The array element count is also capped at MAX_ARGS (32768) to prevent
+/// DoS from massive counts of tiny strings.
+///
+/// # Safety
+/// This function reads from user-provided pointers and must validate them
+pub unsafe fn copy_string_array_from_user_tracked(
+    array_ptr: usize,
+    cumulative_bytes: &mut usize,
+) -> Result<Vec<String>, SyscallError> {
     if array_ptr == 0 {
         return Ok(Vec::new());
     }
@@ -181,15 +211,26 @@ pub unsafe fn copy_string_array_from_user(array_ptr: usize) -> Result<Vec<String
             break;
         }
 
+        // Enforce maximum argument count
+        if strings.len() >= MAX_ARGS {
+            return Err(SyscallError::ArgumentListTooLong);
+        }
+
         let string = copy_string_from_user(string_ptr)?;
+
+        // Account for string bytes + NUL terminator + one 8-byte pointer
+        let entry_cost = string.len() + 1 + core::mem::size_of::<usize>();
+        *cumulative_bytes = cumulative_bytes
+            .checked_add(entry_cost)
+            .ok_or(SyscallError::ArgumentListTooLong)?;
+
+        if *cumulative_bytes > ARG_MAX {
+            return Err(SyscallError::ArgumentListTooLong);
+        }
+
         strings.push(string);
 
         current_ptr += 8; // Move to next pointer
-
-        // Sanity check
-        if strings.len() > 1024 {
-            return Err(SyscallError::InvalidArgument);
-        }
     }
 
     Ok(strings)

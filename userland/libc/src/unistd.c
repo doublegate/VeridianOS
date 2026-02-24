@@ -14,6 +14,7 @@
 #include <string.h>
 #include <errno.h>
 #include <time.h>
+#include <stdarg.h>
 #include <sys/ioctl.h>
 
 /* ========================================================================= */
@@ -98,6 +99,92 @@ int execvp(const char *file, char *const argv[])
 
     errno = ENOENT;
     return -1;
+}
+
+/*
+ * execv: execute a program with an argument vector.
+ * Equivalent to execve(pathname, argv, environ).
+ */
+int execv(const char *pathname, char *const argv[])
+{
+    return execve(pathname, argv, environ);
+}
+
+/*
+ * execl: execute a program with a variadic argument list.
+ * The argument list is terminated by (char *)NULL.
+ */
+int execl(const char *pathname, const char *arg, ...)
+{
+    /* Count arguments. */
+    va_list ap;
+    int argc = 1; /* for 'arg' itself */
+    va_start(ap, arg);
+    while (va_arg(ap, const char *) != NULL)
+        argc++;
+    va_end(ap);
+
+    /* Build argv array. */
+    const char *argv[argc + 1];
+    argv[0] = arg;
+    va_start(ap, arg);
+    for (int i = 1; i <= argc; i++)
+        argv[i] = va_arg(ap, const char *);
+    va_end(ap);
+
+    return execve(pathname, (char *const *)argv, environ);
+}
+
+/*
+ * execlp: execute a program by searching PATH, with variadic args.
+ * The argument list is terminated by (char *)NULL.
+ */
+int execlp(const char *file, const char *arg, ...)
+{
+    /* Count arguments. */
+    va_list ap;
+    int argc = 1;
+    va_start(ap, arg);
+    while (va_arg(ap, const char *) != NULL)
+        argc++;
+    va_end(ap);
+
+    /* Build argv array. */
+    const char *argv[argc + 1];
+    argv[0] = arg;
+    va_start(ap, arg);
+    for (int i = 1; i <= argc; i++)
+        argv[i] = va_arg(ap, const char *);
+    va_end(ap);
+
+    return execvp(file, (char *const *)argv);
+}
+
+/*
+ * execle: execute a program with variadic args and explicit environment.
+ * The argument list is terminated by (char *)NULL, followed by envp.
+ */
+int execle(const char *pathname, const char *arg, ...)
+{
+    /* Count arguments (excluding the trailing envp pointer). */
+    va_list ap;
+    int argc = 1;
+    va_start(ap, arg);
+    while (va_arg(ap, const char *) != NULL)
+        argc++;
+    /* The next argument after the NULL sentinel is envp. */
+    char *const *envp = va_arg(ap, char *const *);
+    va_end(ap);
+
+    /* Build argv array. */
+    const char *argv[argc + 1];
+    argv[0] = arg;
+    va_start(ap, arg);
+    for (int i = 1; i <= argc; i++)
+        argv[i] = va_arg(ap, const char *);
+    va_end(ap);
+
+    return execve(pathname, (char *const *)argv, envp);
 }
 
 /* ========================================================================= */

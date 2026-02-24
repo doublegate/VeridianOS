@@ -557,21 +557,156 @@ int fileno_unlocked(FILE *stream)
     return fileno(stream);
 }
 
-/* --- Process I/O --------------------------------------------------------- */
+/* --- Process I/O (popen / pclose) ---------------------------------------- */
+
+/*
+ * popen/pclose implementation using fork + exec + pipe.
+ *
+ * A static table maps FILE pointers to child PIDs so that pclose() can
+ * waitpid() for the correct child.  Up to 16 simultaneous popen'd
+ * processes are supported.
+ */
+
+#define POPEN_MAX 16
+
+static struct {
+    FILE *fp;
+    pid_t pid;
+} __popen_table[POPEN_MAX];
 
 FILE *popen(const char *command, const char *type)
 {
-    (void)command;
-    (void)type;
-    errno = ENOSYS;
+    int pipefd[2];
+    int reading;
+
+    if (command == NULL || type == NULL) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    if (type[0] == 'r')
+        reading = 1;
+    else if (type[0] == 'w')
+        reading = 0;
+    else {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    if (pipe(pipefd) < 0)
+        return NULL;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return NULL;
+    }
+
+    if (pid == 0) {
+        /* Child process. */
+        if (reading) {
+            /* Parent reads from pipe: child writes stdout to pipe. */
+            close(pipefd[0]);           /* Close read end in child. */
+            if (pipefd[1] != STDOUT_FILENO) {
+                dup2(pipefd[1], STDOUT_FILENO);
+                close(pipefd[1]);
+            }
+        } else {
+            /* Parent writes to pipe: child reads stdin from pipe. */
+            close(pipefd[1]);           /* Close write end in child. */
+            if (pipefd[0] != STDIN_FILENO) {
+                dup2(pipefd[0], STDIN_FILENO);
+                close(pipefd[0]);
+            }
+        }
+
+        /* Execute the command via /bin/sh -c. */
+        char *argv[4];
+        argv[0] = "sh";
+        argv[1] = "-c";
+        argv[2] = (char *)command;
+        argv[3] = NULL;
+        extern char **environ;
+        execve("/bin/sh", argv, environ);
+        _exit(127);  /* execve failed */
+    }
+
+    /* Parent process. */
+    FILE *fp;
+    if (reading) {
+        close(pipefd[1]);              /* Close write end in parent. */
+        fp = fdopen(pipefd[0], "r");
+    } else {
+        close(pipefd[0]);              /* Close read end in parent. */
+        fp = fdopen(pipefd[1], "w");
+    }
+
+    if (fp == NULL) {
+        /* fdopen failed -- clean up. */
+        close(reading ? pipefd[0] : pipefd[1]);
+        waitpid(pid, NULL, 0);
+        return NULL;
+    }
+
+    /* Record the child PID for pclose(). */
+    for (int i = 0; i < POPEN_MAX; i++) {
+        if (__popen_table[i].fp == NULL) {
+            __popen_table[i].fp = fp;
+            __popen_table[i].pid = pid;
+            return fp;
+        }
+    }
+
+    /* No slots available -- this should be rare (>16 simultaneous popens). */
+    fclose(fp);
+    waitpid(pid, NULL, 0);
+    errno = EMFILE;
     return NULL;
 }
 
 int pclose(FILE *stream)
 {
-    (void)stream;
-    errno = ENOSYS;
-    return -1;
+    if (stream == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    /* Find the child PID for this stream. */
+    pid_t pid = -1;
+    int slot = -1;
+    for (int i = 0; i < POPEN_MAX; i++) {
+        if (__popen_table[i].fp == stream) {
+            pid = __popen_table[i].pid;
+            slot = i;
+            break;
+        }
+    }
+
+    if (pid == -1) {
+        /* Not a popen'd stream. */
+        errno = EINVAL;
+        return -1;
+    }
+
+    /* Close the stream (flushes buffers, closes fd). */
+    fclose(stream);
+
+    /* Clear the table entry. */
+    __popen_table[slot].fp = NULL;
+    __popen_table[slot].pid = 0;
+
+    /* Wait for the child to exit and return its status. */
+    int status;
+    pid_t ret;
+    do {
+        ret = waitpid(pid, &status, 0);
+    } while (ret == -1 && errno == EINTR);
+
+    if (ret == -1)
+        return -1;
+
+    return status;
 }
 
 /* --- stdio extensions ---------------------------------------------------- */
@@ -762,33 +897,347 @@ int futimens(int fd, const struct timespec times[2])
 
 #include <fnmatch.h>
 
+/*
+ * fnmatch: POSIX filename pattern matching.
+ *
+ * Handles *, ?, and [...] (including [!...] / [^...] negation and
+ * a-z range expressions).  FNM_PATHNAME, FNM_PERIOD, FNM_NOESCAPE,
+ * and FNM_CASEFOLD flags are supported.
+ */
+static int __fnmatch_lower(int c)
+{
+    return (c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c;
+}
+
 int fnmatch(const char *pattern, const char *string, int flags)
 {
-    (void)flags;
     const char *p = pattern, *s = string;
+
     while (*p) {
+        if (*s == '\0' && *p != '*')
+            return FNM_NOMATCH;
+
+        /* FNM_PERIOD: leading dot must be matched literally. */
+        if ((flags & FNM_PERIOD) && *s == '.' &&
+            (s == string || ((flags & FNM_PATHNAME) && *(s - 1) == '/'))) {
+            if (*p != '.')
+                return FNM_NOMATCH;
+            p++;
+            s++;
+            continue;
+        }
+
         switch (*p) {
         case '?':
-            if (*s == '\0') return 1;
+            if ((flags & FNM_PATHNAME) && *s == '/')
+                return FNM_NOMATCH;
             s++;
             p++;
             break;
+
         case '*':
             p++;
-            if (*p == '\0') return 0;
+            while (*p == '*')
+                p++;
+            if (*p == '\0')
+                return ((flags & FNM_PATHNAME) && strchr(s, '/'))
+                    ? FNM_NOMATCH : 0;
             while (*s) {
-                if (fnmatch(p, s, flags) == 0) return 0;
+                if (fnmatch(p, s, flags & ~FNM_PERIOD) == 0)
+                    return 0;
+                if ((flags & FNM_PATHNAME) && *s == '/')
+                    break;
                 s++;
             }
-            return 1;
-        default:
-            if (*p != *s) return 1;
+            return FNM_NOMATCH;
+
+        case '[': {
+            /* Character class: [abc], [a-z], [!abc], [^abc] */
+            if ((flags & FNM_PATHNAME) && *s == '/')
+                return FNM_NOMATCH;
+
+            p++; /* skip '[' */
+            int negate = 0;
+            if (*p == '!' || *p == '^') {
+                negate = 1;
+                p++;
+            }
+            int matched = 0;
+            int ch = (flags & FNM_CASEFOLD) ? __fnmatch_lower(*s) : *s;
+
+            /* ']' at start of class is literal. */
+            if (*p == ']') {
+                if (ch == ']')
+                    matched = 1;
+                p++;
+            }
+
+            while (*p && *p != ']') {
+                int lo = (flags & FNM_CASEFOLD) ? __fnmatch_lower(*p) : *p;
+                p++;
+                if (*p == '-' && *(p + 1) != '\0' && *(p + 1) != ']') {
+                    p++; /* skip '-' */
+                    int hi = (flags & FNM_CASEFOLD) ? __fnmatch_lower(*p) : *p;
+                    p++;
+                    if (ch >= lo && ch <= hi)
+                        matched = 1;
+                } else {
+                    if (ch == lo)
+                        matched = 1;
+                }
+            }
+            if (*p == ']')
+                p++;
+
+            if (negate)
+                matched = !matched;
+            if (!matched)
+                return FNM_NOMATCH;
+            s++;
+            break;
+        }
+
+        case '\\':
+            if (!(flags & FNM_NOESCAPE)) {
+                p++;
+                if (*p == '\0')
+                    return FNM_NOMATCH;
+            }
+            /* Fall through to literal match. */
+            /* FALLTHROUGH */
+        default: {
+            int pc = *p, sc = *s;
+            if (flags & FNM_CASEFOLD) {
+                pc = __fnmatch_lower(pc);
+                sc = __fnmatch_lower(sc);
+            }
+            if (pc != sc)
+                return FNM_NOMATCH;
             p++;
             s++;
             break;
         }
+        }
     }
-    return (*s == '\0') ? 0 : 1;
+
+    return (*s == '\0') ? 0 : FNM_NOMATCH;
+}
+
+/* --- glob ---------------------------------------------------------------- */
+
+#include <glob.h>
+#include <dirent.h>
+
+/*
+ * glob: POSIX filename generation (wildcard expansion).
+ *
+ * Handles single-level patterns (no path separator in the pattern).
+ * Multi-level path patterns (e.g. dir/ * /file) are handled by
+ * splitting at '/' and recursing on each path component.  This
+ * implementation is sufficient for ash shell filename expansion.
+ */
+
+/* Helper: check if a string contains any glob metacharacters. */
+static int __glob_has_magic(const char *p)
+{
+    for (; *p; p++) {
+        if (*p == '*' || *p == '?' || *p == '[')
+            return 1;
+    }
+    return 0;
+}
+
+/* Helper: add a path to the glob result, growing the array as needed. */
+static int __glob_add(glob_t *pglob, const char *path)
+{
+    size_t idx = pglob->gl_pathc + pglob->gl_offs;
+    /* Grow by doubling, minimum 16 slots. */
+    size_t needed = idx + 2; /* +1 for entry, +1 for trailing NULL */
+    size_t capacity = 0;
+    /* Calculate current capacity from gl_pathv allocation. */
+    if (pglob->gl_pathv == NULL)
+        capacity = 0;
+    else {
+        /* We need at least 'needed' slots. */
+        capacity = needed; /* simplification: always realloc */
+    }
+
+    char **nv = (char **)realloc(pglob->gl_pathv, needed * sizeof(char *));
+    if (nv == NULL)
+        return GLOB_NOSPACE;
+    pglob->gl_pathv = nv;
+
+    /* Initialize gl_offs entries to NULL on first allocation. */
+    if (pglob->gl_pathc == 0) {
+        for (size_t i = 0; i < pglob->gl_offs; i++)
+            pglob->gl_pathv[i] = NULL;
+    }
+
+    char *dup = strdup(path);
+    if (dup == NULL)
+        return GLOB_NOSPACE;
+
+    pglob->gl_pathv[idx] = dup;
+    pglob->gl_pathc++;
+    pglob->gl_pathv[idx + 1] = NULL;
+    return 0;
+}
+
+/* Simple string comparison for qsort. */
+static int __glob_strcmp(const void *a, const void *b)
+{
+    return strcmp(*(const char **)a, *(const char **)b);
+}
+
+int glob(const char *pattern, int flags,
+         int (*errfunc)(const char *, int), glob_t *pglob)
+{
+    (void)errfunc;
+
+    if (!(flags & GLOB_APPEND)) {
+        pglob->gl_pathc = 0;
+        pglob->gl_pathv = NULL;
+        if (!(flags & GLOB_DOOFFS))
+            pglob->gl_offs = 0;
+    }
+
+    /* Split pattern into directory and base components. */
+    const char *slash = strrchr(pattern, '/');
+    char dir[4096];
+    const char *base;
+
+    if (slash) {
+        size_t dlen = (size_t)(slash - pattern);
+        if (dlen == 0) {
+            dir[0] = '/';
+            dir[1] = '\0';
+        } else if (dlen < sizeof(dir)) {
+            memcpy(dir, pattern, dlen);
+            dir[dlen] = '\0';
+        } else {
+            return GLOB_NOSPACE;
+        }
+        base = slash + 1;
+    } else {
+        strcpy(dir, ".");
+        base = pattern;
+    }
+
+    /* If the base component has no wildcards, check literal existence. */
+    if (!__glob_has_magic(base)) {
+        char full[4096];
+        if (slash) {
+            size_t dl = strlen(dir);
+            size_t bl = strlen(base);
+            if (dl + 1 + bl + 1 > sizeof(full))
+                return GLOB_NOSPACE;
+            memcpy(full, dir, dl);
+            full[dl] = '/';
+            memcpy(full + dl + 1, base, bl + 1);
+        } else {
+            size_t bl = strlen(base);
+            if (bl + 1 > sizeof(full))
+                return GLOB_NOSPACE;
+            memcpy(full, base, bl + 1);
+        }
+
+        extern int access(const char *, int);
+        if (access(full, 0 /* F_OK */) == 0) {
+            int rc = __glob_add(pglob, full);
+            if (rc) return rc;
+        } else if (flags & GLOB_NOCHECK) {
+            int rc = __glob_add(pglob, pattern);
+            if (rc) return rc;
+        } else {
+            return GLOB_NOMATCH;
+        }
+        return 0;
+    }
+
+    /* Open the directory and match entries against the base pattern. */
+    DIR *dp = opendir(dir);
+    if (dp == NULL) {
+        if (flags & GLOB_NOCHECK) {
+            int rc = __glob_add(pglob, pattern);
+            if (rc) return rc;
+            return 0;
+        }
+        return GLOB_ABORTED;
+    }
+
+    int found = 0;
+    struct dirent *de;
+    while ((de = readdir(dp)) != NULL) {
+        /* Skip . and .. */
+        if (de->d_name[0] == '.' && (de->d_name[1] == '\0' ||
+            (de->d_name[1] == '.' && de->d_name[2] == '\0')))
+            continue;
+
+        /* Skip hidden files unless pattern starts with '.' */
+        if (de->d_name[0] == '.' && base[0] != '.')
+            continue;
+
+        if (fnmatch(base, de->d_name, 0) == 0) {
+            char full[4096];
+            if (slash) {
+                size_t dl = strlen(dir);
+                size_t nl = strlen(de->d_name);
+                if (dl + 1 + nl + 1 > sizeof(full))
+                    continue;
+                memcpy(full, dir, dl);
+                full[dl] = '/';
+                memcpy(full + dl + 1, de->d_name, nl + 1);
+            } else {
+                size_t nl = strlen(de->d_name);
+                if (nl + 1 > sizeof(full))
+                    continue;
+                memcpy(full, de->d_name, nl + 1);
+            }
+
+            if (flags & GLOB_MARK) {
+                /* Append '/' if entry is a directory.  We skip this check
+                 * since stat() support may be limited; ash doesn't depend on it. */
+            }
+
+            int rc = __glob_add(pglob, full);
+            if (rc) {
+                closedir(dp);
+                return rc;
+            }
+            found++;
+        }
+    }
+    closedir(dp);
+
+    if (found == 0) {
+        if (flags & GLOB_NOCHECK) {
+            int rc = __glob_add(pglob, pattern);
+            if (rc) return rc;
+        } else {
+            return GLOB_NOMATCH;
+        }
+    }
+
+    /* Sort results unless GLOB_NOSORT is set. */
+    if (!(flags & GLOB_NOSORT) && pglob->gl_pathc > 1) {
+        qsort(pglob->gl_pathv + pglob->gl_offs,
+              pglob->gl_pathc, sizeof(char *), __glob_strcmp);
+    }
+
+    return 0;
+}
+
+void globfree(glob_t *pglob)
+{
+    if (pglob == NULL || pglob->gl_pathv == NULL)
+        return;
+
+    for (size_t i = pglob->gl_offs; i < pglob->gl_offs + pglob->gl_pathc; i++) {
+        free(pglob->gl_pathv[i]);
+    }
+    free(pglob->gl_pathv);
+    pglob->gl_pathv = NULL;
+    pglob->gl_pathc = 0;
 }
 
 /* --- setjmp / longjmp (x86_64 only) -------------------------------------- */

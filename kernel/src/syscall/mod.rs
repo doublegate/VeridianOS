@@ -404,8 +404,13 @@ pub enum SyscallError {
     FileExists = -20,
     BadFileDescriptor = -21,
     IoError = -22,
+
+    // Exec errors
+    ArgumentListTooLong = -24,
+
     NotADirectory = -28,
     IsADirectory = -29,
+    NotATerminal = -32,
     BrokenPipe = -39,
     DirectoryNotEmpty = -45,
 }

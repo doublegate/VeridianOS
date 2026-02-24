@@ -53,7 +53,7 @@ pub fn sys_fork() -> SyscallResult {
 /// - argv_ptr: Pointer to argument array
 /// - envp_ptr: Pointer to environment array
 pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallResult {
-    use crate::syscall::userspace::{copy_string_array_from_user, copy_string_from_user};
+    use crate::syscall::userspace::{copy_string_array_from_user_tracked, copy_string_from_user};
 
     // Validate path pointer is in user space
     validate_user_string_ptr(path_ptr)?;
@@ -67,13 +67,18 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
 
     crate::println!("[SYS_EXEC] path=\"{}\"", path);
 
-    // Parse argv and envp arrays from user space
+    // Parse argv and envp arrays from user space with cumulative ARG_MAX
+    // enforcement. A single counter tracks total bytes across both argv and
+    // envp (string data + NUL terminators + pointer slots). If the combined
+    // size exceeds ARG_MAX (131072 bytes), returns E2BIG.
+    //
     // SAFETY: argv_ptr and envp_ptr are user-space pointers to null-terminated
-    // arrays of string pointers. copy_string_array_from_user handles null
-    // pointer checks internally and bounds-checks string lengths.
-    let argv = unsafe { copy_string_array_from_user(argv_ptr)? };
+    // arrays of string pointers. copy_string_array_from_user_tracked handles
+    // null pointer checks internally and bounds-checks string lengths.
+    let mut arg_total_bytes: usize = 0;
+    let argv = unsafe { copy_string_array_from_user_tracked(argv_ptr, &mut arg_total_bytes)? };
 
-    let mut envp = unsafe { copy_string_array_from_user(envp_ptr)? };
+    let mut envp = unsafe { copy_string_array_from_user_tracked(envp_ptr, &mut arg_total_bytes)? };
 
     // If envp is empty (NULL pointer from user-space), inherit the parent
     // process's environment variables. This handles the case where libc's

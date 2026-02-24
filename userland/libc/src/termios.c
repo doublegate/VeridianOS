@@ -149,8 +149,16 @@ int tcsetpgrp(int fd, pid_t pgrp)
     return 0;
 }
 
+/* Forward declaration -- getpgrp() is in syscall.c */
+extern pid_t getpgrp(void);
+
 pid_t tcgetpgrp(int fd)
 {
     (void)fd;
-    return 0;
+    /*
+     * Return the calling process's process group ID. This is correct
+     * for a single-process-group terminal environment and allows ash
+     * to detect it is in the foreground.
+     */
+    return getpgrp();
 }

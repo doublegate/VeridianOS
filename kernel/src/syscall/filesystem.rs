@@ -1081,7 +1081,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
         TIOCGWINSZ | TIOCSWINSZ | TCGETS | TCSETS | TCSETSW | TCSETSF | TIOCGPGRP | TIOCSPGRP
     );
     if is_terminal_cmd && fd > 2 {
-        return Err(SyscallError::InvalidArgument);
+        return Err(SyscallError::NotATerminal);
     }
 
     match cmd {
