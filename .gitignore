@@ -285,6 +285,13 @@ OVMF*.fd
 # Cross-toolchain installs to /opt/veridian/toolchain (outside project).
 # *.tar (line 230) covers rootfs.tar copied to project root by build-rootfs.sh.
 
+# Userland/coreutils build artifacts (cross-compiled objects)
+userland/coreutils/*.o
+
+# Self-host rootfs build artifacts
+target/rootfs-build/
+target/rootfs-selfhost.tar
+
 # Plan files (Claude Code)
 .claude/plans/
 a.out

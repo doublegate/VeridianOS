@@ -2,6 +2,70 @@
 
 ---
 
+## [v0.5.1] - 2026-02-23
+
+### v0.5.1: Progressive Coreutils + Toolchain Validation + Tri-Architecture Clippy Clean
+
+Implements 6 progressively complex POSIX coreutils to exercise the self-hosted compilation pipeline end-to-end, fixes a critical pipe fd corruption bug, cleans up ~490 lines of diagnostic traces, and achieves zero clippy warnings across all 3 architectures (x86_64, AArch64, RISC-V).
+
+---
+
+### Added
+
+#### Progressive Coreutils (`userland/coreutils/`, 6 new files, ~884 lines)
+
+Six C programs of increasing syscall complexity, cross-compiled with the GCC 14.2 toolchain and verified running on VeridianOS via virtio-blk rootfs:
+
+- `echo.c` (36 lines): Argv traversal + write(). Supports `-n` flag for trailing newline suppression. Validates basic compilation, argc/argv, stdout. Self-test: `echo ECHO_PASS` prints `ECHO_PASS`.
+- `cat.c` (71 lines): File open/read/write/close loop. 4KB read buffer. Reads files or stdin. Self-test: `cat /usr/src/cat_test.txt` outputs content ending with `CAT_PASS`. Syscalls: open, read, write, close.
+- `wc.c` (125 lines): Character classification + getopt + formatted printf. Counts lines/words/bytes with `-l`/`-w`/`-c` flags. In-word state machine via isspace(). Self-test: `wc /usr/src/wc_test.txt` yields `3  5  24`. Syscalls: open, read, write, close + getopt + ctype.
+- `ls.c` (174 lines): Directory traversal + stat + qsort. Supports `-l` (long format with permissions, nlink, size, date), `-a` (show hidden), `-1` (one per line). Manual time formatting via gmtime() (strftime is stub). Stack-allocated 256-entry array. Self-test: `ls /usr/src/` lists known files. Syscalls: open, getdents64, stat, write, close.
+- `sort.c` (184 lines): Dynamic memory + custom comparators. Reads lines into malloc/realloc-managed array, sorts via qsort with function pointers. Flags: `-r` (reverse), `-n` (numeric), `-u` (unique). Self-test: `sort /usr/src/sort_test.txt` yields `apple\nbanana\ncherry`. Syscalls: open, read, write, close + malloc/realloc/strdup + qsort.
+- `pipeline_test.c` (294 lines): Capstone fork/exec/pipe/waitpid program with 3 sub-tests. Sub-test 1: file I/O round-trip (write/read/verify/unlink). Sub-test 2: fork+exec cat with dup2 stdout redirection. Sub-test 3: two-stage pipe (cat | sort) with dual fork, pipe(), dup2 for stdin/stdout wiring. Prints SUBTEST1_PASS through SUBTEST3_PASS, then PIPELINE_PASS. Syscalls: fork, execve, waitpid, pipe, dup2, open, read, write, close, unlink.
+
+#### Build Infrastructure
+
+- `scripts/build-selfhost-rootfs.sh`: Extended to cross-compile all 6 coreutils, install to `/bin/` in rootfs, and embed test data files (`cat_test.txt`, `wc_test.txt`, `sort_test.txt`) in `/usr/src/`.
+- `kernel/src/bootstrap.rs`: Added coreutils boot test dispatch (tests 5-10) using `boot_run_program()` helper for sequential process execution with environment setup.
+
+#### Serial Console Fallback
+
+- `kernel/src/userspace/loader.rs`: Refactored fd 0/1/2 setup with `SerialConsoleNode` VFS fallback. When `/dev/console` is not mounted, uses lightweight serial node backed by COM1 (x86_64) to ensure fds 0/1/2 are always occupied in the process file table. Non-x86_64 architectures return EOF immediately from serial read (no UART polling available).
+
+### Fixed
+
+#### Critical: `sys_pipe2` fd Corruption (pipeline_test subtest 3)
+
+- **Root cause**: `sys_pipe2()` in `kernel/src/syscall/filesystem.rs` wrote pipe file descriptor values as `usize` (8 bytes on x86_64) to the user-space buffer, but C `pipe(int pipefd[2])` expects `int` (4 bytes). On little-endian x86_64, writing usize=3 at offset 0 produces `[03,00,00,00,00,00,00,00]`; the C code reads `pipefd[1]` from bytes 4-7 (upper half of first usize), yielding 0 instead of the actual write fd.
+- **Fix**: Changed buffer write from `*mut usize` to `*mut i32` with appropriate casts. Changed `validate_user_buffer` from `2 * size_of::<usize>()` to `2 * size_of::<i32>()`. This matches the POSIX pipe() ABI where pipefd is `int[2]`.
+
+#### Tri-Architecture Clippy Clean
+
+- **Issue**: `SerialConsoleNode::read()` in `loader.rs` had serial polling logic inside `#[cfg(target_arch = "x86_64")]` blocks interleaved with `#[cfg(not(...))]` early return inside a `loop`/`for`, producing 5 clippy errors on AArch64/RISC-V: unreachable code, never-loop, unused mut, unused variable.
+- **Fix**: Restructured to use top-level `#[cfg]` blocks. x86_64 gets the full COM1 serial polling loop; non-x86_64 gets a clean `Ok(0)` return. All 3 architectures now pass `cargo clippy -- -D warnings` with zero errors/warnings.
+
+#### libc: `readdir()` Syscall Argument Count
+
+- `userland/libc/src/dirent.c`: Fixed `readdir()` to use `veridian_syscall3()` with `sizeof(struct dirent)` as the third argument instead of `veridian_syscall2()`, matching the kernel's `sys_getdents64(fd, buf_ptr, buf_size)` signature.
+
+### Changed
+
+#### Diagnostic Trace Cleanup (~490 lines removed, 38% boot log reduction)
+
+- `kernel/src/process/fork.rs`: Removed `[FORK]` clone_from start/done traces and `[FORK-FT]` parent/child fd table dump diagnostics.
+- `kernel/src/process/creation.rs`: Removed 9 `[CRE]` bisect traces (A-tid through I-done), `[EXEC-DATA]` first-32-bytes dump, `[TLS]` base/tcb/memsz trace, `[EXEC-FT]` pre/post-cloexec fd table dumps.
+- `kernel/src/syscall/process.rs`: Removed `[FORK]` start/ok traces, extensive `[SYS_EXEC]` path/argv/envp dumps for cc1/as/ld/collect2, `[EXEC]` entry/stack/CR3 diagnostic, `[EXEC-FT-SYS]` fd dump, `[EXEC]` FS_BASE trace. Kept one concise `[SYS_EXEC] path="..."` line.
+- `kernel/src/syscall/mod.rs`: Removed per-syscall `SC[pid]` trace block (fired for every syscall from PID >= 5) and `[FORK_RET]` val/rcx diagnostic.
+- `kernel/src/syscall/filesystem.rs`: Removed 18 diagnostic blocks: `[OPEN]`, `[CREAT]`, `[CL]`, `[RD]`, `[SK]`, `[SK-ERR]`, `[STAT]`, `[STATP]`, `[ACCESS]` traces.
+- Boot log reduced from 909 to 566 lines (38% reduction) while preserving essential lifecycle markers.
+
+### Infrastructure
+
+- `.gitignore`: Added `userland/coreutils/*.o` and `target/rootfs-build/`, `target/rootfs-selfhost.tar` patterns.
+- Version bumped: Cargo.toml (0.5.0 -> 0.5.1), uname (0.5.0 -> 0.5.1), /etc/os-release (0.5.0 -> 0.5.1).
+
+---
+
 ## [v0.5.0] - 2026-02-21
 
 ### v0.5.0: Self-Hosting Toolchain Complete + User-Space Foundation

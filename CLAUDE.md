@@ -318,7 +318,7 @@ Currently implementing in phases:
 | Area | Status |
 |------|--------|
 | **Repository** | <https://github.com/doublegate/VeridianOS> |
-| **Latest Release** | v0.5.0 (February 21, 2026) - Self-hosting T7 complete, user-space foundation, dead_code audit, TODO categorization |
+| **Latest Release** | v0.5.1 (February 23, 2026) - Progressive coreutils, pipe fd fix, tri-arch clippy clean |
 | **Build** | ✅ All 3 architectures compile, zero warnings |
 | **Boot** | ✅ All 3 architectures Stage 6 BOOTOK, 29/29 tests (fbcon + keyboard driver) |
 | **CI/CD** | ✅ GitHub Actions 100% pass rate |

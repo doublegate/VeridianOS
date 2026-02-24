@@ -519,11 +519,11 @@ impl crate::fs::VfsNode for SerialConsoleNode {
 
     fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
         // Blocking read from serial (same logic as sys_read stdin fallback)
-        let mut count = 0;
-        for slot in buffer.iter_mut() {
-            loop {
-                #[cfg(target_arch = "x86_64")]
-                {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let mut count = 0;
+            for slot in buffer.iter_mut() {
+                loop {
                     let status: u8;
                     unsafe {
                         core::arch::asm!("in al, dx", out("al") status, in("dx") 0x3FDu16);
@@ -537,16 +537,17 @@ impl crate::fs::VfsNode for SerialConsoleNode {
                         count += 1;
                         break;
                     }
+                    core::hint::spin_loop();
                 }
-                #[cfg(not(target_arch = "x86_64"))]
-                {
-                    // Non-x86: return bytes read so far (EOF)
-                    return Ok(count);
-                }
-                core::hint::spin_loop();
             }
+            Ok(count)
         }
-        Ok(count)
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            // Non-x86: no serial polling available, return EOF
+            let _ = buffer;
+            Ok(0)
+        }
     }
 
     fn write(&self, _offset: usize, data: &[u8]) -> Result<usize, KernelError> {
