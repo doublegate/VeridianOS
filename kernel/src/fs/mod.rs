@@ -464,6 +464,12 @@ impl Vfs {
     ///
     /// Checks MAC policy (Write access to file domain) before creating.
     pub fn mkdir(&self, path: &str, permissions: Permissions) -> Result<(), KernelError> {
+        // Strip trailing slashes (e.g., "/tmp/foo/" -> "/tmp/foo")
+        let path = path.trim_end_matches('/');
+        if path.is_empty() {
+            return Err(KernelError::FsError(crate::error::FsError::AlreadyExists));
+        }
+
         // MAC check: creating a directory requires Write access
         let pid = crate::process::current_process()
             .map(|p| p.pid.0)

@@ -316,14 +316,16 @@ pub fn init_default() {
             );
             start
         } else {
-            // Fallback: conservative start at 256MB
-            kprintln!("[MM] WARNING: Could not find kernel physical end, using 256MB start");
-            256 * 1024 * 1024
+            // Fallback: conservative start at 512MB. With a 384MB kernel heap
+            // in BSS, the kernel image can extend past 256MB physical.
+            // 512MB provides a safe margin above the kernel's physical extent.
+            kprintln!("[MM] WARNING: Could not find kernel physical end, using 512MB start");
+            512 * 1024 * 1024
         };
 
-        // Total usable RAM: 512MB (QEMU -m 512M). Allocate from after
-        // kernel to 512MB.
-        let ram_end: u64 = 512 * 1024 * 1024;
+        // Total usable RAM: 2048MB (QEMU -m 2048M for Phase C native
+        // compilation; cc1 needs ~300MB for large files like awk.c).
+        let ram_end: u64 = 2048 * 1024 * 1024;
         let size = ram_end.saturating_sub(alloc_start);
 
         [MemoryRegion {

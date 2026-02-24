@@ -155,7 +155,7 @@ phase_config() {
     cp "$BB_DEFCONFIG" "$BB_BUILD/.config"
     # Run oldconfig to resolve dependencies (non-interactive: accept defaults)
     cd "$BB_SRC"
-    yes '' | make oldconfig O="$BB_BUILD" 2>&1 | tail -5
+    yes '' 2>/dev/null | make oldconfig O="$BB_BUILD" >/dev/null 2>&1 || true
     cp "$BB_BUILD/.config" "$BB_BUILD/.config.resolved"
 
     echo "  Config installed at $BB_BUILD/.config"
@@ -355,14 +355,102 @@ phase_rootfs() {
                    "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/"
         done
 
-        # Headers
+        # Headers -- copy sysroot headers (canonical, freshly rebuilt by phase_headers),
+        # then fill gaps from native-gcc-static for any extras not in sysroot.
+        # Sysroot must go LAST without -n so updated headers win over stale copies.
         [ -d "$NATIVE_GCC_DIR/usr/include" ] && cp -r "$NATIVE_GCC_DIR/usr/include/"* "$BUILD_DIR/usr/include/" 2>/dev/null || true
+        [ -d "${SYSROOT}/usr/include" ] && cp -r "${SYSROOT}/usr/include/"* "$BUILD_DIR/usr/include/" 2>/dev/null || true
+
+        # GCC internal headers (stdbool.h, stddef.h, stdarg.h, etc.) -- essential for compilation
+        local gcc_inc="$NATIVE_GCC_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/include"
+        if [ -d "$gcc_inc" ]; then
+            cp -r "$gcc_inc/"* "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/include/" 2>/dev/null || true
+            echo "    + GCC internal headers ($(ls "$gcc_inc" | wc -l) files)"
+        fi
 
         # GCC specs
         cat > "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/specs" << 'SPECEOF'
 *linker:
 ld
 SPECEOF
+
+        # GNU Make (for Phase C-4 stretch goal)
+        local NATIVE_TOOLS="${PROJECT_ROOT}/target/native-tools-staging"
+        if [ -f "$NATIVE_TOOLS/usr/bin/make" ]; then
+            cp "$NATIVE_TOOLS/usr/bin/make" "$BUILD_DIR/usr/bin/"
+            echo "    + /usr/bin/make"
+        fi
+
+        # readelf, nm, objdump, strip (useful for verification)
+        for tool in readelf nm objdump strip; do
+            if [ -f "$NATIVE_GCC_DIR/usr/bin/$tool" ]; then
+                cp "$NATIVE_GCC_DIR/usr/bin/$tool" "$BUILD_DIR/usr/bin/"
+            fi
+        done
+        echo "    + /usr/bin/{readelf,nm,objdump,strip}"
+    fi
+
+    # =====================================================================
+    # Phase C: Package BusyBox source tree + generated headers for native
+    # compilation on VeridianOS. Pre-generated headers avoid running Kconfig
+    # natively; the build-busybox-native.sh script replaces Make.
+    # =====================================================================
+    if [ -d "$BB_SRC" ]; then
+        echo "  Adding BusyBox source tree for Phase C native compilation..."
+        local BB_ROOTFS_SRC="$BUILD_DIR/usr/src/busybox-${BUSYBOX_VERSION}"
+        mkdir -p "$BB_ROOTFS_SRC/include"
+
+        # Copy BusyBox source directories (only .c and .h files to save space)
+        for srcdir in applets archival console-tools coreutils debianutils \
+                      editors findutils include libbb libpwdgrp miscutils \
+                      procps shell util-linux; do
+            if [ -d "$BB_SRC/$srcdir" ]; then
+                find "$BB_SRC/$srcdir" -type d | while read dir; do
+                    local reldir="${dir#$BB_SRC/}"
+                    mkdir -p "$BB_ROOTFS_SRC/$reldir"
+                done
+                find "$BB_SRC/$srcdir" \( -name '*.c' -o -name '*.h' \) -type f | while read f; do
+                    local relf="${f#$BB_SRC/}"
+                    cp "$f" "$BB_ROOTFS_SRC/$relf"
+                done
+            fi
+        done
+        local src_count
+        src_count=$(find "$BB_ROOTFS_SRC" -name '*.c' -o -name '*.h' | wc -l)
+        echo "    Source files: $src_count (.c + .h)"
+
+        # Copy pre-generated build headers from cross-compilation
+        # These are config-dependent, not source-dependent, so they're
+        # valid for native compilation with the same .config.
+        local GEN_HEADERS="$BB_BUILD/include"
+        if [ -d "$GEN_HEADERS" ]; then
+            for hdr in autoconf.h applets.h applet_tables.h \
+                       bbconfigopts.h bbconfigopts_bz2.h \
+                       common_bufsiz.h embedded_scripts.h \
+                       NUM_APPLETS.h usage.h usage_compressed.h; do
+                if [ -f "$GEN_HEADERS/$hdr" ]; then
+                    cp "$GEN_HEADERS/$hdr" "$BB_ROOTFS_SRC/include/$hdr"
+                fi
+            done
+            echo "    Generated headers: autoconf.h + 9 others"
+        else
+            echo "    WARNING: Generated headers not found at $GEN_HEADERS"
+            echo "    Native compilation will fail without autoconf.h"
+        fi
+
+        # Copy native build script + file lists
+        local NATIVE_SCRIPT="${PROJECT_ROOT}/busybox/build-busybox-native.sh"
+        if [ -f "$NATIVE_SCRIPT" ]; then
+            cp "$NATIVE_SCRIPT" "$BUILD_DIR/usr/src/build-busybox-native.sh"
+            chmod 755 "$BUILD_DIR/usr/src/build-busybox-native.sh"
+            echo "    + /usr/src/build-busybox-native.sh"
+        fi
+        for lst in busybox-compile-list.txt busybox-obj-list.txt; do
+            if [ -f "${PROJECT_ROOT}/busybox/$lst" ]; then
+                cp "${PROJECT_ROOT}/busybox/$lst" "$BUILD_DIR/usr/src/$lst"
+                echo "    + /usr/src/$lst"
+            fi
+        done
     fi
 
     # Create the TAR archive
@@ -386,7 +474,7 @@ SPECEOF
     echo "    -device ide-hd,drive=disk0 \\"
     echo "    -drive file=target/rootfs-busybox.tar,if=none,id=vd0,format=raw \\"
     echo "    -device virtio-blk-pci,drive=vd0 \\"
-    echo "    -serial stdio -display none -m 512M"
+    echo "    -serial stdio -display none -m 1024M"
 }
 
 # =========================================================================

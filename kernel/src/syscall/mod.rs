@@ -400,9 +400,14 @@ pub enum SyscallError {
     AccessDenied = -18,
     ProcessNotFound = -19,
 
-    // POSIX I/O errors
+    // Filesystem errors (values match veridian/errno.h)
+    FileExists = -20,
     BadFileDescriptor = -21,
+    IoError = -22,
+    NotADirectory = -28,
+    IsADirectory = -29,
     BrokenPipe = -39,
+    DirectoryNotEmpty = -45,
 }
 
 impl From<IpcError> for SyscallError {
@@ -435,6 +440,37 @@ impl From<crate::cap::manager::CapError> for SyscallError {
             crate::cap::manager::CapError::IdExhausted => SyscallError::OutOfMemory,
             crate::cap::manager::CapError::QuotaExceeded => SyscallError::OutOfMemory,
         }
+    }
+}
+
+/// Map a KernelError (especially filesystem errors) to the appropriate
+/// SyscallError. Values match veridian/errno.h so libc's `__syscall_ret()` sets
+/// correct errno.
+pub fn map_kernel_error(err: crate::error::KernelError) -> SyscallError {
+    use crate::error::{FsError, KernelError};
+    match err {
+        KernelError::FsError(fs_err) => match fs_err {
+            FsError::NotFound => SyscallError::ResourceNotFound,
+            FsError::AlreadyExists => SyscallError::FileExists,
+            FsError::PermissionDenied => SyscallError::PermissionDenied,
+            FsError::NotADirectory => SyscallError::NotADirectory,
+            FsError::IsADirectory => SyscallError::IsADirectory,
+            FsError::DirectoryNotEmpty => SyscallError::DirectoryNotEmpty,
+            FsError::BadFileDescriptor => SyscallError::BadFileDescriptor,
+            FsError::IoError => SyscallError::IoError,
+            FsError::NotAFile => SyscallError::InvalidArgument,
+            FsError::ReadOnly => SyscallError::PermissionDenied,
+            FsError::InvalidPath => SyscallError::InvalidArgument,
+            FsError::NoRootFs => SyscallError::ResourceNotFound,
+            FsError::TooManyOpenFiles => SyscallError::OutOfMemory,
+            _ => SyscallError::InvalidState,
+        },
+        KernelError::OutOfMemory { .. } => SyscallError::OutOfMemory,
+        KernelError::PermissionDenied { .. } => SyscallError::PermissionDenied,
+        KernelError::AlreadyExists { .. } => SyscallError::FileExists,
+        KernelError::NotFound { .. } => SyscallError::ResourceNotFound,
+        KernelError::BrokenPipe => SyscallError::BrokenPipe,
+        _ => SyscallError::InvalidState,
     }
 }
 

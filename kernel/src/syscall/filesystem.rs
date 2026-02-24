@@ -657,7 +657,7 @@ pub fn sys_mkdir(path: usize, mode: usize) -> SyscallResult {
     let permissions = Permissions::from_mode(mode as u32);
     match vfs()?.read().mkdir(path_str, permissions) {
         Ok(_) => Ok(0),
-        Err(_) => Err(SyscallError::InvalidState),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
@@ -696,7 +696,7 @@ pub fn sys_rmdir(path: usize) -> SyscallResult {
     // Remove directory through VFS
     match vfs()?.read().unlink(path_str) {
         Ok(_) => Ok(0),
-        Err(_) => Err(SyscallError::InvalidState),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 

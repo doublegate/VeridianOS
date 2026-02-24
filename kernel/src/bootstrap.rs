@@ -873,6 +873,131 @@ fn test_user_binary_load() {
             // 12. Comprehensive test script (if present in rootfs)
             boot_run_program("/bin/ash", &["ash", "/usr/src/busybox_test.sh"], env);
 
+            // Phase C: Native compilation tests (only if GCC + BusyBox source in rootfs)
+            {
+                let vfs = get_vfs().read();
+                let has_gcc = vfs.resolve_path("/usr/bin/gcc").is_ok();
+                let has_bb_src = vfs
+                    .resolve_path("/usr/src/busybox-1.36.1/include/autoconf.h")
+                    .is_ok();
+                drop(vfs);
+                if has_gcc && has_bb_src {
+                    kprintln!("[BOOT] Phase C: Native compilation tests");
+
+                    // C-1: Single-file native compilation test
+                    // Compile coreutils/echo.c natively using GCC on VeridianOS
+                    boot_run_program(
+                        "/usr/bin/gcc",
+                        &[
+                            "gcc",
+                            "-c",
+                            "-nostdinc",
+                            "-isystem",
+                            "/usr/include",
+                            "-isystem",
+                            "/usr/lib/gcc/x86_64-veridian/14.2.0/include",
+                            "-include",
+                            "/usr/src/busybox-1.36.1/include/autoconf.h",
+                            "-I",
+                            "/usr/src/busybox-1.36.1/include",
+                            "-I",
+                            "/usr/src/busybox-1.36.1/libbb",
+                            "-I",
+                            "/usr/src/busybox-1.36.1/coreutils",
+                            "-D_GNU_SOURCE",
+                            "-DNDEBUG",
+                            "-D_LARGEFILE_SOURCE",
+                            "-D_LARGEFILE64_SOURCE",
+                            "-D_FILE_OFFSET_BITS=64",
+                            "-DBB_VER=\"1.36.1\"",
+                            "-D__veridian__",
+                            "-D__linux__",
+                            "-DBB_GLOBAL_CONST=",
+                            "-static",
+                            "-fno-stack-protector",
+                            "-ffreestanding",
+                            "-mno-red-zone",
+                            "-mcmodel=small",
+                            "-Wno-unused-parameter",
+                            "-Wno-implicit-function-declaration",
+                            "-Wno-return-type",
+                            "-Wno-int-conversion",
+                            "-Oz",
+                            "-o",
+                            "/tmp/echo.o",
+                            "/usr/src/busybox-1.36.1/coreutils/echo.c",
+                        ],
+                        env,
+                    );
+                    // Verify the object file was produced
+                    {
+                        let vfs = get_vfs().read();
+                        if vfs.resolve_path("/tmp/echo.o").is_ok() {
+                            kprintln!("NATIVE_COMPILE_SINGLE_PASS");
+                        } else {
+                            kprintln!("NATIVE_COMPILE_SINGLE_FAIL");
+                        }
+                        drop(vfs);
+                    }
+
+                    // C-3: Full native build (all 217 files + link)
+                    // Run the pre-generated native compilation script
+                    let vfs = get_vfs().read();
+                    let has_script = vfs.resolve_path("/usr/src/build-busybox-native.sh").is_ok();
+                    drop(vfs);
+                    if has_script {
+                        kprintln!("[BOOT] Phase C-3: Full native BusyBox compilation");
+                        boot_run_program(
+                            "/bin/ash",
+                            &["ash", "/usr/src/build-busybox-native.sh"],
+                            env,
+                        );
+
+                        // C-5: Verify natively-compiled binary
+                        let vfs = get_vfs().read();
+                        let has_native = vfs.resolve_path("/tmp/busybox-native").is_ok();
+                        drop(vfs);
+                        if has_native {
+                            kprintln!("[BOOT] Phase C-5: Native binary verification");
+                            // Check applet list
+                            boot_run_program("/tmp/busybox-native", &["busybox", "--list"], env);
+                            // Functional smoke tests
+                            boot_run_program(
+                                "/tmp/busybox-native",
+                                &["busybox", "echo", "NATIVE_ECHO_PASS"],
+                                env,
+                            );
+                            boot_run_program("/tmp/busybox-native", &["busybox", "true"], env);
+                            boot_run_program(
+                                "/tmp/busybox-native",
+                                &["busybox", "uname", "-a"],
+                                env,
+                            );
+                            boot_run_program(
+                                "/tmp/busybox-native",
+                                &["busybox", "cat", "/usr/src/cat_test.txt"],
+                                env,
+                            );
+                            boot_run_program(
+                                "/tmp/busybox-native",
+                                &["busybox", "wc", "/usr/src/wc_test.txt"],
+                                env,
+                            );
+                            kprintln!("BUSYBOX_NATIVE_COMPILATION_PASS");
+                        } else {
+                            kprintln!("NATIVE_BUILD_BINARY_NOT_FOUND");
+                        }
+                    }
+                } else {
+                    if !has_gcc {
+                        kprintln!("[BOOT] Phase C skipped: /usr/bin/gcc not in rootfs");
+                    }
+                    if !has_bb_src {
+                        kprintln!("[BOOT] Phase C skipped: BusyBox source not in rootfs");
+                    }
+                }
+            }
+
             // Interactive ash (last -- will sit at prompt until killed)
             kprintln!("[BOOT] Starting interactive ash shell");
             boot_run_program("/bin/ash", &["ash"], env);

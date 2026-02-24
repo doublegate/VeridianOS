@@ -316,9 +316,11 @@ void *sbrk(intptr_t increment)
         return __brk_cur;
 
     void *old = __brk_cur;
-    long new_brk = veridian_syscall1(SYS_MEMORY_BRK,
-                                      (long)__brk_cur + increment);
-    if (new_brk < 0) {
+    void *requested = (char *)__brk_cur + increment;
+    long new_brk = veridian_syscall1(SYS_MEMORY_BRK, (long)requested);
+    if (new_brk < 0 || (void *)new_brk != requested) {
+        /* BRK returns the current (unchanged) break on failure,
+         * not a negative error code. Detect by comparing. */
         errno = ENOMEM;
         return (void *)-1;
     }

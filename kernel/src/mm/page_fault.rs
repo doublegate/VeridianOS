@@ -46,10 +46,11 @@ pub struct PageFaultInfo {
 }
 
 /// Default stack guard region size (one page below the mapped stack).
-const STACK_GUARD_SIZE: usize = PAGE_SIZE;
+const _STACK_GUARD_SIZE: usize = PAGE_SIZE;
 
-/// Maximum stack growth per fault (128 KiB).
-const MAX_STACK_GROWTH: usize = 128 * 1024;
+/// Maximum stack growth beyond initial allocation (8 MiB).
+/// cc1 (GCC compiler proper) uses deep recursion for complex expressions.
+const MAX_STACK_GROWTH: usize = 8 * 1024 * 1024;
 
 /// Main page fault handler.
 ///
@@ -207,34 +208,27 @@ fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
         });
     }
 
-    // Guard page check: do not grow into the guard region.
-    let guard_bottom = stack_bottom.saturating_sub(STACK_GUARD_SIZE as u64);
-    if fault < guard_bottom.saturating_sub(MAX_STACK_GROWTH as u64) {
-        // Too far below the stack -- likely a real SIGSEGV.
+    // Check the fault isn't beyond the maximum growable region.
+    let max_total_stack = stack_size as usize + MAX_STACK_GROWTH;
+    let absolute_bottom = stack_top.saturating_sub(max_total_stack as u64);
+    if fault < absolute_bottom {
+        // Too far below the stack -- real SIGSEGV.
         return Err(KernelError::InvalidAddress {
             addr: fault as usize,
         });
     }
 
-    if fault < guard_bottom {
-        // Inside the guard page region.
-        return Err(KernelError::PermissionDenied {
-            operation: "stack guard page hit",
+    // Calculate how many pages to grow (from current bottom down to fault).
+    let fault_page = fault & !(PAGE_SIZE as u64 - 1);
+    let pages_needed = ((stack_bottom - fault_page) / PAGE_SIZE as u64) as usize;
+
+    if pages_needed == 0 {
+        return Err(KernelError::InvalidAddress {
+            addr: fault as usize,
         });
     }
 
-    // Calculate how many pages to grow.
-    let pages_needed = (stack_bottom - fault).div_ceil(PAGE_SIZE as u64) as usize;
-
-    // Cap at MAX_STACK_GROWTH worth of pages.
-    let max_pages = MAX_STACK_GROWTH / PAGE_SIZE;
-    if pages_needed > max_pages {
-        return Err(KernelError::ResourceExhausted {
-            resource: "stack growth limit",
-        });
-    }
-
-    // Drop the read lock and re-acquire as mutable to map pages.
+    // Drop the lock and re-acquire as mutable to map pages.
     drop(memory_space);
 
     let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE;
@@ -244,6 +238,10 @@ fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
         let page_addr = (stack_bottom - ((i + 1) as u64 * PAGE_SIZE as u64)) as usize;
         memory_space_mut.map_page(page_addr, flags)?;
     }
+
+    // Update stack size to reflect the growth so future faults work correctly.
+    let new_size = stack_size as usize + (pages_needed * PAGE_SIZE);
+    memory_space_mut.set_stack_size(new_size);
 
     Ok(())
 }

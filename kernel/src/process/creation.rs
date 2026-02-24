@@ -21,7 +21,7 @@ use super::{
 use crate::{arch::context::ThreadContext, error::KernelError};
 
 /// Default stack sizes
-pub const DEFAULT_USER_STACK_SIZE: usize = 64 * 1024; // 64KB
+pub const DEFAULT_USER_STACK_SIZE: usize = 256 * 1024; // 256KB initial (grows via page faults)
 pub const DEFAULT_KERNEL_STACK_SIZE: usize = 64 * 1024; // 64KB
 
 /// Process creation options

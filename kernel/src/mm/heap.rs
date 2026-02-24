@@ -27,13 +27,18 @@ use super::VirtualAddress;
 // 4. After init, all access goes through the allocator's own synchronization
 // 5. Cannot use OnceLock/GlobalState as those require heap allocation
 //    themselves
-// x86_64 uses a 128MB heap to support loading the self-hosting toolchain
-// rootfs (~45MB TAR), which is read entirely into a Vec<u8> and then
-// copied into RamFS Vecs. AArch64/RISC-V keep 8MB since they have less
-// RAM (128MB default) and don't use virtio-blk for rootfs loading.
+// x86_64 uses a 384MB heap to support loading the self-hosting toolchain
+// rootfs (~57MB TAR with BusyBox source + GCC toolchain) and Phase C native
+// compilation. The rootfs extracts to ~54MB of VFS content (cc1 alone is
+// 35MB). During exec, fs::read_file() creates a second 35MB copy of cc1
+// for ELF loading. Combined with VFS metadata (~10MB), process structures,
+// and heap fragmentation from Phase B tests, 256MB was insufficient.
+// 384MB provides comfortable headroom. Requires QEMU -m 1024M.
+// AArch64/RISC-V keep 8MB since they have less RAM (128MB default) and
+// don't use virtio-blk for rootfs loading.
 #[cfg(target_arch = "x86_64")]
 #[allow(static_mut_refs)]
-static mut HEAP_MEMORY: [u8; 128 * 1024 * 1024] = [0; 128 * 1024 * 1024];
+static mut HEAP_MEMORY: [u8; 384 * 1024 * 1024] = [0; 384 * 1024 * 1024];
 
 #[cfg(not(target_arch = "x86_64"))]
 #[allow(static_mut_refs)]
@@ -41,7 +46,7 @@ static mut HEAP_MEMORY: [u8; 8 * 1024 * 1024] = [0; 8 * 1024 * 1024];
 
 /// Kernel heap size
 #[cfg(target_arch = "x86_64")]
-pub const HEAP_SIZE: usize = 128 * 1024 * 1024;
+pub const HEAP_SIZE: usize = 384 * 1024 * 1024;
 
 #[cfg(not(target_arch = "x86_64"))]
 pub const HEAP_SIZE: usize = 8 * 1024 * 1024;

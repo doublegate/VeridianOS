@@ -401,7 +401,7 @@ impl BuddyAllocator {
 
     /// Allocate frames of the given order
     fn allocate(&self, count: usize) -> Result<FrameNumber> {
-        if count < BITMAP_BUDDY_THRESHOLD {
+        if count == 0 {
             return Err(FrameAllocatorError::InvalidSize);
         }
 
@@ -687,10 +687,16 @@ impl FrameAllocator {
         let start_time = crate::bench::read_timestamp();
 
         let result = if count < BITMAP_BUDDY_THRESHOLD {
-            // Use bitmap allocator
-            self.allocate_bitmap_with_zone(count, numa_node, zone)
+            // Try bitmap allocator first for small allocations
+            match self.allocate_bitmap_with_zone(count, numa_node, zone) {
+                Ok(frame) => Ok(frame),
+                Err(_) => {
+                    // Bitmap exhausted: fall back to buddy allocator
+                    self.allocate_buddy_with_zone(count, numa_node, zone)
+                }
+            }
         } else {
-            // Use buddy allocator
+            // Use buddy allocator for large allocations
             self.allocate_buddy_with_zone(count, numa_node, zone)
         };
 
@@ -880,23 +886,17 @@ impl FrameAllocator {
 
     /// Free frames back to the allocator
     pub fn free_frames(&self, frame: FrameNumber, count: usize) -> Result<()> {
-        // Determine which allocator owns this frame
-        // This is a simplified implementation - in practice, we'd need
-        // to track which allocator owns which frames
-
-        if count < BITMAP_BUDDY_THRESHOLD {
-            // Try bitmap allocators
-            for allocator in self.bitmap_allocators.iter().flatten() {
-                if allocator.free(frame, count).is_ok() {
-                    return Ok(());
-                }
+        // Try bitmap allocators first (they manage the lower portion of RAM)
+        for allocator in self.bitmap_allocators.iter().flatten() {
+            if allocator.free(frame, count).is_ok() {
+                return Ok(());
             }
-        } else {
-            // Try buddy allocators
-            for allocator in self.buddy_allocators.iter().flatten() {
-                if allocator.free(frame, count).is_ok() {
-                    return Ok(());
-                }
+        }
+
+        // Then try buddy allocators (they manage the upper portion)
+        for allocator in self.buddy_allocators.iter().flatten() {
+            if allocator.free(frame, count).is_ok() {
+                return Ok(());
             }
         }
 
