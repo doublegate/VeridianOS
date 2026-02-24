@@ -198,7 +198,17 @@ extern "C" fn kernel_init_stage3_onwards() -> ! {
             match crate::userspace::load_user_program(
                 "/bin/sh",
                 &["sh"],
-                &["PATH=/bin:/usr/bin", "HOME=/", "TERM=veridian"],
+                &[
+                    "PATH=/bin:/usr/bin:/sbin:/usr/sbin",
+                    "HOME=/",
+                    "TERM=veridian",
+                    "SHELL=/bin/sh",
+                    "USER=root",
+                    "PWD=/",
+                    "TMPDIR=/tmp",
+                    "COMPILER_PATH=/usr/libexec/gcc/x86_64-veridian/14.2.0",
+                    "LIBRARY_PATH=/usr/lib:/usr/lib/gcc/x86_64-veridian/14.2.0",
+                ],
             ) {
                 Ok(pid) => {
                     // Raw serial: safe even if kprintln! holds locks
@@ -830,7 +840,9 @@ fn run_user_process(pid: crate::process::ProcessId) {
 
     // Set FS_BASE (MSR 0xC0000100) for TLS if the process has a PT_TLS segment.
     {
-        let fs_base = process.tls_fs_base.load(core::sync::atomic::Ordering::Acquire);
+        let fs_base = process
+            .tls_fs_base
+            .load(core::sync::atomic::Ordering::Acquire);
         if fs_base != 0 {
             unsafe {
                 crate::arch::x86_64::idt::raw_serial_str(b"[BOOT] FS_BASE=0x");
@@ -935,7 +947,7 @@ pub fn boot_run_forked_child(
 
     use crate::{
         arch::x86_64::usermode::{
-            BOOT_RETURN_CR3, BOOT_RETURN_RSP, BOOT_STACK_CANARY, ForkChildRegs,
+            ForkChildRegs, BOOT_RETURN_CR3, BOOT_RETURN_RSP, BOOT_STACK_CANARY,
         },
         process::get_process,
     };
@@ -1032,11 +1044,7 @@ pub fn boot_run_forked_child(
     }
 
     unsafe {
-        crate::arch::x86_64::usermode::enter_forked_child_returnable(
-            &regs,
-            cr3,
-            kernel_rsp_ptr,
-        );
+        crate::arch::x86_64::usermode::enter_forked_child_returnable(&regs, cr3, kernel_rsp_ptr);
     }
 
     // Child exited, boot_return_to_kernel brought us back here.

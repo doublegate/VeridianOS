@@ -114,6 +114,7 @@ pub struct Metadata {
     pub created: u64,
     pub modified: u64,
     pub accessed: u64,
+    pub inode: u64,
 }
 
 /// Directory entry

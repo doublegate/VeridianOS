@@ -88,12 +88,15 @@ impl VfsNode for DevNode {
                         // Canonical mode: line-buffered with editing support.
                         // Buffer characters until newline, CR, or EOF (Ctrl-D).
                         // Support backspace (VERASE) to erase last character.
+                        //
+                        // Block indefinitely waiting for input, just like a real
+                        // terminal device. POSIX requires read() on a terminal to
+                        // block until data is available. Without this, shells and
+                        // other interactive programs see EOF and exit immediately.
                         let mut line_buf: [u8; 4096] = [0u8; 4096];
                         let mut line_len: usize = 0;
-                        let max_spins: u64 = 100_000_000; // ~1s
 
                         loop {
-                            let mut spins: u64 = 0;
                             let byte = loop {
                                 let lsr: u8;
                                 // SAFETY: Reading COM1 LSR (port 0x3FD).
@@ -117,16 +120,6 @@ impl VfsNode for DevNode {
                                         );
                                     }
                                     break data;
-                                }
-                                spins += 1;
-                                if spins >= max_spins {
-                                    // Timeout with no data
-                                    if line_len > 0 {
-                                        let copy_len = line_len.min(buffer.len());
-                                        buffer[..copy_len].copy_from_slice(&line_buf[..copy_len]);
-                                        return Ok(copy_len);
-                                    }
-                                    return Ok(0);
                                 }
                                 core::hint::spin_loop();
                             };
@@ -393,6 +386,7 @@ impl VfsNode for DevNode {
             created: 0,
             modified: 0,
             accessed: 0,
+            inode: 0,
         })
     }
 
@@ -506,6 +500,7 @@ impl VfsNode for DevRoot {
             created: 0,
             modified: 0,
             accessed: 0,
+            inode: 0,
         })
     }
 

@@ -324,11 +324,7 @@ pub fn init_default() {
         // Total usable RAM: 512MB (QEMU -m 512M). Allocate from after
         // kernel to 512MB.
         let ram_end: u64 = 512 * 1024 * 1024;
-        let size = if alloc_start < ram_end {
-            ram_end - alloc_start
-        } else {
-            0
-        };
+        let size = ram_end.saturating_sub(alloc_start);
 
         [MemoryRegion {
             start: alloc_start,

@@ -488,7 +488,7 @@ void perror(const char *s)
 /* Write a single character to the output buffer if space remains. */
 static inline void __put(char *buf, size_t size, size_t *pos, char c)
 {
-    if (*pos < size - 1)
+    if (buf && size > 0 && *pos < size - 1)
         buf[*pos] = c;
     (*pos)++;
 }
@@ -712,7 +712,7 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
 
 done:
     /* NUL-terminate. */
-    if (size > 0) {
+    if (buf && size > 0) {
         if (pos < size)
             buf[pos] = '\0';
         else

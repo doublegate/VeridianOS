@@ -187,6 +187,7 @@ impl VfsNode for ProcNode {
             created: 0,
             modified: 0,
             accessed: 0,
+            inode: 0,
         })
     }
 

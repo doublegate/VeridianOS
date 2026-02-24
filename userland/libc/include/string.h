@@ -107,6 +107,16 @@ int strncasecmp(const char *s1, const char *s2, size_t n);
 char *strpbrk(const char *s, const char *accept);
 
 /* ========================================================================= */
+/* Locale-aware string operations                                            */
+/* ========================================================================= */
+
+/** Compare two strings using the current locale (stub: same as strcmp). */
+int strcoll(const char *s1, const char *s2);
+
+/** Transform a string for locale-aware comparison (stub: copies src). */
+size_t strxfrm(char *dest, const char *src, size_t n);
+
+/* ========================================================================= */
 /* Tokenization                                                              */
 /* ========================================================================= */
 

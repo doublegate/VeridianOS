@@ -273,6 +273,8 @@ char *strndup(const char *s, size_t n)
     return d;
 }
 
+/* strcoll / strxfrm: defined in posix_stubs2.c */
+
 char *strpbrk(const char *s, const char *accept)
 {
     while (*s) {

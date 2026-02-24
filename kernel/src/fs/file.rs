@@ -81,7 +81,8 @@ impl OpenFlags {
     /// Create from bits (for syscall interface)
     ///
     /// Flag values MUST match `<veridian/fcntl.h>` in the sysroot -- that is
-    /// the ABI contract user-space programs (including GCC) are compiled against.
+    /// the ABI contract user-space programs (including GCC) are compiled
+    /// against.
     pub fn from_bits(bits: u32) -> Option<Self> {
         // VeridianOS ABI flags (from veridian/fcntl.h in sysroot)
         const O_RDONLY: u32 = 0x0001;

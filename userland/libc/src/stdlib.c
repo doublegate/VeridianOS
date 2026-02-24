@@ -16,6 +16,7 @@
 #include <signal.h>
 #include <ctype.h>
 #include <sys/wait.h>
+#include <veridian/syscall.h>
 
 /* ========================================================================= */
 /* Memory allocator                                                          */
@@ -171,17 +172,39 @@ void abort(void)
 
 char **environ = NULL;
 
+/*
+ * Thread-local buffer for getenv() kernel fallback.  Sized to hold
+ * typical environment values (PATH, COMPILER_PATH, etc.).
+ */
+static char __getenv_buf[4096];
+
 char *getenv(const char *name)
 {
-    if (!name || !environ)
+    if (!name)
         return NULL;
 
-    size_t len = strlen(name);
-    for (char **ep = environ; *ep; ep++) {
-        if (strncmp(*ep, name, len) == 0 && (*ep)[len] == '=')
-            return *ep + len + 1;
+    /* Fast path: use libc environ if available. */
+    if (environ) {
+        size_t len = strlen(name);
+        for (char **ep = environ; *ep; ep++) {
+            if (strncmp(*ep, name, len) == 0 && (*ep)[len] == '=')
+                return *ep + len + 1;
+        }
+        return NULL;
     }
-    return NULL;
+
+    /*
+     * Fallback: environ is NULL (CRT didn't call __libc_start_main).
+     * Ask the kernel for the value via SYS_PROCESS_GETENV.
+     */
+    size_t nlen = strlen(name);
+    long ret = veridian_syscall4(SYS_PROCESS_GETENV,
+                                 name, (const void *)(unsigned long)nlen,
+                                 __getenv_buf,
+                                 (const void *)(unsigned long)sizeof(__getenv_buf));
+    if (ret < 0)
+        return NULL;
+    return __getenv_buf;
 }
 
 /*
@@ -376,6 +399,39 @@ ldiv_t ldiv(long numer, long denom)
     return result;
 }
 
+long long llabs(long long j)
+{
+    return j < 0 ? -j : j;
+}
+
+lldiv_t lldiv(long long numer, long long denom)
+{
+    lldiv_t result;
+    result.quot = numer / denom;
+    result.rem  = numer % denom;
+    return result;
+}
+
+long long atoll(const char *nptr)
+{
+    return (long long)strtol(nptr, NULL, 10);
+}
+
+void *aligned_alloc(size_t alignment, size_t size)
+{
+    /* Simple stub: malloc always aligns to 16 bytes. */
+    if (alignment <= ALLOC_ALIGN)
+        return malloc(size);
+    /* For larger alignments, over-allocate and align. */
+    void *p = malloc(size + alignment);
+    if (!p) return NULL;
+    unsigned long addr = (unsigned long)p;
+    unsigned long aligned = (addr + alignment - 1) & ~(alignment - 1);
+    return (void *)aligned;
+}
+
+/* Multibyte/wide character stubs are in posix_stubs2.c */
+
 /* ========================================================================= */
 /* String-to-floating-point conversions                                      */
 /* ========================================================================= */
@@ -451,6 +507,11 @@ double strtod(const char *nptr, char **endptr)
 float strtof(const char *nptr, char **endptr)
 {
     return (float)strtod(nptr, endptr);
+}
+
+long double strtold(const char *nptr, char **endptr)
+{
+    return (long double)strtod(nptr, endptr);
 }
 
 double atof(const char *nptr)

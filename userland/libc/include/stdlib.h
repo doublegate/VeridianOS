@@ -142,13 +142,51 @@ void *bsearch(const void *key, const void *base, size_t nmemb,
 /** Absolute value. */
 int abs(int j);
 long labs(long j);
+long long llabs(long long j);
 
 /** Division result with quotient and remainder. */
 typedef struct { int quot; int rem; } div_t;
 typedef struct { long quot; long rem; } ldiv_t;
+typedef struct { long long quot; long long rem; } lldiv_t;
 
 div_t div(int numer, int denom);
 ldiv_t ldiv(long numer, long denom);
+lldiv_t lldiv(long long numer, long long denom);
+
+/** Convert string to long long. */
+long long atoll(const char *nptr);
+
+/** Convert string to long double (stub -- returns double precision). */
+long double strtold(const char *nptr, char **endptr);
+
+/** Allocate aligned memory (C11). */
+void *aligned_alloc(size_t alignment, size_t size);
+
+/* ========================================================================= */
+/* Multibyte/wide character stubs                                            */
+/* ========================================================================= */
+
+#ifndef __wchar_t_defined
+#define __wchar_t_defined
+#ifndef __cplusplus
+typedef int wchar_t;
+#endif
+#endif
+
+/** Determine length of a multibyte character. */
+int mblen(const char *s, size_t n);
+
+/** Convert multibyte string to wide-char string. */
+size_t mbstowcs(wchar_t *dest, const char *src, size_t n);
+
+/** Convert a single multibyte character to wide character. */
+int mbtowc(wchar_t *pwc, const char *s, size_t n);
+
+/** Convert wide-char string to multibyte string. */
+size_t wcstombs(char *dest, const wchar_t *src, size_t n);
+
+/** Convert a wide character to multibyte character. */
+int wctomb(char *s, wchar_t wc);
 
 /* ========================================================================= */
 /* Temporary files                                                           */

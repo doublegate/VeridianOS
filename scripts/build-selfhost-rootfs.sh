@@ -180,6 +180,16 @@ for tool in cc1 collect2; do
     fi
 done
 
+# collect2 searches for 'ld' and 'as' in its own directory before PATH.
+# Copy them into the GCC libexec dir so collect2 can find them.
+for tool in ld as; do
+    if [ -f "$NATIVE_GCC_DIR/usr/bin/$tool" ]; then
+        cp "$NATIVE_GCC_DIR/usr/bin/$tool" "$BUILD_DIR/usr/libexec/gcc/x86_64-veridian/14.2.0/"
+        size=$(stat -c%s "$BUILD_DIR/usr/libexec/gcc/x86_64-veridian/14.2.0/$tool" 2>/dev/null || echo "?")
+        echo "  + /usr/libexec/.../14.2.0/$tool ($(( size / 1024 )) KB) [for collect2]"
+    fi
+done
+
 # Libraries
 echo "--- Libraries ---"
 for f in crt0.o crti.o crtn.o libc.a; do
@@ -221,11 +231,30 @@ if [ -d "$gcc_inc" ]; then
 fi
 
 # =========================================================================
+# 3b. GCC specs file -- bypass collect2, invoke ld directly
+# =========================================================================
+echo "--- GCC specs ---"
+# The native GCC binaries use an internal CRT that doesn't call
+# __libc_start_main, so libc's 'environ' is never set.  This means
+# getenv() returns NULL inside gcc/collect2, and collect2 cannot
+# find 'ld'.  Work around this by overriding the *linker spec to
+# invoke ld directly instead of collect2.
+cat > "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/specs" << 'SPECEOF'
+*linker:
+ld
+SPECEOF
+echo "  + /usr/lib/gcc/x86_64-veridian/14.2.0/specs (linker=ld)"
+
+# =========================================================================
 # 4. Copy test source file for on-OS compilation
 # =========================================================================
 echo "--- Test source ---"
-cp "$TESTS_DIR/selfhost_test.c" "$BUILD_DIR/usr/src/selfhost_test.c"
-echo "  + /usr/src/selfhost_test.c"
+for src in "$TESTS_DIR"/selfhost_*.c; do
+    [ -f "$src" ] || continue
+    name="$(basename "$src")"
+    cp "$src" "$BUILD_DIR/usr/src/$name"
+    echo "  + /usr/src/$name"
+done
 
 # =========================================================================
 # 5. Validate all binaries in /bin and /usr/bin are statically linked

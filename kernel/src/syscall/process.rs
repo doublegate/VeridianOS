@@ -3,6 +3,7 @@
 //! Implements system calls for process and thread management including
 //! creation, termination, and state management.
 
+use alloc::format;
 use core::slice;
 
 use super::{validate_user_buffer, validate_user_string_ptr, SyscallError, SyscallResult};
@@ -31,7 +32,7 @@ pub fn sys_fork() -> SyscallResult {
             #[cfg(target_arch = "x86_64")]
             unsafe {
                 crate::arch::x86_64::idt::raw_serial_str(b"[FORK] ok pid=");
-                crate::arch::x86_64::idt::raw_serial_hex(child_pid.0 as u64);
+                crate::arch::x86_64::idt::raw_serial_hex(child_pid.0);
                 crate::arch::x86_64::idt::raw_serial_str(b"\n");
             }
             // In parent process, inherit capabilities to child
@@ -98,27 +99,85 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
     // pointer checks internally and bounds-checks string lengths.
     let argv = unsafe { copy_string_array_from_user(argv_ptr)? };
 
-    // Diagnostic: dump argc and full argv for cc1/as/ld
+    // Diagnostic: dump argc and full argv for cc1/as/ld/collect2
     #[cfg(target_arch = "x86_64")]
     unsafe {
         crate::arch::x86_64::idt::raw_serial_str(b"[SYS_EXEC] argc=0x");
         crate::arch::x86_64::idt::raw_serial_hex(argv.len() as u64);
         crate::arch::x86_64::idt::raw_serial_str(b"\n");
         // Dump all argv entries for tool invocations
-        if path.contains("cc1") || path.contains("/as") || path.contains("/ld") {
+        if path.contains("cc1")
+            || path.contains("/as")
+            || path.contains("/ld")
+            || path.contains("collect2")
+        {
             for (i, arg) in argv.iter().enumerate() {
                 crate::arch::x86_64::idt::raw_serial_str(b"  argv[");
                 crate::arch::x86_64::idt::raw_serial_hex(i as u64);
                 crate::arch::x86_64::idt::raw_serial_str(b"]=\"");
-                for &b in arg.as_bytes() {
-                    crate::arch::x86_64::idt::raw_serial_str(&[b]);
-                }
+                crate::arch::x86_64::idt::raw_serial_str(arg.as_bytes());
                 crate::arch::x86_64::idt::raw_serial_str(b"\"\n");
             }
         }
     }
 
-    let envp = unsafe { copy_string_array_from_user(envp_ptr)? };
+    // Log raw envp_ptr for all execs to diagnose NULL environ
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[SYS_EXEC] envp_ptr=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(envp_ptr as u64);
+        crate::arch::x86_64::idt::raw_serial_str(b"\n");
+    }
+
+    let mut envp = unsafe { copy_string_array_from_user(envp_ptr)? };
+
+    // If envp is empty (NULL pointer from user-space), inherit the parent
+    // process's environment variables. This handles the case where libc's
+    // `environ` is NULL (e.g., GCC's libiberty overrides `environ` symbol)
+    // or the caller explicitly passes NULL for envp.
+    if envp.is_empty() {
+        if let Some(current) = current_process() {
+            let parent_env = current.env_vars.lock();
+            for (key, value) in parent_env.iter() {
+                envp.push(format!("{}={}", key, value));
+            }
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            crate::arch::x86_64::idt::raw_serial_str(
+                b"[SYS_EXEC] envp inherited from parent, count=0x",
+            );
+            crate::arch::x86_64::idt::raw_serial_hex(envp.len() as u64);
+            crate::arch::x86_64::idt::raw_serial_str(b"\n");
+        }
+    }
+
+    // Diagnostic: dump envp count and entries for tool invocations
+    #[cfg(target_arch = "x86_64")]
+    if path.contains("cc1")
+        || path.contains("/as")
+        || path.contains("/ld")
+        || path.contains("collect2")
+    {
+        unsafe {
+            crate::arch::x86_64::idt::raw_serial_str(b"[SYS_EXEC] envp count=0x");
+            crate::arch::x86_64::idt::raw_serial_hex(envp.len() as u64);
+            crate::arch::x86_64::idt::raw_serial_str(b"\n");
+            for (i, env) in envp.iter().enumerate() {
+                crate::arch::x86_64::idt::raw_serial_str(b"  env[");
+                crate::arch::x86_64::idt::raw_serial_hex(i as u64);
+                crate::arch::x86_64::idt::raw_serial_str(b"]=\"");
+                let bytes = env.as_bytes();
+                let limit = if bytes.len() > 120 { 120 } else { bytes.len() };
+                crate::arch::x86_64::idt::raw_serial_str(&bytes[..limit]);
+                if bytes.len() > 120 {
+                    crate::arch::x86_64::idt::raw_serial_str(b"...");
+                }
+                crate::arch::x86_64::idt::raw_serial_str(b"\"\n");
+            }
+        }
+    }
 
     // Get current process capability space before exec
     let current = current_process().ok_or(SyscallError::InvalidState)?;
@@ -894,6 +953,66 @@ pub fn sys_getpriority(which: usize, who: usize) -> SyscallResult {
             ProcessPriority::Idle => 140,    // Lowest priority
         };
         Ok(priority_value)
+    } else {
+        Err(SyscallError::ResourceNotFound)
+    }
+}
+
+/// Look up an environment variable by name (syscall 205).
+///
+/// Reads from the process's kernel-side `env_vars` BTreeMap, which is
+/// populated during `exec_process()`.  This is needed because some CRT
+/// implementations (e.g. GCC's internal startup code) skip
+/// `__libc_start_main`, leaving libc's `environ` pointer NULL.
+///
+/// # Arguments
+/// - `name_ptr`: Pointer to NUL-terminated variable name.
+/// - `name_len`: Length of the name (not including NUL).
+/// - `buf_ptr`:  User buffer to receive the value (NUL-terminated).
+/// - `buf_len`:  Size of the user buffer.
+///
+/// # Returns
+/// Length of the value (excluding NUL) on success, or error.
+/// If the buffer is too small, returns the required length (caller retries).
+pub fn sys_getenv(
+    name_ptr: usize,
+    name_len: usize,
+    buf_ptr: usize,
+    buf_len: usize,
+) -> SyscallResult {
+    if name_ptr == 0 || name_len == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    // Read the variable name from user space
+    validate_user_buffer(name_ptr, name_len)?;
+    let name_bytes = unsafe { slice::from_raw_parts(name_ptr as *const u8, name_len) };
+    let name = core::str::from_utf8(name_bytes).map_err(|_| SyscallError::InvalidArgument)?;
+
+    // Look up in the current process's env_vars
+    let process = current_process().ok_or(SyscallError::InvalidState)?;
+    let env_vars = process.env_vars.lock();
+
+    if let Some(value) = env_vars.get(name) {
+        let val_len = value.len();
+
+        // If buf_ptr is 0, just return the required length
+        if buf_ptr == 0 || buf_len == 0 {
+            return Ok(val_len);
+        }
+
+        // Check if buffer is large enough (need room for NUL)
+        if buf_len < val_len + 1 {
+            return Ok(val_len); // Return required length so caller can retry
+        }
+
+        // Write value + NUL to user buffer
+        validate_user_buffer(buf_ptr, val_len + 1)?;
+        let buf = unsafe { slice::from_raw_parts_mut(buf_ptr as *mut u8, val_len + 1) };
+        buf[..val_len].copy_from_slice(value.as_bytes());
+        buf[val_len] = 0;
+
+        Ok(val_len)
     } else {
         Err(SyscallError::ResourceNotFound)
     }

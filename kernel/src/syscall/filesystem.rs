@@ -284,7 +284,9 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
                     Err(_e) => {
                         #[cfg(target_arch = "x86_64")]
                         unsafe {
-                            crate::arch::x86_64::idt::raw_serial_str(b"[CREAT] resolve_path FAIL\n");
+                            crate::arch::x86_64::idt::raw_serial_str(
+                                b"[CREAT] resolve_path FAIL\n",
+                            );
                         }
                         return Err(SyscallError::ResourceNotFound);
                     }
@@ -459,8 +461,8 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
                     crate::arch::x86_64::idt::raw_serial_str(b" n=");
                     crate::arch::x86_64::idt::raw_serial_hex(bytes_read as u64);
                     crate::arch::x86_64::idt::raw_serial_str(b" [");
-                    for i in 0..4.min(bytes_read) {
-                        crate::arch::x86_64::idt::raw_serial_hex(buffer_slice[i] as u64);
+                    for (i, &byte) in buffer_slice.iter().enumerate().take(4.min(bytes_read)) {
+                        crate::arch::x86_64::idt::raw_serial_hex(byte as u64);
                         if i < 3 {
                             crate::arch::x86_64::idt::raw_serial_str(b" ");
                         }
@@ -962,8 +964,8 @@ fn fill_stat(metadata: &crate::fs::Metadata) -> FileStat {
     };
     let size = metadata.size as i64;
     FileStat {
-        st_dev: 0,
-        st_ino: 0,
+        st_dev: 1,
+        st_ino: metadata.inode,
         st_mode: mode,
         st_nlink: 1,
         st_uid: metadata.uid,
@@ -1311,14 +1313,38 @@ pub fn sys_stat_path(path_ptr: usize, stat_buf: usize) -> SyscallResult {
     validate_user_ptr_typed::<FileStat>(stat_buf)?;
     let path = read_user_path(path_ptr)?;
 
+    // Diagnostic: log stat_path calls to trace cc1 include directory checks
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[STATP] ");
+        crate::arch::x86_64::idt::raw_serial_str(path.as_bytes());
+    }
+
     let vfs_lock = vfs()?;
     let vfs_guard = vfs_lock.read();
-    let node = vfs_guard
-        .resolve_path(&path)
-        .map_err(|_| SyscallError::ResourceNotFound)?;
+    let node = match vfs_guard.resolve_path(&path) {
+        Ok(n) => n,
+        Err(_e) => {
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                crate::arch::x86_64::idt::raw_serial_str(b" FAIL\n");
+            }
+            return Err(SyscallError::ResourceNotFound);
+        }
+    };
 
     let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
     let stat = fill_stat(&metadata);
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b" mode=");
+        crate::arch::x86_64::idt::raw_serial_hex(stat.st_mode as u64);
+        crate::arch::x86_64::idt::raw_serial_str(b" sz=");
+        crate::arch::x86_64::idt::raw_serial_hex(stat.st_size as u64);
+        crate::arch::x86_64::idt::raw_serial_str(b"\n");
+    }
+
     // SAFETY: stat_buf was validated as non-null, in user-space, and aligned.
     unsafe {
         core::ptr::write(stat_buf as *mut FileStat, stat);

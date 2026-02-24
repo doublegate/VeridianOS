@@ -631,7 +631,7 @@ impl Scheduler {
                 // First task, load its context directly
                 // This happens when scheduler starts with bootstrap task
                 #[cfg(target_arch = "x86_64")]
-                unsafe {
+                {
                     crate::arch::x86_64::idt::raw_serial_str(b"[SCHED] DISPATCH_FIRST pid=0x");
                     crate::arch::x86_64::idt::raw_serial_hex((*next.as_ptr()).pid.0);
                     crate::arch::x86_64::idt::raw_serial_str(b"\n");

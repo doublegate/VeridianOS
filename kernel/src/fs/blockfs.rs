@@ -935,6 +935,7 @@ impl BlockFsInner {
             created: inode.ctime as u64,
             modified: inode.mtime as u64,
             accessed: inode.atime as u64,
+            inode: inode_num as u64,
         })
     }
 

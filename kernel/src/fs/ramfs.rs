@@ -46,6 +46,7 @@ impl RamNode {
                 created: crate::arch::timer::get_timestamp_secs(),
                 modified: crate::arch::timer::get_timestamp_secs(),
                 accessed: crate::arch::timer::get_timestamp_secs(),
+                inode,
             }),
             inode,
         }
@@ -66,6 +67,7 @@ impl RamNode {
                 created: crate::arch::timer::get_timestamp_secs(),
                 modified: crate::arch::timer::get_timestamp_secs(),
                 accessed: crate::arch::timer::get_timestamp_secs(),
+                inode,
             }),
             inode,
         }

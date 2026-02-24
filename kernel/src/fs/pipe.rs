@@ -237,6 +237,7 @@ impl VfsNode for PipeReadNode {
             created: 0,
             modified: 0,
             accessed: 0,
+            inode: 0,
         })
     }
 
@@ -314,6 +315,7 @@ impl VfsNode for PipeWriteNode {
             created: 0,
             modified: 0,
             accessed: 0,
+            inode: 0,
         })
     }
 

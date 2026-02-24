@@ -373,8 +373,8 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
         crate::arch::x86_64::idt::raw_serial_hex(file_data.len() as u64);
         crate::arch::x86_64::idt::raw_serial_str(b" first32=");
         let show = core::cmp::min(32, file_data.len());
-        for i in 0..show {
-            crate::arch::x86_64::idt::raw_serial_hex(file_data[i] as u64);
+        for byte in file_data.iter().take(show) {
+            crate::arch::x86_64::idt::raw_serial_hex(*byte as u64);
             crate::arch::x86_64::idt::raw_serial_str(b" ");
         }
         crate::arch::x86_64::idt::raw_serial_str(b"\n");
@@ -510,10 +510,8 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
 
                 // Allocate user-space memory for TLS via mmap
                 let memory_space = process.memory_space.lock();
-                let tls_alloc = memory_space.mmap(
-                    tls_block_size,
-                    crate::mm::vas::MappingType::Data,
-                );
+                let tls_alloc =
+                    memory_space.mmap(tls_block_size, crate::mm::vas::MappingType::Data);
                 if let Ok(tls_base_vaddr) = tls_alloc {
                     let tls_base = tls_base_vaddr.as_usize();
 
@@ -527,7 +525,8 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
                     if tls_filesz > 0 {
                         let tls_file_offset = tls_seg.file_offset as usize;
                         if tls_file_offset + tls_filesz <= file_data.len() {
-                            let tls_init = &file_data[tls_file_offset..tls_file_offset + tls_filesz];
+                            let tls_init =
+                                &file_data[tls_file_offset..tls_file_offset + tls_filesz];
                             let _ = crate::elf::write_to_user_pages(
                                 &memory_space,
                                 tls_base as u64,
@@ -549,7 +548,9 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
                     drop(memory_space);
 
                     // Store FS_BASE in the process for later use by enter_usermode
-                    process.tls_fs_base.store(tcb_addr as u64, core::sync::atomic::Ordering::Release);
+                    process
+                        .tls_fs_base
+                        .store(tcb_addr as u64, core::sync::atomic::Ordering::Release);
 
                     // Diagnostic
                     unsafe {

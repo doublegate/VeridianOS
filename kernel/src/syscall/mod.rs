@@ -362,6 +362,11 @@ pub enum Syscall {
 
     // System information
     ProcessUname = 204,
+    /// Look up an environment variable by name from the process's env_vars.
+    ///
+    /// Required because some CRT implementations (e.g. GCC's internal CRT)
+    /// skip __libc_start_main, leaving the libc `environ` pointer NULL.
+    ProcessGetenv = 205,
 }
 
 /// System call result type
@@ -692,6 +697,7 @@ fn handle_syscall(
         Syscall::FutexWake => futex::sys_futex_wake(arg1, arg2, arg3).map(|v| v as usize),
         Syscall::ArchPrctl => arch_prctl::sys_arch_prctl(arg1, arg2).map(|v| v as usize),
         Syscall::ProcessUname => sys_uname(arg1),
+        Syscall::ProcessGetenv => sys_getenv(arg1, arg2, arg3, arg4),
 
         _ => Err(SyscallError::InvalidSyscall),
     }
@@ -1272,6 +1278,8 @@ impl TryFrom<usize> for Syscall {
             201 => Ok(Syscall::FutexWait),
             202 => Ok(Syscall::FutexWake),
             203 => Ok(Syscall::ArchPrctl),
+            204 => Ok(Syscall::ProcessUname),
+            205 => Ok(Syscall::ProcessGetenv),
 
             _ => Err(()),
         }
