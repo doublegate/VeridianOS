@@ -25,7 +25,7 @@
  *   echo "abc" | grep -E "a(b|c)c"        -> matches
  *   echo "aXc" | grep -E "a.+c"           -> matches
  *   echo "ac"  | grep -E "a.?c"           -> matches
- *   echo "abbc" | sed 's/b*/X/'           -> Xabbc (BRE * zero-or-more)
+ *   echo "aab" | grep "a*b"               -> matches (BRE star zero-or-more)
  *   echo "abc" | grep '\(ab\)c'           -> matches (BRE group)
  *   echo "abc" | grep -E '(ab)c'          -> matches (ERE group)
  */
