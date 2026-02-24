@@ -4,9 +4,9 @@
 
 ## [v0.5.2] - 2026-02-24
 
-### v0.5.2: BusyBox Sprints B-5/B-6/B-7 -- EPIPE Handling, Float Printf, Pipe Improvements
+### v0.5.2: BusyBox B-5/B-6/B-7/B-8/B-9/B-17 -- EPIPE, Float Printf, Native Compilation, POSIX Regex
 
-Fixes three critical issues discovered during BusyBox 1.36.1 integration testing (95 applets with ash shell). Adds proper EPIPE/BrokenPipe handling for multi-pipe commands, implements `%f/%g/%e` float formatting in libc printf, and improves pipe read behavior for command substitution. Extends libc headers for BusyBox compatibility.
+Major release spanning 6 BusyBox sprints. Fixes critical pipeline issues (EPIPE, float printf, pipe reads), builds Phase C native compilation infrastructure (384MB heap, sbrk hardening, frame allocator fallback), implements a complete POSIX BRE/ERE regex engine (1291 lines), and fixes CI to use the custom x86_64-veridian target with kernel code model.
 
 ---
 
@@ -37,7 +37,39 @@ Fixes three critical issues discovered during BusyBox 1.36.1 integration testing
 - `userland/libc/include/veridian/stat.h`: Added `utimensat`, `futimens` declarations.
 - `userland/libc/src/posix_stubs3.c`: Added `strptime` and `futimens` stub implementations.
 
+#### Phase C Native Compilation Infrastructure (Sprint B-8)
+
+- `kernel/src/mm/heap.rs`: Expanded kernel heap from 128MB to 384MB to support cc1 memory demands during native compilation. Updated `HEAP_SIZE` constant and heap memory array.
+- `kernel/src/mm/frame_allocator.rs`: Added emergency fallback allocation for frame allocator exhaustion -- scans full bitmap when primary region is depleted.
+- `kernel/src/mm/page_fault.rs`: Implemented 8MB user-space stack growth (up from 4MB) via demand paging on guard page faults.
+- `kernel/src/mm/mod.rs`: Added `map_kernel_error()` translation layer mapping kernel memory errors to syscall-compatible error codes.
+- `kernel/src/bootstrap.rs`: Added native compilation boot tests for verifying cc1/as/ld execution paths.
+- `scripts/build-busybox-rootfs.sh`: Extended rootfs build to include native toolchain binaries.
+- `busybox/build-busybox-native.sh`: New script for building BusyBox natively on VeridianOS.
+
+#### sbrk/brk Hardening for cc1-Scale Workloads (Sprint B-9)
+
+- `kernel/src/syscall/memory.rs`: Hardened `sys_brk()` with 64KB chunk pre-allocation (reduces syscall frequency by ~16x for small increments), page-aligned break requests, local per-process break tracking, and 512MB per-process heap limit. Prevents cc1 from exhausting kernel memory with unbounded heap growth.
+- `kernel/src/syscall/mod.rs`: Wired new `SYS_BRK` handling through syscall dispatch.
+- `userland/libc/src/syscall.c`: Updated libc `sbrk()` to use hardened kernel brk path.
+- `userland/libc/src/stdlib.c`: Aligned malloc/free with new brk semantics.
+
+#### POSIX BRE/ERE Regex Engine (Sprint B-17)
+
+- `userland/libc/src/regex.c`: New 1291-line recursive backtracking NFA regex engine implementing `regcomp()`, `regexec()`, `regfree()`, and `regerror()` per POSIX.2. Supports both Basic Regular Expressions (BRE) and Extended Regular Expressions (ERE). Features:
+  - Metacharacters: `. * + ? ^ $ | () [] {m,n}`
+  - 12 POSIX character classes: `[:alpha:]`, `[:digit:]`, `[:alnum:]`, `[:upper:]`, `[:lower:]`, `[:space:]`, `[:blank:]`, `[:print:]`, `[:punct:]`, `[:cntrl:]`, `[:graph:]`, `[:xdigit:]`
+  - Bracket expressions with negation (`[^...]`) and ranges (`[a-z]`)
+  - Alternation, grouping, backreferences (BRE `\(...\)`, ERE `(...)`)
+  - REG_ICASE, REG_NEWLINE, REG_NOSUB, REG_NOTBOL, REG_NOTEOL flags
+  - Enables BusyBox grep, sed, awk, and find applets that depend on regex matching
+- `userland/libc/include/regex.h`: New POSIX `<regex.h>` header with `regex_t`, `regmatch_t`, flag constants, and function declarations.
+
 ### Fixed
+
+#### CI: x86_64 Target Configuration
+
+- `.github/workflows/ci.yml`: Changed x86_64 build target from `x86_64-unknown-none` to `targets/x86_64-veridian.json` (custom target with kernel code model). Fixes R_X86_64_32S relocation errors that occurred because the standard target lacks the kernel code model required for the higher-half kernel linked at 0xFFFFFFFF80100000.
 
 #### EPIPE/BrokenPipe Handling in sys_write (Sprint B-5)
 
@@ -59,6 +91,9 @@ Fixes three critical issues discovered during BusyBox 1.36.1 integration testing
 ### Infrastructure
 
 - Version bumped: Cargo.toml (0.5.1 -> 0.5.2), uname (0.5.1 -> 0.5.2), /etc/os-release (0.5.1 -> 0.5.2).
+- `.gitignore`: Added BusyBox native build artifact patterns (`busybox/busybox`, `busybox/*.o`, `busybox/build/`).
+- `.github/workflows/ci.yml`: Fixed x86_64 target to use `targets/x86_64-veridian.json` with kernel code model.
+- Total: 8 commits, 25+ files changed across B-5/B-6/B-7/B-8/B-9/B-17 sprints plus CI fix.
 
 ### Known Limitations
 

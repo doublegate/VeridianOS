@@ -292,6 +292,14 @@ userland/coreutils/*.o
 target/rootfs-build/
 target/rootfs-selfhost.tar
 
+# BusyBox native build artifacts
+busybox/busybox
+busybox/*.o
+busybox/build/
+
+# Native compilation rootfs build artifacts
+target/rootfs-busybox.tar
+
 # Plan files (Claude Code)
 .claude/plans/
 a.out
