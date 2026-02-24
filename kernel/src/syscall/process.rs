@@ -42,7 +42,17 @@ pub fn sys_fork() -> SyscallResult {
             // In parent process, return child PID
             Ok(child_pid.0 as usize)
         }
-        Err(_) => Err(SyscallError::OutOfMemory),
+        Err(e) => {
+            // Map ResourceExhausted (process table full) to WouldBlock
+            // which is EAGAIN in user space -- the POSIX-correct errno
+            // for fork() when the process limit is reached.
+            match e {
+                crate::error::KernelError::ResourceExhausted { .. } => {
+                    Err(SyscallError::WouldBlock)
+                }
+                _ => Err(SyscallError::OutOfMemory),
+            }
+        }
     }
 }
 

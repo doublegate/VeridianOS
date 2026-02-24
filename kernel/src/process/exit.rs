@@ -534,9 +534,19 @@ pub fn cleanup_process(process: &Process) {
         process.ipc_endpoints.lock().clear();
     }
 
-    // Close all open file descriptors
+    // Close all open file descriptors.
+    // Log a warning if the process has more than 3 fds open (stdin/stdout/stderr).
+    // This helps identify fd leaks during heavy workloads like BusyBox compilation
+    // where 213+ sequential processes must not leak fds.
     {
         let file_table = process.file_table.lock();
+        let open_fds = file_table.count_open();
+        if open_fds > 3 {
+            println!(
+                "[PROCESS] Warning: process {} exiting with {} open fds (expected <= 3)",
+                process.pid.0, open_fds
+            );
+        }
         file_table.close_all();
     }
 

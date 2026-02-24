@@ -413,6 +413,10 @@ pub enum SyscallError {
     NotATerminal = -32,
     BrokenPipe = -39,
     DirectoryNotEmpty = -45,
+    /// Resource limit exceeded (process table full, fd table full, etc.)
+    /// Maps to ERESOURCELIMIT (errno 79) in user space.
+    /// For POSIX fork() EAGAIN semantics, prefer WouldBlock (errno 6).
+    ResourceLimitExceeded = -79,
 }
 
 impl From<IpcError> for SyscallError {

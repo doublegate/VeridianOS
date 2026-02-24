@@ -1029,6 +1029,70 @@ fn boot_run_program(path: &str, argv: &[&str], envp: &[&str]) {
             kprintln!("[BOOT] {} not found in VFS, skipping", path);
         }
     }
+
+    // Sweep any orphaned zombie processes left behind by the program.
+    // In boot context, there is no init process running waitpid() in a loop,
+    // so orphans reparented to init (PID 1) would accumulate indefinitely.
+    // This sweep prevents process table leaks across 213+ sequential
+    // program executions during BusyBox compilation.
+    boot_reap_orphan_zombies();
+}
+
+/// Sweep zombie processes from the process table in boot context.
+///
+/// During boot, programs may fork children that exit without being reaped
+/// (the parent exits without calling waitpid, or the child outlives the
+/// parent). These zombies are reparented to init (PID 1) by `cleanup_process`,
+/// but in boot context there is no init process running a reap loop.
+///
+/// This function scans the process table and removes any zombie process whose
+/// parent is no longer alive (or is init), preventing unbounded zombie
+/// accumulation across hundreds of sequential boot-context program executions.
+#[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+fn boot_reap_orphan_zombies() {
+    use crate::process::{
+        pcb::ProcessState,
+        table::{self, PROCESS_TABLE},
+        ProcessId,
+    };
+
+    // Collect zombie PIDs first to avoid holding the table lock during removal.
+    let mut zombies_to_reap = alloc::vec::Vec::new();
+    PROCESS_TABLE.for_each(|proc| {
+        if proc.get_state() == ProcessState::Zombie {
+            // Reap zombies that were reparented to init (PID 1) or whose
+            // parent no longer exists. PID 0 and PID 1 are system processes.
+            let dominated_by_init_or_orphaned = match proc.parent {
+                Some(parent_pid) => parent_pid.0 <= 1 || table::get_process(parent_pid).is_none(),
+                None => true,
+            };
+            if dominated_by_init_or_orphaned {
+                zombies_to_reap.push(proc.pid);
+            }
+        }
+    });
+
+    for pid in &zombies_to_reap {
+        // Clean up process resources if not already done
+        if let Some(proc) = table::get_process(*pid) {
+            // cleanup_process should have been called by sys_exit, but call
+            // it defensively in case the process died abnormally.
+            if proc.get_state() == ProcessState::Zombie {
+                // Remove from init's children list
+                if let Some(init) = table::get_process(ProcessId(1)) {
+                    init.children.lock().retain(|&p| p != *pid);
+                }
+            }
+        }
+        table::remove_process(*pid);
+    }
+
+    if !zombies_to_reap.is_empty() {
+        kprintln!(
+            "[BOOT] Reaped {} orphan zombie(s) from process table",
+            zombies_to_reap.len()
+        );
+    }
 }
 
 /// Switch to a user process's address space and enter Ring 3.
@@ -1157,6 +1221,11 @@ fn run_user_process(pid: crate::process::ProcessId) {
 /// `movaps` in `Task::new()` requires 16-byte alignment, but the lock
 /// cycle shifts RSP by 8 on the second invocation, causing a GP fault).
 ///
+/// After the user process exits (via `sys_exit` -> `boot_return_to_kernel`),
+/// the process is a zombie in the process table. This function reaps it to
+/// prevent process table leaks across 213+ sequential program executions
+/// during BusyBox compilation.
+///
 /// `#[inline(never)]` prevents the compiler from inlining this into
 /// `test_user_binary_load`, which would change that function's stack frame
 /// layout between invocations and corrupt SSE alignment for subsequent
@@ -1185,6 +1254,21 @@ fn run_user_process_scheduled(pid: crate::process::ProcessId) {
     } else {
         // Process not found or no threads -- run without tracking.
         run_user_process(pid);
+    }
+
+    // Reap the zombie process from the process table.
+    // sys_exit() already called cleanup_process() (closing fds, releasing
+    // memory, capabilities, IPC endpoints) and marked the process as Zombie.
+    // But in boot context there is no parent to call waitpid(), so the
+    // zombie entry leaks in the process table. Remove it now to prevent
+    // unbounded growth across hundreds of sequential program executions.
+    if let Some(proc) = get_process(pid) {
+        let state = proc.get_state();
+        if state == crate::process::ProcessState::Zombie
+            || state == crate::process::ProcessState::Dead
+        {
+            crate::process::table::remove_process(pid);
+        }
     }
 }
 

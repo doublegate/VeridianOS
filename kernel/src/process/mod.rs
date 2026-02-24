@@ -47,8 +47,13 @@ pub use thread::{Thread, ThreadId, ThreadState};
 // Re-export thread context types for compatibility
 pub use crate::arch::context::{ArchThreadContext, ThreadContext};
 
-/// Maximum number of processes
-pub const MAX_PROCESSES: usize = 4096;
+/// Maximum number of concurrent processes (including zombies awaiting reaping).
+///
+/// This limit is enforced in fork() to prevent unbounded process table growth
+/// during workloads like BusyBox native compilation (213+ sequential gcc
+/// invocations). Zombie processes count against this limit until reaped by
+/// their parent via waitpid().
+pub const MAX_PROCESSES: usize = 1024;
 
 /// Maximum threads per process
 pub const MAX_THREADS_PER_PROCESS: usize = 256;

@@ -23,6 +23,21 @@ use crate::{arch::context::ThreadContext, error::KernelError, println};
 /// Fork current process
 #[cfg(feature = "alloc")]
 pub fn fork_process() -> Result<ProcessId, KernelError> {
+    // Enforce process count limit (includes zombies awaiting reap).
+    // This prevents unbounded process table growth during workloads
+    // like BusyBox native compilation (213+ sequential fork+exec+wait).
+    let current_count = table::PROCESS_TABLE.count();
+    if current_count >= super::MAX_PROCESSES {
+        println!(
+            "[PROCESS] fork: process limit reached ({}/{})",
+            current_count,
+            super::MAX_PROCESSES
+        );
+        return Err(KernelError::ResourceExhausted {
+            resource: "process table",
+        });
+    }
+
     let current_process =
         super::current_process().ok_or(KernelError::ProcessNotFound { pid: 0 })?;
 

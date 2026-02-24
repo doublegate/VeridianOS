@@ -272,6 +272,9 @@ extern "C" {
 /** Link has been severed */
 #define ENOLINK             78
 
+/** Resource limit exceeded (process table full, fd table full) */
+#define ERESOURCELIMIT      79  /* SyscallError::ResourceLimitExceeded = -79 */
+
 /* ========================================================================= */
 /* POSIX-Compatible Aliases                                                  */
 /* ========================================================================= */

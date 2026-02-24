@@ -70,6 +70,14 @@ pub fn create_process(name: String, entry_point: usize) -> Result<ProcessId, Ker
 pub fn create_process_with_options(
     options: ProcessCreateOptions,
 ) -> Result<ProcessId, KernelError> {
+    // Enforce process count limit before allocating resources.
+    let current_count = table::PROCESS_TABLE.count();
+    if current_count >= super::MAX_PROCESSES {
+        return Err(KernelError::ResourceExhausted {
+            resource: "process table",
+        });
+    }
+
     // Create the process
     let process = ProcessBuilder::new(options.name.clone())
         .parent(options.parent.unwrap_or(ProcessId(0)))
