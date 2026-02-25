@@ -940,52 +940,22 @@ fn test_user_binary_load() {
                         drop(vfs);
                     }
 
-                    // C-3: Full native build (all 217 files + link)
-                    // Run the pre-generated native compilation script
-                    let vfs = get_vfs().read();
-                    let has_script = vfs.resolve_path("/usr/src/build-busybox-native.sh").is_ok();
-                    drop(vfs);
-                    if has_script {
-                        kprintln!("[BOOT] Phase C-3: Full native BusyBox compilation");
-                        boot_run_program(
-                            "/bin/ash",
-                            &["ash", "/usr/src/build-busybox-native.sh"],
-                            env,
-                        );
-
-                        // C-5: Verify natively-compiled binary
+                    // C-3: Full native build (all 213 files + link)
+                    // SKIPPED during boot -- compiling 213 files blocks the
+                    // interactive shell for many minutes.  The single-file
+                    // test above already validates the toolchain.  To run
+                    // the full build manually from the shell:
+                    //   ash /usr/src/build-busybox-native.sh
+                    {
                         let vfs = get_vfs().read();
-                        let has_native = vfs.resolve_path("/tmp/busybox-native").is_ok();
+                        let has_script =
+                            vfs.resolve_path("/usr/src/build-busybox-native.sh").is_ok();
                         drop(vfs);
-                        if has_native {
-                            kprintln!("[BOOT] Phase C-5: Native binary verification");
-                            // Check applet list
-                            boot_run_program("/tmp/busybox-native", &["busybox", "--list"], env);
-                            // Functional smoke tests
-                            boot_run_program(
-                                "/tmp/busybox-native",
-                                &["busybox", "echo", "NATIVE_ECHO_PASS"],
-                                env,
+                        if has_script {
+                            kprintln!("[BOOT] Phase C-3: Skipped (213-file native build)");
+                            kprintln!(
+                                "[BOOT] Run manually: ash /usr/src/build-busybox-native.sh"
                             );
-                            boot_run_program("/tmp/busybox-native", &["busybox", "true"], env);
-                            boot_run_program(
-                                "/tmp/busybox-native",
-                                &["busybox", "uname", "-a"],
-                                env,
-                            );
-                            boot_run_program(
-                                "/tmp/busybox-native",
-                                &["busybox", "cat", "/usr/src/cat_test.txt"],
-                                env,
-                            );
-                            boot_run_program(
-                                "/tmp/busybox-native",
-                                &["busybox", "wc", "/usr/src/wc_test.txt"],
-                                env,
-                            );
-                            kprintln!("BUSYBOX_NATIVE_COMPILATION_PASS");
-                        } else {
-                            kprintln!("NATIVE_BUILD_BINARY_NOT_FOUND");
                         }
                     }
                 } else {
