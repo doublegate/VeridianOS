@@ -350,10 +350,12 @@ pub fn init_default() {
             safe_start
         };
 
-        // Total usable RAM: detect from QEMU. The bootloader provides
-        // memory map info, but in the default path we estimate 1536MB
-        // minimum (required for 512MB heap). Clamp to avoid exceeding
-        // physical memory.
+        // Total usable RAM. MUST match the QEMU `-m` flag exactly.
+        // Over-estimating causes the buddy allocator to hand out frames
+        // from non-existent physical addresses, corrupting kernel heap
+        // state (manifests as null-ptr deref in linked_list_allocator
+        // after ~200 fork+exec cycles exhaust the bitmap region).
+        // Current QEMU config: -m 2048M.
         let ram_end: u64 = 2048 * 1024 * 1024;
         let size = ram_end.saturating_sub(alloc_start);
 

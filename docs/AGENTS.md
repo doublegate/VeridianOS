@@ -8,8 +8,8 @@
 - `tools/`, `scripts/`: build/debug helpers (QEMU, benchmarks, hooks) — prefer reuse over new scripts.  
 - `targets/`: arch JSON specs (x86_64/aarch64/riscv64); align with build matrix.  
 - `tests/`: cross-arch boot/integration tests; crate-level unit tests live beside source.  
-- `docs/`, `ref_docs/`: invariants, design, and status docs — update when changing interfaces or invariants.  
-- Generated outputs live in `images/`, `artifacts/`, `release-artifacts/`; avoid manual edits.
+- `docs/`: invariants, design, status docs, and reference materials (`docs/reference/`) — update when changing interfaces or invariants.
+- Generated outputs live in `images/`; avoid manual edits.
 
 ## Build, Test, and Development Commands
 - Preferred: `./build-kernel.sh all dev` (or `x86_64|aarch64|riscv64 [dev|release]`) for full builds.  
@@ -39,7 +39,7 @@
 - Commit messages follow conventional commits with scopes, e.g., `fix(ci): handle empty coverage target — explain` (see recent history).  
 - Install git hooks via `just install-hooks`; `just check-commit-msg "<msg>"` mirrors the commit-msg hook.  
 - PRs should include: short summary, linked issue, architectures tested (x86_64/aarch64/riscv64), commands run, and any breaking changes or migration notes.  
-- Keep diffs small and focused; update `docs/` or `ref_docs/` when changing invariants or interfaces.
+- Keep diffs small and focused; update `docs/` (including `docs/reference/`) when changing invariants or interfaces.
 
 ## QEMU & Boot Notes
 - QEMU 10.2+: never wrap with `timeout`; background + kill pattern avoids drive conflicts.  

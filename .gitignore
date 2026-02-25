@@ -170,8 +170,9 @@ uart.log
 # Git worktrees
 worktrees/
 
-# ISO build artifacts
+# ISO build staging artifacts (grub.cfg template is tracked; build outputs are not)
 iso_build/
+tools/iso_build/boot/veridian-kernel
 
 # Python build artifacts
 *.pyc
@@ -293,9 +294,9 @@ target/rootfs-build/
 target/rootfs-selfhost.tar
 
 # BusyBox native build artifacts
-busybox/busybox
-busybox/*.o
-busybox/build/
+tools/busybox/busybox
+tools/busybox/*.o
+tools/busybox/build/
 
 # Native compilation rootfs build artifacts
 target/rootfs-busybox.tar

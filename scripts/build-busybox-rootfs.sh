@@ -25,8 +25,8 @@ BUSYBOX_URL="https://busybox.net/downloads/busybox-${BUSYBOX_VERSION}.tar.bz2"
 WORK_DIR="/tmp/VeridianOS"
 BB_SRC="${WORK_DIR}/busybox-${BUSYBOX_VERSION}"
 BB_BUILD="${WORK_DIR}/busybox-build"
-BB_PATCHES="${PROJECT_ROOT}/busybox/patches"
-BB_DEFCONFIG="${PROJECT_ROOT}/busybox/veridian_defconfig"
+BB_PATCHES="${PROJECT_ROOT}/tools/busybox/patches"
+BB_DEFCONFIG="${PROJECT_ROOT}/tools/busybox/veridian_defconfig"
 
 # Toolchain
 TOOLCHAIN_PREFIX="/opt/veridian/toolchain"
@@ -439,15 +439,15 @@ SPECEOF
         fi
 
         # Copy native build script + file lists
-        local NATIVE_SCRIPT="${PROJECT_ROOT}/busybox/build-busybox-native.sh"
+        local NATIVE_SCRIPT="${PROJECT_ROOT}/tools/busybox/build-busybox-native.sh"
         if [ -f "$NATIVE_SCRIPT" ]; then
             cp "$NATIVE_SCRIPT" "$BUILD_DIR/usr/src/build-busybox-native.sh"
             chmod 755 "$BUILD_DIR/usr/src/build-busybox-native.sh"
             echo "    + /usr/src/build-busybox-native.sh"
         fi
         for lst in busybox-compile-list.txt busybox-obj-list.txt; do
-            if [ -f "${PROJECT_ROOT}/busybox/$lst" ]; then
-                cp "${PROJECT_ROOT}/busybox/$lst" "$BUILD_DIR/usr/src/$lst"
+            if [ -f "${PROJECT_ROOT}/tools/busybox/$lst" ]; then
+                cp "${PROJECT_ROOT}/tools/busybox/$lst" "$BUILD_DIR/usr/src/$lst"
                 echo "    + /usr/src/$lst"
             fi
         done
@@ -485,7 +485,7 @@ phase_blockfs_image() {
     local MKFS_DIR="${PROJECT_ROOT}/tools/mkfs-blockfs"
     local MKFS_BIN="${MKFS_DIR}/target/x86_64-unknown-linux-gnu/release/mkfs-blockfs"
     local BLOCKFS_IMG="${PROJECT_ROOT}/target/rootfs-blockfs.img"
-    local BLOCKFS_SIZE="${BLOCKFS_SIZE:-128}"
+    local BLOCKFS_SIZE="${BLOCKFS_SIZE:-256}"
 
     echo "Building mkfs-blockfs tool..."
     (cd "$MKFS_DIR" && cargo build --release)
@@ -518,7 +518,7 @@ phase_blockfs_image() {
     echo "    -device ide-hd,drive=disk0 \\"
     echo "    -drive file=target/rootfs-blockfs.img,if=none,id=vd0,format=raw \\"
     echo "    -device virtio-blk-pci,drive=vd0 \\"
-    echo "    -serial stdio -display none -m 1536M"
+    echo "    -serial stdio -display none -m 2048M"
 }
 
 # =========================================================================

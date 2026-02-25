@@ -35,7 +35,7 @@ use super::VirtualAddress;
 // block cache. Combined with VFS metadata (~10MB), process structures,
 // and heap fragmentation from Phase B tests, 384MB was insufficient when
 // both BlockFS and native compilation are active.
-// 512MB provides headroom for both. Requires QEMU -m 1536M.
+// 512MB provides headroom for both. Requires QEMU -m 2048M.
 // AArch64/RISC-V keep 8MB since they have less RAM (128MB default) and
 // don't use virtio-blk for rootfs loading.
 #[cfg(target_arch = "x86_64")]

@@ -126,4 +126,4 @@ Key settings:
 ### References
 - [OSDev Wiki - Higher Half Kernel](https://wiki.osdev.org/Higher_Half_Kernel)
 - [System V ABI x86-64 Supplement](https://refspecs.linuxbase.org/elf/x86_64-abi-0.99.pdf)
-- `ref_docs/kernel_issue/` - Additional documentation and solutions
+- `docs/reference/kernel_issue/` - Additional documentation and solutions

@@ -137,7 +137,7 @@ All integrated changes maintain consistency with:
 ## References
 
 - Original comprehensive report (not checked in)
-- AI analysis documents in ref_docs/
+- AI analysis documents in docs/reference/
 - Updated documentation throughout project
 
 ---

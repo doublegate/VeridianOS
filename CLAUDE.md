@@ -103,7 +103,7 @@ qemu-system-x86_64 -enable-kvm \
     -device ide-hd,drive=disk0 \
     -serial stdio -display none -m 256M -s -S
 
-# With persistent BlockFS root filesystem (requires 1536M RAM for 512MB heap):
+# With persistent BlockFS root filesystem (requires 2048M RAM for 512MB heap):
 # First: cd tools/mkfs-blockfs && cargo build --release
 # Then:  ./scripts/build-busybox-rootfs.sh blockfs  (creates target/rootfs-blockfs.img)
 qemu-system-x86_64 -enable-kvm \
@@ -112,7 +112,7 @@ qemu-system-x86_64 -enable-kvm \
     -device ide-hd,drive=disk0 \
     -drive file=target/rootfs-blockfs.img,if=none,id=vd0,format=raw \
     -device virtio-blk-pci,drive=vd0 \
-    -serial stdio -display none -m 1536M
+    -serial stdio -display none -m 2048M
 ```
 
 **⚠️ COMMON MISTAKES (QEMU 10.2 — ALL ARCHITECTURES):**

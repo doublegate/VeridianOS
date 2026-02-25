@@ -253,7 +253,7 @@ If you need help:
 
 ## Recognition
 
-All contributors are recognized in our [CONTRIBUTORS.md](https://github.com/doublegate/VeridianOS/blob/main/CONTRIBUTORS.md) file. We appreciate every contribution, no matter how small!
+All contributors are recognized in our [CONTRIBUTORS.md](https://github.com/doublegate/VeridianOS/blob/main/docs/community/CONTRIBUTORS.md) file. We appreciate every contribution, no matter how small!
 
 ## License
 

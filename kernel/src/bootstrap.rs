@@ -714,9 +714,15 @@ fn mount_blockfs_root() {
     let backend = Arc::new(Mutex::new(VirtioBlockBackend));
 
     let blockfs = match BlockFs::open_existing(backend) {
-        Ok(fs) => fs,
+        Ok(fs) => {
+            kprintln!("[ROOTFS] BlockFS loaded successfully");
+            fs
+        }
         Err(_e) => {
-            kprintln!("[ROOTFS] Failed to open BlockFS, falling back to TAR rootfs");
+            kprintln!(
+                "[ROOTFS] Failed to open BlockFS: {:?}, falling back to TAR rootfs",
+                _e
+            );
             load_tar_rootfs();
             return;
         }

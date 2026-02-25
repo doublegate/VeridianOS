@@ -630,6 +630,83 @@ gpg --detach-sign --armor target/release/veridian-kernel
 gpg --verify veridian-kernel.asc veridian-kernel
 ```
 
+## Persistent Storage (BlockFS)
+
+VeridianOS supports persistent root filesystems via BlockFS. Unlike the default TAR rootfs
+(which is loaded into RAM and lost on shutdown), BlockFS writes directly to a disk image
+that survives across reboots.
+
+### Prerequisites
+
+1. The `mkfs-blockfs` host tool:
+   ```bash
+   cd tools/mkfs-blockfs
+   cargo build --release
+   ```
+
+2. A cross-compiled BusyBox rootfs:
+   ```bash
+   ./scripts/build-busybox-rootfs.sh all
+   ```
+
+### Step-by-Step: Build and Boot with Persistent Storage
+
+```bash
+# 1. Build the kernel (if not already built)
+./build-kernel.sh x86_64 dev
+
+# 2. Create a 256MB BlockFS image populated from the rootfs
+./scripts/build-busybox-rootfs.sh blockfs
+
+# 3. Boot with persistent storage using the convenience script
+./scripts/run-veridian.sh --blockfs
+```
+
+The convenience script handles OVMF detection, stale QEMU cleanup, file validation,
+and correct QEMU flags automatically.
+
+### Manual QEMU Command
+
+If you prefer to run QEMU directly:
+
+```bash
+qemu-system-x86_64 -enable-kvm \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
+    -drive id=disk0,if=none,format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
+    -device ide-hd,drive=disk0 \
+    -drive file=target/rootfs-blockfs.img,if=none,id=vd0,format=raw \
+    -device virtio-blk-pci,drive=vd0 \
+    -serial stdio -display none -m 2048M
+```
+
+Adjust the OVMF path for your distribution (see the [Persistent Storage Guide](PERSISTENT-STORAGE.md)
+for paths on Arch, Debian, and Fedora).
+
+### Convenience Script Options
+
+The `scripts/run-veridian.sh` launcher supports several flags:
+
+```bash
+./scripts/run-veridian.sh                    # TAR rootfs, serial only (default)
+./scripts/run-veridian.sh --blockfs           # Persistent BlockFS, serial only
+./scripts/run-veridian.sh --display           # TAR rootfs, framebuffer display
+./scripts/run-veridian.sh --blockfs --display  # Persistent + framebuffer
+./scripts/run-veridian.sh --release           # Use release build
+```
+
+### Custom Image Size
+
+The default BlockFS image size is 256MB. Override with the `BLOCKFS_SIZE` environment
+variable:
+
+```bash
+BLOCKFS_SIZE=512 ./scripts/build-busybox-rootfs.sh blockfs
+```
+
+For detailed information on the BlockFS on-disk format, sizing recommendations,
+sync/fsync behavior, and troubleshooting, see the
+[Persistent Storage Guide](PERSISTENT-STORAGE.md).
+
 ## Next Steps
 
 After successfully building VeridianOS:

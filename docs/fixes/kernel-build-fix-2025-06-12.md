@@ -37,7 +37,7 @@ Created `build-kernel.sh` to automate builds for all architectures:
 - Updated CLAUDE.md with new build instructions
 - Created KERNEL-BUILD-TROUBLESHOOTING.md guide
 - Updated README.md with build script usage
-- Preserved original documentation in ref_docs/kernel_issue/
+- Preserved original documentation in docs/reference/kernel_issue/
 
 ## Verification
 All architectures now build successfully:

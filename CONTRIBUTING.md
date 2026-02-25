@@ -347,7 +347,7 @@ Fixes #456
 
 Contributors are recognized in several ways:
 
-- Listed in [CONTRIBUTORS.md](CONTRIBUTORS.md)
+- Listed in [CONTRIBUTORS.md](docs/community/CONTRIBUTORS.md)
 - Mentioned in release notes
 - Special roles in Discord
 - Contributor badge on forum

@@ -165,6 +165,7 @@ Phases 0 through 4 are complete. The kernel provides:
 - **BusyBox 1.36.1** -- 95 applets cross-compiled with ash shell support; EPIPE/BrokenPipe handling for multi-pipe commands (`yes | head -n 1`), float printf (`%f/%g/%e`) for `seq`, ash interactive mode (isatty/ENOTTY, sysconf, exec family, fnmatch/glob, tcgetpgrp), process lifecycle hardening for 213+ sequential execs (zombie reaping, MAX_PROCESSES=1024, fd leak detection), ARG_MAX enforcement (128KB), strftime (28 format specifiers), popen/pclose
 - **POSIX Regex Engine** -- 1291-line BRE/ERE regex library (`regex.h`/`regcomp`/`regexec`/`regfree`) with recursive backtracking NFA, supports `. * + ? ^ $ [...] | () {m,n}`, 12 POSIX character classes ([:alpha:], [:digit:], etc.), enables grep/sed/awk/find BusyBox applets
 - **Native Compilation Infrastructure** -- 384MB kernel heap, frame allocator emergency fallback, 8MB user-space stack growth, map_kernel_error translation layer, hardened sbrk/brk with 64KB chunk pre-allocation, page-aligned requests, local break tracking, 512MB per-process heap limit
+- **Persistent Storage** -- BlockFS filesystem with on-disk superblock, bitmap, inode table serialization; auto-detected at boot via magic number probe; sync/fsync support; `mkfs-blockfs` host tool for image creation
 - **Virtio-blk Driver** -- Block I/O with TAR rootfs loader for cross-compiled user-space binaries; virtio-MMIO transport on AArch64/RISC-V, PCI on x86_64
 - **Thread Support** -- clone() with CLONE_VM/CLONE_FS/CLONE_THREAD/CLONE_SETTLS, futex (WAIT/WAKE/REQUEUE/BITSET), POSIX pthread library (create/join/detach/mutex/cond/TLS)
 - **Signal Delivery** -- Full signal frames and trampolines on all three architectures (x86_64, AArch64, RISC-V) with sigreturn context restoration
@@ -280,6 +281,28 @@ qemu-system-riscv64 -M virt -m 256M -bios default \
     -serial stdio -display none
 ```
 
+#### Persistent Storage (BlockFS)
+
+```bash
+# Build the cross-compiled BusyBox rootfs (first time only)
+./scripts/build-busybox-rootfs.sh all
+
+# Create a 256MB persistent BlockFS image populated from rootfs
+./scripts/build-busybox-rootfs.sh blockfs
+
+# Boot with persistent storage
+./scripts/run-veridian.sh --blockfs
+
+# Or manually:
+qemu-system-x86_64 -enable-kvm \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
+    -drive id=disk0,if=none,format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
+    -device ide-hd,drive=disk0 \
+    -drive file=target/rootfs-blockfs.img,if=none,id=vd0,format=raw \
+    -device virtio-blk-pci,drive=vd0 \
+    -serial stdio -display none -m 2048M
+```
+
 For detailed build instructions, see [BUILD-INSTRUCTIONS.md](docs/BUILD-INSTRUCTIONS.md).
 
 ---
@@ -295,7 +318,7 @@ For detailed build instructions, see [BUILD-INSTRUCTIONS.md](docs/BUILD-INSTRUCT
 ### Minimum Requirements
 
 - 64-bit CPU with MMU
-- 256MB RAM
+- 256MB RAM (1.5GB for persistent storage / native compilation)
 - 1GB storage
 
 ### Recommended Requirements
@@ -319,6 +342,7 @@ For detailed build instructions, see [BUILD-INSTRUCTIONS.md](docs/BUILD-INSTRUCT
 - 🗺️ [Implementation Roadmap](docs/IMPLEMENTATION-ROADMAP.md) — Detailed development plan
 - 🔄 [Software Porting Guide](docs/SOFTWARE-PORTING-GUIDE.md) — Porting Linux software to VeridianOS
 - 🔧 [Compiler Toolchain Guide](docs/COMPILER-TOOLCHAIN-GUIDE.md) — Native compiler integration strategy
+- 💾 [Persistent Storage Guide](docs/PERSISTENT-STORAGE.md) — BlockFS filesystem and disk image management
 - 🚀 [Future Development Insights](docs/FUTURE-DEVELOPMENT-INSIGHTS.md) — Analysis and recommendations
 
 ### Development Phases

@@ -4,7 +4,7 @@
 set -e
 
 KERNEL_PATH="target/x86_64-unknown-none/debug/veridian-kernel"
-ISO_DIR="iso_build"
+ISO_DIR="tools/iso_build"
 GRUB_DIR="$ISO_DIR/boot/grub"
 
 echo "Creating GRUB bootable ISO for VeridianOS x86_64..."

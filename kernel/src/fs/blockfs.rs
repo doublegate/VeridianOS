@@ -572,10 +572,10 @@ impl BlockFsInner {
         root_inode.links_count = 2;
         inode_table[0] = root_inode;
 
-        // Initialize block storage
-        let mut block_data = Vec::new();
+        // Initialize block storage (sparse -- blocks materialized on first write)
+        let mut block_data = Vec::with_capacity(block_count as usize);
         for _ in 0..block_count {
-            block_data.push(vec![0u8; BLOCK_SIZE]);
+            block_data.push(Vec::new());
         }
 
         let mut fs = Self {
@@ -618,6 +618,7 @@ impl BlockFsInner {
     fn allocate_block(&mut self) -> Option<u32> {
         let block = self.block_bitmap.allocate_block()?;
         self.superblock.free_blocks -= 1;
+        self.materialize_block(block as usize);
         Some(block)
     }
 
@@ -631,6 +632,26 @@ impl BlockFsInner {
     /// Mark a block as dirty so it will be written to the disk backend on sync.
     fn mark_dirty(&mut self, block_num: u32) {
         self.dirty_blocks.insert(block_num as usize);
+    }
+
+    /// Ensure the block at `idx` is materialized (has 4KB allocated).
+    /// Called before any write to a block. No-op if already materialized.
+    fn materialize_block(&mut self, idx: usize) {
+        if idx < self.block_data.len() && self.block_data[idx].is_empty() {
+            self.block_data[idx] = vec![0u8; BLOCK_SIZE];
+        }
+    }
+
+    /// Get a read-only reference to a block's data.
+    /// Returns a reference to the shared zero block for unmaterialized entries,
+    /// avoiding the need to allocate memory for blocks that have never been
+    /// written.
+    fn block_ref(&self, idx: usize) -> &[u8] {
+        if idx < self.block_data.len() && !self.block_data[idx].is_empty() {
+            &self.block_data[idx]
+        } else {
+            &ZERO_BLOCK
+        }
     }
 
     /// Sync all dirty blocks and metadata to the disk backend.
@@ -664,6 +685,10 @@ impl BlockFsInner {
                     block_idx,
                     device_blocks
                 );
+                continue;
+            }
+            // Skip unmaterialized (sparse) blocks -- they contain only zeros
+            if self.block_data[*block_idx].is_empty() {
                 continue;
             }
             backend.write_block(*block_idx as u64, &self.block_data[*block_idx])?;
@@ -703,8 +728,11 @@ impl BlockFsInner {
         let mut loaded = 0usize;
 
         for block_idx in 0..blocks_to_read {
-            backend.read_block(block_idx as u64, &mut self.block_data[block_idx])?;
-            loaded += 1;
+            if self.block_bitmap.is_allocated(block_idx as u32) {
+                self.materialize_block(block_idx);
+                backend.read_block(block_idx as u64, &mut self.block_data[block_idx])?;
+                loaded += 1;
+            }
         }
 
         Ok(loaded)
@@ -948,15 +976,17 @@ impl BlockFsInner {
         let inode_table =
             Self::deserialize_inode_table(&*bk, superblock.inode_count, superblock.block_count)?;
 
-        // Allocate in-memory block storage and read all data blocks
+        // Allocate sparse in-memory block storage and read only allocated blocks
         let block_count = superblock.block_count as usize;
         let mut block_data = Vec::with_capacity(block_count);
         for _ in 0..block_count {
-            block_data.push(vec![0u8; BLOCK_SIZE]);
+            block_data.push(Vec::new()); // Empty -- sparse
         }
 
+        // Only load blocks that are marked as allocated in the bitmap
         let device_blocks = bk.block_count();
         let first_data = superblock.first_data_block as usize;
+        let mut loaded = 0usize;
         for (i, block) in block_data
             .iter_mut()
             .enumerate()
@@ -966,11 +996,16 @@ impl BlockFsInner {
             if (i as u64) >= device_blocks {
                 break;
             }
-            bk.read_block(i as u64, block)?;
+            if block_bitmap.is_allocated(i as u32) {
+                *block = vec![0u8; BLOCK_SIZE];
+                bk.read_block(i as u64, block)?;
+                loaded += 1;
+            }
         }
 
         crate::println!(
-            "[BLOCKFS] Loaded {} data blocks from disk",
+            "[BLOCKFS] Loaded {} allocated data blocks from disk (sparse, {} total)",
+            loaded,
             block_count.saturating_sub(first_data)
         );
 
@@ -996,7 +1031,7 @@ impl BlockFsInner {
 
     /// Read a u32 block pointer from position `index` within an indirect block.
     fn read_block_ptr(&self, indirect_block: u32, index: usize) -> u32 {
-        let block = &self.block_data[indirect_block as usize];
+        let block = self.block_ref(indirect_block as usize);
         let off = index * size_of::<u32>();
         u32::from_le_bytes([block[off], block[off + 1], block[off + 2], block[off + 3]])
     }
@@ -1005,6 +1040,7 @@ impl BlockFsInner {
     fn write_block_ptr(&mut self, indirect_block: u32, index: usize, value: u32) {
         let off = index * size_of::<u32>();
         let bytes = value.to_le_bytes();
+        self.materialize_block(indirect_block as usize);
         self.block_data[indirect_block as usize][off..off + 4].copy_from_slice(&bytes);
         self.mark_dirty(indirect_block);
     }
@@ -1176,7 +1212,7 @@ impl BlockFsInner {
 
             match self.resolve_block(inode, logical_block) {
                 Some(block_num) => {
-                    let block = &self.block_data[block_num as usize];
+                    let block = self.block_ref(block_num as usize);
                     let copy_len = (BLOCK_SIZE - block_offset).min(to_read - bytes_read);
                     buffer[bytes_read..bytes_read + copy_len]
                         .copy_from_slice(&block[block_offset..block_offset + copy_len]);
@@ -1294,7 +1330,7 @@ impl BlockFsInner {
                 break;
             }
 
-            let block = &self.block_data[block_num as usize];
+            let block = self.block_ref(block_num as usize);
             let block_end = BLOCK_SIZE.min(dir_size - block_start);
             let mut offset = 0;
 
@@ -1530,6 +1566,7 @@ impl BlockFsInner {
         };
 
         // Zero out the inode field in the on-disk entry to mark it deleted
+        self.materialize_block(block_num as usize);
         let block = &mut self.block_data[block_num as usize];
         block[offset] = 0;
         block[offset + 1] = 0;
@@ -1612,6 +1649,7 @@ impl BlockFsInner {
                 if let Some(block_num) = phys_block {
                     let zero_from = size % BLOCK_SIZE;
                     if zero_from > 0 {
+                        self.materialize_block(block_num as usize);
                         let block = &mut self.block_data[block_num as usize];
                         for byte in &mut block[zero_from..BLOCK_SIZE] {
                             *byte = 0;
@@ -1873,7 +1911,7 @@ impl BlockFsInner {
                 break;
             }
 
-            let block = &self.block_data[block_num as usize];
+            let block = self.block_ref(block_num as usize);
             let block_end = BLOCK_SIZE.min(dir_size - block_start);
             let mut offset = 0;
 
@@ -1982,6 +2020,7 @@ impl BlockFsInner {
             return Err(KernelError::FsError(FsError::IoError));
         }
 
+        self.materialize_block(block_num as usize);
         let block = &mut self.block_data[block_num as usize];
 
         // Write inode (4 bytes, little-endian)
@@ -2075,6 +2114,10 @@ fn permissions_to_mode(perms: Permissions, is_dir: bool) -> u16 {
 
     mode
 }
+
+/// A shared zero block for reads of unmaterialized (sparse) blocks.
+/// Avoids allocating 4KB for every unoccupied block index.
+static ZERO_BLOCK: [u8; BLOCK_SIZE] = [0u8; BLOCK_SIZE];
 
 /// BlockFS filesystem
 pub struct BlockFs {

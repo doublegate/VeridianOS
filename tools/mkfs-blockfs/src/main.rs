@@ -16,11 +16,13 @@
 //! Usage:
 //!   mkfs-blockfs --output <path> --size <MB> [--populate <dir>]
 
-use std::collections::VecDeque;
-use std::env;
-use std::fs::{self, File};
-use std::io::{Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::VecDeque,
+    env,
+    fs::{self, File},
+    io::{Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+};
 
 const BLOCK_SIZE: usize = 4096;
 const BLOCKFS_MAGIC: u32 = 0x424C4B46; // "BLKF"
@@ -41,12 +43,12 @@ fn align4(val: usize) -> usize {
 
 fn bitmap_blocks(total_blocks: u32) -> u32 {
     let bits_needed = total_blocks as usize;
-    let bytes_needed = (bits_needed + 7) / 8;
-    ((bytes_needed + BLOCK_SIZE - 1) / BLOCK_SIZE) as u32
+    let bytes_needed = bits_needed.div_ceil(8);
+    bytes_needed.div_ceil(BLOCK_SIZE) as u32
 }
 
 fn inode_table_blocks(inode_count: u32) -> u32 {
-    ((inode_count as usize * DISK_INODE_SIZE + BLOCK_SIZE - 1) / BLOCK_SIZE) as u32
+    (inode_count as usize * DISK_INODE_SIZE).div_ceil(BLOCK_SIZE) as u32
 }
 
 fn computed_first_data_block(total_blocks: u32, inode_count: u32) -> u32 {
@@ -127,7 +129,7 @@ impl DiskInode {
             mtime: 0,
             dtime: 0,
             gid: 0,
-            links_count: 1,
+            links_count: 0,
             blocks: 0,
             flags: 0,
             direct_blocks: [0; 12],
@@ -174,7 +176,7 @@ struct BlockFsBuilder {
 impl BlockFsBuilder {
     fn new(block_count: u32, inode_count: u32) -> Self {
         let first_data = computed_first_data_block(block_count, inode_count);
-        let bitmap_size = (block_count as usize + 7) / 8;
+        let bitmap_size = (block_count as usize).div_ceil(8);
         let mut bitmap = vec![0u8; bitmap_size];
 
         // Mark metadata blocks as allocated
@@ -291,9 +293,54 @@ impl BlockFsBuilder {
             self.blocks[indirect as usize][off..off + 4].copy_from_slice(&blk.to_le_bytes());
             self.inodes[inode_idx as usize].blocks += 1;
             blk
+        } else if logical_block < DIRECT_BLOCKS + PTRS_PER_BLOCK + PTRS_PER_BLOCK * PTRS_PER_BLOCK {
+            // Double indirect
+            let mut dbl_indirect = self.inodes[inode_idx as usize].double_indirect_block;
+            if dbl_indirect == 0 {
+                dbl_indirect = self.allocate_block().expect("out of blocks");
+                self.blocks[dbl_indirect as usize] = vec![0u8; BLOCK_SIZE];
+                self.inodes[inode_idx as usize].double_indirect_block = dbl_indirect;
+                self.inodes[inode_idx as usize].blocks += 1;
+            }
+
+            let rel = logical_block - DIRECT_BLOCKS - PTRS_PER_BLOCK;
+            let l1_idx = rel / PTRS_PER_BLOCK;
+            let l2_idx = rel % PTRS_PER_BLOCK;
+
+            // Read or allocate L1 indirect block
+            let l1_off = l1_idx * 4;
+            let mut l1_block = u32::from_le_bytes([
+                self.blocks[dbl_indirect as usize][l1_off],
+                self.blocks[dbl_indirect as usize][l1_off + 1],
+                self.blocks[dbl_indirect as usize][l1_off + 2],
+                self.blocks[dbl_indirect as usize][l1_off + 3],
+            ]);
+            if l1_block == 0 {
+                l1_block = self.allocate_block().expect("out of blocks");
+                self.blocks[l1_block as usize] = vec![0u8; BLOCK_SIZE];
+                self.blocks[dbl_indirect as usize][l1_off..l1_off + 4]
+                    .copy_from_slice(&l1_block.to_le_bytes());
+                self.inodes[inode_idx as usize].blocks += 1;
+            }
+
+            // Read or allocate data block
+            let l2_off = l2_idx * 4;
+            let existing = u32::from_le_bytes([
+                self.blocks[l1_block as usize][l2_off],
+                self.blocks[l1_block as usize][l2_off + 1],
+                self.blocks[l1_block as usize][l2_off + 2],
+                self.blocks[l1_block as usize][l2_off + 3],
+            ]);
+            if existing != 0 {
+                return existing;
+            }
+            let blk = self.allocate_block().expect("out of blocks");
+            self.blocks[l1_block as usize][l2_off..l2_off + 4].copy_from_slice(&blk.to_le_bytes());
+            self.inodes[inode_idx as usize].blocks += 1;
+            blk
         } else {
             panic!(
-                "file too large: logical block {} exceeds single indirect range",
+                "file too large: logical block {} exceeds double indirect range",
                 logical_block
             );
         }
@@ -405,10 +452,62 @@ impl BlockFsBuilder {
                     Err(_) => continue,
                 };
 
-                if metadata.is_dir() {
+                let file_type = metadata.file_type();
+
+                if file_type.is_dir() {
                     let child_inode = self.create_directory(parent_inode, &name_str);
                     queue.push_back((path, child_inode));
-                } else if metadata.is_file() {
+                } else if file_type.is_symlink() {
+                    // Expand symlinks as copies of their target (matches TAR
+                    // loader behavior). Read the symlink target, resolve it
+                    // relative to the host directory, and copy the target file.
+                    let target = match fs::read_link(&path) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            eprintln!("Warning: cannot read symlink {}: {}", path.display(), e);
+                            continue;
+                        }
+                    };
+
+                    // Resolve relative symlink targets against the containing directory
+                    let resolved = if target.is_relative() {
+                        path.parent().unwrap_or(Path::new(".")).join(&target)
+                    } else {
+                        // Absolute symlinks: resolve relative to the populate root
+                        host_dir.join(target.strip_prefix("/").unwrap_or(&target))
+                    };
+
+                    if resolved.is_file() {
+                        let data = match fs::read(&resolved) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                eprintln!(
+                                    "Warning: cannot read symlink target {}: {}",
+                                    resolved.display(),
+                                    e
+                                );
+                                continue;
+                            }
+                        };
+
+                        let mode = if is_executable(&resolved) {
+                            0x81ED // file, rwxr-xr-x
+                        } else {
+                            0x81A4 // file, rw-r--r--
+                        };
+
+                        self.create_file(parent_inode, &name_str, &data, mode);
+                    } else if resolved.is_dir() {
+                        let child_inode = self.create_directory(parent_inode, &name_str);
+                        queue.push_back((resolved, child_inode));
+                    } else {
+                        eprintln!(
+                            "Warning: symlink target not found: {} -> {}",
+                            path.display(),
+                            resolved.display()
+                        );
+                    }
+                } else if file_type.is_file() {
                     let data = match fs::read(&path) {
                         Ok(d) => d,
                         Err(e) => {
@@ -426,7 +525,7 @@ impl BlockFsBuilder {
 
                     self.create_file(parent_inode, &name_str, &data, mode);
                 }
-                // Skip symlinks, special files for now
+                // Skip special files (block/char devices, sockets, etc.)
             }
         }
     }
@@ -473,7 +572,9 @@ impl BlockFsBuilder {
             if copy_len > 0 {
                 buf[..copy_len].copy_from_slice(&self.bitmap[byte_offset..byte_offset + copy_len]);
             }
-            file.seek(SeekFrom::Start((bitmap_start + i) as u64 * BLOCK_SIZE as u64))?;
+            file.seek(SeekFrom::Start(
+                (bitmap_start + i) as u64 * BLOCK_SIZE as u64,
+            ))?;
             file.write_all(&buf)?;
         }
 
@@ -493,7 +594,9 @@ impl BlockFsBuilder {
                 self.inodes[inode_idx].serialize(&mut buf[off..off + DISK_INODE_SIZE]);
             }
 
-            file.seek(SeekFrom::Start((inode_start + blk_idx) as u64 * BLOCK_SIZE as u64))?;
+            file.seek(SeekFrom::Start(
+                (inode_start + blk_idx) as u64 * BLOCK_SIZE as u64,
+            ))?;
             file.write_all(&buf)?;
         }
 
@@ -601,17 +704,23 @@ fn main() {
     let inode_count = inode_count_override.unwrap_or_else(|| {
         // Default: 1 inode per 16KB (generous for small files)
         let auto = block_count / 4;
-        auto.max(672).min(65536)
+        auto.clamp(672, 65536)
     });
 
     let first_data = computed_first_data_block(block_count, inode_count);
 
     println!("mkfs-blockfs: Creating BlockFS image");
     println!("  Output:           {}", output);
-    println!("  Size:             {} MB ({} blocks)", size_mb, block_count);
+    println!(
+        "  Size:             {} MB ({} blocks)",
+        size_mb, block_count
+    );
     println!("  Inodes:           {}", inode_count);
     println!("  Bitmap blocks:    {}", bitmap_blocks(block_count));
-    println!("  Inode table:      {} blocks", inode_table_blocks(inode_count));
+    println!(
+        "  Inode table:      {} blocks",
+        inode_table_blocks(inode_count)
+    );
     println!("  First data block: {}", first_data);
     println!(
         "  Data blocks:      {}",
@@ -638,10 +747,7 @@ fn main() {
 
     match builder.write_image(Path::new(&output)) {
         Ok(()) => {
-            println!(
-                "mkfs-blockfs: Image created successfully ({} MB)",
-                size_mb
-            );
+            println!("mkfs-blockfs: Image created successfully ({} MB)", size_mb);
         }
         Err(e) => {
             eprintln!("Error writing image: {}", e);
