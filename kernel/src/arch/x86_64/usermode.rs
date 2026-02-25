@@ -79,8 +79,18 @@ pub unsafe fn enter_usermode(entry_point: u64, user_stack: u64, user_cs: u64, us
         "mov fs, {zero:x}",
         "mov gs, {zero:x}",
         // Build iretq frame on current kernel stack FIRST, before wrmsr.
-        // wrmsr clobbers eax/ecx/edx which may overlap with compiler-allocated
-        // operand registers, so all push instructions must come before wrmsr.
+        // wrmsr uses ECX (MSR number), EDX:EAX (value) as IMPLICIT operands.
+        // All iretq frame values must be pushed BEFORE wrmsr, because wrmsr
+        // clobbers EAX/ECX/EDX.
+        //
+        // CRITICAL: fs_lo and fs_hi are bound to EAX and EDX via explicit
+        // register constraints (`in("eax")` / `in("edx")`). This prevents
+        // the compiler from allocating them to ECX, which gets overwritten
+        // by `mov ecx, 0xC0000100`. Without this, the release optimizer can
+        // allocate fs_hi to ECX, causing `mov edx, ecx` to load 0xC0000100
+        // instead of the actual fs_hi value, which makes wrmsr write a
+        // non-canonical address to FS_BASE and triggers a GP fault.
+        //
         //   [RSP+0]  RIP    - user entry point
         //   [RSP+8]  CS     - user code segment (Ring 3)
         //   [RSP+16] RFLAGS - IF set (0x202)
@@ -92,15 +102,14 @@ pub unsafe fn enter_usermode(entry_point: u64, user_stack: u64, user_cs: u64, us
         "push {cs}",       // CS
         "push {rip}",      // RIP (entry point)
         // Now restore FS_BASE for TLS if non-zero. All operand values are safely
-        // on the stack, so clobbering eax/ecx/edx for wrmsr is fine.
-        "test {fs_hi:e}, {fs_hi:e}",
+        // on the stack. fs_lo is already in EAX, fs_hi is already in EDX.
+        // Only ECX needs to be loaded with the MSR number.
+        "test edx, edx",
         "jnz 2f",
-        "test {fs_lo:e}, {fs_lo:e}",
+        "test eax, eax",
         "jz 3f",
         "2:",
         "mov ecx, 0xC0000100",
-        "mov eax, {fs_lo:e}",
-        "mov edx, {fs_hi:e}",
         "wrmsr",
         "3:",
         "iretq",
@@ -110,8 +119,8 @@ pub unsafe fn enter_usermode(entry_point: u64, user_stack: u64, user_cs: u64, us
         cs = in(reg) user_cs,
         rip = in(reg) entry_point,
         zero = in(reg) 0u64,
-        fs_lo = in(reg) fs_lo,
-        fs_hi = in(reg) fs_hi,
+        in("eax") fs_lo,
+        in("edx") fs_hi,
         options(noreturn)
     );
 }
