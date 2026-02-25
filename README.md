@@ -112,7 +112,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.5.4 (February 25, 2026) | **Releases Published**: 29 (v0.1.0 through v0.5.4)
+**Latest Release**: v0.5.5 (February 25, 2026) | **Releases Published**: 30 (v0.1.0 through v0.5.5)
 
 | Metric | Value |
 | ------ | ----- |
@@ -164,7 +164,7 @@ Phases 0 through 4 are complete. The kernel provides:
 - **Coreutils** -- 6 progressively complex POSIX utilities cross-compiled and verified on VeridianOS: echo, cat, wc, ls, sort, and pipeline_test (capstone fork/exec/pipe/waitpid exercise)
 - **BusyBox 1.36.1** -- 95 applets cross-compiled with ash shell support; EPIPE/BrokenPipe handling for multi-pipe commands (`yes | head -n 1`), float printf (`%f/%g/%e`) for `seq`, ash interactive mode (isatty/ENOTTY, sysconf, exec family, fnmatch/glob, tcgetpgrp), process lifecycle hardening for 213+ sequential execs (zombie reaping, MAX_PROCESSES=1024, fd leak detection), ARG_MAX enforcement (128KB), strftime (28 format specifiers), popen/pclose
 - **POSIX Regex Engine** -- 1291-line BRE/ERE regex library (`regex.h`/`regcomp`/`regexec`/`regfree`) with recursive backtracking NFA, supports `. * + ? ^ $ [...] | () {m,n}`, 12 POSIX character classes ([:alpha:], [:digit:], etc.), enables grep/sed/awk/find BusyBox applets
-- **Native Compilation Infrastructure** -- 384MB kernel heap, frame allocator emergency fallback, 8MB user-space stack growth, map_kernel_error translation layer, hardened sbrk/brk with 64KB chunk pre-allocation, page-aligned requests, local break tracking, 512MB per-process heap limit
+- **Native Compilation** -- 208/208 BusyBox source files compiled and linked by GCC 14.2 running natively on VeridianOS; POSIX-compliant partial munmap (front trim, back trim, hole punch) for GCC ggc garbage collector; consolidated brk() heap mapping (O(1) per extension); 512MB kernel heap; 768MB per-process heap limit; 8MB user-space stack growth
 - **Persistent Storage** -- BlockFS filesystem with on-disk superblock, bitmap, inode table serialization; auto-detected at boot via magic number probe; sync/fsync support; `mkfs-blockfs` host tool for image creation
 - **Virtio-blk Driver** -- Block I/O with TAR rootfs loader for cross-compiled user-space binaries; virtio-MMIO transport on AArch64/RISC-V, PCI on x86_64
 - **Thread Support** -- clone() with CLONE_VM/CLONE_FS/CLONE_THREAD/CLONE_SETTLS, futex (WAIT/WAKE/REQUEUE/BITSET), POSIX pthread library (create/join/detach/mutex/cond/TLS)
@@ -197,7 +197,7 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### What Comes Next
 
-- **BusyBox Phase C Verification** -- QEMU boot testing of native compilation (v0.5.4 fixed ~272MB of frame leaks; previously OOM at 210/213 files)
+- **Native BusyBox Compilation** -- 208/208 source files compile and link natively on VeridianOS (NATIVE_COMPILE_PASS achieved in v0.5.5)
 - **Phase 5: Performance Optimization** -- Sub-microsecond IPC, lock-free kernel paths, DPDK networking, NVMe optimization, profiling tools
 - **Phase 6: Advanced Features** -- Wayland compositor, desktop environment, multimedia, virtualization, cloud-native features, POSIX compatibility layer
 

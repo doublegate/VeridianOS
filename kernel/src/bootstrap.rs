@@ -1055,18 +1055,17 @@ fn test_user_binary_load() {
                     }
 
                     // C-3: Full native build (all 208 files + link)
+                    // SKIPPED at boot -- compiling 208 files blocks the
+                    // interactive shell for several minutes. Run manually:
+                    //   ash /usr/src/build-busybox-native.sh
                     {
                         let vfs = get_vfs().read();
                         let has_script =
                             vfs.resolve_path("/usr/src/build-busybox-native.sh").is_ok();
                         drop(vfs);
                         if has_script {
-                            kprintln!("[BOOT] Phase C-3: Full native BusyBox build (208 files)");
-                            boot_run_program(
-                                "/bin/ash",
-                                &["ash", "/usr/src/build-busybox-native.sh"],
-                                env,
-                            );
+                            kprintln!("[BOOT] Phase C-3: Skipped (208-file native build)");
+                            kprintln!("[BOOT] Run manually: ash /usr/src/build-busybox-native.sh");
                         }
                     }
                 } else {
