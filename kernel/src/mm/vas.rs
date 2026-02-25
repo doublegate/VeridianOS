@@ -674,9 +674,17 @@ impl VirtualAddressSpace {
 
         let mut mappings = self.mappings.lock();
 
-        // Check for overlaps
+        // Check for overlaps using standard interval overlap test:
+        // [a_start, a_end) and [b_start, b_end) overlap iff
+        // a_start < b_end AND b_start < a_end.
+        // The previous check missed containment (new fully contains existing)
+        // and falsely rejected adjacent mappings (end == start).
+        let b_start = aligned_start.0;
+        let b_end = aligned_start.0 + aligned_size as u64;
         for (_, existing) in mappings.iter() {
-            if existing.contains(aligned_start) || existing.contains(mapping.end()) {
+            let a_start = existing.start.0;
+            let a_end = existing.start.0 + existing.size as u64;
+            if a_start < b_end && b_start < a_end {
                 return Err(KernelError::AlreadyExists {
                     resource: "address range",
                     id: aligned_start.0,
@@ -827,10 +835,134 @@ impl VirtualAddressSpace {
         Ok(())
     }
 
-    /// Unmap a region by address
+    /// Unmap a region by address and size (POSIX-compliant partial munmap).
+    ///
+    /// Supports three cases:
+    /// 1. **Exact match**: `addr` and `size` match a BTreeMap entry → remove
+    ///    it.
+    /// 2. **Front trim**: `addr` matches the start of a larger mapping → shrink
+    ///    the mapping and free the leading pages.
+    /// 3. **Back trim**: `addr+size` matches the end of a mapping → shrink from
+    ///    the back.
+    /// 4. **Hole punch**: Range is in the middle of a mapping → split into two.
+    /// 5. **Sub-range not at start**: `addr` is inside a mapping → find the
+    ///    containing mapping and trim/punch accordingly.
+    ///
+    /// GCC's ggc garbage collector relies on partial munmap to free individual
+    /// pages within larger mmap pools. Without this, munmap(pool_start, 4KB)
+    /// would destroy the entire multi-MB pool.
     #[cfg(feature = "alloc")]
-    pub fn unmap(&self, start_addr: usize, _size: usize) -> Result<(), KernelError> {
-        self.unmap_region(VirtualAddress(start_addr as u64))
+    pub fn unmap(&self, start_addr: usize, size: usize) -> Result<(), KernelError> {
+        let unmap_start = (start_addr & !(4096 - 1)) as u64;
+        let unmap_size = ((size + 4095) / 4096) * 4096;
+        let unmap_end = unmap_start + unmap_size as u64;
+
+        // First try exact-key match (fast path, most common for our small mmaps)
+        let addr = VirtualAddress(unmap_start);
+        let mut mappings = self.mappings.lock();
+
+        if let Some(existing) = mappings.get(&addr) {
+            if existing.size == unmap_size {
+                // Exact match: remove entire mapping
+                drop(mappings);
+                return self.unmap_region(addr);
+            }
+        }
+
+        // Find the mapping that CONTAINS the requested unmap range.
+        // This handles partial munmap within a larger mmap.
+        let mut containing_key = None;
+        for (key, mapping) in mappings.iter() {
+            let m_start = key.0;
+            let m_end = m_start + mapping.size as u64;
+            if m_start <= unmap_start && m_end >= unmap_end {
+                containing_key = Some(*key);
+                break;
+            }
+        }
+
+        let containing_key = match containing_key {
+            Some(k) => k,
+            None => {
+                // No containing mapping found. If the exact key exists but with
+                // a different size, fall back to removing the entire mapping
+                // (original behavior, for backwards compat with code that passes
+                // size=0 or incorrect size).
+                if mappings.contains_key(&addr) {
+                    drop(mappings);
+                    return self.unmap_region(addr);
+                }
+                return Err(KernelError::NotFound {
+                    resource: "memory region",
+                    id: unmap_start,
+                });
+            }
+        };
+
+        // Remove the containing mapping from BTreeMap
+        let mapping = mappings.remove(&containing_key).unwrap();
+        let m_start = containing_key.0;
+
+        // Calculate page indices within the mapping for the unmap range
+        let unmap_page_start = ((unmap_start - m_start) / 4096) as usize;
+        let unmap_page_count = unmap_size / 4096;
+        let unmap_page_end = unmap_page_start + unmap_page_count;
+
+        // Unmap the requested pages from the page table
+        let pt_root = self.page_table_root.load(Ordering::Acquire);
+        if pt_root != 0 {
+            let mut mapper = unsafe { create_mapper_from_root(pt_root) };
+            for i in unmap_page_start..unmap_page_end {
+                let vaddr = VirtualAddress(m_start + (i as u64) * 4096);
+                let _ = mapper.unmap_page(vaddr);
+            }
+        }
+
+        // Flush TLB for unmapped pages
+        for i in unmap_page_start..unmap_page_end {
+            let vaddr = m_start + (i as u64) * 4096;
+            crate::arch::tlb_flush_address(vaddr);
+        }
+
+        // Free the physical frames for the unmapped range
+        {
+            let frame_allocator = FRAME_ALLOCATOR.lock();
+            for i in unmap_page_start..unmap_page_end.min(mapping.physical_frames.len()) {
+                let _ = frame_allocator.free_frames(mapping.physical_frames[i], 1);
+            }
+        }
+
+        // Re-insert the remaining parts of the mapping
+
+        // Front portion: pages [0..unmap_page_start)
+        if unmap_page_start > 0 {
+            let front_size = unmap_page_start * 4096;
+            let mut front = VirtualMapping::new(containing_key, front_size, mapping.mapping_type);
+            front.flags = mapping.flags;
+            if unmap_page_start <= mapping.physical_frames.len() {
+                front.physical_frames = mapping.physical_frames[..unmap_page_start].to_vec();
+            }
+            mappings.insert(containing_key, front);
+        }
+
+        // Back portion: pages [unmap_page_end..total_pages)
+        let total_pages = mapping.size / 4096;
+        if unmap_page_end < total_pages {
+            let back_start_addr = m_start + (unmap_page_end as u64) * 4096;
+            let back_size = (total_pages - unmap_page_end) * 4096;
+            let mut back = VirtualMapping::new(
+                VirtualAddress(back_start_addr),
+                back_size,
+                mapping.mapping_type,
+            );
+            back.flags = mapping.flags;
+            if unmap_page_end < mapping.physical_frames.len() {
+                back.physical_frames = mapping.physical_frames[unmap_page_end..].to_vec();
+            }
+            mappings.insert(VirtualAddress(back_start_addr), back);
+        }
+
+        Ok(())
     }
 
     /// Find mapping for address
@@ -845,6 +977,7 @@ impl VirtualAddressSpace {
         None
     }
 
+    /// Get a reference to the underlying mappings (for diagnostics).
     /// Allocate memory-mapped region
     pub fn mmap(
         &self,
@@ -879,6 +1012,10 @@ impl VirtualAddressSpace {
     /// - **Below heap_start** or **equal to current**: no-op.
     ///
     /// When `new_break` is `None`, returns the current break without changes.
+    ///
+    /// All heap pages are tracked in a SINGLE consolidated BTreeMap entry
+    /// keyed at the heap start page. This avoids creating one entry per brk()
+    /// call, which previously caused 50,000+ entries and O(n^2) slowdown.
     pub fn brk(&self, new_break: Option<VirtualAddress>) -> VirtualAddress {
         if let Some(addr) = new_break {
             let current = self.heap_break.load(Ordering::Acquire);
@@ -896,10 +1033,7 @@ impl VirtualAddressSpace {
                     // In host test builds, skip physical mapping (no frame allocator).
                     #[cfg(all(feature = "alloc", not(test)))]
                     {
-                        // Map new heap pages
-                        let start = VirtualAddress(old_page * 4096);
-                        let size = ((new_page - old_page) * 4096) as usize;
-                        if self.map_region(start, size, MappingType::Heap).is_ok() {
+                        if self.brk_extend_heap(old_page, new_page).is_ok() {
                             self.heap_break.store(addr.0, Ordering::Release);
                         }
                         // On failure, leave break unchanged
@@ -921,6 +1055,82 @@ impl VirtualAddressSpace {
         }
 
         VirtualAddress(self.heap_break.load(Ordering::Acquire))
+    }
+
+    /// Extend the heap by mapping pages [old_page..new_page).
+    ///
+    /// Instead of calling `map_region()` (which creates a new BTreeMap entry
+    /// each time), this method maintains a SINGLE consolidated heap mapping.
+    /// The first call creates the entry; subsequent calls extend it in-place.
+    /// This reduces the mapping count from O(brk_calls) to O(1) and avoids
+    /// the O(n) overlap check in `map_region()`.
+    #[cfg(all(feature = "alloc", not(test)))]
+    fn brk_extend_heap(&self, old_page: u64, new_page: u64) -> Result<(), KernelError> {
+        let delta_pages = (new_page - old_page) as usize;
+        let start_addr = VirtualAddress(old_page * 4096);
+
+        // Allocate physical frames
+        let mut new_frames = Vec::with_capacity(delta_pages);
+        {
+            let frame_allocator = FRAME_ALLOCATOR.lock();
+            for _ in 0..delta_pages {
+                match frame_allocator.allocate_frames(1, None) {
+                    Ok(frame) => new_frames.push(frame),
+                    Err(_) => {
+                        for &f in &new_frames {
+                            frame_allocator.free_frames(f, 1).ok();
+                        }
+                        return Err(KernelError::OutOfMemory {
+                            requested: 4096,
+                            available: 0,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Zero the frames (POSIX requires zero-filled pages)
+        for &frame in &new_frames {
+            let phys_addr = frame.as_u64() << 12;
+            let virt = crate::mm::phys_to_virt_addr(phys_addr) as *mut u8;
+            unsafe {
+                core::ptr::write_bytes(virt, 0, 4096);
+            }
+        }
+
+        // Map into page tables
+        let pt_root = self.page_table_root.load(Ordering::Acquire);
+        if pt_root != 0 {
+            let mut mapper = unsafe { create_mapper_from_root(pt_root) };
+            let mut alloc = VasFrameAllocator;
+            let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER;
+
+            for (i, &frame) in new_frames.iter().enumerate() {
+                let vaddr = VirtualAddress(start_addr.0 + (i as u64) * 4096);
+                mapper.map_page(vaddr, frame, flags, &mut alloc)?;
+                crate::arch::tlb_flush_address(vaddr.0);
+            }
+        }
+
+        // Extend existing heap mapping or create initial one
+        let heap_start_page = (self.heap_start.load(Ordering::Relaxed) + 4095) / 4096;
+        let heap_key = VirtualAddress(heap_start_page * 4096);
+
+        let mut mappings = self.mappings.lock();
+        if let Some(mapping) = mappings.get_mut(&heap_key) {
+            // Extend existing consolidated heap mapping
+            mapping.size += delta_pages * 4096;
+            mapping.physical_frames.extend_from_slice(&new_frames);
+        } else {
+            // First heap allocation: create consolidated mapping
+            let total_size = ((new_page - heap_start_page) as usize) * 4096;
+            let mut mapping = VirtualMapping::new(heap_key, total_size, MappingType::Heap);
+            mapping.physical_frames = new_frames;
+            mapping.flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER;
+            mappings.insert(heap_key, mapping);
+        }
+
+        Ok(())
     }
 
     /// Clone address space (for fork).

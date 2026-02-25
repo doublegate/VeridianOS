@@ -445,7 +445,7 @@ SPECEOF
             chmod 755 "$BUILD_DIR/usr/src/build-busybox-native.sh"
             echo "    + /usr/src/build-busybox-native.sh"
         fi
-        for lst in busybox-compile-list.txt busybox-obj-list.txt; do
+        for lst in busybox-compile-list.txt busybox-obj-list.txt bb_ver.h; do
             if [ -f "${PROJECT_ROOT}/tools/busybox/$lst" ]; then
                 cp "${PROJECT_ROOT}/tools/busybox/$lst" "$BUILD_DIR/usr/src/$lst"
                 echo "    + /usr/src/$lst"

@@ -49,7 +49,6 @@ coreutils/readlink.o
 coreutils/realpath.o
 coreutils/rm.o
 coreutils/rmdir.o
-coreutils/seq.o
 coreutils/sleep.o
 coreutils/sort.o
 coreutils/stat.o
@@ -115,12 +114,7 @@ libbb/getopt_allopts.o
 libbb/getpty.o
 libbb/get_shell_name.o
 libbb/get_volsize.o
-libbb/hash_md5_sha256_x86-32_shaNI.o
-libbb/hash_md5_sha256_x86-64_shaNI.o
 libbb/hash_md5_sha.o
-libbb/hash_md5_sha_x86-32_shaNI.o
-libbb/hash_md5_sha_x86-64.o
-libbb/hash_md5_sha_x86-64_shaNI.o
 libbb/herror_msg.o
 libbb/human_readable.o
 libbb/inet_common.o

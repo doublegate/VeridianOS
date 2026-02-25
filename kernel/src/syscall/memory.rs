@@ -182,26 +182,6 @@ pub fn sys_mmap(
         }
     }
 
-    // Diagnostic: trace all mmap calls
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[MMAP] addr=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(mapped_addr as u64);
-        crate::arch::x86_64::idt::raw_serial_str(b" len=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(length as u64);
-        crate::arch::x86_64::idt::raw_serial_str(b" flags=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(flags as u64);
-        if !is_anonymous {
-            crate::arch::x86_64::idt::raw_serial_str(b" fd=");
-            crate::arch::x86_64::idt::raw_serial_hex(fd as u64);
-            crate::arch::x86_64::idt::raw_serial_str(b" off=0x");
-            crate::arch::x86_64::idt::raw_serial_hex(offset as u64);
-        } else {
-            crate::arch::x86_64::idt::raw_serial_str(b" ANON");
-        }
-        crate::arch::x86_64::idt::raw_serial_str(b"\n");
-    }
-
     Ok(mapped_addr)
 }
 
@@ -232,9 +212,8 @@ pub fn sys_munmap(addr: usize, length: usize) -> SyscallResult {
     validate_user_pointer(addr, length)?;
 
     let memory_space = proc.memory_space.lock();
-    memory_space
-        .unmap(addr, length)
-        .map_err(|_| SyscallError::InvalidArgument)?;
+    let result = memory_space.unmap(addr, length);
+    result.map_err(|_| SyscallError::InvalidArgument)?;
 
     Ok(0)
 }
@@ -293,9 +272,10 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> SyscallResult {
 /// Maximum user heap size: 512 MiB.
 ///
 /// Prevents a single process from consuming all physical memory via brk().
-/// cc1 (GCC compiler proper) typically uses 100-300 MiB for large source files;
-/// 512 MiB provides comfortable headroom.
-const MAX_USER_HEAP_SIZE: u64 = 512 * 1024 * 1024;
+/// cc1 (GCC compiler proper) uses 100-300 MiB for typical files, but BusyBox
+/// shell/ash.c (~13K lines at -Oz) needs 500-600 MiB due to aggressive
+/// optimization passes. 768 MiB provides headroom for large translation units.
+const MAX_USER_HEAP_SIZE: u64 = 768 * 1024 * 1024;
 
 /// Set or query the program break (syscall 23).
 ///

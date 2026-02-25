@@ -1339,3 +1339,96 @@ struct hostent *gethostbyaddr(const void *addr, socklen_t len, int type)
     h_errno = 1; /* HOST_NOT_FOUND */
     return NULL;
 }
+
+/* ===================== Additional stubs for BusyBox link =================== */
+
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/time.h>
+#include <grp.h>
+
+struct hostent *gethostbyname(const char *name)
+{
+    (void)name;
+    h_errno = 1; /* HOST_NOT_FOUND */
+    return NULL;
+}
+
+int getpeername(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
+{
+    (void)sockfd;
+    (void)addr;
+    (void)addrlen;
+    errno = ENOTSOCK;
+    return -1;
+}
+
+int getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
+{
+    (void)sockfd;
+    (void)addr;
+    (void)addrlen;
+    errno = ENOTSOCK;
+    return -1;
+}
+
+int inet_aton(const char *cp, struct in_addr *inp)
+{
+    (void)cp;
+    (void)inp;
+    return 0;
+}
+
+char *inet_ntoa(struct in_addr in)
+{
+    static char buf[16];
+    unsigned char *b = (unsigned char *)&in.s_addr;
+    int n = snprintf(buf, sizeof(buf), "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+    (void)n;
+    return buf;
+}
+
+ssize_t sendto(int sockfd, const void *buf, size_t len, int flags,
+               const struct sockaddr *dest_addr, socklen_t addrlen)
+{
+    (void)sockfd;
+    (void)buf;
+    (void)len;
+    (void)flags;
+    (void)dest_addr;
+    (void)addrlen;
+    errno = ENOTSOCK;
+    return -1;
+}
+
+int initgroups(const char *user, gid_t group)
+{
+    (void)user;
+    (void)group;
+    return 0;
+}
+
+void endgrent(void) {}
+
+int chroot(const char *path)
+{
+    (void)path;
+    errno = ENOSYS;
+    return -1;
+}
+
+int fchdir(int fd)
+{
+    (void)fd;
+    errno = ENOSYS;
+    return -1;
+}
+
+int settimeofday(const struct timeval *tv, const struct timezone *tz)
+{
+    (void)tv;
+    (void)tz;
+    errno = ENOSYS;
+    return -1;
+}

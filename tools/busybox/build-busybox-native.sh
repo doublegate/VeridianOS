@@ -9,14 +9,14 @@ CC="/usr/bin/gcc"
 COMPILE_LIST="/usr/src/busybox-compile-list.txt"
 OBJ_LIST_FILE="/usr/src/busybox-obj-list.txt"
 
-CFLAGS="-std=gnu99 -nostdinc \
+CFLAGS_BASE="-std=gnu99 -nostdinc \
  -isystem /usr/include \
  -isystem /usr/lib/gcc/x86_64-veridian/14.2.0/include \
  -include ${BB_SRC}/include/autoconf.h \
+ -include /usr/src/bb_ver.h \
  -I ${BB_SRC}/include -I ${BB_SRC}/libbb \
  -D_GNU_SOURCE -DNDEBUG \
  -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 \
- -DBB_VER='\"1.36.1\"' \
  -D__veridian__ -D__linux__ -DBB_GLOBAL_CONST= \
  -static -fno-stack-protector -ffreestanding \
  -mno-red-zone -mcmodel=small \
@@ -28,7 +28,8 @@ CFLAGS="-std=gnu99 -nostdinc \
  -finline-limit=0 -fno-guess-branch-probability \
  -falign-functions=1 -falign-jumps=1 -falign-labels=1 -falign-loops=1 \
  -Wno-unused-parameter -Wno-implicit-function-declaration \
- -Wno-return-type -Wno-format-security -Wno-int-conversion -Oz"
+ -Wno-return-type -Wno-format-security -Wno-int-conversion \
+ -fno-optimize-strlen"
 
 LDFLAGS="-static -nostdlib -ffreestanding"
 COMPILED=0
@@ -71,8 +72,14 @@ while IFS=: read -r src extra; do
     if [ -n "$extra" ]; then
         extra_flag="-I ${BB_SRC}/${extra}"
     fi
-    echo "[CC] $src ($TOTAL/213)"
-    if $CC $CFLAGS $extra_flag -c -o "$obj" "${BB_SRC}/$src" 2>&1; then
+    # Per-file optimization overrides:
+    #   ash.c:  cc1 OOM at -O2 (large file) -- use -O1
+    opt="-O2"
+    if [ "$src" = "shell/ash.c" ]; then
+        opt="-O1"
+    fi
+    echo "[CC] $src ($TOTAL/207)"
+    if $CC $CFLAGS_BASE $opt $extra_flag -c -o "$obj" "${BB_SRC}/$src" 2>&1; then
         COMPILED=$(expr $COMPILED + 1)
     else
         echo "  FAIL: $src"
@@ -95,7 +102,7 @@ while read -r f; do
     OBJ_LIST="${OBJ_LIST} ${OBJ_DIR}/${f}"
 done < "$OBJ_LIST_FILE"
 
-echo "[LD] busybox (213 objects)"
+echo "[LD] busybox (207 objects)"
 $CC $LDFLAGS \
     -Wl,--start-group \
     $OBJ_LIST \

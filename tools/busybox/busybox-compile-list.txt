@@ -49,7 +49,6 @@ coreutils/readlink.c:coreutils
 coreutils/realpath.c:coreutils
 coreutils/rm.c:coreutils
 coreutils/rmdir.c:coreutils
-coreutils/seq.c:coreutils
 coreutils/sleep.c:coreutils
 coreutils/sort.c:coreutils
 coreutils/stat.c:coreutils
@@ -115,12 +114,7 @@ libbb/getopt_allopts.c:
 libbb/getpty.c:
 libbb/get_shell_name.c:
 libbb/get_volsize.c:
-libbb/hash_md5_sha256_x86-32_shaNI.c:
-libbb/hash_md5_sha256_x86-64_shaNI.c:
 libbb/hash_md5_sha.c:
-libbb/hash_md5_sha_x86-32_shaNI.c:
-libbb/hash_md5_sha_x86-64.c:
-libbb/hash_md5_sha_x86-64_shaNI.c:
 libbb/herror_msg.c:
 libbb/human_readable.c:
 libbb/inet_common.c:
