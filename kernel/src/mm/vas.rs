@@ -175,7 +175,6 @@ pub fn free_user_page_table_frames(l4_phys: u64) -> usize {
 /// executable's mappings while keeping the L4 root for reuse. After this
 /// call, user-space L4 entries (0..256) are cleared so fresh intermediate
 /// tables will be allocated by subsequent `map_page` calls.
-#[allow(dead_code)] // Will be used when exec-time page table freeing is implemented
 fn free_user_page_table_subtrees(l4_phys: u64) {
     let phys_offset_val = super::PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Acquire);
 
@@ -1096,18 +1095,28 @@ impl VirtualAddressSpace {
             // Clear all mappings
             mappings.clear();
 
-            // NOTE: Page table hierarchy frames (L4/L3/L2/L1) are NOT freed
-            // here because clear() runs during sys_exit while the process's
-            // CR3 is still active. Freeing the L4 frame (which IS the active
-            // CR3) would cause a triple fault on the next TLB miss.
-            //
-            // Page table frames are freed by the caller (e.g.,
-            // run_user_process_scheduled) AFTER the boot CR3 is restored.
-            // The page_table_root is preserved so the caller can retrieve it
-            // for deferred freeing.
-
-            // Flush TLB for the unmapped user-space pages
+            // Flush TLB for the unmapped user-space pages. This MUST happen
+            // before freeing page table subtrees below, so that no stale TLB
+            // entry references the about-to-be-freed L3/L2/L1 frames.
             crate::arch::tlb_flush_all();
+
+            // Free user-space page table subtree frames (L3/L2/L1) now that
+            // all user PTEs have been cleared and the TLB flushed. The L4
+            // frame itself is NOT freed because it may be the active CR3;
+            // freeing it would cause a triple fault on the next TLB miss.
+            // The L4 frame is freed later by the boot wrapper (e.g.,
+            // run_user_process_scheduled) after the boot CR3 is restored.
+            //
+            // Freeing subtrees here (rather than deferring to the boot
+            // wrapper) is critical for the exec path: exec calls clear()
+            // then init(), which allocates a NEW L4 and overwrites
+            // page_table_root. Without freeing the old subtrees here, they
+            // would be leaked because the old L4 address is overwritten and
+            // the boot wrapper only frees the pre-exec L4 (saved before
+            // entering user mode).
+            if pt_root != 0 {
+                free_user_page_table_subtrees(pt_root);
+            }
         }
 
         // Reset metadata

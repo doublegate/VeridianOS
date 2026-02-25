@@ -1360,19 +1360,45 @@ fn run_user_process_scheduled(pid: crate::process::ProcessId) {
 
     // Boot CR3 is now restored. Free the process's page table hierarchy
     // frames (L4/L3/L2/L1 tables). This is deferred from cleanup_process()
-    // because at that point the process's CR3 was still active — freeing
+    // because at that point the process's CR3 was still active -- freeing
     // the L4 frame while it's the active CR3 causes a triple fault on the
     // next TLB miss.
+    //
+    // If the process called exec(), the page table was replaced: init()
+    // allocated a new L4 and overwrote page_table_root. We must free BOTH
+    // the pre-exec page table (saved_pt_root) and the post-exec page table
+    // (current page_table_root). Without this, every exec() leaks the
+    // post-exec page table hierarchy (~10-30 frames per exec).
+    let current_pt_root = if let Some(proc) = get_process(pid) {
+        proc.memory_space.lock().get_page_table()
+    } else {
+        0
+    };
+
+    // Free the post-exec page table if exec changed it
+    if current_pt_root != 0 && current_pt_root != saved_pt_root {
+        let freed = crate::mm::vas::free_user_page_table_frames(current_pt_root);
+        if freed > 0 {
+            kprintln!(
+                "[BOOT] Freed {} post-exec page table frames for pid {}",
+                freed,
+                pid.0
+            );
+        }
+    }
+
+    // Free the pre-exec (or only) page table
     if saved_pt_root != 0 {
         let freed = crate::mm::vas::free_user_page_table_frames(saved_pt_root);
         if freed > 0 {
             kprintln!("[BOOT] Freed {} page table frames for pid {}", freed, pid.0);
         }
-        // Clear page_table_root so boot_reap_orphan_zombies() will not
-        // attempt to double-free the same page table hierarchy.
-        if let Some(proc) = get_process(pid) {
-            proc.memory_space.lock().set_page_table(0);
-        }
+    }
+
+    // Clear page_table_root so boot_reap_orphan_zombies() will not
+    // attempt to double-free the same page table hierarchy.
+    if let Some(proc) = get_process(pid) {
+        proc.memory_space.lock().set_page_table(0);
     }
 
     // Reap the zombie process from the process table.
@@ -1520,13 +1546,32 @@ pub fn boot_run_forked_child(
 
     // Boot CR3 is restored. Free the child's page table hierarchy frames
     // (deferred from cleanup_process -- see vas.rs clear() comment).
-    // After freeing, clear page_table_root in the child's VAS to prevent
-    // boot_reap_orphan_zombies() from double-freeing the same frames.
+    //
+    // If the child called exec(), the page table was replaced: init()
+    // allocated a new L4 and overwrote page_table_root. We must free BOTH
+    // the pre-exec page table (cr3, saved before entering user mode) and
+    // the post-exec page table (current page_table_root). Without this,
+    // every fork+exec leaks the post-exec page table hierarchy.
+    let current_child_pt = if let Some(child_proc) = get_process(child_pid) {
+        child_proc.memory_space.lock().get_page_table()
+    } else {
+        0
+    };
+
+    // Free the post-exec page table if exec changed it
+    if current_child_pt != 0 && current_child_pt != cr3 {
+        crate::mm::vas::free_user_page_table_frames(current_child_pt);
+    }
+
+    // Free the pre-exec (or only) page table
     if cr3 != 0 {
         crate::mm::vas::free_user_page_table_frames(cr3);
-        if let Some(child_proc) = get_process(child_pid) {
-            child_proc.memory_space.lock().set_page_table(0);
-        }
+    }
+
+    // Clear page_table_root to prevent boot_reap_orphan_zombies()
+    // from double-freeing the same frames.
+    if let Some(child_proc) = get_process(child_pid) {
+        child_proc.memory_space.lock().set_page_table(0);
     }
 
     // Restore parent's per-CPU state so:
