@@ -953,9 +953,7 @@ fn test_user_binary_load() {
                         drop(vfs);
                         if has_script {
                             kprintln!("[BOOT] Phase C-3: Skipped (213-file native build)");
-                            kprintln!(
-                                "[BOOT] Run manually: ash /usr/src/build-busybox-native.sh"
-                            );
+                            kprintln!("[BOOT] Run manually: ash /usr/src/build-busybox-native.sh");
                         }
                     }
                 } else {

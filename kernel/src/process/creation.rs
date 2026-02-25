@@ -573,34 +573,24 @@ unsafe fn write_to_user_stack(
     vaddr: usize,
     value: usize,
 ) {
-    use crate::mm::VirtualAddress;
-
-    let pt_root = memory_space.get_page_table();
-    if pt_root == 0 {
-        return;
-    }
-
-    let mapper = unsafe { super::super::mm::vas::create_mapper_from_root_pub(pt_root) };
-    if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64)) {
-        let page_offset = vaddr & 0xFFF;
-        let phys_addr = (frame.as_u64() << 12) + page_offset as u64;
-        // SAFETY: phys_addr is converted to a kernel-accessible virtual
-        // address via phys_to_virt_addr (required on x86_64 where physical
-        // memory is mapped at a dynamic offset, not identity-mapped).
-        unsafe {
-            let virt = crate::mm::phys_to_virt_addr(phys_addr);
-            core::ptr::write(virt as *mut usize, value);
-        }
+    // Delegate to write_bytes_to_user_stack which handles page-crossing writes.
+    // While pointer writes are typically 16-byte aligned (and thus page-safe),
+    // this ensures correctness regardless of alignment.
+    let bytes = value.to_ne_bytes();
+    // SAFETY: caller guarantees vaddr is valid and mapped with write access.
+    unsafe {
+        write_bytes_to_user_stack(memory_space, vaddr, &bytes);
     }
 }
 
 /// Write a byte slice to a user-space stack address via the physical memory
-/// window.
+/// window.  Handles writes that cross page boundaries by translating each
+/// page separately and copying only the bytes within that page.
 ///
 /// # Safety
 ///
-/// Same requirements as `write_to_user_stack`. The range
-/// `[vaddr, vaddr+data.len())` must be within a single mapped page.
+/// `vaddr` through `vaddr+data.len()-1` must be valid mapped addresses in the
+/// process's VAS with write permissions.
 #[cfg(feature = "alloc")]
 unsafe fn write_bytes_to_user_stack(
     memory_space: &crate::mm::VirtualAddressSpace,
@@ -615,16 +605,32 @@ unsafe fn write_bytes_to_user_stack(
     }
 
     let mapper = unsafe { super::super::mm::vas::create_mapper_from_root_pub(pt_root) };
-    if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64)) {
-        let page_offset = vaddr & 0xFFF;
-        let phys_addr = (frame.as_u64() << 12) + page_offset as u64;
-        // SAFETY: phys_addr is converted to a kernel-accessible virtual
-        // address via phys_to_virt_addr. The destination has at least
-        // data.len() bytes available within the page.
-        unsafe {
-            let virt = crate::mm::phys_to_virt_addr(phys_addr);
-            core::ptr::copy_nonoverlapping(data.as_ptr(), virt as *mut u8, data.len());
+
+    // Write in page-sized chunks to handle data that crosses page boundaries.
+    // Each virtual page may map to a non-contiguous physical frame, so we must
+    // translate each page separately and copy only the bytes within that page.
+    let mut offset = 0usize;
+    while offset < data.len() {
+        let cur_vaddr = vaddr + offset;
+        let page_offset = cur_vaddr & 0xFFF;
+        let bytes_in_page = core::cmp::min(0x1000 - page_offset, data.len() - offset);
+
+        if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(cur_vaddr as u64)) {
+            let phys_addr = (frame.as_u64() << 12) + page_offset as u64;
+            // SAFETY: phys_addr is converted to a kernel-accessible virtual
+            // address via phys_to_virt_addr. We copy exactly bytes_in_page
+            // bytes, which does not exceed the page boundary.
+            unsafe {
+                let virt = crate::mm::phys_to_virt_addr(phys_addr);
+                core::ptr::copy_nonoverlapping(
+                    data.as_ptr().add(offset),
+                    virt as *mut u8,
+                    bytes_in_page,
+                );
+            }
         }
+
+        offset += bytes_in_page;
     }
 }
 
