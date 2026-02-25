@@ -76,6 +76,10 @@ pub unsafe fn create_mapper_from_root_pub(page_table_root: u64) -> PageMapper {
 ///
 /// Returns the number of frames freed.
 pub fn free_user_page_table_frames(l4_phys: u64) -> usize {
+    if l4_phys == 0 {
+        return 0;
+    }
+
     let phys_offset_val = super::PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Acquire);
     let mut freed = 0usize;
 

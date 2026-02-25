@@ -1161,10 +1161,12 @@ fn boot_reap_orphan_zombies() {
             }
             // Free page table frames (deferred from cleanup_process).
             // Boot CR3 is active here, so it's safe to free the process's
-            // page table hierarchy.
+            // page table hierarchy. Clear page_table_root afterwards to
+            // prevent double-free if this zombie is encountered again.
             let pt_root = proc.memory_space.lock().get_page_table();
             if pt_root != 0 {
                 crate::mm::vas::free_user_page_table_frames(pt_root);
+                proc.memory_space.lock().set_page_table(0);
             }
         }
         table::remove_process(*pid);
@@ -1360,6 +1362,11 @@ fn run_user_process_scheduled(pid: crate::process::ProcessId) {
         if freed > 0 {
             kprintln!("[BOOT] Freed {} page table frames for pid {}", freed, pid.0);
         }
+        // Clear page_table_root so boot_reap_orphan_zombies() will not
+        // attempt to double-free the same page table hierarchy.
+        if let Some(proc) = get_process(pid) {
+            proc.memory_space.lock().set_page_table(0);
+        }
     }
 
     // Reap the zombie process from the process table.
@@ -1506,9 +1513,14 @@ pub fn boot_run_forked_child(
     unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) };
 
     // Boot CR3 is restored. Free the child's page table hierarchy frames
-    // (deferred from cleanup_process — see vas.rs clear() comment).
+    // (deferred from cleanup_process -- see vas.rs clear() comment).
+    // After freeing, clear page_table_root in the child's VAS to prevent
+    // boot_reap_orphan_zombies() from double-freeing the same frames.
     if cr3 != 0 {
         crate::mm::vas::free_user_page_table_frames(cr3);
+        if let Some(child_proc) = get_process(child_pid) {
+            child_proc.memory_space.lock().set_page_table(0);
+        }
     }
 
     // Restore parent's per-CPU state so:

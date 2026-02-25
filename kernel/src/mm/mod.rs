@@ -304,6 +304,26 @@ pub fn init_default() {
         let kernel_end_virt = unsafe { &__kernel_end as *const u8 as u64 };
         let kernel_end_phys = translate_kernel_vaddr(kernel_end_virt);
 
+        // If __kernel_end translation failed, try translating the last byte
+        // of HEAP_MEMORY instead. The heap is the largest object in BSS
+        // (~512MB) and its end address is a tight lower bound on the kernel's
+        // physical extent. __kernel_end may fail translation if the
+        // bootloader's page table walk hits an unmapped intermediate entry
+        // for the very last page of the BSS.
+        let kernel_end_phys = if kernel_end_phys != 0 {
+            kernel_end_phys
+        } else {
+            let heap_end_virt = heap::heap_end_vaddr();
+            let heap_end_phys = translate_kernel_vaddr(heap_end_virt);
+            if heap_end_phys != 0 {
+                kprintln!(
+                    "[MM] __kernel_end translation failed, using heap end at phys {:#x}",
+                    heap_end_phys
+                );
+            }
+            heap_end_phys
+        };
+
         // Round up to next 2MB boundary for safety margin, then add 2MB
         let alloc_start = if kernel_end_phys != 0 {
             let aligned = (kernel_end_phys + 0x1FFFFF) & !0x1FFFFF; // Round up to 2MB
@@ -316,15 +336,24 @@ pub fn init_default() {
             );
             start
         } else {
-            // Fallback: conservative start at 512MB. With a 384MB kernel heap
-            // in BSS, the kernel image can extend past 256MB physical.
-            // 512MB provides a safe margin above the kernel's physical extent.
-            kprintln!("[MM] WARNING: Could not find kernel physical end, using 512MB start");
-            512 * 1024 * 1024
+            // Fallback: compute a safe start from HEAP_SIZE. The kernel's
+            // physical footprint is dominated by the BSS (which contains
+            // HEAP_MEMORY). Add 64MB for code, rodata, data, stacks, and
+            // the bootloader's own allocations.
+            let safe_start = (heap::HEAP_SIZE as u64 + 64 * 1024 * 1024 + 0x1FFFFF) & !0x1FFFFF;
+            kprintln!(
+                "[MM] WARNING: Could not find kernel physical end, using {} MB start (heap={}MB + \
+                 64MB margin)",
+                safe_start / (1024 * 1024),
+                heap::HEAP_SIZE / (1024 * 1024)
+            );
+            safe_start
         };
 
-        // Total usable RAM: 2048MB (QEMU -m 2048M for Phase C native
-        // compilation; cc1 needs ~300MB for large files like awk.c).
+        // Total usable RAM: detect from QEMU. The bootloader provides
+        // memory map info, but in the default path we estimate 1536MB
+        // minimum (required for 512MB heap). Clamp to avoid exceeding
+        // physical memory.
         let ram_end: u64 = 2048 * 1024 * 1024;
         let size = ram_end.saturating_sub(alloc_start);
 

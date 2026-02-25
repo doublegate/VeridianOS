@@ -56,6 +56,24 @@ pub const HEAP_SIZE: usize = 8 * 1024 * 1024;
 /// Kernel heap start address (re-exported from architecture module)
 pub const HEAP_START: usize = crate::arch::HEAP_START;
 
+/// Return the virtual address of the last byte of the HEAP_MEMORY array.
+///
+/// Used by the memory management init code when `__kernel_end` translation
+/// fails. The heap is the largest BSS object; its end address is a tight
+/// lower bound on the kernel's physical extent.
+///
+/// # Safety
+///
+/// Accesses the static `HEAP_MEMORY` address. This is safe because we only
+/// compute the pointer value -- we do not read from or write to it.
+pub fn heap_end_vaddr() -> u64 {
+    // SAFETY: We only compute the address of the end of HEAP_MEMORY.
+    // `addr_of!` avoids creating a reference to the `static mut`, which
+    // would be UB under Rust 2024 rules. The pointer arithmetic is valid
+    // as long as HEAP_MEMORY has been placed by the linker.
+    unsafe { (core::ptr::addr_of!(HEAP_MEMORY) as *const u8).add(HEAP_SIZE) as u64 }
+}
+
 /// Slab allocator for efficient small allocations (x86_64 only, uses
 /// LockedHeap)
 #[cfg(target_arch = "x86_64")]
