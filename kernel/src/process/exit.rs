@@ -493,11 +493,48 @@ pub fn cleanup_process(process: &Process) {
         process.pid.0
     );
 
-    // Release memory
+    // Release memory (VAS-tracked data frames + page table subtrees)
     {
         let mut memory_space = process.memory_space.lock();
         // Clear all mappings
         memory_space.clear();
+    }
+
+    // Free kernel stack frames for all threads.
+    //
+    // Kernel stacks are allocated by ThreadBuilder::build() from the frame
+    // allocator but are NOT tracked in the VAS (they live in kernel space at
+    // KERNEL_STACK_REGION_BASE). Without this, every process exit leaks 16
+    // frames (64 KB) of kernel stack per thread -- 630 processes during
+    // BusyBox compilation would leak ~40 MB.
+    //
+    // User stack frames are managed by the VAS (allocated via map_page() and
+    // freed by clear() above), so they do not need separate cleanup here.
+    #[cfg(feature = "alloc")]
+    {
+        let threads = process.threads.lock();
+        for (_, thread) in threads.iter() {
+            let frame_num = thread.kernel_stack.phys_frame.load(Ordering::Acquire);
+            let page_count = thread.kernel_stack.phys_page_count.load(Ordering::Acquire);
+            if frame_num != 0 && page_count > 0 {
+                let frame = crate::mm::FrameNumber::new(frame_num);
+                if let Err(_e) = crate::mm::FRAME_ALLOCATOR
+                    .lock()
+                    .free_frames(frame, page_count)
+                {
+                    println!(
+                        "[PROCESS] Warning: failed to free kernel stack frames for tid {}: {:?}",
+                        thread.tid.0, _e
+                    );
+                }
+                // Mark as freed to prevent double-free
+                thread.kernel_stack.phys_frame.store(0, Ordering::Release);
+                thread
+                    .kernel_stack
+                    .phys_page_count
+                    .store(0, Ordering::Release);
+            }
+        }
     }
 
     // Release capabilities
@@ -611,51 +648,66 @@ pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), KernelErro
             }
         }
 
-        // Free thread stacks using memory space unmap
-        // Free user stack
+        // Free user stack pages from the VAS. User stack frames are managed
+        // by the VAS (allocated via map_page), so unmap them to free the
+        // physical frames. If cleanup_process already called clear(), the
+        // mappings are gone and unmap will fail harmlessly.
         if thread.user_stack.size > 0 {
             let stack_base = thread.user_stack.base;
             let stack_size = thread.user_stack.size;
 
-            // Unmap user stack from process's virtual address space
             let memory_space = process.memory_space.lock();
-            if let Err(_e) = memory_space.unmap(stack_base, stack_size) {
-                println!(
-                    "[PROCESS] Warning: Failed to unmap user stack at {:#x}: {}",
-                    stack_base, _e
-                );
-            } else {
-                println!(
-                    "[PROCESS] Freed user stack at {:#x}, size {}",
-                    stack_base, stack_size
-                );
-            }
-        }
-
-        // Free kernel stack
-        if thread.kernel_stack.size > 0 {
-            let stack_base = thread.kernel_stack.base;
-            let stack_size = thread.kernel_stack.size;
-
-            // Free kernel stack frames directly using the frame allocator
-            // Kernel stacks are physically allocated, so we need to free the frames
-            let num_pages = stack_size.div_ceil(0x1000);
+            // Try to unmap each page individually since map_page creates
+            // per-page entries in the BTreeMap.
+            let num_pages = stack_size / 0x1000;
             for i in 0..num_pages {
-                let frame_addr = stack_base + i * 0x1000;
-                // Convert kernel virtual to physical address (identity mapped in kernel space)
-                // For kernel addresses above 0xFFFF_8000_0000_0000, subtract the offset
-                let phys_addr = if frame_addr >= 0xFFFF_8000_0000_0000 {
-                    frame_addr - 0xFFFF_8000_0000_0000
-                } else {
-                    frame_addr
-                };
-                // Wrap in PhysicalAddress newtype for mm::free_frame
-                crate::mm::free_frame(crate::mm::PhysicalAddress::new(phys_addr as u64));
+                let page_addr = stack_base + i * 0x1000;
+                let _ = memory_space.unmap(page_addr, 0x1000);
             }
             println!(
-                "[PROCESS] Freed kernel stack at {:#x}, size {} ({} frames)",
-                stack_base, stack_size, num_pages
+                "[PROCESS] Freed user stack at {:#x}, size {}",
+                stack_base, stack_size
             );
+        }
+
+        // Free kernel stack frames using the stored physical frame info.
+        // ThreadBuilder::build() records the frame number and page count
+        // in the Stack struct for exactly this purpose.
+        {
+            let frame_num = thread
+                .kernel_stack
+                .phys_frame
+                .load(core::sync::atomic::Ordering::Acquire);
+            let page_count = thread
+                .kernel_stack
+                .phys_page_count
+                .load(core::sync::atomic::Ordering::Acquire);
+            if frame_num != 0 && page_count > 0 {
+                let frame = crate::mm::FrameNumber::new(frame_num);
+                if let Err(_e) = crate::mm::FRAME_ALLOCATOR
+                    .lock()
+                    .free_frames(frame, page_count)
+                {
+                    println!(
+                        "[PROCESS] Warning: Failed to free kernel stack for tid {}: {:?}",
+                        tid.0, _e
+                    );
+                } else {
+                    println!(
+                        "[PROCESS] Freed kernel stack for tid {} ({} frames)",
+                        tid.0, page_count
+                    );
+                }
+                // Mark as freed to prevent double-free
+                thread
+                    .kernel_stack
+                    .phys_frame
+                    .store(0, core::sync::atomic::Ordering::Release);
+                thread
+                    .kernel_stack
+                    .phys_page_count
+                    .store(0, core::sync::atomic::Ordering::Release);
+            }
         }
 
         // Clean up TLS area

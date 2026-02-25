@@ -395,12 +395,19 @@ pub struct Thread {
 /// Stack information
 #[derive(Debug)]
 pub struct Stack {
-    /// Base address (lowest address)
+    /// Base address (lowest address, virtual)
     pub base: usize,
     /// Size in bytes
     pub size: usize,
     /// Current stack pointer
     pub sp: AtomicUsize,
+    /// Physical frame number of the contiguous allocation from the frame
+    /// allocator. Stored so cleanup can free the frames without walking
+    /// page tables. Zero means no physical frames are owned by this Stack
+    /// (e.g., user stacks whose frames are managed by the VAS).
+    pub phys_frame: AtomicU64,
+    /// Number of physical pages owned by this stack (for `free_frames`).
+    pub phys_page_count: AtomicUsize,
 }
 
 impl Stack {
@@ -410,6 +417,8 @@ impl Stack {
             base,
             size,
             sp: AtomicUsize::new(base + size), // Stack grows down
+            phys_frame: AtomicU64::new(0),
+            phys_page_count: AtomicUsize::new(0),
         }
     }
 
@@ -807,11 +816,19 @@ impl ThreadBuilder {
 
     /// Build the thread with real stack allocation.
     ///
-    /// Allocates physical frames for both the user and kernel stacks via the
-    /// global frame allocator. Each stack gets a guard page (unmapped) below
-    /// it to detect stack overflow. Stack pointers are set to the top of
-    /// each allocated region since stacks grow downward on all supported
-    /// architectures (x86_64, AArch64, RISC-V).
+    /// Allocates physical frames for the **kernel** stack via the global frame
+    /// allocator. User stack frames are NOT allocated here because every caller
+    /// immediately maps user stack pages through the VAS (via `map_page()`),
+    /// which allocates its own tracked frames. Allocating frames here would
+    /// orphan them (never freed, never used), leaking 64 pages (256 KB) per
+    /// thread -- the root cause of the native-compilation OOM.
+    ///
+    /// Kernel stack frames are stored in `Stack::phys_frame` so that
+    /// `cleanup_process()` can free them without walking page tables.
+    ///
+    /// Each stack gets a guard page (unmapped) below it to detect overflow.
+    /// Stack pointers are set to the top of each allocated region since stacks
+    /// grow downward on all supported architectures (x86_64, AArch64, RISC-V).
     pub fn build(self) -> Result<Thread, KernelError> {
         let tid = super::alloc_tid();
 
@@ -819,30 +836,22 @@ impl ThreadBuilder {
         let user_stack_pages = self.user_stack_size.div_ceil(FRAME_SIZE);
         let kernel_stack_pages = self.kernel_stack_size.div_ceil(FRAME_SIZE);
 
-        // Allocate physical frames for user stack
-        let user_frame = allocate_stack_frames(user_stack_pages).inspect_err(|_| {
+        // NOTE: User stack frames are NOT allocated here. Every code path that
+        // calls build() subsequently maps user stack pages through the VAS:
+        //   - create_process_with_options(): calls map_page() for each page
+        //   - exec_process(): calls map_page() for re-mapped stack
+        //   - fork_process(): clone_from() deep-copies parent's VAS pages
+        // Those VAS-managed frames are the ones actually used and properly
+        // freed by VAS::clear(). Allocating frames here would orphan them.
+
+        // Allocate physical frames for kernel stack
+        let kernel_frame = allocate_stack_frames(kernel_stack_pages).inspect_err(|_| {
             crate::println!(
-                "[THREAD] Failed to allocate {} user stack frames for tid {}",
-                user_stack_pages,
+                "[THREAD] Failed to allocate {} kernel stack frames for tid {}",
+                kernel_stack_pages,
                 tid.0
             );
         })?;
-        let _user_stack_phys = user_frame.as_addr().as_usize();
-
-        // Allocate physical frames for kernel stack
-        let kernel_frame = match allocate_stack_frames(kernel_stack_pages) {
-            Ok(frame) => frame,
-            Err(e) => {
-                // Clean up user stack on failure
-                free_stack_frames(user_frame, user_stack_pages);
-                crate::println!(
-                    "[THREAD] Failed to allocate {} kernel stack frames for tid {}",
-                    kernel_stack_pages,
-                    tid.0
-                );
-                return Err(e);
-            }
-        };
         let kernel_stack_phys = kernel_frame.as_addr().as_usize();
 
         // Compute virtual addresses for stacks.
@@ -891,6 +900,16 @@ impl ThreadBuilder {
             self.fs.unwrap_or_else(ThreadFs::new_root),
         );
 
+        // Store kernel stack physical frame info for cleanup_process() to free.
+        thread
+            .kernel_stack
+            .phys_frame
+            .store(kernel_frame.as_u64(), Ordering::Release);
+        thread
+            .kernel_stack
+            .phys_page_count
+            .store(kernel_stack_pages, Ordering::Release);
+
         thread.priority = self.priority;
         thread.set_affinity(self.cpu_affinity);
         thread.clear_tid.store(self.clear_tid, Ordering::Release);
@@ -902,12 +921,11 @@ impl ThreadBuilder {
         }
 
         crate::println!(
-            "[THREAD] Allocated stacks for tid {}: user={:#x}..{:#x} (phys={:#x}), \
-             kernel={:#x}..{:#x} (phys={:#x}), guard pages installed",
+            "[THREAD] Allocated stacks for tid {}: user={:#x}..{:#x}, kernel={:#x}..{:#x} \
+             (phys={:#x}), guard pages installed",
             tid.0,
             user_stack_usable_base,
             user_stack_usable_base + user_stack_size,
-            _user_stack_phys,
             kernel_stack_usable_base,
             kernel_stack_usable_base + kernel_stack_size,
             kernel_stack_phys,
