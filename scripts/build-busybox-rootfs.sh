@@ -306,6 +306,93 @@ phase_rootfs() {
 
     echo "  Applet symlinks: $applet_count"
 
+    # =====================================================================
+    # Cross-compile and install sysinfo + edit (+ libcurses dependency)
+    # =====================================================================
+    echo "  Adding sysinfo/edit programs..."
+
+    local libc_incdir="${LIBC_DIR}/include"
+    local pgm_cflags="-std=c11 -static -O2 -nostdinc"
+    pgm_cflags+=" -isystem ${libc_incdir} -isystem ${SYSROOT}/usr/include"
+    pgm_cflags+=" -isystem ${GCC_INCDIR}"
+    pgm_cflags+=" -fno-stack-protector -ffreestanding"
+    pgm_cflags+=" -mno-red-zone -mcmodel=small"
+    pgm_cflags+=" -Wall -Wextra -Wno-unused-parameter"
+    local pgm_ldflags="-static -nostdlib -L${SYSROOT}/usr/lib"
+
+    # sysinfo (fastfetch-inspired system info display)
+    if [ -f "${PROGRAMS_DIR}/sysinfo/sysinfo.c" ]; then
+        echo -n "    sysinfo... "
+        if "$CC" $pgm_cflags $pgm_ldflags -o "$BUILD_DIR/bin/sysinfo" \
+                "${SYSROOT}/usr/lib/crt0.o" "${PROGRAMS_DIR}/sysinfo/sysinfo.c" -lc 2>&1; then
+            "$STRIP" "$BUILD_DIR/bin/sysinfo" 2>/dev/null || true
+            local sz
+            sz=$(stat -c%s "$BUILD_DIR/bin/sysinfo" 2>/dev/null || stat -f%z "$BUILD_DIR/bin/sysinfo" 2>/dev/null)
+            echo "OK ($(( sz / 1024 )) KB)"
+        else
+            echo "FAILED"
+        fi
+    fi
+
+    # Build libcurses.a for rootfs (needed by edit)
+    local curses_src="${PROJECT_ROOT}/userland/libcurses"
+    if [ -f "${curses_src}/curses.c" ]; then
+        echo -n "    libcurses.a... "
+        local curses_build="/tmp/VeridianOS/libcurses-rootfs-build"
+        rm -rf "$curses_build"
+        mkdir -p "$curses_build"
+        local curses_cflags="-static -O2 -Wall -Wextra -Wno-unused-parameter"
+        curses_cflags+=" -fno-stack-protector -ffreestanding -mno-red-zone -mcmodel=small"
+        curses_cflags+=" -nostdinc -isystem ${SYSROOT}/usr/include -isystem ${GCC_INCDIR}"
+        curses_cflags+=" -I${curses_src}"
+        if "$CC" -c $curses_cflags -o "$curses_build/curses.o" "$curses_src/curses.c" 2>&1; then
+            "${TOOLCHAIN_PREFIX}/bin/x86_64-veridian-ar" rcs "$curses_build/libcurses.a" "$curses_build/curses.o"
+            # Install into rootfs
+            mkdir -p "$BUILD_DIR/usr/lib" "$BUILD_DIR/usr/include"
+            cp "$curses_build/libcurses.a" "$BUILD_DIR/usr/lib/libcurses.a"
+            ln -sf libcurses.a "$BUILD_DIR/usr/lib/libncurses.a"
+            cp "$curses_src/curses.h" "$BUILD_DIR/usr/include/curses.h"
+            cp "$curses_src/ncurses.h" "$BUILD_DIR/usr/include/ncurses.h"
+            local csz
+            csz=$(stat -c%s "$curses_build/libcurses.a" 2>/dev/null || stat -f%z "$curses_build/libcurses.a" 2>/dev/null)
+            echo "OK ($(( csz / 1024 )) KB)"
+        else
+            echo "FAILED"
+        fi
+    fi
+
+    # edit (nano-inspired text editor, depends on libcurses)
+    if [ -f "${PROGRAMS_DIR}/edit/edit.c" ] && [ -f "$BUILD_DIR/usr/lib/libcurses.a" ]; then
+        echo -n "    edit... "
+        if "$CC" $pgm_cflags $pgm_ldflags -o "$BUILD_DIR/bin/edit" \
+                "${SYSROOT}/usr/lib/crt0.o" "${PROGRAMS_DIR}/edit/edit.c" \
+                -L"$BUILD_DIR/usr/lib" -lcurses -lc 2>&1; then
+            "$STRIP" "$BUILD_DIR/bin/edit" 2>/dev/null || true
+            local esz
+            esz=$(stat -c%s "$BUILD_DIR/bin/edit" 2>/dev/null || stat -f%z "$BUILD_DIR/bin/edit" 2>/dev/null)
+            echo "OK ($(( esz / 1024 )) KB)"
+        else
+            echo "FAILED"
+        fi
+    fi
+
+    # Copy source files for native compilation on VeridianOS
+    echo "  Adding program source for native compilation..."
+    mkdir -p "$BUILD_DIR/usr/src"
+    [ -f "${PROGRAMS_DIR}/sysinfo/sysinfo.c" ] && cp "${PROGRAMS_DIR}/sysinfo/sysinfo.c" "$BUILD_DIR/usr/src/sysinfo.c"
+    [ -f "${PROGRAMS_DIR}/edit/edit.c" ] && cp "${PROGRAMS_DIR}/edit/edit.c" "$BUILD_DIR/usr/src/edit.c"
+    [ -f "${curses_src}/curses.c" ] && cp "${curses_src}/curses.c" "$BUILD_DIR/usr/src/curses.c"
+    [ -f "${curses_src}/curses.h" ] && cp "${curses_src}/curses.h" "$BUILD_DIR/usr/src/curses.h"
+    echo "    + /usr/src/{sysinfo.c,edit.c,curses.c,curses.h}"
+
+    # Copy native build script (if it exists)
+    local NATIVE_PGM_SCRIPT="${PROJECT_ROOT}/tools/native-programs/build-native-programs.sh"
+    if [ -f "$NATIVE_PGM_SCRIPT" ]; then
+        cp "$NATIVE_PGM_SCRIPT" "$BUILD_DIR/usr/src/build-native-programs.sh"
+        chmod 755 "$BUILD_DIR/usr/src/build-native-programs.sh"
+        echo "    + /usr/src/build-native-programs.sh"
+    fi
+
     # Copy test data files
     echo "  Adding test data..."
     printf 'Hello from VeridianOS\nCAT_PASS\n' > "$BUILD_DIR/usr/src/cat_test.txt"

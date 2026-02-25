@@ -1068,6 +1068,20 @@ fn test_user_binary_load() {
                             kprintln!("[BOOT] Run manually: ash /usr/src/build-busybox-native.sh");
                         }
                     }
+
+                    // C-4: Native sysinfo + edit compilation
+                    // SKIPPED at boot -- run manually at the ash prompt.
+                    {
+                        let vfs = get_vfs().read();
+                        let has_script = vfs
+                            .resolve_path("/usr/src/build-native-programs.sh")
+                            .is_ok();
+                        drop(vfs);
+                        if has_script {
+                            kprintln!("[BOOT] Phase C-4: Skipped (native sysinfo+edit build)");
+                            kprintln!("[BOOT] Run manually: ash /usr/src/build-native-programs.sh");
+                        }
+                    }
                 } else {
                     if !has_gcc {
                         kprintln!("[BOOT] Phase C skipped: /usr/bin/gcc not in rootfs");
