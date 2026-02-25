@@ -16,8 +16,8 @@ use alloc::{collections::BTreeMap, vec::Vec};
 use spin::Mutex;
 
 use super::{
-    page_table::{FrameAllocator as PageFrameAllocator, PageMapper},
-    FrameAllocatorError, FrameNumber, PageFlags, VirtualAddress, FRAME_ALLOCATOR,
+    page_table::{FrameAllocator as PageFrameAllocator, PageMapper, PageTable, PAGE_TABLE_ENTRIES},
+    FrameAllocatorError, FrameNumber, PageFlags, VirtualAddress, FRAME_ALLOCATOR, FRAME_SIZE,
 };
 use crate::error::KernelError;
 
@@ -63,6 +63,182 @@ unsafe fn create_mapper_from_root(page_table_root: u64) -> PageMapper {
 /// Same requirements as [`create_mapper_from_root`].
 pub unsafe fn create_mapper_from_root_pub(page_table_root: u64) -> PageMapper {
     unsafe { create_mapper_from_root(page_table_root) }
+}
+
+/// Free all user-space page table frames in a page table hierarchy.
+///
+/// Walks the L4 table and for each **user-space** L4 entry (indices 0..256),
+/// recursively frees L3, L2, and L1 table frames. Kernel-space entries
+/// (indices 256..512) are left untouched because they are shared across all
+/// address spaces (copied from the boot page tables).
+///
+/// Finally, frees the L4 frame itself.
+///
+/// Returns the number of frames freed.
+pub fn free_user_page_table_frames(l4_phys: u64) -> usize {
+    let phys_offset_val = super::PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Acquire);
+    let mut freed = 0usize;
+
+    // SAFETY: l4_phys is a valid physical address of an L4 page table.
+    // phys_to_virt_addr maps it to the kernel's identity-mapped region.
+    let l4_table = unsafe { &*(super::phys_to_virt_addr(l4_phys) as *const PageTable) };
+
+    // Only walk user-space entries (0..256). Kernel entries (256..512) are
+    // shared references to the boot page tables and must NOT be freed.
+    for l4_idx in 0..256 {
+        let l4_entry = &l4_table[l4_idx];
+        if !l4_entry.is_present() {
+            continue;
+        }
+
+        // Also skip the physical memory mapping L4 entry (bootloader puts
+        // the identity map in a lower-half L4 slot).
+        if phys_offset_val != 0 {
+            let phys_l4_idx = ((phys_offset_val >> 39) & 0x1FF) as usize;
+            if l4_idx == phys_l4_idx {
+                continue;
+            }
+        }
+
+        let l3_phys = match l4_entry.addr() {
+            Some(a) => a.as_u64(),
+            None => continue,
+        };
+
+        // Walk L3 table
+        let l3_table = unsafe { &*(super::phys_to_virt_addr(l3_phys) as *const PageTable) };
+        for l3_idx in 0..PAGE_TABLE_ENTRIES {
+            let l3_entry = &l3_table[l3_idx];
+            if !l3_entry.is_present() {
+                continue;
+            }
+            // Skip huge pages (1GB) -- they have no L2 subtable
+            if l3_entry.flags().0 & PageFlags::HUGE.0 != 0 {
+                continue;
+            }
+
+            let l2_phys = match l3_entry.addr() {
+                Some(a) => a.as_u64(),
+                None => continue,
+            };
+
+            // Walk L2 table
+            let l2_table = unsafe { &*(super::phys_to_virt_addr(l2_phys) as *const PageTable) };
+            for l2_idx in 0..PAGE_TABLE_ENTRIES {
+                let l2_entry = &l2_table[l2_idx];
+                if !l2_entry.is_present() {
+                    continue;
+                }
+                // Skip huge pages (2MB) -- they have no L1 subtable
+                if l2_entry.flags().0 & PageFlags::HUGE.0 != 0 {
+                    continue;
+                }
+
+                let l1_phys = match l2_entry.addr() {
+                    Some(a) => a.as_u64(),
+                    None => continue,
+                };
+
+                // Free the L1 table frame
+                let l1_frame = FrameNumber::new(l1_phys / FRAME_SIZE as u64);
+                FRAME_ALLOCATOR.lock().free_frames(l1_frame, 1).ok();
+                freed += 1;
+            }
+
+            // Free the L2 table frame
+            let l2_frame = FrameNumber::new(l2_phys / FRAME_SIZE as u64);
+            FRAME_ALLOCATOR.lock().free_frames(l2_frame, 1).ok();
+            freed += 1;
+        }
+
+        // Free the L3 table frame
+        let l3_frame = FrameNumber::new(l3_phys / FRAME_SIZE as u64);
+        FRAME_ALLOCATOR.lock().free_frames(l3_frame, 1).ok();
+        freed += 1;
+    }
+
+    // Free the L4 table frame itself
+    let l4_frame = FrameNumber::new(l4_phys / FRAME_SIZE as u64);
+    FRAME_ALLOCATOR.lock().free_frames(l4_frame, 1).ok();
+    freed += 1;
+
+    freed
+}
+
+/// Free user-space page table subtrees (L3/L2/L1) but keep the L4 frame.
+///
+/// Used during exec to reclaim intermediate page table frames from the old
+/// executable's mappings while keeping the L4 root for reuse. After this
+/// call, user-space L4 entries (0..256) are cleared so fresh intermediate
+/// tables will be allocated by subsequent `map_page` calls.
+#[allow(dead_code)] // Will be used when exec-time page table freeing is implemented
+fn free_user_page_table_subtrees(l4_phys: u64) {
+    let phys_offset_val = super::PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Acquire);
+
+    // SAFETY: l4_phys is a valid physical address of an L4 page table.
+    let l4_table = unsafe { &mut *(super::phys_to_virt_addr(l4_phys) as *mut PageTable) };
+
+    for l4_idx in 0..256 {
+        let l4_entry = &l4_table[l4_idx];
+        if !l4_entry.is_present() {
+            continue;
+        }
+
+        // Skip the physical memory mapping L4 entry
+        if phys_offset_val != 0 {
+            let phys_l4_idx = ((phys_offset_val >> 39) & 0x1FF) as usize;
+            if l4_idx == phys_l4_idx {
+                continue;
+            }
+        }
+
+        let l3_phys = match l4_entry.addr() {
+            Some(a) => a.as_u64(),
+            None => continue,
+        };
+
+        // Walk and free L3 subtree
+        let l3_table = unsafe { &*(super::phys_to_virt_addr(l3_phys) as *const PageTable) };
+        for l3_idx in 0..PAGE_TABLE_ENTRIES {
+            let l3_entry = &l3_table[l3_idx];
+            if !l3_entry.is_present() || l3_entry.flags().0 & PageFlags::HUGE.0 != 0 {
+                continue;
+            }
+
+            let l2_phys = match l3_entry.addr() {
+                Some(a) => a.as_u64(),
+                None => continue,
+            };
+
+            let l2_table = unsafe { &*(super::phys_to_virt_addr(l2_phys) as *const PageTable) };
+            for l2_idx in 0..PAGE_TABLE_ENTRIES {
+                let l2_entry = &l2_table[l2_idx];
+                if !l2_entry.is_present() || l2_entry.flags().0 & PageFlags::HUGE.0 != 0 {
+                    continue;
+                }
+
+                let l1_phys = match l2_entry.addr() {
+                    Some(a) => a.as_u64(),
+                    None => continue,
+                };
+
+                // Free L1 frame
+                let l1_frame = FrameNumber::new(l1_phys / FRAME_SIZE as u64);
+                FRAME_ALLOCATOR.lock().free_frames(l1_frame, 1).ok();
+            }
+
+            // Free L2 frame
+            let l2_frame = FrameNumber::new(l2_phys / FRAME_SIZE as u64);
+            FRAME_ALLOCATOR.lock().free_frames(l2_frame, 1).ok();
+        }
+
+        // Free L3 frame
+        let l3_frame = FrameNumber::new(l3_phys / FRAME_SIZE as u64);
+        FRAME_ALLOCATOR.lock().free_frames(l3_frame, 1).ok();
+
+        // Clear the L4 entry so new mappings get fresh page tables
+        l4_table[l4_idx].clear();
+    }
 }
 
 /// Memory mapping types
@@ -460,11 +636,11 @@ impl VirtualAddressSpace {
             // Clear all mappings
             mappings.clear();
 
+            // NOTE: Page table frames are NOT freed here -- see clear() comment.
+            // The caller must free them after switching to a different CR3.
+
             // Flush entire TLB since we destroyed the whole address space
             crate::arch::tlb_flush_all();
-
-            // TODO(phase5): Free page table structures themselves by walking
-            // the hierarchy and freeing intermediate table pages.
         }
     }
 
@@ -509,17 +685,27 @@ impl VirtualAddressSpace {
         let num_pages = aligned_size / 4096;
         let mut physical_frames = Vec::with_capacity(num_pages);
 
-        // Allocate all frames first (hold FRAME_ALLOCATOR lock briefly)
+        // Allocate all frames first (hold FRAME_ALLOCATOR lock briefly).
+        // On partial failure, free any already-allocated frames before
+        // returning the error. Without this cleanup, OOM during a large
+        // mmap would permanently leak every frame allocated before the
+        // failing one.
         {
             let frame_allocator = FRAME_ALLOCATOR.lock();
             for _ in 0..num_pages {
-                let frame = frame_allocator.allocate_frames(1, None).map_err(|_| {
-                    KernelError::OutOfMemory {
-                        requested: 4096,
-                        available: 0,
+                match frame_allocator.allocate_frames(1, None) {
+                    Ok(frame) => physical_frames.push(frame),
+                    Err(_) => {
+                        // Free all frames allocated so far
+                        for &f in &physical_frames {
+                            frame_allocator.free_frames(f, 1).ok();
+                        }
+                        return Err(KernelError::OutOfMemory {
+                            requested: 4096,
+                            available: 0,
+                        });
                     }
-                })?;
-                physical_frames.push(frame);
+                }
             }
         } // Drop frame allocator lock before page table operations
 
@@ -906,7 +1092,17 @@ impl VirtualAddressSpace {
             // Clear all mappings
             mappings.clear();
 
-            // Flush entire TLB since we cleared all mappings
+            // NOTE: Page table hierarchy frames (L4/L3/L2/L1) are NOT freed
+            // here because clear() runs during sys_exit while the process's
+            // CR3 is still active. Freeing the L4 frame (which IS the active
+            // CR3) would cause a triple fault on the next TLB miss.
+            //
+            // Page table frames are freed by the caller (e.g.,
+            // run_user_process_scheduled) AFTER the boot CR3 is restored.
+            // The page_table_root is preserved so the caller can retrieve it
+            // for deferred freeing.
+
+            // Flush TLB for the unmapped user-space pages
             crate::arch::tlb_flush_all();
         }
 
@@ -915,8 +1111,6 @@ impl VirtualAddressSpace {
             .store(self.heap_start.load(Ordering::Relaxed), Ordering::Release);
         self.next_mmap_addr
             .store(0x4000_0000_0000, Ordering::Release);
-
-        // TODO(phase5): Free page table structures
     }
 
     /// Clear user-space mappings only (for exec)
@@ -968,6 +1162,13 @@ impl VirtualAddressSpace {
             for addr in to_remove {
                 mappings.remove(&addr);
             }
+
+            // NOTE: Page table subtree frames (L3/L2/L1) are NOT freed here
+            // because clear_user_space() runs during exec while the process's
+            // CR3 is still active. Freeing intermediate table frames would
+            // corrupt the active page table hierarchy. The old page table
+            // frames are reused by subsequent map_region calls since their L1
+            // entries were already unmapped above (all slots are non-present).
 
             // Flush TLB for user-space changes
             crate::arch::tlb_flush_all();

@@ -1051,6 +1051,13 @@ fn boot_reap_orphan_zombies() {
                     init.children.lock().retain(|&p| p != *pid);
                 }
             }
+            // Free page table frames (deferred from cleanup_process).
+            // Boot CR3 is active here, so it's safe to free the process's
+            // page table hierarchy.
+            let pt_root = proc.memory_space.lock().get_page_table();
+            if pt_root != 0 {
+                crate::mm::vas::free_user_page_table_frames(pt_root);
+            }
         }
         table::remove_process(*pid);
     }
@@ -1203,6 +1210,17 @@ fn run_user_process(pid: crate::process::ProcessId) {
 fn run_user_process_scheduled(pid: crate::process::ProcessId) {
     use crate::process::get_process;
 
+    // Save the process's page table root BEFORE running. cleanup_process()
+    // (called during sys_exit) frees data frames but intentionally does NOT
+    // free the page table hierarchy frames because the process's CR3 is
+    // still active at that point. We free them here AFTER boot_return_to_kernel
+    // restores the boot CR3.
+    let saved_pt_root = if let Some(proc) = get_process(pid) {
+        proc.memory_space.lock().get_page_table()
+    } else {
+        0
+    };
+
     // Look up the process's first thread ID so current_thread() works.
     let tid = if let Some(proc) = get_process(pid) {
         let threads = proc.threads.lock();
@@ -1222,6 +1240,18 @@ fn run_user_process_scheduled(pid: crate::process::ProcessId) {
     } else {
         // Process not found or no threads -- run without tracking.
         run_user_process(pid);
+    }
+
+    // Boot CR3 is now restored. Free the process's page table hierarchy
+    // frames (L4/L3/L2/L1 tables). This is deferred from cleanup_process()
+    // because at that point the process's CR3 was still active — freeing
+    // the L4 frame while it's the active CR3 causes a triple fault on the
+    // next TLB miss.
+    if saved_pt_root != 0 {
+        let freed = crate::mm::vas::free_user_page_table_frames(saved_pt_root);
+        if freed > 0 {
+            kprintln!("[BOOT] Freed {} page table frames for pid {}", freed, pid.0);
+        }
     }
 
     // Reap the zombie process from the process table.
@@ -1366,6 +1396,12 @@ pub fn boot_run_forked_child(
     // and zeroed GS. Now: GS.base=0, KernelGsBase=per_cpu_data.
     // swapgs to restore parent's syscall handler state: GS.base=per_cpu_data.
     unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) };
+
+    // Boot CR3 is restored. Free the child's page table hierarchy frames
+    // (deferred from cleanup_process — see vas.rs clear() comment).
+    if cr3 != 0 {
+        crate::mm::vas::free_user_page_table_frames(cr3);
+    }
 
     // Restore parent's per-CPU state so:
     // - parent's sysretq uses the correct user RSP
