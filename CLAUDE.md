@@ -102,6 +102,17 @@ qemu-system-x86_64 -enable-kvm \
     -drive id=disk0,if=none,format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
     -device ide-hd,drive=disk0 \
     -serial stdio -display none -m 256M -s -S
+
+# With persistent BlockFS root filesystem (requires 1536M RAM for 512MB heap):
+# First: cd tools/mkfs-blockfs && cargo build --release
+# Then:  ./scripts/build-busybox-rootfs.sh blockfs  (creates target/rootfs-blockfs.img)
+qemu-system-x86_64 -enable-kvm \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
+    -drive id=disk0,if=none,format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
+    -device ide-hd,drive=disk0 \
+    -drive file=target/rootfs-blockfs.img,if=none,id=vd0,format=raw \
+    -device virtio-blk-pci,drive=vd0 \
+    -serial stdio -display none -m 1536M
 ```
 
 **⚠️ COMMON MISTAKES (QEMU 10.2 — ALL ARCHITECTURES):**

@@ -2397,3 +2397,35 @@ fn read_file_to_string(path: &str) -> Result<String, String> {
         Err(e) => Err(format!("{}", e)),
     }
 }
+
+// ============================================================================
+// Filesystem sync command
+// ============================================================================
+
+pub(super) struct SyncCommand;
+impl BuiltinCommand for SyncCommand {
+    fn name(&self) -> &str {
+        "sync"
+    }
+    fn description(&self) -> &str {
+        "Flush all pending writes to disk"
+    }
+
+    fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
+        if let Some(vfs) = crate::fs::try_get_vfs() {
+            match vfs.read().sync() {
+                Ok(()) => {
+                    crate::println!("sync: filesystems synced");
+                    CommandResult::Success(0)
+                }
+                Err(e) => {
+                    crate::println!("sync: error: {:?}", e);
+                    CommandResult::Error(String::from("sync failed"))
+                }
+            }
+        } else {
+            crate::println!("sync: VFS not initialized");
+            CommandResult::Error(String::from("VFS not initialized"))
+        }
+    }
+}

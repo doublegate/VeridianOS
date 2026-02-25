@@ -202,6 +202,8 @@ pub enum FsError {
     NotASymlink,
     /// File size exceeds maximum supported limit
     FileTooLarge,
+    /// On-disk data is corrupt or has invalid magic number
+    CorruptedData,
 }
 
 /// Result type alias for kernel operations

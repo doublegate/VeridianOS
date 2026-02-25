@@ -1,0 +1,12 @@
+[package]
+name = "mkfs-blockfs"
+version = "0.1.0"
+edition = "2021"
+description = "Create and populate VeridianOS BlockFS disk images"
+
+# NOT part of the workspace -- standalone host tool
+# Build with: cd tools/mkfs-blockfs && cargo build --release
+
+[[bin]]
+name = "mkfs-blockfs"
+path = "src/main.rs"

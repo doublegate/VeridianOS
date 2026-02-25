@@ -478,6 +478,50 @@ SPECEOF
 }
 
 # =========================================================================
+# Phase: BlockFS Image (persistent root filesystem)
+# =========================================================================
+phase_blockfs_image() {
+    echo "=== Phase: BlockFS Image ==="
+    local MKFS_DIR="${PROJECT_ROOT}/tools/mkfs-blockfs"
+    local MKFS_BIN="${MKFS_DIR}/target/x86_64-unknown-linux-gnu/release/mkfs-blockfs"
+    local BLOCKFS_IMG="${PROJECT_ROOT}/target/rootfs-blockfs.img"
+    local BLOCKFS_SIZE="${BLOCKFS_SIZE:-128}"
+
+    echo "Building mkfs-blockfs tool..."
+    (cd "$MKFS_DIR" && cargo build --release)
+
+    if [ ! -x "$MKFS_BIN" ]; then
+        echo "ERROR: mkfs-blockfs binary not found at $MKFS_BIN"
+        exit 1
+    fi
+
+    if [ ! -d "$BUILD_DIR" ]; then
+        echo "ERROR: rootfs build directory not found at $BUILD_DIR"
+        echo "  Run '$0 rootfs' first to create the rootfs."
+        exit 1
+    fi
+
+    echo "Creating ${BLOCKFS_SIZE}MB BlockFS image from $BUILD_DIR..."
+    "$MKFS_BIN" \
+        --output "$BLOCKFS_IMG" \
+        --size "$BLOCKFS_SIZE" \
+        --populate "$BUILD_DIR"
+
+    echo ""
+    echo "BlockFS image created: $BLOCKFS_IMG"
+    echo ""
+    echo "Boot with persistent storage:"
+    echo "  ./build-kernel.sh x86_64 dev"
+    echo "  qemu-system-x86_64 -enable-kvm \\"
+    echo "    -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \\"
+    echo "    -drive id=disk0,if=none,format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \\"
+    echo "    -device ide-hd,drive=disk0 \\"
+    echo "    -drive file=target/rootfs-blockfs.img,if=none,id=vd0,format=raw \\"
+    echo "    -device virtio-blk-pci,drive=vd0 \\"
+    echo "    -serial stdio -display none -m 1536M"
+}
+
+# =========================================================================
 # Main dispatch
 # =========================================================================
 main() {
@@ -500,6 +544,7 @@ main() {
         patch)      phase_patch ;;
         build)      phase_build ;;
         rootfs)     phase_rootfs ;;
+        blockfs)    phase_blockfs_image ;;
         all)
             phase_download
             phase_headers
@@ -509,7 +554,7 @@ main() {
             phase_rootfs
             ;;
         *)
-            echo "Usage: $0 [download|headers|config|patch|build|rootfs|all]"
+            echo "Usage: $0 [download|headers|config|patch|build|rootfs|blockfs|all]"
             exit 1
             ;;
     esac

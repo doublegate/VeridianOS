@@ -875,6 +875,27 @@ pub fn sys_sync() -> SyscallResult {
     }
 }
 
+/// Sync a single file descriptor to disk (fsync)
+///
+/// Validates the fd exists, then triggers a full filesystem sync.
+/// Since BlockFS syncs all dirty blocks at once, per-fd sync is
+/// equivalent to a full sync.
+pub fn sys_fsync(fd: usize) -> SyscallResult {
+    // Validate the fd exists
+    let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file_table = proc.file_table.lock();
+    if file_table.get(fd).is_none() {
+        return Err(SyscallError::BadFileDescriptor);
+    }
+    drop(file_table);
+
+    // Sync all filesystems (BlockFS syncs dirty blocks to disk)
+    match vfs()?.read().sync() {
+        Ok(_) => Ok(0),
+        Err(_) => Err(SyscallError::InvalidState),
+    }
+}
+
 /// File stat structure for userspace.
 ///
 /// Layout matches the C `struct stat` in `veridian/stat.h` exactly.

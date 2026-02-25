@@ -63,6 +63,37 @@ pub const MAX_FILENAME_LEN: usize = 255;
 /// Number of 512-byte virtio sectors per 4KB BlockFS block
 const SECTORS_PER_BLOCK: usize = BLOCK_SIZE / 512;
 
+/// On-disk superblock lives in block 0
+const SUPERBLOCK_BLOCK: u32 = 0;
+
+/// Serialized superblock size in bytes (fixed layout, LE)
+const SUPERBLOCK_SERIALIZED_SIZE: usize = 62;
+
+/// On-disk DiskInode size (96 bytes, repr(C), no padding gaps)
+const DISK_INODE_SIZE: usize = 96;
+
+/// Number of DiskInodes that fit in one 4KB block
+const INODES_PER_BLOCK: usize = BLOCK_SIZE / DISK_INODE_SIZE; // 42
+
+/// Compute number of blocks needed for the block bitmap.
+/// Each byte covers 8 blocks, each block is 4096 bytes = 32768 bits.
+fn bitmap_blocks(total_blocks: u32) -> u32 {
+    let bits_needed = total_blocks as usize;
+    let bytes_needed = (bits_needed + 7) / 8;
+    ((bytes_needed + BLOCK_SIZE - 1) / BLOCK_SIZE) as u32
+}
+
+/// Compute number of blocks needed for the inode table.
+fn inode_table_blocks(inode_count: u32) -> u32 {
+    ((inode_count as usize * DISK_INODE_SIZE + BLOCK_SIZE - 1) / BLOCK_SIZE) as u32
+}
+
+/// Compute first_data_block from total_blocks and inode_count.
+/// Layout: [superblock(1)] [bitmap(N)] [inode_table(M)] [data...]
+fn computed_first_data_block(total_blocks: u32, inode_count: u32) -> u32 {
+    1 + bitmap_blocks(total_blocks) + inode_table_blocks(inode_count)
+}
+
 // ---------------------------------------------------------------------------
 // Disk backend trait -- abstracts block-level I/O for persistence
 // ---------------------------------------------------------------------------
@@ -190,13 +221,14 @@ pub struct Superblock {
 
 impl Superblock {
     pub fn new(block_count: u32, inode_count: u32) -> Self {
+        let first_data = computed_first_data_block(block_count, inode_count);
         Self {
             magic: BLOCKFS_MAGIC,
             block_count,
             inode_count,
-            free_blocks: block_count - 10, // Reserve first 10 blocks
-            free_inodes: inode_count - 1,  // Reserve root inode
-            first_data_block: 10,
+            free_blocks: block_count.saturating_sub(first_data),
+            free_inodes: inode_count - 1, // Reserve root inode
+            first_data_block: first_data,
             block_size: BLOCK_SIZE as u32,
             inode_size: size_of::<DiskInode>() as u16,
             blocks_per_group: 8192,
@@ -518,8 +550,18 @@ pub struct BlockFsInner {
 
 impl BlockFsInner {
     pub fn new(block_count: u32, inode_count: u32) -> Self {
-        let superblock = Superblock::new(block_count, inode_count);
-        let block_bitmap = BlockBitmap::new(block_count as usize);
+        let first_data = computed_first_data_block(block_count, inode_count);
+        let mut superblock = Superblock::new(block_count, inode_count);
+        superblock.first_data_block = first_data;
+        superblock.free_blocks = block_count.saturating_sub(first_data);
+
+        let mut block_bitmap = BlockBitmap::new(block_count as usize);
+
+        // Mark metadata blocks (0..first_data_block) as allocated
+        for _b in 0..first_data {
+            block_bitmap.allocate_block();
+        }
+
         let mut inode_table = Vec::new();
         inode_table.resize(inode_count as usize, DiskInode::new(0, 0, 0));
 
@@ -631,8 +673,14 @@ impl BlockFsInner {
         // Clear dirty set after successful write
         self.dirty_blocks.clear();
 
-        // Update superblock write time
+        // Update superblock write time and mount count
         self.superblock.write_time = crate::arch::timer::read_hw_timestamp();
+
+        // Write metadata (superblock, bitmap, inode table)
+        self.serialize_superblock(&*backend)?;
+        self.serialize_bitmap(&*backend)?;
+        self.serialize_inode_table(&*backend)?;
+        synced += 1; // Count metadata as one sync unit
 
         Ok(synced)
     }
@@ -660,6 +708,288 @@ impl BlockFsInner {
         }
 
         Ok(loaded)
+    }
+
+    // --- On-disk metadata serialization ---
+
+    /// Serialize the superblock to block 0 on disk (62 bytes, LE).
+    fn serialize_superblock(&self, backend: &dyn DiskBackend) -> Result<(), KernelError> {
+        let mut buf = [0u8; BLOCK_SIZE];
+        let sb = &self.superblock;
+
+        buf[0..4].copy_from_slice(&sb.magic.to_le_bytes());
+        buf[4..8].copy_from_slice(&sb.block_count.to_le_bytes());
+        buf[8..12].copy_from_slice(&sb.inode_count.to_le_bytes());
+        buf[12..16].copy_from_slice(&sb.free_blocks.to_le_bytes());
+        buf[16..20].copy_from_slice(&sb.free_inodes.to_le_bytes());
+        buf[20..24].copy_from_slice(&sb.first_data_block.to_le_bytes());
+        buf[24..28].copy_from_slice(&sb.block_size.to_le_bytes());
+        buf[28..30].copy_from_slice(&sb.inode_size.to_le_bytes());
+        buf[30..34].copy_from_slice(&sb.blocks_per_group.to_le_bytes());
+        buf[34..38].copy_from_slice(&sb.inodes_per_group.to_le_bytes());
+        buf[38..46].copy_from_slice(&sb.mount_time.to_le_bytes());
+        buf[46..54].copy_from_slice(&sb.write_time.to_le_bytes());
+        buf[54..56].copy_from_slice(&sb.mount_count.to_le_bytes());
+        buf[56..58].copy_from_slice(&sb.max_mount_count.to_le_bytes());
+        buf[58..60].copy_from_slice(&sb.state.to_le_bytes());
+        buf[60..62].copy_from_slice(&sb.errors.to_le_bytes());
+
+        backend.write_block(SUPERBLOCK_BLOCK as u64, &buf)
+    }
+
+    /// Deserialize the superblock from block 0. Returns the parsed superblock.
+    fn deserialize_superblock(backend: &dyn DiskBackend) -> Result<Superblock, KernelError> {
+        let mut buf = [0u8; BLOCK_SIZE];
+        backend.read_block(SUPERBLOCK_BLOCK as u64, &mut buf)?;
+
+        let magic = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        if magic != BLOCKFS_MAGIC {
+            return Err(KernelError::FsError(FsError::CorruptedData));
+        }
+
+        Ok(Superblock {
+            magic,
+            block_count: u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]),
+            inode_count: u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]),
+            free_blocks: u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]),
+            free_inodes: u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]),
+            first_data_block: u32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]),
+            block_size: u32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]),
+            inode_size: u16::from_le_bytes([buf[28], buf[29]]),
+            blocks_per_group: u32::from_le_bytes([buf[30], buf[31], buf[32], buf[33]]),
+            inodes_per_group: u32::from_le_bytes([buf[34], buf[35], buf[36], buf[37]]),
+            mount_time: u64::from_le_bytes([
+                buf[38], buf[39], buf[40], buf[41], buf[42], buf[43], buf[44], buf[45],
+            ]),
+            write_time: u64::from_le_bytes([
+                buf[46], buf[47], buf[48], buf[49], buf[50], buf[51], buf[52], buf[53],
+            ]),
+            mount_count: u16::from_le_bytes([buf[54], buf[55]]),
+            max_mount_count: u16::from_le_bytes([buf[56], buf[57]]),
+            state: u16::from_le_bytes([buf[58], buf[59]]),
+            errors: u16::from_le_bytes([buf[60], buf[61]]),
+        })
+    }
+
+    /// Serialize the block bitmap to disk (blocks 1..1+bitmap_blocks).
+    fn serialize_bitmap(&self, backend: &dyn DiskBackend) -> Result<(), KernelError> {
+        let bm_blocks = bitmap_blocks(self.superblock.block_count);
+        let bitmap_start = SUPERBLOCK_BLOCK + 1;
+
+        for i in 0..bm_blocks {
+            let mut buf = [0u8; BLOCK_SIZE];
+            let byte_offset = i as usize * BLOCK_SIZE;
+            let bytes_remaining = self.block_bitmap.bitmap.len().saturating_sub(byte_offset);
+            let copy_len = bytes_remaining.min(BLOCK_SIZE);
+            if copy_len > 0 {
+                buf[..copy_len].copy_from_slice(
+                    &self.block_bitmap.bitmap[byte_offset..byte_offset + copy_len],
+                );
+            }
+            backend.write_block((bitmap_start + i) as u64, &buf)?;
+        }
+
+        Ok(())
+    }
+
+    /// Deserialize the block bitmap from disk.
+    fn deserialize_bitmap(
+        backend: &dyn DiskBackend,
+        total_blocks: u32,
+    ) -> Result<BlockBitmap, KernelError> {
+        let bm_blocks = bitmap_blocks(total_blocks);
+        let bitmap_start = SUPERBLOCK_BLOCK + 1;
+        let bitmap_size = (total_blocks as usize + 7) / 8;
+        let mut bitmap_data = vec![0u8; bitmap_size];
+
+        for i in 0..bm_blocks {
+            let mut buf = [0u8; BLOCK_SIZE];
+            backend.read_block((bitmap_start + i) as u64, &mut buf)?;
+
+            let byte_offset = i as usize * BLOCK_SIZE;
+            let bytes_remaining = bitmap_size.saturating_sub(byte_offset);
+            let copy_len = bytes_remaining.min(BLOCK_SIZE);
+            if copy_len > 0 {
+                bitmap_data[byte_offset..byte_offset + copy_len].copy_from_slice(&buf[..copy_len]);
+            }
+        }
+
+        Ok(BlockBitmap {
+            bitmap: bitmap_data,
+            total_blocks: total_blocks as usize,
+        })
+    }
+
+    /// Serialize a single DiskInode to 96 bytes (LE).
+    fn serialize_disk_inode(inode: &DiskInode, buf: &mut [u8]) {
+        buf[0..2].copy_from_slice(&inode.mode.to_le_bytes());
+        buf[2..4].copy_from_slice(&inode.uid.to_le_bytes());
+        buf[4..8].copy_from_slice(&inode.size.to_le_bytes());
+        buf[8..12].copy_from_slice(&inode.atime.to_le_bytes());
+        buf[12..16].copy_from_slice(&inode.ctime.to_le_bytes());
+        buf[16..20].copy_from_slice(&inode.mtime.to_le_bytes());
+        buf[20..24].copy_from_slice(&inode.dtime.to_le_bytes());
+        buf[24..26].copy_from_slice(&inode.gid.to_le_bytes());
+        buf[26..28].copy_from_slice(&inode.links_count.to_le_bytes());
+        buf[28..32].copy_from_slice(&inode.blocks.to_le_bytes());
+        buf[32..36].copy_from_slice(&inode.flags.to_le_bytes());
+        for (j, &blk) in inode.direct_blocks.iter().enumerate() {
+            let off = 36 + j * 4;
+            buf[off..off + 4].copy_from_slice(&blk.to_le_bytes());
+        }
+        buf[84..88].copy_from_slice(&inode.indirect_block.to_le_bytes());
+        buf[88..92].copy_from_slice(&inode.double_indirect_block.to_le_bytes());
+        buf[92..96].copy_from_slice(&inode.triple_indirect_block.to_le_bytes());
+    }
+
+    /// Deserialize a single DiskInode from 96 bytes (LE).
+    fn deserialize_disk_inode(buf: &[u8]) -> DiskInode {
+        let mut direct_blocks = [0u32; 12];
+        for (j, block) in direct_blocks.iter_mut().enumerate() {
+            let off = 36 + j * 4;
+            *block = u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
+        }
+        DiskInode {
+            mode: u16::from_le_bytes([buf[0], buf[1]]),
+            uid: u16::from_le_bytes([buf[2], buf[3]]),
+            size: u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]),
+            atime: u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]),
+            ctime: u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]),
+            mtime: u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]),
+            dtime: u32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]),
+            gid: u16::from_le_bytes([buf[24], buf[25]]),
+            links_count: u16::from_le_bytes([buf[26], buf[27]]),
+            blocks: u32::from_le_bytes([buf[28], buf[29], buf[30], buf[31]]),
+            flags: u32::from_le_bytes([buf[32], buf[33], buf[34], buf[35]]),
+            direct_blocks,
+            indirect_block: u32::from_le_bytes([buf[84], buf[85], buf[86], buf[87]]),
+            double_indirect_block: u32::from_le_bytes([buf[88], buf[89], buf[90], buf[91]]),
+            triple_indirect_block: u32::from_le_bytes([buf[92], buf[93], buf[94], buf[95]]),
+        }
+    }
+
+    /// Serialize the entire inode table to disk.
+    fn serialize_inode_table(&self, backend: &dyn DiskBackend) -> Result<(), KernelError> {
+        let bm_blocks = bitmap_blocks(self.superblock.block_count);
+        let inode_start = SUPERBLOCK_BLOCK + 1 + bm_blocks;
+        let it_blocks = inode_table_blocks(self.superblock.inode_count);
+
+        for blk_idx in 0..it_blocks {
+            let mut buf = [0u8; BLOCK_SIZE];
+            let base_inode = blk_idx as usize * INODES_PER_BLOCK;
+
+            for slot in 0..INODES_PER_BLOCK {
+                let inode_idx = base_inode + slot;
+                if inode_idx >= self.inode_table.len() {
+                    break;
+                }
+                let off = slot * DISK_INODE_SIZE;
+                Self::serialize_disk_inode(
+                    &self.inode_table[inode_idx],
+                    &mut buf[off..off + DISK_INODE_SIZE],
+                );
+            }
+
+            backend.write_block((inode_start + blk_idx) as u64, &buf)?;
+        }
+
+        Ok(())
+    }
+
+    /// Deserialize the entire inode table from disk.
+    fn deserialize_inode_table(
+        backend: &dyn DiskBackend,
+        inode_count: u32,
+        total_blocks: u32,
+    ) -> Result<Vec<DiskInode>, KernelError> {
+        let bm_blocks = bitmap_blocks(total_blocks);
+        let inode_start = SUPERBLOCK_BLOCK + 1 + bm_blocks;
+        let it_blocks = inode_table_blocks(inode_count);
+        let mut inode_table = Vec::with_capacity(inode_count as usize);
+
+        for blk_idx in 0..it_blocks {
+            let mut buf = [0u8; BLOCK_SIZE];
+            backend.read_block((inode_start + blk_idx) as u64, &mut buf)?;
+
+            for slot in 0..INODES_PER_BLOCK {
+                let inode_idx = blk_idx as usize * INODES_PER_BLOCK + slot;
+                if inode_idx >= inode_count as usize {
+                    break;
+                }
+                let off = slot * DISK_INODE_SIZE;
+                inode_table.push(Self::deserialize_disk_inode(
+                    &buf[off..off + DISK_INODE_SIZE],
+                ));
+            }
+        }
+
+        Ok(inode_table)
+    }
+
+    /// Load an existing BlockFS from a disk backend.
+    ///
+    /// Reads superblock, bitmap, inode table, and all data blocks.
+    fn load_existing(backend: Arc<Mutex<dyn DiskBackend>>) -> Result<Self, KernelError> {
+        let bk = backend.lock();
+
+        // Read and validate superblock
+        let superblock = Self::deserialize_superblock(&*bk)?;
+        crate::println!(
+            "[BLOCKFS] Found existing filesystem: {} blocks, {} inodes, first_data={}",
+            superblock.block_count,
+            superblock.inode_count,
+            superblock.first_data_block
+        );
+
+        // Read bitmap
+        let block_bitmap = Self::deserialize_bitmap(&*bk, superblock.block_count)?;
+
+        // Read inode table
+        let inode_table =
+            Self::deserialize_inode_table(&*bk, superblock.inode_count, superblock.block_count)?;
+
+        // Allocate in-memory block storage and read all data blocks
+        let block_count = superblock.block_count as usize;
+        let mut block_data = Vec::with_capacity(block_count);
+        for _ in 0..block_count {
+            block_data.push(vec![0u8; BLOCK_SIZE]);
+        }
+
+        let device_blocks = bk.block_count();
+        let first_data = superblock.first_data_block as usize;
+        for (i, block) in block_data
+            .iter_mut()
+            .enumerate()
+            .take(block_count)
+            .skip(first_data)
+        {
+            if (i as u64) >= device_blocks {
+                break;
+            }
+            bk.read_block(i as u64, block)?;
+        }
+
+        crate::println!(
+            "[BLOCKFS] Loaded {} data blocks from disk",
+            block_count.saturating_sub(first_data)
+        );
+
+        drop(bk);
+
+        let mut fs = Self {
+            superblock,
+            block_bitmap,
+            inode_table,
+            block_data,
+            dirty_blocks: BTreeSet::new(),
+            disk: Some(backend),
+        };
+
+        // Update mount count and time
+        fs.superblock.mount_count += 1;
+        fs.superblock.mount_time = crate::arch::timer::read_hw_timestamp();
+
+        Ok(fs)
     }
 
     // --- Indirect block helpers ---
@@ -1774,6 +2104,18 @@ impl BlockFs {
         }
 
         Ok(Self::new(block_count, inode_count))
+    }
+
+    /// Open an existing BlockFS from a disk backend.
+    ///
+    /// Reads the superblock, validates the magic number, and loads the bitmap,
+    /// inode table, and all data blocks into memory. The disk backend remains
+    /// attached for subsequent sync operations.
+    pub fn open_existing(backend: Arc<Mutex<dyn DiskBackend>>) -> Result<Self, KernelError> {
+        let inner = BlockFsInner::load_existing(backend)?;
+        Ok(Self {
+            inner: Arc::new(RwLock::new(inner)),
+        })
     }
 
     /// Attach a disk backend for persistent storage.

@@ -108,6 +108,17 @@ int unlink(const char *pathname)
         veridian_syscall1(SYS_FILE_UNLINK, pathname));
 }
 
+int fsync(int fd)
+{
+    return (int)__syscall_ret(
+        veridian_syscall1(SYS_FS_FSYNC, fd));
+}
+
+void sync(void)
+{
+    veridian_syscall0(SYS_FS_SYNC);
+}
+
 int fcntl(int fd, int cmd, ...)
 {
     long arg = 0;

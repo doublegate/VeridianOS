@@ -318,6 +318,14 @@ impl Vfs {
         }
     }
 
+    /// Replace the root filesystem (used for persistent BlockFS mount at boot).
+    ///
+    /// The previous root filesystem (if any) is dropped. Mount points under
+    /// `/dev` and `/proc` should be re-mounted after calling this.
+    pub fn swap_root(&mut self, fs: Arc<dyn Filesystem>) {
+        self.root_fs = Some(fs);
+    }
+
     /// Unmount a filesystem at the specified path
     pub fn unmount(&mut self, path: &str) -> Result<(), KernelError> {
         self.mounts

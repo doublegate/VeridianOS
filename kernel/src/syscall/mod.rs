@@ -265,6 +265,7 @@ pub enum Syscall {
     FsMount = 70,
     FsUnmount = 71,
     FsSync = 72,
+    FsFsync = 73,
 
     // Kernel information
     KernelGetInfo = 80,
@@ -606,6 +607,7 @@ fn handle_syscall(
         Syscall::FsMount => sys_mount(arg1, arg2, arg3, arg4),
         Syscall::FsUnmount => sys_unmount(arg1),
         Syscall::FsSync => sys_sync(),
+        Syscall::FsFsync => sys_fsync(arg1),
 
         // Kernel information
         Syscall::KernelGetInfo => sys_get_kernel_info(arg1),
@@ -1191,6 +1193,7 @@ impl TryFrom<usize> for Syscall {
             70 => Ok(Syscall::FsMount),
             71 => Ok(Syscall::FsUnmount),
             72 => Ok(Syscall::FsSync),
+            73 => Ok(Syscall::FsFsync),
 
             // Kernel information
             80 => Ok(Syscall::KernelGetInfo),

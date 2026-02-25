@@ -1,0 +1,6 @@
+# Override workspace config — build for host, not bare metal
+[build]
+target = "x86_64-unknown-linux-gnu"
+
+[unstable]
+# Do NOT build-std for host tools

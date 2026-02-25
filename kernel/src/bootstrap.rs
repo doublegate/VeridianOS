@@ -648,10 +648,12 @@ pub fn run() -> ! {
 /// Load a rootfs TAR archive from virtio-blk into the VFS.
 ///
 /// If a virtio-blk device is attached (via QEMU `-drive ... -device
-/// virtio-blk-pci,...`), read its entire contents into memory and parse as a
-/// TAR archive, creating files and directories in the RamFS. This is the
-/// primary mechanism for getting cross-compiled user-space binaries into the
-/// filesystem at boot.
+/// virtio-blk-pci,...`), probe its first block to decide the format:
+///
+/// - If the first 4 bytes match `BLOCKFS_MAGIC` (0x424C4B46), mount as a
+///   persistent BlockFS root filesystem (replacing the initial RamFS).
+/// - Otherwise, read the entire disk as a TAR archive and load into RamFS
+///   (existing behavior).
 #[cfg(feature = "alloc")]
 fn load_rootfs_from_disk() {
     use crate::drivers::virtio::blk;
@@ -660,6 +662,112 @@ fn load_rootfs_from_disk() {
         kprintln!("[ROOTFS] No virtio-blk device, skipping disk load");
         return;
     }
+
+    let device = match blk::get_device() {
+        Some(dev) => dev,
+        None => {
+            kprintln!("[ROOTFS] virtio-blk device not available");
+            return;
+        }
+    };
+
+    // Probe the first sector (512 bytes) to check for BlockFS magic
+    let mut probe_buf = [0u8; 512];
+    {
+        let mut dev = device.lock();
+        if let Err(_e) = dev.read_block(0, &mut probe_buf) {
+            kprintln!("[ROOTFS] Failed to read sector 0 for probe");
+            return;
+        }
+    }
+
+    let magic = u32::from_le_bytes([probe_buf[0], probe_buf[1], probe_buf[2], probe_buf[3]]);
+    if magic == crate::fs::blockfs::BLOCKFS_MAGIC {
+        kprintln!("[ROOTFS] BlockFS magic detected -- mounting persistent root");
+        mount_blockfs_root();
+        return;
+    }
+
+    // Fall back to TAR loading
+    load_tar_rootfs();
+}
+
+/// Mount a pre-formatted BlockFS image as the persistent root filesystem.
+///
+/// Reads superblock, bitmap, inode table, and all data blocks from the
+/// virtio-blk device. Replaces the initial RamFS via `swap_root()`, then
+/// re-mounts DevFS at `/dev` and ProcFS at `/proc`.
+#[cfg(feature = "alloc")]
+fn mount_blockfs_root() {
+    use alloc::sync::Arc;
+
+    use spin::Mutex;
+
+    use crate::fs::{
+        blockfs::{BlockFs, VirtioBlockBackend},
+        devfs::DevFs,
+        get_vfs,
+        procfs::ProcFs,
+        Permissions,
+    };
+
+    let backend = Arc::new(Mutex::new(VirtioBlockBackend));
+
+    let blockfs = match BlockFs::open_existing(backend) {
+        Ok(fs) => fs,
+        Err(_e) => {
+            kprintln!("[ROOTFS] Failed to open BlockFS, falling back to TAR rootfs");
+            load_tar_rootfs();
+            return;
+        }
+    };
+
+    let blockfs_arc: Arc<dyn crate::fs::Filesystem> = Arc::new(blockfs);
+
+    // Swap root filesystem from RamFS to BlockFS
+    {
+        let vfs = get_vfs();
+        let mut vfs_guard = vfs.write();
+
+        // Remove existing DevFS/ProcFS mounts (they're on the old root)
+        let _ = vfs_guard.unmount("/dev");
+        let _ = vfs_guard.unmount("/proc");
+
+        vfs_guard.swap_root(blockfs_arc);
+    }
+
+    kprintln!("[ROOTFS] BlockFS mounted as persistent root");
+
+    // Ensure standard directories exist (may already exist from mkfs population)
+    {
+        let vfs = get_vfs();
+        let vfs_guard = vfs.read();
+        if let Ok(root) = vfs_guard.resolve_path("/") {
+            // Create dirs if they don't exist (ok to fail with AlreadyExists)
+            root.mkdir("dev", Permissions::default()).ok();
+            root.mkdir("proc", Permissions::default()).ok();
+            root.mkdir("tmp", Permissions::from_mode(0o777)).ok();
+        }
+    }
+
+    // Re-mount DevFS and ProcFS
+    {
+        let vfs = get_vfs();
+        let mut vfs_guard = vfs.write();
+        vfs_guard.mount("/dev".into(), Arc::new(DevFs::new())).ok();
+        vfs_guard
+            .mount("/proc".into(), Arc::new(ProcFs::new()))
+            .ok();
+    }
+
+    kprintln!("[ROOTFS] DevFS and ProcFS re-mounted on BlockFS root");
+}
+
+/// Load the virtio-blk disk contents as a TAR archive into the RamFS.
+/// This is the legacy boot path for non-persistent rootfs images.
+#[cfg(feature = "alloc")]
+fn load_tar_rootfs() {
+    use crate::drivers::virtio::blk;
 
     let device = match blk::get_device() {
         Some(dev) => dev,

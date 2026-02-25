@@ -44,9 +44,9 @@ use commands::{
     EnvCommand, ExitCommand, ExportCommand, FalseCommand, FgCommand, FreeCommand, GrepCommand,
     HeadCommand, HelpCommand, HistoryCommand, JobsCommand, KillCommand, LsCommand, LsmodCommand,
     MkdirCommand, MountCommand, MvCommand, PkgCommand, PrintfCommand, PsCommand, PwdCommand,
-    ReadCommand, RmCommand, SetCommand, SortCommand, SourceCommand, TailCommand, TeeCommand,
-    TestCommand, TouchCommand, TrCommand, TrueCommand, TypeCommand, UnaliasCommand, UnameCommand,
-    UniqCommand, UnsetCommand, UptimeCommand, WcCommand, WhichCommand,
+    ReadCommand, RmCommand, SetCommand, SortCommand, SourceCommand, SyncCommand, TailCommand,
+    TeeCommand, TestCommand, TouchCommand, TrCommand, TrueCommand, TypeCommand, UnaliasCommand,
+    UnameCommand, UniqCommand, UnsetCommand, UptimeCommand, WcCommand, WhichCommand,
 };
 use spin::RwLock;
 pub use state::{get_shell, init, run_shell, try_get_shell};
@@ -713,6 +713,7 @@ impl Shell {
         builtins.insert("free".into(), Box::new(FreeCommand));
         builtins.insert("dmesg".into(), Box::new(DmesgCommand));
         builtins.insert("df".into(), Box::new(DfCommand));
+        builtins.insert("sync".into(), Box::new(SyncCommand));
 
         // Shell control commands
         builtins.insert("set".into(), Box::new(SetCommand));

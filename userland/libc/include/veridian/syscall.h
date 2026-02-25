@@ -85,10 +85,11 @@ extern "C" {
 #define SYS_FILE_PIPE2          65
 #define SYS_FILE_DUP3           66
 
-/* Filesystem management (70-72) */
+/* Filesystem management (70-73) */
 #define SYS_FS_MOUNT            70
 #define SYS_FS_UNMOUNT          71
 #define SYS_FS_SYNC             72
+#define SYS_FS_FSYNC            73
 
 /* Kernel information (80) */
 #define SYS_KERNEL_GET_INFO     80

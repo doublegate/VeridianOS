@@ -62,6 +62,12 @@ off_t lseek(int fd, off_t offset, int whence);
 /** Close a file descriptor. */
 int close(int fd);
 
+/** Sync a file descriptor to disk. */
+int fsync(int fd);
+
+/** Sync all filesystems to disk. */
+void sync(void);
+
 /** Duplicate a file descriptor. */
 int dup(int oldfd);
 
