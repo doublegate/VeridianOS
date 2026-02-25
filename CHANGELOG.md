@@ -2,6 +2,53 @@
 
 ---
 
+## [v0.5.4] - 2026-02-25
+
+### v0.5.4: Critical Memory Leak Fixes -- GP Fault, Page Table Subtree Leak, Thread Stack Lifecycle
+
+Three targeted fixes eliminating ~272MB of per-boot physical frame leaks that caused BusyBox native compilation (213 sequential GCC invocations) to OOM at file 210-211/213. Also resolves a release-mode-only General Protection fault in user-space entry when binaries use Thread-Local Storage. 5 files changed, +230/-97 lines since v0.5.3.
+
+---
+
+### Fixed
+
+#### GP Fault in enter_usermode wrmsr Register Constraints
+
+- `kernel/src/arch/x86_64/usermode.rs`: Fixed a release-mode-only General Protection fault (#GP err=0x0) triggered when executing user-space binaries with non-zero TLS (Thread-Local Storage), such as GNU assembler (`/usr/bin/as`). The `wrmsr` instruction to set FS_BASE (MSR 0xC0000100) implicitly reads ECX (MSR number), EAX (low 32-bit value), and EDX (high 32-bit value). The inline assembly used generic `in(reg)` constraints for `fs_lo` and `fs_hi`, allowing the release-mode optimizer to allocate `fs_hi` to ECX. The preceding `mov ecx, 0xC0000100` then overwrote the high 32 bits of fs_base before `mov edx, {fs_hi:e}` could read them, writing a non-canonical address to FS_BASE and triggering #GP on the next user-space memory access through FS. Fixed by pinning operands to explicit registers: `in("eax") fs_lo` and `in("edx") fs_hi`, eliminating the intermediate `mov` instructions entirely.
+
+#### Page Table Subtree Leak During exec()
+
+- `kernel/src/mm/vas.rs`: Fixed a per-exec memory leak where `VAS::clear()` unmapped user-space pages and freed data frames but did not free the L3/L2/L1 page table frames themselves. When exec() subsequently called `VAS::init()` to allocate a new L4 page table, the old page table subtree (10-30 frames per process) was orphaned. Over 630+ sequential execs during BusyBox native compilation, this leaked approximately 75MB of physical frames. Fixed by calling `free_user_page_table_subtrees(pt_root)` after TLB flush in `clear()`.
+- `kernel/src/bootstrap.rs`: Boot wrappers (`run_user_process_scheduled()` and `boot_run_forked_child()`) now detect when exec() has changed the process page table root (comparing saved vs. current `pt_root`) and free both the pre-exec and post-exec L4 frames during cleanup, preventing orphaned page table roots in the boot execution path.
+
+#### Thread Stack Frame Leak (320KB per Process)
+
+- `kernel/src/process/thread.rs`: Eliminated a 256KB-per-process user stack frame leak. `ThreadBuilder::build()` allocated 64 physical frames (256KB) for user stacks, but every caller immediately re-allocated user stack pages via `VAS::map_page()`, orphaning the frames from `build()`. Removed the redundant allocation entirely. Added `phys_frame: AtomicU64` and `phys_page_count: AtomicUsize` fields to the `Stack` struct to track physical frame metadata for cleanup, and stored kernel stack frame info during allocation for later deallocation.
+- `kernel/src/process/exit.rs`: Added kernel stack frame cleanup to `cleanup_process()`. Previously, kernel stack frames (16 pages = 64KB per thread) were never freed because `cleanup_process()` did not iterate threads to reclaim their kernel stacks. The new cleanup loop reads the stored `phys_frame` and `phys_page_count` from each thread's kernel stack and calls `free_frames()` to return them to the frame allocator. Combined with the user stack fix, this eliminates 320KB of leaked frames per process (256KB user + 64KB kernel). Over 630 processes during native compilation, this recovers approximately 197MB of physical memory.
+
+### Changed
+
+#### Boot Wrapper Improvements
+
+- `kernel/src/bootstrap.rs`: `run_user_process_scheduled()` and `boot_run_forked_child()` now unconditionally call `set_page_table(0)` during process cleanup (moved outside the conditional block) to ensure the frame allocator always returns to the kernel page table regardless of exec state transitions.
+
+### Infrastructure
+
+- Version bumped: Cargo.toml (0.5.3 -> 0.5.4), uname (0.5.3 -> 0.5.4), /etc/os-release (0.5.3 -> 0.5.4).
+- 3 commits since v0.5.3, 5 files changed, +230/-97 lines.
+- Zero `cargo fmt` issues, zero clippy warnings across all three architectures (x86_64, AArch64, RISC-V).
+
+### Impact Summary
+
+| Leak Source | Per-Process | Over 630 Execs | Fix |
+|-------------|-------------|-----------------|-----|
+| Page table subtrees (L3/L2/L1) | ~10-30 frames (~40-120KB) | ~75MB | `clear()` now frees subtrees |
+| User stack frames | 64 frames (256KB) | ~157MB | Removed redundant allocation from `build()` |
+| Kernel stack frames | 16 frames (64KB) | ~40MB | `cleanup_process()` frees kernel stacks |
+| **Total** | **~320-440KB** | **~272MB** | **All fixed** |
+
+---
+
 ## [v0.5.3] - 2026-02-24
 
 ### v0.5.3: BusyBox B-10/B-11/B-13/B-18 -- Ash Compatibility, Process Lifecycle Hardening, ARG_MAX, POSIX libc

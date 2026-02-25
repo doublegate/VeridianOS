@@ -112,7 +112,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.5.3 (February 24, 2026) | **Releases Published**: 28 (v0.1.0 through v0.5.3)
+**Latest Release**: v0.5.4 (February 25, 2026) | **Releases Published**: 29 (v0.1.0 through v0.5.4)
 
 | Metric | Value |
 | ------ | ----- |
@@ -197,7 +197,7 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### What Comes Next
 
-- **BusyBox Phase C Verification** -- QEMU boot testing of native compilation infrastructure (cc1/as/ld execution on VeridianOS)
+- **BusyBox Phase C Verification** -- QEMU boot testing of native compilation (v0.5.4 fixed ~272MB of frame leaks; previously OOM at 210/213 files)
 - **Phase 5: Performance Optimization** -- Sub-microsecond IPC, lock-free kernel paths, DPDK networking, NVMe optimization, profiling tools
 - **Phase 6: Advanced Features** -- Wayland compositor, desktop environment, multimedia, virtualization, cloud-native features, POSIX compatibility layer
 
