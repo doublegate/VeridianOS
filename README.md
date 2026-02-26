@@ -112,7 +112,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.5.5 (February 25, 2026) | **Releases Published**: 30 (v0.1.0 through v0.5.5)
+**Latest Release**: v0.5.6 (February 25, 2026) | **Releases Published**: 31 (v0.1.0 through v0.5.6)
 
 | Metric | Value |
 | ------ | ----- |
@@ -138,7 +138,7 @@ experiments/   Non-normative exploratory work
 | 2     | User Space Foundation     | **Complete** | v0.3.2  | Feb 2026 |
 | 3     | Security Hardening        | **Complete** | v0.3.2  | Feb 2026 |
 | 4     | Package Ecosystem         | **Complete** | v0.4.0  | Feb 2026 |
-| 5     | Performance Optimization  | Planned      | --      | --       |
+| 5     | Performance Optimization  | **In Progress** | v0.5.6  | Feb 2026 |
 | 6     | Advanced Features and GUI | Planned      | --      | --       |
 
 For detailed release notes, see [Release History](docs/RELEASE-HISTORY.md).
@@ -197,8 +197,8 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### What Comes Next
 
-- **Native BusyBox Compilation** -- 208/208 source files compile and link natively on VeridianOS (NATIVE_COMPILE_PASS achieved in v0.5.5)
-- **Phase 5: Performance Optimization** -- Sub-microsecond IPC, lock-free kernel paths, DPDK networking, NVMe optimization, profiling tools
+- **Native Binary Execution** -- Natively-compiled binaries execute on VeridianOS (NATIVE_ECHO_PASS verified in v0.5.6); sysinfo/edit programs compile natively
+- **Phase 5 Continued** -- Sub-microsecond IPC optimization, lock-free kernel paths, DPDK networking, NVMe optimization, profiling tools
 - **Phase 6: Advanced Features** -- Wayland compositor, desktop environment, multimedia, virtualization, cloud-native features, POSIX compatibility layer
 
 ### Technical Notes
@@ -431,10 +431,11 @@ Security is a fundamental design principle:
 - [x] **Self-Hosting Tier 7**: Full self-hosting toolchain -- Rust user-space targets, std port, static native GCC 14.2 via Canadian cross-compilation, GNU Make + Ninja, vpkg package manager (v0.5.0, Feb 2026)
 - [x] **Coreutils + Toolchain Validation**: 6 progressive POSIX coreutils (echo, cat, wc, ls, sort, pipeline_test) cross-compiled and verified on-target, pipe fd corruption fix, tri-arch clippy clean (v0.5.1, Feb 2026)
 - [x] **BusyBox Integration**: BusyBox 1.36.1 cross-compiled with 95 applets and ash shell, EPIPE handling, float printf, pipe improvements, Phase C native compilation infrastructure (384MB heap, sbrk hardening), POSIX BRE/ERE regex engine, CI target fix (v0.5.2, Feb 2026)
+- [x] **Phase 5 Sprint 1**: Scheduler context switch wiring, IPC blocking/wake + fast path, TODO(phase5) resolution across 56 items in 31 files, user-space /sbin/init process, dead_code audit reduction, native binary execution verification (v0.5.6, Feb 2026)
 
 ### Upcoming
 
-- [ ] **Phase 5**: Performance Optimization (5-6 months) -- Sub-microsecond IPC, lock-free kernel paths, DPDK networking, NVMe optimization
+- [ ] **Phase 5 Continued**: Sub-microsecond IPC optimization, lock-free kernel paths, DPDK networking, NVMe optimization
 - [ ] **Phase 6**: Advanced Features (8-9 months) -- Wayland compositor, desktop environment, multimedia, virtualization, cloud-native, POSIX compatibility layer
 
 See [Release History](docs/RELEASE-HISTORY.md) for detailed per-release notes.

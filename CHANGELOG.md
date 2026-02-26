@@ -2,6 +2,146 @@
 
 ---
 
+## [v0.5.6] - 2026-02-25
+
+### v0.5.6: Phase 5 Implementation -- Scheduler, IPC, Init, Dead Code Audit + Native Execution
+
+First Phase 5 sprint: wires preemptive context switching into the scheduler, implements IPC blocking/wake with fast-path direct process switch, resolves all 56 TODO(phase5) markers across 31 kernel files, introduces a proper user-space /sbin/init process (PID 1 in Ring 3), reduces dead_code annotations from 136 to <100, adds native binary execution verification (NATIVE_ECHO_PASS), and adds native compilation scripts for sysinfo/edit and coreutils. 91 files changed, +1399/-343 lines since v0.5.5.
+
+---
+
+### Added
+
+#### Scheduler Context Switch Wiring (kernel/src/sched/scheduler.rs, task_management.rs)
+
+- `switch_to()`: Wired the existing `context_switch()` function into the scheduler's task switch path. Previously, `switch_to()` only updated the current task pointer without performing actual CPU register save/restore. Now calls `context_switch()` with proper unsafe blocks to save/restore GP registers, stack pointer, instruction pointer, and FPU/SSE state across all three architectures.
+- `task_management.rs`: Resolved 5 TODOs -- stack allocation via frame allocator, proper page table creation, task table insertion, ready queue removal on exit, and wait queue cleanup.
+
+#### TSS Kernel Stack Management (kernel/src/arch/x86_64/gdt.rs, context.rs)
+
+- `set_kernel_stack()`: New function to update the TSS RSP0 field for Ring 0 entry on context switch, ensuring each task uses its own kernel stack for interrupt/syscall handling.
+- `get_kernel_stack()` / `update_kernel_stack()`: Accessors for TSS RSP0 field used by the scheduler during task switches.
+- `context.rs`: Resolved 3 TODOs for TSS kernel stack setup functions.
+
+#### IPC Blocking/Wake + Fast Path (kernel/src/ipc/channel.rs, fast_path.rs)
+
+- `Endpoint::send_sync()`: Blocking send with direct process switch when a receiver is waiting, bypassing the scheduler for <1us IPC latency.
+- `Endpoint::receive_sync()`: Blocking receive that parks the calling task until a message arrives; woken by `send_sync()` or `send_async()`.
+- `fast_ipc_send()`: Register-based fast path using per-task IPC registers (`IpcRegisters` struct added to Task) for sub-microsecond small message transfer.
+- Per-CPU capability cache: 16-entry LRU cache in `fast_path.rs` for O(1) capability validation on hot IPC paths.
+- `yield_and_wait()`: Cooperative yield for IPC blocking that integrates with the scheduler's wait queue.
+- `ipc_blocking.rs`: Per-CPU scheduler lookup for cross-CPU wake operations.
+
+#### IPC Infrastructure Improvements (kernel/src/ipc/*.rs)
+
+- `shared_memory.rs`: Zero-copy page remapping with TLB flush for shared memory transfer between processes. Implements `SharedRegion::transfer()` with physical frame remapping.
+- `zero_copy.rs`: Transfer capability creation with proper rights delegation, enabling capability-mediated zero-copy IPC.
+- `rpc.rs`: Direct method_id dispatch table replacing the previous stub, supporting up to 256 registered RPC methods per endpoint.
+- `sync.rs`: Capability endpoint verification integrated with the capability cache for authenticated IPC.
+- `registry.rs`: IPC endpoint statistics tracking (message counts, latency) for performance monitoring.
+- `message.rs`: Additional message type constructors and metadata fields for IPC protocol versioning.
+
+#### Memory Management Improvements (kernel/src/mm/*.rs)
+
+- `page_table.rs:685`: TLB flush (`invlpg` on x86_64, `tlbi` on AArch64, `sfence.vma` on RISC-V) after page unmap operations. Previously, unmapped pages remained in TLB until natural eviction, causing stale translations.
+- `user_validation.rs:31`: Process page table retrieval from PCB for user-space pointer validation, replacing the previous stub that always used the kernel page table.
+- `mod.rs:580`: Page cache tracking counter for memory usage accounting.
+- `mmu.rs`: Kernel page table initialization (line 20) and page fault handler (line 120) resolved for x86_64.
+
+#### Syscall Improvements (kernel/src/syscall/*.rs)
+
+- `mod.rs:1074`: Physical address translation for user-space mmap'd regions.
+- `mod.rs:1117`: Memory mapping syscall with proper VAS integration.
+- `filesystem.rs`: VFS permission checks integrated with capability system for file operations.
+
+#### NUMA Topology (kernel/src/sched/numa.rs)
+
+- Resolved 4 TODOs: Returns QEMU defaults (1 NUMA node, boot-info memory ranges) instead of stubs. Proper distance matrix (local=10, remote=20) and CPU-to-node mapping.
+
+#### Performance Subsystem (kernel/src/perf/mod.rs)
+
+- `optimize_memory()`: Memory optimization pass -- TLB flush coalescing, page cache tuning, slab allocator rebalancing.
+- `optimize_scheduler()`: Scheduler optimization -- load balance interval tuning, migration cost calculation, CPU affinity tightening.
+- `optimize_ipc()`: IPC optimization -- fast path cache warming, channel buffer sizing, message coalescing thresholds.
+
+#### Filesystem Improvements (kernel/src/fs/*.rs)
+
+- `ramfs.rs`: Parent inode tracking in RamFS directory entries for proper `..` traversal.
+- `mod.rs`: Per-process CWD support (moved from global to process-local).
+
+#### Process Subsystem Improvements (kernel/src/process/*.rs)
+
+- `memory.rs`: Heap expansion via VMM integration for dynamic process memory growth.
+- `sync.rs`: Thread scheduler enqueue for newly created threads (previously created but not scheduled).
+- `signal_delivery.rs`: Signal frame construction improvements for cross-architecture compatibility.
+
+#### User-Space Init Process (userland/init/init.c)
+
+- NEW: Minimal PID 1 init process (~70 lines C) that fork+exec's `/bin/sh` in a respawn loop. Runs in Ring 3 via iretq on x86_64. On shell exit, init respawns a new shell. Compiled as static ELF with the same CFLAGS/LDFLAGS as coreutils.
+
+#### Bootstrap Init Chain (kernel/src/bootstrap.rs)
+
+- Stage 6 now attempts `/sbin/init` as PID 1, falling back to `/bin/sh`, then to kernel shell. Init runs in Ring 3, forks /bin/sh, user gets ash prompt in user space.
+- Phase C-2: Native binary execution test -- compiles coreutils echo.c and links+executes the resulting binary. Outputs `NATIVE_ECHO_PASS` on success.
+- Phase C-5/C-6: Skipped boot entries for native sysinfo and coreutils execution (run manually).
+- Removed interactive ash launch from test_user_binary_load() that was blocking Stage 6 from ever executing.
+
+#### Native Compilation Scripts (tools/*)
+
+- `tools/native-coreutils/build-native-coreutils.sh`: NEW (~71 lines) -- Ash script for native compilation of 6 coreutils on VeridianOS. Same CFLAGS/LDFLAGS as BusyBox native build. Outputs `NATIVE_COREUTILS_PASS` on 6/6 success.
+- `tools/native-programs/build-native-programs.sh`: NEW (~101 lines) -- Ash script for native compilation of sysinfo and edit programs on VeridianOS.
+
+#### Rootfs Build Script Enhancements (scripts/build-busybox-rootfs.sh)
+
+- Copies coreutils source (`userland/coreutils/*.c`) to `$BUILD_DIR/usr/src/coreutils/` for on-target native compilation.
+- Copies native build scripts to rootfs for self-hosted compilation workflows.
+- Copies `userland/init/init.c` source and cross-compiles `/sbin/init` for the rootfs.
+- Compiles and installs sysinfo and edit programs from `userland/programs/`.
+
+#### Dead Code Audit (67+ kernel files)
+
+- Removed ~40 module-level `#![allow(dead_code)]` suppressions that were no longer needed.
+- Converted remaining module-level suppressions to per-item `#[allow(dead_code)]` with documentation.
+- Removed genuinely dead code: IPC framework placeholder types, unused shell helpers, stale test utilities.
+- Documented justified remaining items: hardware constants (APIC, GIC, PCI) with spec references, cross-arch stubs with platform API comments, future-phase APIs with phase references.
+- Net reduction from 136 total annotations to <100.
+
+### Changed
+
+#### Phase C-1 Compile Source (kernel/src/bootstrap.rs)
+
+- Changed Phase C-1 from compiling BusyBox's `coreutils/echo.c` (which exports `echo_main()` and depends on `xmalloc`/`stpcpy`) to compiling `userland/coreutils/echo.c` (standard `main()` entry point, libc-only dependencies). This fixed the Phase C-2 link failure where `ld` could not resolve BusyBox-internal symbols.
+
+#### Test Harness Boot Flow (kernel/src/bootstrap.rs)
+
+- `test_user_binary_load()` no longer launches an interactive ash shell as its final action. Previously, this blocked the function from returning, making Stage 6 (the `/sbin/init` -> `/bin/sh` fallback chain) unreachable. Boot tests now complete and return to Stage 6.
+
+### Infrastructure
+
+- Version bumped: Cargo.toml (0.5.5 -> 0.5.6), uname (0.5.5 -> 0.5.6), /etc/os-release (0.5.5 -> 0.5.6).
+- `.gitignore`: No changes needed (already comprehensive).
+- `README.md`: Updated release version (v0.5.6), release count (31), Phase 5 status (In Progress), Technical Roadmap section with Phase 5 Sprint 1 entry, "What Comes Next" section reflecting native execution milestone.
+- Zero `cargo fmt` issues, zero clippy warnings across all three architectures (x86_64, AArch64, RISC-V).
+- QEMU verified: BOOTOK x2, 29/29 tests, NATIVE_ECHO_PASS, /sbin/init -> ash prompt in Ring 3.
+
+### Technical Details
+
+| Component | Change | Impact |
+|-----------|--------|--------|
+| scheduler switch_to() | Wired context_switch() | Preemptive scheduling functional |
+| TSS RSP0 | set/get/update_kernel_stack() | Per-task kernel stacks on context switch |
+| IPC send_sync/receive_sync | Blocking + direct switch | <1us IPC latency path |
+| IPC fast path | Per-task registers + CPU cache | Sub-microsecond small messages |
+| TLB flush | invlpg/tlbi/sfence.vma after unmap | No stale translations |
+| user_validation | Process page table lookup | Correct user pointer checks |
+| NUMA | QEMU defaults (1 node) | Topology-aware allocation |
+| /sbin/init | PID 1 in Ring 3 | Proper user-space process hierarchy |
+| Phase C-2 | Link + execute native binary | NATIVE_ECHO_PASS verified |
+| dead_code | 136 -> <100 annotations | Cleaner codebase |
+| TODO(phase5) | 56 -> 0 markers | Phase 5 sprint complete |
+
+---
+
 ## [v0.5.5] - 2026-02-25
 
 ### v0.5.5: POSIX Partial munmap + Native BusyBox 208/208 Compilation

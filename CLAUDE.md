@@ -321,7 +321,7 @@ Currently implementing in phases:
 3. **Phase 2** (Months 10-15): User space foundation - **100% COMPLETE** ✅ (v0.3.2)
 4. **Phase 3** (Months 16-21): Security hardening - **100% COMPLETE** ✅ (v0.3.2)
 5. **Phase 4** (Months 22-27): Package ecosystem - **100% COMPLETE** ✅ (v0.4.0)
-6. **Phase 5** (Months 28-33): Performance optimization - **~10% actual** (data structures only)
+6. **Phase 5** (Months 28-33): Performance optimization - **~30% actual** (scheduler, IPC, TODO resolution, init)
 7. **Phase 6** (Months 34-42): Advanced features and GUI - **~5% actual** (type definitions only)
 
 ## Project Status
@@ -329,13 +329,13 @@ Currently implementing in phases:
 | Area | Status |
 |------|--------|
 | **Repository** | <https://github.com/doublegate/VeridianOS> |
-| **Latest Release** | v0.5.3 (February 24, 2026) - BusyBox B-8 through B-18, POSIX libc, process hardening |
+| **Latest Release** | v0.5.6 (February 25, 2026) - Phase 5 implementation: scheduler, IPC, init, dead_code audit, native execution |
 | **Build** | ✅ All 3 architectures compile, zero warnings |
 | **Boot** | ✅ All 3 architectures Stage 6 BOOTOK, 29/29 tests (fbcon + keyboard driver) |
 | **CI/CD** | ✅ GitHub Actions 100% pass rate |
 | **Documentation** | ✅ 25+ guides, GitHub Pages, mdBook, Rustdoc |
 
-**Previous Releases**: v0.5.2, v0.5.1, v0.5.0, v0.4.9, v0.4.6, v0.4.5, v0.4.4, v0.4.3, v0.4.2, v0.4.1, v0.4.0, v0.3.9, v0.3.8, v0.3.7, v0.3.6, v0.3.5, v0.3.4, v0.3.3, v0.3.2, v0.3.1, v0.3.0, v0.2.5, v0.2.1, v0.2.0, v0.1.0
+**Previous Releases**: v0.5.5, v0.5.4, v0.5.3, v0.5.2, v0.5.1, v0.5.0, v0.4.9, v0.4.6, v0.4.5, v0.4.4, v0.4.3, v0.4.2, v0.4.1, v0.4.0, v0.3.9, v0.3.8, v0.3.7, v0.3.6, v0.3.5, v0.3.4, v0.3.3, v0.3.2, v0.3.1, v0.3.0, v0.2.5, v0.2.1, v0.2.0, v0.1.0
 
 ## Implementation Status
 
