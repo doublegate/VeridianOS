@@ -508,6 +508,113 @@ jobs:
                       veridian-release-${{ github.sha }}.zip
                   retention-days: 90
 
+    # Attach build artifacts to GitHub Release (if one exists for this commit)
+    attach-release-assets:
+        name: Attach Release Assets
+        runs-on: ubuntu-latest
+        needs: [release-artifacts]
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        permissions:
+            contents: write
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+            - name: Check for release tag on this commit
+              id: check-tag
+              run: |
+                  # Find any version tag (v*) pointing at this commit
+                  TAG=$(git tag --points-at HEAD | grep '^v' | head -1)
+                  if [ -z "$TAG" ]; then
+                    echo "No version tag found on HEAD"
+                    echo "has_tag=false" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "Found tag: $TAG"
+                    echo "has_tag=true" >> "$GITHUB_OUTPUT"
+                    echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+                  fi
+            - name: Check if GitHub Release exists
+              if: steps.check-tag.outputs.has_tag == 'true'
+              id: check-release
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  RELEASE_TAG: ${{ steps.check-tag.outputs.tag }}
+              run: |
+                  if gh release view "$RELEASE_TAG" --json tagName >/dev/null 2>&1; then
+                    echo "Release exists for $RELEASE_TAG"
+                    echo "has_release=true" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "No release found for $RELEASE_TAG"
+                    echo "has_release=false" >> "$GITHUB_OUTPUT"
+                  fi
+            - name: Download release archive
+              if: steps.check-release.outputs.has_release == 'true'
+              uses: actions/download-artifact@v4
+              with:
+                  name: veridian-release-${{ github.sha }}
+                  path: release-download
+            - name: Download kernel binaries
+              if: steps.check-release.outputs.has_release == 'true'
+              uses: actions/download-artifact@v4
+              with:
+                  path: kernel-download
+                  pattern: veridian-kernel-*
+                  merge-multiple: false
+            - name: Prepare and upload release assets
+              if: steps.check-release.outputs.has_release == 'true'
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  RELEASE_TAG: ${{ steps.check-tag.outputs.tag }}
+              run: |
+                  # Rename release archives with version-friendly names
+                  cp "release-download/veridian-release-${{ github.sha }}.tar.gz" \
+                     "veridian-${RELEASE_TAG}-release.tar.gz"
+                  cp "release-download/veridian-release-${{ github.sha }}.zip" \
+                     "veridian-${RELEASE_TAG}-release.zip"
+
+                  # Upload release archives (--clobber for idempotent re-runs)
+                  gh release upload "$RELEASE_TAG" \
+                    "veridian-${RELEASE_TAG}-release.tar.gz" \
+                    "veridian-${RELEASE_TAG}-release.zip" \
+                    --clobber
+
+                  # Upload individual kernel binaries
+                  for arch in x86_64 aarch64 riscv64gc; do
+                    if [ -f "kernel-download/veridian-kernel-${arch}/veridian-kernel-${arch}" ]; then
+                      gh release upload "$RELEASE_TAG" \
+                        "kernel-download/veridian-kernel-${arch}/veridian-kernel-${arch}" \
+                        --clobber
+                    fi
+                  done
+
+                  echo "Attached build artifacts to release $RELEASE_TAG"
+            - name: Generate release notes if missing
+              if: steps.check-release.outputs.has_release == 'true'
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  RELEASE_TAG: ${{ steps.check-tag.outputs.tag }}
+              run: |
+                  # Check if the release already has a body (release notes)
+                  BODY_LENGTH=$(gh release view "$RELEASE_TAG" --json body --jq '.body | length')
+
+                  if [ "$BODY_LENGTH" -gt 10 ]; then
+                    echo "Release $RELEASE_TAG already has notes ($BODY_LENGTH chars) -- preserving"
+                  else
+                    echo "Release $RELEASE_TAG has no notes -- generating from git log"
+                    PREV_TAG=$(git tag --sort=-version:refname | grep '^v' | sed -n '2p')
+                    if [ -z "$PREV_TAG" ]; then
+                      PREV_TAG=$(git rev-list --max-parents=0 HEAD | head -1)
+                    fi
+                    NOTES=$(git log --pretty=format:"- %s (%h)" "${PREV_TAG}..${RELEASE_TAG}" 2>/dev/null || echo "- Initial release")
+                    gh release edit "$RELEASE_TAG" --notes "## Changes since ${PREV_TAG}
+
+                  ${NOTES}
+
+                  ---
+                  *Auto-generated by CI*"
+                    echo "Generated release notes for $RELEASE_TAG"
+                  fi
+
     # Deploy documentation to GitHub Pages
     deploy-docs:
         name: Deploy Documentation
