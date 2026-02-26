@@ -4,8 +4,7 @@
 //! Small messages (≤64 bytes) are passed via registers for optimal performance,
 //! while large messages use shared memory for zero-copy transfers.
 
-// Core IPC message types -- used by sync/async/fast_path callers
-#![allow(dead_code)]
+// Core IPC message types
 
 use core::mem::size_of;
 
@@ -200,6 +199,22 @@ impl Message {
         match self {
             Message::Small(msg) => msg.opcode,
             Message::Large(msg) => msg.header.opcode,
+        }
+    }
+
+    /// Get message flags
+    pub fn flags(&self) -> u32 {
+        match self {
+            Message::Small(msg) => msg.flags,
+            Message::Large(msg) => msg.header.flags,
+        }
+    }
+
+    /// Set message flags
+    pub fn set_flags(&mut self, flags: u32) {
+        match self {
+            Message::Small(msg) => msg.flags = flags,
+            Message::Large(msg) => msg.header.flags = flags,
         }
     }
 }

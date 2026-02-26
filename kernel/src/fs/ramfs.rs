@@ -28,11 +28,14 @@ struct RamNode {
 
     /// Inode number
     inode: u64,
+
+    /// Parent directory inode (for ".." entries)
+    parent_inode: u64,
 }
 
 impl RamNode {
     /// Create a new file node
-    fn new_file(inode: u64, permissions: Permissions) -> Self {
+    fn new_file(inode: u64, parent_inode: u64, permissions: Permissions) -> Self {
         Self {
             node_type: NodeType::File,
             data: RwLock::new(Vec::new()),
@@ -49,11 +52,12 @@ impl RamNode {
                 inode,
             }),
             inode,
+            parent_inode,
         }
     }
 
     /// Create a new directory node
-    fn new_directory(inode: u64, permissions: Permissions) -> Self {
+    fn new_directory(inode: u64, parent_inode: u64, permissions: Permissions) -> Self {
         Self {
             node_type: NodeType::Directory,
             data: RwLock::new(Vec::new()),
@@ -70,6 +74,7 @@ impl RamNode {
                 inode,
             }),
             inode,
+            parent_inode,
         }
     }
 }
@@ -146,7 +151,7 @@ impl VfsNode for RamNode {
         entries.push(DirEntry {
             name: String::from(".."),
             node_type: NodeType::Directory,
-            inode: self.inode, // TODO(phase5): Track parent inode for proper ".." entries
+            inode: self.parent_inode,
         });
 
         // Add children
@@ -189,7 +194,7 @@ impl VfsNode for RamNode {
         }
 
         let inode = NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        let new_file = Arc::new(RamNode::new_file(inode, permissions));
+        let new_file = Arc::new(RamNode::new_file(inode, self.inode, permissions));
         children.insert(String::from(name), new_file.clone());
 
         Ok(new_file as Arc<dyn VfsNode>)
@@ -211,7 +216,7 @@ impl VfsNode for RamNode {
         }
 
         let inode = NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        let new_dir = Arc::new(RamNode::new_directory(inode, permissions));
+        let new_dir = Arc::new(RamNode::new_directory(inode, self.inode, permissions));
         children.insert(String::from(name), new_dir.clone());
 
         Ok(new_dir as Arc<dyn VfsNode>)
@@ -267,8 +272,11 @@ pub struct RamFs {
 impl RamFs {
     /// Create a new RAM filesystem
     pub fn new() -> Self {
+        let root_inode = NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        // Root directory's parent is itself (standard POSIX behavior)
         let root = Arc::new(RamNode::new_directory(
-            NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
+            root_inode,
+            root_inode,
             Permissions::default(),
         ));
 

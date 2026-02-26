@@ -1395,10 +1395,26 @@ pub fn sys_access(path_ptr: usize, mode: usize) -> SyscallResult {
 
     // For non-zero mode, check permissions against metadata
     if mode != 0 {
-        let _metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
-        // TODO(phase5): Check actual file permissions against the calling
-        // process's uid/gid. For now, all access checks pass if the file
-        // exists.
+        let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
+
+        // Determine the caller's uid.  Root (uid 0) bypasses all checks.
+        let caller_uid = crate::process::current_process()
+            .map(|p| p.uid)
+            .unwrap_or(0);
+
+        if caller_uid != 0 {
+            let perms = &metadata.permissions;
+            // R_OK=4, W_OK=2, X_OK=1
+            if mode & 4 != 0 && !perms.other_read {
+                return Err(SyscallError::PermissionDenied);
+            }
+            if mode & 2 != 0 && !perms.other_write {
+                return Err(SyscallError::PermissionDenied);
+            }
+            if mode & 1 != 0 && !perms.other_exec {
+                return Err(SyscallError::PermissionDenied);
+            }
+        }
     }
 
     Ok(0)

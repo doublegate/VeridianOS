@@ -3,8 +3,7 @@
 //! Provides `waitpid`-style semantics for parent processes to wait on children.
 //! Implements a global wait queue with notification and zombie collection.
 
-// waitpid infrastructure -- exercised via SYS_WAIT syscall
-#![allow(dead_code)]
+// waitpid infrastructure
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -102,8 +101,10 @@ struct WaitEntry {
     /// The PID of the waiting parent.
     waiter_pid: ProcessId,
     /// The specific child PID being waited for, or `None` for any child.
+    #[allow(dead_code)] // Used when filtered waitpid is wired
     target_pid: Option<ProcessId>,
     /// Options controlling wait behavior.
+    #[allow(dead_code)] // Used when WNOHANG/WUNTRACED are supported
     options: WaitOptions,
 }
 
@@ -142,6 +143,7 @@ impl WaitQueue {
     }
 
     /// Check whether a parent has any outstanding waits.
+    #[allow(dead_code)] // Wait queue introspection API
     fn has_waiter(&self, parent_pid: ProcessId) -> bool {
         self.entries.get(&parent_pid).is_some_and(|v| !v.is_empty())
     }

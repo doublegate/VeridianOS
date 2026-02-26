@@ -18,6 +18,7 @@ use super::{
     capability::{EndpointId, IpcCapability, IpcPermissions, ProcessId},
     channel::{Channel, Endpoint},
     error::{IpcError, Result},
+    Message,
 };
 
 /// Global IPC registry using OnceLock for safe initialization.
@@ -423,6 +424,23 @@ pub fn lookup_endpoint(id: EndpointId) -> Result<&'static Endpoint> {
                 .map(|ep| &*(ep as *const Endpoint))
         }
     })
+}
+
+/// Try to receive a message from an endpoint without blocking.
+///
+/// Looks up the endpoint by ID in the registry and attempts to dequeue
+/// a message from its receive queue. Returns None if the endpoint doesn't
+/// exist or has no pending messages.
+pub fn try_receive_from_endpoint(endpoint_id: u64) -> Option<Message> {
+    with_registry(|registry| {
+        Ok(if let Some(ep) = registry.lookup_endpoint(endpoint_id) {
+            ep.try_receive().ok()
+        } else {
+            None
+        })
+    })
+    .ok()
+    .flatten()
 }
 
 /// Validate a capability

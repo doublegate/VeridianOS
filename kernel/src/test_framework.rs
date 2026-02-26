@@ -4,8 +4,7 @@
 //! environment by using serial output and QEMU exit codes to report test
 //! results.
 
-// Test infrastructure -- functions are invoked from test binaries, not
-// from the main kernel path.
+// Test infrastructure -- invoked from test binaries, not main kernel path
 #![allow(dead_code)]
 
 #[cfg(feature = "alloc")]

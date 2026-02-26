@@ -112,3 +112,26 @@ pub fn init() {
 pub fn selectors() -> &'static Selectors {
     &GDT.1
 }
+
+/// Update the kernel stack pointer in the TSS (RSP0).
+///
+/// Called during context switch to set the stack used for Ring 3 -> Ring 0
+/// transitions (interrupts, syscalls). Must be called with interrupts disabled.
+///
+/// # Safety
+///
+/// The TSS is a static initialized during boot. Modifying
+/// `privilege_stack_table[0]` via raw pointer is safe because this is only
+/// called from the scheduler with interrupts disabled, ensuring no concurrent
+/// access.
+pub fn set_kernel_stack(stack_top: u64) {
+    unsafe {
+        let tss_ptr = &*TSS as *const TaskStateSegment as *mut TaskStateSegment;
+        (*tss_ptr).privilege_stack_table[0] = VirtAddr::new(stack_top);
+    }
+}
+
+/// Read the current kernel stack pointer from the TSS (RSP0).
+pub fn get_kernel_stack() -> u64 {
+    TSS.privilege_stack_table[0].as_u64()
+}

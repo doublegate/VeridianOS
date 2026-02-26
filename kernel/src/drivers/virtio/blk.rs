@@ -22,7 +22,6 @@
 //! ```
 
 // Virtio-blk driver -- exercised when block device is attached
-#![allow(dead_code)]
 
 use core::sync::atomic::{self, Ordering};
 
@@ -42,6 +41,7 @@ use crate::{
 pub const BLOCK_SIZE: usize = 512;
 
 /// Maximum number of sectors per single request
+#[allow(dead_code)] // Virtio-blk request size limit per spec
 const MAX_SECTORS_PER_REQ: usize = 256;
 
 /// Virtio-blk feature bits (virtio spec 5.2.3)
@@ -67,6 +67,7 @@ mod req_type {
     /// Write sectors to the device
     pub const VIRTIO_BLK_T_OUT: u32 = 1;
     /// Flush volatile write cache
+    #[allow(dead_code)] // Virtio-blk command type per spec
     pub const VIRTIO_BLK_T_FLUSH: u32 = 4;
 }
 
@@ -225,6 +226,7 @@ pub struct VirtioBlkDevice {
     /// Whether the device is read-only (VIRTIO_BLK_F_RO)
     read_only: bool,
     /// Negotiated features
+    #[allow(dead_code)] // Negotiated feature bits for device capabilities
     features: u32,
 }
 

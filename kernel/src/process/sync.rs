@@ -62,7 +62,11 @@ impl WaitQueue {
             if let Some(process) = super::table::get_process(pid) {
                 if let Some(thread) = process.get_thread(tid) {
                     thread.set_state(super::thread::ThreadState::Ready);
-                    // TODO(phase5): Add thread to scheduler run queue
+                    // Re-enqueue the thread in the scheduler's run queue
+                    #[cfg(feature = "alloc")]
+                    {
+                        let _ = crate::sched::schedule_thread(pid, tid, thread);
+                    }
                     return true;
                 }
             }
@@ -79,7 +83,11 @@ impl WaitQueue {
             if let Some(process) = super::table::get_process(pid) {
                 if let Some(thread) = process.get_thread(tid) {
                     thread.set_state(super::thread::ThreadState::Ready);
-                    // TODO(phase5): Add thread to scheduler run queue
+                    // Re-enqueue the thread in the scheduler's run queue
+                    #[cfg(feature = "alloc")]
+                    {
+                        let _ = crate::sched::schedule_thread(pid, tid, thread);
+                    }
                     count += 1;
                 }
             }

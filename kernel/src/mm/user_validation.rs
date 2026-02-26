@@ -20,17 +20,16 @@ pub fn translate_address(addr: usize) -> Option<PageTableEntry> {
     // Get current process's page table
     let _current_process = crate::process::current_process()?;
 
-    // Get the page table base address
-    // This would normally come from the process's memory space
-    // For now, we'll use the kernel page table as a placeholder
-    // SAFETY: get_kernel_page_table() returns a usize representing the physical
-    // address of the active kernel page table (CR3 on x86_64). Casting to
-    // *const PageTable and dereferencing is valid because the page table is
-    // identity-mapped in kernel space and has 'static lifetime.
-    let page_table = unsafe {
-        // TODO(phase5): Get page table from process memory space
-        &*(crate::mm::get_kernel_page_table() as *const PageTable)
-    };
+    // Get the active page table base address (CR3 on x86_64).
+    // In VeridianOS, syscalls run with the process's page tables loaded
+    // (CR3 switching was removed from syscalls in v0.4.9 for performance).
+    // The kernel is mapped via L4[256-511] in every process's page table,
+    // so CR3 already points to the correct page table for translating both
+    // user and kernel addresses.
+    // SAFETY: get_kernel_page_table() returns the physical address of the
+    // active page table root. The page table memory is accessible via the
+    // kernel's physical memory mapping and has 'static lifetime.
+    let page_table = unsafe { &*(crate::mm::get_kernel_page_table() as *const PageTable) };
 
     // Walk the page tables to find the entry
     let vpn = addr >> 12; // Virtual page number

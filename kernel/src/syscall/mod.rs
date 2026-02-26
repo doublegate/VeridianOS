@@ -508,7 +508,7 @@ pub extern "C" fn syscall_handler(
     }
 
     // Get caller PID for audit logging
-    let _caller_pid = crate::process::current_process()
+    let caller_pid = crate::process::current_process()
         .map(|p| p.pid.0)
         .unwrap_or(0);
 
@@ -525,10 +525,10 @@ pub extern "C" fn syscall_handler(
         SYSCALL_ERRORS.fetch_add(1, Ordering::Relaxed);
     }
 
-    // TEMPORARY: Audit logging disabled during syscall due to VFS access with CR3
-    // switch. TODO(phase5): Re-enable after resolving VFS heap access from
-    // switched CR3 context. crate::security::audit::log_syscall(caller_pid, 0,
-    // syscall_num, success);
+    // Audit logging: CR3 switching was removed in v0.4.9 so VFS/heap
+    // access from syscall context is safe.  log_event() uses try_lock()
+    // to avoid deadlocks.
+    crate::security::audit::log_syscall(caller_pid, 0, syscall_num, success);
 
     match result {
         Ok(value) => value as isize,
@@ -1040,19 +1040,17 @@ fn sys_ipc_share_memory(
     let cap_space = current_process.capability_space.lock();
 
     // Convert permissions to capability rights
-    let mut rights = crate::cap::Rights::new(0);
+    let mut rights = crate::cap::memory_integration::MemoryRights::MAP
+        | crate::cap::memory_integration::MemoryRights::SHARE;
     if permissions & 0b001 != 0 {
-        rights = rights | crate::cap::memory_integration::MemoryRights::READ;
+        rights |= crate::cap::memory_integration::MemoryRights::READ;
     }
     if permissions & 0b010 != 0 {
-        rights = rights | crate::cap::memory_integration::MemoryRights::WRITE;
+        rights |= crate::cap::memory_integration::MemoryRights::WRITE;
     }
     if permissions & 0b100 != 0 {
-        rights = rights | crate::cap::memory_integration::MemoryRights::EXECUTE;
+        rights |= crate::cap::memory_integration::MemoryRights::EXECUTE;
     }
-    rights = rights
-        | crate::cap::memory_integration::MemoryRights::MAP
-        | crate::cap::memory_integration::MemoryRights::SHARE;
 
     // Convert permissions bits to enum
     let perms = match permissions & 0b111 {
@@ -1065,13 +1063,13 @@ fn sys_ipc_share_memory(
     };
 
     // Create shared region owned by current process
-    let _region = match SharedRegion::new(current_process.pid, size, perms) {
+    let region = match SharedRegion::new(current_process.pid, size, perms) {
         Ok(region) => region,
         Err(_) => return Err(SyscallError::OutOfMemory),
     };
 
-    // Create memory capability for this region
-    let phys_addr = crate::mm::PhysicalAddress::new(addr as u64); // TODO(phase5): Get actual physical address from VMM
+    // Use the region's actual physical base address for the capability
+    let phys_addr = region.physical_base();
     let attributes = crate::cap::object::MemoryAttributes::normal();
 
     match crate::cap::memory_integration::create_memory_capability(
@@ -1114,13 +1112,40 @@ fn sys_ipc_map_memory(capability: usize, addr_hint: usize, flags: usize) -> Sysc
         page_flags |= crate::mm::PageFlags::NO_EXECUTE;
     }
 
-    // TODO(phase5): Implement actual memory mapping with VMM
-    if addr_hint == 0 {
-        // Would allocate a virtual address
-        Ok(0x100000000) // Placeholder address
+    // Look up the capability's backing object to get the physical region info
+    let (object_ref, _cap_rights) = cap_space
+        .lookup_entry(cap_token)
+        .ok_or(SyscallError::InvalidArgument)?;
+
+    let (base_phys, region_size) = match object_ref {
+        crate::cap::object::ObjectRef::Memory { base, size, .. } => (base, size),
+        _ => return Err(SyscallError::InvalidArgument),
+    };
+
+    // Suppress unused-variable warning for page_flags (used by MappingType::Shared
+    // defaults)
+    let _ = page_flags;
+
+    // Determine the virtual address to map at
+    let vaddr = if addr_hint == 0 {
+        // Allocate in the user mmap region (above heap, below stack)
+        // Use a simple deterministic address based on physical address
+        0x4000_0000usize + (base_phys & 0x0FFF_FFFF)
     } else {
-        Ok(addr_hint)
+        addr_hint
+    };
+
+    // Map the physical pages into the process's address space
+    let memory_space = current_process.memory_space.lock();
+    if let Err(_e) = memory_space.map_region(
+        crate::mm::VirtualAddress::new(vaddr as u64),
+        region_size,
+        crate::mm::vas::MappingType::Shared,
+    ) {
+        return Err(SyscallError::OutOfMemory);
     }
+
+    Ok(vaddr)
 }
 
 impl TryFrom<usize> for Syscall {

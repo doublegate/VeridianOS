@@ -4,7 +4,7 @@
 //! whose bodies are stored as sequences of command lines to be interpreted
 //! by the shell when invoked.
 
-// Shell user-defined functions -- API complete, not yet wired to executor
+// Shell user-defined functions -- API complete, wiring deferred to Phase 6
 #![allow(dead_code)]
 
 use alloc::{collections::BTreeMap, string::String, vec::Vec};

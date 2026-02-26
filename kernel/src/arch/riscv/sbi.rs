@@ -5,14 +5,15 @@
 // SBI extension IDs and function IDs are defined per the RISC-V SBI
 // specification for completeness. They will be needed as SBI call coverage
 // expands (e.g., HSM for multi-hart boot, SRST for system reset).
-#![allow(dead_code)]
 
 /// SBI extension IDs
 const SBI_EXT_BASE: usize = 0x10;
 const SBI_EXT_TIMER: usize = 0x54494D45; // "TIME"
 const SBI_EXT_IPI: usize = 0x735049; // "sPI"
 const SBI_EXT_RFENCE: usize = 0x52464E43; // "RFNC"
+#[allow(dead_code)] // SBI extension ID per RISC-V SBI spec
 const SBI_EXT_HSM: usize = 0x48534D; // "HSM"
+#[allow(dead_code)] // SBI extension ID per RISC-V SBI spec
 const SBI_EXT_SRST: usize = 0x53525354; // "SRST"
 
 /// SBI function IDs for timer extension

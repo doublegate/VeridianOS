@@ -11,7 +11,6 @@
 
 // Phase 6 (desktop) -- Wayland protocol structures are defined but the
 // compositor is not yet connected to actual display hardware.
-#![allow(dead_code)]
 //! - Efficiency: Minimal data copies, GPU acceleration
 //!
 //! ## Core Concepts

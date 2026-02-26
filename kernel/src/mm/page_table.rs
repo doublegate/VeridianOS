@@ -682,7 +682,36 @@ impl PageMapper {
         })?;
         entry.clear();
 
-        // TODO(phase5): TLB flush
+        // Flush the TLB entry for the unmapped page to ensure stale translations
+        // are not used. Each architecture has its own invalidation instruction.
+        #[cfg(target_arch = "x86_64")]
+        crate::arch::x86_64::mmu::flush_tlb_address(page.as_u64());
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            // SAFETY: TLBI invalidates a single TLB entry for the given virtual
+            // address. This is a non-destructive, privileged operation.
+            unsafe {
+                core::arch::asm!(
+                    "tlbi vaae1is, {0}",
+                    "dsb ish",
+                    "isb",
+                    in(reg) (page.as_u64() >> 12),
+                );
+            }
+        }
+
+        #[cfg(target_arch = "riscv64")]
+        {
+            // SAFETY: sfence.vma invalidates TLB entries for the given virtual
+            // address. This is a non-destructive, privileged operation.
+            unsafe {
+                core::arch::asm!(
+                    "sfence.vma {0}, zero",
+                    in(reg) page.as_u64(),
+                );
+            }
+        }
 
         Ok(frame)
     }

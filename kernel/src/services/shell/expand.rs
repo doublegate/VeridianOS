@@ -6,8 +6,7 @@
 //! variables (`$?`, `$$`, `$0`), tilde expansion, quote handling,
 //! backslash-dollar escaping, and command substitution (`$(command)`).
 
-// Shell variable expansion -- not all expansion paths exercised yet
-#![allow(dead_code)]
+// Shell variable expansion
 
 use alloc::{
     collections::BTreeMap,
@@ -524,8 +523,8 @@ fn execute_substitution_command(command: &str) -> String {
                 .map(|shell| shell.get_cwd())
                 .unwrap_or_else(|| String::from("/"))
         }
-        // TODO(phase5): Full stdout capture requires process pipe infrastructure.
-        // Other commands return empty string for now.
+        // TODO(phase6): Full stdout capture requires process pipe infrastructure
+        // (fork + exec + pipe fd redirection).  Other commands return empty for now.
         _ => String::new(),
     }
 }
@@ -535,6 +534,7 @@ fn execute_substitution_command(command: &str) -> String {
 /// This is the public entry point for command substitution. It delegates
 /// to `expand_variables()` which handles `$(...)` as part of its expansion
 /// pass.
+#[allow(dead_code)] // Public API, not yet called externally
 pub fn expand_command_substitutions(
     input: &str,
     env: &BTreeMap<String, String>,

@@ -9,7 +9,6 @@
 //! functional. See TODO(user-space) markers for specific activation points.
 
 // User-space SDK forward declarations -- see module doc TODO(user-space)
-#![allow(dead_code)]
 
 #[cfg(feature = "alloc")]
 use alloc::{format, string::String, vec::Vec};
@@ -161,7 +160,21 @@ impl PkgConfig {
                 cflags: alloc::vec![format!("--target={}", triple)],
             }),
             _ => {
-                // TODO(phase5): query VFS for /usr/veridian/lib/pkgconfig/<name>.pc
+                // Try to read a .pc file from the VFS pkgconfig directory.
+                // Full .pc file parsing (variable substitution, Requires lines)
+                // is deferred to Phase 6.
+                let pc_path = format!("{}/lib/pkgconfig/{}.pc", sysroot, name);
+                if let Some(vfs_lock) = crate::fs::try_get_vfs() {
+                    let vfs = vfs_lock.read();
+                    if let Ok(node) = vfs.resolve_path(&pc_path) {
+                        let mut buf = alloc::vec![0u8; 4096];
+                        if let Ok(n) = node.read(0, &mut buf) {
+                            if let Ok(content) = core::str::from_utf8(&buf[..n]) {
+                                return Self::parse_pc_basic(content, name, sysroot, triple);
+                            }
+                        }
+                    }
+                }
                 None
             }
         }
@@ -191,6 +204,60 @@ impl PkgConfig {
             }
         }
         result
+    }
+
+    /// Parse a basic subset of a .pc file (Name, Version, Description,
+    /// Cflags, Libs lines).  Variable substitution and Requires are not
+    /// supported.
+    fn parse_pc_basic(content: &str, name: &str, sysroot: &str, triple: &str) -> Option<PkgConfig> {
+        let mut version = String::from("0.0.0");
+        let mut description = String::new();
+        let mut cflags = Vec::new();
+        let mut libs = Vec::new();
+        let mut lib_dirs = Vec::new();
+        let mut include_dirs = Vec::new();
+
+        for line in content.lines() {
+            let line = line.trim();
+            if let Some(val) = line.strip_prefix("Version:") {
+                version = String::from(val.trim());
+            } else if let Some(val) = line.strip_prefix("Description:") {
+                description = String::from(val.trim());
+            } else if let Some(val) = line.strip_prefix("Cflags:") {
+                for token in val.split_whitespace() {
+                    if let Some(inc) = token.strip_prefix("-I") {
+                        include_dirs.push(String::from(inc));
+                    }
+                    cflags.push(String::from(token));
+                }
+            } else if let Some(val) = line.strip_prefix("Libs:") {
+                for token in val.split_whitespace() {
+                    if let Some(dir) = token.strip_prefix("-L") {
+                        lib_dirs.push(String::from(dir));
+                    } else if let Some(lib) = token.strip_prefix("-l") {
+                        libs.push(String::from(lib));
+                    }
+                }
+            }
+        }
+
+        // Fall back to sysroot defaults if the .pc didn't specify paths
+        if include_dirs.is_empty() {
+            include_dirs.push(format!("{}/include", sysroot));
+        }
+        if lib_dirs.is_empty() {
+            lib_dirs.push(format!("{}/lib/{}", sysroot, triple));
+        }
+
+        Some(PkgConfig {
+            name: String::from(name),
+            version,
+            description,
+            include_dirs,
+            lib_dirs,
+            libs,
+            cflags,
+        })
     }
 }
 

@@ -5,7 +5,6 @@
 //! cleanup.
 
 // Task lifecycle management -- exercised via process creation/exit paths
-#![allow(dead_code)]
 
 use core::{ptr::NonNull, sync::atomic::Ordering};
 
@@ -25,39 +24,47 @@ use crate::{
 #[cfg(feature = "alloc")]
 pub fn create_task(
     name: &str,
-    _entry_point: usize,
+    entry_point: usize,
     stack_size: usize,
     priority: Priority,
 ) -> Result<ProcId, KernelError> {
     extern crate alloc;
-    use alloc::string::String;
+    use alloc::{boxed::Box, string::String};
 
     // Allocate PID and TID
     let pid = super::process_compat::alloc_pid();
     let tid = task::alloc_tid();
 
-    // TODO(phase5): Allocate stack
-    let stack_base = 0; // Placeholder
+    // Allocate kernel stack frames (stack_size in bytes, 4KB pages)
+    let stack_pages = stack_size.div_ceil(0x1000);
+    let frames = crate::mm::allocate_pages(stack_pages, None).map_err(|_| {
+        KernelError::ResourceExhausted {
+            resource: "stack frames",
+        }
+    })?;
+    // Convert first frame's physical address to virtual address for stack base
+    let stack_phys = frames[0].as_u64() * 0x1000;
+    let stack_base = crate::mm::phys_to_virt_addr(stack_phys) as usize;
 
-    // TODO(phase5): Create page table
-    let page_table = 0; // Placeholder
+    // Use kernel's page table for now (kernel tasks share address space)
+    let page_table = crate::mm::get_kernel_page_table();
 
     // Create task
-    let mut new_task = Task::new(
+    let mut new_task = Box::new(Task::new(
         pid,
         tid,
         String::from(name),
-        _entry_point,
+        entry_point,
         stack_base + stack_size,
         page_table,
-    );
+    ));
 
     new_task.priority = priority;
 
-    // TODO(phase5): Add to task table
-    // For now, just enqueue it
-    // let task_ptr = NonNull::new(&mut new_task as *mut _).unwrap();
-    // SCHEDULER.enqueue(task_ptr);
+    // Leak the Box to get a stable pointer, then enqueue
+    let task_ptr =
+        NonNull::new(Box::leak(new_task) as *mut _).expect("Box::leak returned null (impossible)");
+    scheduler::SCHEDULER.lock().enqueue(task_ptr);
 
     Ok(pid)
 }
@@ -119,18 +126,12 @@ pub fn exit_task(exit_code: i32) {
                 thread.exit_code.store(exit_code as u32, Ordering::Release);
             }
 
-            // Clean up scheduler data structures
-            // Remove from ready queue if present
-            if let Some(_ready_link) = (*task_mut).ready_link {
-                // TODO(phase5): Remove from ready queue
-                (*task_mut).ready_link = None;
-            }
-
-            // Remove from wait queue if blocked
-            if let Some(_wait_link) = (*task_mut).wait_link {
-                // TODO(phase5): Remove from wait queue
-                (*task_mut).wait_link = None;
-            }
+            // Clean up scheduler data structures.
+            // Clear queue links -- the task is already dequeued from the
+            // ready queue (it was running), so we just null the links to
+            // prevent dangling references during deferred cleanup.
+            (*task_mut).ready_link = None;
+            (*task_mut).wait_link = None;
 
             // Clear current CPU assignment
             (*task_mut).current_cpu = None;

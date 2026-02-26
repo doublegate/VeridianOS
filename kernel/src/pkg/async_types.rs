@@ -9,7 +9,6 @@
 //! that both kernel scheduler primitives and user-space runtimes agree upon.
 
 // User-space async runtime contract -- see TODO(user-space) above
-#![allow(dead_code)]
 
 // ============================================================================
 // TaskState

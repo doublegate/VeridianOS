@@ -2,8 +2,7 @@
 //!
 //! Handles x86_64-specific paging setup and management.
 
-// x86_64 MMU support -- paging setup and management
-#![allow(dead_code)]
+// x86_64 MMU support
 
 use crate::mm::{PhysicalAddress, VirtualAddress};
 
@@ -17,8 +16,11 @@ pub fn init() {
     let cr3 = read_cr3();
     println!("[x86_64 MMU] Current CR3: 0x{:x}", cr3.as_u64());
 
-    // TODO(phase5): Set up dedicated kernel page tables (currently relying on
-    // bootloader's identity mapping)
+    // The bootloader sets up initial page tables with kernel mapped at
+    // L4[256-511].  Each process gets its own L4 with the kernel entries
+    // copied from this root.  Dedicated kernel page tables are not needed
+    // because the per-process page tables already include the kernel mapping.
+    // TODO(phase6): KPTI shadow page tables for Meltdown mitigation.
 }
 
 /// Read CR3 register (page table base)
@@ -117,13 +119,14 @@ pub fn handle_page_fault(error_code: u32, faulting_address: VirtualAddress) {
     println!("  Reserved bit: {}", error.reserved_write());
     println!("  Instruction fetch: {}", error.instruction_fetch());
 
-    // TODO(phase5): Implement proper page fault handling (stack growth, heap
-    // access, COW, process kill)
+    // TODO(phase6): Implement demand paging (stack growth, heap on-demand,
+    // COW for fork, mmap lazy allocation).  Currently all pages are
+    // pre-allocated, so any page fault is a genuine bug.
 
     // Panic is intentional: an unhandled page fault means the CPU tried to
-    // access memory that has no valid mapping. Without a page fault handler
-    // (not yet implemented), continuing would cause undefined behavior.
-    // Once demand paging and COW are implemented, this will be replaced with
-    // proper fault resolution or process termination.
+    // access memory that has no valid mapping. Without a demand-paging
+    // handler, continuing would cause undefined behavior. Once demand
+    // paging and COW are implemented, this will be replaced with proper
+    // fault resolution or process termination.
     panic!("Unhandled page fault at 0x{:x}", faulting_address.as_u64());
 }

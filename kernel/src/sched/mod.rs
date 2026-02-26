@@ -86,12 +86,27 @@ pub(crate) use crate::process::ProcessState;
 // Use process module types (used by submodules via super::)
 pub(crate) use crate::process::{ProcessId, ThreadId};
 
-/// Get the current thread ID
-/// TODO(phase5): Implement proper current thread tracking
+/// Get the current thread ID from the running task.
 pub fn get_current_thread_id() -> u64 {
-    // For now, return a dummy value
-    // In a real implementation, this would track the currently running thread
-    1
+    let sched = scheduler::SCHEDULER.lock();
+    if let Some(current) = sched.current() {
+        // SAFETY: `current` is a valid NonNull<Task> from the scheduler.
+        // We hold the scheduler lock, so the task won't be modified.
+        unsafe { current.as_ref().tid.0 }
+    } else {
+        1 // Fallback: boot thread
+    }
+}
+
+/// Get the PID of the currently running task.
+pub fn current_process_id() -> ProcessId {
+    let sched = scheduler::SCHEDULER.lock();
+    if let Some(current) = sched.current() {
+        // SAFETY: Same as get_current_thread_id.
+        unsafe { current.as_ref().pid }
+    } else {
+        ProcessId(1) // Fallback: init
+    }
 }
 
 /// Set current task (for testing)

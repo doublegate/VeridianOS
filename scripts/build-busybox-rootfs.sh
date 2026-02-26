@@ -376,6 +376,22 @@ phase_rootfs() {
         fi
     fi
 
+    # Cross-compile init (PID 1) for user-space boot
+    local init_src="${PROJECT_ROOT}/userland/init/init.c"
+    if [ -f "$init_src" ]; then
+        echo -n "    init... "
+        mkdir -p "$BUILD_DIR/sbin"
+        if "$CC" $pgm_cflags $pgm_ldflags -o "$BUILD_DIR/sbin/init" \
+                "${SYSROOT}/usr/lib/crt0.o" "$init_src" -lc 2>&1; then
+            "$STRIP" "$BUILD_DIR/sbin/init" 2>/dev/null || true
+            local isz
+            isz=$(stat -c%s "$BUILD_DIR/sbin/init" 2>/dev/null || stat -f%z "$BUILD_DIR/sbin/init" 2>/dev/null)
+            echo "OK ($(( isz / 1024 )) KB)"
+        else
+            echo "FAILED"
+        fi
+    fi
+
     # Copy source files for native compilation on VeridianOS
     echo "  Adding program source for native compilation..."
     mkdir -p "$BUILD_DIR/usr/src"
@@ -391,6 +407,25 @@ phase_rootfs() {
         cp "$NATIVE_PGM_SCRIPT" "$BUILD_DIR/usr/src/build-native-programs.sh"
         chmod 755 "$BUILD_DIR/usr/src/build-native-programs.sh"
         echo "    + /usr/src/build-native-programs.sh"
+    fi
+
+    # Copy coreutils source for native compilation on VeridianOS
+    echo "  Adding coreutils source for native compilation..."
+    mkdir -p "$BUILD_DIR/usr/src/coreutils"
+    for src in "$COREUTILS_DIR"/*.c; do
+        [ -f "$src" ] || continue
+        cp "$src" "$BUILD_DIR/usr/src/coreutils/"
+    done
+    local cu_count
+    cu_count=$(ls "$BUILD_DIR/usr/src/coreutils/"*.c 2>/dev/null | wc -l)
+    echo "    + /usr/src/coreutils/*.c ($cu_count files)"
+
+    # Copy native coreutils build script
+    local NATIVE_CU_SCRIPT="${PROJECT_ROOT}/tools/native-coreutils/build-native-coreutils.sh"
+    if [ -f "$NATIVE_CU_SCRIPT" ]; then
+        cp "$NATIVE_CU_SCRIPT" "$BUILD_DIR/usr/src/build-native-coreutils.sh"
+        chmod 755 "$BUILD_DIR/usr/src/build-native-coreutils.sh"
+        echo "    + /usr/src/build-native-coreutils.sh"
     fi
 
     # Copy test data files
@@ -572,7 +607,7 @@ phase_blockfs_image() {
     local MKFS_DIR="${PROJECT_ROOT}/tools/mkfs-blockfs"
     local MKFS_BIN="${MKFS_DIR}/target/x86_64-unknown-linux-gnu/release/mkfs-blockfs"
     local BLOCKFS_IMG="${PROJECT_ROOT}/target/rootfs-blockfs.img"
-    local BLOCKFS_SIZE="${BLOCKFS_SIZE:-256}"
+    local BLOCKFS_SIZE="${BLOCKFS_SIZE:-512}"
 
     echo "Building mkfs-blockfs tool..."
     (cd "$MKFS_DIR" && cargo build --release)

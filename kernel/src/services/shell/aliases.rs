@@ -3,7 +3,7 @@
 //! Provides an alias registry that maps short names to full command strings,
 //! with recursive expansion and loop detection.
 
-// Shell alias registry -- API complete, not yet wired to executor
+// Shell alias registry -- API complete, wiring deferred to Phase 6
 #![allow(dead_code)]
 
 use alloc::{collections::BTreeMap, string::String, vec::Vec};

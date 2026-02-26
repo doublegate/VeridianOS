@@ -185,33 +185,64 @@ extern "C" fn kernel_init_stage3_onwards() -> ! {
     // to a 1280x800 framebuffer is too slow in QEMU's emulated CPU).
     graphics::fbcon::enable_output();
 
-    // Attempt to run /bin/sh in Ring 3 (x86_64 only).
-    // If the user-space shell exits or fails to load, fall back to the
-    // kernel-space shell. AArch64/RISC-V lack user-mode entry support
-    // and always use the kernel shell.
+    // Attempt to run /sbin/init (PID 1) in Ring 3 (x86_64 only).
+    // /sbin/init will fork+exec /bin/sh and respawn it on exit.
+    // If init is not available, fall back to /bin/sh directly.
+    // If neither works, fall back to the kernel-space shell.
+    // AArch64/RISC-V lack user-mode entry support and always use the kernel shell.
     #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
     {
+        let user_env = &[
+            "PATH=/bin:/usr/bin:/sbin:/usr/sbin",
+            "HOME=/",
+            "TERM=veridian",
+            "SHELL=/bin/sh",
+            "USER=root",
+            "PWD=/",
+            "TMPDIR=/tmp",
+            "COMPILER_PATH=/usr/libexec/gcc/x86_64-veridian/14.2.0",
+            "LIBRARY_PATH=/usr/lib:/usr/lib/gcc/x86_64-veridian/14.2.0",
+        ];
+
+        let mut user_started = false;
+
+        // Try /sbin/init first (proper PID 1 init process)
         let vfs = crate::fs::get_vfs().read();
-        if vfs.resolve_path("/bin/sh").is_ok() {
-            drop(vfs);
-            kprintln!("[BOOTSTRAP] Attempting user-space shell (/bin/sh)...");
-            match crate::userspace::load_user_program(
-                "/bin/sh",
-                &["sh"],
-                &[
-                    "PATH=/bin:/usr/bin:/sbin:/usr/sbin",
-                    "HOME=/",
-                    "TERM=veridian",
-                    "SHELL=/bin/sh",
-                    "USER=root",
-                    "PWD=/",
-                    "TMPDIR=/tmp",
-                    "COMPILER_PATH=/usr/libexec/gcc/x86_64-veridian/14.2.0",
-                    "LIBRARY_PATH=/usr/lib:/usr/lib/gcc/x86_64-veridian/14.2.0",
-                ],
-            ) {
+        let has_init = vfs.resolve_path("/sbin/init").is_ok();
+        let has_sh = vfs.resolve_path("/bin/sh").is_ok();
+        drop(vfs);
+
+        if has_init {
+            kprintln!("[BOOTSTRAP] Attempting user-space init (/sbin/init)...");
+            match crate::userspace::load_user_program("/sbin/init", &["init"], user_env) {
                 Ok(pid) => {
-                    // Raw serial: safe even if kprintln! holds locks
+                    unsafe {
+                        crate::arch::x86_64::idt::raw_serial_str(
+                            b"[BOOTSTRAP] /sbin/init loaded, entering Ring 3\n",
+                        );
+                    }
+                    kprintln!(
+                        "[BOOTSTRAP] /sbin/init loaded (pid={}), entering Ring 3",
+                        pid.0
+                    );
+                    run_user_process_scheduled(pid);
+                    kprintln!("[BOOTSTRAP] init exited, falling back to kernel shell");
+                    user_started = true;
+                }
+                Err(e) => {
+                    kprintln!(
+                        "[BOOTSTRAP] /sbin/init load failed: {:?}, trying /bin/sh",
+                        e
+                    );
+                }
+            }
+        }
+
+        // Fall back to /bin/sh directly if init is not available or failed
+        if !user_started && has_sh {
+            kprintln!("[BOOTSTRAP] Attempting user-space shell (/bin/sh)...");
+            match crate::userspace::load_user_program("/bin/sh", &["sh"], user_env) {
+                Ok(pid) => {
                     unsafe {
                         crate::arch::x86_64::idt::raw_serial_str(
                             b"[BOOTSTRAP] /bin/sh loaded, entering Ring 3\n",
@@ -231,9 +262,8 @@ extern "C" fn kernel_init_stage3_onwards() -> ! {
                     );
                 }
             }
-        } else {
-            drop(vfs);
-            kprintln!("[BOOTSTRAP] /bin/sh not in VFS, using kernel shell");
+        } else if !user_started {
+            kprintln!("[BOOTSTRAP] No user-space init or shell in VFS, using kernel shell");
         }
     }
 
@@ -879,8 +909,9 @@ fn test_user_binary_load() {
         }
     }
 
-    // Test 3: /bin/exec_test -- SKIPPED: multi-LOAD ELF GP fault (TODO(phase5))
-    // Test 4: /bin/sh -- SKIPPED: multi-LOAD ELF GP fault (TODO(phase5))
+    // Test 3: /bin/exec_test -- SKIPPED: multi-LOAD ELF GP fault (TODO(phase6): fix
+    // multi-LOAD ELF loading) Test 4: /bin/sh -- SKIPPED: multi-LOAD ELF GP
+    // fault (TODO(phase6): fix multi-LOAD ELF loading)
 
     // Coreutils validation suite (progressive complexity).
     // Each program exercises different syscall combinations.
@@ -1054,6 +1085,46 @@ fn test_user_binary_load() {
                         drop(vfs);
                     }
 
+                    // C-2: Link echo.o into a binary and execute it natively
+                    boot_run_program(
+                        "/usr/bin/gcc",
+                        &[
+                            "gcc",
+                            "-static",
+                            "-nostdlib",
+                            "-ffreestanding",
+                            "-o",
+                            "/tmp/echo-native",
+                            "/usr/lib/crt0.o",
+                            "/tmp/echo.o",
+                            "-L",
+                            "/usr/lib",
+                            "-L",
+                            "/usr/lib/gcc/x86_64-veridian/14.2.0",
+                            "-lc",
+                            "-lgcc",
+                        ],
+                        env,
+                    );
+                    // Verify link produced a binary, then execute it
+                    {
+                        let vfs = get_vfs().read();
+                        if vfs.resolve_path("/tmp/echo-native").is_ok() {
+                            drop(vfs);
+                            kprintln!("[BOOT] Phase C-2: Executing natively-compiled echo");
+                            boot_run_program(
+                                "/tmp/echo-native",
+                                &["echo", "NATIVE_ECHO_PASS"],
+                                env,
+                            );
+                        } else {
+                            drop(vfs);
+                            kprintln!(
+                                "[BOOT] Phase C-2: Link FAILED -- /tmp/echo-native not found"
+                            );
+                        }
+                    }
+
                     // C-3: Full native build (all 208 files + link)
                     // SKIPPED at boot -- compiling 208 files blocks the
                     // interactive shell for several minutes. Run manually:
@@ -1080,6 +1151,38 @@ fn test_user_binary_load() {
                         if has_script {
                             kprintln!("[BOOT] Phase C-4: Skipped (native sysinfo+edit build)");
                             kprintln!("[BOOT] Run manually: ash /usr/src/build-native-programs.sh");
+                        }
+                    }
+
+                    // C-5: Execute pre-built native binaries (if present from C-4)
+                    // sysinfo reads /proc/* so output validates VFS + uname + proc subsystems
+                    {
+                        let vfs = get_vfs().read();
+                        let has_sysinfo = vfs.resolve_path("/tmp/sysinfo-native").is_ok();
+                        drop(vfs);
+                        if has_sysinfo {
+                            kprintln!("[BOOT] Phase C-5: Executing natively-compiled sysinfo");
+                            boot_run_program("/tmp/sysinfo-native", &["sysinfo"], env);
+                            kprintln!("NATIVE_RUN_SYSINFO_PASS");
+                        } else {
+                            kprintln!("[BOOT] Phase C-5: Skipped (/tmp/sysinfo-native not found)");
+                            kprintln!("[BOOT] Build first: ash /usr/src/build-native-programs.sh");
+                        }
+                    }
+
+                    // C-6: Native coreutils compilation
+                    // SKIPPED at boot -- run manually at the ash prompt.
+                    {
+                        let vfs = get_vfs().read();
+                        let has_script = vfs
+                            .resolve_path("/usr/src/build-native-coreutils.sh")
+                            .is_ok();
+                        drop(vfs);
+                        if has_script {
+                            kprintln!("[BOOT] Phase C-6: Skipped (native coreutils build)");
+                            kprintln!(
+                                "[BOOT] Run manually: ash /usr/src/build-native-coreutils.sh"
+                            );
                         }
                     }
                 } else {

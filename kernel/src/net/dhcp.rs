@@ -3,9 +3,7 @@
 //! Implements DHCPv4 protocol for obtaining IP addresses and network
 //! configuration.
 
-// DHCP protocol constants and methods are defined ahead of full network
-// stack integration. Needed once automatic network configuration is enabled.
-#![allow(dead_code)]
+// DHCP client
 
 use alloc::vec::Vec;
 use core::convert::TryInto;
@@ -31,6 +29,7 @@ pub enum DhcpMessageType {
 
 /// DHCP operation codes
 const DHCP_OP_BOOTREQUEST: u8 = 1;
+#[allow(dead_code)] // DHCP protocol constant per RFC 2131
 const DHCP_OP_BOOTREPLY: u8 = 2;
 
 /// DHCP hardware types
@@ -44,6 +43,7 @@ const OPT_SUBNET_MASK: u8 = 1;
 const OPT_ROUTER: u8 = 3;
 const OPT_DNS_SERVER: u8 = 6;
 const OPT_REQUESTED_IP: u8 = 50;
+#[allow(dead_code)] // DHCP option per RFC 2132
 const OPT_LEASE_TIME: u8 = 51;
 const OPT_MESSAGE_TYPE: u8 = 53;
 const OPT_SERVER_ID: u8 = 54;
@@ -298,6 +298,7 @@ pub struct DhcpClient {
     xid: u32,
 
     /// Current configuration
+    #[allow(dead_code)] // Read during DHCP lease renewal (Phase 6)
     config: Option<DhcpConfig>,
 }
 

@@ -260,7 +260,9 @@ impl ProcessHeap {
             });
         }
 
-        // TODO(phase5): Actually allocate/free pages via VMM for heap expansion
+        // Note: Actual page allocation for heap expansion is handled by
+        // VAS::brk() + brk_extend_heap() in mm/vas.rs, which is invoked by
+        // sys_brk().  This ProcessHeap struct tracks the logical break only.
         self.brk = new_brk;
         Ok(self.brk)
     }

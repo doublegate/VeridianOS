@@ -12,7 +12,6 @@
 // Process management is fully implemented but many functions are not yet
 // called from user-space syscall paths. Will be exercised once the process
 // lifecycle is driven by real user-space programs.
-#![allow(dead_code)]
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

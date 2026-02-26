@@ -36,6 +36,7 @@
 use crate::{error::KernelError, println, process::pcb::Process, process::thread::Thread};
 
 /// Syscall number for SIG_RETURN (must match Syscall::SigReturn = 123).
+#[allow(dead_code)] // Matches Syscall::SigReturn -- used in trampoline injection
 const SYS_SIGRETURN: u64 = 123;
 
 /// Signal handler value indicating default action.
@@ -91,6 +92,7 @@ pub struct SignalFrame {
 }
 
 /// Size of the signal frame in bytes.
+#[allow(dead_code)] // Used for stack frame layout calculations
 const SIGNAL_FRAME_SIZE: usize = core::mem::size_of::<SignalFrame>();
 
 /// x86_64 sigreturn trampoline machine code.
@@ -134,6 +136,7 @@ const TRAMPOLINE_SIZE: usize = SIGRETURN_TRAMPOLINE.len();
 ///
 /// `vaddr` must be a valid mapped address in the process's VAS with write
 /// permissions. The caller must ensure no concurrent access to this memory.
+#[allow(dead_code)] // Signal delivery helper -- wired when signal dispatch is active
 #[cfg(feature = "alloc")]
 unsafe fn write_to_user_stack(
     memory_space: &crate::mm::VirtualAddressSpace,
@@ -201,6 +204,7 @@ unsafe fn write_bytes_to_user_stack(
 ///
 /// `vaddr` must be a valid mapped address in the process's VAS. The caller
 /// must ensure no concurrent writes to this memory.
+#[allow(dead_code)] // Signal delivery helper -- wired when signal dispatch is active
 #[cfg(feature = "alloc")]
 unsafe fn read_from_user_stack(
     memory_space: &crate::mm::VirtualAddressSpace,
@@ -488,6 +492,7 @@ fn deliver_signal_aarch64(
 
 /// Fallback when not compiling for AArch64 with alloc -- signal delivery
 /// is a no-op since this architecture's handler cannot execute.
+#[allow(dead_code)] // Cross-arch fallback stub -- active on non-AArch64 targets
 #[cfg(not(all(feature = "alloc", target_arch = "aarch64")))]
 fn deliver_signal_aarch64(
     _process: &Process,
@@ -656,6 +661,7 @@ fn deliver_signal_riscv(
 
 /// Fallback when not compiling for RISC-V with alloc -- signal delivery
 /// is a no-op since this architecture's handler cannot execute.
+#[allow(dead_code)] // Cross-arch fallback stub -- active on non-RISC-V targets
 #[cfg(not(all(feature = "alloc", target_arch = "riscv64")))]
 fn deliver_signal_riscv(
     _process: &Process,

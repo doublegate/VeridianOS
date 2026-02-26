@@ -562,6 +562,20 @@ pub fn free_pages(pages: &[PhysicalPage]) -> Result<(), FrameAllocatorError> {
     FRAME_ALLOCATOR.lock().free_frames(first_frame, count)
 }
 
+/// Page cache frame counter: tracks the number of frames currently held in
+/// the page cache (file-backed pages kept in memory for faster re-access).
+static PAGE_CACHE_FRAMES: AtomicU64 = AtomicU64::new(0);
+
+/// Increment the page cache frame count when a page is added to the cache.
+pub fn page_cache_add(count: u64) {
+    PAGE_CACHE_FRAMES.fetch_add(count, Ordering::Relaxed);
+}
+
+/// Decrement the page cache frame count when a page is evicted from the cache.
+pub fn page_cache_remove(count: u64) {
+    PAGE_CACHE_FRAMES.fetch_sub(count, Ordering::Relaxed);
+}
+
 /// Memory statistics structure
 pub struct MemoryStats {
     pub total_frames: usize,
@@ -577,6 +591,6 @@ pub fn get_memory_stats() -> MemoryStats {
     MemoryStats {
         total_frames: stats.total_frames as usize,
         free_frames: stats.free_frames as usize,
-        cached_frames: 0, // TODO(phase5): Implement page cache tracking
+        cached_frames: PAGE_CACHE_FRAMES.load(Ordering::Relaxed) as usize,
     }
 }

@@ -56,11 +56,12 @@ impl NumaTopology {
         }
     }
 
-    /// Detect NUMA topology from hardware
+    /// Detect NUMA topology from hardware.
+    ///
+    /// TODO(phase6): Parse ACPI SRAT/SLIT tables for real multi-node topology.
+    /// Currently returns a single UMA node containing all detected CPUs and
+    /// using the frame allocator's reported total memory.
     pub fn detect() -> Self {
-        // TODO(phase5): Query ACPI SRAT/SLIT tables for actual topology
-        // For now, assume single-node UMA system
-
         let mut topo = Self::new();
 
         // Detect number of CPUs
@@ -73,9 +74,16 @@ impl NumaTopology {
         }
         topo.cpus_per_node.push(cpus);
 
-        // TODO(phase5): Query actual memory from ACPI SRAT tables or firmware.
-        // Default to 16 GB when hardware topology is unavailable.
-        topo.memory_per_node.push(16 * 1024 * 1024 * 1024); // 16 GB
+        // Query actual total memory from the frame allocator.
+        let mem_stats = crate::mm::get_memory_stats();
+        let total_bytes = (mem_stats.total_frames as u64) * (crate::mm::FRAME_SIZE as u64);
+        // Use detected memory if available, otherwise default to 256 MB (QEMU minimum).
+        let node_memory = if total_bytes > 0 {
+            total_bytes
+        } else {
+            256 * 1024 * 1024
+        };
+        topo.memory_per_node.push(node_memory);
 
         // Distance matrix (self = 10, remote = 20)
         topo.distance_matrix.push(alloc::vec![10]);
@@ -229,17 +237,23 @@ impl NumaScheduler {
         best_node
     }
 
-    /// Select least-loaded CPU within a node
+    /// Select least-loaded CPU within a node.
+    ///
+    /// Uses round-robin distribution across CPUs in the node to approximate
+    /// even load distribution without per-CPU load tracking overhead.
+    /// TODO(phase6): Query per-CPU run-queue lengths for true load-aware
+    /// selection.
     fn select_cpu_in_node(&self, node: NodeId) -> CpuId {
+        static RR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
         let cpus = &self.topology.cpus_per_node[node as usize];
 
         if cpus.is_empty() {
             return 0;
         }
 
-        // TODO(phase5): Query actual CPU load from scheduler
-        // For now, round-robin within node
-        cpus[0]
+        let idx = RR_COUNTER.fetch_add(1, Ordering::Relaxed) as usize % cpus.len();
+        cpus[idx]
     }
 
     /// Should migrate process to different node?
@@ -283,11 +297,24 @@ impl NumaScheduler {
     }
 }
 
-/// Detect number of CPUs in the system
+/// Detect number of CPUs in the system.
+///
+/// Counts online CPUs from the SMP per-CPU data array.
+/// TODO(phase6): Parse ACPI MADT table for full topology including offline
+/// CPUs.
 fn detect_cpu_count() -> u32 {
-    // TODO(phase5): Query ACPI MADT table for actual CPU count
-    // For now, assume 8 CPUs
-    8
+    let mut count: u32 = 0;
+    for cpu_id in 0..super::smp::MAX_CPUS as u8 {
+        if super::smp::per_cpu(cpu_id).is_some() {
+            count += 1;
+        }
+    }
+    // At minimum, we always have the boot CPU
+    if count == 0 {
+        1
+    } else {
+        count
+    }
 }
 
 /// Global NUMA scheduler instance

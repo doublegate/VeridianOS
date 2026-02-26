@@ -151,8 +151,7 @@ impl KeyStore {
     }
 
     fn current_time() -> u64 {
-        // TODO(phase5): Get actual system time from clock subsystem
-        0
+        crate::arch::timer::get_timestamp_secs()
     }
 }
 

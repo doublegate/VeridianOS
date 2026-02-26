@@ -9,8 +9,7 @@
 //! cryptography:
 //! - **ML-DSA (FIPS 204)**: Module-Lattice-Based Digital Signature Algorithm
 
-// Phase 3 (security hardening) -- cryptographic structures are defined but
-// not yet exercised by higher-level callers.
+// Post-quantum cryptography -- covers sub-module constants per NIST specs
 #![allow(dead_code)]
 //!   - Replaces Dilithium after standardization
 //!   - Provides quantum-resistant digital signatures

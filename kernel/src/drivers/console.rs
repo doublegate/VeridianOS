@@ -2,9 +2,7 @@
 //!
 //! Implements console drivers for VGA text mode and serial console.
 
-// Future-phase driver: Console VGA text mode and serial console. Not all color
-// variants and driver methods are exercised yet.
-#![allow(dead_code)]
+// Console drivers
 
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
@@ -92,6 +90,7 @@ pub struct VgaConsole {
     cursor_x: usize,
     cursor_y: usize,
     cursor_visible: bool,
+    #[allow(dead_code)] // VGA attribute byte for text mode rendering
     default_color: u8,
 }
 
@@ -360,6 +359,7 @@ impl SerialConsole {
     }
 
     /// Read a byte from serial port (non-blocking)
+    #[allow(dead_code)] // Serial read API for future interactive console
     fn read_byte(&self) -> Option<u8> {
         // SAFETY: Reading line status (port+5) and data register (port)
         // are standard 16550 UART I/O operations.

@@ -172,6 +172,12 @@ impl Rights {
         self.0 == 0
     }
 
+    /// Create empty rights set
+    #[inline]
+    pub fn empty() -> Self {
+        Self(0)
+    }
+
     /// Convert to capability flags (4-bit)
     #[inline]
     pub fn to_flags(self) -> u8 {
@@ -197,6 +203,12 @@ impl core::ops::BitOr for Rights {
 
     fn bitor(self, rhs: Self) -> Self::Output {
         Self(self.0 | rhs.0)
+    }
+}
+
+impl core::ops::BitOrAssign for Rights {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
     }
 }
 

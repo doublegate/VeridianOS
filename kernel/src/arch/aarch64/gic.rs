@@ -49,7 +49,7 @@ const GICD_CTLR: usize = 0x000;
 /// Interrupt Controller Type Register -- reports number of interrupt lines.
 const GICD_TYPER: usize = 0x004;
 // Hardware register definition -- retained for completeness per ARM GICv2 spec
-#[allow(dead_code)]
+#[allow(dead_code)] // GICv2 register per ARM spec
 const GICD_IIDR: usize = 0x008;
 /// Interrupt Group Registers (one bit per interrupt).
 const GICD_IGROUPR: usize = 0x080;
@@ -58,9 +58,9 @@ const GICD_ISENABLER: usize = 0x100;
 /// Interrupt Clear-Enable Registers (one bit per interrupt).
 const GICD_ICENABLER: usize = 0x180;
 // Hardware register definitions -- retained for completeness per ARM GICv2 spec
-#[allow(dead_code)]
+#[allow(dead_code)] // GICv2 register per ARM spec
 const GICD_ISPENDR: usize = 0x200;
-#[allow(dead_code)]
+#[allow(dead_code)] // GICv2 register per ARM spec
 const GICD_ICPENDR: usize = 0x280;
 /// Interrupt Priority Registers (one byte per interrupt).
 const GICD_IPRIORITYR: usize = 0x400;

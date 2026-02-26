@@ -10,7 +10,6 @@
 //! bytes.
 
 // User-space SDK forward declarations -- see module doc TODO(user-space)
-#![allow(dead_code)]
 
 #[cfg(feature = "alloc")]
 use alloc::{format, string::String, vec::Vec};

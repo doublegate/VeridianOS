@@ -250,8 +250,10 @@ pub struct Vfs {
     /// Mount points
     mounts: BTreeMap<String, Arc<dyn Filesystem>>,
 
-    /// Current working directory for processes
-    /// TODO(phase5): Move this to per-process data
+    /// Legacy global working directory (fallback only).
+    /// Per-process CWD is tracked in `process::cwd::ProcessCwd` and
+    /// `process::thread::ThreadFs`.  This field is retained for
+    /// kernel-context operations where no process is running.
     cwd: String,
 }
 

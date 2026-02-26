@@ -2,10 +2,7 @@
 //!
 //! Provides performance measurement capabilities for kernel subsystems
 
-// Benchmarking APIs are intentionally kept available even when not actively
-// called -- they are invoked on-demand via the `benchmarks` feature or from
-// integration benchmark binaries.
-#![allow(dead_code)]
+// Benchmarking framework
 
 #[cfg(feature = "alloc")]
 extern crate alloc;

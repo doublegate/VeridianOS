@@ -265,15 +265,46 @@ pub enum CachePolicy {
     Uncached,
 }
 
-/// Grant capability to perform zero-copy transfer
+/// Grant capability to perform zero-copy transfer.
+///
+/// Creates a memory capability in the grantee's capability space that
+/// allows mapping the shared region with the specified permissions.
 pub fn grant_transfer_capability(
-    _granter_pid: u64,
-    _grantee_pid: u64,
-    _region_id: u64,
-    _permissions: Permission,
+    granter_pid: u64,
+    grantee_pid: u64,
+    region_id: u64,
+    permissions: Permission,
 ) -> Result<u64> {
-    // TODO(phase5): Create transfer capability via capability system integration
-    Ok(0)
+    let _granter = crate::process::table::get_process(ProcessId(granter_pid))
+        .ok_or(IpcError::ProcessNotFound)?;
+    let grantee = crate::process::table::get_process(ProcessId(grantee_pid))
+        .ok_or(IpcError::ProcessNotFound)?;
+
+    // Build rights from the IPC permission flags
+    let mut rights = crate::cap::memory_integration::MemoryRights::MAP;
+    if permissions.can_read() {
+        rights |= crate::cap::memory_integration::MemoryRights::READ;
+    }
+    if permissions.can_write() {
+        rights |= crate::cap::memory_integration::MemoryRights::WRITE;
+    }
+    if permissions.can_execute() {
+        rights |= crate::cap::memory_integration::MemoryRights::EXECUTE;
+    }
+
+    // Create a memory capability in the grantee's capability space
+    let grantee_cap_space = grantee.capability_space.lock();
+    let attributes = crate::cap::object::MemoryAttributes::normal();
+    let cap = crate::cap::memory_integration::create_memory_capability(
+        region_id as usize,
+        0, // size determined by region lookup at map time
+        attributes,
+        rights,
+        &grantee_cap_space,
+    )
+    .map_err(|_| IpcError::PermissionDenied)?;
+
+    Ok(cap.to_u64())
 }
 
 /// Batch zero-copy transfer for multiple regions

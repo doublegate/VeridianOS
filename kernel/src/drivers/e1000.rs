@@ -3,9 +3,7 @@
 //! This driver supports the Intel E1000 Gigabit Ethernet controller,
 //! commonly found in QEMU and VirtualBox virtual machines.
 
-// Future-phase driver: Intel E1000 hardware register offsets and descriptor
-// structs defined per the Intel E1000 specification. Retained for completeness.
-#![allow(dead_code)]
+// Intel E1000 driver
 
 use crate::{
     error::KernelError,
@@ -21,8 +19,10 @@ pub const E1000_DEVICE_ID: u16 = 0x100E;
 
 /// E1000 register offsets
 const REG_CTRL: usize = 0x0000; // Device Control
+#[allow(dead_code)] // E1000 hardware register per Intel spec
 const REG_STATUS: usize = 0x0008; // Device Status
 const REG_EEPROM: usize = 0x0014; // EEPROM Read
+#[allow(dead_code)] // E1000 hardware register per Intel spec
 const REG_CTRL_EXT: usize = 0x0018; // Extended Device Control
 const REG_ICR: usize = 0x00C0; // Interrupt Cause Read
 const REG_IMS: usize = 0x00D0; // Interrupt Mask Set

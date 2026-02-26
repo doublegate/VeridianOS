@@ -3,8 +3,7 @@
 //! Tracks and resolves the current working directory for each process.
 //! Provides path normalization and resolution of relative paths.
 
-// Per-process working directory -- exercised via chdir/getcwd syscalls
-#![allow(dead_code)]
+// Per-process working directory
 
 #[cfg(feature = "alloc")]
 extern crate alloc;

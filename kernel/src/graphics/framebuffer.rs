@@ -1,7 +1,6 @@
 //! Framebuffer implementation
 
-// Phase 6 graphics: framebuffer fields not yet used in rendering
-#![allow(dead_code)]
+// Framebuffer implementation
 
 use spin::Mutex;
 
@@ -13,6 +12,7 @@ pub struct Framebuffer {
     width: u32,
     height: u32,
     pitch: u32,
+    #[allow(dead_code)] // Bits-per-pixel for framebuffer configuration
     bpp: u8,
     buffer: Option<*mut u32>,
 }

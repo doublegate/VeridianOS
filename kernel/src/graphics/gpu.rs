@@ -8,8 +8,7 @@
 //! - **OpenGL ES**: Embedded graphics (compatibility)
 //! - **Compute**: GPU compute shaders for parallel processing
 
-// Phase 6 (desktop) -- GPU acceleration structures are defined but not yet
-// wired to actual hardware drivers.
+// GPU acceleration framework -- Phase 6 structures defined ahead of hardware wiring
 #![allow(dead_code)]
 //! ## Architecture
 //!

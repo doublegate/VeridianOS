@@ -1,5 +1,4 @@
-// Methods are progressively wired across sprints (tab completion, etc.)
-#![allow(dead_code)]
+// Line editor methods
 
 //! Line editor with cursor movement, history navigation, and kill ring.
 //!
@@ -80,6 +79,7 @@ impl LineEditor {
     }
 
     /// Check if buffer is empty.
+    #[allow(dead_code)] // Complements len() -- standard API pair
     pub fn is_empty(&self) -> bool {
         self.buffer.is_empty()
     }
@@ -356,6 +356,7 @@ impl LineEditor {
     }
 
     /// Insert a string at the cursor position (used for tab completion).
+    #[allow(dead_code)] // Used by tab completion path
     pub fn insert_str(&mut self, s: &str) {
         for &b in s.as_bytes() {
             self.buffer.insert(self.cursor, b);

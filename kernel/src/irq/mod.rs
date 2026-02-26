@@ -10,9 +10,7 @@
 //! remediation backlog, providing a unified API for registering handlers,
 //! enabling/disabling IRQ lines, and dispatching interrupts.
 
-// IRQ management APIs are fully implemented but not all paths are exercised
-// yet. Will be fully active once user-space drivers register IRQ handlers.
-#![allow(dead_code)]
+// IRQ management
 
 #[cfg(feature = "alloc")]
 extern crate alloc;

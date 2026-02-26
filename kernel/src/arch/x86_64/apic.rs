@@ -44,13 +44,13 @@ const LAPIC_EOI: u32 = 0x0B0;
 /// Spurious Interrupt Vector register -- also contains the software enable bit.
 const LAPIC_SVR: u32 = 0x0F0;
 // Hardware register definitions -- retained for completeness per Intel SDM
-#[allow(dead_code)]
+#[allow(dead_code)] // LAPIC register per Intel SDM
 const LAPIC_ISR_BASE: u32 = 0x100;
-#[allow(dead_code)]
+#[allow(dead_code)] // LAPIC register per Intel SDM
 const LAPIC_TMR_BASE: u32 = 0x180;
-#[allow(dead_code)]
+#[allow(dead_code)] // LAPIC register per Intel SDM
 const LAPIC_IRR_BASE: u32 = 0x200;
-#[allow(dead_code)]
+#[allow(dead_code)] // LAPIC register per Intel SDM
 const LAPIC_ESR: u32 = 0x280;
 /// Interrupt Command Register (low 32 bits).
 const LAPIC_ICR_LOW: u32 = 0x300;
@@ -85,7 +85,7 @@ const SPURIOUS_VECTOR: u8 = 0xFF;
 // ---------------------------------------------------------------------------
 
 // Hardware register definitions -- retained for completeness per Intel SDM
-#[allow(dead_code)]
+#[allow(dead_code)] // Timer mode constant per Intel SDM
 const TIMER_MODE_ONESHOT: u32 = 0b00 << 17;
 /// Periodic timer mode (bits 18:17 = 01).
 const TIMER_MODE_PERIODIC: u32 = 0b01 << 17;
@@ -103,7 +103,7 @@ const IOREGSEL: u32 = 0x00;
 const IOWIN: u32 = 0x10;
 
 // Hardware register definition -- retained for completeness per Intel SDM
-#[allow(dead_code)]
+#[allow(dead_code)] // IOAPIC register per Intel SDM
 const IOAPIC_REG_ID: u32 = 0x00;
 /// I/O APIC Version register.
 const IOAPIC_REG_VER: u32 = 0x01;

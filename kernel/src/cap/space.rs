@@ -576,7 +576,7 @@ impl CapabilityCache {
         self.cache[hash] = Some(CachedCap {
             capability: cap,
             rights,
-            last_used: 0, // TODO(phase5): Use actual timestamp counter for LRU eviction
+            last_used: crate::arch::entropy::read_timestamp(),
         });
     }
 }

@@ -202,8 +202,25 @@ fn validate_send_capability(msg: &Message, endpoint_id: u64) -> Result<()> {
         },
     )?;
 
-    // TODO(phase5): Verify capability is for the specific endpoint_id
-    let _ = endpoint_id;
+    // Verify the capability is associated with the target endpoint.
+    // Look up the full capability entry to check the ObjectRef.
+    // Non-endpoint capabilities are also valid for general IPC
+    // (e.g., process capabilities can send on any endpoint they
+    // have SEND rights for).
+    #[cfg(feature = "alloc")]
+    {
+        if let Some((crate::cap::object::ObjectRef::Endpoint { endpoint }, _rights)) =
+            cap_space.lookup_entry(cap_token)
+        {
+            if endpoint.id() != endpoint_id {
+                return Err(IpcError::InvalidCapability);
+            }
+        }
+    }
+    #[cfg(not(feature = "alloc"))]
+    {
+        let _ = endpoint_id;
+    }
 
     Ok(())
 }

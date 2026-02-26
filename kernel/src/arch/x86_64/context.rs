@@ -183,10 +183,16 @@ impl crate::arch::context::ThreadContext for X86_64Context {
         Self::default()
     }
 
-    fn init(&mut self, entry_point: usize, stack_pointer: usize, _kernel_stack: usize) {
+    fn init(&mut self, entry_point: usize, stack_pointer: usize, kernel_stack: usize) {
         self.rip = entry_point as u64;
         self.rsp = stack_pointer as u64;
-        // TODO(phase5): Set up kernel stack in TSS for ring transitions
+        // Store kernel stack for TSS RSP0 updates during context switch.
+        // When switching to this task, RSP0 in the TSS is updated so that
+        // Ring 3 -> Ring 0 transitions (interrupts, syscalls) land on this
+        // task's kernel stack.
+        if kernel_stack != 0 {
+            crate::arch::x86_64::gdt::set_kernel_stack(kernel_stack as u64);
+        }
     }
 
     fn get_instruction_pointer(&self) -> usize {
@@ -214,12 +220,11 @@ impl crate::arch::context::ThreadContext for X86_64Context {
     }
 
     fn get_kernel_stack(&self) -> usize {
-        // TODO(phase5): Return kernel stack pointer from TSS
-        0
+        crate::arch::x86_64::gdt::get_kernel_stack() as usize
     }
 
-    fn set_kernel_stack(&mut self, _sp: usize) {
-        // TODO(phase5): Set kernel stack in TSS for ring transitions
+    fn set_kernel_stack(&mut self, sp: usize) {
+        crate::arch::x86_64::gdt::set_kernel_stack(sp as u64);
     }
 
     fn set_return_value(&mut self, value: usize) {
@@ -264,12 +269,12 @@ pub unsafe extern "C" fn context_switch(current: *mut X86_64Context, next: *cons
         // Save stack pointer
         "mov [rdi + 0x78], rsp",
 
-        // Save FS base (TLS)
+        // Save FS base (TLS) to tls_base field at offset 0xB0 (176)
         "mov ecx, 0xC0000100",
         "rdmsr",
         "shl rdx, 32",
         "or rax, rdx",
-        "mov [rdi + 0x98], rax",
+        "mov [rdi + 0xB0], rax",
 
         // Save return address as RIP
         "mov rax, [rsp]",
@@ -289,8 +294,8 @@ pub unsafe extern "C" fn context_switch(current: *mut X86_64Context, next: *cons
 
     // Load new context
     asm!(
-        // Load new CR3 if different
-        "mov rax, [rsi + 0xB0]",
+        // Load new CR3 (offset 0xA0 = 160 = cr3 field) if different
+        "mov rax, [rsi + 0xA0]",
         "mov rcx, cr3",
         "cmp rax, rcx",
         "je 2f",
@@ -324,9 +329,9 @@ pub unsafe extern "C" fn context_switch(current: *mut X86_64Context, next: *cons
         // Push return address
         "push qword ptr [rsi + 0x80]",
 
-        // Restore FS base (TLS)
+        // Restore FS base (TLS) from tls_base field at offset 0xB0 (176)
         "mov ecx, 0xC0000100",
-        "mov rax, [rsi + 0x98]",
+        "mov rax, [rsi + 0xB0]",
         "mov rdx, rax",
         "shr rdx, 32",
         "wrmsr",

@@ -4,8 +4,7 @@
 //! and reception, enabling zero-copy operation with minimal allocation
 //! overhead.
 
-// Allow dead code for DMA pool fields pending driver integration
-#![allow(dead_code)]
+// DMA pool for zero-copy networking
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -35,11 +34,13 @@ pub struct DmaBuffer {
     refcount: AtomicU64,
 
     /// Buffer index in pool
+    #[allow(dead_code)] // Used for pool return tracking
     index: u16,
 }
 
 impl DmaBuffer {
     /// Create a new DMA buffer
+    #[allow(dead_code)] // Constructor used by DmaPool allocation
     fn new(virt_addr: usize, phys_addr: PhysicalAddress, size: usize, index: u16) -> Self {
         Self {
             virt_addr,

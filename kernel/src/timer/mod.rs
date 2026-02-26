@@ -25,9 +25,7 @@
 //! let uptime = timer::get_uptime_ms();
 //! ```
 
-// Timer subsystem -- fully implemented, will be fully active once wired to
-// hardware timer interrupts
-#![allow(dead_code)]
+// Timer subsystem
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

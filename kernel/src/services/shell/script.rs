@@ -16,7 +16,7 @@
 //! lines into an AST-like structure ([`ScriptNode`]) that the shell can
 //! then traverse and execute.
 
-// Shell scripting -- parser and AST complete, execution deferred
+// Shell scripting -- parser/AST complete, execution deferred to Phase 6
 #![allow(dead_code)]
 
 use alloc::{

@@ -622,11 +622,35 @@ impl Scheduler {
             (*next_mut).current_cpu = Some(current_cpu());
             (*next_mut).mark_scheduled(current_cpu(), is_voluntary);
 
+            // Update TSS kernel stack for Ring 3 -> Ring 0 transitions
+            #[cfg(target_arch = "x86_64")]
+            {
+                let kernel_sp = (*next.as_ptr()).kernel_stack;
+                if kernel_sp != 0 {
+                    crate::arch::x86_64::gdt::set_kernel_stack(kernel_sp as u64);
+                }
+            }
+
             // Perform context switch
-            if let Some(_current) = self.current {
-                // Save current context and switch to next
-                // For now, we'll just update the task pointer
-                // TODO(phase5): Implement actual context save/restore
+            if let Some(current) = self.current {
+                // Update current pointer BEFORE context_switch, since
+                // context_switch saves current registers and jumps to
+                // next's saved RIP. When this task resumes later,
+                // execution continues after this point with the correct
+                // self.current already set.
+                self.current = Some(next_ptr);
+
+                // Save current context and restore next context.
+                // This call does NOT return until this task is scheduled
+                // again -- at that point, execution resumes here.
+                let current_raw = current.as_raw();
+                context_switch(&mut (*current_raw).context, &(*next.as_ptr()).context);
+
+                // Resumed: Record metrics and return
+                let switch_cycles = super::metrics::read_tsc() - start_cycles;
+                super::metrics::SCHEDULER_METRICS
+                    .record_context_switch(switch_cycles, is_voluntary);
+                return;
             } else {
                 // First task, load its context directly
                 // This happens when scheduler starts with bootstrap task

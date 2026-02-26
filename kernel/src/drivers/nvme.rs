@@ -2,8 +2,7 @@
 //!
 //! High-performance storage driver for NVMe SSDs using the BlockDevice trait.
 
-// Future-phase driver: NVMe hardware register offsets, command opcodes, and
-// queue structures defined per the NVMe specification. Retained for completeness.
+// NVMe driver -- hardware register offsets per NVMe spec
 #![allow(dead_code)]
 
 use alloc::{vec, vec::Vec};

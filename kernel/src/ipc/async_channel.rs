@@ -3,8 +3,7 @@
 //! This module provides high-performance async channels using lock-free
 //! ring buffers and event notification for efficient message passing.
 
-// Async IPC channels -- lock-free ring buffer implementation
-#![allow(dead_code)]
+// Async IPC channels
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -29,6 +28,7 @@ pub struct AsyncChannel {
     /// Channel ID
     id: u64,
     /// Owner process
+    #[allow(dead_code)] // Needed for ownership checks in Phase 6
     owner: ProcessId,
     /// Ring buffer for messages
     buffer: RingBuffer<Message>,

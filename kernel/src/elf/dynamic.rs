@@ -3,8 +3,7 @@
 //! Provides auxiliary vector construction, interpreter discovery, and dynamic
 //! linker preparation for running dynamically-linked ELF binaries.
 
-// ELF dynamic linker bootstrap -- exercised when loading dynamically-linked ELFs
-#![allow(dead_code)]
+// ELF dynamic linker bootstrap
 
 #[cfg(feature = "alloc")]
 extern crate alloc;

@@ -9,7 +9,6 @@
 //! functional. See TODO(user-space) markers for specific activation points.
 
 // User-space API forward declarations -- see NOTE above
-#![allow(dead_code)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;

@@ -3,8 +3,7 @@
 //! Supports VBE (VESA BIOS Extensions) and GOP (Graphics Output Protocol) for
 //! framebuffer access
 
-// Future-phase driver: GPU mode info fields not yet fully utilized
-#![allow(dead_code)]
+// GPU driver
 
 use core::slice;
 
@@ -78,6 +77,7 @@ pub struct GpuDriver {
     width: usize,
     height: usize,
     pitch: usize,
+    #[allow(dead_code)] // Bytes-per-pixel for VBE/GOP framebuffer formats
     bpp: usize,
     pixel_format: PixelFormat,
 }

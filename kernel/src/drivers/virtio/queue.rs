@@ -24,7 +24,6 @@
 //! access a `VirtQueue` from multiple threads without external synchronization.
 
 // Split virtqueue -- shared data structure for all virtio device types
-#![allow(dead_code)]
 
 use core::sync::atomic::{self, Ordering};
 

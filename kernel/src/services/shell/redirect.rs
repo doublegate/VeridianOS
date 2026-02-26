@@ -3,7 +3,7 @@
 //! Parses `>`, `>>`, `<`, `<<<`, `2>`, and `2>&1` from the command token
 //! stream and applies them before command execution.
 
-// Shell I/O redirection -- parsing implemented, execution deferred
+// Shell I/O redirection -- apply functions deferred to Phase 6
 #![allow(dead_code)]
 
 use alloc::{string::String, vec::Vec};

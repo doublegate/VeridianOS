@@ -21,7 +21,6 @@
 //! See [`super::VirtioTransport`] for the unified transport enum.
 
 // Virtio MMIO transport -- AArch64/RISC-V device access
-#![allow(dead_code)]
 
 use core::ptr;
 
@@ -61,6 +60,7 @@ mod regs {
     pub const MAGIC: usize = 0x000; // Magic value "virt"
     pub const VERSION: usize = 0x004; // 1 = legacy, 2 = modern
     pub const DEVICE_ID: usize = 0x008;
+    #[allow(dead_code)] // Virtio MMIO register per spec
     pub const VENDOR_ID: usize = 0x00c;
     pub const DEVICE_FEATURES: usize = 0x010;
     pub const DEVICE_FEATURES_SEL: usize = 0x014;
@@ -128,6 +128,7 @@ impl VirtioMmioTransport {
     }
 
     #[inline]
+    #[allow(dead_code)] // Register-width API completeness
     fn write16(&self, offset: usize, value: u16) {
         // SAFETY: base + offset is an MMIO region mapped in the kernel's phys window.
         unsafe { ptr::write_volatile((self.base + offset) as *mut u16, value) }

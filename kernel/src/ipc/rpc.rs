@@ -168,6 +168,8 @@ impl RpcClient {
 pub struct RpcServer {
     endpoint_id: EndpointId,
     services: RwLock<BTreeMap<String, alloc::boxed::Box<dyn RpcService>>>,
+    /// Direct method_id -> service name dispatch table for O(1) lookup.
+    method_dispatch: RwLock<BTreeMap<MethodId, String>>,
 }
 
 impl RpcServer {
@@ -176,12 +178,20 @@ impl RpcServer {
         Self {
             endpoint_id,
             services: RwLock::new(BTreeMap::new()),
+            method_dispatch: RwLock::new(BTreeMap::new()),
         }
     }
 
     /// Register a service
     pub fn register_service(&self, service: alloc::boxed::Box<dyn RpcService>) {
         let name = service.name().to_string();
+        // Build dispatch table entries for all methods this service handles
+        let methods = service.methods();
+        let mut dispatch = self.method_dispatch.write();
+        for method_id in methods {
+            dispatch.insert(method_id, name.clone());
+        }
+        drop(dispatch);
         self.services.write().insert(name, service);
     }
 
@@ -207,20 +217,20 @@ impl RpcServer {
                     params.push(((value >> (i * 8)) & 0xFF) as u8);
                 }
 
-                // TODO(phase5): Optimize service dispatch with direct method_id lookup
-                let services = self.services.read();
+                // O(1) service dispatch via method_id lookup table
+                let dispatch = self.method_dispatch.read();
+                let service_name = dispatch.get(&method_id);
 
-                // Find service that handles this method
                 let mut result = Vec::new();
                 let mut found = false;
 
-                for service in services.values() {
-                    if service.methods().contains(&method_id) {
+                if let Some(name) = service_name {
+                    let services = self.services.read();
+                    if let Some(service) = services.get(name) {
                         match service.handle_method(method_id, &params) {
                             Ok(response_data) => {
                                 result = response_data;
                                 found = true;
-                                break;
                             }
                             Err(err) => {
                                 // Send error response
