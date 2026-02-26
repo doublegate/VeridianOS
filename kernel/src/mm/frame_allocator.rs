@@ -991,6 +991,183 @@ impl Default for FrameAllocator {
 /// Global frame allocator instance
 pub static FRAME_ALLOCATOR: Mutex<FrameAllocator> = Mutex::new(FrameAllocator::new());
 
+// ============================================================================
+// Per-CPU Page Cache
+// ============================================================================
+
+/// Per-CPU page frame cache to reduce global FRAME_ALLOCATOR contention.
+///
+/// Single-frame allocations (page faults, mmap, fork) dominate. By caching
+/// frames per-CPU, we avoid acquiring the global lock on every allocation.
+///
+/// When the cache is empty, it batch-refills from the global allocator.
+/// When full, it batch-drains back to the global allocator.
+pub struct PerCpuPageCache {
+    /// Cached frame numbers
+    frames: [u64; Self::CAPACITY],
+    /// Number of valid entries in `frames`
+    count: usize,
+}
+
+impl Default for PerCpuPageCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PerCpuPageCache {
+    /// Maximum frames cached per CPU
+    const CAPACITY: usize = 64;
+    /// Refill from global when cache drops below this
+    const LOW_WATERMARK: usize = 16;
+    /// Drain to global when cache exceeds this
+    const HIGH_WATERMARK: usize = 48;
+    /// Number of frames to transfer in a batch
+    const BATCH_SIZE: usize = 32;
+
+    pub const fn new() -> Self {
+        Self {
+            frames: [0; Self::CAPACITY],
+            count: 0,
+        }
+    }
+
+    /// Try to allocate a single frame from the per-CPU cache.
+    /// Returns None if cache is empty (caller should refill from global).
+    #[inline]
+    pub fn alloc_one(&mut self) -> Option<FrameNumber> {
+        if self.count == 0 {
+            return None;
+        }
+        self.count -= 1;
+        Some(FrameNumber::new(self.frames[self.count]))
+    }
+
+    /// Return a single frame to the per-CPU cache.
+    /// Returns false if cache is full (caller should drain to global).
+    #[inline]
+    pub fn free_one(&mut self, frame: FrameNumber) -> bool {
+        if self.count >= Self::CAPACITY {
+            return false;
+        }
+        self.frames[self.count] = frame.as_u64();
+        self.count += 1;
+        true
+    }
+
+    /// Is the cache below the low watermark?
+    #[inline]
+    pub fn needs_refill(&self) -> bool {
+        self.count < Self::LOW_WATERMARK
+    }
+
+    /// Is the cache above the high watermark?
+    #[inline]
+    pub fn needs_drain(&self) -> bool {
+        self.count > Self::HIGH_WATERMARK
+    }
+
+    /// Batch-refill from the global frame allocator.
+    /// Acquires the global lock once, filling up to BATCH_SIZE frames.
+    pub fn batch_refill(&mut self) {
+        let global = FRAME_ALLOCATOR.lock();
+        let to_refill = Self::BATCH_SIZE.min(Self::CAPACITY - self.count);
+        for _ in 0..to_refill {
+            match global.allocate_frames(1, None) {
+                Ok(frame) => {
+                    self.frames[self.count] = frame.as_u64();
+                    self.count += 1;
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    /// Batch-drain excess frames back to the global allocator.
+    /// Acquires the global lock once, returning BATCH_SIZE frames.
+    pub fn batch_drain(&mut self) {
+        let global = FRAME_ALLOCATOR.lock();
+        let to_drain = Self::BATCH_SIZE.min(self.count);
+        for _ in 0..to_drain {
+            if self.count == 0 {
+                break;
+            }
+            self.count -= 1;
+            let frame = FrameNumber::new(self.frames[self.count]);
+            let _ = global.free_frames(frame, 1);
+        }
+    }
+
+    /// Number of cached frames
+    pub fn cached_count(&self) -> usize {
+        self.count
+    }
+}
+
+/// Per-CPU page caches (one per CPU, protected by per-CPU access pattern)
+///
+/// SAFETY: Each CPU accesses only its own index via `current_cpu_id()`.
+/// During bootstrap, only CPU 0 runs. After SMP bringup, each CPU
+/// initializes its own cache. No cross-CPU access occurs.
+static PER_CPU_PAGE_CACHES: Mutex<[PerCpuPageCache; 16]> =
+    Mutex::new([const { PerCpuPageCache::new() }; 16]);
+
+/// Allocate a single physical frame using the per-CPU cache.
+///
+/// Fast path: no global lock contention for single-frame allocs.
+/// Falls back to global allocator if cache is empty and refill fails.
+pub fn per_cpu_alloc_frame() -> Result<FrameNumber> {
+    let cpu_id = crate::sched::smp::current_cpu_id() as usize;
+
+    let mut caches = PER_CPU_PAGE_CACHES.lock();
+    let cache = &mut caches[cpu_id.min(15)];
+
+    // Try cache first
+    if let Some(frame) = cache.alloc_one() {
+        return Ok(frame);
+    }
+
+    // Cache empty -- batch refill from global
+    cache.batch_refill();
+
+    // Try again after refill
+    if let Some(frame) = cache.alloc_one() {
+        return Ok(frame);
+    }
+
+    // Still empty -- fall back to direct global allocation
+    FRAME_ALLOCATOR.lock().allocate_frames(1, None)
+}
+
+/// Free a single physical frame using the per-CPU cache.
+///
+/// Fast path: no global lock contention for single-frame frees.
+/// Drains excess frames back to global if cache is full.
+pub fn per_cpu_free_frame(frame: FrameNumber) -> Result<()> {
+    let cpu_id = crate::sched::smp::current_cpu_id() as usize;
+
+    let mut caches = PER_CPU_PAGE_CACHES.lock();
+    let cache = &mut caches[cpu_id.min(15)];
+
+    // Try cache first
+    if cache.free_one(frame) {
+        // Drain excess if above high watermark
+        if cache.needs_drain() {
+            cache.batch_drain();
+        }
+        return Ok(());
+    }
+
+    // Cache full -- drain first, then retry
+    cache.batch_drain();
+    if cache.free_one(frame) {
+        return Ok(());
+    }
+
+    // Still full (shouldn't happen after drain) -- go direct
+    FRAME_ALLOCATOR.lock().free_frames(frame, 1)
+}
+
 #[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use super::*;

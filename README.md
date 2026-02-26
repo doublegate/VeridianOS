@@ -112,7 +112,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.5.6 (February 25, 2026) | **Releases Published**: 31 (v0.1.0 through v0.5.6)
+**Latest Release**: v0.5.7 (February 26, 2026) | **Releases Published**: 32 (v0.1.0 through v0.5.7)
 
 | Metric | Value |
 | ------ | ----- |
@@ -138,7 +138,7 @@ experiments/   Non-normative exploratory work
 | 2     | User Space Foundation     | **Complete** | v0.3.2  | Feb 2026 |
 | 3     | Security Hardening        | **Complete** | v0.3.2  | Feb 2026 |
 | 4     | Package Ecosystem         | **Complete** | v0.4.0  | Feb 2026 |
-| 5     | Performance Optimization  | **In Progress** | v0.5.6  | Feb 2026 |
+| 5     | Performance Optimization  | **In Progress (~75%)** | v0.5.7  | Feb 2026 |
 | 6     | Advanced Features and GUI | Planned      | --      | --       |
 
 For detailed release notes, see [Release History](docs/RELEASE-HISTORY.md).
@@ -198,7 +198,7 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 ### What Comes Next
 
 - **Native Binary Execution** -- Natively-compiled binaries execute on VeridianOS (NATIVE_ECHO_PASS verified in v0.5.6); sysinfo/edit programs compile natively
-- **Phase 5 Continued** -- Sub-microsecond IPC optimization, lock-free kernel paths, DPDK networking, NVMe optimization, profiling tools
+- **Phase 5 (~75%)** -- Per-CPU page caching, TLB batch/lazy optimization, IPC fast path with per-task registers, priority inheritance, micro-benchmark suite, software tracepoints; remaining: lock-free RCU, huge pages, deadline scheduling, hardware perf counters
 - **Phase 6: Advanced Features** -- Wayland compositor, desktop environment, multimedia, virtualization, cloud-native features, POSIX compatibility layer
 
 ### Technical Notes

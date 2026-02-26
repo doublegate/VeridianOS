@@ -43,10 +43,11 @@ use commands::{
     CpCommand, CutCommand, DateCommand, DfCommand, DmesgCommand, DotCommand, EchoCommand,
     EnvCommand, ExitCommand, ExportCommand, FalseCommand, FgCommand, FreeCommand, GrepCommand,
     HeadCommand, HelpCommand, HistoryCommand, JobsCommand, KillCommand, LsCommand, LsmodCommand,
-    MkdirCommand, MountCommand, MvCommand, PkgCommand, PrintfCommand, PsCommand, PwdCommand,
-    ReadCommand, RmCommand, SetCommand, SortCommand, SourceCommand, SyncCommand, TailCommand,
-    TeeCommand, TestCommand, TouchCommand, TrCommand, TrueCommand, TypeCommand, UnaliasCommand,
-    UnameCommand, UniqCommand, UnsetCommand, UptimeCommand, WcCommand, WhichCommand,
+    MkdirCommand, MountCommand, MvCommand, PerfCommand, PkgCommand, PrintfCommand, PsCommand,
+    PwdCommand, ReadCommand, RmCommand, SetCommand, SortCommand, SourceCommand, SyncCommand,
+    TailCommand, TeeCommand, TestCommand, TouchCommand, TrCommand, TraceCommand, TrueCommand,
+    TypeCommand, UnaliasCommand, UnameCommand, UniqCommand, UnsetCommand, UptimeCommand, WcCommand,
+    WhichCommand,
 };
 use spin::RwLock;
 pub use state::{get_shell, init, run_shell, try_get_shell};
@@ -728,6 +729,10 @@ impl Shell {
         builtins.insert("fg".into(), Box::new(FgCommand));
         builtins.insert("bg".into(), Box::new(BgCommand));
         builtins.insert("jobs".into(), Box::new(JobsCommand));
+
+        // Performance commands
+        builtins.insert("perf".into(), Box::new(PerfCommand));
+        builtins.insert("trace".into(), Box::new(TraceCommand));
     }
 
     fn tokenize(&self, command_line: &str) -> Vec<String> {

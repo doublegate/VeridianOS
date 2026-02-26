@@ -43,6 +43,8 @@ pub struct CpuInfo {
     pub model: String,
     /// CPU features
     pub features: CpuFeatures,
+    /// Per-CPU page frame cache index (matches PER_CPU_PAGE_CACHES slot)
+    pub page_cache_id: u8,
 }
 
 /// CPU features
@@ -86,6 +88,7 @@ impl CpuInfo {
                 phys_addr_bits: 0,
                 virt_addr_bits: 0,
             },
+            page_cache_id: id,
         }
     }
 

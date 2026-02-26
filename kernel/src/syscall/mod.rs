@@ -501,6 +501,13 @@ pub extern "C" fn syscall_handler(
     // Track syscall count
     SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
 
+    // Trace: syscall entry
+    crate::trace!(
+        crate::perf::trace::TraceEventType::SyscallEntry,
+        syscall_num as u64,
+        arg1 as u64
+    );
+
     // Rate limiting check
     if !SYSCALL_RATE_LIMITER.check() {
         SYSCALL_ERRORS.fetch_add(1, Ordering::Relaxed);
@@ -530,10 +537,19 @@ pub extern "C" fn syscall_handler(
     // to avoid deadlocks.
     crate::security::audit::log_syscall(caller_pid, 0, syscall_num, success);
 
-    match result {
+    let ret = match result {
         Ok(value) => value as isize,
         Err(error) => error as i32 as isize,
-    }
+    };
+
+    // Trace: syscall exit
+    crate::trace!(
+        crate::perf::trace::TraceEventType::SyscallExit,
+        syscall_num as u64,
+        ret as u64
+    );
+
+    ret
 }
 
 /// Handle individual system calls

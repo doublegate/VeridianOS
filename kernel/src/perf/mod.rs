@@ -2,6 +2,9 @@
 //!
 //! Provides tools for profiling, optimization, and performance analysis.
 
+pub mod bench;
+pub mod trace;
+
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::KernelError;

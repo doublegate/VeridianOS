@@ -189,6 +189,16 @@ pub struct Task {
     pub migrations: u32,
     /// TLS base snapshot for context switch
     pub tls_base: u64,
+    /// Priority boost from priority inheritance protocol.
+    /// When a high-priority task blocks on a resource held by this task,
+    /// the holder's effective priority is boosted to prevent inversion.
+    pub priority_boost: Option<Priority>,
+    /// IPC register set for fast-path direct message transfer.
+    /// Sender copies message data here; receiver reads on wake-up.
+    pub ipc_regs: [u64; 7],
+    /// Whether this task has user-space address mappings.
+    /// Used for lazy TLB optimization: kernel threads skip CR3 reload.
+    pub has_user_mappings: bool,
 }
 
 impl Task {
@@ -227,6 +237,9 @@ impl Task {
             last_cpu: None,
             migrations: 0,
             tls_base: 0,
+            priority_boost: None,
+            ipc_regs: [0; 7],
+            has_user_mappings: false,
         }
     }
 
@@ -257,8 +270,19 @@ impl Task {
         }
     }
 
-    /// Calculate dynamic priority
+    /// Calculate dynamic priority, accounting for priority inheritance boost.
     pub fn effective_priority(&self) -> u8 {
+        // Priority inheritance: if a high-priority task is waiting on us,
+        // use the boosted priority to prevent priority inversion.
+        if let Some(boosted) = self.priority_boost {
+            let boosted_val = boosted as u8;
+            let base_val = self.priority as u8;
+            // Lower numeric value = higher priority
+            if boosted_val < base_val {
+                return boosted_val;
+            }
+        }
+
         match self.sched_class {
             SchedClass::RealTime => self.priority as u8,
             SchedClass::Normal => {

@@ -1900,7 +1900,7 @@ impl BuiltinCommand for UnameCommand {
             parts.push("veridian");
         }
         if show_release {
-            parts.push("0.5.6");
+            parts.push("0.5.7");
         }
         if show_machine {
             #[cfg(target_arch = "x86_64")]
@@ -2427,5 +2427,92 @@ impl BuiltinCommand for SyncCommand {
             crate::println!("sync: VFS not initialized");
             CommandResult::Error(String::from("VFS not initialized"))
         }
+    }
+}
+
+// ============================================================================
+// Performance Commands
+// ============================================================================
+
+pub(super) struct PerfCommand;
+impl BuiltinCommand for PerfCommand {
+    fn name(&self) -> &str {
+        "perf"
+    }
+    fn description(&self) -> &str {
+        "Run performance benchmarks"
+    }
+
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.len() > 1 && args[1] == "stats" {
+            // Show performance counters
+            let stats = crate::perf::get_stats();
+            crate::println!("Performance Counters:");
+            crate::println!("  Syscalls:         {}", stats.syscalls);
+            crate::println!("  Context switches: {}", stats.context_switches);
+            crate::println!("  Page faults:      {}", stats.page_faults);
+            crate::println!("  Interrupts:       {}", stats.interrupts);
+            crate::println!("  IPC messages:     {}", stats.ipc_messages);
+        } else if args.len() > 1 && args[1] == "reset" {
+            crate::perf::reset_stats();
+            crate::println!("Performance counters reset.");
+        } else {
+            // Run benchmarks
+            crate::perf::bench::run_all_benchmarks();
+        }
+        CommandResult::Success(0)
+    }
+}
+
+pub(super) struct TraceCommand;
+impl BuiltinCommand for TraceCommand {
+    fn name(&self) -> &str {
+        "trace"
+    }
+    fn description(&self) -> &str {
+        "Kernel tracing (on/off/dump)"
+    }
+
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.len() < 2 {
+            crate::println!("Usage: trace <on|off|dump|status>");
+            crate::println!("  on    - Enable kernel tracing");
+            crate::println!("  off   - Disable kernel tracing");
+            crate::println!("  dump  - Dump trace buffer (last 32 events)");
+            crate::println!("  status - Show tracing status");
+            return CommandResult::Success(0);
+        }
+
+        match args[1].as_str() {
+            "on" => {
+                crate::perf::trace::enable();
+                crate::println!("Tracing enabled.");
+            }
+            "off" => {
+                crate::perf::trace::disable();
+                crate::println!("Tracing disabled.");
+            }
+            "dump" => {
+                let count = if args.len() > 2 {
+                    args[2].parse::<usize>().unwrap_or(32)
+                } else {
+                    32
+                };
+                crate::perf::trace::dump_trace(count);
+            }
+            "status" => {
+                let enabled = crate::perf::trace::is_enabled();
+                let total = crate::perf::trace::total_events();
+                crate::println!(
+                    "Tracing: {} ({} events recorded)",
+                    if enabled { "enabled" } else { "disabled" },
+                    total
+                );
+            }
+            _ => {
+                crate::println!("Unknown trace command: {}", args[1]);
+            }
+        }
+        CommandResult::Success(0)
     }
 }

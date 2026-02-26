@@ -1,6 +1,6 @@
 # VeridianOS Master TODO List
 
-**Last Updated**: 2026-02-21 (Phase 4 Complete, Tier 6 COMPLETE, Tier 7 in progress)
+**Last Updated**: 2026-02-26 (Phase 5 ~75%, Tier 7 COMPLETE, v0.5.7)
 
 ## Project Overview Status
 
@@ -9,10 +9,10 @@
 - [x] **Phase 2: User Space Foundation** - COMPLETE (100%) v0.3.2 (February 14, 2026)
 - [x] **Phase 3: Security Hardening** - COMPLETE (100%) v0.3.2 (February 14, 2026)
 - [x] **Phase 4: Package Ecosystem** - COMPLETE (100%) v0.4.0 (February 15, 2026)
-- [ ] **Phase 5: Performance Optimization** - ~10% (data structures, NUMA scheduler, zero-copy networking)
+- [ ] **Phase 5: Performance Optimization** - ~75% (per-CPU caching, TLB batching, IPC fast path, priority inheritance, benchmarks, tracepoints)
 - [ ] **Phase 6: Advanced Features & GUI** - ~5% (type definitions only, Wayland/GPU framework stubs)
 
-## Current Version: v0.5.0 (February 21, 2026)
+## Current Version: v0.5.7 (February 26, 2026)
 
 ### Build Status
 - **x86_64**: 0 errors, 0 warnings, Stage 6 BOOTOK, 29/29 tests
@@ -25,7 +25,7 @@
 - static mut: 7 justified instances (early boot, per-CPU, heap backing)
 - Err("...") string literals: 0
 - Result<T, &str>: 1 justified (parser return)
-- #[allow(dead_code)]: ~42 instances
+- #[allow(dead_code)]: <100 instances (audited, per-item documented)
 - SAFETY comment coverage: >100% (410/389 unsafe blocks)
 - Soundness bugs: 0
 
@@ -111,22 +111,33 @@
   - [x] T6-3: Virtio-MMIO disk driver for AArch64/RISC-V
   - [x] T6-4: LLVM triple patch (veridian OS enum)
   - [x] T6-5: Thread support -- clone()/futex()/pthread (1,145 lines kernel + 556 lines libc)
-- [ ] **Tier 7: Full self-hosting loop** (in progress)
-  - [ ] T7-1: Rust user-space target JSON (x86_64, aarch64, riscv64)
-  - [ ] T7-2: Rust std port (platform layer for VeridianOS syscalls)
-  - [ ] T7-3: Native GCC on VeridianOS (static cross-build)
-  - [ ] T7-4: make/ninja cross-compiled (static binaries)
-  - [ ] T7-5: vpkg user-space migration (kernel → user-space binary)
+- [x] **Tier 7: Full self-hosting loop** (COMPLETE v0.5.0)
+  - [x] T7-1: Rust user-space target JSON (x86_64, aarch64, riscv64)
+  - [x] T7-2: Rust std port (platform layer for VeridianOS syscalls)
+  - [x] T7-3: Native GCC on VeridianOS (static cross-build, GCC 14.2 + binutils 2.43)
+  - [x] T7-4: make/ninja cross-compiled (GNU Make 4.4.1 + Ninja 1.12.1)
+  - [x] T7-5: vpkg user-space migration (176KB static ELF)
 
-### Phase 5: Performance Optimization (~10% actual)
+### Phase 5: Performance Optimization (~30% actual)
 - [x] NUMA-aware scheduling data structures (sched/numa.rs)
 - [x] Zero-copy networking framework (net/zero_copy.rs)
 - [x] Performance counters (perf/mod.rs)
-- [ ] Kernel-wide performance optimization
-- [ ] Lock-free algorithms (RCU, wait-free queues)
-- [ ] Power management
-- [ ] Benchmarking suite
-- [ ] Profile-guided optimization
+- [x] Scheduler context switch wiring (all 3 architectures)
+- [x] IPC blocking/wake with fast path framework
+- [x] TSS RSP0 management for per-task kernel stacks
+- [x] All 56 TODO(phase5) markers resolved
+- [x] User-space /sbin/init (PID 1 in Ring 3)
+- [x] Native binary execution (NATIVE_ECHO_PASS)
+- [x] Dead code audit (136 to <100 annotations)
+- [x] Per-CPU page free lists (PerCpuPageCache, batch refill/drain, v0.5.7)
+- [x] IPC fast path completion (per-task ipc_regs, direct register transfer, v0.5.7)
+- [x] TLB optimization (TlbFlushBatch, lazy TLB, tlb_generation, v0.5.7)
+- [x] Priority inheritance protocol (PiMutex, v0.5.7)
+- [x] Benchmarking suite (7 micro-benchmarks, perf shell builtin, v0.5.7)
+- [x] Software tracepoints (10 event types, per-CPU ring buffers, trace shell builtin, v0.5.7)
+- [ ] Lock-free algorithms (RCU, wait-free queues) -- deferred, requires SMP
+- [ ] Power management -- deferred, requires ACPI parser
+- [ ] Profile-guided optimization -- deferred, requires self-hosted Rust
 
 ### Phase 6: Advanced Features & GUI (~5% actual)
 - [x] Wayland compositor type definitions (desktop/wayland/)
@@ -155,7 +166,7 @@
 | Network Stack | Done | Done | Partial | Partial |
 | Package Manager | Done | Done | Partial | Done |
 | Crypto / Security | Done | Done | Partial | Done |
-| NUMA Scheduling | Done | Partial | Not Started | Not Started |
+| NUMA Scheduling | Done | Done | Partial | Partial |
 | Wayland/GPU | Done | Type Defs | Not Started | Not Started |
 
 ## Known Issues
@@ -181,7 +192,7 @@ See [REMEDIATION_TODO.md](REMEDIATION_TODO.md) for 37 identified gaps from Phase
 - [Phase 2 TODO](PHASE2_TODO.md) - COMPLETE
 - [Phase 3 TODO](PHASE3_TODO.md) - COMPLETE
 - [Phase 4 TODO](PHASE4_TODO.md) - COMPLETE
-- [Phase 5 TODO](PHASE5_TODO.md) - ~10% (future work)
+- [Phase 5 TODO](PHASE5_TODO.md) - ~30%
 - [Phase 6 TODO](PHASE6_TODO.md) - ~5% (future work)
 - [Remediation TODO](REMEDIATION_TODO.md) - Gaps from Phases 0-4
 - [Issues TODO](ISSUES_TODO.md) - Issue history
@@ -192,6 +203,13 @@ See [REMEDIATION_TODO.md](REMEDIATION_TODO.md) for 37 identified gaps from Phase
 
 | Version | Date | Summary |
 |---------|------|---------|
+| v0.5.7 | Feb 26, 2026 | Phase 5 sprint 2: per-CPU page caching, TLB batching, IPC fast path, priority inheritance, benchmarks, tracepoints |
+| v0.5.6 | Feb 25, 2026 | Phase 5 sprint 1: scheduler context switch, IPC blocking/wake, /sbin/init, dead_code audit, native execution |
+| v0.5.5 | Feb 25, 2026 | POSIX partial munmap, consolidated brk(), native BusyBox 208/208 PASS |
+| v0.5.4 | Feb 25, 2026 | Critical memory leak fixes: GP fault wrmsr, page table subtree leak, thread stack lifecycle |
+| v0.5.3 | Feb 24, 2026 | BusyBox ash compat, process lifecycle hardening, ARG_MAX, strftime/popen |
+| v0.5.2 | Feb 24, 2026 | BusyBox B-5 through B-17: EPIPE, float printf, sbrk hardening, POSIX regex, CI fix |
+| v0.5.1 | Feb 23, 2026 | 6 coreutils, pipe fd fix, tri-arch clippy clean |
 | v0.5.0 | Feb 21, 2026 | Self-hosting T7 complete, user-space foundation (exec/fork/fd/shell), dead_code audit |
 | v0.4.9 | Feb 18, 2026 | Self-hosting Tiers 0-5, complete libc, virtio-blk, 30+ syscalls, user-space exec |
 | v0.4.8 | Feb 16, 2026 | Fbcon scroll fix, KVM acceleration, version sync |

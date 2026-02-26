@@ -578,6 +578,25 @@ impl Scheduler {
         }
 
         let start_cycles = super::metrics::read_tsc();
+
+        // Trace: record context switch
+        // SAFETY: next is a valid NonNull<Task>.
+        unsafe {
+            let next_ref = next.as_ref();
+            if let Some(current) = self.current {
+                let current_ref = current.as_ptr().as_ref();
+                crate::trace!(
+                    crate::perf::trace::TraceEventType::SchedSwitchOut,
+                    current_ref.pid.0,
+                    current_ref.tid.0
+                );
+            }
+            crate::trace!(
+                crate::perf::trace::TraceEventType::SchedSwitchIn,
+                next_ref.pid.0,
+                next_ref.tid.0
+            );
+        }
         // SAFETY: If self.current is Some, its TaskPtr points to a valid Task.
         // We read the state field to determine if the context switch is
         // voluntary (task blocked/sleeping) or involuntary (preemption).
@@ -628,6 +647,35 @@ impl Scheduler {
                 let kernel_sp = (*next.as_ptr()).kernel_stack;
                 if kernel_sp != 0 {
                     crate::arch::x86_64::gdt::set_kernel_stack(kernel_sp as u64);
+                }
+            }
+
+            // Lazy TLB: skip CR3 reload when switching to kernel threads
+            // (has_user_mappings == false). Kernel threads share the same
+            // kernel page table mappings, so CR3 reload is unnecessary.
+            // This saves ~100-300 cycles per kernel-to-kernel switch.
+            if (*next.as_ptr()).has_user_mappings {
+                let next_pt = (*next.as_ptr()).page_table;
+                if next_pt != 0 {
+                    // Only reload CR3 if switching to a different address space
+                    let current_pt = if let Some(current) = self.current {
+                        (*current.as_raw()).page_table
+                    } else {
+                        0
+                    };
+                    if next_pt != current_pt {
+                        #[cfg(target_arch = "x86_64")]
+                        {
+                            // SAFETY: next_pt is a valid page table physical address
+                            // from the Task struct, set during process creation.
+                            // Already inside an unsafe block from the parent scope.
+                            core::arch::asm!(
+                                "mov cr3, {}",
+                                in(reg) next_pt,
+                                options(nostack, preserves_flags)
+                            );
+                        }
+                    }
                 }
             }
 

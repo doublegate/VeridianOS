@@ -337,6 +337,75 @@ pub struct VirtualAddressSpace {
     stack_top: AtomicU64,
     /// Stack size (bytes)
     stack_size: AtomicU64,
+
+    /// TLB generation counter. Incremented on every page table modification.
+    /// The scheduler compares this against the last-seen generation at switch
+    /// time to determine whether a TLB flush is needed.
+    pub tlb_generation: AtomicU64,
+}
+
+/// Batched TLB flush accumulator.
+///
+/// Collects up to `MAX_BATCH` virtual addresses for individual flushes.
+/// If more than `MAX_BATCH` addresses are accumulated, the entire TLB is
+/// flushed on commit. This reduces the overhead of multiple individual
+/// `invlpg` instructions in loops (e.g., munmap of many pages).
+pub struct TlbFlushBatch {
+    addresses: [u64; Self::MAX_BATCH],
+    count: usize,
+}
+
+impl Default for TlbFlushBatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TlbFlushBatch {
+    const MAX_BATCH: usize = 16;
+
+    /// Create a new empty batch.
+    pub const fn new() -> Self {
+        Self {
+            addresses: [0; Self::MAX_BATCH],
+            count: 0,
+        }
+    }
+
+    /// Add an address to the batch. Does not flush yet.
+    #[inline]
+    pub fn add(&mut self, vaddr: u64) {
+        if self.count < Self::MAX_BATCH {
+            self.addresses[self.count] = vaddr;
+        }
+        self.count += 1; // Allow overflow past MAX_BATCH to trigger full flush
+    }
+
+    /// Flush all accumulated addresses. If > MAX_BATCH, do a full TLB flush.
+    pub fn flush(self) {
+        if self.count == 0 {
+            return;
+        }
+        if self.count > Self::MAX_BATCH {
+            // Too many addresses -- full TLB flush is cheaper
+            crate::arch::tlb_flush_all();
+        } else {
+            // Individual flushes for small batches
+            for i in 0..self.count {
+                crate::arch::tlb_flush_address(self.addresses[i]);
+            }
+        }
+    }
+
+    /// Number of addresses accumulated
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Is the batch empty?
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
 }
 
 impl Default for VirtualAddressSpace {
@@ -353,6 +422,7 @@ impl Default for VirtualAddressSpace {
             // Stack starts at 0x7FFF_FFFF_0000 and grows down
             stack_top: AtomicU64::new(0x7FFF_FFFF_0000),
             stack_size: AtomicU64::new(8 * 1024 * 1024),
+            tlb_generation: AtomicU64::new(0),
         }
     }
 }

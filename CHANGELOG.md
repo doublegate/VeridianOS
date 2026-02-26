@@ -2,6 +2,65 @@
 
 ---
 
+## [v0.5.7] - 2026-02-26
+
+### v0.5.7: Phase 5 Performance Optimization -- Per-CPU Caching, TLB Batching, IPC Fast Path, Priority Inheritance, Benchmarks, Tracepoints
+
+Completes 6 implementation sprints bringing Phase 5 from ~30% to ~75-80%. Adds per-CPU page frame caching (eliminates global lock contention for single-frame allocations), TLB flush batching with lazy TLB optimization, functional IPC fast path with per-task register storage, priority inheritance mutex (PiMutex), in-kernel micro-benchmark suite with Phase 5 target comparison, and software tracepoints with per-CPU ring buffers. Includes "perf" and "trace" shell builtins.
+
+---
+
+### Added
+
+#### Per-CPU Page Frame Cache (kernel/src/mm/frame_allocator.rs, sched/smp.rs)
+
+- `PerCpuPageCache`: 64-frame per-CPU cache with LOW_WATERMARK (16) and HIGH_WATERMARK (48) thresholds, BATCH_SIZE (32) for amortized global lock access.
+- `per_cpu_alloc_frame()` / `per_cpu_free_frame()`: Lock-free single-frame allocation on the hot path; batch refill/drain from global allocator only when watermarks are crossed.
+- `CpuInfo::page_cache_id`: Per-CPU page cache index in smp.rs.
+
+#### IPC Fast Path Completion (kernel/src/ipc/fast_path.rs, sched/task.rs)
+
+- `Task::ipc_regs`: Per-task IPC register storage (`[u64; 7]`) for sub-microsecond direct message transfer between processes.
+- `fast_send()`: Rewired to write directly into target Task::ipc_regs and wake receiver via scheduler, replacing placeholder that always returned None.
+- `fast_receive()`: Reads from current task's ipc_regs on wakeup.
+- `find_task_by_pid()`: O(1) scheduler task lookup replacing dummy find_process_fast().
+- `SLOW_PATH_FALLBACK_COUNT`: Counter for slow path fallbacks, exposed via `get_slow_path_count()`.
+
+#### TLB Optimization (kernel/src/mm/vas.rs, sched/scheduler.rs)
+
+- `TlbFlushBatch`: Accumulates up to 16 virtual addresses for individual `invlpg` flushes; falls back to full TLB flush when exceeded. Reduces overhead in munmap/exec loops.
+- `VirtualAddressSpace::tlb_generation`: Atomic generation counter for change detection at context switch time.
+- Lazy TLB in `switch_to()`: Skips CR3 reload when switching to kernel threads (`has_user_mappings == false`).
+- `Task::has_user_mappings`: Boolean flag for lazy TLB optimization.
+
+#### Priority Inheritance Protocol (kernel/src/process/sync.rs, sched/task.rs)
+
+- `PiMutex`: Priority inheritance mutex with owner tracking, priority boosting, and original priority restoration on unlock.
+- `Task::priority_boost`: Optional priority boost field checked by `effective_priority()`.
+- Prevents unbounded priority inversion when high-priority tasks block on resources held by low-priority tasks.
+
+#### Benchmarking Suite (kernel/src/perf/bench.rs, services/shell/)
+
+- 7 micro-benchmarks: `syscall_getpid`, `frame_alloc_1` (per-CPU), `frame_alloc_global`, `cap_validate`, `atomic_counter`, `ipc_stats_read`, `sched_current`.
+- Phase 5 performance targets: syscall <500ns, context switch <10us, IPC small <1us, frame alloc <500ns, capability lookup <100ns.
+- `run_all_benchmarks()`: Formatted results table with PASS/FAIL per target.
+- `perf` shell builtin: `perf` (run benchmarks), `perf stats` (show counters), `perf reset` (reset counters).
+
+#### Software Tracepoints (kernel/src/perf/trace.rs, syscall/mod.rs, sched/scheduler.rs)
+
+- `TraceEventType`: 10 event types (SyscallEntry/Exit, SchedSwitchOut/In, IpcFastSend/Receive, FrameAlloc/Free, PageFault, IpcSlowPath).
+- Per-CPU ring buffers: 4096 events per CPU (128KB per CPU), zero overhead when disabled (single AtomicBool check).
+- `trace!()` macro for zero-cost tracing instrumentation.
+- Trace points inserted at syscall entry/exit and scheduler context switch.
+- `trace` shell builtin: `trace on/off/dump/status`.
+
+### Changed
+
+- `scheduler.rs`: Context switch now skips CR3 reload for kernel threads (lazy TLB optimization).
+- Documentation: MASTER_TODO.md, PHASE5_TODO.md, RELEASE_TODO.md updated to reflect v0.5.6 actual state before new implementation.
+
+---
+
 ## [v0.5.6] - 2026-02-25
 
 ### v0.5.6: Phase 5 Implementation -- Scheduler, IPC, Init, Dead Code Audit + Native Execution

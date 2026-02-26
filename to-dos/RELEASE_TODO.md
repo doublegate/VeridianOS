@@ -1,9 +1,9 @@
 # Release Management TODO
 
 **Purpose**: Track release planning, milestones, and deployment tasks
-**Last Updated**: February 21, 2026
-**Current Version**: v0.5.0 (Released February 21, 2026)
-**Current Status**: Phases 0-4.5 Complete. Self-hosting Tiers 0-7 COMPLETE. 25 releases published (v0.1.0 through v0.5.0).
+**Last Updated**: February 26, 2026
+**Current Version**: v0.5.7 (Released February 26, 2026)
+**Current Status**: Phases 0-4.5 Complete. Self-hosting Tiers 0-7 COMPLETE. Phase 5 ~75%. 32 releases published (v0.1.0 through v0.5.7).
 
 ## 🎯 Release Strategy
 
@@ -115,6 +115,67 @@ Following Semantic Versioning (SemVer):
 - [x] Framebuffer console: UEFI GOP (x86_64), ramfb (AArch64/RISC-V), PS/2 keyboard
 - [x] Self-hosting: complete libc (17 files, 6,547 LOC), GCC cross-compiler, virtio-blk, TAR rootfs
 - [x] User-space exec: /bin/minimal runs, CR3 switching removed (~2000 cycles/syscall saved)
+
+#### v0.5.7 - Phase 5 Sprint 2: Performance Optimization -- RELEASED
+**Released**: February 26, 2026
+**Phase**: Phase 5 (Performance Optimization) ~75%
+**Achievements**:
+- [x] Per-CPU page frame cache (PerCpuPageCache, 64-frame, batch refill/drain)
+- [x] IPC fast path completion (per-task ipc_regs, direct register transfer)
+- [x] TLB optimization (TlbFlushBatch, lazy TLB, tlb_generation counter)
+- [x] Priority inheritance protocol (PiMutex in process/sync.rs)
+- [x] Benchmarking suite (7 micro-benchmarks, perf shell builtin)
+- [x] Software tracepoints (10 event types, per-CPU ring buffers, trace shell builtin)
+- [x] Documentation sync (MASTER_TODO, PHASE5_TODO, RELEASE_TODO updated)
+
+#### v0.5.6 - Phase 5 Sprint 1 -- RELEASED
+**Released**: February 25, 2026
+**Phase**: Phase 5 (Performance Optimization) ~30%
+**Achievements**:
+- [x] Scheduler context switch wiring (all 3 architectures)
+- [x] IPC blocking/wake with fast path framework
+- [x] TSS RSP0 management for per-task kernel stacks
+- [x] User-space /sbin/init (PID 1 in Ring 3)
+- [x] Native binary execution (NATIVE_ECHO_PASS)
+- [x] Dead code audit (136 to <100 annotations)
+- [x] All 56 TODO(phase5) markers resolved
+
+#### v0.5.5 - POSIX Partial munmap + Native BusyBox -- RELEASED
+**Released**: February 25, 2026
+**Achievements**:
+- [x] POSIX-compliant partial munmap (5-case: exact, front/back trim, hole punch, sub-range)
+- [x] Consolidated brk() heap mapping (O(1) per extension)
+- [x] Native BusyBox 208/208 sources compiled + linked
+- [x] 12 missing libc stubs
+
+#### v0.5.4 - Critical Memory Leak Fixes -- RELEASED
+**Released**: February 25, 2026
+**Achievements**:
+- [x] GP fault wrmsr register constraint fix (release-only)
+- [x] Page table subtree leak fix during exec (~75MB over 630 execs)
+- [x] Thread stack lifecycle frame leak fix (~197MB over 630 processes)
+
+#### v0.5.3 - BusyBox Compatibility -- RELEASED
+**Released**: February 24, 2026
+**Achievements**:
+- [x] BusyBox ash shell compatibility (B-10)
+- [x] Process lifecycle hardening for 213+ sequential execs (B-11)
+- [x] ARG_MAX enforcement (128KB POSIX limit, B-13)
+- [x] strftime + popen/pclose (B-18)
+
+#### v0.5.2 - BusyBox Build Infrastructure -- RELEASED
+**Released**: February 24, 2026
+**Achievements**:
+- [x] EPIPE/BrokenPipe support, float printf, POSIX regex (1291 lines BRE/ERE)
+- [x] 384MB kernel heap, sbrk hardening, 30+ libc headers
+- [x] CI target fix (kernel code model)
+
+#### v0.5.1 - Coreutils + Pipe Fix -- RELEASED
+**Released**: February 23, 2026
+**Achievements**:
+- [x] 6 coreutils (echo/cat/wc/ls/sort/pipeline_test)
+- [x] pipe() fd ABI fix (usize -> i32)
+- [x] Tri-arch clippy clean
 
 #### v0.5.0 - Self-Hosting Complete + User-Space Foundation -- RELEASED
 **Released**: February 21, 2026
@@ -357,8 +418,8 @@ Thanks to all contributors!
 - Q4: v0.2.5, v0.3.0 (Architecture cleanup)
 
 ### 2026 (Completed + In Progress)
-- Q1: v0.3.1 through v0.4.9 (User Space, Security, Packages, Shell, Self-hosting Tiers 0-5)
-- Q2: v0.5.0 (Self-hosting Tier 6 + Performance) -- PLANNED
+- Q1: v0.3.1 through v0.5.7 (User Space, Security, Packages, Shell, Self-hosting, Phase 5)
+- Q2: v0.5.7+ (Phase 5 Performance + Phase 6 GUI) -- PLANNED
 - Q3: v0.6.0 (Rust self-hosting + Advanced features) -- PLANNED
 - Q4: v0.7.0 (Full self-hosting loop) -- PLANNED
 
