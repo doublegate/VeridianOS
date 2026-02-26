@@ -1030,47 +1030,27 @@ fn test_user_binary_load() {
                     kprintln!("[BOOT] Phase C: Native compilation tests");
 
                     // C-1: Single-file native compilation test
-                    // Compile coreutils/echo.c natively using GCC on VeridianOS
+                    // Compile coreutils echo.c (standalone, libc-only) natively
                     boot_run_program(
                         "/usr/bin/gcc",
                         &[
                             "gcc",
                             "-c",
+                            "-std=c11",
                             "-nostdinc",
                             "-isystem",
                             "/usr/include",
                             "-isystem",
                             "/usr/lib/gcc/x86_64-veridian/14.2.0/include",
-                            "-include",
-                            "/usr/src/busybox-1.36.1/include/autoconf.h",
-                            "-I",
-                            "/usr/src/busybox-1.36.1/include",
-                            "-I",
-                            "/usr/src/busybox-1.36.1/libbb",
-                            "-I",
-                            "/usr/src/busybox-1.36.1/coreutils",
-                            "-D_GNU_SOURCE",
-                            "-DNDEBUG",
-                            "-D_LARGEFILE_SOURCE",
-                            "-D_LARGEFILE64_SOURCE",
-                            "-D_FILE_OFFSET_BITS=64",
-                            "-DBB_VER=\"1.36.1\"",
-                            "-D__veridian__",
-                            "-D__linux__",
-                            "-DBB_GLOBAL_CONST=",
                             "-static",
                             "-fno-stack-protector",
                             "-ffreestanding",
                             "-mno-red-zone",
                             "-mcmodel=small",
-                            "-Wno-unused-parameter",
-                            "-Wno-implicit-function-declaration",
-                            "-Wno-return-type",
-                            "-Wno-int-conversion",
-                            "-Oz",
+                            "-O2",
                             "-o",
                             "/tmp/echo.o",
-                            "/usr/src/busybox-1.36.1/coreutils/echo.c",
+                            "/usr/src/coreutils/echo.c",
                         ],
                         env,
                     );
@@ -1195,9 +1175,9 @@ fn test_user_binary_load() {
                 }
             }
 
-            // Interactive ash (last -- will sit at prompt until killed)
-            kprintln!("[BOOT] Starting interactive ash shell");
-            boot_run_program("/bin/ash", &["ash"], env);
+            // Boot tests complete -- return to kernel_init_stage3_onwards()
+            // which runs Stage 6 (/sbin/init -> /bin/sh -> kernel shell).
+            kprintln!("[BOOT] Boot tests complete, returning to Stage 6");
         }
     }
 }
