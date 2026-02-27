@@ -15,6 +15,7 @@ pub mod ip;
 pub mod socket;
 pub mod tcp;
 pub mod udp;
+pub mod unix_socket;
 pub mod zero_copy;
 
 use alloc::vec::Vec;

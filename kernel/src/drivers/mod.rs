@@ -7,6 +7,7 @@ pub mod console;
 pub mod e1000;
 pub mod gpu;
 pub mod input;
+pub mod iommu;
 pub mod keyboard;
 pub mod network;
 pub mod nvme;

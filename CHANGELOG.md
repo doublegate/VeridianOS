@@ -2,6 +2,62 @@
 
 ---
 
+## [v0.5.11] - 2026-02-27
+
+### v0.5.11: Phase 5.5 Wave 3 -- DMA/IOMMU + Shared Memory/Unix Sockets + Lock-Free Kernel Paths
+
+Third Phase 5.5 Infrastructure Bridge release implementing I/O infrastructure, POSIX IPC primitives, and lock-free synchronization for high-performance kernel paths.
+
+---
+
+### Added
+
+#### DMA + IOMMU Foundation (kernel/src/drivers/iommu.rs ~310 lines, NEW) -- Sprint B-5
+
+- `DmarInfo`, `DrhdUnit`, `RmrrRegion`, `DeviceScope` structs for ACPI DMAR table parsing.
+- `ScatterGatherList` for multi-buffer DMA transfers (NVMe, network NICs).
+- `DmaCoherency` enum (Coherent, NonCoherent, WriteCombining) for buffer allocation policy.
+- `DmaDirection` enum (ToDevice, FromDevice, Bidirectional) for mapping hints.
+- `DmaMappedBuffer` with virtual/DMA address, coherency, and direction tracking.
+- `alloc_dma_buffer()` / `free_dma_buffer()`: Physically contiguous DMA buffer allocation with identity mapping.
+- `identity_map_dma()` / `unmap_dma()`: IOMMU identity mapping (pass-through, full page table translation deferred).
+- `iommu::init()`: DMAR table detection (non-fatal when absent, common on QEMU without intel-iommu).
+
+#### POSIX Shared Memory (kernel/src/ipc/posix_shm.rs ~300 lines, NEW) -- Sprint B-6
+
+- `shm_open()`: Create or open named shared memory objects with O_CREAT/O_EXCL semantics.
+- `shm_unlink()`: Remove named objects with deferred destruction (freed when last reference closes).
+- `shm_truncate()`: Set object size with contiguous physical frame allocation.
+- `shm_close()`: Reference-counted close with automatic cleanup.
+- `shm_stat()`: Query object ID, size, and reference count.
+- Global registry with 256 max objects, 255-byte name limit, 256MB max size.
+
+#### Unix Domain Sockets (kernel/src/net/unix_socket.rs ~500 lines, NEW) -- Sprint B-6
+
+- `socket_create()`: AF_UNIX socket creation (SOCK_STREAM and SOCK_DGRAM modes).
+- `socket_bind()` / `socket_listen()` / `socket_connect()` / `socket_accept()`: Full connection lifecycle for stream sockets.
+- `socket_send()` / `socket_recv()`: Data transfer with SCM_RIGHTS file descriptor passing support.
+- `socket_sendto()`: Connectionless datagram delivery to named sockets.
+- `socketpair()`: Anonymous connected socket pair creation.
+- `ScmRights` ancillary data for Wayland buffer handle passing.
+- Path-based binding with UNIX_PATH_MAX=108, backlog queue up to 128 connections.
+
+#### Lock-Free Kernel Paths (kernel/src/sync/) -- Sprint B-7
+
+- `sync::rcu` (~170 lines): Read-Copy-Update with epoch-based reclamation. `rcu_read_lock()`/`rcu_read_unlock()` (zero-lock reader-side), `synchronize_rcu()` (grace period wait), `call_rcu()` (deferred callback), `rcu_quiescent()` (per-CPU quiescent state reporting).
+- `sync::hazard` (~120 lines): Hazard pointer registry for lock-free memory reclamation. Per-CPU slots (4/CPU), `protect()`/`is_protected()`/`collect_protected()` for safe concurrent deallocation.
+- `sync::lockfree_queue` (~190 lines): Michael-Scott lock-free MPSC queue with AtomicPtr CAS. `push()` (multi-producer), `pop()` (single-consumer), sentinel-based with proper Drop cleanup.
+
+### Changed
+
+- Boot sequence: Skip automatic `/sbin/init` and `/bin/sh` loading; boot directly to native vsh shell. BusyBox ash available via `ash` command from vsh when rootfs loaded.
+- `kernel/src/sync/mod.rs`: Added `pub mod rcu`, `hazard`, `lockfree_queue` with re-exports.
+- `kernel/src/ipc/mod.rs`: Added `pub mod posix_shm`.
+- `kernel/src/net/mod.rs`: Added `pub mod unix_socket`.
+- `kernel/src/drivers/mod.rs`: Added `pub mod iommu`.
+
+---
+
 ## [v0.5.10] - 2026-02-27
 
 ### v0.5.10: Phase 5.5 Wave 2 -- IPI/SMP Foundation + PCI/PCIe Completion

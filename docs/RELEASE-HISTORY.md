@@ -8,6 +8,7 @@ For current project status, see the [README](../README.md). For task tracking, s
 
 ## Table of Contents
 
+- [v0.5.11 -- Phase 5.5 Wave 3: DMA/IOMMU + Shared Mem + Lock-Free](#v0511----phase-55-wave-3-dmaiommu--shared-mem--lock-free)
 - [v0.5.10 -- Phase 5.5 Wave 2: IPI/SMP + PCI/PCIe](#v0510----phase-55-wave-2-ipismp--pcipcie)
 - [v0.5.9 -- Phase 5.5 Wave 1: ACPI + APIC Timer](#v059----phase-55-wave-1-acpi--apic-timer)
 - [v0.5.8 -- Phase 5 Completion: Hot Path Wiring](#v058----phase-5-completion-hot-path-wiring)
@@ -46,6 +47,34 @@ For current project status, see the [README](../README.md). For task tracking, s
 - [v0.2.0 -- Phase 1 Microkernel Core](#v020----phase-1-microkernel-core)
 - [v0.1.0 -- Phase 0 Foundation and Tooling](#v010----phase-0-foundation-and-tooling)
 - [DEEP-RECOMMENDATIONS](#deep-recommendations)
+
+---
+
+## v0.5.11 -- Phase 5.5 Wave 3: DMA/IOMMU + Shared Mem + Lock-Free
+
+**Date**: February 27, 2026
+
+Phase 5.5 Wave 3 release implementing I/O infrastructure, POSIX IPC, and lock-free synchronization.
+
+### Sprint B-5: DMA + IOMMU Foundation
+- DMAR table structures for Intel VT-d detection (DrhdUnit, RmrrRegion, DeviceScope)
+- ScatterGatherList for multi-buffer DMA transfers
+- DmaCoherency/DmaDirection enums for buffer allocation policy
+- DmaMappedBuffer with alloc_dma_buffer()/free_dma_buffer() using identity mapping
+- IOMMU init with non-fatal DMAR absence detection
+
+### Sprint B-6: Shared Memory + Unix Domain Sockets
+- POSIX shm: shm_open/shm_unlink/shm_truncate/shm_close with reference counting
+- Unix sockets: AF_UNIX stream/datagram, bind/listen/connect/accept/send/recv
+- socketpair() for anonymous connected pairs
+- SCM_RIGHTS ancillary data for Wayland fd passing
+
+### Sprint B-7: Lock-Free Kernel Paths
+- RCU: epoch-based read-copy-update (rcu_read_lock, synchronize_rcu, call_rcu)
+- Hazard pointers: per-CPU slots for safe lock-free memory reclamation
+- Lock-free MPSC queue: Michael-Scott CAS-based queue for scheduler ready queues
+
+**Stats**: 11 files changed, ~1600 insertions
 
 ---
 
