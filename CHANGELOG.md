@@ -2,6 +2,78 @@
 
 ---
 
+## [v0.6.1] - 2026-02-27
+
+### v0.6.1: Phase 6 -- Graphical Desktop, Wayland Compositor, and Network Stack
+
+First graphical desktop release. Implements the Phase 6 core path across 5 waves (20 sprints), transforming VeridianOS from a text-mode microkernel into a graphical desktop OS with Wayland compositing, unified input events, and TCP/IP networking. Boots to a rendered desktop with windows, mouse cursor, and gradient background via the `startgui` shell command.
+
+---
+
+### Added
+
+#### Wave 1: Display and Input Foundation (syscalls 230-234)
+
+- **Framebuffer device interface** (`graphics/framebuffer.rs`): `FbInfo` struct with physical address tracking; `get_fb_info()` / `set_phys_addr()` accessors for user-space mmap; physical address computed from virtual pointer minus `PHYS_MEM_OFFSET` at boot.
+- **Physical region mmap** (`mm/vas.rs`): `map_physical_region()` maps existing physical frames (MMIO) into user-space VAS with proper page table wiring; `map_physical_region_user()` free-function allocates virtual address from mmap region and maps.
+- **PS/2 mouse driver** (`drivers/mouse.rs`): 3-byte packet decoding (status, dx, dy) via PS/2 auxiliary port polling; absolute cursor position with screen clamping; 64-entry lock-free ring buffer; controller configuration (enable aux port, IRQ12, data streaming); non-x86_64 stub architecture.
+- **Unified input event system** (`drivers/input_event.rs`): Linux evdev-compatible `InputEvent` struct (timestamp, type, code, value); `EV_KEY`/`EV_REL` event types; keyboard-to-event and mouse-to-event conversion with button state delta tracking; 256-entry ring buffer; `poll_all()` coalesces all input sources.
+- **Hardware cursor sprite** (`graphics/cursor.rs`): 16x16 arrow bitmap with separate black outline mask for any-background visibility; `draw_cursor()` composites onto pixel buffer.
+- **Framebuffer console accessors** (`graphics/fbcon.rs`): `FbHwInfo` struct exposing fb_ptr/width/height/stride/bpp/pixel_format; `get_hw_info()` / `disable_output()` for compositor takeover.
+- **Syscalls**: `FbGetInfo` (230), `FbMap` (231), `InputPoll` (232), `InputRead` (233), `FbSwap` (234).
+
+#### Wave 2: Wayland Compositor Core (syscalls 240-247)
+
+- **Wire protocol parser** (`desktop/wayland/protocol.rs`): Full message framing (object_id + size_opcode header); 8 argument types (Int, Uint, Fixed, String with NUL-padded 4-byte alignment, Object, NewId, Array, Fd); `parse_message()` returns message + bytes consumed; `serialize_message()` for events; event builders for callback.done, display.delete_id, registry.global, shm.format.
+- **SHM buffer management** (`desktop/wayland/buffer.rs`): `WlShmPool` with kernel-heap Vec<u8> backing; `create_buffer()` sub-allocation with offset/stride/format validation; `read_buffer_pixels()` / `write_buffer_pixels()` / `write_data()` for compositor and renderer access; global pool registry with `register_pool()` / `with_pool()` / `with_pool_mut()`.
+- **Surface compositing engine** (`desktop/wayland/compositor.rs`): Software back-buffer (XRGB8888, width*height u32); `composite()` clears to desktop background (0xFF2D3436), iterates surfaces in Z-order, reads pixel data from SHM pools; XRGB8888 direct copy, ARGB8888 per-pixel alpha blend (src-over-dst with a=255/a=0 fast paths), RGB565 5:6:5-to-8:8:8 expansion; atomic fb_width/fb_height for interior mutability; damage tracking via `request_composite()`.
+- **Double-buffered surface state** (`desktop/wayland/surface.rs`): Pending + committed `SurfaceState` with atomic swap on `commit()`; `attach_buffer()` / `damage()` / `damage_full()` / `clear_dirty()`; damage rect tracking.
+- **XDG Shell** (`desktop/wayland/shell.rs`): `XdgShell` manager with ping/pong lifecycle; `XdgSurface` with configure/ack_configure serial tracking and window geometry; `XdgToplevel` with title, app_id, window state (Normal/Maximized/Fullscreen/Minimized), size constraints; `build_initial_configure()` / `build_close_event()` event constructors.
+- **Wayland display server** (`desktop/wayland/mod.rs`): 9 interface handlers (wl_display sync/get_registry, wl_registry bind, wl_compositor create_surface, wl_shm create_pool, wl_shm_pool create_buffer, wl_surface attach/damage/commit, xdg_wm_base get_xdg_surface/pong, xdg_surface get_toplevel/ack_configure/set_window_geometry, xdg_toplevel set_title/set_app_id/set_maximized/set_fullscreen/set_minimized); global announcement of 3 interfaces + 2 SHM formats; per-client object namespace.
+- **Syscalls**: `WlConnect` (240), `WlDisconnect` (241), `WlSendMessage` (242), `WlRecvMessage` (243), `WlCreateShmPool` (244), `WlCreateSurface` (245), `WlCommitSurface` (246), `WlGetEvents` (247).
+
+#### Wave 3: Desktop Environment
+
+- **Terminal ANSI support** (`desktop/terminal.rs`): Full CSI escape sequence parser (Normal/Escape/Csi state machine); SGR color codes (30-37 foreground, 40-47 background, bold, reset); cursor movement (CSI A/B/C/D/H); erase in line (CSI K) and erase in display (CSI 2J).
+- **Desktop panel** (`desktop/panel.rs`): Taskbar with window list buttons (120px each, dark/light based on focus state); system clock (HH:MM from uptime); click-to-focus routing; 32px height; 8x16 font rendering into BGRA pixel buffer.
+- **Desktop renderer** (`desktop/renderer.rs`): `start_desktop()` entry point (called from `startgui` shell command); initializes desktop subsystem, configures Wayland compositor with framebuffer dimensions, creates initial desktop scene (gradient background + 2 demo windows with title bars), disables fbcon, enters render loop; `render_loop()` composites surfaces -> blits back-buffer to hardware framebuffer (BGR/RGB format conversion) -> draws cursor overlay -> polls input -> repeats at ~30fps; integer-math gradient (fixed-point 8.8, no soft-float overhead).
+- **Shell command** (`services/shell/commands.rs`, `mod.rs`): `startgui` command registered in shell builtins.
+
+#### Wave 4: Network Stack (syscalls 250-255)
+
+- **VirtIO-Net driver** (`drivers/virtio_net.rs`): Full VIRTIO_STATUS negotiation (reset -> ACKNOWLEDGE -> DRIVER -> FEATURES_OK -> DRIVER_OK); virtqueue setup reading QueueNumMax from MMIO, allocating desc/avail/used ring memory and per-descriptor 4KB data buffers; TX via descriptor chain (VirtioNetHeader + frame data) with device kick; RX via used ring polling with header stripping and descriptor recycling.
+- **Ethernet frames** (`net/ethernet.rs`): IEEE 802.3 parse/construct with EtherType dispatch (IPv4 0x0800, ARP 0x0806); `parse_frame()` zero-copy; `construct_frame()` builds dst+src+ethertype+payload; `is_for_us()` / `is_broadcast()` MAC matching.
+- **ARP cache** (`net/arp.rs`): `BTreeMap<Ipv4Address, ArpEntry>` with 300-tick timeout aging and 128-entry capacity with LRU eviction; `resolve()` / `update_cache()` / `process_arp_packet()` (request reply + cache update) / `send_arp_request()` (broadcast); `get_cache_entries()` / `flush_cache()` for shell integration.
+- **TCP state machine** (`net/tcp.rs`): 3-way handshake (SYN -> SYN-ACK -> ACK); data transfer with sequence numbers and MSS=1460; `build_tcp_segment()` constructs 20-byte headers; `process_tcp_state_transition()` handles SYN-ACK, ACK, data, FIN for all 11 TCP states; `send_tcp_via_ip()` routes through IP layer.
+- **DHCP client** (`net/dhcp.rs`): Full discover/offer/request/ack flow; `ParsedDhcpOptions` extracts subnet mask, router, DNS servers, lease time, server ID; `process_offer()` sends REQUEST; `process_ack()` configures interface IP via `set_interface_config()` and adds default route; `start()` sends DISCOVER via UDP broadcast.
+- **IP layer** (`net/ip.rs`): `InterfaceConfig` with IP/netmask/gateway/MAC; `send()` constructs IPv4 headers with identification counter, DF flag, checksum; ARP resolution for destination MAC; Ethernet frame wrapping.
+- **Socket extensions** (`net/socket.rs`): `sendto()`, `recvfrom()`, `getsockname()`, `getpeername()`, `setsockopt()`, `getsockopt()` free-function wrappers for syscall layer.
+- **Shell commands** (`services/shell/commands.rs`): `ifconfig` (interface IP/MAC/stats), `dhcp` (trigger discovery), `netstat` (socket table), `arp` (cache display + flush).
+- **Syscalls**: `NetSendTo` (250), `NetRecvFrom` (251), `NetGetSockName` (252), `NetGetPeerName` (253), `NetSetSockOpt` (254), `NetGetSockOpt` (255).
+
+### Changed
+
+- **Desktop module** (`lib.rs`): Removed `phase6-desktop` feature gate; desktop module always compiled.
+- **Desktop init** (`desktop/mod.rs`): Added `wayland::init()` call to desktop initialization sequence.
+- **Bootstrap** (`bootstrap.rs`): Framebuffer physical address stored for user-space mmap; PS/2 mouse driver initialized during Stage 4.
+- **PHYS_MEM_OFFSET** (`mm/mod.rs`): Made public for bootstrap framebuffer physical address calculation.
+- **Graphics compositor** (`graphics/compositor.rs`): Added `surface_id` field linking Window to Wayland surface; added `bg_color`, `focused_window()`, `window_count()` methods.
+
+### Build Verification
+
+- Tri-arch clean: 0 errors, 0 clippy warnings on x86_64, AArch64, RISC-V (all with `-D warnings`)
+- Boot: 29/29 tests pass, double BOOTOK on x86_64 and AArch64
+- RISC-V: 29/29 pass, single BOOTOK (Stage 6 OOM is pre-existing baseline issue)
+- Graphical desktop: verified rendering on x86_64 QEMU with KVM via VNC screenshot capture
+
+### Statistics
+
+- 37 files changed (10 new), +6,862/-267 lines
+- 19 new syscalls (230-255)
+- 5 new shell commands (startgui, ifconfig, dhcp, netstat, arp)
+
+---
+
 ## [v0.6.0] - 2026-02-27
 
 ### v0.6.0: Pre-Phase 6 Tech Debt Remediation -- Syscall Wiring, Stub Promotion, RCU Integration

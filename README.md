@@ -112,7 +112,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.6.0 (February 27, 2026) | **Releases Published**: 39 (v0.1.0 through v0.6.0)
+**Latest Release**: v0.6.1 (February 27, 2026) | **Releases Published**: 40 (v0.1.0 through v0.6.1)
 
 | Metric                 | Value                                           |
 | ---------------------- | ----------------------------------------------- |
@@ -140,7 +140,7 @@ experiments/   Non-normative exploratory work
 | 4     | Package Ecosystem         | **Complete**           | v0.4.0  | Feb 2026 |
 | 5     | Performance Optimization  | **Complete (~90%)**    | v0.5.8  | Feb 2026 |
 | 5.5   | Infrastructure Bridge     | **COMPLETE (100%)** | v0.5.13 | Feb 2026 |
-| 6     | Advanced Features and GUI | Planned                | --      | --       |
+| 6     | Advanced Features and GUI | **In Progress (~40%)** | v0.6.1  | Feb 2026 |
 
 For detailed release notes, see [Release History](docs/RELEASE-HISTORY.md).
 
@@ -199,8 +199,8 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### What Comes Next
 
-- **Phase 5.5 Integration** -- POSIX shared memory and Unix domain sockets wired to syscall table (12 new syscalls), hardware PMU initialized at boot, RCU quiescent state integrated into scheduler context switch, NVMe driver wired to PCI bus scan, IOMMU DMAR detection via ACPI, dynamic linker segment copying fixed (v0.6.0)
-- **Phase 6: Advanced Features** -- Wayland compositor, desktop environment, multimedia, virtualization, cloud-native features, POSIX compatibility layer
+- **Phase 6 Core** -- Wayland compositor with software rendering, graphical desktop with gradient background and windowed applications, PS/2 mouse driver, unified input event system, TCP/IP network stack with VirtIO-Net/Ethernet/ARP/TCP/DHCP, 19 new syscalls, `startgui` shell command boots to desktop (v0.6.1)
+- **Phase 6 Remaining** -- GPU acceleration, real Wayland client applications, multimedia, virtualization, cloud-native features, POSIX compatibility layer
 
 ### Technical Notes
 
@@ -214,7 +214,7 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### Maturity
 
-VeridianOS is an active research system. Phases 0 through 4 are architecturally stable; Phase 5 (performance) and Phase 6 (advanced features) are next.
+VeridianOS is an active research system. Phases 0 through 5.5 are architecturally stable; Phase 6 (advanced features and GUI) is in active development with a functional graphical desktop.
 
 Historical status is recorded in:
 
@@ -436,9 +436,11 @@ Security is a fundamental design principle:
 - [x] **Phase 5.5 Infrastructure Bridge**: ACPI table parser, APIC timer 1000Hz preemptive scheduling, IPI/SMP, PCI/PCIe completion, DMA/IOMMU, POSIX shared memory, Unix domain sockets, lock-free RCU/hazard pointers, NVMe driver, VirtIO-Net, hardware PMU, 2MB huge pages, dynamic linker (v0.5.9-v0.5.13, Feb 2026)
 - [x] **Pre-Phase 6 Tech Debt Remediation**: 12 new syscalls (shm_open/unlink/truncate, socket create/bind/listen/connect/accept/send/recv/close/socketpair), PMU bootstrap wiring, RCU scheduler integration, NVMe PCI enumeration, IOMMU DMAR detection, dynamic linker segment copy fix, stale documentation correction (v0.6.0, Feb 2026)
 
+- [x] **Phase 6 Core (Waves 1-5)**: Graphical desktop with Wayland compositor (wire protocol, SHM buffers, surface compositing, XDG shell), PS/2 mouse driver, unified input events, TCP/IP network stack (VirtIO-Net, Ethernet, ARP, TCP state machine, DHCP client), 19 new syscalls (230-255), `startgui` desktop command, 5 network shell commands (v0.6.1, Feb 2026)
+
 ### Upcoming
 
-- [ ] **Phase 6**: Advanced Features (8-9 months) -- Wayland compositor, desktop environment, multimedia, virtualization, cloud-native, POSIX compatibility layer
+- [ ] **Phase 6 Remaining**: GPU acceleration, real Wayland client applications, multimedia, virtualization, cloud-native, POSIX compatibility layer
 
 See [Release History](docs/RELEASE-HISTORY.md) for detailed per-release notes.
 
