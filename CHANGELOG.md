@@ -2,6 +2,39 @@
 
 ---
 
+## [v0.5.9] - 2026-02-27
+
+### v0.5.9: Phase 5.5 Wave 1 -- ACPI Table Parser + APIC Timer Preemptive Scheduling
+
+First Phase 5.5 Infrastructure Bridge release implementing the hardware foundation (Wave 1) required for multi-core, PCI/PCIe, and advanced driver support.
+
+---
+
+### Added
+
+#### ACPI Table Parser (kernel/src/arch/x86_64/acpi.rs) -- Sprint B-1
+
+- `acpi::init()`: Full ACPI table parser (~570 lines) discovering RSDP from bootloader_api `BootInfo.rsdp_addr`, parsing RSDT/XSDT (ACPI 1.0 + 2.0+), MADT (CPU/APIC topology), and MCFG (PCIe ECAM).
+- `AcpiInfo` struct: Stores parsed Local APIC entries, I/O APIC entries, Interrupt Source Overrides, LAPIC NMI entries, MCFG entries with accessor functions.
+- `irq_to_gsi()`: ISA IRQ to Global System Interrupt remapping via Interrupt Source Override table.
+- `with_acpi_info()`: Safe accessor for parsed ACPI state.
+- `acpi` shell command: Runtime ACPI table inspection (x86_64 only).
+
+#### APIC Timer + Interrupt Wiring -- Sprint B-2
+
+- `calibrate_timer()`: PIT channel 2 reference-based calibration measuring APIC timer frequency (~62731 ticks/ms, ~1003MHz bus with divide-by-16 on QEMU).
+- `start_timer(freq_hz)`: Configures APIC timer in periodic mode at specified frequency (1000Hz for 1ms scheduler preemption ticks).
+- `apic_timer_interrupt_handler` at IDT vector 48: Increments global tick counter, calls scheduler `tick()` with `try_lock()` deadlock prevention, sends APIC EOI.
+- `APIC_TIMER_VECTOR = 48`: Dedicated vector separate from PIC timer at vector 32 to allow coexistence.
+- Interrupts enabled at end of arch init after timer configuration.
+
+### Changed
+
+- `timer::tick()`: Removed `dead_code` annotation, now called from APIC timer handler. Uses `try_lock()` on scheduler to prevent deadlock from interrupt context.
+- `arch::x86_64::init()`: Now calibrates APIC timer, starts 1000Hz periodic timer, and enables interrupts at end of init sequence (previously skipped interrupt enable).
+
+---
+
 ## [v0.5.8] - 2026-02-27
 
 ### v0.5.8: Phase 5 Completion -- Hot Path Wiring, CapabilityCache, O(log n) IPC Lookup, Trace Instrumentation

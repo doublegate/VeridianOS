@@ -48,20 +48,22 @@ B-12 (Dynamic Linker) -- stretch goal
 **Depends on**: None
 **Blocked by**: None
 
-- [ ] Discover RSDP from UEFI system table
-- [ ] Parse RSDT/XSDT to enumerate child tables
-- [ ] Parse MADT (Multiple APIC Description Table)
-  - [ ] Local APIC entries (CPU enumeration)
-  - [ ] I/O APIC entries (interrupt routing)
-  - [ ] Interrupt source overrides
-- [ ] Parse MCFG (PCI Express config space base addresses)
-- [ ] Store parsed data in static structures
-- [ ] `acpi` shell command to dump parsed tables
+- [x] Discover RSDP from UEFI system table (bootloader_api `rsdp_addr`)
+- [x] Parse RSDT/XSDT to enumerate child tables (ACPI 1.0 + 2.0+)
+- [x] Parse MADT (Multiple APIC Description Table)
+  - [x] Local APIC entries (CPU enumeration)
+  - [x] I/O APIC entries (interrupt routing)
+  - [x] Interrupt source overrides + NMI entries
+- [x] Parse MCFG (PCI Express config space base addresses)
+- [x] Store parsed data in static structures (`ACPI_INFO: Mutex<Option<AcpiInfo>>`)
+- [x] `acpi` shell command to dump parsed tables
+- [x] `irq_to_gsi()` for interrupt source override lookup
 
 **Key files**:
-- CREATE: `kernel/src/arch/x86_64/acpi.rs` (~500-700 lines)
-- MODIFY: `kernel/src/arch/x86_64/mod.rs` (pub mod acpi)
-- MODIFY: `kernel/src/arch/x86_64/boot.rs` (call acpi::init())
+- CREATED: `kernel/src/arch/x86_64/acpi.rs` (~570 lines)
+- MODIFIED: `kernel/src/arch/x86_64/mod.rs` (pub mod acpi, init call)
+- MODIFIED: `kernel/src/services/shell/commands.rs` (AcpiCommand)
+- MODIFIED: `kernel/src/services/shell/mod.rs` (acpi builtin registration)
 
 **Not in scope**: Full AML interpreter, ACPI namespace, runtime ACPI methods.
 
@@ -75,17 +77,19 @@ B-12 (Dynamic Linker) -- stretch goal
 **Depends on**: B-1 (MADT provides APIC base address)
 **Blocked by**: B-1
 
-- [ ] Register timer interrupt handler at IDT vector 32
-- [ ] Calibrate APIC timer frequency (PIT or TSC reference)
-- [ ] Configure periodic mode at ~1000 Hz (1ms tick)
-- [ ] Timer handler calls `scheduler::timer_tick()`
-- [ ] Time slice expiry handling in scheduler
-- [ ] EOI (End Of Interrupt) after handler
+- [x] Register APIC timer interrupt handler at IDT vector 48 (dedicated, separate from PIC at 32)
+- [x] Calibrate APIC timer frequency (PIT channel 2 10ms reference)
+- [x] Configure periodic mode at ~1000 Hz (1ms tick) with divide-by-16
+- [x] Timer handler calls `timer::tick()` -> `scheduler.tick()` (try_lock deadlock-safe)
+- [x] Time slice expiry handling in scheduler (pre-existing `tick()` method)
+- [x] APIC EOI after handler (`apic::send_eoi()`)
+- [x] Enable interrupts after timer configuration
 
 **Key files**:
-- MODIFY: `kernel/src/arch/x86_64/apic.rs` (calibrate, start wiring)
-- MODIFY: `kernel/src/arch/x86_64/idt.rs` (vector 32 handler)
-- MODIFY: `kernel/src/sched/scheduler.rs` (timer_tick() entry point)
+- MODIFIED: `kernel/src/arch/x86_64/apic.rs` (calibrate_timer, start_timer, APIC_TIMER_VECTOR=48)
+- MODIFIED: `kernel/src/arch/x86_64/idt.rs` (apic_timer_interrupt_handler at vector 48)
+- MODIFIED: `kernel/src/arch/x86_64/timer.rs` (tick() wired, try_lock scheduler)
+- MODIFIED: `kernel/src/arch/x86_64/mod.rs` (calibrate+start in boot, enable_interrupts)
 
 **Verification**: Timer tick counter increments ~1000/sec; preemption observed.
 
@@ -354,8 +358,8 @@ These items are NOT planned for Phase 5.5:
 
 | Sprint | Component | Analysis | Implementation | Testing | Complete |
 |--------|-----------|----------|---------------|---------|----------|
-| B-1 | ACPI Parser | Not Started | Not Started | Not Started | 0% |
-| B-2 | APIC Timer | Not Started | Not Started | Not Started | 0% |
+| B-1 | ACPI Parser | Done | Done | Done | 100% |
+| B-2 | APIC Timer | Done | Done | Done | 100% |
 | B-3 | IPI/SMP | Not Started | Not Started | Not Started | 0% |
 | B-4 | PCI/PCIe | Not Started | Not Started | Not Started | 0% |
 | B-5 | DMA/IOMMU | Not Started | Not Started | Not Started | 0% |

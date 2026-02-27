@@ -80,6 +80,9 @@ const SVR_ENABLE: u32 = 1 << 8;
 /// Default spurious interrupt vector number (0xFF by convention).
 const SPURIOUS_VECTOR: u8 = 0xFF;
 
+/// APIC timer interrupt vector (dedicated, separate from PIC timer at 32).
+pub const APIC_TIMER_VECTOR: u8 = 48;
+
 // ---------------------------------------------------------------------------
 // LVT Timer mode bits
 // ---------------------------------------------------------------------------
@@ -685,4 +688,164 @@ pub fn send_ipi(dest: u8, vector: u8) -> KernelResult<()> {
         }
         None => Err(KernelError::NotInitialized { subsystem: "APIC" }),
     }
+}
+
+// ---------------------------------------------------------------------------
+// APIC Timer calibration and start
+// ---------------------------------------------------------------------------
+
+/// Calibrated APIC timer ticks per millisecond. Set by `calibrate_timer()`.
+static APIC_TICKS_PER_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Whether the APIC timer has been calibrated and started.
+static APIC_TIMER_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Check whether the APIC timer is active.
+pub fn is_timer_active() -> bool {
+    APIC_TIMER_ACTIVE.load(Ordering::Acquire)
+}
+
+/// Get calibrated APIC timer ticks per millisecond.
+pub fn ticks_per_ms() -> u32 {
+    APIC_TICKS_PER_MS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Calibrate the APIC timer frequency using the PIT (8254) as a reference.
+///
+/// Method: Configure the APIC timer in one-shot mode with a large initial
+/// count, then use the PIT to measure how many APIC ticks elapse in a known
+/// time period (10ms). From this, compute ticks-per-millisecond.
+///
+/// Must be called after `init()` and before `start_timer()`.
+pub fn calibrate_timer() -> KernelResult<u32> {
+    let state = APIC_STATE.lock();
+    let s = state
+        .as_ref()
+        .ok_or(KernelError::NotInitialized { subsystem: "APIC" })?;
+
+    let lapic = &s.local_apic;
+
+    // Use divide-by-16 for calibration (gives good resolution).
+    let divide = 0x03u8; // divide by 16
+    lapic.write(LAPIC_TIMER_DIV, divide as u32);
+
+    // Set timer to one-shot mode with a very large initial count.
+    // Mask the interrupt during calibration.
+    lapic.write(LAPIC_LVT_TIMER, LVT_MASK | APIC_TIMER_VECTOR as u32);
+    lapic.write(LAPIC_TIMER_INIT_COUNT, 0xFFFF_FFFF);
+
+    // Use PIT channel 2 to measure ~10ms.
+    // PIT frequency = 1,193,182 Hz, so 10ms = 11,932 ticks.
+    const PIT_FREQ: u32 = 1_193_182;
+    const CALIBRATION_MS: u32 = 10;
+    let pit_ticks = PIT_FREQ * CALIBRATION_MS / 1000;
+
+    // SAFETY: PIT port I/O for calibration. Port 0x61 controls PIT gate/speaker,
+    // 0x43 is command, 0x42 is channel 2 data. These are standard x86 I/O ports.
+    unsafe {
+        use x86_64::instructions::port::Port;
+
+        // Configure PIT channel 2 for one-shot countdown.
+        let mut port_61 = Port::<u8>::new(0x61);
+        let mut cmd = Port::<u8>::new(0x43);
+        let mut ch2 = Port::<u8>::new(0x42);
+
+        // Disable speaker, enable gate for channel 2.
+        let gate = port_61.read();
+        port_61.write((gate & 0xFD) | 0x01); // gate=1, speaker=0
+
+        // Channel 2, lobyte/hibyte, one-shot mode.
+        cmd.write(0xB0);
+
+        // Load countdown value.
+        ch2.write((pit_ticks & 0xFF) as u8);
+        ch2.write(((pit_ticks >> 8) & 0xFF) as u8);
+
+        // Reset the gate to start countdown (toggle gate: low then high).
+        let g = port_61.read();
+        port_61.write(g & 0xFE); // gate low
+        port_61.write(g | 0x01); // gate high -- starts countdown
+
+        // Wait for PIT channel 2 output to go high (bit 5 of port 0x61).
+        loop {
+            let status = port_61.read();
+            if status & 0x20 != 0 {
+                break;
+            }
+        }
+    }
+
+    // Read how many APIC ticks elapsed during the PIT countdown.
+    let remaining = lapic.read(LAPIC_TIMER_CUR_COUNT);
+    let elapsed = 0xFFFF_FFFFu32.wrapping_sub(remaining);
+
+    // Stop the timer.
+    lapic.write(LAPIC_TIMER_INIT_COUNT, 0);
+
+    // Calculate ticks per millisecond.
+    let ticks_per_ms = elapsed / CALIBRATION_MS;
+
+    if ticks_per_ms == 0 {
+        println!("[APIC] Timer calibration failed: 0 ticks elapsed");
+        return Err(KernelError::HardwareError {
+            device: "APIC timer",
+            code: 0,
+        });
+    }
+
+    APIC_TICKS_PER_MS.store(ticks_per_ms, core::sync::atomic::Ordering::Relaxed);
+
+    // Estimate frequency in MHz.
+    let freq_mhz = (ticks_per_ms as u64 * 1000 * 16) / 1_000_000; // *16 for divisor
+    println!(
+        "[APIC] Timer calibrated: {} ticks/ms, ~{}MHz bus (div16)",
+        ticks_per_ms, freq_mhz
+    );
+
+    Ok(ticks_per_ms)
+}
+
+/// Start the APIC timer in periodic mode at approximately `freq_hz` Hz.
+///
+/// Must be called after `calibrate_timer()`. The timer fires vector
+/// `APIC_TIMER_VECTOR` (48) which must be registered in the IDT.
+pub fn start_timer(freq_hz: u32) -> KernelResult<()> {
+    let tpm = APIC_TICKS_PER_MS.load(core::sync::atomic::Ordering::Relaxed);
+    if tpm == 0 {
+        return Err(KernelError::NotInitialized {
+            subsystem: "APIC timer (not calibrated)",
+        });
+    }
+
+    // Calculate initial count for the desired frequency.
+    // ticks_per_ms * 1000 / freq_hz = ticks per interrupt period.
+    let initial_count = (tpm as u64 * 1000) / (freq_hz as u64);
+    if initial_count == 0 || initial_count > 0xFFFF_FFFF {
+        println!(
+            "[APIC] Invalid timer count for {}Hz: {}",
+            freq_hz, initial_count
+        );
+        return Err(KernelError::HardwareError {
+            device: "APIC timer",
+            code: freq_hz,
+        });
+    }
+
+    let state = APIC_STATE.lock();
+    let s = state
+        .as_ref()
+        .ok_or(KernelError::NotInitialized { subsystem: "APIC" })?;
+
+    // Configure periodic mode at APIC_TIMER_VECTOR with divide-by-16.
+    s.local_apic
+        .setup_timer(APIC_TIMER_VECTOR, 0x03, initial_count as u32);
+
+    APIC_TIMER_ACTIVE.store(true, Ordering::Release);
+
+    println!(
+        "[APIC] Timer started: {}Hz, initial_count={}, vector={}",
+        freq_hz, initial_count, APIC_TIMER_VECTOR
+    );
+
+    Ok(())
 }

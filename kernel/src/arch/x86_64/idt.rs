@@ -27,6 +27,8 @@ lazy_static! {
         idt[32].set_handler_fn(timer_interrupt_handler);
         // Add keyboard interrupt handler (IRQ1 = interrupt 33)
         idt[33].set_handler_fn(keyboard_interrupt_handler);
+        // Add APIC timer interrupt handler (vector 48, separate from PIC timer at 32)
+        idt[48].set_handler_fn(apic_timer_interrupt_handler);
         idt
     };
 }
@@ -284,6 +286,15 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
         let mut pic_command: Port<u8> = Port::new(0x20);
         pic_command.write(0x20); // EOI command
     }
+}
+
+extern "x86-interrupt" fn apic_timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    // Increment the global tick counter (atomic, always safe from interrupt
+    // context).
+    super::timer::tick();
+
+    // Send APIC End-Of-Interrupt (NOT PIC EOI -- APIC timer uses its own EOI path).
+    crate::arch::x86_64::apic::send_eoi();
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {

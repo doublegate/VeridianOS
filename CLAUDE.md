@@ -322,20 +322,21 @@ Currently implementing in phases:
 4. **Phase 3** (Months 16-21): Security hardening - **100% COMPLETE** ✅ (v0.3.2)
 5. **Phase 4** (Months 22-27): Package ecosystem - **100% COMPLETE** ✅ (v0.4.0)
 6. **Phase 5** (Months 28-33): Performance optimization - **~90% actual** (hot paths wired, CapabilityCache, O(log n) IPC PID lookup, trace instrumentation)
-7. **Phase 6** (Months 34-42): Advanced features and GUI - **~5% actual** (type definitions only)
+7. **Phase 5.5** (Bridge): Infrastructure for Phase 6 - **~15% actual** (ACPI parser, APIC timer, 10/12 sprints remaining)
+8. **Phase 6** (Months 34-42): Advanced features and GUI - **~5% actual** (type definitions only)
 
 ## Project Status
 
 | Area | Status |
 |------|--------|
 | **Repository** | <https://github.com/doublegate/VeridianOS> |
-| **Latest Release** | v0.5.8 (February 27, 2026) - Phase 5 completion: hot paths wired, CapabilityCache, O(log n) IPC PID lookup, trace instrumentation |
+| **Latest Release** | v0.5.9 (February 27, 2026) - Phase 5.5 Wave 1: ACPI table parser (MADT/MCFG), APIC timer calibration + 1000Hz preemptive scheduling |
 | **Build** | ✅ All 3 architectures compile, zero warnings |
 | **Boot** | ✅ All 3 architectures Stage 6 BOOTOK, 29/29 tests (fbcon + keyboard driver) |
 | **CI/CD** | ✅ GitHub Actions 100% pass rate |
 | **Documentation** | ✅ 25+ guides, GitHub Pages, mdBook, Rustdoc |
 
-**Previous Releases**: v0.5.7, v0.5.6, v0.5.5, v0.5.4, v0.5.3, v0.5.2, v0.5.1, v0.5.0, v0.4.9, v0.4.6, v0.4.5, v0.4.4, v0.4.3, v0.4.2, v0.4.1, v0.4.0, v0.3.9, v0.3.8, v0.3.7, v0.3.6, v0.3.5, v0.3.4, v0.3.3, v0.3.2, v0.3.1, v0.3.0, v0.2.5, v0.2.1, v0.2.0, v0.1.0
+**Previous Releases**: v0.5.8, v0.5.7, v0.5.6, v0.5.5, v0.5.4, v0.5.3, v0.5.2, v0.5.1, v0.5.0, v0.4.9, v0.4.6, v0.4.5, v0.4.4, v0.4.3, v0.4.2, v0.4.1, v0.4.0, v0.3.9, v0.3.8, v0.3.7, v0.3.6, v0.3.5, v0.3.4, v0.3.3, v0.3.2, v0.3.1, v0.3.0, v0.2.5, v0.2.1, v0.2.0, v0.1.0
 
 ## Implementation Status
 

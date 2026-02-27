@@ -198,7 +198,7 @@ See [REMEDIATION_TODO.md](REMEDIATION_TODO.md) for 37 identified gaps from Phase
 - [Phase 3 TODO](PHASE3_TODO.md) - COMPLETE
 - [Phase 4 TODO](PHASE4_TODO.md) - COMPLETE
 - [Phase 5 TODO](PHASE5_TODO.md) - ~90%
-- [Phase 5.5 TODO](PHASE5.5_TODO.md) - Bridge to Phase 6
+- [Phase 5.5 TODO](PHASE5.5_TODO.md) - ~15% (Wave 1: ACPI + APIC Timer complete)
 - [Phase 6 TODO](PHASE6_TODO.md) - ~5% (future work)
 - [Remediation TODO](REMEDIATION_TODO.md) - Gaps from Phases 0-4
 - [Issues TODO](ISSUES_TODO.md) - Issue history

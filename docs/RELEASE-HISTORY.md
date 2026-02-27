@@ -8,6 +8,7 @@ For current project status, see the [README](../README.md). For task tracking, s
 
 ## Table of Contents
 
+- [v0.5.9 -- Phase 5.5 Wave 1: ACPI + APIC Timer](#v059----phase-55-wave-1-acpi--apic-timer)
 - [v0.5.8 -- Phase 5 Completion: Hot Path Wiring](#v058----phase-5-completion-hot-path-wiring)
 - [v0.5.7 -- Phase 5 Performance Optimization](#v057----phase-5-performance-optimization)
 - [v0.5.6 -- Phase 5 Scheduler, IPC, Init](#v056----phase-5-scheduler-ipc-init)
@@ -44,6 +45,39 @@ For current project status, see the [README](../README.md). For task tracking, s
 - [v0.2.0 -- Phase 1 Microkernel Core](#v020----phase-1-microkernel-core)
 - [v0.1.0 -- Phase 0 Foundation and Tooling](#v010----phase-0-foundation-and-tooling)
 - [DEEP-RECOMMENDATIONS](#deep-recommendations)
+
+---
+
+## v0.5.9 -- Phase 5.5 Wave 1: ACPI + APIC Timer
+
+**Date**: February 27, 2026
+
+First Phase 5.5 Infrastructure Bridge release. Implements the hardware foundation (Wave 1) required for future multi-core, PCI, and driver support.
+
+### Sprint B-1: ACPI Table Parser
+
+Created `kernel/src/arch/x86_64/acpi.rs` (~570 lines):
+- RSDP discovery from bootloader_api `BootInfo.rsdp_addr` (UEFI system table)
+- RSDT/XSDT parsing with both ACPI 1.0 (32-bit pointers) and ACPI 2.0+ (64-bit pointers)
+- MADT parsing: Local APIC entries (CPU enumeration), I/O APIC entries (interrupt routing), Interrupt Source Overrides, LAPIC NMI entries
+- MCFG parsing: PCIe Enhanced Configuration Access Mechanism (ECAM) entries
+- Static storage via `ACPI_INFO: Mutex<Option<AcpiInfo>>` with `with_acpi_info()` accessor
+- `irq_to_gsi()` for ISA IRQ to Global System Interrupt remapping
+- `acpi` shell command for runtime table inspection
+
+### Sprint B-2: APIC Timer + Interrupt Wiring
+
+- APIC timer calibration using PIT channel 2 as 10ms reference (~62731 ticks/ms on QEMU, ~1003MHz bus with divide-by-16)
+- Periodic timer at 1000Hz (1ms tick) for preemptive scheduling via dedicated IDT vector 48
+- `apic_timer_interrupt_handler`: increments tick counter, calls scheduler `tick()` with `try_lock()` deadlock prevention, sends APIC EOI
+- Interrupts enabled at end of arch init after timer configuration
+- Timer tick() in timer.rs wired to scheduler (removed dead_code annotation)
+
+### Boot test (QEMU)
+
+x86_64: 29/29 tests, 2x BOOTOK, APIC timer 1000Hz, ACPI parsed (1 CPU, 1 I/O APIC, 5 ISOs)
+AArch64: 29/29 tests, 2x BOOTOK
+RISC-V: 29/29 tests, BOOTOK
 
 ---
 

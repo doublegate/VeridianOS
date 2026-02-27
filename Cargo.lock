@@ -191,7 +191,7 @@ dependencies = [
 
 [[package]]
 name = "veridian-kernel"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "bitflags 2.11.0",
  "bootloader_api",

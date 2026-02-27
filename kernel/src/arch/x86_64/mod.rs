@@ -4,6 +4,7 @@
 //! serial I/O (COM1 at 0x3F8), VGA text output, and I/O port primitives
 //! for the x86_64 platform.
 
+pub mod acpi;
 pub mod apic;
 pub mod boot;
 pub mod bootstrap;
@@ -100,8 +101,38 @@ pub fn init() {
         Err(e) => println!("[ARCH] APIC init skipped: {}", e),
     }
 
-    // Don't enable interrupts yet - they're all masked
-    println!("[ARCH] Skipping interrupt enable for now");
+    // Parse ACPI tables (MADT, MCFG) from UEFI firmware for hardware topology.
+    // Non-fatal: falls back to defaults if RSDP unavailable.
+    println!("[ARCH] Parsing ACPI tables...");
+    match acpi::init() {
+        Ok(()) => println!("[ARCH] ACPI tables parsed"),
+        Err(e) => println!("[ARCH] ACPI init skipped: {}", e),
+    }
+
+    // Calibrate and start the APIC timer for preemptive scheduling.
+    // Requires APIC to be initialized. Non-fatal: falls back to PIC timer
+    // (which must be explicitly enabled elsewhere) if calibration fails.
+    if apic::is_initialized() {
+        println!("[ARCH] Calibrating APIC timer...");
+        match apic::calibrate_timer() {
+            Ok(tpm) => {
+                println!("[ARCH] APIC timer calibrated: {} ticks/ms", tpm);
+                // Start periodic timer at ~1000 Hz (1ms tick) for scheduler preemption.
+                match apic::start_timer(1000) {
+                    Ok(()) => println!("[ARCH] APIC timer started at 1000Hz"),
+                    Err(e) => println!("[ARCH] APIC timer start failed: {}", e),
+                }
+            }
+            Err(e) => println!("[ARCH] APIC timer calibration failed: {}", e),
+        }
+    }
+
+    // Enable interrupts now that APIC timer is configured and IDT handlers
+    // are registered. The APIC timer fires vector 48 for scheduler preemption.
+    // PIC interrupts remain masked (keyboard/timer enabled separately by
+    // bootstrap when needed).
+    println!("[ARCH] Enabling interrupts");
+    enable_interrupts();
 }
 
 /// Halt the CPU. Used by panic/shutdown paths via `crate::arch::halt()`.

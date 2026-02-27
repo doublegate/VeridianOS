@@ -39,15 +39,15 @@ use alloc::{
 };
 
 use commands::{
-    AliasCommand, BgCommand, BracketTestCommand, CatCommand, CdCommand, ChmodCommand, ClearCommand,
-    CpCommand, CutCommand, DateCommand, DfCommand, DmesgCommand, DotCommand, EchoCommand,
-    EnvCommand, ExitCommand, ExportCommand, FalseCommand, FgCommand, FreeCommand, GrepCommand,
-    HeadCommand, HelpCommand, HistoryCommand, JobsCommand, KillCommand, LsCommand, LsmodCommand,
-    MkdirCommand, MountCommand, MvCommand, PerfCommand, PkgCommand, PrintfCommand, PsCommand,
-    PwdCommand, ReadCommand, RmCommand, SetCommand, SortCommand, SourceCommand, SyncCommand,
-    TailCommand, TeeCommand, TestCommand, TouchCommand, TrCommand, TraceCommand, TrueCommand,
-    TypeCommand, UnaliasCommand, UnameCommand, UniqCommand, UnsetCommand, UptimeCommand, WcCommand,
-    WhichCommand,
+    AcpiCommand, AliasCommand, BgCommand, BracketTestCommand, CatCommand, CdCommand, ChmodCommand,
+    ClearCommand, CpCommand, CutCommand, DateCommand, DfCommand, DmesgCommand, DotCommand,
+    EchoCommand, EnvCommand, ExitCommand, ExportCommand, FalseCommand, FgCommand, FreeCommand,
+    GrepCommand, HeadCommand, HelpCommand, HistoryCommand, JobsCommand, KillCommand, LsCommand,
+    LsmodCommand, MkdirCommand, MountCommand, MvCommand, PerfCommand, PkgCommand, PrintfCommand,
+    PsCommand, PwdCommand, ReadCommand, RmCommand, SetCommand, SortCommand, SourceCommand,
+    SyncCommand, TailCommand, TeeCommand, TestCommand, TouchCommand, TrCommand, TraceCommand,
+    TrueCommand, TypeCommand, UnaliasCommand, UnameCommand, UniqCommand, UnsetCommand,
+    UptimeCommand, WcCommand, WhichCommand,
 };
 use spin::RwLock;
 pub use state::{get_shell, init, run_shell, try_get_shell};
@@ -733,6 +733,9 @@ impl Shell {
         // Performance commands
         builtins.insert("perf".into(), Box::new(PerfCommand));
         builtins.insert("trace".into(), Box::new(TraceCommand));
+
+        // Hardware diagnostics commands
+        builtins.insert("acpi".into(), Box::new(AcpiCommand));
     }
 
     fn tokenize(&self, command_line: &str) -> Vec<String> {

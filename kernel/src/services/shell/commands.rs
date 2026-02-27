@@ -1900,7 +1900,7 @@ impl BuiltinCommand for UnameCommand {
             parts.push("veridian");
         }
         if show_release {
-            parts.push("0.5.8");
+            parts.push("0.5.9");
         }
         if show_machine {
             #[cfg(target_arch = "x86_64")]
@@ -2512,6 +2512,32 @@ impl BuiltinCommand for TraceCommand {
             _ => {
                 crate::println!("Unknown trace command: {}", args[1]);
             }
+        }
+        CommandResult::Success(0)
+    }
+}
+
+// ============================================================================
+// Hardware Diagnostics Commands
+// ============================================================================
+
+pub(super) struct AcpiCommand;
+impl BuiltinCommand for AcpiCommand {
+    fn name(&self) -> &str {
+        "acpi"
+    }
+    fn description(&self) -> &str {
+        "Show parsed ACPI table information"
+    }
+
+    fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
+        #[cfg(target_arch = "x86_64")]
+        {
+            crate::arch::x86_64::acpi::dump();
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            crate::println!("ACPI is only available on x86_64");
         }
         CommandResult::Success(0)
     }

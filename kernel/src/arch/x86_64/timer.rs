@@ -9,16 +9,22 @@ pub fn get_ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
-/// Increment timer ticks (called from timer interrupt handler).
+/// Increment timer ticks (called from APIC timer interrupt handler at vector
+/// 48).
 ///
-/// Will be called from the x86_64 timer interrupt handler once APIC timer
-/// is fully configured.
-#[allow(dead_code)] // Timer interrupt callback -- not yet wired
+/// Increments the global tick counter and triggers a scheduler tick for
+/// preemptive scheduling. Uses `try_lock()` on the scheduler to avoid
+/// deadlock if the scheduler lock is already held (e.g., we interrupted
+/// mid-schedule).
 pub fn tick() {
     TICKS.fetch_add(1, Ordering::Relaxed);
 
-    // Trigger scheduler tick
-    crate::sched::timer_tick();
+    // Trigger scheduler tick. Use try_lock to avoid deadlock: if the
+    // scheduler lock is already held (e.g., we interrupted mid-schedule),
+    // skip the tick -- the holder will complete its scheduling decision.
+    if let Some(mut sched) = crate::sched::scheduler::current_scheduler().try_lock() {
+        sched.tick();
+    }
 }
 
 /// Setup timer for periodic interrupts
