@@ -22,6 +22,7 @@ const RSDT_SIGNATURE: &[u8; 4] = b"RSDT";
 const XSDT_SIGNATURE: &[u8; 4] = b"XSDT";
 const MADT_SIGNATURE: &[u8; 4] = b"APIC";
 const MCFG_SIGNATURE: &[u8; 4] = b"MCFG";
+const DMAR_SIGNATURE: &[u8; 4] = b"DMAR";
 
 // ---------------------------------------------------------------------------
 // MADT entry types
@@ -144,6 +145,12 @@ pub struct AcpiInfo {
     pub has_madt: bool,
     /// Whether MCFG was found and parsed.
     pub has_mcfg: bool,
+    /// Whether DMAR (DMA Remapping) table was found.
+    pub has_dmar: bool,
+    /// Physical address of the DMAR table (for IOMMU driver to parse).
+    pub dmar_address: u64,
+    /// Length of the DMAR table in bytes.
+    pub dmar_length: u32,
     /// ACPI revision (0 = ACPI 1.0, 2 = ACPI 2.0+).
     pub revision: u8,
 }
@@ -164,6 +171,9 @@ impl AcpiInfo {
             mcfg_count: 0,
             has_madt: false,
             has_mcfg: false,
+            has_dmar: false,
+            dmar_address: 0,
+            dmar_length: 0,
             revision: 0,
         }
     }
@@ -529,6 +539,15 @@ fn parse_table(header_vaddr: usize, info: &mut AcpiInfo) {
         parse_madt(header_vaddr, info);
     } else if &sig == MCFG_SIGNATURE {
         parse_mcfg(header_vaddr, info);
+    } else if &sig == DMAR_SIGNATURE {
+        // Record DMAR presence and location for the IOMMU driver to parse.
+        // The DMAR table has a complex structure (DRHD, RMRR, ATSR entries)
+        // that the IOMMU driver handles directly.
+        info.has_dmar = true;
+        // Store the virtual address for the IOMMU driver to read directly.
+        info.dmar_address = header_vaddr as u64;
+        info.dmar_length = len as u32;
+        println!("[ACPI]   DMAR table found (len={})", len);
     } else {
         // Log but skip other tables
         let sig_str = core::str::from_utf8(&sig).unwrap_or("????");

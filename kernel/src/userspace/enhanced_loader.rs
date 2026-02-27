@@ -478,6 +478,11 @@ impl EnhancedElfLoader {
         &self.program_headers
     }
 
+    /// Get the raw ELF file data for segment copying.
+    pub fn raw_data(&self) -> &[u8] {
+        &self.data
+    }
+
     /// Get total memory size needed
     pub fn memory_size(&self) -> usize {
         let mut min_addr = u64::MAX;
@@ -670,17 +675,31 @@ fn load_interpreter(process: &Process, interp_path: &str) -> Result<VirtualAddre
                 })?;
         }
 
-        // Copy segment data
-        if ph.p_filesz > 0 {
-            // SAFETY: seg_vaddr was just mapped into the process address
-            // space by map_page above. write_bytes zeroes the region; the
-            // actual interpreter file data would need to be read from the
-            // VFS once full ELF dynamic linking is implemented. The size
-            // is bounded by p_filesz which comes from the ELF header.
-            // TODO(phase6): Copy real interpreter segment data from VFS.
+        // Zero BSS portion (p_memsz > p_filesz)
+        if ph.p_memsz > ph.p_filesz {
+            let bss_start = seg_vaddr + ph.p_filesz;
+            let bss_len = (ph.p_memsz - ph.p_filesz) as usize;
+            // SAFETY: bss_start is within the mapped region (seg_vaddr..seg_vaddr+p_memsz).
             unsafe {
-                let dest = seg_vaddr as *mut u8;
-                core::ptr::write_bytes(dest, 0, ph.p_filesz as usize);
+                core::ptr::write_bytes(bss_start as *mut u8, 0, bss_len);
+            }
+        }
+
+        // Copy real segment data from the interpreter ELF image.
+        if ph.p_filesz > 0 {
+            let src_offset = ph.p_offset as usize;
+            let copy_len = ph.p_filesz as usize;
+            let elf_data = interp_loader.raw_data();
+            if src_offset + copy_len <= elf_data.len() {
+                // SAFETY: seg_vaddr was mapped above. src is within the
+                // loader's parsed ELF buffer. copy_len is bounded by p_filesz.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        elf_data.as_ptr().add(src_offset),
+                        seg_vaddr as *mut u8,
+                        copy_len,
+                    );
+                }
             }
         }
     }

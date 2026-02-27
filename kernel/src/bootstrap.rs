@@ -416,7 +416,12 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
 
     kprintln!("[BOOTSTRAP] Initializing performance monitoring...");
     perf::init().expect("Failed to initialize performance monitoring");
-    kprintln!("[BOOTSTRAP] Performance monitoring initialized");
+    // Initialize hardware performance counters (PMU) after ACPI/APIC setup.
+    crate::perf::pmu::init();
+    kprintln!(
+        "[BOOTSTRAP] Performance monitoring initialized (PMU: {} counters)",
+        crate::perf::pmu::num_counters()
+    );
 
     kprintln!("[BOOTSTRAP] Initializing IPC...");
     ipc::init();

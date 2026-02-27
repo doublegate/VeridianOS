@@ -368,6 +368,22 @@ pub enum Syscall {
     /// Required because some CRT implementations (e.g. GCC's internal CRT)
     /// skip __libc_start_main, leaving the libc `environ` pointer NULL.
     ProcessGetenv = 205,
+
+    // POSIX shared memory
+    ShmOpen = 210,
+    ShmUnlink = 211,
+    ShmTruncate = 212,
+
+    // Socket operations
+    SocketCreate = 220,
+    SocketBind = 221,
+    SocketListen = 222,
+    SocketConnect = 223,
+    SocketAccept = 224,
+    SocketSend = 225,
+    SocketRecv = 226,
+    SocketClose = 227,
+    SocketPair = 228,
 }
 
 /// System call result type
@@ -716,6 +732,22 @@ fn handle_syscall(
         Syscall::ArchPrctl => arch_prctl::sys_arch_prctl(arg1, arg2).map(|v| v as usize),
         Syscall::ProcessUname => sys_uname(arg1),
         Syscall::ProcessGetenv => sys_getenv(arg1, arg2, arg3, arg4),
+
+        // POSIX shared memory
+        Syscall::ShmOpen => sys_shm_open(arg1, arg2, arg3),
+        Syscall::ShmUnlink => sys_shm_unlink(arg1, arg2),
+        Syscall::ShmTruncate => sys_shm_truncate(arg1, arg2, arg3),
+
+        // Socket operations
+        Syscall::SocketCreate => sys_socket_create(arg1, arg2),
+        Syscall::SocketBind => sys_socket_bind(arg1, arg2, arg3),
+        Syscall::SocketListen => sys_socket_listen(arg1, arg2),
+        Syscall::SocketConnect => sys_socket_connect(arg1, arg2, arg3),
+        Syscall::SocketAccept => sys_socket_accept(arg1),
+        Syscall::SocketSend => sys_socket_send(arg1, arg2, arg3),
+        Syscall::SocketRecv => sys_socket_recv(arg1, arg2, arg3),
+        Syscall::SocketClose => sys_socket_close(arg1),
+        Syscall::SocketPair => sys_socket_pair(arg1, arg2),
 
         _ => Err(SyscallError::InvalidSyscall),
     }
@@ -1325,9 +1357,253 @@ impl TryFrom<usize> for Syscall {
             204 => Ok(Syscall::ProcessUname),
             205 => Ok(Syscall::ProcessGetenv),
 
+            // POSIX shared memory
+            210 => Ok(Syscall::ShmOpen),
+            211 => Ok(Syscall::ShmUnlink),
+            212 => Ok(Syscall::ShmTruncate),
+
+            // Socket operations
+            220 => Ok(Syscall::SocketCreate),
+            221 => Ok(Syscall::SocketBind),
+            222 => Ok(Syscall::SocketListen),
+            223 => Ok(Syscall::SocketConnect),
+            224 => Ok(Syscall::SocketAccept),
+            225 => Ok(Syscall::SocketSend),
+            226 => Ok(Syscall::SocketRecv),
+            227 => Ok(Syscall::SocketClose),
+            228 => Ok(Syscall::SocketPair),
+
             _ => Err(()),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// POSIX Shared Memory syscall handlers
+// ---------------------------------------------------------------------------
+
+/// Read a null-terminated name string from user space (for shm/socket paths).
+fn read_user_name(ptr: usize, max_len: usize) -> Result<alloc::string::String, SyscallError> {
+    validate_user_string_ptr(ptr)?;
+    // SAFETY: ptr was validated as non-null and in user-space.
+    let bytes = unsafe {
+        let mut buf = alloc::vec::Vec::new();
+        let mut p = ptr as *const u8;
+        for _ in 0..max_len {
+            let byte = *p;
+            if byte == 0 {
+                break;
+            }
+            buf.push(byte);
+            p = p.add(1);
+        }
+        buf
+    };
+    core::str::from_utf8(&bytes)
+        .map(alloc::string::String::from)
+        .map_err(|_| SyscallError::InvalidArgument)
+}
+
+/// SYS_SHM_OPEN: Create or open a named shared memory object.
+///
+/// # Arguments
+/// - name_ptr: user-space pointer to null-terminated name
+/// - flags: open flags (bit 0 = create, bit 1 = exclusive, bit 2 = read-only)
+/// - _mode: permission mode (reserved)
+fn sys_shm_open(name_ptr: usize, flags: usize, _mode: usize) -> SyscallResult {
+    let name = read_user_name(name_ptr, crate::ipc::posix_shm::SHM_NAME_MAX)?;
+
+    let shm_flags = crate::ipc::posix_shm::ShmOpenFlags {
+        create: flags & 1 != 0,
+        exclusive: flags & 2 != 0,
+        read_only: flags & 4 != 0,
+    };
+
+    let pid = crate::process::current_process()
+        .map(|p| p.pid)
+        .unwrap_or(crate::process::ProcessId(0));
+
+    crate::ipc::posix_shm::shm_open(&name, shm_flags, pid)
+        .map(|id| id as usize)
+        .map_err(|_| SyscallError::InvalidState)
+}
+
+/// SYS_SHM_UNLINK: Remove a named shared memory object.
+///
+/// # Arguments
+/// - name_ptr: user-space pointer to null-terminated name
+/// - name_len: length hint (unused, reads until null terminator)
+fn sys_shm_unlink(name_ptr: usize, _name_len: usize) -> SyscallResult {
+    let name = read_user_name(name_ptr, crate::ipc::posix_shm::SHM_NAME_MAX)?;
+
+    crate::ipc::posix_shm::shm_unlink(&name)
+        .map(|()| 0)
+        .map_err(|_| SyscallError::ResourceNotFound)
+}
+
+/// SYS_SHM_TRUNCATE: Set the size of a shared memory object.
+///
+/// # Arguments
+/// - name_ptr: user-space pointer to null-terminated name
+/// - _name_len: length hint (unused)
+/// - size: new size in bytes
+fn sys_shm_truncate(name_ptr: usize, _name_len: usize, size: usize) -> SyscallResult {
+    let name = read_user_name(name_ptr, crate::ipc::posix_shm::SHM_NAME_MAX)?;
+
+    crate::ipc::posix_shm::shm_truncate(&name, size)
+        .map(|()| 0)
+        .map_err(|_| SyscallError::OutOfMemory)
+}
+
+// ---------------------------------------------------------------------------
+// Socket syscall handlers
+// ---------------------------------------------------------------------------
+
+/// Socket domain constants matching POSIX/libc.
+const AF_UNIX: usize = 1;
+const AF_INET: usize = 2;
+
+/// Socket type constants matching POSIX/libc.
+const SOCK_STREAM: usize = 1;
+const SOCK_DGRAM: usize = 2;
+
+/// Convert user-space socket type to UnixSocketType.
+fn to_unix_socket_type(
+    sock_type: usize,
+) -> Result<crate::net::unix_socket::UnixSocketType, SyscallError> {
+    match sock_type {
+        SOCK_STREAM => Ok(crate::net::unix_socket::UnixSocketType::Stream),
+        SOCK_DGRAM => Ok(crate::net::unix_socket::UnixSocketType::Datagram),
+        _ => Err(SyscallError::InvalidArgument),
+    }
+}
+
+/// SYS_SOCKET_CREATE: Create a new socket.
+///
+/// # Arguments
+/// - domain: AF_UNIX (1) or AF_INET (2)
+/// - sock_type: SOCK_STREAM (1) or SOCK_DGRAM (2)
+fn sys_socket_create(domain: usize, sock_type: usize) -> SyscallResult {
+    let pid = crate::process::current_process()
+        .map(|p| p.pid.0)
+        .unwrap_or(0);
+
+    match domain {
+        AF_UNIX => {
+            let utype = to_unix_socket_type(sock_type)?;
+            crate::net::unix_socket::socket_create(utype, pid)
+                .map(|id| id as usize)
+                .map_err(|_| SyscallError::OutOfMemory)
+        }
+        AF_INET => {
+            // TODO(phase6): IPv4 socket creation
+            Err(SyscallError::InvalidArgument)
+        }
+        _ => Err(SyscallError::InvalidArgument),
+    }
+}
+
+/// SYS_SOCKET_BIND: Bind a socket to an address/path.
+///
+/// # Arguments
+/// - socket_id: socket descriptor
+/// - addr_ptr: user-space pointer to address (path for AF_UNIX)
+/// - addr_len: address length
+fn sys_socket_bind(socket_id: usize, addr_ptr: usize, _addr_len: usize) -> SyscallResult {
+    let path = read_user_name(addr_ptr, crate::net::unix_socket::UNIX_PATH_MAX)?;
+
+    crate::net::unix_socket::socket_bind(socket_id as u64, &path)
+        .map(|()| 0)
+        .map_err(|_| SyscallError::InvalidState)
+}
+
+/// SYS_SOCKET_LISTEN: Start listening on a bound socket.
+fn sys_socket_listen(socket_id: usize, backlog: usize) -> SyscallResult {
+    crate::net::unix_socket::socket_listen(socket_id as u64, backlog)
+        .map(|()| 0)
+        .map_err(|_| SyscallError::InvalidState)
+}
+
+/// SYS_SOCKET_CONNECT: Connect to a listening socket.
+fn sys_socket_connect(socket_id: usize, addr_ptr: usize, _addr_len: usize) -> SyscallResult {
+    let path = read_user_name(addr_ptr, crate::net::unix_socket::UNIX_PATH_MAX)?;
+
+    crate::net::unix_socket::socket_connect(socket_id as u64, &path)
+        .map(|()| 0)
+        .map_err(|_| SyscallError::InvalidState)
+}
+
+/// SYS_SOCKET_ACCEPT: Accept a pending connection.
+///
+/// Returns the new connected socket ID.
+fn sys_socket_accept(socket_id: usize) -> SyscallResult {
+    crate::net::unix_socket::socket_accept(socket_id as u64)
+        .map(|(new_id, _connecting_id)| new_id as usize)
+        .map_err(|e| match e {
+            crate::error::KernelError::WouldBlock => SyscallError::WouldBlock,
+            _ => SyscallError::InvalidState,
+        })
+}
+
+/// SYS_SOCKET_SEND: Send data on a connected socket.
+fn sys_socket_send(socket_id: usize, buf_ptr: usize, buf_len: usize) -> SyscallResult {
+    validate_user_buffer(buf_ptr, buf_len)?;
+    // SAFETY: buf_ptr validated above as non-null, in user-space, within size
+    // limits.
+    let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, buf_len) };
+
+    crate::net::unix_socket::socket_send(socket_id as u64, data, None)
+        .map_err(|_| SyscallError::InvalidState)
+}
+
+/// SYS_SOCKET_RECV: Receive data from a socket.
+fn sys_socket_recv(socket_id: usize, buf_ptr: usize, buf_len: usize) -> SyscallResult {
+    validate_user_buffer(buf_ptr, buf_len)?;
+    // SAFETY: buf_ptr validated above as non-null, in user-space, within size
+    // limits.
+    let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, buf_len) };
+
+    crate::net::unix_socket::socket_recv(socket_id as u64, buf)
+        .map(|(received, _rights)| received)
+        .map_err(|e| match e {
+            crate::error::KernelError::WouldBlock => SyscallError::WouldBlock,
+            _ => SyscallError::InvalidState,
+        })
+}
+
+/// SYS_SOCKET_CLOSE: Close a socket.
+fn sys_socket_close(socket_id: usize) -> SyscallResult {
+    crate::net::unix_socket::socket_close(socket_id as u64)
+        .map(|()| 0)
+        .map_err(|_| SyscallError::InvalidState)
+}
+
+/// SYS_SOCKET_PAIR: Create a connected socket pair.
+///
+/// # Arguments
+/// - domain: AF_UNIX only
+/// - result_ptr: user-space pointer to write two u64 socket IDs
+fn sys_socket_pair(domain: usize, result_ptr: usize) -> SyscallResult {
+    if domain != AF_UNIX {
+        return Err(SyscallError::InvalidArgument);
+    }
+    validate_user_ptr_typed::<[u64; 2]>(result_ptr)?;
+
+    let pid = crate::process::current_process()
+        .map(|p| p.pid.0)
+        .unwrap_or(0);
+
+    let (id_a, id_b) =
+        crate::net::unix_socket::socketpair(crate::net::unix_socket::UnixSocketType::Stream, pid)
+            .map_err(|_| SyscallError::OutOfMemory)?;
+
+    // SAFETY: result_ptr validated above as aligned and in user-space.
+    unsafe {
+        let ptr = result_ptr as *mut u64;
+        *ptr = id_a;
+        *ptr.add(1) = id_b;
+    }
+    Ok(0)
 }
 
 #[cfg(test)]

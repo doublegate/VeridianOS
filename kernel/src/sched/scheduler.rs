@@ -697,7 +697,10 @@ impl Scheduler {
                 let current_raw = current.as_raw();
                 context_switch(&mut (*current_raw).context, &(*next.as_ptr()).context);
 
-                // Resumed: Record metrics and return
+                // Resumed: Record metrics and report RCU quiescent state.
+                // A context switch is a quiescent point: no RCU read-side
+                // references from before the switch can be held.
+                crate::sync::rcu::rcu_quiescent();
                 let switch_cycles = super::metrics::read_tsc() - start_cycles;
                 super::metrics::SCHEDULER_METRICS
                     .record_context_switch(switch_cycles, is_voluntary);
@@ -738,7 +741,8 @@ impl Scheduler {
             self.current = Some(next_ptr);
         }
 
-        // Record context switch metrics
+        // Record context switch metrics and RCU quiescent state.
+        crate::sync::rcu::rcu_quiescent();
         let switch_cycles = super::metrics::read_tsc() - start_cycles;
         super::metrics::SCHEDULER_METRICS.record_context_switch(switch_cycles, is_voluntary);
     }

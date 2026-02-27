@@ -25,7 +25,7 @@
 - static mut: 7 justified instances (early boot, per-CPU, heap backing)
 - Err("...") string literals: 0
 - Result<T, &str>: 1 justified (parser return)
-- #[allow(dead_code)]: <100 instances (audited, per-item documented)
+- #[allow(dead_code)]: ~125 instances across 52 files (mostly justified: hardware API completeness, Phase 6 stubs, arch-specific)
 - SAFETY comment coverage: >100% (410/389 unsafe blocks)
 - Soundness bugs: 0
 
@@ -198,7 +198,7 @@ See [REMEDIATION_TODO.md](REMEDIATION_TODO.md) for 37 identified gaps from Phase
 - [Phase 3 TODO](PHASE3_TODO.md) - COMPLETE
 - [Phase 4 TODO](PHASE4_TODO.md) - COMPLETE
 - [Phase 5 TODO](PHASE5_TODO.md) - ~90%
-- [Phase 5.5 TODO](PHASE5.5_TODO.md) - ~15% (Wave 1: ACPI + APIC Timer complete)
+- [Phase 5.5 TODO](PHASE5.5_TODO.md) - 100% COMPLETE (all 12 sprints, v0.5.13)
 - [Phase 6 TODO](PHASE6_TODO.md) - ~5% (future work)
 - [Remediation TODO](REMEDIATION_TODO.md) - Gaps from Phases 0-4
 - [Issues TODO](ISSUES_TODO.md) - Issue history
@@ -209,6 +209,12 @@ See [REMEDIATION_TODO.md](REMEDIATION_TODO.md) for 37 identified gaps from Phase
 
 | Version | Date | Summary |
 |---------|------|---------|
+| v0.5.13 | Feb 27, 2026 | Phase 5.5 COMPLETE: 2MB huge pages, dynamic linker (ld-veridian), all 12 sprints done |
+| v0.5.12 | Feb 27, 2026 | Phase 5.5 Wave 4: NVMe driver, VirtIO-Net TX/RX, hardware PMU |
+| v0.5.11 | Feb 27, 2026 | Phase 5.5 Wave 3: DMA/IOMMU, shared memory, Unix sockets, lock-free paths |
+| v0.5.10 | Feb 27, 2026 | Phase 5.5 Wave 2: IPI/SMP foundation, PCI/PCIe completion |
+| v0.5.9 | Feb 27, 2026 | Phase 5.5 Wave 1: ACPI table parser, APIC timer 1000Hz preemptive scheduling |
+| v0.5.8 | Feb 27, 2026 | Phase 5 completion: hot path wiring, CapabilityCache, O(log n) IPC PID lookup, trace instrumentation |
 | v0.5.7 | Feb 26, 2026 | Phase 5 sprint 2: per-CPU page caching, TLB batching, IPC fast path, priority inheritance, benchmarks, tracepoints |
 | v0.5.6 | Feb 25, 2026 | Phase 5 sprint 1: scheduler context switch, IPC blocking/wake, /sbin/init, dead_code audit, native execution |
 | v0.5.5 | Feb 25, 2026 | POSIX partial munmap, consolidated brk(), native BusyBox 208/208 PASS |

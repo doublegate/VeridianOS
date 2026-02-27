@@ -1,17 +1,29 @@
 # Phase 5: Performance Optimization (Months 28-33)
 
-**Status**: ~10% Complete (data structures and framework only)
-**Last Updated**: February 15, 2026
+**Status**: ~90% Complete
+**Last Updated**: February 27, 2026 (v0.5.8)
 
 ### Current Progress
 
-Phase 5 has partial implementations from early architectural work:
-- Performance counters with AtomicU64 tracking (syscalls, context switches, page faults, interrupts, IPC messages)
-- NUMA topology detection framework and distance matrices
-- Zero-copy networking data structures (DMA buffer pools, scatter-gather I/O)
-- Basic profiling section infrastructure
+Phase 5 is substantially complete with core performance optimizations wired into production hot paths:
 
-Most items in this phase remain as future work. The data structures exist but the actual optimization passes (lock-free algorithms, cache-aware scheduling, io_uring, etc.) have not been implemented.
+**Implemented and Wired (v0.5.6 -- v0.5.8):**
+- **Per-CPU page caching**: 64-frame PerCpuPageCache eliminates global frame allocator lock for single-frame allocs. Batch refill (32 frames) from global when empty, batch drain when full. Wired into `map_page()`.
+- **TLB flush batching**: TlbFlushBatch accumulates up to 16 addresses; exceeding 16 triggers full TLB flush. Wired into `map_region()`, `unmap_region()`, and partial munmap. Lazy TLB skips CR3 reload for kernel threads.
+- **IPC fast path**: Per-task `ipc_regs: [u64; 7]` for direct register transfer. `fast_send()` writes to target task's regs and wakes via scheduler. CapabilityCache (16-entry direct-mapped) integrated into `validate_capability_fast()`.
+- **O(log n) PID-to-Task registry**: Global `TASK_REGISTRY: BTreeMap<u64, SendTaskPtr>` for IPC fast path lookup, replacing O(n) task list scan.
+- **Priority inheritance**: PiMutex in `process/sync.rs` boosts owner priority when high-priority task blocks. `Task::priority_boost` checked by `effective_priority()`.
+- **Scheduler context switch wiring**: `switch_to()` calls `context_switch()` (was previously dead code). TSS RSP0 updated on every switch.
+- **IPC blocking/wake**: `send_sync()` directly switches to waiting receiver for <1μs latency.
+- **Performance counters**: AtomicU64 tracking (syscalls, context switches, page faults, interrupts, IPC messages).
+- **Benchmarking suite**: 7 micro-benchmarks with Phase 5 targets, `perf` shell builtin.
+- **Software tracepoints**: 10 event types, per-CPU ring buffers (128KB/CPU), `trace` shell builtin. 8/10 events wired (IpcFastSend, IpcFastReceive, IpcSlowPath, FrameAlloc, SyscallEntry, SyscallExit, ContextSwitch, SchedulerTick).
+- **NUMA topology**: Detection framework and distance matrices.
+
+**Deferred (3 items):**
+- Lock-free algorithms (RCU data structures implemented but not yet integrated into hot paths) -- requires SMP validation
+- Power management -- requires ACPI runtime methods (Phase 6)
+- Profile-guided optimization -- requires self-hosted Rust compiler
 
 ## Overview
 

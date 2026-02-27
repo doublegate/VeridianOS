@@ -232,16 +232,31 @@ pub fn init() -> KernelResult<bool> {
         return Ok(true);
     }
 
-    // Search ACPI tables for DMAR signature.
-    let dmar_result = crate::arch::x86_64::acpi::with_acpi_info(|_info| {
-        // DMAR is not yet in the AcpiInfo structure; we need to scan
-        // RSDT/XSDT entries directly. For now, report that DMAR parsing
-        // infrastructure is ready but actual table scanning requires
-        // extending the ACPI parser to track DMAR entries.
-        //
-        // On QEMU without `-device intel-iommu`, no DMAR table exists.
-        // This is the expected case for most development setups.
-        None::<DmarInfo>
+    // Check if ACPI parser found a DMAR table during boot.
+    let dmar_result = crate::arch::x86_64::acpi::with_acpi_info(|info| {
+        if !info.has_dmar || info.dmar_address == 0 {
+            // No DMAR table present. Expected on QEMU without
+            // `-device intel-iommu`.
+            return None::<DmarInfo>;
+        }
+
+        println!(
+            "[IOMMU] DMAR table at phys {:#x}, len {} bytes",
+            info.dmar_address, info.dmar_length
+        );
+
+        // DMAR table found. Full parsing of DRHD/RMRR structures
+        // requires walking the variable-length remapping entries.
+        // For now, report discovery; full VT-d page table setup
+        // is deferred to Phase 6 (requires MMIO register programming).
+        // TODO(phase6): Parse DRHD entries for register base addresses,
+        // set up context tables and second-level page tables.
+        Some(DmarInfo {
+            host_address_width: 0,
+            flags: 0,
+            drhd_units: alloc::vec::Vec::new(),
+            rmrr_regions: alloc::vec::Vec::new(),
+        })
     });
 
     match dmar_result {

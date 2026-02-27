@@ -553,16 +553,71 @@ impl BlockDevice for NvmeController {
     }
 }
 
-/// Detect and initialize NVMe devices
+/// NVMe PCI subclass code.
+const NVME_SUBCLASS: u8 = 0x08;
+
+/// Detect and initialize NVMe devices via PCI bus enumeration.
+///
+/// Scans the PCI bus for Mass Storage controllers with NVMe subclass
+/// (class 0x01, subclass 0x08). On QEMU without NVMe devices, this
+/// will simply report no devices found.
 pub fn init() -> Result<(), KernelError> {
-    println!("[NVME] Scanning for NVMe devices...");
+    println!("[NVME] Scanning PCI bus for NVMe controllers...");
 
-    // NOTE: Full implementation would:
-    // 1. Scan PCI bus for NVMe controllers
-    // 2. Initialize each controller
-    // 3. Register block devices with VFS
+    #[cfg(target_arch = "x86_64")]
+    {
+        let pci_bus = crate::drivers::pci::get_pci_bus().lock();
+        let storage_devices =
+            pci_bus.find_devices_by_class(crate::drivers::pci::class_codes::MASS_STORAGE);
 
-    println!("[NVME] NVMe driver initialized (stub - requires PCI scanning)");
+        let mut nvme_count = 0;
+        for dev in &storage_devices {
+            if dev.subclass == NVME_SUBCLASS {
+                nvme_count += 1;
+                println!(
+                    "[NVME] Found NVMe controller: {:04x}:{:04x} at {}:{}.{}",
+                    dev.vendor_id,
+                    dev.device_id,
+                    dev.location.bus,
+                    dev.location.device,
+                    dev.location.function,
+                );
+
+                // Report BAR0 (NVMe MMIO register space)
+                if let Some(bar) = dev.bars.first() {
+                    match bar {
+                        crate::drivers::pci::PciBar::Memory { address, size, .. } => {
+                            println!("[NVME]   BAR0: MMIO at {:#x}, size {:#x}", address, size);
+                        }
+                        crate::drivers::pci::PciBar::Io { address, size } => {
+                            println!("[NVME]   BAR0: I/O at {:#x}, size {:#x}", address, size);
+                        }
+                        crate::drivers::pci::PciBar::None => {}
+                    }
+                }
+
+                // TODO(phase6): Full NVMe initialization sequence:
+                // 1. Map BAR0 MMIO region
+                // 2. Read CAP register for queue parameters
+                // 3. Allocate DMA buffers for admin queue pair
+                // 4. Program ASQ/ACQ registers
+                // 5. Set CC.EN = 1, wait for CSTS.RDY
+                // 6. Issue Identify Controller admin command
+                // 7. Create I/O completion and submission queues
+            }
+        }
+
+        if nvme_count == 0 {
+            println!("[NVME] No NVMe controllers found on PCI bus");
+        } else {
+            println!("[NVME] Found {} NVMe controller(s)", nvme_count);
+        }
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        println!("[NVME] NVMe PCI scanning not available on this architecture");
+    }
 
     Ok(())
 }
