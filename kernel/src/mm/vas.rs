@@ -1602,6 +1602,67 @@ impl VirtualAddressSpace {
 
         Ok(())
     }
+
+    /// Map a 2MB huge page at the given virtual address.
+    ///
+    /// Allocates 512 contiguous 4KB frames (= 2MB) and installs a single
+    /// L2 page table entry with the HUGE flag set. This reduces TLB pressure
+    /// for large contiguous allocations (heap, framebuffer, DMA).
+    ///
+    /// The virtual address must be 2MB-aligned.
+    pub fn map_huge_page(&mut self, vaddr: usize, flags: PageFlags) -> Result<(), KernelError> {
+        const HUGE_PAGE_SIZE: usize = 2 * 1024 * 1024; // 2MB
+        const HUGE_PAGE_FRAMES: usize = HUGE_PAGE_SIZE / 4096; // 512
+
+        if vaddr & (HUGE_PAGE_SIZE - 1) != 0 {
+            return Err(KernelError::InvalidArgument {
+                name: "vaddr",
+                value: "not 2MB aligned for huge page",
+            });
+        }
+
+        // Allocate 512 contiguous frames (2MB).
+        let frame = FRAME_ALLOCATOR
+            .lock()
+            .allocate_frames(HUGE_PAGE_FRAMES, None)
+            .map_err(|_| KernelError::OutOfMemory {
+                requested: HUGE_PAGE_SIZE,
+                available: 0,
+            })?;
+
+        // Zero the huge page.
+        let phys_addr = frame.as_u64() * 4096;
+        let virt = crate::mm::phys_to_virt_addr(phys_addr) as *mut u8;
+        // SAFETY: freshly allocated contiguous frames in kernel physical memory window.
+        unsafe {
+            core::ptr::write_bytes(virt, 0, HUGE_PAGE_SIZE);
+        }
+
+        // Install the 2MB mapping with HUGE flag.
+        let huge_flags = PageFlags(flags.0 | PageFlags::HUGE.0);
+        let vaddr_obj = VirtualAddress(vaddr as u64);
+
+        let pt_root = self.page_table_root.load(Ordering::Acquire);
+        if pt_root != 0 {
+            // SAFETY: Same as map_page -- pt_root is a valid L4 page table.
+            let mut mapper = unsafe { create_mapper_from_root(pt_root) };
+            let mut alloc = VasFrameAllocator;
+            mapper.map_page(vaddr_obj, frame, huge_flags, &mut alloc)?;
+            crate::arch::tlb_flush_address(vaddr as u64);
+        }
+
+        // Record the mapping.
+        #[cfg(feature = "alloc")]
+        {
+            let mut mappings = self.mappings.lock();
+            let mut new_mapping = VirtualMapping::new(vaddr_obj, HUGE_PAGE_SIZE, MappingType::Data);
+            new_mapping.physical_frames.push(frame);
+            new_mapping.flags = huge_flags;
+            mappings.insert(vaddr_obj, new_mapping);
+        }
+
+        Ok(())
+    }
 }
 
 /// Virtual address space statistics

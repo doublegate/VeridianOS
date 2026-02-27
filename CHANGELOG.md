@@ -2,6 +2,32 @@
 
 ---
 
+## [v0.5.13] - 2026-02-27
+
+### v0.5.13: Phase 5.5 Wave 5 -- Huge Pages + Dynamic Linker (Phase 5.5 COMPLETE)
+
+Final Phase 5.5 Infrastructure Bridge release. All 12 sprints complete.
+
+---
+
+### Added
+
+#### 2MB Huge Pages (kernel/src/mm/vas.rs) -- Sprint B-11
+
+- `VAS::map_huge_page()`: Maps a 2MB page using L2 page table entry with HUGE flag, allocating 512 contiguous 4KB frames. Reduces TLB pressure for large contiguous allocations (heap, framebuffer, DMA).
+- 2MB alignment validation for virtual addresses.
+
+#### Dynamic Linker (userland/ld-veridian/ ~330 lines, NEW) -- Sprint B-12
+
+- `ld-veridian.c`: Minimal ELF dynamic linker with PT_INTERP support.
+- RELA relocation processing: R_X86_64_RELATIVE, R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT, R_X86_64_64.
+- PT_DYNAMIC parser extracting DT_SYMTAB, DT_STRTAB, DT_RELA, DT_JMPREL, DT_INIT.
+- Library search paths: /lib, /usr/lib.
+- `dlopen()` / `dlsym()` / `dlclose()` API stubs.
+- Loaded library tracking (up to 32 concurrent libraries).
+
+---
+
 ## [v0.5.12] - 2026-02-27
 
 ### v0.5.12: Phase 5.5 Wave 4 -- NVMe Driver + Network Driver Completion + Hardware PMU

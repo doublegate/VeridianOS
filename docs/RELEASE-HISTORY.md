@@ -8,6 +8,7 @@ For current project status, see the [README](../README.md). For task tracking, s
 
 ## Table of Contents
 
+- [v0.5.13 -- Phase 5.5 Wave 5: Huge Pages + Dynamic Linker (COMPLETE)](#v0513----phase-55-wave-5-huge-pages--dynamic-linker-complete)
 - [v0.5.12 -- Phase 5.5 Wave 4: NVMe + Networking + PMU](#v0512----phase-55-wave-4-nvme--networking--pmu)
 - [v0.5.11 -- Phase 5.5 Wave 3: DMA/IOMMU + Shared Mem + Lock-Free](#v0511----phase-55-wave-3-dmaiommu--shared-mem--lock-free)
 - [v0.5.10 -- Phase 5.5 Wave 2: IPI/SMP + PCI/PCIe](#v0510----phase-55-wave-2-ipismp--pcipcie)
@@ -48,6 +49,25 @@ For current project status, see the [README](../README.md). For task tracking, s
 - [v0.2.0 -- Phase 1 Microkernel Core](#v020----phase-1-microkernel-core)
 - [v0.1.0 -- Phase 0 Foundation and Tooling](#v010----phase-0-foundation-and-tooling)
 - [DEEP-RECOMMENDATIONS](#deep-recommendations)
+
+---
+
+## v0.5.13 -- Phase 5.5 Wave 5: Huge Pages + Dynamic Linker (COMPLETE)
+
+**Date**: February 27, 2026
+
+Final Phase 5.5 release. All 12 sprints complete.
+
+### Sprint B-11: 2MB Huge Pages
+- VAS::map_huge_page() with L2 HUGE flag, 512-frame contiguous allocation
+- 2MB alignment validation
+
+### Sprint B-12: Dynamic Linker
+- ld-veridian.c: PT_INTERP dynamic linker (~330 lines)
+- RELA relocation processing (RELATIVE, GLOB_DAT, JUMP_SLOT, 64)
+- PT_DYNAMIC parser, library search paths, dlopen/dlsym/dlclose stubs
+
+**Phase 5.5 Status**: 12/12 sprints COMPLETE
 
 ---
 
