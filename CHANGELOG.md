@@ -2,6 +2,49 @@
 
 ---
 
+## [v0.5.10] - 2026-02-27
+
+### v0.5.10: Phase 5.5 Wave 2 -- IPI/SMP Foundation + PCI/PCIe Completion
+
+Second Phase 5.5 Infrastructure Bridge release implementing multi-core coordination and modern device interrupt infrastructure (Wave 2).
+
+---
+
+### Added
+
+#### IPI + SMP Foundation (kernel/src/arch/x86_64/apic.rs, sched/smp.rs, mm/vas.rs) -- Sprint B-3
+
+- `TLB_SHOOTDOWN_VECTOR = 49`: Dedicated IPI vector for cross-CPU TLB invalidation when shared page tables are modified.
+- `SCHED_WAKE_VECTOR = 50`: Dedicated IPI vector to wake idle CPUs when tasks are placed on their run queues.
+- `LocalApic::send_init_ipi()`: INIT IPI delivery for AP startup (INIT delivery mode 0b101).
+- `LocalApic::send_startup_ipi()`: SIPI delivery with trampoline page vector for AP boot.
+- `LocalApic::send_ipi_all_excluding_self()`: Broadcast IPI to all CPUs excluding self (shorthand 0b11).
+- Public API wrappers: `apic::send_init_ipi()`, `apic::send_startup_ipi()`, `apic::send_ipi_all_excluding_self()`.
+- `tlb_shootdown_handler` at IDT vector 49: Flushes local TLB + sends APIC EOI.
+- `sched_wake_handler` at IDT vector 50: Acknowledges wake IPI with APIC EOI.
+- `TlbFlushBatch::flush_with_shootdown()`: Local TLB flush followed by broadcast IPI to remote CPUs for cross-CPU invalidation.
+- `cpu_up()` INIT-SIPI-SIPI sequence: Proper Intel SDM AP startup (INIT -> 10ms -> SIPI -> 200us -> retry SIPI if not online).
+
+#### PCI/PCIe Completion (kernel/src/drivers/pci.rs) -- Sprint B-4
+
+- `MsiCapability` struct: Parsed MSI capability info (offset, 64-bit support, per-vector masking, max vectors).
+- `MsixCapability` struct: Parsed MSI-X capability info (offset, table size, table/PBA BAR and offset).
+- `PciBus::parse_capabilities()`: PCI capability chain walker for MSI (cap ID 0x05) and MSI-X (cap ID 0x11).
+- `PciBus::scan_bridge()`: Recursive PCI-to-PCI bridge enumeration scanning secondary buses.
+- `PciDevice::secondary_bus`: Header type 1 bridge secondary bus number tracking.
+- `configure_msi()`: MSI vector/address programming for interrupt delivery to target APIC.
+- `ecam_read_config()` / `ecam_write_config()`: PCIe ECAM memory-mapped configuration access (x86_64, using MCFG base from ACPI).
+
+### Changed
+
+- `apic::send_ipi()`: Removed `dead_code` annotation, now used by SMP subsystem.
+- `smp::send_ipi()` x86_64 path: Wired to actual APIC ICR instead of println stub.
+- `smp::cpu_up()` x86_64 path: Uses APIC INIT-SIPI-SIPI instead of generic IPI.
+- `PciBus::enumerate_devices()`: Now detects PCI-to-PCI bridges and recursively scans secondary buses.
+- `PciBus::read_device_config()`: Now reads secondary bus number for bridge devices and parses MSI/MSI-X capabilities.
+
+---
+
 ## [v0.5.9] - 2026-02-27
 
 ### v0.5.9: Phase 5.5 Wave 1 -- ACPI Table Parser + APIC Timer Preemptive Scheduling

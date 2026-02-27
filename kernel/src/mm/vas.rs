@@ -406,6 +406,29 @@ impl TlbFlushBatch {
     pub fn is_empty(&self) -> bool {
         self.count == 0
     }
+
+    /// Flush locally and broadcast TLB shootdown IPI to all other CPUs.
+    ///
+    /// On single-CPU systems the IPI is a no-op (no other CPUs to notify).
+    /// On multi-CPU systems, remote CPUs receive vector 49 and flush their
+    /// entire TLB in the handler.
+    pub fn flush_with_shootdown(self) {
+        // First, flush the local CPU's TLB.
+        self.flush();
+
+        // Then broadcast TLB shootdown IPI to all other CPUs.
+        // On x86_64 with APIC initialized, this sends vector 49 via the ICR
+        // "all excluding self" shorthand. On other architectures or if APIC is
+        // not initialized, this is a no-op.
+        #[cfg(target_arch = "x86_64")]
+        {
+            if crate::arch::x86_64::apic::is_initialized() {
+                let _ = crate::arch::x86_64::apic::send_ipi_all_excluding_self(
+                    crate::arch::x86_64::apic::TLB_SHOOTDOWN_VECTOR,
+                );
+            }
+        }
+    }
 }
 
 impl Default for VirtualAddressSpace {

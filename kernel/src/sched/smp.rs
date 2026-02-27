@@ -434,13 +434,13 @@ pub fn current_cpu_id() -> u8 {
 pub fn send_ipi(target_cpu: u8, vector: u8) {
     #[cfg(target_arch = "x86_64")]
     {
-        // Use APIC to send IPI
-        // For now, use a simplified implementation
-        // Note: APIC module would be implemented in arch-specific code
-        println!(
-            "[SMP] IPI to CPU {} vector {:#x} (x86_64 APIC)",
-            target_cpu, vector
-        );
+        // Send IPI via the Local APIC Interrupt Command Register.
+        if let Err(e) = crate::arch::x86_64::apic::send_ipi(target_cpu, vector) {
+            println!(
+                "[SMP] IPI to CPU {} vector {:#x} failed: {}",
+                target_cpu, vector, e
+            );
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -521,24 +521,40 @@ pub fn cpu_up(cpu_id: u8) -> Result<(), KernelError> {
         init_cpu(cpu_id);
     }
 
-    // Send INIT/SIPI to wake up CPU
+    // Send INIT-SIPI-SIPI sequence to wake up AP (Application Processor).
+    // Per Intel SDM: INIT -> 10ms delay -> SIPI -> 200us delay -> SIPI (if needed).
     #[cfg(target_arch = "x86_64")]
     {
-        // Send INIT IPI
-        send_ipi(cpu_id, 0x00); // INIT vector
+        // Send INIT IPI via the APIC ICR with INIT delivery mode.
+        if let Err(e) = crate::arch::x86_64::apic::send_init_ipi(cpu_id) {
+            println!("[SMP] INIT IPI to CPU {} failed: {}", cpu_id, e);
+            return Err(KernelError::HardwareError {
+                device: "APIC",
+                code: cpu_id as u32,
+            });
+        }
 
-        // Wait 10ms (simulated)
-        // In real implementation, would use timer
+        // 10ms delay for INIT to be processed (spin-wait).
+        for _ in 0..10_000_000 {
+            core::hint::spin_loop();
+        }
 
-        // Send SIPI with startup vector
-        let sipi_vector = 0x08; // Startup at 0x8000
-        send_ipi(cpu_id, sipi_vector);
+        // Send first Startup IPI (SIPI) with trampoline page vector.
+        // Startup page 0x08 = physical address 0x8000 where AP trampoline
+        // code would reside (not yet implemented -- requires 16-bit real mode code).
+        let sipi_page = 0x08u8;
+        let _ = crate::arch::x86_64::apic::send_startup_ipi(cpu_id, sipi_page);
 
-        // Wait 200us and send second SIPI if needed (simulated)
+        // 200us delay.
+        for _ in 0..200_000 {
+            core::hint::spin_loop();
+        }
 
+        // Send second SIPI if AP has not come online yet (per Intel SDM
+        // recommendation).
         if let Some(cpu_data) = per_cpu(cpu_id) {
             if !cpu_data.cpu_info.is_online() {
-                send_ipi(cpu_id, sipi_vector);
+                let _ = crate::arch::x86_64::apic::send_startup_ipi(cpu_id, sipi_page);
             }
         }
     }

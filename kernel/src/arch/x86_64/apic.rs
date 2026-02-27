@@ -83,6 +83,13 @@ const SPURIOUS_VECTOR: u8 = 0xFF;
 /// APIC timer interrupt vector (dedicated, separate from PIC timer at 32).
 pub const APIC_TIMER_VECTOR: u8 = 48;
 
+/// TLB shootdown IPI vector -- sent to remote CPUs to flush stale TLB entries.
+pub const TLB_SHOOTDOWN_VECTOR: u8 = 49;
+
+/// Scheduler wake IPI vector -- sent to wake a remote CPU from idle to run a
+/// task.
+pub const SCHED_WAKE_VECTOR: u8 = 50;
+
 // ---------------------------------------------------------------------------
 // LVT Timer mode bits
 // ---------------------------------------------------------------------------
@@ -343,13 +350,37 @@ impl LocalApic {
     ///
     /// - `dest`: Destination APIC ID.
     /// - `vector`: Interrupt vector.
-    #[allow(dead_code)] // SMP API -- needed when multi-core support is enabled
     pub fn send_ipi(&self, dest: u8, vector: u8) {
         // Write high dword first (destination in bits 31:24).
         self.write(LAPIC_ICR_HIGH, (dest as u32) << 24);
         // Write low dword (vector + delivery mode Fixed). Writing ICR low
         // triggers the IPI.
         self.write(LAPIC_ICR_LOW, vector as u32);
+    }
+
+    /// Send an INIT IPI to a target CPU (used in AP startup sequence).
+    pub fn send_init_ipi(&self, dest: u8) {
+        self.write(LAPIC_ICR_HIGH, (dest as u32) << 24);
+        // INIT: delivery mode = 0b101 (INIT), level assert
+        self.write(LAPIC_ICR_LOW, 0x00004500);
+    }
+
+    /// Send a Startup IPI (SIPI) to a target CPU.
+    ///
+    /// `startup_page` is the physical page number (e.g., 0x08 for 0x8000).
+    pub fn send_startup_ipi(&self, dest: u8, startup_page: u8) {
+        self.write(LAPIC_ICR_HIGH, (dest as u32) << 24);
+        // SIPI: delivery mode = 0b110 (StartUp), vector = page number
+        self.write(LAPIC_ICR_LOW, 0x00004600 | startup_page as u32);
+    }
+
+    /// Broadcast IPI to all CPUs except self.
+    pub fn send_ipi_all_excluding_self(&self, vector: u8) {
+        // Shorthand = 11 (all excluding self), no destination field needed.
+        self.write(
+            LAPIC_ICR_LOW,
+            0x000C0000 | vector as u32, // shorthand=11, dest_mode=physical, delivery=fixed
+        );
     }
 }
 
@@ -678,12 +709,50 @@ pub fn unmask_irq(irq: u8) -> KernelResult<()> {
 ///
 /// - `dest`: Destination APIC ID.
 /// - `vector`: Interrupt vector.
-#[allow(dead_code)] // SMP API -- needed when multi-core support is enabled
 pub fn send_ipi(dest: u8, vector: u8) -> KernelResult<()> {
     let state = APIC_STATE.lock();
     match state.as_ref() {
         Some(s) => {
             s.local_apic.send_ipi(dest, vector);
+            Ok(())
+        }
+        None => Err(KernelError::NotInitialized { subsystem: "APIC" }),
+    }
+}
+
+/// Send INIT IPI to a target CPU for AP startup sequence.
+pub fn send_init_ipi(dest: u8) -> KernelResult<()> {
+    let state = APIC_STATE.lock();
+    match state.as_ref() {
+        Some(s) => {
+            s.local_apic.send_init_ipi(dest);
+            Ok(())
+        }
+        None => Err(KernelError::NotInitialized { subsystem: "APIC" }),
+    }
+}
+
+/// Send Startup IPI (SIPI) to a target CPU for AP startup sequence.
+///
+/// `startup_page` is the physical page number where AP trampoline code resides
+/// (e.g., 0x08 for physical address 0x8000).
+pub fn send_startup_ipi(dest: u8, startup_page: u8) -> KernelResult<()> {
+    let state = APIC_STATE.lock();
+    match state.as_ref() {
+        Some(s) => {
+            s.local_apic.send_startup_ipi(dest, startup_page);
+            Ok(())
+        }
+        None => Err(KernelError::NotInitialized { subsystem: "APIC" }),
+    }
+}
+
+/// Broadcast an IPI to all CPUs except self. Used for TLB shootdown.
+pub fn send_ipi_all_excluding_self(vector: u8) -> KernelResult<()> {
+    let state = APIC_STATE.lock();
+    match state.as_ref() {
+        Some(s) => {
+            s.local_apic.send_ipi_all_excluding_self(vector);
             Ok(())
         }
         None => Err(KernelError::NotInitialized { subsystem: "APIC" }),

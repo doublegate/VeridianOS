@@ -154,6 +154,36 @@ impl PciBar {
     }
 }
 
+/// MSI capability information parsed from the PCI capability chain.
+#[derive(Debug, Clone)]
+pub struct MsiCapability {
+    /// Offset of the MSI capability in config space.
+    pub cap_offset: u16,
+    /// True if 64-bit address is supported.
+    pub is_64bit: bool,
+    /// True if per-vector masking is supported.
+    pub per_vector_mask: bool,
+    /// Maximum number of vectors (log2) the device can request.
+    pub max_vectors_log2: u8,
+}
+
+/// MSI-X capability information parsed from the PCI capability chain.
+#[derive(Debug, Clone)]
+pub struct MsixCapability {
+    /// Offset of the MSI-X capability in config space.
+    pub cap_offset: u16,
+    /// Number of table entries (0-based: actual count = table_size + 1).
+    pub table_size: u16,
+    /// BAR index containing the MSI-X table.
+    pub table_bar: u8,
+    /// Offset within the BAR to the MSI-X table.
+    pub table_offset: u32,
+    /// BAR index containing the Pending Bit Array.
+    pub pba_bar: u8,
+    /// Offset within the BAR to the PBA.
+    pub pba_offset: u32,
+}
+
 /// PCI device representation
 #[derive(Debug, Clone)]
 pub struct PciDevice {
@@ -169,6 +199,12 @@ pub struct PciDevice {
     pub interrupt_pin: u8,
     pub bars: Vec<PciBar>,
     pub enabled: bool,
+    /// MSI capability, if present.
+    pub msi: Option<MsiCapability>,
+    /// MSI-X capability, if present.
+    pub msix: Option<MsixCapability>,
+    /// Secondary bus number (only valid for PCI-to-PCI bridges, header type 1).
+    pub secondary_bus: Option<u8>,
 }
 
 impl PciDevice {
@@ -187,6 +223,9 @@ impl PciDevice {
             interrupt_pin: 0,
             bars: Vec::new(),
             enabled: false,
+            msi: None,
+            msix: None,
+            secondary_bus: None,
         }
     }
 
@@ -268,8 +307,23 @@ impl PciBus {
                     );
 
                     let is_multifunction = pci_device.is_multifunction();
+                    let is_bridge = pci_device.secondary_bus.is_some();
+                    let secondary_bus = pci_device.secondary_bus;
                     self.devices.write().insert(location, pci_device);
                     device_count += 1;
+
+                    // Scan behind PCI-to-PCI bridges recursively.
+                    if is_bridge {
+                        if let Some(sec_bus) = secondary_bus {
+                            crate::println!(
+                                "[PCI] Scanning secondary bus {} behind bridge {}:{}:0",
+                                sec_bus,
+                                bus,
+                                device
+                            );
+                            let _ = self.scan_bridge(sec_bus, &mut device_count);
+                        }
+                    }
 
                     // Check other functions if multifunction
                     if is_multifunction {
@@ -320,7 +374,7 @@ impl PciBus {
         Some(device)
     }
 
-    /// Read full device configuration
+    /// Read full device configuration including capabilities.
     fn read_device_config(&self, device: &mut PciDevice) {
         let location = device.location;
 
@@ -334,6 +388,118 @@ impl PciBus {
 
         // Read BARs
         device.bars = self.read_bars(location, device.header_type & 0x7F);
+
+        // For PCI-to-PCI bridges (header type 1), read the secondary bus number.
+        if device.header_type & 0x7F == 1 {
+            // Secondary bus at offset 0x19 in the bridge header.
+            let buses = self.read_config_dword(location, 0x18);
+            device.secondary_bus = Some(((buses >> 8) & 0xFF) as u8);
+        }
+
+        // Parse PCI capabilities chain (MSI, MSI-X).
+        let status = self.read_config_dword(location, 0x04) >> 16;
+        if status & (1 << 4) != 0 {
+            // Capabilities List bit is set in Status register.
+            self.parse_capabilities(device);
+        }
+    }
+
+    /// Walk the PCI capabilities linked list and parse MSI/MSI-X capabilities.
+    fn parse_capabilities(&self, device: &mut PciDevice) {
+        let location = device.location;
+        // Capabilities pointer is at offset 0x34 (first byte only).
+        let mut cap_ptr = (self
+            .read_config_dword(location, PciConfigRegister::CapabilitiesPointer as u16)
+            & 0xFF) as u16;
+
+        // Walk the linked list (max 48 iterations to prevent infinite loops).
+        let mut iterations = 0;
+        while cap_ptr != 0 && cap_ptr != 0xFF && iterations < 48 {
+            iterations += 1;
+            let cap_header = self.read_config_dword(location, cap_ptr & !3);
+            let offset_in_dword = (cap_ptr & 3) * 8;
+            let cap_id = ((cap_header >> offset_in_dword) & 0xFF) as u8;
+            let next_ptr = ((cap_header >> (offset_in_dword + 8)) & 0xFF) as u16;
+
+            match cap_id {
+                0x05 => {
+                    // MSI Capability
+                    let msg_ctrl = self.read_config_dword(location, (cap_ptr + 2) & !3);
+                    let msg_ctrl_val = ((msg_ctrl >> (((cap_ptr + 2) & 3) * 8)) & 0xFFFF) as u16;
+                    device.msi = Some(MsiCapability {
+                        cap_offset: cap_ptr,
+                        is_64bit: msg_ctrl_val & (1 << 7) != 0,
+                        per_vector_mask: msg_ctrl_val & (1 << 8) != 0,
+                        max_vectors_log2: ((msg_ctrl_val >> 1) & 0x7) as u8,
+                    });
+                }
+                0x11 => {
+                    // MSI-X Capability
+                    let msg_ctrl = self.read_config_dword(location, (cap_ptr + 2) & !3);
+                    let msg_ctrl_val = ((msg_ctrl >> (((cap_ptr + 2) & 3) * 8)) & 0xFFFF) as u16;
+                    let table_offset_dword = self.read_config_dword(location, cap_ptr + 4);
+                    let pba_offset_dword = self.read_config_dword(location, cap_ptr + 8);
+
+                    device.msix = Some(MsixCapability {
+                        cap_offset: cap_ptr,
+                        table_size: msg_ctrl_val & 0x7FF,
+                        table_bar: (table_offset_dword & 0x7) as u8,
+                        table_offset: table_offset_dword & !0x7,
+                        pba_bar: (pba_offset_dword & 0x7) as u8,
+                        pba_offset: pba_offset_dword & !0x7,
+                    });
+                }
+                _ => {} // Skip other capabilities
+            }
+
+            cap_ptr = next_ptr;
+        }
+    }
+
+    /// Scan devices behind a PCI-to-PCI bridge (recursive bus enumeration).
+    fn scan_bridge(&self, secondary_bus: u8, device_count: &mut usize) -> Result<(), KernelError> {
+        for device in 0..32 {
+            let location = PciLocation::new(secondary_bus, device, 0);
+            if let Some(mut pci_device) = self.probe_device(location) {
+                self.read_device_config(&mut pci_device);
+
+                crate::println!(
+                    "[PCI]   Bridge device at {}:{}:{} - {:04x}:{:04x} (class {:02x})",
+                    secondary_bus,
+                    device,
+                    0,
+                    pci_device.vendor_id,
+                    pci_device.device_id,
+                    pci_device.class_code
+                );
+
+                let is_multifunction = pci_device.is_multifunction();
+                let is_bridge = pci_device.secondary_bus.is_some();
+                let sub_bus = pci_device.secondary_bus;
+                self.devices.write().insert(location, pci_device);
+                *device_count += 1;
+
+                // Recurse into sub-bridges.
+                if is_bridge {
+                    if let Some(sub) = sub_bus {
+                        self.scan_bridge(sub, device_count)?;
+                    }
+                }
+
+                // Check other functions if multifunction
+                if is_multifunction {
+                    for function in 1..8 {
+                        let func_location = PciLocation::new(secondary_bus, device, function);
+                        if let Some(mut func_device) = self.probe_device(func_location) {
+                            self.read_device_config(&mut func_device);
+                            self.devices.write().insert(func_location, func_device);
+                            *device_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Read Base Address Registers
@@ -681,4 +847,125 @@ pub fn is_pci_initialized() -> bool {
 /// Get the global PCI bus
 pub fn get_pci_bus() -> &'static spin::Mutex<PciBus> {
     PCI_BUS.get().expect("PCI bus not initialized")
+}
+
+// ---------------------------------------------------------------------------
+// MSI / MSI-X configuration
+// ---------------------------------------------------------------------------
+
+/// Configure MSI for a device to deliver a specific vector to a target APIC.
+///
+/// - `location`: PCI device location.
+/// - `msi`: MSI capability previously discovered by `parse_capabilities()`.
+/// - `vector`: IDT vector number to deliver.
+/// - `dest_apic_id`: Target Local APIC ID.
+pub fn configure_msi(location: PciLocation, msi: &MsiCapability, vector: u8, dest_apic_id: u8) {
+    let bus = get_pci_bus().lock();
+
+    // MSI message address (Intel format): bits 31:20 = 0xFEE, bits 19:12 = dest
+    // APIC ID.
+    let msg_addr: u32 = 0xFEE00000 | ((dest_apic_id as u32) << 12);
+
+    // MSI message data: bits 7:0 = vector, delivery mode = fixed (000).
+    let msg_data: u16 = vector as u16;
+
+    // Write message address (offset +4 from capability start).
+    bus.write_config_dword(location, msi.cap_offset + 4, msg_addr);
+
+    if msi.is_64bit {
+        // 64-bit: upper address at +8, data at +12.
+        bus.write_config_dword(location, msi.cap_offset + 8, 0); // upper 32 bits = 0
+        let data_dword = bus.read_config_dword(location, (msi.cap_offset + 12) & !3);
+        let shift = ((msi.cap_offset + 12) & 3) * 8;
+        let masked = data_dword & !(0xFFFF << shift);
+        bus.write_config_dword(
+            location,
+            (msi.cap_offset + 12) & !3,
+            masked | ((msg_data as u32) << shift),
+        );
+    } else {
+        // 32-bit: data at +8.
+        let data_dword = bus.read_config_dword(location, (msi.cap_offset + 8) & !3);
+        let shift = ((msi.cap_offset + 8) & 3) * 8;
+        let masked = data_dword & !(0xFFFF << shift);
+        bus.write_config_dword(
+            location,
+            (msi.cap_offset + 8) & !3,
+            masked | ((msg_data as u32) << shift),
+        );
+    }
+
+    // Enable MSI: set bit 0 of Message Control (offset +2 from cap start).
+    let ctrl_dword = bus.read_config_dword(location, (msi.cap_offset + 2) & !3);
+    let ctrl_shift = ((msi.cap_offset + 2) & 3) * 8;
+    let enabled = ctrl_dword | (1 << ctrl_shift); // Set MSI Enable bit
+    bus.write_config_dword(location, (msi.cap_offset + 2) & !3, enabled);
+
+    crate::println!(
+        "[PCI] MSI configured for {:02x}:{:02x}.{}: vector={}, dest={}",
+        location.bus,
+        location.device,
+        location.function,
+        vector,
+        dest_apic_id
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PCIe ECAM (Enhanced Configuration Access Mechanism) via MCFG
+// ---------------------------------------------------------------------------
+
+/// Read a PCI config register using memory-mapped ECAM access (PCIe).
+///
+/// `ecam_base` is the physical base address of the ECAM region from ACPI MCFG.
+/// Returns `None` if the physical-to-virtual translation is unavailable.
+#[cfg(target_arch = "x86_64")]
+pub fn ecam_read_config(ecam_base: u64, bus: u8, device: u8, func: u8, offset: u16) -> Option<u32> {
+    if offset > 0xFFF {
+        return None;
+    }
+    // ECAM address = base + (bus << 20) + (device << 15) + (function << 12) +
+    // offset
+    let phys = ecam_base as usize
+        + ((bus as usize) << 20)
+        + ((device as usize) << 15)
+        + ((func as usize) << 12)
+        + (offset as usize & 0xFFC);
+
+    let virt = crate::arch::x86_64::msr::phys_to_virt(phys)?;
+
+    // SAFETY: ECAM region is memory-mapped PCI config space. The physical address
+    // is translated to a virtual address via the bootloader's physical memory
+    // mapping. Volatile read ensures the hardware sees the access.
+    Some(unsafe { core::ptr::read_volatile(virt as *const u32) })
+}
+
+/// Write a PCI config register using memory-mapped ECAM access (PCIe).
+#[cfg(target_arch = "x86_64")]
+pub fn ecam_write_config(
+    ecam_base: u64,
+    bus: u8,
+    device: u8,
+    func: u8,
+    offset: u16,
+    value: u32,
+) -> bool {
+    if offset > 0xFFF {
+        return false;
+    }
+    let phys = ecam_base as usize
+        + ((bus as usize) << 20)
+        + ((device as usize) << 15)
+        + ((func as usize) << 12)
+        + (offset as usize & 0xFFC);
+
+    if let Some(virt) = crate::arch::x86_64::msr::phys_to_virt(phys) {
+        // SAFETY: Same as ecam_read_config. Volatile write to ECAM MMIO region.
+        unsafe {
+            core::ptr::write_volatile(virt as *mut u32, value);
+        }
+        true
+    } else {
+        false
+    }
 }

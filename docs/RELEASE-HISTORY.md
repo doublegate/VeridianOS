@@ -8,6 +8,7 @@ For current project status, see the [README](../README.md). For task tracking, s
 
 ## Table of Contents
 
+- [v0.5.10 -- Phase 5.5 Wave 2: IPI/SMP + PCI/PCIe](#v0510----phase-55-wave-2-ipismp--pcipcie)
 - [v0.5.9 -- Phase 5.5 Wave 1: ACPI + APIC Timer](#v059----phase-55-wave-1-acpi--apic-timer)
 - [v0.5.8 -- Phase 5 Completion: Hot Path Wiring](#v058----phase-5-completion-hot-path-wiring)
 - [v0.5.7 -- Phase 5 Performance Optimization](#v057----phase-5-performance-optimization)
@@ -45,6 +46,33 @@ For current project status, see the [README](../README.md). For task tracking, s
 - [v0.2.0 -- Phase 1 Microkernel Core](#v020----phase-1-microkernel-core)
 - [v0.1.0 -- Phase 0 Foundation and Tooling](#v010----phase-0-foundation-and-tooling)
 - [DEEP-RECOMMENDATIONS](#deep-recommendations)
+
+---
+
+## v0.5.10 -- Phase 5.5 Wave 2: IPI/SMP + PCI/PCIe
+
+**Date**: February 27, 2026
+
+Phase 5.5 Wave 2 release implementing multi-core coordination and modern PCI device infrastructure.
+
+### Sprint B-3: IPI + SMP Foundation
+- IPI vector constants: TLB_SHOOTDOWN_VECTOR=49, SCHED_WAKE_VECTOR=50
+- INIT-SIPI-SIPI AP startup sequence via APIC ICR (per Intel SDM)
+- TLB shootdown handler at IDT[49]: flushes local TLB on remote page table modifications
+- Scheduler wake handler at IDT[50]: breaks HLT on idle CPUs for new tasks
+- `TlbFlushBatch::flush_with_shootdown()`: local flush + broadcast IPI to all other CPUs
+- `smp::send_ipi()` x86_64 path wired to actual APIC (replaced println stub)
+- `smp::cpu_up()` uses proper INIT -> 10ms -> SIPI -> 200us -> SIPI retry
+
+### Sprint B-4: PCI/PCIe Completion
+- `MsiCapability`/`MsixCapability` structs for parsed PCI capability chain data
+- `parse_capabilities()`: walks PCI capability linked list (cap IDs 0x05=MSI, 0x11=MSI-X)
+- `scan_bridge()`: recursive PCI-to-PCI bridge enumeration via secondary bus numbers
+- `configure_msi()`: MSI message address/data programming for interrupt vector delivery
+- `ecam_read_config()`/`ecam_write_config()`: PCIe ECAM memory-mapped config access (x86_64)
+- Bridge secondary bus tracking in PciDevice for recursive scanning
+
+**Stats**: 8 files changed, ~450 insertions
 
 ---
 

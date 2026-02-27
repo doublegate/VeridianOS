@@ -29,6 +29,10 @@ lazy_static! {
         idt[33].set_handler_fn(keyboard_interrupt_handler);
         // Add APIC timer interrupt handler (vector 48, separate from PIC timer at 32)
         idt[48].set_handler_fn(apic_timer_interrupt_handler);
+        // Add TLB shootdown IPI handler (vector 49)
+        idt[49].set_handler_fn(tlb_shootdown_handler);
+        // Add scheduler wake IPI handler (vector 50)
+        idt[50].set_handler_fn(sched_wake_handler);
         idt
     };
 }
@@ -294,6 +298,21 @@ extern "x86-interrupt" fn apic_timer_interrupt_handler(_stack_frame: InterruptSt
     super::timer::tick();
 
     // Send APIC End-Of-Interrupt (NOT PIC EOI -- APIC timer uses its own EOI path).
+    crate::arch::x86_64::apic::send_eoi();
+}
+
+extern "x86-interrupt" fn tlb_shootdown_handler(_stack_frame: InterruptStackFrame) {
+    // Flush the local CPU's TLB in response to a remote CPU modifying shared
+    // page tables. On single-CPU systems this handler is never invoked, but
+    // it is registered for correctness when SMP is enabled.
+    crate::arch::x86_64::tlb_flush_all();
+    crate::arch::x86_64::apic::send_eoi();
+}
+
+extern "x86-interrupt" fn sched_wake_handler(_stack_frame: InterruptStackFrame) {
+    // Wake handler: a remote CPU placed a task on our run queue and sent this
+    // IPI to break us out of HLT. No action needed beyond EOI -- the scheduler
+    // will pick up the new task on the next scheduling decision.
     crate::arch::x86_64::apic::send_eoi();
 }
 
