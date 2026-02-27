@@ -185,85 +185,16 @@ extern "C" fn kernel_init_stage3_onwards() -> ! {
     // to a 1280x800 framebuffer is too slow in QEMU's emulated CPU).
     graphics::fbcon::enable_output();
 
-    // Attempt to run /sbin/init (PID 1) in Ring 3 (x86_64 only).
-    // /sbin/init will fork+exec /bin/sh and respawn it on exit.
-    // If init is not available, fall back to /bin/sh directly.
-    // If neither works, fall back to the kernel-space shell.
-    // AArch64/RISC-V lack user-mode entry support and always use the kernel shell.
+    // Boot directly to the native vsh (kernel-space shell).
+    // User-space shells (BusyBox ash, /bin/sh) can be launched from vsh
+    // via the `ash` or `/bin/sh` command if a rootfs with BusyBox is loaded.
     #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
     {
-        let user_env = &[
-            "PATH=/bin:/usr/bin:/sbin:/usr/sbin",
-            "HOME=/",
-            "TERM=veridian",
-            "SHELL=/bin/sh",
-            "USER=root",
-            "PWD=/",
-            "TMPDIR=/tmp",
-            "COMPILER_PATH=/usr/libexec/gcc/x86_64-veridian/14.2.0",
-            "LIBRARY_PATH=/usr/lib:/usr/lib/gcc/x86_64-veridian/14.2.0",
-        ];
-
-        let mut user_started = false;
-
-        // Try /sbin/init first (proper PID 1 init process)
         let vfs = crate::fs::get_vfs().read();
-        let has_init = vfs.resolve_path("/sbin/init").is_ok();
         let has_sh = vfs.resolve_path("/bin/sh").is_ok();
         drop(vfs);
-
-        if has_init {
-            kprintln!("[BOOTSTRAP] Attempting user-space init (/sbin/init)...");
-            match crate::userspace::load_user_program("/sbin/init", &["init"], user_env) {
-                Ok(pid) => {
-                    unsafe {
-                        crate::arch::x86_64::idt::raw_serial_str(
-                            b"[BOOTSTRAP] /sbin/init loaded, entering Ring 3\n",
-                        );
-                    }
-                    kprintln!(
-                        "[BOOTSTRAP] /sbin/init loaded (pid={}), entering Ring 3",
-                        pid.0
-                    );
-                    run_user_process_scheduled(pid);
-                    kprintln!("[BOOTSTRAP] init exited, falling back to kernel shell");
-                    user_started = true;
-                }
-                Err(e) => {
-                    kprintln!(
-                        "[BOOTSTRAP] /sbin/init load failed: {:?}, trying /bin/sh",
-                        e
-                    );
-                }
-            }
-        }
-
-        // Fall back to /bin/sh directly if init is not available or failed
-        if !user_started && has_sh {
-            kprintln!("[BOOTSTRAP] Attempting user-space shell (/bin/sh)...");
-            match crate::userspace::load_user_program("/bin/sh", &["sh"], user_env) {
-                Ok(pid) => {
-                    unsafe {
-                        crate::arch::x86_64::idt::raw_serial_str(
-                            b"[BOOTSTRAP] /bin/sh loaded, entering Ring 3\n",
-                        );
-                    }
-                    kprintln!(
-                        "[BOOTSTRAP] /bin/sh loaded (pid={}), entering Ring 3",
-                        pid.0
-                    );
-                    run_user_process_scheduled(pid);
-                    kprintln!("[BOOTSTRAP] User shell exited, falling back to kernel shell");
-                }
-                Err(e) => {
-                    kprintln!(
-                        "[BOOTSTRAP] /bin/sh load failed: {:?}, using kernel shell",
-                        e
-                    );
-                }
-            }
-        } else if !user_started {
-            kprintln!("[BOOTSTRAP] No user-space init or shell in VFS, using kernel shell");
+        if has_sh {
+            kprintln!("[BOOTSTRAP] BusyBox ash available at /bin/sh (run 'ash' from vsh)");
         }
     }
 
