@@ -1,7 +1,7 @@
 # Phase 5.5: Infrastructure Bridge TODO
 
 **Phase Duration**: 2-3 months
-**Status**: ~58% (Waves 1-3 Complete)
+**Status**: ~83% (Waves 1-4 Complete)
 **Dependencies**: Phase 5 completion (~90%, v0.5.8)
 
 ## Overview
@@ -370,9 +370,9 @@ These items are NOT planned for Phase 5.5:
 | B-5 | DMA/IOMMU | Done | Done | Done | 100% |
 | B-6 | Shared Mem/Unix Sockets | Done | Done | Done | 100% |
 | B-7 | Lock-Free Paths | Done | Done | Done | 100% |
-| B-8 | NVMe Driver | Not Started | Not Started | Not Started | 0% |
-| B-9 | Network Drivers | Not Started | Not Started | Not Started | 0% |
-| B-10 | Profiling/PMU | Not Started | Not Started | Not Started | 0% |
+| B-8 | NVMe Driver | Done | Done | Done | 100% |
+| B-9 | Network Drivers | Done | Done | Done | 100% |
+| B-10 | Profiling/PMU | Done | Done | Done | 100% |
 | B-11 | Huge Pages | Not Started | Not Started | Not Started | 0% |
 | B-12 | Dynamic Linker | Not Started | Not Started | Not Started | 0% |
 

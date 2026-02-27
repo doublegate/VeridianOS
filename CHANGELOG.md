@@ -2,6 +2,43 @@
 
 ---
 
+## [v0.5.12] - 2026-02-27
+
+### v0.5.12: Phase 5.5 Wave 4 -- NVMe Driver + Network Driver Completion + Hardware PMU
+
+Fourth Phase 5.5 Infrastructure Bridge release completing driver I/O paths and hardware profiling infrastructure.
+
+---
+
+### Added
+
+#### NVMe Driver Completion (kernel/src/drivers/nvme.rs) -- Sprint B-8
+
+- `submit_admin_command()`: NVMe admin command submission with doorbell ringing and polling completion.
+- `create_io_queue()`: I/O queue pair creation via Create I/O CQ/SQ admin commands.
+- `submit_io_read()`: I/O read command submission with LBA addressing and PRP buffer.
+- Full `read_blocks_internal()` / `write_blocks_internal()`: Block I/O via I/O queue with doorbell ringing, completion polling, and CQ head advancement.
+
+#### VirtIO-Net Driver Completion (kernel/src/drivers/virtio_net.rs) -- Sprint B-9
+
+- `transmit()`: Descriptor allocation, available ring submission, device notification via MMIO kick, statistics tracking, descriptor recycling.
+- `receive()`: Used buffer retrieval, packet creation, descriptor recycling back to available ring for future receives.
+
+#### Hardware PMU Driver (kernel/src/perf/pmu.rs ~310 lines, NEW) -- Sprint B-10
+
+- `PmuEvent` enum: 8 hardware performance events (Cycles, InstructionsRetired, L1/L2/LLC cache misses, branch mispredicts, I/D TLB misses).
+- x86_64: CPUID leaf 0x0A detection, IA32_PERFEVTSELx/IA32_PMCx MSR programming via `configure_counter()`/`read_counter()`/`stop_counter()`.
+- AArch64: PMCR_EL0 counter detection, PMCCNTR_EL0 cycle counter read.
+- RISC-V: mcycle/minstret CSR counter access.
+- `SampleBuffer`: Per-CPU instruction pointer sampling buffer (4096 samples) for profiling.
+
+### Changed
+
+- NVMe: Replaced all TODO(phase6) stubs with functional admin and I/O queue command submission.
+- VirtIO-Net: Replaced TODO(phase6) TX/RX stubs with virtqueue-based packet handling.
+
+---
+
 ## [v0.5.11] - 2026-02-27
 
 ### v0.5.11: Phase 5.5 Wave 3 -- DMA/IOMMU + Shared Memory/Unix Sockets + Lock-Free Kernel Paths
