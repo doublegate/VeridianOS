@@ -112,7 +112,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.5.13 (February 27, 2026) | **Releases Published**: 38 (v0.1.0 through v0.5.13)
+**Latest Release**: v0.6.0 (February 27, 2026) | **Releases Published**: 39 (v0.1.0 through v0.6.0)
 
 | Metric                 | Value                                           |
 | ---------------------- | ----------------------------------------------- |
@@ -199,8 +199,7 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### What Comes Next
 
-- **Native Binary Execution** -- Natively-compiled binaries execute on VeridianOS (NATIVE_ECHO_PASS verified in v0.5.6); sysinfo/edit programs compile natively
-- **Phase 5 (~75%)** -- Per-CPU page caching, TLB batch/lazy optimization, IPC fast path with per-task registers, priority inheritance, micro-benchmark suite, software tracepoints; remaining: lock-free RCU, huge pages, deadline scheduling, hardware perf counters
+- **Phase 5.5 Integration** -- POSIX shared memory and Unix domain sockets wired to syscall table (12 new syscalls), hardware PMU initialized at boot, RCU quiescent state integrated into scheduler context switch, NVMe driver wired to PCI bus scan, IOMMU DMAR detection via ACPI, dynamic linker segment copying fixed (v0.6.0)
 - **Phase 6: Advanced Features** -- Wayland compositor, desktop environment, multimedia, virtualization, cloud-native features, POSIX compatibility layer
 
 ### Technical Notes
@@ -434,10 +433,11 @@ Security is a fundamental design principle:
 - [x] **Coreutils + Toolchain Validation**: 6 progressive POSIX coreutils (echo, cat, wc, ls, sort, pipeline_test) cross-compiled and verified on-target, pipe fd corruption fix, tri-arch clippy clean (v0.5.1, Feb 2026)
 - [x] **BusyBox Integration**: BusyBox 1.36.1 cross-compiled with 95 applets and ash shell, EPIPE handling, float printf, pipe improvements, Phase C native compilation infrastructure (384MB heap, sbrk hardening), POSIX BRE/ERE regex engine, CI target fix (v0.5.2, Feb 2026)
 - [x] **Phase 5 Sprint 1**: Scheduler context switch wiring, IPC blocking/wake + fast path, TODO(phase5) resolution across 56 items in 31 files, user-space /sbin/init process, dead_code audit reduction, native binary execution verification (v0.5.6, Feb 2026)
+- [x] **Phase 5.5 Infrastructure Bridge**: ACPI table parser, APIC timer 1000Hz preemptive scheduling, IPI/SMP, PCI/PCIe completion, DMA/IOMMU, POSIX shared memory, Unix domain sockets, lock-free RCU/hazard pointers, NVMe driver, VirtIO-Net, hardware PMU, 2MB huge pages, dynamic linker (v0.5.9-v0.5.13, Feb 2026)
+- [x] **Pre-Phase 6 Tech Debt Remediation**: 12 new syscalls (shm_open/unlink/truncate, socket create/bind/listen/connect/accept/send/recv/close/socketpair), PMU bootstrap wiring, RCU scheduler integration, NVMe PCI enumeration, IOMMU DMAR detection, dynamic linker segment copy fix, stale documentation correction (v0.6.0, Feb 2026)
 
 ### Upcoming
 
-- [ ] **Phase 5 Continued**: Sub-microsecond IPC optimization, lock-free kernel paths, DPDK networking, NVMe optimization
 - [ ] **Phase 6**: Advanced Features (8-9 months) -- Wayland compositor, desktop environment, multimedia, virtualization, cloud-native, POSIX compatibility layer
 
 See [Release History](docs/RELEASE-HISTORY.md) for detailed per-release notes.

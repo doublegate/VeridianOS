@@ -330,7 +330,7 @@ Currently implementing in phases:
 | Area | Status |
 |------|--------|
 | **Repository** | <https://github.com/doublegate/VeridianOS> |
-| **Latest Release** | v0.5.13 (February 27, 2026) - Phase 5.5 COMPLETE: 2MB huge pages, dynamic linker (ld-veridian). All 12 Phase 5.5 sprints done. |
+| **Latest Release** | v0.6.0 (February 27, 2026) - Pre-Phase 6 tech debt remediation: 12 new syscalls, PMU/RCU integration, NVMe PCI scan, IOMMU DMAR, dynamic linker fix |
 | **Build** | ✅ All 3 architectures compile, zero warnings |
 | **Boot** | ✅ All 3 architectures Stage 6 BOOTOK, 29/29 tests (fbcon + keyboard driver) |
 | **CI/CD** | ✅ GitHub Actions 100% pass rate |

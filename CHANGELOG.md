@@ -2,6 +2,84 @@
 
 ---
 
+## [v0.6.0] - 2026-02-27
+
+### v0.6.0: Pre-Phase 6 Tech Debt Remediation -- Syscall Wiring, Stub Promotion, RCU Integration
+
+Comprehensive tech debt audit and remediation bridging Phase 5.5 completion to Phase 6 readiness. Wires Phase 5.5 modules (POSIX shared memory, Unix domain sockets, PMU, RCU) into the syscall table and bootstrap sequence. Promotes NVMe and IOMMU driver stubs to use actual PCI/ACPI infrastructure. Fixes dynamic linker ELF segment loading. Corrects stale documentation.
+
+---
+
+### Added
+
+#### POSIX Shared Memory Syscalls (kernel/src/syscall/mod.rs)
+
+- `ShmOpen` (210): Creates/opens named shared memory objects via `ipc::posix_shm::shm_open()` with user-space name string, bitfield flags (create/exclusive/read-only), and caller PID.
+- `ShmUnlink` (211): Removes named shm objects; deferred destruction if references remain.
+- `ShmTruncate` (212): Sets shm object size with contiguous physical frame allocation.
+
+#### Unix Domain Socket Syscalls (kernel/src/syscall/mod.rs)
+
+- `SocketCreate` (220): AF_UNIX dispatch to `net::unix_socket::socket_create()` with SOCK_STREAM/SOCK_DGRAM type mapping.
+- `SocketBind` (221): Binds socket to filesystem path via `socket_bind()`.
+- `SocketListen` (222): Starts accepting connections with configurable backlog.
+- `SocketConnect` (223): Connects to listening socket by path lookup.
+- `SocketAccept` (224): Accepts pending connection, returns new socket ID.
+- `SocketSend` (225): Sends data with user-space buffer validation.
+- `SocketRecv` (226): Receives data with WouldBlock for empty buffers.
+- `SocketClose` (227): Closes socket with peer notification and path cleanup.
+- `SocketPair` (228): Creates connected AF_UNIX stream pair, writes socket IDs to user pointer.
+
+#### ACPI DMAR Detection (kernel/src/arch/x86_64/acpi.rs)
+
+- `DMAR_SIGNATURE` constant for DMA Remapping table identification.
+- `AcpiInfo.has_dmar`, `.dmar_address`, `.dmar_length` fields for IOMMU driver.
+- DMAR table detection in `parse_table()` alongside existing MADT/MCFG handlers.
+
+### Changed
+
+#### PMU Bootstrap Integration (kernel/src/bootstrap.rs)
+
+- `perf::pmu::init()` called during Stage 3 after ACPI/APIC initialization.
+- Boot log reports detected hardware performance counter count.
+
+#### RCU Scheduler Integration (kernel/src/sched/scheduler.rs)
+
+- `sync::rcu::rcu_quiescent()` called after every context switch (both resume and first-task paths).
+- Context switches are natural RCU quiescent points, enabling grace period detection.
+
+#### NVMe PCI Enumeration (kernel/src/drivers/nvme.rs)
+
+- `init()` scans PCI bus for Mass Storage class (0x01) / NVMe subclass (0x08).
+- Reports vendor:device ID, BDF location, BAR0 MMIO address/size per controller.
+- Gracefully handles no-NVMe case (QEMU default).
+
+#### IOMMU DMAR Integration (kernel/src/drivers/iommu.rs)
+
+- `init()` checks `AcpiInfo.has_dmar` from ACPI parser instead of hardcoded `None`.
+- Logs DMAR table discovery when present; creates stub DmarInfo for future VT-d setup.
+
+#### Dynamic Linker Segment Copy Fix (kernel/src/userspace/enhanced_loader.rs)
+
+- `load_interpreter()` copies real ELF segment data from interpreter file instead of zeroing.
+- New `raw_data()` accessor on `EnhancedElfLoader` for segment-by-offset copying.
+- BSS (p_memsz > p_filesz) zeroed separately before file data copy.
+
+### Fixed
+
+- docs/05-PHASE-5-PERFORMANCE-OPTIMIZATION.md: Status corrected from "~10%" to "~90%".
+- to-dos/MASTER_TODO.md: dead_code count corrected from "<100" to "~125 (52 files)".
+- to-dos/MASTER_TODO.md: Phase 5.5 link corrected from "~15%" to "100% COMPLETE".
+- to-dos/MASTER_TODO.md: Added 6 missing release entries (v0.5.8 through v0.5.13).
+
+### Stats
+
+- 10 files changed, +453/-42 lines
+- Tri-arch build: zero errors, zero warnings (clippy -D warnings)
+- QEMU boot: 29/29 tests, BOOTOK on all 3 architectures
+
+---
+
 ## [v0.5.13] - 2026-02-27
 
 ### v0.5.13: Phase 5.5 Wave 5 -- Huge Pages + Dynamic Linker (Phase 5.5 COMPLETE)
