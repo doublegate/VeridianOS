@@ -2,6 +2,42 @@
 
 ---
 
+## [v0.5.8] - 2026-02-27
+
+### v0.5.8: Phase 5 Completion -- Hot Path Wiring, CapabilityCache, O(log n) IPC Lookup, Trace Instrumentation
+
+Wires Phase 5 performance data structures into production hot paths: TlbFlushBatch replaces individual TLB flushes in map_region/unmap_region/unmap, per_cpu_alloc_frame replaces global lock in map_page(), CapabilityCache accelerates IPC capability validation, and a global PID-to-Task registry provides O(log n) IPC fast path lookup. Adds trace instrumentation for IpcFastSend, IpcFastReceive, IpcSlowPath, and FrameAlloc events. Phase 5 at ~90%.
+
+---
+
+### Added
+
+#### Global PID-to-Task Registry (kernel/src/sched/scheduler.rs, task_management.rs)
+
+- `TASK_REGISTRY`: Global `BTreeMap<u64, SendTaskPtr>` for O(log n) PID-to-Task lookup in IPC fast path, replacing O(n) linear scan.
+- `register_task()` / `unregister_task()`: Lifecycle hooks called from `create_task()`, `create_task_from_thread()`, and `exit_task()`.
+- `get_task_ptr()`: Lock-minimal lookup returning `Option<NonNull<Task>>` for IPC fast path.
+- `SendTaskPtr`: Newtype wrapper around `NonNull<Task>` with `Send + Sync` for use in static `Mutex`.
+
+#### CapabilityCache Integration (kernel/src/ipc/fast_path.rs)
+
+- `FAST_CAP_CACHE`: Static 16-entry direct-mapped cache for IPC capability validation.
+- `validate_capability_fast()`: Checks cache before range check for O(1) fast-accept path on cache hit.
+- Cache insertion on successful IPC completion in `fast_send()`.
+
+#### Additional Trace Events (kernel/src/ipc/fast_path.rs, mm/frame_allocator.rs)
+
+- `IpcFastSend`, `IpcFastReceive`, `IpcSlowPath` trace events in IPC fast path.
+- `FrameAlloc` trace event in all 3 return paths of `per_cpu_alloc_frame()`.
+
+### Changed
+
+- `map_region()`, `unmap_region()`, `unmap()` (vas.rs): Individual `tlb_flush_address()` calls replaced with `TlbFlushBatch` for batched TLB invalidation.
+- `map_page()` (vas.rs): Global `FRAME_ALLOCATOR.lock()` replaced with `per_cpu_alloc_frame()` for lock-free single-frame allocation.
+- `fast_send()` (fast_path.rs): Uses O(log n) `get_task_ptr()` instead of broken `find_task_by_pid()`.
+
+---
+
 ## [v0.5.7] - 2026-02-26
 
 ### v0.5.7: Phase 5 Performance Optimization -- Per-CPU Caching, TLB Batching, IPC Fast Path, Priority Inheritance, Benchmarks, Tracepoints

@@ -1,7 +1,7 @@
 # Phase 5: Performance Optimization TODO
 
 **Phase Duration**: 3-4 months
-**Status**: ~75% Complete (v0.5.7 -- per-CPU caching, TLB optimization, IPC fast path, priority inheritance, benchmarks, tracepoints)
+**Status**: ~90% Complete (v0.5.8 -- hot paths wired, CapabilityCache, O(log n) IPC PID lookup, trace instrumentation)
 **Dependencies**: Phase 4 completion (DONE)
 
 ## Overview
@@ -23,11 +23,13 @@ Phase 5 focuses on system-wide performance optimization including kernel improve
 #### Memory Management Optimization
 - [x] Page allocator improvements
   - [x] Per-CPU page lists (PerCpuPageCache in frame_allocator.rs, v0.5.7)
+  - [x] per_cpu_alloc_frame wired into map_page() hot path (v0.5.8)
   - [x] Batched allocations (BATCH_SIZE=32 refill/drain, v0.5.7)
   - [ ] NUMA optimizations (deferred: requires multi-node hardware testing)
   - [ ] Large page support (deferred: Phase 5.5 candidate, requires 2MB THP infrastructure)
 - [x] TLB optimization
   - [x] TLB shootdown reduction (TlbFlushBatch in vas.rs, v0.5.7)
+  - [x] TlbFlushBatch wired into unmap_region, unmap (partial munmap), map_region hot paths (v0.5.8)
   - [x] ASID management (tlb_generation counter + lazy TLB in scheduler, v0.5.7)
   - [ ] TLB prefetching (deferred: requires workload-specific heuristics)
 - [ ] Cache optimization
@@ -53,6 +55,9 @@ Phase 5 focuses on system-wide performance optimization including kernel improve
 - [x] Fast path optimization
   - [x] Zero-copy transfers
   - [x] Direct switching (IPC blocking/wake wired in v0.5.6)
+  - [x] CapabilityCache wired into validate_capability_fast() (v0.5.8)
+  - [x] O(log n) PID-to-Task registry for IPC fast path lookup (v0.5.8)
+  - [x] Trace events: IpcFastSend, IpcFastReceive, IpcSlowPath, FrameAlloc (v0.5.8)
   - [ ] Batched operations
 - [ ] Notification coalescence
 - [ ] Shared memory optimization

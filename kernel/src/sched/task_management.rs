@@ -64,6 +64,10 @@ pub fn create_task(
     // Leak the Box to get a stable pointer, then enqueue
     let task_ptr =
         NonNull::new(Box::leak(new_task) as *mut _).expect("Box::leak returned null (impossible)");
+
+    // Register in global PID-to-Task registry for O(log n) IPC lookup
+    scheduler::register_task(pid.0, task_ptr);
+
     scheduler::SCHEDULER.lock().enqueue(task_ptr);
 
     Ok(pid)
@@ -106,6 +110,9 @@ pub fn exit_task(exit_code: i32) {
         unsafe {
             let task_mut = current_task.as_ptr();
             let task_ref = &*task_mut;
+
+            // Unregister from global PID-to-Task registry
+            scheduler::unregister_task(task_ref.pid.0);
 
             // Mark task as dead
             (*task_mut).state = ProcessState::Dead;
@@ -230,6 +237,9 @@ pub fn create_task_from_thread(
     // Box::leak always returns a non-null pointer
     let task_ptr =
         NonNull::new(Box::leak(new_task) as *mut _).expect("Box::leak returned null (impossible)");
+
+    // Register in global PID-to-Task registry for O(log n) IPC lookup
+    scheduler::register_task(process_id.0, task_ptr);
 
     // Link thread and task bidirectionally
     thread.set_task_ptr(Some(task_ptr));

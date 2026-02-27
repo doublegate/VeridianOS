@@ -112,14 +112,14 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.5.7 (February 26, 2026) | **Releases Published**: 32 (v0.1.0 through v0.5.7)
+**Latest Release**: v0.5.8 (February 27, 2026) | **Releases Published**: 33 (v0.1.0 through v0.5.8)
 
-| Metric | Value |
-| ------ | ----- |
-| Build | 0 errors, 0 warnings across all 3 architectures |
-| Boot Tests | 29/29 (all architectures, Stage 6 BOOTOK) |
-| Host-Target Unit Tests | 646/646 passing |
-| CI Pipeline | 10/10 jobs passing (GitHub Actions + Codecov) |
+| Metric                 | Value                                           |
+| ---------------------- | ----------------------------------------------- |
+| Build                  | 0 errors, 0 warnings across all 3 architectures |
+| Boot Tests             | 29/29 (all architectures, Stage 6 BOOTOK)       |
+| Host-Target Unit Tests | 646/646 passing                                 |
+| CI Pipeline            | 10/10 jobs passing (GitHub Actions + Codecov)   |
 
 ### Architecture Support
 
@@ -131,15 +131,15 @@ experiments/   Non-normative exploratory work
 
 ### Development Phases
 
-| Phase | Description               | Status       | Version | Date     |
-| ----- | ------------------------- | ------------ | ------- | -------- |
-| 0     | Foundation and Tooling    | **Complete** | v0.1.0  | Jun 2025 |
-| 1     | Microkernel Core          | **Complete** | v0.2.1  | Jun 2025 |
-| 2     | User Space Foundation     | **Complete** | v0.3.2  | Feb 2026 |
-| 3     | Security Hardening        | **Complete** | v0.3.2  | Feb 2026 |
-| 4     | Package Ecosystem         | **Complete** | v0.4.0  | Feb 2026 |
-| 5     | Performance Optimization  | **In Progress (~75%)** | v0.5.7  | Feb 2026 |
-| 6     | Advanced Features and GUI | Planned      | --      | --       |
+| Phase | Description               | Status                 | Version | Date     |
+| ----- | ------------------------- | ---------------------- | ------- | -------- |
+| 0     | Foundation and Tooling    | **Complete**           | v0.1.0  | Jun 2025 |
+| 1     | Microkernel Core          | **Complete**           | v0.2.1  | Jun 2025 |
+| 2     | User Space Foundation     | **Complete**           | v0.3.2  | Feb 2026 |
+| 3     | Security Hardening        | **Complete**           | v0.3.2  | Feb 2026 |
+| 4     | Package Ecosystem         | **Complete**           | v0.4.0  | Feb 2026 |
+| 5     | Performance Optimization  | **In Progress (~90%)** | v0.5.8  | Feb 2026 |
+| 6     | Advanced Features and GUI | Planned                | --      | --       |
 
 For detailed release notes, see [Release History](docs/RELEASE-HISTORY.md).
 
@@ -175,20 +175,21 @@ Phases 0 through 4 are complete. The kernel provides:
 
 The self-hosting effort follows a tiered plan to build VeridianOS toward compiling its own software natively:
 
-| Tier | Description | Status |
-| ---- | ----------- | ------ |
-| 0 | Kernel infrastructure (syscalls, ELF loader, virtio-blk) | **Complete** |
-| 1 | C standard library (stdio, stdlib, string, unistd, math) | **Complete** |
-| 2 | Cross-compilation toolchain (binutils 2.43 + GCC 14.2) | **Complete** |
-| 3 | User-space execution (`/bin/minimal` verified, process lifecycle) | **Complete** |
-| 4 | Sysroot and CRT files (crt0.S, crti.S, crtn.S, all 3 architectures) | **Complete** |
-| 5 | Cross-compiled programs running on VeridianOS | **Complete** |
-| 6 | Thread support, signal delivery, virtio-MMIO, multi-LOAD ELF, native GCC | **Complete** (merged from test-codex) |
-| 7 | Full self-hosting (Rust std port, native GCC, make/ninja, vpkg) | **Complete** (v0.5.0) |
+| Tier | Description                                                              | Status                                |
+| ---- | ------------------------------------------------------------------------ | ------------------------------------- |
+| 0    | Kernel infrastructure (syscalls, ELF loader, virtio-blk)                 | **Complete**                          |
+| 1    | C standard library (stdio, stdlib, string, unistd, math)                 | **Complete**                          |
+| 2    | Cross-compilation toolchain (binutils 2.43 + GCC 14.2)                   | **Complete**                          |
+| 3    | User-space execution (`/bin/minimal` verified, process lifecycle)        | **Complete**                          |
+| 4    | Sysroot and CRT files (crt0.S, crti.S, crtn.S, all 3 architectures)      | **Complete**                          |
+| 5    | Cross-compiled programs running on VeridianOS                            | **Complete**                          |
+| 6    | Thread support, signal delivery, virtio-MMIO, multi-LOAD ELF, native GCC | **Complete** (merged from test-codex) |
+| 7    | Full self-hosting (Rust std port, native GCC, make/ninja, vpkg)          | **Complete** (v0.5.0)                 |
 
 Tier 6 was developed on the test-codex branch and merged to main with a comprehensive audit pass fixing 8 critical bugs. Tier 7 provides the complete self-hosting toolchain: T7-1 (Rust user-space target specs), T7-2 (Rust std platform port), T7-3 (static native GCC via Canadian cross-compilation), T7-4 (GNU Make + Ninja), and T7-5 (vpkg package manager). The native GCC toolchain (T7-3) uses CONFIG_SITE-based autoconf caching to solve endianness detection in Canadian cross builds (`build=linux, host=veridian, target=veridian`), producing statically-linked gcc, cc1, as, ld, ar, and related tools totaling ~91 MB.
 
 ### Recent Kernel Updates (Tier 6 Self-Hosting)
+
 - Futex/threads: wait/wake/requeue validation, futex bitset filtering, CLONE_FS per-thread cwd/umask sharing, TLS-preserving clone/pthread trampoline, child-cleartid wake.
 - Virtio: AArch64/RISC-V virtio-mmio transport (replaces PCI-only); probing fails fast on feature negotiation errors; PCI gated to x86_64 only.
 - Filesystem/exec: BlockFS symlink/readlink works; ELF loader handles multi-LOAD binaries while retaining stack mappings; per-thread FS state wired through syscalls.

@@ -1124,6 +1124,11 @@ pub fn per_cpu_alloc_frame() -> Result<FrameNumber> {
 
     // Try cache first
     if let Some(frame) = cache.alloc_one() {
+        crate::trace!(
+            crate::perf::trace::TraceEventType::FrameAlloc,
+            frame.as_u64(),
+            cpu_id as u64
+        );
         return Ok(frame);
     }
 
@@ -1132,11 +1137,22 @@ pub fn per_cpu_alloc_frame() -> Result<FrameNumber> {
 
     // Try again after refill
     if let Some(frame) = cache.alloc_one() {
+        crate::trace!(
+            crate::perf::trace::TraceEventType::FrameAlloc,
+            frame.as_u64(),
+            cpu_id as u64
+        );
         return Ok(frame);
     }
 
     // Still empty -- fall back to direct global allocation
-    FRAME_ALLOCATOR.lock().allocate_frames(1, None)
+    let frame = FRAME_ALLOCATOR.lock().allocate_frames(1, None)?;
+    crate::trace!(
+        crate::perf::trace::TraceEventType::FrameAlloc,
+        frame.as_u64(),
+        cpu_id as u64
+    );
+    Ok(frame)
 }
 
 /// Free a single physical frame using the per-CPU cache.

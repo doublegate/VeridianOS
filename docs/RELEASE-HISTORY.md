@@ -8,6 +8,23 @@ For current project status, see the [README](../README.md). For task tracking, s
 
 ## Table of Contents
 
+- [v0.5.8 -- Phase 5 Completion: Hot Path Wiring](#v058----phase-5-completion-hot-path-wiring)
+- [v0.5.7 -- Phase 5 Performance Optimization](#v057----phase-5-performance-optimization)
+- [v0.5.6 -- Phase 5 Scheduler, IPC, Init](#v056----phase-5-scheduler-ipc-init)
+- [v0.5.5 -- POSIX Partial Munmap + Native BusyBox 208/208](#v055----posix-partial-munmap--native-busybox-208208)
+- [v0.5.4 -- Critical Memory Leak Fixes](#v054----critical-memory-leak-fixes)
+- [v0.5.3 -- BusyBox Ash Compatibility + Process Hardening](#v053----busybox-ash-compatibility--process-hardening)
+- [v0.5.2 -- BusyBox EPIPE, Float Printf, POSIX Regex](#v052----busybox-epipe-float-printf-posix-regex)
+- [v0.5.1 -- Coreutils + Pipe Fix](#v051----coreutils--pipe-fix)
+- [v0.5.0 -- Self-Hosting Tier 7 Complete](#v050----self-hosting-tier-7-complete)
+- [v0.4.9 -- Self-Hosting Foundation](#v049----self-hosting-foundation)
+- [v0.4.8 -- Fbcon Scroll Fix + KVM](#v048----fbcon-scroll-fix--kvm)
+- [v0.4.7 -- Fbcon Glyph Cache + Pixel Ring Buffer](#v047----fbcon-glyph-cache--pixel-ring-buffer)
+- [v0.4.6 -- Fbcon Back-Buffer + Text Cell Ring](#v046----fbcon-back-buffer--text-cell-ring)
+- [v0.4.5 -- Framebuffer Display + PS/2 Keyboard](#v045----framebuffer-display--ps2-keyboard)
+- [v0.4.4 -- CWD Prompt + VFS Population](#v044----cwd-prompt--vfs-population)
+- [v0.4.3 -- Interactive Shell (vsh)](#v043----interactive-shell-vsh)
+- [v0.4.2 -- IRQ Framework + Timer Management](#v042----irq-framework--timer-management)
 - [v0.4.1 -- Technical Debt Remediation](#v041----technical-debt-remediation)
 - [v0.4.0 -- Phase 4 Milestone](#v040----phase-4-milestone)
 - [v0.3.9 -- Phase 4 Completion + Userland Bridge](#v039----phase-4-completion--userland-bridge)
@@ -27,6 +44,212 @@ For current project status, see the [README](../README.md). For task tracking, s
 - [v0.2.0 -- Phase 1 Microkernel Core](#v020----phase-1-microkernel-core)
 - [v0.1.0 -- Phase 0 Foundation and Tooling](#v010----phase-0-foundation-and-tooling)
 - [DEEP-RECOMMENDATIONS](#deep-recommendations)
+
+---
+
+## v0.5.8 -- Phase 5 Completion: Hot Path Wiring
+
+**Released**: February 27, 2026
+
+Wires Phase 5 performance data structures into production hot paths, bringing Phase 5 from ~75% to ~90%:
+
+- **TlbFlushBatch Integration** -- Replaces individual `tlb_flush_address()` calls in `map_region()`, `unmap_region()`, and `unmap()` (partial munmap) with batched TLB invalidation (up to 16 addresses, then full flush)
+- **Per-CPU Frame Allocation** -- `map_page()` now uses `per_cpu_alloc_frame()` instead of global `FRAME_ALLOCATOR.lock()`, eliminating lock contention for single-frame allocations
+- **CapabilityCache** -- 16-entry direct-mapped cache integrated into `validate_capability_fast()` for O(1) fast-accept path on IPC capability validation
+- **Global PID-to-Task Registry** -- `BTreeMap<u64, SendTaskPtr>` provides O(log n) IPC fast path lookup, replacing broken `find_task_by_pid()` linear scan
+- **Trace Instrumentation** -- IpcFastSend, IpcFastReceive, IpcSlowPath, and FrameAlloc events wired (8/10 event types now active)
+- **Documentation** -- Created DEFERRED-IMPLEMENTATION-ITEMS.md, PERFORMANCE-BENCHMARKS.md, PERFORMANCE-TUNING.md; rewrote TESTING-STATUS.md; updated RELEASE-HISTORY.md
+
+All 3 architectures: Stage 6 BOOTOK, 29/29 tests, zero warnings.
+
+---
+
+## v0.5.7 -- Phase 5 Performance Optimization
+
+**Released**: February 26, 2026
+
+6 implementation sprints bringing Phase 5 from ~30% to ~75%:
+
+- **Per-CPU Page Frame Cache** -- `PerCpuPageCache` (64-frame, batch refill/drain 32), `per_cpu_alloc_frame()`/`per_cpu_free_frame()`
+- **IPC Fast Path Completion** -- Per-task `ipc_regs: [u64; 7]`, `fast_send()` writes directly to target task registers, `fast_receive()` reads from current task
+- **TLB Optimization** -- `TlbFlushBatch` (16 addresses), lazy TLB in scheduler (skip CR3 for kernel threads), `tlb_generation` counter
+- **Priority Inheritance** -- `PiMutex` with owner tracking, priority boosting, original priority restoration
+- **Benchmarking Suite** -- 7 micro-benchmarks with Phase 5 targets, `perf` shell builtin
+- **Software Tracepoints** -- 10 event types, per-CPU ring buffers (4096 events/CPU), `trace` shell builtin
+
+All 3 architectures: Stage 6 BOOTOK, 29/29 tests, zero warnings.
+
+---
+
+## v0.5.6 -- Phase 5 Scheduler, IPC, Init
+
+**Released**: February 25, 2026
+
+First Phase 5 sprint. 8 implementation sprints:
+
+- **Scheduler Context Switch** -- `switch_to()` wired to `context_switch()` (all 3 architectures), TSS RSP0 per-task kernel stacks
+- **IPC Blocking/Wake** -- `send_sync()` directly switches to waiting receiver, fast path framework
+- **User-Space /sbin/init** -- PID 1 running in Ring 3
+- **Dead Code Audit** -- 136 to less than 100 `#[allow(dead_code)]` annotations
+- **Native Execution** -- NATIVE_ECHO_PASS (compile + link + execute on VeridianOS)
+- **TODO Resolution** -- All 56 `TODO(phase5)` markers across 31 files resolved
+
+91 files changed, +1399/-343 lines. All 3 architectures: Stage 6 BOOTOK, 29/29 tests, zero warnings.
+
+---
+
+## v0.5.5 -- POSIX Partial Munmap + Native BusyBox 208/208
+
+**Released**: February 25, 2026
+
+- **POSIX Partial Munmap** -- 5-case munmap (exact, front trim, back trim, hole punch, sub-range); fixes GCC ggc garbage collector segfaults
+- **Consolidated brk()** -- Single BTreeMap entry instead of per-sbrk(), O(1) instead of O(n^2)
+- **Native BusyBox** -- 208/208 sources compiled and linked by native GCC 14.2 on VeridianOS
+- **12 libc stubs** -- gethostbyname, getpeername, getsockname, inet_aton, inet_ntoa, sendto, initgroups, endgrent, chroot, fchdir, settimeofday
+
+17 files changed, +436/-75 lines.
+
+---
+
+## v0.5.4 -- Critical Memory Leak Fixes
+
+**Released**: February 25, 2026
+
+Three critical memory leak fixes totaling ~272MB over 630 process executions:
+
+- **GP Fault wrmsr** -- Explicit EAX/EDX register constraints for MSR writes (release-only register allocation conflict)
+- **Page Table Subtree Leak** -- `VAS::clear()` now frees L3/L2/L1 page table frames during exec() (~75MB leaked)
+- **Thread Stack Leak** -- Fixed double-allocation and added kernel stack frame cleanup in `cleanup_process()` (~197MB leaked)
+
+5 files changed, +230/-97 lines.
+
+---
+
+## v0.5.3 -- BusyBox Ash Compatibility + Process Hardening
+
+**Released**: February 24, 2026
+
+- **Ash Shell Compatibility** -- ENOTTY for non-terminal fds, sysconf, exec family, fnmatch/glob rewrite, tcgetpgrp fix
+- **Process Lifecycle Hardening** -- MAX_PROCESSES=1024 enforcement, boot-context zombie reaping (213+ sequential execs), fd leak detection
+- **ARG_MAX Enforcement** -- 128KB cumulative limit across argv+envp, MAX_ARGS=32768
+- **strftime + popen** -- 28 format specifiers, fork/exec/pipe-based popen (16 concurrent streams)
+
+35 files changed, +3475/-206 lines.
+
+---
+
+## v0.5.2 -- BusyBox EPIPE, Float Printf, POSIX Regex
+
+**Released**: February 24, 2026
+
+- **EPIPE/BrokenPipe** -- `sys_write()` returns EPIPE on broken pipe (critical for pipelines)
+- **Float printf** -- `__format_double()` (~170 lines) for `%f/%g/%e` format specifiers
+- **384MB Kernel Heap** -- Scaled from 128MB for native compilation workloads
+- **sbrk Hardening** -- 64KB chunk pre-allocation, page-aligned breaks, 512MB per-process limit
+- **POSIX Regex** -- 1291-line BRE/ERE NFA engine (regcomp/regexec/regfree/regerror, 12 character classes)
+- **30+ libc headers** -- byteswap.h, endian.h, regex.h, sched.h, syslog.h, and more
+
+69 files changed, +6953/-262 lines.
+
+---
+
+## v0.5.1 -- Coreutils + Pipe Fix
+
+**Released**: February 23, 2026
+
+- **6 Coreutils** -- echo, cat, wc, ls, sort, pipeline_test (~884 lines C) in `userland/coreutils/`
+- **Critical Pipe Fix** -- `sys_pipe2()` wrote fd values as `usize` (8 bytes) instead of `i32` (4 bytes), corrupting second fd
+- **Clippy Clean** -- cfg interleaving restructured to top-level `#[cfg]` blocks
+
+83 files changed, +10926/-699 lines.
+
+---
+
+## v0.5.0 -- Self-Hosting Tier 7 Complete
+
+**Released**: February 21, 2026
+
+Self-hosting Tier 7 complete across 10 sprints:
+
+- **ELF/fork/exec/wait** -- Full process lifecycle, console blocking read, fd 0/1/2 wiring
+- **User-Space Shell Bootstrap** -- Interactive shell from Ring 3
+- **Dead Code Audit** -- 159 to 136 annotations
+- **TODO Categorization** -- 79 items split to phase5/phase6
+- **T7-3 GCC Toolchain** -- GCC 14.2.0 + binutils 2.43 (Canadian cross)
+
+130 files changed, +952/-254 lines.
+
+---
+
+## v0.4.9 -- Self-Hosting Foundation
+
+**Released**: February 18, 2026
+
+Major milestone: self-hosting tiers T0-T5, complete libc, virtio-blk driver, TAR rootfs:
+
+- **30+ Syscalls** -- Complete system call interface for POSIX compatibility
+- **Complete libc** -- Full C library for cross-compilation
+- **VirtIO-Blk Driver** -- Block device for rootfs access
+- **TAR Rootfs** -- Boot from TAR archive containing toolchain
+- **CR3 Switching Removed** -- ~500-2000 cycles saved per syscall
+
+209 files changed, +24573/-8618 lines.
+
+---
+
+## v0.4.8 -- Fbcon Scroll Fix + KVM
+
+**Released**: February 16, 2026
+
+Fbcon scroll fix, KVM acceleration documentation, free panic fix. 7 files changed.
+
+---
+
+## v0.4.7 -- Fbcon Glyph Cache + Pixel Ring Buffer
+
+**Released**: February 16, 2026
+
+128KB glyph cache, pixel ring buffer (O(1) scroll), write-combining PAT (1200+ MB/s). 8 files changed.
+
+---
+
+## v0.4.6 -- Fbcon Back-Buffer + Text Cell Ring
+
+**Released**: February 16, 2026
+
+RAM back-buffer, text cell ring, dirty row tracking for framebuffer console.
+
+---
+
+## v0.4.5 -- Framebuffer Display + PS/2 Keyboard
+
+**Released**: February 16, 2026
+
+UEFI GOP framebuffer (1280x800 BGR), ramfb driver (AArch64/RISC-V), PS/2 keyboard polling, 29/29 tests.
+
+---
+
+## v0.4.4 -- CWD Prompt + VFS Population
+
+**Released**: February 16, 2026
+
+CWD prompt in shell, VFS population with /proc /dev /etc, RISC-V ELF fix.
+
+---
+
+## v0.4.3 -- Interactive Shell (vsh)
+
+**Released**: February 15, 2026
+
+18 sprints implementing a full interactive shell: ANSI parser, line editor, pipes, redirects, variables, glob, tab completion, job control, scripting, 24 builtins. AArch64 DirectUartWriter fix. 13 new files, +8630 lines.
+
+---
+
+## v0.4.2 -- IRQ Framework + Timer Management
+
+**Released**: February 15, 2026
+
+IRQ framework, timer management, syscall hardening.
 
 ---
 

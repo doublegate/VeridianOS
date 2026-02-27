@@ -2,17 +2,18 @@
 
 VeridianOS is a research microkernel operating system written in Rust, strictly prioritizing **correctness, isolation, and explicit architectural invariants**. It demonstrates how capability-based security, strong isolation boundaries, and disciplined `unsafe` code usage can create a resilient system.
 
-## 1. Current Status & Roadmap (v0.5.0)
+## 1. Current Status & Roadmap (v0.5.7)
 
 -   **Phase 4 (Package Ecosystem)**: **COMPLETE**. Includes package manager, SDK, and repository infra.
--   **Phase 4.5 (Interactive Shell - vsh)**: **COMPLETE**. Tri-architecture shell prompt (`root@veridian:/#`) is operational.
--   **Phase 5 (Performance Optimization)**: **IN PROGRESS (~10%)**. Focus is on kernel memory management, scheduler tuning, and IPC optimization.
+-   **Phase 5 (Performance Optimization)**: **IN PROGRESS (~75%)**. Significant performance gains achieved via per-CPU caching, TLB batching, and IPC fast-path optimizations.
+-   **Self-Hosting (Tiers 0-7)**: **COMPLETE**. VeridianOS can now host its own toolchain (GCC 14.2, binutils 2.43, make, ninja, vpkg).
 -   **Phase 6 (Advanced Features)**: **PLANNED (~5%)**. GUI, advanced drivers, virtualization.
 
-**Latest Release (v0.5.0 - Feb 21, 2026):**
--   **Self-hosting Toolchain Complete**: Tiers 0-7 all complete -- Rust targets, std port, native GCC 14.2, make/ninja, vpkg.
--   **User-Space Foundation**: Fixed exec return path (iretq), fork verification, fd 0/1/2 auto-open, console blocking read, shell bootstrap.
--   **Code Quality**: dead_code audit with justification comments, TODO(future) recategorized to phase5/phase6.
+**Latest Release (v0.5.7 - Feb 26, 2026):**
+-   **Performance Suite**: Micro-benchmarks and software tracepoints (10 event types) integrated into the shell (`perf` and `trace` builtins).
+-   **Memory & TLB**: Per-CPU page frame cache (64-frame) and TLB shootdown reduction via `TlbFlushBatch`.
+-   **Scheduler & Sync**: Priority inheritance protocol (`PiMutex`) and direct IPC context switching.
+-   **Native Execution**: Support for BusyBox (208/208 tests passing), native GCC, and user-space shell.
 
 ## 2. Architectural Invariants (Non-Negotiable)
 
@@ -63,9 +64,9 @@ Adherence to `docs/invariants.md` is mandatory.
 ### Implementation Patterns
 
 #### Performance Optimization (Phase 5)
--   **Syscalls**: CR3 switching is removed; syscalls run with user CR3 to avoid TLB flushes.
--   **Graphics**: Use `fbcon` back-buffer and pixel ring buffers to minimize MMIO writes.
--   **Memory**: Implement per-CPU page lists and NUMA-aware allocations.
+-   **Memory**: Per-CPU frame caches (`PerCpuPageCache`) and batched allocations (`BATCH_SIZE=32`) minimize allocator lock contention.
+-   **TLB**: ASID management (`tlb_generation` counter) and lazy TLB loading avoid unnecessary flushes during context switches.
+-   **IPC**: Fast-path optimizations use direct register transfers and `PiMutex` to prevent priority inversion.
 
 #### Hardware Abstraction
 -   **AArch64**: Use `DirectUartWriter` (assembly-based) for output to bypass LLVM loop-compilation bugs.
@@ -78,7 +79,8 @@ Adherence to `docs/invariants.md` is mandatory.
     -   `src/mm/`: Hybrid bitmap+buddy allocator, NUMA-aware paging.
     -   `src/ipc/`: Zero-copy IPC (<1μs latency).
     -   `src/cap/`: Two-level O(1) capability lookup.
+    -   `src/perf/`: Software counters and tracepoint infrastructure.
 -   `drivers/`: User-space drivers (isolated processes).
 -   `services/`: System services (VFS, Init, Network).
 -   `libs/`: `veridian-abi` (Syscalls), `veridian-std` (Libc).
--   `userland/`: `vsh` (Interactive Shell), `minimal` (Test binary).
+-   `userland/`: `vsh` (Interactive Shell), `minimal` (Test binary), `vpkg` (Package manager).

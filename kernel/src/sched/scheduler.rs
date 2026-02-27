@@ -4,6 +4,9 @@
 //! (round-robin, priority, CFS, hybrid), task enqueueing/dequeueing, context
 //! switching, and the global scheduler instance.
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
 use core::{
     ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -886,6 +889,57 @@ const DEFAULT_TIME_SLICE: u32 = 10;
 
 /// Global scheduler instance (for BSP/CPU0)
 pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
+
+// ---- Global PID-to-Task registry for O(log n) lookup ----
+
+#[cfg(feature = "alloc")]
+use alloc::collections::BTreeMap;
+
+/// Wrapper for NonNull<Task> that implements Send+Sync.
+///
+/// SAFETY: Task pointers in the registry are only accessed under the
+/// TASK_REGISTRY mutex. Tasks are pinned in memory (Box::leak) and
+/// outlive their registry entries. Cross-CPU access is serialized
+/// by the mutex.
+#[derive(Clone, Copy)]
+struct SendTaskPtr(NonNull<Task>);
+unsafe impl Send for SendTaskPtr {}
+unsafe impl Sync for SendTaskPtr {}
+
+/// Global PID-to-Task pointer registry.
+///
+/// Enables O(log n) task lookup by PID without holding the scheduler lock.
+/// Tasks are registered on creation and unregistered on exit.
+#[cfg(feature = "alloc")]
+static TASK_REGISTRY: Mutex<Option<BTreeMap<u64, SendTaskPtr>>> = Mutex::new(None);
+
+/// Register a task in the global PID-to-Task registry.
+#[cfg(feature = "alloc")]
+pub fn register_task(pid: u64, task: NonNull<Task>) {
+    let mut registry = TASK_REGISTRY.lock();
+    let map = registry.get_or_insert_with(BTreeMap::new);
+    map.insert(pid, SendTaskPtr(task));
+}
+
+/// Unregister a task from the global PID-to-Task registry.
+#[cfg(feature = "alloc")]
+pub fn unregister_task(pid: u64) {
+    let mut registry = TASK_REGISTRY.lock();
+    if let Some(map) = registry.as_mut() {
+        map.remove(&pid);
+    }
+}
+
+/// Look up a task pointer by PID. O(log n) via BTreeMap.
+///
+/// Returns the NonNull<Task> if the PID is registered. This is used by the
+/// IPC fast path for direct task-to-task message transfer without iterating
+/// the scheduler's run queues.
+#[cfg(feature = "alloc")]
+pub fn get_task_ptr(pid: u64) -> Option<NonNull<Task>> {
+    let registry = TASK_REGISTRY.lock();
+    registry.as_ref().and_then(|map| map.get(&pid).map(|p| p.0))
+}
 
 /// Get scheduler for current CPU
 pub fn current_scheduler() -> &'static Mutex<Scheduler> {

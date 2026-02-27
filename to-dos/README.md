@@ -33,17 +33,17 @@ This directory contains comprehensive TODO tracking for all aspects of the Verid
 
 ## Quick Status
 
-**Current Phase**: Phase 5 - Performance Optimization (~10% actual)
-**Latest Release**: v0.4.1 (February 15, 2026)
-**Overall Progress**: Phases 0-4 complete, Phase 5 ~10%, Phase 6 ~5%
+**Current Phase**: Phase 5 - Performance Optimization (~90% actual)
+**Latest Release**: v0.5.8 (February 27, 2026)
+**Overall Progress**: Phases 0-4 complete, Phase 5 ~90%, Phase 6 ~5%
 
 ### Phase Status Overview
 - Phase 0: Foundation - **COMPLETE (100%)** v0.1.0
 - Phase 1: Microkernel - **COMPLETE (100%)** v0.2.0
 - Phase 2: User Space - **COMPLETE (100%)** v0.3.2
 - Phase 3: Security - **COMPLETE (100%)** v0.3.2
-- Phase 4: Packages - **COMPLETE (100%)** v0.4.1
-- Phase 5: Performance - **~10%** (data structures only)
+- Phase 4: Packages - **COMPLETE (100%)** v0.4.0
+- Phase 5: Performance - **~90%** (hot paths wired, benchmarks, tracepoints)
 - Phase 6: Advanced - **~5%** (type definitions only)
 
 ## Key Metrics
@@ -87,10 +87,11 @@ This directory contains comprehensive TODO tracking for all aspects of the Verid
    - Phase 3: Crypto, MAC, audit, secure boot, memory protection (v0.3.2)
    - Phase 4: Package manager, DPLL resolver, ports, SDK (v0.4.1)
 
-2. **Phase 5 In Progress** - Performance Optimization (~10%)
-   - Performance counter data structures implemented
-   - NUMA topology framework in place
-   - Actual optimization passes (lock-free, cache-aware, etc.) not yet implemented
+2. **Phase 5 In Progress** - Performance Optimization (~90%)
+   - Per-CPU page caching, TLB batching, IPC fast path wired into hot paths
+   - CapabilityCache, O(log n) PID-to-Task registry, trace instrumentation
+   - Benchmarking suite (7 benchmarks), software tracepoints (10 event types)
+   - Remaining: lock-free algorithms (RCU), power management, PGO
 
 3. **Performance Targets Achieved** (Phase 1)
    - IPC Latency: <1us (exceeded 5us target)

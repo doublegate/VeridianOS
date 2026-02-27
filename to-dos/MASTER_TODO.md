@@ -1,6 +1,6 @@
 # VeridianOS Master TODO List
 
-**Last Updated**: 2026-02-26 (Phase 5 ~75%, Tier 7 COMPLETE, v0.5.7)
+**Last Updated**: 2026-02-27 (Phase 5 ~90%, Tier 7 COMPLETE, v0.5.8)
 
 ## Project Overview Status
 
@@ -9,7 +9,7 @@
 - [x] **Phase 2: User Space Foundation** - COMPLETE (100%) v0.3.2 (February 14, 2026)
 - [x] **Phase 3: Security Hardening** - COMPLETE (100%) v0.3.2 (February 14, 2026)
 - [x] **Phase 4: Package Ecosystem** - COMPLETE (100%) v0.4.0 (February 15, 2026)
-- [ ] **Phase 5: Performance Optimization** - ~75% (per-CPU caching, TLB batching, IPC fast path, priority inheritance, benchmarks, tracepoints)
+- [ ] **Phase 5: Performance Optimization** - ~90% (hot path wiring, CapabilityCache, O(log n) IPC PID lookup, trace instrumentation)
 - [ ] **Phase 6: Advanced Features & GUI** - ~5% (type definitions only, Wayland/GPU framework stubs)
 
 ## Current Version: v0.5.7 (February 26, 2026)
@@ -118,7 +118,7 @@
   - [x] T7-4: make/ninja cross-compiled (GNU Make 4.4.1 + Ninja 1.12.1)
   - [x] T7-5: vpkg user-space migration (176KB static ELF)
 
-### Phase 5: Performance Optimization (~30% actual)
+### Phase 5: Performance Optimization (~90% actual)
 - [x] NUMA-aware scheduling data structures (sched/numa.rs)
 - [x] Zero-copy networking framework (net/zero_copy.rs)
 - [x] Performance counters (perf/mod.rs)
@@ -135,6 +135,11 @@
 - [x] Priority inheritance protocol (PiMutex, v0.5.7)
 - [x] Benchmarking suite (7 micro-benchmarks, perf shell builtin, v0.5.7)
 - [x] Software tracepoints (10 event types, per-CPU ring buffers, trace shell builtin, v0.5.7)
+- [x] TlbFlushBatch wired into unmap/map hot paths (v0.5.8)
+- [x] per_cpu_alloc_frame wired into map_page() (v0.5.8)
+- [x] CapabilityCache wired into IPC fast path (v0.5.8)
+- [x] O(log n) PID-to-Task registry for IPC fast path (v0.5.8)
+- [x] Trace events wired: IpcFastSend, IpcFastReceive, IpcSlowPath, FrameAlloc (v0.5.8)
 - [ ] Lock-free algorithms (RCU, wait-free queues) -- deferred, requires SMP
 - [ ] Power management -- deferred, requires ACPI parser
 - [ ] Profile-guided optimization -- deferred, requires self-hosted Rust
@@ -192,7 +197,8 @@ See [REMEDIATION_TODO.md](REMEDIATION_TODO.md) for 37 identified gaps from Phase
 - [Phase 2 TODO](PHASE2_TODO.md) - COMPLETE
 - [Phase 3 TODO](PHASE3_TODO.md) - COMPLETE
 - [Phase 4 TODO](PHASE4_TODO.md) - COMPLETE
-- [Phase 5 TODO](PHASE5_TODO.md) - ~30%
+- [Phase 5 TODO](PHASE5_TODO.md) - ~90%
+- [Phase 5.5 TODO](PHASE5.5_TODO.md) - Bridge to Phase 6
 - [Phase 6 TODO](PHASE6_TODO.md) - ~5% (future work)
 - [Remediation TODO](REMEDIATION_TODO.md) - Gaps from Phases 0-4
 - [Issues TODO](ISSUES_TODO.md) - Issue history

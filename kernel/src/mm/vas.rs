@@ -823,11 +823,15 @@ impl VirtualAddressSpace {
                 mapper.map_page(vaddr, frame, mapping.flags, &mut alloc)?;
             }
 
-            // Flush TLB for the entire mapped range
+            // Flush TLB for the entire mapped range using batched flushes.
+            // TlbFlushBatch accumulates up to 16 addresses and issues a full
+            // TLB flush if more are needed, reducing individual invlpg overhead.
+            let mut tlb_batch = TlbFlushBatch::new();
             for i in 0..num_pages {
                 let vaddr = aligned_start.0 + (i as u64) * 4096;
-                crate::arch::tlb_flush_address(vaddr);
+                tlb_batch.add(vaddr);
             }
+            tlb_batch.flush();
         }
 
         // Record the mapping in our tracking structure
@@ -890,11 +894,13 @@ impl VirtualAddressSpace {
             }
         }
 
-        // Flush TLB for each page in the unmapped range
+        // Flush TLB for the unmapped range using batched flushes
+        let mut tlb_batch = TlbFlushBatch::new();
         for i in 0..num_pages {
             let vaddr = mapping.start.0 + (i as u64) * 4096;
-            crate::arch::tlb_flush_address(vaddr);
+            tlb_batch.add(vaddr);
         }
+        tlb_batch.flush();
 
         // Free the physical frames
         let frame_allocator = FRAME_ALLOCATOR.lock();
@@ -988,11 +994,13 @@ impl VirtualAddressSpace {
             }
         }
 
-        // Flush TLB for unmapped pages
+        // Flush TLB for unmapped pages using batched flushes
+        let mut tlb_batch = TlbFlushBatch::new();
         for i in unmap_page_start..unmap_page_end {
             let vaddr = m_start + (i as u64) * 4096;
-            crate::arch::tlb_flush_address(vaddr);
+            tlb_batch.add(vaddr);
         }
+        tlb_batch.flush();
 
         // Free the physical frames for the unmapped range
         {
@@ -1507,16 +1515,13 @@ impl VirtualAddressSpace {
     pub fn map_page(&mut self, vaddr: usize, flags: PageFlags) -> Result<(), KernelError> {
         use super::PAGE_SIZE;
 
-        // Allocate a physical frame (drop lock before page table operations)
-        let frame = {
-            FRAME_ALLOCATOR
-                .lock()
-                .allocate_frames(1, None)
-                .map_err(|_| KernelError::OutOfMemory {
-                    requested: 4096,
-                    available: 0,
-                })?
-        };
+        // Allocate a physical frame via per-CPU cache (avoids global lock)
+        let frame = crate::mm::frame_allocator::per_cpu_alloc_frame().map_err(|_| {
+            KernelError::OutOfMemory {
+                requested: 4096,
+                available: 0,
+            }
+        })?;
 
         // Zero the frame before mapping. POSIX requires freshly mapped pages
         // to be zero-filled, and the ELF loader relies on this for BSS.
