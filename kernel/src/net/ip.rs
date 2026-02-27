@@ -133,6 +133,55 @@ pub struct RouteEntry {
     pub interface: usize,
 }
 
+/// Interface IP configuration
+#[allow(dead_code)] // Phase 6 network stack -- grows as DHCP/ifconfig configures interfaces
+#[derive(Debug, Clone, Copy)]
+pub struct InterfaceConfig {
+    /// Assigned IP address (0.0.0.0 = unconfigured)
+    pub ip_addr: Ipv4Address,
+    /// Subnet mask
+    pub subnet_mask: Ipv4Address,
+    /// Default gateway
+    pub gateway: Option<Ipv4Address>,
+}
+
+/// Global interface configuration (primary interface)
+static INTERFACE_CONFIG: Mutex<InterfaceConfig> = Mutex::new(InterfaceConfig {
+    ip_addr: Ipv4Address::ANY,
+    subnet_mask: Ipv4Address::ANY,
+    gateway: None,
+});
+
+/// Get the currently configured interface IP address.
+pub fn get_interface_ip() -> Ipv4Address {
+    INTERFACE_CONFIG.lock().ip_addr
+}
+
+/// Get the current interface configuration.
+pub fn get_interface_config() -> InterfaceConfig {
+    *INTERFACE_CONFIG.lock()
+}
+
+/// Set the interface IP configuration (called by DHCP or manual config).
+pub fn set_interface_config(ip: Ipv4Address, mask: Ipv4Address, gw: Option<Ipv4Address>) {
+    let mut config = INTERFACE_CONFIG.lock();
+    config.ip_addr = ip;
+    config.subnet_mask = mask;
+    config.gateway = gw;
+
+    println!(
+        "[IP] Interface configured: {}.{}.{}.{}/{}.{}.{}.{}",
+        ip.0[0], ip.0[1], ip.0[2], ip.0[3], mask.0[0], mask.0[1], mask.0[2], mask.0[3],
+    );
+
+    if let Some(gateway) = gw {
+        println!(
+            "[IP] Gateway: {}.{}.{}.{}",
+            gateway.0[0], gateway.0[1], gateway.0[2], gateway.0[3],
+        );
+    }
+}
+
 /// Simple routing table protected by Mutex
 static ROUTES: Mutex<Vec<RouteEntry>> = Mutex::new(Vec::new());
 
@@ -155,17 +204,60 @@ pub fn lookup_route(dest: Ipv4Address) -> Option<RouteEntry> {
     None
 }
 
+/// Global IP identification counter for unique packet IDs
+static IP_ID_COUNTER: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(1);
+
 /// Send IP packet
+///
+/// Constructs an IPv4 header, wraps the payload in an Ethernet frame,
+/// and transmits via the appropriate network device.
 pub fn send(dest: IpAddress, protocol: IpProtocol, data: &[u8]) -> Result<(), KernelError> {
     match dest {
         IpAddress::V4(dest_v4) => {
-            let src = Ipv4Address::LOCALHOST; // TODO(phase6): Get source address from interface config
+            // Use configured interface address (falls back to 0.0.0.0 pre-DHCP)
+            let src = get_interface_ip();
 
             let mut header = Ipv4Header::new(src, dest_v4, protocol);
             header.total_length = (Ipv4Header::MIN_SIZE + data.len()) as u16;
+            header.identification =
+                IP_ID_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            header.flags = 0x02; // Don't Fragment
             header.calculate_checksum();
 
-            // TODO(phase6): Route and send packet through network device
+            // Combine IP header + payload
+            let header_bytes = header.to_bytes();
+            let mut ip_packet = Vec::with_capacity(header_bytes.len() + data.len());
+            ip_packet.extend_from_slice(&header_bytes);
+            ip_packet.extend_from_slice(data);
+
+            // Resolve destination MAC via ARP (or use broadcast for broadcast IP)
+            let dst_mac = if dest_v4 == Ipv4Address::BROADCAST {
+                super::MacAddress::BROADCAST
+            } else {
+                // Check ARP cache; if miss, send ARP request and use broadcast
+                super::arp::resolve(dest_v4).unwrap_or_else(|| {
+                    super::arp::send_arp_request(dest_v4);
+                    super::MacAddress::BROADCAST
+                })
+            };
+
+            let src_mac = super::device::with_device("eth0", |dev| dev.mac_address())
+                .unwrap_or(super::MacAddress::ZERO);
+
+            // Wrap in Ethernet frame
+            let frame = super::ethernet::construct_frame(
+                dst_mac,
+                src_mac,
+                super::ethernet::ETHERTYPE_IPV4,
+                &ip_packet,
+            );
+
+            // Transmit
+            let pkt = super::Packet::from_bytes(&frame);
+            super::device::with_device_mut("eth0", |dev| {
+                let _ = dev.transmit(&pkt);
+            });
+
             super::update_stats_tx(header.total_length as usize);
 
             Ok(())

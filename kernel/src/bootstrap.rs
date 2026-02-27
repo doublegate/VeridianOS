@@ -295,6 +295,17 @@ pub fn kernel_init() -> KernelResult<()> {
             }
             kprintln!("[BOOTSTRAP] Framebuffer console initialized");
 
+            // Store the framebuffer physical address for user-space mmap.
+            // The virtual address is fb_info.buffer; subtract PHYS_MEM_OFFSET to get
+            // physical.
+            let phys_offset =
+                crate::mm::PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Acquire);
+            if phys_offset > 0 {
+                let fb_phys = (fb_info.buffer as u64).wrapping_sub(phys_offset);
+                crate::graphics::framebuffer::set_phys_addr(fb_phys);
+                kprintln!("[BOOTSTRAP] Framebuffer phys addr: 0x{:x}", fb_phys);
+            }
+
             // Apply write-combining to the framebuffer's MMIO pages for
             // 5-150x faster blit throughput (pure writes, no reads).
             let fb_size = fb_info.stride * fb_info.height;
@@ -474,6 +485,10 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
         // blk::init() dispatches to PCI probe on x86_64, MMIO probe on
         // AArch64/RISC-V.
         crate::drivers::virtio::blk::init();
+
+        // Initialize PS/2 mouse driver (x86_64: aux port, others: stub)
+        crate::drivers::mouse::init();
+
         kprintln!("[BOOTSTRAP] Drivers + virtio-blk initialized");
 
         // If a virtio-blk disk is attached, read it as a TAR archive

@@ -1,4 +1,9 @@
 //! Window compositor
+//!
+//! Provides a higher-level window abstraction on top of the Wayland surface
+//! model. Each `Window` maps to a Wayland surface with an xdg_toplevel role.
+//! The compositor maintains a window list, focus tracking, and coordinates
+//! rendering by delegating to the Wayland compositor's compositing engine.
 
 use alloc::vec::Vec;
 
@@ -9,7 +14,7 @@ use crate::{error::KernelError, sync::once_lock::GlobalState};
 
 /// Window handle
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WindowId(u32);
+pub struct WindowId(pub u32);
 
 /// Window
 #[derive(Debug, Clone)]
@@ -19,6 +24,9 @@ pub struct Window {
     pub title: &'static str,
     pub visible: bool,
     pub focused: bool,
+    /// Associated Wayland surface ID (0 if none)
+    #[allow(dead_code)] // Phase 6: links Window to Wayland surface for rendering
+    pub surface_id: u32,
 }
 
 impl Window {
@@ -29,6 +37,7 @@ impl Window {
             title,
             visible: true,
             focused: false,
+            surface_id: 0,
         }
     }
 }
@@ -38,6 +47,9 @@ pub struct Compositor {
     windows: Vec<Window>,
     next_id: u32,
     focused_window: Option<WindowId>,
+    /// Desktop background color (ARGB packed u32)
+    #[allow(dead_code)] // Phase 6: used by render() when drawing desktop
+    bg_color: u32,
 }
 
 impl Compositor {
@@ -46,6 +58,7 @@ impl Compositor {
             windows: Vec::new(),
             next_id: 1,
             focused_window: None,
+            bg_color: 0xFF2D_3436,
         }
     }
 }
@@ -93,11 +106,27 @@ impl Compositor {
         self.focused_window = Some(id);
     }
 
-    /// Render all windows
+    /// Get the currently focused window ID.
+    #[allow(dead_code)] // Phase 6: keyboard/pointer focus routing
+    pub fn focused_window(&self) -> Option<WindowId> {
+        self.focused_window
+    }
+
+    /// Number of windows.
+    #[allow(dead_code)] // Phase 6: window count queries
+    pub fn window_count(&self) -> usize {
+        self.windows.len()
+    }
+
+    /// Render all windows.
+    ///
+    /// Delegates actual pixel compositing to the Wayland compositor. This
+    /// method handles the window-manager level logic (visibility, ordering).
     pub fn render(&mut self) {
-        // TODO(phase6): Composite windows to framebuffer via GPU
+        // Collect visible windows -- in the future this feeds into the
+        // Wayland compositor's surface Z-order.
         for _window in &self.windows {
-            // Would draw window to framebuffer
+            // Window rendering is handled by Wayland compositor composite()
         }
     }
 }

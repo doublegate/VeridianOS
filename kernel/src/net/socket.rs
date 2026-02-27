@@ -631,6 +631,77 @@ pub fn close_socket(id: usize) -> Result<(), KernelError> {
     with_socket_mut(id, |socket| socket.close())?
 }
 
+// -----------------------------------------------------------------------
+// Free-function wrappers for syscall layer (Phase 6 network extensions)
+// -----------------------------------------------------------------------
+
+/// Send data to a specific address (for UDP sockets).
+pub fn sendto(
+    id: usize,
+    data: &[u8],
+    dest: Option<&crate::net::SocketAddr>,
+) -> Result<usize, KernelError> {
+    with_socket_mut(id, |socket| {
+        if let Some(addr) = dest {
+            socket.send_to(data, *addr, 0)
+        } else {
+            socket.send(data, 0)
+        }
+    })?
+}
+
+/// Receive data with sender address.
+pub fn recvfrom(
+    id: usize,
+    buf: &mut [u8],
+) -> Result<(usize, Option<crate::net::SocketAddr>), KernelError> {
+    let result = with_socket_mut(id, |socket| socket.recv_from(buf, 0))??;
+    Ok((result.0, Some(result.1)))
+}
+
+/// Get the local address of a socket.
+pub fn getsockname(id: usize) -> Result<crate::net::SocketAddr, KernelError> {
+    with_socket(id, |socket| {
+        socket.local_addr.ok_or(KernelError::InvalidState {
+            expected: "bound socket",
+            actual: "unbound",
+        })
+    })?
+}
+
+/// Get the remote address of a connected socket.
+pub fn getpeername(id: usize) -> Result<crate::net::SocketAddr, KernelError> {
+    with_socket(id, |socket| {
+        socket.remote_addr.ok_or(KernelError::InvalidState {
+            expected: "connected socket",
+            actual: "not connected",
+        })
+    })?
+}
+
+/// Set a socket option.
+pub fn setsockopt(
+    _id: usize,
+    _level: i32,
+    _optname: i32,
+    _optval_ptr: usize,
+    _optlen: usize,
+) -> Result<usize, KernelError> {
+    // Stub: accept all options without error
+    Ok(0)
+}
+
+/// Get a socket option.
+pub fn getsockopt(
+    _id: usize,
+    _level: i32,
+    _optname: i32,
+    _optval_ptr: usize,
+) -> Result<usize, KernelError> {
+    // Stub: return 0 for all options
+    Ok(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

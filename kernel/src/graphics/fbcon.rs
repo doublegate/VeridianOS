@@ -1114,6 +1114,41 @@ pub fn is_initialized() -> bool {
     FBCON.lock().is_some()
 }
 
+/// Framebuffer hardware information for the compositor.
+pub struct FbHwInfo {
+    pub fb_ptr: *mut u8,
+    pub width: usize,
+    pub height: usize,
+    pub stride: usize,
+    pub bpp: usize,
+    pub pixel_format: FbPixelFormat,
+}
+
+// SAFETY: FbHwInfo contains a raw pointer to MMIO memory that is valid
+// for the kernel's lifetime. The pointer is only used for direct pixel
+// writes by the compositor, serialized by the caller.
+unsafe impl Send for FbHwInfo {}
+
+/// Get the hardware framebuffer information.
+///
+/// Returns None if fbcon has not been initialized.
+pub fn get_hw_info() -> Option<FbHwInfo> {
+    let guard = FBCON.lock();
+    guard.as_ref().map(|fbcon| FbHwInfo {
+        fb_ptr: fbcon.fb_ptr,
+        width: fbcon.width,
+        height: fbcon.height,
+        stride: fbcon.stride,
+        bpp: fbcon.bpp,
+        pixel_format: fbcon.pixel_format,
+    })
+}
+
+/// Disable fbcon text output (when switching to GUI compositor).
+pub fn disable_output() {
+    FBCON_OUTPUT_ENABLED.store(false, Ordering::Release);
+}
+
 /// Try to allocate a Vec<u8> of the given size, zeroed.
 /// Returns Err if allocation fails (OOM).
 fn try_alloc_vec(size: usize) -> Result<Vec<u8>, ()> {

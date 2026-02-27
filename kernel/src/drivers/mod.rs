@@ -7,8 +7,10 @@ pub mod console;
 pub mod e1000;
 pub mod gpu;
 pub mod input;
+pub mod input_event;
 pub mod iommu;
 pub mod keyboard;
+pub mod mouse;
 pub mod network;
 pub mod nvme;
 pub mod pci;
@@ -45,6 +47,9 @@ pub fn init() {
     if let Err(_e) = gpu::init() {
         crate::println!("[DRIVERS] Warning: GPU init failed: {:?}", _e);
     }
+
+    // Initialize mouse driver (x86_64: PS/2 aux port, others: stub)
+    mouse::init();
 
     crate::println!("[DRIVERS] Device drivers initialized");
 }

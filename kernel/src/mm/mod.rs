@@ -37,7 +37,7 @@ pub const PAGE_SIZE: usize = 4096;
 /// On x86_64 with bootloader 0.11, physical memory is mapped at a dynamic
 /// offset provided by the bootloader. On AArch64 and RISC-V, physical
 /// memory is identity-mapped (offset = 0).
-static PHYS_MEM_OFFSET: AtomicU64 = AtomicU64::new(0);
+pub static PHYS_MEM_OFFSET: AtomicU64 = AtomicU64::new(0);
 
 /// Set the physical memory offset (called once during early boot).
 pub fn set_phys_mem_offset(offset: u64) {

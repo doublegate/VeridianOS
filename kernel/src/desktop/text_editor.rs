@@ -23,6 +23,7 @@ use crate::{
 type Line = Vec<char>;
 
 /// Text editor state
+#[allow(dead_code)] // Phase 6 desktop GUI fields
 pub struct TextEditor {
     /// Window ID
     window_id: WindowId,

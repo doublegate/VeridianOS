@@ -199,6 +199,14 @@ mod userspace;
 pub use futex::sys_futex_wake;
 pub use userspace::copy_to_user;
 
+// Import Phase 6 syscall modules
+mod graphics_syscalls;
+use self::graphics_syscalls::*;
+mod wayland_syscalls;
+use self::wayland_syscalls::*;
+mod network_ext_syscalls;
+use self::network_ext_syscalls::*;
+
 /// System call numbers
 #[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,6 +392,31 @@ pub enum Syscall {
     SocketRecv = 226,
     SocketClose = 227,
     SocketPair = 228,
+
+    // Graphics / framebuffer (Phase 6)
+    FbGetInfo = 230,
+    FbMap = 231,
+    InputPoll = 232,
+    InputRead = 233,
+    FbSwap = 234,
+
+    // Wayland compositor (Phase 6)
+    WlConnect = 240,
+    WlDisconnect = 241,
+    WlSendMessage = 242,
+    WlRecvMessage = 243,
+    WlCreateShmPool = 244,
+    WlCreateSurface = 245,
+    WlCommitSurface = 246,
+    WlGetEvents = 247,
+
+    // Network (Phase 6) -- AF_INET extensions
+    NetSendTo = 250,
+    NetRecvFrom = 251,
+    NetGetSockName = 252,
+    NetGetPeerName = 253,
+    NetSetSockOpt = 254,
+    NetGetSockOpt = 255,
 }
 
 /// System call result type
@@ -748,6 +781,31 @@ fn handle_syscall(
         Syscall::SocketRecv => sys_socket_recv(arg1, arg2, arg3),
         Syscall::SocketClose => sys_socket_close(arg1),
         Syscall::SocketPair => sys_socket_pair(arg1, arg2),
+
+        // Graphics / framebuffer (Phase 6)
+        Syscall::FbGetInfo => sys_fb_get_info(arg1),
+        Syscall::FbMap => sys_fb_map(arg1, arg2),
+        Syscall::InputPoll => sys_input_poll(arg1),
+        Syscall::InputRead => sys_input_read(arg1, arg2),
+        Syscall::FbSwap => sys_fb_swap(),
+
+        // Wayland compositor (Phase 6)
+        Syscall::WlConnect => sys_wl_connect(),
+        Syscall::WlDisconnect => sys_wl_disconnect(arg1),
+        Syscall::WlSendMessage => sys_wl_send_message(arg1, arg2, arg3),
+        Syscall::WlRecvMessage => sys_wl_recv_message(arg1, arg2, arg3),
+        Syscall::WlCreateShmPool => sys_wl_create_shm_pool(arg1, arg2),
+        Syscall::WlCreateSurface => sys_wl_create_surface(arg1, arg2, arg3, arg4),
+        Syscall::WlCommitSurface => sys_wl_commit_surface(arg1, arg2),
+        Syscall::WlGetEvents => sys_wl_get_events(arg1, arg2, arg3),
+
+        // Network extensions (Phase 6)
+        Syscall::NetSendTo => sys_net_sendto(arg1, arg2, arg3, arg4, arg5),
+        Syscall::NetRecvFrom => sys_net_recvfrom(arg1, arg2, arg3, arg4),
+        Syscall::NetGetSockName => sys_net_getsockname(arg1, arg2, arg3),
+        Syscall::NetGetPeerName => sys_net_getpeername(arg1, arg2, arg3),
+        Syscall::NetSetSockOpt => sys_net_setsockopt(arg1, arg2, arg3, arg4, arg5),
+        Syscall::NetGetSockOpt => sys_net_getsockopt(arg1, arg2, arg3, arg4),
 
         _ => Err(SyscallError::InvalidSyscall),
     }

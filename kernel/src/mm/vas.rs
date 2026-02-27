@@ -865,6 +865,65 @@ impl VirtualAddressSpace {
         Ok(())
     }
 
+    /// Map specific physical frames into user space at a chosen virtual
+    /// address.
+    ///
+    /// Used for framebuffer mmap: the physical frames already exist (MMIO) and
+    /// must be mapped read/write into the process address space.
+    #[cfg(feature = "alloc")]
+    pub fn map_physical_region(
+        &self,
+        phys_addr: u64,
+        size: usize,
+        vaddr: VirtualAddress,
+    ) -> Result<(), KernelError> {
+        let aligned_size = ((size + 4095) / 4096) * 4096;
+        let num_pages = aligned_size / 4096;
+        let aligned_phys = phys_addr & !(4096 - 1);
+
+        let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER;
+
+        let pt_root = self.page_table_root.load(Ordering::Acquire);
+        if pt_root == 0 {
+            return Err(KernelError::InvalidState {
+                expected: "initialized page table",
+                actual: "null page table root",
+            });
+        }
+
+        // SAFETY: pt_root is a valid L4 page table.
+        let mut mapper = unsafe { create_mapper_from_root(pt_root) };
+        let mut alloc = VasFrameAllocator;
+
+        // Build frame list from the physical region
+        let mut physical_frames = Vec::with_capacity(num_pages);
+        for i in 0..num_pages {
+            let frame = FrameNumber::new((aligned_phys >> 12) + i as u64);
+            physical_frames.push(frame);
+            let page_vaddr = VirtualAddress(vaddr.0 + (i as u64) * 4096);
+            mapper.map_page(page_vaddr, frame, flags, &mut alloc)?;
+        }
+
+        // Flush TLB
+        let mut tlb_batch = TlbFlushBatch::new();
+        for i in 0..num_pages {
+            tlb_batch.add(vaddr.0 + (i as u64) * 4096);
+        }
+        tlb_batch.flush();
+
+        // Record mapping (no frame ownership -- these are MMIO, not allocator frames)
+        let mapping = VirtualMapping {
+            start: vaddr,
+            size: aligned_size,
+            mapping_type: MappingType::Device,
+            flags,
+            physical_frames,
+        };
+        self.mappings.lock().insert(vaddr, mapping);
+
+        Ok(())
+    }
+
     /// Map a region of virtual memory with RAII guard
     #[cfg(feature = "alloc")]
     pub fn map_region_raii(
@@ -1674,6 +1733,39 @@ pub struct VasStats {
     pub stack_size: usize,
     pub heap_size: usize,
     pub mapping_count: usize,
+}
+
+/// Map a physical memory region into the current process's user-space address
+/// space.
+///
+/// Allocates a virtual address range via the process's VAS mmap region and
+/// maps the given physical frames into it. Used for framebuffer mmap.
+///
+/// Returns the user-space virtual address of the mapping.
+pub fn map_physical_region_user(
+    phys_addr: u64,
+    size: usize,
+) -> Result<usize, crate::syscall::SyscallError> {
+    let proc =
+        crate::process::current_process().ok_or(crate::syscall::SyscallError::InvalidState)?;
+
+    let memory_space = proc.memory_space.lock();
+
+    // Allocate a virtual address range from the mmap region
+    let aligned_size = ((size + 4095) / 4096) * 4096;
+    let vaddr = VirtualAddress(
+        memory_space
+            .next_mmap_addr
+            .fetch_add(aligned_size as u64, Ordering::Relaxed),
+    );
+
+    // Map the physical frames
+    #[cfg(feature = "alloc")]
+    memory_space
+        .map_physical_region(phys_addr, aligned_size, vaddr)
+        .map_err(|_| crate::syscall::SyscallError::OutOfMemory)?;
+
+    Ok(vaddr.as_usize())
 }
 
 #[cfg(test)]

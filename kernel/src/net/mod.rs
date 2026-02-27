@@ -7,9 +7,11 @@
 //! - Socket API
 //! - Network device abstraction
 
+pub mod arp;
 pub mod device;
 pub mod dhcp;
 pub mod dma_pool;
+pub mod ethernet;
 pub mod integration;
 pub mod ip;
 pub mod socket;

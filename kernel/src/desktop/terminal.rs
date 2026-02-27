@@ -64,6 +64,54 @@ impl Default for Cell {
     }
 }
 
+/// ANSI escape parser state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EscapeState {
+    Normal,
+    Escape,
+    Csi,
+}
+
+/// ANSI standard colors (SGR 30-37 foreground, 40-47 background).
+const ANSI_COLORS: [Color; 8] = [
+    Color { r: 0, g: 0, b: 0 }, // 0: black
+    Color {
+        r: 0xAA,
+        g: 0,
+        b: 0,
+    }, // 1: red
+    Color {
+        r: 0,
+        g: 0xAA,
+        b: 0,
+    }, // 2: green
+    Color {
+        r: 0xAA,
+        g: 0x55,
+        b: 0,
+    }, // 3: yellow/brown
+    Color {
+        r: 0,
+        g: 0,
+        b: 0xAA,
+    }, // 4: blue
+    Color {
+        r: 0xAA,
+        g: 0,
+        b: 0xAA,
+    }, // 5: magenta
+    Color {
+        r: 0,
+        g: 0xAA,
+        b: 0xAA,
+    }, // 6: cyan
+    Color {
+        r: 0xAA,
+        g: 0xAA,
+        b: 0xAA,
+    }, // 7: white/light gray
+];
+
 /// Terminal emulator
 pub struct TerminalEmulator {
     /// Window ID
@@ -86,11 +134,22 @@ pub struct TerminalEmulator {
     current_fg: Color,
     current_bg: Color,
 
+    /// Default colors (for SGR reset)
+    default_fg: Color,
+    default_bg: Color,
+
     /// Scrollback buffer
     scrollback: Vec<Vec<Cell>>,
 
     /// Maximum scrollback lines
     max_scrollback: usize,
+
+    /// ANSI escape parser state
+    esc_state: EscapeState,
+    /// ESC sequence parameter accumulator
+    esc_params: [u8; 16],
+    /// Current parameter index
+    esc_param_idx: usize,
 }
 
 impl TerminalEmulator {
@@ -130,8 +189,13 @@ impl TerminalEmulator {
             cursor_y: 0,
             current_fg: Color::GREEN,
             current_bg: Color::BLACK,
+            default_fg: Color::GREEN,
+            default_bg: Color::BLACK,
             scrollback: Vec::new(),
             max_scrollback: 1000,
+            esc_state: EscapeState::Normal,
+            esc_params: [0; 16],
+            esc_param_idx: 0,
         })
     }
 
@@ -184,11 +248,19 @@ impl TerminalEmulator {
         Ok(())
     }
 
-    /// Process a single output byte
+    /// Process a single output byte with ANSI escape sequence support.
     fn process_output_byte(&mut self, byte: u8) {
+        match self.esc_state {
+            EscapeState::Normal => self.process_normal(byte),
+            EscapeState::Escape => self.process_escape(byte),
+            EscapeState::Csi => self.process_csi(byte),
+        }
+    }
+
+    /// Handle a byte in normal (non-escape) mode.
+    fn process_normal(&mut self, byte: u8) {
         match byte {
             b'\n' => {
-                // Newline
                 self.cursor_x = 0;
                 self.cursor_y += 1;
                 if self.cursor_y >= TERMINAL_ROWS {
@@ -196,11 +268,9 @@ impl TerminalEmulator {
                 }
             }
             b'\r' => {
-                // Carriage return
                 self.cursor_x = 0;
             }
             b'\t' => {
-                // Tab
                 self.cursor_x = (self.cursor_x + 8) & !7;
                 if self.cursor_x >= TERMINAL_COLS {
                     self.cursor_x = 0;
@@ -211,14 +281,18 @@ impl TerminalEmulator {
                 }
             }
             b'\x08' => {
-                // Backspace
                 if self.cursor_x > 0 {
                     self.cursor_x -= 1;
                     self.buffer[self.cursor_y][self.cursor_x] = Cell::default();
                 }
             }
+            0x1B => {
+                // ESC — start escape sequence
+                self.esc_state = EscapeState::Escape;
+                self.esc_param_idx = 0;
+                self.esc_params = [0; 16];
+            }
             0x20..=0x7E => {
-                // Printable ASCII
                 self.buffer[self.cursor_y][self.cursor_x] = Cell {
                     character: byte as char,
                     foreground: self.current_fg,
@@ -233,8 +307,154 @@ impl TerminalEmulator {
                     }
                 }
             }
+            _ => {}
+        }
+    }
+
+    /// Handle a byte after ESC was received.
+    fn process_escape(&mut self, byte: u8) {
+        if byte == b'[' {
+            self.esc_state = EscapeState::Csi;
+        } else {
+            self.esc_state = EscapeState::Normal;
+        }
+    }
+
+    /// Handle a byte inside a CSI sequence (ESC [ ...).
+    fn process_csi(&mut self, byte: u8) {
+        match byte {
+            b'0'..=b'9' => {
+                if self.esc_param_idx < self.esc_params.len() {
+                    self.esc_params[self.esc_param_idx] = self.esc_params[self.esc_param_idx]
+                        .wrapping_mul(10)
+                        .wrapping_add(byte - b'0');
+                }
+            }
+            b';' => {
+                if self.esc_param_idx < self.esc_params.len() - 1 {
+                    self.esc_param_idx += 1;
+                }
+            }
+            b'm' => {
+                // SGR (Select Graphic Rendition)
+                self.handle_sgr();
+                self.esc_state = EscapeState::Normal;
+            }
+            b'J' => {
+                // Erase in Display
+                let param = self.esc_params[0];
+                if param == 2 {
+                    // Clear entire screen
+                    for row in self.buffer.iter_mut() {
+                        for cell in row.iter_mut() {
+                            *cell = Cell::default();
+                        }
+                    }
+                    self.cursor_x = 0;
+                    self.cursor_y = 0;
+                }
+                self.esc_state = EscapeState::Normal;
+            }
+            b'H' => {
+                // Cursor Position
+                let row = if self.esc_params[0] > 0 {
+                    (self.esc_params[0] - 1) as usize
+                } else {
+                    0
+                };
+                let col = if self.esc_param_idx >= 1 && self.esc_params[1] > 0 {
+                    (self.esc_params[1] - 1) as usize
+                } else {
+                    0
+                };
+                self.cursor_y = row.min(TERMINAL_ROWS - 1);
+                self.cursor_x = col.min(TERMINAL_COLS - 1);
+                self.esc_state = EscapeState::Normal;
+            }
+            b'A' => {
+                // Cursor Up
+                let n = if self.esc_params[0] > 0 {
+                    self.esc_params[0] as usize
+                } else {
+                    1
+                };
+                self.cursor_y = self.cursor_y.saturating_sub(n);
+                self.esc_state = EscapeState::Normal;
+            }
+            b'B' => {
+                // Cursor Down
+                let n = if self.esc_params[0] > 0 {
+                    self.esc_params[0] as usize
+                } else {
+                    1
+                };
+                self.cursor_y = (self.cursor_y + n).min(TERMINAL_ROWS - 1);
+                self.esc_state = EscapeState::Normal;
+            }
+            b'C' => {
+                // Cursor Forward
+                let n = if self.esc_params[0] > 0 {
+                    self.esc_params[0] as usize
+                } else {
+                    1
+                };
+                self.cursor_x = (self.cursor_x + n).min(TERMINAL_COLS - 1);
+                self.esc_state = EscapeState::Normal;
+            }
+            b'D' => {
+                // Cursor Back
+                let n = if self.esc_params[0] > 0 {
+                    self.esc_params[0] as usize
+                } else {
+                    1
+                };
+                self.cursor_x = self.cursor_x.saturating_sub(n);
+                self.esc_state = EscapeState::Normal;
+            }
+            b'K' => {
+                // Erase in Line
+                let param = self.esc_params[0];
+                let (start, end) = match param {
+                    1 => (0, self.cursor_x),
+                    2 => (0, TERMINAL_COLS),
+                    _ => (self.cursor_x, TERMINAL_COLS),
+                };
+                for col in start..end.min(TERMINAL_COLS) {
+                    self.buffer[self.cursor_y][col] = Cell::default();
+                }
+                self.esc_state = EscapeState::Normal;
+            }
             _ => {
-                // Ignore other control characters for now
+                self.esc_state = EscapeState::Normal;
+            }
+        }
+    }
+
+    /// Handle SGR (Select Graphic Rendition) escape codes.
+    fn handle_sgr(&mut self) {
+        let param_count = self.esc_param_idx + 1;
+        for i in 0..param_count {
+            let code = self.esc_params[i];
+            match code {
+                0 => {
+                    self.current_fg = self.default_fg;
+                    self.current_bg = self.default_bg;
+                }
+                1 => {
+                    // Bold: brighten foreground
+                    self.current_fg = Color {
+                        r: self.current_fg.r.saturating_add(0x55),
+                        g: self.current_fg.g.saturating_add(0x55),
+                        b: self.current_fg.b.saturating_add(0x55),
+                    };
+                }
+                30..=37 => {
+                    self.current_fg = ANSI_COLORS[(code - 30) as usize];
+                }
+                40..=47 => {
+                    self.current_bg = ANSI_COLORS[(code - 40) as usize];
+                }
+                _ => {}
             }
         }
     }

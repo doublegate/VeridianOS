@@ -5,6 +5,8 @@
 
 pub mod file_manager;
 pub mod font;
+pub mod panel;
+pub mod renderer;
 pub mod terminal;
 pub mod text_editor;
 pub mod wayland;
@@ -18,6 +20,9 @@ pub fn init() -> Result<(), KernelError> {
 
     // Initialize font rendering
     font::init()?;
+
+    // Initialize Wayland compositor
+    wayland::init()?;
 
     // Initialize window manager
     window_manager::init()?;

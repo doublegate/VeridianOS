@@ -1,20 +1,47 @@
 //! Framebuffer implementation
+//!
+//! Provides the low-level framebuffer device interface including physical
+//! address tracking for user-space mmap and double-buffered rendering.
 
 // Framebuffer implementation
+
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use spin::Mutex;
 
 use super::{Color, GraphicsContext, Rect};
 use crate::error::KernelError;
 
+/// Framebuffer information structure passed to user space via syscall.
+///
+/// Must be repr(C) for stable ABI across kernel/user boundary.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FbInfo {
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub bpp: u32,
+    pub phys_addr: u64,
+    pub size: u64,
+    /// Pixel format: 0 = BGRA, 1 = RGBA
+    pub format: u32,
+    pub _reserved: u32,
+}
+
 /// Framebuffer configuration
 pub struct Framebuffer {
     width: u32,
     height: u32,
     pitch: u32,
-    #[allow(dead_code)] // Bits-per-pixel for framebuffer configuration
     bpp: u8,
     buffer: Option<*mut u32>,
+    /// Physical address of the framebuffer (for user-space mmap)
+    phys_addr: u64,
+    /// Total size of the framebuffer in bytes
+    size: u64,
+    /// Pixel format (0 = BGRA, 1 = RGBA)
+    format: u32,
 }
 
 // SAFETY: Framebuffer contains a raw pointer to memory-mapped framebuffer
@@ -32,6 +59,9 @@ impl Framebuffer {
             pitch: 0,
             bpp: 32,
             buffer: None,
+            phys_addr: 0,
+            size: 0,
+            format: 0,
         }
     }
 
@@ -40,6 +70,28 @@ impl Framebuffer {
         self.height = height;
         self.pitch = width * 4;
         self.buffer = Some(buffer);
+        self.size = (self.pitch as u64) * (height as u64);
+    }
+
+    /// Configure with physical address tracking (for user-space mmap).
+    pub fn configure_with_phys(
+        &mut self,
+        width: u32,
+        height: u32,
+        pitch: u32,
+        bpp: u8,
+        buffer: *mut u32,
+        phys_addr: u64,
+        format: u32,
+    ) {
+        self.width = width;
+        self.height = height;
+        self.pitch = pitch;
+        self.bpp = bpp;
+        self.buffer = Some(buffer);
+        self.phys_addr = phys_addr;
+        self.size = (pitch as u64) * (height as u64);
+        self.format = format;
     }
 
     pub fn width(&self) -> u32 {
@@ -48,6 +100,37 @@ impl Framebuffer {
 
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    pub fn pitch(&self) -> u32 {
+        self.pitch
+    }
+
+    pub fn phys_addr(&self) -> u64 {
+        self.phys_addr
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Get framebuffer info for user space.
+    pub fn get_info(&self) -> FbInfo {
+        FbInfo {
+            width: self.width,
+            height: self.height,
+            pitch: self.pitch,
+            bpp: self.bpp as u32,
+            phys_addr: self.phys_addr,
+            size: self.size,
+            format: self.format,
+            _reserved: 0,
+        }
+    }
+
+    /// Get the raw buffer pointer (for compositor back-buffer swap).
+    pub fn buffer_ptr(&self) -> Option<*mut u32> {
+        self.buffer
     }
 }
 
@@ -116,18 +199,42 @@ pub fn with_framebuffer<R, F: FnOnce(&mut Framebuffer) -> R>(f: F) -> R {
     f(&mut FRAMEBUFFER.lock())
 }
 
+/// Global tracking of the framebuffer's physical address for user-space mmap.
+/// Set during fbcon init when the bootloader provides framebuffer info.
+static FB_PHYS_ADDR: AtomicU64 = AtomicU64::new(0);
+
+/// Store the framebuffer physical address (called from bootstrap).
+pub fn set_phys_addr(phys: u64) {
+    FB_PHYS_ADDR.store(phys, Ordering::Release);
+    FRAMEBUFFER.lock().phys_addr = phys;
+}
+
+/// Get the framebuffer physical address.
+pub fn get_phys_addr() -> u64 {
+    FB_PHYS_ADDR.load(Ordering::Acquire)
+}
+
+/// Get framebuffer info (safe to call from syscall context).
+pub fn get_fb_info() -> Option<FbInfo> {
+    let fb = FRAMEBUFFER.lock();
+    if fb.width == 0 || fb.height == 0 {
+        return None;
+    }
+    Some(fb.get_info())
+}
+
 /// Initialize framebuffer
 #[cfg_attr(target_arch = "aarch64", allow(unused_variables))]
 pub fn init() -> Result<(), KernelError> {
     println!("[FB] Initializing framebuffer...");
 
-    // TODO(phase6): Get framebuffer info from bootloader (VBE/GOP detection)
     let fb = FRAMEBUFFER.lock();
 
     println!(
-        "[FB] Framebuffer initialized ({}x{})",
+        "[FB] Framebuffer initialized ({}x{}, phys=0x{:x})",
         fb.width(),
-        fb.height()
+        fb.height(),
+        fb.phys_addr(),
     );
     Ok(())
 }

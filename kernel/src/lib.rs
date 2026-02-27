@@ -66,7 +66,6 @@ pub mod arch;
 pub mod bootstrap;
 mod cap;
 pub mod crypto;
-#[cfg(feature = "phase6-desktop")]
 pub mod desktop;
 pub mod drivers;
 pub mod elf;

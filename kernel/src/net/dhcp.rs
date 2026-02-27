@@ -331,42 +331,242 @@ impl DhcpClient {
         packet
     }
 
-    /// Process DHCP OFFER
-    pub fn process_offer(&mut self, _packet: &DhcpPacket) -> Result<(), KernelError> {
-        // TODO(phase6): Parse DHCP offer options to extract IP and server ID
+    /// Process DHCP OFFER -- parse options and transition to Requesting.
+    pub fn process_offer(&mut self, packet: &DhcpPacket) -> Result<(), KernelError> {
+        if self.state != DhcpState::Selecting {
+            return Err(KernelError::InvalidState {
+                expected: "Selecting",
+                actual: "Other",
+            });
+        }
+
+        let options = parse_dhcp_options(&packet.options);
+        let offered_ip = packet.yiaddr;
+        let server_id = options.server_id.unwrap_or(packet.siaddr);
+
+        println!(
+            "[DHCP] Received OFFER: {}.{}.{}.{} from server {}.{}.{}.{}",
+            offered_ip.0[0],
+            offered_ip.0[1],
+            offered_ip.0[2],
+            offered_ip.0[3],
+            server_id.0[0],
+            server_id.0[1],
+            server_id.0[2],
+            server_id.0[3],
+        );
+
+        // Send REQUEST for the offered IP
+        let request = self.create_request(offered_ip, server_id);
+        let request_bytes = request.to_bytes();
+        send_dhcp_packet(&request_bytes);
+
         self.state = DhcpState::Requesting;
         Ok(())
     }
 
-    /// Process DHCP ACK
-    pub fn process_ack(&mut self, _packet: &DhcpPacket) -> Result<(), KernelError> {
-        // TODO(phase6): Parse ACK options and configure network interface
-        self.state = DhcpState::Bound;
+    /// Process DHCP ACK -- configure network interface with obtained
+    /// parameters.
+    pub fn process_ack(&mut self, packet: &DhcpPacket) -> Result<(), KernelError> {
+        if self.state != DhcpState::Requesting {
+            return Err(KernelError::InvalidState {
+                expected: "Requesting",
+                actual: "Other",
+            });
+        }
 
-        println!("[DHCP] Received ACK - IP address configured");
+        let options = parse_dhcp_options(&packet.options);
+
+        let ip = packet.yiaddr;
+        let subnet = options
+            .subnet_mask
+            .unwrap_or(Ipv4Address::new(255, 255, 255, 0));
+        let gateway = options.router;
+        let lease = options.lease_time.unwrap_or(3600);
+
+        let config = DhcpConfig {
+            ip_address: ip,
+            subnet_mask: subnet,
+            router: gateway,
+            dns_servers: options.dns_servers,
+            lease_time: lease,
+            server_id: options.server_id.unwrap_or(packet.siaddr),
+        };
+
         println!(
-            "[DHCP] IP: {}.{}.{}.{}",
-            _packet.yiaddr.0[0], _packet.yiaddr.0[1], _packet.yiaddr.0[2], _packet.yiaddr.0[3]
+            "[DHCP] ACK: IP {}.{}.{}.{} mask {}.{}.{}.{} lease {}s",
+            ip.0[0],
+            ip.0[1],
+            ip.0[2],
+            ip.0[3],
+            subnet.0[0],
+            subnet.0[1],
+            subnet.0[2],
+            subnet.0[3],
+            lease,
         );
+        if let Some(gw) = gateway {
+            println!(
+                "[DHCP] Gateway: {}.{}.{}.{}",
+                gw.0[0], gw.0[1], gw.0[2], gw.0[3]
+            );
+        }
+
+        // Configure the IP layer with the obtained address
+        super::ip::set_interface_config(ip, subnet, gateway);
+
+        // Add default route via gateway
+        if let Some(gw) = gateway {
+            super::ip::add_route(super::ip::RouteEntry {
+                destination: Ipv4Address::new(0, 0, 0, 0),
+                netmask: Ipv4Address::new(0, 0, 0, 0),
+                gateway: Some(gw),
+                interface: 0,
+            });
+        }
+
+        self.config = Some(config);
+        self.state = DhcpState::Bound;
 
         Ok(())
     }
 
-    /// Start DHCP negotiation
+    /// Process an incoming DHCP response packet.
+    ///
+    /// Dispatches to `process_offer` or `process_ack` based on the
+    /// message type option.
+    pub fn process_response(&mut self, data: &[u8]) -> Result<(), KernelError> {
+        let packet = DhcpPacket::from_bytes(data)?;
+
+        // Verify transaction ID matches
+        if packet.xid != self.xid {
+            return Ok(()); // Not for us
+        }
+
+        match packet.get_message_type() {
+            Some(DhcpMessageType::Offer) => self.process_offer(&packet),
+            Some(DhcpMessageType::Ack) => self.process_ack(&packet),
+            Some(DhcpMessageType::Nak) => {
+                println!("[DHCP] Received NAK, restarting negotiation");
+                self.state = DhcpState::Init;
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Get current DHCP state
+    pub fn state(&self) -> DhcpState {
+        self.state
+    }
+
+    /// Get current configuration (if bound)
+    pub fn config(&self) -> Option<&DhcpConfig> {
+        self.config.as_ref()
+    }
+
+    /// Start DHCP negotiation -- sends DISCOVER via UDP broadcast.
     pub fn start(&mut self) -> Result<(), KernelError> {
         println!("[DHCP] Starting DHCP negotiation");
 
-        // Create DISCOVER packet
         let discover = self.create_discover();
-        let _discover_bytes = discover.to_bytes();
+        let discover_bytes = discover.to_bytes();
 
-        // TODO(phase6): Send DISCOVER via UDP broadcast to 255.255.255.255:67
-        println!("[DHCP] Sending DISCOVER ({} bytes)", _discover_bytes.len());
+        println!("[DHCP] Sending DISCOVER ({} bytes)", discover_bytes.len());
+        send_dhcp_packet(&discover_bytes);
 
         self.state = DhcpState::Selecting;
-
         Ok(())
     }
+}
+
+/// Parsed DHCP options
+#[derive(Debug, Default)]
+struct ParsedDhcpOptions {
+    subnet_mask: Option<Ipv4Address>,
+    router: Option<Ipv4Address>,
+    dns_servers: Vec<Ipv4Address>,
+    lease_time: Option<u32>,
+    server_id: Option<Ipv4Address>,
+}
+
+/// Parse DHCP options from the options byte array (after magic cookie).
+fn parse_dhcp_options(options: &[u8]) -> ParsedDhcpOptions {
+    let mut result = ParsedDhcpOptions::default();
+    let mut i = 4; // Skip magic cookie (first 4 bytes)
+
+    while i < options.len() {
+        let code = options[i];
+        if code == OPT_END {
+            break;
+        }
+        if code == 0 {
+            // Padding
+            i += 1;
+            continue;
+        }
+        if i + 1 >= options.len() {
+            break;
+        }
+        let len = options[i + 1] as usize;
+        if i + 2 + len > options.len() {
+            break;
+        }
+        let data = &options[i + 2..i + 2 + len];
+
+        match code {
+            OPT_SUBNET_MASK if len == 4 => {
+                result.subnet_mask = Some(Ipv4Address([data[0], data[1], data[2], data[3]]));
+            }
+            OPT_ROUTER if len >= 4 => {
+                result.router = Some(Ipv4Address([data[0], data[1], data[2], data[3]]));
+            }
+            OPT_DNS_SERVER if len >= 4 => {
+                for chunk in data.chunks_exact(4) {
+                    result
+                        .dns_servers
+                        .push(Ipv4Address([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                }
+            }
+            OPT_LEASE_TIME if len == 4 => {
+                result.lease_time = Some(u32::from_be_bytes([data[0], data[1], data[2], data[3]]));
+            }
+            OPT_SERVER_ID if len == 4 => {
+                result.server_id = Some(Ipv4Address([data[0], data[1], data[2], data[3]]));
+            }
+            _ => {} // Unknown option, skip
+        }
+
+        i += 2 + len;
+    }
+
+    result
+}
+
+/// Send a DHCP packet via UDP broadcast (0.0.0.0:68 -> 255.255.255.255:67).
+fn send_dhcp_packet(data: &[u8]) {
+    let src = super::SocketAddr::v4(Ipv4Address::ANY, 68);
+    let dst = super::SocketAddr::v4(Ipv4Address::BROADCAST, 67);
+    let _ = super::udp::send_packet(src, dst, data);
+}
+
+/// Global DHCP client instance
+static DHCP_CLIENT: spin::Mutex<Option<DhcpClient>> = spin::Mutex::new(None);
+
+/// Start DHCP on the primary interface.
+pub fn start_dhcp() -> Result<(), KernelError> {
+    let mac =
+        super::device::with_device("eth0", |dev| dev.mac_address()).unwrap_or(MacAddress::ZERO);
+
+    let mut lock = DHCP_CLIENT.lock();
+    let client = lock.get_or_insert_with(|| DhcpClient::new(mac));
+    client.start()
+}
+
+/// Get current DHCP state for display.
+pub fn get_dhcp_state() -> Option<DhcpState> {
+    let lock = DHCP_CLIENT.lock();
+    lock.as_ref().map(|c| c.state())
 }
 
 /// Initialize DHCP client
