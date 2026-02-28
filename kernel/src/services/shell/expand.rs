@@ -474,13 +474,29 @@ fn find_closing_paren(chars: &[char]) -> Option<usize> {
     None
 }
 
-/// Execute a simple command for substitution and return its output.
+/// Execute a command for substitution and return its captured output.
 ///
-/// Supports:
-/// - `echo [args...]` — returns the arguments joined by spaces
-/// - `cat <path>` — reads file contents from VFS
-/// - `pwd` — returns current working directory
-/// - Other commands — returns empty string
+/// Supports inline evaluation for common shell builtins and utilities:
+/// - `echo [args...]` -- returns the arguments joined by spaces
+/// - `cat <path>` -- reads file contents from VFS
+/// - `pwd` -- returns current working directory
+/// - `uname [-s|-n|-r|-m|-a]` -- returns system information
+/// - `whoami` -- returns current user name
+/// - `hostname` -- returns system hostname
+/// - `basename <path> [suffix]` -- strips directory and optional suffix
+/// - `dirname <path>` -- strips last path component
+/// - `printf <format> [args...]` -- formatted output
+/// - `true` / `false` -- return empty string (side-effect only)
+/// - `seq <first> [increment] <last>` -- number sequence
+/// - `wc [-l|-w|-c] <file>` -- word/line/byte count
+/// - `head [-n N] <file>` -- first N lines of file
+/// - `tail [-n N] <file>` -- last N lines of file
+/// - `date` -- current date string
+/// - `test`/`[` -- exit status only, returns empty
+/// - `expr <args>` -- simple integer arithmetic
+///
+/// For unrecognized commands, returns an empty string (full pipe-based
+/// stdout capture would require fork+exec+pipe infrastructure).
 fn execute_substitution_command(command: &str) -> String {
     if command.is_empty() {
         return String::new();
@@ -492,41 +508,605 @@ fn execute_substitution_command(command: &str) -> String {
         return String::new();
     }
 
-    match parts[0] {
+    let output = match parts[0] {
         "echo" => {
-            // Return the remaining args joined by spaces, like echo does
+            // echo: return remaining args joined by spaces
             if parts.len() > 1 {
-                parts[1..].join(" ")
-            } else {
-                String::new()
-            }
-        }
-        "cat" => {
-            // Read file contents from VFS
-            if parts.len() > 1 {
-                match crate::fs::read_file(parts[1]) {
-                    Ok(data) => {
-                        // Convert bytes to string, trimming trailing newline
-                        let s = String::from_utf8_lossy(&data).into_owned();
-                        // Trim trailing newline like shell command substitution does
-                        s.trim_end_matches('\n').to_string()
-                    }
-                    Err(_) => String::new(),
+                // Handle -n (no trailing newline) and -e (escape sequences)
+                // For command substitution, trailing newlines are stripped anyway
+                let mut start = 1;
+                while start < parts.len() && parts[start].starts_with('-') {
+                    start += 1;
+                }
+                if start < parts.len() {
+                    parts[start..].join(" ")
+                } else if start > 1 {
+                    // Only flags, no text
+                    String::new()
+                } else {
+                    parts[1..].join(" ")
                 }
             } else {
                 String::new()
             }
         }
+
+        "cat" => {
+            // cat: read file contents from VFS
+            if parts.len() > 1 {
+                let mut result = String::new();
+                for &path in &parts[1..] {
+                    if path.starts_with('-') {
+                        continue; // Skip flags
+                    }
+                    if let Ok(data) = crate::fs::read_file(path) {
+                        let s = String::from_utf8_lossy(&data).into_owned();
+                        result.push_str(&s);
+                    }
+                }
+                result
+            } else {
+                String::new()
+            }
+        }
+
         "pwd" => {
-            // Try to get CWD from shell state
+            // pwd: current working directory
             super::try_get_shell()
                 .map(|shell| shell.get_cwd())
                 .unwrap_or_else(|| String::from("/"))
         }
-        // TODO(phase7): Full stdout capture requires process pipe infrastructure
-        // (fork + exec + pipe fd redirection).  Other commands return empty for now.
-        _ => String::new(),
+
+        "uname" => {
+            // uname: system information
+            subst_uname(&parts[1..])
+        }
+
+        "whoami" => {
+            // whoami: current user
+            super::try_get_shell()
+                .and_then(|shell| shell.get_env("USER"))
+                .unwrap_or_else(|| String::from("root"))
+        }
+
+        "hostname" => {
+            // hostname: system hostname
+            String::from("veridian")
+        }
+
+        "basename" => {
+            // basename: strip directory (and optional suffix)
+            if parts.len() > 1 {
+                subst_basename(parts[1], parts.get(2).copied())
+            } else {
+                String::new()
+            }
+        }
+
+        "dirname" => {
+            // dirname: strip last component
+            if parts.len() > 1 {
+                subst_dirname(parts[1])
+            } else {
+                String::from(".")
+            }
+        }
+
+        "printf" => {
+            // printf: simple format string expansion
+            if parts.len() > 1 {
+                subst_printf(&parts[1..])
+            } else {
+                String::new()
+            }
+        }
+
+        "true" | "false" => {
+            // Side-effect-only commands; return empty for substitution
+            String::new()
+        }
+
+        "seq" => {
+            // seq: number sequence
+            subst_seq(&parts[1..])
+        }
+
+        "wc" => {
+            // wc: word/line/byte count
+            subst_wc(&parts[1..])
+        }
+
+        "head" => {
+            // head: first N lines
+            subst_head(&parts[1..])
+        }
+
+        "tail" => {
+            // tail: last N lines
+            subst_tail(&parts[1..])
+        }
+
+        "tr" => {
+            // tr: character translation requires stdin; not feasible in
+            // substitution context without pipe infrastructure
+            String::new()
+        }
+
+        "date" => {
+            // date: current timestamp
+            subst_date()
+        }
+
+        "test" | "[" => {
+            // test/[: condition evaluation produces exit status only
+            String::new()
+        }
+
+        "expr" => {
+            // expr: simple integer arithmetic
+            subst_expr(&parts[1..])
+        }
+
+        _ => {
+            // Unrecognized command -- full pipe-based stdout capture would
+            // require fork+exec+pipe infrastructure; return empty for now.
+            String::new()
+        }
+    };
+
+    // Strip trailing newlines (standard command substitution behavior)
+    output.trim_end_matches('\n').to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Command substitution inline evaluators
+// ---------------------------------------------------------------------------
+
+/// Evaluate `uname` with optional flags.
+fn subst_uname(args: &[&str]) -> String {
+    let show_all = args.contains(&"-a");
+    let show_sysname = args.is_empty() || show_all || args.contains(&"-s");
+    let show_nodename = show_all || args.contains(&"-n");
+    let show_release = show_all || args.contains(&"-r");
+    let show_machine = show_all || args.contains(&"-m");
+
+    let mut parts_out: Vec<&str> = Vec::new();
+    if show_sysname {
+        parts_out.push("VeridianOS");
     }
+    if show_nodename {
+        parts_out.push("veridian");
+    }
+    if show_release {
+        parts_out.push("0.7.1");
+    }
+    if show_machine {
+        #[cfg(target_arch = "x86_64")]
+        parts_out.push("x86_64");
+        #[cfg(target_arch = "aarch64")]
+        parts_out.push("aarch64");
+        #[cfg(target_arch = "riscv64")]
+        parts_out.push("riscv64");
+    }
+
+    parts_out.join(" ")
+}
+
+/// Evaluate `basename <path> [suffix]`.
+fn subst_basename(path: &str, suffix: Option<&str>) -> String {
+    // Find the last non-trailing-slash component
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return String::from("/");
+    }
+
+    let base = match trimmed.rfind('/') {
+        Some(pos) => &trimmed[pos + 1..],
+        None => trimmed,
+    };
+
+    // Strip optional suffix
+    if let Some(sfx) = suffix {
+        if !sfx.is_empty() && base.len() > sfx.len() && base.ends_with(sfx) {
+            return base[..base.len() - sfx.len()].to_string();
+        }
+    }
+
+    base.to_string()
+}
+
+/// Evaluate `dirname <path>`.
+fn subst_dirname(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return String::from("/");
+    }
+
+    match trimmed.rfind('/') {
+        Some(0) => String::from("/"),
+        Some(pos) => trimmed[..pos].to_string(),
+        None => String::from("."),
+    }
+}
+
+/// Simple `printf` format string expansion.
+///
+/// Supports `%s` (string), `%d` (integer), `%%` (literal %), and `\n`, `\t`
+/// escape sequences. This is a simplified version that handles the most common
+/// use cases in shell scripts.
+fn subst_printf(args: &[&str]) -> String {
+    if args.is_empty() {
+        return String::new();
+    }
+
+    let fmt = args[0];
+    let mut result = String::new();
+    let mut arg_idx = 1usize;
+    let fmt_bytes = fmt.as_bytes();
+    let mut i = 0;
+
+    while i < fmt_bytes.len() {
+        if fmt_bytes[i] == b'%' && i + 1 < fmt_bytes.len() {
+            match fmt_bytes[i + 1] {
+                b's' => {
+                    if arg_idx < args.len() {
+                        result.push_str(args[arg_idx]);
+                        arg_idx += 1;
+                    }
+                    i += 2;
+                }
+                b'd' => {
+                    if arg_idx < args.len() {
+                        result.push_str(args[arg_idx]);
+                        arg_idx += 1;
+                    }
+                    i += 2;
+                }
+                b'%' => {
+                    result.push('%');
+                    i += 2;
+                }
+                _ => {
+                    result.push('%');
+                    i += 1;
+                }
+            }
+        } else if fmt_bytes[i] == b'\\' && i + 1 < fmt_bytes.len() {
+            match fmt_bytes[i + 1] {
+                b'n' => {
+                    result.push('\n');
+                    i += 2;
+                }
+                b't' => {
+                    result.push('\t');
+                    i += 2;
+                }
+                b'\\' => {
+                    result.push('\\');
+                    i += 2;
+                }
+                _ => {
+                    result.push('\\');
+                    i += 1;
+                }
+            }
+        } else {
+            result.push(fmt_bytes[i] as char);
+            i += 1;
+        }
+    }
+
+    result
+}
+
+/// Evaluate `seq [first [increment]] last`.
+fn subst_seq(args: &[&str]) -> String {
+    if args.is_empty() {
+        return String::new();
+    }
+
+    let (first, increment, last) = match args.len() {
+        1 => (1i64, 1i64, parse_i64(args[0]).unwrap_or(1)),
+        2 => {
+            let f = parse_i64(args[0]).unwrap_or(1);
+            let l = parse_i64(args[1]).unwrap_or(1);
+            (f, if f <= l { 1 } else { -1 }, l)
+        }
+        _ => {
+            let f = parse_i64(args[0]).unwrap_or(1);
+            let inc = parse_i64(args[1]).unwrap_or(1);
+            let l = parse_i64(args[2]).unwrap_or(1);
+            (f, inc, l)
+        }
+    };
+
+    if increment == 0 {
+        return String::new();
+    }
+
+    let mut result = String::new();
+    let mut current = first;
+    let mut first_line = true;
+
+    // Safety limit to prevent infinite loops
+    let max_iterations = 10000u32;
+    let mut count = 0u32;
+
+    loop {
+        if increment > 0 && current > last {
+            break;
+        }
+        if increment < 0 && current < last {
+            break;
+        }
+        if count >= max_iterations {
+            break;
+        }
+
+        if !first_line {
+            result.push('\n');
+        }
+        // Format the number
+        let num_str = format_i64(current);
+        result.push_str(&num_str);
+
+        first_line = false;
+        current += increment;
+        count += 1;
+    }
+
+    result
+}
+
+/// Evaluate `wc [-l|-w|-c] <file>`.
+fn subst_wc(args: &[&str]) -> String {
+    let mut count_lines = false;
+    let mut count_words = false;
+    let mut count_bytes = false;
+    let mut file_path = None;
+
+    for &arg in args {
+        match arg {
+            "-l" => count_lines = true,
+            "-w" => count_words = true,
+            "-c" | "-m" => count_bytes = true,
+            _ if !arg.starts_with('-') => file_path = Some(arg),
+            _ => {}
+        }
+    }
+
+    // Default: show all three if no specific flag
+    if !count_lines && !count_words && !count_bytes {
+        count_lines = true;
+        count_words = true;
+        count_bytes = true;
+    }
+
+    let path = match file_path {
+        Some(p) => p,
+        None => return String::from("0"),
+    };
+
+    let data = match crate::fs::read_file(path) {
+        Ok(d) => d,
+        Err(_) => return String::from("0"),
+    };
+
+    let content = String::from_utf8_lossy(&data);
+    let mut parts_out: Vec<String> = Vec::new();
+
+    if count_lines {
+        let lines = content.as_bytes().iter().filter(|&&b| b == b'\n').count();
+        parts_out.push(format!("{}", lines));
+    }
+    if count_words {
+        let words = content.split_whitespace().count();
+        parts_out.push(format!("{}", words));
+    }
+    if count_bytes {
+        parts_out.push(format!("{}", data.len()));
+    }
+
+    parts_out.join(" ")
+}
+
+/// Evaluate `head [-n N] <file>`.
+fn subst_head(args: &[&str]) -> String {
+    let mut num_lines = 10usize;
+    let mut file_path = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        if args[i] == "-n" && i + 1 < args.len() {
+            num_lines = parse_i64(args[i + 1]).unwrap_or(10) as usize;
+            i += 2;
+        } else if !args[i].starts_with('-') {
+            file_path = Some(args[i]);
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+
+    let path = match file_path {
+        Some(p) => p,
+        None => return String::new(),
+    };
+
+    let data = match crate::fs::read_file(path) {
+        Ok(d) => d,
+        Err(_) => return String::new(),
+    };
+
+    let content = String::from_utf8_lossy(&data);
+    let lines: Vec<&str> = content.lines().take(num_lines).collect();
+    lines.join("\n")
+}
+
+/// Evaluate `tail [-n N] <file>`.
+fn subst_tail(args: &[&str]) -> String {
+    let mut num_lines = 10usize;
+    let mut file_path = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        if args[i] == "-n" && i + 1 < args.len() {
+            num_lines = parse_i64(args[i + 1]).unwrap_or(10) as usize;
+            i += 2;
+        } else if !args[i].starts_with('-') {
+            file_path = Some(args[i]);
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+
+    let path = match file_path {
+        Some(p) => p,
+        None => return String::new(),
+    };
+
+    let data = match crate::fs::read_file(path) {
+        Ok(d) => d,
+        Err(_) => return String::new(),
+    };
+
+    let content = String::from_utf8_lossy(&data);
+    let all_lines: Vec<&str> = content.lines().collect();
+    let start = all_lines.len().saturating_sub(num_lines);
+    all_lines[start..].join("\n")
+}
+
+/// Evaluate `date` (simplified UTC timestamp).
+fn subst_date() -> String {
+    let total_secs = crate::arch::timer::get_timestamp_secs();
+
+    let secs_per_day: u64 = 86400;
+    let mut days = total_secs / secs_per_day;
+    let day_secs = total_secs % secs_per_day;
+    let hours = day_secs / 3600;
+    let minutes = (day_secs % 3600) / 60;
+    let seconds = day_secs % 60;
+
+    let mut year: u64 = 1970;
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if days < days_in_year {
+            break;
+        }
+        days -= days_in_year;
+        year += 1;
+    }
+
+    let month_days: [u64; 12] = if is_leap_year(year) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+
+    let mut month: u64 = 1;
+    for &mdays in &month_days {
+        if days < mdays {
+            break;
+        }
+        days -= mdays;
+        month += 1;
+    }
+
+    let day = days + 1;
+
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+        year, month, day, hours, minutes, seconds
+    )
+}
+
+/// Check if a year is a leap year (for date calculation).
+fn is_leap_year(year: u64) -> bool {
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
+}
+
+/// Evaluate `expr` -- simple integer arithmetic.
+///
+/// Supports: `expr <a> + <b>`, `expr <a> - <b>`, `expr <a> * <b>`,
+/// `expr <a> / <b>`, `expr <a> % <b>`.
+fn subst_expr(args: &[&str]) -> String {
+    if args.len() == 3 {
+        let a = parse_i64(args[0]);
+        let b = parse_i64(args[2]);
+        if let (Some(a), Some(b)) = (a, b) {
+            let result = match args[1] {
+                "+" => Some(a + b),
+                "-" => Some(a - b),
+                "*" => Some(a * b),
+                "/" => {
+                    if b != 0 {
+                        Some(a / b)
+                    } else {
+                        None
+                    }
+                }
+                "%" => {
+                    if b != 0 {
+                        Some(a % b)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if let Some(r) = result {
+                return format_i64(r);
+            }
+        }
+    }
+
+    // Single argument: return it as-is (expr identity)
+    if args.len() == 1 {
+        return args[0].to_string();
+    }
+
+    String::from("0")
+}
+
+/// Parse a decimal integer from a string.
+fn parse_i64(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    let (negative, digits) = if let Some(rest) = s.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = s.strip_prefix('+') {
+        (false, rest)
+    } else {
+        (false, s)
+    };
+
+    if digits.is_empty() {
+        return None;
+    }
+
+    let mut result: i64 = 0;
+    for &b in digits.as_bytes() {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        result = result.checked_mul(10)?;
+        result = result.checked_add((b - b'0') as i64)?;
+    }
+
+    if negative {
+        Some(-result)
+    } else {
+        Some(result)
+    }
+}
+
+/// Format an i64 as a decimal string.
+fn format_i64(val: i64) -> String {
+    format!("{}", val)
 }
 
 /// Expand all `$(...)` command substitutions in the input string.
@@ -811,5 +1391,170 @@ mod tests {
         let env = BTreeMap::new();
         // Nested: $(echo $(echo inner))
         assert_eq!(expand_variables("$(echo $(echo inner))", &env, 0), "inner");
+    }
+
+    // ---- Extended command substitution ----
+
+    #[test]
+    fn test_command_sub_hostname() {
+        let env = BTreeMap::new();
+        assert_eq!(expand_variables("$(hostname)", &env, 0), "veridian");
+    }
+
+    #[test]
+    fn test_command_sub_uname_default() {
+        let env = BTreeMap::new();
+        assert_eq!(expand_variables("$(uname)", &env, 0), "VeridianOS");
+    }
+
+    #[test]
+    fn test_command_sub_uname_release() {
+        let env = BTreeMap::new();
+        assert_eq!(expand_variables("$(uname -r)", &env, 0), "0.7.1");
+    }
+
+    #[test]
+    fn test_command_sub_basename() {
+        let env = BTreeMap::new();
+        assert_eq!(
+            expand_variables("$(basename /usr/local/bin/gcc)", &env, 0),
+            "gcc"
+        );
+    }
+
+    #[test]
+    fn test_command_sub_basename_with_suffix() {
+        let env = BTreeMap::new();
+        assert_eq!(
+            expand_variables("$(basename archive.tar.gz .tar.gz)", &env, 0),
+            "archive"
+        );
+    }
+
+    #[test]
+    fn test_command_sub_dirname() {
+        let env = BTreeMap::new();
+        assert_eq!(
+            expand_variables("$(dirname /usr/local/bin/gcc)", &env, 0),
+            "/usr/local/bin"
+        );
+    }
+
+    #[test]
+    fn test_command_sub_dirname_root() {
+        let env = BTreeMap::new();
+        assert_eq!(expand_variables("$(dirname /file)", &env, 0), "/");
+    }
+
+    #[test]
+    fn test_command_sub_dirname_no_slash() {
+        let env = BTreeMap::new();
+        assert_eq!(expand_variables("$(dirname file.txt)", &env, 0), ".");
+    }
+
+    #[test]
+    fn test_command_sub_expr_add() {
+        let env = BTreeMap::new();
+        assert_eq!(expand_variables("$(expr 3 + 4)", &env, 0), "7");
+    }
+
+    #[test]
+    fn test_command_sub_expr_subtract() {
+        let env = BTreeMap::new();
+        assert_eq!(expand_variables("$(expr 10 - 3)", &env, 0), "7");
+    }
+
+    #[test]
+    fn test_command_sub_expr_multiply() {
+        let env = BTreeMap::new();
+        assert_eq!(expand_variables("$(expr 6 * 7)", &env, 0), "42");
+    }
+
+    #[test]
+    fn test_command_sub_seq() {
+        let env = BTreeMap::new();
+        assert_eq!(expand_variables("$(seq 3)", &env, 0), "1\n2\n3");
+    }
+
+    #[test]
+    fn test_command_sub_seq_range() {
+        let env = BTreeMap::new();
+        assert_eq!(expand_variables("$(seq 2 5)", &env, 0), "2\n3\n4\n5");
+    }
+
+    #[test]
+    fn test_command_sub_printf_simple() {
+        let env = BTreeMap::new();
+        assert_eq!(expand_variables("$(printf hello)", &env, 0), "hello");
+    }
+
+    #[test]
+    fn test_command_sub_printf_format() {
+        let env = BTreeMap::new();
+        assert_eq!(
+            expand_variables("$(printf %s-%s foo bar)", &env, 0),
+            "foo-bar"
+        );
+    }
+
+    #[test]
+    fn test_command_sub_true_false() {
+        let env = BTreeMap::new();
+        assert_eq!(expand_variables("$(true)", &env, 0), "");
+        assert_eq!(expand_variables("$(false)", &env, 0), "");
+    }
+
+    // ---- Inline helper unit tests ----
+
+    #[test]
+    fn test_parse_i64() {
+        assert_eq!(parse_i64("42"), Some(42));
+        assert_eq!(parse_i64("-7"), Some(-7));
+        assert_eq!(parse_i64("+10"), Some(10));
+        assert_eq!(parse_i64("0"), Some(0));
+        assert_eq!(parse_i64(""), None);
+        assert_eq!(parse_i64("abc"), None);
+    }
+
+    #[test]
+    fn test_subst_basename_cases() {
+        assert_eq!(subst_basename("/usr/bin/gcc", None), "gcc");
+        assert_eq!(subst_basename("/", None), "/");
+        assert_eq!(subst_basename("file.c", Some(".c")), "file");
+        assert_eq!(subst_basename("a/b/c.rs", Some(".rs")), "c");
+        assert_eq!(subst_basename("/trailing/", None), "trailing");
+    }
+
+    #[test]
+    fn test_subst_dirname_cases() {
+        assert_eq!(subst_dirname("/usr/bin/gcc"), "/usr/bin");
+        assert_eq!(subst_dirname("/file"), "/");
+        assert_eq!(subst_dirname("plain"), ".");
+        assert_eq!(subst_dirname("/"), "/");
+    }
+
+    #[test]
+    fn test_subst_expr_cases() {
+        assert_eq!(subst_expr(&["5", "+", "3"]), "8");
+        assert_eq!(subst_expr(&["10", "-", "4"]), "6");
+        assert_eq!(subst_expr(&["6", "*", "7"]), "42");
+        assert_eq!(subst_expr(&["15", "/", "3"]), "5");
+        assert_eq!(subst_expr(&["17", "%", "5"]), "2");
+        assert_eq!(subst_expr(&["10", "/", "0"]), "0"); // division by zero
+    }
+
+    #[test]
+    fn test_subst_seq_cases() {
+        assert_eq!(subst_seq(&["3"]), "1\n2\n3");
+        assert_eq!(subst_seq(&["2", "4"]), "2\n3\n4");
+        assert_eq!(subst_seq(&["1", "2", "5"]), "1\n3\n5");
+    }
+
+    #[test]
+    fn test_subst_printf_cases() {
+        assert_eq!(subst_printf(&["hello"]), "hello");
+        assert_eq!(subst_printf(&["%s", "world"]), "world");
+        assert_eq!(subst_printf(&["%%"]), "%");
+        assert_eq!(subst_printf(&["a\\nb"]), "a\nb");
     }
 }

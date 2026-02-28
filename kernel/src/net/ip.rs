@@ -262,9 +262,17 @@ pub fn send(dest: IpAddress, protocol: IpProtocol, data: &[u8]) -> Result<(), Ke
 
             Ok(())
         }
-        IpAddress::V6(_) => Err(KernelError::NotImplemented {
-            feature: "ipv6_send",
-        }),
+        IpAddress::V6(dest_v6) => {
+            // Delegate to the IPv6 module
+            let src = super::ipv6::select_source_address(&dest_v6)
+                .unwrap_or(super::Ipv6Address::UNSPECIFIED);
+            let next_header = match protocol {
+                IpProtocol::Tcp => super::ipv6::NEXT_HEADER_TCP,
+                IpProtocol::Udp => super::ipv6::NEXT_HEADER_UDP,
+                IpProtocol::Icmp => super::ipv6::NEXT_HEADER_ICMPV6,
+            };
+            super::ipv6::send(&src, &dest_v6, next_header, data)
+        }
     }
 }
 

@@ -556,6 +556,309 @@ impl BlockDevice for NvmeController {
 /// NVMe PCI subclass code.
 const NVME_SUBCLASS: u8 = 0x08;
 
+/// Admin queue size (64 entries is the minimum guaranteed by spec).
+const ADMIN_QUEUE_SIZE: u16 = 64;
+
+/// Timeout iterations for controller ready polling.
+const CONTROLLER_READY_TIMEOUT: u32 = 500_000;
+
+/// NVMe Identify Controller data offsets.
+const IDENT_SERIAL_OFFSET: usize = 4;
+const IDENT_SERIAL_LEN: usize = 20;
+const IDENT_MODEL_OFFSET: usize = 24;
+const IDENT_MODEL_LEN: usize = 40;
+const IDENT_FIRMWARE_OFFSET: usize = 64;
+const IDENT_FIRMWARE_LEN: usize = 8;
+const IDENT_MDTS_OFFSET: usize = 77;
+
+/// Initialize an NVMe controller found at the given BAR0 physical address.
+///
+/// Performs the full NVMe initialization sequence:
+/// 1. Map BAR0 into kernel virtual address space
+/// 2. Reset the controller (CC.EN=0, wait CSTS.RDY=0)
+/// 3. Allocate admin submission/completion queues via frame allocator
+/// 4. Program AQA, ASQ, ACQ registers
+/// 5. Enable controller (CC.EN=1), wait for CSTS.RDY=1
+/// 6. Issue Identify Controller command to read device metadata
+#[cfg(target_arch = "x86_64")]
+fn initialize_nvme_controller(bar0_phys: u64) -> Result<(), KernelError> {
+    use crate::mm::{phys_to_virt_addr, FRAME_ALLOCATOR, FRAME_SIZE};
+
+    // Step 1: Map BAR0 MMIO region into kernel virtual space.
+    let mmio_base = phys_to_virt_addr(bar0_phys) as usize;
+    println!(
+        "[NVME] MMIO base: phys={:#x} virt={:#x}",
+        bar0_phys, mmio_base
+    );
+
+    // Helper: read 32-bit MMIO register.
+    let read32 = |offset: usize| -> u32 {
+        // SAFETY: Reading NVMe MMIO register. mmio_base is the BAR0 address
+        // mapped through the kernel direct-map (phys + PHYS_MEM_OFFSET).
+        // All offsets are within the NVMe register space (< 0x1000).
+        unsafe { core::ptr::read_volatile((mmio_base + offset) as *const u32) }
+    };
+
+    // Helper: write 32-bit MMIO register.
+    let write32 = |offset: usize, value: u32| {
+        // SAFETY: Writing NVMe MMIO register. Same invariants as read32.
+        unsafe { core::ptr::write_volatile((mmio_base + offset) as *mut u32, value) }
+    };
+
+    // Helper: write 64-bit MMIO register (used for ASQ/ACQ base addresses).
+    let write64 = |offset: usize, value: u64| {
+        // SAFETY: Writing 64-bit NVMe MMIO register (ASQ/ACQ base address).
+        // The register pair is naturally aligned at offset 0x28 and 0x30.
+        unsafe { core::ptr::write_volatile((mmio_base + offset) as *mut u64, value) }
+    };
+
+    // Read controller version.
+    let version = read32(REG_VS);
+    let ver_major = (version >> 16) & 0xFFFF;
+    let ver_minor = (version >> 8) & 0xFF;
+    println!("[NVME] Controller version: {}.{}", ver_major, ver_minor);
+
+    // Read capabilities to determine max queue entries supported.
+    let cap_lo = read32(REG_CAP) as u64;
+    let cap_hi = read32(REG_CAP + 4) as u64;
+    let cap = cap_lo | (cap_hi << 32);
+    let mqes = ((cap & 0xFFFF) + 1) as u16;
+    let admin_qsize = ADMIN_QUEUE_SIZE.min(mqes);
+    println!(
+        "[NVME] CAP={:#018x}, MQES={}, using admin queue size={}",
+        cap, mqes, admin_qsize
+    );
+
+    // Step 2: Disable controller (CC.EN=0).
+    write32(REG_CC, 0);
+
+    // Wait for CSTS.RDY to clear.
+    let mut timeout = CONTROLLER_READY_TIMEOUT;
+    while (read32(REG_CSTS) & CSTS_RDY) != 0 {
+        if timeout == 0 {
+            println!("[NVME] Timeout waiting for controller disable");
+            return Err(KernelError::Timeout {
+                operation: "NVMe controller disable",
+                duration_ms: 500,
+            });
+        }
+        timeout -= 1;
+        core::hint::spin_loop();
+    }
+    println!("[NVME] Controller disabled");
+
+    // Step 3: Allocate physically contiguous memory for admin queues.
+    // Admin Submission Queue: 64 entries x 64 bytes = 4096 bytes = 1 frame.
+    // Admin Completion Queue: 64 entries x 16 bytes = 1024 bytes = 1 frame.
+    let asq_frame = FRAME_ALLOCATOR
+        .lock()
+        .allocate_frames(1, None)
+        .map_err(|_| KernelError::OutOfMemory {
+            requested: FRAME_SIZE,
+            available: 0,
+        })?;
+    let acq_frame = FRAME_ALLOCATOR
+        .lock()
+        .allocate_frames(1, None)
+        .map_err(|_| KernelError::OutOfMemory {
+            requested: FRAME_SIZE,
+            available: 0,
+        })?;
+
+    let asq_phys = asq_frame.as_u64() * FRAME_SIZE as u64;
+    let acq_phys = acq_frame.as_u64() * FRAME_SIZE as u64;
+
+    // Zero the queue memory.
+    let asq_virt = phys_to_virt_addr(asq_phys) as *mut u8;
+    let acq_virt = phys_to_virt_addr(acq_phys) as *mut u8;
+    // SAFETY: Writing to freshly allocated frames mapped via kernel direct-map.
+    // Each frame is FRAME_SIZE (4096) bytes. We zero the entire frame.
+    unsafe {
+        core::ptr::write_bytes(asq_virt, 0, FRAME_SIZE);
+        core::ptr::write_bytes(acq_virt, 0, FRAME_SIZE);
+    }
+
+    println!(
+        "[NVME] Admin queues allocated: ASQ phys={:#x}, ACQ phys={:#x}",
+        asq_phys, acq_phys
+    );
+
+    // Step 4: Program admin queue registers.
+    // AQA: Admin Queue Attributes -- ASQ size in bits [27:16], ACQ size in bits
+    // [11:0]. Sizes are 0-based (value N means N+1 entries).
+    let aqa = (((admin_qsize - 1) as u32) << 16) | ((admin_qsize - 1) as u32);
+    write32(REG_AQA, aqa);
+
+    // ASQ: Admin Submission Queue base address (physical, page-aligned).
+    write64(REG_ASQ, asq_phys);
+
+    // ACQ: Admin Completion Queue base address (physical, page-aligned).
+    write64(REG_ACQ, acq_phys);
+
+    // Step 5: Enable controller.
+    // CC register: EN=1, CSS=0 (NVM), MPS=0 (4KB pages), IOSQES=6 (64B), IOCQES=4
+    // (16B).
+    let cc_value =
+        CC_ENABLE | CC_CSS_NVM | CC_MPS_4K | CC_AMS_RR | CC_SHN_NONE | CC_IOSQES | CC_IOCQES;
+    write32(REG_CC, cc_value);
+    println!("[NVME] Controller enable: CC={:#010x}", cc_value);
+
+    // Wait for CSTS.RDY to assert.
+    timeout = CONTROLLER_READY_TIMEOUT;
+    loop {
+        let csts = read32(REG_CSTS);
+        if (csts & CSTS_RDY) != 0 {
+            break;
+        }
+        if (csts & CSTS_CFS) != 0 {
+            println!("[NVME] Controller fatal status during enable");
+            // Free allocated frames before returning error.
+            let _ = FRAME_ALLOCATOR.lock().free_frames(asq_frame, 1);
+            let _ = FRAME_ALLOCATOR.lock().free_frames(acq_frame, 1);
+            return Err(KernelError::HardwareError {
+                device: "nvme",
+                code: 2,
+            });
+        }
+        if timeout == 0 {
+            println!("[NVME] Timeout waiting for controller ready");
+            let _ = FRAME_ALLOCATOR.lock().free_frames(asq_frame, 1);
+            let _ = FRAME_ALLOCATOR.lock().free_frames(acq_frame, 1);
+            return Err(KernelError::Timeout {
+                operation: "NVMe controller enable",
+                duration_ms: 500,
+            });
+        }
+        timeout -= 1;
+        core::hint::spin_loop();
+    }
+    println!("[NVME] Controller ready");
+
+    // Step 6: Issue Identify Controller command (opcode 0x06, CNS=1).
+    // Allocate a frame for the 4KB identify data buffer.
+    let ident_frame = FRAME_ALLOCATOR
+        .lock()
+        .allocate_frames(1, None)
+        .map_err(|_| KernelError::OutOfMemory {
+            requested: FRAME_SIZE,
+            available: 0,
+        })?;
+    let ident_phys = ident_frame.as_u64() * FRAME_SIZE as u64;
+    let ident_virt = phys_to_virt_addr(ident_phys) as *mut u8;
+
+    // SAFETY: Zeroing freshly allocated identify data frame.
+    unsafe {
+        core::ptr::write_bytes(ident_virt, 0, FRAME_SIZE);
+    }
+
+    // Build Identify Controller submission queue entry.
+    let asq_entries = asq_virt as *mut SubmissionQueueEntry;
+    let identify_cmd = SubmissionQueueEntry {
+        opcode: ADMIN_IDENTIFY,
+        flags: 0,
+        command_id: 1,
+        nsid: 0,
+        _reserved: 0,
+        metadata: 0,
+        prp1: ident_phys, // PRP1 points to identify data buffer
+        prp2: 0,
+        cdw10: 1, // CNS=1: Identify Controller
+        cdw11: 0,
+        cdw12: 0,
+        cdw13: 0,
+        cdw14: 0,
+        cdw15: 0,
+    };
+
+    // Write command to ASQ slot 0.
+    // SAFETY: asq_entries points to the zeroed admin submission queue frame.
+    // Slot 0 is within bounds (admin_qsize >= 1). The queue memory is
+    // 4KB-aligned and large enough for 64 entries of 64 bytes each.
+    unsafe {
+        core::ptr::write_volatile(asq_entries, identify_cmd);
+    }
+
+    // Ring admin SQ doorbell (queue 0 SQ doorbell is at offset 0x1000).
+    write32(0x1000, 1); // Tail = 1 (we wrote entry at index 0)
+
+    // Poll admin completion queue for response.
+    let acq_entries = acq_virt as *const CompletionQueueEntry;
+    timeout = CONTROLLER_READY_TIMEOUT;
+    loop {
+        // SAFETY: Reading completion queue entry 0 from the ACQ frame.
+        let cqe = unsafe { core::ptr::read_volatile(acq_entries) };
+        // Phase bit (bit 0 of status) toggles on each wrap. Initially 0,
+        // so the first valid completion has phase bit = 1.
+        if (cqe.status & 1) != 0 {
+            // Check for error in status field (bits 1-15).
+            let status_code = (cqe.status >> 1) & 0x7FFF;
+            if status_code != 0 {
+                println!(
+                    "[NVME] Identify Controller failed: status={:#x}",
+                    status_code
+                );
+            } else {
+                // Parse identify data.
+                // SAFETY: ident_virt points to a 4KB frame filled by the
+                // controller via DMA. Offsets are within the 4KB page and
+                // we only read byte slices, so alignment is not an issue.
+                unsafe {
+                    // Serial number (bytes 4-23, ASCII, space-padded)
+                    let sn_ptr = ident_virt.add(IDENT_SERIAL_OFFSET);
+                    let sn_slice = core::slice::from_raw_parts(sn_ptr, IDENT_SERIAL_LEN);
+                    if let Ok(sn) = core::str::from_utf8(sn_slice) {
+                        println!("[NVME] Serial:   {}", sn.trim_end());
+                    }
+
+                    // Model number (bytes 24-63, ASCII, space-padded)
+                    let mn_ptr = ident_virt.add(IDENT_MODEL_OFFSET);
+                    let mn_slice = core::slice::from_raw_parts(mn_ptr, IDENT_MODEL_LEN);
+                    if let Ok(mn) = core::str::from_utf8(mn_slice) {
+                        println!("[NVME] Model:    {}", mn.trim_end());
+                    }
+
+                    // Firmware revision (bytes 64-71, ASCII)
+                    let fr_ptr = ident_virt.add(IDENT_FIRMWARE_OFFSET);
+                    let fr_slice = core::slice::from_raw_parts(fr_ptr, IDENT_FIRMWARE_LEN);
+                    if let Ok(fr) = core::str::from_utf8(fr_slice) {
+                        println!("[NVME] Firmware: {}", fr.trim_end());
+                    }
+
+                    // MDTS: Maximum Data Transfer Size (byte 77).
+                    // Value N means max transfer = 2^N * min memory page size.
+                    // 0 means no limit reported.
+                    let mdts = *ident_virt.add(IDENT_MDTS_OFFSET);
+                    if mdts > 0 {
+                        let max_transfer = 1u64 << (12 + mdts as u64); // 4KB * 2^MDTS
+                        println!(
+                            "[NVME] MDTS:     {} (max transfer {} bytes)",
+                            mdts, max_transfer
+                        );
+                    } else {
+                        println!("[NVME] MDTS:     0 (no limit)");
+                    }
+                }
+            }
+            break;
+        }
+        if timeout == 0 {
+            println!("[NVME] Timeout waiting for Identify Controller completion");
+            break;
+        }
+        timeout -= 1;
+        core::hint::spin_loop();
+    }
+
+    // Ring admin CQ doorbell (offset 0x1004 for CQ 0).
+    write32(0x1004, 1); // Head = 1
+
+    // Free the identify data buffer.
+    let _ = FRAME_ALLOCATOR.lock().free_frames(ident_frame, 1);
+
+    println!("[NVME] Admin queue initialization complete");
+    Ok(())
+}
+
 /// Detect and initialize NVMe devices via PCI bus enumeration.
 ///
 /// Scans the PCI bus for Mass Storage controllers with NVMe subclass
@@ -596,14 +899,13 @@ pub fn init() -> Result<(), KernelError> {
                     }
                 }
 
-                // TODO(phase7): Full NVMe initialization sequence:
-                // 1. Map BAR0 MMIO region
-                // 2. Read CAP register for queue parameters
-                // 3. Allocate DMA buffers for admin queue pair
-                // 4. Program ASQ/ACQ registers
-                // 5. Set CC.EN = 1, wait for CSTS.RDY
-                // 6. Issue Identify Controller admin command
-                // 7. Create I/O completion and submission queues
+                // Full NVMe initialization: map BAR0, set up admin queues,
+                // enable controller, and identify.
+                if let Some(bar0_phys) = dev.bars.first().and_then(|b| b.get_memory_address()) {
+                    if let Err(e) = initialize_nvme_controller(bar0_phys) {
+                        println!("[NVME] Controller init failed: {:?}", e);
+                    }
+                }
             }
         }
 

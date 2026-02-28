@@ -128,7 +128,12 @@ impl Socket {
             | (SocketDomain::Inet, SocketType::Stream, SocketProtocol::Default)
             | (SocketDomain::Inet, SocketType::Dgram, SocketProtocol::Udp)
             | (SocketDomain::Inet, SocketType::Dgram, SocketProtocol::Default)
-            | (SocketDomain::Inet, SocketType::Raw, _) => {}
+            | (SocketDomain::Inet, SocketType::Raw, _)
+            | (SocketDomain::Inet6, SocketType::Stream, SocketProtocol::Tcp)
+            | (SocketDomain::Inet6, SocketType::Stream, SocketProtocol::Default)
+            | (SocketDomain::Inet6, SocketType::Dgram, SocketProtocol::Udp)
+            | (SocketDomain::Inet6, SocketType::Dgram, SocketProtocol::Default)
+            | (SocketDomain::Inet6, SocketType::Raw, _) => {}
             _ => {
                 return Err(KernelError::InvalidArgument {
                     name: "socket_combination",
@@ -217,11 +222,7 @@ impl Socket {
         if self.state == SocketState::Unbound {
             let local_addr = match addr.ip() {
                 IpAddress::V4(_) => SocketAddr::v4(super::Ipv4Address::UNSPECIFIED, 0),
-                IpAddress::V6(_) => {
-                    return Err(KernelError::NotImplemented {
-                        feature: "ipv6_auto_bind",
-                    })
-                }
+                IpAddress::V6(_) => SocketAddr::v6(super::Ipv6Address::UNSPECIFIED, 0),
             };
             self.bind(local_addr)?;
         }
@@ -705,7 +706,7 @@ pub fn getsockopt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::net::Ipv4Address;
+    use crate::net::{Ipv4Address, Ipv6Address};
 
     #[test]
     fn test_socket_creation() {
@@ -716,10 +717,39 @@ mod tests {
     }
 
     #[test]
+    fn test_socket_creation_inet6() {
+        let socket =
+            Socket::new(SocketDomain::Inet6, SocketType::Stream, SocketProtocol::Tcp).unwrap();
+        assert_eq!(socket.state, SocketState::Unbound);
+        assert_eq!(socket.domain, SocketDomain::Inet6);
+        assert_eq!(socket.socket_type, SocketType::Stream);
+    }
+
+    #[test]
+    fn test_socket_creation_inet6_udp() {
+        let socket =
+            Socket::new(SocketDomain::Inet6, SocketType::Dgram, SocketProtocol::Udp).unwrap();
+        assert_eq!(socket.domain, SocketDomain::Inet6);
+        assert_eq!(socket.socket_type, SocketType::Dgram);
+    }
+
+    #[test]
     fn test_socket_bind() {
         let mut socket =
             Socket::new(SocketDomain::Inet, SocketType::Stream, SocketProtocol::Tcp).unwrap();
         let addr = SocketAddr::v4(Ipv4Address::LOCALHOST, 8080);
+
+        assert_eq!(socket.state, SocketState::Unbound);
+        socket.bind(addr).unwrap();
+        assert_eq!(socket.state, SocketState::Bound);
+        assert_eq!(socket.local_addr, Some(addr));
+    }
+
+    #[test]
+    fn test_socket_bind_inet6() {
+        let mut socket =
+            Socket::new(SocketDomain::Inet6, SocketType::Stream, SocketProtocol::Tcp).unwrap();
+        let addr = SocketAddr::v6(Ipv6Address::LOCALHOST, 8080);
 
         assert_eq!(socket.state, SocketState::Unbound);
         socket.bind(addr).unwrap();

@@ -8,6 +8,11 @@ For current project status, see the [README](../README.md). For task tracking, s
 
 ## Table of Contents
 
+- [v0.8.0 -- Phase 7 Wave 4: Advanced Networking + Shell/Desktop](#v080----phase-7-wave-4-advanced-networking--shelldesktop)
+- [v0.7.1 -- Phase 7 Waves 1-3: GPU Drivers, Advanced Wayland, Desktop Completion](#v071----phase-7-waves-1-3-gpu-drivers-advanced-wayland-desktop-completion)
+- [v0.7.0 -- Phase 6.5: Rust Compiler Port + Bash-in-Rust Shell](#v070----phase-65-rust-compiler-port--bash-in-rust-shell)
+- [v0.6.4 -- Desktop Interaction Fixes](#v064----desktop-interaction-fixes)
+- [v0.6.3 -- Desktop Completion](#v063----desktop-completion)
 - [v0.6.2 -- Phase 6 Completion + Phase 7 TODO](#v062----phase-6-completion--phase-7-todo)
 - [v0.6.1 -- Phase 6 Graphical Desktop, Wayland Compositor, Network Stack](#v061----phase-6-graphical-desktop-wayland-compositor-network-stack)
 - [v0.6.0 -- Pre-Phase 6 Tech Debt Remediation](#v060----pre-phase-6-tech-debt-remediation)
@@ -52,6 +57,59 @@ For current project status, see the [README](../README.md). For task tracking, s
 - [v0.2.0 -- Phase 1 Microkernel Core](#v020----phase-1-microkernel-core)
 - [v0.1.0 -- Phase 0 Foundation and Tooling](#v010----phase-0-foundation-and-tooling)
 - [DEEP-RECOMMENDATIONS](#deep-recommendations)
+
+---
+
+## v0.8.0 -- Phase 7 Wave 4: Advanced Networking + Shell/Desktop
+
+**Date**: February 28, 2026
+
+Phase 7 Wave 4 implements zero-copy DMA networking, hardware NIC drivers, IPv6 dual-stack, shell command substitution, MIME file dispatch, and NVMe admin queue initialization. Resolves 23 TODO(phase7) source markers (11 remaining for Wave 6).
+
+### Highlights
+- **Zero-Copy DMA**: DMA buffer pool below 4GB, scatter-gather with user page pinning, TCP zero-copy send with MSS segmentation
+- **Hardware NIC**: DMA TX/RX descriptor rings (256 entries), E1000-compatible MMIO registers, PCI class validation
+- **IPv6 Dual-Stack**: ~2,145 lines (ipv6.rs + icmpv6.rs), NDP cache, SLAAC, ICMPv6, AF_INET6 sockets
+- **Shell**: 18 inline commands for $(command) substitution
+- **NVMe**: Full admin queue setup with Identify Controller
+- **New files**: net/ipv6.rs, net/icmpv6.rs, docs/NETWORKING-ARCHITECTURE.md
+- **Modified**: ~18 existing files across net/, drivers/, services/, desktop/
+
+### Stats
+- All 3 architectures: zero warnings, zero errors, 29/29 boot tests
+- TODO(phase7) markers: 34 -> 11 (23 resolved)
+
+---
+
+## v0.7.1 -- Phase 7 Waves 1-3: GPU Drivers, Advanced Wayland, Desktop Completion
+
+**Date**: February 28, 2026
+
+Phase 7 Waves 1-3: VirtIO GPU driver, vendor GPU stubs (i915/amdgpu/nouveau), 8 Wayland protocol extensions, 14 desktop modules, dynamic linker completion. 42 files, +19489/-1045 lines.
+
+---
+
+## v0.7.0 -- Phase 6.5: Rust Compiler Port + Bash-in-Rust Shell
+
+**Date**: February 27, 2026
+
+Rust compiler port (std::sys::veridian, LLVM 19, rustc/cargo) + vsh Bash-in-Rust shell (49 builtins, job control, readline). 115 files, +30439/-609 lines.
+
+---
+
+## v0.6.4 -- Desktop Interaction Fixes
+
+**Date**: February 27, 2026
+
+PS/2 input pipeline rewrite, compositor zero-copy (~30fps), click-to-focus, window dragging. 15 files, +584/-178 lines.
+
+---
+
+## v0.6.3 -- Desktop Completion
+
+**Date**: February 27, 2026
+
+Functional GUI apps (terminal/file manager/text editor), app-to-surface bridge, font8x16, window decorations.
 
 ---
 

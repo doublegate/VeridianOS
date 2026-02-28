@@ -1,6 +1,6 @@
 # VeridianOS Master TODO List
 
-**Last Updated**: 2026-02-27 (Phase 5 ~90%, Phase 5.5 COMPLETE, Phase 6 ~100%, Phase 6.5 COMPLETE, Tier 7 COMPLETE, v0.7.0)
+**Last Updated**: 2026-02-28 (Phase 5 ~90%, Phase 5.5 COMPLETE, Phase 6 ~100%, Phase 6.5 COMPLETE, Phase 7 ~50%, Tier 7 COMPLETE, v0.8.0)
 
 ## Project Overview Status
 
@@ -12,9 +12,9 @@
 - [ ] **Phase 5: Performance Optimization** - ~90% (hot path wiring, CapabilityCache, O(log n) IPC PID lookup, trace instrumentation)
 - [x] **Phase 6: Advanced Features & GUI** - ~100% (Wayland compositor, desktop renderer, input, TCP/IP, desktop apps) v0.6.4
 - [x] **Phase 6.5: Rust Compiler + Bash-in-Rust Shell** - COMPLETE (100%) v0.7.0 (February 27, 2026)
-- [ ] **Phase 7: Production Readiness** - 0% (GPU drivers, advanced Wayland, multimedia, virtualization, cloud-native)
+- [ ] **Phase 7: Production Readiness** - ~50% (Waves 1-4 complete: GPU, Wayland, desktop, networking; Waves 5-6 remaining: multimedia, virtualization) v0.7.1-v0.8.0
 
-## Current Version: v0.7.0 (February 27, 2026)
+## Current Version: v0.8.0 (February 28, 2026)
 
 ### Build Status
 - **x86_64**: 0 errors, 0 warnings, Stage 6 BOOTOK, 29/29 tests
@@ -173,14 +173,14 @@
 | Capability System | Done | Done | Done | Done |
 | VFS / Filesystem | Done | Done | Done | Done |
 | Driver Framework | Done | Done | Partial | Partial |
-| Network Stack | Done | Done | Partial | Partial |
+| Network Stack | Done | Done | Done | Done |
 | Package Manager | Done | Done | Partial | Done |
 | Crypto / Security | Done | Done | Partial | Done |
 | NUMA Scheduling | Done | Done | Partial | Partial |
 | Wayland/Compositor | Done | Done | Partial | Partial |
 | Desktop/Input | Done | Done | Partial | Partial |
 | TCP/IP Stack | Done | Done | Partial | Partial |
-| GPU Acceleration | Done | Type Defs | Not Started | Not Started |
+| GPU Acceleration | Done | Done | Partial | Partial |
 
 ## Known Issues
 
@@ -208,7 +208,7 @@ See [REMEDIATION_TODO.md](REMEDIATION_TODO.md) for 37 identified gaps from Phase
 - [Phase 5 TODO](PHASE5_TODO.md) - ~90%
 - [Phase 5.5 TODO](PHASE5.5_TODO.md) - 100% COMPLETE (all 12 sprints, v0.5.13)
 - [Phase 6 TODO](PHASE6_TODO.md) - ~40% (core graphical path complete)
-- [Phase 7 TODO](PHASE7_TODO.md) - 0% (GPU, multimedia, virtualization, cloud-native)
+- [Phase 7 TODO](PHASE7_TODO.md) - ~50% (Waves 1-4 complete, Waves 5-6 remaining)
 - [Remediation TODO](REMEDIATION_TODO.md) - Gaps from Phases 0-4
 - [Issues TODO](ISSUES_TODO.md) - Issue history
 - [Testing TODO](TESTING_TODO.md) - Testing status
@@ -218,6 +218,11 @@ See [REMEDIATION_TODO.md](REMEDIATION_TODO.md) for 37 identified gaps from Phase
 
 | Version | Date | Summary |
 |---------|------|---------|
+| v0.8.0 | Feb 28, 2026 | Phase 7 Wave 4: zero-copy DMA networking, hardware NIC TX/RX rings, IPv6 dual-stack, command substitution, NVMe admin queue |
+| v0.7.1 | Feb 28, 2026 | Phase 7 Waves 1-3: GPU drivers (virtio-gpu, i915/amdgpu/nouveau), advanced Wayland, desktop completion |
+| v0.7.0 | Feb 27, 2026 | Phase 6.5: Rust compiler port (std::sys::veridian, LLVM 19) + vsh Bash-in-Rust shell (49 builtins) |
+| v0.6.4 | Feb 27, 2026 | Desktop interaction: PS/2 input pipeline, compositor zero-copy (~30fps), click-to-focus, window dragging |
+| v0.6.3 | Feb 27, 2026 | Desktop completion: functional GUI apps, app-to-surface bridge, font8x16, window decorations |
 | v0.6.2 | Feb 27, 2026 | Phase 6 completion: documentation sync, integration wiring, TODO(phase6) resolved, Phase 7 TODO |
 | v0.6.1 | Feb 27, 2026 | Phase 6 graphical desktop: Wayland compositor, PS/2 mouse, TCP/IP (VirtIO-Net/Ethernet/ARP/TCP/DHCP), startgui |
 | v0.6.0 | Feb 27, 2026 | Pre-Phase 6 tech debt: 12 new syscalls (POSIX shm + Unix sockets), PMU, RCU, NVMe PCI, IOMMU DMAR |

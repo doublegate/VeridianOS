@@ -113,7 +113,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.7.1 (February 28, 2026) | **Releases Published**: 45 (v0.1.0 through v0.7.1)
+**Latest Release**: v0.8.0 (February 28, 2026) | **Releases Published**: 46 (v0.1.0 through v0.8.0)
 
 | Metric                 | Value                                           |
 | ---------------------- | ----------------------------------------------- |
@@ -143,7 +143,7 @@ experiments/   Non-normative exploratory work
 | 5.5   | Infrastructure Bridge     | **COMPLETE (100%)** | v0.5.13 | Feb 2026 |
 | 6     | Advanced Features and GUI | **~100% (desktop complete)** | v0.6.4  | Feb 2026 |
 | 6.5   | Rust Compiler + Bash Shell | **COMPLETE (100%)** | v0.7.0  | Feb 2026 |
-| 7     | Production Readiness     | **In Progress (~15%)** | v0.7.1  | Feb 2026 |
+| 7     | Production Readiness     | **In Progress (~50%)** | v0.8.0  | Feb 2026 |
 
 For detailed release notes, see [Release History](docs/RELEASE-HISTORY.md).
 
@@ -185,6 +185,11 @@ Phases 0 through 4 are complete. The kernel provides:
 - **Desktop Applications** -- MIME database (31 types, magic byte detection, extension mapping), syntax highlighter (Rust/C/Shell with keyword/string/comment/number tokenization), system settings app (5 panels: display/network/users/appearance/about), image viewer (PPM P3/P6 and BMP 24/32-bit, nearest-neighbor zoom, pan)
 - **Dynamic Linker Completion** -- Multi-LOAD ELF fix with page-boundary segment handling, lazy PLT/GOT binding, ELF symbol versioning (DT_VERSYM/VERNEED/VERDEF), weak symbol resolution, LD_PRELOAD and LD_LIBRARY_PATH environment variable support, TLS support (PT_TLS, ARCH_SET_FS), DT_INIT_ARRAY/DT_FINI_ARRAY execution, RELRO protection
 - **Desktop IPC Services** -- 6 IPC endpoints (WM=1000, INPUT=1001, COMPOSITOR=1002, NOTIFICATION=1003, CLIPBOARD=1004, LAUNCHER=1005) with typed message dispatch
+- **Zero-Copy DMA Networking** -- DMA buffer pool with physical frame allocation below 4GB for 32-bit DMA compatibility, scatter-gather I/O with user page pinning (VAS page table walking for physical address translation), TCP zero-copy send with MSS segmentation, SendFile with scatter-gather path for large transfers (>=64KB)
+- **Hardware NIC Driver** -- DMA descriptor rings (TX/RX, 256 entries each) with #[repr(C)] descriptors, E1000-compatible MMIO register offsets (TDT, RDT, TCTL, RCTL, STATUS, ICR, IMS), volatile MMIO read/write, ring allocation/deallocation from physical frame allocator, PCI class validation
+- **IPv6 Dual-Stack** -- Full IPv6 implementation (~2,145 lines across ipv6.rs + icmpv6.rs): header parsing/building, NDP cache with LRU eviction, Neighbor Discovery (NS/NA/RS/RA), SLAAC with EUI-64, ICMPv6 (Echo, Dest Unreachable, Packet Too Big, Time Exceeded), AF_INET6 sockets (Stream/Dgram/Raw), dual-stack configuration; shell commands: ping6, ndp, enhanced ifconfig/netstat
+- **Shell Command Substitution** -- 18 inline commands for $(command): echo, cat, pwd, uname, whoami, hostname, basename, dirname, printf, seq, wc, head, tail, date, expr, true/false, test/[, tr
+- **NVMe Admin Queue** -- Full controller reset + initialization sequence with NvmeSubmissionEntry/NvmeCompletionEntry structs, ASQ/ACQ allocation from physical frames, Identify Controller parsing (serial, model, firmware, MDTS)
 
 ### Self-Hosting Roadmap
 
@@ -214,7 +219,8 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### What Comes Next
 
-- **Phase 7 Waves 1-3** -- GPU drivers (virtio-gpu 2D with PCI discovery + virtqueue + scanout, vendor GPU framework stubs for Intel i915/AMD amdgpu/NVIDIA Nouveau with PCI ID tables), advanced Wayland (layer-shell, idle-inhibit, DMA-BUF protocol, multi-output management with HiDPI, xdg-decoration negotiation, XWayland socket stub, libwayland-client user-space library), desktop completion (application launcher, notification system, system tray, screen lock, Alt-Tab switcher, animation framework, window placement/snap/tile, server-side decorations, virtual workspaces, compositing effects with shadow/blur, MIME database, syntax highlighting, settings app, image viewer)
+- **Phase 7 Wave 4 (v0.8.0)** -- Zero-copy DMA networking (scatter-gather with user page pinning, DMA buffer pool below 4GB), hardware NIC driver (DMA TX/RX descriptor rings, E1000-compatible MMIO registers), IPv6 dual-stack (NDP cache, SLAAC, ICMPv6, AF_INET6 sockets), shell command substitution (18 inline commands for $()), MIME file dispatch, NVMe admin queue initialization
+- **Phase 7 Waves 5-6** -- Multimedia framework (audio mixer, VirtIO-Sound, video decode), virtualization (VMX hypervisor, container namespaces), security hardening (KPTI, demand paging, COW fork), performance (NUMA topology, per-CPU queues)
 
 ### Technical Notes
 
@@ -228,7 +234,7 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### Maturity
 
-VeridianOS is an active research system. Phases 0 through 6.5 are architecturally stable with a functional graphical desktop, Rust compiler port, and Bash-compatible userland shell. Phase 7 Waves 1-3 (GPU drivers, advanced Wayland, desktop completion) are implemented. Waves 4-6 (multimedia, virtualization, cloud-native) are planned.
+VeridianOS is an active research system. Phases 0 through 6.5 are architecturally stable with a functional graphical desktop, Rust compiler port, and Bash-compatible userland shell. Phase 7 Waves 1-4 (GPU drivers, advanced Wayland, desktop completion, advanced networking with IPv6) are implemented. Waves 5-6 (multimedia, virtualization, cloud-native) are planned.
 
 Historical status is recorded in:
 

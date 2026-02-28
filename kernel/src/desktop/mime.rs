@@ -9,10 +9,10 @@
 //! 2. File extension mapping (50+ extensions supported)
 //! 3. Fallback to `Unknown`
 //!
-//! The `TODO(phase7): Open file in appropriate application via MIME dispatch`
-//! in `file_manager.rs` line 229 is resolved by this module -- the file manager
-//! can now call `MimeDatabase::detect_mime()` and `MimeDatabase::open_with()`
-//! to determine what application should handle a given file.
+//! The file manager calls `MimeDatabase::detect_mime()` to determine a file's
+//! MIME type, then `MimeDatabase::open_with()` to look up the associated
+//! application, and finally launches that application with the file path as
+//! an argument.
 
 #![allow(dead_code)]
 

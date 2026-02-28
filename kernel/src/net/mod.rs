@@ -13,8 +13,10 @@ pub mod dhcp;
 pub mod dma_pool;
 pub mod epoll;
 pub mod ethernet;
+pub mod icmpv6;
 pub mod integration;
 pub mod ip;
+pub mod ipv6;
 pub mod socket;
 pub mod tcp;
 pub mod udp;
@@ -62,12 +64,17 @@ impl Ipv4Address {
 }
 
 /// IPv6 address (16 bytes)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Ipv6Address(pub [u8; 16]);
 
 impl Ipv6Address {
     pub const LOCALHOST: Self = Self([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    pub const UNSPECIFIED: Self = Self([0; 16]);
     pub const ANY: Self = Self([0; 16]);
+    pub const ALL_NODES_LINK_LOCAL: Self =
+        Self([0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    pub const ALL_ROUTERS_LINK_LOCAL: Self =
+        Self([0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
 }
 
 /// IP address (v4 or v6)
@@ -95,6 +102,13 @@ impl SocketAddr {
     pub fn v4(addr: Ipv4Address, port: Port) -> Self {
         Self {
             ip: IpAddress::V4(addr),
+            port,
+        }
+    }
+
+    pub fn v6(addr: Ipv6Address, port: Port) -> Self {
+        Self {
+            ip: IpAddress::V6(addr),
             port,
         }
     }
@@ -200,6 +214,12 @@ pub fn init() -> Result<(), KernelError> {
 
     // Initialize UDP
     udp::init()?;
+
+    // Initialize IPv6
+    ipv6::init()?;
+
+    // Initialize ICMPv6
+    icmpv6::init()?;
 
     // Initialize socket layer
     socket::init()?;

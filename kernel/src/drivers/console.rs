@@ -560,8 +560,28 @@ impl Driver for ConsoleDriver {
 
     fn detach(&mut self, _device: &DeviceInfo) -> Result<(), KernelError> {
         crate::println!("[CONSOLE] Detaching from device: {}", _device.name);
-        // TODO(phase7): Remove specific console device from device list
-        Ok(())
+
+        // Find and remove the console device matching this DeviceInfo name
+        let device_name = match _device.class {
+            DeviceClass::Display => "vga",
+            DeviceClass::Serial => "serial0",
+            _ => "",
+        };
+
+        if let Some(pos) = self.devices.iter().position(|d| d.name() == device_name) {
+            self.devices.remove(pos);
+            // Adjust active device index if needed
+            if self.active_device >= self.devices.len() && !self.devices.is_empty() {
+                self.active_device = self.devices.len() - 1;
+            }
+            crate::println!("[CONSOLE] Removed console device: {}", device_name);
+            Ok(())
+        } else {
+            Err(KernelError::NotFound {
+                resource: "console_device",
+                id: 0,
+            })
+        }
     }
 
     fn suspend(&mut self) -> Result<(), KernelError> {
@@ -580,8 +600,23 @@ impl Driver for ConsoleDriver {
     }
 
     fn read(&mut self, _offset: u64, _buffer: &mut [u8]) -> Result<usize, KernelError> {
-        // TODO(phase7): Read input from console keyboard driver
-        Ok(0)
+        // Read buffered keystrokes from the keyboard driver.
+        // The keyboard driver decodes PS/2 scancodes into ASCII bytes and
+        // stores them in a lock-free ring buffer. We drain available bytes
+        // into the caller's buffer.
+        let mut bytes_read = 0usize;
+
+        for slot in _buffer.iter_mut() {
+            match crate::drivers::keyboard::read_key() {
+                Some(byte) => {
+                    *slot = byte;
+                    bytes_read += 1;
+                }
+                None => break,
+            }
+        }
+
+        Ok(bytes_read)
     }
 
     fn write(&mut self, _offset: u64, data: &[u8]) -> Result<usize, KernelError> {

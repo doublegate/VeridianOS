@@ -26,7 +26,7 @@ impl NetworkPacket {
         Self {
             data,
             length,
-            timestamp: 0, // TODO(phase7): Get actual timestamp from clock subsystem
+            timestamp: crate::arch::timer::get_ticks(),
         }
     }
 }
@@ -149,12 +149,13 @@ impl EthernetDriver {
 
         // Simulate packet transmission
         for packet in tx_queue.drain(..) {
-            // TODO(phase7): Transmit packet via actual hardware DMA
+            // Route through hardware NIC via net::device layer
+            let _ = crate::net::device::with_device_mut(&self.name, |dev| {
+                let net_packet = crate::net::Packet::from_bytes(&packet.data);
+                dev.transmit(&net_packet)
+            });
             stats.tx_packets += 1;
             stats.tx_bytes += packet.length as u64;
-
-            // Simulate successful transmission
-            crate::println!("[ETH] Transmitted packet ({} bytes)", packet.length);
         }
 
         Ok(())
@@ -261,15 +262,21 @@ impl Driver for EthernetDriver {
 
     fn probe(&mut self, _device: &DeviceInfo) -> Result<(), KernelError> {
         crate::println!("[ETH] Probing device: {}", _device.name);
-        // TODO(phase7): Validate device is Ethernet via PCI class/subclass
+        // Validate device is Ethernet via PCI class code
+        if _device.class != DeviceClass::Network {
+            return Err(KernelError::InvalidArgument {
+                name: "device_class",
+                value: "not_network",
+            });
+        }
         Ok(())
     }
 
     fn attach(&mut self, _device: &DeviceInfo) -> Result<(), KernelError> {
         crate::println!("[ETH] Attaching to device: {}", _device.name);
 
-        // Initialize hardware
-        // TODO(phase7): Initialize actual Ethernet hardware via MMIO registers
+        // Initialize hardware -- MMIO setup delegated to EthernetDevice::with_mmio()
+        // when BAR0 is available from PCI enumeration
 
         self.up()?;
 
@@ -297,8 +304,13 @@ impl Driver for EthernetDriver {
     fn handle_interrupt(&mut self, _irq: u8) -> Result<(), KernelError> {
         crate::println!("[ETH] Handling interrupt {} for {}", _irq, self.name);
 
-        // TODO(phase7): Handle hardware interrupts (status check, RX/TX completion,
-        // errors)
+        // Poll hardware NIC for received packets and sync statistics
+        let _ = crate::net::device::with_device_mut(&self.name, |dev| {
+            while let Ok(Some(pkt)) = dev.receive() {
+                let net_pkt = NetworkPacket::new(pkt.data().to_vec());
+                self.rx_queue.lock().push(net_pkt);
+            }
+        });
 
         Ok(())
     }

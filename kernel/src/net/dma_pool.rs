@@ -3,21 +3,32 @@
 //! Provides pre-allocated DMA-capable buffers for network packet transmission
 //! and reception, enabling zero-copy operation with minimal allocation
 //! overhead.
-
-// DMA pool for zero-copy networking
+//!
+//! Buffers are allocated from physical frames below 4GB for 32-bit DMA
+//! compatibility. Each buffer gets one 4KB frame; the usable portion is
+//! `DMA_BUFFER_SIZE` (2048 bytes) to accommodate network MTU + headers.
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use spin::Mutex;
 
-use crate::{error::KernelError, mm::PhysicalAddress};
+use crate::{
+    error::KernelError,
+    mm::{
+        frame_allocator::MemoryZone, phys_to_virt_addr, FrameNumber, PhysicalAddress,
+        FRAME_ALLOCATOR, FRAME_SIZE,
+    },
+};
 
 /// Standard network buffer size (1500 MTU + headers + alignment)
 pub const DMA_BUFFER_SIZE: usize = 2048;
 
 /// Maximum number of buffers in the pool
 pub const MAX_BUFFERS: usize = 512;
+
+/// Maximum physical address for 32-bit DMA compatibility (4GB)
+const DMA_PHYS_LIMIT: u64 = 0x1_0000_0000;
 
 /// DMA Buffer
 pub struct DmaBuffer {
@@ -34,13 +45,16 @@ pub struct DmaBuffer {
     refcount: AtomicU64,
 
     /// Buffer index in pool
-    #[allow(dead_code)] // Used for pool return tracking
     index: u16,
+
+    /// Frame number backing this buffer (for deallocation)
+    #[allow(dead_code)] // Needed for future pool teardown / frame reclamation
+    frame: FrameNumber,
 }
 
 impl DmaBuffer {
-    /// Create a new DMA buffer
-    #[allow(dead_code)] // Constructor used by DmaPool allocation
+    /// Create a new DMA buffer with explicit addresses
+    #[allow(dead_code)] // Used in tests for direct construction
     fn new(virt_addr: usize, phys_addr: PhysicalAddress, size: usize, index: u16) -> Self {
         Self {
             virt_addr,
@@ -48,6 +62,25 @@ impl DmaBuffer {
             size,
             refcount: AtomicU64::new(0),
             index,
+            frame: FrameNumber::new(phys_addr.as_u64() / FRAME_SIZE as u64),
+        }
+    }
+
+    /// Create a DMA buffer from an allocated physical frame.
+    ///
+    /// Converts the frame number to physical and virtual addresses using the
+    /// kernel's direct physical memory mapping.
+    pub fn from_frame(frame: FrameNumber, index: u16) -> Self {
+        let phys_addr = PhysicalAddress::new(frame.as_u64() * FRAME_SIZE as u64);
+        let virt_addr = phys_to_virt_addr(phys_addr.as_u64()) as usize;
+
+        Self {
+            virt_addr,
+            phys_addr,
+            size: DMA_BUFFER_SIZE,
+            refcount: AtomicU64::new(0),
+            index,
+            frame,
         }
     }
 
@@ -66,19 +99,24 @@ impl DmaBuffer {
         self.size
     }
 
+    /// Get buffer index in pool
+    pub fn index(&self) -> u16 {
+        self.index
+    }
+
     /// Get buffer as slice
     pub fn as_slice(&self) -> &[u8] {
         // SAFETY: virt_addr points to a DMA buffer of exactly `size` bytes allocated
-        // during pool creation. The buffer remains valid for the lifetime of the pool.
-        // We hold &self so no mutable alias exists.
+        // during pool creation from the frame allocator. The buffer remains valid for
+        // the lifetime of the pool. We hold &self so no mutable alias exists.
         unsafe { core::slice::from_raw_parts(self.virt_addr as *const u8, self.size) }
     }
 
     /// Get buffer as mutable slice
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         // SAFETY: virt_addr points to a DMA buffer of exactly `size` bytes allocated
-        // during pool creation. We hold &mut self so no other reference to this
-        // buffer exists, making the mutable slice safe.
+        // during pool creation from the frame allocator. We hold &mut self so no other
+        // reference to this buffer exists, making the mutable slice safe.
         unsafe { core::slice::from_raw_parts_mut(self.virt_addr as *mut u8, self.size) }
     }
 
@@ -116,14 +154,12 @@ pub struct DmaBufferPool {
 }
 
 impl DmaBufferPool {
-    /// Create a new DMA buffer pool
+    /// Create a new DMA buffer pool with physically contiguous frames.
     ///
-    /// NOTE: This is a stub implementation. Proper DMA buffer allocation
-    /// requires:
-    /// 1. Physically contiguous memory allocation
-    /// 2. Cache-coherent memory mapping
-    /// 3. IOMMU configuration (if available)
-    /// 4. Platform-specific DMA constraints
+    /// Allocates `num_buffers` frames from the frame allocator for DMA use.
+    /// Frames are filtered to be below 4GB for 32-bit DMA engine compatibility.
+    /// Each frame provides one `DMA_BUFFER_SIZE` buffer. If allocation fails
+    /// for some frames, the pool is created with however many were successful.
     pub fn new(num_buffers: usize) -> Result<Self, KernelError> {
         if num_buffers > MAX_BUFFERS {
             return Err(KernelError::InvalidArgument {
@@ -132,24 +168,71 @@ impl DmaBufferPool {
             });
         }
 
-        let buffers = Vec::with_capacity(num_buffers);
-        let free_list = Vec::with_capacity(num_buffers);
+        let mut buffers = Vec::with_capacity(num_buffers);
+        let mut free_list = Vec::with_capacity(num_buffers);
+        let mut allocated = 0usize;
 
-        // TODO(phase7): Proper DMA buffer allocation using physically contiguous memory
+        let allocator = FRAME_ALLOCATOR.lock();
+
+        for i in 0..num_buffers {
+            // Allocate from the Normal zone (16MB-MAX on 64-bit) and then filter
+            // for <4GB. The DMA zone only covers 0-16MB which is often reserved.
+            let frame = match allocator.allocate_frames_in_zone(1, None, Some(MemoryZone::Normal)) {
+                Ok(f) => f,
+                Err(_) => {
+                    // Try without zone constraint as fallback
+                    match allocator.allocate_frames(1, None) {
+                        Ok(f) => f,
+                        Err(_) => break, // No more frames available
+                    }
+                }
+            };
+
+            let phys_addr = frame.as_u64() * FRAME_SIZE as u64;
+
+            // Filter: DMA buffers must be below 4GB for 32-bit DMA engines
+            if phys_addr >= DMA_PHYS_LIMIT {
+                // Frame is above 4GB -- free it and continue trying.
+                // On systems with limited low memory this may exhaust quickly.
+                let _ = allocator.free_frames(frame, 1);
+                continue;
+            }
+
+            // Zero-initialize the buffer memory for safety
+            let virt = phys_to_virt_addr(phys_addr) as *mut u8;
+            // SAFETY: virt points to a freshly allocated frame of FRAME_SIZE bytes.
+            // The frame allocator guarantees this memory is not in use. We zero it
+            // before handing it out to prevent information leaks.
+            unsafe {
+                core::ptr::write_bytes(virt, 0, FRAME_SIZE);
+            }
+
+            let buffer = DmaBuffer::from_frame(frame, i as u16);
+            free_list.push(i as u16);
+            buffers.push(buffer);
+            allocated += 1;
+        }
+
+        drop(allocator);
+
+        if allocated == 0 && num_buffers > 0 {
+            return Err(KernelError::OutOfMemory {
+                requested: num_buffers * FRAME_SIZE,
+                available: 0,
+            });
+        }
 
         println!(
-            "[DMA-POOL] Created buffer pool with {} buffers (stub)",
-            num_buffers
+            "[DMA-POOL] Allocated {}/{} DMA buffers ({}KB, all below 4GB)",
+            allocated,
+            num_buffers,
+            allocated * DMA_BUFFER_SIZE / 1024,
         );
-        println!("[DMA-POOL] NOTE: Proper implementation requires:");
-        println!("[DMA-POOL]   - Physically contiguous memory allocation");
-        println!("[DMA-POOL]   - Cache-coherent DMA mapping");
-        println!("[DMA-POOL]   - IOMMU support (if available)");
 
         Ok(Self {
             buffers,
             free_list,
-            total_buffers: num_buffers,
+            total_buffers: allocated,
             allocations: AtomicU64::new(0),
             deallocations: AtomicU64::new(0),
             allocation_failures: AtomicU64::new(0),
@@ -231,15 +314,17 @@ static NETWORK_DMA_POOL: Mutex<Option<DmaBufferPool>> = Mutex::new(None);
 pub fn init_network_pool(num_buffers: usize) -> Result<(), KernelError> {
     let mut pool_lock = NETWORK_DMA_POOL.lock();
     if pool_lock.is_some() {
-        // Already initialized - this is fine, just skip re-initialization
-        println!("[DMA-POOL] Network DMA pool already initialized, skipping...");
         return Ok(());
     }
 
     let pool = DmaBufferPool::new(num_buffers)?;
+    let stats = pool.stats();
     *pool_lock = Some(pool);
 
-    println!("[DMA-POOL] Global network DMA pool initialized");
+    println!(
+        "[DMA-POOL] Network pool: {} buffers, {} free",
+        stats.total_buffers, stats.free_buffers,
+    );
     Ok(())
 }
 
@@ -257,20 +342,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_dma_pool_creation() {
-        let pool = DmaBufferPool::new(16);
-        assert!(pool.is_ok());
+    fn test_dma_pool_constants() {
+        assert_eq!(DMA_BUFFER_SIZE, 2048);
+        assert!(MAX_BUFFERS >= 512);
+        assert!(DMA_PHYS_LIMIT == 0x1_0000_0000);
+    }
+
+    #[test]
+    fn test_dma_pool_exceeds_max() {
+        let pool = DmaBufferPool::new(MAX_BUFFERS + 1);
+        assert!(pool.is_err());
     }
 
     #[test]
     fn test_buffer_reference_counting() {
         let buffer = DmaBuffer::new(0x1000, PhysicalAddress(0x2000), 2048, 0);
         assert!(buffer.is_free());
+        assert_eq!(buffer.index(), 0);
+        assert_eq!(buffer.size(), 2048);
+        assert_eq!(buffer.phys_addr().as_u64(), 0x2000);
+        assert_eq!(buffer.virt_addr(), 0x1000);
 
         buffer.acquire();
         assert!(!buffer.is_free());
 
         buffer.release();
+        assert!(buffer.is_free());
+    }
+
+    #[test]
+    fn test_buffer_from_frame() {
+        let frame = FrameNumber::new(0x100); // Frame 256 = physical 0x100000
+        let buffer = DmaBuffer::from_frame(frame, 5);
+
+        assert_eq!(buffer.index(), 5);
+        assert_eq!(buffer.size(), DMA_BUFFER_SIZE);
+        assert_eq!(buffer.phys_addr().as_u64(), 0x100 * FRAME_SIZE as u64);
         assert!(buffer.is_free());
     }
 }

@@ -2,6 +2,62 @@
 
 ---
 
+## [v0.8.0] - 2026-02-28
+
+### v0.8.0: Phase 7 Wave 4 -- Advanced Networking + Shell/Desktop Integration
+
+Major milestone: Phase 7 Wave 4 implements zero-copy DMA networking infrastructure, a hardware NIC driver framework, full IPv6 dual-stack with NDP/SLAAC, shell command substitution, MIME-based file dispatch, and NVMe admin queue completion. This release adds ~2,145 new lines of IPv6/ICMPv6 implementation, resolves 23 TODO(phase7) markers, and brings the remaining count down to 11 (all Wave 6).
+
+#### Zero-Copy DMA Networking (Sprints N-1, N-2, N-5)
+
+- **DMA buffer pool** (`net/dma_pool.rs`): Real frame allocation below 4GB for 32-bit DMA compatibility, DmaBuffer::from_frame() with zero-initialized buffers, DMA_BUFFER_SIZE=2048 per buffer, MAX_BUFFERS=512 pool capacity
+- **Scatter-gather DMA** (`net/zero_copy.rs`): ZeroCopySend::add_user_buffer() with VAS page table walking for physical address translation, ScatterGatherList::assemble() for contiguous DMA descriptor chain construction from fragmented user pages
+- **TCP zero-copy send** (`net/zero_copy.rs`): TcpZeroCopySend with scatter-gather I/O and TCP segmentation at MSS boundaries, TcpCork flush via tcp::transmit_data() for Nagle-compatible batching
+- **SendFile enhancement**: Scatter-gather path for large transfers (>=64KB threshold), falling back to copy-based transfer for smaller payloads
+
+#### Hardware NIC Driver (Sprints N-3, N-4)
+
+- **DMA descriptor rings** (`net/device.rs`): #[repr(C)] DmaDescriptor with TX_RING_SIZE=256 and RX_RING_SIZE=256 ring buffers, physical frame allocation for descriptor arrays
+- **E1000-compatible MMIO registers**: TDT, RDT, TCTL, RCTL, STATUS, ICR, IMS register offsets with mmio_write32/mmio_read32 volatile accessors
+- **EthernetDevice** (`net/device.rs`): with_mmio() constructor for MMIO base address initialization, TX descriptor flag management with doorbell write for hardware notification, RX DESC_FLAG_DONE polling with descriptor recycling for received packet processing
+- **Hardware NIC routing** (`drivers/network.rs`): TX path through net::device, PCI class_code validation for network controller discovery, MMIO initialization from BAR0, interrupt-driven RX polling loop
+
+#### IPv6 Dual-Stack (Sprints N-6, N-7)
+
+- **IPv6 core** (`net/ipv6.rs`, ~1,509 lines): Ipv6Header parsing/building (version/traffic class/flow label/payload length/next header/hop limit), Ipv6Address with utility methods (is_loopback, is_link_local, is_multicast, solicited_node_multicast), link-local address generation from MAC via EUI-64 interface ID
+- **NDP cache**: BTreeMap-based neighbor cache with LRU eviction at 128 entries, NdpEntry with state tracking (Incomplete/Reachable/Stale/Delay/Probe), timeout-based state transitions
+- **Neighbor Discovery Protocol**: NS (Neighbor Solicitation) / NA (Neighbor Advertisement) / RS (Router Solicitation) / RA (Router Advertisement) message construction and parsing, SLAAC (Stateless Address Autoconfiguration) with EUI-64 interface ID derivation from MAC address
+- **ICMPv6** (`net/icmpv6.rs`, ~636 lines): Echo Request/Reply for ping6, Destination Unreachable (6 codes), Packet Too Big with MTU reporting, Time Exceeded (hop limit / fragment reassembly), checksum computation with IPv6 pseudo-header
+- **AF_INET6 socket support** (`net/socket.rs`): Stream, Dgram, and Raw socket types for IPv6 address family
+- **Dual-stack configuration**: DualStackConfig for simultaneous IPv4/IPv6 operation, Ipv6InterfaceAddr with prefix length and address scope tracking
+- **Shell commands**: `ping6` (ICMPv6 echo request/reply), `ndp` (neighbor cache display/flush), enhanced `ifconfig` and `netstat` with IPv6 address and route display
+
+#### Command Substitution + MIME Dispatch (Sprint N-8)
+
+- **Shell command substitution** (`services/shell/expand.rs`): 18 inline commands for `$(command)` expansion -- echo, cat, pwd, uname, whoami, hostname, basename, dirname, printf, seq, wc, head, tail, date, expr, true/false, test/[, tr; output capture with trailing newline stripping per POSIX semantics
+- **File manager MIME dispatch** (`desktop/file_manager.rs`): File header magic byte detection via MimeDatabase::detect_mime(), open_with() application resolution, launch via userspace::load_user_program() for seamless file-to-application association
+- **MIME documentation update** (`desktop/mime.rs`): Expanded inline documentation for MIME type detection and dispatch flow
+
+#### Console + NVMe Completion (Sprint N-9)
+
+- **Console driver** (`drivers/console.rs`): Device removal support via detach(), keyboard input reading through drivers::keyboard::read_key() for console I/O integration
+- **NVMe admin queue** (`drivers/nvme.rs`): Full controller reset and initialization sequence (CC.EN=0, wait CSTS.RDY=0, configure AQA/ASQ/ACQ, CC.EN=1, wait CSTS.RDY=1), NvmeSubmissionEntry/NvmeCompletionEntry #[repr(C)] structs, ASQ/ACQ physical frame allocation, Identify Controller command parsing (serial number, model number, firmware revision, MDTS)
+- **Bootstrap cleanup**: Removed 2 stale TODO(phase7) comments (multi-LOAD ELF already fixed in v0.7.1)
+
+#### TODO Markers
+
+- 23 TODO(phase7) markers resolved: net/zero_copy.rs (6), drivers/network.rs (5), net/device.rs (3), drivers/console.rs (2), bootstrap.rs (2), net/dma_pool.rs (1), drivers/nvme.rs (1), services/shell/expand.rs (1), desktop/file_manager.rs (1), desktop/mime.rs (1)
+- 11 markers remaining (all Wave 6: mmu x2, tpm x1, pkg x1, numa x3, ipc_blocking x1, perf x2, iommu x1)
+
+#### Stats
+- 2 new files, ~18 modified files
+- ~2,145 new lines (net/ipv6.rs ~1,509, net/icmpv6.rs ~636) plus modifications across existing modules
+- 29 new unit tests for command substitution and IPv6 socket operations
+- Zero clippy warnings on x86_64, AArch64, RISC-V with `-D warnings`
+- All 3 architectures boot to BOOTOK (29/29 tests)
+
+---
+
 ## [v0.7.1] - 2026-02-28
 
 ### v0.7.1: Phase 7 Waves 1-3 -- GPU Drivers, Advanced Wayland, Desktop Completion

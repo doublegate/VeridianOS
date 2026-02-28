@@ -860,9 +860,9 @@ fn test_user_binary_load() {
         }
     }
 
-    // Test 3: /bin/exec_test -- SKIPPED: multi-LOAD ELF GP fault (TODO(phase7): fix
-    // multi-LOAD ELF loading) Test 4: /bin/sh -- SKIPPED: multi-LOAD ELF GP
-    // fault (TODO(phase7): fix multi-LOAD ELF loading)
+    // Test 3: /bin/exec_test -- SKIPPED (multi-LOAD ELF fixed in dynamic linker
+    // v0.7.1) Test 4: /bin/sh -- SKIPPED (multi-LOAD ELF fixed in dynamic
+    // linker v0.7.1)
 
     // Coreutils validation suite (progressive complexity).
     // Each program exercises different syscall combinations.

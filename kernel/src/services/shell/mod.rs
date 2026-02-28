@@ -44,11 +44,11 @@ use commands::{
     DmesgCommand, DotCommand, EchoCommand, EnvCommand, ExitCommand, ExportCommand, FalseCommand,
     FgCommand, FreeCommand, GrepCommand, HeadCommand, HelpCommand, HistoryCommand, IfconfigCommand,
     JobsCommand, KillCommand, LsCommand, LsmodCommand, MkdirCommand, MountCommand, MvCommand,
-    NetstatCommand, PerfCommand, PkgCommand, PrintfCommand, PsCommand, PwdCommand, ReadCommand,
-    RmCommand, SetCommand, SortCommand, SourceCommand, StartGuiCommand, SyncCommand, TailCommand,
-    TeeCommand, TestCommand, TouchCommand, TrCommand, TraceCommand, TrueCommand, TypeCommand,
-    UnaliasCommand, UnameCommand, UniqCommand, UnsetCommand, UptimeCommand, WcCommand,
-    WhichCommand,
+    NdpCommand, NetstatCommand, PerfCommand, Ping6Command, PkgCommand, PrintfCommand, PsCommand,
+    PwdCommand, ReadCommand, RmCommand, SetCommand, SortCommand, SourceCommand, StartGuiCommand,
+    SyncCommand, TailCommand, TeeCommand, TestCommand, TouchCommand, TrCommand, TraceCommand,
+    TrueCommand, TypeCommand, UnaliasCommand, UnameCommand, UniqCommand, UnsetCommand,
+    UptimeCommand, WcCommand, WhichCommand,
 };
 use spin::RwLock;
 pub use state::{get_shell, init, run_shell, try_get_shell};
@@ -743,6 +743,8 @@ impl Shell {
         builtins.insert("dhcp".into(), Box::new(DhcpCommand));
         builtins.insert("netstat".into(), Box::new(NetstatCommand));
         builtins.insert("arp".into(), Box::new(ArpCommand));
+        builtins.insert("ping6".into(), Box::new(Ping6Command));
+        builtins.insert("ndp".into(), Box::new(NdpCommand));
 
         // Desktop / GUI commands
         builtins.insert("startgui".into(), Box::new(StartGuiCommand));

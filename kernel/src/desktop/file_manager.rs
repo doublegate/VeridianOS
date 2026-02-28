@@ -226,8 +226,76 @@ impl FileManager {
                 self.refresh_directory()?;
             }
             NodeType::File => {
-                // TODO(phase7): Open file in appropriate application via MIME dispatch
-                println!("[FILE-MANAGER] Opening file: {}", entry.name);
+                // Build full file path
+                let file_path = if self.current_path == "/" {
+                    format!("/{}", entry.name)
+                } else {
+                    format!("{}/{}", self.current_path, entry.name)
+                };
+
+                // Read file header bytes for magic-based MIME detection
+                let header_bytes = crate::fs::read_file(&file_path).ok().map(|data| {
+                    let len = core::cmp::min(data.len(), 512);
+                    data[..len].to_vec()
+                });
+
+                // Detect MIME type via extension + magic bytes
+                let mime = crate::desktop::mime::MimeDatabase::detect_mime(
+                    &entry.name,
+                    header_bytes.as_deref(),
+                );
+
+                // Look up the associated application
+                let db = crate::desktop::mime::MimeDatabase::new();
+                if let Some(assoc) = db.open_with(&mime) {
+                    let mime_str = crate::desktop::mime::MimeDatabase::mime_to_str(&mime);
+                    println!(
+                        "[FILE-MANAGER] Opening '{}' ({}) with {} ({})",
+                        entry.name, mime_str, assoc.app_name, assoc.app_exec
+                    );
+
+                    // Attempt to launch the associated application with the
+                    // file path as argument. This uses the same load+exec
+                    // infrastructure as the shell's external command execution.
+                    //
+                    // Check if the executable exists first (read guard is
+                    // dropped after resolve_path returns).
+                    let app_exists = crate::fs::get_vfs()
+                        .read()
+                        .resolve_path(&assoc.app_exec)
+                        .is_ok();
+
+                    if app_exists {
+                        match crate::userspace::load_user_program(
+                            &assoc.app_exec,
+                            &[&assoc.app_exec, &file_path],
+                            &[],
+                        ) {
+                            Ok(pid) => {
+                                println!(
+                                    "[FILE-MANAGER] Launched {} (PID {}) for '{}'",
+                                    assoc.app_name, pid.0, entry.name
+                                );
+                            }
+                            Err(e) => {
+                                println!(
+                                    "[FILE-MANAGER] Failed to launch {}: {:?}",
+                                    assoc.app_exec, e
+                                );
+                            }
+                        }
+                    } else {
+                        println!(
+                            "[FILE-MANAGER] Application '{}' not found at '{}'",
+                            assoc.app_name, assoc.app_exec
+                        );
+                    }
+                } else {
+                    println!(
+                        "[FILE-MANAGER] No application associated with '{}'",
+                        entry.name
+                    );
+                }
             }
             _ => {}
         }

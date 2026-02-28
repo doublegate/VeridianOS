@@ -92,9 +92,14 @@ pub fn is_broadcast(mac: &MacAddress) -> bool {
     *mac == MacAddress::BROADCAST
 }
 
-/// Check if a MAC address matches or is broadcast
+/// Check if a MAC address is an IPv6 multicast address (33:33:xx:xx:xx:xx)
+pub fn is_ipv6_multicast(mac: &MacAddress) -> bool {
+    mac.0[0] == 0x33 && mac.0[1] == 0x33
+}
+
+/// Check if a MAC address matches or is broadcast or is IPv6 multicast
 pub fn is_for_us(frame_dst: &MacAddress, our_mac: &MacAddress) -> bool {
-    *frame_dst == *our_mac || is_broadcast(frame_dst)
+    *frame_dst == *our_mac || is_broadcast(frame_dst) || is_ipv6_multicast(frame_dst)
 }
 
 /// Dispatch a received Ethernet frame to the appropriate protocol handler.
@@ -137,6 +142,10 @@ pub fn dispatch_frame(data: &[u8], our_mac: &MacAddress) -> Result<(), KernelErr
                     }
                 }
             }
+        }
+        ETHERTYPE_IPV6 => {
+            // Parse and dispatch IPv6 packet
+            super::ipv6::process_packet(frame.payload)?;
         }
         _ => {
             // Unknown EtherType, silently drop

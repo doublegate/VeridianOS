@@ -1900,7 +1900,7 @@ impl BuiltinCommand for UnameCommand {
             parts.push("veridian");
         }
         if show_release {
-            parts.push("0.7.1");
+            parts.push("0.8.0");
         }
         if show_machine {
             #[cfg(target_arch = "x86_64")]
@@ -2602,8 +2602,26 @@ impl BuiltinCommand for IfconfigCommand {
                         mask.0[2],
                         mask.0[3],
                     );
+
+                    // Show IPv6 addresses
+                    if let Some(v6_config) = crate::net::ipv6::get_config() {
+                        for addr_info in &v6_config.ipv6_addresses {
+                            let scope_str = match addr_info.scope {
+                                crate::net::ipv6::Ipv6Scope::LinkLocal => "link",
+                                crate::net::ipv6::Ipv6Scope::Global => "global",
+                                crate::net::ipv6::Ipv6Scope::SiteLocal => "site",
+                            };
+                            crate::println!(
+                                "        inet6 {}  prefixlen {}  scopeid <{}>",
+                                crate::net::ipv6::format_ipv6_compressed(&addr_info.address),
+                                addr_info.prefix_len,
+                                scope_str,
+                            );
+                        }
+                    }
                 } else {
                     crate::println!("        inet 127.0.0.1 netmask 255.0.0.0");
+                    crate::println!("        inet6 ::1  prefixlen 128  scopeid <host>");
                 }
 
                 crate::println!(
@@ -2683,6 +2701,21 @@ impl BuiltinCommand for NetstatCommand {
         crate::println!("UDP:");
         crate::println!("  Active sockets:     {}", udp_stats.active_sockets);
         crate::println!("  Datagrams queued:   {}", udp_stats.datagrams_queued);
+        crate::println!();
+
+        let ipv6_stats = crate::net::ipv6::get_stats();
+        crate::println!("IPv6:");
+        crate::println!("  Addresses:          {}", ipv6_stats.addresses_configured);
+        crate::println!("  NDP cache entries:  {}", ipv6_stats.ndp_cache_entries);
+        crate::println!("  Hop limit:          {}", ipv6_stats.hop_limit);
+        crate::println!(
+            "  Dual-stack:         {}",
+            if ipv6_stats.dual_stack_active {
+                "active"
+            } else {
+                "inactive"
+            }
+        );
 
         CommandResult::Success(0)
     }
@@ -2730,6 +2763,238 @@ impl BuiltinCommand for ArpCommand {
         }
 
         CommandResult::Success(0)
+    }
+}
+
+// ============================================================================
+// IPv6 Network Commands
+// ============================================================================
+
+pub(super) struct Ping6Command;
+impl BuiltinCommand for Ping6Command {
+    fn name(&self) -> &str {
+        "ping6"
+    }
+    fn description(&self) -> &str {
+        "Send ICMPv6 echo requests to an IPv6 address"
+    }
+
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            crate::println!("Usage: ping6 <ipv6-address> [count]");
+            return CommandResult::Success(1);
+        }
+
+        let dst = match parse_ipv6_address(&args[0]) {
+            Some(addr) => addr,
+            None => {
+                crate::println!("Invalid IPv6 address: {}", args[0]);
+                return CommandResult::Success(1);
+            }
+        };
+
+        let count: u16 = if args.len() > 1 {
+            args[1].parse().unwrap_or(3)
+        } else {
+            3
+        };
+
+        let src = crate::net::ipv6::select_source_address(&dst)
+            .unwrap_or(crate::net::Ipv6Address::UNSPECIFIED);
+
+        crate::println!(
+            "PING6 {} --> {}: {} data bytes",
+            crate::net::ipv6::format_ipv6_compressed(&src),
+            crate::net::ipv6::format_ipv6_compressed(&dst),
+            56,
+        );
+
+        crate::net::icmpv6::reset_echo_reply_tracker();
+
+        let ping_id: u16 = 0x1234; // Fixed ID for simplicity
+        let payload = [0xABu8; 56]; // 56 bytes of ping data
+
+        for seq in 1..=count {
+            let echo_req =
+                crate::net::icmpv6::build_echo_request(&src, &dst, ping_id, seq, &payload);
+
+            match crate::net::ipv6::send(
+                &src,
+                &dst,
+                crate::net::ipv6::NEXT_HEADER_ICMPV6,
+                &echo_req,
+            ) {
+                Ok(()) => {
+                    crate::println!(
+                        "  {} bytes from {}: icmp_seq={} hop_limit={}",
+                        56 + crate::net::icmpv6::ICMPV6_ECHO_HEADER_SIZE,
+                        crate::net::ipv6::format_ipv6_compressed(&dst),
+                        seq,
+                        crate::net::ipv6::get_hop_limit(),
+                    );
+                }
+                Err(e) => {
+                    crate::println!("  send failed: {:?}", e);
+                }
+            }
+        }
+
+        crate::println!(
+            "--- {} ping6 statistics ---",
+            crate::net::ipv6::format_ipv6_compressed(&dst),
+        );
+        crate::println!("{} packets transmitted", count,);
+
+        CommandResult::Success(0)
+    }
+}
+
+pub(super) struct NdpCommand;
+impl BuiltinCommand for NdpCommand {
+    fn name(&self) -> &str {
+        "ndp"
+    }
+    fn description(&self) -> &str {
+        "Show or manage the NDP (IPv6 neighbor) cache"
+    }
+
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        // Check for flush subcommand
+        if !args.is_empty() && args[0] == "flush" {
+            crate::net::ipv6::flush_ndp_cache();
+            crate::println!("NDP cache flushed.");
+            return CommandResult::Success(0);
+        }
+
+        let entries = crate::net::ipv6::get_ndp_entries();
+        if entries.is_empty() {
+            crate::println!("NDP cache is empty.");
+        } else {
+            crate::println!("{:<42} {:<20} {}", "IPv6 Address", "MAC Address", "State");
+            for (ip, mac, state) in &entries {
+                let state_str = match state {
+                    crate::net::ipv6::NdpState::Incomplete => "INCOMPLETE",
+                    crate::net::ipv6::NdpState::Reachable => "REACHABLE",
+                    crate::net::ipv6::NdpState::Stale => "STALE",
+                    crate::net::ipv6::NdpState::Delay => "DELAY",
+                    crate::net::ipv6::NdpState::Probe => "PROBE",
+                };
+                crate::println!(
+                    "{:<42} {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}   {}",
+                    crate::net::ipv6::format_ipv6_compressed(ip),
+                    mac.0[0],
+                    mac.0[1],
+                    mac.0[2],
+                    mac.0[3],
+                    mac.0[4],
+                    mac.0[5],
+                    state_str,
+                );
+            }
+            crate::println!();
+            crate::println!("{} entries", entries.len());
+        }
+
+        // Show IPv6 stats
+        let stats = crate::net::ipv6::get_stats();
+        crate::println!();
+        crate::println!("IPv6 Statistics:");
+        crate::println!("  Addresses configured: {}", stats.addresses_configured);
+        crate::println!("  NDP cache entries:    {}", stats.ndp_cache_entries);
+        crate::println!("  Default hop limit:    {}", stats.hop_limit);
+        crate::println!(
+            "  Dual-stack:           {}",
+            if stats.dual_stack_active {
+                "active"
+            } else {
+                "inactive"
+            }
+        );
+
+        CommandResult::Success(0)
+    }
+}
+
+/// Parse a simple IPv6 address string (colon-hex notation).
+///
+/// Supports full notation (8 groups) and compressed :: notation.
+fn parse_ipv6_address(s: &str) -> Option<crate::net::Ipv6Address> {
+    // Handle special cases
+    if s == "::1" {
+        return Some(crate::net::Ipv6Address::LOCALHOST);
+    }
+    if s == "::" {
+        return Some(crate::net::Ipv6Address::UNSPECIFIED);
+    }
+
+    // Split on ':'
+    let parts: Vec<&str> = s.split(':').collect();
+
+    // Check for :: (double colon) indicating compressed zeros
+    let has_double_colon = s.contains("::");
+
+    if has_double_colon {
+        // Find the position of :: and expand it
+        let mut groups: Vec<u16> = Vec::new();
+        let mut found_gap = false;
+        let mut gap_pos = 0;
+
+        for (i, part) in parts.iter().enumerate() {
+            if part.is_empty() {
+                if !found_gap && (i == 0 || (i > 0 && parts[i.wrapping_sub(1)].is_empty())) {
+                    if !found_gap {
+                        found_gap = true;
+                        gap_pos = groups.len();
+                    }
+                    continue;
+                }
+                if !found_gap {
+                    found_gap = true;
+                    gap_pos = groups.len();
+                }
+                continue;
+            }
+            let val = u16::from_str_radix(part, 16).ok()?;
+            groups.push(val);
+        }
+
+        // Fill in zeros for the :: gap
+        let zeros_needed = 8usize.checked_sub(groups.len())?;
+        let mut result = [0u8; 16];
+        let mut idx = 0;
+
+        for group in &groups[..gap_pos] {
+            let bytes = group.to_be_bytes();
+            result[idx] = bytes[0];
+            result[idx + 1] = bytes[1];
+            idx += 2;
+        }
+
+        idx += zeros_needed * 2;
+
+        for group in &groups[gap_pos..] {
+            let bytes = group.to_be_bytes();
+            result[idx] = bytes[0];
+            result[idx + 1] = bytes[1];
+            idx += 2;
+        }
+
+        Some(crate::net::Ipv6Address(result))
+    } else {
+        // Full notation: exactly 8 groups
+        if parts.len() != 8 {
+            return None;
+        }
+
+        let mut result = [0u8; 16];
+        for (i, part) in parts.iter().enumerate() {
+            let val = u16::from_str_radix(part, 16).ok()?;
+            let bytes = val.to_be_bytes();
+            result[i * 2] = bytes[0];
+            result[i * 2 + 1] = bytes[1];
+        }
+
+        Some(crate::net::Ipv6Address(result))
     }
 }
 
