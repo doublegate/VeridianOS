@@ -176,99 +176,100 @@ impl Compositor {
                 None => continue,
             };
 
-            // Read pixel data from the SHM pool
-            let pixel_data = if buf.pool_id != 0 {
-                buffer::with_pool(buf.pool_id, |pool| {
-                    pool.read_buffer_pixels(buf.pool_buffer_id)
-                        .map(|s| s.to_vec())
-                })
-                .flatten()
-            } else {
-                None
-            };
-
-            let pixels = match &pixel_data {
-                Some(data) => data.as_slice(),
-                None => continue,
-            };
-
-            // Blit the surface buffer into the back-buffer
+            // Blit the surface buffer into the back-buffer directly from
+            // the SHM pool, avoiding a multi-MB `.to_vec()` clone per surface.
             let sx = surface.position.0;
             let sy = surface.position.1;
             let sw = buf.width as usize;
             let sh = buf.height as usize;
             let stride = buf.stride as usize;
+            let format = buf.format;
+            let pool_id = buf.pool_id;
+            let pool_buffer_id = buf.pool_buffer_id;
 
-            for row in 0..sh {
-                let dst_y = sy as isize + row as isize;
-                if dst_y < 0 || dst_y >= fb_h as isize {
-                    continue;
-                }
-                let dst_y = dst_y as usize;
+            if pool_id == 0 {
+                continue;
+            }
 
-                for col in 0..sw {
-                    let dst_x = sx as isize + col as isize;
-                    if dst_x < 0 || dst_x >= fb_w as isize {
+            let drew = buffer::with_pool(pool_id, |pool| {
+                let pixels = match pool.read_buffer_pixels(pool_buffer_id) {
+                    Some(p) => p,
+                    None => return false,
+                };
+
+                for row in 0..sh {
+                    let dst_y = sy as isize + row as isize;
+                    if dst_y < 0 || dst_y >= fb_h as isize {
                         continue;
                     }
-                    let dst_x = dst_x as usize;
+                    let dst_y = dst_y as usize;
 
-                    let src_off = row * stride + col * buf.format.bpp() as usize;
-                    if src_off + 3 >= pixels.len() {
-                        break;
-                    }
-
-                    let dst_idx = dst_y * fb_w + dst_x;
-
-                    match buf.format {
-                        PixelFormat::Xrgb8888 => {
-                            // No alpha -- direct copy as 0xFFRRGGBB
-                            let b_val = pixels[src_off] as u32;
-                            let g_val = pixels[src_off + 1] as u32;
-                            let r_val = pixels[src_off + 2] as u32;
-                            bb[dst_idx] = 0xFF00_0000 | (r_val << 16) | (g_val << 8) | b_val;
+                    for col in 0..sw {
+                        let dst_x = sx as isize + col as isize;
+                        if dst_x < 0 || dst_x >= fb_w as isize {
+                            continue;
                         }
-                        PixelFormat::Argb8888 => {
-                            // Alpha blend: src over dst
-                            let b_src = pixels[src_off] as u32;
-                            let g_src = pixels[src_off + 1] as u32;
-                            let r_src = pixels[src_off + 2] as u32;
-                            let a_src = pixels[src_off + 3] as u32;
+                        let dst_x = dst_x as usize;
 
-                            if a_src == 255 {
-                                bb[dst_idx] = 0xFF00_0000 | (r_src << 16) | (g_src << 8) | b_src;
-                            } else if a_src > 0 {
-                                let dst_pixel = bb[dst_idx];
-                                let r_dst = (dst_pixel >> 16) & 0xFF;
-                                let g_dst = (dst_pixel >> 8) & 0xFF;
-                                let b_dst = dst_pixel & 0xFF;
+                        let src_off = row * stride + col * format.bpp() as usize;
+                        if src_off + 3 >= pixels.len() {
+                            break;
+                        }
 
-                                let inv_a = 255 - a_src;
-                                let r_out = (r_src * a_src + r_dst * inv_a) / 255;
-                                let g_out = (g_src * a_src + g_dst * inv_a) / 255;
-                                let b_out = (b_src * a_src + b_dst * inv_a) / 255;
+                        let dst_idx = dst_y * fb_w + dst_x;
 
-                                bb[dst_idx] = 0xFF00_0000 | (r_out << 16) | (g_out << 8) | b_out;
+                        match format {
+                            PixelFormat::Xrgb8888 => {
+                                let b_val = pixels[src_off] as u32;
+                                let g_val = pixels[src_off + 1] as u32;
+                                let r_val = pixels[src_off + 2] as u32;
+                                bb[dst_idx] = 0xFF00_0000 | (r_val << 16) | (g_val << 8) | b_val;
                             }
-                            // a_src == 0: fully transparent, skip
-                        }
-                        PixelFormat::Rgb565 => {
-                            if src_off + 1 < pixels.len() {
-                                let raw =
-                                    (pixels[src_off] as u16) | ((pixels[src_off + 1] as u16) << 8);
-                                let r5 = ((raw >> 11) & 0x1F) as u32;
-                                let g6 = ((raw >> 5) & 0x3F) as u32;
-                                let b5 = (raw & 0x1F) as u32;
-                                let r8 = (r5 * 255 + 15) / 31;
-                                let g8 = (g6 * 255 + 31) / 63;
-                                let b8 = (b5 * 255 + 15) / 31;
-                                bb[dst_idx] = 0xFF00_0000 | (r8 << 16) | (g8 << 8) | b8;
+                            PixelFormat::Argb8888 => {
+                                let b_src = pixels[src_off] as u32;
+                                let g_src = pixels[src_off + 1] as u32;
+                                let r_src = pixels[src_off + 2] as u32;
+                                let a_src = pixels[src_off + 3] as u32;
+
+                                if a_src == 255 {
+                                    bb[dst_idx] =
+                                        0xFF00_0000 | (r_src << 16) | (g_src << 8) | b_src;
+                                } else if a_src > 0 {
+                                    let dst_pixel = bb[dst_idx];
+                                    let r_dst = (dst_pixel >> 16) & 0xFF;
+                                    let g_dst = (dst_pixel >> 8) & 0xFF;
+                                    let b_dst = dst_pixel & 0xFF;
+
+                                    let inv_a = 255 - a_src;
+                                    let r_out = (r_src * a_src + r_dst * inv_a) / 255;
+                                    let g_out = (g_src * a_src + g_dst * inv_a) / 255;
+                                    let b_out = (b_src * a_src + b_dst * inv_a) / 255;
+
+                                    bb[dst_idx] =
+                                        0xFF00_0000 | (r_out << 16) | (g_out << 8) | b_out;
+                                }
+                            }
+                            PixelFormat::Rgb565 => {
+                                if src_off + 1 < pixels.len() {
+                                    let raw = (pixels[src_off] as u16)
+                                        | ((pixels[src_off + 1] as u16) << 8);
+                                    let r5 = ((raw >> 11) & 0x1F) as u32;
+                                    let g6 = ((raw >> 5) & 0x3F) as u32;
+                                    let b5 = (raw & 0x1F) as u32;
+                                    let r8 = (r5 * 255 + 15) / 31;
+                                    let g8 = (g6 * 255 + 31) / 63;
+                                    let b8 = (b5 * 255 + 15) / 31;
+                                    bb[dst_idx] = 0xFF00_0000 | (r8 << 16) | (g8 << 8) | b8;
+                                }
                             }
                         }
                     }
                 }
+                true
+            });
+            if drew == Some(true) {
+                any_drawn = true;
             }
-            any_drawn = true;
         }
 
         // Step 3: clear dirty flags
@@ -283,8 +284,17 @@ impl Compositor {
     }
 
     /// Get a snapshot of the back-buffer for presentation to hardware.
+    #[allow(dead_code)] // Kept for API compatibility; prefer with_back_buffer()
     pub fn back_buffer(&self) -> Vec<u32> {
         self.back_buffer.read().clone()
+    }
+
+    /// Execute a closure with a read-only reference to the back-buffer.
+    ///
+    /// Avoids the 4MB clone that `back_buffer()` performs each call.
+    pub fn with_back_buffer<R, F: FnOnce(&[u32]) -> R>(&self, f: F) -> R {
+        let bb = self.back_buffer.read();
+        f(&bb)
     }
 
     /// Back-buffer dimensions.

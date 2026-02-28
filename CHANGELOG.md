@@ -2,6 +2,51 @@
 
 ---
 
+## [v0.6.4] - 2026-02-27
+
+### v0.6.4: Desktop Interaction -- Click-to-Focus, Window Dragging, Input Fixes, Performance Optimization
+
+Resolves critical interaction bugs in the graphical desktop: PS/2 input was non-functional in GUI mode, compositor rendering was extremely slow (~12MB/frame heap allocation), click-to-focus did not visually raise windows, and returning to the text console left graphical artifacts. This release makes the desktop fully interactive with window management, drag-to-move, and responsive rendering.
+
+#### PS/2 Input System Overhaul (3 files)
+- **input_event.rs**: Rewrote `poll_all()` to directly poll PS/2 status port 0x64/0x60 in a loop (up to 64 bytes), discriminating keyboard vs mouse data via bit 5 of the status register (APIC disables IRQ1/IRQ12, so polling is required)
+- **mouse.rs**: Added `poll_mouse_byte(byte)` public function for centralized mouse byte processing from the unified PS/2 polling loop; non-x86_64 stub provided
+- **input.rs**: Rewrote `poll_ps2_keyboard()` as a 16-iteration drain loop that reads ALL pending PS/2 bytes, dispatching mouse bytes to `poll_mouse_byte()` to prevent output buffer blockage (a single unread mouse byte blocks all subsequent keyboard data in the PS/2 single output buffer)
+
+#### Compositor Performance Optimization (2 files, ~12MB/frame allocation eliminated)
+- **compositor.rs**: Added `with_back_buffer()` zero-copy closure API; restructured `composite()` to blit pixel data directly from SHM pool backing memory inside `buffer::with_pool()` closures, eliminating per-surface `.to_vec()` clones (~8MB/frame across 3 app surfaces)
+- **renderer.rs**: Replaced `back_buffer()` clone (~4MB) with `with_back_buffer()` reference; replaced per-pixel MMIO writes with row-based `copy_nonoverlapping` memcpy (format already matches: back-buffer 0xFFRRGGBB u32 on LE = BGRA bytes = UEFI GOP BGR); conditional blit only when compositor reports dirty; spin loop reduced from 100K to 50K iterations
+
+#### Click-to-Focus + Compositor Z-Order Sync (3 files)
+- **renderer.rs**: Added `sync_compositor_focus()` that raises the focused window's compositor surface and keeps the panel surface always on top; called on every focus change (mouse click, panel button click, keyboard-driven focus)
+- **renderer.rs**: Added `AppInfo` struct pairing WM window IDs with compositor surface IDs; `DesktopApps::surface_for_window()` provides O(1) WM-to-compositor ID mapping
+- **window_manager.rs**: Added `set_window_title()`, `get_window()`, `get_focused_window_id()` public methods; made `queue_event()` public for render loop direct event injection; focus change detection via `prev_focused` tracking in render loop
+
+#### Window Dragging (renderer.rs)
+- Added `DragState` struct tracking (wid, surface_id, offset_x, offset_y) for active window drags
+- Left-click in the top 28 pixels (TITLE_BAR_HEIGHT) of a window initiates drag; mouse movement updates both WM window position (`move_window()`) and compositor surface position (`set_surface_position()`) in lockstep; mouse release ends drag
+- Non-title-bar clicks are forwarded to the appropriate app as input events
+
+#### Window Titles + Panel Taskbar Labels
+- Set window titles on WM windows during scene creation: "Terminal", "Files", "Text Editor"
+- Panel taskbar buttons now display these labels instead of empty boxes
+- Panel button clicks call `sync_compositor_focus()` to visually bring windows to front
+
+#### Framebuffer Cleanup on GUI Exit (2 files)
+- **fbcon.rs**: Added `mark_all_dirty_and_flush()` that sets `dirty_all = true` and triggers a full back-buffer-to-MMIO blit
+- **renderer.rs**: On ESC exit, zeroes the entire framebuffer before calling `mark_all_dirty_and_flush()`, ensuring clean transition back to the text console with no graphical artifacts
+
+#### Surface ID Accessors (3 files)
+- Added `surface_id()` public methods to `TerminalEmulator`, `FileManager`, and `TextEditor`
+- Added `get_surface_id()` to `TerminalManager` for index-based surface ID lookup
+
+#### Stats
+- 13 files changed, ~534 lines added, ~173 lines removed
+- Zero clippy warnings on x86_64, AArch64, RISC-V with `-D warnings`
+- All 3 architectures boot to BOOTOK (29/29 tests)
+
+---
+
 ## [v0.6.3] - 2026-02-27
 
 ### v0.6.3: Phase 6 Desktop Completion -- Functional GUI Applications

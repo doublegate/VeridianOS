@@ -221,24 +221,16 @@ mod x86_64_impl {
         crate::println!("[MOUSE] PS/2 mouse initialized");
     }
 
-    /// Poll for mouse data and push complete packets to the event buffer.
+    /// Process a single byte from the PS/2 auxiliary port.
     ///
-    /// Called periodically from the input polling loop.
-    pub fn poll_mouse() {
+    /// Called by poll_all() in input_event.rs after reading a byte from
+    /// port 0x60 that was identified as mouse data (status bit 5 set).
+    /// Accumulates bytes into 3-byte packets and pushes complete mouse
+    /// events to the ring buffer.
+    pub fn poll_mouse_byte(byte: u8) {
         if !INITIALIZED.load(Ordering::Acquire) {
             return;
         }
-
-        // Check if aux port has data (status bit 5 = aux data, bit 0 = data ready)
-        // SAFETY: Reading PS/2 status register.
-        let status = unsafe { crate::arch::x86_64::inb(0x64) };
-        if (status & 0x21) != 0x21 {
-            // Bit 0 (data available) + bit 5 (from aux port)
-            return;
-        }
-
-        // SAFETY: Reading PS/2 data port.
-        let byte = unsafe { crate::arch::x86_64::inb(0x60) };
 
         // SAFETY: Single-threaded access (polling from main loop).
         #[allow(static_mut_refs)]
@@ -288,6 +280,31 @@ mod x86_64_impl {
         }
     }
 
+    /// Poll for mouse data and push complete packets to the event buffer.
+    ///
+    /// Legacy entry point -- reads one byte from the PS/2 aux port if
+    /// available and feeds it to poll_mouse_byte(). Prefer using the
+    /// centralized polling in input_event::poll_all() instead, which
+    /// correctly distinguishes keyboard vs mouse bytes and drains all
+    /// pending data in a single call.
+    pub fn poll_mouse() {
+        if !INITIALIZED.load(Ordering::Acquire) {
+            return;
+        }
+
+        // Check if aux port has data (status bit 5 = aux data, bit 0 = data ready)
+        // SAFETY: Reading PS/2 status register.
+        let status = unsafe { crate::arch::x86_64::inb(0x64) };
+        if (status & 0x21) != 0x21 {
+            // Bit 0 (data available) + bit 5 (from aux port)
+            return;
+        }
+
+        // SAFETY: Reading PS/2 data port.
+        let byte = unsafe { crate::arch::x86_64::inb(0x60) };
+        poll_mouse_byte(byte);
+    }
+
     /// Read a mouse event from the buffer.
     pub fn read_event() -> Option<MouseEvent> {
         // SAFETY: Single consumer.
@@ -308,7 +325,7 @@ mod x86_64_impl {
 }
 
 #[cfg(target_arch = "x86_64")]
-pub use x86_64_impl::{has_data, init, poll_mouse, read_event};
+pub use x86_64_impl::{has_data, init, poll_mouse, poll_mouse_byte, read_event};
 
 // ---------------------------------------------------------------------------
 // Stubs for non-x86_64 architectures
@@ -319,6 +336,9 @@ pub fn init() {}
 
 #[cfg(not(target_arch = "x86_64"))]
 pub fn poll_mouse() {}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn poll_mouse_byte(_byte: u8) {}
 
 #[cfg(not(target_arch = "x86_64"))]
 pub fn read_event() -> Option<MouseEvent> {

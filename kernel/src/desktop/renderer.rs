@@ -4,7 +4,7 @@
 //! Creates the initial desktop scene (background gradient, panel, terminal
 //! placeholder) and runs the compositing loop.
 
-use alloc::{vec, vec::Vec};
+use alloc::vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::graphics::{
@@ -77,19 +77,48 @@ pub fn start_desktop() {
     // Render loop: composite -> blit to framebuffer -> poll input -> repeat
     render_loop(&hw, &apps);
 
-    // If we exit the render loop, re-enable fbcon
-    fbcon::enable_output();
+    // Clear the entire framebuffer to remove GUI artifacts before returning
+    // to text console mode.
+    // SAFETY: hw.fb_ptr is valid for stride * height bytes.
+    unsafe {
+        core::ptr::write_bytes(hw.fb_ptr, 0, hw.stride * hw.height);
+    }
+
+    // Re-enable fbcon and force a full repaint of the text console
+    fbcon::mark_all_dirty_and_flush();
     crate::println!("[DESKTOP] GUI stopped, returning to text console");
 }
 
-/// Window IDs for the three desktop applications, stored after scene creation.
+/// Info for a single desktop application: WM window ID + compositor surface ID.
+struct AppInfo {
+    wid: u32,
+    surface_id: u32,
+}
+
+/// Window IDs and surface IDs for the three desktop applications.
 struct DesktopApps {
-    terminal_wid: u32,
-    file_manager_wid: u32,
-    text_editor_wid: u32,
+    terminal: AppInfo,
+    file_manager: AppInfo,
+    text_editor: AppInfo,
     panel_surface_id: u32,
     panel_pool_id: u32,
     panel_pool_buf_id: u32,
+}
+
+impl DesktopApps {
+    /// Look up the compositor surface ID for a given WM window ID.
+    fn surface_for_window(&self, wid: u32) -> Option<u32> {
+        if wid > 0 && wid == self.terminal.wid {
+            return Some(self.terminal.surface_id);
+        }
+        if wid > 0 && wid == self.file_manager.wid {
+            return Some(self.file_manager.surface_id);
+        }
+        if wid > 0 && wid == self.text_editor.wid {
+            return Some(self.text_editor.surface_id);
+        }
+        None
+    }
 }
 
 /// Create the initial desktop scene: background gradient, real apps, and panel.
@@ -149,43 +178,83 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopApps {
 
     // --- Create real applications ---
     // Terminal: 640x384 (80cols x 24rows x 16px)
-    let terminal_wid =
+    let (terminal_wid, terminal_sid) =
         crate::desktop::terminal::with_terminal_manager(|tm| match tm.create_terminal(640, 384) {
-            Ok(idx) => tm.get_window_id(idx).unwrap_or(0),
-            Err(_) => 0,
+            Ok(idx) => (
+                tm.get_window_id(idx).unwrap_or(0),
+                tm.get_surface_id(idx).unwrap_or(0),
+            ),
+            Err(_) => (0, 0),
         })
-        .unwrap_or(0);
+        .unwrap_or((0, 0));
 
     // File manager: 640x480
-    let file_manager_wid = if crate::desktop::file_manager::create_file_manager().is_ok() {
-        crate::desktop::file_manager::with_file_manager(|fm| fm.read().window_id()).unwrap_or(0)
-    } else {
-        0
-    };
+    let (file_manager_wid, file_manager_sid) =
+        if crate::desktop::file_manager::create_file_manager().is_ok() {
+            crate::desktop::file_manager::with_file_manager(|fm| {
+                let r = fm.read();
+                (r.window_id(), r.surface_id())
+            })
+            .unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        };
 
     // Text editor: 800x600
-    let text_editor_wid = if crate::desktop::text_editor::create_text_editor(None).is_ok() {
-        crate::desktop::text_editor::with_text_editor(|te| te.read().window_id()).unwrap_or(0)
-    } else {
-        0
-    };
+    let (text_editor_wid, text_editor_sid) =
+        if crate::desktop::text_editor::create_text_editor(None).is_ok() {
+            crate::desktop::text_editor::with_text_editor(|te| {
+                let r = te.read();
+                (r.window_id(), r.surface_id())
+            })
+            .unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        };
 
-    // Focus the terminal by default
+    // Set window titles so the panel taskbar shows meaningful labels
+    crate::desktop::window_manager::with_window_manager(|wm| {
+        wm.set_window_title(terminal_wid, "Terminal");
+        wm.set_window_title(file_manager_wid, "Files");
+        wm.set_window_title(text_editor_wid, "Text Editor");
+    });
+
+    // Focus the terminal by default and sync compositor z_order
     if terminal_wid > 0 {
         crate::desktop::window_manager::with_window_manager(|wm| {
-            let _ = wm.focus_window(terminal_wid as u32);
+            let _ = wm.focus_window(terminal_wid);
+        });
+        // Raise the terminal surface in the compositor, then ensure panel stays on top
+        crate::desktop::wayland::with_display(|display| {
+            display.wl_compositor.raise_surface(terminal_sid);
+            display.wl_compositor.raise_surface(panel_surface_id);
         });
     }
 
     crate::serial::_serial_print(format_args!(
-        "[DESKTOP] Desktop scene created: bg + terminal({}) + files({}) + editor({}) + panel\n",
-        terminal_wid, file_manager_wid, text_editor_wid
+        "[DESKTOP] Desktop scene created: bg + terminal({}/{}) + files({}/{}) + editor({}/{}) + \
+         panel\n",
+        terminal_wid,
+        terminal_sid,
+        file_manager_wid,
+        file_manager_sid,
+        text_editor_wid,
+        text_editor_sid
     ));
 
     DesktopApps {
-        terminal_wid: terminal_wid as u32,
-        file_manager_wid,
-        text_editor_wid,
+        terminal: AppInfo {
+            wid: terminal_wid,
+            surface_id: terminal_sid,
+        },
+        file_manager: AppInfo {
+            wid: file_manager_wid,
+            surface_id: file_manager_sid,
+        },
+        text_editor: AppInfo {
+            wid: text_editor_wid,
+            surface_id: text_editor_sid,
+        },
         panel_surface_id,
         panel_pool_id,
         panel_pool_buf_id,
@@ -411,6 +480,31 @@ fn translate_input_event(
     }
 }
 
+/// Title bar height in pixels. Clicks in this region initiate window drag.
+const TITLE_BAR_HEIGHT: i32 = 28;
+
+/// Drag state for window movement.
+struct DragState {
+    /// WM window ID being dragged
+    wid: u32,
+    /// Compositor surface ID of the dragged window
+    surface_id: u32,
+    /// Offset from window top-left to mouse grab point
+    offset_x: i32,
+    offset_y: i32,
+}
+
+/// Raise a focused window's compositor surface (and keep panel on top).
+fn sync_compositor_focus(apps: &DesktopApps, focused_wid: u32) {
+    if let Some(surface_id) = apps.surface_for_window(focused_wid) {
+        crate::desktop::wayland::with_display(|display| {
+            display.wl_compositor.raise_surface(surface_id);
+            // Panel must always be the topmost surface
+            display.wl_compositor.raise_surface(apps.panel_surface_id);
+        });
+    }
+}
+
 /// Main compositor render loop.
 ///
 /// Composites all Wayland surfaces, blits to the hardware framebuffer,
@@ -430,6 +524,8 @@ fn render_loop(hw: &fbcon::FbHwInfo, apps: &DesktopApps) {
     render_all_apps(apps);
 
     let mut frame_count: u64 = 0;
+    let mut drag: Option<DragState> = None;
+    let mut prev_focused: Option<u32> = None;
 
     loop {
         frame_count += 1;
@@ -450,16 +546,16 @@ fn render_loop(hw: &fbcon::FbHwInfo, apps: &DesktopApps) {
             }
 
             if let Some(wm_event) = translate_input_event(&raw_event, mouse_x, mouse_y) {
-                // Check for panel click
+                // --- Handle mouse button press ---
                 if let crate::desktop::window_manager::InputEvent::MouseButton {
+                    button: 0,
                     pressed: true,
-                    y,
                     x,
-                    ..
+                    y,
                 } = wm_event
                 {
+                    // Panel click
                     if y >= panel_y {
-                        // Click is in the panel area -- handle panel click
                         if let Some(focus_wid) =
                             crate::desktop::panel::with_panel(|p| p.handle_click(x, y - panel_y))
                                 .flatten()
@@ -467,16 +563,112 @@ fn render_loop(hw: &fbcon::FbHwInfo, apps: &DesktopApps) {
                             crate::desktop::window_manager::with_window_manager(|wm| {
                                 let _ = wm.focus_window(focus_wid);
                             });
+                            sync_compositor_focus(apps, focus_wid);
                         }
+                        continue;
+                    }
+
+                    // Window hit test: find which window was clicked
+                    let hit = crate::desktop::window_manager::with_window_manager(|wm| {
+                        wm.window_at_position(x, y)
+                    })
+                    .flatten();
+
+                    if let Some(wid) = hit {
+                        // Focus the clicked window
+                        crate::desktop::window_manager::with_window_manager(|wm| {
+                            let _ = wm.focus_window(wid);
+                        });
+                        sync_compositor_focus(apps, wid);
+
+                        // Check if click is in the title bar area for drag
+                        let in_title_bar =
+                            crate::desktop::window_manager::with_window_manager(|wm| {
+                                wm.get_window(wid).map(|w| y < w.y + TITLE_BAR_HEIGHT)
+                            })
+                            .flatten()
+                            .unwrap_or(false);
+
+                        if in_title_bar {
+                            // Start drag
+                            if let Some(surface_id) = apps.surface_for_window(wid) {
+                                let win_pos =
+                                    crate::desktop::window_manager::with_window_manager(|wm| {
+                                        wm.get_window(wid).map(|w| (w.x, w.y))
+                                    })
+                                    .flatten();
+                                if let Some((wx, wy)) = win_pos {
+                                    drag = Some(DragState {
+                                        wid,
+                                        surface_id,
+                                        offset_x: x - wx,
+                                        offset_y: y - wy,
+                                    });
+                                }
+                            }
+                        } else {
+                            // Not title bar -- forward click to the app
+                            crate::desktop::window_manager::with_window_manager(|wm| {
+                                wm.queue_event(crate::desktop::window_manager::WindowEvent {
+                                    window_id: wid,
+                                    event: wm_event,
+                                });
+                            });
+                        }
+                    }
+                    continue;
+                }
+
+                // --- Handle mouse button release (end drag) ---
+                if let crate::desktop::window_manager::InputEvent::MouseButton {
+                    button: 0,
+                    pressed: false,
+                    ..
+                } = wm_event
+                {
+                    drag = None;
+                    // Forward release to focused window
+                    crate::desktop::window_manager::with_window_manager(|wm| {
+                        wm.process_input(wm_event);
+                    });
+                    continue;
+                }
+
+                // --- Handle mouse move (drag window or forward) ---
+                if let crate::desktop::window_manager::InputEvent::MouseMove { x, y } = wm_event {
+                    if let Some(ref d) = drag {
+                        let new_x = x - d.offset_x;
+                        let new_y = y - d.offset_y;
+                        // Update WM window position
+                        crate::desktop::window_manager::with_window_manager(|wm| {
+                            let _ = wm.move_window(d.wid, new_x, new_y);
+                        });
+                        // Update compositor surface position
+                        crate::desktop::wayland::with_display(|display| {
+                            display
+                                .wl_compositor
+                                .set_surface_position(d.surface_id, new_x, new_y);
+                        });
                         continue;
                     }
                 }
 
-                // Dispatch to window manager (handles focus, queuing)
+                // All other events: dispatch to window manager
                 crate::desktop::window_manager::with_window_manager(|wm| {
                     wm.process_input(wm_event);
                 });
             }
+        }
+
+        // --- 2b. Detect focus changes and sync compositor z_order ---
+        let current_focused =
+            crate::desktop::window_manager::with_window_manager(|wm| wm.get_focused_window_id())
+                .flatten();
+        if current_focused != prev_focused {
+            if let Some(fwid) = current_focused {
+                sync_compositor_focus(apps, fwid);
+            }
+            prev_focused = current_focused;
         }
 
         // --- 3. Forward queued WM events to apps ---
@@ -500,28 +692,65 @@ fn render_loop(hw: &fbcon::FbHwInfo, apps: &DesktopApps) {
         }
 
         // --- 6. Composite and blit ---
-        // Composite every frame since apps may have updated
         crate::desktop::wayland::with_display(|display| {
             display.wl_compositor.request_composite();
-            let _ = display.wl_compositor.composite();
+            let composited = display.wl_compositor.composite().unwrap_or(false);
+
+            if composited {
+                // Blit directly from the back-buffer without cloning (~4MB saved).
+                // On little-endian x86 the back-buffer's 0xFFRRGGBB u32 layout
+                // produces BGRA byte order, matching UEFI GOP's BGR format.
+                display.wl_compositor.with_back_buffer(|bb| {
+                    if is_bgr {
+                        // Direct row-based memcpy -- format already matches
+                        for y in 0..fb_height {
+                            let src_start = y * fb_width;
+                            let src_end = src_start + fb_width;
+                            if src_end > bb.len() {
+                                break;
+                            }
+                            let dst_offset = y * fb_stride;
+                            // SAFETY: fb_ptr valid for stride*height bytes; src slice
+                            // is fb_width u32s = fb_width*4 bytes.
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    bb[src_start..src_end].as_ptr() as *const u8,
+                                    fb_ptr.add(dst_offset),
+                                    fb_width * 4,
+                                );
+                            }
+                        }
+                    } else {
+                        // RGB format: swap R and B channels
+                        for y in 0..fb_height {
+                            for x in 0..fb_width {
+                                let src_idx = y * fb_width + x;
+                                if src_idx >= bb.len() {
+                                    break;
+                                }
+                                let pixel = bb[src_idx];
+                                let r = (pixel >> 16) & 0xFF;
+                                let g = (pixel >> 8) & 0xFF;
+                                let b = pixel & 0xFF;
+                                let swapped = 0xFF00_0000 | (b << 16) | (g << 8) | r;
+                                let dst_offset = y * fb_stride + x * 4;
+                                unsafe {
+                                    (fb_ptr.add(dst_offset) as *mut u32).write(swapped);
+                                }
+                            }
+                        }
+                    }
+                });
+            }
         });
 
-        let back_buffer: Vec<u32> =
-            crate::desktop::wayland::with_display(|display| display.wl_compositor.back_buffer())
-                .unwrap_or_default();
+        // Always draw cursor (cheap: 16x16 pixels) so it stays responsive
+        // SAFETY: fb_ptr is valid for stride * height bytes.
+        let fb_slice = unsafe { core::slice::from_raw_parts_mut(fb_ptr, fb_stride * fb_height) };
+        cursor::draw_cursor(fb_slice, fb_stride, fb_width, fb_height, mouse_x, mouse_y);
 
-        if !back_buffer.is_empty() {
-            blit_to_framebuffer(&back_buffer, fb_ptr, fb_width, fb_height, fb_stride, is_bgr);
-
-            // Draw mouse cursor on top
-            // SAFETY: fb_ptr is valid for stride * height bytes.
-            let fb_slice =
-                unsafe { core::slice::from_raw_parts_mut(fb_ptr, fb_stride * fb_height) };
-            cursor::draw_cursor(fb_slice, fb_stride, fb_width, fb_height, mouse_x, mouse_y);
-        }
-
-        // ~30fps: yield CPU time
-        for _ in 0..100_000 {
+        // Yield CPU -- shorter spin for better responsiveness
+        for _ in 0..50_000 {
             core::hint::spin_loop();
         }
     }
@@ -530,7 +759,7 @@ fn render_loop(hw: &fbcon::FbHwInfo, apps: &DesktopApps) {
 /// Render all desktop app surfaces.
 fn render_all_apps(apps: &DesktopApps) {
     // Terminal
-    if apps.terminal_wid > 0 {
+    if apps.terminal.wid > 0 {
         crate::desktop::terminal::with_terminal_manager(|tm| {
             tm.render_all_surfaces();
         });
@@ -567,9 +796,9 @@ fn render_panel(apps: &DesktopApps, screen_width: u32) {
 /// Forward pending window manager events to the appropriate apps.
 fn forward_events_to_apps(apps: &DesktopApps) {
     // Get events for terminal window
-    if apps.terminal_wid > 0 {
+    if apps.terminal.wid > 0 {
         let events = crate::desktop::window_manager::with_window_manager(|wm| {
-            wm.get_events(apps.terminal_wid)
+            wm.get_events(apps.terminal.wid)
         })
         .unwrap_or_default();
         if !events.is_empty() {
@@ -582,9 +811,9 @@ fn forward_events_to_apps(apps: &DesktopApps) {
     }
 
     // Get events for file manager window
-    if apps.file_manager_wid > 0 {
+    if apps.file_manager.wid > 0 {
         let events = crate::desktop::window_manager::with_window_manager(|wm| {
-            wm.get_events(apps.file_manager_wid)
+            wm.get_events(apps.file_manager.wid)
         })
         .unwrap_or_default();
         if !events.is_empty() {
@@ -598,9 +827,9 @@ fn forward_events_to_apps(apps: &DesktopApps) {
     }
 
     // Get events for text editor window
-    if apps.text_editor_wid > 0 {
+    if apps.text_editor.wid > 0 {
         let events = crate::desktop::window_manager::with_window_manager(|wm| {
-            wm.get_events(apps.text_editor_wid)
+            wm.get_events(apps.text_editor.wid)
         })
         .unwrap_or_default();
         if !events.is_empty() {
@@ -617,6 +846,9 @@ fn forward_events_to_apps(apps: &DesktopApps) {
 /// Blit the compositor's XRGB8888 back-buffer to the hardware framebuffer.
 ///
 /// Handles BGR vs RGB pixel format conversion.
+/// Note: The render loop now blits inline via `with_back_buffer()` to avoid
+/// a 4MB clone. This standalone version is kept for potential future use.
+#[allow(dead_code)]
 fn blit_to_framebuffer(
     back_buffer: &[u32],
     fb_ptr: *mut u8,

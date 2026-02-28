@@ -1149,6 +1149,18 @@ pub fn disable_output() {
     FBCON_OUTPUT_ENABLED.store(false, Ordering::Release);
 }
 
+/// Mark all rows dirty and trigger a full blit on the next flush.
+///
+/// Used when returning from GUI mode to repaint the entire text console.
+pub fn mark_all_dirty_and_flush() {
+    FBCON_OUTPUT_ENABLED.store(true, Ordering::Release);
+    let mut guard = FBCON.lock();
+    if let Some(ref mut fbcon) = *guard {
+        fbcon.dirty_all = true;
+        fbcon.blit_to_framebuffer();
+    }
+}
+
 /// Try to allocate a Vec<u8> of the given size, zeroed.
 /// Returns Err if allocation fails (OOM).
 fn try_alloc_vec(size: usize) -> Result<Vec<u8>, ()> {

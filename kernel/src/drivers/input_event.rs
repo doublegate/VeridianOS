@@ -130,7 +130,43 @@ pub fn read_event() -> Option<InputEvent> {
 ///
 /// Called periodically (e.g., from APIC timer or shell loop).
 pub fn poll_all() {
-    // Poll keyboard
+    // Poll keyboard and mouse hardware, then drain decoded buffers
+    #[cfg(target_arch = "x86_64")]
+    {
+        // Poll PS/2 controller directly for both keyboard and mouse data.
+        // The APIC takes over interrupt routing from the PIC, so IRQ1
+        // (keyboard) and IRQ12 (mouse) may never fire. We must poll the
+        // controller status port (0x64) to capture input from the QEMU
+        // graphical window.
+        //
+        // Status register bits:
+        //   bit 0 = output buffer full (data available in port 0x60)
+        //   bit 5 = data is from auxiliary (mouse) port
+        //
+        // We loop to drain all pending PS/2 bytes in a single poll_all()
+        // call, dispatching keyboard bytes to handle_scancode() and mouse
+        // bytes to poll_mouse_byte().
+        for _ in 0..64 {
+            // SAFETY: Reading PS/2 status register (port 0x64).
+            let status = unsafe { crate::arch::x86_64::inb(0x64) };
+            if (status & 0x01) == 0 {
+                break; // No data available
+            }
+            if (status & 0x20) != 0 {
+                // Bit 5 set: data is from auxiliary (mouse) port
+                // SAFETY: Reading PS/2 data port (port 0x60).
+                let byte = unsafe { crate::arch::x86_64::inb(0x60) };
+                crate::drivers::mouse::poll_mouse_byte(byte);
+            } else {
+                // Bit 5 clear: data is from keyboard port
+                // SAFETY: Reading PS/2 data port (port 0x60).
+                let scancode = unsafe { crate::arch::x86_64::inb(0x60) };
+                crate::drivers::keyboard::handle_scancode(scancode);
+            }
+        }
+    }
+
+    // Drain decoded keyboard buffer into unified event stream
     #[cfg(target_arch = "x86_64")]
     {
         while let Some(key_byte) = crate::drivers::keyboard::read_key() {
@@ -138,10 +174,9 @@ pub fn poll_all() {
         }
     }
 
-    // Poll mouse
+    // Drain decoded mouse events into unified event stream
     #[cfg(target_arch = "x86_64")]
     {
-        crate::drivers::mouse::poll_mouse();
         while let Some(mouse_event) = crate::drivers::mouse::read_event() {
             // Relative movement events
             if mouse_event.dx != 0 {

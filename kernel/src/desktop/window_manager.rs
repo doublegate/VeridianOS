@@ -313,7 +313,7 @@ impl WindowManager {
     }
 
     /// Queue an event for delivery
-    fn queue_event(&self, event: WindowEvent) {
+    pub fn queue_event(&self, event: WindowEvent) {
         self.event_queue.write().push(event);
     }
 
@@ -333,6 +333,23 @@ impl WindowManager {
         }
 
         events
+    }
+
+    /// Set a window's title.
+    pub fn set_window_title(&self, window_id: WindowId, title: &str) {
+        if let Some(window) = self.windows.write().get_mut(&window_id) {
+            window.set_title(title);
+        }
+    }
+
+    /// Get a clone of a window by ID.
+    pub fn get_window(&self, window_id: WindowId) -> Option<Window> {
+        self.windows.read().get(&window_id).cloned()
+    }
+
+    /// Get the currently focused window ID.
+    pub fn get_focused_window_id(&self) -> Option<WindowId> {
+        *self.focused_window.read()
     }
 
     /// Get all windows

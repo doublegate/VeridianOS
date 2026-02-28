@@ -343,6 +343,11 @@ impl FileManager {
         self.window_id
     }
 
+    /// Get compositor surface ID
+    pub fn surface_id(&self) -> u32 {
+        self.surface_id
+    }
+
     /// Render file manager contents to its compositor surface.
     pub fn render_to_surface(&self) {
         let w = self.width as usize;

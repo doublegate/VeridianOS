@@ -37,41 +37,55 @@ pub fn read_char() -> Option<u8> {
     }
 }
 
-/// Poll the PS/2 keyboard controller for available scancodes.
+/// Poll the PS/2 controller for available data bytes.
 ///
-/// Reads the keyboard controller status register (port 0x64). If bit 0
-/// (Output Buffer Status) is set, a scancode is waiting in port 0x60.
-/// We read it and feed it to the keyboard driver's decoder, which pushes
-/// decoded ASCII bytes to the ring buffer.
+/// Drains all pending bytes from the PS/2 output buffer (port 0x60),
+/// dispatching keyboard scancodes to the keyboard driver and mouse
+/// bytes to the mouse driver. Both must be drained because the PS/2
+/// controller has a single output buffer -- leaving a mouse byte
+/// unread blocks all subsequent keyboard data.
+///
+/// Status register (port 0x64) bits:
+///   bit 0 = output buffer full (data available in port 0x60)
+///   bit 5 = data is from auxiliary (mouse) port
 ///
 /// This is necessary because the APIC (initialized during boot) takes
 /// over interrupt routing from the legacy PIC. The PIC's IRQ1 (keyboard)
-/// may never fire, so we poll instead.
+/// and IRQ12 (mouse) may never fire, so we poll instead.
 #[cfg(target_arch = "x86_64")]
 fn poll_ps2_keyboard() {
-    let status: u8;
-    // SAFETY: Reading the PS/2 controller status register (port 0x64).
-    unsafe {
-        core::arch::asm!(
-            "in al, dx",
-            out("al") status,
-            in("dx") 0x64u16,
-            options(nomem, nostack)
-        );
-    }
-    if (status & 1) != 0 {
-        let scancode: u8;
-        // SAFETY: Reading the PS/2 data register (port 0x60) to get the
-        // pending scancode. This clears the output buffer.
+    for _ in 0..16 {
+        let status: u8;
+        // SAFETY: Reading the PS/2 controller status register (port 0x64).
         unsafe {
             core::arch::asm!(
                 "in al, dx",
-                out("al") scancode,
+                out("al") status,
+                in("dx") 0x64u16,
+                options(nomem, nostack)
+            );
+        }
+        if (status & 0x01) == 0 {
+            break; // No data pending
+        }
+        let byte: u8;
+        // SAFETY: Reading the PS/2 data register (port 0x60).
+        // This clears the output buffer, allowing the next byte through.
+        unsafe {
+            core::arch::asm!(
+                "in al, dx",
+                out("al") byte,
                 in("dx") 0x60u16,
                 options(nomem, nostack)
             );
         }
-        crate::drivers::keyboard::handle_scancode(scancode);
+        if (status & 0x20) != 0 {
+            // Mouse byte -- dispatch to mouse driver to unblock the buffer
+            crate::drivers::mouse::poll_mouse_byte(byte);
+        } else {
+            // Keyboard scancode
+            crate::drivers::keyboard::handle_scancode(byte);
+        }
     }
 }
 

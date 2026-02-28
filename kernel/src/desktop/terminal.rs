@@ -576,6 +576,11 @@ impl TerminalEmulator {
         self.window_id
     }
 
+    /// Get compositor surface ID
+    pub fn surface_id(&self) -> u32 {
+        self.surface_id
+    }
+
     /// Get PTY slave ID for shell connection
     pub fn pty_slave_id(&self) -> u32 {
         self.pty_slave_id
@@ -629,6 +634,12 @@ impl TerminalManager {
     pub fn get_window_id(&self, terminal_id: usize) -> Option<WindowId> {
         let terminals = self.terminals.read();
         terminals.get(terminal_id).map(|t| t.window_id())
+    }
+
+    /// Get the compositor surface ID of a terminal by index.
+    pub fn get_surface_id(&self, terminal_id: usize) -> Option<u32> {
+        let terminals = self.terminals.read();
+        terminals.get(terminal_id).map(|t| t.surface_id())
     }
 
     /// Render all terminal surfaces to the compositor.
