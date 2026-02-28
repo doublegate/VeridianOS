@@ -48,6 +48,12 @@ pub fn init() -> Result<(), KernelError> {
     // Initialize text editor
     text_editor::init()?;
 
+    // Initialize system tray
+    systray::init();
+
+    // Initialize application launcher
+    let _ = launcher::init();
+
     println!("[DESKTOP] Desktop subsystem initialized");
     Ok(())
 }

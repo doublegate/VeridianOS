@@ -6,7 +6,7 @@
 //!
 //! On non-x86_64 architectures, all functions are no-op stubs.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
@@ -14,6 +14,55 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 pub fn is_initialized() -> bool {
     INITIALIZED.load(Ordering::Acquire)
 }
+
+// ---------------------------------------------------------------------------
+// Modifier state tracking
+// ---------------------------------------------------------------------------
+
+/// Bitmask: Shift is held.
+pub const MOD_SHIFT: u8 = 0x01;
+/// Bitmask: Ctrl is held.
+pub const MOD_CTRL: u8 = 0x02;
+/// Bitmask: Alt is held.
+pub const MOD_ALT: u8 = 0x04;
+/// Bitmask: Super/Win is held.
+pub const MOD_SUPER: u8 = 0x08;
+
+static MODIFIER_STATE: AtomicU8 = AtomicU8::new(0);
+
+/// Get the current modifier key bitmask.
+pub fn get_modifiers() -> u8 {
+    MODIFIER_STATE.load(Ordering::Relaxed)
+}
+
+// ---------------------------------------------------------------------------
+// GUI mode: single-byte key codes for special keys
+// ---------------------------------------------------------------------------
+
+/// When true, arrow/special keys emit single-byte codes (0x80+) instead of
+/// multi-byte ANSI escape sequences. This prevents the 0x1B ESC prefix from
+/// triggering the GUI exit guard.
+static GUI_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Enable or disable GUI key encoding mode.
+pub fn set_gui_mode(enabled: bool) {
+    GUI_MODE.store(enabled, Ordering::Release);
+}
+
+/// Single-byte key code for Up arrow (GUI mode).
+pub const KEY_UP: u8 = 0x80;
+/// Single-byte key code for Down arrow (GUI mode).
+pub const KEY_DOWN: u8 = 0x81;
+/// Single-byte key code for Left arrow (GUI mode).
+pub const KEY_LEFT: u8 = 0x82;
+/// Single-byte key code for Right arrow (GUI mode).
+pub const KEY_RIGHT: u8 = 0x83;
+/// Single-byte key code for Home (GUI mode).
+pub const KEY_HOME: u8 = 0x84;
+/// Single-byte key code for End (GUI mode).
+pub const KEY_END: u8 = 0x85;
+/// Single-byte key code for Delete (GUI mode).
+pub const KEY_DELETE: u8 = 0x86;
 
 // ---------------------------------------------------------------------------
 // x86_64 implementation
@@ -99,9 +148,24 @@ mod x86_64_impl {
     /// This function must NOT call println! or acquire any spinlock used
     /// by the serial/fbcon output path.
     pub fn handle_scancode(scancode: u8) {
+        use pc_keyboard::KeyCode;
+
         let mut kb_guard = KEYBOARD.lock();
         if let Some(ref mut keyboard) = *kb_guard {
             if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+                // Track modifier state from the raw key event BEFORE
+                // process_keyevent consumes it. Modifiers are tracked
+                // globally so the render loop can detect hotkeys.
+                let code = key_event.code;
+                let is_down = key_event.state == pc_keyboard::KeyState::Down;
+                match code {
+                    KeyCode::LShift | KeyCode::RShift => update_modifier(MOD_SHIFT, is_down),
+                    KeyCode::LControl | KeyCode::RControl => update_modifier(MOD_CTRL, is_down),
+                    KeyCode::LAlt | KeyCode::RAltGr => update_modifier(MOD_ALT, is_down),
+                    KeyCode::LWin | KeyCode::RWin => update_modifier(MOD_SUPER, is_down),
+                    _ => {}
+                }
+
                 if let Some(key) = keyboard.process_keyevent(key_event) {
                     match key {
                         DecodedKey::Unicode(ch) => {
@@ -115,29 +179,60 @@ mod x86_64_impl {
                             }
                         }
                         DecodedKey::RawKey(key) => {
-                            use pc_keyboard::KeyCode;
-                            let seq: &[u8] = match key {
-                                KeyCode::ArrowUp => b"\x1b[A",
-                                KeyCode::ArrowDown => b"\x1b[B",
-                                KeyCode::ArrowRight => b"\x1b[C",
-                                KeyCode::ArrowLeft => b"\x1b[D",
-                                KeyCode::Home => b"\x1b[H",
-                                KeyCode::End => b"\x1b[F",
-                                KeyCode::Delete => b"\x1b[3~",
-                                _ => b"",
-                            };
-                            // SAFETY: handle_scancode is the sole producer
-                            // (called from IRQ1 with interrupts disabled).
-                            #[allow(static_mut_refs)]
-                            unsafe {
-                                for &byte in seq {
-                                    KEY_BUFFER.push(byte);
+                            if GUI_MODE.load(Ordering::Relaxed) {
+                                // GUI mode: emit single-byte codes for special
+                                // keys to avoid ANSI escape sequence conflicts.
+                                let gui_byte = match key {
+                                    KeyCode::ArrowUp => Some(KEY_UP),
+                                    KeyCode::ArrowDown => Some(KEY_DOWN),
+                                    KeyCode::ArrowRight => Some(KEY_RIGHT),
+                                    KeyCode::ArrowLeft => Some(KEY_LEFT),
+                                    KeyCode::Home => Some(KEY_HOME),
+                                    KeyCode::End => Some(KEY_END),
+                                    KeyCode::Delete => Some(KEY_DELETE),
+                                    _ => None,
+                                };
+                                if let Some(byte) = gui_byte {
+                                    #[allow(static_mut_refs)]
+                                    // SAFETY: sole producer (IRQ1, interrupts disabled).
+                                    unsafe {
+                                        KEY_BUFFER.push(byte);
+                                    }
+                                }
+                            } else {
+                                // Shell mode: emit ANSI escape sequences as before.
+                                let seq: &[u8] = match key {
+                                    KeyCode::ArrowUp => b"\x1b[A",
+                                    KeyCode::ArrowDown => b"\x1b[B",
+                                    KeyCode::ArrowRight => b"\x1b[C",
+                                    KeyCode::ArrowLeft => b"\x1b[D",
+                                    KeyCode::Home => b"\x1b[H",
+                                    KeyCode::End => b"\x1b[F",
+                                    KeyCode::Delete => b"\x1b[3~",
+                                    _ => b"",
+                                };
+                                // SAFETY: handle_scancode is the sole producer
+                                // (called from IRQ1 with interrupts disabled).
+                                #[allow(static_mut_refs)]
+                                unsafe {
+                                    for &byte in seq {
+                                        KEY_BUFFER.push(byte);
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// Update a modifier bit in the global modifier state.
+    fn update_modifier(bit: u8, down: bool) {
+        if down {
+            MODIFIER_STATE.fetch_or(bit, Ordering::Relaxed);
+        } else {
+            MODIFIER_STATE.fetch_and(!bit, Ordering::Relaxed);
         }
     }
 

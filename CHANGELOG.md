@@ -2,6 +2,62 @@
 
 ---
 
+## [v0.10.2] - 2026-02-28
+
+### v0.10.2: Desktop Render Loop Integration -- Wire Phase 7 Modules into Compositing Pipeline
+
+Connects all 8 Phase 7 desktop modules (app switcher, screen lock, launcher, notifications, system tray, animation, settings, image viewer) and window manager features (virtual workspaces, snap-to-edge, window decorations) into the desktop renderer's compositing loop. Previously, these modules were fully implemented as standalone APIs but never called from the render loop, so `startgui` showed only a basic desktop without any Phase 7 features visible.
+
+#### Keyboard Modifier Tracking and GUI Mode (`kernel/src/drivers/keyboard.rs`)
+
+- **Modifier state tracking**: Added `AtomicU8` bitmask (`MOD_SHIFT=0x01`, `MOD_CTRL=0x02`, `MOD_ALT=0x04`, `MOD_SUPER=0x08`) with `get_modifiers()` API. Modifiers are captured from `key_event.code` (LShift/RShift/LControl/RControl/LAlt/RAltGr/LWin/RWin) **before** `process_keyevent()` consumes them, using `fetch_or`/`fetch_and(!bit)` atomics on Down/Up state transitions
+- **GUI mode key encoding**: Added `AtomicBool` flag (`set_gui_mode()`) that switches arrow/special keys from multi-byte ANSI escape sequences (shell mode: `\x1b[A`) to single-byte codes (GUI mode: `KEY_UP=0x80`, `KEY_DOWN=0x81`, `KEY_LEFT=0x82`, `KEY_RIGHT=0x83`, `KEY_HOME=0x84`, `KEY_END=0x85`, `KEY_DELETE=0x86`). This prevents the `0x1B` ESC prefix from triggering the GUI exit guard when arrow keys are pressed
+- **Non-x86_64 stubs**: Module-level functions (`get_modifiers`, `set_gui_mode`) work on all architectures; x86_64_impl only adds the scancode handler internals
+
+#### Compositor Back-Buffer Write Access (`kernel/src/desktop/wayland/compositor.rs`)
+
+- **`with_back_buffer_mut()`**: Provides mutable `&mut [u32]` access to the composited back-buffer for overlay rendering (app switcher, launcher, notifications, screen lock) that draws directly after `composite()` and before the hardware framebuffer blit
+- **`set_surface_mapped()`**: Toggles surface visibility for virtual workspace switching; the compositor already skips `!surface.mapped` surfaces during compositing
+
+#### Desktop Subsystem Initialization (`kernel/src/desktop/mod.rs`, `kernel/src/bootstrap.rs`)
+
+- Added `systray::init()` and `launcher::init()` to desktop subsystem init
+- Added `notification::init(hw.width, hw.height)` in bootstrap after desktop::init() with framebuffer dimensions for toast positioning
+
+#### Render Loop Restructure (`kernel/src/desktop/renderer.rs`)
+
+- **DesktopState**: Replaced `DesktopApps` with richer `DesktopState` holding `AppSwitcher`, `ScreenLocker`, `AnimationManager` as owned instances alongside existing app windows and panel state
+- **GUI mode lifecycle**: `set_gui_mode(true)` on `start_desktop()` entry, `set_gui_mode(false)` on exit, ensuring arrow keys use single-byte encoding only during GUI sessions
+- **ESC/arrow key conflict fix**: ESC only exits GUI when no modifiers are held and no overlays are visible; arrow keys no longer emit 0x1B in GUI mode
+- **Hotkey detection pipeline** (checked before normal event dispatch):
+  - `Alt+Tab`: Show/cycle AppSwitcher overlay with window list
+  - `Alt release`: Commit AppSwitcher selection, focus and raise selected window
+  - `Ctrl+Alt+L`: Activate screen lock
+  - `Ctrl+Alt+Left/Right`: Switch virtual workspace (prev/next of 4)
+  - `Super`: Toggle application launcher overlay
+  - `ESC`: Dismiss active overlays (app switcher, launcher) before considering GUI exit
+- **Screen lock takeover**: When locked, the screen locker captures all keyboard input and renders directly to the back-buffer, bypassing normal compositing entirely
+- **Overlay rendering pipeline**: After `compositor.composite()` and before hardware blit, renders overlays into back-buffer in order: app switcher, launcher, notifications
+- **System tray integration**: Panel rendering now updates systray memory stats via `saturating_sub()` for used memory calculation
+- **Snap-to-edge**: On mouse drag release, `WindowManager::detect_snap_zone()` checks cursor position against screen edges (left/right/maximize zones)
+- **Virtual workspace switching**: `switch_workspace_prev/next()` calls `compositor.set_surface_mapped()` to show/hide window surfaces per workspace
+- **Animation framework**: `AnimationManager::tick()` called each frame with delta time
+- **Notification expiry**: `notification::tick()` called each frame to expire old toasts
+- **Welcome notification**: Sends "Welcome to VeridianOS v0.10.2" toast on desktop creation
+
+#### Bug Fixes
+
+- **Memory stats overflow**: `render_panel()` used `total_frames - free_frames` which panicked when `free_frames > total_frames` due to timing. Fixed with `saturating_sub()`
+
+#### Stats
+
+- 6 files changed, +577 lines added, -119 lines removed
+- Zero clippy warnings on x86_64, AArch64, RISC-V with `-D warnings`
+- All 3 architectures boot to BOOTOK (29/29 tests)
+- Interactive GUI testing verified: `startgui` renders desktop, ESC exits cleanly
+
+---
+
 ## [v0.10.1] - 2026-02-28
 
 ### v0.10.1: Integration Audit -- Wire Disconnected Subsystems

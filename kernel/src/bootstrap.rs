@@ -576,6 +576,10 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
         if let Err(_e) = desktop::init() {
             kprintln!("[BOOTSTRAP] Desktop init deferred (non-fatal)");
         }
+        // Initialize notification manager with screen dimensions from fbcon
+        if let Some(hw) = graphics::fbcon::get_hw_info() {
+            crate::desktop::notification::init(hw.width, hw.height);
+        }
         kprintln!("[BOOTSTRAP] Desktop subsystem initialized");
     }
 

@@ -116,7 +116,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.10.1 (February 28, 2026) | **Releases Published**: 49 (v0.1.0 through v0.10.1)
+**Latest Release**: v0.10.2 (February 28, 2026) | **Releases Published**: 50 (v0.1.0 through v0.10.2)
 
 | Metric                 | Value                                           |
 | ---------------------- | ----------------------------------------------- |
@@ -146,7 +146,7 @@ experiments/   Non-normative exploratory work
 | 5.5   | Infrastructure Bridge     | **COMPLETE (100%)** | v0.5.13 | Feb 2026 |
 | 6     | Advanced Features and GUI | **~100% (desktop complete)** | v0.6.4  | Feb 2026 |
 | 6.5   | Rust Compiler + Bash Shell | **COMPLETE (100%)** | v0.7.0  | Feb 2026 |
-| 7     | Production Readiness     | **Complete (~100%)** | v0.10.1  | Feb 2026 |
+| 7     | Production Readiness     | **Complete (~100%)** | v0.10.2  | Feb 2026 |
 
 For detailed release notes, see [Release History](docs/RELEASE-HISTORY.md).
 
@@ -243,7 +243,7 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### Maturity
 
-VeridianOS is an active research system. Phases 0 through 7 are architecturally stable with a functional graphical desktop, Rust compiler port, Bash-compatible userland shell, Intel VMX hypervisor, container isolation, and comprehensive security hardening. All 6 Phase 7 waves are complete: GPU drivers, advanced Wayland, desktop completion, advanced networking with IPv6, multimedia framework, virtualization, security hardening, and performance optimization. Phase 7.5 (follow-on enhancements) and Phase 8 (next-generation features) are planned.
+VeridianOS is an active research system. Phases 0 through 7 are architecturally stable with a functional graphical desktop, Rust compiler port, Bash-compatible userland shell, Intel VMX hypervisor, container isolation, and comprehensive security hardening. All 6 Phase 7 waves are complete: GPU drivers, advanced Wayland, desktop completion, advanced networking with IPv6, multimedia framework, virtualization, security hardening, and performance optimization. All Phase 7 desktop modules are wired into the compositing pipeline with hotkey-driven overlays (Alt+Tab app switcher, screen lock, launcher, notifications, workspaces). Phase 7.5 (follow-on enhancements) and Phase 8 (next-generation features) are planned.
 
 Historical status is recorded in:
 
@@ -476,6 +476,7 @@ Security is a fundamental design principle:
 - [x] **Phase 7 Wave 5: Multimedia**: Audio subsystem (fixed-point 16.16 mixer, SPSC ring buffer, WAV parser, VirtIO-Sound driver, output pipeline, 8 syscalls), video framework (TGA/QOI decoders, bilinear scaling, media player) (v0.9.0, Feb 2026)
 - [x] **Phase 7 Wave 6: Virtualization + Security + Performance**: Intel VMX hypervisor (VMCS, EPT, virtual devices), container isolation (PID/mount/network/UTS namespaces), KPTI shadow page tables, demand paging, COW fork, TPM MMIO probing, Dilithium ML-DSA-65, NUMA SRAT/SLIT topology, per-CPU ready queues with work-stealing, IPC batching, IOMMU DRHD parsing, all 34 TODO(phase7) resolved (v0.10.0, Feb 2026)
 - [x] **Integration Audit**: Two-pass audit wiring 51 unreachable syscalls, AF_INET socket routing, VirtIO PCI driver probing, COW fork page fault handling, container namespace fork propagation, select() implementation, audio pipeline to VirtIO-Sound, scheduler work-stealing (v0.10.1, Feb 2026)
+- [x] **Desktop Render Loop Integration**: Wire all 8 Phase 7 desktop modules into compositing pipeline -- keyboard modifier tracking (Alt/Ctrl/Super), GUI mode key encoding (single-byte 0x80+ for arrows), hotkey detection (Alt+Tab, Ctrl+Alt+L, Ctrl+Alt+Arrows, Super), screen lock takeover, overlay rendering (app switcher, launcher, notifications), snap-to-edge, virtual workspace switching, system tray stats, animation framework (v0.10.2, Feb 2026)
 
 ### Upcoming
 

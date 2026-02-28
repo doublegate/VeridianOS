@@ -297,6 +297,26 @@ impl Compositor {
         f(&bb)
     }
 
+    /// Execute a closure with a mutable reference to the back-buffer.
+    ///
+    /// Used for overlay rendering (app switcher, launcher, notifications,
+    /// screen lock) that draws directly into the composited back-buffer
+    /// after `composite()` runs and before the hardware framebuffer blit.
+    pub fn with_back_buffer_mut<R, F: FnOnce(&mut [u32]) -> R>(&self, f: F) -> R {
+        let mut bb = self.back_buffer.write();
+        f(&mut bb)
+    }
+
+    /// Set whether a surface is mapped (visible during compositing).
+    ///
+    /// The compositor skips unmapped surfaces during `composite()`.
+    /// Used for virtual workspace switching to hide/show window surfaces.
+    pub fn set_surface_mapped(&self, id: u32, mapped: bool) {
+        self.with_surface_mut(id, |surface| {
+            surface.mapped = mapped;
+        });
+    }
+
     /// Back-buffer dimensions.
     pub fn output_size(&self) -> (u32, u32) {
         (
