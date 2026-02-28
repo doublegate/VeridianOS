@@ -947,8 +947,18 @@ fn handle_syscall(
         Syscall::Fchown => sys_fchown(arg1, arg2, arg3),
         Syscall::Umask => sys_umask(arg1),
         Syscall::Access => sys_access(arg1, arg2),
-        Syscall::Poll | Syscall::Fcntl => Err(SyscallError::NotImplemented),
-        Syscall::Clone | Syscall::Futex => Err(SyscallError::NotImplemented),
+        // Duplicate POSIX aliases -- delegate to the primary implementations.
+        Syscall::Poll => filesystem::sys_poll(arg1, arg2, arg3),
+        Syscall::Fcntl => filesystem::sys_fcntl(arg1, arg2, arg3),
+        Syscall::Clone => thread_clone::sys_thread_clone(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Futex => {
+            // arg1=op (0=WAIT, 1=WAKE), arg2=addr, arg3=val, arg4=timeout/aux, arg5=op2
+            match arg1 {
+                0 => futex::sys_futex_wait(arg2, arg3 as u32, arg4, arg5, arg1).map(|v| v as usize),
+                1 => futex::sys_futex_wake(arg2, arg3, arg4).map(|v| v as usize),
+                _ => Err(SyscallError::InvalidArgument),
+            }
+        }
 
         // Audio syscalls (Phase 7) -- wired to audio subsystem
         Syscall::AudioOpen => {
@@ -1838,6 +1848,22 @@ const AF_INET: usize = 2;
 const SOCK_STREAM: usize = 1;
 const SOCK_DGRAM: usize = 2;
 
+/// High-bit flag to distinguish INET socket IDs from Unix socket IDs.
+/// Applied to socket IDs returned by `sys_socket_create` for AF_INET sockets.
+const INET_SOCKET_FLAG: usize = 0x4000_0000;
+
+/// Check if a socket ID refers to an INET socket.
+#[inline]
+fn is_inet_socket(id: usize) -> bool {
+    id & INET_SOCKET_FLAG != 0
+}
+
+/// Strip the INET flag to get the raw socket table ID.
+#[inline]
+fn inet_socket_id(id: usize) -> usize {
+    id & !INET_SOCKET_FLAG
+}
+
 /// Convert user-space socket type to UnixSocketType.
 fn to_unix_socket_type(
     sock_type: usize,
@@ -1880,6 +1906,7 @@ fn sys_socket_create(domain: usize, sock_type: usize) -> SyscallResult {
                 _ => return Err(SyscallError::InvalidArgument),
             };
             crate::net::socket::create_socket(sock_domain, sock_tp, proto)
+                .map(|id| id | INET_SOCKET_FLAG)
                 .map_err(|_| SyscallError::OutOfMemory)
         }
         _ => Err(SyscallError::InvalidArgument),
@@ -1893,8 +1920,20 @@ fn sys_socket_create(domain: usize, sock_type: usize) -> SyscallResult {
 /// - addr_ptr: user-space pointer to address (path for AF_UNIX)
 /// - addr_len: address length
 fn sys_socket_bind(socket_id: usize, addr_ptr: usize, _addr_len: usize) -> SyscallResult {
+    if is_inet_socket(socket_id) {
+        let id = inet_socket_id(socket_id);
+        // Parse addr as (ip_u32, port_u16) from user space
+        validate_user_buffer(addr_ptr, 6)?;
+        // SAFETY: addr_ptr validated above as non-null, in user-space, 6 bytes.
+        let ip_bytes = unsafe { core::ptr::read_unaligned(addr_ptr as *const [u8; 4]) };
+        let port = unsafe { core::ptr::read_unaligned((addr_ptr + 4) as *const u16) }.to_be();
+        let addr = crate::net::SocketAddr::v4(crate::net::Ipv4Address(ip_bytes), port);
+        crate::net::socket::with_socket_mut(id, |s| s.bind(addr))
+            .map_err(|_| SyscallError::InvalidState)?
+            .map_err(|_| SyscallError::InvalidState)?;
+        return Ok(0);
+    }
     let path = read_user_name(addr_ptr, crate::net::unix_socket::UNIX_PATH_MAX)?;
-
     crate::net::unix_socket::socket_bind(socket_id as u64, &path)
         .map(|()| 0)
         .map_err(|_| SyscallError::InvalidState)
@@ -1902,6 +1941,13 @@ fn sys_socket_bind(socket_id: usize, addr_ptr: usize, _addr_len: usize) -> Sysca
 
 /// SYS_SOCKET_LISTEN: Start listening on a bound socket.
 fn sys_socket_listen(socket_id: usize, backlog: usize) -> SyscallResult {
+    if is_inet_socket(socket_id) {
+        let id = inet_socket_id(socket_id);
+        crate::net::socket::with_socket_mut(id, |s| s.listen(backlog))
+            .map_err(|_| SyscallError::InvalidState)?
+            .map_err(|_| SyscallError::InvalidState)?;
+        return Ok(0);
+    }
     crate::net::unix_socket::socket_listen(socket_id as u64, backlog)
         .map(|()| 0)
         .map_err(|_| SyscallError::InvalidState)
@@ -1909,8 +1955,19 @@ fn sys_socket_listen(socket_id: usize, backlog: usize) -> SyscallResult {
 
 /// SYS_SOCKET_CONNECT: Connect to a listening socket.
 fn sys_socket_connect(socket_id: usize, addr_ptr: usize, _addr_len: usize) -> SyscallResult {
+    if is_inet_socket(socket_id) {
+        let id = inet_socket_id(socket_id);
+        validate_user_buffer(addr_ptr, 6)?;
+        // SAFETY: addr_ptr validated above as non-null, in user-space, 6 bytes.
+        let ip_bytes = unsafe { core::ptr::read_unaligned(addr_ptr as *const [u8; 4]) };
+        let port = unsafe { core::ptr::read_unaligned((addr_ptr + 4) as *const u16) }.to_be();
+        let addr = crate::net::SocketAddr::v4(crate::net::Ipv4Address(ip_bytes), port);
+        crate::net::socket::with_socket_mut(id, |s| s.connect(addr))
+            .map_err(|_| SyscallError::InvalidState)?
+            .map_err(|_| SyscallError::InvalidState)?;
+        return Ok(0);
+    }
     let path = read_user_name(addr_ptr, crate::net::unix_socket::UNIX_PATH_MAX)?;
-
     crate::net::unix_socket::socket_connect(socket_id as u64, &path)
         .map(|()| 0)
         .map_err(|_| SyscallError::InvalidState)
@@ -1920,12 +1977,32 @@ fn sys_socket_connect(socket_id: usize, addr_ptr: usize, _addr_len: usize) -> Sy
 ///
 /// Returns the new connected socket ID.
 fn sys_socket_accept(socket_id: usize) -> SyscallResult {
-    crate::net::unix_socket::socket_accept(socket_id as u64)
-        .map(|(new_id, _connecting_id)| new_id as usize)
-        .map_err(|e| match e {
-            crate::error::KernelError::WouldBlock => SyscallError::WouldBlock,
-            _ => SyscallError::InvalidState,
-        })
+    if is_inet_socket(socket_id) {
+        let id = inet_socket_id(socket_id);
+        let result = crate::net::socket::with_socket(id, |s| s.accept())
+            .map_err(|_| SyscallError::InvalidState)?;
+        match result {
+            Ok((new_sock, _remote)) => {
+                // Register the accepted socket in the socket table
+                let new_id = crate::net::socket::create_socket(
+                    new_sock.domain,
+                    new_sock.socket_type,
+                    new_sock.protocol,
+                )
+                .map_err(|_| SyscallError::OutOfMemory)?;
+                Ok(new_id | INET_SOCKET_FLAG)
+            }
+            Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
+            Err(_) => Err(SyscallError::InvalidState),
+        }
+    } else {
+        crate::net::unix_socket::socket_accept(socket_id as u64)
+            .map(|(new_id, _connecting_id)| new_id as usize)
+            .map_err(|e| match e {
+                crate::error::KernelError::WouldBlock => SyscallError::WouldBlock,
+                _ => SyscallError::InvalidState,
+            })
+    }
 }
 
 /// SYS_SOCKET_SEND: Send data on a connected socket.
@@ -1935,8 +2012,18 @@ fn sys_socket_send(socket_id: usize, buf_ptr: usize, buf_len: usize) -> SyscallR
     // limits.
     let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, buf_len) };
 
-    crate::net::unix_socket::socket_send(socket_id as u64, data, None)
-        .map_err(|_| SyscallError::InvalidState)
+    if is_inet_socket(socket_id) {
+        let id = inet_socket_id(socket_id);
+        crate::net::socket::with_socket_mut(id, |s| s.send(data, 0))
+            .map_err(|_| SyscallError::InvalidState)?
+            .map_err(|e| match e {
+                crate::error::KernelError::WouldBlock => SyscallError::WouldBlock,
+                _ => SyscallError::InvalidState,
+            })
+    } else {
+        crate::net::unix_socket::socket_send(socket_id as u64, data, None)
+            .map_err(|_| SyscallError::InvalidState)
+    }
 }
 
 /// SYS_SOCKET_RECV: Receive data from a socket.
@@ -1946,19 +2033,36 @@ fn sys_socket_recv(socket_id: usize, buf_ptr: usize, buf_len: usize) -> SyscallR
     // limits.
     let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, buf_len) };
 
-    crate::net::unix_socket::socket_recv(socket_id as u64, buf)
-        .map(|(received, _rights)| received)
-        .map_err(|e| match e {
-            crate::error::KernelError::WouldBlock => SyscallError::WouldBlock,
-            _ => SyscallError::InvalidState,
-        })
+    if is_inet_socket(socket_id) {
+        let id = inet_socket_id(socket_id);
+        crate::net::socket::with_socket_mut(id, |s| s.recv(buf, 0))
+            .map_err(|_| SyscallError::InvalidState)?
+            .map_err(|e| match e {
+                crate::error::KernelError::WouldBlock => SyscallError::WouldBlock,
+                _ => SyscallError::InvalidState,
+            })
+    } else {
+        crate::net::unix_socket::socket_recv(socket_id as u64, buf)
+            .map(|(received, _rights)| received)
+            .map_err(|e| match e {
+                crate::error::KernelError::WouldBlock => SyscallError::WouldBlock,
+                _ => SyscallError::InvalidState,
+            })
+    }
 }
 
 /// SYS_SOCKET_CLOSE: Close a socket.
 fn sys_socket_close(socket_id: usize) -> SyscallResult {
-    crate::net::unix_socket::socket_close(socket_id as u64)
-        .map(|()| 0)
-        .map_err(|_| SyscallError::InvalidState)
+    if is_inet_socket(socket_id) {
+        let id = inet_socket_id(socket_id);
+        crate::net::socket::close_socket(id)
+            .map(|()| 0)
+            .map_err(|_| SyscallError::InvalidState)
+    } else {
+        crate::net::unix_socket::socket_close(socket_id as u64)
+            .map(|()| 0)
+            .map_err(|_| SyscallError::InvalidState)
+    }
 }
 
 /// SYS_SOCKET_PAIR: Create a connected socket pair.

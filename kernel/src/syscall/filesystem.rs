@@ -2465,23 +2465,57 @@ pub fn sys_mknod(path_ptr: usize, _mode: usize, _dev: usize) -> SyscallResult {
 
 /// Synchronous I/O multiplexing (syscall 200).
 ///
-/// Thin wrapper that converts select-style arguments to poll().
+/// Scans fd_set bitmaps for set bits and checks whether the corresponding
+/// file descriptors exist in the current process's file table. Files and
+/// pipes are always considered ready (same simplification as `sys_poll`).
 pub fn sys_select(
     nfds: usize,
     readfds_ptr: usize,
     writefds_ptr: usize,
-    exceptfds_ptr: usize,
-    timeout_ptr: usize,
+    _exceptfds_ptr: usize,
+    _timeout_ptr: usize,
 ) -> SyscallResult {
-    // Delegate to poll with a simplified implementation.
-    // The user-space select() in libc converts fd_sets to pollfd
-    // arrays and calls poll() directly. This kernel-side select
-    // is provided for completeness but may not be called if libc
-    // does the conversion itself.
-    let _ = (nfds, readfds_ptr, writefds_ptr, exceptfds_ptr, timeout_ptr);
+    // fd_set is a bitmap: 1 bit per fd, packed into usize-width words.
+    // FD_SETSIZE is typically 1024, but we cap at nfds.
+    let nfds = nfds.min(1024);
+    if nfds == 0 {
+        return Ok(0);
+    }
 
-    // For now, return 0 (no fds ready, immediate timeout).
-    // The libc select() implementation uses poll() directly,
-    // so this kernel path is not critical.
-    Ok(0)
+    // Number of bytes needed for the bitmap
+    let bytes_needed = nfds.div_ceil(8);
+    let mut ready_count: usize = 0;
+
+    // Helper: scan an fd_set bitmap and count ready fds.
+    // All existing fds are considered ready (files/pipes always ready).
+    let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file_table = process.file_table.lock();
+
+    for fdset_ptr in [readfds_ptr, writefds_ptr] {
+        if fdset_ptr == 0 {
+            continue;
+        }
+        validate_user_buffer(fdset_ptr, bytes_needed)?;
+        for fd in 0..nfds {
+            let byte_idx = fd / 8;
+            let bit_idx = fd % 8;
+            // SAFETY: fdset_ptr validated above; byte_idx < bytes_needed.
+            let byte_val = unsafe { core::ptr::read_volatile((fdset_ptr + byte_idx) as *const u8) };
+            if byte_val & (1 << bit_idx) != 0 {
+                // Check if this fd exists in the file table
+                if file_table.get(fd).is_some() {
+                    ready_count += 1;
+                } else {
+                    // Clear the bit for fds that don't exist
+                    let cleared = byte_val & !(1 << bit_idx);
+                    // SAFETY: same pointer, validated above.
+                    unsafe {
+                        core::ptr::write_volatile((fdset_ptr + byte_idx) as *mut u8, cleared);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(ready_count)
 }

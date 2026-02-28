@@ -107,6 +107,29 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
         }
     }
 
+    // Inherit container membership from parent so forked children
+    // stay inside the same container namespace.
+    {
+        let cid = current_process
+            .container_id
+            .load(core::sync::atomic::Ordering::Acquire);
+        new_process
+            .container_id
+            .store(cid, core::sync::atomic::Ordering::Release);
+        if cid != 0 {
+            // Register child in the container's PID namespace
+            #[cfg(target_arch = "x86_64")]
+            {
+                let mut mgr = crate::virt::container::CONTAINER_MGR.lock();
+                if let Some(ref mut mgr) = *mgr {
+                    if let Some(container) = mgr.get_mut(cid) {
+                        container.namespaces.pid.add_process(new_pid);
+                    }
+                }
+            }
+        }
+    }
+
     // Inherit uid, gid, pgid, sid from parent
     // (ProcessBuilder doesn't copy these, so do it manually)
     // uid/gid are non-atomic, but the new_process is not yet visible

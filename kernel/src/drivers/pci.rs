@@ -849,6 +849,54 @@ pub fn get_pci_bus() -> &'static spin::Mutex<PciBus> {
     PCI_BUS.get().expect("PCI bus not initialized")
 }
 
+/// Probe enumerated PCI devices and initialize known VirtIO drivers.
+///
+/// Called after `enumerate_devices()` during bootstrap. Each driver's `init()`
+/// handles the case where no matching device is present, so spurious calls are
+/// harmless.
+pub fn probe_known_drivers() {
+    if !is_pci_initialized() {
+        return;
+    }
+    let devices = get_pci_bus().lock().get_all_devices();
+    for dev in &devices {
+        match (dev.vendor_id, dev.device_id) {
+            // VirtIO GPU (transitional 0x1050, legacy 0x1040)
+            (0x1AF4, 0x1050) | (0x1AF4, 0x1040) => {
+                crate::println!(
+                    "  [pci] Probing VirtIO GPU ({:#06x}:{:#06x})",
+                    dev.vendor_id,
+                    dev.device_id
+                );
+                let _ = crate::drivers::virtio_gpu::init();
+            }
+            // VirtIO Net (transitional 0x1041, legacy 0x1000)
+            (0x1AF4, 0x1041) | (0x1AF4, 0x1000) => {
+                crate::println!(
+                    "  [pci] Probing VirtIO Net ({:#06x}:{:#06x})",
+                    dev.vendor_id,
+                    dev.device_id
+                );
+                let _ = crate::drivers::virtio_net::init();
+            }
+            // VirtIO Sound (0x1059)
+            (0x1AF4, 0x1059) => {
+                crate::println!(
+                    "  [pci] Probing VirtIO Sound ({:#06x}:{:#06x})",
+                    dev.vendor_id,
+                    dev.device_id
+                );
+                let _ = crate::audio::virtio_sound::init();
+            }
+            // VirtIO Block (transitional 0x1042, legacy 0x1001)
+            (0x1AF4, 0x1042) | (0x1AF4, 0x1001) => {
+                // VirtIO-blk is initialized separately via blk::init()
+            }
+            _ => {}
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MSI / MSI-X configuration
 // ---------------------------------------------------------------------------

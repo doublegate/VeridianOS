@@ -154,6 +154,10 @@ pub struct Process {
     /// Set by exec_process when loading an ELF with PT_TLS segment.
     /// Read by sys_exec before enter_usermode to set MSR 0xC0000100.
     pub tls_fs_base: AtomicU64,
+
+    /// Container ID (0 = not containerized). Inherited by forked children
+    /// so processes cannot escape their container namespace.
+    pub container_id: AtomicU64,
 }
 
 /// Memory usage statistics
@@ -202,6 +206,7 @@ impl Process {
             signal_mask: AtomicU64::new(0),
             umask: AtomicU32::new(0o022),
             tls_fs_base: AtomicU64::new(0),
+            container_id: AtomicU64::new(0),
         }
     }
 

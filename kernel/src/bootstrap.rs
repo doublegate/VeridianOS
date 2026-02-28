@@ -3,12 +3,12 @@
 //! This module handles the multi-stage initialization process to avoid
 //! circular dependencies between subsystems.
 
+#[cfg(target_arch = "x86_64")]
+use crate::virt;
 use crate::{
     arch, audio, cap, desktop, error::KernelResult, fs, graphics, ipc, irq, mm, net, perf, pkg,
     process, sched, security, services, timer, video,
 };
-#[cfg(target_arch = "x86_64")]
-use crate::virt;
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -482,6 +482,8 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
                 let pci_bus = crate::drivers::pci::get_pci_bus().lock();
                 let _ = pci_bus.enumerate_devices();
             }
+            // Probe for known VirtIO drivers (GPU, Net, Sound)
+            crate::drivers::pci::probe_known_drivers();
         }
 
         // blk::init() dispatches to PCI probe on x86_64, MMIO probe on
