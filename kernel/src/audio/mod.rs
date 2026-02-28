@@ -14,8 +14,8 @@ pub mod buffer;
 pub mod client;
 pub mod mixer;
 pub mod pipeline;
-pub mod wav;
 mod virtio_sound;
+pub mod wav;
 
 use alloc::string::String;
 

@@ -9,8 +9,7 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::audio::AudioConfig;
-use crate::error::KernelError;
+use crate::{audio::AudioConfig, error::KernelError};
 
 // ============================================================================
 // Pipeline State
@@ -235,7 +234,8 @@ mod tests {
         let config = test_config();
         let pipeline = AudioPipeline::new(config);
         assert_eq!(pipeline.state(), PipelineState::Idle);
-        assert_eq!(pipeline.output_buffer.len(), 256 * 2); // 256 frames * 2 channels
+        assert_eq!(pipeline.output_buffer.len(), 256 * 2); // 256 frames * 2
+                                                           // channels
     }
 
     #[test]

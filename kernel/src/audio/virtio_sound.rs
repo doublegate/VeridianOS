@@ -22,9 +22,10 @@
 
 use alloc::vec::Vec;
 
-use crate::audio::AudioConfig;
-use crate::audio::SampleFormat;
-use crate::error::KernelError;
+use crate::{
+    audio::{AudioConfig, SampleFormat},
+    error::KernelError,
+};
 
 // ============================================================================
 // VirtIO Sound Protocol Constants
@@ -445,11 +446,7 @@ impl VirtioSoundDevice {
     /// Write PCM data to a stream's TX queue
     ///
     /// Returns the number of samples actually queued for playback.
-    pub fn write_pcm(
-        &mut self,
-        stream_id: u32,
-        data: &[i16],
-    ) -> Result<usize, KernelError> {
+    pub fn write_pcm(&mut self, stream_id: u32, data: &[i16]) -> Result<usize, KernelError> {
         if !self.initialized {
             return Err(KernelError::InvalidState {
                 expected: "initialized",
@@ -473,12 +470,8 @@ impl VirtioSoundDevice {
             )
         };
 
-        let pcm_bytes = unsafe {
-            core::slice::from_raw_parts(
-                data.as_ptr() as *const u8,
-                data.len() * 2,
-            )
-        };
+        let pcm_bytes =
+            unsafe { core::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2) };
 
         // Accumulate in TX buffer (real driver would submit to virtqueue)
         self.tx_buffer.clear();
@@ -500,11 +493,7 @@ impl VirtioSoundDevice {
     // ========================================================================
 
     /// Send a simple PCM command (no extra parameters)
-    fn send_pcm_command(
-        &self,
-        stream_id: u32,
-        command: u32,
-    ) -> Result<(), KernelError> {
+    fn send_pcm_command(&self, stream_id: u32, command: u32) -> Result<(), KernelError> {
         let _cmd = VirtioSndPcmHdr {
             hdr: VirtioSndHdr { code: command },
             stream_id,
@@ -578,9 +567,7 @@ pub fn init() -> Result<(), KernelError> {
 }
 
 /// Access the global VirtIO Sound device through a closure
-pub fn with_device<R, F: FnOnce(&mut VirtioSoundDevice) -> R>(
-    f: F,
-) -> Result<R, KernelError> {
+pub fn with_device<R, F: FnOnce(&mut VirtioSoundDevice) -> R>(f: F) -> Result<R, KernelError> {
     let mut guard = VIRTIO_SOUND.lock();
     match guard.as_mut() {
         Some(device) => Ok(f(device)),

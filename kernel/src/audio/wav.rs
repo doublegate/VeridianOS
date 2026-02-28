@@ -15,8 +15,10 @@
 
 use alloc::vec::Vec;
 
-use crate::audio::{AudioConfig, SampleFormat};
-use crate::error::KernelError;
+use crate::{
+    audio::{AudioConfig, SampleFormat},
+    error::KernelError,
+};
 
 // ============================================================================
 // WAV File Constants
@@ -468,9 +470,9 @@ mod tests {
     fn test_convert_u8_to_s16() {
         let data = [128u8, 0, 255]; // Silence, min, max
         let result = convert_u8_to_s16(&data);
-        assert_eq!(result[0], 0);        // 128 -> 0
+        assert_eq!(result[0], 0); // 128 -> 0
         assert_eq!(result[1], -128 << 8); // 0 -> -128*256 = -32768
-        assert_eq!(result[2], 127 << 8);  // 255 -> 127*256 = 32512
+        assert_eq!(result[2], 127 << 8); // 255 -> 127*256 = 32512
     }
 
     #[test]

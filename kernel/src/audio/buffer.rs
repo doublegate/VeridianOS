@@ -254,10 +254,7 @@ impl SharedAudioBuffer {
     /// Returns the number of samples actually written.
     pub fn write_samples(&self, samples: &[i16]) -> usize {
         let bytes: &[u8] = unsafe {
-            core::slice::from_raw_parts(
-                samples.as_ptr() as *const u8,
-                samples.len() * 2,
-            )
+            core::slice::from_raw_parts(samples.as_ptr() as *const u8, samples.len() * 2)
         };
         let ring = self.inner.lock();
         let bytes_written = ring.write(bytes);
@@ -270,10 +267,7 @@ impl SharedAudioBuffer {
     /// Returns the number of samples actually read.
     pub fn read_samples(&self, output: &mut [i16]) -> usize {
         let bytes: &mut [u8] = unsafe {
-            core::slice::from_raw_parts_mut(
-                output.as_mut_ptr() as *mut u8,
-                output.len() * 2,
-            )
+            core::slice::from_raw_parts_mut(output.as_mut_ptr() as *mut u8, output.len() * 2)
         };
         let ring = self.inner.lock();
         let bytes_read = ring.read(bytes);

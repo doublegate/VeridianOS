@@ -6,13 +6,13 @@
 
 #![allow(dead_code)]
 
-use alloc::collections::BTreeMap;
-use alloc::string::String;
+use alloc::{collections::BTreeMap, string::String};
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::audio::buffer::SharedAudioBuffer;
-use crate::audio::AudioConfig;
-use crate::error::KernelError;
+use crate::{
+    audio::{buffer::SharedAudioBuffer, AudioConfig},
+    error::KernelError,
+};
 
 /// Default ring buffer capacity in frames
 const DEFAULT_BUFFER_FRAMES: u32 = 4096;
@@ -101,9 +101,7 @@ impl AudioClient {
         let buffer = SharedAudioBuffer::new(buffer_frames, config);
 
         // Register a mixer channel for this stream
-        let mixer_channel_id = crate::audio::mixer::with_mixer(|mixer| {
-            mixer.add_channel(name)
-        })?;
+        let mixer_channel_id = crate::audio::mixer::with_mixer(|mixer| mixer.add_channel(name))?;
 
         let stream = AudioStream {
             id: stream_id,
@@ -205,11 +203,7 @@ impl AudioClient {
     }
 
     /// Set the volume for a stream (0..65535 maps to 0.0..1.0)
-    pub fn set_volume(
-        &self,
-        id: AudioStreamId,
-        volume: u16,
-    ) -> Result<(), KernelError> {
+    pub fn set_volume(&self, id: AudioStreamId, volume: u16) -> Result<(), KernelError> {
         let stream = self.streams.get(&id.0).ok_or(KernelError::NotFound {
             resource: "audio stream",
             id: id.0 as u64,

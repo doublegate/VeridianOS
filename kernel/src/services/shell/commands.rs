@@ -3089,18 +3089,19 @@ impl BuiltinCommand for PlayCommand {
 
         // Create an audio stream, write samples, and play
         let config = wav.to_audio_config();
-        let result = crate::audio::client::with_client(|client: &mut crate::audio::client::AudioClient| {
-            let stream_id = client.create_stream(path, config)?;
-            client.write_samples(stream_id, &samples)?;
-            client.play(stream_id)?;
-            crate::println!(
-                "Queued {} samples ({} ms) on stream {}",
-                samples.len(),
-                wav.duration_ms(),
-                stream_id.as_u32()
-            );
-            Ok::<(), crate::error::KernelError>(())
-        });
+        let result =
+            crate::audio::client::with_client(|client: &mut crate::audio::client::AudioClient| {
+                let stream_id = client.create_stream(path, config)?;
+                client.write_samples(stream_id, &samples)?;
+                client.play(stream_id)?;
+                crate::println!(
+                    "Queued {} samples ({} ms) on stream {}",
+                    samples.len(),
+                    wav.duration_ms(),
+                    stream_id.as_u32()
+                );
+                Ok::<(), crate::error::KernelError>(())
+            });
 
         match result {
             Ok(Ok(())) => CommandResult::Success(0),
@@ -3127,11 +3128,12 @@ impl BuiltinCommand for VolumeCommand {
     fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
         if args.is_empty() {
             // Show current volume
-            let result = crate::audio::mixer::with_mixer(|mixer: &mut crate::audio::mixer::AudioMixer| {
-                let vol = mixer.get_master_volume();
-                let pct = (vol as u32 * 100) / 65535;
-                crate::println!("Master volume: {}% (raw: {})", pct, vol);
-            });
+            let result =
+                crate::audio::mixer::with_mixer(|mixer: &mut crate::audio::mixer::AudioMixer| {
+                    let vol = mixer.get_master_volume();
+                    let pct = (vol as u32 * 100) / 65535;
+                    crate::println!("Master volume: {}% (raw: {})", pct, vol);
+                });
             if let Err(e) = result {
                 crate::println!("volume: audio not initialized: {:?}", e);
                 return CommandResult::Error(String::from("audio not initialized"));
@@ -3169,10 +3171,11 @@ impl BuiltinCommand for VolumeCommand {
             };
 
             let stream_id = crate::audio::client::AudioStreamId(stream_id_val);
-            let result =
-                crate::audio::client::with_client(|client: &mut crate::audio::client::AudioClient| {
+            let result = crate::audio::client::with_client(
+                |client: &mut crate::audio::client::AudioClient| {
                     client.set_volume(stream_id, raw_vol)
-                });
+                },
+            );
 
             match result {
                 Ok(Ok(())) => {
@@ -3190,9 +3193,10 @@ impl BuiltinCommand for VolumeCommand {
             }
         } else {
             // Master volume
-            let result = crate::audio::mixer::with_mixer(|mixer: &mut crate::audio::mixer::AudioMixer| {
-                mixer.set_master_volume(raw_vol);
-            });
+            let result =
+                crate::audio::mixer::with_mixer(|mixer: &mut crate::audio::mixer::AudioMixer| {
+                    mixer.set_master_volume(raw_vol);
+                });
 
             match result {
                 Ok(()) => {

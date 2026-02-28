@@ -15,8 +15,7 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::error::KernelError;
@@ -172,7 +171,9 @@ impl MixerChannel {
 
     /// Number of samples remaining in this channel's buffer
     fn available_samples(&self) -> usize {
-        self.samples.len().saturating_sub(self.buffer_index as usize)
+        self.samples
+            .len()
+            .saturating_sub(self.buffer_index as usize)
     }
 }
 
@@ -444,8 +445,11 @@ mod tests {
         // With full channel and master volume, samples pass through
         // (volume is 65535/65536 ~= 1.0 so there may be tiny rounding)
         for &sample in &output {
-            assert!(sample > 16000 && sample < 16500,
-                "Expected ~16384, got {}", sample);
+            assert!(
+                sample > 16000 && sample < 16500,
+                "Expected ~16384, got {}",
+                sample
+            );
         }
     }
 
