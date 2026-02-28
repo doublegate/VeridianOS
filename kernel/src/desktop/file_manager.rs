@@ -3,15 +3,12 @@
 //! Provides graphical file browsing and management using the window manager and
 //! VFS.
 
-use alloc::{format, string::String, vec::Vec};
+use alloc::{format, string::String, vec, vec::Vec};
 
 use spin::RwLock;
 
 use crate::{
-    desktop::{
-        font::{with_font_manager, FontSize, FontStyle},
-        window_manager::{with_window_manager, InputEvent, WindowId},
-    },
+    desktop::window_manager::{with_window_manager, InputEvent, WindowId},
     error::KernelError,
     fs::{get_vfs, NodeType},
     sync::once_lock::GlobalState,
@@ -19,19 +16,26 @@ use crate::{
 
 /// File entry in the browser
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Phase 6 GUI stub
 struct FileEntry {
     name: String,
     node_type: NodeType,
+    #[allow(dead_code)] // Set during directory scan; displayed when file details view is added
     size: usize,
+    #[allow(dead_code)] // Set via UI interaction; used in multi-select operations (future)
     selected: bool,
 }
 
 /// File manager state
-#[allow(dead_code)] // Phase 6 GUI stub
 pub struct FileManager {
     /// Window ID
     window_id: WindowId,
+
+    /// Compositor surface ID
+    surface_id: u32,
+    /// SHM pool ID
+    pool_id: u32,
+    /// Pool buffer ID
+    pool_buf_id: u32,
 
     /// Current directory path
     current_path: String,
@@ -63,8 +67,15 @@ impl FileManager {
             actual: "uninitialized",
         })??;
 
+        // Create compositor surface
+        let (surface_id, pool_id, pool_buf_id) =
+            super::renderer::create_app_surface(200, 100, width, height);
+
         let mut fm = Self {
             window_id,
+            surface_id,
+            pool_id,
+            pool_buf_id,
             current_path: String::from("/"),
             entries: Vec::new(),
             selected_index: 0,
@@ -245,62 +256,83 @@ impl FileManager {
         Ok(())
     }
 
-    /// Render file manager
-    pub fn render(
-        &self,
-        framebuffer: &mut [u8],
-        fb_width: usize,
-        fb_height: usize,
-    ) -> Result<(), KernelError> {
-        // Clear background
-        for pixel in framebuffer.iter_mut() {
-            *pixel = 32; // Dark gray
+    /// Render file manager to a BGRA pixel buffer.
+    ///
+    /// `buf` is width*height*4 bytes in BGRA format.
+    pub fn render(&self, buf: &mut [u8], width: usize, _height: usize) -> Result<(), KernelError> {
+        use super::renderer::draw_char_into_buffer;
+
+        // Clear to dark gray background (BGRA: 0x2A2A2A)
+        for chunk in buf.chunks_exact_mut(4) {
+            chunk[0] = 0x2A; // B
+            chunk[1] = 0x2A; // G
+            chunk[2] = 0x2A; // R
+            chunk[3] = 0xFF; // A
         }
 
-        // Render header
-        let header = format!("File Manager - {}", self.current_path);
-        let _ = with_font_manager(|fm| {
-            if let Some(font) = fm.get_font(FontSize::Medium, FontStyle::Regular) {
-                let _ = font.render_text(&header, framebuffer, fb_width, fb_height, 10, 10);
-            }
-        });
+        // Draw header: current path
+        let header = self.current_path.as_bytes();
+        let prefix = b"Path: ";
+        for (i, &ch) in prefix.iter().chain(header.iter()).enumerate() {
+            draw_char_into_buffer(buf, width, ch, 8 + i * 8, 6, 0xDDDDDD);
+        }
 
-        // Render entries
-        let line_height = 20;
-        let start_y = 40;
+        // Draw separator line at y=24
+        for x in 0..width {
+            let offset = (24 * width + x) * 4;
+            if offset + 3 < buf.len() {
+                buf[offset] = 0x55;
+                buf[offset + 1] = 0x55;
+                buf[offset + 2] = 0x55;
+                buf[offset + 3] = 0xFF;
+            }
+        }
+
+        // Draw entries
+        let line_height = 18;
+        let start_y = 28;
 
         for (i, entry) in self.entries.iter().enumerate().skip(self.scroll_offset) {
-            let y = start_y + (i - self.scroll_offset) as i32 * line_height;
+            let row = i - self.scroll_offset;
+            let y = start_y + row * line_height;
 
-            // Highlight selected
+            // Highlight selected row
             if i == self.selected_index {
-                // Draw selection highlight (simplified)
                 for dy in 0..line_height {
-                    for dx in 0..fb_width.min(self.width as usize) {
-                        let py = y + dy;
-                        if py >= 0 && (py as usize) < fb_height {
-                            let index = py as usize * fb_width + dx;
-                            if index < framebuffer.len() {
-                                framebuffer[index] = 64; // Lighter gray
-                            }
+                    for x in 0..width {
+                        let offset = ((y + dy) * width + x) * 4;
+                        if offset + 3 < buf.len() {
+                            buf[offset] = 0x50;
+                            buf[offset + 1] = 0x40;
+                            buf[offset + 2] = 0x30;
+                            buf[offset + 3] = 0xFF;
                         }
                     }
                 }
             }
 
-            // Render entry
-            let prefix = match entry.node_type {
-                NodeType::Directory => "[DIR]  ",
-                NodeType::File => "[FILE] ",
-                _ => "[?]    ",
+            // Draw prefix [DIR] or [FILE]
+            let prefix: &[u8] = match entry.node_type {
+                NodeType::Directory => b"[DIR]  ",
+                NodeType::File => b"[FILE] ",
+                _ => b"[?]    ",
             };
 
-            let entry_text = format!("{}{}", prefix, entry.name);
-            let _ = with_font_manager(|fm| {
-                if let Some(font) = fm.get_font(FontSize::Medium, FontStyle::Regular) {
-                    let _ = font.render_text(&entry_text, framebuffer, fb_width, fb_height, 15, y);
-                }
-            });
+            let (text_color, prefix_color) = match entry.node_type {
+                NodeType::Directory => (0x55AAFF_u32, 0x55AAFF_u32),
+                _ => (0xCCCCCC, 0x888888),
+            };
+
+            // Draw prefix
+            for (j, &ch) in prefix.iter().enumerate() {
+                draw_char_into_buffer(buf, width, ch, 8 + j * 8, y + 1, prefix_color);
+            }
+
+            // Draw entry name
+            let name_x = 8 + prefix.len() * 8;
+            for (j, &ch) in entry.name.as_bytes().iter().enumerate() {
+                draw_char_into_buffer(buf, width, ch, name_x + j * 8, y + 1, text_color);
+            }
         }
 
         Ok(())
@@ -309,6 +341,20 @@ impl FileManager {
     /// Get window ID
     pub fn window_id(&self) -> WindowId {
         self.window_id
+    }
+
+    /// Render file manager contents to its compositor surface.
+    pub fn render_to_surface(&self) {
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let mut pixels = vec![0u8; w * h * 4];
+        let _ = self.render(&mut pixels, w, h);
+        super::renderer::update_surface_pixels(
+            self.surface_id,
+            self.pool_id,
+            self.pool_buf_id,
+            &pixels,
+        );
     }
 }
 

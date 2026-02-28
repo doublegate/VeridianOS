@@ -10,10 +10,7 @@ use alloc::{format, string::String, vec, vec::Vec};
 use spin::RwLock;
 
 use crate::{
-    desktop::{
-        font::{with_font_manager, FontSize, FontStyle},
-        window_manager::{with_window_manager, InputEvent, WindowId},
-    },
+    desktop::window_manager::{with_window_manager, InputEvent, WindowId},
     error::KernelError,
     fs::{get_vfs, OpenFlags},
     sync::once_lock::GlobalState,
@@ -23,10 +20,16 @@ use crate::{
 type Line = Vec<char>;
 
 /// Text editor state
-#[allow(dead_code)] // Phase 6 desktop GUI fields
 pub struct TextEditor {
     /// Window ID
     window_id: WindowId,
+
+    /// Compositor surface ID
+    surface_id: u32,
+    /// SHM pool ID
+    pool_id: u32,
+    /// Pool buffer ID
+    pool_buf_id: u32,
 
     /// File path (None if new file)
     file_path: Option<String>,
@@ -48,10 +51,12 @@ pub struct TextEditor {
     width: u32,
     height: u32,
 
-    /// Visible rows
+    /// Visible rows (used by render to limit line display)
+    #[allow(dead_code)] // Computed for future scroll-window rendering
     visible_rows: usize,
 
     /// Visible columns
+    #[allow(dead_code)] // Computed for future horizontal scroll rendering
     visible_cols: usize,
 }
 
@@ -68,14 +73,21 @@ impl TextEditor {
                 actual: "uninitialized",
             })??;
 
+        // Create compositor surface
+        let (surface_id, pool_id, pool_buf_id) =
+            super::renderer::create_app_surface(150, 80, width, height);
+
         // Calculate visible area
         let char_width = 8;
-        let char_height = 12;
+        let char_height = 16;
         let visible_cols = (width as usize) / char_width;
-        let visible_rows = ((height as usize) - 40) / char_height; // -40 for status bar
+        let visible_rows = ((height as usize) - 24) / char_height; // -24 for status bar
 
         let mut editor = Self {
             window_id,
+            surface_id,
+            pool_id,
+            pool_buf_id,
             file_path: file_path.clone(),
             buffer: vec![Vec::new()], // Start with one empty line
             cursor_line: 0,
@@ -322,30 +334,47 @@ impl TextEditor {
         }
     }
 
-    /// Render text editor
-    pub fn render(
-        &self,
-        framebuffer: &mut [u8],
-        fb_width: usize,
-        fb_height: usize,
-    ) -> Result<(), KernelError> {
-        // Clear background
-        for pixel in framebuffer.iter_mut() {
-            *pixel = 16; // Very dark gray
+    /// Render text editor to a BGRA pixel buffer.
+    ///
+    /// `buf` is width*height*4 bytes in BGRA format.
+    pub fn render(&self, buf: &mut [u8], width: usize, height: usize) -> Result<(), KernelError> {
+        use super::renderer::{draw_char_into_buffer, draw_string_into_buffer};
+
+        let char_h = 16;
+
+        // Clear to very dark gray (BGRA: 0x1E1E1E -- VS Code-like)
+        for chunk in buf.chunks_exact_mut(4) {
+            chunk[0] = 0x1E; // B
+            chunk[1] = 0x1E; // G
+            chunk[2] = 0x1E; // R
+            chunk[3] = 0xFF; // A
         }
 
-        // Get font and render status bar
+        // Status bar at top (dark blue-gray background)
+        for x in 0..width {
+            for dy in 0..20 {
+                let offset = (dy * width + x) * 4;
+                if offset + 3 < buf.len() {
+                    buf[offset] = 0x40; // B
+                    buf[offset + 1] = 0x30; // G
+                    buf[offset + 2] = 0x25; // R
+                    buf[offset + 3] = 0xFF;
+                }
+            }
+        }
+
+        // Build status text
         let status = if let Some(ref path) = self.file_path {
             if self.modified {
                 format!(
-                    "{}* - Line {}, Col {}",
+                    "{}* L{} C{}",
                     path,
                     self.cursor_line + 1,
                     self.cursor_col + 1
                 )
             } else {
                 format!(
-                    "{} - Line {}, Col {}",
+                    "{} L{} C{}",
                     path,
                     self.cursor_line + 1,
                     self.cursor_col + 1
@@ -353,59 +382,51 @@ impl TextEditor {
             }
         } else {
             format!(
-                "[New File] - Line {}, Col {}",
+                "[New File] L{} C{}",
                 self.cursor_line + 1,
                 self.cursor_col + 1
             )
         };
+        draw_string_into_buffer(buf, width, status.as_bytes(), 6, 2, 0xCCCCCC);
 
-        with_font_manager(|font_manager| {
-            if let Some(font) = font_manager.get_font(FontSize::Medium, FontStyle::Regular) {
-                let _ = font.render_text(&status, framebuffer, fb_width, fb_height, 5, 5);
-            }
-        })?;
-
-        // Render text
-        let char_height = 12;
-        let start_y = 30;
+        // Render text lines
+        let text_y_start = 24;
+        let max_visible = (height - text_y_start) / char_h;
 
         for (i, line) in self
             .buffer
             .iter()
             .enumerate()
             .skip(self.scroll_line)
-            .take(self.visible_rows)
+            .take(max_visible)
         {
-            let y = start_y + ((i - self.scroll_line) * char_height) as i32;
+            let row = i - self.scroll_line;
+            let y = text_y_start + row * char_h;
 
-            // Convert line to string
-            let line_str: String = line.iter().collect();
+            // Draw line number (dim)
+            let line_num = i + 1;
+            let num_str = format!("{:>4} ", line_num);
+            draw_string_into_buffer(buf, width, num_str.as_bytes(), 0, y, 0x606060);
 
-            // Render line
-            let _ = with_font_manager(|fm| {
-                if let Some(font) = fm.get_font(FontSize::Medium, FontStyle::Regular) {
-                    let _ = font.render_text(&line_str, framebuffer, fb_width, fb_height, 5, y);
+            // Draw text content
+            let text_x = 5 * 8; // After line number
+            for (j, &ch) in line.iter().enumerate() {
+                if ch as u32 >= 0x20 && (ch as u32) <= 0x7E {
+                    draw_char_into_buffer(buf, width, ch as u8, text_x + j * 8, y, 0xD4D4D4);
                 }
-            });
+            }
 
-            // Render cursor if on this line
+            // Draw cursor on this line
             if i == self.cursor_line {
-                let cursor_x = 5 + (self.cursor_col * 8) as i32;
-                // Draw cursor (vertical bar)
-                for dy in 0..char_height {
+                let cursor_px = text_x + self.cursor_col * 8;
+                for dy in 0..char_h {
                     for dx in 0..2 {
-                        let px = cursor_x + dx;
-                        let py = y + dy as i32;
-
-                        if px >= 0
-                            && py >= 0
-                            && (px as usize) < fb_width
-                            && (py as usize) < fb_height
-                        {
-                            let index = py as usize * fb_width + px as usize;
-                            if index < framebuffer.len() {
-                                framebuffer[index] = 255; // White cursor
-                            }
+                        let offset = ((y + dy) * width + cursor_px + dx) * 4;
+                        if offset + 3 < buf.len() {
+                            buf[offset] = 0xFF; // B
+                            buf[offset + 1] = 0xFF; // G
+                            buf[offset + 2] = 0xFF; // R
+                            buf[offset + 3] = 0xFF;
                         }
                     }
                 }
@@ -418,6 +439,20 @@ impl TextEditor {
     /// Get window ID
     pub fn window_id(&self) -> WindowId {
         self.window_id
+    }
+
+    /// Render text editor contents to its compositor surface.
+    pub fn render_to_surface(&self) {
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let mut pixels = vec![0u8; w * h * 4];
+        let _ = self.render(&mut pixels, w, h);
+        super::renderer::update_surface_pixels(
+            self.surface_id,
+            self.pool_id,
+            self.pool_buf_id,
+            &pixels,
+        );
     }
 }
 

@@ -5,11 +5,16 @@
 //! placeholder) and runs the compositing loop.
 
 use alloc::{vec, vec::Vec};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::graphics::{
     cursor,
     fbcon::{self, FbPixelFormat},
 };
+
+/// Global surface/pool ID counters for compositor objects.
+static NEXT_SURFACE_ID: AtomicU32 = AtomicU32::new(2000);
+static NEXT_POOL_ID: AtomicU32 = AtomicU32::new(200);
 
 /// Initialize the desktop environment and start the compositor.
 ///
@@ -56,7 +61,7 @@ pub fn start_desktop() {
     );
 
     // Create the initial desktop scene
-    create_desktop_scene(hw.width as u32, hw.height as u32);
+    let apps = create_desktop_scene(hw.width as u32, hw.height as u32);
 
     // Disable fbcon text output -- the compositor takes over the framebuffer
     fbcon::disable_output();
@@ -70,17 +75,26 @@ pub fn start_desktop() {
     crate::serial::_serial_print(format_args!("[DESKTOP] Entering compositor render loop\n"));
 
     // Render loop: composite -> blit to framebuffer -> poll input -> repeat
-    render_loop(&hw);
+    render_loop(&hw, &apps);
 
     // If we exit the render loop, re-enable fbcon
     fbcon::enable_output();
     crate::println!("[DESKTOP] GUI stopped, returning to text console");
 }
 
-/// Create the initial desktop scene with a background gradient and demo
-/// windows.
-fn create_desktop_scene(width: u32, height: u32) {
-    // Create a background surface covering the entire screen
+/// Window IDs for the three desktop applications, stored after scene creation.
+struct DesktopApps {
+    terminal_wid: u32,
+    file_manager_wid: u32,
+    text_editor_wid: u32,
+    panel_surface_id: u32,
+    panel_pool_id: u32,
+    panel_pool_buf_id: u32,
+}
+
+/// Create the initial desktop scene: background gradient, real apps, and panel.
+fn create_desktop_scene(width: u32, height: u32) -> DesktopApps {
+    // --- Background surface ---
     let bg_surface_id = 1000;
     crate::desktop::wayland::with_display(|display| {
         let _ = display.wl_compositor.create_surface(bg_surface_id);
@@ -89,19 +103,13 @@ fn create_desktop_scene(width: u32, height: u32) {
             .set_surface_position(bg_surface_id, 0, 0);
     });
 
-    // Create a gradient background in an SHM pool
     let pool_size = (width as usize) * (height as usize) * 4;
     let mut bg_pixels = vec![0u8; pool_size];
     paint_gradient_background(&mut bg_pixels, width as usize, height as usize);
 
-    // Register the pool and buffer
     let pool_id = 100;
     let mut pool = crate::desktop::wayland::buffer::WlShmPool::new(pool_id, 0, pool_size);
-
-    // Write the gradient pixels into the pool's backing memory
     pool.write_data(0, &bg_pixels);
-
-    // Create a buffer in the pool
     let buf_id = pool
         .create_buffer(
             0,
@@ -111,20 +119,17 @@ fn create_desktop_scene(width: u32, height: u32) {
             crate::desktop::wayland::buffer::PixelFormat::Xrgb8888,
         )
         .unwrap_or(0);
-
     crate::desktop::wayland::buffer::register_pool(pool);
 
-    // Attach the buffer to the background surface and commit
     let bg_buffer = crate::desktop::wayland::buffer::Buffer::from_pool(
-        1,       // buffer object ID
-        pool_id, // pool ID
-        buf_id,  // pool buffer ID (returned by create_buffer)
+        1,
+        pool_id,
+        buf_id,
         width,
         height,
         width * 4,
         crate::desktop::wayland::buffer::PixelFormat::Xrgb8888,
     );
-
     crate::desktop::wayland::with_display(|display| {
         display
             .wl_compositor
@@ -136,103 +141,75 @@ fn create_desktop_scene(width: u32, height: u32) {
         display.wl_compositor.request_composite();
     });
 
-    // Create a demo window (colored rectangle) in the center
-    create_demo_window(width, height, 200, 100, 400, 300, 0xFF1A73E8); // Blue
-    create_demo_window(width, height, 350, 200, 350, 250, 0xFF34A853); // Green
+    // --- Initialize panel ---
+    let panel_h = crate::desktop::panel::PANEL_HEIGHT;
+    let _ = crate::desktop::panel::init(width, height);
+    let (panel_surface_id, panel_pool_id, panel_pool_buf_id) =
+        create_app_surface(0, (height - panel_h) as i32, width, panel_h);
+
+    // --- Create real applications ---
+    // Terminal: 640x384 (80cols x 24rows x 16px)
+    let terminal_wid =
+        crate::desktop::terminal::with_terminal_manager(|tm| match tm.create_terminal(640, 384) {
+            Ok(idx) => tm.get_window_id(idx).unwrap_or(0),
+            Err(_) => 0,
+        })
+        .unwrap_or(0);
+
+    // File manager: 640x480
+    let file_manager_wid = if crate::desktop::file_manager::create_file_manager().is_ok() {
+        crate::desktop::file_manager::with_file_manager(|fm| fm.read().window_id()).unwrap_or(0)
+    } else {
+        0
+    };
+
+    // Text editor: 800x600
+    let text_editor_wid = if crate::desktop::text_editor::create_text_editor(None).is_ok() {
+        crate::desktop::text_editor::with_text_editor(|te| te.read().window_id()).unwrap_or(0)
+    } else {
+        0
+    };
+
+    // Focus the terminal by default
+    if terminal_wid > 0 {
+        crate::desktop::window_manager::with_window_manager(|wm| {
+            let _ = wm.focus_window(terminal_wid as u32);
+        });
+    }
 
     crate::serial::_serial_print(format_args!(
-        "[DESKTOP] Desktop scene created: bg + 2 demo windows\n"
+        "[DESKTOP] Desktop scene created: bg + terminal({}) + files({}) + editor({}) + panel\n",
+        terminal_wid, file_manager_wid, text_editor_wid
     ));
+
+    DesktopApps {
+        terminal_wid: terminal_wid as u32,
+        file_manager_wid,
+        text_editor_wid,
+        panel_surface_id,
+        panel_pool_id,
+        panel_pool_buf_id,
+    }
 }
 
-/// Create a demo window surface with a solid color + title bar.
-fn create_demo_window(_screen_w: u32, _screen_h: u32, x: i32, y: i32, w: u32, h: u32, color: u32) {
-    static NEXT_SURFACE_ID: core::sync::atomic::AtomicU32 =
-        core::sync::atomic::AtomicU32::new(2000);
-    static NEXT_POOL_ID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(200);
-
-    let surface_id = NEXT_SURFACE_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    let pool_id = NEXT_POOL_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-
-    // Create surface
-    crate::desktop::wayland::with_display(|display| {
-        let _ = display.wl_compositor.create_surface(surface_id);
-        display.wl_compositor.set_surface_position(surface_id, x, y);
-    });
-
-    // Create pixel data: title bar (dark) + body (color)
-    let pool_size = (w as usize) * (h as usize) * 4;
-    let mut pixels = vec![0u8; pool_size];
-    let title_bar_height = 28;
-
-    for row in 0..h as usize {
-        for col in 0..w as usize {
-            let offset = (row * w as usize + col) * 4;
-            let pixel_color = if row < title_bar_height {
-                // Title bar: dark gray
-                0xFF333333u32
-            } else if row == title_bar_height {
-                // Border line
-                0xFF555555u32
-            } else {
-                color
-            };
-            // BGRA format
-            pixels[offset] = (pixel_color & 0xFF) as u8; // B
-            pixels[offset + 1] = ((pixel_color >> 8) & 0xFF) as u8; // G
-            pixels[offset + 2] = ((pixel_color >> 16) & 0xFF) as u8; // R
-            pixels[offset + 3] = 0xFF; // A
-        }
+/// Draw a string into a BGRA pixel buffer at (px, py) with the given color.
+///
+/// Uses the 8x16 VGA font. Characters are spaced 8 pixels apart horizontally.
+pub fn draw_string_into_buffer(
+    buf: &mut [u8],
+    buf_width: usize,
+    text: &[u8],
+    px: usize,
+    py: usize,
+    color: u32,
+) {
+    for (i, &ch) in text.iter().enumerate() {
+        draw_char_into_buffer(buf, buf_width, ch, px + i * 8, py, color);
     }
-
-    // Draw title bar text "Window" using font glyphs
-    let title = b"VeridianOS";
-    for (i, &ch) in title.iter().enumerate() {
-        draw_char_into_buffer(&mut pixels, w as usize, ch, 8 + i * 8, 6, 0xCCCCCC);
-    }
-
-    // Draw close button (X) in top-right
-    let close_x = w as usize - 24;
-    draw_char_into_buffer(&mut pixels, w as usize, b'X', close_x, 6, 0xFF4444);
-
-    // Register pool + buffer
-    let mut pool = crate::desktop::wayland::buffer::WlShmPool::new(pool_id, 0, pool_size);
-    pool.write_data(0, &pixels);
-    let win_buf_id = pool
-        .create_buffer(
-            0,
-            w,
-            h,
-            w * 4,
-            crate::desktop::wayland::buffer::PixelFormat::Xrgb8888,
-        )
-        .unwrap_or(0);
-    crate::desktop::wayland::buffer::register_pool(pool);
-
-    let buffer = crate::desktop::wayland::buffer::Buffer::from_pool(
-        surface_id + 100,
-        pool_id,
-        win_buf_id,
-        w,
-        h,
-        w * 4,
-        crate::desktop::wayland::buffer::PixelFormat::Xrgb8888,
-    );
-
-    crate::desktop::wayland::with_display(|display| {
-        display
-            .wl_compositor
-            .with_surface_mut(surface_id, |surface| {
-                surface.attach_buffer(buffer.clone());
-                surface.damage_full();
-                let _ = surface.commit();
-            });
-        display.wl_compositor.request_composite();
-    });
 }
 
 /// Draw a single 8x16 character into a BGRA pixel buffer.
-fn draw_char_into_buffer(
+pub fn draw_char_into_buffer(
     buf: &mut [u8],
     buf_width: usize,
     ch: u8,
@@ -260,6 +237,82 @@ fn draw_char_into_buffer(
             }
         }
     }
+}
+
+/// Create a compositor surface backed by a SHM pool + buffer.
+///
+/// Returns `(surface_id, pool_id, pool_buf_id)` for later use with
+/// `update_surface_pixels`.
+pub fn create_app_surface(x: i32, y: i32, w: u32, h: u32) -> (u32, u32, u32) {
+    let surface_id = NEXT_SURFACE_ID.fetch_add(1, Ordering::Relaxed);
+    let pool_id = NEXT_POOL_ID.fetch_add(1, Ordering::Relaxed);
+
+    // Create compositor surface
+    crate::desktop::wayland::with_display(|display| {
+        let _ = display.wl_compositor.create_surface(surface_id);
+        display.wl_compositor.set_surface_position(surface_id, x, y);
+    });
+
+    // Create SHM pool
+    let pool_size = (w as usize) * (h as usize) * 4;
+    let mut pool = crate::desktop::wayland::buffer::WlShmPool::new(pool_id, 0, pool_size);
+
+    // Create buffer in pool
+    let pool_buf_id = pool
+        .create_buffer(
+            0,
+            w,
+            h,
+            w * 4,
+            crate::desktop::wayland::buffer::PixelFormat::Xrgb8888,
+        )
+        .unwrap_or(0);
+
+    crate::desktop::wayland::buffer::register_pool(pool);
+
+    // Attach an initial buffer to the surface
+    let buffer = crate::desktop::wayland::buffer::Buffer::from_pool(
+        surface_id + 1000,
+        pool_id,
+        pool_buf_id,
+        w,
+        h,
+        w * 4,
+        crate::desktop::wayland::buffer::PixelFormat::Xrgb8888,
+    );
+
+    crate::desktop::wayland::with_display(|display| {
+        display
+            .wl_compositor
+            .with_surface_mut(surface_id, |surface| {
+                surface.attach_buffer(buffer.clone());
+                surface.damage_full();
+                let _ = surface.commit();
+            });
+    });
+
+    (surface_id, pool_id, pool_buf_id)
+}
+
+/// Update the pixel data for an app surface and request recomposite.
+///
+/// `pixels` must be exactly `w * h * 4` bytes (BGRA).
+pub fn update_surface_pixels(surface_id: u32, pool_id: u32, pool_buf_id: u32, pixels: &[u8]) {
+    // Write pixel data into pool backing memory
+    crate::desktop::wayland::buffer::with_pool_mut(pool_id, |pool| {
+        pool.write_buffer_pixels(pool_buf_id, pixels);
+    });
+
+    // Mark surface as damaged and request recomposite
+    crate::desktop::wayland::with_display(|display| {
+        display
+            .wl_compositor
+            .with_surface_mut(surface_id, |surface| {
+                surface.damage_full();
+                let _ = surface.commit();
+            });
+        display.wl_compositor.request_composite();
+    });
 }
 
 /// Paint a gradient background into a BGRA pixel buffer.
@@ -299,53 +352,160 @@ fn paint_gradient_background(buf: &mut [u8], width: usize, height: usize) {
     }
 }
 
+/// Translate a raw input_event::InputEvent to a window_manager::InputEvent.
+fn translate_input_event(
+    raw: &crate::drivers::input_event::InputEvent,
+    mouse_x: i32,
+    mouse_y: i32,
+) -> Option<crate::desktop::window_manager::InputEvent> {
+    use crate::{desktop::window_manager::InputEvent as WmEvent, drivers::input_event::*};
+
+    match raw.event_type {
+        EV_KEY => {
+            let code = raw.code;
+            let pressed = raw.value != 0;
+
+            // Mouse buttons (BTN_LEFT=0x110, BTN_RIGHT=0x111, BTN_MIDDLE=0x112)
+            if (BTN_LEFT..=BTN_MIDDLE).contains(&code) {
+                let button = (code - BTN_LEFT) as u8;
+                return Some(WmEvent::MouseButton {
+                    button,
+                    pressed,
+                    x: mouse_x,
+                    y: mouse_y,
+                });
+            }
+
+            // Keyboard: code is the decoded ASCII byte from the PS/2 driver
+            if pressed {
+                // Map some codes to characters
+                let ch = if code < 0x80 {
+                    code as u8 as char
+                } else {
+                    '\0'
+                };
+                Some(WmEvent::KeyPress {
+                    scancode: code as u8,
+                    character: ch,
+                })
+            } else {
+                Some(WmEvent::KeyRelease {
+                    scancode: code as u8,
+                })
+            }
+        }
+        EV_REL => {
+            // Mouse movement: we use absolute cursor position, not relative deltas,
+            // for the WM events. Movement updates happen in cursor_position().
+            // Only emit MouseMove if we see REL_X (to avoid double events for X+Y).
+            if raw.code == REL_X {
+                Some(WmEvent::MouseMove {
+                    x: mouse_x,
+                    y: mouse_y,
+                })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Main compositor render loop.
 ///
 /// Composites all Wayland surfaces, blits to the hardware framebuffer,
-/// and polls for mouse/keyboard input.
-fn render_loop(hw: &fbcon::FbHwInfo) {
+/// routes input events through the window manager to applications.
+fn render_loop(hw: &fbcon::FbHwInfo, apps: &DesktopApps) {
     let fb_ptr = hw.fb_ptr;
     let fb_width = hw.width;
     let fb_height = hw.height;
     let fb_stride = hw.stride;
     let is_bgr = matches!(hw.pixel_format, FbPixelFormat::Bgr);
+    let panel_y = (fb_height as u32 - crate::desktop::panel::PANEL_HEIGHT) as i32;
 
     // Initial composite
     let _drawn = crate::desktop::wayland::with_display(|display| display.wl_compositor.composite());
+
+    // Do initial render of all app surfaces
+    render_all_apps(apps);
 
     let mut frame_count: u64 = 0;
 
     loop {
         frame_count += 1;
 
-        // Poll input events
+        // --- 1. Poll hardware input ---
         crate::drivers::input_event::poll_all();
-
-        // Get mouse position for cursor rendering
         let (mouse_x, mouse_y) = crate::drivers::mouse::cursor_position();
 
-        // Check if any key was pressed (ESC to exit GUI)
-        while let Some(event) = crate::drivers::input_event::read_event() {
-            if event.event_type == crate::drivers::input_event::EV_KEY
-                && event.code == 0x1B  // ESC key
-                && event.value == 1
+        // --- 2. Translate and dispatch input events ---
+        while let Some(raw_event) = crate::drivers::input_event::read_event() {
+            // ESC exits the GUI
+            if raw_event.event_type == crate::drivers::input_event::EV_KEY
+                && raw_event.code == 0x1B
+                && raw_event.value == 1
             {
                 crate::serial::_serial_print(format_args!("[DESKTOP] ESC pressed, exiting GUI\n"));
                 return;
             }
+
+            if let Some(wm_event) = translate_input_event(&raw_event, mouse_x, mouse_y) {
+                // Check for panel click
+                if let crate::desktop::window_manager::InputEvent::MouseButton {
+                    pressed: true,
+                    y,
+                    x,
+                    ..
+                } = wm_event
+                {
+                    if y >= panel_y {
+                        // Click is in the panel area -- handle panel click
+                        if let Some(focus_wid) =
+                            crate::desktop::panel::with_panel(|p| p.handle_click(x, y - panel_y))
+                                .flatten()
+                        {
+                            crate::desktop::window_manager::with_window_manager(|wm| {
+                                let _ = wm.focus_window(focus_wid);
+                            });
+                        }
+                        continue;
+                    }
+                }
+
+                // Dispatch to window manager (handles focus, queuing)
+                crate::desktop::window_manager::with_window_manager(|wm| {
+                    wm.process_input(wm_event);
+                });
+            }
         }
 
-        // Composite if needed (or every 60th frame for periodic refresh)
-        let should_composite = frame_count.is_multiple_of(60);
+        // --- 3. Forward queued WM events to apps ---
+        forward_events_to_apps(apps);
 
-        if should_composite {
-            crate::desktop::wayland::with_display(|display| {
-                display.wl_compositor.request_composite();
-                let _ = display.wl_compositor.composite();
-            });
+        // --- 4. Update app state ---
+        // Terminal: read PTY output
+        crate::desktop::terminal::with_terminal_manager(|tm| {
+            let _ = tm.update_all();
+        });
+
+        // --- 5. Render apps and panel to surfaces (every 4th frame ~7.5fps for
+        // content) ---
+        if frame_count.is_multiple_of(4) {
+            render_all_apps(apps);
         }
 
-        // Blit compositor back-buffer to hardware framebuffer
+        // Panel: update clock + buttons periodically (every 60th frame ~0.5fps)
+        if frame_count.is_multiple_of(60) {
+            render_panel(apps, fb_width as u32);
+        }
+
+        // --- 6. Composite and blit ---
+        // Composite every frame since apps may have updated
+        crate::desktop::wayland::with_display(|display| {
+            display.wl_compositor.request_composite();
+            let _ = display.wl_compositor.composite();
+        });
+
         let back_buffer: Vec<u32> =
             crate::desktop::wayland::with_display(|display| display.wl_compositor.back_buffer())
                 .unwrap_or_default();
@@ -360,10 +520,96 @@ fn render_loop(hw: &fbcon::FbHwInfo) {
             cursor::draw_cursor(fb_slice, fb_stride, fb_width, fb_height, mouse_x, mouse_y);
         }
 
-        // ~30fps: yield CPU time to other tasks
-        // On QEMU with KVM this is fast enough; without KVM it'll be slower
+        // ~30fps: yield CPU time
         for _ in 0..100_000 {
             core::hint::spin_loop();
+        }
+    }
+}
+
+/// Render all desktop app surfaces.
+fn render_all_apps(apps: &DesktopApps) {
+    // Terminal
+    if apps.terminal_wid > 0 {
+        crate::desktop::terminal::with_terminal_manager(|tm| {
+            tm.render_all_surfaces();
+        });
+    }
+
+    // File manager
+    crate::desktop::file_manager::with_file_manager(|fm| {
+        fm.read().render_to_surface();
+    });
+
+    // Text editor
+    crate::desktop::text_editor::with_text_editor(|te| {
+        te.read().render_to_surface();
+    });
+}
+
+/// Render the panel to its compositor surface.
+fn render_panel(apps: &DesktopApps, screen_width: u32) {
+    let panel_h = crate::desktop::panel::PANEL_HEIGHT;
+    crate::desktop::panel::with_panel(|panel| {
+        panel.update_buttons();
+        panel.update_clock();
+        let mut buf = vec![0u8; (screen_width as usize) * (panel_h as usize) * 4];
+        panel.render(&mut buf);
+        update_surface_pixels(
+            apps.panel_surface_id,
+            apps.panel_pool_id,
+            apps.panel_pool_buf_id,
+            &buf,
+        );
+    });
+}
+
+/// Forward pending window manager events to the appropriate apps.
+fn forward_events_to_apps(apps: &DesktopApps) {
+    // Get events for terminal window
+    if apps.terminal_wid > 0 {
+        let events = crate::desktop::window_manager::with_window_manager(|wm| {
+            wm.get_events(apps.terminal_wid)
+        })
+        .unwrap_or_default();
+        if !events.is_empty() {
+            crate::desktop::terminal::with_terminal_manager(|tm| {
+                for event in &events {
+                    let _ = tm.process_input(0, *event);
+                }
+            });
+        }
+    }
+
+    // Get events for file manager window
+    if apps.file_manager_wid > 0 {
+        let events = crate::desktop::window_manager::with_window_manager(|wm| {
+            wm.get_events(apps.file_manager_wid)
+        })
+        .unwrap_or_default();
+        if !events.is_empty() {
+            crate::desktop::file_manager::with_file_manager(|fm| {
+                let mut manager = fm.write();
+                for event in &events {
+                    let _ = manager.process_input(*event);
+                }
+            });
+        }
+    }
+
+    // Get events for text editor window
+    if apps.text_editor_wid > 0 {
+        let events = crate::desktop::window_manager::with_window_manager(|wm| {
+            wm.get_events(apps.text_editor_wid)
+        })
+        .unwrap_or_default();
+        if !events.is_empty() {
+            crate::desktop::text_editor::with_text_editor(|te| {
+                let mut editor = te.write();
+                for event in &events {
+                    let _ = editor.process_input(*event);
+                }
+            });
         }
     }
 }

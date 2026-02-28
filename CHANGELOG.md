@@ -2,6 +2,51 @@
 
 ---
 
+## [v0.6.3] - 2026-02-27
+
+### v0.6.3: Phase 6 Desktop Completion -- Functional GUI Applications
+
+Completes Phase 6 by connecting the three desktop applications (terminal emulator, file manager, text editor) to the Wayland compositor with working font rendering, input event routing, and panel integration. The `startgui` command now boots to a functional graphical desktop with real app windows instead of demo placeholders.
+
+#### Font Rendering Fix
+- Made `draw_char_into_buffer()` public in renderer.rs for cross-module font rendering
+- Added `draw_string_into_buffer()` helper for efficient text rendering
+- Extended `fmt_u64()` from 0-23 to 0-59 range (fixes panel clock showing "??" for minutes 24-59)
+
+#### App Rendering Rewrite (3 files)
+- **Terminal**: Rewrote `render()` to use 8x16 VGA font via `draw_char_into_buffer()` with per-cell foreground/background colors and block cursor
+- **File Manager**: Rewrote `render()` with directory path header, `[DIR]/[FILE]` entries, selection highlight, and color-coded directory names
+- **Text Editor**: Rewrote `render()` with VS Code-like dark theme, line numbers, status bar with file path/cursor position, and vertical bar cursor
+- Removed all references to broken `desktop::font::FontManager` from app rendering paths
+
+#### App-to-Surface Bridge (4 files)
+- Added `create_app_surface()` to allocate compositor surface + SHM pool + buffer per app
+- Added `update_surface_pixels()` to write app pixel data and trigger recomposite
+- Each app (terminal, file manager, text editor) now stores surface/pool/buffer IDs and has a `render_to_surface()` method
+
+#### Input Event Routing
+- Added `translate_input_event()` to convert raw `input_event::InputEvent` to `window_manager::InputEvent`
+- Keyboard events dispatched to focused window via window manager
+- Mouse clicks trigger window focus changes and panel button activation
+- Panel click region detection: clicks below panel Y coordinate route to panel handler
+
+#### Panel Integration
+- Panel initialized during desktop scene creation with compositor surface
+- Panel renders window list buttons (focused highlight) and clock
+- Clock and button list updated periodically in render loop
+
+#### Desktop Scene Overhaul
+- Replaced 2 demo colored rectangles with real terminal (640x384), file manager (640x480), and text editor (800x600)
+- Terminal focused by default on startup
+- Render loop: poll input -> translate -> dispatch to WM -> forward to apps -> update PTY -> render surfaces -> composite -> blit
+
+#### Stats
+- ~10 files changed, ~850 lines added/modified
+- Zero clippy warnings on x86_64, AArch64, RISC-V with `-D warnings`
+- All 3 architectures boot to BOOTOK
+
+---
+
 ## [v0.6.2] - 2026-02-27
 
 ### v0.6.2: Phase 6 Completion -- Documentation Sync, Integration Wiring, Phase 7 TODO

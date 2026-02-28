@@ -3,15 +3,12 @@
 //! Combines PTY, font rendering, and window manager to provide a graphical
 //! terminal.
 
-use alloc::{string::ToString, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 
 use spin::RwLock;
 
 use crate::{
-    desktop::{
-        font::{with_font_manager, FontSize, FontStyle},
-        window_manager::{with_window_manager, InputEvent, WindowId},
-    },
+    desktop::window_manager::{with_window_manager, InputEvent, WindowId},
     error::KernelError,
     fs::pty::with_pty_manager,
     sync::once_lock::GlobalState,
@@ -48,9 +45,7 @@ impl Color {
 #[derive(Debug, Clone, Copy)]
 struct Cell {
     character: char,
-    #[allow(dead_code)] // Rendering field -- used when terminal display is connected
     foreground: Color,
-    #[allow(dead_code)] // Rendering field -- used when terminal display is connected
     background: Color,
 }
 
@@ -112,10 +107,21 @@ const ANSI_COLORS: [Color; 8] = [
     }, // 7: white/light gray
 ];
 
+/// Pixel dimensions for terminal rendering (8x16 font)
+const TERMINAL_PX_WIDTH: u32 = (TERMINAL_COLS * 8) as u32;
+const TERMINAL_PX_HEIGHT: u32 = (TERMINAL_ROWS * 16) as u32;
+
 /// Terminal emulator
 pub struct TerminalEmulator {
     /// Window ID
     window_id: WindowId,
+
+    /// Compositor surface ID
+    surface_id: u32,
+    /// SHM pool ID
+    pool_id: u32,
+    /// Pool buffer ID
+    pool_buf_id: u32,
 
     /// PTY master ID
     pty_master_id: u32,
@@ -162,6 +168,10 @@ impl TerminalEmulator {
             actual: "uninitialized",
         })??;
 
+        // Create compositor surface at the same position as the WM window
+        let (surface_id, pool_id, pool_buf_id) =
+            super::renderer::create_app_surface(100, 100, width, height);
+
         // Create PTY pair
         let (pty_master_id, pty_slave_id) = with_pty_manager(|manager| manager.create_pty())
             .ok_or(KernelError::InvalidState {
@@ -176,12 +186,15 @@ impl TerminalEmulator {
         }
 
         println!(
-            "[TERMINAL] Created terminal emulator: window={}, pty={}",
-            window_id, pty_master_id
+            "[TERMINAL] Created terminal emulator: window={}, surface={}, pty={}",
+            window_id, surface_id, pty_master_id
         );
 
         Ok(Self {
             window_id,
+            surface_id,
+            pool_id,
+            pool_buf_id,
             pty_master_id,
             pty_slave_id,
             buffer,
@@ -197,6 +210,20 @@ impl TerminalEmulator {
             esc_params: [0; 16],
             esc_param_idx: 0,
         })
+    }
+
+    /// Render the terminal contents to its compositor surface.
+    pub fn render_to_surface(&self) {
+        let w = TERMINAL_PX_WIDTH as usize;
+        let h = TERMINAL_PX_HEIGHT as usize;
+        let mut pixels = vec![0u8; w * h * 4];
+        let _ = self.render(&mut pixels, w, h);
+        super::renderer::update_surface_pixels(
+            self.surface_id,
+            self.pool_id,
+            self.pool_buf_id,
+            &pixels,
+        );
     }
 
     /// Process input event
@@ -477,63 +504,66 @@ impl TerminalEmulator {
         self.cursor_y = TERMINAL_ROWS - 1;
     }
 
-    /// Render terminal to framebuffer
-    pub fn render(
-        &self,
-        framebuffer: &mut [u8],
-        fb_width: usize,
-        fb_height: usize,
-    ) -> Result<(), KernelError> {
-        // Clear framebuffer to background color
-        for pixel in framebuffer.iter_mut() {
-            *pixel = 0; // Black background
+    /// Render terminal to a BGRA pixel buffer.
+    ///
+    /// `buf` is width*height*4 bytes in BGRA format.
+    pub fn render(&self, buf: &mut [u8], width: usize, _height: usize) -> Result<(), KernelError> {
+        use super::renderer::draw_char_into_buffer;
+
+        let char_w = 8;
+        let char_h = 16;
+
+        // Clear to black background (BGRA)
+        for chunk in buf.chunks_exact_mut(4) {
+            chunk[0] = 0x00; // B
+            chunk[1] = 0x00; // G
+            chunk[2] = 0x00; // R
+            chunk[3] = 0xFF; // A
         }
 
-        // Render each cell
-        let char_width = 8; // Approximate character width
-        let char_height = 12; // Font size
-
+        // Render each cell with its foreground color
         for y in 0..TERMINAL_ROWS {
             for x in 0..TERMINAL_COLS {
                 let cell = &self.buffer[y][x];
-
-                if cell.character != ' ' {
-                    // Render character
-                    let screen_x = (x * char_width) as i32;
-                    let screen_y = (y * char_height) as i32;
-
-                    // Use font rendering (simplified - would need proper glyph rendering)
-                    let char_str = cell.character.to_string();
-                    let _ = with_font_manager(|fm| {
-                        if let Some(font) = fm.get_font(FontSize::Medium, FontStyle::Regular) {
-                            let _ = font.render_text(
-                                &char_str,
-                                framebuffer,
-                                fb_width,
-                                fb_height,
-                                screen_x,
-                                screen_y,
-                            );
-                        }
-                    });
+                if cell.character == ' ' {
+                    continue;
                 }
+                // Background fill for non-black cells
+                if cell.background.r != 0 || cell.background.g != 0 || cell.background.b != 0 {
+                    let px0 = x * char_w;
+                    let py0 = y * char_h;
+                    for dy in 0..char_h {
+                        for dx in 0..char_w {
+                            let offset = ((py0 + dy) * width + (px0 + dx)) * 4;
+                            if offset + 3 < buf.len() {
+                                buf[offset] = cell.background.b;
+                                buf[offset + 1] = cell.background.g;
+                                buf[offset + 2] = cell.background.r;
+                                buf[offset + 3] = 0xFF;
+                            }
+                        }
+                    }
+                }
+                let fg_color = ((cell.foreground.r as u32) << 16)
+                    | ((cell.foreground.g as u32) << 8)
+                    | (cell.foreground.b as u32);
+                let ch = cell.character as u8;
+                draw_char_into_buffer(buf, width, ch, x * char_w, y * char_h, fg_color);
             }
         }
 
-        // Render cursor
-        let cursor_screen_x = self.cursor_x * char_width;
-        let cursor_screen_y = self.cursor_y * char_height;
-
-        for dx in 0..char_width {
-            for dy in 0..2 {
-                let px = cursor_screen_x + dx;
-                let py = cursor_screen_y + char_height - 1 - dy;
-
-                if px < fb_width && py < fb_height {
-                    let index = py * fb_width + px;
-                    if index < framebuffer.len() {
-                        framebuffer[index] = 255; // White cursor
-                    }
+        // Draw block cursor
+        let cx = self.cursor_x * char_w;
+        let cy = self.cursor_y * char_h;
+        for dy in 0..char_h {
+            for dx in 0..char_w {
+                let offset = ((cy + dy) * width + (cx + dx)) * 4;
+                if offset + 3 < buf.len() {
+                    // Invert: use foreground color with some transparency effect
+                    buf[offset] = 0xCC; // B
+                    buf[offset + 1] = 0xCC; // G
+                    buf[offset + 2] = 0xCC; // R
+                    buf[offset + 3] = 0xFF; // A
                 }
             }
         }
@@ -586,13 +616,27 @@ impl TerminalManager {
         }
     }
 
-    /// Update all terminals
+    /// Update all terminals (read PTY output).
     pub fn update_all(&self) -> Result<(), KernelError> {
         let mut terminals = self.terminals.write();
         for terminal in terminals.iter_mut() {
             terminal.update()?;
         }
         Ok(())
+    }
+
+    /// Get the window ID of a terminal by index.
+    pub fn get_window_id(&self, terminal_id: usize) -> Option<WindowId> {
+        let terminals = self.terminals.read();
+        terminals.get(terminal_id).map(|t| t.window_id())
+    }
+
+    /// Render all terminal surfaces to the compositor.
+    pub fn render_all_surfaces(&self) {
+        let terminals = self.terminals.read();
+        for terminal in terminals.iter() {
+            terminal.render_to_surface();
+        }
     }
 }
 
