@@ -143,6 +143,27 @@ pub fn sys_mmap(
         vaddr.as_usize()
     };
 
+    // Register anonymous mappings with demand paging for COW and future
+    // lazy allocation support. The pages are currently allocated eagerly by
+    // VAS::mmap(), but registering them enables the page fault handler to
+    // resolve COW faults within this region.
+    if is_anonymous {
+        let lazy_flags = if prot & PROT_WRITE != 0 {
+            crate::mm::PageFlags::PRESENT
+                | crate::mm::PageFlags::WRITABLE
+                | crate::mm::PageFlags::USER
+        } else {
+            crate::mm::PageFlags::PRESENT | crate::mm::PageFlags::USER
+        };
+        let aligned_len = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        crate::mm::demand_paging::register_lazy(
+            mapped_addr,
+            aligned_len,
+            lazy_flags,
+            crate::mm::demand_paging::BackingType::Anonymous,
+        );
+    }
+
     // For file-backed mappings, read file contents into the mapped pages
     if !is_anonymous {
         let file_table = proc.file_table.lock();

@@ -950,15 +950,99 @@ fn handle_syscall(
         Syscall::Poll | Syscall::Fcntl => Err(SyscallError::NotImplemented),
         Syscall::Clone | Syscall::Futex => Err(SyscallError::NotImplemented),
 
-        // Audio syscalls (Phase 7) -- stubs
-        Syscall::AudioOpen
-        | Syscall::AudioClose
-        | Syscall::AudioWrite
-        | Syscall::AudioSetVolume
-        | Syscall::AudioGetInfo
-        | Syscall::AudioStart
-        | Syscall::AudioStop
-        | Syscall::AudioPause => Err(SyscallError::NotImplemented),
+        // Audio syscalls (Phase 7) -- wired to audio subsystem
+        Syscall::AudioOpen => {
+            // arg1=sample_rate, arg2=channels -> returns stream_id
+            let sample_rate = arg1 as u32;
+            let channels = if arg2 == 0 { 2u8 } else { arg2 as u8 };
+            let config = crate::audio::AudioConfig {
+                sample_rate: if sample_rate == 0 { 48000 } else { sample_rate },
+                channels,
+                format: crate::audio::SampleFormat::S16Le,
+                buffer_frames: 1024,
+            };
+            crate::audio::client::with_client(|client| {
+                client
+                    .create_stream("user_stream", config)
+                    .map(|id| id.as_u32() as usize)
+            })
+            .map_err(|_| SyscallError::InvalidState)?
+            .map_err(|_| SyscallError::OutOfMemory)
+        }
+        Syscall::AudioClose => {
+            // arg1=stream_id
+            let stream_id = crate::audio::client::AudioStreamId(arg1 as u32);
+            crate::audio::client::with_client(|client| client.close_stream(stream_id))
+                .map_err(|_| SyscallError::InvalidState)?
+                .map_err(|_| SyscallError::InvalidArgument)?;
+            Ok(0)
+        }
+        Syscall::AudioWrite => {
+            // arg1=stream_id, arg2=buffer_ptr, arg3=sample_count
+            let stream_id = crate::audio::client::AudioStreamId(arg1 as u32);
+            let buf_ptr = arg2;
+            let sample_count = arg3;
+            let byte_len = sample_count * 2; // i16 = 2 bytes
+            validate_user_buffer(buf_ptr, byte_len)?;
+            let samples =
+                unsafe { core::slice::from_raw_parts(buf_ptr as *const i16, sample_count) };
+            crate::audio::client::with_client(|client| client.write_samples(stream_id, samples))
+                .map_err(|_| SyscallError::InvalidState)?
+                .map_err(|_| SyscallError::InvalidArgument)
+        }
+        Syscall::AudioSetVolume => {
+            // arg1=stream_id, arg2=volume (0-100)
+            let stream_id = crate::audio::client::AudioStreamId(arg1 as u32);
+            let volume = arg2 as u16;
+            crate::audio::client::with_client(|client| client.set_volume(stream_id, volume))
+                .map_err(|_| SyscallError::InvalidState)?
+                .map_err(|_| SyscallError::InvalidArgument)?;
+            Ok(0)
+        }
+        Syscall::AudioGetInfo => {
+            // arg1=info_ptr -> writes (sample_rate: u32, channels: u32, streams: u32)
+            let info_ptr = arg1;
+            validate_user_buffer(info_ptr, 12)?; // 3 x u32
+            let info = crate::audio::client::with_client(|client| {
+                (
+                    client.default_sample_rate(),
+                    client.default_channels() as u32,
+                    client.stream_count() as u32,
+                )
+            })
+            .map_err(|_| SyscallError::InvalidState)?;
+            unsafe {
+                let ptr = info_ptr as *mut u32;
+                ptr.write(info.0);
+                ptr.add(1).write(info.1);
+                ptr.add(2).write(info.2);
+            }
+            Ok(0)
+        }
+        Syscall::AudioStart => {
+            // arg1=stream_id
+            let stream_id = crate::audio::client::AudioStreamId(arg1 as u32);
+            crate::audio::client::with_client(|client| client.play(stream_id))
+                .map_err(|_| SyscallError::InvalidState)?
+                .map_err(|_| SyscallError::InvalidArgument)?;
+            Ok(0)
+        }
+        Syscall::AudioStop => {
+            // arg1=stream_id
+            let stream_id = crate::audio::client::AudioStreamId(arg1 as u32);
+            crate::audio::client::with_client(|client| client.stop(stream_id))
+                .map_err(|_| SyscallError::InvalidState)?
+                .map_err(|_| SyscallError::InvalidArgument)?;
+            Ok(0)
+        }
+        Syscall::AudioPause => {
+            // arg1=stream_id
+            let stream_id = crate::audio::client::AudioStreamId(arg1 as u32);
+            crate::audio::client::with_client(|client| client.pause(stream_id))
+                .map_err(|_| SyscallError::InvalidState)?
+                .map_err(|_| SyscallError::InvalidArgument)?;
+            Ok(0)
+        }
 
         _ => Err(SyscallError::InvalidSyscall),
     }
@@ -1583,6 +1667,72 @@ impl TryFrom<usize> for Syscall {
             226 => Ok(Syscall::SocketRecv),
             227 => Ok(Syscall::SocketClose),
             228 => Ok(Syscall::SocketPair),
+
+            // Graphics / framebuffer (Phase 6)
+            230 => Ok(Syscall::FbGetInfo),
+            231 => Ok(Syscall::FbMap),
+            232 => Ok(Syscall::InputPoll),
+            233 => Ok(Syscall::InputRead),
+            234 => Ok(Syscall::FbSwap),
+
+            // Wayland compositor (Phase 6)
+            240 => Ok(Syscall::WlConnect),
+            241 => Ok(Syscall::WlDisconnect),
+            242 => Ok(Syscall::WlSendMessage),
+            243 => Ok(Syscall::WlRecvMessage),
+            244 => Ok(Syscall::WlCreateShmPool),
+            245 => Ok(Syscall::WlCreateSurface),
+            246 => Ok(Syscall::WlCommitSurface),
+            247 => Ok(Syscall::WlGetEvents),
+
+            // Network extensions (Phase 6)
+            250 => Ok(Syscall::NetSendTo),
+            251 => Ok(Syscall::NetRecvFrom),
+            252 => Ok(Syscall::NetGetSockName),
+            253 => Ok(Syscall::NetGetPeerName),
+            254 => Ok(Syscall::NetSetSockOpt),
+            255 => Ok(Syscall::NetGetSockOpt),
+
+            // Resource limits (Phase 6.5)
+            260 => Ok(Syscall::GetRlimit),
+            261 => Ok(Syscall::SetRlimit),
+
+            // epoll I/O multiplexing (Phase 6.5)
+            262 => Ok(Syscall::EpollCreate),
+            263 => Ok(Syscall::EpollCtl),
+            264 => Ok(Syscall::EpollWait),
+
+            // Process groups / sessions (Phase 6.5)
+            270 => Ok(Syscall::SetPgid),
+            271 => Ok(Syscall::GetPgid),
+            272 => Ok(Syscall::SetSid),
+            273 => Ok(Syscall::GetSid),
+            274 => Ok(Syscall::TcSetPgrp),
+            275 => Ok(Syscall::TcGetPgrp),
+
+            // PTY (Phase 6.5)
+            280 => Ok(Syscall::OpenPty),
+            281 => Ok(Syscall::GrantPty),
+            282 => Ok(Syscall::UnlockPty),
+            283 => Ok(Syscall::PtsName),
+
+            // Filesystem extensions (Phase 6.5)
+            290 => Ok(Syscall::Link),
+            291 => Ok(Syscall::Symlink),
+            292 => Ok(Syscall::Readlink),
+            293 => Ok(Syscall::Lstat),
+            294 => Ok(Syscall::Fchmod),
+            295 => Ok(Syscall::Fchown),
+            296 => Ok(Syscall::Umask),
+            297 => Ok(Syscall::Access),
+
+            // Poll/fcntl (Phase 6.5)
+            300 => Ok(Syscall::Poll),
+            301 => Ok(Syscall::Fcntl),
+
+            // Threading (Phase 6.5)
+            310 => Ok(Syscall::Clone),
+            311 => Ok(Syscall::Futex),
 
             // Audio (Phase 7)
             320 => Ok(Syscall::AudioOpen),

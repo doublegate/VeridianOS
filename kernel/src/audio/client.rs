@@ -226,9 +226,29 @@ impl AudioClient {
         Ok(stream.state)
     }
 
+    /// Close and remove an audio stream
+    pub fn close_stream(&mut self, id: AudioStreamId) -> Result<(), KernelError> {
+        self.streams.remove(&id.0).ok_or(KernelError::NotFound {
+            resource: "audio stream",
+            id: id.0 as u64,
+        })?;
+        println!("[AUDIO] Closed stream {}", id.0);
+        Ok(())
+    }
+
     /// Get the number of active streams
     pub fn stream_count(&self) -> usize {
         self.streams.len()
+    }
+
+    /// Get the sample rate of the client's default config
+    pub fn default_sample_rate(&self) -> u32 {
+        48000
+    }
+
+    /// Get the default channel count
+    pub fn default_channels(&self) -> u8 {
+        2
     }
 }
 

@@ -97,6 +97,13 @@ impl AudioPipeline {
                     self.underruns.fetch_add(1, Ordering::Relaxed);
                 }
 
+                // Submit mixed audio to VirtIO-Sound hardware (if present)
+                if !all_silence {
+                    let _ = crate::audio::virtio_sound::with_device(|dev| {
+                        let _ = dev.write_pcm(0, &self.output_buffer);
+                    });
+                }
+
                 let frames = self.output_config.buffer_frames as u64;
                 self.frames_processed.fetch_add(frames, Ordering::Relaxed);
             }

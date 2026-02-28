@@ -285,6 +285,44 @@ impl Scheduler {
             }
         }
 
+        // Work-stealing: try to steal from the busiest neighbor CPU
+        {
+            let mut best_cpu = None;
+            let mut best_load = 0u32;
+            for cpu in 0..super::smp::MAX_CPUS as u8 {
+                if cpu == current_cpu {
+                    continue;
+                }
+                if let Some(data) = super::smp::per_cpu(cpu) {
+                    let load = data.cpu_info.nr_running.load(Ordering::Relaxed);
+                    if load > best_load && load >= 2 {
+                        best_load = load;
+                        best_cpu = Some(cpu);
+                    }
+                }
+            }
+
+            if let Some(victim_cpu) = best_cpu {
+                if let Some(victim_data) = super::smp::per_cpu(victim_cpu) {
+                    let mut queue = victim_data.cpu_info.ready_queue.lock();
+                    if let Some(task_ptr) = queue.dequeue() {
+                        // SAFETY: task_ptr is valid from the victim's ready queue.
+                        unsafe {
+                            if task_ptr.as_ref().can_run_on(current_cpu) {
+                                victim_data
+                                    .cpu_info
+                                    .nr_running
+                                    .fetch_sub(1, Ordering::Relaxed);
+                                return Some(task_ptr);
+                            }
+                            // Can't run here, put it back
+                            queue.enqueue(task_ptr);
+                        }
+                    }
+                }
+            }
+        }
+
         // No runnable task found, use idle task
         self.idle_task.map(|t| t.as_ptr())
     }

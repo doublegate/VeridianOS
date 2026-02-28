@@ -43,12 +43,13 @@ use commands::{
     ChmodCommand, ClearCommand, ContainerCommand, CpCommand, CutCommand, DateCommand, DfCommand,
     DhcpCommand, DmesgCommand, DotCommand, EchoCommand, EnvCommand, ExitCommand, ExportCommand,
     FalseCommand, FgCommand, FreeCommand, GrepCommand, HeadCommand, HelpCommand, HistoryCommand,
-    IfconfigCommand, JobsCommand, KillCommand, LsCommand, LsmodCommand, MkdirCommand, MountCommand,
-    MvCommand, NdpCommand, NetstatCommand, PerfCommand, Ping6Command, PkgCommand, PlayCommand,
-    PrintfCommand, PsCommand, PwdCommand, ReadCommand, RmCommand, SetCommand, SortCommand,
-    SourceCommand, StartGuiCommand, SyncCommand, TailCommand, TeeCommand, TestCommand,
-    TouchCommand, TrCommand, TraceCommand, TrueCommand, TypeCommand, UnaliasCommand, UnameCommand,
-    UniqCommand, UnsetCommand, UptimeCommand, VmxCommand, VolumeCommand, WcCommand, WhichCommand,
+    IfconfigCommand, JobsCommand, KillCommand, KptiCommand, LsCommand, LsmodCommand, MkdirCommand,
+    MountCommand, MvCommand, NdpCommand, NetstatCommand, NumaCommand, PerfCommand, Ping6Command,
+    PkgCommand, PlayCommand, PrintfCommand, PsCommand, PwdCommand, ReadCommand, RmCommand,
+    SetCommand, SortCommand, SourceCommand, StartGuiCommand, SyncCommand, TailCommand, TeeCommand,
+    TestCommand, TouchCommand, TrCommand, TraceCommand, TrueCommand, TypeCommand, UnaliasCommand,
+    UnameCommand, UniqCommand, UnsetCommand, UptimeCommand, VmxCommand, VolumeCommand, WcCommand,
+    WhichCommand,
 };
 use spin::RwLock;
 pub use state::{get_shell, init, run_shell, try_get_shell};
@@ -756,6 +757,10 @@ impl Shell {
         // Virtualization commands
         builtins.insert("vmx".into(), Box::new(VmxCommand));
         builtins.insert("container".into(), Box::new(ContainerCommand));
+
+        // Diagnostics commands
+        builtins.insert("numa".into(), Box::new(NumaCommand));
+        builtins.insert("kpti".into(), Box::new(KptiCommand));
     }
 
     fn tokenize(&self, command_line: &str) -> Vec<String> {

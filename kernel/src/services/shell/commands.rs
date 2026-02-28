@@ -3488,3 +3488,113 @@ impl BuiltinCommand for ContainerCommand {
         }
     }
 }
+
+// =============================================================================
+// NUMA topology command
+// =============================================================================
+
+pub struct NumaCommand;
+
+impl BuiltinCommand for NumaCommand {
+    fn name(&self) -> &str {
+        "numa"
+    }
+
+    fn description(&self) -> &str {
+        "Display NUMA topology information"
+    }
+
+    fn execute(&self, args: &[String], _shell: &super::Shell) -> CommandResult {
+        let sub = if args.len() > 1 {
+            args[1].as_str()
+        } else {
+            "info"
+        };
+
+        match sub {
+            "info" | "topology" => {
+                crate::println!("=== NUMA Topology ===");
+
+                #[cfg(target_arch = "x86_64")]
+                {
+                    let found = crate::arch::x86_64::acpi::with_acpi_info(|info| {
+                        if info.has_srat {
+                            crate::println!("SRAT table: found at 0x{:X}", info.srat_address);
+                            crate::println!("  CPU count: {}", info.local_apic_count);
+                        } else {
+                            crate::println!("SRAT table: not found (single-node assumed)");
+                        }
+                        if info.has_slit {
+                            crate::println!("SLIT table: found at 0x{:X}", info.slit_address);
+                        } else {
+                            crate::println!("SLIT table: not found");
+                        }
+                    });
+                    if found.is_none() {
+                        crate::println!("ACPI: not initialized");
+                    }
+                }
+
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    crate::println!("NUMA topology: not available on this architecture");
+                }
+
+                CommandResult::Success(0)
+            }
+            "help" => {
+                crate::println!("Usage: numa [info|topology|help]");
+                crate::println!("  info      - Show NUMA topology information");
+                crate::println!("  topology  - Same as info");
+                CommandResult::Success(0)
+            }
+            _ => {
+                crate::println!("numa: unknown subcommand '{}'. Try 'numa help'", sub);
+                CommandResult::Error(String::from("unknown subcommand"))
+            }
+        }
+    }
+}
+
+// =============================================================================
+// KPTI status command
+// =============================================================================
+
+pub struct KptiCommand;
+
+impl BuiltinCommand for KptiCommand {
+    fn name(&self) -> &str {
+        "kpti"
+    }
+
+    fn description(&self) -> &str {
+        "Display KPTI status"
+    }
+
+    fn execute(&self, _args: &[String], _shell: &super::Shell) -> CommandResult {
+        crate::println!("=== KPTI Status ===");
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            let active = crate::arch::x86_64::kpti::is_active();
+            crate::println!(
+                "KPTI (Kernel Page Table Isolation): {}",
+                if active { "ACTIVE" } else { "INACTIVE" }
+            );
+            if active {
+                crate::println!("Shadow page tables: created");
+                crate::println!("Meltdown mitigation: enabled");
+            } else {
+                crate::println!("Shadow page tables: not initialized");
+                crate::println!("Note: CR3 switching disabled for performance");
+            }
+        }
+
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            crate::println!("KPTI: not applicable on this architecture");
+        }
+
+        CommandResult::Success(0)
+    }
+}

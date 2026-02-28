@@ -55,20 +55,30 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
 
     let new_pid = new_process.pid;
 
-    // Clone address space
+    // Clone address space with COW (copy-on-write) optimization.
+    // Pages are shared read-only between parent and child; physical copies
+    // are deferred to the page fault handler when either process writes.
     {
         let current_space = current_process.memory_space.lock();
         let mut new_space = new_process.memory_space.lock();
 
-        // Note: Currently using full copy instead of copy-on-write (CoW).
-        // CoW optimization deferred to Phase 5 (Performance Optimization) as it
-        // requires:
-        // - Page table flags for CoW pages (read-only + CoW marker)
-        // - Page fault handler integration for CoW page faults
-        // - Reference counting for shared physical pages
-        // - Memory zone integration for CoW tracking
-        // The current implementation is correct, just less memory efficient.
+        // Clone page tables and mapping metadata
         new_space.clone_from(&current_space)?;
+
+        // Mark user-space pages as COW (shared, read-only)
+        let user_pages = collect_user_pages(&current_space);
+        if !user_pages.is_empty() {
+            for &(_vaddr, frame) in &user_pages {
+                crate::mm::demand_paging::with_manager_mut(|mgr| {
+                    mgr.add_cow_entry(frame.as_u64() as usize, frame);
+                    if let Some(entry) = mgr.cow_table.entries.get(&(frame.as_u64() as usize)) {
+                        entry
+                            .ref_count
+                            .store(2, core::sync::atomic::Ordering::Release);
+                    }
+                });
+            }
+        }
     }
 
     // Clone capabilities

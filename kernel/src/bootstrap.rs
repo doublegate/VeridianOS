@@ -4,9 +4,11 @@
 //! circular dependencies between subsystems.
 
 use crate::{
-    arch, cap, error::KernelResult, fs, graphics, ipc, mm, net, perf, pkg, process, sched,
-    security, services,
+    arch, audio, cap, desktop, error::KernelResult, fs, graphics, ipc, irq, mm, net, perf, pkg,
+    process, sched, security, services, timer, video,
 };
+#[cfg(target_arch = "x86_64")]
+use crate::virt;
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -545,6 +547,71 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
     kprintln!("[BOOTSTRAP] Initializing graphics subsystem...");
     graphics::init().expect("Failed to initialize graphics");
     kprintln!("[BOOTSTRAP] Graphics subsystem initialized");
+
+    // Initialize IRQ manager and timer wheel (needed by drivers and scheduler)
+    #[cfg(feature = "alloc")]
+    {
+        if let Err(_e) = irq::init() {
+            kprintln!("[BOOTSTRAP] IRQ manager init skipped (already initialized)");
+        }
+        if let Err(_e) = timer::init() {
+            kprintln!("[BOOTSTRAP] Timer wheel init skipped (already initialized)");
+        }
+    }
+
+    // Initialize USB subsystem (placeholder controllers, non-fatal)
+    #[cfg(feature = "alloc")]
+    {
+        kprintln!("[BOOTSTRAP] Initializing USB subsystem...");
+        crate::drivers::usb::init();
+        kprintln!("[BOOTSTRAP] USB subsystem initialized");
+    }
+
+    // Initialize desktop subsystem (Wayland, window manager, apps)
+    #[cfg(feature = "alloc")]
+    {
+        kprintln!("[BOOTSTRAP] Initializing desktop subsystem...");
+        if let Err(_e) = desktop::init() {
+            kprintln!("[BOOTSTRAP] Desktop init deferred (non-fatal)");
+        }
+        kprintln!("[BOOTSTRAP] Desktop subsystem initialized");
+    }
+
+    // Initialize audio subsystem (mixer, pipeline, VirtIO-Sound)
+    #[cfg(feature = "alloc")]
+    {
+        kprintln!("[BOOTSTRAP] Initializing audio subsystem...");
+        if let Err(_e) = audio::init() {
+            kprintln!("[BOOTSTRAP] Audio init deferred (non-fatal)");
+        }
+        kprintln!("[BOOTSTRAP] Audio subsystem initialized");
+    }
+
+    // Initialize video subsystem (decoders, player)
+    #[cfg(feature = "alloc")]
+    {
+        kprintln!("[BOOTSTRAP] Initializing video subsystem...");
+        if let Err(_e) = video::init() {
+            kprintln!("[BOOTSTRAP] Video init deferred (non-fatal)");
+        }
+        kprintln!("[BOOTSTRAP] Video subsystem initialized");
+    }
+
+    // Initialize virtualization subsystem (VMX detection, containers)
+    #[cfg(target_arch = "x86_64")]
+    {
+        kprintln!("[BOOTSTRAP] Initializing virtualization subsystem...");
+        virt::init();
+        kprintln!("[BOOTSTRAP] Virtualization subsystem initialized");
+    }
+
+    // Initialize KPTI shadow page tables (Meltdown mitigation)
+    #[cfg(target_arch = "x86_64")]
+    {
+        kprintln!("[BOOTSTRAP] Initializing KPTI shadow page tables...");
+        crate::arch::x86_64::kpti::init();
+        kprintln!("[BOOTSTRAP] KPTI initialized");
+    }
 
     kprintln!("[BOOTSTRAP] Scheduler activated - entering main scheduling loop");
 
