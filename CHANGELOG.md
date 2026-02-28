@@ -2,6 +2,36 @@
 
 ---
 
+## [v0.10.1] - 2026-02-28
+
+### v0.10.1: Integration Audit -- Wire Disconnected Subsystems
+
+Two-pass integration audit connecting code paths that existed but were unreachable from their intended callers. No new subsystem logic introduced; all changes wire existing, tested implementations to their dispatch points. 9 files changed across 2 commits.
+
+#### Integration Audit Pass 1 (commit 286000a)
+
+- **46 unreachable syscalls wired**: Connected ThreadClone, FutexWait/Wake/WakeOp, ShmOpen/Unlink/Truncate, SocketCreate/Bind/Listen/Connect/Accept/Send/Recv/Close/Pair, Sendto/Recvfrom, Getsockopt/Setsockopt, Shutdown, Getpeername, Getsockname, Epoll (Create/Ctl/Wait), Openpty/Grantpt/Unlockpt/Ptsname, Link/Symlink/Readlink/Lstat, Fchmod/Fchown/Umask/Access, Poll/Fcntl, Clone/Futex, plus 8 Audio syscalls to their existing handler implementations
+- **COW fork wired to page fault handler**: `cow_fork()` marks user-space pages read-only and registers them in the COW table; the x86_64 page fault handler resolves COW faults by allocating new frames and copying data
+- **Audio pipeline connected to VirtIO-Sound**: `play` shell command now routes samples through mixer -> pipeline -> VirtIO-Sound driver output buffer; `volume` command adjusts mixer levels
+- **8 bootstrap init calls verified**: pci::init(), virtio::blk::init(), mouse::init(), security::init(), desktop::init(), audio::init(), video::init(), virt::init() -- all confirmed as real implementations
+- **Scheduler work-stealing wired**: `schedule()` calls `try_steal_work()` from percpu_queue when local queue is empty
+
+#### Integration Audit Pass 2 (commit 9320ccc)
+
+- **Duplicate syscall aliases resolved**: Syscalls 300 (Poll), 301 (Fcntl), 310 (Clone), 311 (Futex) returned NotImplemented despite working implementations at other numbers; now delegate to sys_poll (189), sys_fcntl (158), sys_thread_clone (46), sys_futex_wait/wake (201/202)
+- **AF_INET socket routing**: Socket operations (bind/connect/listen/accept/send/recv/close) unconditionally dispatched to net::unix_socket, ignoring INET sockets; introduced INET_SOCKET_FLAG (0x4000_0000) to tag AF_INET socket IDs and route each operation to net::socket (TCP/UDP) or net::unix_socket accordingly
+- **VirtIO PCI driver probing**: Added `probe_known_drivers()` to iterate enumerated PCI devices and initialize matching VirtIO drivers (GPU 0x1050/0x1040, Net 0x1041/0x1000, Sound 0x1059); called from bootstrap after enumerate_devices()
+- **Container namespace fork propagation**: Added `container_id: AtomicU64` to Process struct; `fork_process()` inherits parent's container_id and registers child in PID namespace, preventing forked children from escaping containers
+- **select() syscall implementation**: Replaced no-op sys_select() with fd_set bitmap scanning that checks process file table for ready fds and returns actual ready count
+
+#### Stats
+
+- 9 files changed, ~380 lines added, ~50 lines removed across 2 commits
+- Zero clippy warnings on x86_64, AArch64, RISC-V with `-D warnings`
+- All 3 architectures boot to BOOTOK (29/29 tests)
+
+---
+
 ## [v0.10.0] - 2026-02-28
 
 ### v0.10.0: Phase 7 Wave 6 -- Virtualization + Security + Performance

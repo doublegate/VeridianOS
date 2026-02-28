@@ -116,7 +116,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.10.0 (February 28, 2026) | **Releases Published**: 48 (v0.1.0 through v0.10.0)
+**Latest Release**: v0.10.1 (February 28, 2026) | **Releases Published**: 49 (v0.1.0 through v0.10.1)
 
 | Metric                 | Value                                           |
 | ---------------------- | ----------------------------------------------- |
@@ -146,7 +146,7 @@ experiments/   Non-normative exploratory work
 | 5.5   | Infrastructure Bridge     | **COMPLETE (100%)** | v0.5.13 | Feb 2026 |
 | 6     | Advanced Features and GUI | **~100% (desktop complete)** | v0.6.4  | Feb 2026 |
 | 6.5   | Rust Compiler + Bash Shell | **COMPLETE (100%)** | v0.7.0  | Feb 2026 |
-| 7     | Production Readiness     | **Complete (~100%)** | v0.10.0  | Feb 2026 |
+| 7     | Production Readiness     | **Complete (~100%)** | v0.10.1  | Feb 2026 |
 
 For detailed release notes, see [Release History](docs/RELEASE-HISTORY.md).
 
@@ -475,6 +475,7 @@ Security is a fundamental design principle:
 - [x] **Phase 7 Wave 4: Advanced Networking**: Zero-copy DMA networking (buffer pool, scatter-gather, TCP segmentation), hardware NIC driver (DMA TX/RX rings, E1000 MMIO), IPv6 dual-stack (~2,145 lines, NDP/SLAAC/ICMPv6), shell command substitution (18 inline commands), NVMe admin queue, MIME dispatch (v0.8.0, Feb 2026)
 - [x] **Phase 7 Wave 5: Multimedia**: Audio subsystem (fixed-point 16.16 mixer, SPSC ring buffer, WAV parser, VirtIO-Sound driver, output pipeline, 8 syscalls), video framework (TGA/QOI decoders, bilinear scaling, media player) (v0.9.0, Feb 2026)
 - [x] **Phase 7 Wave 6: Virtualization + Security + Performance**: Intel VMX hypervisor (VMCS, EPT, virtual devices), container isolation (PID/mount/network/UTS namespaces), KPTI shadow page tables, demand paging, COW fork, TPM MMIO probing, Dilithium ML-DSA-65, NUMA SRAT/SLIT topology, per-CPU ready queues with work-stealing, IPC batching, IOMMU DRHD parsing, all 34 TODO(phase7) resolved (v0.10.0, Feb 2026)
+- [x] **Integration Audit**: Two-pass audit wiring 51 unreachable syscalls, AF_INET socket routing, VirtIO PCI driver probing, COW fork page fault handling, container namespace fork propagation, select() implementation, audio pipeline to VirtIO-Sound, scheduler work-stealing (v0.10.1, Feb 2026)
 
 ### Upcoming
 
