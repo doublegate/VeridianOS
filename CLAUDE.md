@@ -331,13 +331,13 @@ Currently implementing in phases:
 | Area | Status |
 |------|--------|
 | **Repository** | <https://github.com/doublegate/VeridianOS> |
-| **Latest Release** | v0.6.3 (February 27, 2026) - Phase 6 desktop completion: functional GUI apps (terminal/file manager/text editor), input routing, panel integration |
+| **Latest Release** | v0.6.4 (February 27, 2026) - Desktop interaction fixes: PS/2 input pipeline, compositor zero-copy perf, click-to-focus, window dragging, panel labels |
 | **Build** | ✅ All 3 architectures compile, zero warnings |
 | **Boot** | ✅ All 3 architectures Stage 6 BOOTOK, 29/29 tests (fbcon + keyboard driver) |
 | **CI/CD** | ✅ GitHub Actions 100% pass rate |
 | **Documentation** | ✅ 25+ guides, GitHub Pages, mdBook, Rustdoc |
 
-**Previous Releases**: v0.6.2, v0.6.1, v0.6.0, v0.5.13, v0.5.12, v0.5.11, v0.5.10, v0.5.9, v0.5.8, v0.5.7, v0.5.6, v0.5.5, v0.5.4, v0.5.3, v0.5.2, v0.5.1, v0.5.0, v0.4.9, v0.4.6, v0.4.5, v0.4.4, v0.4.3, v0.4.2, v0.4.1, v0.4.0, v0.3.9, v0.3.8, v0.3.7, v0.3.6, v0.3.5, v0.3.4, v0.3.3, v0.3.2, v0.3.1, v0.3.0, v0.2.5, v0.2.1, v0.2.0, v0.1.0
+**Previous Releases**: v0.6.3, v0.6.2, v0.6.1, v0.6.0, v0.5.13, v0.5.12, v0.5.11, v0.5.10, v0.5.9, v0.5.8, v0.5.7, v0.5.6, v0.5.5, v0.5.4, v0.5.3, v0.5.2, v0.5.1, v0.5.0, v0.4.9, v0.4.6, v0.4.5, v0.4.4, v0.4.3, v0.4.2, v0.4.1, v0.4.0, v0.3.9, v0.3.8, v0.3.7, v0.3.6, v0.3.5, v0.3.4, v0.3.3, v0.3.2, v0.3.1, v0.3.0, v0.2.5, v0.2.1, v0.2.0, v0.1.0
 
 ## Implementation Status
 
