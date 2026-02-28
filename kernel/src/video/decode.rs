@@ -474,6 +474,8 @@ fn read_le_u16(data: &[u8], off: usize) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use alloc::vec;
 
     #[test]
     fn test_detect_qoi() {
