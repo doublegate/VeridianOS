@@ -39,17 +39,20 @@ use alloc::{
 };
 
 use commands::{
-    AcpiCommand, AliasCommand, ArpCommand, BgCommand, BracketTestCommand, CatCommand, CdCommand,
-    ChmodCommand, ClearCommand, ContainerCommand, CpCommand, CutCommand, DateCommand, DfCommand,
-    DhcpCommand, DmesgCommand, DotCommand, EchoCommand, EnvCommand, ExitCommand, ExportCommand,
-    FalseCommand, FgCommand, FreeCommand, GrepCommand, HeadCommand, HelpCommand, HistoryCommand,
-    IfconfigCommand, JobsCommand, KillCommand, KptiCommand, LsCommand, LsmodCommand, MkdirCommand,
-    MountCommand, MvCommand, NdpCommand, NetstatCommand, NumaCommand, PerfCommand, Ping6Command,
-    PkgCommand, PlayCommand, PrintfCommand, PsCommand, PwdCommand, ReadCommand, RmCommand,
-    SetCommand, SortCommand, SourceCommand, StartGuiCommand, SyncCommand, TailCommand, TeeCommand,
-    TestCommand, TouchCommand, TrCommand, TraceCommand, TrueCommand, TypeCommand, UnaliasCommand,
-    UnameCommand, UniqCommand, UnsetCommand, UptimeCommand, VmxCommand, VolumeCommand, WcCommand,
-    WhichCommand,
+    AcpiCommand, AliasCommand, ArpCommand, AuditCommand, BgCommand, Blake3sumCommand,
+    BracketTestCommand, CapCommand, CatCommand, CdCommand, ChmodCommand, ClearCommand,
+    ContainerCommand, CpCommand, CutCommand, DateCommand, DfCommand, DhcpCommand, DmesgCommand,
+    DotCommand, EchoCommand, EnvCommand, ExitCommand, ExportCommand, FalseCommand, FgCommand,
+    FreeCommand, GrepCommand, HeadCommand, HelpCommand, HistoryCommand, IfconfigCommand,
+    IpcsCommand, JobsCommand, KillCommand, KptiCommand, LsCommand, LsblkCommand, LsmodCommand,
+    LsnsCommand, LspciCommand, LsusbCommand, MacCommand, MkdirCommand, MountCommand, MvCommand,
+    NdpCommand, NetstatCommand, NumaCommand, PerfCommand, Ping6Command, PkgCommand, PlayCommand,
+    PrintfCommand, PsCommand, PwdCommand, ReadCommand, RmCommand, RouteCommand, SchedCommand,
+    SetCommand, Sha256sumCommand, SlabCommand, SortCommand, SourceCommand, SsCommand,
+    StartGuiCommand, SyncCommand, TailCommand, TeeCommand, TestCommand, TouchCommand, TpmCommand,
+    TrCommand, TraceCommand, TrueCommand, TypeCommand, UnaliasCommand, UnameCommand, UniqCommand,
+    UnsetCommand, UptimeCommand, VmstatCommand, VmxCommand, VolumeCommand, WcCommand, WhichCommand,
+    WinfoCommand,
 };
 use spin::RwLock;
 pub use state::{get_shell, init, run_shell, try_get_shell};
@@ -761,6 +764,39 @@ impl Shell {
         // Diagnostics commands
         builtins.insert("numa".into(), Box::new(NumaCommand));
         builtins.insert("kpti".into(), Box::new(KptiCommand));
+
+        // Hardware discovery commands
+        builtins.insert("lsblk".into(), Box::new(LsblkCommand));
+        builtins.insert("lspci".into(), Box::new(LspciCommand));
+        builtins.insert("lsusb".into(), Box::new(LsusbCommand));
+
+        // Memory & performance commands
+        builtins.insert("sched".into(), Box::new(SchedCommand));
+        builtins.insert("slab".into(), Box::new(SlabCommand));
+        builtins.insert("vmstat".into(), Box::new(VmstatCommand));
+
+        // Security commands
+        builtins.insert("audit".into(), Box::new(AuditCommand));
+        builtins.insert("cap".into(), Box::new(CapCommand));
+        builtins.insert("mac".into(), Box::new(MacCommand));
+        builtins.insert("tpm".into(), Box::new(TpmCommand));
+
+        // Crypto commands
+        builtins.insert("blake3sum".into(), Box::new(Blake3sumCommand));
+        builtins.insert("sha256sum".into(), Box::new(Sha256sumCommand));
+
+        // IPC commands
+        builtins.insert("ipcs".into(), Box::new(IpcsCommand));
+
+        // Networking commands
+        builtins.insert("route".into(), Box::new(RouteCommand));
+        builtins.insert("ss".into(), Box::new(SsCommand));
+
+        // Desktop commands
+        builtins.insert("winfo".into(), Box::new(WinfoCommand));
+
+        // Virtualization / namespace commands
+        builtins.insert("lsns".into(), Box::new(LsnsCommand));
     }
 
     fn tokenize(&self, command_line: &str) -> Vec<String> {

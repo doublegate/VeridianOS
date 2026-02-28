@@ -1900,7 +1900,7 @@ impl BuiltinCommand for UnameCommand {
             parts.push("veridian");
         }
         if show_release {
-            parts.push("0.10.2");
+            parts.push("0.10.3");
         }
         if show_machine {
             #[cfg(target_arch = "x86_64")]
@@ -3595,6 +3595,762 @@ impl BuiltinCommand for KptiCommand {
             crate::println!("KPTI: not applicable on this architecture");
         }
 
+        CommandResult::Success(0)
+    }
+}
+
+// =============================================================================
+// Hardware Discovery Commands
+// =============================================================================
+
+pub(super) struct LspciCommand;
+impl BuiltinCommand for LspciCommand {
+    fn name(&self) -> &str {
+        "lspci"
+    }
+    fn description(&self) -> &str {
+        "List PCI devices"
+    }
+    fn execute(&self, args: &[String], _shell: &super::Shell) -> CommandResult {
+        let verbose = args.iter().any(|a| a == "-v");
+        let bus = crate::drivers::pci::get_pci_bus().lock();
+        let devices = bus.get_all_devices();
+        if devices.is_empty() {
+            crate::println!("No PCI devices found");
+            return CommandResult::Success(0);
+        }
+        crate::println!(
+            "{:<12} {:<12} {:<8} {}",
+            "BUS:DEV.FN",
+            "VENDOR:DEV",
+            "CLASS",
+            "DESCRIPTION"
+        );
+        for dev in &devices {
+            crate::println!(
+                "{:02x}:{:02x}.{:x}    {:04x}:{:04x}    {:02x}      {}",
+                dev.location.bus,
+                dev.location.device,
+                dev.location.function,
+                dev.vendor_id,
+                dev.device_id,
+                dev.class_code,
+                pci_class_name(dev.class_code)
+            );
+            if verbose {
+                for (i, bar) in dev.bars.iter().enumerate() {
+                    match bar {
+                        crate::drivers::pci::PciBar::Memory { address, size, .. } => {
+                            crate::println!(
+                                "    BAR{}: Memory at {:#x} (size {:#x})",
+                                i,
+                                address,
+                                size
+                            );
+                        }
+                        crate::drivers::pci::PciBar::Io { address, .. } => {
+                            crate::println!("    BAR{}: I/O at {:#x}", i, *address);
+                        }
+                        crate::drivers::pci::PciBar::None => {}
+                    }
+                }
+            }
+        }
+        CommandResult::Success(0)
+    }
+}
+
+fn pci_class_name(class: u8) -> &'static str {
+    match class {
+        0x01 => "Storage controller",
+        0x02 => "Network controller",
+        0x03 => "Display controller",
+        0x04 => "Multimedia controller",
+        0x06 => "Bridge device",
+        0x08 => "System peripheral",
+        0x0C => "Serial bus controller",
+        _ => "Unknown device",
+    }
+}
+
+pub(super) struct LsusbCommand;
+impl BuiltinCommand for LsusbCommand {
+    fn name(&self) -> &str {
+        "lsusb"
+    }
+    fn description(&self) -> &str {
+        "List USB devices"
+    }
+    fn execute(&self, _args: &[String], _shell: &super::Shell) -> CommandResult {
+        let bus = crate::drivers::usb::get_usb_bus().lock();
+        let devices = bus.get_all_devices();
+        if devices.is_empty() {
+            crate::println!("No USB devices found");
+            return CommandResult::Success(0);
+        }
+        for dev in &devices {
+            crate::println!(
+                "Bus {:03} Device {:03}: ID {:04x}:{:04x}",
+                dev.port,
+                dev.address,
+                dev.descriptor.vendor_id,
+                dev.descriptor.product_id
+            );
+        }
+        CommandResult::Success(0)
+    }
+}
+
+pub(super) struct LsblkCommand;
+impl BuiltinCommand for LsblkCommand {
+    fn name(&self) -> &str {
+        "lsblk"
+    }
+    fn description(&self) -> &str {
+        "List block devices"
+    }
+    fn execute(&self, _args: &[String], _shell: &super::Shell) -> CommandResult {
+        crate::println!(
+            "{:<10} {:<8} {:<12} {}",
+            "NAME",
+            "TYPE",
+            "SIZE",
+            "VENDOR:DEV"
+        );
+        let bus = crate::drivers::pci::get_pci_bus().lock();
+        let devices = bus.get_all_devices();
+        let mut idx = 0u32;
+        for dev in &devices {
+            let is_storage = dev.class_code == 0x01;
+            let is_virtio_blk =
+                dev.vendor_id == 0x1AF4 && (dev.device_id == 0x1001 || dev.device_id == 0x1042);
+            if is_storage || is_virtio_blk {
+                let dev_type = if is_virtio_blk { "virtio" } else { "disk" };
+                crate::println!(
+                    "vd{}        {:<8} -            {:04x}:{:04x}",
+                    (b'a' + idx as u8) as char,
+                    dev_type,
+                    dev.vendor_id,
+                    dev.device_id
+                );
+                idx += 1;
+            }
+        }
+        if idx == 0 {
+            crate::println!("(no block devices found)");
+        }
+        CommandResult::Success(0)
+    }
+}
+
+// =============================================================================
+// Memory & Performance Commands
+// =============================================================================
+
+pub(super) struct VmstatCommand;
+impl BuiltinCommand for VmstatCommand {
+    fn name(&self) -> &str {
+        "vmstat"
+    }
+    fn description(&self) -> &str {
+        "Virtual memory statistics"
+    }
+    fn execute(&self, _args: &[String], _shell: &super::Shell) -> CommandResult {
+        let mem = crate::mm::get_memory_stats();
+        let total_kb = mem.total_frames * 4;
+        let free_kb = mem.free_frames * 4;
+        let used_kb = total_kb.saturating_sub(free_kb);
+        crate::println!("=== Virtual Memory Statistics ===");
+        crate::println!("Memory:");
+        crate::println!("  Total:    {} KB ({} MB)", total_kb, total_kb / 1024);
+        crate::println!("  Used:     {} KB ({} MB)", used_kb, used_kb / 1024);
+        crate::println!("  Free:     {} KB ({} MB)", free_kb, free_kb / 1024);
+        crate::println!(
+            "  Frames:   {} total, {} free",
+            mem.total_frames,
+            mem.free_frames
+        );
+        let perf = crate::perf::get_stats();
+        crate::println!("System:");
+        crate::println!("  Context switches: {}", perf.context_switches);
+        crate::println!("  Syscalls:         {}", perf.syscalls);
+        crate::println!("  Interrupts:       {}", perf.interrupts);
+        crate::println!("  Page faults:      {}", perf.page_faults);
+        CommandResult::Success(0)
+    }
+}
+
+pub(super) struct SchedCommand;
+impl BuiltinCommand for SchedCommand {
+    fn name(&self) -> &str {
+        "sched"
+    }
+    fn description(&self) -> &str {
+        "Scheduler statistics"
+    }
+    fn execute(&self, args: &[String], _shell: &super::Shell) -> CommandResult {
+        let sub = args.first().map(|s| s.as_str()).unwrap_or("stats");
+        match sub {
+            "stats" | "" => {
+                let summary = crate::sched::metrics::SCHEDULER_METRICS.get_summary();
+                crate::println!("=== Scheduler Statistics ===");
+                crate::println!("Context switches:    {}", summary.context_switches);
+                crate::println!("  Voluntary:         {}", summary.voluntary_switches);
+                crate::println!("  Involuntary:       {}", summary.involuntary_switches);
+                crate::println!("  Avg latency:       {} cycles", summary.avg_switch_latency);
+                crate::println!("Load balancing:");
+                crate::println!("  Balance ops:       {}", summary.load_balance_count);
+                crate::println!("  Migrations:        {}", summary.task_migrations);
+                crate::println!("IPC:");
+                crate::println!("  Blocked:           {}", summary.ipc_blocks);
+                crate::println!("  Wakeups:           {}", summary.ipc_wakeups);
+                crate::println!("Idle percentage:     {}%", summary.idle_percentage);
+            }
+            "reset" => {
+                crate::println!("Scheduler metrics reset not yet implemented");
+            }
+            _ => {
+                crate::println!("sched: unknown subcommand '{}'. Use: stats, reset", sub);
+                return CommandResult::Error(String::from("unknown subcommand"));
+            }
+        }
+        CommandResult::Success(0)
+    }
+}
+
+pub(super) struct SlabCommand;
+impl BuiltinCommand for SlabCommand {
+    fn name(&self) -> &str {
+        "slab"
+    }
+    fn description(&self) -> &str {
+        "Kernel heap statistics"
+    }
+    fn execute(&self, _args: &[String], _shell: &super::Shell) -> CommandResult {
+        crate::println!("=== Kernel Heap Statistics ===");
+        #[cfg(target_arch = "x86_64")]
+        {
+            let (total, used, free) = crate::mm::heap::get_heap_stats();
+            crate::println!("Heap size:  {} MB", total / (1024 * 1024));
+            crate::println!(
+                "Used:       {} MB ({} KB)",
+                used / (1024 * 1024),
+                used / 1024
+            );
+            crate::println!(
+                "Free:       {} MB ({} KB)",
+                free / (1024 * 1024),
+                free / 1024
+            );
+            let pct = if total > 0 { (used * 100) / total } else { 0 };
+            crate::println!("Usage:      {}%", pct);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            crate::println!("Heap size:  {} KB", crate::mm::heap::HEAP_SIZE / 1024);
+            crate::println!("(detailed stats only available on x86_64)");
+        }
+        CommandResult::Success(0)
+    }
+}
+
+// =============================================================================
+// Security Commands
+// =============================================================================
+
+pub(super) struct CapCommand;
+impl BuiltinCommand for CapCommand {
+    fn name(&self) -> &str {
+        "cap"
+    }
+    fn description(&self) -> &str {
+        "Capability system statistics"
+    }
+    fn execute(&self, args: &[String], _shell: &super::Shell) -> CommandResult {
+        let sub = args.first().map(|s| s.as_str()).unwrap_or("stats");
+        match sub {
+            "stats" | "" => {
+                let stats = crate::cap::manager::cap_manager().stats();
+                crate::println!("=== Capability Statistics ===");
+                crate::println!(
+                    "Created:    {}",
+                    stats
+                        .capabilities_created
+                        .load(core::sync::atomic::Ordering::Relaxed)
+                );
+                crate::println!(
+                    "Delegated:  {}",
+                    stats
+                        .capabilities_delegated
+                        .load(core::sync::atomic::Ordering::Relaxed)
+                );
+                crate::println!(
+                    "Revoked:    {}",
+                    stats
+                        .capabilities_revoked
+                        .load(core::sync::atomic::Ordering::Relaxed)
+                );
+                crate::println!(
+                    "Deleted:    {}",
+                    stats
+                        .capabilities_deleted
+                        .load(core::sync::atomic::Ordering::Relaxed)
+                );
+            }
+            _ => {
+                crate::println!("cap: unknown subcommand '{}'. Use: stats", sub);
+                return CommandResult::Error(String::from("unknown subcommand"));
+            }
+        }
+        CommandResult::Success(0)
+    }
+}
+
+pub(super) struct MacCommand;
+impl BuiltinCommand for MacCommand {
+    fn name(&self) -> &str {
+        "mac"
+    }
+    fn description(&self) -> &str {
+        "Mandatory Access Control status"
+    }
+    fn execute(&self, args: &[String], _shell: &super::Shell) -> CommandResult {
+        let sub = args.first().map(|s| s.as_str()).unwrap_or("status");
+        match sub {
+            "status" | "" => {
+                let enabled = crate::security::mac::is_enabled();
+                let count = crate::security::mac::get_policy_count();
+                crate::println!("=== MAC Status ===");
+                crate::println!(
+                    "Mode:       {}",
+                    if enabled { "enforcing" } else { "permissive" }
+                );
+                crate::println!("Rules:      {}", count);
+            }
+            "test" => {
+                if args.len() < 4 {
+                    crate::println!(
+                        "Usage: mac test <source_type> <target_type> <read|write|execute>"
+                    );
+                    return CommandResult::Error(String::from("missing arguments"));
+                }
+                let access = match args[3].as_str() {
+                    "read" => crate::security::AccessType::Read,
+                    "write" => crate::security::AccessType::Write,
+                    "execute" => crate::security::AccessType::Execute,
+                    _ => {
+                        crate::println!("mac: invalid access type '{}'", args[3]);
+                        return CommandResult::Error(String::from("invalid access type"));
+                    }
+                };
+                let allowed = crate::security::mac::check_access(&args[1], &args[2], access);
+                crate::println!(
+                    "{} -> {} ({}): {}",
+                    args[1],
+                    args[2],
+                    args[3],
+                    if allowed { "ALLOWED" } else { "DENIED" }
+                );
+            }
+            _ => {
+                crate::println!("mac: unknown subcommand '{}'. Use: status, test", sub);
+                return CommandResult::Error(String::from("unknown subcommand"));
+            }
+        }
+        CommandResult::Success(0)
+    }
+}
+
+pub(super) struct AuditCommand;
+impl BuiltinCommand for AuditCommand {
+    fn name(&self) -> &str {
+        "audit"
+    }
+    fn description(&self) -> &str {
+        "Security audit status"
+    }
+    fn execute(&self, args: &[String], _shell: &super::Shell) -> CommandResult {
+        let sub = args.first().map(|s| s.as_str()).unwrap_or("status");
+        match sub {
+            "status" | "" => {
+                let stats = crate::security::audit::get_detailed_stats();
+                crate::println!("=== Audit Status ===");
+                crate::println!("Total events:     {}", stats.total_events);
+                crate::println!("Filtered:         {}", stats.filtered_events);
+                crate::println!("Persisted:        {}", stats.persisted_events);
+                crate::println!("Alerts triggered: {}", stats.alerts_triggered);
+                crate::println!(
+                    "Buffer:           {}/{}",
+                    stats.buffer_count,
+                    stats.buffer_capacity
+                );
+            }
+            "enable" => {
+                crate::security::audit::enable();
+                crate::println!("Audit logging enabled");
+            }
+            "disable" => {
+                crate::security::audit::disable();
+                crate::println!("Audit logging disabled");
+            }
+            _ => {
+                crate::println!(
+                    "audit: unknown subcommand '{}'. Use: status, enable, disable",
+                    sub
+                );
+                return CommandResult::Error(String::from("unknown subcommand"));
+            }
+        }
+        CommandResult::Success(0)
+    }
+}
+
+pub(super) struct TpmCommand;
+impl BuiltinCommand for TpmCommand {
+    fn name(&self) -> &str {
+        "tpm"
+    }
+    fn description(&self) -> &str {
+        "TPM device status"
+    }
+    fn execute(&self, args: &[String], _shell: &super::Shell) -> CommandResult {
+        let sub = args.first().map(|s| s.as_str()).unwrap_or("status");
+        match sub {
+            "status" | "" => {
+                let available = crate::security::tpm::is_available();
+                crate::println!("=== TPM Status ===");
+                crate::println!("Available:   {}", if available { "yes" } else { "no" });
+                if available {
+                    crate::security::tpm::with_tpm(|tpm| {
+                        crate::println!(
+                            "Mode:        {}",
+                            if tpm.is_software_emulation() {
+                                "emulated"
+                            } else {
+                                "hardware"
+                            }
+                        );
+                        crate::println!(
+                            "Initialized: {}",
+                            if tpm.is_initialized() { "yes" } else { "no" }
+                        );
+                    });
+                }
+            }
+            "pcr" => {
+                if args.len() < 2 {
+                    crate::println!("Usage: tpm pcr <index>");
+                    return CommandResult::Error(String::from("missing PCR index"));
+                }
+                let index: u8 = match args[1].parse() {
+                    Ok(v) if v < 24 => v,
+                    _ => {
+                        crate::println!("tpm: invalid PCR index (0-23)");
+                        return CommandResult::Error(String::from("invalid PCR index"));
+                    }
+                };
+                match crate::security::tpm::pcr_read(index) {
+                    Ok(value) => {
+                        crate::print!("PCR[{}]: ", index);
+                        for byte in &value {
+                            crate::print!("{:02x}", byte);
+                        }
+                        crate::println!();
+                    }
+                    Err(e) => {
+                        crate::println!("tpm: failed to read PCR[{}]: {:?}", index, e);
+                    }
+                }
+            }
+            _ => {
+                crate::println!("tpm: unknown subcommand '{}'. Use: status, pcr", sub);
+                return CommandResult::Error(String::from("unknown subcommand"));
+            }
+        }
+        CommandResult::Success(0)
+    }
+}
+
+// =============================================================================
+// Crypto Commands
+// =============================================================================
+
+pub(super) struct Sha256sumCommand;
+impl BuiltinCommand for Sha256sumCommand {
+    fn name(&self) -> &str {
+        "sha256sum"
+    }
+    fn description(&self) -> &str {
+        "Compute SHA-256 hash of a file"
+    }
+    fn execute(&self, args: &[String], _shell: &super::Shell) -> CommandResult {
+        if args.is_empty() {
+            crate::println!("Usage: sha256sum <file>");
+            return CommandResult::Error(String::from("missing filename"));
+        }
+        for filename in args {
+            match crate::fs::read_file(filename) {
+                Ok(data) => {
+                    let hash = crate::crypto::hash::sha256(&data);
+                    for byte in &hash.0 {
+                        crate::print!("{:02x}", byte);
+                    }
+                    crate::println!("  {}", filename);
+                }
+                Err(e) => {
+                    crate::println!("sha256sum: {}: {:?}", filename, e);
+                }
+            }
+        }
+        CommandResult::Success(0)
+    }
+}
+
+pub(super) struct Blake3sumCommand;
+impl BuiltinCommand for Blake3sumCommand {
+    fn name(&self) -> &str {
+        "blake3sum"
+    }
+    fn description(&self) -> &str {
+        "Compute BLAKE3 hash of a file"
+    }
+    fn execute(&self, args: &[String], _shell: &super::Shell) -> CommandResult {
+        if args.is_empty() {
+            crate::println!("Usage: blake3sum <file>");
+            return CommandResult::Error(String::from("missing filename"));
+        }
+        for filename in args {
+            match crate::fs::read_file(filename) {
+                Ok(data) => {
+                    let hash = crate::crypto::hash::blake3(&data);
+                    for byte in &hash.0 {
+                        crate::print!("{:02x}", byte);
+                    }
+                    crate::println!("  {}", filename);
+                }
+                Err(e) => {
+                    crate::println!("blake3sum: {}: {:?}", filename, e);
+                }
+            }
+        }
+        CommandResult::Success(0)
+    }
+}
+
+// =============================================================================
+// IPC Commands
+// =============================================================================
+
+pub(super) struct IpcsCommand;
+impl BuiltinCommand for IpcsCommand {
+    fn name(&self) -> &str {
+        "ipcs"
+    }
+    fn description(&self) -> &str {
+        "IPC facility statistics"
+    }
+    fn execute(&self, _args: &[String], _shell: &super::Shell) -> CommandResult {
+        crate::println!("=== IPC Statistics ===");
+        if let Ok(stats) = crate::ipc::registry::get_registry_stats() {
+            crate::println!("Registry:");
+            crate::println!("  Endpoints created:    {}", stats.endpoints_created);
+            crate::println!("  Endpoints destroyed:  {}", stats.endpoints_destroyed);
+            crate::println!("  Channels created:     {}", stats.channels_created);
+            crate::println!("  Channels destroyed:   {}", stats.channels_destroyed);
+            crate::println!("  Cap cache hit rate:   {}%", stats.cache_hit_rate);
+        }
+        let (fp_count, fp_avg) = crate::ipc::fast_path::get_fast_path_stats();
+        crate::println!("Fast path:");
+        crate::println!("  Transfers:            {}", fp_count);
+        crate::println!("  Avg cycles:           {}", fp_avg);
+        CommandResult::Success(0)
+    }
+}
+
+// =============================================================================
+// Networking Commands
+// =============================================================================
+
+pub(super) struct RouteCommand;
+impl BuiltinCommand for RouteCommand {
+    fn name(&self) -> &str {
+        "route"
+    }
+    fn description(&self) -> &str {
+        "Show IP routing table"
+    }
+    fn execute(&self, _args: &[String], _shell: &super::Shell) -> CommandResult {
+        let routes = crate::net::ip::get_routes();
+        crate::println!(
+            "{:<18} {:<18} {:<18} {}",
+            "Destination",
+            "Gateway",
+            "Netmask",
+            "Iface"
+        );
+        if routes.is_empty() {
+            crate::println!("(no routes)");
+        }
+        for r in &routes {
+            let dest = format!(
+                "{}.{}.{}.{}",
+                r.destination.0[0], r.destination.0[1], r.destination.0[2], r.destination.0[3]
+            );
+            let mask = format!(
+                "{}.{}.{}.{}",
+                r.netmask.0[0], r.netmask.0[1], r.netmask.0[2], r.netmask.0[3]
+            );
+            let gw = match r.gateway {
+                Some(g) => format!("{}.{}.{}.{}", g.0[0], g.0[1], g.0[2], g.0[3]),
+                None => String::from("*"),
+            };
+            crate::println!("{:<18} {:<18} {:<18} eth{}", dest, gw, mask, r.interface);
+        }
+        CommandResult::Success(0)
+    }
+}
+
+pub(super) struct SsCommand;
+impl BuiltinCommand for SsCommand {
+    fn name(&self) -> &str {
+        "ss"
+    }
+    fn description(&self) -> &str {
+        "Show socket statistics"
+    }
+    fn execute(&self, _args: &[String], _shell: &super::Shell) -> CommandResult {
+        let sockets = crate::net::socket::list_sockets();
+        crate::println!(
+            "{:<6} {:<10} {:<8} {:<24} {}",
+            "ID",
+            "State",
+            "Type",
+            "Local",
+            "Remote"
+        );
+        if sockets.is_empty() {
+            crate::println!("(no sockets)");
+        }
+        for s in &sockets {
+            let state = match s.state {
+                crate::net::socket::SocketState::Unbound => "UNBOUND",
+                crate::net::socket::SocketState::Bound => "BOUND",
+                crate::net::socket::SocketState::Listening => "LISTEN",
+                crate::net::socket::SocketState::Connected => "ESTAB",
+                crate::net::socket::SocketState::Closed => "CLOSED",
+            };
+            let sock_type = match s.socket_type {
+                crate::net::socket::SocketType::Stream => "TCP",
+                crate::net::socket::SocketType::Dgram => "UDP",
+                crate::net::socket::SocketType::Raw => "RAW",
+            };
+            let local = s
+                .local_addr
+                .map(|a| format!("{:?}", a))
+                .unwrap_or_else(|| String::from("*"));
+            let remote = s
+                .remote_addr
+                .map(|a| format!("{:?}", a))
+                .unwrap_or_else(|| String::from("*"));
+            crate::println!(
+                "{:<6} {:<10} {:<8} {:<24} {}",
+                s.id,
+                state,
+                sock_type,
+                local,
+                remote
+            );
+        }
+        CommandResult::Success(0)
+    }
+}
+
+// =============================================================================
+// Desktop Commands
+// =============================================================================
+
+pub(super) struct WinfoCommand;
+impl BuiltinCommand for WinfoCommand {
+    fn name(&self) -> &str {
+        "winfo"
+    }
+    fn description(&self) -> &str {
+        "Wayland/desktop information"
+    }
+    fn execute(&self, _args: &[String], _shell: &super::Shell) -> CommandResult {
+        crate::println!("=== Desktop Information ===");
+        crate::desktop::wayland::with_display(|display| {
+            let (w, h) = display.wl_compositor.output_size();
+            crate::println!("Compositor: {}x{}", w, h);
+            crate::println!("Surfaces:   {}", display.wl_compositor.surface_count());
+        });
+        crate::desktop::window_manager::with_window_manager(|wm| {
+            let windows = wm.get_all_windows();
+            let focused = wm.get_focused_window_id();
+            let workspace = wm.get_active_workspace();
+            crate::println!("Windows:    {}", windows.len());
+            crate::println!("Workspace:  {}", workspace);
+            crate::println!("Focused:    {:?}", focused);
+            if !windows.is_empty() {
+                crate::println!("\nWindow List:");
+                crate::println!(
+                    "  {:<6} {:<20} {:<12} {}",
+                    "ID",
+                    "Title",
+                    "Size",
+                    "Position"
+                );
+                for w in &windows {
+                    crate::println!(
+                        "  {:<6} {:<20} {}x{:<8} ({},{})",
+                        w.id,
+                        w.title_str(),
+                        w.width,
+                        w.height,
+                        w.x,
+                        w.y
+                    );
+                }
+            }
+        });
+        CommandResult::Success(0)
+    }
+}
+
+// =============================================================================
+// Virtualization Commands
+// =============================================================================
+
+pub(super) struct LsnsCommand;
+impl BuiltinCommand for LsnsCommand {
+    fn name(&self) -> &str {
+        "lsns"
+    }
+    fn description(&self) -> &str {
+        "List namespaces/containers"
+    }
+    fn execute(&self, _args: &[String], _shell: &super::Shell) -> CommandResult {
+        crate::println!(
+            "{:<8} {:<10} {:<20} {}",
+            "ID",
+            "NPROCS",
+            "HOSTNAME",
+            "STATUS"
+        );
+        let containers =
+            crate::virt::container::with_container_manager(|mgr| mgr.list()).unwrap_or_default();
+        if containers.is_empty() {
+            crate::println!("(no containers)");
+        }
+        for c in &containers {
+            crate::println!(
+                "{:<8} {:<10} {:<20} {}",
+                c.id,
+                c.process_count,
+                c.hostname,
+                c.state
+            );
+        }
         CommandResult::Success(0)
     }
 }

@@ -204,6 +204,11 @@ pub fn lookup_route(dest: Ipv4Address) -> Option<RouteEntry> {
     None
 }
 
+/// Get all routing table entries (used by `route` shell command).
+pub fn get_routes() -> Vec<RouteEntry> {
+    ROUTES.lock().clone()
+}
+
 /// Global IP identification counter for unique packet IDs
 static IP_ID_COUNTER: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(1);
 

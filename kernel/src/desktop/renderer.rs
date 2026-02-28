@@ -110,6 +110,26 @@ struct AppInfo {
     surface_id: u32,
 }
 
+/// Type of dynamically-spawned GUI application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppKind {
+    ImageViewer,
+    Settings,
+    MediaPlayer,
+    SystemMonitor,
+}
+
+/// A dynamically spawned application window.
+struct DynamicApp {
+    kind: AppKind,
+    wid: u32,
+    surface_id: u32,
+    pool_id: u32,
+    pool_buf_id: u32,
+    width: u32,
+    height: u32,
+}
+
 /// Desktop runtime state: application windows + Phase 7 overlay modules.
 struct DesktopState {
     // Existing app windows
@@ -124,6 +144,9 @@ struct DesktopState {
     app_switcher: crate::desktop::app_switcher::AppSwitcher,
     screen_locker: crate::desktop::screen_lock::ScreenLocker,
     animation_mgr: crate::desktop::animation::AnimationManager,
+
+    // Dynamic apps (spawned from launcher, closeable)
+    dynamic_apps: alloc::vec::Vec<DynamicApp>,
 
     // Input state
     frame_count: u64,
@@ -142,6 +165,11 @@ impl DesktopState {
         }
         if wid > 0 && wid == self.text_editor.wid {
             return Some(self.text_editor.surface_id);
+        }
+        for app in &self.dynamic_apps {
+            if wid > 0 && wid == app.wid {
+                return Some(app.surface_id);
+            }
         }
         None
     }
@@ -271,7 +299,7 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopState {
     // Send a welcome notification to demonstrate the notification system
     crate::desktop::notification::notify(
         "VeridianOS Desktop",
-        "Welcome to VeridianOS v0.10.2",
+        "Welcome to VeridianOS v0.10.3",
         crate::desktop::notification::NotificationUrgency::Normal,
         "desktop",
     );
@@ -298,6 +326,7 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopState {
             height as usize,
         ),
         animation_mgr: crate::desktop::animation::AnimationManager::new(),
+        dynamic_apps: alloc::vec::Vec::new(),
         frame_count: 0,
         drag: None,
         prev_focused: None,
@@ -548,6 +577,133 @@ fn sync_compositor_focus(state: &DesktopState, focused_wid: u32) {
     }
 }
 
+/// Spawn a dynamic app: create WM window + compositor surface, return index in
+/// dynamic_apps.
+fn spawn_dynamic_app(
+    state: &mut DesktopState,
+    kind: AppKind,
+    title: &str,
+    w: u32,
+    h: u32,
+) -> Option<usize> {
+    // Check if one of this kind already exists
+    if state.dynamic_apps.iter().any(|a| a.kind == kind) {
+        return None;
+    }
+
+    let wid = crate::desktop::window_manager::with_window_manager(|wm| {
+        wm.create_window(100, 80, w, h, 0)
+    })
+    .and_then(|r| r.ok())?;
+
+    let (surface_id, pool_id, pool_buf_id) = create_app_surface(100, 80, w, h);
+
+    crate::desktop::window_manager::with_window_manager(|wm| {
+        wm.set_window_title(wid, title);
+        let _ = wm.focus_window(wid);
+    });
+
+    // Raise in compositor
+    crate::desktop::wayland::with_display(|display| {
+        display.wl_compositor.raise_surface(surface_id);
+        display.wl_compositor.raise_surface(state.panel_surface_id);
+    });
+
+    state.dynamic_apps.push(DynamicApp {
+        kind,
+        wid,
+        surface_id,
+        pool_id,
+        pool_buf_id,
+        width: w,
+        height: h,
+    });
+
+    Some(state.dynamic_apps.len() - 1)
+}
+
+/// Close a dynamic app by WM window ID.
+fn close_dynamic_app(state: &mut DesktopState, wid: u32) {
+    if let Some(pos) = state.dynamic_apps.iter().position(|a| a.wid == wid) {
+        let app = state.dynamic_apps.remove(pos);
+        // Unmap and destroy surface
+        crate::desktop::wayland::with_display(|display| {
+            display
+                .wl_compositor
+                .set_surface_mapped(app.surface_id, false);
+        });
+        crate::desktop::window_manager::with_window_manager(|wm| {
+            let _ = wm.destroy_window(app.wid);
+        });
+    }
+}
+
+/// Focus an existing dynamic app of the given kind, or return false if not
+/// found.
+fn focus_dynamic_app(state: &DesktopState, kind: AppKind) -> bool {
+    if let Some(app) = state.dynamic_apps.iter().find(|a| a.kind == kind) {
+        let wid = app.wid;
+        crate::desktop::window_manager::with_window_manager(|wm| {
+            let _ = wm.focus_window(wid);
+        });
+        sync_compositor_focus(state, wid);
+        true
+    } else {
+        false
+    }
+}
+
+/// Handle a launcher launch action by spawning or focusing the appropriate app.
+fn handle_launcher_launch(state: &mut DesktopState, exec_path: &str) {
+    match exec_path {
+        "terminal" | "/usr/bin/terminal" => {
+            if state.terminal.wid > 0 {
+                crate::desktop::window_manager::with_window_manager(|wm| {
+                    let _ = wm.focus_window(state.terminal.wid);
+                });
+                sync_compositor_focus(state, state.terminal.wid);
+            }
+        }
+        "files" | "/usr/bin/files" => {
+            if state.file_manager.wid > 0 {
+                crate::desktop::window_manager::with_window_manager(|wm| {
+                    let _ = wm.focus_window(state.file_manager.wid);
+                });
+                sync_compositor_focus(state, state.file_manager.wid);
+            }
+        }
+        "editor" | "/usr/bin/editor" => {
+            if state.text_editor.wid > 0 {
+                crate::desktop::window_manager::with_window_manager(|wm| {
+                    let _ = wm.focus_window(state.text_editor.wid);
+                });
+                sync_compositor_focus(state, state.text_editor.wid);
+            }
+        }
+        "settings" | "/usr/bin/settings" => {
+            if !focus_dynamic_app(state, AppKind::Settings) {
+                spawn_dynamic_app(state, AppKind::Settings, "Settings", 600, 450);
+            }
+        }
+        "sysmonitor" | "/usr/bin/sysmonitor" => {
+            if !focus_dynamic_app(state, AppKind::SystemMonitor) {
+                spawn_dynamic_app(state, AppKind::SystemMonitor, "System Monitor", 640, 400);
+            }
+        }
+        "imageviewer" | "/usr/bin/image-viewer" => {
+            if !focus_dynamic_app(state, AppKind::ImageViewer) {
+                spawn_dynamic_app(state, AppKind::ImageViewer, "Image Viewer", 800, 600);
+            }
+        }
+        "mediaplayer" | "/usr/bin/mediaplayer" => {
+            if !focus_dynamic_app(state, AppKind::MediaPlayer) {
+                spawn_dynamic_app(state, AppKind::MediaPlayer, "Media Player", 640, 300);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Main compositor render loop.
 ///
 /// Composites all Wayland surfaces, blits to the hardware framebuffer,
@@ -718,9 +874,16 @@ fn render_loop(hw: &fbcon::FbHwInfo, state: &mut DesktopState) {
             let launcher_visible =
                 crate::desktop::launcher::with_launcher_ref(|l| l.is_visible()).unwrap_or(false);
             if launcher_visible && is_key_press && raw_event.code < 0x80 {
-                crate::desktop::launcher::with_launcher(|l| {
-                    let _ = l.handle_key(raw_event.code as u8);
-                });
+                let action =
+                    crate::desktop::launcher::with_launcher(|l| l.handle_key(raw_event.code as u8));
+                if let Some(Some(action)) = action {
+                    match action {
+                        crate::desktop::launcher::LauncherAction::Launch(exec) => {
+                            handle_launcher_launch(state, &exec);
+                        }
+                        crate::desktop::launcher::LauncherAction::Hide => {}
+                    }
+                }
                 continue;
             }
 
@@ -776,6 +939,22 @@ fn render_loop(hw: &fbcon::FbHwInfo, state: &mut DesktopState) {
                             .unwrap_or(false);
 
                         if in_title_bar {
+                            // Check close button (rightmost 28px of title bar)
+                            let is_close =
+                                crate::desktop::window_manager::with_window_manager(|wm| {
+                                    wm.get_window(wid).map(|w| x >= w.x + w.width as i32 - 28)
+                                })
+                                .flatten()
+                                .unwrap_or(false);
+
+                            if is_close {
+                                // Only close dynamic apps; static apps are permanent
+                                if state.dynamic_apps.iter().any(|a| a.wid == wid) {
+                                    close_dynamic_app(state, wid);
+                                }
+                                continue;
+                            }
+
                             // Start drag
                             if let Some(surface_id) = state.surface_for_window(wid) {
                                 let win_pos =
@@ -1098,6 +1277,217 @@ fn render_all_apps(state: &DesktopState) {
     crate::desktop::text_editor::with_text_editor(|te| {
         te.read().render_to_surface();
     });
+
+    // Dynamic apps
+    for app in &state.dynamic_apps {
+        let buf_size = (app.width as usize) * (app.height as usize) * 4;
+        let mut buf = alloc::vec![0u8; buf_size];
+
+        match app.kind {
+            AppKind::SystemMonitor => {
+                render_system_monitor(&mut buf, app.width as usize, app.height as usize);
+            }
+            AppKind::MediaPlayer => {
+                render_media_player(&mut buf, app.width as usize, app.height as usize);
+            }
+            AppKind::ImageViewer => {
+                render_placeholder_app(
+                    &mut buf,
+                    app.width as usize,
+                    app.height as usize,
+                    "Image Viewer",
+                    0x1a1a2e,
+                );
+            }
+            AppKind::Settings => {
+                render_placeholder_app(
+                    &mut buf,
+                    app.width as usize,
+                    app.height as usize,
+                    "Settings",
+                    0x2d3436,
+                );
+            }
+        }
+
+        update_surface_pixels(app.surface_id, app.pool_id, app.pool_buf_id, &buf);
+    }
+}
+
+/// Render a placeholder app with title text on a solid background.
+fn render_placeholder_app(buf: &mut [u8], w: usize, h: usize, title: &str, bg_color: u32) {
+    let r = ((bg_color >> 16) & 0xFF) as u8;
+    let g = ((bg_color >> 8) & 0xFF) as u8;
+    let b = (bg_color & 0xFF) as u8;
+    // Fill background
+    for y in 0..h {
+        for x in 0..w {
+            let off = (y * w + x) * 4;
+            if off + 3 < buf.len() {
+                buf[off] = b;
+                buf[off + 1] = g;
+                buf[off + 2] = r;
+                buf[off + 3] = 0xFF;
+            }
+        }
+    }
+    // Draw title centered
+    let title_bytes = title.as_bytes();
+    let tx = w.saturating_sub(title_bytes.len() * 8) / 2;
+    draw_string_into_buffer(buf, w, title_bytes, tx, 20, 0xFFFFFF);
+}
+
+/// Render system monitor showing memory and CPU stats.
+fn render_system_monitor(buf: &mut [u8], w: usize, h: usize) {
+    render_placeholder_app(buf, w, h, "System Monitor", 0x1e272e);
+    let mem = crate::mm::get_memory_stats();
+    let total_mb = (mem.total_frames * 4096) / (1024 * 1024);
+    let used_frames = mem.total_frames.saturating_sub(mem.free_frames);
+    let used_mb = (used_frames * 4096) / (1024 * 1024);
+    let pct = if mem.total_frames > 0 {
+        (used_frames * 100) / mem.total_frames
+    } else {
+        0
+    };
+
+    let perf = crate::perf::get_stats();
+
+    // Memory line
+    let mut line_buf = [0u8; 64];
+    let line = format_stat_line(&mut line_buf, b"Memory: ", used_mb, b"/", total_mb, b" MB");
+    draw_string_into_buffer(buf, w, line, 20, 50, 0x55EFC4);
+
+    // Usage bar
+    let bar_w = w.saturating_sub(60);
+    let filled = (bar_w * pct) / 100;
+    for x in 20..(20 + bar_w).min(w) {
+        let color = if x < 20 + filled { 0x55EFC4 } else { 0x333333 };
+        for dy in 0..12 {
+            let y = 70 + dy;
+            if y < h {
+                draw_pixel(buf, w, x, y, color);
+            }
+        }
+    }
+
+    // Stats
+    let stats_y = 95;
+    let line2 = format_simple(&mut line_buf, b"Ctx switches: ", perf.context_switches);
+    draw_string_into_buffer(buf, w, line2, 20, stats_y, 0xD4D4D4);
+    let line3 = format_simple(&mut line_buf, b"Syscalls:     ", perf.syscalls);
+    draw_string_into_buffer(buf, w, line3, 20, stats_y + 20, 0xD4D4D4);
+    let line4 = format_simple(&mut line_buf, b"Interrupts:   ", perf.interrupts);
+    draw_string_into_buffer(buf, w, line4, 20, stats_y + 40, 0xD4D4D4);
+    let line5 = format_simple(&mut line_buf, b"Page faults:  ", perf.page_faults);
+    draw_string_into_buffer(buf, w, line5, 20, stats_y + 60, 0xD4D4D4);
+}
+
+/// Render media player with playback info.
+fn render_media_player(buf: &mut [u8], w: usize, h: usize) {
+    render_placeholder_app(buf, w, h, "Media Player", 0x2c3e50);
+
+    // Draw playback controls hint
+    draw_string_into_buffer(buf, w, b"No media loaded", 20, 60, 0x95A5A6);
+    draw_string_into_buffer(
+        buf,
+        w,
+        b"Use file manager to open audio/image files",
+        20,
+        80,
+        0x7F8C8D,
+    );
+    draw_string_into_buffer(
+        buf,
+        w,
+        b"Controls: Space=play/pause  S=stop  +/-=volume",
+        20,
+        h.saturating_sub(30),
+        0x7F8C8D,
+    );
+}
+
+/// Draw a single pixel in BGRA format.
+fn draw_pixel(buf: &mut [u8], w: usize, x: usize, y: usize, color: u32) {
+    let off = (y * w + x) * 4;
+    if off + 3 < buf.len() {
+        buf[off] = (color & 0xFF) as u8;
+        buf[off + 1] = ((color >> 8) & 0xFF) as u8;
+        buf[off + 2] = ((color >> 16) & 0xFF) as u8;
+        buf[off + 3] = 0xFF;
+    }
+}
+
+/// Format a stat line: "prefix VALUE suffix" into a fixed buffer. Returns the
+/// used slice.
+fn format_stat_line<'a>(
+    buf: &'a mut [u8; 64],
+    prefix: &[u8],
+    value: usize,
+    sep: &[u8],
+    value2: usize,
+    suffix: &[u8],
+) -> &'a [u8] {
+    let mut pos = 0;
+    for &b in prefix {
+        if pos < 64 {
+            buf[pos] = b;
+            pos += 1;
+        }
+    }
+    pos = write_usize_to_buf(buf, pos, value);
+    for &b in sep {
+        if pos < 64 {
+            buf[pos] = b;
+            pos += 1;
+        }
+    }
+    pos = write_usize_to_buf(buf, pos, value2);
+    for &b in suffix {
+        if pos < 64 {
+            buf[pos] = b;
+            pos += 1;
+        }
+    }
+    &buf[..pos]
+}
+
+/// Format "prefix VALUE" into a fixed buffer.
+fn format_simple<'a>(buf: &'a mut [u8; 64], prefix: &[u8], value: u64) -> &'a [u8] {
+    let mut pos = 0;
+    for &b in prefix {
+        if pos < 64 {
+            buf[pos] = b;
+            pos += 1;
+        }
+    }
+    pos = write_usize_to_buf(buf, pos, value as usize);
+    &buf[..pos]
+}
+
+/// Write a usize as decimal digits into a byte buffer at position `pos`.
+fn write_usize_to_buf(buf: &mut [u8; 64], mut pos: usize, value: usize) -> usize {
+    if value == 0 {
+        if pos < 64 {
+            buf[pos] = b'0';
+            pos += 1;
+        }
+        return pos;
+    }
+    let mut digits = [0u8; 20];
+    let mut n = value;
+    let mut count = 0;
+    while n > 0 {
+        digits[count] = b'0' + (n % 10) as u8;
+        n /= 10;
+        count += 1;
+    }
+    for i in (0..count).rev() {
+        if pos < 64 {
+            buf[pos] = digits[i];
+            pos += 1;
+        }
+    }
+    pos
 }
 
 /// Render the panel to its compositor surface, including system tray.
@@ -1127,7 +1517,7 @@ fn render_panel(state: &DesktopState, screen_width: u32) {
 }
 
 /// Forward pending window manager events to the appropriate apps.
-fn forward_events_to_apps(state: &DesktopState) {
+fn forward_events_to_apps(state: &mut DesktopState) {
     // Get events for terminal window
     if state.terminal.wid > 0 {
         let events = crate::desktop::window_manager::with_window_manager(|wm| {
@@ -1172,6 +1562,25 @@ fn forward_events_to_apps(state: &DesktopState) {
                     let _ = editor.process_input(*event);
                 }
             });
+        }
+    }
+
+    // Dynamic apps: collect (wid, events) first, then process
+    let dynamic_wids: alloc::vec::Vec<u32> = state.dynamic_apps.iter().map(|a| a.wid).collect();
+    for wid in dynamic_wids {
+        let events = crate::desktop::window_manager::with_window_manager(|wm| wm.get_events(wid))
+            .unwrap_or_default();
+        if !events.is_empty() {
+            // Check for close action (ESC key press)
+            for event in &events {
+                if let crate::desktop::window_manager::InputEvent::KeyPress {
+                    scancode: 0x1B, ..
+                } = event
+                {
+                    close_dynamic_app(state, wid);
+                    break;
+                }
+            }
         }
     }
 }

@@ -2,6 +2,62 @@
 
 ---
 
+## [v0.10.3] - 2026-02-28
+
+### v0.10.3: Full Subsystem Integration -- CLI + GUI
+
+Exposes 17+ kernel subsystems that have complete public APIs but were inaccessible from the shell, and wires dynamic GUI app launching from the desktop launcher. Every subsystem with a public API now gets a shell command; the launcher can spawn and close application windows.
+
+#### 17 New CLI Shell Commands (`kernel/src/services/shell/commands.rs`)
+
+- **Hardware Discovery**: `lspci` (PCI device listing with `-v` verbose BARs), `lsusb` (USB device listing), `lsblk` (block device listing -- storage + VirtIO)
+- **Memory & Performance**: `vmstat` (virtual memory stats + perf counters), `sched` (scheduler stats -- context switches, migrations, IPC), `slab` (kernel heap stats, detailed on x86_64)
+- **Security**: `cap` (capability system stats), `mac` (MAC policy status + `mac test <src> <tgt> <access>`), `audit` (audit log status/enable/disable), `tpm` (TPM status + `tpm pcr <index>` PCR read)
+- **Crypto**: `sha256sum` (SHA-256 file hash), `blake3sum` (BLAKE3 file hash)
+- **IPC**: `ipcs` (IPC registry stats + fast path stats)
+- **Networking**: `route` (IP routing table), `ss` (socket statistics)
+- **Desktop**: `winfo` (Wayland compositor info + window list)
+- **Virtualization**: `lsns` (container/namespace listing)
+
+#### Shell API Pre-requisites (4 accessor functions)
+
+- `net::ip::get_routes()`: Clone routing table for `route` command
+- `net::socket::list_sockets()` + `SocketSummary`: Display-friendly socket state for `ss` command
+- `security::mac::{get_policy_count(), is_enabled()}`: MAC subsystem introspection
+- `mm::heap::get_heap_stats()`: Kernel heap statistics (x86_64-only)
+
+#### GUI Dynamic App Framework (`kernel/src/desktop/renderer.rs`)
+
+- **`AppKind` enum + `DynamicApp` struct**: Typed dynamic app tracking (ImageViewer, Settings, MediaPlayer, SystemMonitor) with WM window + compositor surface lifecycle
+- **`spawn_dynamic_app()`**: Creates WM window, compositor surface, focuses, raises -- singleton per app kind
+- **`close_dynamic_app()`**: Unmaps surface, destroys WM window, removes from tracking
+- **`focus_dynamic_app()`**: Finds and focuses existing app, syncs compositor z-order
+- **System Monitor rendering**: Live memory stats (used/total MB, usage bar) + performance counters (context switches, syscalls, interrupts, page faults)
+- **Media Player rendering**: Placeholder with playback control hints
+- **Image Viewer / Settings**: Placeholder apps with themed backgrounds
+
+#### Launcher Dispatch + App List (`kernel/src/desktop/launcher.rs`, `renderer.rs`)
+
+- **Capture `LauncherAction::Launch`**: Previously discarded with `let _ = ...`; now dispatches to `handle_launcher_launch()`
+- **App dispatch**: Static apps (terminal/files/editor) focus existing window; dynamic apps (settings/sysmonitor/imageviewer/mediaplayer) spawn on demand or focus if exists
+- **App list**: Added System Monitor and Media Player entries (7 total)
+
+#### Window Close Buttons (`kernel/src/desktop/renderer.rs`)
+
+- Title bar close button hit detection (rightmost 28px)
+- Dynamic apps close on click; static apps (terminal/files/editor) are permanent
+
+#### Event Forwarding for Dynamic Apps
+
+- ESC key press on dynamic app triggers close
+- Dynamic app WIDs collected before iteration to avoid borrow conflicts
+
+#### Version Bump
+
+- 4 locations: Cargo.toml, uname, os-release, welcome notification
+
+---
+
 ## [v0.10.2] - 2026-02-28
 
 ### v0.10.2: Desktop Render Loop Integration -- Wire Phase 7 Modules into Compositing Pipeline

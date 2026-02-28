@@ -632,6 +632,37 @@ pub fn close_socket(id: usize) -> Result<(), KernelError> {
     with_socket_mut(id, |socket| socket.close())?
 }
 
+/// Summary of a socket's state for display purposes.
+#[derive(Debug, Clone)]
+pub struct SocketSummary {
+    pub id: usize,
+    pub domain: SocketDomain,
+    pub socket_type: SocketType,
+    pub state: SocketState,
+    pub local_addr: Option<SocketAddr>,
+    pub remote_addr: Option<SocketAddr>,
+}
+
+/// List all sockets with their current state.
+pub fn list_sockets() -> Vec<SocketSummary> {
+    let table = SOCKET_TABLE.lock();
+    if let Some(ref sockets) = *table {
+        sockets
+            .iter()
+            .map(|s| SocketSummary {
+                id: s.id,
+                domain: s.domain,
+                socket_type: s.socket_type,
+                state: s.state,
+                local_addr: s.local_addr,
+                remote_addr: s.remote_addr,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
 // -----------------------------------------------------------------------
 // Free-function wrappers for syscall layer (Phase 6 network extensions)
 // -----------------------------------------------------------------------

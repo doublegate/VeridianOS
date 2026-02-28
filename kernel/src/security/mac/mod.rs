@@ -946,6 +946,16 @@ pub fn disable() {
     println!("[MAC] Mandatory Access Control disabled");
 }
 
+/// Check whether MAC enforcement is currently enabled.
+pub fn is_enabled() -> bool {
+    MAC_ENABLED.load(Ordering::Acquire)
+}
+
+/// Return the number of policy rules currently loaded.
+pub fn get_policy_count() -> usize {
+    POLICY_COUNT.load(Ordering::Relaxed)
+}
+
 // ---------------------------------------------------------------------------
 // Policy Loading
 // ---------------------------------------------------------------------------

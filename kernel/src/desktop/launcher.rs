@@ -943,11 +943,25 @@ fn default_applications() -> Vec<AppEntry> {
             "System settings",
         ),
         AppEntry::new(
+            "System Monitor",
+            "/usr/bin/sysmonitor",
+            "utilities-system-monitor",
+            AppCategory::System,
+            "Monitor CPU and memory",
+        ),
+        AppEntry::new(
             "Image Viewer",
             "/usr/bin/image-viewer",
             "eog",
             AppCategory::Graphics,
             "View images",
+        ),
+        AppEntry::new(
+            "Media Player",
+            "/usr/bin/mediaplayer",
+            "multimedia-player",
+            AppCategory::Multimedia,
+            "Play audio and video",
         ),
     ]
 }
@@ -1187,7 +1201,7 @@ pub fn init() -> Result<(), crate::error::KernelError> {
             actual: "initialized",
         })?;
 
-    crate::println!("[LAUNCHER] Application launcher initialized ({} apps)", 5);
+    crate::println!("[LAUNCHER] Application launcher initialized ({} apps)", 7);
     Ok(())
 }
 

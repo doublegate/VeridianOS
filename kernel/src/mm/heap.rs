@@ -76,6 +76,18 @@ pub fn heap_end_vaddr() -> u64 {
     unsafe { (core::ptr::addr_of!(HEAP_MEMORY) as *const u8).add(HEAP_SIZE) as u64 }
 }
 
+/// Get current heap statistics (x86_64 only).
+///
+/// Returns (total, used, free) in bytes.
+#[cfg(target_arch = "x86_64")]
+pub fn get_heap_stats() -> (usize, usize, usize) {
+    let allocator = crate::get_allocator().lock();
+    let total = HEAP_SIZE;
+    let free = allocator.free();
+    let used = total.saturating_sub(free);
+    (total, used, free)
+}
+
 /// Slab allocator for efficient small allocations (x86_64 only, uses
 /// LockedHeap)
 #[cfg(target_arch = "x86_64")]
