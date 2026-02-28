@@ -2,6 +2,57 @@
 
 ---
 
+## [v0.10.0] - 2026-02-28
+
+### v0.10.0: Phase 7 Wave 6 -- Virtualization + Security + Performance
+
+Phase 7 Wave 6 completes the production readiness phase with Intel VMX hypervisor support, container isolation with namespace management, security hardening (KPTI, demand paging, COW fork, TPM, Dilithium), and performance optimization (NUMA topology, per-CPU ready queues, IPC batching, IOMMU). All 34 remaining TODO(phase7) markers resolved. Approximately 22 new files, ~4,500 new lines.
+
+#### Security Hardening (Sprints S-1 through S-4)
+
+- **KPTI shadow page tables** (`arch/x86_64/kpti.rs`): Separate kernel/user L4 page tables with CR3 switching on syscall entry/exit, trampoline mapping for interrupt/syscall handlers, Meltdown mitigation via complete kernel address space isolation from user-mode page tables
+- **Demand paging** (`mm/demand_paging.rs`): Lazy anonymous page allocation via page fault handler, BackingType enum (Anonymous, FileBacked) for future mmap support, faulted-in page tracking with per-VAS metadata, zero-fill-on-demand for heap and stack growth
+- **COW fork** (`process/fork.rs`): `cow_fork()` implementation with shared frame COW table, ref-counted CowEntry for tracking shared page ownership, copy-on-write fault resolution that allocates new frames only on write access, transparent integration with demand paging
+- **TPM MMIO** (`security/tpm.rs`): Hardware TPM probing at standard MMIO address 0xFED40000, register access via volatile MMIO reads (TPM_ACCESS, TPM_INTERFACE_ID), device presence detection and capability reporting
+- **Dilithium verification** (`security/dilithium.rs`): ML-DSA-65 (FIPS 204) algebraic signature verification, z-vector norm bounds checking against gamma1 parameter, SHA-256 verification hash computation, integration with package signature verification pipeline
+
+#### Performance Optimization (Sprints P-1 through P-4)
+
+- **NUMA topology** (`sched/numa.rs`, `arch/x86_64/acpi.rs`): ACPI SRAT (System Resource Affinity Table) and SLIT (System Locality Information Table) parsing, real multi-node topology detection with per-node CPU and memory range mapping, inter-node distance matrix for locality-aware scheduling decisions
+- **Per-CPU ready queues** (`sched/percpu_queue.rs`): Lock-free per-CPU scheduling queues replacing the global ready queue, work-stealing algorithm (steal half from busiest queue), STEAL_THRESHOLD=2 to avoid unnecessary migration, reduced lock contention on multi-core systems
+- **Run-queue instrumentation** (`perf/mod.rs`): Per-CPU RunQueueStats tracking enqueue count, dequeue count, max queue length, and cumulative wait ticks; IPC batch operation counters for performance profiling
+- **IPC message batching** (`ipc/fast_path.rs`): IpcBatch struct accumulating up to 8 messages before dispatch, auto-flush on batch full or explicit flush call, reduced per-message overhead for high-throughput IPC workloads
+- **IOMMU DRHD parsing** (`drivers/iommu.rs`): DMAR table structure parsing, DRHD (DMA Remapping Hardware Unit Definition) and RMRR (Reserved Memory Region Reporting) extraction, device scope iterator for PCI device-to-IOMMU mapping, identity domain creation for DMA pass-through
+
+#### Hypervisor (Sprints H-1, H-2)
+
+- **VMX/VMCS** (`virt/vmx.rs`): Intel VMX enable/disable via CR4.VMXE and VMXON/VMXOFF, VMCS region allocation/load/clear, ~100 VMCS field encodings (guest state, host state, execution/exit/entry controls), VM launch (VMLAUNCH) and resume (VMRESUME) with exit handler dispatch
+- **EPT** (`virt/memory.rs`): 4-level Extended Page Tables for guest physical-to-host physical address translation, map/unmap page with R/W/X permissions, identity_map_range for guest memory setup, EPTP generation with write-back memory type
+- **Virtual devices** (`virt/devices.rs`): VirtualDevice trait for pluggable emulation, 8250 UART emulation (THR/RBR/IER/IIR/LCR/MCR/LSR/MSR registers), 8259A PIC emulation (ICW1-4, IRR/ISR/IMR, EOI), DeviceManager for I/O port dispatch
+
+#### Container Isolation (Sprint C-1)
+
+- **Namespaces** (`virt/namespace.rs`): PID namespace (bidirectional host/container PID mapping), mount namespace (chroot-style isolation), network namespace (veth pair support), UTS namespace (per-container hostname)
+- **Container runtime** (`virt/container.rs`): ContainerManager with create/start/stop/destroy lifecycle, ContainerState machine (Created -> Running -> Stopped -> Destroyed), per-container resource tracking, container enumeration
+
+#### Shell Commands
+
+- `vmx status|enable|disable` -- VMX hypervisor status query and control
+- `container list|create|start|stop|destroy` -- Container lifecycle management
+
+#### TODO Markers
+
+- All 34 remaining TODO(phase7) markers resolved (mmu x2, tpm x1, pkg x1, numa x3, ipc_blocking x1, perf x2, iommu x1, plus Wave 4-5 carryover)
+- `grep -c "TODO(phase7)" kernel/src/` returns 0
+
+#### Stats
+
+- ~22 new files, ~4,500 new lines
+- Zero clippy warnings on x86_64, AArch64, RISC-V with `-D warnings`
+- All 3 architectures boot to BOOTOK (29/29 tests)
+
+---
+
 ## [v0.9.0] - 2026-02-28
 
 ### v0.9.0: Phase 7 Wave 5 -- Multimedia Framework

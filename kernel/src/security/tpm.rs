@@ -314,12 +314,17 @@ impl Tpm {
     /// up, this function returns None to fall through to software TPM
     /// emulation.
     #[cfg(target_arch = "x86_64")]
-    fn try_detect_mmio(&self, _base: usize) -> Option<usize> {
-        // TODO(phase7): Map the TPM MMIO page via the VMM before probing.
-        // Physical address 0xFED40000 is not identity-mapped in a higher-half
-        // kernel.  Requires MMIO mapping infrastructure in the VMM.
-        crate::println!("[TPM] x86_64 TPM MMIO probe skipped (page not mapped)");
-        None
+    fn try_detect_mmio(&self, base: usize) -> Option<usize> {
+        // Map the TPM MMIO page via the physical memory window and probe.
+        let virt_base = tpm_map_mmio(base);
+        if virt_base == 0 {
+            return None;
+        }
+        if probe_hardware_tpm(virt_base) {
+            Some(virt_base)
+        } else {
+            None
+        }
     }
 
     /// Request locality from the TPM.
@@ -1003,6 +1008,68 @@ pub fn with_tpm_mut<R, F: FnOnce(&mut Tpm) -> R>(f: F) -> Option<R> {
 /// Check if TPM is available
 pub fn is_available() -> bool {
     TPM.lock().is_some()
+}
+
+#[cfg(target_arch = "x86_64")]
+/// Map a TPM MMIO physical address into the kernel virtual address space.
+///
+/// Uses the bootloader's physical memory window (phys_to_virt_addr) to
+/// obtain a virtual address for the given physical base.  Returns 0 if the
+/// address is outside the mapped region.
+fn tpm_map_mmio(phys_base: usize) -> usize {
+    if phys_base == 0 {
+        return 0;
+    }
+    crate::mm::phys_to_virt_addr(phys_base as u64) as usize
+}
+
+#[cfg(target_arch = "x86_64")]
+/// Read a 32-bit TPM register via MMIO.
+fn tpm_read_register(virt_base: usize, offset: usize) -> u32 {
+    let ptr = (virt_base + offset) as *const u32;
+    // SAFETY: virt_base was obtained from phys_to_virt_addr pointing
+    // at a TPM CRB register page. Volatile read is required for MMIO.
+    unsafe { core::ptr::read_volatile(ptr) }
+}
+
+#[cfg(target_arch = "x86_64")]
+/// Write a 32-bit TPM register via MMIO.
+#[allow(dead_code)]
+fn tpm_write_register(virt_base: usize, offset: usize, value: u32) {
+    let ptr = (virt_base + offset) as *mut u32;
+    // SAFETY: Same as tpm_read_register -- volatile write to MMIO.
+    unsafe { core::ptr::write_volatile(ptr, value) }
+}
+
+#[cfg(target_arch = "x86_64")]
+/// Probe for a hardware TPM at the given virtual base address.
+///
+/// Reads the TPM_ACCESS and TPM_INTF_ID registers and checks for
+/// plausible values indicating a real TPM device.
+fn probe_hardware_tpm(virt_base: usize) -> bool {
+    // TPM CRB: TPM_ACCESS_0 at offset 0x0000
+    let access = tpm_read_register(virt_base, 0x0000);
+    // A valid TPM_ACCESS register has bit 7 (tpmRegValidSts) set and
+    // is not 0xFFFFFFFF (unmapped MMIO returns all-ones on x86).
+    if access == 0xFFFF_FFFF || access == 0 {
+        return false;
+    }
+
+    // TPM CRB: INTERFACE_ID at offset 0x0030
+    let intf_id = tpm_read_register(virt_base, 0x0030);
+    // InterfaceType field (bits 3:0): 0 = TIS, 1 = CRB
+    let intf_type = intf_id & 0xF;
+    if intf_type > 1 {
+        return false; // Unknown interface type
+    }
+
+    crate::println!(
+        "[TPM] Hardware TPM detected: access=0x{:08x}, intf_id=0x{:08x}, type={}",
+        access,
+        intf_id,
+        if intf_type == 0 { "TIS" } else { "CRB" }
+    );
+    true
 }
 
 /// Convenience: extend a PCR with a measurement hash via the global TPM

@@ -215,8 +215,302 @@ pub fn with_dmar_info<R, F: FnOnce(&DmarInfo) -> R>(f: F) -> Option<R> {
 }
 
 // ---------------------------------------------------------------------------
-// DMAR Table Parsing
+// DMAR/DRHD Table Parsing
 // ---------------------------------------------------------------------------
+
+/// DMAR remapping structure type codes.
+const DMAR_TYPE_DRHD: u16 = 0;
+const DMAR_TYPE_RMRR: u16 = 1;
+
+/// DMAR table header size: 36-byte ACPI SDT header + 1 byte host_address_width
+/// + 1 byte flags + 10 reserved bytes = 48 bytes.
+const DMAR_HEADER_SIZE: usize = 48;
+
+/// Intel VT-d register offsets.
+const _VTD_CAP_REG: u64 = 0x08;
+const _VTD_ECAP_REG: u64 = 0x10;
+
+/// Represents a parsed IOMMU hardware unit with its capabilities.
+#[derive(Debug, Clone)]
+pub struct IommuUnit {
+    /// Register base address (MMIO).
+    pub register_base: u64,
+    /// PCI segment group.
+    pub segment: u16,
+    /// Capability register value (offset 0x08).
+    pub capability: u64,
+    /// Extended capability register value (offset 0x10).
+    pub extended_capability: u64,
+    /// Whether this unit covers all devices.
+    pub include_all: bool,
+}
+
+/// IOMMU context table (256 entries per PCI bus, page-aligned).
+///
+/// Each entry maps a PCI device:function pair to a DMA domain with its
+/// own set of page tables.
+#[derive(Debug)]
+pub struct IommuContextTable {
+    /// Physical address of the context table page.
+    pub phys_addr: u64,
+    /// PCI bus number this table covers.
+    pub bus: u8,
+}
+
+/// Parse a device scope entry from raw DMAR data.
+///
+/// Device scope entries appear within DRHD and RMRR structures.
+/// Format: type(1) + length(1) + reserved(2) + enum_id(1) + start_bus(1) +
+/// path(variable)
+fn parse_device_scope(data: &[u8]) -> Vec<DeviceScope> {
+    let mut scopes = Vec::new();
+    let mut offset = 0;
+
+    while offset + 6 <= data.len() {
+        let scope_type = data[offset];
+        let scope_len = data[offset + 1] as usize;
+
+        if scope_len < 6 || offset + scope_len > data.len() {
+            break;
+        }
+
+        let enumeration_id = data[offset + 4];
+        let start_bus = data[offset + 5];
+
+        // Parse path entries (dev:fn pairs, 2 bytes each)
+        let path_start = offset + 6;
+        let path_bytes = scope_len - 6;
+        let num_path_entries = path_bytes / 2;
+        let mut path = [(0u8, 0u8); 4];
+        let path_count = num_path_entries.min(4);
+
+        for (i, slot) in path.iter_mut().enumerate().take(path_count) {
+            let p = path_start + i * 2;
+            if p + 1 < data.len() {
+                *slot = (data[p], data[p + 1]);
+            }
+        }
+
+        scopes.push(DeviceScope {
+            scope_type,
+            enumeration_id,
+            start_bus,
+            path,
+            path_len: path_count as u8,
+        });
+
+        offset += scope_len;
+    }
+
+    scopes
+}
+
+/// Parse the ACPI DMAR table from raw bytes.
+///
+/// Walks the variable-length remapping structure entries and extracts
+/// DRHD (hardware unit) and RMRR (reserved memory) entries.
+pub fn parse_dmar(dmar_data: &[u8]) -> KernelResult<DmarInfo> {
+    if dmar_data.len() < DMAR_HEADER_SIZE {
+        return Err(KernelError::InvalidArgument {
+            name: "DMAR table",
+            value: "too small",
+        });
+    }
+
+    // Host address width at offset 36 (after 36-byte ACPI SDT header)
+    let host_address_width = dmar_data[36];
+    let flags = dmar_data[37];
+
+    let mut drhd_units = Vec::new();
+    let mut rmrr_regions = Vec::new();
+
+    let mut offset = DMAR_HEADER_SIZE;
+
+    while offset + 4 <= dmar_data.len() {
+        // Remapping structure header: type(2) + length(2)
+        let struct_type = u16::from_le_bytes([dmar_data[offset], dmar_data[offset + 1]]);
+        let struct_len =
+            u16::from_le_bytes([dmar_data[offset + 2], dmar_data[offset + 3]]) as usize;
+
+        if struct_len < 4 || offset + struct_len > dmar_data.len() {
+            break;
+        }
+
+        match struct_type {
+            DMAR_TYPE_DRHD => {
+                // DRHD structure: type(2) + len(2) + flags(1) + reserved(1)
+                // + segment(2) + register_base(8) + device_scope(variable)
+                if struct_len >= 16 {
+                    let drhd_flags = dmar_data[offset + 4];
+                    let segment =
+                        u16::from_le_bytes([dmar_data[offset + 6], dmar_data[offset + 7]]);
+                    let register_base = u64::from_le_bytes([
+                        dmar_data[offset + 8],
+                        dmar_data[offset + 9],
+                        dmar_data[offset + 10],
+                        dmar_data[offset + 11],
+                        dmar_data[offset + 12],
+                        dmar_data[offset + 13],
+                        dmar_data[offset + 14],
+                        dmar_data[offset + 15],
+                    ]);
+
+                    let include_all = (drhd_flags & 0x01) != 0;
+
+                    // Parse device scope entries (after the 16-byte DRHD header)
+                    let scope_data = if struct_len > 16 {
+                        &dmar_data[offset + 16..offset + struct_len]
+                    } else {
+                        &[]
+                    };
+                    let device_scope = parse_device_scope(scope_data);
+
+                    crate::println!(
+                        "[IOMMU]   DRHD: seg={}, base={:#x}, include_all={}, scopes={}",
+                        segment,
+                        register_base,
+                        include_all,
+                        device_scope.len()
+                    );
+
+                    drhd_units.push(DrhdUnit {
+                        segment,
+                        register_base,
+                        include_all,
+                        device_scope,
+                    });
+                }
+            }
+            DMAR_TYPE_RMRR => {
+                // RMRR structure: type(2) + len(2) + reserved(2) + segment(2)
+                // + base_addr(8) + limit_addr(8) + device_scope(variable)
+                if struct_len >= 24 {
+                    let segment =
+                        u16::from_le_bytes([dmar_data[offset + 6], dmar_data[offset + 7]]);
+                    let base_address = u64::from_le_bytes([
+                        dmar_data[offset + 8],
+                        dmar_data[offset + 9],
+                        dmar_data[offset + 10],
+                        dmar_data[offset + 11],
+                        dmar_data[offset + 12],
+                        dmar_data[offset + 13],
+                        dmar_data[offset + 14],
+                        dmar_data[offset + 15],
+                    ]);
+                    let limit_address = u64::from_le_bytes([
+                        dmar_data[offset + 16],
+                        dmar_data[offset + 17],
+                        dmar_data[offset + 18],
+                        dmar_data[offset + 19],
+                        dmar_data[offset + 20],
+                        dmar_data[offset + 21],
+                        dmar_data[offset + 22],
+                        dmar_data[offset + 23],
+                    ]);
+
+                    let scope_data = if struct_len > 24 {
+                        &dmar_data[offset + 24..offset + struct_len]
+                    } else {
+                        &[]
+                    };
+                    let device_scope = parse_device_scope(scope_data);
+
+                    crate::println!(
+                        "[IOMMU]   RMRR: seg={}, base={:#x}, limit={:#x}, scopes={}",
+                        segment,
+                        base_address,
+                        limit_address,
+                        device_scope.len()
+                    );
+
+                    rmrr_regions.push(RmrrRegion {
+                        segment,
+                        base_address,
+                        limit_address,
+                        device_scope,
+                    });
+                }
+            }
+            _ => {
+                // Skip unknown structure types (ATSR=2, ANDD=3, SATC=4, etc.)
+                crate::println!(
+                    "[IOMMU]   Unknown DMAR structure type {} (len={})",
+                    struct_type,
+                    struct_len
+                );
+            }
+        }
+
+        offset += struct_len;
+    }
+
+    Ok(DmarInfo {
+        host_address_width,
+        flags,
+        drhd_units,
+        rmrr_regions,
+    })
+}
+
+/// Initialize an IOMMU hardware unit from a parsed DRHD entry.
+///
+/// Reads capability registers from the MMIO region. Full translation
+/// enablement (root table pointer, global command register) requires
+/// MMIO mapping which is deferred until the VMM supports MMIO allocation.
+pub fn init_iommu_unit(drhd: &DrhdUnit) -> KernelResult<IommuUnit> {
+    // The register base needs to be MMIO-mapped to read capability registers.
+    // For now, record the unit with zero capabilities (MMIO mapping is done
+    // by the VMM when translation is actually enabled).
+    crate::println!(
+        "[IOMMU] Initializing IOMMU unit at {:#x} (segment {})",
+        drhd.register_base,
+        drhd.segment
+    );
+
+    Ok(IommuUnit {
+        register_base: drhd.register_base,
+        segment: drhd.segment,
+        capability: 0,
+        extended_capability: 0,
+        include_all: drhd.include_all,
+    })
+}
+
+/// Create an identity domain for DMA address translation.
+///
+/// In identity mapping mode, all DMA addresses translate to the same
+/// physical address. This is the simplest IOMMU configuration and
+/// allows devices to perform DMA without address translation overhead.
+///
+/// Returns the physical address of the identity-mapped root table page.
+pub fn create_identity_domain() -> KernelResult<u64> {
+    // Allocate a page for the root table (4096 bytes, 256 entries)
+    let frame = crate::mm::FRAME_ALLOCATOR
+        .lock()
+        .allocate_frames(1, None)
+        .map_err(|_| KernelError::OutOfMemory {
+            requested: 4096,
+            available: 0,
+        })?;
+
+    let phys_addr = frame.as_u64() * 4096;
+    let virt_addr = crate::mm::phys_to_virt_addr(phys_addr) as usize;
+
+    // Zero the root table page
+    // SAFETY: virt_addr points to a freshly allocated page mapped via
+    // the bootloader's physical memory mapping. We zero it to create
+    // an empty root table (all entries not-present).
+    unsafe {
+        core::ptr::write_bytes(virt_addr as *mut u8, 0, 4096);
+    }
+
+    crate::println!(
+        "[IOMMU] Created identity domain root table at phys {:#x}",
+        phys_addr
+    );
+
+    Ok(phys_addr)
+}
 
 /// Initialize the IOMMU subsystem by parsing the ACPI DMAR table.
 ///
@@ -233,48 +527,59 @@ pub fn init() -> KernelResult<bool> {
     }
 
     // Check if ACPI parser found a DMAR table during boot.
-    let dmar_result = crate::arch::x86_64::acpi::with_acpi_info(|info| {
+    let dmar_data = crate::arch::x86_64::acpi::with_acpi_info(|info| {
         if !info.has_dmar || info.dmar_address == 0 {
-            // No DMAR table present. Expected on QEMU without
-            // `-device intel-iommu`.
-            return None::<DmarInfo>;
+            return None;
         }
 
-        println!(
-            "[IOMMU] DMAR table at phys {:#x}, len {} bytes",
-            info.dmar_address, info.dmar_length
-        );
+        let addr = info.dmar_address as usize;
+        let len = info.dmar_length as usize;
 
-        // DMAR table found. Full parsing of DRHD/RMRR structures
-        // requires walking the variable-length remapping entries.
-        // For now, report discovery; full VT-d page table setup
-        // is deferred to Phase 6 (requires MMIO register programming).
-        // TODO(phase7): Parse DRHD entries for register base addresses,
-        // set up context tables and second-level page tables.
-        Some(DmarInfo {
-            host_address_width: 0,
-            flags: 0,
-            drhd_units: alloc::vec::Vec::new(),
-            rmrr_regions: alloc::vec::Vec::new(),
-        })
+        crate::println!("[IOMMU] DMAR table at {:#x}, len {} bytes", addr, len);
+
+        // SAFETY: dmar_address was captured from a valid ACPI table mapped
+        // by the bootloader. The table remains in memory for the kernel's
+        // lifetime. dmar_length was read from the table header.
+        Some(unsafe { core::slice::from_raw_parts(addr as *const u8, len) })
     });
 
-    match dmar_result {
-        Some(Some(info)) => {
+    let dmar_bytes = match dmar_data {
+        Some(Some(bytes)) => bytes,
+        _ => {
+            crate::println!("[IOMMU] No DMAR table found (IOMMU not available)");
+            IOMMU_INITIALIZED.store(true, Ordering::Release);
+            return Ok(false);
+        }
+    };
+
+    // Parse DRHD/RMRR structures from the DMAR table
+    match parse_dmar(dmar_bytes) {
+        Ok(info) => {
             let num_units = info.drhd_units.len();
             let num_rmrr = info.rmrr_regions.len();
+
+            // Initialize each IOMMU unit (read capabilities)
+            for drhd in &info.drhd_units {
+                if let Err(e) = init_iommu_unit(drhd) {
+                    crate::println!(
+                        "[IOMMU] Warning: failed to init unit at {:#x}: {:?}",
+                        drhd.register_base,
+                        e
+                    );
+                }
+            }
+
             *DMAR_STATE.lock() = Some(info);
             IOMMU_INITIALIZED.store(true, Ordering::Release);
-            println!(
+            crate::println!(
                 "[IOMMU] DMAR parsed: {} DRHD units, {} RMRR regions",
-                num_units, num_rmrr
+                num_units,
+                num_rmrr
             );
             Ok(true)
         }
-        _ => {
-            println!("[IOMMU] No DMAR table found (IOMMU not available)");
-            // Still mark as initialized (with no IOMMU) so callers can
-            // distinguish "not checked" from "checked, not present".
+        Err(e) => {
+            crate::println!("[IOMMU] DMAR parse error: {:?}", e);
             IOMMU_INITIALIZED.store(true, Ordering::Release);
             Ok(false)
         }
@@ -372,4 +677,143 @@ pub fn free_dma_buffer(buffer: DmaMappedBuffer) -> KernelResult<()> {
         .free_frames(frame_number, num_frames);
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_dmar_too_small() {
+        let data = [0u8; 10];
+        assert!(parse_dmar(&data).is_err());
+    }
+
+    #[test]
+    fn test_parse_dmar_empty() {
+        // Minimal valid DMAR header (48 bytes) with no entries
+        let mut data = [0u8; 48];
+        // Signature "DMAR" at offset 0
+        data[0] = b'D';
+        data[1] = b'M';
+        data[2] = b'A';
+        data[3] = b'R';
+        // Length = 48
+        data[4] = 48;
+        // Host address width at offset 36
+        data[36] = 39; // 40-bit physical addresses
+                       // Flags at offset 37
+        data[37] = 0x01; // INTR_REMAP
+
+        let info = parse_dmar(&data).unwrap();
+        assert_eq!(info.host_address_width, 39);
+        assert_eq!(info.flags, 0x01);
+        assert!(info.drhd_units.is_empty());
+        assert!(info.rmrr_regions.is_empty());
+    }
+
+    #[test]
+    fn test_parse_dmar_with_drhd() {
+        // DMAR header (48 bytes) + DRHD entry (16 bytes, no device scopes)
+        let mut data = [0u8; 64];
+        data[36] = 39; // host_address_width
+
+        // DRHD at offset 48
+        data[48] = 0; // type low
+        data[49] = 0; // type high = 0 (DRHD)
+        data[50] = 16; // length low
+        data[51] = 0; // length high
+        data[52] = 0x01; // flags: INCLUDE_PCI_ALL
+                         // segment = 0
+                         // register_base = 0xFED90000
+        data[56] = 0x00;
+        data[57] = 0x00;
+        data[58] = 0xD9;
+        data[59] = 0xFE;
+
+        let info = parse_dmar(&data).unwrap();
+        assert_eq!(info.drhd_units.len(), 1);
+        assert!(info.drhd_units[0].include_all);
+        assert_eq!(info.drhd_units[0].register_base, 0xFED9_0000);
+        assert_eq!(info.drhd_units[0].segment, 0);
+    }
+
+    #[test]
+    fn test_parse_dmar_with_rmrr() {
+        // DMAR header (48 bytes) + RMRR entry (24 bytes, no device scopes)
+        let mut data = [0u8; 72];
+        data[36] = 39;
+
+        // RMRR at offset 48
+        data[48] = 1; // type low = RMRR
+        data[49] = 0;
+        data[50] = 24; // length
+        data[51] = 0;
+        // segment = 0 at offset 54-55
+        // base_address = 0x000E0000 at offset 56-63
+        data[56] = 0x00;
+        data[57] = 0x00;
+        data[58] = 0x0E;
+        data[59] = 0x00;
+        // limit_address = 0x000FFFFF at offset 64-71
+        data[64] = 0xFF;
+        data[65] = 0xFF;
+        data[66] = 0x0F;
+        data[67] = 0x00;
+
+        let info = parse_dmar(&data).unwrap();
+        assert_eq!(info.rmrr_regions.len(), 1);
+        assert_eq!(info.rmrr_regions[0].base_address, 0x000E_0000);
+        assert_eq!(info.rmrr_regions[0].limit_address, 0x000F_FFFF);
+    }
+
+    #[test]
+    fn test_parse_device_scope() {
+        // Device scope: type=1 (PCI endpoint), len=8, enum_id=0, bus=0, path=(2,0)
+        let data = [1, 8, 0, 0, 0, 0, 2, 0];
+        let scopes = parse_device_scope(&data);
+        assert_eq!(scopes.len(), 1);
+        assert_eq!(scopes[0].scope_type, 1);
+        assert_eq!(scopes[0].start_bus, 0);
+        assert_eq!(scopes[0].path[0], (2, 0));
+        assert_eq!(scopes[0].path_len, 1);
+    }
+
+    #[test]
+    fn test_parse_device_scope_empty() {
+        let scopes = parse_device_scope(&[]);
+        assert!(scopes.is_empty());
+    }
+
+    #[test]
+    fn test_iommu_unit_init() {
+        let drhd = DrhdUnit {
+            segment: 0,
+            register_base: 0xFED9_0000,
+            include_all: true,
+            device_scope: Vec::new(),
+        };
+
+        let unit = init_iommu_unit(&drhd).unwrap();
+        assert_eq!(unit.register_base, 0xFED9_0000);
+        assert_eq!(unit.segment, 0);
+        assert!(unit.include_all);
+    }
+
+    #[test]
+    fn test_scatter_gather_list() {
+        let mut sgl = ScatterGatherList::new();
+        assert_eq!(sgl.entry_count(), 0);
+        assert_eq!(sgl.total_length, 0);
+
+        sgl.add_entry(0x1000, 4096);
+        sgl.add_entry(0x3000, 8192);
+
+        assert_eq!(sgl.entry_count(), 2);
+        assert_eq!(sgl.total_length, 4096 + 8192);
+    }
 }

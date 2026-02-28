@@ -8,6 +8,7 @@ For current project status, see the [README](../README.md). For task tracking, s
 
 ## Table of Contents
 
+- [v0.10.0 -- Phase 7 Wave 6: Virtualization + Security + Performance](#v0100----phase-7-wave-6-virtualization--security--performance)
 - [v0.9.0 -- Phase 7 Wave 5: Multimedia Framework](#v090----phase-7-wave-5-multimedia-framework)
 - [v0.8.0 -- Phase 7 Wave 4: Advanced Networking + Shell/Desktop](#v080----phase-7-wave-4-advanced-networking--shelldesktop)
 - [v0.7.1 -- Phase 7 Waves 1-3: GPU Drivers, Advanced Wayland, Desktop Completion](#v071----phase-7-waves-1-3-gpu-drivers-advanced-wayland-desktop-completion)
@@ -58,6 +59,41 @@ For current project status, see the [README](../README.md). For task tracking, s
 - [v0.2.0 -- Phase 1 Microkernel Core](#v020----phase-1-microkernel-core)
 - [v0.1.0 -- Phase 0 Foundation and Tooling](#v010----phase-0-foundation-and-tooling)
 - [DEEP-RECOMMENDATIONS](#deep-recommendations)
+
+---
+
+## v0.10.0 -- Phase 7 Wave 6: Virtualization + Security + Performance
+
+**Date**: February 28, 2026
+
+Phase 7 Wave 6 completes the production readiness phase. Intel VMX hypervisor with VMCS management, Extended Page Tables, and virtual device emulation (8250 UART, 8259A PIC). Container isolation with PID/mount/network/UTS namespaces. Security hardening: KPTI shadow page tables, demand paging, COW fork, TPM MMIO probing, ML-DSA-65 Dilithium verification. Performance: ACPI SRAT/SLIT NUMA topology, per-CPU ready queues with work-stealing, run-queue instrumentation, IPC batching, IOMMU DRHD parsing. All 34 remaining TODO(phase7) markers resolved. ~22 new files, ~4,500 new lines.
+
+### Highlights
+
+- **KPTI shadow page tables**: Separate kernel/user L4 tables, CR3 switching, Meltdown mitigation
+- **Demand paging**: Lazy anonymous pages via page fault handler, BackingType (Anonymous/FileBacked)
+- **COW fork**: cow_fork() with ref-counted CowEntry, copy-on-write fault resolution
+- **TPM MMIO**: Hardware probing at 0xFED40000, TPM_ACCESS/INTERFACE_ID checks
+- **Dilithium**: ML-DSA-65 (FIPS 204) algebraic verification, z-norm bounds checking
+- **NUMA topology**: ACPI SRAT/SLIT parsing, per-node CPU/memory mapping, distance matrix
+- **Per-CPU ready queues**: Lock-free scheduling, work-stealing (steal half, STEAL_THRESHOLD=2)
+- **IPC batching**: IpcBatch (8 messages), auto-flush, reduced per-message overhead
+- **VMX/VMCS**: Intel VMX enable/disable, VMCS field encodings, VM launch/resume, exit dispatch
+- **EPT**: 4-level Extended Page Tables, identity_map_range, EPTP generation
+- **Virtual devices**: 8250 UART + 8259A PIC emulation, DeviceManager
+- **Namespaces**: PID, mount, network (veth), UTS with bidirectional mapping
+- **Containers**: ContainerManager create/start/stop/destroy lifecycle
+- **Shell**: `vmx status|enable|disable`, `container list|create|start|stop|destroy`
+
+### Stats
+
+| Metric | Value |
+|--------|-------|
+| New files | ~22 |
+| New lines | ~4,500 |
+| TODO(phase7) resolved | 34 (all remaining) |
+| Clippy | Zero warnings (3 architectures) |
+| Boot tests | 29/29 BOOTOK (3 architectures) |
 
 ---
 

@@ -325,20 +325,20 @@ Currently implementing in phases:
 7. **Phase 5.5** (Bridge): Infrastructure for Phase 6 - **100% COMPLETE** (all 12 sprints, v0.5.13)
 8. **Phase 6** (Months 34-42): Advanced features and GUI - **~100% actual** (Wayland compositor, desktop apps, TCP/IP, input, panel)
 9. **Phase 6.5** (Bridge): Rust compiler port + Bash-in-Rust shell - **100% COMPLETE** (42 sprints, 6 waves, v0.7.0)
-10. **Phase 7** (Months 42+): Production readiness - **~65%** (Waves 1-5 complete: GPU drivers, advanced Wayland, desktop completion, advanced networking, multimedia; Wave 6 remaining: virtualization, security, performance)
+10. **Phase 7** (Months 42+): Production readiness - **~100%** (All 6 Waves complete: GPU drivers, advanced Wayland, desktop completion, advanced networking, multimedia, virtualization, security, performance)
 
 ## Project Status
 
 | Area | Status |
 |------|--------|
 | **Repository** | <https://github.com/doublegate/VeridianOS> |
-| **Latest Release** | v0.9.0 (February 28, 2026) - Phase 7 Wave 5: Audio subsystem (fixed-point 16.16 mixer, ring buffer transport, WAV parser, output pipeline), VirtIO-Sound driver (PCI 0x1AF4:0x1059), video framework (TGA/QOI decoders, scaling, color space), media player, shell commands (play, volume), 8 audio syscall stubs |
+| **Latest Release** | v0.10.0 (February 28, 2026) - Phase 7 Wave 6: Virtualization (VMX/VMCS, EPT, virtual devices, container namespaces), security hardening (KPTI shadow page tables, demand paging, COW fork, TPM MMIO, Dilithium ML-DSA-65), performance (ACPI SRAT/SLIT NUMA topology, per-CPU ready queues with work-stealing, IPC batching, IOMMU DRHD parsing), all 34 TODO(phase7) resolved |
 | **Build** | ✅ All 3 architectures compile, zero warnings |
 | **Boot** | ✅ All 3 architectures Stage 6 BOOTOK, 29/29 tests (fbcon + keyboard driver) |
 | **CI/CD** | ✅ GitHub Actions 100% pass rate |
 | **Documentation** | ✅ 25+ guides, GitHub Pages, mdBook, Rustdoc |
 
-**Previous Releases**: v0.8.0, v0.7.1, v0.7.0, v0.6.4, v0.6.3, v0.6.2, v0.6.1, v0.6.0, v0.5.13, v0.5.12, v0.5.11, v0.5.10, v0.5.9, v0.5.8, v0.5.7, v0.5.6, v0.5.5, v0.5.4, v0.5.3, v0.5.2, v0.5.1, v0.5.0, v0.4.9, v0.4.6, v0.4.5, v0.4.4, v0.4.3, v0.4.2, v0.4.1, v0.4.0, v0.3.9, v0.3.8, v0.3.7, v0.3.6, v0.3.5, v0.3.4, v0.3.3, v0.3.2, v0.3.1, v0.3.0, v0.2.5, v0.2.1, v0.2.0, v0.1.0
+**Previous Releases**: 48+ releases from v0.1.0 through v0.9.0. See CHANGELOG.md and docs/RELEASE-HISTORY.md for full history.
 
 ## Implementation Status
 

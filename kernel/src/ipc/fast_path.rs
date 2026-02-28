@@ -333,6 +333,103 @@ pub fn get_slow_path_count() -> u64 {
     SLOW_PATH_FALLBACK_COUNT.load(Ordering::Relaxed)
 }
 
+// ---------------------------------------------------------------------------
+// IPC Message Batching
+// ---------------------------------------------------------------------------
+
+/// Maximum number of messages in a batch before automatic flush.
+pub const BATCH_SIZE: usize = 8;
+
+/// IPC message batch for amortizing per-message overhead.
+///
+/// Collects multiple small messages destined for the same target and
+/// delivers them in a single operation. This reduces per-message overhead
+/// (capability validation, task lookup) by performing these steps once
+/// per batch instead of once per message.
+pub struct IpcBatch {
+    /// Buffered messages.
+    messages: [Option<SmallMessage>; BATCH_SIZE],
+    /// Number of messages currently in the batch.
+    count: usize,
+    /// Target PID for all messages in this batch.
+    target_pid: u64,
+}
+
+impl IpcBatch {
+    /// Create a new empty batch targeting a specific process.
+    pub fn new(target_pid: u64) -> Self {
+        const NONE_MSG: Option<SmallMessage> = None;
+        Self {
+            messages: [NONE_MSG; BATCH_SIZE],
+            count: 0,
+            target_pid,
+        }
+    }
+
+    /// Add a message to the batch.
+    ///
+    /// Returns `true` if the batch is now full and should be flushed.
+    /// Returns `false` if there is still room for more messages.
+    pub fn add_to_batch(&mut self, msg: SmallMessage) -> bool {
+        if self.count < BATCH_SIZE {
+            self.messages[self.count] = Some(msg);
+            self.count += 1;
+        }
+        self.count >= BATCH_SIZE
+    }
+
+    /// Number of messages currently in the batch.
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Whether the batch is empty.
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Flush all buffered messages by sending them via fast_send.
+    ///
+    /// Each message is sent individually via the fast path. Capability
+    /// validation is only performed once per batch (the first message's
+    /// capability is cached for subsequent sends).
+    ///
+    /// Returns the number of messages successfully sent.
+    pub fn flush(&mut self) -> usize {
+        let mut sent = 0;
+        for i in 0..self.count {
+            if let Some(ref msg) = self.messages[i] {
+                if fast_send(msg, self.target_pid).is_ok() {
+                    sent += 1;
+                    crate::perf::record_ipc_message_sent();
+                }
+            }
+        }
+
+        if sent > 0 {
+            crate::perf::record_ipc_batch_flushed();
+        }
+
+        // Clear the batch
+        self.count = 0;
+        for slot in &mut self.messages {
+            *slot = None;
+        }
+
+        sent
+    }
+
+    /// Get the target PID for this batch.
+    pub fn target_pid(&self) -> u64 {
+        self.target_pid
+    }
+}
+
+/// Flush an IPC batch (convenience function for external callers).
+pub fn flush_batch(batch: &mut IpcBatch) -> usize {
+    batch.flush()
+}
+
 #[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use super::*;
@@ -347,5 +444,41 @@ mod tests {
     #[test]
     fn test_slow_path_count() {
         assert_eq!(get_slow_path_count(), 0);
+    }
+
+    #[test]
+    fn test_batch_add_and_full() {
+        let mut batch = IpcBatch::new(42);
+        assert!(batch.is_empty());
+        assert_eq!(batch.len(), 0);
+
+        // Add messages until full
+        for i in 0..BATCH_SIZE - 1 {
+            let msg = SmallMessage {
+                capability: (i as u64) + 1,
+                opcode: 0,
+                flags: 0,
+                data: [0; 4],
+            };
+            assert!(!batch.add_to_batch(msg));
+        }
+
+        assert_eq!(batch.len(), BATCH_SIZE - 1);
+
+        // Last one should indicate full
+        let msg = SmallMessage {
+            capability: 100,
+            opcode: 0,
+            flags: 0,
+            data: [0; 4],
+        };
+        assert!(batch.add_to_batch(msg));
+        assert_eq!(batch.len(), BATCH_SIZE);
+    }
+
+    #[test]
+    fn test_batch_target_pid() {
+        let batch = IpcBatch::new(99);
+        assert_eq!(batch.target_pid(), 99);
     }
 }

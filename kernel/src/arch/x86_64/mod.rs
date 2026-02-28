@@ -13,6 +13,7 @@ pub mod early_serial;
 pub mod entry;
 pub mod gdt;
 pub mod idt;
+pub mod kpti;
 pub mod mmu;
 pub mod msr;
 pub mod multiboot;

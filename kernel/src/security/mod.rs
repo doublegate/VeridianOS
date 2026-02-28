@@ -9,6 +9,7 @@
 pub mod audit;
 pub mod auth;
 pub mod boot;
+pub mod dilithium;
 pub mod fuzzing;
 pub mod mac;
 pub mod memory_protection;

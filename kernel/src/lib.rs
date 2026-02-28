@@ -97,6 +97,7 @@ pub mod userland;
 pub mod userspace;
 pub mod utils;
 pub mod video;
+pub mod virt;
 
 #[cfg(test)]
 mod test_config;

@@ -20,7 +20,7 @@ pub fn init() {
     // L4[256-511].  Each process gets its own L4 with the kernel entries
     // copied from this root.  Dedicated kernel page tables are not needed
     // because the per-process page tables already include the kernel mapping.
-    // TODO(phase7): KPTI shadow page tables for Meltdown mitigation.
+    // KPTI shadow page tables for Meltdown mitigation are in kpti.rs.
 }
 
 /// Read CR3 register (page table base)
@@ -119,14 +119,18 @@ pub fn handle_page_fault(error_code: u32, faulting_address: VirtualAddress) {
     println!("  Reserved bit: {}", error.reserved_write());
     println!("  Instruction fetch: {}", error.instruction_fetch());
 
-    // TODO(phase7): Implement demand paging (stack growth, heap on-demand,
-    // COW for fork, mmap lazy allocation).  Currently all pages are
-    // pre-allocated, so any page fault is a genuine bug.
-
-    // Panic is intentional: an unhandled page fault means the CPU tried to
-    // access memory that has no valid mapping. Without a demand-paging
-    // handler, continuing would cause undefined behavior. Once demand
-    // paging and COW are implemented, this will be replaced with proper
-    // fault resolution or process termination.
-    panic!("Unhandled page fault at 0x{:x}", faulting_address.as_u64());
+    // Delegate to the unified page fault handler which attempts demand paging,
+    // copy-on-write, and stack growth before giving up.
+    let info = crate::mm::page_fault::from_x86_64(
+        error_code as u64,
+        faulting_address.as_u64(),
+        0, // RIP not available in this legacy path
+    );
+    if let Err(_e) = crate::mm::page_fault::handle_page_fault(info) {
+        panic!(
+            "Unhandled page fault at 0x{:x}: {}",
+            faulting_address.as_u64(),
+            _e
+        );
+    }
 }

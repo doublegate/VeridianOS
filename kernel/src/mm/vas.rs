@@ -1137,7 +1137,78 @@ impl VirtualAddressSpace {
         None
     }
 
-    /// Get a reference to the underlying mappings (for diagnostics).
+    /// Get a reference to the underlying mappings BTreeMap.
+    ///
+    /// Used by COW fork to iterate user-space pages and by diagnostics.
+    /// The caller must lock the returned Mutex before accessing entries.
+    pub fn mappings_ref(
+        &self,
+    ) -> &spin::Mutex<alloc::collections::BTreeMap<VirtualAddress, VirtualMapping>> {
+        &self.mappings
+    }
+
+    /// Map a specific virtual address using a pre-allocated physical frame.
+    ///
+    /// Unlike `map_page` (which allocates its own frame), this takes an
+    /// existing frame -- used by demand paging and COW fault handlers.
+    #[cfg(feature = "alloc")]
+    pub fn map_page_with_frame(
+        &mut self,
+        vaddr: usize,
+        frame: super::FrameNumber,
+        flags: PageFlags,
+    ) -> Result<(), KernelError> {
+        let vaddr_obj = VirtualAddress(vaddr as u64);
+        let pt_root = self.page_table_root.load(Ordering::Acquire);
+        if pt_root != 0 {
+            // SAFETY: pt_root is a valid L4 page table address set during
+            // VAS::init(). We have &mut self for exclusive access.
+            let mut mapper = unsafe { create_mapper_from_root(pt_root) };
+            let mut alloc = VasFrameAllocator;
+            mapper.map_page(vaddr_obj, frame, flags, &mut alloc)?;
+            crate::arch::tlb_flush_address(vaddr as u64);
+        }
+        Ok(())
+    }
+
+    /// Re-map a virtual address to a different physical frame (for COW).
+    ///
+    /// Unmaps the old mapping and installs the new frame with the given flags.
+    #[cfg(feature = "alloc")]
+    pub fn remap_page(
+        &mut self,
+        vaddr: usize,
+        new_frame: super::FrameNumber,
+        flags: PageFlags,
+    ) -> Result<(), KernelError> {
+        let vaddr_obj = VirtualAddress(vaddr as u64);
+        let pt_root = self.page_table_root.load(Ordering::Acquire);
+        if pt_root != 0 {
+            // SAFETY: Same as map_page_with_frame.
+            let mut mapper = unsafe { create_mapper_from_root(pt_root) };
+            let mut alloc = VasFrameAllocator;
+            // Unmap old entry (ignore error if not currently mapped)
+            let _ = mapper.unmap_page(vaddr_obj);
+            mapper.map_page(vaddr_obj, new_frame, flags, &mut alloc)?;
+            crate::arch::tlb_flush_address(vaddr as u64);
+        }
+        Ok(())
+    }
+
+    /// Register a lazy (demand-paged) mapping without allocating frames.
+    ///
+    /// Delegates to the demand paging manager. The first access will trigger
+    /// a page fault that the manager resolves by allocating a physical frame.
+    #[cfg(feature = "alloc")]
+    pub fn map_lazy(&mut self, vaddr: usize, size: usize, flags: PageFlags) {
+        crate::mm::demand_paging::register_lazy(
+            vaddr,
+            size,
+            flags,
+            crate::mm::demand_paging::BackingType::Anonymous,
+        );
+    }
+
     /// Allocate memory-mapped region
     pub fn mmap(
         &self,

@@ -1900,7 +1900,7 @@ impl BuiltinCommand for UnameCommand {
             parts.push("veridian");
         }
         if show_release {
-            parts.push("0.9.0");
+            parts.push("0.10.0");
         }
         if show_machine {
             #[cfg(target_arch = "x86_64")]
@@ -3207,6 +3207,283 @@ impl BuiltinCommand for VolumeCommand {
                     crate::println!("volume: audio not initialized: {:?}", e);
                     CommandResult::Error(String::from("audio not initialized"))
                 }
+            }
+        }
+    }
+}
+
+// ── Virtualization commands ──────────────────────────────────────────
+
+pub(super) struct VmxCommand;
+
+impl BuiltinCommand for VmxCommand {
+    fn name(&self) -> &str {
+        "vmx"
+    }
+    fn description(&self) -> &str {
+        "VMX hypervisor management"
+    }
+
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        let sub = args.first().map(|s| s.as_str()).unwrap_or("status");
+        match sub {
+            "status" => {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    let (enabled, active, rev_id) = crate::virt::vmx::vmx_status();
+                    crate::println!("VMX status:");
+                    crate::println!("  VMX supported: {}", crate::virt::cpu_supports_vmx());
+                    crate::println!("  VMX enabled:   {}", enabled);
+                    crate::println!("  VM active:     {}", active);
+                    if let Some(rid) = rev_id {
+                        crate::println!("  VMCS revision: 0x{:x}", rid);
+                    }
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    crate::println!("VMX is only supported on x86_64");
+                }
+                CommandResult::Success(0)
+            }
+            "enable" => {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    match crate::virt::vmx::vmx_enable() {
+                        Ok(()) => {
+                            crate::println!("VMX enabled successfully");
+                            CommandResult::Success(0)
+                        }
+                        Err(e) => {
+                            crate::println!("vmx: enable failed: {}", e);
+                            CommandResult::Error(String::from("vmx enable failed"))
+                        }
+                    }
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    crate::println!("VMX is only supported on x86_64");
+                    CommandResult::Error(String::from("unsupported architecture"))
+                }
+            }
+            "disable" => {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    match crate::virt::vmx::vmx_disable() {
+                        Ok(()) => {
+                            crate::println!("VMX disabled");
+                            CommandResult::Success(0)
+                        }
+                        Err(e) => {
+                            crate::println!("vmx: disable failed: {}", e);
+                            CommandResult::Error(String::from("vmx disable failed"))
+                        }
+                    }
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    crate::println!("VMX is only supported on x86_64");
+                    CommandResult::Error(String::from("unsupported architecture"))
+                }
+            }
+            "help" => {
+                crate::println!("Usage: vmx <subcommand>");
+                crate::println!("  status  - Show VMX status");
+                crate::println!("  enable  - Enable VMX operation");
+                crate::println!("  disable - Disable VMX operation");
+                CommandResult::Success(0)
+            }
+            _ => {
+                crate::println!("vmx: unknown subcommand '{}'. Try 'vmx help'", sub);
+                CommandResult::Error(String::from("unknown subcommand"))
+            }
+        }
+    }
+}
+
+pub(super) struct ContainerCommand;
+
+impl BuiltinCommand for ContainerCommand {
+    fn name(&self) -> &str {
+        "container"
+    }
+    fn description(&self) -> &str {
+        "Container management"
+    }
+
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        let sub = args.first().map(|s| s.as_str()).unwrap_or("list");
+        match sub {
+            "list" => {
+                let result = crate::virt::container::with_container_manager(
+                    |mgr: &mut crate::virt::container::ContainerManager| {
+                        let containers = mgr.list();
+                        if containers.is_empty() {
+                            crate::println!("No containers");
+                        } else {
+                            crate::println!(
+                                "{:<6} {:<20} {:<10} {:<8} {}",
+                                "ID",
+                                "NAME",
+                                "STATE",
+                                "PROCS",
+                                "HOSTNAME"
+                            );
+                            for c in &containers {
+                                crate::println!(
+                                    "{:<6} {:<20} {:<10} {:<8} {}",
+                                    c.id,
+                                    c.name,
+                                    c.state,
+                                    c.process_count,
+                                    c.hostname
+                                );
+                            }
+                        }
+                    },
+                );
+                match result {
+                    Ok(()) => CommandResult::Success(0),
+                    Err(e) => {
+                        crate::println!("container: {}", e);
+                        CommandResult::Error(String::from("container manager not initialized"))
+                    }
+                }
+            }
+            "create" => {
+                let name = args.get(1).map(|s| s.as_str()).unwrap_or("unnamed");
+                let result = crate::virt::container::with_container_manager(
+                    |mgr: &mut crate::virt::container::ContainerManager| mgr.create(name),
+                );
+                match result {
+                    Ok(Ok(id)) => {
+                        crate::println!("Container '{}' created with id {}", name, id);
+                        CommandResult::Success(0)
+                    }
+                    Ok(Err(e)) => {
+                        crate::println!("container: create failed: {}", e);
+                        CommandResult::Error(String::from("create failed"))
+                    }
+                    Err(e) => {
+                        crate::println!("container: {}", e);
+                        CommandResult::Error(String::from("container manager not initialized"))
+                    }
+                }
+            }
+            "start" => {
+                let id_str = match args.get(1) {
+                    Some(s) => s,
+                    None => {
+                        crate::println!("container: start requires <id>");
+                        return CommandResult::Error(String::from("missing id"));
+                    }
+                };
+                let id: u64 = match id_str.parse() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        crate::println!("container: invalid id '{}'", id_str);
+                        return CommandResult::Error(String::from("invalid id"));
+                    }
+                };
+                let program = args.get(2).map(|s| s.as_str()).unwrap_or("/bin/init");
+                let result = crate::virt::container::with_container_manager(
+                    |mgr: &mut crate::virt::container::ContainerManager| mgr.start(id, program),
+                );
+                match result {
+                    Ok(Ok(())) => {
+                        crate::println!("Container {} started", id);
+                        CommandResult::Success(0)
+                    }
+                    Ok(Err(e)) => {
+                        crate::println!("container: start failed: {}", e);
+                        CommandResult::Error(String::from("start failed"))
+                    }
+                    Err(e) => {
+                        crate::println!("container: {}", e);
+                        CommandResult::Error(String::from("container manager not initialized"))
+                    }
+                }
+            }
+            "stop" => {
+                let id_str = match args.get(1) {
+                    Some(s) => s,
+                    None => {
+                        crate::println!("container: stop requires <id>");
+                        return CommandResult::Error(String::from("missing id"));
+                    }
+                };
+                let id: u64 = match id_str.parse() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        crate::println!("container: invalid id '{}'", id_str);
+                        return CommandResult::Error(String::from("invalid id"));
+                    }
+                };
+                let result = crate::virt::container::with_container_manager(
+                    |mgr: &mut crate::virt::container::ContainerManager| mgr.stop(id),
+                );
+                match result {
+                    Ok(Ok(())) => {
+                        crate::println!("Container {} stopped", id);
+                        CommandResult::Success(0)
+                    }
+                    Ok(Err(e)) => {
+                        crate::println!("container: stop failed: {}", e);
+                        CommandResult::Error(String::from("stop failed"))
+                    }
+                    Err(e) => {
+                        crate::println!("container: {}", e);
+                        CommandResult::Error(String::from("container manager not initialized"))
+                    }
+                }
+            }
+            "destroy" => {
+                let id_str = match args.get(1) {
+                    Some(s) => s,
+                    None => {
+                        crate::println!("container: destroy requires <id>");
+                        return CommandResult::Error(String::from("missing id"));
+                    }
+                };
+                let id: u64 = match id_str.parse() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        crate::println!("container: invalid id '{}'", id_str);
+                        return CommandResult::Error(String::from("invalid id"));
+                    }
+                };
+                let result = crate::virt::container::with_container_manager(
+                    |mgr: &mut crate::virt::container::ContainerManager| mgr.destroy(id),
+                );
+                match result {
+                    Ok(Ok(())) => {
+                        crate::println!("Container {} destroyed", id);
+                        CommandResult::Success(0)
+                    }
+                    Ok(Err(e)) => {
+                        crate::println!("container: destroy failed: {}", e);
+                        CommandResult::Error(String::from("destroy failed"))
+                    }
+                    Err(e) => {
+                        crate::println!("container: {}", e);
+                        CommandResult::Error(String::from("container manager not initialized"))
+                    }
+                }
+            }
+            "help" => {
+                crate::println!("Usage: container <subcommand>");
+                crate::println!("  list              - List containers");
+                crate::println!("  create <name>     - Create a container");
+                crate::println!("  start <id> [prog] - Start a container");
+                crate::println!("  stop <id>         - Stop a container");
+                crate::println!("  destroy <id>      - Destroy a container");
+                CommandResult::Success(0)
+            }
+            _ => {
+                crate::println!(
+                    "container: unknown subcommand '{}'. Try 'container help'",
+                    sub
+                );
+                CommandResult::Error(String::from("unknown subcommand"))
             }
         }
     }

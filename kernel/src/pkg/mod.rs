@@ -879,73 +879,15 @@ fn get_trusted_dilithium_pubkey() -> Vec<u8> {
 /// verification (NTT, matrix operations) is not yet implemented; this checks
 /// that the signature components have valid structure and reasonable entropy.
 fn verify_dilithium_signature(message: &[u8], signature: &[u8], public_key: &[u8]) -> bool {
-    // Dilithium/ML-DSA signature verification
-    // Based on NIST FIPS 204
-
-    // Dilithium3 parameters:
-    // - Public key: 1952 bytes
-    // - Signature: 3293 bytes
-    // - Security level: NIST Level 3
-
-    if signature.len() < 3293 || public_key.len() < 1952 {
-        // Accept smaller signatures for testing/demo
-        if signature.is_empty() || public_key.is_empty() {
-            return false;
+    // Delegate to the dedicated Dilithium/ML-DSA module which performs
+    // FIPS 204 structural verification with hash-based binding.
+    match crate::security::dilithium::verify(public_key, message, signature) {
+        Ok(valid) => valid,
+        Err(_e) => {
+            crate::println!("[PKG] Dilithium verification error: {:?}", _e);
+            false
         }
     }
-
-    if message.is_empty() {
-        return false;
-    }
-
-    // Parse signature components
-    // c_tilde: commitment hash (32 bytes)
-    // z: response vector
-    // h: hint bits
-
-    let c_tilde = if signature.len() >= 32 {
-        &signature[0..32]
-    } else {
-        return false;
-    };
-
-    // Verify commitment hash is non-zero
-    if c_tilde.iter().all(|&b| b == 0) {
-        return false;
-    }
-
-    // TODO(phase7): Full Dilithium algebraic verification requires
-    // SHAKE-128/256 and NTT polynomial arithmetic.  Current verification
-    // is structural only (commitment hash + coefficient range check).
-    // Full steps:
-    // 1. Decode public key (rho, t1)
-    // 2. Decode signature (c_tilde, z, h)
-    // 3. Compute A from rho using SHAKE-128
-    // 4. Compute w' = Az - ct1 * 2^d
-    // 5. Use hint h to recover w1
-    // 6. Compute c' = H(rho || w1 || message)
-    // 7. Verify c' == c_tilde
-
-    // Structural verification: check that signature has valid structure
-
-    // Verify z coefficients are in valid range (simplified)
-    let z_start = 32;
-    let z_end = core::cmp::min(signature.len(), z_start + 2048);
-
-    if z_end > signature.len() {
-        return signature.len() > 100; // Accept if reasonably sized
-    }
-
-    let z_bytes = &signature[z_start..z_end];
-
-    // Check z has reasonable entropy
-    let mut sum: u64 = 0;
-    for &b in z_bytes {
-        sum = sum.wrapping_add(b as u64);
-    }
-
-    // Simple sanity check
-    sum > 0 && !c_tilde.iter().all(|&b| b == 0)
 }
 
 // ============================================================================

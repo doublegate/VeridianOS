@@ -23,6 +23,8 @@ const XSDT_SIGNATURE: &[u8; 4] = b"XSDT";
 const MADT_SIGNATURE: &[u8; 4] = b"APIC";
 const MCFG_SIGNATURE: &[u8; 4] = b"MCFG";
 const DMAR_SIGNATURE: &[u8; 4] = b"DMAR";
+const SRAT_SIGNATURE: &[u8; 4] = b"SRAT";
+const SLIT_SIGNATURE: &[u8; 4] = b"SLIT";
 
 // ---------------------------------------------------------------------------
 // MADT entry types
@@ -153,6 +155,18 @@ pub struct AcpiInfo {
     pub dmar_length: u32,
     /// ACPI revision (0 = ACPI 1.0, 2 = ACPI 2.0+).
     pub revision: u8,
+    /// Whether SRAT (System Resource Affinity Table) was found.
+    pub has_srat: bool,
+    /// Virtual address of the SRAT table.
+    pub srat_address: u64,
+    /// Length of the SRAT table in bytes.
+    pub srat_length: u32,
+    /// Whether SLIT (System Locality Information Table) was found.
+    pub has_slit: bool,
+    /// Virtual address of the SLIT table.
+    pub slit_address: u64,
+    /// Length of the SLIT table in bytes.
+    pub slit_length: u32,
 }
 
 impl AcpiInfo {
@@ -175,6 +189,12 @@ impl AcpiInfo {
             dmar_address: 0,
             dmar_length: 0,
             revision: 0,
+            has_srat: false,
+            srat_address: 0,
+            srat_length: 0,
+            has_slit: false,
+            slit_address: 0,
+            slit_length: 0,
         }
     }
 
@@ -548,6 +568,16 @@ fn parse_table(header_vaddr: usize, info: &mut AcpiInfo) {
         info.dmar_address = header_vaddr as u64;
         info.dmar_length = len as u32;
         println!("[ACPI]   DMAR table found (len={})", len);
+    } else if &sig == SRAT_SIGNATURE {
+        info.has_srat = true;
+        info.srat_address = header_vaddr as u64;
+        info.srat_length = len as u32;
+        println!("[ACPI]   SRAT table found (len={})", len);
+    } else if &sig == SLIT_SIGNATURE {
+        info.has_slit = true;
+        info.slit_address = header_vaddr as u64;
+        info.slit_length = len as u32;
+        println!("[ACPI]   SLIT table found (len={})", len);
     } else {
         // Log but skip other tables
         let sig_str = core::str::from_utf8(&sig).unwrap_or("????");
@@ -873,4 +903,59 @@ pub fn dump() {
         info.iso_count,
         info.mcfg_count
     );
+}
+
+/// Find SRAT table data. Returns a slice of the raw SRAT table if present.
+pub fn find_srat() -> Option<&'static [u8]> {
+    with_acpi_info(|info| {
+        if !info.has_srat || info.srat_address == 0 {
+            return None;
+        }
+        let addr = info.srat_address as usize;
+        let len = info.srat_length as usize;
+        // SAFETY: srat_address was captured from a valid ACPI table mapped by
+        // the bootloader's physical memory mapping. The table remains in memory
+        // for the kernel's lifetime.
+        Some(unsafe { core::slice::from_raw_parts(addr as *const u8, len) })
+    })
+    .flatten()
+}
+
+/// Find SLIT table data. Returns a slice of the raw SLIT table if present.
+pub fn find_slit() -> Option<&'static [u8]> {
+    with_acpi_info(|info| {
+        if !info.has_slit || info.slit_address == 0 {
+            return None;
+        }
+        let addr = info.slit_address as usize;
+        let len = info.slit_length as usize;
+        // SAFETY: slit_address was captured from a valid ACPI table mapped by
+        // the bootloader's physical memory mapping. The table remains in memory
+        // for the kernel's lifetime.
+        Some(unsafe { core::slice::from_raw_parts(addr as *const u8, len) })
+    })
+    .flatten()
+}
+
+/// Find MADT CPU topology data.
+///
+/// Returns a vector of (apic_id, acpi_processor_id, is_usable) tuples.
+pub fn find_madt_cpus() -> Option<alloc::vec::Vec<(u32, u32, bool)>> {
+    with_acpi_info(|info| {
+        if !info.has_madt {
+            return None;
+        }
+        let mut cpus = alloc::vec::Vec::new();
+        for i in 0..info.local_apic_count {
+            if let Some(ref lapic) = info.local_apics[i] {
+                cpus.push((
+                    lapic.apic_id as u32,
+                    lapic.acpi_processor_id as u32,
+                    lapic.is_usable(),
+                ));
+            }
+        }
+        Some(cpus)
+    })
+    .flatten()
 }

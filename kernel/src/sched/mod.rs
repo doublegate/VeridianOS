@@ -30,6 +30,7 @@ pub mod ipc_blocking;
 pub mod load_balance;
 pub mod metrics;
 pub mod numa;
+pub mod percpu_queue;
 pub mod process_compat;
 pub mod queue;
 pub mod runtime;

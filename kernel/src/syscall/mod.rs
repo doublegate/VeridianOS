@@ -609,6 +609,10 @@ pub extern "C" fn syscall_handler(
     // Prevents speculative execution of kernel code with user-controlled values.
     crate::arch::speculation_barrier();
 
+    // KPTI: switch to full kernel page tables on syscall entry.
+    #[cfg(target_arch = "x86_64")]
+    crate::arch::x86_64::kpti::on_syscall_entry();
+
     // Track syscall count
     SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
 
@@ -659,6 +663,10 @@ pub extern "C" fn syscall_handler(
         syscall_num as u64,
         ret as u64
     );
+
+    // KPTI: switch to shadow page tables before returning to user mode.
+    #[cfg(target_arch = "x86_64")]
+    crate::arch::x86_64::kpti::on_syscall_exit();
 
     ret
 }

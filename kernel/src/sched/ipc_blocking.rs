@@ -148,12 +148,25 @@ pub fn wake_up_process(pid: ProcessId) {
                 metrics::SCHEDULER_METRICS.record_ipc_wakeup();
             }
 
-            // Find the best CPU to schedule on
-            let target_cpu = if (*task_mut).cpu_affinity.mask() != 0 {
-                // Find least loaded CPU that matches affinity
+            // Find the best CPU to schedule on, preferring last-run CPU
+            // for cache locality (avoids cold-cache penalty on migration).
+            let last_cpu = (*task_mut).current_cpu;
+            let target_cpu = if let Some(last) = last_cpu {
+                // Prefer last-run CPU if it's online (cache warm)
+                if let Some(cpu_data) = smp::per_cpu(last) {
+                    if cpu_data.cpu_info.is_online() {
+                        last
+                    } else {
+                        smp::find_least_loaded_cpu()
+                    }
+                } else {
+                    smp::find_least_loaded_cpu()
+                }
+            } else if (*task_mut).cpu_affinity.mask() != 0 {
+                // Has affinity -- find least loaded CPU matching mask
                 smp::find_least_loaded_cpu_with_affinity((*task_mut).cpu_affinity.mask())
             } else {
-                // No affinity restriction, use least loaded CPU
+                // No preference -- use least loaded CPU
                 smp::find_least_loaded_cpu()
             };
 
@@ -167,8 +180,9 @@ pub fn wake_up_process(pid: ProcessId) {
     for cpu_id in 0..smp::MAX_CPUS as u8 {
         if let Some(cpu_data) = smp::per_cpu(cpu_id) {
             if cpu_data.cpu_info.is_online() {
-                // Per-CPU schedulers not yet implemented -- use global scheduler.
-                // TODO(phase7): Per-CPU ready queues for O(1) wake-up.
+                // Per-CPU ready queues are in percpu_queue module; for
+                // wake-up we still check via the global scheduler since
+                // tasks may be current on any CPU.
                 let sched = super::SCHEDULER.lock();
 
                 // Search through the scheduler's tasks

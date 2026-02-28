@@ -34,6 +34,8 @@ The project explores how capability-oriented design, strong isolation boundaries
 - 🖥️ **Wayland compositor** — Modern display server with GPU acceleration, DMA-BUF, layer-shell
 - 🎨 **Desktop environment** — Application launcher, Alt-Tab, notifications, workspaces, screen lock
 - 🔊 **Multimedia** — Audio mixer, VirtIO-Sound, WAV playback, TGA/QOI image decoding, video framework
+- 🖧 **Virtualization** — Intel VMX hypervisor with VMCS/EPT, container namespaces, virtual device emulation
+- 🔐 **Security hardening** — KPTI shadow page tables, demand paging, COW fork, TPM probing, Dilithium ML-DSA-65
 
 ---
 
@@ -114,7 +116,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.9.0 (February 28, 2026) | **Releases Published**: 47 (v0.1.0 through v0.9.0)
+**Latest Release**: v0.10.0 (February 28, 2026) | **Releases Published**: 48 (v0.1.0 through v0.10.0)
 
 | Metric                 | Value                                           |
 | ---------------------- | ----------------------------------------------- |
@@ -144,7 +146,7 @@ experiments/   Non-normative exploratory work
 | 5.5   | Infrastructure Bridge     | **COMPLETE (100%)** | v0.5.13 | Feb 2026 |
 | 6     | Advanced Features and GUI | **~100% (desktop complete)** | v0.6.4  | Feb 2026 |
 | 6.5   | Rust Compiler + Bash Shell | **COMPLETE (100%)** | v0.7.0  | Feb 2026 |
-| 7     | Production Readiness     | **In Progress (~65%)** | v0.9.0  | Feb 2026 |
+| 7     | Production Readiness     | **Complete (~100%)** | v0.10.0  | Feb 2026 |
 
 For detailed release notes, see [Release History](docs/RELEASE-HISTORY.md).
 
@@ -193,6 +195,10 @@ Phases 0 through 4 are complete. The kernel provides:
 - **NVMe Admin Queue** -- Full controller reset + initialization sequence with NvmeSubmissionEntry/NvmeCompletionEntry structs, ASQ/ACQ allocation from physical frames, Identify Controller parsing (serial, model, firmware, MDTS)
 - **Audio Subsystem** -- Fixed-point 16.16 mixer (per-channel + master volume, saturation arithmetic), lock-free SPSC ring buffer transport, WAV parser (RIFF/WAVE, 8/16/24/32-bit PCM), output pipeline with underrun tracking, audio client API (create/play/pause/stop streams), VirtIO-Sound driver (PCI 0x1AF4:0x1059, PCM stream configuration), shell commands (play, volume), 8 audio syscall stubs (320-327)
 - **Video Framework** -- Pixel format abstraction (XRGB8888, ARGB8888, RGB888, RGB565, BGR888, Gray8), frame scaling (nearest-neighbor + bilinear with fixed-point 8.8 interpolation), BT.601 YUV/RGB color space conversion, alpha blending, TGA decoder (uncompressed + RLE, 24/32-bit), QOI decoder (full spec: index/diff/luma/run/rgb/rgba ops), media player with tick-based frame timing, image viewer TGA/QOI integration
+- **Security Hardening** -- KPTI shadow page tables (separate kernel/user L4 tables, CR3 switching on syscall entry/exit, Meltdown mitigation), demand paging (lazy anonymous page allocation via page fault handler, BackingType Anonymous/FileBacked), COW fork (cow_fork() with ref-counted CowEntry, copy-on-write fault resolution), TPM MMIO probing (0xFED40000, TPM_ACCESS/INTERFACE_ID), Dilithium ML-DSA-65 algebraic verification (FIPS 204, z-norm bounds checking)
+- **Performance Optimization** -- ACPI SRAT/SLIT NUMA topology parsing (per-node CPU/memory mapping, distance matrix), per-CPU ready queues with work-stealing (STEAL_THRESHOLD=2), run-queue instrumentation (RunQueueStats: enqueue/dequeue/max_length/wait_ticks), IPC message batching (IpcBatch 8-message accumulator), IOMMU DRHD parsing (DMAR structures, device scope iterator, identity domain)
+- **Hypervisor** -- Intel VMX (CR4.VMXE, VMXON/VMXOFF, VMCS allocation/load/clear, ~100 VMCS field encodings, VMLAUNCH/VMRESUME, exit handler dispatch), Extended Page Tables (4-level EPT, map/unmap with R/W/X, identity_map_range, EPTP generation), virtual device emulation (8250 UART, 8259A PIC, DeviceManager I/O port dispatch)
+- **Container Isolation** -- PID namespace (bidirectional host/container PID mapping), mount namespace (chroot-style isolation), network namespace (veth pairs), UTS namespace (per-container hostname), ContainerManager (create/start/stop/destroy lifecycle, ContainerState machine)
 
 ### Self-Hosting Roadmap
 
@@ -222,7 +228,8 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### What Comes Next
 
-- **Phase 7 Wave 6 (v0.10.0)** -- Virtualization (VMX hypervisor, EPT, container namespaces), security hardening (KPTI shadow page tables, demand paging, COW fork, TPM MMIO, Dilithium verification), performance optimization (ACPI SRAT/SLIT NUMA topology, per-CPU ready queues, work-stealing scheduler, IOMMU DRHD parsing)
+- **Phase 7.5** -- Follow-on enhancements across 13 categories: TCP congestion control, ALSA-compatible audio, PNG/JPEG decoders, VirtIO GPU 3D, nested virtualization, OCI containers, KASLR, deadline scheduling, clipboard/drag-and-drop, io_uring, ext4/FAT32, QUIC/WireGuard/TLS 1.3, USB xHCI
+- **Phase 8** -- Next-generation features: web browser, advanced self-hosting (native rustc bootstrap), GPU-accelerated compositor, firewall/NAT, Kubernetes CRI/CNI/CSI, KVM API compatibility, LDAP/Kerberos, IDE with LSP, formal verification
 
 ### Technical Notes
 
@@ -236,7 +243,7 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### Maturity
 
-VeridianOS is an active research system. Phases 0 through 6.5 are architecturally stable with a functional graphical desktop, Rust compiler port, and Bash-compatible userland shell. Phase 7 Waves 1-5 (GPU drivers, advanced Wayland, desktop completion, advanced networking with IPv6, multimedia framework) are implemented. Wave 6 (virtualization, security hardening, performance optimization) is planned.
+VeridianOS is an active research system. Phases 0 through 7 are architecturally stable with a functional graphical desktop, Rust compiler port, Bash-compatible userland shell, Intel VMX hypervisor, container isolation, and comprehensive security hardening. All 6 Phase 7 waves are complete: GPU drivers, advanced Wayland, desktop completion, advanced networking with IPv6, multimedia framework, virtualization, security hardening, and performance optimization. Phase 7.5 (follow-on enhancements) and Phase 8 (next-generation features) are planned.
 
 Historical status is recorded in:
 
@@ -465,11 +472,14 @@ Security is a fundamental design principle:
 - [x] **Phase 6 Completion**: Documentation sync (all Phase 6 references updated from ~5% to ~40%), AF_INET socket creation wired to net::socket, VirtIO-Net/E1000 device registry integration, UDP recv_from wired to socket buffer layer, all 43 TODO(phase6) markers resolved (4 wired + 39 reclassified to Phase 7), Phase 7 TODO roadmap generated (15 categories, ~93 items) (v0.6.2, Feb 2026)
 - [x] **Phase 6.5: Rust Compiler Port + Bash Shell**: Rust std::sys::veridian platform (15 files, ~7800 lines), LLVM 19 cross-compilation scripts, rustc/cargo build pipeline with self-hosting verification; vsh Bash-in-Rust shell (~10K lines, 49 builtins, job control, readline); kernel enhancements (8GB memory, epoll, PTY, signal completions); 700+ test cases, 3 documentation guides (v0.7.0, Feb 2026)
 - [x] **Phase 7 Waves 1-3: GPU + Wayland + Desktop**: VirtIO GPU driver (PCI discovery, virtqueue, 2D resources, scanout), vendor GPU stubs (i915/amdgpu/nouveau), Wayland extensions (layer-shell, idle-inhibit, DMA-BUF, multi-output, xdg-decoration, XWayland), libwayland-client library, desktop environment (launcher, notifications, systray, screen lock, Alt-Tab, animation, workspaces, decorations, compositing effects), applications (MIME database, syntax highlighting, settings, image viewer), dynamic linker completion (lazy PLT, symbol versioning, LD_PRELOAD, TLS) (v0.7.1, Feb 2026)
+- [x] **Phase 7 Wave 4: Advanced Networking**: Zero-copy DMA networking (buffer pool, scatter-gather, TCP segmentation), hardware NIC driver (DMA TX/RX rings, E1000 MMIO), IPv6 dual-stack (~2,145 lines, NDP/SLAAC/ICMPv6), shell command substitution (18 inline commands), NVMe admin queue, MIME dispatch (v0.8.0, Feb 2026)
+- [x] **Phase 7 Wave 5: Multimedia**: Audio subsystem (fixed-point 16.16 mixer, SPSC ring buffer, WAV parser, VirtIO-Sound driver, output pipeline, 8 syscalls), video framework (TGA/QOI decoders, bilinear scaling, media player) (v0.9.0, Feb 2026)
+- [x] **Phase 7 Wave 6: Virtualization + Security + Performance**: Intel VMX hypervisor (VMCS, EPT, virtual devices), container isolation (PID/mount/network/UTS namespaces), KPTI shadow page tables, demand paging, COW fork, TPM MMIO probing, Dilithium ML-DSA-65, NUMA SRAT/SLIT topology, per-CPU ready queues with work-stealing, IPC batching, IOMMU DRHD parsing, all 34 TODO(phase7) resolved (v0.10.0, Feb 2026)
 
 ### Upcoming
 
-- [x] **Phase 7 Waves 1-3**: GPU drivers (virtio-gpu, i915/amdgpu/nouveau stubs), advanced Wayland (DMA-BUF, layer-shell, XWayland, libwayland-client, multi-output), desktop completion (launcher, notifications, screen lock, Alt-Tab, workspaces, decorations, animation, MIME, syntax highlighting, settings, image viewer) (v0.7.1, Feb 2026)
-- [ ] **Phase 7 Waves 4-6**: Multimedia (audio server, codecs), virtualization (KVM, containers), cloud-native (OCI, namespaces), POSIX compatibility layer
+- [ ] **Phase 7.5**: Follow-on enhancements -- TCP congestion control, ALSA audio API, PNG/JPEG decoders, VirtIO GPU 3D, nested virtualization, OCI containers, KASLR, deadline scheduling, clipboard, io_uring, ext4/FAT32, QUIC/WireGuard, USB xHCI
+- [ ] **Phase 8**: Next-generation features -- web browser, native rustc bootstrap, GPU-accelerated compositor, firewall/NAT, Kubernetes CRI/CNI/CSI, KVM API compatibility, LDAP/Kerberos, IDE with LSP, formal verification
 
 See [Release History](docs/RELEASE-HISTORY.md) for detailed per-release notes.
 
