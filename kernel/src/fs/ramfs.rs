@@ -2,7 +2,7 @@
 //!
 //! A simple in-memory filesystem for testing and temporary storage.
 
-use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, sync::Arc, vec, vec::Vec};
 
 #[cfg(not(target_arch = "aarch64"))]
 use spin::RwLock;
@@ -66,6 +66,32 @@ impl RamNode {
                 node_type: NodeType::Directory,
                 size: 0,
                 permissions,
+                uid: 0,
+                gid: 0,
+                created: crate::arch::timer::get_timestamp_secs(),
+                modified: crate::arch::timer::get_timestamp_secs(),
+                accessed: crate::arch::timer::get_timestamp_secs(),
+                inode,
+            }),
+            inode,
+            parent_inode,
+        }
+    }
+
+    /// Create a new symbolic link node.
+    ///
+    /// The target path is stored in the node's `data` field.
+    fn new_symlink(inode: u64, parent_inode: u64, target: &str) -> Self {
+        let target_bytes = Vec::from(target.as_bytes());
+        let size = target_bytes.len();
+        Self {
+            node_type: NodeType::Symlink,
+            data: RwLock::new(target_bytes),
+            children: RwLock::new(BTreeMap::new()),
+            metadata: RwLock::new(Metadata {
+                node_type: NodeType::Symlink,
+                size,
+                permissions: Permissions::from_mode(0o777),
                 uid: 0,
                 gid: 0,
                 created: crate::arch::timer::get_timestamp_secs(),
@@ -257,6 +283,84 @@ impl VfsNode for RamNode {
         metadata.size = size;
         metadata.modified = crate::arch::timer::get_timestamp_secs();
 
+        Ok(())
+    }
+
+    fn link(&self, name: &str, target: Arc<dyn VfsNode>) -> Result<(), KernelError> {
+        if self.node_type != NodeType::Directory {
+            return Err(KernelError::FsError(FsError::NotADirectory));
+        }
+
+        // Hard links to directories are not allowed (POSIX)
+        if target.node_type() == NodeType::Directory {
+            return Err(KernelError::FsError(FsError::IsADirectory));
+        }
+
+        let mut children = self.children.write();
+        if children.contains_key(name) {
+            return Err(KernelError::FsError(FsError::AlreadyExists));
+        }
+
+        // RamFS hard link: create a new node that copies the target's data
+        // and shares the same inode number. This provides POSIX-compatible
+        // semantics (same inode visible via stat) although the data is
+        // copied rather than shared. True shared-data hard links would
+        // require Arc downcasting or a different internal representation.
+        let target_meta = target.metadata()?;
+        let inode = target_meta.inode;
+
+        let new_node = Arc::new(RamNode::new_file(
+            inode,
+            self.inode,
+            target_meta.permissions,
+        ));
+
+        // Copy file data from the target
+        let mut buf = vec![0u8; target_meta.size];
+        if !buf.is_empty() {
+            let bytes_read = target.read(0, &mut buf)?;
+            buf.truncate(bytes_read);
+        }
+        if !buf.is_empty() {
+            new_node.write(0, &buf)?;
+        }
+
+        children.insert(String::from(name), new_node);
+        Ok(())
+    }
+
+    fn symlink(&self, name: &str, target: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        if self.node_type != NodeType::Directory {
+            return Err(KernelError::FsError(FsError::NotADirectory));
+        }
+
+        let mut children = self.children.write();
+        if children.contains_key(name) {
+            return Err(KernelError::FsError(FsError::AlreadyExists));
+        }
+
+        let inode = NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let new_symlink = Arc::new(RamNode::new_symlink(inode, self.inode, target));
+        children.insert(String::from(name), new_symlink.clone());
+
+        Ok(new_symlink as Arc<dyn VfsNode>)
+    }
+
+    fn readlink(&self) -> Result<String, KernelError> {
+        if self.node_type != NodeType::Symlink {
+            return Err(KernelError::FsError(FsError::NotASymlink));
+        }
+
+        let data = self.data.read();
+        let s =
+            core::str::from_utf8(&data).map_err(|_| KernelError::FsError(FsError::InvalidPath))?;
+        Ok(String::from(s))
+    }
+
+    fn chmod(&self, permissions: Permissions) -> Result<(), KernelError> {
+        let mut metadata = self.metadata.write();
+        metadata.permissions = permissions;
+        metadata.modified = crate::arch::timer::get_timestamp_secs();
         Ok(())
     }
 }

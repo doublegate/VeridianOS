@@ -2,6 +2,74 @@
 
 ---
 
+## [v0.7.0] - 2026-02-27
+
+### v0.7.0: Phase 6.5 -- Rust Compiler Port + Bash-in-Rust Shell
+
+Major milestone: Phase 6.5 delivers a cross-compiled Rust toolchain targeting VeridianOS (rustc 1.93.1, cargo, LLVM 19) with a full self-hosting pipeline, plus a new Bash-compatible userland shell (`vsh`) written entirely in Rust with ~10,000 lines across 40 source files. This phase comprises 42 sprints across 6 waves, adding ~26,750 new lines.
+
+#### Wave 0: Kernel/libc Prerequisites (12 sprints, P-1 through P-12)
+- **Memory scaling**: Per-process limit raised to 8GB, kernel heap to 1GB, QEMU 32GB support
+- **Dynamic linker**: PLT/GOT completion, dlopen, library search paths in `ld-veridian`
+- **libc networking**: socket/bind/listen/accept/connect/send/recv implementations
+- **libc threading**: Full pthreads via clone/futex (create/join/detach/mutex/cond/TLS)
+- **libc stdio/stdlib**: Buffered I/O, mmap-based malloc, signal handling enhancements
+- **libc POSIX gaps**: poll, fcntl, scandir, pwd/grp stubs
+- **Kernel signals**: SIGTSTP/SIGCONT/SIGCHLD, process groups, terminal job control
+- **Terminal/PTY**: TIOCSCTTY, canonical/raw mode, termios
+- **Filesystem**: Hard link and symlink improvements, permission enforcement
+- **epoll**: I/O multiplexing (epoll_create/ctl/wait) with syscall integration
+
+#### Wave 1: Rust std Platform Implementation (6 sprints, R-1 through R-6)
+- **15 new files** in `userland/rust-std/src/sys/veridian/` (~7,800 lines)
+- Core types: SharedFd, OsStr, Path, errno mapping, syscall bridge
+- fs/io: File, ReadDir, Stdin/Stdout, AnonPipe with full POSIX semantics
+- process/thread: Command::spawn via fork+exec, Thread::new via clone, futex-based locks
+- net/time: TcpStream, UdpSocket, Instant (CLOCK_MONOTONIC), SystemTime (CLOCK_REALTIME)
+- env/alloc: Environment variables, mmap allocator, stack overflow guard pages
+- Target registration: `x86_64-unknown-veridian` target spec with OS metadata
+
+#### Wave 2: LLVM + Rust Compiler Cross-Build (6 sprints, C-1 through C-6)
+- **7 build scripts** in `scripts/` (~1,300 lines)
+- LLVM 19 cross-compilation infrastructure with CMake toolchain
+- Rust std cross-build and hello world verification
+- rustc Stage 0 cross-compilation with veridian patches
+- cargo cross-compilation with vendored dependencies
+- 2GB BlockFS rootfs integration for toolchain packaging
+- Self-hosting verification: Stage 0 -> Stage 1 -> Stage 2 consistency check
+
+#### Wave 3: vsh Userland Shell -- Core Engine (8 sprints, V-1 through V-8)
+- **New `userland/vsh/` crate** -- Bash 5.3-compatible shell in pure Rust (`no_std`)
+- Lexer/tokenizer: heredocs, operators, quoting (single/double/ANSI-C/locale)
+- Parser/AST: recursive descent, full bash grammar (if/while/for/case/select/function)
+- Word expansion: 8-stage pipeline (brace -> tilde -> parameter -> command -> arith -> split -> glob -> quote removal)
+- Command execution: fork+exec, pipelines with pipe(), redirections (16 forms)
+- Variables: scalars, indexed arrays, associative arrays, special vars ($?, $$, $!, $@)
+- Control flow: compound commands, functions with local scope, coprocess, trap
+- Script execution: source/dot, eval, shebang handling
+
+#### Wave 4: vsh Builtins and Job Control (6 sprints, V-9 through V-14)
+- **24 POSIX builtins** + 25 bash-specific builtins (declare, history, shopt, etc.)
+- Job control: fg/bg/jobs, SIGTSTP/SIGCONT, process groups, async notifications
+- Built-in line editor: Emacs and vi modes, tab completion, history search (Ctrl+R)
+- Prompt: PS1-PS4 expansion (\u, \h, \w, \$), ANSI color, PROMPT_COMMAND
+- Startup files: /etc/profile, ~/.vsh_profile, ~/.vshrc, --posix mode
+- Shell options: 32+ shopt options, set -e/-u/-x/-o pipefail
+
+#### Wave 5: Integration, Testing, and Release (4 sprints, T-1 through T-4)
+- **700+ bash test cases** across 11 test scripts in `tests/vsh/`
+- **12 Rust compiler integration tests** in `tests/rust/`
+- **3 documentation guides**: RUST-COMPILER-PORTING.md (764 lines), VSH-SHELL-GUIDE.md (805 lines), PHASE6.5-COMPLETION-SUMMARY.md (360 lines)
+- CI workflow updated with vsh build + test jobs
+
+#### Stats
+- ~80 files changed (40 new vsh, 15 new rust-std, 7 build scripts, 13 test files, 3 docs, 2 remaining)
+- ~26,750 lines added across 42 sprints in 6 waves
+- Zero clippy warnings on x86_64, AArch64, RISC-V with `-D warnings`
+- All 3 architectures boot to BOOTOK (29/29 tests)
+
+---
+
 ## [v0.6.4] - 2026-02-27
 
 ### v0.6.4: Desktop Interaction -- Click-to-Focus, Window Dragging, Input Fixes, Performance Optimization

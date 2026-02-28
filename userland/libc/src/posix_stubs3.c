@@ -726,21 +726,7 @@ int dprintf(int fd, const char *format, ...)
     return n;
 }
 
-int vasprintf(char **strp, const char *format, va_list ap)
-{
-    va_list ap2;
-    va_copy(ap2, ap);
-    int len = vsnprintf(NULL, 0, format, ap2);
-    va_end(ap2);
-    if (len < 0) {
-        *strp = NULL;
-        return -1;
-    }
-    *strp = (char *)malloc((size_t)len + 1);
-    if (*strp == NULL)
-        return -1;
-    return vsnprintf(*strp, (size_t)len + 1, format, ap);
-}
+/* vasprintf is defined in stdio.c -- not duplicated here. */
 
 int fseeko(FILE *stream, off_t offset, int whence)
 {
@@ -750,24 +736,165 @@ int fseeko(FILE *stream, off_t offset, int whence)
 /* --- Group database ------------------------------------------------------ */
 
 #include <grp.h>
+#include <unistd.h>
+#include <fcntl.h>
 
+/*
+ * Static fallback group entry returned when /etc/group is absent or the
+ * requested group is not found in the file.
+ */
 static struct group stub_group = {
-    .gr_name = "root",
+    .gr_name   = "root",
     .gr_passwd = "x",
-    .gr_gid = 0,
-    .gr_mem = NULL
+    .gr_gid    = 0,
+    .gr_mem    = NULL
 };
+
+/*
+ * Scratch buffers for /etc/group parsing.  getgrnam/getgrgid return a
+ * pointer to static storage (POSIX allows this for the non-_r variants).
+ * The gr_* fields point into __gr_line_buf which holds the last parsed
+ * line from /etc/group.
+ *
+ * Format: name:passwd:gid:member,member,...
+ *
+ * Member list: pointers are stored in __gr_members[], pointing into the
+ * members region of __gr_line_buf.  Up to GR_MAX_MEMBERS are supported.
+ */
+#define GR_MAX_MEMBERS 32
+
+static struct group _parsed_gr;
+static char __gr_line_buf[512];
+static char *__gr_members[GR_MAX_MEMBERS + 1]; /* +1 for NULL terminator */
+
+/*
+ * __parse_group_line: parse a colon-delimited /etc/group line into *gr.
+ *
+ * Operates on __gr_line_buf in-place (NUL-terminates each field).
+ * Returns 1 on success, 0 if the line is malformed or a comment.
+ */
+static int __parse_group_line(struct group *gr)
+{
+    char *p = __gr_line_buf;
+
+    /* Skip comment lines and blank lines. */
+    if (*p == '#' || *p == '\n' || *p == '\0')
+        return 0;
+
+    /* Strip trailing newline. */
+    size_t len = 0;
+    while (p[len] && p[len] != '\n') len++;
+    p[len] = '\0';
+
+    /* gr_name */
+    gr->gr_name = p;
+    while (*p && *p != ':') p++;
+    if (!*p) return 0;
+    *p++ = '\0';
+
+    /* gr_passwd */
+    gr->gr_passwd = p;
+    while (*p && *p != ':') p++;
+    if (!*p) return 0;
+    *p++ = '\0';
+
+    /* gr_gid */
+    gr->gr_gid = (gid_t)0;
+    while (*p >= '0' && *p <= '9') {
+        gr->gr_gid = (gid_t)(gr->gr_gid * 10 + (unsigned)(*p - '0'));
+        p++;
+    }
+    if (*p != ':') return 0;
+    p++;
+
+    /* gr_mem: comma-separated member list (may be empty). */
+    int nmem = 0;
+    gr->gr_mem = __gr_members;
+
+    while (*p && nmem < GR_MAX_MEMBERS) {
+        char *start = p;
+        while (*p && *p != ',' && *p != '\n') p++;
+        if (p > start) {
+            char save = *p;
+            *p = '\0';
+            __gr_members[nmem++] = start;
+            if (save == ',')
+                p++;    /* skip comma separator */
+        } else {
+            break;      /* empty members field */
+        }
+    }
+    __gr_members[nmem] = NULL;
+
+    return 1;
+}
+
+/*
+ * __read_group_line: read one line from fd into __gr_line_buf.
+ *
+ * Returns the number of bytes read (>= 1) on success, 0 at EOF.
+ */
+static int __read_group_line(int fd)
+{
+    size_t pos = 0;
+    char ch;
+
+    while (pos < sizeof(__gr_line_buf) - 1) {
+        ssize_t r = read(fd, &ch, 1);
+        if (r <= 0)
+            break;
+        __gr_line_buf[pos++] = ch;
+        if (ch == '\n')
+            break;
+    }
+    __gr_line_buf[pos] = '\0';
+    return (int)pos;
+}
 
 struct group *getgrnam(const char *name)
 {
-    (void)name;
-    return &stub_group;
+    if (!name)
+        return &stub_group;
+
+    int fd = open("/etc/group", O_RDONLY);
+    if (fd < 0)
+        return &stub_group;
+
+    while (__read_group_line(fd) > 0) {
+        if (__parse_group_line(&_parsed_gr)) {
+            if (_parsed_gr.gr_name &&
+                strcmp(_parsed_gr.gr_name, name) == 0) {
+                close(fd);
+                return &_parsed_gr;
+            }
+        }
+    }
+
+    close(fd);
+    return NULL;    /* Not found -- POSIX allows NULL. */
 }
 
 struct group *getgrgid(gid_t gid)
 {
-    (void)gid;
-    return &stub_group;
+    int fd = open("/etc/group", O_RDONLY);
+    if (fd < 0) {
+        /* Fall back to static root group when /etc/group is absent. */
+        if (gid == 0)
+            return &stub_group;
+        return NULL;
+    }
+
+    while (__read_group_line(fd) > 0) {
+        if (__parse_group_line(&_parsed_gr)) {
+            if (_parsed_gr.gr_gid == gid) {
+                close(fd);
+                return &_parsed_gr;
+            }
+        }
+    }
+
+    close(fd);
+    return NULL;    /* Not found. */
 }
 
 int getgrouplist(const char *user, gid_t group, gid_t *groups, int *ngroups)
@@ -1347,6 +1474,7 @@ struct hostent *gethostbyaddr(const void *addr, socklen_t len, int type)
 #include <arpa/inet.h>
 #include <sys/time.h>
 #include <grp.h>
+#include <veridian/syscall.h>
 
 struct hostent *gethostbyname(const char *name)
 {
@@ -1355,22 +1483,36 @@ struct hostent *gethostbyname(const char *name)
     return NULL;
 }
 
+/*
+ * getpeername() -- get name of connected peer socket.
+ *
+ * Kernel syscall SYS_NET_GETPEERNAME (253): (fd, addr_ptr, len_ptr)
+ * The kernel writes the remote address into *addr and sets *addrlen to 16.
+ */
 int getpeername(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-    (void)sockfd;
-    (void)addr;
-    (void)addrlen;
-    errno = ENOTSOCK;
-    return -1;
+    long ret = veridian_syscall3(SYS_NET_GETPEERNAME, sockfd, addr, addrlen);
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
+    }
+    return 0;
 }
 
+/*
+ * getsockname() -- get socket name (local bound address).
+ *
+ * Kernel syscall SYS_NET_GETSOCKNAME (252): (fd, addr_ptr, len_ptr)
+ * The kernel writes the local address into *addr and sets *addrlen to 16.
+ */
 int getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-    (void)sockfd;
-    (void)addr;
-    (void)addrlen;
-    errno = ENOTSOCK;
-    return -1;
+    long ret = veridian_syscall3(SYS_NET_GETSOCKNAME, sockfd, addr, addrlen);
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
+    }
+    return 0;
 }
 
 int inet_aton(const char *cp, struct in_addr *inp)
@@ -1389,17 +1531,78 @@ char *inet_ntoa(struct in_addr in)
     return buf;
 }
 
+/*
+ * sendto() -- send a message to a specific destination address.
+ *
+ * Kernel syscall SYS_NET_SENDTO (250): (fd, buf_ptr, buf_len, addr_ptr, addr_len)
+ * The flags argument is not forwarded (not yet implemented in the kernel).
+ * When dest_addr is NULL (connected socket), falls back to SYS_SOCKET_SEND.
+ */
 ssize_t sendto(int sockfd, const void *buf, size_t len, int flags,
                const struct sockaddr *dest_addr, socklen_t addrlen)
 {
-    (void)sockfd;
-    (void)buf;
-    (void)len;
     (void)flags;
-    (void)dest_addr;
-    (void)addrlen;
-    errno = ENOTSOCK;
-    return -1;
+    long ret;
+    if (dest_addr != NULL) {
+        ret = veridian_syscall5(SYS_NET_SENDTO,
+                                 sockfd, buf, len, dest_addr, addrlen);
+    } else {
+        /* No destination address: send on connected socket. */
+        ret = veridian_syscall3(SYS_SOCKET_SEND, sockfd, buf, len);
+    }
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
+    }
+    return (ssize_t)ret;
+}
+
+/*
+ * recvfrom() -- receive a message and optionally capture sender's address.
+ *
+ * Kernel syscall SYS_NET_RECVFROM (251): (fd, buf_ptr, buf_len, addr_ptr)
+ * addr_ptr may be NULL (kernel handles gracefully).  addrlen is updated to
+ * the fixed sockaddr size (16) when an address was written.
+ * The flags argument is not forwarded.
+ */
+ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags,
+                 struct sockaddr *src_addr, socklen_t *addrlen)
+{
+    (void)flags;
+    long ret = veridian_syscall4(SYS_NET_RECVFROM,
+                                  sockfd, buf, len, src_addr);
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
+    }
+    /* If the caller requested the source address and we wrote one, update
+     * addrlen to reflect the actual sockaddr size the kernel wrote. */
+    if (src_addr != NULL && addrlen != NULL)
+        *addrlen = (socklen_t)sizeof(struct sockaddr);
+    return (ssize_t)ret;
+}
+
+/*
+ * socketpair() -- create a pair of connected sockets (AF_UNIX only).
+ *
+ * Kernel syscall SYS_SOCKET_PAIR (228): (domain, result_ptr)
+ * result_ptr points to a two-element u64 array; the kernel writes both
+ * socket IDs.  We then copy those 64-bit IDs to the int sv[2] array.
+ * type and protocol are not forwarded (kernel creates SOCK_STREAM AF_UNIX
+ * pairs by default).
+ */
+int socketpair(int domain, int type, int protocol, int sv[2])
+{
+    (void)type; (void)protocol;
+    unsigned long ids[2] = {0, 0};
+    long ret = veridian_syscall2(SYS_SOCKET_PAIR, domain, ids);
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
+    }
+    sv[0] = (int)ids[0];
+    sv[1] = (int)ids[1];
+    return 0;
 }
 
 int initgroups(const char *user, gid_t group)

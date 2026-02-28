@@ -99,11 +99,17 @@ jobs:
                       ubuntu-cargo-
             - name: Check formatting
               run: cargo fmt --all -- --check
-            - name: Run clippy
+            - name: Run clippy (kernel)
               # Only check --lib here; main.rs has #[panic_handler] which conflicts
               # with std's panic_impl on the host target. The bin target is already
               # validated by the build-and-test job on all 3 bare-metal targets.
               run: cargo clippy --lib --all-features -- -D warnings ${{ env.CLIPPY_ALLOW }}
+            - name: Check vsh formatting
+              run: cd userland/vsh && cargo fmt -- --check
+            - name: Build vsh (x86_64)
+              run: |
+                  cd userland/vsh
+                  cargo build --target x86_64-unknown-none -Zbuild-std=core,compiler_builtins,alloc
 
     # Build and test for all architectures
     build-and-test:

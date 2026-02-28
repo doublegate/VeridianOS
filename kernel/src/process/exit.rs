@@ -380,6 +380,9 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
             process.set_state(ProcessState::Blocked);
             sched::block_process(pid);
             println!("[PROCESS] Process {} stopped by SIGSTOP", pid.0);
+
+            // Notify parent with SIGCHLD (POSIX: child stopped)
+            notify_parent_sigchld(process);
         }
         _ => {
             // Handle based on action
@@ -395,13 +398,19 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
                 SignalAction::Stop => {
                     process.set_state(ProcessState::Blocked);
                     sched::block_process(pid);
-                    println!("[PROCESS] Process {} stopped", pid.0);
+                    println!("[PROCESS] Process {} stopped by signal {}", pid.0, signal);
+
+                    // Notify parent with SIGCHLD (POSIX: child stopped)
+                    notify_parent_sigchld(process);
                 }
                 SignalAction::Continue => {
                     if process.get_state() == ProcessState::Blocked {
                         process.set_state(ProcessState::Ready);
                         sched::wake_up_process(pid);
-                        println!("[PROCESS] Process {} continued", pid.0);
+                        println!("[PROCESS] Process {} continued by signal {}", pid.0, signal);
+
+                        // Notify parent with SIGCHLD (POSIX: child continued)
+                        notify_parent_sigchld(process);
                     }
                     process.clear_pending_signal(signal as usize);
                 }
@@ -428,6 +437,35 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
     }
 
     Ok(())
+}
+
+// ============================================================================
+// SIGCHLD notification helper
+// ============================================================================
+
+/// Send SIGCHLD to the parent of `process` and wake it if blocked.
+///
+/// Called when a child process exits, stops, or continues. This is the
+/// unified notification path: `exit_process` and `kill_process` (for Stop
+/// and Continue actions) both funnel through here.
+fn notify_parent_sigchld(process: &Process) {
+    if let Some(parent_pid) = process.parent {
+        if let Some(parent) = table::get_process(parent_pid) {
+            // Send SIGCHLD to parent (POSIX: delivered on child state change)
+            if let Err(_e) = parent.send_signal(signals::SIGCHLD as usize) {
+                println!(
+                    "[PROCESS] Warning: Failed to send SIGCHLD to parent {}: {:?}",
+                    parent_pid.0, _e
+                );
+            }
+
+            // Wake parent if it is blocked (e.g. in waitpid)
+            if parent.get_state() == ProcessState::Blocked {
+                parent.set_state(ProcessState::Ready);
+                sched::wake_up_process(parent_pid);
+            }
+        }
+    }
 }
 
 // ============================================================================

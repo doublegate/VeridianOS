@@ -830,6 +830,102 @@ pub fn sys_getsid(pid: usize) -> SyscallResult {
     }
 }
 
+/// Set the foreground process group of a terminal (SYS_TCSETPGRP = 274)
+///
+/// Sets the foreground process group ID associated with the terminal
+/// referred to by `fd`. The calling process must be in the same session
+/// as the target process group.
+///
+/// # Arguments
+/// - `fd`: File descriptor referring to a terminal (currently unused; the
+///   kernel's console is implicitly the controlling terminal).
+/// - `pgid`: The process group ID to set as the foreground group.
+///
+/// # Returns
+/// 0 on success.
+pub fn sys_tcsetpgrp(fd: usize, pgid: usize) -> SyscallResult {
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    let caller_sid = proc.sid.load(core::sync::atomic::Ordering::Acquire);
+    let new_pgid = pgid as u64;
+
+    // Validate that the target pgid belongs to a process in the same session
+    // as the caller (POSIX requirement).
+    let mut found_in_session = false;
+    crate::process::table::PROCESS_TABLE.for_each(|p| {
+        if p.pgid.load(core::sync::atomic::Ordering::Acquire) == new_pgid
+            && p.sid.load(core::sync::atomic::Ordering::Acquire) == caller_sid
+        {
+            found_in_session = true;
+        }
+    });
+
+    if !found_in_session {
+        return Err(SyscallError::PermissionDenied);
+    }
+
+    // Set foreground pgid on the PTY associated with this fd.
+    // Currently the kernel has a single console, so we set on the first
+    // PTY if one exists. When a full fd-to-PTY mapping is available, this
+    // will look up the PTY from the file descriptor table.
+    let _ = fd; // fd will be used when fd-to-PTY mapping is wired
+    crate::fs::pty::with_pty_manager(|manager| {
+        if let Some(master) = manager.get_master(0) {
+            master.set_foreground_pgid(new_pgid);
+        }
+    });
+
+    // Also store in a kernel-wide foreground pgid for the console
+    // (used by tcgetpgrp when no PTY is involved).
+    CONSOLE_FOREGROUND_PGID.store(new_pgid, core::sync::atomic::Ordering::Release);
+
+    Ok(0)
+}
+
+/// Get the foreground process group of a terminal (SYS_TCGETPGRP = 275)
+///
+/// Returns the foreground process group ID associated with the terminal
+/// referred to by `fd`.
+///
+/// # Arguments
+/// - `fd`: File descriptor referring to a terminal (currently unused).
+///
+/// # Returns
+/// The foreground process group ID, or the calling process's pgid if none
+/// has been explicitly set.
+pub fn sys_tcgetpgrp(fd: usize) -> SyscallResult {
+    let _ = fd; // fd will be used when fd-to-PTY mapping is wired
+
+    // Check the PTY first
+    let pty_pgid = crate::fs::pty::with_pty_manager(|manager| {
+        manager
+            .get_master(0)
+            .map(|m| m.get_foreground_pgid())
+            .unwrap_or(0)
+    })
+    .unwrap_or(0);
+
+    if pty_pgid != 0 {
+        return Ok(pty_pgid as usize);
+    }
+
+    // Check the kernel-wide console foreground pgid
+    let console_pgid = CONSOLE_FOREGROUND_PGID.load(core::sync::atomic::Ordering::Acquire);
+    if console_pgid != 0 {
+        return Ok(console_pgid as usize);
+    }
+
+    // Default: return the calling process's pgid
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    Ok(proc.pgid.load(core::sync::atomic::Ordering::Acquire) as usize)
+}
+
+/// Kernel-wide foreground process group for the system console.
+///
+/// This is a fallback for when no PTY is associated with a file descriptor.
+/// It tracks which process group is in the foreground of the kernel console.
+static CONSOLE_FOREGROUND_PGID: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 /// Get process priority
 ///
 /// # Arguments

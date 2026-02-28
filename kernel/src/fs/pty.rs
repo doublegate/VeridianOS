@@ -2,12 +2,27 @@
 //!
 //! Provides pseudo-terminal devices for terminal emulation and shell
 //! interaction.
+//!
+//! # Architecture
+//!
+//! A PTY pair consists of a master and a slave side. The master is used by a
+//! terminal emulator (or the graphical desktop renderer); the slave is used by
+//! the shell or application running inside the terminal.
+//!
+//! Data flow:
+//! - Master writes to `input_buffer`  → slave reads from `input_buffer`
+//! - Slave  writes to `output_buffer` → master reads from `output_buffer`
+//!
+//! The [`PtyMasterNode`] and [`PtySlaveNode`] VfsNode wrappers expose these
+//! buffers as regular file descriptors so that standard `read`/`write`
+//! syscalls work transparently.
 
 // Allow dead code for PTY fields not yet used in current implementation
 #![allow(dead_code, clippy::needless_range_loop)]
 
-use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicU32, Ordering};
+#[allow(unused_imports)]
+use alloc::{collections::VecDeque, format, sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 #[cfg(not(target_arch = "aarch64"))]
 use spin::RwLock;
@@ -99,6 +114,12 @@ pub struct PtyMaster {
 
     /// Process ID of controlling process
     controller: RwLock<Option<ProcessId>>,
+
+    /// Foreground process group ID for this terminal.
+    /// Processes in this group receive keyboard-generated signals (SIGINT,
+    /// SIGTSTP). Background processes accessing this terminal receive
+    /// SIGTTIN/SIGTTOU.
+    foreground_pgid: AtomicU64,
 }
 
 impl PtyMaster {
@@ -111,6 +132,7 @@ impl PtyMaster {
             winsize: RwLock::new(Winsize::default()),
             flags: RwLock::new(TermiosFlags::default()),
             controller: RwLock::new(None),
+            foreground_pgid: AtomicU64::new(0),
         }
     }
 
@@ -141,33 +163,14 @@ impl PtyMaster {
             // Handle special characters if signals are enabled
             if flags.isig {
                 if byte == termios::VINTR_CHAR {
-                    // Send SIGINT to controlling process (^C)
-                    if let Some(pid) = *self.controller.read() {
-                        let process_server = crate::services::process_server::get_process_server();
-                        if let Err(_e) = process_server.send_signal(pid, 2) {
-                            crate::println!(
-                                "[PTY] Warning: failed to send SIGINT to PID {}: {:?}",
-                                pid.0,
-                                _e
-                            );
-                        }
-                    }
+                    // Send SIGINT to foreground process group (^C)
+                    self.send_signal_to_foreground_group(2);
                     continue;
                 }
 
                 if byte == termios::VSUSP_CHAR {
-                    // Send SIGTSTP to controlling process (^Z)
-                    if let Some(pid) = *self.controller.read() {
-                        let process_server = crate::services::process_server::get_process_server();
-                        // SIGTSTP = 20 (POSIX)
-                        if let Err(_e) = process_server.send_signal(pid, 20) {
-                            crate::println!(
-                                "[PTY] Warning: failed to send SIGTSTP to PID {}: {:?}",
-                                pid.0,
-                                _e
-                            );
-                        }
-                    }
+                    // Send SIGTSTP to foreground process group (^Z)
+                    self.send_signal_to_foreground_group(20);
                     continue;
                 }
             }
@@ -182,6 +185,41 @@ impl PtyMaster {
         }
 
         Ok(data.len())
+    }
+
+    /// Send a signal to all processes in the foreground process group.
+    ///
+    /// Falls back to the controlling process if no foreground group is set.
+    fn send_signal_to_foreground_group(&self, signal: i32) {
+        let fg_pgid = self.foreground_pgid.load(Ordering::Acquire);
+
+        if fg_pgid != 0 {
+            // Send signal to all processes in the foreground process group
+            crate::process::table::PROCESS_TABLE.for_each(|proc| {
+                let proc_pgid = proc.pgid.load(Ordering::Acquire);
+                if proc_pgid == fg_pgid && proc.is_alive() {
+                    if let Err(_e) = proc.send_signal(signal as usize) {
+                        crate::println!(
+                            "[PTY] Warning: failed to send signal {} to PID {}: {:?}",
+                            signal,
+                            proc.pid.0,
+                            _e
+                        );
+                    }
+                }
+            });
+        } else if let Some(pid) = *self.controller.read() {
+            // Fallback: send to controlling process only
+            let process_server = crate::services::process_server::get_process_server();
+            if let Err(_e) = process_server.send_signal(pid, signal) {
+                crate::println!(
+                    "[PTY] Warning: failed to send signal {} to PID {}: {:?}",
+                    signal,
+                    pid.0,
+                    _e
+                );
+            }
+        }
     }
 
     /// Set window size
@@ -227,6 +265,23 @@ impl PtyMaster {
     /// Get the controlling process ID, if any.
     pub fn get_controller(&self) -> Option<ProcessId> {
         *self.controller.read()
+    }
+
+    /// Set the foreground process group ID for this terminal.
+    ///
+    /// The foreground process group receives keyboard-generated signals
+    /// (SIGINT from ^C, SIGTSTP from ^Z). Processes in background groups
+    /// that attempt to read from or write to this terminal receive
+    /// SIGTTIN or SIGTTOU respectively.
+    pub fn set_foreground_pgid(&self, pgid: u64) {
+        self.foreground_pgid.store(pgid, Ordering::Release);
+    }
+
+    /// Get the foreground process group ID for this terminal.
+    ///
+    /// Returns 0 if no foreground group has been set.
+    pub fn get_foreground_pgid(&self) -> u64 {
+        self.foreground_pgid.load(Ordering::Acquire)
     }
 }
 
@@ -407,6 +462,191 @@ pub fn with_pty_manager<R, F: FnOnce(&PtyManager) -> R>(f: F) -> Option<R> {
 /// Helper function to get PTY master
 fn get_pty_master(id: u32) -> Option<Arc<PtyMaster>> {
     PTY_MANAGER.with(|manager| manager.get_master(id)).flatten()
+}
+
+// ============================================================================
+// VfsNode wrappers for PTY file descriptors
+// ============================================================================
+
+use super::{DirEntry, Metadata, NodeType, Permissions, VfsNode};
+
+/// VfsNode adapter for the master side of a PTY.
+///
+/// Reading from this node returns bytes that the slave has written (i.e. the
+/// program's output). Writing to this node delivers bytes to the slave's input
+/// buffer (i.e. simulates keyboard input).
+pub struct PtyMasterNode {
+    /// The underlying PTY master, shared with the slave view.
+    master: Arc<PtyMaster>,
+}
+
+impl PtyMasterNode {
+    /// Wrap an existing [`PtyMaster`] as a VfsNode.
+    pub fn new(master: Arc<PtyMaster>) -> Self {
+        Self { master }
+    }
+
+    /// Return the PTY ID owned by this master node.
+    pub fn pty_id(&self) -> u32 {
+        self.master.id()
+    }
+}
+
+impl VfsNode for PtyMasterNode {
+    fn node_type(&self) -> NodeType {
+        NodeType::CharDevice
+    }
+
+    /// Read bytes produced by the slave (the program's stdout/stderr).
+    fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
+        self.master.read(buffer)
+    }
+
+    /// Write bytes that the slave will read (simulate keyboard input).
+    fn write(&self, _offset: usize, data: &[u8]) -> Result<usize, KernelError> {
+        self.master.write(data)
+    }
+
+    fn metadata(&self) -> Result<Metadata, KernelError> {
+        Ok(Metadata {
+            node_type: NodeType::CharDevice,
+            size: 0,
+            permissions: Permissions::from_mode(0o620),
+            uid: 0,
+            gid: 5, // tty group
+            created: 0,
+            modified: 0,
+            accessed: 0,
+            inode: 0x9000_0000 | self.master.id() as u64,
+        })
+    }
+
+    fn readdir(&self) -> Result<Vec<DirEntry>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn lookup(&self, _name: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn create(
+        &self,
+        _name: &str,
+        _permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn mkdir(
+        &self,
+        _name: &str,
+        _permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn unlink(&self, _name: &str) -> Result<(), KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn truncate(&self, _size: usize) -> Result<(), KernelError> {
+        Err(KernelError::PermissionDenied {
+            operation: "truncate PTY master",
+        })
+    }
+}
+
+/// VfsNode adapter for the slave side of a PTY.
+///
+/// Reading from this node returns bytes that the master has written (i.e.
+/// keyboard input forwarded to the shell). Writing to this node sends bytes
+/// to the master's output buffer (the program's output visible in the
+/// terminal emulator).
+pub struct PtySlaveNode {
+    /// The slave descriptor, which back-references the master by ID.
+    slave: PtySlave,
+}
+
+impl PtySlaveNode {
+    /// Wrap a [`PtySlave`] as a VfsNode.
+    pub fn new(slave: PtySlave) -> Self {
+        Self { slave }
+    }
+
+    /// Return the PTY ID of this slave.
+    pub fn pty_id(&self) -> u32 {
+        self.slave.id()
+    }
+
+    /// Return the path that would be exposed as the slave device name.
+    pub fn pts_path(&self) -> alloc::string::String {
+        format!("/dev/pts/{}", self.slave.id())
+    }
+}
+
+impl VfsNode for PtySlaveNode {
+    fn node_type(&self) -> NodeType {
+        NodeType::CharDevice
+    }
+
+    /// Read bytes that the master wrote (keyboard input / program stdin).
+    fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
+        self.slave.read(buffer)
+    }
+
+    /// Write bytes that the master will read (program output / terminal
+    /// output).
+    fn write(&self, _offset: usize, data: &[u8]) -> Result<usize, KernelError> {
+        self.slave.write(data)
+    }
+
+    fn metadata(&self) -> Result<Metadata, KernelError> {
+        Ok(Metadata {
+            node_type: NodeType::CharDevice,
+            size: 0,
+            permissions: Permissions::from_mode(0o620),
+            uid: 0,
+            gid: 5, // tty group
+            created: 0,
+            modified: 0,
+            accessed: 0,
+            inode: 0x9100_0000 | self.slave.id() as u64,
+        })
+    }
+
+    fn readdir(&self) -> Result<Vec<DirEntry>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn lookup(&self, _name: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn create(
+        &self,
+        _name: &str,
+        _permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn mkdir(
+        &self,
+        _name: &str,
+        _permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn unlink(&self, _name: &str) -> Result<(), KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn truncate(&self, _size: usize) -> Result<(), KernelError> {
+        Err(KernelError::PermissionDenied {
+            operation: "truncate PTY slave",
+        })
+    }
 }
 
 #[cfg(test)]

@@ -209,11 +209,16 @@ pub fn sys_sigsuspend(mask_ptr: usize) -> SyscallResult {
         return Err(SyscallError::Interrupted);
     }
 
-    // No pending signal -- restore mask immediately.
-    // Full blocking/suspension requires scheduler integration (the thread
-    // would need to be put into a Blocked state and woken by signal
-    // delivery). For now, return EINTR as if a signal arrived.
+    // Block the process until a signal arrives. The signal delivery
+    // path (process::exit::deliver_pending_signal) will wake us via
+    // sched::wake_up_process when it delivers a signal to this process.
+    proc.set_state(crate::process::pcb::ProcessState::Blocked);
+    crate::sched::block_process(proc.pid);
+
+    // After waking: restore the original signal mask
     proc.set_signal_mask(old_mask);
+
+    // sigsuspend always returns EINTR per POSIX
     Err(SyscallError::Interrupted)
 }
 

@@ -30,6 +30,12 @@ pub const PATH_MAX: usize = 4096;
 /// Maximum filename length
 pub const NAME_MAX: usize = 255;
 
+/// Maximum number of symbolic link traversals before returning ELOOP.
+///
+/// POSIX recommends at least `SYMLOOP_MAX` (typically 8-40). We use 40
+/// to be generous while still detecting infinite cycles.
+pub const SYMLINK_MAX_DEPTH: usize = 40;
+
 /// Filesystem node types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeType {
@@ -99,6 +105,48 @@ impl Permissions {
             other_read: (mode & 0o004) != 0,
             other_write: (mode & 0o002) != 0,
             other_exec: (mode & 0o001) != 0,
+        }
+    }
+
+    /// Check if the given uid/gid has read access.
+    pub fn can_read(&self, uid: u32, gid: u32, file_uid: u32, file_gid: u32) -> bool {
+        if uid == 0 {
+            return true; // root bypasses permission checks
+        }
+        if uid == file_uid {
+            self.owner_read
+        } else if gid == file_gid {
+            self.group_read
+        } else {
+            self.other_read
+        }
+    }
+
+    /// Check if the given uid/gid has write access.
+    pub fn can_write(&self, uid: u32, gid: u32, file_uid: u32, file_gid: u32) -> bool {
+        if uid == 0 {
+            return true;
+        }
+        if uid == file_uid {
+            self.owner_write
+        } else if gid == file_gid {
+            self.group_write
+        } else {
+            self.other_write
+        }
+    }
+
+    /// Check if the given uid/gid has run access.
+    pub fn can_run(&self, uid: u32, gid: u32, file_uid: u32, file_gid: u32) -> bool {
+        if uid == 0 {
+            return true;
+        }
+        if uid == file_uid {
+            self.owner_exec
+        } else if gid == file_gid {
+            self.group_exec
+        } else {
+            self.other_exec
         }
     }
 }
@@ -336,42 +384,59 @@ impl Vfs {
             .map(|_| ())
     }
 
-    /// Resolve a path to a VFS node
+    /// Resolve a path to a VFS node, following symlinks (including the
+    /// final component).
     pub fn resolve_path(&self, path: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.resolve_path_inner(path, &self.cwd, true, 0)
+    }
+
+    /// Resolve a path to a VFS node without following the final symlink
+    /// component. Intermediate symlinks are still followed. Used by
+    /// `lstat()` and `readlink()`.
+    pub fn resolve_path_no_follow(&self, path: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.resolve_path_inner(path, &self.cwd, false, 0)
+    }
+
+    /// Resolve a path to a VFS node using an explicit cwd (per-thread FS
+    /// state).
+    pub fn resolve_from(&self, path: &str, cwd: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.resolve_path_inner(path, cwd, true, 0)
+    }
+
+    /// Resolve a path to a VFS node using an explicit cwd, without
+    /// following the final symlink component.
+    pub fn resolve_from_no_follow(
+        &self,
+        path: &str,
+        cwd: &str,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.resolve_path_inner(path, cwd, false, 0)
+    }
+
+    /// Inner path resolution with configurable symlink behavior.
+    ///
+    /// - `follow_last`: if `true`, a symlink at the final component is
+    ///   resolved. If `false`, the symlink node itself is returned.
+    /// - `symlink_depth`: current nesting depth for loop detection. Returns
+    ///   `FsError::SymlinkLoop` when it exceeds `SYMLINK_MAX_DEPTH`.
+    fn resolve_path_inner(
+        &self,
+        path: &str,
+        cwd: &str,
+        follow_last: bool,
+        symlink_depth: usize,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        if symlink_depth > SYMLINK_MAX_DEPTH {
+            return Err(KernelError::FsError(crate::error::FsError::SymlinkLoop));
+        }
+
         let root_fs = self
             .root_fs
             .as_ref()
             .ok_or(KernelError::FsError(crate::error::FsError::NoRootFs))?;
 
         // Normalize path
-        let path = if path.starts_with('/') {
-            path.into()
-        } else {
-            // Relative path - prepend CWD
-            format!("{}/{}", self.cwd, path)
-        };
-
-        // Check if path is under a mount point
-        for (mount_path, fs) in self.mounts.iter().rev() {
-            if path.starts_with(mount_path) {
-                let relative_path = &path[mount_path.len()..];
-                return self.traverse_path(fs.root(), relative_path);
-            }
-        }
-
-        // Use root filesystem
-        self.traverse_path(root_fs.root(), &path)
-    }
-
-    /// Resolve a path to a VFS node using an explicit cwd (per-thread FS
-    /// state).
-    pub fn resolve_from(&self, path: &str, cwd: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
-        let root_fs = self
-            .root_fs
-            .as_ref()
-            .ok_or(KernelError::FsError(crate::error::FsError::NoRootFs))?;
-
-        let path = if path.starts_with('/') {
+        let path: String = if path.starts_with('/') {
             path.into()
         } else if cwd.ends_with('/') {
             format!("{}{}", cwd, path)
@@ -379,21 +444,30 @@ impl Vfs {
             format!("{}/{}", cwd, path)
         };
 
+        // Check if path is under a mount point
         for (mount_path, fs) in self.mounts.iter().rev() {
             if path.starts_with(mount_path) {
                 let relative_path = &path[mount_path.len()..];
-                return self.traverse_path(fs.root(), relative_path);
+                return self.traverse_path(fs.root(), relative_path, follow_last, symlink_depth);
             }
         }
 
-        self.traverse_path(root_fs.root(), &path)
+        // Use root filesystem
+        self.traverse_path(root_fs.root(), &path, follow_last, symlink_depth)
     }
 
-    /// Traverse a path from a starting node
+    /// Traverse a path from a starting node, with symlink resolution and
+    /// loop detection.
+    ///
+    /// When a path component resolves to a symlink node, its target is
+    /// read via `readlink()` and recursively resolved. For the **final**
+    /// component, symlink resolution is controlled by `follow_last`.
     fn traverse_path(
         &self,
         mut node: Arc<dyn VfsNode>,
         path: &str,
+        follow_last: bool,
+        mut symlink_depth: usize,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
         // Keep track of path components for parent traversal
         let mut path_stack: Vec<Arc<dyn VfsNode>> = Vec::new();
@@ -404,14 +478,15 @@ impl Vfs {
             .filter(|s| !s.is_empty() && *s != ".")
             .collect();
 
-        for component in components {
-            if component == ".." {
+        let last_idx = components.len().saturating_sub(1);
+
+        for (idx, component) in components.iter().enumerate() {
+            let is_last = idx == last_idx;
+
+            if *component == ".." {
                 // Go back to parent directory
                 if path_stack.len() > 1 {
                     path_stack.pop();
-                    // path_stack.len() > 1 was checked above, so last() always succeeds.
-                    // Use ok_or to return an error instead of panicking on the
-                    // impossible case.
                     node = path_stack
                         .last()
                         .ok_or(KernelError::LegacyError {
@@ -423,6 +498,51 @@ impl Vfs {
             } else {
                 // Move forward to child
                 node = node.lookup(component)?;
+
+                // Check if the resolved node is a symlink
+                if node.node_type() == NodeType::Symlink {
+                    // For the final component, only follow if requested
+                    if !is_last || follow_last {
+                        symlink_depth += 1;
+                        if symlink_depth > SYMLINK_MAX_DEPTH {
+                            return Err(KernelError::FsError(crate::error::FsError::SymlinkLoop));
+                        }
+
+                        // Read the symlink target
+                        let target = node.readlink()?;
+
+                        // Resolve the target path recursively.
+                        // If the target is absolute, resolve from root.
+                        // If relative, resolve from the current directory
+                        // in the traversal (the parent of the symlink).
+                        if target.starts_with('/') {
+                            node = self.resolve_path_inner(
+                                &target,
+                                "/",
+                                // Intermediate symlinks (not the final
+                                // component of the *original* path) are
+                                // always followed. For the final component,
+                                // honour follow_last.
+                                !is_last || follow_last,
+                                symlink_depth,
+                            )?;
+                        } else {
+                            // Build the directory path of the current
+                            // traversal position (the parent of the
+                            // symlink) by collecting the path_stack.
+                            // The last entry on path_stack is the parent
+                            // directory (we haven't pushed the symlink
+                            // node yet).
+                            node = self.resolve_path_inner(
+                                &target,
+                                "/",
+                                !is_last || follow_last,
+                                symlink_depth,
+                            )?;
+                        }
+                    }
+                }
+
                 path_stack.push(node.clone());
             }
         }
@@ -692,7 +812,7 @@ pub fn init() {
                     if let Ok(f) = etc.create("os-release", Permissions::default()) {
                         f.write(
                             0,
-                            b"NAME=\"VeridianOS\"\nVERSION=\"0.6.4\"\nID=veridian\nPRETTY_NAME=\"VeridianOS v0.6.4\"\n",
+                            b"NAME=\"VeridianOS\"\nVERSION=\"0.7.0\"\nID=veridian\nPRETTY_NAME=\"VeridianOS v0.7.0\"\n",
                         )
                         .ok();
                     }

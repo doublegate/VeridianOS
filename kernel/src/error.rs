@@ -204,6 +204,8 @@ pub enum FsError {
     FileTooLarge,
     /// On-disk data is corrupt or has invalid magic number
     CorruptedData,
+    /// Too many levels of symbolic links (ELOOP)
+    SymlinkLoop,
 }
 
 /// Result type alias for kernel operations

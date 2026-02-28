@@ -15,11 +15,21 @@
  *     robust exit notification.
  *   - No kernel-side helper threads are required.
  *
+ * Primitives implemented:
+ *   - Mutex (futex-backed, two-state)
+ *   - Condition variable (futex-backed sequence counter)
+ *   - Once (atomic CAS + futex for secondary waiters)
+ *   - Read-write lock (reader count + writer flag + futex)
+ *   - TLS keys (global key table, per-thread value arrays, destructors)
+ *   - Barrier (atomic counter + futex, cyclic via phase counter)
+ *   - Spinlock (atomic CAS busy-wait, no futex)
+ *
  * Limitations:
  *   - No thread cancellation (pthread_cancel is not implemented).
  *   - No robust mutexes or priority inheritance.
- *   - No thread-local storage keys (pthread_key_create et al. are stubs).
  *   - Condition variable timedwait does not handle clock selection.
+ *   - TLS key destructors are invoked at pthread_exit() only, not process exit.
+ *   - PTHREAD_KEYS_MAX = 128; PTHREAD_THREADS_MAX for TLS storage = 256.
  */
 
 #include <pthread.h>
@@ -391,8 +401,9 @@ static void child_trampoline(struct pthread_control *tcb)
     set_thread_pointer(tcb);
     tcb->tid = (pthread_t)gettid();
     void *rv = tcb->start(tcb->arg);
-    tcb->retval = rv;
-    veridian_syscall1(SYS_THREAD_EXIT, (long)rv);
+    /* Run TLS destructors then exit.  pthread_exit() is the public symbol
+     * defined at the bottom of this file; call it directly. */
+    pthread_exit(rv);
     __builtin_unreachable();
 }
 
@@ -549,7 +560,15 @@ pthread_t pthread_self(void)
     return (pthread_t)gettid();
 }
 
-void pthread_exit(void *retval)
+/*
+ * pthread_exit_raw -- low-level thread exit without destructor handling.
+ *
+ * The public pthread_exit() is defined later in this file after
+ * run_tls_destructors() is available.  child_trampoline() calls this
+ * raw version directly because it is a forward reference; the compiler
+ * sees only one definition of the public symbol.
+ */
+static void __attribute__((noreturn)) pthread_exit_raw(void *retval)
 {
     struct pthread_control *tcb = (struct pthread_control *)get_thread_pointer();
     if (tcb) {
@@ -572,4 +591,554 @@ int pthread_yield(void)
 {
     veridian_syscall0(SYS_PROCESS_YIELD);
     return 0;
+}
+
+/* =========================================================================
+ * Read-write lock
+ * =========================================================================
+ *
+ * State:
+ *   rwlock->readers       -- active reader count; we futex_wait on this when
+ *                            a writer needs all readers to drain.
+ *   rwlock->writer        -- 1 when a writer holds the lock, 0 otherwise;
+ *                            readers futex_wait here until the writer releases.
+ *   rwlock->pending_writers -- number of threads waiting to write; a positive
+ *                            value causes new readers to spin/wait, giving
+ *                            writers priority to prevent writer starvation.
+ *
+ * Invariants:
+ *   (a) writer == 1  =>  readers == 0
+ *   (b) readers > 0  =>  writer == 0
+ *
+ * Read-lock acquisition:
+ *   1. If writer==1 or pending_writers>0, block on &writer until it clears.
+ *   2. Atomically increment readers.
+ *   3. Re-check writer: if a writer snuck in between steps 1 and 2, undo
+ *      the increment and retry (avoids ABA window).
+ *
+ * Write-lock acquisition:
+ *   1. Increment pending_writers (signals intent, biases readers).
+ *   2. CAS writer: 0 -> 1.  If it fails, futex_wait on &writer until 0.
+ *   3. Wait for all active readers to drain: futex_wait on &readers until 0.
+ *   4. Decrement pending_writers (the lock is fully ours now).
+ *
+ * Unlock:
+ *   If writer==1: clear it and wake all waiters (readers + any writer).
+ *   If readers>0: decrement; if it reaches 0, wake a pending writer.
+ */
+int pthread_rwlock_init(pthread_rwlock_t *rwlock, const pthread_rwlockattr_t *attr)
+{
+    (void)attr;
+    int err = ensure_futex_ready();
+    if (err) {
+        return err;
+    }
+    __atomic_store_n(&rwlock->readers,         0, __ATOMIC_RELEASE);
+    __atomic_store_n(&rwlock->writer,          0, __ATOMIC_RELEASE);
+    __atomic_store_n(&rwlock->pending_writers, 0, __ATOMIC_RELEASE);
+    return 0;
+}
+
+int pthread_rwlock_destroy(pthread_rwlock_t *rwlock)
+{
+    /* Behaviour is undefined if the lock is held at destroy time. */
+    (void)rwlock;
+    return 0;
+}
+
+int pthread_rwlock_rdlock(pthread_rwlock_t *rwlock)
+{
+    int err = ensure_futex_ready();
+    if (err) {
+        return err;
+    }
+
+    while (1) {
+        /* Block while a writer holds the lock or writers are pending. */
+        while (__atomic_load_n(&rwlock->writer,          __ATOMIC_ACQUIRE) ||
+               __atomic_load_n(&rwlock->pending_writers, __ATOMIC_ACQUIRE)) {
+            futex_wait(&rwlock->writer, 1, NULL);
+        }
+
+        /* Claim one reader slot. */
+        __atomic_fetch_add(&rwlock->readers, 1, __ATOMIC_ACQUIRE);
+
+        /* Verify a writer did not slip in between the check and the increment.
+         * If it did, undo and retry -- we must not hold a reader slot while a
+         * writer is active. */
+        if (!__atomic_load_n(&rwlock->writer, __ATOMIC_ACQUIRE)) {
+            return 0; /* success */
+        }
+        __atomic_fetch_sub(&rwlock->readers, 1, __ATOMIC_RELEASE);
+        /* Wake a potential writer waiting for readers==0 if we transiently
+         * incremented then decremented. */
+        if (__atomic_load_n(&rwlock->readers, __ATOMIC_RELAXED) == 0) {
+            futex_wake(&rwlock->readers, 1);
+        }
+    }
+}
+
+int pthread_rwlock_tryrdlock(pthread_rwlock_t *rwlock)
+{
+    /* Fail immediately if a writer holds or is waiting for the lock. */
+    if (__atomic_load_n(&rwlock->writer,          __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&rwlock->pending_writers, __ATOMIC_ACQUIRE)) {
+        return EBUSY;
+    }
+    __atomic_fetch_add(&rwlock->readers, 1, __ATOMIC_ACQUIRE);
+    if (!__atomic_load_n(&rwlock->writer, __ATOMIC_ACQUIRE)) {
+        return 0;
+    }
+    /* Writer snuck in -- undo. */
+    __atomic_fetch_sub(&rwlock->readers, 1, __ATOMIC_RELEASE);
+    if (__atomic_load_n(&rwlock->readers, __ATOMIC_RELAXED) == 0) {
+        futex_wake(&rwlock->readers, 1);
+    }
+    return EBUSY;
+}
+
+int pthread_rwlock_wrlock(pthread_rwlock_t *rwlock)
+{
+    int err = ensure_futex_ready();
+    if (err) {
+        return err;
+    }
+
+    /* Signal intent so new readers yield to us. */
+    __atomic_fetch_add(&rwlock->pending_writers, 1, __ATOMIC_ACQUIRE);
+
+    /* Acquire the writer flag. */
+    while (1) {
+        int expected = 0;
+        if (__atomic_compare_exchange_n(&rwlock->writer, &expected, 1, false,
+                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+            break;
+        }
+        /* Another writer holds it -- sleep. */
+        futex_wait(&rwlock->writer, 1, NULL);
+    }
+
+    /* Wait for all active readers to finish. */
+    while (__atomic_load_n(&rwlock->readers, __ATOMIC_ACQUIRE) != 0) {
+        futex_wait(&rwlock->readers, __atomic_load_n(&rwlock->readers, __ATOMIC_RELAXED), NULL);
+    }
+
+    /* We now hold the exclusive write lock. */
+    __atomic_fetch_sub(&rwlock->pending_writers, 1, __ATOMIC_RELEASE);
+    return 0;
+}
+
+int pthread_rwlock_trywrlock(pthread_rwlock_t *rwlock)
+{
+    /* Fail immediately if anyone holds the lock. */
+    if (__atomic_load_n(&rwlock->readers, __ATOMIC_ACQUIRE) != 0) {
+        return EBUSY;
+    }
+    int expected = 0;
+    if (!__atomic_compare_exchange_n(&rwlock->writer, &expected, 1, false,
+                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+        return EBUSY;
+    }
+    /* Double-check no readers crept in between. */
+    if (__atomic_load_n(&rwlock->readers, __ATOMIC_ACQUIRE) != 0) {
+        __atomic_store_n(&rwlock->writer, 0, __ATOMIC_RELEASE);
+        futex_wake(&rwlock->writer, INT32_MAX);
+        return EBUSY;
+    }
+    return 0;
+}
+
+int pthread_rwlock_unlock(pthread_rwlock_t *rwlock)
+{
+    if (__atomic_load_n(&rwlock->writer, __ATOMIC_ACQUIRE)) {
+        /* Write-unlock: clear writer and wake all blocked threads so that
+         * pending readers or the next writer can proceed. */
+        __atomic_store_n(&rwlock->writer, 0, __ATOMIC_RELEASE);
+        futex_wake(&rwlock->writer, INT32_MAX);
+    } else {
+        /* Read-unlock: decrement reader count; if we were the last reader and
+         * a writer is pending, wake it. */
+        int prev = __atomic_fetch_sub(&rwlock->readers, 1, __ATOMIC_RELEASE);
+        if (prev == 1 &&
+            __atomic_load_n(&rwlock->pending_writers, __ATOMIC_ACQUIRE)) {
+            futex_wake(&rwlock->readers, 1);
+        }
+    }
+    return 0;
+}
+
+/* =========================================================================
+ * TLS keys (pthread_key_create / delete / getspecific / setspecific)
+ * =========================================================================
+ *
+ * Design:
+ *   A global key table of PTHREAD_KEYS_MAX entries holds the destructor
+ *   function for each key (NULL destructor = slot available when combined
+ *   with the in_use flag).
+ *
+ *   Per-thread values are stored in a flat 2D array:
+ *     tls_values[key][thread_slot]
+ *
+ *   Thread slots are assigned sequentially and recorded in the TCB via a
+ *   global tid-to-slot table (tls_tid_slot[]).  The main thread is slot 0.
+ *
+ *   Memory for value arrays is allocated lazily (first setspecific call for
+ *   a given key allocates the values column).
+ *
+ *   This is not O(1) per-thread in the worst case but is sufficient for
+ *   toolchain use where PTHREAD_KEYS_MAX calls are rare and thread counts
+ *   are small.
+ *
+ * TLS destructor invocation:
+ *   pthread_exit() iterates all active keys and calls the destructor for
+ *   any non-NULL value belonging to the exiting thread.  Destructor calls
+ *   may set new values; we repeat up to PTHREAD_DESTRUCTOR_ITERATIONS times
+ *   (POSIX requires at least 4).
+ */
+
+#define PTHREAD_THREADS_MAX         256
+#define PTHREAD_DESTRUCTOR_ITERATIONS 4
+
+struct tls_key_entry {
+    int      in_use;
+    void   (*destructor)(void *);
+    void    *values[PTHREAD_THREADS_MAX]; /* indexed by thread slot */
+};
+
+/* Protected by key_lock (atomic spinlock -- no futex needed here). */
+static struct tls_key_entry tls_keys[PTHREAD_KEYS_MAX];
+static int key_lock = 0; /* 0=free, 1=held */
+
+/* TID-to-slot mapping.  Slot 0 is reserved for the main thread. */
+static pthread_t tls_tid_map[PTHREAD_THREADS_MAX];
+static int       tls_slots_used = 0;
+
+static inline void key_lock_acquire(void)
+{
+    while (__atomic_exchange_n(&key_lock, 1, __ATOMIC_ACQUIRE))
+        ; /* spin -- key table operations are brief */
+}
+static inline void key_lock_release(void)
+{
+    __atomic_store_n(&key_lock, 0, __ATOMIC_RELEASE);
+}
+
+/*
+ * Return the slot index for the calling thread, allocating one if this is
+ * the first TLS call from this thread.  Returns -1 if PTHREAD_THREADS_MAX
+ * is exhausted.
+ */
+static int get_thread_slot(void)
+{
+    pthread_t self = pthread_self();
+    key_lock_acquire();
+    /* Linear scan -- table is small. */
+    for (int i = 0; i < tls_slots_used; i++) {
+        if (tls_tid_map[i] == self) {
+            key_lock_release();
+            return i;
+        }
+    }
+    /* Allocate new slot. */
+    if (tls_slots_used >= PTHREAD_THREADS_MAX) {
+        key_lock_release();
+        return -1;
+    }
+    int slot = tls_slots_used++;
+    tls_tid_map[slot] = self;
+    key_lock_release();
+    return slot;
+}
+
+int pthread_key_create(pthread_key_t *key, void (*destructor)(void *))
+{
+    if (!key) {
+        return EINVAL;
+    }
+    key_lock_acquire();
+    for (int k = 0; k < PTHREAD_KEYS_MAX; k++) {
+        if (!tls_keys[k].in_use) {
+            tls_keys[k].in_use     = 1;
+            tls_keys[k].destructor = destructor;
+            /* Zero out any stale values from a previous incarnation. */
+            for (int t = 0; t < PTHREAD_THREADS_MAX; t++) {
+                tls_keys[k].values[t] = NULL;
+            }
+            key_lock_release();
+            *key = (pthread_key_t)k;
+            return 0;
+        }
+    }
+    key_lock_release();
+    return EAGAIN; /* POSIX: EAGAIN when no free keys */
+}
+
+int pthread_key_delete(pthread_key_t key)
+{
+    if (key < 0 || key >= PTHREAD_KEYS_MAX) {
+        return EINVAL;
+    }
+    key_lock_acquire();
+    if (!tls_keys[key].in_use) {
+        key_lock_release();
+        return EINVAL;
+    }
+    /* POSIX: does NOT invoke destructors on delete; values simply vanish. */
+    tls_keys[key].in_use     = 0;
+    tls_keys[key].destructor = NULL;
+    for (int t = 0; t < PTHREAD_THREADS_MAX; t++) {
+        tls_keys[key].values[t] = NULL;
+    }
+    key_lock_release();
+    return 0;
+}
+
+void *pthread_getspecific(pthread_key_t key)
+{
+    if (key < 0 || key >= PTHREAD_KEYS_MAX) {
+        return NULL;
+    }
+    key_lock_acquire();
+    if (!tls_keys[key].in_use) {
+        key_lock_release();
+        return NULL;
+    }
+    key_lock_release();
+
+    int slot = get_thread_slot();
+    if (slot < 0) {
+        return NULL;
+    }
+    /* Reading values[slot] is safe without the lock once we have the slot,
+     * because only this thread writes its own slot. */
+    return tls_keys[key].values[slot];
+}
+
+int pthread_setspecific(pthread_key_t key, const void *value)
+{
+    if (key < 0 || key >= PTHREAD_KEYS_MAX) {
+        return EINVAL;
+    }
+    key_lock_acquire();
+    if (!tls_keys[key].in_use) {
+        key_lock_release();
+        return EINVAL;
+    }
+    key_lock_release();
+
+    int slot = get_thread_slot();
+    if (slot < 0) {
+        return ENOMEM;
+    }
+    /* Only this thread writes its own slot -- no lock needed for the write
+     * itself, but we need acquire/release to be visible to future getspecific
+     * calls from the same thread. */
+    __atomic_store_n(&tls_keys[key].values[slot], (void *)(uintptr_t)value,
+                     __ATOMIC_RELEASE);
+    return 0;
+}
+
+/*
+ * Run TLS destructors for the calling thread on exit.
+ * Called from pthread_exit() before the thread_exit syscall.
+ */
+static void run_tls_destructors(void)
+{
+    int slot = get_thread_slot();
+    if (slot < 0) {
+        return; /* No TLS values recorded for this thread. */
+    }
+
+    /* Up to PTHREAD_DESTRUCTOR_ITERATIONS rounds, as required by POSIX. */
+    for (int round = 0; round < PTHREAD_DESTRUCTOR_ITERATIONS; round++) {
+        int any = 0;
+        key_lock_acquire();
+        /* Snapshot: collect (value, destructor) pairs to call outside lock. */
+        struct { void *val; void (*dtor)(void *); } pending[PTHREAD_KEYS_MAX];
+        int n = 0;
+        for (int k = 0; k < PTHREAD_KEYS_MAX; k++) {
+            if (tls_keys[k].in_use && tls_keys[k].destructor &&
+                tls_keys[k].values[slot]) {
+                pending[n].val  = tls_keys[k].values[slot];
+                pending[n].dtor = tls_keys[k].destructor;
+                tls_keys[k].values[slot] = NULL; /* clear before calling dtor */
+                n++;
+                any = 1;
+            }
+        }
+        key_lock_release();
+
+        for (int i = 0; i < n; i++) {
+            pending[i].dtor(pending[i].val);
+        }
+        if (!any) {
+            break; /* No more non-NULL values; done. */
+        }
+    }
+}
+
+/* =========================================================================
+ * Barrier
+ * =========================================================================
+ *
+ * A cyclic barrier: all threads call pthread_barrier_wait(); the last one
+ * to arrive releases all waiting threads and returns PTHREAD_BARRIER_SERIAL_THREAD.
+ * All other callers return 0.
+ *
+ * State:
+ *   barrier->count   -- total threads required (set at init, never changes)
+ *   barrier->waiting -- number of threads currently blocked; futex address
+ *   barrier->phase   -- generation counter; prevents released threads from
+ *                       racing back into the next cycle and seeing a stale
+ *                       futex value
+ *
+ * Protocol:
+ *   1. Atomically increment waiting.
+ *   2. If waiting < count: read current phase, then futex_wait on &waiting
+ *      using the phase as the "expected changed" marker -- actually we wait
+ *      on &phase until it advances (wakes happen via futex_wake on &phase).
+ *   3. The last thread (waiting == count): reset waiting to 0, advance phase,
+ *      broadcast-wake on &phase, return PTHREAD_BARRIER_SERIAL_THREAD.
+ */
+int pthread_barrier_init(pthread_barrier_t *barrier,
+                         const pthread_barrierattr_t *attr,
+                         unsigned int count)
+{
+    (void)attr;
+    if (!barrier || count == 0) {
+        return EINVAL;
+    }
+    int err = ensure_futex_ready();
+    if (err) {
+        return err;
+    }
+    barrier->count   = (int)count;
+    barrier->waiting = 0;
+    barrier->phase   = 0;
+    return 0;
+}
+
+int pthread_barrier_destroy(pthread_barrier_t *barrier)
+{
+    /* Undefined if threads are still waiting. */
+    (void)barrier;
+    return 0;
+}
+
+int pthread_barrier_wait(pthread_barrier_t *barrier)
+{
+    int err = ensure_futex_ready();
+    if (err) {
+        return err;
+    }
+
+    /* Snapshot the phase before incrementing the waiter count so we can
+     * detect the broadcast even if we are preempted between the increment
+     * and the futex_wait call. */
+    int my_phase = __atomic_load_n(&barrier->phase, __ATOMIC_ACQUIRE);
+
+    int arrived = __atomic_add_fetch(&barrier->waiting, 1, __ATOMIC_ACQ_REL);
+    if (arrived == barrier->count) {
+        /* We are the last thread. Reset state and wake everyone else. */
+        __atomic_store_n(&barrier->waiting, 0, __ATOMIC_RELEASE);
+        __atomic_fetch_add(&barrier->phase, 1, __ATOMIC_RELEASE);
+        futex_wake(&barrier->phase, INT32_MAX);
+        return PTHREAD_BARRIER_SERIAL_THREAD;
+    }
+
+    /* Wait until the phase advances (last thread increments it and wakes us).
+     * Retry on spurious wakeups by re-checking the phase. */
+    while (__atomic_load_n(&barrier->phase, __ATOMIC_ACQUIRE) == my_phase) {
+        futex_wait(&barrier->phase, my_phase, NULL);
+    }
+    return 0;
+}
+
+/* =========================================================================
+ * Spinlock
+ * =========================================================================
+ *
+ * A pure atomic CAS busy-wait lock.  No futex; no sleeping.  Suitable for
+ * very short critical sections.  pshared is accepted for API compatibility
+ * but ignored -- our memory model already supports cross-process shared
+ * memory spinlocks because we use __ATOMIC_* builtins.
+ *
+ * State: 0 = unlocked, 1 = locked.
+ *
+ * pthread_spin_lock busy-waits using a test-and-test-and-set (TTAS) pattern:
+ *   - First check the flag with a cheap load (avoids cache-line hammering).
+ *   - Only attempt CAS when the flag appears to be 0.
+ * On x86 a PAUSE hint (via __builtin_ia32_pause) reduces speculative
+ * execution overhead in the spin loop.
+ */
+int pthread_spin_init(pthread_spinlock_t *lock, int pshared)
+{
+    (void)pshared;
+    __atomic_store_n(lock, 0, __ATOMIC_RELEASE);
+    return 0;
+}
+
+int pthread_spin_destroy(pthread_spinlock_t *lock)
+{
+    (void)lock;
+    return 0;
+}
+
+int pthread_spin_lock(pthread_spinlock_t *lock)
+{
+    while (1) {
+        /* TTAS fast path: cheap load before expensive CAS. */
+        if (!__atomic_load_n(lock, __ATOMIC_RELAXED)) {
+            int expected = 0;
+            if (__atomic_compare_exchange_n(lock, &expected, 1, false,
+                                            __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+                return 0;
+            }
+        }
+        /* Hint to the CPU that we are in a spin loop.  On x86 this emits
+         * PAUSE; on other architectures it compiles to nothing, which is
+         * still correct. */
+#if defined(__x86_64__)
+        __asm__ volatile("pause" ::: "memory");
+#elif defined(__aarch64__)
+        __asm__ volatile("yield" ::: "memory");
+#else
+        __asm__ volatile("" ::: "memory"); /* compiler fence */
+#endif
+    }
+}
+
+int pthread_spin_trylock(pthread_spinlock_t *lock)
+{
+    int expected = 0;
+    if (__atomic_compare_exchange_n(lock, &expected, 1, false,
+                                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+        return 0;
+    }
+    return EBUSY;
+}
+
+int pthread_spin_unlock(pthread_spinlock_t *lock)
+{
+    __atomic_store_n(lock, 0, __ATOMIC_RELEASE);
+    return 0;
+}
+
+/* =========================================================================
+ * pthread_exit -- public API
+ * =========================================================================
+ *
+ * Runs TLS destructors for all active keys belonging to this thread, then
+ * calls pthread_exit_raw() which stores the return value in the TCB and
+ * issues SYS_THREAD_EXIT.  The TCB cleanup (freeing stack, unregistering
+ * from the TCB list) is handled by pthread_join() in the joining thread.
+ *
+ * Destructor ordering follows POSIX: up to PTHREAD_DESTRUCTOR_ITERATIONS
+ * rounds; each round calls all non-NULL destructors and clears the value
+ * before calling (so a destructor that sets a new value gets another round).
+ */
+void pthread_exit(void *retval)
+{
+    run_tls_destructors();
+    pthread_exit_raw(retval);
 }

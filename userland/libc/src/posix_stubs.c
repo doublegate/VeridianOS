@@ -411,26 +411,175 @@ int putenv(char *string)
 /* User/Group database                                                       */
 /* ========================================================================= */
 
+/*
+ * Static fallback entry returned when /etc/passwd is absent or does not
+ * contain a matching entry.  Matches the traditional root account.
+ */
 static struct passwd _stub_pw = {
     .pw_name   = "root",
-    .pw_passwd = "",
+    .pw_passwd = "x",
     .pw_uid    = 0,
     .pw_gid    = 0,
     .pw_gecos  = "root",
-    .pw_dir    = "/",
+    .pw_dir    = "/root",
     .pw_shell  = "/bin/sh"
 };
 
+/*
+ * Scratch buffers for /etc/passwd parsing.  getpwnam/getpwuid return a
+ * pointer to static storage (POSIX allows this for the non-_r variants).
+ * The pw_* fields point into __pw_line_buf which holds the last parsed
+ * line from /etc/passwd.
+ *
+ * Format: name:passwd:uid:gid:gecos:dir:shell
+ */
+static struct passwd _parsed_pw;
+static char __pw_line_buf[512];
+
+/* Forward declarations for helpers used below. */
+extern int open(const char *pathname, int flags, ...);
+extern ssize_t read(int fd, void *buf, size_t count);
+extern int close(int fd);
+extern int strcmp(const char *s1, const char *s2);
+
+/* O_RDONLY flag value (matches veridian/fcntl.h -- NOT Linux 0). */
+#define __PW_O_RDONLY  0x0001
+
+/*
+ * __parse_passwd_line: parse a single colon-delimited passwd line into *pw.
+ *
+ * The line must be stored in __pw_line_buf (NUL-terminated).  All pw_*
+ * fields are set to point inside that buffer.  Returns 1 on success,
+ * 0 if the line is malformed or a comment.
+ */
+static int __parse_passwd_line(struct passwd *pw)
+{
+    char *p = __pw_line_buf;
+
+    /* Skip comment lines and blank lines. */
+    if (*p == '#' || *p == '\n' || *p == '\0')
+        return 0;
+
+    /* Strip trailing newline. */
+    size_t len = 0;
+    while (p[len] && p[len] != '\n') len++;
+    p[len] = '\0';
+
+    /* name */
+    pw->pw_name = p;
+    while (*p && *p != ':') p++;
+    if (!*p) return 0;
+    *p++ = '\0';
+
+    /* passwd */
+    pw->pw_passwd = p;
+    while (*p && *p != ':') p++;
+    if (!*p) return 0;
+    *p++ = '\0';
+
+    /* uid */
+    pw->pw_uid = (uid_t)0;
+    while (*p >= '0' && *p <= '9') {
+        pw->pw_uid = pw->pw_uid * 10 + (uid_t)(*p - '0');
+        p++;
+    }
+    if (*p != ':') return 0;
+    p++;
+
+    /* gid */
+    pw->pw_gid = (gid_t)0;
+    while (*p >= '0' && *p <= '9') {
+        pw->pw_gid = pw->pw_gid * 10 + (gid_t)(*p - '0');
+        p++;
+    }
+    if (*p != ':') return 0;
+    p++;
+
+    /* gecos */
+    pw->pw_gecos = p;
+    while (*p && *p != ':') p++;
+    if (!*p) return 0;
+    *p++ = '\0';
+
+    /* dir */
+    pw->pw_dir = p;
+    while (*p && *p != ':') p++;
+    if (!*p) return 0;
+    *p++ = '\0';
+
+    /* shell (rest of line) */
+    pw->pw_shell = p;
+
+    return 1;
+}
+
+/*
+ * __read_passwd_line: read one line from fd into __pw_line_buf.
+ *
+ * Reads byte-by-byte until newline, EOF, or buffer full.
+ * Returns the number of bytes read (>= 1) on success, 0 at EOF.
+ */
+static int __read_passwd_line(int fd)
+{
+    size_t pos = 0;
+    char ch;
+
+    while (pos < sizeof(__pw_line_buf) - 1) {
+        ssize_t r = read(fd, &ch, 1);
+        if (r <= 0)
+            break;      /* EOF or error */
+        __pw_line_buf[pos++] = ch;
+        if (ch == '\n')
+            break;
+    }
+    __pw_line_buf[pos] = '\0';
+    return (int)pos;
+}
+
 struct passwd *getpwnam(const char *name)
 {
-    (void)name;
-    return &_stub_pw;
+    if (!name)
+        return &_stub_pw;
+
+    int fd = open("/etc/passwd", __PW_O_RDONLY);
+    if (fd < 0)
+        return &_stub_pw;
+
+    while (__read_passwd_line(fd) > 0) {
+        if (__parse_passwd_line(&_parsed_pw)) {
+            if (_parsed_pw.pw_name &&
+                strcmp(_parsed_pw.pw_name, name) == 0) {
+                close(fd);
+                return &_parsed_pw;
+            }
+        }
+    }
+
+    close(fd);
+    return NULL;    /* Not found -- POSIX allows NULL for "no entry". */
 }
 
 struct passwd *getpwuid(uid_t uid)
 {
-    (void)uid;
-    return &_stub_pw;
+    int fd = open("/etc/passwd", __PW_O_RDONLY);
+    if (fd < 0) {
+        /* Fall back to static root entry when /etc/passwd is absent. */
+        if (uid == 0)
+            return &_stub_pw;
+        return NULL;
+    }
+
+    while (__read_passwd_line(fd) > 0) {
+        if (__parse_passwd_line(&_parsed_pw)) {
+            if (_parsed_pw.pw_uid == uid) {
+                close(fd);
+                return &_parsed_pw;
+            }
+        }
+    }
+
+    close(fd);
+    return NULL;    /* Not found. */
 }
 
 char *getlogin(void)

@@ -186,6 +186,25 @@ extern "C" {
 #define SYS_PROCESS_UNAME       204
 #define SYS_PROCESS_GETENV      205
 
+/* Socket operations (220-228) */
+#define SYS_SOCKET_CREATE       220
+#define SYS_SOCKET_BIND         221
+#define SYS_SOCKET_LISTEN       222
+#define SYS_SOCKET_CONNECT      223
+#define SYS_SOCKET_ACCEPT       224
+#define SYS_SOCKET_SEND         225
+#define SYS_SOCKET_RECV         226
+#define SYS_SOCKET_CLOSE        227
+#define SYS_SOCKET_PAIR         228
+
+/* Network extensions / AF_INET (250-255) */
+#define SYS_NET_SENDTO          250
+#define SYS_NET_RECVFROM        251
+#define SYS_NET_GETSOCKNAME     252
+#define SYS_NET_GETPEERNAME     253
+#define SYS_NET_SETSOCKOPT      254
+#define SYS_NET_GETSOCKOPT      255
+
 /* AT_* constants for *at() syscalls */
 #define AT_FDCWD                (-100)
 #define AT_REMOVEDIR            0x200

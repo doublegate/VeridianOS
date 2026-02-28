@@ -32,8 +32,8 @@ pub mod layout {
     /// Default heap start
     pub const HEAP_START: usize = 0x0000_0000_1000_0000;
 
-    /// Maximum heap size (1GB)
-    pub const MAX_HEAP_SIZE: usize = 1024 * 1024 * 1024;
+    /// Maximum heap size (8GB) -- supports rustc self-compilation (4-8GB peak)
+    pub const MAX_HEAP_SIZE: usize = 8 * 1024 * 1024 * 1024;
 
     /// Stack end address (grows down from here)
     pub const STACK_END: usize = 0x0000_7FFF_0000_0000;

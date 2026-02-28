@@ -207,6 +207,11 @@ use self::wayland_syscalls::*;
 mod network_ext_syscalls;
 use self::network_ext_syscalls::*;
 
+// Import Phase 6.5 PTY syscall module
+mod pty;
+#[allow(unused_imports)]
+use self::pty::{sys_grantpt, sys_openpty, sys_ptsname, sys_unlockpt};
+
 /// System call numbers
 #[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -417,6 +422,47 @@ pub enum Syscall {
     NetGetPeerName = 253,
     NetSetSockOpt = 254,
     NetGetSockOpt = 255,
+
+    // Resource limits (Phase 6.5)
+    GetRlimit = 260,
+    SetRlimit = 261,
+
+    // epoll I/O multiplexing (Phase 6.5)
+    EpollCreate = 262,
+    EpollCtl = 263,
+    EpollWait = 264,
+
+    // Process groups / sessions (Phase 6.5)
+    SetPgid = 270,
+    GetPgid = 271,
+    SetSid = 272,
+    GetSid = 273,
+    TcSetPgrp = 274,
+    TcGetPgrp = 275,
+
+    // PTY (Phase 6.5)
+    OpenPty = 280,
+    GrantPty = 281,
+    UnlockPty = 282,
+    PtsName = 283,
+
+    // Filesystem extensions (Phase 6.5)
+    Link = 290,
+    Symlink = 291,
+    Readlink = 292,
+    Lstat = 293,
+    Fchmod = 294,
+    Fchown = 295,
+    Umask = 296,
+    Access = 297,
+
+    // Poll/fcntl (Phase 6.5)
+    Poll = 300,
+    Fcntl = 301,
+
+    // Threading (Phase 6.5)
+    Clone = 310,
+    Futex = 311,
 }
 
 /// System call result type
@@ -467,6 +513,12 @@ pub enum SyscallError {
     /// Maps to ERESOURCELIMIT (errno 79) in user space.
     /// For POSIX fork() EAGAIN semantics, prefer WouldBlock (errno 6).
     ResourceLimitExceeded = -79,
+    /// Syscall registered but not yet implemented (Phase 6.5 stubs).
+    /// Maps to ENOSYS (errno 38) in user space.
+    NotImplemented = -38,
+    /// Too many levels of symbolic links (ELOOP).
+    /// Maps to ELOOP (errno 40) in user space.
+    SymlinkLoop = -40,
 }
 
 impl From<IpcError> for SyscallError {
@@ -806,6 +858,79 @@ fn handle_syscall(
         Syscall::NetGetPeerName => sys_net_getpeername(arg1, arg2, arg3),
         Syscall::NetSetSockOpt => sys_net_setsockopt(arg1, arg2, arg3, arg4, arg5),
         Syscall::NetGetSockOpt => sys_net_getsockopt(arg1, arg2, arg3, arg4),
+
+        // Resource limits (Phase 6.5)
+        Syscall::GetRlimit => memory::sys_getrlimit(arg1, arg2),
+        Syscall::SetRlimit => memory::sys_setrlimit(arg1, arg2),
+
+        // epoll I/O multiplexing (Phase 6.5)
+        Syscall::EpollCreate => {
+            let pid = crate::process::current_process()
+                .map(|p| p.pid.0)
+                .unwrap_or(0);
+            crate::net::epoll::epoll_create(pid)
+                .map(|id| id as usize)
+                .map_err(|_| SyscallError::OutOfMemory)
+        }
+        Syscall::EpollCtl => {
+            let epoll_id = arg1 as u32;
+            let op = arg2 as u32;
+            let fd = arg3 as i32;
+            let event_ptr = arg4;
+            let event = if event_ptr != 0 {
+                validate_user_ptr_typed::<crate::net::epoll::EpollEvent>(event_ptr)?;
+                Some(unsafe { &*(event_ptr as *const crate::net::epoll::EpollEvent) })
+            } else {
+                None
+            };
+            crate::net::epoll::epoll_ctl(epoll_id, op, fd, event)
+                .map(|_| 0)
+                .map_err(|_| SyscallError::InvalidArgument)
+        }
+        Syscall::EpollWait => {
+            let epoll_id = arg1 as u32;
+            let events_ptr = arg2;
+            let max_events = arg3;
+            let timeout_ms = arg4 as i32;
+            if max_events == 0 {
+                return Err(SyscallError::InvalidArgument);
+            }
+            validate_user_buffer(
+                events_ptr,
+                max_events * core::mem::size_of::<crate::net::epoll::EpollEvent>(),
+            )?;
+            let events = unsafe {
+                core::slice::from_raw_parts_mut(
+                    events_ptr as *mut crate::net::epoll::EpollEvent,
+                    max_events,
+                )
+            };
+            crate::net::epoll::epoll_wait(epoll_id, events, timeout_ms)
+                .map_err(|_| SyscallError::InvalidArgument)
+        }
+        // Process groups / sessions (Phase 6.5) -- delegate to existing
+        // implementations which also back the older syscall numbers 176-180.
+        Syscall::SetPgid => sys_setpgid(arg1, arg2),
+        Syscall::GetPgid => sys_getpgid(arg1),
+        Syscall::SetSid => sys_setsid(),
+        Syscall::GetSid => sys_getsid(arg1),
+        Syscall::TcSetPgrp => sys_tcsetpgrp(arg1, arg2),
+        Syscall::TcGetPgrp => sys_tcgetpgrp(arg1),
+        // PTY syscalls (Phase 6.5)
+        Syscall::OpenPty => pty::sys_openpty(arg1, arg2),
+        Syscall::GrantPty => pty::sys_grantpt(arg1),
+        Syscall::UnlockPty => pty::sys_unlockpt(arg1),
+        Syscall::PtsName => pty::sys_ptsname(arg1, arg2, arg3),
+        Syscall::Link => sys_link(arg1, arg2),
+        Syscall::Symlink => sys_symlink(arg1, arg2),
+        Syscall::Readlink => sys_readlink(arg1, arg2, arg3),
+        Syscall::Lstat => sys_lstat(arg1, arg2),
+        Syscall::Fchmod => sys_fchmod(arg1, arg2),
+        Syscall::Fchown => sys_fchown(arg1, arg2, arg3),
+        Syscall::Umask => sys_umask(arg1),
+        Syscall::Access => sys_access(arg1, arg2),
+        Syscall::Poll | Syscall::Fcntl => Err(SyscallError::NotImplemented),
+        Syscall::Clone | Syscall::Futex => Err(SyscallError::NotImplemented),
 
         _ => Err(SyscallError::InvalidSyscall),
     }

@@ -112,7 +112,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.6.4 (February 27, 2026) | **Releases Published**: 43 (v0.1.0 through v0.6.4)
+**Latest Release**: v0.7.0 (February 27, 2026) | **Releases Published**: 44 (v0.1.0 through v0.7.0)
 
 | Metric                 | Value                                           |
 | ---------------------- | ----------------------------------------------- |
@@ -141,6 +141,7 @@ experiments/   Non-normative exploratory work
 | 5     | Performance Optimization  | **Complete (~90%)**    | v0.5.8  | Feb 2026 |
 | 5.5   | Infrastructure Bridge     | **COMPLETE (100%)** | v0.5.13 | Feb 2026 |
 | 6     | Advanced Features and GUI | **~100% (desktop complete)** | v0.6.4  | Feb 2026 |
+| 6.5   | Rust Compiler + Bash Shell | **COMPLETE (100%)** | v0.7.0  | Feb 2026 |
 | 7     | Production Readiness     | **Planned**            | --      | --       |
 
 For detailed release notes, see [Release History](docs/RELEASE-HISTORY.md).

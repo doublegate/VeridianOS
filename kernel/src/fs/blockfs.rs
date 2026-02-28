@@ -507,17 +507,10 @@ impl VfsNode for BlockFsNode {
         fs.truncate_inode(self.inode_num, size)
     }
 
-    /// Create a symbolic link in this BlockFS directory.
-    ///
-    /// Currently returns `NotImplemented`. BlockFS has full symlink
-    /// infrastructure in `BlockFsInner::create_symlink` (which allocates
-    /// an inode with mode 0o120777 and stores the target as file data),
-    /// but the VfsNode interface is not yet wired up. This will be
-    /// connected in a future sprint.
-    fn symlink(&self, _name: &str, _target: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
-        Err(KernelError::NotImplemented {
-            feature: "blockfs symlink",
-        })
+    fn symlink(&self, name: &str, target: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        let mut fs = self.fs.write();
+        let new_inode = fs.create_symlink(self.inode_num, name, target)?;
+        Ok(Arc::new(BlockFsNode::new(new_inode, self.fs.clone())))
     }
 
     /// Read the target of a symbolic link in BlockFS.
@@ -530,6 +523,16 @@ impl VfsNode for BlockFsNode {
     fn readlink(&self) -> Result<String, KernelError> {
         let fs = self.fs.read();
         fs.read_symlink(self.inode_num)
+    }
+
+    fn chmod(&self, permissions: Permissions) -> Result<(), KernelError> {
+        let mut fs = self.fs.write();
+        fs.chmod_inode(self.inode_num, permissions)
+    }
+
+    fn link(&self, name: &str, target: Arc<dyn VfsNode>) -> Result<(), KernelError> {
+        let mut fs = self.fs.write();
+        fs.link_in_dir(self.inode_num, name, target)
     }
 }
 
@@ -1688,6 +1691,77 @@ impl BlockFsInner {
         let s =
             core::str::from_utf8(&buf).map_err(|_| KernelError::FsError(FsError::InvalidPath))?;
         Ok(s.to_string())
+    }
+
+    /// Change the permission bits on an inode, preserving the type bits.
+    fn chmod_inode(&mut self, inode_num: u32, permissions: Permissions) -> Result<(), KernelError> {
+        let inode = self
+            .inode_table
+            .get_mut(inode_num as usize)
+            .ok_or(KernelError::FsError(FsError::NotFound))?;
+
+        // Preserve the file type bits (top 4 bits of mode), replace
+        // the permission bits (bottom 12 bits).
+        let type_bits = inode.mode & 0xF000;
+        let perm_bits = permissions_to_mode(permissions, false) & 0x0FFF;
+        inode.mode = type_bits | perm_bits;
+        inode.ctime = crate::arch::timer::read_hw_timestamp() as u32;
+
+        Ok(())
+    }
+
+    /// Create a hard link in a directory.
+    ///
+    /// Adds a new directory entry `name` in `dir_inode` pointing to the
+    /// same inode as `target`. The target's link count is incremented.
+    fn link_in_dir(
+        &mut self,
+        dir_inode: u32,
+        name: &str,
+        target: Arc<dyn VfsNode>,
+    ) -> Result<(), KernelError> {
+        if name.is_empty() || name.len() > MAX_FILENAME_LEN {
+            return Err(KernelError::InvalidArgument {
+                name: "filename",
+                value: "empty or exceeds maximum length",
+            });
+        }
+
+        // Hard links to directories are not allowed (POSIX)
+        if target.node_type() == NodeType::Directory {
+            return Err(KernelError::FsError(FsError::IsADirectory));
+        }
+
+        // Check that the name doesn't already exist
+        if self.find_dir_entry(dir_inode, name).is_some() {
+            return Err(KernelError::FsError(FsError::AlreadyExists));
+        }
+
+        // Get the target's inode number from its metadata
+        let target_meta = target.metadata()?;
+        let target_inode = target_meta.inode as u32;
+
+        // Verify the target inode exists in our inode table (same filesystem)
+        if target_inode as usize >= self.inode_table.len()
+            || self.inode_table[target_inode as usize].links_count == 0
+        {
+            return Err(KernelError::FsError(FsError::NotSupported));
+        }
+
+        // Determine file type for directory entry
+        let file_type = if self.inode_table[target_inode as usize].is_symlink() {
+            DiskDirEntry::FT_SYMLINK
+        } else {
+            DiskDirEntry::FT_REG_FILE
+        };
+
+        // Add directory entry
+        self.write_dir_entry(dir_inode, target_inode, name, file_type)?;
+
+        // Increment link count on the target inode
+        self.inode_table[target_inode as usize].links_count += 1;
+
+        Ok(())
     }
 
     /// Free single-indirect data blocks at or beyond `first_free_block`.

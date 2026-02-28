@@ -36,8 +36,7 @@
 //! It can also link against the VeridianOS libc for C-compatible wrappers.
 //!
 //! ```rust,no_run
-//! use veridian_std::sys::veridian::fs;
-//! use veridian_std::sys::veridian::process;
+//! use veridian_std::sys::veridian::{fs, process};
 //!
 //! // Write to stdout
 //! let msg = b"Hello from VeridianOS!\n";

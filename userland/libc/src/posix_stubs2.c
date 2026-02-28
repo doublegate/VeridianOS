@@ -447,57 +447,201 @@ int getnameinfo(const void *sa, unsigned int salen,
 }
 
 /* ========================================================================= */
-/* Socket stubs                                                              */
+/* Socket syscall wrappers                                                   */
 /* ========================================================================= */
 
+/*
+ * All socket functions delegate to the VeridianOS kernel via the syscall
+ * interface defined in <veridian/syscall.h>.
+ *
+ * Syscall number layout:
+ *   SYS_SOCKET_CREATE  (220) -- socket()
+ *   SYS_SOCKET_BIND    (221) -- bind()
+ *   SYS_SOCKET_LISTEN  (222) -- listen()
+ *   SYS_SOCKET_CONNECT (223) -- connect()
+ *   SYS_SOCKET_ACCEPT  (224) -- accept()
+ *   SYS_SOCKET_SEND    (225) -- send()
+ *   SYS_SOCKET_RECV    (226) -- recv()
+ *   SYS_SOCKET_CLOSE   (227) -- shutdown() (best-effort)
+ *   SYS_SOCKET_PAIR    (228) -- socketpair()
+ *   SYS_NET_SENDTO     (250) -- sendto()
+ *   SYS_NET_RECVFROM   (251) -- recvfrom()
+ *   SYS_NET_GETSOCKNAME(252) -- getsockname()
+ *   SYS_NET_GETPEERNAME(253) -- getpeername()
+ *   SYS_NET_SETSOCKOPT (254) -- setsockopt()
+ *   SYS_NET_GETSOCKOPT (255) -- getsockopt()
+ */
+
+#include <veridian/syscall.h>
+
+/*
+ * Helper shared with posix_stubs3.c: translate a raw syscall return value
+ * to the POSIX convention (negative -> errno + return -1).
+ * (Cannot use the static __syscall_ret from syscall.c here since that file
+ * is compiled separately; we duplicate the one-liner inline.)
+ */
+static inline long __sock_ret(long r)
+{
+    if (r < 0) {
+        errno = (int)(-r);
+        return -1L;
+    }
+    return r;
+}
+
+/*
+ * socket() -- create an endpoint for communication.
+ *
+ * Kernel args: (domain, sock_type)
+ * The protocol argument is not forwarded (kernel derives it from domain +
+ * sock_type); ignored here following the same approach as Linux glibc.
+ */
 int socket(int domain, int type, int protocol)
 {
-    (void)domain; (void)type; (void)protocol;
-    return -1;
+    (void)protocol;
+    long ret = veridian_syscall2(SYS_SOCKET_CREATE, domain, type);
+    return (int)__sock_ret(ret);
 }
 
+/*
+ * connect() -- initiate a connection on a socket.
+ *
+ * Kernel args: (socket_id, addr_ptr, addr_len)
+ */
 int connect(int sockfd, const void *addr, unsigned int addrlen)
 {
-    (void)sockfd; (void)addr; (void)addrlen;
-    return -1;
+    long ret = veridian_syscall3(SYS_SOCKET_CONNECT, sockfd, addr, addrlen);
+    return (int)__sock_ret(ret);
 }
 
+/*
+ * bind() -- bind a name to a socket.
+ *
+ * Kernel args: (socket_id, addr_ptr, addr_len)
+ */
 int bind(int sockfd, const void *addr, unsigned int addrlen)
 {
-    (void)sockfd; (void)addr; (void)addrlen;
-    return -1;
+    long ret = veridian_syscall3(SYS_SOCKET_BIND, sockfd, addr, addrlen);
+    return (int)__sock_ret(ret);
 }
 
+/*
+ * listen() -- listen for connections on a socket.
+ *
+ * Kernel args: (socket_id, backlog)
+ */
 int listen(int sockfd, int backlog)
 {
-    (void)sockfd; (void)backlog;
-    return -1;
+    long ret = veridian_syscall2(SYS_SOCKET_LISTEN, sockfd, backlog);
+    return (int)__sock_ret(ret);
 }
 
+/*
+ * accept() -- accept a connection on a socket.
+ *
+ * The kernel's SYS_SOCKET_ACCEPT takes only the listening socket_id and
+ * returns the new connected socket_id.  addr/addrlen output is not filled
+ * by the kernel at this time; we zero them out to avoid stale data.
+ *
+ * Kernel args: (socket_id)
+ */
 int accept(int sockfd, void *addr, unsigned int *addrlen)
 {
-    (void)sockfd; (void)addr; (void)addrlen;
-    return -1;
+    long ret = veridian_syscall1(SYS_SOCKET_ACCEPT, sockfd);
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
+    }
+    /* Clear addr output so callers don't see stale data. */
+    if (addr && addrlen && *addrlen > 0) {
+        unsigned int i;
+        for (i = 0; i < *addrlen; i++)
+            ((unsigned char *)addr)[i] = 0;
+        *addrlen = 0;
+    }
+    return (int)ret;
 }
 
+/*
+ * send() -- send a message on a socket.
+ *
+ * Kernel args: (socket_id, buf_ptr, buf_len)
+ * The flags argument is not forwarded (not yet supported by the kernel).
+ */
 long send(int sockfd, const void *buf, unsigned long len, int flags)
 {
-    (void)sockfd; (void)buf; (void)len; (void)flags;
-    return -1;
+    (void)flags;
+    long ret = veridian_syscall3(SYS_SOCKET_SEND, sockfd, buf, len);
+    return __sock_ret(ret);
 }
 
+/*
+ * recv() -- receive a message from a socket.
+ *
+ * Kernel args: (socket_id, buf_ptr, buf_len)
+ * The flags argument is not forwarded (not yet supported by the kernel).
+ */
 long recv(int sockfd, void *buf, unsigned long len, int flags)
 {
-    (void)sockfd; (void)buf; (void)len; (void)flags;
-    return -1;
+    (void)flags;
+    long ret = veridian_syscall3(SYS_SOCKET_RECV, sockfd, buf, len);
+    return __sock_ret(ret);
 }
 
+/*
+ * setsockopt() -- set options on sockets.
+ *
+ * Kernel args: (fd, level, optname, optval_ptr, optlen)
+ */
 int setsockopt(int sockfd, int level, int optname,
                const void *optval, unsigned int optlen)
 {
-    (void)sockfd; (void)level; (void)optname;
-    (void)optval; (void)optlen;
-    return -1;
+    long ret = veridian_syscall5(SYS_NET_SETSOCKOPT,
+                                  sockfd, level, optname, optval, optlen);
+    return (int)__sock_ret(ret);
+}
+
+/*
+ * getsockopt() -- get options on sockets.
+ *
+ * Kernel args: (fd, level, optname, optval_ptr)
+ * The optlen pointer is not forwarded; the kernel writes a fixed 4-byte value.
+ */
+int getsockopt(int sockfd, int level, int optname,
+               void *optval, unsigned int *optlen)
+{
+    long ret = veridian_syscall4(SYS_NET_GETSOCKOPT,
+                                  sockfd, level, optname, optval);
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
+    }
+    /* Kernel writes 4 bytes; reflect that in *optlen if provided. */
+    if (optlen)
+        *optlen = 4;
+    return 0;
+}
+
+/*
+ * shutdown() -- shut down part of a full-duplex connection.
+ *
+ * The kernel does not yet have a dedicated shutdown syscall.  We use
+ * SYS_SOCKET_CLOSE as a best-effort implementation when SHUT_RDWR is
+ * requested.  For SHUT_RD / SHUT_WR we return 0 without action (the
+ * kernel's socket layer does not support half-close at this time).
+ */
+int shutdown(int sockfd, int how)
+{
+#define SHUT_RD_LOCAL   0
+#define SHUT_WR_LOCAL   1
+#define SHUT_RDWR_LOCAL 2
+    if (how == SHUT_RDWR_LOCAL) {
+        long ret = veridian_syscall1(SYS_SOCKET_CLOSE, sockfd);
+        return (int)__sock_ret(ret);
+    }
+    /* Half-shutdown not supported; succeed silently. */
+    (void)sockfd;
+    return 0;
 }
 
 /* ========================================================================= */

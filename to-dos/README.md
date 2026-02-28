@@ -16,6 +16,7 @@ This directory contains comprehensive TODO tracking for all aspects of the Verid
 - **[PHASE4_TODO.md](PHASE4_TODO.md)** - Package ecosystem
 - **[PHASE5_TODO.md](PHASE5_TODO.md)** - Performance optimization
 - **[PHASE6_TODO.md](PHASE6_TODO.md)** - Advanced features and GUI
+- **[PHASE6.5_TODO.md](PHASE6.5_TODO.md)** - Rust compiler port + Bash-in-Rust shell
 - **[PHASE7_TODO.md](PHASE7_TODO.md)** - Production readiness and advanced features
 
 ### Ongoing Activity Tracking
@@ -34,9 +35,9 @@ This directory contains comprehensive TODO tracking for all aspects of the Verid
 
 ## Quick Status
 
-**Current Phase**: Phase 6 - Advanced Features & GUI (~40% core graphical path)
-**Latest Release**: v0.6.2 (February 27, 2026)
-**Overall Progress**: Phases 0-4 complete, Phase 5 ~90%, Phase 6 ~40%, Phase 7 planned
+**Current Phase**: Phase 6.5 - Rust Compiler Port + Bash-in-Rust Shell (0%)
+**Latest Release**: v0.6.4 (February 27, 2026)
+**Overall Progress**: Phases 0-6 complete, Phase 6.5 starting, Phase 7 planned
 
 ### Phase Status Overview
 - Phase 0: Foundation - **COMPLETE (100%)** v0.1.0
@@ -45,7 +46,8 @@ This directory contains comprehensive TODO tracking for all aspects of the Verid
 - Phase 3: Security - **COMPLETE (100%)** v0.3.2
 - Phase 4: Packages - **COMPLETE (100%)** v0.4.0
 - Phase 5: Performance - **~90%** (hot paths wired, benchmarks, tracepoints)
-- Phase 6: Advanced - **~40%** (Wayland compositor, desktop, TCP/IP, input)
+- Phase 6: Advanced - **~100%** (Wayland compositor, desktop, TCP/IP, input)
+- Phase 6.5: Rust Compiler + Shell - **0%** (Rust compiler port, Bash-in-Rust vsh)
 - Phase 7: Production - **0%** (GPU, multimedia, virtualization, cloud-native)
 
 ## Key Metrics

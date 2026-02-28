@@ -223,6 +223,8 @@ int vfprintf(FILE *stream, const char *fmt, va_list ap);
 int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap);
 int vsprintf(char *buf, const char *fmt, va_list ap);
 int vasprintf(char **strp, const char *fmt, va_list ap);
+int asprintf(char **strp, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
 
 /** Write formatted output to a file descriptor. */
 int dprintf(int fd, const char *fmt, ...)

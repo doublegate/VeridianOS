@@ -4,8 +4,9 @@
  * Copyright (c) 2025-2026 VeridianOS Contributors
  * SPDX-License-Identifier: MIT OR Apache-2.0
  *
- * Memory allocation (sbrk-backed free-list allocator), process control,
- * environment variables, sorting, and number generation.
+ * Memory allocation (sbrk-backed free-list allocator with mmap fallback
+ * for large requests), process control, environment variables, sorting,
+ * and number generation.
  */
 
 #include <stdlib.h>
@@ -16,6 +17,7 @@
 #include <signal.h>
 #include <ctype.h>
 #include <sys/wait.h>
+#include <sys/mman.h>
 #include <veridian/syscall.h>
 
 /* ========================================================================= */
@@ -45,7 +47,30 @@
  */
 #define SBRK_MIN_SMALL  4096
 #define SBRK_MIN_LARGE  (128 * 1024)
-#define LARGE_THRESHOLD (128 * 1024)
+
+/*
+ * Allocations at or above MMAP_THRESHOLD are satisfied directly via
+ * mmap(MAP_ANONYMOUS|MAP_PRIVATE) rather than sbrk().  This avoids
+ * heap fragmentation for cc1-scale objects (1-300 MiB) and allows
+ * true deallocation via munmap() when free() is called.
+ *
+ * The mmap'd block is prefixed with a mmap_header_t that records the
+ * total mapped length (header + usable) and a magic value so that
+ * free() can distinguish mmap'd blocks from sbrk'd blocks without
+ * touching the free list.
+ */
+#define MMAP_THRESHOLD  (128 * 1024)    /* 128 KiB */
+#define MMAP_MAGIC      0x4D4D415001UL  /* "MMA\x01" */
+
+typedef struct mmap_header {
+    unsigned long   magic;      /* MMAP_MAGIC -- distinguishes from sbrk blocks */
+    size_t          map_size;   /* Total mmap'd length (header + usable bytes) */
+} mmap_header_t;
+
+/* mmap_header_t is placed immediately before the pointer returned to the
+ * caller.  It must be aligned so the usable region starts on an ALLOC_ALIGN
+ * boundary. */
+#define MMAP_HDR_SIZE   ((sizeof(mmap_header_t) + ALLOC_ALIGN - 1) & ~(ALLOC_ALIGN - 1))
 
 typedef struct block_header {
     size_t                  size;   /* Usable size (excluding header) */
@@ -106,7 +131,39 @@ void *malloc(size_t size)
 
     size = align_up(size);
 
-    /* First-fit search on the free list. */
+    /*
+     * Large allocation path: requests at or above MMAP_THRESHOLD are
+     * served directly from the OS via mmap(MAP_ANONYMOUS|MAP_PRIVATE).
+     *
+     * Layout of the mmap'd region:
+     *   [ mmap_header_t (MMAP_HDR_SIZE bytes) ][ usable (size bytes) ]
+     *
+     * The mmap_header_t stores MMAP_MAGIC so that free() can detect
+     * this block without consulting the sbrk free list.  munmap()
+     * releases the entire mapping, giving the pages back to the kernel.
+     */
+    if (size >= MMAP_THRESHOLD) {
+        size_t map_size = MMAP_HDR_SIZE + size;
+        /* Round up to a page boundary for clean munmap accounting. */
+        map_size = (map_size + 4095UL) & ~4095UL;
+
+        void *mem = mmap(NULL, map_size,
+                         PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS,
+                         -1, 0);
+        if (mem == MAP_FAILED) {
+            errno = ENOMEM;
+            return NULL;
+        }
+
+        mmap_header_t *hdr = (mmap_header_t *)mem;
+        hdr->magic    = MMAP_MAGIC;
+        hdr->map_size = map_size;
+
+        return (char *)mem + MMAP_HDR_SIZE;
+    }
+
+    /* Small allocation path: first-fit search on the sbrk free list. */
     block_header_t *prev = NULL;
     block_header_t *cur = free_list;
 
@@ -139,7 +196,7 @@ void *malloc(size_t size)
 
     /* No suitable free block.  Extend the heap via sbrk(). */
     size_t total = HEADER_SIZE + size;
-    size_t sbrk_min = (size >= LARGE_THRESHOLD) ? SBRK_MIN_LARGE : SBRK_MIN_SMALL;
+    size_t sbrk_min = SBRK_MIN_SMALL;
     if (total < sbrk_min)
         total = sbrk_min;
 
@@ -171,6 +228,21 @@ void free(void *ptr)
     if (!ptr)
         return;
 
+    /*
+     * Detect mmap'd large blocks by inspecting the mmap_header_t placed
+     * MMAP_HDR_SIZE bytes before the user pointer.  If the magic value
+     * matches MMAP_MAGIC the block was allocated via mmap and must be
+     * released via munmap rather than inserted into the sbrk free list.
+     */
+    mmap_header_t *mhdr = (mmap_header_t *)((char *)ptr - MMAP_HDR_SIZE);
+    if (mhdr->magic == MMAP_MAGIC) {
+        size_t map_size = mhdr->map_size;
+        /* Clear magic before unmap to prevent double-free confusion. */
+        mhdr->magic = 0;
+        munmap(mhdr, map_size);
+        return;
+    }
+
     block_header_t *blk = (block_header_t *)((char *)ptr - HEADER_SIZE);
     free_insert(blk);
 }
@@ -199,6 +271,28 @@ void *realloc(void *ptr, size_t size)
     }
 
     size = align_up(size);
+
+    /*
+     * For mmap'd large blocks, determine the usable size from the
+     * mmap_header_t and take the allocate-copy-free path.  In-place
+     * growth for mmap'd blocks (via mremap) is not implemented since
+     * the simple allocate-copy-free approach is sufficient and avoids
+     * an additional syscall wrapper.
+     */
+    mmap_header_t *mhdr = (mmap_header_t *)((char *)ptr - MMAP_HDR_SIZE);
+    if (mhdr->magic == MMAP_MAGIC) {
+        size_t old_usable = mhdr->map_size - MMAP_HDR_SIZE;
+        if (old_usable >= size)
+            return ptr;     /* Existing mmap region is large enough. */
+
+        void *newp = malloc(size);
+        if (!newp)
+            return NULL;
+        memcpy(newp, ptr, old_usable < size ? old_usable : size);
+        free(ptr);
+        return newp;
+    }
+
     block_header_t *blk = (block_header_t *)((char *)ptr - HEADER_SIZE);
 
     if (blk->size >= size)

@@ -35,12 +35,14 @@ use super::VirtualAddress;
 // block cache. Combined with VFS metadata (~10MB), process structures,
 // and heap fragmentation from Phase B tests, 384MB was insufficient when
 // both BlockFS and native compilation are active.
-// 512MB provides headroom for both. Requires QEMU -m 2048M.
+// 1GB provides headroom for BlockFS cache, VFS, native compilation, and
+// the Rust toolchain rootfs (rustc+cargo+std ~400MB). Requires QEMU -m 4096M
+// minimum (typically -m 32768M for Phase 6.5 self-hosting).
 // AArch64/RISC-V keep 8MB since they have less RAM (128MB default) and
 // don't use virtio-blk for rootfs loading.
 #[cfg(target_arch = "x86_64")]
 #[allow(static_mut_refs)]
-static mut HEAP_MEMORY: [u8; 512 * 1024 * 1024] = [0; 512 * 1024 * 1024];
+static mut HEAP_MEMORY: [u8; 1024 * 1024 * 1024] = [0; 1024 * 1024 * 1024];
 
 #[cfg(not(target_arch = "x86_64"))]
 #[allow(static_mut_refs)]
@@ -48,7 +50,7 @@ static mut HEAP_MEMORY: [u8; 8 * 1024 * 1024] = [0; 8 * 1024 * 1024];
 
 /// Kernel heap size
 #[cfg(target_arch = "x86_64")]
-pub const HEAP_SIZE: usize = 512 * 1024 * 1024;
+pub const HEAP_SIZE: usize = 1024 * 1024 * 1024;
 
 #[cfg(not(target_arch = "x86_64"))]
 pub const HEAP_SIZE: usize = 8 * 1024 * 1024;

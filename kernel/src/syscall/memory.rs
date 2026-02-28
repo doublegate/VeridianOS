@@ -269,13 +269,13 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> SyscallResult {
     Ok(0)
 }
 
-/// Maximum user heap size: 512 MiB.
+/// Maximum user heap size: 8 GiB.
 ///
 /// Prevents a single process from consuming all physical memory via brk().
-/// cc1 (GCC compiler proper) uses 100-300 MiB for typical files, but BusyBox
-/// shell/ash.c (~13K lines at -Oz) needs 500-600 MiB due to aggressive
-/// optimization passes. 768 MiB provides headroom for large translation units.
-const MAX_USER_HEAP_SIZE: u64 = 768 * 1024 * 1024;
+/// rustc self-compilation requires 4-8 GiB peak working memory per invocation.
+/// 8 GiB provides headroom for Stage 1/Stage 2 self-hosting builds.
+/// Requires QEMU -m 32768M (32GB) for self-hosting workflows.
+const MAX_USER_HEAP_SIZE: u64 = 8 * 1024 * 1024 * 1024;
 
 /// Set or query the program break (syscall 23).
 ///
@@ -315,4 +315,103 @@ pub fn sys_brk(addr: usize) -> SyscallResult {
     let result = memory_space.brk(new_break);
 
     Ok(result.as_usize())
+}
+
+// ============================================================================
+// Resource limits (POSIX getrlimit / setrlimit)
+// ============================================================================
+
+/// POSIX resource limit identifiers
+const RLIMIT_AS: usize = 9; // Address space size
+const RLIMIT_DATA: usize = 2; // Data segment size (heap)
+const RLIMIT_STACK: usize = 3; // Stack size
+const RLIMIT_NOFILE: usize = 7; // Max open files
+const RLIMIT_FSIZE: usize = 1; // Max file size
+
+/// RLIM_INFINITY -- unlimited
+const RLIM_INFINITY: u64 = u64::MAX;
+
+/// rlimit structure (matches POSIX)
+#[repr(C)]
+struct Rlimit {
+    rlim_cur: u64, // soft limit
+    rlim_max: u64, // hard limit
+}
+
+/// Get resource limits (syscall 260).
+///
+/// # Arguments
+/// - `resource`: RLIMIT_* constant
+/// - `rlim_ptr`: Pointer to user-space Rlimit struct to fill
+pub fn sys_getrlimit(resource: usize, rlim_ptr: usize) -> SyscallResult {
+    if rlim_ptr == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    validate_user_pointer(rlim_ptr, core::mem::size_of::<Rlimit>())?;
+
+    let (cur, max) = match resource {
+        RLIMIT_AS => {
+            let limit = MAX_USER_HEAP_SIZE;
+            (limit, limit)
+        }
+        RLIMIT_DATA => {
+            let limit = MAX_USER_HEAP_SIZE;
+            (limit, limit)
+        }
+        RLIMIT_STACK => {
+            let stack_size = 8 * 1024 * 1024u64; // 8MB default
+            (stack_size, stack_size)
+        }
+        RLIMIT_NOFILE => {
+            (256, 256) // current fd table limit
+        }
+        RLIMIT_FSIZE => {
+            (RLIM_INFINITY, RLIM_INFINITY) // no file size limit
+        }
+        _ => return Err(SyscallError::InvalidArgument),
+    };
+
+    // Write the rlimit struct to user space
+    let rlim = rlim_ptr as *mut Rlimit;
+    unsafe {
+        (*rlim).rlim_cur = cur;
+        (*rlim).rlim_max = max;
+    }
+
+    Ok(0)
+}
+
+/// Set resource limits (syscall 261).
+///
+/// Currently only validates and acknowledges -- actual enforcement is via
+/// the existing per-resource constants. Future: per-process configurable
+/// limits.
+///
+/// # Arguments
+/// - `resource`: RLIMIT_* constant
+/// - `rlim_ptr`: Pointer to user-space Rlimit struct with new values
+pub fn sys_setrlimit(resource: usize, rlim_ptr: usize) -> SyscallResult {
+    if rlim_ptr == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    validate_user_pointer(rlim_ptr, core::mem::size_of::<Rlimit>())?;
+
+    let rlim = rlim_ptr as *const Rlimit;
+    let (cur, max) = unsafe { ((*rlim).rlim_cur, (*rlim).rlim_max) };
+
+    // Validate: soft limit must not exceed hard limit
+    if cur > max {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    // Validate the resource type is known
+    match resource {
+        RLIMIT_AS | RLIMIT_DATA | RLIMIT_STACK | RLIMIT_NOFILE | RLIMIT_FSIZE => {}
+        _ => return Err(SyscallError::InvalidArgument),
+    }
+
+    // Acknowledge the request (limits are currently global constants).
+    // Per-process configurable limits deferred to later sprint.
+    let _ = (cur, max);
+    Ok(0)
 }

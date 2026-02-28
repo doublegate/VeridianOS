@@ -11,6 +11,7 @@ pub mod arp;
 pub mod device;
 pub mod dhcp;
 pub mod dma_pool;
+pub mod epoll;
 pub mod ethernet;
 pub mod integration;
 pub mod ip;
@@ -202,6 +203,9 @@ pub fn init() -> Result<(), KernelError> {
 
     // Initialize socket layer
     socket::init()?;
+
+    // Initialize epoll I/O multiplexing
+    epoll::init()?;
 
     // Register hardware network drivers
     if let Err(_e) = integration::register_drivers() {

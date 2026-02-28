@@ -1500,3 +1500,66 @@ ssize_t getline(char **lineptr, size_t *n, FILE *stream)
 {
     return getdelim(lineptr, n, '\n', stream);
 }
+
+/* ========================================================================= */
+/* Allocated formatted print                                                 */
+/* ========================================================================= */
+
+/*
+ * vasprintf -- format into a malloc'd buffer (va_list variant).
+ *
+ * Allocates a buffer large enough to hold the formatted string (including
+ * the terminating NUL), writes the result into it, and stores the pointer
+ * in *strp.  The caller is responsible for freeing the returned buffer.
+ *
+ * Returns the number of characters written (excluding NUL) on success,
+ * or -1 on allocation failure (*strp is set to NULL in that case).
+ *
+ * This is the canonical definition; posix_stubs3.c previously contained
+ * a duplicate that has been removed to avoid multiple-definition link
+ * errors when all libc objects are linked together.
+ */
+int vasprintf(char **strp, const char *fmt, va_list ap)
+{
+    if (!strp || !fmt) {
+        if (strp) *strp = NULL;
+        return -1;
+    }
+
+    /* First pass: measure the output length. */
+    va_list ap2;
+    va_copy(ap2, ap);
+    int len = vsnprintf(NULL, 0, fmt, ap2);
+    va_end(ap2);
+
+    if (len < 0) {
+        *strp = NULL;
+        return -1;
+    }
+
+    /* Allocate buffer (+1 for NUL terminator). */
+    *strp = (char *)malloc((size_t)len + 1);
+    if (!*strp)
+        return -1;
+
+    /* Second pass: write the formatted string. */
+    return vsnprintf(*strp, (size_t)len + 1, fmt, ap);
+}
+
+/*
+ * asprintf -- format into a malloc'd buffer (variadic variant).
+ *
+ * Equivalent to vasprintf() but accepts a variadic argument list.
+ * The caller must free the buffer stored in *strp on success.
+ *
+ * Returns the number of characters written (excluding NUL) on success,
+ * or -1 on allocation failure.
+ */
+int asprintf(char **strp, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int ret = vasprintf(strp, fmt, ap);
+    va_end(ap);
+    return ret;
+}

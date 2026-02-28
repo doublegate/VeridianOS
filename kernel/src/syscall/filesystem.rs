@@ -216,6 +216,33 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
     // Open the file through VFS
     match vfs()?.read().open(path_str, open_flags) {
         Ok(node) => {
+            // Permission check: verify the caller has the required access.
+            // Root (uid 0) bypasses all permission checks.
+            if process.uid != 0 {
+                if let Ok(meta) = node.metadata() {
+                    let p = &meta.permissions;
+                    let is_owner = process.uid == meta.uid;
+                    let is_group = process.gid == meta.gid;
+
+                    if open_flags.read {
+                        let ok = (is_owner && p.owner_read)
+                            || (is_group && p.group_read)
+                            || p.other_read;
+                        if !ok {
+                            return Err(SyscallError::PermissionDenied);
+                        }
+                    }
+                    if open_flags.write || open_flags.append || open_flags.truncate {
+                        let ok = (is_owner && p.owner_write)
+                            || (is_group && p.group_write)
+                            || p.other_write;
+                        if !ok {
+                            return Err(SyscallError::PermissionDenied);
+                        }
+                    }
+                }
+            }
+
             // Handle O_TRUNC on existing files
             if open_flags.truncate {
                 let _ = node.truncate(0);
@@ -925,7 +952,9 @@ fn fill_stat(metadata: &crate::fs::Metadata) -> FileStat {
         crate::fs::NodeType::Directory => 0o040755,
         crate::fs::NodeType::CharDevice => 0o020666,
         crate::fs::NodeType::BlockDevice => 0o060666,
-        _ => 0,
+        crate::fs::NodeType::Symlink => 0o120777,
+        crate::fs::NodeType::Pipe => 0o010644,
+        crate::fs::NodeType::Socket => 0o140755,
     };
     let size = metadata.size as i64;
     FileStat {
@@ -942,6 +971,27 @@ fn fill_stat(metadata: &crate::fs::Metadata) -> FileStat {
         st_atime: metadata.accessed as i64,
         st_mtime: metadata.modified as i64,
         st_ctime: metadata.created as i64,
+    }
+}
+
+/// Map a `KernelError` from VFS path resolution to the most appropriate
+/// `SyscallError`, preserving important distinctions like ELOOP and
+/// ENOENT.
+fn map_resolve_err(e: crate::error::KernelError) -> SyscallError {
+    match e {
+        crate::error::KernelError::FsError(crate::error::FsError::SymlinkLoop) => {
+            SyscallError::SymlinkLoop
+        }
+        crate::error::KernelError::FsError(crate::error::FsError::NotFound) => {
+            SyscallError::ResourceNotFound
+        }
+        crate::error::KernelError::FsError(crate::error::FsError::NotADirectory) => {
+            SyscallError::InvalidArgument
+        }
+        crate::error::KernelError::FsError(crate::error::FsError::PermissionDenied) => {
+            SyscallError::PermissionDenied
+        }
+        _ => SyscallError::ResourceNotFound,
     }
 }
 
@@ -1093,6 +1143,17 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
         TIOCGWINSZ, TIOCSPGRP, TIOCSWINSZ,
     };
 
+    // Give PTY fds priority for TIOCGWINSZ / TIOCSWINSZ before the generic
+    // terminal-only guard below rejects them.  For fd > 2, check whether the
+    // fd refers to a PTY master or slave node.  If so, the PTY handler
+    // returns Some(result) and we propagate it directly.  If the fd is not a
+    // PTY node, it returns None and we fall through to the standard path.
+    if fd > 2 {
+        if let Some(result) = crate::syscall::pty::handle_pty_ioctl(fd, cmd, arg) {
+            return result;
+        }
+    }
+
     // Terminal ioctls are only valid on terminal fds (0=stdin, 1=stdout,
     // 2=stderr which are connected to the serial console). Regular files
     // opened via open() must return ENOTTY so that isatty() returns false
@@ -1226,10 +1287,46 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
 /// # Returns
 /// 0 on success
 pub fn sys_kill(pid: usize, signal: usize) -> SyscallResult {
+    let pid_i = pid as isize;
+
+    if pid_i == 0 {
+        // pid == 0: send to every process in the caller's process group
+        let caller = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+        let my_pgid = caller.pgid.load(core::sync::atomic::Ordering::Relaxed);
+        send_signal_to_pgid(my_pgid, signal as i32)
+    } else if pid_i < 0 {
+        // pid < 0: send to process group |pid|
+        let pgid = (-pid_i) as u64;
+        send_signal_to_pgid(pgid, signal as i32)
+    } else {
+        // pid > 0: send to specific process
+        let process_server = crate::services::process_server::get_process_server();
+        match process_server.send_signal(crate::process::ProcessId(pid as u64), signal as i32) {
+            Ok(()) => Ok(0),
+            Err(_) => Err(SyscallError::ProcessNotFound),
+        }
+    }
+}
+
+/// Send a signal to every process in the given process group.
+fn send_signal_to_pgid(pgid: u64, signal: i32) -> SyscallResult {
+    use crate::process::table;
+
+    let mut found = false;
     let process_server = crate::services::process_server::get_process_server();
-    match process_server.send_signal(crate::process::ProcessId(pid as u64), signal as i32) {
-        Ok(()) => Ok(0),
-        Err(_) => Err(SyscallError::ProcessNotFound),
+    for pid_val in 1..=1024u64 {
+        let pid = crate::process::ProcessId(pid_val);
+        if let Some(proc) = table::get_process(pid) {
+            if proc.pgid.load(core::sync::atomic::Ordering::Relaxed) == pgid {
+                let _ = process_server.send_signal(pid, signal);
+                found = true;
+            }
+        }
+    }
+    if found {
+        Ok(0)
+    } else {
+        Err(SyscallError::ProcessNotFound)
     }
 }
 
@@ -1280,12 +1377,7 @@ pub fn sys_stat_path(path_ptr: usize, stat_buf: usize) -> SyscallResult {
 
     let vfs_lock = vfs()?;
     let vfs_guard = vfs_lock.read();
-    let node = match vfs_guard.resolve_path(&path) {
-        Ok(n) => n,
-        Err(_) => {
-            return Err(SyscallError::ResourceNotFound);
-        }
-    };
+    let node = vfs_guard.resolve_path(&path).map_err(map_resolve_err)?;
 
     let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
     let stat = fill_stat(&metadata);
@@ -1297,10 +1389,11 @@ pub fn sys_stat_path(path_ptr: usize, stat_buf: usize) -> SyscallResult {
     Ok(0)
 }
 
-/// Stat a file by path without following symlinks (syscall 151).
+/// Stat a file by path without following the final symlink (syscall 151).
 ///
-/// Currently identical to `sys_stat_path` since VeridianOS does not yet
-/// support symbolic links.
+/// Like `stat`, but if the final component of the path is a symbolic
+/// link, returns information about the link itself rather than the file
+/// it points to. Intermediate symlinks in the path are still followed.
 ///
 /// # Arguments
 /// - `path_ptr`: Pointer to NUL-terminated path string.
@@ -1309,8 +1402,23 @@ pub fn sys_stat_path(path_ptr: usize, stat_buf: usize) -> SyscallResult {
 /// # Returns
 /// 0 on success.
 pub fn sys_lstat(path_ptr: usize, stat_buf: usize) -> SyscallResult {
-    // No symlinks yet -- lstat behaves identically to stat
-    sys_stat_path(path_ptr, stat_buf)
+    validate_user_ptr_typed::<FileStat>(stat_buf)?;
+    let path = read_user_path(path_ptr)?;
+
+    let vfs_lock = vfs()?;
+    let vfs_guard = vfs_lock.read();
+    let node = vfs_guard
+        .resolve_path_no_follow(&path)
+        .map_err(map_resolve_err)?;
+
+    let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
+    let stat = fill_stat(&metadata);
+
+    // SAFETY: stat_buf was validated as non-null, in user-space, and aligned.
+    unsafe {
+        core::ptr::write(stat_buf as *mut FileStat, stat);
+    }
+    Ok(0)
 }
 
 /// Read the target of a symbolic link (syscall 152).
@@ -1349,9 +1457,11 @@ pub fn sys_readlink(path_ptr: usize, buf: usize, bufsiz: usize) -> SyscallResult
     let vfs_lock = vfs()?;
     let vfs_guard = vfs_lock.read();
 
+    // readlink must NOT follow the final symlink -- we want the link
+    // node itself so we can read its target.
     let node = vfs_guard
-        .resolve_path(&path)
-        .map_err(|_| SyscallError::ResourceNotFound)?;
+        .resolve_path_no_follow(&path)
+        .map_err(map_resolve_err)?;
 
     // readlink operates on the link node itself; if the node is not a
     // symlink, readlink() returns NotImplemented or NotASymlink.
@@ -1389,9 +1499,7 @@ pub fn sys_access(path_ptr: usize, mode: usize) -> SyscallResult {
     let vfs_guard = vfs_lock.read();
 
     // Check if the file exists (F_OK = 0)
-    let result = vfs_guard.resolve_path(&path);
-
-    let node = result.map_err(|_| SyscallError::ResourceNotFound)?;
+    let node = vfs_guard.resolve_path(&path).map_err(map_resolve_err)?;
 
     // For non-zero mode, check permissions against metadata
     if mode != 0 {
@@ -1906,16 +2014,14 @@ pub fn sys_link(old_ptr: usize, new_ptr: usize) -> SyscallResult {
     let vfs_guard = vfs_lock.read();
 
     // Resolve the old path to get the target node
-    let target = vfs_guard
-        .resolve_path(&old_path)
-        .map_err(|_| SyscallError::ResourceNotFound)?;
+    let target = vfs_guard.resolve_path(&old_path).map_err(map_resolve_err)?;
 
     // Split new_path into parent dir + name
     let (parent_path, link_name) = split_path(&new_path)?;
 
     let parent = vfs_guard
         .resolve_path(&parent_path)
-        .map_err(|_| SyscallError::ResourceNotFound)?;
+        .map_err(map_resolve_err)?;
 
     parent
         .link(&link_name, target)
@@ -1938,7 +2044,7 @@ pub fn sys_symlink(target_ptr: usize, link_ptr: usize) -> SyscallResult {
 
     let parent = vfs_guard
         .resolve_path(&parent_path)
-        .map_err(|_| SyscallError::ResourceNotFound)?;
+        .map_err(map_resolve_err)?;
 
     parent
         .symlink(&link_name, &target)
@@ -1953,9 +2059,7 @@ pub fn sys_chmod(path_ptr: usize, mode: usize) -> SyscallResult {
 
     let vfs_lock = vfs()?;
     let vfs_guard = vfs_lock.read();
-    let node = vfs_guard
-        .resolve_path(&path)
-        .map_err(|_| SyscallError::ResourceNotFound)?;
+    let node = vfs_guard.resolve_path(&path).map_err(map_resolve_err)?;
 
     let perms = Permissions::from_mode(mode as u32);
     node.chmod(perms)
