@@ -17,6 +17,8 @@ use super::renderer::draw_string_into_buffer;
 pub enum ImageFormat {
     Ppm,
     Bmp,
+    Tga,
+    Qoi,
     Unknown,
 }
 
@@ -332,6 +334,18 @@ impl ImageViewer {
         })
     }
 
+    /// Load a TGA image via the video decoder, converting to BGRA u32 pixels.
+    pub fn load_tga(data: &[u8]) -> Result<Image, &'static str> {
+        let frame = crate::video::decode::decode_tga(data).map_err(|_| "tga: decode failed")?;
+        Ok(video_frame_to_image(&frame, ImageFormat::Tga))
+    }
+
+    /// Load a QOI image via the video decoder, converting to BGRA u32 pixels.
+    pub fn load_qoi(data: &[u8]) -> Result<Image, &'static str> {
+        let frame = crate::video::decode::decode_qoi(data).map_err(|_| "qoi: decode failed")?;
+        Ok(video_frame_to_image(&frame, ImageFormat::Qoi))
+    }
+
     /// Load an image file from raw byte data, auto-detecting the format.
     pub fn load_file(&mut self, filename: &str, data: &[u8]) {
         self.filename = String::from(filename);
@@ -341,12 +355,18 @@ impl ImageViewer {
         let result = match fmt {
             ImageFormat::Ppm => Self::load_ppm(data),
             ImageFormat::Bmp => Self::load_bmp(data),
+            ImageFormat::Tga => Self::load_tga(data),
+            ImageFormat::Qoi => Self::load_qoi(data),
             ImageFormat::Unknown => {
                 // Try extension-based detection
                 if filename.ends_with(".ppm") || filename.ends_with(".pnm") {
                     Self::load_ppm(data)
                 } else if filename.ends_with(".bmp") {
                     Self::load_bmp(data)
+                } else if filename.ends_with(".tga") {
+                    Self::load_tga(data)
+                } else if filename.ends_with(".qoi") {
+                    Self::load_qoi(data)
                 } else {
                     Err("unknown image format")
                 }
@@ -614,7 +634,7 @@ impl ImageViewer {
         } else {
             // No image -- show status message
             let msg: &[u8] = match &self.state {
-                ImageViewerState::Empty => b"No image loaded. Open a PPM or BMP file.",
+                ImageViewerState::Empty => b"No image loaded. Open PPM, BMP, TGA, or QOI.",
                 ImageViewerState::Loading => b"Loading...",
                 ImageViewerState::Error(_) => b"Error loading image.",
                 ImageViewerState::Loaded => b"(empty)",
@@ -642,6 +662,12 @@ impl ImageViewer {
 
 /// Detect image format from the first bytes of the data.
 pub fn detect_image_format(data: &[u8]) -> ImageFormat {
+    if data.len() >= 4 {
+        // QOI: magic "qoif"
+        if data[0] == b'q' && data[1] == b'o' && data[2] == b'i' && data[3] == b'f' {
+            return ImageFormat::Qoi;
+        }
+    }
     if data.len() >= 2 {
         // PPM magic: P3 or P6
         if data[0] == b'P' && (data[1] == b'3' || data[1] == b'6') {
@@ -652,7 +678,44 @@ pub fn detect_image_format(data: &[u8]) -> ImageFormat {
             return ImageFormat::Bmp;
         }
     }
+    // TGA heuristic (no reliable magic): check header fields
+    if data.len() >= 18 {
+        let color_map_type = data[1];
+        let image_type = data[2];
+        let pixel_depth = data[16];
+        let valid_cmt = color_map_type <= 1;
+        let valid_type = matches!(image_type, 1 | 2 | 3 | 9 | 10 | 11);
+        let valid_depth = matches!(pixel_depth, 8 | 15 | 16 | 24 | 32);
+        if valid_cmt && valid_type && valid_depth {
+            return ImageFormat::Tga;
+        }
+    }
     ImageFormat::Unknown
+}
+
+/// Convert a `VideoFrame` from the video subsystem into the image viewer's
+/// `Image` format (BGRA u32 pixels).
+fn video_frame_to_image(frame: &crate::video::VideoFrame, fmt: ImageFormat) -> Image {
+    let w = frame.width as usize;
+    let h = frame.height as usize;
+    let pixel_count = w * h;
+    let mut pixels = Vec::with_capacity(pixel_count);
+
+    for y in 0..frame.height {
+        for x in 0..frame.width {
+            let (r, g, b, a) = frame.get_pixel(x, y);
+            // Image stores BGRA as u32: A(31:24) R(23:16) G(15:8) B(7:0)
+            let px = ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+            pixels.push(px);
+        }
+    }
+
+    Image {
+        width: w,
+        height: h,
+        pixels,
+        format: fmt,
+    }
 }
 
 /// Scale an image to `dst_width x dst_height` using nearest-neighbor sampling.

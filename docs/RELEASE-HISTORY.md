@@ -8,6 +8,7 @@ For current project status, see the [README](../README.md). For task tracking, s
 
 ## Table of Contents
 
+- [v0.9.0 -- Phase 7 Wave 5: Multimedia Framework](#v090----phase-7-wave-5-multimedia-framework)
 - [v0.8.0 -- Phase 7 Wave 4: Advanced Networking + Shell/Desktop](#v080----phase-7-wave-4-advanced-networking--shelldesktop)
 - [v0.7.1 -- Phase 7 Waves 1-3: GPU Drivers, Advanced Wayland, Desktop Completion](#v071----phase-7-waves-1-3-gpu-drivers-advanced-wayland-desktop-completion)
 - [v0.7.0 -- Phase 6.5: Rust Compiler Port + Bash-in-Rust Shell](#v070----phase-65-rust-compiler-port--bash-in-rust-shell)
@@ -57,6 +58,40 @@ For current project status, see the [README](../README.md). For task tracking, s
 - [v0.2.0 -- Phase 1 Microkernel Core](#v020----phase-1-microkernel-core)
 - [v0.1.0 -- Phase 0 Foundation and Tooling](#v010----phase-0-foundation-and-tooling)
 - [DEEP-RECOMMENDATIONS](#deep-recommendations)
+
+---
+
+## v0.9.0 -- Phase 7 Wave 5: Multimedia Framework
+
+**Date**: February 28, 2026
+
+Phase 7 Wave 5 adds a complete audio subsystem and video framework. The audio stack uses fixed-point 16.16 integer math for mixing, lock-free SPSC ring buffers, and VirtIO-Sound hardware support. The video framework provides TGA/QOI image decoding, frame scaling with bilinear interpolation, and a media player. 18 files changed (13 new, 5 modified), ~3,900 new lines.
+
+### Highlights
+
+- **Audio mixer**: Fixed-point 16.16 arithmetic, multi-channel mixing with per-channel and master volume, saturation arithmetic
+- **Ring buffer transport**: Lock-free SPSC with AtomicU32, typed sample read/write interface
+- **WAV parser**: RIFF/WAVE format, 8/16/24/32-bit PCM with bit-depth conversion utilities
+- **VirtIO-Sound driver**: PCI 0x1AF4:0x1059, MMIO registers, PCM stream configuration
+- **Audio pipeline**: Mixer-to-output buffering with underrun tracking and drain support
+- **Audio client API**: Stream lifecycle (create/play/pause/stop), automatic mixer channel registration
+- **Video pixel formats**: XRGB8888, ARGB8888, RGB888, RGB565, BGR888, Gray8 with full conversion
+- **Image decoders**: TGA (uncompressed + RLE, 24/32-bit) and QOI (full spec, 6 operation types)
+- **Frame scaling**: Nearest-neighbor and bilinear (fixed-point 8.8), BT.601 YUV/RGB, alpha blending
+- **Media player**: Tick-based frame timing, playback state machine, display rectangle
+- **Shell commands**: `play <file.wav>`, `volume [0-100]`
+- **Audio syscalls**: 8 stubs (320-327) for user-space audio API
+
+### Stats
+
+| Metric | Value |
+|--------|-------|
+| New files | 13 (7 audio, 4 video, 2 docs) |
+| Modified files | 5 |
+| New lines | ~3,900 |
+| Unit tests | 33+ |
+| Clippy | Zero warnings (3 architectures) |
+| Boot tests | 29/29 BOOTOK (3 architectures) |
 
 ---
 

@@ -63,6 +63,7 @@ pub mod print;
 mod intrinsics;
 
 pub mod arch;
+pub mod audio;
 pub mod bootstrap;
 mod cap;
 pub mod crypto;
@@ -95,6 +96,7 @@ pub mod timer;
 pub mod userland;
 pub mod userspace;
 pub mod utils;
+pub mod video;
 
 #[cfg(test)]
 mod test_config;

@@ -44,11 +44,11 @@ use commands::{
     DmesgCommand, DotCommand, EchoCommand, EnvCommand, ExitCommand, ExportCommand, FalseCommand,
     FgCommand, FreeCommand, GrepCommand, HeadCommand, HelpCommand, HistoryCommand, IfconfigCommand,
     JobsCommand, KillCommand, LsCommand, LsmodCommand, MkdirCommand, MountCommand, MvCommand,
-    NdpCommand, NetstatCommand, PerfCommand, Ping6Command, PkgCommand, PrintfCommand, PsCommand,
-    PwdCommand, ReadCommand, RmCommand, SetCommand, SortCommand, SourceCommand, StartGuiCommand,
-    SyncCommand, TailCommand, TeeCommand, TestCommand, TouchCommand, TrCommand, TraceCommand,
-    TrueCommand, TypeCommand, UnaliasCommand, UnameCommand, UniqCommand, UnsetCommand,
-    UptimeCommand, WcCommand, WhichCommand,
+    NdpCommand, NetstatCommand, PerfCommand, Ping6Command, PkgCommand, PlayCommand, PrintfCommand,
+    PsCommand, PwdCommand, ReadCommand, RmCommand, SetCommand, SortCommand, SourceCommand,
+    StartGuiCommand, SyncCommand, TailCommand, TeeCommand, TestCommand, TouchCommand, TrCommand,
+    TraceCommand, TrueCommand, TypeCommand, UnaliasCommand, UnameCommand, UniqCommand,
+    UnsetCommand, UptimeCommand, VolumeCommand, WcCommand, WhichCommand,
 };
 use spin::RwLock;
 pub use state::{get_shell, init, run_shell, try_get_shell};
@@ -748,6 +748,10 @@ impl Shell {
 
         // Desktop / GUI commands
         builtins.insert("startgui".into(), Box::new(StartGuiCommand));
+
+        // Audio commands
+        builtins.insert("play".into(), Box::new(PlayCommand));
+        builtins.insert("volume".into(), Box::new(VolumeCommand));
     }
 
     fn tokenize(&self, command_line: &str) -> Vec<String> {

@@ -1,9 +1,9 @@
 # Phase 7: Production Readiness and Advanced Features TODO
 
 **Phase Duration**: 6-12 months
-**Status**: ~50% Complete (Waves 1-4 done, Waves 5-6 remaining)
+**Status**: ~65% Complete (Waves 1-5 done, Wave 6 remaining)
 **Dependencies**: Phase 6 core graphical path (v0.6.2), Phase 5 ~90%
-**Last Updated**: February 28, 2026 (v0.8.0 -- Wave 4 complete)
+**Last Updated**: February 28, 2026 (v0.9.0 -- Wave 5 complete)
 
 ## Overview
 
@@ -114,16 +114,16 @@ Source: `net/zero_copy.rs` TODO(phase7) x6, `net/device.rs` TODO(phase7) x3, `ne
 
 ---
 
-## 8. Multimedia
+## 8. Multimedia -- COMPLETE (v0.9.0, Wave 5)
 
 Source: Phase 6 design doc
 
-- [ ] Audio server (mixing engine, routing, low-latency mode)
-- [ ] Audio drivers (ALSA compat, USB audio, HDMI audio)
-- [ ] Audio playback/recording APIs
-- [ ] Video decoding with hardware acceleration
-- [ ] Video playback framework and streaming support
-- [ ] Camera support (V4L2 implementation)
+- [x] Audio server (fixed-point 16.16 mixing engine, per-channel routing, ring buffer transport)
+- [x] Audio drivers (VirtIO-Sound PCI 0x1AF4:0x1059, PCM stream configuration)
+- [x] Audio playback/recording APIs (AudioClient create/play/pause/stop, WAV parser, 8 syscall stubs)
+- [x] Video decoding (TGA uncompressed+RLE, QOI full spec decoder)
+- [x] Video playback framework (MediaPlayer with tick-based frame timing, scaling, color space)
+- [ ] Camera support (V4L2 implementation) -- deferred to Phase 7.5
 
 ---
 
@@ -223,7 +223,7 @@ Source: `docs/DEFERRED-IMPLEMENTATION-ITEMS.md`
 | Desktop Applications | 6 | 5 | desktop/file_manager.rs x1 | DONE (v0.7.1+v0.8.0) |
 | Dynamic Linker | 6 | 6 | bootstrap.rs x2 | DONE (v0.7.1) |
 | Advanced Networking | 12 | 10 | net/*.rs x10, drivers/network.rs x5 | DONE (v0.8.0) |
-| Multimedia | 6 | 0 | -- | Wave 5 |
+| Multimedia | 6 | 5 | -- | DONE (v0.9.0) |
 | Virtualization | 4 | 0 | drivers/iommu.rs x1 | Wave 6 |
 | Cloud Native | 5 | 0 | -- | Wave 6 |
 | Hardware Drivers | 5 | 3 | drivers/nvme.rs x1, drivers/console.rs x2 | DONE (v0.8.0) |
@@ -231,7 +231,7 @@ Source: `docs/DEFERRED-IMPLEMENTATION-ITEMS.md`
 | Performance | 9 | 0 | perf/mod.rs x2, sched/*.rs x4 | Wave 6 |
 | Shell/Userland | 3 | 2 | services/shell/expand.rs x1 | DONE (v0.8.0) |
 | Phase 5 Deferred | 6 | 0 | -- | Wave 6 |
-| **Total** | **~93** | **53** | **28/39 resolved** | **~57%** |
+| **Total** | **~93** | **58** | **28/39 resolved** | **~62%** |
 
 ---
 
@@ -243,7 +243,7 @@ Source: `docs/DEFERRED-IMPLEMENTATION-ITEMS.md`
 | 2 | v0.7.1 | Advanced Wayland (DMA-BUF, client library, XWayland, multi-output) | COMPLETE |
 | 3 | v0.7.1 | Desktop completion (launcher, Alt-Tab, workspaces, notifications) | COMPLETE |
 | 4 | v0.8.0 | Advanced networking (zero-copy DMA, IPv6, hardware NIC, shell/desktop) | COMPLETE |
-| 5 | v0.9.0 | Multimedia (audio server, VirtIO-Sound, video framework) | Planned |
+| 5 | v0.9.0 | Multimedia (audio mixer, VirtIO-Sound, video framework) | COMPLETE |
 | 6 | v0.10.0 | Virtualization, security hardening, performance optimization | Planned |
 
 ---

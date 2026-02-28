@@ -463,6 +463,16 @@ pub enum Syscall {
     // Threading (Phase 6.5)
     Clone = 310,
     Futex = 311,
+
+    // Audio (Phase 7)
+    AudioOpen = 320,
+    AudioClose = 321,
+    AudioWrite = 322,
+    AudioSetVolume = 323,
+    AudioGetInfo = 324,
+    AudioStart = 325,
+    AudioStop = 326,
+    AudioPause = 327,
 }
 
 /// System call result type
@@ -931,6 +941,16 @@ fn handle_syscall(
         Syscall::Access => sys_access(arg1, arg2),
         Syscall::Poll | Syscall::Fcntl => Err(SyscallError::NotImplemented),
         Syscall::Clone | Syscall::Futex => Err(SyscallError::NotImplemented),
+
+        // Audio syscalls (Phase 7) -- stubs
+        Syscall::AudioOpen
+        | Syscall::AudioClose
+        | Syscall::AudioWrite
+        | Syscall::AudioSetVolume
+        | Syscall::AudioGetInfo
+        | Syscall::AudioStart
+        | Syscall::AudioStop
+        | Syscall::AudioPause => Err(SyscallError::NotImplemented),
 
         _ => Err(SyscallError::InvalidSyscall),
     }
@@ -1555,6 +1575,16 @@ impl TryFrom<usize> for Syscall {
             226 => Ok(Syscall::SocketRecv),
             227 => Ok(Syscall::SocketClose),
             228 => Ok(Syscall::SocketPair),
+
+            // Audio (Phase 7)
+            320 => Ok(Syscall::AudioOpen),
+            321 => Ok(Syscall::AudioClose),
+            322 => Ok(Syscall::AudioWrite),
+            323 => Ok(Syscall::AudioSetVolume),
+            324 => Ok(Syscall::AudioGetInfo),
+            325 => Ok(Syscall::AudioStart),
+            326 => Ok(Syscall::AudioStop),
+            327 => Ok(Syscall::AudioPause),
 
             _ => Err(()),
         }

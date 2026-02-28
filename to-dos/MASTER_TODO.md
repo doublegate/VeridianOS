@@ -1,6 +1,6 @@
 # VeridianOS Master TODO List
 
-**Last Updated**: 2026-02-28 (Phase 5 ~90%, Phase 5.5 COMPLETE, Phase 6 ~100%, Phase 6.5 COMPLETE, Phase 7 ~50%, Tier 7 COMPLETE, v0.8.0)
+**Last Updated**: 2026-02-28 (Phase 5 ~90%, Phase 5.5 COMPLETE, Phase 6 ~100%, Phase 6.5 COMPLETE, Phase 7 ~65%, Tier 7 COMPLETE, v0.9.0)
 
 ## Project Overview Status
 
@@ -12,9 +12,9 @@
 - [ ] **Phase 5: Performance Optimization** - ~90% (hot path wiring, CapabilityCache, O(log n) IPC PID lookup, trace instrumentation)
 - [x] **Phase 6: Advanced Features & GUI** - ~100% (Wayland compositor, desktop renderer, input, TCP/IP, desktop apps) v0.6.4
 - [x] **Phase 6.5: Rust Compiler + Bash-in-Rust Shell** - COMPLETE (100%) v0.7.0 (February 27, 2026)
-- [ ] **Phase 7: Production Readiness** - ~50% (Waves 1-4 complete: GPU, Wayland, desktop, networking; Waves 5-6 remaining: multimedia, virtualization) v0.7.1-v0.8.0
+- [ ] **Phase 7: Production Readiness** - ~65% (Waves 1-5 complete: GPU, Wayland, desktop, networking, multimedia; Wave 6 remaining: virtualization, security, performance) v0.7.1-v0.9.0
 
-## Current Version: v0.8.0 (February 28, 2026)
+## Current Version: v0.9.0 (February 28, 2026)
 
 ### Build Status
 - **x86_64**: 0 errors, 0 warnings, Stage 6 BOOTOK, 29/29 tests
@@ -208,7 +208,7 @@ See [REMEDIATION_TODO.md](REMEDIATION_TODO.md) for 37 identified gaps from Phase
 - [Phase 5 TODO](PHASE5_TODO.md) - ~90%
 - [Phase 5.5 TODO](PHASE5.5_TODO.md) - 100% COMPLETE (all 12 sprints, v0.5.13)
 - [Phase 6 TODO](PHASE6_TODO.md) - ~40% (core graphical path complete)
-- [Phase 7 TODO](PHASE7_TODO.md) - ~50% (Waves 1-4 complete, Waves 5-6 remaining)
+- [Phase 7 TODO](PHASE7_TODO.md) - ~65% (Waves 1-5 complete, Wave 6 remaining)
 - [Remediation TODO](REMEDIATION_TODO.md) - Gaps from Phases 0-4
 - [Issues TODO](ISSUES_TODO.md) - Issue history
 - [Testing TODO](TESTING_TODO.md) - Testing status
@@ -218,6 +218,7 @@ See [REMEDIATION_TODO.md](REMEDIATION_TODO.md) for 37 identified gaps from Phase
 
 | Version | Date | Summary |
 |---------|------|---------|
+| v0.9.0 | Feb 28, 2026 | Phase 7 Wave 5: Audio subsystem (mixer, VirtIO-Sound, WAV playback), video framework (TGA/QOI, scaling, media player) |
 | v0.8.0 | Feb 28, 2026 | Phase 7 Wave 4: zero-copy DMA networking, hardware NIC TX/RX rings, IPv6 dual-stack, command substitution, NVMe admin queue |
 | v0.7.1 | Feb 28, 2026 | Phase 7 Waves 1-3: GPU drivers (virtio-gpu, i915/amdgpu/nouveau), advanced Wayland, desktop completion |
 | v0.7.0 | Feb 27, 2026 | Phase 6.5: Rust compiler port (std::sys::veridian, LLVM 19) + vsh Bash-in-Rust shell (49 builtins) |

@@ -33,6 +33,7 @@ The project explores how capability-oriented design, strong isolation boundaries
 - 📦 **Modern package management** — Source and binary package support
 - 🖥️ **Wayland compositor** — Modern display server with GPU acceleration, DMA-BUF, layer-shell
 - 🎨 **Desktop environment** — Application launcher, Alt-Tab, notifications, workspaces, screen lock
+- 🔊 **Multimedia** — Audio mixer, VirtIO-Sound, WAV playback, TGA/QOI image decoding, video framework
 
 ---
 
@@ -113,7 +114,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.8.0 (February 28, 2026) | **Releases Published**: 46 (v0.1.0 through v0.8.0)
+**Latest Release**: v0.9.0 (February 28, 2026) | **Releases Published**: 47 (v0.1.0 through v0.9.0)
 
 | Metric                 | Value                                           |
 | ---------------------- | ----------------------------------------------- |
@@ -143,7 +144,7 @@ experiments/   Non-normative exploratory work
 | 5.5   | Infrastructure Bridge     | **COMPLETE (100%)** | v0.5.13 | Feb 2026 |
 | 6     | Advanced Features and GUI | **~100% (desktop complete)** | v0.6.4  | Feb 2026 |
 | 6.5   | Rust Compiler + Bash Shell | **COMPLETE (100%)** | v0.7.0  | Feb 2026 |
-| 7     | Production Readiness     | **In Progress (~50%)** | v0.8.0  | Feb 2026 |
+| 7     | Production Readiness     | **In Progress (~65%)** | v0.9.0  | Feb 2026 |
 
 For detailed release notes, see [Release History](docs/RELEASE-HISTORY.md).
 
@@ -190,6 +191,8 @@ Phases 0 through 4 are complete. The kernel provides:
 - **IPv6 Dual-Stack** -- Full IPv6 implementation (~2,145 lines across ipv6.rs + icmpv6.rs): header parsing/building, NDP cache with LRU eviction, Neighbor Discovery (NS/NA/RS/RA), SLAAC with EUI-64, ICMPv6 (Echo, Dest Unreachable, Packet Too Big, Time Exceeded), AF_INET6 sockets (Stream/Dgram/Raw), dual-stack configuration; shell commands: ping6, ndp, enhanced ifconfig/netstat
 - **Shell Command Substitution** -- 18 inline commands for $(command): echo, cat, pwd, uname, whoami, hostname, basename, dirname, printf, seq, wc, head, tail, date, expr, true/false, test/[, tr
 - **NVMe Admin Queue** -- Full controller reset + initialization sequence with NvmeSubmissionEntry/NvmeCompletionEntry structs, ASQ/ACQ allocation from physical frames, Identify Controller parsing (serial, model, firmware, MDTS)
+- **Audio Subsystem** -- Fixed-point 16.16 mixer (per-channel + master volume, saturation arithmetic), lock-free SPSC ring buffer transport, WAV parser (RIFF/WAVE, 8/16/24/32-bit PCM), output pipeline with underrun tracking, audio client API (create/play/pause/stop streams), VirtIO-Sound driver (PCI 0x1AF4:0x1059, PCM stream configuration), shell commands (play, volume), 8 audio syscall stubs (320-327)
+- **Video Framework** -- Pixel format abstraction (XRGB8888, ARGB8888, RGB888, RGB565, BGR888, Gray8), frame scaling (nearest-neighbor + bilinear with fixed-point 8.8 interpolation), BT.601 YUV/RGB color space conversion, alpha blending, TGA decoder (uncompressed + RLE, 24/32-bit), QOI decoder (full spec: index/diff/luma/run/rgb/rgba ops), media player with tick-based frame timing, image viewer TGA/QOI integration
 
 ### Self-Hosting Roadmap
 
@@ -219,8 +222,7 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### What Comes Next
 
-- **Phase 7 Wave 4 (v0.8.0)** -- Zero-copy DMA networking (scatter-gather with user page pinning, DMA buffer pool below 4GB), hardware NIC driver (DMA TX/RX descriptor rings, E1000-compatible MMIO registers), IPv6 dual-stack (NDP cache, SLAAC, ICMPv6, AF_INET6 sockets), shell command substitution (18 inline commands for $()), MIME file dispatch, NVMe admin queue initialization
-- **Phase 7 Waves 5-6** -- Multimedia framework (audio mixer, VirtIO-Sound, video decode), virtualization (VMX hypervisor, container namespaces), security hardening (KPTI, demand paging, COW fork), performance (NUMA topology, per-CPU queues)
+- **Phase 7 Wave 6 (v0.10.0)** -- Virtualization (VMX hypervisor, EPT, container namespaces), security hardening (KPTI shadow page tables, demand paging, COW fork, TPM MMIO, Dilithium verification), performance optimization (ACPI SRAT/SLIT NUMA topology, per-CPU ready queues, work-stealing scheduler, IOMMU DRHD parsing)
 
 ### Technical Notes
 
@@ -234,7 +236,7 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### Maturity
 
-VeridianOS is an active research system. Phases 0 through 6.5 are architecturally stable with a functional graphical desktop, Rust compiler port, and Bash-compatible userland shell. Phase 7 Waves 1-4 (GPU drivers, advanced Wayland, desktop completion, advanced networking with IPv6) are implemented. Waves 5-6 (multimedia, virtualization, cloud-native) are planned.
+VeridianOS is an active research system. Phases 0 through 6.5 are architecturally stable with a functional graphical desktop, Rust compiler port, and Bash-compatible userland shell. Phase 7 Waves 1-5 (GPU drivers, advanced Wayland, desktop completion, advanced networking with IPv6, multimedia framework) are implemented. Wave 6 (virtualization, security hardening, performance optimization) is planned.
 
 Historical status is recorded in:
 

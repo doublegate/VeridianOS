@@ -2,6 +2,46 @@
 
 ---
 
+## [v0.9.0] - 2026-02-28
+
+### v0.9.0: Phase 7 Wave 5 -- Multimedia Framework
+
+Phase 7 Wave 5 adds a complete audio subsystem and video framework to VeridianOS. The audio stack uses fixed-point 16.16 integer math for mixing (no floating-point in kernel), lock-free SPSC ring buffers for transport, and targets VirtIO-Sound hardware. The video framework provides image decoding (TGA, QOI), frame scaling, color space conversion, and a media player with tick-based timing. 18 files changed (13 new, 5 modified).
+
+#### Audio Subsystem (Sprints A-1 through A-5)
+
+- **Audio mixer** (`audio/mixer.rs`, ~514 lines): Fixed-point 16.16 arithmetic with `fp_from_i16()`/`fp_to_i16()`/`fp_mul()` using i64 intermediate and saturation, multi-channel mixing with per-channel volume (AtomicU32) and mute (AtomicBool), master volume control, `mix_to_output()` with saturation arithmetic
+- **Ring buffer transport** (`audio/buffer.rs`, ~446 lines): Lock-free SPSC ring buffer with AtomicU32 read/write positions, `SharedAudioBuffer` with typed `write_samples(&[i16])`/`read_samples(&mut [i16])`, wrap-around and partial operation support
+- **Audio client API** (`audio/client.rs`, ~294 lines): `AudioClient` managing streams via BTreeMap with `create_stream()`, `destroy_stream()`, `write_samples()`, `play()`, `pause()`, `stop()`, `set_volume()`, automatic mixer channel registration
+- **WAV parser** (`audio/wav.rs`, ~492 lines): RIFF/WAVE format parser with chunk iteration, 8/16/24/32-bit PCM support, `convert_u8_to_s16()`, `convert_s24_to_s16()`, `convert_s32_to_s16()` conversion utilities, `to_audio_config()` and `duration_ms()`
+- **Output pipeline** (`audio/pipeline.rs`, ~277 lines): `AudioPipeline` managing mixer-to-output buffering with `process_frame()`, underrun tracking via AtomicU64, drain support for clean playback termination
+- **VirtIO-Sound driver** (`audio/virtio_sound.rs`, ~733 lines): PCI scan for vendor 0x1AF4 device 0x1059, MMIO register access, device initialization with status negotiation, PCM stream configuration (set_params/prepare/start/stop), `#[repr(C)]` protocol structures
+- **Audio syscall stubs** (`syscall/mod.rs`): 8 syscalls (AudioOpen=320 through AudioPause=327) with TryFrom dispatch
+- **Shell commands**: `play <file.wav>` (WAV parse, PCM conversion, stream queue), `volume [0-100] [stream_id]` (master/per-stream volume)
+
+#### Video Framework (Sprints V-1 through V-3)
+
+- **Pixel formats** (`video/mod.rs`, ~341 lines): `PixelFormat` enum (XRGB8888, ARGB8888, RGB888, RGB565, BGR888, BGRX8888, Gray8) with `bytes_per_pixel()` and `has_alpha()`, `VideoFrame` struct with `set_pixel()`/`get_pixel()` handling all formats including RGB565 bit-packing and Gray8 BT.601 luma
+- **Scaling and color** (`video/framebuffer.rs`, ~461 lines): Nearest-neighbor scaling with integer `(dst * src) / dst_dim` mapping, bilinear scaling with fixed-point 8.8 interpolation (4-pixel weighted average), BT.601 YUV/RGB integer conversion, pre-multiplied alpha blending, `blit_to_framebuffer()` with clipping
+- **Image decoders** (`video/decode.rs`, ~585 lines): Auto-detection by magic bytes, TGA decoder (Type 2 uncompressed + Type 10 RLE, 24/32-bit BGR/BGRA, bottom-left/top-left origin), QOI decoder (full spec: OP_RGB, OP_RGBA, OP_INDEX, OP_DIFF, OP_LUMA, OP_RUN with 64-entry hash table)
+- **Media player** (`video/player.rs`, ~506 lines): `RawVideoStream` with tick-based frame timing, `MediaPlayer` with `load_image()`/`load_video()`, playback state machine (Stopped/Playing/Paused/Finished), display rectangle management
+- **Image viewer integration** (`desktop/image_viewer.rs`): TGA and QOI format detection and decoding via `crate::video::decode`, `video_frame_to_image()` BGRA conversion helper
+
+#### Documentation
+
+- New: `docs/AUDIO-SUBSYSTEM.md` -- audio architecture, mixer, ring buffer, VirtIO-Sound, pipeline
+- New: `docs/VIDEO-FRAMEWORK.md` -- pixel formats, scaling, decoders, media player
+
+#### Stats
+
+- 13 new files, 5 modified files
+- ~3,900 new lines of audio/video implementation
+- 33+ unit tests for mixer, ring buffer, WAV parser, pipeline, pixel formats, scaling, decoders, player
+- Zero clippy warnings on x86_64, AArch64, RISC-V with `-D warnings`
+- All 3 architectures boot to BOOTOK (29/29 tests)
+
+---
+
 ## [v0.8.0] - 2026-02-28
 
 ### v0.8.0: Phase 7 Wave 4 -- Advanced Networking + Shell/Desktop Integration
