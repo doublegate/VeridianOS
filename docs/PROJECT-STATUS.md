@@ -18,8 +18,8 @@
 | Phase 2: User Space Foundation | 100% COMPLETE | v0.3.2 | February 14, 2026 |
 | Phase 3: Security Hardening | 100% COMPLETE | v0.3.2 | February 14, 2026 |
 | Phase 4: Package Ecosystem | 100% COMPLETE | v0.4.1 | February 15, 2026 |
-| Phase 5: Performance Optimization | ~10% | -- | In progress |
-| Phase 6: Advanced Features/GUI | ~5% | -- | Future |
+| Phase 5: Performance Optimization | ~90% | v0.5.8 | Hot paths wired |
+| Phase 6: Advanced Features/GUI | ~40% | v0.6.2 | Core graphical path |
 
 **Architecture Status** (Updated February 15, 2026):
 
@@ -336,7 +336,7 @@ The journey from concept to implementation begins now. With clear documentation,
 
 **Document Version**: 4.0
 **Last Updated**: February 15, 2026
-**Status**: Phases 0-4 COMPLETE (Phase 5 ~10%, Phase 6 ~5%)
+**Status**: Phases 0-4 COMPLETE (Phase 5 ~90%, Phase 6 ~40%)
 **Repository**: https://github.com/doublegate/VeridianOS
 **CI Status**: 100% PASSING - All checks green
 **Latest Release**: v0.4.1 (February 15, 2026)

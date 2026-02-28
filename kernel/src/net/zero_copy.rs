@@ -43,7 +43,7 @@ pub struct DmaBuffer {
 impl DmaBuffer {
     /// Create new DMA buffer
     pub fn new(size: usize) -> Result<Self, KernelError> {
-        // TODO(phase6): Allocate DMA-capable memory (below 4GB for 32-bit DMA)
+        // TODO(phase7): Allocate DMA-capable memory (below 4GB for 32-bit DMA)
 
         Ok(Self {
             physical_addr: 0,
@@ -185,7 +185,7 @@ impl ScatterGatherList {
                 });
             }
 
-            // TODO(phase6): Copy data from physical address to contiguous buffer
+            // TODO(phase7): Copy data from physical address to contiguous buffer
 
             offset += segment.length;
         }
@@ -219,7 +219,7 @@ impl ZeroCopySend {
 
     /// Add data from user buffer (zero-copy via page remapping)
     pub fn add_user_buffer(&mut self, user_addr: u64, length: usize) -> Result<(), KernelError> {
-        // TODO(phase6): Pin user pages and translate to physical addresses
+        // TODO(phase7): Pin user pages and translate to physical addresses
 
         self.sg_list.add_segment(user_addr, length);
         Ok(())
@@ -232,7 +232,7 @@ impl ZeroCopySend {
 
     /// Execute send (hardware-assisted)
     pub fn execute(&self) -> Result<(), KernelError> {
-        // TODO(phase6): Program network card DMA engine with scatter-gather list
+        // TODO(phase7): Program network card DMA engine with scatter-gather list
 
         Ok(())
     }
@@ -272,7 +272,7 @@ impl SendFile {
     /// Reads data from the source file descriptor and writes it to the
     /// destination socket using kernel-internal buffers, avoiding any
     /// copy to/from user-space.  True page-remapping (splice) requires
-    /// pipe buffer infrastructure (TODO(phase6)).
+    /// pipe buffer infrastructure (TODO(phase7)).
     pub fn execute(&self) -> Result<usize, KernelError> {
         let proc = crate::process::current_process().ok_or(KernelError::InvalidState {
             expected: "running process",
@@ -341,7 +341,7 @@ impl TcpCork {
     /// Force send pending data
     pub fn flush(&mut self) -> Result<(), KernelError> {
         if !self.pending.is_empty() {
-            // TODO(phase6): Send pending data via TCP socket
+            // TODO(phase7): Send pending data via TCP socket
             self.pending.clear();
         }
         Ok(())

@@ -1,6 +1,6 @@
 # Deferred Implementation Items
 
-**Last Updated**: February 27, 2026 (v0.5.8)
+**Last Updated**: February 27, 2026 (v0.6.2)
 
 This document tracks items explicitly deferred from their original implementation phase, with rationale and target phase for each.
 
@@ -43,18 +43,30 @@ Items that serve as prerequisites for Phase 6 (Advanced Features/GUI):
 | Network driver completion | Functional TX/RX for virtio-net and e1000 | B-9 |
 | Profiling tools + hardware PMU | Cache miss, branch mispredict measurement | B-10 |
 
-## Items Staying in Phase 6+
+## Phase 6 Items Completed (v0.6.1)
 
-These items are NOT planned for Phase 5.5 and remain in Phase 6 or later:
+| Item | Status |
+|------|--------|
+| Wayland compositor | DONE -- wire protocol, SHM buffers, compositing, XDG shell |
+| Desktop environment | DONE -- renderer, panel, terminal ANSI |
+| TCP/IP network stack | DONE -- VirtIO-Net, Ethernet, ARP, TCP, DHCP |
+| Input system | DONE -- PS/2 mouse, unified events, cursor |
 
-| Item | Rationale |
-|------|-----------|
-| Full AML interpreter | Only basic ACPI table parsing needed; AML requires complex runtime |
-| Wayland compositor | Requires shared memory + Unix sockets (Phase 5.5 B-6) first |
-| Container runtime | Requires namespace isolation and cgroup infrastructure |
-| Self-hosted Rust compiler | Requires complete POSIX layer and dynamic linker |
-| io_uring | Requires user-space driver infrastructure |
-| Power management (DVFS, C-states) | Requires ACPI runtime methods |
+## Items Remaining in Phase 7+
+
+These items require infrastructure beyond what Phase 6 delivered:
+
+| Item | Rationale | Target |
+|------|-----------|--------|
+| Full AML interpreter | Only basic ACPI table parsing needed; AML requires complex runtime | Phase 7 |
+| GPU drivers (Intel/AMD/NVIDIA) | Requires mode-setting, command submission, DMA | Phase 7 |
+| Container runtime | Requires namespace isolation and cgroup infrastructure | Phase 7 |
+| Self-hosted Rust compiler | Requires complete POSIX layer and dynamic linker | Phase 7 |
+| io_uring | Requires user-space driver infrastructure | Phase 7 |
+| Power management (DVFS, C-states) | Requires ACPI runtime methods | Phase 7 |
+| Multimedia (audio/video) | Requires audio server, hardware codecs | Phase 7 |
+
+See [`to-dos/PHASE7_TODO.md`](../to-dos/PHASE7_TODO.md) for comprehensive Phase 7 roadmap.
 
 ## Pre-Phase 2 Deferred Items (Historical)
 
@@ -73,4 +85,4 @@ For Phases 0-4 gap tracking, see also [`to-dos/REMEDIATION_TODO.md`](../to-dos/R
 
 ---
 
-**See also**: [Phase 5 TODO](../to-dos/PHASE5_TODO.md) | [Phase 5.5 TODO](../to-dos/PHASE5.5_TODO.md) | [Phase 6 TODO](../to-dos/PHASE6_TODO.md)
+**See also**: [Phase 5 TODO](../to-dos/PHASE5_TODO.md) | [Phase 5.5 TODO](../to-dos/PHASE5.5_TODO.md) | [Phase 6 TODO](../to-dos/PHASE6_TODO.md) | [Phase 7 TODO](../to-dos/PHASE7_TODO.md)

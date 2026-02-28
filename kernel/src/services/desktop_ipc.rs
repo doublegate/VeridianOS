@@ -214,7 +214,7 @@ pub const COMPOSITOR_ENDPOINT: EndpointId = 1002;
 pub fn init() -> Result<(), KernelError> {
     println!("[DESKTOP-IPC] Initializing desktop IPC protocol...");
 
-    // TODO(phase6): Register well-known IPC endpoints for window manager, input
+    // TODO(phase7): Register well-known IPC endpoints for window manager, input
     // server, and compositor
 
     println!("[DESKTOP-IPC] Desktop IPC protocol initialized");

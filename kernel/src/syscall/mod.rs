@@ -1554,8 +1554,20 @@ fn sys_socket_create(domain: usize, sock_type: usize) -> SyscallResult {
                 .map_err(|_| SyscallError::OutOfMemory)
         }
         AF_INET => {
-            // TODO(phase6): IPv4 socket creation
-            Err(SyscallError::InvalidArgument)
+            let sock_domain = crate::net::socket::SocketDomain::Inet;
+            let (sock_tp, proto) = match sock_type {
+                SOCK_STREAM => (
+                    crate::net::socket::SocketType::Stream,
+                    crate::net::socket::SocketProtocol::Tcp,
+                ),
+                SOCK_DGRAM => (
+                    crate::net::socket::SocketType::Dgram,
+                    crate::net::socket::SocketProtocol::Udp,
+                ),
+                _ => return Err(SyscallError::InvalidArgument),
+            };
+            crate::net::socket::create_socket(sock_domain, sock_tp, proto)
+                .map_err(|_| SyscallError::OutOfMemory)
         }
         _ => Err(SyscallError::InvalidArgument),
     }

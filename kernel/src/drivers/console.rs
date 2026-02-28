@@ -560,7 +560,7 @@ impl Driver for ConsoleDriver {
 
     fn detach(&mut self, _device: &DeviceInfo) -> Result<(), KernelError> {
         crate::println!("[CONSOLE] Detaching from device: {}", _device.name);
-        // TODO(phase6): Remove specific console device from device list
+        // TODO(phase7): Remove specific console device from device list
         Ok(())
     }
 
@@ -580,7 +580,7 @@ impl Driver for ConsoleDriver {
     }
 
     fn read(&mut self, _offset: u64, _buffer: &mut [u8]) -> Result<usize, KernelError> {
-        // TODO(phase6): Read input from console keyboard driver
+        // TODO(phase7): Read input from console keyboard driver
         Ok(0)
     }
 

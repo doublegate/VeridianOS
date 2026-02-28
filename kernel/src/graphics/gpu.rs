@@ -56,7 +56,7 @@ pub struct GpuFeatures {
 impl GpuDevice {
     /// Detect GPU devices
     pub fn enumerate() -> Vec<GpuDevice> {
-        // TODO(phase6): Enumerate PCIe devices for GPU detection
+        // TODO(phase7): Enumerate PCIe devices for GPU detection
 
         vec![GpuDevice {
             name: String::from("Virtual GPU"),
@@ -127,7 +127,7 @@ impl CommandBuffer {
 
     /// Submit command buffer to GPU
     pub fn submit(&self) -> Result<(), KernelError> {
-        // TODO(phase6): Submit to GPU command queue via DMA
+        // TODO(phase7): Submit to GPU command queue via DMA
         Ok(())
     }
 }
@@ -225,13 +225,13 @@ pub mod opengl_es {
 
         /// Make context current
         pub fn make_current(&self) -> Result<(), KernelError> {
-            // TODO(phase6): Bind OpenGL ES context to current thread
+            // TODO(phase7): Bind OpenGL ES context to current thread
             Ok(())
         }
 
         /// Swap buffers
         pub fn swap_buffers(&self) -> Result<(), KernelError> {
-            // TODO(phase6): Present framebuffer via page flip or blit
+            // TODO(phase7): Present framebuffer via page flip or blit
             Ok(())
         }
     }

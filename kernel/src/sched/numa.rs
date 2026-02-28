@@ -58,7 +58,7 @@ impl NumaTopology {
 
     /// Detect NUMA topology from hardware.
     ///
-    /// TODO(phase6): Parse ACPI SRAT/SLIT tables for real multi-node topology.
+    /// TODO(phase7): Parse ACPI SRAT/SLIT tables for real multi-node topology.
     /// Currently returns a single UMA node containing all detected CPUs and
     /// using the frame allocator's reported total memory.
     pub fn detect() -> Self {
@@ -241,7 +241,7 @@ impl NumaScheduler {
     ///
     /// Uses round-robin distribution across CPUs in the node to approximate
     /// even load distribution without per-CPU load tracking overhead.
-    /// TODO(phase6): Query per-CPU run-queue lengths for true load-aware
+    /// TODO(phase7): Query per-CPU run-queue lengths for true load-aware
     /// selection.
     fn select_cpu_in_node(&self, node: NodeId) -> CpuId {
         static RR_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -300,7 +300,7 @@ impl NumaScheduler {
 /// Detect number of CPUs in the system.
 ///
 /// Counts online CPUs from the SMP per-CPU data array.
-/// TODO(phase6): Parse ACPI MADT table for full topology including offline
+/// TODO(phase7): Parse ACPI MADT table for full topology including offline
 /// CPUs.
 fn detect_cpu_count() -> u32 {
     let mut count: u32 = 0;

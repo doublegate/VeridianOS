@@ -1,9 +1,9 @@
 # Release Management TODO
 
 **Purpose**: Track release planning, milestones, and deployment tasks
-**Last Updated**: February 26, 2026
-**Current Version**: v0.5.7 (Released February 26, 2026)
-**Current Status**: Phases 0-4.5 Complete. Self-hosting Tiers 0-7 COMPLETE. Phase 5 ~75%. 32 releases published (v0.1.0 through v0.5.7).
+**Last Updated**: February 27, 2026
+**Current Version**: v0.6.2 (Released February 27, 2026)
+**Current Status**: Phases 0-4.5 Complete. Self-hosting Tiers 0-7 COMPLETE. Phase 5 ~90%. Phase 6 ~40%. 38 releases published (v0.1.0 through v0.6.2).
 
 ## 🎯 Release Strategy
 
@@ -116,6 +116,40 @@ Following Semantic Versioning (SemVer):
 - [x] Self-hosting: complete libc (17 files, 6,547 LOC), GCC cross-compiler, virtio-blk, TAR rootfs
 - [x] User-space exec: /bin/minimal runs, CR3 switching removed (~2000 cycles/syscall saved)
 
+#### v0.6.2 - Phase 6 Completion + Phase 7 TODO -- RELEASED
+**Released**: February 27, 2026
+**Phase**: Phase 6 ~40% (core graphical path complete)
+**Achievements**:
+- [x] Documentation sync (all Phase 6 references updated from ~5% to ~40%)
+- [x] AF_INET socket creation wired to net::socket
+- [x] VirtIO-Net/E1000 device registry integration
+- [x] UDP recv_from wired to socket buffer layer
+- [x] All 43 TODO(phase6) markers resolved (4 wired, 39 reclassified to phase7)
+- [x] Phase 7 TODO generated (15 categories, ~85 items)
+- [x] Release history updated (v0.6.0, v0.6.1 entries added)
+
+#### v0.6.1 - Phase 6 Graphical Desktop -- RELEASED
+**Released**: February 27, 2026
+**Phase**: Phase 6 (Advanced Features & GUI) ~35%
+**Achievements**:
+- [x] Wayland compositor (wire protocol, SHM buffers, compositing, XDG shell)
+- [x] Desktop renderer (gradient background, demo windows, render loop)
+- [x] PS/2 mouse driver, unified input events, hardware cursor
+- [x] TCP/IP stack (VirtIO-Net, Ethernet, ARP, TCP, DHCP)
+- [x] 19 new syscalls, startgui command, 37 files +6862 lines
+
+#### v0.6.0 - Pre-Phase 6 Tech Debt Remediation -- RELEASED
+**Released**: February 27, 2026
+**Phase**: Pre-Phase 6 tech debt
+**Achievements**:
+- [x] 12 new syscalls (POSIX shm + Unix sockets)
+- [x] PMU bootstrap, RCU integration
+- [x] NVMe PCI scan, IOMMU DMAR parsing, dynamic linker fix
+
+#### v0.5.13 through v0.5.8 - Phase 5 + Phase 5.5 -- RELEASED
+**Released**: February 27, 2026
+**Phase**: Phase 5 ~90%, Phase 5.5 100% COMPLETE
+
 #### v0.5.7 - Phase 5 Sprint 2: Performance Optimization -- RELEASED
 **Released**: February 26, 2026
 **Phase**: Phase 5 (Performance Optimization) ~75%
@@ -190,15 +224,14 @@ Following Semantic Versioning (SemVer):
 - [x] Console blocking read, fd 0/1/2 auto-open, user-space shell bootstrap
 - [x] dead_code audit, TODO(future) recategorization to phase5/phase6
 
-#### v0.6.0 - Rust Self-Hosting + Advanced Features
+#### v0.7.0 - Phase 7: Production Readiness
 **Target Date**: Q3 2026
-**Phase**: Self-hosting Tier 7 + Phase 6
+**Phase**: Phase 7
 **Goals**:
-- [ ] Rust user-space target JSON (T7-1)
-- [ ] Rust std port (T7-2)
-- [ ] vpkg user-space migration (T7-5)
-- [ ] Wayland compositor
-- [ ] Basic desktop environment
+- [ ] GPU driver framework (Intel i915/AMD/virtio-gpu)
+- [ ] Advanced Wayland (real clients, XWayland)
+- [ ] Multimedia (audio server, video decoding)
+- [ ] Container runtime (OCI, namespaces)
 
 ### v1.0.0 - First Stable Release
 **Target Date**: Q3 2027  
@@ -418,10 +451,9 @@ Thanks to all contributors!
 - Q4: v0.2.5, v0.3.0 (Architecture cleanup)
 
 ### 2026 (Completed + In Progress)
-- Q1: v0.3.1 through v0.5.7 (User Space, Security, Packages, Shell, Self-hosting, Phase 5)
-- Q2: v0.5.7+ (Phase 5 Performance + Phase 6 GUI) -- PLANNED
-- Q3: v0.6.0 (Rust self-hosting + Advanced features) -- PLANNED
-- Q4: v0.7.0 (Full self-hosting loop) -- PLANNED
+- Q1: v0.3.1 through v0.6.2 (User Space, Security, Packages, Shell, Self-hosting, Phase 5, Phase 6 core)
+- Q2-Q3: v0.7.0 (Phase 7: GPU, multimedia, advanced Wayland) -- PLANNED
+- Q4: v0.8.0 (Phase 7: virtualization, cloud-native) -- PLANNED
 
 ### 2027
 - Q1: v0.8.0 (Performance + Polish)

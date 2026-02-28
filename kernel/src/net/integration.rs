@@ -156,13 +156,19 @@ fn try_register_e1000(bar_address: u64) -> Result<(), KernelError> {
             let name = driver.name();
             let mac = driver.mac_address();
 
-            // TODO(phase6): Register E1000 with network device registry
-
             println!(
                 "[NET-INTEGRATION] E1000 initialized: {} (MAC: \
                  {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
                 name, mac.0[0], mac.0[1], mac.0[2], mac.0[3], mac.0[4], mac.0[5]
             );
+
+            // Register with network device registry
+            if let Err(e) = device::register_device(Box::new(driver)) {
+                println!(
+                    "[NET-INTEGRATION] Warning: failed to register E1000: {:?}",
+                    e
+                );
+            }
 
             Ok(())
         }
@@ -184,16 +190,22 @@ fn try_register_virtio_net(bar_address: u64) -> Result<(), KernelError> {
 
     match VirtioNetDriver::new(bar_address as usize) {
         Ok(driver) => {
-            let _name = driver.name();
-            let _mac = driver.mac_address();
-
-            // TODO(phase6): Register VirtIO-Net with network device registry
+            let name = driver.name();
+            let mac = driver.mac_address();
 
             println!(
                 "[NET-INTEGRATION] VirtIO-Net initialized: {} (MAC: \
                  {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
-                _name, _mac.0[0], _mac.0[1], _mac.0[2], _mac.0[3], _mac.0[4], _mac.0[5]
+                name, mac.0[0], mac.0[1], mac.0[2], mac.0[3], mac.0[4], mac.0[5]
             );
+
+            // Register with network device registry
+            if let Err(e) = device::register_device(Box::new(driver)) {
+                println!(
+                    "[NET-INTEGRATION] Warning: failed to register VirtIO-Net: {:?}",
+                    e
+                );
+            }
 
             Ok(())
         }

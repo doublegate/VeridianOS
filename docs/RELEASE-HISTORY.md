@@ -8,6 +8,9 @@ For current project status, see the [README](../README.md). For task tracking, s
 
 ## Table of Contents
 
+- [v0.6.2 -- Phase 6 Completion + Phase 7 TODO](#v062----phase-6-completion--phase-7-todo)
+- [v0.6.1 -- Phase 6 Graphical Desktop, Wayland Compositor, Network Stack](#v061----phase-6-graphical-desktop-wayland-compositor-network-stack)
+- [v0.6.0 -- Pre-Phase 6 Tech Debt Remediation](#v060----pre-phase-6-tech-debt-remediation)
 - [v0.5.13 -- Phase 5.5 Wave 5: Huge Pages + Dynamic Linker (COMPLETE)](#v0513----phase-55-wave-5-huge-pages--dynamic-linker-complete)
 - [v0.5.12 -- Phase 5.5 Wave 4: NVMe + Networking + PMU](#v0512----phase-55-wave-4-nvme--networking--pmu)
 - [v0.5.11 -- Phase 5.5 Wave 3: DMA/IOMMU + Shared Mem + Lock-Free](#v0511----phase-55-wave-3-dmaiommu--shared-mem--lock-free)
@@ -49,6 +52,83 @@ For current project status, see the [README](../README.md). For task tracking, s
 - [v0.2.0 -- Phase 1 Microkernel Core](#v020----phase-1-microkernel-core)
 - [v0.1.0 -- Phase 0 Foundation and Tooling](#v010----phase-0-foundation-and-tooling)
 - [DEEP-RECOMMENDATIONS](#deep-recommendations)
+
+---
+
+## v0.6.2 -- Phase 6 Completion + Phase 7 TODO
+
+**Date**: February 27, 2026
+
+Phase 6 documentation sync, integration wiring, and TODO marker resolution:
+
+- **Documentation Sync** -- All Phase 6 references updated from "~5%" to "~40%"; MASTER_TODO, PHASE6_TODO, design doc, README, RELEASE_TODO, DEFERRED-IMPLEMENTATION-ITEMS all updated
+- **AF_INET Socket Creation** -- `sys_socket_create()` now wires AF_INET to `net::socket::create_socket()` for IPv4 TCP/UDP sockets
+- **Device Registry Integration** -- E1000 and VirtIO-Net drivers registered with `net::device::register_device()` on init
+- **UDP recv_from Wiring** -- `UdpSocket` now tracks `socket_id`, registers with UDP socket buffer on `bind()`, and delegates `recv_from()` to the socket buffer layer
+- **TODO(phase6) Resolution** -- All 43 markers resolved: 4 wired to implementations, 39 reclassified to `TODO(phase7)` with justification
+- **Phase 7 TODO** -- Comprehensive roadmap generated (`to-dos/PHASE7_TODO.md`) with 15 categories and ~85 items
+
+---
+
+## v0.6.1 -- Phase 6 Graphical Desktop, Wayland Compositor, Network Stack
+
+**Date**: February 27, 2026
+
+First graphical desktop release. Transforms VeridianOS from a text-mode microkernel into a graphical desktop OS with networking.
+
+### Wave 1: Display and Input Foundation (Sprints 1-4, syscalls 230-234)
+- `FbInfo` struct + physical address tracking in `graphics/framebuffer.rs`
+- `map_physical_region()` / `map_physical_region_user()` in `mm/vas.rs`
+- PS/2 mouse driver (`drivers/mouse.rs`): 3-byte packets, absolute cursor, ring buffer
+- Unified input event system (`drivers/input_event.rs`): EV_KEY/EV_REL, 256-entry queue
+- Hardware cursor sprite (`graphics/cursor.rs`): 16x16 arrow with outline
+
+### Wave 2: Wayland Compositor Core (Sprints 5-8, syscalls 240-247)
+- Wire protocol parser (`desktop/wayland/protocol.rs`): 8 argument types, message framing
+- SHM buffer management (`desktop/wayland/buffer.rs`): WlShmPool, sub-allocation, write_data()
+- Software compositor (`desktop/wayland/compositor.rs`): back-buffer, Z-order, alpha blend, atomic dimensions
+- Double-buffered surfaces (`desktop/wayland/surface.rs`): pending/committed state swap
+- XDG shell (`desktop/wayland/shell.rs`): ping/pong, configure, toplevel lifecycle
+- Display server (`desktop/wayland/mod.rs`): 9 interface handlers, per-client objects
+
+### Wave 3: Desktop Environment (Sprints 9-12)
+- Terminal ANSI (`desktop/terminal.rs`): CSI parser, SGR colors, cursor movement
+- Desktop panel (`desktop/panel.rs`): window list, clock, click-to-focus
+- Desktop renderer (`desktop/renderer.rs`): start_desktop(), render loop, framebuffer blit
+
+### Wave 4: Network Stack (Sprints 13-16, syscalls 250-255)
+- VirtIO-Net (`drivers/virtio_net.rs`): full VIRTIO negotiation, virtqueue TX/RX
+- Ethernet (`net/ethernet.rs`): IEEE 802.3 parse/construct, EtherType dispatch
+- ARP (`net/arp.rs`): cache with timeout, request/reply, broadcast
+- TCP (`net/tcp.rs`): 3-way handshake, data transfer MSS=1460, FIN/ACK close
+- DHCP (`net/dhcp.rs`): discover/offer/request/ack, option parsing, IP config
+- IP layer (`net/ip.rs`): InterfaceConfig, IPv4 headers, ARP resolve
+- Socket extensions (`net/socket.rs`): sendto/recvfrom/getsockname/getpeername/setsockopt/getsockopt
+- Shell commands: ifconfig, dhcp, netstat, arp
+
+### Wave 5: Integration (Sprints 17-20)
+- Desktop init wires `wayland::init()` into subsystem init
+- `startgui` shell command launches graphical desktop
+- Compositor render loop: composite -> blit -> cursor -> input poll -> repeat
+
+**Stats**: 37 files changed (10 new), +6,862/-267 lines, 19 new syscalls.
+
+---
+
+## v0.6.0 -- Pre-Phase 6 Tech Debt Remediation
+
+**Date**: February 27, 2026
+
+Comprehensive tech debt audit bridging Phase 5.5 to Phase 6 readiness:
+
+- **12 New Syscalls** -- POSIX shared memory (ShmOpen=210, ShmUnlink=211, ShmTruncate=212); Unix domain sockets (SocketCreate=220 through SocketPair=228)
+- **PMU Bootstrap** -- `perf::pmu::init()` called during Stage 3 after ACPI/APIC
+- **RCU Integration** -- `rcu_quiescent()` called after every scheduler context switch
+- **NVMe PCI Scan** -- init() scans PCI bus for class 0x01/subclass 0x08
+- **IOMMU DMAR** -- AcpiInfo extended with `has_dmar`, `dmar_address`, `dmar_length`
+- **Dynamic Linker Fix** -- `load_interpreter()` copies real ELF segment data
+
+**Stats**: 18 files changed, +542/-53 lines.
 
 ---
 

@@ -113,7 +113,7 @@ pub fn optimize_memory() {
 ///
 /// Reports scheduling performance counters (context switches, syscalls).
 /// Affinity tuning and cross-node load rebalancing require per-CPU
-/// run-queue instrumentation (TODO(phase6)).
+/// run-queue instrumentation (TODO(phase7)).
 pub fn optimize_scheduler() {
     println!("[PERF] Optimizing scheduler...");
     let counters = get_stats();
@@ -126,7 +126,7 @@ pub fn optimize_scheduler() {
 /// Optimize IPC.
 ///
 /// Reports IPC message throughput counters.  Fast-path tuning and
-/// message batching require workload profiling (TODO(phase6)).
+/// message batching require workload profiling (TODO(phase7)).
 pub fn optimize_ipc() {
     println!("[PERF] Optimizing IPC...");
     let counters = get_stats();

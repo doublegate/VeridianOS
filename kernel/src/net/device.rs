@@ -235,7 +235,7 @@ impl NetworkDevice for EthernetDevice {
 
     fn set_state(&mut self, state: DeviceState) -> Result<(), KernelError> {
         self.state = state;
-        // TODO(phase6): Configure hardware state via device registers
+        // TODO(phase7): Configure hardware state via device registers
         Ok(())
     }
 
@@ -252,7 +252,7 @@ impl NetworkDevice for EthernetDevice {
             });
         }
 
-        // TODO(phase6): Transmit via hardware DMA/MMIO
+        // TODO(phase7): Transmit via hardware DMA/MMIO
         self.stats.tx_packets += 1;
         self.stats.tx_bytes += packet.len() as u64;
 
@@ -264,7 +264,7 @@ impl NetworkDevice for EthernetDevice {
             return Ok(None);
         }
 
-        // TODO(phase6): Receive from hardware via DMA ring buffer
+        // TODO(phase7): Receive from hardware via DMA ring buffer
         Ok(None)
     }
 }

@@ -249,7 +249,7 @@ pub fn init() -> KernelResult<bool> {
         // requires walking the variable-length remapping entries.
         // For now, report discovery; full VT-d page table setup
         // is deferred to Phase 6 (requires MMIO register programming).
-        // TODO(phase6): Parse DRHD entries for register base addresses,
+        // TODO(phase7): Parse DRHD entries for register base addresses,
         // set up context tables and second-level page tables.
         Some(DmarInfo {
             host_address_width: 0,

@@ -1,37 +1,40 @@
 # Phase 6: Advanced Features and GUI TODO
 
 **Phase Duration**: 4-6 months
-**Status**: ~5% Complete (type definitions and framework stubs only)
-**Dependencies**: Phase 5 completion (in progress)
+**Status**: ~40% Complete (core graphical path: Wayland compositor, desktop renderer, input, TCP/IP stack)
+**Dependencies**: Phase 5 completion (~90%), Phase 5.5 COMPLETE
+**Last Updated**: February 27, 2026 (v0.6.2)
 
 ## Overview
 
-Phase 6 implements advanced features including GUI stack, multimedia support, virtualization, and cloud-native capabilities.
+Phase 6 implements advanced features including a GUI stack, networking, and desktop environment. The core graphical path was completed in v0.6.1; remaining items (GPU drivers, multimedia, virtualization, cloud-native) are tracked in [Phase 7 TODO](PHASE7_TODO.md).
 
 ## 🎯 Goals
 
-- [ ] Implement complete GUI stack
-- [ ] Add multimedia support
-- [ ] Enable virtualization features
-- [ ] Build container runtime
-- [ ] Create desktop environment
+- [x] Implement Wayland compositor with software rendering (v0.6.1)
+- [x] Create desktop environment with panel, terminal, renderer (v0.6.1)
+- [x] Implement TCP/IP network stack (v0.6.1)
+- [x] Add PS/2 mouse + unified input event system (v0.6.1)
+- [x] Wire AF_INET sockets, device registry, UDP recv (v0.6.2)
+- [x] Resolve all TODO(phase6) markers (v0.6.2)
+- [ ] GPU acceleration, multimedia, virtualization -- see Phase 7
 
 ## 📋 Core Tasks
 
 ### 1. Graphics Stack
 
-#### Display Server (Wayland)
-- [ ] Wayland protocol implementation
-  - [ ] Core protocol
-  - [ ] XDG shell protocol
-  - [ ] Input protocols
-  - [ ] DMA-BUF protocol
-- [ ] Compositor framework
-  - [ ] Window management
-  - [ ] Surface composition
-  - [ ] Input handling
-  - [ ] Output management
-- [ ] Client library
+#### Display Server (Wayland) -- Core path DONE (v0.6.1)
+- [x] Wayland protocol implementation
+  - [x] Core protocol (wire protocol parser, 8 argument types, message framing)
+  - [x] XDG shell protocol (ping/pong, configure, toplevel lifecycle)
+  - [x] Input protocols (unified input events, EV_KEY/EV_REL)
+  - [ ] DMA-BUF protocol -- Phase 7
+- [x] Compositor framework
+  - [x] Window management (Z-order, focus)
+  - [x] Surface composition (alpha blend, double-buffered)
+  - [x] Input handling (PS/2 mouse, keyboard)
+  - [ ] Output management (multi-monitor) -- Phase 7
+- [ ] Client library -- Phase 7
   - [ ] Connection management
   - [ ] Buffer management
   - [ ] Event handling
@@ -81,16 +84,16 @@ Phase 6 implements advanced features including GUI stack, multimedia support, vi
   - [ ] Display mirroring
   - [ ] Hotplug handling
 
-#### Desktop Shell
-- [ ] Panel/taskbar
-  - [ ] Application launcher
-  - [ ] System tray
-  - [ ] Notification area
-  - [ ] Clock/calendar
-- [ ] Desktop widgets
-- [ ] Application switcher
-- [ ] Virtual desktops
-- [ ] Screen locking
+#### Desktop Shell -- Basic DONE (v0.6.1)
+- [x] Panel/taskbar (window list, clock, click-to-focus)
+  - [ ] Application launcher -- Phase 7
+  - [ ] System tray -- Phase 7
+  - [ ] Notification area -- Phase 7
+  - [x] Clock/calendar (basic clock display)
+- [ ] Desktop widgets -- Phase 7
+- [ ] Application switcher -- Phase 7
+- [ ] Virtual desktops -- Phase 7
+- [ ] Screen locking -- Phase 7
 
 ### 3. GUI Toolkit
 
@@ -228,15 +231,27 @@ Phase 6 implements advanced features including GUI stack, multimedia support, vi
 - [ ] Dynamic configuration
 - [ ] Auto-scaling support
 
-### 8. Advanced Networking
+### 8. Advanced Networking -- Core DONE (v0.6.1), advanced items Phase 7
 
-#### Network Virtualization
+#### Core Networking (DONE v0.6.1)
+- [x] VirtIO-Net driver (full VIRTIO negotiation, virtqueue TX/RX)
+- [x] Ethernet (IEEE 802.3 parse/construct, EtherType dispatch)
+- [x] ARP (cache with timeout, request/reply, broadcast)
+- [x] TCP (3-way handshake, data transfer MSS=1460, FIN/ACK close)
+- [x] DHCP (discover/offer/request/ack, option parsing, IP config)
+- [x] IP layer (InterfaceConfig, IPv4 headers, ARP resolve)
+- [x] Socket extensions (sendto/recvfrom/getsockname/getpeername/setsockopt/getsockopt)
+- [x] AF_INET socket creation (v0.6.2)
+- [x] Device registry wiring (v0.6.2)
+- [x] UDP recv_from wired to socket buffer (v0.6.2)
+
+#### Network Virtualization -- Phase 7
 - [ ] Virtual switches
 - [ ] Network namespaces
 - [ ] VLAN support
 - [ ] Overlay networks
 
-#### Advanced Protocols
+#### Advanced Protocols -- Phase 7
 - [ ] IPv6 full support
 - [ ] QUIC implementation
 - [ ] WireGuard VPN
@@ -297,11 +312,14 @@ trait ContainerRuntime {
 
 | Component | Design | Implementation | Testing | Complete |
 |-----------|--------|----------------|---------|----------|
-| Graphics | ⚪ | ⚪ | ⚪ | ⚪ |
-| Desktop | ⚪ | ⚪ | ⚪ | ⚪ |
+| Wayland Compositor | 🟢 | 🟢 | 🟡 | 🟡 |
+| Desktop Renderer | 🟢 | 🟢 | 🟡 | 🟡 |
+| Input (Mouse/Keyboard) | 🟢 | 🟢 | 🟡 | 🟡 |
+| TCP/IP Stack | 🟢 | 🟢 | 🟡 | 🟡 |
+| GPU Acceleration | 🟢 | ⚪ | ⚪ | ⚪ |
 | Multimedia | ⚪ | ⚪ | ⚪ | ⚪ |
 | Virtualization | ⚪ | ⚪ | ⚪ | ⚪ |
-| Applications | ⚪ | ⚪ | ⚪ | ⚪ |
+| Desktop Apps | 🟢 | 🟡 | ⚪ | ⚪ |
 
 ## 📅 Timeline
 
@@ -320,58 +338,35 @@ trait ContainerRuntime {
 
 ## From Code Audit
 
-The following items were recategorized from `TODO(future)` to `TODO(phase6)` based on their content (network, TCP/IP, GPU, USB, NVMe, dynamic linking, device drivers, console).
+Items recategorized from `TODO(future)` to `TODO(phase6)` based on their content.
 
-### Network Stack (TCP/IP)
-- `net/tcp.rs` - Construct and send SYN packet via IP layer
-- `net/tcp.rs` - Segment data and send via TCP with retransmission
-- `net/tcp.rs` - Receive reassembled data from TCP receive buffer
-- `net/udp.rs` - Receive data from network stack socket buffer
-- `net/ip.rs` - Get source address from interface config
-- `net/ip.rs` - Route and send packet through network device
-- `net/dhcp.rs` - Parse DHCP offer options to extract IP and server ID
-- `net/dhcp.rs` - Parse ACK options and configure network interface
-- `net/dhcp.rs` - Send DISCOVER via UDP broadcast
-- `net/integration.rs` - Register E1000 with network device registry
-- `net/integration.rs` - Register VirtIO-Net with network device registry
-- `net/device.rs` - Configure hardware state via device registers
-- `net/device.rs` - Transmit via hardware DMA/MMIO
-- `net/device.rs` - Receive from hardware via DMA ring buffer
-- `net/dma_pool.rs` - Proper DMA buffer allocation using physically contiguous memory
+### Resolved in v0.6.1 (Implemented)
+- [x] `net/tcp.rs` - TCP 3-way handshake, data transfer, FIN/ACK close
+- [x] `net/ip.rs` - InterfaceConfig, IPv4 headers, ARP resolve
+- [x] `net/dhcp.rs` - Full DHCP client (discover/offer/request/ack)
+- [x] `drivers/virtio_net.rs` - Complete virtqueue TX/RX with DMA and MMIO kick
+- [x] `drivers/nvme.rs` - Admin command submission + I/O queue pair creation (v0.5.12)
 
-### Network Zero-Copy I/O
-- `net/zero_copy.rs` - Allocate DMA-capable memory (below 4GB for 32-bit DMA)
-- `net/zero_copy.rs` - Copy data from physical address to contiguous buffer
-- `net/zero_copy.rs` - Pin user pages and translate to physical addresses
-- `net/zero_copy.rs` - Program network card DMA engine with scatter-gather list
-- `net/zero_copy.rs` - Send pending data via TCP socket
+### Resolved in v0.6.2 (Wired)
+- [x] `net/integration.rs` - E1000 + VirtIO-Net registered with device registry
+- [x] `net/udp.rs` - recv_from wired to socket buffer layer
+- [x] `syscall/mod.rs` - AF_INET socket creation
 
-### VirtIO Network Driver
-- `drivers/virtio_net.rs` - Complete virtqueue TX with DMA buffer allocation and MMIO kick
-- `drivers/virtio_net.rs` - Complete virtqueue RX with DMA buffer retrieval and recycling
-- `drivers/virtio_net.rs` - Implement virtqueue-based transmission
-- `drivers/virtio_net.rs` - Implement virtqueue-based reception
-
-### NVMe Storage Driver
-- `drivers/nvme.rs` - NVMe admin command submission with doorbell ringing
-- `drivers/nvme.rs` - NVMe read: create I/O command, submit, wait, copy from DMA
-- `drivers/nvme.rs` - NVMe write: copy to DMA, create I/O command, submit, wait
-
-### Ethernet Network Driver
-- `drivers/network.rs` - Get actual timestamp from clock subsystem
-- `drivers/network.rs` - Transmit packet via actual hardware DMA
-- `drivers/network.rs` - Validate device is Ethernet via PCI class/subclass
-- `drivers/network.rs` - Initialize actual Ethernet hardware via MMIO registers
-- `drivers/network.rs` - Handle hardware interrupts (status check, RX/TX completion)
-
-### Console Driver
-- `drivers/console.rs` - Remove specific console device from device list
-- `drivers/console.rs` - Read input from console keyboard driver
-
-### Dynamic Linking
-- `userspace/enhanced_loader.rs` - Copy real interpreter segment data from VFS
+### Reclassified to Phase 7 (TODO(phase7))
+All remaining items have been reclassified to `TODO(phase7)` in source code:
+- Network zero-copy I/O (6 items in `net/zero_copy.rs`)
+- Hardware NIC drivers (5 items in `drivers/network.rs`)
+- DMA pool allocation (`net/dma_pool.rs`)
+- Network device abstraction (3 items in `net/device.rs`)
+- GPU drivers (4 items in `graphics/gpu.rs`, 1 in `drivers/gpu.rs`)
+- Console driver (2 items in `drivers/console.rs`)
+- NUMA optimization (3 items in `sched/numa.rs`)
+- Security hardening (2 items in `arch/x86_64/mmu.rs`, 1 in `security/tpm.rs`)
+- Performance profiling (2 items in `perf/mod.rs`)
+- Other (see [Phase 7 TODO](PHASE7_TODO.md) for comprehensive list)
 
 ---
 
 **Previous Phase**: [Phase 5 - Performance Optimization](PHASE5_TODO.md)
-**Next Steps**: [Post-1.0 Enhancements](ENHANCEMENTS_TODO.md)
+**Next Phase**: [Phase 7 - Production Readiness](PHASE7_TODO.md)
+**See Also**: [Post-1.0 Enhancements](ENHANCEMENTS_TODO.md)

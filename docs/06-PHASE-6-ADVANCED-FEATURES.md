@@ -1,19 +1,20 @@
 # Phase 6: Advanced Features and GUI (Months 34-42)
 
-**Status**: ~5% Complete (type definitions and framework stubs only)
-**Last Updated**: February 15, 2026
+**Status**: ~40% Complete (core graphical path implemented in v0.6.1)
+**Last Updated**: February 27, 2026
 
-### Current Progress
+### Current Progress (v0.6.2)
 
-Phase 6 has minimal implementations from early architectural work:
-- Color representation (RGBA) and geometric primitives (Rect)
-- GraphicsContext trait and basic framebuffer implementation
-- Window compositor type definitions (window creation, focus tracking)
-- Wayland protocol message type definitions
-- GPU device enumeration type definitions
-- Terminal emulator, file manager, and text editor type scaffolding
+Phase 6 core graphical path is complete as of v0.6.1:
+- **Wayland Compositor**: Wire protocol parser (8 argument types), SHM buffer management, software compositor with alpha blending and Z-order, double-buffered surfaces, XDG shell (ping/pong, configure, toplevel lifecycle), display server with 9 interface handlers
+- **Desktop Environment**: Terminal ANSI parser (CSI, SGR colors, cursor), desktop panel (window list, clock, click-to-focus), desktop renderer with compositor render loop and framebuffer blit
+- **Input System**: PS/2 mouse driver (3-byte packets, absolute cursor, ring buffer), unified input events (EV_KEY/EV_REL, 256-entry queue), hardware cursor sprite (16x16 arrow with outline)
+- **TCP/IP Network Stack**: VirtIO-Net driver (full VIRTIO negotiation, virtqueue TX/RX), Ethernet (IEEE 802.3), ARP (cache with timeout), TCP (3-way handshake, MSS=1460, FIN/ACK), DHCP (discover/offer/request/ack), IP layer, socket extensions
+- **19 New Syscalls**: FbGetInfo..FbSwap (230-234), WlConnect..WlGetEvents (240-247), NetSendTo..NetGetSockOpt (250-255)
+- **Shell Commands**: ifconfig, dhcp, netstat, arp, startgui
+- **Integration** (v0.6.2): AF_INET socket creation, device registry wiring, UDP recv_from
 
-These are primarily type definitions and data structures. No actual GPU drivers, Wayland protocol handling, multimedia stack, virtualization, or cloud features have been implemented.
+Remaining items (GPU drivers, multimedia, virtualization, cloud-native) are tracked in [Phase 7 TODO](../to-dos/PHASE7_TODO.md).
 
 ## Overview
 

@@ -20,7 +20,7 @@ pub fn init() {
     // L4[256-511].  Each process gets its own L4 with the kernel entries
     // copied from this root.  Dedicated kernel page tables are not needed
     // because the per-process page tables already include the kernel mapping.
-    // TODO(phase6): KPTI shadow page tables for Meltdown mitigation.
+    // TODO(phase7): KPTI shadow page tables for Meltdown mitigation.
 }
 
 /// Read CR3 register (page table base)
@@ -119,7 +119,7 @@ pub fn handle_page_fault(error_code: u32, faulting_address: VirtualAddress) {
     println!("  Reserved bit: {}", error.reserved_write());
     println!("  Instruction fetch: {}", error.instruction_fetch());
 
-    // TODO(phase6): Implement demand paging (stack growth, heap on-demand,
+    // TODO(phase7): Implement demand paging (stack growth, heap on-demand,
     // COW for fork, mmap lazy allocation).  Currently all pages are
     // pre-allocated, so any page fault is a genuine bug.
 

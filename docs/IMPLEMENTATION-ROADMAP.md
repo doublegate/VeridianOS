@@ -15,8 +15,8 @@ Phase 1: Microkernel Core (4-5 months) - 100% Complete ━━━━━━━━�
 Phase 2: User Space Foundation (5-6 months) - 100% Complete ━━━━━━━━━━━━ ✅ (v0.3.2)
 Phase 3: Security Hardening (5-6 months) - 100% Complete ━━━━━━━━━━━━ ✅ (v0.3.2)
 Phase 4: Package Ecosystem (5-6 months) - 100% Complete ━━━━━━━━━━━━ ✅ (v0.4.1)
-Phase 5: Performance Optimization (5-6 months) - ~10% Complete ━░░░░░░░░░░░ (data structures only)
-Phase 6: Advanced Features (8-9 months) - ~5% Complete ░░░░░░░░░░░░ (type definitions only)
+Phase 5: Performance Optimization (5-6 months) - ~90% Complete ━━━━━━━━━━░ (hot paths wired, v0.5.8)
+Phase 6: Advanced Features (8-9 months) - ~40% Complete ━━━━━░░░░░░░ (core graphical path, v0.6.2)
 ```
 
 ## Technical Architecture Decisions

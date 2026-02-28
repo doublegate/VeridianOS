@@ -304,7 +304,7 @@ pub fn init() -> Result<(), KernelError> {
     println!("[GPU] Initializing GPU driver...");
 
     // For now, create a simple framebuffer (would normally detect VBE/GOP)
-    // TODO(phase6): Detect actual framebuffer from bootloader (VBE/GOP)
+    // TODO(phase7): Detect actual framebuffer from bootloader (VBE/GOP)
     let driver = GpuDriver::simple(0xFD000000, 1024, 768);
 
     *GPU_DRIVER.lock() = Some(driver);

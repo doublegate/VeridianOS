@@ -596,7 +596,7 @@ pub fn init() -> Result<(), KernelError> {
                     }
                 }
 
-                // TODO(phase6): Full NVMe initialization sequence:
+                // TODO(phase7): Full NVMe initialization sequence:
                 // 1. Map BAR0 MMIO region
                 // 2. Read CAP register for queue parameters
                 // 3. Allocate DMA buffers for admin queue pair

@@ -914,7 +914,7 @@ fn verify_dilithium_signature(message: &[u8], signature: &[u8], public_key: &[u8
         return false;
     }
 
-    // TODO(phase6): Full Dilithium algebraic verification requires
+    // TODO(phase7): Full Dilithium algebraic verification requires
     // SHAKE-128/256 and NTT polynomial arithmetic.  Current verification
     // is structural only (commitment hash + coefficient range check).
     // Full steps:

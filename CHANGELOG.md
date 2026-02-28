@@ -2,6 +2,52 @@
 
 ---
 
+## [v0.6.2] - 2026-02-27
+
+### v0.6.2: Phase 6 Completion -- Documentation Sync, Integration Wiring, Phase 7 TODO
+
+Completes Phase 6 by synchronizing all documentation to reflect the v0.6.1 graphical desktop achievements, wiring 3 integration points that were left as TODO stubs, resolving all 43 `TODO(phase6)` source code markers, and generating a comprehensive Phase 7 roadmap. No new kernel features -- this is a documentation, wiring, and cleanup release.
+
+#### Sprint 1: Documentation Sync (9 files)
+- Updated Phase 6 status from "~5% (type definitions only)" to "~40% (core graphical path)" in MASTER_TODO.md, PHASE6_TODO.md, 06-PHASE-6-ADVANCED-FEATURES.md, to-dos/README.md, PROJECT-STATUS.md, IMPLEMENTATION-ROADMAP.md
+- Added v0.6.0, v0.6.1, v0.6.2 entries to docs/RELEASE-HISTORY.md with full wave-by-wave details
+- Updated RELEASE_TODO.md: version sync, release records for v0.6.0/v0.6.1/v0.6.2
+- Updated DEFERRED-IMPLEMENTATION-ITEMS.md: added Phase 6 completed section, Phase 7 remaining items
+- Checked off completed items in PHASE6_TODO.md: Wayland protocol, compositor, desktop shell, networking
+- Updated progress tracking tables across all status documents
+
+#### Sprint 2: Integration Wiring (3 kernel files, 4 TODO markers resolved)
+- `kernel/src/syscall/mod.rs`: AF_INET socket creation now routes through `net::socket::create_socket()` with proper SocketDomain::Inet, SocketType::Stream/Dgram, and SocketProtocol::Tcp/Udp mapping
+- `kernel/src/net/integration.rs`: E1000 and VirtIO-Net drivers now registered with `net::device::register_device(Box::new(driver))` after successful initialization, with error logging on registration failure
+- `kernel/src/net/udp.rs`: Added `socket_id: usize` field (atomic counter), `register_socket()` on `bind()`, `recv_from()` now delegates to global `UDP_SOCKETS` buffer layer via `receive_from()`, `Drop` impl calls `unregister_socket()` for cleanup
+
+#### Sprint 3: TODO(phase6) Marker Reclassification (19 kernel files)
+- All 39 remaining `TODO(phase6)` markers reclassified to `TODO(phase7)` across 19 source files
+- Files affected: bootstrap.rs, security/tpm.rs, net/zero_copy.rs (x6), services/desktop_ipc.rs, sched/numa.rs (x3), sched/ipc_blocking.rs, net/dma_pool.rs, net/device.rs (x3), graphics/gpu.rs (x4), drivers/nvme.rs, drivers/iommu.rs, pkg/mod.rs, services/shell/expand.rs, drivers/console.rs (x2), desktop/file_manager.rs, drivers/gpu.rs, drivers/network.rs (x5), perf/mod.rs (x2), arch/x86_64/mmu.rs (x2)
+- Post-reclassification: `grep -rn "TODO(phase6)" kernel/src/` returns **0 results**
+
+#### Sprint 4: Phase 7 TODO Generation (1 new file)
+- Created `to-dos/PHASE7_TODO.md`: 252 lines, 15 categories, 93 items
+- Categories: GPU Drivers (8), Advanced Wayland (6), Desktop Completion (7), Window Manager (6), Desktop Apps (6), Dynamic Linker (6), Advanced Networking (12), Multimedia (6), Virtualization (4), Cloud Native (5), Hardware Drivers (5), Security Hardening (4), Performance (9), Shell/Userland (3), Phase 5 Deferred (6)
+- Includes source marker cross-references, progress tracking table, 6-wave 12-month suggested timeline
+
+#### Sprint 5: Version Bump + Final Documentation (8 files)
+- Version bump: `Cargo.toml` (workspace), `commands.rs` (uname), `fs/mod.rs` (/etc/os-release) -- 0.6.1 -> 0.6.2
+- CLAUDE.md: Phase 6 "~5%" -> "~40%", added Phase 7 to development phases, updated latest release
+- README.md: Latest release, development phases table, technical roadmap
+
+#### Verification
+- `grep -rn "TODO(phase6)" kernel/src/`: **0 results** (all 43 resolved)
+- `grep -rn "~5%" to-dos/`: **0 stale references** (only in changelog context)
+- `./build-kernel.sh all dev`: zero errors, zero warnings (all 3 architectures)
+- `cargo clippy` with `-D warnings` on x86_64, AArch64, RISC-V: **zero warnings**
+- `cargo fmt --all -- --check`: **clean**
+- QEMU x86_64: 29/29 tests, 2x BOOTOK
+- QEMU AArch64: 29/29 tests, 2x BOOTOK
+- QEMU RISC-V: 29/29 tests, 2x BOOTOK
+
+---
+
 ## [v0.6.1] - 2026-02-27
 
 ### v0.6.1: Phase 6 -- Graphical Desktop, Wayland Compositor, and Network Stack

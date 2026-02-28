@@ -215,7 +215,7 @@ impl FileManager {
                 self.refresh_directory()?;
             }
             NodeType::File => {
-                // TODO(phase6): Open file in appropriate application via MIME dispatch
+                // TODO(phase7): Open file in appropriate application via MIME dispatch
                 println!("[FILE-MANAGER] Opening file: {}", entry.name);
             }
             _ => {}

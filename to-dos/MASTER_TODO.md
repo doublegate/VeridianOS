@@ -1,6 +1,6 @@
 # VeridianOS Master TODO List
 
-**Last Updated**: 2026-02-27 (Phase 5 ~90%, Phase 5.5 COMPLETE, Tier 7 COMPLETE, v0.6.0)
+**Last Updated**: 2026-02-27 (Phase 5 ~90%, Phase 5.5 COMPLETE, Phase 6 ~40%, Tier 7 COMPLETE, v0.6.2)
 
 ## Project Overview Status
 
@@ -10,9 +10,10 @@
 - [x] **Phase 3: Security Hardening** - COMPLETE (100%) v0.3.2 (February 14, 2026)
 - [x] **Phase 4: Package Ecosystem** - COMPLETE (100%) v0.4.0 (February 15, 2026)
 - [ ] **Phase 5: Performance Optimization** - ~90% (hot path wiring, CapabilityCache, O(log n) IPC PID lookup, trace instrumentation)
-- [ ] **Phase 6: Advanced Features & GUI** - ~5% (type definitions only, Wayland/GPU framework stubs)
+- [ ] **Phase 6: Advanced Features & GUI** - ~40% (core graphical path: Wayland compositor, desktop renderer, input, TCP/IP)
+- [ ] **Phase 7: Production Readiness** - 0% (GPU drivers, advanced Wayland, multimedia, virtualization, cloud-native)
 
-## Current Version: v0.6.0 (February 27, 2026)
+## Current Version: v0.6.2 (February 27, 2026)
 
 ### Build Status
 - **x86_64**: 0 errors, 0 warnings, Stage 6 BOOTOK, 29/29 tests
@@ -144,15 +145,18 @@
 - [ ] Power management -- deferred, requires ACPI parser
 - [ ] Profile-guided optimization -- deferred, requires self-hosted Rust
 
-### Phase 6: Advanced Features & GUI (~5% actual)
-- [x] Wayland compositor type definitions (desktop/wayland/)
-- [x] GPU framework type definitions (graphics/gpu.rs)
-- [x] Window manager, terminal, text editor, file manager type stubs
-- [ ] Functional GPU drivers (Intel, AMD, NVIDIA)
-- [ ] Desktop environment
-- [ ] Multimedia (audio, video)
-- [ ] Virtualization / container runtime
-- [ ] GUI toolkit
+### Phase 6: Advanced Features & GUI (~40% actual -- core graphical path)
+- [x] Wayland compositor: wire protocol parser, SHM buffers, surface compositing, XDG shell (v0.6.1)
+- [x] Desktop renderer: gradient background, demo windows, compositor render loop (v0.6.1)
+- [x] PS/2 mouse driver, unified input events (EV_KEY/EV_REL), hardware cursor (v0.6.1)
+- [x] TCP/IP network stack: VirtIO-Net TX/RX, Ethernet, ARP cache, TCP state machine, DHCP (v0.6.1)
+- [x] Shell commands: ifconfig, dhcp, netstat, arp, startgui (v0.6.1)
+- [x] 19 new syscalls (FbGetInfo..FbSwap, WlConnect..WlGetEvents, NetSendTo..NetGetSockOpt) (v0.6.1)
+- [x] AF_INET socket creation wired to net::socket (v0.6.2)
+- [x] VirtIO-Net/E1000 device registry integration (v0.6.2)
+- [x] UDP recv_from wired to socket buffer layer (v0.6.2)
+- [x] All TODO(phase6) markers resolved or reclassified to Phase 7 (v0.6.2)
+- [ ] GPU drivers, advanced Wayland, multimedia, virtualization -- see Phase 7
 
 ## Progress Tracking
 
@@ -172,7 +176,10 @@
 | Package Manager | Done | Done | Partial | Done |
 | Crypto / Security | Done | Done | Partial | Done |
 | NUMA Scheduling | Done | Done | Partial | Partial |
-| Wayland/GPU | Done | Type Defs | Not Started | Not Started |
+| Wayland/Compositor | Done | Done | Partial | Partial |
+| Desktop/Input | Done | Done | Partial | Partial |
+| TCP/IP Stack | Done | Done | Partial | Partial |
+| GPU Acceleration | Done | Type Defs | Not Started | Not Started |
 
 ## Known Issues
 
@@ -199,7 +206,8 @@ See [REMEDIATION_TODO.md](REMEDIATION_TODO.md) for 37 identified gaps from Phase
 - [Phase 4 TODO](PHASE4_TODO.md) - COMPLETE
 - [Phase 5 TODO](PHASE5_TODO.md) - ~90%
 - [Phase 5.5 TODO](PHASE5.5_TODO.md) - 100% COMPLETE (all 12 sprints, v0.5.13)
-- [Phase 6 TODO](PHASE6_TODO.md) - ~5% (future work)
+- [Phase 6 TODO](PHASE6_TODO.md) - ~40% (core graphical path complete)
+- [Phase 7 TODO](PHASE7_TODO.md) - 0% (GPU, multimedia, virtualization, cloud-native)
 - [Remediation TODO](REMEDIATION_TODO.md) - Gaps from Phases 0-4
 - [Issues TODO](ISSUES_TODO.md) - Issue history
 - [Testing TODO](TESTING_TODO.md) - Testing status
@@ -209,6 +217,9 @@ See [REMEDIATION_TODO.md](REMEDIATION_TODO.md) for 37 identified gaps from Phase
 
 | Version | Date | Summary |
 |---------|------|---------|
+| v0.6.2 | Feb 27, 2026 | Phase 6 completion: documentation sync, integration wiring, TODO(phase6) resolved, Phase 7 TODO |
+| v0.6.1 | Feb 27, 2026 | Phase 6 graphical desktop: Wayland compositor, PS/2 mouse, TCP/IP (VirtIO-Net/Ethernet/ARP/TCP/DHCP), startgui |
+| v0.6.0 | Feb 27, 2026 | Pre-Phase 6 tech debt: 12 new syscalls (POSIX shm + Unix sockets), PMU, RCU, NVMe PCI, IOMMU DMAR |
 | v0.5.13 | Feb 27, 2026 | Phase 5.5 COMPLETE: 2MB huge pages, dynamic linker (ld-veridian), all 12 sprints done |
 | v0.5.12 | Feb 27, 2026 | Phase 5.5 Wave 4: NVMe driver, VirtIO-Net TX/RX, hardware PMU |
 | v0.5.11 | Feb 27, 2026 | Phase 5.5 Wave 3: DMA/IOMMU, shared memory, Unix sockets, lock-free paths |

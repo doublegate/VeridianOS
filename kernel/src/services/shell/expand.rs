@@ -523,7 +523,7 @@ fn execute_substitution_command(command: &str) -> String {
                 .map(|shell| shell.get_cwd())
                 .unwrap_or_else(|| String::from("/"))
         }
-        // TODO(phase6): Full stdout capture requires process pipe infrastructure
+        // TODO(phase7): Full stdout capture requires process pipe infrastructure
         // (fork + exec + pipe fd redirection).  Other commands return empty for now.
         _ => String::new(),
     }

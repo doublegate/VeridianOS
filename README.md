@@ -112,7 +112,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.6.1 (February 27, 2026) | **Releases Published**: 40 (v0.1.0 through v0.6.1)
+**Latest Release**: v0.6.2 (February 27, 2026) | **Releases Published**: 41 (v0.1.0 through v0.6.2)
 
 | Metric                 | Value                                           |
 | ---------------------- | ----------------------------------------------- |
@@ -140,7 +140,8 @@ experiments/   Non-normative exploratory work
 | 4     | Package Ecosystem         | **Complete**           | v0.4.0  | Feb 2026 |
 | 5     | Performance Optimization  | **Complete (~90%)**    | v0.5.8  | Feb 2026 |
 | 5.5   | Infrastructure Bridge     | **COMPLETE (100%)** | v0.5.13 | Feb 2026 |
-| 6     | Advanced Features and GUI | **In Progress (~40%)** | v0.6.1  | Feb 2026 |
+| 6     | Advanced Features and GUI | **In Progress (~40%)** | v0.6.2  | Feb 2026 |
+| 7     | Production Readiness     | **Planned**            | --      | --       |
 
 For detailed release notes, see [Release History](docs/RELEASE-HISTORY.md).
 
@@ -437,10 +438,11 @@ Security is a fundamental design principle:
 - [x] **Pre-Phase 6 Tech Debt Remediation**: 12 new syscalls (shm_open/unlink/truncate, socket create/bind/listen/connect/accept/send/recv/close/socketpair), PMU bootstrap wiring, RCU scheduler integration, NVMe PCI enumeration, IOMMU DMAR detection, dynamic linker segment copy fix, stale documentation correction (v0.6.0, Feb 2026)
 
 - [x] **Phase 6 Core (Waves 1-5)**: Graphical desktop with Wayland compositor (wire protocol, SHM buffers, surface compositing, XDG shell), PS/2 mouse driver, unified input events, TCP/IP network stack (VirtIO-Net, Ethernet, ARP, TCP state machine, DHCP client), 19 new syscalls (230-255), `startgui` desktop command, 5 network shell commands (v0.6.1, Feb 2026)
+- [x] **Phase 6 Completion**: Documentation sync (all Phase 6 references updated from ~5% to ~40%), AF_INET socket creation wired to net::socket, VirtIO-Net/E1000 device registry integration, UDP recv_from wired to socket buffer layer, all 43 TODO(phase6) markers resolved (4 wired + 39 reclassified to Phase 7), Phase 7 TODO roadmap generated (15 categories, ~93 items) (v0.6.2, Feb 2026)
 
 ### Upcoming
 
-- [ ] **Phase 6 Remaining**: GPU acceleration, real Wayland client applications, multimedia, virtualization, cloud-native, POSIX compatibility layer
+- [ ] **Phase 7**: GPU acceleration, advanced Wayland (DMA-BUF, XWayland, client library), multimedia (audio server, video), virtualization (KVM, containers), cloud-native, POSIX compatibility layer
 
 See [Release History](docs/RELEASE-HISTORY.md) for detailed per-release notes.
 

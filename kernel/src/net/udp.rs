@@ -1,11 +1,15 @@
 //! UDP protocol implementation
 
 use alloc::{collections::BTreeMap, vec::Vec};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use spin::Mutex;
 
 use super::{IpAddress, SocketAddr};
 use crate::error::KernelError;
+
+/// Next UDP socket ID counter
+static NEXT_UDP_ID: AtomicUsize = AtomicUsize::new(1);
 
 /// UDP header
 #[derive(Debug, Clone)]
@@ -100,6 +104,7 @@ pub struct UdpSocket {
     pub local: SocketAddr,
     pub remote: Option<SocketAddr>,
     pub bound: bool,
+    socket_id: usize,
 }
 
 impl UdpSocket {
@@ -108,6 +113,7 @@ impl UdpSocket {
             local: SocketAddr::v4(super::Ipv4Address::UNSPECIFIED, 0),
             remote: None,
             bound: false,
+            socket_id: NEXT_UDP_ID.fetch_add(1, Ordering::Relaxed),
         }
     }
 }
@@ -115,6 +121,14 @@ impl UdpSocket {
 impl Default for UdpSocket {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for UdpSocket {
+    fn drop(&mut self) {
+        if self.bound {
+            unregister_socket(self.socket_id);
+        }
     }
 }
 
@@ -130,6 +144,7 @@ impl UdpSocket {
 
         self.local = addr;
         self.bound = true;
+        register_socket(self.socket_id, addr);
         Ok(())
     }
 
@@ -182,7 +197,7 @@ impl UdpSocket {
     }
 
     /// Receive data
-    pub fn recv_from(&self, _buffer: &mut [u8]) -> Result<(usize, SocketAddr), KernelError> {
+    pub fn recv_from(&self, buffer: &mut [u8]) -> Result<(usize, SocketAddr), KernelError> {
         if !self.bound {
             return Err(KernelError::InvalidState {
                 expected: "bound",
@@ -190,8 +205,7 @@ impl UdpSocket {
             });
         }
 
-        // TODO(phase6): Receive data from network stack socket buffer
-        Ok((0, self.local))
+        receive_from(self.socket_id, buffer)
     }
 
     /// Receive data (from connected address)

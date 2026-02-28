@@ -135,7 +135,7 @@ impl DmaBufferPool {
         let buffers = Vec::with_capacity(num_buffers);
         let free_list = Vec::with_capacity(num_buffers);
 
-        // TODO(phase6): Proper DMA buffer allocation using physically contiguous memory
+        // TODO(phase7): Proper DMA buffer allocation using physically contiguous memory
 
         println!(
             "[DMA-POOL] Created buffer pool with {} buffers (stub)",
