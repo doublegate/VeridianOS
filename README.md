@@ -173,6 +173,9 @@ Phases 0 through 4 are complete. The kernel provides:
 - **Thread Support** -- clone() with CLONE_VM/CLONE_FS/CLONE_THREAD/CLONE_SETTLS, futex (WAIT/WAKE/REQUEUE/BITSET), POSIX pthread library (create/join/detach/mutex/cond/TLS)
 - **Signal Delivery** -- Full signal frames and trampolines on all three architectures (x86_64, AArch64, RISC-V) with sigreturn context restoration
 - **Symlink Support** -- Full readlink() implementation across BlockFS and RamFS with VFS-level dispatch
+- **Rust std Platform Port** -- `std::sys::veridian` platform module (15 files, ~7800 lines) implementing fs, io, process, thread, net, time, alloc, and synchronization primitives; LLVM 19 cross-compilation scripts; rustc/cargo build pipeline with self-hosting verification (Stage 0 -> Stage 1 -> Stage 2 consistency)
+- **Userland Shell (vsh)** -- Bash 5.3-compatible shell written in pure Rust (~10K lines), featuring lexer with heredocs and quoting, recursive descent parser with full AST, 8-stage POSIX word expansion (tilde, parameter, command substitution, arithmetic, field splitting, pathname, brace, quote removal), fork+exec pipelines with redirections, 49 builtins (POSIX + Bash extensions), job control (fg/bg/jobs/wait), readline with Emacs/vi modes and tab completion, startup file processing (~/.vshrc)
+- **Kernel Enhancements for Rust** -- 8GB memory scaling, epoll (create/ctl/wait with edge/level-triggered modes), enhanced PTY subsystem (openpty/grantpt/unlockpt), POSIX signal completions (sigprocmask, sigpending, sigsuspend), filesystem hardening (ftruncate, rename, fchmod, fchown, readdir improvements)
 
 ### Self-Hosting Roadmap
 
@@ -188,6 +191,7 @@ The self-hosting effort follows a tiered plan to build VeridianOS toward compili
 | 5    | Cross-compiled programs running on VeridianOS                            | **Complete**                          |
 | 6    | Thread support, signal delivery, virtio-MMIO, multi-LOAD ELF, native GCC | **Complete** (merged from test-codex) |
 | 7    | Full self-hosting (Rust std port, native GCC, make/ninja, vpkg)          | **Complete** (v0.5.0)                 |
+| 8    | Rust compiler port (std::sys::veridian, LLVM 19 cross-build, rustc/cargo) | **Complete** (v0.7.0)               |
 
 Tier 6 was developed on the test-codex branch and merged to main with a comprehensive audit pass fixing 8 critical bugs. Tier 7 provides the complete self-hosting toolchain: T7-1 (Rust user-space target specs), T7-2 (Rust std platform port), T7-3 (static native GCC via Canadian cross-compilation), T7-4 (GNU Make + Ninja), and T7-5 (vpkg package manager). The native GCC toolchain (T7-3) uses CONFIG_SITE-based autoconf caching to solve endianness detection in Canadian cross builds (`build=linux, host=veridian, target=veridian`), producing statically-linked gcc, cc1, as, ld, ar, and related tools totaling ~91 MB.
 
@@ -201,8 +205,7 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### What Comes Next
 
-- **Phase 6 Core** -- Wayland compositor with software rendering, graphical desktop with gradient background and windowed applications, PS/2 mouse driver, unified input event system, TCP/IP network stack with VirtIO-Net/Ethernet/ARP/TCP/DHCP, 19 new syscalls, `startgui` shell command boots to desktop (v0.6.1)
-- **Phase 6 Remaining** -- GPU acceleration, real Wayland client applications, multimedia, virtualization, cloud-native features, POSIX compatibility layer
+- **Phase 7** -- GPU acceleration (virtio-gpu, DRM framebuffer), advanced Wayland (DMA-BUF, XWayland, client library), multimedia (audio server, codec pipeline, media player), virtualization (KVM-style hypervisor, containers), cloud-native (OCI runtime, network namespaces), POSIX compatibility layer
 
 ### Technical Notes
 
@@ -216,7 +219,7 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### Maturity
 
-VeridianOS is an active research system. Phases 0 through 5.5 are architecturally stable; Phase 6 (advanced features and GUI) is in active development with a functional graphical desktop.
+VeridianOS is an active research system. Phases 0 through 6.5 are architecturally stable with a functional graphical desktop, Rust compiler port, and Bash-compatible userland shell. Phase 7 (production readiness) is planned.
 
 Historical status is recorded in:
 
@@ -347,6 +350,8 @@ For detailed build instructions, see [BUILD-INSTRUCTIONS.md](docs/BUILD-INSTRUCT
 - 🔧 [Compiler Toolchain Guide](docs/COMPILER-TOOLCHAIN-GUIDE.md) — Native compiler integration strategy
 - 💾 [Persistent Storage Guide](docs/PERSISTENT-STORAGE.md) — BlockFS filesystem and disk image management
 - 🚀 [Future Development Insights](docs/FUTURE-DEVELOPMENT-INSIGHTS.md) — Analysis and recommendations
+- 🦀 [Rust Compiler Porting Guide](docs/RUST-COMPILER-PORTING.md) — Porting rustc to VeridianOS via LLVM 19 cross-compilation
+- 🐚 [vsh Shell Guide](docs/VSH-SHELL-GUIDE.md) — Bash-compatible userland shell usage and internals
 
 ### Development Phases
 
@@ -359,6 +364,7 @@ The project follows a phased development approach:
 5. [Phase 4: Package Ecosystem](docs/04-PHASE-4-PACKAGE-ECOSYSTEM.md) — Package management
 6. [Phase 5: Performance Optimization](docs/05-PHASE-5-PERFORMANCE-OPTIMIZATION.md) — Performance tuning
 7. [Phase 6: Advanced Features](docs/06-PHASE-6-ADVANCED-FEATURES.md) — GUI and advanced features
+8. [Phase 6.5 Completion Summary](docs/PHASE6.5-COMPLETION-SUMMARY.md) — Rust compiler port and Bash-in-Rust shell
 
 See [PROJECT-STATUS.md](docs/PROJECT-STATUS.md) for detailed status information and [Master TODO](to-dos/MASTER_TODO.md) for task tracking.
 
@@ -440,6 +446,7 @@ Security is a fundamental design principle:
 
 - [x] **Phase 6 Core (Waves 1-5)**: Graphical desktop with Wayland compositor (wire protocol, SHM buffers, surface compositing, XDG shell), PS/2 mouse driver, unified input events, TCP/IP network stack (VirtIO-Net, Ethernet, ARP, TCP state machine, DHCP client), 19 new syscalls (230-255), `startgui` desktop command, 5 network shell commands (v0.6.1, Feb 2026)
 - [x] **Phase 6 Completion**: Documentation sync (all Phase 6 references updated from ~5% to ~40%), AF_INET socket creation wired to net::socket, VirtIO-Net/E1000 device registry integration, UDP recv_from wired to socket buffer layer, all 43 TODO(phase6) markers resolved (4 wired + 39 reclassified to Phase 7), Phase 7 TODO roadmap generated (15 categories, ~93 items) (v0.6.2, Feb 2026)
+- [x] **Phase 6.5: Rust Compiler Port + Bash Shell**: Rust std::sys::veridian platform (15 files, ~7800 lines), LLVM 19 cross-compilation scripts, rustc/cargo build pipeline with self-hosting verification; vsh Bash-in-Rust shell (~10K lines, 49 builtins, job control, readline); kernel enhancements (8GB memory, epoll, PTY, signal completions); 700+ test cases, 3 documentation guides (v0.7.0, Feb 2026)
 
 ### Upcoming
 
