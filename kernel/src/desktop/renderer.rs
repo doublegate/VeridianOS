@@ -890,3 +890,394 @@ fn blit_to_framebuffer(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// WM-2: Server-side window decorations
+// ---------------------------------------------------------------------------
+
+/// Window decoration rendering configuration.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub struct DecorationConfig {
+    /// Title bar height in pixels.
+    pub title_bar_height: u32,
+    /// Border width in pixels.
+    pub border_width: u32,
+    /// Title bar background color (focused): ARGB packed as 0xAARRGGBB.
+    pub title_bg_focused: u32,
+    /// Title bar background color (unfocused): ARGB packed as 0xAARRGGBB.
+    pub title_bg_unfocused: u32,
+    /// Title text color: ARGB packed as 0xAARRGGBB.
+    pub title_text_color: u32,
+    /// Border color (focused): ARGB packed as 0xAARRGGBB.
+    pub border_focused: u32,
+    /// Border color (unfocused): ARGB packed as 0xAARRGGBB.
+    pub border_unfocused: u32,
+    /// Button size in pixels (close/maximize/minimize).
+    pub button_size: u32,
+    /// Padding between title text and buttons.
+    pub button_padding: u32,
+}
+
+#[allow(dead_code)]
+impl DecorationConfig {
+    /// Default decoration configuration matching the existing desktop style.
+    pub fn default_config() -> Self {
+        Self {
+            title_bar_height: 28,
+            border_width: 1,
+            title_bg_focused: 0xFF34_495E,
+            title_bg_unfocused: 0xFF57_6574,
+            title_text_color: 0xFFEC_F0F1,
+            border_focused: 0xFF2C_3E50,
+            border_unfocused: 0xFF7F_8C8D,
+            button_size: 16,
+            button_padding: 6,
+        }
+    }
+}
+
+impl Default for DecorationConfig {
+    fn default() -> Self {
+        Self::default_config()
+    }
+}
+
+/// Buttons that can appear in the title bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum DecorationButton {
+    Close,
+    Maximize,
+    Minimize,
+}
+
+/// Result of hit-testing a point against window decorations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum DecorationHitTest {
+    /// Point is not in any decoration area.
+    None,
+    /// Title bar (drag region).
+    TitleBar,
+    /// Close button.
+    CloseButton,
+    /// Maximize button.
+    MaximizeButton,
+    /// Minimize button.
+    MinimizeButton,
+    /// Border edge for resize.
+    Border(BorderEdge),
+}
+
+/// Which border edge was hit for resize operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum BorderEdge {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+/// Render a complete window decoration frame into a pixel buffer.
+///
+/// Draws the title bar (with title text), border outline, and close/maximize/
+/// minimize buttons. The buffer is expected to include space for decorations:
+/// total width = `width`, total height = `height` (title bar at top, border
+/// around all edges).
+///
+/// Pixels are written as 0xAARRGGBB (ARGB8888).
+#[allow(dead_code)]
+pub fn render_window_decoration(
+    buffer: &mut [u32],
+    buf_w: u32,
+    config: &DecorationConfig,
+    title: &str,
+    focused: bool,
+    width: u32,
+    height: u32,
+) {
+    let bw = config.border_width;
+    let tbh = config.title_bar_height;
+    let border_color = if focused {
+        config.border_focused
+    } else {
+        config.border_unfocused
+    };
+    let title_bg = if focused {
+        config.title_bg_focused
+    } else {
+        config.title_bg_unfocused
+    };
+
+    // Draw border (top, bottom, left, right strips)
+    for y in 0..height {
+        for x in 0..width {
+            let idx = (y * buf_w + x) as usize;
+            if idx >= buffer.len() {
+                continue;
+            }
+            let in_top_border = y < bw;
+            let in_bottom_border = y >= height.saturating_sub(bw);
+            let in_left_border = x < bw;
+            let in_right_border = x >= width.saturating_sub(bw);
+
+            if in_top_border || in_bottom_border || in_left_border || in_right_border {
+                buffer[idx] = border_color;
+            }
+        }
+    }
+
+    // Draw title bar background
+    for y in bw..bw.saturating_add(tbh).min(height) {
+        for x in bw..width.saturating_sub(bw) {
+            let idx = (y * buf_w + x) as usize;
+            if idx < buffer.len() {
+                buffer[idx] = title_bg;
+            }
+        }
+    }
+
+    // Draw title text (8x16 font)
+    let text_x = bw + 8;
+    let text_y = bw + (tbh.saturating_sub(16)) / 2;
+    let mut cx = text_x;
+    for &ch in title.as_bytes() {
+        if cx + 8 >= width.saturating_sub(bw + 3 * (config.button_size + config.button_padding)) {
+            break;
+        }
+        let glyph = crate::graphics::font8x16::glyph(ch);
+        for row in 0..16u32 {
+            let bits = glyph[row as usize];
+            for col in 0..8u32 {
+                if bits & (0x80 >> col) != 0 {
+                    let px = cx + col;
+                    let py = text_y + row;
+                    let idx = (py * buf_w + px) as usize;
+                    if idx < buffer.len() {
+                        buffer[idx] = config.title_text_color;
+                    }
+                }
+            }
+        }
+        cx += 8;
+    }
+
+    // Draw buttons (right-aligned in title bar)
+    let btn_y = bw + (tbh.saturating_sub(config.button_size)) / 2;
+    let btn_sz = config.button_size;
+    let btn_pad = config.button_padding;
+
+    // Close button (rightmost)
+    let close_x = width.saturating_sub(bw + btn_pad + btn_sz);
+    render_decoration_button(
+        buffer,
+        buf_w,
+        close_x,
+        btn_y,
+        btn_sz,
+        DecorationButton::Close,
+        false,
+    );
+
+    // Maximize button
+    let max_x = close_x.saturating_sub(btn_pad + btn_sz);
+    render_decoration_button(
+        buffer,
+        buf_w,
+        max_x,
+        btn_y,
+        btn_sz,
+        DecorationButton::Maximize,
+        false,
+    );
+
+    // Minimize button
+    let min_x = max_x.saturating_sub(btn_pad + btn_sz);
+    render_decoration_button(
+        buffer,
+        buf_w,
+        min_x,
+        btn_y,
+        btn_sz,
+        DecorationButton::Minimize,
+        false,
+    );
+}
+
+/// Hit-test a point (relative to the window's top-left including decorations)
+/// against the decoration regions.
+#[allow(dead_code)]
+pub fn hit_test_decoration(
+    x: i32,
+    y: i32,
+    config: &DecorationConfig,
+    width: u32,
+    height: u32,
+) -> DecorationHitTest {
+    let bw = config.border_width as i32;
+    let tbh = config.title_bar_height as i32;
+    let w = width as i32;
+    let h = height as i32;
+    let btn_sz = config.button_size as i32;
+    let btn_pad = config.button_padding as i32;
+
+    // Outside the window entirely
+    if x < 0 || y < 0 || x >= w || y >= h {
+        return DecorationHitTest::None;
+    }
+
+    // Border corners (8x8 corner zones)
+    let corner = bw.max(8);
+    if x < corner && y < corner {
+        return DecorationHitTest::Border(BorderEdge::TopLeft);
+    }
+    if x >= w - corner && y < corner {
+        return DecorationHitTest::Border(BorderEdge::TopRight);
+    }
+    if x < corner && y >= h - corner {
+        return DecorationHitTest::Border(BorderEdge::BottomLeft);
+    }
+    if x >= w - corner && y >= h - corner {
+        return DecorationHitTest::Border(BorderEdge::BottomRight);
+    }
+
+    // Border edges
+    if y < bw {
+        return DecorationHitTest::Border(BorderEdge::Top);
+    }
+    if y >= h - bw {
+        return DecorationHitTest::Border(BorderEdge::Bottom);
+    }
+    if x < bw {
+        return DecorationHitTest::Border(BorderEdge::Left);
+    }
+    if x >= w - bw {
+        return DecorationHitTest::Border(BorderEdge::Right);
+    }
+
+    // Title bar region
+    if y >= bw && y < bw + tbh {
+        // Check buttons (right-aligned)
+        let close_x = w - bw - btn_pad - btn_sz;
+        if x >= close_x && x < close_x + btn_sz {
+            return DecorationHitTest::CloseButton;
+        }
+
+        let max_x = close_x - btn_pad - btn_sz;
+        if x >= max_x && x < max_x + btn_sz {
+            return DecorationHitTest::MaximizeButton;
+        }
+
+        let min_x = max_x - btn_pad - btn_sz;
+        if x >= min_x && x < min_x + btn_sz {
+            return DecorationHitTest::MinimizeButton;
+        }
+
+        return DecorationHitTest::TitleBar;
+    }
+
+    DecorationHitTest::None
+}
+
+/// Render a single decoration button (close, maximize, or minimize).
+///
+/// Draws a small icon inside a square region starting at (`x`, `y`) with
+/// the given `size`. If `hovered`, the background is slightly highlighted.
+#[allow(dead_code)]
+pub fn render_decoration_button(
+    buffer: &mut [u32],
+    buf_w: u32,
+    x: u32,
+    y: u32,
+    size: u32,
+    button_type: DecorationButton,
+    hovered: bool,
+) {
+    // Button background
+    let bg = if hovered {
+        match button_type {
+            DecorationButton::Close => 0xFFE7_4C3C,    // Red highlight
+            DecorationButton::Maximize => 0xFF2E_CC71, // Green highlight
+            DecorationButton::Minimize => 0xFFF3_9C12, // Yellow highlight
+        }
+    } else {
+        match button_type {
+            DecorationButton::Close => 0xFFC0_392B,
+            DecorationButton::Maximize => 0xFF27_AE60,
+            DecorationButton::Minimize => 0xFFF1_C40F,
+        }
+    };
+
+    // Fill button background (circle approximation: filled square with inset)
+    let inset = size / 6;
+    for dy in inset..size.saturating_sub(inset) {
+        for dx in inset..size.saturating_sub(inset) {
+            let px = x + dx;
+            let py = y + dy;
+            let idx = (py * buf_w + px) as usize;
+            if idx < buffer.len() {
+                buffer[idx] = bg;
+            }
+        }
+    }
+
+    // Draw icon glyph
+    let icon_color: u32 = 0xFFFF_FFFF;
+    let cx = x + size / 2;
+    let cy = y + size / 2;
+    let half = (size / 4).max(2);
+
+    match button_type {
+        DecorationButton::Close => {
+            // X shape: two diagonal lines
+            for i in 0..half {
+                let coords = [
+                    (cx - half + i, cy - half + i),
+                    (cx + half - i - 1, cy - half + i),
+                    (cx - half + i, cy + half - i - 1),
+                    (cx + half - i - 1, cy + half - i - 1),
+                ];
+                for &(px, py) in &coords {
+                    let idx = (py * buf_w + px) as usize;
+                    if idx < buffer.len() {
+                        buffer[idx] = icon_color;
+                    }
+                }
+            }
+        }
+        DecorationButton::Maximize => {
+            // Rectangle outline
+            for i in 0..(half * 2) {
+                let coords = [
+                    (cx - half + i, cy - half),     // top
+                    (cx - half + i, cy + half - 1), // bottom
+                    (cx - half, cy - half + i),     // left
+                    (cx + half - 1, cy - half + i), // right
+                ];
+                for &(px, py) in &coords {
+                    let idx = (py * buf_w + px) as usize;
+                    if idx < buffer.len() {
+                        buffer[idx] = icon_color;
+                    }
+                }
+            }
+        }
+        DecorationButton::Minimize => {
+            // Horizontal line at bottom
+            for i in 0..(half * 2) {
+                let px = cx - half + i;
+                let py = cy + half / 2;
+                let idx = (py * buf_w + px) as usize;
+                if idx < buffer.len() {
+                    buffer[idx] = icon_color;
+                }
+            }
+        }
+    }
+}

@@ -2,6 +2,74 @@
 
 ---
 
+## [v0.7.1] - 2026-02-28
+
+### v0.7.1: Phase 7 Waves 1-3 -- GPU Drivers, Advanced Wayland, Desktop Completion
+
+Major milestone: Phase 7 Waves 1-3 implement GPU driver infrastructure, advanced Wayland protocol extensions, and a complete desktop environment with 21 new kernel modules and significant enhancements to 13 existing files. This release transforms the graphical desktop from a basic compositor demo into a feature-rich environment with application launcher, notifications, workspaces, screen locking, and GPU-accelerated rendering infrastructure.
+
+#### Wave 1: GPU Drivers + Dynamic Linker Completion
+
+##### GPU Infrastructure (5 sprints, G-1 through G-5)
+- **VirtIO GPU driver** (`drivers/virtio_gpu.rs`, ~1,900 lines): Complete VirtIO GPU 2D driver with PCI device discovery (vendor 0x1AF4, device 0x1050, subsystem 0x0010), split virtqueue ring buffer management, VIRTIO_GPU_CMD_RESOURCE_CREATE_2D (XRGB8888/ARGB8888 formats), VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING with scatter-gather DMA descriptors, VIRTIO_GPU_CMD_SET_SCANOUT for display output binding, VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D for host-side buffer transfer, VIRTIO_GPU_CMD_RESOURCE_FLUSH for display refresh; public API: `init()`, `with_driver()`, `is_available()`, `flush_framebuffer()`, `get_display_size()`, `enumerate_gpu_devices()`
+- **GPU manager integration** (`graphics/gpu.rs`): `enumerate()` wired to VirtIO GPU PCI bus scan for real device discovery; `submit()` delegates to VirtIO GPU flush; `swap_buffers()` triggers framebuffer refresh; all 4 TODO(phase7) markers resolved
+- **Bootloader GOP detection** (`drivers/gpu.rs`): `detect_framebuffer()` reads `get_framebuffer_info()` from UEFI GOP boot info with fallback to hardcoded 0xFD000000; `detection_mode()` reports "GOP detected" or "fallback"
+- **Intel i915 stub** (`drivers/gpu_i915.rs`, ~300 lines): PCI ID tables for 6 Intel GPU generations (Skylake, Kaby Lake, Coffee Lake, Ice Lake, Tiger Lake, Meteor Lake), MMIO register offsets (PIPE_A/B/C, DPLL, PCH_PORT), GuC/HuC firmware engine states, PCI probing with BAR0/BAR2 extraction
+- **AMD amdgpu stub** (`drivers/gpu_amdgpu.rs`, ~320 lines): PCI ID tables for 4 AMD GPU generations (GCN5/Vega, RDNA1, RDNA2, RDNA3), MMIO register offsets (GRBM, SRBM, DCN, MC_HUB, SMU, GFX_RING, SDMA, VCN), DCN display output configuration, power state management (D0-D3Cold), clock info struct, PCI probing
+- **NVIDIA Nouveau stub** (`drivers/gpu_nouveau.rs`, ~300 lines): PCI ID tables for 4 NVIDIA architectures (Pascal, Turing, Ampere, Ada Lovelace), MMIO register offsets (PMC, PBUS, PDISP, PGRAPH, PFIFO, PFB, PTIMER, PGPIO, PPWR), Falcon microcontroller engine types (PMU, Display, GrCtxSw, NVDEC, NVENC, SEC2, GSP), GSP firmware requirement detection (Turing+), PCI probing
+
+##### Dynamic Linker Completion (3 sprints, D-1 through D-3)
+- **Multi-LOAD ELF fix** (`ld-veridian.c`): Page-boundary rounding for PT_LOAD segments with anonymous mmap + pread for correct segment loading; prevents GP faults on binaries with non-contiguous LOAD segments
+- **Lazy PLT binding**: GOT/PLT resolver infrastructure with `_dl_runtime_resolve()` stub, DT_JMPREL/DT_PLTREL/DT_PLTRELSZ processing
+- **Symbol versioning**: ELF version structures (Elf64_Verneed, Elf64_Vernaux, Elf64_Versym), DT_VERSYM/DT_VERNEED/DT_VERDEF section parsing, version-aware symbol lookup with VER_FLG_BASE/VER_NDX_LOCAL/VER_NDX_GLOBAL handling, weak symbol resolution fallback
+- **LD_PRELOAD + LD_LIBRARY_PATH**: Environment variable parsing with colon-separated path lists, preload library injection before main executable dependencies, library search path ordering (LD_LIBRARY_PATH -> DT_RPATH -> /lib -> /usr/lib)
+- **TLS support**: PT_TLS segment detection and allocation, ARCH_SET_FS via arch_prctl syscall for thread-local storage base, static TLS model initialization
+- **Init/Fini arrays**: DT_INIT_ARRAY/DT_FINI_ARRAY execution with proper ordering (init forward, fini reverse)
+- **RELRO protection**: PT_GNU_RELRO segment detection with SYS_MEMORY_PROTECT syscall for read-only relocation table hardening
+
+#### Wave 2: Advanced Wayland Features (8 sprints, W-1 through W-7)
+
+- **IPC endpoint registration** (`services/desktop_ipc.rs`, expanded to ~590 lines): 6 desktop IPC service endpoints (WM=1000, INPUT=1001, COMPOSITOR=1002, NOTIFICATION=1003, CLIPBOARD=1004, LAUNCHER=1005) with typed message dispatch (WindowCreate, WindowMove, WindowResize, WindowClose, WindowFocus, KeyEvent, MouseEvent, SurfaceCreate, SurfaceDamage, NotificationShow, ClipboardCopy, ClipboardPaste, LauncherOpen, LauncherSearch)
+- **Layer shell protocol** (`desktop/wayland/layer_shell.rs`, ~620 lines): zwlr_layer_shell_v1 implementation with Layer enum (Background/Bottom/Top/Overlay), Anchor bitfield (Top/Bottom/Left/Right), LayerSurface with margin/exclusive zone/keyboard interactivity, LayerShellManager tracking up to 64 surfaces, proper stacking order enforcement
+- **Idle inhibit protocol** (`desktop/wayland/idle_inhibit.rs`, ~220 lines): zwp_idle_inhibit_manager_v1 with IdleInhibitor lifecycle (create/destroy), per-surface inhibitor tracking, active inhibitor count query for screen lock/DPMS integration
+- **DMA-BUF protocol** (`desktop/wayland/dmabuf.rs`, ~770 lines): zwp_linux_dmabuf_v1 with fourcc format codes (XRGB8888, ARGB8888, XBGR8888, ABGR8888, RGB888, BGR888, YUYV, NV12, NV21, YUV420), DmaBufParams builder pattern (width/height/format/modifier/plane configuration), VirtIO GPU resource ID import as native handle, modifier advertisement
+- **Multi-output management** (`desktop/wayland/output.rs`, ~780 lines): OutputManager with wl_output v4 protocol, HiDPI scaling (1x/2x/3x), horizontal/vertical/mirror arrangement modes, output geometry (position/physical size/subpixel/transform/mode/scale), hotplug add/remove, preferred mode advertisement, display layout serialization
+- **XDG decoration negotiation** (`desktop/wayland/shell.rs`): DecorationMode enum (ClientSide/ServerSide), `negotiate_decoration()` function with server-side preference, xdg_toplevel_decoration_v1 semantics
+- **XWayland socket stub** (`desktop/xwayland.rs`, ~560 lines): X11 display socket infrastructure (/tmp/.X11-unix/X0), XWayland process lifecycle management (start/stop/restart), X11 window-to-Wayland surface ID mapping, window type classification (Normal/Dialog/Toolbar/Menu/DND/Tooltip/Popup), focus forwarding between X11 and Wayland surfaces
+- **Wayland client library** (`userland/libwayland/`, ~1,440 lines across 3 files): User-space `libwayland-client.a` library with raw VeridianOS syscall interface (no libc dependency), WlDisplay connection management, SHM pool creation with shared memory allocation, WlSurface lifecycle (create/attach/commit/damage), WlBuffer management, event dispatch loop, WlSeat with keyboard/pointer capability binding
+
+#### Wave 3: Desktop Completion (14 sprints, WM-1 through A-4)
+
+##### Window Manager Enhancements (5 sprints)
+- **Window placement and snap/tile** (`desktop/window_manager.rs`, expanded to ~1,050 lines): PlacementHeuristic enum (Cascade/Center/Smart/Manual), cascade offset tracking (30px step, wrap at screen edge), smart placement with overlap minimization via gravity scoring, SnapZone enum (Left/Right/Top/Bottom/TopLeft/TopRight/BottomLeft/BottomRight) with snap_window() positioning, TileLayout enum (Horizontal/Vertical/Grid) with automatic window tiling across available screen area
+- **Server-side decorations** (`desktop/renderer.rs`, expanded to ~1,280 lines): DecorationConfig with title bar height (28px), border width (2px), button sizing (20px), configurable colors (active/inactive/hover), render_window_decoration() with title text rendering via font8x16, minimize/maximize/close button glyphs, hit_test_decoration() returning DecorationHitRegion (TitleBar/Close/Maximize/Minimize/Border edges)
+- **Alt-Tab application switcher** (`desktop/app_switcher.rs`, ~620 lines): AppSwitcherOverlay with centered modal overlay, SwitcherEntry per-window with icon/title, keyboard cycling (Tab forward, Shift-Tab backward), selection highlight, ESC to cancel, Enter/Tab-release to confirm, AppIcon enum with 5 built-in icon types (Terminal/FileManager/TextEditor/Settings/Default), timeout-based auto-dismiss
+- **Virtual workspaces** (`desktop/window_manager.rs`): WorkspaceId (1-4), per-workspace window lists with independent z-ordering, switch_workspace() with window visibility toggling, move_window_to_workspace() for cross-workspace window migration, Ctrl+Alt+Arrow workspace switching, workspace indicators in panel
+- **Compositing effects and animation** (`desktop/wayland/compositor.rs`, `desktop/animation.rs`): render_shadow() with 3-pass box blur (horizontal+vertical+merge) using fixed-point 8.8 arithmetic, configurable shadow radius (4-16px) and opacity, alpha_blend() with premultiplied alpha compositing, apply_opacity() for per-window transparency; AnimationManager with EasingFunction enum (Linear/EaseIn/EaseOut/EaseInOut/EaseInQuad/EaseOutQuad/EaseInCubic/EaseOutCubic/Bounce), TransitionState tracking (position/opacity/scale), tick-based animation advancement, 256-entry fixed-point lookup table
+
+##### Desktop Environment (3 sprints)
+- **Application launcher** (`desktop/launcher.rs`, ~1,210 lines): AppLauncher with grid layout (4 columns), AppEntry with name/exec/icon/category, .desktop file parser (Name/Exec/Icon/Categories/Comment/Terminal fields), search-as-you-type with case-insensitive substring matching, 5 default applications (Terminal, Files, Text Editor, Settings, Image Viewer), keyboard navigation (arrows/Enter/Escape), overlay rendering with semi-transparent backdrop
+- **Notification system** (`desktop/notification.rs`, ~440 lines; `services/notification_ipc.rs`, ~230 lines): NotificationManager with toast popup rendering, Urgency enum (Low/Normal/Critical), configurable display duration (5s/10s/persistent), tick-based expiry with automatic dismissal, notification stacking (up to 5 visible), IPC endpoint 1003 for cross-process notification delivery, unique notification ID generation
+- **System tray** (`desktop/systray.rs`, ~470 lines): SystemTray with 3 default items (CPU monitor, memory monitor, clock), SysTrayItemType enum (Clock/CpuMonitor/MemoryMonitor/NetworkStatus/BatteryStatus/Volume/Custom), color-coded CPU usage (green <50%, yellow 50-79%, red >=80%), separator rendering between items, total_width() calculation, handle_click() hit testing, update_clock/cpu/memory methods with auto-width recalculation
+
+##### Screen Lock and Authentication
+- **Screen locker** (`desktop/screen_lock.rs`, ~530 lines): ScreenLocker with fullscreen overlay, password field with masked input (asterisks), password verification against stored hash (SHA-256 via `security::auth`), lockout after 5 failed attempts (30s cooldown), idle timeout configuration (5/15/30/60 minutes), padlock icon rendering (16x16 pixel art), Ctrl+Alt+L keyboard shortcut trigger, unlock animation
+
+##### Desktop Application Enhancements (4 sprints)
+- **MIME database** (`desktop/mime.rs`, ~1,130 lines): MimeDatabase with 31 registered MIME types, magic byte detection for 8 file formats (PNG, JPEG, GIF, BMP, PDF, ELF, gzip, ZIP via file header signatures), extension-to-MIME mapping for 31+ extensions, MIME-to-application dispatch (open_with returning AppAction enum), category classification (Text/Image/Audio/Video/Application/Archive/Font)
+- **Syntax highlighting** (`desktop/syntax.rs`, ~1,320 lines): SyntaxHighlighter trait with tokenize_line() -> Vec<(TokenType, range)>, RustHighlighter (36 keywords, 14 types, lifetime detection, attribute parsing, raw string literals, byte strings), CHighlighter (27 keywords, 11 types, preprocessor directives, multi-line comment state), ShHighlighter (23 keywords, variable expansion $VAR/${VAR}, heredoc detection, command substitution), TokenType enum (Keyword/Type/String/Comment/Number/Operator/Preprocessor/Attribute/Lifetime/Function/Variable/Normal), 26 unit tests, detect_language() from file extension
+- **System settings** (`desktop/settings.rs`, ~730 lines): SettingsApp with 5 panels (Display: resolution/scaling/refresh; Network: interface list/IP config; Users: account management; Appearance: theme/wallpaper/font size; About: version/architecture/memory), sidebar navigation, panel rendering with form controls (labels, values, separators), per-panel state tracking
+- **Image viewer** (`desktop/image_viewer.rs`, ~720 lines): PPM parser (P3 ASCII and P6 binary formats with maxval normalization), BMP parser (24-bit and 32-bit uncompressed with bottom-up row order), nearest-neighbor scaling for zoom in/out (0.1x-10.0x range), pan with arrow keys, fit-to-window mode, BGRA pixel conversion for compositor, file loading from path with format auto-detection via magic bytes
+
+#### Stats
+- 21 new files, 13 modified files
+- ~16,500 lines added across 30 sprints in 3 waves
+- Zero clippy warnings on x86_64, AArch64, RISC-V with `-D warnings`
+- All 3 architectures boot to BOOTOK (29/29 tests)
+- 7 TODO(phase7) markers resolved (4 in graphics/gpu.rs, 1 in drivers/gpu.rs, 1 in services/desktop_ipc.rs, 1 in desktop/file_manager.rs)
+
+---
+
 ## [v0.7.0] - 2026-02-27
 
 ### v0.7.0: Phase 6.5 -- Rust Compiler Port + Bash-in-Rust Shell

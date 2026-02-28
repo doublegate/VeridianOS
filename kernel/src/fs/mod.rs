@@ -812,7 +812,7 @@ pub fn init() {
                     if let Ok(f) = etc.create("os-release", Permissions::default()) {
                         f.write(
                             0,
-                            b"NAME=\"VeridianOS\"\nVERSION=\"0.7.0\"\nID=veridian\nPRETTY_NAME=\"VeridianOS v0.7.0\"\n",
+                            b"NAME=\"VeridianOS\"\nVERSION=\"0.7.1\"\nID=veridian\nPRETTY_NAME=\"VeridianOS v0.7.1\"\n",
                         )
                         .ok();
                     }

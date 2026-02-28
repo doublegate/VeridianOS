@@ -1,6 +1,8 @@
 //! Window Manager with Event Loop
 //!
 //! Manages windows, input events, and coordinates desktop applications.
+//! Provides window placement heuristics, snap/tile support, and virtual
+//! workspaces.
 
 use alloc::{collections::BTreeMap, vec::Vec};
 
@@ -11,6 +13,12 @@ use crate::{error::KernelError, sync::once_lock::GlobalState};
 /// Window ID type
 pub type WindowId = u32;
 
+/// Workspace identifier
+pub type WorkspaceId = u8;
+
+/// Maximum number of workspaces
+pub const MAX_WORKSPACES: usize = 4;
+
 /// Window state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowState {
@@ -19,6 +27,46 @@ pub enum WindowState {
     Maximized,
     Fullscreen,
     Hidden,
+}
+
+/// Window placement heuristic
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlacementHeuristic {
+    /// Cascade from top-left corner
+    Cascade,
+    /// Center on screen
+    Center,
+    /// Smart placement avoiding overlap
+    Smart,
+    /// User-specified position
+    Manual { x: i32, y: i32 },
+}
+
+/// Snap zone for window tiling
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapZone {
+    None,
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    Maximize,
+}
+
+/// Tile layout mode for arranging all visible windows
+#[derive(Debug, Clone, Copy)]
+pub enum TileLayout {
+    /// Equal horizontal split (side by side columns)
+    EqualColumns,
+    /// Master-stack: largest window on left (60%), remainder stacked right
+    /// (40%)
+    MasterStack,
+    /// Grid arrangement (auto rows x cols)
+    Grid,
 }
 
 /// Window structure
@@ -35,6 +83,14 @@ pub struct Window {
     pub visible: bool,
     pub focused: bool,
     pub owner_pid: u64,
+    /// Window opacity (0 = transparent, 255 = fully opaque)
+    pub opacity: u8,
+    /// Saved geometry before snap/maximize (x, y, w, h)
+    pub saved_geometry: Option<(i32, i32, u32, u32)>,
+    /// Current snap zone
+    pub snap_zone: SnapZone,
+    /// Workspace this window belongs to
+    pub workspace: WorkspaceId,
 }
 
 impl Window {
@@ -52,6 +108,10 @@ impl Window {
             visible: true,
             focused: false,
             owner_pid,
+            opacity: 255,
+            saved_geometry: None,
+            snap_zone: SnapZone::None,
+            workspace: 0,
         }
     }
 
@@ -66,6 +126,35 @@ impl Window {
     /// Get window title as string slice
     pub fn title_str(&self) -> &str {
         core::str::from_utf8(&self.title[..self.title_len]).unwrap_or("")
+    }
+}
+
+/// Virtual workspace containing a set of windows
+pub struct Workspace {
+    pub id: WorkspaceId,
+    pub name: [u8; 32],
+    pub name_len: usize,
+    pub windows: Vec<WindowId>,
+}
+
+impl Workspace {
+    /// Create a new workspace with a numeric name
+    fn new(id: WorkspaceId) -> Self {
+        let mut name = [0u8; 32];
+        let digit = b'1' + id;
+        name[0] = digit;
+        Self {
+            id,
+            name,
+            name_len: 1,
+            windows: Vec::new(),
+        }
+    }
+
+    /// Get workspace name as string slice
+    #[allow(dead_code)]
+    pub fn name_str(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("")
     }
 }
 
@@ -122,11 +211,34 @@ pub struct WindowManager {
     /// Mouse cursor position
     mouse_x: RwLock<i32>,
     mouse_y: RwLock<i32>,
+
+    // --- WM-1: Placement heuristics ---
+    /// Current placement heuristic for new windows
+    placement_heuristic: RwLock<PlacementHeuristic>,
+
+    /// Next cascade offset position (x, y)
+    cascade_offset: RwLock<(i32, i32)>,
+
+    /// Screen dimensions
+    screen_width: RwLock<u32>,
+    screen_height: RwLock<u32>,
+
+    // --- WM-4: Virtual workspaces ---
+    /// Virtual workspaces
+    workspaces: RwLock<Vec<Workspace>>,
+
+    /// Currently active workspace
+    active_workspace: RwLock<WorkspaceId>,
 }
 
 impl WindowManager {
     /// Create a new window manager
     pub fn new() -> Self {
+        let mut workspaces = Vec::with_capacity(MAX_WORKSPACES);
+        for i in 0..MAX_WORKSPACES {
+            workspaces.push(Workspace::new(i as WorkspaceId));
+        }
+
         Self {
             windows: RwLock::new(BTreeMap::new()),
             z_order: RwLock::new(Vec::new()),
@@ -135,6 +247,12 @@ impl WindowManager {
             next_window_id: RwLock::new(1),
             mouse_x: RwLock::new(0),
             mouse_y: RwLock::new(0),
+            placement_heuristic: RwLock::new(PlacementHeuristic::Cascade),
+            cascade_offset: RwLock::new((32, 32)),
+            screen_width: RwLock::new(1280),
+            screen_height: RwLock::new(800),
+            workspaces: RwLock::new(workspaces),
+            active_workspace: RwLock::new(0),
         }
     }
 
@@ -159,6 +277,15 @@ impl WindowManager {
         self.windows.write().insert(id, window);
         self.z_order.write().push(id);
 
+        // Add to active workspace
+        let active = *self.active_workspace.read();
+        {
+            let mut workspaces = self.workspaces.write();
+            if let Some(ws) = workspaces.get_mut(active as usize) {
+                ws.windows.push(id);
+            }
+        }
+
         println!("[WM] Created window {} for PID {}", id, owner_pid);
 
         Ok(id)
@@ -168,6 +295,14 @@ impl WindowManager {
     pub fn destroy_window(&self, window_id: WindowId) -> Result<(), KernelError> {
         self.windows.write().remove(&window_id);
         self.z_order.write().retain(|&id| id != window_id);
+
+        // Remove from all workspaces
+        {
+            let mut workspaces = self.workspaces.write();
+            for ws in workspaces.iter_mut() {
+                ws.windows.retain(|&id| id != window_id);
+            }
+        }
 
         if *self.focused_window.read() == Some(window_id) {
             *self.focused_window.write() = None;
@@ -357,6 +492,467 @@ impl WindowManager {
         self.windows.read().values().cloned().collect()
     }
 
+    /// Get all visible windows on the active workspace
+    #[allow(dead_code)]
+    pub fn get_visible_windows(&self) -> Vec<Window> {
+        let active = *self.active_workspace.read();
+        self.windows
+            .read()
+            .values()
+            .filter(|w| w.visible && w.workspace == active && w.state != WindowState::Minimized)
+            .cloned()
+            .collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // WM-1: Placement heuristics and snap/tile
+    // -----------------------------------------------------------------------
+
+    /// Set the screen dimensions (called when display is configured)
+    #[allow(dead_code)]
+    pub fn set_screen_size(&self, width: u32, height: u32) {
+        *self.screen_width.write() = width;
+        *self.screen_height.write() = height;
+    }
+
+    /// Set the window placement heuristic
+    #[allow(dead_code)]
+    pub fn set_placement_heuristic(&self, heuristic: PlacementHeuristic) {
+        *self.placement_heuristic.write() = heuristic;
+    }
+
+    /// Compute the placement position for a window based on the current
+    /// heuristic.
+    ///
+    /// The window must already be inserted into `self.windows` so its
+    /// dimensions can be read. Returns `(x, y)` for the top-left corner.
+    #[allow(dead_code)]
+    pub fn place_window(&self, window_id: WindowId) -> (i32, i32) {
+        let (win_w, win_h) = {
+            let windows = self.windows.read();
+            match windows.get(&window_id) {
+                Some(w) => (w.width, w.height),
+                None => return (0, 0),
+            }
+        };
+
+        let scr_w = *self.screen_width.read();
+        let scr_h = *self.screen_height.read();
+        let heuristic = *self.placement_heuristic.read();
+
+        match heuristic {
+            PlacementHeuristic::Cascade => {
+                let mut offset = self.cascade_offset.write();
+                let x = offset.0;
+                let y = offset.1;
+
+                // Advance cascade position
+                offset.0 += 32;
+                offset.1 += 32;
+
+                // Wrap around if we go off-screen
+                if offset.0 + win_w as i32 > scr_w as i32 || offset.1 + win_h as i32 > scr_h as i32
+                {
+                    offset.0 = 32;
+                    offset.1 = 32;
+                }
+
+                (x, y)
+            }
+            PlacementHeuristic::Center => {
+                let x = (scr_w as i32 - win_w as i32) / 2;
+                let y = (scr_h as i32 - win_h as i32) / 2;
+                (x.max(0), y.max(0))
+            }
+            PlacementHeuristic::Smart => self.smart_place(win_w, win_h, scr_w, scr_h),
+            PlacementHeuristic::Manual { x, y } => (x, y),
+        }
+    }
+
+    /// Smart placement: find position with minimal overlap with existing
+    /// windows
+    fn smart_place(&self, win_w: u32, win_h: u32, scr_w: u32, scr_h: u32) -> (i32, i32) {
+        let windows = self.windows.read();
+        let visible: Vec<&Window> = windows
+            .values()
+            .filter(|w| w.visible && w.state != WindowState::Minimized)
+            .collect();
+
+        if visible.is_empty() {
+            let x = (scr_w as i32 - win_w as i32) / 2;
+            let y = (scr_h as i32 - win_h as i32) / 2;
+            return (x.max(0), y.max(0));
+        }
+
+        let step = 64i32;
+        let mut best_x = 0i32;
+        let mut best_y = 0i32;
+        let mut best_overlap = i64::MAX;
+
+        let max_x = (scr_w as i32 - win_w as i32).max(0);
+        let max_y = (scr_h as i32 - win_h as i32).max(0);
+
+        let mut cy = 0i32;
+        while cy <= max_y {
+            let mut cx = 0i32;
+            while cx <= max_x {
+                let mut total_overlap: i64 = 0;
+
+                for w in &visible {
+                    let ox1 = cx.max(w.x);
+                    let oy1 = cy.max(w.y);
+                    let ox2 = (cx + win_w as i32).min(w.x + w.width as i32);
+                    let oy2 = (cy + win_h as i32).min(w.y + w.height as i32);
+
+                    if ox1 < ox2 && oy1 < oy2 {
+                        total_overlap += (ox2 - ox1) as i64 * (oy2 - oy1) as i64;
+                    }
+                }
+
+                if total_overlap < best_overlap {
+                    best_overlap = total_overlap;
+                    best_x = cx;
+                    best_y = cy;
+
+                    if total_overlap == 0 {
+                        return (best_x, best_y);
+                    }
+                }
+
+                cx += step;
+            }
+            cy += step;
+        }
+
+        (best_x, best_y)
+    }
+
+    /// Snap a window to a screen zone (half, quarter, or maximize).
+    ///
+    /// Saves the window's current geometry so it can be restored later.
+    #[allow(dead_code)]
+    pub fn snap_window(&self, window_id: WindowId, zone: SnapZone) {
+        let scr_w = *self.screen_width.read();
+        let scr_h = *self.screen_height.read();
+        let panel_h: u32 = 32;
+        let usable_h = scr_h.saturating_sub(panel_h);
+
+        let half_w = scr_w / 2;
+        let half_h = usable_h / 2;
+
+        let mut windows = self.windows.write();
+        let window = match windows.get_mut(&window_id) {
+            Some(w) => w,
+            None => return,
+        };
+
+        // Save geometry before snapping (only if not already snapped)
+        if window.snap_zone == SnapZone::None {
+            window.saved_geometry = Some((window.x, window.y, window.width, window.height));
+        }
+
+        match zone {
+            SnapZone::None => {
+                if let Some((sx, sy, sw, sh)) = window.saved_geometry.take() {
+                    window.x = sx;
+                    window.y = sy;
+                    window.width = sw;
+                    window.height = sh;
+                }
+                window.state = WindowState::Normal;
+            }
+            SnapZone::Left => {
+                window.x = 0;
+                window.y = 0;
+                window.width = half_w;
+                window.height = usable_h;
+            }
+            SnapZone::Right => {
+                window.x = half_w as i32;
+                window.y = 0;
+                window.width = scr_w - half_w;
+                window.height = usable_h;
+            }
+            SnapZone::Top => {
+                window.x = 0;
+                window.y = 0;
+                window.width = scr_w;
+                window.height = half_h;
+            }
+            SnapZone::Bottom => {
+                window.x = 0;
+                window.y = half_h as i32;
+                window.width = scr_w;
+                window.height = usable_h - half_h;
+            }
+            SnapZone::TopLeft => {
+                window.x = 0;
+                window.y = 0;
+                window.width = half_w;
+                window.height = half_h;
+            }
+            SnapZone::TopRight => {
+                window.x = half_w as i32;
+                window.y = 0;
+                window.width = scr_w - half_w;
+                window.height = half_h;
+            }
+            SnapZone::BottomLeft => {
+                window.x = 0;
+                window.y = half_h as i32;
+                window.width = half_w;
+                window.height = usable_h - half_h;
+            }
+            SnapZone::BottomRight => {
+                window.x = half_w as i32;
+                window.y = half_h as i32;
+                window.width = scr_w - half_w;
+                window.height = usable_h - half_h;
+            }
+            SnapZone::Maximize => {
+                window.x = 0;
+                window.y = 0;
+                window.width = scr_w;
+                window.height = usable_h;
+                window.state = WindowState::Maximized;
+            }
+        }
+
+        window.snap_zone = zone;
+    }
+
+    /// Detect which snap zone a screen coordinate falls in.
+    ///
+    /// Returns `SnapZone::None` if the position is not within the edge
+    /// threshold (8 pixels).
+    #[allow(dead_code)]
+    pub fn detect_snap_zone(x: i32, y: i32, screen_w: u32, screen_h: u32) -> SnapZone {
+        const EDGE_THRESHOLD: i32 = 8;
+        let sw = screen_w as i32;
+        let sh = screen_h as i32;
+
+        let near_left = x < EDGE_THRESHOLD;
+        let near_right = x >= sw - EDGE_THRESHOLD;
+        let near_top = y < EDGE_THRESHOLD;
+        let near_bottom = y >= sh - EDGE_THRESHOLD;
+
+        match (near_left, near_right, near_top, near_bottom) {
+            (true, false, true, false) => SnapZone::TopLeft,
+            (true, false, false, true) => SnapZone::BottomLeft,
+            (false, true, true, false) => SnapZone::TopRight,
+            (false, true, false, true) => SnapZone::BottomRight,
+            (true, false, false, false) => SnapZone::Left,
+            (false, true, false, false) => SnapZone::Right,
+            (false, false, true, false) => SnapZone::Top,
+            (false, false, false, true) => SnapZone::Bottom,
+            _ => SnapZone::None,
+        }
+    }
+
+    /// Tile all visible windows on the active workspace using the given layout.
+    #[allow(dead_code)]
+    pub fn tile_windows(&self, layout: TileLayout) {
+        let scr_w = *self.screen_width.read();
+        let scr_h = *self.screen_height.read();
+        let panel_h: u32 = 32;
+        let usable_h = scr_h.saturating_sub(panel_h);
+
+        let active_ws = *self.active_workspace.read();
+        let mut windows = self.windows.write();
+
+        let visible_ids: Vec<WindowId> = windows
+            .values()
+            .filter(|w| {
+                w.visible
+                    && w.workspace == active_ws
+                    && w.state != WindowState::Minimized
+                    && w.state != WindowState::Hidden
+            })
+            .map(|w| w.id)
+            .collect();
+
+        let count = visible_ids.len();
+        if count == 0 {
+            return;
+        }
+
+        match layout {
+            TileLayout::EqualColumns => {
+                let col_width = scr_w / count as u32;
+                for (i, &wid) in visible_ids.iter().enumerate() {
+                    if let Some(w) = windows.get_mut(&wid) {
+                        w.x = (i as u32 * col_width) as i32;
+                        w.y = 0;
+                        w.width = col_width;
+                        w.height = usable_h;
+                        w.snap_zone = SnapZone::None;
+                    }
+                }
+            }
+            TileLayout::MasterStack => {
+                if count == 1 {
+                    if let Some(w) = windows.get_mut(&visible_ids[0]) {
+                        w.x = 0;
+                        w.y = 0;
+                        w.width = scr_w;
+                        w.height = usable_h;
+                        w.snap_zone = SnapZone::None;
+                    }
+                } else {
+                    let master_w = (scr_w * 60) / 100;
+                    let stack_w = scr_w - master_w;
+                    let stack_count = (count - 1) as u32;
+                    let stack_h = usable_h / stack_count;
+
+                    if let Some(w) = windows.get_mut(&visible_ids[0]) {
+                        w.x = 0;
+                        w.y = 0;
+                        w.width = master_w;
+                        w.height = usable_h;
+                        w.snap_zone = SnapZone::None;
+                    }
+
+                    for (i, &wid) in visible_ids.iter().skip(1).enumerate() {
+                        if let Some(w) = windows.get_mut(&wid) {
+                            w.x = master_w as i32;
+                            w.y = (i as u32 * stack_h) as i32;
+                            w.width = stack_w;
+                            w.height = stack_h;
+                            w.snap_zone = SnapZone::None;
+                        }
+                    }
+                }
+            }
+            TileLayout::Grid => {
+                let cols = {
+                    let mut c = 1u32;
+                    while c * c < count as u32 {
+                        c += 1;
+                    }
+                    c
+                };
+                let rows = (count as u32).div_ceil(cols);
+                let cell_w = scr_w / cols;
+                let cell_h = usable_h / rows;
+
+                for (i, &wid) in visible_ids.iter().enumerate() {
+                    let col = (i as u32) % cols;
+                    let row = (i as u32) / cols;
+                    if let Some(w) = windows.get_mut(&wid) {
+                        w.x = (col * cell_w) as i32;
+                        w.y = (row * cell_h) as i32;
+                        w.width = cell_w;
+                        w.height = cell_h;
+                        w.snap_zone = SnapZone::None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Set window opacity (0 = transparent, 255 = opaque)
+    #[allow(dead_code)]
+    pub fn set_window_opacity(&self, window_id: WindowId, opacity: u8) {
+        if let Some(window) = self.windows.write().get_mut(&window_id) {
+            window.opacity = opacity;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // WM-4: Virtual workspaces
+    // -----------------------------------------------------------------------
+
+    /// Switch to a different workspace.
+    #[allow(dead_code)]
+    pub fn switch_workspace(&self, workspace_id: WorkspaceId) {
+        if workspace_id as usize >= MAX_WORKSPACES {
+            return;
+        }
+
+        let current = *self.active_workspace.read();
+        if current == workspace_id {
+            return;
+        }
+
+        let mut windows = self.windows.write();
+
+        for window in windows.values_mut() {
+            if window.workspace == current {
+                window.visible = false;
+            }
+        }
+
+        for window in windows.values_mut() {
+            if window.workspace == workspace_id && window.state != WindowState::Minimized {
+                window.visible = true;
+            }
+        }
+
+        *self.active_workspace.write() = workspace_id;
+        *self.focused_window.write() = None;
+
+        crate::println!("[WM] Switched to workspace {}", workspace_id + 1);
+    }
+
+    /// Move a window to a different workspace.
+    #[allow(dead_code)]
+    pub fn move_window_to_workspace(&self, window_id: WindowId, workspace_id: WorkspaceId) {
+        if workspace_id as usize >= MAX_WORKSPACES {
+            return;
+        }
+
+        let active = *self.active_workspace.read();
+
+        {
+            let mut workspaces = self.workspaces.write();
+            for ws in workspaces.iter_mut() {
+                ws.windows.retain(|&id| id != window_id);
+            }
+            if let Some(ws) = workspaces.get_mut(workspace_id as usize) {
+                ws.windows.push(window_id);
+            }
+        }
+
+        let mut windows = self.windows.write();
+        if let Some(window) = windows.get_mut(&window_id) {
+            window.workspace = workspace_id;
+
+            if workspace_id != active {
+                window.visible = false;
+                if *self.focused_window.read() == Some(window_id) {
+                    *self.focused_window.write() = None;
+                }
+            } else {
+                window.visible = true;
+            }
+        }
+
+        crate::println!(
+            "[WM] Moved window {} to workspace {}",
+            window_id,
+            workspace_id + 1
+        );
+    }
+
+    /// Get the currently active workspace ID.
+    #[allow(dead_code)]
+    pub fn get_active_workspace(&self) -> WorkspaceId {
+        *self.active_workspace.read()
+    }
+
+    /// Get the list of window IDs on a given workspace.
+    #[allow(dead_code)]
+    pub fn get_workspace_windows(&self, workspace_id: WorkspaceId) -> Vec<WindowId> {
+        if workspace_id as usize >= MAX_WORKSPACES {
+            return Vec::new();
+        }
+        let workspaces = self.workspaces.read();
+        match workspaces.get(workspace_id as usize) {
+            Some(ws) => ws.windows.clone(),
+            None => Vec::new(),
+        }
+    }
+
     /// Event loop iteration
     pub fn event_loop_iteration(&self) {
         // Process any pending hardware events
@@ -435,5 +1031,25 @@ mod tests {
 
         assert_eq!(wm.window_at_position(150, 150), Some(id));
         assert_eq!(wm.window_at_position(50, 50), None);
+    }
+
+    #[test]
+    fn test_snap_zone_detection() {
+        assert_eq!(
+            WindowManager::detect_snap_zone(2, 400, 1280, 800),
+            SnapZone::Left
+        );
+        assert_eq!(
+            WindowManager::detect_snap_zone(1275, 400, 1280, 800),
+            SnapZone::Right
+        );
+        assert_eq!(
+            WindowManager::detect_snap_zone(2, 2, 1280, 800),
+            SnapZone::TopLeft
+        );
+        assert_eq!(
+            WindowManager::detect_snap_zone(640, 400, 1280, 800),
+            SnapZone::None
+        );
     }
 }

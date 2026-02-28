@@ -20,6 +20,10 @@
 
 pub mod buffer;
 pub mod compositor;
+pub mod dmabuf;
+pub mod idle_inhibit;
+pub mod layer_shell;
+pub mod output;
 pub mod protocol;
 pub mod shell;
 pub mod surface;
@@ -66,6 +70,22 @@ impl WaylandDisplay {
         display.register_global("wl_compositor", 4);
         display.register_global("wl_shm", 1);
         display.register_global("xdg_wm_base", 2);
+        display.register_global(
+            layer_shell::ZWLR_LAYER_SHELL_V1,
+            layer_shell::ZWLR_LAYER_SHELL_V1_VERSION,
+        );
+        display.register_global(
+            idle_inhibit::ZWP_IDLE_INHIBIT_MANAGER_V1,
+            idle_inhibit::ZWP_IDLE_INHIBIT_MANAGER_V1_VERSION,
+        );
+        display.register_global(
+            shell::ZXDG_DECORATION_MANAGER_V1,
+            shell::ZXDG_DECORATION_MANAGER_V1_VERSION,
+        );
+        display.register_global(
+            dmabuf::ZWP_LINUX_DMABUF_V1,
+            dmabuf::ZWP_LINUX_DMABUF_V1_VERSION,
+        );
 
         display
     }
@@ -1020,8 +1040,12 @@ mod tests {
     #[test]
     fn test_display_creation() {
         let display = WaylandDisplay::new();
-        assert_eq!(display.globals.read().len(), 3); // compositor, shm,
-                                                     // xdg_wm_base
+        assert_eq!(display.globals.read().len(), 7); // compositor, shm,
+                                                     // xdg_wm_base,
+                                                     // layer_shell,
+                                                     // idle_inhibit,
+                                                     // decoration_mgr,
+                                                     // dmabuf
     }
 
     #[test]

@@ -102,6 +102,96 @@ pub const XDG_TOPLEVEL_STATE_RESIZING: u32 = 3;
 pub const XDG_TOPLEVEL_STATE_ACTIVATED: u32 = 4;
 
 // ---------------------------------------------------------------------------
+// XDG Decoration constants (zxdg_decoration_manager_v1)
+// ---------------------------------------------------------------------------
+
+/// Wayland global interface name for decoration manager
+pub const ZXDG_DECORATION_MANAGER_V1: &str = "zxdg_decoration_manager_v1";
+
+/// Protocol version
+pub const ZXDG_DECORATION_MANAGER_V1_VERSION: u32 = 1;
+
+// Manager request opcodes
+/// destroy
+#[allow(dead_code)] // Phase 7: decoration manager teardown
+pub const ZXDG_DECORATION_MANAGER_V1_DESTROY: u16 = 0;
+/// get_toplevel_decoration(id: new_id, toplevel: object)
+#[allow(dead_code)] // Phase 7: decoration negotiation
+pub const ZXDG_DECORATION_MANAGER_V1_GET_TOPLEVEL_DECORATION: u16 = 1;
+
+// Toplevel decoration request opcodes
+/// destroy
+#[allow(dead_code)] // Phase 7: decoration cleanup
+pub const ZXDG_TOPLEVEL_DECORATION_V1_DESTROY: u16 = 0;
+/// set_mode(mode: uint)
+#[allow(dead_code)] // Phase 7: client decoration preference
+pub const ZXDG_TOPLEVEL_DECORATION_V1_SET_MODE: u16 = 1;
+/// unset_mode
+#[allow(dead_code)] // Phase 7: client reverts to compositor preference
+pub const ZXDG_TOPLEVEL_DECORATION_V1_UNSET_MODE: u16 = 2;
+
+// Toplevel decoration event opcodes
+/// configure(mode: uint)
+#[allow(dead_code)] // Phase 7: compositor announces chosen mode
+pub const ZXDG_TOPLEVEL_DECORATION_V1_CONFIGURE: u16 = 0;
+
+// Decoration mode constants
+/// Decorations are drawn by the client
+#[allow(dead_code)] // Phase 7: CSD mode
+pub const ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE: u32 = 1;
+/// Decorations are drawn by the compositor (server)
+#[allow(dead_code)] // Phase 7: SSD mode
+pub const ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE: u32 = 2;
+
+/// Server-side vs client-side decoration preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecorationMode {
+    /// Client draws its own title bar, borders, etc.
+    ClientSide,
+    /// Compositor draws title bar, borders, etc.
+    ServerSide,
+}
+
+impl DecorationMode {
+    /// Parse from the wire `u32` value.
+    pub fn from_u32(v: u32) -> Option<Self> {
+        match v {
+            ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE => Some(Self::ClientSide),
+            ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE => Some(Self::ServerSide),
+            _ => None,
+        }
+    }
+
+    /// Convert to the wire `u32` value.
+    pub fn to_u32(self) -> u32 {
+        match self {
+            Self::ClientSide => ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE,
+            Self::ServerSide => ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE,
+        }
+    }
+}
+
+/// Per-toplevel decoration state negotiated between client and compositor.
+#[allow(dead_code)] // Phase 7: full decoration negotiation lifecycle
+pub struct ToplevelDecoration {
+    /// Decoration object ID
+    pub id: u32,
+    /// Associated toplevel ID
+    pub toplevel_id: u32,
+    /// The mode that the compositor decided on
+    pub mode: DecorationMode,
+}
+
+/// Negotiate decoration mode for a toplevel.
+///
+/// VeridianOS always prefers server-side decorations so that the compositor
+/// draws title bars, close buttons, and window borders uniformly.
+pub fn negotiate_decoration(_client_preference: Option<DecorationMode>) -> DecorationMode {
+    // The compositor always chooses SSD for a consistent desktop appearance.
+    DecorationMode::ServerSide
+}
+
+// ---------------------------------------------------------------------------
 // Window state
 // ---------------------------------------------------------------------------
 

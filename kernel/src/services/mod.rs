@@ -6,6 +6,7 @@
 pub mod desktop_ipc;
 pub mod driver_framework;
 pub mod init_system;
+pub mod notification_ipc;
 pub mod process_server;
 pub mod shell;
 pub mod shell_utils;

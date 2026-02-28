@@ -31,7 +31,8 @@ The project explores how capability-oriented design, strong isolation boundaries
 - 🔧 **Multi-architecture** — x86_64, AArch64, and RISC-V support
 - 🔒 **Security focused** — Mandatory access control, secure boot, hardware security
 - 📦 **Modern package management** — Source and binary package support
-- 🖥️ **Wayland compositor** — Modern display server with GPU acceleration
+- 🖥️ **Wayland compositor** — Modern display server with GPU acceleration, DMA-BUF, layer-shell
+- 🎨 **Desktop environment** — Application launcher, Alt-Tab, notifications, workspaces, screen lock
 
 ---
 
@@ -112,7 +113,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.7.0 (February 27, 2026) | **Releases Published**: 44 (v0.1.0 through v0.7.0)
+**Latest Release**: v0.7.1 (February 28, 2026) | **Releases Published**: 45 (v0.1.0 through v0.7.1)
 
 | Metric                 | Value                                           |
 | ---------------------- | ----------------------------------------------- |
@@ -142,7 +143,7 @@ experiments/   Non-normative exploratory work
 | 5.5   | Infrastructure Bridge     | **COMPLETE (100%)** | v0.5.13 | Feb 2026 |
 | 6     | Advanced Features and GUI | **~100% (desktop complete)** | v0.6.4  | Feb 2026 |
 | 6.5   | Rust Compiler + Bash Shell | **COMPLETE (100%)** | v0.7.0  | Feb 2026 |
-| 7     | Production Readiness     | **Planned**            | --      | --       |
+| 7     | Production Readiness     | **In Progress (~15%)** | v0.7.1  | Feb 2026 |
 
 For detailed release notes, see [Release History](docs/RELEASE-HISTORY.md).
 
@@ -176,6 +177,14 @@ Phases 0 through 4 are complete. The kernel provides:
 - **Rust std Platform Port** -- `std::sys::veridian` platform module (15 files, ~7800 lines) implementing fs, io, process, thread, net, time, alloc, and synchronization primitives; LLVM 19 cross-compilation scripts; rustc/cargo build pipeline with self-hosting verification (Stage 0 -> Stage 1 -> Stage 2 consistency)
 - **Userland Shell (vsh)** -- Bash 5.3-compatible shell written in pure Rust (~10K lines), featuring lexer with heredocs and quoting, recursive descent parser with full AST, 8-stage POSIX word expansion (tilde, parameter, command substitution, arithmetic, field splitting, pathname, brace, quote removal), fork+exec pipelines with redirections, 49 builtins (POSIX + Bash extensions), job control (fg/bg/jobs/wait), readline with Emacs/vi modes and tab completion, startup file processing (~/.vshrc)
 - **Kernel Enhancements for Rust** -- 8GB memory scaling, epoll (create/ctl/wait with edge/level-triggered modes), enhanced PTY subsystem (openpty/grantpt/unlockpt), POSIX signal completions (sigprocmask, sigpending, sigsuspend), filesystem hardening (ftruncate, rename, fchmod, fchown, readdir improvements)
+- **GPU Driver Framework** -- VirtIO GPU driver with PCI discovery (vendor 0x1AF4, device 0x1050), split virtqueue ring, 2D resource management (create/attach/scanout/transfer/flush), framebuffer integration; vendor GPU framework stubs for Intel i915 (6 generations: Skylake through Meteor Lake), AMD amdgpu (4 generations: GCN5 through RDNA3), NVIDIA Nouveau (4 architectures: Pascal through Ada Lovelace) with PCI ID tables and MMIO register maps
+- **Advanced Wayland Protocols** -- Layer shell (background/bottom/top/overlay layers with anchor/margin/exclusive zone), idle inhibit manager, DMA-BUF protocol (zwp_linux_dmabuf_v1 with fourcc format codes and VirtIO GPU resource import), multi-output management with HiDPI scaling (1x/2x/3x) and horizontal/vertical arrangement, xdg-decoration server/client negotiation, XWayland socket infrastructure stub
+- **Wayland Client Library** -- `libwayland-client.a` user-space library (~1,400 lines C) with raw syscall interface, SHM pool management, surface lifecycle, event dispatch loop
+- **Desktop Environment** -- Application launcher with .desktop file parser and search grid, notification system with toast popups and urgency levels, system tray (CPU/memory monitors, clock), screen locker with password authentication and idle timeout, Alt-Tab application switcher with keyboard cycling, animation framework (9 easing functions, fixed-point 8.8 math), 4 virtual workspaces
+- **Window Manager Enhancements** -- Window placement heuristics (cascade/center/smart), snap-to-edge (left/right/maximize), tile layouts (horizontal/vertical/grid), server-side decorations with title bars and min/max/close buttons, compositing effects (3-pass box blur shadows, alpha blending, opacity)
+- **Desktop Applications** -- MIME database (31 types, magic byte detection, extension mapping), syntax highlighter (Rust/C/Shell with keyword/string/comment/number tokenization), system settings app (5 panels: display/network/users/appearance/about), image viewer (PPM P3/P6 and BMP 24/32-bit, nearest-neighbor zoom, pan)
+- **Dynamic Linker Completion** -- Multi-LOAD ELF fix with page-boundary segment handling, lazy PLT/GOT binding, ELF symbol versioning (DT_VERSYM/VERNEED/VERDEF), weak symbol resolution, LD_PRELOAD and LD_LIBRARY_PATH environment variable support, TLS support (PT_TLS, ARCH_SET_FS), DT_INIT_ARRAY/DT_FINI_ARRAY execution, RELRO protection
+- **Desktop IPC Services** -- 6 IPC endpoints (WM=1000, INPUT=1001, COMPOSITOR=1002, NOTIFICATION=1003, CLIPBOARD=1004, LAUNCHER=1005) with typed message dispatch
 
 ### Self-Hosting Roadmap
 
@@ -205,7 +214,7 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### What Comes Next
 
-- **Phase 7** -- GPU acceleration (virtio-gpu, DRM framebuffer), advanced Wayland (DMA-BUF, XWayland, client library), multimedia (audio server, codec pipeline, media player), virtualization (KVM-style hypervisor, containers), cloud-native (OCI runtime, network namespaces), POSIX compatibility layer
+- **Phase 7 Waves 1-3** -- GPU drivers (virtio-gpu 2D with PCI discovery + virtqueue + scanout, vendor GPU framework stubs for Intel i915/AMD amdgpu/NVIDIA Nouveau with PCI ID tables), advanced Wayland (layer-shell, idle-inhibit, DMA-BUF protocol, multi-output management with HiDPI, xdg-decoration negotiation, XWayland socket stub, libwayland-client user-space library), desktop completion (application launcher, notification system, system tray, screen lock, Alt-Tab switcher, animation framework, window placement/snap/tile, server-side decorations, virtual workspaces, compositing effects with shadow/blur, MIME database, syntax highlighting, settings app, image viewer)
 
 ### Technical Notes
 
@@ -219,7 +228,7 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### Maturity
 
-VeridianOS is an active research system. Phases 0 through 6.5 are architecturally stable with a functional graphical desktop, Rust compiler port, and Bash-compatible userland shell. Phase 7 (production readiness) is planned.
+VeridianOS is an active research system. Phases 0 through 6.5 are architecturally stable with a functional graphical desktop, Rust compiler port, and Bash-compatible userland shell. Phase 7 Waves 1-3 (GPU drivers, advanced Wayland, desktop completion) are implemented. Waves 4-6 (multimedia, virtualization, cloud-native) are planned.
 
 Historical status is recorded in:
 
@@ -447,10 +456,12 @@ Security is a fundamental design principle:
 - [x] **Phase 6 Core (Waves 1-5)**: Graphical desktop with Wayland compositor (wire protocol, SHM buffers, surface compositing, XDG shell), PS/2 mouse driver, unified input events, TCP/IP network stack (VirtIO-Net, Ethernet, ARP, TCP state machine, DHCP client), 19 new syscalls (230-255), `startgui` desktop command, 5 network shell commands (v0.6.1, Feb 2026)
 - [x] **Phase 6 Completion**: Documentation sync (all Phase 6 references updated from ~5% to ~40%), AF_INET socket creation wired to net::socket, VirtIO-Net/E1000 device registry integration, UDP recv_from wired to socket buffer layer, all 43 TODO(phase6) markers resolved (4 wired + 39 reclassified to Phase 7), Phase 7 TODO roadmap generated (15 categories, ~93 items) (v0.6.2, Feb 2026)
 - [x] **Phase 6.5: Rust Compiler Port + Bash Shell**: Rust std::sys::veridian platform (15 files, ~7800 lines), LLVM 19 cross-compilation scripts, rustc/cargo build pipeline with self-hosting verification; vsh Bash-in-Rust shell (~10K lines, 49 builtins, job control, readline); kernel enhancements (8GB memory, epoll, PTY, signal completions); 700+ test cases, 3 documentation guides (v0.7.0, Feb 2026)
+- [x] **Phase 7 Waves 1-3: GPU + Wayland + Desktop**: VirtIO GPU driver (PCI discovery, virtqueue, 2D resources, scanout), vendor GPU stubs (i915/amdgpu/nouveau), Wayland extensions (layer-shell, idle-inhibit, DMA-BUF, multi-output, xdg-decoration, XWayland), libwayland-client library, desktop environment (launcher, notifications, systray, screen lock, Alt-Tab, animation, workspaces, decorations, compositing effects), applications (MIME database, syntax highlighting, settings, image viewer), dynamic linker completion (lazy PLT, symbol versioning, LD_PRELOAD, TLS) (v0.7.1, Feb 2026)
 
 ### Upcoming
 
-- [ ] **Phase 7**: GPU acceleration, advanced Wayland (DMA-BUF, XWayland, client library), multimedia (audio server, video), virtualization (KVM, containers), cloud-native, POSIX compatibility layer
+- [x] **Phase 7 Waves 1-3**: GPU drivers (virtio-gpu, i915/amdgpu/nouveau stubs), advanced Wayland (DMA-BUF, layer-shell, XWayland, libwayland-client, multi-output), desktop completion (launcher, notifications, screen lock, Alt-Tab, workspaces, decorations, animation, MIME, syntax highlighting, settings, image viewer) (v0.7.1, Feb 2026)
+- [ ] **Phase 7 Waves 4-6**: Multimedia (audio server, codecs), virtualization (KVM, containers), cloud-native (OCI, namespaces), POSIX compatibility layer
 
 See [Release History](docs/RELEASE-HISTORY.md) for detailed per-release notes.
 

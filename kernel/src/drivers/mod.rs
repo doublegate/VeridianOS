@@ -6,6 +6,9 @@
 pub mod console;
 pub mod e1000;
 pub mod gpu;
+pub mod gpu_amdgpu;
+pub mod gpu_i915;
+pub mod gpu_nouveau;
 pub mod input;
 pub mod input_event;
 pub mod iommu;
@@ -19,6 +22,7 @@ pub mod storage;
 pub mod terminal;
 pub mod usb;
 pub mod virtio;
+pub mod virtio_gpu;
 pub mod virtio_net;
 
 pub use console::{ConsoleDevice, ConsoleDriver, SerialConsole, VgaConsole};
@@ -46,6 +50,11 @@ pub fn init() {
     virtio::blk::init();
     if let Err(_e) = gpu::init() {
         crate::println!("[DRIVERS] Warning: GPU init failed: {:?}", _e);
+    }
+
+    // Initialize VirtIO GPU driver (PCI discovery, 2D framebuffer)
+    if let Err(_e) = virtio_gpu::init() {
+        crate::println!("[DRIVERS] Warning: VirtIO GPU init failed: {:?}", _e);
     }
 
     // Initialize mouse driver (x86_64: PS/2 aux port, others: stub)

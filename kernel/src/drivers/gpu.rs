@@ -257,6 +257,17 @@ impl GpuDriver {
         self.height
     }
 
+    /// Return a string describing how this driver was configured.
+    fn detection_mode(&self) -> &'static str {
+        // The simple() fallback always uses 0xFD000000; a real bootloader
+        // framebuffer will have a different address.
+        if self.framebuffer_addr == 0xFD000000 {
+            "fallback"
+        } else {
+            "GOP detected"
+        }
+    }
+
     /// Blit buffer to screen
     pub fn blit(
         &mut self,
@@ -303,14 +314,48 @@ static GPU_DRIVER: Mutex<Option<GpuDriver>> = Mutex::new(None);
 pub fn init() -> Result<(), KernelError> {
     println!("[GPU] Initializing GPU driver...");
 
-    // For now, create a simple framebuffer (would normally detect VBE/GOP)
-    // TODO(phase7): Detect actual framebuffer from bootloader (VBE/GOP)
-    let driver = GpuDriver::simple(0xFD000000, 1024, 768);
+    let driver = detect_framebuffer();
+
+    let (width, height, mode) = (driver.width, driver.height, driver.detection_mode());
 
     *GPU_DRIVER.lock() = Some(driver);
 
-    println!("[GPU] GPU driver initialized (1024x768)");
+    println!(
+        "[GPU] GPU driver initialized ({}x{}, {})",
+        width, height, mode
+    );
     Ok(())
+}
+
+/// Detect the framebuffer from the bootloader's BootInfo (x86_64 UEFI GOP).
+///
+/// On x86_64, queries the boot framebuffer info provided by the UEFI
+/// bootloader. On other architectures (or if no framebuffer is available),
+/// falls back to a simple software framebuffer.
+fn detect_framebuffer() -> GpuDriver {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if let Some(fb_info) = crate::arch::x86_64::boot::get_framebuffer_info() {
+            let pixel_format = if fb_info.is_bgr {
+                PixelFormat::Bgra8888
+            } else {
+                PixelFormat::Rgba8888
+            };
+
+            return GpuDriver {
+                framebuffer_addr: fb_info.buffer as usize,
+                width: fb_info.width,
+                height: fb_info.height,
+                pitch: fb_info.stride,
+                bpp: fb_info.bpp,
+                pixel_format,
+            };
+        }
+    }
+
+    // Fallback for non-x86_64 architectures or when no bootloader framebuffer
+    // is available
+    GpuDriver::simple(0xFD000000, 1024, 768)
 }
 
 /// Execute a closure with the GPU driver (mutable access)

@@ -317,6 +317,75 @@ impl Default for Compositor {
     }
 }
 
+// ---------------------------------------------------------------------------
+// WM-5: Compositing effects
+// ---------------------------------------------------------------------------
+
+/// Render a soft shadow behind a window surface.
+///
+/// `shadow_buffer` should be pre-allocated with
+/// `(width + 2*radius) * (height + 2*radius)` u32 elements.
+/// Uses a 3-pass box blur approximating a Gaussian shadow.
+#[allow(dead_code)]
+pub fn render_shadow(
+    shadow_buffer: &mut [u32],
+    buf_width: u32,
+    width: u32,
+    height: u32,
+    radius: u32,
+    opacity: u8,
+) {
+    crate::desktop::animation::render_shadow(
+        shadow_buffer,
+        buf_width,
+        width,
+        height,
+        radius,
+        opacity,
+    );
+}
+
+/// Alpha-blend a single source pixel (ARGB8888) onto a destination pixel
+/// (XRGB8888). Returns the blended pixel as 0xFFRRGGBB.
+#[allow(dead_code)]
+pub fn alpha_blend(src: u32, dst: u32) -> u32 {
+    let src_a = (src >> 24) & 0xFF;
+    if src_a == 255 {
+        return src | 0xFF00_0000;
+    }
+    if src_a == 0 {
+        return dst;
+    }
+
+    let src_r = (src >> 16) & 0xFF;
+    let src_g = (src >> 8) & 0xFF;
+    let src_b = src & 0xFF;
+
+    let dst_r = (dst >> 16) & 0xFF;
+    let dst_g = (dst >> 8) & 0xFF;
+    let dst_b = dst & 0xFF;
+
+    let inv_a = 255 - src_a;
+    let r = (src_r * src_a + dst_r * inv_a) / 255;
+    let g = (src_g * src_a + dst_g * inv_a) / 255;
+    let b = (src_b * src_a + dst_b * inv_a) / 255;
+
+    0xFF00_0000 | (r << 16) | (g << 8) | b
+}
+
+/// Apply a per-surface opacity to a u32 pixel (XRGB8888 -> ARGB8888).
+///
+/// Multiplies the existing alpha channel by `opacity / 255`.
+#[allow(dead_code)]
+pub fn apply_opacity(pixel: u32, opacity: u8) -> u32 {
+    if opacity == 255 {
+        return pixel;
+    }
+    let a = (pixel >> 24) & 0xFF;
+    let new_a = (a * opacity as u32) / 255;
+    (new_a << 24) | (pixel & 0x00FF_FFFF)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
