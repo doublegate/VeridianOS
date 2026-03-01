@@ -328,13 +328,17 @@ impl Panel {
             ticks / 1_000_000_000
         };
 
-        // Convert epoch seconds to date components
-        let secs_of_day = epoch_secs % 86400;
+        // Apply America/New_York timezone (EST = UTC-5)
+        let tz_offset_secs: u64 = 5 * 3600;
+        let local_epoch = epoch_secs.saturating_sub(tz_offset_secs);
+
+        // Convert local epoch seconds to date components
+        let secs_of_day = local_epoch % 86400;
         let hours = (secs_of_day / 3600) % 24;
         let minutes = (secs_of_day / 60) % 60;
 
         // Days since Unix epoch (1970-01-01, a Thursday)
-        let mut remaining_days = (epoch_secs / 86400) as u32;
+        let mut remaining_days = (local_epoch / 86400) as u32;
 
         // Day of week: 1970-01-01 was Thursday (index 4)
         let day_of_week = (remaining_days + 4) % 7; // 0=Sun..6=Sat

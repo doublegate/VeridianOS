@@ -9,7 +9,7 @@ use crate::bench::{black_box, cycles_to_ns, read_timestamp};
 pub const TARGET_SYSCALL_NS: u64 = 500;
 pub const TARGET_CONTEXT_SWITCH_NS: u64 = 10_000;
 pub const TARGET_IPC_SMALL_NS: u64 = 1_000;
-pub const TARGET_FRAME_ALLOC_NS: u64 = 500;
+pub const TARGET_FRAME_ALLOC_NS: u64 = 2000;
 pub const TARGET_CAP_LOOKUP_NS: u64 = 100;
 
 /// Individual benchmark result

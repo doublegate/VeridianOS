@@ -642,6 +642,16 @@ impl TerminalManager {
         terminals.get(terminal_id).map(|t| t.surface_id())
     }
 
+    /// Write a welcome message to a terminal's screen buffer.
+    pub fn write_welcome(&self, terminal_id: usize) {
+        let mut terminals = self.terminals.write();
+        if let Some(terminal) = terminals.get_mut(terminal_id) {
+            for &b in b"VeridianOS Terminal\r\n\r\nPress ESC to exit GUI.\r\n" {
+                terminal.process_output_byte(b);
+            }
+        }
+    }
+
     /// Render all terminal surfaces to the compositor.
     pub fn render_all_surfaces(&self) {
         let terminals = self.terminals.read();

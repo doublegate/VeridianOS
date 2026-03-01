@@ -148,6 +148,9 @@ struct DesktopState {
     // Settings app instance (owned, renders full UI)
     settings_app: crate::desktop::settings::SettingsApp,
 
+    // Image viewer instance (owned, renders full UI)
+    image_viewer: crate::desktop::image_viewer::ImageViewer,
+
     // Dynamic apps (spawned from launcher, closeable)
     dynamic_apps: alloc::vec::Vec<DynamicApp>,
 
@@ -276,6 +279,11 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopState {
         wm.set_window_title(text_editor_wid, "Text Editor");
     });
 
+    // Write welcome message to terminal so it's not a blank black window
+    crate::desktop::terminal::with_terminal_manager(|tm| {
+        tm.write_welcome(0);
+    });
+
     // Focus the terminal by default and sync compositor z_order
     if terminal_wid > 0 {
         crate::desktop::window_manager::with_window_manager(|wm| {
@@ -302,7 +310,7 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopState {
     // Send a welcome notification to demonstrate the notification system
     crate::desktop::notification::notify(
         "VeridianOS Desktop",
-        "Welcome to VeridianOS v0.10.4",
+        "Welcome to VeridianOS v0.10.5",
         crate::desktop::notification::NotificationUrgency::Normal,
         "desktop",
     );
@@ -330,6 +338,7 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopState {
         ),
         animation_mgr: crate::desktop::animation::AnimationManager::new(),
         settings_app: crate::desktop::settings::SettingsApp::new(),
+        image_viewer: crate::desktop::image_viewer::ImageViewer::new(),
         dynamic_apps: alloc::vec::Vec::new(),
         frame_count: 0,
         drag: None,
@@ -639,6 +648,85 @@ fn close_dynamic_app(state: &mut DesktopState, wid: u32) {
         crate::desktop::window_manager::with_window_manager(|wm| {
             let _ = wm.destroy_window(app.wid);
         });
+    }
+}
+
+/// Close any window (dynamic or static) by WM window ID.
+fn close_any_window(state: &mut DesktopState, wid: u32) {
+    // Dynamic apps: use existing close path
+    if state.dynamic_apps.iter().any(|a| a.wid == wid) {
+        close_dynamic_app(state, wid);
+        return;
+    }
+    // Static apps: unmap surface, destroy WM window, zero the wid
+    if wid == state.terminal.wid {
+        crate::desktop::wayland::with_display(|display| {
+            display
+                .wl_compositor
+                .set_surface_mapped(state.terminal.surface_id, false);
+        });
+        crate::desktop::window_manager::with_window_manager(|wm| {
+            let _ = wm.destroy_window(wid);
+        });
+        state.terminal.wid = 0;
+    } else if wid == state.file_manager.wid {
+        crate::desktop::wayland::with_display(|display| {
+            display
+                .wl_compositor
+                .set_surface_mapped(state.file_manager.surface_id, false);
+        });
+        crate::desktop::window_manager::with_window_manager(|wm| {
+            let _ = wm.destroy_window(wid);
+        });
+        state.file_manager.wid = 0;
+    } else if wid == state.text_editor.wid {
+        crate::desktop::wayland::with_display(|display| {
+            display
+                .wl_compositor
+                .set_surface_mapped(state.text_editor.surface_id, false);
+        });
+        crate::desktop::window_manager::with_window_manager(|wm| {
+            let _ = wm.destroy_window(wid);
+        });
+        state.text_editor.wid = 0;
+    }
+}
+
+/// Draw close button overlays (red square with white X) on all visible windows.
+fn draw_close_button_overlays(bb: &mut [u32], fb_width: usize, _fb_height: usize) {
+    let windows =
+        crate::desktop::window_manager::with_window_manager(|wm| wm.get_visible_windows())
+            .unwrap_or_default();
+    for w in &windows {
+        // Close button: 16x16 at top-right of title bar
+        let btn_x = (w.x + w.width as i32 - 22).max(0) as usize;
+        let btn_y = (w.y + 6).max(0) as usize;
+        for dy in 0..16 {
+            for dx in 0..16 {
+                let px = btn_x + dx;
+                let py = btn_y + dy;
+                let idx = py * fb_width + px;
+                if idx < bb.len() {
+                    // Red background
+                    bb[idx] = 0xFF_CC3333;
+                }
+            }
+        }
+        // Draw white X (2px thick diagonal lines)
+        for i in 0..14 {
+            let coords = [
+                (btn_x + 1 + i, btn_y + 1 + i),
+                (btn_x + 2 + i, btn_y + 1 + i),
+                (btn_x + 14 - i, btn_y + 1 + i),
+                (btn_x + 13 - i, btn_y + 1 + i),
+            ];
+            for (px, py) in coords {
+                let idx = py * fb_width + px;
+                if idx < bb.len() {
+                    bb[idx] = 0xFF_FFFFFF;
+                }
+            }
+        }
     }
 }
 
@@ -955,10 +1043,7 @@ fn render_loop(hw: &fbcon::FbHwInfo, state: &mut DesktopState) {
                                 .unwrap_or(false);
 
                             if is_close {
-                                // Only close dynamic apps; static apps are permanent
-                                if state.dynamic_apps.iter().any(|a| a.wid == wid) {
-                                    close_dynamic_app(state, wid);
-                                }
+                                close_any_window(state, wid);
                                 continue;
                             }
 
@@ -986,6 +1071,49 @@ fn render_loop(hw: &fbcon::FbHwInfo, state: &mut DesktopState) {
                                     event: wm_event,
                                 });
                             });
+                        }
+                    }
+                    continue;
+                }
+
+                // --- Handle right-click ---
+                if let crate::desktop::window_manager::InputEvent::MouseButton {
+                    button: 1,
+                    pressed: true,
+                    x,
+                    y,
+                } = wm_event
+                {
+                    // Dismiss launcher on right-click
+                    let launcher_visible =
+                        crate::desktop::launcher::with_launcher_ref(|l| l.is_visible())
+                            .unwrap_or(false);
+                    if launcher_visible {
+                        crate::desktop::launcher::with_launcher(|l| l.hide());
+                    }
+
+                    // Skip panel area
+                    if y < panel_y {
+                        // Window hit test
+                        let hit = crate::desktop::window_manager::with_window_manager(|wm| {
+                            wm.window_at_position(x, y)
+                        })
+                        .flatten();
+
+                        if let Some(wid) = hit {
+                            // Right-click on title bar: close window
+                            let in_title_bar =
+                                crate::desktop::window_manager::with_window_manager(|wm| {
+                                    wm.get_window(wid).map(|w| y < w.y + TITLE_BAR_HEIGHT)
+                                })
+                                .flatten()
+                                .unwrap_or(false);
+                            if in_title_bar {
+                                close_any_window(state, wid);
+                            }
+                        } else {
+                            // Right-click on desktop background: toggle launcher
+                            crate::desktop::launcher::with_launcher(|l| l.toggle());
                         }
                     }
                     continue;
@@ -1110,6 +1238,9 @@ fn render_loop(hw: &fbcon::FbHwInfo, state: &mut DesktopState) {
                 // Render Phase 7 overlays into the back-buffer (post-composite,
                 // pre-blit). These draw on top of all Wayland surfaces.
                 display.wl_compositor.with_back_buffer_mut(|bb| {
+                    // Close button overlays on all visible windows
+                    draw_close_button_overlays(bb, fb_width, fb_height);
+
                     // App switcher overlay (Alt+Tab)
                     if state.app_switcher.is_visible() {
                         state
@@ -1317,18 +1448,21 @@ fn render_all_apps(state: &DesktopState) {
 
         match app.kind {
             AppKind::SystemMonitor => {
-                render_system_monitor(&mut buf, app.width as usize, app.height as usize);
+                render_system_monitor(
+                    &mut buf,
+                    app.width as usize,
+                    app.height as usize,
+                    state.frame_count,
+                );
             }
             AppKind::MediaPlayer => {
                 render_media_player(&mut buf, app.width as usize, app.height as usize);
             }
             AppKind::ImageViewer => {
-                render_placeholder_app(
+                state.image_viewer.render_to_u8_buffer(
                     &mut buf,
                     app.width as usize,
                     app.height as usize,
-                    "Image Viewer",
-                    0x1a1a2e,
                 );
             }
             AppKind::Settings => {
@@ -1368,7 +1502,7 @@ fn render_placeholder_app(buf: &mut [u8], w: usize, h: usize, title: &str, bg_co
 }
 
 /// Render system monitor showing memory and CPU stats.
-fn render_system_monitor(buf: &mut [u8], w: usize, h: usize) {
+fn render_system_monitor(buf: &mut [u8], w: usize, h: usize, frame_count: u64) {
     render_placeholder_app(buf, w, h, "System Monitor", 0x1e272e);
     let mem = crate::mm::get_memory_stats();
     let total_mb = (mem.total_frames * 4096) / (1024 * 1024);
@@ -1410,6 +1544,8 @@ fn render_system_monitor(buf: &mut [u8], w: usize, h: usize) {
     draw_string_into_buffer(buf, w, line4, 20, stats_y + 40, 0xD4D4D4);
     let line5 = format_simple(&mut line_buf, b"Page faults:  ", perf.page_faults);
     draw_string_into_buffer(buf, w, line5, 20, stats_y + 60, 0xD4D4D4);
+    let line6 = format_simple(&mut line_buf, b"GUI frames:   ", frame_count);
+    draw_string_into_buffer(buf, w, line6, 20, stats_y + 80, 0xD4D4D4);
 }
 
 /// Render media player with playback info.
@@ -1595,22 +1731,61 @@ fn forward_events_to_apps(state: &mut DesktopState) {
         }
     }
 
-    // Dynamic apps: collect (wid, events) first, then process
-    let dynamic_wids: alloc::vec::Vec<u32> = state.dynamic_apps.iter().map(|a| a.wid).collect();
-    for wid in dynamic_wids {
+    // Dynamic apps: collect (wid, kind, events), then dispatch
+    let dynamic_info: alloc::vec::Vec<(u32, AppKind)> =
+        state.dynamic_apps.iter().map(|a| (a.wid, a.kind)).collect();
+    for (wid, kind) in dynamic_info {
         let events = crate::desktop::window_manager::with_window_manager(|wm| wm.get_events(wid))
             .unwrap_or_default();
-        if !events.is_empty() {
-            // Check for close action (ESC key press)
-            for event in &events {
-                if let crate::desktop::window_manager::InputEvent::KeyPress {
-                    scancode: 0x1B, ..
-                } = event
-                {
-                    close_dynamic_app(state, wid);
-                    break;
-                }
+        if events.is_empty() {
+            continue;
+        }
+        // Get window position for coordinate transform
+        let win_pos = crate::desktop::window_manager::with_window_manager(|wm| {
+            wm.get_window(wid).map(|w| (w.x, w.y))
+        })
+        .flatten()
+        .unwrap_or((0, 0));
+
+        let mut should_close = false;
+        for event in &events {
+            // ESC closes any dynamic app
+            if let crate::desktop::window_manager::InputEvent::KeyPress { scancode: 0x1B, .. } =
+                event
+            {
+                should_close = true;
+                break;
             }
+            match kind {
+                AppKind::Settings => match event {
+                    crate::desktop::window_manager::InputEvent::KeyPress { scancode, .. } => {
+                        state.settings_app.handle_key(*scancode);
+                    }
+                    crate::desktop::window_manager::InputEvent::MouseButton {
+                        button: 0,
+                        pressed: true,
+                        x,
+                        y,
+                    } => {
+                        let local_x = (*x - win_pos.0).max(0) as usize;
+                        let local_y = (*y - win_pos.1).max(0) as usize;
+                        state.settings_app.handle_click(local_x, local_y);
+                    }
+                    _ => {}
+                },
+                AppKind::ImageViewer => {
+                    if let crate::desktop::window_manager::InputEvent::KeyPress {
+                        scancode, ..
+                    } = event
+                    {
+                        state.image_viewer.handle_key(*scancode);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if should_close {
+            close_dynamic_app(state, wid);
         }
     }
 }

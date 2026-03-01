@@ -137,6 +137,19 @@ impl FileManager {
                 _ => a.name.cmp(&b.name),
             });
 
+        // Insert ".." parent directory entry at the top for non-root dirs
+        if self.current_path != "/" {
+            self.entries.insert(
+                0,
+                FileEntry {
+                    name: String::from(".."),
+                    node_type: NodeType::Directory,
+                    size: 0,
+                    selected: false,
+                },
+            );
+        }
+
         println!("[FILE-MANAGER] Loaded {} entries", self.entries.len());
 
         Ok(())
@@ -145,7 +158,10 @@ impl FileManager {
     /// Process input event
     pub fn process_input(&mut self, event: InputEvent) -> Result<(), KernelError> {
         match event {
-            InputEvent::KeyPress { character, .. } => {
+            InputEvent::KeyPress {
+                character,
+                scancode,
+            } => {
                 match character {
                     '\n' | '\r' => {
                         // Enter - open selected entry
@@ -171,7 +187,32 @@ impl FileManager {
                         // Refresh
                         self.refresh_directory()?;
                     }
-                    _ => {}
+                    _ => {
+                        // Arrow keys in GUI mode (single-byte 0x80+ codes)
+                        match scancode {
+                            0x80 => {
+                                // KEY_UP
+                                if self.selected_index > 0 {
+                                    self.selected_index -= 1;
+                                }
+                            }
+                            0x81 => {
+                                // KEY_DOWN
+                                if self.selected_index < self.entries.len().saturating_sub(1) {
+                                    self.selected_index += 1;
+                                }
+                            }
+                            0x82 => {
+                                // KEY_LEFT - parent directory
+                                self.navigate_parent()?;
+                            }
+                            0x83 => {
+                                // KEY_RIGHT - open selected
+                                self.open_selected()?;
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
             InputEvent::MouseButton {
@@ -215,6 +256,10 @@ impl FileManager {
 
         match entry.node_type {
             NodeType::Directory => {
+                // Handle ".." parent directory
+                if entry.name == ".." {
+                    return self.navigate_parent();
+                }
                 // Navigate into directory
                 if self.current_path == "/" {
                     self.current_path = format!("/{}", entry.name);

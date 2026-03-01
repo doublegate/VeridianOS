@@ -776,6 +776,27 @@ fn read_le_u16(data: &[u8], off: usize) -> u16 {
     (data[off] as u16) | ((data[off + 1] as u16) << 8)
 }
 
+impl ImageViewer {
+    /// Render the image viewer into a `u8` BGRA pixel buffer.
+    ///
+    /// Delegates to `render_to_buffer` (u32), then converts to u8 bytes.
+    pub fn render_to_u8_buffer(&self, buf: &mut [u8], buf_width: usize, buf_height: usize) {
+        let pixel_count = buf_width * buf_height;
+        let mut u32_buf = vec![0u32; pixel_count];
+        self.render_to_buffer(&mut u32_buf, buf_width, buf_height);
+        // Convert u32 BGRA pixels to u8 BGRA bytes
+        for (i, &px) in u32_buf.iter().enumerate() {
+            let off = i * 4;
+            if off + 3 < buf.len() {
+                buf[off] = (px & 0xFF) as u8; // B
+                buf[off + 1] = ((px >> 8) & 0xFF) as u8; // G
+                buf[off + 2] = ((px >> 16) & 0xFF) as u8; // R
+                buf[off + 3] = ((px >> 24) & 0xFF) as u8; // A
+            }
+        }
+    }
+}
+
 impl Default for ImageViewer {
     fn default() -> Self {
         Self::new()

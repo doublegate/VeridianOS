@@ -905,19 +905,22 @@ impl FrameAllocator {
 
     /// Get allocator statistics
     pub fn get_stats(&self) -> FrameAllocatorStats {
-        let mut free_frames = 0;
+        let mut free_frames = 0u64;
+        let mut total_frames = 0u64;
 
         for allocator in self.bitmap_allocators.iter().flatten() {
             free_frames += allocator.free_count() as u64;
+            total_frames += allocator.total_frames as u64;
         }
 
         for allocator in self.buddy_allocators.iter().flatten() {
             free_frames += allocator.free_count() as u64;
+            total_frames += allocator.total_frames as u64;
         }
 
         let stats = self.stats.lock();
         FrameAllocatorStats {
-            total_frames: stats.total_frames,
+            total_frames,
             free_frames,
             bitmap_allocations: stats.bitmap_allocations,
             buddy_allocations: stats.buddy_allocations,
