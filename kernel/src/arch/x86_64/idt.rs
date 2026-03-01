@@ -73,6 +73,8 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
+    crate::perf::count_page_fault();
+
     // SAFETY: Read CR2 (faulting address) before any code that might trigger
     // another page fault, which would overwrite CR2.
     let cr2_val: u64 = unsafe {
@@ -274,6 +276,8 @@ pub(crate) unsafe fn raw_serial_hex(val: u64) {
 }
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    crate::perf::count_interrupt();
+
     // Notify the scheduler of a timer tick for preemptive scheduling.
     // Use try_lock to avoid deadlock: if the scheduler lock is already held
     // (e.g., we interrupted mid-schedule), skip the tick — the holder will
@@ -293,6 +297,8 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
 }
 
 extern "x86-interrupt" fn apic_timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    crate::perf::count_interrupt();
+
     // Increment the global tick counter (atomic, always safe from interrupt
     // context).
     super::timer::tick();
@@ -317,6 +323,8 @@ extern "x86-interrupt" fn sched_wake_handler(_stack_frame: InterruptStackFrame) 
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    crate::perf::count_interrupt();
+
     // Read scancode from PS/2 data port (0x60) and forward to keyboard driver.
     // This handler must NOT call println! or acquire any spinlock used by
     // the serial/fbcon output path.

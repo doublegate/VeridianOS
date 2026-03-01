@@ -2,6 +2,106 @@
 
 ---
 
+## [v0.10.4] - 2026-02-28
+
+### v0.10.4: GUI Bug Fixes + VirtIO GPU Acceleration
+
+Fixes 5 GUI bugs discovered during interactive QEMU testing and wires the VirtIO GPU driver (implemented in Phase 7 Wave 1 but never connected) into the desktop rendering pipeline for hardware-accelerated 2D framebuffer compositing.
+
+#### Bug 1: System Monitor Shows All Zeros -- Perf Counter Wiring
+
+The performance counters (`perf::count_syscall()`, `count_context_switch()`, `count_page_fault()`) existed as atomic increment functions but were never called from any kernel code path. All `AtomicU64` counters remained at 0.
+
+- **`kernel/src/perf/mod.rs`**: Added missing `count_interrupt()` function (the `INTERRUPT_COUNT` static existed but had no public incrementer)
+- **`kernel/src/syscall/mod.rs`**: Wired `perf::count_syscall()` at `handle_syscall()` entry point -- counts every syscall dispatch
+- **`kernel/src/sched/scheduler.rs`**: Wired `perf::count_context_switch()` in `switch_to()` -- counts actual task switches (not scheduling decisions that continue the current task)
+- **`kernel/src/arch/x86_64/idt.rs`**: Wired `perf::count_page_fault()` at page fault handler entry (before CR2 read), `perf::count_interrupt()` in PIC timer (vector 32), APIC timer (vector 48), and keyboard (IRQ1) interrupt handlers
+
+All counter functions use `AtomicU64::fetch_add(1, Relaxed)` -- safe from interrupt context with zero lock contention.
+
+#### Bug 2: Settings Window Is Blank -- SettingsApp Rendering
+
+The `AppKind::Settings` arm in `render_all_apps()` called `render_placeholder_app()` (solid background + centered title text) instead of the fully-implemented `SettingsApp::render_to_buffer()` which has sidebar navigation, 5 content panels (Display/Network/Users/Appearance/About), selection highlighting, and interactive fields.
+
+- **`kernel/src/desktop/settings.rs`**: Added `render_to_u8_buffer(&self, buf, w, h)` that renders the complete settings UI directly to a BGRA `u8` buffer, avoiding the intermediate allocation + u8-to-u32 conversion of `render_to_buffer()`. Refactored `render_to_buffer()` to delegate to the new method.
+- **`kernel/src/desktop/renderer.rs`**: Added `settings_app: SettingsApp` to `DesktopState`, instantiated via `SettingsApp::new()` in `create_desktop_scene()`. Replaced `render_placeholder_app("Settings", 0x2d3436)` with `state.settings_app.render_to_u8_buffer()`.
+
+#### Bug 3: Panel Clock Shows Wrong Date/Time -- CMOS RTC Driver
+
+The panel clock calculated time from `read_hw_timestamp()` (TSC ticks) divided by an assumed 1GHz frequency, starting from 00:00 at boot. Fake date calculation used `days % 28` for day-of-month. No CMOS RTC driver existed.
+
+- **`kernel/src/arch/x86_64/rtc.rs`** (NEW, 133 lines): Complete CMOS MC146818 RTC driver:
+  - I/O ports 0x70 (index) / 0x71 (data) for register access
+  - BCD-to-binary conversion (checks register 0x0B bit 2)
+  - 12/24-hour format handling (register 0x0B bit 1)
+  - Update-in-progress wait (register 0x0A bit 7, spin-limited)
+  - Century register 0x32 (ACPI FADT standard)
+  - `read_rtc() -> RtcTime`: Raw CMOS read with all conversions
+  - `rtc_to_epoch(RtcTime) -> u64`: Gregorian calendar to Unix epoch conversion with leap year handling
+  - `init()`: Reads boot-time RTC into `BOOT_EPOCH: AtomicU64`, captures TSC baseline
+  - `current_epoch_secs()`: `BOOT_EPOCH + (now_tsc - boot_tsc) / 1GHz` -- real wall-clock seconds
+- **`kernel/src/arch/x86_64/mod.rs`**: Added `pub mod rtc;`
+- **`kernel/src/bootstrap.rs`**: Added `rtc::init()` call during x86_64 bootstrap (after PAT, before memory init)
+- **`kernel/src/desktop/panel.rs`**: Complete rewrite of `update_clock()`:
+  - Calls `rtc::current_epoch_secs()` on x86_64 (falls back to TSC-only on other architectures)
+  - Proper epoch-to-date decomposition: days since 1970-01-01, year/month/day extraction with leap year handling
+  - Day-of-week via `(days + 4) % 7` (1970-01-01 = Thursday)
+  - Added `is_leap_year()` helper
+
+#### Bug 4: Taskbar Click Doesn't Switch Focus -- Stale Button List
+
+`panel.update_buttons()` was only called every 60 frames (now 10), so the button list could be empty or stale when a click event arrived. Clicking a window title in the taskbar would hit-test against outdated positions.
+
+- **`kernel/src/desktop/renderer.rs`**: Added `panel.update_buttons()` call immediately before `panel.handle_click()` in the panel click event handler, ensuring the button list matches current WM state before hit-testing.
+
+#### Bug 5: GUI Is Sluggish -- Render Loop Optimization + VirtIO GPU
+
+Multiple compounding performance issues:
+1. Apps rendered every 4th frame (`is_multiple_of(4)` guard) -- effective 15 FPS
+2. Panel updated every 60th frame -- clock visibly stale
+3. Spin-loop frame pacing at 50,000 iterations -- excessive CPU waste between frames
+
+- **`kernel/src/desktop/renderer.rs`**: Removed `is_multiple_of(4)` guard on `render_all_apps()` (now renders every frame). Reduced panel update interval from `is_multiple_of(60)` to `is_multiple_of(10)`. Reduced spin loop from 50,000 to 5,000 iterations for faster frame pacing.
+
+#### VirtIO GPU Hardware-Accelerated Framebuffer Blit
+
+The VirtIO GPU driver (`kernel/src/drivers/virtio_gpu.rs`, ~1800 lines) was fully implemented in Phase 7 Wave 1 (2D commands, BGRX8888 backing buffer, virtqueue transport) but never called from the renderer. The desktop wrote directly to the UEFI GOP MMIO framebuffer via per-row `copy_nonoverlapping`.
+
+- **`kernel/src/desktop/renderer.rs`**: Added `try_gpu_blit()` function (~20 lines, x86_64 only):
+  1. Checks `virtio_gpu::is_available()` -- returns `false` if no VirtIO GPU detected (QEMU `-vga std` or no display device)
+  2. Acquires VirtIO GPU driver lock via `with_driver()`
+  3. Copies compositor back-buffer to GPU backing store via `get_framebuffer_mut()` + `copy_from_slice()` -- fast memcpy to guest-accessible DMA buffer
+  4. Issues `flush_framebuffer()` -- enqueues `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH` via virtqueue, triggering host-side DMA transfer and display refresh
+- Modified `blit_back_buffer()` to try VirtIO GPU first, falling back to existing UEFI GOP MMIO path
+- Format compatibility: compositor back-buffer (XRGB8888) and VirtIO GPU backing (BGRX8888) have identical byte layout -- no pixel format conversion needed
+
+Performance improvement path: replaces ~4MB of per-row MMIO writes (uncached, ~200-1000 MB/s) with a single memcpy to DMA buffer (~2-10 GB/s) plus two lightweight virtqueue commands.
+
+#### Version Bump
+
+- `Cargo.toml`, `kernel/src/services/shell/commands.rs` (uname), `kernel/src/fs/mod.rs` (os-release), `kernel/src/desktop/renderer.rs` (welcome notification): 0.10.3 → 0.10.4
+
+#### Files Changed
+
+| File | Type | Lines |
+|------|------|-------|
+| `kernel/src/perf/mod.rs` | Modified | +6 |
+| `kernel/src/syscall/mod.rs` | Modified | +1 |
+| `kernel/src/sched/scheduler.rs` | Modified | +1 |
+| `kernel/src/arch/x86_64/idt.rs` | Modified | +8 |
+| `kernel/src/desktop/settings.rs` | Modified | +85/-80 |
+| `kernel/src/desktop/renderer.rs` | Modified | +35/-10 |
+| `kernel/src/arch/x86_64/rtc.rs` | **New** | +133 |
+| `kernel/src/arch/x86_64/mod.rs` | Modified | +1 |
+| `kernel/src/bootstrap.rs` | Modified | +1 |
+| `kernel/src/desktop/panel.rs` | Modified | +55/-35 |
+| `Cargo.toml` | Modified | +1/-1 |
+| `kernel/src/fs/mod.rs` | Modified | +1/-1 |
+| `kernel/src/services/shell/commands.rs` | Modified | +1/-1 |
+| **Total** | **13 files (1 new)** | **+329/-128** |
+
+---
+
 ## [v0.10.3] - 2026-02-28
 
 ### v0.10.3: Full Subsystem Integration -- CLI + GUI

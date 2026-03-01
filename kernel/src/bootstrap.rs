@@ -247,6 +247,7 @@ pub fn kernel_init() -> KernelResult<()> {
     {
         crate::arch::x86_64::pat::init();
         kprintln!("[BOOTSTRAP] PAT configured (WC available)");
+        crate::arch::x86_64::rtc::init();
     }
 
     kprintln!("[BOOTSTRAP] Architecture initialized");

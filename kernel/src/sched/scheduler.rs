@@ -618,6 +618,7 @@ impl Scheduler {
             return; // Already running
         }
 
+        crate::perf::count_context_switch();
         let start_cycles = super::metrics::read_tsc();
 
         // Trace: record context switch

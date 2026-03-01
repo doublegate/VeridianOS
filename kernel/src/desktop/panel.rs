@@ -316,52 +316,85 @@ impl Panel {
         }
     }
 
-    /// Update the clock display with date and time.
+    /// Update the clock display with real wall-clock date and time.
     pub fn update_clock(&self) {
-        let uptime_ticks = crate::arch::timer::read_hw_timestamp();
-        // Approximate: convert ticks to seconds (assume ~1GHz TSC)
-        let secs = uptime_ticks / 1_000_000_000;
-        let hours = (secs / 3600) % 24;
-        let minutes = (secs / 60) % 60;
+        // Use CMOS RTC on x86_64 for real wall-clock time; fall back to
+        // uptime-based approximation on other architectures.
+        #[cfg(target_arch = "x86_64")]
+        let epoch_secs = crate::arch::x86_64::rtc::current_epoch_secs();
+        #[cfg(not(target_arch = "x86_64"))]
+        let epoch_secs = {
+            let ticks = crate::arch::timer::read_hw_timestamp();
+            ticks / 1_000_000_000
+        };
 
-        // Calculate day of week from uptime (starting from "Mon" as epoch day)
-        let days = secs / 86400;
-        let day_of_week = days % 7;
+        // Convert epoch seconds to date components
+        let secs_of_day = epoch_secs % 86400;
+        let hours = (secs_of_day / 3600) % 24;
+        let minutes = (secs_of_day / 60) % 60;
+
+        // Days since Unix epoch (1970-01-01, a Thursday)
+        let mut remaining_days = (epoch_secs / 86400) as u32;
+
+        // Day of week: 1970-01-01 was Thursday (index 4)
+        let day_of_week = (remaining_days + 4) % 7; // 0=Sun..6=Sat
+        let day_name = match day_of_week {
+            0 => "Sun",
+            1 => "Mon",
+            2 => "Tue",
+            3 => "Wed",
+            4 => "Thu",
+            5 => "Fri",
+            6 => "Sat",
+            _ => "???",
+        };
+
+        // Year/month/day from days since epoch
+        let mut year: u32 = 1970;
+        loop {
+            let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+            if remaining_days < days_in_year {
+                break;
+            }
+            remaining_days -= days_in_year;
+            year += 1;
+        }
+
+        let month_days: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        let mut month_idx: usize = 0;
+        for (i, &md) in month_days.iter().enumerate() {
+            let days = if i == 1 && is_leap_year(year) { 29 } else { md };
+            if remaining_days < days {
+                month_idx = i;
+                break;
+            }
+            remaining_days -= days;
+            if i == 11 {
+                month_idx = 11;
+            }
+        }
+        let month_day = remaining_days + 1;
+
+        let month = match month_idx {
+            0 => "Jan",
+            1 => "Feb",
+            2 => "Mar",
+            3 => "Apr",
+            4 => "May",
+            5 => "Jun",
+            6 => "Jul",
+            7 => "Aug",
+            8 => "Sep",
+            9 => "Oct",
+            10 => "Nov",
+            11 => "Dec",
+            _ => "???",
+        };
 
         let mut clock = self.clock_text.write();
         clock.clear();
 
-        // Day of week abbreviation
-        let day_name = match day_of_week {
-            0 => "Mon",
-            1 => "Tue",
-            2 => "Wed",
-            3 => "Thu",
-            4 => "Fri",
-            5 => "Sat",
-            6 => "Sun",
-            _ => "???",
-        };
-
-        // Month and day (approximate from uptime -- treat day 0 as Feb 28)
-        let month_day = (days % 28) + 1;
-        let month = match (days / 28) % 12 {
-            0 => "Feb",
-            1 => "Mar",
-            2 => "Apr",
-            3 => "May",
-            4 => "Jun",
-            5 => "Jul",
-            6 => "Aug",
-            7 => "Sep",
-            8 => "Oct",
-            9 => "Nov",
-            10 => "Dec",
-            11 => "Jan",
-            _ => "???",
-        };
-
-        // Format: "Mon Feb 28 14:30"
+        // Format: "Fri Feb 28 14:30"
         for ch in day_name.chars() {
             clock.push(ch);
         }
@@ -373,7 +406,7 @@ impl Panel {
         if month_day < 10 {
             clock.push(' ');
         }
-        for ch in fmt_u64(month_day).chars() {
+        for ch in fmt_u64(month_day as u64).chars() {
             clock.push(ch);
         }
         clock.push(' ');
@@ -600,6 +633,11 @@ fn render_char_to_buf(
             }
         }
     }
+}
+
+/// Check if a year is a leap year.
+fn is_leap_year(y: u32) -> bool {
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
 /// Format a u64 (0-59) as a decimal string (no heap allocation).

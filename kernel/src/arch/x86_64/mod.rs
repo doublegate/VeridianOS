@@ -18,6 +18,7 @@ pub mod mmu;
 pub mod msr;
 pub mod multiboot;
 pub mod pat;
+pub mod rtc;
 pub mod serial;
 pub mod syscall;
 pub mod timer;

@@ -680,6 +680,7 @@ fn handle_syscall(
     arg4: usize,
     arg5: usize,
 ) -> SyscallResult {
+    crate::perf::count_syscall();
     match syscall {
         // IPC system calls
         Syscall::IpcSend => sys_ipc_send(arg1, arg2, arg3, arg4),

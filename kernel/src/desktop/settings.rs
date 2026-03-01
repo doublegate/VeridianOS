@@ -408,17 +408,12 @@ impl SettingsApp {
     // Rendering
     // -----------------------------------------------------------------------
 
-    /// Render the settings window into a `u32` BGRA pixel buffer.
+    /// Render the settings UI directly into a BGRA `u8` pixel buffer.
     ///
-    /// `buffer` must be at least `buf_width * buf_height` elements.
-    pub fn render_to_buffer(&self, buffer: &mut [u32], buf_width: usize, buf_height: usize) {
-        // We render via an intermediate byte buffer (BGRA) since that is what
-        // draw_char_into_buffer / draw_string_into_buffer expect.
-        let byte_len = buf_width * buf_height * 4;
-        let mut byte_buf = vec![0u8; byte_len];
-
+    /// `buf` must be at least `buf_width * buf_height * 4` bytes.
+    pub fn render_to_u8_buffer(&self, buf: &mut [u8], buf_width: usize, buf_height: usize) {
         // -- background (dark gray) --
-        for chunk in byte_buf.chunks_exact_mut(4) {
+        for chunk in buf.chunks_exact_mut(4) {
             chunk[0] = 0x28; // B
             chunk[1] = 0x28; // G
             chunk[2] = 0x28; // R
@@ -429,11 +424,11 @@ impl SettingsApp {
         for y in 0..buf_height {
             for x in 0..SIDEBAR_WIDTH.min(buf_width) {
                 let off = (y * buf_width + x) * 4;
-                if off + 3 < byte_buf.len() {
-                    byte_buf[off] = 0x32;
-                    byte_buf[off + 1] = 0x32;
-                    byte_buf[off + 2] = 0x32;
-                    byte_buf[off + 3] = 0xFF;
+                if off + 3 < buf.len() {
+                    buf[off] = 0x32;
+                    buf[off + 1] = 0x32;
+                    buf[off + 2] = 0x32;
+                    buf[off + 3] = 0xFF;
                 }
             }
         }
@@ -448,11 +443,11 @@ impl SettingsApp {
                 for dy in 0..SIDEBAR_ITEM_HEIGHT {
                     for x in 0..SIDEBAR_WIDTH.min(buf_width) {
                         let off = ((item_y + dy) * buf_width + x) * 4;
-                        if off + 3 < byte_buf.len() {
-                            byte_buf[off] = 0x55;
-                            byte_buf[off + 1] = 0x44;
-                            byte_buf[off + 2] = 0x33;
-                            byte_buf[off + 3] = 0xFF;
+                        if off + 3 < buf.len() {
+                            buf[off] = 0x55;
+                            buf[off + 1] = 0x44;
+                            buf[off + 2] = 0x33;
+                            buf[off + 3] = 0xFF;
                         }
                     }
                 }
@@ -464,7 +459,7 @@ impl SettingsApp {
                 0xAAAAAA
             };
             draw_string_into_buffer(
-                &mut byte_buf,
+                buf,
                 buf_width,
                 panel.label().as_bytes(),
                 10,
@@ -476,32 +471,41 @@ impl SettingsApp {
         // -- sidebar / content divider --
         for y in 0..buf_height {
             let off = (y * buf_width + SIDEBAR_WIDTH) * 4;
-            if off + 3 < byte_buf.len() {
-                byte_buf[off] = 0x55;
-                byte_buf[off + 1] = 0x55;
-                byte_buf[off + 2] = 0x55;
-                byte_buf[off + 3] = 0xFF;
+            if off + 3 < buf.len() {
+                buf[off] = 0x55;
+                buf[off + 1] = 0x55;
+                buf[off + 2] = 0x55;
+                buf[off + 3] = 0xFF;
             }
         }
 
         // -- content area --
         match self.active_panel {
             SettingsPanel::Display => {
-                self.render_display_panel(&mut byte_buf, buf_width);
+                self.render_display_panel(buf, buf_width);
             }
             SettingsPanel::Network => {
-                self.render_network_panel(&mut byte_buf, buf_width);
+                self.render_network_panel(buf, buf_width);
             }
             SettingsPanel::Users => {
-                self.render_users_panel(&mut byte_buf, buf_width);
+                self.render_users_panel(buf, buf_width);
             }
             SettingsPanel::Appearance => {
-                self.render_appearance_panel(&mut byte_buf, buf_width);
+                self.render_appearance_panel(buf, buf_width);
             }
             SettingsPanel::About => {
-                self.render_about_panel(&mut byte_buf, buf_width);
+                self.render_about_panel(buf, buf_width);
             }
         }
+    }
+
+    /// Render the settings window into a `u32` BGRA pixel buffer.
+    ///
+    /// `buffer` must be at least `buf_width * buf_height` elements.
+    pub fn render_to_buffer(&self, buffer: &mut [u32], buf_width: usize, buf_height: usize) {
+        let byte_len = buf_width * buf_height * 4;
+        let mut byte_buf = vec![0u8; byte_len];
+        self.render_to_u8_buffer(&mut byte_buf, buf_width, buf_height);
 
         // Convert byte buffer (BGRA u8) into u32 buffer
         for (i, chunk) in byte_buf.chunks_exact(4).enumerate() {

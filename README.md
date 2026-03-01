@@ -116,7 +116,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.10.3 (February 28, 2026) | **Releases Published**: 51 (v0.1.0 through v0.10.3)
+**Latest Release**: v0.10.4 (February 28, 2026) | **Releases Published**: 52 (v0.1.0 through v0.10.4)
 
 | Metric                 | Value                                           |
 | ---------------------- | ----------------------------------------------- |
@@ -146,7 +146,7 @@ experiments/   Non-normative exploratory work
 | 5.5   | Infrastructure Bridge     | **COMPLETE (100%)** | v0.5.13 | Feb 2026 |
 | 6     | Advanced Features and GUI | **~100% (desktop complete)** | v0.6.4  | Feb 2026 |
 | 6.5   | Rust Compiler + Bash Shell | **COMPLETE (100%)** | v0.7.0  | Feb 2026 |
-| 7     | Production Readiness     | **Complete (~100%)** | v0.10.3  | Feb 2026 |
+| 7     | Production Readiness     | **Complete (~100%)** | v0.10.4  | Feb 2026 |
 
 For detailed release notes, see [Release History](docs/RELEASE-HISTORY.md).
 
@@ -478,6 +478,7 @@ Security is a fundamental design principle:
 - [x] **Integration Audit**: Two-pass audit wiring 51 unreachable syscalls, AF_INET socket routing, VirtIO PCI driver probing, COW fork page fault handling, container namespace fork propagation, select() implementation, audio pipeline to VirtIO-Sound, scheduler work-stealing (v0.10.1, Feb 2026)
 - [x] **Desktop Render Loop Integration**: Wire all 8 Phase 7 desktop modules into compositing pipeline -- keyboard modifier tracking (Alt/Ctrl/Super), GUI mode key encoding (single-byte 0x80+ for arrows), hotkey detection (Alt+Tab, Ctrl+Alt+L, Ctrl+Alt+Arrows, Super), screen lock takeover, overlay rendering (app switcher, launcher, notifications), snap-to-edge, virtual workspace switching, system tray stats, animation framework (v0.10.2, Feb 2026)
 - [x] **Full Subsystem Integration -- CLI + GUI**: 17 new shell commands (lspci, lsusb, lsblk, vmstat, sched, slab, cap, mac, audit, tpm, sha256sum, blake3sum, ipcs, route, ss, winfo, lsns), dynamic GUI app framework (spawn/close/focus lifecycle), launcher dispatch with 7 apps, system monitor with live stats, window close buttons, 4 subsystem accessor APIs (v0.10.3, Feb 2026)
+- [x] **GUI Bug Fixes + VirtIO GPU Acceleration**: 5 GUI bug fixes (system monitor perf counters, settings app rendering, CMOS RTC real-time clock, taskbar focus switching, render loop performance), VirtIO GPU hardware-accelerated framebuffer blit path, CMOS RTC driver for wall-clock time (v0.10.4, Feb 2026)
 
 ### Upcoming
 

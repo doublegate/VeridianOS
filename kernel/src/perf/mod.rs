@@ -46,6 +46,12 @@ pub fn count_page_fault() {
     PAGE_FAULT_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Increment interrupt counter
+#[inline(always)]
+pub fn count_interrupt() {
+    INTERRUPT_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Get performance statistics as a point-in-time snapshot
 pub fn get_stats() -> PerfCounters {
     PerfCounters {

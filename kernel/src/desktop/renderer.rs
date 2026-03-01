@@ -145,6 +145,9 @@ struct DesktopState {
     screen_locker: crate::desktop::screen_lock::ScreenLocker,
     animation_mgr: crate::desktop::animation::AnimationManager,
 
+    // Settings app instance (owned, renders full UI)
+    settings_app: crate::desktop::settings::SettingsApp,
+
     // Dynamic apps (spawned from launcher, closeable)
     dynamic_apps: alloc::vec::Vec<DynamicApp>,
 
@@ -299,7 +302,7 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopState {
     // Send a welcome notification to demonstrate the notification system
     crate::desktop::notification::notify(
         "VeridianOS Desktop",
-        "Welcome to VeridianOS v0.10.3",
+        "Welcome to VeridianOS v0.10.4",
         crate::desktop::notification::NotificationUrgency::Normal,
         "desktop",
     );
@@ -326,6 +329,7 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopState {
             height as usize,
         ),
         animation_mgr: crate::desktop::animation::AnimationManager::new(),
+        settings_app: crate::desktop::settings::SettingsApp::new(),
         dynamic_apps: alloc::vec::Vec::new(),
         frame_count: 0,
         drag: None,
@@ -905,6 +909,9 @@ fn render_loop(hw: &fbcon::FbHwInfo, state: &mut DesktopState) {
 
                     // Panel click
                     if y >= panel_y {
+                        // Refresh button list before hit-testing so stale entries
+                        // don't cause missed clicks (buttons update every N frames).
+                        crate::desktop::panel::with_panel(|p| p.update_buttons());
                         if let Some(focus_wid) =
                             crate::desktop::panel::with_panel(|p| p.handle_click(x, y - panel_y))
                                 .flatten()
@@ -1087,12 +1094,10 @@ fn render_loop(hw: &fbcon::FbHwInfo, state: &mut DesktopState) {
         }
 
         // --- 5. Render apps and panel to surfaces ---
-        if state.frame_count.is_multiple_of(4) {
-            render_all_apps(state);
-        }
+        render_all_apps(state);
 
         // Panel: update clock + buttons + systray periodically
-        if state.frame_count.is_multiple_of(60) {
+        if state.frame_count.is_multiple_of(10) {
             render_panel(state, fb_width as u32);
         }
 
@@ -1144,11 +1149,32 @@ fn render_loop(hw: &fbcon::FbHwInfo, state: &mut DesktopState) {
         let fb_slice = unsafe { core::slice::from_raw_parts_mut(fb_ptr, fb_stride * fb_height) };
         cursor::draw_cursor(fb_slice, fb_stride, fb_width, fb_height, mouse_x, mouse_y);
 
-        // Yield CPU -- shorter spin for better responsiveness
-        for _ in 0..50_000 {
+        // Yield CPU -- short spin for frame pacing
+        for _ in 0..5_000 {
             core::hint::spin_loop();
         }
     }
+}
+
+/// Try to blit the compositor back-buffer via VirtIO GPU (DMA path).
+///
+/// Returns `true` if the GPU handled the blit, `false` to fall back to
+/// direct MMIO writes.
+#[cfg(target_arch = "x86_64")]
+fn try_gpu_blit(compositor: &crate::desktop::wayland::compositor::Compositor) -> bool {
+    if !crate::drivers::virtio_gpu::is_available() {
+        return false;
+    }
+    crate::drivers::virtio_gpu::with_driver(|gpu| {
+        compositor.with_back_buffer(|bb| {
+            if let Some(backing) = gpu.get_framebuffer_mut() {
+                let copy_len = bb.len().min(backing.len());
+                backing[..copy_len].copy_from_slice(&bb[..copy_len]);
+            }
+        });
+        let _ = gpu.flush_framebuffer();
+    });
+    true
 }
 
 /// Blit the compositor's back-buffer to the hardware framebuffer.
@@ -1160,6 +1186,12 @@ fn blit_back_buffer(
     fb_stride: usize,
     is_bgr: bool,
 ) {
+    // Try VirtIO GPU first (hardware-accelerated DMA path)
+    #[cfg(target_arch = "x86_64")]
+    if try_gpu_blit(compositor) {
+        return;
+    }
+
     compositor.with_back_buffer(|bb| {
         if is_bgr {
             // Direct row-based memcpy -- format already matches
@@ -1300,12 +1332,10 @@ fn render_all_apps(state: &DesktopState) {
                 );
             }
             AppKind::Settings => {
-                render_placeholder_app(
+                state.settings_app.render_to_u8_buffer(
                     &mut buf,
                     app.width as usize,
                     app.height as usize,
-                    "Settings",
-                    0x2d3436,
                 );
             }
         }
