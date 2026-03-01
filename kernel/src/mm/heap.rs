@@ -79,7 +79,7 @@ pub fn heap_end_vaddr() -> u64 {
 /// Get current heap statistics (x86_64 only).
 ///
 /// Returns (total, used, free) in bytes.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub fn get_heap_stats() -> (usize, usize, usize) {
     let allocator = crate::get_allocator().lock();
     let total = HEAP_SIZE;

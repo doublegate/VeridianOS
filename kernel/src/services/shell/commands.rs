@@ -3828,7 +3828,7 @@ impl BuiltinCommand for SlabCommand {
     }
     fn execute(&self, _args: &[String], _shell: &super::Shell) -> CommandResult {
         crate::println!("=== Kernel Heap Statistics ===");
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
             let (total, used, free) = crate::mm::heap::get_heap_stats();
             crate::println!("Heap size:  {} MB", total / (1024 * 1024));
