@@ -116,14 +116,14 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.10.5 (February 28, 2026) | **Releases Published**: 53 (v0.1.0 through v0.10.5)
+**Latest Release**: v0.10.6 (March 1, 2026) | **Releases Published**: 54 (v0.1.0 through v0.10.6)
 
 | Metric                 | Value                                           |
 | ---------------------- | ----------------------------------------------- |
 | Build                  | 0 errors, 0 warnings across all 3 architectures |
 | Boot Tests             | 29/29 (all architectures, Stage 6 BOOTOK)       |
-| Host-Target Unit Tests | 646/646 passing                                 |
-| CI Pipeline            | 10/10 jobs passing (GitHub Actions + Codecov)   |
+| Host-Target Unit Tests | 998/998 passing                                 |
+| CI Pipeline            | 11/11 jobs passing (GitHub Actions + Codecov)   |
 
 ### Architecture Support
 
@@ -146,7 +146,7 @@ experiments/   Non-normative exploratory work
 | 5.5   | Infrastructure Bridge     | **COMPLETE (100%)** | v0.5.13 | Feb 2026 |
 | 6     | Advanced Features and GUI | **~100% (desktop complete)** | v0.6.4  | Feb 2026 |
 | 6.5   | Rust Compiler + Bash Shell | **COMPLETE (100%)** | v0.7.0  | Feb 2026 |
-| 7     | Production Readiness     | **Complete (~100%)** | v0.10.5  | Feb 2026 |
+| 7     | Production Readiness     | **Complete (~100%)** | v0.10.6  | Mar 2026 |
 
 For detailed release notes, see [Release History](docs/RELEASE-HISTORY.md).
 
@@ -243,7 +243,7 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### Maturity
 
-VeridianOS is an active research system. Phases 0 through 7 are architecturally stable with a functional graphical desktop, Rust compiler port, Bash-compatible userland shell, Intel VMX hypervisor, container isolation, and comprehensive security hardening. All 6 Phase 7 waves are complete: GPU drivers, advanced Wayland, desktop completion, advanced networking with IPv6, multimedia framework, virtualization, security hardening, and performance optimization. All Phase 7 desktop modules are wired into the compositing pipeline with hotkey-driven overlays (Alt+Tab app switcher, screen lock, launcher, notifications, workspaces). All desktop windows have visible close buttons, right-click context menus, interactive settings/image viewer panels, and full keyboard navigation (arrow keys + vi keys) in the file manager. Phase 7.5 (follow-on enhancements) and Phase 8 (next-generation features) are planned.
+VeridianOS is an active research system. Phases 0 through 7 are architecturally stable with a functional graphical desktop, Rust compiler port, Bash-compatible userland shell, Intel VMX hypervisor, container isolation, and comprehensive security hardening. All 6 Phase 7 waves are complete: GPU drivers, advanced Wayland, desktop completion, advanced networking with IPv6, multimedia framework, virtualization, security hardening, and performance optimization. All Phase 7 desktop modules are wired into the compositing pipeline with hotkey-driven overlays (Alt+Tab app switcher, screen lock, launcher, notifications, workspaces). All desktop windows have visible close buttons, right-click context menus, interactive settings/image viewer panels, and full keyboard navigation (arrow keys + vi keys) in the file manager. CI pipeline achieves full 11/11 job pass rate including Code Coverage (998 host-target unit tests via cargo-llvm-cov with Codecov integration). Phase 7.5 (follow-on enhancements) and Phase 8 (next-generation features) are planned.
 
 Historical status is recorded in:
 
@@ -480,6 +480,7 @@ Security is a fundamental design principle:
 - [x] **Full Subsystem Integration -- CLI + GUI**: 17 new shell commands (lspci, lsusb, lsblk, vmstat, sched, slab, cap, mac, audit, tpm, sha256sum, blake3sum, ipcs, route, ss, winfo, lsns), dynamic GUI app framework (spawn/close/focus lifecycle), launcher dispatch with 7 apps, system monitor with live stats, window close buttons, 4 subsystem accessor APIs (v0.10.3, Feb 2026)
 - [x] **GUI Bug Fixes + VirtIO GPU Acceleration**: 5 GUI bug fixes (system monitor perf counters, settings app rendering, CMOS RTC real-time clock, taskbar focus switching, render loop performance), VirtIO GPU hardware-accelerated framebuffer blit path, CMOS RTC driver for wall-clock time (v0.10.4, Feb 2026)
 - [x] **9 GUI Bug Fixes -- Close Buttons, Right-Click, Interactivity, Navigation**: Close button overlays on all windows (static + dynamic closeable), right-click context actions (title bar close, desktop launcher toggle), settings/image viewer event dispatch (keyboard + mouse forwarding), file manager ".." parent entry + arrow key navigation, terminal welcome message, system monitor total_frames fix + frame counter, benchmark target relaxation, EST timezone offset (v0.10.5, Feb 2026)
+- [x] **CI Hardening -- Code Coverage + cfg Gate Fixes**: Fix Code Coverage job compilation failures (add `use alloc::vec;` to dilithium.rs and numa.rs test modules for host-target `vec!` macro access), gate DMA buffer pool test assertions on `target_os="none"` (frame allocator unavailable on host), fix `get_heap_stats()` cfg gate mismatch (`target_arch="x86_64"` -> compound `target_os="none"` gate); CI achieves 11/11 job pass rate with 998 host-target unit tests (v0.10.6, Mar 2026)
 
 ### Upcoming
 
