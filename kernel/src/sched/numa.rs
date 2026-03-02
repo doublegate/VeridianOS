@@ -747,6 +747,9 @@ pub fn get_numa_scheduler() -> Option<&'static NumaScheduler> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use alloc::vec;
+
     use super::*;
 
     #[test]
