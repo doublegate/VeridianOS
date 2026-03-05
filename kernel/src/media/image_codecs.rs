@@ -2835,8 +2835,8 @@ mod tests {
         // 4 = 100, 0 = 000, 5 = 101
         // Packed: 100 000 101 = byte 0: 00000100 = 0x04, byte 1: 00000101 >> shifted
         // Actually LSB: bits 0-2 = 100(4), bits 3-5 = 000(0), bits 6-8 = 101(5)
-        // byte 0: bits 0-7: bit0=0,bit1=0,bit2=1,bit3=0,bit4=0,bit5=0,bit6=1,bit7=0 = 0x44
-        // byte 1: bit8=1 => 0x01
+        // byte 0: bits 0-7: bit0=0,bit1=0,bit2=1,bit3=0,bit4=0,bit5=0,bit6=1,bit7=0 =
+        // 0x44 byte 1: bit8=1 => 0x01
         let data = vec![0x44, 0x01];
         let result = lzw_decompress(&data, 2).unwrap();
         assert_eq!(result, vec![0]);
