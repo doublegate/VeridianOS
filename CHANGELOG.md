@@ -2,6 +2,31 @@
 
 ---
 
+## [v0.15.0] - 2026-03-05
+
+### v0.15.0: Phase 7.5 Wave 7 -- GPU Acceleration, Hypervisor & Containers
+
+Wave 7 delivers 19 enhancements across GPU acceleration (6 items), hypervisor (6 items), and container infrastructure (7 items): VirtIO GPU 3D with virgl command submission, OpenGL ES 2.0 software rasterizer, GEM/TTM buffer management, DRM KMS interface, vsync/page flip, hardware cursor plane; nested virtualization with L2 VMCS shadowing, VirtIO device passthrough, live migration, guest SMP with multi-vCPU, virtual LAPIC emulation, VM snapshots; OCI runtime specification compliance, container image format with layer extraction, cgroup memory/CPU controllers, overlay filesystem, veth networking, seccomp BPF syscall filtering.
+
+**3 new files, ~8,656 insertions, 130 unit tests**
+
+#### New Modules
+
+- **GPU Acceleration** (`kernel/src/graphics/gpu_accel.rs`, ~2,746 lines): VirtIO GPU 3D (virgl protocol, 3D resource creation, command buffer submission, context management), OpenGL ES 2.0 software rasterizer (vertex/fragment shader framework, triangle rasterization with edge functions, nearest-neighbor texture sampling, depth testing, alpha blending), GEM/TTM buffer management (GPU memory objects, cache coherency domains, LRU eviction, memory domain migration), DRM KMS interface (CRTC/connector/encoder/plane abstraction, atomic modeset, property bag), vsync/page flip (vblank event tracking, double-buffered scanout, flip-complete notification), hardware cursor plane (64x64 ARGB cursor overlay, position updates, plane compositing). 35 unit tests.
+- **Hypervisor Enhancements** (`kernel/src/virt/hypervisor.rs`, ~2,874 lines): Nested virtualization (L2 VMCS shadowing, shadow VMCS cache, nested VM-entry/exit handling, VMCS field merging), VirtIO device passthrough (PCI config space routing, MMIO BAR mapping, MSI-X interrupt forwarding, device state save/restore), live migration (pre-copy iterative dirty page transfer, stop-and-copy final phase, VMCS serialization, device state checkpointing, migration state machine), guest SMP (multi-vCPU creation, per-vCPU VMCS allocation, INIT/SIPI AP bootstrap, inter-vCPU scheduling), virtual LAPIC emulation (timer modes: one-shot/periodic/TSC-deadline, IPI delivery, EOI broadcast, interrupt priority/ISR/IRR registers), VM snapshots (VMCS + memory + device state serialization, snapshot metadata, restore with validation). 46 unit tests.
+- **Container Enhancements** (`kernel/src/virt/containers.rs`, ~3,036 lines): OCI runtime specification (config.json parsing, rootfs pivot, lifecycle hooks: prestart/poststart/poststop, process spec with args/env/cwd/capabilities), container image format (layer extraction with tar-like overlay, image manifest, layer diff application, content-addressable storage with SHA-256), cgroup memory controller (limit enforcement, usage tracking via page fault counting, OOM notification with configurable policy: kill/pause/notify), cgroup CPU controller (shares-based proportional scheduling, quota/period enforcement with bandwidth throttling, CPU accounting), overlay filesystem (lower/upper/work directory layers, copy-up on write, whiteout files for deletion, opaque directory markers), veth networking (virtual Ethernet pair creation, bridge attachment, per-container network namespace with IP assignment, basic NAT with port mapping), seccomp BPF (syscall filter programs, allow/deny/trace/errno actions, BPF instruction interpreter, filter inheritance across fork). 49 unit tests.
+
+#### Build Verification
+
+| Target | Build | Clippy | Status |
+|--------|-------|--------|--------|
+| x86_64-unknown-none | Pass | 0 warnings | OK |
+| aarch64-unknown-none | Pass | 0 warnings | OK |
+| riscv64gc-unknown-none-elf | Pass | 0 warnings | OK |
+| x86_64-unknown-linux-gnu (host) | Pass | 0 warnings | OK |
+
+---
+
 ## [v0.14.0] - 2026-03-05
 
 ### v0.14.0: Phase 7.5 Wave 6 -- Audio & Video

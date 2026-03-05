@@ -10,6 +10,7 @@ pub mod fbcon;
 pub mod font8x16;
 pub mod framebuffer;
 pub mod gpu;
+pub mod gpu_accel;
 
 /// Color representation (RGBA)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -7,7 +7,9 @@
 extern crate alloc;
 
 pub mod container;
+pub mod containers;
 pub mod devices;
+pub mod hypervisor;
 pub mod memory;
 pub mod namespace;
 pub mod vmx;

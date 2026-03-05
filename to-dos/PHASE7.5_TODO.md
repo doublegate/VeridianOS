@@ -1,7 +1,7 @@
 # Phase 7.5: Follow-On Enhancements TODO
 
 **Phase Duration**: 6-12 months
-**Status**: In Progress (Wave 6 Complete)
+**Status**: In Progress (Wave 7 Complete)
 **Dependencies**: Phase 7 complete (v0.10.0)
 **Last Updated**: March 5, 2026
 
@@ -48,35 +48,35 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 
 ## 4. GPU Acceleration
 
-- [ ] VirtIO GPU 3D (virgl protocol, 3D resource creation, command submission)
-- [ ] OpenGL ES 2.0 software rasterizer (vertex/fragment shaders, texture sampling)
-- [ ] GEM/TTM buffer management (GPU memory allocation, cache coherency)
-- [ ] DRM KMS (Kernel Mode Setting) interface for user-space display servers
-- [ ] Vsync / page flip support (vblank events, double buffering)
-- [ ] Hardware cursor plane (GPU cursor overlay, position updates)
+- [x] VirtIO GPU 3D (virgl protocol, 3D resource creation, command submission)
+- [x] OpenGL ES 2.0 software rasterizer (vertex/fragment shaders, texture sampling)
+- [x] GEM/TTM buffer management (GPU memory allocation, cache coherency)
+- [x] DRM KMS (Kernel Mode Setting) interface for user-space display servers
+- [x] Vsync / page flip support (vblank events, double buffering)
+- [x] Hardware cursor plane (GPU cursor overlay, position updates)
 
 ---
 
 ## 5. Hypervisor Enhancements
 
-- [ ] Nested virtualization (L2 VMCS shadowing)
-- [ ] VirtIO device passthrough to guests
-- [ ] Live migration (VMCS serialization, memory pre-copy, stop-and-copy)
-- [ ] Guest SMP support (multi-vCPU with virtual LAPIC)
-- [ ] Virtual LAPIC emulation (timer, IPI delivery, EOI)
-- [ ] VM snapshots (VMCS + memory + device state serialization)
+- [x] Nested virtualization (L2 VMCS shadowing)
+- [x] VirtIO device passthrough to guests
+- [x] Live migration (VMCS serialization, memory pre-copy, stop-and-copy)
+- [x] Guest SMP support (multi-vCPU with virtual LAPIC)
+- [x] Virtual LAPIC emulation (timer, IPI delivery, EOI)
+- [x] VM snapshots (VMCS + memory + device state serialization)
 
 ---
 
 ## 6. Container Enhancements
 
-- [ ] OCI runtime specification compliance (config.json, rootfs, lifecycle hooks)
-- [ ] Container image format (layer extraction, overlayfs composition)
-- [ ] Cgroup memory controller (limit, usage tracking, OOM notification)
-- [ ] Cgroup CPU controller (shares, quota, period enforcement)
-- [ ] Overlay filesystem (lower/upper/work layers, copy-up, whiteout files)
-- [ ] Veth networking (virtual Ethernet pairs, bridge, NAT)
-- [ ] Seccomp BPF (syscall filtering, allow/deny/trace actions)
+- [x] OCI runtime specification compliance (config.json, rootfs, lifecycle hooks)
+- [x] Container image format (layer extraction, overlayfs composition)
+- [x] Cgroup memory controller (limit, usage tracking, OOM notification)
+- [x] Cgroup CPU controller (shares, quota, period enforcement)
+- [x] Overlay filesystem (lower/upper/work layers, copy-up, whiteout files)
+- [x] Veth networking (virtual Ethernet pairs, bridge, NAT)
+- [x] Seccomp BPF (syscall filtering, allow/deny/trace actions)
 
 ---
 
@@ -163,9 +163,9 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 | Networking Enhancements | 7 | 7 | **COMPLETE** |
 | Audio Enhancements | 7 | 7 | **COMPLETE** |
 | Video Enhancements | 6 | 6 | **COMPLETE** |
-| GPU Acceleration | 6 | 0 | Planned |
-| Hypervisor Enhancements | 6 | 0 | Planned |
-| Container Enhancements | 7 | 0 | Planned |
+| GPU Acceleration | 6 | 6 | **COMPLETE** |
+| Hypervisor Enhancements | 6 | 6 | **COMPLETE** |
+| Container Enhancements | 7 | 7 | **COMPLETE** |
 | Security | 6 | 6 | **COMPLETE** |
 | Performance | 5 | 5 | **COMPLETE** |
 | Desktop | 6 | 0 | Planned |
@@ -173,7 +173,7 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 | Filesystem | 6 | 6 | **COMPLETE** |
 | Networking Protocols | 6 | 6 | **COMPLETE** |
 | Hardware Drivers | 6 | 6 | **COMPLETE** |
-| **Total** | **~80** | **49** | **61%** |
+| **Total** | **~80** | **68** | **85%** |
 
 ---
 
