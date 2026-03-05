@@ -1,7 +1,7 @@
 # Phase 7.5: Follow-On Enhancements TODO
 
 **Phase Duration**: 6-12 months
-**Status**: In Progress (Wave 4 Complete)
+**Status**: In Progress (Wave 5 Complete)
 **Dependencies**: Phase 7 complete (v0.10.0)
 **Last Updated**: March 5, 2026
 
@@ -16,7 +16,7 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 - [x] TCP congestion control algorithms (Reno, Cubic)
 - [x] TCP Selective Acknowledgment (SACK)
 - [x] DNS resolver (recursive queries, caching, /etc/resolv.conf)
-- [ ] HTTP/1.1 client library (chunked transfer, keep-alive, redirects)
+- [x] HTTP/1.1 client library (chunked transfer, keep-alive, redirects)
 - [x] VLAN (802.1Q) tagging and trunk support
 - [x] Multicast group management (IGMP/MLD)
 - [x] NIC bonding / link aggregation (active-backup, round-robin)
@@ -136,12 +136,12 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 
 ## 12. Networking Protocols
 
-- [ ] QUIC protocol (UDP-based transport, TLS 1.3 integration, stream multiplexing)
-- [ ] WireGuard VPN (Noise protocol framework, ChaCha20-Poly1305 tunnel)
-- [ ] mDNS/DNS-SD (multicast service discovery, .local resolution)
-- [ ] NTP client (time synchronization, clock discipline, stratum tracking)
-- [ ] SSH server (Ed25519 host keys, channel multiplexing, shell session)
-- [ ] TLS 1.3 (handshake state machine, AEAD encryption, certificate validation)
+- [x] QUIC protocol (UDP-based transport, TLS 1.3 integration, stream multiplexing)
+- [x] WireGuard VPN (Noise protocol framework, ChaCha20-Poly1305 tunnel)
+- [x] mDNS/DNS-SD (multicast service discovery, .local resolution)
+- [x] NTP client (time synchronization, clock discipline, stratum tracking)
+- [x] SSH server (Ed25519 host keys, channel multiplexing, shell session)
+- [x] TLS 1.3 (handshake state machine, AEAD encryption, certificate validation)
 
 ---
 
@@ -160,7 +160,7 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 
 | Category | Items | Completed | Status |
 |----------|-------|-----------|--------|
-| Networking Enhancements | 7 | 6 | In Progress (HTTP/1.1 deferred to Wave 5) |
+| Networking Enhancements | 7 | 7 | **COMPLETE** |
 | Audio Enhancements | 7 | 0 | Planned |
 | Video Enhancements | 6 | 0 | Planned |
 | GPU Acceleration | 6 | 0 | Planned |
@@ -171,9 +171,9 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 | Desktop | 6 | 0 | Planned |
 | Shell/Userland | 6 | 0 | Planned |
 | Filesystem | 6 | 6 | **COMPLETE** |
-| Networking Protocols | 6 | 0 | Planned |
+| Networking Protocols | 6 | 6 | **COMPLETE** |
 | Hardware Drivers | 6 | 6 | **COMPLETE** |
-| **Total** | **~80** | **29** | **36%** |
+| **Total** | **~80** | **36** | **45%** |
 
 ---
 

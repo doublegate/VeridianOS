@@ -116,13 +116,13 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.12.1 (March 5, 2026) | **Releases Published**: 58 (v0.1.0 through v0.12.1)
+**Latest Release**: v0.13.0 (March 5, 2026) | **Releases Published**: 59 (v0.1.0 through v0.13.0)
 
 | Metric                 | Value                                           |
 | ---------------------- | ----------------------------------------------- |
 | Build                  | 0 errors, 0 warnings across all 3 architectures |
 | Boot Tests             | 29/29 (all architectures, Stage 6 BOOTOK)       |
-| Host-Target Unit Tests | 998/998 passing                                 |
+| Host-Target Unit Tests | 1,742/1,742 passing                             |
 | CI Pipeline            | 11/11 jobs passing (GitHub Actions + Codecov)   |
 
 ### Architecture Support
@@ -147,7 +147,7 @@ experiments/   Non-normative exploratory work
 | 6     | Advanced Features and GUI | **~100% (desktop complete)** | v0.6.4  | Feb 2026 |
 | 6.5   | Rust Compiler + Bash Shell | **COMPLETE (100%)** | v0.7.0  | Feb 2026 |
 | 7     | Production Readiness     | **Complete (~100%)** | v0.10.6  | Mar 2026 |
-| 7.5   | Follow-On Enhancements   | **In Progress (Wave 4)** | v0.12.1  | Mar 2026 |
+| 7.5   | Follow-On Enhancements   | **In Progress (Wave 5)** | v0.13.0  | Mar 2026 |
 
 For detailed release notes, see [Release History](docs/RELEASE-HISTORY.md).
 

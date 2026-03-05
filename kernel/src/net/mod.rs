@@ -31,6 +31,15 @@ pub mod multicast;
 pub mod tcp_sack;
 pub mod vlan;
 
+// Phase 7.5 Wave 5: Crypto & Protocols
+pub mod http;
+pub mod mdns;
+pub mod ntp;
+pub mod quic;
+pub mod ssh;
+pub mod tls;
+pub mod wireguard;
+
 use alloc::vec::Vec;
 
 use crate::error::KernelError;

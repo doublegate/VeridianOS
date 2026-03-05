@@ -2,6 +2,35 @@
 
 ---
 
+## [v0.13.0] - 2026-03-05
+
+### v0.13.0: Phase 7.5 Wave 5 -- Crypto & Protocols
+
+Wave 5 delivers 7 security and application protocol implementations: TLS 1.3 with ChaCha20-Poly1305/X25519/HKDF, SSH-2.0 server with Ed25519/channel multiplexing, HTTP/1.1 client with chunked transfer/redirects, NTP client with clock discipline, QUIC transport (RFC 9000) with connection/stream management, WireGuard VPN with Noise IK handshake/BLAKE2s, and mDNS/DNS-SD for zero-configuration networking.
+
+**7 new files, 1 enhanced file, ~14,500 insertions, 247 unit tests**
+
+#### New Modules
+
+- **TLS 1.3** (`kernel/src/net/tls.rs`, ~3,360 lines): Full TLS 1.3 handshake engine (ClientHello/ServerHello/EncryptedExtensions/Finished), X25519 key exchange with 5-limb field arithmetic (mod 2^255-19), ChaCha20-Poly1305 AEAD (5-limb Poly1305 MAC, quarter-round block cipher), HKDF-SHA256 (extract/expand/derive-secret), record layer encoding/decoding, session resumption with ticket store, certificate trust store, 0-RTT early data support. 34 unit tests.
+- **SSH-2.0 Server** (`kernel/src/net/ssh.rs`, ~2,680 lines): SSH transport layer (binary packet protocol, version exchange), KEXINIT negotiation (curve25519-sha256, chacha20-poly1305@openssh.com), Ed25519 host key stubs, password and publickey authentication, channel multiplexing with flow control (window adjust), PTY allocation, shell/exec/env requests, exit status/signal propagation, session state machine (KexInit->KexDh->NewKeys->Auth->Session). 51 unit tests.
+- **HTTP/1.1 Client** (`kernel/src/net/http.rs`, ~1,360 lines): Request builder (GET/POST/PUT/DELETE/HEAD/PATCH), header management, chunked transfer-encoding decode, Content-Length body reading, redirect following (301/302/307/308, max 10 hops), URL parser (scheme/host/port/path/query), response status code classification, streaming response parser, connection reuse hints (keep-alive). 28 unit tests.
+- **NTP Client** (`kernel/src/net/ntp.rs`, ~1,120 lines): NTPv4 packet format (48-byte, all fields), 64-bit fixed-point timestamps (seconds.fraction since 1900), clock offset/delay calculation, clock filter algorithm (8-sample shift register, select by minimum delay), drift estimator with exponential smoothing (alpha=1/4 fixed-point), poll interval adjustment (64s-1024s), kiss-of-death (KoD) handling, leap indicator, boot-time RTC sync. 25 unit tests.
+- **QUIC Transport** (`kernel/src/net/quic.rs`, ~2,710 lines): RFC 9000 variable-length integer encoding (1/2/4/8 byte), long header packets (Initial/Handshake/0-RTT/Retry with version/DCID/SCID), short header (1-RTT, spin bit), connection ID management with routing, stream multiplexing (bidirectional/unidirectional, flow control per-stream and connection-level), frame types (STREAM/ACK/CRYPTO/NEW_CONNECTION_ID/MAX_DATA/PING), connection state machine (Initial->Handshake->Established->Closing->Draining), packet number spaces, loss detection stubs. 44 unit tests.
+- **WireGuard VPN** (`kernel/src/net/wireguard.rs`, ~1,670 lines): Noise IK handshake protocol (initiator/responder messages with BLAKE2s MAC), X25519 Diffie-Hellman, BLAKE2s hash (10-round compression, full spec), HMAC-BLAKE2s, session key derivation (HKDF-BLAKE2s), anti-replay window (bitmap-based, 2048-packet window), keepalive timer management, peer table with public key lookup, MTU calculation (IPv4/IPv6 overhead), tunnel interface with encapsulation/decapsulation. 36 unit tests.
+- **mDNS/DNS-SD** (`kernel/src/net/mdns.rs`, ~1,650 lines): Multicast DNS (RFC 6762) query/response on 224.0.0.251:5353, DNS-SD service registration/discovery (RFC 6763), SRV/TXT/PTR record construction, name compression in responses, cache with TTL expiry and cache-flush bit handling, probe-announce state machine (3-probe conflict detection, 2-announce), TXT record key=value encoding/decoding, service type enumeration (_services._dns-sd._udp.local). 29 unit tests.
+
+#### Build Verification
+
+| Target | Build | Clippy | Status |
+|--------|-------|--------|--------|
+| x86_64-unknown-none | Pass | 0 warnings | OK |
+| aarch64-unknown-none | Pass | 0 warnings | OK |
+| riscv64gc-unknown-none-elf | Pass | 0 warnings | OK |
+| x86_64-unknown-linux-gnu (host) | Pass | 0 warnings | OK |
+
+---
+
 ## [v0.12.1] - 2026-03-05
 
 ### v0.12.1: Phase 7.5 Wave 4 -- Networking Foundations
