@@ -295,36 +295,34 @@ pub fn enable_smap() -> Result<(), KernelError> {
 /// access user-mapped pages. Keep this window as short as possible.
 #[inline(always)]
 pub fn disable_smap_temporarily() {
-    if !is_smap_enabled() {
-        return;
-    }
-
-    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-    // SAFETY: STAC sets EFLAGS.AC, temporarily allowing supervisor access
-    // to user pages when SMAP is enabled. Must be paired with CLAC.
-    unsafe {
-        core::arch::asm!("stac", options(nomem, nostack));
-    }
-
-    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-    // SAFETY: Clearing PAN allows privileged access to user pages.
-    unsafe {
-        core::arch::asm!(".inst 0xD500409F", options(nomem, nostack));
-    }
-
-    #[cfg(all(
-        any(target_arch = "riscv32", target_arch = "riscv64"),
-        target_os = "none"
-    ))]
-    {
-        const SSTATUS_SUM: u64 = 1 << 18;
-        // SAFETY: Setting SUM allows S-mode to access U-mode pages.
+    if is_smap_enabled() {
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        // SAFETY: STAC sets EFLAGS.AC, temporarily allowing supervisor access
+        // to user pages when SMAP is enabled. Must be paired with CLAC.
         unsafe {
-            core::arch::asm!(
-                "csrs sstatus, {sum}",
-                sum = in(reg) SSTATUS_SUM,
-                options(nomem, nostack),
-            );
+            core::arch::asm!("stac", options(nomem, nostack));
+        }
+
+        #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+        // SAFETY: Clearing PAN allows privileged access to user pages.
+        unsafe {
+            core::arch::asm!(".inst 0xD500409F", options(nomem, nostack));
+        }
+
+        #[cfg(all(
+            any(target_arch = "riscv32", target_arch = "riscv64"),
+            target_os = "none"
+        ))]
+        {
+            const SSTATUS_SUM: u64 = 1 << 18;
+            // SAFETY: Setting SUM allows S-mode to access U-mode pages.
+            unsafe {
+                core::arch::asm!(
+                    "csrs sstatus, {sum}",
+                    sum = in(reg) SSTATUS_SUM,
+                    options(nomem, nostack),
+                );
+            }
         }
     }
 }
@@ -335,35 +333,33 @@ pub fn disable_smap_temporarily() {
 /// On RISC-V, clears the SUM bit.
 #[inline(always)]
 pub fn restore_smap() {
-    if !is_smap_enabled() {
-        return;
-    }
-
-    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-    // SAFETY: CLAC clears EFLAGS.AC, re-enabling SMAP protection.
-    unsafe {
-        core::arch::asm!("clac", options(nomem, nostack));
-    }
-
-    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-    // SAFETY: Re-enabling PAN restores the user-access restriction.
-    unsafe {
-        core::arch::asm!(".inst 0xD500419F", options(nomem, nostack));
-    }
-
-    #[cfg(all(
-        any(target_arch = "riscv32", target_arch = "riscv64"),
-        target_os = "none"
-    ))]
-    {
-        const SSTATUS_SUM: u64 = 1 << 18;
-        // SAFETY: Clearing SUM re-restricts S-mode access to U-mode pages.
+    if is_smap_enabled() {
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        // SAFETY: CLAC clears EFLAGS.AC, re-enabling SMAP protection.
         unsafe {
-            core::arch::asm!(
-                "csrc sstatus, {sum}",
-                sum = in(reg) SSTATUS_SUM,
-                options(nomem, nostack),
-            );
+            core::arch::asm!("clac", options(nomem, nostack));
+        }
+
+        #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+        // SAFETY: Re-enabling PAN restores the user-access restriction.
+        unsafe {
+            core::arch::asm!(".inst 0xD500419F", options(nomem, nostack));
+        }
+
+        #[cfg(all(
+            any(target_arch = "riscv32", target_arch = "riscv64"),
+            target_os = "none"
+        ))]
+        {
+            const SSTATUS_SUM: u64 = 1 << 18;
+            // SAFETY: Clearing SUM re-restricts S-mode access to U-mode pages.
+            unsafe {
+                core::arch::asm!(
+                    "csrc sstatus, {sum}",
+                    sum = in(reg) SSTATUS_SUM,
+                    options(nomem, nostack),
+                );
+            }
         }
     }
 }
