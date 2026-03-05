@@ -1836,6 +1836,7 @@ pub fn is_xhci_device(class_code: u8, subclass: u8, prog_if: u8) -> bool {
 /// This uses the existing PCI device list from `crate::drivers::pci`.
 #[cfg(feature = "alloc")]
 pub fn find_xhci_controllers() -> Vec<XhciPciDevice> {
+    #[allow(unused_mut)]
     let mut controllers = Vec::new();
 
     // Use the PCI subsystem to iterate discovered devices

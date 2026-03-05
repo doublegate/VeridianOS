@@ -838,11 +838,17 @@ mod tests {
         assert_eq!(bytes[3], 0x43); // 'C'
 
         let parsed = CommandBlockWrapper::from_bytes(&bytes).unwrap();
-        assert_eq!(parsed.tag, 42);
-        assert_eq!(parsed.data_transfer_length, 4096);
-        assert_eq!(parsed.flags, CBW_DIRECTION_IN);
-        assert_eq!(parsed.lun, 0);
-        assert_eq!(parsed.cb[0], 0x28); // READ(10) opcode
+        // Copy fields out of packed struct before asserting (E0793)
+        let tag = parsed.tag;
+        let dtl = parsed.data_transfer_length;
+        let flags = parsed.flags;
+        let lun = parsed.lun;
+        let cb0 = parsed.cb[0];
+        assert_eq!(tag, 42);
+        assert_eq!(dtl, 4096);
+        assert_eq!(flags, CBW_DIRECTION_IN);
+        assert_eq!(lun, 0);
+        assert_eq!(cb0, 0x28); // READ(10) opcode
     }
 
     #[test]
@@ -872,8 +878,11 @@ mod tests {
         assert_eq!(bytes.len(), CommandStatusWrapper::SIZE);
 
         let parsed = CommandStatusWrapper::from_bytes(&bytes).unwrap();
-        assert_eq!(parsed.tag, 42);
-        assert_eq!(parsed.data_residue, 0);
+        // Copy fields out of packed struct before asserting (E0793)
+        let tag = parsed.tag;
+        let residue = parsed.data_residue;
+        assert_eq!(tag, 42);
+        assert_eq!(residue, 0);
         assert_eq!(parsed.get_status(), CswStatus::Passed);
     }
 
@@ -888,7 +897,8 @@ mod tests {
         let bytes = csw.to_bytes();
         let parsed = CommandStatusWrapper::from_bytes(&bytes).unwrap();
         assert_eq!(parsed.get_status(), CswStatus::Failed);
-        assert_eq!(parsed.data_residue, 512);
+        let residue = parsed.data_residue;
+        assert_eq!(residue, 512);
     }
 
     #[test]
