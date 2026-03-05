@@ -1,7 +1,7 @@
 # Phase 7.5: Follow-On Enhancements TODO
 
 **Phase Duration**: 6-12 months
-**Status**: In Progress (Wave 3 Complete)
+**Status**: In Progress (Wave 4 Complete)
 **Dependencies**: Phase 7 complete (v0.10.0)
 **Last Updated**: March 5, 2026
 
@@ -13,13 +13,13 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 
 ## 1. Networking Enhancements
 
-- [ ] TCP congestion control algorithms (Reno, Cubic)
-- [ ] TCP Selective Acknowledgment (SACK)
-- [ ] DNS resolver (recursive queries, caching, /etc/resolv.conf)
+- [x] TCP congestion control algorithms (Reno, Cubic)
+- [x] TCP Selective Acknowledgment (SACK)
+- [x] DNS resolver (recursive queries, caching, /etc/resolv.conf)
 - [ ] HTTP/1.1 client library (chunked transfer, keep-alive, redirects)
-- [ ] VLAN (802.1Q) tagging and trunk support
-- [ ] Multicast group management (IGMP/MLD)
-- [ ] NIC bonding / link aggregation (active-backup, round-robin)
+- [x] VLAN (802.1Q) tagging and trunk support
+- [x] Multicast group management (IGMP/MLD)
+- [x] NIC bonding / link aggregation (active-backup, round-robin)
 
 ---
 
@@ -160,7 +160,7 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 
 | Category | Items | Completed | Status |
 |----------|-------|-----------|--------|
-| Networking Enhancements | 7 | 0 | Planned |
+| Networking Enhancements | 7 | 6 | In Progress (HTTP/1.1 deferred to Wave 5) |
 | Audio Enhancements | 7 | 0 | Planned |
 | Video Enhancements | 6 | 0 | Planned |
 | GPU Acceleration | 6 | 0 | Planned |
@@ -173,7 +173,7 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 | Filesystem | 6 | 6 | **COMPLETE** |
 | Networking Protocols | 6 | 0 | Planned |
 | Hardware Drivers | 6 | 6 | **COMPLETE** |
-| **Total** | **~80** | **23** | **29%** |
+| **Total** | **~80** | **29** | **36%** |
 
 ---
 

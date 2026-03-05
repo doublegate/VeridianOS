@@ -23,6 +23,14 @@ pub mod udp;
 pub mod unix_socket;
 pub mod zero_copy;
 
+// Phase 7.5 Wave 4: Networking Foundations
+pub mod bonding;
+pub mod congestion;
+pub mod dns;
+pub mod multicast;
+pub mod tcp_sack;
+pub mod vlan;
+
 use alloc::vec::Vec;
 
 use crate::error::KernelError;

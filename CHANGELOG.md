@@ -2,6 +2,34 @@
 
 ---
 
+## [v0.12.1] - 2026-03-05
+
+### v0.12.1: Phase 7.5 Wave 4 -- Networking Foundations
+
+Wave 4 delivers 7 networking enhancements: TCP Reno and Cubic congestion control, TCP SACK, DNS resolver with caching, VLAN 802.1Q tagging, multicast IGMP/MLDv2, and NIC bonding with failover.
+
+**6 new files, 1 enhanced file, ~5,500 insertions, 110+ unit tests**
+
+#### New Modules
+
+- **TCP Congestion Control** (`kernel/src/net/congestion.rs`, ~1,300 lines): `CongestionController` trait with Reno and Cubic implementations. Reno: slow start, congestion avoidance, fast retransmit/recovery, Jacobson's RTO (fixed-point alpha=1/8, beta=1/4). Cubic: W(t) = C*(t-K)^3 + W_max with C=0.4 beta=0.7, integer cubic root via Newton's method, TCP-friendly region, fast convergence. 30 unit tests.
+- **TCP SACK** (`kernel/src/net/tcp_sack.rs`, ~690 lines): SACK option parsing/serialization (kind 4/5), SackScoreboard with merge-on-insert, hole detection, selective retransmission scheduling, wrapping sequence number arithmetic (seq_lt/le/gt/ge). 20 unit tests.
+- **DNS Resolver** (`kernel/src/net/dns.rs`, ~1,500 lines): DNS message format (header/question/RR), 9 record types (A/AAAA/CNAME/MX/TXT/PTR/SRV/NS/SOA), label compression with loop detection, 256-entry LRU cache with TTL expiry, /etc/resolv.conf and /etc/hosts parsing, global resolver with OnceLock<Mutex<>>. 22 unit tests.
+- **VLAN 802.1Q** (`kernel/src/net/vlan.rs`, ~540 lines): VlanTag with PCP/DEI/VID fields, tag insertion/stripping in Ethernet frames, Access and Trunk modes, VlanManager with create/delete/ingress/egress operations. 18 unit tests.
+- **Multicast IGMP/MLDv2** (`kernel/src/net/multicast.rs`, ~840 lines): IPv4 multicast group validation (224.0.0.0/4), IGMPv2 (Query/Report/Leave with RFC 1071 checksum), MLDv2 (6 record types), MulticastManager with reference-counted join/leave, timer-based periodic reports, IPv6 group support. 18 unit tests.
+- **NIC Bonding** (`kernel/src/net/bonding.rs`, ~620 lines): Active-Backup and Round-Robin modes, BondSlave with link state and TX/RX counters, automatic failover on link down, ARP monitoring with interval-based health checks, skip-downed-slave in round-robin. 15 unit tests.
+
+#### Build Verification
+
+| Target | Build | Clippy | Status |
+|--------|-------|--------|--------|
+| x86_64-unknown-none | Pass | 0 warnings | OK |
+| aarch64-unknown-none | Pass | 0 warnings | OK |
+| riscv64gc-unknown-none-elf | Pass | 0 warnings | OK |
+| x86_64-unknown-linux-gnu (host) | Pass | 0 warnings | OK |
+
+---
+
 ## [v0.12.0] - 2026-03-05
 
 ### v0.12.0: Phase 7.5 Wave 3 -- Hardware Drivers
