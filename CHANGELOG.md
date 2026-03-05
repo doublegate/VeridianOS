@@ -2,6 +2,46 @@
 
 ---
 
+## [v0.12.0] - 2026-03-05
+
+### v0.12.0: Phase 7.5 Wave 3 -- Hardware Drivers
+
+Wave 3 delivers 6 hardware driver implementations: USB xHCI host controller, USB mass storage, USB HID (keyboard/mouse), AHCI/SATA controller, Bluetooth HCI subsystem, and enhanced RTC driver with alarm/NTP support.
+
+**6 new files, 2 enhanced files, ~8,400 insertions, 90+ unit tests**
+
+#### New Modules
+
+- **USB xHCI Host Controller** (`kernel/src/drivers/usb/xhci.rs`, ~2,350 lines): PCI enumeration (class 0x0C/0x03/0x30), MMIO capability/operational/runtime/doorbell register sets, TRB ring buffers (command/event/transfer) with link TRBs and cycle bit management, device slot allocation (up to 256), endpoint context configuration, control/bulk/interrupt transfer submission, port status change detection, MSI-X interrupt handling stubs, full device enumeration flow (enable slot, address device, get descriptor). 25+ unit tests.
+- **USB Mass Storage** (`kernel/src/drivers/usb/mass_storage.rs`, ~1,100 lines): Bulk-Only Transport (BOT) protocol with Command Block Wrapper (CBW) and Command Status Wrapper (CSW), SCSI command set (INQUIRY, TEST UNIT READY, READ CAPACITY(10), READ(10), WRITE(10), REQUEST SENSE), sector-based BlockDevice trait implementation, error recovery (clear HALT, bulk-only reset), device identification and capacity detection. 20+ unit tests.
+- **USB HID** (`kernel/src/drivers/usb/hid.rs`, ~900 lines): Boot protocol keyboard and mouse support, HID report descriptor parser (Input/Output/Feature items, Usage Page/Usage, Collection), report field extraction with logical min/max, modifier key and LED handling, mouse button/X/Y/wheel parsing, InputEvent generation (KeyPress/KeyRelease/MouseMove/MouseButton/MouseScroll), interrupt transfer polling stubs. 15+ unit tests.
+- **AHCI/SATA Controller** (`kernel/src/drivers/ahci.rs`, ~1,690 lines): PCI enumeration (class 0x01/0x06/0x01), HBA MMIO register set (CAP/GHC/IS/PI/VS), port detection and signature identification (SATA/ATAPI/SEMB/PM), command list (32 slots) and received FIS structures, Physical Region Descriptor Table (PRDT) with scatter-gather, Register Host-to-Device FIS construction, ATA commands (IDENTIFY DEVICE, READ/WRITE DMA EXT, FLUSH CACHE EXT), NCQ (READ/WRITE FPDMA QUEUED with tag management), port start/stop and COMRESET, BlockDevice trait. 20+ unit tests.
+- **Bluetooth HCI** (`kernel/src/drivers/bluetooth/hci.rs`, ~1,770 lines): HCI command/event protocol (command packets, event packets, ACL data), command opcodes (Reset, Read BD ADDR, Set Event Mask, Write Scan Enable, Create Connection, Disconnect, Inquiry), event parsing (Command Complete, Command Status, Connection Complete, Disconnection Complete, Inquiry Result, Number of Completed Packets), connection handle management, L2CAP basic framing (signaling channel, connection-oriented), SDP service record stubs, controller state machine (Off/Initializing/Ready/Scanning/Connected). 15+ unit tests.
+- **Bluetooth subsystem** (`kernel/src/drivers/bluetooth/mod.rs`, ~30 lines): Global BluetoothController with OnceLock<Mutex<>> initialization.
+
+#### Enhanced Modules
+
+- **RTC Driver** (`kernel/src/arch/x86_64/rtc.rs`, +380 lines): Alarm register support (hours/minutes/seconds + enable/disable), IRQ 8 interrupt configuration, timezone offset storage (AtomicI64), NTP time correction integration (millisecond-level adjustment), configurable century register, periodic rate setting, enhanced epoch calculation with NTP/timezone corrections. 10+ unit tests.
+- **Driver init** (`kernel/src/drivers/mod.rs`): AHCI init call wired into driver initialization sequence.
+
+#### Infrastructure
+
+- 6 new modules wired: `drivers/usb/xhci`, `drivers/usb/mass_storage`, `drivers/usb/hid`, `drivers/ahci`, `drivers/bluetooth/hci`, `drivers/bluetooth/mod`
+- All modules use `#[allow(dead_code)]` for infrastructure-level code awaiting hardware integration
+- `OnceLock<Mutex<>>` pattern for global driver instances (Bluetooth controller)
+- PCI class-based device discovery for xHCI (0x0C0330) and AHCI (0x010601)
+
+#### Build Verification
+
+| Target | Build | Clippy | Status |
+|--------|-------|--------|--------|
+| x86_64-unknown-none | Pass | 0 warnings | OK |
+| aarch64-unknown-none | Pass | 0 warnings | OK |
+| riscv64gc-unknown-none-elf | Pass | 0 warnings | OK |
+| x86_64-unknown-linux-gnu (host) | Pass | 0 warnings | OK |
+
+---
+
 ## [v0.11.1] - 2026-03-05
 
 ### v0.11.1: Phase 7.5 Wave 2 -- Performance & Scheduling

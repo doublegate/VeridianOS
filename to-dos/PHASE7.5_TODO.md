@@ -1,7 +1,7 @@
 # Phase 7.5: Follow-On Enhancements TODO
 
 **Phase Duration**: 6-12 months
-**Status**: In Progress (Wave 2 Complete)
+**Status**: In Progress (Wave 3 Complete)
 **Dependencies**: Phase 7 complete (v0.10.0)
 **Last Updated**: March 5, 2026
 
@@ -147,12 +147,12 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 
 ## 13. Hardware Drivers
 
-- [ ] USB xHCI host controller (command/event/transfer rings, device slots)
-- [ ] USB mass storage (bulk-only transport, SCSI command set)
-- [ ] USB HID (keyboard/mouse via interrupt transfers, report descriptors)
-- [ ] Bluetooth HCI (command/event transport, L2CAP, SDP)
-- [ ] AHCI/SATA controller (FIS-based I/O, command list, port multiplier)
-- [ ] RTC (CMOS real-time clock, alarm, century register)
+- [x] USB xHCI host controller (command/event/transfer rings, device slots)
+- [x] USB mass storage (bulk-only transport, SCSI command set)
+- [x] USB HID (keyboard/mouse via interrupt transfers, report descriptors)
+- [x] Bluetooth HCI (command/event transport, L2CAP, SDP)
+- [x] AHCI/SATA controller (FIS-based I/O, command list, port multiplier)
+- [x] RTC (CMOS real-time clock, alarm, century register)
 
 ---
 
@@ -172,8 +172,8 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 | Shell/Userland | 6 | 0 | Planned |
 | Filesystem | 6 | 6 | **COMPLETE** |
 | Networking Protocols | 6 | 0 | Planned |
-| Hardware Drivers | 6 | 0 | Planned |
-| **Total** | **~80** | **17** | **21%** |
+| Hardware Drivers | 6 | 6 | **COMPLETE** |
+| **Total** | **~80** | **23** | **29%** |
 
 ---
 

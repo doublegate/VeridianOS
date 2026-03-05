@@ -3,6 +3,8 @@
 //! Contains all device drivers including bus drivers, network drivers, and
 //! device-specific drivers.
 
+pub mod ahci;
+pub mod bluetooth;
 pub mod console;
 pub mod e1000;
 pub mod gpu;
@@ -55,6 +57,11 @@ pub fn init() {
     // Initialize VirtIO GPU driver (PCI discovery, 2D framebuffer)
     if let Err(_e) = virtio_gpu::init() {
         crate::println!("[DRIVERS] Warning: VirtIO GPU init failed: {:?}", _e);
+    }
+
+    // Initialize AHCI/SATA controller driver
+    if let Err(_e) = ahci::init() {
+        crate::println!("[DRIVERS] Warning: AHCI init failed: {:?}", _e);
     }
 
     // Initialize mouse driver (x86_64: PS/2 aux port, others: stub)

@@ -209,7 +209,7 @@ See [REMEDIATION_TODO.md](REMEDIATION_TODO.md) for 37 identified gaps from Phase
 - [Phase 5.5 TODO](PHASE5.5_TODO.md) - 100% COMPLETE (all 12 sprints, v0.5.13)
 - [Phase 6 TODO](PHASE6_TODO.md) - ~40% (core graphical path complete)
 - [Phase 7 TODO](PHASE7_TODO.md) - ~100% (All 6 Waves complete)
-- [Phase 7.5 TODO](PHASE7.5_TODO.md) - In Progress (Wave 2 complete, v0.11.1)
+- [Phase 7.5 TODO](PHASE7.5_TODO.md) - In Progress (Wave 3 complete, v0.12.0)
 - [Phase 8 TODO](PHASE8_TODO.md) - Planned (next-generation features)
 - [Remediation TODO](REMEDIATION_TODO.md) - Gaps from Phases 0-4
 - [Issues TODO](ISSUES_TODO.md) - Issue history

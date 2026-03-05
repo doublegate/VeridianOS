@@ -6,10 +6,14 @@
 //! - [`device`]: USB device types, descriptors, and bus-level device management
 //! - [`host`]: USB host controller trait and UHCI controller implementation
 //! - [`transfer`]: USB transfer types and UHCI transfer descriptors
+//! - [`mass_storage`]: USB Mass Storage Bulk-Only Transport driver
 
 mod device;
+pub mod hid;
 mod host;
+pub mod mass_storage;
 mod transfer;
+pub mod xhci;
 
 // Re-export all public types to maintain existing API
 use alloc::boxed::Box;
