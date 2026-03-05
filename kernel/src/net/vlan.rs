@@ -329,9 +329,10 @@ pub fn with_manager<R, F: FnOnce(&mut VlanManager) -> R>(f: F) -> Option<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     #[allow(unused_imports)]
     use alloc::vec;
+
+    use super::*;
 
     #[test]
     fn test_vlan_tag_new() {

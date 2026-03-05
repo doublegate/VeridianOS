@@ -1093,9 +1093,10 @@ pub fn add_host(name: &str, addr: Ipv4Address) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     #[allow(unused_imports)]
     use alloc::vec;
+
+    use super::*;
 
     #[test]
     fn test_dns_record_type_roundtrip() {
