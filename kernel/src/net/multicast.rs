@@ -622,6 +622,8 @@ pub fn with_manager<R, F: FnOnce(&mut MulticastManager) -> R>(f: F) -> Result<R,
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use alloc::vec;
 
     #[test]
     fn test_ipv4_multicast_validation() {
