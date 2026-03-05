@@ -2369,13 +2369,28 @@ mod tests {
 
     #[test]
     fn test_oci_config_parse_basic() {
-        let input = "oci_version=1.0.2\nroot_path=/rootfs\nroot_readonly=true\\
-                     nhostname=mycontainer\nprocess_cwd=/app\nprocess_uid=1000\nprocess_gid=1000\\
-                     nprocess_terminal=true\nprocess_arg=/bin/sh\nprocess_arg=-c\\
-                     nprocess_env=PATH=/usr/bin\nnamespace=pid\nnamespace=network:/proc/123/ns/\
-                     net\ncgroups_path=/sys/fs/cgroup/mycontainer\nmemory_limit=67108864\\
-                     ncpu_shares=512\ncpu_quota=50000\ncpu_period=100000\nhook_prestart=/usr/bin/\
-                     hook:5\nmount=/proc:proc:proc:nosuid,noexec\n";
+        let input = concat!(
+            "oci_version=1.0.2\n",
+            "root_path=/rootfs\n",
+            "root_readonly=true\n",
+            "hostname=mycontainer\n",
+            "process_cwd=/app\n",
+            "process_uid=1000\n",
+            "process_gid=1000\n",
+            "process_terminal=true\n",
+            "process_arg=/bin/sh\n",
+            "process_arg=-c\n",
+            "process_env=PATH=/usr/bin\n",
+            "namespace=pid\n",
+            "namespace=network:/proc/123/ns/net\n",
+            "cgroups_path=/sys/fs/cgroup/mycontainer\n",
+            "memory_limit=67108864\n",
+            "cpu_shares=512\n",
+            "cpu_quota=50000\n",
+            "cpu_period=100000\n",
+            "hook_prestart=/usr/bin/hook:5\n",
+            "mount=/proc:proc:proc:nosuid,noexec\n",
+        );
         let config = OciConfig::parse(input).unwrap();
         assert_eq!(config.oci_version, "1.0.2");
         assert_eq!(config.root.path, "/rootfs");
