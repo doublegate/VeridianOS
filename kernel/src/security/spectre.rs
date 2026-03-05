@@ -359,15 +359,14 @@ pub fn bounds_mask(index: usize, size: usize) -> usize {
     //
     // This is the standard pattern recommended by the Linux kernel and
     // Intel for Spectre-v1 safe array indexing.
-    // Compute (size - 1) - index; if index < size, the result is
-    // non-negative (high bit clear). If index >= size, it underflows
-    // (high bit set).
-    let diff = (size.wrapping_sub(1)).wrapping_sub(index);
-    // Arithmetic right shift: propagate sign bit across all bits.
-    let sign = (diff as isize) >> (usize::BITS - 1);
-    // If index < size => diff >= 0 => sign == 0 => !0 == all-ones (usize::MAX)
-    // If index >= size => diff < 0 => sign == -1 => !(-1) == 0
-    !(sign as usize)
+    // Branchless bounds check for Spectre v1 mitigation.
+    //
+    // (index < size) as usize gives 1 if in-bounds, 0 if out-of-bounds.
+    // wrapping_neg() converts: 1 -> usize::MAX (all ones), 0 -> 0.
+    //
+    // The compiler emits cmov (branchless) for the comparison-to-integer
+    // conversion, which is safe against branch predictor speculation.
+    ((index < size) as usize).wrapping_neg()
 }
 
 /// Safe array index that clamps to zero under mis-speculation.
