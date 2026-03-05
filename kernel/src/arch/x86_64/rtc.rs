@@ -179,6 +179,7 @@ fn wait_for_update() {
 }
 
 /// Read a CMOS register.
+#[cfg(target_os = "none")]
 fn read_cmos(reg: u8) -> u8 {
     // SAFETY: Ports 0x70/0x71 are the standard CMOS RTC index/data ports.
     // Writing the register index to 0x70 and reading from 0x71 is the
@@ -187,6 +188,12 @@ fn read_cmos(reg: u8) -> u8 {
         crate::arch::x86_64::outb(0x70, reg);
         crate::arch::x86_64::inb(0x71)
     }
+}
+
+/// Host stub: CMOS registers are not available on user-space targets.
+#[cfg(not(target_os = "none"))]
+fn read_cmos(_reg: u8) -> u8 {
+    0
 }
 
 /// Convert BCD-encoded byte to binary.
