@@ -1047,10 +1047,17 @@ mod tests {
         let root = integer_cbrt(u64::MAX);
         // 2642245^3 ≈ 1.844 * 10^19 ≈ u64::MAX
         assert!(root >= 2_642_245);
-        assert!(
-            (root + 1).saturating_mul(root + 1).saturating_mul(root + 1) == 0
-                || (root + 1).pow(3) > u64::MAX / 2
-        ); // Overflow means root is correct
+        // Verify root^3 <= u64::MAX (doesn't overflow)
+        assert!(root
+            .checked_mul(root)
+            .and_then(|r2| r2.checked_mul(root))
+            .is_some());
+        // Verify (root+1)^3 overflows u64 (proves root is the floor cbrt)
+        let r1 = root + 1;
+        assert!(r1
+            .checked_mul(r1)
+            .and_then(|r2| r2.checked_mul(r1))
+            .is_none());
     }
 
     #[test]
