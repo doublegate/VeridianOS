@@ -170,7 +170,7 @@ impl DnsResponseCode {
 // ---------------------------------------------------------------------------
 
 /// DNS message header (12 bytes)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsHeader {
     /// Transaction ID
     pub id: u16,
