@@ -207,6 +207,10 @@ use self::wayland_syscalls::*;
 mod network_ext_syscalls;
 use self::network_ext_syscalls::*;
 
+// Phase 7.5 Wave 8: Shell/Userland extensions (io_uring, ptrace, core dump,
+// users, sudo, cron)
+mod userland_ext;
+
 // Import Phase 6.5 PTY syscall module
 mod pty;
 #[allow(unused_imports)]

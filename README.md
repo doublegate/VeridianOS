@@ -116,7 +116,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.15.0 (March 5, 2026) | **Releases Published**: 61 (v0.1.0 through v0.15.0)
+**Latest Release**: v0.16.0 (March 5, 2026) | **Releases Published**: 62 (v0.1.0 through v0.16.0)
 
 | Metric                 | Value                                           |
 | ---------------------- | ----------------------------------------------- |
@@ -147,7 +147,7 @@ experiments/   Non-normative exploratory work
 | 6     | Advanced Features and GUI | **~100% (desktop complete)** | v0.6.4  | Feb 2026 |
 | 6.5   | Rust Compiler + Bash Shell | **COMPLETE (100%)** | v0.7.0  | Feb 2026 |
 | 7     | Production Readiness     | **Complete (~100%)** | v0.10.6  | Mar 2026 |
-| 7.5   | Follow-On Enhancements   | **In Progress (Wave 7)** | v0.15.0  | Mar 2026 |
+| 7.5   | Follow-On Enhancements   | **COMPLETE (100%)** | v0.16.0  | Mar 2026 |
 
 For detailed release notes, see [Release History](docs/RELEASE-HISTORY.md).
 
@@ -244,7 +244,7 @@ Tier 6 was developed on the test-codex branch and merged to main with a comprehe
 
 ### Maturity
 
-VeridianOS is an active research system. Phases 0 through 7 are architecturally stable with a functional graphical desktop, Rust compiler port, Bash-compatible userland shell, Intel VMX hypervisor, container isolation, and comprehensive security hardening. Phase 7.5 follow-on enhancements are 85% complete (68/80 items across 7 waves): filesystem (ext4/FAT32/tmpfs/inotify/flock/xattr), core security (KASLR/stack canaries/SMEP-SMAP/retpoline/audit/cap revocation), performance (EDF scheduling/cache-aware allocation/false sharing elimination/power management/PGO), hardware drivers (xHCI/mass storage/HID/Bluetooth HCI/AHCI-SATA/RTC), networking (TCP Reno+Cubic/SACK/DNS/VLAN/multicast/bonding), crypto and protocols (TLS 1.3/SSH/HTTP/NTP/QUIC/WireGuard/mDNS), audio (ALSA/USB Audio/HDMI/capture/Vorbis/MP3/RT scheduling), video (PNG/JPEG/GIF/AVI/frame rate conversion/subtitles), GPU acceleration (VirtIO GPU 3D/OpenGL ES 2.0/GEM-TTM/DRM KMS/vsync/hardware cursor), hypervisor (nested virt/passthrough/live migration/SMP/LAPIC/snapshots), and containers (OCI/image format/cgroup mem+CPU/overlay FS/veth/seccomp BPF). CI pipeline achieves full 11/11 job pass rate including Code Coverage. Phase 7.5 Wave 8 (Desktop + Shell/Userland) and Phase 8 (next-generation features) are next.
+VeridianOS is an active research system. Phases 0 through 7 are architecturally stable with a functional graphical desktop, Rust compiler port, Bash-compatible userland shell, Intel VMX hypervisor, container isolation, and comprehensive security hardening. Phase 7.5 follow-on enhancements are 100% complete (80/80 items across 8 waves): filesystem (ext4/FAT32/tmpfs/inotify/flock/xattr), core security (KASLR/stack canaries/SMEP-SMAP/retpoline/audit/cap revocation), performance (EDF scheduling/cache-aware allocation/false sharing elimination/power management/PGO), hardware drivers (xHCI/mass storage/HID/Bluetooth HCI/AHCI-SATA/RTC), networking (TCP Reno+Cubic/SACK/DNS/VLAN/multicast/bonding), crypto and protocols (TLS 1.3/SSH/HTTP/NTP/QUIC/WireGuard/mDNS), audio (ALSA/USB Audio/HDMI/capture/Vorbis/MP3/RT scheduling), video (PNG/JPEG/GIF/AVI/frame rate conversion/subtitles), GPU acceleration (VirtIO GPU 3D/OpenGL ES 2.0/GEM-TTM/DRM KMS/vsync/hardware cursor), hypervisor (nested virt/passthrough/live migration/SMP/LAPIC/snapshots), containers (OCI/image format/cgroup mem+CPU/overlay FS/veth/seccomp BPF), desktop (clipboard/drag-and-drop/shortcuts/themes/TrueType fonts/CJK Unicode), and shell/userland (io_uring/ptrace/core dumps/user management/sudo-su/crontab). CI pipeline achieves full 11/11 job pass rate including Code Coverage. Phase 8 (next-generation features) is next.
 
 Historical status is recorded in:
 

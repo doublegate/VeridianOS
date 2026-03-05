@@ -1,7 +1,7 @@
 # Phase 7.5: Follow-On Enhancements TODO
 
 **Phase Duration**: 6-12 months
-**Status**: In Progress (Wave 7 Complete)
+**Status**: COMPLETE (All 8 Waves Done)
 **Dependencies**: Phase 7 complete (v0.10.0)
 **Last Updated**: March 5, 2026
 
@@ -103,23 +103,23 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 
 ## 9. Desktop
 
-- [ ] Clipboard protocol (wl_data_device, MIME type negotiation, paste)
-- [ ] Drag-and-drop (wl_data_offer, enter/leave/drop events)
-- [ ] Global keyboard shortcuts (configurable key bindings, shortcut manager)
-- [ ] Theme engine (color schemes, icon themes, GTK/Qt style compat)
-- [ ] Font rendering (TrueType/OpenType rasterizer, hinting, subpixel)
-- [ ] CJK Unicode support (wide character rendering, input method framework)
+- [x] Clipboard protocol (wl_data_device, MIME type negotiation, paste)
+- [x] Drag-and-drop (wl_data_offer, enter/leave/drop events)
+- [x] Global keyboard shortcuts (configurable key bindings, shortcut manager)
+- [x] Theme engine (color schemes, icon themes, GTK/Qt style compat)
+- [x] Font rendering (TrueType/OpenType rasterizer, hinting, subpixel)
+- [x] CJK Unicode support (wide character rendering, input method framework)
 
 ---
 
 ## 10. Shell and Userland
 
-- [ ] io_uring for user-space async I/O (submission/completion queues)
-- [ ] ptrace system call (PTRACE_ATTACH, PTRACE_PEEKDATA, single-step)
-- [ ] Core dump generation (ELF core format, register state, memory segments)
-- [ ] User and group management (/etc/passwd, /etc/group, useradd/userdel)
-- [ ] sudo/su privilege elevation (PAM-style authentication, policy files)
-- [ ] Crontab scheduler (cron daemon, crontab parsing, job execution)
+- [x] io_uring for user-space async I/O (submission/completion queues)
+- [x] ptrace system call (PTRACE_ATTACH, PTRACE_PEEKDATA, single-step)
+- [x] Core dump generation (ELF core format, register state, memory segments)
+- [x] User and group management (/etc/passwd, /etc/group, useradd/userdel)
+- [x] sudo/su privilege elevation (PAM-style authentication, policy files)
+- [x] Crontab scheduler (cron daemon, crontab parsing, job execution)
 
 ---
 
@@ -168,12 +168,12 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 | Container Enhancements | 7 | 7 | **COMPLETE** |
 | Security | 6 | 6 | **COMPLETE** |
 | Performance | 5 | 5 | **COMPLETE** |
-| Desktop | 6 | 0 | Planned |
-| Shell/Userland | 6 | 0 | Planned |
+| Desktop | 6 | 6 | **COMPLETE** |
+| Shell/Userland | 6 | 6 | **COMPLETE** |
 | Filesystem | 6 | 6 | **COMPLETE** |
 | Networking Protocols | 6 | 6 | **COMPLETE** |
 | Hardware Drivers | 6 | 6 | **COMPLETE** |
-| **Total** | **~80** | **68** | **85%** |
+| **Total** | **~80** | **80** | **100%** |
 
 ---
 

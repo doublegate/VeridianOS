@@ -2,6 +2,30 @@
 
 ---
 
+## [v0.16.0] - 2026-03-05
+
+### v0.16.0: Phase 7.5 Wave 8 -- Desktop & Shell/Userland (PHASE 7.5 COMPLETE)
+
+Wave 8 delivers the final 12 enhancements completing Phase 7.5 (80/80 = 100%): 6 desktop items (clipboard protocol, drag-and-drop, global keyboard shortcuts, theme engine, TrueType font rendering, CJK Unicode support) and 6 shell/userland items (io_uring async I/O, ptrace debugging, core dump generation, user/group management, sudo/su privilege elevation, crontab scheduler).
+
+**2 new files, ~8,188 insertions, 95 unit tests**
+
+#### New Modules
+
+- **Desktop Extensions** (`kernel/src/desktop/desktop_ext.rs`, ~3,448 lines): Wayland-compatible clipboard protocol (ClipboardManager with copy/paste, MIME negotiation for text/html/png, primary selection, 8-entry history with LRU). Drag-and-drop (DndManager with enter/leave/drop/motion events, DndState machine, source/target MIME matching, ghost image tracking). Global keyboard shortcuts (ShortcutManager with ModifierMask bitmask, 24 ShortcutAction variants, priority-based matching with System/Desktop/Application/User levels, 8 default bindings). Theme engine (ThemeManager with 6 presets: Light/Dark/SolarizedDark/SolarizedLight/Nord/Dracula, ThemeColors with 30 color slots, integer alpha blending/darken/lighten). TrueType font rendering (TtfParser for cmap format 4/glyf/head/hhea/loca/maxp tables, GlyphOutline with on/off-curve points, integer Bresenham + recursive quadratic Bezier rasterization, 256-entry GlyphCache with LRU). CJK Unicode (is_cjk_wide() covering 11 Unicode ranges, char_width()/string_width()/truncate_to_width(), InputMethodEditor framework with composing/committed states, Pinyin table stub). 42 unit tests.
+- **Shell/Userland Extensions** (`kernel/src/syscall/userland_ext.rs`, ~4,740 lines): io_uring (IoUring with SQ/CQ ring buffers, 16 opcodes including READV/WRITEV/FSYNC/POLL_ADD/SENDMSG/RECVMSG/TIMEOUT, batch submission, IoUringManager for multi-ring management). ptrace (17 PtraceRequest variants, PtraceManager with tracer-tracee tracking, x86_64 RegisterState with 27 registers, TraceeState machine with signal interception). Core dump (ELF64 core writer with ET_CORE header, PT_NOTE with NT_PRSTATUS/NT_PRPSINFO, PT_LOAD per memory segment). User/group management (UserDatabase/GroupDatabase with /etc/passwd+shadow+group format parsing, add/remove/lookup operations). sudo/su (SudoersParser for /etc/sudoers with user/group/NOPASSWD matching, PrivilegeManager with sudo_exec/su_switch, session timeout tracking). Crontab (CronField with Any/Value/Range/Step/List, CronSchedule 5-field parser, @reboot/@daily/@hourly shortcuts, CronDaemon with tick-based scheduling, next_run() calculation). 53 unit tests.
+
+#### Build Verification
+
+| Target | Build | Clippy | Status |
+|--------|-------|--------|--------|
+| x86_64-unknown-none | Pass | 0 warnings | OK |
+| aarch64-unknown-none | Pass | 0 warnings | OK |
+| riscv64gc-unknown-none-elf | Pass | 0 warnings | OK |
+| x86_64-unknown-linux-gnu (host) | Pass | 0 warnings | OK |
+
+---
+
 ## [v0.15.0] - 2026-03-05
 
 ### v0.15.0: Phase 7.5 Wave 7 -- GPU Acceleration, Hypervisor & Containers

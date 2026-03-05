@@ -5,6 +5,7 @@
 
 pub mod animation;
 pub mod app_switcher;
+pub mod desktop_ext;
 pub mod file_manager;
 pub mod font;
 pub mod image_viewer;
