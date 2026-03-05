@@ -7,6 +7,8 @@
 #![allow(dead_code)]
 
 pub mod bootloader;
+pub mod cache_aligned;
+pub mod cache_topology;
 pub mod demand_paging;
 pub mod frame_allocator;
 pub mod heap;

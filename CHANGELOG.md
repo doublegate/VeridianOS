@@ -2,6 +2,60 @@
 
 ---
 
+## [v0.11.1] - 2026-03-05
+
+### v0.11.1: Phase 7.5 Wave 2 -- Performance & Scheduling
+
+Wave 2 delivers 5 performance and scheduling enhancements: EDF deadline scheduling, cache-aware memory allocation, false sharing elimination, power management (C-states/P-states), and PGO build pipeline documentation.
+
+**5 new files, ~2,700 insertions, 60+ unit tests**
+
+#### Deadline Scheduling (EDF) -- `kernel/src/sched/deadline.rs` (~980 lines)
+- `DeadlineEntity` with runtime/deadline/period parameters (nanoseconds)
+- `DeadlineScheduler` with BTreeMap-based task management
+- Admission control: fixed-point permille (1000 = 100%) utilization tracking
+- `pick_next()`: selects task with earliest absolute deadline and remaining runtime
+- `tick()` decrements runtime, throttles exhausted tasks until period replenishment
+- `replenish()` resets runtime at period boundaries
+- `SchedAttr` for `sched_setattr()`-compatible interface
+- Global `DEADLINE_SCHEDULER` mutex for kernel integration; 20+ unit tests
+
+#### Cache-Aware Memory Allocation -- `kernel/src/mm/cache_topology.rs` (~767 lines)
+- Cache hierarchy detection: CPUID leaf 4 (Intel), leaf 0x8000001D (AMD)
+- Hardcoded defaults for AArch64 (Cortex-A72) and RISC-V
+- `CacheTopology` struct with up to 8 cache levels (L1D, L1I, L2, L3)
+- Cache coloring: `compute_colors()` calculates color count from L3 parameters
+- `frame_color()` assigns colors based on physical frame number and page size
+- Thread-safe global topology via `spin::RwLock` with `init()` and query API; 15+ unit tests
+
+#### False Sharing Elimination -- `kernel/src/mm/cache_aligned.rs` (~180 lines)
+- `CacheAligned<T>` wrapper: `#[repr(C, align(64))]` for cache line isolation
+- Implements Deref, DerefMut, Send, Sync, Default, Clone, Copy, Debug
+- `CACHE_LINE_SIZE` constant (64 bytes for x86_64/AArch64/RISC-V)
+- Applied to 5 performance counters in `perf/mod.rs` (SYSCALL_COUNT, etc.)
+- `#[repr(align(64))]` on `PerCpuPageCache` and `ReadyQueue` structs; 8 unit tests
+
+#### Power Management -- `kernel/src/power/mod.rs` (~743 lines)
+- C-states (C0-C3): HLT/MWAIT (x86_64), WFI (AArch64/RISC-V)
+- P-states (P0-P7): 8 performance levels with frequency/voltage metadata
+- OnDemand governor: utilization-based frequency scaling (80%/20% thresholds)
+- `IA32_PERF_CTL` MSR integration for x86_64 frequency control
+- MWAIT detection via CPUID leaf 1 (ECX bit 3)
+- Thread-safe `PowerState` via `spin::RwLock`; 16+ unit tests
+
+#### PGO Build Pipeline -- `docs/PERFORMANCE-TUNING.md` (updated)
+- Profile-Guided Optimization build steps for x86_64
+- Instrumented build, QEMU workload collection, profile merge, optimized rebuild
+- Cache topology, false sharing, deadline scheduling, power management documentation
+
+#### Infrastructure
+- 3 modules wired: `mm/cache_aligned`, `mm/cache_topology`, `sched/deadline`
+- `power` module wired into `lib.rs`
+- CPUID `rbx` register workaround (LLVM reserves rbx): push/pop pattern
+- `DeadlineScheduler` Default impl for clippy compliance
+
+---
+
 ## [v0.11.0] - 2026-03-05
 
 ### v0.11.0: Phase 7.5 Wave 1 -- Filesystem & Core Security

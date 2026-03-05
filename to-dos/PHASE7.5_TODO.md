@@ -1,7 +1,7 @@
 # Phase 7.5: Follow-On Enhancements TODO
 
 **Phase Duration**: 6-12 months
-**Status**: In Progress (Wave 1 Complete)
+**Status**: In Progress (Wave 2 Complete)
 **Dependencies**: Phase 7 complete (v0.10.0)
 **Last Updated**: March 5, 2026
 
@@ -93,11 +93,11 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 
 ## 8. Performance
 
-- [ ] Deadline scheduling (Earliest Deadline First with APIC timer integration)
-- [ ] Cache-aware memory allocation (L1/L2/L3 topology detection, coloring)
-- [ ] False sharing elimination (cache line padding, per-CPU alignment)
-- [ ] Power management (C-states, P-states via ACPI _CST/_PSS methods)
-- [ ] Profile-guided optimization (instrumentation, PGO build pipeline)
+- [x] Deadline scheduling (Earliest Deadline First with APIC timer integration)
+- [x] Cache-aware memory allocation (L1/L2/L3 topology detection, coloring)
+- [x] False sharing elimination (cache line padding, per-CPU alignment)
+- [x] Power management (C-states, P-states via ACPI _CST/_PSS methods)
+- [x] Profile-guided optimization (instrumentation, PGO build pipeline)
 
 ---
 
@@ -167,13 +167,13 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 | Hypervisor Enhancements | 6 | 0 | Planned |
 | Container Enhancements | 7 | 0 | Planned |
 | Security | 6 | 6 | **COMPLETE** |
-| Performance | 5 | 0 | Planned |
+| Performance | 5 | 5 | **COMPLETE** |
 | Desktop | 6 | 0 | Planned |
 | Shell/Userland | 6 | 0 | Planned |
 | Filesystem | 6 | 6 | **COMPLETE** |
 | Networking Protocols | 6 | 0 | Planned |
 | Hardware Drivers | 6 | 0 | Planned |
-| **Total** | **~80** | **12** | **15%** |
+| **Total** | **~80** | **17** | **21%** |
 
 ---
 

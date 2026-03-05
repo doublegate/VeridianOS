@@ -9,7 +9,7 @@ pub mod trace;
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use crate::error::KernelError;
+use crate::{error::KernelError, mm::cache_aligned::CacheAligned};
 
 /// Performance counters (snapshot view)
 #[derive(Debug, Default, Clone, Copy)]
@@ -21,12 +21,17 @@ pub struct PerfCounters {
     pub ipc_messages: u64,
 }
 
-/// Atomic performance counters for safe concurrent access
-static SYSCALL_COUNT: AtomicU64 = AtomicU64::new(0);
-static CONTEXT_SWITCH_COUNT: AtomicU64 = AtomicU64::new(0);
-static PAGE_FAULT_COUNT: AtomicU64 = AtomicU64::new(0);
-static INTERRUPT_COUNT: AtomicU64 = AtomicU64::new(0);
-static IPC_MESSAGE_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Atomic performance counters for safe concurrent access.
+///
+/// Each counter is wrapped in `CacheAligned` to prevent false sharing
+/// between CPU cores when multiple counters are incremented concurrently
+/// from different cores (e.g., syscall count on CPU 0, interrupt count on CPU
+/// 1).
+static SYSCALL_COUNT: CacheAligned<AtomicU64> = CacheAligned::new(AtomicU64::new(0));
+static CONTEXT_SWITCH_COUNT: CacheAligned<AtomicU64> = CacheAligned::new(AtomicU64::new(0));
+static PAGE_FAULT_COUNT: CacheAligned<AtomicU64> = CacheAligned::new(AtomicU64::new(0));
+static INTERRUPT_COUNT: CacheAligned<AtomicU64> = CacheAligned::new(AtomicU64::new(0));
+static IPC_MESSAGE_COUNT: CacheAligned<AtomicU64> = CacheAligned::new(AtomicU64::new(0));
 
 /// Increment syscall counter
 #[inline(always)]

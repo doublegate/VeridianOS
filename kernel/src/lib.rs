@@ -81,6 +81,7 @@ pub mod net;
 pub mod perf;
 pub mod phase2_validation;
 pub mod pkg;
+pub mod power;
 pub mod process;
 pub mod raii;
 pub mod sched;

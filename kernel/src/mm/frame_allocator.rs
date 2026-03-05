@@ -1005,6 +1005,9 @@ pub static FRAME_ALLOCATOR: Mutex<FrameAllocator> = Mutex::new(FrameAllocator::n
 ///
 /// When the cache is empty, it batch-refills from the global allocator.
 /// When full, it batch-drains back to the global allocator.
+/// Cache-line aligned to prevent false sharing when per-CPU caches are
+/// stored in adjacent array slots accessed by different cores.
+#[repr(align(64))]
 pub struct PerCpuPageCache {
     /// Cached frame numbers
     frames: [u64; Self::CAPACITY],

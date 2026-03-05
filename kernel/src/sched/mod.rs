@@ -25,6 +25,7 @@
 
 // ---- Submodule declarations ----
 
+pub mod deadline;
 pub mod init;
 pub mod ipc_blocking;
 pub mod load_balance;

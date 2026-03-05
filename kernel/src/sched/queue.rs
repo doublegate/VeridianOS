@@ -117,6 +117,10 @@ impl PriorityQueue {
 }
 
 /// Multi-level ready queue
+///
+/// Cache-line aligned to prevent false sharing when per-CPU ready queues
+/// are stored in adjacent array slots accessed by different cores.
+#[repr(align(64))]
 pub struct ReadyQueue {
     /// Real-time queues by priority
     rt_queues: [PriorityQueue; NUM_RT_PRIORITIES],

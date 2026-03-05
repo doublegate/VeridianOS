@@ -242,4 +242,114 @@ trace off      # Disable
 
 ---
 
+---
+
+## 7. Cache Topology Detection (v0.11.1)
+
+**File**: `kernel/src/mm/cache_topology.rs`
+
+### Architecture
+
+Detects CPU cache hierarchy (L1/L2/L3) using architecture-specific mechanisms:
+- x86_64: CPUID leaf 4 (Intel) and leaf 0x8000001D (AMD)
+- AArch64: hardcoded defaults (Cortex-A72: 48KB L1D, 1MB L2)
+- RISC-V: hardcoded defaults (32KB L1D, 256KB L2)
+
+### Cache Coloring
+
+Assigns "colors" to physical frames based on L3 set index bits, reducing cache
+conflict misses for adjacent allocations on NUMA systems. Advisory preference
+in frame allocator -- not a hard constraint.
+
+---
+
+## 8. False Sharing Elimination (v0.11.1)
+
+**File**: `kernel/src/mm/cache_aligned.rs`
+
+### CacheAligned<T> Wrapper
+
+`CacheAligned<T>` wraps a value with `#[repr(C, align(64))]` to ensure each
+value occupies its own cache line, preventing false sharing between CPU cores.
+
+Used for:
+- Performance counters (`perf/mod.rs`): 5 atomic counters
+- Per-CPU page caches (`mm/frame_allocator.rs`): `PerCpuPageCache`
+- Ready queues (`sched/queue.rs`): `ReadyQueue`
+
+---
+
+## 9. Deadline Scheduling -- EDF (v0.11.1)
+
+**File**: `kernel/src/sched/deadline.rs`
+
+### SCHED_DEADLINE Policy
+
+Implements Earliest Deadline First alongside CFS. Deadline tasks always preempt
+CFS tasks. Among deadline tasks, the one with the earliest absolute deadline wins.
+
+| Parameter | Description |
+|-----------|-------------|
+| runtime_ns | Worst-case execution time per period |
+| deadline_ns | Relative deadline from period start |
+| period_ns | Activation period |
+
+Admission control ensures total utilization (sum of runtime/period) <= 100%.
+Uses fixed-point permille arithmetic (1000 = 100%).
+
+---
+
+## 10. Power Management (v0.11.1)
+
+**File**: `kernel/src/power/mod.rs`
+
+### C-States
+
+| State | x86_64 | AArch64/RISC-V | Wake Latency |
+|-------|--------|----------------|-------------|
+| C0 | Active | Active | 0 |
+| C1 | HLT | WFI | ~1 us |
+| C2 | MWAIT | WFI | ~10 us |
+| C3 | MWAIT C3 | WFI | ~100 us |
+
+### P-States (OnDemand Governor)
+
+- Monitors CPU utilization over 10ms intervals
+- Scales up when utilization > 80%, down when < 30%
+- x86_64: `IA32_PERF_CTL` MSR for frequency control
+- 8 performance levels (P0-P7)
+
+---
+
+## 11. Profile-Guided Optimization (v0.11.1)
+
+### PGO Build Steps
+
+```bash
+# Step 1: Instrumented build
+RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data" \
+  cargo build --target targets/x86_64-veridian.json \
+  -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc --release
+
+# Step 2: Run workload in QEMU
+qemu-system-x86_64 -enable-kvm \
+  -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
+  -drive id=disk0,if=none,format=raw,file=target/x86_64-veridian/release/veridian-uefi.img \
+  -device ide-hd,drive=disk0 \
+  -serial stdio -display none -m 256M </dev/null > /tmp/pgo-boot.log 2>&1 &
+PGO_PID=$!; sleep 30; kill $PGO_PID 2>/dev/null
+
+# Step 3: Merge profiles
+llvm-profdata merge -o /tmp/pgo-data/merged.profdata /tmp/pgo-data/
+
+# Step 4: Optimized build
+RUSTFLAGS="-Cprofile-use=/tmp/pgo-data/merged.profdata" \
+  cargo build --target targets/x86_64-veridian.json \
+  -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc --release
+```
+
+Expected: 5-15% improvement for hot code paths (IPC, scheduler, page faults).
+
+---
+
 **See also**: [Performance Benchmarks](PERFORMANCE-BENCHMARKS.md) | [Phase 5 TODO](../to-dos/PHASE5_TODO.md) | [Deferred Items](DEFERRED-IMPLEMENTATION-ITEMS.md)

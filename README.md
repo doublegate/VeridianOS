@@ -116,7 +116,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.11.0 (March 5, 2026) | **Releases Published**: 55 (v0.1.0 through v0.11.0)
+**Latest Release**: v0.11.1 (March 5, 2026) | **Releases Published**: 56 (v0.1.0 through v0.11.1)
 
 | Metric                 | Value                                           |
 | ---------------------- | ----------------------------------------------- |
@@ -147,7 +147,7 @@ experiments/   Non-normative exploratory work
 | 6     | Advanced Features and GUI | **~100% (desktop complete)** | v0.6.4  | Feb 2026 |
 | 6.5   | Rust Compiler + Bash Shell | **COMPLETE (100%)** | v0.7.0  | Feb 2026 |
 | 7     | Production Readiness     | **Complete (~100%)** | v0.10.6  | Mar 2026 |
-| 7.5   | Follow-On Enhancements   | **In Progress (Wave 1)** | v0.11.0  | Mar 2026 |
+| 7.5   | Follow-On Enhancements   | **In Progress (Wave 2)** | v0.11.1  | Mar 2026 |
 
 For detailed release notes, see [Release History](docs/RELEASE-HISTORY.md).
 
