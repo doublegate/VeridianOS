@@ -2319,7 +2319,7 @@ mod tests {
 
     #[test]
     fn test_audio_scheduler_aggregate_stats() {
-        let mut sched = AudioScheduler::new();
+        let mut sched = AudioScheduler::with_max_reservation(1000);
         let p1 = AudioSchedParams::from_priority(1, AudioPriorityClass::Normal);
         let p2 = AudioSchedParams::from_priority(2, AudioPriorityClass::Background);
         assert!(sched.register_thread(p1).is_ok());
