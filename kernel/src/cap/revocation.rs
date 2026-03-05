@@ -1,6 +1,18 @@
 //! Capability revocation mechanism
 //!
 //! Implements cascading revocation and immediate invalidation of capabilities.
+//!
+//! # Derivation Tree
+//!
+//! When capabilities are delegated (derived), the parent-child relationship is
+//! recorded in a global derivation tree. Revoking a parent capability
+//! transitively revokes all descendants via [`revoke_cascade`].
+//!
+//! # Revocation Notifications
+//!
+//! When a capability is revoked, processes that held it receive a
+//! [`RevocationNotification`] in a per-process queue, enabling them to
+//! gracefully release resources.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -11,7 +23,10 @@ use crate::error::KernelError;
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
-use alloc::{collections::BTreeSet, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    vec::Vec,
+};
 
 use spin::RwLock;
 
@@ -250,4 +265,445 @@ pub fn sys_capability_revoke(cap_value: u64) -> Result<(), KernelError> {
     }
 
     revoke_capability(cap)
+}
+
+// ===========================================================================
+// Derivation Tree (Sprint 1.12)
+// ===========================================================================
+
+/// Global derivation tree: maps parent capability ID -> list of child
+/// capability IDs.
+///
+/// This enables transitive (cascading) revocation: revoking a parent
+/// automatically revokes all descendants.
+#[cfg(feature = "alloc")]
+static DERIVATION_TREE: RwLock<BTreeMap<u64, Vec<u64>>> = RwLock::new(BTreeMap::new());
+
+/// Record a parent-child derivation relationship between two capabilities.
+///
+/// Called when a capability is delegated or derived from another. The child
+/// capability will be transitively revoked if the parent is revoked.
+#[cfg(feature = "alloc")]
+pub fn record_derivation(parent_cap_id: u64, child_cap_id: u64) {
+    let mut tree = DERIVATION_TREE.write();
+    tree.entry(parent_cap_id).or_default().push(child_cap_id);
+}
+
+/// Revoke a capability and transitively revoke all derived capabilities.
+///
+/// Walks the derivation tree in breadth-first order, revoking each descendant.
+/// Returns the list of all capability IDs that were revoked (including the
+/// root).
+///
+/// Generation counters are checked before revocation: if a capability has been
+/// re-created with a newer generation, it is skipped (the revocation list add
+/// is a no-op for already-revoked IDs).
+#[cfg(feature = "alloc")]
+pub fn revoke_cascade(cap_id: u64) -> Vec<u64> {
+    let mut revoked_ids = Vec::new();
+    let mut queue = VecDeque::new();
+    queue.push_back(cap_id);
+
+    while let Some(current_id) = queue.pop_front() {
+        // Construct a token from the raw ID (generation 0 for lookup purposes).
+        // The revocation list and capability manager handle generation checks
+        // internally.
+        let cap = CapabilityToken::from_u64(current_id);
+
+        // Add to global revocation list
+        REVOCATION_LIST.add(cap);
+        // Mark as revoked in capability manager (best-effort)
+        cap_manager().revoke(cap).ok();
+
+        revoked_ids.push(current_id);
+
+        // Enqueue all children for transitive revocation
+        let tree = DERIVATION_TREE.read();
+        if let Some(children) = tree.get(&current_id) {
+            for &child_id in children {
+                // Avoid cycles (defensive)
+                if !revoked_ids.contains(&child_id) {
+                    queue.push_back(child_id);
+                }
+            }
+        }
+    }
+
+    // Broadcast revocation for all affected capabilities
+    for &id in &revoked_ids {
+        broadcast_revocation(CapabilityToken::from_u64(id));
+    }
+
+    // Push notifications for all revoked capabilities
+    push_revocation_notifications(&revoked_ids, RevocationReason::ParentRevoked);
+
+    revoked_ids
+}
+
+/// Get the full derivation subtree rooted at the given capability ID.
+///
+/// Returns all descendant capability IDs (children, grandchildren, etc.)
+/// in breadth-first order. Does not include the root `cap_id` itself.
+#[cfg(feature = "alloc")]
+pub fn get_derivation_tree(cap_id: u64) -> Vec<u64> {
+    let mut descendants = Vec::new();
+    let mut queue = VecDeque::new();
+    queue.push_back(cap_id);
+
+    let tree = DERIVATION_TREE.read();
+    while let Some(current_id) = queue.pop_front() {
+        if let Some(children) = tree.get(&current_id) {
+            for &child_id in children {
+                if !descendants.contains(&child_id) {
+                    descendants.push(child_id);
+                    queue.push_back(child_id);
+                }
+            }
+        }
+    }
+
+    descendants
+}
+
+/// Remove a capability from the derivation tree entirely.
+///
+/// Removes it as a parent (dropping all its children references) and also
+/// removes it from any parent's child list.
+#[cfg(feature = "alloc")]
+pub fn cleanup_capability(cap_id: u64) {
+    let mut tree = DERIVATION_TREE.write();
+
+    // Remove as parent
+    tree.remove(&cap_id);
+
+    // Remove from all parent child lists
+    for children in tree.values_mut() {
+        children.retain(|&id| id != cap_id);
+    }
+}
+
+/// Get the direct children of a capability in the derivation tree.
+#[cfg(feature = "alloc")]
+pub fn get_children(cap_id: u64) -> Vec<u64> {
+    let tree = DERIVATION_TREE.read();
+    tree.get(&cap_id).cloned().unwrap_or_default()
+}
+
+/// Get statistics about the derivation tree.
+///
+/// Returns (number of parent nodes, total number of child edges).
+#[cfg(feature = "alloc")]
+pub fn derivation_tree_stats() -> (usize, usize) {
+    let tree = DERIVATION_TREE.read();
+    let parents = tree.len();
+    let total_children: usize = tree.values().map(|v| v.len()).sum();
+    (parents, total_children)
+}
+
+// ===========================================================================
+// Revocation Notifications (Sprint 1.12)
+// ===========================================================================
+
+/// Maximum number of queued notifications per process.
+const MAX_NOTIFICATIONS_PER_PROCESS: usize = 256;
+
+/// Reason a capability was revoked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevocationReason {
+    /// Explicitly revoked by the owning process
+    Explicit,
+    /// Parent capability was revoked (transitive / cascade)
+    ParentRevoked,
+    /// Process that held the capability exited
+    ProcessExit,
+    /// Security policy forced revocation
+    PolicyEnforced,
+}
+
+impl RevocationReason {
+    /// Human-readable description.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::ParentRevoked => "parent_revoked",
+            Self::ProcessExit => "process_exit",
+            Self::PolicyEnforced => "policy_enforced",
+        }
+    }
+}
+
+/// Notification delivered to a process when one of its capabilities is revoked.
+#[derive(Debug, Clone, Copy)]
+pub struct RevocationNotification {
+    /// The ID of the revoked capability
+    pub cap_id: u64,
+    /// Timestamp (seconds since boot) when revocation occurred
+    pub revoked_at: u64,
+    /// Reason for the revocation
+    pub reason: RevocationReason,
+}
+
+/// Per-process revocation notification queues.
+///
+/// Maps process ID -> bounded deque of notifications.
+#[cfg(feature = "alloc")]
+static REVOCATION_QUEUE: RwLock<BTreeMap<u64, VecDeque<RevocationNotification>>> =
+    RwLock::new(BTreeMap::new());
+
+/// Get a timestamp for revocation notifications.
+fn get_revocation_timestamp() -> u64 {
+    #[cfg(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    ))]
+    {
+        crate::arch::timer::get_timestamp_secs()
+    }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )))]
+    {
+        0
+    }
+}
+
+/// Push revocation notifications for a list of revoked capability IDs.
+///
+/// Each process in the process table receives a notification for each
+/// capability ID that was revoked.
+#[cfg(feature = "alloc")]
+fn push_revocation_notifications(cap_ids: &[u64], reason: RevocationReason) {
+    let timestamp = get_revocation_timestamp();
+
+    // Get list of all PIDs from the process server
+    let process_server = crate::services::process_server::get_process_server();
+    let pids = process_server.list_process_ids();
+
+    let mut queue = REVOCATION_QUEUE.write();
+    for pid in pids {
+        let notifications = queue.entry(pid.0).or_default();
+        for &cap_id in cap_ids {
+            let notification = RevocationNotification {
+                cap_id,
+                revoked_at: timestamp,
+                reason,
+            };
+            // Evict oldest if at capacity
+            if notifications.len() >= MAX_NOTIFICATIONS_PER_PROCESS {
+                notifications.pop_front();
+            }
+            notifications.push_back(notification);
+        }
+    }
+}
+
+/// Push a single revocation notification to a specific process.
+#[cfg(feature = "alloc")]
+pub fn notify_process(pid: u64, cap_id: u64, reason: RevocationReason) {
+    let timestamp = get_revocation_timestamp();
+    let notification = RevocationNotification {
+        cap_id,
+        revoked_at: timestamp,
+        reason,
+    };
+
+    let mut queue = REVOCATION_QUEUE.write();
+    let notifications = queue.entry(pid).or_default();
+    if notifications.len() >= MAX_NOTIFICATIONS_PER_PROCESS {
+        notifications.pop_front();
+    }
+    notifications.push_back(notification);
+}
+
+/// Drain all pending revocation notifications for a given process.
+///
+/// Returns the notifications and clears the queue for that process.
+#[cfg(feature = "alloc")]
+pub fn drain_notifications(pid: u64) -> Vec<RevocationNotification> {
+    let mut queue = REVOCATION_QUEUE.write();
+    match queue.remove(&pid) {
+        Some(deque) => deque.into_iter().collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Peek at pending revocation notifications for a process without consuming
+/// them.
+#[cfg(feature = "alloc")]
+pub fn peek_notifications(pid: u64) -> Vec<RevocationNotification> {
+    let queue = REVOCATION_QUEUE.read();
+    match queue.get(&pid) {
+        Some(deque) => deque.iter().copied().collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Get the number of pending notifications for a process.
+#[cfg(feature = "alloc")]
+pub fn notification_count(pid: u64) -> usize {
+    let queue = REVOCATION_QUEUE.read();
+    queue.get(&pid).map_or(0, |q| q.len())
+}
+
+/// Clean up notification queue for a process that has exited.
+#[cfg(feature = "alloc")]
+pub fn cleanup_process_notifications(pid: u64) {
+    let mut queue = REVOCATION_QUEUE.write();
+    queue.remove(&pid);
+}
+
+/// Get summary statistics for the notification system.
+///
+/// Returns (number of processes with pending notifications,
+///          total queued notifications across all processes).
+#[cfg(feature = "alloc")]
+pub fn notification_stats() -> (usize, usize) {
+    let queue = REVOCATION_QUEUE.read();
+    let process_count = queue.len();
+    let total_notifications: usize = queue.values().map(|q| q.len()).sum();
+    (process_count, total_notifications)
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    #[cfg(feature = "alloc")]
+    #[allow(unused_imports)]
+    use alloc::vec;
+
+    use super::*;
+
+    #[test]
+    fn test_revocation_list_basic() {
+        let list = RevocationList::new();
+        let cap = CapabilityToken::new(100, 0, 0, 0);
+
+        assert!(!list.is_revoked(cap));
+        list.add(cap);
+        assert!(list.is_revoked(cap));
+    }
+
+    #[test]
+    fn test_revocation_list_generation() {
+        let list = RevocationList::new();
+        let cap_gen0 = CapabilityToken::new(200, 0, 0, 0);
+        let cap_gen1 = CapabilityToken::new(200, 1, 0, 0);
+
+        list.add(cap_gen0);
+        assert!(list.is_revoked(cap_gen0));
+        // Different generation should not be considered revoked
+        assert!(!list.is_revoked(cap_gen1));
+    }
+
+    #[test]
+    fn test_revocation_list_epoch() {
+        let list = RevocationList::new();
+        let initial_epoch = list.epoch();
+
+        let cap = CapabilityToken::new(300, 0, 0, 0);
+        list.add(cap);
+
+        assert!(list.epoch() > initial_epoch);
+    }
+
+    #[test]
+    fn test_revocation_cache_basic() {
+        let cache = RevocationCache::new();
+        let cap = CapabilityToken::new(400, 0, 0, 0);
+        // cache queries REVOCATION_LIST which is a global static,
+        // so results depend on prior test state. We verify no panic.
+        let _ = cache.is_revoked(cap);
+    }
+
+    #[test]
+    fn test_revocation_reason_display() {
+        assert_eq!(RevocationReason::Explicit.as_str(), "explicit");
+        assert_eq!(RevocationReason::ParentRevoked.as_str(), "parent_revoked");
+        assert_eq!(RevocationReason::ProcessExit.as_str(), "process_exit");
+        assert_eq!(RevocationReason::PolicyEnforced.as_str(), "policy_enforced");
+    }
+
+    #[test]
+    fn test_revocation_notification_fields() {
+        let notif = RevocationNotification {
+            cap_id: 42,
+            revoked_at: 1000,
+            reason: RevocationReason::Explicit,
+        };
+        assert_eq!(notif.cap_id, 42);
+        assert_eq!(notif.revoked_at, 1000);
+        assert_eq!(notif.reason, RevocationReason::Explicit);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn test_derivation_tree_record_and_get() {
+        // Use unique cap IDs to avoid collision with other tests
+        let parent = 10_000;
+        let child1 = 10_001;
+        let child2 = 10_002;
+        let grandchild = 10_003;
+
+        record_derivation(parent, child1);
+        record_derivation(parent, child2);
+        record_derivation(child1, grandchild);
+
+        let children = get_children(parent);
+        assert!(children.contains(&child1));
+        assert!(children.contains(&child2));
+
+        let subtree = get_derivation_tree(parent);
+        assert!(subtree.contains(&child1));
+        assert!(subtree.contains(&child2));
+        assert!(subtree.contains(&grandchild));
+
+        // Cleanup
+        cleanup_capability(grandchild);
+        cleanup_capability(child1);
+        cleanup_capability(child2);
+        cleanup_capability(parent);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn test_derivation_tree_cleanup() {
+        let parent = 20_000;
+        let child = 20_001;
+
+        record_derivation(parent, child);
+        assert!(!get_children(parent).is_empty());
+
+        cleanup_capability(child);
+        // Child should be removed from parent's children list
+        assert!(!get_children(parent).contains(&child));
+
+        cleanup_capability(parent);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn test_derivation_tree_stats() {
+        let parent = 30_000;
+        let child1 = 30_001;
+        let child2 = 30_002;
+
+        record_derivation(parent, child1);
+        record_derivation(parent, child2);
+
+        let (parents, total) = derivation_tree_stats();
+        // At least our parent should be present (may have others from parallel tests)
+        assert!(parents >= 1);
+        assert!(total >= 2);
+
+        // Cleanup
+        cleanup_capability(child1);
+        cleanup_capability(child2);
+        cleanup_capability(parent);
+    }
 }

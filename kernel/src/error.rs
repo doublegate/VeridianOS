@@ -206,6 +206,8 @@ pub enum FsError {
     CorruptedData,
     /// Too many levels of symbolic links (ELOOP)
     SymlinkLoop,
+    /// No space left on device (ENOSPC)
+    NoSpace,
 }
 
 /// Result type alias for kernel operations

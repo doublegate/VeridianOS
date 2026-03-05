@@ -7,12 +7,17 @@
 //! - Secure boot verification
 
 pub mod audit;
+pub mod audit_enhanced;
 pub mod auth;
 pub mod boot;
 pub mod dilithium;
 pub mod fuzzing;
+pub mod kaslr;
 pub mod mac;
 pub mod memory_protection;
+pub mod smep_smap;
+pub mod spectre;
+pub mod stack_canary;
 pub mod tpm;
 pub mod tpm_commands;
 
@@ -96,6 +101,18 @@ pub fn init() -> Result<(), KernelError> {
 
     boot::verify()?;
     kprintln!("[SECURITY] boot verify done");
+
+    smep_smap::init()?;
+    kprintln!("[SECURITY] smep_smap done");
+
+    spectre::init()?;
+    kprintln!("[SECURITY] spectre done");
+
+    kaslr::init()?;
+    kprintln!("[SECURITY] kaslr done");
+
+    stack_canary::init()?;
+    kprintln!("[SECURITY] stack_canary done");
 
     kprintln!("[SECURITY] Security subsystem initialized successfully");
     Ok(())

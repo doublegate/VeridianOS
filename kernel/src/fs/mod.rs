@@ -15,12 +15,18 @@ pub mod bare_lock;
 pub mod blockdev;
 pub mod blockfs;
 pub mod devfs;
+pub mod ext4;
+pub mod fat32;
 pub mod file;
+pub mod flock;
+pub mod inotify;
 pub mod pipe;
 pub mod procfs;
 pub mod pty;
 pub mod ramfs;
 pub mod tar;
+pub mod tmpfs;
+pub mod xattr;
 
 pub use file::{File, FileDescriptor, FileTable, OpenFlags, SeekFrom};
 
@@ -812,7 +818,7 @@ pub fn init() {
                     if let Ok(f) = etc.create("os-release", Permissions::default()) {
                         f.write(
                             0,
-                            b"NAME=\"VeridianOS\"\nVERSION=\"0.10.6\"\nID=veridian\nPRETTY_NAME=\"VeridianOS v0.10.6\"\n",
+                            b"NAME=\"VeridianOS\"\nVERSION=\"0.11.0\"\nID=veridian\nPRETTY_NAME=\"VeridianOS v0.11.0\"\n",
                         )
                         .ok();
                     }

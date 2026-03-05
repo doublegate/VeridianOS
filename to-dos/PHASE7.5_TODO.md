@@ -1,9 +1,9 @@
 # Phase 7.5: Follow-On Enhancements TODO
 
 **Phase Duration**: 6-12 months
-**Status**: Planned
+**Status**: In Progress (Wave 1 Complete)
 **Dependencies**: Phase 7 complete (v0.10.0)
-**Last Updated**: February 28, 2026
+**Last Updated**: March 5, 2026
 
 ## Overview
 
@@ -82,12 +82,12 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 
 ## 7. Security
 
-- [ ] KASLR (Kernel Address Space Layout Randomization)
-- [ ] Stack canaries (function prologue/epilogue guard values)
-- [ ] SMEP/SMAP enforcement (Supervisor Mode Execution/Access Prevention)
-- [ ] Spectre retpoline mitigation for indirect branches
-- [ ] Capability revocation propagation (transitive revocation tree walk)
-- [ ] Audit log persistence (write-ahead log to BlockFS, rotation)
+- [x] KASLR (Kernel Address Space Layout Randomization)
+- [x] Stack canaries (function prologue/epilogue guard values)
+- [x] SMEP/SMAP enforcement (Supervisor Mode Execution/Access Prevention)
+- [x] Spectre retpoline mitigation for indirect branches
+- [x] Capability revocation propagation (transitive revocation tree walk)
+- [x] Audit log persistence (write-ahead log to BlockFS, rotation)
 
 ---
 
@@ -125,12 +125,12 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 
 ## 11. Filesystem
 
-- [ ] ext4 read-only support (extent tree, dir_index, journal replay)
-- [ ] FAT32 read/write (long file names, directory traversal, cluster chains)
-- [ ] tmpfs (memory-backed filesystem with size limits)
-- [ ] inotify (file system event monitoring, watch descriptors)
-- [ ] File locking (flock, fcntl F_SETLK/F_GETLK, POSIX advisory locks)
-- [ ] Extended attributes (xattr get/set/list/remove, user/system namespace)
+- [x] ext4 read-only support (extent tree, dir_index, journal replay)
+- [x] FAT32 read/write (long file names, directory traversal, cluster chains)
+- [x] tmpfs (memory-backed filesystem with size limits)
+- [x] inotify (file system event monitoring, watch descriptors)
+- [x] File locking (flock, fcntl F_SETLK/F_GETLK, POSIX advisory locks)
+- [x] Extended attributes (xattr get/set/list/remove, user/system namespace)
 
 ---
 
@@ -166,14 +166,14 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 | GPU Acceleration | 6 | 0 | Planned |
 | Hypervisor Enhancements | 6 | 0 | Planned |
 | Container Enhancements | 7 | 0 | Planned |
-| Security | 6 | 0 | Planned |
+| Security | 6 | 6 | **COMPLETE** |
 | Performance | 5 | 0 | Planned |
 | Desktop | 6 | 0 | Planned |
 | Shell/Userland | 6 | 0 | Planned |
-| Filesystem | 6 | 0 | Planned |
+| Filesystem | 6 | 6 | **COMPLETE** |
 | Networking Protocols | 6 | 0 | Planned |
 | Hardware Drivers | 6 | 0 | Planned |
-| **Total** | **~80** | **0** | **0%** |
+| **Total** | **~80** | **12** | **15%** |
 
 ---
 

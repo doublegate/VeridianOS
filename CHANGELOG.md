@@ -2,6 +2,134 @@
 
 ---
 
+## [v0.11.0] - 2026-03-05
+
+### v0.11.0: Phase 7.5 Wave 1 -- Filesystem & Core Security
+
+Phase 7.5 Wave 1 delivers 12 new subsystems spanning real filesystem support (ext4, FAT32, tmpfs), filesystem infrastructure (inotify, file locking, extended attributes), and comprehensive security hardening (KASLR, stack canaries, SMEP/SMAP, Spectre mitigations, enhanced audit logging, capability revocation cascade). This is the first of 8 waves in the Phase 7.5 follow-on enhancement program.
+
+#### Filesystem: ext4 Read-Only Support (kernel/src/fs/ext4.rs, ~800 lines)
+
+- Complete ext4 filesystem implementation with superblock parsing (magic 0xEF53, offset 1024), block group descriptors, and inode table traversal
+- Extent-based inodes: recursive walk through internal nodes (ExtentIdx) and leaf nodes (Extent) with 64-bit block numbers via EXT4_EXTENTS_FL flag detection
+- Legacy block-map inodes: 12 direct + singly/doubly/triply indirect block pointer resolution
+- Directory parsing: linear entry traversal with inode, rec_len, name_len, file_type fields
+- Inline symlinks for targets < 60 bytes (stored in i_block array)
+- `from_image()` constructor for memory-backed ext4 volumes
+- All write operations return `Err(KernelError::FsError(FsError::ReadOnly))`
+- 10 unit tests with `make_test_ext4_image()` helper creating minimal 64KB ext4 volumes
+
+#### Filesystem: FAT32 Read/Write (kernel/src/fs/fat32.rs, ~1200 lines)
+
+- Full FAT32 implementation with BPB (BIOS Parameter Block) and FSInfo sector parsing
+- FAT table navigation: cluster chain traversal, free cluster allocation, chain extension
+- Directory support: 8.3 short names + VFAT long file name (LFN) entries with checksum validation
+- Read path: path resolution -> directory entry lookup -> cluster chain follow -> data copy
+- Write path: cluster allocation -> FAT entry update -> data write -> directory entry update
+- All VFS operations: create, read, write, truncate, unlink, mkdir, rmdir, readdir, stat
+- AArch64 compatibility via scoped blocks (avoiding bare_lock `drop_non_drop` clippy issues)
+- 14 unit tests covering cluster chains, directory operations, and filesystem mounting
+
+#### Filesystem: tmpfs Memory-Backed Filesystem (kernel/src/fs/tmpfs.rs, ~730 lines)
+
+- In-memory filesystem with configurable size limits via mount options
+- Page-aligned frame allocations for file data (4KB granularity with partial last-page tracking)
+- Inode table with AtomicU64 counter for inode number generation
+- Directory entries in BTreeMap<String, InodeNumber> per directory inode
+- Symlink support with in-memory target storage
+- All VFS operations: create, read, write, truncate, unlink, mkdir, rmdir, readdir, stat, link, symlink, readlink, chmod
+- 16 unit tests
+
+#### Filesystem: inotify Event Monitoring (kernel/src/fs/inotify.rs, ~1000 lines)
+
+- File system event monitoring with per-instance watch descriptors
+- Event types: IN_CREATE, IN_DELETE, IN_MODIFY, IN_MOVED_FROM, IN_MOVED_TO, IN_ATTRIB, IN_CLOSE_WRITE, IN_RECURSIVE
+- Per-instance circular event buffer (256 events) with duplicate event coalescing
+- Watch descriptor management: add, remove, path-to-inode resolution
+- 30 unit tests
+
+#### Filesystem: File Locking -- flock/fcntl (kernel/src/fs/flock.rs, ~775 lines)
+
+- POSIX advisory locks: fcntl(F_SETLK/F_SETLKW/F_GETLK) with byte-range locking
+- BSD whole-file locks: flock(LOCK_SH/LOCK_EX/LOCK_UN/LOCK_NB)
+- Per-inode lock table with BTreeMap tracking and overlap detection
+- BFS-based deadlock detection across all inodes for F_SETLKW blocking locks
+- Process exit cleanup via cleanup_process_locks(pid)
+- 28 unit tests covering shared/exclusive conflicts, ranges, deadlock detection
+
+#### Filesystem: Extended Attributes (kernel/src/fs/xattr.rs, ~590 lines)
+
+- Per-inode extended attribute storage in BTreeMap<String, Vec<u8>>
+- Namespace support: user.* and system.* with access control
+- Size limits: 64KB per attribute value, 256 attributes per inode
+- Operations: getxattr, setxattr, listxattr, removexattr + l/f variants
+- 29 unit tests
+
+#### Security: KASLR (kernel/src/security/kaslr.rs, ~630 lines)
+
+- Kernel Address Space Layout Randomization with multi-region offset generation
+- Entropy sources: RDRAND (x86_64), RNDR (AArch64), xorshift64 fallback
+- 2MB-aligned slide granularity for TLB efficiency within 2GB randomization range
+- Randomizes: kernel text, rodata, data, BSS, heap base, stack base, module base
+- 14 unit tests
+
+#### Security: Stack Canaries (kernel/src/security/stack_canary.rs, ~560 lines)
+
+- Per-thread 64-bit stack canary values from CSPRNG
+- Architecture-specific entropy collection: RDRAND (x86), RNDR (ARM), rdtime (RISC-V)
+- BTreeMap-based canary registry for per-thread tracking
+- Canary verification and panic-on-corruption handlers
+- 12 unit tests
+
+#### Security: SMEP/SMAP Enforcement (kernel/src/security/smep_smap.rs, ~555 lines)
+
+- SMEP (Supervisor Mode Execution Prevention): CR4 bit 20 on x86_64
+- SMAP (Supervisor Mode Access Prevention): CR4 bit 21 on x86_64
+- ARM PAN (Privileged Access Never) via raw `.inst` encoding (LLVM assembler workaround)
+- RISC-V SUM (Supervisor User Memory) via sstatus register
+- CPUID/feature detection before enabling, graceful fallback
+- stac()/clac() wrapper functions for controlled user-space access in syscall handlers
+- 8 unit tests
+
+#### Security: Spectre Retpoline Mitigation (kernel/src/security/spectre.rs, ~560 lines)
+
+- IBRS/IBPB/STIBP MSR detection and configuration for x86_64
+- ARM CSV2 (Cache Speculation Variant 2) capability detection
+- Retpoline thunk infrastructure for indirect branch mitigation
+- bounds_mask() for speculative bounds checking
+- Serializing barriers for speculation fence
+- 15 unit tests
+
+#### Security: Enhanced Audit Logging (kernel/src/security/audit_enhanced.rs, ~995 lines)
+
+- 8 audit categories (Auth, FileAccess, Process, Network, Security, System, Capability, Container)
+- 4 severity levels (Info, Warning, Error, Critical) with structured AuditEntry records
+- Ring buffer storage (VecDeque, configurable capacity, default 8192 entries)
+- Event coalescing for identical events within 1-second window (reduces log volume)
+- Multi-dimensional query filtering: category mask, severity, PID, time range, failures_only
+- Convenience functions: log_auth(), log_file(), log_process(), log_network(), etc.
+- 14 unit tests
+
+#### Security: Capability Revocation Cascade (kernel/src/cap/revocation.rs, +457 lines)
+
+- Derivation tree tracking via DERIVATION_TREE BTreeMap<u64, Vec<u64>> (parent->children)
+- BFS-based transitive cascade revocation: revoke_cascade() walks entire descendant tree
+- Per-process notification queues (REVOCATION_QUEUE, bounded at 256 per PID)
+- RevocationReason enum: Explicit, ParentRevoked, ProcessExit, PolicyEnforced
+- Generation counter checking: skip re-created capabilities with newer generation
+- 9 unit tests
+
+#### Infrastructure
+
+- Added FsError::NoSpace variant for filesystem space exhaustion errors
+- Wired 6 new filesystem modules into fs/mod.rs (ext4, fat32, flock, inotify, tmpfs, xattr)
+- Wired 5 new security modules into security/mod.rs with init() calls (kaslr, stack_canary, smep_smap, spectre, audit_enhanced)
+- Version bump: 0.10.6 -> 0.11.0
+
+**Files**: 14 new, 6 modified | **Lines**: ~8,500+ new | **Tests**: 175+ new unit tests
+
+---
+
 ## [v0.10.6] - 2026-03-01
 
 ### v0.10.6: CI Hardening -- Code Coverage Job Fix + Host-Target Test Compilation
