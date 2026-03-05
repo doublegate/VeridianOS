@@ -3268,7 +3268,7 @@ mod tests {
     #[test]
     fn test_ttf_parser_empty() {
         let result = TtfParser::new(&[]);
-        assert_eq!(result, Err(FontError::InvalidFont));
+        assert!(matches!(result, Err(FontError::InvalidFont)));
     }
 
     #[test]

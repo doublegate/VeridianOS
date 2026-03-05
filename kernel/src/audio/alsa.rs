@@ -2285,10 +2285,10 @@ mod tests {
     #[test]
     fn test_mixer_control_not_found() {
         let mixer = AlsaMixer::new();
-        assert_eq!(
+        assert!(matches!(
             mixer.get_control(999),
             Err(AlsaError::MixerControlNotFound { id: 999 })
-        );
+        ));
     }
 
     // --- Gain Control Tests ---

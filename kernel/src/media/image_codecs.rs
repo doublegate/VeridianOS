@@ -47,7 +47,7 @@ pub enum ImageCodecError {
 }
 
 /// A decoded image frame with RGBA8888 pixels.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DecodedImage {
     /// Width in pixels.
     pub width: u32,
@@ -104,7 +104,7 @@ impl DecodedImage {
 }
 
 /// A decoded GIF with potentially multiple frames for animation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DecodedGif {
     /// Logical screen width.
     pub width: u32,
@@ -117,7 +117,7 @@ pub struct DecodedGif {
 }
 
 /// A single GIF animation frame.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GifFrame {
     /// RGBA8888 pixel data for the full logical screen.
     pub image: DecodedImage,
