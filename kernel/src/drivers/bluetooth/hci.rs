@@ -439,7 +439,7 @@ pub fn format_bd_addr(addr: &BdAddr) -> [u8; 17] {
         let offset = (5 - i) * 3; // reverse byte order for display
         out[offset] = hex[(addr[i] >> 4) as usize];
         out[offset + 1] = hex[(addr[i] & 0x0F) as usize];
-        if i < 5 {
+        if i > 0 {
             out[offset + 2] = b':';
         }
     }

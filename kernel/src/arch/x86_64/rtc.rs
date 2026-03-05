@@ -256,7 +256,9 @@ pub fn set_alarm(_hour: u8, _minute: u8, _second: u8) {}
 
 /// Non-x86_64 stub for `disable_alarm`.
 #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
-pub fn disable_alarm() {}
+pub fn disable_alarm() {
+    ALARM_ENABLED.store(false, Ordering::Relaxed);
+}
 
 /// Register a callback function pointer to invoke when the alarm fires.
 pub fn set_alarm_callback(callback: fn()) {
