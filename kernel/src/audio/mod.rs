@@ -10,10 +10,13 @@
 
 #![allow(dead_code)]
 
+pub mod alsa;
 pub mod buffer;
 pub mod client;
+pub mod codecs;
 pub mod mixer;
 pub mod pipeline;
+pub mod usb_audio;
 pub(crate) mod virtio_sound;
 pub mod wav;
 

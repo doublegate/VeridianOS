@@ -2,6 +2,33 @@
 
 ---
 
+## [v0.14.0] - 2026-03-05
+
+### v0.14.0: Phase 7.5 Wave 6 -- Audio & Video
+
+Wave 6 delivers 13 multimedia enhancements: ALSA-compatible PCM/mixer API with audio capture, USB Audio Class (UAC 1.0/2.0) driver, HDMI audio output, OGG Vorbis decoder, MP3 decoder, real-time audio scheduling, PNG/JPEG/GIF image decoders, AVI container parser, frame rate conversion, and subtitle overlay.
+
+**5 new files, 1 new module (media/), ~14,000 insertions, 213 unit tests**
+
+#### New Modules
+
+- **ALSA-Compatible API** (`kernel/src/audio/alsa.rs`, ~2,610 lines): PCM device lifecycle (open/close/prepare/start/stop/drain), 7-state PCM state machine with validated transitions, hardware params (rate/channels/format/buffer/period), software params (avail_min/thresholds), ring buffer read/write + MMAP mode, mixer controls (Master/PCM/Capture volume, integer/boolean/enumerated types), sample format conversion (U8/S16/S32), 16.16 fixed-point gain with dB lookup table, capture pipeline with overrun detection, device registry. 47 unit tests.
+- **USB Audio Class** (`kernel/src/audio/usb_audio.rs`, ~2,680 lines): UAC 1.0/2.0 descriptor parsing (InputTerminal/OutputTerminal/FeatureUnit/MixerUnit/ClockSource), audio format type I with discrete and continuous sample rate ranges, isochronous endpoint sync types (Async/Adaptive/Sync), 8.8 fixed-point dB volume control, device enumeration from raw configuration descriptors. HDMI audio: CEA-861 infoframe construction, channel allocation (2ch-7.1), Audio Clock Regeneration (N/CTS), ELD parsing for sink capabilities. 41 unit tests.
+- **Audio Codecs** (`kernel/src/audio/codecs.rs`, ~3,320 lines): OGG container (page parsing, CRC32, bitstream demuxing, packet extraction). Vorbis decoder (identification/comment/setup headers, codebook Huffman trees, Floor type 1 integer interpolation, Residue types 0/1/2, integer MDCT with 2.30 fixed-point twiddle factors, Vorbis window). MP3 decoder (MPEG-1 Layer III frame sync, side info, Huffman tables, integer requantization via pow(2,4/3) lookup, MS/intensity stereo, 36/12-point integer IMDCT, 32-subband synthesis polyphase filterbank). 40 unit tests.
+- **Image Codecs** (`kernel/src/media/image_codecs.rs`, ~2,970 lines): PNG (DEFLATE inflate, zlib, 5 filter types, Adam7 interlacing, all color types/bit depths). JPEG (baseline DCT, Huffman/quantization tables, integer IDCT, YCbCr-to-RGB fixed-point, 4:4:4/4:2:2/4:2:0 chroma). GIF (LZW decompression, animation frames, disposal methods, interlacing). All output RGBA8888. 41 unit tests.
+- **Video Processing** (`kernel/src/media/video_processing.rs`, ~2,440 lines): AVI container (RIFF/avih/strh/strf/idx1 parsing, frame extraction, interleaved demux). Frame rate conversion (duplicate/drop/3:2 pulldown/timestamp-select/linear blend). SRT subtitle parser with 8x16 font overlay rendering and semi-transparent background. Real-time audio scheduling (3 priority classes, CPU reservation, jitter tracking, period-based wakeups). 44 unit tests.
+
+#### Build Verification
+
+| Target | Build | Clippy | Status |
+|--------|-------|--------|--------|
+| x86_64-unknown-none | Pass | 0 warnings | OK |
+| aarch64-unknown-none | Pass | 0 warnings | OK |
+| riscv64gc-unknown-none-elf | Pass | 0 warnings | OK |
+| x86_64-unknown-linux-gnu (host) | Pass | 0 warnings | OK |
+
+---
+
 ## [v0.13.0] - 2026-03-05
 
 ### v0.13.0: Phase 7.5 Wave 5 -- Crypto & Protocols

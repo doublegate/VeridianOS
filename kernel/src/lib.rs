@@ -76,6 +76,7 @@ pub mod graphics;
 pub mod ipc;
 pub mod irq;
 pub mod log_service;
+pub mod media;
 pub mod mm;
 pub mod net;
 pub mod perf;

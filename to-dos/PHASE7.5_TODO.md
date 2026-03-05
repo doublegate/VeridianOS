@@ -1,7 +1,7 @@
 # Phase 7.5: Follow-On Enhancements TODO
 
 **Phase Duration**: 6-12 months
-**Status**: In Progress (Wave 5 Complete)
+**Status**: In Progress (Wave 6 Complete)
 **Dependencies**: Phase 7 complete (v0.10.0)
 **Last Updated**: March 5, 2026
 
@@ -25,24 +25,24 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 
 ## 2. Audio Enhancements
 
-- [ ] ALSA-compatible user-space API (PCM open/close/read/write, mixer controls)
-- [ ] USB Audio Class driver (UAC 1.0/2.0)
-- [ ] HDMI audio output via GPU driver integration
-- [ ] Audio recording / capture pipeline
-- [ ] OGG Vorbis decoder
-- [ ] MP3 decoder (minimp3 or equivalent)
-- [ ] Real-time audio scheduling (deadline priority for audio threads)
+- [x] ALSA-compatible user-space API (PCM open/close/read/write, mixer controls)
+- [x] USB Audio Class driver (UAC 1.0/2.0)
+- [x] HDMI audio output via GPU driver integration
+- [x] Audio recording / capture pipeline
+- [x] OGG Vorbis decoder
+- [x] MP3 decoder (minimp3 or equivalent)
+- [x] Real-time audio scheduling (deadline priority for audio threads)
 
 ---
 
 ## 3. Video Enhancements
 
-- [ ] PNG decoder (DEFLATE decompression, IDAT chunk handling, interlacing)
-- [ ] JPEG decoder (baseline DCT, Huffman, quantization)
-- [ ] GIF decoder (LZW decompression, animation frame sequencing)
-- [ ] AVI container parser (RIFF/AVI, audio/video stream demux)
-- [ ] Frame rate conversion (frame duplication, interpolation)
-- [ ] Subtitle overlay (SRT text rendering on video frames)
+- [x] PNG decoder (DEFLATE decompression, IDAT chunk handling, interlacing)
+- [x] JPEG decoder (baseline DCT, Huffman, quantization)
+- [x] GIF decoder (LZW decompression, animation frame sequencing)
+- [x] AVI container parser (RIFF/AVI, audio/video stream demux)
+- [x] Frame rate conversion (frame duplication, interpolation)
+- [x] Subtitle overlay (SRT text rendering on video frames)
 
 ---
 
@@ -161,8 +161,8 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 | Category | Items | Completed | Status |
 |----------|-------|-----------|--------|
 | Networking Enhancements | 7 | 7 | **COMPLETE** |
-| Audio Enhancements | 7 | 0 | Planned |
-| Video Enhancements | 6 | 0 | Planned |
+| Audio Enhancements | 7 | 7 | **COMPLETE** |
+| Video Enhancements | 6 | 6 | **COMPLETE** |
 | GPU Acceleration | 6 | 0 | Planned |
 | Hypervisor Enhancements | 6 | 0 | Planned |
 | Container Enhancements | 7 | 0 | Planned |
@@ -173,7 +173,7 @@ Phase 7.5 covers follow-on enhancements to Phase 7 subsystems. These items were 
 | Filesystem | 6 | 6 | **COMPLETE** |
 | Networking Protocols | 6 | 6 | **COMPLETE** |
 | Hardware Drivers | 6 | 6 | **COMPLETE** |
-| **Total** | **~80** | **36** | **45%** |
+| **Total** | **~80** | **49** | **61%** |
 
 ---
 
