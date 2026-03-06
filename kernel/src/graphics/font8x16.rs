@@ -19,7 +19,7 @@ pub fn glyph(ch: u8) -> &'static [u8; 16] {
 ///
 /// 256 glyphs x 16 bytes each = 4096 bytes total.
 /// Each byte represents one row of 8 pixels (bit 7 = leftmost).
-pub static FONT_8X16: [[u8; 16]; 256] = [
+pub(crate) static FONT_8X16: [[u8; 16]; 256] = [
     // 0x00 - NUL
     [
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,

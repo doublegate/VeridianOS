@@ -19,7 +19,7 @@ use crate::error::KernelError;
 
 /// Current state of a video stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlaybackState {
+pub(crate) enum PlaybackState {
     Stopped,
     Playing,
     Paused,
@@ -34,7 +34,7 @@ pub enum PlaybackState {
 ///
 /// Frame advancement is driven by calling `next_frame()` which
 /// uses a simple tick-based timing model (caller provides tick count).
-pub struct RawVideoStream {
+pub(crate) struct RawVideoStream {
     frames: Vec<VideoFrame>,
     current_frame: usize,
     info: VideoInfo,
@@ -46,7 +46,7 @@ pub struct RawVideoStream {
 
 impl RawVideoStream {
     /// Create an empty stream with the given metadata.
-    pub fn new(info: VideoInfo) -> Self {
+    pub(crate) fn new(info: VideoInfo) -> Self {
         Self {
             frames: Vec::new(),
             current_frame: 0,
@@ -58,12 +58,12 @@ impl RawVideoStream {
     }
 
     /// Append a decoded frame to the stream.
-    pub fn add_frame(&mut self, frame: VideoFrame) {
+    pub(crate) fn add_frame(&mut self, frame: VideoFrame) {
         self.frames.push(frame);
     }
 
     /// Begin (or resume) playback.
-    pub fn play(&mut self) {
+    pub(crate) fn play(&mut self) {
         match self.state {
             PlaybackState::Stopped | PlaybackState::Finished => {
                 self.current_frame = 0;
@@ -81,14 +81,14 @@ impl RawVideoStream {
     }
 
     /// Pause playback.
-    pub fn pause(&mut self) {
+    pub(crate) fn pause(&mut self) {
         if self.state == PlaybackState::Playing {
             self.state = PlaybackState::Paused;
         }
     }
 
     /// Stop playback and reset to the beginning.
-    pub fn stop(&mut self) {
+    pub(crate) fn stop(&mut self) {
         self.state = PlaybackState::Stopped;
         self.current_frame = 0;
         self.frames_displayed = 0;
@@ -96,7 +96,7 @@ impl RawVideoStream {
     }
 
     /// Seek to a specific frame index.
-    pub fn seek(&mut self, frame_index: usize) {
+    pub(crate) fn seek(&mut self, frame_index: usize) {
         if frame_index < self.frames.len() {
             self.current_frame = frame_index;
         }
@@ -106,7 +106,7 @@ impl RawVideoStream {
     ///
     /// Returns a reference to the current frame if one should be displayed,
     /// or `None` if the stream is not playing or has finished.
-    pub fn next_frame(&mut self) -> Option<&VideoFrame> {
+    pub(crate) fn next_frame(&mut self) -> Option<&VideoFrame> {
         if self.state != PlaybackState::Playing {
             // If paused or stopped, return the current frame without advancing
             return if self.state == PlaybackState::Paused {
@@ -152,7 +152,7 @@ impl RawVideoStream {
     }
 
     /// Current playback position in milliseconds.
-    pub fn current_position_ms(&self) -> u64 {
+    pub(crate) fn current_position_ms(&self) -> u64 {
         if self.info.frame_rate_num == 0 || self.frames.is_empty() {
             return 0;
         }
@@ -162,7 +162,7 @@ impl RawVideoStream {
     }
 
     /// Total stream duration in milliseconds.
-    pub fn duration_ms(&self) -> u64 {
+    pub(crate) fn duration_ms(&self) -> u64 {
         if self.info.frame_rate_num == 0 || self.frames.is_empty() {
             return 0;
         }
@@ -172,22 +172,22 @@ impl RawVideoStream {
     }
 
     /// Whether the stream has reached the end.
-    pub fn is_finished(&self) -> bool {
+    pub(crate) fn is_finished(&self) -> bool {
         self.state == PlaybackState::Finished
     }
 
     /// Get current playback state.
-    pub fn state(&self) -> PlaybackState {
+    pub(crate) fn state(&self) -> PlaybackState {
         self.state
     }
 
     /// Number of frames in the stream.
-    pub fn frame_count(&self) -> usize {
+    pub(crate) fn frame_count(&self) -> usize {
         self.frames.len()
     }
 
     /// Get video info.
-    pub fn info(&self) -> &VideoInfo {
+    pub(crate) fn info(&self) -> &VideoInfo {
         &self.info
     }
 }
@@ -198,7 +198,7 @@ impl RawVideoStream {
 
 /// Higher-level media player that wraps a video stream and a display
 /// rectangle.
-pub struct MediaPlayer {
+pub(crate) struct MediaPlayer {
     video_stream: Option<RawVideoStream>,
     audio_stream_id: Option<u32>,
     display_x: u32,
@@ -209,7 +209,7 @@ pub struct MediaPlayer {
 
 impl MediaPlayer {
     /// Create a new, empty media player.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             video_stream: None,
             audio_stream_id: None,
@@ -221,7 +221,7 @@ impl MediaPlayer {
     }
 
     /// Load a single image (TGA, QOI) and present it as a one-frame video.
-    pub fn load_image(&mut self, data: &[u8]) -> Result<(), KernelError> {
+    pub(crate) fn load_image(&mut self, data: &[u8]) -> Result<(), KernelError> {
         let frame = decode::decode_image(data)?;
 
         let info = VideoInfo {
@@ -240,7 +240,7 @@ impl MediaPlayer {
     }
 
     /// Load a pre-decoded frame sequence as a video.
-    pub fn load_video(
+    pub(crate) fn load_video(
         &mut self,
         frames: Vec<VideoFrame>,
         info: VideoInfo,
@@ -262,7 +262,7 @@ impl MediaPlayer {
     }
 
     /// Start playback.
-    pub fn play(&mut self) -> Result<(), KernelError> {
+    pub(crate) fn play(&mut self) -> Result<(), KernelError> {
         match self.video_stream.as_mut() {
             Some(stream) => {
                 stream.play();
@@ -276,28 +276,28 @@ impl MediaPlayer {
     }
 
     /// Pause playback.
-    pub fn pause(&mut self) {
+    pub(crate) fn pause(&mut self) {
         if let Some(stream) = self.video_stream.as_mut() {
             stream.pause();
         }
     }
 
     /// Stop playback.
-    pub fn stop(&mut self) {
+    pub(crate) fn stop(&mut self) {
         if let Some(stream) = self.video_stream.as_mut() {
             stream.stop();
         }
     }
 
     /// Get the current frame for rendering.
-    pub fn render_current_frame(&self) -> Option<&VideoFrame> {
+    pub(crate) fn render_current_frame(&self) -> Option<&VideoFrame> {
         self.video_stream
             .as_ref()
             .and_then(|stream| stream.frames.get(stream.current_frame))
     }
 
     /// Set the display rectangle on screen.
-    pub fn set_display_rect(&mut self, x: u32, y: u32, width: u32, height: u32) {
+    pub(crate) fn set_display_rect(&mut self, x: u32, y: u32, width: u32, height: u32) {
         self.display_x = x;
         self.display_y = y;
         self.display_width = width;
@@ -305,7 +305,7 @@ impl MediaPlayer {
     }
 
     /// Get display rectangle.
-    pub fn display_rect(&self) -> (u32, u32, u32, u32) {
+    pub(crate) fn display_rect(&self) -> (u32, u32, u32, u32) {
         (
             self.display_x,
             self.display_y,
@@ -315,12 +315,12 @@ impl MediaPlayer {
     }
 
     /// Check if a video is loaded.
-    pub fn is_loaded(&self) -> bool {
+    pub(crate) fn is_loaded(&self) -> bool {
         self.video_stream.is_some()
     }
 
     /// Get the playback state.
-    pub fn playback_state(&self) -> Option<PlaybackState> {
+    pub(crate) fn playback_state(&self) -> Option<PlaybackState> {
         self.video_stream.as_ref().map(|s| s.state())
     }
 }
@@ -338,7 +338,7 @@ impl Default for MediaPlayer {
 static PLAYER: Mutex<Option<MediaPlayer>> = Mutex::new(None);
 
 /// Initialize the player subsystem.
-pub fn init() -> Result<(), KernelError> {
+pub(crate) fn init() -> Result<(), KernelError> {
     let mut guard = PLAYER.lock();
     if guard.is_none() {
         *guard = Some(MediaPlayer::new());
@@ -347,7 +347,7 @@ pub fn init() -> Result<(), KernelError> {
 }
 
 /// Execute a closure with the global media player.
-pub fn with_player<R, F: FnOnce(&mut MediaPlayer) -> R>(f: F) -> Result<R, KernelError> {
+pub(crate) fn with_player<R, F: FnOnce(&mut MediaPlayer) -> R>(f: F) -> Result<R, KernelError> {
     let mut guard = PLAYER.lock();
     match guard.as_mut() {
         Some(player) => Ok(f(player)),
@@ -373,12 +373,12 @@ fn get_tick() -> u64 {
 }
 
 /// Advance the tick counter (called by the kernel timer or test harness).
-pub fn advance_tick(ms: u64) {
+pub(crate) fn advance_tick(ms: u64) {
     TICK_COUNTER.fetch_add(ms, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Set the tick counter to an absolute value.
-pub fn set_tick(ms: u64) {
+pub(crate) fn set_tick(ms: u64) {
     TICK_COUNTER.store(ms, core::sync::atomic::Ordering::Relaxed);
 }
 

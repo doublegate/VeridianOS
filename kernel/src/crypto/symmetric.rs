@@ -4,12 +4,14 @@
 //! Full implementations following NIST SP 800-38D (GCM) and RFC 8439
 //! (ChaCha20-Poly1305).
 
+#![allow(dead_code)]
+
 use alloc::vec::Vec;
 
 use super::{CryptoError, CryptoResult};
 
 /// Symmetric cipher trait
-pub trait SymmetricCipher {
+pub(crate) trait SymmetricCipher {
     /// Encrypt data
     fn encrypt(&self, plaintext: &[u8], nonce: &[u8]) -> CryptoResult<Vec<u8>>;
 
@@ -205,14 +207,14 @@ impl Aes256 {
 }
 
 /// AES-256-GCM cipher - Full NIST SP 800-38D implementation
-pub struct Aes256Gcm {
+pub(crate) struct Aes256Gcm {
     aes: Aes256,
     h: [u8; 16], // Authentication hash subkey
 }
 
 impl Aes256Gcm {
     /// Create new AES-256-GCM cipher with key
-    pub fn new(key: &[u8]) -> CryptoResult<Self> {
+    pub(crate) fn new(key: &[u8]) -> CryptoResult<Self> {
         if key.len() != 32 {
             return Err(CryptoError::InvalidKeySize);
         }
@@ -394,13 +396,13 @@ impl SymmetricCipher for Aes256Gcm {
 }
 
 /// ChaCha20-Poly1305 cipher - Full RFC 8439 implementation
-pub struct ChaCha20Poly1305 {
+pub(crate) struct ChaCha20Poly1305 {
     key: [u8; 32],
 }
 
 impl ChaCha20Poly1305 {
     /// Create new ChaCha20-Poly1305 cipher with key
-    pub fn new(key: &[u8]) -> CryptoResult<Self> {
+    pub(crate) fn new(key: &[u8]) -> CryptoResult<Self> {
         if key.len() != 32 {
             return Err(CryptoError::InvalidKeySize);
         }

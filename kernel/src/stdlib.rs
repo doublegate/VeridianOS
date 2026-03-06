@@ -2,11 +2,13 @@
 //!
 //! Core library functions and utilities for user-space applications.
 
+#![allow(dead_code)]
+
 use alloc::{boxed::Box, format, string::String};
 use core::{ptr, slice};
 
 /// Memory allocation functions
-pub mod memory {
+pub(crate) mod memory {
     use super::*;
 
     /// Allocate memory
@@ -14,7 +16,7 @@ pub mod memory {
     /// # Safety
     /// Caller must eventually call `free` on the returned pointer (if non-null)
     /// with the same allocator.  The returned memory is uninitialized.
-    pub unsafe fn malloc(size: usize) -> *mut u8 {
+    pub(crate) unsafe fn malloc(size: usize) -> *mut u8 {
         if size == 0 {
             return ptr::null_mut();
         }
@@ -34,7 +36,7 @@ pub mod memory {
     /// Caller must eventually call `free` on the returned pointer (if
     /// non-null). `count * size` must not overflow (saturating_mul is used
     /// as a safeguard).
-    pub unsafe fn calloc(count: usize, size: usize) -> *mut u8 {
+    pub(crate) unsafe fn calloc(count: usize, size: usize) -> *mut u8 {
         let total_size = count.saturating_mul(size);
         if total_size == 0 {
             return ptr::null_mut();
@@ -54,7 +56,7 @@ pub mod memory {
     /// `malloc`/`calloc`. The old allocation is freed; do not use `ptr`
     /// after this call. WARNING: current implementation assumes max 1KB old
     /// allocation size.
-    pub unsafe fn realloc(ptr: *mut u8, new_size: usize) -> *mut u8 {
+    pub(crate) unsafe fn realloc(ptr: *mut u8, new_size: usize) -> *mut u8 {
         if ptr.is_null() {
             return malloc(new_size);
         }
@@ -82,7 +84,7 @@ pub mod memory {
     /// # Safety
     /// `ptr` must be null or a pointer previously returned by `malloc`/`calloc`
     /// that has not already been freed.  Double-free is undefined behavior.
-    pub unsafe fn free(ptr: *mut u8) {
+    pub(crate) unsafe fn free(ptr: *mut u8) {
         if !ptr.is_null() {
             // In real implementation, we'd track allocation size
             // Layout(1, 1) is always valid: size > 0, align is power of 2
@@ -96,7 +98,7 @@ pub mod memory {
     /// # Safety
     /// `dest` and `src` must be valid for `n` bytes.  The regions must not
     /// overlap; use `memmove` for overlapping copies.
-    pub unsafe fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    pub(crate) unsafe fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
         ptr::copy_nonoverlapping(src, dest, n);
         dest
     }
@@ -105,7 +107,7 @@ pub mod memory {
     ///
     /// # Safety
     /// `dest` and `src` must be valid for `n` bytes.  Regions may overlap.
-    pub unsafe fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    pub(crate) unsafe fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
         ptr::copy(src, dest, n);
         dest
     }
@@ -114,7 +116,7 @@ pub mod memory {
     ///
     /// # Safety
     /// `dest` must be valid for writing `n` bytes.
-    pub unsafe fn memset(dest: *mut u8, value: i32, n: usize) -> *mut u8 {
+    pub(crate) unsafe fn memset(dest: *mut u8, value: i32, n: usize) -> *mut u8 {
         ptr::write_bytes(dest, value as u8, n);
         dest
     }
@@ -123,7 +125,7 @@ pub mod memory {
     ///
     /// # Safety
     /// Both `s1` and `s2` must be valid for reading `n` bytes.
-    pub unsafe fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
+    pub(crate) unsafe fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
         let slice1 = slice::from_raw_parts(s1, n);
         let slice2 = slice::from_raw_parts(s2, n);
 
@@ -140,14 +142,14 @@ pub mod memory {
 }
 
 /// String manipulation functions
-pub mod string {
+pub(crate) mod string {
     use super::*;
 
     /// Calculate string length
     ///
     /// # Safety
     /// `s` must point to a valid, NUL-terminated C string.
-    pub unsafe fn strlen(s: *const u8) -> usize {
+    pub(crate) unsafe fn strlen(s: *const u8) -> usize {
         let mut len = 0;
         while *s.add(len) != 0 {
             len += 1;
@@ -160,7 +162,7 @@ pub mod string {
     /// # Safety
     /// `src` must be NUL-terminated.  `dest` must have room for the
     /// entire source string including its NUL terminator.
-    pub unsafe fn strcpy(dest: *mut u8, src: *const u8) -> *mut u8 {
+    pub(crate) unsafe fn strcpy(dest: *mut u8, src: *const u8) -> *mut u8 {
         let mut i = 0;
         loop {
             let c = *src.add(i);
@@ -178,7 +180,7 @@ pub mod string {
     /// # Safety
     /// `dest` must be valid for writing `n` bytes.  `src` must be valid
     /// for reading up to `n` bytes or until a NUL terminator is found.
-    pub unsafe fn strncpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    pub(crate) unsafe fn strncpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
         let mut i = 0;
         while i < n {
             let c = *src.add(i);
@@ -203,7 +205,7 @@ pub mod string {
     /// # Safety
     /// Both `dest` and `src` must be NUL-terminated.  `dest` must have
     /// room for its current content plus the entirety of `src` plus NUL.
-    pub unsafe fn strcat(dest: *mut u8, src: *const u8) -> *mut u8 {
+    pub(crate) unsafe fn strcat(dest: *mut u8, src: *const u8) -> *mut u8 {
         let dest_len = strlen(dest);
         strcpy(dest.add(dest_len), src);
         dest
@@ -213,7 +215,7 @@ pub mod string {
     ///
     /// # Safety
     /// Both `s1` and `s2` must point to valid, NUL-terminated C strings.
-    pub unsafe fn strcmp(s1: *const u8, s2: *const u8) -> i32 {
+    pub(crate) unsafe fn strcmp(s1: *const u8, s2: *const u8) -> i32 {
         let mut i = 0;
         loop {
             let c1 = *s1.add(i);
@@ -236,7 +238,7 @@ pub mod string {
     /// # Safety
     /// Both `s1` and `s2` must be valid for reading up to `n` bytes
     /// or until a NUL terminator is found.
-    pub unsafe fn strncmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
+    pub(crate) unsafe fn strncmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
         for i in 0..n {
             let c1 = *s1.add(i);
             let c2 = *s2.add(i);
@@ -257,7 +259,7 @@ pub mod string {
     ///
     /// # Safety
     /// `s` must point to a valid, NUL-terminated C string.
-    pub unsafe fn strchr(s: *const u8, c: i32) -> *const u8 {
+    pub(crate) unsafe fn strchr(s: *const u8, c: i32) -> *const u8 {
         let target = c as u8;
         let mut i = 0;
 
@@ -280,7 +282,7 @@ pub mod string {
     /// # Safety
     /// Both `haystack` and `needle` must point to valid, NUL-terminated C
     /// strings.
-    pub unsafe fn strstr(haystack: *const u8, needle: *const u8) -> *const u8 {
+    pub(crate) unsafe fn strstr(haystack: *const u8, needle: *const u8) -> *const u8 {
         let needle_len = strlen(needle);
         if needle_len == 0 {
             return haystack;
@@ -302,7 +304,7 @@ pub mod string {
 }
 
 /// File I/O functions
-pub mod io {
+pub(crate) mod io {
     use alloc::sync::Arc;
 
     use super::*;
@@ -339,7 +341,7 @@ pub mod io {
     pub const SEEK_END: i32 = 2;
 
     /// Open a file
-    pub fn open(path: &str, flags: i32) -> Result<*mut File, crate::error::KernelError> {
+    pub(crate) fn open(path: &str, flags: i32) -> Result<*mut File, crate::error::KernelError> {
         let open_flags = if flags & O_RDWR != 0 {
             OpenFlags::read_write()
         } else if flags & O_WRONLY != 0 {
@@ -367,7 +369,7 @@ pub mod io {
     /// `file` must be null or a pointer previously returned by `open`
     /// that has not already been closed.  After this call, `file` is
     /// dangling and must not be dereferenced.
-    pub unsafe fn close(file: *mut File) -> i32 {
+    pub(crate) unsafe fn close(file: *mut File) -> i32 {
         if file.is_null() {
             return -1;
         }
@@ -381,7 +383,7 @@ pub mod io {
     /// # Safety
     /// `file` must be a valid, open `File` pointer from `open`.
     /// `buf` must be valid for writing `count` bytes.
-    pub unsafe fn read(file: *mut File, buf: *mut u8, count: usize) -> isize {
+    pub(crate) unsafe fn read(file: *mut File, buf: *mut u8, count: usize) -> isize {
         if file.is_null() || buf.is_null() {
             return -1;
         }
@@ -403,7 +405,7 @@ pub mod io {
     /// # Safety
     /// `file` must be a valid, open `File` pointer from `open`.
     /// `buf` must be valid for reading `count` bytes.
-    pub unsafe fn write(file: *mut File, buf: *const u8, count: usize) -> isize {
+    pub(crate) unsafe fn write(file: *mut File, buf: *const u8, count: usize) -> isize {
         if file.is_null() || buf.is_null() {
             return -1;
         }
@@ -424,7 +426,7 @@ pub mod io {
     ///
     /// # Safety
     /// `file` must be a valid, open `File` pointer from `open`.
-    pub unsafe fn seek(file: *mut File, offset: isize, whence: i32) -> isize {
+    pub(crate) unsafe fn seek(file: *mut File, offset: isize, whence: i32) -> isize {
         if file.is_null() {
             return -1;
         }
@@ -472,7 +474,7 @@ pub mod io {
     }
 
     /// Print to stdout
-    pub fn printf(fmt: &str, args: &[&dyn core::fmt::Display]) -> i32 {
+    pub(crate) fn printf(fmt: &str, args: &[&dyn core::fmt::Display]) -> i32 {
         // Simple printf implementation
         let mut output = String::new();
         let mut arg_index = 0;
@@ -507,17 +509,17 @@ pub mod io {
     }
 
     /// Print to stdout with newline
-    pub fn puts(s: &str) -> i32 {
+    pub(crate) fn puts(s: &str) -> i32 {
         crate::println!("{}", s);
         (s.len() + 1) as i32
     }
 }
 
 /// Process management functions
-pub mod process {
+pub(crate) mod process {
 
     /// Exit current process
-    pub fn exit(status: i32) -> ! {
+    pub(crate) fn exit(status: i32) -> ! {
         crate::process::lifecycle::exit_process(status);
         // Process should never return after exit.
         // Use the arch-specific idle function to avoid duplicating
@@ -528,14 +530,14 @@ pub mod process {
     }
 
     /// Get current process ID
-    pub fn getpid() -> u32 {
+    pub(crate) fn getpid() -> u32 {
         crate::process::get_current_process()
             .map(|p| p.pid.0 as u32)
             .unwrap_or(0) // Return 0 if no current process
     }
 
     /// Get parent process ID
-    pub fn getppid() -> u32 {
+    pub(crate) fn getppid() -> u32 {
         crate::process::get_current_process()
             .and_then(|p| p.parent)
             .map(|ppid| ppid.0 as u32)
@@ -549,7 +551,7 @@ pub mod process {
     /// - 0 to the child process
     /// - Child's PID to the parent process
     /// - -1 on error
-    pub fn fork() -> i32 {
+    pub(crate) fn fork() -> i32 {
         match crate::process::fork_process() {
             Ok(child_pid) => {
                 // fork_process() returns the child PID to the parent
@@ -561,7 +563,7 @@ pub mod process {
     }
 
     /// Execute program
-    pub fn exec(path: &str, args: &[&str]) -> i32 {
+    pub(crate) fn exec(path: &str, args: &[&str]) -> i32 {
         match crate::userspace::load_user_program(path, args, &[]) {
             Ok(pid) => pid.0 as i32,
             Err(_) => -1,
@@ -578,7 +580,7 @@ pub mod process {
     /// `status` must be either null or point to valid, writable, aligned
     /// memory for a single `i32`.  If the pointer is invalid, writing the
     /// exit status will corrupt memory or fault.
-    pub unsafe fn wait(status: *mut i32) -> i32 {
+    pub(crate) unsafe fn wait(status: *mut i32) -> i32 {
         match crate::process::wait_for_child(None) {
             Ok((pid, exit_status)) => {
                 // SAFETY: Caller guarantees `status` is null or a valid
@@ -594,9 +596,9 @@ pub mod process {
 }
 
 /// Math functions
-pub mod math {
+pub(crate) mod math {
     /// Absolute value
-    pub fn abs(x: i32) -> i32 {
+    pub(crate) fn abs(x: i32) -> i32 {
         if x < 0 {
             -x
         } else {
@@ -605,7 +607,7 @@ pub mod math {
     }
 
     /// Floating point absolute value
-    pub fn fabs(x: f64) -> f64 {
+    pub(crate) fn fabs(x: f64) -> f64 {
         if x < 0.0 {
             -x
         } else {
@@ -614,7 +616,7 @@ pub mod math {
     }
 
     /// Power function (integer)
-    pub fn pow_int(base: i32, exp: u32) -> i32 {
+    pub(crate) fn pow_int(base: i32, exp: u32) -> i32 {
         let mut result = 1;
         let mut b = base;
         let mut e = exp;
@@ -631,7 +633,7 @@ pub mod math {
     }
 
     /// Square root (integer approximation)
-    pub fn sqrt_int(x: u32) -> u32 {
+    pub(crate) fn sqrt_int(x: u32) -> u32 {
         if x == 0 {
             return 0;
         }
@@ -648,7 +650,7 @@ pub mod math {
     }
 
     /// Minimum
-    pub fn min(a: i32, b: i32) -> i32 {
+    pub(crate) fn min(a: i32, b: i32) -> i32 {
         if a < b {
             a
         } else {
@@ -657,7 +659,7 @@ pub mod math {
     }
 
     /// Maximum
-    pub fn max(a: i32, b: i32) -> i32 {
+    pub(crate) fn max(a: i32, b: i32) -> i32 {
         if a > b {
             a
         } else {
@@ -667,14 +669,14 @@ pub mod math {
 }
 
 /// Time functions
-pub mod time {
+pub(crate) mod time {
     use core::sync::atomic::{AtomicU64, Ordering};
 
     /// Boot timestamp base (could be set from RTC on boot)
     static BOOT_TIME_SECONDS: AtomicU64 = AtomicU64::new(0);
 
     /// Set boot time from RTC (call during system initialization)
-    pub fn set_boot_time(seconds_since_epoch: u64) {
+    pub(crate) fn set_boot_time(seconds_since_epoch: u64) {
         BOOT_TIME_SECONDS.store(seconds_since_epoch, Ordering::Release);
     }
 
@@ -683,7 +685,7 @@ pub mod time {
     /// Returns the current system time based on:
     /// - Boot time (set from RTC during initialization)
     /// - Timer ticks elapsed since boot
-    pub fn time() -> u64 {
+    pub(crate) fn time() -> u64 {
         let ticks = crate::arch::timer::get_ticks();
         // Assuming ~1000 ticks per second (typical timer frequency)
         // Convert ticks to seconds since boot
@@ -693,18 +695,18 @@ pub mod time {
     }
 
     /// Sleep for seconds
-    pub fn sleep(seconds: u32) {
+    pub(crate) fn sleep(seconds: u32) {
         crate::thread_api::sleep_ms(seconds as u64 * 1000);
     }
 
     /// Sleep for microseconds
-    pub fn usleep(microseconds: u32) {
+    pub(crate) fn usleep(microseconds: u32) {
         crate::thread_api::sleep_ms(microseconds as u64 / 1000);
     }
 }
 
 /// Error handling
-pub mod error {
+pub(crate) mod error {
     /// Error numbers (errno values)
     pub const EPERM: i32 = 1; // Operation not permitted
     pub const ENOENT: i32 = 2; // No such file or directory
@@ -735,17 +737,17 @@ pub mod error {
     static ERRNO: AtomicI32 = AtomicI32::new(0);
 
     /// Get error number
-    pub fn get_errno() -> i32 {
+    pub(crate) fn get_errno() -> i32 {
         ERRNO.load(Ordering::Relaxed)
     }
 
     /// Set error number
-    pub fn set_errno(errno: i32) {
+    pub(crate) fn set_errno(errno: i32) {
         ERRNO.store(errno, Ordering::Relaxed);
     }
 
     /// Get error string
-    pub fn strerror(errno: i32) -> &'static str {
+    pub(crate) fn strerror(errno: i32) -> &'static str {
         match errno {
             EPERM => "Operation not permitted",
             ENOENT => "No such file or directory",
@@ -776,18 +778,18 @@ pub mod error {
 }
 
 /// Random number generation
-pub mod random {
+pub(crate) mod random {
     use core::sync::atomic::{AtomicU32, Ordering};
 
     static SEED: AtomicU32 = AtomicU32::new(1);
 
     /// Set random seed
-    pub fn srand(seed: u32) {
+    pub(crate) fn srand(seed: u32) {
         SEED.store(seed, Ordering::Relaxed);
     }
 
     /// Generate random number
-    pub fn rand() -> i32 {
+    pub(crate) fn rand() -> i32 {
         let new_seed = SEED
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |s| {
                 Some(s.wrapping_mul(1103515245).wrapping_add(12345))
@@ -798,7 +800,7 @@ pub mod random {
     }
 
     /// Generate random number in range
-    pub fn rand_range(min: i32, max: i32) -> i32 {
+    pub(crate) fn rand_range(min: i32, max: i32) -> i32 {
         if min >= max {
             return min;
         }
@@ -807,7 +809,7 @@ pub mod random {
 }
 
 /// System information
-pub mod system {
+pub(crate) mod system {
     use alloc::{collections::BTreeMap, string::String};
 
     use spin::RwLock;
@@ -816,7 +818,7 @@ pub mod system {
     static ENVIRONMENT: RwLock<Option<BTreeMap<String, String>>> = RwLock::new(None);
 
     /// Initialize environment with default values
-    pub fn init_environment() {
+    pub(crate) fn init_environment() {
         let mut env = BTreeMap::new();
         env.insert(
             String::from("PATH"),
@@ -844,7 +846,7 @@ pub mod system {
     }
 
     /// Get system information
-    pub fn get_system_info() -> SystemInfo {
+    pub(crate) fn get_system_info() -> SystemInfo {
         SystemInfo {
             os_name: "VeridianOS",
             version: "0.2.1",
@@ -868,7 +870,7 @@ pub mod system {
     ///
     /// Retrieves the value of the specified environment variable.
     /// Returns None if the variable is not set.
-    pub fn getenv(name: &str) -> Option<String> {
+    pub(crate) fn getenv(name: &str) -> Option<String> {
         let env_guard = ENVIRONMENT.read();
         if let Some(ref env) = *env_guard {
             env.get(name).cloned()
@@ -887,7 +889,7 @@ pub mod system {
     ///
     /// Sets the environment variable `name` to `value`.
     /// Returns 0 on success, -1 on error.
-    pub fn setenv(name: &str, value: &str) -> i32 {
+    pub(crate) fn setenv(name: &str, value: &str) -> i32 {
         let mut env_guard = ENVIRONMENT.write();
         if env_guard.is_none() {
             // Initialize environment if not already done
@@ -906,7 +908,7 @@ pub mod system {
     ///
     /// Removes the environment variable `name`.
     /// Returns 0 on success, -1 if variable doesn't exist.
-    pub fn unsetenv(name: &str) -> i32 {
+    pub(crate) fn unsetenv(name: &str) -> i32 {
         let mut env_guard = ENVIRONMENT.write();
         if let Some(ref mut env) = *env_guard {
             if env.remove(name).is_some() {
@@ -922,7 +924,7 @@ pub mod system {
     /// Get all environment variables
     ///
     /// Returns a copy of all environment variables as a BTreeMap.
-    pub fn get_all_env() -> BTreeMap<String, String> {
+    pub(crate) fn get_all_env() -> BTreeMap<String, String> {
         let env_guard = ENVIRONMENT.read();
         if let Some(ref env) = *env_guard {
             env.clone()

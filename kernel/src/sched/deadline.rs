@@ -505,7 +505,7 @@ impl DeadlineScheduler {
 
 /// Global deadline scheduler instance, protected by a spinlock.
 #[cfg(feature = "alloc")]
-pub static DEADLINE_SCHEDULER: spin::Mutex<DeadlineScheduler> =
+pub(crate) static DEADLINE_SCHEDULER: spin::Mutex<DeadlineScheduler> =
     spin::Mutex::new(DeadlineScheduler::new());
 
 // ============================================================================

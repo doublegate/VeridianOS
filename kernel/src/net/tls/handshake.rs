@@ -566,7 +566,7 @@ impl HandshakeEngine {
     }
 
     /// Get the current transcript hash
-    pub fn transcript_hash(&self) -> Hash256 {
+    pub(crate) fn transcript_hash(&self) -> Hash256 {
         sha256(&self.transcript)
     }
 }

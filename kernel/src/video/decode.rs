@@ -4,7 +4,7 @@
 //! Both decoders produce `VideoFrame` output using the parent module's
 //! `PixelFormat::Argb8888` for maximum fidelity.
 
-#![allow(dead_code)]
+#![allow(dead_code, clippy::upper_case_acronyms)]
 
 use alloc::vec::Vec;
 
@@ -17,7 +17,7 @@ use crate::{error::KernelError, graphics::PixelFormat};
 
 /// Supported image formats the decoder can handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImageFormat {
+pub(crate) enum ImageFormat {
     TGA,
     QOI,
     PPM,
@@ -26,7 +26,7 @@ pub enum ImageFormat {
 }
 
 /// Detect the image format from the file header / magic bytes.
-pub fn detect_format(data: &[u8]) -> ImageFormat {
+pub(crate) fn detect_format(data: &[u8]) -> ImageFormat {
     if data.len() < 4 {
         return ImageFormat::Unknown;
     }
@@ -74,17 +74,17 @@ pub fn detect_format(data: &[u8]) -> ImageFormat {
 
 /// TGA file header (18 bytes).
 #[derive(Debug, Clone, Copy)]
-pub struct TgaHeader {
-    pub id_length: u8,
-    pub color_map_type: u8,
-    pub image_type: u8,
-    pub color_map_spec: [u8; 5],
-    pub x_origin: u16,
-    pub y_origin: u16,
-    pub width: u16,
-    pub height: u16,
-    pub pixel_depth: u8,
-    pub image_descriptor: u8,
+pub(crate) struct TgaHeader {
+    pub(crate) id_length: u8,
+    pub(crate) color_map_type: u8,
+    pub(crate) image_type: u8,
+    pub(crate) color_map_spec: [u8; 5],
+    pub(crate) x_origin: u16,
+    pub(crate) y_origin: u16,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+    pub(crate) pixel_depth: u8,
+    pub(crate) image_descriptor: u8,
 }
 
 impl TgaHeader {
@@ -117,7 +117,7 @@ impl TgaHeader {
 /// - Type 2: uncompressed true-color (24-bit and 32-bit)
 /// - Type 10: RLE-compressed true-color (24-bit and 32-bit)
 /// - Bottom-left (default) and top-left origin (bit 5 of image_descriptor)
-pub fn decode_tga(data: &[u8]) -> Result<VideoFrame, KernelError> {
+pub(crate) fn decode_tga(data: &[u8]) -> Result<VideoFrame, KernelError> {
     let header = TgaHeader::parse(data)?;
 
     // Validate image type
@@ -274,7 +274,7 @@ fn qoi_hash(r: u8, g: u8, b: u8, a: u8) -> usize {
 ///
 /// Header: "qoif" (4B), width (u32 BE), height (u32 BE), channels (u8),
 /// colorspace (u8) End marker: 7 zero bytes + 0x01
-pub fn decode_qoi(data: &[u8]) -> Result<VideoFrame, KernelError> {
+pub(crate) fn decode_qoi(data: &[u8]) -> Result<VideoFrame, KernelError> {
     // Minimum: 14 byte header + 8 byte end marker
     if data.len() < 22 {
         return Err(KernelError::InvalidArgument {
@@ -434,7 +434,7 @@ pub fn decode_qoi(data: &[u8]) -> Result<VideoFrame, KernelError> {
 ///
 /// Supports TGA, QOI.  PPM and BMP are detected but not decoded here
 /// (use the desktop image_viewer for those).
-pub fn decode_image(data: &[u8]) -> Result<VideoFrame, KernelError> {
+pub(crate) fn decode_image(data: &[u8]) -> Result<VideoFrame, KernelError> {
     let fmt = detect_format(data);
     match fmt {
         ImageFormat::TGA => decode_tga(data),

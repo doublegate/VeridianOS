@@ -3,7 +3,8 @@
 //! Side-channel resistant operations for cryptographic implementations.
 //!
 //! ## Security Considerations
-//!
+// Allow dead_code: cryptographic primitives for future subsystem use
+#![allow(dead_code)]
 //! - All operations must execute in constant time to prevent timing attacks
 //! - No data-dependent branches or memory accesses
 //! - Compiler optimizations must not introduce timing variations
@@ -15,7 +16,7 @@ use core::sync::atomic::{compiler_fence, Ordering};
 ///
 /// Returns 1 if equal, 0 otherwise. Runs in constant time regardless of input.
 #[inline(never)]
-pub fn ct_eq_bytes(a: &[u8], b: &[u8]) -> u8 {
+pub(crate) fn ct_eq_bytes(a: &[u8], b: &[u8]) -> u8 {
     if a.len() != b.len() {
         return 0;
     }
@@ -39,21 +40,21 @@ pub fn ct_eq_bytes(a: &[u8], b: &[u8]) -> u8 {
 /// Returns `a` if `condition` is 1, `b` if `condition` is 0.
 /// Condition must be 0 or 1.
 #[inline(always)]
-pub fn ct_select_u8(condition: u8, a: u8, b: u8) -> u8 {
+pub(crate) fn ct_select_u8(condition: u8, a: u8, b: u8) -> u8 {
     let mask = condition.wrapping_neg();
     (a & mask) | (b & !mask)
 }
 
 /// Constant-time conditional select for u32
 #[inline(always)]
-pub fn ct_select_u32(condition: u8, a: u32, b: u32) -> u32 {
+pub(crate) fn ct_select_u32(condition: u8, a: u32, b: u32) -> u32 {
     let mask = (condition as u32).wrapping_neg();
     (a & mask) | (b & !mask)
 }
 
 /// Constant-time conditional select for u64
 #[inline(always)]
-pub fn ct_select_u64(condition: u8, a: u64, b: u64) -> u64 {
+pub(crate) fn ct_select_u64(condition: u8, a: u64, b: u64) -> u64 {
     let mask = (condition as u64).wrapping_neg();
     (a & mask) | (b & !mask)
 }
@@ -63,7 +64,7 @@ pub fn ct_select_u64(condition: u8, a: u64, b: u64) -> u64 {
 /// Copies `src` to `dst` if `condition` is 1.
 /// Always reads from `src` and writes to `dst` to maintain constant time.
 #[inline(never)]
-pub fn ct_copy(dst: &mut [u8], src: &[u8], condition: u8) {
+pub(crate) fn ct_copy(dst: &mut [u8], src: &[u8], condition: u8) {
     assert_eq!(dst.len(), src.len());
 
     for i in 0..dst.len() {
@@ -77,7 +78,7 @@ pub fn ct_copy(dst: &mut [u8], src: &[u8], condition: u8) {
 ///
 /// Zeros an array in constant time, preventing compiler optimization.
 #[inline(never)]
-pub fn ct_zero(data: &mut [u8]) {
+pub(crate) fn ct_zero(data: &mut [u8]) {
     for byte in data.iter_mut() {
         // SAFETY: `byte` is a valid mutable reference from the `data` slice, so the
         // pointer derived from it is aligned, non-null, and points to initialized
@@ -95,7 +96,7 @@ pub fn ct_zero(data: &mut [u8]) {
 ///
 /// Returns 1 if a < b, 0 otherwise
 #[inline(always)]
-pub fn ct_lt_u32(a: u32, b: u32) -> u8 {
+pub(crate) fn ct_lt_u32(a: u32, b: u32) -> u8 {
     let diff = a ^ ((a ^ b) | ((a.wrapping_sub(b)) ^ b));
     ((diff >> 31) & 1) as u8
 }
@@ -104,7 +105,7 @@ pub fn ct_lt_u32(a: u32, b: u32) -> u8 {
 ///
 /// Returns -1 if a < b, 0 if a == b, 1 if a > b
 #[inline(never)]
-pub fn ct_cmp_bytes(a: &[u8], b: &[u8]) -> i8 {
+pub(crate) fn ct_cmp_bytes(a: &[u8], b: &[u8]) -> i8 {
     assert_eq!(a.len(), b.len());
 
     let mut greater = 0u8;
@@ -131,7 +132,7 @@ pub fn ct_cmp_bytes(a: &[u8], b: &[u8]) -> i8 {
 
 /// Memory barrier to prevent reordering
 #[inline(always)]
-pub fn memory_barrier() {
+pub(crate) fn memory_barrier() {
     compiler_fence(Ordering::SeqCst);
 }
 

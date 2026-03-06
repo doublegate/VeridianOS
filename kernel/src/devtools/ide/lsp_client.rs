@@ -14,7 +14,7 @@ type MessageId = u64;
 
 /// JSON value (minimal subset)
 #[derive(Debug, Clone, PartialEq)]
-pub enum JsonValue {
+pub(crate) enum JsonValue {
     Null,
     Bool(bool),
     Number(i64),
@@ -24,33 +24,33 @@ pub enum JsonValue {
 }
 
 impl JsonValue {
-    pub fn as_str(&self) -> Option<&str> {
+    pub(crate) fn as_str(&self) -> Option<&str> {
         match self {
             Self::Str(s) => Some(s),
             _ => None,
         }
     }
 
-    pub fn as_i64(&self) -> Option<i64> {
+    pub(crate) fn as_i64(&self) -> Option<i64> {
         match self {
             Self::Number(n) => Some(*n),
             _ => None,
         }
     }
 
-    pub fn as_object(&self) -> Option<&BTreeMap<String, JsonValue>> {
+    pub(crate) fn as_object(&self) -> Option<&BTreeMap<String, JsonValue>> {
         match self {
             Self::Object(m) => Some(m),
             _ => None,
         }
     }
 
-    pub fn get(&self, key: &str) -> Option<&JsonValue> {
+    pub(crate) fn get(&self, key: &str) -> Option<&JsonValue> {
         self.as_object()?.get(key)
     }
 
     /// Serialize to JSON string
-    pub fn to_json(&self) -> String {
+    pub(crate) fn to_json(&self) -> String {
         match self {
             Self::Null => "null".to_string(),
             Self::Bool(b) => if *b { "true" } else { "false" }.to_string(),
@@ -80,7 +80,7 @@ impl JsonValue {
 }
 
 /// Minimal JSON parser
-pub fn parse_json(input: &str) -> Option<JsonValue> {
+pub(crate) fn parse_json(input: &str) -> Option<JsonValue> {
     let trimmed = input.trim();
     let (val, _) = parse_value(trimmed.as_bytes(), 0)?;
     Some(val)
@@ -247,15 +247,15 @@ fn parse_number(data: &[u8], mut pos: usize) -> Option<(JsonValue, usize)> {
 
 /// LSP completion item
 #[derive(Debug, Clone)]
-pub struct CompletionItem {
-    pub label: String,
-    pub kind: CompletionKind,
-    pub detail: Option<String>,
-    pub insert_text: Option<String>,
+pub(crate) struct CompletionItem {
+    pub(crate) label: String,
+    pub(crate) kind: CompletionKind,
+    pub(crate) detail: Option<String>,
+    pub(crate) insert_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompletionKind {
+pub(crate) enum CompletionKind {
     Text = 1,
     Method = 2,
     Function = 3,
@@ -272,18 +272,18 @@ pub enum CompletionKind {
 
 /// LSP diagnostic
 #[derive(Debug, Clone)]
-pub struct Diagnostic {
-    pub range_start_line: u32,
-    pub range_start_col: u32,
-    pub range_end_line: u32,
-    pub range_end_col: u32,
-    pub severity: DiagnosticSeverity,
-    pub message: String,
-    pub source: Option<String>,
+pub(crate) struct Diagnostic {
+    pub(crate) range_start_line: u32,
+    pub(crate) range_start_col: u32,
+    pub(crate) range_end_line: u32,
+    pub(crate) range_end_col: u32,
+    pub(crate) severity: DiagnosticSeverity,
+    pub(crate) message: String,
+    pub(crate) source: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiagnosticSeverity {
+pub(crate) enum DiagnosticSeverity {
     Error = 1,
     Warning = 2,
     Information = 3,
@@ -292,24 +292,24 @@ pub enum DiagnosticSeverity {
 
 /// LSP location (for go-to-definition)
 #[derive(Debug, Clone)]
-pub struct Location {
-    pub uri: String,
-    pub line: u32,
-    pub col: u32,
+pub(crate) struct Location {
+    pub(crate) uri: String,
+    pub(crate) line: u32,
+    pub(crate) col: u32,
 }
 
 /// LSP hover result
 #[derive(Debug, Clone)]
-pub struct HoverResult {
-    pub contents: String,
-    pub range: Option<(u32, u32, u32, u32)>,
+pub(crate) struct HoverResult {
+    pub(crate) contents: String,
+    pub(crate) range: Option<(u32, u32, u32, u32)>,
 }
 
 /// LSP client state
-pub struct LspClient {
+pub(crate) struct LspClient {
     next_id: MessageId,
-    pub server_capabilities: Option<JsonValue>,
-    pub diagnostics: Vec<Diagnostic>,
+    pub(crate) server_capabilities: Option<JsonValue>,
+    pub(crate) diagnostics: Vec<Diagnostic>,
     initialized: bool,
 }
 
@@ -320,7 +320,7 @@ impl Default for LspClient {
 }
 
 impl LspClient {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             next_id: 1,
             server_capabilities: None,
@@ -336,7 +336,7 @@ impl LspClient {
     }
 
     /// Build JSON-RPC request
-    pub fn build_request(&mut self, method: &str, params: JsonValue) -> String {
+    pub(crate) fn build_request(&mut self, method: &str, params: JsonValue) -> String {
         let id = self.next_id();
         let mut obj = BTreeMap::new();
         obj.insert("jsonrpc".to_string(), JsonValue::Str("2.0".to_string()));
@@ -349,7 +349,7 @@ impl LspClient {
     }
 
     /// Build JSON-RPC notification (no id)
-    pub fn build_notification(&self, method: &str, params: JsonValue) -> String {
+    pub(crate) fn build_notification(&self, method: &str, params: JsonValue) -> String {
         let mut obj = BTreeMap::new();
         obj.insert("jsonrpc".to_string(), JsonValue::Str("2.0".to_string()));
         obj.insert("method".to_string(), JsonValue::Str(method.to_string()));
@@ -360,7 +360,7 @@ impl LspClient {
     }
 
     /// Build initialize request
-    pub fn build_initialize(&mut self, root_uri: &str) -> String {
+    pub(crate) fn build_initialize(&mut self, root_uri: &str) -> String {
         let mut capabilities = BTreeMap::new();
         let mut text_doc = BTreeMap::new();
         let mut completion = BTreeMap::new();
@@ -377,7 +377,7 @@ impl LspClient {
     }
 
     /// Parse an LSP response
-    pub fn parse_response(&mut self, data: &str) -> Option<JsonValue> {
+    pub(crate) fn parse_response(&mut self, data: &str) -> Option<JsonValue> {
         // Skip Content-Length header
         let body_start = data.find("\r\n\r\n")?;
         let body = &data[body_start + 4..];
@@ -395,7 +395,7 @@ impl LspClient {
     }
 
     /// Parse completion items from response
-    pub fn parse_completions(&self, result: &JsonValue) -> Vec<CompletionItem> {
+    pub(crate) fn parse_completions(&self, result: &JsonValue) -> Vec<CompletionItem> {
         let mut items = Vec::new();
 
         let arr = match result {
@@ -454,7 +454,7 @@ impl LspClient {
         items
     }
 
-    pub fn is_initialized(&self) -> bool {
+    pub(crate) fn is_initialized(&self) -> bool {
         self.initialized
     }
 }

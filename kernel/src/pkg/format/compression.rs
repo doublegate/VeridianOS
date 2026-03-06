@@ -4,9 +4,61 @@
 //! package content. Each algorithm is implemented as a self-contained
 //! submodule with compress/decompress functions.
 
-use alloc::{string::String, vec::Vec};
+use alloc::vec::Vec;
 
 use super::Compression;
+
+// ============================================================================
+// Compression Error Type
+// ============================================================================
+
+/// Errors that can occur during compression or decompression
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompressionError {
+    /// Input data is too short to contain a valid header
+    InputTooShort,
+    /// Magic number does not match expected format
+    InvalidMagic,
+    /// A compressed block is truncated
+    TruncatedBlock,
+    /// Literal data is truncated
+    TruncatedLiterals,
+    /// An offset or distance value is invalid
+    InvalidOffset,
+    /// Run-length encoded data is truncated
+    TruncatedRle,
+    /// Content size field is unsupported
+    UnsupportedContentSize,
+    /// Block type is reserved or unknown
+    ReservedBlockType,
+    /// Input is empty when data is expected
+    EmptyInput,
+    /// A match reference has an invalid distance
+    InvalidDistance,
+    /// Escape sequence is truncated
+    TruncatedEscape,
+    /// A long match reference is truncated
+    TruncatedMatch,
+}
+
+impl core::fmt::Display for CompressionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InputTooShort => write!(f, "input too short"),
+            Self::InvalidMagic => write!(f, "invalid magic number"),
+            Self::TruncatedBlock => write!(f, "truncated block"),
+            Self::TruncatedLiterals => write!(f, "truncated literals"),
+            Self::InvalidOffset => write!(f, "invalid offset"),
+            Self::TruncatedRle => write!(f, "truncated RLE"),
+            Self::UnsupportedContentSize => write!(f, "unsupported content size"),
+            Self::ReservedBlockType => write!(f, "reserved block type"),
+            Self::EmptyInput => write!(f, "empty input"),
+            Self::InvalidDistance => write!(f, "invalid distance"),
+            Self::TruncatedEscape => write!(f, "truncated escape"),
+            Self::TruncatedMatch => write!(f, "truncated match"),
+        }
+    }
+}
 
 // ============================================================================
 // LZ4 Implementation (Simple Block Format)
@@ -26,7 +78,7 @@ mod lz4 {
     use super::*;
 
     /// Compress data using LZ4 block format
-    pub fn compress(input: &[u8]) -> Result<Vec<u8>, String> {
+    pub fn compress(input: &[u8]) -> Result<Vec<u8>, CompressionError> {
         if input.is_empty() {
             return Ok(Vec::new());
         }
@@ -189,15 +241,15 @@ mod lz4 {
     }
 
     /// Decompress LZ4 frame format data
-    pub fn decompress(input: &[u8]) -> Result<Vec<u8>, String> {
+    pub fn decompress(input: &[u8]) -> Result<Vec<u8>, CompressionError> {
         if input.len() < 15 {
-            return Err(String::from("LZ4: Input too short"));
+            return Err(CompressionError::InputTooShort);
         }
 
         // Verify magic number
         let magic = u32::from_le_bytes([input[0], input[1], input[2], input[3]]);
         if magic != LZ4_MAGIC {
-            return Err(String::from("LZ4: Invalid magic number"));
+            return Err(CompressionError::InvalidMagic);
         }
 
         // Parse frame descriptor
@@ -227,7 +279,7 @@ mod lz4 {
             let block_size = (block_size_raw & 0x7FFFFFFF) as usize;
 
             if pos + block_size > input.len() {
-                return Err(String::from("LZ4: Truncated block"));
+                return Err(CompressionError::TruncatedBlock);
             }
 
             if uncompressed {
@@ -243,7 +295,7 @@ mod lz4 {
     }
 
     /// Decompress a single LZ4 block
-    fn decompress_block(input: &[u8], output: &mut Vec<u8>) -> Result<(), String> {
+    fn decompress_block(input: &[u8], output: &mut Vec<u8>) -> Result<(), CompressionError> {
         let mut pos = 0;
 
         while pos < input.len() {
@@ -265,7 +317,7 @@ mod lz4 {
 
             // Copy literals
             if pos + literal_len > input.len() {
-                return Err(String::from("LZ4: Truncated literals"));
+                return Err(CompressionError::TruncatedLiterals);
             }
             output.extend_from_slice(&input[pos..pos + literal_len]);
             pos += literal_len;
@@ -277,13 +329,13 @@ mod lz4 {
 
             // Match offset
             if pos + 2 > input.len() {
-                return Err(String::from("LZ4: Truncated offset"));
+                return Err(CompressionError::InvalidOffset);
             }
             let offset = u16::from_le_bytes([input[pos], input[pos + 1]]) as usize;
             pos += 2;
 
             if offset == 0 || offset > output.len() {
-                return Err(String::from("LZ4: Invalid offset"));
+                return Err(CompressionError::InvalidOffset);
             }
 
             // Match length
@@ -323,7 +375,7 @@ mod zstd {
     use super::*;
 
     /// Compress data using simplified Zstd-like format
-    pub fn compress(input: &[u8]) -> Result<Vec<u8>, String> {
+    pub fn compress(input: &[u8]) -> Result<Vec<u8>, CompressionError> {
         if input.is_empty() {
             return Ok(Vec::new());
         }
@@ -432,15 +484,15 @@ mod zstd {
     }
 
     /// Decompress Zstd frame format data
-    pub fn decompress(input: &[u8]) -> Result<Vec<u8>, String> {
+    pub fn decompress(input: &[u8]) -> Result<Vec<u8>, CompressionError> {
         if input.len() < 8 {
-            return Err(String::from("Zstd: Input too short"));
+            return Err(CompressionError::InputTooShort);
         }
 
         // Verify magic number
         let magic = u32::from_le_bytes([input[0], input[1], input[2], input[3]]);
         if magic != ZSTD_MAGIC {
-            return Err(String::from("Zstd: Invalid magic number"));
+            return Err(CompressionError::InvalidMagic);
         }
 
         // Parse frame header
@@ -454,7 +506,7 @@ mod zstd {
                 u32::from_le_bytes([input[5], input[6], input[7], input[8]]) as usize,
                 9,
             ),
-            _ => return Err(String::from("Zstd: Unsupported content size")),
+            _ => return Err(CompressionError::UnsupportedContentSize),
         };
 
         let mut output = Vec::with_capacity(content_size);
@@ -469,7 +521,7 @@ mod zstd {
             let block_size = (block_header >> 3) as usize;
 
             if pos + block_size > input.len() {
-                return Err(String::from("Zstd: Truncated block"));
+                return Err(CompressionError::TruncatedBlock);
             }
 
             match block_type {
@@ -488,7 +540,7 @@ mod zstd {
                     // Compressed block
                     decompress_block_rle(&input[pos..pos + block_size], &mut output)?;
                 }
-                _ => return Err(String::from("Zstd: Reserved block type")),
+                _ => return Err(CompressionError::ReservedBlockType),
             }
 
             pos += block_size;
@@ -502,7 +554,7 @@ mod zstd {
     }
 
     /// Decompress RLE block
-    fn decompress_block_rle(input: &[u8], output: &mut Vec<u8>) -> Result<(), String> {
+    fn decompress_block_rle(input: &[u8], output: &mut Vec<u8>) -> Result<(), CompressionError> {
         let mut pos = 0;
 
         while pos < input.len() {
@@ -513,7 +565,7 @@ mod zstd {
                 // Run-length encoded
                 let run_len = (control & 0x7F) as usize;
                 if pos >= input.len() {
-                    return Err(String::from("Zstd: Truncated RLE"));
+                    return Err(CompressionError::TruncatedRle);
                 }
                 let byte = input[pos];
                 pos += 1;
@@ -524,7 +576,7 @@ mod zstd {
                 // Literal sequence
                 let literal_len = control as usize;
                 if pos + literal_len > input.len() {
-                    return Err(String::from("Zstd: Truncated literals"));
+                    return Err(CompressionError::TruncatedLiterals);
                 }
                 output.extend_from_slice(&input[pos..pos + literal_len]);
                 pos += literal_len;
@@ -549,7 +601,7 @@ mod brotli {
     use super::*;
 
     /// Compress data using simplified Brotli-like format
-    pub fn compress(input: &[u8]) -> Result<Vec<u8>, String> {
+    pub fn compress(input: &[u8]) -> Result<Vec<u8>, CompressionError> {
         if input.is_empty() {
             return Ok(vec![0x06]); // Empty Brotli stream
         }
@@ -658,9 +710,9 @@ mod brotli {
     }
 
     /// Decompress Brotli format data
-    pub fn decompress(input: &[u8]) -> Result<Vec<u8>, String> {
+    pub fn decompress(input: &[u8]) -> Result<Vec<u8>, CompressionError> {
         if input.is_empty() {
-            return Err(String::from("Brotli: Empty input"));
+            return Err(CompressionError::EmptyInput);
         }
 
         // Check for empty stream
@@ -669,7 +721,7 @@ mod brotli {
         }
 
         if input.len() < 7 {
-            return Err(String::from("Brotli: Input too short"));
+            return Err(CompressionError::InputTooShort);
         }
 
         // Parse header
@@ -696,7 +748,7 @@ mod brotli {
     }
 
     /// Decompress a meta-block
-    fn decompress_meta_block(input: &[u8], output: &mut Vec<u8>) -> Result<(), String> {
+    fn decompress_meta_block(input: &[u8], output: &mut Vec<u8>) -> Result<(), CompressionError> {
         let mut pos = 0;
 
         while pos < input.len() {
@@ -706,21 +758,21 @@ mod brotli {
             if byte == 0xFE {
                 // Escaped literal
                 if pos >= input.len() {
-                    return Err(String::from("Brotli: Truncated escape"));
+                    return Err(CompressionError::TruncatedEscape);
                 }
                 output.push(input[pos]);
                 pos += 1;
             } else if byte == 0xFF {
                 // Long match
                 if pos + 4 > input.len() {
-                    return Err(String::from("Brotli: Truncated long match"));
+                    return Err(CompressionError::TruncatedMatch);
                 }
                 let match_len = u16::from_le_bytes([input[pos], input[pos + 1]]) as usize;
                 let distance = u16::from_le_bytes([input[pos + 2], input[pos + 3]]) as usize;
                 pos += 4;
 
                 if distance > output.len() {
-                    return Err(String::from("Brotli: Invalid distance"));
+                    return Err(CompressionError::InvalidDistance);
                 }
 
                 let match_start = output.len() - distance;
@@ -732,13 +784,13 @@ mod brotli {
                 // Short match
                 let match_len = (byte & 0x0F) as usize + 4;
                 if pos >= input.len() {
-                    return Err(String::from("Brotli: Truncated short match"));
+                    return Err(CompressionError::TruncatedMatch);
                 }
                 let distance = input[pos] as usize;
                 pos += 1;
 
                 if distance > output.len() {
-                    return Err(String::from("Brotli: Invalid distance"));
+                    return Err(CompressionError::InvalidDistance);
                 }
 
                 let match_start = output.len() - distance;
@@ -761,7 +813,7 @@ mod brotli {
 // ============================================================================
 
 /// Decompress data based on compression algorithm
-pub fn decompress(data: &[u8], compression: Compression) -> Result<Vec<u8>, String> {
+pub fn decompress(data: &[u8], compression: Compression) -> Result<Vec<u8>, CompressionError> {
     match compression {
         Compression::None => Ok(data.to_vec()),
         Compression::Zstd => zstd::decompress(data),
@@ -771,7 +823,7 @@ pub fn decompress(data: &[u8], compression: Compression) -> Result<Vec<u8>, Stri
 }
 
 /// Compress data using specified algorithm
-pub fn compress(data: &[u8], compression: Compression) -> Result<Vec<u8>, String> {
+pub fn compress(data: &[u8], compression: Compression) -> Result<Vec<u8>, CompressionError> {
     match compression {
         Compression::None => Ok(data.to_vec()),
         Compression::Zstd => zstd::compress(data),

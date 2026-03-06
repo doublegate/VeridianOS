@@ -284,7 +284,8 @@ pub struct RateLimitStats {
 }
 
 /// Global rate limiter instance
-pub static RATE_LIMITER: RateLimiter = RateLimiter::new();
+#[allow(dead_code)]
+pub(crate) static RATE_LIMITER: RateLimiter = RateLimiter::new();
 
 /// Get current time in nanoseconds
 fn get_current_time() -> u64 {

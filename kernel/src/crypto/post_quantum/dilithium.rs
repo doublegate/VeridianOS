@@ -267,25 +267,25 @@ fn dil_params(level: DilithiumLevel) -> (usize, usize, u32, i32, usize) {
 }
 
 /// ML-DSA (Dilithium) signing key
-pub struct DilithiumSigningKey {
+pub(crate) struct DilithiumSigningKey {
     level: DilithiumLevel,
     secret: Vec<u8>,
 }
 
 /// ML-DSA (Dilithium) verifying key
-pub struct DilithiumVerifyingKey {
+pub(crate) struct DilithiumVerifyingKey {
     level: DilithiumLevel,
     public: Vec<u8>,
 }
 
 /// ML-DSA (Dilithium) signature
-pub struct DilithiumSignature {
+pub(crate) struct DilithiumSignature {
     bytes: Vec<u8>,
 }
 
 impl DilithiumSigningKey {
     /// Generate new signing key using lattice-based key generation
-    pub fn generate(level: DilithiumLevel) -> CryptoResult<Self> {
+    pub(crate) fn generate(level: DilithiumLevel) -> CryptoResult<Self> {
         use crate::crypto::{hash::sha256, random::get_random};
 
         let (k, l, eta, _gamma1, _) = dil_params(level);
@@ -382,7 +382,7 @@ impl DilithiumSigningKey {
     }
 
     /// Sign a message using ML-DSA (Dilithium) with rejection sampling
-    pub fn sign(&self, message: &[u8]) -> CryptoResult<DilithiumSignature> {
+    pub(crate) fn sign(&self, message: &[u8]) -> CryptoResult<DilithiumSignature> {
         use crate::crypto::hash::sha256;
 
         let (k, l, _eta, gamma1, sig_size) = dil_params(self.level);
@@ -588,7 +588,7 @@ impl DilithiumSigningKey {
     }
 
     /// Get corresponding verifying key
-    pub fn verifying_key(&self) -> DilithiumVerifyingKey {
+    pub(crate) fn verifying_key(&self) -> DilithiumVerifyingKey {
         let (k, l, _, _, _) = dil_params(self.level);
         let poly_size = DIL_N * 4;
         let t_start = 32 + (l + k) * poly_size;
@@ -629,7 +629,11 @@ impl DilithiumSigningKey {
 
 impl DilithiumVerifyingKey {
     /// Verify a signature using ML-DSA (Dilithium)
-    pub fn verify(&self, message: &[u8], signature: &DilithiumSignature) -> CryptoResult<bool> {
+    pub(crate) fn verify(
+        &self,
+        message: &[u8],
+        signature: &DilithiumSignature,
+    ) -> CryptoResult<bool> {
         use crate::crypto::hash::sha256;
 
         let (k, l, _eta, gamma1, _) = dil_params(self.level);

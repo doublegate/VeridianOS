@@ -3,27 +3,29 @@
 //! Measures latency of core kernel operations and compares against Phase 5
 //! performance targets. Accessible via the "perf" shell builtin.
 
+#![allow(dead_code)]
+
 use crate::bench::{black_box, cycles_to_ns, read_timestamp};
 
 /// Phase 5 performance targets (nanoseconds, x86_64 with KVM)
-pub const TARGET_SYSCALL_NS: u64 = 500;
-pub const TARGET_CONTEXT_SWITCH_NS: u64 = 10_000;
-pub const TARGET_IPC_SMALL_NS: u64 = 1_000;
-pub const TARGET_FRAME_ALLOC_NS: u64 = 2000;
-pub const TARGET_CAP_LOOKUP_NS: u64 = 100;
+pub(crate) const TARGET_SYSCALL_NS: u64 = 500;
+pub(crate) const TARGET_CONTEXT_SWITCH_NS: u64 = 10_000;
+pub(crate) const TARGET_IPC_SMALL_NS: u64 = 1_000;
+pub(crate) const TARGET_FRAME_ALLOC_NS: u64 = 2000;
+pub(crate) const TARGET_CAP_LOOKUP_NS: u64 = 100;
 
 /// Individual benchmark result
-pub struct BenchResult {
-    pub name: &'static str,
-    pub iterations: u64,
-    pub min_ns: u64,
-    pub avg_ns: u64,
-    pub max_ns: u64,
-    pub target_ns: u64,
+pub(crate) struct BenchResult {
+    pub(crate) name: &'static str,
+    pub(crate) iterations: u64,
+    pub(crate) min_ns: u64,
+    pub(crate) avg_ns: u64,
+    pub(crate) max_ns: u64,
+    pub(crate) target_ns: u64,
 }
 
 impl BenchResult {
-    pub fn meets_target(&self) -> bool {
+    pub(crate) fn meets_target(&self) -> bool {
         self.avg_ns <= self.target_ns
     }
 }
@@ -140,7 +142,7 @@ fn bench_sched_current() -> BenchResult {
 }
 
 /// Run all benchmarks and print results.
-pub fn run_all_benchmarks() {
+pub(crate) fn run_all_benchmarks() {
     crate::println!("=== VeridianOS Phase 5 Performance Benchmarks ===");
     crate::println!();
     crate::println!(

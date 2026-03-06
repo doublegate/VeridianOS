@@ -2,6 +2,8 @@
 //!
 //! Provides cryptographic primitives and services for secure operations.
 
+#![allow(dead_code)]
+
 pub mod asymmetric;
 pub mod cipher_suite;
 pub mod constant_time;
@@ -12,18 +14,10 @@ pub mod pq_params;
 pub mod random;
 pub mod symmetric;
 
-pub use asymmetric::{KeyPair, SigningKey, VerifyingKey};
-pub use cipher_suite::{CipherSuite, HmacAlgorithm, KdfAlgorithm};
-pub use hash::{Blake2s, Hash256, Hash512, HashAlgorithm};
-pub use keystore::{Key, KeyId, KeyStore};
-pub use post_quantum::{DilithiumSigningKey, HybridKeyExchange, KyberSecretKey};
-pub use random::{get_random, SecureRandom};
-pub use symmetric::{Aes256Gcm, ChaCha20Poly1305, SymmetricCipher};
-
 use crate::error::KernelError;
 
 /// Initialize cryptographic subsystem
-pub fn init() -> Result<(), KernelError> {
+pub(crate) fn init() -> Result<(), KernelError> {
     crate::println!("[CRYPTO] Initializing cryptographic subsystem...");
 
     // Initialize secure random number generator
@@ -43,11 +37,11 @@ pub fn init() -> Result<(), KernelError> {
 }
 
 /// Crypto operation result
-pub type CryptoResult<T> = Result<T, CryptoError>;
+pub(crate) type CryptoResult<T> = Result<T, CryptoError>;
 
 /// Cryptographic errors
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CryptoError {
+pub(crate) enum CryptoError {
     InvalidKeySize,
     InvalidNonceSize,
     InvalidTagSize,
@@ -63,7 +57,7 @@ pub enum CryptoError {
 /// Validate crypto primitives against known test vectors (NIST FIPS 180-4).
 ///
 /// Returns true if all test vectors pass, false otherwise.
-pub fn validate() -> bool {
+pub(crate) fn validate() -> bool {
     // NIST FIPS 180-4 SHA-256 test vector: SHA-256("abc")
     // Expected: ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61
     // f20015ad

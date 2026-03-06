@@ -931,7 +931,7 @@ impl Default for Scheduler {
 const DEFAULT_TIME_SLICE: u32 = 10;
 
 /// Global scheduler instance (for BSP/CPU0)
-pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
+pub(crate) static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
 
 // ---- Global PID-to-Task registry for O(log n) lookup ----
 

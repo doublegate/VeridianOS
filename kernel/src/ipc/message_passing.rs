@@ -218,7 +218,7 @@ impl Default for EndpointRegistry {
 
 /// Global endpoint registry instance
 #[cfg(feature = "alloc")]
-pub static ENDPOINT_REGISTRY: EndpointRegistry = EndpointRegistry::new();
+pub(crate) static ENDPOINT_REGISTRY: EndpointRegistry = EndpointRegistry::new();
 
 /// Send a message to an endpoint
 #[cfg(feature = "alloc")]

@@ -2,6 +2,47 @@
 
 ---
 
+## [v0.17.1] - 2026-03-06
+
+### v0.17.1: Tier 3 Technical Debt Remediation -- Type-Safe Errors, Encapsulation Audit, Nesting Cleanup
+
+Final tier of the three-tier tech debt remediation cycle, completing all identified P0-P3 structural issues.
+
+#### String Error Type Elimination (3a)
+
+- **`CompressionError`** in `pkg/format/compression.rs` (12 variants): Replaces 11 `Result<T, String>` -- covers LZ4/Zstd/Brotli decompression failures (InputTooShort, InvalidMagic, TruncatedBlock, OutputOverflow, InvalidOffset, ChecksumMismatch, etc.)
+- **`ResolverError`** in `pkg/resolver.rs` (7 variants): Replaces 12 `Result<T, String>` -- covers DPLL SAT dependency resolution (PackageNotFound, NoSatisfyingVersion, VersionConflict, MissingMetadata, Unsatisfiable, Conflict, NoProvider)
+- **`ScriptError`** in `services/shell/script.rs` (4 variants): Replaces 14 `Result<T, String>` -- covers shell script parsing and arithmetic (Syntax with line number, Arithmetic, InvalidNumber, NumberOverflow)
+- **`JsVmError`** in `browser/js_vm.rs` (9 variants): Replaces 9 `Result<T, String>` -- covers JS bytecode interpreter failures (ExecutionLimitExceeded, UnknownOpcode, UncaughtException, StackOverflow, StackUnderflow, NoCallFrame, IpOutOfBounds, NotCallable, InvalidFunctionId)
+- **`TabError`** in `browser/tab_isolation.rs` (7 variants): Replaces 6 `Result<T, String>` -- covers tab process isolation (ProcessLimitReached, ProcessAlreadyExists, ProcessNotFound, InvalidState, CapabilityDenied, ResourceLimitViolation, ScriptError)
+- All error types implement `Debug`, `Clone`, `Display`; context via `&'static str` messages to avoid heap allocation
+- Total: 79 -> 29 `Result<T, String>` (remaining 29 in low-priority files: test helpers, ELF parser, single-instance modules)
+
+#### Encapsulation Audit (3c)
+
+- **pub(crate) count: ~95 -> 951** (+833 items converted)
+- Phase 1 -- Statics/consts: 22 `pub static` -> `pub(crate) static` across 16 files (IPC, MM, process, scheduler, graphics, net, perf, virt, media, arch); includes `BOOT_INFO`, `EARLY_SERIAL`, `READY_QUEUE_STATIC`
+- Phase 2 -- Internal modules: Bulk-converted all `pub` to `pub(crate)` in `perf/` (4 files), `power/`, `debug/` (3 files), `devtools/` (10 files), `video/` (4 files)
+- Phase 3 -- Leaf modules: Bulk-converted in `crypto/` (13 files incl. post_quantum), `timer/`, `stdlib.rs`
+- Breakdown: 488 functions, 247 struct fields, 85 structs, 44 consts, 30 enums, 25 statics, 24 modules, 8 use-decls, 4 type aliases, 1 trait
+- Fixed cascading visibility mismatches in `security/auth.rs`, `net/ssh.rs`, `net/tls/handshake.rs`
+- Removed dead re-exports from `debug/mod.rs`, `crypto/mod.rs`, `crypto/post_quantum/mod.rs`, `sched/mod.rs`, `ipc/mod.rs`, `mm/mod.rs`
+
+#### Deep Nesting Cleanup (3b)
+
+- `desktop/systray.rs`: Max indent 68 -> 24 spaces (comment continuation repositioned)
+- `process/wait.rs`: Max indent 70 -> 20 spaces (comment continuations repositioned)
+- Root cause: `rustfmt` comment alignment, not actual code nesting (code was already <=6 levels)
+
+#### Infrastructure
+
+- Version bump 0.17.0 -> 0.17.1 (Cargo.toml, os-release, uname, desktop welcome)
+- README.md: v0.17.1, release 68
+- 65 files modified, net +310 LOC
+- All 3 architectures build clean, zero clippy warnings on 4 targets
+
+---
+
 ## [v0.17.0] - 2026-03-06
 
 ### v0.17.0: Tier 2 Technical Debt Remediation -- Crypto Unification, Audio Trait, Dead Code Audit, Test Coverage

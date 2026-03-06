@@ -3,6 +3,8 @@
 //! Provides tools for profiling, optimization, and performance analysis.
 //! Includes per-CPU run-queue instrumentation and IPC workload stats.
 
+#![allow(dead_code)]
+
 pub mod bench;
 pub mod pmu;
 pub mod trace;
@@ -13,12 +15,12 @@ use crate::{error::KernelError, mm::cache_aligned::CacheAligned};
 
 /// Performance counters (snapshot view)
 #[derive(Debug, Default, Clone, Copy)]
-pub struct PerfCounters {
-    pub syscalls: u64,
-    pub context_switches: u64,
-    pub page_faults: u64,
-    pub interrupts: u64,
-    pub ipc_messages: u64,
+pub(crate) struct PerfCounters {
+    pub(crate) syscalls: u64,
+    pub(crate) context_switches: u64,
+    pub(crate) page_faults: u64,
+    pub(crate) interrupts: u64,
+    pub(crate) ipc_messages: u64,
 }
 
 /// Atomic performance counters for safe concurrent access.
@@ -35,30 +37,30 @@ static IPC_MESSAGE_COUNT: CacheAligned<AtomicU64> = CacheAligned::new(AtomicU64:
 
 /// Increment syscall counter
 #[inline(always)]
-pub fn count_syscall() {
+pub(crate) fn count_syscall() {
     SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Increment context switch counter
 #[inline(always)]
-pub fn count_context_switch() {
+pub(crate) fn count_context_switch() {
     CONTEXT_SWITCH_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Increment page fault counter
 #[inline(always)]
-pub fn count_page_fault() {
+pub(crate) fn count_page_fault() {
     PAGE_FAULT_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Increment interrupt counter
 #[inline(always)]
-pub fn count_interrupt() {
+pub(crate) fn count_interrupt() {
     INTERRUPT_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Get performance statistics as a point-in-time snapshot
-pub fn get_stats() -> PerfCounters {
+pub(crate) fn get_stats() -> PerfCounters {
     PerfCounters {
         syscalls: SYSCALL_COUNT.load(Ordering::Relaxed),
         context_switches: CONTEXT_SWITCH_COUNT.load(Ordering::Relaxed),
@@ -69,7 +71,7 @@ pub fn get_stats() -> PerfCounters {
 }
 
 /// Reset performance counters
-pub fn reset_stats() {
+pub(crate) fn reset_stats() {
     SYSCALL_COUNT.store(0, Ordering::Relaxed);
     CONTEXT_SWITCH_COUNT.store(0, Ordering::Relaxed);
     PAGE_FAULT_COUNT.store(0, Ordering::Relaxed);
@@ -78,7 +80,7 @@ pub fn reset_stats() {
 }
 
 /// Performance profiler
-pub struct Profiler {
+pub(crate) struct Profiler {
     start_time: u64,
     /// Read in end() via println! which is a no-op on some architectures.
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
@@ -87,7 +89,7 @@ pub struct Profiler {
 
 impl Profiler {
     /// Start profiling a section
-    pub fn start(name: &'static str) -> Self {
+    pub(crate) fn start(name: &'static str) -> Self {
         Self {
             start_time: crate::test_framework::read_timestamp(),
             name,
@@ -95,7 +97,7 @@ impl Profiler {
     }
 
     /// End profiling and print results
-    pub fn end(self) {
+    pub(crate) fn end(self) {
         let _elapsed = crate::test_framework::read_timestamp() - self.start_time;
         println!("[PERF] {} took {} cycles", self.name, _elapsed);
     }
@@ -109,15 +111,15 @@ impl Profiler {
 const MAX_RQ_CPUS: usize = 16;
 
 /// Per-CPU run-queue statistics.
-pub struct RunQueueStats {
+pub(crate) struct RunQueueStats {
     /// Total enqueue operations on this CPU.
-    pub enqueue_count: AtomicU64,
+    pub(crate) enqueue_count: AtomicU64,
     /// Total dequeue operations on this CPU.
-    pub dequeue_count: AtomicU64,
+    pub(crate) dequeue_count: AtomicU64,
     /// High-water mark for queue length.
-    pub max_length: AtomicU32,
+    pub(crate) max_length: AtomicU32,
     /// Cumulative wait ticks across all dequeued tasks.
-    pub total_wait_ticks: AtomicU64,
+    pub(crate) total_wait_ticks: AtomicU64,
 }
 
 impl RunQueueStats {
@@ -147,7 +149,7 @@ static RQ_STATS: [RunQueueStats; MAX_RQ_CPUS] = {
 
 /// Record an enqueue operation for a CPU's run queue.
 #[inline(always)]
-pub fn record_enqueue(cpu_id: usize, queue_len: u32) {
+pub(crate) fn record_enqueue(cpu_id: usize, queue_len: u32) {
     if cpu_id < MAX_RQ_CPUS {
         RQ_STATS[cpu_id]
             .enqueue_count
@@ -167,7 +169,7 @@ pub fn record_enqueue(cpu_id: usize, queue_len: u32) {
 
 /// Record a dequeue operation with wait time.
 #[inline(always)]
-pub fn record_dequeue(cpu_id: usize, wait_ticks: u64) {
+pub(crate) fn record_dequeue(cpu_id: usize, wait_ticks: u64) {
     if cpu_id < MAX_RQ_CPUS {
         RQ_STATS[cpu_id]
             .dequeue_count
@@ -180,19 +182,19 @@ pub fn record_dequeue(cpu_id: usize, wait_ticks: u64) {
 
 /// Aggregated scheduler profile from all CPUs.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct SchedulerProfile {
+pub(crate) struct SchedulerProfile {
     /// Average wait ticks per dequeue across all CPUs.
-    pub avg_wait_ticks: u64,
+    pub(crate) avg_wait_ticks: u64,
     /// Maximum queue length seen on any CPU.
-    pub max_queue_length: u32,
+    pub(crate) max_queue_length: u32,
     /// Total enqueues across all CPUs.
-    pub total_enqueues: u64,
+    pub(crate) total_enqueues: u64,
     /// Total dequeues across all CPUs.
-    pub total_dequeues: u64,
+    pub(crate) total_dequeues: u64,
 }
 
 /// Collect aggregated scheduler stats from all CPUs.
-pub fn get_scheduler_stats() -> SchedulerProfile {
+pub(crate) fn get_scheduler_stats() -> SchedulerProfile {
     let mut total_enq = 0u64;
     let mut total_deq = 0u64;
     let mut total_wait = 0u64;
@@ -233,18 +235,18 @@ static IPC_BATCHES_FLUSHED: AtomicU64 = AtomicU64::new(0);
 
 /// Record an IPC message sent via the fast path.
 #[inline(always)]
-pub fn record_ipc_message_sent() {
+pub(crate) fn record_ipc_message_sent() {
     IPC_MESSAGES_SENT.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Record an IPC batch flush.
 #[inline(always)]
-pub fn record_ipc_batch_flushed() {
+pub(crate) fn record_ipc_batch_flushed() {
     IPC_BATCHES_FLUSHED.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Get IPC workload stats: (messages_sent, batches_flushed).
-pub fn get_ipc_workload_stats() -> (u64, u64) {
+pub(crate) fn get_ipc_workload_stats() -> (u64, u64) {
     (
         IPC_MESSAGES_SENT.load(Ordering::Relaxed),
         IPC_BATCHES_FLUSHED.load(Ordering::Relaxed),
@@ -258,7 +260,7 @@ pub fn get_ipc_workload_stats() -> (u64, u64) {
 /// Optimize memory allocator.
 ///
 /// Collects allocation statistics and logs fragmentation metrics.
-pub fn optimize_memory() {
+pub(crate) fn optimize_memory() {
     println!("[PERF] Optimizing memory allocator...");
     let stats = crate::mm::get_memory_stats();
     let used = stats.total_frames.saturating_sub(stats.free_frames);
@@ -277,7 +279,7 @@ pub fn optimize_memory() {
 ///
 /// Reports per-CPU run-queue instrumentation data: average wait time,
 /// max queue depth, and total enqueue/dequeue counts.
-pub fn optimize_scheduler() {
+pub(crate) fn optimize_scheduler() {
     println!("[PERF] Optimizing scheduler...");
     let counters = get_stats();
     let sched_profile = get_scheduler_stats();
@@ -297,7 +299,7 @@ pub fn optimize_scheduler() {
 /// Optimize IPC.
 ///
 /// Reports IPC message throughput and batch flush statistics.
-pub fn optimize_ipc() {
+pub(crate) fn optimize_ipc() {
     println!("[PERF] Optimizing IPC...");
     let counters = get_stats();
     let (msgs_sent, batches) = get_ipc_workload_stats();
@@ -309,7 +311,7 @@ pub fn optimize_ipc() {
 }
 
 /// Initialize performance subsystem
-pub fn init() -> Result<(), KernelError> {
+pub(crate) fn init() -> Result<(), KernelError> {
     println!("[PERF] Initializing performance subsystem...");
 
     reset_stats();

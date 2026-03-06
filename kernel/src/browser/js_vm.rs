@@ -19,6 +19,49 @@ use super::{
 };
 
 // ---------------------------------------------------------------------------
+// JS VM Error Type
+// ---------------------------------------------------------------------------
+
+/// Errors produced by the JavaScript virtual machine
+#[derive(Debug, Clone)]
+pub enum JsVmError {
+    /// Execution step limit exceeded
+    ExecutionLimitExceeded,
+    /// Unknown bytecode opcode
+    UnknownOpcode { byte: u8 },
+    /// Uncaught exception from user code
+    UncaughtException { message: String },
+    /// Operand stack overflow
+    StackOverflow,
+    /// Operand stack underflow (pop from empty stack)
+    StackUnderflow,
+    /// No active call frame
+    NoCallFrame,
+    /// Instruction pointer out of bounds
+    IpOutOfBounds,
+    /// Attempted to call a non-callable value
+    NotCallable,
+    /// Invalid function ID
+    InvalidFunctionId,
+}
+
+impl core::fmt::Display for JsVmError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ExecutionLimitExceeded => write!(f, "Execution limit exceeded"),
+            Self::UnknownOpcode { byte } => write!(f, "Unknown opcode: {}", byte),
+            Self::UncaughtException { message } => write!(f, "Uncaught: {}", message),
+            Self::StackOverflow => write!(f, "Stack overflow"),
+            Self::StackUnderflow => write!(f, "Stack underflow"),
+            Self::NoCallFrame => write!(f, "No call frame"),
+            Self::IpOutOfBounds => write!(f, "IP out of bounds"),
+            Self::NotCallable => write!(f, "Not callable"),
+            Self::InvalidFunctionId => write!(f, "Invalid function ID"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // JS Values
 // ---------------------------------------------------------------------------
 
@@ -279,7 +322,7 @@ impl JsVm {
     }
 
     /// Execute a compiled chunk (top-level code)
-    pub fn run_chunk(&mut self, chunk: &Chunk) -> Result<JsValue, String> {
+    pub fn run_chunk(&mut self, chunk: &Chunk) -> Result<JsValue, JsVmError> {
         // Create a top-level function template from the chunk
         let template = FunctionTemplate {
             name: "<main>".to_string(),
@@ -305,13 +348,13 @@ impl JsVm {
     }
 
     /// Main interpreter loop
-    fn run_loop(&mut self) -> Result<JsValue, String> {
+    fn run_loop(&mut self) -> Result<JsValue, JsVmError> {
         let mut steps = 0usize;
 
         loop {
             steps += 1;
             if steps > self.max_steps {
-                return Err("Execution limit exceeded".to_string());
+                return Err(JsVmError::ExecutionLimitExceeded);
             }
 
             let frame = match self.call_stack.last_mut() {
@@ -332,7 +375,7 @@ impl JsVm {
             let op = match Opcode::from_byte(op_byte) {
                 Some(o) => o,
                 None => {
-                    return Err(format!("Unknown opcode: {}", op_byte));
+                    return Err(JsVmError::UnknownOpcode { byte: op_byte });
                 }
             };
 
@@ -663,7 +706,9 @@ impl JsVm {
                             frame.ip = try_state.catch_ip;
                         }
                     } else {
-                        return Err(format!("Uncaught: {}", val.to_js_string()));
+                        return Err(JsVmError::UncaughtException {
+                            message: val.to_js_string(),
+                        });
                     }
                 }
                 Opcode::EnterTry => {
@@ -692,44 +737,36 @@ impl JsVm {
 
     // -- Helpers --
 
-    fn push(&mut self, val: JsValue) -> Result<(), String> {
+    fn push(&mut self, val: JsValue) -> Result<(), JsVmError> {
         if self.stack.len() >= self.max_stack {
-            return Err("Stack overflow".to_string());
+            return Err(JsVmError::StackOverflow);
         }
         self.stack.push(val);
         Ok(())
     }
 
-    fn pop(&mut self) -> Result<JsValue, String> {
-        self.stack
-            .pop()
-            .ok_or_else(|| "Stack underflow".to_string())
+    fn pop(&mut self) -> Result<JsValue, JsVmError> {
+        self.stack.pop().ok_or(JsVmError::StackUnderflow)
     }
 
-    fn read_byte(&mut self) -> Result<u8, String> {
-        let frame = self
-            .call_stack
-            .last_mut()
-            .ok_or_else(|| "No call frame".to_string())?;
+    fn read_byte(&mut self) -> Result<u8, JsVmError> {
+        let frame = self.call_stack.last_mut().ok_or(JsVmError::NoCallFrame)?;
         if frame.ip >= frame.bytecode.len() {
-            return Err("IP out of bounds".to_string());
+            return Err(JsVmError::IpOutOfBounds);
         }
         let b = frame.bytecode[frame.ip];
         frame.ip += 1;
         Ok(b)
     }
 
-    fn read_u16(&mut self) -> Result<u16, String> {
+    fn read_u16(&mut self) -> Result<u16, JsVmError> {
         let hi = self.read_byte()? as u16;
         let lo = self.read_byte()? as u16;
         Ok((hi << 8) | lo)
     }
 
-    fn get_string_constant(&self, idx: usize) -> Result<String, String> {
-        let frame = self
-            .call_stack
-            .last()
-            .ok_or_else(|| "No call frame".to_string())?;
+    fn get_string_constant(&self, idx: usize) -> Result<String, JsVmError> {
+        let frame = self.call_stack.last().ok_or(JsVmError::NoCallFrame)?;
         match frame.constants.get(idx) {
             Some(Constant::Str(s)) => Ok(s.clone()),
             _ => Ok(format!("{}", idx)),
@@ -793,7 +830,7 @@ impl JsVm {
     }
 
     /// Call a function value
-    fn call_function(&mut self, argc: usize) -> Result<(), String> {
+    fn call_function(&mut self, argc: usize) -> Result<(), JsVmError> {
         let mut args = Vec::with_capacity(argc);
         for _ in 0..argc {
             args.push(self.pop()?);
@@ -808,7 +845,7 @@ impl JsVm {
                     .function_arena
                     .get(fid)
                     .cloned()
-                    .ok_or("Invalid function ID")?;
+                    .ok_or(JsVmError::InvalidFunctionId)?;
 
                 let mut locals = Vec::with_capacity(template.local_count);
                 for i in 0..template.param_count {
@@ -835,7 +872,7 @@ impl JsVm {
                 self.push(JsValue::Undefined)?;
             }
             _ => {
-                return Err("Not callable".to_string());
+                return Err(JsVmError::NotCallable);
             }
         }
 
@@ -922,7 +959,7 @@ mod tests {
     use super::*;
     use crate::browser::{js_compiler::Compiler, js_lexer::js_int, js_parser::JsParser};
 
-    fn run_js(src: &str) -> Result<JsValue, String> {
+    fn run_js(src: &str) -> Result<JsValue, JsVmError> {
         let mut parser = JsParser::from_source(src);
         let root = parser.parse();
         let mut compiler = Compiler::new();

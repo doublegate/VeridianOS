@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 /// Decompression error
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InflateError {
+pub(crate) enum InflateError {
     InvalidHeader,
     InvalidBlock,
     BufferOverflow,
@@ -17,7 +17,7 @@ pub enum InflateError {
 }
 
 /// Zlib header check (2-byte header: CMF + FLG)
-pub fn check_zlib_header(data: &[u8]) -> Result<usize, InflateError> {
+pub(crate) fn check_zlib_header(data: &[u8]) -> Result<usize, InflateError> {
     if data.len() < 2 {
         return Err(InflateError::IncompleteInput);
     }
@@ -126,7 +126,7 @@ const DIST_EXTRA: [u8; 30] = [
 ];
 
 /// Inflate (decompress) raw DEFLATE data
-pub fn inflate_raw(data: &[u8], max_output: usize) -> Result<Vec<u8>, InflateError> {
+pub(crate) fn inflate_raw(data: &[u8], max_output: usize) -> Result<Vec<u8>, InflateError> {
     let mut reader = BitReader::new(data);
     let mut output = Vec::with_capacity(core::cmp::min(max_output, 65536));
 
@@ -171,7 +171,7 @@ pub fn inflate_raw(data: &[u8], max_output: usize) -> Result<Vec<u8>, InflateErr
 }
 
 /// Inflate with zlib header
-pub fn inflate_zlib(data: &[u8], max_output: usize) -> Result<Vec<u8>, InflateError> {
+pub(crate) fn inflate_zlib(data: &[u8], max_output: usize) -> Result<Vec<u8>, InflateError> {
     let header_size = check_zlib_header(data)?;
     inflate_raw(&data[header_size..], max_output)
 }

@@ -10,14 +10,14 @@ use alloc::{
 
 /// Flame graph frame
 #[derive(Debug, Clone)]
-pub struct FlameFrame {
-    pub name: String,
-    pub samples: u64,
-    pub children: Vec<FlameFrame>,
+pub(crate) struct FlameFrame {
+    pub(crate) name: String,
+    pub(crate) samples: u64,
+    pub(crate) children: Vec<FlameFrame>,
 }
 
 impl FlameFrame {
-    pub fn new(name: &str) -> Self {
+    pub(crate) fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
             samples: 0,
@@ -25,17 +25,17 @@ impl FlameFrame {
         }
     }
 
-    pub fn add_child(&mut self, child: FlameFrame) {
+    pub(crate) fn add_child(&mut self, child: FlameFrame) {
         self.children.push(child);
     }
 
     /// Total samples including children
-    pub fn total_samples(&self) -> u64 {
+    pub(crate) fn total_samples(&self) -> u64 {
         self.samples + self.children.iter().map(|c| c.total_samples()).sum::<u64>()
     }
 
     /// Find or create a child with the given name
-    pub fn get_or_create_child(&mut self, name: &str) -> &mut FlameFrame {
+    pub(crate) fn get_or_create_child(&mut self, name: &str) -> &mut FlameFrame {
         let idx = self.children.iter().position(|c| c.name == name);
         if let Some(i) = idx {
             &mut self.children[i]
@@ -48,40 +48,40 @@ impl FlameFrame {
 
 /// Call stack sample
 #[derive(Debug, Clone)]
-pub struct StackSample {
-    pub timestamp: u64,
-    pub frames: Vec<String>,
-    pub cpu: u32,
+pub(crate) struct StackSample {
+    pub(crate) timestamp: u64,
+    pub(crate) frames: Vec<String>,
+    pub(crate) cpu: u32,
 }
 
 /// CPU timeline data point
 #[derive(Debug, Clone, Copy)]
-pub struct CpuDataPoint {
-    pub timestamp: u64,
-    pub usage_percent: u8,
-    pub cpu_id: u32,
+pub(crate) struct CpuDataPoint {
+    pub(crate) timestamp: u64,
+    pub(crate) usage_percent: u8,
+    pub(crate) cpu_id: u32,
 }
 
 /// Memory timeline data point
 #[derive(Debug, Clone, Copy)]
-pub struct MemDataPoint {
-    pub timestamp: u64,
-    pub used_bytes: u64,
-    pub total_bytes: u64,
+pub(crate) struct MemDataPoint {
+    pub(crate) timestamp: u64,
+    pub(crate) used_bytes: u64,
+    pub(crate) total_bytes: u64,
 }
 
 /// Profiler session
-pub struct ProfilerSession {
-    pub name: String,
-    pub samples: Vec<StackSample>,
-    pub cpu_timeline: Vec<CpuDataPoint>,
-    pub mem_timeline: Vec<MemDataPoint>,
-    pub start_time: u64,
-    pub end_time: u64,
+pub(crate) struct ProfilerSession {
+    pub(crate) name: String,
+    pub(crate) samples: Vec<StackSample>,
+    pub(crate) cpu_timeline: Vec<CpuDataPoint>,
+    pub(crate) mem_timeline: Vec<MemDataPoint>,
+    pub(crate) start_time: u64,
+    pub(crate) end_time: u64,
 }
 
 impl ProfilerSession {
-    pub fn new(name: &str) -> Self {
+    pub(crate) fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
             samples: Vec::new(),
@@ -92,7 +92,7 @@ impl ProfilerSession {
         }
     }
 
-    pub fn add_sample(&mut self, sample: StackSample) {
+    pub(crate) fn add_sample(&mut self, sample: StackSample) {
         if self.samples.is_empty() {
             self.start_time = sample.timestamp;
         }
@@ -100,16 +100,16 @@ impl ProfilerSession {
         self.samples.push(sample);
     }
 
-    pub fn add_cpu_point(&mut self, point: CpuDataPoint) {
+    pub(crate) fn add_cpu_point(&mut self, point: CpuDataPoint) {
         self.cpu_timeline.push(point);
     }
 
-    pub fn add_mem_point(&mut self, point: MemDataPoint) {
+    pub(crate) fn add_mem_point(&mut self, point: MemDataPoint) {
         self.mem_timeline.push(point);
     }
 
     /// Build flame graph from samples
-    pub fn build_flame_graph(&self) -> FlameFrame {
+    pub(crate) fn build_flame_graph(&self) -> FlameFrame {
         let mut root = FlameFrame::new("all");
 
         for sample in &self.samples {
@@ -124,16 +124,16 @@ impl ProfilerSession {
     }
 
     /// Duration in timestamp units
-    pub fn duration(&self) -> u64 {
+    pub(crate) fn duration(&self) -> u64 {
         self.end_time.saturating_sub(self.start_time)
     }
 
-    pub fn sample_count(&self) -> usize {
+    pub(crate) fn sample_count(&self) -> usize {
         self.samples.len()
     }
 
     /// Average CPU usage
-    pub fn avg_cpu_usage(&self) -> u8 {
+    pub(crate) fn avg_cpu_usage(&self) -> u8 {
         if self.cpu_timeline.is_empty() {
             return 0;
         }
@@ -146,7 +146,7 @@ impl ProfilerSession {
     }
 
     /// Peak memory usage
-    pub fn peak_memory(&self) -> u64 {
+    pub(crate) fn peak_memory(&self) -> u64 {
         self.mem_timeline
             .iter()
             .map(|p| p.used_bytes)
@@ -156,14 +156,14 @@ impl ProfilerSession {
 }
 
 /// Profiler GUI renderer (renders to a pixel buffer)
-pub struct ProfilerGui {
-    pub width: u32,
-    pub height: u32,
-    pub view: ProfilerView,
+pub(crate) struct ProfilerGui {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) view: ProfilerView,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProfilerView {
+pub(crate) enum ProfilerView {
     FlameGraph,
     CpuTimeline,
     MemoryTimeline,
@@ -171,7 +171,7 @@ pub enum ProfilerView {
 }
 
 impl ProfilerGui {
-    pub fn new(width: u32, height: u32) -> Self {
+    pub(crate) fn new(width: u32, height: u32) -> Self {
         Self {
             width,
             height,
@@ -179,12 +179,12 @@ impl ProfilerGui {
         }
     }
 
-    pub fn switch_view(&mut self, view: ProfilerView) {
+    pub(crate) fn switch_view(&mut self, view: ProfilerView) {
         self.view = view;
     }
 
     /// Render the flame graph to a color buffer
-    pub fn render_flame_graph(&self, root: &FlameFrame, buf: &mut [u32]) {
+    pub(crate) fn render_flame_graph(&self, root: &FlameFrame, buf: &mut [u32]) {
         let total = root.total_samples();
         if total == 0 || buf.len() < (self.width * self.height) as usize {
             return;
@@ -263,18 +263,18 @@ impl ProfilerGui {
 
 /// Node in an aggregated call tree.
 #[derive(Debug, Clone)]
-pub struct CallTreeNode {
-    pub function_name: String,
+pub(crate) struct CallTreeNode {
+    pub(crate) function_name: String,
     /// Samples where this function is the leaf (self time).
-    pub self_time: u64,
+    pub(crate) self_time: u64,
     /// Total samples including all descendants.
-    pub total_time: u64,
-    pub children: Vec<CallTreeNode>,
-    pub call_count: u64,
+    pub(crate) total_time: u64,
+    pub(crate) children: Vec<CallTreeNode>,
+    pub(crate) call_count: u64,
 }
 
 impl CallTreeNode {
-    pub fn new(name: &str) -> Self {
+    pub(crate) fn new(name: &str) -> Self {
         Self {
             function_name: name.to_string(),
             self_time: 0,
@@ -303,18 +303,18 @@ impl CallTreeNode {
 
 /// Flattened call tree entry for rendering.
 #[derive(Debug, Clone)]
-pub struct FlatCallEntry {
-    pub function_name: String,
-    pub self_time: u64,
-    pub total_time: u64,
-    pub call_count: u64,
-    pub depth: u32,
+pub(crate) struct FlatCallEntry {
+    pub(crate) function_name: String,
+    pub(crate) self_time: u64,
+    pub(crate) total_time: u64,
+    pub(crate) call_count: u64,
+    pub(crate) depth: u32,
 }
 
 /// Aggregated call tree built from stack samples.
-pub struct CallTree {
-    pub roots: Vec<CallTreeNode>,
-    pub total_samples: u64,
+pub(crate) struct CallTree {
+    pub(crate) roots: Vec<CallTreeNode>,
+    pub(crate) total_samples: u64,
 }
 
 impl Default for CallTree {
@@ -324,7 +324,7 @@ impl Default for CallTree {
 }
 
 impl CallTree {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             roots: Vec::new(),
             total_samples: 0,
@@ -335,7 +335,7 @@ impl CallTree {
     ///
     /// Each sample's frames are walked bottom-up (callers first). The leaf
     /// frame receives self-time credit.
-    pub fn build_from_stacks(samples: &[StackSample]) -> Self {
+    pub(crate) fn build_from_stacks(samples: &[StackSample]) -> Self {
         let mut tree = CallTree::new();
         tree.total_samples = samples.len() as u64;
 
@@ -390,7 +390,7 @@ impl CallTree {
     }
 
     /// Flatten the tree into a list with depth information for rendering.
-    pub fn flatten(&self) -> Vec<FlatCallEntry> {
+    pub(crate) fn flatten(&self) -> Vec<FlatCallEntry> {
         let mut result = Vec::new();
         for root in &self.roots {
             Self::flatten_node(root, 0, &mut result);
@@ -412,7 +412,7 @@ impl CallTree {
     }
 
     /// Find the top-N hottest paths by total_time across all root entries.
-    pub fn hottest_paths(&self, top_n: usize) -> Vec<FlatCallEntry> {
+    pub(crate) fn hottest_paths(&self, top_n: usize) -> Vec<FlatCallEntry> {
         let mut sorted = self.flatten();
         // Sort descending by total_time
         sorted.sort_by(|a, b| b.total_time.cmp(&a.total_time));
@@ -422,14 +422,14 @@ impl CallTree {
 }
 
 /// Profiler data export utilities.
-pub struct ProfilerExport;
+pub(crate) struct ProfilerExport;
 
 impl ProfilerExport {
     /// Generate an SVG-like text representation of a flame graph.
     ///
     /// Produces a simplified folded-stack format suitable for text display:
     /// each line is `stack;path samples\n`.
-    pub fn export_flamegraph_svg(session: &ProfilerSession) -> String {
+    pub(crate) fn export_flamegraph_svg(session: &ProfilerSession) -> String {
         let mut out = String::new();
         // Header
         out.push_str("<!-- VeridianOS Profiler Flame Graph -->\n");
@@ -452,7 +452,7 @@ impl ProfilerExport {
     }
 
     /// Generate a text summary of a profiling session.
-    pub fn export_summary(session: &ProfilerSession) -> String {
+    pub(crate) fn export_summary(session: &ProfilerSession) -> String {
         let mut out = String::from("=== Profiler Summary ===\n");
         out.push_str("Session: ");
         out.push_str(&session.name);
@@ -492,7 +492,7 @@ impl ProfilerExport {
 
 impl ProfilerGui {
     /// Render a call tree view into a text buffer (indented with percentages).
-    pub fn render_call_tree(&self, tree: &CallTree) -> String {
+    pub(crate) fn render_call_tree(&self, tree: &CallTree) -> String {
         let mut out = String::from("Call Tree View\n");
         out.push_str("==============\n");
         let total = tree.total_samples.max(1);
@@ -518,7 +518,7 @@ impl ProfilerGui {
     }
 
     /// Render a hotspot list: top functions sorted by self time.
-    pub fn render_hotspots(&self, tree: &CallTree, top_n: usize) -> String {
+    pub(crate) fn render_hotspots(&self, tree: &CallTree, top_n: usize) -> String {
         let mut out = String::from("Hotspot Analysis\n");
         out.push_str("================\n");
         let total = tree.total_samples.max(1);

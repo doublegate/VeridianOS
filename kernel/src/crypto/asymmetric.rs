@@ -850,29 +850,29 @@ fn sc_muladd_reduce(s: &mut [i64; 24]) {
 // ============================================================================
 
 /// Signing key (private key)
-pub struct SigningKey {
+pub(crate) struct SigningKey {
     bytes: [u8; 32],
 }
 
 /// Verifying key (public key)
-pub struct VerifyingKey {
+pub(crate) struct VerifyingKey {
     bytes: [u8; 32],
 }
 
 /// Cryptographic signature
-pub struct Signature {
+pub(crate) struct Signature {
     bytes: [u8; 64],
 }
 
 /// Key pair (signing + verifying keys)
-pub struct KeyPair {
-    pub signing_key: SigningKey,
-    pub verifying_key: VerifyingKey,
+pub(crate) struct KeyPair {
+    pub(crate) signing_key: SigningKey,
+    pub(crate) verifying_key: VerifyingKey,
 }
 
 impl SigningKey {
     /// Create signing key from bytes
-    pub fn from_bytes(bytes: &[u8]) -> CryptoResult<Self> {
+    pub(crate) fn from_bytes(bytes: &[u8]) -> CryptoResult<Self> {
         if bytes.len() != 32 {
             return Err(CryptoError::InvalidKeySize);
         }
@@ -884,12 +884,12 @@ impl SigningKey {
     }
 
     /// Get key bytes
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
         &self.bytes
     }
 
     /// Sign a message using Ed25519 (RFC 8032 Section 5.1.6)
-    pub fn sign(&self, message: &[u8]) -> CryptoResult<Signature> {
+    pub(crate) fn sign(&self, message: &[u8]) -> CryptoResult<Signature> {
         // Step 1: Hash the private key
         let h = sha512(&self.bytes);
 
@@ -931,7 +931,7 @@ impl SigningKey {
 
 impl VerifyingKey {
     /// Create verifying key from bytes
-    pub fn from_bytes(bytes: &[u8]) -> CryptoResult<Self> {
+    pub(crate) fn from_bytes(bytes: &[u8]) -> CryptoResult<Self> {
         if bytes.len() != 32 {
             return Err(CryptoError::InvalidKeySize);
         }
@@ -943,12 +943,12 @@ impl VerifyingKey {
     }
 
     /// Get key bytes
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
         &self.bytes
     }
 
     /// Verify a signature using Ed25519 (RFC 8032 Section 5.1.7)
-    pub fn verify(&self, message: &[u8], signature: &Signature) -> CryptoResult<bool> {
+    pub(crate) fn verify(&self, message: &[u8], signature: &Signature) -> CryptoResult<bool> {
         // Parse R and S from signature
         let r_bytes: [u8; 32] = {
             let mut arr = [0u8; 32];
@@ -1000,7 +1000,7 @@ impl VerifyingKey {
 
 impl Signature {
     /// Create signature from bytes
-    pub fn from_bytes(bytes: &[u8]) -> CryptoResult<Self> {
+    pub(crate) fn from_bytes(bytes: &[u8]) -> CryptoResult<Self> {
         if bytes.len() != 64 {
             return Err(CryptoError::InvalidKey);
         }
@@ -1012,19 +1012,19 @@ impl Signature {
     }
 
     /// Get signature bytes
-    pub fn as_bytes(&self) -> &[u8; 64] {
+    pub(crate) fn as_bytes(&self) -> &[u8; 64] {
         &self.bytes
     }
 
     /// Convert to vector
-    pub fn to_vec(&self) -> Vec<u8> {
+    pub(crate) fn to_vec(&self) -> Vec<u8> {
         self.bytes.to_vec()
     }
 }
 
 impl KeyPair {
     /// Generate new key pair
-    pub fn generate() -> CryptoResult<Self> {
+    pub(crate) fn generate() -> CryptoResult<Self> {
         use super::random::get_random;
 
         let rng = get_random();
@@ -1035,7 +1035,7 @@ impl KeyPair {
     }
 
     /// Create key pair from seed using Ed25519 key derivation
-    pub fn from_seed(seed: &[u8; 32]) -> CryptoResult<Self> {
+    pub(crate) fn from_seed(seed: &[u8; 32]) -> CryptoResult<Self> {
         let signing_key = SigningKey { bytes: *seed };
 
         // Derive public key: hash seed, clamp, scalar multiply by basepoint
@@ -1061,12 +1061,12 @@ impl KeyPair {
     }
 
     /// Sign a message with this key pair
-    pub fn sign(&self, message: &[u8]) -> CryptoResult<Signature> {
+    pub(crate) fn sign(&self, message: &[u8]) -> CryptoResult<Signature> {
         self.signing_key.sign(message)
     }
 
     /// Verify a signature with this key pair
-    pub fn verify(&self, message: &[u8], signature: &Signature) -> CryptoResult<bool> {
+    pub(crate) fn verify(&self, message: &[u8], signature: &Signature) -> CryptoResult<bool> {
         self.verifying_key.verify(message, signature)
     }
 }
@@ -1250,7 +1250,7 @@ fn sc_muladd(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> [u8; 32] {
 
 /// X25519 scalar multiplication on the Montgomery form of Curve25519
 /// Uses the Montgomery ladder for constant-time computation
-pub fn x25519_scalar_mult(scalar: &[u8; 32], u_point: &[u8; 32]) -> [u8; 32] {
+pub(crate) fn x25519_scalar_mult(scalar: &[u8; 32], u_point: &[u8; 32]) -> [u8; 32] {
     // Clamp scalar per RFC 7748 Section 5
     let mut k = *scalar;
     k[0] &= 248;
@@ -1306,7 +1306,7 @@ pub fn x25519_scalar_mult(scalar: &[u8; 32], u_point: &[u8; 32]) -> [u8; 32] {
 }
 
 /// X25519 base point (u=9)
-pub const X25519_BASEPOINT: [u8; 32] = {
+pub(crate) const X25519_BASEPOINT: [u8; 32] = {
     let mut b = [0u8; 32];
     b[0] = 9;
     b
@@ -1333,19 +1333,19 @@ pub mod key_exchange {
 
     impl PublicKey {
         /// Create from bytes
-        pub fn from_bytes(bytes: &[u8; 32]) -> Self {
+        pub(crate) fn from_bytes(bytes: &[u8; 32]) -> Self {
             Self { bytes: *bytes }
         }
 
         /// Get bytes
-        pub fn as_bytes(&self) -> &[u8; 32] {
+        pub(crate) fn as_bytes(&self) -> &[u8; 32] {
             &self.bytes
         }
     }
 
     impl SecretKey {
         /// Generate new secret key
-        pub fn generate() -> CryptoResult<Self> {
+        pub(crate) fn generate() -> CryptoResult<Self> {
             use super::super::random::get_random;
 
             let rng = get_random();
@@ -1357,14 +1357,14 @@ pub mod key_exchange {
 
         /// Get corresponding public key using X25519
         /// public_key = scalar_mult(secret, basepoint)
-        pub fn public_key(&self) -> PublicKey {
+        pub(crate) fn public_key(&self) -> PublicKey {
             let pub_bytes = super::x25519_scalar_mult(&self.bytes, &super::X25519_BASEPOINT);
             PublicKey { bytes: pub_bytes }
         }
 
         /// Perform X25519 key exchange
         /// shared_secret = scalar_mult(my_secret, their_public)
-        pub fn exchange(&self, their_public: &PublicKey) -> CryptoResult<SharedSecret> {
+        pub(crate) fn exchange(&self, their_public: &PublicKey) -> CryptoResult<SharedSecret> {
             let shared = super::x25519_scalar_mult(&self.bytes, &their_public.bytes);
 
             // Check for all-zero output (low-order point)
@@ -1386,7 +1386,7 @@ pub mod key_exchange {
 
     impl SharedSecret {
         /// Get shared secret bytes
-        pub fn as_bytes(&self) -> &[u8; 32] {
+        pub(crate) fn as_bytes(&self) -> &[u8; 32] {
             &self.bytes
         }
     }

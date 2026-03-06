@@ -2,7 +2,7 @@
 //!
 //! Provides cryptographically secure random number generation using a
 //! ChaCha20-based CSPRNG seeded from hardware entropy sources.
-//!
+#![allow(dead_code)]
 //! ## Design
 //!
 //! The CSPRNG uses ChaCha20 in counter mode as the core PRG:
@@ -27,7 +27,7 @@ use crate::sync::once_lock::OnceLock;
 const RESEED_INTERVAL: u64 = 4096;
 
 /// Secure random number generator backed by ChaCha20
-pub struct SecureRandom {
+pub(crate) struct SecureRandom {
     state: Mutex<RandomState>,
 }
 
@@ -52,7 +52,7 @@ struct RandomState {
 
 impl SecureRandom {
     /// Create new secure random number generator
-    pub fn new() -> CryptoResult<Self> {
+    pub(crate) fn new() -> CryptoResult<Self> {
         // Initialize with hardware RNG or timer
         let seed = Self::get_entropy()?;
 
@@ -90,7 +90,7 @@ impl SecureRandom {
     }
 
     /// Generate random bytes
-    pub fn fill_bytes(&self, dest: &mut [u8]) -> CryptoResult<()> {
+    pub(crate) fn fill_bytes(&self, dest: &mut [u8]) -> CryptoResult<()> {
         let mut state = self.state.lock();
 
         // Check if reseed is needed
@@ -122,7 +122,7 @@ impl SecureRandom {
     }
 
     /// Generate random u64
-    pub fn next_u64(&self) -> u64 {
+    pub(crate) fn next_u64(&self) -> u64 {
         let mut bytes = [0u8; 8];
         if let Err(_e) = self.fill_bytes(&mut bytes) {
             crate::println!("[CSPRNG] Warning: fill_bytes failed in next_u64: {:?}", _e);
@@ -131,7 +131,7 @@ impl SecureRandom {
     }
 
     /// Generate random u32
-    pub fn next_u32(&self) -> u32 {
+    pub(crate) fn next_u32(&self) -> u32 {
         let mut bytes = [0u8; 4];
         if let Err(_e) = self.fill_bytes(&mut bytes) {
             crate::println!("[CSPRNG] Warning: fill_bytes failed in next_u32: {:?}", _e);
@@ -314,19 +314,19 @@ impl Default for SecureRandom {
 static RNG_STORAGE: OnceLock<SecureRandom> = OnceLock::new();
 
 /// Initialize random number generator
-pub fn init() -> CryptoResult<()> {
+pub(crate) fn init() -> CryptoResult<()> {
     let rng = SecureRandom::new()?;
     let _ = RNG_STORAGE.set(rng);
     Ok(())
 }
 
 /// Get global random number generator
-pub fn get_random() -> &'static SecureRandom {
+pub(crate) fn get_random() -> &'static SecureRandom {
     RNG_STORAGE.get_or_init(|| SecureRandom::new().expect("Failed to create RNG"))
 }
 
 /// Generate random bytes (convenience function)
-pub fn random_bytes(count: usize) -> Vec<u8> {
+pub(crate) fn random_bytes(count: usize) -> Vec<u8> {
     let mut bytes = vec![0u8; count];
 
     let rng = get_random();

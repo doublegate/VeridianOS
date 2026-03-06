@@ -119,7 +119,7 @@ impl Default for IpcPerfStats {
 }
 
 /// Global IPC performance statistics instance
-pub static IPC_PERF_STATS: IpcPerfStats = IpcPerfStats::new();
+pub(crate) static IPC_PERF_STATS: IpcPerfStats = IpcPerfStats::new();
 
 /// IPC performance report
 #[derive(Debug, Clone, Copy)]

@@ -303,7 +303,7 @@ impl ProcessTable {
 }
 
 /// Global process table instance
-pub static PROCESS_TABLE: ProcessTable = ProcessTable::new();
+pub(crate) static PROCESS_TABLE: ProcessTable = ProcessTable::new();
 
 /// Initialize the process table
 pub fn init() {

@@ -1702,9 +1702,9 @@ pub enum AudioSchedError {
 }
 
 /// Global audio scheduling statistics counters (lock-free).
-pub static AUDIO_TOTAL_UNDERRUNS: AtomicU64 = AtomicU64::new(0);
-pub static AUDIO_TOTAL_OVERRUNS: AtomicU64 = AtomicU64::new(0);
-pub static AUDIO_TOTAL_LATE_WAKES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static AUDIO_TOTAL_UNDERRUNS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static AUDIO_TOTAL_OVERRUNS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static AUDIO_TOTAL_LATE_WAKES: AtomicU64 = AtomicU64::new(0);
 
 /// Increment global underrun counter.
 pub fn count_audio_underrun() {

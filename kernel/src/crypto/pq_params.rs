@@ -3,7 +3,7 @@
 //! Official parameter sets from NIST FIPS 203 (ML-KEM) and FIPS 204 (ML-DSA).
 //!
 //! ## References
-//!
+#![allow(dead_code)]
 //! - FIPS 203: Module-Lattice-Based Key-Encapsulation Mechanism Standard
 //! - FIPS 204: Module-Lattice-Based Digital Signature Standard
 //! - NIST PQC Standardization Process: <https://csrc.nist.gov/projects/post-quantum-cryptography>
@@ -123,7 +123,7 @@ pub mod kyber {
 
 /// Security level mapping
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SecurityLevel {
+pub(crate) enum SecurityLevel {
     /// NIST Level 1 (equivalent to AES-128, ~128 bits quantum security)
     Level1,
     /// NIST Level 2 (equivalent to SHA-256 collision resistance, ~128 bits)
@@ -138,7 +138,7 @@ pub enum SecurityLevel {
 
 impl SecurityLevel {
     /// Get classical security bits
-    pub fn classical_bits(&self) -> u32 {
+    pub(crate) fn classical_bits(&self) -> u32 {
         match self {
             SecurityLevel::Level1 | SecurityLevel::Level2 => 128,
             SecurityLevel::Level3 | SecurityLevel::Level4 => 192,
@@ -147,7 +147,7 @@ impl SecurityLevel {
     }
 
     /// Get quantum security bits
-    pub fn quantum_bits(&self) -> u32 {
+    pub(crate) fn quantum_bits(&self) -> u32 {
         match self {
             SecurityLevel::Level1 | SecurityLevel::Level2 => 128,
             SecurityLevel::Level3 | SecurityLevel::Level4 => 192,
@@ -156,7 +156,7 @@ impl SecurityLevel {
     }
 
     /// Get recommended use cases
-    pub fn use_cases(&self) -> &'static str {
+    pub(crate) fn use_cases(&self) -> &'static str {
         match self {
             SecurityLevel::Level1 | SecurityLevel::Level2 => {
                 "Standard security applications, IoT devices, embedded systems"
@@ -176,7 +176,7 @@ pub mod recommendations {
     use super::SecurityLevel;
 
     /// Get recommended Dilithium level for security requirement
-    pub fn dilithium_level(required_security: SecurityLevel) -> &'static str {
+    pub(crate) fn dilithium_level(required_security: SecurityLevel) -> &'static str {
         match required_security {
             SecurityLevel::Level1 | SecurityLevel::Level2 => "ML-DSA-44 (Level 2)",
             SecurityLevel::Level3 | SecurityLevel::Level4 => "ML-DSA-65 (Level 3)",
@@ -185,7 +185,7 @@ pub mod recommendations {
     }
 
     /// Get recommended Kyber level for security requirement
-    pub fn kyber_level(required_security: SecurityLevel) -> &'static str {
+    pub(crate) fn kyber_level(required_security: SecurityLevel) -> &'static str {
         match required_security {
             SecurityLevel::Level1 | SecurityLevel::Level2 => "ML-KEM-512",
             SecurityLevel::Level3 | SecurityLevel::Level4 => "ML-KEM-768",
@@ -194,10 +194,10 @@ pub mod recommendations {
     }
 
     /// Default security level for general use
-    pub const DEFAULT_SECURITY: SecurityLevel = SecurityLevel::Level3;
+    pub(crate) const DEFAULT_SECURITY: SecurityLevel = SecurityLevel::Level3;
 
     /// Performance vs Security trade-offs
-    pub const PERFORMANCE_NOTES: &str = "
+    pub(crate) const PERFORMANCE_NOTES: &str = "
     Level 2 (ML-DSA-44, ML-KEM-512):
       - Fastest performance
       - Smallest key/signature sizes

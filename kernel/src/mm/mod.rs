@@ -24,9 +24,10 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+pub(crate) use frame_allocator::FRAME_ALLOCATOR;
 // Re-export commonly used types
 pub use frame_allocator::{
-    FrameAllocatorError, FrameNumber, PhysicalAddress, PhysicalFrame, FRAME_ALLOCATOR, FRAME_SIZE,
+    FrameAllocatorError, FrameNumber, PhysicalAddress, PhysicalFrame, FRAME_SIZE,
 };
 pub use heap::init as init_heap;
 pub use user_validation::{is_user_addr_valid, translate_address as translate_user_address};
@@ -40,7 +41,7 @@ pub const PAGE_SIZE: usize = 4096;
 /// On x86_64 with bootloader 0.11, physical memory is mapped at a dynamic
 /// offset provided by the bootloader. On AArch64 and RISC-V, physical
 /// memory is identity-mapped (offset = 0).
-pub static PHYS_MEM_OFFSET: AtomicU64 = AtomicU64::new(0);
+pub(crate) static PHYS_MEM_OFFSET: AtomicU64 = AtomicU64::new(0);
 
 /// Set the physical memory offset (called once during early boot).
 pub fn set_phys_mem_offset(offset: u64) {

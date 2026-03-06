@@ -9,6 +9,3 @@ pub mod gdb_stub;
 
 #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
 pub mod breakpoint;
-
-#[cfg(all(feature = "alloc", target_arch = "x86_64"))]
-pub use gdb_stub::{gdb_handle_exception, gdb_init};

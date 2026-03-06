@@ -13,7 +13,7 @@ use super::{
 use crate::crypto::CryptoResult;
 
 /// Hybrid key exchange (combining classical and post-quantum)
-pub struct HybridKeyExchange {
+pub(crate) struct HybridKeyExchange {
     /// X25519 classical key
     classical_secret: crate::crypto::asymmetric::key_exchange::SecretKey,
     /// Kyber post-quantum key
@@ -22,7 +22,7 @@ pub struct HybridKeyExchange {
 
 impl HybridKeyExchange {
     /// Generate new hybrid key pair
-    pub fn generate(kyber_level: KyberLevel) -> CryptoResult<Self> {
+    pub(crate) fn generate(kyber_level: KyberLevel) -> CryptoResult<Self> {
         let classical_secret = crate::crypto::asymmetric::key_exchange::SecretKey::generate()?;
         let pq_secret = KyberSecretKey::generate(kyber_level)?;
 
@@ -33,7 +33,7 @@ impl HybridKeyExchange {
     }
 
     /// Get public keys
-    pub fn public_keys(
+    pub(crate) fn public_keys(
         &self,
     ) -> (
         crate::crypto::asymmetric::key_exchange::PublicKey,
@@ -46,7 +46,7 @@ impl HybridKeyExchange {
     }
 
     /// Perform hybrid key exchange
-    pub fn exchange(
+    pub(crate) fn exchange(
         &self,
         their_classical: &crate::crypto::asymmetric::key_exchange::PublicKey,
         their_pq_ct: &KyberCiphertext,

@@ -47,14 +47,17 @@ pub mod riscv_scheduler;
 // ---- Re-exports: scheduler types ----
 
 #[cfg(not(target_arch = "riscv64"))]
-pub use queue::READY_QUEUE;
+pub(crate) use queue::READY_QUEUE;
 #[cfg(target_arch = "riscv64")]
 pub use scheduler::SchedAlgorithm;
 #[cfg(not(target_arch = "riscv64"))]
-pub use scheduler::{SchedAlgorithm, SCHEDULER};
+pub use scheduler::SchedAlgorithm;
+#[cfg(not(target_arch = "riscv64"))]
+pub(crate) use scheduler::SCHEDULER;
 
 #[cfg(target_arch = "riscv64")]
-pub static SCHEDULER: riscv_scheduler::RiscvScheduler = riscv_scheduler::RiscvScheduler::new();
+pub(crate) static SCHEDULER: riscv_scheduler::RiscvScheduler =
+    riscv_scheduler::RiscvScheduler::new();
 
 // ---- Re-exports: initialization ----
 pub use init::{init, init_with_bootstrap};

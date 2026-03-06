@@ -4,6 +4,7 @@
 //! color space conversion (YUV <-> RGB via BT.601), alpha blending, and
 //! framebuffer blitting. All math is integer-only (no FPU).
 
+#![allow(clippy::upper_case_acronyms)]
 #![allow(dead_code)]
 
 use super::VideoFrame;
@@ -15,7 +16,7 @@ use crate::graphics::PixelFormat;
 
 /// Scaling algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScaleMode {
+pub(crate) enum ScaleMode {
     /// Point sampling -- fastest, blocky.
     NearestNeighbor,
     /// Fixed-point 8.8 bilinear interpolation -- smoother.
@@ -28,7 +29,7 @@ pub enum ScaleMode {
 
 /// Color space descriptor (for future pipeline use).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColorSpace {
+pub(crate) enum ColorSpace {
     SRGB,
     LinearRGB,
     YUV420,
@@ -43,7 +44,7 @@ pub enum ColorSpace {
 ///
 /// Source pixels are read through `get_pixel()` so any pixel format is
 /// supported.  The output frame uses the same `PixelFormat` as the source.
-pub fn scale_frame(
+pub(crate) fn scale_frame(
     src: &VideoFrame,
     dst_width: u32,
     dst_height: u32,
@@ -139,7 +140,7 @@ pub fn scale_frame(
 ///
 /// Pixels are read with `get_pixel()` (format-aware) and written with
 /// `set_pixel()`, so any combination of source/destination formats works.
-pub fn convert_pixel_format(src: &VideoFrame, dst_format: PixelFormat) -> VideoFrame {
+pub(crate) fn convert_pixel_format(src: &VideoFrame, dst_format: PixelFormat) -> VideoFrame {
     let mut dst = VideoFrame::new(src.width, src.height, dst_format);
     for y in 0..src.height {
         for x in 0..src.width {
@@ -164,7 +165,7 @@ pub fn convert_pixel_format(src: &VideoFrame, dst_format: PixelFormat) -> VideoF
 ///
 /// The caller must ensure `fb_addr` points to a valid writable region of
 /// at least `fb_stride * fb_height` bytes.
-pub unsafe fn blit_to_framebuffer(
+pub(crate) unsafe fn blit_to_framebuffer(
     frame: &VideoFrame,
     fb_addr: usize,
     fb_width: u32,
@@ -228,7 +229,7 @@ pub unsafe fn blit_to_framebuffer(
 /// Blit a `VideoFrame` onto a u32 slice buffer (BGRA layout).
 ///
 /// Safe variant that works with Rust slices instead of raw pointers.
-pub fn blit_to_buffer(
+pub(crate) fn blit_to_buffer(
     frame: &VideoFrame,
     buffer: &mut [u32],
     buf_width: u32,
@@ -283,7 +284,7 @@ pub fn blit_to_buffer(
 ///       - 0.714 * (V - 128)     ~  Y - (88*(U-128) + 183*(V-128)) >> 8
 /// B = Y + 1.772 * (U - 128)     ~  Y + (454 * (U-128)) >> 8
 /// ```
-pub fn yuv_to_rgb(y: u8, u: u8, v: u8) -> (u8, u8, u8) {
+pub(crate) fn yuv_to_rgb(y: u8, u: u8, v: u8) -> (u8, u8, u8) {
     let y = y as i32;
     let cb = u as i32 - 128;
     let cr = v as i32 - 128;
@@ -302,7 +303,7 @@ pub fn yuv_to_rgb(y: u8, u: u8, v: u8) -> (u8, u8, u8) {
 /// U  = -0.169*R - 0.331*G + 0.500*B + 128  ~ ((-43*R - 85*G + 128*B) >> 8) + 128
 /// V  =  0.500*R - 0.419*G - 0.081*B + 128  ~ ((128*R - 107*G - 21*B) >> 8) + 128
 /// ```
-pub fn rgb_to_yuv(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+pub(crate) fn rgb_to_yuv(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
     let ri = r as i32;
     let gi = g as i32;
     let bi = b as i32;
@@ -322,7 +323,7 @@ pub fn rgb_to_yuv(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
 ///
 /// Uses integer math: `result = (src * alpha + dst * (255 - alpha)) / 255`.
 /// This is the standard "over" compositing operation.
-pub fn alpha_blend(
+pub(crate) fn alpha_blend(
     src_r: u8,
     src_g: u8,
     src_b: u8,

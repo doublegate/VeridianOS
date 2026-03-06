@@ -67,7 +67,7 @@ impl Container {
 }
 
 static NEXT_CONTAINER_ID: AtomicU64 = AtomicU64::new(1);
-pub static CONTAINER_MGR: spin::Mutex<Option<ContainerManager>> = spin::Mutex::new(None);
+pub(crate) static CONTAINER_MGR: spin::Mutex<Option<ContainerManager>> = spin::Mutex::new(None);
 
 #[cfg(feature = "alloc")]
 pub struct ContainerManager {

@@ -243,7 +243,7 @@ impl PerCpuScheduler {
 }
 
 /// Global per-CPU scheduler instance.
-pub static PERCPU_SCHED: Mutex<Option<PerCpuScheduler>> = Mutex::new(None);
+pub(crate) static PERCPU_SCHED: Mutex<Option<PerCpuScheduler>> = Mutex::new(None);
 
 /// Push a process onto the appropriate CPU's queue.
 pub fn percpu_push(cpu_id: usize, pid: ProcessId) {

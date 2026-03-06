@@ -10,7 +10,7 @@ use alloc::{
 };
 
 /// Gap buffer for efficient text editing
-pub struct GapBuffer {
+pub(crate) struct GapBuffer {
     buf: Vec<u8>,
     gap_start: usize,
     gap_end: usize,
@@ -25,7 +25,7 @@ impl Default for GapBuffer {
 impl GapBuffer {
     const INITIAL_GAP: usize = 64;
 
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             buf: vec![0; Self::INITIAL_GAP],
             gap_start: 0,
@@ -33,7 +33,7 @@ impl GapBuffer {
         }
     }
 
-    pub fn from_text(text: &str) -> Self {
+    pub(crate) fn from_text(text: &str) -> Self {
         let bytes = text.as_bytes();
         let gap_size = Self::INITIAL_GAP;
         let mut buf = Vec::with_capacity(bytes.len() + gap_size);
@@ -47,11 +47,11 @@ impl GapBuffer {
         }
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.buf.len() - self.gap_len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
@@ -98,7 +98,7 @@ impl GapBuffer {
     }
 
     /// Insert a character at position
-    pub fn insert(&mut self, pos: usize, ch: u8) {
+    pub(crate) fn insert(&mut self, pos: usize, ch: u8) {
         self.move_gap_to(pos);
         self.ensure_gap(1);
         self.buf[self.gap_start] = ch;
@@ -106,7 +106,7 @@ impl GapBuffer {
     }
 
     /// Insert a string at position
-    pub fn insert_str(&mut self, pos: usize, text: &str) {
+    pub(crate) fn insert_str(&mut self, pos: usize, text: &str) {
         self.move_gap_to(pos);
         self.ensure_gap(text.len());
         self.buf[self.gap_start..self.gap_start + text.len()].copy_from_slice(text.as_bytes());
@@ -114,7 +114,7 @@ impl GapBuffer {
     }
 
     /// Delete a character at position
-    pub fn delete(&mut self, pos: usize) -> Option<u8> {
+    pub(crate) fn delete(&mut self, pos: usize) -> Option<u8> {
         if pos >= self.len() {
             return None;
         }
@@ -125,7 +125,7 @@ impl GapBuffer {
     }
 
     /// Delete a range of characters
-    pub fn delete_range(&mut self, start: usize, end: usize) -> usize {
+    pub(crate) fn delete_range(&mut self, start: usize, end: usize) -> usize {
         if start >= end || start >= self.len() {
             return 0;
         }
@@ -137,7 +137,7 @@ impl GapBuffer {
     }
 
     /// Get character at position
-    pub fn char_at(&self, pos: usize) -> Option<u8> {
+    pub(crate) fn char_at(&self, pos: usize) -> Option<u8> {
         if pos >= self.len() {
             return None;
         }
@@ -150,7 +150,7 @@ impl GapBuffer {
     }
 
     /// Convert to String
-    pub fn to_text(&self) -> String {
+    pub(crate) fn to_text(&self) -> String {
         let mut result = Vec::with_capacity(self.len());
         for i in 0..self.gap_start {
             result.push(self.buf[i]);
@@ -162,13 +162,13 @@ impl GapBuffer {
     }
 
     /// Get a line by number (0-based)
-    pub fn line(&self, line_num: usize) -> Option<String> {
+    pub(crate) fn line(&self, line_num: usize) -> Option<String> {
         let text = self.to_text();
         text.lines().nth(line_num).map(|s| s.to_string())
     }
 
     /// Count lines
-    pub fn line_count(&self) -> usize {
+    pub(crate) fn line_count(&self) -> usize {
         let text = self.to_text();
         text.lines().count().max(1)
     }
@@ -182,20 +182,20 @@ enum EditOp {
 }
 
 /// Editor buffer (file being edited)
-pub struct EditorBuffer {
-    pub name: String,
-    pub gap_buf: GapBuffer,
-    pub cursor_pos: usize,
-    pub cursor_line: usize,
-    pub cursor_col: usize,
-    pub modified: bool,
+pub(crate) struct EditorBuffer {
+    pub(crate) name: String,
+    pub(crate) gap_buf: GapBuffer,
+    pub(crate) cursor_pos: usize,
+    pub(crate) cursor_line: usize,
+    pub(crate) cursor_col: usize,
+    pub(crate) modified: bool,
     undo_stack: Vec<EditOp>,
     redo_stack: Vec<EditOp>,
-    pub scroll_top: usize,
+    pub(crate) scroll_top: usize,
 }
 
 impl EditorBuffer {
-    pub fn new(name: &str) -> Self {
+    pub(crate) fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
             gap_buf: GapBuffer::new(),
@@ -209,7 +209,7 @@ impl EditorBuffer {
         }
     }
 
-    pub fn from_text(name: &str, text: &str) -> Self {
+    pub(crate) fn from_text(name: &str, text: &str) -> Self {
         Self {
             name: name.to_string(),
             gap_buf: GapBuffer::from_text(text),
@@ -223,7 +223,7 @@ impl EditorBuffer {
         }
     }
 
-    pub fn insert_char(&mut self, ch: u8) {
+    pub(crate) fn insert_char(&mut self, ch: u8) {
         self.gap_buf.insert(self.cursor_pos, ch);
         let text = String::from(ch as char);
         self.undo_stack.push(EditOp::Insert {
@@ -236,7 +236,7 @@ impl EditorBuffer {
         self.update_cursor_pos();
     }
 
-    pub fn insert_text(&mut self, text: &str) {
+    pub(crate) fn insert_text(&mut self, text: &str) {
         self.gap_buf.insert_str(self.cursor_pos, text);
         self.undo_stack.push(EditOp::Insert {
             pos: self.cursor_pos,
@@ -248,7 +248,7 @@ impl EditorBuffer {
         self.update_cursor_pos();
     }
 
-    pub fn delete_char(&mut self) -> Option<u8> {
+    pub(crate) fn delete_char(&mut self) -> Option<u8> {
         if self.cursor_pos >= self.gap_buf.len() {
             return None;
         }
@@ -262,7 +262,7 @@ impl EditorBuffer {
         Some(ch)
     }
 
-    pub fn backspace(&mut self) -> Option<u8> {
+    pub(crate) fn backspace(&mut self) -> Option<u8> {
         if self.cursor_pos == 0 {
             return None;
         }
@@ -270,7 +270,7 @@ impl EditorBuffer {
         self.delete_char()
     }
 
-    pub fn undo(&mut self) -> bool {
+    pub(crate) fn undo(&mut self) -> bool {
         let op = match self.undo_stack.pop() {
             Some(op) => op,
             None => return false,
@@ -293,7 +293,7 @@ impl EditorBuffer {
         true
     }
 
-    pub fn redo(&mut self) -> bool {
+    pub(crate) fn redo(&mut self) -> bool {
         let op = match self.redo_stack.pop() {
             Some(op) => op,
             None => return false,
@@ -325,17 +325,17 @@ impl EditorBuffer {
             .map_or(before.len(), |p| before.len() - p - 1);
     }
 
-    pub fn content(&self) -> String {
+    pub(crate) fn content(&self) -> String {
         self.gap_buf.to_text()
     }
 
-    pub fn line_count(&self) -> usize {
+    pub(crate) fn line_count(&self) -> usize {
         self.gap_buf.line_count()
     }
 }
 
 /// Multi-buffer editor
-pub struct Editor {
+pub(crate) struct Editor {
     buffers: Vec<EditorBuffer>,
     active: usize,
 }
@@ -347,21 +347,21 @@ impl Default for Editor {
 }
 
 impl Editor {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             buffers: Vec::new(),
             active: 0,
         }
     }
 
-    pub fn open(&mut self, name: &str, content: &str) -> usize {
+    pub(crate) fn open(&mut self, name: &str, content: &str) -> usize {
         let idx = self.buffers.len();
         self.buffers.push(EditorBuffer::from_text(name, content));
         self.active = idx;
         idx
     }
 
-    pub fn close(&mut self, idx: usize) -> bool {
+    pub(crate) fn close(&mut self, idx: usize) -> bool {
         if idx >= self.buffers.len() {
             return false;
         }
@@ -372,15 +372,15 @@ impl Editor {
         true
     }
 
-    pub fn active_buffer(&self) -> Option<&EditorBuffer> {
+    pub(crate) fn active_buffer(&self) -> Option<&EditorBuffer> {
         self.buffers.get(self.active)
     }
 
-    pub fn active_buffer_mut(&mut self) -> Option<&mut EditorBuffer> {
+    pub(crate) fn active_buffer_mut(&mut self) -> Option<&mut EditorBuffer> {
         self.buffers.get_mut(self.active)
     }
 
-    pub fn switch_to(&mut self, idx: usize) -> bool {
+    pub(crate) fn switch_to(&mut self, idx: usize) -> bool {
         if idx < self.buffers.len() {
             self.active = idx;
             true
@@ -389,7 +389,7 @@ impl Editor {
         }
     }
 
-    pub fn buffer_count(&self) -> usize {
+    pub(crate) fn buffer_count(&self) -> usize {
         self.buffers.len()
     }
 }

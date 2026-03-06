@@ -16,32 +16,32 @@ use super::{
 
 /// Index entry (staging area)
 #[derive(Debug, Clone)]
-pub struct IndexEntry {
-    pub path: String,
-    pub id: ObjectId,
-    pub mode: u32,
-    pub size: u64,
+pub(crate) struct IndexEntry {
+    pub(crate) path: String,
+    pub(crate) id: ObjectId,
+    pub(crate) mode: u32,
+    pub(crate) size: u64,
 }
 
 /// Git repository (in-memory)
-pub struct Repository {
+pub(crate) struct Repository {
     /// Object store (id -> serialized data)
     objects: BTreeMap<ObjectId, Vec<u8>>,
     /// Reference store
-    pub refs: RefStore,
+    pub(crate) refs: RefStore,
     /// Index (staging area)
     index: Vec<IndexEntry>,
     /// Working directory path
-    pub workdir: String,
+    pub(crate) workdir: String,
     /// User configuration
-    pub config: GitConfig,
+    pub(crate) config: GitConfig,
 }
 
 /// Git configuration
 #[derive(Debug, Clone)]
-pub struct GitConfig {
-    pub user_name: String,
-    pub user_email: String,
+pub(crate) struct GitConfig {
+    pub(crate) user_name: String,
+    pub(crate) user_email: String,
 }
 
 impl Default for GitConfig {
@@ -55,17 +55,17 @@ impl Default for GitConfig {
 
 /// Diff hunk
 #[derive(Debug, Clone)]
-pub struct DiffHunk {
-    pub old_start: usize,
-    pub old_count: usize,
-    pub new_start: usize,
-    pub new_count: usize,
-    pub lines: Vec<DiffLine>,
+pub(crate) struct DiffHunk {
+    pub(crate) old_start: usize,
+    pub(crate) old_count: usize,
+    pub(crate) new_start: usize,
+    pub(crate) new_count: usize,
+    pub(crate) lines: Vec<DiffLine>,
 }
 
 /// Diff line
 #[derive(Debug, Clone)]
-pub enum DiffLine {
+pub(crate) enum DiffLine {
     Context(String),
     Added(String),
     Removed(String),
@@ -73,16 +73,16 @@ pub enum DiffLine {
 
 /// Log entry for display
 #[derive(Debug, Clone)]
-pub struct LogEntry {
-    pub id: ObjectId,
-    pub author: String,
-    pub timestamp: u64,
-    pub message: String,
+pub(crate) struct LogEntry {
+    pub(crate) id: ObjectId,
+    pub(crate) author: String,
+    pub(crate) timestamp: u64,
+    pub(crate) message: String,
 }
 
 impl Repository {
     /// Initialize a new repository
-    pub fn init(workdir: &str) -> Self {
+    pub(crate) fn init(workdir: &str) -> Self {
         Self {
             objects: BTreeMap::new(),
             refs: RefStore::new(),
@@ -93,25 +93,25 @@ impl Repository {
     }
 
     /// Store a git object and return its ID
-    pub fn store_object(&mut self, obj: &GitObject) -> ObjectId {
+    pub(crate) fn store_object(&mut self, obj: &GitObject) -> ObjectId {
         let id = obj.compute_id();
         self.objects.entry(id).or_insert_with(|| obj.serialize());
         id
     }
 
     /// Retrieve a git object by ID
-    pub fn get_object(&self, id: &ObjectId) -> Option<GitObject> {
+    pub(crate) fn get_object(&self, id: &ObjectId) -> Option<GitObject> {
         let data = self.objects.get(id)?;
         GitObject::deserialize(data)
     }
 
     /// Check if an object exists
-    pub fn has_object(&self, id: &ObjectId) -> bool {
+    pub(crate) fn has_object(&self, id: &ObjectId) -> bool {
         self.objects.contains_key(id)
     }
 
     /// Object count
-    pub fn object_count(&self) -> usize {
+    pub(crate) fn object_count(&self) -> usize {
         self.objects.len()
     }
 
@@ -120,7 +120,7 @@ impl Repository {
     // -----------------------------------------------------------------------
 
     /// `git add` -- stage a file
-    pub fn add(&mut self, path: &str, content: &[u8]) -> ObjectId {
+    pub(crate) fn add(&mut self, path: &str, content: &[u8]) -> ObjectId {
         let blob = Blob::new(content.to_vec());
         let obj = blob.to_object();
         let id = self.store_object(&obj);
@@ -142,7 +142,7 @@ impl Repository {
     }
 
     /// `git commit` -- create a commit from the index
-    pub fn commit(&mut self, message: &str) -> Option<ObjectId> {
+    pub(crate) fn commit(&mut self, message: &str) -> Option<ObjectId> {
         if self.index.is_empty() {
             return None;
         }
@@ -195,7 +195,7 @@ impl Repository {
     }
 
     /// `git log` -- walk commit history
-    pub fn log(&self, max_entries: usize) -> Vec<LogEntry> {
+    pub(crate) fn log(&self, max_entries: usize) -> Vec<LogEntry> {
         let mut entries = Vec::new();
         let mut current = match self.refs.head() {
             Some(id) => *id,
@@ -231,7 +231,7 @@ impl Repository {
     }
 
     /// `git diff` -- compare two blobs (simple line diff)
-    pub fn diff_blobs(&self, old: &[u8], new: &[u8]) -> Vec<DiffHunk> {
+    pub(crate) fn diff_blobs(&self, old: &[u8], new: &[u8]) -> Vec<DiffHunk> {
         let old_lines: Vec<&str> = core::str::from_utf8(old).unwrap_or("").lines().collect();
         let new_lines: Vec<&str> = core::str::from_utf8(new).unwrap_or("").lines().collect();
 
@@ -275,11 +275,11 @@ impl Repository {
     }
 
     /// `git branch` -- list or create branches
-    pub fn branch_list(&self) -> Vec<String> {
+    pub(crate) fn branch_list(&self) -> Vec<String> {
         self.refs.branches()
     }
 
-    pub fn branch_create(&mut self, name: &str) -> bool {
+    pub(crate) fn branch_create(&mut self, name: &str) -> bool {
         if let Some(head_id) = self.refs.head() {
             let id = *head_id;
             self.refs.create_branch(name, id);
@@ -289,18 +289,18 @@ impl Repository {
         }
     }
 
-    pub fn branch_delete(&mut self, name: &str) -> bool {
+    pub(crate) fn branch_delete(&mut self, name: &str) -> bool {
         let ref_name = alloc::format!("refs/heads/{}", name);
         self.refs.delete(&ref_name)
     }
 
     /// `git checkout` -- switch branches
-    pub fn checkout(&mut self, branch: &str) -> bool {
+    pub(crate) fn checkout(&mut self, branch: &str) -> bool {
         self.refs.checkout_branch(branch)
     }
 
     /// `git status` -- show index and working tree status
-    pub fn status(&self) -> Vec<String> {
+    pub(crate) fn status(&self) -> Vec<String> {
         let mut lines = Vec::new();
 
         if let Some(branch) = self.refs.current_branch() {
@@ -325,7 +325,7 @@ impl Repository {
     }
 
     /// `git tag` -- create a lightweight tag
-    pub fn tag_create(&mut self, name: &str) -> bool {
+    pub(crate) fn tag_create(&mut self, name: &str) -> bool {
         if let Some(head_id) = self.refs.head() {
             let id = *head_id;
             self.refs.create_tag(name, id);
@@ -336,7 +336,7 @@ impl Repository {
     }
 
     /// Get index entry count
-    pub fn index_count(&self) -> usize {
+    pub(crate) fn index_count(&self) -> usize {
         self.index.len()
     }
 }

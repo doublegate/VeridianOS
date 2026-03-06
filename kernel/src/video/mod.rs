@@ -21,22 +21,22 @@ use crate::{error::KernelError, graphics::PixelFormat};
 
 /// A single video/image frame stored in CPU-accessible memory.
 #[derive(Debug, Clone)]
-pub struct VideoFrame {
+pub(crate) struct VideoFrame {
     /// Width in pixels.
-    pub width: u32,
+    pub(crate) width: u32,
     /// Height in pixels.
-    pub height: u32,
+    pub(crate) height: u32,
     /// Pixel format.
-    pub format: PixelFormat,
+    pub(crate) format: PixelFormat,
     /// Raw pixel data (row-major, tightly packed or with stride padding).
     data: Vec<u8>,
     /// Row stride in bytes (>= width * bpp).
-    pub stride: u32,
+    pub(crate) stride: u32,
 }
 
 impl VideoFrame {
     /// Allocate a new, zeroed frame.
-    pub fn new(width: u32, height: u32, format: PixelFormat) -> Self {
+    pub(crate) fn new(width: u32, height: u32, format: PixelFormat) -> Self {
         let bpp = format.bytes_per_pixel() as u32;
         let stride = width * bpp;
         let size = (stride as usize) * (height as usize);
@@ -51,12 +51,12 @@ impl VideoFrame {
 
     /// Byte offset of pixel (x, y) in the data buffer.
     #[inline]
-    pub fn pixel_offset(&self, x: u32, y: u32) -> usize {
+    pub(crate) fn pixel_offset(&self, x: u32, y: u32) -> usize {
         (y as usize) * (self.stride as usize) + (x as usize) * self.format.bytes_per_pixel()
     }
 
     /// Write a pixel at (x, y).  Out-of-bounds writes are silently ignored.
-    pub fn set_pixel(&mut self, x: u32, y: u32, r: u8, g: u8, b: u8, a: u8) {
+    pub(crate) fn set_pixel(&mut self, x: u32, y: u32, r: u8, g: u8, b: u8, a: u8) {
         if x >= self.width || y >= self.height {
             return;
         }
@@ -151,7 +151,7 @@ impl VideoFrame {
 
     /// Read a pixel at (x, y) as (R, G, B, A).
     /// Returns (0,0,0,0) for out-of-bounds coordinates.
-    pub fn get_pixel(&self, x: u32, y: u32) -> (u8, u8, u8, u8) {
+    pub(crate) fn get_pixel(&self, x: u32, y: u32) -> (u8, u8, u8, u8) {
         if x >= self.width || y >= self.height {
             return (0, 0, 0, 0);
         }
@@ -274,7 +274,7 @@ impl VideoFrame {
     }
 
     /// Fill the entire frame with a solid color.
-    pub fn clear(&mut self, r: u8, g: u8, b: u8) {
+    pub(crate) fn clear(&mut self, r: u8, g: u8, b: u8) {
         for y in 0..self.height {
             for x in 0..self.width {
                 self.set_pixel(x, y, r, g, b, 0xFF);
@@ -283,12 +283,12 @@ impl VideoFrame {
     }
 
     /// Immutable access to the raw pixel data.
-    pub fn data(&self) -> &[u8] {
+    pub(crate) fn data(&self) -> &[u8] {
         &self.data
     }
 
     /// Mutable access to the raw pixel data.
-    pub fn data_mut(&mut self) -> &mut [u8] {
+    pub(crate) fn data_mut(&mut self) -> &mut [u8] {
         &mut self.data
     }
 }
@@ -299,14 +299,14 @@ impl VideoFrame {
 
 /// Metadata describing a video stream.
 #[derive(Debug, Clone, Copy)]
-pub struct VideoInfo {
-    pub width: u32,
-    pub height: u32,
-    pub format: PixelFormat,
+pub(crate) struct VideoInfo {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) format: PixelFormat,
     /// Frame-rate numerator (e.g. 30 for 30 fps).
-    pub frame_rate_num: u32,
+    pub(crate) frame_rate_num: u32,
     /// Frame-rate denominator (e.g. 1 for 30 fps).
-    pub frame_rate_den: u32,
+    pub(crate) frame_rate_den: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -316,7 +316,7 @@ pub struct VideoInfo {
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// Initialize the video subsystem.
-pub fn init() -> Result<(), KernelError> {
+pub(crate) fn init() -> Result<(), KernelError> {
     if INITIALIZED.load(Ordering::Acquire) {
         return Ok(());
     }

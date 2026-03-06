@@ -429,7 +429,7 @@ const NUM_NORMAL_PRIORITIES: usize = 4;
 
 /// Global ready queue protected by mutex
 #[cfg(not(target_arch = "riscv64"))]
-pub static READY_QUEUE: Mutex<ReadyQueue> = Mutex::new(ReadyQueue::new());
+pub(crate) static READY_QUEUE: Mutex<ReadyQueue> = Mutex::new(ReadyQueue::new());
 
 /// Global ready queue for RISC-V (avoiding spin::Mutex issues)
 ///
@@ -446,16 +446,16 @@ pub static READY_QUEUE: Mutex<ReadyQueue> = Mutex::new(ReadyQueue::new());
 /// Const-initializing directly in BSS avoids all heap/stack issues.
 #[cfg(target_arch = "riscv64")]
 #[allow(static_mut_refs)]
-pub static mut READY_QUEUE_STATIC: ReadyQueue = ReadyQueue::new();
+pub(crate) static mut READY_QUEUE_STATIC: ReadyQueue = ReadyQueue::new();
 
 /// Per-CPU ready queues for SMP
 #[cfg(feature = "smp")]
-pub static PER_CPU_QUEUES: [Mutex<ReadyQueue>; MAX_CPUS] =
+pub(crate) static PER_CPU_QUEUES: [Mutex<ReadyQueue>; MAX_CPUS] =
     [const { Mutex::new(ReadyQueue::new()) }; MAX_CPUS];
 
 /// Maximum number of CPUs supported
 #[cfg(feature = "smp")]
-pub const MAX_CPUS: usize = 64;
+pub(crate) const MAX_CPUS: usize = 64;
 
 /// Get the global ready queue (architecture-specific)
 #[cfg(target_arch = "riscv64")]

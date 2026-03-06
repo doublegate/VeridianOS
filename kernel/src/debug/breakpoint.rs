@@ -23,7 +23,7 @@ struct SwBreakpoint {
 
 /// Hardware watchpoint type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WatchpointType {
+pub(crate) enum WatchpointType {
     Write,
     Read,
     Access,
@@ -250,7 +250,7 @@ fn parse_z_command(data: &[u8]) -> Option<(u8, u64, u64)> {
 }
 
 /// Handle Z (insert breakpoint/watchpoint) command
-pub fn handle_insert(data: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn handle_insert(data: &[u8]) -> Option<Vec<u8>> {
     let (bp_type, addr, kind) = parse_z_command(data)?;
     let mut mgr = BP_MANAGER.lock();
 
@@ -300,7 +300,7 @@ pub fn handle_insert(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Handle z (remove breakpoint/watchpoint) command
-pub fn handle_remove(data: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn handle_remove(data: &[u8]) -> Option<Vec<u8>> {
     let (bp_type, addr, _kind) = parse_z_command(data)?;
     let mut mgr = BP_MANAGER.lock();
 

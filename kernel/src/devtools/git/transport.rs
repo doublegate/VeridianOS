@@ -12,7 +12,7 @@ use super::objects::ObjectId;
 
 /// Transport protocol
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransportProtocol {
+pub(crate) enum TransportProtocol {
     /// Git smart HTTP/HTTPS
     Http,
     /// Git protocol (git://)
@@ -23,21 +23,21 @@ pub enum TransportProtocol {
 
 /// Remote repository reference
 #[derive(Debug, Clone)]
-pub struct RemoteRef {
-    pub id: ObjectId,
-    pub name: String,
+pub(crate) struct RemoteRef {
+    pub(crate) id: ObjectId,
+    pub(crate) name: String,
 }
 
 /// Remote connection configuration
 #[derive(Debug, Clone)]
-pub struct RemoteConfig {
-    pub name: String,
-    pub url: String,
-    pub protocol: TransportProtocol,
+pub(crate) struct RemoteConfig {
+    pub(crate) name: String,
+    pub(crate) url: String,
+    pub(crate) protocol: TransportProtocol,
 }
 
 impl RemoteConfig {
-    pub fn new(name: &str, url: &str) -> Self {
+    pub(crate) fn new(name: &str, url: &str) -> Self {
         let protocol = if url.starts_with("https://") || url.starts_with("http://") {
             TransportProtocol::Http
         } else if url.starts_with("git://") {
@@ -56,19 +56,19 @@ impl RemoteConfig {
     }
 
     /// Get info/refs URL for smart HTTP
-    pub fn info_refs_url(&self) -> String {
+    pub(crate) fn info_refs_url(&self) -> String {
         let base = self.url.trim_end_matches('/');
         alloc::format!("{}/info/refs?service=git-upload-pack", base)
     }
 
     /// Get upload-pack URL
-    pub fn upload_pack_url(&self) -> String {
+    pub(crate) fn upload_pack_url(&self) -> String {
         let base = self.url.trim_end_matches('/');
         alloc::format!("{}/git-upload-pack", base)
     }
 
     /// Get receive-pack URL
-    pub fn receive_pack_url(&self) -> String {
+    pub(crate) fn receive_pack_url(&self) -> String {
         let base = self.url.trim_end_matches('/');
         alloc::format!("{}/git-receive-pack", base)
     }
@@ -79,7 +79,7 @@ pub mod pktline {
     use alloc::vec::Vec;
 
     /// Encode a pkt-line (4-char hex length prefix + data)
-    pub fn encode(data: &[u8]) -> Vec<u8> {
+    pub(crate) fn encode(data: &[u8]) -> Vec<u8> {
         let len = data.len() + 4;
         let mut buf = Vec::with_capacity(len);
         buf.extend_from_slice(alloc::format!("{:04x}", len).as_bytes());
@@ -88,17 +88,17 @@ pub mod pktline {
     }
 
     /// Encode a flush packet (0000)
-    pub fn flush() -> Vec<u8> {
+    pub(crate) fn flush() -> Vec<u8> {
         b"0000".to_vec()
     }
 
     /// Encode a delimiter packet (0001)
-    pub fn delim() -> Vec<u8> {
+    pub(crate) fn delim() -> Vec<u8> {
         b"0001".to_vec()
     }
 
     /// Decode a pkt-line from a buffer, returning (line_data, bytes_consumed)
-    pub fn decode(data: &[u8]) -> Option<(Vec<u8>, usize)> {
+    pub(crate) fn decode(data: &[u8]) -> Option<(Vec<u8>, usize)> {
         if data.len() < 4 {
             return None;
         }
@@ -121,7 +121,7 @@ pub mod pktline {
     }
 
     /// Parse all pkt-lines from a buffer
-    pub fn parse_all(mut data: &[u8]) -> Vec<Vec<u8>> {
+    pub(crate) fn parse_all(mut data: &[u8]) -> Vec<Vec<u8>> {
         let mut lines = Vec::new();
         while !data.is_empty() {
             match decode(data) {
@@ -139,7 +139,7 @@ pub mod pktline {
 }
 
 /// Parse server advertisement (info/refs response)
-pub fn parse_refs_advertisement(data: &[u8]) -> Vec<RemoteRef> {
+pub(crate) fn parse_refs_advertisement(data: &[u8]) -> Vec<RemoteRef> {
     let mut refs = Vec::new();
 
     let lines = pktline::parse_all(data);
@@ -175,7 +175,7 @@ pub fn parse_refs_advertisement(data: &[u8]) -> Vec<RemoteRef> {
 }
 
 /// Build a want/have negotiation request
-pub fn build_want_request(wants: &[ObjectId], haves: &[ObjectId]) -> Vec<u8> {
+pub(crate) fn build_want_request(wants: &[ObjectId], haves: &[ObjectId]) -> Vec<u8> {
     let mut buf = Vec::new();
 
     for (i, want) in wants.iter().enumerate() {
@@ -201,7 +201,7 @@ pub fn build_want_request(wants: &[ObjectId], haves: &[ObjectId]) -> Vec<u8> {
 }
 
 /// Build a push request
-pub fn build_push_request(old_id: &ObjectId, new_id: &ObjectId, ref_name: &str) -> Vec<u8> {
+pub(crate) fn build_push_request(old_id: &ObjectId, new_id: &ObjectId, ref_name: &str) -> Vec<u8> {
     let mut buf = Vec::new();
     let line = alloc::format!("{} {} {}\0report-status\n", old_id, new_id, ref_name);
     buf.extend_from_slice(&pktline::encode(line.as_bytes()));
@@ -211,13 +211,13 @@ pub fn build_push_request(old_id: &ObjectId, new_id: &ObjectId, ref_name: &str) 
 
 /// Packfile header
 #[derive(Debug, Clone, Copy)]
-pub struct PackHeader {
-    pub version: u32,
-    pub num_objects: u32,
+pub(crate) struct PackHeader {
+    pub(crate) version: u32,
+    pub(crate) num_objects: u32,
 }
 
 /// Parse packfile header ("PACK" + version + object count)
-pub fn parse_pack_header(data: &[u8]) -> Option<PackHeader> {
+pub(crate) fn parse_pack_header(data: &[u8]) -> Option<PackHeader> {
     if data.len() < 12 {
         return None;
     }

@@ -11,7 +11,7 @@ use alloc::{
 
 /// Job status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JobStatus {
+pub(crate) enum JobStatus {
     Pending,
     Running,
     Passed,
@@ -21,16 +21,16 @@ pub enum JobStatus {
 
 /// CI job step
 #[derive(Debug, Clone)]
-pub struct JobStep {
-    pub name: String,
-    pub command: String,
-    pub status: JobStatus,
-    pub output: String,
-    pub exit_code: Option<i32>,
+pub(crate) struct JobStep {
+    pub(crate) name: String,
+    pub(crate) command: String,
+    pub(crate) status: JobStatus,
+    pub(crate) output: String,
+    pub(crate) exit_code: Option<i32>,
 }
 
 impl JobStep {
-    pub fn new(name: &str, command: &str) -> Self {
+    pub(crate) fn new(name: &str, command: &str) -> Self {
         Self {
             name: name.to_string(),
             command: command.to_string(),
@@ -43,18 +43,18 @@ impl JobStep {
 
 /// CI job definition
 #[derive(Debug, Clone)]
-pub struct Job {
-    pub name: String,
-    pub steps: Vec<JobStep>,
-    pub status: JobStatus,
-    pub environment: BTreeMap<String, String>,
-    pub artifacts: Vec<String>,
-    pub dependencies: Vec<String>,
-    pub allow_failure: bool,
+pub(crate) struct Job {
+    pub(crate) name: String,
+    pub(crate) steps: Vec<JobStep>,
+    pub(crate) status: JobStatus,
+    pub(crate) environment: BTreeMap<String, String>,
+    pub(crate) artifacts: Vec<String>,
+    pub(crate) dependencies: Vec<String>,
+    pub(crate) allow_failure: bool,
 }
 
 impl Job {
-    pub fn new(name: &str) -> Self {
+    pub(crate) fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
             steps: Vec::new(),
@@ -66,12 +66,12 @@ impl Job {
         }
     }
 
-    pub fn add_step(&mut self, name: &str, command: &str) {
+    pub(crate) fn add_step(&mut self, name: &str, command: &str) {
         self.steps.push(JobStep::new(name, command));
     }
 
     /// Execute all steps (simulated)
-    pub fn execute(&mut self) -> bool {
+    pub(crate) fn execute(&mut self) -> bool {
         self.status = JobStatus::Running;
 
         for step in &mut self.steps {
@@ -92,20 +92,20 @@ impl Job {
         all_passed
     }
 
-    pub fn step_count(&self) -> usize {
+    pub(crate) fn step_count(&self) -> usize {
         self.steps.len()
     }
 }
 
 /// CI pipeline (collection of jobs)
-pub struct Pipeline {
-    pub name: String,
-    pub jobs: Vec<Job>,
-    pub trigger: PipelineTrigger,
+pub(crate) struct Pipeline {
+    pub(crate) name: String,
+    pub(crate) jobs: Vec<Job>,
+    pub(crate) trigger: PipelineTrigger,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PipelineTrigger {
+pub(crate) enum PipelineTrigger {
     Push,
     PullRequest,
     Manual,
@@ -113,7 +113,7 @@ pub enum PipelineTrigger {
 }
 
 impl Pipeline {
-    pub fn new(name: &str) -> Self {
+    pub(crate) fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
             jobs: Vec::new(),
@@ -121,12 +121,12 @@ impl Pipeline {
         }
     }
 
-    pub fn add_job(&mut self, job: Job) {
+    pub(crate) fn add_job(&mut self, job: Job) {
         self.jobs.push(job);
     }
 
     /// Execute all jobs in order
-    pub fn execute(&mut self) -> bool {
+    pub(crate) fn execute(&mut self) -> bool {
         let mut all_passed = true;
         let mut completed: Vec<String> = Vec::new();
 
@@ -147,18 +147,18 @@ impl Pipeline {
         all_passed
     }
 
-    pub fn job_count(&self) -> usize {
+    pub(crate) fn job_count(&self) -> usize {
         self.jobs.len()
     }
 
-    pub fn passed_count(&self) -> usize {
+    pub(crate) fn passed_count(&self) -> usize {
         self.jobs
             .iter()
             .filter(|j| j.status == JobStatus::Passed)
             .count()
     }
 
-    pub fn failed_count(&self) -> usize {
+    pub(crate) fn failed_count(&self) -> usize {
         self.jobs
             .iter()
             .filter(|j| j.status == JobStatus::Failed)
@@ -168,17 +168,17 @@ impl Pipeline {
 
 /// Build artifact stored after job completion.
 #[derive(Debug, Clone)]
-pub struct Artifact {
-    pub name: String,
-    pub size: u64,
-    pub job_id: String,
-    pub pipeline_id: String,
-    pub created_tick: u64,
-    pub data_hash: [u8; 32],
+pub(crate) struct Artifact {
+    pub(crate) name: String,
+    pub(crate) size: u64,
+    pub(crate) job_id: String,
+    pub(crate) pipeline_id: String,
+    pub(crate) created_tick: u64,
+    pub(crate) data_hash: [u8; 32],
 }
 
 impl Artifact {
-    pub fn new(name: &str, job_id: &str, pipeline_id: &str) -> Self {
+    pub(crate) fn new(name: &str, job_id: &str, pipeline_id: &str) -> Self {
         Self {
             name: name.to_string(),
             size: 0,
@@ -191,7 +191,7 @@ impl Artifact {
 }
 
 /// Artifact storage with retention management.
-pub struct ArtifactStore {
+pub(crate) struct ArtifactStore {
     artifacts: BTreeMap<String, Artifact>,
 }
 
@@ -202,14 +202,14 @@ impl Default for ArtifactStore {
 }
 
 impl ArtifactStore {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             artifacts: BTreeMap::new(),
         }
     }
 
     /// Store a build artifact with metadata.
-    pub fn store_artifact(
+    pub(crate) fn store_artifact(
         &mut self,
         name: &str,
         data_hash: [u8; 32],
@@ -226,40 +226,40 @@ impl ArtifactStore {
     }
 
     /// Retrieve an artifact by name.
-    pub fn get_artifact(&self, name: &str) -> Option<&Artifact> {
+    pub(crate) fn get_artifact(&self, name: &str) -> Option<&Artifact> {
         self.artifacts.get(name)
     }
 
     /// List all stored artifacts.
-    pub fn list_artifacts(&self) -> Vec<&Artifact> {
+    pub(crate) fn list_artifacts(&self) -> Vec<&Artifact> {
         self.artifacts.values().collect()
     }
 
     /// Remove artifacts older than the retention tick threshold.
-    pub fn cleanup_old(&mut self, current_tick: u64, retention_ticks: u64) -> usize {
+    pub(crate) fn cleanup_old(&mut self, current_tick: u64, retention_ticks: u64) -> usize {
         let cutoff = current_tick.saturating_sub(retention_ticks);
         let before = self.artifacts.len();
         self.artifacts.retain(|_, a| a.created_tick >= cutoff);
         before - self.artifacts.len()
     }
 
-    pub fn count(&self) -> usize {
+    pub(crate) fn count(&self) -> usize {
         self.artifacts.len()
     }
 }
 
 /// Git repository poller for triggering CI pipelines on new commits.
 #[derive(Debug, Clone)]
-pub struct GitPoller {
-    pub repo_url: String,
-    pub branch: String,
-    pub last_commit_hash: String,
-    pub poll_interval_ticks: u64,
+pub(crate) struct GitPoller {
+    pub(crate) repo_url: String,
+    pub(crate) branch: String,
+    pub(crate) last_commit_hash: String,
+    pub(crate) poll_interval_ticks: u64,
     last_poll_tick: u64,
 }
 
 impl GitPoller {
-    pub fn new(repo_url: &str, branch: &str, poll_interval: u64) -> Self {
+    pub(crate) fn new(repo_url: &str, branch: &str, poll_interval: u64) -> Self {
         Self {
             repo_url: repo_url.to_string(),
             branch: branch.to_string(),
@@ -270,7 +270,7 @@ impl GitPoller {
     }
 
     /// Check whether enough ticks have elapsed for a new poll.
-    pub fn should_poll(&self, current_tick: u64) -> bool {
+    pub(crate) fn should_poll(&self, current_tick: u64) -> bool {
         current_tick.saturating_sub(self.last_poll_tick) >= self.poll_interval_ticks
     }
 
@@ -278,7 +278,7 @@ impl GitPoller {
     ///
     /// Returns `true` if the commit hash changed (simulated: any non-empty
     /// `current_head` that differs from last known triggers an update).
-    pub fn check_for_updates(&mut self, current_head: &str, current_tick: u64) -> bool {
+    pub(crate) fn check_for_updates(&mut self, current_head: &str, current_tick: u64) -> bool {
         self.last_poll_tick = current_tick;
         if !current_head.is_empty() && current_head != self.last_commit_hash {
             self.last_commit_hash = current_head.to_string();
@@ -290,7 +290,7 @@ impl GitPoller {
 
     /// Trigger a pipeline on the new commit (creates a Pipeline with Push
     /// trigger).
-    pub fn trigger_pipeline(&self, name: &str) -> Pipeline {
+    pub(crate) fn trigger_pipeline(&self, name: &str) -> Pipeline {
         let mut pipeline = Pipeline::new(name);
         pipeline.trigger = PipelineTrigger::Push;
         pipeline
@@ -298,9 +298,9 @@ impl GitPoller {
 }
 
 /// Namespace isolation for CI job sandboxing.
-pub struct NamespaceIsolation {
-    pub sandbox_id: u64,
-    pub active: bool,
+pub(crate) struct NamespaceIsolation {
+    pub(crate) sandbox_id: u64,
+    pub(crate) active: bool,
 }
 
 impl Default for NamespaceIsolation {
@@ -310,7 +310,7 @@ impl Default for NamespaceIsolation {
 }
 
 impl NamespaceIsolation {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             sandbox_id: 0,
             active: false,
@@ -318,7 +318,7 @@ impl NamespaceIsolation {
     }
 
     /// Create a conceptual sandbox for job isolation.
-    pub fn create_sandbox(&mut self, job_name: &str) -> u64 {
+    pub(crate) fn create_sandbox(&mut self, job_name: &str) -> u64 {
         // In real implementation, this would create PID/mount namespaces
         let mut hash: u64 = 5381;
         for byte in job_name.bytes() {
@@ -330,25 +330,25 @@ impl NamespaceIsolation {
     }
 
     /// Tear down the sandbox.
-    pub fn cleanup_sandbox(&mut self) {
+    pub(crate) fn cleanup_sandbox(&mut self) {
         self.active = false;
         self.sandbox_id = 0;
     }
 
-    pub fn is_active(&self) -> bool {
+    pub(crate) fn is_active(&self) -> bool {
         self.active
     }
 }
 
 /// Pipeline execution report.
 #[derive(Debug, Clone)]
-pub struct PipelineReport {
-    pub pipeline_name: String,
-    pub total_jobs: usize,
-    pub passed: usize,
-    pub failed: usize,
-    pub skipped: usize,
-    pub artifacts_collected: usize,
+pub(crate) struct PipelineReport {
+    pub(crate) pipeline_name: String,
+    pub(crate) total_jobs: usize,
+    pub(crate) passed: usize,
+    pub(crate) failed: usize,
+    pub(crate) skipped: usize,
+    pub(crate) artifacts_collected: usize,
 }
 
 impl Pipeline {
@@ -356,7 +356,7 @@ impl Pipeline {
     ///
     /// Checks the poller, runs if there are new commits, and collects
     /// artifacts into the store.
-    pub fn run_with_polling(
+    pub(crate) fn run_with_polling(
         &mut self,
         poller: &mut GitPoller,
         current_head: &str,
@@ -376,7 +376,7 @@ impl Pipeline {
     }
 
     /// Collect declared artifacts from completed jobs into the artifact store.
-    pub fn collect_artifacts(&self, store: &mut ArtifactStore, tick: u64) -> usize {
+    pub(crate) fn collect_artifacts(&self, store: &mut ArtifactStore, tick: u64) -> usize {
         let mut count = 0;
         for job in &self.jobs {
             if job.status != JobStatus::Passed {
@@ -398,7 +398,7 @@ impl Pipeline {
     }
 
     /// Generate an execution summary report.
-    pub fn generate_report(&self, artifacts_collected: usize) -> PipelineReport {
+    pub(crate) fn generate_report(&self, artifacts_collected: usize) -> PipelineReport {
         PipelineReport {
             pipeline_name: self.name.clone(),
             total_jobs: self.jobs.len(),
@@ -415,7 +415,7 @@ impl Pipeline {
 }
 
 /// Parse a minimal CI config (key=value style)
-pub fn parse_ci_config(config: &str) -> Vec<Job> {
+pub(crate) fn parse_ci_config(config: &str) -> Vec<Job> {
     let mut jobs = Vec::new();
     let mut current_job: Option<Job> = None;
 

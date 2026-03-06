@@ -197,8 +197,8 @@ impl SystemTray {
         }
         let items_width: usize = visible.iter().map(|i| i.width).sum();
         let separators = if visible.len() > 1 {
-            (visible.len() - 1) * (self.padding + 1 + self.padding) // pad + 1px
-                                                                    // sep + pad
+            // pad + 1px separator + pad
+            (visible.len() - 1) * (self.padding + 1 + self.padding)
         } else {
             0
         };

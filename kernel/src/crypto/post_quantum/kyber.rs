@@ -313,30 +313,30 @@ fn kyber_params(level: KyberLevel) -> (usize, u32, u32, usize, usize) {
 }
 
 /// ML-KEM (Kyber) secret key
-pub struct KyberSecretKey {
+pub(crate) struct KyberSecretKey {
     level: KyberLevel,
     secret: Vec<u8>,
 }
 
 /// ML-KEM (Kyber) public key
-pub struct KyberPublicKey {
+pub(crate) struct KyberPublicKey {
     level: KyberLevel,
     public: Vec<u8>,
 }
 
 /// ML-KEM (Kyber) ciphertext
-pub struct KyberCiphertext {
+pub(crate) struct KyberCiphertext {
     bytes: Vec<u8>,
 }
 
 /// ML-KEM (Kyber) shared secret
-pub struct KyberSharedSecret {
+pub(crate) struct KyberSharedSecret {
     bytes: [u8; 32],
 }
 
 impl KyberSecretKey {
     /// Generate new key pair using lattice-based key generation
-    pub fn generate(level: KyberLevel) -> CryptoResult<Self> {
+    pub(crate) fn generate(level: KyberLevel) -> CryptoResult<Self> {
         use crate::crypto::{hash::sha256, random::get_random};
 
         let (k, eta1, _eta2, _du, _dv) = kyber_params(level);
@@ -458,7 +458,7 @@ impl KyberSecretKey {
     }
 
     /// Get corresponding public key
-    pub fn public_key(&self) -> KyberPublicKey {
+    pub(crate) fn public_key(&self) -> KyberPublicKey {
         let (k, _, _, _, _) = kyber_params(self.level);
 
         let public_size = match self.level {
@@ -505,7 +505,10 @@ impl KyberSecretKey {
     }
 
     /// Decapsulate to get shared secret
-    pub fn decapsulate(&self, ciphertext: &KyberCiphertext) -> CryptoResult<KyberSharedSecret> {
+    pub(crate) fn decapsulate(
+        &self,
+        ciphertext: &KyberCiphertext,
+    ) -> CryptoResult<KyberSharedSecret> {
         use crate::crypto::hash::sha256;
 
         let (k, _, _, du, dv) = kyber_params(self.level);
@@ -591,7 +594,7 @@ impl KyberSecretKey {
 
 impl KyberPublicKey {
     /// Encapsulate to generate shared secret and ciphertext
-    pub fn encapsulate(&self) -> CryptoResult<(KyberCiphertext, KyberSharedSecret)> {
+    pub(crate) fn encapsulate(&self) -> CryptoResult<(KyberCiphertext, KyberSharedSecret)> {
         use crate::crypto::{hash::sha256, random::get_random};
 
         let (k, _eta1, eta2, du, dv) = kyber_params(self.level);
@@ -741,7 +744,7 @@ impl KyberPublicKey {
 
 impl KyberSharedSecret {
     /// Get shared secret bytes
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
         &self.bytes
     }
 }

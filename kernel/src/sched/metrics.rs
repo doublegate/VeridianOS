@@ -248,7 +248,7 @@ impl Default for SchedulerMetrics {
 }
 
 /// Global scheduler metrics
-pub static SCHEDULER_METRICS: SchedulerMetrics = SchedulerMetrics::new();
+pub(crate) static SCHEDULER_METRICS: SchedulerMetrics = SchedulerMetrics::new();
 
 /// Read CPU timestamp counter.
 ///

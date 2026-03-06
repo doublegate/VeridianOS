@@ -219,8 +219,8 @@ pub fn sys_waitpid(pid: i64, options: WaitOptions) -> Result<(ProcessId, WaitSta
 
                 // Stopped child (WUNTRACED).
                 if options.is_untraced() && state == ProcessState::Blocked {
-                    return Ok((*child_pid, WaitStatus::Stopped(19))); // SIGSTOP
-                                                                      // = 19
+                    // SIGSTOP = 19
+                    return Ok((*child_pid, WaitStatus::Stopped(19)));
                 }
 
                 // Continued child (WCONTINUED).
@@ -392,8 +392,8 @@ mod tests {
 
     #[test]
     fn test_wait_status_stopped() {
-        let status = WaitStatus::Stopped(19); // SIGSTOP
-                                              // Raw: 0x7F | (19 << 8) = 127 | 4864 = 4991
+        // SIGSTOP, Raw: 0x7F | (19 << 8) = 127 | 4864 = 4991
+        let status = WaitStatus::Stopped(19);
         assert_eq!(status.to_raw(), 0x7F | (19 << 8));
     }
 

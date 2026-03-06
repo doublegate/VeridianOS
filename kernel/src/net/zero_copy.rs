@@ -757,7 +757,7 @@ impl Default for ZeroCopyStats {
 }
 
 /// Global zero-copy statistics
-pub static ZERO_COPY_STATS: ZeroCopyStats = ZeroCopyStats::new();
+pub(crate) static ZERO_COPY_STATS: ZeroCopyStats = ZeroCopyStats::new();
 
 #[cfg(test)]
 mod tests {

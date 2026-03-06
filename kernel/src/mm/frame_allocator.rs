@@ -992,7 +992,7 @@ impl Default for FrameAllocator {
 }
 
 /// Global frame allocator instance
-pub static FRAME_ALLOCATOR: Mutex<FrameAllocator> = Mutex::new(FrameAllocator::new());
+pub(crate) static FRAME_ALLOCATOR: Mutex<FrameAllocator> = Mutex::new(FrameAllocator::new());
 
 // ============================================================================
 // Per-CPU Page Cache

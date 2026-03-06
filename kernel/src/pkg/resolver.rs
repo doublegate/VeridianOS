@@ -6,12 +6,90 @@
 
 use alloc::{
     collections::{BTreeMap, BTreeSet},
+    format,
     string::String,
     vec,
     vec::Vec,
 };
 
 use super::{Dependency, PackageId, PackageMetadata, Version};
+
+// ============================================================================
+// Resolver Error Type
+// ============================================================================
+
+/// Errors from dependency resolution
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolverError {
+    /// Package not found in any repository
+    PackageNotFound { name: String },
+    /// No version satisfies the given requirement
+    NoSatisfyingVersion {
+        package: String,
+        requirement: String,
+    },
+    /// Version conflict between requirements
+    VersionConflict {
+        package: String,
+        required: String,
+        existing: String,
+    },
+    /// Missing metadata for a package version
+    MissingMetadata { package: String, version: String },
+    /// No satisfying assignment found by SAT solver
+    Unsatisfiable,
+    /// Two packages conflict with each other
+    Conflict {
+        package: String,
+        conflicting: String,
+    },
+    /// No provider for a virtual package
+    NoProvider { virtual_package: String },
+}
+
+impl core::fmt::Display for ResolverError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::PackageNotFound { name } => write!(f, "Package not found: {}", name),
+            Self::NoSatisfyingVersion {
+                package,
+                requirement,
+            } => {
+                write!(
+                    f,
+                    "No suitable version found for {} (requirement: {})",
+                    package, requirement
+                )
+            }
+            Self::VersionConflict {
+                package,
+                required,
+                existing,
+            } => {
+                write!(
+                    f,
+                    "Version conflict for {}: need {}, have {}",
+                    package, required, existing
+                )
+            }
+            Self::MissingMetadata { package, version } => {
+                write!(f, "Missing metadata for {} {}", package, version)
+            }
+            Self::Unsatisfiable => {
+                write!(f, "No satisfying assignment found for dependencies")
+            }
+            Self::Conflict {
+                package,
+                conflicting,
+            } => {
+                write!(f, "Conflict: {} conflicts with {}", package, conflicting)
+            }
+            Self::NoProvider { virtual_package } => {
+                write!(f, "No provider for virtual package: {}", virtual_package)
+            }
+        }
+    }
+}
 
 // ============================================================================
 // Version Requirement
@@ -564,7 +642,7 @@ impl DependencyResolver {
     pub fn resolve(
         &self,
         dependencies: &[Dependency],
-    ) -> Result<Vec<(PackageId, Version)>, String> {
+    ) -> Result<Vec<(PackageId, Version)>, ResolverError> {
         // Try greedy resolution first (fast path)
         match self.resolve_greedy(dependencies) {
             Ok(solution) => Ok(solution),
@@ -579,7 +657,7 @@ impl DependencyResolver {
     fn resolve_greedy(
         &self,
         dependencies: &[Dependency],
-    ) -> Result<Vec<(PackageId, Version)>, String> {
+    ) -> Result<Vec<(PackageId, Version)>, ResolverError> {
         let mut solution = BTreeMap::new();
         let mut visited = BTreeSet::new();
 
@@ -602,7 +680,7 @@ impl DependencyResolver {
     fn resolve_sat(
         &self,
         dependencies: &[Dependency],
-    ) -> Result<Vec<(PackageId, Version)>, String> {
+    ) -> Result<Vec<(PackageId, Version)>, ResolverError> {
         // Collect all relevant packages and versions
         let mut relevant = BTreeSet::new();
         self.collect_relevant_packages(dependencies, &mut relevant)?;
@@ -630,9 +708,7 @@ impl DependencyResolver {
         self.encode_conflicts(&var_map, &mut solver);
 
         // Solve
-        let solution = solver
-            .solve()
-            .ok_or_else(|| String::from("No satisfying assignment found for dependencies"))?;
+        let solution = solver.solve().ok_or(ResolverError::Unsatisfiable)?;
 
         // Decode solution
         self.decode_solution(&solution, &var_list)
@@ -643,7 +719,7 @@ impl DependencyResolver {
         &self,
         dependencies: &[Dependency],
         relevant: &mut BTreeSet<(PackageId, Version)>,
-    ) -> Result<(), String> {
+    ) -> Result<(), ResolverError> {
         let mut work_queue: Vec<PackageId> = dependencies.iter().map(|d| d.name.clone()).collect();
         let mut visited_pkgs = BTreeSet::new();
 
@@ -660,10 +736,12 @@ impl DependencyResolver {
                 if let Some((real, _)) = providers.first() {
                     real.clone()
                 } else {
-                    return Err(alloc::format!("No provider for virtual package: {}", pkg));
+                    return Err(ResolverError::NoProvider {
+                        virtual_package: pkg,
+                    });
                 }
             } else {
-                return Err(alloc::format!("Package not found: {}", pkg));
+                return Err(ResolverError::PackageNotFound { name: pkg });
             };
 
             if let Some(versions) = self.available.get(&real_pkg) {
@@ -692,16 +770,15 @@ impl DependencyResolver {
         var_map: &BTreeMap<(PackageId, Version), usize>,
         relevant: &BTreeSet<(PackageId, Version)>,
         solver: &mut SatSolver,
-    ) -> Result<(), String> {
+    ) -> Result<(), ResolverError> {
         // Top-level dependencies: at least one satisfying version must be true
         for dep in dependencies {
             let clause = self.build_dependency_clause(dep, var_map)?;
             if clause.literals.is_empty() {
-                return Err(alloc::format!(
-                    "No version satisfies requirement {} {}",
-                    dep.name,
-                    dep.version_req
-                ));
+                return Err(ResolverError::NoSatisfyingVersion {
+                    package: dep.name.clone(),
+                    requirement: dep.version_req.clone(),
+                });
             }
             solver.add_clause(clause);
         }
@@ -802,7 +879,7 @@ impl DependencyResolver {
         &self,
         dep: &Dependency,
         var_map: &BTreeMap<(PackageId, Version), usize>,
-    ) -> Result<SatClause, String> {
+    ) -> Result<SatClause, ResolverError> {
         let mut lits = Vec::new();
         let req = VersionReq::parse(&dep.version_req);
 
@@ -825,7 +902,7 @@ impl DependencyResolver {
         &self,
         solution: &[bool],
         var_list: &[(PackageId, Version)],
-    ) -> Result<Vec<(PackageId, Version)>, String> {
+    ) -> Result<Vec<(PackageId, Version)>, ResolverError> {
         let mut result = Vec::new();
 
         for (i, selected) in solution.iter().enumerate() {
@@ -843,7 +920,7 @@ impl DependencyResolver {
     fn topological_sort(
         &self,
         packages: &[(PackageId, Version)],
-    ) -> Result<Vec<(PackageId, Version)>, String> {
+    ) -> Result<Vec<(PackageId, Version)>, ResolverError> {
         let pkg_set: BTreeSet<PackageId> = packages.iter().map(|(p, _)| p.clone()).collect();
 
         // Build adjacency: dep -> [dependents]
@@ -929,7 +1006,7 @@ impl DependencyResolver {
         &self,
         installed: &BTreeMap<PackageId, Version>,
         upgrade_targets: &[PackageId],
-    ) -> Result<Vec<(PackageId, Version)>, String> {
+    ) -> Result<Vec<(PackageId, Version)>, ResolverError> {
         // Determine which packages to upgrade
         let targets: Vec<PackageId> = if upgrade_targets.is_empty() {
             installed.keys().cloned().collect()
@@ -985,7 +1062,7 @@ impl DependencyResolver {
         dep: &Dependency,
         solution: &mut BTreeMap<PackageId, Version>,
         visited: &mut BTreeSet<PackageId>,
-    ) -> Result<(), String> {
+    ) -> Result<(), ResolverError> {
         // Check for circular dependencies
         if visited.contains(&dep.name) {
             return Ok(()); // Already being resolved
@@ -1000,12 +1077,11 @@ impl DependencyResolver {
             let req = VersionReq::parse(&dep.version_req);
 
             if !req.satisfies(existing_version) {
-                return Err(alloc::format!(
-                    "Version conflict for {}: need {}, have {}",
-                    dep.name,
-                    dep.version_req,
-                    Self::version_to_string(existing_version)
-                ));
+                return Err(ResolverError::VersionConflict {
+                    package: dep.name.clone(),
+                    required: dep.version_req.clone(),
+                    existing: Self::version_to_string(existing_version),
+                });
             }
             return Ok(());
         }
@@ -1019,12 +1095,9 @@ impl DependencyResolver {
         let candidate = self
             .metadata
             .get(&(real_name.clone(), version.clone()))
-            .ok_or_else(|| {
-                alloc::format!(
-                    "Missing metadata for {} {}",
-                    real_name,
-                    Self::version_to_string(&version)
-                )
+            .ok_or_else(|| ResolverError::MissingMetadata {
+                package: real_name.clone(),
+                version: Self::version_to_string(&version),
             })?;
 
         // Resolve transitive dependencies
@@ -1045,11 +1118,13 @@ impl DependencyResolver {
         &self,
         package_id: &PackageId,
         version_req_str: &str,
-    ) -> Result<Version, String> {
-        let versions = self
-            .available
-            .get(package_id)
-            .ok_or_else(|| alloc::format!("Package not found: {}", package_id))?;
+    ) -> Result<Version, ResolverError> {
+        let versions =
+            self.available
+                .get(package_id)
+                .ok_or_else(|| ResolverError::PackageNotFound {
+                    name: package_id.clone(),
+                })?;
 
         let req = VersionReq::parse(version_req_str);
 
@@ -1060,26 +1135,26 @@ impl DependencyResolver {
             }
         }
 
-        Err(alloc::format!(
-            "No suitable version found for {} (requirement: {})",
-            package_id,
-            version_req_str
-        ))
+        Err(ResolverError::NoSatisfyingVersion {
+            package: package_id.clone(),
+            requirement: String::from(version_req_str),
+        })
     }
 
     /// Check for conflicts in solution
-    fn check_conflicts(&self, solution: &BTreeMap<PackageId, Version>) -> Result<(), String> {
+    fn check_conflicts(
+        &self,
+        solution: &BTreeMap<PackageId, Version>,
+    ) -> Result<(), ResolverError> {
         for (pkg_id, version) in solution {
             if let Some(candidate) = self.metadata.get(&(pkg_id.clone(), version.clone())) {
                 for conflict in &candidate.conflicts {
                     let resolved = self.resolve_virtual(conflict);
                     if solution.contains_key(&resolved) {
-                        return Err(alloc::format!(
-                            "Conflict: {} {} conflicts with {}",
-                            pkg_id,
-                            Self::version_to_string(version),
-                            conflict
-                        ));
+                        return Err(ResolverError::Conflict {
+                            package: format!("{} {}", pkg_id, Self::version_to_string(version)),
+                            conflicting: conflict.clone(),
+                        });
                     }
                 }
             }

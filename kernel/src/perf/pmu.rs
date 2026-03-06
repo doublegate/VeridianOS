@@ -3,7 +3,8 @@
 //! Provides access to hardware performance counters for profiling and
 //! optimization. Supports x86_64 (IA32_PERFEVTSELx / IA32_PMCx MSRs),
 //! AArch64 (PMCR_EL0, PMCNTENSET_EL0), and RISC-V (mcycle, minstret).
-//!
+
+#![allow(dead_code)]
 //! Performance events that can be counted:
 //! - Instructions retired
 //! - CPU cycles
@@ -25,7 +26,7 @@ static NUM_COUNTERS: AtomicU8 = AtomicU8::new(0);
 
 /// Performance events that can be monitored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PmuEvent {
+pub(crate) enum PmuEvent {
     /// CPU cycles (unhalted core cycles).
     Cycles,
     /// Instructions retired.
@@ -66,22 +67,22 @@ impl PmuEvent {
 
 /// A PMU counter configuration.
 #[derive(Debug, Clone)]
-pub struct PmuCounter {
+pub(crate) struct PmuCounter {
     /// Counter index (0..NUM_COUNTERS-1).
-    pub index: u8,
+    pub(crate) index: u8,
     /// The event being counted.
-    pub event: PmuEvent,
+    pub(crate) event: PmuEvent,
     /// Whether this counter is currently active.
-    pub active: bool,
+    pub(crate) active: bool,
 }
 
 /// PMU counter sample (snapshot of a single counter).
 #[derive(Debug, Clone, Copy)]
-pub struct PmuSample {
+pub(crate) struct PmuSample {
     /// The event type.
-    pub event: PmuEvent,
+    pub(crate) event: PmuEvent,
     /// Counter value.
-    pub count: u64,
+    pub(crate) count: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -92,7 +93,7 @@ pub struct PmuSample {
 ///
 /// Detects the number of available performance counters and their
 /// capabilities via CPUID (x86_64) or system register reads (ARM/RISC-V).
-pub fn init() {
+pub(crate) fn init() {
     if PMU_INITIALIZED.load(Ordering::Acquire) {
         return;
     }
@@ -116,12 +117,12 @@ pub fn init() {
 }
 
 /// Check if PMU is initialized.
-pub fn is_initialized() -> bool {
+pub(crate) fn is_initialized() -> bool {
     PMU_INITIALIZED.load(Ordering::Acquire)
 }
 
 /// Get the number of general-purpose performance counters.
-pub fn num_counters() -> u8 {
+pub(crate) fn num_counters() -> u8 {
     NUM_COUNTERS.load(Ordering::Relaxed)
 }
 
@@ -152,7 +153,7 @@ fn init_x86_64() {
 /// Programs IA32_PERFEVTSELx with the event selector, unit mask,
 /// and enable bits. The counter starts counting immediately.
 #[cfg(target_arch = "x86_64")]
-pub fn configure_counter(counter: u8, event: PmuEvent) -> bool {
+pub(crate) fn configure_counter(counter: u8, event: PmuEvent) -> bool {
     let num = num_counters();
     if counter >= num {
         return false;
@@ -182,7 +183,7 @@ pub fn configure_counter(counter: u8, event: PmuEvent) -> bool {
 
 /// Read a performance counter value on x86_64.
 #[cfg(target_arch = "x86_64")]
-pub fn read_counter(counter: u8) -> u64 {
+pub(crate) fn read_counter(counter: u8) -> u64 {
     if counter >= num_counters() {
         return 0;
     }
@@ -192,7 +193,7 @@ pub fn read_counter(counter: u8) -> u64 {
 
 /// Stop (disable) a performance counter on x86_64.
 #[cfg(target_arch = "x86_64")]
-pub fn stop_counter(counter: u8) {
+pub(crate) fn stop_counter(counter: u8) {
     if counter >= num_counters() {
         return;
     }
@@ -219,7 +220,7 @@ fn init_aarch64() {
 
 /// Read the cycle counter on AArch64 (PMCCNTR_EL0).
 #[cfg(target_arch = "aarch64")]
-pub fn read_cycle_counter() -> u64 {
+pub(crate) fn read_cycle_counter() -> u64 {
     let val: u64;
     // SAFETY: Reading PMCCNTR_EL0, a read-only performance counter register.
     unsafe {
@@ -241,7 +242,7 @@ fn init_riscv() {
 
 /// Read the cycle counter on RISC-V (mcycle CSR).
 #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-pub fn read_cycle_counter() -> u64 {
+pub(crate) fn read_cycle_counter() -> u64 {
     let val: u64;
     // SAFETY: Reading mcycle CSR is a read-only operation.
     unsafe {
@@ -252,7 +253,7 @@ pub fn read_cycle_counter() -> u64 {
 
 /// Read the instruction counter on RISC-V (minstret CSR).
 #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-pub fn read_instret_counter() -> u64 {
+pub(crate) fn read_instret_counter() -> u64 {
     let val: u64;
     // SAFETY: Reading minstret CSR is a read-only operation.
     unsafe {
@@ -266,27 +267,27 @@ pub fn read_instret_counter() -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Maximum number of instruction pointer samples per buffer.
-pub const MAX_SAMPLES: usize = 4096;
+pub(crate) const MAX_SAMPLES: usize = 4096;
 
 /// A sample captured by the sampling profiler.
 #[derive(Debug, Clone, Copy)]
-pub struct ProfileSample {
+pub(crate) struct ProfileSample {
     /// Instruction pointer at sample time.
-    pub ip: u64,
+    pub(crate) ip: u64,
     /// CPU ID where the sample was taken.
-    pub cpu: u8,
+    pub(crate) cpu: u8,
     /// Process ID (0 for kernel).
-    pub pid: u64,
+    pub(crate) pid: u64,
 }
 
 /// Per-CPU sample buffer.
-pub struct SampleBuffer {
+pub(crate) struct SampleBuffer {
     /// Sample storage.
-    pub samples: [ProfileSample; MAX_SAMPLES],
+    pub(crate) samples: [ProfileSample; MAX_SAMPLES],
     /// Number of samples collected.
-    pub count: usize,
+    pub(crate) count: usize,
     /// Whether sampling is active.
-    pub active: bool,
+    pub(crate) active: bool,
 }
 
 impl SampleBuffer {
@@ -305,7 +306,7 @@ impl SampleBuffer {
     }
 
     /// Record a sample. Returns false if buffer is full.
-    pub fn record(&mut self, ip: u64, cpu: u8, pid: u64) -> bool {
+    pub(crate) fn record(&mut self, ip: u64, cpu: u8, pid: u64) -> bool {
         if self.count >= MAX_SAMPLES {
             return false;
         }
@@ -315,7 +316,7 @@ impl SampleBuffer {
     }
 
     /// Clear the sample buffer.
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.count = 0;
     }
 }

@@ -9,11 +9,53 @@
 
 use alloc::{
     collections::BTreeMap,
+    format,
     string::{String, ToString},
     vec::Vec,
 };
 
 use super::{dom_bindings::DomApi, js_gc::GcHeap, js_vm::JsVm, tabs::TabId};
+
+// ---------------------------------------------------------------------------
+// Tab Error Type
+// ---------------------------------------------------------------------------
+
+/// Errors from tab process isolation
+#[derive(Debug, Clone)]
+pub enum TabError {
+    /// Maximum process limit reached
+    ProcessLimitReached,
+    /// Process already exists for this tab
+    ProcessAlreadyExists,
+    /// No process found for the given tab
+    ProcessNotFound,
+    /// Tab is not in the expected state
+    InvalidState { expected: &'static str },
+    /// A capability is not permitted
+    CapabilityDenied { capability: &'static str },
+    /// A resource limit was violated
+    ResourceLimitViolation { message: String },
+    /// JavaScript execution failed
+    ScriptError { message: String },
+}
+
+impl core::fmt::Display for TabError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ProcessLimitReached => write!(f, "Maximum process limit reached"),
+            Self::ProcessAlreadyExists => write!(f, "Process already exists for this tab"),
+            Self::ProcessNotFound => write!(f, "No process for tab"),
+            Self::InvalidState { expected } => {
+                write!(f, "Tab is not in {} state", expected)
+            }
+            Self::CapabilityDenied { capability } => {
+                write!(f, "{} not permitted", capability)
+            }
+            Self::ResourceLimitViolation { message } => write!(f, "{}", message),
+            Self::ScriptError { message } => write!(f, "{}", message),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Tab process state
@@ -229,18 +271,26 @@ impl TabProcess {
     }
 
     /// Check if a resource limit would be exceeded
-    pub fn check_limits(&self) -> Option<String> {
+    pub fn check_limits(&self) -> Option<TabError> {
         if self.usage.heap_bytes > self.limits.max_heap_bytes {
-            return Some("Heap size limit exceeded".to_string());
+            return Some(TabError::ResourceLimitViolation {
+                message: String::from("Heap size limit exceeded"),
+            });
         }
         if self.usage.dom_node_count > self.limits.max_dom_nodes {
-            return Some("DOM node limit exceeded".to_string());
+            return Some(TabError::ResourceLimitViolation {
+                message: String::from("DOM node limit exceeded"),
+            });
         }
         if self.usage.timer_count > self.limits.max_timers {
-            return Some("Timer limit exceeded".to_string());
+            return Some(TabError::ResourceLimitViolation {
+                message: String::from("Timer limit exceeded"),
+            });
         }
         if self.usage.steps_this_tick > self.limits.max_steps_per_tick {
-            return Some("CPU budget exceeded for this tick".to_string());
+            return Some(TabError::ResourceLimitViolation {
+                message: String::from("CPU budget exceeded for this tick"),
+            });
         }
         None
     }
@@ -253,7 +303,7 @@ impl TabProcess {
     }
 
     /// Process one tick of execution
-    pub fn tick(&mut self) -> Result<(), String> {
+    pub fn tick(&mut self) -> Result<(), TabError> {
         if self.state != TabProcessState::Running {
             return Ok(());
         }
@@ -285,7 +335,8 @@ impl TabProcess {
 
         // Check limits
         if let Some(violation) = self.check_limits() {
-            self.crash(&violation);
+            let msg = format!("{}", violation);
+            self.crash(&msg);
             return Err(violation);
         }
 
@@ -293,14 +344,18 @@ impl TabProcess {
     }
 
     /// Execute JavaScript in this tab's context
-    pub fn execute_script(&mut self, source: &str) -> Result<(), String> {
+    pub fn execute_script(&mut self, source: &str) -> Result<(), TabError> {
         if self.state != TabProcessState::Running {
-            return Err("Tab process is not running".to_string());
+            return Err(TabError::InvalidState {
+                expected: "running",
+            });
         }
 
         // Quick check: can we handle this?
         if !self.capabilities.can_execute_js {
-            return Err("JavaScript execution not permitted".to_string());
+            return Err(TabError::CapabilityDenied {
+                capability: "JavaScript execution",
+            });
         }
 
         let mut parser = super::js_parser::JsParser::from_source(source);
@@ -309,7 +364,7 @@ impl TabProcess {
         if !parser.errors.is_empty() {
             let err = parser.errors.join("; ");
             self.last_error = Some(err.clone());
-            return Err(err);
+            return Err(TabError::ScriptError { message: err });
         }
 
         let mut compiler = super::js_compiler::Compiler::new();
@@ -319,14 +374,16 @@ impl TabProcess {
             Ok(_) => {
                 self.update_usage();
                 if let Some(violation) = self.check_limits() {
-                    self.crash(&violation);
+                    let msg = format!("{}", violation);
+                    self.crash(&msg);
                     return Err(violation);
                 }
                 Ok(())
             }
             Err(e) => {
-                self.last_error = Some(e.clone());
-                Err(e)
+                let msg = format!("{}", e);
+                self.last_error = Some(msg.clone());
+                Err(TabError::ScriptError { message: msg })
             }
         }
     }
@@ -495,12 +552,12 @@ impl ProcessIsolation {
     }
 
     /// Spawn a new tab process
-    pub fn spawn_tab_process(&mut self, tab_id: TabId) -> Result<(), String> {
+    pub fn spawn_tab_process(&mut self, tab_id: TabId) -> Result<(), TabError> {
         if self.processes.len() >= self.max_processes {
-            return Err("Maximum process limit reached".to_string());
+            return Err(TabError::ProcessLimitReached);
         }
         if self.processes.contains_key(&tab_id) {
-            return Err("Process already exists for this tab".to_string());
+            return Err(TabError::ProcessAlreadyExists);
         }
 
         let mut process = TabProcess::new(tab_id);
@@ -514,7 +571,7 @@ impl ProcessIsolation {
         &mut self,
         tab_id: TabId,
         capabilities: TabCapabilities,
-    ) -> Result<(), String> {
+    ) -> Result<(), TabError> {
         self.spawn_tab_process(tab_id)?;
         if let Some(proc) = self.processes.get_mut(&tab_id) {
             proc.capabilities = capabilities;
@@ -545,14 +602,16 @@ impl ProcessIsolation {
     }
 
     /// Recover a crashed tab process (recreate its context)
-    pub fn recover_from_crash(&mut self, tab_id: TabId) -> Result<(), String> {
+    pub fn recover_from_crash(&mut self, tab_id: TabId) -> Result<(), TabError> {
         let proc = self
             .processes
             .get_mut(&tab_id)
-            .ok_or_else(|| "No process for tab".to_string())?;
+            .ok_or(TabError::ProcessNotFound)?;
 
         if proc.state != TabProcessState::Crashed {
-            return Err("Tab is not in crashed state".to_string());
+            return Err(TabError::InvalidState {
+                expected: "crashed",
+            });
         }
 
         // Reset VM and GC, keep limits and capabilities
@@ -605,14 +664,21 @@ impl ProcessIsolation {
     }
 
     /// Send postMessage from one tab to another
-    pub fn post_message(&mut self, source: TabId, target: TabId, data: &str) -> Result<(), String> {
+    pub fn post_message(
+        &mut self,
+        source: TabId,
+        target: TabId,
+        data: &str,
+    ) -> Result<(), TabError> {
         // Check source can send
         let source_proc = self
             .processes
             .get(&source)
-            .ok_or_else(|| "Source tab not found".to_string())?;
+            .ok_or(TabError::ProcessNotFound)?;
         if !source_proc.capabilities.can_post_message {
-            return Err("Source tab does not have postMessage capability".to_string());
+            return Err(TabError::CapabilityDenied {
+                capability: "postMessage",
+            });
         }
         let origin = source_proc.origin.clone();
 
@@ -620,7 +686,7 @@ impl ProcessIsolation {
         let target_proc = self
             .processes
             .get_mut(&target)
-            .ok_or_else(|| "Target tab not found".to_string())?;
+            .ok_or(TabError::ProcessNotFound)?;
 
         target_proc.inbox.push(IpcMessage::PostMessage {
             source_tab: source,

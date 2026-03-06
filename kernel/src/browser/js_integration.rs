@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 use alloc::{
+    format,
     string::{String, ToString},
     vec::Vec,
 };
@@ -86,8 +87,9 @@ impl ScriptEngine {
                 Ok(())
             }
             Err(e) => {
-                self.last_error = Some(e.clone());
-                Err(e)
+                let msg = format!("{}", e);
+                self.last_error = Some(msg.clone());
+                Err(msg)
             }
         }
     }

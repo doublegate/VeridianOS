@@ -3,6 +3,8 @@
 //! Implements the four Git object types (blob, tree, commit, tag),
 //! SHA-1 object IDs, and object storage/retrieval.
 
+#![allow(clippy::wrong_self_convention)]
+
 use alloc::{
     string::{String, ToString},
     vec::Vec,
@@ -10,21 +12,21 @@ use alloc::{
 
 /// SHA-1 object identifier (20 bytes / 40 hex chars)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ObjectId([u8; 20]);
+pub(crate) struct ObjectId([u8; 20]);
 
 impl ObjectId {
     pub const ZERO: Self = Self([0u8; 20]);
 
-    pub fn from_bytes(bytes: &[u8; 20]) -> Self {
+    pub(crate) fn from_bytes(bytes: &[u8; 20]) -> Self {
         Self(*bytes)
     }
 
-    pub fn as_bytes(&self) -> &[u8; 20] {
+    pub(crate) fn as_bytes(&self) -> &[u8; 20] {
         &self.0
     }
 
     /// Parse from 40-character hex string
-    pub fn from_hex(hex: &str) -> Option<Self> {
+    pub(crate) fn from_hex(hex: &str) -> Option<Self> {
         if hex.len() != 40 {
             return None;
         }
@@ -39,7 +41,7 @@ impl ObjectId {
     }
 
     /// Convert to 40-character hex string
-    pub fn to_hex(&self) -> String {
+    pub(crate) fn to_hex(&self) -> String {
         let mut s = String::with_capacity(40);
         for &b in &self.0 {
             s.push(hex_char((b >> 4) & 0x0F));
@@ -49,7 +51,7 @@ impl ObjectId {
     }
 
     /// Return first 7 chars of hex (short form)
-    pub fn short(&self) -> String {
+    pub(crate) fn short(&self) -> String {
         self.to_hex()[..7].to_string()
     }
 }
@@ -79,7 +81,7 @@ fn hex_char(n: u8) -> char {
 
 /// Git object types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ObjectType {
+pub(crate) enum ObjectType {
     Blob,
     Tree,
     Commit,
@@ -87,7 +89,7 @@ pub enum ObjectType {
 }
 
 impl ObjectType {
-    pub fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Blob => "blob",
             Self::Tree => "tree",
@@ -96,7 +98,7 @@ impl ObjectType {
         }
     }
 
-    pub fn parse(s: &str) -> Option<Self> {
+    pub(crate) fn parse(s: &str) -> Option<Self> {
         match s {
             "blob" => Some(Self::Blob),
             "tree" => Some(Self::Tree),
@@ -115,18 +117,18 @@ impl core::fmt::Display for ObjectType {
 
 /// A raw Git object (type + data)
 #[derive(Debug, Clone)]
-pub struct GitObject {
-    pub obj_type: ObjectType,
-    pub data: Vec<u8>,
+pub(crate) struct GitObject {
+    pub(crate) obj_type: ObjectType,
+    pub(crate) data: Vec<u8>,
 }
 
 impl GitObject {
-    pub fn new(obj_type: ObjectType, data: Vec<u8>) -> Self {
+    pub(crate) fn new(obj_type: ObjectType, data: Vec<u8>) -> Self {
         Self { obj_type, data }
     }
 
     /// Serialize to Git's loose object format: "type size\0data"
-    pub fn serialize(&self) -> Vec<u8> {
+    pub(crate) fn serialize(&self) -> Vec<u8> {
         let header = alloc::format!("{} {}\0", self.obj_type.as_str(), self.data.len());
         let mut buf = Vec::with_capacity(header.len() + self.data.len());
         buf.extend_from_slice(header.as_bytes());
@@ -135,14 +137,14 @@ impl GitObject {
     }
 
     /// Compute the SHA-1 object ID
-    pub fn compute_id(&self) -> ObjectId {
+    pub(crate) fn compute_id(&self) -> ObjectId {
         let serialized = self.serialize();
         let hash = sha1_hash(&serialized);
         ObjectId(hash)
     }
 
     /// Parse from serialized format
-    pub fn deserialize(data: &[u8]) -> Option<Self> {
+    pub(crate) fn deserialize(data: &[u8]) -> Option<Self> {
         // Find null byte separating header from content
         let null_pos = data.iter().position(|&b| b == 0)?;
         let header = core::str::from_utf8(&data[..null_pos]).ok()?;
@@ -168,30 +170,30 @@ impl GitObject {
 
 /// Blob object (file content)
 #[derive(Debug, Clone)]
-pub struct Blob {
-    pub data: Vec<u8>,
+pub(crate) struct Blob {
+    pub(crate) data: Vec<u8>,
 }
 
 impl Blob {
-    pub fn new(data: Vec<u8>) -> Self {
+    pub(crate) fn new(data: Vec<u8>) -> Self {
         Self { data }
     }
 
-    pub fn to_object(&self) -> GitObject {
+    pub(crate) fn to_object(&self) -> GitObject {
         GitObject::new(ObjectType::Blob, self.data.clone())
     }
 }
 
 /// Tree entry (file mode + name + object ID)
 #[derive(Debug, Clone)]
-pub struct TreeEntry {
-    pub mode: u32,
-    pub name: String,
-    pub id: ObjectId,
+pub(crate) struct TreeEntry {
+    pub(crate) mode: u32,
+    pub(crate) name: String,
+    pub(crate) id: ObjectId,
 }
 
 impl TreeEntry {
-    pub fn new(mode: u32, name: &str, id: ObjectId) -> Self {
+    pub(crate) fn new(mode: u32, name: &str, id: ObjectId) -> Self {
         Self {
             mode,
             name: name.to_string(),
@@ -200,35 +202,35 @@ impl TreeEntry {
     }
 
     /// Check if this is a directory entry
-    pub fn is_tree(&self) -> bool {
+    pub(crate) fn is_tree(&self) -> bool {
         self.mode == 0o040000
     }
 
     /// Check if this is a regular file
-    pub fn is_blob(&self) -> bool {
+    pub(crate) fn is_blob(&self) -> bool {
         self.mode == 0o100644 || self.mode == 0o100755
     }
 }
 
 /// Tree object (directory listing)
 #[derive(Debug, Clone, Default)]
-pub struct Tree {
-    pub entries: Vec<TreeEntry>,
+pub(crate) struct Tree {
+    pub(crate) entries: Vec<TreeEntry>,
 }
 
 impl Tree {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             entries: Vec::new(),
         }
     }
 
-    pub fn add_entry(&mut self, entry: TreeEntry) {
+    pub(crate) fn add_entry(&mut self, entry: TreeEntry) {
         self.entries.push(entry);
     }
 
     /// Serialize to Git tree format: "mode name\0<20-byte-sha1>"
-    pub fn to_object(&self) -> GitObject {
+    pub(crate) fn to_object(&self) -> GitObject {
         let mut data = Vec::new();
         let mut sorted = self.entries.clone();
         sorted.sort_by(|a, b| {
@@ -259,7 +261,7 @@ impl Tree {
     }
 
     /// Parse from tree object data
-    pub fn from_data(data: &[u8]) -> Option<Self> {
+    pub(crate) fn from_data(data: &[u8]) -> Option<Self> {
         let mut tree = Self::new();
         let mut pos = 0;
 
@@ -292,15 +294,15 @@ impl Tree {
 
 /// Person info (author/committer)
 #[derive(Debug, Clone)]
-pub struct Person {
-    pub name: String,
-    pub email: String,
-    pub timestamp: u64,
-    pub tz_offset: i16,
+pub(crate) struct Person {
+    pub(crate) name: String,
+    pub(crate) email: String,
+    pub(crate) timestamp: u64,
+    pub(crate) tz_offset: i16,
 }
 
 impl Person {
-    pub fn new(name: &str, email: &str, timestamp: u64) -> Self {
+    pub(crate) fn new(name: &str, email: &str, timestamp: u64) -> Self {
         Self {
             name: name.to_string(),
             email: email.to_string(),
@@ -309,7 +311,7 @@ impl Person {
         }
     }
 
-    pub fn format(&self) -> String {
+    pub(crate) fn format(&self) -> String {
         let sign = if self.tz_offset >= 0 { '+' } else { '-' };
         let offset_abs = self.tz_offset.unsigned_abs();
         let hours = offset_abs / 60;
@@ -328,16 +330,16 @@ impl Person {
 
 /// Commit object
 #[derive(Debug, Clone)]
-pub struct Commit {
-    pub tree: ObjectId,
-    pub parents: Vec<ObjectId>,
-    pub author: Person,
-    pub committer: Person,
-    pub message: String,
+pub(crate) struct Commit {
+    pub(crate) tree: ObjectId,
+    pub(crate) parents: Vec<ObjectId>,
+    pub(crate) author: Person,
+    pub(crate) committer: Person,
+    pub(crate) message: String,
 }
 
 impl Commit {
-    pub fn new(tree: ObjectId, author: Person, message: &str) -> Self {
+    pub(crate) fn new(tree: ObjectId, author: Person, message: &str) -> Self {
         Self {
             tree,
             parents: Vec::new(),
@@ -347,7 +349,7 @@ impl Commit {
         }
     }
 
-    pub fn to_object(&self) -> GitObject {
+    pub(crate) fn to_object(&self) -> GitObject {
         let mut data = String::new();
         data.push_str(&alloc::format!("tree {}\n", self.tree));
         for parent in &self.parents {
@@ -365,7 +367,7 @@ impl Commit {
     }
 
     /// Parse from commit object data
-    pub fn from_data(data: &[u8]) -> Option<Self> {
+    pub(crate) fn from_data(data: &[u8]) -> Option<Self> {
         let text = core::str::from_utf8(data).ok()?;
         let mut tree = ObjectId::ZERO;
         let mut parents = Vec::new();
@@ -421,16 +423,16 @@ impl Commit {
 
 /// Tag object
 #[derive(Debug, Clone)]
-pub struct Tag {
-    pub object: ObjectId,
-    pub obj_type: ObjectType,
-    pub tag_name: String,
-    pub tagger: Person,
-    pub message: String,
+pub(crate) struct Tag {
+    pub(crate) object: ObjectId,
+    pub(crate) obj_type: ObjectType,
+    pub(crate) tag_name: String,
+    pub(crate) tagger: Person,
+    pub(crate) message: String,
 }
 
 impl Tag {
-    pub fn new(object: ObjectId, tag_name: &str, tagger: Person, message: &str) -> Self {
+    pub(crate) fn new(object: ObjectId, tag_name: &str, tagger: Person, message: &str) -> Self {
         Self {
             object,
             obj_type: ObjectType::Commit,
@@ -440,7 +442,7 @@ impl Tag {
         }
     }
 
-    pub fn to_object(&self) -> GitObject {
+    pub(crate) fn to_object(&self) -> GitObject {
         let mut data = String::new();
         data.push_str(&alloc::format!("object {}\n", self.object));
         data.push_str(&alloc::format!("type {}\n", self.obj_type));
@@ -487,7 +489,7 @@ fn parse_person(s: &str) -> Option<Person> {
 // ---------------------------------------------------------------------------
 
 /// SHA-1 hash (for Git object IDs)
-pub fn sha1_hash(data: &[u8]) -> [u8; 20] {
+pub(crate) fn sha1_hash(data: &[u8]) -> [u8; 20] {
     let mut h0: u32 = 0x67452301;
     let mut h1: u32 = 0xEFCDAB89;
     let mut h2: u32 = 0x98BADCFE;

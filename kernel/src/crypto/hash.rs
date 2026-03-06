@@ -3,13 +3,15 @@
 //! Implements SHA-256, SHA-512, and BLAKE3 hash algorithms.
 //! Full implementations following FIPS 180-4 and BLAKE3 specification.
 
+#![allow(dead_code, clippy::wrong_self_convention)]
+
 use alloc::vec::Vec;
 
 use super::CryptoResult;
 
 /// Hash algorithm types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HashAlgorithm {
+pub(crate) enum HashAlgorithm {
     Sha256,
     Sha512,
     Blake3,
@@ -17,25 +19,25 @@ pub enum HashAlgorithm {
 
 /// 256-bit hash output
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Hash256(pub [u8; 32]);
+pub(crate) struct Hash256(pub [u8; 32]);
 
 /// 512-bit hash output
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Hash512(pub [u8; 64]);
+pub(crate) struct Hash512(pub [u8; 64]);
 
 impl Hash256 {
     /// Create hash from bytes
-    pub fn from_bytes(bytes: &[u8; 32]) -> Self {
+    pub(crate) fn from_bytes(bytes: &[u8; 32]) -> Self {
         Self(*bytes)
     }
 
     /// Get hash as bytes
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
     /// Convert to hex string
-    pub fn to_hex(&self) -> alloc::string::String {
+    pub(crate) fn to_hex(&self) -> alloc::string::String {
         use alloc::format;
         let mut s = alloc::string::String::with_capacity(64);
         for byte in self.0 {
@@ -47,17 +49,17 @@ impl Hash256 {
 
 impl Hash512 {
     /// Create hash from bytes
-    pub fn from_bytes(bytes: &[u8; 64]) -> Self {
+    pub(crate) fn from_bytes(bytes: &[u8; 64]) -> Self {
         Self(*bytes)
     }
 
     /// Get hash as bytes
-    pub fn as_bytes(&self) -> &[u8; 64] {
+    pub(crate) fn as_bytes(&self) -> &[u8; 64] {
         &self.0
     }
 
     /// Convert to hex string
-    pub fn to_hex(&self) -> alloc::string::String {
+    pub(crate) fn to_hex(&self) -> alloc::string::String {
         use alloc::format;
         let mut s = alloc::string::String::with_capacity(128);
         for byte in self.0 {
@@ -68,7 +70,7 @@ impl Hash512 {
 }
 
 /// Hash data with specified algorithm
-pub fn hash(algorithm: HashAlgorithm, data: &[u8]) -> CryptoResult<Vec<u8>> {
+pub(crate) fn hash(algorithm: HashAlgorithm, data: &[u8]) -> CryptoResult<Vec<u8>> {
     match algorithm {
         HashAlgorithm::Sha256 => {
             let hash = sha256(data);
@@ -162,7 +164,7 @@ fn sha256_process_block(h: &mut [u32; 8], block: &[u8]) {
 }
 
 /// SHA-256 hash - Zero-allocation streaming implementation (FIPS 180-4)
-pub fn sha256(data: &[u8]) -> Hash256 {
+pub(crate) fn sha256(data: &[u8]) -> Hash256 {
     let mut h = SHA256_H0;
     let original_len_bits = (data.len() as u64) * 8;
 
@@ -368,7 +370,7 @@ fn sha512_process_block(h: &mut [u64; 8], block: &[u8]) {
 }
 
 /// SHA-512 hash - Zero-allocation streaming implementation (FIPS 180-4)
-pub fn sha512(data: &[u8]) -> Hash512 {
+pub(crate) fn sha512(data: &[u8]) -> Hash512 {
     let mut h = SHA512_H0;
     let original_len_bits = (data.len() as u128) * 8;
 
@@ -501,7 +503,7 @@ fn blake3_compress(
 }
 
 /// BLAKE3 hash - Full implementation following BLAKE3 specification
-pub fn blake3(data: &[u8]) -> Hash256 {
+pub(crate) fn blake3(data: &[u8]) -> Hash256 {
     // For simplicity, this implementation handles data up to 64 bytes (single
     // chunk) For longer data, a full tree structure would be needed
 
@@ -554,7 +556,7 @@ const BLAKE2S_SIGMA: [[usize; 16]; 10] = [
 
 /// BLAKE2s hash state (RFC 7693)
 #[derive(Clone)]
-pub struct Blake2s {
+pub(crate) struct Blake2s {
     h: [u32; 8],
     t: [u32; 2],
     buf: [u8; 64],
@@ -565,7 +567,7 @@ pub struct Blake2s {
 
 impl Blake2s {
     /// Create new BLAKE2s hasher with specified output length (1-32 bytes)
-    pub fn new(outlen: usize) -> Self {
+    pub(crate) fn new(outlen: usize) -> Self {
         assert!((1..=32).contains(&outlen));
         let mut h = BLAKE2S_IV;
         // Parameter block: fan-out=1, depth=1, digest_length=outlen
@@ -580,7 +582,7 @@ impl Blake2s {
     }
 
     /// Create new keyed BLAKE2s hasher
-    pub fn new_keyed(key: &[u8], outlen: usize) -> Self {
+    pub(crate) fn new_keyed(key: &[u8], outlen: usize) -> Self {
         assert!(!key.is_empty() && key.len() <= 32);
         assert!((1..=32).contains(&outlen));
         let mut h = BLAKE2S_IV;
@@ -602,7 +604,7 @@ impl Blake2s {
     }
 
     /// Update state with input data
-    pub fn update(&mut self, data: &[u8]) {
+    pub(crate) fn update(&mut self, data: &[u8]) {
         let mut offset = 0;
         let len = data.len();
 
@@ -633,7 +635,7 @@ impl Blake2s {
     }
 
     /// Finalize and return the hash digest
-    pub fn finalize(mut self) -> [u8; 32] {
+    pub(crate) fn finalize(mut self) -> [u8; 32] {
         self.increment_counter(self.buf_len as u32);
         // Zero-pad remaining buffer
         let buf_len = self.buf_len;
@@ -715,21 +717,25 @@ impl Blake2s {
 }
 
 /// Compute BLAKE2s hash of data with given output length
-pub fn blake2s_hash(data: &[u8], outlen: usize) -> [u8; 32] {
+pub(crate) fn blake2s_hash(data: &[u8], outlen: usize) -> [u8; 32] {
     let mut hasher = Blake2s::new(outlen);
     hasher.update(data);
     hasher.finalize()
 }
 
 /// Compute keyed BLAKE2s hash
-pub fn blake2s_keyed_hash(key: &[u8], data: &[u8], outlen: usize) -> [u8; 32] {
+pub(crate) fn blake2s_keyed_hash(key: &[u8], data: &[u8], outlen: usize) -> [u8; 32] {
     let mut hasher = Blake2s::new_keyed(key, outlen);
     hasher.update(data);
     hasher.finalize()
 }
 
 /// Verify hash matches data
-pub fn verify_hash(algorithm: HashAlgorithm, data: &[u8], expected: &[u8]) -> CryptoResult<bool> {
+pub(crate) fn verify_hash(
+    algorithm: HashAlgorithm,
+    data: &[u8],
+    expected: &[u8],
+) -> CryptoResult<bool> {
     let computed = hash(algorithm, data)?;
     Ok(computed == expected)
 }

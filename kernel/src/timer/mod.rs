@@ -27,6 +27,8 @@
 
 // Timer subsystem
 
+#![allow(dead_code)]
+
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use spin::Mutex;
@@ -68,7 +70,7 @@ static UPTIME_MS: AtomicU64 = AtomicU64::new(0);
 /// Wraps a `u64` value that is guaranteed unique for the lifetime of the
 /// kernel (barring counter wrap at 2^64, which is practically impossible).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TimerId(pub u64);
+pub(crate) struct TimerId(pub(crate) u64);
 
 impl TimerId {
     /// Allocate the next unique timer ID.
@@ -79,7 +81,7 @@ impl TimerId {
 
 /// Timer firing mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimerMode {
+pub(crate) enum TimerMode {
     /// Fire once after the interval elapses, then auto-deactivate.
     OneShot,
     /// Fire repeatedly at the given interval until explicitly cancelled.
@@ -91,7 +93,7 @@ pub enum TimerMode {
 /// Callbacks are plain function pointers (not closures) so they can be
 /// stored in static data without requiring `alloc`. The [`TimerId`] of the
 /// firing timer is passed so the callback can identify which timer expired.
-pub type TimerCallback = fn(TimerId);
+pub(crate) type TimerCallback = fn(TimerId);
 
 /// A single software timer entry.
 #[derive(Debug, Clone, Copy)]
@@ -277,7 +279,7 @@ fn noop_callback(_id: TimerId) {}
 /// Must be called once during kernel boot, after the global allocator is
 /// available (for the `GlobalState` mutex). Repeated calls return an
 /// error.
-pub fn init() -> KernelResult<()> {
+pub(crate) fn init() -> KernelResult<()> {
     TIMER_WHEEL
         .init(Mutex::new(TimerWheel::new()))
         .map_err(|_| KernelError::AlreadyExists {
@@ -296,7 +298,7 @@ pub fn init() -> KernelResult<()> {
 ///
 /// # Returns
 /// The [`TimerId`] of the newly created timer.
-pub fn create_timer(
+pub(crate) fn create_timer(
     mode: TimerMode,
     interval_ms: u64,
     callback: TimerCallback,
@@ -313,7 +315,7 @@ pub fn create_timer(
 ///
 /// Returns `Ok(())` if the timer was found and removed, or a
 /// [`KernelError::NotFound`] if no such timer exists.
-pub fn cancel_timer(id: TimerId) -> KernelResult<()> {
+pub(crate) fn cancel_timer(id: TimerId) -> KernelResult<()> {
     TIMER_WHEEL
         .with_mut(|wheel| {
             let mut wheel = wheel.lock();
@@ -327,7 +329,7 @@ pub fn cancel_timer(id: TimerId) -> KernelResult<()> {
 /// This function should be called from the timer interrupt handler (or a
 /// periodic scheduler tick) with the number of milliseconds that have
 /// elapsed since the last call.
-pub fn timer_tick(elapsed_ms: u64) {
+pub(crate) fn timer_tick(elapsed_ms: u64) {
     // Update monotonic uptime counter.
     UPTIME_MS.fetch_add(elapsed_ms, Ordering::Relaxed);
 
@@ -342,12 +344,12 @@ pub fn timer_tick(elapsed_ms: u64) {
 /// This counter is incremented by [`timer_tick`] and is independent of
 /// wall-clock time. It will not wrap for over 584 million years at
 /// millisecond granularity.
-pub fn get_uptime_ms() -> u64 {
+pub(crate) fn get_uptime_ms() -> u64 {
     UPTIME_MS.load(Ordering::Relaxed)
 }
 
 /// Return the number of currently pending (active) timers.
-pub fn pending_timer_count() -> usize {
+pub(crate) fn pending_timer_count() -> usize {
     TIMER_WHEEL
         .with(|wheel| {
             let wheel = wheel.lock();

@@ -19,7 +19,7 @@ use super::CryptoResult;
 /// Delegates to the existing `SymmetricCipher` implementations in
 /// `crypto::symmetric`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CipherSuite {
+pub(crate) enum CipherSuite {
     /// ChaCha20-Poly1305 (RFC 8439)
     ChaCha20Poly1305,
     /// AES-256-GCM (NIST SP 800-38D)
@@ -28,7 +28,7 @@ pub enum CipherSuite {
 
 impl CipherSuite {
     /// Encrypt with AEAD: returns ciphertext || tag
-    pub fn encrypt_aead(
+    pub(crate) fn encrypt_aead(
         &self,
         key: &[u8],
         nonce: &[u8],
@@ -49,7 +49,7 @@ impl CipherSuite {
     }
 
     /// Decrypt with AEAD: input is ciphertext || tag, returns plaintext
-    pub fn decrypt_aead(
+    pub(crate) fn decrypt_aead(
         &self,
         key: &[u8],
         nonce: &[u8],
@@ -70,7 +70,7 @@ impl CipherSuite {
     }
 
     /// Key size in bytes
-    pub fn key_size(&self) -> usize {
+    pub(crate) fn key_size(&self) -> usize {
         match self {
             Self::ChaCha20Poly1305 => 32,
             Self::Aes256Gcm => 32,
@@ -78,7 +78,7 @@ impl CipherSuite {
     }
 
     /// Nonce size in bytes
-    pub fn nonce_size(&self) -> usize {
+    pub(crate) fn nonce_size(&self) -> usize {
         match self {
             Self::ChaCha20Poly1305 => 12,
             Self::Aes256Gcm => 12,
@@ -86,7 +86,7 @@ impl CipherSuite {
     }
 
     /// Authentication tag size in bytes
-    pub fn tag_size(&self) -> usize {
+    pub(crate) fn tag_size(&self) -> usize {
         match self {
             Self::ChaCha20Poly1305 => 16,
             Self::Aes256Gcm => 16,
@@ -94,7 +94,7 @@ impl CipherSuite {
     }
 
     /// Algorithm name string
-    pub fn algorithm_name(&self) -> &'static str {
+    pub(crate) fn algorithm_name(&self) -> &'static str {
         match self {
             Self::ChaCha20Poly1305 => "ChaCha20-Poly1305",
             Self::Aes256Gcm => "AES-256-GCM",
@@ -108,7 +108,7 @@ impl CipherSuite {
 
 /// HMAC algorithm variants
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HmacAlgorithm {
+pub(crate) enum HmacAlgorithm {
     /// HMAC-SHA-256
     HmacSha256,
     /// HMAC-BLAKE2s (RFC 2104 construction with BLAKE2s)
@@ -117,7 +117,7 @@ pub enum HmacAlgorithm {
 
 impl HmacAlgorithm {
     /// Compute HMAC over data with the given key
-    pub fn compute(&self, key: &[u8], data: &[u8]) -> [u8; 32] {
+    pub(crate) fn compute(&self, key: &[u8], data: &[u8]) -> [u8; 32] {
         match self {
             Self::HmacSha256 => hmac_sha256(key, data),
             Self::HmacBlake2s => hmac_blake2s(key, data),
@@ -125,7 +125,7 @@ impl HmacAlgorithm {
     }
 
     /// Output size in bytes
-    pub fn output_size(&self) -> usize {
+    pub(crate) fn output_size(&self) -> usize {
         match self {
             Self::HmacSha256 => 32,
             Self::HmacBlake2s => 32,
@@ -209,14 +209,14 @@ fn hmac_blake2s(key: &[u8], data: &[u8]) -> [u8; 32] {
 
 /// KDF algorithm variants
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KdfAlgorithm {
+pub(crate) enum KdfAlgorithm {
     /// HKDF using BLAKE2s as the underlying HMAC
     HkdfBlake2s,
 }
 
 impl KdfAlgorithm {
     /// HKDF-Extract: derive a PRK from salt and input keying material
-    pub fn extract(&self, salt: &[u8], ikm: &[u8]) -> [u8; 32] {
+    pub(crate) fn extract(&self, salt: &[u8], ikm: &[u8]) -> [u8; 32] {
         match self {
             Self::HkdfBlake2s => HmacAlgorithm::HmacBlake2s.compute(salt, ikm),
         }
@@ -225,7 +225,7 @@ impl KdfAlgorithm {
     /// HKDF-Expand: derive output keying material from PRK and info
     ///
     /// Returns up to 32 bytes of output keying material.
-    pub fn expand(&self, prk: &[u8], info: &[u8]) -> [u8; 32] {
+    pub(crate) fn expand(&self, prk: &[u8], info: &[u8]) -> [u8; 32] {
         match self {
             Self::HkdfBlake2s => HmacAlgorithm::HmacBlake2s.compute(prk, info),
         }
@@ -236,7 +236,11 @@ impl KdfAlgorithm {
     /// This is the pattern used by WireGuard's Noise handshake:
     /// PRK = HMAC(chaining_key, input), T1 = HMAC(PRK, 0x01),
     /// T2 = HMAC(PRK, T1 || 0x02)
-    pub fn extract_expand2(&self, chaining_key: &[u8; 32], input: &[u8]) -> ([u8; 32], [u8; 32]) {
+    pub(crate) fn extract_expand2(
+        &self,
+        chaining_key: &[u8; 32],
+        input: &[u8],
+    ) -> ([u8; 32], [u8; 32]) {
         match self {
             Self::HkdfBlake2s => {
                 let prk = HmacAlgorithm::HmacBlake2s.compute(chaining_key, input);
@@ -255,7 +259,7 @@ impl KdfAlgorithm {
     /// Extended pattern for Noise handshake PSK mixing:
     /// PRK = HMAC(chaining_key, input), T1 = HMAC(PRK, 0x01),
     /// T2 = HMAC(PRK, T1 || 0x02), T3 = HMAC(PRK, T2 || 0x03)
-    pub fn extract_expand3(
+    pub(crate) fn extract_expand3(
         &self,
         chaining_key: &[u8; 32],
         input: &[u8],

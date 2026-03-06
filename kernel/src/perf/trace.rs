@@ -11,12 +11,12 @@ use core::{
 };
 
 /// Global tracing enable flag -- zero overhead when false (single atomic load).
-pub static TRACING_ENABLED: AtomicBool = AtomicBool::new(false);
+pub(crate) static TRACING_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Trace event types
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TraceEventType {
+pub(crate) enum TraceEventType {
     /// System call entry
     SyscallEntry = 0,
     /// System call exit
@@ -42,17 +42,17 @@ pub enum TraceEventType {
 /// A single trace event (32 bytes, cache-line friendly).
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct TraceEvent {
+pub(crate) struct TraceEvent {
     /// Timestamp (architecture-specific cycle counter)
-    pub timestamp: u64,
+    pub(crate) timestamp: u64,
     /// Event type
-    pub event_type: u8,
+    pub(crate) event_type: u8,
     /// CPU that generated this event
-    pub cpu: u8,
+    pub(crate) cpu: u8,
     /// Padding for alignment
     _pad: [u8; 6],
     /// Event-specific data (e.g., PID, syscall number, frame number)
-    pub data: [u64; 2],
+    pub(crate) data: [u64; 2],
 }
 
 impl TraceEvent {
@@ -135,7 +135,7 @@ static TRACE_RINGS: PerCpuTraceRings =
 /// When `TRACING_ENABLED` is false, this compiles down to a single atomic
 /// load and branch (typically predicted not-taken).
 #[inline(always)]
-pub fn trace_event(event_type: TraceEventType, data0: u64, data1: u64) {
+pub(crate) fn trace_event(event_type: TraceEventType, data0: u64, data1: u64) {
     if !TRACING_ENABLED.load(Ordering::Relaxed) {
         return;
     }
@@ -157,24 +157,24 @@ pub fn trace_event(event_type: TraceEventType, data0: u64, data1: u64) {
 }
 
 /// Enable tracing
-pub fn enable() {
+pub(crate) fn enable() {
     TRACING_ENABLED.store(true, Ordering::Release);
 }
 
 /// Disable tracing
-pub fn disable() {
+pub(crate) fn disable() {
     TRACING_ENABLED.store(false, Ordering::Release);
 }
 
 /// Check if tracing is enabled
-pub fn is_enabled() -> bool {
+pub(crate) fn is_enabled() -> bool {
     TRACING_ENABLED.load(Ordering::Relaxed)
 }
 
 /// Dump trace events from all CPUs to serial output.
 ///
 /// Prints the most recent `count` events per CPU.
-pub fn dump_trace(count: usize) {
+pub(crate) fn dump_trace(count: usize) {
     let was_enabled = is_enabled();
     disable(); // Pause tracing during dump
 
@@ -225,7 +225,7 @@ pub fn dump_trace(count: usize) {
 }
 
 /// Get total events across all CPUs
-pub fn total_events() -> usize {
+pub(crate) fn total_events() -> usize {
     (0..MAX_TRACE_CPUS)
         .map(|cpu| unsafe { (*TRACE_RINGS.0[cpu].get()).total_events() })
         .sum()

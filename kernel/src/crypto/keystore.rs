@@ -2,6 +2,8 @@
 //!
 //! Secure storage and management of cryptographic keys.
 
+#![allow(dead_code)]
+
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 use spin::RwLock;
@@ -11,11 +13,11 @@ use crate::sync::once_lock::OnceLock;
 
 /// Key identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct KeyId(pub u64);
+pub(crate) struct KeyId(pub u64);
 
 /// Cryptographic key types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeyType {
+pub(crate) enum KeyType {
     Symmetric,
     SigningKey,
     VerifyingKey,
@@ -24,32 +26,32 @@ pub enum KeyType {
 
 /// Stored cryptographic key
 #[derive(Debug, Clone)]
-pub struct Key {
-    pub id: KeyId,
-    pub key_type: KeyType,
-    pub data: Vec<u8>,
-    pub metadata: KeyMetadata,
+pub(crate) struct Key {
+    pub(crate) id: KeyId,
+    pub(crate) key_type: KeyType,
+    pub(crate) data: Vec<u8>,
+    pub(crate) metadata: KeyMetadata,
 }
 
 /// Key metadata
 #[derive(Debug, Clone)]
-pub struct KeyMetadata {
-    pub name: String,
-    pub created: u64,
-    pub expires: Option<u64>,
-    pub usage_count: u64,
-    pub max_usage: Option<u64>,
+pub(crate) struct KeyMetadata {
+    pub(crate) name: String,
+    pub(crate) created: u64,
+    pub(crate) expires: Option<u64>,
+    pub(crate) usage_count: u64,
+    pub(crate) max_usage: Option<u64>,
 }
 
 /// Key store for managing cryptographic keys
-pub struct KeyStore {
+pub(crate) struct KeyStore {
     keys: RwLock<BTreeMap<KeyId, Key>>,
     next_id: RwLock<u64>,
 }
 
 impl KeyStore {
     /// Create new key store
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             keys: RwLock::new(BTreeMap::new()),
             next_id: RwLock::new(1),
@@ -57,7 +59,12 @@ impl KeyStore {
     }
 
     /// Store a new key
-    pub fn store_key(&self, key_type: KeyType, data: Vec<u8>, name: String) -> CryptoResult<KeyId> {
+    pub(crate) fn store_key(
+        &self,
+        key_type: KeyType,
+        data: Vec<u8>,
+        name: String,
+    ) -> CryptoResult<KeyId> {
         let mut next_id = self.next_id.write();
         let id = KeyId(*next_id);
         *next_id += 1;
@@ -81,26 +88,26 @@ impl KeyStore {
     }
 
     /// Retrieve a key by ID
-    pub fn get_key(&self, id: KeyId) -> CryptoResult<Key> {
+    pub(crate) fn get_key(&self, id: KeyId) -> CryptoResult<Key> {
         let keys = self.keys.read();
 
         keys.get(&id).cloned().ok_or(CryptoError::InvalidKey)
     }
 
     /// Delete a key
-    pub fn delete_key(&self, id: KeyId) -> CryptoResult<()> {
+    pub(crate) fn delete_key(&self, id: KeyId) -> CryptoResult<()> {
         let mut keys = self.keys.write();
 
         keys.remove(&id).ok_or(CryptoError::InvalidKey).map(|_| ())
     }
 
     /// List all key IDs
-    pub fn list_keys(&self) -> Vec<KeyId> {
+    pub(crate) fn list_keys(&self) -> Vec<KeyId> {
         self.keys.read().keys().copied().collect()
     }
 
     /// Increment key usage count
-    pub fn use_key(&self, id: KeyId) -> CryptoResult<()> {
+    pub(crate) fn use_key(&self, id: KeyId) -> CryptoResult<()> {
         let mut keys = self.keys.write();
 
         if let Some(key) = keys.get_mut(&id) {
@@ -127,7 +134,7 @@ impl KeyStore {
     }
 
     /// Set key expiration time
-    pub fn set_expiration(&self, id: KeyId, expires: u64) -> CryptoResult<()> {
+    pub(crate) fn set_expiration(&self, id: KeyId, expires: u64) -> CryptoResult<()> {
         let mut keys = self.keys.write();
 
         if let Some(key) = keys.get_mut(&id) {
@@ -139,7 +146,7 @@ impl KeyStore {
     }
 
     /// Set maximum usage count for key
-    pub fn set_max_usage(&self, id: KeyId, max_usage: u64) -> CryptoResult<()> {
+    pub(crate) fn set_max_usage(&self, id: KeyId, max_usage: u64) -> CryptoResult<()> {
         let mut keys = self.keys.write();
 
         if let Some(key) = keys.get_mut(&id) {
@@ -165,7 +172,7 @@ impl Default for KeyStore {
 static GLOBAL_KEYSTORE: RwLock<Option<KeyStore>> = RwLock::new(None);
 
 /// Initialize key store
-pub fn init() -> CryptoResult<()> {
+pub(crate) fn init() -> CryptoResult<()> {
     let keystore = KeyStore::new();
     *GLOBAL_KEYSTORE.write() = Some(keystore);
     Ok(())
@@ -175,7 +182,7 @@ pub fn init() -> CryptoResult<()> {
 static KEYSTORE_STORAGE: OnceLock<KeyStore> = OnceLock::new();
 
 /// Get global key store
-pub fn get_keystore() -> &'static KeyStore {
+pub(crate) fn get_keystore() -> &'static KeyStore {
     KEYSTORE_STORAGE.get_or_init(KeyStore::new)
 }
 

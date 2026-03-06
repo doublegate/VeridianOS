@@ -21,11 +21,40 @@
 
 use alloc::{
     collections::BTreeMap,
-    format,
     string::{String, ToString},
     vec,
     vec::Vec,
 };
+
+// ---------------------------------------------------------------------------
+// Script Error Type
+// ---------------------------------------------------------------------------
+
+/// Errors from shell script parsing and arithmetic evaluation
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScriptError {
+    /// Syntax error at a specific line
+    Syntax { line: usize, message: &'static str },
+    /// Arithmetic evaluation error
+    Arithmetic { message: &'static str },
+    /// Number parsing error
+    InvalidNumber { input: String },
+    /// Number overflow during parsing
+    NumberOverflow { input: String },
+}
+
+impl core::fmt::Display for ScriptError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Syntax { line, message } => {
+                write!(f, "syntax error: {} on line {}", message, line)
+            }
+            Self::Arithmetic { message } => write!(f, "{}", message),
+            Self::InvalidNumber { input } => write!(f, "invalid number: {}", input),
+            Self::NumberOverflow { input } => write!(f, "number overflow: {}", input),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // AST types
@@ -109,7 +138,7 @@ impl ScriptEngine {
     ///
     /// Returns a list of top-level [`ScriptNode`]s, or an error message
     /// if the script is malformed (e.g., unmatched `if`/`fi`).
-    pub fn parse_script(&self, lines: &[String]) -> Result<Vec<ScriptNode>, String> {
+    pub fn parse_script(&self, lines: &[String]) -> Result<Vec<ScriptNode>, ScriptError> {
         let mut pos = 0;
         let mut nodes = Vec::new();
 
@@ -148,7 +177,7 @@ impl ScriptEngine {
         &self,
         lines: &[String],
         pos: usize,
-    ) -> Result<(Option<ScriptNode>, usize), String> {
+    ) -> Result<(Option<ScriptNode>, usize), ScriptError> {
         if pos >= lines.len() {
             return Ok((None, pos));
         }
@@ -177,7 +206,7 @@ impl ScriptEngine {
         &self,
         lines: &[String],
         start: usize,
-    ) -> Result<(Option<ScriptNode>, usize), String> {
+    ) -> Result<(Option<ScriptNode>, usize), ScriptError> {
         let first_line = lines[start].trim();
 
         // Extract condition: everything after "if" and before optional "; then"
@@ -185,10 +214,10 @@ impl ScriptEngine {
         let (condition, then_on_same_line) = split_then(after_if);
 
         if condition.is_empty() {
-            return Err(format!(
-                "syntax error: empty condition on line {}",
-                start + 1
-            ));
+            return Err(ScriptError::Syntax {
+                line: start + 1,
+                message: "empty condition",
+            });
         }
 
         let mut pos = start + 1;
@@ -197,10 +226,10 @@ impl ScriptEngine {
         if !then_on_same_line {
             pos = skip_blank_and_comments(lines, pos);
             if pos >= lines.len() || first_token(lines[pos].trim()) != "then" {
-                return Err(format!(
-                    "syntax error: expected 'then' after 'if' condition near line {}",
-                    start + 1
-                ));
+                return Err(ScriptError::Syntax {
+                    line: start + 1,
+                    message: "expected 'then' after 'if' condition",
+                });
             }
             pos += 1;
         }
@@ -220,10 +249,10 @@ impl ScriptEngine {
 
         loop {
             if pos >= lines.len() {
-                return Err(format!(
-                    "syntax error: 'if' without matching 'fi' (started on line {})",
-                    start + 1
-                ));
+                return Err(ScriptError::Syntax {
+                    line: start + 1,
+                    message: "'if' without matching 'fi'",
+                });
             }
 
             let line = lines[pos].trim();
@@ -269,17 +298,17 @@ impl ScriptEngine {
                 let after_elif = strip_keyword(line, "elif");
                 let (elif_cond, elif_then) = split_then(after_elif);
                 if elif_cond.is_empty() {
-                    return Err(format!(
-                        "syntax error: empty 'elif' condition on line {}",
-                        pos + 1
-                    ));
+                    return Err(ScriptError::Syntax {
+                        line: pos + 1,
+                        message: "empty 'elif' condition",
+                    });
                 }
 
                 if let IfSection::Else = section {
-                    return Err(format!(
-                        "syntax error: 'elif' after 'else' on line {}",
-                        pos + 1
-                    ));
+                    return Err(ScriptError::Syntax {
+                        line: pos + 1,
+                        message: "'elif' after 'else'",
+                    });
                 }
 
                 // Start a new elif branch
@@ -290,10 +319,10 @@ impl ScriptEngine {
                 if !elif_then {
                     let next = skip_blank_and_comments(lines, pos);
                     if next >= lines.len() || first_token(lines[next].trim()) != "then" {
-                        return Err(format!(
-                            "syntax error: expected 'then' after 'elif' near line {}",
-                            pos
-                        ));
+                        return Err(ScriptError::Syntax {
+                            line: pos,
+                            message: "expected 'then' after 'elif'",
+                        });
                     }
                     pos = next + 1;
                 }
@@ -336,16 +365,16 @@ impl ScriptEngine {
         &self,
         lines: &[String],
         start: usize,
-    ) -> Result<(Option<ScriptNode>, usize), String> {
+    ) -> Result<(Option<ScriptNode>, usize), ScriptError> {
         let first_line = lines[start].trim();
         let after_while = strip_keyword(first_line, "while");
         let (condition, do_on_same_line) = split_do(after_while);
 
         if condition.is_empty() {
-            return Err(format!(
-                "syntax error: empty 'while' condition on line {}",
-                start + 1
-            ));
+            return Err(ScriptError::Syntax {
+                line: start + 1,
+                message: "empty 'while' condition",
+            });
         }
 
         let mut pos = start + 1;
@@ -353,10 +382,10 @@ impl ScriptEngine {
         if !do_on_same_line {
             pos = skip_blank_and_comments(lines, pos);
             if pos >= lines.len() || first_token(lines[pos].trim()) != "do" {
-                return Err(format!(
-                    "syntax error: expected 'do' after 'while' near line {}",
-                    start + 1
-                ));
+                return Err(ScriptError::Syntax {
+                    line: start + 1,
+                    message: "expected 'do' after 'while'",
+                });
             }
             pos += 1;
         }
@@ -364,10 +393,10 @@ impl ScriptEngine {
         let mut body = Vec::new();
         loop {
             if pos >= lines.len() {
-                return Err(format!(
-                    "syntax error: 'while' without matching 'done' (started on line {})",
-                    start + 1
-                ));
+                return Err(ScriptError::Syntax {
+                    line: start + 1,
+                    message: "'while' without matching 'done'",
+                });
             }
 
             let line = lines[pos].trim();
@@ -393,7 +422,7 @@ impl ScriptEngine {
         &self,
         lines: &[String],
         start: usize,
-    ) -> Result<(Option<ScriptNode>, usize), String> {
+    ) -> Result<(Option<ScriptNode>, usize), ScriptError> {
         let first_line = lines[start].trim();
         let after_for = strip_keyword(first_line, "for");
 
@@ -401,10 +430,10 @@ impl ScriptEngine {
         let (var, words, do_on_same_line) = parse_for_header(after_for)?;
 
         if var.is_empty() {
-            return Err(format!(
-                "syntax error: missing variable in 'for' on line {}",
-                start + 1
-            ));
+            return Err(ScriptError::Syntax {
+                line: start + 1,
+                message: "missing variable in 'for'",
+            });
         }
 
         let mut pos = start + 1;
@@ -412,10 +441,10 @@ impl ScriptEngine {
         if !do_on_same_line {
             pos = skip_blank_and_comments(lines, pos);
             if pos >= lines.len() || first_token(lines[pos].trim()) != "do" {
-                return Err(format!(
-                    "syntax error: expected 'do' after 'for' near line {}",
-                    start + 1
-                ));
+                return Err(ScriptError::Syntax {
+                    line: start + 1,
+                    message: "expected 'do' after 'for'",
+                });
             }
             pos += 1;
         }
@@ -423,10 +452,10 @@ impl ScriptEngine {
         let mut body = Vec::new();
         loop {
             if pos >= lines.len() {
-                return Err(format!(
-                    "syntax error: 'for' without matching 'done' (started on line {})",
-                    start + 1
-                ));
+                return Err(ScriptError::Syntax {
+                    line: start + 1,
+                    message: "'for' without matching 'done'",
+                });
             }
 
             let line = lines[pos].trim();
@@ -452,17 +481,17 @@ impl ScriptEngine {
         &self,
         lines: &[String],
         start: usize,
-    ) -> Result<(Option<ScriptNode>, usize), String> {
+    ) -> Result<(Option<ScriptNode>, usize), ScriptError> {
         let first_line = lines[start].trim();
         let after_case = strip_keyword(first_line, "case");
 
         // Expected: "word in"
         let (word, has_in) = parse_case_header(after_case);
         if word.is_empty() {
-            return Err(format!(
-                "syntax error: missing word in 'case' on line {}",
-                start + 1
-            ));
+            return Err(ScriptError::Syntax {
+                line: start + 1,
+                message: "missing word in 'case'",
+            });
         }
 
         let mut pos = start + 1;
@@ -470,10 +499,10 @@ impl ScriptEngine {
         if !has_in {
             pos = skip_blank_and_comments(lines, pos);
             if pos >= lines.len() || lines[pos].trim() != "in" {
-                return Err(format!(
-                    "syntax error: expected 'in' after 'case' near line {}",
-                    start + 1
-                ));
+                return Err(ScriptError::Syntax {
+                    line: start + 1,
+                    message: "expected 'in' after 'case'",
+                });
             }
             pos += 1;
         }
@@ -482,10 +511,10 @@ impl ScriptEngine {
 
         loop {
             if pos >= lines.len() {
-                return Err(format!(
-                    "syntax error: 'case' without matching 'esac' (started on line {})",
-                    start + 1
-                ));
+                return Err(ScriptError::Syntax {
+                    line: start + 1,
+                    message: "'case' without matching 'esac'",
+                });
             }
 
             let line = lines[pos].trim();
@@ -512,15 +541,13 @@ impl ScriptEngine {
         &self,
         lines: &[String],
         start: usize,
-    ) -> Result<(Vec<String>, Vec<ScriptNode>, usize), String> {
+    ) -> Result<(Vec<String>, Vec<ScriptNode>, usize), ScriptError> {
         let line = lines[start].trim();
 
         // Find the ")" delimiter that separates patterns from commands
-        let paren_pos = line.find(')').ok_or_else(|| {
-            format!(
-                "syntax error: expected ')' in case pattern on line {}",
-                start + 1
-            )
+        let paren_pos = line.find(')').ok_or(ScriptError::Syntax {
+            line: start + 1,
+            message: "expected ')' in case pattern",
         })?;
 
         let pattern_str = &line[..paren_pos];
@@ -531,10 +558,10 @@ impl ScriptEngine {
             .collect();
 
         if patterns.is_empty() {
-            return Err(format!(
-                "syntax error: empty pattern in case branch on line {}",
-                start + 1
-            ));
+            return Err(ScriptError::Syntax {
+                line: start + 1,
+                message: "empty pattern in case branch",
+            });
         }
 
         // Check for inline commands after ")"
@@ -563,10 +590,10 @@ impl ScriptEngine {
 
         loop {
             if pos >= lines.len() {
-                return Err(format!(
-                    "syntax error: case branch without ';;' (started on line {})",
-                    start + 1
-                ));
+                return Err(ScriptError::Syntax {
+                    line: start + 1,
+                    message: "case branch without ';;'",
+                });
             }
 
             let bline = lines[pos].trim();
@@ -728,18 +755,19 @@ fn test_dir_exists(path: &str) -> bool {
 /// - Whitespace between tokens
 ///
 /// Returns the computed value or an error message.
-pub fn evaluate_arithmetic(expr: &str) -> Result<i64, String> {
+pub fn evaluate_arithmetic(expr: &str) -> Result<i64, ScriptError> {
     let tokens = tokenize_arithmetic(expr)?;
     if tokens.is_empty() {
-        return Err("empty arithmetic expression".to_string());
+        return Err(ScriptError::Arithmetic {
+            message: "empty arithmetic expression",
+        });
     }
     let mut pos = 0;
     let result = parse_expr(&tokens, &mut pos)?;
     if pos < tokens.len() {
-        return Err(format!(
-            "unexpected token '{}' in arithmetic expression",
-            tokens[pos]
-        ));
+        return Err(ScriptError::Arithmetic {
+            message: "unexpected token in arithmetic expression",
+        });
     }
     Ok(result)
 }
@@ -832,7 +860,7 @@ impl core::fmt::Display for ArithToken {
 }
 
 /// Tokenize an arithmetic expression string.
-fn tokenize_arithmetic(expr: &str) -> Result<Vec<ArithToken>, String> {
+fn tokenize_arithmetic(expr: &str) -> Result<Vec<ArithToken>, ScriptError> {
     let mut tokens = Vec::new();
     let chars: Vec<char> = expr.chars().collect();
     let len = chars.len();
@@ -875,8 +903,7 @@ fn tokenize_arithmetic(expr: &str) -> Result<Vec<ArithToken>, String> {
                         i += 1;
                     }
                     let num_str: String = chars[start..i].iter().collect();
-                    let n = parse_i64(&num_str)
-                        .map_err(|_| format!("invalid number in arithmetic: -{}", num_str))?;
+                    let n = parse_i64(&num_str)?;
                     tokens.push(ArithToken::Number(-n));
                 } else {
                     tokens.push(ArithToken::Minus);
@@ -909,15 +936,13 @@ fn tokenize_arithmetic(expr: &str) -> Result<Vec<ArithToken>, String> {
                     i += 1;
                 }
                 let num_str: String = chars[start..i].iter().collect();
-                let n = parse_i64(&num_str)
-                    .map_err(|_| format!("invalid number in arithmetic: {}", num_str))?;
+                let n = parse_i64(&num_str)?;
                 tokens.push(ArithToken::Number(n));
             }
             _ => {
-                return Err(format!(
-                    "unexpected character '{}' in arithmetic expression",
-                    ch
-                ));
+                return Err(ScriptError::Arithmetic {
+                    message: "unexpected character in arithmetic expression",
+                });
             }
         }
     }
@@ -926,7 +951,7 @@ fn tokenize_arithmetic(expr: &str) -> Result<Vec<ArithToken>, String> {
 }
 
 /// Parse an expression: handles `+` and `-` (lowest precedence).
-fn parse_expr(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
+fn parse_expr(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, ScriptError> {
     let mut left = parse_term(tokens, pos)?;
 
     while *pos < tokens.len() {
@@ -949,7 +974,7 @@ fn parse_expr(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
 }
 
 /// Parse a term: handles `*`, `/`, `%` (higher precedence).
-fn parse_term(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
+fn parse_term(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, ScriptError> {
     let mut left = parse_factor(tokens, pos)?;
 
     while *pos < tokens.len() {
@@ -963,7 +988,9 @@ fn parse_term(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
                 *pos += 1;
                 let right = parse_factor(tokens, pos)?;
                 if right == 0 {
-                    return Err("division by zero".to_string());
+                    return Err(ScriptError::Arithmetic {
+                        message: "division by zero",
+                    });
                 }
                 left /= right;
             }
@@ -971,7 +998,9 @@ fn parse_term(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
                 *pos += 1;
                 let right = parse_factor(tokens, pos)?;
                 if right == 0 {
-                    return Err("modulo by zero".to_string());
+                    return Err(ScriptError::Arithmetic {
+                        message: "modulo by zero",
+                    });
                 }
                 left %= right;
             }
@@ -983,9 +1012,11 @@ fn parse_term(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
 }
 
 /// Parse a factor: a number or a parenthesized expression.
-fn parse_factor(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
+fn parse_factor(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, ScriptError> {
     if *pos >= tokens.len() {
-        return Err("unexpected end of arithmetic expression".to_string());
+        return Err(ScriptError::Arithmetic {
+            message: "unexpected end of arithmetic expression",
+        });
     }
 
     match &tokens[*pos] {
@@ -998,7 +1029,9 @@ fn parse_factor(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
             *pos += 1; // skip '('
             let val = parse_expr(tokens, pos)?;
             if *pos >= tokens.len() || tokens[*pos] != ArithToken::RParen {
-                return Err("unmatched '(' in arithmetic expression".to_string());
+                return Err(ScriptError::Arithmetic {
+                    message: "unmatched '(' in arithmetic expression",
+                });
             }
             *pos += 1; // skip ')'
             Ok(val)
@@ -1009,10 +1042,9 @@ fn parse_factor(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
             let val = parse_factor(tokens, pos)?;
             Ok(-val)
         }
-        other => Err(format!(
-            "unexpected token '{}' in arithmetic expression",
-            other
-        )),
+        _ => Err(ScriptError::Arithmetic {
+            message: "unexpected token in arithmetic expression",
+        }),
     }
 }
 
@@ -1077,7 +1109,7 @@ fn split_do(input: &str) -> (String, bool) {
 /// Parse the header of a `for` loop: "var in word1 word2 ...; do"
 ///
 /// Returns `(var, words, has_do)`.
-fn parse_for_header(input: &str) -> Result<(String, Vec<String>, bool), String> {
+fn parse_for_header(input: &str) -> Result<(String, Vec<String>, bool), ScriptError> {
     let input = input.trim();
 
     // Check for "; do" suffix
@@ -1090,14 +1122,20 @@ fn parse_for_header(input: &str) -> Result<(String, Vec<String>, bool), String> 
     let parts: Vec<&str> = header.split_whitespace().collect();
 
     if parts.is_empty() {
-        return Err("syntax error: missing variable in 'for'".to_string());
+        return Err(ScriptError::Syntax {
+            line: 0,
+            message: "missing variable in 'for'",
+        });
     }
 
     let var = parts[0].to_string();
 
     // Check for "in" keyword
     if parts.len() < 2 || parts[1] != "in" {
-        return Err("syntax error: expected 'in' after variable in 'for'".to_string());
+        return Err(ScriptError::Syntax {
+            line: 0,
+            message: "expected 'in' after variable in 'for'",
+        });
     }
 
     let words: Vec<String> = parts[2..].iter().map(|w| w.to_string()).collect();
@@ -1147,10 +1185,12 @@ fn skip_blank_and_comments(lines: &[String], start: usize) -> usize {
 }
 
 /// Parse a string as i64 without relying on std.
-fn parse_i64(s: &str) -> Result<i64, String> {
+fn parse_i64(s: &str) -> Result<i64, ScriptError> {
     let s = s.trim();
     if s.is_empty() {
-        return Err("empty number".to_string());
+        return Err(ScriptError::InvalidNumber {
+            input: String::new(),
+        });
     }
 
     let (negative, digits) = if let Some(rest) = s.strip_prefix('-') {
@@ -1162,19 +1202,25 @@ fn parse_i64(s: &str) -> Result<i64, String> {
     };
 
     if digits.is_empty() {
-        return Err(format!("invalid number: {}", s));
+        return Err(ScriptError::InvalidNumber {
+            input: String::from(s),
+        });
     }
 
     let mut result: i64 = 0;
     for ch in digits.chars() {
         if !ch.is_ascii_digit() {
-            return Err(format!("invalid number: {}", s));
+            return Err(ScriptError::InvalidNumber {
+                input: String::from(s),
+            });
         }
         let digit = (ch as u8 - b'0') as i64;
         result = result
             .checked_mul(10)
             .and_then(|r| r.checked_add(digit))
-            .ok_or_else(|| format!("number overflow: {}", s))?;
+            .ok_or_else(|| ScriptError::NumberOverflow {
+                input: String::from(s),
+            })?;
     }
 
     if negative {

@@ -38,31 +38,31 @@ static GDB_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Saved register state from the last exception/breakpoint
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
-pub struct GdbRegisters {
-    pub rax: u64,
-    pub rbx: u64,
-    pub rcx: u64,
-    pub rdx: u64,
-    pub rsi: u64,
-    pub rdi: u64,
-    pub rbp: u64,
-    pub rsp: u64,
-    pub r8: u64,
-    pub r9: u64,
-    pub r10: u64,
-    pub r11: u64,
-    pub r12: u64,
-    pub r13: u64,
-    pub r14: u64,
-    pub r15: u64,
-    pub rip: u64,
-    pub rflags: u64,
-    pub cs: u64,
-    pub ss: u64,
-    pub ds: u64,
-    pub es: u64,
-    pub fs: u64,
-    pub gs: u64,
+pub(crate) struct GdbRegisters {
+    pub(crate) rax: u64,
+    pub(crate) rbx: u64,
+    pub(crate) rcx: u64,
+    pub(crate) rdx: u64,
+    pub(crate) rsi: u64,
+    pub(crate) rdi: u64,
+    pub(crate) rbp: u64,
+    pub(crate) rsp: u64,
+    pub(crate) r8: u64,
+    pub(crate) r9: u64,
+    pub(crate) r10: u64,
+    pub(crate) r11: u64,
+    pub(crate) r12: u64,
+    pub(crate) r13: u64,
+    pub(crate) r14: u64,
+    pub(crate) r15: u64,
+    pub(crate) rip: u64,
+    pub(crate) rflags: u64,
+    pub(crate) cs: u64,
+    pub(crate) ss: u64,
+    pub(crate) ds: u64,
+    pub(crate) es: u64,
+    pub(crate) fs: u64,
+    pub(crate) gs: u64,
 }
 
 impl GdbRegisters {
@@ -789,7 +789,7 @@ fn handle_vkill(data: &[u8]) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 /// Initialize the GDB stub on COM2
-pub fn gdb_init() {
+pub(crate) fn gdb_init() {
     com2_init();
 
     let state = GdbState::new();
@@ -800,14 +800,14 @@ pub fn gdb_init() {
 }
 
 /// Check if GDB is active
-pub fn is_gdb_active() -> bool {
+pub(crate) fn is_gdb_active() -> bool {
     GDB_ACTIVE.load(Ordering::Relaxed)
 }
 
 /// Handle an exception/trap by entering GDB command loop.
 /// `signal` is the Unix signal number (e.g., 5 for SIGTRAP).
 /// `regs` provides the saved register context.
-pub fn gdb_handle_exception(signal: u8, regs: &mut GdbRegisters) {
+pub(crate) fn gdb_handle_exception(signal: u8, regs: &mut GdbRegisters) {
     let state_lock = match GDB_STATE.get() {
         Some(s) => s,
         None => return,

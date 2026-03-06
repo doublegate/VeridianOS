@@ -12,7 +12,7 @@ use super::objects::ObjectId;
 
 /// Reference types
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RefValue {
+pub(crate) enum RefValue {
     /// Direct reference to an object ID
     Direct(ObjectId),
     /// Symbolic reference (e.g., HEAD -> refs/heads/main)
@@ -21,20 +21,20 @@ pub enum RefValue {
 
 /// Reference entry
 #[derive(Debug, Clone)]
-pub struct Ref {
-    pub name: String,
-    pub value: RefValue,
+pub(crate) struct Ref {
+    pub(crate) name: String,
+    pub(crate) value: RefValue,
 }
 
 impl Ref {
-    pub fn direct(name: &str, id: ObjectId) -> Self {
+    pub(crate) fn direct(name: &str, id: ObjectId) -> Self {
         Self {
             name: name.to_string(),
             value: RefValue::Direct(id),
         }
     }
 
-    pub fn symbolic(name: &str, target: &str) -> Self {
+    pub(crate) fn symbolic(name: &str, target: &str) -> Self {
         Self {
             name: name.to_string(),
             value: RefValue::Symbolic(target.to_string()),
@@ -42,7 +42,7 @@ impl Ref {
     }
 
     /// Resolve a reference to a direct object ID
-    pub fn resolve<'a>(&'a self, store: &'a RefStore) -> Option<&'a ObjectId> {
+    pub(crate) fn resolve<'a>(&'a self, store: &'a RefStore) -> Option<&'a ObjectId> {
         match &self.value {
             RefValue::Direct(id) => Some(id),
             RefValue::Symbolic(target) => store.resolve(target),
@@ -52,7 +52,7 @@ impl Ref {
 
 /// Reference store (in-memory)
 #[derive(Debug, Clone)]
-pub struct RefStore {
+pub(crate) struct RefStore {
     refs: BTreeMap<String, RefValue>,
 }
 
@@ -63,7 +63,7 @@ impl Default for RefStore {
 }
 
 impl RefStore {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let mut refs = BTreeMap::new();
         // Default HEAD -> refs/heads/main
         refs.insert(
@@ -74,23 +74,23 @@ impl RefStore {
     }
 
     /// Get a reference value
-    pub fn get(&self, name: &str) -> Option<&RefValue> {
+    pub(crate) fn get(&self, name: &str) -> Option<&RefValue> {
         self.refs.get(name)
     }
 
     /// Set a direct reference
-    pub fn set_direct(&mut self, name: &str, id: ObjectId) {
+    pub(crate) fn set_direct(&mut self, name: &str, id: ObjectId) {
         self.refs.insert(name.to_string(), RefValue::Direct(id));
     }
 
     /// Set a symbolic reference
-    pub fn set_symbolic(&mut self, name: &str, target: &str) {
+    pub(crate) fn set_symbolic(&mut self, name: &str, target: &str) {
         self.refs
             .insert(name.to_string(), RefValue::Symbolic(target.to_string()));
     }
 
     /// Resolve a reference name to an object ID, following symbolic refs
-    pub fn resolve(&self, name: &str) -> Option<&ObjectId> {
+    pub(crate) fn resolve(&self, name: &str) -> Option<&ObjectId> {
         let mut current = name;
         let mut depth = 0;
         loop {
@@ -108,12 +108,12 @@ impl RefStore {
     }
 
     /// Get HEAD object ID
-    pub fn head(&self) -> Option<&ObjectId> {
+    pub(crate) fn head(&self) -> Option<&ObjectId> {
         self.resolve("HEAD")
     }
 
     /// Get current branch name (if HEAD is symbolic)
-    pub fn current_branch(&self) -> Option<&str> {
+    pub(crate) fn current_branch(&self) -> Option<&str> {
         match self.refs.get("HEAD")? {
             RefValue::Symbolic(target) => target.strip_prefix("refs/heads/"),
             RefValue::Direct(_) => None, // Detached HEAD
@@ -121,7 +121,7 @@ impl RefStore {
     }
 
     /// List all branches
-    pub fn branches(&self) -> Vec<String> {
+    pub(crate) fn branches(&self) -> Vec<String> {
         self.refs
             .keys()
             .filter(|k| k.starts_with("refs/heads/"))
@@ -130,7 +130,7 @@ impl RefStore {
     }
 
     /// List all tags
-    pub fn tags(&self) -> Vec<String> {
+    pub(crate) fn tags(&self) -> Vec<String> {
         self.refs
             .keys()
             .filter(|k| k.starts_with("refs/tags/"))
@@ -139,24 +139,24 @@ impl RefStore {
     }
 
     /// Delete a reference
-    pub fn delete(&mut self, name: &str) -> bool {
+    pub(crate) fn delete(&mut self, name: &str) -> bool {
         self.refs.remove(name).is_some()
     }
 
     /// Create a branch pointing to a commit
-    pub fn create_branch(&mut self, name: &str, id: ObjectId) {
+    pub(crate) fn create_branch(&mut self, name: &str, id: ObjectId) {
         let ref_name = alloc::format!("refs/heads/{}", name);
         self.set_direct(&ref_name, id);
     }
 
     /// Create a lightweight tag
-    pub fn create_tag(&mut self, name: &str, id: ObjectId) {
+    pub(crate) fn create_tag(&mut self, name: &str, id: ObjectId) {
         let ref_name = alloc::format!("refs/tags/{}", name);
         self.set_direct(&ref_name, id);
     }
 
     /// Switch HEAD to a branch
-    pub fn checkout_branch(&mut self, name: &str) -> bool {
+    pub(crate) fn checkout_branch(&mut self, name: &str) -> bool {
         let ref_name = alloc::format!("refs/heads/{}", name);
         if self.refs.contains_key(&ref_name) {
             self.set_symbolic("HEAD", &ref_name);
@@ -167,7 +167,7 @@ impl RefStore {
     }
 
     /// Ref count
-    pub fn count(&self) -> usize {
+    pub(crate) fn count(&self) -> usize {
         self.refs.len()
     }
 }

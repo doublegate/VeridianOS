@@ -265,10 +265,11 @@ fn pbkdf2_hmac_sha256(password: &[u8], salt: &[u8], iterations: u32) -> Hash256 
 
 /// User credential
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Credential {
     pub username: &'static str,
-    pub password_hash: Hash256,
-    pub salt: [u8; 32],
+    pub(crate) password_hash: Hash256,
+    pub(crate) salt: [u8; 32],
 }
 
 // ---------------------------------------------------------------------------
@@ -280,7 +281,7 @@ pub struct Credential {
 pub struct UserAccount {
     pub user_id: UserId,
     pub username: &'static str,
-    pub password_hash: Hash256,
+    pub(crate) password_hash: Hash256,
     pub salt: [u8; 32],
     pub locked: bool,
     pub failed_attempts: u32,
@@ -290,7 +291,7 @@ pub struct UserAccount {
     /// expires.
     pub expires_at: Option<u64>,
     /// Password history: stores hashes of previous passwords (fixed-size).
-    pub password_history: [Option<Hash256>; MAX_PASSWORD_HISTORY],
+    pub(crate) password_history: [Option<Hash256>; MAX_PASSWORD_HISTORY],
     /// Number of valid entries in `password_history`.
     pub password_history_len: usize,
 }

@@ -270,7 +270,7 @@ impl AlgorithmId {
     /// Returns `None` for algorithms that are not AEAD cipher suites
     /// (key exchange, host key, MAC, compression) or for AES-CTR which
     /// is not yet available as a `CipherSuite` variant.
-    pub fn as_cipher_suite(&self) -> Option<crate::crypto::cipher_suite::CipherSuite> {
+    pub(crate) fn as_cipher_suite(&self) -> Option<crate::crypto::cipher_suite::CipherSuite> {
         match self {
             Self::Chacha20Poly1305 => {
                 Some(crate::crypto::cipher_suite::CipherSuite::ChaCha20Poly1305)

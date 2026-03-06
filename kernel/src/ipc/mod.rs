@@ -32,8 +32,8 @@ pub use capability::{EndpointId, IpcCapability, IpcPermissions, Permission, Proc
 pub use channel::{Channel, Endpoint};
 pub use error::{IpcError, Result};
 pub use message::{LargeMessage, Message, SmallMessage};
-pub use perf::{cycles_to_ns, measure_ipc_operation, IPC_PERF_STATS};
-pub use rate_limit::{RateLimits, RATE_LIMITER};
+pub use perf::{cycles_to_ns, measure_ipc_operation};
+pub use rate_limit::RateLimits;
 // Re-export internal functions for tests
 #[cfg(test)]
 pub use registry::lookup_endpoint;

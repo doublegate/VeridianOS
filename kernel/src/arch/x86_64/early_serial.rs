@@ -108,7 +108,7 @@ use super::{inb, outb};
 /// 4. Cannot use OnceLock/Mutex as those require heap allocation
 /// 5. After boot, output switches to the proper serial driver
 #[allow(static_mut_refs)]
-pub static mut EARLY_SERIAL: EarlySerial = EarlySerial::new();
+pub(crate) static mut EARLY_SERIAL: EarlySerial = EarlySerial::new();
 
 /// Initialize early serial output
 pub fn init() {

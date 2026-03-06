@@ -43,17 +43,13 @@ pub mod kyber;
 
 use alloc::vec::Vec;
 
-pub use dilithium::{DilithiumSignature, DilithiumSigningKey, DilithiumVerifyingKey};
-pub use hybrid::HybridKeyExchange;
-pub use kyber::{KyberCiphertext, KyberPublicKey, KyberSecretKey, KyberSharedSecret};
-
 // ============================================================================
 // Shared Types
 // ============================================================================
 
 /// Dilithium security levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DilithiumLevel {
+pub(crate) enum DilithiumLevel {
     Level2, // ~128 bits security
     Level3, // ~192 bits security
     Level5, // ~256 bits security
@@ -61,7 +57,7 @@ pub enum DilithiumLevel {
 
 /// Kyber security levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KyberLevel {
+pub(crate) enum KyberLevel {
     Kyber512,  // ~128 bits security
     Kyber768,  // ~192 bits security
     Kyber1024, // ~256 bits security

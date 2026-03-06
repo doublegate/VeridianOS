@@ -25,7 +25,7 @@ use crate::error::KernelError;
 /// CPU idle power states (ACPI C-states)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
-pub enum CState {
+pub(crate) enum CState {
     /// C0: CPU is actively executing instructions
     C0 = 0,
     /// C1: Halt — core clock stopped, fastest wake-up
@@ -38,10 +38,10 @@ pub enum CState {
 
 impl CState {
     /// Number of defined C-states
-    pub const COUNT: usize = 4;
+    pub(crate) const COUNT: usize = 4;
 
     /// Convert from a raw u8 value
-    pub fn from_u8(val: u8) -> Option<Self> {
+    pub(crate) fn from_u8(val: u8) -> Option<Self> {
         match val {
             0 => Some(CState::C0),
             1 => Some(CState::C1),
@@ -54,15 +54,15 @@ impl CState {
 
 /// Information about a specific C-state
 #[derive(Debug, Clone, Copy)]
-pub struct CStateInfo {
+pub(crate) struct CStateInfo {
     /// The C-state this info describes
-    pub state: CState,
+    pub(crate) state: CState,
     /// Exit latency in nanoseconds (time to return to C0)
-    pub exit_latency_ns: u64,
+    pub(crate) exit_latency_ns: u64,
     /// Minimum residency in nanoseconds (must stay this long for net benefit)
-    pub target_residency_ns: u64,
+    pub(crate) target_residency_ns: u64,
     /// Whether this state is supported on the current hardware
-    pub supported: bool,
+    pub(crate) supported: bool,
 }
 
 /// Default C-state table with typical latencies
@@ -99,17 +99,17 @@ const DEFAULT_CSTATE_TABLE: [CStateInfo; CState::COUNT] = [
 
 /// CPU performance state (frequency/voltage operating point)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PState {
+pub(crate) struct PState {
     /// CPU frequency in MHz
-    pub frequency_mhz: u32,
+    pub(crate) frequency_mhz: u32,
     /// Core voltage in millivolts
-    pub voltage_mv: u32,
+    pub(crate) voltage_mv: u32,
     /// Estimated power draw in milliwatts
-    pub power_mw: u32,
+    pub(crate) power_mw: u32,
 }
 
 /// Maximum number of P-state entries
-pub const MAX_PSTATES: usize = 16;
+pub(crate) const MAX_PSTATES: usize = 16;
 
 /// Default P-state table (generic x86_64-like frequency steps)
 const DEFAULT_PSTATE_TABLE: [PState; 4] = [
@@ -141,7 +141,7 @@ const DEFAULT_PSTATE_TABLE: [PState; 4] = [
 
 /// Frequency scaling governor policy
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Governor {
+pub(crate) enum Governor {
     /// Scale frequency based on CPU utilization
     OnDemand,
     /// Always run at maximum frequency
@@ -248,7 +248,7 @@ static CURRENT_PSTATE: AtomicUsize = AtomicUsize::new(0);
 /// Detects hardware capabilities (MWAIT, P-state support) and populates
 /// the C-state and P-state tables. Falls back to hardcoded defaults when
 /// ACPI tables are not available.
-pub fn init() -> Result<(), KernelError> {
+pub(crate) fn init() -> Result<(), KernelError> {
     let mut state = POWER_STATE.write();
     if state.initialized {
         return Err(KernelError::AlreadyExists {
@@ -324,7 +324,7 @@ fn detect_mwait() -> bool {
 ///
 /// The actual C-state entered may be lower than `suggested` if the hardware
 /// does not support the requested state.
-pub fn enter_idle(suggested: CState) {
+pub(crate) fn enter_idle(suggested: CState) {
     if suggested == CState::C0 {
         // C0 = active, nothing to do
         return;
@@ -455,7 +455,7 @@ const IA32_PERF_CTL: u32 = 0x199;
 /// Index 0 is the lowest frequency; index `num_pstates - 1` is the highest.
 /// Returns `Err` if the index is out of range or the subsystem is not
 /// initialized.
-pub fn set_frequency(pstate_index: usize) -> Result<(), KernelError> {
+pub(crate) fn set_frequency(pstate_index: usize) -> Result<(), KernelError> {
     let state = POWER_STATE.read();
     if !state.initialized {
         return Err(KernelError::NotInitialized { subsystem: "power" });
@@ -507,7 +507,7 @@ fn arch_set_pstate(_index: usize, _pstate: &PState) {
 ///
 /// `utilization_percent` should be 0..=100 representing the fraction
 /// of the last tick period the CPU was not idle.
-pub fn governor_tick(utilization_percent: u32) -> Result<(), KernelError> {
+pub(crate) fn governor_tick(utilization_percent: u32) -> Result<(), KernelError> {
     let state = POWER_STATE.read();
     if !state.initialized {
         return Err(KernelError::NotInitialized { subsystem: "power" });
@@ -536,7 +536,7 @@ pub fn governor_tick(utilization_percent: u32) -> Result<(), KernelError> {
 }
 
 /// Set the active governor policy.
-pub fn set_governor(gov: Governor) -> Result<(), KernelError> {
+pub(crate) fn set_governor(gov: Governor) -> Result<(), KernelError> {
     let mut state = POWER_STATE.write();
     if !state.initialized {
         return Err(KernelError::NotInitialized { subsystem: "power" });
@@ -546,7 +546,7 @@ pub fn set_governor(gov: Governor) -> Result<(), KernelError> {
 }
 
 /// Get the active governor policy.
-pub fn get_governor() -> Governor {
+pub(crate) fn get_governor() -> Governor {
     POWER_STATE.read().governor
 }
 
@@ -555,20 +555,20 @@ pub fn get_governor() -> Governor {
 // ---------------------------------------------------------------------------
 
 /// Get the current C-state (lock-free atomic read).
-pub fn get_current_cstate() -> CState {
+pub(crate) fn get_current_cstate() -> CState {
     let val = CURRENT_CSTATE.load(Ordering::Acquire);
     CState::from_u8(val).unwrap_or(CState::C0)
 }
 
 /// Get the current P-state index (lock-free atomic read).
-pub fn get_current_pstate() -> usize {
+pub(crate) fn get_current_pstate() -> usize {
     CURRENT_PSTATE.load(Ordering::Acquire)
 }
 
 /// Get the table of supported C-states.
 ///
 /// Returns a fixed-size array; check `supported` field per entry.
-pub fn get_supported_cstates() -> [CStateInfo; CState::COUNT] {
+pub(crate) fn get_supported_cstates() -> [CStateInfo; CState::COUNT] {
     POWER_STATE.read().cstates
 }
 
@@ -576,18 +576,18 @@ pub fn get_supported_cstates() -> [CStateInfo; CState::COUNT] {
 ///
 /// Returns a slice-like view: the first `count` entries in the returned
 /// tuple are valid.
-pub fn get_supported_pstates() -> ([PState; MAX_PSTATES], usize) {
+pub(crate) fn get_supported_pstates() -> ([PState; MAX_PSTATES], usize) {
     let state = POWER_STATE.read();
     (state.pstates, state.num_pstates)
 }
 
 /// Get the number of supported P-states.
-pub fn get_pstate_count() -> usize {
+pub(crate) fn get_pstate_count() -> usize {
     POWER_STATE.read().num_pstates
 }
 
 /// Check if the subsystem is initialized.
-pub fn is_initialized() -> bool {
+pub(crate) fn is_initialized() -> bool {
     POWER_STATE.read().initialized
 }
 
