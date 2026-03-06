@@ -17,16 +17,16 @@ use core::{
 
 /// Saved bootstrap RSP for returning after a user process exits.
 /// Set by `enter_usermode_returnable()`, consumed by `boot_return_to_kernel()`.
-pub static BOOT_RETURN_RSP: AtomicU64 = AtomicU64::new(0);
+pub(crate) static BOOT_RETURN_RSP: AtomicU64 = AtomicU64::new(0);
 
 /// Saved bootstrap CR3 for returning after a user process exits.
-pub static BOOT_RETURN_CR3: AtomicU64 = AtomicU64::new(0);
+pub(crate) static BOOT_RETURN_CR3: AtomicU64 = AtomicU64::new(0);
 
 /// Stack canary for detecting corruption of the boot context.
 /// Set to a known value when the boot context is saved, verified before
 /// restore. A mismatch indicates stack corruption (buffer overflow,
 /// use-after-free, etc.).
-pub static BOOT_STACK_CANARY: AtomicU64 = AtomicU64::new(0);
+pub(crate) static BOOT_STACK_CANARY: AtomicU64 = AtomicU64::new(0);
 
 /// Magic value for the boot stack canary.
 /// Chosen to be unlikely to appear naturally in memory.

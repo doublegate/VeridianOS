@@ -2,6 +2,41 @@
 
 ---
 
+## [v0.16.4] - 2026-03-06
+
+### v0.16.4: Tier 1 Technical Debt Remediation -- God Object Splits, Error Handling, Test Coverage
+
+Structural quality remediation release focused on reducing god objects, improving encapsulation, and filling test coverage gaps identified by comprehensive tech debt analysis. No logic changes -- purely refactoring, error handling improvements, and new tests.
+
+#### God Object Splits (3 files -> 18 submodules)
+
+- **`virt/containers.rs`** (3,035 LOC) split into `containers/{mod.rs, oci.rs, image.rs, cgroups.rs, overlay.rs, networking.rs, seccomp.rs}` -- OCI lifecycle, image layers, cgroup mem+CPU controllers, overlay FS, veth networking, and seccomp BPF filter each in dedicated modules with shared helpers in mod.rs
+- **`virt/hypervisor.rs`** (2,960 LOC) split into `hypervisor/{mod.rs, nested.rs, passthrough.rs, migration.rs, smp.rs, lapic.rs, snapshot.rs}` -- shadow VMCS/nesting, PCI/MMIO passthrough, live migration with dirty page tracking, virtual CPUs with IPI, virtual LAPIC, and VM snapshots each isolated
+- **`media/image_codecs.rs`** (2,972 LOC) split into `image_codecs/{mod.rs, png.rs, jpeg.rs, gif.rs}` -- PNG (with DEFLATE/zlib), JPEG baseline DCT, and GIF 87a/89a (with LZW) decoders separated with shared types (DecodedImage, ImageCodecError, byte-reading helpers) in mod.rs
+
+#### Error Handling Improvements
+
+- Replaced 1 non-test `unwrap()` in `syscall/userland_ext/cron.rs` with `expect("invariant: crontab was just inserted if missing")` documenting the infallibility invariant
+- Audit confirmed all `unwrap()` calls in `fs/inotify.rs` (94) and `syscall/userland_ext/mod.rs` (67) are exclusively in `#[cfg(test)]` code -- production paths already use proper `Result<T, KernelError>` error handling
+
+#### New Test Coverage (40 tests)
+
+- **`error.rs`** (20 tests): KernelError equality/inequality, Display impl for 7 variants, From conversions for IpcError/SchedError/SyscallError/FsError/&str/CapError (3 variants), sub-error type equality
+- **`bootstrap.rs`** (8 tests): BOOTSTRAP_PID/TID constants, init process PID distinction, KernelResult type alias with Ok/Err/?-operator propagation
+- **`userland.rs`** (12 tests): TestSuiteSummary construction and Default, success_rate() edge cases (zero/all/none/half/single), Clone preservation, error accumulation, Debug output
+
+#### Encapsulation
+
+- Changed 3 boot-context atomics from `pub` to `pub(crate)` in `arch/x86_64/usermode.rs`: `BOOT_RETURN_RSP`, `BOOT_RETURN_CR3`, `BOOT_STACK_CANARY` -- all references are crate-internal (bootstrap.rs, usermode.rs)
+
+#### Infrastructure
+
+- Version bump 0.16.3 -> 0.16.4 (Cargo.toml, os-release, uname, desktop welcome)
+- README.md: v0.16.4, 4,033 tests, release 66
+- All 3 architectures build clean, zero clippy warnings on 4 targets
+
+---
+
 ## [v0.16.3] - 2026-03-06
 
 ### v0.16.3: Phase 8 Complete -- Next-Generation Features (Waves 2-8)

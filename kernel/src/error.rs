@@ -367,3 +367,196 @@ macro_rules! kernel_error {
         $crate::error::KernelError::$variant
     };
 }
+
+#[cfg(test)]
+mod tests {
+    use alloc::string::ToString;
+
+    use super::*;
+
+    // --- KernelError equality and clone ---
+
+    #[test]
+    fn test_kernel_error_out_of_memory_equality() {
+        let e1 = KernelError::OutOfMemory {
+            requested: 4096,
+            available: 0,
+        };
+        let e2 = KernelError::OutOfMemory {
+            requested: 4096,
+            available: 0,
+        };
+        assert_eq!(e1, e2);
+    }
+
+    #[test]
+    fn test_kernel_error_out_of_memory_inequality() {
+        let e1 = KernelError::OutOfMemory {
+            requested: 4096,
+            available: 0,
+        };
+        let e2 = KernelError::OutOfMemory {
+            requested: 8192,
+            available: 0,
+        };
+        assert_ne!(e1, e2);
+    }
+
+    #[test]
+    fn test_kernel_error_clone() {
+        let e1 = KernelError::InvalidAddress { addr: 0xDEAD };
+        let e2 = e1;
+        assert_eq!(e1, e2);
+    }
+
+    // --- Display impls ---
+
+    #[test]
+    fn test_display_out_of_memory() {
+        let e = KernelError::OutOfMemory {
+            requested: 1024,
+            available: 512,
+        };
+        let s = e.to_string();
+        assert!(s.contains("1024"));
+        assert!(s.contains("512"));
+        assert!(s.contains("Out of memory"));
+    }
+
+    #[test]
+    fn test_display_invalid_address() {
+        let e = KernelError::InvalidAddress { addr: 0xCAFE };
+        let s = e.to_string();
+        assert!(s.contains("cafe"));
+        assert!(s.contains("Invalid address"));
+    }
+
+    #[test]
+    fn test_display_process_not_found() {
+        let e = KernelError::ProcessNotFound { pid: 42 };
+        let s = e.to_string();
+        assert!(s.contains("42"));
+        assert!(s.contains("not found"));
+    }
+
+    #[test]
+    fn test_display_would_block() {
+        let e = KernelError::WouldBlock;
+        assert_eq!(e.to_string(), "Operation would block");
+    }
+
+    #[test]
+    fn test_display_broken_pipe() {
+        let e = KernelError::BrokenPipe;
+        assert_eq!(e.to_string(), "Broken pipe");
+    }
+
+    #[test]
+    fn test_display_legacy_error() {
+        let e = KernelError::LegacyError {
+            message: "old error",
+        };
+        assert_eq!(e.to_string(), "old error");
+    }
+
+    #[test]
+    fn test_display_timeout() {
+        let e = KernelError::Timeout {
+            operation: "read",
+            duration_ms: 5000,
+        };
+        let s = e.to_string();
+        assert!(s.contains("read"));
+        assert!(s.contains("5000"));
+    }
+
+    // --- From conversions ---
+
+    #[test]
+    fn test_from_ipc_error() {
+        let ipc = IpcError::QueueEmpty;
+        let ke: KernelError = ipc.into();
+        assert_eq!(ke, KernelError::IpcError(IpcError::QueueEmpty));
+    }
+
+    #[test]
+    fn test_from_sched_error() {
+        let se = SchedError::QueueEmpty;
+        let ke: KernelError = se.into();
+        assert_eq!(ke, KernelError::SchedulerError(SchedError::QueueEmpty));
+    }
+
+    #[test]
+    fn test_from_syscall_error() {
+        let se = SyscallError::AccessDenied;
+        let ke: KernelError = se.into();
+        assert_eq!(ke, KernelError::SyscallError(SyscallError::AccessDenied));
+    }
+
+    #[test]
+    fn test_from_fs_error() {
+        let fe = FsError::NotFound;
+        let ke: KernelError = fe.into();
+        assert_eq!(ke, KernelError::FsError(FsError::NotFound));
+    }
+
+    #[test]
+    fn test_from_static_str() {
+        let ke: KernelError = "something broke".into();
+        assert_eq!(
+            ke,
+            KernelError::LegacyError {
+                message: "something broke"
+            }
+        );
+    }
+
+    #[test]
+    fn test_from_cap_error_invalid() {
+        let ce = CapError::InvalidCapability;
+        let ke: KernelError = ce.into();
+        match ke {
+            KernelError::InvalidCapability { cap_id, reason } => {
+                assert_eq!(cap_id, 0);
+                assert_eq!(reason, CapError::InvalidCapability);
+            }
+            _ => panic!("Expected InvalidCapability variant"),
+        }
+    }
+
+    #[test]
+    fn test_from_cap_error_revoked() {
+        let ce = CapError::CapabilityRevoked;
+        let ke: KernelError = ce.into();
+        assert_eq!(ke, KernelError::CapabilityRevoked { cap_id: 0 });
+    }
+
+    #[test]
+    fn test_from_cap_error_id_exhausted() {
+        let ce = CapError::IdExhausted;
+        let ke: KernelError = ce.into();
+        assert_eq!(
+            ke,
+            KernelError::ResourceExhausted {
+                resource: "capability IDs"
+            }
+        );
+    }
+
+    // --- Sub-error type equality ---
+
+    #[test]
+    fn test_ipc_error_variants() {
+        assert_ne!(IpcError::QueueEmpty, IpcError::WouldBlock);
+        assert_eq!(IpcError::Timeout, IpcError::Timeout);
+        let e = IpcError::MessageTooLarge { size: 100, max: 64 };
+        assert_eq!(e, IpcError::MessageTooLarge { size: 100, max: 64 });
+    }
+
+    #[test]
+    fn test_fs_error_variants() {
+        assert_ne!(FsError::NotFound, FsError::AlreadyExists);
+        assert_eq!(FsError::IoError, FsError::IoError);
+        assert_ne!(FsError::IsADirectory, FsError::NotADirectory);
+    }
+}

@@ -780,7 +780,9 @@ impl CronDaemon {
             self.crontabs
                 .insert(String::from(username), CronTab::new(username));
         }
-        self.crontabs.get_mut(username).unwrap()
+        self.crontabs
+            .get_mut(username)
+            .expect("invariant: crontab was just inserted if missing")
     }
 
     /// Remove a user's crontab

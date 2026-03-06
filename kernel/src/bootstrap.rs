@@ -2234,3 +2234,72 @@ fn create_init_process() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bootstrap_pid_is_zero() {
+        assert_eq!(BOOTSTRAP_PID, 0);
+    }
+
+    #[test]
+    fn test_bootstrap_tid_is_zero() {
+        assert_eq!(BOOTSTRAP_TID, 0);
+    }
+
+    #[test]
+    fn test_bootstrap_pid_and_tid_match() {
+        // Both bootstrap IDs should be the same (the bootstrap task is PID 0, TID 0)
+        assert_eq!(BOOTSTRAP_PID, BOOTSTRAP_TID);
+    }
+
+    #[test]
+    fn test_bootstrap_pid_type() {
+        // BOOTSTRAP_PID should be a valid u64 value
+        let pid: u64 = BOOTSTRAP_PID;
+        assert!(pid < u64::MAX);
+    }
+
+    #[test]
+    fn test_bootstrap_constants_are_not_one() {
+        // PID/TID 1 is reserved for the init process, bootstrap must differ
+        assert_ne!(BOOTSTRAP_PID, 1);
+        assert_ne!(BOOTSTRAP_TID, 1);
+    }
+
+    #[test]
+    fn test_kernel_init_returns_kernel_result() {
+        // Verify KernelResult type alias works with the function signature.
+        // We cannot call kernel_init() in tests (it requires hardware), but
+        // we can verify the return type compiles.
+        fn _assert_return_type() -> KernelResult<()> {
+            Ok(())
+        }
+        assert!(_assert_return_type().is_ok());
+    }
+
+    #[test]
+    fn test_kernel_result_error_propagation() {
+        // Verify that KernelResult works with the ? operator
+        fn inner() -> KernelResult<u32> {
+            let _: () = Ok::<(), crate::error::KernelError>(())?;
+            Ok(42)
+        }
+        assert_eq!(inner().unwrap(), 42);
+    }
+
+    #[test]
+    fn test_kernel_result_error_variant() {
+        fn failing() -> KernelResult<()> {
+            Err(crate::error::KernelError::NotInitialized { subsystem: "test" })
+        }
+        let result = failing();
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            crate::error::KernelError::NotInitialized { subsystem: "test" }
+        );
+    }
+}

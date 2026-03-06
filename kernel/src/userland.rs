@@ -348,4 +348,120 @@ pub mod test_runner {
         crate::println!("Running full Phase 2 validation instead...");
         run_phase2_validation()
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_suite_summary_new() {
+            let s = TestSuiteSummary::new();
+            assert_eq!(s.total_tests, 0);
+            assert_eq!(s.passed, 0);
+            assert_eq!(s.failed, 0);
+            assert!(s.errors.is_empty());
+        }
+
+        #[test]
+        fn test_suite_summary_default() {
+            let s = TestSuiteSummary::default();
+            assert_eq!(s.total_tests, 0);
+            assert_eq!(s.passed, 0);
+            assert_eq!(s.failed, 0);
+            assert!(s.errors.is_empty());
+        }
+
+        #[test]
+        fn test_suite_summary_new_equals_default() {
+            let a = TestSuiteSummary::new();
+            let b = TestSuiteSummary::default();
+            assert_eq!(a.total_tests, b.total_tests);
+            assert_eq!(a.passed, b.passed);
+            assert_eq!(a.failed, b.failed);
+            assert_eq!(a.errors.len(), b.errors.len());
+        }
+
+        #[test]
+        fn test_success_rate_empty() {
+            let s = TestSuiteSummary::new();
+            // Zero tests should report 100% success
+            assert_eq!(s.success_rate(), 100.0);
+        }
+
+        #[test]
+        fn test_success_rate_all_passed() {
+            let mut s = TestSuiteSummary::new();
+            s.total_tests = 10;
+            s.passed = 10;
+            s.failed = 0;
+            assert_eq!(s.success_rate(), 100.0);
+        }
+
+        #[test]
+        fn test_success_rate_none_passed() {
+            let mut s = TestSuiteSummary::new();
+            s.total_tests = 5;
+            s.passed = 0;
+            s.failed = 5;
+            assert_eq!(s.success_rate(), 0.0);
+        }
+
+        #[test]
+        fn test_success_rate_half_passed() {
+            let mut s = TestSuiteSummary::new();
+            s.total_tests = 4;
+            s.passed = 2;
+            s.failed = 2;
+            assert_eq!(s.success_rate(), 50.0);
+        }
+
+        #[test]
+        fn test_suite_summary_clone() {
+            let mut s = TestSuiteSummary::new();
+            s.total_tests = 3;
+            s.passed = 2;
+            s.failed = 1;
+            s.errors.push(String::from("test failure"));
+            let cloned = s.clone();
+            assert_eq!(cloned.total_tests, 3);
+            assert_eq!(cloned.passed, 2);
+            assert_eq!(cloned.failed, 1);
+            assert_eq!(cloned.errors.len(), 1);
+            assert_eq!(cloned.errors[0], "test failure");
+        }
+
+        #[test]
+        fn test_suite_summary_errors_accumulate() {
+            let mut s = TestSuiteSummary::new();
+            assert!(s.errors.is_empty());
+            s.errors.push(String::from("error 1"));
+            s.errors.push(String::from("error 2"));
+            assert_eq!(s.errors.len(), 2);
+        }
+
+        #[test]
+        fn test_suite_summary_debug_impl() {
+            let s = TestSuiteSummary::new();
+            let debug_str = alloc::format!("{:?}", s);
+            assert!(debug_str.contains("TestSuiteSummary"));
+            assert!(debug_str.contains("total_tests"));
+        }
+
+        #[test]
+        fn test_success_rate_single_test_passed() {
+            let mut s = TestSuiteSummary::new();
+            s.total_tests = 1;
+            s.passed = 1;
+            assert_eq!(s.success_rate(), 100.0);
+        }
+
+        #[test]
+        fn test_success_rate_single_test_failed() {
+            let mut s = TestSuiteSummary::new();
+            s.total_tests = 1;
+            s.passed = 0;
+            s.failed = 1;
+            assert_eq!(s.success_rate(), 0.0);
+        }
+    }
 }

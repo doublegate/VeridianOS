@@ -88,13 +88,13 @@ All drivers and services run in user space with capability-controlled access to 
 
 ## Project Status
 
-**Version**: v0.16.3 | **All development phases complete** | **65 releases published**
+**Version**: v0.16.4 | **All development phases complete** | **66 releases published**
 
 | Metric | Value |
 | --- | --- |
 | Build | 0 errors, 0 warnings across all 3 architectures |
 | Boot tests | 29/29 (Stage 6 BOOTOK on all architectures) |
-| Host-target unit tests | 3,993 passing |
+| Host-target unit tests | 4,033 passing |
 | CI pipeline | 11/11 jobs green (GitHub Actions + Codecov) |
 | Unsafe code | 7 justified `static mut` remaining (early boot, per-CPU, heap) |
 
