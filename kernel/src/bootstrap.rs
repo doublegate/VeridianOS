@@ -508,6 +508,13 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
         kprintln!("[BOOTSTRAP] Initializing services...");
         services::init();
         kprintln!("[BOOTSTRAP] Services initialized");
+
+        // Activate init system services
+        if let Some(init) = crate::services::init_system::try_get_init_system() {
+            if let Err(_e) = init.initialize() {
+                kprintln!("[BOOTSTRAP] Init system activation deferred: {:?}", _e);
+            }
+        }
     }
 
     kprintln!("[BOOTSTRAP] Core services initialized");

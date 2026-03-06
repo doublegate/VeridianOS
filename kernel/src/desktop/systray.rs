@@ -118,7 +118,12 @@ impl SystemTray {
             padding: TRAY_PADDING,
         };
 
-        // Default items: CPU, Memory, Clock (left-to-right order)
+        // Default items (left-to-right order)
+        tray.items.push(SysTrayItem::new(
+            SysTrayItemType::NetworkStatus,
+            "Net: up",
+            "Network status",
+        ));
         tray.items.push(SysTrayItem::new(
             SysTrayItemType::CpuMonitor,
             "CPU: 0%",
@@ -128,6 +133,16 @@ impl SystemTray {
             SysTrayItemType::MemoryMonitor,
             "MEM: 0/0 MB",
             "Memory usage",
+        ));
+        tray.items.push(SysTrayItem::new(
+            SysTrayItemType::Volume,
+            "Vol: 75%",
+            "Audio volume",
+        ));
+        tray.items.push(SysTrayItem::new(
+            SysTrayItemType::BatteryStatus,
+            "AC",
+            "Power source",
         ));
         tray.items.push(SysTrayItem::new(
             SysTrayItemType::Clock,
@@ -184,6 +199,38 @@ impl SystemTray {
         for item in &mut self.items {
             if item.item_type == SysTrayItemType::MemoryMonitor {
                 item.set_label(&label);
+                return;
+            }
+        }
+    }
+
+    /// Update the network status display.
+    pub fn update_network(&mut self, is_up: bool) {
+        let label = if is_up { "Net: up" } else { "Net: --" };
+        for item in &mut self.items {
+            if item.item_type == SysTrayItemType::NetworkStatus {
+                item.set_label(label);
+                return;
+            }
+        }
+    }
+
+    /// Update the volume display (0-100).
+    pub fn update_volume(&mut self, volume_percent: u8) {
+        let label = format_volume(volume_percent);
+        for item in &mut self.items {
+            if item.item_type == SysTrayItemType::Volume {
+                item.set_label(&label);
+                return;
+            }
+        }
+    }
+
+    /// Update the battery/power status display.
+    pub fn update_battery(&mut self, label_str: &str) {
+        for item in &mut self.items {
+            if item.item_type == SysTrayItemType::BatteryStatus {
+                item.set_label(label_str);
                 return;
             }
         }
@@ -295,6 +342,15 @@ fn format_cpu(usage: u8) -> String {
     let mut s = String::with_capacity(10);
     s.push_str("CPU:");
     push_u8_decimal(&mut s, usage);
+    s.push('%');
+    s
+}
+
+/// Format volume label: "Vol: XX%"
+fn format_volume(volume: u8) -> String {
+    let mut s = String::with_capacity(10);
+    s.push_str("Vol:");
+    push_u8_decimal(&mut s, volume);
     s.push('%');
     s
 }
@@ -445,7 +501,7 @@ static SYSTEM_TRAY: GlobalState<spin::Mutex<SystemTray>> = GlobalState::new();
 /// Initialize the global system tray.
 pub fn init() {
     let _ = SYSTEM_TRAY.init(spin::Mutex::new(SystemTray::new()));
-    crate::println!("[SYSTRAY] System tray initialized (3 default items)");
+    crate::println!("[SYSTRAY] System tray initialized (6 default items)");
 }
 
 /// Execute a closure with a mutable reference to the system tray.

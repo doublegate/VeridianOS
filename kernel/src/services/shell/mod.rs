@@ -40,20 +40,25 @@ use alloc::{
 };
 
 use commands::{
-    AcpiCommand, AliasCommand, ArpCommand, AuditCommand, BgCommand, Blake3sumCommand,
-    BracketTestCommand, CapCommand, CatCommand, CdCommand, ChmodCommand, ClearCommand,
-    ContainerCommand, CpCommand, CutCommand, DateCommand, DfCommand, DhcpCommand, DmesgCommand,
+    AcpiCommand, AliasCommand, ArpCommand, AuditCommand, BgCommand, Blake3sumCommand, BondCommand,
+    BracketTestCommand, BrowserCommand, BtCommand, CapCommand, CatCommand, CdCommand, ChmodCommand,
+    CiCommand, ClearCommand, CloudInitCommand, ContainerCommand, CoredumpCommand, CpCommand,
+    CurlCommand, CutCommand, DateCommand, DfCommand, DhcpCommand, DmesgCommand, DnsCommand,
     DotCommand, EchoCommand, EnvCommand, ExitCommand, ExportCommand, FalseCommand, FgCommand,
-    FreeCommand, GrepCommand, HeadCommand, HelpCommand, HistoryCommand, IfconfigCommand,
-    IpcsCommand, JobsCommand, KillCommand, KptiCommand, LsCommand, LsblkCommand, LsmodCommand,
-    LsnsCommand, LspciCommand, LsusbCommand, MacCommand, MkdirCommand, MountCommand, MvCommand,
-    NdpCommand, NetstatCommand, NumaCommand, PerfCommand, Ping6Command, PkgCommand, PlayCommand,
-    PrintfCommand, PsCommand, PwdCommand, ReadCommand, RmCommand, RouteCommand, SchedCommand,
-    SetCommand, Sha256sumCommand, SlabCommand, SortCommand, SourceCommand, SsCommand,
-    StartGuiCommand, SyncCommand, TailCommand, TeeCommand, TestCommand, TouchCommand, TpmCommand,
-    TrCommand, TraceCommand, TrueCommand, TypeCommand, UnaliasCommand, UnameCommand, UniqCommand,
-    UnsetCommand, UptimeCommand, VmstatCommand, VmxCommand, VolumeCommand, WcCommand, WhichCommand,
-    WinfoCommand,
+    FirewallCommand, FreeCommand, GdbCommand, GitCommand, GrepCommand, HeadCommand, HelpCommand,
+    HistoryCommand, HostnameCommand, HttpServerCommand, HwinfoCommand, IfconfigCommand,
+    IpcsCommand, JobsCommand, KillCommand, KinitCommand, KlistCommand, KptiCommand, KubectlCommand,
+    LdapsearchCommand, LsCommand, LsblkCommand, LscpuCommand, LsmodCommand, LsnsCommand,
+    LspciCommand, LsusbCommand, MacCommand, MakeCommand, MkdirCommand, MountCommand, MvCommand,
+    NatCommand, NdpCommand, NetstatCommand, NotifyCommand, NtpCommand, NumaCommand, PerfCommand,
+    Ping6Command, PingCommand, PkgCommand, PlayCommand, PrintfCommand, ProfilerCommand, PsCommand,
+    PwdCommand, ReadCommand, RmCommand, RouteCommand, SchedCommand, ScreenshotCommand, SetCommand,
+    Sha256sumCommand, SlabCommand, SortCommand, SourceCommand, SsCommand, SshCommand, SshdCommand,
+    StartGuiCommand, StraceCommand, SyncCommand, SysctlCommand, TailCommand, TeeCommand,
+    TestCommand, ThemeCommand, TopCommand, TouchCommand, TpmCommand, TrCommand, TraceCommand,
+    TrueCommand, TypeCommand, UnaliasCommand, UnameCommand, UniqCommand, UnsetCommand,
+    UptimeCommand, VlanCommand, VmstatCommand, VmxCommand, VolumeCommand, VpnCommand, WcCommand,
+    WgCommand, WhichCommand, WifiCommand, WinfoCommand,
 };
 use spin::RwLock;
 pub use state::{get_shell, init, run_shell, try_get_shell};
@@ -793,11 +798,61 @@ impl Shell {
         builtins.insert("route".into(), Box::new(RouteCommand));
         builtins.insert("ss".into(), Box::new(SsCommand));
 
+        // Extended network commands
+        builtins.insert("firewall".into(), Box::new(FirewallCommand));
+        builtins.insert("nat".into(), Box::new(NatCommand));
+        builtins.insert("dns".into(), Box::new(DnsCommand));
+        builtins.insert("ntp".into(), Box::new(NtpCommand));
+        builtins.insert("vpn".into(), Box::new(VpnCommand));
+        builtins.insert("wg".into(), Box::new(WgCommand));
+        builtins.insert("wifi".into(), Box::new(WifiCommand));
+        builtins.insert("bt".into(), Box::new(BtCommand));
+        builtins.insert("ssh".into(), Box::new(SshCommand));
+        builtins.insert("curl".into(), Box::new(CurlCommand));
+        builtins.insert("ping".into(), Box::new(PingCommand));
+        builtins.insert("vlan".into(), Box::new(VlanCommand));
+        builtins.insert("bond".into(), Box::new(BondCommand));
+        builtins.insert("ldapsearch".into(), Box::new(LdapsearchCommand));
+        builtins.insert("kinit".into(), Box::new(KinitCommand));
+        builtins.insert("klist".into(), Box::new(KlistCommand));
+
         // Desktop commands
         builtins.insert("winfo".into(), Box::new(WinfoCommand));
 
         // Virtualization / namespace commands
         builtins.insert("lsns".into(), Box::new(LsnsCommand));
+
+        // Development tools
+        builtins.insert("git".into(), Box::new(GitCommand));
+        builtins.insert("make".into(), Box::new(MakeCommand));
+        builtins.insert("gdb".into(), Box::new(GdbCommand));
+        builtins.insert("profiler".into(), Box::new(ProfilerCommand));
+        builtins.insert("ci".into(), Box::new(CiCommand));
+
+        // System diagnostics
+        builtins.insert("top".into(), Box::new(TopCommand));
+        builtins.insert("strace".into(), Box::new(StraceCommand));
+        builtins.insert("coredump".into(), Box::new(CoredumpCommand));
+        builtins.insert("lscpu".into(), Box::new(LscpuCommand));
+        builtins.insert("hostname".into(), Box::new(HostnameCommand));
+        builtins.insert("sysctl".into(), Box::new(SysctlCommand));
+
+        // Hardware info
+        builtins.insert("hwinfo".into(), Box::new(HwinfoCommand));
+
+        // Cloud/container commands
+        builtins.insert("cloud-init".into(), Box::new(CloudInitCommand));
+        builtins.insert("kubectl".into(), Box::new(KubectlCommand));
+
+        // Server commands
+        builtins.insert("http-server".into(), Box::new(HttpServerCommand));
+        builtins.insert("sshd".into(), Box::new(SshdCommand));
+
+        // Desktop commands (extended)
+        builtins.insert("screenshot".into(), Box::new(ScreenshotCommand));
+        builtins.insert("notify".into(), Box::new(NotifyCommand));
+        builtins.insert("theme".into(), Box::new(ThemeCommand));
+        builtins.insert("browser".into(), Box::new(BrowserCommand));
     }
 
     fn tokenize(&self, command_line: &str) -> Vec<String> {

@@ -14,6 +14,7 @@
 
 mod crypto;
 mod desktop;
+mod devtools;
 mod filesystem;
 mod hardware;
 mod network;
@@ -30,6 +31,7 @@ use alloc::{format, string::String, vec::Vec};
 
 pub(super) use crypto::*;
 pub(super) use desktop::*;
+pub(super) use devtools::*;
 pub(super) use filesystem::*;
 pub(super) use hardware::*;
 pub(super) use network::*;

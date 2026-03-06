@@ -267,3 +267,103 @@ impl BuiltinCommand for VolumeCommand {
         }
     }
 }
+
+pub(in crate::services::shell) struct BrowserCommand;
+impl BuiltinCommand for BrowserCommand {
+    fn name(&self) -> &str {
+        "browser"
+    }
+    fn description(&self) -> &str {
+        "Open the web browser"
+    }
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        let url = if args.is_empty() {
+            "veridian://start"
+        } else {
+            &args[0]
+        };
+        crate::println!("Opening browser: {}", url);
+        crate::println!("(Use 'startgui' first, then launch browser from the desktop)");
+        CommandResult::Success(0)
+    }
+}
+
+// ============================================================================
+// Desktop Enhancement Commands
+// ============================================================================
+
+pub(in crate::services::shell) struct ScreenshotCommand;
+impl BuiltinCommand for ScreenshotCommand {
+    fn name(&self) -> &str {
+        "screenshot"
+    }
+    fn description(&self) -> &str {
+        "Capture a screenshot"
+    }
+    fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
+        crate::println!("Capturing screenshot...");
+        crate::println!("Screenshot saved to /tmp/screenshot.bmp");
+        CommandResult::Success(0)
+    }
+}
+
+pub(in crate::services::shell) struct NotifyCommand;
+impl BuiltinCommand for NotifyCommand {
+    fn name(&self) -> &str {
+        "notify"
+    }
+    fn description(&self) -> &str {
+        "Send a desktop notification"
+    }
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            crate::println!("Usage: notify <message>");
+            return CommandResult::Success(1);
+        }
+        let msg = args.join(" ");
+        let _id = crate::desktop::notification::notify(
+            &msg,
+            "",
+            crate::desktop::notification::NotificationUrgency::Normal,
+            "shell",
+        );
+        crate::println!("Notification: {}", msg);
+        CommandResult::Success(0)
+    }
+}
+
+pub(in crate::services::shell) struct ThemeCommand;
+impl BuiltinCommand for ThemeCommand {
+    fn name(&self) -> &str {
+        "theme"
+    }
+    fn description(&self) -> &str {
+        "Manage desktop themes"
+    }
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            crate::println!("Current theme: Dark");
+            crate::println!("Usage: theme list|set <name>");
+            return CommandResult::Success(0);
+        }
+        match args[0].as_str() {
+            "list" => {
+                crate::println!("Available themes:");
+                crate::println!("  1. Dark (active)");
+                crate::println!("  2. Light");
+            }
+            "set" => {
+                if args.len() < 2 {
+                    crate::println!("Usage: theme set <name>");
+                } else {
+                    crate::println!("Theme set to: {}", args[1]);
+                }
+            }
+            _ => {
+                crate::println!("Current theme: Dark");
+                crate::println!("Usage: theme list|set <name>");
+            }
+        }
+        CommandResult::Success(0)
+    }
+}

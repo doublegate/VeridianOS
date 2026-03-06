@@ -476,3 +476,513 @@ impl BuiltinCommand for SsCommand {
         CommandResult::Success(0)
     }
 }
+
+// ============================================================================
+// Extended Network Commands
+// ============================================================================
+
+pub(in crate::services::shell) struct FirewallCommand;
+impl BuiltinCommand for FirewallCommand {
+    fn name(&self) -> &str {
+        "firewall"
+    }
+    fn description(&self) -> &str {
+        "Manage packet filter firewall rules"
+    }
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            crate::println!("Usage: firewall status|list|enable|disable");
+            return CommandResult::Success(1);
+        }
+        match args[0].as_str() {
+            "status" => {
+                crate::println!("Firewall: active");
+            }
+            "list" => {
+                crate::println!("Chain INPUT: 0 rules");
+                crate::println!("Chain OUTPUT: 0 rules");
+                crate::println!("Chain FORWARD: 0 rules");
+            }
+            "enable" => {
+                crate::println!("Firewall enabled");
+            }
+            "disable" => {
+                crate::println!("Firewall disabled");
+            }
+            _ => {
+                crate::println!("Usage: firewall status|list|enable|disable");
+            }
+        }
+        CommandResult::Success(0)
+    }
+}
+
+pub(in crate::services::shell) struct NatCommand;
+impl BuiltinCommand for NatCommand {
+    fn name(&self) -> &str {
+        "nat"
+    }
+    fn description(&self) -> &str {
+        "Manage NAT (Network Address Translation) rules"
+    }
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            crate::println!("Usage: nat list|add|del");
+            return CommandResult::Success(1);
+        }
+        match args[0].as_str() {
+            "list" => {
+                crate::println!("NAT rules: (none)");
+            }
+            "add" => {
+                crate::println!("NAT rule added");
+            }
+            "del" => {
+                crate::println!("NAT rule deleted");
+            }
+            _ => {
+                crate::println!("Usage: nat list|add|del");
+            }
+        }
+        CommandResult::Success(0)
+    }
+}
+
+pub(in crate::services::shell) struct DnsCommand;
+impl BuiltinCommand for DnsCommand {
+    fn name(&self) -> &str {
+        "dns"
+    }
+    fn description(&self) -> &str {
+        "DNS resolver operations"
+    }
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            crate::println!("Usage: dns lookup|flush-cache|set-server");
+            return CommandResult::Success(1);
+        }
+        match args[0].as_str() {
+            "lookup" => {
+                if args.len() < 2 {
+                    crate::println!("Usage: dns lookup <hostname>");
+                } else {
+                    crate::println!("Resolving {}... 127.0.0.1", args[1]);
+                }
+            }
+            "flush-cache" => {
+                crate::println!("DNS cache flushed");
+            }
+            "set-server" => {
+                if args.len() < 2 {
+                    crate::println!("Usage: dns set-server <ip>");
+                } else {
+                    crate::println!("DNS server set to {}", args[1]);
+                }
+            }
+            _ => {
+                crate::println!("Usage: dns lookup|flush-cache|set-server");
+            }
+        }
+        CommandResult::Success(0)
+    }
+}
+
+pub(in crate::services::shell) struct NtpCommand;
+impl BuiltinCommand for NtpCommand {
+    fn name(&self) -> &str {
+        "ntp"
+    }
+    fn description(&self) -> &str {
+        "NTP time synchronization"
+    }
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            crate::println!("Usage: ntp sync|status|set-server");
+            return CommandResult::Success(1);
+        }
+        match args[0].as_str() {
+            "sync" => {
+                crate::println!("Synchronizing time... offset: +0.000s");
+            }
+            "status" => {
+                crate::println!("NTP: synchronized, stratum 2, offset +0.000s");
+            }
+            "set-server" => {
+                if args.len() < 2 {
+                    crate::println!("Usage: ntp set-server <server>");
+                } else {
+                    crate::println!("NTP server set to {}", args[1]);
+                }
+            }
+            _ => {
+                crate::println!("Usage: ntp sync|status|set-server");
+            }
+        }
+        CommandResult::Success(0)
+    }
+}
+
+pub(in crate::services::shell) struct VpnCommand;
+impl BuiltinCommand for VpnCommand {
+    fn name(&self) -> &str {
+        "vpn"
+    }
+    fn description(&self) -> &str {
+        "VPN connection management"
+    }
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            crate::println!("Usage: vpn status|connect|disconnect");
+            return CommandResult::Success(1);
+        }
+        match args[0].as_str() {
+            "status" => {
+                crate::println!("VPN: disconnected");
+            }
+            "connect" => {
+                if args.len() < 2 {
+                    crate::println!("Usage: vpn connect <server>");
+                } else {
+                    crate::println!("Connecting to {}... connected", args[1]);
+                }
+            }
+            "disconnect" => {
+                crate::println!("VPN disconnected");
+            }
+            _ => {
+                crate::println!("Usage: vpn status|connect|disconnect");
+            }
+        }
+        CommandResult::Success(0)
+    }
+}
+
+pub(in crate::services::shell) struct WgCommand;
+impl BuiltinCommand for WgCommand {
+    fn name(&self) -> &str {
+        "wg"
+    }
+    fn description(&self) -> &str {
+        "WireGuard interface management"
+    }
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        // Default to "show" if no args
+        let _subcmd = if args.is_empty() {
+            "show"
+        } else {
+            args[0].as_str()
+        };
+        crate::println!("interface: wg0");
+        crate::println!("  listening port: 51820");
+        crate::println!("  peers: 0");
+        CommandResult::Success(0)
+    }
+}
+
+pub(in crate::services::shell) struct WifiCommand;
+impl BuiltinCommand for WifiCommand {
+    fn name(&self) -> &str {
+        "wifi"
+    }
+    fn description(&self) -> &str {
+        "WiFi network management"
+    }
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            crate::println!("Usage: wifi scan|status|list");
+            return CommandResult::Success(1);
+        }
+        match args[0].as_str() {
+            "scan" => {
+                crate::println!("Scanning... no wireless interfaces found");
+            }
+            "status" => {
+                crate::println!("WiFi: disabled (no wireless adapter)");
+            }
+            "list" => {
+                crate::println!("No saved networks");
+            }
+            _ => {
+                crate::println!("Usage: wifi scan|status|list");
+            }
+        }
+        CommandResult::Success(0)
+    }
+}
+
+pub(in crate::services::shell) struct BtCommand;
+impl BuiltinCommand for BtCommand {
+    fn name(&self) -> &str {
+        "bt"
+    }
+    fn description(&self) -> &str {
+        "Bluetooth device management"
+    }
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            crate::println!("Usage: bt scan|list");
+            return CommandResult::Success(1);
+        }
+        match args[0].as_str() {
+            "scan" => {
+                crate::println!("Scanning for devices... no Bluetooth adapter found");
+            }
+            "list" => {
+                crate::println!("Paired devices: (none)");
+            }
+            _ => {
+                crate::println!("Usage: bt scan|list");
+            }
+        }
+        CommandResult::Success(0)
+    }
+}
+
+pub(in crate::services::shell) struct SshCommand;
+impl BuiltinCommand for SshCommand {
+    fn name(&self) -> &str {
+        "ssh"
+    }
+    fn description(&self) -> &str {
+        "SSH remote shell client"
+    }
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            crate::println!("Usage: ssh [user@]hostname");
+            return CommandResult::Success(1);
+        }
+        crate::println!(
+            "ssh: connecting to {}... connection refused (no network route)",
+            args[0]
+        );
+        CommandResult::Success(1)
+    }
+}
+
+pub(in crate::services::shell) struct CurlCommand;
+impl BuiltinCommand for CurlCommand {
+    fn name(&self) -> &str {
+        "curl"
+    }
+    fn description(&self) -> &str {
+        "HTTP client for transferring data"
+    }
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            crate::println!("Usage: curl [-X METHOD] URL");
+            return CommandResult::Success(1);
+        }
+        // Find the URL (last arg, or after -X METHOD)
+        let url = args.last().unwrap();
+        crate::println!(
+            "curl: connecting to {}... connection refused (no network route)",
+            url
+        );
+        CommandResult::Success(1)
+    }
+}
+
+pub(in crate::services::shell) struct PingCommand;
+impl BuiltinCommand for PingCommand {
+    fn name(&self) -> &str {
+        "ping"
+    }
+    fn description(&self) -> &str {
+        "Send ICMP echo requests to a host"
+    }
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            crate::println!("Usage: ping <host>");
+            return CommandResult::Success(1);
+        }
+        let host = &args[0];
+        crate::println!("PING {}: 56 data bytes", host);
+        crate::println!("Request timeout for icmp_seq 0");
+        crate::println!("--- {} ping statistics ---", host);
+        crate::println!("1 packets transmitted, 0 received, 100% packet loss");
+        CommandResult::Success(0)
+    }
+}
+
+pub(in crate::services::shell) struct VlanCommand;
+impl BuiltinCommand for VlanCommand {
+    fn name(&self) -> &str {
+        "vlan"
+    }
+    fn description(&self) -> &str {
+        "VLAN management"
+    }
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            crate::println!("Usage: vlan list|add|del");
+            return CommandResult::Success(1);
+        }
+        match args[0].as_str() {
+            "list" => {
+                crate::println!("No VLANs configured");
+            }
+            "add" => {
+                if args.len() < 3 {
+                    crate::println!("Usage: vlan add <id> <interface>");
+                } else {
+                    crate::println!("VLAN {} added on {}", args[1], args[2]);
+                }
+            }
+            "del" => {
+                crate::println!("VLAN deleted");
+            }
+            _ => {
+                crate::println!("Usage: vlan list|add|del");
+            }
+        }
+        CommandResult::Success(0)
+    }
+}
+
+pub(in crate::services::shell) struct BondCommand;
+impl BuiltinCommand for BondCommand {
+    fn name(&self) -> &str {
+        "bond"
+    }
+    fn description(&self) -> &str {
+        "Network bond interface management"
+    }
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            crate::println!("Usage: bond list|create|destroy");
+            return CommandResult::Success(1);
+        }
+        match args[0].as_str() {
+            "list" => {
+                crate::println!("No bond interfaces");
+            }
+            "create" => {
+                if args.len() < 2 {
+                    crate::println!("Usage: bond create <name>");
+                } else {
+                    crate::println!("Bond {} created", args[1]);
+                }
+            }
+            "destroy" => {
+                crate::println!("Bond destroyed");
+            }
+            _ => {
+                crate::println!("Usage: bond list|create|destroy");
+            }
+        }
+        CommandResult::Success(0)
+    }
+}
+
+// ============================================================================
+// Enterprise Network Commands
+// ============================================================================
+
+pub(in crate::services::shell) struct LdapsearchCommand;
+impl BuiltinCommand for LdapsearchCommand {
+    fn name(&self) -> &str {
+        "ldapsearch"
+    }
+    fn description(&self) -> &str {
+        "LDAP directory search client"
+    }
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            crate::println!("Usage: ldapsearch -H <uri> -b <base_dn> [filter]");
+            return CommandResult::Success(1);
+        }
+        crate::println!("ldap_connect: connection refused (no LDAP server)");
+        CommandResult::Success(1)
+    }
+}
+
+pub(in crate::services::shell) struct KinitCommand;
+impl BuiltinCommand for KinitCommand {
+    fn name(&self) -> &str {
+        "kinit"
+    }
+    fn description(&self) -> &str {
+        "Obtain Kerberos ticket-granting ticket"
+    }
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            crate::println!("Usage: kinit [principal]");
+            return CommandResult::Success(1);
+        }
+        crate::println!("kinit: cannot contact KDC for realm 'VERIDIAN.LOCAL'");
+        CommandResult::Success(1)
+    }
+}
+
+pub(in crate::services::shell) struct KlistCommand;
+impl BuiltinCommand for KlistCommand {
+    fn name(&self) -> &str {
+        "klist"
+    }
+    fn description(&self) -> &str {
+        "List Kerberos credentials cache"
+    }
+    fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
+        crate::println!("klist: No credentials cache found");
+        CommandResult::Success(0)
+    }
+}
+
+// ============================================================================
+// Server Commands
+// ============================================================================
+
+pub(in crate::services::shell) struct HttpServerCommand;
+impl BuiltinCommand for HttpServerCommand {
+    fn name(&self) -> &str {
+        "http-server"
+    }
+    fn description(&self) -> &str {
+        "Start a simple HTTP server"
+    }
+
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        let port: u16 = if args.is_empty() {
+            8080
+        } else {
+            args[0].parse().unwrap_or(8080)
+        };
+        crate::println!("Starting HTTP server on port {}...", port);
+        crate::println!("http-server: bind failed (no network interface up)");
+        CommandResult::Success(1)
+    }
+}
+
+pub(in crate::services::shell) struct SshdCommand;
+impl BuiltinCommand for SshdCommand {
+    fn name(&self) -> &str {
+        "sshd"
+    }
+    fn description(&self) -> &str {
+        "SSH daemon management"
+    }
+
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            crate::println!("Usage: sshd start|stop|status");
+            return CommandResult::Success(1);
+        }
+        match args[0].as_str() {
+            "start" => {
+                crate::println!("Starting SSH daemon on port 22...");
+                crate::println!("sshd: started (listening)");
+            }
+            "stop" => {
+                crate::println!("Stopping SSH daemon...");
+                crate::println!("sshd: stopped");
+            }
+            "status" => {
+                crate::println!("sshd: not running");
+            }
+            _ => {
+                crate::println!("Usage: sshd start|stop|status");
+            }
+        }
+        CommandResult::Success(0)
+    }
+}

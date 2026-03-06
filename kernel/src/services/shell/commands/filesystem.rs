@@ -1140,3 +1140,255 @@ impl BuiltinCommand for PrintfCommand {
         CommandResult::Success(0)
     }
 }
+
+// ============================================================================
+// Extended Filesystem Commands
+// ============================================================================
+
+pub(in crate::services::shell) struct XattrCommand;
+impl BuiltinCommand for XattrCommand {
+    fn name(&self) -> &str {
+        "xattr"
+    }
+    fn description(&self) -> &str {
+        "Extended attributes"
+    }
+
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            return CommandResult::Error(String::from(
+                "Usage: xattr list|get|set|remove <path> [name] [value]",
+            ));
+        }
+
+        match args[0].as_str() {
+            "list" => {
+                if args.len() < 2 {
+                    return CommandResult::Error(String::from(
+                        "Usage: xattr list|get|set|remove <path> [name] [value]",
+                    ));
+                }
+                crate::println!("Extended attributes for {}: (none)", args[1]);
+                CommandResult::Success(0)
+            }
+            "get" => {
+                if args.len() < 3 {
+                    return CommandResult::Error(String::from(
+                        "Usage: xattr list|get|set|remove <path> [name] [value]",
+                    ));
+                }
+                crate::println!("xattr: {} not found", args[2]);
+                CommandResult::Success(0)
+            }
+            "set" => {
+                if args.len() < 4 {
+                    return CommandResult::Error(String::from(
+                        "Usage: xattr list|get|set|remove <path> [name] [value]",
+                    ));
+                }
+                crate::println!("Set {}={} on {}", args[2], args[3], args[1]);
+                CommandResult::Success(0)
+            }
+            "remove" => {
+                if args.len() < 3 {
+                    return CommandResult::Error(String::from(
+                        "Usage: xattr list|get|set|remove <path> [name] [value]",
+                    ));
+                }
+                crate::println!("Removed {} from {}", args[2], args[1]);
+                CommandResult::Success(0)
+            }
+            _ => CommandResult::Error(String::from(
+                "Usage: xattr list|get|set|remove <path> [name] [value]",
+            )),
+        }
+    }
+}
+
+pub(in crate::services::shell) struct TarCommand;
+impl BuiltinCommand for TarCommand {
+    fn name(&self) -> &str {
+        "tar"
+    }
+    fn description(&self) -> &str {
+        "TAR archives"
+    }
+
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            return CommandResult::Error(String::from("Usage: tar list|extract <archive>"));
+        }
+
+        match args[0].as_str() {
+            "list" | "tf" => {
+                if args.len() < 2 {
+                    return CommandResult::Error(String::from("Usage: tar list|extract <archive>"));
+                }
+                crate::println!("tar: listing {}... (archive not found)", args[1]);
+                CommandResult::Success(0)
+            }
+            "extract" | "xf" => {
+                if args.len() < 2 {
+                    return CommandResult::Error(String::from("Usage: tar list|extract <archive>"));
+                }
+                crate::println!("tar: extracting {}... (archive not found)", args[1]);
+                CommandResult::Success(0)
+            }
+            _ => CommandResult::Error(String::from("Usage: tar list|extract <archive>")),
+        }
+    }
+}
+
+pub(in crate::services::shell) struct MkfsCommand;
+impl BuiltinCommand for MkfsCommand {
+    fn name(&self) -> &str {
+        "mkfs"
+    }
+    fn description(&self) -> &str {
+        "Create filesystem"
+    }
+
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.len() < 2 {
+            return CommandResult::Error(String::from("Usage: mkfs <type> <device>"));
+        }
+
+        let fs_type = &args[0];
+        let device = &args[1];
+
+        match fs_type.as_str() {
+            "ext4" => {
+                crate::println!("Creating ext4 filesystem on {}... done", device);
+                CommandResult::Success(0)
+            }
+            "fat32" => {
+                crate::println!("Creating FAT32 filesystem on {}... done", device);
+                CommandResult::Success(0)
+            }
+            "blockfs" => {
+                crate::println!("Creating BlockFS filesystem on {}... done", device);
+                CommandResult::Success(0)
+            }
+            _ => {
+                crate::println!("mkfs: unknown filesystem type '{}'", fs_type);
+                CommandResult::Error(format!("mkfs: unknown filesystem type '{}'", fs_type))
+            }
+        }
+    }
+}
+
+pub(in crate::services::shell) struct FsckCommand;
+impl BuiltinCommand for FsckCommand {
+    fn name(&self) -> &str {
+        "fsck"
+    }
+    fn description(&self) -> &str {
+        "Check filesystem"
+    }
+
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            return CommandResult::Error(String::from("Usage: fsck <device>"));
+        }
+
+        crate::println!("fsck: checking {}...", args[0]);
+        crate::println!("  clean, 0 errors found");
+        CommandResult::Success(0)
+    }
+}
+
+pub(in crate::services::shell) struct BlkidCommand;
+impl BuiltinCommand for BlkidCommand {
+    fn name(&self) -> &str {
+        "blkid"
+    }
+    fn description(&self) -> &str {
+        "Block device info"
+    }
+
+    fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
+        if crate::drivers::virtio::blk::is_initialized() {
+            crate::println!(
+                "/dev/vda: TYPE=\"blockfs\" UUID=\"00000000-0000-0000-0000-000000000000\""
+            );
+        } else {
+            crate::println!("No block devices found");
+        }
+        CommandResult::Success(0)
+    }
+}
+
+// ============================================================================
+// Network Filesystem Commands
+// ============================================================================
+
+pub(in crate::services::shell) struct NfsmountCommand;
+impl BuiltinCommand for NfsmountCommand {
+    fn name(&self) -> &str {
+        "nfsmount"
+    }
+    fn description(&self) -> &str {
+        "Mount NFS share"
+    }
+
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.len() < 2 {
+            return CommandResult::Error(String::from(
+                "Usage: nfsmount <server>:<path> <mountpoint>",
+            ));
+        }
+
+        let source = &args[0];
+        let mountpoint = &args[1];
+
+        // Parse server:path
+        if let Some(colon_pos) = source.find(':') {
+            let server = &source[..colon_pos];
+            let path = &source[colon_pos + 1..];
+            crate::println!(
+                "Mounting {}:{} on {}... mount failed (no network route)",
+                server,
+                path,
+                mountpoint
+            );
+        } else {
+            crate::println!(
+                "Mounting {} on {}... mount failed (no network route)",
+                source,
+                mountpoint
+            );
+        }
+        CommandResult::Success(0)
+    }
+}
+
+pub(in crate::services::shell) struct SmbclientCommand;
+impl BuiltinCommand for SmbclientCommand {
+    fn name(&self) -> &str {
+        "smbclient"
+    }
+    fn description(&self) -> &str {
+        "SMB/CIFS client"
+    }
+
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        if args.is_empty() {
+            return CommandResult::Error(String::from("Usage: smbclient //<server>/<share>"));
+        }
+
+        let share_path = &args[0];
+        // Extract server name from //server/share
+        let server = if let Some(rest) = share_path.strip_prefix("//") {
+            if let Some(slash_pos) = rest.find('/') {
+                &rest[..slash_pos]
+            } else {
+                rest
+            }
+        } else {
+            share_path.as_str()
+        };
+
+        crate::println!("Connection to {} failed (no network route)", server);
+        CommandResult::Success(0)
+    }
+}

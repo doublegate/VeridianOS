@@ -122,6 +122,8 @@ enum AppKind {
     Settings,
     MediaPlayer,
     SystemMonitor,
+    Browser,
+    PdfViewer,
 }
 
 /// A dynamically spawned application window.
@@ -315,7 +317,7 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopState {
     // Send a welcome notification to demonstrate the notification system
     crate::desktop::notification::notify(
         "VeridianOS Desktop",
-        "Welcome to VeridianOS v0.17.1",
+        "Welcome to VeridianOS v0.18.0",
         crate::desktop::notification::NotificationUrgency::Normal,
         "desktop",
     );
@@ -789,6 +791,16 @@ fn handle_launcher_launch(state: &mut DesktopState, exec_path: &str) {
         "mediaplayer" | "/usr/bin/mediaplayer" => {
             if !focus_dynamic_app(state, AppKind::MediaPlayer) {
                 spawn_dynamic_app(state, AppKind::MediaPlayer, "Media Player", 640, 300);
+            }
+        }
+        "browser" | "/usr/bin/browser" => {
+            if !focus_dynamic_app(state, AppKind::Browser) {
+                spawn_dynamic_app(state, AppKind::Browser, "Web Browser", 900, 600);
+            }
+        }
+        "pdfviewer" | "/usr/bin/pdfviewer" => {
+            if !focus_dynamic_app(state, AppKind::PdfViewer) {
+                spawn_dynamic_app(state, AppKind::PdfViewer, "PDF Viewer", 800, 600);
             }
         }
         _ => {}
@@ -1471,6 +1483,12 @@ fn render_all_apps(state: &DesktopState) {
                     app.height as usize,
                 );
             }
+            AppKind::Browser => {
+                render_browser(&mut buf, app.width as usize, app.height as usize);
+            }
+            AppKind::PdfViewer => {
+                render_pdf_viewer(&mut buf, app.width as usize, app.height as usize);
+            }
         }
 
         update_surface_pixels(app.surface_id, app.pool_id, app.pool_buf_id, &buf);
@@ -1545,6 +1563,45 @@ fn render_system_monitor(buf: &mut [u8], w: usize, h: usize, frame_count: u64) {
     draw_string_into_buffer(buf, w, line5, 20, stats_y + 60, 0xD4D4D4);
     let line6 = format_simple(&mut line_buf, b"GUI frames:   ", frame_count);
     draw_string_into_buffer(buf, w, line6, 20, stats_y + 80, 0xD4D4D4);
+
+    // Process list header
+    let proc_y = stats_y + 110;
+    draw_string_into_buffer(buf, w, b"PID   NAME            STATE", 20, proc_y, 0x55EFC4);
+
+    // Draw separator line
+    for x in 20..(w.saturating_sub(20)) {
+        if proc_y + 16 < h {
+            draw_pixel(buf, w, x, proc_y + 16, 0x444444);
+        }
+    }
+
+    // Get process list from process server
+    let process_server = crate::services::process_server::get_process_server();
+    let processes = process_server.list_processes();
+    let max_display = ((h.saturating_sub(proc_y + 20)) / 16).min(processes.len());
+    for (i, proc_info) in processes.iter().take(max_display).enumerate() {
+        let py = proc_y + 20 + i * 16;
+        if py + 16 > h {
+            break;
+        }
+        // Format: PID (6 chars), NAME (16 chars), STATE
+        let pid_line = format_simple(&mut line_buf, b"", proc_info.pid.0);
+        draw_string_into_buffer(buf, w, pid_line, 20, py, 0xD4D4D4);
+
+        let name_bytes = proc_info.name.as_bytes();
+        let name_len = name_bytes.len().min(15);
+        draw_string_into_buffer(buf, w, &name_bytes[..name_len], 68, py, 0xD4D4D4);
+
+        let state_str = match proc_info.state {
+            crate::services::process_server::ProcessState::Running => b"Running" as &[u8],
+            crate::services::process_server::ProcessState::Sleeping => b"Sleeping",
+            crate::services::process_server::ProcessState::Waiting => b"Waiting",
+            crate::services::process_server::ProcessState::Stopped => b"Stopped",
+            crate::services::process_server::ProcessState::Zombie => b"Zombie",
+            crate::services::process_server::ProcessState::Dead => b"Dead",
+        };
+        draw_string_into_buffer(buf, w, state_str, 196, py, 0xD4D4D4);
+    }
 }
 
 /// Render media player with playback info.
@@ -1568,6 +1625,111 @@ fn render_media_player(buf: &mut [u8], w: usize, h: usize) {
         20,
         h.saturating_sub(30),
         0x7F8C8D,
+    );
+}
+
+/// Render web browser with address bar and content area.
+fn render_browser(buf: &mut [u8], w: usize, h: usize) {
+    render_placeholder_app(buf, w, h, "Web Browser", 0x1a1a2e);
+
+    // Address bar background
+    for y in 40..60 {
+        for x in 10..(w.saturating_sub(10)) {
+            let off = (y * w + x) * 4;
+            if off + 3 < buf.len() {
+                buf[off] = 0x3A; // B
+                buf[off + 1] = 0x3A; // G
+                buf[off + 2] = 0x3A; // R
+                buf[off + 3] = 0xFF;
+            }
+        }
+    }
+    draw_string_into_buffer(buf, w, b"veridian://start", 16, 44, 0xCCCCCC);
+
+    // Tab bar
+    draw_string_into_buffer(buf, w, b"[New Tab]", 10, 24, 0xAAAAFF);
+
+    // Content area
+    let content_y = 75;
+    draw_string_into_buffer(
+        buf,
+        w,
+        b"Welcome to VeridianOS Web Browser",
+        20,
+        content_y,
+        0xFFFFFF,
+    );
+    draw_string_into_buffer(
+        buf,
+        w,
+        b"HTML5 + CSS3 + JavaScript Engine",
+        20,
+        content_y + 20,
+        0xAAAAAA,
+    );
+    draw_string_into_buffer(
+        buf,
+        w,
+        b"Enter a URL in the address bar to browse",
+        20,
+        content_y + 50,
+        0x777777,
+    );
+    draw_string_into_buffer(
+        buf,
+        w,
+        b"Keyboard: Ctrl+L = address bar, Ctrl+T = new tab",
+        20,
+        content_y + 70,
+        0x666666,
+    );
+}
+
+/// Render PDF viewer with document area.
+fn render_pdf_viewer(buf: &mut [u8], w: usize, h: usize) {
+    render_placeholder_app(buf, w, h, "PDF Viewer", 0x2a2a35);
+
+    // Toolbar
+    draw_string_into_buffer(
+        buf,
+        w,
+        b"[Open] [<] Page 1 of 1 [>] [Zoom: 100%]",
+        10,
+        40,
+        0xBBBBBB,
+    );
+
+    // Document area (light background to simulate page)
+    let page_x = 40;
+    let page_y = 65;
+    let page_w = w.saturating_sub(80);
+    let page_h = h.saturating_sub(100);
+    for y in page_y..(page_y + page_h).min(h) {
+        for x in page_x..(page_x + page_w).min(w) {
+            let off = (y * w + x) * 4;
+            if off + 3 < buf.len() {
+                buf[off] = 0xF0; // B
+                buf[off + 1] = 0xF0; // G
+                buf[off + 2] = 0xF0; // R
+                buf[off + 3] = 0xFF;
+            }
+        }
+    }
+    draw_string_into_buffer(
+        buf,
+        w,
+        b"No document loaded",
+        page_x + 20,
+        page_y + 30,
+        0x555555,
+    );
+    draw_string_into_buffer(
+        buf,
+        w,
+        b"Use File Manager to open a PDF",
+        page_x + 20,
+        page_y + 50,
+        0x777777,
     );
 }
 

@@ -569,6 +569,82 @@ impl InitSystem {
             stop_timeout: None,
         })?;
 
+        // Register firewall service
+        self.register_service(ServiceDefinition {
+            name: String::from("firewall"),
+            description: String::from("Packet Filter Firewall"),
+            command: String::from("/sbin/fwd"),
+            arguments: vec![],
+            environment: vec![],
+            working_directory: String::from("/"),
+            user: 0,
+            group: 0,
+            restart_policy: RestartPolicy::OnFailure,
+            restart_delay_ms: 3000,
+            max_restarts: 3,
+            timeout_ms: 30000,
+            dependencies: vec![(String::from("network"), DependencyType::After)],
+            start_level: 18,
+            stop_timeout: None,
+        })?;
+
+        // Register DNS resolver service
+        self.register_service(ServiceDefinition {
+            name: String::from("dns-resolver"),
+            description: String::from("DNS Resolver"),
+            command: String::from("/sbin/resolved"),
+            arguments: vec![],
+            environment: vec![],
+            working_directory: String::from("/"),
+            user: 0,
+            group: 0,
+            restart_policy: RestartPolicy::OnFailure,
+            restart_delay_ms: 3000,
+            max_restarts: 3,
+            timeout_ms: 30000,
+            dependencies: vec![(String::from("network"), DependencyType::Requires)],
+            start_level: 22,
+            stop_timeout: None,
+        })?;
+
+        // Register NTP time sync service
+        self.register_service(ServiceDefinition {
+            name: String::from("ntp"),
+            description: String::from("NTP Time Sync"),
+            command: String::from("/sbin/ntpd"),
+            arguments: vec![],
+            environment: vec![],
+            working_directory: String::from("/"),
+            user: 0,
+            group: 0,
+            restart_policy: RestartPolicy::OnFailure,
+            restart_delay_ms: 3000,
+            max_restarts: 3,
+            timeout_ms: 30000,
+            dependencies: vec![(String::from("network"), DependencyType::After)],
+            start_level: 25,
+            stop_timeout: None,
+        })?;
+
+        // Register SSH server service
+        self.register_service(ServiceDefinition {
+            name: String::from("ssh"),
+            description: String::from("SSH Server"),
+            command: String::from("/sbin/sshd"),
+            arguments: vec![],
+            environment: vec![],
+            working_directory: String::from("/"),
+            user: 0,
+            group: 0,
+            restart_policy: RestartPolicy::OnFailure,
+            restart_delay_ms: 3000,
+            max_restarts: 3,
+            timeout_ms: 30000,
+            dependencies: vec![(String::from("network"), DependencyType::After)],
+            start_level: 30,
+            stop_timeout: None,
+        })?;
+
         Ok(())
     }
 

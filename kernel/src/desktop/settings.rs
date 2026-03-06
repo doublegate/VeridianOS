@@ -20,6 +20,9 @@ pub enum SettingsPanel {
     Network,
     Users,
     Appearance,
+    Audio,
+    Bluetooth,
+    Power,
     About,
 }
 
@@ -31,6 +34,9 @@ impl SettingsPanel {
             Self::Network => "Network",
             Self::Users => "Users",
             Self::Appearance => "Appearance",
+            Self::Audio => "Audio",
+            Self::Bluetooth => "Bluetooth",
+            Self::Power => "Power",
             Self::About => "About",
         }
     }
@@ -42,6 +48,9 @@ impl SettingsPanel {
             Self::Network,
             Self::Users,
             Self::Appearance,
+            Self::Audio,
+            Self::Bluetooth,
+            Self::Power,
             Self::About,
         ]
     }
@@ -53,7 +62,10 @@ impl SettingsPanel {
             Self::Network => 1,
             Self::Users => 2,
             Self::Appearance => 3,
-            Self::About => 4,
+            Self::Audio => 4,
+            Self::Bluetooth => 5,
+            Self::Power => 6,
+            Self::About => 7,
         }
     }
 }
@@ -172,6 +184,78 @@ impl AppearanceSettings {
     }
 }
 
+/// Audio settings.
+#[derive(Debug, Clone)]
+pub struct AudioSettings {
+    pub master_volume: u8,
+    pub muted: bool,
+    pub output_device: String,
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self {
+            master_volume: 75,
+            muted: false,
+            output_device: String::from("Default Output"),
+        }
+    }
+}
+
+impl AudioSettings {
+    fn item_count(&self) -> usize {
+        3 // volume, mute, output device
+    }
+}
+
+/// Bluetooth settings.
+#[derive(Debug, Clone)]
+pub struct BluetoothSettings {
+    pub enabled: bool,
+    pub discoverable: bool,
+    pub device_name: String,
+}
+
+impl Default for BluetoothSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            discoverable: false,
+            device_name: String::from("VeridianOS"),
+        }
+    }
+}
+
+impl BluetoothSettings {
+    fn item_count(&self) -> usize {
+        3 // enabled, discoverable, device name
+    }
+}
+
+/// Power settings.
+#[derive(Debug, Clone)]
+pub struct PowerSettings {
+    pub profile_index: usize,
+    pub screen_timeout_min: u8,
+    pub profiles: Vec<&'static str>,
+}
+
+impl Default for PowerSettings {
+    fn default() -> Self {
+        Self {
+            profile_index: 0,
+            screen_timeout_min: 10,
+            profiles: vec!["Balanced", "Performance", "Power Saver"],
+        }
+    }
+}
+
+impl PowerSettings {
+    fn item_count(&self) -> usize {
+        2 // profile, screen timeout
+    }
+}
+
 /// Static system information displayed on the About panel.
 #[derive(Debug, Clone)]
 pub struct AboutInfo {
@@ -226,6 +310,9 @@ pub struct SettingsApp {
     pub user: UserSettings,
     pub appearance: AppearanceSettings,
     pub about: AboutInfo,
+    pub audio: AudioSettings,
+    pub bluetooth: BluetoothSettings,
+    pub power_settings: PowerSettings,
 
     /// Index of the selected item within the active panel's content area.
     pub selected_item: usize,
@@ -256,6 +343,9 @@ impl SettingsApp {
             user: UserSettings::default(),
             appearance: AppearanceSettings::default(),
             about: AboutInfo::default(),
+            audio: AudioSettings::default(),
+            bluetooth: BluetoothSettings::default(),
+            power_settings: PowerSettings::default(),
             selected_item: 0,
             surface_id: None,
             width: 600,
@@ -276,6 +366,9 @@ impl SettingsApp {
             SettingsPanel::Network => self.network.item_count(),
             SettingsPanel::Users => self.user.item_count(),
             SettingsPanel::Appearance => self.appearance.item_count(),
+            SettingsPanel::Audio => self.audio.item_count(),
+            SettingsPanel::Bluetooth => self.bluetooth.item_count(),
+            SettingsPanel::Power => self.power_settings.item_count(),
             SettingsPanel::About => 0, // read-only
         }
     }
@@ -400,6 +493,50 @@ impl SettingsApp {
                 }
                 _ => {}
             },
+            SettingsPanel::Audio => match self.selected_item {
+                0 => {
+                    // Cycle volume by 10
+                    self.audio.master_volume = if self.audio.master_volume >= 100 {
+                        0
+                    } else {
+                        self.audio.master_volume + 10
+                    };
+                }
+                1 => {
+                    self.audio.muted = !self.audio.muted;
+                }
+                _ => {}
+            },
+            SettingsPanel::Bluetooth => match self.selected_item {
+                0 => {
+                    self.bluetooth.enabled = !self.bluetooth.enabled;
+                }
+                1 => {
+                    self.bluetooth.discoverable = !self.bluetooth.discoverable;
+                }
+                _ => {}
+            },
+            SettingsPanel::Power => match self.selected_item {
+                0 => {
+                    let n = self.power_settings.profiles.len();
+                    if n > 0 {
+                        self.power_settings.profile_index =
+                            (self.power_settings.profile_index + 1) % n;
+                    }
+                }
+                1 => {
+                    // Cycle screen timeout: 5, 10, 15, 30, 0(never)
+                    self.power_settings.screen_timeout_min =
+                        match self.power_settings.screen_timeout_min {
+                            5 => 10,
+                            10 => 15,
+                            15 => 30,
+                            30 => 0,
+                            _ => 5,
+                        };
+                }
+                _ => {}
+            },
             SettingsPanel::About => {} // read-only
         }
     }
@@ -492,6 +629,15 @@ impl SettingsApp {
             }
             SettingsPanel::Appearance => {
                 self.render_appearance_panel(buf, buf_width);
+            }
+            SettingsPanel::Audio => {
+                self.render_audio_panel(buf, buf_width);
+            }
+            SettingsPanel::Bluetooth => {
+                self.render_bluetooth_panel(buf, buf_width);
+            }
+            SettingsPanel::Power => {
+                self.render_power_panel(buf, buf_width);
             }
             SettingsPanel::About => {
                 self.render_about_panel(buf, buf_width);
@@ -716,18 +862,159 @@ impl SettingsApp {
     }
 
     fn render_about_panel(&self, buf: &mut [u8], buf_width: usize) {
-        let rows: [(&[u8], &[u8]); 5] = [
+        // Wire real memory data
+        let mem = crate::mm::get_memory_stats();
+        let total_mb = (mem.total_frames * 4096) / (1024 * 1024);
+        let used_frames = mem.total_frames.saturating_sub(mem.free_frames);
+        let used_mb = (used_frames * 4096) / (1024 * 1024);
+        let mem_str = format!("{}/{} MB", used_mb, total_mb);
+
+        // CPU architecture
+        let arch_str = if cfg!(target_arch = "x86_64") {
+            "x86_64"
+        } else if cfg!(target_arch = "aarch64") {
+            "aarch64"
+        } else if cfg!(target_arch = "riscv64") {
+            "riscv64gc"
+        } else {
+            "unknown"
+        };
+
+        let rows: [(&[u8], &[u8]); 7] = [
             (b"OS:", self.about.os_name.as_bytes()),
             (b"Version:", self.about.version.as_bytes()),
             (b"Kernel:", self.about.kernel_version.as_bytes()),
             (b"Package:", self.about.arch.as_bytes()),
             (b"Hostname:", self.about.hostname.as_bytes()),
+            (b"Arch:", arch_str.as_bytes()),
+            (b"Memory:", mem_str.as_bytes()),
         ];
 
         for (i, (label, value)) in rows.iter().enumerate() {
             // About panel is read-only; never highlight.
             Self::render_label_value(buf, buf_width, i, label, value, false);
         }
+    }
+
+    fn render_audio_panel(&self, buf: &mut [u8], buf_width: usize) {
+        let vol = format!(
+            "{}%{}",
+            self.audio.master_volume,
+            if self.audio.muted { " (muted)" } else { "" }
+        );
+        Self::render_label_value(
+            buf,
+            buf_width,
+            0,
+            b"Volume:",
+            vol.as_bytes(),
+            self.selected_item == 0,
+        );
+
+        let mute = if self.audio.muted { "Yes" } else { "No" };
+        Self::render_label_value(
+            buf,
+            buf_width,
+            1,
+            b"Muted:",
+            mute.as_bytes(),
+            self.selected_item == 1,
+        );
+
+        Self::render_label_value(
+            buf,
+            buf_width,
+            2,
+            b"Output:",
+            self.audio.output_device.as_bytes(),
+            self.selected_item == 2,
+        );
+    }
+
+    fn render_bluetooth_panel(&self, buf: &mut [u8], buf_width: usize) {
+        let enabled = if self.bluetooth.enabled { "On" } else { "Off" };
+        Self::render_label_value(
+            buf,
+            buf_width,
+            0,
+            b"Bluetooth:",
+            enabled.as_bytes(),
+            self.selected_item == 0,
+        );
+
+        let disc = if self.bluetooth.discoverable {
+            "Yes"
+        } else {
+            "No"
+        };
+        Self::render_label_value(
+            buf,
+            buf_width,
+            1,
+            b"Discoverable:",
+            disc.as_bytes(),
+            self.selected_item == 1,
+        );
+
+        Self::render_label_value(
+            buf,
+            buf_width,
+            2,
+            b"Device Name:",
+            self.bluetooth.device_name.as_bytes(),
+            self.selected_item == 2,
+        );
+
+        // Paired devices section
+        let y = CONTENT_Y + 4 * LINE_HEIGHT;
+        draw_string_into_buffer(
+            buf,
+            buf_width,
+            b"Paired Devices: (none)",
+            CONTENT_X,
+            y,
+            0x777777,
+        );
+    }
+
+    fn render_power_panel(&self, buf: &mut [u8], buf_width: usize) {
+        let profile = if self.power_settings.profile_index < self.power_settings.profiles.len() {
+            self.power_settings.profiles[self.power_settings.profile_index]
+        } else {
+            "Unknown"
+        };
+        Self::render_label_value(
+            buf,
+            buf_width,
+            0,
+            b"Power Profile:",
+            profile.as_bytes(),
+            self.selected_item == 0,
+        );
+
+        let timeout = if self.power_settings.screen_timeout_min == 0 {
+            String::from("Never")
+        } else {
+            format!("{} min", self.power_settings.screen_timeout_min)
+        };
+        Self::render_label_value(
+            buf,
+            buf_width,
+            1,
+            b"Screen Timeout:",
+            timeout.as_bytes(),
+            self.selected_item == 1,
+        );
+
+        // Power status from kernel
+        let y = CONTENT_Y + 3 * LINE_HEIGHT;
+        let governor = match crate::power::get_governor() {
+            crate::power::Governor::OnDemand => "OnDemand",
+            crate::power::Governor::Performance => "Performance",
+            crate::power::Governor::PowerSave => "PowerSave",
+        };
+        let gov_label = format!("Governor: {}", governor);
+        draw_string_into_buffer(buf, buf_width, gov_label.as_bytes(), CONTENT_X, y, 0x777777);
     }
 }
 

@@ -236,6 +236,26 @@ impl TextEditor {
                     // Backspace
                     self.delete_char();
                 }
+                '\x13' => {
+                    // Ctrl+S: Save file
+                    if let Err(e) = self.save_file() {
+                        crate::println!("[EDITOR] Save failed: {:?}", e);
+                    }
+                }
+                '\x0F' => {
+                    // Ctrl+O: Open file (stub -- would need file dialog)
+                    crate::println!("[EDITOR] Open file: use file manager to open files");
+                }
+                '\x0E' => {
+                    // Ctrl+N: New file
+                    self.buffer.clear();
+                    self.buffer.push(alloc::vec::Vec::new());
+                    self.cursor_line = 0;
+                    self.cursor_col = 0;
+                    self.scroll_line = 0;
+                    self.file_path = None;
+                    self.modified = false;
+                }
                 '\t' => {
                     // Tab - insert 4 spaces
                     for _ in 0..4 {
@@ -432,6 +452,38 @@ impl TextEditor {
                 }
             }
         }
+
+        // Bottom status line background
+        let status_y = height.saturating_sub(20);
+        for x in 0..width {
+            for dy in 0..20 {
+                let offset = ((status_y + dy) * width + x) * 4;
+                if offset + 3 < buf.len() {
+                    buf[offset] = 0x50; // B
+                    buf[offset + 1] = 0x40; // G
+                    buf[offset + 2] = 0x30; // R
+                    buf[offset + 3] = 0xFF;
+                }
+            }
+        }
+        // Bottom status text: shortcuts hint + cursor position
+        let mod_indicator = if self.modified { "*" } else { "" };
+        let file_name = self.file_path.as_deref().unwrap_or("[New File]");
+        let bottom_status = format!(
+            " {}{} | Ln {}, Col {} | Ctrl+S Save  Ctrl+N New",
+            file_name,
+            mod_indicator,
+            self.cursor_line + 1,
+            self.cursor_col + 1,
+        );
+        draw_string_into_buffer(
+            buf,
+            width,
+            bottom_status.as_bytes(),
+            0,
+            status_y + 2,
+            0xCCCCCC,
+        );
 
         Ok(())
     }

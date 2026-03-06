@@ -963,6 +963,20 @@ fn default_applications() -> Vec<AppEntry> {
             AppCategory::Multimedia,
             "Play audio and video",
         ),
+        AppEntry::new(
+            "Web Browser",
+            "/usr/bin/browser",
+            "web-browser",
+            AppCategory::Network,
+            "Browse the web",
+        ),
+        AppEntry::new(
+            "PDF Viewer",
+            "/usr/bin/pdfviewer",
+            "pdf-viewer",
+            AppCategory::Utility,
+            "View PDF documents",
+        ),
     ]
 }
 

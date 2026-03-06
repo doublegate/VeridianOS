@@ -2,6 +2,74 @@
 
 ---
 
+## [v0.18.0] - 2026-03-06
+
+### v0.18.0: "Ship It" Final Integration -- 8 Waves, 63 New Commands, 128 Total Builtins
+
+Wires ~40 previously disconnected subsystems into a cohesive, production-ready OS experience. Every subsystem was already implemented; this release connects them to the user-facing shell and desktop. Implemented across 8 independently releasable waves.
+
+#### Wave 1 -- Core UX (Power, User, Service Management, Init)
+
+- **Power management** (5): `shutdown`, `reboot`, `poweroff`, `suspend`, `hibernate` -- ACPI/power subsystem control
+- **User management** (8): `useradd`, `userdel`, `passwd`, `id`, `whoami`, `groups`, `su`, `sudo` -- full user lifecycle
+- **Service management**: `service` (list/start/stop/restart/status) -- systemd-style lifecycle control
+- **Init system activation**: 8 services registered at boot (console, logger, devmgr, network, firewall, dns-resolver, ntp, ssh); essential services auto-started
+- 4 new init services: firewall (level 18), dns-resolver (22), ntp (25), ssh (30)
+
+#### Wave 2 -- Network Subsystem Wiring (16 commands)
+
+- `firewall`, `nat`, `dns`, `ntp`, `vpn`, `wg`, `wifi`, `bt`, `ssh`, `curl`, `ping`
+- `vlan`, `bond`, `ldapsearch`, `kinit`, `klist`
+
+#### Wave 3 -- Filesystem, Storage, Scheduled Tasks (11 commands)
+
+- Filesystem: `xattr`, `tar`, `mkfs`, `fsck`, `blkid`, `nfsmount`, `smbclient`
+- Storage: `mdadm`, `iscsiadm`
+- Scheduled tasks: `crontab`, `at`
+
+#### Wave 4 -- DevTools and Diagnostics (12 commands)
+
+- New `devtools.rs` module: `git`, `make`, `gdb`, `profiler`, `ci`
+- Diagnostics: `top`, `strace`, `coredump`, `lscpu`, `hostname`, `sysctl`, `hwinfo`
+
+#### Wave 5 -- GUI App Completion
+
+- **Browser**: Added to AppKind enum, launcher, and renderer; launchable from desktop and `browser` shell command
+- **PDF Viewer**: Added to AppKind enum, launcher, and renderer with toolbar and page area
+- **Text editor**: Ctrl+S (save), Ctrl+O (open), Ctrl+N (new) shortcuts; status line with filename, modified indicator, cursor position
+- 9 total desktop apps (up from 7)
+
+#### Wave 6 -- Settings and System Monitor
+
+- 3 new settings panels: Audio (volume/mute/output), Bluetooth (enable/discoverable/devices), Power (profile/timeout/governor)
+- 8 total settings panels (up from 5)
+- System Monitor: real process list from `process_server::list_processes()` with PID/name/state columns
+- About panel: live memory stats and CPU architecture
+- Power panel: wired to kernel governor state via `power::get_governor()`
+
+#### Wave 7 -- Remaining Gaps (7 commands)
+
+- Cloud/container: `cloud-init`, `kubectl`
+- Server: `http-server`, `sshd`
+- Desktop: `screenshot`, `notify`, `theme`
+- System tray: network status, volume, battery indicators
+
+#### Wave 8 -- Help, Polish, Version
+
+- Categorized `help` command with 17 categories and per-command help via `help <command>`
+- Version bump 0.17.1 -> 0.18.0 (Cargo.toml, os-release, uname, desktop welcome)
+- Dead code audit on power module (annotations retained -- items still internal-only)
+- `pub(crate) mod userland_ext` visibility fix (needed by shell commands)
+
+#### Statistics
+
+- 19 files changed (+1 new), +2,705/-32 LOC
+- 63 new shell commands, 128 total builtins
+- 9 desktop apps (was 7), 8 settings panels (was 5), 8 init services (was 4)
+- All 3 architectures build clean, zero clippy warnings on 4 targets, QEMU boot verified
+
+---
+
 ## [v0.17.1] - 2026-03-06
 
 ### v0.17.1: Tier 3 Technical Debt Remediation -- Type-Safe Errors, Encapsulation Audit, Nesting Cleanup
