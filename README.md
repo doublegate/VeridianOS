@@ -42,12 +42,12 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 - **Self-hosting** -- Native GCC 14.2 and Rust compiler toolchain; BusyBox 1.36.1 with 95 applets compiled on-target
 - **Package management** -- DPLL SAT dependency resolver, ports system, reproducible builds, Ed25519 package signing
 - **Complete C library** -- Full stdio/stdlib/string/unistd with POSIX headers, math library, and architecture-specific setjmp/longjmp
-- **Bash-compatible shell (vsh)** -- Pure Rust shell with 49 builtins, job control, readline, scripting, and POSIX word expansion
+- **Bash-compatible shell (vsh)** -- Pure Rust shell with 128 builtins (power, user, service, network, filesystem, storage, devtools, diagnostics, desktop, cloud/container), job control, readline, scripting, and POSIX word expansion
 
 ### Desktop & Multimedia
 
 - **Wayland compositor** -- Wire protocol, SHM buffers, XDG shell, layer-shell, DMA-BUF, multi-output with HiDPI scaling
-- **Desktop environment** -- Application launcher, Alt-Tab switcher, notifications, system tray, screen lock, virtual workspaces, TrueType fonts, CJK Unicode
+- **Desktop environment** -- 9 desktop apps (terminal, file manager, text editor, calculator, system monitor, settings, image viewer, web browser, PDF viewer), application launcher, Alt-Tab switcher, notifications, 6-item system tray, 8 settings panels, screen lock, virtual workspaces, TrueType fonts, CJK Unicode
 - **GPU acceleration** -- VirtIO GPU 2D/3D, OpenGL ES 2.0, DRM/KMS, texture atlas compositor with shader pipeline; vendor stubs for i915, amdgpu, and nouveau
 - **Audio & video** -- ALSA-compatible mixer, VirtIO-Sound, WAV/Vorbis/MP3 playback, PNG/JPEG/GIF/TGA/QOI decoders, media player
 - **Web browser engine** -- HTML5 tokenizer, arena-based DOM, CSS layout (block/inline/float/flexbox), JavaScript VM with mark-sweep GC, tabbed browsing with process isolation
