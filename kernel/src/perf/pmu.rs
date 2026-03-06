@@ -11,13 +11,13 @@
 //! - Branch mispredictions
 //! - TLB misses
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 /// Whether the PMU has been initialized.
 static PMU_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// Number of available general-purpose performance counters.
-static mut NUM_COUNTERS: u8 = 0;
+static NUM_COUNTERS: AtomicU8 = AtomicU8::new(0);
 
 // ---------------------------------------------------------------------------
 // Performance Event Selectors
@@ -122,9 +122,7 @@ pub fn is_initialized() -> bool {
 
 /// Get the number of general-purpose performance counters.
 pub fn num_counters() -> u8 {
-    // SAFETY: NUM_COUNTERS is written once during init() before any
-    // concurrent reads. After init, it is read-only.
-    unsafe { NUM_COUNTERS }
+    NUM_COUNTERS.load(Ordering::Relaxed)
 }
 
 // ---------------------------------------------------------------------------
@@ -141,10 +139,7 @@ fn init_x86_64() {
     let num_gp_counters = ((cpuid.eax >> 8) & 0xFF) as u8;
     let counter_width = ((cpuid.eax >> 16) & 0xFF) as u8;
 
-    // SAFETY: Written once during init, read-only afterwards.
-    unsafe {
-        NUM_COUNTERS = num_gp_counters;
-    }
+    NUM_COUNTERS.store(num_gp_counters, Ordering::Relaxed);
 
     println!(
         "[PMU] x86_64: version={}, counters={}, width={} bits",
@@ -218,9 +213,7 @@ fn init_aarch64() {
         core::arch::asm!("mrs {}, PMCR_EL0", out(reg) pmcr);
     }
     let n = ((pmcr >> 11) & 0x1F) as u8;
-    unsafe {
-        NUM_COUNTERS = n;
-    }
+    NUM_COUNTERS.store(n, Ordering::Relaxed);
     println!("[PMU] AArch64: {} event counters", n);
 }
 
@@ -242,9 +235,7 @@ pub fn read_cycle_counter() -> u64 {
 #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
 fn init_riscv() {
     // RISC-V has fixed counters: mcycle, minstret, plus optional HPM counters.
-    unsafe {
-        NUM_COUNTERS = 2; // cycle + instret at minimum
-    }
+    NUM_COUNTERS.store(2, Ordering::Relaxed);
     println!("[PMU] RISC-V: cycle + instret counters");
 }
 

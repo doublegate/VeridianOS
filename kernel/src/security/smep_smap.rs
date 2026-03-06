@@ -86,6 +86,7 @@ pub fn is_smap_enabled() -> bool {
 fn detect_features() {
     // CPUID leaf 7, sub-leaf 0: structured extended feature flags in EBX.
     // LLVM reserves RBX, so we must save/restore it around `cpuid`.
+    #[allow(unused_variables)]
     let ebx: u32;
 
     // SAFETY: CPUID is a read-only instruction. We save and restore RBX

@@ -2,14 +2,14 @@
 //!
 //! Provides decoders for Truevision TGA and Quite OK Image (QOI) formats.
 //! Both decoders produce `VideoFrame` output using the parent module's
-//! `PixelFormat::ARGB8888` for maximum fidelity.
+//! `PixelFormat::Argb8888` for maximum fidelity.
 
 #![allow(dead_code)]
 
 use alloc::vec::Vec;
 
-use super::{PixelFormat, VideoFrame};
-use crate::error::KernelError;
+use super::VideoFrame;
+use crate::{error::KernelError, graphics::PixelFormat};
 
 // ---------------------------------------------------------------------------
 // Format detection
@@ -223,7 +223,7 @@ pub fn decode_tga(data: &[u8]) -> Result<VideoFrame, KernelError> {
     // Origin: bit 5 of image_descriptor => 1 = top-left, 0 = bottom-left
     let top_left_origin = (header.image_descriptor & 0x20) != 0;
 
-    let mut frame = VideoFrame::new(width, height, PixelFormat::ARGB8888);
+    let mut frame = VideoFrame::new(width, height, PixelFormat::Argb8888);
     for row in 0..height {
         let src_row = if top_left_origin {
             row
@@ -311,7 +311,7 @@ pub fn decode_qoi(data: &[u8]) -> Result<VideoFrame, KernelError> {
     }
 
     let pixel_count = (width as usize) * (height as usize);
-    let mut frame = VideoFrame::new(width, height, PixelFormat::ARGB8888);
+    let mut frame = VideoFrame::new(width, height, PixelFormat::Argb8888);
 
     // Previously seen pixel array (64 entries)
     let mut index: [(u8, u8, u8, u8); 64] = [(0, 0, 0, 0); 64];

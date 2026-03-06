@@ -3,6 +3,7 @@
 //! Represents a renderable rectangular area. Each surface has pending and
 //! committed state (double-buffered protocol state) and tracks attached
 //! buffers, position, damage, and opaque regions.
+#![allow(dead_code)]
 
 use alloc::vec::Vec;
 
@@ -36,10 +37,8 @@ pub struct SurfaceState {
     /// Accumulated damage regions since last commit
     pub damage: Vec<DamageRect>,
     /// Opaque region hint (currently unused, reserved for Phase 6)
-    #[allow(dead_code)] // Phase 6: opaque region optimization
     pub opaque: Vec<DamageRect>,
     /// Input region (where the surface accepts pointer/touch)
-    #[allow(dead_code)] // Phase 6: input region clipping
     pub input: Vec<DamageRect>,
 }
 
@@ -185,7 +184,8 @@ impl Surface {
 
 #[cfg(test)]
 mod tests {
-    use super::{super::buffer::PixelFormat, *};
+    use super::*;
+    use crate::graphics::PixelFormat;
 
     #[test]
     fn test_surface_lifecycle() {

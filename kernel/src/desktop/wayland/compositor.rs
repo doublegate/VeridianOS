@@ -3,16 +3,14 @@
 //! Manages surfaces and composites them into a back-buffer that can be
 //! presented to the hardware framebuffer. Surfaces are drawn in Z-order
 //! with per-pixel alpha blending for ARGB8888 and fast memcpy for XRGB8888.
+#![allow(dead_code)]
 
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 
 use spin::RwLock;
 
-use super::{
-    buffer::{self, PixelFormat},
-    surface::Surface,
-};
-use crate::error::KernelError;
+use super::{buffer, surface::Surface};
+use crate::{error::KernelError, graphics::PixelFormat};
 
 // ---------------------------------------------------------------------------
 // Desktop background color (dark blue-grey)
@@ -262,6 +260,16 @@ impl Compositor {
                                     bb[dst_idx] = 0xFF00_0000 | (r8 << 16) | (g8 << 8) | b8;
                                 }
                             }
+                            // Other formats: treat as opaque XRGB
+                            _ => {
+                                if src_off + 2 < pixels.len() {
+                                    let b_val = pixels[src_off] as u32;
+                                    let g_val = pixels[src_off + 1] as u32;
+                                    let r_val = pixels[src_off + 2] as u32;
+                                    bb[dst_idx] =
+                                        0xFF00_0000 | (r_val << 16) | (g_val << 8) | b_val;
+                                }
+                            }
                         }
                     }
                 }
@@ -284,7 +292,6 @@ impl Compositor {
     }
 
     /// Get a snapshot of the back-buffer for presentation to hardware.
-    #[allow(dead_code)] // Kept for API compatibility; prefer with_back_buffer()
     pub fn back_buffer(&self) -> Vec<u32> {
         self.back_buffer.read().clone()
     }
@@ -346,7 +353,6 @@ impl Default for Compositor {
 /// `shadow_buffer` should be pre-allocated with
 /// `(width + 2*radius) * (height + 2*radius)` u32 elements.
 /// Uses a 3-pass box blur approximating a Gaussian shadow.
-#[allow(dead_code)]
 pub fn render_shadow(
     shadow_buffer: &mut [u32],
     buf_width: u32,
@@ -367,7 +373,6 @@ pub fn render_shadow(
 
 /// Alpha-blend a single source pixel (ARGB8888) onto a destination pixel
 /// (XRGB8888). Returns the blended pixel as 0xFFRRGGBB.
-#[allow(dead_code)]
 pub fn alpha_blend(src: u32, dst: u32) -> u32 {
     let src_a = (src >> 24) & 0xFF;
     if src_a == 255 {
@@ -396,7 +401,6 @@ pub fn alpha_blend(src: u32, dst: u32) -> u32 {
 /// Apply a per-surface opacity to a u32 pixel (XRGB8888 -> ARGB8888).
 ///
 /// Multiplies the existing alpha channel by `opacity / 255`.
-#[allow(dead_code)]
 pub fn apply_opacity(pixel: u32, opacity: u8) -> u32 {
     if opacity == 255 {
         return pixel;
@@ -408,10 +412,8 @@ pub fn apply_opacity(pixel: u32, opacity: u8) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        super::buffer::{Buffer, PixelFormat},
-        *,
-    };
+    use super::{super::buffer::Buffer, *};
+    use crate::graphics::PixelFormat;
 
     #[test]
     fn test_create_destroy_surface() {

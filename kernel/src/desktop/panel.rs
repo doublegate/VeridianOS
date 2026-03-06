@@ -18,6 +18,10 @@
 //! The panel requests exclusive zone equal to its height, so the
 //! compositor reserves that space and prevents normal windows from
 //! overlapping the panel area.
+//!
+//! Layer-shell types, enum variants, and panel configuration fields define
+//! the complete panel API. Unused items are retained for protocol completeness.
+#![allow(dead_code)]
 
 use alloc::{string::String, vec::Vec};
 
@@ -48,7 +52,6 @@ const WORKSPACE_AREA_WIDTH: u32 =
 
 /// Layer-shell layer (from wlr-layer-shell protocol).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum LayerShellLayer {
     /// Below all windows
     Background = 0,
@@ -62,7 +65,6 @@ pub enum LayerShellLayer {
 
 /// Layer-shell anchor edges (bitmask).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum LayerShellAnchor {
     /// No anchor (centered)
     None = 0,
@@ -78,7 +80,6 @@ pub enum LayerShellAnchor {
 
 /// Layer-shell surface configuration.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct LayerSurfaceConfig {
     /// The Wayland surface layer
     pub layer: LayerShellLayer,
@@ -99,7 +100,6 @@ pub struct LayerSurfaceConfig {
 
 impl LayerSurfaceConfig {
     /// Create a configuration for a bottom-anchored panel.
-    #[allow(dead_code)]
     pub fn bottom_panel(screen_width: u32, height: u32) -> Self {
         Self {
             layer: LayerShellLayer::Top,
@@ -165,10 +165,8 @@ pub struct Panel {
     /// Clock string (updated periodically).
     clock_text: RwLock<String>,
     /// Layer-shell surface ID (if initialized via layer-shell protocol).
-    #[allow(dead_code)]
     layer_surface_id: Option<u32>,
     /// Layer-shell configuration.
-    #[allow(dead_code)]
     layer_config: Option<LayerSurfaceConfig>,
     /// Workspace indicator state.
     workspaces: RwLock<WorkspaceState>,
@@ -201,7 +199,6 @@ impl Panel {
     /// overlapping.
     ///
     /// Returns the layer surface ID, or None if already initialized.
-    #[allow(dead_code)]
     pub fn init_layer_surface(&mut self) -> Option<u32> {
         if self.layer_surface_id.is_some() {
             return self.layer_surface_id;
@@ -235,13 +232,11 @@ impl Panel {
     }
 
     /// Get the layer-shell surface ID.
-    #[allow(dead_code)]
     pub fn layer_surface_id(&self) -> Option<u32> {
         self.layer_surface_id
     }
 
     /// Set the active workspace.
-    #[allow(dead_code)]
     pub fn set_active_workspace(&self, index: usize) {
         if index < NUM_WORKSPACES {
             self.workspaces.write().active = index;
@@ -249,13 +244,11 @@ impl Panel {
     }
 
     /// Get the active workspace index.
-    #[allow(dead_code)]
     pub fn active_workspace(&self) -> usize {
         self.workspaces.read().active
     }
 
     /// Update workspace window counts from the window manager.
-    #[allow(dead_code)]
     pub fn update_workspace_counts(&self) {
         let windows = with_window_manager(|wm| wm.get_all_windows()).unwrap_or_default();
         let mut ws = self.workspaces.write();

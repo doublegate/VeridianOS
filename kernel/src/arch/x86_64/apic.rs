@@ -8,6 +8,11 @@
 //! The Local APIC is memory-mapped at 0xFEE0_0000 (identity-mapped by the
 //! bootloader). The I/O APIC is at 0xFEC0_0000 with indirect register access
 //! via IOREGSEL/IOWIN.
+//!
+//! Register constants and hardware API methods define the complete Local APIC
+//! and I/O APIC register set per the Intel SDM. Unused items are retained for
+//! hardware reference completeness.
+#![allow(dead_code)]
 
 use core::{
     ptr,
@@ -44,13 +49,9 @@ const LAPIC_EOI: u32 = 0x0B0;
 /// Spurious Interrupt Vector register -- also contains the software enable bit.
 const LAPIC_SVR: u32 = 0x0F0;
 // Hardware register definitions -- retained for completeness per Intel SDM
-#[allow(dead_code)] // LAPIC register per Intel SDM
 const LAPIC_ISR_BASE: u32 = 0x100;
-#[allow(dead_code)] // LAPIC register per Intel SDM
 const LAPIC_TMR_BASE: u32 = 0x180;
-#[allow(dead_code)] // LAPIC register per Intel SDM
 const LAPIC_IRR_BASE: u32 = 0x200;
-#[allow(dead_code)] // LAPIC register per Intel SDM
 const LAPIC_ESR: u32 = 0x280;
 /// Interrupt Command Register (low 32 bits).
 const LAPIC_ICR_LOW: u32 = 0x300;
@@ -95,7 +96,6 @@ pub const SCHED_WAKE_VECTOR: u8 = 50;
 // ---------------------------------------------------------------------------
 
 // Hardware register definitions -- retained for completeness per Intel SDM
-#[allow(dead_code)] // Timer mode constant per Intel SDM
 const TIMER_MODE_ONESHOT: u32 = 0b00 << 17;
 /// Periodic timer mode (bits 18:17 = 01).
 const TIMER_MODE_PERIODIC: u32 = 0b01 << 17;
@@ -113,7 +113,6 @@ const IOREGSEL: u32 = 0x00;
 const IOWIN: u32 = 0x10;
 
 // Hardware register definition -- retained for completeness per Intel SDM
-#[allow(dead_code)] // IOAPIC register per Intel SDM
 const IOAPIC_REG_ID: u32 = 0x00;
 /// I/O APIC Version register.
 const IOAPIC_REG_VER: u32 = 0x01;
@@ -158,20 +157,17 @@ impl RedirectionEntry {
     }
 
     /// Get the interrupt vector.
-    #[allow(dead_code)] // Hardware API -- retained for completeness
     pub fn vector(&self) -> u8 {
         (self.raw & 0xFF) as u8
     }
 
     /// Set delivery mode (bits 10:8).
     /// 0=Fixed, 1=LowestPriority, 2=SMI, 4=NMI, 5=INIT, 7=ExtINT.
-    #[allow(dead_code)] // Hardware API -- retained for completeness
     pub fn set_delivery_mode(&mut self, mode: u8) {
         self.raw = (self.raw & !(0b111 << 8)) | (((mode & 0b111) as u64) << 8);
     }
 
     /// Set destination mode (bit 11). 0=Physical, 1=Logical.
-    #[allow(dead_code)] // Hardware API -- retained for completeness
     pub fn set_dest_mode_logical(&mut self, logical: bool) {
         if logical {
             self.raw |= 1 << 11;
@@ -181,7 +177,6 @@ impl RedirectionEntry {
     }
 
     /// Set pin polarity (bit 13). false=active high, true=active low.
-    #[allow(dead_code)] // Hardware API -- retained for completeness
     pub fn set_active_low(&mut self, active_low: bool) {
         if active_low {
             self.raw |= 1 << 13;
@@ -191,7 +186,6 @@ impl RedirectionEntry {
     }
 
     /// Set trigger mode (bit 15). false=edge, true=level.
-    #[allow(dead_code)] // Hardware API -- retained for completeness
     pub fn set_level_triggered(&mut self, level: bool) {
         if level {
             self.raw |= 1 << 15;
@@ -280,7 +274,6 @@ impl LocalApic {
     }
 
     /// Read the Local APIC version register.
-    #[allow(dead_code)] // Hardware API -- retained for completeness
     pub fn read_version(&self) -> u32 {
         self.read(LAPIC_VERSION)
     }
@@ -341,7 +334,6 @@ impl LocalApic {
     }
 
     /// Read the current timer count (counts down from the initial value).
-    #[allow(dead_code)] // Hardware API -- retained for completeness
     pub fn read_timer_count(&self) -> u32 {
         self.read(LAPIC_TIMER_CUR_COUNT)
     }

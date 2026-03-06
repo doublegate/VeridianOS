@@ -104,26 +104,18 @@ impl EventBuffer {
 unsafe impl Send for EventBuffer {}
 unsafe impl Sync for EventBuffer {}
 
-static mut EVENT_BUFFER: EventBuffer = EventBuffer::new();
+static EVENT_BUFFER: spin::Mutex<EventBuffer> = spin::Mutex::new(EventBuffer::new());
 
 /// Push an input event into the global event queue.
 ///
 /// Called by keyboard and mouse drivers.
 pub fn push_event(event: InputEvent) {
-    // SAFETY: Single producer from polling loop.
-    #[allow(static_mut_refs)]
-    unsafe {
-        EVENT_BUFFER.push(event);
-    }
+    EVENT_BUFFER.lock().push(event);
 }
 
 /// Read the next input event from the queue.
 pub fn read_event() -> Option<InputEvent> {
-    // SAFETY: Single consumer.
-    #[allow(static_mut_refs)]
-    unsafe {
-        EVENT_BUFFER.pop()
-    }
+    EVENT_BUFFER.lock().pop()
 }
 
 /// Poll all input sources and convert to input events.
@@ -186,30 +178,29 @@ pub fn poll_all() {
                 push_event(InputEvent::rel(REL_Y, mouse_event.dy as i32));
             }
             // Button events
-            static mut PREV_BUTTONS: u8 = 0;
-            #[allow(static_mut_refs)]
-            unsafe {
-                let changed = mouse_event.buttons ^ PREV_BUTTONS;
-                if (changed & super::mouse::BUTTON_LEFT) != 0 {
-                    push_event(InputEvent::key(
-                        BTN_LEFT,
-                        (mouse_event.buttons & super::mouse::BUTTON_LEFT) != 0,
-                    ));
-                }
-                if (changed & super::mouse::BUTTON_RIGHT) != 0 {
-                    push_event(InputEvent::key(
-                        BTN_RIGHT,
-                        (mouse_event.buttons & super::mouse::BUTTON_RIGHT) != 0,
-                    ));
-                }
-                if (changed & super::mouse::BUTTON_MIDDLE) != 0 {
-                    push_event(InputEvent::key(
-                        BTN_MIDDLE,
-                        (mouse_event.buttons & super::mouse::BUTTON_MIDDLE) != 0,
-                    ));
-                }
-                PREV_BUTTONS = mouse_event.buttons;
+            static PREV_BUTTONS: core::sync::atomic::AtomicU8 =
+                core::sync::atomic::AtomicU8::new(0);
+            let prev = PREV_BUTTONS.load(Ordering::Relaxed);
+            let changed = mouse_event.buttons ^ prev;
+            if (changed & super::mouse::BUTTON_LEFT) != 0 {
+                push_event(InputEvent::key(
+                    BTN_LEFT,
+                    (mouse_event.buttons & super::mouse::BUTTON_LEFT) != 0,
+                ));
             }
+            if (changed & super::mouse::BUTTON_RIGHT) != 0 {
+                push_event(InputEvent::key(
+                    BTN_RIGHT,
+                    (mouse_event.buttons & super::mouse::BUTTON_RIGHT) != 0,
+                ));
+            }
+            if (changed & super::mouse::BUTTON_MIDDLE) != 0 {
+                push_event(InputEvent::key(
+                    BTN_MIDDLE,
+                    (mouse_event.buttons & super::mouse::BUTTON_MIDDLE) != 0,
+                ));
+            }
+            PREV_BUTTONS.store(mouse_event.buttons, Ordering::Relaxed);
         }
     }
 }

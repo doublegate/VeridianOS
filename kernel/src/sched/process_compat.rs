@@ -103,19 +103,24 @@ pub fn current_process() -> &'static mut TaskProcessAdapter {
 
             #[cfg(not(feature = "alloc"))]
             {
-                // Without alloc, fall back to static storage
-                static mut CURRENT_PROCESS: TaskProcessAdapter = TaskProcessAdapter {
-                    pid: ProcessId(0),
-                    state: ProcessState::Running,
-                    blocked_on: None,
-                    task: None,
-                };
+                // Without alloc, fall back to static storage with interior
+                // mutability. SyncCell is a minimal Sync wrapper around
+                // UnsafeCell for early-boot single-threaded contexts.
+                struct SyncCell(core::cell::UnsafeCell<TaskProcessAdapter>);
+                unsafe impl Sync for SyncCell {}
+
+                static CURRENT_PROCESS: SyncCell =
+                    SyncCell(core::cell::UnsafeCell::new(TaskProcessAdapter {
+                        pid: ProcessId(0),
+                        state: ProcessState::Running,
+                        blocked_on: None,
+                        task: None,
+                    }));
 
                 // SAFETY: This static is only accessed from the scheduler path
                 // which runs with interrupts disabled on a single CPU during
-                // early boot (no alloc). `addr_of_mut!` avoids creating an
-                // intermediate reference to the static.
-                let current_ref = &mut *core::ptr::addr_of_mut!(CURRENT_PROCESS);
+                // early boot (no alloc).
+                let current_ref = &mut *CURRENT_PROCESS.0.get();
                 current_ref.pid = task.pid;
                 current_ref.state = task_state_to_process_state(task.state);
                 current_ref.blocked_on = task.blocked_on;
@@ -159,16 +164,19 @@ pub fn current_process() -> &'static mut TaskProcessAdapter {
 
             #[cfg(not(feature = "alloc"))]
             {
-                static mut DUMMY_PROCESS: TaskProcessAdapter = TaskProcessAdapter {
-                    pid: ProcessId(0),
-                    state: ProcessState::Running,
-                    blocked_on: None,
-                    task: None,
-                };
+                struct SyncCell(core::cell::UnsafeCell<TaskProcessAdapter>);
+                unsafe impl Sync for SyncCell {}
+
+                static DUMMY_PROCESS: SyncCell =
+                    SyncCell(core::cell::UnsafeCell::new(TaskProcessAdapter {
+                        pid: ProcessId(0),
+                        state: ProcessState::Running,
+                        blocked_on: None,
+                        task: None,
+                    }));
                 // SAFETY: Accessed only during early boot without alloc, single-
-                // threaded context. `addr_of_mut!` avoids UB from direct static
-                // mut reference.
-                &mut *core::ptr::addr_of_mut!(DUMMY_PROCESS)
+                // threaded context.
+                &mut *DUMMY_PROCESS.0.get()
             }
         }
     }

@@ -6,7 +6,8 @@
 
 #![allow(dead_code)]
 
-use super::{PixelFormat, VideoFrame};
+use super::VideoFrame;
+use crate::graphics::PixelFormat;
 
 // ---------------------------------------------------------------------------
 // Scale mode
@@ -366,7 +367,7 @@ mod tests {
 
     #[test]
     fn test_nearest_neighbor_identity() {
-        let mut src = VideoFrame::new(4, 4, PixelFormat::ARGB8888);
+        let mut src = VideoFrame::new(4, 4, PixelFormat::Argb8888);
         src.set_pixel(0, 0, 255, 0, 0, 255);
         src.set_pixel(3, 3, 0, 255, 0, 255);
 
@@ -377,7 +378,7 @@ mod tests {
 
     #[test]
     fn test_nearest_neighbor_upscale() {
-        let mut src = VideoFrame::new(2, 2, PixelFormat::ARGB8888);
+        let mut src = VideoFrame::new(2, 2, PixelFormat::Argb8888);
         src.set_pixel(0, 0, 100, 200, 50, 255);
         src.set_pixel(1, 1, 10, 20, 30, 255);
 
@@ -390,7 +391,7 @@ mod tests {
 
     #[test]
     fn test_bilinear_identity() {
-        let mut src = VideoFrame::new(4, 4, PixelFormat::ARGB8888);
+        let mut src = VideoFrame::new(4, 4, PixelFormat::Argb8888);
         src.set_pixel(0, 0, 255, 0, 0, 255);
 
         let dst = scale_frame(&src, 4, 4, ScaleMode::Bilinear);
@@ -401,11 +402,11 @@ mod tests {
 
     #[test]
     fn test_convert_xrgb_to_rgb888() {
-        let mut src = VideoFrame::new(2, 2, PixelFormat::XRGB8888);
+        let mut src = VideoFrame::new(2, 2, PixelFormat::Xrgb8888);
         src.set_pixel(0, 0, 0xAA, 0xBB, 0xCC, 0xFF);
 
-        let dst = convert_pixel_format(&src, PixelFormat::RGB888);
-        assert_eq!(dst.format, PixelFormat::RGB888);
+        let dst = convert_pixel_format(&src, PixelFormat::Rgb888);
+        assert_eq!(dst.format, PixelFormat::Rgb888);
         let (r, g, b, a) = dst.get_pixel(0, 0);
         assert_eq!((r, g, b), (0xAA, 0xBB, 0xCC));
         assert_eq!(a, 0xFF);

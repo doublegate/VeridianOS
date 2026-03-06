@@ -202,6 +202,7 @@ fn bcd_to_bin(bcd: u8) -> u8 {
 }
 
 /// Convert binary value to BCD encoding.
+#[allow(dead_code)]
 fn bin_to_bcd(val: u8) -> u8 {
     ((val / 10) << 4) | (val % 10)
 }
@@ -399,6 +400,7 @@ fn write_cmos(reg: u8, val: u8) {
 
 /// Non-x86_64 stub (no-op).
 #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+#[allow(dead_code)]
 fn write_cmos(_reg: u8, _val: u8) {}
 
 // ---------------------------------------------------------------------------

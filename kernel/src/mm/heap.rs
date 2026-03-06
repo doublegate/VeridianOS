@@ -320,7 +320,7 @@ pub fn init() -> Result<(), crate::error::KernelError> {
     // resulting `heap_start` pointer is valid for `heap_size` bytes and the memory
     // does not overlap with any other allocation because it is a dedicated static
     // array in the kernel binary.
-    #[allow(unused_unsafe)]
+    #[allow(unused_unsafe, unused_variables)]
     unsafe {
         let heap_start = core::ptr::addr_of_mut!(HEAP_MEMORY) as *mut u8;
         let heap_size = HEAP_SIZE;

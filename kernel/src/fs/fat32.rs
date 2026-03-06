@@ -4,6 +4,10 @@
 //! Supports 8.3 short names and VFAT long file names (LFN).
 //! Integrates with block devices (VirtIO-blk, NVMe, etc.) via the BlockDevice
 //! trait.
+//!
+//! Struct fields, attribute constants, and helper methods define the complete
+//! FAT32 on-disk format. Unused items are retained for format completeness.
+#![allow(dead_code)]
 
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -26,11 +30,8 @@ const FAT32_FREE: u32 = 0x0000_0000;
 const DIR_ENTRY_SIZE: usize = 32;
 
 /// Attribute flags for directory entries
-#[allow(dead_code)]
 const ATTR_READ_ONLY: u8 = 0x01;
-#[allow(dead_code)]
 const ATTR_HIDDEN: u8 = 0x02;
-#[allow(dead_code)]
 const ATTR_SYSTEM: u8 = 0x04;
 const ATTR_DIRECTORY: u8 = 0x10;
 const ATTR_LONG_NAME: u8 = 0x0F;
@@ -101,14 +102,12 @@ impl Bpb {
     }
 
     /// Sector offset of a FAT entry for a given cluster
-    #[allow(dead_code)]
     fn fat_sector_for_cluster(&self, cluster: u32) -> u32 {
         let fat_offset = cluster * 4;
         self.reserved_sectors as u32 + fat_offset / self.bytes_per_sector as u32
     }
 
     /// Byte offset within FAT sector for a given cluster
-    #[allow(dead_code)]
     fn fat_offset_in_sector(&self, cluster: u32) -> usize {
         ((cluster * 4) % self.bytes_per_sector as u32) as usize
     }
@@ -213,22 +212,18 @@ impl RawDirEntry {
         ((self.first_cluster_hi as u32) << 16) | self.first_cluster_lo as u32
     }
 
-    #[allow(dead_code)]
     fn is_free(&self) -> bool {
         self.name[0] == 0xE5 || self.name[0] == 0x00
     }
 
-    #[allow(dead_code)]
     fn is_end(&self) -> bool {
         self.name[0] == 0x00
     }
 
-    #[allow(dead_code)]
     fn is_long_name(&self) -> bool {
         self.attr == ATTR_LONG_NAME
     }
 
-    #[allow(dead_code)]
     fn is_directory(&self) -> bool {
         (self.attr & ATTR_DIRECTORY) != 0
     }
@@ -313,7 +308,6 @@ static FAT32_NEXT_INODE: AtomicU64 = AtomicU64::new(1);
 struct Fat32Node {
     node_type: NodeType,
     /// Data cache for files; directory entry bytes for directories
-    #[allow(dead_code)]
     data: RwLock<Vec<u8>>,
     /// Children (populated on first readdir/lookup for directories)
     children: RwLock<BTreeMap<String, Arc<Fat32Node>>>,
@@ -883,7 +877,6 @@ impl VfsNode for Fat32Node {
 /// FAT32 filesystem
 pub struct Fat32Fs {
     root: Arc<Fat32Node>,
-    #[allow(dead_code)]
     state: Arc<RwLock<Fat32State>>,
     readonly: bool,
 }

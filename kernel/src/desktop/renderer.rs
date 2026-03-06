@@ -3,6 +3,11 @@
 //! Connects the Wayland compositor's back-buffer to the hardware framebuffer.
 //! Creates the initial desktop scene (background gradient, panel, terminal
 //! placeholder) and runs the compositing loop.
+//!
+//! Includes server-side decoration (SSD) types and rendering functions that
+//! define the complete decoration API surface. Some items (hit-testing, button
+//! rendering) are not yet wired into the event dispatch path.
+#![allow(dead_code)]
 
 use alloc::vec;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -205,7 +210,7 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopState {
             width,
             height,
             width * 4,
-            crate::desktop::wayland::buffer::PixelFormat::Xrgb8888,
+            crate::graphics::PixelFormat::Xrgb8888,
         )
         .unwrap_or(0);
     crate::desktop::wayland::buffer::register_pool(pool);
@@ -217,7 +222,7 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopState {
         width,
         height,
         width * 4,
-        crate::desktop::wayland::buffer::PixelFormat::Xrgb8888,
+        crate::graphics::PixelFormat::Xrgb8888,
     );
     crate::desktop::wayland::with_display(|display| {
         display
@@ -310,7 +315,7 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopState {
     // Send a welcome notification to demonstrate the notification system
     crate::desktop::notification::notify(
         "VeridianOS Desktop",
-        "Welcome to VeridianOS v0.16.0",
+        "Welcome to VeridianOS v0.16.1",
         crate::desktop::notification::NotificationUrgency::Normal,
         "desktop",
     );
@@ -413,13 +418,7 @@ pub fn create_app_surface(x: i32, y: i32, w: u32, h: u32) -> (u32, u32, u32) {
 
     // Create buffer in pool
     let pool_buf_id = pool
-        .create_buffer(
-            0,
-            w,
-            h,
-            w * 4,
-            crate::desktop::wayland::buffer::PixelFormat::Xrgb8888,
-        )
+        .create_buffer(0, w, h, w * 4, crate::graphics::PixelFormat::Xrgb8888)
         .unwrap_or(0);
 
     crate::desktop::wayland::buffer::register_pool(pool);
@@ -432,7 +431,7 @@ pub fn create_app_surface(x: i32, y: i32, w: u32, h: u32) -> (u32, u32, u32) {
         w,
         h,
         w * 4,
-        crate::desktop::wayland::buffer::PixelFormat::Xrgb8888,
+        crate::graphics::PixelFormat::Xrgb8888,
     );
 
     crate::desktop::wayland::with_display(|display| {
@@ -1795,7 +1794,6 @@ fn forward_events_to_apps(state: &mut DesktopState) {
 /// Handles BGR vs RGB pixel format conversion.
 /// Note: The render loop now blits inline via `with_back_buffer()` to avoid
 /// a 4MB clone. This standalone version is kept for potential future use.
-#[allow(dead_code)]
 fn blit_to_framebuffer(
     back_buffer: &[u32],
     fb_ptr: *mut u8,
@@ -1844,7 +1842,6 @@ fn blit_to_framebuffer(
 
 /// Window decoration rendering configuration.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub struct DecorationConfig {
     /// Title bar height in pixels.
     pub title_bar_height: u32,
@@ -1866,7 +1863,6 @@ pub struct DecorationConfig {
     pub button_padding: u32,
 }
 
-#[allow(dead_code)]
 impl DecorationConfig {
     /// Default decoration configuration matching the existing desktop style.
     pub fn default_config() -> Self {
@@ -1892,7 +1888,6 @@ impl Default for DecorationConfig {
 
 /// Buttons that can appear in the title bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum DecorationButton {
     Close,
     Maximize,
@@ -1901,7 +1896,6 @@ pub enum DecorationButton {
 
 /// Result of hit-testing a point against window decorations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum DecorationHitTest {
     /// Point is not in any decoration area.
     None,
@@ -1919,7 +1913,6 @@ pub enum DecorationHitTest {
 
 /// Which border edge was hit for resize operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum BorderEdge {
     Top,
     Bottom,
@@ -1939,7 +1932,6 @@ pub enum BorderEdge {
 /// around all edges).
 ///
 /// Pixels are written as 0xAARRGGBB (ARGB8888).
-#[allow(dead_code)]
 pub fn render_window_decoration(
     buffer: &mut [u32],
     buf_w: u32,
@@ -2059,7 +2051,6 @@ pub fn render_window_decoration(
 
 /// Hit-test a point (relative to the window's top-left including decorations)
 /// against the decoration regions.
-#[allow(dead_code)]
 pub fn hit_test_decoration(
     x: i32,
     y: i32,
@@ -2136,7 +2127,6 @@ pub fn hit_test_decoration(
 ///
 /// Draws a small icon inside a square region starting at (`x`, `y`) with
 /// the given `size`. If `hovered`, the background is slightly highlighted.
-#[allow(dead_code)]
 pub fn render_decoration_button(
     buffer: &mut [u32],
     buf_w: u32,

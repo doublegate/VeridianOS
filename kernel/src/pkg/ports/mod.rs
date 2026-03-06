@@ -1063,3 +1063,328 @@ fn build_type_label(bt: BuildType) -> &'static str {
         BuildType::Custom => "custom",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[allow(unused_imports)]
+    use alloc::vec;
+
+    use super::*;
+
+    // ---- BuildType ----
+
+    #[test]
+    fn test_build_type_parse() {
+        assert_eq!(BuildType::parse("autotools"), Some(BuildType::Autotools));
+        assert_eq!(BuildType::parse("Autotools"), Some(BuildType::Autotools));
+        assert_eq!(BuildType::parse("cmake"), Some(BuildType::CMake));
+        assert_eq!(BuildType::parse("CMake"), Some(BuildType::CMake));
+        assert_eq!(BuildType::parse("CMAKE"), Some(BuildType::CMake));
+        assert_eq!(BuildType::parse("meson"), Some(BuildType::Meson));
+        assert_eq!(BuildType::parse("Meson"), Some(BuildType::Meson));
+        assert_eq!(BuildType::parse("cargo"), Some(BuildType::Cargo));
+        assert_eq!(BuildType::parse("Cargo"), Some(BuildType::Cargo));
+        assert_eq!(BuildType::parse("make"), Some(BuildType::Make));
+        assert_eq!(BuildType::parse("custom"), Some(BuildType::Custom));
+        assert_eq!(BuildType::parse("unknown"), None);
+    }
+
+    #[test]
+    fn test_build_type_configure_command() {
+        assert!(BuildType::Autotools
+            .configure_command()
+            .contains("./configure"));
+        assert!(BuildType::CMake.configure_command().contains("cmake"));
+        assert!(BuildType::Meson.configure_command().contains("meson"));
+        assert!(BuildType::Cargo.configure_command().contains("cargo build"));
+        assert!(BuildType::Make.configure_command().is_empty());
+        assert!(BuildType::Custom.configure_command().is_empty());
+    }
+
+    #[test]
+    fn test_build_type_build_command() {
+        assert!(BuildType::Autotools.build_command().contains("make"));
+        assert!(BuildType::CMake.build_command().contains("cmake --build"));
+        assert!(BuildType::Meson.build_command().contains("ninja"));
+        assert!(BuildType::Cargo.build_command().is_empty());
+        assert!(BuildType::Make.build_command().contains("make"));
+        assert!(BuildType::Custom.build_command().is_empty());
+    }
+
+    #[test]
+    fn test_build_type_install_command() {
+        assert!(BuildType::Autotools
+            .install_command()
+            .contains("make install"));
+        assert!(BuildType::CMake
+            .install_command()
+            .contains("cmake --install"));
+        assert!(BuildType::Meson.install_command().contains("ninja"));
+        assert!(BuildType::Cargo.install_command().contains("cargo install"));
+        assert!(BuildType::Custom.install_command().is_empty());
+    }
+
+    // ---- Port ----
+
+    #[test]
+    fn test_port_new() {
+        let port = Port::new(String::from("curl"), String::from("8.5.0"));
+        assert_eq!(port.name, "curl");
+        assert_eq!(port.version, "8.5.0");
+        assert!(port.description.is_empty());
+        assert!(port.homepage.is_empty());
+        assert!(port.sources.is_empty());
+        assert!(port.checksums.is_empty());
+        assert_eq!(port.build_type, BuildType::Make);
+        assert!(port.build_steps.is_empty());
+        assert!(port.dependencies.is_empty());
+        assert_eq!(port.category, "misc");
+        assert!(port.license.is_empty());
+    }
+
+    // ---- BuildEnvironment ----
+
+    #[test]
+    fn test_build_environment_new() {
+        let port = Port::new(String::from("curl"), String::from("8.5.0"));
+        let env = BuildEnvironment::new(&port);
+        assert!(env.build_root.contains("curl-8.5.0"));
+        assert!(env.source_dir.contains("/src"));
+        assert!(env.build_dir.contains("/build"));
+        assert!(env.pkg_dir.contains("/pkg"));
+        assert_eq!(env.build_timeout_ms, 300_000);
+        assert_eq!(env.get_env("PORT_NAME"), Some("curl"));
+        assert_eq!(env.get_env("PORT_VERSION"), Some("8.5.0"));
+    }
+
+    #[test]
+    fn test_build_environment_get_set_env() {
+        let port = Port::new(String::from("test"), String::from("1.0"));
+        let mut env = BuildEnvironment::new(&port);
+        assert!(env.get_env("MY_VAR").is_none());
+        env.set_env(String::from("MY_VAR"), String::from("my_val"));
+        assert_eq!(env.get_env("MY_VAR"), Some("my_val"));
+    }
+
+    // ---- PortManager ----
+
+    #[test]
+    fn test_port_manager_new() {
+        let pm = PortManager::new();
+        assert_eq!(pm.port_count(), 0);
+        assert!(pm.list_ports().is_empty());
+    }
+
+    #[test]
+    fn test_port_manager_register_and_get() {
+        let mut pm = PortManager::new();
+        let port = Port::new(String::from("curl"), String::from("8.5.0"));
+        pm.register_port(port);
+        assert_eq!(pm.port_count(), 1);
+        let p = pm.get_port("curl").unwrap();
+        assert_eq!(p.version, "8.5.0");
+    }
+
+    #[test]
+    fn test_port_manager_get_nonexistent() {
+        let pm = PortManager::new();
+        assert!(pm.get_port("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_port_manager_search() {
+        let mut pm = PortManager::new();
+        let mut p1 = Port::new(String::from("curl"), String::from("8.5.0"));
+        p1.description = String::from("URL transfer tool");
+        pm.register_port(p1);
+
+        let mut p2 = Port::new(String::from("wget"), String::from("1.0.0"));
+        p2.description = String::from("Network downloader");
+        pm.register_port(p2);
+
+        let results = pm.search("curl");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "curl");
+
+        // Search by description
+        let results = pm.search("downloader");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "wget");
+
+        // Case insensitive
+        let results = pm.search("CURL");
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_port_manager_resolve_build_deps_simple() {
+        let mut pm = PortManager::new();
+        let mut app = Port::new(String::from("app"), String::from("1.0.0"));
+        app.dependencies = vec![String::from("lib")];
+        pm.register_port(app.clone());
+        pm.register_port(Port::new(String::from("lib"), String::from("1.0.0")));
+
+        let deps = pm.resolve_build_deps(&app).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0], "lib");
+    }
+
+    #[test]
+    fn test_port_manager_resolve_build_deps_cycle() {
+        let mut pm = PortManager::new();
+        let mut a = Port::new(String::from("a"), String::from("1.0.0"));
+        a.dependencies = vec![String::from("b")];
+        let mut b = Port::new(String::from("b"), String::from("1.0.0"));
+        b.dependencies = vec![String::from("a")];
+        pm.register_port(a.clone());
+        pm.register_port(b);
+
+        let result = pm.resolve_build_deps(&a);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_port_manager_resolve_build_deps_missing() {
+        let mut pm = PortManager::new();
+        let mut app = Port::new(String::from("app"), String::from("1.0.0"));
+        app.dependencies = vec![String::from("missing-dep")];
+        pm.register_port(app.clone());
+
+        let result = pm.resolve_build_deps(&app);
+        assert!(result.is_err());
+    }
+
+    // ---- parse_portfile ----
+
+    #[test]
+    fn test_parse_portfile_minimal() {
+        let content = r#"
+[port]
+name = "curl"
+version = "8.5.0"
+"#;
+        let port = parse_portfile(content).unwrap();
+        assert_eq!(port.name, "curl");
+        assert_eq!(port.version, "8.5.0");
+        assert_eq!(port.build_type, BuildType::Make); // default
+        assert_eq!(port.category, "misc"); // default
+    }
+
+    #[test]
+    fn test_parse_portfile_full() {
+        let content = r#"
+[port]
+name = "curl"
+version = "8.5.0"
+description = "URL transfer tool"
+homepage = "https://curl.se"
+license = "MIT"
+category = "net"
+build_type = "autotools"
+
+[dependencies]
+build = ["openssl", "zlib"]
+"#;
+        let port = parse_portfile(content).unwrap();
+        assert_eq!(port.name, "curl");
+        assert_eq!(port.version, "8.5.0");
+        assert_eq!(port.description, "URL transfer tool");
+        assert_eq!(port.homepage, "https://curl.se");
+        assert_eq!(port.license, "MIT");
+        assert_eq!(port.category, "net");
+        assert_eq!(port.build_type, BuildType::Autotools);
+        assert_eq!(port.dependencies.len(), 2);
+        assert_eq!(port.dependencies[0], "openssl");
+        assert_eq!(port.dependencies[1], "zlib");
+    }
+
+    #[test]
+    fn test_parse_portfile_missing_port_section() {
+        let content = r#"
+[other]
+name = "test"
+"#;
+        assert!(parse_portfile(content).is_err());
+    }
+
+    #[test]
+    fn test_parse_portfile_missing_name() {
+        let content = r#"
+[port]
+version = "1.0.0"
+"#;
+        assert!(parse_portfile(content).is_err());
+    }
+
+    #[test]
+    fn test_parse_portfile_missing_version() {
+        let content = r#"
+[port]
+name = "test"
+"#;
+        assert!(parse_portfile(content).is_err());
+    }
+
+    // ---- hex_nibble ----
+
+    #[test]
+    fn test_hex_nibble() {
+        assert_eq!(hex_nibble(b'0'), 0);
+        assert_eq!(hex_nibble(b'9'), 9);
+        assert_eq!(hex_nibble(b'a'), 10);
+        assert_eq!(hex_nibble(b'f'), 15);
+        assert_eq!(hex_nibble(b'A'), 10);
+        assert_eq!(hex_nibble(b'F'), 15);
+        assert_eq!(hex_nibble(b'z'), 0); // invalid
+    }
+
+    // ---- parse_hex_checksum ----
+
+    #[test]
+    fn test_parse_hex_checksum() {
+        let hex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+        let result = parse_hex_checksum(hex);
+        assert_eq!(result[0], 0x01);
+        assert_eq!(result[15], 0x10);
+        assert_eq!(result[31], 0x20);
+    }
+
+    #[test]
+    fn test_parse_hex_checksum_short() {
+        let hex = "0102";
+        let result = parse_hex_checksum(hex);
+        assert_eq!(result[0], 0x01);
+        assert_eq!(result[1], 0x02);
+        assert_eq!(result[2], 0x00); // rest zeros
+    }
+
+    // ---- build_type_label ----
+
+    #[test]
+    fn test_build_type_label() {
+        assert_eq!(build_type_label(BuildType::Autotools), "autotools");
+        assert_eq!(build_type_label(BuildType::CMake), "cmake");
+        assert_eq!(build_type_label(BuildType::Meson), "meson");
+        assert_eq!(build_type_label(BuildType::Cargo), "cargo");
+        assert_eq!(build_type_label(BuildType::Make), "make");
+        assert_eq!(build_type_label(BuildType::Custom), "custom");
+    }
+
+    // ---- parse_port_version ----
+
+    #[test]
+    fn test_parse_port_version() {
+        let v = parse_port_version("8.5.0");
+        assert_eq!(v.major, 8);
+        assert_eq!(v.minor, 5);
+        assert_eq!(v.patch, 0);
+    }
+
+    #[test]
+    fn test_parse_port_version_partial() {
+        let v = parse_port_version("3.1");
+        assert_eq!(v.major, 3);
+        assert_eq!(v.minor, 1);
+        assert_eq!(v.patch, 0);
+    }
+}

@@ -17,6 +17,8 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use spin::Mutex;
 
+use super::PixelFormat;
+
 // ---------------------------------------------------------------------------
 // Fixed-point math utilities (16.16 format)
 // ---------------------------------------------------------------------------
@@ -1338,28 +1340,8 @@ pub enum ConnectorStatus {
     Unknown,
 }
 
-/// Pixel format for framebuffers
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PixelFormat {
-    Xrgb8888,
-    Argb8888,
-    Rgb565,
-    Xbgr8888,
-    Abgr8888,
-}
-
-impl PixelFormat {
-    /// Bytes per pixel
-    pub fn bpp(&self) -> u32 {
-        match self {
-            PixelFormat::Xrgb8888
-            | PixelFormat::Argb8888
-            | PixelFormat::Xbgr8888
-            | PixelFormat::Abgr8888 => 4,
-            PixelFormat::Rgb565 => 2,
-        }
-    }
-}
+// PixelFormat is imported from super::PixelFormat
+// (crate::graphics::PixelFormat)
 
 /// Display mode (resolution + timing)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

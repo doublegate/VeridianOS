@@ -3,6 +3,11 @@
 //! Supports reading files, directories, symlinks from ext4 formatted volumes.
 //! Handles both extent-based and legacy block-map inodes.
 //! Journal replay is not implemented (read-only mount).
+//!
+//! Struct fields and constants define the on-disk ext4 format per the kernel
+//! documentation. Unused fields/constants are retained for format completeness
+//! and future write support.
+#![allow(dead_code)]
 
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -31,13 +36,9 @@ const S_IFDIR: u16 = 0x4000;
 const S_IFLNK: u16 = 0xA000;
 
 /// Directory entry file types
-#[allow(dead_code)]
 const EXT4_FT_UNKNOWN: u8 = 0;
-#[allow(dead_code)]
 const EXT4_FT_REG_FILE: u8 = 1;
-#[allow(dead_code)]
 const EXT4_FT_DIR: u8 = 2;
-#[allow(dead_code)]
 const EXT4_FT_SYMLINK: u8 = 7;
 
 /// Root directory inode number
@@ -48,7 +49,6 @@ const EXT4_EXTENT_HEADER_SIZE: usize = 12;
 /// Size of an ext4 extent
 const EXT4_EXTENT_SIZE: usize = 12;
 /// Size of an ext4 extent index
-#[allow(dead_code)]
 const EXT4_EXTENT_IDX_SIZE: usize = 12;
 
 /// Magic number for extent tree headers
@@ -61,24 +61,17 @@ static EXT4_NEXT_INODE: AtomicU64 = AtomicU64::new(1);
 struct Ext4Superblock {
     inodes_count: u32,
     blocks_count_lo: u32,
-    #[allow(dead_code)]
     free_blocks_count_lo: u32,
-    #[allow(dead_code)]
     free_inodes_count: u32,
-    #[allow(dead_code)]
     first_data_block: u32,
     log_block_size: u32,
     blocks_per_group: u32,
     inodes_per_group: u32,
-    #[allow(dead_code)]
     magic: u16,
     inode_size: u16,
-    #[allow(dead_code)]
     feature_incompat: u32,
-    #[allow(dead_code)]
     feature_ro_compat: u32,
     desc_size: u16,
-    #[allow(dead_code)]
     blocks_count_hi: u32,
 }
 
@@ -166,13 +159,11 @@ struct Ext4Inode {
     mode: u16,
     size_lo: u32,
     size_hi: u32,
-    #[allow(dead_code)]
     atime: u32,
     mtime: u32,
     flags: u32,
     /// The 60-byte i_block area (direct/indirect blocks or extent tree)
     block_data: [u8; 60],
-    #[allow(dead_code)]
     links_count: u16,
 }
 
@@ -205,7 +196,6 @@ impl Ext4Inode {
         (self.mode & S_IFMT) == S_IFDIR
     }
 
-    #[allow(dead_code)]
     fn is_file(&self) -> bool {
         (self.mode & S_IFMT) == S_IFREG
     }
@@ -305,7 +295,6 @@ impl Extent {
 /// ext4 extent index (12 bytes) -- for internal tree nodes
 struct ExtentIdx {
     /// File block covered by subtree
-    #[allow(dead_code)]
     block: u32,
     /// Physical block of child node
     leaf_lo: u32,
@@ -824,7 +813,6 @@ impl VfsNode for Ext4Node {
 /// ext4 filesystem (read-only)
 pub struct Ext4Fs {
     root: Arc<Ext4Node>,
-    #[allow(dead_code)]
     state: Arc<RwLock<Ext4State>>,
 }
 

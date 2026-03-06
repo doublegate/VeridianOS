@@ -3,6 +3,11 @@
 //! Manages windows, input events, and coordinates desktop applications.
 //! Provides window placement heuristics, snap/tile support, and virtual
 //! workspaces.
+//!
+//! Public API methods define the complete window management interface.
+//! Some methods (e.g., tiling layouts, opacity control) are not yet wired
+//! into the desktop renderer but are retained as part of the WM API surface.
+#![allow(dead_code)]
 
 use alloc::{collections::BTreeMap, vec::Vec};
 
@@ -152,7 +157,6 @@ impl Workspace {
     }
 
     /// Get workspace name as string slice
-    #[allow(dead_code)]
     pub fn name_str(&self) -> &str {
         core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("")
     }
@@ -493,7 +497,6 @@ impl WindowManager {
     }
 
     /// Get all visible windows on the active workspace
-    #[allow(dead_code)]
     pub fn get_visible_windows(&self) -> Vec<Window> {
         let active = *self.active_workspace.read();
         self.windows
@@ -509,14 +512,12 @@ impl WindowManager {
     // -----------------------------------------------------------------------
 
     /// Set the screen dimensions (called when display is configured)
-    #[allow(dead_code)]
     pub fn set_screen_size(&self, width: u32, height: u32) {
         *self.screen_width.write() = width;
         *self.screen_height.write() = height;
     }
 
     /// Set the window placement heuristic
-    #[allow(dead_code)]
     pub fn set_placement_heuristic(&self, heuristic: PlacementHeuristic) {
         *self.placement_heuristic.write() = heuristic;
     }
@@ -526,7 +527,6 @@ impl WindowManager {
     ///
     /// The window must already be inserted into `self.windows` so its
     /// dimensions can be read. Returns `(x, y)` for the top-left corner.
-    #[allow(dead_code)]
     pub fn place_window(&self, window_id: WindowId) -> (i32, i32) {
         let (win_w, win_h) = {
             let windows = self.windows.read();
@@ -630,7 +630,6 @@ impl WindowManager {
     /// Snap a window to a screen zone (half, quarter, or maximize).
     ///
     /// Saves the window's current geometry so it can be restored later.
-    #[allow(dead_code)]
     pub fn snap_window(&self, window_id: WindowId, zone: SnapZone) {
         let scr_w = *self.screen_width.read();
         let scr_h = *self.screen_height.read();
@@ -725,7 +724,6 @@ impl WindowManager {
     ///
     /// Returns `SnapZone::None` if the position is not within the edge
     /// threshold (8 pixels).
-    #[allow(dead_code)]
     pub fn detect_snap_zone(x: i32, y: i32, screen_w: u32, screen_h: u32) -> SnapZone {
         const EDGE_THRESHOLD: i32 = 8;
         let sw = screen_w as i32;
@@ -750,7 +748,6 @@ impl WindowManager {
     }
 
     /// Tile all visible windows on the active workspace using the given layout.
-    #[allow(dead_code)]
     pub fn tile_windows(&self, layout: TileLayout) {
         let scr_w = *self.screen_width.read();
         let scr_h = *self.screen_height.read();
@@ -851,7 +848,6 @@ impl WindowManager {
     }
 
     /// Set window opacity (0 = transparent, 255 = opaque)
-    #[allow(dead_code)]
     pub fn set_window_opacity(&self, window_id: WindowId, opacity: u8) {
         if let Some(window) = self.windows.write().get_mut(&window_id) {
             window.opacity = opacity;
@@ -863,7 +859,6 @@ impl WindowManager {
     // -----------------------------------------------------------------------
 
     /// Switch to a different workspace.
-    #[allow(dead_code)]
     pub fn switch_workspace(&self, workspace_id: WorkspaceId) {
         if workspace_id as usize >= MAX_WORKSPACES {
             return;
@@ -895,7 +890,6 @@ impl WindowManager {
     }
 
     /// Move a window to a different workspace.
-    #[allow(dead_code)]
     pub fn move_window_to_workspace(&self, window_id: WindowId, workspace_id: WorkspaceId) {
         if workspace_id as usize >= MAX_WORKSPACES {
             return;
@@ -935,13 +929,11 @@ impl WindowManager {
     }
 
     /// Get the currently active workspace ID.
-    #[allow(dead_code)]
     pub fn get_active_workspace(&self) -> WorkspaceId {
         *self.active_workspace.read()
     }
 
     /// Get the list of window IDs on a given workspace.
-    #[allow(dead_code)]
     pub fn get_workspace_windows(&self, workspace_id: WorkspaceId) -> Vec<WindowId> {
         if workspace_id as usize >= MAX_WORKSPACES {
             return Vec::new();

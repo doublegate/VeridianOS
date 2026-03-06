@@ -389,20 +389,20 @@ pub fn set_tick(ms: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::video::PixelFormat;
+    use crate::graphics::PixelFormat;
 
     fn make_info(fps: u32) -> VideoInfo {
         VideoInfo {
             width: 4,
             height: 4,
-            format: PixelFormat::ARGB8888,
+            format: PixelFormat::Argb8888,
             frame_rate_num: fps,
             frame_rate_den: 1,
         }
     }
 
     fn make_frame(r: u8) -> VideoFrame {
-        let mut f = VideoFrame::new(4, 4, PixelFormat::ARGB8888);
+        let mut f = VideoFrame::new(4, 4, PixelFormat::Argb8888);
         f.set_pixel(0, 0, r, 0, 0, 255);
         f
     }

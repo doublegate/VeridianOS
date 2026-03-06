@@ -1236,3 +1236,686 @@ impl Default for VulnerabilityDatabase {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[allow(unused_imports)]
+    use alloc::vec;
+
+    use super::*;
+
+    // ---- HttpResponse ----
+
+    #[test]
+    fn test_http_response_new() {
+        let r = HttpResponse::new();
+        assert_eq!(r.status_code, 0);
+        assert!(r.headers.is_empty());
+        assert!(r.body.is_empty());
+    }
+
+    #[test]
+    fn test_http_response_is_success() {
+        let mut r = HttpResponse::new();
+        r.status_code = 200;
+        assert!(r.is_success());
+        r.status_code = 299;
+        assert!(r.is_success());
+        r.status_code = 300;
+        assert!(!r.is_success());
+        r.status_code = 199;
+        assert!(!r.is_success());
+        r.status_code = 404;
+        assert!(!r.is_success());
+    }
+
+    // ---- HttpClient URL building / parsing ----
+
+    #[test]
+    fn test_http_client_build_url_with_trailing_slash() {
+        let client = HttpClient::new(String::from("https://example.com/"));
+        let url = client.build_url("packages.json");
+        assert_eq!(url, "https://example.com/packages.json");
+    }
+
+    #[test]
+    fn test_http_client_build_url_without_trailing_slash() {
+        let client = HttpClient::new(String::from("https://example.com"));
+        let url = client.build_url("packages.json");
+        assert_eq!(url, "https://example.com/packages.json");
+    }
+
+    #[test]
+    fn test_http_client_build_url_path_with_leading_slash() {
+        let client = HttpClient::new(String::from("https://example.com"));
+        let url = client.build_url("/packages.json");
+        assert_eq!(url, "https://example.com/packages.json");
+    }
+
+    #[test]
+    fn test_http_client_parse_url_https() {
+        let client = HttpClient::new(String::from("https://example.com"));
+        let (host, port, path) = client.parse_url("https://example.com/path").unwrap();
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 443);
+        assert_eq!(path, "/path");
+    }
+
+    #[test]
+    fn test_http_client_parse_url_http() {
+        let client = HttpClient::new(String::from("http://example.com"));
+        let (host, port, path) = client.parse_url("http://example.com/path").unwrap();
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 443); // Defaults to 443
+        assert_eq!(path, "/path");
+    }
+
+    #[test]
+    fn test_http_client_parse_url_with_port() {
+        let client = HttpClient::new(String::from(""));
+        let (host, port, path) = client.parse_url("https://example.com:8080/api").unwrap();
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 8080);
+        assert_eq!(path, "/api");
+    }
+
+    #[test]
+    fn test_http_client_parse_url_no_path() {
+        let client = HttpClient::new(String::from(""));
+        let (host, port, path) = client.parse_url("https://example.com").unwrap();
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 443);
+        assert_eq!(path, "/");
+    }
+
+    #[test]
+    fn test_http_client_build_request_get() {
+        let client = HttpClient::new(String::from(""));
+        let req = client.build_request(HttpMethod::Get, "example.com", "/index.html");
+        let req_str = core::str::from_utf8(&req).unwrap();
+        assert!(req_str.starts_with("GET /index.html HTTP/1.1\r\n"));
+        assert!(req_str.contains("Host: example.com"));
+    }
+
+    #[test]
+    fn test_http_client_build_request_head() {
+        let client = HttpClient::new(String::from(""));
+        let req = client.build_request(HttpMethod::Head, "example.com", "/");
+        let req_str = core::str::from_utf8(&req).unwrap();
+        assert!(req_str.starts_with("HEAD / HTTP/1.1\r\n"));
+    }
+
+    #[test]
+    fn test_http_client_resolve_hostname_ip() {
+        let client = HttpClient::new(String::from(""));
+        let ip = client.resolve_hostname("192.168.1.10").unwrap();
+        assert_eq!(ip, [192, 168, 1, 10]);
+    }
+
+    #[test]
+    fn test_http_client_resolve_hostname_fallback() {
+        let client = HttpClient::new(String::from(""));
+        let ip = client.resolve_hostname("example.com").unwrap();
+        assert_eq!(ip, [127, 0, 0, 1]);
+    }
+
+    #[test]
+    fn test_http_client_find_header_end() {
+        let client = HttpClient::new(String::from(""));
+        let data = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\nbody";
+        let pos = client.find_header_end(data);
+        assert!(pos.is_some());
+        // Verify that the data at pos..pos+4 is \r\n\r\n
+        let p = pos.unwrap();
+        assert_eq!(&data[p..p + 4], b"\r\n\r\n");
+    }
+
+    #[test]
+    fn test_http_client_find_header_end_missing() {
+        let client = HttpClient::new(String::from(""));
+        let data = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n";
+        assert!(client.find_header_end(data).is_none());
+    }
+
+    #[test]
+    fn test_http_client_parse_response() {
+        let client = HttpClient::new(String::from(""));
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello world";
+        let response = client.parse_response(raw).unwrap();
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.headers.len(), 1);
+        assert_eq!(response.headers[0].0, "Content-Type");
+        assert_eq!(response.headers[0].1, "text/plain");
+        assert_eq!(response.body, b"hello world");
+    }
+
+    // ---- Repository ----
+
+    #[test]
+    fn test_repository_new() {
+        let repo = Repository::new(String::from("test"), String::from("https://test.org"), true);
+        assert_eq!(repo.name, "test");
+        assert_eq!(repo.url, "https://test.org");
+        assert!(repo.trusted);
+        assert!(repo.package_cache.is_empty());
+        assert_eq!(repo.last_updated, 0);
+    }
+
+    #[test]
+    fn test_repository_default() {
+        let repo = Repository::default();
+        assert_eq!(repo.name, "default");
+        assert!(repo.trusted);
+    }
+
+    #[test]
+    fn test_repository_has_package_empty() {
+        let repo = Repository::default();
+        assert!(!repo.has_package(&String::from("nonexistent")));
+    }
+
+    #[test]
+    fn test_repository_get_package_none() {
+        let repo = Repository::default();
+        assert!(repo.get_package(&String::from("nonexistent")).is_none());
+    }
+
+    #[test]
+    fn test_repository_invalidate_cache() {
+        let mut repo = Repository::default();
+        repo.last_updated = 1000;
+        repo.invalidate_cache();
+        assert!(repo.package_cache.is_empty());
+        assert_eq!(repo.last_updated, 0);
+    }
+
+    #[test]
+    fn test_repository_is_cache_stale() {
+        let repo = Repository::default();
+        // last_updated = 0, current_time = 3601 -> stale
+        assert!(repo.is_cache_stale(3601));
+        // current_time = 3600 -> not stale (exactly 1 hour)
+        assert!(!repo.is_cache_stale(3600));
+        // current_time = 100 -> not stale
+        assert!(!repo.is_cache_stale(100));
+    }
+
+    // ---- Repository JSON parsing ----
+
+    #[test]
+    fn test_repository_extract_json_string() {
+        let repo = Repository::default();
+        let json = r#"{"name":"curl","version":"8.5.0"}"#;
+        assert_eq!(
+            repo.extract_json_string(json, "name"),
+            Some(String::from("curl"))
+        );
+        assert_eq!(
+            repo.extract_json_string(json, "version"),
+            Some(String::from("8.5.0"))
+        );
+        assert_eq!(repo.extract_json_string(json, "missing"), None);
+    }
+
+    #[test]
+    fn test_repository_parse_version() {
+        let repo = Repository::default();
+        let v = repo.parse_version("1.2.3").unwrap();
+        assert_eq!(v, Version::new(1, 2, 3));
+    }
+
+    #[test]
+    fn test_repository_parse_version_too_short() {
+        let repo = Repository::default();
+        assert!(repo.parse_version("1.2").is_none());
+    }
+
+    #[test]
+    fn test_repository_parse_version_invalid() {
+        let repo = Repository::default();
+        assert!(repo.parse_version("abc").is_none());
+    }
+
+    #[test]
+    fn test_repository_extract_conflicts() {
+        let repo = Repository::default();
+        let json = r#"{"conflicts":["pkg-b","pkg-c"]}"#;
+        let conflicts = repo.extract_conflicts(json);
+        assert_eq!(conflicts.len(), 2);
+        assert_eq!(conflicts[0], "pkg-b");
+        assert_eq!(conflicts[1], "pkg-c");
+    }
+
+    #[test]
+    fn test_repository_extract_conflicts_empty() {
+        let repo = Repository::default();
+        let json = r#"{"name":"test"}"#;
+        let conflicts = repo.extract_conflicts(json);
+        assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn test_repository_extract_dependencies() {
+        let repo = Repository::default();
+        let json = r#"{"dependencies":[{"name":"openssl","version":"1.0.0"}]}"#;
+        let deps = repo.extract_dependencies(json);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "openssl");
+        assert_eq!(deps[0].version_req, "1.0.0");
+    }
+
+    #[test]
+    fn test_repository_parse_package_index_empty_array() {
+        let repo = Repository::default();
+        let data = b"[]";
+        let pkgs = repo.parse_package_index(data);
+        assert!(pkgs.is_empty());
+    }
+
+    #[test]
+    fn test_repository_parse_package_index_not_array() {
+        let repo = Repository::default();
+        let data = b"{}";
+        let pkgs = repo.parse_package_index(data);
+        assert!(pkgs.is_empty());
+    }
+
+    #[test]
+    fn test_repository_parse_package_index_invalid_utf8() {
+        let repo = Repository::default();
+        let data: &[u8] = &[0xFF, 0xFE];
+        let pkgs = repo.parse_package_index(data);
+        assert!(pkgs.is_empty());
+    }
+
+    // ---- RepositoryIndex ----
+
+    #[test]
+    fn test_repository_index_generate() {
+        let pkgs = vec![PackageMetadata {
+            name: String::from("test-pkg"),
+            version: Version::new(1, 0, 0),
+            author: String::from("author"),
+            description: String::from("desc"),
+            license: String::from("MIT"),
+            dependencies: vec![],
+            conflicts: vec![],
+        }];
+        let index = RepositoryIndex::generate(&pkgs);
+        assert_eq!(index.entries.len(), 1);
+        assert_eq!(index.entries[0].name, "test-pkg");
+        assert_eq!(index.entries[0].version, "1.0.0");
+        assert_eq!(index.entries[0].description, "desc");
+        assert_eq!(index.entries[0].license, "MIT");
+    }
+
+    #[test]
+    fn test_repository_index_to_bytes() {
+        let pkgs = vec![PackageMetadata {
+            name: String::from("a"),
+            version: Version::new(0, 1, 0),
+            author: String::new(),
+            description: String::from("d"),
+            license: String::from("MIT"),
+            dependencies: vec![],
+            conflicts: vec![],
+        }];
+        let index = RepositoryIndex::generate(&pkgs);
+        let bytes = index.to_bytes();
+        let s = core::str::from_utf8(&bytes).unwrap();
+        assert!(s.contains("\"name\":\"a\""));
+        assert!(s.contains("\"version\":\"0.1.0\""));
+        assert!(s.contains("\"license\":\"MIT\""));
+    }
+
+    #[test]
+    fn test_repository_index_verify_signature_empty() {
+        let index = RepositoryIndex::generate(&[]);
+        // Empty signature -> false
+        assert!(!index.verify_signature(&[1, 2, 3]));
+        // Empty public key -> false
+        let mut index2 = RepositoryIndex::generate(&[]);
+        index2.signature = vec![1, 2, 3];
+        assert!(!index2.verify_signature(&[]));
+    }
+
+    // ---- MirrorManager ----
+
+    #[test]
+    fn test_mirror_manager_new() {
+        let mm = MirrorManager::new();
+        assert_eq!(mm.mirror_count(), 0);
+        assert!(mm.list_mirrors().is_empty());
+    }
+
+    #[test]
+    fn test_mirror_manager_add_and_sort() {
+        let mut mm = MirrorManager::new();
+        mm.add_mirror(MirrorMetadata {
+            url: String::from("https://mirror2.com"),
+            priority: 20,
+            region: String::from("us"),
+            last_sync: 0,
+            status: MirrorStatus::Unknown,
+        });
+        mm.add_mirror(MirrorMetadata {
+            url: String::from("https://mirror1.com"),
+            priority: 10,
+            region: String::from("eu"),
+            last_sync: 0,
+            status: MirrorStatus::Unknown,
+        });
+        assert_eq!(mm.mirror_count(), 2);
+        // Should be sorted by priority (lower first)
+        assert_eq!(mm.list_mirrors()[0].url, "https://mirror1.com");
+        assert_eq!(mm.list_mirrors()[1].url, "https://mirror2.com");
+    }
+
+    #[test]
+    fn test_mirror_manager_remove() {
+        let mut mm = MirrorManager::new();
+        mm.add_mirror(MirrorMetadata {
+            url: String::from("https://mirror1.com"),
+            priority: 10,
+            region: String::new(),
+            last_sync: 0,
+            status: MirrorStatus::Online,
+        });
+        assert!(mm.remove_mirror("https://mirror1.com"));
+        assert!(!mm.remove_mirror("https://nonexistent.com"));
+        assert_eq!(mm.mirror_count(), 0);
+    }
+
+    #[test]
+    fn test_mirror_manager_select_best() {
+        let mut mm = MirrorManager::new();
+        mm.add_mirror(MirrorMetadata {
+            url: String::from("https://mirror1.com"),
+            priority: 10,
+            region: String::new(),
+            last_sync: 0,
+            status: MirrorStatus::Offline,
+        });
+        mm.add_mirror(MirrorMetadata {
+            url: String::from("https://mirror2.com"),
+            priority: 20,
+            region: String::new(),
+            last_sync: 0,
+            status: MirrorStatus::Online,
+        });
+        // Should skip offline mirror1 and return online mirror2
+        let best = mm.select_best_mirror().unwrap();
+        assert_eq!(best.url, "https://mirror2.com");
+    }
+
+    #[test]
+    fn test_mirror_manager_select_best_all_offline() {
+        let mut mm = MirrorManager::new();
+        mm.add_mirror(MirrorMetadata {
+            url: String::from("https://mirror1.com"),
+            priority: 10,
+            region: String::new(),
+            last_sync: 0,
+            status: MirrorStatus::Offline,
+        });
+        // Falls back to first mirror when all offline
+        let best = mm.select_best_mirror().unwrap();
+        assert_eq!(best.url, "https://mirror1.com");
+    }
+
+    #[test]
+    fn test_mirror_manager_select_best_empty() {
+        let mm = MirrorManager::new();
+        assert!(mm.select_best_mirror().is_none());
+    }
+
+    #[test]
+    fn test_mirror_manager_mark_offline() {
+        let mut mm = MirrorManager::new();
+        mm.add_mirror(MirrorMetadata {
+            url: String::from("https://mirror1.com"),
+            priority: 10,
+            region: String::new(),
+            last_sync: 0,
+            status: MirrorStatus::Online,
+        });
+        mm.mark_offline("https://mirror1.com");
+        assert_eq!(mm.list_mirrors()[0].status, MirrorStatus::Offline);
+    }
+
+    // ---- RepositoryConfig ----
+
+    #[test]
+    fn test_repo_config_new() {
+        let cfg = RepositoryConfig::new();
+        assert!(cfg.all_repositories().is_empty());
+        assert!(cfg.enabled_repositories().is_empty());
+    }
+
+    #[test]
+    fn test_repo_config_add_and_sort() {
+        let mut cfg = RepositoryConfig::new();
+        cfg.add_repository(RepositoryEntry {
+            name: String::from("b"),
+            url: String::from("https://b.org"),
+            enabled: true,
+            trusted: true,
+            priority: 20,
+            mirrors: vec![],
+        });
+        cfg.add_repository(RepositoryEntry {
+            name: String::from("a"),
+            url: String::from("https://a.org"),
+            enabled: true,
+            trusted: false,
+            priority: 10,
+            mirrors: vec![],
+        });
+        assert_eq!(cfg.all_repositories().len(), 2);
+        assert_eq!(cfg.all_repositories()[0].name, "a");
+    }
+
+    #[test]
+    fn test_repo_config_remove() {
+        let mut cfg = RepositoryConfig::new();
+        cfg.add_repository(RepositoryEntry {
+            name: String::from("test"),
+            url: String::from("https://test.org"),
+            enabled: true,
+            trusted: true,
+            priority: 10,
+            mirrors: vec![],
+        });
+        assert!(cfg.remove_repository("test"));
+        assert!(!cfg.remove_repository("test"));
+        assert!(cfg.all_repositories().is_empty());
+    }
+
+    #[test]
+    fn test_repo_config_enable_disable() {
+        let mut cfg = RepositoryConfig::new();
+        cfg.add_repository(RepositoryEntry {
+            name: String::from("test"),
+            url: String::from("https://test.org"),
+            enabled: false,
+            trusted: true,
+            priority: 10,
+            mirrors: vec![],
+        });
+        assert!(cfg.enabled_repositories().is_empty());
+        assert!(cfg.enable_repository("test"));
+        assert_eq!(cfg.enabled_repositories().len(), 1);
+        assert!(cfg.disable_repository("test"));
+        assert!(cfg.enabled_repositories().is_empty());
+        assert!(!cfg.enable_repository("nonexistent"));
+        assert!(!cfg.disable_repository("nonexistent"));
+    }
+
+    #[test]
+    fn test_repo_config_get_repository() {
+        let mut cfg = RepositoryConfig::new();
+        cfg.add_repository(RepositoryEntry {
+            name: String::from("test"),
+            url: String::from("https://test.org"),
+            enabled: true,
+            trusted: true,
+            priority: 10,
+            mirrors: vec![],
+        });
+        assert!(cfg.get_repository("test").is_some());
+        assert!(cfg.get_repository("other").is_none());
+    }
+
+    // ---- AccessControl ----
+
+    #[test]
+    fn test_access_control_new() {
+        let ac = AccessControl::new(UploadPolicy::Open);
+        assert_eq!(ac.upload_policy, UploadPolicy::Open);
+    }
+
+    #[test]
+    fn test_access_control_add_remove_uploader() {
+        let mut ac = AccessControl::new(UploadPolicy::Restricted);
+        let fp = [0u8; 32];
+        ac.add_uploader(fp);
+        // Adding duplicate should not create duplicates
+        ac.add_uploader(fp);
+        assert!(ac.remove_uploader(&fp));
+        assert!(!ac.remove_uploader(&fp));
+    }
+
+    #[test]
+    fn test_access_control_default() {
+        let ac = AccessControl::default();
+        assert_eq!(ac.upload_policy, UploadPolicy::Restricted);
+    }
+
+    // ---- SecurityScanner ----
+
+    #[test]
+    fn test_security_scanner_default_patterns() {
+        let scanner = SecurityScanner::new();
+        // Should have default patterns loaded
+        assert!(!scanner.patterns.is_empty());
+    }
+
+    #[test]
+    fn test_security_scanner_scan_paths_match() {
+        let scanner = SecurityScanner::new();
+        let paths = &["/etc/shadow"];
+        let findings = scanner.scan_package_paths(paths);
+        assert!(!findings.is_empty());
+        assert_eq!(findings[0].severity, Severity::High);
+    }
+
+    #[test]
+    fn test_security_scanner_scan_paths_no_match() {
+        let scanner = SecurityScanner::new();
+        let paths = &["/usr/bin/hello"];
+        let findings = scanner.scan_package_paths(paths);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_security_scanner_scan_capabilities() {
+        let scanner = SecurityScanner::new();
+        let caps = &["CAP_SYS_ADMIN"];
+        let findings = scanner.scan_capabilities(caps);
+        assert!(!findings.is_empty());
+        assert_eq!(findings[0].severity, Severity::Medium);
+    }
+
+    #[test]
+    fn test_security_scanner_scan_capabilities_no_match() {
+        let scanner = SecurityScanner::new();
+        let caps = &["CAP_READ"];
+        let findings = scanner.scan_capabilities(caps);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_security_scanner_add_pattern() {
+        let mut scanner = SecurityScanner::new();
+        let initial_count = scanner.patterns.len();
+        scanner.add_pattern(MalwarePattern {
+            pattern_type: PatternType::KnownBadHash,
+            description: String::from("bad hash"),
+            severity: Severity::Critical,
+            pattern: String::from("deadbeef"),
+        });
+        assert_eq!(scanner.patterns.len(), initial_count + 1);
+    }
+
+    // ---- Severity ordering ----
+
+    #[test]
+    fn test_severity_ordering() {
+        assert!(Severity::Low < Severity::Medium);
+        assert!(Severity::Medium < Severity::High);
+        assert!(Severity::High < Severity::Critical);
+    }
+
+    // ---- VulnerabilityDatabase ----
+
+    #[test]
+    fn test_vuln_db_new() {
+        let db = VulnerabilityDatabase::new();
+        assert_eq!(db.advisory_count(), 0);
+        assert_eq!(db.critical_count(), 0);
+    }
+
+    #[test]
+    fn test_vuln_db_add_and_check() {
+        let mut db = VulnerabilityDatabase::new();
+        db.add_advisory(VulnerabilityAdvisory {
+            id: String::from("CVE-2024-0001"),
+            affected_packages: vec![(String::from("openssl"), String::from("1.0.0"))],
+            severity: Severity::Critical,
+            description: String::from("buffer overflow"),
+            fixed_version: Some(String::from("1.0.1")),
+        });
+        assert_eq!(db.advisory_count(), 1);
+        assert_eq!(db.critical_count(), 1);
+
+        let results = db.check_package("openssl", "1.0.0");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "CVE-2024-0001");
+
+        let results = db.check_package("openssl", "1.0.1");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_vuln_db_wildcard() {
+        let mut db = VulnerabilityDatabase::new();
+        db.add_advisory(VulnerabilityAdvisory {
+            id: String::from("CVE-2024-0002"),
+            affected_packages: vec![(String::from("curl"), String::from("*"))],
+            severity: Severity::High,
+            description: String::from("all versions"),
+            fixed_version: None,
+        });
+        let results = db.check_package("curl", "999.0.0");
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_vuln_db_check_installed() {
+        let mut db = VulnerabilityDatabase::new();
+        db.add_advisory(VulnerabilityAdvisory {
+            id: String::from("CVE-2024-0003"),
+            affected_packages: vec![(String::from("pkg-a"), String::from("1.0.0"))],
+            severity: Severity::Medium,
+            description: String::from("test"),
+            fixed_version: None,
+        });
+        let installed = vec![
+            (String::from("pkg-a"), String::from("1.0.0")),
+            (String::from("pkg-b"), String::from("2.0.0")),
+        ];
+        let results = db.check_installed(&installed);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "pkg-a");
+    }
+}

@@ -2,6 +2,65 @@
 
 ---
 
+## [v0.16.1] - 2026-03-05
+
+### v0.16.1: Tech Debt Remediation
+
+Comprehensive tech debt remediation addressing structural debt from rapid Phase 7.5 feature expansion. No new features; all changes improve code quality, safety, and maintainability.
+
+**49 files changed, ~2,364 insertions, ~19,663 deletions (net -17,299 lines)**
+
+#### Phase 1: Safe Global State Conversion (11 `static mut` eliminated)
+
+- **`drivers/mouse.rs`**: `MOUSE_BUFFER`, `PACKET_BUF`, `PACKET_IDX` converted to `spin::Mutex<T>` with `PacketState` struct
+- **`drivers/keyboard.rs`**: `KEY_BUFFER` converted to `spin::Mutex<KeyBuffer>`
+- **`drivers/input_event.rs`**: `EVENT_BUFFER` to `spin::Mutex<EventBuffer>`, `PREV_BUTTONS` to `AtomicU8`
+- **`sched/process_compat.rs`**: `CURRENT_PROCESS`, `DUMMY_PROCESS` to `SyncCell(UnsafeCell<T>)` pattern
+- **`perf/pmu.rs`**: `NUM_COUNTERS` to `AtomicU8`
+- **`perf/trace.rs`**: `TRACE_RINGS` to `PerCpuTraceRings([UnsafeCell<TraceRing>; N])` with `unsafe impl Sync`
+
+#### Phase 2: Type Consolidation
+
+- **PixelFormat**: Consolidated from 4 definitions to 1 canonical enum in `graphics/mod.rs`; 6 consumer modules updated with `pub use` re-exports
+- **MemoryRegion**: Duplicate in `ipc/shared_memory.rs` replaced with `pub use super::message::MemoryRegion`
+
+#### Phase 3: Oversized File Splitting (5 files)
+
+| Original File | Lines | Split Into |
+|--------------|-------|------------|
+| `services/shell/commands.rs` | 4,356 | `commands/{mod,filesystem,hardware,network,security,system,crypto,desktop,package}.rs` |
+| `syscall/userland_ext.rs` | 4,630 | `userland_ext/{mod,io_uring,ptrace,coredump,privilege,cron,helpers}.rs` |
+| `desktop/desktop_ext.rs` | 3,491 | `desktop_ext/{mod,clipboard,dnd,shortcuts,theme,font_render,cjk}.rs` |
+| `net/tls.rs` | 3,364 | `tls/{mod,handshake,record,cipher,certificate}.rs` |
+| `audio/codecs.rs` | 3,319 | `codecs/{mod,vorbis,mp3}.rs` |
+
+#### Phase 4: Production `unwrap()` Reduction
+
+- `ipc/shared_memory.rs`: `.unwrap()` replaced with `.ok_or(KernelError::NotFound {...})?`
+- `mm/vas.rs`: `.unwrap()` replaced with `.ok_or(KernelError::NotFound {...})?`
+- `net/quic.rs`: `.unwrap()` replaced with `.expect("stream was just inserted")`
+
+#### Phase 5: `pkg/` Module Test Coverage
+
+- 125 new unit tests across 5 files: `repository.rs` (60+ tests), `ports/mod.rs` (25+ tests), `compliance.rs` (20+ tests), `reproducible.rs` (20+ tests), `mod.rs` (misc)
+
+#### Phase 6: Dead Code Audit
+
+- `#[allow(dead_code)]` reduced from 321 to 193 annotations (40% reduction)
+- Focus on `desktop/wayland/shell.rs`, `fs/ext4.rs`, `arch/x86_64/apic.rs`, `desktop/window_manager.rs`, `fs/fat32.rs`
+
+#### Build Verification
+
+| Target | Build | Clippy | Status |
+|--------|-------|--------|--------|
+| x86_64-unknown-none | Pass | 0 warnings | OK |
+| aarch64-unknown-none | Pass | 0 warnings | OK |
+| riscv64gc-unknown-none-elf | Pass | 0 warnings | OK |
+| x86_64-unknown-linux-gnu (host) | Pass | 0 warnings | OK |
+| Host-target tests | 2,356 passing | -- | OK |
+
+---
+
 ## [v0.16.0] - 2026-03-05
 
 ### v0.16.0: Phase 7.5 Wave 8 -- Desktop & Shell/Userland (PHASE 7.5 COMPLETE)

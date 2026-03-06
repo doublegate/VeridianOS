@@ -128,7 +128,7 @@ mod x86_64_impl {
     unsafe impl Send for KeyBuffer {}
     unsafe impl Sync for KeyBuffer {}
 
-    static mut KEY_BUFFER: KeyBuffer = KeyBuffer::new();
+    static KEY_BUFFER: Mutex<KeyBuffer> = Mutex::new(KeyBuffer::new());
 
     static KEYBOARD: Mutex<Option<Keyboard<layouts::Us104Key, ScancodeSet1>>> = Mutex::new(None);
 
@@ -170,12 +170,7 @@ mod x86_64_impl {
                     match key {
                         DecodedKey::Unicode(ch) => {
                             if ch.is_ascii() {
-                                // SAFETY: handle_scancode is the sole producer
-                                // (called from IRQ1 with interrupts disabled).
-                                #[allow(static_mut_refs)]
-                                unsafe {
-                                    KEY_BUFFER.push(ch as u8);
-                                }
+                                KEY_BUFFER.lock().push(ch as u8);
                             }
                         }
                         DecodedKey::RawKey(key) => {
@@ -193,11 +188,7 @@ mod x86_64_impl {
                                     _ => None,
                                 };
                                 if let Some(byte) = gui_byte {
-                                    #[allow(static_mut_refs)]
-                                    // SAFETY: sole producer (IRQ1, interrupts disabled).
-                                    unsafe {
-                                        KEY_BUFFER.push(byte);
-                                    }
+                                    KEY_BUFFER.lock().push(byte);
                                 }
                             } else {
                                 // Shell mode: emit ANSI escape sequences as before.
@@ -211,13 +202,9 @@ mod x86_64_impl {
                                     KeyCode::Delete => b"\x1b[3~",
                                     _ => b"",
                                 };
-                                // SAFETY: handle_scancode is the sole producer
-                                // (called from IRQ1 with interrupts disabled).
-                                #[allow(static_mut_refs)]
-                                unsafe {
-                                    for &byte in seq {
-                                        KEY_BUFFER.push(byte);
-                                    }
+                                let mut buf = KEY_BUFFER.lock();
+                                for &byte in seq {
+                                    buf.push(byte);
                                 }
                             }
                         }
@@ -238,11 +225,7 @@ mod x86_64_impl {
 
     /// Read a decoded key byte from the keyboard buffer (non-blocking).
     pub fn read_key() -> Option<u8> {
-        // SAFETY: read_key is the sole consumer, called from the shell loop.
-        #[allow(static_mut_refs)]
-        unsafe {
-            KEY_BUFFER.pop()
-        }
+        KEY_BUFFER.lock().pop()
     }
 }
 

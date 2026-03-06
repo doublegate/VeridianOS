@@ -17,6 +17,9 @@
 //! - **Buffer**: Pixel data attached to surface
 //! - **Compositor**: Window manager
 //! - **Shell**: Desktop interface (xdg-shell)
+//!
+//! Protocol types and dispatch infrastructure retained for completeness.
+#![allow(dead_code)]
 
 pub mod buffer;
 pub mod compositor;
@@ -33,10 +36,10 @@ use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use spin::RwLock;
 
 use self::{
-    buffer::{Buffer, PixelFormat, WlShmPool},
+    buffer::{Buffer, WlShmPool},
     protocol::{parse_message, WaylandError, WaylandMessage},
 };
-use crate::{error::KernelError, sync::once_lock::GlobalState};
+use crate::{error::KernelError, graphics::PixelFormat, sync::once_lock::GlobalState};
 
 /// Wayland object ID
 pub type ObjectId = u32;
@@ -142,7 +145,6 @@ impl Default for WaylandDisplay {
 
 /// Global object announcement
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Phase 6: global announcement to new clients
 struct GlobalObject {
     interface: String,
     version: u32,
@@ -819,13 +821,11 @@ impl WaylandClient {
     }
 
     /// Queue events for later retrieval.
-    #[allow(dead_code)] // Phase 6: async event delivery
     pub fn queue_events(&self, events: &[u8]) {
         self.event_queue.write().extend_from_slice(events);
     }
 
     /// Drain queued events.
-    #[allow(dead_code)] // Phase 6: async event delivery
     pub fn drain_events(&self) -> Vec<u8> {
         let mut queue = self.event_queue.write();
         let events = queue.clone();
@@ -873,7 +873,6 @@ fn extract_string_from_raw_args(args: &[protocol::Argument]) -> Vec<u8> {
 
 /// Wayland object
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Phase 6: object interface introspection
 struct Object {
     id: ObjectId,
     interface: String,

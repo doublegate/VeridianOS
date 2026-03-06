@@ -5,7 +5,10 @@
 //! `TRACING_ENABLED`). When enabled, events are written to a fixed-size ring
 //! buffer per CPU, requiring no heap allocation.
 
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 /// Global tracing enable flag -- zero overhead when false (single atomic load).
 pub static TRACING_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -113,11 +116,19 @@ impl TraceRing {
 /// Maximum CPUs for trace ring allocation
 const MAX_TRACE_CPUS: usize = 16;
 
-/// Per-CPU trace rings.
+/// Per-CPU trace rings with interior mutability.
 ///
-/// SAFETY: Each CPU writes only to its own ring via `current_cpu_id()`.
+/// Each CPU writes only to its own ring via `current_cpu_id()`.
 /// Reading is done with tracing disabled or from the shell (single-threaded).
-static mut TRACE_RINGS: [TraceRing; MAX_TRACE_CPUS] = [const { TraceRing::new() }; MAX_TRACE_CPUS];
+struct PerCpuTraceRings([UnsafeCell<TraceRing>; MAX_TRACE_CPUS]);
+
+// SAFETY: Per-CPU access pattern ensures no data races -- each CPU only
+// writes to its own ring (indexed by cpu_id). Reading is done with tracing
+// disabled, preventing concurrent writes.
+unsafe impl Sync for PerCpuTraceRings {}
+
+static TRACE_RINGS: PerCpuTraceRings =
+    PerCpuTraceRings([const { UnsafeCell::new(TraceRing::new()) }; MAX_TRACE_CPUS]);
 
 /// Record a trace event (inline, minimal overhead).
 ///
@@ -141,7 +152,7 @@ pub fn trace_event(event_type: TraceEventType, data0: u64, data1: u64) {
     // SAFETY: Each CPU writes only to its own ring. The cpu index is
     // bounded by MAX_TRACE_CPUS via the min() call.
     unsafe {
-        TRACE_RINGS[cpu.min(MAX_TRACE_CPUS - 1)].record(event);
+        (*TRACE_RINGS.0[cpu.min(MAX_TRACE_CPUS - 1)].get()).record(event);
     }
 }
 
@@ -181,7 +192,7 @@ pub fn dump_trace(count: usize) {
     for cpu in 0..MAX_TRACE_CPUS {
         // SAFETY: We disabled tracing, so no concurrent writes.
         // We only read from the ring buffer.
-        let ring = unsafe { &TRACE_RINGS[cpu] };
+        let ring = unsafe { &*TRACE_RINGS.0[cpu].get() };
         let total = ring.total_events();
         if total == 0 {
             continue;
@@ -204,7 +215,7 @@ pub fn dump_trace(count: usize) {
     }
 
     let total: usize = (0..MAX_TRACE_CPUS)
-        .map(|cpu| unsafe { TRACE_RINGS[cpu].total_events() })
+        .map(|cpu| unsafe { (*TRACE_RINGS.0[cpu].get()).total_events() })
         .sum();
     crate::println!("=== Total events recorded: {} ===", total);
 
@@ -216,7 +227,7 @@ pub fn dump_trace(count: usize) {
 /// Get total events across all CPUs
 pub fn total_events() -> usize {
     (0..MAX_TRACE_CPUS)
-        .map(|cpu| unsafe { TRACE_RINGS[cpu].total_events() })
+        .map(|cpu| unsafe { (*TRACE_RINGS.0[cpu].get()).total_events() })
         .sum()
 }
 

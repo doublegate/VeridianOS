@@ -28,11 +28,13 @@ pub mod virtio_gpu;
 pub mod virtio_net;
 
 pub use console::{ConsoleDevice, ConsoleDriver, SerialConsole, VgaConsole};
-pub use gpu::{GpuDriver, PixelFormat};
+pub use gpu::GpuDriver;
 pub use network::{EthernetDriver, LoopbackDriver, NetworkDevice};
 pub use pci::{PciBus, PciDevice};
 pub use storage::{AtaDriver, StorageDevice};
 pub use usb::{UsbBus, UsbDevice};
+
+pub use crate::graphics::PixelFormat;
 
 /// Initialize all drivers
 pub fn init() {

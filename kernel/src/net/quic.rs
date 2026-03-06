@@ -1807,7 +1807,10 @@ impl StreamManager {
             stream.state = StreamState::Open;
             self.streams.insert(stream_id, stream);
         }
-        self.streams.get_mut(&stream_id).unwrap()
+        // SAFETY: stream_id was just inserted above if missing.
+        self.streams
+            .get_mut(&stream_id)
+            .expect("stream was just inserted")
     }
 
     /// Get a stream by ID.

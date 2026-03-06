@@ -8,6 +8,7 @@
 //! 2. **Scatter-Gather I/O**: Compose packets from multiple buffers
 //! 3. **Page Remapping**: Transfer ownership instead of copying data
 //! 4. **sendfile()**: Kernel-to-kernel transfer bypassing user space
+#![allow(dead_code)]
 //! 5. **TCP_CORK**: Batch small writes into single packet
 //! 6. **Memory Mapping**: mmap() network buffers to user space
 //! 7. **TcpZeroCopySend**: Combined scatter-gather + TCP segmentation
@@ -208,7 +209,6 @@ impl ScatterGatherList {
     }
 
     /// Number of segments
-    #[allow(dead_code)]
     pub fn segment_count(&self) -> usize {
         self.segments.len()
     }
@@ -294,7 +294,6 @@ impl ZeroCopySend {
     }
 
     /// Add data from a kernel physical address range.
-    #[allow(dead_code)]
     pub fn add_kernel_buffer(&mut self, phys_addr: u64, length: usize) {
         self.sg_list.add_segment(phys_addr, length);
     }
@@ -364,7 +363,6 @@ impl ZeroCopySend {
     }
 
     /// Get a reference to the scatter-gather list
-    #[allow(dead_code)]
     pub fn sg_list(&self) -> &ScatterGatherList {
         &self.sg_list
     }
@@ -572,7 +570,6 @@ impl TcpCork {
     }
 
     /// Create a TCP cork bound to a specific socket
-    #[allow(dead_code)] // Used when TcpCork is created from socket layer
     pub fn with_socket(
         max_pending: usize,
         socket_id: usize,
@@ -598,7 +595,6 @@ impl TcpCork {
     }
 
     /// Get the current pending data size
-    #[allow(dead_code)]
     pub fn pending_len(&self) -> usize {
         self.pending.len()
     }
@@ -629,7 +625,6 @@ impl TcpCork {
 ///
 /// Collects data into a scatter-gather list and segments it into TCP MSS-sized
 /// chunks for transmission, avoiding intermediate copies where possible.
-#[allow(dead_code)] // Future use for optimized TCP transmit path
 pub struct TcpZeroCopySend {
     /// Scatter-gather list of data to send
     sg_list: ScatterGatherList,
@@ -641,7 +636,6 @@ pub struct TcpZeroCopySend {
     mss: usize,
 }
 
-#[allow(dead_code)] // Future use for optimized TCP transmit path
 impl TcpZeroCopySend {
     /// TCP Maximum Segment Size for Ethernet (1500 MTU - 20 IP - 20 TCP)
     const DEFAULT_MSS: usize = 1460;

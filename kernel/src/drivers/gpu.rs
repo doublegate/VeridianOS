@@ -9,7 +9,10 @@ use core::slice;
 
 use spin::Mutex;
 
-use crate::{error::KernelError, graphics::Color};
+use crate::{
+    error::KernelError,
+    graphics::{Color, PixelFormat},
+};
 
 /// VBE Mode Info Block
 #[repr(C, packed)]
@@ -82,14 +85,7 @@ pub struct GpuDriver {
     pixel_format: PixelFormat,
 }
 
-/// Pixel Format
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PixelFormat {
-    Rgb888,
-    Bgr888,
-    Rgba8888,
-    Bgra8888,
-}
+// PixelFormat is imported from crate::graphics::PixelFormat
 
 impl GpuDriver {
     /// Create GPU driver from VBE mode info
@@ -232,17 +228,34 @@ impl GpuDriver {
     /// Convert Color to pixel value based on format
     fn color_to_pixel(&self, color: Color) -> u32 {
         match self.pixel_format {
-            PixelFormat::Rgb888 | PixelFormat::Rgba8888 => {
+            PixelFormat::Rgb888
+            | PixelFormat::Rgba8888
+            | PixelFormat::Xrgb8888
+            | PixelFormat::Argb8888 => {
                 ((color.a as u32) << 24)
                     | ((color.r as u32) << 16)
                     | ((color.g as u32) << 8)
                     | (color.b as u32)
             }
-            PixelFormat::Bgr888 | PixelFormat::Bgra8888 => {
+            PixelFormat::Bgr888
+            | PixelFormat::Bgra8888
+            | PixelFormat::Xbgr8888
+            | PixelFormat::Abgr8888
+            | PixelFormat::Bgrx8888 => {
                 ((color.a as u32) << 24)
                     | ((color.b as u32) << 16)
                     | ((color.g as u32) << 8)
                     | (color.r as u32)
+            }
+            PixelFormat::Rgb565 => {
+                let r5 = (color.r as u32 & 0xF8) << 8;
+                let g6 = (color.g as u32 & 0xFC) << 3;
+                let b5 = (color.b as u32) >> 3;
+                r5 | g6 | b5
+            }
+            PixelFormat::Gray8 => {
+                let luma = (color.r as u32 * 77 + color.g as u32 * 150 + color.b as u32 * 29) >> 8;
+                luma | (luma << 8) | (luma << 16) | 0xFF00_0000
             }
         }
     }

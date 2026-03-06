@@ -13,47 +13,7 @@ pub mod player;
 use alloc::{vec, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::error::KernelError;
-
-// ---------------------------------------------------------------------------
-// Pixel format
-// ---------------------------------------------------------------------------
-
-/// Pixel format descriptor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PixelFormat {
-    /// 32-bit: x(8) R(8) G(8) B(8), alpha ignored.
-    XRGB8888,
-    /// 32-bit: A(8) R(8) G(8) B(8), premultiplied alpha.
-    ARGB8888,
-    /// 24-bit: R(8) G(8) B(8), packed.
-    RGB888,
-    /// 16-bit: R(5) G(6) B(5).
-    RGB565,
-    /// 24-bit: B(8) G(8) R(8), packed.
-    BGR888,
-    /// 32-bit: B(8) G(8) R(8) x(8), alpha ignored.
-    BGRX8888,
-    /// 8-bit grayscale.
-    Gray8,
-}
-
-impl PixelFormat {
-    /// Number of bytes per pixel.
-    pub fn bytes_per_pixel(&self) -> usize {
-        match self {
-            Self::XRGB8888 | Self::ARGB8888 | Self::BGRX8888 => 4,
-            Self::RGB888 | Self::BGR888 => 3,
-            Self::RGB565 => 2,
-            Self::Gray8 => 1,
-        }
-    }
-
-    /// Whether this format carries an alpha channel.
-    pub fn has_alpha(&self) -> bool {
-        matches!(self, Self::ARGB8888)
-    }
-}
+use crate::{error::KernelError, graphics::PixelFormat};
 
 // ---------------------------------------------------------------------------
 // Video frame
@@ -102,7 +62,7 @@ impl VideoFrame {
         }
         let off = self.pixel_offset(x, y);
         match self.format {
-            PixelFormat::XRGB8888 => {
+            PixelFormat::Xrgb8888 => {
                 if off + 3 < self.data.len() {
                     self.data[off] = b;
                     self.data[off + 1] = g;
@@ -110,7 +70,7 @@ impl VideoFrame {
                     self.data[off + 3] = 0xFF;
                 }
             }
-            PixelFormat::ARGB8888 => {
+            PixelFormat::Argb8888 => {
                 if off + 3 < self.data.len() {
                     self.data[off] = b;
                     self.data[off + 1] = g;
@@ -118,14 +78,14 @@ impl VideoFrame {
                     self.data[off + 3] = a;
                 }
             }
-            PixelFormat::RGB888 => {
+            PixelFormat::Rgb888 => {
                 if off + 2 < self.data.len() {
                     self.data[off] = r;
                     self.data[off + 1] = g;
                     self.data[off + 2] = b;
                 }
             }
-            PixelFormat::RGB565 => {
+            PixelFormat::Rgb565 => {
                 if off + 1 < self.data.len() {
                     let val: u16 =
                         ((r as u16 & 0xF8) << 8) | ((g as u16 & 0xFC) << 3) | (b as u16 >> 3);
@@ -133,19 +93,51 @@ impl VideoFrame {
                     self.data[off + 1] = (val >> 8) as u8;
                 }
             }
-            PixelFormat::BGR888 => {
+            PixelFormat::Bgr888 => {
                 if off + 2 < self.data.len() {
                     self.data[off] = b;
                     self.data[off + 1] = g;
                     self.data[off + 2] = r;
                 }
             }
-            PixelFormat::BGRX8888 => {
+            PixelFormat::Bgrx8888 => {
                 if off + 3 < self.data.len() {
                     self.data[off] = b;
                     self.data[off + 1] = g;
                     self.data[off + 2] = r;
                     self.data[off + 3] = 0xFF;
+                }
+            }
+            PixelFormat::Rgba8888 => {
+                if off + 3 < self.data.len() {
+                    self.data[off] = r;
+                    self.data[off + 1] = g;
+                    self.data[off + 2] = b;
+                    self.data[off + 3] = a;
+                }
+            }
+            PixelFormat::Bgra8888 => {
+                if off + 3 < self.data.len() {
+                    self.data[off] = b;
+                    self.data[off + 1] = g;
+                    self.data[off + 2] = r;
+                    self.data[off + 3] = a;
+                }
+            }
+            PixelFormat::Xbgr8888 => {
+                if off + 3 < self.data.len() {
+                    self.data[off] = 0xFF;
+                    self.data[off + 1] = b;
+                    self.data[off + 2] = g;
+                    self.data[off + 3] = r;
+                }
+            }
+            PixelFormat::Abgr8888 => {
+                if off + 3 < self.data.len() {
+                    self.data[off] = a;
+                    self.data[off + 1] = b;
+                    self.data[off + 2] = g;
+                    self.data[off + 3] = r;
                 }
             }
             PixelFormat::Gray8 => {
@@ -165,14 +157,14 @@ impl VideoFrame {
         }
         let off = self.pixel_offset(x, y);
         match self.format {
-            PixelFormat::XRGB8888 => {
+            PixelFormat::Xrgb8888 => {
                 if off + 3 < self.data.len() {
                     (self.data[off + 2], self.data[off + 1], self.data[off], 0xFF)
                 } else {
                     (0, 0, 0, 0)
                 }
             }
-            PixelFormat::ARGB8888 => {
+            PixelFormat::Argb8888 => {
                 if off + 3 < self.data.len() {
                     (
                         self.data[off + 2],
@@ -184,14 +176,14 @@ impl VideoFrame {
                     (0, 0, 0, 0)
                 }
             }
-            PixelFormat::RGB888 => {
+            PixelFormat::Rgb888 => {
                 if off + 2 < self.data.len() {
                     (self.data[off], self.data[off + 1], self.data[off + 2], 0xFF)
                 } else {
                     (0, 0, 0, 0)
                 }
             }
-            PixelFormat::RGB565 => {
+            PixelFormat::Rgb565 => {
                 if off + 1 < self.data.len() {
                     let val = (self.data[off] as u16) | ((self.data[off + 1] as u16) << 8);
                     let r = ((val >> 11) & 0x1F) as u8;
@@ -208,16 +200,64 @@ impl VideoFrame {
                     (0, 0, 0, 0)
                 }
             }
-            PixelFormat::BGR888 => {
+            PixelFormat::Bgr888 => {
                 if off + 2 < self.data.len() {
                     (self.data[off + 2], self.data[off + 1], self.data[off], 0xFF)
                 } else {
                     (0, 0, 0, 0)
                 }
             }
-            PixelFormat::BGRX8888 => {
+            PixelFormat::Bgrx8888 => {
                 if off + 3 < self.data.len() {
                     (self.data[off + 2], self.data[off + 1], self.data[off], 0xFF)
+                } else {
+                    (0, 0, 0, 0)
+                }
+            }
+            PixelFormat::Rgba8888 => {
+                if off + 3 < self.data.len() {
+                    (
+                        self.data[off],
+                        self.data[off + 1],
+                        self.data[off + 2],
+                        self.data[off + 3],
+                    )
+                } else {
+                    (0, 0, 0, 0)
+                }
+            }
+            PixelFormat::Bgra8888 => {
+                if off + 3 < self.data.len() {
+                    (
+                        self.data[off + 2],
+                        self.data[off + 1],
+                        self.data[off],
+                        self.data[off + 3],
+                    )
+                } else {
+                    (0, 0, 0, 0)
+                }
+            }
+            PixelFormat::Xbgr8888 => {
+                if off + 3 < self.data.len() {
+                    (
+                        self.data[off + 3],
+                        self.data[off + 2],
+                        self.data[off + 1],
+                        0xFF,
+                    )
+                } else {
+                    (0, 0, 0, 0)
+                }
+            }
+            PixelFormat::Abgr8888 => {
+                if off + 3 < self.data.len() {
+                    (
+                        self.data[off + 3],
+                        self.data[off + 2],
+                        self.data[off + 1],
+                        self.data[off],
+                    )
                 } else {
                     (0, 0, 0, 0)
                 }
@@ -296,26 +336,26 @@ mod tests {
 
     #[test]
     fn test_pixel_format_bpp() {
-        assert_eq!(PixelFormat::XRGB8888.bytes_per_pixel(), 4);
-        assert_eq!(PixelFormat::ARGB8888.bytes_per_pixel(), 4);
-        assert_eq!(PixelFormat::RGB888.bytes_per_pixel(), 3);
-        assert_eq!(PixelFormat::RGB565.bytes_per_pixel(), 2);
+        assert_eq!(PixelFormat::Xrgb8888.bytes_per_pixel(), 4);
+        assert_eq!(PixelFormat::Argb8888.bytes_per_pixel(), 4);
+        assert_eq!(PixelFormat::Rgb888.bytes_per_pixel(), 3);
+        assert_eq!(PixelFormat::Rgb565.bytes_per_pixel(), 2);
         assert_eq!(PixelFormat::Gray8.bytes_per_pixel(), 1);
-        assert_eq!(PixelFormat::BGR888.bytes_per_pixel(), 3);
-        assert_eq!(PixelFormat::BGRX8888.bytes_per_pixel(), 4);
+        assert_eq!(PixelFormat::Bgr888.bytes_per_pixel(), 3);
+        assert_eq!(PixelFormat::Bgrx8888.bytes_per_pixel(), 4);
     }
 
     #[test]
     fn test_pixel_format_alpha() {
-        assert!(!PixelFormat::XRGB8888.has_alpha());
-        assert!(PixelFormat::ARGB8888.has_alpha());
-        assert!(!PixelFormat::RGB888.has_alpha());
+        assert!(!PixelFormat::Xrgb8888.has_alpha());
+        assert!(PixelFormat::Argb8888.has_alpha());
+        assert!(!PixelFormat::Rgb888.has_alpha());
         assert!(!PixelFormat::Gray8.has_alpha());
     }
 
     #[test]
     fn test_video_frame_new() {
-        let f = VideoFrame::new(320, 240, PixelFormat::XRGB8888);
+        let f = VideoFrame::new(320, 240, PixelFormat::Xrgb8888);
         assert_eq!(f.width, 320);
         assert_eq!(f.height, 240);
         assert_eq!(f.stride, 320 * 4);
@@ -324,7 +364,7 @@ mod tests {
 
     #[test]
     fn test_video_frame_set_get_pixel() {
-        let mut f = VideoFrame::new(4, 4, PixelFormat::ARGB8888);
+        let mut f = VideoFrame::new(4, 4, PixelFormat::Argb8888);
         f.set_pixel(1, 2, 0xAA, 0xBB, 0xCC, 0xDD);
         let (r, g, b, a) = f.get_pixel(1, 2);
         assert_eq!((r, g, b, a), (0xAA, 0xBB, 0xCC, 0xDD));
@@ -332,7 +372,7 @@ mod tests {
 
     #[test]
     fn test_video_frame_out_of_bounds() {
-        let mut f = VideoFrame::new(2, 2, PixelFormat::RGB888);
+        let mut f = VideoFrame::new(2, 2, PixelFormat::Rgb888);
         // Should not panic
         f.set_pixel(10, 10, 255, 0, 0, 255);
         let px = f.get_pixel(10, 10);

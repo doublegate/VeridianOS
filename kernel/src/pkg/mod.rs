@@ -1172,6 +1172,335 @@ fn install_file(path: &str, data: &[u8], mode: u32) -> PkgResult<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    #[allow(unused_imports)]
+    use alloc::vec;
+
+    use super::*;
+
+    // ---- Version ----
+
+    #[test]
+    fn test_version_new() {
+        let v = Version::new(1, 2, 3);
+        assert_eq!(v.major, 1);
+        assert_eq!(v.minor, 2);
+        assert_eq!(v.patch, 3);
+    }
+
+    #[test]
+    fn test_version_ordering() {
+        let v1 = Version::new(1, 0, 0);
+        let v2 = Version::new(1, 0, 1);
+        let v3 = Version::new(1, 1, 0);
+        let v4 = Version::new(2, 0, 0);
+        assert!(v1 < v2);
+        assert!(v2 < v3);
+        assert!(v3 < v4);
+        assert_eq!(v1, Version::new(1, 0, 0));
+    }
+
+    #[test]
+    fn test_version_clone_and_eq() {
+        let v1 = Version::new(5, 10, 15);
+        let v2 = v1.clone();
+        assert_eq!(v1, v2);
+    }
+
+    // ---- parse_version ----
+
+    #[test]
+    fn test_parse_version_full() {
+        let v = parse_version("1.2.3");
+        assert_eq!(v, Version::new(1, 2, 3));
+    }
+
+    #[test]
+    fn test_parse_version_partial() {
+        let v = parse_version("5.10");
+        assert_eq!(v, Version::new(5, 10, 0));
+    }
+
+    #[test]
+    fn test_parse_version_major_only() {
+        let v = parse_version("7");
+        assert_eq!(v, Version::new(7, 0, 0));
+    }
+
+    #[test]
+    fn test_parse_version_invalid() {
+        let v = parse_version("abc");
+        assert_eq!(v, Version::new(0, 0, 0));
+    }
+
+    #[test]
+    fn test_parse_version_empty() {
+        let v = parse_version("");
+        assert_eq!(v, Version::new(0, 0, 0));
+    }
+
+    // ---- extract_json_string ----
+
+    #[test]
+    fn test_extract_json_string_found() {
+        let json = r#"{"name":"hello","version":"1.0.0"}"#;
+        assert_eq!(
+            extract_json_string(json, "name"),
+            Some(String::from("hello"))
+        );
+        assert_eq!(
+            extract_json_string(json, "version"),
+            Some(String::from("1.0.0"))
+        );
+    }
+
+    #[test]
+    fn test_extract_json_string_not_found() {
+        let json = r#"{"name":"hello"}"#;
+        assert_eq!(extract_json_string(json, "missing"), None);
+    }
+
+    // ---- extract_json_array ----
+
+    #[test]
+    fn test_extract_json_array_found() {
+        let json = r#"{"items":["a","b","c"]}"#;
+        let arr = extract_json_array(json, "items").unwrap();
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0], "a");
+        assert_eq!(arr[1], "b");
+        assert_eq!(arr[2], "c");
+    }
+
+    #[test]
+    fn test_extract_json_array_not_found() {
+        let json = r#"{"name":"test"}"#;
+        assert!(extract_json_array(json, "items").is_none());
+    }
+
+    #[test]
+    fn test_extract_json_array_empty() {
+        let json = r#"{"items":[]}"#;
+        let arr = extract_json_array(json, "items").unwrap();
+        assert!(arr.is_empty());
+    }
+
+    // ---- parse_package_metadata ----
+
+    #[test]
+    fn test_parse_package_metadata_valid() {
+        let json = br#"{"name":"test-pkg","version":"1.2.3","author":"dev","description":"a package","license":"MIT"}"#;
+        let meta = parse_package_metadata(json).unwrap();
+        assert_eq!(meta.name, "test-pkg");
+        assert_eq!(meta.version, Version::new(1, 2, 3));
+        assert_eq!(meta.author, "dev");
+        assert_eq!(meta.description, "a package");
+        assert_eq!(meta.license, "MIT");
+    }
+
+    #[test]
+    fn test_parse_package_metadata_minimal() {
+        let json = br#"{}"#;
+        let meta = parse_package_metadata(json).unwrap();
+        assert_eq!(meta.name, "unknown");
+        assert_eq!(meta.version, Version::new(0, 0, 0));
+    }
+
+    #[test]
+    fn test_parse_package_metadata_invalid_utf8() {
+        let data: &[u8] = &[0xFF, 0xFE];
+        assert!(parse_package_metadata(data).is_err());
+    }
+
+    #[test]
+    fn test_parse_package_metadata_with_deps() {
+        let json = br#"{"name":"app","version":"1.0.0","dependencies":["lib@>=1.0.0","core"]}"#;
+        let meta = parse_package_metadata(json).unwrap();
+        assert_eq!(meta.dependencies.len(), 2);
+        assert_eq!(meta.dependencies[0].name, "lib");
+        assert_eq!(meta.dependencies[0].version_req, ">=1.0.0");
+        assert_eq!(meta.dependencies[1].name, "core");
+        assert_eq!(meta.dependencies[1].version_req, "*");
+    }
+
+    // ---- InstallOptions ----
+
+    #[test]
+    fn test_install_options_default() {
+        let opts = InstallOptions::default();
+        assert!(!opts.force_unsigned);
+        assert!(opts.expected_hash.is_none());
+    }
+
+    // ---- PackageManager basic operations ----
+
+    #[test]
+    fn test_package_manager_new() {
+        let pm = PackageManager::new();
+        assert!(pm.list_installed().is_empty());
+        assert!(!pm.is_installed(&String::from("test")));
+    }
+
+    #[test]
+    fn test_package_manager_default() {
+        let pm = PackageManager::default();
+        assert!(pm.list_installed().is_empty());
+    }
+
+    #[test]
+    fn test_package_manager_remove_not_installed() {
+        let mut pm = PackageManager::new();
+        let result = pm.remove(&String::from("nonexistent"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_package_manager_get_metadata_none() {
+        let pm = PackageManager::new();
+        assert!(pm.get_metadata(&String::from("missing")).is_none());
+    }
+
+    // ---- Transaction system ----
+
+    #[test]
+    fn test_transaction_begin_commit() {
+        let mut pm = PackageManager::new();
+        assert!(pm.begin_transaction().is_ok());
+        assert!(pm.commit_transaction().is_ok());
+    }
+
+    #[test]
+    fn test_transaction_double_begin() {
+        let mut pm = PackageManager::new();
+        assert!(pm.begin_transaction().is_ok());
+        assert!(pm.begin_transaction().is_err());
+    }
+
+    #[test]
+    fn test_transaction_commit_without_begin() {
+        let mut pm = PackageManager::new();
+        assert!(pm.commit_transaction().is_err());
+    }
+
+    #[test]
+    fn test_transaction_rollback_without_begin() {
+        let mut pm = PackageManager::new();
+        assert!(pm.rollback_transaction().is_err());
+    }
+
+    #[test]
+    fn test_transaction_rollback() {
+        let mut pm = PackageManager::new();
+        // Insert a package manually for testing
+        pm.installed.insert(
+            String::from("test-pkg"),
+            PackageMetadata {
+                name: String::from("test-pkg"),
+                version: Version::new(1, 0, 0),
+                author: String::new(),
+                description: String::new(),
+                license: String::new(),
+                dependencies: vec![],
+                conflicts: vec![],
+            },
+        );
+
+        assert!(pm.begin_transaction().is_ok());
+        // Remove the package
+        assert!(pm.remove(&String::from("test-pkg")).is_ok());
+        assert!(!pm.is_installed(&String::from("test-pkg")));
+        // Rollback
+        assert!(pm.rollback_transaction().is_ok());
+        assert!(pm.is_installed(&String::from("test-pkg")));
+    }
+
+    // ---- find_dependents ----
+
+    #[test]
+    fn test_find_dependents() {
+        let mut pm = PackageManager::new();
+        pm.installed.insert(
+            String::from("lib"),
+            PackageMetadata {
+                name: String::from("lib"),
+                version: Version::new(1, 0, 0),
+                author: String::new(),
+                description: String::new(),
+                license: String::new(),
+                dependencies: vec![],
+                conflicts: vec![],
+            },
+        );
+        pm.installed.insert(
+            String::from("app"),
+            PackageMetadata {
+                name: String::from("app"),
+                version: Version::new(1, 0, 0),
+                author: String::new(),
+                description: String::new(),
+                license: String::new(),
+                dependencies: vec![Dependency {
+                    name: String::from("lib"),
+                    version_req: String::from("*"),
+                }],
+                conflicts: vec![],
+            },
+        );
+        let deps = pm.find_dependents(&String::from("lib"));
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0], "app");
+    }
+
+    #[test]
+    fn test_remove_with_dependents_fails() {
+        let mut pm = PackageManager::new();
+        pm.installed.insert(
+            String::from("lib"),
+            PackageMetadata {
+                name: String::from("lib"),
+                version: Version::new(1, 0, 0),
+                author: String::new(),
+                description: String::new(),
+                license: String::new(),
+                dependencies: vec![],
+                conflicts: vec![],
+            },
+        );
+        pm.installed.insert(
+            String::from("app"),
+            PackageMetadata {
+                name: String::from("app"),
+                version: Version::new(1, 0, 0),
+                author: String::new(),
+                description: String::new(),
+                license: String::new(),
+                dependencies: vec![Dependency {
+                    name: String::from("lib"),
+                    version_req: String::from("*"),
+                }],
+                conflicts: vec![],
+            },
+        );
+        // Cannot remove lib because app depends on it
+        assert!(pm.remove(&String::from("lib")).is_err());
+    }
+
+    // ---- extract_package_files ----
+
+    #[test]
+    fn test_extract_package_files_too_short() {
+        let data: &[u8] = &[0, 1, 2];
+        assert!(extract_package_files("test", data).is_err());
+    }
+
+    #[test]
+    fn test_extract_package_files_zero_files() {
+        let data: &[u8] = &[0, 0, 0, 0]; // num_files = 0
+        assert!(extract_package_files("test", data).is_ok());
+    }
+}
+
 /// Create directory hierarchy
 fn create_directories(path: &str) -> PkgResult<()> {
     // Split path and create each component

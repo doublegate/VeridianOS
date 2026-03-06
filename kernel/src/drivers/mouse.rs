@@ -56,6 +56,8 @@ pub fn is_initialized() -> bool {
 mod x86_64_impl {
     use core::sync::atomic::AtomicUsize;
 
+    use spin::Mutex;
+
     use super::*;
 
     /// Ring buffer for mouse events.
@@ -113,11 +115,18 @@ mod x86_64_impl {
     unsafe impl Send for MouseBuffer {}
     unsafe impl Sync for MouseBuffer {}
 
-    static mut MOUSE_BUFFER: MouseBuffer = MouseBuffer::new();
+    static MOUSE_BUFFER: Mutex<MouseBuffer> = Mutex::new(MouseBuffer::new());
 
     /// Packet accumulation state
-    static mut PACKET_BUF: [u8; 3] = [0; 3];
-    static mut PACKET_IDX: usize = 0;
+    struct PacketState {
+        buf: [u8; 3],
+        idx: usize,
+    }
+
+    static PACKET_STATE: Mutex<PacketState> = Mutex::new(PacketState {
+        buf: [0; 3],
+        idx: 0,
+    });
 
     /// Wait for the PS/2 controller input buffer to be empty.
     #[inline]
@@ -232,51 +241,47 @@ mod x86_64_impl {
             return;
         }
 
-        // SAFETY: Single-threaded access (polling from main loop).
-        #[allow(static_mut_refs)]
-        unsafe {
-            PACKET_BUF[PACKET_IDX] = byte;
-            PACKET_IDX += 1;
+        let mut pkt = PACKET_STATE.lock();
+        let idx = pkt.idx;
+        pkt.buf[idx] = byte;
+        pkt.idx = idx + 1;
 
-            if PACKET_IDX >= 3 {
-                PACKET_IDX = 0;
-                let status_byte = PACKET_BUF[0];
+        if pkt.idx >= 3 {
+            pkt.idx = 0;
+            let status_byte = pkt.buf[0];
 
-                // Validate: bit 3 must always be set in a standard PS/2 packet
-                if (status_byte & 0x08) == 0 {
-                    return; // Resync
-                }
-
-                let buttons = status_byte & 0x07;
-
-                // Reconstruct signed deltas
-                let mut dx = PACKET_BUF[1] as i16;
-                let mut dy = PACKET_BUF[2] as i16;
-                if (status_byte & 0x10) != 0 {
-                    dx -= 256; // X sign bit
-                }
-                if (status_byte & 0x20) != 0 {
-                    dy -= 256; // Y sign bit
-                }
-
-                // PS/2 Y axis is inverted (up = positive)
-                dy = -dy;
-
-                // Update absolute cursor position
-                let sw = SCREEN_WIDTH.load(Ordering::Relaxed) as i32;
-                let sh = SCREEN_HEIGHT.load(Ordering::Relaxed) as i32;
-                let mut cx = CURSOR_X.load(Ordering::Relaxed) + dx as i32;
-                let mut cy = CURSOR_Y.load(Ordering::Relaxed) + dy as i32;
-                cx = cx.clamp(0, sw - 1);
-                cy = cy.clamp(0, sh - 1);
-                CURSOR_X.store(cx, Ordering::Relaxed);
-                CURSOR_Y.store(cy, Ordering::Relaxed);
-
-                let event = MouseEvent { dx, dy, buttons };
-                // SAFETY: Single producer (this function).
-                #[allow(static_mut_refs)]
-                MOUSE_BUFFER.push(event);
+            // Validate: bit 3 must always be set in a standard PS/2 packet
+            if (status_byte & 0x08) == 0 {
+                return; // Resync
             }
+
+            let buttons = status_byte & 0x07;
+
+            // Reconstruct signed deltas
+            let mut dx = pkt.buf[1] as i16;
+            let mut dy = pkt.buf[2] as i16;
+            if (status_byte & 0x10) != 0 {
+                dx -= 256; // X sign bit
+            }
+            if (status_byte & 0x20) != 0 {
+                dy -= 256; // Y sign bit
+            }
+
+            // PS/2 Y axis is inverted (up = positive)
+            dy = -dy;
+
+            // Update absolute cursor position
+            let sw = SCREEN_WIDTH.load(Ordering::Relaxed) as i32;
+            let sh = SCREEN_HEIGHT.load(Ordering::Relaxed) as i32;
+            let mut cx = CURSOR_X.load(Ordering::Relaxed) + dx as i32;
+            let mut cy = CURSOR_Y.load(Ordering::Relaxed) + dy as i32;
+            cx = cx.clamp(0, sw - 1);
+            cy = cy.clamp(0, sh - 1);
+            CURSOR_X.store(cx, Ordering::Relaxed);
+            CURSOR_Y.store(cy, Ordering::Relaxed);
+
+            let event = MouseEvent { dx, dy, buttons };
+            MOUSE_BUFFER.lock().push(event);
         }
     }
 
@@ -307,20 +312,12 @@ mod x86_64_impl {
 
     /// Read a mouse event from the buffer.
     pub fn read_event() -> Option<MouseEvent> {
-        // SAFETY: Single consumer.
-        #[allow(static_mut_refs)]
-        unsafe {
-            MOUSE_BUFFER.pop()
-        }
+        MOUSE_BUFFER.lock().pop()
     }
 
     /// Check if mouse buffer has pending events.
     pub fn has_data() -> bool {
-        // SAFETY: Atomic reads only.
-        #[allow(static_mut_refs)]
-        unsafe {
-            MOUSE_BUFFER.has_data()
-        }
+        MOUSE_BUFFER.lock().has_data()
     }
 }
 

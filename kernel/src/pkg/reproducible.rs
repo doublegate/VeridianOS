@@ -510,3 +510,261 @@ fn push_usize(s: &mut String, value: usize) {
     use core::fmt::Write;
     let _ = write!(s, "{}", value);
 }
+
+#[cfg(test)]
+mod tests {
+    #[allow(unused_imports)]
+    use alloc::vec;
+
+    use super::*;
+
+    // ---- BuildSnapshot ----
+
+    #[test]
+    fn test_build_snapshot_new() {
+        let snap = BuildSnapshot::new();
+        assert!(snap.toolchain_version.is_empty());
+        assert!(snap.env_vars.is_empty());
+        assert!(snap.timestamp_override.is_none());
+        assert!(snap.source_hashes.is_empty());
+        assert!(snap.target_triple.is_empty());
+    }
+
+    // ---- BuildInputs / BuildOutputs ----
+
+    #[test]
+    fn test_build_inputs_new() {
+        let inp = BuildInputs::new();
+        assert!(inp.source_hashes.is_empty());
+        assert!(inp.dependency_versions.is_empty());
+    }
+
+    #[test]
+    fn test_build_outputs_new() {
+        let out = BuildOutputs::new();
+        assert!(out.file_hashes.is_empty());
+        assert_eq!(out.total_size, 0);
+        assert_eq!(out.file_count, 0);
+    }
+
+    // ---- ReproducibilityResult ----
+
+    #[test]
+    fn test_reproducibility_result_is_reproducible() {
+        let result = ReproducibilityResult {
+            matching_files: vec![String::from("a.o")],
+            differing_files: vec![],
+            missing_in_a: vec![],
+            missing_in_b: vec![],
+        };
+        assert!(result.is_reproducible());
+    }
+
+    #[test]
+    fn test_reproducibility_result_not_reproducible_differing() {
+        let result = ReproducibilityResult {
+            matching_files: vec![],
+            differing_files: vec![(String::from("a.o"), [1u8; 32], [2u8; 32])],
+            missing_in_a: vec![],
+            missing_in_b: vec![],
+        };
+        assert!(!result.is_reproducible());
+    }
+
+    #[test]
+    fn test_reproducibility_result_not_reproducible_missing() {
+        let result = ReproducibilityResult {
+            matching_files: vec![],
+            differing_files: vec![],
+            missing_in_a: vec![String::from("b.o")],
+            missing_in_b: vec![],
+        };
+        assert!(!result.is_reproducible());
+    }
+
+    // ---- canonicalize_path_value ----
+
+    #[test]
+    fn test_canonicalize_path_no_change() {
+        assert_eq!(canonicalize_path_value("/usr/bin"), "/usr/bin");
+    }
+
+    #[test]
+    fn test_canonicalize_path_trailing_slash() {
+        assert_eq!(canonicalize_path_value("/usr/bin/"), "/usr/bin");
+    }
+
+    #[test]
+    fn test_canonicalize_path_double_slash() {
+        assert_eq!(canonicalize_path_value("/usr//bin"), "/usr/bin");
+    }
+
+    #[test]
+    fn test_canonicalize_path_root_only() {
+        assert_eq!(canonicalize_path_value("/"), "/");
+    }
+
+    #[test]
+    fn test_canonicalize_path_non_path() {
+        assert_eq!(canonicalize_path_value("hello"), "hello");
+    }
+
+    // ---- normalize_environment ----
+
+    #[test]
+    fn test_normalize_environment() {
+        use super::super::ports::{BuildEnvironment, Port};
+        let port = Port::new(String::from("test"), String::from("1.0.0"));
+        let mut env = BuildEnvironment::new(&port);
+        normalize_environment(&mut env);
+        assert_eq!(env.get_env("SOURCE_DATE_EPOCH"), Some("0"));
+        assert_eq!(env.get_env("LC_ALL"), Some("C"));
+        assert_eq!(env.get_env("LANG"), Some("C"));
+        assert_eq!(env.get_env("LANGUAGE"), Some("C"));
+        assert_eq!(env.get_env("TZ"), Some("UTC"));
+    }
+
+    // ---- bytes_to_hex ----
+
+    #[test]
+    fn test_bytes_to_hex() {
+        assert_eq!(bytes_to_hex(&[0x00, 0xff, 0xab]), "00ffab");
+        assert_eq!(bytes_to_hex(&[]), "");
+        assert_eq!(bytes_to_hex(&[0x01, 0x23, 0x45, 0x67]), "01234567");
+    }
+
+    // ---- verify_reproducible ----
+
+    #[test]
+    fn test_verify_reproducible_identical() {
+        let a = BuildManifest {
+            port_name: String::from("test"),
+            port_version: String::from("1.0.0"),
+            inputs: BuildInputs::new(),
+            outputs: BuildOutputs {
+                file_hashes: vec![(String::from("a.o"), [1u8; 32])],
+                total_size: 100,
+                file_count: 1,
+            },
+            build_duration_ms: 0,
+        };
+        let b = a.clone();
+        let result = verify_reproducible(&a, &b);
+        assert!(result.is_reproducible());
+        assert_eq!(result.matching_files.len(), 1);
+    }
+
+    #[test]
+    fn test_verify_reproducible_differing() {
+        let a = BuildManifest {
+            port_name: String::from("test"),
+            port_version: String::from("1.0.0"),
+            inputs: BuildInputs::new(),
+            outputs: BuildOutputs {
+                file_hashes: vec![(String::from("a.o"), [1u8; 32])],
+                total_size: 100,
+                file_count: 1,
+            },
+            build_duration_ms: 0,
+        };
+        let b = BuildManifest {
+            port_name: String::from("test"),
+            port_version: String::from("1.0.0"),
+            inputs: BuildInputs::new(),
+            outputs: BuildOutputs {
+                file_hashes: vec![(String::from("a.o"), [2u8; 32])],
+                total_size: 100,
+                file_count: 1,
+            },
+            build_duration_ms: 0,
+        };
+        let result = verify_reproducible(&a, &b);
+        assert!(!result.is_reproducible());
+        assert_eq!(result.differing_files.len(), 1);
+    }
+
+    #[test]
+    fn test_verify_reproducible_missing_files() {
+        let a = BuildManifest {
+            port_name: String::from("test"),
+            port_version: String::from("1.0.0"),
+            inputs: BuildInputs::new(),
+            outputs: BuildOutputs {
+                file_hashes: vec![(String::from("a.o"), [1u8; 32])],
+                total_size: 100,
+                file_count: 1,
+            },
+            build_duration_ms: 0,
+        };
+        let b = BuildManifest {
+            port_name: String::from("test"),
+            port_version: String::from("1.0.0"),
+            inputs: BuildInputs::new(),
+            outputs: BuildOutputs {
+                file_hashes: vec![(String::from("b.o"), [1u8; 32])],
+                total_size: 100,
+                file_count: 1,
+            },
+            build_duration_ms: 0,
+        };
+        let result = verify_reproducible(&a, &b);
+        assert!(!result.is_reproducible());
+        assert_eq!(result.missing_in_b.len(), 1); // a.o missing in b
+        assert_eq!(result.missing_in_a.len(), 1); // b.o missing in a
+    }
+
+    // ---- serialize_manifest ----
+
+    #[test]
+    fn test_serialize_manifest() {
+        let manifest = BuildManifest {
+            port_name: String::from("curl"),
+            port_version: String::from("8.5.0"),
+            inputs: BuildInputs {
+                source_hashes: vec![(String::from("main.c"), [0xABu8; 32])],
+                env_snapshot: BuildSnapshot {
+                    toolchain_version: String::from("rustc 1.93"),
+                    env_vars: BTreeMap::new(),
+                    timestamp_override: Some(0),
+                    source_hashes: vec![],
+                    target_triple: String::from("x86_64-veridian"),
+                },
+                dependency_versions: BTreeMap::new(),
+            },
+            outputs: BuildOutputs {
+                file_hashes: vec![(String::from("curl"), [0xCDu8; 32])],
+                total_size: 12345,
+                file_count: 1,
+            },
+            build_duration_ms: 5000,
+        };
+        let bytes = serialize_manifest(&manifest);
+        let text = core::str::from_utf8(&bytes).unwrap();
+        assert!(text.contains("PORT=curl"));
+        assert!(text.contains("VERSION=8.5.0"));
+        assert!(text.contains("TOOLCHAIN=rustc 1.93"));
+        assert!(text.contains("TARGET=x86_64-veridian"));
+        assert!(text.contains("DURATION_MS=5000"));
+        assert!(text.contains("INPUT_COUNT=1"));
+        assert!(text.contains("OUTPUT_COUNT=1"));
+        assert!(text.contains("TOTAL_SIZE=12345"));
+        assert!(text.contains("INPUT:main.c="));
+        assert!(text.contains("OUTPUT:curl="));
+    }
+
+    // ---- push_u64, push_usize ----
+
+    #[test]
+    fn test_push_u64() {
+        let mut s = String::new();
+        push_u64(&mut s, 42);
+        assert_eq!(s, "42");
+    }
+
+    #[test]
+    fn test_push_usize() {
+        let mut s = String::new();
+        push_usize(&mut s, 0);
+        assert_eq!(s, "0");
+    }
+}

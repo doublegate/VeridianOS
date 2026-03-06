@@ -6,6 +6,11 @@
 //! Wire format: `[object_id: u32][size_opcode: u32][arguments...]`
 //! - size = upper 16 bits of second word (total message size in bytes)
 //! - opcode = lower 16 bits of second word
+//!
+//! Constants and error variants define the complete Wayland core protocol
+//! surface area. Items not yet wired into dispatch are retained for protocol
+//! completeness.
+#![allow(dead_code)]
 
 use alloc::{vec, vec::Vec};
 
@@ -19,7 +24,6 @@ use crate::error::KernelError;
 const HEADER_SIZE: usize = 8;
 
 /// Maximum message size (64 KB per Wayland spec)
-#[allow(dead_code)] // Phase 6: used in future message size validation
 const MAX_MESSAGE_SIZE: usize = 65536;
 
 // -- Well-known interface identifiers used during dispatch -------------------
@@ -43,7 +47,6 @@ pub const WL_DISPLAY_DELETE_ID: u16 = 1;
 /// Registry announces a global
 pub const WL_REGISTRY_GLOBAL: u16 = 0;
 /// Registry removes a global
-#[allow(dead_code)] // Phase 6: emitted when globals are removed at runtime
 pub const WL_REGISTRY_GLOBAL_REMOVE: u16 = 1;
 
 // wl_registry opcodes (requests client -> server)
@@ -54,7 +57,6 @@ pub const WL_REGISTRY_BIND: u16 = 0;
 /// create_surface
 pub const WL_COMPOSITOR_CREATE_SURFACE: u16 = 0;
 /// create_region
-#[allow(dead_code)] // Phase 6: region-based input/clipping
 pub const WL_COMPOSITOR_CREATE_REGION: u16 = 1;
 
 // wl_shm opcodes (requests)
@@ -69,26 +71,22 @@ pub const WL_SHM_FORMAT: u16 = 0;
 /// create_buffer
 pub const WL_SHM_POOL_CREATE_BUFFER: u16 = 0;
 /// destroy
-#[allow(dead_code)] // Phase 6: pool lifecycle management
 pub const WL_SHM_POOL_DESTROY: u16 = 2;
 
 // wl_surface opcodes (requests)
 /// destroy
-#[allow(dead_code)] // Phase 6: surface destruction
 pub const WL_SURFACE_DESTROY: u16 = 0;
 /// attach
 pub const WL_SURFACE_ATTACH: u16 = 1;
 /// damage
 pub const WL_SURFACE_DAMAGE: u16 = 2;
 /// frame
-#[allow(dead_code)] // Phase 6: frame callback for vsync
 pub const WL_SURFACE_FRAME: u16 = 3;
 /// commit
 pub const WL_SURFACE_COMMIT: u16 = 6;
 
 // wl_surface event opcodes
 /// enter output
-#[allow(dead_code)] // Phase 6: multi-output support
 pub const WL_SURFACE_ENTER: u16 = 0;
 
 // Pixel format constants matching Wayland wl_shm.format enum
@@ -117,7 +115,6 @@ pub enum WaylandError {
     /// Opcode not recognized for the target interface
     UnknownOpcode { object_id: u32, opcode: u16 },
     /// A required new_id argument was missing
-    #[allow(dead_code)] // Phase 6: validated during bind dispatching
     MissingNewId,
 }
 
@@ -464,7 +461,6 @@ fn serialize_arg(buf: &mut Vec<u8>, arg: &Argument) {
 // ---------------------------------------------------------------------------
 
 /// Build a wl_display.error event.
-#[allow(dead_code)] // Phase 6: sent to clients on protocol errors
 pub fn build_display_error(object_id: u32, code: u32, message: &[u8]) -> Vec<u8> {
     let msg = WaylandMessage::new(
         WL_DISPLAY_ID,

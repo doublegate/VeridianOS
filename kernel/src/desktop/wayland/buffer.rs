@@ -4,56 +4,13 @@
 //! Each `WlShmPool` owns a contiguous byte allocation from which individual
 //! `WlBuffer` objects are sub-allocated at arbitrary offsets. This mirrors
 //! the real Wayland wl_shm / wl_shm_pool / wl_buffer protocol objects.
+#![allow(dead_code)]
 
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 
 use spin::Mutex;
 
-use crate::error::KernelError;
-
-// ---------------------------------------------------------------------------
-// Pixel formats
-// ---------------------------------------------------------------------------
-
-/// Supported pixel formats (subset of wl_shm.format).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PixelFormat {
-    /// 32-bit ARGB with alpha channel
-    Argb8888,
-    /// 32-bit XRGB (alpha ignored, treated as 0xFF)
-    Xrgb8888,
-    /// 16-bit RGB 5:6:5
-    Rgb565,
-}
-
-impl PixelFormat {
-    /// Bytes per pixel for this format.
-    pub fn bpp(self) -> u32 {
-        match self {
-            PixelFormat::Argb8888 | PixelFormat::Xrgb8888 => 4,
-            PixelFormat::Rgb565 => 2,
-        }
-    }
-
-    /// Convert a Wayland wl_shm format code to our enum.
-    pub fn from_wl_format(code: u32) -> Option<Self> {
-        match code {
-            0 => Some(PixelFormat::Argb8888), // WL_SHM_FORMAT_ARGB8888
-            1 => Some(PixelFormat::Xrgb8888), // WL_SHM_FORMAT_XRGB8888
-            _ => None,
-        }
-    }
-
-    /// Convert to Wayland wl_shm format code.
-    #[allow(dead_code)] // Phase 6: used when announcing supported formats
-    pub fn to_wl_format(self) -> u32 {
-        match self {
-            PixelFormat::Argb8888 => 0,
-            PixelFormat::Xrgb8888 => 1,
-            PixelFormat::Rgb565 => 0x20363154, // WL_SHM_FORMAT_RGB565
-        }
-    }
-}
+use crate::{error::KernelError, graphics::PixelFormat};
 
 // ---------------------------------------------------------------------------
 // WlShmPool -- shared memory pool
@@ -146,7 +103,6 @@ impl WlShmPool {
     }
 
     /// Remove a buffer from this pool.
-    #[allow(dead_code)] // Phase 6: buffer destruction path
     pub fn destroy_buffer(&mut self, buffer_id: u32) -> bool {
         self.buffers.remove(&buffer_id).is_some()
     }
@@ -198,7 +154,6 @@ impl WlShmPool {
     }
 
     /// Resize the pool (wl_shm_pool.resize). Only growing is allowed.
-    #[allow(dead_code)] // Phase 6: pool resize protocol support
     pub fn resize(&mut self, new_size: usize) -> Result<(), KernelError> {
         if new_size < self.size {
             return Err(KernelError::InvalidArgument {
@@ -287,7 +242,6 @@ pub fn with_pool<R, F: FnOnce(&WlShmPool) -> R>(pool_id: u32, f: F) -> Option<R>
 }
 
 /// Remove a pool from the registry.
-#[allow(dead_code)] // Phase 6: pool destruction
 pub fn unregister_pool(pool_id: u32) -> Option<WlShmPool> {
     let mut guard = SHM_POOLS.lock();
     guard.as_mut().and_then(|pools| pools.remove(&pool_id))

@@ -509,3 +509,307 @@ impl Default for DependencyGraph {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[allow(unused_imports)]
+    use alloc::vec;
+
+    use super::*;
+
+    // ---- License ----
+
+    #[test]
+    fn test_license_as_str() {
+        assert_eq!(License::MIT.as_str(), "MIT");
+        assert_eq!(License::Apache2.as_str(), "Apache-2.0");
+        assert_eq!(License::GPL2.as_str(), "GPL-2.0");
+        assert_eq!(License::GPL3.as_str(), "GPL-3.0");
+        assert_eq!(License::LGPL21.as_str(), "LGPL-2.1");
+        assert_eq!(License::BSD2.as_str(), "BSD-2-Clause");
+        assert_eq!(License::BSD3.as_str(), "BSD-3-Clause");
+        assert_eq!(License::ISC.as_str(), "ISC");
+        assert_eq!(License::MPL2.as_str(), "MPL-2.0");
+        assert_eq!(License::Proprietary.as_str(), "Proprietary");
+        assert_eq!(License::Unknown.as_str(), "Unknown");
+    }
+
+    #[test]
+    fn test_license_from_spdx() {
+        assert_eq!(License::from_spdx("MIT"), License::MIT);
+        assert_eq!(License::from_spdx("Apache-2.0"), License::Apache2);
+        assert_eq!(License::from_spdx("Apache2"), License::Apache2);
+        assert_eq!(License::from_spdx("GPL-2.0"), License::GPL2);
+        assert_eq!(License::from_spdx("GPL-3.0"), License::GPL3);
+        assert_eq!(License::from_spdx("LGPL-2.1"), License::LGPL21);
+        assert_eq!(License::from_spdx("BSD-2-Clause"), License::BSD2);
+        assert_eq!(License::from_spdx("BSD-3-Clause"), License::BSD3);
+        assert_eq!(License::from_spdx("ISC"), License::ISC);
+        assert_eq!(License::from_spdx("MPL-2.0"), License::MPL2);
+        assert_eq!(License::from_spdx("Proprietary"), License::Proprietary);
+        assert_eq!(License::from_spdx("Weird"), License::Unknown);
+    }
+
+    #[test]
+    fn test_license_is_copyleft() {
+        assert!(License::GPL2.is_copyleft());
+        assert!(License::GPL3.is_copyleft());
+        assert!(License::LGPL21.is_copyleft());
+        assert!(License::MPL2.is_copyleft());
+        assert!(!License::MIT.is_copyleft());
+        assert!(!License::Apache2.is_copyleft());
+        assert!(!License::BSD3.is_copyleft());
+    }
+
+    #[test]
+    fn test_license_is_permissive() {
+        assert!(License::MIT.is_permissive());
+        assert!(License::Apache2.is_permissive());
+        assert!(License::BSD2.is_permissive());
+        assert!(License::BSD3.is_permissive());
+        assert!(License::ISC.is_permissive());
+        assert!(!License::GPL2.is_permissive());
+        assert!(!License::GPL3.is_permissive());
+        assert!(!License::Proprietary.is_permissive());
+    }
+
+    // ---- detect_license ----
+
+    #[test]
+    fn test_detect_license_mit() {
+        assert_eq!(detect_license("MIT License\nCopyright..."), License::MIT);
+        assert_eq!(
+            detect_license("Permission is hereby granted, free of charge"),
+            License::MIT
+        );
+    }
+
+    #[test]
+    fn test_detect_license_apache() {
+        assert_eq!(
+            detect_license("Apache License Version 2.0"),
+            License::Apache2
+        );
+    }
+
+    #[test]
+    fn test_detect_license_gpl3() {
+        assert_eq!(
+            detect_license("GNU General Public License version 3"),
+            License::GPL3
+        );
+    }
+
+    #[test]
+    fn test_detect_license_gpl2() {
+        assert_eq!(
+            detect_license("GNU General Public License version 2"),
+            License::GPL2
+        );
+    }
+
+    #[test]
+    fn test_detect_license_bsd2() {
+        assert_eq!(detect_license("BSD 2-Clause License"), License::BSD2);
+    }
+
+    #[test]
+    fn test_detect_license_bsd3() {
+        assert_eq!(detect_license("BSD 3-Clause License"), License::BSD3);
+    }
+
+    #[test]
+    fn test_detect_license_isc() {
+        assert_eq!(detect_license("ISC License"), License::ISC);
+    }
+
+    #[test]
+    fn test_detect_license_mpl() {
+        assert_eq!(detect_license("Mozilla Public License 2.0"), License::MPL2);
+    }
+
+    #[test]
+    fn test_detect_license_proprietary() {
+        assert_eq!(
+            detect_license("All rights reserved. No copying."),
+            License::Proprietary
+        );
+    }
+
+    #[test]
+    fn test_detect_license_unknown() {
+        assert_eq!(detect_license("Some random text"), License::Unknown);
+    }
+
+    // ---- LicenseCompatibility ----
+
+    #[test]
+    fn test_compatibility_permissive_ok() {
+        assert!(LicenseCompatibility::is_compatible(
+            &License::MIT,
+            &License::Apache2
+        ));
+        assert!(LicenseCompatibility::is_compatible(
+            &License::BSD3,
+            &License::ISC
+        ));
+    }
+
+    #[test]
+    fn test_compatibility_gpl2_gpl3_incompatible() {
+        assert!(!LicenseCompatibility::is_compatible(
+            &License::GPL2,
+            &License::GPL3
+        ));
+        assert!(!LicenseCompatibility::is_compatible(
+            &License::GPL3,
+            &License::GPL2
+        ));
+    }
+
+    #[test]
+    fn test_compatibility_proprietary_gpl_incompatible() {
+        assert!(!LicenseCompatibility::is_compatible(
+            &License::Proprietary,
+            &License::GPL3
+        ));
+        assert!(!LicenseCompatibility::is_compatible(
+            &License::GPL2,
+            &License::Proprietary
+        ));
+    }
+
+    #[test]
+    fn test_compatibility_unknown_always_compatible() {
+        assert!(LicenseCompatibility::is_compatible(
+            &License::Unknown,
+            &License::GPL3
+        ));
+        assert!(LicenseCompatibility::is_compatible(
+            &License::Proprietary,
+            &License::Unknown
+        ));
+    }
+
+    #[test]
+    fn test_compatibility_mit_gpl_ok() {
+        assert!(LicenseCompatibility::is_compatible(
+            &License::MIT,
+            &License::GPL3
+        ));
+    }
+
+    // ---- check_compatibility ----
+
+    #[test]
+    fn test_check_compatibility_ok() {
+        let deps = vec![
+            (String::from("a"), License::MIT),
+            (String::from("b"), License::Apache2),
+            (String::from("c"), License::BSD3),
+        ];
+        assert!(check_compatibility(&deps).is_ok());
+    }
+
+    #[test]
+    fn test_check_compatibility_conflict() {
+        let deps = vec![
+            (String::from("a"), License::GPL2),
+            (String::from("b"), License::GPL3),
+        ];
+        let result = check_compatibility(&deps);
+        assert!(result.is_err());
+        let conflicts = result.unwrap_err();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].package_a, "a");
+        assert_eq!(conflicts[0].package_b, "b");
+    }
+
+    // ---- DependencyGraph ----
+
+    #[test]
+    fn test_dep_graph_new() {
+        let g = DependencyGraph::new();
+        assert_eq!(g.package_count(), 0);
+        assert_eq!(g.edge_count(), 0);
+    }
+
+    #[test]
+    fn test_dep_graph_add_package() {
+        let mut g = DependencyGraph::new();
+        g.add_package("a");
+        assert_eq!(g.package_count(), 1);
+        assert_eq!(g.edge_count(), 0);
+    }
+
+    #[test]
+    fn test_dep_graph_add_dependency() {
+        let mut g = DependencyGraph::new();
+        g.add_dependency("app", "lib");
+        assert_eq!(g.package_count(), 2);
+        assert_eq!(g.edge_count(), 1);
+        let deps = g.dependencies("app").unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0], "lib");
+    }
+
+    #[test]
+    fn test_dep_graph_reverse_deps() {
+        let mut g = DependencyGraph::new();
+        g.add_dependency("app", "lib");
+        g.add_dependency("tool", "lib");
+        let reverse = g.find_reverse_deps("lib");
+        assert_eq!(reverse.len(), 2);
+    }
+
+    #[test]
+    fn test_dep_graph_find_roots() {
+        let mut g = DependencyGraph::new();
+        g.add_dependency("app", "lib");
+        g.add_dependency("lib", "core");
+        let roots = g.find_roots();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0], "app");
+    }
+
+    #[test]
+    fn test_dep_graph_no_cycles() {
+        let mut g = DependencyGraph::new();
+        g.add_dependency("a", "b");
+        g.add_dependency("b", "c");
+        let cycles = g.detect_circular_deps();
+        assert!(cycles.is_empty());
+    }
+
+    #[test]
+    fn test_dep_graph_with_cycle() {
+        let mut g = DependencyGraph::new();
+        g.add_dependency("a", "b");
+        g.add_dependency("b", "c");
+        g.add_dependency("c", "a");
+        let cycles = g.detect_circular_deps();
+        assert!(!cycles.is_empty());
+    }
+
+    #[test]
+    fn test_dep_graph_depth() {
+        let mut g = DependencyGraph::new();
+        g.add_dependency("app", "lib");
+        g.add_dependency("lib", "core");
+        assert_eq!(g.dependency_depth("core"), 2);
+        assert_eq!(g.dependency_depth("lib"), 1);
+        assert_eq!(g.dependency_depth("app"), 0);
+    }
+
+    #[test]
+    fn test_dep_graph_depth_not_found() {
+        let g = DependencyGraph::new();
+        assert_eq!(g.dependency_depth("nonexistent"), 0);
+    }
+
+    #[test]
+    fn test_dep_graph_dependencies_none() {
+        let g = DependencyGraph::new();
+        assert!(g.dependencies("nonexistent").is_none());
+    }
+}

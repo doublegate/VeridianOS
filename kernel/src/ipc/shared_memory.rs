@@ -331,19 +331,8 @@ impl SharedRegion {
     }
 }
 
-/// Memory region descriptor for IPC messages
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct MemoryRegion {
-    /// Virtual address in sender's address space
-    pub base_addr: u64,
-    /// Size of the region
-    pub size: u64,
-    /// Permissions (read/write/execute)
-    pub permissions: u32,
-    /// Cache policy
-    pub cache_policy: u32,
-}
+// MemoryRegion is defined in ipc::message -- re-use it here.
+pub use super::message::MemoryRegion;
 
 impl MemoryRegion {
     /// Create from a SharedRegion

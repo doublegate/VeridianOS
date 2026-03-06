@@ -2,6 +2,12 @@
 //!
 //! Implements xdg_wm_base, xdg_surface, and xdg_toplevel -- the standard
 //! desktop shell interface for managing windows, popups, and positioners.
+//!
+//! Many constants, struct fields, and methods define the complete Wayland XDG
+//! shell protocol surface area. Items that are not yet wired into the
+//! compositor dispatch path are retained for protocol completeness and will be
+//! connected as more of the XDG shell protocol is implemented.
+#![allow(dead_code)]
 
 use alloc::{collections::BTreeMap, string::String, vec, vec::Vec};
 
@@ -16,10 +22,8 @@ use crate::error::KernelError;
 
 // xdg_wm_base opcodes (requests)
 /// destroy
-#[allow(dead_code)] // Phase 6: xdg_wm_base teardown
 pub const XDG_WM_BASE_DESTROY: u16 = 0;
 /// create_positioner
-#[allow(dead_code)] // Phase 6: popup positioning
 pub const XDG_WM_BASE_CREATE_POSITIONER: u16 = 1;
 /// get_xdg_surface
 pub const XDG_WM_BASE_GET_XDG_SURFACE: u16 = 2;
@@ -32,12 +36,10 @@ pub const XDG_WM_BASE_PING: u16 = 0;
 
 // xdg_surface opcodes (requests)
 /// destroy
-#[allow(dead_code)] // Phase 6: xdg_surface cleanup
 pub const XDG_SURFACE_DESTROY: u16 = 0;
 /// get_toplevel
 pub const XDG_SURFACE_GET_TOPLEVEL: u16 = 1;
 /// get_popup
-#[allow(dead_code)] // Phase 6: popup surfaces
 pub const XDG_SURFACE_GET_POPUP: u16 = 2;
 /// set_window_geometry
 pub const XDG_SURFACE_SET_WINDOW_GEOMETRY: u16 = 3;
@@ -50,36 +52,28 @@ pub const XDG_SURFACE_CONFIGURE: u16 = 0;
 
 // xdg_toplevel opcodes (requests)
 /// destroy
-#[allow(dead_code)] // Phase 6: toplevel teardown
 pub const XDG_TOPLEVEL_DESTROY: u16 = 0;
 /// set_parent
-#[allow(dead_code)] // Phase 6: transient window chains
 pub const XDG_TOPLEVEL_SET_PARENT: u16 = 1;
 /// set_title
 pub const XDG_TOPLEVEL_SET_TITLE: u16 = 2;
 /// set_app_id
 pub const XDG_TOPLEVEL_SET_APP_ID: u16 = 3;
 /// move (interactive)
-#[allow(dead_code)] // Phase 6: interactive move via pointer grab
 pub const XDG_TOPLEVEL_MOVE: u16 = 5;
 /// resize (interactive)
-#[allow(dead_code)] // Phase 6: interactive resize via pointer grab
 pub const XDG_TOPLEVEL_RESIZE: u16 = 6;
 /// set_max_size
-#[allow(dead_code)] // Phase 6: size constraints
 pub const XDG_TOPLEVEL_SET_MAX_SIZE: u16 = 7;
 /// set_min_size
-#[allow(dead_code)] // Phase 6: size constraints
 pub const XDG_TOPLEVEL_SET_MIN_SIZE: u16 = 8;
 /// set_maximized
 pub const XDG_TOPLEVEL_SET_MAXIMIZED: u16 = 9;
 /// unset_maximized
-#[allow(dead_code)] // Phase 6: unmaximize
 pub const XDG_TOPLEVEL_UNSET_MAXIMIZED: u16 = 10;
 /// set_fullscreen
 pub const XDG_TOPLEVEL_SET_FULLSCREEN: u16 = 11;
 /// unset_fullscreen
-#[allow(dead_code)] // Phase 6: unfullscreen
 pub const XDG_TOPLEVEL_UNSET_FULLSCREEN: u16 = 12;
 /// set_minimized
 pub const XDG_TOPLEVEL_SET_MINIMIZED: u16 = 13;
@@ -96,7 +90,6 @@ pub const XDG_TOPLEVEL_STATE_MAXIMIZED: u32 = 1;
 /// fullscreen state
 pub const XDG_TOPLEVEL_STATE_FULLSCREEN: u32 = 2;
 /// resizing state
-#[allow(dead_code)] // Phase 6: interactive resize feedback
 pub const XDG_TOPLEVEL_STATE_RESIZING: u32 = 3;
 /// activated (focused) state
 pub const XDG_TOPLEVEL_STATE_ACTIVATED: u32 = 4;
@@ -113,34 +106,26 @@ pub const ZXDG_DECORATION_MANAGER_V1_VERSION: u32 = 1;
 
 // Manager request opcodes
 /// destroy
-#[allow(dead_code)] // Phase 7: decoration manager teardown
 pub const ZXDG_DECORATION_MANAGER_V1_DESTROY: u16 = 0;
 /// get_toplevel_decoration(id: new_id, toplevel: object)
-#[allow(dead_code)] // Phase 7: decoration negotiation
 pub const ZXDG_DECORATION_MANAGER_V1_GET_TOPLEVEL_DECORATION: u16 = 1;
 
 // Toplevel decoration request opcodes
 /// destroy
-#[allow(dead_code)] // Phase 7: decoration cleanup
 pub const ZXDG_TOPLEVEL_DECORATION_V1_DESTROY: u16 = 0;
 /// set_mode(mode: uint)
-#[allow(dead_code)] // Phase 7: client decoration preference
 pub const ZXDG_TOPLEVEL_DECORATION_V1_SET_MODE: u16 = 1;
 /// unset_mode
-#[allow(dead_code)] // Phase 7: client reverts to compositor preference
 pub const ZXDG_TOPLEVEL_DECORATION_V1_UNSET_MODE: u16 = 2;
 
 // Toplevel decoration event opcodes
 /// configure(mode: uint)
-#[allow(dead_code)] // Phase 7: compositor announces chosen mode
 pub const ZXDG_TOPLEVEL_DECORATION_V1_CONFIGURE: u16 = 0;
 
 // Decoration mode constants
 /// Decorations are drawn by the client
-#[allow(dead_code)] // Phase 7: CSD mode
 pub const ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE: u32 = 1;
 /// Decorations are drawn by the compositor (server)
-#[allow(dead_code)] // Phase 7: SSD mode
 pub const ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE: u32 = 2;
 
 /// Server-side vs client-side decoration preference.
@@ -172,7 +157,6 @@ impl DecorationMode {
 }
 
 /// Per-toplevel decoration state negotiated between client and compositor.
-#[allow(dead_code)] // Phase 7: full decoration negotiation lifecycle
 pub struct ToplevelDecoration {
     /// Decoration object ID
     pub id: u32,
@@ -271,10 +255,8 @@ pub struct XdgToplevel {
     /// Whether this toplevel is activated (focused)
     pub activated: bool,
     /// Minimum size constraint (0,0 = no constraint)
-    #[allow(dead_code)] // Phase 6: size constraint enforcement
     pub min_size: (u32, u32),
     /// Maximum size constraint (0,0 = no constraint)
-    #[allow(dead_code)] // Phase 6: size constraint enforcement
     pub max_size: (u32, u32),
 }
 
@@ -312,7 +294,6 @@ impl XdgToplevel {
         self.state = WindowState::Minimized;
     }
 
-    #[allow(dead_code)] // Phase 6: unmaximize/unfullscreen restore
     pub fn set_normal(&mut self) {
         self.state = WindowState::Normal;
     }
@@ -332,7 +313,6 @@ pub struct XdgShell {
     /// Pending ping serial (None = no outstanding ping)
     pending_ping: Option<u32>,
     /// Whether the client responded to the last ping
-    #[allow(dead_code)] // Phase 6: unresponsive client detection
     client_alive: bool,
 }
 
@@ -401,7 +381,6 @@ impl XdgShell {
     }
 
     /// Destroy an xdg_surface.
-    #[allow(dead_code)] // Phase 6: surface cleanup
     pub fn destroy_xdg_surface(&mut self, id: u32) -> bool {
         self.xdg_surfaces.remove(&id).is_some()
     }
@@ -547,7 +526,6 @@ pub fn init_xdg_shell() {
 }
 
 /// Execute a closure with read access to the XDG shell.
-#[allow(dead_code)] // Phase 6: xdg queries from window manager
 pub fn with_xdg_shell<R, F: FnOnce(&XdgShell) -> R>(f: F) -> Option<R> {
     let guard = XDG_SHELL.read();
     guard.as_ref().map(f)

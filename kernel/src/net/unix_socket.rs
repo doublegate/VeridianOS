@@ -277,7 +277,10 @@ pub fn socket_connect(socket_id: u64, path: &str) -> KernelResult<()> {
     }
 
     // Enqueue the connection request.
-    let target = sockets.get_mut(&target_id).unwrap();
+    let target = sockets.get_mut(&target_id).ok_or(KernelError::NotFound {
+        resource: "unix_socket_target",
+        id: target_id,
+    })?;
     target.pending_connections.push_back(socket_id);
 
     // Mark the connecting socket as connected (peer will be set on accept).

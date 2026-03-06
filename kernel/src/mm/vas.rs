@@ -1058,7 +1058,12 @@ impl VirtualAddressSpace {
         };
 
         // Remove the containing mapping from BTreeMap
-        let mapping = mappings.remove(&containing_key).unwrap();
+        let mapping = mappings
+            .remove(&containing_key)
+            .ok_or(KernelError::NotFound {
+                resource: "vas_mapping",
+                id: containing_key.0 as u64,
+            })?;
         let m_start = containing_key.0;
 
         // Calculate page indices within the mapping for the unmap range

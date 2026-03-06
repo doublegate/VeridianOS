@@ -4,6 +4,7 @@
 //! model. Each `Window` maps to a Wayland surface with an xdg_toplevel role.
 //! The compositor maintains a window list, focus tracking, and coordinates
 //! rendering by delegating to the Wayland compositor's compositing engine.
+#![allow(dead_code)] // Window compositor public API -- methods retained for Phase 6+ integration
 
 use alloc::vec::Vec;
 
@@ -25,7 +26,6 @@ pub struct Window {
     pub visible: bool,
     pub focused: bool,
     /// Associated Wayland surface ID (0 if none)
-    #[allow(dead_code)] // Phase 6: links Window to Wayland surface for rendering
     pub surface_id: u32,
 }
 
@@ -48,7 +48,6 @@ pub struct Compositor {
     next_id: u32,
     focused_window: Option<WindowId>,
     /// Desktop background color (ARGB packed u32)
-    #[allow(dead_code)] // Phase 6: used by render() when drawing desktop
     bg_color: u32,
 }
 
@@ -107,13 +106,11 @@ impl Compositor {
     }
 
     /// Get the currently focused window ID.
-    #[allow(dead_code)] // Phase 6: keyboard/pointer focus routing
     pub fn focused_window(&self) -> Option<WindowId> {
         self.focused_window
     }
 
     /// Number of windows.
-    #[allow(dead_code)] // Phase 6: window count queries
     pub fn window_count(&self) -> usize {
         self.windows.len()
     }

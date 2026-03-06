@@ -116,7 +116,7 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.16.0 (March 5, 2026) | **Releases Published**: 62 (v0.1.0 through v0.16.0)
+**Latest Release**: v0.16.1 (March 5, 2026) | **Releases Published**: 63 (v0.1.0 through v0.16.1)
 
 | Metric                 | Value                                           |
 | ---------------------- | ----------------------------------------------- |
@@ -483,9 +483,11 @@ Security is a fundamental design principle:
 - [x] **9 GUI Bug Fixes -- Close Buttons, Right-Click, Interactivity, Navigation**: Close button overlays on all windows (static + dynamic closeable), right-click context actions (title bar close, desktop launcher toggle), settings/image viewer event dispatch (keyboard + mouse forwarding), file manager ".." parent entry + arrow key navigation, terminal welcome message, system monitor total_frames fix + frame counter, benchmark target relaxation, EST timezone offset (v0.10.5, Feb 2026)
 - [x] **CI Hardening -- Code Coverage + cfg Gate Fixes**: Fix Code Coverage job compilation failures (add `use alloc::vec;` to dilithium.rs and numa.rs test modules for host-target `vec!` macro access), gate DMA buffer pool test assertions on `target_os="none"` (frame allocator unavailable on host), fix `get_heap_stats()` cfg gate mismatch (`target_arch="x86_64"` -> compound `target_os="none"` gate); CI achieves 11/11 job pass rate with 998 host-target unit tests (v0.10.6, Mar 2026)
 
+- [x] **Phase 7.5**: Follow-on enhancements across 8 waves (80/80 items): filesystem (ext4/FAT32/tmpfs/inotify/flock/xattr), security (KASLR/canaries/SMEP-SMAP/retpoline), performance (EDF scheduling/cache-aware alloc/PGO), drivers (xHCI/AHCI-SATA/HID/Bluetooth), networking (TCP Reno+Cubic/SACK/DNS/VLAN/bonding), crypto (TLS 1.3/SSH/HTTP/NTP/QUIC/WireGuard), audio/video (ALSA/Vorbis/MP3/PNG/JPEG/GIF), GPU (VirtIO 3D/GLES2/DRM KMS), hypervisor (nested/passthrough/migration), containers (OCI/cgroups/seccomp), desktop (clipboard/DnD/shortcuts/themes/TrueType/CJK), shell (io_uring/ptrace/coredump/users/sudo/cron) (v0.11.0-v0.16.0, Mar 2026)
+- [x] **v0.16.1 Tech Debt Remediation**: 11 undocumented `static mut` converted to safe patterns (AtomicU8/spin::Mutex/UnsafeCell wrappers), PixelFormat consolidated from 4 to 1 definition, 5 oversized files split into submodules (19,663 lines reorganized), production `unwrap()` reduction, 125 new pkg/ tests (2,356 total), dead_code annotations reduced 321->193 (v0.16.1, Mar 2026)
+
 ### Upcoming
 
-- [ ] **Phase 7.5**: Follow-on enhancements -- TCP congestion control, ALSA audio API, PNG/JPEG decoders, VirtIO GPU 3D, nested virtualization, OCI containers, KASLR, deadline scheduling, clipboard, io_uring, ext4/FAT32, QUIC/WireGuard, USB xHCI
 - [ ] **Phase 8**: Next-generation features -- web browser, native rustc bootstrap, GPU-accelerated compositor, firewall/NAT, Kubernetes CRI/CNI/CSI, KVM API compatibility, LDAP/Kerberos, IDE with LSP, formal verification
 
 See [Release History](docs/RELEASE-HISTORY.md) for detailed per-release notes.
