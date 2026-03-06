@@ -78,23 +78,9 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 
 ## Architecture
 
-```text
-+---------------------------------------------------------------+
-|                      User Applications                        |
-|         Desktop Apps  |  Browser  |  vsh Shell  |  BusyBox    |
-+---------------------------------------------------------------+
-|                      System Services                          |
-|    VFS    |  Network Stack  |  Display Server  |  Audio       |
-+---------------------------------------------------------------+
-|                     User-Space Drivers                        |
-|   Block   |   NIC   |   GPU   |   USB   |   WiFi/BT          |
-+---------------------------------------------------------------+
-|                        Microkernel                            |
-|  Memory Mgmt  |  Scheduler  |  IPC  |  Capabilities          |
-+---------------------------------------------------------------+
-|                     Hardware (x86_64 / AArch64 / RISC-V)      |
-+---------------------------------------------------------------+
-```
+<div align="center">
+<img src="images/veridian-architecture.png" alt="VeridianOS Architecture Diagram" width="100%" />
+</div>
 
 All drivers and services run in user space with capability-controlled access to hardware. The microkernel provides only memory management, scheduling, IPC, and the capability system. See [Architecture Overview](docs/ARCHITECTURE-OVERVIEW.md) for detailed design documentation and [Invariants](docs/invariants.md) for the authoritative list of architectural invariants.
 

@@ -1,0 +1,331 @@
+digraph VeridianOS {
+    // =================================================================
+    // VeridianOS — Microkernel Architecture
+    // Style: Dark theme matching Stratum ecosystem diagram
+    // =================================================================
+
+    bgcolor="#0d1117"
+    rankdir=TB
+    splines=true
+    nodesep=0.6
+    ranksep=1.0
+    pad="0.8,0.4"
+    compound=true
+
+    // Default styles
+    node [shape=none fontname="Consolas,Courier New,monospace" fontsize=11 margin="0"]
+    edge [arrowsize=0.7 penwidth=1.5]
+
+    // =================================================================
+    // TITLE
+    // =================================================================
+    title [label=<
+        <TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="18" FACE="Consolas,Courier New,monospace"><B>VeridianOS &#8212; Microkernel Architecture</B></FONT></TD></TR>
+        <TR><TD><FONT COLOR="#8b949e" POINT-SIZE="11" FACE="Consolas,Courier New,monospace">(capability-based &#183; zero-copy IPC &#183; multi-arch &#183; self-hosting)</FONT></TD></TR>
+        </TABLE>>]
+
+    // =================================================================
+    // LEGEND
+    // =================================================================
+    legend [label=<
+        <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6" COLOR="#30363d" BGCOLOR="#0d1117">
+        <TR><TD COLSPAN="2"><FONT COLOR="#c9d1d9" POINT-SIZE="10"><B>Legend</B></FONT></TD></TR>
+        <TR><TD><FONT COLOR="#a371f7">&#9679;</FONT></TD><TD ALIGN="LEFT"><FONT COLOR="#8b949e" POINT-SIZE="9">Purple: Applications</FONT></TD></TR>
+        <TR><TD><FONT COLOR="#39d2c0">&#9679;</FONT></TD><TD ALIGN="LEFT"><FONT COLOR="#8b949e" POINT-SIZE="9">Teal: System Services</FONT></TD></TR>
+        <TR><TD><FONT COLOR="#58a6ff">&#9679;</FONT></TD><TD ALIGN="LEFT"><FONT COLOR="#8b949e" POINT-SIZE="9">Blue: User-Space Drivers</FONT></TD></TR>
+        <TR><TD><FONT COLOR="#2ea043">&#9679;</FONT></TD><TD ALIGN="LEFT"><FONT COLOR="#8b949e" POINT-SIZE="9">Green: Microkernel (TCB)</FONT></TD></TR>
+        <TR><TD><FONT COLOR="#8b949e">&#9679;</FONT></TD><TD ALIGN="LEFT"><FONT COLOR="#8b949e" POINT-SIZE="9">Gray: Hardware</FONT></TD></TR>
+        <TR><TD><FONT COLOR="#f85149">&#9679;</FONT></TD><TD ALIGN="LEFT"><FONT COLOR="#8b949e" POINT-SIZE="9">Red: Security</FONT></TD></TR>
+        <TR><TD><FONT COLOR="#d29922">&#9679;</FONT></TD><TD ALIGN="LEFT"><FONT COLOR="#8b949e" POINT-SIZE="9">Amber: Infrastructure</FONT></TD></TR>
+        <TR><TD><FONT COLOR="#f778ba">&#9679;</FONT></TD><TD ALIGN="LEFT"><FONT COLOR="#8b949e" POINT-SIZE="9">Pink: Developer Tools</FONT></TD></TR>
+        </TABLE>>]
+
+    // =================================================================
+    // APPLICATIONS (Purple #a371f7)
+    // =================================================================
+    desktop [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#a371f7" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#a371f7"><B>Desktop Environment</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="9">App Launcher &#183; Alt-Tab<BR/>Notifications &#183; Screen Lock<BR/>Workspaces &#183; System Tray<BR/>TrueType &#183; CJK Unicode</FONT></TD></TR>
+        </TABLE>>]
+
+    browser [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#a371f7" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#a371f7"><B>Web Browser</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="9">HTML5 Tokenizer<BR/>CSS Layout &#183; Flexbox<BR/>JavaScript VM + GC<BR/>Tabbed &#183; Process Isolation</FONT></TD></TR>
+        </TABLE>>]
+
+    vsh [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#a371f7" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#a371f7"><B>vsh Shell</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="9">49 Builtins<BR/>Job Control &#183; Readline<BR/>POSIX Word Expansion<BR/>Scripting &#183; Functions</FONT></TD></TR>
+        </TABLE>>]
+
+    busybox [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#a371f7" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#a371f7"><B>BusyBox + Coreutils</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="9">95 Applets &#183; ash Shell<BR/>6 POSIX Coreutils<BR/>POSIX Regex Engine<BR/>Native Compilation</FONT></TD></TR>
+        </TABLE>>]
+
+    // =================================================================
+    // SYSTEM SERVICES (Teal #39d2c0)
+    // =================================================================
+    vfs [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#39d2c0" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#39d2c0"><B>VFS</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="9">ramfs &#183; devfs &#183; procfs<BR/>BlockFS &#183; ext4 &#183; FAT32<BR/>inotify &#183; flock &#183; xattr</FONT></TD></TR>
+        </TABLE>>]
+
+    netstack [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#39d2c0" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#39d2c0"><B>Network Stack</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="9">TCP/IP &#183; IPv6 Dual-Stack<BR/>DNS &#183; DHCP &#183; TLS 1.3<BR/>Firewall &#183; NAT &#183; Routing<BR/>QUIC &#183; WireGuard &#183; SSH</FONT></TD></TR>
+        </TABLE>>]
+
+    wayland [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#39d2c0" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#39d2c0"><B>Display Server</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="9">Wayland Compositor<BR/>GPU Acceleration<BR/>Layer-Shell &#183; DMA-BUF<BR/>HiDPI &#183; Multi-Output</FONT></TD></TR>
+        </TABLE>>]
+
+    audio [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#39d2c0" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#39d2c0"><B>Audio / Video</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="9">ALSA Mixer &#183; VirtIO-Sound<BR/>WAV &#183; Vorbis &#183; MP3<BR/>PNG &#183; JPEG &#183; GIF<BR/>Media Player</FONT></TD></TR>
+        </TABLE>>]
+
+    pkgmgr [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#39d2c0" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#39d2c0"><B>Package Manager</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="9">vpkg &#183; DPLL SAT Resolver<BR/>Ports System<BR/>Reproducible Builds<BR/>Ed25519 Signing</FONT></TD></TR>
+        </TABLE>>]
+
+    // =================================================================
+    // USER-SPACE DRIVERS (Blue #58a6ff)
+    // =================================================================
+    drv_block [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#58a6ff" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#58a6ff"><B>Block</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="9">VirtIO-blk &#183; NVMe<BR/>AHCI-SATA</FONT></TD></TR>
+        </TABLE>>]
+
+    drv_net [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#58a6ff" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#58a6ff"><B>Network</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="9">E1000 &#183; VirtIO-Net<BR/>WiFi 802.11 &#183; BT</FONT></TD></TR>
+        </TABLE>>]
+
+    drv_gpu [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#58a6ff" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#58a6ff"><B>GPU</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="9">VirtIO GPU 2D/3D<BR/>DRM/KMS &#183; GLES 2.0</FONT></TD></TR>
+        </TABLE>>]
+
+    drv_usb [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#58a6ff" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#58a6ff"><B>USB / Input</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="9">xHCI &#183; HID &#183; Storage<BR/>PS/2 &#183; Mouse</FONT></TD></TR>
+        </TABLE>>]
+
+    // =================================================================
+    // MICROKERNEL (Green #2ea043) — Trusted Computing Base
+    // =================================================================
+    kernel [label=<
+        <TABLE BORDER="3" CELLBORDER="0" CELLSPACING="0" CELLPADDING="10" COLOR="#2ea043" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#2ea043" POINT-SIZE="13"><B>Microkernel</B></FONT></TD></TR>
+        <TR><TD><FONT COLOR="#2ea043" POINT-SIZE="9">[Trusted Computing Base &#8212; &lt;15K LOC]</FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="9">
+        Memory Management          Scheduler<BR/>
+        (bitmap+buddy, NUMA,       (CFS, SMP, EDF,<BR/>
+         4-level page tables)       work-stealing)<BR/>
+        <BR/>
+        IPC                        Capability System<BR/>
+        (zero-copy &lt;1&#956;s,           (64-bit tokens, O(1),<BR/>
+         batching, shared mem)      revocation, cache)<BR/>
+        <BR/>
+        Syscall Interface (35+ syscalls)<BR/>
+        Process Lifecycle &#183; Signals &#183; Threads
+        </FONT></TD></TR>
+        </TABLE>>]
+
+    // =================================================================
+    // HARDWARE (Gray #8b949e)
+    // =================================================================
+    hw_x86 [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#8b949e" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#8b949e"><B>x86_64</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#6e7681" POINT-SIZE="9">UEFI Boot &#183; APIC<BR/>VMX &#183; 1280&#215;800 GOP</FONT></TD></TR>
+        </TABLE>>]
+
+    hw_aarch64 [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#8b949e" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#8b949e"><B>AArch64</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#6e7681" POINT-SIZE="9">Direct Kernel Boot<BR/>PL011 UART &#183; GICv2</FONT></TD></TR>
+        </TABLE>>]
+
+    hw_riscv [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#8b949e" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#8b949e"><B>RISC-V 64</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#6e7681" POINT-SIZE="9">OpenSBI &#183; PLIC<BR/>Sv48 Page Tables</FONT></TD></TR>
+        </TABLE>>]
+
+    // =================================================================
+    // SECURITY (Red #f85149) — Side panel
+    // =================================================================
+    security [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#f85149" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#f85149"><B>Security</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="9">KPTI &#183; KASLR &#183; SMEP/SMAP<BR/>Stack Canaries &#183; W^X &#183; Retpoline<BR/>MAC &#183; RBAC &#183; Audit Logging<BR/>Secure Boot &#183; TPM 2.0 &#183; IOMMU<BR/>ML-DSA-65 &#183; ML-KEM &#183; Ed25519</FONT></TD></TR>
+        </TABLE>>]
+
+    verification [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#f85149" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#f85149"><B>Formal Verification</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="9">38 Kani Proof Harnesses<BR/>6 TLA+ Specifications<BR/>Boot &#183; IPC &#183; Memory<BR/>Capabilities &#183; Info Flow</FONT></TD></TR>
+        </TABLE>>]
+
+    // =================================================================
+    // INFRASTRUCTURE (Amber #d29922)
+    // =================================================================
+    containers [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#d29922" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#d29922"><B>Containers</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="9">OCI Runtime<BR/>PID/Mount/Net/UTS NS<BR/>cgroups &#183; seccomp BPF<BR/>Overlay FS &#183; veth</FONT></TD></TR>
+        </TABLE>>]
+
+    hypervisor [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#d29922" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#d29922"><B>Virtualization</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="9">Intel VMX &#183; VMCS &#183; EPT<BR/>KVM API Compat<BR/>Live Migration &#183; VFIO<BR/>SR-IOV &#183; Hotplug</FONT></TD></TR>
+        </TABLE>>]
+
+    cloudnative [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#d29922" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#d29922"><B>Cloud-Native</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="9">CRI &#183; CNI &#183; CSI<BR/>Service Mesh &#183; mTLS<BR/>L4/L7 Load Balancer<BR/>cloud-init</FONT></TD></TR>
+        </TABLE>>]
+
+    // =================================================================
+    // DEVELOPER TOOLS (Pink #f778ba)
+    // =================================================================
+    devtools [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#f778ba" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#f778ba"><B>Developer Tools</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="9">GCC 14.2 &#183; rustc &#183; LLVM 19<BR/>IDE + LSP Client<BR/>GDB Remote Protocol<BR/>CI Runner &#183; Profiler<BR/>Native git &#183; Build System</FONT></TD></TR>
+        </TABLE>>]
+
+    libc [label=<
+        <TABLE BORDER="2" CELLBORDER="0" CELLSPACING="0" CELLPADDING="8" COLOR="#f778ba" BGCOLOR="#0d1117">
+        <TR><TD><FONT COLOR="#f778ba"><B>C Library + Rust std</B></FONT></TD></TR>
+        <HR/>
+        <TR><TD><FONT COLOR="#c9d1d9" POINT-SIZE="9">Full stdio/stdlib/string<BR/>POSIX Headers &#183; libm<BR/>std::sys::veridian<BR/>pthread &#183; setjmp/longjmp</FONT></TD></TR>
+        </TABLE>>]
+
+    // =================================================================
+    // EDGES — Applications to Services (purple)
+    // =================================================================
+    desktop -> wayland [color="#a371f7" style=bold]
+    desktop -> audio [color="#a371f7" style=bold]
+    browser -> netstack [color="#a371f7" style=bold]
+    browser -> wayland [color="#a371f7" style=bold]
+    vsh -> vfs [color="#a371f7" style=bold]
+    busybox -> vfs [color="#a371f7" style=bold]
+    busybox -> libc [color="#f778ba" style=dashed]
+
+    // =================================================================
+    // EDGES — Services to Drivers (teal)
+    // =================================================================
+    vfs -> drv_block [color="#39d2c0"]
+    netstack -> drv_net [color="#39d2c0"]
+    wayland -> drv_gpu [color="#39d2c0"]
+    audio -> drv_usb [color="#39d2c0" style=dashed]
+
+    // =================================================================
+    // EDGES — Drivers to Microkernel (blue, capability requests)
+    // =================================================================
+    drv_block -> kernel [color="#58a6ff" xlabel=<  <FONT COLOR="#58a6ff" POINT-SIZE="8">cap</FONT>  >]
+    drv_net -> kernel [color="#58a6ff" xlabel=<  <FONT COLOR="#58a6ff" POINT-SIZE="8">cap</FONT>  >]
+    drv_gpu -> kernel [color="#58a6ff" xlabel=<  <FONT COLOR="#58a6ff" POINT-SIZE="8">cap</FONT>  >]
+    drv_usb -> kernel [color="#58a6ff" xlabel=<  <FONT COLOR="#58a6ff" POINT-SIZE="8">cap</FONT>  >]
+
+    // =================================================================
+    // EDGES — Services to Microkernel (green, IPC)
+    // =================================================================
+    vfs -> kernel [color="#2ea043" style=dashed xlabel=<  <FONT COLOR="#2ea043" POINT-SIZE="8">IPC</FONT>  >]
+    netstack -> kernel [color="#2ea043" style=dashed xlabel=<  <FONT COLOR="#2ea043" POINT-SIZE="8">IPC</FONT>  >]
+    wayland -> kernel [color="#2ea043" style=dashed xlabel=<  <FONT COLOR="#2ea043" POINT-SIZE="8">IPC</FONT>  >]
+    pkgmgr -> kernel [color="#2ea043" style=dashed xlabel=<  <FONT COLOR="#2ea043" POINT-SIZE="8">IPC</FONT>  >]
+
+    // =================================================================
+    // EDGES — Microkernel to Hardware (green, bold)
+    // =================================================================
+    kernel -> hw_x86 [color="#2ea043" style=bold penwidth=2.0]
+    kernel -> hw_aarch64 [color="#2ea043" style=bold penwidth=2.0]
+    kernel -> hw_riscv [color="#2ea043" style=bold penwidth=2.0]
+
+    // =================================================================
+    // EDGES — Security (red, dashed — wraps kernel)
+    // =================================================================
+    security -> kernel [color="#f85149" style=dashed dir=both arrowhead=none arrowtail=none]
+    verification -> kernel [color="#f85149" style=dotted]
+
+    // =================================================================
+    // EDGES — Infrastructure to Microkernel (amber)
+    // =================================================================
+    containers -> kernel [color="#d29922" xlabel=<  <FONT COLOR="#d29922" POINT-SIZE="8">ns</FONT>  >]
+    hypervisor -> kernel [color="#d29922" xlabel=<  <FONT COLOR="#d29922" POINT-SIZE="8">VMX</FONT>  >]
+    cloudnative -> netstack [color="#d29922" style=dashed]
+    cloudnative -> containers [color="#d29922" style=dashed]
+
+    // =================================================================
+    // EDGES — Developer Tools (pink, dashed)
+    // =================================================================
+    devtools -> kernel [color="#f778ba" style=dashed xlabel=<  <FONT COLOR="#f778ba" POINT-SIZE="8">debug</FONT>  >]
+    libc -> kernel [color="#f778ba" xlabel=<  <FONT COLOR="#f778ba" POINT-SIZE="8">syscall</FONT>  >]
+
+    // =================================================================
+    // LAYOUT — Rank constraints for layered appearance
+    // =================================================================
+    { rank=min; title }
+    { rank=same; desktop; browser; vsh; busybox; legend }
+    { rank=same; vfs; netstack; wayland; audio; pkgmgr }
+    { rank=same; drv_block; drv_net; drv_gpu; drv_usb; devtools; libc }
+    { rank=same; security; kernel; containers; hypervisor }
+    { rank=same; verification; hw_x86; hw_aarch64; hw_riscv; cloudnative }
+
+    // Invisible edges for ordering within ranks
+    title -> desktop [style=invis]
+    desktop -> browser -> vsh -> busybox [style=invis]
+    vfs -> netstack -> wayland -> audio -> pkgmgr [style=invis]
+    drv_block -> drv_net -> drv_gpu -> drv_usb [style=invis]
+    hw_x86 -> hw_aarch64 -> hw_riscv [style=invis]
+    security -> kernel [style=invis]
+    kernel -> containers [style=invis]
+    containers -> hypervisor [style=invis]
+    verification -> hw_x86 [style=invis]
+    cloudnative -> hw_riscv [style=invis]
+}
