@@ -15,7 +15,6 @@ use super::l4::{Backend, LbAlgorithm};
 
 /// An HTTP routing rule.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct HttpRoute {
     /// Path prefix to match (e.g., "/api/v1").
     pub path_prefix: String,
@@ -55,7 +54,6 @@ impl HttpRoute {
 
 /// A named group of backends.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct BackendGroup {
     /// Group name.
     pub name: String,
@@ -128,7 +126,6 @@ impl BackendGroup {
 
 /// A set of L7 routing rules.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct L7Rule {
     /// Ordered routes (first match wins).
     pub routes: Vec<HttpRoute>,
@@ -142,7 +139,6 @@ pub struct L7Rule {
 
 /// Token bucket rate limiter.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct RateLimit {
     /// Maximum requests per second (integer).
     pub requests_per_second: u32,
@@ -200,7 +196,6 @@ impl RateLimit {
 
 /// Sticky session manager (cookie-based affinity).
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct StickySession {
     /// Cookie name used for session affinity.
     pub cookie_name: String,
@@ -244,7 +239,6 @@ impl StickySession {
 
 /// L7 load balancer error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum L7Error {
     /// No route matched.
     NoRouteMatch,
@@ -262,7 +256,6 @@ pub enum L7Error {
 
 /// L7 Load Balancer implementation.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct L7LoadBalancer {
     /// Routing rules.
     rules: Vec<L7Rule>,

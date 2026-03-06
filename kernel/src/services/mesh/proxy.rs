@@ -14,7 +14,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Sidecar proxy configuration.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ProxyConfig {
     /// Port to listen on.
     pub listen_port: u16,
@@ -46,7 +45,6 @@ impl Default for ProxyConfig {
 
 /// Connection state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum ConnectionState {
     /// Connection is idle and available.
     Idle,
@@ -58,7 +56,6 @@ pub enum ConnectionState {
 
 /// A pooled connection to an upstream.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Connection {
     /// Unique connection identifier.
     pub id: u64,
@@ -77,7 +74,6 @@ static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Connection pool for upstream services.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ConnectionPool {
     /// Pooled connections.
     connections: Vec<Connection>,
@@ -170,7 +166,6 @@ impl ConnectionPool {
 
 /// Proxy statistics.
 #[derive(Debug, Default)]
-#[allow(dead_code)]
 pub struct ProxyStats {
     /// Total requests proxied.
     pub total_requests: AtomicU64,
@@ -213,7 +208,6 @@ impl ProxyStats {
 
 /// Upstream health status.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct UpstreamHealth {
     /// Upstream index.
     pub idx: usize,
@@ -231,7 +225,6 @@ pub struct UpstreamHealth {
 
 /// Proxy error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum ProxyError {
     /// No healthy upstream available.
     NoHealthyUpstream,
@@ -245,7 +238,6 @@ pub enum ProxyError {
 
 /// Sidecar proxy implementation.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct SidecarProxy {
     /// Proxy configuration.
     config: ProxyConfig,

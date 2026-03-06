@@ -4,6 +4,8 @@
 //! indices. Supports element creation, tree manipulation, traversal, and
 //! querying by ID or tag name. No raw pointers.
 
+#![allow(dead_code)]
+
 use alloc::{
     collections::BTreeMap,
     string::{String, ToString},
@@ -11,12 +13,10 @@ use alloc::{
 };
 
 /// Index into the node arena
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct NodeId(pub usize);
 
 /// Type of DOM node
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum NodeType {
     #[default]
@@ -28,7 +28,6 @@ pub enum NodeType {
 }
 
 /// Data specific to Element nodes
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct ElementData {
     pub tag_name: String,
@@ -36,7 +35,6 @@ pub struct ElementData {
     pub namespace: Option<String>,
 }
 
-#[allow(dead_code)]
 impl ElementData {
     pub fn new(tag_name: &str) -> Self {
         Self {
@@ -63,7 +61,6 @@ impl ElementData {
 }
 
 /// A single node in the DOM tree
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct Node {
     pub node_type: NodeType,
@@ -74,13 +71,11 @@ pub struct Node {
 }
 
 /// Arena allocator for DOM nodes
-#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct NodeArena {
     nodes: Vec<Node>,
 }
 
-#[allow(dead_code)]
 impl NodeArena {
     pub fn new() -> Self {
         Self { nodes: Vec::new() }
@@ -115,7 +110,6 @@ impl NodeArena {
 }
 
 /// The DOM Document
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Document {
     pub arena: NodeArena,
@@ -128,7 +122,6 @@ impl Default for Document {
     }
 }
 
-#[allow(dead_code)]
 impl Document {
     /// Create a new empty document
     pub fn new() -> Self {

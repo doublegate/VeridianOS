@@ -4,6 +4,8 @@
 //! link navigation, and scroll state management. All dimensions use
 //! pixel coordinates (i32).
 
+#![allow(dead_code)]
+
 use alloc::{
     string::{String, ToString},
     vec::Vec,
@@ -16,7 +18,6 @@ use super::events::NodeId;
 // ---------------------------------------------------------------------------
 
 /// HTML input element types
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputType {
     #[default]
@@ -31,7 +32,6 @@ pub enum InputType {
 }
 
 /// HTTP method for form submission
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FormMethod {
     #[default]
@@ -40,7 +40,6 @@ pub enum FormMethod {
 }
 
 /// A <form> element's state
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct FormElement {
     /// Form node ID in the DOM
@@ -93,7 +92,6 @@ impl FormElement {
 }
 
 /// An <input> element's state
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct InputElement {
     /// Node ID in the DOM
@@ -172,7 +170,6 @@ impl InputElement {
 // ---------------------------------------------------------------------------
 
 /// Text input buffer with cursor and selection
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct TextInput {
     /// Text buffer
@@ -398,7 +395,6 @@ impl TextInput {
 // ---------------------------------------------------------------------------
 
 /// Result of clicking on a link
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum LinkAction {
     /// Navigate to a new URL
@@ -430,7 +426,6 @@ pub fn handle_click_on_link(href: &str) -> LinkAction {
 // ---------------------------------------------------------------------------
 
 /// Viewport scroll state
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct ScrollState {
     /// Current vertical scroll offset (pixels)

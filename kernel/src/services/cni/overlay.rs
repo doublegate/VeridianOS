@@ -13,7 +13,6 @@ use alloc::{collections::BTreeMap, vec::Vec};
 
 /// VXLAN tunnel configuration.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct VxlanTunnel {
     /// VXLAN Network Identifier (24-bit, 0..16777215).
     pub vni: u32,
@@ -50,7 +49,6 @@ impl VxlanTunnel {
 /// Wire format:
 ///   [flags(1)][reserved(3)][vni(3)][reserved(1)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct VxlanHeader {
     /// Flags (bit 3 = VNI valid).
     pub flags: u8,
@@ -104,7 +102,6 @@ pub type MacAddress = [u8; 6];
 
 /// FDB entry: maps MAC to remote VTEP IP.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct FdbEntry {
     /// Destination MAC address.
     pub mac: MacAddress,
@@ -122,7 +119,6 @@ pub struct FdbEntry {
 
 /// ARP proxy entry: maps IP to MAC for remote containers.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ArpProxyEntry {
     /// Container IP address.
     pub ip: u32,
@@ -138,7 +134,6 @@ pub struct ArpProxyEntry {
 
 /// VXLAN overlay error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum VxlanError {
     /// Tunnel not found.
     TunnelNotFound(u32),
@@ -156,7 +151,6 @@ pub enum VxlanError {
 
 /// VXLAN overlay network manager.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct VxlanOverlay {
     /// Active tunnels keyed by VNI.
     tunnels: BTreeMap<u32, VxlanTunnel>,

@@ -14,7 +14,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Network configuration for a pod sandbox.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct NetworkConfig {
     /// Pod CIDR.
     pub pod_cidr: String,
@@ -26,7 +25,6 @@ pub struct NetworkConfig {
 
 /// Pod sandbox state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub enum PodSandboxState {
     /// Sandbox is ready to run containers.
     Ready,
@@ -37,7 +35,6 @@ pub enum PodSandboxState {
 
 /// A pod sandbox groups containers with shared namespaces and networking.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct PodSandbox {
     /// Unique sandbox identifier.
     pub id: u64,
@@ -63,7 +60,6 @@ pub struct PodSandbox {
 
 /// Container state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub enum ContainerState {
     /// Container has been created but not started.
     #[default]
@@ -91,7 +87,6 @@ impl ContainerState {
 
 /// A container running within a pod sandbox.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Container {
     /// Unique container identifier.
     pub id: u64,
@@ -121,7 +116,6 @@ pub struct Container {
 
 /// Container status information.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ContainerStatus {
     /// Container ID.
     pub id: u64,
@@ -145,7 +139,6 @@ pub struct ContainerStatus {
 
 /// CRI error type.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum CriError {
     /// Sandbox not found.
     SandboxNotFound(u64),
@@ -168,7 +161,6 @@ fn alloc_id() -> u64 {
 
 /// CRI RuntimeService implementation.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct RuntimeService {
     /// Active pod sandboxes.
     sandboxes: BTreeMap<u64, PodSandbox>,

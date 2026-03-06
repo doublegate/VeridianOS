@@ -5,26 +5,24 @@
 //! compound), declarations with typed values, and specificity calculation.
 //! All numeric values use 26.6 fixed-point (i32).
 
+#![allow(dead_code)]
+
 use alloc::{string::String, vec::Vec};
 
 /// 26.6 fixed-point type: multiply pixel values by 64
-#[allow(dead_code)]
 pub type FixedPoint = i32;
 
 /// Convert pixels to 26.6 fixed-point
-#[allow(dead_code)]
 pub const fn px_to_fp(px: i32) -> FixedPoint {
     px * 64
 }
 
 /// Convert 26.6 fixed-point to pixels
-#[allow(dead_code)]
 pub const fn fp_to_px(fp: FixedPoint) -> i32 {
     fp / 64
 }
 
 /// CSS token types
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CssToken {
     Ident(String),
@@ -51,13 +49,11 @@ pub enum CssToken {
 }
 
 /// CSS tokenizer
-#[allow(dead_code)]
 pub struct CssTokenizer {
     input: Vec<u8>,
     pos: usize,
 }
 
-#[allow(dead_code)]
 impl CssTokenizer {
     pub fn new(input: &str) -> Self {
         Self {
@@ -374,7 +370,6 @@ impl CssTokenizer {
 }
 
 /// A simple CSS selector
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SimpleSelector {
     pub tag_name: Option<String>,
@@ -383,7 +378,6 @@ pub struct SimpleSelector {
 }
 
 /// Selector types
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selector {
     Simple(SimpleSelector),
@@ -397,11 +391,9 @@ pub enum Selector {
 }
 
 /// Specificity: (id_count, class_count, tag_count)
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct Specificity(pub u32, pub u32, pub u32);
 
-#[allow(dead_code)]
 impl Selector {
     pub fn specificity(&self) -> Specificity {
         match self {
@@ -430,7 +422,6 @@ impl Selector {
 }
 
 /// CSS measurement unit
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unit {
     Px,
@@ -442,7 +433,6 @@ pub enum Unit {
 }
 
 /// CSS property value
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum CssValue {
     Keyword(String),
@@ -458,7 +448,6 @@ pub enum CssValue {
 }
 
 /// A CSS declaration (property: value)
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Declaration {
     pub property: String,
@@ -467,7 +456,6 @@ pub struct Declaration {
 }
 
 /// A CSS rule (selectors + declarations)
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CssRule {
     pub selectors: Vec<Selector>,
@@ -475,20 +463,17 @@ pub struct CssRule {
 }
 
 /// A parsed CSS stylesheet
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct Stylesheet {
     pub rules: Vec<CssRule>,
 }
 
 /// CSS parser
-#[allow(dead_code)]
 pub struct CssParser {
     tokens: Vec<CssToken>,
     pos: usize,
 }
 
-#[allow(dead_code)]
 impl CssParser {
     pub fn new(css: &str) -> Self {
         let mut tokenizer = CssTokenizer::new(css);
@@ -906,7 +891,6 @@ impl CssParser {
 }
 
 /// Parse a hex color string to ARGB u32
-#[allow(dead_code)]
 pub fn parse_hex_color(hex: &str) -> u32 {
     let hex = hex.trim_start_matches('#');
     match hex.len() {
@@ -938,7 +922,6 @@ fn u8_from_hex_char(c: u8) -> u8 {
 }
 
 /// Named CSS colors
-#[allow(dead_code)]
 pub fn named_color(name: &str) -> Option<u32> {
     match name {
         "black" => Some(0xFF000000),

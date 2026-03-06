@@ -13,7 +13,6 @@ use alloc::{string::String, vec::Vec};
 
 /// HTTP/2 frame type identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum FrameType {
     /// DATA frame (type 0x0)
     Data,
@@ -57,7 +56,6 @@ impl FrameType {
 
 /// HTTP/2 frame header + payload.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Http2Frame {
     /// Length of the payload (24-bit).
     pub length: u32,
@@ -369,7 +367,6 @@ pub fn hpack_static_find_name(name: &str) -> Option<usize> {
 
 /// gRPC message: 1-byte compressed flag + 4-byte length + payload.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct GrpcMessage {
     /// Service name (e.g., "runtime.v1.RuntimeService").
     pub service: String,
@@ -450,7 +447,6 @@ impl GrpcMessage {
 
 /// gRPC status codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum GrpcStatus {
     /// Success.
     Ok,
@@ -518,7 +514,6 @@ impl GrpcStatus {
 
 /// gRPC response.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct GrpcResponse {
     /// Status code.
     pub status: GrpcStatus,
@@ -550,7 +545,6 @@ impl GrpcResponse {
 
 /// Unix socket-based gRPC transport.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct GrpcTransport {
     /// Socket path for the CRI endpoint.
     socket_path: String,

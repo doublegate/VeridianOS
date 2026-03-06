@@ -16,6 +16,10 @@ use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::{IpAddress, Ipv4Address};
+use crate::crypto::{
+    cipher_suite::{CipherSuite, HmacAlgorithm, KdfAlgorithm},
+    hash::{blake2s_hash, blake2s_keyed_hash},
+};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -76,265 +80,47 @@ const IDENTIFIER: &[u8] = b"WireGuard v1 zx2c4 Jason@zx2c4.com";
 /// Transport message header: type(4) + receiver(4) + counter(8)
 const TRANSPORT_HEADER_SIZE: usize = 16;
 
-// ── BLAKE2s (RFC 7693) ──────────────────────────────────────────────────────
-
-/// BLAKE2s initialization vector (same as SHA-256 fractional parts of
-/// sqrt(primes))
-const BLAKE2S_IV: [u32; 8] = [
-    0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19,
-];
-
-/// BLAKE2s sigma permutation schedule (10 rounds)
-const BLAKE2S_SIGMA: [[usize; 16]; 10] = [
-    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
-    [14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3],
-    [11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4],
-    [7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8],
-    [9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13],
-    [2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9],
-    [12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11],
-    [13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10],
-    [6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5],
-    [10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0],
-];
-
-/// BLAKE2s hash state
-#[derive(Clone)]
-pub struct Blake2s {
-    h: [u32; 8],
-    t: [u32; 2],
-    buf: [u8; 64],
-    buf_len: usize,
-    outlen: usize,
-}
-
-impl Blake2s {
-    /// Create new BLAKE2s hasher with specified output length (1-32 bytes)
-    pub fn new(outlen: usize) -> Self {
-        assert!((1..=32).contains(&outlen));
-        let mut h = BLAKE2S_IV;
-        // Parameter block: fan-out=1, depth=1, digest_length=outlen
-        h[0] ^= 0x01010000 ^ (outlen as u32);
-        Self {
-            h,
-            t: [0, 0],
-            buf: [0u8; 64],
-            buf_len: 0,
-            outlen,
-        }
-    }
-
-    /// Create new keyed BLAKE2s hasher
-    pub fn new_keyed(key: &[u8], outlen: usize) -> Self {
-        assert!(!key.is_empty() && key.len() <= 32);
-        assert!((1..=32).contains(&outlen));
-        let mut h = BLAKE2S_IV;
-        // Parameter block: fan-out=1, depth=1, digest_length=outlen,
-        // key_length=key.len()
-        h[0] ^= 0x01010000 ^ ((key.len() as u32) << 8) ^ (outlen as u32);
-        let mut state = Self {
-            h,
-            t: [0, 0],
-            buf: [0u8; 64],
-            buf_len: 0,
-            outlen,
-        };
-        // Pad key to 64 bytes and process as first block
-        let mut padded_key = [0u8; 64];
-        padded_key[..key.len()].copy_from_slice(key);
-        state.update(&padded_key);
-        state
-    }
-
-    /// Update state with input data
-    pub fn update(&mut self, data: &[u8]) {
-        let mut offset = 0;
-        let len = data.len();
-
-        // Fill buffer
-        if self.buf_len > 0 && self.buf_len + len > 64 {
-            let fill = 64 - self.buf_len;
-            self.buf[self.buf_len..64].copy_from_slice(&data[..fill]);
-            self.increment_counter(64);
-            self.compress(false);
-            self.buf_len = 0;
-            offset = fill;
-        }
-
-        // Process full blocks (keeping at least 1 byte for finalization)
-        while offset + 64 < len {
-            self.buf.copy_from_slice(&data[offset..offset + 64]);
-            self.increment_counter(64);
-            self.compress(false);
-            offset += 64;
-        }
-
-        // Buffer remaining
-        let remaining = len - offset;
-        if remaining > 0 {
-            self.buf[self.buf_len..self.buf_len + remaining].copy_from_slice(&data[offset..]);
-            self.buf_len += remaining;
-        }
-    }
-
-    /// Finalize and return the hash digest
-    pub fn finalize(mut self) -> [u8; 32] {
-        self.increment_counter(self.buf_len as u32);
-        // Zero-pad remaining buffer
-        let buf_len = self.buf_len;
-        for byte in &mut self.buf[buf_len..] {
-            *byte = 0;
-        }
-        self.compress(true);
-
-        let mut out = [0u8; 32];
-        for i in 0..8 {
-            let bytes = self.h[i].to_le_bytes();
-            out[i * 4..i * 4 + 4].copy_from_slice(&bytes);
-        }
-        out
-    }
-
-    /// BLAKE2s compression function: 10 rounds of G mixing
-    fn compress(&mut self, last: bool) {
-        let mut v = [0u32; 16];
-        v[..8].copy_from_slice(&self.h);
-        v[8..16].copy_from_slice(&BLAKE2S_IV);
-
-        v[12] ^= self.t[0];
-        v[13] ^= self.t[1];
-        if last {
-            v[14] = !v[14];
-        }
-
-        // Decode message block into 16 words
-        let mut m = [0u32; 16];
-        for (i, word) in m.iter_mut().enumerate() {
-            *word = u32::from_le_bytes([
-                self.buf[i * 4],
-                self.buf[i * 4 + 1],
-                self.buf[i * 4 + 2],
-                self.buf[i * 4 + 3],
-            ]);
-        }
-
-        // 10 rounds of G mixing
-        for s in &BLAKE2S_SIGMA[..10] {
-            // Column step
-            Self::g(&mut v, 0, 4, 8, 12, m[s[0]], m[s[1]]);
-            Self::g(&mut v, 1, 5, 9, 13, m[s[2]], m[s[3]]);
-            Self::g(&mut v, 2, 6, 10, 14, m[s[4]], m[s[5]]);
-            Self::g(&mut v, 3, 7, 11, 15, m[s[6]], m[s[7]]);
-            // Diagonal step
-            Self::g(&mut v, 0, 5, 10, 15, m[s[8]], m[s[9]]);
-            Self::g(&mut v, 1, 6, 11, 12, m[s[10]], m[s[11]]);
-            Self::g(&mut v, 2, 7, 8, 13, m[s[12]], m[s[13]]);
-            Self::g(&mut v, 3, 4, 9, 14, m[s[14]], m[s[15]]);
-        }
-
-        // Finalize
-        for i in 0..8 {
-            self.h[i] ^= v[i] ^ v[i + 8];
-        }
-    }
-
-    /// BLAKE2s G mixing function
-    #[inline]
-    fn g(v: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize, x: u32, y: u32) {
-        v[a] = v[a].wrapping_add(v[b]).wrapping_add(x);
-        v[d] = (v[d] ^ v[a]).rotate_right(16);
-        v[c] = v[c].wrapping_add(v[d]);
-        v[b] = (v[b] ^ v[c]).rotate_right(12);
-        v[a] = v[a].wrapping_add(v[b]).wrapping_add(y);
-        v[d] = (v[d] ^ v[a]).rotate_right(8);
-        v[c] = v[c].wrapping_add(v[d]);
-        v[b] = (v[b] ^ v[c]).rotate_right(7);
-    }
-
-    fn increment_counter(&mut self, inc: u32) {
-        self.t[0] = self.t[0].wrapping_add(inc);
-        if self.t[0] < inc {
-            self.t[1] = self.t[1].wrapping_add(1);
-        }
-    }
-}
+// ── BLAKE2s (delegates to crate::crypto::hash) ─────────────────────────────
 
 /// Compute BLAKE2s hash of data with given output length
+///
+/// Delegates to `crate::crypto::hash::blake2s_hash`.
 pub fn blake2s(data: &[u8], outlen: usize) -> [u8; 32] {
-    let mut hasher = Blake2s::new(outlen);
-    hasher.update(data);
-    hasher.finalize()
+    blake2s_hash(data, outlen)
 }
 
 /// Compute keyed BLAKE2s hash
+///
+/// Delegates to `crate::crypto::hash::blake2s_keyed_hash`.
 pub fn blake2s_keyed(key: &[u8], data: &[u8], outlen: usize) -> [u8; 32] {
-    let mut hasher = Blake2s::new_keyed(key, outlen);
-    hasher.update(data);
-    hasher.finalize()
+    blake2s_keyed_hash(key, data, outlen)
 }
 
-/// HMAC-BLAKE2s: RFC 2104 construction using BLAKE2s
+/// HMAC-BLAKE2s: delegates to `HmacAlgorithm::HmacBlake2s`
 pub fn hmac_blake2s(key: &[u8], data: &[u8]) -> [u8; 32] {
-    let block_size = 64;
-    let mut padded_key = [0u8; 64];
-
-    if key.len() > block_size {
-        let hash = blake2s(key, 32);
-        padded_key[..32].copy_from_slice(&hash);
-    } else {
-        padded_key[..key.len()].copy_from_slice(key);
-    }
-
-    // Inner hash: H((key XOR ipad) || data)
-    let mut ipad = [0x36u8; 64];
-    for i in 0..64 {
-        ipad[i] ^= padded_key[i];
-    }
-    let mut inner = Blake2s::new(32);
-    inner.update(&ipad);
-    inner.update(data);
-    let inner_hash = inner.finalize();
-
-    // Outer hash: H((key XOR opad) || inner_hash)
-    let mut opad = [0x5cu8; 64];
-    for i in 0..64 {
-        opad[i] ^= padded_key[i];
-    }
-    let mut outer = Blake2s::new(32);
-    outer.update(&opad);
-    outer.update(&inner_hash);
-    outer.finalize()
+    HmacAlgorithm::HmacBlake2s.compute(key, data)
 }
 
-/// HKDF-BLAKE2s key derivation (extract + expand)
+/// HKDF-BLAKE2s key derivation (extract + expand, two outputs)
+///
+/// Delegates to `KdfAlgorithm::HkdfBlake2s`.
 fn hkdf(chaining_key: &[u8; 32], input: &[u8]) -> ([u8; 32], [u8; 32]) {
-    let prk = hmac_blake2s(chaining_key, input);
-    let t1 = hmac_blake2s(&prk, &[0x01]);
-    let mut t1_input = [0u8; 33];
-    t1_input[..32].copy_from_slice(&t1);
-    t1_input[32] = 0x02;
-    let t2 = hmac_blake2s(&prk, &t1_input);
-    (t1, t2)
+    KdfAlgorithm::HkdfBlake2s.extract_expand2(chaining_key, input)
 }
 
 /// HKDF with three outputs
+///
+/// Delegates to `KdfAlgorithm::HkdfBlake2s`.
 fn hkdf3(chaining_key: &[u8; 32], input: &[u8]) -> ([u8; 32], [u8; 32], [u8; 32]) {
-    let prk = hmac_blake2s(chaining_key, input);
-    let t1 = hmac_blake2s(&prk, &[0x01]);
-    let mut t1_input = [0u8; 33];
-    t1_input[..32].copy_from_slice(&t1);
-    t1_input[32] = 0x02;
-    let t2 = hmac_blake2s(&prk, &t1_input);
-    let mut t2_input = [0u8; 33];
-    t2_input[..32].copy_from_slice(&t2);
-    t2_input[32] = 0x03;
-    let t3 = hmac_blake2s(&prk, &t2_input);
-    (t1, t2, t3)
+    KdfAlgorithm::HkdfBlake2s.extract_expand3(chaining_key, input)
 }
 
-// ── X25519 Key Exchange (stub) ──────────────────────────────────────────────
+// ── X25519 Key Exchange (delegates to crate::crypto::asymmetric) ────────────
 
 /// X25519 key pair (Curve25519 Diffie-Hellman)
+///
+/// Uses the real X25519 scalar multiplication from `crate::crypto::asymmetric`
+/// for public key derivation and Diffie-Hellman key exchange.
 #[derive(Clone)]
 pub struct X25519KeyPair {
     pub private_key: [u8; 32],
@@ -350,9 +136,11 @@ impl X25519KeyPair {
         private_key[31] &= 127;
         private_key[31] |= 64;
 
-        // Derive public key via scalar multiplication with base point
-        // (stub: use BLAKE2s hash as placeholder for actual curve math)
-        let public_key = blake2s(&private_key, 32);
+        // Derive public key via real X25519 scalar multiplication with basepoint
+        let public_key = crate::crypto::asymmetric::x25519_scalar_mult(
+            &private_key,
+            &crate::crypto::asymmetric::X25519_BASEPOINT,
+        );
         Self {
             private_key,
             public_key,
@@ -361,43 +149,29 @@ impl X25519KeyPair {
 
     /// Perform Diffie-Hellman key exchange
     pub fn dh(&self, their_public: &[u8; 32]) -> [u8; 32] {
-        // Stub: combine keys via HMAC (real impl would use scalar multiplication)
-        hmac_blake2s(&self.private_key, their_public)
+        crate::crypto::asymmetric::x25519_scalar_mult(&self.private_key, their_public)
     }
 }
 
-// ── ChaCha20-Poly1305 AEAD (stub) ──────────────────────────────────────────
+// ── ChaCha20-Poly1305 AEAD (delegates to CipherSuite) ──────────────────────
 
 /// AEAD encrypt with ChaCha20-Poly1305
 ///
-/// Returns ciphertext || 16-byte tag
+/// Uses `CipherSuite::ChaCha20Poly1305` from the shared crypto module.
+/// Returns ciphertext || 16-byte tag.
 fn aead_encrypt(key: &[u8; 32], nonce: u64, aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
     let mut nonce_bytes = [0u8; CHACHA_NONCE_SIZE];
     nonce_bytes[4..12].copy_from_slice(&nonce.to_le_bytes());
 
-    // Stub: XOR with key-derived stream (real impl would use ChaCha20 quarter
-    // rounds)
-    let stream_key = hmac_blake2s(key, &nonce_bytes);
-    let mut output = Vec::with_capacity(plaintext.len() + TAG_SIZE);
-    for (i, &byte) in plaintext.iter().enumerate() {
-        output.push(byte ^ stream_key[i % 32]);
-    }
-
-    // Compute authentication tag over AAD + ciphertext
-    let mut tag_input = Vec::with_capacity(aad.len() + output.len() + 16);
-    tag_input.extend_from_slice(aad);
-    tag_input.extend_from_slice(&output);
-    tag_input.extend_from_slice(&(aad.len() as u64).to_le_bytes());
-    tag_input.extend_from_slice(&(plaintext.len() as u64).to_le_bytes());
-    let tag = hmac_blake2s(&stream_key, &tag_input);
-    output.extend_from_slice(&tag[..TAG_SIZE]);
-
-    output
+    CipherSuite::ChaCha20Poly1305
+        .encrypt_aead(key, &nonce_bytes, aad, plaintext)
+        .unwrap_or_default()
 }
 
 /// AEAD decrypt with ChaCha20-Poly1305
 ///
-/// Returns plaintext or error if authentication fails
+/// Uses `CipherSuite::ChaCha20Poly1305` from the shared crypto module.
+/// Returns plaintext or error if authentication fails.
 fn aead_decrypt(
     key: &[u8; 32],
     nonce: u64,
@@ -407,31 +181,13 @@ fn aead_decrypt(
     if ciphertext_and_tag.len() < TAG_SIZE {
         return Err(WireGuardError::DecryptionFailed);
     }
-    let ct_len = ciphertext_and_tag.len() - TAG_SIZE;
-    let ciphertext = &ciphertext_and_tag[..ct_len];
-    let tag = &ciphertext_and_tag[ct_len..];
 
     let mut nonce_bytes = [0u8; CHACHA_NONCE_SIZE];
     nonce_bytes[4..12].copy_from_slice(&nonce.to_le_bytes());
-    let stream_key = hmac_blake2s(key, &nonce_bytes);
 
-    // Verify tag
-    let mut tag_input = Vec::with_capacity(aad.len() + ct_len + 16);
-    tag_input.extend_from_slice(aad);
-    tag_input.extend_from_slice(ciphertext);
-    tag_input.extend_from_slice(&(aad.len() as u64).to_le_bytes());
-    tag_input.extend_from_slice(&(ct_len as u64).to_le_bytes());
-    let expected_tag = hmac_blake2s(&stream_key, &tag_input);
-    if tag != &expected_tag[..TAG_SIZE] {
-        return Err(WireGuardError::DecryptionFailed);
-    }
-
-    // Decrypt
-    let mut plaintext = Vec::with_capacity(ct_len);
-    for (i, &byte) in ciphertext.iter().enumerate() {
-        plaintext.push(byte ^ stream_key[i % 32]);
-    }
-    Ok(plaintext)
+    CipherSuite::ChaCha20Poly1305
+        .decrypt_aead(key, &nonce_bytes, aad, ciphertext_and_tag)
+        .map_err(|_| WireGuardError::DecryptionFailed)
 }
 
 // ── Error Types ─────────────────────────────────────────────────────────────

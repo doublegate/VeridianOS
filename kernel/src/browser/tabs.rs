@@ -5,6 +5,8 @@
 //! rendering state. The tab bar provides visual tab switching with
 //! keyboard shortcuts (Ctrl+T, Ctrl+W, Ctrl+Tab, Ctrl+Shift+Tab).
 
+#![allow(dead_code)]
+
 use alloc::{
     collections::BTreeMap,
     string::{String, ToString},
@@ -23,7 +25,6 @@ pub type TabId = u64;
 // ---------------------------------------------------------------------------
 
 /// Navigation history for a single tab
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct NavigationHistory {
     /// Back stack (most recent at end)
@@ -111,7 +112,6 @@ impl NavigationHistory {
 // ---------------------------------------------------------------------------
 
 /// Loading state of a tab
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TabLoadState {
     /// Tab is idle / fully loaded
@@ -134,7 +134,6 @@ pub enum TabLoadState {
 // ---------------------------------------------------------------------------
 
 /// A single browser tab
-#[allow(dead_code)]
 #[derive(Clone)]
 pub struct Tab {
     /// Unique tab identifier
@@ -259,7 +258,6 @@ impl Tab {
 // ---------------------------------------------------------------------------
 
 /// Visual tab bar state for rendering
-#[allow(dead_code)]
 pub struct TabBar {
     /// Width of each tab in pixels
     pub tab_width: i32,
@@ -501,7 +499,6 @@ pub enum TabAction {
 }
 
 /// Manages all browser tabs
-#[allow(dead_code)]
 pub struct TabManager {
     /// All tabs, keyed by TabId
     tabs: BTreeMap<TabId, Tab>,

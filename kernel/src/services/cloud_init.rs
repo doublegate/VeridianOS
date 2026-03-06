@@ -14,7 +14,6 @@ use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 /// Instance metadata source (link-local address 169.254.169.254).
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct MetadataService {
     /// Base URL for the metadata service.
     base_url: String,
@@ -106,7 +105,6 @@ impl MetadataService {
 
 /// User account configuration.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct UserConfig {
     /// Username.
     pub name: String,
@@ -134,7 +132,6 @@ impl Default for UserConfig {
 
 /// File to write during cloud-init.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct WriteFile {
     /// Absolute file path.
     pub path: String,
@@ -159,7 +156,6 @@ impl Default for WriteFile {
 
 /// User data configuration.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct UserData {
     /// Desired hostname.
     pub hostname: String,
@@ -256,7 +252,6 @@ impl UserData {
 
 /// Cloud-init error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum CloudInitError {
     /// Metadata service unreachable.
     MetadataUnavailable,
@@ -280,7 +275,6 @@ pub enum CloudInitError {
 
 /// Execution log entry.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct LogEntry {
     /// Stage name.
     pub stage: String,
@@ -292,7 +286,6 @@ pub struct LogEntry {
 
 /// Cloud-Init runner: orchestrates the full initialization sequence.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct CloudInitRunner {
     /// Metadata service.
     metadata: MetadataService,

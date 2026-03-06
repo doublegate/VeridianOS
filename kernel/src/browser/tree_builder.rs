@@ -5,6 +5,8 @@
 //! algorithm with insertion modes, auto-closing, and formatting
 //! element reconstruction.
 
+#![allow(dead_code)]
+
 use alloc::{
     collections::BTreeMap,
     string::{String, ToString},
@@ -17,7 +19,6 @@ use super::{
 };
 
 /// Insertion modes for the tree builder
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InsertionMode {
     Initial,
@@ -35,7 +36,6 @@ enum InsertionMode {
 }
 
 /// Elements that auto-close a <p> tag
-#[allow(dead_code)]
 const P_CLOSING_TAGS: &[&str] = &[
     "address",
     "article",
@@ -70,7 +70,6 @@ const P_CLOSING_TAGS: &[&str] = &[
 ];
 
 /// Elements that auto-close themselves
-#[allow(dead_code)]
 const SELF_CLOSING_TAGS: &[(&str, &[&str])] = &[
     ("li", &["li"]),
     ("dt", &["dt", "dd"]),
@@ -86,13 +85,11 @@ const SELF_CLOSING_TAGS: &[(&str, &[&str])] = &[
 ];
 
 /// Formatting element names
-#[allow(dead_code)]
 const FORMATTING_ELEMENTS: &[&str] = &[
     "b", "big", "code", "em", "font", "i", "s", "small", "strike", "strong", "tt", "u",
 ];
 
 /// Active formatting entry
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct FormattingEntry {
     tag_name: String,
@@ -101,7 +98,6 @@ struct FormattingEntry {
 }
 
 /// HTML tree builder that constructs a DOM from tokens
-#[allow(dead_code)]
 pub struct TreeBuilder {
     document: Document,
     insertion_mode: InsertionMode,
@@ -113,7 +109,6 @@ pub struct TreeBuilder {
     frameset_ok: bool,
 }
 
-#[allow(dead_code)]
 impl TreeBuilder {
     /// Create a new tree builder
     pub fn new() -> Self {

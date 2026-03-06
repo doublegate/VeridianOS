@@ -14,7 +14,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Image specification (reference to pull).
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct ImageSpec {
     /// Full image name (e.g., "docker.io/library/nginx").
     pub image_name: String,
@@ -54,7 +53,6 @@ impl ImageSpec {
 
 /// Status of a pulled image.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ImageStatus {
     /// Unique image identifier.
     pub id: u64,
@@ -72,7 +70,6 @@ pub struct ImageStatus {
 
 /// Authentication configuration for pulling images from private registries.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct AuthConfig {
     /// Username.
     pub username: String,
@@ -84,7 +81,6 @@ pub struct AuthConfig {
 
 /// Image pull progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum PullStatus {
     /// Pull has not started.
     Pending,
@@ -98,7 +94,6 @@ pub enum PullStatus {
     Failed,
 }
 
-#[allow(dead_code)]
 impl PullStatus {
     /// Check if pull is terminal.
     pub fn is_terminal(self) -> bool {
@@ -108,7 +103,6 @@ impl PullStatus {
 
 /// Image service error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum ImageError {
     /// Image not found.
     NotFound(String),
@@ -135,7 +129,6 @@ fn alloc_image_id() -> u64 {
 
 /// CRI ImageService implementation.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ImageService {
     /// Stored images keyed by ID.
     images: BTreeMap<u64, ImageStatus>,

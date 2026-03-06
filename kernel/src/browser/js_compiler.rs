@@ -4,6 +4,8 @@
 //! stack-based instruction set with ~40 opcodes. Functions are compiled
 //! into FunctionTemplates with their own constant pools.
 
+#![allow(dead_code)]
+
 use alloc::{
     string::{String, ToString},
     vec::Vec,
@@ -19,7 +21,6 @@ use super::{
 // ---------------------------------------------------------------------------
 
 /// Bytecode opcodes (single-byte encoding)
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Opcode {
@@ -166,7 +167,6 @@ impl Opcode {
 // ---------------------------------------------------------------------------
 
 /// Constant pool entry
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum Constant {
     Number(JsNumber),
@@ -178,7 +178,6 @@ pub enum Constant {
 }
 
 /// Compiled function template
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct FunctionTemplate {
     /// Function name (empty for anonymous)
@@ -198,7 +197,6 @@ pub struct FunctionTemplate {
 }
 
 /// Bytecode chunk (top-level compilation unit)
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct Chunk {
     pub bytecode: Vec<u8>,
@@ -210,7 +208,6 @@ pub struct Chunk {
 // Local variable tracking
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct Local {
     name: String,
@@ -223,7 +220,6 @@ struct Local {
 // ---------------------------------------------------------------------------
 
 /// Bytecode compiler
-#[allow(dead_code)]
 pub struct Compiler {
     /// Current chunk being compiled
     chunk: Chunk,

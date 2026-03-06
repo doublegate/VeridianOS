@@ -5,6 +5,8 @@
 //!
 //! Sprints W5-S9 (CPU + memory hot-plug), W5-S10 (PCI hot-plug).
 
+#![allow(dead_code)]
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -38,7 +40,6 @@ const BITS_PER_WORD: usize = 64;
 
 /// Type of hot-plug event
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum HotplugType {
     /// CPU hot-plug (add or remove)
     Cpu,
@@ -54,7 +55,6 @@ pub enum HotplugType {
 
 /// A hot-plug event notification
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct HotplugEvent {
     /// Type of device being hot-plugged
     pub event_type: HotplugType,
@@ -68,7 +68,6 @@ pub struct HotplugEvent {
 
 impl HotplugEvent {
     /// Create a new hot-plug event
-    #[allow(dead_code)]
     pub fn new(event_type: HotplugType, device_info: u64, timestamp: u64, is_add: bool) -> Self {
         Self {
             event_type,
@@ -79,37 +78,31 @@ impl HotplugEvent {
     }
 
     /// Create a CPU add event
-    #[allow(dead_code)]
     pub fn cpu_add(cpu_id: u32, timestamp: u64) -> Self {
         Self::new(HotplugType::Cpu, cpu_id as u64, timestamp, true)
     }
 
     /// Create a CPU remove event
-    #[allow(dead_code)]
     pub fn cpu_remove(cpu_id: u32, timestamp: u64) -> Self {
         Self::new(HotplugType::Cpu, cpu_id as u64, timestamp, false)
     }
 
     /// Create a memory add event
-    #[allow(dead_code)]
     pub fn memory_add(dimm_slot: u32, timestamp: u64) -> Self {
         Self::new(HotplugType::Memory, dimm_slot as u64, timestamp, true)
     }
 
     /// Create a memory remove event
-    #[allow(dead_code)]
     pub fn memory_remove(dimm_slot: u32, timestamp: u64) -> Self {
         Self::new(HotplugType::Memory, dimm_slot as u64, timestamp, false)
     }
 
     /// Create a PCI device add event
-    #[allow(dead_code)]
     pub fn pci_add(slot_id: u32, timestamp: u64) -> Self {
         Self::new(HotplugType::PciDevice, slot_id as u64, timestamp, true)
     }
 
     /// Create a PCI device remove event
-    #[allow(dead_code)]
     pub fn pci_remove(slot_id: u32, timestamp: u64) -> Self {
         Self::new(HotplugType::PciDevice, slot_id as u64, timestamp, false)
     }
@@ -121,7 +114,6 @@ impl HotplugEvent {
 
 /// ACPI Generic Event Device for hot-plug notifications
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub struct AcpiGed {
     /// Pending events queue
     events: VecDeque<HotplugEvent>,
@@ -141,7 +133,6 @@ impl Default for AcpiGed {
 #[cfg(feature = "alloc")]
 impl AcpiGed {
     /// Create a new ACPI GED
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             events: VecDeque::new(),
@@ -151,7 +142,6 @@ impl AcpiGed {
     }
 
     /// Inject a hot-plug event
-    #[allow(dead_code)]
     pub fn inject_event(&mut self, mut event: HotplugEvent) -> Result<(), VmError> {
         if !self.enabled {
             return Err(VmError::DeviceError);
@@ -166,37 +156,31 @@ impl AcpiGed {
     }
 
     /// Poll the next pending event
-    #[allow(dead_code)]
     pub fn poll_event(&mut self) -> Option<HotplugEvent> {
         self.events.pop_front()
     }
 
     /// Check if there are pending events
-    #[allow(dead_code)]
     pub fn has_pending_events(&self) -> bool {
         !self.events.is_empty()
     }
 
     /// Get number of pending events
-    #[allow(dead_code)]
     pub fn pending_count(&self) -> usize {
         self.events.len()
     }
 
     /// Clear all pending events
-    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.events.clear();
     }
 
     /// Enable or disable the GED
-    #[allow(dead_code)]
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
     }
 
     /// Check if enabled
-    #[allow(dead_code)]
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
@@ -208,7 +192,6 @@ impl AcpiGed {
 
 /// CPU hot-plug lifecycle state
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub enum CpuLifecycleState {
     /// CPU slot is empty (not allocated)
     #[default]
@@ -231,7 +214,6 @@ pub enum CpuLifecycleState {
 
 /// CPU hot-plug manager
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub struct CpuHotplug {
     /// Maximum CPUs supported
     pub max_cpus: u32,
@@ -248,7 +230,6 @@ pub struct CpuHotplug {
 #[cfg(feature = "alloc")]
 impl CpuHotplug {
     /// Create a new CPU hot-plug manager
-    #[allow(dead_code)]
     pub fn new(max_cpus: u32, boot_cpu: u32) -> Self {
         let max = max_cpus.min(MAX_HOTPLUG_CPUS as u32);
         let bitmap_words = (max as usize).div_ceil(BITS_PER_WORD);
@@ -275,7 +256,6 @@ impl CpuHotplug {
     }
 
     /// Add (hot-plug) a CPU
-    #[allow(dead_code)]
     pub fn add_cpu(&mut self, cpu_id: u32) -> Result<(), VmError> {
         if cpu_id >= self.max_cpus {
             return Err(VmError::InvalidVmState);
@@ -303,7 +283,6 @@ impl CpuHotplug {
     }
 
     /// Remove (hot-unplug) a CPU
-    #[allow(dead_code)]
     pub fn remove_cpu(&mut self, cpu_id: u32) -> Result<(), VmError> {
         if cpu_id >= self.max_cpus {
             return Err(VmError::InvalidVmState);
@@ -331,7 +310,6 @@ impl CpuHotplug {
     }
 
     /// Check if a CPU is online
-    #[allow(dead_code)]
     pub fn is_online(&self, cpu_id: u32) -> bool {
         if cpu_id >= self.max_cpus {
             return false;
@@ -346,7 +324,6 @@ impl CpuHotplug {
     }
 
     /// Get CPU lifecycle state
-    #[allow(dead_code)]
     pub fn cpu_state(&self, cpu_id: u32) -> CpuLifecycleState {
         if (cpu_id as usize) < self.cpu_states.len() {
             self.cpu_states[cpu_id as usize]
@@ -356,19 +333,16 @@ impl CpuHotplug {
     }
 
     /// Get number of online CPUs
-    #[allow(dead_code)]
     pub fn online_count(&self) -> u32 {
         self.online_count
     }
 
     /// Get maximum CPUs
-    #[allow(dead_code)]
     pub fn max_cpus(&self) -> u32 {
         self.max_cpus
     }
 
     /// Get list of online CPU IDs
-    #[allow(dead_code)]
     pub fn online_cpu_ids(&self) -> Vec<u32> {
         let mut ids = Vec::new();
         for (word_idx, &word) in self.online_cpus.iter().enumerate() {
@@ -394,7 +368,6 @@ impl CpuHotplug {
 
 /// A memory DIMM slot for hot-plug
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub struct MemoryDimm {
     /// Slot number
     pub slot: u32,
@@ -408,7 +381,6 @@ pub struct MemoryDimm {
 
 impl MemoryDimm {
     /// Create a new DIMM
-    #[allow(dead_code)]
     pub fn new(slot: u32, size_mb: u32, base_addr: u64) -> Self {
         Self {
             slot,
@@ -419,13 +391,11 @@ impl MemoryDimm {
     }
 
     /// Get DIMM size in bytes
-    #[allow(dead_code)]
     pub fn size_bytes(&self) -> u64 {
         self.size_mb as u64 * 1024 * 1024
     }
 
     /// Get end address (exclusive)
-    #[allow(dead_code)]
     pub fn end_addr(&self) -> u64 {
         self.base_addr + self.size_bytes()
     }
@@ -437,7 +407,6 @@ impl MemoryDimm {
 
 /// Memory hot-plug manager
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub struct MemoryHotplug {
     /// Maximum DIMM slots
     pub max_dimms: u32,
@@ -454,7 +423,6 @@ impl MemoryHotplug {
     /// Create a new memory hot-plug manager
     ///
     /// `initial_base` is the address above which hot-added DIMMs are placed.
-    #[allow(dead_code)]
     pub fn new(max_dimms: u32, initial_base: u64) -> Self {
         Self {
             max_dimms: max_dimms.min(MAX_DIMMS as u32),
@@ -465,7 +433,6 @@ impl MemoryHotplug {
     }
 
     /// Add (hot-plug) a memory DIMM
-    #[allow(dead_code)]
     pub fn add_dimm(&mut self, size_mb: u32) -> Result<u32, VmError> {
         if self.dimms.len() >= self.max_dimms as usize {
             return Err(VmError::GuestMemoryError);
@@ -494,7 +461,6 @@ impl MemoryHotplug {
     }
 
     /// Remove (hot-unplug) a memory DIMM
-    #[allow(dead_code)]
     pub fn remove_dimm(&mut self, slot: u32) -> Result<(), VmError> {
         let dimm = self
             .dimms
@@ -517,25 +483,21 @@ impl MemoryHotplug {
     }
 
     /// Get DIMM by slot
-    #[allow(dead_code)]
     pub fn dimm(&self, slot: u32) -> Option<&MemoryDimm> {
         self.dimms.iter().find(|d| d.slot == slot)
     }
 
     /// Get total online memory in MB
-    #[allow(dead_code)]
     pub fn total_online_mb(&self) -> u64 {
         self.total_online_mb
     }
 
     /// Get number of installed DIMMs
-    #[allow(dead_code)]
     pub fn dimm_count(&self) -> usize {
         self.dimms.len()
     }
 
     /// Get number of online DIMMs
-    #[allow(dead_code)]
     pub fn online_dimm_count(&self) -> usize {
         self.dimms.iter().filter(|d| d.online).count()
     }
@@ -547,7 +509,6 @@ impl MemoryHotplug {
 
 /// Power indicator state
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub enum PowerIndicator {
     /// Indicator off
     #[default]
@@ -560,7 +521,6 @@ pub enum PowerIndicator {
 
 /// Attention indicator state
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub enum AttentionIndicator {
     /// Indicator off
     #[default]
@@ -577,7 +537,6 @@ pub enum AttentionIndicator {
 
 /// A PCI hot-plug slot
 #[derive(Debug, Clone, Copy, Default)]
-#[allow(dead_code)]
 pub struct PciHotplugSlot {
     /// Slot identifier
     pub slot_id: u32,
@@ -597,7 +556,6 @@ pub struct PciHotplugSlot {
 
 impl PciHotplugSlot {
     /// Create a new empty slot
-    #[allow(dead_code)]
     pub fn new(slot_id: u32) -> Self {
         Self {
             slot_id,
@@ -607,7 +565,6 @@ impl PciHotplugSlot {
     }
 
     /// Create a slot with surprise removal support
-    #[allow(dead_code)]
     pub fn with_surprise_removal(slot_id: u32) -> Self {
         Self {
             slot_id,
@@ -623,7 +580,6 @@ impl PciHotplugSlot {
 
 /// Standard Hot-Plug Controller for conventional PCI hot-plug
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub struct ShpcController {
     /// Hot-plug slots
     pub slots: Vec<PciHotplugSlot>,
@@ -636,7 +592,6 @@ pub struct ShpcController {
 #[cfg(feature = "alloc")]
 impl ShpcController {
     /// Create a new SHPC controller
-    #[allow(dead_code)]
     pub fn new(num_slots: u32, base_addr: u64) -> Self {
         let count = num_slots.min(MAX_PCI_SLOTS as u32);
         let mut slots = Vec::with_capacity(count as usize);
@@ -651,7 +606,6 @@ impl ShpcController {
     }
 
     /// Power on a slot (insert device)
-    #[allow(dead_code)]
     pub fn slot_power_on(&mut self, slot_id: u32, device_bdf: u32) -> Result<(), VmError> {
         let slot = self
             .slots
@@ -671,7 +625,6 @@ impl ShpcController {
     }
 
     /// Power off a slot (eject device)
-    #[allow(dead_code)]
     pub fn slot_power_off(&mut self, slot_id: u32) -> Result<(), VmError> {
         let slot = self
             .slots
@@ -691,7 +644,6 @@ impl ShpcController {
     }
 
     /// Handle surprise removal of a device
-    #[allow(dead_code)]
     pub fn surprise_removal(&mut self, slot_id: u32) -> Result<HotplugEvent, VmError> {
         let slot = self
             .slots
@@ -717,19 +669,16 @@ impl ShpcController {
     }
 
     /// Get slot state
-    #[allow(dead_code)]
     pub fn slot(&self, slot_id: u32) -> Option<&PciHotplugSlot> {
         self.slots.iter().find(|s| s.slot_id == slot_id)
     }
 
     /// Get number of occupied slots
-    #[allow(dead_code)]
     pub fn occupied_count(&self) -> usize {
         self.slots.iter().filter(|s| s.occupied).count()
     }
 
     /// Get number of total slots
-    #[allow(dead_code)]
     pub fn slot_count(&self) -> usize {
         self.slots.len()
     }
@@ -741,7 +690,6 @@ impl ShpcController {
 
 /// Slot event type for PCIe native hot-plug
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum SlotEvent {
     /// Attention button pressed
     AttentionButton,
@@ -757,7 +705,6 @@ pub enum SlotEvent {
 
 /// PCIe native hot-plug controller (per-slot)
 #[derive(Debug, Clone, Copy, Default)]
-#[allow(dead_code)]
 pub struct PcieNativeHotplug {
     /// Slot ID
     pub slot_id: u32,
@@ -783,7 +730,6 @@ pub struct PcieNativeHotplug {
 
 impl PcieNativeHotplug {
     /// Create a new PCIe hot-plug controller for a slot
-    #[allow(dead_code)]
     pub fn new(slot_id: u32) -> Self {
         Self {
             slot_id,
@@ -794,7 +740,6 @@ impl PcieNativeHotplug {
     }
 
     /// Handle a slot event
-    #[allow(dead_code)]
     pub fn handle_slot_event(&mut self, event: SlotEvent) -> Option<HotplugEvent> {
         match event {
             SlotEvent::AttentionButton => {
@@ -840,7 +785,6 @@ impl PcieNativeHotplug {
     }
 
     /// Enable power to the slot
-    #[allow(dead_code)]
     pub fn power_on(&mut self) {
         self.power_enabled = true;
         self.power_indicator = PowerIndicator::On;
@@ -848,20 +792,17 @@ impl PcieNativeHotplug {
     }
 
     /// Disable power to the slot
-    #[allow(dead_code)]
     pub fn power_off(&mut self) {
         self.power_enabled = false;
         self.power_indicator = PowerIndicator::Off;
     }
 
     /// Check if a device is present
-    #[allow(dead_code)]
     pub fn is_present(&self) -> bool {
         self.presence_detect
     }
 
     /// Check if power is on
-    #[allow(dead_code)]
     pub fn is_powered(&self) -> bool {
         self.power_enabled
     }

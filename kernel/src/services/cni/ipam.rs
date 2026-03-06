@@ -13,7 +13,6 @@ use alloc::{string::String, vec::Vec};
 
 /// IPAM configuration for a subnet.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct IpamConfig {
     /// Subnet base address (host byte order).
     pub subnet: u32,
@@ -92,7 +91,6 @@ impl IpamConfig {
 
 /// IPAM error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum IpamError {
     /// No addresses available.
     Exhausted,
@@ -110,7 +108,6 @@ pub enum IpamError {
 
 /// Bitmap-based IP address allocator for a single subnet.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct IpamAllocator {
     /// Bitmap of allocated addresses (1 bit per host address).
     bitmap: Vec<u64>,

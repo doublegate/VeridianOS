@@ -5,6 +5,8 @@
 //! capabilities. Includes crash recovery, IPC between tabs, and resource
 //! limits to prevent any single tab from monopolizing the system.
 
+#![allow(dead_code)]
+
 use alloc::{
     collections::BTreeMap,
     string::{String, ToString},
@@ -38,7 +40,6 @@ pub enum TabProcessState {
 // ---------------------------------------------------------------------------
 
 /// Resource limits for a tab process
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ResourceLimits {
     /// Maximum JS heap size in bytes
@@ -73,7 +74,6 @@ impl Default for ResourceLimits {
 // ---------------------------------------------------------------------------
 
 /// Current resource usage for a tab
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct ResourceUsage {
     /// Current heap bytes
@@ -99,7 +99,6 @@ pub struct ResourceUsage {
 // ---------------------------------------------------------------------------
 
 /// Message types for inter-tab communication
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum IpcMessage {
     /// postMessage-style string message
@@ -152,7 +151,6 @@ pub enum TabLifecycleEvent {
 // ---------------------------------------------------------------------------
 
 /// An isolated tab process with its own JS VM, DOM, and GC
-#[allow(dead_code)]
 pub struct TabProcess {
     /// Associated tab ID
     pub tab_id: TabId,
@@ -349,7 +347,6 @@ impl TabProcess {
 // ---------------------------------------------------------------------------
 
 /// Capabilities bitmap for tab sandboxing
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TabCapabilities {
     /// Can execute JavaScript
@@ -464,7 +461,6 @@ impl TabCapabilities {
 // ---------------------------------------------------------------------------
 
 /// Manages all tab processes and their isolation
-#[allow(dead_code)]
 pub struct ProcessIsolation {
     /// Tab processes keyed by TabId
     processes: BTreeMap<TabId, TabProcess>,

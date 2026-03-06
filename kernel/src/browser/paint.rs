@@ -5,6 +5,8 @@
 //! into a pixel buffer. Uses integer-only alpha blending and the
 //! 8x16 bitmap font for text rendering.
 
+#![allow(dead_code)]
+
 use alloc::{string::String, vec::Vec};
 
 use super::{
@@ -14,7 +16,6 @@ use super::{
 };
 
 /// Side of a border
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BorderSide {
     Top,
@@ -24,7 +25,6 @@ pub enum BorderSide {
 }
 
 /// A display command in the display list
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum DisplayCommand {
     /// Fill a rectangle with a solid color
@@ -40,7 +40,6 @@ pub enum DisplayCommand {
 }
 
 /// A rectangle in pixel coordinates (not fixed-point)
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PixelRect {
     pub x: i32,
@@ -49,7 +48,6 @@ pub struct PixelRect {
     pub height: i32,
 }
 
-#[allow(dead_code)]
 impl PixelRect {
     pub fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
         Self {
@@ -90,13 +88,11 @@ impl PixelRect {
 }
 
 /// A display list of rendering commands
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct DisplayList {
     pub commands: Vec<DisplayCommand>,
 }
 
-#[allow(dead_code)]
 impl DisplayList {
     pub fn new() -> Self {
         Self {
@@ -110,7 +106,6 @@ impl DisplayList {
 }
 
 /// Build a display list from a layout tree
-#[allow(dead_code)]
 pub fn build_display_list(layout: &LayoutBox, scroll_y: i32) -> DisplayList {
     let mut list = DisplayList::new();
     render_layout_box(&mut list, layout, scroll_y);
@@ -118,7 +113,6 @@ pub fn build_display_list(layout: &LayoutBox, scroll_y: i32) -> DisplayList {
 }
 
 /// Render a layout box into the display list
-#[allow(dead_code)]
 fn render_layout_box(list: &mut DisplayList, layout: &LayoutBox, scroll_y: i32) {
     if layout.style.display == Display::None {
         return;
@@ -174,7 +168,6 @@ fn render_layout_box(list: &mut DisplayList, layout: &LayoutBox, scroll_y: i32) 
 }
 
 /// Render background color
-#[allow(dead_code)]
 fn render_background(list: &mut DisplayList, layout: &LayoutBox, scroll_y: i32) {
     let bg = layout.style.background_color;
     if bg == 0 || (bg >> 24) == 0 {
@@ -195,7 +188,6 @@ fn render_background(list: &mut DisplayList, layout: &LayoutBox, scroll_y: i32) 
 }
 
 /// Render borders
-#[allow(dead_code)]
 fn render_borders(list: &mut DisplayList, layout: &LayoutBox, scroll_y: i32) {
     let d = &layout.dimensions;
     let bb = d.border_box();
@@ -268,7 +260,6 @@ fn render_borders(list: &mut DisplayList, layout: &LayoutBox, scroll_y: i32) {
 }
 
 /// Pixel buffer painter
-#[allow(dead_code)]
 pub struct Painter {
     pub width: usize,
     pub height: usize,
@@ -276,7 +267,6 @@ pub struct Painter {
     clip_stack: Vec<PixelRect>,
 }
 
-#[allow(dead_code)]
 impl Painter {
     /// Create a new painter with given dimensions
     pub fn new(width: usize, height: usize) -> Self {
@@ -414,7 +404,6 @@ impl Painter {
 
 /// Alpha-blend source over destination (integer math)
 /// Color format: ARGB (0xAARRGGBB)
-#[allow(dead_code)]
 pub fn alpha_blend(src: u32, dst: u32) -> u32 {
     let sa = (src >> 24) & 0xFF;
     let sr = (src >> 16) & 0xFF;
@@ -437,7 +426,6 @@ pub fn alpha_blend(src: u32, dst: u32) -> u32 {
 
 /// Get a basic 8x16 glyph for a character
 /// Returns 16 bytes (one per row), each bit represents a pixel
-#[allow(dead_code)]
 fn get_glyph(ch: char) -> [u8; 16] {
     // Simplified glyph data for printable ASCII
     let code = ch as u32;

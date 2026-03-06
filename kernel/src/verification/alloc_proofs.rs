@@ -5,26 +5,24 @@
 //! no double allocation, use-after-free prevention, buddy system consistency,
 //! frame conservation, zone correctness, and alignment guarantees.
 
+#![allow(dead_code)]
+
 #[cfg(feature = "alloc")]
 use alloc::collections::BTreeSet;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 /// Frame size in bytes (4 KiB)
-#[allow(dead_code)]
 const MODEL_FRAME_SIZE: u64 = 4096;
 
 /// DMA zone upper bound (16 MB)
-#[allow(dead_code)]
 const DMA_ZONE_LIMIT: u64 = 16 * 1024 * 1024;
 
 /// Maximum buddy order (2^10 = 1024 frames = 4 MiB block)
-#[allow(dead_code)]
 const MAX_BUDDY_ORDER: u32 = 10;
 
 /// Memory zones for zone-aware allocation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[allow(dead_code)]
 pub enum MemoryZone {
     /// DMA zone: 0 - 16 MB
     Dma = 0,
@@ -36,7 +34,6 @@ pub enum MemoryZone {
 
 /// Allocation state of a frame
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum FrameState {
     /// Frame is free and available
     Free,
@@ -46,7 +43,6 @@ pub enum FrameState {
 
 /// Model of the frame allocator for verification
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct AllocatorModel {
     /// Set of currently allocated frame addresses
     #[cfg(feature = "alloc")]
@@ -63,7 +59,6 @@ pub struct AllocatorModel {
 }
 
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 impl AllocatorModel {
     /// Create a new allocator model with frames in range [base, base + count *
     /// FRAME_SIZE)
@@ -149,7 +144,6 @@ impl AllocatorModel {
 }
 
 /// Get the address range for a memory zone
-#[allow(dead_code)]
 fn zone_range(zone: MemoryZone) -> (u64, u64) {
     match zone {
         MemoryZone::Dma => (0, DMA_ZONE_LIMIT),
@@ -160,7 +154,6 @@ fn zone_range(zone: MemoryZone) -> (u64, u64) {
 
 /// Buddy block model for buddy system verification
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct BuddyBlock {
     /// Base address (frame-aligned)
     pub base: u64,
@@ -170,7 +163,6 @@ pub struct BuddyBlock {
     pub free: bool,
 }
 
-#[allow(dead_code)]
 impl BuddyBlock {
     /// Size of this block in frames
     pub fn frame_count(&self) -> u64 {
@@ -233,7 +225,6 @@ impl BuddyBlock {
 
 /// Bitmap allocator model for small allocation verification
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct BitmapModel {
     /// Bitmap tracking allocated frames (true = allocated)
     #[cfg(feature = "alloc")]
@@ -243,7 +234,6 @@ pub struct BitmapModel {
 }
 
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 impl BitmapModel {
     /// Create a new bitmap for the given number of frames
     pub fn new(base: u64, frame_count: usize) -> Self {
@@ -293,7 +283,6 @@ impl BitmapModel {
 
 /// Errors from allocator verification
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum AllocModelError {
     /// No free frames available
     OutOfMemory,
@@ -314,11 +303,9 @@ pub enum AllocModelError {
 }
 
 /// Allocator invariant checker
-#[allow(dead_code)]
 pub struct AllocInvariantChecker;
 
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 impl AllocInvariantChecker {
     /// Verify no double allocation: allocated set has no duplicates
     /// (BTreeSet guarantees this structurally, but we verify operationally)

@@ -5,6 +5,8 @@
 //!
 //! Sprint W5-S8.
 
+#![allow(dead_code)]
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -18,30 +20,21 @@ use super::{vfio::PciAddress, VmError};
 // ---------------------------------------------------------------------------
 
 /// SR-IOV PCI Extended Capability ID
-#[allow(dead_code)]
 const SRIOV_CAP_ID: u16 = 0x0010;
 
 /// Maximum VFs per physical function
 const MAX_VFS: usize = 256;
 
 /// SR-IOV capability register offsets (from capability start)
-#[allow(dead_code)]
 const SRIOV_CAP_OFFSET: u16 = 0x04;
-#[allow(dead_code)]
 const SRIOV_CTRL_OFFSET: u16 = 0x08;
-#[allow(dead_code)]
 const SRIOV_TOTAL_VFS_OFFSET: u16 = 0x0E;
-#[allow(dead_code)]
 const SRIOV_NUM_VFS_OFFSET: u16 = 0x10;
-#[allow(dead_code)]
 const SRIOV_VF_OFFSET_OFFSET: u16 = 0x14;
-#[allow(dead_code)]
 const SRIOV_VF_STRIDE_OFFSET: u16 = 0x16;
-#[allow(dead_code)]
 const SRIOV_VF_DEVICE_ID_OFFSET: u16 = 0x1A;
 
 /// SR-IOV control register bits
-#[allow(dead_code)]
 const SRIOV_CTRL_VF_ENABLE: u16 = 0x0001;
 const SRIOV_CTRL_VF_MIGRATION: u16 = 0x0002;
 const SRIOV_CTRL_ARI_CAPABLE: u16 = 0x0010;
@@ -52,7 +45,6 @@ const SRIOV_CTRL_ARI_CAPABLE: u16 = 0x0010;
 
 /// Parsed SR-IOV capability from PCI config space
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub struct SriovCapability {
     /// Offset of the SR-IOV capability in PCI config space
     pub offset: u16,
@@ -79,7 +71,6 @@ impl SriovCapability {
     ///
     /// `data` should contain the SR-IOV capability structure starting at index
     /// 0.
-    #[allow(dead_code)]
     pub fn parse(data: &[u8], offset: u16) -> Result<Self, VmError> {
         if data.len() < 0x24 {
             return Err(VmError::DeviceError);
@@ -107,7 +98,6 @@ impl SriovCapability {
     }
 
     /// Calculate the PCI address of a specific VF
-    #[allow(dead_code)]
     pub fn vf_address(&self, pf: &PciAddress, vf_index: u16) -> Option<PciAddress> {
         if vf_index >= self.total_vfs {
             return None;
@@ -120,7 +110,6 @@ impl SriovCapability {
     }
 
     /// Get the SR-IOV extended capability ID
-    #[allow(dead_code)]
     pub fn cap_id() -> u16 {
         SRIOV_CAP_ID
     }
@@ -132,7 +121,6 @@ impl SriovCapability {
 
 /// State of a Virtual Function
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub enum VfState {
     /// VF is not enabled
     #[default]
@@ -145,7 +133,6 @@ pub enum VfState {
 
 /// A single Virtual Function instance
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub struct VirtualFunction {
     /// VF index within the PF's VF space
     pub vf_index: u16,
@@ -161,7 +148,6 @@ pub struct VirtualFunction {
 
 impl VirtualFunction {
     /// Create a new VF
-    #[allow(dead_code)]
     pub fn new(vf_index: u16, pci_address: PciAddress) -> Self {
         Self {
             vf_index,
@@ -173,14 +159,12 @@ impl VirtualFunction {
     }
 
     /// Enable this VF
-    #[allow(dead_code)]
     pub fn enable(&mut self) {
         self.enabled = true;
         self.state = VfState::Enabled;
     }
 
     /// Disable this VF
-    #[allow(dead_code)]
     pub fn disable(&mut self) {
         self.enabled = false;
         self.assigned_vm = None;
@@ -188,7 +172,6 @@ impl VirtualFunction {
     }
 
     /// Assign this VF to a VM
-    #[allow(dead_code)]
     pub fn assign(&mut self, vm_id: u32) -> Result<(), VmError> {
         if !self.enabled {
             return Err(VmError::DeviceError);
@@ -202,7 +185,6 @@ impl VirtualFunction {
     }
 
     /// Unassign this VF from its VM
-    #[allow(dead_code)]
     pub fn unassign(&mut self) {
         self.assigned_vm = None;
         if self.enabled {
@@ -213,7 +195,6 @@ impl VirtualFunction {
     }
 
     /// Check if this VF is available for assignment
-    #[allow(dead_code)]
     pub fn is_available(&self) -> bool {
         self.enabled && self.assigned_vm.is_none()
     }
@@ -225,7 +206,6 @@ impl VirtualFunction {
 
 /// An SR-IOV physical function with its virtual functions
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub struct SriovDevice {
     /// PCI address of the physical function
     pub pf_address: PciAddress,
@@ -240,7 +220,6 @@ pub struct SriovDevice {
 #[cfg(feature = "alloc")]
 impl SriovDevice {
     /// Create a new SR-IOV device from a PF and capability
-    #[allow(dead_code)]
     pub fn new(pf_address: PciAddress, capability: SriovCapability) -> Self {
         Self {
             pf_address,
@@ -251,7 +230,6 @@ impl SriovDevice {
     }
 
     /// Parse capability from config space data
-    #[allow(dead_code)]
     pub fn parse_capability(
         pf_address: PciAddress,
         data: &[u8],
@@ -262,7 +240,6 @@ impl SriovDevice {
     }
 
     /// Enable VFs (creates VF entries)
-    #[allow(dead_code)]
     pub fn enable_vfs(&mut self, num_vfs: u16) -> Result<(), VmError> {
         if num_vfs > self.capability.total_vfs || num_vfs as usize > MAX_VFS {
             return Err(VmError::DeviceError);
@@ -287,7 +264,6 @@ impl SriovDevice {
     }
 
     /// Disable all VFs
-    #[allow(dead_code)]
     pub fn disable_vfs(&mut self) {
         for vf in &mut self.vfs {
             vf.disable();
@@ -298,7 +274,6 @@ impl SriovDevice {
     }
 
     /// Assign a VF to a VM
-    #[allow(dead_code)]
     pub fn assign_vf(&mut self, vf_index: u16, vm_id: u32) -> Result<(), VmError> {
         let vf = self
             .vfs
@@ -309,7 +284,6 @@ impl SriovDevice {
     }
 
     /// Unassign a VF from its VM
-    #[allow(dead_code)]
     pub fn unassign_vf(&mut self, vf_index: u16) -> Result<(), VmError> {
         let vf = self
             .vfs
@@ -321,25 +295,21 @@ impl SriovDevice {
     }
 
     /// Get a VF by index
-    #[allow(dead_code)]
     pub fn vf(&self, vf_index: u16) -> Option<&VirtualFunction> {
         self.vfs.iter().find(|v| v.vf_index == vf_index)
     }
 
     /// Get number of enabled VFs
-    #[allow(dead_code)]
     pub fn num_enabled_vfs(&self) -> usize {
         self.vfs.iter().filter(|v| v.enabled).count()
     }
 
     /// Get number of assigned VFs
-    #[allow(dead_code)]
     pub fn num_assigned_vfs(&self) -> usize {
         self.vfs.iter().filter(|v| v.assigned_vm.is_some()).count()
     }
 
     /// List available (unassigned) VFs
-    #[allow(dead_code)]
     pub fn available_vfs(&self) -> Vec<u16> {
         self.vfs
             .iter()
@@ -355,7 +325,6 @@ impl SriovDevice {
 
 /// Manager for all SR-IOV devices in the system
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub struct SriovManager {
     /// Known SR-IOV devices keyed by PF BDF
     devices: BTreeMap<u16, SriovDevice>,
@@ -371,7 +340,6 @@ impl Default for SriovManager {
 #[cfg(feature = "alloc")]
 impl SriovManager {
     /// Create a new SR-IOV manager
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             devices: BTreeMap::new(),
@@ -379,26 +347,22 @@ impl SriovManager {
     }
 
     /// Discover and register an SR-IOV device
-    #[allow(dead_code)]
     pub fn discover(&mut self, device: SriovDevice) {
         let bdf = device.pf_address.to_bdf();
         self.devices.insert(bdf, device);
     }
 
     /// Get a device by PF address
-    #[allow(dead_code)]
     pub fn get_device(&self, pf: &PciAddress) -> Option<&SriovDevice> {
         self.devices.get(&pf.to_bdf())
     }
 
     /// Get a mutable device by PF address
-    #[allow(dead_code)]
     pub fn get_device_mut(&mut self, pf: &PciAddress) -> Option<&mut SriovDevice> {
         self.devices.get_mut(&pf.to_bdf())
     }
 
     /// List all VFs across all devices
-    #[allow(dead_code)]
     pub fn list_vfs(&self) -> Vec<(PciAddress, &VirtualFunction)> {
         let mut result = Vec::new();
         for dev in self.devices.values() {
@@ -410,19 +374,16 @@ impl SriovManager {
     }
 
     /// Get total number of registered SR-IOV devices
-    #[allow(dead_code)]
     pub fn device_count(&self) -> usize {
         self.devices.len()
     }
 
     /// Get total number of enabled VFs
-    #[allow(dead_code)]
     pub fn total_vfs(&self) -> usize {
         self.devices.values().map(|d| d.num_enabled_vfs()).sum()
     }
 
     /// Get total number of assigned VFs
-    #[allow(dead_code)]
     pub fn total_assigned_vfs(&self) -> usize {
         self.devices.values().map(|d| d.num_assigned_vfs()).sum()
     }

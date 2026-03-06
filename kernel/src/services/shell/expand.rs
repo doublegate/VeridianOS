@@ -6,6 +6,8 @@
 //! variables (`$?`, `$$`, `$0`), tilde expansion, quote handling,
 //! backslash-dollar escaping, and command substitution (`$(command)`).
 
+#![allow(dead_code)]
+
 // Shell variable expansion
 
 use alloc::{

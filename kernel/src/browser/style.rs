@@ -4,6 +4,8 @@
 //! sorting by specificity, and inheriting inheritable properties
 //! from parent nodes. Includes user-agent default styles.
 
+#![allow(dead_code)]
+
 use alloc::{string::String, vec::Vec};
 
 use super::{
@@ -15,7 +17,6 @@ use super::{
 };
 
 /// CSS display property
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Display {
     Block,
@@ -34,7 +35,6 @@ pub enum Display {
 }
 
 /// CSS position property
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Position {
     #[default]
@@ -45,7 +45,6 @@ pub enum Position {
 }
 
 /// CSS float property
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Float {
     #[default]
@@ -55,7 +54,6 @@ pub enum Float {
 }
 
 /// CSS clear property
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Clear {
     #[default]
@@ -66,7 +64,6 @@ pub enum Clear {
 }
 
 /// CSS text-align property
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextAlign {
     #[default]
@@ -77,7 +74,6 @@ pub enum TextAlign {
 }
 
 /// CSS overflow property
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Overflow {
     #[default]
@@ -88,7 +84,6 @@ pub enum Overflow {
 }
 
 /// CSS visibility property
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Visibility {
     #[default]
@@ -98,7 +93,6 @@ pub enum Visibility {
 }
 
 /// CSS border style
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BorderStyle {
     #[default]
@@ -114,7 +108,6 @@ pub enum BorderStyle {
 }
 
 /// CSS white-space property
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WhiteSpace {
     #[default]
@@ -126,7 +119,6 @@ pub enum WhiteSpace {
 }
 
 /// Computed style for a DOM node (all values resolved to final values)
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ComputedStyle {
     pub display: Display,
@@ -227,7 +219,6 @@ impl Default for ComputedStyle {
 }
 
 /// A matched rule with its specificity for sorting
-#[allow(dead_code)]
 #[derive(Debug)]
 struct MatchedRule {
     specificity: Specificity,
@@ -236,7 +227,6 @@ struct MatchedRule {
 }
 
 /// Style resolver that applies CSS rules to DOM nodes
-#[allow(dead_code)]
 pub struct StyleResolver {
     pub stylesheets: Vec<Stylesheet>,
     pub ua_stylesheet: Stylesheet,
@@ -248,7 +238,6 @@ impl Default for StyleResolver {
     }
 }
 
-#[allow(dead_code)]
 impl StyleResolver {
     /// Create a new style resolver with user-agent defaults
     pub fn new() -> Self {

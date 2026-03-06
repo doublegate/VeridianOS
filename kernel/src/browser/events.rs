@@ -4,6 +4,8 @@
 //! hit testing against layout boxes, and event listener management.
 //! All coordinates use 26.6 fixed-point arithmetic (i32).
 
+#![allow(dead_code)]
+
 use alloc::{collections::BTreeMap, vec::Vec};
 
 // ---------------------------------------------------------------------------
@@ -36,7 +38,6 @@ pub const fn fp_to_int(v: FixedPoint) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// DOM event type enumeration
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventType {
     Click,
@@ -95,7 +96,6 @@ impl EventType {
 }
 
 /// Event propagation phase
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EventPhase {
     /// Not dispatched yet
@@ -114,7 +114,6 @@ pub enum EventPhase {
 // ---------------------------------------------------------------------------
 
 /// A DOM event
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Event {
     /// Type of the event
@@ -232,7 +231,6 @@ impl Event {
 // ---------------------------------------------------------------------------
 
 /// An event listener registration
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventListener {
     /// Type of event to listen for
@@ -258,7 +256,6 @@ impl EventListener {
 // ---------------------------------------------------------------------------
 
 /// Axis-aligned bounding box for a layout element (pixel coordinates)
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HitRect {
     pub x: i32,
@@ -290,7 +287,6 @@ impl HitRect {
 // ---------------------------------------------------------------------------
 
 /// Simple tree structure for tracking parent-child relationships
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct NodeTree {
     /// Parent of each node (None for root)
@@ -338,7 +334,6 @@ impl NodeTree {
 // ---------------------------------------------------------------------------
 
 /// Dispatches DOM events with capture/bubble propagation
-#[allow(dead_code)]
 pub struct EventDispatcher {
     /// Event listeners keyed by node ID
     listeners: BTreeMap<NodeId, Vec<EventListener>>,

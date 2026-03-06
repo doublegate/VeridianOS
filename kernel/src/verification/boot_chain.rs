@@ -5,20 +5,19 @@
 //! monotonicity, measurement log completeness, hash chain integrity, and
 //! boot policy decision coverage.
 
+#![allow(dead_code)]
+
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 /// Maximum number of PCR registers (TPM 2.0 standard: 24)
-#[allow(dead_code)]
 const MAX_PCRS: usize = 24;
 
 /// SHA-256 digest length
-#[allow(dead_code)]
 const DIGEST_LEN: usize = 32;
 
 /// Boot stages that must be measured
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum BootStage {
     /// UEFI firmware measurement
     Firmware = 0,
@@ -34,7 +33,6 @@ pub enum BootStage {
     UserSpace = 5,
 }
 
-#[allow(dead_code)]
 impl BootStage {
     /// Total number of boot stages
     const COUNT: usize = 6;
@@ -55,7 +53,6 @@ impl BootStage {
 
 /// Boot status state machine
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub enum BootStatus {
     /// Not yet started
     #[default]
@@ -72,7 +69,6 @@ pub enum BootStatus {
 
 /// Policy decision for a boot measurement
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum PolicyDecision {
     /// Measurement matches expected value
     Allow,
@@ -84,7 +80,6 @@ pub enum PolicyDecision {
 
 /// State of PCR registers
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct PcrState {
     /// PCR values, each is a SHA-256 digest
     values: [[u8; DIGEST_LEN]; MAX_PCRS],
@@ -101,7 +96,6 @@ impl Default for PcrState {
     }
 }
 
-#[allow(dead_code)]
 impl PcrState {
     /// Create a new PCR state with all registers zeroed
     pub fn new() -> Self {
@@ -160,7 +154,6 @@ impl PcrState {
 
 /// A single measurement log entry
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct MeasurementEntry {
     /// Which PCR this measurement extends
     pub pcr_index: usize,
@@ -174,7 +167,6 @@ pub struct MeasurementEntry {
 
 /// What component was measured
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum MeasuredComponent {
     /// UEFI firmware code
     FirmwareCode,
@@ -194,7 +186,6 @@ pub enum MeasuredComponent {
 
 /// Measurement log tracking all boot measurements
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct MeasurementLog {
     /// Ordered list of measurement entries
     #[cfg(feature = "alloc")]
@@ -205,7 +196,6 @@ pub struct MeasurementLog {
     next_sequence: u64,
 }
 
-#[allow(dead_code)]
 impl MeasurementLog {
     /// Create a new empty measurement log
     pub fn new() -> Self {
@@ -251,7 +241,6 @@ impl MeasurementLog {
 
 /// Errors from boot chain verification
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum BootVerifyError {
     /// PCR index out of range
     InvalidPcrIndex,
@@ -271,7 +260,6 @@ pub enum BootVerifyError {
 
 /// Boot chain verifier that checks invariants
 #[derive(Debug, Default)]
-#[allow(dead_code)]
 pub struct BootChainVerifier {
     /// Current PCR state
     pcr_state: PcrState,
@@ -287,7 +275,6 @@ pub struct BootChainVerifier {
     expected_pcrs: Vec<(usize, [u8; DIGEST_LEN])>,
 }
 
-#[allow(dead_code)]
 impl BootChainVerifier {
     /// Create a new boot chain verifier
     pub fn new() -> Self {
@@ -454,7 +441,6 @@ impl BootChainVerifier {
 /// This is NOT cryptographically secure. It provides a deterministic
 /// mixing function for proof harnesses where the property being verified
 /// is the protocol behavior, not the hash strength.
-#[allow(dead_code)]
 fn simple_sha256_model(input: &[u8]) -> [u8; DIGEST_LEN] {
     let mut output = [0u8; DIGEST_LEN];
 

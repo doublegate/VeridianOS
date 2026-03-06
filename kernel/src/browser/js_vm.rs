@@ -4,6 +4,8 @@
 //! for objects and 32.32 fixed-point arithmetic for numbers (no floating
 //! point).
 
+#![allow(dead_code)]
+
 use alloc::{
     collections::BTreeMap,
     format,
@@ -27,7 +29,6 @@ pub type ObjectId = usize;
 pub type FunctionId = usize;
 
 /// JavaScript value (no floating point)
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub enum JsValue {
     #[default]
@@ -124,7 +125,6 @@ impl JsValue {
 // ---------------------------------------------------------------------------
 
 /// Object internal type
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ObjectType {
     #[default]
@@ -135,7 +135,6 @@ pub enum ObjectType {
 }
 
 /// A JavaScript object stored in the arena
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct JsObject {
     /// Properties
@@ -175,7 +174,6 @@ impl JsObject {
 // ---------------------------------------------------------------------------
 
 /// A function call frame on the call stack
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CallFrame {
     /// Function template being executed
@@ -196,7 +194,6 @@ pub struct CallFrame {
 // Try/catch state
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct TryState {
     catch_ip: usize,
@@ -209,7 +206,6 @@ struct TryState {
 // ---------------------------------------------------------------------------
 
 /// JavaScript virtual machine
-#[allow(dead_code)]
 pub struct JsVm {
     /// Operand stack
     pub stack: Vec<JsValue>,

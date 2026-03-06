@@ -14,7 +14,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Volume access type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum AccessType {
     /// Block device access.
     Block,
@@ -24,7 +23,6 @@ pub enum AccessType {
 
 /// Volume access mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum AccessMode {
     /// Single node writer.
     SingleNodeWriter,
@@ -38,7 +36,6 @@ pub enum AccessMode {
 
 /// Volume state in its lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub enum VolumeState {
     /// Volume is being created.
     #[default]
@@ -53,7 +50,6 @@ pub enum VolumeState {
 
 /// A storage volume.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Volume {
     /// Unique volume identifier.
     pub id: u64,
@@ -83,7 +79,6 @@ pub struct Volume {
 
 /// CSI controller error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum ControllerError {
     /// Volume not found.
     VolumeNotFound(u64),
@@ -114,7 +109,6 @@ fn alloc_volume_id() -> u64 {
 
 /// CSI ControllerService implementation.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ControllerService {
     /// Volumes keyed by ID.
     volumes: BTreeMap<u64, Volume>,

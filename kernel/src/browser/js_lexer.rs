@@ -4,6 +4,8 @@
 //! string escapes, number parsing (integer and decimal to 32.32 fixed-point),
 //! and automatic semicolon insertion (ASI).
 
+#![allow(dead_code)]
+
 use alloc::{
     string::{String, ToString},
     vec::Vec,
@@ -47,7 +49,6 @@ pub const JS_NAN: JsNumber = i64::MAX;
 // ---------------------------------------------------------------------------
 
 /// JavaScript token
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum JsToken {
     // Literals
@@ -219,7 +220,6 @@ impl JsToken {
 // ---------------------------------------------------------------------------
 
 /// JavaScript lexer
-#[allow(dead_code)]
 pub struct JsLexer {
     /// Input source as bytes
     input: Vec<u8>,

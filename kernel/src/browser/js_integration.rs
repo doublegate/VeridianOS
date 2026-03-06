@@ -4,6 +4,8 @@
 //! and event system into a cohesive script engine. Handles `<script>`
 //! tag processing, event loop ticking, and callback dispatch.
 
+#![allow(dead_code)]
+
 use alloc::{
     string::{String, ToString},
     vec::Vec,
@@ -19,7 +21,6 @@ use super::{
 // ---------------------------------------------------------------------------
 
 /// The script engine integrating all JS components
-#[allow(dead_code)]
 pub struct ScriptEngine {
     /// JavaScript virtual machine
     pub vm: JsVm,

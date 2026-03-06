@@ -13,7 +13,6 @@ use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 /// Protocol for a service endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum Protocol {
     /// TCP.
     Tcp,
@@ -27,7 +26,6 @@ pub enum Protocol {
 
 /// A single endpoint (instance) of a service.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ServiceEndpoint {
     /// IP address (as a dotted string or integer).
     pub address: String,
@@ -41,7 +39,6 @@ pub struct ServiceEndpoint {
 
 /// A registered service with its endpoints.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ServiceEntry {
     /// Service name.
     pub name: String,
@@ -63,7 +60,6 @@ pub struct ServiceEntry {
 
 /// Service discovery error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum DiscoveryError {
     /// Service not found.
     NotFound(String),
@@ -82,7 +78,6 @@ type ServiceKey = (String, String);
 
 /// Service registry and discovery.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ServiceRegistry {
     /// Services keyed by (namespace, name).
     services: BTreeMap<ServiceKey, ServiceEntry>,

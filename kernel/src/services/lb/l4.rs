@@ -14,7 +14,6 @@ use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 /// A backend server in a virtual IP pool.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Backend {
     /// Backend address (IP string).
     pub address: String,
@@ -50,7 +49,6 @@ impl Backend {
 
 /// Load balancing algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub enum LbAlgorithm {
     /// Simple round-robin.
     #[default]
@@ -71,7 +69,6 @@ pub enum LbAlgorithm {
 
 /// A virtual IP (VIP) with its backend pool.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct VirtualIp {
     /// VIP address.
     pub vip_addr: String,
@@ -96,7 +93,6 @@ impl VirtualIp {
 
 /// L4 load balancer error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum L4Error {
     /// VIP not found.
     VipNotFound(String),
@@ -114,7 +110,6 @@ pub enum L4Error {
 
 /// L4 Load Balancer implementation.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct L4LoadBalancer {
     /// Virtual IPs keyed by "addr:port".
     vips: BTreeMap<String, VirtualIp>,

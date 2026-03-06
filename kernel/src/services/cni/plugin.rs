@@ -13,7 +13,6 @@ use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 /// CNI plugin configuration.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct CniConfig {
     /// CNI specification version.
     pub cni_version: String,
@@ -85,7 +84,6 @@ impl CniConfig {
 
 /// A network interface in the CNI result.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct CniInterface {
     /// Interface name (e.g., "eth0").
     pub name: String,
@@ -97,7 +95,6 @@ pub struct CniInterface {
 
 /// An IP address assignment in the CNI result.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct CniIpConfig {
     /// IP address with prefix (e.g., "10.244.0.5/24").
     pub address: String,
@@ -109,7 +106,6 @@ pub struct CniIpConfig {
 
 /// A route in the CNI result.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct CniRoute {
     /// Destination CIDR (e.g., "0.0.0.0/0" for default).
     pub dst: String,
@@ -119,7 +115,6 @@ pub struct CniRoute {
 
 /// DNS configuration in the CNI result.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct CniDns {
     /// DNS nameservers.
     pub nameservers: Vec<String>,
@@ -129,7 +124,6 @@ pub struct CniDns {
 
 /// Result returned from a CNI plugin operation.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct CniResult {
     /// CNI version.
     pub cni_version: String,
@@ -161,7 +155,6 @@ impl Default for CniResult {
 
 /// CNI plugin error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum CniError {
     /// Configuration error.
     InvalidConfig(String),
@@ -196,7 +189,6 @@ pub trait CniPlugin {
 
 /// Veth pair representing a container-to-bridge link.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct VethPair {
     /// Host-side veth name.
     pub host_name: String,
@@ -212,7 +204,6 @@ pub struct VethPair {
 
 /// Bridge plugin: creates veth pairs and attaches them to a bridge device.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct BridgePlugin {
     /// Bridge device name.
     bridge_name: String,

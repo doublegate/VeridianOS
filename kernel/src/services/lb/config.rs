@@ -15,7 +15,6 @@ use super::l4::LbAlgorithm;
 
 /// VIP configuration entry.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct VipConfig {
     /// VIP address.
     pub address: String,
@@ -29,7 +28,6 @@ pub struct VipConfig {
 
 /// Route configuration entry.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct RouteConfig {
     /// Path prefix.
     pub path_prefix: String,
@@ -41,7 +39,6 @@ pub struct RouteConfig {
 
 /// Load balancer configuration.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct LbConfig {
     /// VIP definitions.
     pub vips: Vec<VipConfig>,
@@ -69,7 +66,6 @@ impl Default for LbConfig {
 
 /// Config parse error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum ConfigError {
     /// Invalid configuration line.
     InvalidLine(String),

@@ -14,7 +14,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Request to run a command in a container.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ExecRequest {
     /// Target container ID.
     pub container_id: u64,
@@ -32,7 +31,6 @@ pub struct ExecRequest {
 
 /// Result of a synchronous command run.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub struct ExecResponse {
     /// Exit code.
     pub exit_code: i32,
@@ -44,7 +42,6 @@ pub struct ExecResponse {
 
 /// Request to attach to a running container.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct AttachRequest {
     /// Target container ID.
     pub container_id: u64,
@@ -60,7 +57,6 @@ pub struct AttachRequest {
 
 /// Request to forward a port from a pod sandbox.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct PortForwardRequest {
     /// Target pod sandbox ID.
     pub pod_sandbox_id: u64,
@@ -70,7 +66,6 @@ pub struct PortForwardRequest {
 
 /// Stream session state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum StreamState {
     /// Session is active.
     Active,
@@ -87,7 +82,6 @@ impl StreamState {
 
 /// A streaming session (for running commands, attaching, or port-forwarding).
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct StreamSession {
     /// Unique session identifier.
     pub id: u64,
@@ -105,7 +99,6 @@ pub struct StreamSession {
 
 /// Streaming service error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum StreamError {
     /// Container not found.
     ContainerNotFound(u64),
@@ -130,7 +123,6 @@ fn alloc_session_id() -> u64 {
 
 /// CRI Streaming Service implementation.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct StreamingService {
     /// Active streaming sessions.
     sessions: BTreeMap<u64, StreamSession>,

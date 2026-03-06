@@ -5,32 +5,25 @@
 //! monotonicity (derivation produces subsets), cascading revocation,
 //! generation-based invalidation, and cross-address-space isolation.
 
+#![allow(dead_code)]
+
 #[cfg(feature = "alloc")]
 use alloc::collections::BTreeMap;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 /// Rights bitmask constants
-#[allow(dead_code)]
 pub const CAP_RIGHT_READ: u32 = 1 << 0;
-#[allow(dead_code)]
 pub const CAP_RIGHT_WRITE: u32 = 1 << 1;
-#[allow(dead_code)]
 pub const CAP_RIGHT_EXECUTE: u32 = 1 << 2;
-#[allow(dead_code)]
 pub const CAP_RIGHT_GRANT: u32 = 1 << 3;
-#[allow(dead_code)]
 pub const CAP_RIGHT_REVOKE: u32 = 1 << 4;
-#[allow(dead_code)]
 pub const CAP_RIGHT_MAP: u32 = 1 << 5;
-#[allow(dead_code)]
 pub const CAP_RIGHT_DERIVE: u32 = 1 << 6;
-#[allow(dead_code)]
 pub const CAP_ALL_RIGHTS: u32 = 0x7F;
 
 /// Model of a capability token
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct CapabilityModel {
     /// Unique token value
     pub token: u64,
@@ -46,7 +39,6 @@ pub struct CapabilityModel {
     pub address_space: u64,
 }
 
-#[allow(dead_code)]
 impl CapabilityModel {
     /// Encode capability fields into a single u64 token
     ///
@@ -101,7 +93,6 @@ impl CapabilityModel {
 
 /// Capability space model (per-process capability table)
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct CapSpaceModel {
     /// All capabilities indexed by token
     #[cfg(feature = "alloc")]
@@ -119,7 +110,6 @@ pub struct CapSpaceModel {
 }
 
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 impl CapSpaceModel {
     /// Create a new capability space
     pub fn new() -> Self {
@@ -242,11 +232,9 @@ impl CapSpaceModel {
 }
 
 /// Capability invariant checker
-#[allow(dead_code)]
 pub struct CapInvariantChecker;
 
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 impl CapInvariantChecker {
     /// Verify non-forgery: capabilities can only be created through the kernel
     /// API
@@ -313,7 +301,6 @@ impl CapInvariantChecker {
 
 /// Errors from capability verification
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum CapModelError {
     /// Token is not valid
     InvalidToken,

@@ -1250,7 +1250,7 @@ fn sc_muladd(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> [u8; 32] {
 
 /// X25519 scalar multiplication on the Montgomery form of Curve25519
 /// Uses the Montgomery ladder for constant-time computation
-fn x25519_scalar_mult(scalar: &[u8; 32], u_point: &[u8; 32]) -> [u8; 32] {
+pub fn x25519_scalar_mult(scalar: &[u8; 32], u_point: &[u8; 32]) -> [u8; 32] {
     // Clamp scalar per RFC 7748 Section 5
     let mut k = *scalar;
     k[0] &= 248;
@@ -1306,7 +1306,7 @@ fn x25519_scalar_mult(scalar: &[u8; 32], u_point: &[u8; 32]) -> [u8; 32] {
 }
 
 /// X25519 base point (u=9)
-const X25519_BASEPOINT: [u8; 32] = {
+pub const X25519_BASEPOINT: [u8; 32] = {
     let mut b = [0u8; 32];
     b[0] = 9;
     b

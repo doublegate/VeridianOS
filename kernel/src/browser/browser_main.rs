@@ -5,6 +5,8 @@
 //! Provides the public API for creating, driving, and rendering the
 //! browser from the VeridianOS desktop environment.
 
+#![allow(dead_code)]
+
 use alloc::{
     format,
     string::{String, ToString},
@@ -22,7 +24,6 @@ use super::{
 // ---------------------------------------------------------------------------
 
 /// Browser configuration
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct BrowserConfig {
     /// Default home page URL
@@ -66,7 +67,6 @@ impl Default for BrowserConfig {
 // ---------------------------------------------------------------------------
 
 /// Address bar editing state
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AddressBar {
     /// Current text content
@@ -226,7 +226,6 @@ pub enum NavButton {
 }
 
 /// Navigation bar with buttons
-#[allow(dead_code)]
 pub struct NavigationBar {
     /// Button width in pixels
     pub button_width: u32,
@@ -367,7 +366,6 @@ impl NavigationBar {
 // ---------------------------------------------------------------------------
 
 /// The main browser struct, integrating tabs, isolation, and rendering
-#[allow(dead_code)]
 pub struct Browser {
     /// Configuration
     pub config: BrowserConfig,

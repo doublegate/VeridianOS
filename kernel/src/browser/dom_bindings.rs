@@ -4,6 +4,8 @@
 //! element manipulation, event listener registration, timers (setTimeout/
 //! setInterval), and console output.
 
+#![allow(dead_code)]
+
 use alloc::{
     collections::BTreeMap,
     string::{String, ToString},
@@ -17,7 +19,6 @@ use super::events::{EventDispatcher, EventType, NodeId};
 // ---------------------------------------------------------------------------
 
 /// Timer entry for setTimeout/setInterval
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TimerEntry {
     /// Unique timer ID
@@ -33,7 +34,6 @@ pub struct TimerEntry {
 }
 
 /// Timer queue managing setTimeout/setInterval
-#[allow(dead_code)]
 pub struct TimerQueue {
     /// All scheduled timers
     timers: Vec<TimerEntry>,
@@ -143,7 +143,6 @@ impl TimerQueue {
 // ---------------------------------------------------------------------------
 
 /// Simplified DOM node for JS bindings
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct DomNode {
     /// Node ID
@@ -183,7 +182,6 @@ impl DomNode {
 // ---------------------------------------------------------------------------
 
 /// Bridge between JS VM and DOM tree
-#[allow(dead_code)]
 pub struct DomApi {
     /// All DOM nodes (arena)
     nodes: Vec<DomNode>,

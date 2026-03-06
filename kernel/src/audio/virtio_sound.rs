@@ -20,10 +20,10 @@
 
 #![allow(dead_code)]
 
-use alloc::vec::Vec;
+use alloc::{string::String, vec, vec::Vec};
 
 use crate::{
-    audio::{AudioConfig, SampleFormat},
+    audio::{AudioConfig, AudioDevice, AudioDeviceCapabilities, AudioError, SampleFormat},
     error::KernelError,
 };
 
@@ -254,6 +254,16 @@ pub struct VirtioSoundDevice {
     initialized: bool,
     /// Pending TX buffer data
     tx_buffer: Vec<u8>,
+    /// Device name for AudioDevice trait
+    device_name: String,
+    /// Cached device capabilities for AudioDevice trait
+    device_capabilities: AudioDeviceCapabilities,
+    /// Currently active stream ID for AudioDevice trait operations
+    active_stream_id: u32,
+    /// Current audio configuration
+    current_config: Option<AudioConfig>,
+    /// Whether a stream is currently running
+    stream_running: bool,
 }
 
 impl VirtioSoundDevice {
@@ -271,6 +281,26 @@ impl VirtioSoundDevice {
             num_chmaps: 0,
             initialized: false,
             tx_buffer: Vec::new(),
+            device_name: String::from("VirtIO Sound Device"),
+            device_capabilities: AudioDeviceCapabilities {
+                min_sample_rate: 5512,
+                max_sample_rate: 192000,
+                min_channels: 1,
+                max_channels: 8,
+                supported_formats: vec![
+                    SampleFormat::U8,
+                    SampleFormat::S16Le,
+                    SampleFormat::S16Be,
+                    SampleFormat::S24Le,
+                    SampleFormat::S32Le,
+                    SampleFormat::F32,
+                ],
+                playback: true,
+                capture: true,
+            },
+            active_stream_id: 0,
+            current_config: None,
+            stream_running: false,
         }
     }
 
@@ -527,6 +557,94 @@ impl VirtioSoundDevice {
     /// Read from device-specific configuration space
     fn read_config(&self, offset: u32) -> u32 {
         self.read_reg(VIRTIO_MMIO_CONFIG + offset)
+    }
+}
+
+// ============================================================================
+// AudioDevice Trait Implementation for VirtioSoundDevice
+// ============================================================================
+
+impl AudioDevice for VirtioSoundDevice {
+    fn configure(&mut self, config: &AudioConfig) -> Result<AudioConfig, AudioError> {
+        self.configure_stream(self.active_stream_id, config)
+            .map_err(|_| AudioError::InvalidConfig {
+                reason: "VirtIO stream configuration failed",
+            })?;
+        self.current_config = Some(*config);
+        Ok(*config)
+    }
+
+    fn start(&mut self) -> Result<(), AudioError> {
+        if self.stream_running {
+            return Err(AudioError::AlreadyStarted);
+        }
+        self.start_stream(self.active_stream_id)
+            .map_err(|_| AudioError::IoError)?;
+        self.stream_running = true;
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), AudioError> {
+        if !self.stream_running {
+            return Err(AudioError::NotStarted);
+        }
+        self.stop_stream(self.active_stream_id)
+            .map_err(|_| AudioError::IoError)?;
+        self.stream_running = false;
+        Ok(())
+    }
+
+    fn write_frames(&mut self, data: &[u8]) -> Result<usize, AudioError> {
+        let config = self.current_config.ok_or(AudioError::InvalidConfig {
+            reason: "stream not configured",
+        })?;
+        let frame_size = config.frame_size() as usize;
+        if frame_size == 0 {
+            return Ok(0);
+        }
+
+        // Convert byte data to i16 slice for write_pcm
+        // write_pcm expects &[i16], so we need an even number of bytes
+        let aligned_len = data.len() & !1; // round down to even
+        if aligned_len == 0 {
+            return Ok(0);
+        }
+
+        let samples =
+            unsafe { core::slice::from_raw_parts(data.as_ptr() as *const i16, aligned_len / 2) };
+
+        let written_samples = self
+            .write_pcm(self.active_stream_id, samples)
+            .map_err(|_| AudioError::IoError)?;
+
+        // Convert samples written back to frames
+        let channels = config.channels as usize;
+        if channels == 0 {
+            return Ok(0);
+        }
+        Ok(written_samples / channels)
+    }
+
+    fn read_frames(&mut self, _output: &mut [u8]) -> Result<usize, AudioError> {
+        // VirtIO Sound capture would use the rx_queue; not yet implemented
+        // in the underlying driver, so return an error.
+        Err(AudioError::UnsupportedFormat)
+    }
+
+    fn capabilities(&self) -> &AudioDeviceCapabilities {
+        &self.device_capabilities
+    }
+
+    fn name(&self) -> &str {
+        &self.device_name
+    }
+
+    fn is_playback(&self) -> bool {
+        true
+    }
+
+    fn is_capture(&self) -> bool {
+        true
     }
 }
 

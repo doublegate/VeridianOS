@@ -24,6 +24,8 @@ extern crate alloc;
 use alloc::{collections::BTreeMap, string::String, vec, vec::Vec};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use super::{AudioConfig, AudioDevice, AudioDeviceCapabilities, AudioError, SampleFormat};
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -460,11 +462,15 @@ pub struct PcmDevice {
     xrun_count: AtomicU32,
     /// Whether device is currently open
     is_open: bool,
+    /// Cached device capabilities for AudioDevice trait
+    device_capabilities: AudioDeviceCapabilities,
 }
 
 impl PcmDevice {
     /// Create a new PCM device
     pub fn new(id: u32, name: &str, direction: StreamDirection) -> Self {
+        let is_playback = direction == StreamDirection::Playback;
+        let is_capture = direction == StreamDirection::Capture;
         Self {
             id,
             name: String::from(name),
@@ -479,6 +485,20 @@ impl PcmDevice {
             frames_read: AtomicU64::new(0),
             xrun_count: AtomicU32::new(0),
             is_open: false,
+            device_capabilities: AudioDeviceCapabilities {
+                min_sample_rate: 8000,
+                max_sample_rate: 192000,
+                min_channels: 1,
+                max_channels: 8,
+                supported_formats: vec![
+                    SampleFormat::U8,
+                    SampleFormat::S16Le,
+                    SampleFormat::S32Le,
+                    SampleFormat::F32,
+                ],
+                playback: is_playback,
+                capture: is_capture,
+            },
         }
     }
 
@@ -908,6 +928,151 @@ impl PcmDevice {
 
         self.write_pos = ((wp + tw) % cap) as u32;
         Ok(to_write / frame_size)
+    }
+}
+
+// ============================================================================
+// AlsaError -> AudioError Conversion
+// ============================================================================
+
+impl From<AlsaError> for AudioError {
+    fn from(err: AlsaError) -> Self {
+        match err {
+            AlsaError::DeviceNotFound { .. } => AudioError::DeviceNotFound,
+            AlsaError::DeviceAlreadyOpen { .. } | AlsaError::DeviceBusy { .. } => {
+                AudioError::DeviceBusy
+            }
+            AlsaError::DeviceNotOpen { .. }
+            | AlsaError::HwParamsNotSet
+            | AlsaError::SwParamsNotSet => AudioError::InvalidConfig {
+                reason: "device not configured",
+            },
+            AlsaError::InvalidStateTransition { current, .. } => {
+                if current == PcmState::Running {
+                    AudioError::AlreadyStarted
+                } else {
+                    AudioError::NotStarted
+                }
+            }
+            AlsaError::Overrun { .. } => AudioError::BufferOverrun,
+            AlsaError::Underrun { .. } => AudioError::BufferUnderrun,
+            AlsaError::InvalidFormat => AudioError::UnsupportedFormat,
+            AlsaError::InvalidSampleRate { .. } => AudioError::InvalidConfig {
+                reason: "unsupported sample rate",
+            },
+            AlsaError::InvalidChannels { .. } => AudioError::InvalidConfig {
+                reason: "unsupported channel count",
+            },
+            AlsaError::InvalidBufferSize { .. } => AudioError::InvalidConfig {
+                reason: "invalid buffer size",
+            },
+            AlsaError::InvalidPeriodSize { .. } => AudioError::InvalidConfig {
+                reason: "invalid period size",
+            },
+            AlsaError::BufferFull => AudioError::BufferUnderrun,
+            AlsaError::BufferEmpty => AudioError::BufferOverrun,
+            AlsaError::MixerControlNotFound { .. } | AlsaError::MixerValueOutOfRange { .. } => {
+                AudioError::InvalidConfig {
+                    reason: "mixer control error",
+                }
+            }
+            AlsaError::TooManyDevices => AudioError::DeviceBusy,
+            AlsaError::WrongDirection => AudioError::InvalidConfig {
+                reason: "wrong stream direction",
+            },
+        }
+    }
+}
+
+// ============================================================================
+// AudioDevice Trait Implementation for PcmDevice
+// ============================================================================
+
+/// Helper to convert PcmFormat to SampleFormat
+fn pcm_format_to_sample_format(fmt: PcmFormat) -> SampleFormat {
+    match fmt {
+        PcmFormat::U8 => SampleFormat::U8,
+        PcmFormat::S16Le => SampleFormat::S16Le,
+        PcmFormat::S32Le => SampleFormat::S32Le,
+        PcmFormat::F32FixedPoint => SampleFormat::F32,
+    }
+}
+
+/// Helper to convert SampleFormat to PcmFormat (best-effort mapping)
+fn sample_format_to_pcm_format(fmt: SampleFormat) -> Result<PcmFormat, AudioError> {
+    match fmt {
+        SampleFormat::U8 => Ok(PcmFormat::U8),
+        SampleFormat::S16Le => Ok(PcmFormat::S16Le),
+        SampleFormat::S32Le => Ok(PcmFormat::S32Le),
+        SampleFormat::F32 => Ok(PcmFormat::F32FixedPoint),
+        // Formats without a direct ALSA PcmFormat mapping
+        SampleFormat::S16Be | SampleFormat::S24Le => Err(AudioError::UnsupportedFormat),
+    }
+}
+
+impl AudioDevice for PcmDevice {
+    fn configure(&mut self, config: &AudioConfig) -> Result<AudioConfig, AudioError> {
+        // Open the device if not already open
+        if !self.is_open {
+            self.open().map_err(AudioError::from)?;
+        }
+
+        let pcm_format = sample_format_to_pcm_format(config.format)?;
+
+        let hw_params = HwParams {
+            sample_rate: config.sample_rate,
+            channels: config.channels,
+            format: pcm_format,
+            buffer_size: config.buffer_frames,
+            period_size: config.buffer_frames / 4,
+        };
+
+        self.set_hw_params(hw_params).map_err(AudioError::from)?;
+        self.prepare().map_err(AudioError::from)?;
+
+        // Return the actual applied config
+        Ok(AudioConfig {
+            sample_rate: hw_params.sample_rate,
+            channels: hw_params.channels,
+            format: pcm_format_to_sample_format(hw_params.format),
+            buffer_frames: hw_params.buffer_size,
+        })
+    }
+
+    fn start(&mut self) -> Result<(), AudioError> {
+        PcmDevice::start(self).map_err(AudioError::from)
+    }
+
+    fn stop(&mut self) -> Result<(), AudioError> {
+        PcmDevice::stop(self).map_err(AudioError::from)
+    }
+
+    fn write_frames(&mut self, data: &[u8]) -> Result<usize, AudioError> {
+        self.write(data)
+            .map(|frames| frames as usize)
+            .map_err(AudioError::from)
+    }
+
+    fn read_frames(&mut self, output: &mut [u8]) -> Result<usize, AudioError> {
+        self.read(output)
+            .map(|frames| frames as usize)
+            .map_err(AudioError::from)
+    }
+
+    fn capabilities(&self) -> &AudioDeviceCapabilities {
+        &self.device_capabilities
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn is_playback(&self) -> bool {
+        self.direction == StreamDirection::Playback
+    }
+
+    fn is_capture(&self) -> bool {
+        self.direction == StreamDirection::Capture
     }
 }
 

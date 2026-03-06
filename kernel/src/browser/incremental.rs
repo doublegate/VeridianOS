@@ -4,6 +4,8 @@
 //! re-paint on every DOM change. Uses per-node dirty flags and
 //! rectangular damage regions.
 
+#![allow(dead_code)]
+
 use alloc::{collections::BTreeMap, vec::Vec};
 
 use super::events::NodeId;
@@ -13,7 +15,6 @@ use super::events::NodeId;
 // ---------------------------------------------------------------------------
 
 /// Dirty state of a node, ordered by severity
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum DirtyFlag {
     /// No changes needed
@@ -32,7 +33,6 @@ pub enum DirtyFlag {
 // ---------------------------------------------------------------------------
 
 /// Tracks per-node dirty state for incremental updates
-#[allow(dead_code)]
 pub struct DirtyTracker {
     /// Per-node dirty flags
     flags: BTreeMap<NodeId, DirtyFlag>,
@@ -197,7 +197,6 @@ impl DirtyTracker {
 // ---------------------------------------------------------------------------
 
 /// A rectangular damage region in pixel coordinates
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DamageRegion {
     pub x: i32,
@@ -283,7 +282,6 @@ impl DamageRegion {
 // ---------------------------------------------------------------------------
 
 /// Accumulates damage regions and merges them
-#[allow(dead_code)]
 pub struct DamageList {
     /// Individual damage regions
     regions: Vec<DamageRegion>,
@@ -366,7 +364,6 @@ impl DamageList {
 // ---------------------------------------------------------------------------
 
 /// Coordinates incremental restyle, relayout, and repaint
-#[allow(dead_code)]
 pub struct IncrementalLayout {
     /// Dirty tracker
     pub tracker: DirtyTracker,

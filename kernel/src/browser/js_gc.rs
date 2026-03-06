@@ -3,6 +3,8 @@
 //! Conservative mark-sweep GC for the JS object arena. Uses tri-color
 //! marking with root scanning from the VM stack, call frames, and globals.
 
+#![allow(dead_code)]
+
 use alloc::vec::Vec;
 
 use super::js_vm::{JsObject, JsValue, JsVm, ObjectId};
@@ -12,7 +14,6 @@ use super::js_vm::{JsObject, JsValue, JsVm, ObjectId};
 // ---------------------------------------------------------------------------
 
 /// A GC-managed cell wrapping a JsObject
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct GcCell {
     /// The object data
@@ -39,7 +40,6 @@ impl GcCell {
 // ---------------------------------------------------------------------------
 
 /// Arena for garbage-collected objects
-#[allow(dead_code)]
 pub struct GcArena {
     /// Object slots (None = free)
     objects: Vec<Option<GcCell>>,
@@ -137,7 +137,6 @@ impl GcArena {
 // ---------------------------------------------------------------------------
 
 /// Garbage collector coordinating mark and sweep phases
-#[allow(dead_code)]
 pub struct GcHeap {
     pub arena: GcArena,
 }

@@ -6,6 +6,8 @@
 //! positioned layout (relative, absolute, fixed), and margin collapsing.
 //! All measurements use 26.6 fixed-point (i32).
 
+#![allow(dead_code)]
+
 use alloc::{
     string::{String, ToString},
     vec::Vec,
@@ -18,7 +20,6 @@ use super::{
 };
 
 /// A rectangle with position and size in fixed-point units
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Rect {
     pub x: FixedPoint,
@@ -28,7 +29,6 @@ pub struct Rect {
 }
 
 /// Edge sizes (margin, padding, border)
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EdgeSizes {
     pub top: FixedPoint,
@@ -38,7 +38,6 @@ pub struct EdgeSizes {
 }
 
 /// Complete dimensions of a layout box
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Dimensions {
     pub content: Rect,
@@ -47,7 +46,6 @@ pub struct Dimensions {
     pub margin: EdgeSizes,
 }
 
-#[allow(dead_code)]
 impl Dimensions {
     /// Get the padding box (content + padding)
     pub fn padding_box(&self) -> Rect {
@@ -83,7 +81,6 @@ impl Dimensions {
 }
 
 /// Type of layout box
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BoxType {
     #[default]
@@ -93,7 +90,6 @@ pub enum BoxType {
 }
 
 /// A fragment within an inline line box
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct InlineFragment {
     pub node_id: Option<NodeId>,
@@ -109,7 +105,6 @@ pub struct InlineFragment {
 }
 
 /// A line box containing inline fragments
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct LineBox {
     pub baseline: FixedPoint,
@@ -121,7 +116,6 @@ pub struct LineBox {
 }
 
 /// A float exclusion area
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 struct FloatExclusion {
     x: FixedPoint,
@@ -132,7 +126,6 @@ struct FloatExclusion {
 }
 
 /// A layout box in the layout tree
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct LayoutBox {
     pub box_type: BoxType,
@@ -156,7 +149,6 @@ impl Default for LayoutBox {
     }
 }
 
-#[allow(dead_code)]
 impl LayoutBox {
     /// Create a new layout box
     pub fn new(box_type: BoxType, style: ComputedStyle, node_id: Option<NodeId>) -> Self {
@@ -177,11 +169,9 @@ impl LayoutBox {
 }
 
 /// Character width in fixed-point (8 pixels per char for 8x16 font)
-#[allow(dead_code)]
 const CHAR_WIDTH: FixedPoint = 8 * 64; // 8px in 26.6 FP
 
 /// Layout context for tracking float exclusions and state
-#[allow(dead_code)]
 struct LayoutContext {
     left_floats: Vec<FloatExclusion>,
     right_floats: Vec<FloatExclusion>,
@@ -189,7 +179,6 @@ struct LayoutContext {
     viewport_height: FixedPoint,
 }
 
-#[allow(dead_code)]
 impl LayoutContext {
     fn new(viewport_width: i32, viewport_height: i32) -> Self {
         Self {
@@ -254,7 +243,6 @@ impl LayoutContext {
 }
 
 /// Build a layout tree from a styled DOM
-#[allow(dead_code)]
 pub fn build_layout_tree(
     doc: &Document,
     resolver: &StyleResolver,
@@ -271,7 +259,6 @@ pub fn build_layout_tree(
 }
 
 /// Recursively build layout boxes from DOM nodes
-#[allow(dead_code)]
 fn build_layout_box(
     doc: &Document,
     node_id: NodeId,
@@ -386,7 +373,6 @@ fn build_layout_box(
 }
 
 /// Layout a box and its children
-#[allow(dead_code)]
 fn layout_box(layout: &mut LayoutBox, ctx: &mut LayoutContext) {
     if layout.style.display == Display::None {
         return;
@@ -401,7 +387,6 @@ fn layout_box(layout: &mut LayoutBox, ctx: &mut LayoutContext) {
 }
 
 /// Layout a block-level box
-#[allow(dead_code)]
 fn layout_block(layout: &mut LayoutBox, ctx: &mut LayoutContext) {
     // Calculate width
     calculate_width(layout, ctx);
@@ -471,7 +456,6 @@ fn layout_block(layout: &mut LayoutBox, ctx: &mut LayoutContext) {
 }
 
 /// Calculate the width of a block-level box
-#[allow(dead_code)]
 fn calculate_width(layout: &mut LayoutBox, ctx: &LayoutContext) {
     let parent_width = if layout.dimensions.content.width > 0 {
         layout.dimensions.content.width
@@ -504,7 +488,6 @@ fn calculate_width(layout: &mut LayoutBox, ctx: &LayoutContext) {
 }
 
 /// Calculate padding, border, margin from style
-#[allow(dead_code)]
 fn calculate_box_model(layout: &mut LayoutBox) {
     layout.dimensions.padding = EdgeSizes {
         top: layout.style.padding_top,
@@ -527,7 +510,6 @@ fn calculate_box_model(layout: &mut LayoutBox) {
 }
 
 /// Calculate the height of a block box
-#[allow(dead_code)]
 fn calculate_height(layout: &mut LayoutBox, content_height: FixedPoint) {
     if let Some(h) = layout.style.height {
         layout.dimensions.content.height = h;
@@ -547,7 +529,6 @@ fn calculate_height(layout: &mut LayoutBox, content_height: FixedPoint) {
 }
 
 /// Layout inline children into line boxes
-#[allow(dead_code)]
 fn layout_inline_children(parent: &LayoutBox, ctx: &LayoutContext) -> Vec<LineBox> {
     let container_width = parent.dimensions.content.width;
     let mut line_boxes: Vec<LineBox> = Vec::new();
@@ -627,7 +608,6 @@ fn collect_inline_fragments(
 }
 
 /// Apply text alignment to a line box
-#[allow(dead_code)]
 fn apply_text_align(line: &mut LineBox, container_width: FixedPoint, style: &ComputedStyle) {
     let remaining = container_width - line.width;
     if remaining <= 0 {
@@ -660,7 +640,6 @@ fn apply_text_align(line: &mut LineBox, container_width: FixedPoint, style: &Com
 }
 
 /// Layout a floated element
-#[allow(dead_code)]
 fn layout_float(
     layout: &mut LayoutBox,
     ctx: &mut LayoutContext,
@@ -722,7 +701,6 @@ fn layout_float(
 }
 
 /// Position absolutely/fixed positioned children
-#[allow(dead_code)]
 fn position_children(parent: &mut LayoutBox, ctx: &LayoutContext) {
     for child in &mut parent.children {
         match child.style.position {
@@ -754,7 +732,6 @@ fn position_children(parent: &mut LayoutBox, ctx: &LayoutContext) {
 }
 
 /// Generate text content from a DOM node for inline layout
-#[allow(dead_code)]
 pub fn get_text_for_layout(doc: &Document, node_id: NodeId) -> String {
     let mut text = String::new();
     doc.walk(node_id, &mut |id| {
@@ -770,7 +747,6 @@ pub fn get_text_for_layout(doc: &Document, node_id: NodeId) -> String {
 }
 
 /// Word wrap: split text into lines that fit within a given width
-#[allow(dead_code)]
 pub fn word_wrap(text: &str, max_width: FixedPoint, white_space: WhiteSpace) -> Vec<String> {
     if max_width <= 0 {
         return Vec::new();
@@ -843,7 +819,6 @@ pub fn word_wrap(text: &str, max_width: FixedPoint, white_space: WhiteSpace) -> 
 }
 
 /// Collapse whitespace according to CSS rules
-#[allow(dead_code)]
 fn collapse_whitespace(text: &str) -> String {
     let mut result = String::new();
     let mut last_was_space = false;
@@ -862,13 +837,11 @@ fn collapse_whitespace(text: &str) -> String {
 }
 
 /// Measure text width in fixed-point units (8px per char)
-#[allow(dead_code)]
 pub fn measure_text_width(text: &str) -> FixedPoint {
     (text.len() as i32) * CHAR_WIDTH
 }
 
 /// Measure text height for a given font size
-#[allow(dead_code)]
 pub fn measure_text_height(font_size: FixedPoint) -> FixedPoint {
     // Using 8x16 font, height scales with font size
     // Default 16px font = 16px height

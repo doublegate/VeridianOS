@@ -13,7 +13,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 /// A point-in-time snapshot of a volume.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Snapshot {
     /// Unique snapshot identifier.
     pub id: u64,
@@ -31,7 +30,6 @@ pub struct Snapshot {
 
 /// Snapshot error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum SnapshotError {
     /// Snapshot not found.
     NotFound(u64),
@@ -56,7 +54,6 @@ fn alloc_snapshot_id() -> u64 {
 
 /// CSI Snapshot Service implementation.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct SnapshotService {
     /// Snapshots keyed by ID.
     snapshots: BTreeMap<u64, Snapshot>,

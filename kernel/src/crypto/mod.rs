@@ -3,6 +3,7 @@
 //! Provides cryptographic primitives and services for secure operations.
 
 pub mod asymmetric;
+pub mod cipher_suite;
 pub mod constant_time;
 pub mod hash;
 pub mod keystore;
@@ -12,7 +13,8 @@ pub mod random;
 pub mod symmetric;
 
 pub use asymmetric::{KeyPair, SigningKey, VerifyingKey};
-pub use hash::{Hash256, Hash512, HashAlgorithm};
+pub use cipher_suite::{CipherSuite, HmacAlgorithm, KdfAlgorithm};
+pub use hash::{Blake2s, Hash256, Hash512, HashAlgorithm};
 pub use keystore::{Key, KeyId, KeyStore};
 pub use post_quantum::{DilithiumSigningKey, HybridKeyExchange, KyberSecretKey};
 pub use random::{get_random, SecureRandom};

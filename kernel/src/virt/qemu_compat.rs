@@ -5,6 +5,8 @@
 //!
 //! Sprints W5-S4 (device model interface), W5-S5 (migration format + pre-copy).
 
+#![allow(dead_code)]
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -43,7 +45,6 @@ const DEFAULT_DIRTY_THRESHOLD: u64 = 256;
 // ---------------------------------------------------------------------------
 
 /// Trait for device models that handle I/O and MMIO
-#[allow(dead_code)]
 pub trait DeviceModelInterface: Send {
     /// Handle an I/O port access
     fn handle_io(&mut self, port: u16, is_write: bool, data: &mut [u8]) -> Result<(), VmError>;
@@ -64,7 +65,6 @@ pub trait DeviceModelInterface: Send {
 
 /// I/O port handler registration
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub struct IoHandler {
     /// Starting port of the I/O range
     pub port_start: u16,
@@ -76,7 +76,6 @@ pub struct IoHandler {
 
 impl IoHandler {
     /// Create a new I/O handler
-    #[allow(dead_code)]
     pub fn new(port_start: u16, port_count: u16, device_id: u32) -> Self {
         Self {
             port_start,
@@ -86,19 +85,16 @@ impl IoHandler {
     }
 
     /// Check if a port falls within this handler's range
-    #[allow(dead_code)]
     pub fn contains_port(&self, port: u16) -> bool {
         port >= self.port_start && port < self.port_start + self.port_count
     }
 
     /// Get the port end (exclusive)
-    #[allow(dead_code)]
     pub fn port_end(&self) -> u16 {
         self.port_start + self.port_count
     }
 
     /// Dispatch an I/O access (returns the offset within the range)
-    #[allow(dead_code)]
     pub fn dispatch_io(&self, port: u16) -> Option<u16> {
         if self.contains_port(port) {
             Some(port - self.port_start)
@@ -114,7 +110,6 @@ impl IoHandler {
 
 /// MMIO region handler registration
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub struct MmioHandler {
     /// Base address of the MMIO region
     pub base_addr: u64,
@@ -126,7 +121,6 @@ pub struct MmioHandler {
 
 impl MmioHandler {
     /// Create a new MMIO handler
-    #[allow(dead_code)]
     pub fn new(base_addr: u64, size: u64, device_id: u32) -> Self {
         Self {
             base_addr,
@@ -136,19 +130,16 @@ impl MmioHandler {
     }
 
     /// Check if an address falls within this handler's range
-    #[allow(dead_code)]
     pub fn contains_addr(&self, addr: u64) -> bool {
         addr >= self.base_addr && addr < self.base_addr + self.size
     }
 
     /// Get the address end (exclusive)
-    #[allow(dead_code)]
     pub fn addr_end(&self) -> u64 {
         self.base_addr + self.size
     }
 
     /// Dispatch an MMIO access (returns the offset within the region)
-    #[allow(dead_code)]
     pub fn dispatch_mmio(&self, addr: u64) -> Option<u64> {
         if self.contains_addr(addr) {
             Some(addr - self.base_addr)
@@ -164,7 +155,6 @@ impl MmioHandler {
 
 /// Multiplexer for routing I/O and MMIO to registered device handlers
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub struct DeviceMultiplexer {
     /// I/O handlers keyed by starting port
     io_handlers: BTreeMap<u16, IoHandler>,
@@ -182,7 +172,6 @@ impl Default for DeviceMultiplexer {
 #[cfg(feature = "alloc")]
 impl DeviceMultiplexer {
     /// Create a new empty device multiplexer
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             io_handlers: BTreeMap::new(),
@@ -191,7 +180,6 @@ impl DeviceMultiplexer {
     }
 
     /// Register an I/O handler
-    #[allow(dead_code)]
     pub fn register_io(&mut self, handler: IoHandler) -> Result<(), VmError> {
         if self.io_handlers.len() >= MAX_IO_HANDLERS {
             return Err(VmError::DeviceError);
@@ -210,7 +198,6 @@ impl DeviceMultiplexer {
     }
 
     /// Register an MMIO handler
-    #[allow(dead_code)]
     pub fn register_mmio(&mut self, handler: MmioHandler) -> Result<(), VmError> {
         if self.mmio_handlers.len() >= MAX_MMIO_HANDLERS {
             return Err(VmError::DeviceError);
@@ -228,7 +215,6 @@ impl DeviceMultiplexer {
     }
 
     /// Dispatch an I/O access, returning (device_id, offset)
-    #[allow(dead_code)]
     pub fn dispatch_io(&self, port: u16) -> Option<(u32, u16)> {
         // Find the handler whose range includes this port
         for handler in self.io_handlers.values() {
@@ -240,7 +226,6 @@ impl DeviceMultiplexer {
     }
 
     /// Dispatch an MMIO access, returning (device_id, offset)
-    #[allow(dead_code)]
     pub fn dispatch_mmio(&self, addr: u64) -> Option<(u32, u64)> {
         for handler in self.mmio_handlers.values() {
             if let Some(offset) = handler.dispatch_mmio(addr) {
@@ -251,25 +236,21 @@ impl DeviceMultiplexer {
     }
 
     /// Unregister an I/O handler by starting port
-    #[allow(dead_code)]
     pub fn unregister_io(&mut self, port_start: u16) -> bool {
         self.io_handlers.remove(&port_start).is_some()
     }
 
     /// Unregister an MMIO handler by base address
-    #[allow(dead_code)]
     pub fn unregister_mmio(&mut self, base_addr: u64) -> bool {
         self.mmio_handlers.remove(&base_addr).is_some()
     }
 
     /// Get number of registered I/O handlers
-    #[allow(dead_code)]
     pub fn io_handler_count(&self) -> usize {
         self.io_handlers.len()
     }
 
     /// Get number of registered MMIO handlers
-    #[allow(dead_code)]
     pub fn mmio_handler_count(&self) -> usize {
         self.mmio_handlers.len()
     }
@@ -282,7 +263,6 @@ impl DeviceMultiplexer {
 /// Serialized state of a single device
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct DeviceState {
     /// Device name identifier
     pub device_name: String,
@@ -293,7 +273,6 @@ pub struct DeviceState {
 #[cfg(feature = "alloc")]
 impl DeviceState {
     /// Create a new device state
-    #[allow(dead_code)]
     pub fn new(name: &str) -> Self {
         Self {
             device_name: String::from(name),
@@ -302,7 +281,6 @@ impl DeviceState {
     }
 
     /// Create a device state with data
-    #[allow(dead_code)]
     pub fn with_data(name: &str, data: Vec<u8>) -> Self {
         Self {
             device_name: String::from(name),
@@ -311,26 +289,22 @@ impl DeviceState {
     }
 
     /// Write a u32 value to the state data
-    #[allow(dead_code)]
     pub fn write_u32(&mut self, value: u32) {
         self.data.extend_from_slice(&value.to_le_bytes());
     }
 
     /// Write a u64 value to the state data
-    #[allow(dead_code)]
     pub fn write_u64(&mut self, value: u64) {
         self.data.extend_from_slice(&value.to_le_bytes());
     }
 
     /// Write a byte slice to the state data
-    #[allow(dead_code)]
     pub fn write_bytes(&mut self, bytes: &[u8]) {
         self.write_u32(bytes.len() as u32);
         self.data.extend_from_slice(bytes);
     }
 
     /// Read a u32 from state data at offset, advancing offset
-    #[allow(dead_code)]
     pub fn read_u32(&self, offset: &mut usize) -> Option<u32> {
         if *offset + 4 > self.data.len() {
             return None;
@@ -341,7 +315,6 @@ impl DeviceState {
     }
 
     /// Read a u64 from state data at offset, advancing offset
-    #[allow(dead_code)]
     pub fn read_u64(&self, offset: &mut usize) -> Option<u64> {
         if *offset + 8 > self.data.len() {
             return None;
@@ -352,7 +325,6 @@ impl DeviceState {
     }
 
     /// Read bytes from state data at offset, advancing offset
-    #[allow(dead_code)]
     pub fn read_bytes(&self, offset: &mut usize) -> Option<Vec<u8>> {
         let len = self.read_u32(offset)? as usize;
         if *offset + len > self.data.len() {
@@ -364,7 +336,6 @@ impl DeviceState {
     }
 
     /// Get total serialized size
-    #[allow(dead_code)]
     pub fn serialized_size(&self) -> usize {
         4 + self.device_name.len() + self.data.len() // name_len + name + data
     }
@@ -377,7 +348,6 @@ impl DeviceState {
 /// Complete VM state for migration
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct VmState {
     /// Per-vCPU register state (serialized as bytes)
     pub vcpu_regs: Vec<Vec<u8>>,
@@ -392,7 +362,6 @@ pub struct VmState {
 #[cfg(feature = "alloc")]
 impl VmState {
     /// Create a new VM state
-    #[allow(dead_code)]
     pub fn new(num_vcpus: u32, memory_size: u64) -> Self {
         Self {
             vcpu_regs: Vec::with_capacity(num_vcpus as usize),
@@ -403,13 +372,11 @@ impl VmState {
     }
 
     /// Add vCPU register state
-    #[allow(dead_code)]
     pub fn add_vcpu_state(&mut self, regs: Vec<u8>) {
         self.vcpu_regs.push(regs);
     }
 
     /// Set memory hash
-    #[allow(dead_code)]
     pub fn set_memory_hash(&mut self, hash: u64) {
         self.memory_hash = hash;
     }
@@ -421,7 +388,6 @@ impl VmState {
 
 /// Migration stream header (v3 format)
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub struct MigrationHeader {
     /// Magic number (MIGRATION_MAGIC)
     pub magic: u32,
@@ -439,7 +405,6 @@ pub struct MigrationHeader {
 
 impl MigrationHeader {
     /// Create a new migration header
-    #[allow(dead_code)]
     pub fn new(vm_state_size: u32, device_state_size: u32, device_count: u32) -> Self {
         Self {
             magic: MIGRATION_MAGIC,
@@ -452,7 +417,6 @@ impl MigrationHeader {
     }
 
     /// Validate the header
-    #[allow(dead_code)]
     pub fn validate(&self) -> Result<(), VmError> {
         if self.magic != MIGRATION_MAGIC {
             return Err(VmError::InvalidVmState);
@@ -465,7 +429,6 @@ impl MigrationHeader {
 
     /// Serialize header to bytes
     #[cfg(feature = "alloc")]
-    #[allow(dead_code)]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(24);
         buf.extend_from_slice(&self.magic.to_le_bytes());
@@ -478,7 +441,6 @@ impl MigrationHeader {
     }
 
     /// Deserialize header from bytes
-    #[allow(dead_code)]
     pub fn from_bytes(data: &[u8]) -> Result<Self, VmError> {
         if data.len() < 24 {
             return Err(VmError::InvalidVmState);
@@ -509,7 +471,6 @@ impl MigrationHeader {
 
 /// Serialize VM and device states into a migration stream
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn serialize_state(vm_state: &VmState, device_states: &[DeviceState]) -> Vec<u8> {
     let mut vm_data = Vec::new();
     // Serialize VM state
@@ -546,7 +507,6 @@ pub fn serialize_state(vm_state: &VmState, device_states: &[DeviceState]) -> Vec
 
 /// Deserialize VM state from a migration stream
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub fn deserialize_state(data: &[u8]) -> Result<(VmState, Vec<DeviceState>), VmError> {
     let header = MigrationHeader::from_bytes(data)?;
 
@@ -659,7 +619,6 @@ pub fn deserialize_state(data: &[u8]) -> Result<(VmState, Vec<DeviceState>), VmE
 
 /// Bitmap-based dirty page tracker for migration
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub struct DirtyPageTracker {
     /// Bitmap of dirty pages (1 bit per page)
     bitmap: Vec<u64>,
@@ -674,7 +633,6 @@ pub struct DirtyPageTracker {
 #[cfg(feature = "alloc")]
 impl DirtyPageTracker {
     /// Create a new dirty page tracker for the given memory size
-    #[allow(dead_code)]
     pub fn new(memory_size: u64, page_size: u64) -> Self {
         let ps = if page_size == 0 { PAGE_SIZE } else { page_size };
         let num_pages = memory_size.div_ceil(ps);
@@ -688,7 +646,6 @@ impl DirtyPageTracker {
     }
 
     /// Mark a page as dirty by its page frame number
-    #[allow(dead_code)]
     pub fn mark_dirty(&mut self, page_num: u64) {
         if page_num >= self.num_pages {
             return;
@@ -705,13 +662,11 @@ impl DirtyPageTracker {
     }
 
     /// Mark a page as dirty by physical address
-    #[allow(dead_code)]
     pub fn mark_dirty_addr(&mut self, addr: u64) {
         self.mark_dirty(addr / self.page_size);
     }
 
     /// Check if a page is dirty
-    #[allow(dead_code)]
     pub fn is_dirty(&self, page_num: u64) -> bool {
         if page_num >= self.num_pages {
             return false;
@@ -726,7 +681,6 @@ impl DirtyPageTracker {
     }
 
     /// Get list of dirty page numbers
-    #[allow(dead_code)]
     pub fn get_dirty_pages(&self) -> Vec<u64> {
         let mut pages = Vec::new();
         for (word_idx, &word) in self.bitmap.iter().enumerate() {
@@ -746,7 +700,6 @@ impl DirtyPageTracker {
     }
 
     /// Clear all dirty bits and return the list of previously dirty pages
-    #[allow(dead_code)]
     pub fn clear(&mut self) -> Vec<u64> {
         let dirty = self.get_dirty_pages();
         for word in &mut self.bitmap {
@@ -757,25 +710,21 @@ impl DirtyPageTracker {
     }
 
     /// Get the number of dirty pages
-    #[allow(dead_code)]
     pub fn dirty_count(&self) -> u64 {
         self.dirty_count
     }
 
     /// Get the total number of tracked pages
-    #[allow(dead_code)]
     pub fn total_pages(&self) -> u64 {
         self.num_pages
     }
 
     /// Get page size
-    #[allow(dead_code)]
     pub fn page_size(&self) -> u64 {
         self.page_size
     }
 
     /// Mark all pages as dirty (for initial transfer)
-    #[allow(dead_code)]
     pub fn mark_all_dirty(&mut self) {
         for (i, word) in self.bitmap.iter_mut().enumerate() {
             let remaining = self.num_pages.saturating_sub(i as u64 * BITS_PER_WORD);
@@ -795,7 +744,6 @@ impl DirtyPageTracker {
 
 /// Phase of the live migration process
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub enum MigrationPhase {
     /// Not started
     #[default]
@@ -816,7 +764,6 @@ pub enum MigrationPhase {
 
 /// Live migration stream controller
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub struct MigrationStream {
     /// Current migration phase
     pub phase: MigrationPhase,
@@ -839,7 +786,6 @@ pub struct MigrationStream {
 #[cfg(feature = "alloc")]
 impl MigrationStream {
     /// Create a new migration stream
-    #[allow(dead_code)]
     pub fn new(memory_size: u64) -> Self {
         Self {
             phase: MigrationPhase::Idle,
@@ -854,7 +800,6 @@ impl MigrationStream {
     }
 
     /// Start the pre-copy phase
-    #[allow(dead_code)]
     pub fn start_precopy(&mut self) {
         self.phase = MigrationPhase::PreCopy;
         self.rounds = 0;
@@ -863,7 +808,6 @@ impl MigrationStream {
 
     /// Send dirty pages for the current round
     /// Returns the page numbers that were sent
-    #[allow(dead_code)]
     pub fn send_dirty_pages(&mut self) -> Vec<u64> {
         if self.phase != MigrationPhase::PreCopy {
             return Vec::new();
@@ -880,7 +824,6 @@ impl MigrationStream {
     }
 
     /// Receive dirty pages on the destination (mark them as received)
-    #[allow(dead_code)]
     pub fn receive_dirty_pages(&mut self, pages: &[u64]) -> Result<(), VmError> {
         // On destination side, pages have been received and applied
         self.total_pages_sent = self.total_pages_sent.saturating_add(pages.len() as u64);
@@ -888,7 +831,6 @@ impl MigrationStream {
     }
 
     /// Check if we should transition to stop-and-copy
-    #[allow(dead_code)]
     pub fn should_stop_and_copy(&self) -> bool {
         if self.phase != MigrationPhase::PreCopy {
             return false;
@@ -898,7 +840,6 @@ impl MigrationStream {
     }
 
     /// Transition to stop-and-copy phase
-    #[allow(dead_code)]
     pub fn stop_and_copy(&mut self) -> Vec<u64> {
         self.phase = MigrationPhase::StopAndCopy;
 
@@ -912,19 +853,16 @@ impl MigrationStream {
     }
 
     /// Complete the migration
-    #[allow(dead_code)]
     pub fn complete(&mut self) {
         self.phase = MigrationPhase::Done;
     }
 
     /// Mark migration as failed
-    #[allow(dead_code)]
     pub fn fail(&mut self) {
         self.phase = MigrationPhase::Failed;
     }
 
     /// Get migration statistics
-    #[allow(dead_code)]
     pub fn stats(&self) -> MigrationStats {
         MigrationStats {
             phase: self.phase,
@@ -938,7 +876,6 @@ impl MigrationStream {
 
 /// Migration statistics
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub struct MigrationStats {
     /// Current phase
     pub phase: MigrationPhase,

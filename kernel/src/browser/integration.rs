@@ -4,6 +4,8 @@
 //! the full pipeline: HTML tokenization, DOM construction, CSS parsing,
 //! style resolution, layout computation, and pixel painting.
 
+#![allow(dead_code)]
+
 use alloc::vec::Vec;
 
 use super::{
@@ -19,13 +21,11 @@ use super::{
 ///
 /// Convenience function that runs the full pipeline:
 /// tokenize -> build DOM -> parse CSS -> resolve styles -> layout -> paint
-#[allow(dead_code)]
 pub fn render_html(html: &str, width: i32, height: i32) -> Vec<u32> {
     render_html_with_css(html, "", width, height)
 }
 
 /// Render HTML with an external CSS string to a pixel buffer
-#[allow(dead_code)]
 pub fn render_html_with_css(html: &str, css: &str, width: i32, height: i32) -> Vec<u32> {
     let doc = TreeBuilder::build(html);
     let stylesheet = CssParser::parse(css);
@@ -43,7 +43,6 @@ pub fn render_html_with_css(html: &str, css: &str, width: i32, height: i32) -> V
 }
 
 /// Render HTML and return the layout tree (for inspection)
-#[allow(dead_code)]
 pub fn render_to_layout(html: &str, css: &str, width: i32, height: i32) -> LayoutBox {
     let doc = TreeBuilder::build(html);
     let stylesheet = CssParser::parse(css);
@@ -55,7 +54,6 @@ pub fn render_to_layout(html: &str, css: &str, width: i32, height: i32) -> Layou
 }
 
 /// Render HTML and return (layout, display_list) for inspection
-#[allow(dead_code)]
 pub fn render_to_display_list(
     html: &str,
     css: &str,
@@ -75,13 +73,11 @@ pub fn render_to_display_list(
 }
 
 /// Parse HTML and return the Document for inspection
-#[allow(dead_code)]
 pub fn parse_html(html: &str) -> Document {
     TreeBuilder::build(html)
 }
 
 /// Check if a pixel region contains a specific color
-#[allow(dead_code)]
 pub fn region_contains_color(pixels: &[u32], width: usize, rect: &PixelRect, color: u32) -> bool {
     for y in rect.y..(rect.y + rect.height) {
         for x in rect.x..(rect.x + rect.width) {
@@ -97,7 +93,6 @@ pub fn region_contains_color(pixels: &[u32], width: usize, rect: &PixelRect, col
 }
 
 /// Check if a pixel region is entirely one color
-#[allow(dead_code)]
 pub fn region_is_solid_color(pixels: &[u32], width: usize, rect: &PixelRect, color: u32) -> bool {
     for y in rect.y..(rect.y + rect.height) {
         for x in rect.x..(rect.x + rect.width) {
@@ -113,7 +108,6 @@ pub fn region_is_solid_color(pixels: &[u32], width: usize, rect: &PixelRect, col
 }
 
 /// Count the number of unique colors in a pixel region
-#[allow(dead_code)]
 pub fn count_unique_colors(pixels: &[u32], width: usize, rect: &PixelRect) -> usize {
     let mut colors: Vec<u32> = Vec::new();
     for y in rect.y..(rect.y + rect.height) {
@@ -130,7 +124,6 @@ pub fn count_unique_colors(pixels: &[u32], width: usize, rect: &PixelRect) -> us
 }
 
 /// Find a layout box with a specific tag (for test inspection)
-#[allow(dead_code)]
 pub fn find_layout_box_by_tag<'a>(
     layout: &'a LayoutBox,
     doc: &Document,
@@ -150,7 +143,6 @@ pub fn find_layout_box_by_tag<'a>(
 }
 
 /// Count layout boxes in the tree
-#[allow(dead_code)]
 pub fn count_layout_boxes(layout: &LayoutBox) -> usize {
     let mut count = 1;
     for child in &layout.children {

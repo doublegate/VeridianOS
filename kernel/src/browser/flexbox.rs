@@ -3,6 +3,8 @@
 //! Implements the CSS Flexible Box Layout algorithm. All dimensions
 //! use 26.6 fixed-point arithmetic (i32) consistent with Phase A.
 
+#![allow(dead_code)]
+
 use alloc::vec::Vec;
 
 use super::events::NodeId;
@@ -55,7 +57,6 @@ pub const FP_ONE: FixedPoint = 1 << FP_SHIFT;
 // ---------------------------------------------------------------------------
 
 /// Flex direction (main axis orientation)
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FlexDirection {
     #[default]
@@ -78,7 +79,6 @@ impl FlexDirection {
 }
 
 /// Flex wrapping behavior
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FlexWrap {
     #[default]
@@ -88,7 +88,6 @@ pub enum FlexWrap {
 }
 
 /// Cross-axis alignment for flex items
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AlignItems {
     FlexStart,
@@ -100,7 +99,6 @@ pub enum AlignItems {
 }
 
 /// Main-axis content distribution
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum JustifyContent {
     #[default]
@@ -113,7 +111,6 @@ pub enum JustifyContent {
 }
 
 /// Alignment for multiple flex lines
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AlignContent {
     FlexStart,
@@ -126,7 +123,6 @@ pub enum AlignContent {
 }
 
 /// Per-item alignment override
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AlignSelf {
     #[default]
@@ -143,7 +139,6 @@ pub enum AlignSelf {
 // ---------------------------------------------------------------------------
 
 /// A flex item with its computed properties
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct FlexItem {
     /// DOM node ID
@@ -239,7 +234,6 @@ impl FlexItem {
 // ---------------------------------------------------------------------------
 
 /// A single line of flex items (created during wrapping)
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 struct FlexLine {
     /// Indices into the items vec
@@ -255,7 +249,6 @@ struct FlexLine {
 // ---------------------------------------------------------------------------
 
 /// Flex container properties
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct FlexContainerStyle {
     pub direction: FlexDirection,
@@ -266,7 +259,6 @@ pub struct FlexContainerStyle {
 }
 
 /// Flex layout engine
-#[allow(dead_code)]
 pub struct FlexLayout {
     /// Container style
     pub style: FlexContainerStyle,

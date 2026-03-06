@@ -477,3 +477,224 @@ pub fn dispatch_count() -> u64 {
         })
         .unwrap_or(0)
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::KernelError;
+
+    // -- IrqNumber tests --
+
+    #[test]
+    fn irq_number_new_and_as_u32() {
+        let irq = IrqNumber::new(42);
+        assert_eq!(irq.as_u32(), 42);
+    }
+
+    #[test]
+    fn irq_number_from_u32() {
+        let irq = IrqNumber::from(7u32);
+        assert_eq!(irq.0, 7);
+    }
+
+    #[test]
+    fn irq_number_into_u32() {
+        let irq = IrqNumber::new(99);
+        let raw: u32 = irq.into();
+        assert_eq!(raw, 99);
+    }
+
+    #[test]
+    fn irq_number_display() {
+        use core::fmt::Write;
+        let irq = IrqNumber::new(13);
+        let mut buf = alloc::string::String::new();
+        write!(buf, "{}", irq).unwrap();
+        assert_eq!(buf, "IRQ#13");
+    }
+
+    #[test]
+    fn irq_number_equality() {
+        assert_eq!(IrqNumber::new(5), IrqNumber::new(5));
+        assert_ne!(IrqNumber::new(5), IrqNumber::new(6));
+    }
+
+    #[test]
+    fn irq_number_ordering() {
+        assert!(IrqNumber::new(1) < IrqNumber::new(2));
+        assert!(IrqNumber::new(255) > IrqNumber::new(0));
+    }
+
+    #[test]
+    fn irq_number_clone_copy() {
+        let a = IrqNumber::new(10);
+        let b = a; // Copy
+        let c = a.clone();
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+    }
+
+    // -- IrqManager tests --
+
+    #[test]
+    fn manager_new_has_zero_dispatch_count() {
+        let mgr = IrqManager::new();
+        assert_eq!(mgr.dispatch_count(), 0);
+    }
+
+    #[test]
+    fn manager_register_handler_success() {
+        let mut mgr = IrqManager::new();
+        fn dummy(_irq: IrqNumber) {}
+        let result = mgr.register(IrqNumber::new(1), dummy);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn manager_register_duplicate_returns_error() {
+        let mut mgr = IrqManager::new();
+        fn dummy(_irq: IrqNumber) {}
+        mgr.register(IrqNumber::new(5), dummy).unwrap();
+        let result = mgr.register(IrqNumber::new(5), dummy);
+        assert_eq!(
+            result,
+            Err(KernelError::AlreadyExists {
+                resource: "IRQ handler",
+                id: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn manager_register_invalid_irq_number() {
+        let mut mgr = IrqManager::new();
+        fn dummy(_irq: IrqNumber) {}
+        // MAX_IRQ is 256, so 256 should be rejected
+        let result = mgr.register(IrqNumber::new(256), dummy);
+        assert_eq!(
+            result,
+            Err(KernelError::InvalidArgument {
+                name: "irq",
+                value: "IRQ number exceeds maximum",
+            })
+        );
+    }
+
+    #[test]
+    fn manager_register_max_valid_irq() {
+        let mut mgr = IrqManager::new();
+        fn dummy(_irq: IrqNumber) {}
+        // 255 is the last valid IRQ (MAX_IRQ - 1)
+        let result = mgr.register(IrqNumber::new(255), dummy);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn manager_unregister_success() {
+        let mut mgr = IrqManager::new();
+        fn dummy(_irq: IrqNumber) {}
+        mgr.register(IrqNumber::new(10), dummy).unwrap();
+        let result = mgr.unregister(IrqNumber::new(10));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn manager_unregister_nonexistent_returns_error() {
+        let mut mgr = IrqManager::new();
+        let result = mgr.unregister(IrqNumber::new(99));
+        assert_eq!(
+            result,
+            Err(KernelError::NotFound {
+                resource: "IRQ handler",
+                id: 99,
+            })
+        );
+    }
+
+    #[test]
+    fn manager_unregister_then_reregister() {
+        let mut mgr = IrqManager::new();
+        fn dummy(_irq: IrqNumber) {}
+        mgr.register(IrqNumber::new(3), dummy).unwrap();
+        mgr.unregister(IrqNumber::new(3)).unwrap();
+        // Should be able to register again after unregistering
+        let result = mgr.register(IrqNumber::new(3), dummy);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn manager_dispatch_increments_count() {
+        let mut mgr = IrqManager::new();
+        fn dummy(_irq: IrqNumber) {}
+        mgr.register(IrqNumber::new(1), dummy).unwrap();
+        assert_eq!(mgr.dispatch_count(), 0);
+        mgr.dispatch(IrqNumber::new(1));
+        assert_eq!(mgr.dispatch_count(), 1);
+        mgr.dispatch(IrqNumber::new(1));
+        mgr.dispatch(IrqNumber::new(1));
+        assert_eq!(mgr.dispatch_count(), 3);
+    }
+
+    #[test]
+    fn manager_dispatch_spurious_irq_increments_count() {
+        // Dispatching an IRQ with no handler should still increment the
+        // dispatch count (it counts total dispatches, not handled ones).
+        let mut mgr = IrqManager::new();
+        mgr.dispatch(IrqNumber::new(42));
+        assert_eq!(mgr.dispatch_count(), 1);
+    }
+
+    #[test]
+    fn manager_dispatch_calls_correct_handler() {
+        use core::sync::atomic::{AtomicU32, Ordering};
+        static CALLED_WITH: AtomicU32 = AtomicU32::new(0);
+
+        fn handler(irq: IrqNumber) {
+            CALLED_WITH.store(irq.as_u32(), Ordering::SeqCst);
+        }
+
+        let mut mgr = IrqManager::new();
+        mgr.register(IrqNumber::new(7), handler).unwrap();
+        mgr.dispatch(IrqNumber::new(7));
+        assert_eq!(CALLED_WITH.load(Ordering::SeqCst), 7);
+    }
+
+    #[test]
+    fn manager_multiple_handlers_independent() {
+        use core::sync::atomic::{AtomicU32, Ordering};
+        static HANDLER_A_COUNT: AtomicU32 = AtomicU32::new(0);
+        static HANDLER_B_COUNT: AtomicU32 = AtomicU32::new(0);
+
+        fn handler_a(_irq: IrqNumber) {
+            HANDLER_A_COUNT.fetch_add(1, Ordering::SeqCst);
+        }
+        fn handler_b(_irq: IrqNumber) {
+            HANDLER_B_COUNT.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let mut mgr = IrqManager::new();
+        mgr.register(IrqNumber::new(10), handler_a).unwrap();
+        mgr.register(IrqNumber::new(20), handler_b).unwrap();
+
+        mgr.dispatch(IrqNumber::new(10));
+        mgr.dispatch(IrqNumber::new(10));
+        mgr.dispatch(IrqNumber::new(20));
+
+        assert_eq!(HANDLER_A_COUNT.load(Ordering::SeqCst), 2);
+        assert_eq!(HANDLER_B_COUNT.load(Ordering::SeqCst), 1);
+        assert_eq!(mgr.dispatch_count(), 3);
+    }
+
+    #[test]
+    fn manager_register_irq_zero() {
+        let mut mgr = IrqManager::new();
+        fn dummy(_irq: IrqNumber) {}
+        // IRQ 0 is valid (timer on x86_64)
+        let result = mgr.register(IrqNumber::new(0), dummy);
+        assert!(result.is_ok());
+    }
+}

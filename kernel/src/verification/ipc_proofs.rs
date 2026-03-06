@@ -5,6 +5,8 @@
 //! FIFO ordering, message conservation, channel isolation, buffer bounds,
 //! capability enforcement, and deadlock freedom via wait-for graph analysis.
 
+#![allow(dead_code)]
+
 #[cfg(feature = "alloc")]
 use alloc::collections::BTreeMap;
 #[cfg(feature = "alloc")]
@@ -13,18 +15,14 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 /// Maximum channel capacity for bounded verification
-#[allow(dead_code)]
 const MAX_CHANNEL_CAPACITY: usize = 256;
 
 /// Rights bitmask for capability enforcement
-#[allow(dead_code)]
 const RIGHT_SEND: u32 = 1 << 0;
-#[allow(dead_code)]
 const RIGHT_RECV: u32 = 1 << 1;
 
 /// Message type tags for type safety verification
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum MessageType {
     /// Small message (register-based fast path, <= 64 bytes)
     Small = 0,
@@ -38,7 +36,6 @@ pub enum MessageType {
 
 /// A message in the IPC channel model
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct IpcMessage {
     /// Unique sequence number
     pub sequence: u64,
@@ -54,7 +51,6 @@ pub struct IpcMessage {
 
 /// Model of an IPC channel for verification
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct IpcChannelModel {
     /// Channel identifier
     pub id: u64,
@@ -93,7 +89,6 @@ impl Default for IpcChannelModel {
 
 /// Errors in the IPC model
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum IpcModelError {
     /// Channel is full
     ChannelFull,
@@ -122,7 +117,6 @@ pub enum IpcModelError {
 }
 
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 impl IpcChannelModel {
     /// Create a new channel with the given ID and capacity
     pub fn new(id: u64, capacity: usize) -> Self {
@@ -195,11 +189,9 @@ impl IpcChannelModel {
 }
 
 /// IPC invariant checker that validates channel properties
-#[allow(dead_code)]
 pub struct IpcInvariantChecker;
 
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 impl IpcInvariantChecker {
     /// Verify FIFO ordering: messages dequeued in send order
     pub fn verify_fifo_ordering(channel: &IpcChannelModel) -> Result<(), IpcModelError> {
@@ -271,7 +263,6 @@ impl IpcInvariantChecker {
 
 /// Wait-for graph for deadlock detection
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct WaitGraph {
     /// Edges: process -> list of processes it's waiting for
     #[cfg(feature = "alloc")]
@@ -279,7 +270,6 @@ pub struct WaitGraph {
 }
 
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 impl WaitGraph {
     /// Create a new empty wait-for graph
     pub fn new() -> Self {
@@ -340,7 +330,6 @@ impl WaitGraph {
 
 /// Model for shared memory regions (zero-copy verification)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct SharedRegion {
     /// Start address (page-aligned)
     pub base: u64,
@@ -350,7 +339,6 @@ pub struct SharedRegion {
     pub owner: u64,
 }
 
-#[allow(dead_code)]
 impl SharedRegion {
     /// Check if two regions overlap
     pub fn overlaps(&self, other: &SharedRegion) -> bool {
@@ -361,7 +349,6 @@ impl SharedRegion {
 
 /// Async ring buffer model for verification
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct AsyncRingBuffer {
     /// Buffer capacity (power of 2)
     pub capacity: u32,
@@ -373,7 +360,6 @@ pub struct AsyncRingBuffer {
     pub count: u32,
 }
 
-#[allow(dead_code)]
 impl AsyncRingBuffer {
     /// Create a new ring buffer with given capacity (must be power of 2)
     pub fn new(capacity: u32) -> Self {
@@ -420,7 +406,6 @@ impl AsyncRingBuffer {
 
 /// Notification model for delivery verification
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct Notification {
     /// Target process ID
     pub target: u64,

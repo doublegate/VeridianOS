@@ -20,9 +20,128 @@ pub mod usb_audio;
 pub(crate) mod virtio_sound;
 pub mod wav;
 
-use alloc::string::String;
+use alloc::{string::String, vec::Vec};
 
 use crate::error::KernelError;
+
+// ============================================================================
+// Unified Audio Error Type
+// ============================================================================
+
+/// Common audio error type for all audio backends
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+pub enum AudioError {
+    /// Requested device was not found
+    DeviceNotFound,
+    /// Device is in use by another client
+    DeviceBusy,
+    /// Configuration is invalid
+    InvalidConfig { reason: &'static str },
+    /// Capture buffer overrun -- data was lost
+    BufferOverrun,
+    /// Playback buffer underrun -- device starved
+    BufferUnderrun,
+    /// Device has not been started
+    NotStarted,
+    /// Device is already running
+    AlreadyStarted,
+    /// Requested format is not supported by this device
+    UnsupportedFormat,
+    /// Low-level I/O error communicating with hardware
+    IoError,
+}
+
+impl core::fmt::Display for AudioError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            AudioError::DeviceNotFound => write!(f, "audio device not found"),
+            AudioError::DeviceBusy => write!(f, "audio device busy"),
+            AudioError::InvalidConfig { reason } => {
+                write!(f, "invalid audio config: {}", reason)
+            }
+            AudioError::BufferOverrun => write!(f, "audio buffer overrun"),
+            AudioError::BufferUnderrun => write!(f, "audio buffer underrun"),
+            AudioError::NotStarted => write!(f, "audio device not started"),
+            AudioError::AlreadyStarted => write!(f, "audio device already started"),
+            AudioError::UnsupportedFormat => write!(f, "unsupported audio format"),
+            AudioError::IoError => write!(f, "audio I/O error"),
+        }
+    }
+}
+
+// ============================================================================
+// Device Capabilities
+// ============================================================================
+
+/// Describes the hardware capabilities of an audio device
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct AudioDeviceCapabilities {
+    /// Minimum supported sample rate in Hz
+    pub min_sample_rate: u32,
+    /// Maximum supported sample rate in Hz
+    pub max_sample_rate: u32,
+    /// Minimum supported channel count
+    pub min_channels: u8,
+    /// Maximum supported channel count
+    pub max_channels: u8,
+    /// List of supported sample formats
+    pub supported_formats: Vec<SampleFormat>,
+    /// Whether the device supports playback
+    pub playback: bool,
+    /// Whether the device supports capture
+    pub capture: bool,
+}
+
+// ============================================================================
+// Unified Audio Device Trait
+// ============================================================================
+
+/// Unified audio device trait for playback and capture backends
+///
+/// Provides a common interface across ALSA PCM devices, VirtIO Sound streams,
+/// USB Audio Class devices, and any future audio backends. Implementations
+/// adapt existing backend-specific APIs to this shared contract.
+#[allow(dead_code)]
+pub trait AudioDevice {
+    /// Configure the device with desired parameters.
+    ///
+    /// The device may adjust parameters to the nearest supported values.
+    /// Returns the actual configuration that was applied.
+    fn configure(&mut self, config: &AudioConfig) -> Result<AudioConfig, AudioError>;
+
+    /// Start playback or capture.
+    fn start(&mut self) -> Result<(), AudioError>;
+
+    /// Stop playback or capture.
+    fn stop(&mut self) -> Result<(), AudioError>;
+
+    /// Write PCM samples for playback.
+    ///
+    /// Returns the number of frames written. The data must be interleaved
+    /// samples in the format specified by the current configuration.
+    fn write_frames(&mut self, data: &[u8]) -> Result<usize, AudioError>;
+
+    /// Read PCM samples from capture.
+    ///
+    /// Returns the number of frames read. The output buffer is filled with
+    /// interleaved samples in the format specified by the current
+    /// configuration.
+    fn read_frames(&mut self, output: &mut [u8]) -> Result<usize, AudioError>;
+
+    /// Query device capabilities.
+    fn capabilities(&self) -> &AudioDeviceCapabilities;
+
+    /// Human-readable device name.
+    fn name(&self) -> &str;
+
+    /// Returns true if this device supports playback.
+    fn is_playback(&self) -> bool;
+
+    /// Returns true if this device supports capture.
+    fn is_capture(&self) -> bool;
+}
 
 /// Audio sample format
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

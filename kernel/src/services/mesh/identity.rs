@@ -14,7 +14,6 @@ use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 /// A SPIFFE identity (spiffe://trust-domain/path).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-#[allow(dead_code)]
 pub struct SpiffeId {
     /// Trust domain (e.g., "cluster.local").
     pub trust_domain: String,
@@ -57,7 +56,6 @@ impl SpiffeId {
 
 /// A service identity with associated certificate material.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ServiceIdentity {
     /// SPIFFE ID.
     pub spiffe_id: SpiffeId,
@@ -93,7 +91,6 @@ impl ServiceIdentity {
 
 /// Identity provider error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum IdentityError {
     /// Identity not found.
     NotFound(String),
@@ -113,7 +110,6 @@ pub enum IdentityError {
 
 /// Service identity provider with self-signed CA stub.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct IdentityProvider {
     /// Issued identities keyed by SPIFFE URI.
     identities: BTreeMap<String, ServiceIdentity>,

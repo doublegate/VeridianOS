@@ -4,13 +4,14 @@
 //! into a stream of tokens (start tags, end tags, text, comments, doctype).
 //! Handles entity references (&amp;, &lt;, &gt;, &quot;) and void elements.
 
+#![allow(dead_code)]
+
 use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
 
 /// An HTML attribute (name=value pair)
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attribute {
     pub name: String,
@@ -18,7 +19,6 @@ pub struct Attribute {
 }
 
 /// Tokens produced by the HTML tokenizer
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Token {
     /// <!DOCTYPE ...>
@@ -36,7 +36,6 @@ pub enum Token {
 }
 
 /// States for the tokenizer state machine
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TokenizerState {
     Data,
@@ -62,14 +61,12 @@ enum TokenizerState {
 }
 
 /// Void elements that are self-closing
-#[allow(dead_code)]
 const VOID_ELEMENTS: &[&str] = &[
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
     "track", "wbr",
 ];
 
 /// HTML tokenizer that converts input bytes into tokens
-#[allow(dead_code)]
 pub struct HtmlTokenizer {
     input: Vec<u8>,
     pos: usize,
@@ -85,7 +82,6 @@ pub struct HtmlTokenizer {
     current_char: u8,
 }
 
-#[allow(dead_code)]
 impl HtmlTokenizer {
     /// Create a new tokenizer from input bytes
     pub fn new(input: &[u8]) -> Self {

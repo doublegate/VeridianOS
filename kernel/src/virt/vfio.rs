@@ -5,6 +5,8 @@
 //!
 //! Sprints W5-S6 (container/group/device), W5-S7 (DMA + MSI-X).
 
+#![allow(dead_code)]
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -33,7 +35,6 @@ const MAX_DMA_MAPPINGS: usize = 256;
 const MAX_MSIX_VECTORS: usize = 2048;
 
 /// Maximum IRQ types
-#[allow(dead_code)]
 const MAX_IRQS: usize = 4;
 
 // ---------------------------------------------------------------------------
@@ -42,7 +43,6 @@ const MAX_IRQS: usize = 4;
 
 /// PCI device address (BDF - Bus:Device.Function)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[allow(dead_code)]
 pub struct PciAddress {
     /// PCI bus number
     pub bus: u8,
@@ -54,7 +54,6 @@ pub struct PciAddress {
 
 impl PciAddress {
     /// Create a new PCI address
-    #[allow(dead_code)]
     pub fn new(bus: u8, device: u8, function: u8) -> Self {
         Self {
             bus,
@@ -64,13 +63,11 @@ impl PciAddress {
     }
 
     /// Encode as a single u16 value (BDF format)
-    #[allow(dead_code)]
     pub fn to_bdf(&self) -> u16 {
         ((self.bus as u16) << 8) | ((self.device as u16) << 3) | (self.function as u16)
     }
 
     /// Decode from a BDF u16 value
-    #[allow(dead_code)]
     pub fn from_bdf(bdf: u16) -> Self {
         Self {
             bus: (bdf >> 8) as u8,
@@ -92,7 +89,6 @@ impl core::fmt::Display for PciAddress {
 
 /// BAR (Base Address Register) flags
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub struct BarFlags {
     bits: u32,
 }
@@ -108,31 +104,26 @@ impl BarFlags {
     pub const BIT64: Self = Self { bits: 8 };
 
     /// Check if I/O space
-    #[allow(dead_code)]
     pub fn is_io(self) -> bool {
         self.bits & 1 != 0
     }
 
     /// Check if memory space
-    #[allow(dead_code)]
     pub fn is_memory(self) -> bool {
         self.bits & 2 != 0
     }
 
     /// Check if prefetchable
-    #[allow(dead_code)]
     pub fn is_prefetchable(self) -> bool {
         self.bits & 4 != 0
     }
 
     /// Check if 64-bit
-    #[allow(dead_code)]
     pub fn is_64bit(self) -> bool {
         self.bits & 8 != 0
     }
 
     /// Combine flags
-    #[allow(dead_code)]
     pub fn union(self, other: Self) -> Self {
         Self {
             bits: self.bits | other.bits,
@@ -142,7 +133,6 @@ impl BarFlags {
 
 /// PCI BAR region descriptor
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub struct BarRegion {
     /// BAR index (0-5)
     pub index: u8,
@@ -160,7 +150,6 @@ pub struct BarRegion {
 
 impl BarRegion {
     /// Create a new BAR region
-    #[allow(dead_code)]
     pub fn new(index: u8, base_addr: u64, size: u64, flags: BarFlags) -> Self {
         Self {
             index,
@@ -173,14 +162,12 @@ impl BarRegion {
     }
 
     /// Map this BAR into guest physical address space
-    #[allow(dead_code)]
     pub fn map_to_guest(&mut self, guest_addr: u64) {
         self.guest_addr = guest_addr;
         self.mapped = true;
     }
 
     /// Unmap this BAR from guest
-    #[allow(dead_code)]
     pub fn unmap(&mut self) {
         self.mapped = false;
         self.guest_addr = 0;
@@ -193,7 +180,6 @@ impl BarRegion {
 
 /// DMA mapping flags
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub struct DmaFlags {
     bits: u32,
 }
@@ -207,13 +193,11 @@ impl DmaFlags {
     pub const READ_WRITE: Self = Self { bits: 3 };
 
     /// Check read access
-    #[allow(dead_code)]
     pub fn is_readable(self) -> bool {
         self.bits & 1 != 0
     }
 
     /// Check write access
-    #[allow(dead_code)]
     pub fn is_writable(self) -> bool {
         self.bits & 2 != 0
     }
@@ -221,7 +205,6 @@ impl DmaFlags {
 
 /// DMA address mapping entry
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub struct DmaMapping {
     /// I/O Virtual Address (device-visible address)
     pub iova: u64,
@@ -235,7 +218,6 @@ pub struct DmaMapping {
 
 impl DmaMapping {
     /// Create a new DMA mapping
-    #[allow(dead_code)]
     pub fn new(iova: u64, size: u64, paddr: u64, flags: DmaFlags) -> Self {
         Self {
             iova,
@@ -246,13 +228,11 @@ impl DmaMapping {
     }
 
     /// Check if an IOVA falls within this mapping
-    #[allow(dead_code)]
     pub fn contains(&self, iova: u64) -> bool {
         iova >= self.iova && iova < self.iova + self.size
     }
 
     /// Translate IOVA to physical address
-    #[allow(dead_code)]
     pub fn translate(&self, iova: u64) -> Option<u64> {
         if self.contains(iova) {
             Some(self.paddr + (iova - self.iova))
@@ -268,7 +248,6 @@ impl DmaMapping {
 
 /// VFIO interrupt types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum VfioIrqType {
     /// Legacy INTx interrupt
     Intx = 0,
@@ -282,7 +261,6 @@ pub enum VfioIrqType {
 
 /// VFIO IRQ configuration
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub struct VfioIrqInfo {
     /// IRQ type
     pub irq_type: VfioIrqType,
@@ -296,7 +274,6 @@ pub struct VfioIrqInfo {
 
 impl VfioIrqInfo {
     /// Create a new IRQ info
-    #[allow(dead_code)]
     pub fn new(irq_type: VfioIrqType, count: u32) -> Self {
         Self {
             irq_type,
@@ -313,7 +290,6 @@ impl VfioIrqInfo {
 
 /// An IOMMU group containing one or more PCI devices
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub struct IommuGroup {
     /// Group identifier
     pub group_id: u32,
@@ -328,7 +304,6 @@ pub struct IommuGroup {
 #[cfg(feature = "alloc")]
 impl IommuGroup {
     /// Create a new IOMMU group
-    #[allow(dead_code)]
     pub fn new(group_id: u32) -> Self {
         Self {
             group_id,
@@ -339,7 +314,6 @@ impl IommuGroup {
     }
 
     /// Add a device to this group
-    #[allow(dead_code)]
     pub fn add_device(&mut self, addr: PciAddress) -> Result<(), VmError> {
         if self.devices.len() >= MAX_DEVICES_PER_GROUP {
             return Err(VmError::DeviceError);
@@ -352,7 +326,6 @@ impl IommuGroup {
     }
 
     /// Remove a device from this group
-    #[allow(dead_code)]
     pub fn remove_device(&mut self, addr: &PciAddress) -> bool {
         if let Some(pos) = self.devices.iter().position(|d| d == addr) {
             self.devices.swap_remove(pos);
@@ -363,20 +336,17 @@ impl IommuGroup {
     }
 
     /// Check if a device is in this group
-    #[allow(dead_code)]
     pub fn contains_device(&self, addr: &PciAddress) -> bool {
         self.devices.contains(addr)
     }
 
     /// Attach to a container
-    #[allow(dead_code)]
     pub fn attach(&mut self, container_id: u32) {
         self.attached = true;
         self.container_id = Some(container_id);
     }
 
     /// Detach from container
-    #[allow(dead_code)]
     pub fn detach(&mut self) {
         self.attached = false;
         self.container_id = None;
@@ -389,7 +359,6 @@ impl IommuGroup {
 
 /// VFIO container for grouping IOMMU groups together
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub struct VfioContainer {
     /// IOMMU type (1 = Type1, 6 = Type1v2)
     pub iommu_type: u32,
@@ -404,7 +373,6 @@ pub struct VfioContainer {
 #[cfg(feature = "alloc")]
 impl VfioContainer {
     /// Create a new VFIO container
-    #[allow(dead_code)]
     pub fn new(container_id: u32, iommu_type: u32) -> Self {
         Self {
             iommu_type,
@@ -415,7 +383,6 @@ impl VfioContainer {
     }
 
     /// Add an IOMMU group to this container
-    #[allow(dead_code)]
     pub fn add_group(&mut self, mut group: IommuGroup) -> Result<(), VmError> {
         if self.groups.len() >= MAX_GROUPS_PER_CONTAINER {
             return Err(VmError::DeviceError);
@@ -426,7 +393,6 @@ impl VfioContainer {
     }
 
     /// Add a DMA mapping
-    #[allow(dead_code)]
     pub fn dma_map(&mut self, mapping: DmaMapping) -> Result<(), VmError> {
         if self.dma_mappings.len() >= MAX_DMA_MAPPINGS {
             return Err(VmError::DeviceError);
@@ -444,7 +410,6 @@ impl VfioContainer {
     }
 
     /// Remove a DMA mapping by IOVA
-    #[allow(dead_code)]
     pub fn dma_unmap(&mut self, iova: u64) -> Result<u64, VmError> {
         if let Some(pos) = self.dma_mappings.iter().position(|m| m.iova == iova) {
             let size = self.dma_mappings[pos].size;
@@ -456,7 +421,6 @@ impl VfioContainer {
     }
 
     /// Translate an IOVA to physical address
-    #[allow(dead_code)]
     pub fn translate_iova(&self, iova: u64) -> Option<u64> {
         for mapping in &self.dma_mappings {
             if let Some(paddr) = mapping.translate(iova) {
@@ -467,13 +431,11 @@ impl VfioContainer {
     }
 
     /// Get number of groups
-    #[allow(dead_code)]
     pub fn group_count(&self) -> usize {
         self.groups.len()
     }
 
     /// Get number of DMA mappings
-    #[allow(dead_code)]
     pub fn dma_mapping_count(&self) -> usize {
         self.dma_mappings.len()
     }
@@ -485,7 +447,6 @@ impl VfioContainer {
 
 /// A VFIO-managed PCI device for passthrough
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub struct VfioDevice {
     /// IOMMU group this device belongs to
     pub group_id: u32,
@@ -508,7 +469,6 @@ pub struct VfioDevice {
 #[cfg(feature = "alloc")]
 impl VfioDevice {
     /// Open (bind) a device to VFIO
-    #[allow(dead_code)]
     pub fn open(
         group_id: u32,
         pci_address: PciAddress,
@@ -528,7 +488,6 @@ impl VfioDevice {
     }
 
     /// Add a BAR region
-    #[allow(dead_code)]
     pub fn add_bar(&mut self, region: BarRegion) -> Result<(), VmError> {
         if self.bar_regions.len() >= MAX_BAR_REGIONS {
             return Err(VmError::DeviceError);
@@ -538,7 +497,6 @@ impl VfioDevice {
     }
 
     /// Map a BAR region into guest EPT (uncacheable)
-    #[allow(dead_code)]
     pub fn map_bar(&mut self, bar_index: u8, guest_addr: u64) -> Result<(), VmError> {
         if let Some(bar) = self.bar_regions.iter_mut().find(|b| b.index == bar_index) {
             bar.map_to_guest(guest_addr);
@@ -551,7 +509,6 @@ impl VfioDevice {
     }
 
     /// Unmap a BAR region
-    #[allow(dead_code)]
     pub fn unmap_bar(&mut self, bar_index: u8) -> Result<(), VmError> {
         if let Some(bar) = self.bar_regions.iter_mut().find(|b| b.index == bar_index) {
             bar.unmap();
@@ -562,7 +519,6 @@ impl VfioDevice {
     }
 
     /// Enable MSI-X interrupts with remapping
-    #[allow(dead_code)]
     pub fn enable_msix(&mut self, num_vectors: u32) -> Result<(), VmError> {
         if num_vectors > MAX_MSIX_VECTORS as u32 {
             return Err(VmError::DeviceError);
@@ -578,7 +534,6 @@ impl VfioDevice {
     }
 
     /// Disable MSI-X interrupts
-    #[allow(dead_code)]
     pub fn disable_msix(&mut self) {
         if let Some(irq) = self
             .irqs
@@ -590,7 +545,6 @@ impl VfioDevice {
     }
 
     /// Perform a function-level reset
-    #[allow(dead_code)]
     pub fn reset(&mut self) -> Result<(), VmError> {
         // Unmap all BARs
         for bar in &mut self.bar_regions {
@@ -604,7 +558,6 @@ impl VfioDevice {
     }
 
     /// Assign this device to a VM
-    #[allow(dead_code)]
     pub fn assign_to_vm(&mut self, vm_id: u32) -> Result<(), VmError> {
         if self.assigned_vm.is_some() {
             return Err(VmError::DeviceError);
@@ -614,31 +567,26 @@ impl VfioDevice {
     }
 
     /// Unassign this device from its VM
-    #[allow(dead_code)]
     pub fn unassign(&mut self) {
         self.assigned_vm = None;
     }
 
     /// Check if assigned to a VM
-    #[allow(dead_code)]
     pub fn is_assigned(&self) -> bool {
         self.assigned_vm.is_some()
     }
 
     /// Get assigned VM ID
-    #[allow(dead_code)]
     pub fn assigned_vm_id(&self) -> Option<u32> {
         self.assigned_vm
     }
 
     /// Get BAR region by index
-    #[allow(dead_code)]
     pub fn bar(&self, index: u8) -> Option<&BarRegion> {
         self.bar_regions.iter().find(|b| b.index == index)
     }
 
     /// Check if MSI-X is enabled
-    #[allow(dead_code)]
     pub fn msix_enabled(&self) -> bool {
         self.irqs
             .iter()
@@ -646,7 +594,6 @@ impl VfioDevice {
     }
 
     /// Get MSI-X vector count
-    #[allow(dead_code)]
     pub fn msix_vector_count(&self) -> u32 {
         self.irqs
             .iter()

@@ -4,6 +4,8 @@
 //! HTML parsing, CSS styling, layout, and painting. Manages the
 //! address bar, viewport, scroll position, and history stacks.
 
+#![allow(dead_code)]
+
 use alloc::{
     string::{String, ToString},
     vec::Vec,
@@ -19,7 +21,6 @@ use super::{
 };
 
 /// Browser window state
-#[allow(dead_code)]
 pub struct BrowserWindow {
     /// Text in the address bar
     pub address_bar: String,
@@ -55,7 +56,6 @@ impl Default for BrowserWindow {
     }
 }
 
-#[allow(dead_code)]
 impl BrowserWindow {
     /// Create a new browser window with given viewport dimensions
     pub fn new(width: i32, height: i32) -> Self {
@@ -369,7 +369,6 @@ impl BrowserWindow {
 }
 
 /// Find a tag in a byte slice (case-insensitive)
-#[allow(dead_code)]
 fn find_tag_start(bytes: &[u8], start: usize, tag: &[u8]) -> Option<usize> {
     if tag.is_empty() || start + tag.len() > bytes.len() {
         return None;

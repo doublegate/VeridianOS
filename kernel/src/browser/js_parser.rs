@@ -4,6 +4,8 @@
 //! Uses arena allocation (Vec + index) for AST nodes, Pratt parsing for
 //! expressions (precedence climbing), and recursive descent for statements.
 
+#![allow(dead_code)]
+
 use alloc::{
     string::{String, ToString},
     vec,
@@ -23,7 +25,6 @@ pub type AstNodeId = usize;
 pub const AST_NONE: AstNodeId = usize::MAX;
 
 /// Binary operator
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     Add,
@@ -51,7 +52,6 @@ pub enum BinOp {
 }
 
 /// Unary operator
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
     Neg,
@@ -63,7 +63,6 @@ pub enum UnaryOp {
 }
 
 /// AST node
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum AstNode {
     /// Program root: list of top-level statements
@@ -215,7 +214,6 @@ pub enum AstNode {
 }
 
 /// Variable declaration kind
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VarKind {
     Var,
@@ -228,7 +226,6 @@ pub enum VarKind {
 // ---------------------------------------------------------------------------
 
 /// Arena allocator for AST nodes
-#[allow(dead_code)]
 pub struct AstArena {
     nodes: Vec<AstNode>,
 }
@@ -279,7 +276,6 @@ impl AstArena {
 // ---------------------------------------------------------------------------
 
 /// JavaScript parser
-#[allow(dead_code)]
 pub struct JsParser {
     /// Token stream
     tokens: Vec<JsToken>,

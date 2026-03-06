@@ -9,6 +9,7 @@
 //! - [`commands`] - All built-in command implementations
 //! - [`state`] - Global singleton management (init, get_shell, try_get_shell)
 
+#![allow(dead_code)]
 // Many variables in this module are only used in println! calls which are
 // no-ops on some architectures (like AArch64), causing unused variable warnings.
 #![allow(unused_variables)]

@@ -6,6 +6,8 @@
 //!
 //! Sprints W5-S1 (core API), W5-S2 (vCPU management), W5-S3 (PIT emulation).
 
+#![allow(dead_code)]
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -42,7 +44,6 @@ const MAX_MSR_ENTRIES: usize = 256;
 
 /// KVM capability identifiers
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum KvmCapability {
     /// In-kernel IRQ chip emulation
     Irqchip = 0,
@@ -68,14 +69,12 @@ pub enum KvmCapability {
 
 impl KvmCapability {
     /// Check if this capability is supported
-    #[allow(dead_code)]
     pub fn is_supported(&self) -> bool {
         // All capabilities supported in our implementation
         true
     }
 
     /// Convert from raw integer
-    #[allow(dead_code)]
     pub fn from_raw(value: u32) -> Option<Self> {
         match value {
             0 => Some(Self::Irqchip),
@@ -99,7 +98,6 @@ impl KvmCapability {
 
 /// VM exit reason from KVM run
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum KvmExitReason {
     /// I/O port access
     Io,
@@ -117,7 +115,6 @@ pub enum KvmExitReason {
 
 impl KvmExitReason {
     /// Convert from raw exit code
-    #[allow(dead_code)]
     pub fn from_raw(raw: u32) -> Self {
         match raw {
             2 => Self::Io,
@@ -130,7 +127,6 @@ impl KvmExitReason {
     }
 
     /// Convert to raw exit code
-    #[allow(dead_code)]
     pub fn to_raw(self) -> u32 {
         match self {
             Self::Io => 2,
@@ -149,7 +145,6 @@ impl KvmExitReason {
 
 /// Direction of I/O port access
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub enum IoDirection {
     /// Reading from port
     #[default]
@@ -164,7 +159,6 @@ pub enum IoDirection {
 
 /// Information about an I/O port VM exit
 #[derive(Debug, Clone, Copy, Default)]
-#[allow(dead_code)]
 pub struct KvmIoExit {
     /// Direction of I/O access
     pub direction: IoDirection,
@@ -178,7 +172,6 @@ pub struct KvmIoExit {
 
 impl KvmIoExit {
     /// Create a new I/O exit for an IN instruction
-    #[allow(dead_code)]
     pub fn new_in(port: u16, size: u8) -> Self {
         Self {
             direction: IoDirection::In,
@@ -189,7 +182,6 @@ impl KvmIoExit {
     }
 
     /// Create a new I/O exit for an OUT instruction
-    #[allow(dead_code)]
     pub fn new_out(port: u16, size: u8, data: u32) -> Self {
         Self {
             direction: IoDirection::Out,
@@ -206,7 +198,6 @@ impl KvmIoExit {
 
 /// Information about an MMIO VM exit
 #[derive(Debug, Clone, Copy, Default)]
-#[allow(dead_code)]
 pub struct KvmMmioExit {
     /// Physical address accessed
     pub phys_addr: u64,
@@ -220,7 +211,6 @@ pub struct KvmMmioExit {
 
 impl KvmMmioExit {
     /// Create a new MMIO exit for a read
-    #[allow(dead_code)]
     pub fn new_read(phys_addr: u64, len: u8) -> Self {
         Self {
             phys_addr,
@@ -231,7 +221,6 @@ impl KvmMmioExit {
     }
 
     /// Create a new MMIO exit for a write
-    #[allow(dead_code)]
     pub fn new_write(phys_addr: u64, data: u64, len: u8) -> Self {
         Self {
             phys_addr,
@@ -248,7 +237,6 @@ impl KvmMmioExit {
 
 /// x86_64 general-purpose register set
 #[derive(Debug, Clone, Copy, Default)]
-#[allow(dead_code)]
 pub struct KvmRegs {
     pub rax: u64,
     pub rbx: u64,
@@ -276,7 +264,6 @@ pub struct KvmRegs {
 
 /// x86 segment register descriptor
 #[derive(Debug, Clone, Copy, Default)]
-#[allow(dead_code)]
 pub struct KvmSegment {
     pub base: u64,
     pub limit: u32,
@@ -293,7 +280,6 @@ pub struct KvmSegment {
 
 impl KvmSegment {
     /// Create a flat code segment for long mode
-    #[allow(dead_code)]
     pub fn flat_code_64() -> Self {
         Self {
             base: 0,
@@ -311,7 +297,6 @@ impl KvmSegment {
     }
 
     /// Create a flat data segment for long mode
-    #[allow(dead_code)]
     pub fn flat_data_64() -> Self {
         Self {
             base: 0,
@@ -335,7 +320,6 @@ impl KvmSegment {
 
 /// x86_64 system register set (segment + control registers)
 #[derive(Debug, Clone, Copy, Default)]
-#[allow(dead_code)]
 pub struct KvmSregs {
     pub cs: KvmSegment,
     pub ds: KvmSegment,
@@ -354,7 +338,6 @@ pub struct KvmSregs {
 
 impl KvmSregs {
     /// Create sregs for real mode entry
-    #[allow(dead_code)]
     pub fn real_mode() -> Self {
         Self {
             cr0: 0x10, // ET bit set
@@ -363,7 +346,6 @@ impl KvmSregs {
     }
 
     /// Create sregs for 64-bit long mode
-    #[allow(dead_code)]
     pub fn long_mode(cr3: u64) -> Self {
         Self {
             cs: KvmSegment::flat_code_64(),
@@ -387,7 +369,6 @@ impl KvmSregs {
 
 /// Model-Specific Register entry
 #[derive(Debug, Clone, Copy, Default)]
-#[allow(dead_code)]
 pub struct MsrEntry {
     /// MSR index
     pub index: u32,
@@ -401,7 +382,6 @@ pub struct MsrEntry {
 
 /// A user memory region mapping guest physical to host virtual
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub struct KvmMemoryRegion {
     /// Slot index for this region
     pub slot: u32,
@@ -422,7 +402,6 @@ impl KvmMemoryRegion {
     pub const FLAG_LOG_DIRTY: u32 = 2;
 
     /// Create a new memory region
-    #[allow(dead_code)]
     pub fn new(slot: u32, guest_phys: u64, size: u64, host_addr: u64) -> Self {
         Self {
             slot,
@@ -434,7 +413,6 @@ impl KvmMemoryRegion {
     }
 
     /// Create a read-only memory region
-    #[allow(dead_code)]
     pub fn new_readonly(slot: u32, guest_phys: u64, size: u64, host_addr: u64) -> Self {
         Self {
             slot,
@@ -446,25 +424,21 @@ impl KvmMemoryRegion {
     }
 
     /// Check if region is read-only
-    #[allow(dead_code)]
     pub fn is_readonly(&self) -> bool {
         self.flags & Self::FLAG_READONLY != 0
     }
 
     /// Check if region has dirty logging enabled
-    #[allow(dead_code)]
     pub fn has_dirty_logging(&self) -> bool {
         self.flags & Self::FLAG_LOG_DIRTY != 0
     }
 
     /// Check if an address falls within this region
-    #[allow(dead_code)]
     pub fn contains_guest_addr(&self, addr: u64) -> bool {
         addr >= self.guest_phys_addr && addr < self.guest_phys_addr + self.memory_size
     }
 
     /// Translate guest physical to host virtual address
-    #[allow(dead_code)]
     pub fn translate(&self, guest_phys: u64) -> Option<u64> {
         if self.contains_guest_addr(guest_phys) {
             Some(self.userspace_addr + (guest_phys - self.guest_phys_addr))
@@ -480,7 +454,6 @@ impl KvmMemoryRegion {
 
 /// PIT counter operating mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub enum PitMode {
     /// Mode 0: Interrupt on terminal count
     #[default]
@@ -499,7 +472,6 @@ pub enum PitMode {
 
 impl PitMode {
     /// Convert from raw mode bits
-    #[allow(dead_code)]
     pub fn from_raw(raw: u8) -> Self {
         match raw & 0x07 {
             0 => Self::InterruptOnTerminalCount,
@@ -519,7 +491,6 @@ impl PitMode {
 
 /// State for a single PIT counter channel
 #[derive(Debug, Clone, Copy, Default)]
-#[allow(dead_code)]
 pub struct PitChannel {
     /// Current counter value
     pub count: u16,
@@ -551,7 +522,6 @@ pub struct PitChannel {
 
 impl PitChannel {
     /// Create a new PIT channel with default state
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             gate: true,   // Gate high by default for channels 0,1
@@ -561,7 +531,6 @@ impl PitChannel {
     }
 
     /// Load a new count value
-    #[allow(dead_code)]
     pub fn load_count(&mut self, value: u16) {
         self.reload = if value == 0 { u16::MAX } else { value };
         self.count = self.reload;
@@ -570,7 +539,6 @@ impl PitChannel {
     }
 
     /// Tick the counter by one unit
-    #[allow(dead_code)]
     pub fn tick(&mut self) -> bool {
         if !self.enabled || !self.gate {
             return false;
@@ -604,7 +572,6 @@ impl PitChannel {
     }
 
     /// Calculate the frequency in Hz (integer)
-    #[allow(dead_code)]
     pub fn frequency_hz(&self) -> u64 {
         if self.reload == 0 {
             return 0;
@@ -613,7 +580,6 @@ impl PitChannel {
     }
 
     /// Calculate the period in nanoseconds (integer)
-    #[allow(dead_code)]
     pub fn period_ns(&self) -> u64 {
         let freq = self.frequency_hz();
         if freq == 0 {
@@ -623,7 +589,6 @@ impl PitChannel {
     }
 
     /// Advance by a number of nanoseconds, return number of interrupts fired
-    #[allow(dead_code)]
     pub fn advance_ns(&mut self, ns: u64) -> u32 {
         if !self.enabled || self.reload == 0 {
             return 0;
@@ -649,7 +614,6 @@ impl PitChannel {
     }
 
     /// Latch the current counter value
-    #[allow(dead_code)]
     pub fn latch(&mut self) {
         if !self.latch_valid {
             self.latch_value = self.count;
@@ -659,7 +623,6 @@ impl PitChannel {
     }
 
     /// Read a byte from the channel (respects latch and access mode)
-    #[allow(dead_code)]
     pub fn read_byte(&mut self) -> u8 {
         let value = if self.latch_valid {
             self.latch_value
@@ -706,7 +669,6 @@ impl PitChannel {
     }
 
     /// Write a byte to the channel (respects access mode)
-    #[allow(dead_code)]
     pub fn write_byte(&mut self, byte: u8) {
         match self.access_mode {
             1 => {
@@ -739,7 +701,6 @@ impl PitChannel {
 
 /// 8254/8253-compatible Programmable Interval Timer
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct VirtualPit {
     /// Three counter channels
     pub channels: [PitChannel; PIT_CHANNEL_COUNT],
@@ -757,7 +718,6 @@ impl Default for VirtualPit {
 
 impl VirtualPit {
     /// Create a new PIT with default channel configuration
-    #[allow(dead_code)]
     pub fn new() -> Self {
         let mut channels = [PitChannel::new(), PitChannel::new(), PitChannel::new()];
         // Channel 2 gate is controlled by speaker port
@@ -770,7 +730,6 @@ impl VirtualPit {
     }
 
     /// Handle I/O write to PIT control word register (port 0x43)
-    #[allow(dead_code)]
     pub fn write_control(&mut self, value: u8) {
         let channel = ((value >> 6) & 0x03) as usize;
         if channel == 3 {
@@ -819,7 +778,6 @@ impl VirtualPit {
     }
 
     /// Handle I/O read from a channel data port
-    #[allow(dead_code)]
     pub fn read_channel(&mut self, channel: usize) -> u8 {
         if channel >= PIT_CHANNEL_COUNT {
             return 0xFF;
@@ -828,7 +786,6 @@ impl VirtualPit {
     }
 
     /// Handle I/O write to a channel data port
-    #[allow(dead_code)]
     pub fn write_channel(&mut self, channel: usize, value: u8) {
         if channel >= PIT_CHANNEL_COUNT {
             return;
@@ -837,7 +794,6 @@ impl VirtualPit {
     }
 
     /// Handle speaker control port (0x61) read
-    #[allow(dead_code)]
     pub fn read_speaker_port(&self) -> u8 {
         let mut val = 0u8;
         if self.speaker_gate {
@@ -850,14 +806,12 @@ impl VirtualPit {
     }
 
     /// Handle speaker control port (0x61) write
-    #[allow(dead_code)]
     pub fn write_speaker_port(&mut self, value: u8) {
         self.speaker_gate = value & 0x01 != 0;
         self.channels[2].gate = value & 0x01 != 0;
     }
 
     /// Advance all channels by a number of nanoseconds
-    #[allow(dead_code)]
     pub fn advance_ns(&mut self, ns: u64) -> u32 {
         let mut total_irqs = 0u32;
         // Channel 0 is typically connected to IRQ 0
@@ -873,7 +827,6 @@ impl VirtualPit {
     }
 
     /// Handle PIT I/O port access (ports 0x40-0x43, 0x61)
-    #[allow(dead_code)]
     pub fn handle_io(&mut self, port: u16, is_write: bool, data: &mut [u8]) -> bool {
         match port {
             0x40..=0x42 => {
@@ -917,7 +870,6 @@ impl VirtualPit {
 
 /// Run state for the shared KVM run page
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub enum KvmRunState {
     /// vCPU is ready to run
     #[default]
@@ -930,7 +882,6 @@ pub enum KvmRunState {
 
 /// Shared run page between kernel and userspace
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct KvmRunPage {
     /// Current run state
     pub state: KvmRunState,
@@ -946,7 +897,6 @@ pub struct KvmRunPage {
 
 impl KvmRunPage {
     /// Create a new run page
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::default()
     }
@@ -954,7 +904,6 @@ impl KvmRunPage {
 
 /// Virtual CPU state
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub struct KvmVcpu {
     /// vCPU identifier within the VM
     pub vcpu_id: u32,
@@ -983,7 +932,6 @@ pub struct KvmVcpu {
 #[cfg(feature = "alloc")]
 impl KvmVcpu {
     /// Create a new vCPU with the given ID
-    #[allow(dead_code)]
     pub fn new(vcpu_id: u32) -> Self {
         Self {
             vcpu_id,
@@ -1004,7 +952,6 @@ impl KvmVcpu {
     ///
     /// Returns the exit reason. In a real implementation this would
     /// execute a VMX VM entry; here we simulate common exit scenarios.
-    #[allow(dead_code)]
     pub fn run(&mut self) -> Result<KvmExitReason, VmError> {
         if self.halted {
             // If halted and no pending interrupt, exit with HLT
@@ -1040,31 +987,26 @@ impl KvmVcpu {
     }
 
     /// Get general-purpose registers
-    #[allow(dead_code)]
     pub fn get_regs(&self) -> &KvmRegs {
         &self.regs
     }
 
     /// Set general-purpose registers
-    #[allow(dead_code)]
     pub fn set_regs(&mut self, regs: KvmRegs) {
         self.regs = regs;
     }
 
     /// Get system registers
-    #[allow(dead_code)]
     pub fn get_sregs(&self) -> &KvmSregs {
         &self.sregs
     }
 
     /// Set system registers
-    #[allow(dead_code)]
     pub fn set_sregs(&mut self, sregs: KvmSregs) {
         self.sregs = sregs;
     }
 
     /// Get MSR values
-    #[allow(dead_code)]
     pub fn get_msrs(&self, indices: &[u32]) -> Vec<MsrEntry> {
         let mut result = Vec::with_capacity(indices.len());
         for &idx in indices {
@@ -1079,7 +1021,6 @@ impl KvmVcpu {
     }
 
     /// Set MSR values
-    #[allow(dead_code)]
     pub fn set_msrs(&mut self, entries: &[MsrEntry]) -> Result<usize, VmError> {
         if entries.len() > MAX_MSR_ENTRIES {
             return Err(VmError::InvalidVmState);
@@ -1095,7 +1036,6 @@ impl KvmVcpu {
     }
 
     /// Inject an external interrupt
-    #[allow(dead_code)]
     pub fn interrupt(&mut self, vector: u8) {
         self.pending_interrupt = Some(vector);
         if self.halted {
@@ -1104,7 +1044,6 @@ impl KvmVcpu {
     }
 
     /// Signal an MSI interrupt
-    #[allow(dead_code)]
     pub fn signal_msi(&mut self, address: u64, data: u32) {
         // MSI address format: destination ID in bits 19:12
         let _dest_id = (address >> 12) & 0xFF;
@@ -1114,31 +1053,26 @@ impl KvmVcpu {
     }
 
     /// Check if vCPU is halted
-    #[allow(dead_code)]
     pub fn is_halted(&self) -> bool {
         self.halted
     }
 
     /// Halt the vCPU (simulates HLT instruction)
-    #[allow(dead_code)]
     pub fn halt(&mut self) {
         self.halted = true;
     }
 
     /// Get entry count
-    #[allow(dead_code)]
     pub fn entry_count(&self) -> u64 {
         self.entry_count
     }
 
     /// Get exit count
-    #[allow(dead_code)]
     pub fn exit_count(&self) -> u64 {
         self.exit_count
     }
 
     /// Reset the vCPU to initial state
-    #[allow(dead_code)]
     pub fn reset(&mut self) {
         self.regs = KvmRegs::default();
         self.sregs = KvmSregs::default();
@@ -1156,7 +1090,6 @@ impl KvmVcpu {
 
 /// Virtual Machine instance
 #[cfg(feature = "alloc")]
-#[allow(dead_code)]
 pub struct KvmVm {
     /// VM file descriptor (simulated)
     vm_fd: u32,
@@ -1183,7 +1116,6 @@ pub struct KvmVm {
 #[cfg(feature = "alloc")]
 impl KvmVm {
     /// Create a new VM
-    #[allow(dead_code)]
     pub fn create(vm_id: u32) -> Result<Self, VmError> {
         Ok(Self {
             vm_fd: vm_id + 1000, // Simulated fd
@@ -1200,14 +1132,12 @@ impl KvmVm {
     }
 
     /// Set the TSS address (x86-specific, required before creating vCPUs)
-    #[allow(dead_code)]
     pub fn set_tss_addr(&mut self, addr: u64) -> Result<(), VmError> {
         self.tss_addr = addr;
         Ok(())
     }
 
     /// Map a user memory region into the guest physical address space
-    #[allow(dead_code)]
     pub fn set_user_memory_region(&mut self, region: KvmMemoryRegion) -> Result<(), VmError> {
         if self.memory_regions.len() >= MAX_MEMORY_REGIONS {
             return Err(VmError::GuestMemoryError);
@@ -1238,7 +1168,6 @@ impl KvmVm {
     }
 
     /// Create a vCPU and return its index
-    #[allow(dead_code)]
     pub fn create_vcpu(&mut self, vcpu_id: u32) -> Result<usize, VmError> {
         if self.num_vcpus as usize >= MAX_VCPUS_PER_VM {
             return Err(VmError::InvalidVmState);
@@ -1252,19 +1181,16 @@ impl KvmVm {
     }
 
     /// Get a reference to a vCPU by index
-    #[allow(dead_code)]
     pub fn vcpu(&self, index: usize) -> Option<&KvmVcpu> {
         self.vcpus.get(index)
     }
 
     /// Get a mutable reference to a vCPU by index
-    #[allow(dead_code)]
     pub fn vcpu_mut(&mut self, index: usize) -> Option<&mut KvmVcpu> {
         self.vcpus.get_mut(index)
     }
 
     /// Create an in-kernel IRQ chip (LAPIC + IOAPIC)
-    #[allow(dead_code)]
     pub fn create_irqchip(&mut self) -> Result<(), VmError> {
         if self.irqchip_created {
             return Err(VmError::VmxAlreadyEnabled);
@@ -1274,7 +1200,6 @@ impl KvmVm {
     }
 
     /// Create an in-kernel PIT (i8254)
-    #[allow(dead_code)]
     pub fn create_pit2(&mut self) -> Result<(), VmError> {
         if self.pit_created {
             return Err(VmError::VmxAlreadyEnabled);
@@ -1288,19 +1213,16 @@ impl KvmVm {
     }
 
     /// Get the PIT if created
-    #[allow(dead_code)]
     pub fn pit(&self) -> Option<&VirtualPit> {
         self.pit.as_ref()
     }
 
     /// Get mutable PIT if created
-    #[allow(dead_code)]
     pub fn pit_mut(&mut self) -> Option<&mut VirtualPit> {
         self.pit.as_mut()
     }
 
     /// Translate a guest physical address to host virtual
-    #[allow(dead_code)]
     pub fn translate_address(&self, guest_phys: u64) -> Option<u64> {
         for region in &self.memory_regions {
             if let Some(host_addr) = region.translate(guest_phys) {
@@ -1311,43 +1233,36 @@ impl KvmVm {
     }
 
     /// Get the number of vCPUs
-    #[allow(dead_code)]
     pub fn num_vcpus(&self) -> u32 {
         self.num_vcpus
     }
 
     /// Get the number of memory regions
-    #[allow(dead_code)]
     pub fn num_memory_regions(&self) -> usize {
         self.memory_regions.len()
     }
 
     /// Check if irqchip is created
-    #[allow(dead_code)]
     pub fn has_irqchip(&self) -> bool {
         self.irqchip_created
     }
 
     /// Check if PIT is created
-    #[allow(dead_code)]
     pub fn has_pit(&self) -> bool {
         self.pit_created
     }
 
     /// Get VM identifier
-    #[allow(dead_code)]
     pub fn vm_id(&self) -> u32 {
         self.vm_id
     }
 
     /// Get next available memory slot
-    #[allow(dead_code)]
     pub fn next_memory_slot(&self) -> u32 {
         self.next_slot
     }
 
     /// Allocate a new memory slot and return it
-    #[allow(dead_code)]
     pub fn allocate_memory_slot(&mut self) -> u32 {
         let slot = self.next_slot;
         self.next_slot += 1;
@@ -1355,13 +1270,11 @@ impl KvmVm {
     }
 
     /// Check a KVM capability
-    #[allow(dead_code)]
     pub fn check_capability(&self, cap: KvmCapability) -> bool {
         cap.is_supported()
     }
 
     /// Dispatch I/O to PIT if appropriate
-    #[allow(dead_code)]
     pub fn handle_pit_io(&mut self, port: u16, is_write: bool, data: &mut [u8]) -> bool {
         if let Some(pit) = &mut self.pit {
             pit.handle_io(port, is_write, data)
@@ -1371,19 +1284,16 @@ impl KvmVm {
     }
 
     /// Get memory region by slot
-    #[allow(dead_code)]
     pub fn memory_region(&self, slot: u32) -> Option<&KvmMemoryRegion> {
         self.memory_regions.iter().find(|r| r.slot == slot)
     }
 
     /// List all memory regions
-    #[allow(dead_code)]
     pub fn memory_regions(&self) -> &[KvmMemoryRegion] {
         &self.memory_regions
     }
 
     /// Get total guest memory size in bytes
-    #[allow(dead_code)]
     pub fn total_memory(&self) -> u64 {
         self.memory_regions.iter().map(|r| r.memory_size).sum()
     }
@@ -1394,19 +1304,16 @@ impl KvmVm {
 // ---------------------------------------------------------------------------
 
 /// Get the KVM API version
-#[allow(dead_code)]
 pub fn kvm_get_api_version() -> u32 {
     KVM_API_VERSION
 }
 
 /// Check if KVM extension is available
-#[allow(dead_code)]
 pub fn kvm_check_extension(cap: KvmCapability) -> bool {
     cap.is_supported()
 }
 
 /// Get the recommended vCPU map size
-#[allow(dead_code)]
 pub fn kvm_get_vcpu_mmap_size() -> usize {
     // Size of the KvmRunPage structure (page-aligned)
     4096

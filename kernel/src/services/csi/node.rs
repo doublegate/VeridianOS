@@ -13,7 +13,6 @@ use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 /// A volume staged on this node.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct StagedVolume {
     /// Volume ID.
     pub volume_id: u64,
@@ -29,7 +28,6 @@ pub struct StagedVolume {
 
 /// A volume published (bind-mounted) into a container.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct PublishedVolume {
     /// Volume ID.
     pub volume_id: u64,
@@ -47,7 +45,6 @@ pub struct PublishedVolume {
 
 /// Node service error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum NodeError {
     /// Volume not found.
     VolumeNotFound(u64),
@@ -69,7 +66,6 @@ pub enum NodeError {
 
 /// CSI NodeService implementation.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct NodeService {
     /// Node identifier.
     node_id: String,
