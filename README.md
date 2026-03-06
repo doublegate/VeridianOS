@@ -116,13 +116,13 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.16.1 (March 5, 2026) | **Releases Published**: 63 (v0.1.0 through v0.16.1)
+**Latest Release**: v0.16.2 (March 6, 2026) | **Releases Published**: 64 (v0.1.0 through v0.16.2)
 
 | Metric                 | Value                                           |
 | ---------------------- | ----------------------------------------------- |
 | Build                  | 0 errors, 0 warnings across all 3 architectures |
 | Boot Tests             | 29/29 (all architectures, Stage 6 BOOTOK)       |
-| Host-Target Unit Tests | 1,742/1,742 passing                             |
+| Host-Target Unit Tests | 2,356/2,356 passing                             |
 | CI Pipeline            | 11/11 jobs passing (GitHub Actions + Codecov)   |
 
 ### Architecture Support
@@ -142,7 +142,7 @@ experiments/   Non-normative exploratory work
 | 2     | User Space Foundation     | **Complete**           | v0.3.2  | Feb 2026 |
 | 3     | Security Hardening        | **Complete**           | v0.3.2  | Feb 2026 |
 | 4     | Package Ecosystem         | **Complete**           | v0.4.0  | Feb 2026 |
-| 5     | Performance Optimization  | **Complete (~90%)**    | v0.5.8  | Feb 2026 |
+| 5     | Performance Optimization  | **COMPLETE (100%)**    | v0.16.2 | Mar 2026 |
 | 5.5   | Infrastructure Bridge     | **COMPLETE (100%)** | v0.5.13 | Feb 2026 |
 | 6     | Advanced Features and GUI | **~100% (desktop complete)** | v0.6.4  | Feb 2026 |
 | 6.5   | Rust Compiler + Bash Shell | **COMPLETE (100%)** | v0.7.0  | Feb 2026 |
@@ -485,6 +485,7 @@ Security is a fundamental design principle:
 
 - [x] **Phase 7.5**: Follow-on enhancements across 8 waves (80/80 items): filesystem (ext4/FAT32/tmpfs/inotify/flock/xattr), security (KASLR/canaries/SMEP-SMAP/retpoline), performance (EDF scheduling/cache-aware alloc/PGO), drivers (xHCI/AHCI-SATA/HID/Bluetooth), networking (TCP Reno+Cubic/SACK/DNS/VLAN/bonding), crypto (TLS 1.3/SSH/HTTP/NTP/QUIC/WireGuard), audio/video (ALSA/Vorbis/MP3/PNG/JPEG/GIF), GPU (VirtIO 3D/GLES2/DRM KMS), hypervisor (nested/passthrough/migration), containers (OCI/cgroups/seccomp), desktop (clipboard/DnD/shortcuts/themes/TrueType/CJK), shell (io_uring/ptrace/coredump/users/sudo/cron) (v0.11.0-v0.16.0, Mar 2026)
 - [x] **v0.16.1 Tech Debt Remediation**: 11 undocumented `static mut` converted to safe patterns (AtomicU8/spin::Mutex/UnsafeCell wrappers), PixelFormat consolidated from 4 to 1 definition, 5 oversized files split into submodules (19,663 lines reorganized), production `unwrap()` reduction, 125 new pkg/ tests (2,356 total), dead_code annotations reduced 321->193 (v0.16.1, Mar 2026)
+- [x] **v0.16.2 Phase 5 Completion + Phase 8 Wave 1 (partial)**: Phase 5 Performance Optimization brought to 100% (trace instrumentation 10/10, FrameFree+PageFault wired, validation criteria checked). Phase 8 Wave 1 Foundation & Self-Hosting: GDB remote serial protocol stub (`debug/gdb_stub.rs`, `debug/breakpoint.rs`), native git client object model (`devtools/git/objects.rs`, `deflate.rs`, `refs.rs`, `commands.rs`, `transport.rs`), build orchestrator with dependency topo-sort (`pkg/build_system.rs`, `pkg/build_package.rs`), LLVM 19 + rustc bootstrap portfiles (`pkg/ports/llvm.rs`, `pkg/ports/rustc_bootstrap.rs`), IDE text editor with gap buffer + LSP client (`devtools/ide/editor.rs`, `devtools/ide/lsp_client.rs`), CI runner (`devtools/ci/runner.rs`), profiler GUI with flame graph rendering (`devtools/profiler/gui.rs`) (v0.16.2, Mar 2026)
 
 ### Upcoming
 

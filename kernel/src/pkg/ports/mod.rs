@@ -9,6 +9,10 @@
 //! parsed with the minimal TOML parser in [`super::toml_parser`].
 
 pub mod collection;
+#[cfg(feature = "alloc")]
+pub mod llvm;
+#[cfg(feature = "alloc")]
+pub mod rustc_bootstrap;
 
 #[cfg(feature = "alloc")]
 use alloc::{collections::BTreeMap, string::String, vec, vec::Vec};

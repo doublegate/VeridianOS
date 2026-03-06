@@ -101,6 +101,13 @@ pub mod utils;
 pub mod video;
 pub mod virt;
 
+#[allow(dead_code)]
+#[cfg(feature = "alloc")]
+pub mod debug;
+#[allow(dead_code)]
+#[cfg(feature = "alloc")]
+pub mod devtools;
+
 #[cfg(test)]
 mod test_config;
 mod test_framework;

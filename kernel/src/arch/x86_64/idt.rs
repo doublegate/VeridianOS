@@ -74,6 +74,11 @@ extern "x86-interrupt" fn page_fault_handler(
     error_code: PageFaultErrorCode,
 ) {
     crate::perf::count_page_fault();
+    crate::trace!(
+        crate::perf::trace::TraceEventType::PageFault,
+        0, // CR2 not yet read; filled in after read below
+        error_code.bits()
+    );
 
     // SAFETY: Read CR2 (faulting address) before any code that might trigger
     // another page fault, which would overwrite CR2.

@@ -8,6 +8,10 @@
 #![allow(clippy::unwrap_or_default)]
 
 pub mod async_types;
+#[cfg(feature = "alloc")]
+pub mod build_package;
+#[cfg(feature = "alloc")]
+pub mod build_system;
 pub mod compliance;
 pub mod database;
 pub mod delta;

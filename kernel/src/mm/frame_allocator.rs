@@ -1167,6 +1167,11 @@ pub fn per_cpu_alloc_frame() -> Result<FrameNumber> {
 /// Drains excess frames back to global if cache is full.
 pub fn per_cpu_free_frame(frame: FrameNumber) -> Result<()> {
     let cpu_id = crate::sched::smp::current_cpu_id() as usize;
+    crate::trace!(
+        crate::perf::trace::TraceEventType::FrameFree,
+        frame.as_u64(),
+        cpu_id as u64
+    );
 
     let mut caches = PER_CPU_PAGE_CACHES.lock();
     let cache = &mut caches[cpu_id.min(15)];

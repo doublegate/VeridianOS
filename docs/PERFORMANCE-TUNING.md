@@ -196,8 +196,8 @@ Per-CPU ring buffers (4096 events each, 128KB per CPU) with zero-overhead disabl
 | `IpcFastReceive` | `fast_receive()` | Wired (v0.5.8) |
 | `IpcSlowPath` | Fast path fallback | Wired (v0.5.8) |
 | `FrameAlloc` | `per_cpu_alloc_frame()` | Wired (v0.5.8) |
-| `FrameFree` | -- | Not yet wired |
-| `PageFault` | -- | Not yet wired |
+| `FrameFree` | `per_cpu_free_frame()` | Wired |
+| `PageFault` | `page_fault_handler()` | Wired |
 
 ### Usage
 

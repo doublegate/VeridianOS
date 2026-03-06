@@ -2,6 +2,69 @@
 
 ---
 
+## [v0.16.2] - 2026-03-06
+
+### v0.16.2: Phase 5 Completion + Phase 8 Wave 1 (Foundation & Self-Hosting)
+
+Two milestones: (1) Phase 5 Performance Optimization brought to 100% by wiring the last 2 of 10 software trace event types; (2) Phase 8 Wave 1 partial implementation adding 21 new files across 6 new kernel module trees for self-hosting infrastructure.
+
+**28 files changed (21 new), ~5,500 insertions, ~25 deletions**
+
+#### Phase 5: Trace Instrumentation Completion (10/10 event types)
+
+- **`arch/x86_64/idt.rs`**: Wire `PageFault` trace event in `page_fault_handler()` with error code data, completing the final missing event type
+- **`mm/frame_allocator.rs`**: Wire `FrameFree` trace event in `per_cpu_free_frame()` with frame address and CPU ID
+- **`docs/PERFORMANCE-TUNING.md`**: Update trace table to reflect all 10 events wired (was 8/10)
+- **`to-dos/PHASE5_TODO.md`**: Status updated to 100% complete; all goals, validation criteria, deliverables, and progress table marked done
+
+#### Phase 8 Wave 1: Foundation & Self-Hosting (6 new module trees)
+
+##### GDB Remote Serial Protocol (`kernel/src/debug/`)
+- **`gdb_stub.rs`** (~650 lines): RSP packet framing (`$data#checksum`), register read/write (`g`/`G`), memory read/write (`m`/`M`), single-step, continue, halt reason query; transport over COM2 (0x2F8); `GdbState` session management with connected/halted/single-stepping states; 12 unit tests
+- **`breakpoint.rs`** (~350 lines): Software breakpoint manager using INT3 (0xCC) instruction patching, hardware watchpoint configuration via DR0-DR3 debug registers with 4 watchpoint types (Write/ReadWrite/Execute), max 256 software + 4 hardware breakpoints; 10 unit tests
+
+##### Native Git Client (`kernel/src/devtools/git/`)
+- **`objects.rs`** (~600 lines): Git object model (Blob/Tree/Commit/Tag), SHA-1 hash computation (full FIPS 180-4 implementation with 80-round message schedule), ObjectId 20-byte storage with hex encoding/decoding, tree entry mode parsing; 15 unit tests
+- **`deflate.rs`** (~300 lines): Zlib inflate/deflate for packfile decompression, Huffman decoding with dynamic code tables, ADLER32 checksum, LZ77 back-reference handling; 8 unit tests
+- **`refs.rs`** (~300 lines): Git reference management (HEAD, branches, tags), RefStore with symbolic ref resolution, branch create/delete/list, detached HEAD support; 10 unit tests
+- **`commands.rs`** (~700 lines): Porcelain commands (init/add/commit/log/diff/status/branch/checkout), in-memory object database, staging area (index), working directory diff, author/committer metadata; 18 unit tests
+- **`transport.rs`** (~500 lines): Git smart HTTP protocol, pack negotiation (want/have/done), pack-line framing (4-byte hex length prefix), packfile index parsing, fetch/push/clone operations; 12 unit tests
+
+##### Build Orchestrator (`kernel/src/pkg/build_system.rs`, `build_package.rs`)
+- **`build_system.rs`** (~500 lines): Source-to-binary build pipeline with 10 stages (Fetch→Verify→Extract→Patch→Configure→Compile→Test→Install→Package→Done), dependency topological sort using Kahn's algorithm, build sandbox with namespace isolation and environment control, `BuildOrchestrator` with dependency-aware sequential execution; 15 unit tests
+- **`build_package.rs`** (~500 lines): Binary `.vpkg` package creation from build staging directory, Ed25519 package signing with signature verification, package metadata (name, version, architecture, dependencies, file manifest with SHA-256 per-file checksums), TAR-like archive format; 12 unit tests
+
+##### Compiler Ports (`kernel/src/pkg/ports/`)
+- **`llvm.rs`** (~450 lines): LLVM 19.1.0 cross-build portfile with CMake configuration generator (30+ options), memory requirement validation (4GB minimum), target selection (X86/AArch64/RISCV), single-threaded linking mode, build/install/test command generation; 8 unit tests
+- **`rustc_bootstrap.rs`** (~270 lines): Rustc multi-stage bootstrap (Stage 0→1→2) using cross-compiled seed compiler, `config.toml` generator for `x.py`, stage advancement with error handling, binary reproducibility verification (SHA-256 comparison), rustdoc generation config; 11 unit tests
+
+##### IDE with LSP (`kernel/src/devtools/ide/`)
+- **`editor.rs`** (~510 lines): Text editor engine with gap buffer data structure (64-byte initial gap, amortized O(1) insert/delete), multi-buffer support with undo/redo history stack (Insert/Delete ops), cursor position tracking (line/col), line-based text access, `Editor` multi-buffer manager with open/close/switch; 12 unit tests
+- **`lsp_client.rs`** (~700 lines): Language Server Protocol client with JSON-RPC 2.0 message framing, 6 LSP methods (initialize, textDocument/completion, textDocument/hover, textDocument/definition, textDocument/didOpen, textDocument/publishDiagnostics), minimal JSON parser for response extraction, request ID tracking, diagnostic severity levels; 14 unit tests
+
+##### CI Runner (`kernel/src/devtools/ci/runner.rs`)
+- **`runner.rs`** (~600 lines): Continuous integration job runner with pipeline/job/step hierarchy, TOML-like job definitions, sequential step execution with pass/fail/skip status tracking, artifact collection from build directories, environment variable propagation, `allow_failure` support, execution log capture; 12 unit tests
+
+##### Profiler GUI (`kernel/src/devtools/profiler/gui.rs`)
+- **`gui.rs`** (~390 lines): Profiling visualization with flame graph rendering (recursive frame tree, depth-based color gradient, proportional width based on sample count), CPU timeline with per-point utilization tracking, memory timeline with peak detection, `ProfilerSession` for sample collection with stack trace aggregation, `ProfilerGui` pixel buffer renderer (800x600, 4 view modes); 12 unit tests
+
+#### Module Registration
+
+- **`lib.rs`**: Register `debug` and `devtools` module trees with `#[allow(dead_code)] #[cfg(feature = "alloc")]`
+- **`pkg/mod.rs`**: Register `build_package` and `build_system` submodules
+- **`pkg/ports/mod.rs`**: Register `llvm` and `rustc_bootstrap` portfiles
+
+#### Build Verification
+
+| Target | Build | Clippy | Status |
+|--------|-------|--------|--------|
+| x86_64 bare-metal | Pass | 0 warnings | OK |
+| aarch64-unknown-none | Pass | 0 warnings | OK |
+| riscv64gc-unknown-none-elf | Pass | 0 warnings | OK |
+| x86_64-unknown-linux-gnu (host) | Pass | 0 warnings | OK |
+
+---
+
 ## [v0.16.1] - 2026-03-05
 
 ### v0.16.1: Tech Debt Remediation
