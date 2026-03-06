@@ -124,7 +124,7 @@ impl BreakpointManager {
 
     fn insert_hw_watchpoint(&mut self, addr: u64, len: u8, wp_type: WatchpointType) -> bool {
         // Find free DR slot
-        for (i, wp) in self.hw_watchpoints.iter_mut().enumerate() {
+        for (idx, wp) in self.hw_watchpoints.iter_mut().enumerate() {
             if !wp.active {
                 wp.addr = addr;
                 wp.len = len;
@@ -132,7 +132,9 @@ impl BreakpointManager {
                 wp.active = true;
 
                 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-                set_debug_register(i, addr, len, wp_type);
+                set_debug_register(idx, addr, len, wp_type);
+                #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+                let _ = idx;
 
                 return true;
             }
@@ -141,12 +143,14 @@ impl BreakpointManager {
     }
 
     fn remove_hw_watchpoint(&mut self, addr: u64, wp_type: WatchpointType) -> bool {
-        for (i, wp) in self.hw_watchpoints.iter_mut().enumerate() {
+        for (idx, wp) in self.hw_watchpoints.iter_mut().enumerate() {
             if wp.active && wp.addr == addr && wp.wp_type == wp_type {
                 wp.active = false;
 
                 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-                clear_debug_register(i);
+                clear_debug_register(idx);
+                #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+                let _ = idx;
 
                 return true;
             }

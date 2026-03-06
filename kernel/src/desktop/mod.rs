@@ -3,9 +3,13 @@
 //! Provides desktop environment functionality including font rendering,
 //! window management, and graphical user interface components.
 
+pub mod a11y;
 pub mod animation;
 pub mod app_switcher;
 pub mod desktop_ext;
+pub mod desktop_icons;
+pub mod display_manager;
+pub mod file_assoc;
 pub mod file_manager;
 pub mod font;
 pub mod image_viewer;
@@ -14,6 +18,7 @@ pub mod launcher;
 pub mod mime;
 pub mod notification;
 pub mod panel;
+pub mod pdf;
 pub mod renderer;
 pub mod screen_lock;
 pub mod settings;

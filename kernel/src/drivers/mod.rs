@@ -27,6 +27,11 @@ pub mod virtio;
 pub mod virtio_gpu;
 pub mod virtio_net;
 
+// Phase 8 Wave 2: Networking v2
+pub mod iscsi;
+pub mod raid;
+pub mod wifi;
+
 pub use console::{ConsoleDevice, ConsoleDriver, SerialConsole, VgaConsole};
 pub use gpu::GpuDriver;
 pub use network::{EthernetDriver, LoopbackDriver, NetworkDevice};

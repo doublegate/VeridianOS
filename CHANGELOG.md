@@ -2,6 +2,77 @@
 
 ---
 
+## [v0.16.3] - 2026-03-06
+
+### v0.16.3: Phase 8 Complete -- Next-Generation Features (Waves 2-8)
+
+Completes all 8 waves of Phase 8, transforming VeridianOS from a production-ready microkernel into a fully-featured, enterprise-grade, cloud-native OS with a web browser engine and formal verification infrastructure. 71 new files, ~19,000 new lines of code, 1,637 new tests (3,993 total host-target tests).
+
+#### Wave 2: Networking v2 (15 files, ~180 tests)
+
+- **Netfilter firewall** (`net/firewall/`): 5 hook points (PreRouting/Input/Forward/Output/PostRouting), built-in chains with default policies, packet matching by IP/CIDR/port/protocol with `--syn`/`--state` flags, per-rule AtomicU64 counters, connection tracking with 5-tuple table and TCP/UDP/ICMP state machine (NEW/ESTABLISHED/RELATED), NAT (SNAT/DNAT/masquerade) with port pool allocation, RFC 1624 incremental checksum updates
+- **Routing daemon** (`net/routing/`): RIP v2 (RFC 2453) with split horizon and poisoned reverse over UDP multicast 224.0.0.9:520; OSPF (RFC 2328) Area 0 with Hello protocol, DBD exchange, Router/Network LSAs, Dijkstra SPF computation
+- **WiFi 802.11** (`drivers/wifi/`): MAC layer frame parsing (management/control/data), STA state machine with BSS scanning; WPA2 4-way EAPOL handshake, PBKDF2-SHA256 PSK derivation, PTK derivation, CCMP encryption stubs, WPA3-SAE framework
+- **Bluetooth** (`drivers/bluetooth/`): L2CAP channel management with segmentation and reassembly; RFCOMM serial emulation with credit-based flow control; profiles -- A2DP (SBC codec negotiation), HID (report descriptors), SPP (serial port)
+- **VPN** (`net/vpn/`): Virtual tunnel `tun0` device with packet routing; OpenVPN TLS/UDP protocol with anti-replay window, HMAC authentication, config file parsing
+
+#### Wave 3: Enterprise & Dev Tools (11 files, ~150 tests)
+
+- **ASN.1/BER** (`net/asn1.rs`): Full BER/DER encode/decode for all universal tag types, OID support, TLV builder API
+- **LDAP** (`net/ldap/`): LDAP v3 over TCP, Simple/SASL bind, search with filter encoding, AD attribute mapping (sAMAccountName), credential caching, LDAPS via TLS
+- **Kerberos** (`net/kerberos/`): Kerberos v5 AS-REQ/AS-REP/TGS-REQ/TGS-REP via ASN.1/DER, PBKDF2 key derivation, MIT krb5 ccache format, kinit/klist/kdestroy commands
+- **NFS v4** (`fs/nfs/`): RFC 7530 COMPOUND operations, file handles, XDR encoding, AUTH_SYS authentication
+- **SMB2/3** (`fs/smb/`): Dialect negotiation, NTLM authentication, tree connect, CREATE/READ/WRITE operations, credit-based flow control, HMAC signing
+- **iSCSI** (`drivers/iscsi/`): RFC 7143 initiator over TCP:3260, PDU framing, SCSI INQUIRY/READ(10)/WRITE(10), session state machine
+- **Software RAID** (`drivers/raid/`): RAID 0/1/5 with XOR parity computation, mdadm v1.2 superblock, rebuild/resync, health monitoring
+- **Package repository** (`pkg/repo_server.rs`): HTTP server for `.vpkg` packages, JSON index, Ed25519 upload authentication
+
+#### Wave 4: Desktop v2 (9 files, 97 tests)
+
+- **GPU compositor** (`graphics/`): Texture atlas with shelf bin-packing allocator, GL-style compositor with alpha-over/add/multiply blending, TGSI-like shader compiler and software executor, orthographic projection
+- **Desktop enhancements** (`desktop/`): Desktop icons with `.desktop` file parser and grid layout; file association registry with 26 default MIME mappings and "Open With" dialog; PDF 1.4 parser (xref, objects, content streams) and renderer; print spooler with job queues and IPP/1.1 stubs; accessibility tree with screen reader, high contrast theme, and keyboard navigation (F6 cycling, landmarks); display manager with login screen, session management (Console/Wayland), VT switching (Ctrl+Alt+F1-F6), idle auto-lock
+
+#### Wave 5: Advanced Virtualization (5 files, 124 tests)
+
+- **KVM API** (`virt/kvm.rs`): `KVM_GET_API_VERSION`, `KVM_CREATE_VM`, `KVM_SET_USER_MEMORY_REGION`, `KVM_CREATE_VCPU`, `KVM_RUN` with vmlaunch/vmresume, IO/MMIO exit decoding, register/SREG/MSR get/set, interrupt injection, Virtual PIT (3-channel 8254), MSI signaling, 10 capability flags
+- **QEMU compatibility** (`virt/qemu_compat.rs`): Device multiplexer with IO/MMIO dispatch, migration v3 wire format (pre-copy dirty page tracking, stop-and-copy with VMCS + device state serialization), TCP-based streaming
+- **VFIO passthrough** (`virt/vfio.rs`): IOMMU group isolation, VfioContainer with DMA map/unmap, BAR-to-EPT mapping (uncacheable), MSI-X interrupt remapping, function-level reset
+- **SR-IOV** (`virt/sriov.rs`): PCI SR-IOV capability parsing, VF enable/disable/assign lifecycle, VF manager with discovery
+- **Hot-plug** (`virt/hotplug.rs`): ACPI GED event queue, CPU hot-plug with bitmap and boot CPU protection, memory hot-plug with DIMM add/remove, SHPC/PCIe native hot-plug with surprise removal
+
+#### Wave 6: Cloud-Native Platform (22 files, 154 tests)
+
+- **CRI** (`services/cri/`): Minimal HTTP/2 frame parser + HPACK static table (61 entries) + gRPC message framing over Unix socket; PodSandbox/Container lifecycle with state machine; image pull/list/remove with storage tracking; exec/attach/port-forward streaming sessions
+- **CNI** (`services/cni/`): CniPlugin trait with BridgePlugin (veth pair + bridge + NAT); VXLAN overlay (encap/decap UDP 4789, FDB MAC learning with aging, ARP proxy); bitmap-based IPAM per subnet
+- **CSI** (`services/csi/`): Volume CRUD with capacity tracking; stage/unstage and publish/unpublish with dependency enforcement; COW snapshots with source validation
+- **Service mesh** (`services/mesh/`): Sidecar proxy with connection pooling, round-robin, health checks, mTLS flag; service registry with DNS resolution (`name.namespace.svc.cluster.local`); SPIFFE identity issuance, verification, and certificate rotation
+- **Load balancer** (`services/lb/`): L4 with 5 algorithms (RoundRobin, LeastConn, Weighted, Random, IpHash); L7 HTTP routing (path/host/header matching), token-bucket rate limiting, sticky sessions; key-value config parser
+- **Cloud-init** (`services/cloud_init.rs`): Metadata service (169.254.169.254), user-data parser, hostname/users/SSH keys/commands
+
+#### Wave 7: Web Browser Engine (24 files, ~644 tests)
+
+- **Phase A -- Static HTML Renderer**: HTML5 tokenizer (~20 WHATWG states, entity decoding), arena-based DOM (NodeArena with Document/Element/Text nodes), tree builder (12 insertion modes with auto-close), CSS tokenizer/parser (selectors, specificity, cascade), style resolution (~40 properties, user-agent stylesheet, inheritance), block+inline layout (margin collapse, line boxes, word wrap), float+positioned layout, display list painter (integer alpha blending, 8x16 font), browser window with navigation history and scroll
+- **Phase B -- DOM Interactivity**: W3C event model (capture/target/bubble, hit testing), HTML forms (text input, links, URL encoding), scroll state, CSS Flexbox layout (grow/shrink/alignment in 26.6 fixed-point), incremental layout with dirty flags and damage regions
+- **Phase C -- JavaScript VM**: JS lexer (tokenizer with 32.32 fixed-point numbers, ASI), Pratt parser with arena-allocated AST, bytecode compiler (~40 opcodes, constant pool, closures), stack-based VM interpreter (JsValue with integer fast-path, 100K step limit), mark-sweep garbage collector (tri-color marking, slot reuse), DOM bindings (document/element methods, setTimeout/setInterval, console.log)
+- **Phase D -- Tabbed Browsing**: Tab manager (navigation history, new/close/switch/move/reopen, Ctrl+T/W/Tab/1-9 shortcuts), per-tab process isolation (independent JsVm/GcHeap/DomApi per tab), tab capabilities (10 permission flags with sandboxed/trusted presets), resource limits and usage tracking, postMessage IPC, shared localStorage with storage events, background tab suspend/resume, browser shell command (`browser open|back|forward|reload|tabs|close|quit`)
+
+#### Wave 8: Formal Verification (5 Rust files + 6 TLA+ specs, 41 tests + 38 Kani proofs)
+
+- **Boot chain** (`verification/boot_chain.rs`, `specs/boot_chain.tla`): PCR extension monotonicity, measurement log completeness, hash chain integrity -- 8 Kani proofs
+- **IPC** (`verification/ipc_proofs.rs`, `specs/ipc_protocol.tla`, `specs/ipc_deadlock.tla`): FIFO ordering, no message loss, channel isolation, buffer bounds, deadlock freedom (wait-for graph acyclicity) -- 12 Kani proofs
+- **Memory allocator** (`verification/alloc_proofs.rs`, `specs/memory_allocator.tla`): No double allocation, no use-after-free, buddy split/coalesce consistency, frame conservation -- 10 Kani proofs
+- **Capabilities** (`verification/cap_proofs.rs`, `specs/capability_model.tla`, `specs/information_flow.tla`): Token non-forgery, rights monotonicity, revocation completeness, non-interference between security domains -- 8 Kani proofs
+
+#### Infrastructure
+
+- Version bump 0.16.2 -> 0.16.3 (Cargo.toml, os-release, uname, desktop welcome)
+- 6 `use alloc::vec;` imports added to browser test modules for host-target Code Coverage CI compatibility
+- 2 compilation fixes: `flexbox.rs` fp_div operator precedence, `tab_isolation.rs` method name correction
+- 9 test logic fixes: hex escape consumption, for-loop parser assignment handling, flexbox precision (single-step i64 division), browser render overflow (`saturating_sub`), GC sentinel ID for builtin objects
+- README.md: Phase 8 complete, 3,993 tests, release 65
+
+---
+
 ## [v0.16.2] - 2026-03-06
 
 ### v0.16.2: Phase 5 Completion + Phase 8 Wave 1 (Foundation & Self-Hosting)

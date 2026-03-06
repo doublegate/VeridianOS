@@ -114,7 +114,7 @@ impl ProfilerSession {
 
         for sample in &self.samples {
             let mut current = &mut root;
-            for frame in sample.frames.iter().rev() {
+            for frame in &sample.frames {
                 current = current.get_or_create_child(frame);
                 current.samples += 1;
             }
@@ -261,12 +261,314 @@ impl ProfilerGui {
     }
 }
 
+/// Node in an aggregated call tree.
+#[derive(Debug, Clone)]
+pub struct CallTreeNode {
+    pub function_name: String,
+    /// Samples where this function is the leaf (self time).
+    pub self_time: u64,
+    /// Total samples including all descendants.
+    pub total_time: u64,
+    pub children: Vec<CallTreeNode>,
+    pub call_count: u64,
+}
+
+impl CallTreeNode {
+    pub fn new(name: &str) -> Self {
+        Self {
+            function_name: name.to_string(),
+            self_time: 0,
+            total_time: 0,
+            children: Vec::new(),
+            call_count: 0,
+        }
+    }
+
+    /// Find a child by name, returning its index.
+    fn find_child(&self, name: &str) -> Option<usize> {
+        self.children.iter().position(|c| c.function_name == name)
+    }
+
+    /// Get or create a child node with the given name.
+    fn get_or_create_child(&mut self, name: &str) -> &mut CallTreeNode {
+        let idx = self.find_child(name);
+        if let Some(i) = idx {
+            &mut self.children[i]
+        } else {
+            self.children.push(CallTreeNode::new(name));
+            self.children.last_mut().unwrap()
+        }
+    }
+}
+
+/// Flattened call tree entry for rendering.
+#[derive(Debug, Clone)]
+pub struct FlatCallEntry {
+    pub function_name: String,
+    pub self_time: u64,
+    pub total_time: u64,
+    pub call_count: u64,
+    pub depth: u32,
+}
+
+/// Aggregated call tree built from stack samples.
+pub struct CallTree {
+    pub roots: Vec<CallTreeNode>,
+    pub total_samples: u64,
+}
+
+impl Default for CallTree {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CallTree {
+    pub fn new() -> Self {
+        Self {
+            roots: Vec::new(),
+            total_samples: 0,
+        }
+    }
+
+    /// Build a call tree from a slice of stack samples.
+    ///
+    /// Each sample's frames are walked bottom-up (callers first). The leaf
+    /// frame receives self-time credit.
+    pub fn build_from_stacks(samples: &[StackSample]) -> Self {
+        let mut tree = CallTree::new();
+        tree.total_samples = samples.len() as u64;
+
+        for sample in samples {
+            if sample.frames.is_empty() {
+                continue;
+            }
+
+            // frames[0] is the bottom (caller), last is the leaf
+            let bottom_name = &sample.frames[0];
+
+            // Find or create root
+            let root_idx = tree
+                .roots
+                .iter()
+                .position(|r| r.function_name == *bottom_name);
+            let root = if let Some(i) = root_idx {
+                &mut tree.roots[i]
+            } else {
+                tree.roots.push(CallTreeNode::new(bottom_name));
+                tree.roots.last_mut().unwrap()
+            };
+
+            root.call_count += 1;
+            root.total_time += 1;
+
+            // Walk down the stack
+            let mut current = root as *mut CallTreeNode;
+            for (i, frame_name) in sample.frames.iter().enumerate().skip(1) {
+                // SAFETY: We only hold one mutable reference at a time,
+                // descending through a tree we own.
+                let node = unsafe { &mut *current };
+                let child = node.get_or_create_child(frame_name);
+                child.call_count += 1;
+                child.total_time += 1;
+
+                // Leaf frame gets self-time
+                if i == sample.frames.len() - 1 {
+                    child.self_time += 1;
+                }
+
+                current = child as *mut CallTreeNode;
+            }
+
+            // If single-frame sample, root is also the leaf
+            if sample.frames.len() == 1 {
+                root.self_time += 1;
+            }
+        }
+
+        tree
+    }
+
+    /// Flatten the tree into a list with depth information for rendering.
+    pub fn flatten(&self) -> Vec<FlatCallEntry> {
+        let mut result = Vec::new();
+        for root in &self.roots {
+            Self::flatten_node(root, 0, &mut result);
+        }
+        result
+    }
+
+    fn flatten_node(node: &CallTreeNode, depth: u32, result: &mut Vec<FlatCallEntry>) {
+        result.push(FlatCallEntry {
+            function_name: node.function_name.clone(),
+            self_time: node.self_time,
+            total_time: node.total_time,
+            call_count: node.call_count,
+            depth,
+        });
+        for child in &node.children {
+            Self::flatten_node(child, depth + 1, result);
+        }
+    }
+
+    /// Find the top-N hottest paths by total_time across all root entries.
+    pub fn hottest_paths(&self, top_n: usize) -> Vec<FlatCallEntry> {
+        let mut sorted = self.flatten();
+        // Sort descending by total_time
+        sorted.sort_by(|a, b| b.total_time.cmp(&a.total_time));
+        sorted.truncate(top_n);
+        sorted
+    }
+}
+
+/// Profiler data export utilities.
+pub struct ProfilerExport;
+
+impl ProfilerExport {
+    /// Generate an SVG-like text representation of a flame graph.
+    ///
+    /// Produces a simplified folded-stack format suitable for text display:
+    /// each line is `stack;path samples\n`.
+    pub fn export_flamegraph_svg(session: &ProfilerSession) -> String {
+        let mut out = String::new();
+        // Header
+        out.push_str("<!-- VeridianOS Profiler Flame Graph -->\n");
+        out.push_str("<!-- Format: stack;path sample_count -->\n");
+
+        for sample in &session.samples {
+            if sample.frames.is_empty() {
+                continue;
+            }
+            // Build folded stack line
+            for (i, frame) in sample.frames.iter().enumerate() {
+                if i > 0 {
+                    out.push(';');
+                }
+                out.push_str(frame);
+            }
+            out.push_str(" 1\n");
+        }
+        out
+    }
+
+    /// Generate a text summary of a profiling session.
+    pub fn export_summary(session: &ProfilerSession) -> String {
+        let mut out = String::from("=== Profiler Summary ===\n");
+        out.push_str("Session: ");
+        out.push_str(&session.name);
+        out.push('\n');
+        out.push_str("Samples: ");
+        push_u64_str(&mut out, session.sample_count() as u64);
+        out.push('\n');
+        out.push_str("Duration: ");
+        push_u64_str(&mut out, session.duration());
+        out.push_str(" ticks\n");
+        out.push_str("Avg CPU: ");
+        push_u64_str(&mut out, session.avg_cpu_usage() as u64);
+        out.push_str("%\n");
+        out.push_str("Peak Mem: ");
+        push_u64_str(&mut out, session.peak_memory());
+        out.push_str(" bytes\n");
+
+        // Top functions from call tree
+        let tree = CallTree::build_from_stacks(&session.samples);
+        let hot = tree.hottest_paths(5);
+        if !hot.is_empty() {
+            out.push_str("\nTop functions by total time:\n");
+            for entry in &hot {
+                out.push_str("  ");
+                out.push_str(&entry.function_name);
+                out.push_str(" (total=");
+                push_u64_str(&mut out, entry.total_time);
+                out.push_str(", self=");
+                push_u64_str(&mut out, entry.self_time);
+                out.push_str(")\n");
+            }
+        }
+
+        out
+    }
+}
+
+impl ProfilerGui {
+    /// Render a call tree view into a text buffer (indented with percentages).
+    pub fn render_call_tree(&self, tree: &CallTree) -> String {
+        let mut out = String::from("Call Tree View\n");
+        out.push_str("==============\n");
+        let total = tree.total_samples.max(1);
+        let flat = tree.flatten();
+        for entry in &flat {
+            // Indent
+            for _ in 0..entry.depth {
+                out.push_str("  ");
+            }
+            out.push_str(&entry.function_name);
+            out.push_str(" [");
+            // Percentage of total: (total_time * 100) / total_samples
+            let pct = (entry.total_time * 100) / total;
+            push_u64_str(&mut out, pct);
+            out.push_str("%, self=");
+            let self_pct = (entry.self_time * 100) / total;
+            push_u64_str(&mut out, self_pct);
+            out.push_str("%, calls=");
+            push_u64_str(&mut out, entry.call_count);
+            out.push_str("]\n");
+        }
+        out
+    }
+
+    /// Render a hotspot list: top functions sorted by self time.
+    pub fn render_hotspots(&self, tree: &CallTree, top_n: usize) -> String {
+        let mut out = String::from("Hotspot Analysis\n");
+        out.push_str("================\n");
+        let total = tree.total_samples.max(1);
+
+        // Collect all nodes, sort by self_time descending
+        let flat = tree.flatten();
+        let mut by_self: Vec<&FlatCallEntry> = flat.iter().filter(|e| e.self_time > 0).collect();
+        by_self.sort_by(|a, b| b.self_time.cmp(&a.self_time));
+        by_self.truncate(top_n);
+
+        for (i, entry) in by_self.iter().enumerate() {
+            push_u64_str(&mut out, (i + 1) as u64);
+            out.push_str(". ");
+            out.push_str(&entry.function_name);
+            out.push_str("  self=");
+            let pct = (entry.self_time * 100) / total;
+            push_u64_str(&mut out, pct);
+            out.push_str("% (");
+            push_u64_str(&mut out, entry.self_time);
+            out.push_str(" samples)\n");
+        }
+        out
+    }
+}
+
+/// Append a u64 as decimal text (no std formatting needed).
+fn push_u64_str(out: &mut String, mut val: u64) {
+    if val == 0 {
+        out.push('0');
+        return;
+    }
+    let start = out.len();
+    while val > 0 {
+        let digit = (val % 10) as u8 + b'0';
+        out.push(digit as char);
+        val /= 10;
+    }
+    let bytes = unsafe { out.as_bytes_mut() };
+    bytes[start..].reverse();
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use alloc::vec;
+
     use super::*;
 
     #[test]
@@ -388,5 +690,121 @@ mod tests {
         assert_eq!(session.avg_cpu_usage(), 0);
         assert_eq!(session.peak_memory(), 0);
         assert_eq!(session.duration(), 0);
+    }
+
+    #[test]
+    fn test_call_tree_build() {
+        let samples = vec![
+            StackSample {
+                timestamp: 0,
+                frames: vec!["main".to_string(), "foo".to_string(), "bar".to_string()],
+                cpu: 0,
+            },
+            StackSample {
+                timestamp: 1,
+                frames: vec!["main".to_string(), "foo".to_string()],
+                cpu: 0,
+            },
+        ];
+        let tree = CallTree::build_from_stacks(&samples);
+        assert_eq!(tree.total_samples, 2);
+        assert_eq!(tree.roots.len(), 1);
+        assert_eq!(tree.roots[0].function_name, "main");
+        assert_eq!(tree.roots[0].call_count, 2);
+    }
+
+    #[test]
+    fn test_call_tree_flatten() {
+        let samples = vec![StackSample {
+            timestamp: 0,
+            frames: vec!["main".to_string(), "compute".to_string()],
+            cpu: 0,
+        }];
+        let tree = CallTree::build_from_stacks(&samples);
+        let flat = tree.flatten();
+        assert_eq!(flat.len(), 2);
+        assert_eq!(flat[0].depth, 0);
+        assert_eq!(flat[1].depth, 1);
+        assert_eq!(flat[1].function_name, "compute");
+    }
+
+    #[test]
+    fn test_call_tree_hottest_paths() {
+        let samples = vec![
+            StackSample {
+                timestamp: 0,
+                frames: vec!["main".to_string(), "hot".to_string()],
+                cpu: 0,
+            },
+            StackSample {
+                timestamp: 1,
+                frames: vec!["main".to_string(), "hot".to_string()],
+                cpu: 0,
+            },
+            StackSample {
+                timestamp: 2,
+                frames: vec!["main".to_string(), "cold".to_string()],
+                cpu: 0,
+            },
+        ];
+        let tree = CallTree::build_from_stacks(&samples);
+        let hot = tree.hottest_paths(2);
+        assert!(!hot.is_empty());
+        // "main" has highest total_time (3), then "hot" (2)
+        assert_eq!(hot[0].function_name, "main");
+    }
+
+    #[test]
+    fn test_export_flamegraph_svg() {
+        let mut session = ProfilerSession::new("test");
+        session.add_sample(StackSample {
+            timestamp: 0,
+            frames: vec!["main".to_string(), "foo".to_string()],
+            cpu: 0,
+        });
+        let svg = ProfilerExport::export_flamegraph_svg(&session);
+        assert!(svg.contains("main;foo 1"));
+        assert!(svg.contains("VeridianOS"));
+    }
+
+    #[test]
+    fn test_export_summary() {
+        let mut session = ProfilerSession::new("bench");
+        session.add_sample(StackSample {
+            timestamp: 100,
+            frames: vec!["main".to_string()],
+            cpu: 0,
+        });
+        session.add_sample(StackSample {
+            timestamp: 200,
+            frames: vec!["main".to_string()],
+            cpu: 0,
+        });
+        let summary = ProfilerExport::export_summary(&session);
+        assert!(summary.contains("Session: bench"));
+        assert!(summary.contains("Samples: 2"));
+        assert!(summary.contains("Duration: 100"));
+    }
+
+    #[test]
+    fn test_render_call_tree_view() {
+        let samples = vec![
+            StackSample {
+                timestamp: 0,
+                frames: vec!["main".to_string(), "work".to_string()],
+                cpu: 0,
+            },
+            StackSample {
+                timestamp: 1,
+                frames: vec!["main".to_string(), "work".to_string()],
+                cpu: 0,
+            },
+        ];
+        let tree = CallTree::build_from_stacks(&samples);
+        let gui = ProfilerGui::new(800, 600);
+        let text = gui.render_call_tree(&tree);
+        assert!(text.contains("main"));
+        assert!(text.contains("work"));
+        assert!(text.contains("100%")); // main has 100% total
     }
 }

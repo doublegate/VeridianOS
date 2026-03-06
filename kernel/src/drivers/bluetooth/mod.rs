@@ -7,6 +7,11 @@
 
 pub mod hci;
 
+// Phase 8 Wave 2: Bluetooth L2CAP/RFCOMM/Profiles
+pub mod l2cap;
+pub mod profiles;
+pub mod rfcomm;
+
 pub use hci::{BluetoothController, ControllerState};
 use spin::Mutex;
 

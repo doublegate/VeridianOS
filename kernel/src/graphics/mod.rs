@@ -9,8 +9,11 @@ pub mod cursor;
 pub mod fbcon;
 pub mod font8x16;
 pub mod framebuffer;
+pub mod gl_compositor;
 pub mod gpu;
 pub mod gpu_accel;
+pub mod shader;
+pub mod texture_atlas;
 
 /// Canonical pixel format descriptor.
 ///

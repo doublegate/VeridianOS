@@ -8,6 +8,7 @@
 //! - Network device abstraction
 
 pub mod arp;
+pub mod asn1;
 pub mod device;
 pub mod dhcp;
 pub mod dma_pool;
@@ -17,6 +18,8 @@ pub mod icmpv6;
 pub mod integration;
 pub mod ip;
 pub mod ipv6;
+pub mod kerberos;
+pub mod ldap;
 pub mod socket;
 pub mod tcp;
 pub mod udp;
@@ -39,6 +42,11 @@ pub mod quic;
 pub mod ssh;
 pub mod tls;
 pub mod wireguard;
+
+// Phase 8 Wave 2: Networking v2
+pub mod firewall;
+pub mod routing;
+pub mod vpn;
 
 use alloc::vec::Vec;
 

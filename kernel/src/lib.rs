@@ -103,10 +103,16 @@ pub mod virt;
 
 #[allow(dead_code)]
 #[cfg(feature = "alloc")]
+pub mod browser;
+#[allow(dead_code)]
+#[cfg(feature = "alloc")]
 pub mod debug;
 #[allow(dead_code)]
 #[cfg(feature = "alloc")]
 pub mod devtools;
+#[allow(dead_code)]
+#[cfg(feature = "alloc")]
+pub mod verification;
 
 #[cfg(test)]
 mod test_config;

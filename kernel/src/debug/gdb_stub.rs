@@ -135,6 +135,12 @@ struct GdbState {
     registers: GdbRegisters,
     connected: bool,
     no_ack_mode: bool,
+    /// Currently selected thread for register/memory operations
+    current_thread: u64,
+    /// Thread enumeration state for qsThreadInfo
+    thread_enum_index: usize,
+    /// Cached thread IDs for enumeration
+    thread_ids_cache: Vec<u64>,
 }
 
 impl GdbState {
@@ -143,8 +149,100 @@ impl GdbState {
             registers: GdbRegisters::default(),
             connected: false,
             no_ack_mode: false,
+            current_thread: 1,
+            thread_enum_index: 0,
+            thread_ids_cache: Vec::new(),
         }
     }
+}
+
+/// Collect thread IDs from the kernel task registry
+#[cfg(feature = "alloc")]
+fn collect_thread_ids() -> Vec<u64> {
+    // Use process table to enumerate known PIDs
+    // Fall back to just thread 1 if registry is empty
+    let mut ids = Vec::new();
+    for pid in 1..=256u64 {
+        if crate::sched::scheduler::get_task_ptr(pid).is_some() {
+            ids.push(pid);
+        }
+    }
+    if ids.is_empty() {
+        alloc::vec![1] // fallback: report at least thread 1
+    } else {
+        ids
+    }
+}
+
+/// Check if a thread exists in the task registry
+fn thread_exists(tid: u64) -> bool {
+    crate::sched::scheduler::get_task_ptr(tid).is_some() || tid == 1
+}
+
+/// Format a thread ID as hex bytes
+#[cfg(feature = "alloc")]
+fn format_thread_id_hex(tid: u64) -> Vec<u8> {
+    if tid == 0 {
+        return alloc::vec![b'0'];
+    }
+    let mut result = Vec::new();
+    let val = tid;
+    let mut started = false;
+    for shift in (0..16).rev() {
+        let nibble = ((val >> (shift * 4)) & 0xF) as u8;
+        if nibble != 0 || started {
+            started = true;
+            result.push(if nibble < 10 {
+                b'0' + nibble
+            } else {
+                b'a' + nibble - 10
+            });
+        }
+    }
+    if result.is_empty() {
+        result.push(b'0');
+    }
+    result
+}
+
+/// Load registers from a thread's saved context
+#[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+fn load_thread_registers(tid: u64) -> Option<GdbRegisters> {
+    let task_ptr = crate::sched::scheduler::get_task_ptr(tid)?;
+    let task = unsafe { task_ptr.as_ref() };
+    match &task.context {
+        crate::sched::task::TaskContext::X86_64(ctx) => Some(GdbRegisters {
+            rax: ctx.rax,
+            rbx: ctx.rbx,
+            rcx: ctx.rcx,
+            rdx: ctx.rdx,
+            rsi: ctx.rsi,
+            rdi: ctx.rdi,
+            rbp: ctx.rbp,
+            rsp: ctx.rsp,
+            r8: ctx.r8,
+            r9: ctx.r9,
+            r10: ctx.r10,
+            r11: ctx.r11,
+            r12: ctx.r12,
+            r13: ctx.r13,
+            r14: ctx.r14,
+            r15: ctx.r15,
+            rip: ctx.rip,
+            rflags: ctx.rflags,
+            cs: ctx.cs as u64,
+            ss: ctx.ss as u64,
+            ds: ctx.ds as u64,
+            es: ctx.es as u64,
+            fs: ctx.fs as u64,
+            gs: ctx.gs as u64,
+        }),
+    }
+}
+
+#[cfg(all(feature = "alloc", not(target_arch = "x86_64")))]
+fn load_thread_registers(_tid: u64) -> Option<GdbRegisters> {
+    None // GDB stub is x86_64 only
 }
 
 static GDB_STATE: OnceLock<Mutex<GdbState>> = OnceLock::new();
@@ -516,15 +614,31 @@ fn handle_query(_state: &mut GdbState, data: &[u8]) -> Option<Vec<u8>> {
         return Some(b"1".to_vec());
     }
     if data == b"fThreadInfo" {
-        // Report thread 1 (main kernel thread)
-        return Some(b"m1".to_vec());
+        // Enumerate all threads from task registry
+        _state.thread_ids_cache = collect_thread_ids();
+        _state.thread_enum_index = 0;
+        if _state.thread_ids_cache.is_empty() {
+            return Some(b"l".to_vec());
+        }
+        let mut response = alloc::vec![b'm'];
+        for (i, &tid) in _state.thread_ids_cache.iter().enumerate() {
+            if i > 0 {
+                response.push(b',');
+            }
+            response.extend_from_slice(&format_thread_id_hex(tid));
+        }
+        _state.thread_enum_index = _state.thread_ids_cache.len();
+        return Some(response);
     }
     if data == b"sThreadInfo" {
+        // All threads reported in fThreadInfo
         return Some(b"l".to_vec());
     }
     if data == b"C" {
         // Current thread ID
-        return Some(b"QC1".to_vec());
+        let mut resp = b"QC".to_vec();
+        resp.extend_from_slice(&format_thread_id_hex(_state.current_thread));
+        return Some(resp);
     }
     if data.starts_with(b"Xfer:features:read:target.xml:") {
         let xml = b"l<?xml version=\"1.0\"?>\
@@ -553,14 +667,121 @@ fn handle_set_command(state: &mut GdbState, data: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Handle 'H' command: set thread for subsequent operations
-fn handle_set_thread(_data: &[u8]) -> Vec<u8> {
-    // We only support one thread context, accept any
-    b"OK".to_vec()
+fn handle_set_thread(state: &mut GdbState, data: &[u8]) -> Vec<u8> {
+    if data.is_empty() {
+        return b"E01".to_vec();
+    }
+    let _op = data[0]; // 'g' for register ops, 'c' for continue ops
+    let tid_str = &data[1..];
+    if tid_str.is_empty() {
+        return b"E01".to_vec();
+    }
+
+    // Parse thread ID (hex)
+    let tid = if tid_str == b"-1" {
+        // -1 means "all threads"
+        0xFFFF_FFFF_FFFF_FFFF
+    } else {
+        let mut val = 0u64;
+        for &b in tid_str {
+            let nibble = match b {
+                b'0'..=b'9' => b - b'0',
+                b'a'..=b'f' => b - b'a' + 10,
+                b'A'..=b'F' => b - b'A' + 10,
+                _ => return b"E01".to_vec(),
+            };
+            val = val.wrapping_shl(4) | nibble as u64;
+        }
+        val
+    };
+
+    // 0 means "any thread", -1 means "all threads" — both accepted
+    if tid == 0 || tid == 0xFFFF_FFFF_FFFF_FFFF {
+        // Keep current thread unchanged
+        return b"OK".to_vec();
+    }
+
+    // Validate thread exists
+    if thread_exists(tid) {
+        state.current_thread = tid;
+        b"OK".to_vec()
+    } else {
+        b"E01".to_vec()
+    }
 }
 
 /// Handle 'T' command: is thread alive?
-fn handle_thread_alive(_data: &[u8]) -> Vec<u8> {
-    b"OK".to_vec()
+fn handle_thread_alive(data: &[u8]) -> Vec<u8> {
+    if data.is_empty() {
+        return b"OK".to_vec();
+    }
+    let mut tid = 0u64;
+    for &b in data {
+        let nibble = match b {
+            b'0'..=b'9' => b - b'0',
+            b'a'..=b'f' => b - b'a' + 10,
+            b'A'..=b'F' => b - b'A' + 10,
+            _ => return b"E01".to_vec(),
+        };
+        tid = tid.wrapping_shl(4) | nibble as u64;
+    }
+    if thread_exists(tid) {
+        b"OK".to_vec()
+    } else {
+        b"E01".to_vec()
+    }
+}
+
+/// Handle 'vAttach;pid': attach to a process
+#[cfg(feature = "alloc")]
+fn handle_vattach(state: &mut GdbState, data: &[u8]) -> Vec<u8> {
+    // Parse PID from hex after "Attach;"
+    if !data.starts_with(b"Attach;") {
+        return b"E01".to_vec();
+    }
+    let pid_hex = &data[7..];
+    let mut pid = 0u64;
+    for &b in pid_hex {
+        let nibble = match b {
+            b'0'..=b'9' => b - b'0',
+            b'a'..=b'f' => b - b'a' + 10,
+            b'A'..=b'F' => b - b'A' + 10,
+            _ => return b"E01".to_vec(),
+        };
+        pid = pid.wrapping_shl(4) | nibble as u64;
+    }
+    if thread_exists(pid) {
+        state.current_thread = pid;
+        b"S05".to_vec() // SIGTRAP stop reply
+    } else {
+        b"E01".to_vec()
+    }
+}
+
+/// Handle 'vKill;pid': kill a process
+#[cfg(feature = "alloc")]
+fn handle_vkill(data: &[u8]) -> Vec<u8> {
+    if !data.starts_with(b"Kill;") {
+        return b"E01".to_vec();
+    }
+    let pid_hex = &data[5..];
+    let mut pid = 0u64;
+    for &b in pid_hex {
+        let nibble = match b {
+            b'0'..=b'9' => b - b'0',
+            b'a'..=b'f' => b - b'a' + 10,
+            b'A'..=b'F' => b - b'A' + 10,
+            _ => return b"E01".to_vec(),
+        };
+        pid = pid.wrapping_shl(4) | nibble as u64;
+    }
+    // Signal the process to terminate
+    let process_id = crate::process::pcb::ProcessId(pid);
+    if crate::process::exit::kill_process(process_id, 9).is_ok() {
+        b"OK".to_vec()
+    } else {
+        b"E01".to_vec()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -720,13 +941,43 @@ pub fn gdb_handle_exception(signal: u8, regs: &mut GdbRegisters) {
             }
             // 'H' - set thread
             b'H' => {
-                let reply = handle_set_thread(args);
+                let mut state = state_lock.lock();
+                let reply = handle_set_thread(&mut state, args);
                 send_packet(&reply);
             }
             // 'T' - thread alive
             b'T' => {
                 let reply = handle_thread_alive(args);
                 send_packet(&reply);
+            }
+            // 'v' - extended/verbose commands
+            b'v' => {
+                if args.starts_with(b"Cont?") {
+                    send_packet(b"vCont;c;s;t");
+                } else if args.starts_with(b"Cont;c") {
+                    let state = state_lock.lock();
+                    *regs = state.registers;
+                    return;
+                } else if args.starts_with(b"Cont;s") {
+                    let mut state = state_lock.lock();
+                    state.registers.rflags |= 0x100;
+                    *regs = state.registers;
+                    return;
+                } else if args.starts_with(b"Kill;") {
+                    let reply = handle_vkill(args);
+                    send_packet(&reply);
+                    GDB_ACTIVE.store(false, Ordering::Release);
+                    let mut state = state_lock.lock();
+                    state.connected = false;
+                    *regs = state.registers;
+                    return;
+                } else if args.starts_with(b"Attach;") {
+                    let mut state = state_lock.lock();
+                    let reply = handle_vattach(&mut state, args);
+                    send_packet(&reply);
+                } else {
+                    send_empty();
+                }
             }
             // 'q' - general query
             b'q' => {
@@ -760,33 +1011,6 @@ pub fn gdb_handle_exception(signal: u8, regs: &mut GdbRegisters) {
                     send_empty();
                 }
             }
-            // 'v' - verbose resume commands
-            b'v' => {
-                if args.starts_with(b"Cont?") {
-                    send_packet(b"vCont;c;s;t");
-                } else if args.starts_with(b"Cont;c") {
-                    let state = state_lock.lock();
-                    *regs = state.registers;
-                    return;
-                } else if args.starts_with(b"Cont;s") {
-                    let mut state = state_lock.lock();
-                    state.registers.rflags |= 0x100;
-                    *regs = state.registers;
-                    return;
-                } else if args.starts_with(b"Kill") {
-                    send_ok();
-                    GDB_ACTIVE.store(false, Ordering::Release);
-                    let mut state = state_lock.lock();
-                    state.connected = false;
-                    *regs = state.registers;
-                    return;
-                } else if args.starts_with(b"Attach") {
-                    let reply = handle_halt_reason();
-                    send_packet(&reply);
-                } else {
-                    send_empty();
-                }
-            }
             _ => {
                 send_empty();
             }
@@ -800,6 +1024,9 @@ pub fn gdb_handle_exception(signal: u8, regs: &mut GdbRegisters) {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use alloc::vec;
+
     use super::*;
 
     #[test]
@@ -923,8 +1150,60 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_set_thread() {
-        let reply = handle_set_thread(b"g0");
+    fn test_handle_set_thread_any() {
+        let mut state = GdbState::new();
+        let reply = handle_set_thread(&mut state, b"g0");
         assert_eq!(&reply, b"OK");
+    }
+
+    #[test]
+    fn test_handle_set_thread_all() {
+        let mut state = GdbState::new();
+        let reply = handle_set_thread(&mut state, b"g-1");
+        assert_eq!(&reply, b"OK");
+    }
+
+    #[test]
+    fn test_handle_set_thread_specific() {
+        let mut state = GdbState::new();
+        // Thread 1 always exists as fallback
+        let reply = handle_set_thread(&mut state, b"g1");
+        assert_eq!(&reply, b"OK");
+        assert_eq!(state.current_thread, 1);
+    }
+
+    #[test]
+    fn test_handle_set_thread_empty_error() {
+        let mut state = GdbState::new();
+        let reply = handle_set_thread(&mut state, b"");
+        assert_eq!(&reply, b"E01");
+    }
+
+    #[test]
+    fn test_handle_set_thread_continue_op() {
+        let mut state = GdbState::new();
+        let reply = handle_set_thread(&mut state, b"c1");
+        assert_eq!(&reply, b"OK");
+    }
+
+    #[test]
+    fn test_format_thread_id_hex() {
+        assert_eq!(format_thread_id_hex(0), vec![b'0']);
+        assert_eq!(format_thread_id_hex(1), vec![b'1']);
+        assert_eq!(format_thread_id_hex(0xFF), vec![b'f', b'f']);
+        assert_eq!(format_thread_id_hex(0x1234), vec![b'1', b'2', b'3', b'4']);
+    }
+
+    #[test]
+    fn test_gdb_state_default_thread() {
+        let state = GdbState::new();
+        assert_eq!(state.current_thread, 1);
+    }
+
+    #[test]
+    fn test_collect_thread_ids_fallback() {
+        // With empty registry, should return [1]
+        let ids = collect_thread_ids();
+        assert!(!ids.is_empty());
     }
 }

@@ -3,10 +3,17 @@
 //! Provides core system services including process management,
 //! driver framework, and system daemons.
 
+pub mod cloud_init;
+pub mod cni;
+pub mod cri;
+pub mod csi;
 pub mod desktop_ipc;
 pub mod driver_framework;
 pub mod init_system;
+pub mod lb;
+pub mod mesh;
 pub mod notification_ipc;
+pub mod print;
 pub mod process_server;
 pub mod shell;
 pub mod shell_utils;

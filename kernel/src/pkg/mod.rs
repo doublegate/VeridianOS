@@ -20,6 +20,8 @@ pub mod format;
 pub mod manifest;
 pub mod plugin;
 pub mod ports;
+#[cfg(feature = "alloc")]
+pub mod repo_server;
 pub mod repository;
 pub mod reproducible;
 pub mod resolver;

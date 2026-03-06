@@ -116,13 +116,13 @@ experiments/   Non-normative exploratory work
 
 ## Project Status
 
-**Latest Release**: v0.16.2 (March 6, 2026) | **Releases Published**: 64 (v0.1.0 through v0.16.2)
+**Latest Release**: v0.16.3 (March 6, 2026) | **Releases Published**: 65 (v0.1.0 through v0.16.3)
 
 | Metric                 | Value                                           |
 | ---------------------- | ----------------------------------------------- |
 | Build                  | 0 errors, 0 warnings across all 3 architectures |
 | Boot Tests             | 29/29 (all architectures, Stage 6 BOOTOK)       |
-| Host-Target Unit Tests | 2,356/2,356 passing                             |
+| Host-Target Unit Tests | 3,993/3,993 passing                             |
 | CI Pipeline            | 11/11 jobs passing (GitHub Actions + Codecov)   |
 
 ### Architecture Support
@@ -148,6 +148,7 @@ experiments/   Non-normative exploratory work
 | 6.5   | Rust Compiler + Bash Shell | **COMPLETE (100%)** | v0.7.0  | Feb 2026 |
 | 7     | Production Readiness     | **Complete (~100%)** | v0.10.6  | Mar 2026 |
 | 7.5   | Follow-On Enhancements   | **COMPLETE (100%)** | v0.16.0  | Mar 2026 |
+| 8     | Next-Generation Features | **COMPLETE (100%)** | v0.16.3  | Mar 2026 |
 
 For detailed release notes, see [Release History](docs/RELEASE-HISTORY.md).
 
@@ -486,10 +487,11 @@ Security is a fundamental design principle:
 - [x] **Phase 7.5**: Follow-on enhancements across 8 waves (80/80 items): filesystem (ext4/FAT32/tmpfs/inotify/flock/xattr), security (KASLR/canaries/SMEP-SMAP/retpoline), performance (EDF scheduling/cache-aware alloc/PGO), drivers (xHCI/AHCI-SATA/HID/Bluetooth), networking (TCP Reno+Cubic/SACK/DNS/VLAN/bonding), crypto (TLS 1.3/SSH/HTTP/NTP/QUIC/WireGuard), audio/video (ALSA/Vorbis/MP3/PNG/JPEG/GIF), GPU (VirtIO 3D/GLES2/DRM KMS), hypervisor (nested/passthrough/migration), containers (OCI/cgroups/seccomp), desktop (clipboard/DnD/shortcuts/themes/TrueType/CJK), shell (io_uring/ptrace/coredump/users/sudo/cron) (v0.11.0-v0.16.0, Mar 2026)
 - [x] **v0.16.1 Tech Debt Remediation**: 11 undocumented `static mut` converted to safe patterns (AtomicU8/spin::Mutex/UnsafeCell wrappers), PixelFormat consolidated from 4 to 1 definition, 5 oversized files split into submodules (19,663 lines reorganized), production `unwrap()` reduction, 125 new pkg/ tests (2,356 total), dead_code annotations reduced 321->193 (v0.16.1, Mar 2026)
 - [x] **v0.16.2 Phase 5 Completion + Phase 8 Wave 1 (partial)**: Phase 5 Performance Optimization brought to 100% (trace instrumentation 10/10, FrameFree+PageFault wired, validation criteria checked). Phase 8 Wave 1 Foundation & Self-Hosting: GDB remote serial protocol stub (`debug/gdb_stub.rs`, `debug/breakpoint.rs`), native git client object model (`devtools/git/objects.rs`, `deflate.rs`, `refs.rs`, `commands.rs`, `transport.rs`), build orchestrator with dependency topo-sort (`pkg/build_system.rs`, `pkg/build_package.rs`), LLVM 19 + rustc bootstrap portfiles (`pkg/ports/llvm.rs`, `pkg/ports/rustc_bootstrap.rs`), IDE text editor with gap buffer + LSP client (`devtools/ide/editor.rs`, `devtools/ide/lsp_client.rs`), CI runner (`devtools/ci/runner.rs`), profiler GUI with flame graph rendering (`devtools/profiler/gui.rs`) (v0.16.2, Mar 2026)
+- [x] **v0.16.3 Phase 8 Complete (Waves 2-8)**: All 8 waves of Phase 8 next-generation features. Wave 2: Networking v2 -- netfilter firewall with conntrack/NAT, RIP v2/OSPF routing, WiFi 802.11 MAC+WPA2/WPA3, Bluetooth L2CAP/RFCOMM/profiles (A2DP/HID/SPP), VPN tunnel interfaces with OpenVPN. Wave 3: Enterprise -- ASN.1/BER, LDAP v3 with AD integration, Kerberos v5 with ticket cache, NFS v4 client, SMB2/3 client with NTLM, iSCSI initiator, software RAID 0/1/5, package repository server. Wave 4: Desktop v2 -- GPU texture atlas with bin-packing, GL compositor with alpha blending, TGSI shader compiler, desktop icons with .desktop parser, file associations with MIME registry, PDF 1.4 renderer, print spooler with IPP, accessibility (screen reader/high contrast/keyboard nav), display manager with login screen and VT switching. Wave 5: Virtualization -- KVM core ioctls with vCPU run loop, QEMU device model compatibility with live migration, VFIO PCI passthrough with IOMMU groups, SR-IOV VF management, CPU/memory/PCI hotplug with ACPI GED. Wave 6: Cloud-Native -- CRI gRPC transport + runtime/image/streaming services, CNI bridge/VXLAN overlay with IPAM, CSI controller/node/snapshots, service mesh sidecar proxy with mTLS and SPIFFE, L4/L7 load balancer (5 algorithms), cloud-init metadata service. Wave 7: Web Browser -- HTML5 tokenizer (~20 states), arena-based DOM, tree builder (12 insertion modes), CSS parser with 26.6 fixed-point layout, block/inline/float layout engine, pixel painter, W3C event model, HTML forms with links/scroll, CSS Flexbox, incremental layout with dirty flags, JavaScript lexer/parser (Pratt)/bytecode compiler (~40 opcodes)/stack-based VM (32.32 fixed-point)/mark-sweep GC, DOM bindings with timers, tabbed browsing with process isolation. Wave 8: Formal Verification -- 38 Kani proof harnesses (boot chain/IPC/allocator/capabilities), 6 TLA+ specifications (boot_chain/ipc_protocol/ipc_deadlock/memory_allocator/capability_model/information_flow). 71 new files, ~19K new LOC, 1,637 new tests (3,993 total). (v0.16.3, Mar 2026)
 
 ### Upcoming
 
-- [ ] **Phase 8**: Next-generation features -- web browser, native rustc bootstrap, GPU-accelerated compositor, firewall/NAT, Kubernetes CRI/CNI/CSI, KVM API compatibility, LDAP/Kerberos, IDE with LSP, formal verification
+- All phases complete through Phase 8. Future work: production hardening, hardware testing, community feedback.
 
 See [Release History](docs/RELEASE-HISTORY.md) for detailed per-release notes.
 

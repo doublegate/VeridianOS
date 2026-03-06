@@ -28,6 +28,10 @@ pub mod tar;
 pub mod tmpfs;
 pub mod xattr;
 
+// Phase 8 Wave 3: Enterprise Storage
+pub mod nfs;
+pub mod smb;
+
 pub use file::{File, FileDescriptor, FileTable, OpenFlags, SeekFrom};
 
 /// Maximum path length
@@ -818,7 +822,7 @@ pub fn init() {
                     if let Ok(f) = etc.create("os-release", Permissions::default()) {
                         f.write(
                             0,
-                            b"NAME=\"VeridianOS\"\nVERSION=\"0.16.2\"\nID=veridian\nPRETTY_NAME=\"VeridianOS v0.16.2\"\n",
+                            b"NAME=\"VeridianOS\"\nVERSION=\"0.16.3\"\nID=veridian\nPRETTY_NAME=\"VeridianOS v0.16.3\"\n",
                         )
                         .ok();
                     }

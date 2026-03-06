@@ -13,6 +13,8 @@ pub mod collection;
 pub mod llvm;
 #[cfg(feature = "alloc")]
 pub mod rustc_bootstrap;
+#[cfg(feature = "alloc")]
+pub mod rustdoc;
 
 #[cfg(feature = "alloc")]
 use alloc::{collections::BTreeMap, string::String, vec, vec::Vec};

@@ -9,9 +9,14 @@ extern crate alloc;
 pub mod container;
 pub mod containers;
 pub mod devices;
+pub mod hotplug;
 pub mod hypervisor;
+pub mod kvm;
 pub mod memory;
 pub mod namespace;
+pub mod qemu_compat;
+pub mod sriov;
+pub mod vfio;
 pub mod vmx;
 
 use crate::error::KernelError;

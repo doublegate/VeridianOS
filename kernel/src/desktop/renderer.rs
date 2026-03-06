@@ -315,7 +315,7 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopState {
     // Send a welcome notification to demonstrate the notification system
     crate::desktop::notification::notify(
         "VeridianOS Desktop",
-        "Welcome to VeridianOS v0.16.2",
+        "Welcome to VeridianOS v0.16.3",
         crate::desktop::notification::NotificationUrgency::Normal,
         "desktop",
     );

@@ -166,6 +166,254 @@ impl Pipeline {
     }
 }
 
+/// Build artifact stored after job completion.
+#[derive(Debug, Clone)]
+pub struct Artifact {
+    pub name: String,
+    pub size: u64,
+    pub job_id: String,
+    pub pipeline_id: String,
+    pub created_tick: u64,
+    pub data_hash: [u8; 32],
+}
+
+impl Artifact {
+    pub fn new(name: &str, job_id: &str, pipeline_id: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            size: 0,
+            job_id: job_id.to_string(),
+            pipeline_id: pipeline_id.to_string(),
+            created_tick: 0,
+            data_hash: [0u8; 32],
+        }
+    }
+}
+
+/// Artifact storage with retention management.
+pub struct ArtifactStore {
+    artifacts: BTreeMap<String, Artifact>,
+}
+
+impl Default for ArtifactStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ArtifactStore {
+    pub fn new() -> Self {
+        Self {
+            artifacts: BTreeMap::new(),
+        }
+    }
+
+    /// Store a build artifact with metadata.
+    pub fn store_artifact(
+        &mut self,
+        name: &str,
+        data_hash: [u8; 32],
+        size: u64,
+        job_id: &str,
+        pipeline_id: &str,
+        tick: u64,
+    ) {
+        let mut artifact = Artifact::new(name, job_id, pipeline_id);
+        artifact.data_hash = data_hash;
+        artifact.size = size;
+        artifact.created_tick = tick;
+        self.artifacts.insert(name.to_string(), artifact);
+    }
+
+    /// Retrieve an artifact by name.
+    pub fn get_artifact(&self, name: &str) -> Option<&Artifact> {
+        self.artifacts.get(name)
+    }
+
+    /// List all stored artifacts.
+    pub fn list_artifacts(&self) -> Vec<&Artifact> {
+        self.artifacts.values().collect()
+    }
+
+    /// Remove artifacts older than the retention tick threshold.
+    pub fn cleanup_old(&mut self, current_tick: u64, retention_ticks: u64) -> usize {
+        let cutoff = current_tick.saturating_sub(retention_ticks);
+        let before = self.artifacts.len();
+        self.artifacts.retain(|_, a| a.created_tick >= cutoff);
+        before - self.artifacts.len()
+    }
+
+    pub fn count(&self) -> usize {
+        self.artifacts.len()
+    }
+}
+
+/// Git repository poller for triggering CI pipelines on new commits.
+#[derive(Debug, Clone)]
+pub struct GitPoller {
+    pub repo_url: String,
+    pub branch: String,
+    pub last_commit_hash: String,
+    pub poll_interval_ticks: u64,
+    last_poll_tick: u64,
+}
+
+impl GitPoller {
+    pub fn new(repo_url: &str, branch: &str, poll_interval: u64) -> Self {
+        Self {
+            repo_url: repo_url.to_string(),
+            branch: branch.to_string(),
+            last_commit_hash: String::new(),
+            poll_interval_ticks: poll_interval,
+            last_poll_tick: 0,
+        }
+    }
+
+    /// Check whether enough ticks have elapsed for a new poll.
+    pub fn should_poll(&self, current_tick: u64) -> bool {
+        current_tick.saturating_sub(self.last_poll_tick) >= self.poll_interval_ticks
+    }
+
+    /// Check for updates by comparing current HEAD with last known.
+    ///
+    /// Returns `true` if the commit hash changed (simulated: any non-empty
+    /// `current_head` that differs from last known triggers an update).
+    pub fn check_for_updates(&mut self, current_head: &str, current_tick: u64) -> bool {
+        self.last_poll_tick = current_tick;
+        if !current_head.is_empty() && current_head != self.last_commit_hash {
+            self.last_commit_hash = current_head.to_string();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Trigger a pipeline on the new commit (creates a Pipeline with Push
+    /// trigger).
+    pub fn trigger_pipeline(&self, name: &str) -> Pipeline {
+        let mut pipeline = Pipeline::new(name);
+        pipeline.trigger = PipelineTrigger::Push;
+        pipeline
+    }
+}
+
+/// Namespace isolation for CI job sandboxing.
+pub struct NamespaceIsolation {
+    pub sandbox_id: u64,
+    pub active: bool,
+}
+
+impl Default for NamespaceIsolation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NamespaceIsolation {
+    pub fn new() -> Self {
+        Self {
+            sandbox_id: 0,
+            active: false,
+        }
+    }
+
+    /// Create a conceptual sandbox for job isolation.
+    pub fn create_sandbox(&mut self, job_name: &str) -> u64 {
+        // In real implementation, this would create PID/mount namespaces
+        let mut hash: u64 = 5381;
+        for byte in job_name.bytes() {
+            hash = hash.wrapping_mul(33).wrapping_add(byte as u64);
+        }
+        self.sandbox_id = hash;
+        self.active = true;
+        self.sandbox_id
+    }
+
+    /// Tear down the sandbox.
+    pub fn cleanup_sandbox(&mut self) {
+        self.active = false;
+        self.sandbox_id = 0;
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+}
+
+/// Pipeline execution report.
+#[derive(Debug, Clone)]
+pub struct PipelineReport {
+    pub pipeline_name: String,
+    pub total_jobs: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub artifacts_collected: usize,
+}
+
+impl Pipeline {
+    /// Execute the pipeline with git polling support.
+    ///
+    /// Checks the poller, runs if there are new commits, and collects
+    /// artifacts into the store.
+    pub fn run_with_polling(
+        &mut self,
+        poller: &mut GitPoller,
+        current_head: &str,
+        current_tick: u64,
+        store: &mut ArtifactStore,
+    ) -> Option<PipelineReport> {
+        if !poller.should_poll(current_tick) {
+            return None;
+        }
+        if !poller.check_for_updates(current_head, current_tick) {
+            return None;
+        }
+
+        self.execute();
+        let artifacts = self.collect_artifacts(store, current_tick);
+        Some(self.generate_report(artifacts))
+    }
+
+    /// Collect declared artifacts from completed jobs into the artifact store.
+    pub fn collect_artifacts(&self, store: &mut ArtifactStore, tick: u64) -> usize {
+        let mut count = 0;
+        for job in &self.jobs {
+            if job.status != JobStatus::Passed {
+                continue;
+            }
+            for artifact_name in &job.artifacts {
+                store.store_artifact(
+                    artifact_name,
+                    [0u8; 32], // Placeholder hash
+                    0,
+                    &job.name,
+                    &self.name,
+                    tick,
+                );
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Generate an execution summary report.
+    pub fn generate_report(&self, artifacts_collected: usize) -> PipelineReport {
+        PipelineReport {
+            pipeline_name: self.name.clone(),
+            total_jobs: self.jobs.len(),
+            passed: self.passed_count(),
+            failed: self.failed_count(),
+            skipped: self
+                .jobs
+                .iter()
+                .filter(|j| j.status == JobStatus::Skipped)
+                .count(),
+            artifacts_collected,
+        }
+    }
+}
+
 /// Parse a minimal CI config (key=value style)
 pub fn parse_ci_config(config: &str) -> Vec<Job> {
     let mut jobs = Vec::new();
@@ -337,5 +585,118 @@ step = "deploy: ./deploy.sh"
         pipeline.execute();
         assert_eq!(pipeline.passed_count(), 2);
         assert_eq!(pipeline.failed_count(), 0);
+    }
+
+    #[test]
+    fn test_artifact_store_basic() {
+        let mut store = ArtifactStore::new();
+        store.store_artifact("app.bin", [0u8; 32], 1024, "build", "ci-1", 100);
+        assert_eq!(store.count(), 1);
+        let art = store.get_artifact("app.bin").unwrap();
+        assert_eq!(art.size, 1024);
+        assert_eq!(art.job_id, "build");
+    }
+
+    #[test]
+    fn test_artifact_store_list() {
+        let mut store = ArtifactStore::new();
+        store.store_artifact("a.bin", [0u8; 32], 10, "j1", "p1", 1);
+        store.store_artifact("b.bin", [0u8; 32], 20, "j2", "p1", 2);
+        assert_eq!(store.list_artifacts().len(), 2);
+    }
+
+    #[test]
+    fn test_artifact_cleanup() {
+        let mut store = ArtifactStore::new();
+        store.store_artifact("old", [0u8; 32], 10, "j1", "p1", 10);
+        store.store_artifact("new", [0u8; 32], 20, "j2", "p1", 100);
+        let removed = store.cleanup_old(110, 50);
+        assert_eq!(removed, 1);
+        assert_eq!(store.count(), 1);
+        assert!(store.get_artifact("new").is_some());
+    }
+
+    #[test]
+    fn test_git_poller_check_updates() {
+        let mut poller = GitPoller::new("https://example.com/repo.git", "main", 100);
+        assert!(poller.check_for_updates("abc123", 100));
+        assert!(!poller.check_for_updates("abc123", 200)); // same hash
+        assert!(poller.check_for_updates("def456", 300)); // different hash
+    }
+
+    #[test]
+    fn test_git_poller_should_poll() {
+        let poller = GitPoller::new("https://example.com/repo.git", "main", 100);
+        assert!(poller.should_poll(100));
+        assert!(!poller.should_poll(50));
+    }
+
+    #[test]
+    fn test_git_poller_trigger_pipeline() {
+        let poller = GitPoller::new("https://example.com/repo.git", "main", 100);
+        let pipeline = poller.trigger_pipeline("auto-ci");
+        assert_eq!(pipeline.name, "auto-ci");
+        assert_eq!(pipeline.trigger, PipelineTrigger::Push);
+    }
+
+    #[test]
+    fn test_namespace_isolation() {
+        let mut ns = NamespaceIsolation::new();
+        assert!(!ns.is_active());
+        let id = ns.create_sandbox("build-job");
+        assert!(id > 0);
+        assert!(ns.is_active());
+        ns.cleanup_sandbox();
+        assert!(!ns.is_active());
+    }
+
+    #[test]
+    fn test_pipeline_collect_artifacts() {
+        let mut pipeline = Pipeline::new("ci");
+        let mut job = Job::new("build");
+        job.add_step("compile", "cargo build");
+        job.artifacts.push("target/app".to_string());
+        pipeline.add_job(job);
+        pipeline.execute();
+
+        let mut store = ArtifactStore::new();
+        let count = pipeline.collect_artifacts(&mut store, 500);
+        assert_eq!(count, 1);
+        assert!(store.get_artifact("target/app").is_some());
+    }
+
+    #[test]
+    fn test_pipeline_generate_report() {
+        let mut pipeline = Pipeline::new("ci");
+        let mut job = Job::new("build");
+        job.add_step("compile", "cargo build");
+        pipeline.add_job(job);
+        pipeline.execute();
+        let report = pipeline.generate_report(1);
+        assert_eq!(report.pipeline_name, "ci");
+        assert_eq!(report.total_jobs, 1);
+        assert_eq!(report.passed, 1);
+        assert_eq!(report.failed, 0);
+        assert_eq!(report.artifacts_collected, 1);
+    }
+
+    #[test]
+    fn test_run_with_polling_no_update() {
+        let mut pipeline = Pipeline::new("ci");
+        let mut job = Job::new("build");
+        job.add_step("compile", "cargo build");
+        pipeline.add_job(job);
+
+        let mut poller = GitPoller::new("repo", "main", 100);
+        let mut store = ArtifactStore::new();
+
+        // Too early to poll
+        let result = pipeline.run_with_polling(&mut poller, "abc", 50, &mut store);
+        assert!(result.is_none());
+
+        // Now poll with a commit
+        let result = pipeline.run_with_polling(&mut poller, "abc", 100, &mut store);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().passed, 1);
     }
 }
