@@ -2,7 +2,7 @@
 
 #![allow(unused_variables, unused_assignments)]
 
-use alloc::string::String;
+use alloc::{format, string::String};
 
 use super::pci_class_name;
 use crate::services::shell::{BuiltinCommand, CommandResult, Shell};
@@ -156,7 +156,13 @@ impl BuiltinCommand for MdadmCommand {
 
         match args[0].as_str() {
             "status" | "--detail" => {
-                crate::println!("No RAID arrays configured");
+                let manager = crate::drivers::raid::manager::RaidManager::new();
+                let count = manager.array_count();
+                if count == 0 {
+                    crate::println!("No RAID arrays configured");
+                } else {
+                    crate::println!("{} RAID array(s) configured", count);
+                }
                 CommandResult::Success(0)
             }
             "create" => {
@@ -167,13 +173,46 @@ impl BuiltinCommand for MdadmCommand {
                 }
                 let name = &args[1];
                 // Extract level from --level=N if present
-                let mut level = "0";
+                let mut level_str = "0";
                 for arg in &args[2..] {
                     if let Some(stripped) = arg.strip_prefix("--level=") {
-                        level = stripped;
+                        level_str = stripped;
                     }
                 }
-                crate::println!("Creating RAID {} array {}...", level, name);
+                let raid_level = match level_str {
+                    "0" => crate::drivers::raid::manager::RaidLevel::Raid0,
+                    "1" => crate::drivers::raid::manager::RaidLevel::Raid1,
+                    "5" => crate::drivers::raid::manager::RaidLevel::Raid5,
+                    _ => {
+                        crate::println!("mdadm: unsupported RAID level '{}'", level_str);
+                        return CommandResult::Error(format!(
+                            "mdadm: unsupported RAID level '{}'",
+                            level_str
+                        ));
+                    }
+                };
+
+                // Collect device args (anything not starting with --)
+                let mut disks = alloc::vec::Vec::new();
+                for (i, arg) in args[2..].iter().enumerate() {
+                    if !arg.starts_with("--") {
+                        disks.push(crate::drivers::raid::manager::RaidDisk::new(
+                            i as u32,
+                            arg,
+                            1024 * 1024, // 1M blocks default
+                        ));
+                    }
+                }
+
+                let mut manager = crate::drivers::raid::manager::RaidManager::new();
+                match manager.create_array(name, raid_level, disks) {
+                    Ok(()) => {
+                        crate::println!("mdadm: created RAID {:?} array {}", raid_level, name);
+                    }
+                    Err(e) => {
+                        crate::println!("mdadm: create failed: {:?}", e);
+                    }
+                }
                 CommandResult::Success(0)
             }
             _ => CommandResult::Error(String::from("Usage: mdadm status|create|assemble <array>")),
@@ -202,11 +241,76 @@ impl BuiltinCommand for IscsiadmCommand {
                         "Usage: iscsiadm discover|login|list",
                     ));
                 }
-                crate::println!("No iSCSI targets found at {}", args[1]);
+                let portal = &args[1];
+                crate::println!("Discovering targets at {}...", portal);
+                let mut initiator = crate::drivers::iscsi::initiator::IscsiInitiator::new(portal);
+                // Need a session to run discovery; attempt login first
+                let initiator_name = "iqn.2026-03.os.veridian:initiator";
+                let target_name = "iqn.2026-03.os.veridian:discovery";
+                match initiator.login(initiator_name, target_name) {
+                    Ok(session_idx) => match initiator.discovery(session_idx) {
+                        Ok(targets) => {
+                            if targets.is_empty() {
+                                crate::println!("No iSCSI targets found at {}", portal);
+                            } else {
+                                for t in &targets {
+                                    crate::println!("  {}", t);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            crate::println!("iSCSI discovery failed: {:?}", e);
+                        }
+                    },
+                    Err(e) => {
+                        crate::println!(
+                            "iSCSI login to {} failed: {:?} (no network route)",
+                            portal,
+                            e
+                        );
+                    }
+                }
+                CommandResult::Success(0)
+            }
+            "login" => {
+                if args.len() < 2 {
+                    return CommandResult::Error(String::from("Usage: iscsiadm login <portal>"));
+                }
+                let portal = &args[1];
+                let mut initiator = crate::drivers::iscsi::initiator::IscsiInitiator::new(portal);
+                let initiator_name = "iqn.2026-03.os.veridian:initiator";
+                let target_name = args
+                    .get(2)
+                    .map(|s| s.as_str())
+                    .unwrap_or("iqn.2026-03.os.veridian:target0");
+                match initiator.login(initiator_name, target_name) {
+                    Ok(idx) => {
+                        crate::println!("iSCSI session {} established to {}", idx, portal);
+                    }
+                    Err(e) => {
+                        crate::println!("iSCSI login failed: {:?}", e);
+                    }
+                }
                 CommandResult::Success(0)
             }
             "list" => {
-                crate::println!("Active sessions: (none)");
+                let initiator = crate::drivers::iscsi::initiator::IscsiInitiator::new("localhost");
+                let count = initiator.session_count();
+                if count == 0 {
+                    crate::println!("Active sessions: (none)");
+                } else {
+                    crate::println!("Active sessions: {}", count);
+                    for i in 0..count {
+                        if let Some(session) = initiator.session(i) {
+                            crate::println!(
+                                "  [{}] {} -> {}",
+                                i,
+                                session.initiator_name,
+                                session.target_name
+                            );
+                        }
+                    }
+                }
                 CommandResult::Success(0)
             }
             _ => CommandResult::Error(String::from("Usage: iscsiadm discover|login|list")),

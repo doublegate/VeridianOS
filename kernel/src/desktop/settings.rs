@@ -270,8 +270,8 @@ impl Default for AboutInfo {
     fn default() -> Self {
         Self {
             os_name: "VeridianOS",
-            version: "0.10.0",
-            kernel_version: "0.10.0-phase7",
+            version: "0.19.0",
+            kernel_version: "0.19.0-deepwiring",
             arch: core::env!("CARGO_PKG_NAME"), // will be "veridian-kernel"
             hostname: String::from("veridian"),
         }
@@ -336,7 +336,7 @@ const CHAR_W: usize = 8;
 impl SettingsApp {
     /// Create a new settings application with default values.
     pub fn new() -> Self {
-        Self {
+        let mut app = Self {
             active_panel: SettingsPanel::Display,
             display: DisplaySettings::default(),
             network: NetworkSettings::default(),
@@ -350,6 +350,46 @@ impl SettingsApp {
             surface_id: None,
             width: 600,
             height: 400,
+        };
+        app.refresh_from_kernel();
+        app
+    }
+
+    /// Refresh settings fields from live kernel subsystem state.
+    pub fn refresh_from_kernel(&mut self) {
+        // -- Network: pull IP configuration from the kernel IP stack --
+        let iface = crate::net::ip::get_interface_config();
+        let ip = iface.ip_addr.0;
+        self.network.ip_address = format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+        if let Some(gw) = iface.gateway {
+            self.network.gateway = format!("{}.{}.{}.{}", gw.0[0], gw.0[1], gw.0[2], gw.0[3]);
+        }
+        // DNS is not part of InterfaceConfig; leave default
+
+        // -- Audio: read master volume from the mixer --
+        if let Ok(raw_vol) =
+            crate::audio::mixer::with_mixer(|m: &mut crate::audio::mixer::AudioMixer| {
+                m.get_master_volume()
+            })
+        {
+            // Map 0..65535 -> 0..100
+            self.audio.master_volume = ((raw_vol as u32 * 100) / 65535) as u8;
+        }
+
+        // -- Power: map governor to profile index --
+        let governor = crate::power::get_governor();
+        self.power_settings.profile_index = match governor {
+            crate::power::Governor::OnDemand => 0,    // "Balanced"
+            crate::power::Governor::Performance => 1, // "Performance"
+            crate::power::Governor::PowerSave => 2,   // "Power Saver"
+        };
+
+        // -- Users: look up uid 0 from the user database --
+        let db = crate::syscall::userland_ext::UserDatabase::new();
+        if let Some(entry) = db.get_user_by_uid(0) {
+            self.user.username = entry.username.clone();
+            self.user.home_dir = entry.home.clone();
+            self.user.shell = entry.shell.clone();
         }
     }
 
@@ -501,6 +541,13 @@ impl SettingsApp {
                     } else {
                         self.audio.master_volume + 10
                     };
+                    // Apply to kernel mixer
+                    let raw_vol = ((self.audio.master_volume as u32 * 65535) / 100) as u16;
+                    let _ = crate::audio::mixer::with_mixer(
+                        |m: &mut crate::audio::mixer::AudioMixer| {
+                            m.set_master_volume(raw_vol);
+                        },
+                    );
                 }
                 1 => {
                     self.audio.muted = !self.audio.muted;

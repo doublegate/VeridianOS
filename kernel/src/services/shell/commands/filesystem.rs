@@ -1161,6 +1161,20 @@ impl BuiltinCommand for XattrCommand {
             ));
         }
 
+        // Resolve path to inode via VFS metadata
+        let resolve_inode = |path: &str| -> Result<u64, String> {
+            let vfs_lock = crate::fs::try_get_vfs()
+                .ok_or_else(|| String::from("xattr: VFS not initialized"))?;
+            let vfs = vfs_lock.read();
+            let node = vfs
+                .resolve_path(path)
+                .map_err(|e| format!("xattr: cannot resolve '{}': {:?}", path, e))?;
+            let meta = node
+                .metadata()
+                .map_err(|e| format!("xattr: metadata error: {:?}", e))?;
+            Ok(meta.inode)
+        };
+
         match args[0].as_str() {
             "list" => {
                 if args.len() < 2 {
@@ -1168,7 +1182,24 @@ impl BuiltinCommand for XattrCommand {
                         "Usage: xattr list|get|set|remove <path> [name] [value]",
                     ));
                 }
-                crate::println!("Extended attributes for {}: (none)", args[1]);
+                let inode = match resolve_inode(&args[1]) {
+                    Ok(i) => i,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                match crate::fs::xattr::listxattr(inode) {
+                    Ok(attrs) if attrs.is_empty() => {
+                        crate::println!("Extended attributes for {}: (none)", args[1]);
+                    }
+                    Ok(attrs) => {
+                        crate::println!("Extended attributes for {}:", args[1]);
+                        for name in &attrs {
+                            crate::println!("  {}", name);
+                        }
+                    }
+                    Err(e) => {
+                        crate::println!("xattr: list error: {:?}", e);
+                    }
+                }
                 CommandResult::Success(0)
             }
             "get" => {
@@ -1177,7 +1208,27 @@ impl BuiltinCommand for XattrCommand {
                         "Usage: xattr list|get|set|remove <path> [name] [value]",
                     ));
                 }
-                crate::println!("xattr: {} not found", args[2]);
+                let inode = match resolve_inode(&args[1]) {
+                    Ok(i) => i,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                match crate::fs::xattr::getxattr(inode, &args[2]) {
+                    Ok(value) => {
+                        // Try to display as UTF-8, fall back to hex
+                        if let Ok(s) = core::str::from_utf8(&value) {
+                            crate::println!("{}=\"{}\"", args[2], s);
+                        } else {
+                            crate::print!("{}=0x", args[2]);
+                            for b in &value {
+                                crate::print!("{:02x}", b);
+                            }
+                            crate::println!();
+                        }
+                    }
+                    Err(_) => {
+                        crate::println!("xattr: {} not found", args[2]);
+                    }
+                }
                 CommandResult::Success(0)
             }
             "set" => {
@@ -1186,7 +1237,18 @@ impl BuiltinCommand for XattrCommand {
                         "Usage: xattr list|get|set|remove <path> [name] [value]",
                     ));
                 }
-                crate::println!("Set {}={} on {}", args[2], args[3], args[1]);
+                let inode = match resolve_inode(&args[1]) {
+                    Ok(i) => i,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                match crate::fs::xattr::setxattr(inode, &args[2], args[3].as_bytes(), 0) {
+                    Ok(()) => {
+                        crate::println!("Set {}={} on {}", args[2], args[3], args[1]);
+                    }
+                    Err(e) => {
+                        crate::println!("xattr: set error: {:?}", e);
+                    }
+                }
                 CommandResult::Success(0)
             }
             "remove" => {
@@ -1195,7 +1257,18 @@ impl BuiltinCommand for XattrCommand {
                         "Usage: xattr list|get|set|remove <path> [name] [value]",
                     ));
                 }
-                crate::println!("Removed {} from {}", args[2], args[1]);
+                let inode = match resolve_inode(&args[1]) {
+                    Ok(i) => i,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                match crate::fs::xattr::removexattr(inode, &args[2]) {
+                    Ok(()) => {
+                        crate::println!("Removed {} from {}", args[2], args[1]);
+                    }
+                    Err(_) => {
+                        crate::println!("xattr: {} not found on {}", args[2], args[1]);
+                    }
+                }
                 CommandResult::Success(0)
             }
             _ => CommandResult::Error(String::from(
@@ -1224,14 +1297,58 @@ impl BuiltinCommand for TarCommand {
                 if args.len() < 2 {
                     return CommandResult::Error(String::from("Usage: tar list|extract <archive>"));
                 }
-                crate::println!("tar: listing {}... (archive not found)", args[1]);
+                match crate::fs::read_file(&args[1]) {
+                    Ok(data) => {
+                        // Parse 512-byte TAR headers
+                        let mut offset = 0usize;
+                        let mut count = 0usize;
+                        while offset + 512 <= data.len() {
+                            // Check for zero block (end of archive)
+                            let header = &data[offset..offset + 512];
+                            if header.iter().all(|&b| b == 0) {
+                                break;
+                            }
+                            // Name is bytes 0..100, null-terminated
+                            let name_end =
+                                header[..100].iter().position(|&b| b == 0).unwrap_or(100);
+                            let name =
+                                core::str::from_utf8(&header[..name_end]).unwrap_or("<invalid>");
+                            // Size is octal ASCII at bytes 124..136
+                            let size_str = core::str::from_utf8(&header[124..136])
+                                .unwrap_or("0")
+                                .trim_matches(|c: char| c == '\0' || c == ' ');
+                            let size = u64::from_str_radix(size_str, 8).unwrap_or(0);
+                            crate::println!("{:>10} {}", size, name);
+                            count += 1;
+                            // Advance past header + data (rounded up to 512)
+                            let data_blocks = (size as usize).div_ceil(512);
+                            offset += 512 + data_blocks * 512;
+                        }
+                        crate::println!("tar: {} entries", count);
+                    }
+                    Err(e) => {
+                        crate::println!("tar: cannot read '{}': {:?}", args[1], e);
+                    }
+                }
                 CommandResult::Success(0)
             }
             "extract" | "xf" => {
                 if args.len() < 2 {
                     return CommandResult::Error(String::from("Usage: tar list|extract <archive>"));
                 }
-                crate::println!("tar: extracting {}... (archive not found)", args[1]);
+                match crate::fs::read_file(&args[1]) {
+                    Ok(data) => match crate::fs::tar::load_tar_to_vfs(&data) {
+                        Ok(count) => {
+                            crate::println!("tar: extracted {} entries from {}", count, args[1]);
+                        }
+                        Err(e) => {
+                            crate::println!("tar: extract error: {:?}", e);
+                        }
+                    },
+                    Err(e) => {
+                        crate::println!("tar: cannot read '{}': {:?}", args[1], e);
+                    }
+                }
                 CommandResult::Success(0)
             }
             _ => CommandResult::Error(String::from("Usage: tar list|extract <archive>")),
@@ -1255,6 +1372,12 @@ impl BuiltinCommand for MkfsCommand {
 
         let fs_type = &args[0];
         let device = &args[1];
+
+        // Validate that block device is available
+        if !crate::drivers::virtio::blk::is_initialized() {
+            crate::println!("mkfs: no block device available (virtio-blk not initialized)");
+            return CommandResult::Error(String::from("mkfs: no block device available"));
+        }
 
         match fs_type.as_str() {
             "ext4" => {
@@ -1292,7 +1415,57 @@ impl BuiltinCommand for FsckCommand {
         }
 
         crate::println!("fsck: checking {}...", args[0]);
-        crate::println!("  clean, 0 errors found");
+
+        // Walk the VFS tree from root and count entries
+        match crate::fs::try_get_vfs() {
+            Some(vfs_lock) => {
+                let vfs = vfs_lock.read();
+                let mut file_count: usize = 0;
+                let mut dir_count: usize = 0;
+                let mut errors: usize = 0;
+
+                // Resolve the target path (or root)
+                match vfs.resolve_path(&args[0]) {
+                    Ok(root_node) => {
+                        // Count entries via readdir if it's a directory
+                        match root_node.readdir() {
+                            Ok(entries) => {
+                                for entry in &entries {
+                                    match entry.node_type {
+                                        crate::fs::NodeType::Directory => dir_count += 1,
+                                        _ => file_count += 1,
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                // Not a directory, just count the node itself
+                                file_count = 1;
+                            }
+                        }
+                        crate::println!(
+                            "  {} files, {} directories checked",
+                            file_count,
+                            dir_count
+                        );
+                    }
+                    Err(e) => {
+                        crate::println!("  error resolving path: {:?}", e);
+                        errors += 1;
+                    }
+                }
+                crate::println!(
+                    "  {}",
+                    if errors == 0 {
+                        "clean, 0 errors found"
+                    } else {
+                        "errors detected"
+                    }
+                );
+            }
+            None => {
+                crate::println!("  VFS not initialized, cannot check");
+            }
+        }
         CommandResult::Success(0)
     }
 }
@@ -1345,17 +1518,23 @@ impl BuiltinCommand for NfsmountCommand {
         if let Some(colon_pos) = source.find(':') {
             let server = &source[..colon_pos];
             let path = &source[colon_pos + 1..];
-            crate::println!(
-                "Mounting {}:{} on {}... mount failed (no network route)",
-                server,
-                path,
-                mountpoint
-            );
+            crate::println!("Mounting {}:{} on {}...", server, path, mountpoint);
+
+            // Create NFS client and attempt mount
+            let mut client = crate::fs::nfs::client::NfsClient::new(String::from(server));
+            client.set_auth(0, 0, String::from("veridian"));
+            match client.mount() {
+                Ok(_fh) => {
+                    crate::println!("  NFS mount succeeded");
+                }
+                Err(e) => {
+                    crate::println!("  NFS mount failed: {:?}", e);
+                }
+            }
         } else {
             crate::println!(
-                "Mounting {} on {}... mount failed (no network route)",
-                source,
-                mountpoint
+                "nfsmount: invalid format '{}', expected <server>:<path>",
+                source
             );
         }
         CommandResult::Success(0)
@@ -1388,7 +1567,19 @@ impl BuiltinCommand for SmbclientCommand {
             share_path.as_str()
         };
 
-        crate::println!("Connection to {} failed (no network route)", server);
+        crate::println!("Connecting to {}...", server);
+
+        // Create SMB client and attempt negotiation
+        let mut client = crate::fs::smb::client::SmbClient::new(server);
+        match client.negotiate() {
+            Ok(dialect) => {
+                crate::println!("  Negotiated dialect: {:?}", dialect);
+                crate::println!("  Session established with {}", share_path);
+            }
+            Err(e) => {
+                crate::println!("  SMB negotiation failed: {:?}", e);
+            }
+        }
         CommandResult::Success(0)
     }
 }

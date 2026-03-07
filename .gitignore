@@ -317,6 +317,9 @@ gui-screenshot*.ppm
 # VNC connection artifacts
 .vnc/
 
+# Minimal rootfs staging directory (created for QEMU testing)
+target/rootfs/
+
 # Plan files (Claude Code)
 .claude/plans/
 a.out

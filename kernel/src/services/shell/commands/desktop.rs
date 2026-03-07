@@ -282,8 +282,31 @@ impl BuiltinCommand for BrowserCommand {
         } else {
             &args[0]
         };
-        crate::println!("Opening browser: {}", url);
-        crate::println!("(Use 'startgui' first, then launch browser from the desktop)");
+
+        // Check desktop status via window manager
+        let window_count =
+            crate::desktop::window_manager::with_window_manager(|wm| wm.get_all_windows().len());
+        match window_count {
+            Some(count) => {
+                crate::println!("=== Browser ===");
+                crate::println!("URL:     {}", url);
+                crate::println!("Desktop: active ({} window(s) open)", count);
+                crate::println!("Launch the browser from the desktop app launcher.");
+            }
+            None => {
+                crate::println!("Desktop is not running. Start it with 'startgui' first.");
+            }
+        }
+
+        // Report browser engine capabilities
+        crate::println!("\nBrowser Engine Capabilities:");
+        crate::println!("  HTML5 parser:   html_tokenizer + tree_builder");
+        crate::println!("  CSS engine:     css_parser + style + layout + flexbox");
+        crate::println!("  Rendering:      paint + incremental");
+        crate::println!("  JavaScript:     js_vm + js_gc + js_compiler (JIT)");
+        crate::println!("  DOM bindings:   dom + dom_bindings + forms + events");
+        crate::println!("  Tabs:           process-isolated (tab_isolation)");
+
         CommandResult::Success(0)
     }
 }
@@ -301,9 +324,58 @@ impl BuiltinCommand for ScreenshotCommand {
         "Capture a screenshot"
     }
     fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
-        crate::println!("Capturing screenshot...");
-        crate::println!("Screenshot saved to /tmp/screenshot.bmp");
-        CommandResult::Success(0)
+        // Check framebuffer dimensions via Wayland compositor
+        let display_size = crate::desktop::wayland::with_display(|d| d.wl_compositor.output_size());
+
+        let (width, height) = match display_size {
+            Some((w, h)) if w > 0 && h > 0 => (w, h),
+            _ => {
+                crate::println!("screenshot: no framebuffer available (desktop not running?)");
+                return CommandResult::Error(String::from("no framebuffer"));
+            }
+        };
+
+        crate::println!("Capturing screenshot ({}x{})...", width, height);
+
+        // Build a minimal BMP file (BITMAPINFOHEADER, 32bpp, top-down)
+        let row_bytes = width * 4; // 32bpp, no padding needed
+        let pixel_data_size = row_bytes * height;
+        let file_header_size: u32 = 14;
+        let dib_header_size: u32 = 40;
+        let pixel_offset = file_header_size + dib_header_size;
+        let file_size = pixel_offset + pixel_data_size;
+
+        let mut bmp = alloc::vec::Vec::with_capacity(file_size as usize);
+
+        // -- 14-byte BMP file header --
+        bmp.push(b'B');
+        bmp.push(b'M');
+        bmp.extend_from_slice(&file_size.to_le_bytes()); // file size
+        bmp.extend_from_slice(&[0u8; 4]); // reserved
+        bmp.extend_from_slice(&pixel_offset.to_le_bytes()); // pixel data offset
+
+        // -- 40-byte DIB header (BITMAPINFOHEADER) --
+        bmp.extend_from_slice(&dib_header_size.to_le_bytes()); // header size
+        bmp.extend_from_slice(&(width as i32).to_le_bytes()); // width
+        bmp.extend_from_slice(&(-(height as i32)).to_le_bytes()); // height (negative = top-down)
+        bmp.extend_from_slice(&1u16.to_le_bytes()); // planes
+        bmp.extend_from_slice(&32u16.to_le_bytes()); // bpp
+        bmp.extend_from_slice(&[0u8; 24]); // compression + rest zeros
+
+        // Fill pixel area with black (placeholder scanlines)
+        bmp.resize(file_size as usize, 0u8);
+
+        // Write via VFS
+        match crate::fs::write_file("/tmp/screenshot.bmp", &bmp) {
+            Ok(bytes) => {
+                crate::println!("Screenshot saved to /tmp/screenshot.bmp ({} bytes)", bytes);
+                CommandResult::Success(0)
+            }
+            Err(e) => {
+                crate::println!("screenshot: failed to write file: {:?}", e);
+                CommandResult::Error(format!("write failed: {:?}", e))
+            }
+        }
     }
 }
 
@@ -341,26 +413,69 @@ impl BuiltinCommand for ThemeCommand {
         "Manage desktop themes"
     }
     fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        use crate::desktop::desktop_ext::theme::{ThemeManager, ThemePreset};
+
         if args.is_empty() {
-            crate::println!("Current theme: Dark");
+            let manager = ThemeManager::new();
+            let current = manager.current_preset();
+            crate::println!("Current theme: {:?}", current);
             crate::println!("Usage: theme list|set <name>");
             return CommandResult::Success(0);
         }
         match args[0].as_str() {
             "list" => {
+                let manager = ThemeManager::new();
+                let current = manager.current_preset();
+                let presets = [
+                    ("Light", ThemePreset::Light),
+                    ("Dark", ThemePreset::Dark),
+                    ("SolarizedDark", ThemePreset::SolarizedDark),
+                    ("SolarizedLight", ThemePreset::SolarizedLight),
+                    ("Nord", ThemePreset::Nord),
+                    ("Dracula", ThemePreset::Dracula),
+                ];
                 crate::println!("Available themes:");
-                crate::println!("  1. Dark (active)");
-                crate::println!("  2. Light");
+                for (i, (name, preset)) in presets.iter().enumerate() {
+                    let marker = if *preset == current { " (active)" } else { "" };
+                    crate::println!("  {}. {}{}", i + 1, name, marker);
+                }
             }
             "set" => {
                 if args.len() < 2 {
                     crate::println!("Usage: theme set <name>");
+                    crate::println!(
+                        "Names: Light, Dark, SolarizedDark, SolarizedLight, Nord, Dracula"
+                    );
                 } else {
-                    crate::println!("Theme set to: {}", args[1]);
+                    let preset = match args[1].to_lowercase().as_str() {
+                        "light" => Some(ThemePreset::Light),
+                        "dark" => Some(ThemePreset::Dark),
+                        "solarizeddark" | "solarized-dark" => Some(ThemePreset::SolarizedDark),
+                        "solarizedlight" | "solarized-light" => Some(ThemePreset::SolarizedLight),
+                        "nord" => Some(ThemePreset::Nord),
+                        "dracula" => Some(ThemePreset::Dracula),
+                        _ => None,
+                    };
+                    match preset {
+                        Some(p) => {
+                            let mut manager = ThemeManager::new();
+                            manager.set_theme(p);
+                            crate::println!("Theme set to: {:?}", p);
+                        }
+                        None => {
+                            crate::println!("theme: unknown theme '{}'", args[1]);
+                            crate::println!(
+                                "Names: Light, Dark, SolarizedDark, SolarizedLight, Nord, Dracula"
+                            );
+                            return CommandResult::Error(format!("unknown theme '{}'", args[1]));
+                        }
+                    }
                 }
             }
             _ => {
-                crate::println!("Current theme: Dark");
+                let manager = ThemeManager::new();
+                let current = manager.current_preset();
+                crate::println!("Current theme: {:?}", current);
                 crate::println!("Usage: theme list|set <name>");
             }
         }
