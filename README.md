@@ -96,7 +96,7 @@ All drivers and services run in user space with capability-controlled access to 
 | Boot tests | 29/29 (Stage 6 BOOTOK on all architectures) |
 | Host-target unit tests | 4,095 passing |
 | CI pipeline | 11/11 jobs green (GitHub Actions + Codecov) |
-| Unsafe code | 6 justified `static mut`; 88%+ unsafe blocks have SAFETY documentation |
+| Unsafe code | 7 justified `static mut`; 99%+ unsafe blocks have SAFETY documentation |
 
 ### Architecture Support
 
@@ -168,7 +168,7 @@ qemu-system-x86_64 -enable-kvm \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
     -drive id=disk0,if=none,format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
     -device ide-hd,drive=disk0 \
-    -serial stdio -display none -m 256M
+    -serial stdio -display none -m 2G
 
 # Run in QEMU (AArch64)
 qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \
@@ -207,10 +207,10 @@ For detailed build instructions, see [BUILD-INSTRUCTIONS.md](docs/BUILD-INSTRUCT
 | --- | --- | --- | --- |
 | Boot | UEFI via OVMF | Direct `-kernel` | OpenSBI `-bios default` |
 | Display | 1280x800 UEFI GOP | ramfb | ramfb |
-| Minimum RAM | 256MB | 256MB | 256MB |
+| Minimum RAM | 2GB | 256MB | 256MB |
 | Native compilation | 1.5GB+ | -- | -- |
 
-**Minimum**: 64-bit CPU with MMU, 256MB RAM, 1GB storage.
+**Minimum**: 64-bit CPU with MMU, 2GB RAM (x86_64) or 256MB RAM (AArch64/RISC-V), 1GB storage.
 **Recommended**: Multi-core CPU with virtualization support, 4GB+ RAM, NVMe storage.
 
 ---
