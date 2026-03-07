@@ -564,7 +564,7 @@ impl BuiltinCommand for UnameCommand {
             parts.push("veridian");
         }
         if show_release {
-            parts.push("0.20.1");
+            parts.push("0.20.2");
         }
         if show_machine {
             #[cfg(target_arch = "x86_64")]
@@ -2116,6 +2116,9 @@ impl BuiltinCommand for GroupsCommand {
     }
 }
 
+/// Stub: `su` does not switch privilege. The kernel shell runs in ring 0 with
+/// no user-space privilege boundary, so interactive authentication and
+/// credential switching are not implemented. This is a known limitation.
 pub(in crate::services::shell) struct SuCommand;
 impl BuiltinCommand for SuCommand {
     fn name(&self) -> &str {
@@ -2138,6 +2141,10 @@ impl BuiltinCommand for SuCommand {
     }
 }
 
+/// Stub: `sudo` does not execute commands with elevated privileges. The kernel
+/// shell already runs in ring 0 -- there is no privilege boundary to escalate.
+/// This checks for a root user in the database but does not authenticate the
+/// caller or actually execute the requested command. Known limitation.
 pub(in crate::services::shell) struct SudoCommand;
 impl BuiltinCommand for SudoCommand {
     fn name(&self) -> &str {

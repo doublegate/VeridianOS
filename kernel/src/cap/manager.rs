@@ -344,7 +344,15 @@ pub fn cap_manager() -> &'static CapabilityManager {
     &CAP_MANAGER
 }
 
-/// Fast inline capability check
+/// Fast inline capability check.
+///
+/// NOTE: There is a theoretical TOCTOU window between the rights check and
+/// the revocation check -- a capability could be revoked between the two
+/// lookups. In practice this window is extremely narrow: the capability
+/// space is RwLock-protected and revocation is a rare administrative
+/// operation. A single atomic check would eliminate this entirely but
+/// requires restructuring the capability space lookup. Documented as a
+/// known limitation.
 #[inline(always)]
 pub fn check_capability(
     cap: CapabilityToken,

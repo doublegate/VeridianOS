@@ -358,9 +358,13 @@ struct McfgAllocation {
 fn validate_checksum(addr: usize, len: usize) -> bool {
     let mut sum: u8 = 0;
     for i in 0..len {
+        let byte_addr = match addr.checked_add(i) {
+            Some(a) => a,
+            None => return false,
+        };
         // SAFETY: addr..addr+len is within a valid ACPI table that was mapped
         // by the bootloader's physical memory mapping. We read individual bytes.
-        sum = sum.wrapping_add(unsafe { *((addr + i) as *const u8) });
+        sum = sum.wrapping_add(unsafe { *(byte_addr as *const u8) });
     }
     sum == 0
 }
@@ -397,7 +401,11 @@ fn parse_madt(header_vaddr: usize, info: &mut AcpiInfo) {
         let entry_header = unsafe { &*(offset as *const MadtEntryHeader) };
         let entry_len = entry_header.length as usize;
 
-        if entry_len < 2 || offset + entry_len > entries_end {
+        let next_offset = match offset.checked_add(entry_len) {
+            Some(n) => n,
+            None => break,
+        };
+        if entry_len < 2 || next_offset > entries_end {
             break;
         }
 

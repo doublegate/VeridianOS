@@ -214,7 +214,11 @@ impl Compositor {
                             break;
                         }
 
-                        let dst_idx = dst_y * fb_w + dst_x;
+                        let dst_idx =
+                            match dst_y.checked_mul(fb_w).and_then(|v| v.checked_add(dst_x)) {
+                                Some(idx) if idx < bb.len() => idx,
+                                _ => continue,
+                            };
 
                         match format {
                             PixelFormat::Xrgb8888 => {

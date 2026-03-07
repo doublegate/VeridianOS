@@ -290,8 +290,8 @@ pub struct UserAccount {
     /// Account expiration timestamp (seconds since boot). `None` = never
     /// expires.
     pub expires_at: Option<u64>,
-    /// Password history: stores hashes of previous passwords (fixed-size).
-    pub(crate) password_history: [Option<Hash256>; MAX_PASSWORD_HISTORY],
+    /// Password history: stores (hash, salt) pairs of previous passwords.
+    pub(crate) password_history: [Option<(Hash256, [u8; 32])>; MAX_PASSWORD_HISTORY],
     /// Number of valid entries in `password_history`.
     pub password_history_len: usize,
 }
@@ -368,32 +368,15 @@ impl UserAccount {
 
     /// Change password with history tracking.
     ///
-    /// Checks that the new password is not in the password history.
-    /// The `history_size` parameter controls how many old hashes to retain.
+    /// Checks that the new password is not the current password and not in
+    /// the password history. The `history_size` parameter controls how many
+    /// old (hash, salt) pairs to retain.
     pub fn change_password(
         &mut self,
         new_password: &str,
         history_size: usize,
     ) -> Result<(), KernelError> {
-        // Check new password against history (simplified: exact reuse detection)
-        let _new_hash_with_old_salts_match = self.password_history[..self.password_history_len]
-            .iter()
-            .any(|entry| {
-                if let Some(old_hash) = entry {
-                    let history_salt_bytes = old_hash.as_bytes();
-                    let history_check = pbkdf2_hmac_sha256(
-                        new_password.as_bytes(),
-                        history_salt_bytes,
-                        Self::PBKDF2_ITERATIONS,
-                    );
-                    let _ = history_check;
-                    false // Placeholder -- see below for correct check
-                } else {
-                    false
-                }
-            });
-
-        // Correct approach: check if new password matches current password
+        // Check if new password matches current password
         if self.verify_password(new_password) {
             return Err(KernelError::InvalidArgument {
                 name: "password",
@@ -401,7 +384,29 @@ impl UserAccount {
             });
         }
 
-        // Save current hash to history (fixed-size ring buffer)
+        // Check new password against history using stored (hash, salt) pairs
+        let reused = self.password_history[..self.password_history_len]
+            .iter()
+            .any(|entry| {
+                if let Some((old_hash, old_salt)) = entry {
+                    let candidate = Self::hash_password_with_salt(new_password, old_salt);
+                    crate::crypto::constant_time::ct_eq_bytes(
+                        candidate.as_bytes(),
+                        old_hash.as_bytes(),
+                    ) == 1
+                } else {
+                    false
+                }
+            });
+
+        if reused {
+            return Err(KernelError::InvalidArgument {
+                name: "password",
+                value: "matches a recent password in history",
+            });
+        }
+
+        // Save current (hash, salt) to history (fixed-size ring buffer)
         let effective_size = history_size.min(MAX_PASSWORD_HISTORY);
         if effective_size > 0 {
             if self.password_history_len >= effective_size {
@@ -409,10 +414,11 @@ impl UserAccount {
                 for i in 0..effective_size - 1 {
                     self.password_history[i] = self.password_history[i + 1];
                 }
-                self.password_history[effective_size - 1] = Some(self.password_hash);
+                self.password_history[effective_size - 1] = Some((self.password_hash, self.salt));
                 self.password_history_len = effective_size;
             } else {
-                self.password_history[self.password_history_len] = Some(self.password_hash);
+                self.password_history[self.password_history_len] =
+                    Some((self.password_hash, self.salt));
                 self.password_history_len += 1;
             }
         }
@@ -901,7 +907,7 @@ pub fn init() -> Result<(), KernelError> {
     }
 
     crate::println!("[AUTH] Authentication framework initialized");
-    crate::println!("[AUTH] Default root user created (password: veridian)");
+    crate::println!("[AUTH] Default root user created");
     crate::println!(
         "[AUTH] PBKDF2-HMAC-SHA256 with {} iterations",
         UserAccount::PBKDF2_ITERATIONS

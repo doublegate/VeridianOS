@@ -2,6 +2,42 @@
 
 ---
 
+## [v0.20.2] - 2026-03-07
+
+### v0.20.2: Security Scan Remediation
+
+Post-v0.20.1 security audit identifying and remediating 7 findings (2 medium bugs, 2 defense-in-depth hardening, 3 documentation items) across authentication, capability revocation, compositor, and ACPI subsystems. Full report at `/tmp/VeridianOS/security-scan-report.md`.
+
+#### Priority 1 -- Bug Fixes
+
+- **Fixed broken password history validation** (`security/auth.rs`): `change_password()` computed a history reuse check but discarded the result (closure always returned `false`). Root cause: history stored only `Hash256` without the salt needed for re-derivation. Changed `password_history` type from `[Option<Hash256>; N]` to `[Option<(Hash256, [u8; 32])>; N]`, rewrote closure to re-derive via `PBKDF2(new_password, stored_salt)` and compare with `ct_eq_bytes()` (constant-time). Reuse now returns `InvalidArgument` error. [MEDIUM]
+- **Fixed capability cascading revocation logic bug** (`cap/revocation.rs`): `revoke_cascading()` revoked the parent capability then attempted to re-lookup its rights for the derived-capability comparison. The second `lookup_entry(cap)` returned `None`/stale data since the parent was already revoked, causing derived capabilities to escape cascading revocation. Fix: cache `lookup_entry(cap)` result (object + rights) BEFORE calling `revoke_capability(cap)`. [MEDIUM]
+- **Removed default password from boot log** (`security/auth.rs`): Boot message changed from `[AUTH] Default root user created (password: veridian)` to `[AUTH] Default root user created`. Default account retained for development; password no longer broadcast to console. [LOW]
+
+#### Priority 2 -- Defense-in-Depth Hardening
+
+- **Compositor bounds check** (`desktop/wayland/compositor.rs`): Replaced unchecked `dst_y * fb_w + dst_x` index calculation with `checked_mul`/`checked_add` and explicit `bb.len()` bounds guard. Original was provably safe (bounds enforced by earlier `dst_y < fb_h`/`dst_x < fb_w` checks) but lacked defense-in-depth against theoretical overflow. [LOW]
+- **ACPI checked pointer arithmetic** (`arch/x86_64/acpi.rs`): Added `checked_add` in checksum validation loop (`addr + i`) and MADT entry parsing (`offset + entry_len`). ACPI tables are from trusted firmware (TCB), making this informational, but checked arithmetic prevents undefined behavior if firmware is malformed. [INFO]
+
+#### Priority 3 -- Documentation
+
+- **su/sudo stub documentation** (`services/shell/commands/system.rs`): Added doc comments to `SuCommand` and `SudoCommand` explaining these are intentional stubs -- the kernel shell runs in ring 0 with no user-space privilege boundary. Not a vulnerability. [LOW]
+- **Capability check TOCTOU documentation** (`cap/manager.rs`): Added detailed comment to `check_capability()` documenting the theoretical TOCTOU window between `check_rights()` and `is_valid()`. Window is extremely narrow (RwLock-protected, revocation is rare). Single atomic check would eliminate it but requires CapabilitySpace restructuring. [LOW]
+
+#### Scan Coverage
+
+- 3 parallel exploration agents scanned: unsafe code, capability system, IPC, syscall boundaries, crypto; dependencies, secrets, configuration, input validation; memory safety, authentication, race conditions, integer overflow
+- Areas rated STRONG/EXCELLENT: unsafe code discipline, syscall boundary validation, cryptography (PBKDF2+ct_eq+compiler fences+post-quantum), IPC validation, network parsing, filesystem path traversal protection, dependency hygiene, secrets management
+
+#### Verification
+
+- `cargo fmt --all -- --check`: PASS
+- Clippy aarch64-unknown-none + riscv64gc-unknown-none-elf: PASS (0 warnings)
+- `./build-kernel.sh all dev`: PASS (all 3 architectures)
+- 6 files changed (security fixes), +68/-34 lines
+
+---
+
 ## [v0.20.1] - 2026-03-07
 
 ### v0.20.1: Tier 4 Technical Debt Remediation

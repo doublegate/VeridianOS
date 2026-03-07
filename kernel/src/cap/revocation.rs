@@ -152,22 +152,23 @@ pub fn revoke_cascading(
     #[cfg(feature = "alloc")]
     let mut to_revoke = Vec::new();
 
-    // First revoke the main capability
+    // Cache parent's object and rights BEFORE revoking (lookup would fail after)
+    let parent_info = cap_space.lookup_entry(cap);
+
+    // Now revoke the main capability
     revoke_capability(cap)?;
     revoked_count += 1;
 
     // Find all capabilities that reference the same object
-    if let Some((object, _)) = cap_space.lookup_entry(cap) {
+    if let Some((object, parent_rights)) = parent_info {
         #[cfg(feature = "alloc")]
         {
-            // Iterate through all capabilities to find those with same object
+            // Iterate through all capabilities to find derived ones with same object
             let _ = cap_space.iter_capabilities(|entry| {
                 if entry.object == object && entry.capability != cap {
-                    // Check if this is a derived capability (has less rights)
-                    if let Some((_, parent_rights)) = cap_space.lookup_entry(cap) {
-                        if !entry.rights.contains(parent_rights) {
-                            to_revoke.push(entry.capability);
-                        }
+                    // A derived capability has a subset of the parent's rights
+                    if !entry.rights.contains(parent_rights) {
+                        to_revoke.push(entry.capability);
                     }
                 }
                 true // Continue iteration

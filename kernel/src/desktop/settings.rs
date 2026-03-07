@@ -270,8 +270,8 @@ impl Default for AboutInfo {
     fn default() -> Self {
         Self {
             os_name: "VeridianOS",
-            version: "0.20.1",
-            kernel_version: "0.20.1-techdebt4",
+            version: "0.20.2",
+            kernel_version: "0.20.2-security",
             arch: core::env!("CARGO_PKG_NAME"), // will be "veridian-kernel"
             hostname: String::from("veridian"),
         }

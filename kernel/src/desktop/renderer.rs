@@ -423,7 +423,7 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopState {
     // Send a welcome notification to demonstrate the notification system
     crate::desktop::notification::notify(
         "VeridianOS Desktop",
-        "Welcome to VeridianOS v0.20.1",
+        "Welcome to VeridianOS v0.20.2",
         crate::desktop::notification::NotificationUrgency::Normal,
         "desktop",
     );
@@ -2139,7 +2139,7 @@ fn render_pdf_viewer(buf: &mut [u8], w: usize, h: usize, bg_color: u32, page_ind
         draw_string_into_buffer(
             buf,
             w,
-            b"PDF Engine: VeridianPDF v0.20.1",
+            b"PDF Engine: VeridianPDF v0.20.2",
             page_x + 20,
             page_y + 20,
             0x333333,
