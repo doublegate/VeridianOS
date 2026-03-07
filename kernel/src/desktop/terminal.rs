@@ -3,7 +3,8 @@
 //! Combines PTY, font rendering, and window manager to provide a graphical
 //! terminal.
 
-use alloc::{vec, vec::Vec};
+#[allow(unused_imports)]
+use alloc::{format, string::String, vec, vec::Vec};
 
 use spin::RwLock;
 
@@ -156,21 +157,26 @@ pub struct TerminalEmulator {
     esc_params: [u8; 16],
     /// Current parameter index
     esc_param_idx: usize,
+
+    /// Line editing buffer for local shell execution
+    line_buffer: String,
 }
 
 impl TerminalEmulator {
     /// Create a new terminal emulator
     pub fn new(width: u32, height: u32) -> Result<Self, KernelError> {
-        // Create window
-        let window_id = with_window_manager(|wm| wm.create_window(100, 100, width, height, 0))
-            .ok_or(KernelError::InvalidState {
-            expected: "initialized",
-            actual: "uninitialized",
-        })??;
+        // WM window includes title bar (28px) above content area
+        let title_bar_h = 28u32;
+        let window_id =
+            with_window_manager(|wm| wm.create_window(100, 100, width, height + title_bar_h, 0))
+                .ok_or(KernelError::InvalidState {
+                expected: "initialized",
+                actual: "uninitialized",
+            })??;
 
-        // Create compositor surface at the same position as the WM window
+        // Compositor surface covers the full window area (title bar + content)
         let (surface_id, pool_id, pool_buf_id) =
-            super::renderer::create_app_surface(100, 100, width, height);
+            super::renderer::create_app_surface(100, 100, width, height + title_bar_h);
 
         // Create PTY pair
         let (pty_master_id, pty_slave_id) = with_pty_manager(|manager| manager.create_pty())
@@ -209,15 +215,33 @@ impl TerminalEmulator {
             esc_state: EscapeState::Normal,
             esc_params: [0; 16],
             esc_param_idx: 0,
+            line_buffer: String::new(),
         })
     }
 
     /// Render the terminal contents to its compositor surface.
+    ///
+    /// The surface includes a 28px title bar at the top; terminal content
+    /// is rendered starting at row 28.
     pub fn render_to_surface(&self) {
         let w = TERMINAL_PX_WIDTH as usize;
-        let h = TERMINAL_PX_HEIGHT as usize;
-        let mut pixels = vec![0u8; w * h * 4];
-        let _ = self.render(&mut pixels, w, h);
+        let content_h = TERMINAL_PX_HEIGHT as usize;
+        let title_bar_h: usize = 28;
+        let total_h = content_h + title_bar_h;
+        let mut pixels = vec![0u8; w * total_h * 4];
+
+        // Render content into a temporary buffer, then copy at y-offset 28
+        let mut content = vec![0u8; w * content_h * 4];
+        let _ = self.render(&mut content, w, content_h);
+        for y in 0..content_h {
+            let src_off = y * w * 4;
+            let dst_off = (y + title_bar_h) * w * 4;
+            pixels[dst_off..dst_off + w * 4].copy_from_slice(&content[src_off..src_off + w * 4]);
+        }
+
+        // Draw title bar into rows 0..28 and close button
+        super::renderer::draw_title_bar_into_surface(&mut pixels, w, total_h, self.window_id);
+
         super::renderer::update_surface_pixels(
             self.surface_id,
             self.pool_id,
@@ -229,26 +253,112 @@ impl TerminalEmulator {
     /// Process input event
     pub fn process_input(&mut self, event: InputEvent) -> Result<(), KernelError> {
         match event {
-            InputEvent::KeyPress { character, .. } => {
-                // Send character to PTY
-                let master_id = self.pty_master_id;
-                if let Some(master) =
-                    with_pty_manager(|manager| manager.get_master(master_id)).flatten()
-                {
-                    let mut buf = [0u8; 4];
-                    let encoded = character.encode_utf8(&mut buf);
-                    master.write(encoded.as_bytes())?;
+            InputEvent::KeyPress {
+                character,
+                scancode,
+            } => {
+                match character {
+                    '\r' | '\n' => {
+                        // Echo newline
+                        self.process_output_byte(b'\r');
+                        self.process_output_byte(b'\n');
+
+                        // Execute command
+                        let cmd = self.line_buffer.clone();
+                        self.line_buffer.clear();
+
+                        if !cmd.is_empty() {
+                            self.execute_command(&cmd);
+                        }
+
+                        // Print prompt
+                        for &b in b"root@veridian:/# " {
+                            self.process_output_byte(b);
+                        }
+                    }
+                    '\x08' | '\x7f' => {
+                        // Backspace
+                        if !self.line_buffer.is_empty() {
+                            self.line_buffer.pop();
+                            // Erase character on screen: BS + space + BS
+                            self.process_output_byte(b'\x08');
+                            self.process_output_byte(b' ');
+                            self.process_output_byte(b'\x08');
+                        }
+                    }
+                    '\x00' => {
+                        // Null / non-printable from scancode-only events
+                        // Handle arrow keys etc. if needed
+                        let _ = scancode;
+                    }
+                    c if c >= ' ' => {
+                        // Printable character: echo + accumulate
+                        self.line_buffer.push(c);
+                        self.process_output_byte(c as u8);
+                    }
+                    _ => {}
                 }
             }
-            InputEvent::KeyRelease { .. } => {
-                // Ignore key releases for now
-            }
-            _ => {
-                // Ignore mouse events in terminal
-            }
+            InputEvent::KeyRelease { .. } => {}
+            _ => {}
         }
 
         Ok(())
+    }
+
+    /// Execute a shell command and write captured output to the terminal.
+    fn execute_command(&mut self, cmd: &str) {
+        if let Some(shell) = crate::services::shell::try_get_shell() {
+            // Capture println! output during command execution
+            crate::print_capture::start_capture();
+            let result = shell.execute_command(cmd);
+            let captured = crate::print_capture::stop_capture();
+
+            // Display captured output (skip [SHELL-EXEC] debug lines)
+            for line in captured.lines() {
+                if line.starts_with("[SHELL-EXEC]") {
+                    continue;
+                }
+                for &b in line.as_bytes() {
+                    self.process_output_byte(b);
+                }
+                self.process_output_byte(b'\r');
+                self.process_output_byte(b'\n');
+            }
+
+            // Display error/not-found messages from the result itself
+            match result {
+                crate::services::shell::CommandResult::Success(_) => {}
+                crate::services::shell::CommandResult::Error(msg) => {
+                    for &b in msg.as_bytes() {
+                        if b == b'\n' {
+                            self.process_output_byte(b'\r');
+                        }
+                        self.process_output_byte(b);
+                    }
+                    self.process_output_byte(b'\r');
+                    self.process_output_byte(b'\n');
+                }
+                crate::services::shell::CommandResult::NotFound => {
+                    let msg = format!(
+                        "{}: command not found",
+                        cmd.split_whitespace().next().unwrap_or(cmd)
+                    );
+                    for &b in msg.as_bytes() {
+                        self.process_output_byte(b);
+                    }
+                    self.process_output_byte(b'\r');
+                    self.process_output_byte(b'\n');
+                }
+                crate::services::shell::CommandResult::Exit(_) => {}
+            }
+        } else {
+            for &b in b"shell not initialized" {
+                self.process_output_byte(b);
+            }
+            self.process_output_byte(b'\r');
+            self.process_output_byte(b'\n');
+        }
     }
 
     /// Update terminal from PTY output
@@ -650,7 +760,7 @@ impl TerminalManager {
     pub fn write_welcome(&self, terminal_id: usize) {
         let mut terminals = self.terminals.write();
         if let Some(terminal) = terminals.get_mut(terminal_id) {
-            for &b in b"VeridianOS Terminal\r\n\r\nPress ESC to exit GUI.\r\n" {
+            for &b in b"VeridianOS Terminal\r\n\r\nPress ESC to exit GUI.\r\nroot@veridian:/# " {
                 terminal.process_output_byte(b);
             }
         }

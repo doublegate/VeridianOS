@@ -496,12 +496,15 @@ impl WindowManager {
         self.windows.read().values().cloned().collect()
     }
 
-    /// Get all visible windows on the active workspace
+    /// Get all visible windows on the active workspace, ordered by z-order
+    /// (bottom to top -- last element is the topmost window).
     pub fn get_visible_windows(&self) -> Vec<Window> {
         let active = *self.active_workspace.read();
-        self.windows
-            .read()
-            .values()
+        let windows = self.windows.read();
+        let z_order = self.z_order.read();
+        z_order
+            .iter()
+            .filter_map(|id| windows.get(id))
             .filter(|w| w.visible && w.workspace == active && w.state != WindowState::Minimized)
             .cloned()
             .collect()

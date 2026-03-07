@@ -59,6 +59,7 @@ pub fn get_allocator() -> &'static LockedUnsafeBumpAllocator {
 
 #[macro_use]
 pub mod print;
+pub mod print_capture;
 
 mod intrinsics;
 

@@ -26,13 +26,15 @@ macro_rules! println {
     ($($arg:tt)*) => ({ let _ = format_args!($($arg)*); });
 }
 
-// x86_64 bare-metal — dual output: serial + framebuffer console
+// x86_64 bare-metal — triple output: serial + framebuffer console + capture
+// buffer
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => ({
         $crate::serial::_serial_print(format_args!($($arg)*));
         $crate::graphics::fbcon::_fbcon_print(format_args!($($arg)*));
+        $crate::print_capture::_capture_print(format_args!($($arg)*));
     });
 }
 

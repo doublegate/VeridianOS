@@ -40,25 +40,30 @@ use alloc::{
 };
 
 use commands::{
-    AcpiCommand, AliasCommand, ArpCommand, AuditCommand, BgCommand, Blake3sumCommand, BondCommand,
-    BracketTestCommand, BrowserCommand, BtCommand, CapCommand, CatCommand, CdCommand, ChmodCommand,
-    CiCommand, ClearCommand, CloudInitCommand, ContainerCommand, CoredumpCommand, CpCommand,
-    CurlCommand, CutCommand, DateCommand, DfCommand, DhcpCommand, DmesgCommand, DnsCommand,
-    DotCommand, EchoCommand, EnvCommand, ExitCommand, ExportCommand, FalseCommand, FgCommand,
-    FirewallCommand, FreeCommand, GdbCommand, GitCommand, GrepCommand, HeadCommand, HelpCommand,
-    HistoryCommand, HostnameCommand, HttpServerCommand, HwinfoCommand, IfconfigCommand,
-    IpcsCommand, JobsCommand, KillCommand, KinitCommand, KlistCommand, KptiCommand, KubectlCommand,
-    LdapsearchCommand, LsCommand, LsblkCommand, LscpuCommand, LsmodCommand, LsnsCommand,
-    LspciCommand, LsusbCommand, MacCommand, MakeCommand, MkdirCommand, MountCommand, MvCommand,
-    NatCommand, NdpCommand, NetstatCommand, NotifyCommand, NtpCommand, NumaCommand, PerfCommand,
-    Ping6Command, PingCommand, PkgCommand, PlayCommand, PrintfCommand, ProfilerCommand, PsCommand,
-    PwdCommand, ReadCommand, RmCommand, RouteCommand, SchedCommand, ScreenshotCommand, SetCommand,
-    Sha256sumCommand, SlabCommand, SortCommand, SourceCommand, SsCommand, SshCommand, SshdCommand,
-    StartGuiCommand, StraceCommand, SyncCommand, SysctlCommand, TailCommand, TeeCommand,
-    TestCommand, ThemeCommand, TopCommand, TouchCommand, TpmCommand, TrCommand, TraceCommand,
-    TrueCommand, TypeCommand, UnaliasCommand, UnameCommand, UniqCommand, UnsetCommand,
-    UptimeCommand, VlanCommand, VmstatCommand, VmxCommand, VolumeCommand, VpnCommand, WcCommand,
-    WgCommand, WhichCommand, WifiCommand, WinfoCommand,
+    AcpiCommand, AliasCommand, ArpCommand, AtCommand, AuditCommand, BgCommand, Blake3sumCommand,
+    BlkidCommand, BondCommand, BracketTestCommand, BrowserCommand, BtCommand, CapCommand,
+    CatCommand, CdCommand, ChmodCommand, CiCommand, ClearCommand, CloudInitCommand,
+    ContainerCommand, CoredumpCommand, CpCommand, CrontabCommand, CurlCommand, CutCommand,
+    DateCommand, DfCommand, DhcpCommand, DmesgCommand, DnsCommand, DotCommand, EchoCommand,
+    EnvCommand, ExitCommand, ExportCommand, FalseCommand, FgCommand, FirewallCommand, FreeCommand,
+    FsckCommand, GdbCommand, GitCommand, GrepCommand, GroupsCommand, HeadCommand, HelpCommand,
+    HibernateCommand, HistoryCommand, HostnameCommand, HttpServerCommand, HwinfoCommand, IdCommand,
+    IfconfigCommand, IpcsCommand, IscsiadmCommand, JobsCommand, KillCommand, KinitCommand,
+    KlistCommand, KptiCommand, KubectlCommand, LdapsearchCommand, LsCommand, LsblkCommand,
+    LscpuCommand, LsmodCommand, LsnsCommand, LspciCommand, LsusbCommand, MacCommand, MakeCommand,
+    MdadmCommand, MkdirCommand, MkfsCommand, MountCommand, MvCommand, NatCommand, NdpCommand,
+    NetstatCommand, NfsmountCommand, NotifyCommand, NtpCommand, NumaCommand, PasswdCommand,
+    PerfCommand, Ping6Command, PingCommand, PkgCommand, PlayCommand, PoweroffCommand,
+    PrintfCommand, ProfilerCommand, PsCommand, PwdCommand, ReadCommand, RebootCommand, RmCommand,
+    RouteCommand, SchedCommand, ScreenshotCommand, ServiceCommand, SetCommand, Sha256sumCommand,
+    ShutdownCommand, SlabCommand, SmbclientCommand, SortCommand, SourceCommand, SsCommand,
+    SshCommand, SshdCommand, StartGuiCommand, StraceCommand, SuCommand, SudoCommand,
+    SuspendCommand, SyncCommand, SysctlCommand, TailCommand, TarCommand, TeeCommand, TestCommand,
+    ThemeCommand, TopCommand, TouchCommand, TpmCommand, TrCommand, TraceCommand, TrueCommand,
+    TypeCommand, UnaliasCommand, UnameCommand, UniqCommand, UnsetCommand, UptimeCommand,
+    UseraddCommand, UserdelCommand, VlanCommand, VmstatCommand, VmxCommand, VolumeCommand,
+    VpnCommand, WcCommand, WgCommand, WhichCommand, WhoamiCommand, WifiCommand, WinfoCommand,
+    XattrCommand,
 };
 use spin::RwLock;
 pub use state::{get_shell, init, run_shell, try_get_shell};
@@ -853,6 +858,41 @@ impl Shell {
         builtins.insert("notify".into(), Box::new(NotifyCommand));
         builtins.insert("theme".into(), Box::new(ThemeCommand));
         builtins.insert("browser".into(), Box::new(BrowserCommand));
+
+        // User/group management
+        builtins.insert("whoami".into(), Box::new(WhoamiCommand));
+        builtins.insert("id".into(), Box::new(IdCommand));
+        builtins.insert("groups".into(), Box::new(GroupsCommand));
+        builtins.insert("useradd".into(), Box::new(UseraddCommand));
+        builtins.insert("userdel".into(), Box::new(UserdelCommand));
+        builtins.insert("passwd".into(), Box::new(PasswdCommand));
+        builtins.insert("su".into(), Box::new(SuCommand));
+        builtins.insert("sudo".into(), Box::new(SudoCommand));
+
+        // Service and power management
+        builtins.insert("service".into(), Box::new(ServiceCommand));
+        builtins.insert("reboot".into(), Box::new(RebootCommand));
+        builtins.insert("shutdown".into(), Box::new(ShutdownCommand));
+        builtins.insert("poweroff".into(), Box::new(PoweroffCommand));
+        builtins.insert("suspend".into(), Box::new(SuspendCommand));
+        builtins.insert("hibernate".into(), Box::new(HibernateCommand));
+
+        // Scheduling
+        builtins.insert("crontab".into(), Box::new(CrontabCommand));
+        builtins.insert("at".into(), Box::new(AtCommand));
+
+        // Filesystem tools
+        builtins.insert("tar".into(), Box::new(TarCommand));
+        builtins.insert("xattr".into(), Box::new(XattrCommand));
+        builtins.insert("mkfs".into(), Box::new(MkfsCommand));
+        builtins.insert("fsck".into(), Box::new(FsckCommand));
+        builtins.insert("blkid".into(), Box::new(BlkidCommand));
+        builtins.insert("nfsmount".into(), Box::new(NfsmountCommand));
+        builtins.insert("smbclient".into(), Box::new(SmbclientCommand));
+
+        // Hardware/storage
+        builtins.insert("mdadm".into(), Box::new(MdadmCommand));
+        builtins.insert("iscsiadm".into(), Box::new(IscsiadmCommand));
     }
 
     fn tokenize(&self, command_line: &str) -> Vec<String> {

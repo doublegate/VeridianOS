@@ -42,7 +42,7 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 - **Self-hosting** -- Native GCC 14.2 and Rust compiler toolchain; BusyBox 1.36.1 with 95 applets compiled on-target
 - **Package management** -- DPLL SAT dependency resolver, ports system, reproducible builds, Ed25519 package signing
 - **Complete C library** -- Full stdio/stdlib/string/unistd with POSIX headers, math library, and architecture-specific setjmp/longjmp
-- **Bash-compatible shell (vsh)** -- Pure Rust shell with 128 builtins (power, user, service, network, filesystem, storage, devtools, diagnostics, desktop, cloud/container), job control, readline, scripting, and POSIX word expansion
+- **Bash-compatible shell (vsh)** -- Pure Rust shell with 153 builtins (power, user, service, network, filesystem, storage, devtools, diagnostics, desktop, cloud/container), job control, readline, scripting, and POSIX word expansion
 
 ### Desktop & Multimedia
 
@@ -88,7 +88,7 @@ All drivers and services run in user space with capability-controlled access to 
 
 ## Project Status
 
-**Version**: v0.20.2 | **All development phases complete** | **75 releases published**
+**Version**: v0.20.3 | **All development phases complete** | **76 releases published**
 
 | Metric | Value |
 | --- | --- |

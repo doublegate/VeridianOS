@@ -60,16 +60,18 @@ impl FileManager {
         let width = 640;
         let height = 480;
 
-        // Create window
-        let window_id = with_window_manager(|wm| wm.create_window(200, 100, width, height, 0))
-            .ok_or(KernelError::InvalidState {
-            expected: "initialized",
-            actual: "uninitialized",
-        })??;
+        // WM window includes title bar (28px) above content area
+        let title_bar_h = 28u32;
+        let window_id =
+            with_window_manager(|wm| wm.create_window(200, 100, width, height + title_bar_h, 0))
+                .ok_or(KernelError::InvalidState {
+                expected: "initialized",
+                actual: "uninitialized",
+            })??;
 
-        // Create compositor surface
+        // Compositor surface covers the full window area (title bar + content)
         let (surface_id, pool_id, pool_buf_id) =
-            super::renderer::create_app_surface(200, 100, width, height);
+            super::renderer::create_app_surface(200, 100, width, height + title_bar_h);
 
         let mut fm = Self {
             window_id,
@@ -462,11 +464,25 @@ impl FileManager {
     }
 
     /// Render file manager contents to its compositor surface.
+    ///
+    /// The surface includes a 28px title bar; content is at y-offset 28.
     pub fn render_to_surface(&self) {
         let w = self.width as usize;
-        let h = self.height as usize;
-        let mut pixels = vec![0u8; w * h * 4];
-        let _ = self.render(&mut pixels, w, h);
+        let content_h = self.height as usize;
+        let title_bar_h: usize = 28;
+        let total_h = content_h + title_bar_h;
+        let mut pixels = vec![0u8; w * total_h * 4];
+
+        let mut content = vec![0u8; w * content_h * 4];
+        let _ = self.render(&mut content, w, content_h);
+        for y in 0..content_h {
+            let src_off = y * w * 4;
+            let dst_off = (y + title_bar_h) * w * 4;
+            pixels[dst_off..dst_off + w * 4].copy_from_slice(&content[src_off..src_off + w * 4]);
+        }
+
+        super::renderer::draw_title_bar_into_surface(&mut pixels, w, total_h, self.window_id);
+
         super::renderer::update_surface_pixels(
             self.surface_id,
             self.pool_id,

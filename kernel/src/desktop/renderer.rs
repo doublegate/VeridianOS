@@ -309,6 +309,12 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopState {
     let mut bg_pixels = vec![0u8; pool_size];
     paint_gradient_background(&mut bg_pixels, width as usize, height as usize);
 
+    // Render desktop icons into the background surface so they appear behind
+    // all windows naturally via compositor z-order.
+    let panel_h = crate::desktop::panel::PANEL_HEIGHT;
+    let icon_grid = create_default_icon_grid(width, height - panel_h);
+    render_icons_into_bgra(&icon_grid, &mut bg_pixels, width as usize, height as usize);
+
     let pool_id = 100;
     let mut pool = crate::desktop::wayland::buffer::WlShmPool::new(pool_id, 0, pool_size);
     pool.write_data(0, &bg_pixels);
@@ -344,7 +350,6 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopState {
     });
 
     // --- Initialize panel ---
-    let panel_h = crate::desktop::panel::PANEL_HEIGHT;
     let _ = crate::desktop::panel::init(width, height);
     let (panel_surface_id, panel_pool_id, panel_pool_buf_id) =
         create_app_surface(0, (height - panel_h) as i32, width, panel_h);
@@ -423,7 +428,7 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopState {
     // Send a welcome notification to demonstrate the notification system
     crate::desktop::notification::notify(
         "VeridianOS Desktop",
-        "Welcome to VeridianOS v0.20.2",
+        "Welcome to VeridianOS v0.20.3",
         crate::desktop::notification::NotificationUrgency::Normal,
         "desktop",
     );
@@ -456,7 +461,7 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopState {
         theme: crate::desktop::desktop_ext::theme::ThemeManager::new(),
         clipboard: crate::desktop::desktop_ext::clipboard::ClipboardManager::new(),
         dnd: crate::desktop::desktop_ext::dnd::DndManager::new(),
-        icon_grid: create_default_icon_grid(width, height - panel_h),
+        icon_grid,
         browser: None,
         pdf_page_index: 0,
         dynamic_apps: alloc::vec::Vec::new(),
@@ -495,6 +500,54 @@ fn create_default_icon_grid(
 
     grid.arrange();
     grid
+}
+
+/// Render desktop icons (bitmap + label) into a BGRA u8 pixel buffer.
+///
+/// Each icon's 16x16 ARGB bitmap is converted to BGRA on the fly, and the
+/// icon name is drawn below using the 8x16 VGA font.
+fn render_icons_into_bgra(
+    grid: &crate::desktop::desktop_icons::IconGrid,
+    buf: &mut [u8],
+    buf_width: usize,
+    buf_height: usize,
+) {
+    let icon_sz = crate::desktop::desktop_icons::ICON_SIZE as i32;
+    let bw = buf_width as i32;
+    let bh = buf_height as i32;
+
+    for icon in &grid.icons {
+        // Draw icon bitmap (ARGB -> BGRA)
+        for row in 0..icon_sz {
+            let dy = icon.y + row;
+            if dy < 0 || dy >= bh {
+                continue;
+            }
+            for col in 0..icon_sz {
+                let dx = icon.x + col;
+                if dx < 0 || dx >= bw {
+                    continue;
+                }
+                let src = icon.icon_data[(row * icon_sz + col) as usize];
+                let off = ((dy * bw + dx) as usize) * 4;
+                if off + 3 < buf.len() {
+                    buf[off] = (src & 0xFF) as u8; // B
+                    buf[off + 1] = ((src >> 8) & 0xFF) as u8; // G
+                    buf[off + 2] = ((src >> 16) & 0xFF) as u8; // R
+                    buf[off + 3] = 0xFF; // A
+                }
+            }
+        }
+
+        // Draw label below icon
+        let label_x = icon.x.max(0) as usize;
+        let label_y = (icon.y + icon_sz + 2).max(0) as usize;
+        let name_bytes = icon.name.as_bytes();
+        let label_len = name_bytes.len().min(8);
+        for (ci, &ch) in name_bytes[..label_len].iter().enumerate() {
+            draw_char_into_buffer(buf, buf_width, ch, label_x + ci * 8, label_y, 0xCCCCCC);
+        }
+    }
 }
 
 /// Draw a string into a BGRA pixel buffer at (px, py) with the given color.
@@ -546,27 +599,6 @@ pub fn draw_char_into_buffer(
                     buf[offset + 1] = g;
                     buf[offset + 2] = r;
                     buf[offset + 3] = 0xFF;
-                }
-            }
-        }
-    }
-}
-
-/// Render a single 8x16 glyph into a u32 (packed XRGB) back-buffer.
-///
-/// Used for overlays rendered directly into the compositor back-buffer (desktop
-/// icons labels, etc.) where the buffer is `&mut [u32]` rather than `&mut
-/// [u8]`.
-fn draw_glyph_u32(buf: &mut [u32], buf_width: usize, px: usize, py: usize, ch: u8, color: u32) {
-    let glyph = crate::graphics::font8x16::glyph(ch);
-    for (row, &bits) in glyph.iter().enumerate() {
-        for col in 0..8 {
-            if (bits >> (7 - col)) & 1 != 0 {
-                let x = px + col;
-                let y = py + row;
-                let offset = y * buf_width + x;
-                if offset < buf.len() {
-                    buf[offset] = color;
                 }
             }
         }
@@ -778,12 +810,14 @@ fn spawn_dynamic_app(
         return None;
     }
 
+    let title_bar_h = 28u32;
     let wid = crate::desktop::window_manager::with_window_manager(|wm| {
-        wm.create_window(100, 80, w, h, 0)
+        wm.create_window(100, 80, w, h + title_bar_h, 0)
     })
     .and_then(|r| r.ok())?;
 
-    let (surface_id, pool_id, pool_buf_id) = create_app_surface(100, 80, w, h);
+    // Surface covers full window area (title bar + content)
+    let (surface_id, pool_id, pool_buf_id) = create_app_surface(100, 80, w, h + title_bar_h);
 
     crate::desktop::window_manager::with_window_manager(|wm| {
         wm.set_window_title(wid, title);
@@ -866,44 +900,85 @@ fn close_any_window(state: &mut DesktopState, wid: u32) {
     }
 }
 
-/// Draw close button overlays (red square with white X) on all visible windows.
-fn draw_close_button_overlays(
-    bb: &mut [u32],
-    fb_width: usize,
-    _fb_height: usize,
-    close_color: u32,
-) {
-    let windows =
-        crate::desktop::window_manager::with_window_manager(|wm| wm.get_visible_windows())
-            .unwrap_or_default();
-    for w in &windows {
-        // Close button: 16x16 at top-right of title bar
-        let btn_x = (w.x + w.width as i32 - 22).max(0) as usize;
-        let btn_y = (w.y + 6).max(0) as usize;
-        for dy in 0..16 {
-            for dx in 0..16 {
-                let px = btn_x + dx;
-                let py = btn_y + dy;
-                let idx = py * fb_width + px;
-                if idx < bb.len() {
-                    // Close button background (themed)
-                    bb[idx] = close_color;
-                }
+/// Draw a title bar (background + title text + close button) into a BGRA
+/// surface pixel buffer.  The title bar occupies the top 28 rows of the
+/// buffer.  The window's title and focus state are read from the WM.
+pub fn draw_title_bar_into_surface(pixels: &mut [u8], width: usize, _total_h: usize, wid: u32) {
+    let cfg = DecorationConfig::default_config();
+    let tbh = cfg.title_bar_height as usize;
+
+    // Look up window title and focus state
+    let (title_buf, title_len, focused) =
+        crate::desktop::window_manager::with_window_manager(|wm| {
+            wm.get_window(wid)
+                .map(|w| (w.title, w.title_len, w.focused))
+        })
+        .flatten()
+        .unwrap_or(([0u8; 64], 0, false));
+
+    let bg_argb = if focused {
+        cfg.title_bg_focused
+    } else {
+        cfg.title_bg_unfocused
+    };
+    // Convert ARGB -> BGRA components
+    let bg_r = ((bg_argb >> 16) & 0xFF) as u8;
+    let bg_g = ((bg_argb >> 8) & 0xFF) as u8;
+    let bg_b = (bg_argb & 0xFF) as u8;
+
+    // Fill title bar background
+    for y in 0..tbh {
+        for x in 0..width {
+            let off = (y * width + x) * 4;
+            if off + 3 < pixels.len() {
+                pixels[off] = bg_b;
+                pixels[off + 1] = bg_g;
+                pixels[off + 2] = bg_r;
+                pixels[off + 3] = 0xFF;
             }
         }
-        // Draw white X (2px thick diagonal lines)
-        for i in 0..14 {
-            let coords = [
-                (btn_x + 1 + i, btn_y + 1 + i),
-                (btn_x + 2 + i, btn_y + 1 + i),
-                (btn_x + 14 - i, btn_y + 1 + i),
-                (btn_x + 13 - i, btn_y + 1 + i),
-            ];
-            for (px, py) in coords {
-                let idx = py * fb_width + px;
-                if idx < bb.len() {
-                    bb[idx] = 0xFF_FFFFFF;
-                }
+    }
+
+    // Draw title text (vertically centered in title bar)
+    let text_color = cfg.title_text_color & 0x00FF_FFFF; // strip alpha for draw helper
+    let text_y = (tbh.saturating_sub(16)) / 2;
+    for (ci, &ch) in title_buf[..title_len].iter().enumerate() {
+        draw_char_into_buffer(pixels, width, ch, 8 + ci * 8, text_y, text_color);
+    }
+
+    // Draw close button (red square with white X) at top-right
+    let btn_sz = 16usize;
+    let btn_x = width.saturating_sub(22);
+    let btn_y = (tbh.saturating_sub(btn_sz)) / 2;
+    let close_r: u8 = 0xE7;
+    let close_g: u8 = 0x4C;
+    let close_b: u8 = 0x3C;
+    for dy in 0..btn_sz {
+        for dx in 0..btn_sz {
+            let off = ((btn_y + dy) * width + btn_x + dx) * 4;
+            if off + 3 < pixels.len() {
+                pixels[off] = close_b;
+                pixels[off + 1] = close_g;
+                pixels[off + 2] = close_r;
+                pixels[off + 3] = 0xFF;
+            }
+        }
+    }
+    // White X (2px thick diagonals)
+    for i in 0..14usize {
+        let coords = [
+            (btn_x + 1 + i, btn_y + 1 + i),
+            (btn_x + 2 + i, btn_y + 1 + i),
+            (btn_x + 14 - i, btn_y + 1 + i),
+            (btn_x + 13 - i, btn_y + 1 + i),
+        ];
+        for (px, py) in coords {
+            let off = (py * width + px) * 4;
+            if off + 3 < pixels.len() {
+                pixels[off] = 0xFF;
+                pixels[off + 1] = 0xFF;
+                pixels[off + 2] = 0xFF;
+                pixels[off + 3] = 0xFF;
             }
         }
     }
@@ -1538,11 +1613,12 @@ fn render_and_composite(state: &mut DesktopState, layout: &FrameLayout, tick: u6
     }
 }
 
-/// Render Phase 7 overlays into the composited back-buffer.
-///
-/// Draws desktop icons, close buttons, app switcher, launcher, and
-/// notification toasts on top of all Wayland surfaces (post-composite,
+/// Render modal overlays into the composited back-buffer (post-composite,
 /// pre-blit).
+///
+/// Only true overlays (app switcher, launcher, notifications) are drawn here.
+/// Title bars, close buttons, and desktop icons are now part of their
+/// respective surfaces.
 fn render_overlays(
     state: &DesktopState,
     bb: &mut [u32],
@@ -1550,29 +1626,10 @@ fn render_overlays(
     fb_height: usize,
     tick: u64,
 ) {
-    // Desktop icons (rendered behind windows, in background area)
-    for icon in &state.icon_grid.icons {
-        if icon.x >= 0 && icon.y >= 0 {
-            crate::desktop::desktop_icons::IconGrid::render_icon(
-                icon,
-                bb,
-                fb_width as u32,
-                fb_height as u32,
-            );
-            let label_x = icon.x.max(0) as usize;
-            let label_y =
-                (icon.y + crate::desktop::desktop_icons::ICON_SIZE as i32 + 2).max(0) as usize;
-            let name_bytes = icon.name.as_bytes();
-            let label_len = name_bytes.len().min(8);
-            for (ci, &ch) in name_bytes[..label_len].iter().enumerate() {
-                draw_glyph_u32(bb, fb_width, label_x + ci * 8, label_y, ch, 0xFFCCCCCC);
-            }
-        }
-    }
-
-    // Close button overlays on all visible windows (themed error color)
-    let close_btn_color = state.theme.colors().error.0;
-    draw_close_button_overlays(bb, fb_width, fb_height, close_btn_color);
+    // Title bars and close buttons are rendered into each surface's pixel
+    // buffer (see draw_title_bar_into_surface), and desktop icons are baked
+    // into the background surface (see render_icons_into_bgra).  The
+    // compositor's z-order compositing handles occlusion naturally.
 
     // App switcher overlay (Alt+Tab)
     if state.app_switcher.is_visible() {
@@ -1755,61 +1812,43 @@ fn render_all_apps(state: &mut DesktopState) {
     let app_error_color = state.theme.colors().error.0 & 0x00FFFFFF;
     let app_accent_color = state.theme.colors().accent.0 & 0x00FFFFFF;
 
-    // Dynamic apps
+    // Dynamic apps -- render content then prepend title bar into full surface
+    let title_bar_h: usize = 28;
     for app in &state.dynamic_apps {
-        let buf_size = (app.width as usize) * (app.height as usize) * 4;
-        let mut buf = alloc::vec![0u8; buf_size];
+        let w = app.width as usize;
+        let content_h = app.height as usize;
+        let total_h = content_h + title_bar_h;
+        let content_size = w * content_h * 4;
+        let mut content = alloc::vec![0u8; content_size];
 
         match app.kind {
             AppKind::SystemMonitor => {
-                render_system_monitor(
-                    &mut buf,
-                    app.width as usize,
-                    app.height as usize,
-                    state.frame_count,
-                    app_bg,
-                );
+                render_system_monitor(&mut content, w, content_h, state.frame_count, app_bg);
             }
             AppKind::MediaPlayer => {
-                render_media_player(&mut buf, app.width as usize, app.height as usize, app_bg);
+                render_media_player(&mut content, w, content_h, app_bg);
             }
             AppKind::ImageViewer => {
-                state.image_viewer.render_to_u8_buffer(
-                    &mut buf,
-                    app.width as usize,
-                    app.height as usize,
-                );
+                state
+                    .image_viewer
+                    .render_to_u8_buffer(&mut content, w, content_h);
             }
             AppKind::Settings => {
-                state.settings_app.render_to_u8_buffer(
-                    &mut buf,
-                    app.width as usize,
-                    app.height as usize,
-                );
+                state
+                    .settings_app
+                    .render_to_u8_buffer(&mut content, w, content_h);
             }
             AppKind::Browser => {
-                render_browser(
-                    &mut buf,
-                    app.width as usize,
-                    app.height as usize,
-                    app_bg,
-                    &mut state.browser,
-                );
+                render_browser(&mut content, w, content_h, app_bg, &mut state.browser);
             }
             AppKind::PdfViewer => {
-                render_pdf_viewer(
-                    &mut buf,
-                    app.width as usize,
-                    app.height as usize,
-                    app_bg,
-                    state.pdf_page_index,
-                );
+                render_pdf_viewer(&mut content, w, content_h, app_bg, state.pdf_page_index);
             }
             AppKind::Calculator => {
                 render_calculator(
-                    &mut buf,
-                    app.width as usize,
-                    app.height as usize,
+                    &mut content,
+                    w,
+                    content_h,
                     &state.calculator,
                     app_bg,
                     app_accent_color,
@@ -1818,7 +1857,16 @@ fn render_all_apps(state: &mut DesktopState) {
             }
         }
 
-        update_surface_pixels(app.surface_id, app.pool_id, app.pool_buf_id, &buf);
+        // Build full surface: title bar (28 rows) + content
+        let mut pixels = alloc::vec![0u8; w * total_h * 4];
+        for y in 0..content_h {
+            let src_off = y * w * 4;
+            let dst_off = (y + title_bar_h) * w * 4;
+            pixels[dst_off..dst_off + w * 4].copy_from_slice(&content[src_off..src_off + w * 4]);
+        }
+        draw_title_bar_into_surface(&mut pixels, w, total_h, app.wid);
+
+        update_surface_pixels(app.surface_id, app.pool_id, app.pool_buf_id, &pixels);
     }
 }
 
@@ -2139,7 +2187,7 @@ fn render_pdf_viewer(buf: &mut [u8], w: usize, h: usize, bg_color: u32, page_ind
         draw_string_into_buffer(
             buf,
             w,
-            b"PDF Engine: VeridianPDF v0.20.2",
+            b"PDF Engine: VeridianPDF v0.20.3",
             page_x + 20,
             page_y + 20,
             0x333333,

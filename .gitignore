@@ -46,6 +46,7 @@ images/
 
 # QEMU
 *.qcow2
+*.ppm
 
 # Coverage reports
 coverage/

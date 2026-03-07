@@ -586,6 +586,14 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
         kprintln!("[BOOTSTRAP] User database initialized");
     }
 
+    // Initialize PTY subsystem (needed by desktop terminal emulator)
+    #[cfg(feature = "alloc")]
+    {
+        if let Err(_e) = crate::fs::pty::init() {
+            kprintln!("[BOOTSTRAP] PTY init failed (non-fatal)");
+        }
+    }
+
     // Initialize desktop subsystem (Wayland, window manager, apps)
     #[cfg(feature = "alloc")]
     {

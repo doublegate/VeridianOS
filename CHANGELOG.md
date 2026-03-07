@@ -2,6 +2,73 @@
 
 ---
 
+## [v0.20.3] - 2026-03-07
+
+### v0.20.3: GUI Terminal Fix + CLI Command Wiring
+
+Desktop GUI and shell improvements: fully interactive terminal with local echo and shell command execution, window decoration architecture overhaul eliminating overlay bleeding, desktop icons baked into background surface, print capture system for command output, and 25 missing command registrations wired into the shell dispatcher.
+
+#### Part 1: CLI Shell -- 25 New Command Registrations
+
+All 25 commands had complete `BuiltinCommand` implementations but were missing from the dispatcher (imports + registrations in `kernel/src/services/shell/mod.rs`):
+
+- **User/Group (5):** `whoami`, `id`, `groups`, `useradd`, `userdel`
+- **Auth (3):** `passwd`, `su`, `sudo`
+- **Service/Power (5):** `service`, `reboot`, `shutdown`, `poweroff`, `suspend`, `hibernate`
+- **Scheduling (2):** `crontab`, `at`
+- **Filesystem (7):** `tar`, `xattr`, `mkfs`, `fsck`, `blkid`, `nfsmount`, `smbclient`
+- **Hardware (2):** `mdadm`, `iscsiadm`
+
+Total registered builtins: 128 -> 153.
+
+#### Part 2: GUI Window Decoration Architecture Overhaul
+
+- **Title bars moved into surface buffers**: `draw_title_bar_into_surface()` renders title bar background, title text, and close button (red X) directly into each window's BGRA pixel buffer. Compositor z-order now handles occlusion naturally -- no more bleeding through higher z-order windows.
+- **Desktop icons baked into background surface**: `render_icons_into_bgra()` renders icon bitmaps and labels into the background surface during scene creation. Icons appear behind all windows via compositor z-order.
+- **Removed post-composite overlays**: Eliminated `draw_close_button_overlays()`, `draw_title_bar_overlays()`, and icon/label rendering from `render_overlays()`. Only true modal overlays (app switcher, launcher, notifications) remain as post-composite.
+- **Dead code cleanup**: Removed unused `draw_glyph_u32()` function.
+
+#### Part 3: GUI Terminal -- Full Interactivity
+
+- **PTY initialization**: Added `crate::fs::pty::init()` in `bootstrap.rs` before desktop subsystem init. Previously, PTY manager was never initialized, causing terminal creation to fail silently (window created but no PTY pair).
+- **Local echo + line editing**: Terminal `process_input()` rewritten for direct character handling -- echo on type, backspace support, line buffer accumulation, Enter triggers command execution. Replaces non-functional PTY-only write path.
+- **Output capture system** (new `print_capture` module): Global capture buffer with `start_capture()`/`stop_capture()`. x86_64 `print!` macro extended to also call `_capture_print()`, enabling `println!` output from all 153 shell builtins to be captured and displayed in the GUI terminal.
+- **Shell command execution**: Terminal's `execute_command()` uses capture mode around `shell.execute_command(cmd)`, filters `[SHELL-EXEC]` debug lines, and displays command output + error/not-found messages.
+- **Welcome text + prompt**: Terminal shows "VeridianOS Terminal", "Press ESC to exit GUI.", and `root@veridian:/#` prompt on boot.
+
+#### Part 4: Window Manager Z-Order Fix
+
+- `get_visible_windows()` changed to iterate `z_order` vec instead of BTreeMap for correct bottom-to-top compositing order.
+
+#### Part 5: App Surface Architecture
+
+- All app windows (terminal, file manager, text editor, dynamic apps) now create surfaces covering full window area (content height + 28px title bar).
+- `render_to_surface()` in terminal.rs, file_manager.rs, text_editor.rs rewritten to render content into temp buffer, copy at y-offset 28, then prepend title bar via `draw_title_bar_into_surface()`.
+
+#### Files Changed
+
+- `kernel/src/services/shell/mod.rs` -- 25 command imports + registrations
+- `kernel/src/desktop/renderer.rs` -- overlay architecture overhaul, icon rendering, title bar function, dead code removal
+- `kernel/src/desktop/terminal.rs` -- local echo, line editing, shell execution, output capture integration
+- `kernel/src/desktop/file_manager.rs` -- surface/title bar architecture update
+- `kernel/src/desktop/text_editor.rs` -- surface/title bar architecture update
+- `kernel/src/desktop/window_manager.rs` -- z-order fix for get_visible_windows()
+- `kernel/src/bootstrap.rs` -- PTY init before desktop
+- `kernel/src/print.rs` -- capture buffer integration in x86_64 print! macro
+- `kernel/src/print_capture.rs` -- NEW: output capture buffer module
+- `kernel/src/lib.rs` -- print_capture module registration
+- Version files (5 locations) -- bumped to v0.20.3
+
+#### Verification
+
+- `cargo fmt --all`: PASS
+- Clippy aarch64 + riscv64: PASS (0 warnings)
+- `./build-kernel.sh all dev`: PASS (all 3 architectures)
+- QEMU boot tested: desktop renders correctly, terminal accepts input and executes commands
+- 12+ files changed
+
+---
+
 ## [v0.20.2] - 2026-03-07
 
 ### v0.20.2: Security Scan Remediation
