@@ -2,6 +2,59 @@
 
 ---
 
+## [v0.21.0] - 2026-03-07
+
+### v0.21.0: Performance Benchmarking + Verification Infrastructure
+
+Real in-kernel benchmark measurements and formal verification directory buildout.
+
+#### Part 1: Performance Benchmarking
+
+- **In-kernel micro-benchmarks**: 7 benchmarks run via `perf` command in QEMU (x86_64 + KVM). 6/7 meet Phase 5 targets. Results: syscall_getpid 79ns (target 500ns), cap_validate 57ns (target 100ns), atomic_counter 34ns (target 50ns), ipc_stats_read 44ns (target 100ns), sched_current 77ns (target 200ns), frame_alloc_global 1,525ns (target 4,000ns). Only frame_alloc_1 (per-CPU path, 2,215ns) slightly exceeds its 2,000ns target.
+- **Boot tests**: 29/29 in-kernel tests pass on every boot.
+- **Performance report**: Full results captured in `/tmp/VeridianOS/PERFORMANCE-REPORT.md` with environment details, multi-run comparison, and Phase 0/1 baseline analysis.
+
+#### Part 2: Verification Infrastructure
+
+- **`verification/` directory**: Created top-level directory matching README project structure (line 134). Contains `kani/` and `tla+/` subdirectories with documentation.
+- **TLA+ specs relocated**: 6 `.tla` files moved from `specs/` to `verification/tla+/`. Backward-compatible symlink `specs -> verification/tla+` preserves existing references.
+- **6 TLC configuration files** (`.cfg`): Created for all specs with small constant domains for feasible model checking:
+  - `boot_chain.cfg`: 3 PCRs, 3 boot stages, 6-element digest domain
+  - `capability_model.cfg`: 5 tokens, 5 rights, 3 processes
+  - `ipc_protocol.cfg`: 2 channels, capacity 3, 2 processes
+  - `ipc_deadlock.cfg`: 3 processes
+  - `memory_allocator.cfg`: 4 frames, 1 DMA + 3 normal, max order 2
+  - `information_flow.cfg`: 2 domains (Low/High), 2 processes, 2 channels
+- **3 README files**: Top-level verification overview, Kani proof inventory (38 harnesses), TLA+ spec inventory (6 specs with invariant tables).
+- **`scripts/verify.sh`**: Verification runner with auto-detection of Kani and TLC, graceful degradation with install instructions.
+
+#### Part 3: Version Bump
+
+- Version: v0.20.3 -> v0.21.0 (5 files)
+
+#### Files Created (10)
+
+- `verification/README.md` -- top-level verification overview
+- `verification/kani/README.md` -- 38 Kani proof inventory
+- `verification/tla+/README.md` -- 6 TLA+ spec inventory
+- `verification/tla+/boot_chain.cfg` -- TLC config
+- `verification/tla+/capability_model.cfg` -- TLC config
+- `verification/tla+/ipc_protocol.cfg` -- TLC config
+- `verification/tla+/ipc_deadlock.cfg` -- TLC config
+- `verification/tla+/memory_allocator.cfg` -- TLC config
+- `verification/tla+/information_flow.cfg` -- TLC config
+- `scripts/verify.sh` -- verification runner
+
+#### Files Moved
+
+- `specs/*.tla` (6 files) -> `verification/tla+/`, symlink `specs -> verification/tla+`
+
+#### Files Modified (5 -- version bump)
+
+- `Cargo.toml`, `kernel/src/fs/mod.rs`, `kernel/src/services/shell/commands/system.rs`, `kernel/src/desktop/renderer.rs`, `kernel/src/desktop/settings.rs`
+
+---
+
 ## [v0.20.3] - 2026-03-07
 
 ### v0.20.3: GUI Terminal Fix + CLI Command Wiring
