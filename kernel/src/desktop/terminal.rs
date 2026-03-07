@@ -548,6 +548,10 @@ impl TerminalEmulator {
                     | ((cell.foreground.g as u32) << 8)
                     | (cell.foreground.b as u32);
                 let ch = cell.character as u8;
+                let cw = crate::desktop::desktop_ext::cjk::char_width(cell.character);
+                if cw == 0 {
+                    continue; // skip zero-width / combining marks
+                }
                 draw_char_into_buffer(buf, width, ch, x * char_w, y * char_h, fg_color);
             }
         }

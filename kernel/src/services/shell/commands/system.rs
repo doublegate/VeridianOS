@@ -564,7 +564,7 @@ impl BuiltinCommand for UnameCommand {
             parts.push("veridian");
         }
         if show_release {
-            parts.push("0.19.0");
+            parts.push("0.20.0");
         }
         if show_machine {
             #[cfg(target_arch = "x86_64")]
@@ -1327,7 +1327,8 @@ impl BuiltinCommand for SchedCommand {
                 crate::println!("Idle percentage:     {}%", summary.idle_percentage);
             }
             "reset" => {
-                crate::println!("Scheduler metrics reset not yet implemented");
+                crate::sched::metrics::SCHEDULER_METRICS.reset();
+                crate::println!("Scheduler metrics reset");
             }
             _ => {
                 crate::println!("sched: unknown subcommand '{}'. Use: stats, reset", sub);
@@ -1951,17 +1952,19 @@ impl BuiltinCommand for UseraddCommand {
             return CommandResult::Success(1);
         }
         let username = &args[0];
-        let mut db = crate::syscall::userland_ext::users::UserDatabase::new();
-        match db.add_user(username, 1000, None) {
-            Ok(uid) => {
-                crate::println!("User '{}' created with uid {}", username, uid);
-                CommandResult::Success(0)
+        let result = crate::syscall::userland_ext::with_user_db_mut(|db| {
+            match db.add_user(username, 1000, None) {
+                Ok(uid) => {
+                    crate::println!("User '{}' created with uid {}", username, uid);
+                    0
+                }
+                Err(e) => {
+                    crate::println!("useradd: failed to add user '{}': {:?}", username, e);
+                    1
+                }
             }
-            Err(e) => {
-                crate::println!("useradd: failed to add user '{}': {:?}", username, e);
-                CommandResult::Success(1)
-            }
-        }
+        });
+        CommandResult::Success(result.unwrap_or(1))
     }
 }
 
@@ -1979,19 +1982,18 @@ impl BuiltinCommand for UserdelCommand {
             return CommandResult::Success(1);
         }
         let username = &args[0];
-        let mut db = crate::syscall::userland_ext::users::UserDatabase::new();
-        // Add user first so we can demonstrate removal (session-local DB)
-        let _ = db.add_user(username, 1000, None);
-        match db.remove_user(username) {
-            Ok(()) => {
-                crate::println!("User '{}' removed", username);
-                CommandResult::Success(0)
-            }
-            Err(e) => {
-                crate::println!("userdel: failed to remove user '{}': {:?}", username, e);
-                CommandResult::Success(1)
-            }
-        }
+        let result =
+            crate::syscall::userland_ext::with_user_db_mut(|db| match db.remove_user(username) {
+                Ok(()) => {
+                    crate::println!("User '{}' removed", username);
+                    0
+                }
+                Err(e) => {
+                    crate::println!("userdel: failed to remove user '{}': {:?}", username, e);
+                    1
+                }
+            });
+        CommandResult::Success(result.unwrap_or(1))
     }
 }
 
@@ -2005,8 +2007,11 @@ impl BuiltinCommand for PasswdCommand {
     }
     fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
         let username = if args.is_empty() { "root" } else { &args[0] };
-        let db = crate::syscall::userland_ext::users::UserDatabase::new();
-        if db.get_user_by_name(username).is_none() {
+        let exists = crate::syscall::userland_ext::with_user_db(|db| {
+            db.get_user_by_name(username).is_some()
+        })
+        .unwrap_or(false);
+        if !exists {
             crate::println!("passwd: user '{}' does not exist", username);
             return CommandResult::Success(1);
         }
@@ -2024,25 +2029,13 @@ impl BuiltinCommand for IdCommand {
         "Display user identity"
     }
     fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
-        if args.is_empty() {
-            let db = crate::syscall::userland_ext::users::UserDatabase::new();
-            if let Some(user) = db.get_user_by_name("root") {
-                crate::println!(
-                    "uid={}({}) gid={}({}) groups={}({})",
-                    user.uid,
-                    user.username,
-                    user.gid,
-                    user.username,
-                    user.gid,
-                    user.username
-                );
-            } else {
-                crate::println!("uid=0(root) gid=0(root) groups=0(root)");
-            }
+        let lookup_name = if args.is_empty() {
+            "root"
         } else {
-            let username = &args[0];
-            let db = crate::syscall::userland_ext::users::UserDatabase::new();
-            if let Some(user) = db.get_user_by_name(username) {
+            args[0].as_str()
+        };
+        let found = crate::syscall::userland_ext::with_user_db(|db| {
+            if let Some(user) = db.get_user_by_name(lookup_name) {
                 crate::println!(
                     "uid={}({}) gid={}({}) groups={}({})",
                     user.uid,
@@ -2052,8 +2045,17 @@ impl BuiltinCommand for IdCommand {
                     user.gid,
                     user.username
                 );
+                true
             } else {
-                crate::println!("id: '{}': no such user", username);
+                false
+            }
+        })
+        .unwrap_or(false);
+        if !found {
+            if args.is_empty() {
+                crate::println!("uid=0(root) gid=0(root) groups=0(root)");
+            } else {
+                crate::println!("id: '{}': no such user", args[0]);
                 return CommandResult::Success(1);
             }
         }
@@ -2090,16 +2092,22 @@ impl BuiltinCommand for GroupsCommand {
         let username = shell
             .get_env("USER")
             .unwrap_or_else(|| String::from("root"));
-        let db = crate::syscall::userland_ext::users::UserDatabase::new();
-        if let Some(user) = db.get_user_by_name(&username) {
-            // Look up the group name for the user's primary GID
-            let gdb = crate::syscall::userland_ext::users::GroupDatabase::new();
-            let group_name = gdb
-                .get_group_by_gid(user.gid)
-                .map(|g| g.name.clone())
-                .unwrap_or_else(|| format!("{}", user.gid));
-            crate::println!("{} : {}", user.username, group_name);
-        } else {
+        let found = crate::syscall::userland_ext::with_user_db(|db| {
+            if let Some(user) = db.get_user_by_name(&username) {
+                // Look up the group name for the user's primary GID
+                let gdb = crate::syscall::userland_ext::users::GroupDatabase::new();
+                let group_name = gdb
+                    .get_group_by_gid(user.gid)
+                    .map(|g| g.name.clone())
+                    .unwrap_or_else(|| format!("{}", user.gid));
+                crate::println!("{} : {}", user.username, group_name);
+                true
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false);
+        if !found {
             crate::println!("{}", username);
         }
         CommandResult::Success(0)
@@ -2116,8 +2124,10 @@ impl BuiltinCommand for SuCommand {
     }
     fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
         let target = if args.is_empty() { "root" } else { &args[0] };
-        let db = crate::syscall::userland_ext::users::UserDatabase::new();
-        if db.get_user_by_name(target).is_none() {
+        let exists =
+            crate::syscall::userland_ext::with_user_db(|db| db.get_user_by_name(target).is_some())
+                .unwrap_or(false);
+        if !exists {
             crate::println!("su: user '{}' does not exist", target);
             return CommandResult::Success(1);
         }
@@ -2139,8 +2149,9 @@ impl BuiltinCommand for SudoCommand {
             crate::println!("Usage: sudo <command> [args...]");
             return CommandResult::Success(1);
         }
-        let db = crate::syscall::userland_ext::users::UserDatabase::new();
-        let is_root = db.get_user_by_name("root").is_some();
+        let is_root =
+            crate::syscall::userland_ext::with_user_db(|db| db.get_user_by_name("root").is_some())
+                .unwrap_or(false);
         let cmd_str: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let joined = cmd_str.join(" ");
         if is_root {
@@ -2436,8 +2447,41 @@ impl BuiltinCommand for LscpuCommand {
         )))]
         crate::println!("Architecture:  unknown");
 
-        crate::println!("CPU(s):        1");
-        crate::println!("Model:         QEMU Virtual CPU");
+        // Get real CPU info via CPUID on x86_64
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        {
+            // CPUID EAX=0: vendor string
+            let cpuid0 = unsafe { core::arch::x86_64::__cpuid(0) };
+            let mut vendor = [0u8; 12];
+            vendor[0..4].copy_from_slice(&cpuid0.ebx.to_le_bytes());
+            vendor[4..8].copy_from_slice(&cpuid0.edx.to_le_bytes());
+            vendor[8..12].copy_from_slice(&cpuid0.ecx.to_le_bytes());
+            let vendor_str = core::str::from_utf8(&vendor).unwrap_or("Unknown");
+            crate::println!("Vendor:        {}", vendor_str);
+
+            // CPUID EAX=1: family/model/stepping
+            let cpuid1 = unsafe { core::arch::x86_64::__cpuid(1) };
+            let stepping = cpuid1.eax & 0xF;
+            let model = ((cpuid1.eax >> 4) & 0xF) | (((cpuid1.eax >> 16) & 0xF) << 4);
+            let family = ((cpuid1.eax >> 8) & 0xF) + ((cpuid1.eax >> 20) & 0xFF);
+            crate::println!("Family:        {}", family);
+            crate::println!("Model:         {}", model);
+            crate::println!("Stepping:      {}", stepping);
+
+            // Logical processors from CPUID EAX=1 EBX bits 23:16
+            let logical_cpus = (cpuid1.ebx >> 16) & 0xFF;
+            crate::println!(
+                "CPU(s):        {}",
+                if logical_cpus > 0 { logical_cpus } else { 1 }
+            );
+        }
+
+        // Fallback for non-x86_64 or host target
+        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+        {
+            crate::println!("CPU(s):        1");
+            crate::println!("Vendor:        (platform-specific)");
+        }
 
         CommandResult::Success(0)
     }
@@ -2486,7 +2530,7 @@ impl BuiltinCommand for SysctlCommand {
             let mem = crate::mm::get_memory_stats();
             let total_kb = mem.total_frames * 4;
 
-            crate::println!("kernel.version = 0.19.0");
+            crate::println!("kernel.version = {}", env!("CARGO_PKG_VERSION"));
 
             #[cfg(target_arch = "x86_64")]
             crate::println!("kernel.arch = x86_64");
@@ -2502,6 +2546,10 @@ impl BuiltinCommand for SysctlCommand {
             crate::println!("kernel.arch = unknown");
 
             crate::println!("vm.total_memory = {}K", total_kb);
+            let free_kb = mem.free_frames * 4;
+            crate::println!("vm.free_memory = {}K", free_kb);
+            let uptime = crate::arch::timer::get_ticks() / 1000;
+            crate::println!("kernel.uptime = {}s", uptime);
             crate::println!("kernel.hostname = veridian");
             crate::println!("kernel.ostype = VeridianOS");
         } else if let Some(eq_pos) = arg.find('=') {
@@ -2633,10 +2681,19 @@ impl BuiltinCommand for CloudInitCommand {
         }
         match args[0].as_str() {
             "run" => {
-                crate::println!("cloud-init: running... no datasource found");
+                let mut runner = crate::services::cloud_init::CloudInitRunner::new();
+                match runner.fetch_metadata() {
+                    Ok(()) => crate::println!("cloud-init: metadata fetched successfully"),
+                    Err(e) => crate::println!("cloud-init: {:?}", e),
+                }
             }
             "status" => {
-                crate::println!("cloud-init: status: disabled (no metadata service)");
+                let runner = crate::services::cloud_init::CloudInitRunner::new();
+                if runner.is_completed() {
+                    crate::println!("cloud-init: status: done");
+                } else {
+                    crate::println!("cloud-init: status: not run");
+                }
             }
             _ => {
                 crate::println!("Usage: cloud-init run|status");
@@ -2662,11 +2719,22 @@ impl BuiltinCommand for KubectlCommand {
         }
         match args[1].as_str() {
             "pods" => {
-                crate::println!("No resources found in default namespace");
+                let runtime = crate::services::cri::runtime::RuntimeService::new();
+                let containers = runtime.list_containers(None, None);
+                if containers.is_empty() {
+                    crate::println!("No resources found in default namespace");
+                } else {
+                    crate::println!("NAME                    STATUS      AGE");
+                    for c in &containers {
+                        crate::println!("{:<24}{:?}         -", c.name, c.state);
+                    }
+                }
             }
             "nodes" => {
-                crate::println!("NAME        STATUS   ROLES    AGE   VERSION");
-                crate::println!("veridian    Ready    master   1d    v1.0.0");
+                let mem = crate::mm::get_memory_stats();
+                let total_mb = (mem.total_frames * 4096) / (1024 * 1024);
+                crate::println!("NAME        STATUS   ROLES    MEMORY");
+                crate::println!("veridian    Ready    master   {} Mi", total_mb);
             }
             _ => {
                 crate::println!("No resources found in default namespace");

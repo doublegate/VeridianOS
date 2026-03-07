@@ -577,6 +577,13 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
         kprintln!("[BOOTSTRAP] USB subsystem initialized");
     }
 
+    // Initialize persistent user database
+    #[cfg(feature = "alloc")]
+    {
+        crate::syscall::userland_ext::users::init_user_db();
+        kprintln!("[BOOTSTRAP] User database initialized");
+    }
+
     // Initialize desktop subsystem (Wayland, window manager, apps)
     #[cfg(feature = "alloc")]
     {

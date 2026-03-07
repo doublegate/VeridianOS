@@ -43,7 +43,10 @@ pub use ptrace::{
     PtraceError, PtraceManager, PtraceOptions, PtraceRequest, RegisterState, SigInfo, TraceeState,
 };
 #[allow(unused_imports)]
-pub use users::{GroupDatabase, GroupEntry, ShadowEntry, UserDatabase, UserEntry, UserGroupError};
+pub use users::{
+    init_user_db, with_user_db, with_user_db_mut, GroupDatabase, GroupEntry, ShadowEntry,
+    UserDatabase, UserEntry, UserGroupError,
+};
 
 // ============================================================================
 // Tests

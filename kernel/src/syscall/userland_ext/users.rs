@@ -9,7 +9,27 @@ extern crate alloc;
 #[cfg(feature = "alloc")]
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
+use spin::RwLock;
+
 use super::helpers::{parse_u32, parse_u64, push_u32_str, push_u64_str};
+use crate::sync::once_lock::GlobalState;
+
+static USER_DB: GlobalState<RwLock<UserDatabase>> = GlobalState::new();
+
+/// Initialize the global persistent user database.
+pub fn init_user_db() {
+    let _ = USER_DB.init(RwLock::new(UserDatabase::new()));
+}
+
+/// Access the global user database immutably.
+pub fn with_user_db<R, F: FnOnce(&UserDatabase) -> R>(f: F) -> Option<R> {
+    USER_DB.with(|lock| f(&lock.read()))
+}
+
+/// Access the global user database mutably.
+pub fn with_user_db_mut<R, F: FnOnce(&mut UserDatabase) -> R>(f: F) -> Option<R> {
+    USER_DB.with(|lock| f(&mut lock.write()))
+}
 
 // ============================================================================
 // Constants

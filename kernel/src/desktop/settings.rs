@@ -270,8 +270,8 @@ impl Default for AboutInfo {
     fn default() -> Self {
         Self {
             os_name: "VeridianOS",
-            version: "0.19.0",
-            kernel_version: "0.19.0-deepwiring",
+            version: "0.20.0",
+            kernel_version: "0.20.0-fullcircuit",
             arch: core::env!("CARGO_PKG_NAME"), // will be "veridian-kernel"
             hostname: String::from("veridian"),
         }
@@ -511,8 +511,9 @@ impl SettingsApp {
             }
             SettingsPanel::Appearance => match self.selected_item {
                 0 => {
-                    // Cycle theme (0=dark, 1=light)
-                    self.appearance.theme_index = (self.appearance.theme_index + 1) % 2;
+                    // Cycle theme (0=dark, 1=light, 2=solarized-dark, 3=solarized-light, 4=nord,
+                    // 5=dracula)
+                    self.appearance.theme_index = (self.appearance.theme_index + 1) % 6;
                 }
                 1 => {
                     // Cycle font size 12..20
@@ -570,6 +571,13 @@ impl SettingsApp {
                         self.power_settings.profile_index =
                             (self.power_settings.profile_index + 1) % n;
                     }
+                    // Write back to kernel
+                    let gov = match self.power_settings.profile_index {
+                        0 => crate::power::Governor::OnDemand,
+                        1 => crate::power::Governor::Performance,
+                        _ => crate::power::Governor::PowerSave,
+                    };
+                    let _ = crate::power::set_governor(gov);
                 }
                 1 => {
                     // Cycle screen timeout: 5, 10, 15, 30, 0(never)
@@ -859,6 +867,10 @@ impl SettingsApp {
         let theme = match self.appearance.theme_index {
             0 => "Dark",
             1 => "Light",
+            2 => "Solarized Dark",
+            3 => "Solarized Light",
+            4 => "Nord",
+            5 => "Dracula",
             _ => "Custom",
         };
         Self::render_label_value(

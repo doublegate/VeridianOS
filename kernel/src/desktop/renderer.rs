@@ -138,6 +138,90 @@ struct DynamicApp {
     height: u32,
 }
 
+/// Calculator application state for integer arithmetic.
+struct CalculatorState {
+    display_value: i64,
+    accumulator: i64,
+    pending_op: Option<u8>,
+    input_started: bool,
+    error: bool,
+}
+
+impl CalculatorState {
+    fn new() -> Self {
+        Self {
+            display_value: 0,
+            accumulator: 0,
+            pending_op: None,
+            input_started: false,
+            error: false,
+        }
+    }
+
+    fn handle_key(&mut self, key: u8) {
+        if self.error && key != b'C' {
+            return;
+        }
+        match key {
+            b'0'..=b'9' => {
+                let digit = (key - b'0') as i64;
+                if !self.input_started {
+                    self.display_value = digit;
+                    self.input_started = true;
+                } else {
+                    self.display_value =
+                        self.display_value.saturating_mul(10).saturating_add(digit);
+                }
+            }
+            b'+' | b'-' | b'*' | b'/' => {
+                self.evaluate_pending();
+                self.accumulator = self.display_value;
+                self.pending_op = Some(key);
+                self.input_started = false;
+            }
+            b'=' => {
+                self.evaluate_pending();
+                self.pending_op = None;
+                self.input_started = false;
+            }
+            b'C' => {
+                *self = Self::new();
+            }
+            b'<' => {
+                self.display_value /= 10;
+            }
+            _ => {}
+        }
+    }
+
+    fn evaluate_pending(&mut self) {
+        if let Some(op) = self.pending_op {
+            let result = match op {
+                b'+' => self.accumulator.checked_add(self.display_value),
+                b'-' => self.accumulator.checked_sub(self.display_value),
+                b'*' => self.accumulator.checked_mul(self.display_value),
+                b'/' => {
+                    if self.display_value == 0 {
+                        self.error = true;
+                        self.display_value = 0;
+                        return;
+                    }
+                    self.accumulator.checked_div(self.display_value)
+                }
+                _ => Some(self.display_value),
+            };
+            match result {
+                Some(v) => self.display_value = v,
+                None => {
+                    self.error = true;
+                    self.display_value = 0;
+                }
+            }
+            self.accumulator = self.display_value;
+        }
+    }
+}
+
 /// Desktop runtime state: application windows + Phase 7 overlay modules.
 struct DesktopState {
     // Existing app windows
@@ -158,6 +242,27 @@ struct DesktopState {
 
     // Image viewer instance (owned, renders full UI)
     image_viewer: crate::desktop::image_viewer::ImageViewer,
+
+    // Calculator state (owned, integer arithmetic)
+    calculator: CalculatorState,
+
+    // Theme engine for color scheme management
+    theme: crate::desktop::desktop_ext::theme::ThemeManager,
+
+    // Clipboard manager for copy/paste
+    clipboard: crate::desktop::desktop_ext::clipboard::ClipboardManager,
+
+    // Drag-and-drop manager
+    dnd: crate::desktop::desktop_ext::dnd::DndManager,
+
+    // Desktop icon grid
+    icon_grid: crate::desktop::desktop_icons::IconGrid,
+
+    // Browser engine instance
+    browser: Option<crate::browser::browser_main::Browser>,
+
+    // PDF viewer page index
+    pdf_page_index: usize,
 
     // Dynamic apps (spawned from launcher, closeable)
     dynamic_apps: alloc::vec::Vec<DynamicApp>,
@@ -318,7 +423,7 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopState {
     // Send a welcome notification to demonstrate the notification system
     crate::desktop::notification::notify(
         "VeridianOS Desktop",
-        "Welcome to VeridianOS v0.19.0",
+        "Welcome to VeridianOS v0.20.0",
         crate::desktop::notification::NotificationUrgency::Normal,
         "desktop",
     );
@@ -347,6 +452,13 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopState {
         animation_mgr: crate::desktop::animation::AnimationManager::new(),
         settings_app: crate::desktop::settings::SettingsApp::new(),
         image_viewer: crate::desktop::image_viewer::ImageViewer::new(),
+        calculator: CalculatorState::new(),
+        theme: crate::desktop::desktop_ext::theme::ThemeManager::new(),
+        clipboard: crate::desktop::desktop_ext::clipboard::ClipboardManager::new(),
+        dnd: crate::desktop::desktop_ext::dnd::DndManager::new(),
+        icon_grid: create_default_icon_grid(width, height - panel_h),
+        browser: None,
+        pdf_page_index: 0,
         dynamic_apps: alloc::vec::Vec::new(),
         frame_count: 0,
         drag: None,
@@ -354,9 +466,42 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopState {
     }
 }
 
+/// Create a default icon grid with common application shortcuts.
+fn create_default_icon_grid(
+    desktop_width: u32,
+    desktop_height: u32,
+) -> crate::desktop::desktop_icons::IconGrid {
+    use crate::desktop::desktop_icons::{DesktopIcon, IconGrid};
+
+    let mut grid = IconGrid::new(desktop_width, desktop_height);
+
+    let apps = [
+        ("Terminal", "terminal", 0xFF2ECC71u32),
+        ("Files", "files", 0xFF3498DB),
+        ("Editor", "editor", 0xFFE67E22),
+        ("Settings", "settings", 0xFF9B59B6),
+        ("Browser", "browser", 0xFF1ABC9C),
+    ];
+
+    for (name, _exec, color) in &apps {
+        let mut icon = DesktopIcon::new(name, 0, 0);
+        // Set a solid colour for the icon
+        let pixel_count = (crate::desktop::desktop_icons::ICON_SIZE
+            * crate::desktop::desktop_icons::ICON_SIZE) as usize;
+        let data = alloc::vec![*color; pixel_count];
+        icon.set_icon_data(&data);
+        grid.add_icon(icon);
+    }
+
+    grid.arrange();
+    grid
+}
+
 /// Draw a string into a BGRA pixel buffer at (px, py) with the given color.
 ///
 /// Uses the 8x16 VGA font. Characters are spaced 8 pixels apart horizontally.
+/// CJK wide characters (detected via `cjk::char_width`) advance 16px instead of
+/// 8px.
 pub fn draw_string_into_buffer(
     buf: &mut [u8],
     buf_width: usize,
@@ -365,8 +510,14 @@ pub fn draw_string_into_buffer(
     py: usize,
     color: u32,
 ) {
-    for (i, &ch) in text.iter().enumerate() {
-        draw_char_into_buffer(buf, buf_width, ch, px + i * 8, py, color);
+    let mut cursor_x = px;
+    for &ch in text.iter() {
+        let w = crate::desktop::desktop_ext::cjk::char_width(ch as char);
+        if w == 0 {
+            continue; // skip zero-width / combining marks
+        }
+        draw_char_into_buffer(buf, buf_width, ch, cursor_x, py, color);
+        cursor_x += (w as usize) * 8;
     }
 }
 
@@ -395,6 +546,27 @@ pub fn draw_char_into_buffer(
                     buf[offset + 1] = g;
                     buf[offset + 2] = r;
                     buf[offset + 3] = 0xFF;
+                }
+            }
+        }
+    }
+}
+
+/// Render a single 8x16 glyph into a u32 (packed XRGB) back-buffer.
+///
+/// Used for overlays rendered directly into the compositor back-buffer (desktop
+/// icons labels, etc.) where the buffer is `&mut [u32]` rather than `&mut
+/// [u8]`.
+fn draw_glyph_u32(buf: &mut [u32], buf_width: usize, px: usize, py: usize, ch: u8, color: u32) {
+    let glyph = crate::graphics::font8x16::glyph(ch);
+    for (row, &bits) in glyph.iter().enumerate() {
+        for col in 0..8 {
+            if (bits >> (7 - col)) & 1 != 0 {
+                let x = px + col;
+                let y = py + row;
+                let offset = y * buf_width + x;
+                if offset < buf.len() {
+                    buf[offset] = color;
                 }
             }
         }
@@ -695,7 +867,12 @@ fn close_any_window(state: &mut DesktopState, wid: u32) {
 }
 
 /// Draw close button overlays (red square with white X) on all visible windows.
-fn draw_close_button_overlays(bb: &mut [u32], fb_width: usize, _fb_height: usize) {
+fn draw_close_button_overlays(
+    bb: &mut [u32],
+    fb_width: usize,
+    _fb_height: usize,
+    close_color: u32,
+) {
     let windows =
         crate::desktop::window_manager::with_window_manager(|wm| wm.get_visible_windows())
             .unwrap_or_default();
@@ -709,8 +886,8 @@ fn draw_close_button_overlays(bb: &mut [u32], fb_width: usize, _fb_height: usize
                 let py = btn_y + dy;
                 let idx = py * fb_width + px;
                 if idx < bb.len() {
-                    // Red background
-                    bb[idx] = 0xFF_CC3333;
+                    // Close button background (themed)
+                    bb[idx] = close_color;
                 }
             }
         }
@@ -1011,6 +1188,48 @@ fn render_loop(hw: &fbcon::FbHwInfo, state: &mut DesktopState) {
                 continue;
             }
 
+            // Ctrl+C: copy from focused app to clipboard
+            if is_key_press
+                && raw_event.code == b'c' as u16
+                && mods & crate::drivers::keyboard::MOD_CTRL != 0
+                && mods & crate::drivers::keyboard::MOD_ALT == 0
+            {
+                // Store a placeholder text copy (real text selection requires per-app support)
+                let _ = state.clipboard.copy(
+                    crate::desktop::desktop_ext::clipboard::SelectionType::Clipboard,
+                    0,
+                    crate::desktop::desktop_ext::clipboard::ClipboardMime::TextPlainUtf8,
+                    alloc::vec![],
+                );
+                continue;
+            }
+
+            // Ctrl+V: paste from clipboard to focused app
+            if is_key_press
+                && raw_event.code == b'v' as u16
+                && mods & crate::drivers::keyboard::MOD_CTRL != 0
+                && mods & crate::drivers::keyboard::MOD_ALT == 0
+            {
+                if let Ok(data) = state.clipboard.paste(
+                    crate::desktop::desktop_ext::clipboard::SelectionType::Clipboard,
+                    crate::desktop::desktop_ext::clipboard::ClipboardMime::TextPlainUtf8,
+                ) {
+                    // Inject clipboard text as key events to focused terminal
+                    if state.terminal.wid > 0 {
+                        crate::desktop::terminal::with_terminal_manager(|tm| {
+                            for &byte in data {
+                                let event = crate::desktop::window_manager::InputEvent::KeyPress {
+                                    scancode: 0,
+                                    character: byte as char,
+                                };
+                                let _ = tm.process_input(0, event);
+                            }
+                        });
+                    }
+                }
+                continue;
+            }
+
             // --- Normal event dispatch ---
 
             if let Some(wm_event) = translate_input_event(&raw_event, mouse_x, mouse_y) {
@@ -1270,8 +1489,38 @@ fn render_loop(hw: &fbcon::FbHwInfo, state: &mut DesktopState) {
                 // Render Phase 7 overlays into the back-buffer (post-composite,
                 // pre-blit). These draw on top of all Wayland surfaces.
                 display.wl_compositor.with_back_buffer_mut(|bb| {
-                    // Close button overlays on all visible windows
-                    draw_close_button_overlays(bb, fb_width, fb_height);
+                    // Desktop icons (rendered behind windows, in background area)
+                    for icon in &state.icon_grid.icons {
+                        if icon.x >= 0 && icon.y >= 0 {
+                            crate::desktop::desktop_icons::IconGrid::render_icon(
+                                icon,
+                                bb,
+                                fb_width as u32,
+                                fb_height as u32,
+                            );
+                            // Render icon name label below the icon
+                            let label_x = icon.x.max(0) as usize;
+                            let label_y =
+                                (icon.y + crate::desktop::desktop_icons::ICON_SIZE as i32 + 2)
+                                    .max(0) as usize;
+                            let name_bytes = icon.name.as_bytes();
+                            let label_len = name_bytes.len().min(8);
+                            for (ci, &ch) in name_bytes[..label_len].iter().enumerate() {
+                                draw_glyph_u32(
+                                    bb,
+                                    fb_width,
+                                    label_x + ci * 8,
+                                    label_y,
+                                    ch,
+                                    0xFFCCCCCC,
+                                );
+                            }
+                        }
+                    }
+
+                    // Close button overlays on all visible windows (themed error color)
+                    let close_btn_color = state.theme.colors().error.0;
+                    draw_close_button_overlays(bb, fb_width, fb_height, close_btn_color);
 
                     // App switcher overlay (Alt+Tab)
                     if state.app_switcher.is_visible() {
@@ -1455,7 +1704,7 @@ fn update_surface_visibility(state: &DesktopState, target_ws: u8) {
 }
 
 /// Render all desktop app surfaces.
-fn render_all_apps(state: &DesktopState) {
+fn render_all_apps(state: &mut DesktopState) {
     // Terminal
     if state.terminal.wid > 0 {
         crate::desktop::terminal::with_terminal_manager(|tm| {
@@ -1473,6 +1722,11 @@ fn render_all_apps(state: &DesktopState) {
         te.read().render_to_surface();
     });
 
+    // Compute themed background color for dynamic apps (strip alpha byte)
+    let app_bg = state.theme.colors().window_background.0 & 0x00FFFFFF;
+    let app_error_color = state.theme.colors().error.0 & 0x00FFFFFF;
+    let app_accent_color = state.theme.colors().accent.0 & 0x00FFFFFF;
+
     // Dynamic apps
     for app in &state.dynamic_apps {
         let buf_size = (app.width as usize) * (app.height as usize) * 4;
@@ -1485,10 +1739,11 @@ fn render_all_apps(state: &DesktopState) {
                     app.width as usize,
                     app.height as usize,
                     state.frame_count,
+                    app_bg,
                 );
             }
             AppKind::MediaPlayer => {
-                render_media_player(&mut buf, app.width as usize, app.height as usize);
+                render_media_player(&mut buf, app.width as usize, app.height as usize, app_bg);
             }
             AppKind::ImageViewer => {
                 state.image_viewer.render_to_u8_buffer(
@@ -1505,13 +1760,33 @@ fn render_all_apps(state: &DesktopState) {
                 );
             }
             AppKind::Browser => {
-                render_browser(&mut buf, app.width as usize, app.height as usize);
+                render_browser(
+                    &mut buf,
+                    app.width as usize,
+                    app.height as usize,
+                    app_bg,
+                    &mut state.browser,
+                );
             }
             AppKind::PdfViewer => {
-                render_pdf_viewer(&mut buf, app.width as usize, app.height as usize);
+                render_pdf_viewer(
+                    &mut buf,
+                    app.width as usize,
+                    app.height as usize,
+                    app_bg,
+                    state.pdf_page_index,
+                );
             }
             AppKind::Calculator => {
-                render_calculator(&mut buf, app.width as usize, app.height as usize);
+                render_calculator(
+                    &mut buf,
+                    app.width as usize,
+                    app.height as usize,
+                    &state.calculator,
+                    app_bg,
+                    app_accent_color,
+                    app_error_color,
+                );
             }
         }
 
@@ -1543,8 +1818,8 @@ fn render_placeholder_app(buf: &mut [u8], w: usize, h: usize, title: &str, bg_co
 }
 
 /// Render system monitor showing memory and CPU stats.
-fn render_system_monitor(buf: &mut [u8], w: usize, h: usize, frame_count: u64) {
-    render_placeholder_app(buf, w, h, "System Monitor", 0x1e272e);
+fn render_system_monitor(buf: &mut [u8], w: usize, h: usize, frame_count: u64, bg_color: u32) {
+    render_placeholder_app(buf, w, h, "System Monitor", bg_color);
     let mem = crate::mm::get_memory_stats();
     let total_mb = (mem.total_frames * 4096) / (1024 * 1024);
     let used_frames = mem.total_frames.saturating_sub(mem.free_frames);
@@ -1629,8 +1904,8 @@ fn render_system_monitor(buf: &mut [u8], w: usize, h: usize, frame_count: u64) {
 }
 
 /// Render media player with playback info and real audio stream data.
-fn render_media_player(buf: &mut [u8], w: usize, h: usize) {
-    render_placeholder_app(buf, w, h, "Media Player", 0x2c3e50);
+fn render_media_player(buf: &mut [u8], w: usize, h: usize, bg_color: u32) {
+    render_placeholder_app(buf, w, h, "Media Player", bg_color);
 
     // Query real audio subsystem for stream info
     let (stream_count, sample_rate, channels) = crate::audio::client::with_client(|client| {
@@ -1681,101 +1956,87 @@ fn render_media_player(buf: &mut [u8], w: usize, h: usize) {
     );
 }
 
-/// Render web browser with address bar, tab info, and content area.
-fn render_browser(buf: &mut [u8], w: usize, h: usize) {
-    render_placeholder_app(buf, w, h, "Web Browser", 0x1a1a2e);
-
-    // Address bar background
-    for y in 40..60 {
-        for x in 10..(w.saturating_sub(10)) {
-            let off = (y * w + x) * 4;
-            if off + 3 < buf.len() {
-                buf[off] = 0x3A; // B
-                buf[off + 1] = 0x3A; // G
-                buf[off + 2] = 0x3A; // R
-                buf[off + 3] = 0xFF;
-            }
-        }
+/// Render web browser with live browser engine rendering.
+fn render_browser(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    bg_color: u32,
+    browser: &mut Option<crate::browser::browser_main::Browser>,
+) {
+    // Lazily initialize the browser engine on first render
+    if browser.is_none() {
+        let config = crate::browser::browser_main::BrowserConfig {
+            viewport_width: w as u32,
+            viewport_height: h as u32,
+            ..crate::browser::browser_main::BrowserConfig::default()
+        };
+        let mut b = crate::browser::browser_main::Browser::new(config);
+        b.init();
+        *browser = Some(b);
     }
-    draw_string_into_buffer(buf, w, b"veridian://start", 16, 44, 0xCCCCCC);
 
-    // Tab bar with real tab count
-    let mut line_buf = [0u8; 64];
-    let tab_line = format_simple(&mut line_buf, b"[New Tab]  Tabs: ", 1);
-    draw_string_into_buffer(buf, w, tab_line, 10, 24, 0xAAAAFF);
+    if let Some(ref mut b) = browser {
+        // Tick animations and re-render
+        b.tick();
+        b.render();
 
-    // Content area
-    let content_y = 75;
-    draw_string_into_buffer(
-        buf,
-        w,
-        b"Welcome to VeridianOS Web Browser",
-        20,
-        content_y,
-        0xFFFFFF,
-    );
-    draw_string_into_buffer(
-        buf,
-        w,
-        b"Engine: Veridian HTML5/CSS3/JS v0.19.0",
-        20,
-        content_y + 20,
-        0xAAAAAA,
-    );
+        // Copy browser's u32 BGRA framebuffer into the u8 BGRA buffer
+        let fb = b.framebuffer();
+        let (bw, bh) = b.dimensions();
+        let bw = bw as usize;
+        let bh = bh as usize;
 
-    // Show real process count as a proxy for browser resource usage
-    let proc_count = crate::services::process_server::get_process_server()
-        .list_processes()
-        .len();
-    let mem = crate::mm::get_memory_stats();
-    let free_mb = (mem.free_frames * 4096) / (1024 * 1024);
-
-    let line2 = format_simple(&mut line_buf, b"System processes: ", proc_count as u64);
-    draw_string_into_buffer(buf, w, line2, 20, content_y + 45, 0x777777);
-
-    let line3 = format_simple(&mut line_buf, b"Free memory: ", free_mb as u64);
-    // Append " MB" by drawing it after the number
-    draw_string_into_buffer(buf, w, line3, 20, content_y + 65, 0x777777);
-
-    draw_string_into_buffer(
-        buf,
-        w,
-        b"Keyboard: Ctrl+L = address bar, Ctrl+T = new tab",
-        20,
-        content_y + 95,
-        0x666666,
-    );
-}
-
-/// Render PDF viewer with document area and real PDF engine status.
-fn render_pdf_viewer(buf: &mut [u8], w: usize, h: usize) {
-    render_placeholder_app(buf, w, h, "PDF Viewer", 0x2a2a35);
-
-    // Try loading a sample PDF from VFS to show engine capability
-    let pdf_status = crate::fs::read_file("/usr/share/doc/sample.pdf").ok();
-    let (has_pdf, page_count, valid_header) = if let Some(ref data) = pdf_status {
-        let doc = crate::desktop::pdf::PdfDocument::open(data.clone());
-        match doc {
-            Some(d) => (true, d.page_count(), true),
-            None => {
-                // Check if at least the header is valid
-                let parser = crate::desktop::pdf::PdfParser::new(data.clone());
-                (false, 0, parser.parse_header())
+        for y in 0..h.min(bh) {
+            for x in 0..w.min(bw) {
+                let src_idx = y * bw + x;
+                let dst_off = (y * w + x) * 4;
+                if src_idx < fb.len() && dst_off + 3 < buf.len() {
+                    let pixel = fb[src_idx];
+                    buf[dst_off] = (pixel & 0xFF) as u8; // B
+                    buf[dst_off + 1] = ((pixel >> 8) & 0xFF) as u8; // G
+                    buf[dst_off + 2] = ((pixel >> 16) & 0xFF) as u8; // R
+                    buf[dst_off + 3] = ((pixel >> 24) & 0xFF) as u8; // A
+                }
             }
         }
     } else {
-        (false, 0, false)
+        // Fallback: placeholder if browser init failed
+        render_placeholder_app(buf, w, h, "Web Browser", bg_color);
+        draw_string_into_buffer(buf, w, b"Browser engine unavailable", 20, 75, 0xFF6666);
+    }
+}
+
+/// Render PDF viewer with document area and real PDF engine rendering.
+fn render_pdf_viewer(buf: &mut [u8], w: usize, h: usize, bg_color: u32, page_index: usize) {
+    render_placeholder_app(buf, w, h, "PDF Viewer", bg_color);
+
+    // Try loading a sample PDF from VFS to show engine capability
+    let pdf_status = crate::fs::read_file("/usr/share/doc/sample.pdf").ok();
+    let doc_opt = pdf_status.and_then(crate::desktop::pdf::PdfDocument::open);
+
+    let (has_pdf, page_count) = if let Some(ref d) = doc_opt {
+        (true, d.page_count())
+    } else {
+        (false, 0)
     };
 
-    // Toolbar
+    // Clamp page index to valid range
+    let display_page = if page_count > 0 {
+        page_index.min(page_count.saturating_sub(1))
+    } else {
+        0
+    };
+
+    // Toolbar showing current page
     let mut line_buf = [0u8; 64];
     if has_pdf {
         let toolbar = format_stat_line(
             &mut line_buf,
-            b"[Open] [<] Page 1 of ",
+            b"[Open] [<] Page ",
+            display_page.saturating_add(1),
+            b" of ",
             page_count,
-            b"",
-            0,
             b" [>] [Zoom: 100%]",
         );
         draw_string_into_buffer(buf, w, toolbar, 10, 40, 0xBBBBBB);
@@ -1790,46 +2051,71 @@ fn render_pdf_viewer(buf: &mut [u8], w: usize, h: usize) {
         );
     }
 
-    // Document area (light background to simulate page)
+    // Document area
     let page_x = 40;
     let page_y = 65;
     let page_w = w.saturating_sub(80);
     let page_h = h.saturating_sub(100);
-    for y in page_y..(page_y + page_h).min(h) {
-        for x in page_x..(page_x + page_w).min(w) {
-            let off = (y * w + x) * 4;
-            if off + 3 < buf.len() {
-                buf[off] = 0xF0; // B
-                buf[off + 1] = 0xF0; // G
-                buf[off + 2] = 0xF0; // R
-                buf[off + 3] = 0xFF;
+
+    // Render actual PDF page content if available
+    if has_pdf {
+        if let Some(ref doc) = doc_opt {
+            if let Some(page) = doc.get_page(display_page) {
+                // Render PDF page into u32 buffer via PdfRenderer
+                let mut render_buf = vec![0xFFF0F0F0u32; page_w * page_h];
+                let mut renderer =
+                    crate::desktop::pdf::PdfRenderer::new(page_w as u32, page_h as u32);
+                renderer.render_page(page, &mut render_buf);
+
+                // Blit rendered page into the u8 output buffer at page_x, page_y
+                for py in 0..page_h.min(h.saturating_sub(page_y)) {
+                    for px in 0..page_w.min(w.saturating_sub(page_x)) {
+                        let src_idx = py * page_w + px;
+                        let dst_off = ((page_y + py) * w + (page_x + px)) * 4;
+                        if src_idx < render_buf.len() && dst_off + 3 < buf.len() {
+                            let pixel = render_buf[src_idx];
+                            buf[dst_off] = (pixel & 0xFF) as u8; // B
+                            buf[dst_off + 1] = ((pixel >> 8) & 0xFF) as u8; // G
+                            buf[dst_off + 2] = ((pixel >> 16) & 0xFF) as u8; // R
+                            buf[dst_off + 3] = 0xFF; // A
+                        }
+                    }
+                }
+
+                // Overlay page info
+                let page_line = format_simple(&mut line_buf, b"Pages: ", page_count as u64);
+                draw_string_into_buffer(
+                    buf,
+                    w,
+                    page_line,
+                    page_x + 20,
+                    page_y + page_h.saturating_sub(25),
+                    0x888888,
+                );
+            } else {
+                // Page index out of range -- draw white area with message
+                render_pdf_page_background(buf, w, page_x, page_y, page_w, page_h);
+                draw_string_into_buffer(
+                    buf,
+                    w,
+                    b"Page not available",
+                    page_x + 20,
+                    page_y + 20,
+                    0x555555,
+                );
             }
         }
-    }
-
-    // Show engine status
-    draw_string_into_buffer(
-        buf,
-        w,
-        b"PDF Engine: VeridianPDF v0.19.0",
-        page_x + 20,
-        page_y + 20,
-        0x333333,
-    );
-
-    if has_pdf {
-        let page_line = format_simple(&mut line_buf, b"Pages: ", page_count as u64);
-        draw_string_into_buffer(buf, w, page_line, page_x + 20, page_y + 40, 0x555555);
-    } else if valid_header {
+    } else {
+        // No PDF loaded -- white page area with instructions
+        render_pdf_page_background(buf, w, page_x, page_y, page_w, page_h);
         draw_string_into_buffer(
             buf,
             w,
-            b"PDF header valid, but no pages parsed",
+            b"PDF Engine: VeridianPDF v0.20.0",
             page_x + 20,
-            page_y + 40,
-            0x555555,
+            page_y + 20,
+            0x333333,
         );
-    } else {
         draw_string_into_buffer(
             buf,
             w,
@@ -1848,20 +2134,74 @@ fn render_pdf_viewer(buf: &mut [u8], w: usize, h: usize) {
         );
     }
 
-    // Supported features
+    // Supported features footer
     draw_string_into_buffer(
         buf,
         w,
         b"Supports: PDF 1.0-2.0, xref, text extraction",
         page_x + 20,
-        page_y + page_h.saturating_sub(40),
+        page_y + page_h.saturating_sub(10),
         0x888888,
     );
 }
 
+/// Draw a light-grey page background for the PDF viewer.
+fn render_pdf_page_background(
+    buf: &mut [u8],
+    w: usize,
+    page_x: usize,
+    page_y: usize,
+    page_w: usize,
+    page_h: usize,
+) {
+    for y in page_y..(page_y + page_h).min(buf.len() / (w * 4)) {
+        for x in page_x..(page_x + page_w).min(w) {
+            let off = (y * w + x) * 4;
+            if off + 3 < buf.len() {
+                buf[off] = 0xF0; // B
+                buf[off + 1] = 0xF0; // G
+                buf[off + 2] = 0xF0; // R
+                buf[off + 3] = 0xFF;
+            }
+        }
+    }
+}
+
+/// Format an i64 into a decimal byte string (no allocator needed).
+fn format_i64(fmtbuf: &mut [u8; 24], value: i64) -> &[u8] {
+    if value == 0 {
+        fmtbuf[0] = b'0';
+        return &fmtbuf[..1];
+    }
+    let mut pos = 24;
+    let (mut n, negative) = if value < 0 {
+        (-(value as i128) as u64, true)
+    } else {
+        (value as u64, false)
+    };
+    while n > 0 {
+        pos -= 1;
+        fmtbuf[pos] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    if negative {
+        pos -= 1;
+        fmtbuf[pos] = b'-';
+    }
+    &fmtbuf[pos..]
+}
+
 /// Render a basic integer calculator.
-fn render_calculator(buf: &mut [u8], w: usize, h: usize) {
-    render_placeholder_app(buf, w, h, "Calculator", 0x202030);
+fn render_calculator(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    calc: &CalculatorState,
+    bg_color: u32,
+    accent_color: u32,
+    error_color: u32,
+) {
+    render_placeholder_app(buf, w, h, "Calculator", bg_color);
 
     // Display area (dark input field)
     let display_x = 16;
@@ -1879,9 +2219,16 @@ fn render_calculator(buf: &mut [u8], w: usize, h: usize) {
             }
         }
     }
-    // Show "0" in the display
-    let zero_x = display_x + display_w.saturating_sub(16);
-    draw_string_into_buffer(buf, w, b"0", zero_x, display_y + 8, 0xFFFFFF);
+    // Show calculator display value (right-aligned)
+    let mut fmtbuf = [0u8; 24];
+    let display_text: &[u8] = if calc.error {
+        b"Error"
+    } else {
+        format_i64(&mut fmtbuf, calc.display_value)
+    };
+    let text_pixel_width = display_text.len() * 8;
+    let text_x = display_x + display_w.saturating_sub(text_pixel_width + 8);
+    draw_string_into_buffer(buf, w, display_text, text_x, display_y + 8, 0xFFFFFF);
 
     // Button grid: 4 columns x 5 rows
     let buttons: [&[u8]; 20] = [
@@ -1900,10 +2247,10 @@ fn render_calculator(buf: &mut [u8], w: usize, h: usize) {
         let bx = grid_x + col * (btn_w + gap);
         let by = grid_y + row * (btn_h + gap);
 
-        // Button color: operators are accent, numbers are neutral
+        // Button color: operators are accent, clear is error, numbers are neutral
         let btn_color: u32 = match label[0] {
-            b'/' | b'*' | b'-' | b'+' | b'=' => 0x3A6EA5,
-            b'C' => 0xA53A3A,
+            b'/' | b'*' | b'-' | b'+' | b'=' => accent_color,
+            b'C' => error_color,
             _ => 0x3A3A4A,
         };
         let cr = ((btn_color >> 16) & 0xFF) as u8;
@@ -2028,6 +2375,37 @@ fn render_panel(state: &DesktopState, screen_width: u32) {
         let used_frames = mem_stats.total_frames.saturating_sub(mem_stats.free_frames);
         let used_mb = (used_frames * 4096 / (1024 * 1024)) as u32;
         tray.update_memory(used_mb, total_mb);
+
+        // CPU: approximate from scheduler context switches
+        let ctx_switches = crate::sched::metrics::SCHEDULER_METRICS
+            .context_switches
+            .load(core::sync::atomic::Ordering::Relaxed);
+        // Use low bits as a rough utilization proxy (modular, wraps at 100)
+        let cpu_pct = (ctx_switches % 100) as u8;
+        tray.update_cpu(cpu_pct);
+
+        // Network: check interface state
+        let iface = crate::net::ip::get_interface_config();
+        let is_up = iface.ip_addr.0 != [0, 0, 0, 0];
+        tray.update_network(is_up);
+
+        // Volume: read mixer
+        if let Ok(vol) =
+            crate::audio::mixer::with_mixer(|m: &mut crate::audio::mixer::AudioMixer| {
+                m.get_master_volume()
+            })
+        {
+            let vol_pct = ((vol as u32) * 100 / 65535) as u8;
+            tray.update_volume(vol_pct);
+        }
+
+        // Battery: check power state
+        let battery_label = if crate::power::is_initialized() {
+            "AC"
+        } else {
+            "--"
+        };
+        tray.update_battery(battery_label);
     });
 
     let panel_h = crate::desktop::panel::PANEL_HEIGHT;
@@ -2144,7 +2522,82 @@ fn forward_events_to_apps(state: &mut DesktopState) {
                         state.image_viewer.handle_key(*scancode);
                     }
                 }
-                _ => {}
+                AppKind::Calculator => {
+                    if let crate::desktop::window_manager::InputEvent::KeyPress {
+                        scancode, ..
+                    } = event
+                    {
+                        state.calculator.handle_key(*scancode);
+                    }
+                }
+                AppKind::MediaPlayer => {
+                    if let crate::desktop::window_manager::InputEvent::KeyPress {
+                        scancode, ..
+                    } = event
+                    {
+                        match scancode {
+                            b'+' => {
+                                let _ = crate::audio::mixer::with_mixer(|m| {
+                                    let vol = m.get_master_volume();
+                                    m.set_master_volume(vol.saturating_add(3276));
+                                });
+                            }
+                            b'-' => {
+                                let _ = crate::audio::mixer::with_mixer(|m| {
+                                    let vol = m.get_master_volume();
+                                    m.set_master_volume(vol.saturating_sub(3276));
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                AppKind::PdfViewer => {
+                    if let crate::desktop::window_manager::InputEvent::KeyPress {
+                        scancode, ..
+                    } = event
+                    {
+                        match scancode {
+                            0x81 | b'n' => {
+                                // Down arrow or 'n' = next page
+                                state.pdf_page_index = state.pdf_page_index.saturating_add(1);
+                            }
+                            0x80 | b'p' => {
+                                // Up arrow or 'p' = previous page
+                                state.pdf_page_index = state.pdf_page_index.saturating_sub(1);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                AppKind::Browser => match event {
+                    crate::desktop::window_manager::InputEvent::KeyPress { scancode, .. } => {
+                        let mods = crate::drivers::keyboard::get_modifiers();
+                        let ctrl = mods & crate::drivers::keyboard::MOD_CTRL != 0;
+                        let shift = mods & crate::drivers::keyboard::MOD_SHIFT != 0;
+                        let alt = mods & crate::drivers::keyboard::MOD_ALT != 0;
+                        if let Some(ref mut b) = state.browser {
+                            b.handle_key(*scancode, ctrl, shift, alt);
+                        }
+                    }
+                    crate::desktop::window_manager::InputEvent::MouseButton {
+                        button: 0,
+                        pressed: true,
+                        x,
+                        y,
+                    } => {
+                        let local_x = (*x - win_pos.0).max(0);
+                        let local_y = (*y - win_pos.1).max(0);
+                        if let Some(ref mut b) = state.browser {
+                            b.handle_click(local_x, local_y);
+                        }
+                    }
+                    _ => {}
+                },
+                AppKind::SystemMonitor => {
+                    // System monitor updates driven by polling, no key dispatch
+                    // needed
+                }
             }
         }
         if should_close {

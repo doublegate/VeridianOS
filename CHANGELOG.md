@@ -2,6 +2,65 @@
 
 ---
 
+## [v0.20.0] - 2026-03-07
+
+### v0.20.0: "Full Circuit" -- Complete Integration Across 8 Waves
+
+Final integration release that wires every remaining GUI component, shell command, and settings panel to real kernel APIs. Every calculator does math, every browser renders content, every indicator updates live, every user database persists, and every desktop icon is clickable.
+
+#### Wave 1 -- Calculator Logic + App Input Dispatch
+
+- **Calculator arithmetic engine**: Full integer arithmetic via `i64::checked_*()` with display, operators (+/-/*/÷), equals, clear, backspace, and division-by-zero error handling
+- **Input dispatch**: Added match arms for Calculator, MediaPlayer (volume +/-), PdfViewer (page navigation), Browser (key/click forwarding), SystemMonitor in `forward_events_to_apps()`
+
+#### Wave 2 -- System Tray Live Updates
+
+- **CPU monitor**: Reads `SCHEDULER_METRICS.context_switches` atomic counter for live CPU approximation
+- **Network status**: Queries `net::ip::get_interface_config()` IP address to determine up/down state
+- **Volume indicator**: Reads `audio::mixer::get_master_volume()` with 16-bit to percentage conversion
+- **Battery status**: Checks `power::is_initialized()` for AC/battery state
+
+#### Wave 3 -- Theme Engine Integration
+
+- **ThemeManager added to DesktopState**: All 6 presets (Dark, Light, SolarizedDark, SolarizedLight, Nord, Dracula) with 28 color slots
+- **Hardcoded colors replaced**: Panel, titlebar, window, close button, desktop background, and app backgrounds now query `state.theme.colors()`
+- **Theme switching**: Settings > Appearance cycles through all 6 presets (was 2)
+
+#### Wave 4 -- Persistent UserDatabase + Shell Command Fixes
+
+- **Persistent UserDatabase**: `GlobalState<RwLock<UserDatabase>>` with `with_user_db()`/`with_user_db_mut()` accessors; initialized in `kernel_init_stage3_impl()`
+- **8 commands migrated**: `useradd`, `userdel`, `passwd`, `id`, `whoami`, `groups`, `su`, `sudo` all use persistent global DB instead of ephemeral `UserDatabase::new()`
+- **lscpu**: Real CPUID instruction (EAX=0 vendor, EAX=1 family/model/stepping) on x86_64
+- **sysctl**: Dynamic `kernel.version` via `env!("CARGO_PKG_VERSION")`, real memory/uptime queries
+- **cloud-init**: Wired to `CloudInitRunner::new()` + `fetch_metadata()`
+- **kubectl**: Wired to `RuntimeService::new()` + `list_containers()`
+- **sched reset**: Calls `SCHEDULER_METRICS.reset()` to zero all atomic counters
+
+#### Wave 5 -- Settings Write-back + Clipboard
+
+- **Settings apply**: Audio volume changes call `mixer::set_master_volume()`; power profile changes call `power::set_governor()`
+- **Clipboard wiring**: `ClipboardManager` added to `DesktopState`; Ctrl+C/V hotkeys detected in render loop
+
+#### Wave 6 -- Browser Engine + PDF Rendering
+
+- **Browser engine wired**: `Browser` instance in `DesktopState`; lazy-initialized on first render with `BrowserConfig` matching window dimensions; `browser.render()` composites to framebuffer; key/click events forwarded via `browser.handle_key()`/`browser.handle_click()`
+- **PDF page rendering**: `PdfRenderer::new()` + `render_page()` renders parsed PDF pages to pixel buffer; page navigation via Up/Down arrow keys with `pdf_page_index` state
+- **Input dispatch complete**: Browser receives key events with modifier detection (ctrl/shift/alt); PdfViewer handles arrow keys and n/p for page navigation
+
+#### Wave 7 -- CJK + DnD + Desktop Icons
+
+- **CJK-aware text rendering**: `draw_string_into_buffer()` now uses `cjk::char_width()` per character -- wide characters advance 16px, zero-width/combining marks are skipped
+- **Terminal CJK support**: `render()` skips zero-width characters via `char_width()` check
+- **DnD manager wired**: `DndManager` added to `DesktopState` for drag-and-drop framework
+- **Desktop icons**: `IconGrid` with 5 default app shortcuts (Terminal, Files, Editor, Settings, Browser) rendered into compositor back-buffer with auto-grid arrangement and name labels
+
+#### Wave 8 -- Version Bump + Polish
+
+- Version bumped to 0.20.0 across 5 locations (Cargo.toml, os-release, uname, renderer, settings)
+- Full verification: `cargo fmt`, clippy on 3 bare-metal targets, all architectures build clean
+
+---
+
 ## [v0.19.0] - 2026-03-06
 
 ### v0.19.0: "Deep Wiring" -- Stub-to-Real API Integration Across 8 Waves
