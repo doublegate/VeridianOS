@@ -10,10 +10,12 @@
  */
 
 #include <stddef.h>
+#include <stdint.h>
 #include <errno.h>
 #include <time.h>
 #include <pwd.h>
-#include <dlfcn.h>
+
+typedef long ssize_t;
 
 /* ========================================================================= */
 /* Time functions                                                            */
@@ -582,40 +584,45 @@ struct passwd *getpwuid(uid_t uid)
     return NULL;    /* Not found. */
 }
 
+/* ========================================================================= */
+/* Password database iteration (setpwent / getpwent / endpwent)              */
+/* ========================================================================= */
+
+static int __pw_fd = -1;
+
+void setpwent(void)
+{
+    if (__pw_fd >= 0)
+        close(__pw_fd);
+    __pw_fd = open("/etc/passwd", __PW_O_RDONLY);
+}
+
+void endpwent(void)
+{
+    if (__pw_fd >= 0) {
+        close(__pw_fd);
+        __pw_fd = -1;
+    }
+}
+
+struct passwd *getpwent(void)
+{
+    if (__pw_fd < 0) {
+        __pw_fd = open("/etc/passwd", __PW_O_RDONLY);
+        if (__pw_fd < 0)
+            return (struct passwd *)0;
+    }
+
+    while (__read_passwd_line(__pw_fd) > 0) {
+        if (__parse_passwd_line(&_parsed_pw))
+            return &_parsed_pw;
+    }
+    return (struct passwd *)0;
+}
+
 char *getlogin(void)
 {
     return "root";
-}
-
-/* ========================================================================= */
-/* Dynamic loading (stubs -- no dynamic linking on VeridianOS yet)            */
-/* ========================================================================= */
-
-static char _dl_error[] = "dynamic loading not supported";
-
-void *dlopen(const char *filename, int flags)
-{
-    (void)filename;
-    (void)flags;
-    return NULL;
-}
-
-void *dlsym(void *handle, const char *symbol)
-{
-    (void)handle;
-    (void)symbol;
-    return NULL;
-}
-
-int dlclose(void *handle)
-{
-    (void)handle;
-    return -1;
-}
-
-char *dlerror(void)
-{
-    return _dl_error;
 }
 
 /* ========================================================================= */

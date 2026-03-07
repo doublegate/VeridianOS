@@ -653,6 +653,28 @@ void *aligned_alloc(size_t alignment, size_t size)
     return (void *)aligned;
 }
 
+int posix_memalign(void **memptr, size_t alignment, size_t size)
+{
+    /*
+     * POSIX posix_memalign(): alignment must be a power of two and a
+     * multiple of sizeof(void *).
+     */
+    if (!memptr)
+        return EINVAL;
+    if (alignment < sizeof(void *))
+        return EINVAL;
+    /* Check power of two */
+    if ((alignment & (alignment - 1)) != 0)
+        return EINVAL;
+
+    void *p = aligned_alloc(alignment, size);
+    if (!p)
+        return ENOMEM;
+
+    *memptr = p;
+    return 0;
+}
+
 /* Multibyte/wide character stubs are in posix_stubs2.c */
 
 /* ========================================================================= */

@@ -229,6 +229,12 @@ unsigned int alarm(unsigned int seconds);
 #define _SC_PAGESIZE            30
 #define _SC_PAGE_SIZE           _SC_PAGESIZE
 #define _SC_OPEN_MAX            4
+#define _SC_HOST_NAME_MAX       180
+#define _SC_LOGIN_NAME_MAX      181
+#define _SC_PHYS_PAGES          182
+#define _SC_AVPHYS_PAGES        183
+#define _SC_LINE_MAX            184
+#define _SC_CHILD_MAX           185
 
 /** Get configurable system variables. */
 long sysconf(int name);

@@ -25,6 +25,15 @@ struct group *getgrnam(const char *name);
 struct group *getgrgid(gid_t gid);
 int getgrouplist(const char *user, gid_t group, gid_t *groups, int *ngroups);
 
+/** Rewind the group database to the beginning. */
+void setgrent(void);
+
+/** Close the group database. */
+void endgrent(void);
+
+/** Read the next entry from the group database. */
+struct group *getgrent(void);
+
 #ifdef __cplusplus
 }
 #endif

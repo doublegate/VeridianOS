@@ -1154,6 +1154,48 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
         }
     }
 
+    // DRM ioctl dispatch: check if the fd refers to a /dev/dri/* device.
+    // Also handle evdev ioctls for /dev/input/event* devices.
+    if fd > 2 {
+        if let Some(proc) = process::current_process() {
+            let file_table = proc.file_table.lock();
+            if let Some(file) = file_table.get(fd as crate::fs::file::FileDescriptor) {
+                if let Some(ref path) = file.path {
+                    if path.contains("dri/") {
+                        // DRM ioctl -- dispatch to drm_ioctl module
+                        drop(file_table);
+                        return match crate::graphics::drm_ioctl::drm_ioctl_dispatch(
+                            fd as i32,
+                            cmd as u64,
+                            arg as *mut u8,
+                        ) {
+                            Ok(v) => Ok(v as usize),
+                            Err(_) => Err(SyscallError::InvalidArgument),
+                        };
+                    } else if path.contains("input/event") {
+                        // evdev ioctl -- extract minor from path
+                        let minor = if path.ends_with("event0") {
+                            64u32
+                        } else if path.ends_with("event1") {
+                            65u32
+                        } else {
+                            return Err(SyscallError::InvalidArgument);
+                        };
+                        drop(file_table);
+                        return match crate::drivers::evdev::handle_ioctl(
+                            minor,
+                            cmd as u32,
+                            arg as *mut u8,
+                        ) {
+                            Ok(v) => Ok(v as usize),
+                            Err(_) => Err(SyscallError::InvalidArgument),
+                        };
+                    }
+                }
+            }
+        }
+    }
+
     // Terminal ioctls are only valid on terminal fds (0=stdin, 1=stdout,
     // 2=stderr which are connected to the serial console). Regular files
     // opened via open() must return ENOTTY so that isatty() returns false

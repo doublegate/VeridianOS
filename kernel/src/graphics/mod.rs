@@ -6,6 +6,7 @@ use crate::error::KernelError;
 
 pub mod compositor;
 pub mod cursor;
+pub mod drm_ioctl;
 pub mod fbcon;
 pub mod font8x16;
 pub mod framebuffer;

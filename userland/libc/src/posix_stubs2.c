@@ -9,12 +9,14 @@
  */
 
 #include <stddef.h>
+#include <stdint.h>
 #include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
 
-/* Forward declarations to avoid pulling in full headers */
+/* sigset_t is not pulled in by the above headers. */
 typedef unsigned long sigset_t;
-typedef long pid_t;
-typedef unsigned int mode_t;
 
 /* ========================================================================= */
 /* putchar                                                                   */
@@ -34,11 +36,19 @@ int putchar(int c)
 /* sysconf                                                                   */
 /* ========================================================================= */
 
-#define _SC_CLK_TCK           2
-#define _SC_OPEN_MAX          4
-#define _SC_NPROCESSORS_ONLN  84
-#define _SC_PAGESIZE          30
-#define _SC_ARG_MAX           0
+#define _SC_CLK_TCK             2
+#define _SC_OPEN_MAX            4
+#define _SC_NPROCESSORS_ONLN    84
+#define _SC_NPROCESSORS_CONF    83
+#define _SC_PAGESIZE            30
+#define _SC_PAGE_SIZE           _SC_PAGESIZE
+#define _SC_ARG_MAX             0
+#define _SC_HOST_NAME_MAX       180
+#define _SC_LOGIN_NAME_MAX      181
+#define _SC_PHYS_PAGES          182
+#define _SC_AVPHYS_PAGES        183
+#define _SC_LINE_MAX            184
+#define _SC_CHILD_MAX           185
 
 long sysconf(int name)
 {
@@ -46,6 +56,7 @@ long sysconf(int name)
     case _SC_CLK_TCK:
         return 100; /* 100 Hz tick (standard for POSIX) */
     case _SC_NPROCESSORS_ONLN:
+    case _SC_NPROCESSORS_CONF:
         return 1; /* Single CPU for now */
     case _SC_PAGESIZE:
         return 4096;
@@ -53,6 +64,18 @@ long sysconf(int name)
         return 256;
     case _SC_ARG_MAX:
         return 131072; /* 128 KiB */
+    case _SC_HOST_NAME_MAX:
+        return 64;
+    case _SC_LOGIN_NAME_MAX:
+        return 32;
+    case _SC_PHYS_PAGES:
+        return 65536; /* 256 MB worth of 4K pages */
+    case _SC_AVPHYS_PAGES:
+        return 32768; /* ~128 MB available */
+    case _SC_LINE_MAX:
+        return 2048;
+    case _SC_CHILD_MAX:
+        return 256;
     default:
         return -1;
     }
@@ -260,7 +283,7 @@ long fpathconf(int fd, int name)
 /* Multibyte/wide character stubs                                            */
 /* ========================================================================= */
 
-typedef int wchar_t;
+/* wchar_t is provided by <stddef.h> via <stdlib.h> */
 
 int mblen(const char *s, unsigned long n)
 {
@@ -354,7 +377,7 @@ unsigned long mbrlen(const char *s, unsigned long n, mbstate_t_stub *ps)
 /* utime                                                                     */
 /* ========================================================================= */
 
-typedef long time_t;
+/* time_t is provided by <veridian/types.h> via <sys/types.h> */
 
 struct utimbuf {
     time_t actime;
@@ -404,46 +427,191 @@ FILE *freopen(const char *pathname, const char *mode, FILE *stream)
 }
 
 /* ========================================================================= */
-/* getaddrinfo / freeaddrinfo stubs                                          */
+/* getaddrinfo / freeaddrinfo -- minimal numeric-only implementation         */
 /* ========================================================================= */
 
-struct addrinfo_stub {
-    int              ai_flags;
-    int              ai_family;
-    int              ai_socktype;
-    int              ai_protocol;
-    unsigned int     ai_addrlen;
-    void            *ai_addr;
-    char            *ai_canonname;
-    struct addrinfo_stub *ai_next;
-};
+#include <netdb.h>
+#include <netinet/in.h>
 
-int getaddrinfo(const char *node, const char *service,
-                const struct addrinfo_stub *hints,
-                struct addrinfo_stub **res)
+/*
+ * Case-insensitive compare for getaddrinfo hostname matching.
+ */
+static int __enc_casecmp_gai(const char *a, const char *b)
 {
-    (void)node; (void)service; (void)hints; (void)res;
-    return -2; /* EAI_NONAME */
+    while (*a && *b) {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca += 32;
+        if (cb >= 'A' && cb <= 'Z') cb += 32;
+        if (ca != cb) return 1;
+        a++; b++;
+    }
+    return *a != *b;
 }
 
-void freeaddrinfo(struct addrinfo_stub *res)
+/*
+ * __parse_ipv4: parse a dotted-decimal IPv4 address into a network-order
+ * uint32_t.  Returns 1 on success, 0 on failure.
+ */
+static int __parse_ipv4(const char *str, uint32_t *out)
 {
-    (void)res;
+    uint32_t addr = 0;
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        unsigned int octet = 0;
+        int digits = 0;
+
+        while (*str >= '0' && *str <= '9') {
+            octet = octet * 10 + (unsigned int)(*str - '0');
+            if (octet > 255) return 0;
+            str++;
+            digits++;
+        }
+        if (digits == 0) return 0;
+
+        addr = (addr << 8) | octet;
+
+        if (i < 3) {
+            if (*str != '.') return 0;
+            str++;
+        }
+    }
+
+    if (*str != '\0') return 0;
+
+    *out = htonl(addr);
+    return 1;
+}
+
+/*
+ * __parse_port: parse a numeric port string.
+ * Returns the port in host byte order, or -1 on failure.
+ */
+static int __parse_port(const char *service)
+{
+    if (!service || *service == '\0') return 0;
+
+    unsigned int port = 0;
+    while (*service) {
+        if (*service < '0' || *service > '9') return -1;
+        port = port * 10 + (unsigned int)(*service - '0');
+        if (port > 65535) return -1;
+        service++;
+    }
+    return (int)port;
+}
+
+int getaddrinfo(const char *node, const char *service,
+                const struct addrinfo *hints,
+                struct addrinfo **res)
+{
+    int family    = AF_UNSPEC;
+    int socktype  = 0;
+    int protocol  = 0;
+    int flags     = 0;
+
+    if (!res) return EAI_FAIL;
+    *res = (struct addrinfo *)0;
+
+    if (hints) {
+        family   = hints->ai_family;
+        socktype = hints->ai_socktype;
+        protocol = hints->ai_protocol;
+        flags    = hints->ai_flags;
+    }
+
+    /* We only support AF_INET and AF_UNSPEC */
+    if (family != AF_UNSPEC && family != AF_INET)
+        return EAI_FAMILY;
+
+    /* Parse port */
+    int port = __parse_port(service);
+    if (port < 0) return EAI_SERVICE;
+
+    /* Determine the IPv4 address */
+    uint32_t addr_net;  /* network byte order */
+
+    if (!node || *node == '\0') {
+        /* NULL node: AI_PASSIVE -> INADDR_ANY, else loopback */
+        if (flags & AI_PASSIVE)
+            addr_net = htonl(INADDR_ANY);
+        else
+            addr_net = htonl(INADDR_LOOPBACK);
+    } else if (__enc_casecmp_gai(node, "localhost") == 0) {
+        addr_net = htonl(INADDR_LOOPBACK);
+    } else {
+        /* Try parsing as numeric IPv4 */
+        if (!__parse_ipv4(node, &addr_net))
+            return EAI_NONAME;  /* No DNS resolution */
+    }
+
+    /* Default to SOCK_STREAM if not specified */
+    if (socktype == 0) socktype = SOCK_STREAM;
+    if (protocol == 0) {
+        if (socktype == SOCK_STREAM) protocol = IPPROTO_TCP;
+        else if (socktype == SOCK_DGRAM) protocol = IPPROTO_UDP;
+    }
+
+    /* Allocate result: addrinfo + sockaddr_in in one block */
+    struct addrinfo *ai = (struct addrinfo *)malloc(
+        sizeof(struct addrinfo) + sizeof(struct sockaddr_in));
+    if (!ai) return EAI_MEMORY;
+
+    struct sockaddr_in *sa = (struct sockaddr_in *)(ai + 1);
+    memset(sa, 0, sizeof(*sa));
+    sa->sin_family = AF_INET;
+    sa->sin_port   = htons((uint16_t)port);
+    sa->sin_addr.s_addr = addr_net;
+
+    memset(ai, 0, sizeof(*ai));
+    ai->ai_flags    = flags;
+    ai->ai_family   = AF_INET;
+    ai->ai_socktype = socktype;
+    ai->ai_protocol = protocol;
+    ai->ai_addrlen  = sizeof(struct sockaddr_in);
+    ai->ai_addr     = (struct sockaddr *)sa;
+    ai->ai_canonname = (char *)0;
+    ai->ai_next     = (struct addrinfo *)0;
+
+    *res = ai;
+    return 0;
+}
+
+void freeaddrinfo(struct addrinfo *res)
+{
+    while (res) {
+        struct addrinfo *next = res->ai_next;
+        /* ai_canonname is not allocated separately in our implementation */
+        free(res);
+        res = next;
+    }
 }
 
 const char *gai_strerror(int errcode)
 {
-    (void)errcode;
-    return "Name resolution not supported";
+    switch (errcode) {
+    case 0:             return "Success";
+    case EAI_NONAME:    return "Name or service not known";
+    case EAI_SERVICE:   return "Servname not supported for ai_socktype";
+    case EAI_FAIL:      return "Non-recoverable failure in name resolution";
+    case EAI_MEMORY:    return "Memory allocation failure";
+    case EAI_FAMILY:    return "ai_family not supported";
+    case EAI_AGAIN:     return "Temporary failure in name resolution";
+    case EAI_BADFLAGS:  return "Bad value for ai_flags";
+    case EAI_SOCKTYPE:  return "ai_socktype not supported";
+    case EAI_SYSTEM:    return "System error";
+    case EAI_OVERFLOW:  return "Buffer overflow";
+    default:            return "Unknown error";
+    }
 }
 
-int getnameinfo(const void *sa, unsigned int salen,
-                char *host, unsigned int hostlen,
-                char *serv, unsigned int servlen, int flags)
+int getnameinfo(const struct sockaddr *sa, socklen_t salen,
+                char *host, socklen_t hostlen,
+                char *serv, socklen_t servlen, int flags)
 {
     (void)sa; (void)salen; (void)host; (void)hostlen;
     (void)serv; (void)servlen; (void)flags;
-    return -2; /* EAI_NONAME */
+    return EAI_NONAME;
 }
 
 /* ========================================================================= */
@@ -830,8 +998,7 @@ double modf(double x, double *iptr)
 /* Locale-aware string functions (C/POSIX locale only)                       */
 /* ========================================================================= */
 
-extern int strcmp(const char *s1, const char *s2);
-extern unsigned long strlen(const char *s);
+/* strcmp and strlen are provided by <string.h> included above. */
 
 /* strcoll: locale-aware string compare -- in C locale, same as strcmp */
 int strcoll(const char *s1, const char *s2)
@@ -857,9 +1024,7 @@ unsigned long strxfrm(char *dest, const char *src, unsigned long n)
 /* stdio functions needed by C++ <cstdio>                                    */
 /* ========================================================================= */
 
-/* Forward declare FILE and streams (match stdio.h) */
-struct _FILE;
-typedef struct _FILE FILE;
+/* FILE already typedef'd above (freopen section); just need stream externs */
 extern FILE *stdin;
 extern FILE *stdout;
 extern FILE *stderr;

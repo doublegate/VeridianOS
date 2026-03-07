@@ -897,6 +897,42 @@ struct group *getgrgid(gid_t gid)
     return NULL;    /* Not found. */
 }
 
+/* ========================================================================= */
+/* Group database iteration (setgrent / getgrent / endgrent)                 */
+/* ========================================================================= */
+
+static int __gr_fd = -1;
+
+void setgrent(void)
+{
+    if (__gr_fd >= 0)
+        close(__gr_fd);
+    __gr_fd = open("/etc/group", O_RDONLY);
+}
+
+void endgrent(void)
+{
+    if (__gr_fd >= 0) {
+        close(__gr_fd);
+        __gr_fd = -1;
+    }
+}
+
+struct group *getgrent(void)
+{
+    if (__gr_fd < 0) {
+        __gr_fd = open("/etc/group", O_RDONLY);
+        if (__gr_fd < 0)
+            return (struct group *)0;
+    }
+
+    while (__read_group_line(__gr_fd) > 0) {
+        if (__parse_group_line(&_parsed_gr))
+            return &_parsed_gr;
+    }
+    return (struct group *)0;
+}
+
 int getgrouplist(const char *user, gid_t group, gid_t *groups, int *ngroups)
 {
     (void)user;
@@ -1612,7 +1648,7 @@ int initgroups(const char *user, gid_t group)
     return 0;
 }
 
-void endgrent(void) {}
+/* endgrent() is implemented above with setgrent()/getgrent(). */
 
 int chroot(const char *path)
 {

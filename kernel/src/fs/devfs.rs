@@ -312,6 +312,18 @@ impl VfsNode for DevNode {
                     Ok(0)
                 }
             }
+            // evdev input device nodes: /dev/input/event*
+            "input/event0" | "input/event1" => {
+                let minor = self._minor;
+                let bytes_read = crate::drivers::evdev::read_device(minor, buffer);
+                Ok(bytes_read)
+            }
+            // DRI device nodes: /dev/dri/card0, /dev/dri/renderD128
+            "dri/card0" | "dri/renderD128" => {
+                // DRM devices are ioctl-driven; read() is not the primary interface.
+                // Return 0 (no data available for plain reads).
+                Ok(0)
+            }
             _ => {
                 // Dispatch read to registered device driver via driver framework
                 if let Some(fw) = crate::services::driver_framework::try_get_driver_framework() {
@@ -431,58 +443,38 @@ impl VfsNode for DevNode {
     }
 }
 
-/// Device filesystem root directory
-struct DevRoot {
+/// A device subdirectory (e.g., `/dev/dri/`, `/dev/input/`).
+///
+/// Contains its own set of device nodes, supports lookup and readdir.
+struct DevSubDir {
+    #[allow(dead_code)] // Retained for debugging/identification
+    name: String,
     devices: RwLock<BTreeMap<String, Arc<DevNode>>>,
 }
 
-impl DevRoot {
-    fn new() -> Self {
-        let mut devices = BTreeMap::new();
-
-        // Create standard device nodes
-        devices.insert(
-            String::from("null"),
-            Arc::new(DevNode::new_char(String::from("null"), 1, 3)),
-        );
-
-        devices.insert(
-            String::from("zero"),
-            Arc::new(DevNode::new_char(String::from("zero"), 1, 5)),
-        );
-
-        devices.insert(
-            String::from("random"),
-            Arc::new(DevNode::new_char(String::from("random"), 1, 8)),
-        );
-
-        devices.insert(
-            String::from("urandom"),
-            Arc::new(DevNode::new_char(String::from("urandom"), 1, 9)),
-        );
-
-        devices.insert(
-            String::from("console"),
-            Arc::new(DevNode::new_char(String::from("console"), 5, 1)),
-        );
-
-        devices.insert(
-            String::from("tty0"),
-            Arc::new(DevNode::new_char(String::from("tty0"), 4, 0)),
-        );
-
+impl DevSubDir {
+    fn new(name: String) -> Self {
         Self {
-            devices: RwLock::new(devices),
+            name,
+            devices: RwLock::new(BTreeMap::new()),
         }
+    }
+
+    fn add_device(&self, dev_name: String, node: Arc<DevNode>) {
+        self.devices.write().insert(dev_name, node);
     }
 }
 
-impl VfsNode for DevRoot {
+impl VfsNode for DevSubDir {
     fn node_type(&self) -> NodeType {
         NodeType::Directory
     }
 
-    fn read(&self, _offset: usize, _buffer: &mut [u8]) -> Result<usize, KernelError> {
+    fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
+        // Dispatch reads on child device nodes.
+        // This is called when a file under the subdir is read directly.
+        // For evdev nodes, read input events; for DRI nodes, not supported.
+        let _ = buffer;
         Err(KernelError::FsError(FsError::IsADirectory))
     }
 
@@ -532,6 +524,192 @@ impl VfsNode for DevRoot {
     }
 
     fn lookup(&self, name: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        let devices = self.devices.read();
+        devices
+            .get(name)
+            .map(|node| node.clone() as Arc<dyn VfsNode>)
+            .ok_or(KernelError::FsError(FsError::NotFound))
+    }
+
+    fn create(
+        &self,
+        _name: &str,
+        _permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::OperationNotSupported {
+            operation: "create in device subdir",
+        })
+    }
+
+    fn mkdir(
+        &self,
+        _name: &str,
+        _permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::OperationNotSupported {
+            operation: "mkdir in device subdir",
+        })
+    }
+
+    fn unlink(&self, _name: &str) -> Result<(), KernelError> {
+        Err(KernelError::OperationNotSupported {
+            operation: "unlink device subdir node",
+        })
+    }
+
+    fn truncate(&self, _size: usize) -> Result<(), KernelError> {
+        Err(KernelError::FsError(FsError::IsADirectory))
+    }
+}
+
+/// Device filesystem root directory
+struct DevRoot {
+    devices: RwLock<BTreeMap<String, Arc<DevNode>>>,
+    /// Subdirectories (dri, input, etc.)
+    subdirs: RwLock<BTreeMap<String, Arc<DevSubDir>>>,
+}
+
+impl DevRoot {
+    fn new() -> Self {
+        let mut devices = BTreeMap::new();
+
+        // Create standard device nodes
+        devices.insert(
+            String::from("null"),
+            Arc::new(DevNode::new_char(String::from("null"), 1, 3)),
+        );
+
+        devices.insert(
+            String::from("zero"),
+            Arc::new(DevNode::new_char(String::from("zero"), 1, 5)),
+        );
+
+        devices.insert(
+            String::from("random"),
+            Arc::new(DevNode::new_char(String::from("random"), 1, 8)),
+        );
+
+        devices.insert(
+            String::from("urandom"),
+            Arc::new(DevNode::new_char(String::from("urandom"), 1, 9)),
+        );
+
+        devices.insert(
+            String::from("console"),
+            Arc::new(DevNode::new_char(String::from("console"), 5, 1)),
+        );
+
+        devices.insert(
+            String::from("tty0"),
+            Arc::new(DevNode::new_char(String::from("tty0"), 4, 0)),
+        );
+
+        // Create /dev/dri/ subdirectory with DRM device nodes
+        let dri_dir = Arc::new(DevSubDir::new(String::from("dri")));
+        dri_dir.add_device(
+            String::from("card0"),
+            Arc::new(DevNode::new_char(String::from("dri/card0"), 226, 0)),
+        );
+        dri_dir.add_device(
+            String::from("renderD128"),
+            Arc::new(DevNode::new_char(String::from("dri/renderD128"), 226, 128)),
+        );
+
+        // Create /dev/input/ subdirectory with evdev device nodes
+        let input_dir = Arc::new(DevSubDir::new(String::from("input")));
+        input_dir.add_device(
+            String::from("event0"),
+            Arc::new(DevNode::new_char(String::from("input/event0"), 13, 64)),
+        );
+        input_dir.add_device(
+            String::from("event1"),
+            Arc::new(DevNode::new_char(String::from("input/event1"), 13, 65)),
+        );
+
+        let mut subdirs = BTreeMap::new();
+        subdirs.insert(String::from("dri"), dri_dir);
+        subdirs.insert(String::from("input"), input_dir);
+
+        Self {
+            devices: RwLock::new(devices),
+            subdirs: RwLock::new(subdirs),
+        }
+    }
+}
+
+impl VfsNode for DevRoot {
+    fn node_type(&self) -> NodeType {
+        NodeType::Directory
+    }
+
+    fn read(&self, _offset: usize, _buffer: &mut [u8]) -> Result<usize, KernelError> {
+        Err(KernelError::FsError(FsError::IsADirectory))
+    }
+
+    fn write(&self, _offset: usize, _data: &[u8]) -> Result<usize, KernelError> {
+        Err(KernelError::FsError(FsError::IsADirectory))
+    }
+
+    fn metadata(&self) -> Result<Metadata, KernelError> {
+        Ok(Metadata {
+            node_type: NodeType::Directory,
+            size: 0,
+            permissions: Permissions::default(),
+            uid: 0,
+            gid: 0,
+            created: 0,
+            modified: 0,
+            accessed: 0,
+            inode: 0,
+        })
+    }
+
+    fn readdir(&self) -> Result<Vec<DirEntry>, KernelError> {
+        let devices = self.devices.read();
+        let subdirs = self.subdirs.read();
+        let mut entries = Vec::new();
+
+        entries.push(DirEntry {
+            name: String::from("."),
+            node_type: NodeType::Directory,
+            inode: 0,
+        });
+
+        entries.push(DirEntry {
+            name: String::from(".."),
+            node_type: NodeType::Directory,
+            inode: 0,
+        });
+
+        // List subdirectories (dri, input)
+        for (name, _) in subdirs.iter() {
+            entries.push(DirEntry {
+                name: name.clone(),
+                node_type: NodeType::Directory,
+                inode: 0,
+            });
+        }
+
+        for (name, device) in devices.iter() {
+            entries.push(DirEntry {
+                name: name.clone(),
+                node_type: device.node_type,
+                inode: 0,
+            });
+        }
+
+        Ok(entries)
+    }
+
+    fn lookup(&self, name: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        // Check subdirectories first (dri, input)
+        {
+            let subdirs = self.subdirs.read();
+            if let Some(subdir) = subdirs.get(name) {
+                return Ok(subdir.clone() as Arc<dyn VfsNode>);
+            }
+        }
+
         let devices = self.devices.read();
         devices
             .get(name)

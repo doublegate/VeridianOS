@@ -7,6 +7,7 @@ pub mod ahci;
 pub mod bluetooth;
 pub mod console;
 pub mod e1000;
+pub mod evdev;
 pub mod gpu;
 pub mod gpu_amdgpu;
 pub mod gpu_i915;

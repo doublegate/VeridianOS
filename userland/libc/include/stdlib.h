@@ -166,6 +166,9 @@ long double strtold(const char *nptr, char **endptr);
 /** Allocate aligned memory (C11). */
 void *aligned_alloc(size_t alignment, size_t size);
 
+/** Allocate aligned memory (POSIX). */
+int posix_memalign(void **memptr, size_t alignment, size_t size);
+
 /* ========================================================================= */
 /* Multibyte/wide character stubs                                            */
 /* ========================================================================= */
