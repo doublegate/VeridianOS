@@ -976,6 +976,8 @@ impl VirtioGpuDriver {
             req_slice[..copy_len].copy_from_slice(&cmd_bytes[..copy_len]);
 
             // Zero the response buffer
+            // SAFETY: resp_buf_virt is a leaked 4096-byte allocation, same
+            // invariants as req_slice above.
             let resp_slice =
                 unsafe { core::slice::from_raw_parts_mut(resp_buf_virt as *mut u8, 4096) };
             resp_slice[..resp_len.min(4096)].fill(0);
@@ -1043,6 +1045,8 @@ impl VirtioGpuDriver {
 
     /// Send a typed command and expect a simple OK_NODATA response.
     fn send_simple_command<T: Sized>(&mut self, cmd: &T) -> Result<(), KernelError> {
+        // SAFETY: Reinterpreting a #[repr(C)] struct as a byte slice for
+        // serialization. The struct is Sized and lives on the stack.
         let cmd_bytes = unsafe {
             core::slice::from_raw_parts(cmd as *const T as *const u8, core::mem::size_of::<T>())
         };
@@ -1098,6 +1102,7 @@ impl VirtioGpuDriver {
     /// Returns the first enabled display mode (scanout 0 is preferred).
     pub fn get_display_info(&mut self) -> Result<VirtioGpuDisplayOne, KernelError> {
         let cmd = VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_GET_DISPLAY_INFO);
+        // SAFETY: Reinterpreting a #[repr(C)] VirtioGpuCtrlHdr as a byte slice.
         let cmd_bytes = unsafe {
             core::slice::from_raw_parts(
                 &cmd as *const VirtioGpuCtrlHdr as *const u8,
@@ -1137,6 +1142,7 @@ impl VirtioGpuDriver {
     /// response buffer.
     fn get_display_info_internal(&mut self) -> Result<VirtioGpuDisplayOne, KernelError> {
         let cmd = VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_GET_DISPLAY_INFO);
+        // SAFETY: Reinterpreting a #[repr(C)] VirtioGpuCtrlHdr as a byte slice.
         let cmd_bytes = unsafe {
             core::slice::from_raw_parts(
                 &cmd as *const VirtioGpuCtrlHdr as *const u8,
@@ -1181,11 +1187,13 @@ impl VirtioGpuDriver {
         let resp_buf_phys = self.ctrl_buffers[resp_desc_idx as usize].phys_addr;
 
         // Copy command
+        // SAFETY: req_buf_virt is a leaked 4096-byte DMA buffer. We hold &mut self.
         let req_slice = unsafe { core::slice::from_raw_parts_mut(req_buf_virt as *mut u8, 4096) };
         let copy_len = cmd_bytes.len().min(4096);
         req_slice[..copy_len].copy_from_slice(&cmd_bytes[..copy_len]);
 
         // Zero response
+        // SAFETY: resp_buf_virt is a leaked 4096-byte DMA buffer. We hold &mut self.
         let resp_slice = unsafe { core::slice::from_raw_parts_mut(resp_buf_virt as *mut u8, 4096) };
         resp_slice[..resp_size.min(4096)].fill(0);
 
@@ -1206,6 +1214,7 @@ impl VirtioGpuDriver {
         controlq.add_to_avail(req_desc_idx);
 
         // Kick
+        // SAFETY: Writing to VirtIO queue notify register at mapped MMIO address.
         unsafe {
             core::ptr::write_volatile((mmio + VIRTIO_MMIO_QUEUE_NOTIFY) as *mut u32, 0);
         }
@@ -1340,6 +1349,8 @@ impl VirtioGpuDriver {
             },
         };
 
+        // SAFETY: Reinterpreting a #[repr(C)] struct as a byte slice for
+        // serialization to the VirtIO control queue.
         let cmd_bytes = unsafe {
             core::slice::from_raw_parts(
                 &combined as *const AttachBackingWithEntry as *const u8,

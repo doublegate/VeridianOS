@@ -62,6 +62,8 @@ unsafe fn create_mapper_from_root(page_table_root: u64) -> PageMapper {
 ///
 /// Same requirements as [`create_mapper_from_root`].
 pub unsafe fn create_mapper_from_root_pub(page_table_root: u64) -> PageMapper {
+    // SAFETY: Caller guarantees page_table_root is a valid, identity-mapped L4 page
+    // table address.
     unsafe { create_mapper_from_root(page_table_root) }
 }
 
@@ -110,6 +112,8 @@ pub fn free_user_page_table_frames(l4_phys: u64) -> usize {
         };
 
         // Walk L3 table
+        // SAFETY: l3_phys is from a present L4 entry; phys_to_virt_addr maps it into
+        // the kernel's identity-mapped region.
         let l3_table = unsafe { &*(super::phys_to_virt_addr(l3_phys) as *const PageTable) };
         for l3_idx in 0..PAGE_TABLE_ENTRIES {
             let l3_entry = &l3_table[l3_idx];
@@ -127,6 +131,8 @@ pub fn free_user_page_table_frames(l4_phys: u64) -> usize {
             };
 
             // Walk L2 table
+            // SAFETY: l2_phys is from a present L3 entry; phys_to_virt_addr maps it into
+            // the kernel's identity-mapped region.
             let l2_table = unsafe { &*(super::phys_to_virt_addr(l2_phys) as *const PageTable) };
             for l2_idx in 0..PAGE_TABLE_ENTRIES {
                 let l2_entry = &l2_table[l2_idx];
@@ -201,6 +207,8 @@ fn free_user_page_table_subtrees(l4_phys: u64) {
         };
 
         // Walk and free L3 subtree
+        // SAFETY: l3_phys is from a present L4 entry; phys_to_virt_addr maps it into
+        // the kernel's identity-mapped region.
         let l3_table = unsafe { &*(super::phys_to_virt_addr(l3_phys) as *const PageTable) };
         for l3_idx in 0..PAGE_TABLE_ENTRIES {
             let l3_entry = &l3_table[l3_idx];
@@ -213,6 +221,8 @@ fn free_user_page_table_subtrees(l4_phys: u64) {
                 None => continue,
             };
 
+            // SAFETY: l2_phys is from a present L3 entry; phys_to_virt_addr maps it into
+            // the kernel's identity-mapped region.
             let l2_table = unsafe { &*(super::phys_to_virt_addr(l2_phys) as *const PageTable) };
             for l2_idx in 0..PAGE_TABLE_ENTRIES {
                 let l2_entry = &l2_table[l2_idx];
@@ -581,8 +591,12 @@ impl VirtualAddressSpace {
         if parent_root != 0 {
             // Step 2: Copy kernel-space L4 entries (indices 256-511) directly.
             // These are shared across all address spaces.
+            // SAFETY: parent_root is a valid L4 page table physical address;
+            // phys_to_virt_addr maps it into the kernel's identity-mapped region.
             let parent_l4 =
                 unsafe { &*(super::phys_to_virt_addr(parent_root) as *const PageTable) };
+            // SAFETY: new_root was just allocated by PageTableHierarchy::new() and is a
+            // valid, zeroed L4 page table.
             let child_l4 = unsafe { &mut *(super::phys_to_virt_addr(new_root) as *mut PageTable) };
 
             for i in 256..PAGE_TABLE_ENTRIES {
@@ -1074,6 +1088,7 @@ impl VirtualAddressSpace {
         // Unmap the requested pages from the page table
         let pt_root = self.page_table_root.load(Ordering::Acquire);
         if pt_root != 0 {
+            // SAFETY: pt_root is a valid L4 page table address set during VAS::init().
             let mut mapper = unsafe { create_mapper_from_root(pt_root) };
             for i in unmap_page_start..unmap_page_end {
                 let vaddr = VirtualAddress(m_start + (i as u64) * 4096);
@@ -1329,6 +1344,8 @@ impl VirtualAddressSpace {
         for &frame in &new_frames {
             let phys_addr = frame.as_u64() << 12;
             let virt = crate::mm::phys_to_virt_addr(phys_addr) as *mut u8;
+            // SAFETY: Frame is freshly allocated; phys_to_virt_addr maps it into the
+            // kernel's identity-mapped region.
             unsafe {
                 core::ptr::write_bytes(virt, 0, 4096);
             }
@@ -1337,6 +1354,7 @@ impl VirtualAddressSpace {
         // Map into page tables
         let pt_root = self.page_table_root.load(Ordering::Acquire);
         if pt_root != 0 {
+            // SAFETY: pt_root is a valid L4 page table address set during VAS::init().
             let mut mapper = unsafe { create_mapper_from_root(pt_root) };
             let mut alloc = VasFrameAllocator;
             let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER;

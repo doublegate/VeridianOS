@@ -35,7 +35,7 @@ pub enum HciPacketType {
 
 impl HciPacketType {
     /// Parse packet type from raw byte
-    pub fn from_u8(val: u8) -> Option<Self> {
+    pub(crate) fn from_u8(val: u8) -> Option<Self> {
         match val {
             0x01 => Some(Self::Command),
             0x02 => Some(Self::AclData),
@@ -69,7 +69,7 @@ pub enum Ogf {
 }
 
 impl Ogf {
-    pub fn from_u8(val: u8) -> Option<Self> {
+    pub(crate) fn from_u8(val: u8) -> Option<Self> {
         match val {
             0x01 => Some(Self::LinkControl),
             0x02 => Some(Self::LinkPolicy),
@@ -154,7 +154,7 @@ impl HciCommand {
     }
 
     /// Create a new HCI command with parameters
-    pub fn with_params(opcode: u16, params: &[u8]) -> Result<Self, KernelError> {
+    pub(crate) fn with_params(opcode: u16, params: &[u8]) -> Result<Self, KernelError> {
         if params.len() > HCI_MAX_COMMAND_PARAMS {
             return Err(KernelError::InvalidArgument {
                 name: "params",
@@ -169,7 +169,7 @@ impl HciCommand {
 
     /// Serialize command to a byte buffer (H4 transport format)
     /// Returns number of bytes written
-    pub fn serialize(&self, buf: &mut [u8]) -> Result<usize, KernelError> {
+    pub(crate) fn serialize(&self, buf: &mut [u8]) -> Result<usize, KernelError> {
         let total = 1 + 3 + self.param_len as usize; // type + header + params
         if buf.len() < total {
             return Err(KernelError::InvalidArgument {
@@ -218,7 +218,7 @@ pub enum HciEventCode {
 }
 
 impl HciEventCode {
-    pub fn from_u8(val: u8) -> Option<Self> {
+    pub(crate) fn from_u8(val: u8) -> Option<Self> {
         match val {
             0x01 => Some(Self::InquiryComplete),
             0x02 => Some(Self::InquiryResult),
@@ -268,7 +268,7 @@ impl HciEvent {
     }
 
     /// Parse an HCI event from a raw buffer (excluding H4 type byte)
-    pub fn parse(buf: &[u8]) -> Result<Self, KernelError> {
+    pub(crate) fn parse(buf: &[u8]) -> Result<Self, KernelError> {
         if buf.len() < 2 {
             return Err(KernelError::InvalidArgument {
                 name: "event_buffer",
@@ -292,17 +292,17 @@ impl HciEvent {
     }
 
     /// Check if this is a Command Complete event
-    pub fn is_command_complete(&self) -> bool {
+    pub(crate) fn is_command_complete(&self) -> bool {
         self.event_code == HciEventCode::CommandComplete as u8
     }
 
     /// Check if this is a Command Status event
-    pub fn is_command_status(&self) -> bool {
+    pub(crate) fn is_command_status(&self) -> bool {
         self.event_code == HciEventCode::CommandStatus as u8
     }
 
     /// For Command Complete events, extract the opcode that completed
-    pub fn command_complete_opcode(&self) -> Option<u16> {
+    pub(crate) fn command_complete_opcode(&self) -> Option<u16> {
         if !self.is_command_complete() || self.param_len < 3 {
             return None;
         }
@@ -311,7 +311,7 @@ impl HciEvent {
     }
 
     /// For Command Complete events, extract the status byte
-    pub fn command_complete_status(&self) -> Option<u8> {
+    pub(crate) fn command_complete_status(&self) -> Option<u8> {
         if !self.is_command_complete() || self.param_len < 4 {
             return None;
         }
@@ -319,7 +319,7 @@ impl HciEvent {
     }
 
     /// For Command Status events, extract the status byte
-    pub fn command_status(&self) -> Option<u8> {
+    pub(crate) fn command_status(&self) -> Option<u8> {
         if !self.is_command_status() || self.param_len < 1 {
             return None;
         }
@@ -371,7 +371,7 @@ pub struct AclHeader {
 
 impl AclHeader {
     /// Parse ACL header from 4 bytes
-    pub fn parse(buf: &[u8]) -> Result<Self, KernelError> {
+    pub(crate) fn parse(buf: &[u8]) -> Result<Self, KernelError> {
         if buf.len() < 4 {
             return Err(KernelError::InvalidArgument {
                 name: "acl_buffer",
@@ -405,7 +405,7 @@ impl AclHeader {
     }
 
     /// Serialize ACL header into 4 bytes
-    pub fn serialize(&self, buf: &mut [u8]) -> Result<(), KernelError> {
+    pub(crate) fn serialize(&self, buf: &mut [u8]) -> Result<(), KernelError> {
         if buf.len() < 4 {
             return Err(KernelError::InvalidArgument {
                 name: "buffer",
@@ -432,7 +432,7 @@ pub type BdAddr = [u8; 6];
 pub const BD_ADDR_ZERO: BdAddr = [0u8; 6];
 
 /// Format a BD_ADDR as colon-separated hex string
-pub fn format_bd_addr(addr: &BdAddr) -> [u8; 17] {
+pub(crate) fn format_bd_addr(addr: &BdAddr) -> [u8; 17] {
     let hex = b"0123456789ABCDEF";
     let mut out = [0u8; 17];
     for i in 0..6 {
@@ -490,13 +490,13 @@ impl HciUsbTransport {
     }
 
     /// Configure the transport for a specific USB device
-    pub fn configure(&mut self, device_addr: u8) {
+    pub(crate) fn configure(&mut self, device_addr: u8) {
         self.device_addr = device_addr;
         self.active = true;
     }
 
     /// Send an HCI command over USB bulk OUT
-    pub fn send_command(&self, _cmd: &HciCommand) -> Result<(), KernelError> {
+    pub(crate) fn send_command(&self, _cmd: &HciCommand) -> Result<(), KernelError> {
         if !self.active {
             return Err(KernelError::InvalidState {
                 expected: "active",
@@ -509,7 +509,11 @@ impl HciUsbTransport {
     }
 
     /// Send ACL data over USB bulk OUT
-    pub fn send_acl_data(&self, _header: &AclHeader, _data: &[u8]) -> Result<(), KernelError> {
+    pub(crate) fn send_acl_data(
+        &self,
+        _header: &AclHeader,
+        _data: &[u8],
+    ) -> Result<(), KernelError> {
         if !self.active {
             return Err(KernelError::InvalidState {
                 expected: "active",
@@ -520,7 +524,7 @@ impl HciUsbTransport {
     }
 
     /// Poll for an HCI event from USB interrupt/bulk IN endpoint
-    pub fn poll_event(&self) -> Result<Option<HciEvent>, KernelError> {
+    pub(crate) fn poll_event(&self) -> Result<Option<HciEvent>, KernelError> {
         if !self.active {
             return Err(KernelError::InvalidState {
                 expected: "active",
@@ -532,7 +536,7 @@ impl HciUsbTransport {
     }
 
     /// Poll for ACL data from USB bulk IN endpoint
-    pub fn poll_acl_data(
+    pub(crate) fn poll_acl_data(
         &self,
     ) -> Result<Option<(AclHeader, [u8; ACL_MAX_DATA_LEN], usize)>, KernelError> {
         if !self.active {
@@ -610,7 +614,7 @@ impl DiscoveredDevice {
 
 /// Parse an Extended Inquiry Response (EIR) data block
 /// Returns (name_bytes, name_len) if a Complete/Shortened Local Name is found
-pub fn parse_eir_name(eir: &[u8]) -> Option<([u8; 248], usize)> {
+pub(crate) fn parse_eir_name(eir: &[u8]) -> Option<([u8; 248], usize)> {
     let mut offset = 0;
     while offset < eir.len() {
         let length = eir[offset] as usize;
@@ -713,7 +717,7 @@ pub struct L2capHeader {
 
 impl L2capHeader {
     /// Parse L2CAP header from 4 bytes
-    pub fn parse(buf: &[u8]) -> Result<Self, KernelError> {
+    pub(crate) fn parse(buf: &[u8]) -> Result<Self, KernelError> {
         if buf.len() < 4 {
             return Err(KernelError::InvalidArgument {
                 name: "l2cap_buffer",
@@ -727,7 +731,7 @@ impl L2capHeader {
     }
 
     /// Serialize L2CAP header into 4 bytes
-    pub fn serialize(&self, buf: &mut [u8]) -> Result<(), KernelError> {
+    pub(crate) fn serialize(&self, buf: &mut [u8]) -> Result<(), KernelError> {
         if buf.len() < 4 {
             return Err(KernelError::InvalidArgument {
                 name: "buffer",
@@ -771,7 +775,7 @@ pub struct L2capSignalHeader {
 }
 
 impl L2capSignalHeader {
-    pub fn parse(buf: &[u8]) -> Result<Self, KernelError> {
+    pub(crate) fn parse(buf: &[u8]) -> Result<Self, KernelError> {
         if buf.len() < 4 {
             return Err(KernelError::InvalidArgument {
                 name: "signal_buffer",
@@ -849,7 +853,7 @@ impl SdpServiceRecord {
 pub const MAX_SDP_RECORDS: usize = 8;
 
 /// Check if a 16-bit UUID matches a service record
-pub fn sdp_uuid_match(record: &SdpServiceRecord, uuid: u16) -> bool {
+pub(crate) fn sdp_uuid_match(record: &SdpServiceRecord, uuid: u16) -> bool {
     record.valid && record.service_class_uuid == uuid
 }
 
@@ -954,34 +958,34 @@ impl BluetoothController {
     }
 
     /// Get current controller state
-    pub fn state(&self) -> ControllerState {
+    pub(crate) fn state(&self) -> ControllerState {
         self.state
     }
 
     /// Get the local BD_ADDR
-    pub fn local_addr(&self) -> &BdAddr {
+    pub(crate) fn local_addr(&self) -> &BdAddr {
         &self.local_addr
     }
 
     /// Get controller statistics
-    pub fn stats(&self) -> &BluetoothStats {
+    pub(crate) fn stats(&self) -> &BluetoothStats {
         &self.stats
     }
 
     /// Get number of active connections
-    pub fn connection_count(&self) -> usize {
+    pub(crate) fn connection_count(&self) -> usize {
         self.connection_count
     }
 
     /// Get number of discovered devices
-    pub fn discovered_count(&self) -> usize {
+    pub(crate) fn discovered_count(&self) -> usize {
         self.discovered_count
     }
 
     // ----- Initialization and Reset -----
 
     /// Initialize the controller: configure USB transport and send HCI_Reset
-    pub fn initialize(&mut self, usb_device_addr: u8) -> Result<(), KernelError> {
+    pub(crate) fn initialize(&mut self, usb_device_addr: u8) -> Result<(), KernelError> {
         if self.state != ControllerState::Off {
             return Err(KernelError::InvalidState {
                 expected: "Off",
@@ -1000,7 +1004,7 @@ impl BluetoothController {
     }
 
     /// Send HCI_Reset command
-    pub fn send_reset(&mut self) -> Result<(), KernelError> {
+    pub(crate) fn send_reset(&mut self) -> Result<(), KernelError> {
         let cmd = HciCommand::new(HCI_RESET);
         self.transport.send_command(&cmd)?;
         self.stats.commands_sent += 1;
@@ -1008,7 +1012,7 @@ impl BluetoothController {
     }
 
     /// Send HCI_Read_BD_ADDR command
-    pub fn read_bd_addr(&mut self) -> Result<(), KernelError> {
+    pub(crate) fn read_bd_addr(&mut self) -> Result<(), KernelError> {
         self.ensure_ready()?;
         let cmd = HciCommand::new(HCI_READ_BD_ADDR);
         self.transport.send_command(&cmd)?;
@@ -1017,7 +1021,7 @@ impl BluetoothController {
     }
 
     /// Send HCI_Read_Local_Name command
-    pub fn read_local_name(&mut self) -> Result<(), KernelError> {
+    pub(crate) fn read_local_name(&mut self) -> Result<(), KernelError> {
         self.ensure_ready()?;
         let cmd = HciCommand::new(HCI_READ_LOCAL_NAME);
         self.transport.send_command(&cmd)?;
@@ -1026,7 +1030,7 @@ impl BluetoothController {
     }
 
     /// Send HCI_Write_Scan_Enable command
-    pub fn write_scan_enable(&mut self, mode: ScanEnable) -> Result<(), KernelError> {
+    pub(crate) fn write_scan_enable(&mut self, mode: ScanEnable) -> Result<(), KernelError> {
         self.ensure_ready()?;
         let cmd = HciCommand::with_params(HCI_WRITE_SCAN_ENABLE, &[mode as u8])?;
         self.transport.send_command(&cmd)?;
@@ -1039,7 +1043,7 @@ impl BluetoothController {
     /// Start inquiry (device discovery)
     /// inquiry_length: N * 1.28s (range 1..=30)
     /// max_responses: max number of responses (0 = unlimited)
-    pub fn start_inquiry(
+    pub(crate) fn start_inquiry(
         &mut self,
         inquiry_length: u8,
         max_responses: u8,
@@ -1071,7 +1075,7 @@ impl BluetoothController {
     }
 
     /// Process an Inquiry Result event and store discovered device
-    pub fn handle_inquiry_result(
+    pub(crate) fn handle_inquiry_result(
         &mut self,
         addr: BdAddr,
         page_scan_rep_mode: u8,
@@ -1099,7 +1103,7 @@ impl BluetoothController {
     }
 
     /// Handle Inquiry Complete event
-    pub fn handle_inquiry_complete(&mut self) {
+    pub(crate) fn handle_inquiry_complete(&mut self) {
         if self.state == ControllerState::Scanning {
             if self.connection_count > 0 {
                 self.state = ControllerState::Connected;
@@ -1110,7 +1114,7 @@ impl BluetoothController {
     }
 
     /// Get a discovered device by index
-    pub fn get_discovered(&self, index: usize) -> Option<&DiscoveredDevice> {
+    pub(crate) fn get_discovered(&self, index: usize) -> Option<&DiscoveredDevice> {
         if index < self.discovered_count {
             let dev = &self.discovered[index];
             if dev.valid {
@@ -1123,7 +1127,7 @@ impl BluetoothController {
     // ----- Connection Management -----
 
     /// Create a connection to a remote device
-    pub fn create_connection(&mut self, addr: &BdAddr) -> Result<(), KernelError> {
+    pub(crate) fn create_connection(&mut self, addr: &BdAddr) -> Result<(), KernelError> {
         self.ensure_ready_or_connected()?;
 
         if self.connection_count >= MAX_CONNECTIONS {
@@ -1161,7 +1165,7 @@ impl BluetoothController {
     }
 
     /// Handle Connection Complete event from controller
-    pub fn handle_connection_complete(
+    pub(crate) fn handle_connection_complete(
         &mut self,
         status: u8,
         handle: u16,
@@ -1191,7 +1195,7 @@ impl BluetoothController {
     }
 
     /// Disconnect from a remote device
-    pub fn disconnect(&mut self, handle: u16, reason: u8) -> Result<(), KernelError> {
+    pub(crate) fn disconnect(&mut self, handle: u16, reason: u8) -> Result<(), KernelError> {
         // Find connection by handle
         let found = self.connections.iter_mut().any(|conn| {
             if conn.state == ConnectionState::Connected && conn.handle == handle {
@@ -1220,7 +1224,7 @@ impl BluetoothController {
     }
 
     /// Handle Disconnection Complete event
-    pub fn handle_disconnection_complete(&mut self, _status: u8, handle: u16) {
+    pub(crate) fn handle_disconnection_complete(&mut self, _status: u8, handle: u16) {
         for conn in &mut self.connections {
             if conn.handle == handle
                 && (conn.state == ConnectionState::Connected
@@ -1240,14 +1244,14 @@ impl BluetoothController {
     }
 
     /// Find a connection by handle
-    pub fn find_connection(&self, handle: u16) -> Option<&HciConnection> {
+    pub(crate) fn find_connection(&self, handle: u16) -> Option<&HciConnection> {
         self.connections
             .iter()
             .find(|c| c.state == ConnectionState::Connected && c.handle == handle)
     }
 
     /// Store a link key for a connection (stub)
-    pub fn store_link_key(&mut self, addr: &BdAddr, key: &[u8; 16]) {
+    pub(crate) fn store_link_key(&mut self, addr: &BdAddr, key: &[u8; 16]) {
         for conn in &mut self.connections {
             if conn.state == ConnectionState::Connected && conn.remote_addr == *addr {
                 conn.link_key = *key;
@@ -1260,7 +1264,7 @@ impl BluetoothController {
     // ----- ACL Data -----
 
     /// Send ACL data to a connected device
-    pub fn send_acl(&mut self, handle: u16, data: &[u8]) -> Result<(), KernelError> {
+    pub(crate) fn send_acl(&mut self, handle: u16, data: &[u8]) -> Result<(), KernelError> {
         let conn = self
             .connections
             .iter()
@@ -1292,7 +1296,11 @@ impl BluetoothController {
     // ----- SDP Stubs -----
 
     /// Register a local SDP service record
-    pub fn register_sdp_record(&mut self, uuid: u16, channel: u16) -> Result<u32, KernelError> {
+    pub(crate) fn register_sdp_record(
+        &mut self,
+        uuid: u16,
+        channel: u16,
+    ) -> Result<u32, KernelError> {
         if self.sdp_record_count >= MAX_SDP_RECORDS {
             return Err(KernelError::ResourceExhausted {
                 resource: "SDP service records",
@@ -1309,7 +1317,7 @@ impl BluetoothController {
     }
 
     /// Search for a service by UUID in local records
-    pub fn sdp_search_local(&self, uuid: u16) -> Option<&SdpServiceRecord> {
+    pub(crate) fn sdp_search_local(&self, uuid: u16) -> Option<&SdpServiceRecord> {
         self.sdp_records[..self.sdp_record_count]
             .iter()
             .find(|r| sdp_uuid_match(r, uuid))
@@ -1318,7 +1326,7 @@ impl BluetoothController {
     // ----- Event Processing -----
 
     /// Process a received HCI event
-    pub fn process_event(&mut self, event: &HciEvent) {
+    pub(crate) fn process_event(&mut self, event: &HciEvent) {
         self.stats.events_received += 1;
 
         match HciEventCode::from_u8(event.event_code) {
@@ -1480,7 +1488,7 @@ impl BluetoothController {
     }
 
     /// Poll the transport and process any pending events
-    pub fn poll(&mut self) -> Result<(), KernelError> {
+    pub(crate) fn poll(&mut self) -> Result<(), KernelError> {
         if self.state == ControllerState::Off {
             return Ok(());
         }

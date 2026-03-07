@@ -206,7 +206,7 @@ pub enum PcmFormat {
 
 impl PcmFormat {
     /// Bytes per sample for this format
-    pub fn bytes_per_sample(self) -> u32 {
+    pub(crate) fn bytes_per_sample(self) -> u32 {
         match self {
             PcmFormat::U8 => 1,
             PcmFormat::S16Le => 2,
@@ -215,7 +215,7 @@ impl PcmFormat {
     }
 
     /// Bits per sample for this format
-    pub fn bits_per_sample(self) -> u32 {
+    pub(crate) fn bits_per_sample(self) -> u32 {
         self.bytes_per_sample() * 8
     }
 }
@@ -247,7 +247,7 @@ pub enum PcmState {
 impl PcmState {
     /// Check if a transition from the current state to the target state is
     /// valid
-    pub fn can_transition_to(self, target: PcmState) -> bool {
+    pub(crate) fn can_transition_to(self, target: PcmState) -> bool {
         match (self, target) {
             // From Open: can go to Setup (after hw_params)
             (PcmState::Open, PcmState::Setup) => true,
@@ -320,7 +320,7 @@ impl HwParams {
     }
 
     /// Validate hardware parameters
-    pub fn validate(&self) -> Result<(), AlsaError> {
+    pub(crate) fn validate(&self) -> Result<(), AlsaError> {
         // Sample rate validation (common rates)
         match self.sample_rate {
             8000 | 11025 | 16000 | 22050 | 32000 | 44100 | 48000 | 88200 | 96000 | 176400
@@ -355,22 +355,22 @@ impl HwParams {
     }
 
     /// Calculate frame size in bytes (channels * bytes_per_sample)
-    pub fn frame_size(&self) -> u32 {
+    pub(crate) fn frame_size(&self) -> u32 {
         self.channels as u32 * self.format.bytes_per_sample()
     }
 
     /// Calculate byte rate (sample_rate * frame_size)
-    pub fn byte_rate(&self) -> u32 {
+    pub(crate) fn byte_rate(&self) -> u32 {
         self.sample_rate.saturating_mul(self.frame_size())
     }
 
     /// Calculate buffer size in bytes
-    pub fn buffer_bytes(&self) -> u32 {
+    pub(crate) fn buffer_bytes(&self) -> u32 {
         self.buffer_size.saturating_mul(self.frame_size())
     }
 
     /// Calculate period size in bytes
-    pub fn period_bytes(&self) -> u32 {
+    pub(crate) fn period_bytes(&self) -> u32 {
         self.period_size.saturating_mul(self.frame_size())
     }
 }
@@ -413,7 +413,7 @@ impl SwParams {
     }
 
     /// Validate software parameters against hardware parameters
-    pub fn validate(&self, hw_params: &HwParams) -> Result<(), AlsaError> {
+    pub(crate) fn validate(&self, hw_params: &HwParams) -> Result<(), AlsaError> {
         if self.avail_min == 0 || self.avail_min > hw_params.buffer_size {
             return Err(AlsaError::InvalidBufferSize {
                 requested: self.avail_min,
@@ -503,7 +503,7 @@ impl PcmDevice {
     }
 
     /// Open the device for use
-    pub fn open(&mut self) -> Result<(), AlsaError> {
+    pub(crate) fn open(&mut self) -> Result<(), AlsaError> {
         if self.is_open {
             return Err(AlsaError::DeviceAlreadyOpen { device_id: self.id });
         }
@@ -513,7 +513,7 @@ impl PcmDevice {
     }
 
     /// Close the device
-    pub fn close(&mut self) -> Result<(), AlsaError> {
+    pub(crate) fn close(&mut self) -> Result<(), AlsaError> {
         if !self.is_open {
             return Err(AlsaError::DeviceNotOpen { device_id: self.id });
         }
@@ -530,7 +530,7 @@ impl PcmDevice {
     }
 
     /// Set hardware parameters
-    pub fn set_hw_params(&mut self, params: HwParams) -> Result<(), AlsaError> {
+    pub(crate) fn set_hw_params(&mut self, params: HwParams) -> Result<(), AlsaError> {
         if !self.is_open {
             return Err(AlsaError::DeviceNotOpen { device_id: self.id });
         }
@@ -541,12 +541,12 @@ impl PcmDevice {
     }
 
     /// Get current hardware parameters
-    pub fn get_hw_params(&self) -> Result<&HwParams, AlsaError> {
+    pub(crate) fn get_hw_params(&self) -> Result<&HwParams, AlsaError> {
         self.hw_params.as_ref().ok_or(AlsaError::HwParamsNotSet)
     }
 
     /// Set software parameters
-    pub fn set_sw_params(&mut self, params: SwParams) -> Result<(), AlsaError> {
+    pub(crate) fn set_sw_params(&mut self, params: SwParams) -> Result<(), AlsaError> {
         let hw = self.hw_params.as_ref().ok_or(AlsaError::HwParamsNotSet)?;
         params.validate(hw)?;
         self.sw_params = Some(params);
@@ -554,12 +554,12 @@ impl PcmDevice {
     }
 
     /// Get current software parameters
-    pub fn get_sw_params(&self) -> Result<&SwParams, AlsaError> {
+    pub(crate) fn get_sw_params(&self) -> Result<&SwParams, AlsaError> {
         self.sw_params.as_ref().ok_or(AlsaError::SwParamsNotSet)
     }
 
     /// Prepare the device for operation (allocate buffers)
-    pub fn prepare(&mut self) -> Result<(), AlsaError> {
+    pub(crate) fn prepare(&mut self) -> Result<(), AlsaError> {
         let hw = self.hw_params.ok_or(AlsaError::HwParamsNotSet)?;
 
         // Allocate buffer
@@ -580,12 +580,12 @@ impl PcmDevice {
     }
 
     /// Start the device (begin playback or capture)
-    pub fn start(&mut self) -> Result<(), AlsaError> {
+    pub(crate) fn start(&mut self) -> Result<(), AlsaError> {
         self.transition_state(PcmState::Running)
     }
 
     /// Stop the device immediately
-    pub fn stop(&mut self) -> Result<(), AlsaError> {
+    pub(crate) fn stop(&mut self) -> Result<(), AlsaError> {
         if self.state == PcmState::Running || self.state == PcmState::Paused {
             self.state = PcmState::Prepared;
             Ok(())
@@ -598,12 +598,12 @@ impl PcmDevice {
     }
 
     /// Pause the device
-    pub fn pause(&mut self) -> Result<(), AlsaError> {
+    pub(crate) fn pause(&mut self) -> Result<(), AlsaError> {
         self.transition_state(PcmState::Paused)
     }
 
     /// Resume from pause
-    pub fn resume(&mut self) -> Result<(), AlsaError> {
+    pub(crate) fn resume(&mut self) -> Result<(), AlsaError> {
         if self.state != PcmState::Paused {
             return Err(AlsaError::InvalidStateTransition {
                 current: self.state,
@@ -615,7 +615,7 @@ impl PcmDevice {
     }
 
     /// Drain: wait for all buffered data to be consumed, then stop
-    pub fn drain(&mut self) -> Result<(), AlsaError> {
+    pub(crate) fn drain(&mut self) -> Result<(), AlsaError> {
         if self.state == PcmState::Running {
             self.state = PcmState::Draining;
             // In a real implementation, we'd wait for the buffer to empty.
@@ -631,7 +631,7 @@ impl PcmDevice {
     }
 
     /// Recover from XRun state
-    pub fn recover_xrun(&mut self) -> Result<(), AlsaError> {
+    pub(crate) fn recover_xrun(&mut self) -> Result<(), AlsaError> {
         if self.state != PcmState::XRun {
             return Err(AlsaError::InvalidStateTransition {
                 current: self.state,
@@ -647,7 +647,7 @@ impl PcmDevice {
     /// Write interleaved sample data to the playback buffer
     ///
     /// Returns the number of frames written.
-    pub fn write(&mut self, data: &[u8]) -> Result<u32, AlsaError> {
+    pub(crate) fn write(&mut self, data: &[u8]) -> Result<u32, AlsaError> {
         if self.direction != StreamDirection::Playback {
             return Err(AlsaError::WrongDirection);
         }
@@ -701,7 +701,7 @@ impl PcmDevice {
     /// Read interleaved sample data from the capture buffer
     ///
     /// Returns the number of frames read.
-    pub fn read(&mut self, output: &mut [u8]) -> Result<u32, AlsaError> {
+    pub(crate) fn read(&mut self, output: &mut [u8]) -> Result<u32, AlsaError> {
         if self.direction != StreamDirection::Capture {
             return Err(AlsaError::WrongDirection);
         }
@@ -751,7 +751,7 @@ impl PcmDevice {
     }
 
     /// Get the number of frames available for writing (playback)
-    pub fn avail_update(&self) -> Result<u32, AlsaError> {
+    pub(crate) fn avail_update(&self) -> Result<u32, AlsaError> {
         let hw = self.hw_params.as_ref().ok_or(AlsaError::HwParamsNotSet)?;
         let frame_size = hw.frame_size();
         if frame_size == 0 {
@@ -765,42 +765,42 @@ impl PcmDevice {
     }
 
     /// Get the current PCM state
-    pub fn state(&self) -> PcmState {
+    pub(crate) fn state(&self) -> PcmState {
         self.state
     }
 
     /// Get the device ID
-    pub fn id(&self) -> u32 {
+    pub(crate) fn id(&self) -> u32 {
         self.id
     }
 
     /// Get the device name
-    pub fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
     /// Get the stream direction
-    pub fn direction(&self) -> StreamDirection {
+    pub(crate) fn direction(&self) -> StreamDirection {
         self.direction
     }
 
     /// Get total frames written
-    pub fn total_frames_written(&self) -> u64 {
+    pub(crate) fn total_frames_written(&self) -> u64 {
         self.frames_written.load(Ordering::Relaxed)
     }
 
     /// Get total frames read
-    pub fn total_frames_read(&self) -> u64 {
+    pub(crate) fn total_frames_read(&self) -> u64 {
         self.frames_read.load(Ordering::Relaxed)
     }
 
     /// Get xrun count
-    pub fn xrun_count(&self) -> u32 {
+    pub(crate) fn xrun_count(&self) -> u32 {
         self.xrun_count.load(Ordering::Relaxed)
     }
 
     /// Whether device is open
-    pub fn is_open(&self) -> bool {
+    pub(crate) fn is_open(&self) -> bool {
         self.is_open
     }
 
@@ -808,7 +808,7 @@ impl PcmDevice {
     ///
     /// Returns a reference to the internal buffer for direct manipulation.
     /// Only valid in Prepared or Running state.
-    pub fn mmap_begin(&self) -> Result<(&[u8], u32, u32), AlsaError> {
+    pub(crate) fn mmap_begin(&self) -> Result<(&[u8], u32, u32), AlsaError> {
         if self.state != PcmState::Prepared && self.state != PcmState::Running {
             return Err(AlsaError::InvalidStateTransition {
                 current: self.state,
@@ -830,7 +830,7 @@ impl PcmDevice {
     }
 
     /// Commit frames after MMAP write
-    pub fn mmap_commit(&mut self, frames: u32) -> Result<(), AlsaError> {
+    pub(crate) fn mmap_commit(&mut self, frames: u32) -> Result<(), AlsaError> {
         let hw = self.hw_params.ok_or(AlsaError::HwParamsNotSet)?;
         let frame_size = hw.frame_size();
         let bytes = frames.saturating_mul(frame_size);
@@ -1113,7 +1113,7 @@ pub struct MixerControl {
 
 impl MixerControl {
     /// Create a new integer mixer control
-    pub fn new_integer(id: u32, name: &str, min: i32, max: i32, initial: i32) -> Self {
+    pub(crate) fn new_integer(id: u32, name: &str, min: i32, max: i32, initial: i32) -> Self {
         Self {
             id,
             name: String::from(name),
@@ -1127,7 +1127,7 @@ impl MixerControl {
     }
 
     /// Create a new boolean mixer control
-    pub fn new_boolean(id: u32, name: &str, initial: bool) -> Self {
+    pub(crate) fn new_boolean(id: u32, name: &str, initial: bool) -> Self {
         Self {
             id,
             name: String::from(name),
@@ -1141,7 +1141,7 @@ impl MixerControl {
     }
 
     /// Create a new enumerated mixer control
-    pub fn new_enumerated(id: u32, name: &str, items: Vec<String>, initial: u32) -> Self {
+    pub(crate) fn new_enumerated(id: u32, name: &str, items: Vec<String>, initial: u32) -> Self {
         let count = items.len() as u32;
         Self {
             id,
@@ -1156,12 +1156,12 @@ impl MixerControl {
     }
 
     /// Get the current value
-    pub fn get_value(&self) -> i32 {
+    pub(crate) fn get_value(&self) -> i32 {
         self.value.load(Ordering::Relaxed) as i32
     }
 
     /// Set the value with range checking
-    pub fn set_value(&self, val: i32) -> Result<(), AlsaError> {
+    pub(crate) fn set_value(&self, val: i32) -> Result<(), AlsaError> {
         if val < self.min || val > self.max {
             return Err(AlsaError::MixerValueOutOfRange {
                 value: val,
@@ -1174,17 +1174,17 @@ impl MixerControl {
     }
 
     /// For boolean controls: get as bool
-    pub fn get_bool(&self) -> bool {
+    pub(crate) fn get_bool(&self) -> bool {
         self.value.load(Ordering::Relaxed) != 0
     }
 
     /// For boolean controls: set as bool
-    pub fn set_bool(&self, val: bool) {
+    pub(crate) fn set_bool(&self, val: bool) {
         self.value.store(if val { 1 } else { 0 }, Ordering::Relaxed);
     }
 
     /// For enumerated controls: get selected item name
-    pub fn get_enum_name(&self) -> Option<&str> {
+    pub(crate) fn get_enum_name(&self) -> Option<&str> {
         let idx = self.value.load(Ordering::Relaxed) as usize;
         self.enum_names.get(idx).map(|s| s.as_str())
     }
@@ -1247,28 +1247,28 @@ impl AlsaMixer {
     }
 
     /// Add a custom mixer control
-    pub fn add_control(&mut self, control: MixerControl) -> u32 {
+    pub(crate) fn add_control(&mut self, control: MixerControl) -> u32 {
         let id = control.id;
         self.controls.insert(id, control);
         id
     }
 
     /// Allocate a new control ID
-    pub fn alloc_control_id(&mut self) -> u32 {
+    pub(crate) fn alloc_control_id(&mut self) -> u32 {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         id
     }
 
     /// Get a control by ID
-    pub fn get_control(&self, id: u32) -> Result<&MixerControl, AlsaError> {
+    pub(crate) fn get_control(&self, id: u32) -> Result<&MixerControl, AlsaError> {
         self.controls
             .get(&id)
             .ok_or(AlsaError::MixerControlNotFound { id })
     }
 
     /// Set volume for a control (0-100 range)
-    pub fn set_volume(&self, control_id: u32, volume: i32) -> Result<(), AlsaError> {
+    pub(crate) fn set_volume(&self, control_id: u32, volume: i32) -> Result<(), AlsaError> {
         let control = self
             .controls
             .get(&control_id)
@@ -1277,7 +1277,7 @@ impl AlsaMixer {
     }
 
     /// Get volume for a control
-    pub fn get_volume(&self, control_id: u32) -> Result<i32, AlsaError> {
+    pub(crate) fn get_volume(&self, control_id: u32) -> Result<i32, AlsaError> {
         let control = self
             .controls
             .get(&control_id)
@@ -1286,12 +1286,12 @@ impl AlsaMixer {
     }
 
     /// Get the number of controls
-    pub fn control_count(&self) -> usize {
+    pub(crate) fn control_count(&self) -> usize {
         self.controls.len()
     }
 
     /// List all control IDs
-    pub fn list_control_ids(&self) -> Vec<u32> {
+    pub(crate) fn list_control_ids(&self) -> Vec<u32> {
         self.controls.keys().copied().collect()
     }
 }
@@ -1311,27 +1311,27 @@ impl Default for AlsaMixer {
 /// U8 range: 0..255 (center at 128)
 /// S16 range: -32768..32767
 #[inline]
-pub fn convert_u8_to_s16(sample: u8) -> i16 {
+pub(crate) fn convert_u8_to_s16(sample: u8) -> i16 {
     // Shift center from 128 to 0, then scale up by 256
     ((sample as i16) - 128) * 256
 }
 
 /// Convert S16 sample to U8 (compress range)
 #[inline]
-pub fn convert_s16_to_u8(sample: i16) -> u8 {
+pub(crate) fn convert_s16_to_u8(sample: i16) -> u8 {
     // Scale down by 256 and shift center from 0 to 128
     ((sample / 256) + 128) as u8
 }
 
 /// Convert S16 sample to S32 (expand to 32-bit)
 #[inline]
-pub fn convert_s16_to_s32(sample: i16) -> i32 {
+pub(crate) fn convert_s16_to_s32(sample: i16) -> i32 {
     (sample as i32) << 16
 }
 
 /// Convert S32 sample to S16 (truncate to 16-bit)
 #[inline]
-pub fn convert_s32_to_s16(sample: i32) -> i16 {
+pub(crate) fn convert_s32_to_s16(sample: i32) -> i16 {
     let shifted = sample >> 16;
     if shifted > i16::MAX as i32 {
         i16::MAX
@@ -1344,18 +1344,18 @@ pub fn convert_s32_to_s16(sample: i32) -> i16 {
 
 /// Convert U8 sample to S32
 #[inline]
-pub fn convert_u8_to_s32(sample: u8) -> i32 {
+pub(crate) fn convert_u8_to_s32(sample: u8) -> i32 {
     convert_s16_to_s32(convert_u8_to_s16(sample))
 }
 
 /// Convert S32 sample to U8
 #[inline]
-pub fn convert_s32_to_u8(sample: i32) -> u8 {
+pub(crate) fn convert_s32_to_u8(sample: i32) -> u8 {
     convert_s16_to_u8(convert_s32_to_s16(sample))
 }
 
 /// Convert a buffer of samples between formats
-pub fn convert_buffer(
+pub(crate) fn convert_buffer(
     input: &[u8],
     src_format: PcmFormat,
     dst_format: PcmFormat,
@@ -1447,7 +1447,7 @@ impl GainFactor {
 
     /// Apply this gain factor to a 16-bit sample
     #[inline]
-    pub fn apply_s16(self, sample: i16) -> i16 {
+    pub(crate) fn apply_s16(self, sample: i16) -> i16 {
         let wide = (sample as i32 as i64) * (self.0 as i64);
         let result = wide >> FP_SHIFT;
         if result > i16::MAX as i64 {
@@ -1461,7 +1461,7 @@ impl GainFactor {
 
     /// Apply this gain factor to a 32-bit sample
     #[inline]
-    pub fn apply_s32(self, sample: i32) -> i32 {
+    pub(crate) fn apply_s32(self, sample: i32) -> i32 {
         let wide = (sample as i64) * (self.0 as i64);
         let result = wide >> FP_SHIFT;
         if result > i32::MAX as i64 {
@@ -1474,7 +1474,7 @@ impl GainFactor {
     }
 
     /// Get the raw 16.16 fixed-point value
-    pub fn raw(self) -> i32 {
+    pub(crate) fn raw(self) -> i32 {
         self.0
     }
 }
@@ -1485,7 +1485,7 @@ impl GainFactor {
 /// Range: -60 dB to +20 dB. Values below -60 dB are treated as mute.
 ///
 /// The `db_tenths` parameter is in tenths of a dB (e.g., -30 = -3.0 dB).
-pub fn gain_from_db_tenths(db_tenths: i32) -> GainFactor {
+pub(crate) fn gain_from_db_tenths(db_tenths: i32) -> GainFactor {
     // Below -600 tenths (-60 dB): effectively mute
     if db_tenths <= -600 {
         return GainFactor::MUTE;
@@ -1634,7 +1634,7 @@ pub fn gain_from_db_tenths(db_tenths: i32) -> GainFactor {
 /// Convert a 0-100 volume percentage to a gain factor
 ///
 /// 0 = mute, 100 = unity gain (0 dB). Uses a perceptual curve.
-pub fn gain_from_percent(percent: u32) -> GainFactor {
+pub(crate) fn gain_from_percent(percent: u32) -> GainFactor {
     if percent == 0 {
         return GainFactor::MUTE;
     }
@@ -1727,7 +1727,7 @@ impl CaptureDevice {
     }
 
     /// Start recording
-    pub fn start(&mut self) -> Result<(), AlsaError> {
+    pub(crate) fn start(&mut self) -> Result<(), AlsaError> {
         if self.state != CaptureState::Idle && self.state != CaptureState::Paused {
             return Err(AlsaError::InvalidStateTransition {
                 current: PcmState::Running,
@@ -1739,21 +1739,21 @@ impl CaptureDevice {
     }
 
     /// Stop recording
-    pub fn stop(&mut self) {
+    pub(crate) fn stop(&mut self) {
         self.state = CaptureState::Idle;
         self.read_pos = 0;
         self.write_pos = 0;
     }
 
     /// Pause recording
-    pub fn pause(&mut self) {
+    pub(crate) fn pause(&mut self) {
         if self.state == CaptureState::Recording {
             self.state = CaptureState::Paused;
         }
     }
 
     /// Resume recording
-    pub fn resume(&mut self) {
+    pub(crate) fn resume(&mut self) {
         if self.state == CaptureState::Paused {
             self.state = CaptureState::Recording;
         }
@@ -1763,7 +1763,7 @@ impl CaptureDevice {
     ///
     /// This is called by the audio driver/interrupt handler when new data
     /// arrives from the hardware. If the buffer is full, an overrun occurs.
-    pub fn push_data(&mut self, data: &[u8]) -> Result<u32, AlsaError> {
+    pub(crate) fn push_data(&mut self, data: &[u8]) -> Result<u32, AlsaError> {
         if self.state != CaptureState::Recording {
             return Ok(0);
         }
@@ -1843,7 +1843,7 @@ impl CaptureDevice {
     /// Read captured audio data from the ring buffer
     ///
     /// Returns the number of frames read. Called by the application/client.
-    pub fn read_data(&mut self, output: &mut [u8]) -> u32 {
+    pub(crate) fn read_data(&mut self, output: &mut [u8]) -> u32 {
         let frame_size = self.hw_params.frame_size();
         if frame_size == 0 {
             return 0;
@@ -1875,7 +1875,7 @@ impl CaptureDevice {
     }
 
     /// Get capture statistics
-    pub fn stats(&self) -> CaptureStats {
+    pub(crate) fn stats(&self) -> CaptureStats {
         let cap = self.buffer.len() as u32;
         let frame_size = self.hw_params.frame_size();
         let fill_bytes = self.available_read(cap);
@@ -1894,22 +1894,22 @@ impl CaptureDevice {
     }
 
     /// Get capture state
-    pub fn state(&self) -> CaptureState {
+    pub(crate) fn state(&self) -> CaptureState {
         self.state
     }
 
     /// Set capture gain
-    pub fn set_gain(&mut self, gain: GainFactor) {
+    pub(crate) fn set_gain(&mut self, gain: GainFactor) {
         self.gain = gain;
     }
 
     /// Get capture gain
-    pub fn gain(&self) -> GainFactor {
+    pub(crate) fn gain(&self) -> GainFactor {
         self.gain
     }
 
     /// Get hardware parameters
-    pub fn hw_params(&self) -> &HwParams {
+    pub(crate) fn hw_params(&self) -> &HwParams {
         &self.hw_params
     }
 
@@ -1993,7 +1993,7 @@ impl DeviceRegistry {
     }
 
     /// Register a new audio device
-    pub fn register(&mut self, info: DeviceInfo) -> Result<u32, AlsaError> {
+    pub(crate) fn register(&mut self, info: DeviceInfo) -> Result<u32, AlsaError> {
         if self.devices.len() >= MAX_PCM_DEVICES {
             return Err(AlsaError::TooManyDevices);
         }
@@ -2003,7 +2003,7 @@ impl DeviceRegistry {
     }
 
     /// Unregister a device
-    pub fn unregister(&mut self, id: u32) -> Result<(), AlsaError> {
+    pub(crate) fn unregister(&mut self, id: u32) -> Result<(), AlsaError> {
         self.devices
             .remove(&id)
             .map(|_| ())
@@ -2011,34 +2011,34 @@ impl DeviceRegistry {
     }
 
     /// Get device info by ID
-    pub fn get(&self, id: u32) -> Result<&DeviceInfo, AlsaError> {
+    pub(crate) fn get(&self, id: u32) -> Result<&DeviceInfo, AlsaError> {
         self.devices
             .get(&id)
             .ok_or(AlsaError::DeviceNotFound { device_id: id })
     }
 
     /// List all registered devices
-    pub fn list(&self) -> Vec<&DeviceInfo> {
+    pub(crate) fn list(&self) -> Vec<&DeviceInfo> {
         self.devices.values().collect()
     }
 
     /// List only playback devices
-    pub fn list_playback(&self) -> Vec<&DeviceInfo> {
+    pub(crate) fn list_playback(&self) -> Vec<&DeviceInfo> {
         self.devices.values().filter(|d| d.playback).collect()
     }
 
     /// List only capture devices
-    pub fn list_capture(&self) -> Vec<&DeviceInfo> {
+    pub(crate) fn list_capture(&self) -> Vec<&DeviceInfo> {
         self.devices.values().filter(|d| d.capture).collect()
     }
 
     /// Number of registered devices
-    pub fn device_count(&self) -> usize {
+    pub(crate) fn device_count(&self) -> usize {
         self.devices.len()
     }
 
     /// Allocate a new device ID
-    pub fn alloc_id(&self) -> u32 {
+    pub(crate) fn alloc_id(&self) -> u32 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 }

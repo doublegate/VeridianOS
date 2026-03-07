@@ -934,6 +934,8 @@ impl ThreadBuilder {
         );
 
         #[cfg(target_arch = "x86_64")]
+        // SAFETY: raw_serial_str writes directly to the COM1 serial port (0x3F8).
+        // This is safe to call at any point during kernel execution.
         unsafe {
             crate::arch::x86_64::idt::raw_serial_str(b"[THREAD] build() returning Ok\n");
         }

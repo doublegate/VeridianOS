@@ -241,7 +241,7 @@ pub enum AlgorithmId {
 
 impl AlgorithmId {
     /// Convert algorithm to its SSH wire name
-    pub fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Curve25519Sha256 => "curve25519-sha256",
             Self::SshEd25519 => "ssh-ed25519",
@@ -253,7 +253,7 @@ impl AlgorithmId {
     }
 
     /// Parse from SSH wire name
-    pub fn parse_name(s: &str) -> Option<Self> {
+    pub(crate) fn parse_name(s: &str) -> Option<Self> {
         match s {
             "curve25519-sha256" | "curve25519-sha256@libssh.org" => Some(Self::Curve25519Sha256),
             "ssh-ed25519" => Some(Self::SshEd25519),
@@ -294,7 +294,7 @@ pub struct VersionInfo {
 
 impl VersionInfo {
     /// Parse an SSH identification string (e.g., "SSH-2.0-OpenSSH_9.0\r\n")
-    pub fn parse(data: &[u8]) -> Option<Self> {
+    pub(crate) fn parse(data: &[u8]) -> Option<Self> {
         // Must start with "SSH-"
         if data.len() < 8 || &data[..4] != b"SSH-" {
             return None;
@@ -348,7 +348,7 @@ impl VersionInfo {
     }
 
     /// Encode to wire format (with trailing \r\n)
-    pub fn encode(&self) -> Vec<u8> {
+    pub(crate) fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(64);
         buf.extend_from_slice(b"SSH-");
         buf.extend_from_slice(&self.protocol_version);
@@ -402,7 +402,7 @@ impl SshPacket {
     }
 
     /// Encode packet to wire format (without MAC)
-    pub fn encode(&self) -> Vec<u8> {
+    pub(crate) fn encode(&self) -> Vec<u8> {
         let padding_length = self.padding.len() as u8;
         let packet_length = (1 + self.payload.len() + self.padding.len()) as u32;
         let total = 4 + packet_length as usize;
@@ -416,7 +416,7 @@ impl SshPacket {
     }
 
     /// Decode packet from wire format (without MAC verification)
-    pub fn decode(data: &[u8]) -> Result<(Self, usize), SshError> {
+    pub(crate) fn decode(data: &[u8]) -> Result<(Self, usize), SshError> {
         if data.len() < 5 {
             return Err(SshError::InvalidPacket);
         }
@@ -445,7 +445,7 @@ impl SshPacket {
     }
 
     /// Get the message type byte (first byte of payload)
-    pub fn message_type(&self) -> Option<u8> {
+    pub(crate) fn message_type(&self) -> Option<u8> {
         self.payload.first().copied()
     }
 }
@@ -517,7 +517,7 @@ impl KexInitMessage {
     }
 
     /// Encode KEXINIT message to payload bytes (including msg type byte)
-    pub fn encode(&self) -> Vec<u8> {
+    pub(crate) fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(512);
         buf.push(SSH_MSG_KEXINIT);
         buf.extend_from_slice(&self.cookie);
@@ -547,7 +547,7 @@ impl KexInitMessage {
     }
 
     /// Decode KEXINIT from payload bytes (after msg type byte is consumed)
-    pub fn decode(data: &[u8]) -> Result<Self, SshError> {
+    pub(crate) fn decode(data: &[u8]) -> Result<Self, SshError> {
         if data.len() < 17 {
             return Err(SshError::InvalidPacket);
         }
@@ -648,13 +648,13 @@ impl KexState {
     }
 
     /// Set the server ephemeral key pair
-    pub fn set_server_keys(&mut self, private: [u8; 32], public: [u8; 32]) {
+    pub(crate) fn set_server_keys(&mut self, private: [u8; 32], public: [u8; 32]) {
         self.server_ephemeral_private = private;
         self.server_ephemeral_public = public;
     }
 
     /// Set the client's ephemeral public key from KEX_ECDH_INIT
-    pub fn set_client_public(&mut self, key: [u8; 32]) {
+    pub(crate) fn set_client_public(&mut self, key: [u8; 32]) {
         self.client_ephemeral_public = key;
     }
 }
@@ -696,7 +696,7 @@ impl TransportKeys {
 }
 
 /// Encode a disconnect message
-pub fn encode_disconnect(reason_code: u32, description: &str) -> Vec<u8> {
+pub(crate) fn encode_disconnect(reason_code: u32, description: &str) -> Vec<u8> {
     let desc_bytes = description.as_bytes();
     let mut buf = Vec::with_capacity(16 + desc_bytes.len());
     buf.push(SSH_MSG_DISCONNECT);
@@ -710,12 +710,12 @@ pub fn encode_disconnect(reason_code: u32, description: &str) -> Vec<u8> {
 }
 
 /// Encode a NEWKEYS message
-pub fn encode_newkeys() -> Vec<u8> {
+pub(crate) fn encode_newkeys() -> Vec<u8> {
     vec![SSH_MSG_NEWKEYS]
 }
 
 /// Encode a service accept message
-pub fn encode_service_accept(service_name: &str) -> Vec<u8> {
+pub(crate) fn encode_service_accept(service_name: &str) -> Vec<u8> {
     let name_bytes = service_name.as_bytes();
     let mut buf = Vec::with_capacity(5 + name_bytes.len());
     buf.push(SSH_MSG_SERVICE_ACCEPT);
@@ -725,7 +725,7 @@ pub fn encode_service_accept(service_name: &str) -> Vec<u8> {
 }
 
 /// Parse a service request, return service name
-pub fn parse_service_request(payload: &[u8]) -> Result<Vec<u8>, SshError> {
+pub(crate) fn parse_service_request(payload: &[u8]) -> Result<Vec<u8>, SshError> {
     if payload.is_empty() || payload[0] != SSH_MSG_SERVICE_REQUEST {
         return Err(SshError::InvalidPacket);
     }
@@ -757,7 +757,7 @@ pub enum AuthMethod {
 }
 
 impl AuthMethod {
-    pub fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::None => "none",
             Self::Password => "password",
@@ -766,7 +766,7 @@ impl AuthMethod {
         }
     }
 
-    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+    pub(crate) fn from_bytes(data: &[u8]) -> Option<Self> {
         match data {
             b"none" => Some(Self::None),
             b"password" => Some(Self::Password),
@@ -816,18 +816,18 @@ impl AuthState {
     }
 
     /// Record a failed attempt, return whether more attempts are allowed
-    pub fn record_failure(&mut self) -> bool {
+    pub(crate) fn record_failure(&mut self) -> bool {
         self.attempts += 1;
         self.attempts < self.max_attempts
     }
 
     /// Mark authentication as successful
-    pub fn mark_success(&mut self) {
+    pub(crate) fn mark_success(&mut self) {
         self.authenticated = true;
     }
 
     /// Check if authentication attempts are exhausted
-    pub fn exhausted(&self) -> bool {
+    pub(crate) fn exhausted(&self) -> bool {
         self.attempts >= self.max_attempts
     }
 }
@@ -869,7 +869,7 @@ pub enum AuthMethodData {
 }
 
 /// Parse a userauth request from payload
-pub fn parse_userauth_request(payload: &[u8]) -> Result<UserauthRequest, SshError> {
+pub(crate) fn parse_userauth_request(payload: &[u8]) -> Result<UserauthRequest, SshError> {
     if payload.is_empty() || payload[0] != SSH_MSG_USERAUTH_REQUEST {
         return Err(SshError::InvalidPacket);
     }
@@ -929,7 +929,7 @@ pub fn parse_userauth_request(payload: &[u8]) -> Result<UserauthRequest, SshErro
 }
 
 /// Encode a userauth failure message
-pub fn encode_userauth_failure(methods: &[AuthMethod], partial_success: bool) -> Vec<u8> {
+pub(crate) fn encode_userauth_failure(methods: &[AuthMethod], partial_success: bool) -> Vec<u8> {
     let mut name_list = Vec::new();
     for (i, method) in methods.iter().enumerate() {
         if i > 0 {
@@ -947,12 +947,12 @@ pub fn encode_userauth_failure(methods: &[AuthMethod], partial_success: bool) ->
 }
 
 /// Encode a userauth success message
-pub fn encode_userauth_success() -> Vec<u8> {
+pub(crate) fn encode_userauth_success() -> Vec<u8> {
     vec![SSH_MSG_USERAUTH_SUCCESS]
 }
 
 /// Encode a userauth PK_OK (server accepts this key for auth)
-pub fn encode_userauth_pk_ok(algorithm: &[u8], public_key: &[u8]) -> Vec<u8> {
+pub(crate) fn encode_userauth_pk_ok(algorithm: &[u8], public_key: &[u8]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(9 + algorithm.len() + public_key.len());
     buf.push(SSH_MSG_USERAUTH_PK_OK);
     write_ssh_string(&mut buf, algorithm);
@@ -961,7 +961,7 @@ pub fn encode_userauth_pk_ok(algorithm: &[u8], public_key: &[u8]) -> Vec<u8> {
 }
 
 /// Encode a banner message
-pub fn encode_banner(message: &str) -> Vec<u8> {
+pub(crate) fn encode_banner(message: &str) -> Vec<u8> {
     let msg_bytes = message.as_bytes();
     let mut buf = Vec::with_capacity(9 + msg_bytes.len());
     buf.push(SSH_MSG_USERAUTH_BANNER);
@@ -987,7 +987,7 @@ pub enum ChannelType {
 }
 
 impl ChannelType {
-    pub fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Session => "session",
             Self::DirectTcpip => "direct-tcpip",
@@ -995,7 +995,7 @@ impl ChannelType {
         }
     }
 
-    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+    pub(crate) fn from_bytes(data: &[u8]) -> Option<Self> {
         match data {
             b"session" => Some(Self::Session),
             b"direct-tcpip" => Some(Self::DirectTcpip),
@@ -1079,7 +1079,7 @@ impl Channel {
     }
 
     /// Confirm channel open from remote
-    pub fn confirm(&mut self, remote_id: u32, remote_window: u32, remote_max_packet: u32) {
+    pub(crate) fn confirm(&mut self, remote_id: u32, remote_window: u32, remote_max_packet: u32) {
         self.remote_id = remote_id;
         self.remote_window = remote_window;
         self.remote_max_packet = remote_max_packet;
@@ -1087,7 +1087,7 @@ impl Channel {
     }
 
     /// Consume send window (returns true if enough window available)
-    pub fn consume_send_window(&mut self, amount: u32) -> bool {
+    pub(crate) fn consume_send_window(&mut self, amount: u32) -> bool {
         if self.remote_window >= amount {
             self.remote_window -= amount;
             true
@@ -1097,7 +1097,7 @@ impl Channel {
     }
 
     /// Consume receive window
-    pub fn consume_recv_window(&mut self, amount: u32) -> bool {
+    pub(crate) fn consume_recv_window(&mut self, amount: u32) -> bool {
         if self.local_window >= amount {
             self.local_window -= amount;
             true
@@ -1107,17 +1107,17 @@ impl Channel {
     }
 
     /// Adjust local window (increase capacity to receive more data)
-    pub fn adjust_local_window(&mut self, increment: u32) {
+    pub(crate) fn adjust_local_window(&mut self, increment: u32) {
         self.local_window = self.local_window.saturating_add(increment);
     }
 
     /// Adjust remote window (peer sent WINDOW_ADJUST)
-    pub fn adjust_remote_window(&mut self, increment: u32) {
+    pub(crate) fn adjust_remote_window(&mut self, increment: u32) {
         self.remote_window = self.remote_window.saturating_add(increment);
     }
 
     /// Mark EOF received
-    pub fn mark_eof_received(&mut self) {
+    pub(crate) fn mark_eof_received(&mut self) {
         self.eof_received = true;
         if self.state == ChannelState::Open {
             self.state = ChannelState::EofReceived;
@@ -1125,7 +1125,7 @@ impl Channel {
     }
 
     /// Mark EOF sent
-    pub fn mark_eof_sent(&mut self) {
+    pub(crate) fn mark_eof_sent(&mut self) {
         self.eof_sent = true;
         if self.state == ChannelState::Open {
             self.state = ChannelState::EofSent;
@@ -1133,7 +1133,7 @@ impl Channel {
     }
 
     /// Mark channel as closed
-    pub fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         self.state = ChannelState::Closed;
     }
 }
@@ -1162,7 +1162,7 @@ impl ChannelTable {
     }
 
     /// Allocate a new channel, returning its local ID
-    pub fn open(&mut self, channel_type: ChannelType) -> Result<u32, SshError> {
+    pub(crate) fn open(&mut self, channel_type: ChannelType) -> Result<u32, SshError> {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         let channel = Channel::new(id, channel_type);
@@ -1171,33 +1171,33 @@ impl ChannelTable {
     }
 
     /// Get a channel by local ID
-    pub fn get(&self, local_id: u32) -> Option<&Channel> {
+    pub(crate) fn get(&self, local_id: u32) -> Option<&Channel> {
         self.channels.get(&local_id)
     }
 
     /// Get a mutable channel by local ID
-    pub fn get_mut(&mut self, local_id: u32) -> Option<&mut Channel> {
+    pub(crate) fn get_mut(&mut self, local_id: u32) -> Option<&mut Channel> {
         self.channels.get_mut(&local_id)
     }
 
     /// Remove a channel
-    pub fn remove(&mut self, local_id: u32) -> Option<Channel> {
+    pub(crate) fn remove(&mut self, local_id: u32) -> Option<Channel> {
         self.channels.remove(&local_id)
     }
 
     /// Number of active channels
-    pub fn count(&self) -> usize {
+    pub(crate) fn count(&self) -> usize {
         self.channels.len()
     }
 
     /// Check if a channel exists
-    pub fn contains(&self, local_id: u32) -> bool {
+    pub(crate) fn contains(&self, local_id: u32) -> bool {
         self.channels.contains_key(&local_id)
     }
 }
 
 /// Encode a channel open message
-pub fn encode_channel_open(
+pub(crate) fn encode_channel_open(
     channel_type: ChannelType,
     sender_channel: u32,
     initial_window: u32,
@@ -1214,7 +1214,7 @@ pub fn encode_channel_open(
 }
 
 /// Parse a channel open request
-pub fn parse_channel_open(payload: &[u8]) -> Result<(ChannelType, u32, u32, u32), SshError> {
+pub(crate) fn parse_channel_open(payload: &[u8]) -> Result<(ChannelType, u32, u32, u32), SshError> {
     if payload.is_empty() || payload[0] != SSH_MSG_CHANNEL_OPEN {
         return Err(SshError::InvalidPacket);
     }
@@ -1233,7 +1233,7 @@ pub fn parse_channel_open(payload: &[u8]) -> Result<(ChannelType, u32, u32, u32)
 }
 
 /// Encode channel open confirmation
-pub fn encode_channel_open_confirmation(
+pub(crate) fn encode_channel_open_confirmation(
     recipient_channel: u32,
     sender_channel: u32,
     initial_window: u32,
@@ -1249,7 +1249,7 @@ pub fn encode_channel_open_confirmation(
 }
 
 /// Encode channel open failure
-pub fn encode_channel_open_failure(
+pub(crate) fn encode_channel_open_failure(
     recipient_channel: u32,
     reason_code: u32,
     description: &str,
@@ -1266,7 +1266,7 @@ pub fn encode_channel_open_failure(
 }
 
 /// Encode channel data
-pub fn encode_channel_data(recipient_channel: u32, data: &[u8]) -> Vec<u8> {
+pub(crate) fn encode_channel_data(recipient_channel: u32, data: &[u8]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(9 + data.len());
     buf.push(SSH_MSG_CHANNEL_DATA);
     buf.extend_from_slice(&recipient_channel.to_be_bytes());
@@ -1275,7 +1275,7 @@ pub fn encode_channel_data(recipient_channel: u32, data: &[u8]) -> Vec<u8> {
 }
 
 /// Parse channel data, returns (recipient_channel, data)
-pub fn parse_channel_data(payload: &[u8]) -> Result<(u32, Vec<u8>), SshError> {
+pub(crate) fn parse_channel_data(payload: &[u8]) -> Result<(u32, Vec<u8>), SshError> {
     if payload.is_empty() || payload[0] != SSH_MSG_CHANNEL_DATA {
         return Err(SshError::InvalidPacket);
     }
@@ -1286,7 +1286,7 @@ pub fn parse_channel_data(payload: &[u8]) -> Result<(u32, Vec<u8>), SshError> {
 }
 
 /// Encode channel extended data (e.g., stderr)
-pub fn encode_channel_extended_data(
+pub(crate) fn encode_channel_extended_data(
     recipient_channel: u32,
     data_type: u32,
     data: &[u8],
@@ -1300,7 +1300,7 @@ pub fn encode_channel_extended_data(
 }
 
 /// Encode channel window adjust
-pub fn encode_window_adjust(recipient_channel: u32, bytes_to_add: u32) -> Vec<u8> {
+pub(crate) fn encode_window_adjust(recipient_channel: u32, bytes_to_add: u32) -> Vec<u8> {
     let mut buf = Vec::with_capacity(9);
     buf.push(SSH_MSG_CHANNEL_WINDOW_ADJUST);
     buf.extend_from_slice(&recipient_channel.to_be_bytes());
@@ -1309,7 +1309,7 @@ pub fn encode_window_adjust(recipient_channel: u32, bytes_to_add: u32) -> Vec<u8
 }
 
 /// Parse channel window adjust, returns (recipient_channel, bytes_to_add)
-pub fn parse_window_adjust(payload: &[u8]) -> Result<(u32, u32), SshError> {
+pub(crate) fn parse_window_adjust(payload: &[u8]) -> Result<(u32, u32), SshError> {
     if payload.is_empty() || payload[0] != SSH_MSG_CHANNEL_WINDOW_ADJUST {
         return Err(SshError::InvalidPacket);
     }
@@ -1320,7 +1320,7 @@ pub fn parse_window_adjust(payload: &[u8]) -> Result<(u32, u32), SshError> {
 }
 
 /// Encode channel EOF
-pub fn encode_channel_eof(recipient_channel: u32) -> Vec<u8> {
+pub(crate) fn encode_channel_eof(recipient_channel: u32) -> Vec<u8> {
     let mut buf = Vec::with_capacity(5);
     buf.push(SSH_MSG_CHANNEL_EOF);
     buf.extend_from_slice(&recipient_channel.to_be_bytes());
@@ -1328,7 +1328,7 @@ pub fn encode_channel_eof(recipient_channel: u32) -> Vec<u8> {
 }
 
 /// Encode channel close
-pub fn encode_channel_close(recipient_channel: u32) -> Vec<u8> {
+pub(crate) fn encode_channel_close(recipient_channel: u32) -> Vec<u8> {
     let mut buf = Vec::with_capacity(5);
     buf.push(SSH_MSG_CHANNEL_CLOSE);
     buf.extend_from_slice(&recipient_channel.to_be_bytes());
@@ -1336,7 +1336,7 @@ pub fn encode_channel_close(recipient_channel: u32) -> Vec<u8> {
 }
 
 /// Encode a channel request
-pub fn encode_channel_request(
+pub(crate) fn encode_channel_request(
     recipient_channel: u32,
     request_type: &str,
     want_reply: bool,
@@ -1366,7 +1366,7 @@ pub struct ChannelRequest {
 }
 
 /// Parse a channel request
-pub fn parse_channel_request(payload: &[u8]) -> Result<ChannelRequest, SshError> {
+pub(crate) fn parse_channel_request(payload: &[u8]) -> Result<ChannelRequest, SshError> {
     if payload.is_empty() || payload[0] != SSH_MSG_CHANNEL_REQUEST {
         return Err(SshError::InvalidPacket);
     }
@@ -1415,7 +1415,7 @@ pub struct PtyInfo {
 
 impl PtyInfo {
     /// Parse a pty-req request data blob
-    pub fn parse(data: &[u8]) -> Result<Self, SshError> {
+    pub(crate) fn parse(data: &[u8]) -> Result<Self, SshError> {
         let mut pos = 0;
         let term_type = read_ssh_string(data, &mut pos)?;
         let width_cols = read_u32(data, &mut pos)?;
@@ -1435,7 +1435,7 @@ impl PtyInfo {
     }
 
     /// Encode PTY info to wire format (for pty-req channel request data)
-    pub fn encode(&self) -> Vec<u8> {
+    pub(crate) fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(32 + self.term_type.len() + self.terminal_modes.len());
         write_ssh_string(&mut buf, &self.term_type);
         buf.extend_from_slice(&self.width_cols.to_be_bytes());
@@ -1455,7 +1455,7 @@ pub struct ExecRequest {
 }
 
 impl ExecRequest {
-    pub fn parse(data: &[u8]) -> Result<Self, SshError> {
+    pub(crate) fn parse(data: &[u8]) -> Result<Self, SshError> {
         let mut pos = 0;
         let command = read_ssh_string(data, &mut pos)?;
         Ok(Self { command })
@@ -1472,7 +1472,7 @@ pub struct EnvRequest {
 }
 
 impl EnvRequest {
-    pub fn parse(data: &[u8]) -> Result<Self, SshError> {
+    pub(crate) fn parse(data: &[u8]) -> Result<Self, SshError> {
         let mut pos = 0;
         let name = read_ssh_string(data, &mut pos)?;
         let value = read_ssh_string(data, &mut pos)?;
@@ -1487,11 +1487,11 @@ pub struct ExitStatus {
 }
 
 impl ExitStatus {
-    pub fn encode(&self) -> Vec<u8> {
+    pub(crate) fn encode(&self) -> Vec<u8> {
         self.code.to_be_bytes().to_vec()
     }
 
-    pub fn parse(data: &[u8]) -> Result<Self, SshError> {
+    pub(crate) fn parse(data: &[u8]) -> Result<Self, SshError> {
         if data.len() < 4 {
             return Err(SshError::InvalidPacket);
         }
@@ -1514,7 +1514,7 @@ pub struct ExitSignal {
 }
 
 impl ExitSignal {
-    pub fn encode(&self) -> Vec<u8> {
+    pub(crate) fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(
             16 + self.signal_name.len() + self.error_message.len() + self.language_tag.len(),
         );
@@ -1525,7 +1525,7 @@ impl ExitSignal {
         buf
     }
 
-    pub fn parse(data: &[u8]) -> Result<Self, SshError> {
+    pub(crate) fn parse(data: &[u8]) -> Result<Self, SshError> {
         let mut pos = 0;
         let signal_name = read_ssh_string(data, &mut pos)?;
         if pos >= data.len() {
@@ -1591,7 +1591,7 @@ impl ShellSession {
     }
 
     /// Allocate a PTY for this session
-    pub fn allocate_pty(&mut self, pty_info: PtyInfo) -> Result<(), SshError> {
+    pub(crate) fn allocate_pty(&mut self, pty_info: PtyInfo) -> Result<(), SshError> {
         if self.state != ShellSessionState::Idle {
             return Err(SshError::InvalidState);
         }
@@ -1601,7 +1601,7 @@ impl ShellSession {
     }
 
     /// Start a shell session
-    pub fn start_shell(&mut self) -> Result<(), SshError> {
+    pub(crate) fn start_shell(&mut self) -> Result<(), SshError> {
         match self.state {
             ShellSessionState::Idle | ShellSessionState::PtyAllocated => {
                 self.state = ShellSessionState::Running;
@@ -1624,18 +1624,18 @@ impl ShellSession {
     }
 
     /// Add an environment variable
-    pub fn set_env(&mut self, name: Vec<u8>, value: Vec<u8>) {
+    pub(crate) fn set_env(&mut self, name: Vec<u8>, value: Vec<u8>) {
         self.environment.push((name, value));
     }
 
     /// Mark session as exited
-    pub fn mark_exited(&mut self, code: u32) {
+    pub(crate) fn mark_exited(&mut self, code: u32) {
         self.exit_code = Some(code);
         self.state = ShellSessionState::Exited;
     }
 
     /// Mark session as killed by signal
-    pub fn mark_signaled(&mut self, signal: Vec<u8>) {
+    pub(crate) fn mark_signaled(&mut self, signal: Vec<u8>) {
         self.exit_signal = Some(signal);
         self.state = ShellSessionState::Exited;
     }
@@ -1664,7 +1664,7 @@ impl HostKeyPair {
     }
 
     /// Encode public key in SSH wire format ("ssh-ed25519" || key_data)
-    pub fn encode_public_key(&self) -> Vec<u8> {
+    pub(crate) fn encode_public_key(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(51);
         write_ssh_string(&mut buf, b"ssh-ed25519");
         write_ssh_string(&mut buf, &self.public_key);
@@ -1730,7 +1730,7 @@ impl SshSession {
     }
 
     /// Process version exchange
-    pub fn process_version(&mut self, data: &[u8]) -> Result<SessionState, SshError> {
+    pub(crate) fn process_version(&mut self, data: &[u8]) -> Result<SessionState, SshError> {
         if self.state != SessionState::VersionExchange {
             return Err(SshError::InvalidState);
         }
@@ -1746,7 +1746,7 @@ impl SshSession {
     }
 
     /// Transition to NewKeysExpected after KEXINIT exchange
-    pub fn begin_key_exchange(&mut self) -> Result<(), SshError> {
+    pub(crate) fn begin_key_exchange(&mut self) -> Result<(), SshError> {
         if self.state != SessionState::KeyExchange {
             return Err(SshError::InvalidState);
         }
@@ -1754,7 +1754,7 @@ impl SshSession {
     }
 
     /// Process NEWKEYS message, transition to Authentication
-    pub fn process_newkeys(&mut self) -> Result<SessionState, SshError> {
+    pub(crate) fn process_newkeys(&mut self) -> Result<SessionState, SshError> {
         if self.state != SessionState::KeyExchange && self.state != SessionState::NewKeysExpected {
             return Err(SshError::InvalidState);
         }
@@ -1763,7 +1763,7 @@ impl SshSession {
     }
 
     /// Process successful authentication, transition to Connected
-    pub fn authenticate_success(&mut self) -> Result<SessionState, SshError> {
+    pub(crate) fn authenticate_success(&mut self) -> Result<SessionState, SshError> {
         if self.state != SessionState::Authentication {
             return Err(SshError::InvalidState);
         }
@@ -1773,12 +1773,15 @@ impl SshSession {
     }
 
     /// Disconnect the session
-    pub fn disconnect(&mut self) {
+    pub(crate) fn disconnect(&mut self) {
         self.state = SessionState::Disconnected;
     }
 
     /// Process a channel request (pty-req, shell, exec, env)
-    pub fn handle_channel_request(&mut self, request: &ChannelRequest) -> Result<bool, SshError> {
+    pub(crate) fn handle_channel_request(
+        &mut self,
+        request: &ChannelRequest,
+    ) -> Result<bool, SshError> {
         let channel = self
             .channels
             .get_mut(request.recipient_channel)
@@ -1848,14 +1851,14 @@ impl SshSession {
     }
 
     /// Increment send sequence counter
-    pub fn next_send_seq(&mut self) -> u32 {
+    pub(crate) fn next_send_seq(&mut self) -> u32 {
         let seq = self.send_seq;
         self.send_seq = self.send_seq.wrapping_add(1);
         seq
     }
 
     /// Increment recv sequence counter
-    pub fn next_recv_seq(&mut self) -> u32 {
+    pub(crate) fn next_recv_seq(&mut self) -> u32 {
         let seq = self.recv_seq;
         self.recv_seq = self.recv_seq.wrapping_add(1);
         seq
@@ -1893,12 +1896,12 @@ impl SshServer {
     }
 
     /// Set the server banner message
-    pub fn set_banner(&mut self, banner: String) {
+    pub(crate) fn set_banner(&mut self, banner: String) {
         self.banner = Some(banner);
     }
 
     /// Accept a new connection, creating a session
-    pub fn accept_connection(&mut self) -> Result<u32, SshError> {
+    pub(crate) fn accept_connection(&mut self) -> Result<u32, SshError> {
         if self.sessions.len() >= self.max_sessions {
             return Err(SshError::SessionLimitReached);
         }
@@ -1910,22 +1913,22 @@ impl SshServer {
     }
 
     /// Get a session by ID
-    pub fn get_session(&self, session_id: u32) -> Option<&SshSession> {
+    pub(crate) fn get_session(&self, session_id: u32) -> Option<&SshSession> {
         self.sessions.get(&session_id)
     }
 
     /// Get a mutable session by ID
-    pub fn get_session_mut(&mut self, session_id: u32) -> Option<&mut SshSession> {
+    pub(crate) fn get_session_mut(&mut self, session_id: u32) -> Option<&mut SshSession> {
         self.sessions.get_mut(&session_id)
     }
 
     /// Remove a disconnected session
-    pub fn remove_session(&mut self, session_id: u32) -> Option<SshSession> {
+    pub(crate) fn remove_session(&mut self, session_id: u32) -> Option<SshSession> {
         self.sessions.remove(&session_id)
     }
 
     /// Number of active sessions
-    pub fn active_sessions(&self) -> usize {
+    pub(crate) fn active_sessions(&self) -> usize {
         self.sessions.len()
     }
 }

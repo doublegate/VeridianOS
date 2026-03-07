@@ -564,7 +564,7 @@ impl BuiltinCommand for UnameCommand {
             parts.push("veridian");
         }
         if show_release {
-            parts.push("0.20.0");
+            parts.push("0.20.1");
         }
         if show_machine {
             #[cfg(target_arch = "x86_64")]
@@ -1847,6 +1847,7 @@ impl BuiltinCommand for ShutdownCommand {
         }
         // Try ACPI S5 via QEMU debug-exit on x86_64
         #[cfg(target_arch = "x86_64")]
+        // SAFETY: Writing to QEMU debug-exit port 0xF4 to trigger VM shutdown.
         unsafe {
             x86_64::instructions::port::Port::new(0xf4).write(0x00u32);
         }
@@ -1893,6 +1894,7 @@ impl BuiltinCommand for PoweroffCommand {
             crate::println!("poweroff: init system not available");
         }
         #[cfg(target_arch = "x86_64")]
+        // SAFETY: Writing to QEMU debug-exit port 0xF4 to trigger VM power-off.
         unsafe {
             x86_64::instructions::port::Port::new(0xf4).write(0x00u32);
         }
@@ -2451,6 +2453,8 @@ impl BuiltinCommand for LscpuCommand {
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
             // CPUID EAX=0: vendor string
+            // SAFETY: CPUID is available on all x86_64 CPUs; leaf 0 returns the vendor
+            // string.
             let cpuid0 = unsafe { core::arch::x86_64::__cpuid(0) };
             let mut vendor = [0u8; 12];
             vendor[0..4].copy_from_slice(&cpuid0.ebx.to_le_bytes());
@@ -2460,6 +2464,7 @@ impl BuiltinCommand for LscpuCommand {
             crate::println!("Vendor:        {}", vendor_str);
 
             // CPUID EAX=1: family/model/stepping
+            // SAFETY: CPUID leaf 1 is supported (max leaf >= 1 from cpuid0.eax).
             let cpuid1 = unsafe { core::arch::x86_64::__cpuid(1) };
             let stepping = cpuid1.eax & 0xF;
             let model = ((cpuid1.eax >> 4) & 0xF) | (((cpuid1.eax >> 16) & 0xF) << 4);

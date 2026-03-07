@@ -93,6 +93,7 @@ extern "x86-interrupt" fn page_fault_handler(
     let was_user = ec & 4 != 0; // U/S bit
 
     // Early diagnostic: raw serial before ANY other work to catch cascading faults
+    // SAFETY: Port I/O writes to COM1 (0x3F8) for diagnostic serial output.
     unsafe {
         raw_serial_str(b"PF! cr2=0x");
         raw_serial_hex(cr2_val);
@@ -139,6 +140,7 @@ extern "x86-interrupt" fn page_fault_handler(
         // Cannot call sys_exit() from interrupt context (it uses println!
         // and locks which risk deadlock). Instead, mark the process as
         // Zombie and call boot_return_to_kernel directly.
+        // SAFETY: Port I/O writes to COM1 (0x3F8) for diagnostic serial output.
         unsafe {
             raw_serial_str(b"SEGFAULT pid=0x");
             raw_serial_hex(
@@ -155,6 +157,8 @@ extern "x86-interrupt" fn page_fault_handler(
 
         // Dump user stack to identify the call chain at crash time.
         // Since we don't switch CR3, user pages are mapped.
+        // SAFETY: User stack is mapped (no CR3 switch). RSP is bounds-checked
+        // before dereferencing. Port I/O to COM1 for serial output.
         unsafe {
             let user_rsp = stack_frame.stack_pointer.as_u64();
             raw_serial_str(b"  RSP=0x");
@@ -189,6 +193,8 @@ extern "x86-interrupt" fn page_fault_handler(
         // entry). boot_return_to_kernel expects the swapgs state from
         // syscall_entry. Do swapgs first to balance boot_return's swapgs.
         if crate::arch::x86_64::usermode::has_boot_return_context() {
+            // SAFETY: swapgs balances the GS base for boot_return_to_kernel.
+            // boot_return context was verified by has_boot_return_context().
             unsafe {
                 raw_serial_str(b"[PF_KILL] boot_return\n");
                 core::arch::asm!("swapgs", options(nomem, nostack));

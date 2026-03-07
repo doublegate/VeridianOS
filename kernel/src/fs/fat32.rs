@@ -275,6 +275,8 @@ impl LfnDirEntry {
         let mut chars = Vec::new();
 
         // Copy fields from packed struct to local arrays to avoid unaligned access
+        // SAFETY: addr_of! on packed fields avoids creating unaligned refs;
+        // read_unaligned handles alignment.
         let name1: [u16; 5] = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(self.name1)) };
         let name2: [u16; 6] = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(self.name2)) };
         let name3: [u16; 2] = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(self.name3)) };
@@ -454,6 +456,7 @@ impl Fat32State {
 
             if attr == ATTR_LONG_NAME {
                 // LFN entry
+                // SAFETY: entry_bytes is a 32-byte aligned slice matching LfnDirEntry layout.
                 let lfn = unsafe { &*(entry_bytes.as_ptr() as *const LfnDirEntry) };
                 let order = lfn.order & 0x3F;
                 lfn_parts.push((order, lfn.chars()));
@@ -461,6 +464,7 @@ impl Fat32State {
             }
 
             // Short name entry
+            // SAFETY: entry_bytes is a 32-byte aligned slice matching RawDirEntry layout.
             let raw = unsafe { &*(entry_bytes.as_ptr() as *const RawDirEntry) };
 
             // Build long name if LFN parts exist
@@ -1175,6 +1179,7 @@ mod tests {
         entry[..8].copy_from_slice(b"TEST    ");
         entry[8..11].copy_from_slice(b"TXT");
         entry[11] = 0x20; // Archive attribute
+                          // SAFETY: entry is a stack-local 32-byte array matching RawDirEntry layout.
         let raw = unsafe { &*(entry.as_ptr() as *const RawDirEntry) };
         assert_eq!(raw.short_name(), "TEST.TXT");
     }
@@ -1185,6 +1190,7 @@ mod tests {
         entry[..8].copy_from_slice(b"README  ");
         entry[8..11].copy_from_slice(b"   ");
         entry[11] = 0x10; // Directory
+                          // SAFETY: entry is a stack-local 32-byte array matching RawDirEntry layout.
         let raw = unsafe { &*(entry.as_ptr() as *const RawDirEntry) };
         assert_eq!(raw.short_name(), "README");
     }

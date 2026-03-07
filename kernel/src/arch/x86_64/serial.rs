@@ -9,6 +9,7 @@ use uart_16550::SerialPort;
 
 lazy_static! {
     pub static ref SERIAL1: Mutex<SerialPort> = {
+        // SAFETY: 0x3F8 is the well-known I/O port address for COM1 (16550 UART).
         let mut serial_port = unsafe { SerialPort::new(0x3F8) };
         serial_port.init();
         Mutex::new(serial_port)

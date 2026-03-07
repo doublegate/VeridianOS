@@ -167,6 +167,8 @@ static BP_MANAGER: spin::Mutex<BreakpointManager> = spin::Mutex::new(BreakpointM
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 fn set_debug_register(idx: usize, addr: u64, len: u8, wp_type: WatchpointType) {
+    // SAFETY: Writing x86_64 debug registers DR0-DR3 and DR7 to configure hardware
+    // breakpoints.
     unsafe {
         // Set address in DR0-DR3
         match idx {
@@ -212,6 +214,7 @@ fn set_debug_register(idx: usize, addr: u64, len: u8, wp_type: WatchpointType) {
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 fn clear_debug_register(idx: usize) {
+    // SAFETY: Reading and writing x86_64 DR7 to disable a hardware breakpoint slot.
     unsafe {
         let mut dr7: u64;
         core::arch::asm!("mov {}, dr7", out(reg) dr7, options(nostack));

@@ -116,6 +116,7 @@ pub fn load_user_program(
     let pid = lifecycle::create_process_with_options(options)?;
 
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: raw_serial_str writes to the COM1 I/O port for diagnostic output.
     unsafe {
         crate::arch::x86_64::idt::raw_serial_str(b"[LOADER] pid created, opening fds\n");
     }
@@ -177,6 +178,7 @@ pub fn load_user_program(
         let mut memory_space = process.memory_space.lock();
 
         #[cfg(target_arch = "x86_64")]
+        // SAFETY: raw_serial_str writes to the COM1 I/O port for diagnostic output.
         unsafe {
             crate::arch::x86_64::idt::raw_serial_str(b"[LOADER] loading ELF segments\n");
         }
@@ -228,6 +230,7 @@ pub fn load_user_program(
     }
 
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: raw_serial_str writes to the COM1 I/O port for diagnostic output.
     unsafe {
         crate::arch::x86_64::idt::raw_serial_str(b"[LOADER] load complete, returning pid\n");
     }
@@ -525,11 +528,13 @@ impl crate::fs::VfsNode for SerialConsoleNode {
             for slot in buffer.iter_mut() {
                 loop {
                     let status: u8;
+                    // SAFETY: Reading COM1 line status register (0x3FD) via x86 port I/O.
                     unsafe {
                         core::arch::asm!("in al, dx", out("al") status, in("dx") 0x3FDu16);
                     }
                     if (status & 1) != 0 {
                         let byte: u8;
+                        // SAFETY: Reading COM1 data register (0x3F8) after confirming data ready.
                         unsafe {
                             core::arch::asm!("in al, dx", out("al") byte, in("dx") 0x3F8u16);
                         }

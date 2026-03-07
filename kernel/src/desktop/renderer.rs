@@ -423,7 +423,7 @@ fn create_desktop_scene(width: u32, height: u32) -> DesktopState {
     // Send a welcome notification to demonstrate the notification system
     crate::desktop::notification::notify(
         "VeridianOS Desktop",
-        "Welcome to VeridianOS v0.20.0",
+        "Welcome to VeridianOS v0.20.1",
         crate::desktop::notification::NotificationUrgency::Normal,
         "desktop",
     );
@@ -1005,6 +1005,16 @@ fn handle_launcher_launch(state: &mut DesktopState, exec_path: &str) {
     }
 }
 
+/// Framebuffer layout info passed to render sub-functions.
+struct FrameLayout {
+    fb_ptr: *mut u8,
+    fb_width: usize,
+    fb_height: usize,
+    fb_stride: usize,
+    is_bgr: bool,
+    panel_y: i32,
+}
+
 /// Main compositor render loop.
 ///
 /// Composites all Wayland surfaces, blits to the hardware framebuffer,
@@ -1013,12 +1023,14 @@ fn handle_launcher_launch(state: &mut DesktopState, exec_path: &str) {
 /// launcher, notifications, system tray, snap-to-edge, virtual
 /// workspaces, window decorations, and animations.
 fn render_loop(hw: &fbcon::FbHwInfo, state: &mut DesktopState) {
-    let fb_ptr = hw.fb_ptr;
-    let fb_width = hw.width;
-    let fb_height = hw.height;
-    let fb_stride = hw.stride;
-    let is_bgr = matches!(hw.pixel_format, FbPixelFormat::Bgr);
-    let panel_y = (fb_height as u32 - crate::desktop::panel::PANEL_HEIGHT) as i32;
+    let layout = FrameLayout {
+        fb_ptr: hw.fb_ptr,
+        fb_width: hw.width,
+        fb_height: hw.height,
+        fb_stride: hw.stride,
+        is_bgr: matches!(hw.pixel_format, FbPixelFormat::Bgr),
+        panel_y: (hw.height as u32 - crate::desktop::panel::PANEL_HEIGHT) as i32,
+    };
 
     // Initial composite
     let _drawn = crate::desktop::wayland::with_display(|display| display.wl_compositor.composite());
@@ -1028,544 +1040,560 @@ fn render_loop(hw: &fbcon::FbHwInfo, state: &mut DesktopState) {
 
     // Set screen size for window manager placement heuristics
     crate::desktop::window_manager::with_window_manager(|wm| {
-        wm.set_screen_size(fb_width as u32, fb_height as u32);
+        wm.set_screen_size(layout.fb_width as u32, layout.fb_height as u32);
     });
 
     loop {
         state.frame_count += 1;
         let tick = crate::arch::timer::get_ticks();
 
-        // --- 0. Screen lock: takes over all input and rendering ---
+        // Screen lock takes over all input and rendering
         if state.screen_locker.is_locked() {
-            crate::drivers::input_event::poll_all();
-            while let Some(raw_event) = crate::drivers::input_event::read_event() {
-                if raw_event.event_type == crate::drivers::input_event::EV_KEY
-                    && raw_event.value == 1
-                {
-                    let action = state.screen_locker.handle_key(raw_event.code as u8, tick);
-                    if matches!(action, crate::desktop::screen_lock::LockAction::Unlocked) {
-                        break;
-                    }
-                }
+            handle_screen_lock(state, &layout, tick);
+            continue;
+        }
+
+        // Poll, translate, and dispatch input events; returns true if ESC exit
+        if handle_input_events(state, &layout) {
+            return;
+        }
+
+        // Update focus, idle timeout, animations, notifications
+        update_ui_state(state, tick);
+
+        // Render apps, composite overlays, blit to framebuffer
+        render_and_composite(state, &layout, tick);
+    }
+}
+
+/// Handle the screen lock: consume input, tick lock state, render lock screen.
+fn handle_screen_lock(state: &mut DesktopState, layout: &FrameLayout, tick: u64) {
+    crate::drivers::input_event::poll_all();
+    while let Some(raw_event) = crate::drivers::input_event::read_event() {
+        if raw_event.event_type == crate::drivers::input_event::EV_KEY && raw_event.value == 1 {
+            let action = state.screen_locker.handle_key(raw_event.code as u8, tick);
+            if matches!(action, crate::desktop::screen_lock::LockAction::Unlocked) {
+                break;
             }
-            state.screen_locker.tick(tick);
-            // Render lock screen directly to back-buffer, then blit
-            crate::desktop::wayland::with_display(|display| {
-                display.wl_compositor.with_back_buffer_mut(|bb| {
-                    state
-                        .screen_locker
-                        .render_to_buffer(bb, fb_width, fb_height, tick);
-                });
-                blit_back_buffer(
-                    &display.wl_compositor,
-                    fb_ptr,
-                    fb_width,
-                    fb_height,
-                    fb_stride,
-                    is_bgr,
-                );
-            });
-            for _ in 0..50_000 {
-                core::hint::spin_loop();
+        }
+    }
+    state.screen_locker.tick(tick);
+    crate::desktop::wayland::with_display(|display| {
+        display.wl_compositor.with_back_buffer_mut(|bb| {
+            state
+                .screen_locker
+                .render_to_buffer(bb, layout.fb_width, layout.fb_height, tick);
+        });
+        blit_back_buffer(
+            &display.wl_compositor,
+            layout.fb_ptr,
+            layout.fb_width,
+            layout.fb_height,
+            layout.fb_stride,
+            layout.is_bgr,
+        );
+    });
+    for _ in 0..50_000 {
+        core::hint::spin_loop();
+    }
+}
+
+/// Poll hardware input, translate events, and dispatch hotkeys/mouse/keyboard.
+///
+/// Returns `true` if the GUI should exit (ESC pressed without overlays).
+fn handle_input_events(state: &mut DesktopState, layout: &FrameLayout) -> bool {
+    crate::drivers::input_event::poll_all();
+    let (mouse_x, mouse_y) = crate::drivers::mouse::cursor_position();
+    let mods = crate::drivers::keyboard::get_modifiers();
+    let tick = crate::arch::timer::get_ticks();
+
+    // Record activity for idle timeout
+    state.screen_locker.record_activity(tick);
+
+    while let Some(raw_event) = crate::drivers::input_event::read_event() {
+        let is_key_press =
+            raw_event.event_type == crate::drivers::input_event::EV_KEY && raw_event.value == 1;
+
+        // ESC without modifiers exits the GUI
+        if is_key_press && raw_event.code == 0x1B && mods == 0 {
+            // Only exit if no overlay is open
+            if !state.app_switcher.is_visible() {
+                crate::serial::_serial_print(format_args!("[DESKTOP] ESC pressed, exiting GUI\n"));
+                return true;
+            }
+        }
+
+        // --- Hotkey detection (before normal event dispatch) ---
+
+        // Alt+Tab: show/cycle app switcher
+        if is_key_press && raw_event.code == 0x09 && mods & crate::drivers::keyboard::MOD_ALT != 0 {
+            if !state.app_switcher.is_visible() {
+                let windows = get_window_list_for_switcher();
+                state.app_switcher.show(windows);
+            } else {
+                state.app_switcher.next();
             }
             continue;
         }
 
-        // --- 1. Poll hardware input ---
-        crate::drivers::input_event::poll_all();
-        let (mouse_x, mouse_y) = crate::drivers::mouse::cursor_position();
-        let mods = crate::drivers::keyboard::get_modifiers();
-
-        // Record activity for idle timeout
-        state.screen_locker.record_activity(tick);
-
-        // --- 2. Translate and dispatch input events ---
-        while let Some(raw_event) = crate::drivers::input_event::read_event() {
-            let is_key_press =
-                raw_event.event_type == crate::drivers::input_event::EV_KEY && raw_event.value == 1;
-
-            // ESC without modifiers exits the GUI
-            if is_key_press && raw_event.code == 0x1B && mods == 0 {
-                // Only exit if no overlay is open
-                if !state.app_switcher.is_visible() {
-                    crate::serial::_serial_print(format_args!(
-                        "[DESKTOP] ESC pressed, exiting GUI\n"
-                    ));
-                    return;
-                }
+        // Alt released while switcher visible: commit selection
+        if state.app_switcher.is_visible()
+            && mods & crate::drivers::keyboard::MOD_ALT == 0
+            && raw_event.event_type == crate::drivers::input_event::EV_KEY
+        {
+            if let Some(wid) = state.app_switcher.hide() {
+                crate::desktop::window_manager::with_window_manager(|wm| {
+                    let _ = wm.focus_window(wid);
+                });
+                sync_compositor_focus(state, wid);
             }
+            continue;
+        }
 
-            // --- Hotkey detection (before normal event dispatch) ---
+        // Ctrl+Alt+L: lock screen
+        if is_key_press
+            && raw_event.code == b'l' as u16
+            && mods & (crate::drivers::keyboard::MOD_CTRL | crate::drivers::keyboard::MOD_ALT)
+                == (crate::drivers::keyboard::MOD_CTRL | crate::drivers::keyboard::MOD_ALT)
+        {
+            state.screen_locker.lock();
+            continue;
+        }
 
-            // Alt+Tab: show/cycle app switcher
-            if is_key_press
-                && raw_event.code == 0x09
-                && mods & crate::drivers::keyboard::MOD_ALT != 0
-            {
-                if !state.app_switcher.is_visible() {
-                    let windows = get_window_list_for_switcher();
-                    state.app_switcher.show(windows);
-                } else {
-                    state.app_switcher.next();
-                }
+        // Ctrl+Alt+Arrow: switch workspace
+        if is_key_press
+            && mods & (crate::drivers::keyboard::MOD_CTRL | crate::drivers::keyboard::MOD_ALT)
+                == (crate::drivers::keyboard::MOD_CTRL | crate::drivers::keyboard::MOD_ALT)
+        {
+            if raw_event.code == crate::drivers::keyboard::KEY_LEFT as u16 {
+                switch_workspace_prev(state);
                 continue;
             }
-
-            // Alt released while switcher visible: commit selection
-            if state.app_switcher.is_visible()
-                && mods & crate::drivers::keyboard::MOD_ALT == 0
-                && raw_event.event_type == crate::drivers::input_event::EV_KEY
-            {
-                if let Some(wid) = state.app_switcher.hide() {
-                    crate::desktop::window_manager::with_window_manager(|wm| {
-                        let _ = wm.focus_window(wid);
-                    });
-                    sync_compositor_focus(state, wid);
-                }
+            if raw_event.code == crate::drivers::keyboard::KEY_RIGHT as u16 {
+                switch_workspace_next(state);
                 continue;
             }
+        }
 
-            // Ctrl+Alt+L: lock screen
-            if is_key_press
-                && raw_event.code == b'l' as u16
-                && mods & (crate::drivers::keyboard::MOD_CTRL | crate::drivers::keyboard::MOD_ALT)
-                    == (crate::drivers::keyboard::MOD_CTRL | crate::drivers::keyboard::MOD_ALT)
-            {
-                state.screen_locker.lock();
+        // Super key: toggle launcher
+        if is_key_press && mods & crate::drivers::keyboard::MOD_SUPER != 0 {
+            crate::desktop::launcher::with_launcher(|l| l.toggle());
+            continue;
+        }
+
+        // ESC closes launcher or app switcher overlays
+        if is_key_press && raw_event.code == 0x1B {
+            if state.app_switcher.is_visible() {
+                let _ = state.app_switcher.hide();
                 continue;
             }
-
-            // Ctrl+Alt+Arrow: switch workspace
-            if is_key_press
-                && mods & (crate::drivers::keyboard::MOD_CTRL | crate::drivers::keyboard::MOD_ALT)
-                    == (crate::drivers::keyboard::MOD_CTRL | crate::drivers::keyboard::MOD_ALT)
-            {
-                if raw_event.code == crate::drivers::keyboard::KEY_LEFT as u16 {
-                    switch_workspace_prev(state);
-                    continue;
-                }
-                if raw_event.code == crate::drivers::keyboard::KEY_RIGHT as u16 {
-                    switch_workspace_next(state);
-                    continue;
-                }
-            }
-
-            // Super key: toggle launcher
-            if is_key_press && mods & crate::drivers::keyboard::MOD_SUPER != 0 {
-                crate::desktop::launcher::with_launcher(|l| l.toggle());
-                continue;
-            }
-
-            // ESC closes launcher or app switcher overlays
-            if is_key_press && raw_event.code == 0x1B {
-                if state.app_switcher.is_visible() {
-                    let _ = state.app_switcher.hide();
-                    continue;
-                }
-                let launcher_visible =
-                    crate::desktop::launcher::with_launcher_ref(|l| l.is_visible())
-                        .unwrap_or(false);
-                if launcher_visible {
-                    crate::desktop::launcher::with_launcher(|l| l.hide());
-                    continue;
-                }
-            }
-
-            // Forward keyboard to launcher when visible
             let launcher_visible =
                 crate::desktop::launcher::with_launcher_ref(|l| l.is_visible()).unwrap_or(false);
-            if launcher_visible && is_key_press && raw_event.code < 0x80 {
-                let action =
-                    crate::desktop::launcher::with_launcher(|l| l.handle_key(raw_event.code as u8));
-                if let Some(Some(action)) = action {
-                    match action {
-                        crate::desktop::launcher::LauncherAction::Launch(exec) => {
-                            handle_launcher_launch(state, &exec);
-                        }
-                        crate::desktop::launcher::LauncherAction::Hide => {}
+            if launcher_visible {
+                crate::desktop::launcher::with_launcher(|l| l.hide());
+                continue;
+            }
+        }
+
+        // Forward keyboard to launcher when visible
+        let launcher_visible =
+            crate::desktop::launcher::with_launcher_ref(|l| l.is_visible()).unwrap_or(false);
+        if launcher_visible && is_key_press && raw_event.code < 0x80 {
+            let action =
+                crate::desktop::launcher::with_launcher(|l| l.handle_key(raw_event.code as u8));
+            if let Some(Some(action)) = action {
+                match action {
+                    crate::desktop::launcher::LauncherAction::Launch(exec) => {
+                        handle_launcher_launch(state, &exec);
                     }
+                    crate::desktop::launcher::LauncherAction::Hide => {}
                 }
-                continue;
             }
+            continue;
+        }
 
-            // Ctrl+C: copy from focused app to clipboard
-            if is_key_press
-                && raw_event.code == b'c' as u16
-                && mods & crate::drivers::keyboard::MOD_CTRL != 0
-                && mods & crate::drivers::keyboard::MOD_ALT == 0
-            {
-                // Store a placeholder text copy (real text selection requires per-app support)
-                let _ = state.clipboard.copy(
-                    crate::desktop::desktop_ext::clipboard::SelectionType::Clipboard,
-                    0,
-                    crate::desktop::desktop_ext::clipboard::ClipboardMime::TextPlainUtf8,
-                    alloc::vec![],
-                );
-                continue;
-            }
+        // Ctrl+C: copy from focused app to clipboard
+        if is_key_press
+            && raw_event.code == b'c' as u16
+            && mods & crate::drivers::keyboard::MOD_CTRL != 0
+            && mods & crate::drivers::keyboard::MOD_ALT == 0
+        {
+            let _ = state.clipboard.copy(
+                crate::desktop::desktop_ext::clipboard::SelectionType::Clipboard,
+                0,
+                crate::desktop::desktop_ext::clipboard::ClipboardMime::TextPlainUtf8,
+                alloc::vec![],
+            );
+            continue;
+        }
 
-            // Ctrl+V: paste from clipboard to focused app
-            if is_key_press
-                && raw_event.code == b'v' as u16
-                && mods & crate::drivers::keyboard::MOD_CTRL != 0
-                && mods & crate::drivers::keyboard::MOD_ALT == 0
-            {
-                if let Ok(data) = state.clipboard.paste(
-                    crate::desktop::desktop_ext::clipboard::SelectionType::Clipboard,
-                    crate::desktop::desktop_ext::clipboard::ClipboardMime::TextPlainUtf8,
-                ) {
-                    // Inject clipboard text as key events to focused terminal
-                    if state.terminal.wid > 0 {
-                        crate::desktop::terminal::with_terminal_manager(|tm| {
-                            for &byte in data {
-                                let event = crate::desktop::window_manager::InputEvent::KeyPress {
-                                    scancode: 0,
-                                    character: byte as char,
-                                };
-                                let _ = tm.process_input(0, event);
-                            }
-                        });
-                    }
-                }
-                continue;
-            }
-
-            // --- Normal event dispatch ---
-
-            if let Some(wm_event) = translate_input_event(&raw_event, mouse_x, mouse_y) {
-                // --- Handle mouse button press ---
-                if let crate::desktop::window_manager::InputEvent::MouseButton {
-                    button: 0,
-                    pressed: true,
-                    x,
-                    y,
-                } = wm_event
-                {
-                    // Dismiss launcher on click outside
-                    if launcher_visible {
-                        crate::desktop::launcher::with_launcher(|l| l.hide());
-                    }
-
-                    // Panel click
-                    if y >= panel_y {
-                        // Refresh button list before hit-testing so stale entries
-                        // don't cause missed clicks (buttons update every N frames).
-                        crate::desktop::panel::with_panel(|p| p.update_buttons());
-                        if let Some(focus_wid) =
-                            crate::desktop::panel::with_panel(|p| p.handle_click(x, y - panel_y))
-                                .flatten()
-                        {
-                            crate::desktop::window_manager::with_window_manager(|wm| {
-                                let _ = wm.focus_window(focus_wid);
-                            });
-                            sync_compositor_focus(state, focus_wid);
+        // Ctrl+V: paste from clipboard to focused app
+        if is_key_press
+            && raw_event.code == b'v' as u16
+            && mods & crate::drivers::keyboard::MOD_CTRL != 0
+            && mods & crate::drivers::keyboard::MOD_ALT == 0
+        {
+            if let Ok(data) = state.clipboard.paste(
+                crate::desktop::desktop_ext::clipboard::SelectionType::Clipboard,
+                crate::desktop::desktop_ext::clipboard::ClipboardMime::TextPlainUtf8,
+            ) {
+                if state.terminal.wid > 0 {
+                    crate::desktop::terminal::with_terminal_manager(|tm| {
+                        for &byte in data {
+                            let event = crate::desktop::window_manager::InputEvent::KeyPress {
+                                scancode: 0,
+                                character: byte as char,
+                            };
+                            let _ = tm.process_input(0, event);
                         }
-                        continue;
-                    }
+                    });
+                }
+            }
+            continue;
+        }
 
-                    // Window hit test: find which window was clicked
-                    let hit = crate::desktop::window_manager::with_window_manager(|wm| {
-                        wm.window_at_position(x, y)
+        // --- Normal event dispatch ---
+        if let Some(wm_event) = translate_input_event(&raw_event, mouse_x, mouse_y) {
+            dispatch_mouse_and_keyboard(state, layout, wm_event, launcher_visible);
+        }
+    }
+
+    false
+}
+
+/// Dispatch a translated WM event: mouse clicks, drags, releases, and keyboard.
+fn dispatch_mouse_and_keyboard(
+    state: &mut DesktopState,
+    layout: &FrameLayout,
+    wm_event: crate::desktop::window_manager::InputEvent,
+    launcher_visible: bool,
+) {
+    // --- Handle left mouse button press ---
+    if let crate::desktop::window_manager::InputEvent::MouseButton {
+        button: 0,
+        pressed: true,
+        x,
+        y,
+    } = wm_event
+    {
+        // Dismiss launcher on click outside
+        if launcher_visible {
+            crate::desktop::launcher::with_launcher(|l| l.hide());
+        }
+
+        // Panel click
+        if y >= layout.panel_y {
+            crate::desktop::panel::with_panel(|p| p.update_buttons());
+            if let Some(focus_wid) =
+                crate::desktop::panel::with_panel(|p| p.handle_click(x, y - layout.panel_y))
+                    .flatten()
+            {
+                crate::desktop::window_manager::with_window_manager(|wm| {
+                    let _ = wm.focus_window(focus_wid);
+                });
+                sync_compositor_focus(state, focus_wid);
+            }
+            return;
+        }
+
+        // Window hit test: find which window was clicked
+        let hit =
+            crate::desktop::window_manager::with_window_manager(|wm| wm.window_at_position(x, y))
+                .flatten();
+
+        if let Some(wid) = hit {
+            crate::desktop::window_manager::with_window_manager(|wm| {
+                let _ = wm.focus_window(wid);
+            });
+            sync_compositor_focus(state, wid);
+
+            let in_title_bar = crate::desktop::window_manager::with_window_manager(|wm| {
+                wm.get_window(wid).map(|w| y < w.y + TITLE_BAR_HEIGHT)
+            })
+            .flatten()
+            .unwrap_or(false);
+
+            if in_title_bar {
+                let is_close = crate::desktop::window_manager::with_window_manager(|wm| {
+                    wm.get_window(wid).map(|w| x >= w.x + w.width as i32 - 28)
+                })
+                .flatten()
+                .unwrap_or(false);
+
+                if is_close {
+                    close_any_window(state, wid);
+                    return;
+                }
+
+                // Start drag
+                if let Some(surface_id) = state.surface_for_window(wid) {
+                    let win_pos = crate::desktop::window_manager::with_window_manager(|wm| {
+                        wm.get_window(wid).map(|w| (w.x, w.y))
                     })
                     .flatten();
-
-                    if let Some(wid) = hit {
-                        // Focus the clicked window
-                        crate::desktop::window_manager::with_window_manager(|wm| {
-                            let _ = wm.focus_window(wid);
+                    if let Some((wx, wy)) = win_pos {
+                        state.drag = Some(DragState {
+                            wid,
+                            surface_id,
+                            offset_x: x - wx,
+                            offset_y: y - wy,
                         });
-                        sync_compositor_focus(state, wid);
-
-                        // Check if click is in the title bar area for drag
-                        let in_title_bar =
-                            crate::desktop::window_manager::with_window_manager(|wm| {
-                                wm.get_window(wid).map(|w| y < w.y + TITLE_BAR_HEIGHT)
-                            })
-                            .flatten()
-                            .unwrap_or(false);
-
-                        if in_title_bar {
-                            // Check close button (rightmost 28px of title bar)
-                            let is_close =
-                                crate::desktop::window_manager::with_window_manager(|wm| {
-                                    wm.get_window(wid).map(|w| x >= w.x + w.width as i32 - 28)
-                                })
-                                .flatten()
-                                .unwrap_or(false);
-
-                            if is_close {
-                                close_any_window(state, wid);
-                                continue;
-                            }
-
-                            // Start drag
-                            if let Some(surface_id) = state.surface_for_window(wid) {
-                                let win_pos =
-                                    crate::desktop::window_manager::with_window_manager(|wm| {
-                                        wm.get_window(wid).map(|w| (w.x, w.y))
-                                    })
-                                    .flatten();
-                                if let Some((wx, wy)) = win_pos {
-                                    state.drag = Some(DragState {
-                                        wid,
-                                        surface_id,
-                                        offset_x: x - wx,
-                                        offset_y: y - wy,
-                                    });
-                                }
-                            }
-                        } else {
-                            // Not title bar -- forward click to the app
-                            crate::desktop::window_manager::with_window_manager(|wm| {
-                                wm.queue_event(crate::desktop::window_manager::WindowEvent {
-                                    window_id: wid,
-                                    event: wm_event,
-                                });
-                            });
-                        }
                     }
-                    continue;
                 }
-
-                // --- Handle right-click ---
-                if let crate::desktop::window_manager::InputEvent::MouseButton {
-                    button: 1,
-                    pressed: true,
-                    x,
-                    y,
-                } = wm_event
-                {
-                    // Dismiss launcher on right-click
-                    let launcher_visible =
-                        crate::desktop::launcher::with_launcher_ref(|l| l.is_visible())
-                            .unwrap_or(false);
-                    if launcher_visible {
-                        crate::desktop::launcher::with_launcher(|l| l.hide());
-                    }
-
-                    // Skip panel area
-                    if y < panel_y {
-                        // Window hit test
-                        let hit = crate::desktop::window_manager::with_window_manager(|wm| {
-                            wm.window_at_position(x, y)
-                        })
-                        .flatten();
-
-                        if let Some(wid) = hit {
-                            // Right-click on title bar: close window
-                            let in_title_bar =
-                                crate::desktop::window_manager::with_window_manager(|wm| {
-                                    wm.get_window(wid).map(|w| y < w.y + TITLE_BAR_HEIGHT)
-                                })
-                                .flatten()
-                                .unwrap_or(false);
-                            if in_title_bar {
-                                close_any_window(state, wid);
-                            }
-                        } else {
-                            // Right-click on desktop background: toggle launcher
-                            crate::desktop::launcher::with_launcher(|l| l.toggle());
-                        }
-                    }
-                    continue;
-                }
-
-                // --- Handle mouse button release (end drag + snap-to-edge) ---
-                if let crate::desktop::window_manager::InputEvent::MouseButton {
-                    button: 0,
-                    pressed: false,
-                    x,
-                    y,
-                } = wm_event
-                {
-                    if let Some(ref d) = state.drag {
-                        // Check snap-to-edge on drag release
-                        let zone = crate::desktop::window_manager::WindowManager::detect_snap_zone(
-                            x,
-                            y,
-                            fb_width as u32,
-                            fb_height as u32,
-                        );
-                        if zone != crate::desktop::window_manager::SnapZone::None {
-                            let drag_wid = d.wid;
-                            let drag_sid = d.surface_id;
-                            crate::desktop::window_manager::with_window_manager(|wm| {
-                                wm.snap_window(drag_wid, zone);
-                                // Read new snapped geometry and update compositor
-                                if let Some(w) = wm.get_window(drag_wid) {
-                                    crate::desktop::wayland::with_display(|display| {
-                                        display
-                                            .wl_compositor
-                                            .set_surface_position(drag_sid, w.x, w.y);
-                                    });
-                                }
-                            });
-                        }
-                    }
-                    state.drag = None;
-                    // Forward release to focused window
-                    crate::desktop::window_manager::with_window_manager(|wm| {
-                        wm.process_input(wm_event);
+            } else {
+                // Not title bar -- forward click to the app
+                crate::desktop::window_manager::with_window_manager(|wm| {
+                    wm.queue_event(crate::desktop::window_manager::WindowEvent {
+                        window_id: wid,
+                        event: wm_event,
                     });
-                    continue;
-                }
+                });
+            }
+        }
+        return;
+    }
 
-                // --- Handle mouse move (drag window or forward) ---
-                if let crate::desktop::window_manager::InputEvent::MouseMove { x, y } = wm_event {
-                    if let Some(ref d) = state.drag {
-                        let new_x = x - d.offset_x;
-                        let new_y = y - d.offset_y;
-                        // Update WM window position
-                        crate::desktop::window_manager::with_window_manager(|wm| {
-                            let _ = wm.move_window(d.wid, new_x, new_y);
-                        });
-                        // Update compositor surface position
+    // --- Handle right-click ---
+    if let crate::desktop::window_manager::InputEvent::MouseButton {
+        button: 1,
+        pressed: true,
+        x,
+        y,
+    } = wm_event
+    {
+        let launcher_visible =
+            crate::desktop::launcher::with_launcher_ref(|l| l.is_visible()).unwrap_or(false);
+        if launcher_visible {
+            crate::desktop::launcher::with_launcher(|l| l.hide());
+        }
+
+        if y < layout.panel_y {
+            let hit = crate::desktop::window_manager::with_window_manager(|wm| {
+                wm.window_at_position(x, y)
+            })
+            .flatten();
+
+            if let Some(wid) = hit {
+                let in_title_bar = crate::desktop::window_manager::with_window_manager(|wm| {
+                    wm.get_window(wid).map(|w| y < w.y + TITLE_BAR_HEIGHT)
+                })
+                .flatten()
+                .unwrap_or(false);
+                if in_title_bar {
+                    close_any_window(state, wid);
+                }
+            } else {
+                crate::desktop::launcher::with_launcher(|l| l.toggle());
+            }
+        }
+        return;
+    }
+
+    // --- Handle mouse button release (end drag + snap-to-edge) ---
+    if let crate::desktop::window_manager::InputEvent::MouseButton {
+        button: 0,
+        pressed: false,
+        x,
+        y,
+    } = wm_event
+    {
+        if let Some(ref d) = state.drag {
+            let zone = crate::desktop::window_manager::WindowManager::detect_snap_zone(
+                x,
+                y,
+                layout.fb_width as u32,
+                layout.fb_height as u32,
+            );
+            if zone != crate::desktop::window_manager::SnapZone::None {
+                let drag_wid = d.wid;
+                let drag_sid = d.surface_id;
+                crate::desktop::window_manager::with_window_manager(|wm| {
+                    wm.snap_window(drag_wid, zone);
+                    if let Some(w) = wm.get_window(drag_wid) {
                         crate::desktop::wayland::with_display(|display| {
                             display
                                 .wl_compositor
-                                .set_surface_position(d.surface_id, new_x, new_y);
+                                .set_surface_position(drag_sid, w.x, w.y);
                         });
-                        continue;
                     }
-                }
-
-                // All other events: dispatch to window manager
-                crate::desktop::window_manager::with_window_manager(|wm| {
-                    wm.process_input(wm_event);
                 });
             }
         }
-
-        // --- 2b. Detect focus changes and sync compositor z_order ---
-        let current_focused =
-            crate::desktop::window_manager::with_window_manager(|wm| wm.get_focused_window_id())
-                .flatten();
-        if current_focused != state.prev_focused {
-            if let Some(fwid) = current_focused {
-                sync_compositor_focus(state, fwid);
-            }
-            state.prev_focused = current_focused;
-        }
-
-        // --- 2c. Check idle timeout for screen lock ---
-        if state.screen_locker.check_idle_timeout(tick) {
-            state.screen_locker.lock();
-        }
-
-        // --- 3. Forward queued WM events to apps ---
-        forward_events_to_apps(state);
-
-        // --- 4. Update app state ---
-        // Terminal: read PTY output
-        crate::desktop::terminal::with_terminal_manager(|tm| {
-            let _ = tm.update_all();
+        state.drag = None;
+        crate::desktop::window_manager::with_window_manager(|wm| {
+            wm.process_input(wm_event);
         });
+        return;
+    }
 
-        // Tick animation manager
-        state.animation_mgr.tick(16); // ~16ms per frame at 60fps
-        state.animation_mgr.remove_completed();
-
-        // Tick notification expiry (every 30th frame to avoid overhead)
-        if state.frame_count.is_multiple_of(30) {
-            crate::desktop::notification::with_notification_manager(|mgr| {
-                mgr.tick(tick);
+    // --- Handle mouse move (drag window or forward) ---
+    if let crate::desktop::window_manager::InputEvent::MouseMove { x, y } = wm_event {
+        if let Some(ref d) = state.drag {
+            let new_x = x - d.offset_x;
+            let new_y = y - d.offset_y;
+            crate::desktop::window_manager::with_window_manager(|wm| {
+                let _ = wm.move_window(d.wid, new_x, new_y);
             });
-        }
-
-        // --- 5. Render apps and panel to surfaces ---
-        render_all_apps(state);
-
-        // Panel: update clock + buttons + systray periodically
-        if state.frame_count.is_multiple_of(10) {
-            render_panel(state, fb_width as u32);
-        }
-
-        // --- 6. Composite, render overlays, and blit ---
-        crate::desktop::wayland::with_display(|display| {
-            display.wl_compositor.request_composite();
-            let composited = display.wl_compositor.composite().unwrap_or(false);
-
-            if composited {
-                // Render Phase 7 overlays into the back-buffer (post-composite,
-                // pre-blit). These draw on top of all Wayland surfaces.
-                display.wl_compositor.with_back_buffer_mut(|bb| {
-                    // Desktop icons (rendered behind windows, in background area)
-                    for icon in &state.icon_grid.icons {
-                        if icon.x >= 0 && icon.y >= 0 {
-                            crate::desktop::desktop_icons::IconGrid::render_icon(
-                                icon,
-                                bb,
-                                fb_width as u32,
-                                fb_height as u32,
-                            );
-                            // Render icon name label below the icon
-                            let label_x = icon.x.max(0) as usize;
-                            let label_y =
-                                (icon.y + crate::desktop::desktop_icons::ICON_SIZE as i32 + 2)
-                                    .max(0) as usize;
-                            let name_bytes = icon.name.as_bytes();
-                            let label_len = name_bytes.len().min(8);
-                            for (ci, &ch) in name_bytes[..label_len].iter().enumerate() {
-                                draw_glyph_u32(
-                                    bb,
-                                    fb_width,
-                                    label_x + ci * 8,
-                                    label_y,
-                                    ch,
-                                    0xFFCCCCCC,
-                                );
-                            }
-                        }
-                    }
-
-                    // Close button overlays on all visible windows (themed error color)
-                    let close_btn_color = state.theme.colors().error.0;
-                    draw_close_button_overlays(bb, fb_width, fb_height, close_btn_color);
-
-                    // App switcher overlay (Alt+Tab)
-                    if state.app_switcher.is_visible() {
-                        state
-                            .app_switcher
-                            .render(bb, fb_width as u32, fb_height as u32);
-                    }
-
-                    // Launcher overlay (Super key)
-                    crate::desktop::launcher::with_launcher_ref(|l| {
-                        if l.is_visible() {
-                            l.render_to_buffer(bb, fb_width, fb_height);
-                        }
-                    });
-
-                    // Notification toasts (top-right)
-                    crate::desktop::notification::with_notification_manager(|mgr| {
-                        if mgr.active_count() > 0 {
-                            mgr.render_to_buffer(bb, fb_width, fb_height, tick);
-                        }
-                    });
-                });
-
-                // Blit composited back-buffer (with overlays) to hardware framebuffer
-                blit_back_buffer(
-                    &display.wl_compositor,
-                    fb_ptr,
-                    fb_width,
-                    fb_height,
-                    fb_stride,
-                    is_bgr,
-                );
-            }
-        });
-
-        // Always draw cursor (cheap: 16x16 pixels) so it stays responsive
-        // SAFETY: fb_ptr is valid for stride * height bytes.
-        let fb_slice = unsafe { core::slice::from_raw_parts_mut(fb_ptr, fb_stride * fb_height) };
-        cursor::draw_cursor(fb_slice, fb_stride, fb_width, fb_height, mouse_x, mouse_y);
-
-        // Yield CPU -- short spin for frame pacing
-        for _ in 0..5_000 {
-            core::hint::spin_loop();
+            crate::desktop::wayland::with_display(|display| {
+                display
+                    .wl_compositor
+                    .set_surface_position(d.surface_id, new_x, new_y);
+            });
+            return;
         }
     }
+
+    // All other events: dispatch to window manager
+    crate::desktop::window_manager::with_window_manager(|wm| {
+        wm.process_input(wm_event);
+    });
+}
+
+/// Update focus tracking, idle timeout, animations, and notifications.
+fn update_ui_state(state: &mut DesktopState, tick: u64) {
+    // Detect focus changes and sync compositor z_order
+    let current_focused =
+        crate::desktop::window_manager::with_window_manager(|wm| wm.get_focused_window_id())
+            .flatten();
+    if current_focused != state.prev_focused {
+        if let Some(fwid) = current_focused {
+            sync_compositor_focus(state, fwid);
+        }
+        state.prev_focused = current_focused;
+    }
+
+    // Check idle timeout for screen lock
+    if state.screen_locker.check_idle_timeout(tick) {
+        state.screen_locker.lock();
+    }
+
+    // Forward queued WM events to apps
+    forward_events_to_apps(state);
+
+    // Terminal: read PTY output
+    crate::desktop::terminal::with_terminal_manager(|tm| {
+        let _ = tm.update_all();
+    });
+
+    // Tick animation manager
+    state.animation_mgr.tick(16); // ~16ms per frame at 60fps
+    state.animation_mgr.remove_completed();
+
+    // Tick notification expiry (every 30th frame to avoid overhead)
+    if state.frame_count.is_multiple_of(30) {
+        crate::desktop::notification::with_notification_manager(|mgr| {
+            mgr.tick(tick);
+        });
+    }
+}
+
+/// Render all apps, composite overlays, and blit to the hardware framebuffer.
+fn render_and_composite(state: &mut DesktopState, layout: &FrameLayout, tick: u64) {
+    render_all_apps(state);
+
+    // Panel: update clock + buttons + systray periodically
+    if state.frame_count.is_multiple_of(10) {
+        render_panel(state, layout.fb_width as u32);
+    }
+
+    // Composite, render overlays, and blit
+    crate::desktop::wayland::with_display(|display| {
+        display.wl_compositor.request_composite();
+        let composited = display.wl_compositor.composite().unwrap_or(false);
+
+        if composited {
+            display.wl_compositor.with_back_buffer_mut(|bb| {
+                render_overlays(state, bb, layout.fb_width, layout.fb_height, tick);
+            });
+
+            blit_back_buffer(
+                &display.wl_compositor,
+                layout.fb_ptr,
+                layout.fb_width,
+                layout.fb_height,
+                layout.fb_stride,
+                layout.is_bgr,
+            );
+        }
+    });
+
+    // Always draw cursor (cheap: 16x16 pixels) so it stays responsive
+    let (mouse_x, mouse_y) = crate::drivers::mouse::cursor_position();
+    // SAFETY: fb_ptr is valid for stride * height bytes.
+    let fb_slice = unsafe {
+        core::slice::from_raw_parts_mut(layout.fb_ptr, layout.fb_stride * layout.fb_height)
+    };
+    cursor::draw_cursor(
+        fb_slice,
+        layout.fb_stride,
+        layout.fb_width,
+        layout.fb_height,
+        mouse_x,
+        mouse_y,
+    );
+
+    // Yield CPU -- short spin for frame pacing
+    for _ in 0..5_000 {
+        core::hint::spin_loop();
+    }
+}
+
+/// Render Phase 7 overlays into the composited back-buffer.
+///
+/// Draws desktop icons, close buttons, app switcher, launcher, and
+/// notification toasts on top of all Wayland surfaces (post-composite,
+/// pre-blit).
+fn render_overlays(
+    state: &DesktopState,
+    bb: &mut [u32],
+    fb_width: usize,
+    fb_height: usize,
+    tick: u64,
+) {
+    // Desktop icons (rendered behind windows, in background area)
+    for icon in &state.icon_grid.icons {
+        if icon.x >= 0 && icon.y >= 0 {
+            crate::desktop::desktop_icons::IconGrid::render_icon(
+                icon,
+                bb,
+                fb_width as u32,
+                fb_height as u32,
+            );
+            let label_x = icon.x.max(0) as usize;
+            let label_y =
+                (icon.y + crate::desktop::desktop_icons::ICON_SIZE as i32 + 2).max(0) as usize;
+            let name_bytes = icon.name.as_bytes();
+            let label_len = name_bytes.len().min(8);
+            for (ci, &ch) in name_bytes[..label_len].iter().enumerate() {
+                draw_glyph_u32(bb, fb_width, label_x + ci * 8, label_y, ch, 0xFFCCCCCC);
+            }
+        }
+    }
+
+    // Close button overlays on all visible windows (themed error color)
+    let close_btn_color = state.theme.colors().error.0;
+    draw_close_button_overlays(bb, fb_width, fb_height, close_btn_color);
+
+    // App switcher overlay (Alt+Tab)
+    if state.app_switcher.is_visible() {
+        state
+            .app_switcher
+            .render(bb, fb_width as u32, fb_height as u32);
+    }
+
+    // Launcher overlay (Super key)
+    crate::desktop::launcher::with_launcher_ref(|l| {
+        if l.is_visible() {
+            l.render_to_buffer(bb, fb_width, fb_height);
+        }
+    });
+
+    // Notification toasts (top-right)
+    crate::desktop::notification::with_notification_manager(|mgr| {
+        if mgr.active_count() > 0 {
+            mgr.render_to_buffer(bb, fb_width, fb_height, tick);
+        }
+    });
 }
 
 /// Try to blit the compositor back-buffer via VirtIO GPU (DMA path).
@@ -2111,7 +2139,7 @@ fn render_pdf_viewer(buf: &mut [u8], w: usize, h: usize, bg_color: u32, page_ind
         draw_string_into_buffer(
             buf,
             w,
-            b"PDF Engine: VeridianPDF v0.20.0",
+            b"PDF Engine: VeridianPDF v0.20.1",
             page_x + 20,
             page_y + 20,
             0x333333,

@@ -56,12 +56,12 @@ pub enum SdpAttribute {
 
 impl SdpAttribute {
     /// Check if this attribute is nil
-    pub fn is_nil(&self) -> bool {
+    pub(crate) fn is_nil(&self) -> bool {
         matches!(self, Self::Nil)
     }
 
     /// Try to extract a u16 value
-    pub fn as_u16(&self) -> Option<u16> {
+    pub(crate) fn as_u16(&self) -> Option<u16> {
         match self {
             Self::Uint16(v) => Some(*v),
             Self::Uint8(v) => Some(*v as u16),
@@ -70,7 +70,7 @@ impl SdpAttribute {
     }
 
     /// Try to extract a UUID16 value
-    pub fn as_uuid16(&self) -> Option<u16> {
+    pub(crate) fn as_uuid16(&self) -> Option<u16> {
         match self {
             Self::Uuid16(v) => Some(*v),
             _ => None,
@@ -189,27 +189,27 @@ impl SdpRecord {
     }
 
     /// Add a protocol to the protocol descriptor list
-    pub fn add_protocol(&mut self, uuid: u16) {
+    pub(crate) fn add_protocol(&mut self, uuid: u16) {
         self.protocol_list.push(uuid);
     }
 
     /// Add a profile descriptor (UUID + version)
-    pub fn add_profile(&mut self, uuid: u16, version: u16) {
+    pub(crate) fn add_profile(&mut self, uuid: u16, version: u16) {
         self.profile_list.push((uuid, version));
     }
 
     /// Set an attribute on this record
-    pub fn set_attribute(&mut self, id: u16, value: SdpAttribute) {
+    pub(crate) fn set_attribute(&mut self, id: u16, value: SdpAttribute) {
         self.attributes.insert(id, value);
     }
 
     /// Get an attribute by ID
-    pub fn get_attribute(&self, id: u16) -> Option<&SdpAttribute> {
+    pub(crate) fn get_attribute(&self, id: u16) -> Option<&SdpAttribute> {
         self.attributes.get(&id)
     }
 
     /// Check if this record matches a given service class UUID
-    pub fn matches_uuid(&self, uuid: u16) -> bool {
+    pub(crate) fn matches_uuid(&self, uuid: u16) -> bool {
         self.service_class_uuid == uuid
     }
 }
@@ -245,14 +245,14 @@ impl SdpDatabase {
     }
 
     /// Get number of registered services
-    pub fn record_count(&self) -> usize {
+    pub(crate) fn record_count(&self) -> usize {
         self.records.len()
     }
 
     /// Register a new service record
     ///
     /// Returns the assigned service record handle
-    pub fn register_service(&mut self, service_class_uuid: u16, name: &str) -> u32 {
+    pub(crate) fn register_service(&mut self, service_class_uuid: u16, name: &str) -> u32 {
         let handle = self.next_handle;
         self.next_handle += 1;
         let record = SdpRecord::new(handle, service_class_uuid, name);
@@ -261,7 +261,7 @@ impl SdpDatabase {
     }
 
     /// Register a fully constructed SDP record
-    pub fn register_record(&mut self, mut record: SdpRecord) -> u32 {
+    pub(crate) fn register_record(&mut self, mut record: SdpRecord) -> u32 {
         let handle = self.next_handle;
         self.next_handle += 1;
         record.handle = handle;
@@ -270,19 +270,19 @@ impl SdpDatabase {
     }
 
     /// Remove a service record by handle
-    pub fn remove_service(&mut self, handle: u32) -> bool {
+    pub(crate) fn remove_service(&mut self, handle: u32) -> bool {
         let initial_len = self.records.len();
         self.records.retain(|r| r.handle != handle);
         self.records.len() < initial_len
     }
 
     /// Find a service record by service class UUID
-    pub fn find_by_uuid(&self, uuid: u16) -> Option<&SdpRecord> {
+    pub(crate) fn find_by_uuid(&self, uuid: u16) -> Option<&SdpRecord> {
         self.records.iter().find(|r| r.matches_uuid(uuid))
     }
 
     /// Search for all records matching a service class UUID
-    pub fn search(&self, uuid: u16) -> Vec<&SdpRecord> {
+    pub(crate) fn search(&self, uuid: u16) -> Vec<&SdpRecord> {
         self.records
             .iter()
             .filter(|r| r.matches_uuid(uuid))
@@ -290,12 +290,12 @@ impl SdpDatabase {
     }
 
     /// Get a record by handle
-    pub fn get_by_handle(&self, handle: u32) -> Option<&SdpRecord> {
+    pub(crate) fn get_by_handle(&self, handle: u32) -> Option<&SdpRecord> {
         self.records.iter().find(|r| r.handle == handle)
     }
 
     /// Get a mutable record by handle
-    pub fn get_by_handle_mut(&mut self, handle: u32) -> Option<&mut SdpRecord> {
+    pub(crate) fn get_by_handle_mut(&mut self, handle: u32) -> Option<&mut SdpRecord> {
         self.records.iter_mut().find(|r| r.handle == handle)
     }
 }
@@ -322,7 +322,7 @@ pub enum A2dpCodec {
 
 impl A2dpCodec {
     /// Parse codec type from byte
-    pub fn from_u8(val: u8) -> Option<Self> {
+    pub(crate) fn from_u8(val: u8) -> Option<Self> {
         match val {
             0x00 => Some(Self::Sbc),
             0x01 => Some(Self::Mpeg12),
@@ -407,7 +407,7 @@ impl Default for SbcConfig {
 
 impl SbcConfig {
     /// Validate the SBC configuration
-    pub fn validate(&self) -> Result<(), KernelError> {
+    pub(crate) fn validate(&self) -> Result<(), KernelError> {
         if self.subbands != 4 && self.subbands != 8 {
             return Err(KernelError::InvalidArgument {
                 name: "subbands",
@@ -436,7 +436,8 @@ impl SbcConfig {
     }
 
     /// Encode SBC configuration into the 4-byte AVDTP codec information element
-    pub fn to_bytes(&self) -> [u8; 4] {
+    #[allow(clippy::wrong_self_convention)]
+    pub(crate) fn to_bytes(&self) -> [u8; 4] {
         let mut bytes = [0u8; 4];
         // Byte 0: sample frequency (4 bits) | channel mode (4 bits)
         bytes[0] = (self.sample_frequency as u8) | (self.channel_mode as u8);
@@ -531,7 +532,7 @@ impl A2dpSink {
     }
 
     /// Configure the sink with a specific codec and parameters
-    pub fn configure(
+    pub(crate) fn configure(
         &mut self,
         codec: A2dpCodec,
         sample_rate: u32,
@@ -576,7 +577,7 @@ impl A2dpSink {
     }
 
     /// Start streaming audio
-    pub fn start_stream(&mut self) -> Result<(), KernelError> {
+    pub(crate) fn start_stream(&mut self) -> Result<(), KernelError> {
         if self.state != A2dpState::Configured && self.state != A2dpState::Suspended {
             return Err(KernelError::InvalidState {
                 expected: "Configured or Suspended",
@@ -588,7 +589,7 @@ impl A2dpSink {
     }
 
     /// Suspend the audio stream
-    pub fn suspend(&mut self) -> Result<(), KernelError> {
+    pub(crate) fn suspend(&mut self) -> Result<(), KernelError> {
         if self.state != A2dpState::Streaming {
             return Err(KernelError::InvalidState {
                 expected: "Streaming",
@@ -600,7 +601,7 @@ impl A2dpSink {
     }
 
     /// Close the stream and return to idle
-    pub fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         self.state = A2dpState::Idle;
         self.transport_cid = 0;
     }
@@ -624,7 +625,7 @@ pub enum HidReportType {
 
 impl HidReportType {
     /// Parse report type from byte
-    pub fn from_u8(val: u8) -> Option<Self> {
+    pub(crate) fn from_u8(val: u8) -> Option<Self> {
         match val {
             0x01 => Some(Self::Input),
             0x02 => Some(Self::Output),
@@ -662,7 +663,7 @@ impl HidReport {
     }
 
     /// Create a report with data
-    pub fn with_data(report_type: HidReportType, report_id: u8, data: &[u8]) -> Self {
+    pub(crate) fn with_data(report_type: HidReportType, report_id: u8, data: &[u8]) -> Self {
         let copy_len = data.len().min(HID_MAX_REPORT_SIZE);
         let mut report = Self::new(report_type, report_id);
         report.data[..copy_len].copy_from_slice(&data[..copy_len]);
@@ -671,7 +672,7 @@ impl HidReport {
     }
 
     /// Get the report data as a slice
-    pub fn as_bytes(&self) -> &[u8] {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.data[..self.data_len]
     }
 }
@@ -691,7 +692,7 @@ pub struct HidDescriptor {
 
 impl HidDescriptor {
     /// Create a keyboard HID descriptor
-    pub fn keyboard() -> Self {
+    pub(crate) fn keyboard() -> Self {
         Self {
             usage_page: 0x01, // Generic Desktop
             usage: 0x06,      // Keyboard
@@ -701,7 +702,7 @@ impl HidDescriptor {
     }
 
     /// Create a mouse HID descriptor
-    pub fn mouse() -> Self {
+    pub(crate) fn mouse() -> Self {
         Self {
             usage_page: 0x01, // Generic Desktop
             usage: 0x02,      // Mouse
@@ -711,7 +712,7 @@ impl HidDescriptor {
     }
 
     /// Create a gamepad HID descriptor
-    pub fn gamepad() -> Self {
+    pub(crate) fn gamepad() -> Self {
         Self {
             usage_page: 0x01, // Generic Desktop
             usage: 0x05,      // Game Pad
@@ -721,7 +722,7 @@ impl HidDescriptor {
     }
 
     /// Total report size in bytes
-    pub fn report_byte_size(&self) -> usize {
+    pub(crate) fn report_byte_size(&self) -> usize {
         let total_bits = (self.report_size as usize) * (self.report_count as usize);
         total_bits.div_ceil(8)
     }
@@ -773,7 +774,7 @@ impl HidDevice {
     }
 
     /// Send an output report to the device (e.g., keyboard LEDs)
-    pub fn send_report(&self, report: &HidReport) -> Result<(), KernelError> {
+    pub(crate) fn send_report(&self, report: &HidReport) -> Result<(), KernelError> {
         if self.state != HidState::Ready {
             return Err(KernelError::InvalidState {
                 expected: "Ready",
@@ -794,7 +795,7 @@ impl HidDevice {
     }
 
     /// Receive an input report from the device
-    pub fn receive_report(&mut self, data: &[u8]) -> Result<HidReport, KernelError> {
+    pub(crate) fn receive_report(&mut self, data: &[u8]) -> Result<HidReport, KernelError> {
         if self.state != HidState::Ready {
             return Err(KernelError::InvalidState {
                 expected: "Ready",
@@ -817,7 +818,7 @@ impl HidDevice {
     ///
     /// Returns a list of field values extracted based on
     /// report_size/report_count
-    pub fn parse_report(&self, report: &HidReport) -> Result<ParsedHidReport, KernelError> {
+    pub(crate) fn parse_report(&self, report: &HidReport) -> Result<ParsedHidReport, KernelError> {
         if report.data_len == 0 {
             return Err(KernelError::InvalidArgument {
                 name: "report",
@@ -856,21 +857,21 @@ impl HidDevice {
     }
 
     /// Connect the HID device
-    pub fn connect(&mut self, control_cid: u16, interrupt_cid: u16) {
+    pub(crate) fn connect(&mut self, control_cid: u16, interrupt_cid: u16) {
         self.control_cid = control_cid;
         self.interrupt_cid = interrupt_cid;
         self.state = HidState::Connected;
     }
 
     /// Set the device to ready state
-    pub fn set_ready(&mut self) {
+    pub(crate) fn set_ready(&mut self) {
         if self.state == HidState::Connected {
             self.state = HidState::Ready;
         }
     }
 
     /// Disconnect the HID device
-    pub fn disconnect(&mut self) {
+    pub(crate) fn disconnect(&mut self) {
         self.state = HidState::Disconnected;
         self.control_cid = 0;
         self.interrupt_cid = 0;
@@ -888,7 +889,7 @@ pub struct ParsedHidReport {
 
 impl ParsedHidReport {
     /// Get field value at index
-    pub fn field(&self, index: usize) -> Option<u32> {
+    pub(crate) fn field(&self, index: usize) -> Option<u32> {
         if index < self.field_count {
             Some(self.fields[index])
         } else {
@@ -943,7 +944,7 @@ impl SerialPortProfile {
     }
 
     /// Connect the serial port
-    pub fn connect(&mut self) -> Result<(), KernelError> {
+    pub(crate) fn connect(&mut self) -> Result<(), KernelError> {
         if self.connected {
             return Err(KernelError::InvalidState {
                 expected: "disconnected",
@@ -955,7 +956,7 @@ impl SerialPortProfile {
     }
 
     /// Disconnect the serial port
-    pub fn disconnect(&mut self) -> Result<(), KernelError> {
+    pub(crate) fn disconnect(&mut self) -> Result<(), KernelError> {
         if !self.connected {
             return Err(KernelError::InvalidState {
                 expected: "connected",
@@ -970,7 +971,7 @@ impl SerialPortProfile {
     /// Write data to the serial port (to be sent over RFCOMM)
     ///
     /// Returns the data slice that should be sent via RFCOMM
-    pub fn write<'a>(&self, data: &'a [u8]) -> Result<&'a [u8], KernelError> {
+    pub(crate) fn write<'a>(&self, data: &'a [u8]) -> Result<&'a [u8], KernelError> {
         if !self.connected {
             return Err(KernelError::InvalidState {
                 expected: "connected",
@@ -988,7 +989,7 @@ impl SerialPortProfile {
     }
 
     /// Buffer received data from RFCOMM
-    pub fn receive(&mut self, data: &[u8]) -> Result<usize, KernelError> {
+    pub(crate) fn receive(&mut self, data: &[u8]) -> Result<usize, KernelError> {
         if !self.connected {
             return Err(KernelError::InvalidState {
                 expected: "connected",
@@ -1005,7 +1006,7 @@ impl SerialPortProfile {
     /// Read buffered data
     ///
     /// Returns number of bytes read
-    pub fn read(&mut self, buf: &mut [u8]) -> usize {
+    pub(crate) fn read(&mut self, buf: &mut [u8]) -> usize {
         let copy_len = buf.len().min(self.read_len);
         buf[..copy_len].copy_from_slice(&self.read_buf[..copy_len]);
         // Shift remaining data forward

@@ -58,12 +58,12 @@ impl DirtyTracker {
     }
 
     /// Register a parent relationship
-    pub fn set_parent(&mut self, child: NodeId, parent: NodeId) {
+    pub(crate) fn set_parent(&mut self, child: NodeId, parent: NodeId) {
         self.parents.insert(child, parent);
     }
 
     /// Remove a node from tracking
-    pub fn remove_node(&mut self, node: NodeId) {
+    pub(crate) fn remove_node(&mut self, node: NodeId) {
         if let Some(flag) = self.flags.remove(&node) {
             if flag != DirtyFlag::Clean {
                 self.dirty_count = self.dirty_count.saturating_sub(1);
@@ -74,7 +74,7 @@ impl DirtyTracker {
 
     /// Mark a node as dirty with the given severity.
     /// Propagates LayoutDirty/StyleDirty upward to ancestors.
-    pub fn mark_dirty(&mut self, node: NodeId, flag: DirtyFlag) {
+    pub(crate) fn mark_dirty(&mut self, node: NodeId, flag: DirtyFlag) {
         if flag == DirtyFlag::Clean {
             return;
         }
@@ -106,42 +106,42 @@ impl DirtyTracker {
     }
 
     /// Mark a node as style-dirty (strongest)
-    pub fn mark_style_dirty(&mut self, node: NodeId) {
+    pub(crate) fn mark_style_dirty(&mut self, node: NodeId) {
         self.mark_dirty(node, DirtyFlag::StyleDirty);
     }
 
     /// Mark a node as layout-dirty
-    pub fn mark_layout_dirty(&mut self, node: NodeId) {
+    pub(crate) fn mark_layout_dirty(&mut self, node: NodeId) {
         self.mark_dirty(node, DirtyFlag::LayoutDirty);
     }
 
     /// Mark a node as paint-dirty
-    pub fn mark_paint_dirty(&mut self, node: NodeId) {
+    pub(crate) fn mark_paint_dirty(&mut self, node: NodeId) {
         self.mark_dirty(node, DirtyFlag::PaintDirty);
     }
 
     /// Get the dirty flag for a node
-    pub fn get_flag(&self, node: NodeId) -> DirtyFlag {
+    pub(crate) fn get_flag(&self, node: NodeId) -> DirtyFlag {
         self.flags.get(&node).copied().unwrap_or(DirtyFlag::Clean)
     }
 
     /// Whether a node needs restyle
-    pub fn needs_restyle(&self, node: NodeId) -> bool {
+    pub(crate) fn needs_restyle(&self, node: NodeId) -> bool {
         self.get_flag(node) >= DirtyFlag::StyleDirty
     }
 
     /// Whether a node needs relayout
-    pub fn needs_relayout(&self, node: NodeId) -> bool {
+    pub(crate) fn needs_relayout(&self, node: NodeId) -> bool {
         self.get_flag(node) >= DirtyFlag::LayoutDirty
     }
 
     /// Whether a node needs repaint
-    pub fn needs_repaint(&self, node: NodeId) -> bool {
+    pub(crate) fn needs_repaint(&self, node: NodeId) -> bool {
         self.get_flag(node) >= DirtyFlag::PaintDirty
     }
 
     /// Clear a specific node's dirty flag
-    pub fn clear(&mut self, node: NodeId) {
+    pub(crate) fn clear(&mut self, node: NodeId) {
         if let Some(flag) = self.flags.get_mut(&node) {
             if *flag != DirtyFlag::Clean {
                 *flag = DirtyFlag::Clean;
@@ -151,7 +151,7 @@ impl DirtyTracker {
     }
 
     /// Clear all dirty flags
-    pub fn clear_all(&mut self) {
+    pub(crate) fn clear_all(&mut self) {
         for flag in self.flags.values_mut() {
             *flag = DirtyFlag::Clean;
         }
@@ -159,17 +159,17 @@ impl DirtyTracker {
     }
 
     /// Whether any nodes are dirty
-    pub fn has_dirty_nodes(&self) -> bool {
+    pub(crate) fn has_dirty_nodes(&self) -> bool {
         self.dirty_count > 0
     }
 
     /// Number of dirty nodes
-    pub fn dirty_node_count(&self) -> usize {
+    pub(crate) fn dirty_node_count(&self) -> usize {
         self.dirty_count
     }
 
     /// Get all nodes with at least the given dirty level, sorted by node ID
-    pub fn dirty_nodes(&self, min_flag: DirtyFlag) -> Vec<NodeId> {
+    pub(crate) fn dirty_nodes(&self, min_flag: DirtyFlag) -> Vec<NodeId> {
         self.flags
             .iter()
             .filter(|(_, &flag)| flag >= min_flag)
@@ -179,7 +179,7 @@ impl DirtyTracker {
 
     /// Find the highest dirty ancestor of a node (the subtree root to
     /// re-process)
-    pub fn highest_dirty_ancestor(&self, node: NodeId, min_flag: DirtyFlag) -> NodeId {
+    pub(crate) fn highest_dirty_ancestor(&self, node: NodeId, min_flag: DirtyFlag) -> NodeId {
         let mut highest = node;
         let mut current = node;
         while let Some(&parent) = self.parents.get(&current) {
@@ -216,27 +216,27 @@ impl DamageRegion {
     }
 
     /// Whether this region is empty (zero area)
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.width <= 0 || self.height <= 0
     }
 
     /// Right edge
-    pub fn right(&self) -> i32 {
+    pub(crate) fn right(&self) -> i32 {
         self.x + self.width
     }
 
     /// Bottom edge
-    pub fn bottom(&self) -> i32 {
+    pub(crate) fn bottom(&self) -> i32 {
         self.y + self.height
     }
 
     /// Area in pixels
-    pub fn area(&self) -> i64 {
+    pub(crate) fn area(&self) -> i64 {
         self.width as i64 * self.height as i64
     }
 
     /// Union with another region (bounding box)
-    pub fn union(&self, other: &DamageRegion) -> DamageRegion {
+    pub(crate) fn union(&self, other: &DamageRegion) -> DamageRegion {
         if self.is_empty() {
             return *other;
         }
@@ -251,7 +251,7 @@ impl DamageRegion {
     }
 
     /// Intersection with another region
-    pub fn intersect(&self, other: &DamageRegion) -> DamageRegion {
+    pub(crate) fn intersect(&self, other: &DamageRegion) -> DamageRegion {
         let x = self.x.max(other.x);
         let y = self.y.max(other.y);
         let r = self.right().min(other.right());
@@ -264,7 +264,7 @@ impl DamageRegion {
     }
 
     /// Whether this region fully contains another
-    pub fn contains(&self, other: &DamageRegion) -> bool {
+    pub(crate) fn contains(&self, other: &DamageRegion) -> bool {
         self.x <= other.x
             && self.y <= other.y
             && self.right() >= other.right()
@@ -272,7 +272,7 @@ impl DamageRegion {
     }
 
     /// Whether this region contains a point
-    pub fn contains_point(&self, px: i32, py: i32) -> bool {
+    pub(crate) fn contains_point(&self, px: i32, py: i32) -> bool {
         px >= self.x && px < self.right() && py >= self.y && py < self.bottom()
     }
 }
@@ -307,7 +307,7 @@ impl DamageList {
     }
 
     /// Add a damage region
-    pub fn add(&mut self, region: DamageRegion) {
+    pub(crate) fn add(&mut self, region: DamageRegion) {
         if region.is_empty() {
             return;
         }
@@ -321,7 +321,7 @@ impl DamageList {
     }
 
     /// Merge all regions into a single bounding box
-    pub fn merge_all(&mut self) {
+    pub(crate) fn merge_all(&mut self) {
         if !self.regions.is_empty() {
             self.regions.clear();
             self.regions.push(self.bounds);
@@ -329,28 +329,28 @@ impl DamageList {
     }
 
     /// Get the bounding box of all damage
-    pub fn bounding_box(&self) -> DamageRegion {
+    pub(crate) fn bounding_box(&self) -> DamageRegion {
         self.bounds
     }
 
     /// Get individual damage regions
-    pub fn regions(&self) -> &[DamageRegion] {
+    pub(crate) fn regions(&self) -> &[DamageRegion] {
         &self.regions
     }
 
     /// Whether there is any damage
-    pub fn has_damage(&self) -> bool {
+    pub(crate) fn has_damage(&self) -> bool {
         !self.regions.is_empty()
     }
 
     /// Clear all damage
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.regions.clear();
         self.bounds = DamageRegion::default();
     }
 
     /// Check if a rectangle overlaps with any damage region
-    pub fn overlaps(&self, region: &DamageRegion) -> bool {
+    pub(crate) fn overlaps(&self, region: &DamageRegion) -> bool {
         // Quick check against bounding box first
         if self.bounds.intersect(region).is_empty() {
             return false;
@@ -389,23 +389,23 @@ impl IncrementalLayout {
     }
 
     /// Register a node's layout rectangle (called after layout pass)
-    pub fn set_node_rect(&mut self, node: NodeId, x: i32, y: i32, w: i32, h: i32) {
+    pub(crate) fn set_node_rect(&mut self, node: NodeId, x: i32, y: i32, w: i32, h: i32) {
         self.node_rects.insert(node, DamageRegion::new(x, y, w, h));
     }
 
     /// Get a node's layout rectangle
-    pub fn node_rect(&self, node: NodeId) -> Option<DamageRegion> {
+    pub(crate) fn node_rect(&self, node: NodeId) -> Option<DamageRegion> {
         self.node_rects.get(&node).copied()
     }
 
     /// Remove a node's rect
-    pub fn remove_node_rect(&mut self, node: NodeId) {
+    pub(crate) fn remove_node_rect(&mut self, node: NodeId) {
         self.node_rects.remove(&node);
     }
 
     /// Get nodes that need restyle, returning the highest dirty ancestors
     /// to minimize redundant work
-    pub fn restyle_roots(&self) -> Vec<NodeId> {
+    pub(crate) fn restyle_roots(&self) -> Vec<NodeId> {
         let dirty = self.tracker.dirty_nodes(DirtyFlag::StyleDirty);
         let mut roots = Vec::new();
         for &node in &dirty {
@@ -420,7 +420,7 @@ impl IncrementalLayout {
     }
 
     /// Get subtree roots that need relayout
-    pub fn relayout_roots(&self) -> Vec<NodeId> {
+    pub(crate) fn relayout_roots(&self) -> Vec<NodeId> {
         let dirty = self.tracker.dirty_nodes(DirtyFlag::LayoutDirty);
         let mut roots = Vec::new();
         for &node in &dirty {
@@ -435,7 +435,7 @@ impl IncrementalLayout {
     }
 
     /// Mark damage for all nodes that need repaint
-    pub fn compute_damage(&mut self) {
+    pub(crate) fn compute_damage(&mut self) {
         let paint_dirty = self.tracker.dirty_nodes(DirtyFlag::PaintDirty);
         for &node in &paint_dirty {
             if let Some(rect) = self.node_rects.get(&node) {
@@ -445,14 +445,14 @@ impl IncrementalLayout {
     }
 
     /// After processing: clear dirty flags for processed nodes and damage
-    pub fn finish_update(&mut self) {
+    pub(crate) fn finish_update(&mut self) {
         self.tracker.clear_all();
         self.damage.clear();
     }
 
     /// Full update cycle: compute damage, return regions, clear state.
     /// Returns the bounding box of all damage (if any).
-    pub fn flush(&mut self) -> Option<DamageRegion> {
+    pub(crate) fn flush(&mut self) -> Option<DamageRegion> {
         self.compute_damage();
         if self.damage.has_damage() {
             let bbox = self.damage.bounding_box();

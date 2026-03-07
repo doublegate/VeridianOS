@@ -69,13 +69,13 @@ pub enum KvmCapability {
 
 impl KvmCapability {
     /// Check if this capability is supported
-    pub fn is_supported(&self) -> bool {
+    pub(crate) fn is_supported(&self) -> bool {
         // All capabilities supported in our implementation
         true
     }
 
     /// Convert from raw integer
-    pub fn from_raw(value: u32) -> Option<Self> {
+    pub(crate) fn from_raw(value: u32) -> Option<Self> {
         match value {
             0 => Some(Self::Irqchip),
             1 => Some(Self::Hlt),
@@ -115,7 +115,7 @@ pub enum KvmExitReason {
 
 impl KvmExitReason {
     /// Convert from raw exit code
-    pub fn from_raw(raw: u32) -> Self {
+    pub(crate) fn from_raw(raw: u32) -> Self {
         match raw {
             2 => Self::Io,
             6 => Self::Mmio,
@@ -127,7 +127,7 @@ impl KvmExitReason {
     }
 
     /// Convert to raw exit code
-    pub fn to_raw(self) -> u32 {
+    pub(crate) fn to_raw(self) -> u32 {
         match self {
             Self::Io => 2,
             Self::Mmio => 6,
@@ -172,7 +172,7 @@ pub struct KvmIoExit {
 
 impl KvmIoExit {
     /// Create a new I/O exit for an IN instruction
-    pub fn new_in(port: u16, size: u8) -> Self {
+    pub(crate) fn new_in(port: u16, size: u8) -> Self {
         Self {
             direction: IoDirection::In,
             port,
@@ -182,7 +182,7 @@ impl KvmIoExit {
     }
 
     /// Create a new I/O exit for an OUT instruction
-    pub fn new_out(port: u16, size: u8, data: u32) -> Self {
+    pub(crate) fn new_out(port: u16, size: u8, data: u32) -> Self {
         Self {
             direction: IoDirection::Out,
             port,
@@ -211,7 +211,7 @@ pub struct KvmMmioExit {
 
 impl KvmMmioExit {
     /// Create a new MMIO exit for a read
-    pub fn new_read(phys_addr: u64, len: u8) -> Self {
+    pub(crate) fn new_read(phys_addr: u64, len: u8) -> Self {
         Self {
             phys_addr,
             data: 0,
@@ -221,7 +221,7 @@ impl KvmMmioExit {
     }
 
     /// Create a new MMIO exit for a write
-    pub fn new_write(phys_addr: u64, data: u64, len: u8) -> Self {
+    pub(crate) fn new_write(phys_addr: u64, data: u64, len: u8) -> Self {
         Self {
             phys_addr,
             data,
@@ -280,7 +280,7 @@ pub struct KvmSegment {
 
 impl KvmSegment {
     /// Create a flat code segment for long mode
-    pub fn flat_code_64() -> Self {
+    pub(crate) fn flat_code_64() -> Self {
         Self {
             base: 0,
             limit: 0xFFFF_FFFF,
@@ -297,7 +297,7 @@ impl KvmSegment {
     }
 
     /// Create a flat data segment for long mode
-    pub fn flat_data_64() -> Self {
+    pub(crate) fn flat_data_64() -> Self {
         Self {
             base: 0,
             limit: 0xFFFF_FFFF,
@@ -338,7 +338,7 @@ pub struct KvmSregs {
 
 impl KvmSregs {
     /// Create sregs for real mode entry
-    pub fn real_mode() -> Self {
+    pub(crate) fn real_mode() -> Self {
         Self {
             cr0: 0x10, // ET bit set
             ..Default::default()
@@ -346,7 +346,7 @@ impl KvmSregs {
     }
 
     /// Create sregs for 64-bit long mode
-    pub fn long_mode(cr3: u64) -> Self {
+    pub(crate) fn long_mode(cr3: u64) -> Self {
         Self {
             cs: KvmSegment::flat_code_64(),
             ds: KvmSegment::flat_data_64(),
@@ -424,22 +424,22 @@ impl KvmMemoryRegion {
     }
 
     /// Check if region is read-only
-    pub fn is_readonly(&self) -> bool {
+    pub(crate) fn is_readonly(&self) -> bool {
         self.flags & Self::FLAG_READONLY != 0
     }
 
     /// Check if region has dirty logging enabled
-    pub fn has_dirty_logging(&self) -> bool {
+    pub(crate) fn has_dirty_logging(&self) -> bool {
         self.flags & Self::FLAG_LOG_DIRTY != 0
     }
 
     /// Check if an address falls within this region
-    pub fn contains_guest_addr(&self, addr: u64) -> bool {
+    pub(crate) fn contains_guest_addr(&self, addr: u64) -> bool {
         addr >= self.guest_phys_addr && addr < self.guest_phys_addr + self.memory_size
     }
 
     /// Translate guest physical to host virtual address
-    pub fn translate(&self, guest_phys: u64) -> Option<u64> {
+    pub(crate) fn translate(&self, guest_phys: u64) -> Option<u64> {
         if self.contains_guest_addr(guest_phys) {
             Some(self.userspace_addr + (guest_phys - self.guest_phys_addr))
         } else {
@@ -472,7 +472,7 @@ pub enum PitMode {
 
 impl PitMode {
     /// Convert from raw mode bits
-    pub fn from_raw(raw: u8) -> Self {
+    pub(crate) fn from_raw(raw: u8) -> Self {
         match raw & 0x07 {
             0 => Self::InterruptOnTerminalCount,
             1 => Self::OneShot,
@@ -531,7 +531,7 @@ impl PitChannel {
     }
 
     /// Load a new count value
-    pub fn load_count(&mut self, value: u16) {
+    pub(crate) fn load_count(&mut self, value: u16) {
         self.reload = if value == 0 { u16::MAX } else { value };
         self.count = self.reload;
         self.enabled = true;
@@ -539,7 +539,7 @@ impl PitChannel {
     }
 
     /// Tick the counter by one unit
-    pub fn tick(&mut self) -> bool {
+    pub(crate) fn tick(&mut self) -> bool {
         if !self.enabled || !self.gate {
             return false;
         }
@@ -572,7 +572,7 @@ impl PitChannel {
     }
 
     /// Calculate the frequency in Hz (integer)
-    pub fn frequency_hz(&self) -> u64 {
+    pub(crate) fn frequency_hz(&self) -> u64 {
         if self.reload == 0 {
             return 0;
         }
@@ -580,7 +580,7 @@ impl PitChannel {
     }
 
     /// Calculate the period in nanoseconds (integer)
-    pub fn period_ns(&self) -> u64 {
+    pub(crate) fn period_ns(&self) -> u64 {
         let freq = self.frequency_hz();
         if freq == 0 {
             return 0;
@@ -589,7 +589,7 @@ impl PitChannel {
     }
 
     /// Advance by a number of nanoseconds, return number of interrupts fired
-    pub fn advance_ns(&mut self, ns: u64) -> u32 {
+    pub(crate) fn advance_ns(&mut self, ns: u64) -> u32 {
         if !self.enabled || self.reload == 0 {
             return 0;
         }
@@ -614,7 +614,7 @@ impl PitChannel {
     }
 
     /// Latch the current counter value
-    pub fn latch(&mut self) {
+    pub(crate) fn latch(&mut self) {
         if !self.latch_valid {
             self.latch_value = self.count;
             self.latch_valid = true;
@@ -623,7 +623,7 @@ impl PitChannel {
     }
 
     /// Read a byte from the channel (respects latch and access mode)
-    pub fn read_byte(&mut self) -> u8 {
+    pub(crate) fn read_byte(&mut self) -> u8 {
         let value = if self.latch_valid {
             self.latch_value
         } else {
@@ -669,7 +669,7 @@ impl PitChannel {
     }
 
     /// Write a byte to the channel (respects access mode)
-    pub fn write_byte(&mut self, byte: u8) {
+    pub(crate) fn write_byte(&mut self, byte: u8) {
         match self.access_mode {
             1 => {
                 // Low byte only
@@ -730,7 +730,7 @@ impl VirtualPit {
     }
 
     /// Handle I/O write to PIT control word register (port 0x43)
-    pub fn write_control(&mut self, value: u8) {
+    pub(crate) fn write_control(&mut self, value: u8) {
         let channel = ((value >> 6) & 0x03) as usize;
         if channel == 3 {
             // Read-back command
@@ -778,7 +778,7 @@ impl VirtualPit {
     }
 
     /// Handle I/O read from a channel data port
-    pub fn read_channel(&mut self, channel: usize) -> u8 {
+    pub(crate) fn read_channel(&mut self, channel: usize) -> u8 {
         if channel >= PIT_CHANNEL_COUNT {
             return 0xFF;
         }
@@ -786,7 +786,7 @@ impl VirtualPit {
     }
 
     /// Handle I/O write to a channel data port
-    pub fn write_channel(&mut self, channel: usize, value: u8) {
+    pub(crate) fn write_channel(&mut self, channel: usize, value: u8) {
         if channel >= PIT_CHANNEL_COUNT {
             return;
         }
@@ -794,7 +794,7 @@ impl VirtualPit {
     }
 
     /// Handle speaker control port (0x61) read
-    pub fn read_speaker_port(&self) -> u8 {
+    pub(crate) fn read_speaker_port(&self) -> u8 {
         let mut val = 0u8;
         if self.speaker_gate {
             val |= 0x01;
@@ -806,13 +806,13 @@ impl VirtualPit {
     }
 
     /// Handle speaker control port (0x61) write
-    pub fn write_speaker_port(&mut self, value: u8) {
+    pub(crate) fn write_speaker_port(&mut self, value: u8) {
         self.speaker_gate = value & 0x01 != 0;
         self.channels[2].gate = value & 0x01 != 0;
     }
 
     /// Advance all channels by a number of nanoseconds
-    pub fn advance_ns(&mut self, ns: u64) -> u32 {
+    pub(crate) fn advance_ns(&mut self, ns: u64) -> u32 {
         let mut total_irqs = 0u32;
         // Channel 0 is typically connected to IRQ 0
         let ch0_irqs = self.channels[0].advance_ns(ns);
@@ -827,7 +827,7 @@ impl VirtualPit {
     }
 
     /// Handle PIT I/O port access (ports 0x40-0x43, 0x61)
-    pub fn handle_io(&mut self, port: u16, is_write: bool, data: &mut [u8]) -> bool {
+    pub(crate) fn handle_io(&mut self, port: u16, is_write: bool, data: &mut [u8]) -> bool {
         match port {
             0x40..=0x42 => {
                 let channel = (port - 0x40) as usize;
@@ -952,7 +952,7 @@ impl KvmVcpu {
     ///
     /// Returns the exit reason. In a real implementation this would
     /// execute a VMX VM entry; here we simulate common exit scenarios.
-    pub fn run(&mut self) -> Result<KvmExitReason, VmError> {
+    pub(crate) fn run(&mut self) -> Result<KvmExitReason, VmError> {
         if self.halted {
             // If halted and no pending interrupt, exit with HLT
             if self.pending_interrupt.is_none() {
@@ -987,27 +987,27 @@ impl KvmVcpu {
     }
 
     /// Get general-purpose registers
-    pub fn get_regs(&self) -> &KvmRegs {
+    pub(crate) fn get_regs(&self) -> &KvmRegs {
         &self.regs
     }
 
     /// Set general-purpose registers
-    pub fn set_regs(&mut self, regs: KvmRegs) {
+    pub(crate) fn set_regs(&mut self, regs: KvmRegs) {
         self.regs = regs;
     }
 
     /// Get system registers
-    pub fn get_sregs(&self) -> &KvmSregs {
+    pub(crate) fn get_sregs(&self) -> &KvmSregs {
         &self.sregs
     }
 
     /// Set system registers
-    pub fn set_sregs(&mut self, sregs: KvmSregs) {
+    pub(crate) fn set_sregs(&mut self, sregs: KvmSregs) {
         self.sregs = sregs;
     }
 
     /// Get MSR values
-    pub fn get_msrs(&self, indices: &[u32]) -> Vec<MsrEntry> {
+    pub(crate) fn get_msrs(&self, indices: &[u32]) -> Vec<MsrEntry> {
         let mut result = Vec::with_capacity(indices.len());
         for &idx in indices {
             let value = self
@@ -1021,7 +1021,7 @@ impl KvmVcpu {
     }
 
     /// Set MSR values
-    pub fn set_msrs(&mut self, entries: &[MsrEntry]) -> Result<usize, VmError> {
+    pub(crate) fn set_msrs(&mut self, entries: &[MsrEntry]) -> Result<usize, VmError> {
         if entries.len() > MAX_MSR_ENTRIES {
             return Err(VmError::InvalidVmState);
         }
@@ -1036,7 +1036,7 @@ impl KvmVcpu {
     }
 
     /// Inject an external interrupt
-    pub fn interrupt(&mut self, vector: u8) {
+    pub(crate) fn interrupt(&mut self, vector: u8) {
         self.pending_interrupt = Some(vector);
         if self.halted {
             self.halted = false;
@@ -1044,7 +1044,7 @@ impl KvmVcpu {
     }
 
     /// Signal an MSI interrupt
-    pub fn signal_msi(&mut self, address: u64, data: u32) {
+    pub(crate) fn signal_msi(&mut self, address: u64, data: u32) {
         // MSI address format: destination ID in bits 19:12
         let _dest_id = (address >> 12) & 0xFF;
         // MSI data: vector in bits 7:0
@@ -1053,27 +1053,27 @@ impl KvmVcpu {
     }
 
     /// Check if vCPU is halted
-    pub fn is_halted(&self) -> bool {
+    pub(crate) fn is_halted(&self) -> bool {
         self.halted
     }
 
     /// Halt the vCPU (simulates HLT instruction)
-    pub fn halt(&mut self) {
+    pub(crate) fn halt(&mut self) {
         self.halted = true;
     }
 
     /// Get entry count
-    pub fn entry_count(&self) -> u64 {
+    pub(crate) fn entry_count(&self) -> u64 {
         self.entry_count
     }
 
     /// Get exit count
-    pub fn exit_count(&self) -> u64 {
+    pub(crate) fn exit_count(&self) -> u64 {
         self.exit_count
     }
 
     /// Reset the vCPU to initial state
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.regs = KvmRegs::default();
         self.sregs = KvmSregs::default();
         self.msrs.clear();
@@ -1132,13 +1132,16 @@ impl KvmVm {
     }
 
     /// Set the TSS address (x86-specific, required before creating vCPUs)
-    pub fn set_tss_addr(&mut self, addr: u64) -> Result<(), VmError> {
+    pub(crate) fn set_tss_addr(&mut self, addr: u64) -> Result<(), VmError> {
         self.tss_addr = addr;
         Ok(())
     }
 
     /// Map a user memory region into the guest physical address space
-    pub fn set_user_memory_region(&mut self, region: KvmMemoryRegion) -> Result<(), VmError> {
+    pub(crate) fn set_user_memory_region(
+        &mut self,
+        region: KvmMemoryRegion,
+    ) -> Result<(), VmError> {
         if self.memory_regions.len() >= MAX_MEMORY_REGIONS {
             return Err(VmError::GuestMemoryError);
         }
@@ -1168,7 +1171,7 @@ impl KvmVm {
     }
 
     /// Create a vCPU and return its index
-    pub fn create_vcpu(&mut self, vcpu_id: u32) -> Result<usize, VmError> {
+    pub(crate) fn create_vcpu(&mut self, vcpu_id: u32) -> Result<usize, VmError> {
         if self.num_vcpus as usize >= MAX_VCPUS_PER_VM {
             return Err(VmError::InvalidVmState);
         }
@@ -1181,17 +1184,17 @@ impl KvmVm {
     }
 
     /// Get a reference to a vCPU by index
-    pub fn vcpu(&self, index: usize) -> Option<&KvmVcpu> {
+    pub(crate) fn vcpu(&self, index: usize) -> Option<&KvmVcpu> {
         self.vcpus.get(index)
     }
 
     /// Get a mutable reference to a vCPU by index
-    pub fn vcpu_mut(&mut self, index: usize) -> Option<&mut KvmVcpu> {
+    pub(crate) fn vcpu_mut(&mut self, index: usize) -> Option<&mut KvmVcpu> {
         self.vcpus.get_mut(index)
     }
 
     /// Create an in-kernel IRQ chip (LAPIC + IOAPIC)
-    pub fn create_irqchip(&mut self) -> Result<(), VmError> {
+    pub(crate) fn create_irqchip(&mut self) -> Result<(), VmError> {
         if self.irqchip_created {
             return Err(VmError::VmxAlreadyEnabled);
         }
@@ -1200,7 +1203,7 @@ impl KvmVm {
     }
 
     /// Create an in-kernel PIT (i8254)
-    pub fn create_pit2(&mut self) -> Result<(), VmError> {
+    pub(crate) fn create_pit2(&mut self) -> Result<(), VmError> {
         if self.pit_created {
             return Err(VmError::VmxAlreadyEnabled);
         }
@@ -1213,17 +1216,17 @@ impl KvmVm {
     }
 
     /// Get the PIT if created
-    pub fn pit(&self) -> Option<&VirtualPit> {
+    pub(crate) fn pit(&self) -> Option<&VirtualPit> {
         self.pit.as_ref()
     }
 
     /// Get mutable PIT if created
-    pub fn pit_mut(&mut self) -> Option<&mut VirtualPit> {
+    pub(crate) fn pit_mut(&mut self) -> Option<&mut VirtualPit> {
         self.pit.as_mut()
     }
 
     /// Translate a guest physical address to host virtual
-    pub fn translate_address(&self, guest_phys: u64) -> Option<u64> {
+    pub(crate) fn translate_address(&self, guest_phys: u64) -> Option<u64> {
         for region in &self.memory_regions {
             if let Some(host_addr) = region.translate(guest_phys) {
                 return Some(host_addr);
@@ -1233,49 +1236,49 @@ impl KvmVm {
     }
 
     /// Get the number of vCPUs
-    pub fn num_vcpus(&self) -> u32 {
+    pub(crate) fn num_vcpus(&self) -> u32 {
         self.num_vcpus
     }
 
     /// Get the number of memory regions
-    pub fn num_memory_regions(&self) -> usize {
+    pub(crate) fn num_memory_regions(&self) -> usize {
         self.memory_regions.len()
     }
 
     /// Check if irqchip is created
-    pub fn has_irqchip(&self) -> bool {
+    pub(crate) fn has_irqchip(&self) -> bool {
         self.irqchip_created
     }
 
     /// Check if PIT is created
-    pub fn has_pit(&self) -> bool {
+    pub(crate) fn has_pit(&self) -> bool {
         self.pit_created
     }
 
     /// Get VM identifier
-    pub fn vm_id(&self) -> u32 {
+    pub(crate) fn vm_id(&self) -> u32 {
         self.vm_id
     }
 
     /// Get next available memory slot
-    pub fn next_memory_slot(&self) -> u32 {
+    pub(crate) fn next_memory_slot(&self) -> u32 {
         self.next_slot
     }
 
     /// Allocate a new memory slot and return it
-    pub fn allocate_memory_slot(&mut self) -> u32 {
+    pub(crate) fn allocate_memory_slot(&mut self) -> u32 {
         let slot = self.next_slot;
         self.next_slot += 1;
         slot
     }
 
     /// Check a KVM capability
-    pub fn check_capability(&self, cap: KvmCapability) -> bool {
+    pub(crate) fn check_capability(&self, cap: KvmCapability) -> bool {
         cap.is_supported()
     }
 
     /// Dispatch I/O to PIT if appropriate
-    pub fn handle_pit_io(&mut self, port: u16, is_write: bool, data: &mut [u8]) -> bool {
+    pub(crate) fn handle_pit_io(&mut self, port: u16, is_write: bool, data: &mut [u8]) -> bool {
         if let Some(pit) = &mut self.pit {
             pit.handle_io(port, is_write, data)
         } else {
@@ -1284,17 +1287,17 @@ impl KvmVm {
     }
 
     /// Get memory region by slot
-    pub fn memory_region(&self, slot: u32) -> Option<&KvmMemoryRegion> {
+    pub(crate) fn memory_region(&self, slot: u32) -> Option<&KvmMemoryRegion> {
         self.memory_regions.iter().find(|r| r.slot == slot)
     }
 
     /// List all memory regions
-    pub fn memory_regions(&self) -> &[KvmMemoryRegion] {
+    pub(crate) fn memory_regions(&self) -> &[KvmMemoryRegion] {
         &self.memory_regions
     }
 
     /// Get total guest memory size in bytes
-    pub fn total_memory(&self) -> u64 {
+    pub(crate) fn total_memory(&self) -> u64 {
         self.memory_regions.iter().map(|r| r.memory_size).sum()
     }
 }
@@ -1304,17 +1307,17 @@ impl KvmVm {
 // ---------------------------------------------------------------------------
 
 /// Get the KVM API version
-pub fn kvm_get_api_version() -> u32 {
+pub(crate) fn kvm_get_api_version() -> u32 {
     KVM_API_VERSION
 }
 
 /// Check if KVM extension is available
-pub fn kvm_check_extension(cap: KvmCapability) -> bool {
+pub(crate) fn kvm_check_extension(cap: KvmCapability) -> bool {
     cap.is_supported()
 }
 
 /// Get the recommended vCPU map size
-pub fn kvm_get_vcpu_mmap_size() -> usize {
+pub(crate) fn kvm_get_vcpu_mmap_size() -> usize {
     // Size of the KvmRunPage structure (page-aligned)
     4096
 }

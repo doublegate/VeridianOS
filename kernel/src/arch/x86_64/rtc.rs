@@ -365,6 +365,8 @@ pub fn rtc_ioctl(cmd: u32, arg: u64) -> i32 {
         RTC_ALM_SET => {
             // arg is a pointer to RtcAlarm in the caller's address space.
             // In kernel context we treat it as a direct struct pointer.
+            // SAFETY: arg is a valid pointer to an RtcAlarm struct from the caller's
+            // address space, verified by the syscall layer before reaching here.
             let alarm = unsafe { &*(arg as *const RtcAlarm) };
             if alarm.hour > 23 || alarm.minute > 59 || alarm.second > 59 {
                 return -1;

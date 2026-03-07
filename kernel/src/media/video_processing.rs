@@ -43,7 +43,7 @@ impl AviFlags {
     pub const AVIF_COPYRIGHTED: u32 = 0x0002_0000;
 
     /// Check whether a specific flag is set.
-    pub fn has_flag(&self, flag: u32) -> bool {
+    pub(crate) fn has_flag(&self, flag: u32) -> bool {
         self.0 & flag != 0
     }
 }
@@ -67,7 +67,7 @@ impl FourCC {
     pub const AUDS: Self = Self(*b"auds");
 
     /// Create from a byte slice; returns None if slice is too short.
-    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+    pub(crate) fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < 4 {
             return None;
         }
@@ -113,7 +113,7 @@ pub struct AviMainHeader {
 
 impl AviMainHeader {
     /// Parse from a byte buffer (little-endian, expects >= 40 bytes).
-    pub fn parse(data: &[u8]) -> Option<Self> {
+    pub(crate) fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 40 {
             return None;
         }
@@ -133,7 +133,7 @@ impl AviMainHeader {
 
     /// Compute frame rate as a rational number (numerator, denominator).
     /// Returns (fps_num, fps_den) such that fps = fps_num / fps_den.
-    pub fn frame_rate(&self) -> (u32, u32) {
+    pub(crate) fn frame_rate(&self) -> (u32, u32) {
         if self.microseconds_per_frame == 0 {
             return (0, 1);
         }
@@ -194,7 +194,7 @@ pub struct AviStreamHeader {
 
 impl AviStreamHeader {
     /// Parse from a byte buffer (little-endian, expects >= 56 bytes).
-    pub fn parse(data: &[u8]) -> Option<Self> {
+    pub(crate) fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 56 {
             return None;
         }
@@ -224,7 +224,7 @@ impl AviStreamHeader {
     }
 
     /// Determine the stream type from the FourCC tag.
-    pub fn get_stream_type(&self) -> StreamType {
+    pub(crate) fn get_stream_type(&self) -> StreamType {
         if self.stream_type == *b"vids" {
             StreamType::Video
         } else if self.stream_type == *b"auds" {
@@ -235,7 +235,7 @@ impl AviStreamHeader {
     }
 
     /// Compute sample rate as a rational (rate / scale).
-    pub fn sample_rate(&self) -> (u32, u32) {
+    pub(crate) fn sample_rate(&self) -> (u32, u32) {
         if self.scale == 0 {
             return (0, 1);
         }
@@ -273,7 +273,7 @@ pub struct BitmapInfoHeader {
 
 impl BitmapInfoHeader {
     /// Parse from a byte buffer (little-endian, expects >= 40 bytes).
-    pub fn parse(data: &[u8]) -> Option<Self> {
+    pub(crate) fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 40 {
             return None;
         }
@@ -293,12 +293,12 @@ impl BitmapInfoHeader {
     }
 
     /// Whether the image is stored bottom-up (positive height).
-    pub fn is_bottom_up(&self) -> bool {
+    pub(crate) fn is_bottom_up(&self) -> bool {
         self.height > 0
     }
 
     /// Absolute height (always positive).
-    pub fn abs_height(&self) -> u32 {
+    pub(crate) fn abs_height(&self) -> u32 {
         if self.height < 0 {
             (-(self.height as i64)) as u32
         } else {
@@ -333,7 +333,7 @@ impl WaveFormatEx {
 
     /// Parse from a byte buffer (little-endian, expects >= 16 bytes).
     /// The cb_size field is optional (only present if data >= 18 bytes).
-    pub fn parse(data: &[u8]) -> Option<Self> {
+    pub(crate) fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 16 {
             return None;
         }
@@ -354,7 +354,7 @@ impl WaveFormatEx {
     }
 
     /// Whether this is PCM (uncompressed) audio.
-    pub fn is_pcm(&self) -> bool {
+    pub(crate) fn is_pcm(&self) -> bool {
         self.format_tag == Self::WAVE_FORMAT_PCM
     }
 }
@@ -377,7 +377,7 @@ impl AviIndexEntry {
     pub const AVIIF_KEYFRAME: u32 = 0x0000_0010;
 
     /// Parse a single index entry (16 bytes).
-    pub fn parse(data: &[u8]) -> Option<Self> {
+    pub(crate) fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 16 {
             return None;
         }
@@ -392,13 +392,13 @@ impl AviIndexEntry {
     }
 
     /// Whether this entry is a keyframe.
-    pub fn is_keyframe(&self) -> bool {
+    pub(crate) fn is_keyframe(&self) -> bool {
         self.flags & Self::AVIIF_KEYFRAME != 0
     }
 
     /// Get the stream number from the chunk_id (first two ASCII digits).
     /// E.g., "00dc" -> 0, "01wb" -> 1.
-    pub fn stream_number(&self) -> u8 {
+    pub(crate) fn stream_number(&self) -> u8 {
         let d0 = self.chunk_id[0].wrapping_sub(b'0');
         let d1 = self.chunk_id[1].wrapping_sub(b'0');
         if d0 <= 9 && d1 <= 9 {
@@ -409,12 +409,12 @@ impl AviIndexEntry {
     }
 
     /// Whether this is a video chunk (ends with "dc" or "db").
-    pub fn is_video(&self) -> bool {
+    pub(crate) fn is_video(&self) -> bool {
         self.chunk_id[2] == b'd' && (self.chunk_id[3] == b'c' || self.chunk_id[3] == b'b')
     }
 
     /// Whether this is an audio chunk (ends with "wb").
-    pub fn is_audio(&self) -> bool {
+    pub(crate) fn is_audio(&self) -> bool {
         self.chunk_id[2] == b'w' && self.chunk_id[3] == b'b'
     }
 }
@@ -457,7 +457,7 @@ impl AviContainer {
     ///
     /// Reads RIFF header, avih, all strh/strf pairs, and the idx1 index.
     /// Does NOT load frame data -- use [`extract_frame`] for that.
-    pub fn parse(data: &[u8]) -> Option<Self> {
+    pub(crate) fn parse(data: &[u8]) -> Option<Self> {
         // RIFF header: "RIFF" + size(4) + "AVI "
         if data.len() < 12 {
             return None;
@@ -616,14 +616,14 @@ impl AviContainer {
     }
 
     /// Get the first video stream info, if any.
-    pub fn video_stream(&self) -> Option<&AviStreamInfo> {
+    pub(crate) fn video_stream(&self) -> Option<&AviStreamInfo> {
         self.streams
             .iter()
             .find(|s| s.stream_type == StreamType::Video)
     }
 
     /// Get the first audio stream info, if any.
-    pub fn audio_stream(&self) -> Option<&AviStreamInfo> {
+    pub(crate) fn audio_stream(&self) -> Option<&AviStreamInfo> {
         self.streams
             .iter()
             .find(|s| s.stream_type == StreamType::Audio)
@@ -633,7 +633,7 @@ impl AviContainer {
     ///
     /// Returns a slice into the provided data pointing to the frame payload.
     /// `frame_index` is the zero-based video frame number in the idx1.
-    pub fn extract_frame<'a>(&self, data: &'a [u8], frame_index: usize) -> Option<&'a [u8]> {
+    pub(crate) fn extract_frame<'a>(&self, data: &'a [u8], frame_index: usize) -> Option<&'a [u8]> {
         let video_entries: Vec<&AviIndexEntry> =
             self.index.iter().filter(|e| e.is_video()).collect();
         let entry = video_entries.get(frame_index)?;
@@ -652,28 +652,28 @@ impl AviContainer {
     }
 
     /// Count video frames in the index.
-    pub fn video_frame_count(&self) -> usize {
+    pub(crate) fn video_frame_count(&self) -> usize {
         self.index.iter().filter(|e| e.is_video()).count()
     }
 
     /// Count audio chunks in the index.
-    pub fn audio_chunk_count(&self) -> usize {
+    pub(crate) fn audio_chunk_count(&self) -> usize {
         self.index.iter().filter(|e| e.is_audio()).count()
     }
 
     /// Get all video index entries.
-    pub fn video_index_entries(&self) -> Vec<&AviIndexEntry> {
+    pub(crate) fn video_index_entries(&self) -> Vec<&AviIndexEntry> {
         self.index.iter().filter(|e| e.is_video()).collect()
     }
 
     /// Get all audio index entries.
-    pub fn audio_index_entries(&self) -> Vec<&AviIndexEntry> {
+    pub(crate) fn audio_index_entries(&self) -> Vec<&AviIndexEntry> {
         self.index.iter().filter(|e| e.is_audio()).collect()
     }
 
     /// Demux: separate video and audio index entries for interleaved playback.
     /// Returns (video_entries, audio_entries).
-    pub fn demux_streams(&self) -> (Vec<AviIndexEntry>, Vec<AviIndexEntry>) {
+    pub(crate) fn demux_streams(&self) -> (Vec<AviIndexEntry>, Vec<AviIndexEntry>) {
         let mut video = Vec::new();
         let mut audio = Vec::new();
         for entry in &self.index {
@@ -747,7 +747,7 @@ impl FrameRateConverter {
     ///                  / (dst_fps_den * src_fps_num)
     ///
     /// All integer arithmetic; rounds down to nearest source frame.
-    pub fn source_frame_for_output(&self, output_index: u32) -> u32 {
+    pub(crate) fn source_frame_for_output(&self, output_index: u32) -> u32 {
         if self.src_fps_num == 0 || self.dst_fps_den == 0 {
             return 0;
         }
@@ -788,7 +788,7 @@ impl FrameRateConverter {
     ///   ... then pattern repeats with next 4 source frames.
     ///
     /// Returns (source_frame_index, is_repeated_frame).
-    pub fn pulldown_32_source(&self, output_index: u32) -> (u32, bool) {
+    pub(crate) fn pulldown_32_source(&self, output_index: u32) -> (u32, bool) {
         let cycle = output_index / 5;
         let phase = output_index % 5;
         let base = cycle * 4;
@@ -810,7 +810,7 @@ impl FrameRateConverter {
     /// of the *next* source frame to blend (0 = 100% current, 256 = 100%
     /// next).
     #[cfg(feature = "alloc")]
-    pub fn build_frame_map(
+    pub(crate) fn build_frame_map(
         &self,
         total_source_frames: u32,
         total_output_frames: u32,
@@ -896,7 +896,7 @@ pub struct FrameMapEntry {
 /// `weight` is 0..256 (0 = 100% frame_a, 256 = 100% frame_b).
 /// Both buffers must have the same length. Output is written to `out`.
 #[cfg(feature = "alloc")]
-pub fn blend_frames(frame_a: &[u8], frame_b: &[u8], out: &mut [u8], weight: u16) {
+pub(crate) fn blend_frames(frame_a: &[u8], frame_b: &[u8], out: &mut [u8], weight: u16) {
     let len = frame_a.len().min(frame_b.len()).min(out.len());
     let w = weight as u32;
     let inv_w = 256u32.saturating_sub(w);
@@ -985,7 +985,7 @@ impl SubtitleTrack {
     /// Second subtitle
     /// with multiple lines.
     /// ```
-    pub fn parse_srt(input: &str) -> Self {
+    pub(crate) fn parse_srt(input: &str) -> Self {
         let mut entries = Vec::new();
         let mut lines = input.lines().peekable();
 
@@ -1048,14 +1048,14 @@ impl SubtitleTrack {
     /// Find the active subtitle at the given time (in milliseconds).
     ///
     /// Returns the first entry where start_ms <= time_ms < end_ms.
-    pub fn active_at(&self, time_ms: u64) -> Option<&SubtitleEntry> {
+    pub(crate) fn active_at(&self, time_ms: u64) -> Option<&SubtitleEntry> {
         self.entries
             .iter()
             .find(|e| time_ms >= e.start_ms && time_ms < e.end_ms)
     }
 
     /// Find all active subtitles at the given time.
-    pub fn all_active_at(&self, time_ms: u64) -> Vec<&SubtitleEntry> {
+    pub(crate) fn all_active_at(&self, time_ms: u64) -> Vec<&SubtitleEntry> {
         self.entries
             .iter()
             .filter(|e| time_ms >= e.start_ms && time_ms < e.end_ms)
@@ -1063,12 +1063,12 @@ impl SubtitleTrack {
     }
 
     /// Number of subtitle entries.
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Whether the track is empty.
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 }
@@ -1085,7 +1085,7 @@ impl SubtitleTrack {
 /// Uses a simple 8x16 bitmap font renderer. Characters outside printable ASCII
 /// are skipped. Multi-line text is word-wrapped at the frame width boundary.
 #[cfg(feature = "alloc")]
-pub fn render_subtitle_overlay(
+pub(crate) fn render_subtitle_overlay(
     buf: &mut [u8],
     stride: u32,
     width: u32,
@@ -1366,7 +1366,7 @@ pub enum AudioPriorityClass {
 
 impl AudioPriorityClass {
     /// Get the period in nanoseconds for this priority class.
-    pub fn period_ns(&self) -> u64 {
+    pub(crate) fn period_ns(&self) -> u64 {
         match self {
             Self::Critical => 1_000_000,    // 1ms
             Self::Normal => 5_000_000,      // 5ms
@@ -1375,7 +1375,7 @@ impl AudioPriorityClass {
     }
 
     /// Get the runtime budget in nanoseconds for this priority class.
-    pub fn runtime_ns(&self) -> u64 {
+    pub(crate) fn runtime_ns(&self) -> u64 {
         match self {
             Self::Critical => 500_000,      // 500us
             Self::Normal => 2_000_000,      // 2ms
@@ -1384,12 +1384,12 @@ impl AudioPriorityClass {
     }
 
     /// Get the deadline in nanoseconds (same as period for audio).
-    pub fn deadline_ns(&self) -> u64 {
+    pub(crate) fn deadline_ns(&self) -> u64 {
         self.period_ns()
     }
 
     /// Compute CPU utilization in permille (parts per 1000).
-    pub fn utilization_permille(&self) -> u64 {
+    pub(crate) fn utilization_permille(&self) -> u64 {
         let period = self.period_ns();
         if period == 0 {
             return 1000;
@@ -1418,7 +1418,7 @@ pub struct AudioSchedParams {
 
 impl AudioSchedParams {
     /// Create scheduling parameters for a given priority class.
-    pub fn from_priority(pid: u64, priority: AudioPriorityClass) -> Self {
+    pub(crate) fn from_priority(pid: u64, priority: AudioPriorityClass) -> Self {
         Self {
             pid,
             priority,
@@ -1429,7 +1429,7 @@ impl AudioSchedParams {
     }
 
     /// Create custom scheduling parameters.
-    pub fn custom(pid: u64, period_ns: u64, runtime_ns: u64) -> Self {
+    pub(crate) fn custom(pid: u64, period_ns: u64, runtime_ns: u64) -> Self {
         let cpu_reservation_permille = if period_ns > 0 {
             (runtime_ns.saturating_mul(1000) / period_ns) as u32
         } else {
@@ -1472,7 +1472,7 @@ pub struct AudioSchedStats {
 
 impl AudioSchedStats {
     /// Compute average jitter in nanoseconds.
-    pub fn avg_jitter_ns(&self) -> u64 {
+    pub(crate) fn avg_jitter_ns(&self) -> u64 {
         if self.periods_completed == 0 {
             return 0;
         }
@@ -1483,7 +1483,7 @@ impl AudioSchedStats {
     ///
     /// `actual_wake_ns` is the actual wake time. `expected_wake_ns` is when
     /// the wake was scheduled. The difference is the jitter.
-    pub fn record_wake(&mut self, actual_wake_ns: u64, expected_wake_ns: u64) {
+    pub(crate) fn record_wake(&mut self, actual_wake_ns: u64, expected_wake_ns: u64) {
         self.periods_completed += 1;
 
         let jitter = actual_wake_ns.abs_diff(expected_wake_ns);
@@ -1509,12 +1509,12 @@ impl AudioSchedStats {
     }
 
     /// Record a buffer underrun event.
-    pub fn record_underrun(&mut self) {
+    pub(crate) fn record_underrun(&mut self) {
         self.underruns += 1;
     }
 
     /// Record a buffer overrun event.
-    pub fn record_overrun(&mut self) {
+    pub(crate) fn record_overrun(&mut self) {
         self.overruns += 1;
     }
 }
@@ -1559,7 +1559,7 @@ impl AudioScheduler {
     }
 
     /// Create with a custom maximum CPU reservation.
-    pub fn with_max_reservation(max_permille: u32) -> Self {
+    pub(crate) fn with_max_reservation(max_permille: u32) -> Self {
         Self {
             threads: Vec::new(),
             stats: Vec::new(),
@@ -1574,7 +1574,10 @@ impl AudioScheduler {
     /// - Maximum thread count exceeded
     /// - CPU reservation would exceed the maximum
     /// - Thread already registered
-    pub fn register_thread(&mut self, params: AudioSchedParams) -> Result<(), AudioSchedError> {
+    pub(crate) fn register_thread(
+        &mut self,
+        params: AudioSchedParams,
+    ) -> Result<(), AudioSchedError> {
         // Check duplicates
         if self.threads.iter().any(|t| t.pid == params.pid) {
             return Err(AudioSchedError::AlreadyRegistered);
@@ -1600,7 +1603,7 @@ impl AudioScheduler {
     }
 
     /// Unregister an audio thread.
-    pub fn unregister_thread(&mut self, pid: u64) -> Result<(), AudioSchedError> {
+    pub(crate) fn unregister_thread(&mut self, pid: u64) -> Result<(), AudioSchedError> {
         let idx = self
             .threads
             .iter()
@@ -1616,24 +1619,24 @@ impl AudioScheduler {
     }
 
     /// Get the scheduling parameters for a thread.
-    pub fn get_params(&self, pid: u64) -> Option<&AudioSchedParams> {
+    pub(crate) fn get_params(&self, pid: u64) -> Option<&AudioSchedParams> {
         self.threads.iter().find(|t| t.pid == pid)
     }
 
     /// Get mutable scheduling statistics for a thread.
-    pub fn get_stats_mut(&mut self, pid: u64) -> Option<&mut AudioSchedStats> {
+    pub(crate) fn get_stats_mut(&mut self, pid: u64) -> Option<&mut AudioSchedStats> {
         let idx = self.threads.iter().position(|t| t.pid == pid)?;
         self.stats.get_mut(idx)
     }
 
     /// Get scheduling statistics for a thread.
-    pub fn get_stats(&self, pid: u64) -> Option<&AudioSchedStats> {
+    pub(crate) fn get_stats(&self, pid: u64) -> Option<&AudioSchedStats> {
         let idx = self.threads.iter().position(|t| t.pid == pid)?;
         self.stats.get(idx)
     }
 
     /// Record a wake event for a thread.
-    pub fn record_wake(
+    pub(crate) fn record_wake(
         &mut self,
         pid: u64,
         actual_ns: u64,
@@ -1645,29 +1648,29 @@ impl AudioScheduler {
     }
 
     /// Total CPU reservation in permille.
-    pub fn total_reservation(&self) -> u32 {
+    pub(crate) fn total_reservation(&self) -> u32 {
         self.total_reservation_permille
     }
 
     /// Number of registered audio threads.
-    pub fn thread_count(&self) -> usize {
+    pub(crate) fn thread_count(&self) -> usize {
         self.threads.len()
     }
 
     /// Available CPU budget in permille.
-    pub fn available_budget(&self) -> u32 {
+    pub(crate) fn available_budget(&self) -> u32 {
         self.max_reservation_permille
             .saturating_sub(self.total_reservation_permille)
     }
 
     /// Compute the next wake time for a thread based on its period.
-    pub fn next_wake_time(&self, pid: u64, current_ns: u64) -> Option<u64> {
+    pub(crate) fn next_wake_time(&self, pid: u64, current_ns: u64) -> Option<u64> {
         let params = self.get_params(pid)?;
         Some(current_ns.saturating_add(params.period_ns))
     }
 
     /// Get aggregate statistics across all audio threads.
-    pub fn aggregate_stats(&self) -> AudioSchedStats {
+    pub(crate) fn aggregate_stats(&self) -> AudioSchedStats {
         let mut agg = AudioSchedStats::default();
         for stats in &self.stats {
             agg.periods_completed = agg
@@ -1707,17 +1710,17 @@ pub(crate) static AUDIO_TOTAL_OVERRUNS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static AUDIO_TOTAL_LATE_WAKES: AtomicU64 = AtomicU64::new(0);
 
 /// Increment global underrun counter.
-pub fn count_audio_underrun() {
+pub(crate) fn count_audio_underrun() {
     AUDIO_TOTAL_UNDERRUNS.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Increment global overrun counter.
-pub fn count_audio_overrun() {
+pub(crate) fn count_audio_overrun() {
     AUDIO_TOTAL_OVERRUNS.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Increment global late wake counter.
-pub fn count_audio_late_wake() {
+pub(crate) fn count_audio_late_wake() {
     AUDIO_TOTAL_LATE_WAKES.fetch_add(1, Ordering::Relaxed);
 }
 

@@ -203,6 +203,8 @@ impl EptManager {
             };
             let p = f.as_u64() * crate::mm::FRAME_SIZE as u64;
             let v = crate::mm::phys_to_virt_addr(p);
+            // SAFETY: Frame was just allocated; zeroing its full size via the kernel
+            // direct-map.
             unsafe {
                 core::ptr::write_bytes(v as *mut u8, 0, crate::mm::FRAME_SIZE);
             }
@@ -210,6 +212,8 @@ impl EptManager {
         }
 
         let pdpt_phys = pml4_table.entry(pml4_idx).address();
+        // SAFETY: pdpt_phys is a valid physical address from a present EPT entry;
+        // direct-map yields a valid pointer.
         let pdpt_table =
             unsafe { &mut *(crate::mm::phys_to_virt_addr(pdpt_phys) as *mut EptTable) };
 
@@ -221,6 +225,8 @@ impl EptManager {
             };
             let p = f.as_u64() * crate::mm::FRAME_SIZE as u64;
             let v = crate::mm::phys_to_virt_addr(p);
+            // SAFETY: Frame was just allocated; zeroing its full size via the kernel
+            // direct-map.
             unsafe {
                 core::ptr::write_bytes(v as *mut u8, 0, crate::mm::FRAME_SIZE);
             }
@@ -228,6 +234,8 @@ impl EptManager {
         }
 
         let pd_phys = pdpt_table.entry(pdpt_idx).address();
+        // SAFETY: pd_phys is a valid physical address from a present EPT entry;
+        // direct-map yields a valid pointer.
         let pd_table = unsafe { &mut *(crate::mm::phys_to_virt_addr(pd_phys) as *mut EptTable) };
 
         if !pd_table.entry(pd_idx).is_present() {
@@ -238,6 +246,8 @@ impl EptManager {
             };
             let p = f.as_u64() * crate::mm::FRAME_SIZE as u64;
             let v = crate::mm::phys_to_virt_addr(p);
+            // SAFETY: Frame was just allocated; zeroing its full size via the kernel
+            // direct-map.
             unsafe {
                 core::ptr::write_bytes(v as *mut u8, 0, crate::mm::FRAME_SIZE);
             }
@@ -245,6 +255,8 @@ impl EptManager {
         }
 
         let pt_phys = pd_table.entry(pd_idx).address();
+        // SAFETY: pt_phys is a valid physical address from a present EPT entry;
+        // direct-map yields a valid pointer.
         let pt_table = unsafe { &mut *(crate::mm::phys_to_virt_addr(pt_phys) as *mut EptTable) };
         *pt_table.entry_mut(pt_idx) = EptEntry::new_page(host_phys, perms, mem_type);
         self.mapped_pages += 1;
@@ -270,11 +282,15 @@ impl EptManager {
         let pt_idx = ((guest_phys >> 12) & INDEX_MASK) as usize;
 
         let pml4_phys = self.pml4_frame.as_u64() * crate::mm::FRAME_SIZE as u64;
+        // SAFETY: pml4_phys derived from self.pml4_frame; direct-map address is valid
+        // and aligned.
         let pml4_table = unsafe { &*(crate::mm::phys_to_virt_addr(pml4_phys) as *const EptTable) };
         if !pml4_table.entry(pml4_idx).is_present() {
             return Ok(());
         }
 
+        // SAFETY: Entry is present (checked above); address points to a valid EPT PDPT
+        // frame.
         let pdpt_table = unsafe {
             &*(crate::mm::phys_to_virt_addr(pml4_table.entry(pml4_idx).address())
                 as *const EptTable)
@@ -283,6 +299,8 @@ impl EptManager {
             return Ok(());
         }
 
+        // SAFETY: Entry is present (checked above); address points to a valid EPT PD
+        // frame.
         let pd_table = unsafe {
             &*(crate::mm::phys_to_virt_addr(pdpt_table.entry(pdpt_idx).address())
                 as *const EptTable)
@@ -291,6 +309,8 @@ impl EptManager {
             return Ok(());
         }
 
+        // SAFETY: Entry is present (checked above); address points to a valid EPT PT
+        // frame.
         let pt_table = unsafe {
             &mut *(crate::mm::phys_to_virt_addr(pd_table.entry(pd_idx).address()) as *mut EptTable)
         };

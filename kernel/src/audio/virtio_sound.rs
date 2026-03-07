@@ -493,6 +493,8 @@ impl VirtioSoundDevice {
 
         // Build TX buffer: VirtioSndPcmXfer header + PCM data
         let header = VirtioSndPcmXfer { stream_id };
+        // SAFETY: Reinterpreting a #[repr(C)] struct as a byte slice for
+        // serialization into the TX buffer.
         let header_bytes = unsafe {
             core::slice::from_raw_parts(
                 &header as *const VirtioSndPcmXfer as *const u8,
@@ -500,6 +502,8 @@ impl VirtioSoundDevice {
             )
         };
 
+        // SAFETY: Reinterpreting an i16 slice as a byte slice. The data
+        // pointer is valid and the byte length is exactly data.len() * 2.
         let pcm_bytes =
             unsafe { core::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2) };
 
@@ -540,6 +544,7 @@ impl VirtioSoundDevice {
             return;
         }
         let addr = self.mmio_base + offset as usize;
+        // SAFETY: MMIO register write at device address validated non-zero above.
         unsafe {
             core::ptr::write_volatile(addr as *mut u32, value);
         }
@@ -551,6 +556,7 @@ impl VirtioSoundDevice {
             return 0;
         }
         let addr = self.mmio_base + offset as usize;
+        // SAFETY: MMIO register read at device address validated non-zero above.
         unsafe { core::ptr::read_volatile(addr as *const u32) }
     }
 
@@ -610,6 +616,8 @@ impl AudioDevice for VirtioSoundDevice {
             return Ok(0);
         }
 
+        // SAFETY: Reinterpreting a u8 slice as i16. The data pointer is valid,
+        // aligned_len is even, and i16 has alignment <= u8 slice alignment.
         let samples =
             unsafe { core::slice::from_raw_parts(data.as_ptr() as *const i16, aligned_len / 2) };
 
@@ -764,6 +772,8 @@ fn pci_config_read(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
         | ((offset as u32) & 0xFC);
 
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: Port I/O to PCI configuration space registers (0xCF8/0xCFC).
+    // These are well-known x86 I/O ports for PCI bus enumeration.
     unsafe {
         // Write address to CONFIG_ADDRESS (0xCF8)
         core::arch::asm!(

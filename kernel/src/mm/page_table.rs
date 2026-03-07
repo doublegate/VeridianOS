@@ -454,6 +454,8 @@ impl PageMapper {
                         available: 0,
                     })?;
             // Zero the new page table frame before use
+            // SAFETY: Physical address converted to virtual via identity-mapped region;
+            // frame is freshly allocated and exclusively owned.
             unsafe {
                 let virt = super::phys_to_virt_addr(frame.as_u64() << 12);
                 core::ptr::write_bytes(virt as *mut u8, 0, 4096);
@@ -468,6 +470,8 @@ impl PageMapper {
             expected: "L3 entry present",
             actual: "not present",
         })?;
+        // SAFETY: Physical address from a present L3 entry, converted to virtual via
+        // identity-mapped region.
         let l2_table =
             unsafe { &mut *(super::phys_to_virt_addr(l2_phys.as_u64()) as *mut PageTable) };
         let l2_entry = &mut l2_table[breakdown.l2_index];
@@ -482,6 +486,8 @@ impl PageMapper {
                         available: 0,
                     })?;
             // Zero the new page table frame before use
+            // SAFETY: Physical address converted to virtual via identity-mapped region;
+            // frame is freshly allocated and exclusively owned.
             unsafe {
                 let virt = super::phys_to_virt_addr(frame.as_u64() << 12);
                 core::ptr::write_bytes(virt as *mut u8, 0, 4096);
@@ -496,6 +502,8 @@ impl PageMapper {
             expected: "L2 entry present",
             actual: "not present",
         })?;
+        // SAFETY: Physical address from a present L2 entry, converted to virtual via
+        // identity-mapped region.
         let l1_table =
             unsafe { &mut *(super::phys_to_virt_addr(l1_phys.as_u64()) as *mut PageTable) };
 
@@ -536,6 +544,8 @@ impl PageMapper {
             expected: "L4 entry has address",
             actual: "no address",
         })?;
+        // SAFETY: Physical address from a present L4 entry, converted to virtual via
+        // identity-mapped region.
         let l3_table =
             unsafe { &*(super::phys_to_virt_addr(l3_phys.as_u64()) as *const PageTable) };
         let l3_entry = &l3_table[breakdown.l3_index];
@@ -549,6 +559,8 @@ impl PageMapper {
             expected: "L3 entry has address",
             actual: "no address",
         })?;
+        // SAFETY: Physical address from a present L3 entry, converted to virtual via
+        // identity-mapped region.
         let l2_table =
             unsafe { &*(super::phys_to_virt_addr(l2_phys.as_u64()) as *const PageTable) };
         let l2_entry = &l2_table[breakdown.l2_index];
@@ -562,6 +574,8 @@ impl PageMapper {
             expected: "L2 entry has address",
             actual: "no address",
         })?;
+        // SAFETY: Physical address from a present L2 entry, converted to virtual via
+        // identity-mapped region.
         let l1_table =
             unsafe { &*(super::phys_to_virt_addr(l1_phys.as_u64()) as *const PageTable) };
         let entry = &l1_table[breakdown.l1_index];
@@ -594,6 +608,8 @@ impl PageMapper {
         }
 
         let l3_phys = l3_phys_from_entry(l4_entry, page)?;
+        // SAFETY: Physical address from a present L4 entry, converted to virtual via
+        // identity-mapped region.
         let l3_table = unsafe { &*(super::phys_to_virt_addr(l3_phys as u64) as *const PageTable) };
         let l3_entry = &l3_table[breakdown.l3_index];
         if !l3_entry.is_present() {
@@ -603,6 +619,8 @@ impl PageMapper {
         }
 
         let l2_phys = l3_phys_from_entry(l3_entry, page)?;
+        // SAFETY: Physical address from a present L3 entry, converted to virtual via
+        // identity-mapped region.
         let l2_table = unsafe { &*(super::phys_to_virt_addr(l2_phys as u64) as *const PageTable) };
         let l2_entry = &l2_table[breakdown.l2_index];
         if !l2_entry.is_present() {
@@ -612,6 +630,8 @@ impl PageMapper {
         }
 
         let l1_phys = l3_phys_from_entry(l2_entry, page)?;
+        // SAFETY: Physical address from a present L2 entry, converted to virtual via
+        // identity-mapped region.
         let l1_table =
             unsafe { &mut *(super::phys_to_virt_addr(l1_phys as u64) as *mut PageTable) };
         let entry = &mut l1_table[breakdown.l1_index];
@@ -646,6 +666,8 @@ impl PageMapper {
             expected: "L4 entry has address",
             actual: "no address",
         })?;
+        // SAFETY: Physical address from a present L4 entry, converted to virtual via
+        // identity-mapped region.
         let l3_table =
             unsafe { &mut *(super::phys_to_virt_addr(l3_phys.as_u64()) as *mut PageTable) };
         let l3_entry = &l3_table[breakdown.l3_index];
@@ -659,6 +681,8 @@ impl PageMapper {
             expected: "L3 entry has address",
             actual: "no address",
         })?;
+        // SAFETY: Physical address from a present L3 entry, converted to virtual via
+        // identity-mapped region.
         let l2_table =
             unsafe { &mut *(super::phys_to_virt_addr(l2_phys.as_u64()) as *mut PageTable) };
         let l2_entry = &l2_table[breakdown.l2_index];
@@ -672,6 +696,8 @@ impl PageMapper {
             expected: "L2 entry has address",
             actual: "no address",
         })?;
+        // SAFETY: Physical address from a present L2 entry, converted to virtual via
+        // identity-mapped region.
         let l1_table =
             unsafe { &mut *(super::phys_to_virt_addr(l1_phys.as_u64()) as *mut PageTable) };
 

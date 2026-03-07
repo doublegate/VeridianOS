@@ -817,6 +817,7 @@ impl TransferRing {
             let link_addr =
                 self.state.segment_phys + (self.state.capacity as u64) * (TRB_SIZE as u64);
             let link = Trb::link(self.state.segment_phys, true, !self.state.cycle);
+            // SAFETY: link_addr is the last TRB slot in the transfer ring segment.
             unsafe {
                 core::ptr::write_volatile(link_addr as *mut Trb, link);
             }
@@ -871,6 +872,7 @@ impl TransferRing {
             transfer_type,
             self.state.cycle,
         );
+        // SAFETY: Caller guarantees the ring segment is valid DMA memory.
         unsafe {
             self.enqueue(setup);
         }
@@ -878,6 +880,7 @@ impl TransferRing {
         // Data Stage (if any)
         if data_len > 0 {
             let data = Trb::data_stage(data_phys, data_len as u32, direction_in, self.state.cycle);
+            // SAFETY: Same ring segment invariant as setup stage above.
             unsafe {
                 self.enqueue(data);
             }
@@ -886,6 +889,7 @@ impl TransferRing {
         // Status Stage (direction is opposite of data stage, or IN if no data)
         let status_dir_in = if data_len == 0 { true } else { !direction_in };
         let status = Trb::status_stage(status_dir_in, true, self.state.cycle);
+        // SAFETY: Same ring segment invariant as setup stage above.
         unsafe { self.enqueue(status) }
     }
 
@@ -1372,6 +1376,8 @@ impl XhciController {
     #[cfg(target_os = "none")]
     pub unsafe fn new(mmio_base: u64) -> Result<Self, KernelError> {
         // Read capability registers
+        // SAFETY: Caller guarantees mmio_base is a valid, mapped xHCI MMIO region.
+        // All reads are within the capability register space at known offsets.
         let cap_length = unsafe { core::ptr::read_volatile(mmio_base as *const u8) };
         let hci_version = unsafe {
             core::ptr::read_volatile((mmio_base + cap_regs::HCIVERSION as u64) as *const u16)
@@ -1554,7 +1560,7 @@ impl XhciController {
     }
 
     /// Reset the host controller
-    pub fn reset(&mut self) -> Result<(), KernelError> {
+    pub(crate) fn reset(&mut self) -> Result<(), KernelError> {
         // Stop the controller first
         let cmd = self.read_op_reg(op_regs::USBCMD);
         self.write_op_reg(op_regs::USBCMD, cmd & !usbcmd_bits::RS);
@@ -1588,7 +1594,7 @@ impl XhciController {
     }
 
     /// Start the host controller (set Run/Stop bit)
-    pub fn start(&mut self) -> Result<(), KernelError> {
+    pub(crate) fn start(&mut self) -> Result<(), KernelError> {
         let cmd = self.read_op_reg(op_regs::USBCMD);
         self.write_op_reg(op_regs::USBCMD, cmd | usbcmd_bits::RS | usbcmd_bits::INTE);
 
@@ -1609,7 +1615,7 @@ impl XhciController {
     }
 
     /// Stop the host controller
-    pub fn stop(&mut self) -> Result<(), KernelError> {
+    pub(crate) fn stop(&mut self) -> Result<(), KernelError> {
         let cmd = self.read_op_reg(op_regs::USBCMD);
         self.write_op_reg(op_regs::USBCMD, cmd & !usbcmd_bits::RS);
 
@@ -1629,7 +1635,7 @@ impl XhciController {
     }
 
     /// Configure the maximum number of device slots
-    pub fn set_max_slots(&mut self, max: u8) {
+    pub(crate) fn set_max_slots(&mut self, max: u8) {
         let max = max.min(self.capabilities.max_slots);
         let config = self.read_op_reg(op_regs::CONFIG);
         self.write_op_reg(op_regs::CONFIG, (config & !0xFF) | (max as u32));
@@ -1637,17 +1643,17 @@ impl XhciController {
     }
 
     /// Set the Device Context Base Address Array Pointer
-    pub fn set_dcbaap(&self, phys_addr: u64) {
+    pub(crate) fn set_dcbaap(&self, phys_addr: u64) {
         self.write_op_reg64(op_regs::DCBAAP, phys_addr);
     }
 
     /// Set the Command Ring Control Register
-    pub fn set_crcr(&self) {
+    pub(crate) fn set_crcr(&self) {
         self.write_op_reg64(op_regs::CRCR, self.command_ring.crcr_value());
     }
 
     /// Get port status for a given port (1-based)
-    pub fn get_port_status(&self, port: u8) -> Result<XhciPort, KernelError> {
+    pub(crate) fn get_port_status(&self, port: u8) -> Result<XhciPort, KernelError> {
         if port == 0 || port > self.capabilities.max_ports {
             return Err(KernelError::InvalidArgument {
                 name: "port",
@@ -1659,7 +1665,7 @@ impl XhciController {
     }
 
     /// Reset a port (1-based)
-    pub fn reset_port(&self, port: u8) -> Result<(), KernelError> {
+    pub(crate) fn reset_port(&self, port: u8) -> Result<(), KernelError> {
         if port == 0 || port > self.capabilities.max_ports {
             return Err(KernelError::InvalidArgument {
                 name: "port",
@@ -1690,7 +1696,7 @@ impl XhciController {
     }
 
     /// Check if a device is connected on a port (1-based)
-    pub fn is_port_connected(&self, port: u8) -> bool {
+    pub(crate) fn is_port_connected(&self, port: u8) -> bool {
         if port == 0 || port > self.capabilities.max_ports {
             return false;
         }
@@ -1699,7 +1705,7 @@ impl XhciController {
     }
 
     /// Whether the controller is currently running
-    pub fn is_running(&self) -> bool {
+    pub(crate) fn is_running(&self) -> bool {
         self.running
     }
 
@@ -1711,7 +1717,8 @@ impl XhciController {
     ///
     /// The command ring segment must be valid DMA-accessible memory.
     #[cfg(target_os = "none")]
-    pub unsafe fn send_command(&mut self, trb: Trb) -> u64 {
+    pub(crate) unsafe fn send_command(&mut self, trb: Trb) -> u64 {
+        // SAFETY: Caller guarantees the command ring segment is valid DMA memory.
         let addr = unsafe { self.command_ring.enqueue(trb) };
         self.ring_command_doorbell();
         addr
@@ -1719,7 +1726,7 @@ impl XhciController {
 
     /// Non-hardware stub
     #[cfg(not(target_os = "none"))]
-    pub fn send_command(&mut self, trb: Trb) -> u64 {
+    pub(crate) fn send_command(&mut self, trb: Trb) -> u64 {
         self.command_ring.enqueue(trb)
     }
 
@@ -1729,7 +1736,8 @@ impl XhciController {
     ///
     /// The event ring segment must be valid memory.
     #[cfg(target_os = "none")]
-    pub unsafe fn poll_event(&mut self) -> Option<Trb> {
+    pub(crate) unsafe fn poll_event(&mut self) -> Option<Trb> {
+        // SAFETY: Caller guarantees the event ring segment is valid memory.
         let event = unsafe { self.event_ring.dequeue()? };
         // Update ERDP to acknowledge the event
         let erdp = self.event_ring.erdp_value();
@@ -1746,7 +1754,7 @@ impl XhciController {
 
     /// Non-hardware stub
     #[cfg(not(target_os = "none"))]
-    pub fn poll_event(&mut self) -> Option<Trb> {
+    pub(crate) fn poll_event(&mut self) -> Option<Trb> {
         self.event_ring.dequeue()
     }
 }

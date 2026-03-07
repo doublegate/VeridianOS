@@ -142,7 +142,7 @@ impl AcpiGed {
     }
 
     /// Inject a hot-plug event
-    pub fn inject_event(&mut self, mut event: HotplugEvent) -> Result<(), VmError> {
+    pub(crate) fn inject_event(&mut self, mut event: HotplugEvent) -> Result<(), VmError> {
         if !self.enabled {
             return Err(VmError::DeviceError);
         }
@@ -156,32 +156,32 @@ impl AcpiGed {
     }
 
     /// Poll the next pending event
-    pub fn poll_event(&mut self) -> Option<HotplugEvent> {
+    pub(crate) fn poll_event(&mut self) -> Option<HotplugEvent> {
         self.events.pop_front()
     }
 
     /// Check if there are pending events
-    pub fn has_pending_events(&self) -> bool {
+    pub(crate) fn has_pending_events(&self) -> bool {
         !self.events.is_empty()
     }
 
     /// Get number of pending events
-    pub fn pending_count(&self) -> usize {
+    pub(crate) fn pending_count(&self) -> usize {
         self.events.len()
     }
 
     /// Clear all pending events
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.events.clear();
     }
 
     /// Enable or disable the GED
-    pub fn set_enabled(&mut self, enabled: bool) {
+    pub(crate) fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
     }
 
     /// Check if enabled
-    pub fn is_enabled(&self) -> bool {
+    pub(crate) fn is_enabled(&self) -> bool {
         self.enabled
     }
 }
@@ -256,7 +256,7 @@ impl CpuHotplug {
     }
 
     /// Add (hot-plug) a CPU
-    pub fn add_cpu(&mut self, cpu_id: u32) -> Result<(), VmError> {
+    pub(crate) fn add_cpu(&mut self, cpu_id: u32) -> Result<(), VmError> {
         if cpu_id >= self.max_cpus {
             return Err(VmError::InvalidVmState);
         }
@@ -283,7 +283,7 @@ impl CpuHotplug {
     }
 
     /// Remove (hot-unplug) a CPU
-    pub fn remove_cpu(&mut self, cpu_id: u32) -> Result<(), VmError> {
+    pub(crate) fn remove_cpu(&mut self, cpu_id: u32) -> Result<(), VmError> {
         if cpu_id >= self.max_cpus {
             return Err(VmError::InvalidVmState);
         }
@@ -310,7 +310,7 @@ impl CpuHotplug {
     }
 
     /// Check if a CPU is online
-    pub fn is_online(&self, cpu_id: u32) -> bool {
+    pub(crate) fn is_online(&self, cpu_id: u32) -> bool {
         if cpu_id >= self.max_cpus {
             return false;
         }
@@ -324,7 +324,7 @@ impl CpuHotplug {
     }
 
     /// Get CPU lifecycle state
-    pub fn cpu_state(&self, cpu_id: u32) -> CpuLifecycleState {
+    pub(crate) fn cpu_state(&self, cpu_id: u32) -> CpuLifecycleState {
         if (cpu_id as usize) < self.cpu_states.len() {
             self.cpu_states[cpu_id as usize]
         } else {
@@ -333,17 +333,17 @@ impl CpuHotplug {
     }
 
     /// Get number of online CPUs
-    pub fn online_count(&self) -> u32 {
+    pub(crate) fn online_count(&self) -> u32 {
         self.online_count
     }
 
     /// Get maximum CPUs
-    pub fn max_cpus(&self) -> u32 {
+    pub(crate) fn max_cpus(&self) -> u32 {
         self.max_cpus
     }
 
     /// Get list of online CPU IDs
-    pub fn online_cpu_ids(&self) -> Vec<u32> {
+    pub(crate) fn online_cpu_ids(&self) -> Vec<u32> {
         let mut ids = Vec::new();
         for (word_idx, &word) in self.online_cpus.iter().enumerate() {
             if word == 0 {
@@ -391,12 +391,12 @@ impl MemoryDimm {
     }
 
     /// Get DIMM size in bytes
-    pub fn size_bytes(&self) -> u64 {
+    pub(crate) fn size_bytes(&self) -> u64 {
         self.size_mb as u64 * 1024 * 1024
     }
 
     /// Get end address (exclusive)
-    pub fn end_addr(&self) -> u64 {
+    pub(crate) fn end_addr(&self) -> u64 {
         self.base_addr + self.size_bytes()
     }
 }
@@ -433,7 +433,7 @@ impl MemoryHotplug {
     }
 
     /// Add (hot-plug) a memory DIMM
-    pub fn add_dimm(&mut self, size_mb: u32) -> Result<u32, VmError> {
+    pub(crate) fn add_dimm(&mut self, size_mb: u32) -> Result<u32, VmError> {
         if self.dimms.len() >= self.max_dimms as usize {
             return Err(VmError::GuestMemoryError);
         }
@@ -461,7 +461,7 @@ impl MemoryHotplug {
     }
 
     /// Remove (hot-unplug) a memory DIMM
-    pub fn remove_dimm(&mut self, slot: u32) -> Result<(), VmError> {
+    pub(crate) fn remove_dimm(&mut self, slot: u32) -> Result<(), VmError> {
         let dimm = self
             .dimms
             .iter_mut()
@@ -483,22 +483,22 @@ impl MemoryHotplug {
     }
 
     /// Get DIMM by slot
-    pub fn dimm(&self, slot: u32) -> Option<&MemoryDimm> {
+    pub(crate) fn dimm(&self, slot: u32) -> Option<&MemoryDimm> {
         self.dimms.iter().find(|d| d.slot == slot)
     }
 
     /// Get total online memory in MB
-    pub fn total_online_mb(&self) -> u64 {
+    pub(crate) fn total_online_mb(&self) -> u64 {
         self.total_online_mb
     }
 
     /// Get number of installed DIMMs
-    pub fn dimm_count(&self) -> usize {
+    pub(crate) fn dimm_count(&self) -> usize {
         self.dimms.len()
     }
 
     /// Get number of online DIMMs
-    pub fn online_dimm_count(&self) -> usize {
+    pub(crate) fn online_dimm_count(&self) -> usize {
         self.dimms.iter().filter(|d| d.online).count()
     }
 }
@@ -606,7 +606,7 @@ impl ShpcController {
     }
 
     /// Power on a slot (insert device)
-    pub fn slot_power_on(&mut self, slot_id: u32, device_bdf: u32) -> Result<(), VmError> {
+    pub(crate) fn slot_power_on(&mut self, slot_id: u32, device_bdf: u32) -> Result<(), VmError> {
         let slot = self
             .slots
             .iter_mut()
@@ -625,7 +625,7 @@ impl ShpcController {
     }
 
     /// Power off a slot (eject device)
-    pub fn slot_power_off(&mut self, slot_id: u32) -> Result<(), VmError> {
+    pub(crate) fn slot_power_off(&mut self, slot_id: u32) -> Result<(), VmError> {
         let slot = self
             .slots
             .iter_mut()
@@ -644,7 +644,7 @@ impl ShpcController {
     }
 
     /// Handle surprise removal of a device
-    pub fn surprise_removal(&mut self, slot_id: u32) -> Result<HotplugEvent, VmError> {
+    pub(crate) fn surprise_removal(&mut self, slot_id: u32) -> Result<HotplugEvent, VmError> {
         let slot = self
             .slots
             .iter_mut()
@@ -669,17 +669,17 @@ impl ShpcController {
     }
 
     /// Get slot state
-    pub fn slot(&self, slot_id: u32) -> Option<&PciHotplugSlot> {
+    pub(crate) fn slot(&self, slot_id: u32) -> Option<&PciHotplugSlot> {
         self.slots.iter().find(|s| s.slot_id == slot_id)
     }
 
     /// Get number of occupied slots
-    pub fn occupied_count(&self) -> usize {
+    pub(crate) fn occupied_count(&self) -> usize {
         self.slots.iter().filter(|s| s.occupied).count()
     }
 
     /// Get number of total slots
-    pub fn slot_count(&self) -> usize {
+    pub(crate) fn slot_count(&self) -> usize {
         self.slots.len()
     }
 }
@@ -740,7 +740,7 @@ impl PcieNativeHotplug {
     }
 
     /// Handle a slot event
-    pub fn handle_slot_event(&mut self, event: SlotEvent) -> Option<HotplugEvent> {
+    pub(crate) fn handle_slot_event(&mut self, event: SlotEvent) -> Option<HotplugEvent> {
         match event {
             SlotEvent::AttentionButton => {
                 self.attention_button = true;
@@ -785,25 +785,25 @@ impl PcieNativeHotplug {
     }
 
     /// Enable power to the slot
-    pub fn power_on(&mut self) {
+    pub(crate) fn power_on(&mut self) {
         self.power_enabled = true;
         self.power_indicator = PowerIndicator::On;
         self.power_fault = false;
     }
 
     /// Disable power to the slot
-    pub fn power_off(&mut self) {
+    pub(crate) fn power_off(&mut self) {
         self.power_enabled = false;
         self.power_indicator = PowerIndicator::Off;
     }
 
     /// Check if a device is present
-    pub fn is_present(&self) -> bool {
+    pub(crate) fn is_present(&self) -> bool {
         self.presence_detect
     }
 
     /// Check if power is on
-    pub fn is_powered(&self) -> bool {
+    pub(crate) fn is_powered(&self) -> bool {
         self.power_enabled
     }
 }

@@ -239,6 +239,8 @@ pub fn init(memory_map: &[MemoryRegion]) {
 #[cfg(target_arch = "x86_64")]
 fn translate_kernel_vaddr(vaddr: u64) -> u64 {
     let cr3: u64;
+    // SAFETY: Reading CR3 is a read-only privileged operation with no side effects;
+    // always valid in ring 0.
     unsafe {
         core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack));
     }
@@ -248,6 +250,8 @@ fn translate_kernel_vaddr(vaddr: u64) -> u64 {
     // L4 index
     let l4_idx = ((vaddr >> 39) & 0x1FF) as usize;
     let l4_virt = (l4_phys + phys_offset) as *const u64;
+    // SAFETY: l4_virt points into the L4 page table via the identity-mapped
+    // physical memory region; index is bounded to 0..511.
     let l4_entry = unsafe { core::ptr::read_volatile(l4_virt.add(l4_idx)) };
     if l4_entry & 1 == 0 {
         return 0;
@@ -257,6 +261,8 @@ fn translate_kernel_vaddr(vaddr: u64) -> u64 {
     let l3_phys = l4_entry & 0x000F_FFFF_FFFF_F000;
     let l3_idx = ((vaddr >> 30) & 0x1FF) as usize;
     let l3_virt = (l3_phys + phys_offset) as *const u64;
+    // SAFETY: l3_virt points into the L3 page table via identity-mapped region;
+    // index is bounded to 0..511.
     let l3_entry = unsafe { core::ptr::read_volatile(l3_virt.add(l3_idx)) };
     if l3_entry & 1 == 0 {
         return 0;
@@ -270,6 +276,8 @@ fn translate_kernel_vaddr(vaddr: u64) -> u64 {
     let l2_phys = l3_entry & 0x000F_FFFF_FFFF_F000;
     let l2_idx = ((vaddr >> 21) & 0x1FF) as usize;
     let l2_virt = (l2_phys + phys_offset) as *const u64;
+    // SAFETY: l2_virt points into the L2 page table via identity-mapped region;
+    // index is bounded to 0..511.
     let l2_entry = unsafe { core::ptr::read_volatile(l2_virt.add(l2_idx)) };
     if l2_entry & 1 == 0 {
         return 0;
@@ -283,6 +291,8 @@ fn translate_kernel_vaddr(vaddr: u64) -> u64 {
     let l1_phys = l2_entry & 0x000F_FFFF_FFFF_F000;
     let l1_idx = ((vaddr >> 12) & 0x1FF) as usize;
     let l1_virt = (l1_phys + phys_offset) as *const u64;
+    // SAFETY: l1_virt points into the L1 page table via identity-mapped region;
+    // index is bounded to 0..511.
     let l1_entry = unsafe { core::ptr::read_volatile(l1_virt.add(l1_idx)) };
     if l1_entry & 1 == 0 {
         return 0;
@@ -305,6 +315,8 @@ pub fn init_default() {
         extern "C" {
             static __kernel_end: u8;
         }
+        // SAFETY: __kernel_end is a linker-defined symbol; we only take its address,
+        // not dereference it.
         let kernel_end_virt = unsafe { &__kernel_end as *const u8 as u64 };
         let kernel_end_phys = translate_kernel_vaddr(kernel_end_virt);
 
@@ -412,6 +424,8 @@ pub fn init_default() {
 #[cfg(target_arch = "x86_64")]
 pub fn reserve_boot_page_table_frames() {
     let cr3: u64;
+    // SAFETY: Reading CR3 is a read-only privileged operation with no side effects;
+    // always valid in ring 0.
     unsafe {
         core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack));
     }
@@ -430,6 +444,8 @@ pub fn reserve_boot_page_table_frames() {
     // Helper: walk one L4 entry's subtree (L3 → L2 → L1) and reserve all
     // intermediate page table frames.
     let mut reserve_l4_subtree = |l4_idx: usize| {
+        // SAFETY: l4_virt points into the L4 page table via identity-mapped region;
+        // l4_idx is bounded by callers to valid L4 indices.
         let l4_entry = unsafe { core::ptr::read_volatile(l4_virt.add(l4_idx)) };
         if l4_entry & 1 == 0 {
             return; // Not present
@@ -442,6 +458,8 @@ pub fn reserve_boot_page_table_frames() {
         // Walk L3 entries
         let l3_virt = (l3_phys + phys_offset) as *const u64;
         for l3_idx in 0..512 {
+            // SAFETY: l3_virt points into the L3 page table via identity-mapped region;
+            // l3_idx is bounded to 0..511.
             let l3_entry = unsafe { core::ptr::read_volatile(l3_virt.add(l3_idx)) };
             if l3_entry & 1 == 0 {
                 continue;
@@ -457,6 +475,8 @@ pub fn reserve_boot_page_table_frames() {
             // Walk L2 entries
             let l2_virt = (l2_phys + phys_offset) as *const u64;
             for l2_idx in 0..512 {
+                // SAFETY: l2_virt points into the L2 page table via identity-mapped region;
+                // l2_idx is bounded to 0..511.
                 let l2_entry = unsafe { core::ptr::read_volatile(l2_virt.add(l2_idx)) };
                 if l2_entry & 1 == 0 {
                     continue;

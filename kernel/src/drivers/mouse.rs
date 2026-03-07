@@ -189,10 +189,12 @@ mod x86_64_impl {
 
         // Get controller configuration byte
         wait_input();
+        // SAFETY: Reading PS/2 controller configuration via command port.
         unsafe {
             crate::arch::x86_64::outb(0x64, 0x20);
         }
         let config_byte = if wait_output() {
+            // SAFETY: Reading PS/2 data port for configuration byte.
             Some(unsafe { crate::arch::x86_64::inb(0x60) })
         } else {
             None
@@ -203,10 +205,12 @@ mod x86_64_impl {
             config &= !0x20; // Disable aux clock inhibit
 
             wait_input();
+            // SAFETY: Writing PS/2 controller command to set configuration.
             unsafe {
                 crate::arch::x86_64::outb(0x64, 0x60); // Write config
             }
             wait_input();
+            // SAFETY: Writing configuration byte to PS/2 data port.
             unsafe {
                 crate::arch::x86_64::outb(0x60, config);
             }

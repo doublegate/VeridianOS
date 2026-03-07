@@ -527,6 +527,9 @@ impl VirtioNetDriver {
 
         // For RX: point each descriptor at its data buffer and populate avail ring
         if is_rx {
+            // SAFETY: desc_ptr and avail_ptr point into the same leaked, zeroed
+            // allocation used above. The region is large enough for qs descriptors
+            // and the avail ring. No aliasing: this is a second pass for RX init.
             let desc_slice = unsafe { core::slice::from_raw_parts_mut(desc_ptr, qs) };
             let avail_ref = unsafe { &mut *avail_ptr };
             for i in 0..qs {

@@ -312,6 +312,8 @@ pub fn sys_wait(pid: isize, status_ptr: usize, options: usize) -> SyscallResult 
         Ok((child_pid, exit_status)) => {
             // Write exit status to user space if pointer provided
             if status_ptr != 0 {
+                // SAFETY: status_ptr is non-zero; copy_to_user validates it is within
+                // user-space.
                 unsafe {
                     copy_to_user(status_ptr, &exit_status)?;
                 }
@@ -991,6 +993,8 @@ pub fn sys_getenv(
 
     // Read the variable name from user space
     validate_user_buffer(name_ptr, name_len)?;
+    // SAFETY: name_ptr validated by validate_user_buffer above as non-null and in
+    // user-space.
     let name_bytes = unsafe { slice::from_raw_parts(name_ptr as *const u8, name_len) };
     let name = core::str::from_utf8(name_bytes).map_err(|_| SyscallError::InvalidArgument)?;
 
@@ -1013,6 +1017,8 @@ pub fn sys_getenv(
 
         // Write value + NUL to user buffer
         validate_user_buffer(buf_ptr, val_len + 1)?;
+        // SAFETY: buf_ptr validated by validate_user_buffer above as non-null and in
+        // user-space.
         let buf = unsafe { slice::from_raw_parts_mut(buf_ptr as *mut u8, val_len + 1) };
         buf[..val_len].copy_from_slice(value.as_bytes());
         buf[val_len] = 0;

@@ -54,7 +54,7 @@ impl NavigationHistory {
     }
 
     /// Navigate to a new URL, pushing current to back stack
-    pub fn navigate(&mut self, url: &str) {
+    pub(crate) fn navigate(&mut self, url: &str) {
         if !self.current.is_empty() {
             self.back.push(self.current.clone());
             if self.back.len() > self.max_entries {
@@ -66,7 +66,7 @@ impl NavigationHistory {
     }
 
     /// Go back one page, returns the URL to navigate to
-    pub fn go_back(&mut self) -> Option<String> {
+    pub(crate) fn go_back(&mut self) -> Option<String> {
         let prev = self.back.pop()?;
         self.forward.push(self.current.clone());
         self.current = prev.clone();
@@ -74,7 +74,7 @@ impl NavigationHistory {
     }
 
     /// Go forward one page, returns the URL to navigate to
-    pub fn go_forward(&mut self) -> Option<String> {
+    pub(crate) fn go_forward(&mut self) -> Option<String> {
         let next = self.forward.pop()?;
         self.back.push(self.current.clone());
         self.current = next.clone();
@@ -82,27 +82,27 @@ impl NavigationHistory {
     }
 
     /// Whether back navigation is available
-    pub fn can_go_back(&self) -> bool {
+    pub(crate) fn can_go_back(&self) -> bool {
         !self.back.is_empty()
     }
 
     /// Whether forward navigation is available
-    pub fn can_go_forward(&self) -> bool {
+    pub(crate) fn can_go_forward(&self) -> bool {
         !self.forward.is_empty()
     }
 
     /// Current URL
-    pub fn current_url(&self) -> &str {
+    pub(crate) fn current_url(&self) -> &str {
         &self.current
     }
 
     /// Number of entries in back stack
-    pub fn back_count(&self) -> usize {
+    pub(crate) fn back_count(&self) -> usize {
         self.back.len()
     }
 
     /// Number of entries in forward stack
-    pub fn forward_count(&self) -> usize {
+    pub(crate) fn forward_count(&self) -> usize {
         self.forward.len()
     }
 }
@@ -185,7 +185,7 @@ impl Tab {
     }
 
     /// Navigate this tab to a new URL
-    pub fn navigate(&mut self, url: &str) {
+    pub(crate) fn navigate(&mut self, url: &str) {
         self.history.navigate(url);
         self.url = url.to_string();
         self.title = title_from_url(url);
@@ -194,18 +194,18 @@ impl Tab {
     }
 
     /// Mark loading complete
-    pub fn finish_loading(&mut self) {
+    pub(crate) fn finish_loading(&mut self) {
         self.load_state = TabLoadState::Idle;
     }
 
     /// Mark loading failed
-    pub fn fail_loading(&mut self, error: &str) {
+    pub(crate) fn fail_loading(&mut self, error: &str) {
         self.load_state = TabLoadState::Error;
         self.error_message = Some(error.to_string());
     }
 
     /// Set the tab title (from <title> tag)
-    pub fn set_title(&mut self, title: &str) {
+    pub(crate) fn set_title(&mut self, title: &str) {
         self.title = if title.is_empty() {
             title_from_url(&self.url)
         } else {
@@ -214,22 +214,22 @@ impl Tab {
     }
 
     /// Get display title (truncated for tab bar)
-    pub fn display_title(&self, max_len: usize) -> String {
+    pub(crate) fn display_title(&self, max_len: usize) -> String {
         truncate_title(&self.title, max_len)
     }
 
     /// Whether the tab can go back
-    pub fn can_go_back(&self) -> bool {
+    pub(crate) fn can_go_back(&self) -> bool {
         self.history.can_go_back()
     }
 
     /// Whether the tab can go forward
-    pub fn can_go_forward(&self) -> bool {
+    pub(crate) fn can_go_forward(&self) -> bool {
         self.history.can_go_forward()
     }
 
     /// Go back, returns URL if successful
-    pub fn go_back(&mut self) -> Option<String> {
+    pub(crate) fn go_back(&mut self) -> Option<String> {
         let url = self.history.go_back()?;
         self.url = url.clone();
         self.title = title_from_url(&url);
@@ -238,7 +238,7 @@ impl Tab {
     }
 
     /// Go forward, returns URL if successful
-    pub fn go_forward(&mut self) -> Option<String> {
+    pub(crate) fn go_forward(&mut self) -> Option<String> {
         let url = self.history.go_forward()?;
         self.url = url.clone();
         self.title = title_from_url(&url);
@@ -247,7 +247,7 @@ impl Tab {
     }
 
     /// Reload the current page
-    pub fn reload(&mut self) {
+    pub(crate) fn reload(&mut self) {
         self.load_state = TabLoadState::Loading;
         self.error_message = None;
     }
@@ -307,7 +307,7 @@ impl TabBar {
     }
 
     /// Calculate the width for each tab given the number of tabs
-    pub fn compute_tab_width(&self, num_tabs: usize) -> i32 {
+    pub(crate) fn compute_tab_width(&self, num_tabs: usize) -> i32 {
         if num_tabs == 0 {
             return self.max_tab_width;
         }
@@ -318,7 +318,7 @@ impl TabBar {
     }
 
     /// Get the tab at a given x position, given an ordered list of tab IDs
-    pub fn tab_at_x(&self, x: i32, tab_ids: &[TabId], num_tabs: usize) -> Option<TabId> {
+    pub(crate) fn tab_at_x(&self, x: i32, tab_ids: &[TabId], num_tabs: usize) -> Option<TabId> {
         let tw = self.compute_tab_width(num_tabs);
         let local_x = x + self.scroll_offset;
         if local_x < 0 {
@@ -333,7 +333,12 @@ impl TabBar {
     }
 
     /// Check if the click is on the close button of a tab
-    pub fn is_close_button_hit(&self, x: i32, tab_ids: &[TabId], num_tabs: usize) -> Option<TabId> {
+    pub(crate) fn is_close_button_hit(
+        &self,
+        x: i32,
+        tab_ids: &[TabId],
+        num_tabs: usize,
+    ) -> Option<TabId> {
         let tw = self.compute_tab_width(num_tabs);
         let local_x = x + self.scroll_offset;
         if local_x < 0 {
@@ -354,7 +359,7 @@ impl TabBar {
     }
 
     /// Check if click is on the new-tab button
-    pub fn is_new_tab_button_hit(&self, x: i32, num_tabs: usize) -> bool {
+    pub(crate) fn is_new_tab_button_hit(&self, x: i32, num_tabs: usize) -> bool {
         let tw = self.compute_tab_width(num_tabs);
         let tabs_end = (num_tabs as i32) * tw - self.scroll_offset;
         x >= tabs_end && x <= tabs_end + 32
@@ -362,7 +367,7 @@ impl TabBar {
 
     /// Render the tab bar into a pixel buffer (BGRA format)
     /// Returns the rendered line data for the tab bar area
-    pub fn render_tab_bar(&self, tabs: &[&Tab], buf: &mut [u32], buf_width: usize) {
+    pub(crate) fn render_tab_bar(&self, tabs: &[&Tab], buf: &mut [u32], buf_width: usize) {
         let height = self.height as usize;
         let tw = self.compute_tab_width(tabs.len()) as usize;
 
@@ -462,7 +467,7 @@ impl TabBar {
     }
 
     /// Scroll to ensure a tab is visible
-    pub fn ensure_visible(&mut self, tab_index: usize, num_tabs: usize) {
+    pub(crate) fn ensure_visible(&mut self, tab_index: usize, num_tabs: usize) {
         let tw = self.compute_tab_width(num_tabs);
         let tab_start = (tab_index as i32) * tw;
         let tab_end = tab_start + tw;
@@ -546,7 +551,7 @@ impl TabManager {
 
     /// Create a new tab with the given URL.
     /// Returns the TabId, or None if max tabs reached.
-    pub fn new_tab(&mut self, url: &str) -> Option<TabId> {
+    pub(crate) fn new_tab(&mut self, url: &str) -> Option<TabId> {
         if self.tabs.len() >= self.max_tabs {
             return None;
         }
@@ -568,7 +573,7 @@ impl TabManager {
 
     /// Close a tab by ID. Returns true if closed.
     /// If closing the active tab, switches to an adjacent tab.
-    pub fn close_tab(&mut self, id: TabId) -> bool {
+    pub(crate) fn close_tab(&mut self, id: TabId) -> bool {
         // Don't close the last tab - open a blank tab instead
         if self.tabs.len() <= 1 {
             if let Some(tab) = self.tabs.get_mut(&id) {
@@ -626,7 +631,7 @@ impl TabManager {
     }
 
     /// Switch to a tab by ID
-    pub fn switch_tab(&mut self, id: TabId) -> bool {
+    pub(crate) fn switch_tab(&mut self, id: TabId) -> bool {
         if !self.tabs.contains_key(&id) {
             return false;
         }
@@ -654,7 +659,7 @@ impl TabManager {
     }
 
     /// Switch to the next tab (wraps around)
-    pub fn next_tab(&mut self) -> bool {
+    pub(crate) fn next_tab(&mut self) -> bool {
         if self.tab_order.len() <= 1 {
             return false;
         }
@@ -668,7 +673,7 @@ impl TabManager {
     }
 
     /// Switch to the previous tab (wraps around)
-    pub fn prev_tab(&mut self) -> bool {
+    pub(crate) fn prev_tab(&mut self) -> bool {
         if self.tab_order.len() <= 1 {
             return false;
         }
@@ -686,7 +691,7 @@ impl TabManager {
     }
 
     /// Switch to tab at a specific index (0-based)
-    pub fn switch_to_index(&mut self, index: usize) -> bool {
+    pub(crate) fn switch_to_index(&mut self, index: usize) -> bool {
         if let Some(&id) = self.tab_order.get(index) {
             self.switch_tab(id)
         } else {
@@ -695,7 +700,7 @@ impl TabManager {
     }
 
     /// Move a tab to a new position in the tab order
-    pub fn move_tab(&mut self, id: TabId, new_index: usize) -> bool {
+    pub(crate) fn move_tab(&mut self, id: TabId, new_index: usize) -> bool {
         let current_idx = match self.tab_order.iter().position(|&t| t == id) {
             Some(idx) => idx,
             None => return false,
@@ -707,34 +712,34 @@ impl TabManager {
     }
 
     /// Reopen the most recently closed tab
-    pub fn reopen_closed_tab(&mut self) -> Option<TabId> {
+    pub(crate) fn reopen_closed_tab(&mut self) -> Option<TabId> {
         let url = self.recently_closed.pop()?;
         self.new_tab(&url)
     }
 
     /// Get the active tab
-    pub fn active_tab(&self) -> Option<&Tab> {
+    pub(crate) fn active_tab(&self) -> Option<&Tab> {
         self.active_tab.and_then(|id| self.tabs.get(&id))
     }
 
     /// Get the active tab mutably
-    pub fn active_tab_mut(&mut self) -> Option<&mut Tab> {
+    pub(crate) fn active_tab_mut(&mut self) -> Option<&mut Tab> {
         let id = self.active_tab?;
         self.tabs.get_mut(&id)
     }
 
     /// Get a tab by ID
-    pub fn get_tab(&self, id: TabId) -> Option<&Tab> {
+    pub(crate) fn get_tab(&self, id: TabId) -> Option<&Tab> {
         self.tabs.get(&id)
     }
 
     /// Get a tab mutably by ID
-    pub fn get_tab_mut(&mut self, id: TabId) -> Option<&mut Tab> {
+    pub(crate) fn get_tab_mut(&mut self, id: TabId) -> Option<&mut Tab> {
         self.tabs.get_mut(&id)
     }
 
     /// Get all tabs in display order
-    pub fn tabs_in_order(&self) -> Vec<&Tab> {
+    pub(crate) fn tabs_in_order(&self) -> Vec<&Tab> {
         self.tab_order
             .iter()
             .filter_map(|id| self.tabs.get(id))
@@ -742,22 +747,22 @@ impl TabManager {
     }
 
     /// Number of open tabs
-    pub fn tab_count(&self) -> usize {
+    pub(crate) fn tab_count(&self) -> usize {
         self.tabs.len()
     }
 
     /// Active tab ID
-    pub fn active_tab_id(&self) -> Option<TabId> {
+    pub(crate) fn active_tab_id(&self) -> Option<TabId> {
         self.active_tab
     }
 
     /// Ordered tab IDs
-    pub fn tab_order(&self) -> &[TabId] {
+    pub(crate) fn tab_order(&self) -> &[TabId] {
         &self.tab_order
     }
 
     /// Process a keyboard shortcut, returning the action to take
-    pub fn decode_shortcut(ctrl: bool, shift: bool, key: u8) -> TabAction {
+    pub(crate) fn decode_shortcut(ctrl: bool, shift: bool, key: u8) -> TabAction {
         if !ctrl {
             return TabAction::None;
         }
@@ -775,7 +780,7 @@ impl TabManager {
     }
 
     /// Execute a tab action
-    pub fn execute_action(&mut self, action: TabAction) -> bool {
+    pub(crate) fn execute_action(&mut self, action: TabAction) -> bool {
         match action {
             TabAction::NewTab => self.new_tab("").is_some(),
             TabAction::CloseTab => {
@@ -794,18 +799,18 @@ impl TabManager {
     }
 
     /// Update tick counter
-    pub fn tick(&mut self) {
+    pub(crate) fn tick(&mut self) {
         self.current_tick += 1;
     }
 
     /// Set the tab bar width
-    pub fn set_viewport_width(&mut self, width: i32) {
+    pub(crate) fn set_viewport_width(&mut self, width: i32) {
         self.tab_bar.visible_width = width;
     }
 
     /// Handle tab bar click at position (x, y)
     /// Returns an action to take
-    pub fn handle_tab_bar_click(&mut self, x: i32, _y: i32) -> TabAction {
+    pub(crate) fn handle_tab_bar_click(&mut self, x: i32, _y: i32) -> TabAction {
         let num_tabs = self.tab_order.len();
         let ids: Vec<TabId> = self.tab_order.clone();
 

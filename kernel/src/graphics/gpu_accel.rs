@@ -142,14 +142,14 @@ impl VirglContext {
     }
 
     /// Attach a resource to this context
-    pub fn attach_resource(&mut self, resource_id: u32) {
+    pub(crate) fn attach_resource(&mut self, resource_id: u32) {
         if !self.resources.contains(&resource_id) {
             self.resources.push(resource_id);
         }
     }
 
     /// Detach a resource from this context
-    pub fn detach_resource(&mut self, resource_id: u32) {
+    pub(crate) fn detach_resource(&mut self, resource_id: u32) {
         self.resources.retain(|&r| r != resource_id);
     }
 }
@@ -220,11 +220,11 @@ impl VirglFence {
         }
     }
 
-    pub fn signal(&self) {
+    pub(crate) fn signal(&self) {
         self.signaled.store(true, Ordering::Release);
     }
 
-    pub fn is_signaled(&self) -> bool {
+    pub(crate) fn is_signaled(&self) -> bool {
         self.signaled.load(Ordering::Acquire)
     }
 }
@@ -254,7 +254,7 @@ impl VirglDriver {
     }
 
     /// Create a new rendering context
-    pub fn create_context(&mut self, name: &[u8]) -> u32 {
+    pub(crate) fn create_context(&mut self, name: &[u8]) -> u32 {
         let ctx_id = self.next_ctx_id;
         self.next_ctx_id += 1;
         let ctx = VirglContext::new(ctx_id, name);
@@ -267,7 +267,7 @@ impl VirglDriver {
     }
 
     /// Destroy a rendering context
-    pub fn destroy_context(&mut self, ctx_id: u32) -> bool {
+    pub(crate) fn destroy_context(&mut self, ctx_id: u32) -> bool {
         if let Some(pos) = self.contexts.iter().position(|c| c.ctx_id == ctx_id) {
             self.contexts[pos].active = false;
             self.command_queue.push(VirglCommand::CtxDestroy { ctx_id });
@@ -280,7 +280,7 @@ impl VirglDriver {
 
     /// Create a 3D resource
     #[allow(clippy::too_many_arguments)]
-    pub fn create_resource_3d(
+    pub(crate) fn create_resource_3d(
         &mut self,
         resource_type: Virgl3dResourceType,
         format: VirglFormat,
@@ -327,7 +327,7 @@ impl VirglDriver {
 
     /// Transfer data to/from a 3D resource
     #[allow(clippy::too_many_arguments)]
-    pub fn transfer_3d(
+    pub(crate) fn transfer_3d(
         &mut self,
         resource_id: u32,
         level: u32,
@@ -362,7 +362,7 @@ impl VirglDriver {
     }
 
     /// Submit a command buffer for a given context
-    pub fn submit_command_buffer(&mut self, ctx_id: u32, data_len: u32) -> bool {
+    pub(crate) fn submit_command_buffer(&mut self, ctx_id: u32, data_len: u32) -> bool {
         if !self.contexts.iter().any(|c| c.ctx_id == ctx_id && c.active) {
             return false;
         }
@@ -372,7 +372,7 @@ impl VirglDriver {
     }
 
     /// Create a fence for synchronization
-    pub fn create_fence(&mut self, ctx_id: u32) -> u64 {
+    pub(crate) fn create_fence(&mut self, ctx_id: u32) -> u64 {
         let fence_id = self.next_fence_id;
         self.next_fence_id += 1;
 
@@ -383,7 +383,7 @@ impl VirglDriver {
     }
 
     /// Check if a fence has been signaled
-    pub fn is_fence_signaled(&self, fence_id: u64) -> Option<bool> {
+    pub(crate) fn is_fence_signaled(&self, fence_id: u64) -> Option<bool> {
         self.fences
             .iter()
             .find(|f| f.fence_id == fence_id)
@@ -391,7 +391,7 @@ impl VirglDriver {
     }
 
     /// Signal a fence (called by interrupt handler or poll)
-    pub fn signal_fence(&self, fence_id: u64) -> bool {
+    pub(crate) fn signal_fence(&self, fence_id: u64) -> bool {
         if let Some(fence) = self.fences.iter().find(|f| f.fence_id == fence_id) {
             fence.signal();
             true
@@ -401,19 +401,19 @@ impl VirglDriver {
     }
 
     /// Flush all pending commands (returns count of commands submitted)
-    pub fn flush(&mut self) -> usize {
+    pub(crate) fn flush(&mut self) -> usize {
         let count = self.command_queue.len();
         self.command_queue.clear();
         count
     }
 
     /// Find a resource by ID
-    pub fn find_resource(&self, resource_id: u32) -> Option<&Virgl3dResource> {
+    pub(crate) fn find_resource(&self, resource_id: u32) -> Option<&Virgl3dResource> {
         self.resources.iter().find(|r| r.resource_id == resource_id)
     }
 
     /// Destroy a resource
-    pub fn destroy_resource(&mut self, resource_id: u32) -> bool {
+    pub(crate) fn destroy_resource(&mut self, resource_id: u32) -> bool {
         // Remove from all contexts
         for ctx in &mut self.contexts {
             ctx.detach_resource(resource_id);
@@ -513,7 +513,7 @@ impl Vec4 {
     }
 
     /// Create from integer values (converts to 16.16 FP)
-    pub fn from_ints(x: i32, y: i32, z: i32, w: i32) -> Self {
+    pub(crate) fn from_ints(x: i32, y: i32, z: i32, w: i32) -> Self {
         Self {
             x: fp_from_int(x),
             y: fp_from_int(y),
@@ -523,7 +523,7 @@ impl Vec4 {
     }
 
     /// Linear interpolation between two Vec4 values
-    pub fn lerp(a: &Vec4, b: &Vec4, t: i32) -> Vec4 {
+    pub(crate) fn lerp(a: &Vec4, b: &Vec4, t: i32) -> Vec4 {
         Vec4 {
             x: fp_lerp(a.x, b.x, t),
             y: fp_lerp(a.y, b.y, t),
@@ -565,7 +565,7 @@ impl SoftTexture {
     }
 
     /// Sample the texture at (u, v) in 16.16 fixed-point [0, FP_ONE]
-    pub fn sample(&self, u: i32, v: i32) -> u32 {
+    pub(crate) fn sample(&self, u: i32, v: i32) -> u32 {
         if self.width == 0 || self.height == 0 {
             return 0;
         }
@@ -787,14 +787,14 @@ impl SoftwareRasterizer {
     }
 
     /// Clear color buffer
-    pub fn clear_color_buffer(&mut self) {
+    pub(crate) fn clear_color_buffer(&mut self) {
         for px in &mut self.color_buffer {
             *px = self.clear_color;
         }
     }
 
     /// Clear depth buffer
-    pub fn clear_depth_buffer(&mut self) {
+    pub(crate) fn clear_depth_buffer(&mut self) {
         for d in &mut self.depth_buffer {
             *d = self.clear_depth;
         }
@@ -954,7 +954,7 @@ impl SoftwareRasterizer {
     }
 
     /// Rasterize a single triangle using edge functions (fixed-point)
-    pub fn rasterize_triangle(&mut self, v0: &Vertex, v1: &Vertex, v2: &Vertex) {
+    pub(crate) fn rasterize_triangle(&mut self, v0: &Vertex, v1: &Vertex, v2: &Vertex) {
         // Transform vertices through MVP
         let pos0 = self.transform_vertex(&v0.position);
         let pos1 = self.transform_vertex(&v1.position);
@@ -1088,7 +1088,7 @@ impl SoftwareRasterizer {
     }
 
     /// Draw an array of triangles
-    pub fn draw_triangles(&mut self, vertices: &[Vertex]) {
+    pub(crate) fn draw_triangles(&mut self, vertices: &[Vertex]) {
         let count = vertices.len() / 3;
         let mut i = 0;
         while i < count {
@@ -1099,7 +1099,7 @@ impl SoftwareRasterizer {
     }
 
     /// Draw indexed triangles
-    pub fn draw_indexed_triangles(&mut self, vertices: &[Vertex], indices: &[u32]) {
+    pub(crate) fn draw_indexed_triangles(&mut self, vertices: &[Vertex], indices: &[u32]) {
         let count = indices.len() / 3;
         let mut i = 0;
         while i < count {
@@ -1178,21 +1178,21 @@ impl GemBufferObject {
         }
     }
 
-    pub fn set_name(&mut self, name: &[u8]) {
+    pub(crate) fn set_name(&mut self, name: &[u8]) {
         let len = name.len().min(32);
         self.name[..len].copy_from_slice(&name[..len]);
         self.name_len = len;
     }
 
-    pub fn ref_count(&self) -> u32 {
+    pub(crate) fn ref_count(&self) -> u32 {
         self.ref_count.load(Ordering::Acquire)
     }
 
-    pub fn add_ref(&self) -> u32 {
+    pub(crate) fn add_ref(&self) -> u32 {
         self.ref_count.fetch_add(1, Ordering::AcqRel) + 1
     }
 
-    pub fn release(&self) -> u32 {
+    pub(crate) fn release(&self) -> u32 {
         self.ref_count.fetch_sub(1, Ordering::AcqRel) - 1
     }
 }
@@ -1218,7 +1218,7 @@ impl GemManager {
     }
 
     /// Create a new buffer object
-    pub fn create_buffer(&mut self, size: usize) -> Option<u32> {
+    pub(crate) fn create_buffer(&mut self, size: usize) -> Option<u32> {
         if size == 0 || self.total_allocated + size > self.max_allocation {
             return None;
         }
@@ -1232,7 +1232,7 @@ impl GemManager {
     }
 
     /// Destroy a buffer object (only if ref_count reaches 0)
-    pub fn destroy_buffer(&mut self, handle: u32) -> bool {
+    pub(crate) fn destroy_buffer(&mut self, handle: u32) -> bool {
         if let Some(pos) = self.buffers.iter().position(|b| b.handle == handle) {
             let remaining = self.buffers[pos].release();
             if remaining == 0 {
@@ -1245,17 +1245,17 @@ impl GemManager {
     }
 
     /// Find a buffer by handle
-    pub fn find_buffer(&self, handle: u32) -> Option<&GemBufferObject> {
+    pub(crate) fn find_buffer(&self, handle: u32) -> Option<&GemBufferObject> {
         self.buffers.iter().find(|b| b.handle == handle)
     }
 
     /// Find a buffer by handle (mutable)
-    pub fn find_buffer_mut(&mut self, handle: u32) -> Option<&mut GemBufferObject> {
+    pub(crate) fn find_buffer_mut(&mut self, handle: u32) -> Option<&mut GemBufferObject> {
         self.buffers.iter_mut().find(|b| b.handle == handle)
     }
 
     /// Pin a buffer (prevent eviction)
-    pub fn pin_buffer(&mut self, handle: u32) -> bool {
+    pub(crate) fn pin_buffer(&mut self, handle: u32) -> bool {
         if let Some(bo) = self.find_buffer_mut(handle) {
             bo.pinned = true;
             true
@@ -1265,7 +1265,7 @@ impl GemManager {
     }
 
     /// Unpin a buffer (allow eviction)
-    pub fn unpin_buffer(&mut self, handle: u32) -> bool {
+    pub(crate) fn unpin_buffer(&mut self, handle: u32) -> bool {
         if let Some(bo) = self.find_buffer_mut(handle) {
             bo.pinned = false;
             true
@@ -1275,7 +1275,7 @@ impl GemManager {
     }
 
     /// Move buffer to a different memory domain
-    pub fn set_domain(&mut self, handle: u32, domain: MemoryDomain) -> bool {
+    pub(crate) fn set_domain(&mut self, handle: u32, domain: MemoryDomain) -> bool {
         if let Some(bo) = self.find_buffer_mut(handle) {
             bo.domain = domain;
             true
@@ -1285,7 +1285,7 @@ impl GemManager {
     }
 
     /// Set cache coherency mode for a buffer
-    pub fn set_cache_mode(&mut self, handle: u32, mode: CacheMode) -> bool {
+    pub(crate) fn set_cache_mode(&mut self, handle: u32, mode: CacheMode) -> bool {
         if let Some(bo) = self.find_buffer_mut(handle) {
             bo.cache_mode = mode;
             true
@@ -1295,7 +1295,7 @@ impl GemManager {
     }
 
     /// Add a reference to a buffer
-    pub fn add_ref(&self, handle: u32) -> bool {
+    pub(crate) fn add_ref(&self, handle: u32) -> bool {
         if let Some(bo) = self.buffers.iter().find(|b| b.handle == handle) {
             bo.add_ref();
             true
@@ -1305,7 +1305,7 @@ impl GemManager {
     }
 
     /// Get number of buffers
-    pub fn buffer_count(&self) -> usize {
+    pub(crate) fn buffer_count(&self) -> usize {
         self.buffers.len()
     }
 }
@@ -1370,7 +1370,7 @@ pub struct DisplayMode {
 
 impl DisplayMode {
     /// Common 1920x1080 @ 60 Hz mode
-    pub fn mode_1080p60() -> Self {
+    pub(crate) fn mode_1080p60() -> Self {
         Self {
             hdisplay: 1920,
             vdisplay: 1080,
@@ -1386,7 +1386,7 @@ impl DisplayMode {
     }
 
     /// Common 1280x720 @ 60 Hz mode
-    pub fn mode_720p60() -> Self {
+    pub(crate) fn mode_720p60() -> Self {
         Self {
             hdisplay: 1280,
             vdisplay: 720,
@@ -1402,7 +1402,7 @@ impl DisplayMode {
     }
 
     /// Common 1280x800 @ 60 Hz mode (VeridianOS default)
-    pub fn mode_wxga60() -> Self {
+    pub(crate) fn mode_wxga60() -> Self {
         Self {
             hdisplay: 1280,
             vdisplay: 800,
@@ -1418,7 +1418,7 @@ impl DisplayMode {
     }
 
     /// Validate mode timing parameters
-    pub fn validate(&self) -> bool {
+    pub(crate) fn validate(&self) -> bool {
         // Basic sanity checks
         if self.hdisplay == 0 || self.vdisplay == 0 {
             return false;
@@ -1450,7 +1450,7 @@ impl DisplayMode {
     }
 
     /// Calculate actual refresh rate in millihertz from timing parameters
-    pub fn calculated_refresh_mhz(&self) -> u32 {
+    pub(crate) fn calculated_refresh_mhz(&self) -> u32 {
         if self.htotal == 0 || self.vtotal == 0 {
             return 0;
         }
@@ -1498,7 +1498,7 @@ impl DrmFramebuffer {
     }
 
     /// Calculate total size in bytes
-    pub fn size_bytes(&self) -> usize {
+    pub(crate) fn size_bytes(&self) -> usize {
         (self.pitch as usize)
             .checked_mul(self.height as usize)
             .unwrap_or(0)
@@ -1619,7 +1619,7 @@ impl KmsManager {
     }
 
     /// Add a CRTC
-    pub fn add_crtc(&mut self) -> u32 {
+    pub(crate) fn add_crtc(&mut self) -> u32 {
         let id = self.next_crtc_id;
         self.next_crtc_id += 1;
         self.crtcs.push(DrmCrtc::new(id));
@@ -1627,7 +1627,7 @@ impl KmsManager {
     }
 
     /// Add a connector
-    pub fn add_connector(&mut self, connector_type: ConnectorType) -> u32 {
+    pub(crate) fn add_connector(&mut self, connector_type: ConnectorType) -> u32 {
         let id = self.next_connector_id;
         self.next_connector_id += 1;
         self.connectors.push(DrmConnector::new(id, connector_type));
@@ -1635,7 +1635,7 @@ impl KmsManager {
     }
 
     /// Add an encoder
-    pub fn add_encoder(&mut self, encoder_type: EncoderType, possible_crtcs: u32) -> u32 {
+    pub(crate) fn add_encoder(&mut self, encoder_type: EncoderType, possible_crtcs: u32) -> u32 {
         let id = self.next_encoder_id;
         self.next_encoder_id += 1;
         self.encoders.push(DrmEncoder {
@@ -1648,7 +1648,7 @@ impl KmsManager {
     }
 
     /// Create a framebuffer object
-    pub fn create_framebuffer(
+    pub(crate) fn create_framebuffer(
         &mut self,
         width: u32,
         height: u32,
@@ -1663,7 +1663,7 @@ impl KmsManager {
     }
 
     /// Destroy a framebuffer object
-    pub fn destroy_framebuffer(&mut self, fb_id: u32) -> bool {
+    pub(crate) fn destroy_framebuffer(&mut self, fb_id: u32) -> bool {
         if let Some(pos) = self.framebuffers.iter().position(|f| f.fb_id == fb_id) {
             self.framebuffers.remove(pos);
             true
@@ -1673,7 +1673,7 @@ impl KmsManager {
     }
 
     /// Bind an encoder to a CRTC
-    pub fn bind_encoder(&mut self, encoder_id: u32, crtc_id: u32) -> bool {
+    pub(crate) fn bind_encoder(&mut self, encoder_id: u32, crtc_id: u32) -> bool {
         // Check CRTC exists
         if !self.crtcs.iter().any(|c| c.crtc_id == crtc_id) {
             return false;
@@ -1700,7 +1700,7 @@ impl KmsManager {
     }
 
     /// Connect a connector to an encoder
-    pub fn connect_encoder(&mut self, connector_id: u32, encoder_id: u32) -> bool {
+    pub(crate) fn connect_encoder(&mut self, connector_id: u32, encoder_id: u32) -> bool {
         if !self.encoders.iter().any(|e| e.encoder_id == encoder_id) {
             return false;
         }
@@ -1717,7 +1717,7 @@ impl KmsManager {
     }
 
     /// Set connector status and available modes
-    pub fn set_connector_status(
+    pub(crate) fn set_connector_status(
         &mut self,
         connector_id: u32,
         status: ConnectorStatus,
@@ -1737,7 +1737,7 @@ impl KmsManager {
     }
 
     /// Perform an atomic mode-setting commit
-    pub fn atomic_commit(&mut self, commit: &AtomicCommit) -> bool {
+    pub(crate) fn atomic_commit(&mut self, commit: &AtomicCommit) -> bool {
         // Validate mode
         if !commit.mode.validate() {
             return false;
@@ -1773,12 +1773,12 @@ impl KmsManager {
     }
 
     /// Find a framebuffer by ID
-    pub fn find_framebuffer(&self, fb_id: u32) -> Option<&DrmFramebuffer> {
+    pub(crate) fn find_framebuffer(&self, fb_id: u32) -> Option<&DrmFramebuffer> {
         self.framebuffers.iter().find(|f| f.fb_id == fb_id)
     }
 
     /// Find a CRTC by ID
-    pub fn find_crtc(&self, crtc_id: u32) -> Option<&DrmCrtc> {
+    pub(crate) fn find_crtc(&self, crtc_id: u32) -> Option<&DrmCrtc> {
         self.crtcs.iter().find(|c| c.crtc_id == crtc_id)
     }
 }
@@ -1858,7 +1858,7 @@ impl PageFlipManager {
     }
 
     /// Register a CRTC for page flipping
-    pub fn register_crtc(&mut self, crtc_id: u32, initial_fb: u32) {
+    pub(crate) fn register_crtc(&mut self, crtc_id: u32, initial_fb: u32) {
         // Avoid duplicates
         if self.front_buffers.iter().any(|(id, _)| *id == crtc_id) {
             return;
@@ -1871,7 +1871,7 @@ impl PageFlipManager {
     }
 
     /// Request a page flip (swap back buffer to front on next vblank)
-    pub fn request_flip(&mut self, request: PageFlipRequest) -> bool {
+    pub(crate) fn request_flip(&mut self, request: PageFlipRequest) -> bool {
         // Check that CRTC is registered
         let state_idx = self
             .flip_states
@@ -1901,7 +1901,7 @@ impl PageFlipManager {
     }
 
     /// Process a vblank interrupt for a CRTC (called from interrupt handler)
-    pub fn handle_vblank(&mut self, crtc_id: u32, timestamp_ns: u64) {
+    pub(crate) fn handle_vblank(&mut self, crtc_id: u32, timestamp_ns: u64) {
         // Increment vblank counter
         if let Some((_, counter)) = self.vblank_counters.iter().find(|(id, _)| *id == crtc_id) {
             counter.fetch_add(1, Ordering::Relaxed);
@@ -1962,7 +1962,7 @@ impl PageFlipManager {
     }
 
     /// Get the current front buffer for a CRTC
-    pub fn front_buffer(&self, crtc_id: u32) -> Option<u32> {
+    pub(crate) fn front_buffer(&self, crtc_id: u32) -> Option<u32> {
         self.front_buffers
             .iter()
             .find(|(id, _)| *id == crtc_id)
@@ -1970,7 +1970,7 @@ impl PageFlipManager {
     }
 
     /// Get the current vblank count for a CRTC
-    pub fn vblank_count(&self, crtc_id: u32) -> Option<u64> {
+    pub(crate) fn vblank_count(&self, crtc_id: u32) -> Option<u64> {
         self.vblank_counters
             .iter()
             .find(|(id, _)| *id == crtc_id)
@@ -1978,7 +1978,7 @@ impl PageFlipManager {
     }
 
     /// Get the last vblank timestamp for a CRTC
-    pub fn vblank_timestamp(&self, crtc_id: u32) -> Option<u64> {
+    pub(crate) fn vblank_timestamp(&self, crtc_id: u32) -> Option<u64> {
         self.vblank_timestamps
             .iter()
             .find(|(id, _)| *id == crtc_id)
@@ -1986,12 +1986,12 @@ impl PageFlipManager {
     }
 
     /// Drain all pending vblank events
-    pub fn drain_events(&mut self) -> Vec<VblankEvent> {
+    pub(crate) fn drain_events(&mut self) -> Vec<VblankEvent> {
         core::mem::take(&mut self.vblank_events)
     }
 
     /// Check if a flip is pending for a given CRTC
-    pub fn is_flip_pending(&self, crtc_id: u32) -> bool {
+    pub(crate) fn is_flip_pending(&self, crtc_id: u32) -> bool {
         self.flip_states
             .iter()
             .find(|(id, _)| *id == crtc_id)
@@ -2023,18 +2023,18 @@ pub enum CursorFormat {
 }
 
 impl CursorFormat {
-    pub fn width(&self) -> u32 {
+    pub(crate) fn width(&self) -> u32 {
         match self {
             CursorFormat::Argb32x32 => 32,
             CursorFormat::Argb64x64 => 64,
         }
     }
 
-    pub fn height(&self) -> u32 {
+    pub(crate) fn height(&self) -> u32 {
         self.width() // Square cursors
     }
 
-    pub fn pixel_count(&self) -> usize {
+    pub(crate) fn pixel_count(&self) -> usize {
         let w = self.width() as usize;
         w.checked_mul(w).unwrap_or(0)
     }
@@ -2076,7 +2076,7 @@ impl HardwareCursor {
     }
 
     /// Set cursor image data (ARGB8888 pixels)
-    pub fn set_image(&mut self, pixels: &[u32]) -> bool {
+    pub(crate) fn set_image(&mut self, pixels: &[u32]) -> bool {
         let expected = self.format.pixel_count();
         if pixels.len() != expected {
             return false;
@@ -2087,27 +2087,27 @@ impl HardwareCursor {
     }
 
     /// Set cursor position on screen
-    pub fn set_position(&mut self, x: i32, y: i32) {
+    pub(crate) fn set_position(&mut self, x: i32, y: i32) {
         self.x = x;
         self.y = y;
         self.dirty = true;
     }
 
     /// Set hotspot offset
-    pub fn set_hotspot(&mut self, x: u32, y: u32) {
+    pub(crate) fn set_hotspot(&mut self, x: u32, y: u32) {
         self.hotspot_x = x.min(self.format.width().saturating_sub(1));
         self.hotspot_y = y.min(self.format.height().saturating_sub(1));
         self.dirty = true;
     }
 
     /// Enable cursor display
-    pub fn enable(&mut self) {
+    pub(crate) fn enable(&mut self) {
         self.enabled = true;
         self.dirty = true;
     }
 
     /// Disable cursor display
-    pub fn disable(&mut self) {
+    pub(crate) fn disable(&mut self) {
         self.enabled = false;
         self.dirty = true;
     }
@@ -2116,7 +2116,7 @@ impl HardwareCursor {
     ///
     /// Blends cursor ARGB pixels onto the target buffer at the cursor's
     /// position. Uses pre-multiplied alpha blending with integer math.
-    pub fn composite_onto(&self, target: &mut [u32], target_width: u32, target_height: u32) {
+    pub(crate) fn composite_onto(&self, target: &mut [u32], target_width: u32, target_height: u32) {
         if !self.enabled {
             return;
         }
@@ -2173,7 +2173,7 @@ impl HardwareCursor {
     }
 
     /// Generate a default arrow cursor image (simple pointer)
-    pub fn load_default_arrow(&mut self) {
+    pub(crate) fn load_default_arrow(&mut self) {
         // Simple 16x16 arrow pattern, scaled to format size
         let w = self.format.width() as usize;
         let _h = self.format.height() as usize;

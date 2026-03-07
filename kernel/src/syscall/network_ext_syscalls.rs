@@ -25,6 +25,8 @@ pub(super) fn sys_net_sendto(
         super::validate_user_buffer(addr_ptr, addr_len)?;
     }
 
+    // SAFETY: buf_ptr validated by validate_user_buffer above as non-null and
+    // within user-space.
     let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, buf_len) };
 
     let dest = if addr_ptr != 0 {
@@ -51,6 +53,8 @@ pub(super) fn sys_net_recvfrom(
 ) -> SyscallResult {
     super::validate_user_buffer(buf_ptr, buf_len)?;
 
+    // SAFETY: buf_ptr validated by validate_user_buffer above as non-null and
+    // within user-space.
     let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, buf_len) };
 
     let (n, src_addr) = crate::net::socket::recvfrom(fd, buf).map_err(|_| SyscallError::IoError)?;
@@ -71,6 +75,8 @@ pub(super) fn sys_net_getsockname(fd: usize, addr_ptr: usize, len_ptr: usize) ->
     write_sockaddr(addr_ptr, &addr)?;
 
     // Write actual address length
+    // SAFETY: len_ptr validated by validate_user_buffer above as non-null and
+    // within user-space.
     unsafe {
         *(len_ptr as *mut u32) = 16;
     }
@@ -86,6 +92,8 @@ pub(super) fn sys_net_getpeername(fd: usize, addr_ptr: usize, len_ptr: usize) ->
     let addr = crate::net::socket::getpeername(fd).map_err(|_| SyscallError::BadFileDescriptor)?;
     write_sockaddr(addr_ptr, &addr)?;
 
+    // SAFETY: len_ptr validated by validate_user_buffer above as non-null and
+    // within user-space.
     unsafe {
         *(len_ptr as *mut u32) = 16;
     }
@@ -128,12 +136,15 @@ fn parse_sockaddr(
     _addr_len: usize,
 ) -> Result<crate::net::SocketAddr, SyscallError> {
     // struct sockaddr_in { u16 family, u16 port_be, u32 addr_be, u8 zero[8] }
+    // SAFETY: addr_ptr was validated by the caller via validate_user_buffer.
     let family = unsafe { *(addr_ptr as *const u16) };
     if family != 2 {
         // AF_INET = 2
         return Err(SyscallError::InvalidArgument);
     }
+    // SAFETY: addr_ptr + 2 is within the validated sockaddr buffer.
     let port_be = unsafe { *((addr_ptr + 2) as *const u16) };
+    // SAFETY: addr_ptr + 4 is within the validated sockaddr buffer.
     let addr_be = unsafe { *((addr_ptr + 4) as *const u32) };
 
     let port = u16::from_be(port_be);
@@ -153,6 +164,8 @@ fn write_sockaddr(addr_ptr: usize, addr: &crate::net::SocketAddr) -> Result<(), 
     };
 
     // struct sockaddr_in: family(2) + port_be(2) + addr_be(4) + zero(8)
+    // SAFETY: addr_ptr was validated by the caller via
+    // validate_user_buffer(addr_ptr, 16).
     unsafe {
         *(addr_ptr as *mut u16) = 2; // AF_INET
         *((addr_ptr + 2) as *mut u16) = addr.port.to_be();

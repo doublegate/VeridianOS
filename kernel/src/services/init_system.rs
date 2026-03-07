@@ -454,6 +454,8 @@ impl InitSystem {
         #[cfg(target_arch = "x86_64")]
         {
             // Pulse the keyboard controller reset line (port 0xFE to 0x64)
+            // SAFETY: Writing 0xFE to keyboard controller port 0x64 triggers a system
+            // reset.
             unsafe {
                 use x86_64::instructions::port::Port;
                 let mut port: Port<u8> = Port::new(0x64);
@@ -464,6 +466,7 @@ impl InitSystem {
         #[cfg(target_arch = "aarch64")]
         {
             // PSCI SYSTEM_RESET (function ID 0x84000009)
+            // SAFETY: Invoking PSCI SYSTEM_RESET via HVC; does not return on success.
             unsafe {
                 core::arch::asm!("ldr x0, =0x84000009", "hvc #0", options(nomem, nostack));
             }
@@ -472,6 +475,8 @@ impl InitSystem {
         #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
         {
             // SBI system reset (SRST extension, function 0)
+            // SAFETY: Invoking SBI SRST ecall to reset the system; does not return on
+            // success.
             unsafe {
                 core::arch::asm!(
                     "li a7, 0x53525354", // SRST extension ID
@@ -843,11 +848,13 @@ pub fn run_init() -> ! {
             x86_64::instructions::hlt();
 
             #[cfg(target_arch = "aarch64")]
+            // SAFETY: WFI halts the core until the next interrupt; no memory or state side effects.
             unsafe {
                 core::arch::asm!("wfi", options(nomem, nostack));
             }
 
             #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+            // SAFETY: WFI halts the core until the next interrupt; no memory or state side effects.
             unsafe {
                 core::arch::asm!("wfi", options(nomem, nostack));
             }

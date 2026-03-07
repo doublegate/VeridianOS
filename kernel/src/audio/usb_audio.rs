@@ -179,7 +179,7 @@ pub enum IsoSyncType {
 
 impl IsoSyncType {
     /// Parse sync type from endpoint bmAttributes bits 2-3
-    pub fn from_attributes(attr: u8) -> Self {
+    pub(crate) fn from_attributes(attr: u8) -> Self {
         match attr & 0x0C {
             UAC_EP_SYNC_ASYNC => IsoSyncType::Asynchronous,
             UAC_EP_SYNC_ADAPTIVE => IsoSyncType::Adaptive,
@@ -189,7 +189,7 @@ impl IsoSyncType {
     }
 
     /// Convert to endpoint bmAttributes bits
-    pub fn to_attributes(self) -> u8 {
+    pub(crate) fn to_attributes(self) -> u8 {
         match self {
             IsoSyncType::None => UAC_EP_SYNC_NONE,
             IsoSyncType::Asynchronous => UAC_EP_SYNC_ASYNC,
@@ -250,14 +250,14 @@ pub struct FeatureUnit {
 
 impl FeatureUnit {
     /// Check if mute control is available for a channel (0 = master)
-    pub fn has_mute(&self, channel: usize) -> bool {
+    pub(crate) fn has_mute(&self, channel: usize) -> bool {
         self.controls
             .get(channel)
             .is_some_and(|c| c & (1 << 0) != 0)
     }
 
     /// Check if volume control is available for a channel (0 = master)
-    pub fn has_volume(&self, channel: usize) -> bool {
+    pub(crate) fn has_volume(&self, channel: usize) -> bool {
         self.controls
             .get(channel)
             .is_some_and(|c| c & (1 << 1) != 0)
@@ -290,12 +290,12 @@ pub struct ClockSource {
 
 impl ClockSource {
     /// Check if clock is external
-    pub fn is_external(&self) -> bool {
+    pub(crate) fn is_external(&self) -> bool {
         self.attributes & 0x01 != 0
     }
 
     /// Check if clock is synced to SOF
-    pub fn is_sof_synced(&self) -> bool {
+    pub(crate) fn is_sof_synced(&self) -> bool {
         self.attributes & 0x02 != 0
     }
 }
@@ -317,7 +317,7 @@ pub enum AudioUnit {
 
 impl AudioUnit {
     /// Get the unit/terminal ID
-    pub fn id(&self) -> u8 {
+    pub(crate) fn id(&self) -> u8 {
         match self {
             AudioUnit::InputTerminal(t) => t.terminal_id,
             AudioUnit::OutputTerminal(t) => t.terminal_id,
@@ -343,7 +343,7 @@ pub struct SampleRateRange {
 
 impl SampleRateRange {
     /// Create a discrete (single-value) sample rate
-    pub fn discrete(rate: u32) -> Self {
+    pub(crate) fn discrete(rate: u32) -> Self {
         Self {
             min: rate,
             max: rate,
@@ -351,17 +351,17 @@ impl SampleRateRange {
     }
 
     /// Create a continuous range
-    pub fn range(min: u32, max: u32) -> Self {
+    pub(crate) fn range(min: u32, max: u32) -> Self {
         Self { min, max }
     }
 
     /// Check if a given rate falls within this range
-    pub fn contains(&self, rate: u32) -> bool {
+    pub(crate) fn contains(&self, rate: u32) -> bool {
         rate >= self.min && rate <= self.max
     }
 
     /// Check if this is a discrete (single-value) rate
-    pub fn is_discrete(&self) -> bool {
+    pub(crate) fn is_discrete(&self) -> bool {
         self.min == self.max
     }
 }
@@ -383,7 +383,7 @@ pub struct AudioFormatDescriptor {
 
 impl AudioFormatDescriptor {
     /// Check if a given sample rate is supported
-    pub fn supports_rate(&self, rate: u32) -> bool {
+    pub(crate) fn supports_rate(&self, rate: u32) -> bool {
         // If no rates listed, we assume any rate is ok (continuous)
         if self.sample_rates.is_empty() {
             return true;
@@ -392,12 +392,12 @@ impl AudioFormatDescriptor {
     }
 
     /// Check if this format is PCM
-    pub fn is_pcm(&self) -> bool {
+    pub(crate) fn is_pcm(&self) -> bool {
         self.format_tag == UAC_FORMAT_PCM || self.format_tag == UAC_FORMAT_PCM8
     }
 
     /// Get the frame size in bytes (channels * subframe_size)
-    pub fn frame_size(&self) -> u16 {
+    pub(crate) fn frame_size(&self) -> u16 {
         self.nr_channels as u16 * self.subframe_size as u16
     }
 }
@@ -429,23 +429,23 @@ pub struct AudioStreamingInterface {
 
 impl AudioStreamingInterface {
     /// Check if this is an input (capture) stream
-    pub fn is_input(&self) -> bool {
+    pub(crate) fn is_input(&self) -> bool {
         self.endpoint_address & 0x80 != 0
     }
 
     /// Check if this is an output (playback) stream
-    pub fn is_output(&self) -> bool {
+    pub(crate) fn is_output(&self) -> bool {
         self.endpoint_address & 0x80 == 0
     }
 
     /// Check if this is the zero-bandwidth alternate setting
-    pub fn is_zero_bandwidth(&self) -> bool {
+    pub(crate) fn is_zero_bandwidth(&self) -> bool {
         self.alternate_setting == 0
     }
 
     /// Calculate bytes per frame at a given sample rate
     /// Returns bytes per USB frame (1ms at full speed, 125us at high speed)
-    pub fn bytes_per_usb_frame(&self, sample_rate: u32) -> u32 {
+    pub(crate) fn bytes_per_usb_frame(&self, sample_rate: u32) -> u32 {
         // For full-speed: 1 frame = 1ms, so bytes = sample_rate/1000 * frame_size
         let frame_size = self.format.frame_size() as u32;
         // Use integer division: (sample_rate * frame_size) / 1000
@@ -483,22 +483,22 @@ pub const VOLUME_MAX: VolumeDb = VolumeDb(i16::MAX);
 
 impl VolumeDb {
     /// Create a volume from integer dB value
-    pub fn from_db(db: i8) -> Self {
+    pub(crate) fn from_db(db: i8) -> Self {
         VolumeDb((db as i16) << 8)
     }
 
     /// Get the integer part of the dB value
-    pub fn integer_db(&self) -> i8 {
+    pub(crate) fn integer_db(&self) -> i8 {
         (self.0 >> 8) as i8
     }
 
     /// Get the fractional part (0-255, representing 0/256 to 255/256 dB)
-    pub fn fraction(&self) -> u8 {
+    pub(crate) fn fraction(&self) -> u8 {
         self.0 as u8
     }
 
     /// Get the raw 8.8 fixed-point value
-    pub fn raw(&self) -> i16 {
+    pub(crate) fn raw(&self) -> i16 {
         self.0
     }
 
@@ -510,7 +510,8 @@ impl VolumeDb {
     /// - Maps positive dB values to saturated 65535
     ///
     /// This is an approximation suitable for kernel audio mixing.
-    pub fn to_linear_u16(&self) -> u16 {
+    #[allow(clippy::wrong_self_convention)]
+    pub(crate) fn to_linear_u16(&self) -> u16 {
         let db_int = self.integer_db();
 
         if db_int >= 0 {
@@ -556,7 +557,7 @@ impl VolumeDb {
     /// Create from a linear 0..65535 volume value
     ///
     /// Inverse of `to_linear_u16()`, approximate.
-    pub fn from_linear_u16(linear: u16) -> Self {
+    pub(crate) fn from_linear_u16(linear: u16) -> Self {
         if linear == 0 {
             return VOLUME_SILENCE;
         }
@@ -618,7 +619,7 @@ impl UsbAudioDevice {
     }
 
     /// Find an input terminal by ID
-    pub fn find_input_terminal(&self, id: u8) -> Option<&InputTerminal> {
+    pub(crate) fn find_input_terminal(&self, id: u8) -> Option<&InputTerminal> {
         self.units.iter().find_map(|u| match u {
             AudioUnit::InputTerminal(t) if t.terminal_id == id => Some(t),
             _ => None,
@@ -626,7 +627,7 @@ impl UsbAudioDevice {
     }
 
     /// Find an output terminal by ID
-    pub fn find_output_terminal(&self, id: u8) -> Option<&OutputTerminal> {
+    pub(crate) fn find_output_terminal(&self, id: u8) -> Option<&OutputTerminal> {
         self.units.iter().find_map(|u| match u {
             AudioUnit::OutputTerminal(t) if t.terminal_id == id => Some(t),
             _ => None,
@@ -634,7 +635,7 @@ impl UsbAudioDevice {
     }
 
     /// Find a feature unit by ID
-    pub fn find_feature_unit(&self, id: u8) -> Option<&FeatureUnit> {
+    pub(crate) fn find_feature_unit(&self, id: u8) -> Option<&FeatureUnit> {
         self.units.iter().find_map(|u| match u {
             AudioUnit::FeatureUnit(f) if f.unit_id == id => Some(f),
             _ => None,
@@ -642,7 +643,7 @@ impl UsbAudioDevice {
     }
 
     /// Get all feature units in the topology
-    pub fn feature_units(&self) -> Vec<&FeatureUnit> {
+    pub(crate) fn feature_units(&self) -> Vec<&FeatureUnit> {
         self.units
             .iter()
             .filter_map(|u| match u {
@@ -653,7 +654,7 @@ impl UsbAudioDevice {
     }
 
     /// Get all output (playback) streaming interfaces
-    pub fn playback_interfaces(&self) -> Vec<&AudioStreamingInterface> {
+    pub(crate) fn playback_interfaces(&self) -> Vec<&AudioStreamingInterface> {
         self.streaming_interfaces
             .iter()
             .filter(|s| s.is_output() && !s.is_zero_bandwidth())
@@ -661,7 +662,7 @@ impl UsbAudioDevice {
     }
 
     /// Get all input (capture) streaming interfaces
-    pub fn capture_interfaces(&self) -> Vec<&AudioStreamingInterface> {
+    pub(crate) fn capture_interfaces(&self) -> Vec<&AudioStreamingInterface> {
         self.streaming_interfaces
             .iter()
             .filter(|s| s.is_input() && !s.is_zero_bandwidth())
@@ -670,7 +671,7 @@ impl UsbAudioDevice {
 
     /// Find a streaming interface that supports the given sample rate and
     /// channels
-    pub fn find_compatible_interface(
+    pub(crate) fn find_compatible_interface(
         &self,
         sample_rate: u32,
         channels: u8,
@@ -686,7 +687,7 @@ impl UsbAudioDevice {
     }
 
     /// Get the number of units in the topology
-    pub fn unit_count(&self) -> usize {
+    pub(crate) fn unit_count(&self) -> usize {
         self.units.len()
     }
 }
@@ -698,7 +699,7 @@ impl UsbAudioDevice {
 /// Parse a UAC Audio Control interface header
 ///
 /// Returns (UAC version, total_length) or error.
-pub fn parse_ac_header(data: &[u8]) -> Result<(UacVersion, u16), KernelError> {
+pub(crate) fn parse_ac_header(data: &[u8]) -> Result<(UacVersion, u16), KernelError> {
     // Minimum AC header: bLength(1) + bDescriptorType(1) + bDescriptorSubtype(1)
     //                    + bcdADC(2) + wTotalLength(2) + bInCollection(1) +
     //                      baInterfaceNr(1...)
@@ -729,7 +730,7 @@ pub fn parse_ac_header(data: &[u8]) -> Result<(UacVersion, u16), KernelError> {
 }
 
 /// Parse an Input Terminal descriptor from raw bytes
-pub fn parse_input_terminal(data: &[u8]) -> Result<InputTerminal, KernelError> {
+pub(crate) fn parse_input_terminal(data: &[u8]) -> Result<InputTerminal, KernelError> {
     // UAC 1.0 input terminal is at least 12 bytes
     if data.len() < 12 {
         return Err(KernelError::InvalidArgument {
@@ -755,7 +756,7 @@ pub fn parse_input_terminal(data: &[u8]) -> Result<InputTerminal, KernelError> {
 }
 
 /// Parse an Output Terminal descriptor from raw bytes
-pub fn parse_output_terminal(data: &[u8]) -> Result<OutputTerminal, KernelError> {
+pub(crate) fn parse_output_terminal(data: &[u8]) -> Result<OutputTerminal, KernelError> {
     // UAC 1.0 output terminal is at least 9 bytes
     if data.len() < 9 {
         return Err(KernelError::InvalidArgument {
@@ -780,7 +781,7 @@ pub fn parse_output_terminal(data: &[u8]) -> Result<OutputTerminal, KernelError>
 }
 
 /// Parse a Feature Unit descriptor from raw bytes (UAC 1.0)
-pub fn parse_feature_unit(data: &[u8]) -> Result<FeatureUnit, KernelError> {
+pub(crate) fn parse_feature_unit(data: &[u8]) -> Result<FeatureUnit, KernelError> {
     // Minimum: bLength(1) + bDescriptorType(1) + bDescriptorSubtype(1)
     //        + bUnitID(1) + bSourceID(1) + bControlSize(1) + bmaControls(...)
     if data.len() < 7 {
@@ -838,7 +839,7 @@ pub fn parse_feature_unit(data: &[u8]) -> Result<FeatureUnit, KernelError> {
 }
 
 /// Parse a Mixer Unit descriptor from raw bytes
-pub fn parse_mixer_unit(data: &[u8]) -> Result<MixerUnit, KernelError> {
+pub(crate) fn parse_mixer_unit(data: &[u8]) -> Result<MixerUnit, KernelError> {
     // Minimum: bLength(1) + bDescriptorType(1) + bDescriptorSubtype(1)
     //        + bUnitID(1) + bNrInPins(1) + baSourceID(...)
     if data.len() < 5 {
@@ -888,7 +889,7 @@ pub fn parse_mixer_unit(data: &[u8]) -> Result<MixerUnit, KernelError> {
 }
 
 /// Parse an Audio Streaming format type descriptor (UAC 1.0 Type I)
-pub fn parse_format_type_i(data: &[u8]) -> Result<AudioFormatDescriptor, KernelError> {
+pub(crate) fn parse_format_type_i(data: &[u8]) -> Result<AudioFormatDescriptor, KernelError> {
     // Minimum: bLength(1) + bDescriptorType(1) + bDescriptorSubtype(1)
     //        + bFormatType(1) + bNrChannels(1) + bSubframeSize(1)
     //        + bBitResolution(1) + bSamFreqType(1)
@@ -946,7 +947,7 @@ fn read_u24_le(data: &[u8]) -> u32 {
 }
 
 /// Parse a Clock Source descriptor (UAC 2.0)
-pub fn parse_clock_source(data: &[u8]) -> Result<ClockSource, KernelError> {
+pub(crate) fn parse_clock_source(data: &[u8]) -> Result<ClockSource, KernelError> {
     // bLength(1) + bDescriptorType(1) + bDescriptorSubtype(1)
     // + bClockID(1) + bmAttributes(1) + bmControls(1) + bAssocTerminal(1)
     if data.len() < 7 {
@@ -978,7 +979,7 @@ pub fn parse_clock_source(data: &[u8]) -> Result<ClockSource, KernelError> {
 ///
 /// Returns the control request bytes for setting the sample rate on an
 /// isochronous endpoint.
-pub fn build_set_sample_rate_request(endpoint: u8, sample_rate: u32) -> SampleRateRequest {
+pub(crate) fn build_set_sample_rate_request(endpoint: u8, sample_rate: u32) -> SampleRateRequest {
     SampleRateRequest {
         request_type: 0x22, // Host-to-device, class, endpoint
         request: UAC_SET_CUR,
@@ -989,7 +990,7 @@ pub fn build_set_sample_rate_request(endpoint: u8, sample_rate: u32) -> SampleRa
 }
 
 /// Build a GET_CUR sample rate control request for UAC 1.0
-pub fn build_get_sample_rate_request(endpoint: u8) -> SampleRateRequest {
+pub(crate) fn build_get_sample_rate_request(endpoint: u8) -> SampleRateRequest {
     SampleRateRequest {
         request_type: 0xA2, // Device-to-host, class, endpoint
         request: UAC_GET_CUR,
@@ -1016,7 +1017,7 @@ pub struct SampleRateRequest {
 
 impl SampleRateRequest {
     /// Encode the sample rate as 3-byte little-endian for USB transfer
-    pub fn rate_bytes(&self) -> [u8; 3] {
+    pub(crate) fn rate_bytes(&self) -> [u8; 3] {
         [
             (self.sample_rate & 0xFF) as u8,
             ((self.sample_rate >> 8) & 0xFF) as u8,
@@ -1025,7 +1026,7 @@ impl SampleRateRequest {
     }
 
     /// Decode a 3-byte sample rate response
-    pub fn decode_rate(data: &[u8]) -> u32 {
+    pub(crate) fn decode_rate(data: &[u8]) -> u32 {
         if data.len() >= 3 {
             read_u24_le(data)
         } else {
@@ -1039,7 +1040,7 @@ impl SampleRateRequest {
 // ============================================================================
 
 /// Build a SET_CUR volume control request
-pub fn build_set_volume_request(
+pub(crate) fn build_set_volume_request(
     unit_id: u8,
     channel: u8,
     interface: u16,
@@ -1055,7 +1056,11 @@ pub fn build_set_volume_request(
 }
 
 /// Build a GET_CUR volume control request
-pub fn build_get_volume_request(unit_id: u8, channel: u8, interface: u16) -> VolumeControlRequest {
+pub(crate) fn build_get_volume_request(
+    unit_id: u8,
+    channel: u8,
+    interface: u16,
+) -> VolumeControlRequest {
     VolumeControlRequest {
         request_type: 0xA1, // Device-to-host, class, interface
         request: UAC_GET_CUR,
@@ -1066,7 +1071,7 @@ pub fn build_get_volume_request(unit_id: u8, channel: u8, interface: u16) -> Vol
 }
 
 /// Build a SET_CUR mute control request
-pub fn build_set_mute_request(
+pub(crate) fn build_set_mute_request(
     unit_id: u8,
     channel: u8,
     interface: u16,
@@ -1093,12 +1098,12 @@ pub struct VolumeControlRequest {
 
 impl VolumeControlRequest {
     /// Encode the volume value as 2-byte little-endian for USB transfer
-    pub fn volume_bytes(&self) -> [u8; 2] {
+    pub(crate) fn volume_bytes(&self) -> [u8; 2] {
         self.volume.raw().to_le_bytes()
     }
 
     /// Decode a 2-byte volume response
-    pub fn decode_volume(data: &[u8]) -> VolumeDb {
+    pub(crate) fn decode_volume(data: &[u8]) -> VolumeDb {
         if data.len() >= 2 {
             VolumeDb(i16::from_le_bytes([data[0], data[1]]))
         } else {
@@ -1126,7 +1131,7 @@ pub struct MuteControlRequest {
 ///
 /// Takes the full configuration descriptor bytes and parses all audio-related
 /// descriptors into a `UsbAudioDevice`.
-pub fn enumerate_audio_device(
+pub(crate) fn enumerate_audio_device(
     device_address: u8,
     config_descriptor: &[u8],
 ) -> Result<UsbAudioDevice, KernelError> {
@@ -1209,7 +1214,7 @@ pub const STANDARD_SAMPLE_RATES: &[u32] = &[
 ];
 
 /// Check if a sample rate is a standard USB audio rate
-pub fn is_standard_sample_rate(rate: u32) -> bool {
+pub(crate) fn is_standard_sample_rate(rate: u32) -> bool {
     STANDARD_SAMPLE_RATES.contains(&rate)
 }
 
@@ -1285,7 +1290,7 @@ pub enum HdmiChannelAllocation {
 
 impl HdmiChannelAllocation {
     /// Get the number of audio channels for this allocation
-    pub fn channel_count(&self) -> u8 {
+    pub(crate) fn channel_count(&self) -> u8 {
         match self {
             HdmiChannelAllocation::Stereo => 2,
             HdmiChannelAllocation::Stereo21 => 3,
@@ -1299,7 +1304,7 @@ impl HdmiChannelAllocation {
     }
 
     /// Get the allocation code byte
-    pub fn code(&self) -> u8 {
+    pub(crate) fn code(&self) -> u8 {
         *self as u8
     }
 }
@@ -1328,7 +1333,7 @@ pub enum HdmiSampleRate {
 
 impl HdmiSampleRate {
     /// Convert from Hz to HDMI sample rate code
-    pub fn from_hz(hz: u32) -> Self {
+    pub(crate) fn from_hz(hz: u32) -> Self {
         match hz {
             32000 => HdmiSampleRate::Rate32000,
             44100 => HdmiSampleRate::Rate44100,
@@ -1342,7 +1347,8 @@ impl HdmiSampleRate {
     }
 
     /// Convert to Hz
-    pub fn to_hz(&self) -> u32 {
+    #[allow(clippy::wrong_self_convention)]
+    pub(crate) fn to_hz(&self) -> u32 {
         match self {
             HdmiSampleRate::StreamHeader => 0,
             HdmiSampleRate::Rate32000 => 32000,
@@ -1372,7 +1378,7 @@ pub enum HdmiSampleSize {
 
 impl HdmiSampleSize {
     /// Convert from bit depth
-    pub fn from_bits(bits: u8) -> Self {
+    pub(crate) fn from_bits(bits: u8) -> Self {
         match bits {
             16 => HdmiSampleSize::Bits16,
             20 => HdmiSampleSize::Bits20,
@@ -1410,7 +1416,7 @@ pub struct HdmiAudioInfoframe {
 
 impl HdmiAudioInfoframe {
     /// Create a stereo PCM infoframe with common settings
-    pub fn stereo_pcm(sample_rate: u32, bit_depth: u8) -> Self {
+    pub(crate) fn stereo_pcm(sample_rate: u32, bit_depth: u8) -> Self {
         Self {
             coding_type: HdmiAudioCoding::Pcm,
             channel_count: 2,
@@ -1423,7 +1429,7 @@ impl HdmiAudioInfoframe {
     }
 
     /// Create a 5.1 surround PCM infoframe
-    pub fn surround51_pcm(sample_rate: u32, bit_depth: u8) -> Self {
+    pub(crate) fn surround51_pcm(sample_rate: u32, bit_depth: u8) -> Self {
         Self {
             coding_type: HdmiAudioCoding::Pcm,
             channel_count: 6,
@@ -1436,7 +1442,7 @@ impl HdmiAudioInfoframe {
     }
 
     /// Create a 7.1 surround PCM infoframe
-    pub fn surround71_pcm(sample_rate: u32, bit_depth: u8) -> Self {
+    pub(crate) fn surround71_pcm(sample_rate: u32, bit_depth: u8) -> Self {
         Self {
             coding_type: HdmiAudioCoding::Pcm,
             channel_count: 8,
@@ -1456,7 +1462,7 @@ impl HdmiAudioInfoframe {
     /// - Byte 2: Length (0x0A)
     /// - Byte 3: Checksum
     /// - Bytes 4-13: Payload (DB1-DB10)
-    pub fn to_bytes(&self) -> [u8; 14] {
+    pub(crate) fn to_bytes(&self) -> [u8; 14] {
         let mut buf = [0u8; 14];
 
         // Header
@@ -1504,7 +1510,7 @@ impl HdmiAudioInfoframe {
     }
 
     /// Verify an infoframe checksum
-    pub fn verify_checksum(data: &[u8]) -> bool {
+    pub(crate) fn verify_checksum(data: &[u8]) -> bool {
         if data.len() < 14 {
             return false;
         }
@@ -1513,7 +1519,7 @@ impl HdmiAudioInfoframe {
     }
 
     /// Parse an infoframe from raw bytes
-    pub fn from_bytes(data: &[u8]) -> Result<Self, KernelError> {
+    pub(crate) fn from_bytes(data: &[u8]) -> Result<Self, KernelError> {
         if data.len() < 14 {
             return Err(KernelError::InvalidArgument {
                 name: "hdmi_infoframe",
@@ -1629,7 +1635,7 @@ impl AudioClockRegeneration {
     ///
     /// N values from HDMI 1.4b specification, Table 7-1/7-2/7-3.
     /// These are the recommended values for 148.5 MHz TMDS clock (1080p60).
-    pub fn recommended_n(sample_rate: u32) -> u32 {
+    pub(crate) fn recommended_n(sample_rate: u32) -> u32 {
         match sample_rate {
             32000 => 4096,
             44100 => 6272,
@@ -1651,7 +1657,7 @@ impl AudioClockRegeneration {
     /// CTS = N * TMDS_clock / (128 * Fs)
     ///
     /// Uses u64 intermediate to avoid overflow.
-    pub fn calculate_cts(n: u32, sample_rate: u32, tmds_clock_khz: u32) -> u32 {
+    pub(crate) fn calculate_cts(n: u32, sample_rate: u32, tmds_clock_khz: u32) -> u32 {
         if sample_rate == 0 {
             return 0;
         }
@@ -1683,17 +1689,17 @@ impl AudioClockRegeneration {
     }
 
     /// Standard ACR for 1080p60 (148.5 MHz TMDS clock)
-    pub fn for_1080p60(sample_rate: u32) -> Self {
+    pub(crate) fn for_1080p60(sample_rate: u32) -> Self {
         Self::new(sample_rate, 148500)
     }
 
     /// Standard ACR for 4K60 (594 MHz TMDS clock)
-    pub fn for_4k60(sample_rate: u32) -> Self {
+    pub(crate) fn for_4k60(sample_rate: u32) -> Self {
         Self::new(sample_rate, 594000)
     }
 
     /// Standard ACR for 720p60 (74.25 MHz TMDS clock)
-    pub fn for_720p60(sample_rate: u32) -> Self {
+    pub(crate) fn for_720p60(sample_rate: u32) -> Self {
         Self::new(sample_rate, 74250)
     }
 }
@@ -1755,7 +1761,7 @@ pub struct ShortAudioDescriptor {
 
 impl ShortAudioDescriptor {
     /// Parse a SAD from 3 raw bytes
-    pub fn from_bytes(data: &[u8; 3]) -> Self {
+    pub(crate) fn from_bytes(data: &[u8; 3]) -> Self {
         Self {
             format_code: (data[0] >> 3) & 0x0F,
             max_channels: (data[0] & 0x07) + 1,
@@ -1765,7 +1771,7 @@ impl ShortAudioDescriptor {
     }
 
     /// Check if this SAD supports a given sample rate
-    pub fn supports_rate(&self, rate: u32) -> bool {
+    pub(crate) fn supports_rate(&self, rate: u32) -> bool {
         let bit = match rate {
             32000 => 0,
             44100 => 1,
@@ -1780,7 +1786,7 @@ impl ShortAudioDescriptor {
     }
 
     /// Check if this SAD supports PCM and a given bit depth
-    pub fn supports_pcm_depth(&self, bits: u8) -> bool {
+    pub(crate) fn supports_pcm_depth(&self, bits: u8) -> bool {
         if self.format_code != 1 {
             // Only PCM has bit depth info
             return false;
@@ -1794,12 +1800,13 @@ impl ShortAudioDescriptor {
     }
 
     /// Check if this is a PCM format descriptor
-    pub fn is_pcm(&self) -> bool {
+    pub(crate) fn is_pcm(&self) -> bool {
         self.format_code == 1
     }
 
     /// Serialize to 3-byte representation
-    pub fn to_bytes(&self) -> [u8; 3] {
+    #[allow(clippy::wrong_self_convention)]
+    pub(crate) fn to_bytes(&self) -> [u8; 3] {
         let byte0 =
             ((self.format_code & 0x0F) << 3) | ((self.max_channels.saturating_sub(1)) & 0x07);
         [byte0, self.sample_rate_mask & 0x7F, self.detail]
@@ -1811,7 +1818,7 @@ impl HdmiEld {
     ///
     /// The ELD format is defined in the HDA specification and contains
     /// baseline and vendor-specific sections.
-    pub fn parse(data: &[u8]) -> Result<Self, KernelError> {
+    pub(crate) fn parse(data: &[u8]) -> Result<Self, KernelError> {
         if data.len() < 16 {
             return Err(KernelError::InvalidArgument {
                 name: "eld",
@@ -1881,7 +1888,7 @@ impl HdmiEld {
     }
 
     /// Check if the sink supports a specific audio format
-    pub fn supports_format(&self, format_code: u8, rate: u32, channels: u8) -> bool {
+    pub(crate) fn supports_format(&self, format_code: u8, rate: u32, channels: u8) -> bool {
         self.sads.iter().any(|sad| {
             sad.format_code == format_code
                 && sad.max_channels >= channels
@@ -1890,7 +1897,7 @@ impl HdmiEld {
     }
 
     /// Check if the sink supports stereo PCM at a given rate and depth
-    pub fn supports_stereo_pcm(&self, rate: u32, bit_depth: u8) -> bool {
+    pub(crate) fn supports_stereo_pcm(&self, rate: u32, bit_depth: u8) -> bool {
         self.sads.iter().any(|sad| {
             sad.is_pcm()
                 && sad.max_channels >= 2
@@ -1900,7 +1907,7 @@ impl HdmiEld {
     }
 
     /// Get the maximum number of PCM channels supported
-    pub fn max_pcm_channels(&self) -> u8 {
+    pub(crate) fn max_pcm_channels(&self) -> u8 {
         self.sads
             .iter()
             .filter(|sad| sad.is_pcm())
@@ -1910,7 +1917,7 @@ impl HdmiEld {
     }
 
     /// Get all supported PCM sample rates
-    pub fn supported_pcm_rates(&self) -> Vec<u32> {
+    pub(crate) fn supported_pcm_rates(&self) -> Vec<u32> {
         let mut rates = Vec::new();
         let rate_table: &[(u32, u8)] = &[
             (32000, 0),
@@ -1983,7 +1990,7 @@ impl HdmiAudioOutput {
     }
 
     /// Configure the output for stereo PCM at the given rate
-    pub fn configure_stereo_pcm(
+    pub(crate) fn configure_stereo_pcm(
         &mut self,
         sample_rate: u32,
         bit_depth: u8,
@@ -2008,17 +2015,17 @@ impl HdmiAudioOutput {
     }
 
     /// Enable audio output
-    pub fn enable(&mut self) {
+    pub(crate) fn enable(&mut self) {
         self.enabled = true;
     }
 
     /// Disable audio output
-    pub fn disable(&mut self) {
+    pub(crate) fn disable(&mut self) {
         self.enabled = false;
     }
 
     /// Check if a sink is connected (ELD available)
-    pub fn has_sink(&self) -> bool {
+    pub(crate) fn has_sink(&self) -> bool {
         self.eld.is_some()
     }
 }

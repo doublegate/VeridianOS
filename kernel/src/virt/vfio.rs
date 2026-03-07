@@ -104,27 +104,27 @@ impl BarFlags {
     pub const BIT64: Self = Self { bits: 8 };
 
     /// Check if I/O space
-    pub fn is_io(self) -> bool {
+    pub(crate) fn is_io(self) -> bool {
         self.bits & 1 != 0
     }
 
     /// Check if memory space
-    pub fn is_memory(self) -> bool {
+    pub(crate) fn is_memory(self) -> bool {
         self.bits & 2 != 0
     }
 
     /// Check if prefetchable
-    pub fn is_prefetchable(self) -> bool {
+    pub(crate) fn is_prefetchable(self) -> bool {
         self.bits & 4 != 0
     }
 
     /// Check if 64-bit
-    pub fn is_64bit(self) -> bool {
+    pub(crate) fn is_64bit(self) -> bool {
         self.bits & 8 != 0
     }
 
     /// Combine flags
-    pub fn union(self, other: Self) -> Self {
+    pub(crate) fn union(self, other: Self) -> Self {
         Self {
             bits: self.bits | other.bits,
         }
@@ -162,13 +162,13 @@ impl BarRegion {
     }
 
     /// Map this BAR into guest physical address space
-    pub fn map_to_guest(&mut self, guest_addr: u64) {
+    pub(crate) fn map_to_guest(&mut self, guest_addr: u64) {
         self.guest_addr = guest_addr;
         self.mapped = true;
     }
 
     /// Unmap this BAR from guest
-    pub fn unmap(&mut self) {
+    pub(crate) fn unmap(&mut self) {
         self.mapped = false;
         self.guest_addr = 0;
     }
@@ -193,12 +193,12 @@ impl DmaFlags {
     pub const READ_WRITE: Self = Self { bits: 3 };
 
     /// Check read access
-    pub fn is_readable(self) -> bool {
+    pub(crate) fn is_readable(self) -> bool {
         self.bits & 1 != 0
     }
 
     /// Check write access
-    pub fn is_writable(self) -> bool {
+    pub(crate) fn is_writable(self) -> bool {
         self.bits & 2 != 0
     }
 }
@@ -228,12 +228,12 @@ impl DmaMapping {
     }
 
     /// Check if an IOVA falls within this mapping
-    pub fn contains(&self, iova: u64) -> bool {
+    pub(crate) fn contains(&self, iova: u64) -> bool {
         iova >= self.iova && iova < self.iova + self.size
     }
 
     /// Translate IOVA to physical address
-    pub fn translate(&self, iova: u64) -> Option<u64> {
+    pub(crate) fn translate(&self, iova: u64) -> Option<u64> {
         if self.contains(iova) {
             Some(self.paddr + (iova - self.iova))
         } else {
@@ -314,7 +314,7 @@ impl IommuGroup {
     }
 
     /// Add a device to this group
-    pub fn add_device(&mut self, addr: PciAddress) -> Result<(), VmError> {
+    pub(crate) fn add_device(&mut self, addr: PciAddress) -> Result<(), VmError> {
         if self.devices.len() >= MAX_DEVICES_PER_GROUP {
             return Err(VmError::DeviceError);
         }
@@ -326,7 +326,7 @@ impl IommuGroup {
     }
 
     /// Remove a device from this group
-    pub fn remove_device(&mut self, addr: &PciAddress) -> bool {
+    pub(crate) fn remove_device(&mut self, addr: &PciAddress) -> bool {
         if let Some(pos) = self.devices.iter().position(|d| d == addr) {
             self.devices.swap_remove(pos);
             true
@@ -336,18 +336,18 @@ impl IommuGroup {
     }
 
     /// Check if a device is in this group
-    pub fn contains_device(&self, addr: &PciAddress) -> bool {
+    pub(crate) fn contains_device(&self, addr: &PciAddress) -> bool {
         self.devices.contains(addr)
     }
 
     /// Attach to a container
-    pub fn attach(&mut self, container_id: u32) {
+    pub(crate) fn attach(&mut self, container_id: u32) {
         self.attached = true;
         self.container_id = Some(container_id);
     }
 
     /// Detach from container
-    pub fn detach(&mut self) {
+    pub(crate) fn detach(&mut self) {
         self.attached = false;
         self.container_id = None;
     }
@@ -383,7 +383,7 @@ impl VfioContainer {
     }
 
     /// Add an IOMMU group to this container
-    pub fn add_group(&mut self, mut group: IommuGroup) -> Result<(), VmError> {
+    pub(crate) fn add_group(&mut self, mut group: IommuGroup) -> Result<(), VmError> {
         if self.groups.len() >= MAX_GROUPS_PER_CONTAINER {
             return Err(VmError::DeviceError);
         }
@@ -393,7 +393,7 @@ impl VfioContainer {
     }
 
     /// Add a DMA mapping
-    pub fn dma_map(&mut self, mapping: DmaMapping) -> Result<(), VmError> {
+    pub(crate) fn dma_map(&mut self, mapping: DmaMapping) -> Result<(), VmError> {
         if self.dma_mappings.len() >= MAX_DMA_MAPPINGS {
             return Err(VmError::DeviceError);
         }
@@ -410,7 +410,7 @@ impl VfioContainer {
     }
 
     /// Remove a DMA mapping by IOVA
-    pub fn dma_unmap(&mut self, iova: u64) -> Result<u64, VmError> {
+    pub(crate) fn dma_unmap(&mut self, iova: u64) -> Result<u64, VmError> {
         if let Some(pos) = self.dma_mappings.iter().position(|m| m.iova == iova) {
             let size = self.dma_mappings[pos].size;
             self.dma_mappings.swap_remove(pos);
@@ -421,7 +421,7 @@ impl VfioContainer {
     }
 
     /// Translate an IOVA to physical address
-    pub fn translate_iova(&self, iova: u64) -> Option<u64> {
+    pub(crate) fn translate_iova(&self, iova: u64) -> Option<u64> {
         for mapping in &self.dma_mappings {
             if let Some(paddr) = mapping.translate(iova) {
                 return Some(paddr);
@@ -431,12 +431,12 @@ impl VfioContainer {
     }
 
     /// Get number of groups
-    pub fn group_count(&self) -> usize {
+    pub(crate) fn group_count(&self) -> usize {
         self.groups.len()
     }
 
     /// Get number of DMA mappings
-    pub fn dma_mapping_count(&self) -> usize {
+    pub(crate) fn dma_mapping_count(&self) -> usize {
         self.dma_mappings.len()
     }
 }
@@ -488,7 +488,7 @@ impl VfioDevice {
     }
 
     /// Add a BAR region
-    pub fn add_bar(&mut self, region: BarRegion) -> Result<(), VmError> {
+    pub(crate) fn add_bar(&mut self, region: BarRegion) -> Result<(), VmError> {
         if self.bar_regions.len() >= MAX_BAR_REGIONS {
             return Err(VmError::DeviceError);
         }
@@ -497,7 +497,7 @@ impl VfioDevice {
     }
 
     /// Map a BAR region into guest EPT (uncacheable)
-    pub fn map_bar(&mut self, bar_index: u8, guest_addr: u64) -> Result<(), VmError> {
+    pub(crate) fn map_bar(&mut self, bar_index: u8, guest_addr: u64) -> Result<(), VmError> {
         if let Some(bar) = self.bar_regions.iter_mut().find(|b| b.index == bar_index) {
             bar.map_to_guest(guest_addr);
             // In a real implementation, this would set up EPT entries with
@@ -509,7 +509,7 @@ impl VfioDevice {
     }
 
     /// Unmap a BAR region
-    pub fn unmap_bar(&mut self, bar_index: u8) -> Result<(), VmError> {
+    pub(crate) fn unmap_bar(&mut self, bar_index: u8) -> Result<(), VmError> {
         if let Some(bar) = self.bar_regions.iter_mut().find(|b| b.index == bar_index) {
             bar.unmap();
             Ok(())
@@ -519,7 +519,7 @@ impl VfioDevice {
     }
 
     /// Enable MSI-X interrupts with remapping
-    pub fn enable_msix(&mut self, num_vectors: u32) -> Result<(), VmError> {
+    pub(crate) fn enable_msix(&mut self, num_vectors: u32) -> Result<(), VmError> {
         if num_vectors > MAX_MSIX_VECTORS as u32 {
             return Err(VmError::DeviceError);
         }
@@ -534,7 +534,7 @@ impl VfioDevice {
     }
 
     /// Disable MSI-X interrupts
-    pub fn disable_msix(&mut self) {
+    pub(crate) fn disable_msix(&mut self) {
         if let Some(irq) = self
             .irqs
             .iter_mut()
@@ -545,7 +545,7 @@ impl VfioDevice {
     }
 
     /// Perform a function-level reset
-    pub fn reset(&mut self) -> Result<(), VmError> {
+    pub(crate) fn reset(&mut self) -> Result<(), VmError> {
         // Unmap all BARs
         for bar in &mut self.bar_regions {
             bar.unmap();
@@ -558,7 +558,7 @@ impl VfioDevice {
     }
 
     /// Assign this device to a VM
-    pub fn assign_to_vm(&mut self, vm_id: u32) -> Result<(), VmError> {
+    pub(crate) fn assign_to_vm(&mut self, vm_id: u32) -> Result<(), VmError> {
         if self.assigned_vm.is_some() {
             return Err(VmError::DeviceError);
         }
@@ -567,34 +567,34 @@ impl VfioDevice {
     }
 
     /// Unassign this device from its VM
-    pub fn unassign(&mut self) {
+    pub(crate) fn unassign(&mut self) {
         self.assigned_vm = None;
     }
 
     /// Check if assigned to a VM
-    pub fn is_assigned(&self) -> bool {
+    pub(crate) fn is_assigned(&self) -> bool {
         self.assigned_vm.is_some()
     }
 
     /// Get assigned VM ID
-    pub fn assigned_vm_id(&self) -> Option<u32> {
+    pub(crate) fn assigned_vm_id(&self) -> Option<u32> {
         self.assigned_vm
     }
 
     /// Get BAR region by index
-    pub fn bar(&self, index: u8) -> Option<&BarRegion> {
+    pub(crate) fn bar(&self, index: u8) -> Option<&BarRegion> {
         self.bar_regions.iter().find(|b| b.index == index)
     }
 
     /// Check if MSI-X is enabled
-    pub fn msix_enabled(&self) -> bool {
+    pub(crate) fn msix_enabled(&self) -> bool {
         self.irqs
             .iter()
             .any(|i| i.irq_type == VfioIrqType::MsiX && i.enabled)
     }
 
     /// Get MSI-X vector count
-    pub fn msix_vector_count(&self) -> u32 {
+    pub(crate) fn msix_vector_count(&self) -> u32 {
         self.irqs
             .iter()
             .find(|i| i.irq_type == VfioIrqType::MsiX)

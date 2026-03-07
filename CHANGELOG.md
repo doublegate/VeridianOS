@@ -2,6 +2,47 @@
 
 ---
 
+## [v0.20.1] - 2026-03-07
+
+### v0.20.1: Tier 4 Technical Debt Remediation
+
+Post-v0.20.0 code quality sweep addressing complexity hotspots, unsafe code documentation, and encapsulation across the 323K-line kernel codebase. No functional changes -- refactoring, documentation, and visibility improvements only.
+
+#### render_loop() Decomposition (Tier 2 -- Strategic)
+
+- **Split 554-line monolith into 6 focused functions**: `render_loop()` (30-line orchestrator), `handle_screen_lock()`, `handle_input_events()`, `dispatch_mouse_and_keyboard()`, `update_ui_state()`, `render_and_composite()` + `render_overlays()`
+- **Introduced `FrameLayout` struct**: Encapsulates framebuffer pointer, dimensions, stride, pixel format, and panel Y coordinate -- eliminates 6 parameter passes per frame
+- **Maintained exact behavior**: All input dispatch, overlay rendering, cursor drawing, and frame pacing logic preserved; zero behavioral changes
+
+#### SAFETY Comment Coverage (Tier 1 -- Quick Win)
+
+- **136 `// SAFETY:` comments added** across 25 files documenting why each unsafe block is sound
+- **Subsystem breakdown**: arch/x86_64 (7), mm/page_table+vas+mod (33), process+sched+syscall (16), drivers+bootstrap (35), remaining (elf, virt, fs, userspace, debug, services, audio -- 45)
+- **Coverage improvement**: Unsafe blocks without SAFETY comments reduced from 399 to 263 (34% reduction)
+- **Patterns documented**: MMIO register access, page table manipulation, port I/O, ELF section pointers, user-space pointer validation, signal frame setup, DMA buffer access, context switching
+
+#### pub(crate) Encapsulation Audit (Tier 1 -- Quick Win)
+
+- **~760 `pub fn` converted to `pub(crate) fn`** across 15 internal implementation files
+- **pub:pub(crate) ratio improved from 9.8:1 to 5.0:1** (6,260 pub vs 1,264 pub(crate))
+- **Files converted**: gpu_accel.rs (~75), alsa.rs (~70), usb_audio.rs (~77), kvm.rs (~70), qemu_compat.rs (~40), hotplug.rs (~35), vfio.rs (~35), ssh.rs (~65), quic.rs (~55), xhci.rs (~52), hci.rs (~39), profiles.rs (~32), video_processing.rs (~41), tabs.rs (~39), incremental.rs (~35)
+- **Preserved as pub**: All constructors (`new()`), trait implementations, module-level `init` functions, and standard API names
+- **Fixed 4 clippy `wrong_self_convention` errors** introduced by `to_*` methods on Copy types gaining `pub(crate)` visibility
+
+#### Analysis Corrections
+
+- USB/QUIC/SSH `.unwrap()` calls (125 total): Confirmed ALL in `#[cfg(test)]` modules -- no production risk, no action needed
+- Unsafe block count without SAFETY: Actual was 399 (vs 117 estimated in analysis) -- 3.4x larger scope than projected
+
+#### Verification
+
+- `cargo fmt --all -- --check`: PASS
+- Clippy aarch64-unknown-none + riscv64gc-unknown-none-elf: PASS (0 warnings)
+- `./build-kernel.sh all dev`: PASS (all 3 architectures)
+- 40 files changed, +1,556/-1,271 lines
+
+---
+
 ## [v0.20.0] - 2026-03-07
 
 ### v0.20.0: "Full Circuit" -- Complete Integration Across 8 Waves

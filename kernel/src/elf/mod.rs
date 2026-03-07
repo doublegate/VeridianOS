@@ -102,6 +102,8 @@ fn zero_user_pages(
         });
     }
 
+    // SAFETY: pt_root was validated non-zero above; it points to a valid page table
+    // root.
     let mapper = unsafe { create_mapper_from_root_pub(pt_root) };
     let mut offset = 0usize;
 
@@ -164,6 +166,7 @@ impl ElfLoader {
 
                 // Diagnostic: log each LOAD segment for multi-LOAD debugging
                 #[cfg(target_arch = "x86_64")]
+                // SAFETY: raw_serial_str writes to the COM1 I/O port for diagnostic output.
                 unsafe {
                     crate::arch::x86_64::idt::raw_serial_str(b"[ELF] LOAD#");
                     crate::arch::x86_64::idt::raw_serial_hex(_load_idx as u64);
@@ -202,6 +205,8 @@ impl ElfLoader {
                         use crate::mm::{vas::create_mapper_from_root_pub, VirtualAddress};
                         let pt_root = vas.get_page_table();
                         if pt_root != 0 {
+                            // SAFETY: pt_root validated non-zero; points to a valid page table
+                            // root.
                             let mapper = unsafe { create_mapper_from_root_pub(pt_root) };
                             mapper.translate_page(VirtualAddress(addr)).map_err(|_| {
                                 crate::error::KernelError::UnmappedMemory {
@@ -265,6 +270,7 @@ impl ElfLoader {
 
         // Diagnostic: log the parsed entry point
         #[cfg(target_arch = "x86_64")]
+        // SAFETY: raw_serial_str writes to the COM1 I/O port for diagnostic output.
         unsafe {
             crate::arch::x86_64::idt::raw_serial_str(b"[ELF] entry=0x");
             crate::arch::x86_64::idt::raw_serial_hex(binary.entry_point);

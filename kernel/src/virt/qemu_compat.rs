@@ -85,17 +85,17 @@ impl IoHandler {
     }
 
     /// Check if a port falls within this handler's range
-    pub fn contains_port(&self, port: u16) -> bool {
+    pub(crate) fn contains_port(&self, port: u16) -> bool {
         port >= self.port_start && port < self.port_start + self.port_count
     }
 
     /// Get the port end (exclusive)
-    pub fn port_end(&self) -> u16 {
+    pub(crate) fn port_end(&self) -> u16 {
         self.port_start + self.port_count
     }
 
     /// Dispatch an I/O access (returns the offset within the range)
-    pub fn dispatch_io(&self, port: u16) -> Option<u16> {
+    pub(crate) fn dispatch_io(&self, port: u16) -> Option<u16> {
         if self.contains_port(port) {
             Some(port - self.port_start)
         } else {
@@ -130,17 +130,17 @@ impl MmioHandler {
     }
 
     /// Check if an address falls within this handler's range
-    pub fn contains_addr(&self, addr: u64) -> bool {
+    pub(crate) fn contains_addr(&self, addr: u64) -> bool {
         addr >= self.base_addr && addr < self.base_addr + self.size
     }
 
     /// Get the address end (exclusive)
-    pub fn addr_end(&self) -> u64 {
+    pub(crate) fn addr_end(&self) -> u64 {
         self.base_addr + self.size
     }
 
     /// Dispatch an MMIO access (returns the offset within the region)
-    pub fn dispatch_mmio(&self, addr: u64) -> Option<u64> {
+    pub(crate) fn dispatch_mmio(&self, addr: u64) -> Option<u64> {
         if self.contains_addr(addr) {
             Some(addr - self.base_addr)
         } else {
@@ -180,7 +180,7 @@ impl DeviceMultiplexer {
     }
 
     /// Register an I/O handler
-    pub fn register_io(&mut self, handler: IoHandler) -> Result<(), VmError> {
+    pub(crate) fn register_io(&mut self, handler: IoHandler) -> Result<(), VmError> {
         if self.io_handlers.len() >= MAX_IO_HANDLERS {
             return Err(VmError::DeviceError);
         }
@@ -198,7 +198,7 @@ impl DeviceMultiplexer {
     }
 
     /// Register an MMIO handler
-    pub fn register_mmio(&mut self, handler: MmioHandler) -> Result<(), VmError> {
+    pub(crate) fn register_mmio(&mut self, handler: MmioHandler) -> Result<(), VmError> {
         if self.mmio_handlers.len() >= MAX_MMIO_HANDLERS {
             return Err(VmError::DeviceError);
         }
@@ -215,7 +215,7 @@ impl DeviceMultiplexer {
     }
 
     /// Dispatch an I/O access, returning (device_id, offset)
-    pub fn dispatch_io(&self, port: u16) -> Option<(u32, u16)> {
+    pub(crate) fn dispatch_io(&self, port: u16) -> Option<(u32, u16)> {
         // Find the handler whose range includes this port
         for handler in self.io_handlers.values() {
             if let Some(offset) = handler.dispatch_io(port) {
@@ -226,7 +226,7 @@ impl DeviceMultiplexer {
     }
 
     /// Dispatch an MMIO access, returning (device_id, offset)
-    pub fn dispatch_mmio(&self, addr: u64) -> Option<(u32, u64)> {
+    pub(crate) fn dispatch_mmio(&self, addr: u64) -> Option<(u32, u64)> {
         for handler in self.mmio_handlers.values() {
             if let Some(offset) = handler.dispatch_mmio(addr) {
                 return Some((handler.device_id, offset));
@@ -236,22 +236,22 @@ impl DeviceMultiplexer {
     }
 
     /// Unregister an I/O handler by starting port
-    pub fn unregister_io(&mut self, port_start: u16) -> bool {
+    pub(crate) fn unregister_io(&mut self, port_start: u16) -> bool {
         self.io_handlers.remove(&port_start).is_some()
     }
 
     /// Unregister an MMIO handler by base address
-    pub fn unregister_mmio(&mut self, base_addr: u64) -> bool {
+    pub(crate) fn unregister_mmio(&mut self, base_addr: u64) -> bool {
         self.mmio_handlers.remove(&base_addr).is_some()
     }
 
     /// Get number of registered I/O handlers
-    pub fn io_handler_count(&self) -> usize {
+    pub(crate) fn io_handler_count(&self) -> usize {
         self.io_handlers.len()
     }
 
     /// Get number of registered MMIO handlers
-    pub fn mmio_handler_count(&self) -> usize {
+    pub(crate) fn mmio_handler_count(&self) -> usize {
         self.mmio_handlers.len()
     }
 }
@@ -289,23 +289,23 @@ impl DeviceState {
     }
 
     /// Write a u32 value to the state data
-    pub fn write_u32(&mut self, value: u32) {
+    pub(crate) fn write_u32(&mut self, value: u32) {
         self.data.extend_from_slice(&value.to_le_bytes());
     }
 
     /// Write a u64 value to the state data
-    pub fn write_u64(&mut self, value: u64) {
+    pub(crate) fn write_u64(&mut self, value: u64) {
         self.data.extend_from_slice(&value.to_le_bytes());
     }
 
     /// Write a byte slice to the state data
-    pub fn write_bytes(&mut self, bytes: &[u8]) {
+    pub(crate) fn write_bytes(&mut self, bytes: &[u8]) {
         self.write_u32(bytes.len() as u32);
         self.data.extend_from_slice(bytes);
     }
 
     /// Read a u32 from state data at offset, advancing offset
-    pub fn read_u32(&self, offset: &mut usize) -> Option<u32> {
+    pub(crate) fn read_u32(&self, offset: &mut usize) -> Option<u32> {
         if *offset + 4 > self.data.len() {
             return None;
         }
@@ -315,7 +315,7 @@ impl DeviceState {
     }
 
     /// Read a u64 from state data at offset, advancing offset
-    pub fn read_u64(&self, offset: &mut usize) -> Option<u64> {
+    pub(crate) fn read_u64(&self, offset: &mut usize) -> Option<u64> {
         if *offset + 8 > self.data.len() {
             return None;
         }
@@ -325,7 +325,7 @@ impl DeviceState {
     }
 
     /// Read bytes from state data at offset, advancing offset
-    pub fn read_bytes(&self, offset: &mut usize) -> Option<Vec<u8>> {
+    pub(crate) fn read_bytes(&self, offset: &mut usize) -> Option<Vec<u8>> {
         let len = self.read_u32(offset)? as usize;
         if *offset + len > self.data.len() {
             return None;
@@ -336,7 +336,7 @@ impl DeviceState {
     }
 
     /// Get total serialized size
-    pub fn serialized_size(&self) -> usize {
+    pub(crate) fn serialized_size(&self) -> usize {
         4 + self.device_name.len() + self.data.len() // name_len + name + data
     }
 }
@@ -372,12 +372,12 @@ impl VmState {
     }
 
     /// Add vCPU register state
-    pub fn add_vcpu_state(&mut self, regs: Vec<u8>) {
+    pub(crate) fn add_vcpu_state(&mut self, regs: Vec<u8>) {
         self.vcpu_regs.push(regs);
     }
 
     /// Set memory hash
-    pub fn set_memory_hash(&mut self, hash: u64) {
+    pub(crate) fn set_memory_hash(&mut self, hash: u64) {
         self.memory_hash = hash;
     }
 }
@@ -417,7 +417,7 @@ impl MigrationHeader {
     }
 
     /// Validate the header
-    pub fn validate(&self) -> Result<(), VmError> {
+    pub(crate) fn validate(&self) -> Result<(), VmError> {
         if self.magic != MIGRATION_MAGIC {
             return Err(VmError::InvalidVmState);
         }
@@ -471,7 +471,7 @@ impl MigrationHeader {
 
 /// Serialize VM and device states into a migration stream
 #[cfg(feature = "alloc")]
-pub fn serialize_state(vm_state: &VmState, device_states: &[DeviceState]) -> Vec<u8> {
+pub(crate) fn serialize_state(vm_state: &VmState, device_states: &[DeviceState]) -> Vec<u8> {
     let mut vm_data = Vec::new();
     // Serialize VM state
     vm_data.extend_from_slice(&vm_state.num_vcpus.to_le_bytes());
@@ -507,7 +507,7 @@ pub fn serialize_state(vm_state: &VmState, device_states: &[DeviceState]) -> Vec
 
 /// Deserialize VM state from a migration stream
 #[cfg(feature = "alloc")]
-pub fn deserialize_state(data: &[u8]) -> Result<(VmState, Vec<DeviceState>), VmError> {
+pub(crate) fn deserialize_state(data: &[u8]) -> Result<(VmState, Vec<DeviceState>), VmError> {
     let header = MigrationHeader::from_bytes(data)?;
 
     let vm_offset = 24; // After header
@@ -646,7 +646,7 @@ impl DirtyPageTracker {
     }
 
     /// Mark a page as dirty by its page frame number
-    pub fn mark_dirty(&mut self, page_num: u64) {
+    pub(crate) fn mark_dirty(&mut self, page_num: u64) {
         if page_num >= self.num_pages {
             return;
         }
@@ -662,12 +662,12 @@ impl DirtyPageTracker {
     }
 
     /// Mark a page as dirty by physical address
-    pub fn mark_dirty_addr(&mut self, addr: u64) {
+    pub(crate) fn mark_dirty_addr(&mut self, addr: u64) {
         self.mark_dirty(addr / self.page_size);
     }
 
     /// Check if a page is dirty
-    pub fn is_dirty(&self, page_num: u64) -> bool {
+    pub(crate) fn is_dirty(&self, page_num: u64) -> bool {
         if page_num >= self.num_pages {
             return false;
         }
@@ -681,7 +681,7 @@ impl DirtyPageTracker {
     }
 
     /// Get list of dirty page numbers
-    pub fn get_dirty_pages(&self) -> Vec<u64> {
+    pub(crate) fn get_dirty_pages(&self) -> Vec<u64> {
         let mut pages = Vec::new();
         for (word_idx, &word) in self.bitmap.iter().enumerate() {
             if word == 0 {
@@ -700,7 +700,7 @@ impl DirtyPageTracker {
     }
 
     /// Clear all dirty bits and return the list of previously dirty pages
-    pub fn clear(&mut self) -> Vec<u64> {
+    pub(crate) fn clear(&mut self) -> Vec<u64> {
         let dirty = self.get_dirty_pages();
         for word in &mut self.bitmap {
             *word = 0;
@@ -710,22 +710,22 @@ impl DirtyPageTracker {
     }
 
     /// Get the number of dirty pages
-    pub fn dirty_count(&self) -> u64 {
+    pub(crate) fn dirty_count(&self) -> u64 {
         self.dirty_count
     }
 
     /// Get the total number of tracked pages
-    pub fn total_pages(&self) -> u64 {
+    pub(crate) fn total_pages(&self) -> u64 {
         self.num_pages
     }
 
     /// Get page size
-    pub fn page_size(&self) -> u64 {
+    pub(crate) fn page_size(&self) -> u64 {
         self.page_size
     }
 
     /// Mark all pages as dirty (for initial transfer)
-    pub fn mark_all_dirty(&mut self) {
+    pub(crate) fn mark_all_dirty(&mut self) {
         for (i, word) in self.bitmap.iter_mut().enumerate() {
             let remaining = self.num_pages.saturating_sub(i as u64 * BITS_PER_WORD);
             if remaining >= BITS_PER_WORD {
@@ -800,7 +800,7 @@ impl MigrationStream {
     }
 
     /// Start the pre-copy phase
-    pub fn start_precopy(&mut self) {
+    pub(crate) fn start_precopy(&mut self) {
         self.phase = MigrationPhase::PreCopy;
         self.rounds = 0;
         self.tracker.mark_all_dirty();
@@ -808,7 +808,7 @@ impl MigrationStream {
 
     /// Send dirty pages for the current round
     /// Returns the page numbers that were sent
-    pub fn send_dirty_pages(&mut self) -> Vec<u64> {
+    pub(crate) fn send_dirty_pages(&mut self) -> Vec<u64> {
         if self.phase != MigrationPhase::PreCopy {
             return Vec::new();
         }
@@ -824,14 +824,14 @@ impl MigrationStream {
     }
 
     /// Receive dirty pages on the destination (mark them as received)
-    pub fn receive_dirty_pages(&mut self, pages: &[u64]) -> Result<(), VmError> {
+    pub(crate) fn receive_dirty_pages(&mut self, pages: &[u64]) -> Result<(), VmError> {
         // On destination side, pages have been received and applied
         self.total_pages_sent = self.total_pages_sent.saturating_add(pages.len() as u64);
         Ok(())
     }
 
     /// Check if we should transition to stop-and-copy
-    pub fn should_stop_and_copy(&self) -> bool {
+    pub(crate) fn should_stop_and_copy(&self) -> bool {
         if self.phase != MigrationPhase::PreCopy {
             return false;
         }
@@ -840,7 +840,7 @@ impl MigrationStream {
     }
 
     /// Transition to stop-and-copy phase
-    pub fn stop_and_copy(&mut self) -> Vec<u64> {
+    pub(crate) fn stop_and_copy(&mut self) -> Vec<u64> {
         self.phase = MigrationPhase::StopAndCopy;
 
         // Get final dirty pages
@@ -853,17 +853,17 @@ impl MigrationStream {
     }
 
     /// Complete the migration
-    pub fn complete(&mut self) {
+    pub(crate) fn complete(&mut self) {
         self.phase = MigrationPhase::Done;
     }
 
     /// Mark migration as failed
-    pub fn fail(&mut self) {
+    pub(crate) fn fail(&mut self) {
         self.phase = MigrationPhase::Failed;
     }
 
     /// Get migration statistics
-    pub fn stats(&self) -> MigrationStats {
+    pub(crate) fn stats(&self) -> MigrationStats {
         MigrationStats {
             phase: self.phase,
             rounds: self.rounds,

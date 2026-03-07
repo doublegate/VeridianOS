@@ -253,6 +253,8 @@ impl SharedAudioBuffer {
     /// Converts the sample slice to bytes and writes into the ring buffer.
     /// Returns the number of samples actually written.
     pub fn write_samples(&self, samples: &[i16]) -> usize {
+        // SAFETY: Reinterpreting &[i16] as &[u8]; i16 alignment >= u8, length scaled by
+        // 2.
         let bytes: &[u8] = unsafe {
             core::slice::from_raw_parts(samples.as_ptr() as *const u8, samples.len() * 2)
         };
@@ -266,6 +268,8 @@ impl SharedAudioBuffer {
     /// Reads bytes from the ring buffer and reinterprets as i16 samples.
     /// Returns the number of samples actually read.
     pub fn read_samples(&self, output: &mut [i16]) -> usize {
+        // SAFETY: Reinterpreting &mut [i16] as &mut [u8]; i16 alignment >= u8, length
+        // scaled by 2.
         let bytes: &mut [u8] = unsafe {
             core::slice::from_raw_parts_mut(output.as_mut_ptr() as *mut u8, output.len() * 2)
         };

@@ -902,6 +902,7 @@ fn handle_syscall(
             let event_ptr = arg4;
             let event = if event_ptr != 0 {
                 validate_user_ptr_typed::<crate::net::epoll::EpollEvent>(event_ptr)?;
+                // SAFETY: event_ptr validated as aligned, non-null, and in user-space above.
                 Some(unsafe { &*(event_ptr as *const crate::net::epoll::EpollEvent) })
             } else {
                 None
@@ -922,6 +923,8 @@ fn handle_syscall(
                 events_ptr,
                 max_events * core::mem::size_of::<crate::net::epoll::EpollEvent>(),
             )?;
+            // SAFETY: events_ptr validated by validate_user_buffer above as non-null and in
+            // user-space.
             let events = unsafe {
                 core::slice::from_raw_parts_mut(
                     events_ptr as *mut crate::net::epoll::EpollEvent,
@@ -999,6 +1002,8 @@ fn handle_syscall(
             let sample_count = arg3;
             let byte_len = sample_count * 2; // i16 = 2 bytes
             validate_user_buffer(buf_ptr, byte_len)?;
+            // SAFETY: buf_ptr validated by validate_user_buffer above as non-null and in
+            // user-space.
             let samples =
                 unsafe { core::slice::from_raw_parts(buf_ptr as *const i16, sample_count) };
             crate::audio::client::with_client(|client| client.write_samples(stream_id, samples))
@@ -1026,6 +1031,7 @@ fn handle_syscall(
                 )
             })
             .map_err(|_| SyscallError::InvalidState)?;
+            // SAFETY: info_ptr validated by validate_user_buffer(info_ptr, 12) above.
             unsafe {
                 let ptr = info_ptr as *mut u32;
                 ptr.write(info.0);

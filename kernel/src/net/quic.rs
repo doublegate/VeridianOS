@@ -91,11 +91,11 @@ pub enum QuicError {
 }
 
 impl QuicError {
-    pub fn as_u64(self) -> u64 {
+    pub(crate) fn as_u64(self) -> u64 {
         self as u64
     }
 
-    pub fn from_u64(val: u64) -> Self {
+    pub(crate) fn from_u64(val: u64) -> Self {
         match val {
             0x00 => Self::NoError,
             0x01 => Self::InternalError,
@@ -130,7 +130,7 @@ pub type QuicResult<T> = Result<T, QuicError>;
 ///
 /// Values 0..63 use 1 byte, 64..16383 use 2 bytes,
 /// 16384..1073741823 use 4 bytes, larger use 8 bytes.
-pub fn encode_varint(value: u64, buf: &mut [u8]) -> QuicResult<usize> {
+pub(crate) fn encode_varint(value: u64, buf: &mut [u8]) -> QuicResult<usize> {
     if value <= 63 {
         if buf.is_empty() {
             return Err(QuicError::BufferTooSmall);
@@ -165,7 +165,7 @@ pub fn encode_varint(value: u64, buf: &mut [u8]) -> QuicResult<usize> {
 
 /// Decode a variable-length integer from `buf`, returning (value,
 /// bytes_consumed).
-pub fn decode_varint(buf: &[u8]) -> QuicResult<(u64, usize)> {
+pub(crate) fn decode_varint(buf: &[u8]) -> QuicResult<(u64, usize)> {
     if buf.is_empty() {
         return Err(QuicError::BufferTooSmall);
     }
@@ -204,7 +204,7 @@ pub fn decode_varint(buf: &[u8]) -> QuicResult<(u64, usize)> {
 }
 
 /// Return the number of bytes needed to encode `value` as a varint.
-pub fn varint_len(value: u64) -> usize {
+pub(crate) fn varint_len(value: u64) -> usize {
     if value <= 63 {
         1
     } else if value <= 16383 {
@@ -245,7 +245,7 @@ impl ConnectionId {
         })
     }
 
-    pub fn as_slice(&self) -> &[u8] {
+    pub(crate) fn as_slice(&self) -> &[u8] {
         &self.bytes[..self.len as usize]
     }
 
@@ -272,7 +272,7 @@ impl ConnectionId {
 /// difference from the largest acknowledged packet number.
 ///
 /// Returns (encoded value, byte length 1-4).
-pub fn encode_packet_number(full_pn: u64, largest_acked: u64) -> (u32, usize) {
+pub(crate) fn encode_packet_number(full_pn: u64, largest_acked: u64) -> (u32, usize) {
     let num_unacked = if full_pn > largest_acked {
         full_pn - largest_acked
     } else {
@@ -297,7 +297,7 @@ pub fn encode_packet_number(full_pn: u64, largest_acked: u64) -> (u32, usize) {
 ///
 /// Uses the expected packet number (largest received + 1) and the truncated
 /// value to reconstruct the full packet number (RFC 9000 Appendix A).
-pub fn decode_packet_number(largest_pn: u64, truncated_pn: u32, pn_len: usize) -> u64 {
+pub(crate) fn decode_packet_number(largest_pn: u64, truncated_pn: u32, pn_len: usize) -> u64 {
     let expected_pn = largest_pn.wrapping_add(1);
     let pn_nbits = (pn_len * 8) as u64;
     let pn_win = 1u64 << pn_nbits;
@@ -332,7 +332,7 @@ pub enum LongPacketType {
 }
 
 impl LongPacketType {
-    pub fn from_bits(bits: u8) -> QuicResult<Self> {
+    pub(crate) fn from_bits(bits: u8) -> QuicResult<Self> {
         match bits {
             0x00 => Ok(Self::Initial),
             0x01 => Ok(Self::ZeroRtt),
@@ -370,7 +370,7 @@ pub struct LongHeader {
 
 impl LongHeader {
     /// Encode a long header into `buf`, returning bytes written.
-    pub fn encode(&self, buf: &mut [u8]) -> QuicResult<usize> {
+    pub(crate) fn encode(&self, buf: &mut [u8]) -> QuicResult<usize> {
         let mut off = 0;
 
         // First byte: 1 (form) | 1 (fixed) | type (2 bits) | reserved (2) | pn_len (2)
@@ -449,7 +449,7 @@ impl LongHeader {
     }
 
     /// Decode a long header from `buf`, returning (header, bytes_consumed).
-    pub fn decode(buf: &[u8]) -> QuicResult<(Self, usize)> {
+    pub(crate) fn decode(buf: &[u8]) -> QuicResult<(Self, usize)> {
         if buf.len() < 7 {
             return Err(QuicError::BufferTooSmall);
         }
@@ -586,7 +586,7 @@ impl ShortHeader {
     }
 
     /// Encode a short header into `buf`, returning bytes written.
-    pub fn encode(&self, buf: &mut [u8], largest_acked: u64) -> QuicResult<usize> {
+    pub(crate) fn encode(&self, buf: &mut [u8], largest_acked: u64) -> QuicResult<usize> {
         let mut off = 0;
         let (pn_val, pn_len) = encode_packet_number(self.packet_number, largest_acked);
 
@@ -624,7 +624,7 @@ impl ShortHeader {
 ///
 /// `mask` is a 5-byte sample derived from the Header Protection (HP) key.
 /// Byte 0 masks the first byte; bytes 1-4 mask packet number bytes.
-pub fn apply_header_protection(buf: &mut [u8], pn_offset: usize, mask: &[u8; 5]) {
+pub(crate) fn apply_header_protection(buf: &mut [u8], pn_offset: usize, mask: &[u8; 5]) {
     if buf.is_empty() {
         return;
     }
@@ -736,7 +736,7 @@ pub struct EcnCounts {
 
 impl QuicFrame {
     /// Encode frame into `buf`, returning bytes written.
-    pub fn encode(&self, buf: &mut [u8]) -> QuicResult<usize> {
+    pub(crate) fn encode(&self, buf: &mut [u8]) -> QuicResult<usize> {
         match self {
             Self::Padding => {
                 if buf.is_empty() {
@@ -933,7 +933,7 @@ impl QuicFrame {
     }
 
     /// Decode a single frame from `buf`, returning (frame, bytes_consumed).
-    pub fn decode(buf: &[u8]) -> QuicResult<(Self, usize)> {
+    pub(crate) fn decode(buf: &[u8]) -> QuicResult<(Self, usize)> {
         if buf.is_empty() {
             return Err(QuicError::BufferTooSmall);
         }
@@ -1175,7 +1175,7 @@ impl QuicFrame {
     }
 
     /// Returns true if this frame is ack-eliciting.
-    pub fn is_ack_eliciting(&self) -> bool {
+    pub(crate) fn is_ack_eliciting(&self) -> bool {
         !matches!(self, Self::Ack { .. } | Self::Padding)
     }
 }
@@ -1237,14 +1237,20 @@ impl PnSpace {
     }
 
     /// Allocate the next packet number.
-    pub fn alloc_pn(&mut self) -> u64 {
+    pub(crate) fn alloc_pn(&mut self) -> u64 {
         let pn = self.next_pn;
         self.next_pn += 1;
         pn
     }
 
     /// Record a sent packet.
-    pub fn on_packet_sent(&mut self, pn: u64, sent_time_us: u64, ack_eliciting: bool, size: usize) {
+    pub(crate) fn on_packet_sent(
+        &mut self,
+        pn: u64,
+        sent_time_us: u64,
+        ack_eliciting: bool,
+        size: usize,
+    ) {
         self.sent_packets.insert(
             pn,
             SentPacketInfo {
@@ -1256,7 +1262,7 @@ impl PnSpace {
     }
 
     /// Record a received packet number from peer.
-    pub fn on_packet_received(&mut self, pn: u64, ack_eliciting: bool) {
+    pub(crate) fn on_packet_received(&mut self, pn: u64, ack_eliciting: bool) {
         if pn > self.largest_received {
             self.largest_received = pn;
         }
@@ -1338,7 +1344,7 @@ impl QuicConnection {
     }
 
     /// Transition to a new connection state.
-    pub fn transition(&mut self, new_state: ConnectionState) -> QuicResult<()> {
+    pub(crate) fn transition(&mut self, new_state: ConnectionState) -> QuicResult<()> {
         let valid = matches!(
             (self.state, new_state),
             (ConnectionState::Idle, ConnectionState::Handshake)
@@ -1358,17 +1364,17 @@ impl QuicConnection {
     }
 
     /// Get the packet number space for a given space index.
-    pub fn pn_space(&self, space: PacketNumberSpace) -> &PnSpace {
+    pub(crate) fn pn_space(&self, space: PacketNumberSpace) -> &PnSpace {
         &self.pn_spaces[space as usize]
     }
 
     /// Get the packet number space mutably.
-    pub fn pn_space_mut(&mut self, space: PacketNumberSpace) -> &mut PnSpace {
+    pub(crate) fn pn_space_mut(&mut self, space: PacketNumberSpace) -> &mut PnSpace {
         &mut self.pn_spaces[space as usize]
     }
 
     /// Check if the connection has timed out.
-    pub fn is_idle_timeout(&self, now_us: u64) -> bool {
+    pub(crate) fn is_idle_timeout(&self, now_us: u64) -> bool {
         if self.last_activity_us == 0 {
             return false;
         }
@@ -1377,24 +1383,24 @@ impl QuicConnection {
     }
 
     /// Update last activity timestamp.
-    pub fn touch(&mut self, now_us: u64) {
+    pub(crate) fn touch(&mut self, now_us: u64) {
         self.last_activity_us = now_us;
     }
 
     /// Rotate connection ID: add a new CID and optionally retire old ones.
-    pub fn add_connection_id(&mut self, cid: ConnectionId) {
+    pub(crate) fn add_connection_id(&mut self, cid: ConnectionId) {
         self.active_cids.push(cid);
     }
 
     /// Retire connection IDs with sequence numbers below `retire_prior_to`.
-    pub fn retire_connection_ids(&mut self, retire_prior_to: usize) {
+    pub(crate) fn retire_connection_ids(&mut self, retire_prior_to: usize) {
         if retire_prior_to < self.active_cids.len() {
             self.active_cids.drain(0..retire_prior_to);
         }
     }
 
     /// Initiate path validation by sending PATH_CHALLENGE.
-    pub fn initiate_path_challenge(&mut self, challenge_data: [u8; 8]) -> QuicFrame {
+    pub(crate) fn initiate_path_challenge(&mut self, challenge_data: [u8; 8]) -> QuicFrame {
         self.path_challenge_data = Some(challenge_data);
         QuicFrame::PathChallenge {
             data: challenge_data,
@@ -1402,7 +1408,7 @@ impl QuicConnection {
     }
 
     /// Validate path response.
-    pub fn validate_path_response(&mut self, response_data: &[u8; 8]) -> bool {
+    pub(crate) fn validate_path_response(&mut self, response_data: &[u8; 8]) -> bool {
         if let Some(expected) = self.path_challenge_data {
             if *response_data == expected {
                 self.path_challenge_data = None;
@@ -1413,12 +1419,12 @@ impl QuicConnection {
     }
 
     /// Check connection-level send flow control.
-    pub fn can_send(&self, bytes: u64) -> bool {
+    pub(crate) fn can_send(&self, bytes: u64) -> bool {
         self.data_sent + bytes <= self.max_data_send
     }
 
     /// Update connection-level max data (received MAX_DATA from peer).
-    pub fn update_max_data_send(&mut self, max_data: u64) {
+    pub(crate) fn update_max_data_send(&mut self, max_data: u64) {
         if max_data > self.max_data_send {
             self.max_data_send = max_data;
         }
@@ -1464,7 +1470,7 @@ impl RttEstimator {
     }
 
     /// Update RTT estimate with a new sample.
-    pub fn update(&mut self, rtt_sample_us: u64) {
+    pub(crate) fn update(&mut self, rtt_sample_us: u64) {
         self.latest_rtt = rtt_sample_us;
         if rtt_sample_us < self.min_rtt {
             self.min_rtt = rtt_sample_us;
@@ -1491,19 +1497,19 @@ impl RttEstimator {
     }
 
     /// Get smoothed RTT in microseconds.
-    pub fn smoothed_rtt(&self) -> u64 {
+    pub(crate) fn smoothed_rtt(&self) -> u64 {
         self.srtt_shifted >> SRTT_SHIFT
     }
 
     /// Get RTT variance in microseconds.
-    pub fn rttvar(&self) -> u64 {
+    pub(crate) fn rttvar(&self) -> u64 {
         self.rttvar_shifted >> RTTVAR_SHIFT
     }
 
     /// Calculate PTO (Probe Timeout) in microseconds.
     ///
     /// PTO = 2 * smoothed_RTT + max(4 * rttvar, 1ms)
-    pub fn pto(&self) -> u64 {
+    pub(crate) fn pto(&self) -> u64 {
         let srtt = self.smoothed_rtt();
         let rttvar = self.rttvar();
         let var_component = if rttvar * 4 > PTO_MIN_US {
@@ -1517,7 +1523,7 @@ impl RttEstimator {
     /// Calculate the loss detection time threshold in microseconds.
     ///
     /// Time threshold = max(9/8 * max(smoothed_rtt, latest_rtt), 1ms)
-    pub fn loss_time_threshold(&self) -> u64 {
+    pub(crate) fn loss_time_threshold(&self) -> u64 {
         let base = if self.smoothed_rtt() > self.latest_rtt {
             self.smoothed_rtt()
         } else {
@@ -1551,7 +1557,7 @@ pub enum StreamType {
 
 impl StreamType {
     /// Classify a stream ID.
-    pub fn from_id(stream_id: u64) -> Self {
+    pub(crate) fn from_id(stream_id: u64) -> Self {
         match stream_id & 0x03 {
             0x00 => Self::ClientBidi,
             0x01 => Self::ServerBidi,
@@ -1562,12 +1568,12 @@ impl StreamType {
     }
 
     /// Whether this stream type is bidirectional.
-    pub fn is_bidirectional(self) -> bool {
+    pub(crate) fn is_bidirectional(self) -> bool {
         matches!(self, Self::ClientBidi | Self::ServerBidi)
     }
 
     /// Whether this stream type is initiated by the client.
-    pub fn is_client_initiated(self) -> bool {
+    pub(crate) fn is_client_initiated(self) -> bool {
         matches!(self, Self::ClientBidi | Self::ClientUni)
     }
 }
@@ -1633,7 +1639,7 @@ impl QuicStream {
     }
 
     /// Transition stream state.
-    pub fn transition(&mut self, new_state: StreamState) -> QuicResult<()> {
+    pub(crate) fn transition(&mut self, new_state: StreamState) -> QuicResult<()> {
         let valid = matches!(
             (self.state, new_state),
             (StreamState::Idle, StreamState::Open)
@@ -1651,7 +1657,7 @@ impl QuicStream {
     }
 
     /// Write data to the send buffer.
-    pub fn write(&mut self, data: &[u8]) -> QuicResult<usize> {
+    pub(crate) fn write(&mut self, data: &[u8]) -> QuicResult<usize> {
         if self.state == StreamState::HalfClosedLocal || self.state == StreamState::Closed {
             return Err(QuicError::StreamStateError);
         }
@@ -1669,7 +1675,7 @@ impl QuicStream {
     }
 
     /// Read data from the receive buffer.
-    pub fn read(&mut self, buf: &mut [u8]) -> usize {
+    pub(crate) fn read(&mut self, buf: &mut [u8]) -> usize {
         let to_read = if buf.len() < self.recv_buf.len() {
             buf.len()
         } else {
@@ -1681,7 +1687,7 @@ impl QuicStream {
     }
 
     /// Receive data from a STREAM frame.
-    pub fn receive_data(&mut self, offset: u64, data: &[u8], fin: bool) -> QuicResult<()> {
+    pub(crate) fn receive_data(&mut self, offset: u64, data: &[u8], fin: bool) -> QuicResult<()> {
         if self.state == StreamState::HalfClosedRemote || self.state == StreamState::Closed {
             return Err(QuicError::StreamStateError);
         }
@@ -1711,12 +1717,12 @@ impl QuicStream {
     }
 
     /// Check if send flow control allows sending `bytes` more.
-    pub fn can_send(&self, bytes: u64) -> bool {
+    pub(crate) fn can_send(&self, bytes: u64) -> bool {
         self.bytes_sent + bytes <= self.max_send_data
     }
 
     /// Update max send data (received MAX_STREAM_DATA from peer).
-    pub fn update_max_send_data(&mut self, max_data: u64) {
+    pub(crate) fn update_max_send_data(&mut self, max_data: u64) {
         if max_data > self.max_send_data {
             self.max_send_data = max_data;
         }
@@ -1755,7 +1761,7 @@ impl StreamManager {
     }
 
     /// Open a new bidirectional stream, returning its ID.
-    pub fn open_bidi_stream(&mut self) -> u64 {
+    pub(crate) fn open_bidi_stream(&mut self) -> u64 {
         let id = if self.is_client {
             let id = self.next_client_bidi;
             self.next_client_bidi += 4;
@@ -1776,7 +1782,7 @@ impl StreamManager {
     }
 
     /// Open a new unidirectional stream, returning its ID.
-    pub fn open_uni_stream(&mut self) -> u64 {
+    pub(crate) fn open_uni_stream(&mut self) -> u64 {
         let id = if self.is_client {
             let id = self.next_client_uni;
             self.next_client_uni += 4;
@@ -1797,7 +1803,7 @@ impl StreamManager {
     }
 
     /// Get a stream by ID, creating it if it was initiated by the peer.
-    pub fn get_or_create(&mut self, stream_id: u64) -> &mut QuicStream {
+    pub(crate) fn get_or_create(&mut self, stream_id: u64) -> &mut QuicStream {
         if !self.streams.contains_key(&stream_id) {
             let mut stream = QuicStream::new(
                 stream_id,
@@ -1814,17 +1820,17 @@ impl StreamManager {
     }
 
     /// Get a stream by ID.
-    pub fn get(&self, stream_id: u64) -> Option<&QuicStream> {
+    pub(crate) fn get(&self, stream_id: u64) -> Option<&QuicStream> {
         self.streams.get(&stream_id)
     }
 
     /// Get a mutable stream by ID.
-    pub fn get_mut(&mut self, stream_id: u64) -> Option<&mut QuicStream> {
+    pub(crate) fn get_mut(&mut self, stream_id: u64) -> Option<&mut QuicStream> {
         self.streams.get_mut(&stream_id)
     }
 
     /// Close a stream.
-    pub fn close_stream(&mut self, stream_id: u64) -> QuicResult<()> {
+    pub(crate) fn close_stream(&mut self, stream_id: u64) -> QuicResult<()> {
         let stream = self
             .streams
             .get_mut(&stream_id)
@@ -1840,7 +1846,7 @@ impl StreamManager {
     }
 
     /// Number of active (non-closed) streams.
-    pub fn active_count(&self) -> usize {
+    pub(crate) fn active_count(&self) -> usize {
         self.streams
             .values()
             .filter(|s| s.state != StreamState::Closed && s.state != StreamState::Idle)
@@ -1881,7 +1887,11 @@ impl LossDetector {
     /// Detect lost packets in the given packet number space.
     ///
     /// Returns a list of lost packet numbers.
-    pub fn detect_lost_packets(pn_space: &PnSpace, rtt: &RttEstimator, now_us: u64) -> Vec<u64> {
+    pub(crate) fn detect_lost_packets(
+        pn_space: &PnSpace,
+        rtt: &RttEstimator,
+        now_us: u64,
+    ) -> Vec<u64> {
         let mut lost = Vec::new();
         let largest_acked = pn_space.largest_acked;
         let loss_delay = rtt.loss_time_threshold();
@@ -1907,21 +1917,21 @@ impl LossDetector {
     }
 
     /// Calculate PTO with exponential backoff.
-    pub fn compute_pto(&self, rtt: &RttEstimator) -> u64 {
+    pub(crate) fn compute_pto(&self, rtt: &RttEstimator) -> u64 {
         let base_pto = rtt.pto();
         // Exponential backoff: PTO * 2^pto_count
         base_pto.checked_shl(self.pto_count).unwrap_or(u64::MAX)
     }
 
     /// Record that an ack-eliciting packet was sent.
-    pub fn on_ack_eliciting_sent(&mut self, space: PacketNumberSpace, now_us: u64) {
+    pub(crate) fn on_ack_eliciting_sent(&mut self, space: PacketNumberSpace, now_us: u64) {
         self.time_of_last_ack_eliciting[space as usize] = now_us;
     }
 
     /// Process an ACK and update loss detection state.
     ///
     /// Returns (newly_acked_packets, rtt_sample_us).
-    pub fn on_ack_received(
+    pub(crate) fn on_ack_received(
         pn_space: &mut PnSpace,
         largest_acked: u64,
         ack_delay_us: u64,
@@ -1958,12 +1968,12 @@ impl LossDetector {
     }
 
     /// Reset PTO count (called when ack received).
-    pub fn reset_pto(&mut self) {
+    pub(crate) fn reset_pto(&mut self) {
         self.pto_count = 0;
     }
 
     /// Increment PTO count (called on PTO timeout).
-    pub fn on_pto_timeout(&mut self) {
+    pub(crate) fn on_pto_timeout(&mut self) {
         self.pto_count += 1;
     }
 }

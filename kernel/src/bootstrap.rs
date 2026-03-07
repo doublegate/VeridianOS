@@ -148,6 +148,8 @@ extern "C" fn kernel_init_stage3_onwards() -> ! {
     if let Err(e) = kernel_init_stage3_impl() {
         crate::println!("[BOOTSTRAP] FATAL: Stage 3+ init failed: {:?}", e);
         loop {
+            // SAFETY: Halting the CPU in an unrecoverable error loop. No
+            // memory or stack side effects.
             unsafe {
                 core::arch::asm!("hlt", options(nomem, nostack));
             }
@@ -1395,6 +1397,8 @@ fn run_user_process(pid: crate::process::ProcessId) {
             .tls_fs_base
             .load(core::sync::atomic::Ordering::Acquire);
         if fs_base != 0 {
+            // SAFETY: Writing IA32_FS_BASE MSR and emitting serial debug output.
+            // fs_base is a valid TLS address from the ELF loader.
             unsafe {
                 crate::arch::x86_64::idt::raw_serial_str(b"[BOOT] FS_BASE=0x");
                 crate::arch::x86_64::idt::raw_serial_hex(fs_base);
@@ -1641,6 +1645,9 @@ pub fn boot_run_forked_child(
     // Without restoring these, the parent's sysretq uses wrong RSP and
     // the parent's next syscall uses a stale kernel stack pointer.
     let per_cpu = crate::arch::x86_64::syscall::per_cpu_data_ptr();
+    // SAFETY: per_cpu is a valid pointer to the current CPU's PerCpuData,
+    // initialized during boot. We read kernel_rsp and user_rsp to save/restore
+    // across the child dispatch.
     let saved_kernel_rsp = unsafe { (*per_cpu).kernel_rsp };
     let saved_user_rsp = unsafe { (*per_cpu).user_rsp };
 
@@ -1651,11 +1658,15 @@ pub fn boot_run_forked_child(
     // and KernelGsBase = 0 (from parent's syscall_entry swapgs). enter_usermode
     // needs KernelGsBase = per_cpu_data so the child's syscall_entry can load
     // kernel_rsp. swapgs swaps them: GS.base → 0, KernelGsBase → per_cpu_data.
+    // SAFETY: Rebalancing swapgs so KernelGsBase holds per_cpu_data for the
+    // child's syscall_entry. We are in a syscall context with known GS state.
     unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) };
 
     let kernel_rsp_ptr = per_cpu as u64;
 
     // Diagnostic: show key registers being passed to child
+    // SAFETY: Writing directly to the serial port for low-level debug output.
+    // The raw_serial_* functions use port I/O that is always safe in kernel mode.
     unsafe {
         crate::arch::x86_64::idt::raw_serial_str(b"[CHILD_DISPATCH] rip=0x");
         crate::arch::x86_64::idt::raw_serial_hex(regs.rip);
@@ -1668,6 +1679,9 @@ pub fn boot_run_forked_child(
         crate::arch::x86_64::idt::raw_serial_str(b"\n");
     }
 
+    // SAFETY: All preconditions for enter_forked_child_returnable are met:
+    // regs contains the child's saved register state, cr3 is a valid page table,
+    // and kernel_rsp_ptr points to the per-CPU data for syscall re-entry.
     unsafe {
         crate::arch::x86_64::usermode::enter_forked_child_returnable(&regs, cr3, kernel_rsp_ptr);
     }
@@ -1676,6 +1690,8 @@ pub fn boot_run_forked_child(
     // boot_return_to_kernel did swapgs (balancing child's syscall_entry swapgs)
     // and zeroed GS. Now: GS.base=0, KernelGsBase=per_cpu_data.
     // swapgs to restore parent's syscall handler state: GS.base=per_cpu_data.
+    // SAFETY: Restoring GS.base to per_cpu_data after child exit. The GS state
+    // is known (GS.base=0, KernelGsBase=per_cpu_data) from boot_return_to_kernel.
     unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) };
 
     // Boot CR3 is restored. Free the child's page table hierarchy frames
@@ -1711,6 +1727,8 @@ pub fn boot_run_forked_child(
     // Restore parent's per-CPU state so:
     // - parent's sysretq uses the correct user RSP
     // - parent's next syscall uses the correct kernel stack
+    // SAFETY: per_cpu is a valid pointer (same as saved above). Restoring the
+    // saved values that were overwritten during child dispatch.
     unsafe {
         (*per_cpu).kernel_rsp = saved_kernel_rsp;
         (*per_cpu).user_rsp = saved_user_rsp;

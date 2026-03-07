@@ -209,6 +209,8 @@ fn format_thread_id_hex(tid: u64) -> Vec<u8> {
 #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
 fn load_thread_registers(tid: u64) -> Option<GdbRegisters> {
     let task_ptr = crate::sched::scheduler::get_task_ptr(tid)?;
+    // SAFETY: task_ptr is a valid NonNull returned by the scheduler; task lifetime
+    // outlives this read.
     let task = unsafe { task_ptr.as_ref() };
     match &task.context {
         crate::sched::task::TaskContext::X86_64(ctx) => Some(GdbRegisters {
@@ -253,6 +255,8 @@ static GDB_STATE: OnceLock<Mutex<GdbState>> = OnceLock::new();
 
 #[cfg(target_os = "none")]
 fn com2_init() {
+    // SAFETY: Programming COM2 UART registers via x86 port I/O during
+    // initialization.
     unsafe {
         // Disable interrupts
         outb(COM2_IER, 0x00);
@@ -287,6 +291,7 @@ unsafe fn inb(port: u16) -> u8 {
 
 #[cfg(target_os = "none")]
 fn com2_read_byte() -> u8 {
+    // SAFETY: Reading COM2 LSR and data registers via x86 port I/O.
     unsafe {
         // Wait for data ready
         while (inb(COM2_LSR) & LSR_DATA_READY) == 0 {
@@ -298,6 +303,7 @@ fn com2_read_byte() -> u8 {
 
 #[cfg(target_os = "none")]
 fn com2_write_byte(byte: u8) {
+    // SAFETY: Reading COM2 LSR and writing data register via x86 port I/O.
     unsafe {
         // Wait for TX empty
         while (inb(COM2_LSR) & LSR_TX_EMPTY) == 0 {
@@ -309,6 +315,7 @@ fn com2_write_byte(byte: u8) {
 
 #[cfg(target_os = "none")]
 fn _com2_data_available() -> bool {
+    // SAFETY: Reading COM2 line status register via x86 port I/O.
     unsafe { (inb(COM2_LSR) & LSR_DATA_READY) != 0 }
 }
 
