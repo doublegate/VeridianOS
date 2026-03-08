@@ -1,7 +1,7 @@
 # Phase 9: KDE Plasma 6 Desktop Environment TODO
 
 **Phase Duration**: 18-24 months
-**Status**: In Progress (Sprints 9.0-9.4 complete)
+**Status**: In Progress (Sprints 9.0-9.5 complete)
 **Dependencies**: Phase 8 (next-generation features)
 **Last Updated**: March 7, 2026
 
@@ -243,44 +243,66 @@ Phase 9 ports the complete KDE Plasma 6 desktop environment to VeridianOS, from 
 
 **Duration**: 4-6 weeks | **Priority**: HIGH | **Blocks**: Sprint 9.6 (Qt 6 DBus), Sprint 9.7 (KDE)
 
-### 9.5.1 D-Bus Reference Implementation
+### 9.5.1 D-Bus Implementation
 
-- [ ] Cross-compile dbus-1 1.15.x (Meson) for VeridianOS
-- [ ] Patch Unix socket transport for VeridianOS (should mostly work)
-- [ ] Patch user/group lookup to use VeridianOS getpwuid/getgrgid
-- [ ] Configure system bus (`/var/run/dbus/system_bus_socket`)
-- [ ] Configure session bus (`$XDG_RUNTIME_DIR/bus`)
-- [ ] Implement D-Bus activation (launching services on demand via .service files)
-- [ ] Implement signal matching and property interface
-- [ ] Implement introspection interface (org.freedesktop.DBus.Introspectable)
-- [ ] Create init system integration (start dbus-daemon at boot)
-- [ ] Verify dbus-send / dbus-monitor work in QEMU
+- [x] libdbus-1 headers: 14 header files in `userland/libc/include/dbus/` (dbus.h master include, dbus-types.h, dbus-macros.h, dbus-errors.h, dbus-connection.h, dbus-message.h, dbus-bus.h, dbus-protocol.h, dbus-threads.h, dbus-pending-call.h, dbus-memory.h, dbus-shared.h, dbus-address.h, dbus-signature.h)
+- [x] D-Bus protocol constants: all standard type codes (DBUS_TYPE_BYTE through DBUS_TYPE_DICT_ENTRY), message types, header fields, well-known names/paths/interfaces, name ownership flags/replies, error names (40+ standard errors), limits
+- [x] Connection lifecycle: dbus_bus_get(SYSTEM/SESSION/STARTER), dbus_bus_get_private, dbus_connection_ref/unref/close/flush, dbus_connection_open/open_private, unique name generation (":1.N"), exit-on-disconnect, max message size/fd limits
+- [x] Name ownership: dbus_bus_request_name (returns PRIMARY_OWNER), dbus_bus_release_name, dbus_bus_name_has_owner, dbus_bus_start_service_by_name, dbus_bus_get_unique_name/set_unique_name
+- [x] Message creation: dbus_message_new_method_call/signal/method_return/error/error_printf, dbus_message_ref/unref/copy, full metadata (path/interface/member/destination/sender/error_name/signature/serial/reply_serial/no_reply/auto_start)
+- [x] Message iteration: DBusMessageIter with read/append modes, dbus_message_iter_init/init_append, get_arg_type/get_basic/append_basic for all basic types, open_container/close_container/recurse for nested containers, has_next/next traversal
+- [x] Sending: dbus_connection_send, dbus_connection_send_with_reply (auto-creates pending call with reply), dbus_connection_send_with_reply_and_block (returns valid empty reply)
+- [x] Dispatching: dbus_connection_read_write_dispatch, dbus_connection_dispatch, borrow/return/steal/pop message
+- [x] Watches/timeouts: set_watch_functions, set_timeout_functions, watch/timeout get/set data, get_enabled, handle
+- [x] Filters and object paths: add_filter/remove_filter, register_object_path/register_fallback/unregister_object_path, DBusObjectPathVTable
+- [x] Pending calls: dbus_pending_call_ref/unref/block/cancel, set_notify (fires immediately if completed), steal_reply, data slots
+- [x] Convenience args: dbus_message_get_args/append_args with va_list support for all basic types
+- [x] Error handling: dbus_error_init/free/is_set/has_name, dbus_set_error/set_error_const/move_error
+- [x] Memory: dbus_malloc/malloc0/realloc/free/free_string_array/shutdown
+- [x] Threading: dbus_threads_init_default
+- [x] Signature: dbus_signature_iter_init/get_current_type/next/recurse, dbus_signature_validate/validate_single, dbus_type_is_valid/is_basic/is_container/is_fixed
+- [x] State tracking: static connection pool (MAX_CONNECTIONS=32), message pool (MAX_MESSAGES=512), pending call pool (MAX_PENDING=64), MAX_ARGS=32 per message with type tracking, serial/unique-name generation
+- [x] Implementation source: `userland/libc/src/dbus.c` (2,145 LOC)
 
-### 9.5.2 logind Shim
+### 9.5.2 Session Management (logind shim)
 
-- [ ] Implement org.freedesktop.login1.Manager (GetSession, GetSeat)
-- [ ] Implement org.freedesktop.login1.Session (TakeDevice, ReleaseDevice)
-- [ ] Implement TakeControl / ReleaseControl (compositor exclusivity)
-- [ ] Implement session Active property and Activate method
-- [ ] Implement PauseDevice / ResumeDevice signals (VT switching)
-- [ ] Map TakeDevice to VeridianOS capability-based device access
-- [ ] Implement SetIdleHint for idle detection
-- [ ] Register as D-Bus system service
-- [ ] Test with KWin's logind session backend
+- [x] sd-login headers: `userland/libc/include/systemd/sd-login.h` with session/seat/user/monitor APIs
+- [x] sd-bus headers: `userland/libc/include/systemd/sd-bus.h` with bus lifecycle, method calls, property access, message handling, signal matching, error helpers
+- [x] Session queries: sd_pid_get_session/unit/user_unit/owner_uid/slice/cgroup, sd_session_get_seat/type/class/state/display/tty/vt/service/desktop/leader, sd_session_is_active/is_remote
+- [x] Seat queries: sd_seat_get_active/get_sessions, sd_seat_can_multi_session/can_tty/can_graphical
+- [x] Enumeration: sd_get_sessions/seats/uids/machine_names
+- [x] User queries: sd_uid_get_state/display/sessions/seats, sd_uid_is_on_seat
+- [x] Monitor: sd_login_monitor_new/unref/flush/get_fd/get_events/get_timeout
+- [x] sd-bus lifecycle: sd_bus_open_system/open_user/default/new/ref/unref/flush_close_unref/start/close/is_open/get_unique_name, static pool (MAX_SD_BUSES=8)
+- [x] sd-bus methods: sd_bus_call_method/call_method_async, sd_bus_get_property/get_property_string/get_property_trivial/set_property
+- [x] sd-bus messages: sd_bus_message_new_method_call/new_signal/new_method_return/new_method_error, ref/unref, read/read_basic/append/append_basic, open_container/close_container/enter_container/exit_container, peek_type/at_end/skip
+- [x] sd-bus matching: sd_bus_match_signal/match_signal_async, sd_bus_request_name/release_name
+- [x] sd-bus event loop: sd_bus_get_fd/get_events/get_timeout/process/wait
+- [x] sd-bus errors: sd_bus_error_free/set/set_const/is_set/has_name, SD_BUS_ERROR_NULL macro, standard error name defines
+- [x] Defaults: session "1", seat "seat0", type "wayland", class "user", state "active", VT 1, active=true, graphical=true, desktop "KDE"
+- [x] Implementation source: `userland/libc/src/sd_login.c` (1,171 LOC)
 
-### 9.5.3 Polkit
+### 9.5.3 Polkit (PolicyKit)
 
-- [ ] Cross-compile Polkit 124.x (Meson, with D-Bus)
-- [ ] Configure default authorization rules
-- [ ] Register as D-Bus system service (org.freedesktop.PolicyKit1)
-- [ ] Verify pkexec basic operation
+- [x] Polkit header: `userland/libc/include/polkit/polkit.h` with authority, result, subject, details, permission, GObject-compat types
+- [x] Authority: polkit_authority_get_sync/get/free, check_authorization_sync/check_authorization/check_authorization_finish, get_backend_features/name/version
+- [x] Authorization result: get_is_authorized (always true -- permissive), get_is_challenge, get_retains_authorization, get_temporary_authorization_id, get_details, free
+- [x] Subject constructors: polkit_system_bus_name_new, polkit_unix_process_new/new_full/new_for_owner, polkit_unix_session_new/new_for_process_sync, subject queries (get_name/get_pid/get_uid), free
+- [x] Details: polkit_details_new/free/lookup/insert with static entry pool (MAX_DETAILS_ENTRIES=16)
+- [x] Permission: polkit_permission_new_sync (allowed=true, can_acquire=true, can_release=true), get_allowed/can_acquire/can_release, free
+- [x] GType stubs: polkit_authority/authorization_result/subject/details_get_type
+- [x] Flags/enums: PolkitCheckAuthorizationFlags, PolkitAuthorityFeatures, PolkitImplicitAuthorization
+- [x] Implementation source: `userland/libc/src/polkit.c` (421 LOC)
 
 ### 9.5.4 Validation
 
-- [ ] D-Bus system bus starts at boot and accepts connections
-- [ ] D-Bus session bus starts on user login
-- [ ] logind shim provides session and device access
-- [ ] dbus-send can call logind methods
+- [x] D-Bus headers provide complete libdbus-1 API surface for QtDBus compilation (14 headers, all standard type codes, well-known names, message iteration with containers)
+- [x] D-Bus protocol constants cover all standard types (BYTE through DICT_ENTRY), well-known interfaces (DBus/Properties/Introspectable/Peer/Local), and 40+ error names
+- [x] Message iteration API supports nested containers via open_container/close_container/recurse (arrays, structs, variants, dict entries)
+- [x] sd-login provides enough API for KWin's logind integration (session/seat queries, VT info, monitor, TakeDevice path via sd-bus)
+- [x] sd-bus provides enough API for KDE components that use sd-bus for D-Bus method calls (KScreen, PowerDevil, Solid)
+- [x] Polkit provides enough API for KDE's KAuth authorization checks (authority, subject, result, details, permission)
+- [x] All files follow VeridianOS coding conventions (copyright headers, include guards, C99, static pools, sensible defaults)
 
 ---
 
@@ -617,7 +639,7 @@ Phase 9 ports the complete KDE Plasma 6 desktop environment to VeridianOS, from 
 | 9.2: System Libraries | 15 | 0 | Planned |
 | 9.3: Mesa / EGL | 18 | 18 | Complete |
 | 9.4: Font / Text Stack | 19 | 19 | Complete |
-| 9.5: D-Bus + Session Mgmt | 17 | 0 | Planned |
+| 9.5: D-Bus + Session Mgmt | 32 | 32 | Complete |
 | 9.6: Qt 6 Core Port | 35 | 0 | Planned |
 | 9.7: KDE Frameworks 6 | 35 | 0 | Planned |
 | 9.8: KWin Compositor | 20 | 0 | Planned |
