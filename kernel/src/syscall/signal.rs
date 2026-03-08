@@ -48,21 +48,26 @@ pub const SIG_IGN: usize = 1;
 // User-space signal action structure (repr(C) for ABI stability)
 // ============================================================================
 
-/// Mirrors the POSIX `struct sigaction` layout expected by user space.
+/// Linux x86_64 kernel `struct sigaction` layout (32 bytes).
+///
+/// Field order MUST match the kernel ABI that musl's rt_sigaction expects:
+///   sa_handler (8), sa_flags (8), sa_restorer (8), sa_mask (8).
+/// Note: sa_flags is `unsigned long` (8 bytes on x86_64), NOT u32.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SigAction {
     /// Signal handler function pointer (or SIG_DFL / SIG_IGN).
-    pub sa_handler: usize,
-    /// Signal mask to apply during handler execution.
-    pub sa_mask: u64,
-    /// Flags (SA_RESTART, SA_SIGINFO, etc.).
-    pub sa_flags: u32,
-    /// Padding for alignment.
-    pub _pad: u32,
+    pub sa_handler: usize, // offset 0
+    /// Flags (SA_RESTART, SA_SIGINFO, SA_NOCLDSTOP, etc.).
+    pub sa_flags: u64, // offset 8 (unsigned long on x86_64)
     /// Optional restorer function (used by the kernel to inject sigreturn).
-    pub sa_restorer: usize,
+    pub sa_restorer: usize, // offset 16
+    /// Signal mask to apply during handler execution.
+    pub sa_mask: u64, // offset 24
 }
+
+// Compile-time assertion: Linux x86_64 struct sigaction is 32 bytes.
+const _: () = assert!(core::mem::size_of::<SigAction>() == 32);
 
 // ============================================================================
 // Syscall implementations
@@ -107,10 +112,9 @@ pub fn sys_sigaction(signum: usize, act_ptr: usize, oldact_ptr: usize) -> Syscal
         unsafe {
             let old_act = oldact_ptr as *mut SigAction;
             (*old_act).sa_handler = old_handler as usize;
-            (*old_act).sa_mask = 0;
             (*old_act).sa_flags = 0;
-            (*old_act)._pad = 0;
             (*old_act).sa_restorer = 0;
+            (*old_act).sa_mask = 0;
         }
     }
 

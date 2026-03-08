@@ -76,10 +76,13 @@ pub const NCCS: usize = 32;
 // Terminal state structures (repr(C) to match user-space struct termios)
 // =========================================================================
 
-/// Terminal attributes, matching the C `struct termios` layout exactly.
+/// Linux `struct termios` layout (60 bytes).
 ///
-/// Fields are in the same order as the userland header `termios.h`:
-///   c_iflag, c_oflag, c_cflag, c_lflag, c_cc[32], c_ispeed, c_ospeed.
+/// Field order MUST match the kernel ABI that musl's TCGETS/TCSETS expect:
+///   c_iflag(4), c_oflag(4), c_cflag(4), c_lflag(4), c_line(1),
+///   c_cc[32](32), pad(3), c_ispeed(4), c_ospeed(4).
+/// The `c_line` field is required -- without it, c_cc starts at the wrong
+/// offset and musl reads corrupted control characters.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct KernelTermios {
@@ -87,10 +90,14 @@ pub struct KernelTermios {
     pub c_oflag: u32,
     pub c_cflag: u32,
     pub c_lflag: u32,
+    pub c_line: u8,
     pub c_cc: [u8; NCCS],
     pub c_ispeed: u32,
     pub c_ospeed: u32,
 }
+
+// Compile-time assertion: Linux struct termios is 60 bytes (with NCCS=32).
+const _: () = assert!(core::mem::size_of::<KernelTermios>() == 60);
 
 impl KernelTermios {
     /// Create default terminal attributes (cooked mode, echo on).
@@ -115,6 +122,7 @@ impl KernelTermios {
             c_oflag: OPOST | ONLCR,
             c_cflag: CS8 | CREAD | HUPCL,
             c_lflag: ECHO | ECHOE | ECHOK | ICANON | ISIG | IEXTEN,
+            c_line: 0, // N_TTY line discipline
             c_cc: cc,
             c_ispeed: 38400,
             c_ospeed: 38400,
