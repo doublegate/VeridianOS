@@ -346,6 +346,8 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
                     unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, count) };
                 return match file_desc.read(buffer_slice) {
                     Ok(bytes_read) => Ok(bytes_read),
+                    Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
+                    Err(crate::error::KernelError::BrokenPipe) => Ok(0),
                     Err(_) => Err(SyscallError::InvalidState),
                 };
             }
@@ -528,6 +530,7 @@ pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
                 return match file_desc.write(buffer_slice) {
                     Ok(bytes_written) => Ok(bytes_written),
                     Err(crate::error::KernelError::BrokenPipe) => Err(SyscallError::BrokenPipe),
+                    Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
                     Err(_) => Err(SyscallError::InvalidState),
                 };
             }
@@ -561,6 +564,7 @@ pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
     match file_desc.write(buffer_slice) {
         Ok(bytes_written) => Ok(bytes_written),
         Err(crate::error::KernelError::BrokenPipe) => Err(SyscallError::BrokenPipe),
+        Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
         Err(_) => Err(SyscallError::InvalidState),
     }
 }
