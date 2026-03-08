@@ -213,49 +213,66 @@ pub fn timerfd_gettime(tfd_id: u32) -> Result<Itimerspec, SyscallError> {
 /// Read from a timerfd -- returns number of expirations since last read.
 ///
 /// Checks the timer against current time and accumulates expirations.
-/// Returns EAGAIN if no expirations and nonblock mode is set.
+/// If nonblock is set, returns EAGAIN immediately when no expirations.
+/// In blocking mode, busy-waits with scheduler yield until the timer
+/// fires (capped at 30s to prevent permanent hangs).
 pub fn timerfd_read(tfd_id: u32) -> Result<u64, SyscallError> {
-    let mut registry = TIMERFD_REGISTRY.lock();
-    let instance = registry
-        .get_mut(&tfd_id)
-        .ok_or(SyscallError::BadFileDescriptor)?;
+    let start = crate::timer::get_uptime_ms();
+    const MAX_BLOCK_MS: u64 = 30_000;
 
-    if !instance.armed {
+    loop {
+        let mut registry = TIMERFD_REGISTRY.lock();
+        let instance = registry
+            .get_mut(&tfd_id)
+            .ok_or(SyscallError::BadFileDescriptor)?;
+
+        if !instance.armed {
+            if instance.nonblock {
+                return Err(SyscallError::WouldBlock);
+            }
+            // Timer not armed and blocking -- wait for it to be armed
+            drop(registry);
+            if crate::timer::get_uptime_ms() - start >= MAX_BLOCK_MS {
+                return Err(SyscallError::WouldBlock);
+            }
+            crate::sched::yield_cpu();
+            continue;
+        }
+
+        // Check for expirations against current TSC-based time
+        let now = monotonic_now_ns();
+        if now >= instance.next_expiry_ns {
+            let interval_ns = instance.spec.it_interval.to_ns();
+            if interval_ns > 0 {
+                let elapsed = now - instance.next_expiry_ns;
+                let extra_expirations = elapsed / interval_ns;
+                instance.expirations = instance.expirations.saturating_add(1 + extra_expirations);
+                instance.next_expiry_ns = instance
+                    .next_expiry_ns
+                    .saturating_add((1 + extra_expirations) * interval_ns);
+            } else {
+                instance.expirations = instance.expirations.saturating_add(1);
+                instance.armed = false;
+            }
+        }
+
+        if instance.expirations > 0 {
+            let count = instance.expirations;
+            instance.expirations = 0;
+            return Ok(count);
+        }
+
         if instance.nonblock {
             return Err(SyscallError::WouldBlock);
         }
-        return Err(SyscallError::WouldBlock);
-    }
 
-    // Check for expirations
-    let now = monotonic_now_ns();
-    if now >= instance.next_expiry_ns {
-        let interval_ns = instance.spec.it_interval.to_ns();
-        if interval_ns > 0 {
-            // Periodic timer: calculate how many expirations occurred
-            let elapsed = now - instance.next_expiry_ns;
-            let extra_expirations = elapsed / interval_ns;
-            instance.expirations = instance.expirations.saturating_add(1 + extra_expirations);
-            instance.next_expiry_ns = instance
-                .next_expiry_ns
-                .saturating_add((1 + extra_expirations) * interval_ns);
-        } else {
-            // One-shot: exactly 1 expiration, then disarm
-            instance.expirations = instance.expirations.saturating_add(1);
-            instance.armed = false;
-        }
-    }
-
-    if instance.expirations == 0 {
-        if instance.nonblock {
+        // Release lock, yield, and retry
+        drop(registry);
+        if crate::timer::get_uptime_ms() - start >= MAX_BLOCK_MS {
             return Err(SyscallError::WouldBlock);
         }
-        return Err(SyscallError::WouldBlock);
+        crate::sched::yield_cpu();
     }
-
-    let count = instance.expirations;
-    instance.expirations = 0;
-    Ok(count)
 }
 
 /// Query whether a timerfd is readable (timer has expired).

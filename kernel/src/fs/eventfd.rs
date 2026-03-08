@@ -90,56 +90,81 @@ pub fn eventfd_create(initval: u32, flags: u32) -> SyscallResult {
 /// In normal mode: returns the full counter and resets to 0.
 /// In semaphore mode: returns 1 and decrements by 1.
 /// If counter is 0 and nonblock is set, returns EAGAIN (WouldBlock).
+/// If blocking mode, busy-waits with scheduler yield until counter > 0
+/// (capped at 30s to prevent permanent hangs).
 pub fn eventfd_read(efd_id: u32) -> Result<u64, SyscallError> {
-    let mut registry = EVENTFD_REGISTRY.lock();
-    let instance = registry
-        .get_mut(&efd_id)
-        .ok_or(SyscallError::BadFileDescriptor)?;
+    let start = crate::timer::get_uptime_ms();
+    const MAX_BLOCK_MS: u64 = 30_000;
 
-    if instance.counter == 0 {
+    loop {
+        let mut registry = EVENTFD_REGISTRY.lock();
+        let instance = registry
+            .get_mut(&efd_id)
+            .ok_or(SyscallError::BadFileDescriptor)?;
+
+        if instance.counter > 0 {
+            return if instance.semaphore {
+                instance.counter = instance.counter.saturating_sub(1);
+                Ok(1)
+            } else {
+                let val = instance.counter;
+                instance.counter = 0;
+                Ok(val)
+            };
+        }
+
         if instance.nonblock {
             return Err(SyscallError::WouldBlock);
         }
-        // In a real implementation we would block the calling thread here
-        // and wake it when a write occurs. For now, return WouldBlock.
-        return Err(SyscallError::WouldBlock);
-    }
 
-    if instance.semaphore {
-        instance.counter = instance.counter.saturating_sub(1);
-        Ok(1)
-    } else {
-        let val = instance.counter;
-        instance.counter = 0;
-        Ok(val)
+        // Release lock before yielding
+        drop(registry);
+
+        if crate::timer::get_uptime_ms() - start >= MAX_BLOCK_MS {
+            return Err(SyscallError::WouldBlock);
+        }
+
+        crate::sched::yield_cpu();
     }
 }
 
 /// Write to an eventfd. Adds `value` to the internal counter.
 ///
 /// If the addition would overflow `u64::MAX - 1`, returns EAGAIN when
-/// nonblock is set, otherwise blocks (simplified to EAGAIN for now).
+/// nonblock is set, otherwise busy-waits until a read drains the counter
+/// enough (capped at 30s).
 pub fn eventfd_write(efd_id: u32, value: u64) -> SyscallResult {
     if value == u64::MAX {
         return Err(SyscallError::InvalidArgument);
     }
 
-    let mut registry = EVENTFD_REGISTRY.lock();
-    let instance = registry
-        .get_mut(&efd_id)
-        .ok_or(SyscallError::BadFileDescriptor)?;
-
-    // Check for overflow (Linux caps at u64::MAX - 1)
+    let start = crate::timer::get_uptime_ms();
+    const MAX_BLOCK_MS: u64 = 30_000;
     let max = u64::MAX - 1;
-    if instance.counter > max - value {
+
+    loop {
+        let mut registry = EVENTFD_REGISTRY.lock();
+        let instance = registry
+            .get_mut(&efd_id)
+            .ok_or(SyscallError::BadFileDescriptor)?;
+
+        if instance.counter <= max - value {
+            instance.counter = instance.counter.saturating_add(value);
+            return Ok(0);
+        }
+
         if instance.nonblock {
             return Err(SyscallError::WouldBlock);
         }
-        return Err(SyscallError::WouldBlock);
-    }
 
-    instance.counter = instance.counter.saturating_add(value);
-    Ok(0)
+        drop(registry);
+
+        if crate::timer::get_uptime_ms() - start >= MAX_BLOCK_MS {
+            return Err(SyscallError::WouldBlock);
+        }
+
+        crate::sched::yield_cpu();
+    }
 }
 
 /// Query whether an eventfd is readable (counter > 0).

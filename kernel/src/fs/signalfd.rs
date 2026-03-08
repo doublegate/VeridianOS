@@ -206,22 +206,34 @@ pub fn deliver_signal(target_pid: u64, signum: u32, sender_pid: u32) {
 /// Returns a `SignalfdSiginfo` struct for the oldest pending signal
 /// in the mask, or EAGAIN/WouldBlock if no signals pending.
 pub fn signalfd_read(sfd_id: u32) -> Result<SignalfdSiginfo, SyscallError> {
-    let mut registry = SIGNALFD_REGISTRY.lock();
-    let instance = registry
-        .get_mut(&sfd_id)
-        .ok_or(SyscallError::BadFileDescriptor)?;
+    let start = crate::timer::get_uptime_ms();
+    const MAX_BLOCK_MS: u64 = 30_000;
 
-    if instance.pending.is_empty() {
-        return Err(SyscallError::WouldBlock);
+    loop {
+        let mut registry = SIGNALFD_REGISTRY.lock();
+        let instance = registry
+            .get_mut(&sfd_id)
+            .ok_or(SyscallError::BadFileDescriptor)?;
+
+        if !instance.pending.is_empty() {
+            let sig = instance.pending.remove(0);
+            return Ok(SignalfdSiginfo {
+                ssi_signo: sig.signum,
+                ssi_pid: sig.sender_pid,
+                ..SignalfdSiginfo::default()
+            });
+        }
+
+        if instance.nonblock {
+            return Err(SyscallError::WouldBlock);
+        }
+
+        drop(registry);
+        if crate::timer::get_uptime_ms() - start >= MAX_BLOCK_MS {
+            return Err(SyscallError::WouldBlock);
+        }
+        crate::sched::yield_cpu();
     }
-
-    let sig = instance.pending.remove(0);
-    let info = SignalfdSiginfo {
-        ssi_signo: sig.signum,
-        ssi_pid: sig.sender_pid,
-        ..SignalfdSiginfo::default()
-    };
-    Ok(info)
 }
 
 /// Query whether a signalfd has pending signals.
