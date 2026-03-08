@@ -13,7 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 BUILD_DIR="${PROJECT_ROOT}/target/cross-build/dbus"
-SYSROOT="${VERIDIAN_SYSROOT:-/opt/veridian-sysroot}"
+SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
 JOBS="${JOBS:-$(nproc)}"
 
 DBUS_VER="1.14.10"
@@ -24,15 +24,14 @@ die() { echo "[build-dbus] ERROR: $*" >&2; exit 1; }
 
 mkdir -p "${BUILD_DIR}"
 
-export CC="${SYSROOT}/bin/x86_64-veridian-musl-gcc"
-export CFLAGS="-O2 --sysroot=${SYSROOT}"
-export LDFLAGS="-L${SYSROOT}/usr/lib -static"
-export CPPFLAGS="-I${SYSROOT}/usr/include"
-export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig"
+CC="${SYSROOT}/bin/x86_64-veridian-musl-gcc"
+export CC
+export CFLAGS="-O2 -fPIC"
+export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
 export PKG_CONFIG_SYSROOT_DIR="${SYSROOT}"
 
 COMMON_CONFIGURE=(
-    --host=x86_64-veridian
+    --host=x86_64-unknown-linux-musl
     --prefix="${SYSROOT}/usr"
     --enable-static
     --disable-shared
@@ -152,6 +151,11 @@ verify() {
 # ── Main ──────────────────────────────────────────────────────────────
 main() {
     log "=== Building D-Bus for VeridianOS ==="
+    log "Sysroot: ${SYSROOT}"
+
+    [[ -f "${SYSROOT}/usr/lib/libc.a" ]] || die "musl libc not found. Run build-musl.sh first."
+    [[ -f "${SYSROOT}/usr/lib/libexpat.a" ]] || die "expat not found. Run build-deps.sh first."
+
     build_dbus
     create_dbus_config
     verify
