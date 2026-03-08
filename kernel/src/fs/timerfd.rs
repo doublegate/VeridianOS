@@ -403,6 +403,10 @@ impl VfsNode for TimerFdNode {
         Err(KernelError::FsError(crate::error::FsError::NotADirectory))
     }
 
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        Some(self)
+    }
+
     fn truncate(&self, _size: usize) -> Result<(), KernelError> {
         Err(KernelError::PermissionDenied {
             operation: "truncate timerfd",

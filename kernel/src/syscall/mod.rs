@@ -1176,15 +1176,14 @@ fn handle_syscall(
                 .map_err(|_| SyscallError::OutOfMemory)?;
             Ok(fd)
         }
-        // timerfd_settime/gettime use the internal tfd_id, not the fd.
-        // musl will call these with the fd, so we need to look up the tfd_id
-        // from the file table. For now, pass through as raw ID (works when
-        // internal ID matches -- will need fd->tfd_id translation later).
+        // timerfd_settime/gettime: musl passes the real fd, so we look up
+        // the internal tfd_id via as_any() downcast on the VfsNode.
         Syscall::TimerfdSettime => {
-            let tfd_id = arg1 as u32;
+            let fd = arg1;
             let flags = arg2 as u32;
             let new_ptr = arg3;
             let old_ptr = arg4;
+            let tfd_id = resolve_timerfd_id(fd)?;
             validate_user_ptr_typed::<crate::fs::timerfd::Itimerspec>(new_ptr)?;
             // SAFETY: new_ptr validated above.
             let new_spec = unsafe { &*(new_ptr as *const crate::fs::timerfd::Itimerspec) };
@@ -1198,8 +1197,9 @@ fn handle_syscall(
             crate::fs::timerfd::timerfd_settime(tfd_id, flags, new_spec, old_spec)
         }
         Syscall::TimerfdGettime => {
-            let tfd_id = arg1 as u32;
+            let fd = arg1;
             let curr_ptr = arg2;
+            let tfd_id = resolve_timerfd_id(fd)?;
             validate_user_ptr_typed::<crate::fs::timerfd::Itimerspec>(curr_ptr)?;
             let spec = crate::fs::timerfd::timerfd_gettime(tfd_id)?;
             // SAFETY: curr_ptr validated above.
@@ -1259,6 +1259,21 @@ fn handle_syscall(
 
         _ => Err(SyscallError::InvalidSyscall),
     }
+}
+
+/// Resolve a file descriptor to an internal timerfd ID.
+///
+/// Looks up the fd in the current process's file table, downcasts the
+/// VfsNode to `TimerFdNode`, and returns its internal `tfd_id`.
+fn resolve_timerfd_id(fd: usize) -> Result<u32, SyscallError> {
+    let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file_table = proc.file_table.lock();
+    let file = file_table.get(fd).ok_or(SyscallError::BadFileDescriptor)?;
+    let any = file.node.as_any().ok_or(SyscallError::BadFileDescriptor)?;
+    let tfd_node = any
+        .downcast_ref::<crate::fs::timerfd::TimerFdNode>()
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    Ok(tfd_node.tfd_id())
 }
 
 /// getrandom syscall -- fills user buffer with cryptographically secure random

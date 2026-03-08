@@ -295,6 +295,16 @@ pub trait VfsNode: Send + Sync {
         // Regular files/dirs: always ready for read+write
         0x0001 | 0x0004 // POLLIN | POLLOUT
     }
+
+    /// Downcast to `&dyn core::any::Any` for type-specific operations.
+    ///
+    /// Used by syscall handlers that need to extract implementation-specific
+    /// state from a VfsNode (e.g., timerfd_settime needs the internal timer
+    /// ID from a TimerFdNode). Default returns `None`; only nodes that need
+    /// downcasting override this.
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        None
+    }
 }
 
 /// Filesystem trait
