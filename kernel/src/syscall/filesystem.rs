@@ -1691,29 +1691,31 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             Ok(0)
         }
         F_GETFL => {
-            // Get file status flags from the File struct
-            // Flag values must match veridian/fcntl.h ABI
+            // Get file status flags. Linux ABI: O_RDONLY=0, O_WRONLY=1, O_RDWR=2.
             let file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
-            let mut flags: usize = 0;
-            if file.flags.read && file.flags.write {
-                flags |= 0x0003; // O_RDWR
+            let mut flags: usize = if file.flags.read && file.flags.write {
+                2 // O_RDWR
             } else if file.flags.write {
-                flags |= 0x0002; // O_WRONLY
-            } else if file.flags.read {
-                flags |= 0x0001; // O_RDONLY
-            }
+                1 // O_WRONLY
+            } else {
+                0 // O_RDONLY
+            };
             if file.flags.append {
                 flags |= 0x0400; // O_APPEND
+            }
+            if file.nonblock.load(core::sync::atomic::Ordering::Relaxed) {
+                flags |= 0x0800; // O_NONBLOCK
             }
             Ok(flags)
         }
         F_SETFL => {
-            // Set file status flags -- only O_APPEND and O_NONBLOCK can be
-            // changed after open. We validate the fd exists but the actual
-            // flag mutation requires mutable access to the File struct which
-            // is behind an Arc. This is a no-op for now (flags are set at
-            // open time and not typically changed).
-            let _file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+            // Set file status flags. Only O_APPEND and O_NONBLOCK can be
+            // changed after open (per POSIX). O_NONBLOCK is stored as an
+            // AtomicBool on the File for lock-free toggling.
+            let file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+            let nonblock = (arg & 0x0800) != 0; // O_NONBLOCK
+            file.nonblock
+                .store(nonblock, core::sync::atomic::Ordering::Relaxed);
             Ok(0)
         }
         _ => Err(SyscallError::InvalidArgument),

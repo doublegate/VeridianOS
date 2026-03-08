@@ -1,6 +1,7 @@
 //! File descriptors and file operations
 
 use alloc::{string::String, sync::Arc, vec::Vec};
+use core::sync::atomic::AtomicBool;
 
 #[cfg(not(target_arch = "aarch64"))]
 use spin::RwLock;
@@ -27,6 +28,7 @@ pub struct OpenFlags {
     pub create: bool,
     pub truncate: bool,
     pub exclusive: bool,
+    pub nonblock: bool,
 }
 
 impl OpenFlags {
@@ -39,6 +41,7 @@ impl OpenFlags {
             create: false,
             truncate: false,
             exclusive: false,
+            nonblock: false,
         }
     }
 
@@ -51,6 +54,7 @@ impl OpenFlags {
             create: true,
             truncate: true,
             exclusive: false,
+            nonblock: false,
         }
     }
 
@@ -63,6 +67,7 @@ impl OpenFlags {
             create: true,
             truncate: false,
             exclusive: false,
+            nonblock: false,
         }
     }
 
@@ -75,34 +80,36 @@ impl OpenFlags {
             create: true,
             truncate: false,
             exclusive: false,
+            nonblock: false,
         }
     }
 
-    /// Create from bits (for syscall interface)
+    /// Create from bits (for syscall interface).
     ///
-    /// Flag values MUST match `<veridian/fcntl.h>` in the sysroot -- that is
-    /// the ABI contract user-space programs (including GCC) are compiled
-    /// against.
+    /// Flag values match the Linux x86_64 ABI (`<fcntl.h>`) so musl-compiled
+    /// programs work correctly. O_RDONLY=0, O_WRONLY=1, O_RDWR=2.
     pub fn from_bits(bits: u32) -> Option<Self> {
-        // VeridianOS ABI flags (from veridian/fcntl.h in sysroot)
-        const O_RDONLY: u32 = 0x0001;
-        const O_WRONLY: u32 = 0x0002;
-        const O_RDWR: u32 = 0x0003;
+        // Linux x86_64 ABI flags
+        const O_WRONLY: u32 = 0x0001;
+        const O_RDWR: u32 = 0x0002;
         const O_ACCMODE: u32 = 0x0003;
-        const O_CREAT: u32 = 0x0100;
+        const O_CREAT: u32 = 0x0040;
+        const O_EXCL: u32 = 0x0080;
         const O_TRUNC: u32 = 0x0200;
         const O_APPEND: u32 = 0x0400;
-        const O_EXCL: u32 = 0x0800;
+        const O_NONBLOCK: u32 = 0x0800;
 
         let access_mode = bits & O_ACCMODE;
 
         Some(Self {
-            read: access_mode == O_RDONLY || access_mode == O_RDWR,
+            // O_RDONLY = 0: read when access mode is 0 (rdonly) or 2 (rdwr)
+            read: access_mode != O_WRONLY,
             write: access_mode == O_WRONLY || access_mode == O_RDWR,
             append: (bits & O_APPEND) != 0,
             create: (bits & O_CREAT) != 0,
             truncate: (bits & O_TRUNC) != 0,
             exclusive: (bits & O_EXCL) != 0,
+            nonblock: (bits & O_NONBLOCK) != 0,
         })
     }
 }
@@ -123,6 +130,11 @@ pub struct File {
     /// Open flags
     pub flags: OpenFlags,
 
+    /// Non-blocking I/O flag (can be toggled via fcntl F_SETFL after open).
+    /// Stored as AtomicBool because File is behind Arc and F_SETFL needs to
+    /// toggle this without mutable access.
+    pub nonblock: AtomicBool,
+
     /// Current position in file
     pub position: RwLock<usize>,
 
@@ -137,9 +149,11 @@ pub struct File {
 impl File {
     /// Create a new file structure
     pub fn new(node: Arc<dyn VfsNode>, flags: OpenFlags) -> Self {
+        let nb = flags.nonblock;
         Self {
             node,
             flags,
+            nonblock: AtomicBool::new(nb),
             position: RwLock::new(0),
             refcount: RwLock::new(1),
             path: None,
@@ -148,9 +162,11 @@ impl File {
 
     /// Create a new file structure with a known path
     pub fn new_with_path(node: Arc<dyn VfsNode>, flags: OpenFlags, path: String) -> Self {
+        let nb = flags.nonblock;
         Self {
             node,
             flags,
+            nonblock: AtomicBool::new(nb),
             position: RwLock::new(0),
             refcount: RwLock::new(1),
             path: Some(path),
