@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Dolphin
+GenericName=File Manager
+Comment=Browse and manage files and folders
+Exec=dolphin %U
+Icon=system-file-manager
+Terminal=false
+Categories=Qt;KDE;System;FileManager;
+MimeType=inode/directory;
+StartupNotify=true
+StartupWMClass=dolphin
+X-KDE-HasTempFileOption=true
+X-DBUS-StartupType=Multi
+Keywords=files;folders;browse;manager;

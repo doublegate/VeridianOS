@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Kate
+GenericName=Advanced Text Editor
+Comment=KDE Advanced Text Editor
+Exec=kate %U
+Icon=kate
+Terminal=false
+Categories=Qt;KDE;Utility;TextEditor;
+MimeType=text/plain;text/x-c;text/x-c++;text/x-python;text/x-rust;text/x-shellscript;text/html;text/css;text/javascript;application/json;application/xml;
+StartupNotify=true
+StartupWMClass=kate
+X-DBUS-StartupType=Multi
+Keywords=text;editor;code;develop;programming;

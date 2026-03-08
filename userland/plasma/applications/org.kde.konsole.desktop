@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Konsole
+GenericName=Terminal Emulator
+Comment=Terminal emulator for KDE
+Exec=konsole %U
+Icon=utilities-terminal
+Terminal=false
+Categories=Qt;KDE;System;TerminalEmulator;
+StartupNotify=true
+StartupWMClass=konsole
+X-DBUS-StartupType=Unique
+X-KDE-SubstituteUID=false
+Keywords=terminal;console;shell;command;cli;

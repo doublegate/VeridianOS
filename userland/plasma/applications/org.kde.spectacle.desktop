@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Spectacle
+GenericName=Screenshot Capture Utility
+Comment=Capture screenshots of the desktop, windows, or regions
+Exec=spectacle
+Icon=spectacle
+Terminal=false
+Categories=Qt;KDE;Graphics;Utility;
+StartupNotify=true
+StartupWMClass=spectacle
+X-DBUS-StartupType=Unique
+Keywords=screenshot;capture;screen;snap;print;

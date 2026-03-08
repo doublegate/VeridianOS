@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=System Settings
+GenericName=System Configuration
+Comment=Configure system settings and preferences
+Exec=systemsettings6
+Icon=preferences-system
+Terminal=false
+Categories=Qt;KDE;Settings;System;
+StartupNotify=true
+StartupWMClass=systemsettings
+X-DBUS-StartupType=Unique
+Keywords=settings;preferences;configuration;system;display;power;
