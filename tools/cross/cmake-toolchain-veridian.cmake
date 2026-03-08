@@ -9,16 +9,20 @@ set(CMAKE_SYSTEM_PROCESSOR x86_64)
 # Sysroot -- populated by build-musl.sh and subsequent dependency builds
 set(VERIDIAN_SYSROOT "$ENV{VERIDIAN_SYSROOT}")
 if(NOT VERIDIAN_SYSROOT)
-    set(VERIDIAN_SYSROOT "/opt/veridian-sysroot")
+    # Default to in-tree sysroot
+    get_filename_component(_toolchain_dir "${CMAKE_CURRENT_LIST_DIR}" DIRECTORY)
+    get_filename_component(_project_root "${_toolchain_dir}" DIRECTORY)
+    set(VERIDIAN_SYSROOT "${_project_root}/target/veridian-sysroot")
 endif()
 
 set(CMAKE_SYSROOT "${VERIDIAN_SYSROOT}")
 
 # Cross-compiler (musl-gcc wrapper)
 set(CMAKE_C_COMPILER "${VERIDIAN_SYSROOT}/bin/x86_64-veridian-musl-gcc")
-set(CMAKE_CXX_COMPILER "${VERIDIAN_SYSROOT}/bin/x86_64-veridian-musl-g++")
-set(CMAKE_AR "${VERIDIAN_SYSROOT}/bin/x86_64-veridian-ar" CACHE FILEPATH "Archiver")
-set(CMAKE_RANLIB "${VERIDIAN_SYSROOT}/bin/x86_64-veridian-ranlib" CACHE FILEPATH "Ranlib")
+# No C++ cross-compiler yet; will be added when needed for Qt6
+# set(CMAKE_CXX_COMPILER "${VERIDIAN_SYSROOT}/bin/x86_64-veridian-musl-g++")
+set(CMAKE_AR "ar" CACHE FILEPATH "Archiver")
+set(CMAKE_RANLIB "ranlib" CACHE FILEPATH "Ranlib")
 
 # Search paths
 set(CMAKE_FIND_ROOT_PATH "${VERIDIAN_SYSROOT}")

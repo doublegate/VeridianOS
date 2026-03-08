@@ -15,11 +15,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 BUILD_DIR="${PROJECT_ROOT}/target/cross-build/deps"
-SYSROOT="${VERIDIAN_SYSROOT:-/opt/veridian-sysroot}"
+SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
 TOOLCHAIN="${SCRIPT_DIR}/cmake-toolchain-veridian.cmake"
 MESON_CROSS="${SCRIPT_DIR}/meson-cross-veridian.txt"
 JOBS="${JOBS:-$(nproc)}"
 CC="${SYSROOT}/bin/x86_64-veridian-musl-gcc"
+# For autotools --host, we need a "cross compiler" that autotools can find.
+# Create temporary symlinks so configure can find x86_64-veridian-gcc etc.
+CROSS_BIN="${BUILD_DIR}/.cross-bin"
 
 # Library versions
 ZLIB_VER="1.3.1"
@@ -42,23 +45,41 @@ fetch() {
     local tarball="${BUILD_DIR}/${name}.tar.gz"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading ${name}..."
-        curl -fsSL -o "${tarball}" "${url}" || wget -q -O "${tarball}" "${url}"
+        curl -fsSL -o "${tarball}" -L "${url}" || wget -q -O "${tarball}" "${url}"
     fi
     if [[ ! -d "${BUILD_DIR}/${dir}" ]]; then
         log "Extracting ${name}..."
-        tar -xzf "${tarball}" -C "${BUILD_DIR}"
+        tar -xf "${tarball}" -C "${BUILD_DIR}"
     fi
 }
 
-# ── Common configure flags for autotools builds ───────────────────────
+# ── Cross-compilation setup ───────────────────────────────────────────
+# Autotools --host requires a triplet-prefixed CC.  Create symlinks so
+# configure can discover x86_64-veridian-{gcc,ar,ranlib,strip}.
+setup_cross_symlinks() {
+    mkdir -p "${CROSS_BIN}"
+    ln -sf "${CC}" "${CROSS_BIN}/x86_64-unknown-linux-musl-gcc"
+    for tool in ar ranlib strip objcopy objdump; do
+        ln -sf "$(command -v ${tool})" "${CROSS_BIN}/x86_64-unknown-linux-musl-${tool}"
+    done
+    export PATH="${CROSS_BIN}:${PATH}"
+
+    # Generate meson cross file with resolved sysroot path
+    MESON_CROSS="${BUILD_DIR}/meson-cross-veridian.txt"
+    sed "s|@SYSROOT@|${SYSROOT}|g" "${SCRIPT_DIR}/meson-cross-veridian.txt" > "${MESON_CROSS}"
+}
+
+# Use linux-musl triplet for autotools' config.sub validation.
+# VeridianOS uses the Linux x86_64 ABI with musl libc, so this is accurate.
 COMMON_CONFIGURE=(
-    --host=x86_64-veridian
+    --host=x86_64-unknown-linux-musl
     --prefix="${SYSROOT}/usr"
     --enable-static
     --disable-shared
 )
 
-export CC CFLAGS="-O2 --sysroot=${SYSROOT}"
+export CC
+export CFLAGS="-O2"
 export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
 export PKG_CONFIG_SYSROOT_DIR="${SYSROOT}"
 
@@ -69,12 +90,16 @@ build_zlib() {
         return 0
     fi
     fetch "zlib-${ZLIB_VER}" \
-        "https://zlib.net/zlib-${ZLIB_VER}.tar.gz" \
+        "https://github.com/madler/zlib/releases/download/v${ZLIB_VER}/zlib-${ZLIB_VER}.tar.gz" \
         "zlib-${ZLIB_VER}"
 
     local src="${BUILD_DIR}/zlib-${ZLIB_VER}"
     log "Building zlib ${ZLIB_VER}..."
+    # zlib's configure is not autotools; it uses CC directly.
     (cd "${src}" && \
+        CC="${CC}" \
+        AR="ar" \
+        RANLIB="ranlib" \
         ./configure --static --prefix="${SYSROOT}/usr" && \
         make -j"${JOBS}" && \
         make install)
@@ -227,6 +252,9 @@ build_xkbcommon() {
     local bld="${BUILD_DIR}/xkbcommon-build"
     log "Building libxkbcommon ${XKBCOMMON_VER}..."
     mkdir -p "${bld}"
+    # Remove old build dir if present (meson can't reconfigure in-place)
+    rm -rf "${bld}"
+    mkdir -p "${bld}"
     (cd "${bld}" && \
         meson setup "${src}" \
             --cross-file="${MESON_CROSS}" \
@@ -264,6 +292,8 @@ verify() {
 main() {
     log "=== Building C dependencies for VeridianOS KDE ==="
     log "Sysroot: ${SYSROOT}"
+
+    setup_cross_symlinks
 
     build_zlib
     build_libffi
