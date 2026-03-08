@@ -1522,16 +1522,26 @@ fn sys_memfd_create(_name_ptr: usize, _flags: usize) -> SyscallResult {
 fn sys_set_tid_address(tidptr: usize) -> SyscallResult {
     let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
 
-    // Store the clear_child_tid address on the current thread.
-    // On thread exit, the kernel should: *tidptr = 0; futex_wake(tidptr, 1).
-    // For now we record it but the exit-time clearing is not yet wired.
     if tidptr != 0 {
         validate_user_pointer(tidptr, 4)?;
     }
-    proc.set_clear_child_tid(tidptr);
 
-    // Return the caller's TID
-    Ok(proc.pid.0 as usize)
+    // Store on both the process PCB (for process-level tracking) and the
+    // current thread's clear_tid field (which exit_thread() actually reads
+    // to perform the zero-and-futex-wake on thread termination).
+    proc.set_clear_child_tid(tidptr);
+    if let Some(thread) = crate::process::current_thread() {
+        thread
+            .clear_tid
+            .store(tidptr, core::sync::atomic::Ordering::Release);
+    }
+
+    // Return the caller's TID (Linux returns the thread's tid, but in
+    // VeridianOS single-threaded processes use pid as tid)
+    let tid = crate::process::current_thread()
+        .map(|t| t.tid.0 as usize)
+        .unwrap_or(proc.pid.0 as usize);
+    Ok(tid)
 }
 
 /// set_robust_list syscall -- register robust futex list head for cleanup on
