@@ -4,6 +4,14 @@
 --- 1. Remap Linux syscall numbers to VeridianOS equivalents.
 --- 2. Remap VeridianOS errno codes back to Linux errno codes.
 ---
+--- It also patches 5 hand-written x86_64 assembly files that bypass
+--- the C-level __syscall() remapping by issuing syscall directly:
+--- 3. src/thread/x86_64/clone.s       (clone 56->310, exit 60->11)
+--- 4. src/thread/x86_64/__set_thread_area.s (arch_prctl 158->203)
+--- 5. src/signal/x86_64/restore.s     (rt_sigreturn 15->123)
+--- 6. src/thread/x86_64/__unmapself.s  (munmap 11->21, exit 60->11)
+--- 7. src/process/x86_64/vfork.s      (vfork 58->fork 12)
+---
 --- musl internally uses Linux x86_64 syscall numbers (e.g. SYS_read=0,
 --- SYS_write=1). VeridianOS uses its own numbering (e.g. read=52,
 --- write=53). This patch intercepts __syscall() calls and remaps the
@@ -295,3 +303,72 @@ diff --git a/arch/x86_64/syscall_arch.h b/arch/x86_64/syscall_arch.h
 +						  "d"(a3), "r"(r10), "r"(r8) : "rcx", "r11", "memory");
 +	return __veridian_remap_errno(ret);
  }
+
+diff --git a/src/thread/x86_64/clone.s b/src/thread/x86_64/clone.s
+--- a/src/thread/x86_64/clone.s
++++ b/src/thread/x86_64/clone.s
+@@ -5,7 +5,7 @@
+ .type   __clone,@function
+ __clone:
+-	movl $56,%eax
++	movl $310,%eax  /* VeridianOS clone (was Linux 56) */
+ 	mov %rdi,%r11
+ 	mov %rdx,%rdi
+ 	mov %r8,%rdx
+@@ -21,7 +21,7 @@
+ 	call *%r9
+ 	mov %eax,%edi
+-	movl $60,%eax
++	movl $11,%eax  /* VeridianOS exit (was Linux 60) */
+ 	syscall
+ 	hlt
+ 1:	ret
+
+diff --git a/src/thread/x86_64/__set_thread_area.s b/src/thread/x86_64/__set_thread_area.s
+--- a/src/thread/x86_64/__set_thread_area.s
++++ b/src/thread/x86_64/__set_thread_area.s
+@@ -7,7 +7,7 @@
+ __set_thread_area:
+ 	mov %rdi,%rsi           /* shift for syscall */
+ 	movl $0x1002,%edi       /* SET_FS register */
+-	movl $158,%eax          /* arch_prctl(SET_FS, arg)*/
++	movl $203,%eax          /* VeridianOS arch_prctl (was Linux 158) */
+ 	syscall                 /* arch_prctl(SET_FS, arg)*/
+ 	ret
+
+diff --git a/src/signal/x86_64/restore.s b/src/signal/x86_64/restore.s
+--- a/src/signal/x86_64/restore.s
++++ b/src/signal/x86_64/restore.s
+@@ -4,6 +4,6 @@
+ .type __restore_rt,@function
+ __restore_rt:
+-	mov $15, %rax
++	mov $123, %rax  /* VeridianOS rt_sigreturn (was Linux 15) */
+ 	syscall
+ .size __restore_rt,.-__restore_rt
+
+diff --git a/src/thread/x86_64/__unmapself.s b/src/thread/x86_64/__unmapself.s
+--- a/src/thread/x86_64/__unmapself.s
++++ b/src/thread/x86_64/__unmapself.s
+@@ -5,8 +5,8 @@
+ .type   __unmapself,@function
+ __unmapself:
+-	movl $11,%eax   /* munmap(arg2,arg3) */
++	movl $21,%eax   /* VeridianOS munmap (was Linux 11) */
+ 	syscall         /* munmap(arg2,arg3) */
+ 	xor %rdi,%rdi   /* exit() args: always return success */
+-	movl $60,%eax   /* exit(0) */
++	movl $11,%eax   /* VeridianOS exit (was Linux 60) */
+ 	syscall         /* exit(0) */
+
+diff --git a/src/process/x86_64/vfork.s b/src/process/x86_64/vfork.s
+--- a/src/process/x86_64/vfork.s
++++ b/src/process/x86_64/vfork.s
+@@ -3,7 +3,7 @@
+ vfork:
+ 	pop %rdx
+-	mov $58,%eax
++	mov $12,%eax  /* VeridianOS fork (was Linux vfork 58) */
+ 	syscall
+ 	push %rdx
+ 	mov %rax,%rdi
