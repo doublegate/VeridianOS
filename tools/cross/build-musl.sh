@@ -100,7 +100,7 @@ patch_musl() {
 #define __VER_SYS_write      53
 #define __VER_SYS_open       50
 #define __VER_SYS_close      51
-#define __VER_SYS_stat       55
+#define __VER_SYS_stat       150
 #define __VER_SYS_fstat      55
 #define __VER_SYS_lstat      151
 #define __VER_SYS_lseek      54
@@ -223,11 +223,24 @@ patch_musl() {
 #define __VER_SYS_shmat      210
 
 /* Misc */
-#define __VER_SYS_arch_prctl 203
-#define __VER_SYS_getrlimit  260
-#define __VER_SYS_setrlimit  261
-#define __VER_SYS_mknod      199
-#define __VER_SYS_ptrace     140
+#define __VER_SYS_arch_prctl     203
+#define __VER_SYS_getrlimit      260
+#define __VER_SYS_setrlimit      261
+#define __VER_SYS_mknod          199
+#define __VER_SYS_ptrace         140
+#define __VER_SYS_set_tid_address 352
+#define __VER_SYS_set_robust_list 353
+#define __VER_SYS_madvise        345
+#define __VER_SYS_getdents64     340
+#define __VER_SYS_prlimit64      341
+#define __VER_SYS_inotify_init1  342
+#define __VER_SYS_memfd_create   351
+#define __VER_SYS_fchmodat       346
+#define __VER_SYS_fchownat       347
+#define __VER_SYS_linkat         348
+#define __VER_SYS_symlinkat      349
+#define __VER_SYS_readlinkat     350
+#define __VER_SYS_shutdown       227
 
 #endif /* _VERIDIAN_SYSCALL_MAP_H */
 HEADER
