@@ -142,6 +142,21 @@ pub fn eventfd_write(efd_id: u32, value: u64) -> SyscallResult {
     Ok(0)
 }
 
+/// Query whether an eventfd is readable (counter > 0).
+/// Used by epoll to check readiness without consuming data.
+pub fn is_readable(efd_id: u32) -> bool {
+    let registry = EVENTFD_REGISTRY.lock();
+    registry.get(&efd_id).is_some_and(|i| i.counter > 0)
+}
+
+/// Query whether an eventfd is writable (counter < u64::MAX - 1).
+pub fn is_writable(efd_id: u32) -> bool {
+    let registry = EVENTFD_REGISTRY.lock();
+    registry
+        .get(&efd_id)
+        .is_some_and(|i| i.counter < u64::MAX - 1)
+}
+
 /// Close (destroy) an eventfd instance.
 pub fn eventfd_close(efd_id: u32) -> SyscallResult {
     let mut registry = EVENTFD_REGISTRY.lock();

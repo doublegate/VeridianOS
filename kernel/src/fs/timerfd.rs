@@ -258,6 +258,21 @@ pub fn timerfd_read(tfd_id: u32) -> Result<u64, SyscallError> {
     Ok(count)
 }
 
+/// Query whether a timerfd is readable (timer has expired).
+/// Used by epoll to check readiness without consuming data.
+pub fn is_readable(tfd_id: u32) -> bool {
+    let registry = TIMERFD_REGISTRY.lock();
+    let instance = match registry.get(&tfd_id) {
+        Some(i) => i,
+        None => return false,
+    };
+    if !instance.armed {
+        return false;
+    }
+    let now = monotonic_now_ns();
+    now >= instance.next_expiry_ns || instance.expirations > 0
+}
+
 /// Close (destroy) a timerfd instance.
 pub fn timerfd_close(tfd_id: u32) -> SyscallResult {
     let mut registry = TIMERFD_REGISTRY.lock();

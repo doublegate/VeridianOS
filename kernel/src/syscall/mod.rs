@@ -478,6 +478,14 @@ pub enum Syscall {
     AudioStop = 326,
     AudioPause = 327,
 
+    // musl libc compatibility syscalls
+    Getdents64 = 340,
+    Prlimit64 = 341,
+    InotifyInit1 = 342,
+    InotifyAddWatch = 343,
+    InotifyRmWatch = 344,
+    Madvise = 345,
+
     // Event/timer notification fds (KDE/Wayland infrastructure)
     Getrandom = 330,
     EventfdCreate = 331,
@@ -1142,6 +1150,17 @@ fn handle_syscall(
         Syscall::SendMsg => sys_sendmsg(arg1, arg2, arg3),
         Syscall::RecvMsg => sys_recvmsg(arg1, arg2, arg3),
 
+        // musl libc compatibility syscalls
+        Syscall::Getdents64 => sys_getdents64(arg1, arg2, arg3),
+        Syscall::Prlimit64 => sys_prlimit64(arg1, arg2, arg3, arg4),
+        Syscall::InotifyInit1 => Err(SyscallError::NotImplemented),
+        Syscall::InotifyAddWatch => Err(SyscallError::NotImplemented),
+        Syscall::InotifyRmWatch => Err(SyscallError::NotImplemented),
+        Syscall::Madvise => {
+            // madvise is advisory -- always succeed (no-op).
+            Ok(0)
+        }
+
         _ => Err(SyscallError::InvalidSyscall),
     }
 }
@@ -1167,6 +1186,130 @@ fn sys_getrandom(buf_ptr: usize, buflen: usize, _flags: usize) -> SyscallResult 
     let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, len) };
     rng.fill_bytes(buf).map_err(|_| SyscallError::IoError)?;
     Ok(len)
+}
+
+/// getdents64 syscall -- read directory entries in Linux struct linux_dirent64
+/// format.
+///
+/// musl's readdir() uses getdents64 to read directory contents. Each entry is:
+///   d_ino (u64), d_off (u64), d_reclen (u16), d_type (u8), d_name[...]
+///
+/// # Arguments
+/// - `fd`: Directory file descriptor.
+/// - `buf_ptr`: User-space buffer for dirent64 entries.
+/// - `buf_size`: Size of the buffer in bytes.
+///
+/// # Returns
+/// Number of bytes written to buf, or 0 when no more entries.
+fn sys_getdents64(fd: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
+    if buf_size == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    validate_user_buffer(buf_ptr, buf_size)?;
+
+    let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file_table = proc.file_table.lock();
+    let file_desc = file_table.get(fd).ok_or(SyscallError::BadFileDescriptor)?;
+
+    let entries = file_desc
+        .node
+        .readdir()
+        .map_err(|_| SyscallError::IoError)?;
+
+    let pos = file_desc.tell();
+    if pos >= entries.len() {
+        return Ok(0);
+    }
+
+    let mut offset = 0usize;
+    let mut idx = pos;
+
+    while idx < entries.len() {
+        let entry = &entries[idx];
+        let name_bytes = entry.name.as_bytes();
+        // d_ino(8) + d_off(8) + d_reclen(2) + d_type(1) + name + NUL
+        let reclen_unaligned = 8 + 8 + 2 + 1 + name_bytes.len() + 1;
+        // Align to 8 bytes
+        let reclen = (reclen_unaligned + 7) & !7;
+
+        if offset + reclen > buf_size {
+            break;
+        }
+
+        let d_type: u8 = match entry.node_type {
+            crate::fs::NodeType::File => 8,        // DT_REG
+            crate::fs::NodeType::Directory => 4,   // DT_DIR
+            crate::fs::NodeType::CharDevice => 2,  // DT_CHR
+            crate::fs::NodeType::BlockDevice => 6, // DT_BLK
+            crate::fs::NodeType::Symlink => 10,    // DT_LNK
+            crate::fs::NodeType::Pipe => 1,        // DT_FIFO
+            crate::fs::NodeType::Socket => 12,     // DT_SOCK
+        };
+
+        // SAFETY: buf_ptr + offset is within the validated user buffer.
+        unsafe {
+            let base = (buf_ptr + offset) as *mut u8;
+            // d_ino (use inode from entry, default 1)
+            let ino = if entry.inode == 0 {
+                (idx + 1) as u64
+            } else {
+                entry.inode
+            };
+            *(base as *mut u64) = ino;
+            // d_off (offset to next entry)
+            *((base.add(8)) as *mut u64) = (offset + reclen) as u64;
+            // d_reclen
+            *((base.add(16)) as *mut u16) = reclen as u16;
+            // d_type
+            *base.add(18) = d_type;
+            // d_name (NUL-terminated)
+            core::ptr::copy_nonoverlapping(name_bytes.as_ptr(), base.add(19), name_bytes.len());
+            *base.add(19 + name_bytes.len()) = 0;
+            // Zero-fill padding
+            let written = 19 + name_bytes.len() + 1;
+            for i in written..reclen {
+                *base.add(i) = 0;
+            }
+        }
+
+        offset += reclen;
+        idx += 1;
+    }
+
+    // Advance file position
+    if idx > pos {
+        let _ = file_desc.seek(crate::fs::SeekFrom::Start(idx));
+    }
+
+    Ok(offset)
+}
+
+/// prlimit64 syscall -- get/set resource limits for a process.
+///
+/// Combines getrlimit and setrlimit in one call. musl uses this for both.
+///
+/// # Arguments
+/// - `pid`: Process ID (0 = current process).
+/// - `resource`: RLIMIT_* constant.
+/// - `new_rlim_ptr`: Pointer to new Rlimit (0 = don't set).
+/// - `old_rlim_ptr`: Pointer to receive old Rlimit (0 = don't get).
+fn sys_prlimit64(
+    _pid: usize,
+    resource: usize,
+    new_rlim_ptr: usize,
+    old_rlim_ptr: usize,
+) -> SyscallResult {
+    // Get old limits if requested
+    if old_rlim_ptr != 0 {
+        memory::sys_getrlimit(resource, old_rlim_ptr)?;
+    }
+
+    // Set new limits if requested
+    if new_rlim_ptr != 0 {
+        memory::sys_setrlimit(resource, new_rlim_ptr)?;
+    }
+
+    Ok(0)
 }
 
 /// sendmsg syscall -- sends data with optional ancillary data (SCM_RIGHTS).
@@ -2124,6 +2267,14 @@ impl TryFrom<usize> for Syscall {
             337 => Ok(Syscall::SignalfdCreate),
             338 => Ok(Syscall::SendMsg),
             339 => Ok(Syscall::RecvMsg),
+
+            // musl libc compatibility
+            340 => Ok(Syscall::Getdents64),
+            341 => Ok(Syscall::Prlimit64),
+            342 => Ok(Syscall::InotifyInit1),
+            343 => Ok(Syscall::InotifyAddWatch),
+            344 => Ok(Syscall::InotifyRmWatch),
+            345 => Ok(Syscall::Madvise),
 
             _ => Err(()),
         }

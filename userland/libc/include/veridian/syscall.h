@@ -222,6 +222,14 @@ extern "C" {
 #define SYS_SENDMSG             338
 #define SYS_RECVMSG             339
 
+/* musl libc compatibility syscalls (340-345) */
+#define SYS_GETDENTS64          340
+#define SYS_PRLIMIT64           341
+#define SYS_INOTIFY_INIT1       342
+#define SYS_INOTIFY_ADD_WATCH   343
+#define SYS_INOTIFY_RM_WATCH    344
+#define SYS_MADVISE             345
+
 /* AT_* constants for *at() syscalls */
 #define AT_FDCWD                (-100)
 #define AT_REMOVEDIR            0x200

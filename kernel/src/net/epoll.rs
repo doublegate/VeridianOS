@@ -341,9 +341,39 @@ pub fn epoll_destroy(epoll_id: u32) -> Result<(), KernelError> {
 /// Query the readiness of a file descriptor.
 ///
 /// Checks the kernel's fd state (pipe buffers, socket receive queues, etc.)
-/// and returns the matching event flags.
+/// and returns the matching event flags. Also checks special fd types
+/// (eventfd, timerfd, signalfd) which use pseudo-fd IDs from their own
+/// registries.
 fn poll_fd_readiness(fd: i32) -> u32 {
-    // Get the current process's file table to check fd state.
+    let fd_u32 = fd as u32;
+
+    // Check special fd types first -- these are pseudo-fds that may not
+    // appear in the process file table. Each registry returns false for
+    // unknown IDs, so at most one will match.
+    //
+    // eventfd: readable when counter > 0, writable when counter < MAX
+    if crate::fs::eventfd::is_readable(fd_u32) || crate::fs::eventfd::is_writable(fd_u32) {
+        let mut ready = 0u32;
+        if crate::fs::eventfd::is_readable(fd_u32) {
+            ready |= EPOLLIN;
+        }
+        if crate::fs::eventfd::is_writable(fd_u32) {
+            ready |= EPOLLOUT;
+        }
+        return ready;
+    }
+
+    // timerfd: readable when timer has expired (never writable)
+    if crate::fs::timerfd::is_readable(fd_u32) {
+        return EPOLLIN;
+    }
+
+    // signalfd: readable when signals are pending (never writable)
+    if crate::fs::signalfd::is_readable(fd_u32) {
+        return EPOLLIN;
+    }
+
+    // Regular file descriptors -- check the process file table
     let proc = match crate::process::current_process() {
         Some(p) => p,
         None => return EPOLLERR,
@@ -367,14 +397,11 @@ fn poll_fd_readiness(fd: i32) -> u32 {
         | crate::fs::NodeType::CharDevice
         | crate::fs::NodeType::BlockDevice => {
             // Regular files and device nodes are always considered readable/writable
-            // (actual I/O may still block at a lower level, but epoll reports them
-            // as ready).
             ready |= EPOLLIN | EPOLLOUT;
         }
         crate::fs::NodeType::Pipe => {
             // Pipes: check buffer occupancy
             // For now, report both readable and writable
-            // (real implementation would check pipe buffer fill level)
             ready |= EPOLLIN | EPOLLOUT;
         }
         _ => {
