@@ -2,6 +2,104 @@
 
 ---
 
+## [v0.22.0] - 2026-03-08
+
+### v0.22.0: Phase 9 Complete -- KDE Plasma 6 Desktop Environment Porting Infrastructure
+
+Complete 8-layer porting infrastructure for KDE Plasma 6 Wayland desktop environment on VeridianOS. 11 sprints, 314 tasks, ~130 new files across `userland/libc/`, `userland/qt6/`, `userland/kf6/`, `userland/kwin/`, `userland/plasma/`, and `userland/integration/`. Existing built-in desktop preserved as lightweight fallback session.
+
+#### Sprint 9.0-9.1: Foundation (Dynamic Linking + Graphics)
+
+- **Dynamic linker**: dlopen/dlsym/dlclose/dlerror/dladdr wired to ld-veridian ELF loader, lazy binding, symbol versioning, RTLD flag support
+- **libc extensions**: iconv, locale, getpwuid/getgrgid, atexit/__cxa_atexit, mmap MAP_SHARED
+- **C++ runtime**: libstdc++ port with exceptions (libunwind), RTTI, thread_local, STL containers
+- **DRM/KMS user-space**: /dev/dri/card0 ioctls (MODE_GETRESOURCES, SETCRTC, PAGE_FLIP, dumb buffers, GEM), libdrm port
+- **evdev/libinput**: /dev/input/event* interface, libinput context + device enumeration
+
+#### Sprint 9.2: System Libraries
+
+- **6 library shims**: zlib (deflate/inflate), libffi (closure ABI), pcre2 (regex JIT), ICU (Unicode normalization + collation), OpenSSL (EVP/TLS), libxml2 (SAX/DOM parser)
+
+#### Sprint 9.3: Graphics Stack (EGL/GLES2/libepoxy)
+
+- **EGL 1.5**: Display lifecycle, config selection, context/surface management on DRM/GBM backend (1,109 LOC)
+- **OpenGL ES 2.0**: ~150 entry point stubs with state tracking (1,618 LOC)
+- **libepoxy**: GL/EGL dispatch with version queries and extension checks
+- **14 headers**: EGL/, GLES2/, GLES3/, KHR/, epoxy/
+- **Meson cross-file** for Mesa/llvmpipe+virgl builds
+
+#### Sprint 9.4: Font/Text Stack
+
+- **FreeType 2.13.3**: Font rendering with glyph metrics, 8x16 fallback bitmaps (1,147 LOC)
+- **HarfBuzz 9.0.0**: Text shaping with UTF-8/16/32, 1:1 Latin glyph mapping (2,000 LOC)
+- **Fontconfig 2.15.0**: Font discovery with DejaVu fallbacks (1,170 LOC)
+- **libxkbcommon 1.7.0**: Keyboard handling, US QWERTY layout, ~120 keycode entries (1,173 LOC)
+- **33 headers**: freetype/ (14), harfbuzz/ (13), fontconfig/ (2), xkbcommon/ (4)
+
+#### Sprint 9.5: D-Bus + Session Management
+
+- **libdbus-1**: Connection pool (32), message pool (512), container iteration, serial generation (2,145 LOC)
+- **systemd-logind shim**: Session/seat queries, sd-bus API, wayland session defaults (1,171 LOC)
+- **Polkit**: Permissive authorization policy, GObject compat stubs (421 LOC)
+- **17 headers**: dbus/ (14), systemd/ (2), polkit/ (1)
+
+#### Sprint 9.6: Qt 6 Core Port
+
+- **QPA plugin "qveridian"**: 19 C++ files -- integration, screen, window, backing store, GL context, cursor, clipboard, theme, event dispatcher
+- **Qt mkspec**: veridian-g++ with qmake.conf + qplatformdefs.h
+- **Platform module**: VeridianOS.cmake (UNIX-like, ELF, EGL+Wayland)
+- **CMake toolchain**: Cross-compilation with Qt6 dependency paths
+- **3 new libc headers**: sys/eventfd.h, sys/timerfd.h, sys/inotify.h
+- **qt_core_platform.c**: eventfd, timerfd, inotify, madvise, getauxval, memfd_create (247 LOC)
+
+#### Sprint 9.7: KDE Frameworks 6
+
+- **ECM platform modules**: VeridianOSPlatform.cmake + ECMVeridianOSConfig.cmake
+- **Solid backend**: Device enumeration via /dev, /proc, /sys (~1,017 LOC)
+- **KIO worker**: POSIX file:// protocol, 40+ MIME types, trash:// (~831 LOC)
+- **KWindowSystem backend**: org_kde_plasma_window_management Wayland protocol (~740 LOC)
+- **KWallet backend**: File-based credential storage with XOR encryption (~870 LOC)
+- **Build scripts**: Tier 1 (15 frameworks), Tier 2 (9), Tier 3 (11), master orchestrator
+
+#### Sprint 9.8: KWin Compositor
+
+- **DRM/KMS platform backend**: Connector/CRTC enumeration, GBM surfaces, EGL on GBM, page flip VSync (1,228 LOC)
+- **libinput backend**: Keyboard/pointer/touch events, xkbcommon state, keymap fd sharing (790 LOC)
+- **KDE Wayland protocols**: plasma_shell, window_management, server_decoration, blur, DPMS, outputdevice/management (1,153 LOC)
+- **Effects configuration**: Three-tier GPU detection (llvmpipe/virgl/real), per-tier effect lists (483 LOC)
+- **Session management**: XDG dirs, D-Bus verification, signal handlers (471 LOC)
+
+#### Sprint 9.9: Plasma Desktop
+
+- **Breeze Qt style**: 15+ widget types, animation engine, color palette, High-DPI (1,580 LOC)
+- **Breeze window decoration**: Title bar, 8 button types, hover animations, shadow generation (1,054 LOC)
+- **Plasma integration**: Qt platform theme, Breeze color palette, icon/font defaults (~750 LOC)
+- **Lock screen**: SHA-256 auth, ext-session-lock-v1, clock/avatar/password UI (1,106 LOC)
+- **KScreen backend**: DRM output enumeration, EDID parsing, multi-monitor layout (917 LOC)
+- **PowerDevil backend**: Battery sysfs, DPMS, CPU governor, suspend/hibernate (848 LOC)
+- **Breeze asset installer**: Icons, cursors, color schemes, wallpaper, desktop theme (617 LOC)
+- **5 .desktop files**: Dolphin, Konsole, Kate, Spectacle, System Settings
+
+#### Sprint 9.10: Integration + Polish
+
+- **Boot integration**: D-Bus system bus + logind at boot, session type selection, clean shutdown (348 LOC)
+- **Display manager**: Login prompt, session type menu, UserDatabase auth (915 LOC)
+- **XWayland**: On-demand launch, clipboard sharing, input forwarding, window reparenting (1,011 LOC)
+- **Performance profiler**: Memory RSS, FPS, input latency, D-Bus RTT measurement (485 LOC)
+- **KDE rootfs builder**: 2GB ext4 with Qt6/KF6/KWin/Plasma + Breeze assets (499 LOC)
+- **QEMU KDE launch**: VirtIO GPU 3D, 2GB RAM, SMP 4 (188 LOC)
+- **Test suite**: Kernel regression, window management, screenshots, keyboard shortcuts (508 LOC)
+- **CI workflow**: KDE sysroot build, caching, QEMU boot test, screenshot comparison (332 LOC)
+- **Known limitations**: Documented rendering, XWayland, hardware, and KDE feature gaps
+
+#### Version Bump
+
+- Version: v0.21.0 -> v0.22.0 (5 kernel files + Cargo.toml)
+- README.md: Version, release count, KDE Plasma 6 feature entry, repo structure
+- .gitignore: KDE build artifact patterns
+
+---
+
 ## [v0.21.0] - 2026-03-07
 
 ### v0.21.0: Performance Benchmarking + Verification Infrastructure

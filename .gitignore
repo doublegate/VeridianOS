@@ -321,6 +321,13 @@ gui-screenshot*.ppm
 # Minimal rootfs staging directory (created for QEMU testing)
 target/rootfs/
 
+# KDE Plasma 6 build artifacts (cross-compiled sysroot, not tracked)
+userland/kde-sysroot/
+userland/qt6-build/
+userland/kf6-build/
+userland/kwin-build/
+userland/plasma-build/
+
 # Plan files (Claude Code)
 .claude/plans/
 a.out

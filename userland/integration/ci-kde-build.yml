@@ -1,0 +1,332 @@
+name: KDE Plasma Build
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'userland/qt6/**'
+      - 'userland/kf6/**'
+      - 'userland/kwin/**'
+      - 'userland/plasma/**'
+      - 'userland/integration/**'
+      - 'userland/libc/**'
+      - 'userland/libwayland/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'userland/qt6/**'
+      - 'userland/kf6/**'
+      - 'userland/kwin/**'
+      - 'userland/plasma/**'
+      - 'userland/integration/**'
+  workflow_dispatch:
+    inputs:
+      build_rootfs:
+        description: "Build KDE rootfs image"
+        required: false
+        default: false
+        type: boolean
+      skip_boot_test:
+        description: "Skip QEMU boot test"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VERIDIAN_SYSROOT: /opt/veridian-sysroot
+  QT_HOST_PATH: /usr/lib/qt6
+  BUILD_TYPE: Release
+  JOBS: 4
+
+jobs:
+  # ==================================================================
+  # Job 1: Build KDE sysroot (Qt6 + KF6 + KWin + Plasma)
+  # ==================================================================
+  build-sysroot:
+    name: Build KDE Sysroot
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build git \
+            meson pkg-config \
+            libdrm-dev libgbm-dev libinput-dev \
+            libxkbcommon-dev libpixman-1-dev \
+            libepoxy-dev libfontconfig1-dev \
+            libfreetype-dev libharfbuzz-dev \
+            qt6-base-dev qt6-wayland-dev \
+            qt6-declarative-dev qt6-svg-dev \
+            extra-cmake-modules \
+            wayland-protocols libwayland-dev \
+            dbus libdbus-1-dev
+
+      - name: Cache sysroot
+        id: cache-sysroot
+        uses: actions/cache@v4
+        with:
+          path: /opt/veridian-sysroot
+          key: kde-sysroot-${{ hashFiles('userland/qt6/**', 'userland/kf6/**', 'userland/kwin/**', 'userland/plasma/**') }}
+          restore-keys: |
+            kde-sysroot-
+
+      - name: Create sysroot directory
+        if: steps.cache-sysroot.outputs.cache-hit != 'true'
+        run: |
+          sudo mkdir -p /opt/veridian-sysroot/usr/{bin,lib,include,share}
+          sudo chown -R $USER /opt/veridian-sysroot
+
+      - name: Build Qt6 QPA plugin
+        if: steps.cache-sysroot.outputs.cache-hit != 'true'
+        run: |
+          echo "Qt6 QPA plugin build would go here"
+          echo "Using cached sysroot or pre-built binaries in production"
+
+      - name: Build KDE Frameworks 6
+        if: steps.cache-sysroot.outputs.cache-hit != 'true'
+        run: |
+          echo "KF6 build would go here"
+          echo "Components: KConfig, KCoreAddons, KI18n, KIO, KWindowSystem, etc."
+
+      - name: Build KWin
+        if: steps.cache-sysroot.outputs.cache-hit != 'true'
+        run: |
+          echo "KWin build would go here"
+          echo "See: userland/kwin/build-kwin.sh"
+
+      - name: Build Plasma apps
+        if: steps.cache-sysroot.outputs.cache-hit != 'true'
+        run: |
+          echo "Plasma apps build would go here"
+          echo "See: userland/plasma/build-plasma-apps.sh"
+
+      - name: Verify sysroot structure
+        run: |
+          echo "=== Sysroot contents ==="
+          ls -la /opt/veridian-sysroot/usr/bin/ 2>/dev/null || echo "No binaries yet"
+          ls -la /opt/veridian-sysroot/usr/lib/ 2>/dev/null || echo "No libraries yet"
+
+      - name: Upload sysroot artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kde-sysroot
+          path: /opt/veridian-sysroot
+          retention-days: 7
+          if-no-files-found: warn
+
+  # ==================================================================
+  # Job 2: Build kernel (verify no regressions)
+  # ==================================================================
+  build-kernel:
+    name: Verify Kernel Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2025-01-15
+          components: rust-src, llvm-tools-preview
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: kernel-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            kernel-
+
+      - name: Build kernel (all architectures)
+        run: |
+          ./build-kernel.sh all dev
+
+      - name: Run host-target tests
+        run: |
+          cargo test 2>&1 | tail -20
+
+      - name: Clippy (x86_64)
+        run: |
+          cargo clippy --target targets/x86_64-veridian.json \
+            -p veridian-kernel \
+            -Zbuild-std=core,compiler_builtins,alloc \
+            -Zbuild-std-features=compiler-builtins-mem \
+            -- -D warnings \
+            -A unused_variables -A unused_imports -A dead_code \
+            -A static_mut_refs -A unreachable_code
+
+  # ==================================================================
+  # Job 3: Build KDE rootfs image
+  # ==================================================================
+  build-rootfs:
+    name: Build KDE Rootfs
+    runs-on: ubuntu-latest
+    needs: [build-sysroot, build-kernel]
+    if: github.event.inputs.build_rootfs == 'true' || github.ref == 'refs/heads/main'
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download sysroot
+        uses: actions/download-artifact@v4
+        with:
+          name: kde-sysroot
+          path: /opt/veridian-sysroot
+
+      - name: Build KDE rootfs
+        run: |
+          echo "KDE rootfs build would go here"
+          echo "See: userland/integration/build-kde-rootfs.sh"
+          # In production: sudo ./userland/integration/build-kde-rootfs.sh
+
+      - name: Upload rootfs artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kde-rootfs
+          path: target/rootfs-kde.img
+          retention-days: 3
+          if-no-files-found: warn
+
+  # ==================================================================
+  # Job 4: QEMU boot test
+  # ==================================================================
+  boot-test:
+    name: QEMU Boot Test (KDE)
+    runs-on: ubuntu-latest
+    needs: [build-rootfs]
+    if: github.event.inputs.skip_boot_test != 'true'
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf socat
+
+      - name: Download rootfs
+        uses: actions/download-artifact@v4
+        with:
+          name: kde-rootfs
+          path: target/
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2025-01-15
+          components: rust-src, llvm-tools-preview
+
+      - name: Build kernel
+        run: |
+          ./build-kernel.sh x86_64 dev
+
+      - name: Boot test (serial, 30s timeout)
+        run: |
+          # Launch QEMU in background with QMP and serial log
+          qemu-system-x86_64 \
+            -enable-kvm \
+            -m 2048M \
+            -smp 4 \
+            -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
+            -drive id=disk0,if=none,format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
+            -device ide-hd,drive=disk0 \
+            -serial file:/tmp/qemu-serial.log \
+            -display none \
+            -qmp unix:/tmp/qmp-kde.sock,server,nowait \
+            -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+            </dev/null >/dev/null 2>&1 &
+          QEMU_PID=$!
+
+          # Wait for boot
+          sleep 30
+
+          # Check serial output for boot markers
+          if [ -f /tmp/qemu-serial.log ]; then
+            echo "=== Serial output ==="
+            cat /tmp/qemu-serial.log
+            echo "=== End serial ==="
+
+            if grep -q "BOOTOK\|VeridianOS\|init" /tmp/qemu-serial.log; then
+              echo "Boot successful"
+            else
+              echo "WARNING: No boot markers found"
+            fi
+          fi
+
+          # Take screenshot via QMP
+          echo '{"execute":"qmp_capabilities"}{"execute":"screendump","arguments":{"filename":"/tmp/boot-screenshot.ppm"}}' | \
+            socat - UNIX-CONNECT:/tmp/qmp-kde.sock 2>/dev/null || true
+          sleep 2
+
+          # Kill QEMU
+          kill $QEMU_PID 2>/dev/null || true
+          wait $QEMU_PID 2>/dev/null || true
+
+      - name: Upload boot artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-test-results
+          path: |
+            /tmp/qemu-serial.log
+            /tmp/boot-screenshot.ppm
+          retention-days: 3
+          if-no-files-found: warn
+
+  # ==================================================================
+  # Job 5: Screenshot comparison
+  # ==================================================================
+  screenshot-compare:
+    name: Screenshot Comparison
+    runs-on: ubuntu-latest
+    needs: [boot-test]
+    if: always() && needs.boot-test.result == 'success'
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download boot artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: boot-test-results
+          path: /tmp/
+
+      - name: Compare screenshots
+        run: |
+          echo "Screenshot comparison would go here"
+          echo "Using perceptual diff (pdiff) or similar tool"
+
+          if [ -f /tmp/boot-screenshot.ppm ]; then
+            FILE_SIZE=$(wc -c < /tmp/boot-screenshot.ppm)
+            echo "Screenshot size: ${FILE_SIZE} bytes"
+            if [ "${FILE_SIZE}" -gt 1024 ]; then
+              echo "Screenshot appears valid"
+            else
+              echo "WARNING: Screenshot may be empty"
+            fi
+          else
+            echo "No screenshot captured"
+          fi

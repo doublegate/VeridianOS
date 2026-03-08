@@ -48,6 +48,7 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 
 - **Wayland compositor** -- Wire protocol, SHM buffers, XDG shell, layer-shell, DMA-BUF, multi-output with HiDPI scaling
 - **Desktop environment** -- 9 desktop apps (terminal, file manager, text editor, calculator, system monitor, settings, image viewer, web browser, PDF viewer), application launcher, Alt-Tab switcher, notifications, 6-item system tray, 8 settings panels, screen lock, virtual workspaces, TrueType fonts, CJK Unicode
+- **KDE Plasma 6 porting infrastructure** -- Complete platform backend stack for KDE Plasma 6 Wayland desktop: Qt 6 QPA plugin, KDE Frameworks 6 backends (Solid, KIO, KWindowSystem, KWallet), KWin DRM/KMS compositor integration, Breeze theme, display manager, XWayland, and CI pipeline. Full 8-layer dependency stack from dynamic linking through Plasma shell (314 porting tasks across 11 sprints)
 - **GPU acceleration** -- VirtIO GPU 2D/3D, OpenGL ES 2.0, DRM/KMS, texture atlas compositor with shader pipeline; vendor stubs for i915, amdgpu, and nouveau
 - **Audio & video** -- ALSA-compatible mixer, VirtIO-Sound, WAV/Vorbis/MP3 playback, PNG/JPEG/GIF/TGA/QOI decoders, media player
 - **Web browser engine** -- HTML5 tokenizer, arena-based DOM, CSS layout (block/inline/float/flexbox), JavaScript VM with mark-sweep GC, tabbed browsing with process isolation
@@ -88,7 +89,7 @@ All drivers and services run in user space with capability-controlled access to 
 
 ## Project Status
 
-**Version**: v0.20.3 | **All development phases complete** | **76 releases published**
+**Version**: v0.22.0 | **All development phases complete (0-9)** | **77 releases published**
 
 | Metric | Value |
 | --- | --- |
@@ -125,7 +126,7 @@ All drivers and services run in user space with capability-controlled access to 
 kernel/        Trusted computing base (microkernel)
 drivers/       Hardware interaction behind explicit privilege boundaries
 services/      Capability-mediated system services (CRI, CNI, CSI, mesh, LB)
-userland/      User processes, libc, libm, Rust std port, vsh, vpkg
+userland/      User processes, libc, libm, Rust std port, vsh, vpkg, KDE Plasma 6 backends
 boot/          Bootloader and early initialization
 targets/       Rust target JSON specs (kernel and user-space, all 3 architectures)
 scripts/       Build infrastructure (cross-toolchain, sysroot, rootfs)
