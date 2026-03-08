@@ -33,10 +33,11 @@ pub fn sys_get_kernel_info(buf: usize) -> SyscallResult {
     Ok(size_of::<KernelVersionInfo>())
 }
 
-/// POSIX uname() layout: five 65-byte fields (sysname, nodename, release,
-/// version, machine). Total size = 325 bytes.
+/// Linux utsname layout: six 65-byte fields (sysname, nodename, release,
+/// version, machine, domainname). Total size = 390 bytes.
+/// musl allocates all 6 fields; we must write all of them.
 const UTSNAME_LENGTH: usize = 65;
-const UTSNAME_SIZE: usize = UTSNAME_LENGTH * 5;
+const UTSNAME_SIZE: usize = UTSNAME_LENGTH * 6;
 
 /// Fill a user-space utsname struct with system identification.
 ///
@@ -71,6 +72,9 @@ pub fn sys_uname(buf: usize) -> SyscallResult {
     write_field(UTSNAME_LENGTH * 4, b"aarch64");
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     write_field(UTSNAME_LENGTH * 4, b"riscv64");
+
+    // domainname (6th field) -- empty string (no NIS domain)
+    write_field(UTSNAME_LENGTH * 5, b"");
 
     Ok(0)
 }
