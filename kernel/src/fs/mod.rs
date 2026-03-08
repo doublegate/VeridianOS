@@ -280,6 +280,21 @@ pub trait VfsNode: Send + Sync {
     fn chmod(&self, _permissions: Permissions) -> Result<(), KernelError> {
         Err(KernelError::NotImplemented { feature: "chmod" })
     }
+
+    /// Poll readiness for I/O multiplexing (poll/epoll).
+    ///
+    /// Returns a bitmask of ready events using POLL* constants:
+    /// - bit 0 (POLLIN=1): readable without blocking
+    /// - bit 2 (POLLOUT=4): writable without blocking
+    /// - bit 3 (POLLERR=8): error condition
+    /// - bit 4 (POLLHUP=16): hangup (peer closed)
+    ///
+    /// Default: regular files are always readable and writable.
+    /// Pipe nodes override this to check actual buffer state.
+    fn poll_readiness(&self) -> u16 {
+        // Regular files/dirs: always ready for read+write
+        0x0001 | 0x0004 // POLLIN | POLLOUT
+    }
 }
 
 /// Filesystem trait

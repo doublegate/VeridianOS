@@ -2162,16 +2162,26 @@ pub fn sys_truncate_path(path_ptr: usize, size: usize) -> SyscallResult {
 
 /// Poll file descriptors for readiness (syscall 189).
 ///
-/// Simplified implementation: checks each fd for readability/writability
-/// and returns immediately (no blocking).
+/// Poll file descriptors for I/O readiness using VfsNode::poll_readiness().
+///
+/// Checks each fd's actual buffer state (pipe occupancy, write-end closed,
+/// etc.) rather than always reporting ready. Supports timeout via busy-wait
+/// with scheduler yield (same approach as nanosleep).
 ///
 /// # Arguments
 /// - `fds_ptr`: Pointer to array of PollFd structs.
 /// - `nfds`: Number of entries.
-/// - `_timeout_ms`: Timeout in milliseconds (ignored — always returns
-///   immediately).
-pub fn sys_poll(fds_ptr: usize, nfds: usize, _timeout_ms: usize) -> SyscallResult {
+/// - `timeout_ms`: Timeout in milliseconds. 0 = non-blocking poll, negative (as
+///   i32) = infinite wait, positive = wait up to N ms.
+pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult {
     if nfds == 0 {
+        // timeout_ms > 0 means sleep for that duration (like usleep via poll)
+        if (timeout_ms as i32) > 0 {
+            let start = crate::timer::get_uptime_ms();
+            while crate::timer::get_uptime_ms() - start < timeout_ms as u64 {
+                crate::sched::yield_cpu();
+            }
+        }
         return Ok(0);
     }
     if nfds > 256 {
@@ -2180,43 +2190,73 @@ pub fn sys_poll(fds_ptr: usize, nfds: usize, _timeout_ms: usize) -> SyscallResul
 
     validate_user_buffer(fds_ptr, nfds * core::mem::size_of::<PollFd>())?;
 
-    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let file_table = proc.file_table.lock();
-    let mut ready_count = 0usize;
+    let timeout_i32 = timeout_ms as i32;
+    let start = crate::timer::get_uptime_ms();
+    // Cap infinite wait to 30 seconds to prevent permanent hangs
+    let max_wait_ms: u64 = if timeout_i32 < 0 {
+        30_000
+    } else {
+        timeout_ms as u64
+    };
 
-    for i in 0..nfds {
-        // SAFETY: fds_ptr was validated above and PollFd is repr(C).
-        let pollfd = unsafe { &mut *((fds_ptr as *mut PollFd).add(i)) };
-        pollfd.revents = 0;
+    loop {
+        let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+        let file_table = proc.file_table.lock();
+        let mut ready_count = 0usize;
 
-        if pollfd.fd < 0 {
-            continue;
-        }
+        for i in 0..nfds {
+            // SAFETY: fds_ptr was validated above and PollFd is repr(C).
+            let pollfd = unsafe { &mut *((fds_ptr as *mut PollFd).add(i)) };
+            pollfd.revents = 0;
 
-        if let Some(_file) = file_table.get(pollfd.fd as usize) {
-            // Simplified: files/pipes are always readable and writable for now.
-            // A proper implementation would check pipe buffer state.
-            if pollfd.events & POLLIN != 0 {
-                pollfd.revents |= POLLIN;
+            if pollfd.fd < 0 {
+                continue;
             }
-            if pollfd.events & POLLOUT != 0 {
-                pollfd.revents |= POLLOUT;
-            }
-            if pollfd.revents != 0 {
+
+            if let Some(file) = file_table.get(pollfd.fd as usize) {
+                let readiness = file.node.poll_readiness();
+                if pollfd.events & POLLIN != 0 && readiness & 0x0001 != 0 {
+                    pollfd.revents |= POLLIN;
+                }
+                if pollfd.events & POLLOUT != 0 && readiness & 0x0004 != 0 {
+                    pollfd.revents |= POLLOUT;
+                }
+                // POLLERR and POLLHUP always delivered regardless of events mask
+                if readiness & 0x0008 != 0 {
+                    pollfd.revents |= POLLERR;
+                }
+                if readiness & 0x0010 != 0 {
+                    pollfd.revents |= POLLHUP;
+                }
+                if pollfd.revents != 0 {
+                    ready_count += 1;
+                }
+            } else {
+                pollfd.revents = POLLNVAL;
                 ready_count += 1;
             }
-        } else {
-            pollfd.revents = POLLNVAL;
-            ready_count += 1;
         }
-    }
+        // Drop file_table lock before yielding
+        drop(file_table);
 
-    Ok(ready_count)
+        if ready_count > 0 || timeout_i32 == 0 {
+            return Ok(ready_count);
+        }
+
+        // Timeout expired?
+        if crate::timer::get_uptime_ms() - start >= max_wait_ms {
+            return Ok(0);
+        }
+
+        crate::sched::yield_cpu();
+    }
 }
 
 /// Poll event flags
 const POLLIN: i16 = 0x001;
 const POLLOUT: i16 = 0x004;
+const POLLERR: i16 = 0x008;
+const POLLHUP: i16 = 0x010;
 const POLLNVAL: i16 = 0x020;
 
 /// Poll file descriptor structure (matches C struct pollfd).

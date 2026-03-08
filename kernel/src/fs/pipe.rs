@@ -227,6 +227,22 @@ impl VfsNode for PipeReadNode {
         })
     }
 
+    fn poll_readiness(&self) -> u16 {
+        let reader = self.reader.lock();
+        let pipe = reader.inner.lock();
+        let mut events = 0u16;
+        if !pipe.buffer.is_empty() {
+            events |= 0x0001; // POLLIN
+        }
+        if pipe.write_closed {
+            events |= 0x0010; // POLLHUP -- write end closed (EOF pending)
+            if pipe.buffer.is_empty() {
+                events |= 0x0001; // POLLIN -- read will return 0 (EOF)
+            }
+        }
+        events
+    }
+
     fn metadata(&self) -> Result<Metadata, KernelError> {
         Ok(Metadata {
             size: 0,
@@ -303,6 +319,18 @@ impl VfsNode for PipeWriteNode {
 
     fn write(&self, _offset: usize, data: &[u8]) -> Result<usize, KernelError> {
         self.writer.lock().write(data)
+    }
+
+    fn poll_readiness(&self) -> u16 {
+        let writer = self.writer.lock();
+        let pipe = writer.inner.lock();
+        let mut events = 0u16;
+        if pipe.read_closed {
+            events |= 0x0008; // POLLERR -- broken pipe
+        } else if pipe.buffer.len() < pipe.capacity {
+            events |= 0x0004; // POLLOUT -- space available
+        }
+        events
     }
 
     fn metadata(&self) -> Result<Metadata, KernelError> {

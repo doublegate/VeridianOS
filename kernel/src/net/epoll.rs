@@ -294,28 +294,49 @@ pub fn epoll_ctl(
 ///
 /// Returns the number of ready events written to `events`.
 /// If `timeout_ms` is 0, returns immediately (non-blocking poll).
-/// If `timeout_ms` is -1, blocks indefinitely (simplified: returns current
-/// state).
+/// If `timeout_ms` is -1, waits up to 30s (capped to prevent permanent hangs).
+/// Otherwise waits up to `timeout_ms` milliseconds.
 pub fn epoll_wait(
     epoll_id: u32,
     events: &mut [EpollEvent],
-    _timeout_ms: i32,
+    timeout_ms: i32,
 ) -> Result<usize, KernelError> {
-    let mut reg_guard = EPOLL_REGISTRY.lock();
-    let reg = reg_guard
-        .as_mut()
-        .ok_or(KernelError::NotInitialized { subsystem: "epoll" })?;
+    let start = crate::timer::get_uptime_ms();
+    // Cap infinite wait to 30 seconds to prevent permanent hangs
+    let max_wait_ms: u64 = if timeout_ms < 0 {
+        30_000
+    } else {
+        timeout_ms as u64
+    };
 
-    let instance = reg
-        .instances
-        .get_mut(&epoll_id)
-        .ok_or(KernelError::NotFound {
-            resource: "epoll instance",
-            id: epoll_id as u64,
-        })?;
+    loop {
+        let count = {
+            let mut reg_guard = EPOLL_REGISTRY.lock();
+            let reg = reg_guard
+                .as_mut()
+                .ok_or(KernelError::NotInitialized { subsystem: "epoll" })?;
 
-    let count = instance.poll_events(events);
-    Ok(count)
+            let instance = reg
+                .instances
+                .get_mut(&epoll_id)
+                .ok_or(KernelError::NotFound {
+                    resource: "epoll instance",
+                    id: epoll_id as u64,
+                })?;
+
+            instance.poll_events(events)
+        }; // Drop lock before yielding
+
+        if count > 0 || timeout_ms == 0 {
+            return Ok(count);
+        }
+
+        if crate::timer::get_uptime_ms() - start >= max_wait_ms {
+            return Ok(0);
+        }
+
+        crate::sched::yield_cpu();
+    }
 }
 
 /// Destroy an epoll instance.
@@ -385,28 +406,21 @@ fn poll_fd_readiness(fd: i32) -> u32 {
         None => return EPOLLERR | EPOLLHUP,
     };
 
+    // Use VfsNode::poll_readiness() for actual buffer state checking.
+    // Maps POLL* flags (u16) to EPOLL* flags (u32) -- same bit positions.
+    let readiness = file.node.poll_readiness() as u32;
     let mut ready = 0u32;
-
-    // Check if the fd's underlying node has data available for reading.
-    // For pipes: check if the pipe buffer is non-empty.
-    // For sockets: check if the receive queue is non-empty.
-    // For regular files: always readable (no blocking).
-    let node_type = file.node.node_type();
-    match node_type {
-        crate::fs::NodeType::File
-        | crate::fs::NodeType::CharDevice
-        | crate::fs::NodeType::BlockDevice => {
-            // Regular files and device nodes are always considered readable/writable
-            ready |= EPOLLIN | EPOLLOUT;
-        }
-        crate::fs::NodeType::Pipe => {
-            // Pipes: check buffer occupancy
-            // For now, report both readable and writable
-            ready |= EPOLLIN | EPOLLOUT;
-        }
-        _ => {
-            ready |= EPOLLIN | EPOLLOUT;
-        }
+    if readiness & 0x0001 != 0 {
+        ready |= EPOLLIN;
+    }
+    if readiness & 0x0004 != 0 {
+        ready |= EPOLLOUT;
+    }
+    if readiness & 0x0008 != 0 {
+        ready |= EPOLLERR;
+    }
+    if readiness & 0x0010 != 0 {
+        ready |= EPOLLHUP;
     }
 
     ready
