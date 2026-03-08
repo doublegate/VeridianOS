@@ -252,6 +252,127 @@ pub fn signalfd_close(sfd_id: u32) -> SyscallResult {
     Ok(0)
 }
 
+// ── VfsNode adapter ────────────────────────────────────────────────────
+
+use alloc::sync::Arc;
+
+use super::{DirEntry, Metadata, NodeType, Permissions, VfsNode};
+use crate::error::KernelError;
+
+/// VfsNode wrapper around a signalfd instance.
+///
+/// This allows signalfd to be inserted into a process's file table so that
+/// standard read()/close()/epoll work on it. musl's signalfd4() syscall
+/// expects a real file descriptor.
+pub struct SignalFdNode {
+    sfd_id: u32,
+}
+
+impl SignalFdNode {
+    pub fn new(sfd_id: u32) -> Self {
+        Self { sfd_id }
+    }
+
+    /// Get the internal signalfd ID (needed for mask updates).
+    pub fn sfd_id(&self) -> u32 {
+        self.sfd_id
+    }
+}
+
+impl VfsNode for SignalFdNode {
+    fn node_type(&self) -> NodeType {
+        NodeType::CharDevice
+    }
+
+    fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
+        if buffer.len() < 128 {
+            return Err(KernelError::InvalidArgument {
+                name: "buflen",
+                value: "must be at least 128 bytes for signalfd",
+            });
+        }
+        let info = signalfd_read(self.sfd_id).map_err(|e| match e {
+            SyscallError::WouldBlock => KernelError::WouldBlock,
+            _ => KernelError::FsError(crate::error::FsError::BadFileDescriptor),
+        })?;
+        // SAFETY: SignalfdSiginfo is repr(C) and exactly 128 bytes.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(&info as *const SignalfdSiginfo as *const u8, 128)
+        };
+        buffer[..128].copy_from_slice(bytes);
+        Ok(128)
+    }
+
+    fn write(&self, _offset: usize, _data: &[u8]) -> Result<usize, KernelError> {
+        // signalfd is not writable via write(2)
+        Err(KernelError::PermissionDenied {
+            operation: "write signalfd",
+        })
+    }
+
+    fn poll_readiness(&self) -> u16 {
+        let mut events = 0u16;
+        if is_readable(self.sfd_id) {
+            events |= 0x0001; // POLLIN
+        }
+        events
+    }
+
+    fn metadata(&self) -> Result<Metadata, KernelError> {
+        Ok(Metadata {
+            size: 0,
+            node_type: NodeType::CharDevice,
+            permissions: Permissions::from_mode(0o666),
+            uid: 0,
+            gid: 0,
+            created: 0,
+            modified: 0,
+            accessed: 0,
+            inode: 0,
+        })
+    }
+
+    fn readdir(&self) -> Result<Vec<DirEntry>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn lookup(&self, _name: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn create(
+        &self,
+        _name: &str,
+        _permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn mkdir(
+        &self,
+        _name: &str,
+        _permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn unlink(&self, _name: &str) -> Result<(), KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn truncate(&self, _size: usize) -> Result<(), KernelError> {
+        Err(KernelError::PermissionDenied {
+            operation: "truncate signalfd",
+        })
+    }
+}
+
+impl Drop for SignalFdNode {
+    fn drop(&mut self) {
+        let _ = signalfd_close(self.sfd_id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

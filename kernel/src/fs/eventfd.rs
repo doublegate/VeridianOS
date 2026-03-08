@@ -191,6 +191,141 @@ pub fn eventfd_close(efd_id: u32) -> SyscallResult {
     Ok(0)
 }
 
+// ── VfsNode adapter ────────────────────────────────────────────────────
+
+use alloc::{sync::Arc, vec::Vec};
+
+use super::{DirEntry, Metadata, NodeType, Permissions, VfsNode};
+use crate::error::KernelError;
+
+/// VfsNode wrapper around an eventfd instance.
+///
+/// This allows eventfd to be inserted into a process's file table so that
+/// standard read()/write()/close()/epoll work on it. musl's eventfd2()
+/// syscall expects a real file descriptor.
+pub struct EventFdNode {
+    efd_id: u32,
+}
+
+impl EventFdNode {
+    pub fn new(efd_id: u32) -> Self {
+        Self { efd_id }
+    }
+}
+
+impl VfsNode for EventFdNode {
+    fn node_type(&self) -> NodeType {
+        NodeType::CharDevice
+    }
+
+    fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
+        if buffer.len() < 8 {
+            return Err(KernelError::InvalidArgument {
+                name: "buflen",
+                value: "must be at least 8 bytes for eventfd",
+            });
+        }
+        let val = eventfd_read(self.efd_id).map_err(|e| match e {
+            SyscallError::WouldBlock => KernelError::WouldBlock,
+            _ => KernelError::FsError(crate::error::FsError::BadFileDescriptor),
+        })?;
+        buffer[..8].copy_from_slice(&val.to_le_bytes());
+        Ok(8)
+    }
+
+    fn write(&self, _offset: usize, data: &[u8]) -> Result<usize, KernelError> {
+        if data.len() < 8 {
+            return Err(KernelError::InvalidArgument {
+                name: "buflen",
+                value: "must be at least 8 bytes for eventfd",
+            });
+        }
+        let val =
+            u64::from_le_bytes(
+                data[..8]
+                    .try_into()
+                    .map_err(|_| KernelError::InvalidArgument {
+                        name: "data",
+                        value: "invalid byte slice for u64",
+                    })?,
+            );
+        eventfd_write(self.efd_id, val).map_err(|e| match e {
+            SyscallError::WouldBlock => KernelError::WouldBlock,
+            SyscallError::InvalidArgument => KernelError::InvalidArgument {
+                name: "value",
+                value: "u64::MAX is not a valid eventfd value",
+            },
+            _ => KernelError::FsError(crate::error::FsError::BadFileDescriptor),
+        })?;
+        Ok(8)
+    }
+
+    fn poll_readiness(&self) -> u16 {
+        let mut events = 0u16;
+        if is_readable(self.efd_id) {
+            events |= 0x0001; // POLLIN
+        }
+        if is_writable(self.efd_id) {
+            events |= 0x0004; // POLLOUT
+        }
+        events
+    }
+
+    fn metadata(&self) -> Result<Metadata, KernelError> {
+        Ok(Metadata {
+            size: 0,
+            node_type: NodeType::CharDevice,
+            permissions: Permissions::from_mode(0o666),
+            uid: 0,
+            gid: 0,
+            created: 0,
+            modified: 0,
+            accessed: 0,
+            inode: 0,
+        })
+    }
+
+    fn readdir(&self) -> Result<Vec<DirEntry>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn lookup(&self, _name: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn create(
+        &self,
+        _name: &str,
+        _permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn mkdir(
+        &self,
+        _name: &str,
+        _permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn unlink(&self, _name: &str) -> Result<(), KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn truncate(&self, _size: usize) -> Result<(), KernelError> {
+        Err(KernelError::PermissionDenied {
+            operation: "truncate eventfd",
+        })
+    }
+}
+
+impl Drop for EventFdNode {
+    fn drop(&mut self) {
+        let _ = eventfd_close(self.efd_id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
