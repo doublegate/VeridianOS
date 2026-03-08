@@ -210,8 +210,9 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
     // Get current process
     let process = process::current_process().ok_or(SyscallError::InvalidState)?;
 
-    // Convert flags
+    // Convert flags. O_CLOEXEC (0x80000) is handled separately.
     let open_flags = OpenFlags::from_bits(flags as u32).ok_or(SyscallError::InvalidArgument)?;
+    let cloexec = (flags & 0x80000) != 0; // O_CLOEXEC
 
     // Open the file through VFS
     match vfs()?.read().open(path_str, open_flags) {
@@ -255,9 +256,9 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
                 alloc::string::String::from(path_str),
             );
 
-            // Add to process file table
+            // Add to process file table (with O_CLOEXEC if specified)
             let file_table = process.file_table.lock();
-            match file_table.open(alloc::sync::Arc::new(file)) {
+            match file_table.open_with_flags(alloc::sync::Arc::new(file), cloexec) {
                 Ok(fd_num) => Ok(fd_num),
                 Err(_) => Err(SyscallError::OutOfMemory),
             }
@@ -282,7 +283,7 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
                             alloc::string::String::from(path_str),
                         );
                         let file_table = process.file_table.lock();
-                        match file_table.open(alloc::sync::Arc::new(file)) {
+                        match file_table.open_with_flags(alloc::sync::Arc::new(file), cloexec) {
                             Ok(fd_num) => Ok(fd_num),
                             Err(_) => Err(SyscallError::OutOfMemory),
                         }
@@ -2353,12 +2354,13 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
     // VFS directly instead.
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
     let open_flags = OpenFlags::from_bits(flags as u32).ok_or(SyscallError::InvalidArgument)?;
+    let cloexec = (flags & 0x80000) != 0; // O_CLOEXEC
 
     match vfs()?.read().open(&abs_path, open_flags) {
         Ok(node) => {
             let file = crate::fs::file::File::new(node, open_flags);
             let file_table = proc.file_table.lock();
-            match file_table.open(alloc::sync::Arc::new(file)) {
+            match file_table.open_with_flags(alloc::sync::Arc::new(file), cloexec) {
                 Ok(fd_num) => Ok(fd_num),
                 Err(_) => Err(SyscallError::OutOfMemory),
             }
@@ -2376,7 +2378,7 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
                     Ok(node) => {
                         let file = crate::fs::file::File::new(node, open_flags);
                         let file_table = proc.file_table.lock();
-                        match file_table.open(alloc::sync::Arc::new(file)) {
+                        match file_table.open_with_flags(alloc::sync::Arc::new(file), cloexec) {
                             Ok(fd_num) => Ok(fd_num),
                             Err(_) => Err(SyscallError::OutOfMemory),
                         }
