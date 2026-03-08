@@ -923,18 +923,30 @@ fn handle_syscall(
 
         // epoll I/O multiplexing (Phase 6.5)
         Syscall::EpollCreate => {
+            let _flags = arg1; // epoll_create1 flags (EPOLL_CLOEXEC)
+            let cloexec = (arg1 & 0x80000) != 0; // EPOLL_CLOEXEC = O_CLOEXEC
             let pid = crate::process::current_process()
                 .map(|p| p.pid.0)
                 .unwrap_or(0);
-            crate::net::epoll::epoll_create(pid)
-                .map(|id| id as usize)
-                .map_err(|_| SyscallError::OutOfMemory)
+            let epoll_id =
+                crate::net::epoll::epoll_create(pid).map_err(|_| SyscallError::OutOfMemory)?;
+            // Wrap as VfsNode for real fd semantics
+            let node: alloc::sync::Arc<dyn crate::fs::VfsNode> =
+                alloc::sync::Arc::new(crate::net::epoll::EpollNode::new(epoll_id));
+            let file = crate::fs::file::File::new(node, crate::fs::OpenFlags::read_only());
+            let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+            let file_table = proc.file_table.lock();
+            let fd = file_table
+                .open_with_flags(alloc::sync::Arc::new(file), cloexec)
+                .map_err(|_| SyscallError::OutOfMemory)?;
+            Ok(fd)
         }
         Syscall::EpollCtl => {
-            let epoll_id = arg1 as u32;
+            let epoll_fd = arg1;
             let op = arg2 as u32;
             let fd = arg3 as i32;
             let event_ptr = arg4;
+            let epoll_id = resolve_epoll_id(epoll_fd)?;
             let event = if event_ptr != 0 {
                 validate_user_ptr_typed::<crate::net::epoll::EpollEvent>(event_ptr)?;
                 // SAFETY: event_ptr validated as aligned, non-null, and in user-space above.
@@ -947,10 +959,11 @@ fn handle_syscall(
                 .map_err(|_| SyscallError::InvalidArgument)
         }
         Syscall::EpollWait => {
-            let epoll_id = arg1 as u32;
+            let epoll_fd = arg1;
             let events_ptr = arg2;
             let max_events = arg3;
             let timeout_ms = arg4 as i32;
+            let epoll_id = resolve_epoll_id(epoll_fd)?;
             if max_events == 0 {
                 return Err(SyscallError::InvalidArgument);
             }
@@ -1274,6 +1287,18 @@ fn resolve_timerfd_id(fd: usize) -> Result<u32, SyscallError> {
         .downcast_ref::<crate::fs::timerfd::TimerFdNode>()
         .ok_or(SyscallError::BadFileDescriptor)?;
     Ok(tfd_node.tfd_id())
+}
+
+/// Resolve a file descriptor to an internal epoll ID.
+fn resolve_epoll_id(fd: usize) -> Result<u32, SyscallError> {
+    let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file_table = proc.file_table.lock();
+    let file = file_table.get(fd).ok_or(SyscallError::BadFileDescriptor)?;
+    let any = file.node.as_any().ok_or(SyscallError::BadFileDescriptor)?;
+    let epoll_node = any
+        .downcast_ref::<crate::net::epoll::EpollNode>()
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    Ok(epoll_node.epoll_id())
 }
 
 /// getrandom syscall -- fills user buffer with cryptographically secure random

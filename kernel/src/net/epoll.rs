@@ -366,35 +366,9 @@ pub fn epoll_destroy(epoll_id: u32) -> Result<(), KernelError> {
 /// (eventfd, timerfd, signalfd) which use pseudo-fd IDs from their own
 /// registries.
 fn poll_fd_readiness(fd: i32) -> u32 {
-    let fd_u32 = fd as u32;
-
-    // Check special fd types first -- these are pseudo-fds that may not
-    // appear in the process file table. Each registry returns false for
-    // unknown IDs, so at most one will match.
-    //
-    // eventfd: readable when counter > 0, writable when counter < MAX
-    if crate::fs::eventfd::is_readable(fd_u32) || crate::fs::eventfd::is_writable(fd_u32) {
-        let mut ready = 0u32;
-        if crate::fs::eventfd::is_readable(fd_u32) {
-            ready |= EPOLLIN;
-        }
-        if crate::fs::eventfd::is_writable(fd_u32) {
-            ready |= EPOLLOUT;
-        }
-        return ready;
-    }
-
-    // timerfd: readable when timer has expired (never writable)
-    if crate::fs::timerfd::is_readable(fd_u32) {
-        return EPOLLIN;
-    }
-
-    // signalfd: readable when signals are pending (never writable)
-    if crate::fs::signalfd::is_readable(fd_u32) {
-        return EPOLLIN;
-    }
-
-    // Regular file descriptors -- check the process file table
+    // All fd types (eventfd, timerfd, signalfd, pipes, sockets, files) are
+    // now VfsNode-backed in the process file table. poll_readiness() on
+    // each VfsNode handles type-specific readiness checking.
     let proc = match crate::process::current_process() {
         Some(p) => p,
         None => return EPOLLERR,
@@ -424,4 +398,107 @@ fn poll_fd_readiness(fd: i32) -> u32 {
     }
 
     ready
+}
+
+// ============================================================================
+// VfsNode adapter -- allows epoll fd to live in process file table
+// ============================================================================
+
+use alloc::{sync::Arc, vec::Vec};
+
+use crate::fs::{DirEntry, Metadata, NodeType, Permissions, VfsNode};
+
+/// VfsNode wrapper around an epoll instance.
+///
+/// Allows epoll_create1() to return a real file descriptor. musl expects
+/// to be able to close() the epoll fd. read()/write() are not supported.
+pub struct EpollNode {
+    epoll_id: u32,
+}
+
+impl EpollNode {
+    pub fn new(epoll_id: u32) -> Self {
+        Self { epoll_id }
+    }
+
+    /// Get the internal epoll ID (for epoll_ctl/epoll_wait).
+    pub fn epoll_id(&self) -> u32 {
+        self.epoll_id
+    }
+}
+
+impl VfsNode for EpollNode {
+    fn node_type(&self) -> NodeType {
+        NodeType::CharDevice
+    }
+
+    fn read(&self, _offset: usize, _buffer: &mut [u8]) -> Result<usize, KernelError> {
+        Err(KernelError::PermissionDenied {
+            operation: "read epoll",
+        })
+    }
+
+    fn write(&self, _offset: usize, _data: &[u8]) -> Result<usize, KernelError> {
+        Err(KernelError::PermissionDenied {
+            operation: "write epoll",
+        })
+    }
+
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        Some(self)
+    }
+
+    fn metadata(&self) -> Result<Metadata, KernelError> {
+        Ok(Metadata {
+            size: 0,
+            node_type: NodeType::CharDevice,
+            permissions: Permissions::from_mode(0o666),
+            uid: 0,
+            gid: 0,
+            created: 0,
+            modified: 0,
+            accessed: 0,
+            inode: 0,
+        })
+    }
+
+    fn readdir(&self) -> Result<Vec<DirEntry>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn lookup(&self, _name: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn create(
+        &self,
+        _name: &str,
+        _permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn mkdir(
+        &self,
+        _name: &str,
+        _permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn unlink(&self, _name: &str) -> Result<(), KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotADirectory))
+    }
+
+    fn truncate(&self, _size: usize) -> Result<(), KernelError> {
+        Err(KernelError::PermissionDenied {
+            operation: "truncate epoll",
+        })
+    }
+}
+
+impl Drop for EpollNode {
+    fn drop(&mut self) {
+        let _ = epoll_destroy(self.epoll_id);
+    }
 }
