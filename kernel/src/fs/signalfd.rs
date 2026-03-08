@@ -228,9 +228,7 @@ pub fn signalfd_read(sfd_id: u32) -> Result<SignalfdSiginfo, SyscallError> {
 /// Used by epoll to check readiness without consuming data.
 pub fn is_readable(sfd_id: u32) -> bool {
     let registry = SIGNALFD_REGISTRY.lock();
-    registry
-        .get(&sfd_id)
-        .is_some_and(|i| !i.pending.is_empty())
+    registry.get(&sfd_id).is_some_and(|i| !i.pending.is_empty())
 }
 
 /// Close (destroy) a signalfd instance.

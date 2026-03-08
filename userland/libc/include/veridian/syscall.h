@@ -222,13 +222,19 @@ extern "C" {
 #define SYS_SENDMSG             338
 #define SYS_RECVMSG             339
 
-/* musl libc compatibility syscalls (340-345) */
+/* musl libc compatibility syscalls (340-351) */
 #define SYS_GETDENTS64          340
 #define SYS_PRLIMIT64           341
 #define SYS_INOTIFY_INIT1       342
 #define SYS_INOTIFY_ADD_WATCH   343
 #define SYS_INOTIFY_RM_WATCH    344
 #define SYS_MADVISE             345
+#define SYS_FCHMODAT            346
+#define SYS_FCHOWNAT            347
+#define SYS_LINKAT              348
+#define SYS_SYMLINKAT           349
+#define SYS_READLINKAT          350
+#define SYS_MEMFD_CREATE        351
 
 /* AT_* constants for *at() syscalls */
 #define AT_FDCWD                (-100)

@@ -159,7 +159,7 @@ const SERIAL_IO_MAX_SIZE: usize = 64 * 1024;
 
 /// Helper to get the VFS instance, returning a syscall error instead of
 /// panicking if the VFS subsystem has not been initialized yet.
-fn vfs() -> Result<&'static spin::RwLock<crate::fs::Vfs>, SyscallError> {
+pub(crate) fn vfs() -> Result<&'static spin::RwLock<crate::fs::Vfs>, SyscallError> {
     try_get_vfs().ok_or(SyscallError::InvalidState)
 }
 
@@ -977,7 +977,7 @@ fn fill_stat(metadata: &crate::fs::Metadata) -> FileStat {
 /// Map a `KernelError` from VFS path resolution to the most appropriate
 /// `SyscallError`, preserving important distinctions like ELOOP and
 /// ENOENT.
-fn map_resolve_err(e: crate::error::KernelError) -> SyscallError {
+pub(crate) fn map_resolve_err(e: crate::error::KernelError) -> SyscallError {
     match e {
         crate::error::KernelError::FsError(crate::error::FsError::SymlinkLoop) => {
             SyscallError::SymlinkLoop
@@ -1378,7 +1378,7 @@ fn send_signal_to_pgid(pgid: u64, signal: i32) -> SyscallResult {
 
 /// Helper: read a NUL-terminated path from user space into an alloc::String.
 #[cfg(feature = "alloc")]
-fn read_user_path(ptr: usize) -> Result<alloc::string::String, SyscallError> {
+pub(crate) fn read_user_path(ptr: usize) -> Result<alloc::string::String, SyscallError> {
     validate_user_string_ptr(ptr)?;
 
     // SAFETY: ptr was validated as non-null and in user-space above. We read
@@ -2232,7 +2232,10 @@ struct PollFd {
 ///
 /// If `dirfd == AT_FDCWD`, uses the process CWD. Otherwise resolves the
 /// path relative to the directory referred to by dirfd.
-fn resolve_at_path(dirfd: usize, path: &str) -> Result<alloc::string::String, SyscallError> {
+pub(crate) fn resolve_at_path(
+    dirfd: usize,
+    path: &str,
+) -> Result<alloc::string::String, SyscallError> {
     use alloc::string::String;
 
     if path.starts_with('/') {
@@ -2441,7 +2444,9 @@ pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> Syscall
 }
 
 /// Helper: split a path into (parent_dir, basename).
-fn split_path(path: &str) -> Result<(alloc::string::String, alloc::string::String), SyscallError> {
+pub(crate) fn split_path(
+    path: &str,
+) -> Result<(alloc::string::String, alloc::string::String), SyscallError> {
     use alloc::string::String;
 
     if let Some(pos) = path.rfind('/') {

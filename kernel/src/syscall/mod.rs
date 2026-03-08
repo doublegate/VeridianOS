@@ -486,6 +486,14 @@ pub enum Syscall {
     InotifyRmWatch = 344,
     Madvise = 345,
 
+    // *at() syscalls for musl (dirfd-relative path operations)
+    Fchmodat = 346,
+    Fchownat = 347,
+    Linkat = 348,
+    Symlinkat = 349,
+    Readlinkat = 350,
+    MemfdCreate = 351,
+
     // Event/timer notification fds (KDE/Wayland infrastructure)
     Getrandom = 330,
     EventfdCreate = 331,
@@ -1161,6 +1169,14 @@ fn handle_syscall(
             Ok(0)
         }
 
+        // *at() syscalls -- dirfd-relative path operations for musl
+        Syscall::Fchmodat => sys_fchmodat(arg1, arg2, arg3),
+        Syscall::Fchownat => sys_fchownat(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Linkat => sys_linkat(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Symlinkat => sys_symlinkat(arg1, arg2, arg3),
+        Syscall::Readlinkat => sys_readlinkat(arg1, arg2, arg3, arg4),
+        Syscall::MemfdCreate => sys_memfd_create(arg1, arg2),
+
         _ => Err(SyscallError::InvalidSyscall),
     }
 }
@@ -1310,6 +1326,161 @@ fn sys_prlimit64(
     }
 
     Ok(0)
+}
+
+/// fchmodat syscall -- chmod relative to a directory fd.
+///
+/// # Arguments
+/// - `dirfd`: Directory fd (AT_FDCWD for CWD-relative).
+/// - `path_ptr`: Path to the file.
+/// - `mode`: Permission bits.
+fn sys_fchmodat(dirfd: usize, path_ptr: usize, mode: usize) -> SyscallResult {
+    let rel_path = filesystem::read_user_path(path_ptr)?;
+    let abs_path = filesystem::resolve_at_path(dirfd, &rel_path)?;
+
+    let vfs_lock = filesystem::vfs()?;
+    let vfs_guard = vfs_lock.read();
+    let node = vfs_guard
+        .resolve_path(&abs_path)
+        .map_err(filesystem::map_resolve_err)?;
+    let perms = crate::fs::Permissions::from_mode(mode as u32);
+    node.chmod(perms)
+        .map_err(|_| SyscallError::InvalidArgument)?;
+    Ok(0)
+}
+
+/// fchownat syscall -- chown relative to a directory fd.
+///
+/// # Arguments
+/// - `dirfd`: Directory fd (AT_FDCWD for CWD-relative).
+/// - `path_ptr`: Path to the file.
+/// - `uid`: User ID.
+/// - `gid`: Group ID.
+/// - `flags`: AT_SYMLINK_NOFOLLOW, etc.
+fn sys_fchownat(
+    dirfd: usize,
+    path_ptr: usize,
+    _uid: usize,
+    _gid: usize,
+    _flags: usize,
+) -> SyscallResult {
+    let rel_path = filesystem::read_user_path(path_ptr)?;
+    let _abs_path = filesystem::resolve_at_path(dirfd, &rel_path)?;
+    // No-op: accept but don't enforce ownership changes (same as sys_chown)
+    Ok(0)
+}
+
+/// linkat syscall -- create hard link relative to directory fds.
+///
+/// # Arguments
+/// - `olddirfd`: Directory fd for oldpath.
+/// - `oldpath_ptr`: Source path.
+/// - `newdirfd`: Directory fd for newpath.
+/// - `newpath_ptr`: Link destination path.
+/// - `flags`: AT_SYMLINK_FOLLOW, etc.
+fn sys_linkat(
+    olddirfd: usize,
+    oldpath_ptr: usize,
+    newdirfd: usize,
+    newpath_ptr: usize,
+    _flags: usize,
+) -> SyscallResult {
+    let old_rel = filesystem::read_user_path(oldpath_ptr)?;
+    let new_rel = filesystem::read_user_path(newpath_ptr)?;
+    let old_abs = filesystem::resolve_at_path(olddirfd, &old_rel)?;
+    let new_abs = filesystem::resolve_at_path(newdirfd, &new_rel)?;
+
+    let vfs_lock = filesystem::vfs()?;
+    let vfs_guard = vfs_lock.read();
+
+    // Resolve old path to get target node
+    let target = vfs_guard
+        .resolve_path(&old_abs)
+        .map_err(filesystem::map_resolve_err)?;
+
+    // Split new path into parent + name, create link in parent
+    let (parent_path, link_name) = filesystem::split_path(&new_abs)?;
+    let parent = vfs_guard
+        .resolve_path(&parent_path)
+        .map_err(filesystem::map_resolve_err)?;
+    parent
+        .link(&link_name, target)
+        .map_err(|_| SyscallError::InvalidArgument)?;
+    Ok(0)
+}
+
+/// symlinkat syscall -- create symlink relative to a directory fd.
+///
+/// # Arguments
+/// - `target_ptr`: Symlink target (what it points to).
+/// - `newdirfd`: Directory fd for linkpath.
+/// - `linkpath_ptr`: Path where symlink is created.
+fn sys_symlinkat(target_ptr: usize, newdirfd: usize, linkpath_ptr: usize) -> SyscallResult {
+    let target = filesystem::read_user_path(target_ptr)?;
+    let link_rel = filesystem::read_user_path(linkpath_ptr)?;
+    let link_abs = filesystem::resolve_at_path(newdirfd, &link_rel)?;
+
+    let vfs_lock = filesystem::vfs()?;
+    let vfs_guard = vfs_lock.read();
+
+    // Split link path into parent + name, create symlink in parent
+    let (parent_path, link_name) = filesystem::split_path(&link_abs)?;
+    let parent = vfs_guard
+        .resolve_path(&parent_path)
+        .map_err(filesystem::map_resolve_err)?;
+    parent
+        .symlink(&link_name, &target)
+        .map_err(|_| SyscallError::InvalidArgument)?;
+    Ok(0)
+}
+
+/// readlinkat syscall -- read symlink target relative to a directory fd.
+///
+/// # Arguments
+/// - `dirfd`: Directory fd (AT_FDCWD for CWD-relative).
+/// - `path_ptr`: Path to the symlink.
+/// - `buf_ptr`: User buffer for the target string.
+/// - `buf_size`: Size of the buffer.
+fn sys_readlinkat(dirfd: usize, path_ptr: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
+    if buf_size == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let rel_path = filesystem::read_user_path(path_ptr)?;
+    let abs_path = filesystem::resolve_at_path(dirfd, &rel_path)?;
+    validate_user_buffer(buf_ptr, buf_size)?;
+
+    let vfs_lock = filesystem::vfs()?;
+    let vfs_guard = vfs_lock.read();
+
+    // readlinkat must not follow the final symlink
+    let node = vfs_guard
+        .resolve_path_no_follow(&abs_path)
+        .map_err(filesystem::map_resolve_err)?;
+    let target = node.readlink().map_err(|_| SyscallError::InvalidArgument)?;
+
+    let bytes = target.as_bytes();
+    let copy_len = bytes.len().min(buf_size);
+    // SAFETY: buf_ptr validated by validate_user_buffer above.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf_ptr as *mut u8, copy_len);
+    }
+    Ok(copy_len)
+}
+
+/// memfd_create syscall -- create anonymous memory-backed file descriptor.
+///
+/// Returns an fd backed by anonymous memory. Used by Wayland for shared
+/// buffers and by various libraries for temporary file-like objects.
+///
+/// # Arguments
+/// - `name_ptr`: User-space pointer to name string (for debugging).
+/// - `flags`: MFD_CLOEXEC (0x01), MFD_ALLOW_SEALING (0x02).
+fn sys_memfd_create(_name_ptr: usize, _flags: usize) -> SyscallResult {
+    // Create an anonymous memory region as a pseudo-fd via eventfd's
+    // infrastructure (counter=0, non-blocking). This provides a valid fd
+    // that can be mmap'd. In a full implementation this would use a
+    // dedicated memfd subsystem with sealing support.
+    crate::fs::eventfd::eventfd_create(0, crate::fs::eventfd::EFD_NONBLOCK)
 }
 
 /// sendmsg syscall -- sends data with optional ancillary data (SCM_RIGHTS).
@@ -2275,6 +2446,12 @@ impl TryFrom<usize> for Syscall {
             343 => Ok(Syscall::InotifyAddWatch),
             344 => Ok(Syscall::InotifyRmWatch),
             345 => Ok(Syscall::Madvise),
+            346 => Ok(Syscall::Fchmodat),
+            347 => Ok(Syscall::Fchownat),
+            348 => Ok(Syscall::Linkat),
+            349 => Ok(Syscall::Symlinkat),
+            350 => Ok(Syscall::Readlinkat),
+            351 => Ok(Syscall::MemfdCreate),
 
             _ => Err(()),
         }

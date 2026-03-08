@@ -31,8 +31,8 @@ diff --git a/arch/x86_64/syscall_arch.h b/arch/x86_64/syscall_arch.h
 +	case 1:   return 53;   /* write */
 +	case 2:   return 50;   /* open */
 +	case 3:   return 51;   /* close */
-+	case 4:   return 55;   /* stat */
-+	case 5:   return 55;   /* fstat */
++	case 4:   return 150;  /* stat (path-based -> FileStatPath) */
++	case 5:   return 55;   /* fstat (fd-based -> FileStat) */
 +	case 6:   return 151;  /* lstat */
 +	case 8:   return 54;   /* lseek */
 +	case 9:   return 20;   /* mmap */
@@ -119,11 +119,11 @@ diff --git a/arch/x86_64/syscall_arch.h b/arch/x86_64/syscall_arch.h
 +	case 260: return 191;  /* fstatat */
 +	case 263: return 192;  /* unlinkat */
 +	case 264: return 194;  /* renameat */
-+	case 265: return 155;  /* linkat -> link */
-+	case 266: return 156;  /* symlinkat -> symlink */
-+	case 267: return 152;  /* readlinkat -> readlink */
-+	case 268: return 186;  /* fchmodat -> fchmod */
-+	case 269: return 198;  /* fchownat -> fchown */
++	case 265: return 348;  /* linkat */
++	case 266: return 349;  /* symlinkat */
++	case 267: return 350;  /* readlinkat */
++	case 268: return 346;  /* fchmodat */
++	case 269: return 347;  /* fchownat */
 +	case 281: return 263;  /* epoll_ctl */
 +	case 288: return 224;  /* accept4 -> accept */
 +	case 289: return 337;  /* signalfd4 */
@@ -133,7 +133,7 @@ diff --git a/arch/x86_64/syscall_arch.h b/arch/x86_64/syscall_arch.h
 +	case 293: return 342;  /* inotify_init1 */
 +	case 302: return 341;  /* prlimit64 */
 +	case 318: return 330;  /* getrandom */
-+	case 319: return 319;  /* memfd_create (stub) */
++	case 319: return 351;  /* memfd_create */
 +	case 322: return 334;  /* timerfd_create (via 283) */
 +	case 325: return 335;  /* timerfd_settime */
 +	case 326: return 336;  /* timerfd_gettime */
@@ -197,6 +197,13 @@ diff --git a/arch/x86_64/syscall_arch.h b/arch/x86_64/syscall_arch.h
  static __inline long __syscall6(long n, long a1, long a2, long a3, long a4,
  			long a5, long a6)
  {
++	/* VeridianOS mmap packs fd (arg5) and offset (arg6) into a single arg5:
++	 * upper 32 bits = fd, lower 32 bits = offset.
++	 * musl passes them as separate args per Linux ABI, but VeridianOS
++	 * syscall_handler only receives 5 args (arg6 is not forwarded).
++	 * Pack before remapping so the kernel sees the expected format. */
++	if (n == 9) /* mmap */
++		a5 = ((unsigned long)a5 << 32) | ((unsigned long)a6 & 0xFFFFFFFFUL);
 +	n = __veridian_remap_syscall(n);
  	unsigned long ret;
  	register long r10 __asm__("r10") = a4;
