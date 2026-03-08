@@ -15,9 +15,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 BUILD_DIR="${PROJECT_ROOT}/target/cross-build/fonts"
-SYSROOT="${VERIDIAN_SYSROOT:-/opt/veridian-sysroot}"
-TOOLCHAIN="${SCRIPT_DIR}/cmake-toolchain-veridian.cmake"
-MESON_CROSS="${SCRIPT_DIR}/meson-cross-veridian.txt"
+SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
 JOBS="${JOBS:-$(nproc)}"
 
 FREETYPE_VER="2.13.2"
@@ -43,17 +41,50 @@ fetch() {
     fi
 }
 
-export CC="${SYSROOT}/bin/x86_64-veridian-musl-gcc"
-export CFLAGS="-O2 --sysroot=${SYSROOT}"
+CC="${SYSROOT}/bin/x86_64-veridian-musl-gcc"
+CXX="${SYSROOT}/bin/x86_64-veridian-musl-g++"
+export CC
+export CFLAGS="-O2 -fPIC"
 export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
 export PKG_CONFIG_SYSROOT_DIR="${SYSROOT}"
 
 COMMON_CONFIGURE=(
-    --host=x86_64-veridian
+    --host=x86_64-unknown-linux-musl
     --prefix="${SYSROOT}/usr"
     --enable-static
     --disable-shared
 )
+
+# Generate meson cross file with resolved sysroot
+generate_meson_cross() {
+    local cross_file="${BUILD_DIR}/meson-cross.txt"
+    cat > "${cross_file}" << CROSSEOF
+[binaries]
+c = '${CC}'
+cpp = '${CXX}'
+ar = 'ar'
+strip = 'strip'
+pkgconfig = 'pkg-config'
+
+[built-in options]
+c_args = ['-fPIC']
+c_link_args = []
+cpp_args = ['-fPIC']
+cpp_link_args = []
+
+[properties]
+sys_root = '${SYSROOT}'
+pkg_config_libdir = '${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig'
+needs_exe_wrapper = true
+
+[host_machine]
+system = 'linux'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+CROSSEOF
+    echo "${cross_file}"
+}
 
 # ── 1. FreeType (pass 1 -- no HarfBuzz) ──────────────────────────────
 build_freetype_pass1() {
@@ -99,7 +130,7 @@ build_harfbuzz() {
     mkdir -p "${bld}"
     (cd "${bld}" && \
         meson setup "${src}" \
-            --cross-file="${MESON_CROSS}" \
+            --cross-file="$(generate_meson_cross)" \
             --prefix="${SYSROOT}/usr" \
             --default-library=static \
             -Dfreetype=enabled \
@@ -157,7 +188,7 @@ build_fontconfig() {
     mkdir -p "${bld}"
     (cd "${bld}" && \
         meson setup "${src}" \
-            --cross-file="${MESON_CROSS}" \
+            --cross-file="$(generate_meson_cross)" \
             --prefix="${SYSROOT}/usr" \
             --default-library=static \
             -Ddoc=disabled \
