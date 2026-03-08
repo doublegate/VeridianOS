@@ -2,6 +2,32 @@
 
 ---
 
+## [v0.24.0] - 2026-03-08
+
+### v0.24.0: Phase 11 -- KDE Plasma 6 Default Desktop Integration
+
+Connects the KDE Plasma 6 infrastructure (built in Phases 9+10) to the kernel's `startgui` command. KDE Plasma 6 is now the default desktop session. The built-in kernel-space DE serves as a fallback.
+
+#### Sprint 11.0: Session Config + KDE Session Manager
+
+- **Session config reader** (`session_config.rs`): Reads `/etc/veridian/session.conf` for `session_type=plasma|builtin`, defaults to Plasma
+- **KDE session manager** (`kde_session.rs`): Orchestrates KDE launch -- desktop subsystem init, fbcon handoff, user process execution via `load_user_program` + `run_user_process`, page table cleanup, zombie reaping, fbcon restore on exit
+- **Startup failure detection**: TSC-based timing detects quick exit (<5s) and falls back to built-in DE automatically
+- **`startgui` command enhanced**: Accepts `builtin`/`plasma`/`help` arguments, reads session config when no argument given, dispatches to KDE or built-in path
+
+#### Sprint 11.1: Default Config + Init Script Integration
+
+- **Default session config**: `/etc/veridian/session.conf` created during VFS init with `session_type=plasma`
+- **KDE init script**: `--from-kernel` flag skips session type detection when launched by kernel
+- **`KdePlasma` session type**: Added to `display_manager::SessionType` enum
+
+#### Sprint 11.2: Tests
+
+- 9 unit tests for session config parsing (plasma, builtin, kde alias, empty, comments, invalid UTF-8)
+- 3 unit tests for KDE session (env vars, lifetime threshold, script path)
+
+---
+
 ## [v0.23.0] - 2026-03-08
 
 ### v0.23.0: Phase 10 Complete -- KDE Known Limitations Remediation

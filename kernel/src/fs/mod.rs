@@ -822,7 +822,7 @@ pub fn init() {
                     if let Ok(f) = etc.create("os-release", Permissions::default()) {
                         f.write(
                             0,
-                            b"NAME=\"VeridianOS\"\nVERSION=\"0.23.0\"\nID=veridian\nPRETTY_NAME=\"VeridianOS v0.23.0\"\n",
+                            b"NAME=\"VeridianOS\"\nVERSION=\"0.24.0\"\nID=veridian\nPRETTY_NAME=\"VeridianOS v0.24.0\"\n",
                         )
                         .ok();
                     }
@@ -849,6 +849,17 @@ pub fn init() {
                             b"Welcome to VeridianOS - a capability-based microkernel OS\n",
                         )
                         .ok();
+                    }
+
+                    // /etc/veridian/session.conf (default desktop session config)
+                    if let Ok(veridian_dir) = etc.mkdir("veridian", Permissions::default()) {
+                        if let Ok(f) = veridian_dir.create("session.conf", Permissions::default()) {
+                            f.write(
+                                0,
+                                b"# VeridianOS session configuration\n# session_type: plasma (KDE Plasma 6) or builtin (built-in DE)\nsession_type=plasma\n",
+                            )
+                            .ok();
+                        }
                     }
                 }
             }

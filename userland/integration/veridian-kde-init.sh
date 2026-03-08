@@ -454,6 +454,17 @@ main() {
     log "  VeridianOS KDE Init System"
     log "========================================="
 
+    # Parse flags
+    FROM_KERNEL=0
+    for arg in "$@"; do
+        case "${arg}" in
+            --from-kernel)
+                FROM_KERNEL=1
+                log "Launched from kernel startgui command"
+                ;;
+        esac
+    done
+
     # Register shutdown handler
     trap shutdown_handler EXIT
     trap shutdown_handler INT
@@ -482,7 +493,13 @@ main() {
     setup_xdg_runtime
 
     # Phase 3: Detect and launch session
-    detect_session_type
+    if [ "${FROM_KERNEL}" -eq 1 ]; then
+        # Kernel already decided on Plasma -- skip detection
+        SESSION_TYPE="plasma"
+        log "Session type: plasma (from kernel)"
+    else
+        detect_session_type
+    fi
     log_time "kwin_start"
     launch_session
 

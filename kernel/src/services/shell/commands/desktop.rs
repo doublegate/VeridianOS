@@ -18,8 +18,50 @@ impl BuiltinCommand for StartGuiCommand {
     fn description(&self) -> &str {
         "Start the graphical desktop environment"
     }
-    fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
-        crate::desktop::renderer::start_desktop();
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        use crate::desktop::session_config::{self, SessionPreference};
+
+        // Parse explicit session argument: "startgui builtin" or "startgui plasma"
+        let preference = if !args.is_empty() {
+            match args[0].as_str() {
+                "builtin" | "default" => SessionPreference::Builtin,
+                "plasma" | "kde" => SessionPreference::Plasma,
+                "help" | "--help" | "-h" => {
+                    crate::println!("Usage: startgui [builtin|plasma]");
+                    crate::println!("  builtin  - Launch built-in desktop environment");
+                    crate::println!("  plasma   - Launch KDE Plasma 6 desktop session");
+                    crate::println!("  (none)   - Read preference from /etc/veridian/session.conf");
+                    return CommandResult::Success(0);
+                }
+                other => {
+                    crate::println!("startgui: unknown session type '{}'", other);
+                    crate::println!("Usage: startgui [builtin|plasma]");
+                    return CommandResult::Error(format!("unknown session type '{}'", other));
+                }
+            }
+        } else {
+            // Read from config file
+            session_config::read_session_preference()
+        };
+
+        match preference {
+            SessionPreference::Plasma => {
+                if session_config::kde_binaries_available() {
+                    crate::println!("[startgui] Starting KDE Plasma 6 session...");
+                    crate::desktop::kde_session::start_kde_session();
+                } else {
+                    crate::println!(
+                        "[startgui] KDE not available, falling back to built-in desktop"
+                    );
+                    crate::desktop::renderer::start_desktop();
+                }
+            }
+            SessionPreference::Builtin => {
+                crate::println!("[startgui] Starting built-in desktop environment...");
+                crate::desktop::renderer::start_desktop();
+            }
+        }
+
         CommandResult::Success(0)
     }
 }

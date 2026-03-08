@@ -50,6 +50,7 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 - **Desktop environment** -- 9 desktop apps (terminal, file manager, text editor, calculator, system monitor, settings, image viewer, web browser, PDF viewer), application launcher, Alt-Tab switcher, notifications, 6-item system tray, 8 settings panels, screen lock, virtual workspaces, TrueType fonts, CJK Unicode
 - **KDE Plasma 6 porting infrastructure** -- Complete platform backend stack for KDE Plasma 6 Wayland desktop: Qt 6 QPA plugin, KDE Frameworks 6 backends (Solid, KIO, KWindowSystem, KWallet), KWin DRM/KMS compositor integration, Breeze theme, display manager, XWayland, and CI pipeline. Full 8-layer dependency stack from dynamic linking through Plasma shell (314 porting tasks across 11 sprints)
 - **KDE limitations remediation** -- PipeWire audio with PulseAudio compatibility, NetworkManager with Wi-Fi/Ethernet/DNS, BlueZ Bluetooth with HCI bridge, XWayland GLX/DRI3/XIM enhancements, ACPI power management with CPU frequency scaling, KRunner search (6 runners), Baloo file indexer, Activities framework, USB hotplug with udev, V4L2 video, multi-monitor, session save/restore, KSM memory deduplication, D-Bus optimization
+- **KDE Plasma 6 default desktop** -- `startgui` launches KDE Plasma 6 as default session with automatic fallback to built-in DE; session config via `/etc/veridian/session.conf`; `startgui builtin` forces built-in DE
 - **GPU acceleration** -- VirtIO GPU 2D/3D, OpenGL ES 2.0, DRM/KMS, texture atlas compositor with shader pipeline; vendor stubs for i915, amdgpu, and nouveau
 - **Audio & video** -- ALSA-compatible mixer, VirtIO-Sound, WAV/Vorbis/MP3 playback, PNG/JPEG/GIF/TGA/QOI decoders, media player
 - **Web browser engine** -- HTML5 tokenizer, arena-based DOM, CSS layout (block/inline/float/flexbox), JavaScript VM with mark-sweep GC, tabbed browsing with process isolation
@@ -90,7 +91,7 @@ All drivers and services run in user space with capability-controlled access to 
 
 ## Project Status
 
-**Version**: v0.23.0 | **All development phases complete (0-10)** | **78 releases published**
+**Version**: v0.24.0 | **All development phases complete (0-11)** | **79 releases published**
 
 | Metric | Value |
 | --- | --- |

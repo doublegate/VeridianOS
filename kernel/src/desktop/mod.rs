@@ -13,6 +13,7 @@ pub mod file_assoc;
 pub mod file_manager;
 pub mod font;
 pub mod image_viewer;
+pub mod kde_session;
 #[allow(unused)]
 pub mod launcher;
 pub mod mime;
@@ -21,6 +22,7 @@ pub mod panel;
 pub mod pdf;
 pub mod renderer;
 pub mod screen_lock;
+pub mod session_config;
 pub mod settings;
 pub mod syntax;
 pub mod systray;

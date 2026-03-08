@@ -1341,7 +1341,7 @@ fn boot_reap_orphan_zombies() {
 /// correct stack alignment, preventing SSE `movaps` GP faults in callers.
 #[inline(never)]
 #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
-fn run_user_process(pid: crate::process::ProcessId) {
+pub(crate) fn run_user_process(pid: crate::process::ProcessId) {
     use crate::process::get_process;
 
     let process = match get_process(pid) {

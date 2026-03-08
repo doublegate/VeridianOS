@@ -25,6 +25,8 @@ pub enum SessionType {
     Desktop,
     /// Wayland-only session.
     Wayland,
+    /// KDE Plasma 6 session via external init script.
+    KdePlasma,
 }
 
 // ---------------------------------------------------------------------------
