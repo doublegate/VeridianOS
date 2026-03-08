@@ -24,6 +24,7 @@ pub mod ramfb;
 pub mod storage;
 pub mod terminal;
 pub mod usb;
+pub mod v4l2;
 pub mod virtio;
 pub mod virtio_gpu;
 pub mod virtio_net;

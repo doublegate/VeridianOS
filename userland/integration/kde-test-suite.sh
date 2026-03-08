@@ -436,6 +436,356 @@ test_session_switching() {
 }
 
 # =========================================================================
+# Test 11: Audio subsystem (Phase 10)
+# =========================================================================
+
+test_audio_subsystem() {
+    should_run "audio" || return 0
+    begin_test "Audio subsystem (PipeWire + PA compat + ALSA bridge)"
+
+    PW_SRC="${PROJECT_ROOT}/userland/pipewire"
+    PASS=true
+
+    # Verify PipeWire daemon source
+    if [ ! -f "${PW_SRC}/pipewire-veridian.cpp" ]; then
+        fail_test "pipewire-veridian.cpp not found"
+        return
+    fi
+
+    # Verify PulseAudio compat layer
+    if [ ! -f "${PW_SRC}/pulseaudio-compat.cpp" ]; then
+        PASS=false
+    fi
+
+    # Verify ALSA bridge
+    if [ ! -f "${PW_SRC}/pw-alsa-bridge.cpp" ]; then
+        PASS=false
+    fi
+
+    # Verify Plasma audio applet
+    if [ ! -f "${PROJECT_ROOT}/userland/plasma/plasma-audio-applet.cpp" ]; then
+        PASS=false
+    fi
+
+    # Verify build script
+    if [ ! -f "${PW_SRC}/build-pipewire.sh" ]; then
+        PASS=false
+    fi
+
+    if [ "${PASS}" = true ]; then
+        pass_test
+    else
+        fail_test "missing PipeWire components"
+    fi
+}
+
+# =========================================================================
+# Test 12: NetworkManager (Phase 10)
+# =========================================================================
+
+test_network_manager() {
+    should_run "network-manager" || return 0
+    begin_test "NetworkManager (daemon + device backends + DNS)"
+
+    NM_SRC="${PROJECT_ROOT}/userland/networkmanager"
+    PASS=true
+
+    # Verify NM daemon
+    if [ ! -f "${NM_SRC}/nm-veridian.cpp" ]; then
+        fail_test "nm-veridian.cpp not found"
+        return
+    fi
+
+    # Verify device backends
+    for backend in nm-wifi.cpp nm-ethernet.cpp nm-dns.cpp; do
+        if [ ! -f "${NM_SRC}/${backend}" ]; then
+            PASS=false
+        fi
+    done
+
+    # Verify Plasma network applet
+    if [ ! -f "${PROJECT_ROOT}/userland/plasma/plasma-nm-applet.cpp" ]; then
+        PASS=false
+    fi
+
+    # Verify build script
+    if [ ! -f "${NM_SRC}/build-nm.sh" ]; then
+        PASS=false
+    fi
+
+    if [ "${PASS}" = true ]; then
+        pass_test
+    else
+        fail_test "missing NetworkManager components"
+    fi
+}
+
+# =========================================================================
+# Test 13: Bluetooth (Phase 10)
+# =========================================================================
+
+test_bluetooth() {
+    should_run "bluetooth" || return 0
+    begin_test "BlueZ Bluetooth (daemon + HCI bridge + pairing)"
+
+    BZ_SRC="${PROJECT_ROOT}/userland/bluez"
+    PASS=true
+
+    # Verify BlueZ daemon
+    if [ ! -f "${BZ_SRC}/bluez-veridian.cpp" ]; then
+        fail_test "bluez-veridian.cpp not found"
+        return
+    fi
+
+    # Verify HCI bridge and pairing
+    for component in bluez-hci-bridge.cpp bluez-pair.cpp; do
+        if [ ! -f "${BZ_SRC}/${component}" ]; then
+            PASS=false
+        fi
+    done
+
+    # Verify Plasma Bluetooth applet
+    if [ ! -f "${PROJECT_ROOT}/userland/plasma/plasma-bluetooth-applet.cpp" ]; then
+        PASS=false
+    fi
+
+    # Verify build script
+    if [ ! -f "${BZ_SRC}/build-bluez.sh" ]; then
+        PASS=false
+    fi
+
+    if [ "${PASS}" = true ]; then
+        pass_test
+    else
+        fail_test "missing BlueZ components"
+    fi
+}
+
+# =========================================================================
+# Test 14: XWayland enhancements (Phase 10)
+# =========================================================================
+
+test_xwayland_enhanced() {
+    should_run "xwayland-enhanced" || return 0
+    begin_test "XWayland enhancements (GLX + DRI3 + IM bridge + INCR clipboard)"
+
+    INT_SRC="${PROJECT_ROOT}/userland/integration"
+    PASS=true
+
+    # Verify GLX-over-EGL
+    if [ ! -f "${INT_SRC}/xwayland-glx.cpp" ]; then
+        PASS=false
+    fi
+
+    # Verify DRI3
+    if [ ! -f "${INT_SRC}/xwayland-dri3.cpp" ]; then
+        PASS=false
+    fi
+
+    # Verify input method bridge
+    if [ ! -f "${INT_SRC}/xwayland-im.cpp" ]; then
+        PASS=false
+    fi
+
+    # Verify updated clipboard (INCR support in xwayland-veridian.cpp)
+    if [ ! -f "${INT_SRC}/xwayland-veridian.cpp" ]; then
+        PASS=false
+    fi
+
+    if [ "${PASS}" = true ]; then
+        pass_test
+    else
+        fail_test "missing XWayland enhancement files"
+    fi
+}
+
+# =========================================================================
+# Test 15: Power management (Phase 10)
+# =========================================================================
+
+test_power_management() {
+    should_run "power" || return 0
+    begin_test "Power management (ACPI + DPMS + cpufreq + sysfs)"
+
+    KERNEL_SRC="${PROJECT_ROOT}/kernel/src"
+    PASS=true
+
+    # Verify kernel modules
+    for mod in arch/x86_64/acpi_pm.rs arch/x86_64/dpms.rs arch/x86_64/cpufreq.rs sysfs/power.rs; do
+        if [ ! -f "${KERNEL_SRC}/${mod}" ]; then
+            PASS=false
+            echo "    Missing: kernel/src/${mod}"
+        fi
+    done
+
+    # Verify PowerDevil backend
+    if [ ! -f "${PROJECT_ROOT}/userland/plasma/powerdevil-veridian-backend.cpp" ]; then
+        PASS=false
+    fi
+
+    if [ "${PASS}" = true ]; then
+        pass_test
+    else
+        fail_test "missing power management components"
+    fi
+}
+
+# =========================================================================
+# Test 16: KDE features (Phase 10)
+# =========================================================================
+
+test_kde_features() {
+    should_run "kde-features" || return 0
+    begin_test "KDE features (KRunner + Baloo + Activities)"
+
+    PASS=true
+
+    # Verify KRunner
+    if [ ! -f "${PROJECT_ROOT}/userland/plasma/krunner-veridian.cpp" ]; then
+        PASS=false
+        echo "    Missing: KRunner"
+    fi
+
+    # Verify Baloo
+    if [ ! -f "${PROJECT_ROOT}/userland/kf6/baloo-veridian-backend.cpp" ]; then
+        PASS=false
+        echo "    Missing: Baloo backend"
+    fi
+    if [ ! -f "${PROJECT_ROOT}/userland/kf6/baloo-veridian-index.cpp" ]; then
+        PASS=false
+        echo "    Missing: Baloo index"
+    fi
+
+    # Verify Activities
+    if [ ! -f "${PROJECT_ROOT}/userland/plasma/activities-veridian.cpp" ]; then
+        PASS=false
+        echo "    Missing: Activities"
+    fi
+
+    if [ "${PASS}" = true ]; then
+        pass_test
+    else
+        fail_test "missing KDE feature components"
+    fi
+}
+
+# =========================================================================
+# Test 17: USB hotplug + udev (Phase 10)
+# =========================================================================
+
+test_usb_hotplug() {
+    should_run "usb-hotplug" || return 0
+    begin_test "USB hotplug (udev daemon + hotplug polling)"
+
+    PASS=true
+
+    # Verify udev daemon
+    UDEV_SRC="${PROJECT_ROOT}/userland/udev"
+    if [ ! -f "${UDEV_SRC}/udev-veridian.cpp" ]; then
+        PASS=false
+        echo "    Missing: udev daemon"
+    fi
+    if [ ! -f "${UDEV_SRC}/libudev-veridian.cpp" ]; then
+        PASS=false
+        echo "    Missing: libudev shim"
+    fi
+
+    # Verify kernel hotplug module
+    if [ ! -f "${PROJECT_ROOT}/kernel/src/drivers/usb/hotplug.rs" ]; then
+        PASS=false
+        echo "    Missing: kernel USB hotplug"
+    fi
+
+    if [ "${PASS}" = true ]; then
+        pass_test
+    else
+        fail_test "missing USB hotplug components"
+    fi
+}
+
+# =========================================================================
+# Test 18: Session management (Phase 10)
+# =========================================================================
+
+test_session_management() {
+    should_run "session" || return 0
+    begin_test "Session management (multi-user + save/restore)"
+
+    PASS=true
+
+    # Verify kernel session module
+    if [ ! -f "${PROJECT_ROOT}/kernel/src/process/session.rs" ]; then
+        PASS=false
+        echo "    Missing: kernel session module"
+    fi
+
+    # Verify session save/restore
+    if [ ! -f "${PROJECT_ROOT}/userland/plasma/session-save-restore.cpp" ]; then
+        PASS=false
+        echo "    Missing: session save/restore"
+    fi
+
+    # Verify Akonadi
+    if [ ! -f "${PROJECT_ROOT}/userland/akonadi/akonadi-veridian.cpp" ]; then
+        PASS=false
+        echo "    Missing: Akonadi PIM"
+    fi
+
+    # Verify session script
+    if [ ! -f "${PROJECT_ROOT}/userland/plasma/plasma-veridian-session.sh" ]; then
+        PASS=false
+        echo "    Missing: session script"
+    fi
+
+    if [ "${PASS}" = true ]; then
+        pass_test
+    else
+        fail_test "missing session management components"
+    fi
+}
+
+# =========================================================================
+# Test 19: Performance optimization (Phase 10)
+# =========================================================================
+
+test_performance() {
+    should_run "performance" || return 0
+    begin_test "Performance (KSM + memory opt + D-Bus batching)"
+
+    PASS=true
+
+    # Verify KSM kernel module
+    if [ ! -f "${PROJECT_ROOT}/kernel/src/mm/ksm.rs" ]; then
+        PASS=false
+        echo "    Missing: KSM module"
+    fi
+
+    # Verify memory optimization
+    if [ ! -f "${PROJECT_ROOT}/userland/integration/plasma-memory-opt.cpp" ]; then
+        PASS=false
+        echo "    Missing: memory optimization"
+    fi
+
+    # Verify D-Bus optimization
+    if [ ! -f "${PROJECT_ROOT}/userland/integration/dbus-optimize.cpp" ]; then
+        PASS=false
+        echo "    Missing: D-Bus optimization"
+    fi
+
+    # Verify parallel init
+    if [ ! -f "${PROJECT_ROOT}/userland/integration/veridian-kde-init.sh" ]; then
+        PASS=false
+        echo "    Missing: parallel KDE init"
+    fi
+
+    if [ "${PASS}" = true ]; then
+        pass_test
+    else
+        fail_test "missing performance components"
+    fi
+}
+
+# =========================================================================
 # Report
 # =========================================================================
 
@@ -494,6 +844,17 @@ main() {
     test_xwayland
     test_dbus_services
     test_session_switching
+
+    # Phase 10 tests
+    test_audio_subsystem
+    test_network_manager
+    test_bluetooth
+    test_xwayland_enhanced
+    test_power_management
+    test_kde_features
+    test_usb_hotplug
+    test_session_management
+    test_performance
 
     # Generate report
     generate_report

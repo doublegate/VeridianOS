@@ -12,6 +12,7 @@ pub mod cache_topology;
 pub mod demand_paging;
 pub mod frame_allocator;
 pub mod heap;
+pub mod ksm;
 pub mod page_fault;
 pub mod page_table;
 pub mod user_validation;

@@ -622,6 +622,151 @@ impl DisplayManager {
 }
 
 // ---------------------------------------------------------------------------
+// Per-user session state for multi-user support
+// ---------------------------------------------------------------------------
+
+/// Information about a user session visible to the display manager.
+#[derive(Debug, Clone)]
+pub struct SessionInfo {
+    /// Session identifier (matches `process::session::SessionId`).
+    pub session_id: u64,
+    /// User ID.
+    pub user_id: u32,
+    /// Username.
+    pub username: String,
+    /// Session type (Console, Desktop, or Wayland).
+    pub session_type: SessionType,
+    /// Virtual terminal number assigned to this session.
+    pub vt_number: u8,
+    /// Whether the session is currently active.
+    pub active: bool,
+    /// Whether the session is locked.
+    pub locked: bool,
+}
+
+impl DisplayManager {
+    /// Create a new user session on the next available VT.
+    ///
+    /// VT assignment: `VT7 + session_index`.
+    pub fn create_user_session(
+        &mut self,
+        user_id: u32,
+        username: &str,
+        session_type: SessionType,
+    ) -> Option<u64> {
+        if self.sessions.len() >= 8 {
+            return None;
+        }
+
+        let session_index = self.sessions.len() as u8;
+        let vt_number = 7u8.saturating_add(session_index);
+
+        // Assign the VT if within range
+        let vt_idx = (vt_number as usize).saturating_sub(1);
+        if vt_idx < self.virtual_terminals.len() {
+            let vt = &mut self.virtual_terminals[vt_idx];
+            vt.user_id = user_id;
+            vt.session_type = session_type;
+        }
+
+        let tick = TICK_COUNTER.load(Ordering::Relaxed);
+        let mut session = DisplaySession::new(session_type, user_id, username);
+        session.login_time = tick;
+        session.last_activity = tick;
+
+        self.sessions.insert(user_id, session.clone());
+
+        // If no current session, make this one active
+        if self.current_session.is_none() {
+            self.current_session = Some(session);
+            self.showing_login = false;
+        }
+
+        // Return a pseudo session ID based on user_id
+        Some(user_id as u64)
+    }
+
+    /// Switch to a different user's session by user ID.
+    ///
+    /// The current session is preserved; the display switches to
+    /// the target session's VT.
+    pub fn switch_to_session(&mut self, target_user_id: u32) -> bool {
+        if let Some(session) = self.sessions.get(&target_user_id) {
+            self.current_session = Some(session.clone());
+            self.showing_login = false;
+
+            // Find and activate the corresponding VT
+            for vt in self.virtual_terminals.iter_mut() {
+                if vt.user_id == target_user_id {
+                    vt.active = true;
+                    self.active_vt = vt.id;
+                } else {
+                    vt.active = false;
+                }
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get information about all active sessions for the DM UI.
+    pub fn get_sessions(&self) -> Vec<SessionInfo> {
+        let mut result = Vec::new();
+        for (uid, session) in &self.sessions {
+            let info = SessionInfo {
+                session_id: *uid as u64,
+                user_id: *uid,
+                username: session.username.clone(),
+                session_type: session.session_type,
+                vt_number: self
+                    .virtual_terminals
+                    .iter()
+                    .find(|vt| vt.user_id == *uid)
+                    .map(|vt| vt.id)
+                    .unwrap_or(0),
+                active: self
+                    .current_session
+                    .as_ref()
+                    .map(|cs| cs.user_id == *uid)
+                    .unwrap_or(false),
+                locked: session.locked,
+            };
+            result.push(info);
+        }
+        result
+    }
+
+    /// Handle user logout: clean up session and return to login screen.
+    pub fn logout_user(&mut self, user_id: u32) {
+        // Remove session
+        self.sessions.remove(&user_id);
+
+        // Clear VT assignment
+        for vt in self.virtual_terminals.iter_mut() {
+            if vt.user_id == user_id {
+                vt.user_id = 0;
+                vt.session_type = SessionType::Console;
+            }
+        }
+
+        // If the logged-out user was the current session, switch or show login
+        if let Some(ref session) = self.current_session {
+            if session.user_id == user_id {
+                self.current_session = None;
+                // Try to switch to another session
+                if let Some((&next_uid, next_session)) = self.sessions.iter().next() {
+                    self.current_session = Some(next_session.clone());
+                    let _ = next_uid;
+                } else {
+                    self.show_login();
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Rendering helpers
 // ---------------------------------------------------------------------------
 
@@ -872,5 +1017,69 @@ mod tests {
         let mut session = DisplaySession::new(SessionType::Console, 1, "test");
         session.touch(12345);
         assert_eq!(session.last_activity, 12345);
+    }
+
+    #[test]
+    fn test_create_user_session() {
+        let mut dm = DisplayManager::new();
+        let sid = dm.create_user_session(1000, "alice", SessionType::Desktop);
+        assert!(sid.is_some());
+        assert_eq!(dm.session_count(), 1);
+        assert!(!dm.showing_login);
+    }
+
+    #[test]
+    fn test_create_user_session_max() {
+        let mut dm = DisplayManager::new();
+        for i in 0..8u32 {
+            let name = alloc::format!("user{}", i);
+            dm.create_user_session(i, &name, SessionType::Desktop);
+        }
+        let overflow = dm.create_user_session(99, "overflow", SessionType::Desktop);
+        assert!(overflow.is_none());
+    }
+
+    #[test]
+    fn test_switch_to_session() {
+        let mut dm = DisplayManager::new();
+        dm.create_user_session(1, "alice", SessionType::Desktop);
+        dm.create_user_session(2, "bob", SessionType::Desktop);
+
+        assert!(dm.switch_to_session(2));
+        let current = dm.current_session.as_ref().unwrap();
+        assert_eq!(current.user_id, 2);
+        assert_eq!(current.username, "bob");
+    }
+
+    #[test]
+    fn test_get_sessions() {
+        let mut dm = DisplayManager::new();
+        dm.create_user_session(1, "alice", SessionType::Desktop);
+        dm.create_user_session(2, "bob", SessionType::Wayland);
+
+        let sessions = dm.get_sessions();
+        assert_eq!(sessions.len(), 2);
+    }
+
+    #[test]
+    fn test_logout_user() {
+        let mut dm = DisplayManager::new();
+        dm.create_user_session(1, "alice", SessionType::Desktop);
+        dm.create_user_session(2, "bob", SessionType::Desktop);
+
+        dm.logout_user(1);
+        assert_eq!(dm.session_count(), 1);
+        // Should have switched to bob
+        let current = dm.current_session.as_ref().unwrap();
+        assert_eq!(current.user_id, 2);
+    }
+
+    #[test]
+    fn test_logout_last_user_shows_login() {
+        let mut dm = DisplayManager::new();
+        dm.create_user_session(1, "alice", SessionType::Desktop);
+        dm.logout_user(1);
+        assert_eq!(dm.session_count(), 0);
+        assert!(dm.showing_login);
     }
 }

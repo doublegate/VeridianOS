@@ -45,6 +45,9 @@ pub mod wireguard;
 
 // Phase 8 Wave 2: Networking v2
 pub mod firewall;
+
+// Phase 10: Netlink IPC
+pub mod netlink;
 pub mod routing;
 pub mod vpn;
 

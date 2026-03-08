@@ -13,8 +13,11 @@
 - [x] **Phase 6: Advanced Features & GUI** - ~100% (Wayland compositor, desktop renderer, input, TCP/IP, desktop apps) v0.6.4
 - [x] **Phase 6.5: Rust Compiler + Bash-in-Rust Shell** - COMPLETE (100%) v0.7.0 (February 27, 2026)
 - [x] **Phase 7: Production Readiness** - ~100% (All 6 Waves complete: GPU, Wayland, desktop, networking, multimedia, virtualization, security, performance) v0.7.1-v0.10.0
+- [x] **Phase 8: Next-Generation Features** - COMPLETE (100%) v0.16.3 (March 2026)
+- [x] **Phase 9: KDE Plasma 6 Porting** - COMPLETE (100%) v0.22.0 (March 2026)
+- [x] **Phase 10: KDE Known Limitations Remediation** - COMPLETE (100%) v0.23.0 (March 2026)
 
-## Current Version: v0.16.0 (March 5, 2026)
+## Current Version: v0.23.0 (March 2026)
 
 ### Build Status
 - **x86_64**: 0 errors, 0 warnings, Stage 6 BOOTOK, 29/29 tests
@@ -210,7 +213,9 @@ See [REMEDIATION_TODO.md](REMEDIATION_TODO.md) for 37 identified gaps from Phase
 - [Phase 6 TODO](PHASE6_TODO.md) - ~40% (core graphical path complete)
 - [Phase 7 TODO](PHASE7_TODO.md) - ~100% (All 6 Waves complete)
 - [Phase 7.5 TODO](PHASE7.5_TODO.md) - **COMPLETE** (all 8 waves, 80/80, v0.16.0)
-- [Phase 8 TODO](PHASE8_TODO.md) - Planned (next-generation features)
+- [Phase 8 TODO](PHASE8_TODO.md) - COMPLETE (next-generation features)
+- [Phase 9 TODO](PHASE9_TODO.md) - COMPLETE (KDE Plasma 6 porting)
+- [Phase 10 TODO](PHASE10_TODO.md) - **COMPLETE** (KDE Known Limitations Remediation, v0.23.0)
 - [Remediation TODO](REMEDIATION_TODO.md) - Gaps from Phases 0-4
 - [Issues TODO](ISSUES_TODO.md) - Issue history
 - [Testing TODO](TESTING_TODO.md) - Testing status

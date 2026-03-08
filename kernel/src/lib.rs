@@ -93,6 +93,7 @@ pub mod services;
 pub mod stdlib;
 pub mod sync;
 mod syscall;
+pub mod sysfs;
 pub mod test_tasks;
 pub mod thread_api;
 pub mod timer;

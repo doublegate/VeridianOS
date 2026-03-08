@@ -104,6 +104,14 @@ log() {
     fi
 }
 
+log_startup_time() {
+    LABEL="$1"
+    NOW="$(date +%s%N 2>/dev/null || date +%s)"
+    TIMING_LOG="/tmp/veridian-boot-timing.log"
+    echo "${LABEL}: ${NOW}" >> "${TIMING_LOG}" 2>/dev/null || true
+    log "TIMING ${LABEL}: ${NOW}"
+}
+
 # =========================================================================
 # D-Bus Session Bus
 # =========================================================================
@@ -236,11 +244,68 @@ start_plasma_shell() {
 }
 
 # =========================================================================
+# Session Save / Restore
+# =========================================================================
+
+SESSION_RESTORE_BINARY="/usr/lib/veridian/session-save-restore"
+
+save_session_state() {
+    log "Saving session state..."
+
+    if [ -x "${SESSION_RESTORE_BINARY}" ]; then
+        "${SESSION_RESTORE_BINARY}" --save "${XDG_CONFIG_HOME}" \
+            >> "${LOG_DIR}/session-save.log" 2>&1 || true
+        log "  Session state saved to ${XDG_CONFIG_HOME}/plasma-session/"
+    else
+        log "  WARNING: session-save-restore not found, skipping save"
+        # Fallback: save running app list manually
+        SESSION_SAVE_DIR="${XDG_CONFIG_HOME}/plasma-session"
+        mkdir -p "${SESSION_SAVE_DIR}"
+        SAVE_FILE="${SESSION_SAVE_DIR}/session-apps.conf"
+        echo "# VeridianOS Plasma session state" > "${SAVE_FILE}"
+        echo "# Saved at $(date 2>/dev/null || echo 'unknown')" >> "${SAVE_FILE}"
+        echo "session_type=plasma" >> "${SAVE_FILE}"
+        log "  Fallback: wrote minimal session state"
+    fi
+}
+
+restore_session_state() {
+    log "Checking for saved session..."
+
+    SESSION_SAVE_DIR="${XDG_CONFIG_HOME}/plasma-session"
+    SAVE_FILE="${SESSION_SAVE_DIR}/session-apps.conf"
+
+    if [ ! -f "${SAVE_FILE}" ]; then
+        log "  No saved session found"
+        return 0
+    fi
+
+    log "  Found saved session at ${SAVE_FILE}"
+
+    # Check if user wants to restore
+    if [ "${VERIDIAN_SESSION_RESTORE:-ask}" = "never" ]; then
+        log "  Session restore disabled (VERIDIAN_SESSION_RESTORE=never)"
+        return 0
+    fi
+
+    if [ -x "${SESSION_RESTORE_BINARY}" ]; then
+        "${SESSION_RESTORE_BINARY}" --restore "${XDG_CONFIG_HOME}" \
+            >> "${LOG_DIR}/session-restore.log" 2>&1 || true
+        log "  Session restored"
+    else
+        log "  WARNING: session-save-restore not found, skipping restore"
+    fi
+}
+
+# =========================================================================
 # Shutdown Handler
 # =========================================================================
 
 cleanup() {
     log "Session shutdown requested..."
+
+    # Save session state before stopping components
+    save_session_state
 
     # Stop components in reverse order
     for COMPONENT in plasmashell kwin_wayland kactivitymanagerd \
@@ -288,20 +353,69 @@ main() {
 
     # Phase 1: Environment
     setup_logging
+    log_startup_time "session_env_start"
     setup_xdg_environment
+    log_startup_time "session_env_done"
+
+    # Phase 1.5: Start background services in parallel (before KWin)
+    # PipeWire, NetworkManager, and BlueZ can initialize while we set
+    # up D-Bus and KDE daemons, saving ~3-4s of serial startup time.
+    log "Starting background services in parallel..."
+    log_startup_time "bg_services_start"
+
+    if [ -x /usr/bin/pipewire ]; then
+        /usr/bin/pipewire >> "${LOG_DIR}/pipewire.log" 2>&1 &
+        PIPEWIRE_PID=$!
+        PIDS="${PIDS} ${PIPEWIRE_PID}"
+        log "  PipeWire launched: PID=${PIPEWIRE_PID}"
+    fi
+
+    if [ -x /usr/bin/nm-daemon ]; then
+        /usr/bin/nm-daemon >> "${LOG_DIR}/nm.log" 2>&1 &
+        NM_BG_PID=$!
+        PIDS="${PIDS} ${NM_BG_PID}"
+        log "  NetworkManager launched: PID=${NM_BG_PID}"
+    fi
+
+    if [ -x /usr/bin/bluez-daemon ]; then
+        /usr/bin/bluez-daemon >> "${LOG_DIR}/bluez.log" 2>&1 &
+        BLUEZ_BG_PID=$!
+        PIDS="${PIDS} ${BLUEZ_BG_PID}"
+        log "  BlueZ launched: PID=${BLUEZ_BG_PID}"
+    fi
+
+    log_startup_time "bg_services_launched"
 
     # Phase 2: D-Bus
     start_dbus_session
+    log_startup_time "dbus_session_ready"
 
     # Phase 3: KDE daemons
     start_kde_daemons
+    log_startup_time "kde_daemons_ready"
 
     # Phase 4: KWin compositor
     start_kwin
+    log_startup_time "kwin_ready"
 
     # Phase 5: Plasma shell
     start_plasma_shell
+    log_startup_time "plasma_shell_ready"
 
+    # Phase 5.5: Deferred Baloo startup (30s delay to avoid I/O storm)
+    if command -v baloo_file >/dev/null 2>&1; then
+        (
+            sleep 30
+            log "Starting Baloo file indexer (deferred)..."
+            baloo_file >> "${LOG_DIR}/baloo.log" 2>&1
+        ) &
+        log "  Baloo scheduled: 30s deferred start"
+    fi
+
+    # Phase 6: Restore previous session (if any)
+    restore_session_state
+
+    log_startup_time "session_fully_started"
     log "Plasma session fully started"
     echo "========================================"
     echo "  Session running -- PID $$"

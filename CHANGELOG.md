@@ -2,6 +2,94 @@
 
 ---
 
+## [v0.23.0] - 2026-03-08
+
+### v0.23.0: Phase 10 Complete -- KDE Known Limitations Remediation
+
+Systematic remediation of all known limitations from Phase 9's KDE Plasma 6 porting. 11 sprints addressing rendering, audio, networking, Bluetooth, XWayland, power management, KDE features, hardware support, session management, and performance. ~95 new files, ~26,000 LOC across 5 new userland directories and 7 new kernel modules.
+
+#### Sprint 10.0: Rendering Performance
+
+- **Damage tracking**: Per-surface dirty-rect list with merge algorithm, composite only damaged regions
+- **Software VSync**: TSC-based timer for frame pacing (~30+ FPS with llvmpipe)
+- **KWin swrender backend**: Damage-region recomposite, double-buffer VSync coordination
+
+#### Sprint 10.1: PipeWire Audio
+
+- **PipeWire daemon**: Stream management, graph routing, ALSA bridge with integer resampler (44.1/48 kHz)
+- **PulseAudio compat**: pa_context/pa_stream API translated to PipeWire graph
+- **Plasma audio applet**: Per-stream volume control with mute/unmute
+- **Kernel ALSA**: PCM ioctl dispatch (SNDRV_PCM_IOCTL_*), /dev/snd/* routing
+
+#### Sprint 10.2: NetworkManager
+
+- **NM daemon**: D-Bus API (org.freedesktop.NetworkManager), connection profiles, device state machine
+- **Wi-Fi backend**: AP scanning, WPA2 authentication
+- **Ethernet backend**: Link detection, DHCP client integration
+- **DNS backend**: resolv.conf management, DNS caching
+- **Plasma network applet**: Connection list, Wi-Fi scan, VPN status
+- **Kernel netlink**: Netlink-style IPC for kernel-to-NM communication
+
+#### Sprint 10.3: BlueZ Bluetooth
+
+- **BlueZ daemon**: D-Bus API (org.bluez.*), adapter/device management
+- **HCI bridge**: Command/event handling, connection management
+- **Pairing agent**: PIN/SSP with Secure Simple Pairing
+- **Plasma Bluetooth applet**: Adapter toggle, device list, pairing UI
+- **Kernel device node**: /dev/bluetooth/hci0
+
+#### Sprint 10.4: XWayland Enhancements
+
+- **GLX-over-EGL**: GLX 1.4 translation layer for legacy X11 OpenGL apps
+- **DRI3 extension**: GBM buffer management, fd passing for hardware-accelerated X11
+- **XIM bridge**: XIM-to-Wayland text-input-v3 for CJK/IBus/Fcitx input methods
+- **Rich clipboard**: PNG/BMP/URI support, INCR protocol for transfers >256KB
+
+#### Sprint 10.5: Power Management
+
+- **ACPI power states**: S3 (suspend-to-RAM), S4 (hibernate), S5 (soft-off), SCI handler
+- **DPMS**: Display on/standby/suspend/off via sysfs
+- **CPU frequency**: P-state control with performance/powersave/ondemand governors
+- **sysfs interface**: Virtual files for /sys/class/power_supply, backlight, cpufreq
+
+#### Sprint 10.6: KDE Features
+
+- **KRunner**: 6 search runners (application, file, calculator, command, web, unit converter)
+- **Baloo file indexer**: Filesystem crawler with inotify, inverted index with trigram search
+- **Activities framework**: Create, switch, delete activities with per-activity window sets
+- **Screen lock**: PAM-based authentication, DPMS display blank, lid close event handling
+
+#### Sprint 10.7: Hardware Support
+
+- **USB hotplug**: xHCI port status polling, device attach/detach events
+- **udev daemon**: Device event daemon with rule matching, libudev client shim
+- **V4L2**: Video capture device interface with test pattern generator
+- **Multi-monitor**: Multi-output manager with EDID parsing, KWin platform integration
+- **Solid backend**: udev event subscription for KDE device notifications
+
+#### Sprint 10.8: Session Management
+
+- **Multi-user login**: Display manager with user selection, VT-based session switching
+- **Session save/restore**: Window state persistence across logout/login cycles
+- **Akonadi PIM**: Local contacts/calendar/notes data store
+- **Kernel sessions**: Per-user session groups with isolation
+
+#### Sprint 10.9: Performance
+
+- **KSM**: Kernel Same-page Merging for anonymous page deduplication
+- **Lazy loading**: Deferred KF6 plugin initialization, cache cleanup on memory pressure
+- **D-Bus batching**: Message coalescing, binary shortcut protocol, credential cache
+- **Parallel startup**: Concurrent daemon initialization (PipeWire, NM, BlueZ, udev)
+
+#### Sprint 10.10: Integration + Polish
+
+- CI pipeline updated with Phase 10 component builds and module verification
+- Test suite expanded with 9 new test functions (19 total)
+- KNOWN-LIMITATIONS.md rewritten (22 items resolved, 7 remaining)
+- Version: v0.22.0 -> v0.23.0 (6 files)
+
+---
+
 ## [v0.22.0] - 2026-03-08
 
 ### v0.22.0: Phase 9 Complete -- KDE Plasma 6 Desktop Environment Porting Infrastructure

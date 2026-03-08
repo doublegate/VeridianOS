@@ -694,6 +694,330 @@ bool vdm_handle_key(vdm_context_t *ctx, int keycode, bool pressed)
 }
 
 /* ======================================================================
+ * Multi-user session management
+ * ====================================================================== */
+
+/* Maximum concurrent user sessions */
+#define VDM_MAX_USER_SESSIONS   8
+
+/* User entry from /etc/veridian/passwd or user database */
+typedef struct {
+    char    username[VDM_MAX_USERNAME];
+    char    display_name[VDM_MAX_USERNAME];
+    int     uid;
+    char    home_dir[256];
+    char    shell[128];
+    bool    has_avatar;
+} vdm_user_entry_t;
+
+/* Active session tracking */
+typedef struct {
+    int     session_id;
+    int     vt_number;          /* VT7 + index */
+    int     uid;
+    char    username[VDM_MAX_USERNAME];
+    pid_t   session_pid;
+    vdm_session_type_t session_type;
+    bool    active;
+    bool    locked;
+} vdm_active_session_t;
+
+static vdm_user_entry_t s_user_list[VDM_MAX_USER_SESSIONS];
+static int s_user_count = 0;
+
+static vdm_active_session_t s_active_sessions[VDM_MAX_USER_SESSIONS];
+static int s_active_session_count = 0;
+static int s_current_session_idx = -1;
+
+/*
+ * Load the list of available users from /etc/veridian/passwd.
+ * Format: username:hash:salt:uid:display_name:home:shell
+ * Returns the number of users loaded.
+ */
+int vdm_load_user_list(void)
+{
+    s_user_count = 0;
+
+    /* Always add root */
+    strncpy(s_user_list[0].username, "root", VDM_MAX_USERNAME - 1);
+    strncpy(s_user_list[0].display_name, "System Administrator",
+            VDM_MAX_USERNAME - 1);
+    s_user_list[0].uid = 0;
+    strncpy(s_user_list[0].home_dir, "/root", sizeof(s_user_list[0].home_dir) - 1);
+    strncpy(s_user_list[0].shell, "/bin/sh", sizeof(s_user_list[0].shell) - 1);
+    s_user_list[0].has_avatar = false;
+    s_user_count = 1;
+
+    FILE *fp = fopen("/etc/veridian/passwd", "r");
+    if (!fp) {
+        return s_user_count;
+    }
+
+    char line[512];
+    while (fgets(line, sizeof(line), fp) &&
+           s_user_count < VDM_MAX_USER_SESSIONS) {
+        line[strcspn(line, "\n")] = '\0';
+        if (line[0] == '#' || line[0] == '\0') {
+            continue;
+        }
+
+        /* Parse fields: username:hash:salt:uid:display_name:home:shell */
+        char *fields[7];
+        int field_count = 0;
+        char *tok = strtok(line, ":");
+        while (tok && field_count < 7) {
+            fields[field_count++] = tok;
+            tok = strtok(NULL, ":");
+        }
+
+        if (field_count < 4) {
+            continue;
+        }
+
+        /* Skip if root is already added */
+        if (strcmp(fields[0], "root") == 0) {
+            continue;
+        }
+
+        vdm_user_entry_t *u = &s_user_list[s_user_count];
+        memset(u, 0, sizeof(*u));
+        strncpy(u->username, fields[0], VDM_MAX_USERNAME - 1);
+        u->uid = atoi(fields[3]);
+
+        if (field_count >= 5) {
+            strncpy(u->display_name, fields[4], VDM_MAX_USERNAME - 1);
+        } else {
+            strncpy(u->display_name, fields[0], VDM_MAX_USERNAME - 1);
+        }
+
+        if (field_count >= 6) {
+            strncpy(u->home_dir, fields[5], sizeof(u->home_dir) - 1);
+        } else {
+            snprintf(u->home_dir, sizeof(u->home_dir), "/home/%s", fields[0]);
+        }
+
+        if (field_count >= 7) {
+            strncpy(u->shell, fields[6], sizeof(u->shell) - 1);
+        } else {
+            strncpy(u->shell, "/bin/sh", sizeof(u->shell) - 1);
+        }
+
+        /* Check for user avatar at ~/.face */
+        char avatar_path[300];
+        snprintf(avatar_path, sizeof(avatar_path), "%s/.face", u->home_dir);
+        struct stat avatar_st;
+        u->has_avatar = (stat(avatar_path, &avatar_st) == 0);
+
+        s_user_count++;
+    }
+
+    fclose(fp);
+    fprintf(stderr, "[veridian-dm] Loaded %d users\n", s_user_count);
+    return s_user_count;
+}
+
+/*
+ * Create a new user session on the next available VT.
+ * VT assignment: session 0 = VT7, session 1 = VT8, etc.
+ * Returns the session index, or -1 on error.
+ */
+int vdm_create_user_session(const char *username, int uid,
+                             vdm_session_type_t stype)
+{
+    if (s_active_session_count >= VDM_MAX_USER_SESSIONS) {
+        fprintf(stderr, "[veridian-dm] Maximum sessions reached (%d)\n",
+                VDM_MAX_USER_SESSIONS);
+        return -1;
+    }
+
+    int idx = s_active_session_count;
+    vdm_active_session_t *sess = &s_active_sessions[idx];
+
+    memset(sess, 0, sizeof(*sess));
+    sess->session_id = idx;
+    sess->vt_number = 7 + idx;  /* VT7, VT8, ... */
+    sess->uid = uid;
+    strncpy(sess->username, username, VDM_MAX_USERNAME - 1);
+    sess->session_type = stype;
+    sess->active = true;
+    sess->locked = false;
+    sess->session_pid = -1;
+
+    s_active_session_count++;
+
+    fprintf(stderr, "[veridian-dm] Created session %d for '%s' on VT%d\n",
+            idx, username, sess->vt_number);
+    return idx;
+}
+
+/*
+ * Switch to a different user session.
+ * Saves the current session state and activates the target session.
+ */
+int vdm_switch_to_session(int session_idx)
+{
+    if (session_idx < 0 || session_idx >= s_active_session_count) {
+        return -1;
+    }
+
+    /* Deactivate current session */
+    if (s_current_session_idx >= 0 &&
+        s_current_session_idx < s_active_session_count) {
+        s_active_sessions[s_current_session_idx].active = false;
+        fprintf(stderr, "[veridian-dm] Suspending session %d ('%s')\n",
+                s_current_session_idx,
+                s_active_sessions[s_current_session_idx].username);
+    }
+
+    /* Activate target session */
+    s_active_sessions[session_idx].active = true;
+    s_current_session_idx = session_idx;
+
+    fprintf(stderr, "[veridian-dm] Switched to session %d ('%s') on VT%d\n",
+            session_idx,
+            s_active_sessions[session_idx].username,
+            s_active_sessions[session_idx].vt_number);
+    return 0;
+}
+
+/*
+ * Handle "Switch User" action: save current session and show the greeter
+ * for a new login on the next VT.
+ */
+int vdm_handle_switch_user(vdm_context_t *ctx)
+{
+    if (!ctx) {
+        return -1;
+    }
+
+    /* Mark current session as background (not destroyed) */
+    if (s_current_session_idx >= 0) {
+        s_active_sessions[s_current_session_idx].active = false;
+    }
+
+    /* Return to login screen for new user */
+    ctx->state = VDM_STATE_LOGIN;
+    ctx->login_attempts = 0;
+    memset(ctx->username, 0, sizeof(ctx->username));
+    memset(ctx->password, 0, sizeof(ctx->password));
+
+    fprintf(stderr, "[veridian-dm] Switch User: showing greeter for new login\n");
+    return 0;
+}
+
+/*
+ * Lock the current session and show a simplified greeter.
+ * Only the current user's password is required to unlock.
+ */
+int vdm_lock_current_session(vdm_context_t *ctx)
+{
+    if (!ctx || s_current_session_idx < 0) {
+        return -1;
+    }
+
+    vdm_active_session_t *sess = &s_active_sessions[s_current_session_idx];
+    sess->locked = true;
+
+    /* Pre-fill username for lock screen (password only) */
+    strncpy(ctx->username, sess->username, VDM_MAX_USERNAME - 1);
+    ctx->state = VDM_STATE_LOGIN;
+    ctx->password_mode = true;
+
+    fprintf(stderr, "[veridian-dm] Session %d locked for '%s'\n",
+            s_current_session_idx, sess->username);
+    return 0;
+}
+
+/*
+ * Get the list of active sessions for display in the DM.
+ * Returns the count of active sessions.
+ */
+int vdm_get_active_sessions(vdm_active_session_t *out, int max)
+{
+    int count = 0;
+    for (int i = 0; i < s_active_session_count && count < max; i++) {
+        out[count++] = s_active_sessions[i];
+    }
+    return count;
+}
+
+/*
+ * Render the user list on the login screen.
+ * Shows user names with avatar indicators.
+ */
+void vdm_render_user_list(vdm_context_t *ctx)
+{
+    if (!ctx || !ctx->framebuffer || s_user_count == 0) {
+        return;
+    }
+
+    int cx = ctx->fb_width / 2;
+    int start_y = ctx->fb_height / 2 + 140;
+
+    vdm_render_text(ctx, cx - 60, start_y, "Users:", COLOR_DIM);
+
+    for (int i = 0; i < s_user_count && i < 6; i++) {
+        int uy = start_y + 24 + i * 20;
+        char label[128];
+        snprintf(label, sizeof(label), "  %s%s (%s)",
+                 s_user_list[i].has_avatar ? "[*] " : "    ",
+                 s_user_list[i].display_name,
+                 s_user_list[i].username);
+        vdm_render_text(ctx, cx - 140, uy, label, COLOR_FG);
+    }
+
+    /* Show active session count */
+    if (s_active_session_count > 0) {
+        char sess_msg[64];
+        snprintf(sess_msg, sizeof(sess_msg),
+                 "%d active session(s)", s_active_session_count);
+        vdm_render_text(ctx, cx - 80, start_y - 24, sess_msg, COLOR_ACCENT);
+    }
+}
+
+/*
+ * Enhanced login rendering with user list and session indicators.
+ */
+void vdm_render_login_enhanced(vdm_context_t *ctx)
+{
+    if (!ctx || !ctx->framebuffer) {
+        return;
+    }
+
+    /* Render the standard login screen */
+    vdm_render_login(ctx);
+
+    /* Overlay the user list */
+    vdm_render_user_list(ctx);
+
+    /* Render active session switcher bar at bottom */
+    if (s_active_session_count > 1) {
+        int bar_y = ctx->fb_height - 40;
+        vdm_render_rect(ctx, 0, bar_y, ctx->fb_width, 40, 0xFF0A0A1E);
+
+        int bar_x = 20;
+        for (int i = 0; i < s_active_session_count; i++) {
+            uint32_t bg = (i == s_current_session_idx)
+                          ? COLOR_SELECTED : 0xFF1A1A2E;
+            vdm_render_rect(ctx, bar_x, bar_y + 4, 120, 32, bg);
+
+            char label[32];
+            snprintf(label, sizeof(label), "VT%d: %s",
+                     s_active_sessions[i].vt_number,
+                     s_active_sessions[i].username);
+            vdm_render_text(ctx, bar_x + 8, bar_y + 12, label, COLOR_FG);
+
+            if (s_active_sessions[i].locked) {
+                vdm_render_text(ctx, bar_x + 100, bar_y + 12,
+                                "[L]", COLOR_ERROR);
+            }
+
+            bar_x += 140;
+        }
+    }
+}
+
+/* ======================================================================
  * Entry point
  * ====================================================================== */
 
@@ -702,6 +1026,9 @@ int main(void)
     vdm_context_t ctx;
 
     fprintf(stderr, "[veridian-dm] VeridianOS Display Manager starting\n");
+
+    /* Load available users for the login screen */
+    vdm_load_user_list();
 
     if (vdm_init(&ctx) != 0) {
         fprintf(stderr, "[veridian-dm] Initialization failed\n");

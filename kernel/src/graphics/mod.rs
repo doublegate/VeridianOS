@@ -6,6 +6,7 @@ use crate::error::KernelError;
 
 pub mod compositor;
 pub mod cursor;
+pub mod damage_tracking;
 pub mod drm_ioctl;
 pub mod fbcon;
 pub mod font8x16;
@@ -13,8 +14,10 @@ pub mod framebuffer;
 pub mod gl_compositor;
 pub mod gpu;
 pub mod gpu_accel;
+pub mod multi_output;
 pub mod shader;
 pub mod texture_atlas;
+pub mod vsync_sw;
 
 /// Canonical pixel format descriptor.
 ///

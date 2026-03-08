@@ -11,6 +11,7 @@
 mod device;
 pub mod hid;
 mod host;
+pub mod hotplug;
 pub mod mass_storage;
 mod transfer;
 pub mod xhci;

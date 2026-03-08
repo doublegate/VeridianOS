@@ -305,6 +305,147 @@ shutdown_handler() {
 }
 
 # =========================================================================
+# Parallel Daemon Startup
+# =========================================================================
+
+PIPEWIRE_PID=""
+NM_PID=""
+BLUEZ_PID=""
+
+start_background_daemons() {
+    log "Starting background daemons in parallel..."
+
+    # PipeWire audio daemon
+    if [ -x /usr/bin/pipewire ]; then
+        /usr/bin/pipewire >> /tmp/pipewire.log 2>&1 &
+        PIPEWIRE_PID=$!
+        log "  PipeWire launched: PID=${PIPEWIRE_PID}"
+    else
+        log "  PipeWire not found -- audio will be unavailable"
+    fi
+
+    # NetworkManager
+    if [ -x /usr/sbin/NetworkManager ]; then
+        /usr/sbin/NetworkManager --no-daemon >> /tmp/nm.log 2>&1 &
+        NM_PID=$!
+        log "  NetworkManager launched: PID=${NM_PID}"
+    elif [ -x /usr/bin/nm-daemon ]; then
+        /usr/bin/nm-daemon >> /tmp/nm.log 2>&1 &
+        NM_PID=$!
+        log "  nm-daemon launched: PID=${NM_PID}"
+    else
+        log "  NetworkManager not found -- network management limited"
+    fi
+
+    # BlueZ Bluetooth daemon
+    if [ -x /usr/libexec/bluetooth/bluetoothd ]; then
+        /usr/libexec/bluetooth/bluetoothd >> /tmp/bluez.log 2>&1 &
+        BLUEZ_PID=$!
+        log "  BlueZ launched: PID=${BLUEZ_PID}"
+    elif [ -x /usr/bin/bluez-daemon ]; then
+        /usr/bin/bluez-daemon >> /tmp/bluez.log 2>&1 &
+        BLUEZ_PID=$!
+        log "  bluez-daemon launched: PID=${BLUEZ_PID}"
+    else
+        log "  BlueZ not found -- Bluetooth unavailable"
+    fi
+
+    # Wait for all background daemons to register on D-Bus
+    # This runs in parallel, so total wait = max(individual waits)
+    WAIT_COUNT=0
+    MAX_DAEMON_WAIT=30   # 3 seconds max
+    while [ ${WAIT_COUNT} -lt ${MAX_DAEMON_WAIT} ]; do
+        ALL_READY=1
+
+        # Check PipeWire readiness
+        if [ -n "${PIPEWIRE_PID}" ] && ! kill -0 "${PIPEWIRE_PID}" 2>/dev/null; then
+            log "  WARNING: PipeWire exited prematurely"
+            PIPEWIRE_PID=""
+        fi
+
+        # Check NetworkManager readiness
+        if [ -n "${NM_PID}" ] && ! kill -0 "${NM_PID}" 2>/dev/null; then
+            log "  WARNING: NetworkManager exited prematurely"
+            NM_PID=""
+        fi
+
+        if [ ${ALL_READY} -eq 1 ]; then
+            break
+        fi
+
+        sleep 0.1
+        WAIT_COUNT=$((WAIT_COUNT + 1))
+    done
+
+    log "Background daemons ready"
+}
+
+# =========================================================================
+# Font Cache Pre-check
+# =========================================================================
+
+check_font_cache() {
+    log "Checking font cache..."
+
+    FONT_CACHE_DIR="/var/cache/fontconfig"
+    FONT_CACHE_MARKER="${FONT_CACHE_DIR}/.veridian-cache-built"
+
+    if [ -f "${FONT_CACHE_MARKER}" ]; then
+        log "  Font cache already generated -- skipping fc-cache"
+        log "  (saves ~2-3 seconds on boot)"
+        return 0
+    fi
+
+    # Font cache not present -- generate it
+    if command -v fc-cache >/dev/null 2>&1; then
+        log "  Generating font cache (first boot)..."
+        log_time "font_cache_gen_start"
+        fc-cache -f 2>/dev/null || true
+        mkdir -p "${FONT_CACHE_DIR}"
+        echo "built" > "${FONT_CACHE_MARKER}" 2>/dev/null || true
+        log_time "font_cache_gen_done"
+        log "  Font cache generated"
+    else
+        log "  fc-cache not found -- font rendering may be slow"
+    fi
+}
+
+# =========================================================================
+# Deferred Service Activation
+# =========================================================================
+
+schedule_deferred_services() {
+    log "Scheduling deferred services..."
+
+    # Baloo file indexer: delay 30 seconds after desktop ready
+    # Heavy I/O during startup degrades user experience
+    if command -v baloo_file >/dev/null 2>&1; then
+        (
+            sleep 30
+            log "  Starting Baloo file indexer (deferred)..."
+            baloo_file >> /tmp/baloo.log 2>&1
+        ) &
+        log "  Baloo scheduled: 30s after desktop ready"
+    fi
+
+    # Akonadi PIM server: start only on first PIM app access
+    # Uses D-Bus activation instead of explicit launch
+    AKONADI_SERVICE="/usr/share/dbus-1/services/org.freedesktop.Akonadi.Control.service"
+    if [ -f "${AKONADI_SERVICE}" ]; then
+        log "  Akonadi: D-Bus activation configured (on-demand)"
+    else
+        log "  Akonadi: service file not found -- PIM on-demand disabled"
+    fi
+
+    # KRunner: delay until Alt+F2 or first search
+    if [ -f "/usr/share/dbus-1/services/org.kde.krunner.service" ]; then
+        log "  KRunner: D-Bus activation configured (on-demand)"
+    fi
+
+    log "Deferred services scheduled"
+}
+
+# =========================================================================
 # Main
 # =========================================================================
 
@@ -329,6 +470,14 @@ main() {
     start_logind
     log_time "logind_ready"
 
+    # Phase 1.5: Parallel daemon startup (PipeWire, NetworkManager, BlueZ)
+    start_background_daemons
+    log_time "background_daemons_launched"
+
+    # Phase 1.6: Font cache check (skip regeneration if cache exists)
+    check_font_cache
+    log_time "font_cache_checked"
+
     # Phase 2: Runtime environment
     setup_xdg_runtime
 
@@ -336,6 +485,9 @@ main() {
     detect_session_type
     log_time "kwin_start"
     launch_session
+
+    # Phase 3.5: Deferred service activation
+    schedule_deferred_services
 
     # Phase 4: Wait for session to end
     if [ -n "${SESSION_PID}" ]; then

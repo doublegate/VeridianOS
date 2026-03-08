@@ -328,6 +328,14 @@ userland/kf6-build/
 userland/kwin-build/
 userland/plasma-build/
 
+# Phase 10 build artifacts (cross-compiled userland daemons)
+userland/pipewire/pipewire-build/
+userland/networkmanager/nm-build/
+userland/bluez/bluez-build/
+userland/udev/udev-build/
+userland/akonadi/akonadi-build/
+userland/kwin/kwin-src/
+
 # Plan files (Claude Code)
 .claude/plans/
 a.out

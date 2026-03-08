@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+pub mod device_node;
 pub mod hci;
 
 // Phase 8 Wave 2: Bluetooth L2CAP/RFCOMM/Profiles

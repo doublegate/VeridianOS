@@ -127,6 +127,9 @@ Q_SIGNALS:
 
 private Q_SLOTS:
     void onInotifyEvent();
+    void onUdevDeviceAdded(const QString &devpath, const QString &subsystem);
+    void onUdevDeviceRemoved(const QString &devpath, const QString &subsystem);
+    void onUdevDeviceChanged(const QString &devpath, const QString &subsystem);
 
 private:
     void enumerateBlockDevices();
@@ -135,8 +138,10 @@ private:
     void enumerateDisplayDevices();
     void enumerateProcessors();
     void enumerateBatteries();
+    void enumerateUsbDevices();
 
     void startHotplugMonitor();
+    void subscribeUdevEvents();
 
     QStringList m_deviceUdis;
     QMap<QString, VeridianDevice *> m_devices;

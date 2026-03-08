@@ -332,6 +332,10 @@ public:
     QVector<VeridianDrmOutput *> outputs() const;
     VeridianDrmOutput *primaryOutput() const;
     bool updateOutputs();
+    void scanOutputs();
+    void handleHotplug(uint32_t connectorId, bool connected);
+    void setOutputPosition(VeridianDrmOutput *output, int x, int y);
+    bool setOutputMode(VeridianDrmOutput *output, const drmModeModeInfo &mode);
 
     /* ----- Rendering ----- */
     VeridianEglBackend *eglBackend() const;

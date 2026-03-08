@@ -11,6 +11,8 @@
 
 #include "solid-veridian-backend.h"
 
+#include <QDBusConnection>
+#include <QDBusMessage>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -749,6 +751,204 @@ double VeridianBattery::energyRate() const { return 0.0; }
 double VeridianBattery::voltage() const { return 0.0; }
 double VeridianBattery::temperature() const { return 0.0; }
 QString VeridianBattery::serial() const { return QString(); }
+
+/* ========================================================================= */
+/* udev D-Bus Integration (Sprint 10.7)                                      */
+/* ========================================================================= */
+
+static const QString UDI_USB = UDI_PREFIX + QStringLiteral("/usb");
+static const QString UDI_INPUT = UDI_PREFIX + QStringLiteral("/input");
+
+/**
+ * Subscribe to udev device events via D-Bus.
+ *
+ * Connects to the org.freedesktop.UDev D-Bus service and listens
+ * for DeviceAdded and DeviceRemoved signals.  Maps udev subsystems
+ * to Solid device types and updates the device list.
+ */
+void VeridianManager::subscribeUdevEvents()
+{
+    QDBusConnection bus = QDBusConnection::systemBus();
+    if (!bus.isConnected()) {
+        qWarning("VeridianManager: D-Bus system bus not available, "
+                 "udev integration disabled");
+        return;
+    }
+
+    /* Connect to DeviceAdded signal */
+    bus.connect(
+        QStringLiteral("org.freedesktop.UDev"),   /* service */
+        QStringLiteral("/org/freedesktop/UDev"),   /* path */
+        QStringLiteral("org.freedesktop.UDev"),    /* interface */
+        QStringLiteral("DeviceAdded"),             /* signal */
+        this,
+        SLOT(onUdevDeviceAdded(QString, QString)));
+
+    /* Connect to DeviceRemoved signal */
+    bus.connect(
+        QStringLiteral("org.freedesktop.UDev"),
+        QStringLiteral("/org/freedesktop/UDev"),
+        QStringLiteral("org.freedesktop.UDev"),
+        QStringLiteral("DeviceRemoved"),
+        this,
+        SLOT(onUdevDeviceRemoved(QString, QString)));
+
+    /* Connect to DeviceChanged signal */
+    bus.connect(
+        QStringLiteral("org.freedesktop.UDev"),
+        QStringLiteral("/org/freedesktop/UDev"),
+        QStringLiteral("org.freedesktop.UDev"),
+        QStringLiteral("DeviceChanged"),
+        this,
+        SLOT(onUdevDeviceChanged(QString, QString)));
+
+    qDebug("VeridianManager: subscribed to udev D-Bus events");
+}
+
+/**
+ * Map a udev subsystem name to a Solid UDI prefix.
+ *
+ * @param subsystem  udev subsystem (e.g., "usb", "block", "net").
+ * @return Solid UDI prefix, or empty string if unmapped.
+ */
+static QString subsystemToUdiPrefix(const QString &subsystem)
+{
+    if (subsystem == QStringLiteral("usb"))
+        return UDI_USB;
+    if (subsystem == QStringLiteral("block"))
+        return UDI_BLOCK;
+    if (subsystem == QStringLiteral("net"))
+        return UDI_NET;
+    if (subsystem == QStringLiteral("input"))
+        return UDI_INPUT;
+    if (subsystem == QStringLiteral("drm"))
+        return UDI_DISPLAY;
+    if (subsystem == QStringLiteral("sound"))
+        return UDI_AUDIO;
+    return QString();
+}
+
+/**
+ * Handle a udev DeviceAdded D-Bus signal.
+ *
+ * Creates a new Solid device entry for the newly attached device.
+ *
+ * @param devpath    Sysfs device path from udev.
+ * @param subsystem  udev subsystem name.
+ */
+void VeridianManager::onUdevDeviceAdded(const QString &devpath,
+                                         const QString &subsystem)
+{
+    QString prefix = subsystemToUdiPrefix(subsystem);
+    if (prefix.isEmpty()) {
+        qDebug("VeridianManager: ignoring udev add for unknown subsystem: %s",
+               qUtf8Printable(subsystem));
+        return;
+    }
+
+    /* Extract device name from devpath */
+    QString devName = devpath.section(QLatin1Char('/'), -1);
+    QString udi = prefix + QLatin1Char('/') + devName;
+
+    if (m_deviceUdis.contains(udi)) {
+        qDebug("VeridianManager: device already tracked: %s",
+               qUtf8Printable(udi));
+        return;
+    }
+
+    m_deviceUdis << udi;
+
+    qDebug("VeridianManager: udev device added: %s (subsystem=%s)",
+           qUtf8Printable(udi), qUtf8Printable(subsystem));
+
+    Q_EMIT deviceAdded(udi);
+}
+
+/**
+ * Handle a udev DeviceRemoved D-Bus signal.
+ *
+ * Removes the Solid device entry and cleans up.
+ *
+ * @param devpath    Sysfs device path from udev.
+ * @param subsystem  udev subsystem name.
+ */
+void VeridianManager::onUdevDeviceRemoved(const QString &devpath,
+                                           const QString &subsystem)
+{
+    QString prefix = subsystemToUdiPrefix(subsystem);
+    if (prefix.isEmpty())
+        return;
+
+    QString devName = devpath.section(QLatin1Char('/'), -1);
+    QString udi = prefix + QLatin1Char('/') + devName;
+
+    if (!m_deviceUdis.contains(udi))
+        return;
+
+    m_deviceUdis.removeAll(udi);
+
+    /* Clean up cached device object */
+    delete m_devices.take(udi);
+
+    qDebug("VeridianManager: udev device removed: %s (subsystem=%s)",
+           qUtf8Printable(udi), qUtf8Printable(subsystem));
+
+    Q_EMIT deviceRemoved(udi);
+}
+
+/**
+ * Handle a udev DeviceChanged D-Bus signal.
+ *
+ * Updates device properties and re-creates the cached device object.
+ *
+ * @param devpath    Sysfs device path from udev.
+ * @param subsystem  udev subsystem name.
+ */
+void VeridianManager::onUdevDeviceChanged(const QString &devpath,
+                                           const QString &subsystem)
+{
+    QString prefix = subsystemToUdiPrefix(subsystem);
+    if (prefix.isEmpty())
+        return;
+
+    QString devName = devpath.section(QLatin1Char('/'), -1);
+    QString udi = prefix + QLatin1Char('/') + devName;
+
+    if (!m_deviceUdis.contains(udi))
+        return;
+
+    /* Invalidate cached device so it gets re-created on next access */
+    delete m_devices.take(udi);
+
+    qDebug("VeridianManager: udev device changed: %s (subsystem=%s)",
+           qUtf8Printable(udi), qUtf8Printable(subsystem));
+}
+
+/**
+ * Enumerate USB devices.
+ *
+ * Scans /dev/bus/usb/ for attached USB devices and adds them
+ * to the device list.
+ */
+void VeridianManager::enumerateUsbDevices()
+{
+    QDir usbDir(QStringLiteral("/dev/bus/usb"));
+    if (!usbDir.exists())
+        return;
+
+    /* Scan bus directories (001, 002, ...) */
+    const QStringList buses = usbDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QString &bus : buses) {
+        QDir busDir(usbDir.filePath(bus));
+        const QStringList devices = busDir.entryList(QDir::Files);
+        for (const QString &dev : devices) {
+            QString udi = UDI_USB + QLatin1Char('/') + bus +
+                          QLatin1Char('-') + dev;
+            if (!m_deviceUdis.contains(udi))
+                m_deviceUdis << udi;
+        }
+    }
+}
 
 } /* namespace Veridian */
 } /* namespace Backends */

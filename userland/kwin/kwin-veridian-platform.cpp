@@ -1225,4 +1225,229 @@ bool VeridianDrmBackend::endFrame(VeridianDrmOutput *output)
     return output->schedulePageFlip();
 }
 
+/* ========================================================================= */
+/* Multi-Output Support (Sprint 10.7)                                        */
+/* ========================================================================= */
+
+/**
+ * Scan all DRM connectors and create a VeridianDrmOutput for each
+ * connected display.
+ *
+ * Called during initialization and after hotplug events.  Iterates
+ * the connector list from enumerateConnectors(), skips disconnected
+ * connectors, and creates output objects with GBM surfaces and EGL
+ * contexts.
+ */
+void VeridianDrmBackend::scanOutputs()
+{
+    if (m_drmFd < 0) {
+        qWarning("VeridianDrmBackend::scanOutputs: no DRM fd");
+        return;
+    }
+
+    QVector<VeridianDrmConnector> connectors = enumerateConnectors();
+    QVector<VeridianDrmCrtc> crtcs = enumerateCrtcs();
+
+    qDebug("VeridianDrmBackend::scanOutputs: found %d connectors, %d CRTCs",
+           connectors.size(), crtcs.size());
+
+    for (const VeridianDrmConnector &conn : connectors) {
+        if (!conn.connected)
+            continue;
+
+        /* Check if we already have an output for this connector */
+        bool exists = false;
+        for (const VeridianDrmOutput *out : m_outputs) {
+            if (out->connectorId() == conn.connectorId) {
+                exists = true;
+                break;
+            }
+        }
+        if (exists)
+            continue;
+
+        /* Find a free CRTC for this connector */
+        VeridianDrmCrtc assignedCrtc;
+        memset(&assignedCrtc, 0, sizeof(assignedCrtc));
+        bool crtcFound = false;
+
+        for (const VeridianDrmCrtc &crtc : crtcs) {
+            /* Check if this CRTC is already in use */
+            bool inUse = false;
+            for (const VeridianDrmOutput *out : m_outputs) {
+                if (out->crtcId() == crtc.crtcId) {
+                    inUse = true;
+                    break;
+                }
+            }
+            if (!inUse) {
+                assignedCrtc = crtc;
+                crtcFound = true;
+                break;
+            }
+        }
+
+        if (!crtcFound) {
+            qWarning("VeridianDrmBackend::scanOutputs: no free CRTC for "
+                     "connector %u (%s)",
+                     conn.connectorId,
+                     qUtf8Printable(conn.name));
+            continue;
+        }
+
+        /* Create output */
+        auto *output = new VeridianDrmOutput(m_drmFd, this);
+        if (!output->initFromConnector(conn, assignedCrtc)) {
+            qWarning("VeridianDrmBackend::scanOutputs: failed to init "
+                     "output for connector %u",
+                     conn.connectorId);
+            delete output;
+            continue;
+        }
+
+        /* Create GBM surface for this output */
+        if (m_gbmDevice) {
+            if (!output->createGbmSurface(m_gbmDevice)) {
+                qWarning("VeridianDrmBackend::scanOutputs: failed to create "
+                         "GBM surface for connector %u",
+                         conn.connectorId);
+                delete output;
+                continue;
+            }
+
+            /* Create per-output EGL surface */
+            if (m_eglBackend && output->gbmSurface()) {
+                EGLSurface eglSurface =
+                    m_eglBackend->createSurface(output->gbmSurface());
+                if (eglSurface == EGL_NO_SURFACE) {
+                    qWarning("VeridianDrmBackend::scanOutputs: failed to "
+                             "create EGL surface for connector %u",
+                             conn.connectorId);
+                }
+            }
+        }
+
+        m_outputs.append(output);
+
+        qDebug("VeridianDrmBackend::scanOutputs: created output '%s' "
+               "(%dx%d@%dHz) on CRTC %u",
+               qUtf8Printable(output->name()),
+               output->sizePixels().width(),
+               output->sizePixels().height(),
+               output->refreshRate() / 1000,
+               output->crtcId());
+
+        Q_EMIT outputAdded(output);
+    }
+
+    Q_EMIT outputsQueried();
+}
+
+/**
+ * Handle a DRM connector hotplug event.
+ *
+ * Called when a display is connected or disconnected.  On connect,
+ * creates a new output with GBM surface and EGL context.  On
+ * disconnect, tears down the output and cleans up resources.
+ *
+ * @param connectorId  DRM connector ID from the hotplug event.
+ * @param connected    true if a display was connected.
+ */
+void VeridianDrmBackend::handleHotplug(uint32_t connectorId, bool connected)
+{
+    qDebug("VeridianDrmBackend::handleHotplug: connector %u %s",
+           connectorId, connected ? "connected" : "disconnected");
+
+    if (connected) {
+        /* Re-scan to pick up the new connector */
+        scanOutputs();
+    } else {
+        /* Find and remove the output for this connector */
+        for (int i = 0; i < m_outputs.size(); ++i) {
+            if (m_outputs[i]->connectorId() == connectorId) {
+                VeridianDrmOutput *output = m_outputs[i];
+                m_outputs.removeAt(i);
+
+                qDebug("VeridianDrmBackend::handleHotplug: removed output '%s'",
+                       qUtf8Printable(output->name()));
+
+                Q_EMIT outputRemoved(output);
+
+                /* Clean up GBM and EGL resources */
+                output->destroyGbmSurface();
+                output->deleteLater();
+                break;
+            }
+        }
+    }
+}
+
+/**
+ * Configure output position within the virtual desktop.
+ *
+ * @param output  The output to position.
+ * @param x       X offset in virtual desktop coordinates.
+ * @param y       Y offset in virtual desktop coordinates.
+ */
+void VeridianDrmBackend::setOutputPosition(VeridianDrmOutput *output,
+                                            int x, int y)
+{
+    if (!output) {
+        qWarning("VeridianDrmBackend::setOutputPosition: null output");
+        return;
+    }
+
+    qDebug("VeridianDrmBackend::setOutputPosition: '%s' -> (%d, %d)",
+           qUtf8Printable(output->name()), x, y);
+
+    /* Position data is managed by the compositor; this is a
+     * notification hook for the DRM backend to update its
+     * internal state if needed. */
+}
+
+/**
+ * Configure output mode (resolution + refresh rate).
+ *
+ * @param output  The output to configure.
+ * @param mode    DRM mode info for the desired resolution/refresh.
+ * @return true on success.
+ */
+bool VeridianDrmBackend::setOutputMode(VeridianDrmOutput *output,
+                                        const drmModeModeInfo &mode)
+{
+    if (!output) {
+        qWarning("VeridianDrmBackend::setOutputMode: null output");
+        return false;
+    }
+
+    qDebug("VeridianDrmBackend::setOutputMode: '%s' -> %ux%u@%uHz",
+           qUtf8Printable(output->name()),
+           mode.hdisplay, mode.vdisplay, mode.vrefresh);
+
+    /* Destroy and recreate GBM surface at new resolution */
+    output->destroyGbmSurface();
+
+    if (!output->setMode(mode)) {
+        qWarning("VeridianDrmBackend::setOutputMode: DRM modeset failed");
+        return false;
+    }
+
+    if (m_gbmDevice && !output->createGbmSurface(m_gbmDevice)) {
+        qWarning("VeridianDrmBackend::setOutputMode: GBM surface failed");
+        return false;
+    }
+
+    /* Recreate EGL surface */
+    if (m_eglBackend && output->gbmSurface()) {
+        EGLSurface eglSurface =
+            m_eglBackend->createSurface(output->gbmSurface());
+        if (eglSurface == EGL_NO_SURFACE) {
+            qWarning("VeridianDrmBackend::setOutputMode: EGL surface failed");
+            return false;
+        }
+    }
+
+    return true;
+}
+
 } /* namespace KWin */

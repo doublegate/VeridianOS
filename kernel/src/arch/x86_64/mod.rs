@@ -5,10 +5,13 @@
 //! for the x86_64 platform.
 
 pub mod acpi;
+pub mod acpi_pm;
 pub mod apic;
 pub mod boot;
 pub mod bootstrap;
 pub mod context;
+pub mod cpufreq;
+pub mod dpms;
 pub mod early_serial;
 pub mod entry;
 pub mod gdt;

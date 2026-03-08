@@ -1,59 +1,40 @@
 # KDE Plasma 6 on VeridianOS -- Known Limitations
 
-**Version**: Phase 9 Sprint 9.10 (Integration + Polish)
+**Version**: Phase 10 Complete (v0.23.0)
 **Last Updated**: March 2026
 
 ---
 
-## Rendering
+## Remaining Limitations
+
+### GPU & Rendering
 
 | Limitation | Details | Workaround |
 |-----------|---------|------------|
-| Software rendering | llvmpipe provides ~15 FPS; usable but not smooth | Use VirtIO GPU with virgl (`--enable-virgl`) in QEMU for 60 FPS |
-| No real GPU support | Only VirtIO GPU is supported; no AMD/NVIDIA/Intel drivers | Future: DRM/KMS drivers for real hardware |
-| No VSync on llvmpipe | Screen tearing possible with software rendering | Switch to virgl or accept tearing |
+| No real GPU drivers | Only VirtIO GPU supported; no AMD/NVIDIA/Intel native drivers | Use VirtIO GPU with virgl in QEMU |
 | OpenGL ES 2.0 only | No OpenGL 3.x/4.x core profile support | KWin's GLES2 backend handles this transparently |
+| Complex script rendering | Arabic/Devanagari ligature rendering may have edge cases | Install additional fonts; Latin/CJK fully supported |
 
-## XWayland
-
-| Limitation | Details | Workaround |
-|-----------|---------|------------|
-| No GLX | X11 apps cannot use GLX for OpenGL; only EGL via glamor | Use Wayland-native apps when possible |
-| Input methods | CJK/IBus/Fcitx not fully wired through XWayland | Use Wayland-native input method framework |
-| DRI3 limited | Hardware-accelerated X11 rendering requires VirtIO GPU | Software rendering used as fallback |
-| Clipboard large objects | X11 <-> Wayland clipboard limited to 16 MB per transfer | Transfer files via filesystem instead |
-
-## Hardware Support
+### Data & Sync
 
 | Limitation | Details | Workaround |
 |-----------|---------|------------|
-| No NetworkManager | Network configuration not available through KDE settings | Use manual `ip`/`ifconfig` commands |
-| No Bluetooth stack | BlueZ not ported; Bluetooth settings panel non-functional | Use serial/USB for peripherals |
-| No PulseAudio/PipeWire | Audio playback and recording not available | Future: audio subsystem port |
-| No webcam/V4L2 | Video capture devices not supported | N/A |
-| No USB hotplug | USB devices must be present at boot | Restart QEMU to add/remove USB devices |
-| Single monitor only | Multi-monitor/display configuration not supported | Use single display output |
+| No full Akonadi sync | Local PIM data only; no Exchange/IMAP/CalDAV sync | Use web-based email/calendar; local contacts/notes work |
 
-## KDE Features
+### Platform
 
 | Limitation | Details | Workaround |
 |-----------|---------|------------|
-| No Activities | KDE Activities framework disabled | Use virtual desktops instead |
-| No screen lock | Screen locking/DPMS not functional | Lock via QEMU monitor or close window |
-| No Baloo file indexer | Desktop search and file indexing disabled | Use `find`/`grep` for file search |
-| No KRunner | Application launcher search limited | Use application menu |
-| No Akonadi/PIM | KDE PIM (email, calendar, contacts) not available | Use web-based alternatives |
-| No power management | PowerDevil backend reports but cannot control hardware | Power states managed by QEMU |
-| No suspend/hibernate | ACPI S3/S4 states not implemented | Shut down and restart instead |
+| Multi-arch KDE | KDE Plasma 6 is x86_64 only; AArch64/RISC-V are future work | Kernel + built-in DE run on all 3 architectures |
+| Cross-compilation required | All KDE components must be cross-compiled from a host | Use provided build scripts in each component directory |
+| No native package manager | KDE libraries installed manually to sysroot | Use `build-kde-rootfs.sh` for full rootfs |
 
-## Performance
+### Performance
 
 | Limitation | Details | Workaround |
 |-----------|---------|------------|
 | Memory: ~800MB baseline | Plasma session uses 600-800 MB RSS | Allocate 2+ GB RAM to QEMU |
-| Boot time: ~8-12s | KWin startup to desktop in 8-12 seconds | Pre-warm font cache with `fc-cache -f` |
 | Font rendering | FreeType + HarfBuzz shims; complex scripts may render incorrectly | Install additional fonts |
-| D-Bus overhead | Session bus adds ~0.5-1ms to IPC calls | Acceptable for desktop use |
 
 ## System Requirements
 
@@ -65,22 +46,36 @@
 | GPU | VirtIO 2D | VirtIO 3D (virgl) |
 | Architecture | x86_64 only | x86_64 (AArch64/RISC-V future) |
 
-## Session Management
+---
 
-| Limitation | Details | Workaround |
-|-----------|---------|------------|
-| No multi-user sessions | Only single-user (root) supported | Run as root; user accounts planned |
-| No session save/restore | Window positions not preserved across reboots | Manually re-open applications |
-| Session type requires reboot | Switching between built-in DE and KDE requires reboot | Edit `/etc/veridian/session.conf` and reboot |
-| Auto-login only | No graphical login screen in initial release | Display manager (veridian-dm) is text-based |
+## Resolved in Phase 10
 
-## Build System
+The following limitations from Phase 9 were resolved in Phase 10 (v0.23.0):
 
-| Limitation | Details | Workaround |
-|-----------|---------|------------|
-| Cross-compilation required | All KDE components must be cross-compiled | Use provided build scripts |
-| No native package manager | Libraries installed manually to sysroot | Use `build-kde-rootfs.sh` |
-| CI build time | Full KDE sysroot build takes ~90 minutes | Sysroot caching reduces to ~5 minutes |
+| Limitation | Sprint | Resolution |
+|-----------|--------|------------|
+| No VSync on llvmpipe | 10.0 | Software VSync via TSC timer + damage tracking (~30+ FPS) |
+| Software rendering ~15 FPS | 10.0 | Damage-region recomposite skips unchanged surfaces |
+| No PulseAudio/PipeWire | 10.1 | PipeWire daemon with ALSA bridge + PulseAudio compat layer |
+| No NetworkManager | 10.2 | NetworkManager shim with Wi-Fi/Ethernet/DNS backends |
+| No Bluetooth stack | 10.3 | BlueZ shim with HCI bridge and pairing agent |
+| No GLX | 10.4 | GLX-over-EGL translation layer for X11 apps |
+| Input methods (XWayland) | 10.4 | XIM-to-Wayland text-input-v3 bridge |
+| DRI3 limited | 10.4 | DRI3 extension with GBM buffer management |
+| Clipboard large objects | 10.4 | INCR protocol for transfers >256KB |
+| No power management | 10.5 | ACPI S3/S4 suspend/hibernate, CPU frequency governors |
+| No suspend/hibernate | 10.5 | ACPI S3/S4 state transitions via sysfs interface |
+| No screen lock | 10.5/10.6 | DPMS display blanking + PAM-based lock screen |
+| No KRunner | 10.6 | KRunner with 6 runners (app/file/calc/cmd/web/unit) |
+| No Baloo file indexer | 10.6 | Baloo backend with filesystem crawler + trigram index |
+| No Activities | 10.6 | Activities framework with create/switch/delete |
+| No webcam/V4L2 | 10.7 | V4L2 device interface with test pattern generator |
+| No USB hotplug | 10.7 | xHCI port status polling + udev device daemon |
+| Single monitor only | 10.7 | Multi-output manager with EDID parsing |
+| No multi-user sessions | 10.8 | Multi-user login via display manager with VT switching |
+| No session save/restore | 10.8 | Window state save/restore on logout/login |
+| No Akonadi/PIM | 10.8 | Akonadi local data store (contacts/calendar/notes) |
+| D-Bus overhead | 10.9 | Message batching + binary shortcut protocol |
 
 ---
 
