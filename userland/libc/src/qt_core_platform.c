@@ -36,10 +36,15 @@ extern long write(int fd, const void *buf, unsigned long count);
 /* Syscall numbers for new VeridianOS syscalls                               */
 /* ========================================================================= */
 
-#define SYS_EVENTFD         280
-#define SYS_TIMERFD_CREATE  283
-#define SYS_TIMERFD_SETTIME 284
-#define SYS_TIMERFD_GETTIME 285
+/* Syscall numbers -- MUST match kernel/src/syscall/mod.rs enum values */
+#define SYS_EVENTFD         331
+#define SYS_EVENTFD_READ    332
+#define SYS_EVENTFD_WRITE   333
+#define SYS_TIMERFD_CREATE  334
+#define SYS_TIMERFD_SETTIME 335
+#define SYS_TIMERFD_GETTIME 336
+#define SYS_SIGNALFD        337
+#define SYS_GETRANDOM       330
 #define SYS_INOTIFY_INIT1   290
 #define SYS_INOTIFY_ADD_WATCH 291
 #define SYS_INOTIFY_RM_WATCH 292

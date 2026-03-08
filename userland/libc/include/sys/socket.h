@@ -100,6 +100,41 @@ struct msghdr {
     int           msg_flags;
 };
 
+/* Control message header for ancillary data (used by sendmsg/recvmsg) */
+struct cmsghdr {
+    socklen_t cmsg_len;     /* Data byte count including header */
+    int       cmsg_level;   /* Originating protocol (SOL_SOCKET) */
+    int       cmsg_type;    /* Protocol-specific type (SCM_RIGHTS) */
+    /* followed by unsigned char cmsg_data[] */
+};
+
+/* Ancillary data types */
+#define SCM_RIGHTS  1   /* Transfer file descriptors */
+#define SCM_CREDENTIALS 2
+
+/* CMSG macros for navigating ancillary data */
+#define CMSG_ALIGN(len) (((len) + sizeof(size_t) - 1) & ~(sizeof(size_t) - 1))
+#define CMSG_SPACE(len) (CMSG_ALIGN(sizeof(struct cmsghdr)) + CMSG_ALIGN(len))
+#define CMSG_LEN(len)   (CMSG_ALIGN(sizeof(struct cmsghdr)) + (len))
+#define CMSG_DATA(cmsg)  ((unsigned char *)((struct cmsghdr *)(cmsg) + 1))
+
+static inline struct cmsghdr *CMSG_FIRSTHDR(const struct msghdr *msg)
+{
+    return msg->msg_controllen >= sizeof(struct cmsghdr)
+        ? (struct cmsghdr *)msg->msg_control
+        : (struct cmsghdr *)0;
+}
+
+static inline struct cmsghdr *CMSG_NXTHDR(const struct msghdr *msg,
+                                           const struct cmsghdr *cmsg)
+{
+    size_t next = (size_t)((char *)cmsg + CMSG_ALIGN(cmsg->cmsg_len));
+    size_t end  = (size_t)((char *)msg->msg_control + msg->msg_controllen);
+    if (next + sizeof(struct cmsghdr) > end)
+        return (struct cmsghdr *)0;
+    return (struct cmsghdr *)next;
+}
+
 /* Socket functions */
 int socket(int domain, int type, int protocol);
 int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen);

@@ -205,6 +205,23 @@ extern "C" {
 #define SYS_NET_SETSOCKOPT      254
 #define SYS_NET_GETSOCKOPT      255
 
+/* epoll I/O multiplexing (262-264) */
+#define SYS_EPOLL_CREATE        262
+#define SYS_EPOLL_CTL           263
+#define SYS_EPOLL_WAIT          264
+
+/* Event/timer notification fds + getrandom (330-339) */
+#define SYS_GETRANDOM           330
+#define SYS_EVENTFD_CREATE      331
+#define SYS_EVENTFD_READ        332
+#define SYS_EVENTFD_WRITE       333
+#define SYS_TIMERFD_CREATE      334
+#define SYS_TIMERFD_SETTIME     335
+#define SYS_TIMERFD_GETTIME     336
+#define SYS_SIGNALFD_CREATE     337
+#define SYS_SENDMSG             338
+#define SYS_RECVMSG             339
+
 /* AT_* constants for *at() syscalls */
 #define AT_FDCWD                (-100)
 #define AT_REMOVEDIR            0x200

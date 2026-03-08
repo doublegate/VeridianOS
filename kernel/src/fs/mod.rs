@@ -15,6 +15,7 @@ pub mod bare_lock;
 pub mod blockdev;
 pub mod blockfs;
 pub mod devfs;
+pub mod eventfd;
 pub mod ext4;
 pub mod fat32;
 pub mod file;
@@ -24,7 +25,9 @@ pub mod pipe;
 pub mod procfs;
 pub mod pty;
 pub mod ramfs;
+pub mod signalfd;
 pub mod tar;
+pub mod timerfd;
 pub mod tmpfs;
 pub mod xattr;
 

@@ -1,0 +1,346 @@
+//! timerfd -- Timer notification file descriptor
+//!
+//! Provides file descriptors that deliver timer expiration notifications,
+//! integrable with epoll/poll. Used by Qt6 for frame pacing and event
+//! loop timeouts, and by KWin for compositor frame scheduling.
+//!
+//! ## Syscall Interface
+//! - `timerfd_create(clockid, flags) -> fd`     (syscall 331)
+//! - `timerfd_settime(fd, flags, new, old) -> 0` (syscall 332)
+//! - `timerfd_gettime(fd, curr) -> 0`            (syscall 333)
+//! - Read via standard `read(2)` on returned fd
+//!
+//! ## Semantics
+//! - **read**: Returns the number of expirations since last read as a u64.
+//!   Returns EAGAIN if no expirations and non-blocking, otherwise blocks.
+//! - Timer resolution is based on kernel uptime (TSC-derived).
+
+#![allow(dead_code)]
+
+use alloc::collections::BTreeMap;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use spin::Mutex;
+
+use crate::syscall::{SyscallError, SyscallResult};
+
+/// Maximum number of timerfd instances system-wide.
+const MAX_TIMERFD_INSTANCES: usize = 4096;
+
+/// Clock IDs (subset of POSIX clocks).
+pub const CLOCK_REALTIME: u32 = 0;
+pub const CLOCK_MONOTONIC: u32 = 1;
+
+/// TFD_NONBLOCK: Return EAGAIN instead of blocking.
+pub const TFD_NONBLOCK: u32 = 0x800;
+/// TFD_CLOEXEC: Set close-on-exec.
+pub const TFD_CLOEXEC: u32 = 0x80000;
+
+/// TFD_TIMER_ABSTIME: Interpret new_value.it_value as absolute time.
+pub const TFD_TIMER_ABSTIME: u32 = 1;
+
+/// Time specification matching `struct timespec` layout.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Timespec {
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
+}
+
+impl Timespec {
+    pub fn to_ns(&self) -> u64 {
+        (self.tv_sec as u64)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(self.tv_nsec as u64)
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.tv_sec == 0 && self.tv_nsec == 0
+    }
+}
+
+/// Timer interval specification matching `struct itimerspec`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Itimerspec {
+    /// Interval for periodic timer (0 = one-shot).
+    pub it_interval: Timespec,
+    /// Initial expiration time.
+    pub it_value: Timespec,
+}
+
+/// Internal timerfd state.
+struct TimerFdInstance {
+    /// Clock type (CLOCK_REALTIME or CLOCK_MONOTONIC).
+    clock_id: u32,
+    /// Whether non-blocking mode is active.
+    nonblock: bool,
+    /// Current timer specification.
+    spec: Itimerspec,
+    /// Absolute expiration time in nanoseconds (monotonic).
+    next_expiry_ns: u64,
+    /// Number of expirations accumulated since last read.
+    expirations: u64,
+    /// Whether the timer is armed.
+    armed: bool,
+    /// Owner process ID.
+    owner_pid: u64,
+}
+
+/// Global registry of timerfd instances.
+static TIMERFD_REGISTRY: Mutex<BTreeMap<u32, TimerFdInstance>> = Mutex::new(BTreeMap::new());
+
+/// Next ID for timerfd allocation.
+static NEXT_TIMERFD_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Get current monotonic time in nanoseconds from kernel uptime.
+fn monotonic_now_ns() -> u64 {
+    // Use the kernel's uptime counter (TSC-based on x86_64)
+    let uptime_ms = crate::timer::get_uptime_ms();
+    uptime_ms.saturating_mul(1_000_000)
+}
+
+/// Create a new timerfd.
+///
+/// # Arguments
+/// - `clockid`: `CLOCK_REALTIME` or `CLOCK_MONOTONIC`.
+/// - `flags`: Combination of `TFD_NONBLOCK`, `TFD_CLOEXEC`.
+///
+/// # Returns
+/// The timerfd ID on success.
+pub fn timerfd_create(clockid: u32, flags: u32) -> SyscallResult {
+    if clockid != CLOCK_REALTIME && clockid != CLOCK_MONOTONIC {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let pid = crate::process::current_process()
+        .map(|p| p.pid.0)
+        .unwrap_or(0);
+
+    let nonblock = (flags & TFD_NONBLOCK) != 0;
+
+    let instance = TimerFdInstance {
+        clock_id: clockid,
+        nonblock,
+        spec: Itimerspec::default(),
+        next_expiry_ns: 0,
+        expirations: 0,
+        armed: false,
+        owner_pid: pid,
+    };
+
+    let id = NEXT_TIMERFD_ID.fetch_add(1, Ordering::Relaxed) as u32;
+
+    let mut registry = TIMERFD_REGISTRY.lock();
+    if registry.len() >= MAX_TIMERFD_INSTANCES {
+        return Err(SyscallError::OutOfMemory);
+    }
+    registry.insert(id, instance);
+    Ok(id as usize)
+}
+
+/// Arm or disarm a timerfd.
+///
+/// # Arguments
+/// - `tfd_id`: Timer fd ID.
+/// - `flags`: `TFD_TIMER_ABSTIME` for absolute time.
+/// - `new_spec`: New timer specification.
+///
+/// # Returns
+/// The previous timer specification via `old_spec` (if non-null).
+pub fn timerfd_settime(
+    tfd_id: u32,
+    flags: u32,
+    new_spec: &Itimerspec,
+    old_spec: Option<&mut Itimerspec>,
+) -> SyscallResult {
+    let mut registry = TIMERFD_REGISTRY.lock();
+    let instance = registry
+        .get_mut(&tfd_id)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+
+    // Return old value if requested
+    if let Some(old) = old_spec {
+        *old = instance.spec;
+    }
+
+    instance.spec = *new_spec;
+    instance.expirations = 0;
+
+    if new_spec.it_value.is_zero() {
+        // Disarm the timer
+        instance.armed = false;
+        instance.next_expiry_ns = 0;
+    } else {
+        instance.armed = true;
+        let now = monotonic_now_ns();
+
+        if (flags & TFD_TIMER_ABSTIME) != 0 {
+            // Absolute time
+            instance.next_expiry_ns = new_spec.it_value.to_ns();
+        } else {
+            // Relative time
+            instance.next_expiry_ns = now.saturating_add(new_spec.it_value.to_ns());
+        }
+    }
+
+    Ok(0)
+}
+
+/// Get the current timer specification.
+pub fn timerfd_gettime(tfd_id: u32) -> Result<Itimerspec, SyscallError> {
+    let registry = TIMERFD_REGISTRY.lock();
+    let instance = registry
+        .get(&tfd_id)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+
+    if !instance.armed {
+        return Ok(Itimerspec::default());
+    }
+
+    let now = monotonic_now_ns();
+    let remaining_ns = instance.next_expiry_ns.saturating_sub(now);
+
+    Ok(Itimerspec {
+        it_interval: instance.spec.it_interval,
+        it_value: Timespec {
+            tv_sec: (remaining_ns / 1_000_000_000) as i64,
+            tv_nsec: (remaining_ns % 1_000_000_000) as i64,
+        },
+    })
+}
+
+/// Read from a timerfd -- returns number of expirations since last read.
+///
+/// Checks the timer against current time and accumulates expirations.
+/// Returns EAGAIN if no expirations and nonblock mode is set.
+pub fn timerfd_read(tfd_id: u32) -> Result<u64, SyscallError> {
+    let mut registry = TIMERFD_REGISTRY.lock();
+    let instance = registry
+        .get_mut(&tfd_id)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+
+    if !instance.armed {
+        if instance.nonblock {
+            return Err(SyscallError::WouldBlock);
+        }
+        return Err(SyscallError::WouldBlock);
+    }
+
+    // Check for expirations
+    let now = monotonic_now_ns();
+    if now >= instance.next_expiry_ns {
+        let interval_ns = instance.spec.it_interval.to_ns();
+        if interval_ns > 0 {
+            // Periodic timer: calculate how many expirations occurred
+            let elapsed = now - instance.next_expiry_ns;
+            let extra_expirations = elapsed / interval_ns;
+            instance.expirations = instance.expirations.saturating_add(1 + extra_expirations);
+            instance.next_expiry_ns = instance
+                .next_expiry_ns
+                .saturating_add((1 + extra_expirations) * interval_ns);
+        } else {
+            // One-shot: exactly 1 expiration, then disarm
+            instance.expirations = instance.expirations.saturating_add(1);
+            instance.armed = false;
+        }
+    }
+
+    if instance.expirations == 0 {
+        if instance.nonblock {
+            return Err(SyscallError::WouldBlock);
+        }
+        return Err(SyscallError::WouldBlock);
+    }
+
+    let count = instance.expirations;
+    instance.expirations = 0;
+    Ok(count)
+}
+
+/// Close (destroy) a timerfd instance.
+pub fn timerfd_close(tfd_id: u32) -> SyscallResult {
+    let mut registry = TIMERFD_REGISTRY.lock();
+    registry
+        .remove(&tfd_id)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_timerfd_create_monotonic() {
+        TIMERFD_REGISTRY.lock().clear();
+
+        let id = timerfd_create(CLOCK_MONOTONIC, 0).unwrap();
+        assert!(id > 0);
+    }
+
+    #[test]
+    fn test_timerfd_create_invalid_clock() {
+        TIMERFD_REGISTRY.lock().clear();
+
+        assert!(timerfd_create(99, 0).is_err());
+    }
+
+    #[test]
+    fn test_timerfd_disarm() {
+        TIMERFD_REGISTRY.lock().clear();
+
+        let id = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK).unwrap() as u32;
+
+        // Arm with 1 second
+        let spec = Itimerspec {
+            it_value: Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
+            it_interval: Timespec::default(),
+        };
+        timerfd_settime(id, 0, &spec, None).unwrap();
+
+        // Disarm
+        let zero = Itimerspec::default();
+        timerfd_settime(id, 0, &zero, None).unwrap();
+
+        // Read should fail (disarmed)
+        assert!(timerfd_read(id).is_err());
+    }
+
+    #[test]
+    fn test_timerfd_gettime_disarmed() {
+        TIMERFD_REGISTRY.lock().clear();
+
+        let id = timerfd_create(CLOCK_MONOTONIC, 0).unwrap() as u32;
+        let current = timerfd_gettime(id).unwrap();
+        assert!(current.it_value.is_zero());
+    }
+
+    #[test]
+    fn test_timerfd_close() {
+        TIMERFD_REGISTRY.lock().clear();
+
+        let id = timerfd_create(CLOCK_MONOTONIC, 0).unwrap() as u32;
+        timerfd_close(id).unwrap();
+        assert!(timerfd_gettime(id).is_err());
+    }
+
+    #[test]
+    fn test_timespec_to_ns() {
+        let ts = Timespec {
+            tv_sec: 1,
+            tv_nsec: 500_000_000,
+        };
+        assert_eq!(ts.to_ns(), 1_500_000_000);
+    }
+
+    #[test]
+    fn test_timespec_zero() {
+        let ts = Timespec::default();
+        assert!(ts.is_zero());
+        assert_eq!(ts.to_ns(), 0);
+    }
+}

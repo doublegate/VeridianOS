@@ -477,6 +477,18 @@ pub enum Syscall {
     AudioStart = 325,
     AudioStop = 326,
     AudioPause = 327,
+
+    // Event/timer notification fds (KDE/Wayland infrastructure)
+    Getrandom = 330,
+    EventfdCreate = 331,
+    EventfdRead = 332,
+    EventfdWrite = 333,
+    TimerfdCreate = 334,
+    TimerfdSettime = 335,
+    TimerfdGettime = 336,
+    SignalfdCreate = 337,
+    SendMsg = 338,
+    RecvMsg = 339,
 }
 
 /// System call result type
@@ -1065,7 +1077,343 @@ fn handle_syscall(
             Ok(0)
         }
 
+        // getrandom(buf, buflen, flags) -> bytes_written
+        Syscall::Getrandom => sys_getrandom(arg1, arg2, arg3),
+
+        // eventfd syscalls
+        Syscall::EventfdCreate => crate::fs::eventfd::eventfd_create(arg1 as u32, arg2 as u32),
+        Syscall::EventfdRead => {
+            let efd_id = arg1 as u32;
+            let buf_ptr = arg2;
+            validate_user_buffer(buf_ptr, 8)?;
+            let val = crate::fs::eventfd::eventfd_read(efd_id)?;
+            // SAFETY: buf_ptr validated by validate_user_buffer above.
+            unsafe {
+                *(buf_ptr as *mut u64) = val;
+            }
+            Ok(8)
+        }
+        Syscall::EventfdWrite => {
+            let efd_id = arg1 as u32;
+            let buf_ptr = arg2;
+            validate_user_buffer(buf_ptr, 8)?;
+            // SAFETY: buf_ptr validated by validate_user_buffer above.
+            let val = unsafe { *(buf_ptr as *const u64) };
+            crate::fs::eventfd::eventfd_write(efd_id, val)
+        }
+
+        // timerfd syscalls
+        Syscall::TimerfdCreate => crate::fs::timerfd::timerfd_create(arg1 as u32, arg2 as u32),
+        Syscall::TimerfdSettime => {
+            let tfd_id = arg1 as u32;
+            let flags = arg2 as u32;
+            let new_ptr = arg3;
+            let old_ptr = arg4;
+            validate_user_ptr_typed::<crate::fs::timerfd::Itimerspec>(new_ptr)?;
+            // SAFETY: new_ptr validated above.
+            let new_spec = unsafe { &*(new_ptr as *const crate::fs::timerfd::Itimerspec) };
+            let old_spec = if old_ptr != 0 {
+                validate_user_ptr_typed::<crate::fs::timerfd::Itimerspec>(old_ptr)?;
+                // SAFETY: old_ptr validated above.
+                Some(unsafe { &mut *(old_ptr as *mut crate::fs::timerfd::Itimerspec) })
+            } else {
+                None
+            };
+            crate::fs::timerfd::timerfd_settime(tfd_id, flags, new_spec, old_spec)
+        }
+        Syscall::TimerfdGettime => {
+            let tfd_id = arg1 as u32;
+            let curr_ptr = arg2;
+            validate_user_ptr_typed::<crate::fs::timerfd::Itimerspec>(curr_ptr)?;
+            let spec = crate::fs::timerfd::timerfd_gettime(tfd_id)?;
+            // SAFETY: curr_ptr validated above.
+            unsafe {
+                *(curr_ptr as *mut crate::fs::timerfd::Itimerspec) = spec;
+            }
+            Ok(0)
+        }
+
+        // signalfd syscall
+        Syscall::SignalfdCreate => {
+            crate::fs::signalfd::signalfd_create(arg1 as i32, arg2 as u64, arg3 as u32)
+        }
+
+        // sendmsg/recvmsg -- delegate to unix socket module for SCM_RIGHTS
+        Syscall::SendMsg => sys_sendmsg(arg1, arg2, arg3),
+        Syscall::RecvMsg => sys_recvmsg(arg1, arg2, arg3),
+
         _ => Err(SyscallError::InvalidSyscall),
+    }
+}
+
+/// getrandom syscall -- fills user buffer with cryptographically secure random
+/// bytes.
+///
+/// # Arguments
+/// - `buf_ptr`: User-space buffer to fill.
+/// - `buflen`: Number of bytes to generate.
+/// - `flags`: 0 for blocking (always succeeds), GRND_NONBLOCK (1) for
+///   non-blocking.
+fn sys_getrandom(buf_ptr: usize, buflen: usize, _flags: usize) -> SyscallResult {
+    if buflen == 0 {
+        return Ok(0);
+    }
+    // Cap at 256 bytes per call to avoid holding the RNG lock too long
+    let len = buflen.min(256);
+    validate_user_buffer(buf_ptr, len)?;
+
+    let rng = crate::crypto::random::get_random();
+    // SAFETY: buf_ptr validated by validate_user_buffer above.
+    let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, len) };
+    rng.fill_bytes(buf).map_err(|_| SyscallError::IoError)?;
+    Ok(len)
+}
+
+/// sendmsg syscall -- sends data with optional ancillary data (SCM_RIGHTS).
+///
+/// arg1=socket_fd, arg2=msghdr_ptr, arg3=flags.
+///
+/// The msghdr struct layout (matching C struct msghdr):
+///   - msg_name (ptr), msg_namelen (u32)
+///   - msg_iov (ptr to iovec array), msg_iovlen (i32)
+///   - msg_control (ptr to cmsghdr), msg_controllen (u32)
+///   - msg_flags (i32)
+///
+/// For SCM_RIGHTS: msg_control points to a cmsghdr with cmsg_level=SOL_SOCKET,
+/// cmsg_type=SCM_RIGHTS, followed by an array of i32 file descriptors.
+fn sys_sendmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallResult {
+    // Validate msghdr pointer (7 fields, ~56 bytes on 64-bit)
+    validate_user_buffer(msghdr_ptr, 56)?;
+
+    // SAFETY: msghdr_ptr validated above.
+    let (iov_ptr, iov_len, control_ptr, control_len) = unsafe {
+        let base = msghdr_ptr as *const usize;
+        // msg_name = offset 0, msg_namelen = offset 1
+        // msg_iov = offset 2, msg_iovlen = offset 3
+        let iov_ptr = *base.add(2);
+        let iov_len = *base.add(3);
+        // msg_control = offset 4, msg_controllen = offset 5
+        let control_ptr = *base.add(4);
+        let control_len = *base.add(5);
+        (iov_ptr, iov_len, control_ptr, control_len)
+    };
+
+    // Gather data from iovec array
+    let mut data = alloc::vec::Vec::new();
+    if iov_len > 0 && iov_ptr != 0 {
+        let iov_byte_len = iov_len * core::mem::size_of::<[usize; 2]>();
+        validate_user_buffer(iov_ptr, iov_byte_len)?;
+        for i in 0..iov_len {
+            // SAFETY: iov_ptr validated above, each iovec is (base, len).
+            let (base, len) = unsafe {
+                let entry = (iov_ptr as *const usize).add(i * 2);
+                (*entry, *entry.add(1))
+            };
+            if len > 0 && base != 0 {
+                validate_user_buffer(base, len)?;
+                // SAFETY: base validated above.
+                let slice = unsafe { core::slice::from_raw_parts(base as *const u8, len) };
+                data.extend_from_slice(slice);
+            }
+        }
+    }
+
+    // Parse ancillary data for SCM_RIGHTS
+    let rights = if control_len >= 16 && control_ptr != 0 {
+        validate_user_buffer(control_ptr, control_len)?;
+        parse_scm_rights(control_ptr, control_len)
+    } else {
+        None
+    };
+
+    // Send via Unix socket with optional SCM_RIGHTS
+    if is_inet_socket(socket_fd) {
+        // INET sockets don't support SCM_RIGHTS -- just send data
+        let id = inet_socket_id(socket_fd);
+        crate::net::socket::with_socket_mut(id, |s| s.send(&data, 0))
+            .map_err(|_| SyscallError::InvalidState)?
+            .map_err(|e| match e {
+                crate::error::KernelError::WouldBlock => SyscallError::WouldBlock,
+                _ => SyscallError::InvalidState,
+            })
+    } else {
+        crate::net::unix_socket::socket_send(socket_fd as u64, &data, rights)
+            .map_err(|_| SyscallError::InvalidState)
+    }
+}
+
+/// Parse SCM_RIGHTS from a control message buffer.
+///
+/// Looks for a cmsghdr with cmsg_level=SOL_SOCKET(1), cmsg_type=SCM_RIGHTS(1),
+/// and extracts the file descriptor array.
+fn parse_scm_rights(
+    control_ptr: usize,
+    control_len: usize,
+) -> Option<crate::net::unix_socket::ScmRights> {
+    const SOL_SOCKET: i32 = 1;
+    const SCM_RIGHTS: i32 = 1;
+    const CMSGHDR_SIZE: usize = 16; // cmsg_len(4) + cmsg_level(4) + cmsg_type(4) + padding
+
+    if control_len < CMSGHDR_SIZE {
+        return None;
+    }
+
+    // SAFETY: control_ptr was validated by caller.
+    let (cmsg_len, cmsg_level, cmsg_type) = unsafe {
+        let base = control_ptr as *const u32;
+        (*base as usize, *base.add(1) as i32, *base.add(2) as i32)
+    };
+
+    if cmsg_level != SOL_SOCKET || cmsg_type != SCM_RIGHTS {
+        return None;
+    }
+
+    // FDs start after the cmsghdr (at CMSGHDR_SIZE offset)
+    let fd_bytes = cmsg_len.saturating_sub(CMSGHDR_SIZE);
+    let fd_count = fd_bytes / 4; // Each fd is an i32 (4 bytes)
+    if fd_count == 0 || fd_count > 16 {
+        return None;
+    }
+
+    let mut fds = alloc::vec::Vec::with_capacity(fd_count);
+    // SAFETY: control_ptr + CMSGHDR_SIZE is within the validated buffer.
+    for i in 0..fd_count {
+        let fd = unsafe { *((control_ptr + CMSGHDR_SIZE) as *const i32).add(i) };
+        if fd >= 0 {
+            fds.push(fd as u32);
+        }
+    }
+
+    if fds.is_empty() {
+        None
+    } else {
+        Some(crate::net::unix_socket::ScmRights { fds })
+    }
+}
+
+/// recvmsg syscall -- receives data with optional ancillary data (SCM_RIGHTS).
+///
+/// arg1=socket_fd, arg2=msghdr_ptr, arg3=flags.
+///
+/// On return, if SCM_RIGHTS fds were received, they are written into the
+/// msg_control buffer as a cmsghdr.
+fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallResult {
+    validate_user_buffer(msghdr_ptr, 56)?;
+
+    // SAFETY: msghdr_ptr validated above.
+    let (iov_ptr, iov_len, control_ptr, control_len) = unsafe {
+        let base = msghdr_ptr as *const usize;
+        let iov_ptr = *base.add(2);
+        let iov_len = *base.add(3);
+        let control_ptr = *base.add(4);
+        let control_len = *base.add(5);
+        (iov_ptr, iov_len, control_ptr, control_len)
+    };
+
+    // Calculate total receive buffer size from iovec
+    let mut total_buf_len: usize = 0;
+    if iov_len > 0 && iov_ptr != 0 {
+        let iov_byte_len = iov_len * core::mem::size_of::<[usize; 2]>();
+        validate_user_buffer(iov_ptr, iov_byte_len)?;
+        for i in 0..iov_len {
+            // SAFETY: iov_ptr validated above.
+            let len = unsafe { *((iov_ptr as *const usize).add(i * 2 + 1)) };
+            total_buf_len = total_buf_len.saturating_add(len);
+        }
+    }
+
+    // Allocate a temporary kernel buffer to receive into
+    let mut recv_buf = alloc::vec![0u8; total_buf_len.min(65536)];
+
+    // Receive from socket
+    let (received, rights) = if is_inet_socket(socket_fd) {
+        let id = inet_socket_id(socket_fd);
+        let received = crate::net::socket::with_socket_mut(id, |s| s.recv(&mut recv_buf, 0))
+            .map_err(|_| SyscallError::InvalidState)?
+            .map_err(|e| match e {
+                crate::error::KernelError::WouldBlock => SyscallError::WouldBlock,
+                _ => SyscallError::InvalidState,
+            })?;
+        (received, None)
+    } else {
+        crate::net::unix_socket::socket_recv(socket_fd as u64, &mut recv_buf).map_err(
+            |e| match e {
+                crate::error::KernelError::WouldBlock => SyscallError::WouldBlock,
+                _ => SyscallError::InvalidState,
+            },
+        )?
+    };
+
+    // Scatter received data into iovec buffers
+    let mut offset = 0usize;
+    if iov_len > 0 && iov_ptr != 0 {
+        for i in 0..iov_len {
+            if offset >= received {
+                break;
+            }
+            // SAFETY: iov_ptr validated above.
+            let (base, len) = unsafe {
+                let entry = (iov_ptr as *const usize).add(i * 2);
+                (*entry, *entry.add(1))
+            };
+            if len > 0 && base != 0 {
+                let copy_len = (received - offset).min(len);
+                validate_user_buffer(base, copy_len)?;
+                // SAFETY: base validated above.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        recv_buf[offset..].as_ptr(),
+                        base as *mut u8,
+                        copy_len,
+                    );
+                }
+                offset += copy_len;
+            }
+        }
+    }
+
+    // Write SCM_RIGHTS into msg_control if fds were received
+    if let Some(scm) = rights {
+        if !scm.fds.is_empty() && control_ptr != 0 && control_len >= 16 {
+            write_scm_rights(control_ptr, control_len, &scm.fds, msghdr_ptr);
+        }
+    }
+
+    Ok(received)
+}
+
+/// Write SCM_RIGHTS fds into the user-space msg_control buffer as a cmsghdr.
+fn write_scm_rights(control_ptr: usize, control_len: usize, fds: &[u32], msghdr_ptr: usize) {
+    const SOL_SOCKET: u32 = 1;
+    const SCM_RIGHTS: u32 = 1;
+    const CMSGHDR_SIZE: usize = 16;
+
+    let needed = CMSGHDR_SIZE + fds.len() * 4;
+    if needed > control_len {
+        return;
+    }
+
+    // SAFETY: control_ptr was validated by caller via validate_user_buffer.
+    unsafe {
+        let base = control_ptr as *mut u32;
+        // cmsg_len
+        *base = needed as u32;
+        // cmsg_level = SOL_SOCKET
+        *base.add(1) = SOL_SOCKET;
+        // cmsg_type = SCM_RIGHTS
+        *base.add(2) = SCM_RIGHTS;
+        // Write fd array
+        let fd_base = (control_ptr + CMSGHDR_SIZE) as *mut i32;
+        for (i, &fd) in fds.iter().enumerate() {
+            *fd_base.add(i) = fd as i32;
+        }
+    }
+
+    // Update msg_controllen in the msghdr to reflect actual data written
+    // SAFETY: msghdr_ptr was validated by caller.
+    unsafe {
+        let controllen_ptr = (msghdr_ptr as *mut usize).add(5);
+        *controllen_ptr = needed;
     }
 }
 
@@ -1764,6 +2112,18 @@ impl TryFrom<usize> for Syscall {
             325 => Ok(Syscall::AudioStart),
             326 => Ok(Syscall::AudioStop),
             327 => Ok(Syscall::AudioPause),
+
+            // Event/timer notification fds (KDE/Wayland infrastructure)
+            330 => Ok(Syscall::Getrandom),
+            331 => Ok(Syscall::EventfdCreate),
+            332 => Ok(Syscall::EventfdRead),
+            333 => Ok(Syscall::EventfdWrite),
+            334 => Ok(Syscall::TimerfdCreate),
+            335 => Ok(Syscall::TimerfdSettime),
+            336 => Ok(Syscall::TimerfdGettime),
+            337 => Ok(Syscall::SignalfdCreate),
+            338 => Ok(Syscall::SendMsg),
+            339 => Ok(Syscall::RecvMsg),
 
             _ => Err(()),
         }
