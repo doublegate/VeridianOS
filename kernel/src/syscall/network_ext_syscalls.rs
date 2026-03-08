@@ -185,7 +185,10 @@ fn parse_sockaddr(
 }
 
 /// Write a SocketAddr as sockaddr_in to user space.
-fn write_sockaddr(addr_ptr: usize, addr: &crate::net::SocketAddr) -> Result<(), SyscallError> {
+pub(super) fn write_sockaddr(
+    addr_ptr: usize,
+    addr: &crate::net::SocketAddr,
+) -> Result<(), SyscallError> {
     let bytes = match &addr.ip {
         crate::net::IpAddress::V4(v4) => v4.0,
         _ => [0, 0, 0, 0],

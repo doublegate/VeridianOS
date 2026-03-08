@@ -882,11 +882,15 @@ fn handle_syscall(
         Syscall::SocketBind => sys_socket_bind(arg1, arg2, arg3),
         Syscall::SocketListen => sys_socket_listen(arg1, arg2),
         Syscall::SocketConnect => sys_socket_connect(arg1, arg2, arg3),
-        Syscall::SocketAccept => sys_socket_accept(arg1),
+        // Linux ABI: accept4(fd, addr, addrlen_ptr, flags)
+        // accept (Linux 43) also maps here via remap patch.
+        Syscall::SocketAccept => sys_socket_accept(arg1, arg2, arg3),
         Syscall::SocketSend => sys_socket_send(arg1, arg2, arg3),
         Syscall::SocketRecv => sys_socket_recv(arg1, arg2, arg3),
         Syscall::SocketClose => sys_socket_close(arg1),
-        Syscall::SocketPair => sys_socket_pair(arg1, arg2),
+        // Linux ABI: socketpair(domain, type, protocol, sv[2])
+        // arg1=domain, arg2=type, arg3=protocol, arg4=sv pointer
+        Syscall::SocketPair => sys_socket_pair(arg1, arg2, arg4),
 
         // Graphics / framebuffer (Phase 6)
         Syscall::FbGetInfo => sys_fb_get_info(arg1),
@@ -2786,14 +2790,18 @@ fn sys_socket_connect(socket_id: usize, addr_ptr: usize, _addr_len: usize) -> Sy
 
 /// SYS_SOCKET_ACCEPT: Accept a pending connection.
 ///
+/// Linux ABI: `accept4(fd, addr, addrlen_ptr, flags)`.
+/// `addr_ptr` and `addrlen_ptr` are optional (may be 0). When non-null, the
+/// peer address is written back in sockaddr_in format.
+///
 /// Returns the new connected socket ID.
-fn sys_socket_accept(socket_id: usize) -> SyscallResult {
+fn sys_socket_accept(socket_id: usize, addr_ptr: usize, addrlen_ptr: usize) -> SyscallResult {
     if is_inet_socket(socket_id) {
         let id = inet_socket_id(socket_id);
         let result = crate::net::socket::with_socket(id, |s| s.accept())
             .map_err(|_| SyscallError::InvalidState)?;
         match result {
-            Ok((new_sock, _remote)) => {
+            Ok((new_sock, remote)) => {
                 // Register the accepted socket in the socket table
                 let new_id = crate::net::socket::create_socket(
                     new_sock.domain,
@@ -2801,6 +2809,19 @@ fn sys_socket_accept(socket_id: usize) -> SyscallResult {
                     new_sock.protocol,
                 )
                 .map_err(|_| SyscallError::OutOfMemory)?;
+
+                // Write peer address back if requested
+                if addr_ptr != 0 && addrlen_ptr != 0 {
+                    let _ = network_ext_syscalls::write_sockaddr(addr_ptr, &remote);
+                    // Write actual addrlen (16 for sockaddr_in)
+                    if validate_user_buffer(addrlen_ptr, 4).is_ok() {
+                        // SAFETY: addrlen_ptr validated above.
+                        unsafe {
+                            *(addrlen_ptr as *mut u32) = 16;
+                        }
+                    }
+                }
+
                 Ok(new_id | INET_SOCKET_FLAG)
             }
             Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
@@ -2881,11 +2902,12 @@ fn sys_socket_close(socket_id: usize) -> SyscallResult {
 /// # Arguments
 /// - domain: AF_UNIX only
 /// - result_ptr: user-space pointer to write two u64 socket IDs
-fn sys_socket_pair(domain: usize, result_ptr: usize) -> SyscallResult {
+fn sys_socket_pair(domain: usize, _sock_type: usize, result_ptr: usize) -> SyscallResult {
     if domain != AF_UNIX {
         return Err(SyscallError::InvalidArgument);
     }
-    validate_user_ptr_typed::<[u64; 2]>(result_ptr)?;
+    // Linux writes int sv[2] (two i32 values = 8 bytes).
+    validate_user_buffer(result_ptr, 2 * core::mem::size_of::<i32>())?;
 
     let pid = crate::process::current_process()
         .map(|p| p.pid.0)
@@ -2895,11 +2917,12 @@ fn sys_socket_pair(domain: usize, result_ptr: usize) -> SyscallResult {
         crate::net::unix_socket::socketpair(crate::net::unix_socket::UnixSocketType::Stream, pid)
             .map_err(|_| SyscallError::OutOfMemory)?;
 
-    // SAFETY: result_ptr validated above as aligned and in user-space.
+    // SAFETY: result_ptr validated above as non-null and in user-space.
+    // Write as i32 to match Linux ABI (int sv[2]).
     unsafe {
-        let ptr = result_ptr as *mut u64;
-        *ptr = id_a;
-        *ptr.add(1) = id_b;
+        let ptr = result_ptr as *mut i32;
+        *ptr = id_a as i32;
+        *ptr.add(1) = id_b as i32;
     }
     Ok(0)
 }
