@@ -493,6 +493,8 @@ pub enum Syscall {
     Symlinkat = 349,
     Readlinkat = 350,
     MemfdCreate = 351,
+    SetTidAddress = 352,
+    SetRobustList = 353,
 
     // Event/timer notification fds (KDE/Wayland infrastructure)
     Getrandom = 330,
@@ -988,10 +990,27 @@ fn handle_syscall(
         Syscall::Fcntl => filesystem::sys_fcntl(arg1, arg2, arg3),
         Syscall::Clone => thread_clone::sys_thread_clone(arg1, arg2, arg3, arg4, arg5),
         Syscall::Futex => {
-            // arg1=op (0=WAIT, 1=WAKE), arg2=addr, arg3=val, arg4=timeout/aux, arg5=op2
-            match arg1 {
-                0 => futex::sys_futex_wait(arg2, arg3 as u32, arg4, arg5, arg1).map(|v| v as usize),
-                1 => futex::sys_futex_wake(arg2, arg3, arg4).map(|v| v as usize),
+            // Linux ABI: futex(uaddr, op, val, timeout/val2, uaddr2, val3)
+            // arg1=uaddr, arg2=op, arg3=val, arg4=timeout/val2, arg5=uaddr2
+            // arg6 (val3) not available (5-arg handler), default to 0.
+            // Mask off FUTEX_PRIVATE_FLAG (bit 7 = 128) -- VeridianOS is
+            // single-address-space per process, so private == shared.
+            let cmd = (arg2 as u32) & 0x7F;
+            match cmd {
+                // FUTEX_WAIT: wait if *uaddr == val
+                0 => futex::sys_futex_wait(arg1, arg3 as u32, arg4, 0, arg2).map(|v| v as usize),
+                // FUTEX_WAKE: wake up to val waiters
+                1 => futex::sys_futex_wake(arg1, arg3, 0).map(|v| v as usize),
+                // FUTEX_REQUEUE: wake val waiters, requeue rest to uaddr2
+                3 => futex::sys_futex_requeue(arg1, arg3, arg5, 0).map(|v| v as usize),
+                // FUTEX_WAKE_OP: atomic op on uaddr2, then conditional wake
+                5 => futex::sys_futex_wake_op(arg1, arg3, arg5, 0, arg2).map(|v| v as usize),
+                // FUTEX_WAIT_BITSET: wait with bitset mask.
+                // Linux passes bitset as arg6 (val3), which is not available
+                // in our 5-arg handler. We pass arg5 (uaddr2) as aux, which
+                // sys_futex_wait interprets as the bitset for op==9. For musl
+                // this is acceptable since it primarily uses FUTEX_WAIT/WAKE.
+                9 => futex::sys_futex_wait(arg1, arg3 as u32, arg4, arg5, arg2).map(|v| v as usize),
                 _ => Err(SyscallError::InvalidArgument),
             }
         }
@@ -1176,6 +1195,8 @@ fn handle_syscall(
         Syscall::Symlinkat => sys_symlinkat(arg1, arg2, arg3),
         Syscall::Readlinkat => sys_readlinkat(arg1, arg2, arg3, arg4),
         Syscall::MemfdCreate => sys_memfd_create(arg1, arg2),
+        Syscall::SetTidAddress => sys_set_tid_address(arg1),
+        Syscall::SetRobustList => sys_set_robust_list(arg1, arg2),
 
         _ => Err(SyscallError::InvalidSyscall),
     }
@@ -1481,6 +1502,63 @@ fn sys_memfd_create(_name_ptr: usize, _flags: usize) -> SyscallResult {
     // that can be mmap'd. In a full implementation this would use a
     // dedicated memfd subsystem with sealing support.
     crate::fs::eventfd::eventfd_create(0, crate::fs::eventfd::EFD_NONBLOCK)
+}
+
+/// set_tid_address syscall -- register the calling thread's clear_child_tid
+/// pointer.
+///
+/// musl calls this during `__libc_start_main()` to register a pointer that
+/// the kernel will zero and futex-wake when the thread exits. This is how
+/// `pthread_join()` works: the joining thread does `futex_wait(tid_ptr)`,
+/// and when the target thread exits, the kernel clears `*tid_ptr` and
+/// issues `FUTEX_WAKE` to unblock the joiner.
+///
+/// # Arguments
+/// - `tidptr`: User-space address where the kernel will write 0 on thread exit,
+///   then futex-wake any waiters.
+///
+/// # Returns
+/// The calling thread's TID.
+fn sys_set_tid_address(tidptr: usize) -> SyscallResult {
+    let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+
+    // Store the clear_child_tid address on the current thread.
+    // On thread exit, the kernel should: *tidptr = 0; futex_wake(tidptr, 1).
+    // For now we record it but the exit-time clearing is not yet wired.
+    if tidptr != 0 {
+        validate_user_pointer(tidptr, 4)?;
+    }
+    proc.set_clear_child_tid(tidptr);
+
+    // Return the caller's TID
+    Ok(proc.pid.0 as usize)
+}
+
+/// set_robust_list syscall -- register robust futex list head for cleanup on
+/// abnormal thread termination.
+///
+/// musl calls this during thread initialization. If a thread holding a
+/// robust futex dies, the kernel walks the list and marks the futexes as
+/// owner-died (FUTEX_OWNER_DIED) so waiting threads can recover.
+///
+/// # Arguments
+/// - `head_ptr`: Pointer to `struct robust_list_head` in user space.
+/// - `len`: Size of the structure (must match kernel expectation).
+///
+/// # Returns
+/// 0 on success.
+fn sys_set_robust_list(head_ptr: usize, len: usize) -> SyscallResult {
+    // Expected size: 3 * sizeof(void*) = 24 bytes on 64-bit
+    if len != 24 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if head_ptr != 0 {
+        validate_user_pointer(head_ptr, len)?;
+    }
+
+    let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    proc.set_robust_list(head_ptr);
+    Ok(0)
 }
 
 /// sendmsg syscall -- sends data with optional ancillary data (SCM_RIGHTS).
@@ -2452,6 +2530,8 @@ impl TryFrom<usize> for Syscall {
             349 => Ok(Syscall::Symlinkat),
             350 => Ok(Syscall::Readlinkat),
             351 => Ok(Syscall::MemfdCreate),
+            352 => Ok(Syscall::SetTidAddress),
+            353 => Ok(Syscall::SetRobustList),
 
             _ => Err(()),
         }

@@ -235,6 +235,8 @@ extern "C" {
 #define SYS_SYMLINKAT           349
 #define SYS_READLINKAT          350
 #define SYS_MEMFD_CREATE        351
+#define SYS_SET_TID_ADDRESS     352
+#define SYS_SET_ROBUST_LIST     353
 
 /* AT_* constants for *at() syscalls */
 #define AT_FDCWD                (-100)
