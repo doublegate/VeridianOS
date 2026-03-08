@@ -927,6 +927,36 @@ impl Shell {
     }
 
     fn execute_external_command(&self, command: &str, args: &[String]) -> CommandResult {
+        // If command is an absolute or relative path, try it directly first
+        if command.starts_with('/') || command.starts_with("./") || command.starts_with("../") {
+            if let Ok(_node) = crate::fs::get_vfs().read().resolve_path(command) {
+                crate::println!("[SHELL] Found executable: {}", command);
+                match crate::userspace::load_user_program(
+                    command,
+                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    &self
+                        .get_all_env()
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>(),
+                ) {
+                    Ok(pid) => {
+                        crate::println!("[SHELL] Process {} created, about to run", pid.0);
+                        let exit_code = run_user_process_from_shell(pid);
+                        crate::println!("[SHELL] Process {} exited with code {}", pid.0, exit_code);
+                        return CommandResult::Success(exit_code);
+                    }
+                    Err(e) => {
+                        return CommandResult::Error(format!(
+                            "Failed to execute {}: {}",
+                            command, e
+                        ));
+                    }
+                }
+            }
+            return CommandResult::NotFound;
+        }
+
         // Try to find the command in PATH
         let path_env = self.get_env("PATH").unwrap_or_default();
         let paths: Vec<&str> = path_env.split(':').collect();
@@ -1286,7 +1316,7 @@ fn run_user_process_from_shell(pid: crate::process::ProcessId) -> i32 {
             return 1;
         }
 
-        // Get entry point and user stack from the process's first thread
+        // Get entry point, user stack, and thread ID from the process's first thread
         let threads = process.threads.lock();
         let thread = match threads.values().next() {
             Some(t) => t,
@@ -1297,6 +1327,8 @@ fn run_user_process_from_shell(pid: crate::process::ProcessId) -> i32 {
                 return 1;
             }
         };
+
+        let tid = thread.tid;
 
         let (entry_point, user_stack_ptr) = {
             use crate::arch::context::ThreadContext;
@@ -1316,6 +1348,11 @@ fn run_user_process_from_shell(pid: crate::process::ProcessId) -> i32 {
             entry_point,
             user_stack_ptr
         );
+
+        // Register as the current process so that current_process() /
+        // current_thread() return the correct values during syscalls
+        // (required for arch_prctl, brk, mmap, etc.).
+        crate::process::set_boot_current(pid, tid);
 
         // User CS and SS selectors (Ring 3)
         let user_cs: u64 = 0x33; // GDT index 6, RPL 3
@@ -1343,13 +1380,48 @@ fn run_user_process_from_shell(pid: crate::process::ProcessId) -> i32 {
             );
         }
 
+        // Clear boot current tracking after user process exits
+        crate::process::clear_boot_current();
+
         crate::println!("[SHELL] Returned from Ring 3");
 
-        // When we return here, the process has exited. Get the exit code.
-        match get_process(pid) {
-            Some(p) => p.get_exit_code(),
-            None => 0, // Process was cleaned up, assume successful exit
+        // Free the process's page table hierarchy frames. Deferred from
+        // cleanup_process() because the process's CR3 was still active
+        // at that point. Now that boot CR3 is restored, it is safe.
+        let current_pt_root = if let Some(proc) = get_process(pid) {
+            proc.memory_space.lock().get_page_table()
+        } else {
+            0
+        };
+
+        // Free post-exec page table if exec changed it
+        if current_pt_root != 0 && current_pt_root != pt_root {
+            crate::mm::vas::free_user_page_table_frames(current_pt_root);
         }
+        // Free the original page table
+        if pt_root != 0 {
+            crate::mm::vas::free_user_page_table_frames(pt_root);
+        }
+        // Clear so no double-free
+        if let Some(proc) = get_process(pid) {
+            proc.memory_space.lock().set_page_table(0);
+        }
+
+        // Get exit code and reap zombie
+        let exit_code = match get_process(pid) {
+            Some(p) => p.get_exit_code(),
+            None => 0,
+        };
+        if let Some(proc) = get_process(pid) {
+            let state = proc.get_state();
+            if state == crate::process::ProcessState::Zombie
+                || state == crate::process::ProcessState::Dead
+            {
+                crate::process::table::remove_process(pid);
+            }
+        }
+
+        exit_code
     }
 
     #[cfg(not(target_arch = "x86_64"))]

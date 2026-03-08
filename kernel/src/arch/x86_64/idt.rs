@@ -61,6 +61,15 @@ extern "x86-interrupt" fn double_fault_handler(
         raw_serial_str(b" rsp=0x");
         let rsp = stack_frame.stack_pointer.as_u64();
         raw_serial_hex(rsp);
+        // Read CR2 (faulting address from the page fault that triggered DF)
+        let cr2: u64;
+        core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack));
+        raw_serial_str(b" cr2=0x");
+        raw_serial_hex(cr2);
+        // Read CS from the stack frame to determine privilege level
+        let cs = stack_frame.code_segment.0;
+        raw_serial_str(b" cs=0x");
+        raw_serial_hex(cs as u64);
         raw_serial_str(b"\n");
     }
 

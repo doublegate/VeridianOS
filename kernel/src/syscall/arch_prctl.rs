@@ -48,6 +48,27 @@ pub fn sys_arch_prctl(code: usize, addr: usize) -> Result<isize, SyscallError> {
     match code {
         ARCH_SET_FS => {
             ctx.set_tls_base(addr as u64);
+
+            // Also write the MSR immediately so the FS base is active when
+            // we return to user mode. iretq does not restore FS_BASE, so
+            // without this write, %fs:-relative TLS accesses would fault.
+            #[cfg(target_arch = "x86_64")]
+            {
+                let lo = addr as u32;
+                let hi = (addr >> 32) as u32;
+                // SAFETY: Writing IA32_FS_BASE (0xC0000100) is a privileged
+                // operation executed in ring 0. `addr` is the TLS base
+                // provided by the user process via arch_prctl.
+                unsafe {
+                    core::arch::asm!(
+                        "wrmsr",
+                        in("ecx") 0xC000_0100u32,
+                        in("eax") lo,
+                        in("edx") hi,
+                    );
+                }
+            }
+
             Ok(0)
         }
         ARCH_GET_FS => {

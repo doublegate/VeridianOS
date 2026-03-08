@@ -183,16 +183,15 @@ impl crate::arch::context::ThreadContext for X86_64Context {
         Self::default()
     }
 
-    fn init(&mut self, entry_point: usize, stack_pointer: usize, kernel_stack: usize) {
+    fn init(&mut self, entry_point: usize, stack_pointer: usize, _kernel_stack: usize) {
         self.rip = entry_point as u64;
         self.rsp = stack_pointer as u64;
-        // Store kernel stack for TSS RSP0 updates during context switch.
-        // When switching to this task, RSP0 in the TSS is updated so that
-        // Ring 3 -> Ring 0 transitions (interrupts, syscalls) land on this
-        // task's kernel stack.
-        if kernel_stack != 0 {
-            crate::arch::x86_64::gdt::set_kernel_stack(kernel_stack as u64);
-        }
+        // NOTE: TSS RSP0 is NOT updated here. The scheduler updates TSS RSP0
+        // during context switch (scheduler.rs). Setting it here is wrong for
+        // non-scheduled threads (e.g., inline-executed user programs from the
+        // shell) because the kernel stack virtual address may not be mapped
+        // in the process's page tables, causing a Double Fault when hardware
+        // interrupts fire in user mode.
     }
 
     fn get_instruction_pointer(&self) -> usize {
