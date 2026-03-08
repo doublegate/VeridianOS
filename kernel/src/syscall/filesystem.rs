@@ -932,22 +932,35 @@ pub fn sys_fsync(fd: usize) -> SyscallResult {
 /// Layout matches the C `struct stat` in `veridian/stat.h` exactly.
 /// All fields use fixed-size types matching the C typedefs in
 /// `veridian/types.h`.
+/// Linux x86_64 `struct stat` layout (144 bytes).
+///
+/// Field order and padding MUST match the kernel ABI that musl expects.
+/// Key difference from naive layout: nlink comes before mode, and there
+/// is a 4-byte pad after gid, plus nanosecond fields and trailing padding.
 #[repr(C)]
 struct FileStat {
-    st_dev: u64,     // dev_t
-    st_ino: u64,     // ino_t
-    st_mode: u32,    // mode_t
-    st_nlink: u64,   // nlink_t
-    st_uid: u32,     // uid_t
-    st_gid: u32,     // gid_t
-    st_rdev: u64,    // dev_t
-    st_size: i64,    // off_t
-    st_blksize: i64, // blksize_t
-    st_blocks: i64,  // blkcnt_t
-    st_atime: i64,   // time_t
-    st_mtime: i64,   // time_t
-    st_ctime: i64,   // time_t
+    st_dev: u64,        // offset 0
+    st_ino: u64,        // offset 8
+    st_nlink: u64,      // offset 16 (note: before st_mode in Linux ABI)
+    st_mode: u32,       // offset 24
+    st_uid: u32,        // offset 28
+    st_gid: u32,        // offset 32
+    __pad0: u32,        // offset 36
+    st_rdev: u64,       // offset 40
+    st_size: i64,       // offset 48
+    st_blksize: i64,    // offset 56
+    st_blocks: i64,     // offset 64
+    st_atime: i64,      // offset 72
+    st_atime_nsec: i64, // offset 80
+    st_mtime: i64,      // offset 88
+    st_mtime_nsec: i64, // offset 96
+    st_ctime: i64,      // offset 104
+    st_ctime_nsec: i64, // offset 112
+    __unused: [i64; 3], // offset 120 (padding to 144 bytes)
 }
+
+// Compile-time assertion: Linux x86_64 struct stat is exactly 144 bytes.
+const _: () = assert!(core::mem::size_of::<FileStat>() == 144);
 
 /// Helper: populate a FileStat from VFS metadata.
 fn fill_stat(metadata: &crate::fs::Metadata) -> FileStat {
@@ -964,17 +977,22 @@ fn fill_stat(metadata: &crate::fs::Metadata) -> FileStat {
     FileStat {
         st_dev: 1,
         st_ino: metadata.inode,
-        st_mode: mode,
         st_nlink: 1,
+        st_mode: mode,
         st_uid: metadata.uid,
         st_gid: metadata.gid,
+        __pad0: 0,
         st_rdev: 0,
         st_size: size,
         st_blksize: 4096,
         st_blocks: (size + 511) / 512,
         st_atime: metadata.accessed as i64,
+        st_atime_nsec: 0,
         st_mtime: metadata.modified as i64,
+        st_mtime_nsec: 0,
         st_ctime: metadata.created as i64,
+        st_ctime_nsec: 0,
+        __unused: [0; 3],
     }
 }
 
