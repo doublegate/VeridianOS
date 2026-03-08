@@ -495,6 +495,7 @@ pub enum Syscall {
     MemfdCreate = 351,
     SetTidAddress = 352,
     SetRobustList = 353,
+    ClockNanosleep = 354,
 
     // Event/timer notification fds (KDE/Wayland infrastructure)
     Getrandom = 330,
@@ -906,7 +907,7 @@ fn handle_syscall(
 
         // Network extensions (Phase 6)
         Syscall::NetSendTo => sys_net_sendto(arg1, arg2, arg3, arg4, arg5),
-        Syscall::NetRecvFrom => sys_net_recvfrom(arg1, arg2, arg3, arg4),
+        Syscall::NetRecvFrom => sys_net_recvfrom(arg1, arg2, arg3, arg4, arg5),
         Syscall::NetGetSockName => sys_net_getsockname(arg1, arg2, arg3),
         Syscall::NetGetPeerName => sys_net_getpeername(arg1, arg2, arg3),
         Syscall::NetSetSockOpt => sys_net_setsockopt(arg1, arg2, arg3, arg4, arg5),
@@ -1197,6 +1198,7 @@ fn handle_syscall(
         Syscall::MemfdCreate => sys_memfd_create(arg1, arg2),
         Syscall::SetTidAddress => sys_set_tid_address(arg1),
         Syscall::SetRobustList => sys_set_robust_list(arg1, arg2),
+        Syscall::ClockNanosleep => sys_clock_nanosleep(arg1, arg2, arg3, arg4),
 
         _ => Err(SyscallError::InvalidSyscall),
     }
@@ -1569,6 +1571,25 @@ fn sys_set_robust_list(head_ptr: usize, len: usize) -> SyscallResult {
     let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
     proc.set_robust_list(head_ptr);
     Ok(0)
+}
+
+/// clock_nanosleep syscall -- sleep with clock selection.
+///
+/// Linux ABI: `clock_nanosleep(clockid, flags, request, remain)`
+/// musl maps Linux 230 -> VeridianOS 354.
+///
+/// We ignore clockid (always use monotonic) and flags (TIMER_ABSTIME not
+/// supported), delegating to the existing nanosleep implementation.
+fn sys_clock_nanosleep(
+    _clockid: usize,
+    _flags: usize,
+    req_ptr: usize,
+    rem_ptr: usize,
+) -> SyscallResult {
+    // Delegate to nanosleep -- ignores clockid and flags for now.
+    // TIMER_ABSTIME (flags=1) would require reading the clock and computing
+    // relative sleep, but for MVP this is acceptable.
+    time::sys_nanosleep(req_ptr, rem_ptr)
 }
 
 /// sendmsg syscall -- sends data with optional ancillary data (SCM_RIGHTS).
@@ -2542,6 +2563,7 @@ impl TryFrom<usize> for Syscall {
             351 => Ok(Syscall::MemfdCreate),
             352 => Ok(Syscall::SetTidAddress),
             353 => Ok(Syscall::SetRobustList),
+            354 => Ok(Syscall::ClockNanosleep),
 
             _ => Err(()),
         }

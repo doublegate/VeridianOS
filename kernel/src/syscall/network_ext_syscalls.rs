@@ -7,21 +7,31 @@ use super::{SyscallError, SyscallResult};
 
 /// Send data to a specific address (UDP-style).
 ///
+/// Linux ABI: `sendto(fd, buf, len, flags, dest_addr, addrlen)`
+/// musl maps Linux 44 -> VeridianOS 250.
+///
 /// # Arguments
 /// - `fd`: Socket file descriptor.
 /// - `buf_ptr`: User-space data buffer.
 /// - `buf_len`: Data length.
-/// - `addr_ptr`: User-space sockaddr pointer.
-/// - `addr_len`: Address structure length.
+/// - `_flags`: Send flags (MSG_DONTWAIT, etc.) -- currently ignored.
+/// - `addr_ptr`: User-space sockaddr pointer (arg5 in Linux ABI).
 pub(super) fn sys_net_sendto(
     fd: usize,
     buf_ptr: usize,
     buf_len: usize,
+    _flags: usize,
     addr_ptr: usize,
-    addr_len: usize,
 ) -> SyscallResult {
     super::validate_user_buffer(buf_ptr, buf_len)?;
-    if addr_ptr != 0 {
+    // addr_len (Linux arg6) is not available due to 5-arg handler limit.
+    // Infer from sa_family: AF_INET=16, AF_INET6=28, AF_UNIX=110. Default 128.
+    let addr_len = if addr_ptr != 0 {
+        infer_sockaddr_len(addr_ptr)
+    } else {
+        0
+    };
+    if addr_ptr != 0 && addr_len > 0 {
         super::validate_user_buffer(addr_ptr, addr_len)?;
     }
 
@@ -40,15 +50,20 @@ pub(super) fn sys_net_sendto(
 
 /// Receive data with sender address.
 ///
+/// Linux ABI: `recvfrom(fd, buf, len, flags, src_addr, addrlen_ptr)`
+/// musl maps Linux 45 -> VeridianOS 251.
+///
 /// # Arguments
 /// - `fd`: Socket file descriptor.
 /// - `buf_ptr`: User-space receive buffer.
 /// - `buf_len`: Buffer capacity.
+/// - `_flags`: Receive flags (MSG_DONTWAIT, etc.) -- currently ignored.
 /// - `addr_ptr`: User-space sockaddr buffer (may be 0).
 pub(super) fn sys_net_recvfrom(
     fd: usize,
     buf_ptr: usize,
     buf_len: usize,
+    _flags: usize,
     addr_ptr: usize,
 ) -> SyscallResult {
     super::validate_user_buffer(buf_ptr, buf_len)?;
@@ -128,6 +143,19 @@ pub(super) fn sys_net_getsockopt(
     }
     crate::net::socket::getsockopt(fd, level as i32, optname as i32, optval_ptr)
         .map_err(|_| SyscallError::InvalidArgument)
+}
+
+/// Infer sockaddr length from sa_family when the actual length is unavailable
+/// (e.g., sendto where arg6 is lost due to 5-arg handler limit).
+fn infer_sockaddr_len(addr_ptr: usize) -> usize {
+    // SAFETY: addr_ptr was checked non-null by the caller; read only 2 bytes.
+    let family = unsafe { *(addr_ptr as *const u16) };
+    match family {
+        2 => 16,  // AF_INET: sizeof(sockaddr_in)
+        10 => 28, // AF_INET6: sizeof(sockaddr_in6)
+        1 => 110, // AF_UNIX: sizeof(sockaddr_un)
+        _ => 128, // Conservative default
+    }
 }
 
 /// Parse a sockaddr_in from user space.
