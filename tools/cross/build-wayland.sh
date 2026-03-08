@@ -17,13 +17,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 BUILD_DIR="${PROJECT_ROOT}/target/cross-build/wayland"
-SYSROOT="${VERIDIAN_SYSROOT:-/opt/veridian-sysroot}"
-MESON_CROSS="${SCRIPT_DIR}/meson-cross-veridian.txt"
+SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
 JOBS="${JOBS:-$(nproc)}"
+CC="${SYSROOT}/bin/x86_64-veridian-musl-gcc"
 
-WAYLAND_VER="1.22.0"
+WAYLAND_VER="1.23.1"
 WAYLAND_URL="https://gitlab.freedesktop.org/wayland/wayland/-/releases/${WAYLAND_VER}/downloads/wayland-${WAYLAND_VER}.tar.xz"
-PROTOCOLS_VER="1.33"
+# If system wayland-scanner version doesn't match, we build our own from this source
+PROTOCOLS_VER="1.38"
 PROTOCOLS_URL="https://gitlab.freedesktop.org/wayland/wayland-protocols/-/releases/${PROTOCOLS_VER}/downloads/wayland-protocols-${PROTOCOLS_VER}.tar.xz"
 
 log() { echo "[build-wayland] $*"; }
@@ -42,6 +43,34 @@ fetch() {
         log "Extracting ${name}..."
         tar -xf "${tarball}" -C "${BUILD_DIR}"
     fi
+}
+
+# ── Generate meson cross file ─────────────────────────────────────────
+generate_meson_cross() {
+    local cross_file="${BUILD_DIR}/meson-cross.txt"
+    cat > "${cross_file}" << CROSSEOF
+[binaries]
+c = '${CC}'
+ar = 'ar'
+strip = 'strip'
+pkgconfig = 'pkg-config'
+
+[built-in options]
+c_args = ['-fPIC']
+c_link_args = []
+
+[properties]
+sys_root = '${SYSROOT}'
+pkg_config_libdir = '${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig'
+needs_exe_wrapper = true
+
+[host_machine]
+system = 'linux'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+CROSSEOF
+    echo "${cross_file}"
 }
 
 # ── 1. Build wayland-scanner (HOST native) ───────────────────────────
@@ -81,6 +110,8 @@ build_wayland_libs() {
     local src="${BUILD_DIR}/wayland-${WAYLAND_VER}"
     local bld="${BUILD_DIR}/cross-build"
     local scanner="${BUILD_DIR}/host-build/install/bin/wayland-scanner"
+    local cross_file
+    cross_file="$(generate_meson_cross)"
 
     if [[ ! -x "${scanner}" ]]; then
         # Fall back to system scanner
@@ -90,12 +121,36 @@ build_wayland_libs() {
         fi
     fi
 
+    export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
+    export PKG_CONFIG_SYSROOT_DIR="${SYSROOT}"
+
+    # Point build-machine pkg-config to our host-built scanner so meson
+    # finds the matching wayland-scanner version
+    local host_pkgconfig="${BUILD_DIR}/host-build/install/lib/pkgconfig"
+    if [[ -d "${host_pkgconfig}" ]]; then
+        export PKG_CONFIG_PATH_FOR_BUILD="${host_pkgconfig}"
+    fi
+
+    # Apply patches if present (e.g., relax scanner version check)
+    local patch_dir="${SCRIPT_DIR}/wayland-patches"
+    if [[ -d "${patch_dir}" ]]; then
+        local marker="${src}/.veridian_patched"
+        if [[ ! -f "${marker}" ]]; then
+            for patch in "${patch_dir}"/*.patch; do
+                [[ -f "$patch" ]] || continue
+                log "Applying $(basename "$patch")..."
+                (cd "${src}" && patch -p1 < "$patch" 2>/dev/null || true)
+            done
+            touch "${marker}"
+        fi
+    fi
+
     log "Cross-compiling Wayland libraries..."
     rm -rf "${bld}"
     mkdir -p "${bld}"
     (cd "${bld}" && \
         meson setup "${src}" \
-            --cross-file="${MESON_CROSS}" \
+            --cross-file="${cross_file}" \
             --prefix="${SYSROOT}/usr" \
             --default-library=static \
             -Dscanner=false \
@@ -139,7 +194,9 @@ verify() {
     local errors=0
     for lib in libwayland-client.a libwayland-server.a libwayland-cursor.a; do
         if [[ -f "${SYSROOT}/usr/lib/${lib}" ]]; then
-            log "  OK: ${lib}"
+            local size
+            size=$(stat -c%s "${SYSROOT}/usr/lib/${lib}" 2>/dev/null || echo "?")
+            log "  OK: ${lib} (${size} bytes)"
         else
             log "  MISSING: ${lib}"
             errors=$((errors + 1))
@@ -166,10 +223,17 @@ verify() {
 # ── Main ──────────────────────────────────────────────────────────────
 main() {
     log "=== Building Wayland for VeridianOS ==="
+    log "Sysroot: ${SYSROOT}"
+
+    [[ -f "${SYSROOT}/usr/lib/libc.a" ]] || die "musl libc not found. Run build-musl.sh first."
+    [[ -f "${SYSROOT}/usr/lib/libffi.a" ]] || die "libffi not found. Run build-deps.sh first."
+    [[ -f "${SYSROOT}/usr/lib/libexpat.a" ]] || die "expat not found. Run build-deps.sh first."
+
     build_scanner
     build_wayland_libs
     install_protocols
     verify
+
     log "=== Wayland build complete ==="
 }
 
