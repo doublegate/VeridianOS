@@ -79,7 +79,7 @@ COMMON_CONFIGURE=(
 )
 
 export CC
-export CFLAGS="-O2"
+export CFLAGS="-O2 -fPIC"
 export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
 export PKG_CONFIG_SYSROOT_DIR="${SYSROOT}"
 
