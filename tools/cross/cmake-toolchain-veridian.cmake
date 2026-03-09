@@ -6,6 +6,11 @@
 set(CMAKE_SYSTEM_NAME Linux)
 set(CMAKE_SYSTEM_PROCESSOR x86_64)
 
+# Force cross-compilation. Both host and target are Linux x86_64, so cmake
+# does not auto-detect this as a cross build. We override it because we use
+# a different libc (musl), sysroot, and toolchain.
+set(CMAKE_CROSSCOMPILING ON CACHE BOOL "Cross-compiling to VeridianOS" FORCE)
+
 # Sysroot -- populated by build-musl.sh and subsequent dependency builds
 set(VERIDIAN_SYSROOT "$ENV{VERIDIAN_SYSROOT}")
 if(NOT VERIDIAN_SYSROOT)
@@ -41,3 +46,9 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 # PKG_CONFIG_SYSROOT_DIR (it would double-prefix the paths)
 set(ENV{PKG_CONFIG_PATH} "${VERIDIAN_SYSROOT}/usr/lib/pkgconfig:${VERIDIAN_SYSROOT}/usr/share/pkgconfig")
 set(ENV{PKG_CONFIG_SYSROOT_DIR} "")
+
+# Static linking: add system libraries that static Mesa/Qt depend on.
+# These get appended after all other libs, resolving symbols from the
+# fat Mesa archives (which need expat, z, dl, m, pthread).
+set(CMAKE_EXE_LINKER_FLAGS_INIT "-Wl,--allow-multiple-definition")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--start-group -lGLESv2 -lEGL -lgbm -ldrm -lglapi -lwayland-client -lwayland-server -lwayland-egl -lwayland-cursor -lffi -ludev -lexpat -lz -lm -ldl -lpthread -Wl,--end-group" CACHE STRING "Extra link libs for static" FORCE)

@@ -16,6 +16,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -23,6 +24,13 @@
 /* ========================================================================= */
 /* Internal structures                                                       */
 /* ========================================================================= */
+
+/* Concrete definition for the opaque UdevMonitor handle from udev-veridian.h.
+ * The daemon side creates these; the libudev shim accesses pipeFd for poll. */
+struct UdevMonitor {
+    int pipeFd[2];          /* pipe for event notification */
+    char filter[UDEV_MAX_NAME]; /* subsystem filter */
+};
 
 struct udev {
     int refcount;
@@ -331,6 +339,41 @@ int udev_enumerate_add_match_subsystem(struct udev_enumerate *udev_enumerate,
         return -EINVAL;
 
     strncpy(udev_enumerate->subsystem, subsystem, UDEV_MAX_NAME - 1);
+    return 0;
+}
+
+int udev_enumerate_add_match_property(struct udev_enumerate *udev_enumerate,
+                                       const char *property,
+                                       const char *value)
+{
+    if (!udev_enumerate)
+        return -EINVAL;
+
+    /* VeridianOS stub: property matching not implemented, accept all */
+    (void)property;
+    (void)value;
+    return 0;
+}
+
+int udev_enumerate_add_match_sysattr(struct udev_enumerate *udev_enumerate,
+                                      const char *sysattr,
+                                      const char *value)
+{
+    if (!udev_enumerate)
+        return -EINVAL;
+
+    /* VeridianOS stub: sysattr matching not implemented, accept all */
+    (void)sysattr;
+    (void)value;
+    return 0;
+}
+
+int udev_enumerate_add_match_is_initialized(struct udev_enumerate *udev_enumerate)
+{
+    if (!udev_enumerate)
+        return -EINVAL;
+
+    /* VeridianOS stub: all devices considered initialized */
     return 0;
 }
 

@@ -10,9 +10,10 @@
 [binaries]
 # The musl-gcc wrapper handles sysroot flags internally
 c = '@SYSROOT@/bin/x86_64-veridian-musl-gcc'
+cpp = '@SYSROOT@/bin/x86_64-veridian-musl-g++'
 ar = 'ar'
 strip = 'strip'
-pkgconfig = 'pkg-config'
+pkg-config = 'pkg-config'
 
 [built-in options]
 c_args = []

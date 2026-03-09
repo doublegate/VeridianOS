@@ -66,3 +66,101 @@ int _dl_find_object(void *address, struct dl_find_object *result) {
 /* __dso_handle - required for C++ static destructors in shared libraries.
  * GCC's crtbeginS.o normally provides this, but our nostdlib linking skips it. */
 void *__dso_handle __attribute__((visibility("hidden"))) = &__dso_handle;
+
+/* glibc FORTIFY_SOURCE functions - forward to standard versions */
+#include <string.h>
+#include <wchar.h>
+
+void *__memcpy_chk(void *dest, const void *src, size_t len, size_t destlen) {
+    return memcpy(dest, src, len);
+}
+
+void *__memmove_chk(void *dest, const void *src, size_t len, size_t destlen) {
+    return memmove(dest, src, len);
+}
+
+void *__memset_chk(void *s, int c, size_t n, size_t slen) {
+    return memset(s, c, n);
+}
+
+char *__strcpy_chk(char *dest, const char *src, size_t destlen) {
+    return strcpy(dest, src);
+}
+
+char *__strcat_chk(char *dest, const char *src, size_t destlen) {
+    return strcat(dest, src);
+}
+
+char *__stpcpy_chk(char *dest, const char *src, size_t destlen) {
+    return stpcpy(dest, src);
+}
+
+int __snprintf_chk(char *s, size_t maxlen, int flag, size_t slen,
+                   const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int ret = vsnprintf(s, maxlen, fmt, ap);
+    va_end(ap);
+    return ret;
+}
+
+size_t __mbsrtowcs_chk(wchar_t *dest, const char **src, size_t len,
+                        mbstate_t *ps, size_t destlen) {
+    return mbsrtowcs(dest, src, len, ps);
+}
+
+wchar_t *__wmemcpy_chk(wchar_t *dest, const wchar_t *src, size_t n,
+                        size_t destlen) {
+    return wmemcpy(dest, src, n);
+}
+
+wchar_t *__wmemmove_chk(wchar_t *dest, const wchar_t *src, size_t n,
+                         size_t destlen) {
+    return wmemmove(dest, src, n);
+}
+
+wchar_t *__wmemset_chk(wchar_t *dest, wchar_t c, size_t n, size_t destlen) {
+    return wmemset(dest, c, n);
+}
+
+wchar_t *__wcscpy_chk(wchar_t *dest, const wchar_t *src, size_t destlen) {
+    return wcscpy(dest, src);
+}
+
+wchar_t *__wcscat_chk(wchar_t *dest, const wchar_t *src, size_t destlen) {
+    return wcscat(dest, src);
+}
+
+size_t __wcrtomb_chk(char *s, wchar_t wc, mbstate_t *ps, size_t buflen) {
+    return wcrtomb(s, wc, ps);
+}
+
+size_t __mbrtowc(wchar_t *pwc, const char *s, size_t n, mbstate_t *ps) {
+    return mbrtowc(pwc, s, n, ps);
+}
+
+int __swprintf_chk(wchar_t *s, size_t maxlen, int flag, size_t slen,
+                   const wchar_t *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int ret = vswprintf(s, maxlen, fmt, ap);
+    va_end(ap);
+    return ret;
+}
+
+/* fseeko64/ftello64 - musl's fseeko/ftello are already 64-bit on 64-bit systems */
+int fseeko64(FILE *stream, long long offset, int whence) {
+    return fseeko(stream, (off_t)offset, whence);
+}
+
+long long ftello64(FILE *stream) {
+    return (long long)ftello(stream);
+}
+
+/* __cxa_thread_atexit_impl - thread-local destructor registration.
+ * musl provides __cxa_thread_atexit but GCC's libstdc++ references _impl. */
+int __cxa_thread_atexit_impl(void (*func)(void *), void *obj, void *dso_handle) {
+    /* Forward to musl's __cxa_thread_atexit */
+    extern int __cxa_thread_atexit(void (*)(void *), void *, void *);
+    return __cxa_thread_atexit(func, obj, dso_handle);
+}

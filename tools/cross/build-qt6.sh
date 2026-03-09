@@ -41,12 +41,13 @@ fetch() {
     fi
 }
 
-# ── 1. Build host Qt tools (moc, rcc, uic, etc.) ─────────────────────
-# Qt cross-compilation requires native tools to generate code.
+# ── 1. Build host Qt (full, with GUI/Widgets/DBus) ───────────────────
+# Qt cross-compilation requires native tools (moc, rcc, uic) and full
+# host Qt libraries for building submodule host tools (qsb, qmlcachegen).
 build_host_qt() {
     local host_prefix="${BUILD_DIR}/host-qt"
-    if [[ -f "${host_prefix}/bin/moc" ]]; then
-        log "Host Qt tools: already built."
+    if [[ -f "${host_prefix}/libexec/moc" ]]; then
+        log "Host Qt: already built."
         return 0
     fi
     fetch "qtbase-everywhere-src-${QT_VER}" \
@@ -55,7 +56,7 @@ build_host_qt() {
 
     local src="${BUILD_DIR}/qtbase-everywhere-src-${QT_VER}"
     local bld="${BUILD_DIR}/host-qt-build"
-    log "Building host Qt tools (moc, rcc, uic)..."
+    log "Building host Qt (full)..."
     rm -rf "${bld}"
     mkdir -p "${bld}"
     (cd "${bld}" && \
@@ -64,13 +65,12 @@ build_host_qt() {
             -release \
             -nomake examples \
             -nomake tests \
-            -no-gui \
-            -no-widgets \
             -dbus-linked \
-            -no-opengl && \
+            -gui \
+            -widgets && \
         cmake --build . --parallel "${JOBS}" && \
         cmake --install .)
-    log "Host Qt tools: done."
+    log "Host Qt: done."
 }
 
 # ── 2. Install VeridianOS QPA plugin into Qt source tree ──────────────
@@ -153,19 +153,20 @@ build_qt_cross() {
             -xplatform linux-g++ \
             -opengl es2 \
             -egl \
-            -no-openssl \
-            -no-feature-sql \
+            -openssl-linked \
+            -feature-sql \
+            -sql-sqlite \
             -no-feature-testlib \
-            -no-feature-network \
             -no-feature-system-doubleconversion \
             -no-zstd \
             -no-feature-system-libb2 \
             -no-feature-textmarkdownreader \
             -no-feature-textmarkdownwriter \
-            -no-feature-accessibility-atspi-bridge \
+            -feature-accessibility-atspi-bridge \
             -no-feature-mtdev \
             -no-feature-tslib \
-            -no-feature-libinput \
+            -feature-libinput \
+            -no-feature-brotli \
             -system-zlib \
             -system-freetype \
             -system-harfbuzz \
@@ -178,7 +179,7 @@ build_qt_cross() {
             -nomake tests \
             -- \
             -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
-            -DCMAKE_IGNORE_PREFIX_PATH="/home/linuxbrew/.linuxbrew" && \
+            -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" && \
         cmake --build . --parallel "${JOBS}" && \
         cmake --install .)
     log "Qt 6 cross-build: done."
@@ -264,19 +265,188 @@ build_qt_wayland() {
             -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
             -DCMAKE_PREFIX_PATH="${SYSROOT}/usr" \
             -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
-            -DQT_HOST_PATH="${host_prefix}" \
+            -DQT_HOST_PATH:PATH="${host_prefix}" \
+            -DQT_HOST_PATH_CMAKE_DIR:PATH="${host_prefix}/lib/cmake" \
             -DBUILD_SHARED_LIBS=OFF \
-            -DCMAKE_IGNORE_PREFIX_PATH="/home/linuxbrew/.linuxbrew" && \
+            -DBUILD_TESTING=OFF \
+            -DQT_BUILD_EXAMPLES=OFF \
+            -DQT_FORCE_BUILD_TOOLS=OFF \
+            -DQT_FEATURE_wayland_server=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" && \
         cmake --build . --parallel "${JOBS}" && \
         cmake --install .)
     log "QtWayland: done."
+}
+
+# ── 5. Build QtShaderTools ────────────────────────────────────────────
+# Required by QtQuick for runtime shader compilation.
+build_qt_shadertools() {
+    if [[ -f "${SYSROOT}/usr/lib/libQt6ShaderTools.a" ]]; then
+        log "QtShaderTools: already installed."
+        return 0
+    fi
+    fetch "qtshadertools-everywhere-src-${QT_VER}" \
+        "${QT_BASE_URL}/qtshadertools-everywhere-src-${QT_VER}.tar.xz" \
+        "qtshadertools-everywhere-src-${QT_VER}"
+
+    local src="${BUILD_DIR}/qtshadertools-everywhere-src-${QT_VER}"
+    local bld="${BUILD_DIR}/qtshadertools-build"
+    local host_prefix="${BUILD_DIR}/host-qt"
+
+    # First build qsb tool for host (code generator)
+    if [[ ! -f "${host_prefix}/bin/qsb" ]] && \
+       [[ ! -f "${host_prefix}/libexec/qsb" ]]; then
+        log "Building host QtShaderTools (qsb tool)..."
+        local host_bld="${BUILD_DIR}/host-qtshadertools-build"
+        rm -rf "${host_bld}"
+        mkdir -p "${host_bld}"
+        (cd "${host_bld}" && \
+            cmake "${src}" \
+                -DCMAKE_PREFIX_PATH="${host_prefix}" \
+                -DCMAKE_INSTALL_PREFIX="${host_prefix}" \
+                -DBUILD_SHARED_LIBS=ON \
+                -DBUILD_TESTING=OFF \
+                -DQT_BUILD_TESTS=OFF && \
+            cmake --build . --parallel "${JOBS}" && \
+            cmake --install .)
+        log "Host QtShaderTools: done."
+    fi
+
+    log "Building QtShaderTools ${QT_VER}..."
+    rm -rf "${bld}"
+    mkdir -p "${bld}"
+
+    export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
+    export PKG_CONFIG_SYSROOT_DIR=""
+
+    (cd "${bld}" && \
+        cmake "${src}" \
+            -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
+            -DCMAKE_PREFIX_PATH="${SYSROOT}/usr" \
+            -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
+            -DQT_HOST_PATH:PATH="${host_prefix}" \
+            -DQT_HOST_PATH_CMAKE_DIR:PATH="${host_prefix}/lib/cmake" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_TESTING=OFF \
+            -DQT_BUILD_EXAMPLES=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" && \
+        cmake --build . --parallel "${JOBS}" && \
+        cmake --install .)
+    log "QtShaderTools: done."
+}
+
+# ── 6. Build QtDeclarative (QML + Quick) ─────────────────────────────
+# Provides QtQml and QtQuick, required by KDE Plasma shell.
+build_qt_declarative() {
+    if [[ -f "${SYSROOT}/usr/lib/libQt6Qml.a" ]]; then
+        log "QtDeclarative: already installed."
+        return 0
+    fi
+    fetch "qtdeclarative-everywhere-src-${QT_VER}" \
+        "${QT_BASE_URL}/qtdeclarative-everywhere-src-${QT_VER}.tar.xz" \
+        "qtdeclarative-everywhere-src-${QT_VER}"
+
+    local src="${BUILD_DIR}/qtdeclarative-everywhere-src-${QT_VER}"
+    local bld="${BUILD_DIR}/qtdeclarative-build"
+    local host_prefix="${BUILD_DIR}/host-qt"
+
+    # Build host QML tools (qmlcachegen, qmltyperegistrar, etc.)
+    if [[ ! -f "${host_prefix}/bin/qmlcachegen" ]] && \
+       [[ ! -f "${host_prefix}/libexec/qmlcachegen" ]]; then
+        log "Building host QtDeclarative tools..."
+        local host_bld="${BUILD_DIR}/host-qtdeclarative-build"
+        rm -rf "${host_bld}"
+        mkdir -p "${host_bld}"
+        (cd "${host_bld}" && \
+            cmake "${src}" \
+                -DCMAKE_PREFIX_PATH="${host_prefix}" \
+                -DCMAKE_INSTALL_PREFIX="${host_prefix}" \
+                -DBUILD_SHARED_LIBS=ON \
+                -DBUILD_TESTING=OFF \
+                -DQT_BUILD_TESTS=OFF \
+                -DQT_BUILD_EXAMPLES=OFF && \
+            cmake --build . --parallel "${JOBS}" && \
+            cmake --install .)
+        log "Host QtDeclarative tools: done."
+    fi
+
+    log "Building QtDeclarative ${QT_VER}..."
+    rm -rf "${bld}"
+    mkdir -p "${bld}"
+
+    export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
+    export PKG_CONFIG_SYSROOT_DIR=""
+
+    (cd "${bld}" && \
+        cmake "${src}" \
+            -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
+            -DCMAKE_PREFIX_PATH="${SYSROOT}/usr" \
+            -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
+            -DQT_HOST_PATH:PATH="${host_prefix}" \
+            -DQT_HOST_PATH_CMAKE_DIR:PATH="${host_prefix}/lib/cmake" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_TESTING=OFF \
+            -DQT_BUILD_EXAMPLES=OFF \
+            -DQT_FORCE_BUILD_TOOLS=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" && \
+        cmake --build . --parallel "${JOBS}" -- -k || true && \
+        cmake --install . 2>/dev/null || true)
+    # Tool binaries (qml, qmlpreview, etc.) may fail to link when cross-
+    # compiling due to static Mesa link complexity. The libraries themselves
+    # build successfully and are installed. Host tools (from host-qt) are
+    # used for code generation instead.
+    if [[ ! -f "${SYSROOT}/usr/lib/libQt6Qml.a" ]]; then
+        die "QtDeclarative build failed: libQt6Qml.a not produced"
+    fi
+    log "QtDeclarative: done."
+}
+
+# ── 7. Build QtSvg ───────────────────────────────────────────────────
+# SVG support used by KDE icons and themes.
+build_qt_svg() {
+    if [[ -f "${SYSROOT}/usr/lib/libQt6Svg.a" ]]; then
+        log "QtSvg: already installed."
+        return 0
+    fi
+    fetch "qtsvg-everywhere-src-${QT_VER}" \
+        "${QT_BASE_URL}/qtsvg-everywhere-src-${QT_VER}.tar.xz" \
+        "qtsvg-everywhere-src-${QT_VER}"
+
+    local src="${BUILD_DIR}/qtsvg-everywhere-src-${QT_VER}"
+    local bld="${BUILD_DIR}/qtsvg-build"
+    local host_prefix="${BUILD_DIR}/host-qt"
+    log "Building QtSvg ${QT_VER}..."
+    rm -rf "${bld}"
+    mkdir -p "${bld}"
+
+    export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
+    export PKG_CONFIG_SYSROOT_DIR=""
+
+    (cd "${bld}" && \
+        cmake "${src}" \
+            -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
+            -DCMAKE_PREFIX_PATH="${SYSROOT}/usr" \
+            -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
+            -DQT_HOST_PATH:PATH="${host_prefix}" \
+            -DQT_HOST_PATH_CMAKE_DIR:PATH="${host_prefix}/lib/cmake" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_TESTING=OFF \
+            -DQT_BUILD_EXAMPLES=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" && \
+        cmake --build . --parallel "${JOBS}" && \
+        cmake --install .)
+    log "QtSvg: done."
 }
 
 # ── Verify ────────────────────────────────────────────────────────────
 verify() {
     log "Verifying Qt 6 installation..."
     local errors=0
-    for lib in libQt6Core.a libQt6Gui.a libQt6Widgets.a libQt6DBus.a libQt6WaylandClient.a; do
+    for lib in libQt6Core.a libQt6Gui.a libQt6Widgets.a libQt6DBus.a libQt6WaylandClient.a libQt6Qml.a libQt6Quick.a libQt6ShaderTools.a libQt6Svg.a; do
         if [[ -f "${SYSROOT}/usr/lib/${lib}" ]]; then
             local size
             size=$(stat -c%s "${SYSROOT}/usr/lib/${lib}" 2>/dev/null || echo "?")
@@ -314,6 +484,9 @@ main() {
     build_host_qt
     install_qpa_plugin
     build_qt_cross
+    build_qt_shadertools
+    build_qt_declarative
+    build_qt_svg
     build_host_qt_wayland
     build_qt_wayland
     verify

@@ -66,7 +66,6 @@ build_dbus() {
             --disable-selinux \
             --disable-apparmor \
             --disable-libaudit \
-            --disable-inotify \
             --disable-kqueue \
             --disable-xml-docs \
             --disable-doxygen-docs \
@@ -75,7 +74,7 @@ build_dbus() {
             --without-x \
             --with-xml=expat \
             --with-system-socket=/run/dbus/system_bus_socket \
-            --with-session-socket-dir=/tmp/dbus-session && \
+            --with-session-socket-dir="${DBUS_SESSION_SOCKET_DIR:-/run/dbus/session}" && \
         make -j"${JOBS}" && \
         make install)
     log "D-Bus: done."
@@ -92,7 +91,7 @@ create_dbus_config() {
  "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
 <busconfig>
   <type>session</type>
-  <listen>unix:tmpdir=/tmp/dbus-session</listen>
+  <listen>unix:tmpdir=/run/dbus/session</listen>
   <auth>EXTERNAL</auth>
   <policy context="default">
     <allow send_destination="*" eavesdrop="true"/>

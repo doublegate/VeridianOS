@@ -5,14 +5,14 @@
 # Integrates VeridianOS platform backend from userland/kwin/.
 #
 # Prerequisites:
-#   - Qt 6 + KF6 + Mesa + Wayland + libinput (or stub)
+#   - Qt 6 + KF6 + Mesa + Wayland + libinput (real, from build-deps.sh)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 BUILD_DIR="${PROJECT_ROOT}/target/cross-build/kwin"
-SYSROOT="${VERIDIAN_SYSROOT:-/opt/veridian-sysroot}"
+SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
 TOOLCHAIN="${SCRIPT_DIR}/cmake-toolchain-veridian.cmake"
 JOBS="${JOBS:-$(nproc)}"
 
@@ -39,152 +39,16 @@ fetch() {
     fi
 }
 
-# ── 1. Build libinput stub ────────────────────────────────────────────
-# MVP: Stub libinput that forwards VeridianOS kernel input events.
-# Real libinput can be added later.
-build_libinput_stub() {
-    if [[ -f "${SYSROOT}/usr/lib/libinput.a" ]]; then
-        log "libinput stub: already installed."
+# ── 1. Verify real libinput ───────────────────────────────────────────
+# Real libinput is now built by build-deps.sh (with libevdev).
+# This function just verifies it exists.
+verify_libinput() {
+    if [[ -f "${SYSROOT}/usr/lib/libinput.a" ]] && \
+       [[ -f "${SYSROOT}/usr/include/libinput.h" ]]; then
+        log "libinput: found in sysroot."
         return 0
     fi
-
-    local stub_dir="${SCRIPT_DIR}/libinput-stub"
-    local stub_src="${stub_dir}/libinput_stub.c"
-
-    # Create minimal libinput API stub if not present
-    if [[ ! -f "${stub_src}" ]]; then
-        log "Creating libinput API stub..."
-        mkdir -p "${stub_dir}"
-        cat > "${stub_src}" << 'STUB_C'
-/* Minimal libinput API stub for VeridianOS KWin
- *
- * Provides the libinput API surface that KWin needs to compile.
- * Input events are actually delivered through VeridianOS's kernel
- * input subsystem (PS/2 keyboard + VirtIO mouse), not through
- * libinput's evdev backend.
- */
-#include <stdlib.h>
-#include <stdint.h>
-
-/* Opaque types */
-struct libinput { int dummy; };
-struct libinput_device { int dummy; };
-struct libinput_event { int dummy; };
-struct libinput_seat { int dummy; };
-struct udev { int dummy; };
-
-enum libinput_event_type {
-    LIBINPUT_EVENT_NONE = 0,
-    LIBINPUT_EVENT_DEVICE_ADDED = 1,
-    LIBINPUT_EVENT_KEYBOARD_KEY = 300,
-    LIBINPUT_EVENT_POINTER_MOTION = 400,
-    LIBINPUT_EVENT_POINTER_BUTTON = 401,
-    LIBINPUT_EVENT_POINTER_AXIS = 402,
-};
-
-struct libinput *libinput_udev_create_context(
-    const void *interface, void *user_data, struct udev *udev) {
-    (void)interface; (void)user_data; (void)udev;
-    return calloc(1, sizeof(struct libinput));
-}
-
-int libinput_udev_assign_seat(struct libinput *li, const char *seat) {
-    (void)li; (void)seat;
-    return 0;
-}
-
-int libinput_get_fd(struct libinput *li) {
-    (void)li;
-    return -1; /* No real fd -- input comes from kernel */
-}
-
-int libinput_dispatch(struct libinput *li) {
-    (void)li;
-    return 0;
-}
-
-struct libinput_event *libinput_get_event(struct libinput *li) {
-    (void)li;
-    return NULL; /* No events from this stub */
-}
-
-enum libinput_event_type libinput_event_get_type(struct libinput_event *event) {
-    (void)event;
-    return LIBINPUT_EVENT_NONE;
-}
-
-void libinput_event_destroy(struct libinput_event *event) {
-    (void)event;
-}
-
-struct libinput *libinput_unref(struct libinput *li) {
-    free(li);
-    return NULL;
-}
-
-void libinput_suspend(struct libinput *li) { (void)li; }
-int libinput_resume(struct libinput *li) { (void)li; return 0; }
-STUB_C
-    fi
-
-    # Create header
-    local stub_hdr="${SYSROOT}/usr/include/libinput.h"
-    mkdir -p "$(dirname "${stub_hdr}")"
-    cat > "${stub_hdr}" << 'STUB_H'
-#ifndef LIBINPUT_H
-#define LIBINPUT_H
-#include <stdint.h>
-
-struct libinput;
-struct libinput_device;
-struct libinput_event;
-struct libinput_seat;
-struct udev;
-
-enum libinput_event_type {
-    LIBINPUT_EVENT_NONE = 0,
-    LIBINPUT_EVENT_DEVICE_ADDED = 1,
-    LIBINPUT_EVENT_KEYBOARD_KEY = 300,
-    LIBINPUT_EVENT_POINTER_MOTION = 400,
-    LIBINPUT_EVENT_POINTER_BUTTON = 401,
-    LIBINPUT_EVENT_POINTER_AXIS = 402,
-};
-
-struct libinput *libinput_udev_create_context(
-    const void *interface, void *user_data, struct udev *udev);
-int libinput_udev_assign_seat(struct libinput *li, const char *seat);
-int libinput_get_fd(struct libinput *li);
-int libinput_dispatch(struct libinput *li);
-struct libinput_event *libinput_get_event(struct libinput *li);
-enum libinput_event_type libinput_event_get_type(struct libinput_event *event);
-void libinput_event_destroy(struct libinput_event *event);
-struct libinput *libinput_unref(struct libinput *li);
-void libinput_suspend(struct libinput *li);
-int libinput_resume(struct libinput *li);
-
-#endif /* LIBINPUT_H */
-STUB_H
-
-    # Compile stub
-    local cc="${SYSROOT}/bin/x86_64-veridian-musl-gcc"
-    log "Compiling libinput stub..."
-    "${cc}" -c -O2 -o "${BUILD_DIR}/libinput_stub.o" "${stub_src}"
-    ar rcs "${SYSROOT}/usr/lib/libinput.a" "${BUILD_DIR}/libinput_stub.o"
-
-    # Create pkg-config file
-    mkdir -p "${SYSROOT}/usr/lib/pkgconfig"
-    cat > "${SYSROOT}/usr/lib/pkgconfig/libinput.pc" << PC
-prefix=${SYSROOT}/usr
-libdir=\${prefix}/lib
-includedir=\${prefix}/include
-
-Name: libinput
-Description: libinput stub for VeridianOS
-Version: 1.25.0
-Libs: -L\${libdir} -linput
-Cflags: -I\${includedir}
-PC
-    log "libinput stub: done."
+    die "libinput not found. Run build-deps.sh first (builds real libevdev + libinput)."
 }
 
 # ── 2. Build kdecoration ─────────────────────────────────────────────
@@ -246,10 +110,10 @@ build_kwin() {
             -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
             -DBUILD_SHARED_LIBS=OFF \
             -DBUILD_TESTING=OFF \
-            -DKWIN_BUILD_XWAYLAND=OFF \
-            -DKWIN_BUILD_SCREENLOCKER=OFF \
-            -DKWIN_BUILD_TABBOX=OFF \
-            -DKWIN_BUILD_KCMS=OFF \
+            -DKWIN_BUILD_XWAYLAND=ON \
+            -DKWIN_BUILD_SCREENLOCKER=ON \
+            -DKWIN_BUILD_TABBOX=ON \
+            -DKWIN_BUILD_KCMS=ON \
             -DCMAKE_BUILD_TYPE=Release && \
         cmake --build . --parallel "${JOBS}" && \
         cmake --install .)
@@ -262,6 +126,7 @@ verify() {
     local errors=0
     for item in \
         "${SYSROOT}/usr/lib/libinput.a" \
+        "${SYSROOT}/usr/lib/libevdev.a" \
         "${SYSROOT}/usr/include/libinput.h" \
     ; do
         if [[ -f "$item" ]]; then
@@ -287,7 +152,7 @@ verify() {
 # ── Main ──────────────────────────────────────────────────────────────
 main() {
     log "=== Building KWin for VeridianOS ==="
-    build_libinput_stub
+    verify_libinput
     build_kdecoration
     install_veridian_backend
     build_kwin

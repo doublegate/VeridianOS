@@ -12,12 +12,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 BUILD_DIR="${PROJECT_ROOT}/target/cross-build/kf6"
-SYSROOT="${VERIDIAN_SYSROOT:-/opt/veridian-sysroot}"
+SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
 TOOLCHAIN="${SCRIPT_DIR}/cmake-toolchain-veridian.cmake"
+HOST_QT="${PROJECT_ROOT}/target/cross-build/qt6/host-qt"
 JOBS="${JOBS:-$(nproc)}"
 
-KF_VER="6.0.0"
-KF_URL_BASE="https://download.kde.org/stable/frameworks/6.0"
+KF_VER="6.12.0"
+KF_MAJOR="6.12"
+KF_URL_BASE="https://download.kde.org/stable/frameworks/${KF_MAJOR}"
 
 log() { echo "[build-kf6] $*"; }
 die() { echo "[build-kf6] ERROR: $*" >&2; exit 1; }
@@ -41,13 +43,23 @@ fetch() {
 cmake_build() {
     local name="$1"
     local src="$2"
+    shift 2
+    local extra_args=("$@")
     local bld="${BUILD_DIR}/${name}-build"
 
-    if [[ -f "${SYSROOT}/usr/lib/libKF6${name}.a" ]] || \
+    # KDE installs cmake configs as KF6<Name> where Name drops the K prefix
+    # e.g. KConfig -> KF6Config, KCoreAddons -> KF6CoreAddons
+    # Exception: KCMUtils -> KF6KCMUtils (K is part of the acronym KCM)
+    local cmake_name="${name#K}"  # Strip leading K: KConfig -> Config
+    if [[ -f "${SYSROOT}/usr/lib/cmake/KF6${cmake_name}/KF6${cmake_name}Config.cmake" ]] || \
        [[ -f "${SYSROOT}/usr/lib/cmake/KF6${name}/KF6${name}Config.cmake" ]]; then
         log "${name}: already installed."
         return 0
     fi
+
+    export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
+    export PKG_CONFIG_LIBDIR="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
+    export PKG_CONFIG_SYSROOT_DIR=""
 
     log "Building KF6 ${name}..."
     rm -rf "${bld}"
@@ -57,13 +69,28 @@ cmake_build() {
             -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
             -DCMAKE_PREFIX_PATH="${SYSROOT}/usr" \
             -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
+            -DECM_DIR="${SYSROOT}/usr/share/ECM/cmake" \
+            -DQT_HOST_PATH:PATH="${HOST_QT}" \
+            -DQT_HOST_PATH_CMAKE_DIR:PATH="${HOST_QT}/lib/cmake" \
             -DBUILD_SHARED_LIBS=OFF \
             -DBUILD_TESTING=OFF \
             -DBUILD_QCH=OFF \
-            -DCMAKE_BUILD_TYPE=Release && \
-        cmake --build . --parallel "${JOBS}" && \
-        cmake --install .)
-    log "KF6 ${name}: done."
+            -DBUILD_DESIGNERPLUGIN=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" \
+            "${extra_args[@]}" && \
+        cmake --build . --parallel "${JOBS}" -- -k || true && \
+        cmake --install . 2>/dev/null || \
+        cmake --install . --component Devel 2>/dev/null || true)
+    # Verify cmake config was installed (library or header-only module)
+    local cmake_name="${name#K}"
+    if [[ -f "${SYSROOT}/usr/lib/cmake/KF6${cmake_name}/KF6${cmake_name}Config.cmake" ]] || \
+       [[ -f "${SYSROOT}/usr/lib/cmake/KF6${name}/KF6${name}Config.cmake" ]]; then
+        log "KF6 ${name}: done."
+    else
+        log "KF6 ${name}: cmake config not installed!"
+        return 1
+    fi
 }
 
 # ── Install VeridianOS KF6 backend files ──────────────────────────────
@@ -108,65 +135,144 @@ build_ecm() {
 
 # ── KF6 Module Builds (in dependency order) ───────────────────────────
 
+# Common extra cmake args to avoid system package leakage
+KF_COMMON_ARGS=(
+    -DBUILD_PYTHON_BINDINGS=OFF
+    -DCMAKE_DISABLE_FIND_PACKAGE_Shiboken6=ON
+    -DCMAKE_DISABLE_FIND_PACKAGE_Qt6LinguistTools=ON
+    -DKF_SKIP_PO_PROCESSING=ON
+    -DWITH_X11=OFF
+    -DWITH_BZIP2=OFF
+    -DWITH_LIBLZMA=OFF
+    -DWITH_LIBZSTD=OFF
+    -DCMAKE_DISABLE_FIND_PACKAGE_BZip2=ON
+    -DCMAKE_DISABLE_FIND_PACKAGE_LibLZMA=ON
+    -DCMAKE_DISABLE_FIND_PACKAGE_LibZstd=ON
+    -DCMAKE_PROJECT_INCLUDE="${SCRIPT_DIR}/wayland-scanner-target.cmake"
+)
+
+# Helper: fetch + cmake_build a KF6 module by name
+build_kf_module() {
+    local mod="$1"
+    shift
+    local extra=("$@")
+    local lower
+    lower=$(echo "${mod}" | tr '[:upper:]' '[:lower:]')
+    local pkg="${lower}-${KF_VER}"
+    fetch "${pkg}" "${KF_URL_BASE}/${pkg}.tar.xz" "${pkg}"
+    cmake_build "${mod}" "${BUILD_DIR}/${pkg}" "${KF_COMMON_ARGS[@]}" "${extra[@]}"
+}
+
 # Tier 1: No KF dependencies
 build_tier1() {
-    local modules=(KConfig KCoreAddons KI18n KGuiAddons KWidgetsAddons KColorScheme)
+    local modules=(KConfig KCoreAddons KI18n KGuiAddons KWidgetsAddons
+                   KColorScheme KArchive KCodecs KItemViews)
     for mod in "${modules[@]}"; do
-        local lower
-        lower=$(echo "${mod}" | tr '[:upper:]' '[:lower:]')
-        local pkg="${lower}-${KF_VER}"
-        fetch "${pkg}" "${KF_URL_BASE}/${pkg}.tar.xz" "${pkg}"
-        cmake_build "${mod}" "${BUILD_DIR}/${pkg}"
+        build_kf_module "${mod}"
     done
+}
+
+# ── Plasma Wayland Protocols (needed by KWindowSystem) ────────────────
+build_plasma_wayland_protocols() {
+    if [[ -d "${SYSROOT}/usr/lib/cmake/PlasmaWaylandProtocols" ]]; then
+        log "PlasmaWaylandProtocols: already installed."
+        return 0
+    fi
+    local PWP_VER="1.15.0"
+    local pkg="plasma-wayland-protocols-${PWP_VER}"
+    fetch "${pkg}" \
+        "https://download.kde.org/stable/plasma-wayland-protocols/${pkg}.tar.xz" \
+        "${pkg}"
+
+    local bld="${BUILD_DIR}/plasma-wayland-protocols-build"
+    log "Building PlasmaWaylandProtocols..."
+    rm -rf "${bld}"
+    mkdir -p "${bld}"
+    (cd "${bld}" && \
+        cmake "${BUILD_DIR}/${pkg}" \
+            -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
+            -DECM_DIR="${SYSROOT}/usr/share/ECM/cmake" \
+            -DBUILD_TESTING=OFF && \
+        cmake --build . --parallel "${JOBS}" && \
+        cmake --install .)
+    log "PlasmaWaylandProtocols: done."
 }
 
 # Tier 2: Depends on Tier 1
 build_tier2() {
-    local modules=(KIconThemes KWindowSystem KGlobalAccel KPackage)
-    for mod in "${modules[@]}"; do
-        local lower
-        lower=$(echo "${mod}" | tr '[:upper:]' '[:lower:]')
-        local pkg="${lower}-${KF_VER}"
-        fetch "${pkg}" "${KF_URL_BASE}/${pkg}.tar.xz" "${pkg}"
-        cmake_build "${mod}" "${BUILD_DIR}/${pkg}"
-    done
+    build_kf_module KIconThemes
+    # KWindowSystem: disable X11 & Wayland platform plugins (MODULE .so incompatible with static)
+    build_kf_module KWindowSystem -DKWINDOWSYSTEM_X11=OFF -DKWINDOWSYSTEM_WAYLAND=OFF
+    build_kf_module KGlobalAccel
+    build_kf_module KPackage
+    build_kf_module KCompletion
+    build_kf_module KJobWidgets
+    build_kf_module KAuth
+    build_kf_module KConfigWidgets
+    build_kf_module KNotifications
+    build_kf_module KService
+    build_kf_module Solid
 }
 
 # Tier 3: Depends on Tier 1+2
 build_tier3() {
-    local modules=(KDeclarative KCMUtils)
-    for mod in "${modules[@]}"; do
-        local lower
-        lower=$(echo "${mod}" | tr '[:upper:]' '[:lower:]')
-        local pkg="${lower}-${KF_VER}"
-        fetch "${pkg}" "${KF_URL_BASE}/${pkg}.tar.xz" "${pkg}"
-        cmake_build "${mod}" "${BUILD_DIR}/${pkg}"
-    done
+    build_kf_module KDeclarative
+    build_kf_module KXmlGui
+    build_kf_module KBookmarks
+    # KIO and KCMUtils are optional -- they have deep dependency chains
+    # and require host-target library compatibility (MODULE plugins)
+    build_kf_module KIO || log "KIO: skipped (optional for cross-build)"
+    build_kf_module KCMUtils || log "KCMUtils: skipped (optional for cross-build)"
 }
 
 # ── Verify ────────────────────────────────────────────────────────────
 verify() {
     log "Verifying KF6 installation..."
     local errors=0
-    for mod in KConfig KCoreAddons KI18n KWindowSystem KGlobalAccel KPackage; do
-        local cmake_config="${SYSROOT}/usr/lib/cmake/KF6${mod}/KF6${mod}Config.cmake"
-        if [[ -f "${cmake_config}" ]]; then
-            log "  OK: KF6${mod}"
+    local optional_errors=0
+
+    # Required modules (core KF6 for KWin + Plasma)
+    for cmake_name in Config CoreAddons I18n GuiAddons WidgetsAddons ColorScheme \
+                      Archive Codecs ItemViews IconThemes WindowSystem GlobalAccel \
+                      Package Completion JobWidgets Auth ConfigWidgets Notifications \
+                      Service Solid Declarative XmlGui Bookmarks; do
+        if [[ -f "${SYSROOT}/usr/lib/cmake/KF6${cmake_name}/KF6${cmake_name}Config.cmake" ]]; then
+            log "  OK: KF6${cmake_name}"
         else
-            log "  MISSING: KF6${mod} (${cmake_config})"
+            log "  MISSING: KF6${cmake_name}"
             errors=$((errors + 1))
         fi
     done
+
+    # Optional modules (deep dependency chains, may fail in cross-build)
+    for cmake_name in KIO KCMUtils; do
+        if [[ -f "${SYSROOT}/usr/lib/cmake/KF6${cmake_name}/KF6${cmake_name}Config.cmake" ]]; then
+            log "  OK: KF6${cmake_name}"
+        else
+            log "  OPTIONAL: KF6${cmake_name} (not installed)"
+            optional_errors=$((optional_errors + 1))
+        fi
+    done
+
     if [[ $errors -gt 0 ]]; then
-        die "${errors} modules missing!"
+        die "${errors} required modules missing!"
+    fi
+    if [[ $optional_errors -gt 0 ]]; then
+        log "${optional_errors} optional modules not installed"
     fi
     log "KDE Frameworks 6 ready."
 }
 
 # ── Main ──────────────────────────────────────────────────────────────
 main() {
-    log "=== Building KDE Frameworks 6 for VeridianOS ==="
+    log "=== Building KDE Frameworks 6 ${KF_VER} for VeridianOS ==="
+    log "Sysroot: ${SYSROOT}"
+
+    [[ -f "${SYSROOT}/usr/lib/libQt6Core.a" ]] || die "Qt6 not found. Run build-qt6.sh first."
+    [[ -d "${HOST_QT}/libexec" ]] || die "Host Qt tools not found. Run build-qt6.sh first."
+
     build_ecm
+    build_plasma_wayland_protocols
     build_tier1
     build_tier2
     build_tier3

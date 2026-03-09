@@ -154,6 +154,25 @@ int udev_enumerate_add_match_subsystem(struct udev_enumerate *udev_enumerate,
                                         const char *subsystem);
 
 /**
+ * Add a property match to the enumerator.
+ */
+int udev_enumerate_add_match_property(struct udev_enumerate *udev_enumerate,
+                                       const char *property,
+                                       const char *value);
+
+/**
+ * Add a sysattr match to the enumerator.
+ */
+int udev_enumerate_add_match_sysattr(struct udev_enumerate *udev_enumerate,
+                                      const char *sysattr,
+                                      const char *value);
+
+/**
+ * Require devices to be initialized.
+ */
+int udev_enumerate_add_match_is_initialized(struct udev_enumerate *udev_enumerate);
+
+/**
  * Scan for matching devices.
  *
  * @return 0 on success, negative errno on failure.

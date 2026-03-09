@@ -33,6 +33,11 @@ LIBJPEG_VER="3.0.3"
 LIBPNG_VER="1.6.43"
 XKBCOMMON_VER="1.7.0"
 EXPAT_VER="2.6.2"
+SQLITE_VER="3490100"  # 3.49.1
+OPENSSL_VER="3.3.2"
+LIBEVDEV_VER="1.13.3"
+LIBINPUT_VER="1.26.2"
+ATSPI_VER="2.52.0"
 
 log() { echo "[build-deps] $*"; }
 die() { echo "[build-deps] ERROR: $*" >&2; exit 1; }
@@ -268,11 +273,188 @@ build_xkbcommon() {
     log "libxkbcommon: done."
 }
 
+# ── 8. SQLite ─────────────────────────────────────────────────────────
+build_sqlite() {
+    if [[ -f "${SYSROOT}/usr/lib/libsqlite3.a" ]]; then
+        log "SQLite: already installed."
+        return 0
+    fi
+    local url="https://www.sqlite.org/2025/sqlite-autoconf-${SQLITE_VER}.tar.gz"
+    local tarball="${BUILD_DIR}/sqlite-${SQLITE_VER}.tar.gz"
+    local dir="sqlite-autoconf-${SQLITE_VER}"
+    if [[ ! -f "${tarball}" ]]; then
+        log "Downloading SQLite..."
+        curl -fsSL -o "${tarball}" "${url}" || wget -q -O "${tarball}" "${url}"
+    fi
+    if [[ ! -d "${BUILD_DIR}/${dir}" ]]; then
+        log "Extracting SQLite..."
+        tar -xf "${tarball}" -C "${BUILD_DIR}"
+    fi
+    local src="${BUILD_DIR}/${dir}"
+    log "Building SQLite..."
+    (cd "${src}" && \
+        CC="${SYSROOT}/bin/x86_64-veridian-musl-gcc" \
+        CFLAGS="-O2 -fPIC -DSQLITE_THREADSAFE=1" \
+        ./configure \
+            --host=x86_64-unknown-linux-musl \
+            --prefix="${SYSROOT}/usr" \
+            --enable-static \
+            --disable-shared \
+            --disable-readline && \
+        make -j"${JOBS}" && \
+        make install)
+    log "SQLite: done."
+}
+
+# ── 9. OpenSSL (static, for Qt6 TLS) ─────────────────────────────────
+build_openssl() {
+    if [[ -f "${SYSROOT}/usr/lib/libssl.a" ]]; then
+        log "OpenSSL: already installed."
+        return 0
+    fi
+    local url="https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VER}/openssl-${OPENSSL_VER}.tar.gz"
+    local tarball="${BUILD_DIR}/openssl-${OPENSSL_VER}.tar.gz"
+    local dir="openssl-${OPENSSL_VER}"
+    if [[ ! -f "${tarball}" ]]; then
+        log "Downloading OpenSSL ${OPENSSL_VER}..."
+        curl -fsSL -o "${tarball}" -L "${url}" || wget -q -O "${tarball}" "${url}"
+    fi
+    if [[ ! -d "${BUILD_DIR}/${dir}" ]]; then
+        log "Extracting OpenSSL..."
+        tar -xf "${tarball}" -C "${BUILD_DIR}"
+    fi
+    local src="${BUILD_DIR}/${dir}"
+    log "Building OpenSSL ${OPENSSL_VER}..."
+    (cd "${src}" && \
+        CC="${SYSROOT}/bin/x86_64-veridian-musl-gcc" \
+        AR="ar" \
+        RANLIB="ranlib" \
+        ./Configure linux-x86_64 \
+            --prefix="${SYSROOT}/usr" \
+            --openssldir="${SYSROOT}/etc/ssl" \
+            --cross-compile-prefix= \
+            no-shared \
+            no-async \
+            no-engine \
+            no-tests \
+            -fPIC && \
+        make -j"${JOBS}" && \
+        make install_sw)
+    log "OpenSSL: done."
+}
+
+# ── 10. libevdev (meson, needed by libinput) ─────────────────────────
+build_libevdev() {
+    if [[ -f "${SYSROOT}/usr/lib/libevdev.a" ]]; then
+        log "libevdev: already installed."
+        return 0
+    fi
+    local url="https://freedesktop.org/software/libevdev/libevdev-${LIBEVDEV_VER}.tar.xz"
+    local tarball="${BUILD_DIR}/libevdev-${LIBEVDEV_VER}.tar.xz"
+    local dir="libevdev-${LIBEVDEV_VER}"
+    if [[ ! -f "${tarball}" ]]; then
+        log "Downloading libevdev ${LIBEVDEV_VER}..."
+        curl -fsSL -o "${tarball}" -L "${url}" || wget -q -O "${tarball}" "${url}"
+    fi
+    if [[ ! -d "${BUILD_DIR}/${dir}" ]]; then
+        log "Extracting libevdev..."
+        tar -xf "${tarball}" -C "${BUILD_DIR}"
+    fi
+    local src="${BUILD_DIR}/${dir}"
+    local bld="${BUILD_DIR}/libevdev-build"
+    log "Building libevdev ${LIBEVDEV_VER}..."
+    rm -rf "${bld}"
+    mkdir -p "${bld}"
+    (cd "${bld}" && \
+        meson setup "${src}" \
+            --cross-file="${MESON_CROSS}" \
+            --prefix="${SYSROOT}/usr" \
+            --default-library=static \
+            -Dtests=disabled \
+            -Ddocumentation=disabled && \
+        ninja -j"${JOBS}" && \
+        ninja install)
+    log "libevdev: done."
+}
+
+# ── 11. libinput (meson, needs libevdev) ─────────────────────────────
+build_libinput() {
+    if [[ -f "${SYSROOT}/usr/lib/libinput.a" ]]; then
+        log "libinput: already installed."
+        return 0
+    fi
+    local url="https://gitlab.freedesktop.org/libinput/libinput/-/archive/${LIBINPUT_VER}/libinput-${LIBINPUT_VER}.tar.gz"
+    local tarball="${BUILD_DIR}/libinput-${LIBINPUT_VER}.tar.gz"
+    local dir="libinput-${LIBINPUT_VER}"
+    if [[ ! -f "${tarball}" ]]; then
+        log "Downloading libinput ${LIBINPUT_VER}..."
+        curl -fsSL -o "${tarball}" -L "${url}" || wget -q -O "${tarball}" "${url}"
+    fi
+    if [[ ! -d "${BUILD_DIR}/${dir}" ]]; then
+        log "Extracting libinput..."
+        tar -xf "${tarball}" -C "${BUILD_DIR}"
+    fi
+    local src="${BUILD_DIR}/${dir}"
+    local bld="${BUILD_DIR}/libinput-build"
+    log "Building libinput ${LIBINPUT_VER}..."
+    rm -rf "${bld}"
+    mkdir -p "${bld}"
+    (cd "${bld}" && \
+        meson setup "${src}" \
+            --cross-file="${MESON_CROSS}" \
+            --prefix="${SYSROOT}/usr" \
+            --default-library=static \
+            -Dlibwacom=false \
+            -Ddebug-gui=false \
+            -Dtests=false \
+            -Ddocumentation=false \
+            -Dzshcompletiondir=no && \
+        ninja -j"${JOBS}" && \
+        ninja install)
+    log "libinput: done."
+}
+
+# ── 12. at-spi2-core (meson, for Qt6 accessibility) ─────────────────
+build_atspi() {
+    if [[ -f "${SYSROOT}/usr/lib/libatspi.a" ]]; then
+        log "at-spi2-core: already installed."
+        return 0
+    fi
+    local url="https://download.gnome.org/sources/at-spi2-core/${ATSPI_VER%.*}/at-spi2-core-${ATSPI_VER}.tar.xz"
+    local tarball="${BUILD_DIR}/at-spi2-core-${ATSPI_VER}.tar.xz"
+    local dir="at-spi2-core-${ATSPI_VER}"
+    if [[ ! -f "${tarball}" ]]; then
+        log "Downloading at-spi2-core ${ATSPI_VER}..."
+        curl -fsSL -o "${tarball}" -L "${url}" || wget -q -O "${tarball}" "${url}"
+    fi
+    if [[ ! -d "${BUILD_DIR}/${dir}" ]]; then
+        log "Extracting at-spi2-core..."
+        tar -xf "${tarball}" -C "${BUILD_DIR}"
+    fi
+    local src="${BUILD_DIR}/${dir}"
+    local bld="${BUILD_DIR}/atspi-build"
+    log "Building at-spi2-core ${ATSPI_VER}..."
+    rm -rf "${bld}"
+    mkdir -p "${bld}"
+    (cd "${bld}" && \
+        meson setup "${src}" \
+            --cross-file="${MESON_CROSS}" \
+            --prefix="${SYSROOT}/usr" \
+            --default-library=static \
+            -Dintrospection=disabled \
+            -Dx11=disabled \
+            -Dsystemd=disabled \
+            -Ddocs=false && \
+        ninja -j"${JOBS}" && \
+        ninja install)
+    log "at-spi2-core: done."
+}
+
 # ── Verify ────────────────────────────────────────────────────────────
 verify() {
     log "Verifying all dependencies..."
     local errors=0
-    for lib in libz.a libffi.a libpcre2-8.a libexpat.a libxml2.a libjpeg.a libpng16.a libxkbcommon.a; do
+    for lib in libz.a libffi.a libpcre2-8.a libexpat.a libxml2.a libjpeg.a libpng16.a libxkbcommon.a libsqlite3.a libssl.a libcrypto.a libevdev.a libinput.a libatspi.a; do
         if [[ -f "${SYSROOT}/usr/lib/${lib}" ]]; then
             local size
             size=$(stat -c%s "${SYSROOT}/usr/lib/${lib}" 2>/dev/null || echo "?")
@@ -303,6 +485,11 @@ main() {
     build_libjpeg
     build_libpng
     build_xkbcommon
+    build_sqlite
+    build_openssl
+    build_libevdev
+    build_libinput
+    build_atspi
 
     verify
 
