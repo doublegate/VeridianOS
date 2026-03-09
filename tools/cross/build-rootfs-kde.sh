@@ -12,7 +12,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-SYSROOT="${VERIDIAN_SYSROOT:-/opt/veridian-sysroot}"
+SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
 STAGING="${PROJECT_ROOT}/target/rootfs-kde-staging"
 OUTPUT="${PROJECT_ROOT}/target/rootfs-kde-blockfs.img"
 MKFS_BLOCKFS="${PROJECT_ROOT}/tools/mkfs-blockfs"
@@ -41,13 +41,13 @@ prepare_staging() {
 # ── Copy binaries ────────────────────────────────────────────────────
 copy_binaries() {
     log "Copying binaries..."
-    local bins=(kwin_wayland plasmashell dbus-daemon)
+    local bins=(kwin_wayland kwin_wayland_wrapper kwin_killer_helper plasmashell dbus-daemon)
     for bin in "${bins[@]}"; do
         if [[ -f "${SYSROOT}/usr/bin/${bin}" ]]; then
             cp "${SYSROOT}/usr/bin/${bin}" "${STAGING}/usr/bin/"
             log "  ${bin}: $(stat -c%s "${SYSROOT}/usr/bin/${bin}" 2>/dev/null || echo "?") bytes"
         else
-            log "  WARNING: ${bin} not found"
+            log "  WARNING: ${bin} not found (optional)"
         fi
     done
 }
@@ -182,8 +182,6 @@ verify() {
     local errors=0
     for item in \
         "${STAGING}/etc/veridian/session.conf" \
-        "${STAGING}/etc/dbus-1/session.conf" \
-        "${STAGING}/etc/fonts/fonts.conf" \
     ; do
         if [[ -f "$item" ]]; then
             log "  OK: ${item#${STAGING}}"

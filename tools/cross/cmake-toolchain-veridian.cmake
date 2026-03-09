@@ -14,9 +14,9 @@ set(CMAKE_CROSSCOMPILING ON CACHE BOOL "Cross-compiling to VeridianOS" FORCE)
 # Sysroot -- populated by build-musl.sh and subsequent dependency builds
 set(VERIDIAN_SYSROOT "$ENV{VERIDIAN_SYSROOT}")
 if(NOT VERIDIAN_SYSROOT)
-    # Default to in-tree sysroot
-    get_filename_component(_toolchain_dir "${CMAKE_CURRENT_LIST_DIR}" DIRECTORY)
-    get_filename_component(_project_root "${_toolchain_dir}" DIRECTORY)
+    # Default to in-tree sysroot (tools/cross/ -> tools/ -> project root)
+    get_filename_component(_tools_dir "${CMAKE_CURRENT_LIST_DIR}" DIRECTORY)
+    get_filename_component(_project_root "${_tools_dir}" DIRECTORY)
     set(VERIDIAN_SYSROOT "${_project_root}/target/veridian-sysroot")
 endif()
 
@@ -28,12 +28,26 @@ set(CMAKE_CXX_COMPILER "${VERIDIAN_SYSROOT}/bin/x86_64-veridian-musl-g++")
 set(CMAKE_AR "ar" CACHE FILEPATH "Archiver")
 set(CMAKE_RANLIB "ranlib" CACHE FILEPATH "Ranlib")
 
+# Host Qt for cross-compilation (tools like moc, rcc, uic run on host)
+get_filename_component(_build_dir "${VERIDIAN_SYSROOT}/../cross-build/qt6/host-qt" ABSOLUTE)
+if(EXISTS "${_build_dir}")
+    set(QT_HOST_PATH "${_build_dir}" CACHE PATH "Host Qt for cross-compilation" FORCE)
+    set(QT_HOST_PATH_CMAKE_DIR "${_build_dir}/lib/cmake" CACHE PATH "Host Qt cmake dir" FORCE)
+endif()
+
+# Host tools for KDE cross-compilation (qtwaylandscanner_kde runs on host)
+get_filename_component(_kwin_build_dir "${VERIDIAN_SYSROOT}/../cross-build/kwin" ABSOLUTE)
+if(EXISTS "${_kwin_build_dir}/qtwaylandscanner_kde-host-build/qtwaylandscanner_kde")
+    set(QTWAYLANDSCANNER_KDE_EXECUTABLE "${_kwin_build_dir}/qtwaylandscanner_kde-host-build/qtwaylandscanner_kde"
+        CACHE FILEPATH "Host qtwaylandscanner_kde" FORCE)
+endif()
+
 # Search paths -- include both sysroot root and /usr for cmake find_*()
 set(CMAKE_FIND_ROOT_PATH "${VERIDIAN_SYSROOT}" "${VERIDIAN_SYSROOT}/usr")
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 
 # Static linking by default
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static libraries")
@@ -42,13 +56,16 @@ set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static libraries")
 # to avoid linker issues with .so files and musl's -static wrapper
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
-# Pkg-config: .pc files already have absolute paths, so do NOT set
-# PKG_CONFIG_SYSROOT_DIR (it would double-prefix the paths)
-set(ENV{PKG_CONFIG_PATH} "${VERIDIAN_SYSROOT}/usr/lib/pkgconfig:${VERIDIAN_SYSROOT}/usr/share/pkgconfig")
+# Pkg-config: use LIBDIR (not PATH) to replace default search dirs entirely,
+# preventing host system .pc files from leaking into cross-compilation.
+# Do NOT set PKG_CONFIG_SYSROOT_DIR (it would double-prefix the paths).
+set(ENV{PKG_CONFIG_LIBDIR} "${VERIDIAN_SYSROOT}/usr/lib/pkgconfig:${VERIDIAN_SYSROOT}/usr/share/pkgconfig")
+set(ENV{PKG_CONFIG_PATH} "")
 set(ENV{PKG_CONFIG_SYSROOT_DIR} "")
 
-# Static linking: add system libraries that static Mesa/Qt depend on.
-# These get appended after all other libs, resolving symbols from the
-# fat Mesa archives (which need expat, z, dl, m, pthread).
-set(CMAKE_EXE_LINKER_FLAGS_INIT "-Wl,--allow-multiple-definition")
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--start-group -lGLESv2 -lEGL -lgbm -ldrm -lglapi -lwayland-client -lwayland-server -lwayland-egl -lwayland-cursor -lffi -ludev -lexpat -lz -lm -ldl -lpthread -Wl,--end-group" CACHE STRING "Extra link libs for static" FORCE)
+# Static linking: resolve circular dependencies between static archives.
+# CMAKE_EXE_LINKER_FLAGS goes before cmake-generated libs (too early).
+# CMAKE_CXX_STANDARD_LIBRARIES goes after ALL cmake libs (correct for resolution).
+set(CMAKE_EXE_LINKER_FLAGS "-Wl,--allow-multiple-definition" CACHE STRING "Linker flags" FORCE)
+set(CMAKE_CXX_STANDARD_LIBRARIES "-Wl,--start-group -lepoxy -lGLESv2 -lEGL -lgbm -ldrm -lglapi -lwayland-client -lwayland-server -lwayland-egl -lwayland-cursor -lffi -ludev -levdev -lexpat -lfreetype -lfontconfig -lsystemd -lz -lm -ldl -lpthread ${VERIDIAN_SYSROOT}/usr/lib/libkwin_stubs.a ${VERIDIAN_SYSROOT}/usr/lib/glibc_shim.a -Wl,--end-group" CACHE STRING "Extra link libs for static" FORCE)
+set(CMAKE_C_STANDARD_LIBRARIES "${CMAKE_CXX_STANDARD_LIBRARIES}" CACHE STRING "Extra C link libs for static" FORCE)

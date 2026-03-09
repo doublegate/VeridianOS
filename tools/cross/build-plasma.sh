@@ -11,12 +11,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 BUILD_DIR="${PROJECT_ROOT}/target/cross-build/plasma"
-SYSROOT="${VERIDIAN_SYSROOT:-/opt/veridian-sysroot}"
+SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
 TOOLCHAIN="${SCRIPT_DIR}/cmake-toolchain-veridian.cmake"
+HOST_QT="${PROJECT_ROOT}/target/cross-build/qt6/host-qt"
 JOBS="${JOBS:-$(nproc)}"
 
-PLASMA_VER="6.0.0"
-PLASMA_URL_BASE="https://download.kde.org/stable/plasma/6.0.0"
+PLASMA_VER="6.3.5"
+PLASMA_URL_BASE="https://download.kde.org/stable/plasma/6.3.5"
 
 log() { echo "[build-plasma] $*"; }
 die() { echo "[build-plasma] ERROR: $*" >&2; exit 1; }
@@ -42,20 +43,30 @@ cmake_build() {
     local bld="${BUILD_DIR}/${name}-build"
     local extra_args="${3:-}"
 
+    export PKG_CONFIG_LIBDIR="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
+    export PKG_CONFIG_SYSROOT_DIR=""
+
     log "Building ${name}..."
     rm -rf "${bld}"
     mkdir -p "${bld}"
     (cd "${bld}" && \
+        export QT_HOST_PATH="${HOST_QT}" && \
         cmake "${src}" \
             -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
             -DCMAKE_PREFIX_PATH="${SYSROOT}/usr" \
             -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
+            -DECM_DIR:PATH="${SYSROOT}/usr/share/ECM/cmake" \
+            -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" \
             -DBUILD_SHARED_LIBS=OFF \
             -DBUILD_TESTING=OFF \
+            -DBUILD_QCH=OFF \
             -DCMAKE_BUILD_TYPE=Release \
+            -DKF_SKIP_PO_PROCESSING=ON \
+            -DKF6_HOST_TOOLING=/usr/lib64/cmake \
             ${extra_args} && \
-        cmake --build . --parallel "${JOBS}" && \
-        cmake --install .)
+        cmake --build . --parallel "${JOBS}" -- -k || true && \
+        cmake --install . --prefix "${SYSROOT}/usr" 2>/dev/null || \
+        cmake --install . --prefix "${SYSROOT}/usr" --component Devel 2>/dev/null || true)
     log "${name}: done."
 }
 

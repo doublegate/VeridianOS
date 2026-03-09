@@ -36,6 +36,7 @@ EXPAT_VER="2.6.2"
 SQLITE_VER="3490100"  # 3.49.1
 OPENSSL_VER="3.3.2"
 LIBEVDEV_VER="1.13.3"
+MTDEV_VER="1.1.7"
 LIBINPUT_VER="1.26.2"
 ATSPI_VER="2.52.0"
 
@@ -331,6 +332,7 @@ build_openssl() {
         RANLIB="ranlib" \
         ./Configure linux-x86_64 \
             --prefix="${SYSROOT}/usr" \
+            --libdir=lib \
             --openssldir="${SYSROOT}/etc/ssl" \
             --cross-compile-prefix= \
             no-shared \
@@ -375,6 +377,25 @@ build_libevdev() {
         ninja -j"${JOBS}" && \
         ninja install)
     log "libevdev: done."
+}
+
+# ── 10b. mtdev (autotools, needed by libinput) ──────────────────────
+build_mtdev() {
+    if [[ -f "${SYSROOT}/usr/lib/libmtdev.a" ]]; then
+        log "mtdev: already installed."
+        return 0
+    fi
+    fetch "mtdev-${MTDEV_VER}" \
+        "https://bitmath.org/code/mtdev/mtdev-${MTDEV_VER}.tar.bz2" \
+        "mtdev-${MTDEV_VER}"
+
+    local src="${BUILD_DIR}/mtdev-${MTDEV_VER}"
+    log "Building mtdev ${MTDEV_VER}..."
+    (cd "${src}" && \
+        ./configure "${COMMON_CONFIGURE[@]}" && \
+        make -j"${JOBS}" && \
+        make install)
+    log "mtdev: done."
 }
 
 # ── 11. libinput (meson, needs libevdev) ─────────────────────────────
@@ -454,7 +475,7 @@ build_atspi() {
 verify() {
     log "Verifying all dependencies..."
     local errors=0
-    for lib in libz.a libffi.a libpcre2-8.a libexpat.a libxml2.a libjpeg.a libpng16.a libxkbcommon.a libsqlite3.a libssl.a libcrypto.a libevdev.a libinput.a libatspi.a; do
+    for lib in libz.a libffi.a libpcre2-8.a libexpat.a libxml2.a libjpeg.a libpng16.a libxkbcommon.a libsqlite3.a libssl.a libcrypto.a libevdev.a libmtdev.a libinput.a; do
         if [[ -f "${SYSROOT}/usr/lib/${lib}" ]]; then
             local size
             size=$(stat -c%s "${SYSROOT}/usr/lib/${lib}" 2>/dev/null || echo "?")
@@ -488,8 +509,9 @@ main() {
     build_sqlite
     build_openssl
     build_libevdev
+    build_mtdev
     build_libinput
-    build_atspi
+    build_atspi || log "at-spi2-core: skipped (requires glib-2.0; optional for accessibility)"
 
     verify
 

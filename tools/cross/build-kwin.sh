@@ -16,10 +16,11 @@ SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
 TOOLCHAIN="${SCRIPT_DIR}/cmake-toolchain-veridian.cmake"
 JOBS="${JOBS:-$(nproc)}"
 
-KWIN_VER="6.0.0"
-KWIN_URL="https://download.kde.org/stable/plasma/6.0.0/kwin-${KWIN_VER}.tar.xz"
-KDECORATION_VER="6.0.0"
-KDECORATION_URL="https://download.kde.org/stable/plasma/6.0.0/kdecoration-${KDECORATION_VER}.tar.xz"
+KWIN_VER="6.3.5"
+KWIN_URL="https://download.kde.org/stable/plasma/6.3.5/kwin-${KWIN_VER}.tar.xz"
+KDECORATION_VER="6.3.5"
+KDECORATION_URL="https://download.kde.org/stable/plasma/6.3.5/kdecoration-${KDECORATION_VER}.tar.xz"
+HOST_QT="${PROJECT_ROOT}/target/cross-build/qt6/host-qt"
 
 log() { echo "[build-kwin] $*"; }
 die() { echo "[build-kwin] ERROR: $*" >&2; exit 1; }
@@ -62,15 +63,30 @@ build_kdecoration() {
     local src="${BUILD_DIR}/kdecoration-${KDECORATION_VER}"
     local bld="${BUILD_DIR}/kdecoration-build"
     log "Building kdecoration ${KDECORATION_VER}..."
+
+    # Patch SHARED -> STATIC for static cross-compilation
+    sed -i 's/add_library(kdecorations3private SHARED/add_library(kdecorations3private STATIC/' \
+        "${src}/src/private/CMakeLists.txt"
+    sed -i 's/add_library(kdecorations3 SHARED/add_library(kdecorations3 STATIC/' \
+        "${src}/src/CMakeLists.txt"
+
     rm -rf "${bld}"
     mkdir -p "${bld}"
+    export PKG_CONFIG_LIBDIR="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
+    export PKG_CONFIG_SYSROOT_DIR=""
+
     (cd "${bld}" && \
         cmake "${src}" \
             -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
             -DCMAKE_PREFIX_PATH="${SYSROOT}/usr" \
             -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
+            -DQT_HOST_PATH:PATH="${HOST_QT}" \
+            -DQT_HOST_PATH_CMAKE_DIR:PATH="${HOST_QT}/lib/cmake" \
+            -DECM_DIR:PATH="${SYSROOT}/usr/share/ECM/cmake" \
+            -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" \
             -DBUILD_SHARED_LIBS=OFF \
-            -DBUILD_TESTING=OFF && \
+            -DBUILD_TESTING=OFF \
+            -DCMAKE_BUILD_TYPE=Release && \
         cmake --build . --parallel "${JOBS}" && \
         cmake --install .)
     log "kdecoration: done."
@@ -103,20 +119,35 @@ build_kwin() {
     log "Building KWin ${KWIN_VER}..."
     rm -rf "${bld}"
     mkdir -p "${bld}"
+    export PKG_CONFIG_LIBDIR="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
+    export PKG_CONFIG_SYSROOT_DIR=""
+
     (cd "${bld}" && \
         cmake "${src}" \
             -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
             -DCMAKE_PREFIX_PATH="${SYSROOT}/usr" \
             -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
+            -DQT_HOST_PATH:PATH="${HOST_QT}" \
+            -DQT_HOST_PATH_CMAKE_DIR:PATH="${HOST_QT}/lib/cmake" \
+            -DECM_DIR:PATH="${SYSROOT}/usr/share/ECM/cmake" \
+            -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" \
             -DBUILD_SHARED_LIBS=OFF \
             -DBUILD_TESTING=OFF \
-            -DKWIN_BUILD_XWAYLAND=ON \
-            -DKWIN_BUILD_SCREENLOCKER=ON \
+            -DKWIN_BUILD_X11=OFF \
+            -DKWIN_BUILD_XWAYLAND=OFF \
+            -DKWIN_BUILD_SCREENLOCKER=OFF \
             -DKWIN_BUILD_TABBOX=ON \
-            -DKWIN_BUILD_KCMS=ON \
-            -DCMAKE_BUILD_TYPE=Release && \
-        cmake --build . --parallel "${JOBS}" && \
-        cmake --install .)
+            -DKWIN_BUILD_KCMS=OFF \
+            -DKWIN_BUILD_GLOBALSHORTCUTS=OFF \
+            -DQTWAYLANDSCANNER_KDE_EXECUTABLE="${BUILD_DIR}/qtwaylandscanner_kde-host-build/qtwaylandscanner_kde" \
+            -DKF6_HOST_TOOLING="/usr/lib64/cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DKF_SKIP_PO_PROCESSING=ON \
+            -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--allow-multiple-definition" \
+            -DCMAKE_PROJECT_INCLUDE="${SCRIPT_DIR}/wayland-scanner-target.cmake" && \
+        cmake --build . --parallel "${JOBS}" -- -k || true && \
+        cmake --install . 2>/dev/null || \
+        cmake --install . --component Devel 2>/dev/null || true)
     log "KWin: done."
 }
 

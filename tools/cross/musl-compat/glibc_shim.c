@@ -164,3 +164,38 @@ int __cxa_thread_atexit_impl(void (*func)(void *), void *obj, void *dso_handle) 
     extern int __cxa_thread_atexit(void (*)(void *), void *, void *);
     return __cxa_thread_atexit(func, obj, dso_handle);
 }
+
+/* pthread_*_clock* - glibc extensions for clock-specific pthread operations.
+ * GCC 15 libstdc++ references these when _GLIBCXX_USE_PTHREAD_COND_CLOCKWAIT
+ * is set. Provide fallback implementations using standard POSIX equivalents. */
+#include <pthread.h>
+#include <time.h>
+
+int pthread_cond_clockwait(pthread_cond_t *cond,
+                           pthread_mutex_t *mutex,
+                           clockid_t clock_id,
+                           const struct timespec *abstime) {
+    (void)clock_id;
+    return pthread_cond_timedwait(cond, mutex, abstime);
+}
+
+int pthread_mutex_clocklock(pthread_mutex_t *mutex,
+                            clockid_t clock_id,
+                            const struct timespec *abstime) {
+    (void)clock_id;
+    return pthread_mutex_timedlock(mutex, abstime);
+}
+
+int pthread_rwlock_clockwrlock(pthread_rwlock_t *rwlock,
+                               clockid_t clock_id,
+                               const struct timespec *abstime) {
+    (void)clock_id;
+    return pthread_rwlock_timedwrlock(rwlock, abstime);
+}
+
+int pthread_rwlock_clockrdlock(pthread_rwlock_t *rwlock,
+                               clockid_t clock_id,
+                               const struct timespec *abstime) {
+    (void)clock_id;
+    return pthread_rwlock_timedrdlock(rwlock, abstime);
+}
