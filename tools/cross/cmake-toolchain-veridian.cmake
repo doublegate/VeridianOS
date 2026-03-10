@@ -67,7 +67,7 @@ set(ENV{PKG_CONFIG_SYSROOT_DIR} "")
 # CMAKE_EXE_LINKER_FLAGS goes before cmake-generated libs (too early).
 # CMAKE_CXX_STANDARD_LIBRARIES goes after ALL cmake libs (correct for resolution).
 set(CMAKE_EXE_LINKER_FLAGS "-Wl,--allow-multiple-definition" CACHE STRING "Linker flags" FORCE)
-set(CMAKE_CXX_STANDARD_LIBRARIES "-Wl,--start-group -lepoxy -lGLESv2 -lEGL -lgbm -ldrm -lglapi -lwayland-client -lwayland-server -lwayland-egl -lwayland-cursor -lffi -ludev -levdev -lexpat -lfreetype -lfontconfig -lsystemd -lz -lm -ldl -lpthread ${VERIDIAN_SYSROOT}/usr/lib/libkwin_stubs.a ${VERIDIAN_SYSROOT}/usr/lib/glibc_shim.a -Wl,--end-group" CACHE STRING "Extra link libs for static" FORCE)
+set(CMAKE_CXX_STANDARD_LIBRARIES "-Wl,--start-group -lepoxy -lGLESv2 -lEGL -lgbm -ldrm -lglapi -lwayland-client -lwayland-server -lwayland-egl -lwayland-cursor -lffi -ludev -levdev -lexpat -lfreetype -lfontconfig -lsystemd -lz -lm -ldl -lpthread ${VERIDIAN_SYSROOT}/usr/lib/libkwin_stubs.a ${VERIDIAN_SYSROOT}/usr/lib/libgl_stubs.a ${VERIDIAN_SYSROOT}/usr/lib/libkf6_link_stubs.a ${VERIDIAN_SYSROOT}/usr/lib/glibc_shim.a -Wl,--end-group" CACHE STRING "Extra link libs for static" FORCE)
 set(CMAKE_C_STANDARD_LIBRARIES "${CMAKE_CXX_STANDARD_LIBRARIES}" CACHE STRING "Extra C link libs for static" FORCE)
 
 # Cross-compilation helpers: create Wayland::Scanner and KF6 stub targets.
