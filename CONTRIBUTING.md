@@ -87,8 +87,7 @@ Documentation improvements are always welcome! This includes:
 
 ### 1. Branch Strategy
 
-- `main` - Stable branch, all tests passing
-- `develop` - Development branch, PRs target here
+- `main` - Primary development branch, all tests passing, PRs target here
 - `feature/*` - Feature branches
 - `fix/*` - Bug fix branches
 - `docs/*` - Documentation branches
@@ -98,8 +97,8 @@ Documentation improvements are always welcome! This includes:
 ```bash
 # Sync with upstream
 git fetch upstream
-git checkout develop
-git merge upstream/develop
+git checkout main
+git merge upstream/main
 
 # Create feature branch
 git checkout -b feature/my-feature
@@ -112,15 +111,17 @@ git checkout -b feature/my-feature
 3. **Update documentation** as needed
 4. **Run tests locally**:
    ```bash
-   just test
+   cargo test
    ```
 5. **Check formatting**:
    ```bash
-   just fmt-check
+   cargo fmt --all --check
    ```
 6. **Run lints**:
    ```bash
-   just clippy
+   cargo clippy --target x86_64-unknown-none -p veridian-kernel -- -D warnings
+   cargo clippy --target aarch64-unknown-none -p veridian-kernel -- -D warnings
+   cargo clippy --target riscv64gc-unknown-none-elf -p veridian-kernel -- -D warnings
    ```
 
 ### 4. Testing Requirements
@@ -270,12 +271,14 @@ Fixes #456
 1. **Update from upstream**:
    ```bash
    git fetch upstream
-   git rebase upstream/develop
+   git rebase upstream/main
    ```
 
 2. **Run all checks**:
    ```bash
-   just ci-checks
+   cargo fmt --all --check
+   cargo clippy --target x86_64-unknown-none -p veridian-kernel -- -D warnings
+   cargo test
    ```
 
 3. **Update documentation** if needed

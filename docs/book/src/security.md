@@ -1,90 +1,70 @@
 # Security Policy
 
-## Reporting Security Vulnerabilities
+The authoritative security policy is maintained in the repository root:
 
-The security of VeridianOS is our top priority. If you discover a security vulnerability, please follow these steps:
+**[SECURITY.md](https://github.com/doublegate/VeridianOS/blob/main/SECURITY.md)**
 
-### Do NOT
-- Open a public GitHub issue
-- Discuss the vulnerability publicly
-- Exploit the vulnerability
+## Reporting Vulnerabilities
 
-### Do
-1. Email security@veridian-os.org with:
-   - Description of the vulnerability
-   - Steps to reproduce
-   - Potential impact
-   - Any suggested fixes
+- **Email**: security@veridian-os.org
+- **Do NOT** open public issues for security vulnerabilities
+- **Response time**: Within 48 hours for acknowledgment
 
-2. Allow up to 72 hours for initial response
+## Security Features (All Complete as of v0.25.1)
 
-3. Work with us to understand and resolve the issue
+### Capability-Based Security
+- Unforgeable 64-bit capability tokens with generation counters
+- Two-level O(1) capability lookup with per-CPU cache
+- Hierarchical inheritance with cascading revocation
+- System call capability enforcement
 
-## Security Design Principles
+### Cryptographic Services
+- ChaCha20-Poly1305, Ed25519, X25519, SHA-256
+- Post-quantum: ML-KEM (Kyber), ML-DSA (Dilithium)
+- TLS 1.3, SSH, WireGuard VPN
+- Hardware CSPRNG (RDRAND with CPUID check)
 
-VeridianOS is designed with security as a fundamental principle:
+### Kernel Hardening
+- KASLR (Kernel Address Space Layout Randomization)
+- Stack canaries and guards
+- SMEP/SMAP enforcement
+- Retpoline for Spectre mitigation
+- W^X enforcement
+- Checked arithmetic in critical paths
 
-### 1. Capability-Based Security
-- All resource access requires unforgeable capability tokens
-- Fine-grained permission control
-- No ambient authority
+### Mandatory Access Control
+- MAC policy parser with RBAC and MLS enforcement
+- Audit logging framework
+- Secure boot chain verification
 
-### 2. Memory Safety
-- Written in Rust to prevent memory corruption
-- Minimal unsafe code with thorough documentation
-- Automatic bounds checking
-
-### 3. Isolation
-- Microkernel architecture minimizes trusted code
-- User-space drivers and services
-- Process isolation with separate address spaces
-
-### 4. Hardware Security Features
-- Support for Intel TDX, AMD SEV-SNP, ARM CCA
-- Hardware memory tagging (Intel LAM, ARM MTE)
+### Hardware Security
+- TPM integration
+- Intel TDX, AMD SEV-SNP, ARM CCA
 - IOMMU for DMA protection
+
+### Memory Safety
+- Written in Rust (memory safety by default)
+- 7 justified `static mut` remaining (early boot, per-CPU, heap)
+- 99%+ SAFETY comment coverage on all unsafe blocks
+- 0 soundness bugs
+
+### Network Security
+- Stateful firewall with NAT/conntrack
+- Certificate pinning
+- Network isolation
+
+## Security Scan History
+
+- **v0.20.2**: 7 findings remediated (2 medium, 2 low, 2 info, 1 doc)
+  - Password history: salted hashes with constant-time comparison
+  - Capability revocation: cache invalidation before revoke
+  - Compositor bounds checking
+  - ACPI checked arithmetic
 
 ## Supported Versions
 
-As VeridianOS is in early development, only the latest version receives security updates:
-
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
-| < 0.1   | :x:                |
-
-## Security Features by Phase
-
-### Phase 0-1 (Current)
-- Basic memory protection
-- Address space isolation
-- Capability system foundation
-
-### Phase 2-3 (Planned)
-- Mandatory access control
-- Secure boot
-- Cryptographic services
-- Audit logging
-
-### Phase 4-6 (Future)
-- Advanced threat detection
-- Hardware security integration
-- Formal verification
-- Post-quantum cryptography
-
-## Security Advisories
-
-Security advisories will be published at:
-- GitHub Security Advisories
-- Mailing list: security-announce@veridian-os.org
-- Website: https://veridian-os.org/security
-
-## Acknowledgments
-
-We appreciate security researchers who responsibly disclose vulnerabilities. Contributors will be acknowledged (with permission) in our Hall of Fame.
-
-## Contact
-
-- Security Team: security@veridian-os.org
-- PGP Key: [Available on website]
-- Response Time: 72 hours for initial response
+| Version | Supported |
+| ------- | --------- |
+| 0.25.x (latest) | Yes |
+| main branch | Yes |
+| < 0.25 | No |

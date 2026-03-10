@@ -1,5 +1,9 @@
 # IPC System Design
 
+> **Authoritative specification**: [docs/design/IPC-DESIGN.md](https://github.com/doublegate/VeridianOS/blob/main/docs/design/IPC-DESIGN.md)
+>
+> **Implementation Status**: Complete as of v0.25.1. Fast path IPC measured at <1us latency (79ns syscall_getpid, 44ns ipc_stats_read).
+
 The VeridianOS Inter-Process Communication (IPC) system provides high-performance message passing with integrated capability support. The design emphasizes zero-copy transfers and minimal kernel involvement.
 
 ## Architecture Overview

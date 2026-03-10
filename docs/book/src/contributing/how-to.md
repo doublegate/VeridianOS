@@ -162,9 +162,11 @@ Aim for:
 
 1. **Run all checks locally**:
    ```bash
-   just fmt-check
-   just clippy
-   just test
+   cargo fmt --all --check
+   cargo clippy --target x86_64-unknown-none -p veridian-kernel -- -D warnings
+   cargo clippy --target aarch64-unknown-none -p veridian-kernel -- -D warnings
+   cargo clippy --target riscv64gc-unknown-none-elf -p veridian-kernel -- -D warnings
+   cargo test
    ```
 
 2. **Update documentation**:
@@ -205,21 +207,20 @@ Your PR must:
 ### Building Specific Architectures
 
 ```bash
-# Build for x86_64
-just build-arch x86_64
+# Build all architectures
+./build-kernel.sh all dev
 
-# Build for AArch64
-just build-arch aarch64
-
-# Build for RISC-V
-just build-arch riscv64
+# Build for specific architecture
+./build-kernel.sh x86_64 dev
+./build-kernel.sh aarch64 dev
+./build-kernel.sh riscv64 dev
 ```
 
 ### Running Tests
 
 ```bash
-# Run all tests
-just test
+# Run all host-target tests (4,095+ passing)
+cargo test
 
 # Run specific test
 cargo test test_name
@@ -230,15 +231,13 @@ cargo test -- --nocapture
 
 ### Debugging
 
+See [docs/GDB-DEBUGGING.md](https://github.com/doublegate/VeridianOS/blob/main/docs/GDB-DEBUGGING.md) for detailed GDB debugging instructions. Quick start:
+
 ```bash
-# Debug x86_64
-just debug-x86_64
-
-# Debug AArch64
-just debug-aarch64
-
-# Debug RISC-V
-just debug-riscv64
+# Add -s -S to any QEMU command, then in another terminal:
+gdb-multiarch target/x86_64-veridian/debug/veridian-kernel
+(gdb) target remote :1234
+(gdb) continue
 ```
 
 ## Getting Help

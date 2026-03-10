@@ -19,7 +19,7 @@ pkill -9 -f qemu-system; sleep 2; qemu-system-x86_64 ...
 
 ## VeridianOS Overview
 
-Next-generation microkernel OS in Rust. Capability-based security, user-space drivers, multi-arch (x86_64, AArch64, RISC-V). All phases (0-8) complete, v0.16.3. See CLAUDE.local.md for current state.
+Next-generation microkernel OS in Rust. Capability-based security, user-space drivers, multi-arch (x86_64, AArch64, RISC-V). All phases (0-12) complete, v0.25.1. See CLAUDE.local.md for current state.
 
 ## Essential Commands
 
@@ -113,7 +113,7 @@ cargo clippy --target x86_64-unknown-none -p veridian-kernel -- -D warnings
 cargo clippy --target aarch64-unknown-none -p veridian-kernel -- -D warnings
 cargo clippy --target riscv64gc-unknown-none-elf -p veridian-kernel -- -D warnings
 
-# Host-target tests (3,993 passing)
+# Host-target tests (4,095+ passing)
 cargo test
 
 # NOTE: Automated kernel tests blocked by Rust toolchain lang items limitation
@@ -150,7 +150,14 @@ kernel/src/{arch/, mm/, sched/, cap/, ipc/, syscall/, process/, perf/, desktop/,
 drivers/          # User-space driver processes
 services/         # System services (VFS, network, CRI/CNI/CSI)
 userland/         # User applications and libraries
+  libc/           # C library shims
+  qt6/            # Qt 6 QPA plugin and shims
+  kf6/            # KDE Frameworks 6 backends
+  kwin/           # KWin compositor backend
+  plasma/         # Plasma Desktop components
+  integration/    # KDE integration tests
 tools/            # Build tools and utilities
+  cross/          # KDE cross-compilation scripts (15 build scripts)
 debug/            # Debug logs and scripts (gitignored)
 verification/     # Kani proofs + TLA+ specs
 ```
@@ -247,4 +254,4 @@ IPC <1us | Context switch <10us | Memory alloc <1us | Capability lookup O(1) | 1
 - **GitHub Pages**: <https://doublegate.github.io/VeridianOS/>
 - **mdBook**: `docs/book/src/` | Build: `mdbook build` in `docs/book/`
 - **Design docs**: `docs/design/{MEMORY-ALLOCATOR,IPC,SCHEDULER,CAPABILITY-SYSTEM}-DESIGN.md`
-- **TODO tracking**: `to-dos/{MASTER,PHASE[0-8],TESTING,ISSUES,RELEASE}_TODO.md`
+- **TODO tracking**: `to-dos/{MASTER,TESTING,ISSUES,RELEASE}_TODO.md` (completed phase TODOs in `to-dos/archive/`)

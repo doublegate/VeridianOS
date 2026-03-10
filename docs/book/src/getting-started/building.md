@@ -23,10 +23,6 @@ The easiest way to build VeridianOS using the automated build script:
 
 # Build release version
 ./build-kernel.sh all release
-
-# Alternative: using just
-just build
-just run
 ```
 
 ## Architecture-Specific Builds
@@ -38,9 +34,6 @@ just run
 ```bash
 # Recommended: using build script
 ./build-kernel.sh x86_64 dev
-
-# Using just
-just build-x86_64
 
 # Manual build (with kernel code model)
 cargo build --target targets/x86_64-veridian.json \
@@ -56,9 +49,6 @@ Output: `target/x86_64-veridian/debug/veridian-kernel`
 # Recommended: using build script
 ./build-kernel.sh aarch64 dev
 
-# Using just
-just build-aarch64
-
 # Manual build (standard bare metal target)
 cargo build --target aarch64-unknown-none \
     -p veridian-kernel
@@ -71,9 +61,6 @@ Output: `target/aarch64-unknown-none/debug/veridian-kernel`
 ```bash
 # Recommended: using build script
 ./build-kernel.sh riscv64 dev
-
-# Using just
-just build-riscv64
 
 # Manual build (standard bare metal target)
 cargo build --target riscv64gc-unknown-none-elf \
@@ -92,9 +79,6 @@ For optimized builds:
 # Using build script (recommended)
 ./build-kernel.sh all release
 
-# Using just
-just build-release
-
 # Manual for x86_64
 cargo build --release --target targets/x86_64-veridian.json \
     -p veridian-kernel \
@@ -104,7 +88,7 @@ cargo build --release --target targets/x86_64-veridian.json \
 ### Build All Architectures
 
 ```bash
-just build-all
+./build-kernel.sh all dev
 ```
 
 This builds debug versions for all three architectures.
@@ -191,8 +175,8 @@ rustup component add rust-src llvm-tools-preview
 If builds fail unexpectedly:
 ```bash
 # Clean and rebuild
-just clean
-just build
+cargo clean
+./build-kernel.sh all dev
 ```
 
 ## Build Performance
@@ -212,8 +196,7 @@ cargo build -j 4  # Use 4 cores
 
 The target directory can grow large. Clean periodically:
 ```bash
-just clean        # Clean debug builds
-just clean-all    # Clean everything
+cargo clean
 ```
 
 ## CI/CD Builds

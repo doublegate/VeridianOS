@@ -2,12 +2,13 @@
 
 ## Supported Versions
 
-VeridianOS is currently in pre-release development. Security updates will be provided for:
+VeridianOS is at v0.25.1 with all phases (0-12) complete. Security updates are provided for:
 
 | Version | Supported          |
 | ------- | ------------------ |
+| 0.25.x (latest) | :white_check_mark: |
 | main branch | :white_check_mark: |
-| < 1.0   | :x:                |
+| < 0.25  | :x:                |
 
 Once we reach 1.0, we will maintain security updates for the current major version and one previous major version.
 
@@ -74,44 +75,59 @@ When contributing to VeridianOS:
 - Never implement custom cryptography
 - Use well-established libraries
 - Follow current best practices
-- Prepare for post-quantum algorithms
 
 ### Memory Safety
 
 - Leverage Rust's memory safety
-- Minimize unsafe code
-- Document all safety invariants
+- Minimize unsafe code (7 justified `static mut` remaining)
+- Document all safety invariants (99%+ SAFETY comment coverage)
 - Use fuzzing for testing
 
 ## Security Features
 
-VeridianOS implements multiple layers of security:
+VeridianOS implements multiple layers of security (all complete as of v0.25.1):
 
 1. **Capability-based access control**
-   - Unforgeable object references
-   - Fine-grained permissions
-   - Principle of least privilege
+   - Unforgeable 64-bit capability tokens with generation counters
+   - Fine-grained permissions with O(1) lookup
+   - Hierarchical inheritance and cascading revocation
+   - Per-CPU capability cache
 
 2. **Memory protection**
    - W^X enforcement
-   - ASLR (Address Space Layout Randomization)
-   - Stack guards
+   - KASLR (Kernel Address Space Layout Randomization)
+   - Stack canaries and guards
    - Heap isolation
+   - SMEP/SMAP enforcement
 
-3. **Secure boot**
-   - UEFI Secure Boot support
-   - Measured boot with TPM
-   - Verified boot chain
+3. **Cryptographic services**
+   - ChaCha20-Poly1305, Ed25519, X25519, SHA-256
+   - Post-quantum cryptography: ML-KEM (Kyber), ML-DSA (Dilithium)
+   - Hardware CSPRNG (RDRAND with CPUID check)
+   - TLS 1.3, SSH, WireGuard VPN
 
-4. **Hardware security**
+4. **Mandatory access control**
+   - MAC policy parser with RBAC and MLS enforcement
+   - Audit logging framework
+   - Secure boot chain verification
+
+5. **Hardware security**
    - TPM integration
-   - Hardware security module support
-   - Trusted execution environments
+   - Intel TDX, AMD SEV-SNP, ARM CCA support
+   - IOMMU for DMA protection
+   - Retpoline for Spectre mitigation
 
-5. **Network security**
+6. **Network security**
+   - Stateful firewall with NAT/conntrack
    - Mandatory TLS for system services
    - Certificate pinning
    - Network isolation
+
+7. **Kernel hardening**
+   - Speculative execution mitigations (retpoline)
+   - Checked arithmetic in critical paths
+   - Password history with salted hashes and constant-time comparison
+   - Capability cache invalidation before revocation
 
 ## Development Security
 
@@ -129,7 +145,7 @@ Our threat model considers:
 - Fuzzing with AFL++ and libFuzzer
 - Static analysis with clippy and cargo-audit
 - Dynamic analysis with sanitizers
-- Penetration testing before releases
+- Security scan completed (v0.20.2): 7 findings remediated
 
 ### Incident Response
 

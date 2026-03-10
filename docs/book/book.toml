@@ -3,7 +3,6 @@ title = "VeridianOS Developer Guide"
 authors = ["VeridianOS Contributors"]
 description = "Comprehensive guide to VeridianOS development"
 language = "en"
-multilingual = false
 src = "src"
 
 [build]
@@ -20,7 +19,6 @@ default-theme = "navy"
 preferred-dark-theme = "navy"
 smart-punctuation = true
 mathjax-support = false
-copy-fonts = true
 additional-css = ["../book-theme/veridian.css"]
 additional-js = []
 no-section-label = false

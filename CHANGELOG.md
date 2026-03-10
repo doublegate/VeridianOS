@@ -2,6 +2,55 @@
 
 ---
 
+## [v0.25.2] - 2026-03-10
+
+### v0.25.2: Documentation Audit -- Archive Reorganization, mdBook Refresh, and File Naming Standardization
+
+Comprehensive documentation overhaul across 6 sprints: archived 105+ stale files into categorized subdirectories, rebuilt the mdBook with 8 new phase chapters and refreshed content across all existing chapters, deleted previously-committed mdBook build artifacts from version control, and standardized file naming conventions across all documentation directories (47 renames with 19 cross-reference updates). Zero functional code changes -- documentation and project hygiene only.
+
+#### Documentation Archive Reorganization (Sprints 1-3)
+
+- **Archive structure**: Created `docs/archive/` with 7 subdirectories: `phase_specs/`, `sessions/`, `reports/`, `ai-analysis/`, `book/`, `doc_updates/`, `format/`
+- **105+ files archived**: Moved stale phase specs (7), session logs (4), completion reports (25+), AI analysis docs (5), and historical records into categorized archive
+- **Archive README**: `docs/archive/README.md` documents structure, contents, and usage guidelines
+- **TO-DO archive**: Moved 15 completed phase TODO files to `to-dos/archive/`
+
+#### mdBook Refresh (Sprint 4)
+
+- **8 new phase chapters**: Added `phase6.5-rust-compiler.md`, `phase7-production.md`, `phase7.5-followon.md`, `phase8-nextgen.md`, `phase9-kde-porting.md`, `phase10-kde-remediation.md`, `phase11-kde-integration.md`, `phase12-kde-crosscompile.md` to `docs/book/src/phases/`
+- **SUMMARY.md updated**: All 13 phases (0-12) now listed in mdBook table of contents
+- **Content refresh**: Updated `introduction.md`, `building.md`, `running.md`, `testing.md`, `performance.md`, `how-to.md`, `changelog.md`, `status.md`, `roadmap.md`, `security.md`, and all 4 design documents (`capability-system.md`, `ipc-system.md`, `memory-allocator.md`, `scheduler.md`)
+- **book.toml updated**: mdBook configuration refreshed
+- **Build artifacts purged**: Removed 92 previously-committed `docs/book/book/` HTML/CSS/JS/font files from version control (directory already in `.gitignore`)
+
+#### File Naming Standardization (Sprint 6)
+
+- **47 files renamed** to enforce one naming convention per directory (UPPER-KEBAB-CASE for docs, reference, archive, debug)
+- **docs/ top-level** (7): `architecture.md` -> `ARCHITECTURE.md`, `capability-flow.md` -> `CAPABILITY-FLOW.md`, `design-rationale.md` -> `DESIGN-RATIONALE.md`, `invariants.md` -> `INVARIANTS.md`, `kernel-entry-points.md` -> `KERNEL-ENTRY-POINTS.md`, `reading-guide.md` -> `READING-GUIDE.md`, `unsafe-policy.md` -> `UNSAFE-POLICY.md`
+- **docs/reference/** (28): Dropped `VeridianOS_` prefix from 21 files, uppercased 7 lowercase files in subdirectories (`kernel_issue/`, `os-development/`)
+- **docs/archive/ai-analysis/** (5): Replaced space-separated names with UPPER-KEBAB (`Claude-4 - VeridianOS Future Dev.md` -> `CLAUDE-4-VERIDIAN-FUTURE-DEV.md`, etc.)
+- **docs/archive/reports/** (3): Uppercased `phase4-*.md` outliers
+- **docs/status/** (1) + **docs/fixes/** (1) + **debug/** (2): Uppercased lowercase outliers
+- **19 cross-reference updates** across 7 files: `README.md` (6 links), `docs/AGENTS.md` (1), `docs/READING-GUIDE.md` (6), `docs/UNSAFE-POLICY.md` (1), `docs/archive/GEMINI.md` (2), `docs/archive/README.md` (listing), `docs/reference/CONTRIBUTING-GUIDE.md` (1)
+- **Excluded from renames** (tool-specific conventions): `docs/book/src/` (mdBook lowercase-kebab), `to-dos/` (UPPER_TODO), `.github/` and `.claude/commands/` (lowercase)
+
+#### Project Hygiene
+
+- **CONTRIBUTING.md**: Updated for documentation audit changes
+- **SECURITY.md**: Refreshed security policy
+- **CLAUDE.md**: Updated project guidance
+- **Cargo.lock**: Regenerated after version bump
+- **README.md**: Updated version (v0.25.2), release count (83), phase count (0-12)
+
+#### Verified
+
+- `cargo fmt` -- no changes
+- `cargo clippy` -- 0 warnings on all 3 bare-metal targets (x86_64, AArch64, RISC-V)
+- All cross-references verified: 0 broken links to old lowercase filenames in active docs
+- 0 `VeridianOS_` prefix files remaining in `docs/reference/`
+
+---
+
 ## [v0.25.1] - 2026-03-10
 
 ### v0.25.1: KDE Session Launch Fix -- Direct ELF Binary Execution

@@ -1,8 +1,20 @@
 # VeridianOS Scheduler Design Document
 
-**Version**: 1.3  
-**Date**: 2025-06-11  
-**Status**: Phase 1 Implementation In Progress (~35% Complete)
+**Version**: 1.4
+**Date**: 2026-03-10
+**Status**: Implementation Complete (100%)
+
+### Current Implementation Status (v0.25.1)
+
+All scheduler features fully implemented and benchmarked:
+- CFS (Completely Fair Scheduler) with multi-level priority queues
+- SMP support with per-CPU run queues and work-stealing
+- CPU hotplug (cpu_up/cpu_down) and Inter-Processor Interrupts
+- NUMA-aware load balancing with task migration
+- EDF (Earliest Deadline First) real-time scheduling
+- Priority inheritance protocol (PiMutex)
+- Cache-aware allocation, false sharing prevention
+- Benchmarks (QEMU x86_64+KVM): sched_current 77ns, context switch <10us
 
 ## Executive Summary
 

@@ -1,9 +1,19 @@
 # VeridianOS Memory Allocator Design Document
 
-**Version**: 1.3  
-**Date**: 2025-06-17  
-**Status**: Implementation Complete (100%)  
-**Latest Release**: v0.2.1 - All architectures boot to Stage 6
+**Version**: 1.4
+**Date**: 2026-03-10
+**Status**: Implementation Complete (100%)
+**Latest Release**: v0.25.1 - All phases (0-12) complete
+
+### Current Implementation Status (v0.25.1)
+
+All memory allocator features fully implemented and benchmarked:
+- Hybrid bitmap+buddy frame allocator with NUMA awareness
+- Per-CPU page frame cache (64-frame) for fast allocation
+- TLB shootdown reduction via `TlbFlushBatch`
+- Benchmarks (QEMU x86_64+KVM): frame_alloc_global 1,525ns, frame_alloc_1 (per-CPU) 2,215ns
+- Memory zones (DMA, Normal), kernel heap with slab allocator
+- Virtual Address Space management with user-space safety
 
 ## Executive Summary
 

@@ -1,8 +1,20 @@
 # VeridianOS Capability System Design Document
 
-**Version**: 1.1  
-**Date**: 2025-06-11  
-**Status**: Partially Implemented (~45% Complete)
+**Version**: 1.2
+**Date**: 2026-03-10
+**Status**: Implementation Complete (100%)
+
+### Current Implementation Status (v0.25.1)
+
+All capability system features fully implemented and benchmarked:
+- 64-bit packed capability tokens with generation counters
+- Two-level capability space with O(1) lookup
+- Per-CPU capability cache for hot path performance
+- Hierarchical inheritance with configurable policies (fork/exec)
+- Cascading revocation via delegation tree tracking
+- Full integration with IPC, memory operations, and system calls
+- Benchmarks (QEMU x86_64+KVM): cap_validate 57ns
+- Security scan (v0.20.2): cache invalidation before revocation fixed
 
 ## Executive Summary
 

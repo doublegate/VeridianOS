@@ -1,8 +1,18 @@
 # VeridianOS IPC Design Document
 
-**Version**: 1.3  
-**Date**: 2025-01-09  
-**Status**: Implementation In Progress (~45% complete)
+**Version**: 1.4
+**Date**: 2026-03-10
+**Status**: Implementation Complete (100%)
+
+### Current Implementation Status (v0.25.1)
+
+All IPC features fully implemented and benchmarked:
+- Synchronous/asynchronous channels with zero-copy shared memory
+- Fast path register-based IPC: <1us latency achieved
+- Benchmarks (QEMU x86_64+KVM): syscall_getpid 79ns, ipc_stats_read 44ns
+- Global O(1) channel registry, token bucket rate limiting
+- NUMA-aware message routing, capability-integrated send/receive
+- Direct IPC context switching for priority inheritance
 
 ## Executive Summary
 

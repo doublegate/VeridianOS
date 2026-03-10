@@ -10,18 +10,22 @@
 
 ## Welcome to VeridianOS
 
-VeridianOS is a modern microkernel operating system written entirely in Rust, emphasizing security, modularity, and performance. This book serves as the comprehensive guide for understanding, building, and contributing to VeridianOS.
+VeridianOS is a modern microkernel operating system written entirely in Rust, emphasizing security, modularity, and performance. All 13 development phases (0-12) are complete as of v0.25.1, including full KDE Plasma 6 desktop integration cross-compiled from source.
+
+This book serves as the comprehensive guide for understanding, building, and contributing to VeridianOS.
 
 ## Key Features
 
-- 🛡️ **Capability-based security** - Unforgeable tokens for all resource access
-- 🚀 **Microkernel architecture** - Minimal kernel with services in user space
-- 🦀 **Written in Rust** - Memory safety without garbage collection
-- ⚡ **High performance** - Lock-free algorithms, zero-copy IPC
-- 🔧 **Multi-architecture** - x86_64, AArch64, and RISC-V support
-- 🔒 **Security focused** - Mandatory access control, secure boot, hardware security
-- 📦 **Modern package management** - Source and binary package support
-- 🖥️ **Wayland compositor** - Modern display server with GPU acceleration
+- **Capability-based security** - Unforgeable 64-bit tokens for all resource access with O(1) lookup
+- **Microkernel architecture** - Minimal kernel with drivers and services in user space
+- **Written in Rust** - Memory safety without garbage collection, 99%+ SAFETY comment coverage
+- **High performance** - Lock-free algorithms, zero-copy IPC (<1us latency)
+- **Multi-architecture** - x86_64, AArch64, and RISC-V support (all boot to Stage 6)
+- **Security focused** - Post-quantum crypto (ML-KEM, ML-DSA), KASLR, SMEP/SMAP, MAC/RBAC
+- **KDE Plasma 6 desktop** - Cross-compiled from source with Qt 6.8.3, KDE Frameworks 6.12.0
+- **Self-hosting** - Native GCC 14.2, binutils, make, ninja, vpkg toolchain
+- **Modern package management** - Source and binary package support
+- **153 shell builtins** - Full-featured vsh shell with job control and scripting
 
 ## Why VeridianOS?
 
@@ -43,42 +47,16 @@ VeridianOS follows these core principles:
 
 ## Current Status
 
-### 🎉 **Phase 1: Microkernel Core** (100% Complete! - v0.2.0)
+**Version**: v0.25.1 (March 10, 2026) | **All Phases Complete** (0-12)
 
-**Released**: June 12, 2025  
-**Status**: COMPLETE ✅  
-**Latest Release**: v0.2.1 (June 17, 2025) - Maintenance release with all three architectures booting to Stage 6
+- 4,095+ tests passing across host-target and kernel boot tests
+- 3 architectures booting to Stage 6 BOOTOK with 29/29 tests each
+- CI pipeline: 11/11 jobs passing
+- Zero clippy warnings across all targets
+- KDE Plasma 6 cross-compiled from source (kwin_wayland, plasmashell, dbus-daemon)
+- 153 shell builtins, 9 desktop apps, 8 settings panels
 
-- ✅ Memory Management (100%): Hybrid allocator, VMM, kernel heap
-- ✅ Process Management (100%): Full lifecycle, context switching
-- ✅ IPC System (100%): <1μs latency, zero-copy transfers
-- ✅ Scheduler (100%): CFS, SMP support, load balancing
-- ✅ Capability System (100%): Hierarchical inheritance, per-CPU cache
-
-### Recent Improvements (June 17, 2025)
-- **v0.2.1 Maintenance Release**:
-  - ✅ All three architectures (x86_64, AArch64, RISC-V) boot to Stage 6
-  - ✅ AArch64 assembly-only approach successfully bypasses LLVM loop compilation bugs
-  - ✅ Zero warnings and clippy-clean across all architectures
-  - ✅ Documentation reorganized with session docs moved to `docs/archive/sessions/`
-- **DEEP-RECOMMENDATIONS Implementation (9 of 9 Complete)**:
-  - ✅ Bootstrap module fixing boot sequence circular dependency
-  - ✅ AArch64 calling convention fixed with proper BSS clearing
-  - ✅ Atomic operations replacing unsafe static access
-  - ✅ Capability token overflow protection implemented
-  - ✅ Comprehensive user pointer validation
-  - ✅ Custom test framework bypassing lang_items conflicts
-  - ✅ Error type migration from string literals to KernelError enum
-  - ✅ **COMPLETED**: Comprehensive RAII patterns for resource cleanup (TODO #8)
-  - ✅ **COMPLETED**: AArch64 workarounds for LLVM bugs
-- **Documentation Organization**: Created archive structure for historical docs
-- **Phase 2 Readiness**: All components stable, ready for user space foundation (TODO #9)
-
-### 🎉 **Phase 0: Foundation & Tooling** (100% Complete! - v0.1.0)
-
-**Released**: June 7, 2025  
-**Status**: COMPLETE ✅
-
+See [Project Status](./project/status.md) for detailed metrics and [Roadmap](./project/roadmap.md) for phase completion history.
 
 ## What This Book Covers
 
@@ -90,7 +68,7 @@ This book is organized into several sections:
 - **Platform Support**: Architecture-specific implementation details
 - **API Reference**: Complete system call and kernel API documentation
 - **Design Documents**: Detailed specifications for major subsystems
-- **Development Phases**: Roadmap and implementation timeline
+- **Development Phases**: All 13 phases from foundation to KDE cross-compilation
 
 ## Join the Community
 
@@ -103,5 +81,3 @@ VeridianOS is an open-source project welcoming contributions from developers wor
 ## License
 
 VeridianOS is dual-licensed under MIT and Apache 2.0 licenses. See the LICENSE files for details.
-
-Let's build the future of operating systems together!

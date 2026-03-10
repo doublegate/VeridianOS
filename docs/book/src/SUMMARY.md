@@ -70,6 +70,14 @@
 - [Phase 4: Package Ecosystem](./phases/phase4-packages.md)
 - [Phase 5: Performance](./phases/phase5-performance.md)
 - [Phase 6: Advanced Features](./phases/phase6-advanced.md)
+- [Phase 6.5: Rust Compiler](./phases/phase6.5-rust-compiler.md)
+- [Phase 7: Production Readiness](./phases/phase7-production.md)
+- [Phase 7.5: Follow-On Features](./phases/phase7.5-followon.md)
+- [Phase 8: Next-Generation](./phases/phase8-nextgen.md)
+- [Phase 9: KDE Plasma 6 Porting](./phases/phase9-kde-porting.md)
+- [Phase 10: KDE Remediation](./phases/phase10-kde-remediation.md)
+- [Phase 11: KDE Integration](./phases/phase11-kde-integration.md)
+- [Phase 12: KDE Cross-Compilation](./phases/phase12-kde-crosscompile.md)
 
 # Project Information
 

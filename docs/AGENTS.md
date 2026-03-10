@@ -24,7 +24,7 @@
 ## Coding Style & Naming Conventions
 - Rust 2021 edition; `rustfmt.toml` enforces 100-col, 4 spaces, reordered imports.  
 - Name patterns: `snake_case` (modules/functions), `CamelCase` (types), `SCREAMING_SNAKE_CASE` (consts).  
-- Unsafe policy: every unsafe block needs `// SAFETY:` explaining invariants and preconditions; prefer the `GlobalState` pattern over `static mut` (only 7 justified remain). See `docs/unsafe-policy.md` for the binding rules.  
+- Unsafe policy: every unsafe block needs `// SAFETY:` explaining invariants and preconditions; prefer the `GlobalState` pattern over `static mut` (only 7 justified remain). See `docs/UNSAFE-POLICY.md` for the binding rules.  
 - Public APIs document invariants and capability expectations.  
 - Run `just fmt` and `just clippy` before pushing; CI treats warnings as failures.
 

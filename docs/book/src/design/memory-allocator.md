@@ -1,5 +1,9 @@
 # Memory Allocator Design
 
+> **Authoritative specification**: [docs/design/MEMORY-ALLOCATOR-DESIGN.md](https://github.com/doublegate/VeridianOS/blob/main/docs/design/MEMORY-ALLOCATOR-DESIGN.md)
+>
+> **Implementation Status**: Complete as of v0.25.1. Benchmarked at 1,525ns (global) / 2,215ns (per-CPU) frame allocation.
+
 The VeridianOS memory allocator uses a hybrid approach combining buddy and bitmap allocators for optimal performance across different allocation sizes. This design achieves < 1μs allocation latency while minimizing fragmentation.
 
 ## Design Goals

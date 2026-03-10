@@ -85,13 +85,13 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 <img src="images/veridian-architecture.png" alt="VeridianOS Architecture Diagram" width="100%" />
 </div>
 
-All drivers and services run in user space with capability-controlled access to hardware. The microkernel provides only memory management, scheduling, IPC, and the capability system. See [Architecture Overview](docs/ARCHITECTURE-OVERVIEW.md) for detailed design documentation and [Invariants](docs/invariants.md) for the authoritative list of architectural invariants.
+All drivers and services run in user space with capability-controlled access to hardware. The microkernel provides only memory management, scheduling, IPC, and the capability system. See [Architecture Overview](docs/ARCHITECTURE-OVERVIEW.md) for detailed design documentation and [Invariants](docs/INVARIANTS.md) for the authoritative list of architectural invariants.
 
 ---
 
 ## Project Status
 
-**Version**: v0.25.1 | **All development phases complete (0-11)** | **82 releases published**
+**Version**: v0.25.2 | **All development phases complete (0-12)** | **83 releases published**
 
 | Metric | Value |
 | --- | --- |
@@ -246,10 +246,10 @@ For detailed build instructions, see [BUILD-INSTRUCTIONS.md](docs/BUILD-INSTRUCT
 
 ## How to Read the Code
 
-1. [Invariants](docs/invariants.md) -- Architectural invariants (start here)
-2. [Architecture](docs/architecture.md) -- System architecture
-3. [Kernel Entry Points](docs/kernel-entry-points.md) -- Where execution begins
-4. [Capability Flow](docs/capability-flow.md) -- How capabilities govern services and drivers
+1. [Invariants](docs/INVARIANTS.md) -- Architectural invariants (start here)
+2. [Architecture](docs/ARCHITECTURE.md) -- System architecture
+3. [Kernel Entry Points](docs/KERNEL-ENTRY-POINTS.md) -- Where execution begins
+4. [Capability Flow](docs/CAPABILITY-FLOW.md) -- How capabilities govern services and drivers
 
 Helpful diagrams:
 
@@ -262,7 +262,7 @@ Helpful diagrams:
 
 Unsafe Rust is permitted only to enforce higher-level invariants and is strictly controlled. Every unsafe block requires a `// SAFETY:` comment documenting the invariant it upholds. Coverage exceeds 100% (410 comments for 389 unsafe blocks).
 
-See [Unsafe Policy](docs/unsafe-policy.md) for the full policy.
+See [Unsafe Policy](docs/UNSAFE-POLICY.md) for the full policy.
 
 ---
 

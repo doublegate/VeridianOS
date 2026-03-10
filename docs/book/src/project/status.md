@@ -1,344 +1,120 @@
 # Project Status
 
-## Current Status: Phase 1 Complete - Ready for Phase 2
+## Current Status: All Phases Complete (0-12)
 
-**Latest Release**: v0.2.1 - Maintenance Release  
-**Released**: June 17, 2025  
-**Previous Release**: v0.2.0 - Microkernel Core (June 12, 2025)  
-**Current Phase**: Phase 1 - Microkernel Core COMPLETE ✓  
-**Phase 1 Progress**: 100% Complete - All subsystems fully implemented!  
-**Last Updated**: June 17, 2025
+**Latest Release**: v0.25.1 (March 10, 2026)
+**All 13 Phases**: COMPLETE
+**Tests**: 4,095+ passing
+**CI Pipeline**: 11/11 jobs green
 
-VeridianOS has successfully completed Phase 1 (Microkernel Core) with all major subsystems fully implemented! The project achieved 100% completion of IPC system with <1μs latency, memory management with user-space safety, process management with full lifecycle support, CFS scheduler with SMP and CPU hotplug, and a complete capability system with inheritance and revocation. The microkernel is now ready for Phase 2: User Space Foundation.
+## Phase Completion Summary
 
-### Recent Improvements (June 17, 2025)
-- **v0.2.1 Maintenance Release**:
-  - ✅ All three architectures (x86_64, AArch64, RISC-V) boot to Stage 6
-  - ✅ AArch64 assembly-only approach successfully bypasses LLVM loop compilation bugs
-  - ✅ Zero warnings and clippy-clean across all architectures
-  - ✅ Documentation reorganized with session docs moved to `docs/archive/sessions/`
-- **DEEP-RECOMMENDATIONS Implementation (9 of 9 Complete)**:
-  - ✅ Bootstrap module fixing boot sequence circular dependency
-  - ✅ AArch64 calling convention fixed with proper BSS clearing
-  - ✅ Atomic operations replacing unsafe static access
-  - ✅ Capability token overflow protection implemented
-  - ✅ Comprehensive user pointer validation
-  - ✅ Custom test framework to bypass lang_items conflicts
-  - ✅ Error type migration from string literals to KernelError enum
-  - ✅ **COMPLETED**: Comprehensive RAII patterns for resource cleanup (TODO #8)
-  - ✅ **COMPLETED**: AArch64 workarounds for LLVM bugs
-- **Documentation Organization**: Archive structure created for historical docs
-- **Code Quality**: Fixed all clippy warnings including lifetime elision
-- **Phase 2 Readiness**: All Phase 1 components stable, ready for user space foundation (TODO #9)
+| Phase | Description | Version | Date | Status |
+|-------|-------------|---------|------|--------|
+| 0 | Foundation & Tooling | v0.1.0 | Jun 2025 | COMPLETE |
+| 1 | Microkernel Core | v0.2.0 | Jun 2025 | COMPLETE |
+| 2 | User Space Foundation | v0.3.2 | Feb 2026 | COMPLETE |
+| 3 | Security Hardening | v0.3.2 | Feb 2026 | COMPLETE |
+| 4 | Package Ecosystem | v0.4.0 | Feb 2026 | COMPLETE |
+| 5 | Performance Optimization | v0.16.2 | Mar 2026 | COMPLETE |
+| 5.5 | Infrastructure Bridge | v0.5.13 | Feb 2026 | COMPLETE |
+| 6 | Advanced Features & GUI | v0.6.4 | Feb 2026 | COMPLETE |
+| 6.5 | Rust Compiler + vsh Shell | v0.7.0 | Feb 2026 | COMPLETE |
+| 7 | Production Readiness (6 Waves) | v0.10.0 | Mar 2026 | COMPLETE |
+| 7.5 | Follow-On Features (8 Waves) | v0.16.0 | Mar 2026 | COMPLETE |
+| 8 | Next-Generation (8 Waves) | v0.16.3 | Mar 2026 | COMPLETE |
+| 9 | KDE Plasma 6 Porting | v0.22.0 | Mar 2026 | COMPLETE |
+| 10 | KDE Limitations Remediation | v0.23.0 | Mar 2026 | COMPLETE |
+| 11 | KDE Default Desktop Integration | v0.24.0 | Mar 2026 | COMPLETE |
+| 12 | KDE Cross-Compilation | v0.25.0 | Mar 2026 | COMPLETE |
 
-## Phase 0 Achievements
+## Architecture Boot Status
 
-### Infrastructure ✅
-- **Build System**: Cargo workspace with custom targets
-- **CI/CD Pipeline**: GitHub Actions 100% passing
-- **Documentation**: 25+ comprehensive guides
-- **Testing Framework**: No-std tests with benchmarks
-- **Version Control**: Git hooks and PR templates
-
-### Technical Milestones ✅
-- **Multi-Architecture Support**: x86_64, AArch64, RISC-V
-- **Boot Success**: All architectures boot to kernel_main
-- **Serial I/O**: Working on all platforms
-- **GDB Debugging**: Full remote debugging support
-- **Code Quality**: Zero warnings, all checks passing
-
-### Release Artifacts ✅
-- Kernel binaries for all architectures
-- Debug symbols for x86_64
-- Automated release process
-- GitHub Pages documentation
-
-## Architecture Support Matrix
+All 3 architectures boot to Stage 6 BOOTOK with 29/29 tests passing.
 
 | Component | x86_64 | AArch64 | RISC-V |
-|-----------|--------|---------|---------|
-| Build | ✅ | ✅ | ✅ |
-| Boot | ✅ | ⚠️ | ✅ |
-| Serial Output | ✅ | ✅ | ✅ |
-| GDB Debug | ✅ | ✅ | ✅ |
-| Tests | ✅ | ✅ | ✅ |
+|-----------|--------|---------|--------|
+| Build | PASS | PASS | PASS |
+| Boot (Stage 6) | PASS | PASS | PASS |
+| Serial Output | PASS | PASS | PASS |
+| GDB Debug | PASS | PASS | PASS |
+| Tests (29/29) | PASS | PASS | PASS |
+| Clippy (0 warnings) | PASS | PASS | PASS |
 
-**Boot Notes** (v0.2.1):
-- x86_64: Boots successfully to Stage 6, reaches scheduler and bootstrap task
-- RISC-V: Boots successfully to Stage 6, reaches idle loop  
-- AArch64: Boots to Stage 6 with assembly-only workarounds for LLVM loop bugs
+**x86_64 extras**: UEFI GOP 1280x800 BGR, Ring 3 user-space entry, 1280x800 desktop, 6 coreutils, BusyBox 95 applets, 512MB BlockFS, native compile, /sbin/init PID 1, KDE Plasma 6 cross-compiled binaries loaded into Ring 3.
 
-## Development Metrics
+## Code Quality Metrics
 
-### Code Quality
-- **Format Check**: ✅ Passing
-- **Clippy Lints**: ✅ Zero warnings
-- **Security Audit**: ✅ No vulnerabilities
-- **Documentation**: ✅ 100% public API
+| Metric | Value |
+|--------|-------|
+| Host-target tests | 4,095+ passing |
+| Boot tests | 29/29 (all 3 architectures) |
+| CI jobs | 11/11 passing |
+| Clippy warnings | 0 (all targets) |
+| `static mut` | 7 justified (early boot, per-CPU, heap) |
+| `Err("...")` string literals | 0 |
+| `Result<T, String>` | 0 (5 proper error enums) |
+| Soundness bugs | 0 |
+| SAFETY comment coverage | 99%+ |
+| `dead_code` annotations | ~107 (all justified) |
+| Longest function | ~180 LOC |
+| Shell builtins | 153 |
+| Desktop apps | 9 |
+| Settings panels | 8 |
 
-### Build Performance
-- **Clean Build**: ~2 minutes
-- **Incremental Build**: < 30 seconds
-- **CI Pipeline**: ~5 minutes total
-- **Artifact Size**: < 10MB per architecture
+## Performance Benchmarks (v0.21.0)
 
-## Phase Timeline
+Measured on QEMU x86_64 with KVM (i9-10850K):
 
-### Phase 0: Foundation (Complete) ✅
-- Development environment
-- Build infrastructure
-- CI/CD pipeline
-- Documentation framework
-- Testing foundation
+| Benchmark | Result | Target | Status |
+|-----------|--------|--------|--------|
+| syscall_getpid | 79ns | <500ns | PASS |
+| cap_validate | 57ns | <100ns | PASS |
+| atomic_counter | 34ns | -- | PASS |
+| ipc_stats_read | 44ns | -- | PASS |
+| sched_current | 77ns | -- | PASS |
+| frame_alloc_global | 1,525ns | <2,000ns | PASS |
+| frame_alloc_1 (per-CPU) | 2,215ns | <2,000ns | MARGINAL |
 
-### Phase 1: Microkernel Core (COMPLETE) ✓
-**Started**: June 8, 2025
+6/7 benchmarks meet or exceed Phase 5 targets.
 
-**IPC System (100% Complete)**:
-- ✅ Synchronous message passing
-- ✅ Fast path optimization (<5μs)
-- ✅ Zero-copy transfers
-- ✅ Capability integration
-- ✅ System call interface
-- ✅ Global registry with O(1) lookup
-- ✅ Asynchronous channels
-- ✅ Rate limiting for DoS protection
-- ✅ Performance tracking
-- ✅ IPC tests and benchmarks restored
-- ✅ Full integration with scheduler
-- ✅ Integration tests with full system
-- ✅ IPC-Capability integration complete (June 11, 2025)
+## Self-Hosting Status
 
-**Memory Management (100% Complete)**:
-- ✅ Hybrid frame allocator (bitmap + buddy system)
-- ✅ NUMA-aware allocation support
-- ✅ Performance statistics tracking
-- ✅ Virtual memory manager with 4-level page tables
-- ✅ Kernel heap allocator (slab + linked list)
-- ✅ Memory zones (DMA, Normal)
-- ✅ TLB shootdown for multi-core systems
-- ✅ Page fault handling infrastructure
-- ✅ Reserved memory region tracking
-- ✅ Bootloader memory map integration
-✅ Virtual Address Space (VAS) cleanup and user-space safety
-✅ User-kernel memory validation with translate_address()
-✅ Frame deallocation in VAS::destroy()
+All self-hosting tiers (0-7) complete as of v0.5.0:
+- GCC 14.2, binutils 2.43, make, ninja
+- vpkg package manager
+- BusyBox 208/208 tests passing
+- Native compilation on VeridianOS
 
-**Process Management (100% Complete) ✅**:
-- ✅ Process Control Block (PCB) implementation
-- ✅ Thread management with ThreadContext trait
-- ✅ Context switching for all architectures
-- ✅ Process lifecycle management
-- ✅ Global process table with O(1) lookup
-- ✅ Synchronization primitives (Mutex, Semaphore, CondVar, RwLock, Barrier)
-- ✅ Memory management integration
-- ✅ IPC integration with blocking/waking
-- ✅ Process system calls (create, exit, wait, exec, fork, kill)
-- ✅ Thread-scheduler state synchronization
-- ✅ Thread cleanup on exit
-- ✅ CPU affinity enforcement
-- Deferred: Priority inheritance, signal handling, process groups
+## KDE Plasma 6 Status (v0.25.1)
 
-**Scheduler (100% Complete)**:
-- ✅ Core scheduler structure with round-robin algorithm
-- ✅ Idle task creation and management
-- ✅ Timer setup for all architectures (10ms tick)
-- ✅ Process/Thread to Task integration with bidirectional linking
-- ✅ Basic SMP support with per-CPU data
-- ✅ CPU affinity enforcement in all scheduling
-- ✅ Load balancing framework (basic)
-- ✅ Thread cleanup on exit
-- ✅ IPC blocking/waking integration
-- ✅ Thread state synchronization
-- ✅ Priority-based scheduling with multi-level queues
-- ✅ CFS (Completely Fair Scheduler) implementation
-- ✅ Full task migration between CPUs
-- ✅ SMP support with per-CPU run queues
-- ✅ CPU hotplug support (cpu_up/cpu_down)
-- ✅ Inter-Processor Interrupts (IPI) for all architectures
+Cross-compiled from source using musl-based static pipeline:
+- **kwin_wayland**: 64MB stripped, loads into Ring 3 (4 LOAD segments, ~66MB VA)
+- **plasmashell**: 59MB stripped
+- **dbus-daemon**: 886KB
+- **Rootfs**: 180MB BlockFS image (512 inodes)
+- Qt 6.8.3, KDE Frameworks 6.12.0, Mesa 24.2.8 (softpipe), Wayland 1.23.1
 
-**Capability System (100% Complete)**:
-- ✅ 64-bit packed capability tokens
-- ✅ Two-level capability space with O(1) lookup
-- ✅ Rights management (read, write, execute, grant, derive)
-- ✅ Object references for all kernel objects
-- ✅ IPC integration with permission validation
-- ✅ Memory operation capability checks
-- ✅ Capability inheritance for fork/exec with policies
-- ✅ Cascading revocation with delegation tree tracking
-- ✅ Per-CPU capability cache for performance
-- ✅ System call capability enforcement
-- ✅ Full process table integration
+Current state: ELF loader maps kwin_wayland into user memory, musl `_start` entry point reached. Expected double-fault at syscall boundary (kernel syscall gaps pending for v1.0.0).
 
-### Phase 2: User Space Foundation
-- Init system
-- Device drivers
-- File system
-- Network stack
-- POSIX compatibility
+## Verification Infrastructure
 
-### Phase 3: Security Hardening
-- Mandatory access control
-- Secure boot
-- Cryptographic services
-- Hardware security
+- 38 Kani proofs for critical kernel paths
+- 6 TLA+ specifications (boot chain, IPC, memory, capabilities)
+- TLC model checking configurations
+- `scripts/verify.sh` runner
 
-### Phase 4: Package Ecosystem
-- Package manager
-- Ports system
-- Binary packages
-- Repository infrastructure
+## Next Steps
 
-### Phase 5: Performance Optimization
-- Kernel optimizations
-- I/O performance
-- Memory performance
-- Profiling tools
-
-### Phase 6: Advanced Features
-- GUI support
-- Desktop environment
-- Virtualization
-- Cloud native features
-
-## Next Immediate Tasks
-
-### Current Sprint: IPC Completion (Weeks 1-3)
-- [x] Synchronous message passing ✅
-- [x] Fast path implementation ✅
-- [x] Zero-copy transfers ✅
-- [x] Asynchronous channels ✅
-- [x] Performance tracking ✅
-- [x] IPC tests and benchmarks ✅
-- [ ] Full scheduler integration
-- [ ] System-wide integration tests
-
-### Next Sprint: Memory Management (Weeks 4-6) - COMPLETE ✅
-- [x] Implement bitmap allocator ✅
-- [x] Implement buddy allocator ✅
-- [x] Create hybrid allocator ✅
-- [x] Add NUMA support ✅
-- [x] Virtual memory management ✅
-- [x] Kernel heap allocator ✅
-- [x] TLB management ✅
-- [x] Memory zones ✅
-- [x] Page fault handling ✅
-
-### Following Sprint: Process Management (Weeks 7-9)
-- [ ] Process creation
-- [ ] Thread support
-- [ ] Context switching
-- [ ] Process termination
-
-### Final Sprint: Integration (Weeks 10-12)
-- [ ] Full capability system
-- [ ] Scheduler integration
-- [ ] System call refinement
-- [ ] Performance optimization
+- **v1.0.0**: Final release with kernel syscall gap remediation
+- Real hardware testing
+- Community contributions
+- llvmpipe GPU upgrade
+- Upstream KDE cross-compilation patches
 
 ## Project Resources
 
-### Documentation
-- [Architecture Overview](../architecture/overview.md)
-- [Development Guide](../development/organization.md)
-- [API Reference](../api/kernel.md)
-- [Contributing Guide](../contributing/how-to.md)
-
-### Communication
 - **GitHub**: [github.com/doublegate/VeridianOS](https://github.com/doublegate/VeridianOS)
-- **Issues**: [GitHub Issues](https://github.com/doublegate/VeridianOS/issues)
+- **GitHub Pages**: [doublegate.github.io/VeridianOS](https://doublegate.github.io/VeridianOS)
+- **CHANGELOG**: [CHANGELOG.md](https://github.com/doublegate/VeridianOS/blob/main/CHANGELOG.md)
 - **Discord**: [discord.gg/veridian](https://discord.gg/veridian)
-- **Documentation**: [doublegate.github.io/VeridianOS](https://doublegate.github.io/VeridianOS)
-
-## How to Get Involved
-
-VeridianOS welcomes contributions! Here's how you can help:
-
-1. **Code Contributions**: Pick an issue labeled "good first issue"
-2. **Documentation**: Help improve our guides and API docs
-3. **Testing**: Write tests and improve coverage
-4. **Bug Reports**: Report issues you encounter
-5. **Feature Ideas**: Suggest improvements
-
-See our [Contributing Guide](../contributing/how-to.md) for details.
-
-## Recent Updates
-
-### June 12, 2025 - Phase 1 Complete! v0.2.0 Released 🎉
-- **MILESTONE**: Phase 1 Microkernel Core 100% complete!
-- Completed all remaining subsystems:
-  - Memory management: Added VAS cleanup and user-space safety
-  - Scheduler: Implemented CFS, SMP support, CPU hotplug, and IPI
-  - Capability system: Added inheritance, revocation, and per-CPU cache
-- Fixed all compilation issues across architectures
-- Achieved all performance targets:
-  - IPC latency: <1μs (exceeded target!)
-  - Context switch: <10μs
-  - Memory allocation: <1μs
-  - Capability lookup: O(1)
-- Released v0.2.0 with complete microkernel functionality
-- Ready to begin Phase 2: User Space Foundation
-
-### June 11, 2025 - IPC-Capability Integration Complete
-- Completed full IPC-Capability integration
-- All IPC operations now validate capabilities before proceeding
-- Implemented capability transfer through IPC messages
-- Added send/receive permission checks to all channels
-- Integrated capability validation in system call handlers
-- Fixed all compilation errors across architectures
-- IPC subsystem now 100% complete
-- Phase 1 overall progress now at ~65%
-
-### June 10, 2025 - IPC-Process Integration Complete
-- Connected IPC system calls to actual IPC mechanisms
-- Implemented process blocking/waking on IPC operations
-- Completed message passing between processes
-- Achieved full context switching for all architectures
-- Synchronized process/thread states with scheduler
-- Implemented thread cleanup on exit
-- Added CPU affinity enforcement in scheduler
-- Phase 1 progress updated to ~35% overall (Process Management 100% complete)
-
-### June 10, 2025 - Scheduler Implementation Started
-- Implemented core scheduler with round-robin algorithm
-- Created idle task for BSP (Bootstrap Processor)
-- Set up timer interrupts for all architectures (10ms tick)
-- Integrated scheduler with process/thread management
-- Added basic SMP support and CPU affinity
-- Implemented load balancing framework
-- Phase 1 overall progress now at ~65%
-
-### June 10, 2025 - Process Management Completion
-- Completed process management implementation (85% - core features done)
-- Implemented all process system calls
-- Fixed CI failures across all architectures
-- Updated documentation to track deferred items
-
-### June 9, 2025 - Major Memory Management Progress
-- Memory management now ~95% complete
-- Implemented complete virtual memory system with 4-level page tables
-- Added kernel heap with slab allocator for common sizes
-- Implemented TLB shootdown for multi-core systems
-- Added memory zones (DMA, Normal) with balancing
-- Created page fault handling infrastructure
-- Integrated reserved memory tracking
-- Phase 1 overall progress now at ~35%
-
-### June 8, 2025 - Phase 1 Started
-- Began IPC implementation
-- Completed synchronous message passing
-- Implemented fast path with <5μs latency
-- Added zero-copy transfer support
-- Integrated capability system for IPC
-
-### June 7, 2025 - v0.1.0 Release
-- Completed Phase 0 with 100% of goals achieved
-- Fixed final CI/CD issues across all architectures
-- Released first version with build artifacts
-- Deployed documentation to GitHub Pages
-
-### June 6, 2025
-- Fixed AArch64 boot sequence
-- Implemented GDB debugging infrastructure
-- Completed test framework
-- Set up documentation pipeline
