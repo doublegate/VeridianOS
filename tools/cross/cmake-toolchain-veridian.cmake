@@ -20,7 +20,11 @@ if(NOT VERIDIAN_SYSROOT)
     set(VERIDIAN_SYSROOT "${_project_root}/target/veridian-sysroot")
 endif()
 
-set(CMAKE_SYSROOT "${VERIDIAN_SYSROOT}")
+# NOTE: Do NOT set CMAKE_SYSROOT here. The musl-g++ wrapper handles include
+# paths via -nostdinc and explicit -isystem flags. Setting CMAKE_SYSROOT causes
+# GCC to add --sysroot= which conflicts with the wrapper's include ordering,
+# resulting in musl's stdlib.h vs GCC's cstdlib incompatibilities.
+# set(CMAKE_SYSROOT "${VERIDIAN_SYSROOT}")  # DISABLED
 
 # Cross-compiler (musl-gcc wrapper)
 set(CMAKE_C_COMPILER "${VERIDIAN_SYSROOT}/bin/x86_64-veridian-musl-gcc")
@@ -67,7 +71,7 @@ set(ENV{PKG_CONFIG_SYSROOT_DIR} "")
 # CMAKE_EXE_LINKER_FLAGS goes before cmake-generated libs (too early).
 # CMAKE_CXX_STANDARD_LIBRARIES goes after ALL cmake libs (correct for resolution).
 set(CMAKE_EXE_LINKER_FLAGS "-Wl,--allow-multiple-definition" CACHE STRING "Linker flags" FORCE)
-set(CMAKE_CXX_STANDARD_LIBRARIES "-Wl,--start-group -lepoxy -lGLESv2 -lEGL -lgbm -ldrm -lglapi -lwayland-client -lwayland-server -lwayland-egl -lwayland-cursor -lffi -ludev -levdev -lexpat -lfreetype -lfontconfig -lsystemd -lz -lm -ldl -lpthread ${VERIDIAN_SYSROOT}/usr/lib/libkwin_stubs.a ${VERIDIAN_SYSROOT}/usr/lib/libgl_stubs.a ${VERIDIAN_SYSROOT}/usr/lib/libkf6_link_stubs.a ${VERIDIAN_SYSROOT}/usr/lib/glibc_shim.a -Wl,--end-group" CACHE STRING "Extra link libs for static" FORCE)
+set(CMAKE_CXX_STANDARD_LIBRARIES "-Wl,--start-group -lepoxy -lGLESv2 -lEGL -lgbm -ldrm -lglapi -lwayland-client -lwayland-server -lwayland-egl -lwayland-cursor -lffi -ludev -levdev -lexpat -lfreetype -lfontconfig -lsystemd -lcanberra -llcms2 -lxcvt -ldisplay-info -lz -lm -ldl -lpthread ${VERIDIAN_SYSROOT}/usr/lib/libwl_fixes_stub.a ${VERIDIAN_SYSROOT}/usr/lib/libkwin_stubs.a ${VERIDIAN_SYSROOT}/usr/lib/libgl_stubs.a ${VERIDIAN_SYSROOT}/usr/lib/libkf6_link_stubs.a ${VERIDIAN_SYSROOT}/usr/lib/glibc_shim.a -Wl,--end-group" CACHE STRING "Extra link libs for static" FORCE)
 set(CMAKE_C_STANDARD_LIBRARIES "${CMAKE_CXX_STANDARD_LIBRARIES}" CACHE STRING "Extra C link libs for static" FORCE)
 
 # Cross-compilation helpers: create Wayland::Scanner and KF6 stub targets.

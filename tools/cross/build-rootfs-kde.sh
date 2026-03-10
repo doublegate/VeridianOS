@@ -131,9 +131,17 @@ build_image() {
     fi
 
     # Build mkfs-blockfs if needed
-    if [[ ! -f "${MKFS_BLOCKFS}/target/release/mkfs-blockfs" ]]; then
+    local mkfs_bin="${MKFS_BLOCKFS}/target/release/mkfs-blockfs"
+    if [[ ! -f "${mkfs_bin}" ]]; then
+        mkfs_bin="${MKFS_BLOCKFS}/target/x86_64-unknown-linux-gnu/release/mkfs-blockfs"
+    fi
+    if [[ ! -f "${mkfs_bin}" ]]; then
         log "Building mkfs-blockfs tool..."
         (cd "${MKFS_BLOCKFS}" && cargo build --release)
+        mkfs_bin="${MKFS_BLOCKFS}/target/x86_64-unknown-linux-gnu/release/mkfs-blockfs"
+        if [[ ! -f "${mkfs_bin}" ]]; then
+            mkfs_bin="${MKFS_BLOCKFS}/target/release/mkfs-blockfs"
+        fi
     fi
 
     # Calculate image size (staging + 50% headroom, minimum 256MB)
@@ -143,10 +151,10 @@ build_image() {
     local img_size_mb=$(( img_size / 1048576 ))
     log "  Staging: $(( staging_size / 1048576 )) MB, Image: ${img_size_mb} MB"
 
-    "${MKFS_BLOCKFS}/target/release/mkfs-blockfs" \
-        --source "${STAGING}" \
+    "${mkfs_bin}" \
+        --populate "${STAGING}" \
         --output "${OUTPUT}" \
-        --size "${img_size_mb}M" \
+        --size "${img_size_mb}" \
         2>&1 || {
         # Fallback: create raw image with tar
         log "  mkfs-blockfs failed, creating tar-based image..."
