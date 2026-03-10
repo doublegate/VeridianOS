@@ -48,7 +48,7 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 
 - **Wayland compositor** -- Wire protocol, SHM buffers, XDG shell, layer-shell, DMA-BUF, multi-output with HiDPI scaling
 - **Desktop environment** -- 9 desktop apps (terminal, file manager, text editor, calculator, system monitor, settings, image viewer, web browser, PDF viewer), application launcher, Alt-Tab switcher, notifications, 6-item system tray, 8 settings panels, screen lock, virtual workspaces, TrueType fonts, CJK Unicode
-- **KDE Plasma 6 porting infrastructure** -- Complete platform backend stack for KDE Plasma 6 Wayland desktop: Qt 6 QPA plugin, KDE Frameworks 6 backends (Solid, KIO, KWindowSystem, KWallet), KWin DRM/KMS compositor integration, Breeze theme, display manager, XWayland, and CI pipeline. Full 8-layer dependency stack from dynamic linking through Plasma shell (314 porting tasks across 11 sprints)
+- **KDE Plasma 6 cross-compilation** -- Complete platform backend stack and cross-compiled binaries for KDE Plasma 6 Wayland desktop. Static musl-based toolchain cross-compiles kwin_wayland (158MB), plasmashell (150MB), and dbus-daemon (886KB) from source. 250+ static libraries in sysroot including Qt 6.8.3, KDE Frameworks 6.12.0, Mesa softpipe, Wayland 1.23.1, and full font/input/rendering stacks. 479MB BlockFS rootfs image for QEMU boot. Qt 6 QPA plugin, KF6 backends, KWin DRM/KMS, Breeze theme, display manager, XWayland (314 porting tasks across 11 sprints)
 - **KDE limitations remediation** -- PipeWire audio with PulseAudio compatibility, NetworkManager with Wi-Fi/Ethernet/DNS, BlueZ Bluetooth with HCI bridge, XWayland GLX/DRI3/XIM enhancements, ACPI power management with CPU frequency scaling, KRunner search (6 runners), Baloo file indexer, Activities framework, USB hotplug with udev, V4L2 video, multi-monitor, session save/restore, KSM memory deduplication, D-Bus optimization
 - **KDE Plasma 6 default desktop** -- `startgui` launches KDE Plasma 6 as default session with automatic fallback to built-in DE; session config via `/etc/veridian/session.conf`; `startgui builtin` forces built-in DE
 - **GPU acceleration** -- VirtIO GPU 2D/3D, OpenGL ES 2.0, DRM/KMS, texture atlas compositor with shader pipeline; vendor stubs for i915, amdgpu, and nouveau
@@ -91,7 +91,7 @@ All drivers and services run in user space with capability-controlled access to 
 
 ## Project Status
 
-**Version**: v0.24.0 | **All development phases complete (0-11)** | **79 releases published**
+**Version**: v0.25.0 | **All development phases complete (0-11)** | **81 releases published**
 
 | Metric | Value |
 | --- | --- |

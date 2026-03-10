@@ -336,6 +336,12 @@ userland/udev/udev-build/
 userland/akonadi/akonadi-build/
 userland/kwin/kwin-src/
 
+# Cross-compilation sysroot and build artifacts (Phase 7-10 KDE pipeline)
+target/veridian-sysroot/
+target/cross-build/
+target/rootfs-kde-staging/
+target/rootfs-kde-blockfs.img
+
 # Plan files (Claude Code)
 .claude/plans/
 a.out

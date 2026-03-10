@@ -17,8 +17,9 @@
 - [x] **Phase 9: KDE Plasma 6 Porting** - COMPLETE (100%) v0.22.0 (March 2026)
 - [x] **Phase 10: KDE Known Limitations Remediation** - COMPLETE (100%) v0.23.0 (March 2026)
 - [x] **Phase 11: KDE Plasma 6 Default Desktop Integration** - COMPLETE (100%) v0.24.0 (March 2026)
+- [x] **Phase 12: KDE Plasma 6 Cross-Compilation** - COMPLETE (100%) v0.25.0 (March 2026)
 
-## Current Version: v0.24.0 (March 2026)
+## Current Version: v0.25.0 (March 2026)
 
 ### Build Status
 - **x86_64**: 0 errors, 0 warnings, Stage 6 BOOTOK, 29/29 tests

@@ -2,6 +2,64 @@
 
 ---
 
+## [v0.25.0] - 2026-03-10
+
+### v0.25.0: KDE Plasma 6 Cross-Compilation -- Real Binaries from Source
+
+Cross-compiles the entire KDE Plasma 6 desktop stack from source using a musl-based static toolchain. Produces three bootable binaries (kwin_wayland, plasmashell, dbus-daemon) and a 479MB BlockFS rootfs image for QEMU. This is the culmination of the KDE porting infrastructure built in Phases 9-11.
+
+#### Cross-Compilation Pipeline (10 Phases)
+
+- **Phase 1: musl libc** -- musl 1.2.5 cross-compiled with VeridianOS syscall number remapping patch (`0001-veridian-syscall-remap.patch`). Produces `musl-gcc`/`musl-g++` wrapper scripts.
+- **Phase 2: C library dependencies** -- 8 foundational libraries: zlib 1.3.1, libffi 3.4.7, PCRE2 10.43, expat 2.7.1, libxml2 2.12.9, libjpeg-turbo 3.0.1 (SIMD disabled for -fPIC compat), libpng 1.6.43, libxkbcommon 1.7.0
+- **Phase 3: Mesa software rendering** -- Mesa 24.2.8 with softpipe Gallium driver. Post-build pipeline extracts `.o` from `.so.p` directories, creates fat static archives via `ar -M` MRI scripts. Produces `libEGL.a`, `libGLESv2.a`, `libgbm.a`, `libglapi.a`, `libdrm.a`
+- **Phase 4: Wayland** -- Wayland 1.23.1 + protocols 1.38. Two-stage build: host `wayland-scanner` first, then cross-compiled `libwayland-{client,server,cursor,egl}.a`
+- **Phase 5: Font stack** -- FreeType 2.13.2, HarfBuzz 8.3.0, Fontconfig 2.15.0 with 3-pass circular dependency resolution. DejaVu Sans fonts bundled.
+- **Phase 6: D-Bus** -- dbus 1.14.10 with expat XML parser. Produces `dbus-daemon` (886KB static) and `libdbus-1.a`
+- **Phase 7: Qt 6.8.3** -- 12 Qt modules statically cross-compiled: QtBase, QtSvg, QtShaderTools, QtDeclarative (QML/Quick), QtWayland. Host Qt rebuilt with GUI/Widgets for tool builds. QPA plugin integration for VeridianOS platform.
+- **Phase 8: KDE Frameworks 6.12.0** -- 35+ KF6 modules in dependency order across 4 tiers: ECM, KConfig, KCoreAddons, KI18n, KWindowSystem, KGuiAddons, KWidgetsAddons, KIconThemes, KColorScheme, KGlobalAccel, KPackage, KArchive, KAuth, KBookmarks, KCompletion, KConfigWidgets, KItemViews, KJobWidgets, KDED, KIO, Solid, KXmlGui, KNotifications, KCrash, KDBusAddons, KTextWidgets, KWallet, KNewStuff, KParts, KRunner, KSvg, KSonnet, KStatusNotifierItem, KNotifyConfig
+- **Phase 9: KWin 6.3.5** -- Wayland compositor with kdecoration 6.3.5. Static SHARED->STATIC patching. Stub libraries for libinput, libcanberra, systemd notification. Produces `kwin_wayland` (158MB static ELF)
+- **Phase 10: Plasma Desktop 6.3.5** -- 9 sequential components: plasma-activities, kdecoration, Breeze (MODULE->STATIC), libplasma/PlasmaQuick, layer-shell-qt, libkscreen, kscreenlocker, plasma5support, plasma-workspace (22 libraries). Produces `plasmashell` (150MB static ELF)
+
+#### Rootfs Assembly
+
+- **BlockFS disk image**: 479MB with 245 inodes, 22 fonts, 3 binaries, D-Bus configs, XDG session configs, integration scripts
+- **Rootfs builder**: `build-rootfs-kde.sh` stages binaries/configs then runs `mkfs-blockfs` with correct CLI flags (`--populate`, integer `--size`)
+- **QEMU boot**: Rootfs loads as VirtIO block device alongside UEFI kernel image
+
+#### Toolchain Architecture
+
+- **cmake-toolchain-veridian.cmake**: Central cross-compilation toolchain with `--start-group`/`--end-group` link group containing 20+ libraries and 4 stub archives (libkwin_stubs.a, libgl_stubs.a, libkf6_link_stubs.a, glibc_shim.a)
+- **cmake-toolchain-veridian-deps.cmake**: Minimal toolchain for foundational C deps without KDE/Mesa link groups
+- **CMAKE_SYSROOT disabled**: musl-g++ wrapper handles include paths via `-nostdinc`/`-isystem`; CMAKE_SYSROOT conflicts with wrapper ordering
+- **CMAKE_CXX_STANDARD_LIBRARIES**: Link group placed after all cmake libs (not in EXE_LINKER_FLAGS which goes too early)
+- **PKG_CONFIG_LIBDIR**: Replaces default search dirs entirely (PKG_CONFIG_PATH would leak host system .pc files)
+
+#### Key Technical Solutions
+
+- **Mesa static archives**: Mesa hardcodes `shared_library()` in meson.build. Post-build pipeline extracts .o files from .so.p build dirs, creates fat .a via `ar -M` MRI scripts, removes .so, rewrites pkg-config
+- **libjpeg TLS fix**: SIMD-enabled build generates `R_X86_64_TPOFF32` relocations incompatible with .so plugins. Fixed with `-DWITH_SIMD=OFF -fPIC`
+- **Qt6 QML host tools**: qmlcachegen/qmltyperegistrar must run on host. Host Qt rebuilt with `-gui -widgets`, then cross-compile with `-k || true` (tool binaries fail but library targets succeed)
+- **KF6 MODULE->STATIC**: KDE libraries use `add_library(... MODULE` requiring shared. `sed` patches to STATIC at build time
+- **GL stubs**: Mesa's static libGLESv2.a uses dispatch tables that don't export raw GL names. 15 C stubs (glGetString, glEnable, glBlendFunc, etc.)
+- **C++ udev mangling**: Qt6 compiled udev headers without `extern "C"`, expects C++-mangled symbols. Rebuilt libudev.a as C++
+- **KF6 MOC stubs**: KAbstractIdleTimePoller, KWaylandExtras, KConfigPropertyMap require Qt meta-object system. MOC-generated stubs in libkf6_link_stubs.a
+- **glibc_shim.c**: 18 FORTIFY_SOURCE stubs + 4 pthread clock functions for GCC 15 libstdc++ linked against musl
+
+#### Build Scripts (15 files in tools/cross/)
+
+- `build-musl.sh`, `build-deps.sh`, `build-mesa.sh`, `build-wayland.sh`, `build-fonts.sh`, `build-dbus.sh`, `build-qt6.sh`, `build-kf6.sh`, `build-kwin.sh`, `build-plasma.sh`, `build-rootfs-kde.sh`, `build-all-kde.sh`
+- `cmake-toolchain-veridian.cmake`, `cmake-toolchain-veridian-deps.cmake`
+- `musl-patches/0001-veridian-syscall-remap.patch`
+
+#### Sysroot Statistics
+
+- 250+ static `.a` archives, ~1.1 GB total
+- Qt 6.8.3 (12 modules), KDE Frameworks 6.12.0 (35+ modules), Plasma 6.3.5 (9 components)
+- Mesa 24.2.8 (softpipe), Wayland 1.23.1, FreeType/HarfBuzz/Fontconfig, D-Bus, OpenSSL, libinput
+
+---
+
 ## [v0.24.0] - 2026-03-08
 
 ### v0.24.0: Phase 11 -- KDE Plasma 6 Default Desktop Integration
