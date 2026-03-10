@@ -200,25 +200,11 @@ KF_COMMON_ARGS=(
     -DCMAKE_DISABLE_FIND_PACKAGE_LibLZMA=ON
     -DCMAKE_DISABLE_FIND_PACKAGE_LibZstd=ON
     -DCMAKE_PROJECT_INCLUDE="${SCRIPT_DIR}/wayland-scanner-target.cmake"
-    # No Qt6Qml/Quick in static cross-build sysroot -- disable per-module QML options
-    # Stub Qt6Qml/Quick/Svg cmake configs exist in sysroot for find_package()
-    -DKCONFIG_USE_QML=OFF
-    -DKCOREADDONS_USE_QML=OFF
-    -DKICONTHEMES_USE_QML=OFF
-    -DKICONTHEMES_USE_QTQUICK=OFF
-    -DKCOLORSCHEME_USE_QML=OFF
-    -DKSERVICE_USE_QML=OFF
-    -DKCONFIGWIDGETS_USE_QML=OFF
-    -DKNOTIFICATIONS_USE_QML=OFF
-    -DKPACKAGE_USE_QML=OFF
-    -DKIO_USE_QML=OFF
-    -DBUILD_WITH_QML=OFF
-    -DKWINDOWSYSTEM_QML=OFF
+    # Qt6 QML/Quick now available in sysroot -- enable QML where useful
     -DBUILD_DESIGNERPLUGIN=OFF
     -DUSE_BreezeIcons=OFF
     -DCMAKE_DISABLE_FIND_PACKAGE_Canberra=ON
     -DCMAKE_DISABLE_FIND_PACKAGE_Phonon4Qt6=ON
-    -DCMAKE_DISABLE_FIND_PACKAGE_KF6Sonnet=ON
     -DCMAKE_DISABLE_FIND_PACKAGE_LIBGIT2=ON
 )
 
@@ -230,6 +216,17 @@ build_kf_module() {
     local lower
     lower=$(echo "${mod}" | tr '[:upper:]' '[:lower:]')
     local pkg="${lower}-${KF_VER}"
+    fetch "${pkg}" "${KF_URL_BASE}/${pkg}.tar.xz" "${pkg}"
+    cmake_build "${mod}" "${BUILD_DIR}/${pkg}" "${KF_COMMON_ARGS[@]}" "${extra[@]}"
+}
+
+# Helper: fetch + cmake_build with custom tarball name (for non-standard naming)
+build_kf_module_custom() {
+    local mod="$1"
+    local tarball_base="$2"
+    shift 2
+    local extra=("$@")
+    local pkg="${tarball_base}-${KF_VER}"
     fetch "${pkg}" "${KF_URL_BASE}/${pkg}.tar.xz" "${pkg}"
     cmake_build "${mod}" "${BUILD_DIR}/${pkg}" "${KF_COMMON_ARGS[@]}" "${extra[@]}"
 }
@@ -287,13 +284,65 @@ build_tier2() {
 
 # Tier 3: Depends on Tier 1+2
 build_tier3() {
-    build_kf_module KDeclarative || log "KDeclarative: skipped (QML-heavy, optional for cross-build)"
+    build_kf_module KDeclarative || log "KDeclarative: skipped (optional for cross-build)"
     build_kf_module KXmlGui
     build_kf_module KBookmarks
-    # KIO and KCMUtils are optional -- they have deep dependency chains
-    # and require host-target library compatibility (MODULE plugins)
+    # KIO and KCMUtils have deep dependency chains
     build_kf_module KIO || log "KIO: skipped (optional for cross-build)"
     build_kf_module KCMUtils || log "KCMUtils: skipped (optional for cross-build)"
+}
+
+# Tier 4: Additional modules needed by plasma-workspace
+build_tier4() {
+    # KCrash: crash reporting (depends on KCoreAddons)
+    build_kf_module KCrash
+
+    # KDBusAddons: D-Bus utilities (depends on KCoreAddons)
+    build_kf_module KDBusAddons
+
+    # KTextWidgets: text editing widgets (depends on Completion, ConfigWidgets, I18n, Sonnet)
+    # Sonnet stub in sysroot provides headers-only target. TextToSpeech disabled.
+    build_kf_module KTextWidgets \
+        -DWITH_TEXT_TO_SPEECH=OFF
+
+    # KWallet: secret storage framework (lib only, no daemon)
+    build_kf_module KWallet \
+        -DCMAKE_DISABLE_FIND_PACKAGE_Gpgmepp=ON \
+        -DCMAKE_DISABLE_FIND_PACKAGE_QGpgmeQt6=ON \
+        -DCMAKE_DISABLE_FIND_PACKAGE_Qca-qt6=ON \
+        -DBUILD_KWALLETD=OFF \
+        -DBUILD_KWALLET_QUERY=OFF || log "KWallet: skipped (optional)"
+
+    # KNewStuff: content download framework (depends on KPackage, KArchive, KI18n)
+    build_kf_module KNewStuff || log "KNewStuff: skipped (optional)"
+
+    # KRunner: desktop search framework (depends on KConfig, KCoreAddons, KI18n)
+    build_kf_module KRunner || log "KRunner: skipped (optional)"
+
+    # KStatusNotifierItem: system tray protocol
+    build_kf_module KStatusNotifierItem || log "KStatusNotifierItem: skipped (optional)"
+
+    # KNotifyConfig: notification config UI (depends on KNotifications, KIO)
+    build_kf_module KNotifyConfig || log "KNotifyConfig: skipped (optional)"
+
+    # KParts: document framework (depends on KIO, KXmlGui)
+    build_kf_module KParts || log "KParts: skipped (optional)"
+
+    # KDED: KDE Daemon framework
+    build_kf_module KDED || log "KDED: skipped (optional)"
+
+    # Prison: barcode/QR code library (optional, used by some Plasma applets)
+    build_kf_module Prison || log "Prison: skipped (optional)"
+
+    # KItemModels: proxy model classes
+    build_kf_module KItemModels || log "KItemModels: skipped (optional)"
+
+    # Kirigami: QtQuick component framework (needed by many Plasma QML files)
+    # Special: tarball is "kirigami" not "kkirigami2"; cmake config is KF6Kirigami2
+    build_kf_module_custom "Kirigami2" "kirigami" || log "Kirigami: skipped (optional)"
+
+    # KSvg: SVG rendering for Plasma themes (depends on KConfig, KColorScheme, Qt6Svg)
+    build_kf_module KSvg || log "KSvg: skipped (optional)"
 }
 
 # ── Verify ────────────────────────────────────────────────────────────
@@ -315,8 +364,19 @@ verify() {
         fi
     done
 
-    # Optional modules (deep dependency chains, may fail in cross-build)
-    for cmake_name in KIO KCMUtils Declarative; do
+    # Tier 4 modules (needed by plasma-workspace, best-effort)
+    for cmake_name in Crash DBusAddons TextWidgets Wallet NewStuff Runner \
+                      StatusNotifierItem NotifyConfig Parts ItemModels Svg; do
+        if [[ -f "${SYSROOT}/usr/lib/cmake/KF6${cmake_name}/KF6${cmake_name}Config.cmake" ]]; then
+            log "  OK: KF6${cmake_name}"
+        else
+            log "  OPTIONAL: KF6${cmake_name} (not installed)"
+            optional_errors=$((optional_errors + 1))
+        fi
+    done
+
+    # Deep optional modules
+    for cmake_name in KIO KCMUtils Declarative KDED; do
         if [[ -f "${SYSROOT}/usr/lib/cmake/KF6${cmake_name}/KF6${cmake_name}Config.cmake" ]]; then
             log "  OK: KF6${cmake_name}"
         else
@@ -347,6 +407,7 @@ main() {
     build_tier1
     build_tier2
     build_tier3
+    build_tier4
     install_veridian_backends
     verify
     log "=== KF6 build complete ==="

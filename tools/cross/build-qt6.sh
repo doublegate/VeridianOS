@@ -333,7 +333,7 @@ build_qt_shadertools() {
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" && \
         cmake --build . --parallel "${JOBS}" && \
-        cmake --install .)
+        cmake --install . --prefix "${SYSROOT}/usr")
     log "QtShaderTools: done."
 }
 
@@ -393,11 +393,23 @@ build_qt_declarative() {
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" && \
         cmake --build . --parallel "${JOBS}" -- -k || true && \
-        cmake --install . 2>/dev/null || true)
+        cmake --install . --prefix "${SYSROOT}/usr" 2>/dev/null || true)
     # Tool binaries (qml, qmlpreview, etc.) may fail to link when cross-
     # compiling due to static Mesa link complexity. The libraries themselves
     # build successfully and are installed. Host tools (from host-qt) are
     # used for code generation instead.
+
+    # Copy any .a libraries the install step missed (due to failed tool binaries)
+    for lib in "${bld}"/lib/libQt6*.a; do
+        [[ -f "$lib" ]] || continue
+        local base
+        base=$(basename "$lib")
+        if [[ ! -f "${SYSROOT}/usr/lib/${base}" ]]; then
+            log "  Manually copying ${base}..."
+            cp "$lib" "${SYSROOT}/usr/lib/"
+        fi
+    done
+
     if [[ ! -f "${SYSROOT}/usr/lib/libQt6Qml.a" ]]; then
         die "QtDeclarative build failed: libQt6Qml.a not produced"
     fi
@@ -446,7 +458,7 @@ build_qt_svg() {
 verify() {
     log "Verifying Qt 6 installation..."
     local errors=0
-    for lib in libQt6Core.a libQt6Gui.a libQt6Widgets.a libQt6DBus.a libQt6WaylandClient.a libQt6Qml.a libQt6Quick.a libQt6ShaderTools.a libQt6Svg.a; do
+    for lib in libQt6Core.a libQt6Gui.a libQt6Widgets.a libQt6DBus.a libQt6WaylandClient.a libQt6Qml.a libQt6Quick.a libQt6QmlModels.a libQt6ShaderTools.a libQt6Svg.a libQt6SvgWidgets.a; do
         if [[ -f "${SYSROOT}/usr/lib/${lib}" ]]; then
             local size
             size=$(stat -c%s "${SYSROOT}/usr/lib/${lib}" 2>/dev/null || echo "?")
