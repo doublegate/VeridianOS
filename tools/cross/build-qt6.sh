@@ -162,7 +162,7 @@ build_qt_cross() {
             -no-feature-system-libb2 \
             -no-feature-textmarkdownreader \
             -no-feature-textmarkdownwriter \
-            -feature-accessibility-atspi-bridge \
+            -no-feature-accessibility-atspi-bridge \
             -no-feature-mtdev \
             -no-feature-tslib \
             -feature-libinput \
@@ -170,7 +170,7 @@ build_qt_cross() {
             -system-zlib \
             -system-freetype \
             -system-harfbuzz \
-            -system-pcre \
+            -qt-pcre \
             -system-libpng \
             -system-libjpeg \
             -fontconfig \

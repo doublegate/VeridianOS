@@ -82,8 +82,58 @@ cmake_build() {
         cmake --build . --parallel "${JOBS}" -- -k || true && \
         cmake --install . 2>/dev/null || \
         cmake --install . --component Devel 2>/dev/null || true)
-    # Verify cmake config was installed (library or header-only module)
+
+    # Copy any .a libraries that the install step missed (due to failed executables)
+    for lib in "${bld}"/lib/libKF6*.a; do
+        [[ -f "$lib" ]] || continue
+        local base
+        base=$(basename "$lib")
+        if [[ ! -f "${SYSROOT}/usr/lib/${base}" ]]; then
+            log "  Manually copying ${base}..."
+            cp "$lib" "${SYSROOT}/usr/lib/"
+        fi
+    done
+
+    # Generate missing Targets.cmake from built .a files
     local cmake_name="${name#K}"
+    local cmake_dir=""
+    for d in "${SYSROOT}/usr/lib/cmake/KF6${cmake_name}" "${SYSROOT}/usr/lib/cmake/KF6${name}"; do
+        [[ -d "$d" ]] && cmake_dir="$d" && break
+    done
+    if [[ -n "${cmake_dir}" ]] && [[ ! -f "${cmake_dir}/KF6${cmake_name}Targets.cmake" ]] && [[ ! -f "${cmake_dir}/KF6${name}Targets.cmake" ]]; then
+        # Auto-generate minimal targets file from built .a libraries
+        local targets_file="${cmake_dir}/KF6${cmake_name}Targets.cmake"
+        [[ -d "${SYSROOT}/usr/lib/cmake/KF6${name}" ]] && targets_file="${cmake_dir}/KF6${name}Targets.cmake"
+        log "  Generating ${targets_file##*/}..."
+        {
+            echo "# Auto-generated targets for VeridianOS cross-build"
+            for lib in "${SYSROOT}"/usr/lib/libKF6${cmake_name}*.a "${SYSROOT}"/usr/lib/libKF6${name}*.a; do
+                [[ -f "$lib" ]] || continue
+                local base tgt alias_name
+                base=$(basename "$lib" .a)  # e.g. libKF6IconThemes -> KF6IconThemes
+                tgt="${base#lib}"           # KF6IconThemes
+                # KDE namespace: KF6IconThemes -> KF6::IconThemes
+                alias_name="${tgt/KF6/KF6::}"  # KF6::IconThemes
+                echo "if(NOT TARGET ${tgt})"
+                echo "  add_library(${tgt} STATIC IMPORTED)"
+                echo "  set_target_properties(${tgt} PROPERTIES"
+                echo "    IMPORTED_LOCATION \"\${CMAKE_CURRENT_LIST_DIR}/../../../lib/${base}.a\""
+                echo "    INTERFACE_INCLUDE_DIRECTORIES \"\${CMAKE_CURRENT_LIST_DIR}/../../../include/KF6/${cmake_name};\${CMAKE_CURRENT_LIST_DIR}/../../../include/KF6/${name}\""
+                echo "  )"
+                echo "endif()"
+                if [[ "${alias_name}" != "${tgt}" ]]; then
+                    echo "if(NOT TARGET ${alias_name})"
+                    echo "  add_library(${alias_name} INTERFACE IMPORTED)"
+                    echo "  set_target_properties(${alias_name} PROPERTIES"
+                    echo "    INTERFACE_LINK_LIBRARIES ${tgt}"
+                    echo "  )"
+                    echo "endif()"
+                fi
+            done
+        } > "${targets_file}"
+    fi
+
+    # Verify cmake config was installed (library or header-only module)
     if [[ -f "${SYSROOT}/usr/lib/cmake/KF6${cmake_name}/KF6${cmake_name}Config.cmake" ]] || \
        [[ -f "${SYSROOT}/usr/lib/cmake/KF6${name}/KF6${name}Config.cmake" ]]; then
         log "KF6 ${name}: done."
@@ -142,6 +192,7 @@ KF_COMMON_ARGS=(
     -DCMAKE_DISABLE_FIND_PACKAGE_Qt6LinguistTools=ON
     -DKF_SKIP_PO_PROCESSING=ON
     -DWITH_X11=OFF
+    -DWITH_WAYLAND=OFF
     -DWITH_BZIP2=OFF
     -DWITH_LIBLZMA=OFF
     -DWITH_LIBZSTD=OFF
@@ -149,6 +200,26 @@ KF_COMMON_ARGS=(
     -DCMAKE_DISABLE_FIND_PACKAGE_LibLZMA=ON
     -DCMAKE_DISABLE_FIND_PACKAGE_LibZstd=ON
     -DCMAKE_PROJECT_INCLUDE="${SCRIPT_DIR}/wayland-scanner-target.cmake"
+    # No Qt6Qml/Quick in static cross-build sysroot -- disable per-module QML options
+    # Stub Qt6Qml/Quick/Svg cmake configs exist in sysroot for find_package()
+    -DKCONFIG_USE_QML=OFF
+    -DKCOREADDONS_USE_QML=OFF
+    -DKICONTHEMES_USE_QML=OFF
+    -DKICONTHEMES_USE_QTQUICK=OFF
+    -DKCOLORSCHEME_USE_QML=OFF
+    -DKSERVICE_USE_QML=OFF
+    -DKCONFIGWIDGETS_USE_QML=OFF
+    -DKNOTIFICATIONS_USE_QML=OFF
+    -DKPACKAGE_USE_QML=OFF
+    -DKIO_USE_QML=OFF
+    -DBUILD_WITH_QML=OFF
+    -DKWINDOWSYSTEM_QML=OFF
+    -DBUILD_DESIGNERPLUGIN=OFF
+    -DUSE_BreezeIcons=OFF
+    -DCMAKE_DISABLE_FIND_PACKAGE_Canberra=ON
+    -DCMAKE_DISABLE_FIND_PACKAGE_Phonon4Qt6=ON
+    -DCMAKE_DISABLE_FIND_PACKAGE_KF6Sonnet=ON
+    -DCMAKE_DISABLE_FIND_PACKAGE_LIBGIT2=ON
 )
 
 # Helper: fetch + cmake_build a KF6 module by name
@@ -206,17 +277,17 @@ build_tier2() {
     build_kf_module KGlobalAccel
     build_kf_module KPackage
     build_kf_module KCompletion
+    build_kf_module KNotifications
     build_kf_module KJobWidgets
     build_kf_module KAuth
     build_kf_module KConfigWidgets
-    build_kf_module KNotifications
     build_kf_module KService
     build_kf_module Solid
 }
 
 # Tier 3: Depends on Tier 1+2
 build_tier3() {
-    build_kf_module KDeclarative
+    build_kf_module KDeclarative || log "KDeclarative: skipped (QML-heavy, optional for cross-build)"
     build_kf_module KXmlGui
     build_kf_module KBookmarks
     # KIO and KCMUtils are optional -- they have deep dependency chains
@@ -235,7 +306,7 @@ verify() {
     for cmake_name in Config CoreAddons I18n GuiAddons WidgetsAddons ColorScheme \
                       Archive Codecs ItemViews IconThemes WindowSystem GlobalAccel \
                       Package Completion JobWidgets Auth ConfigWidgets Notifications \
-                      Service Solid Declarative XmlGui Bookmarks; do
+                      Service Solid XmlGui Bookmarks; do
         if [[ -f "${SYSROOT}/usr/lib/cmake/KF6${cmake_name}/KF6${cmake_name}Config.cmake" ]]; then
             log "  OK: KF6${cmake_name}"
         else
@@ -245,7 +316,7 @@ verify() {
     done
 
     # Optional modules (deep dependency chains, may fail in cross-build)
-    for cmake_name in KIO KCMUtils; do
+    for cmake_name in KIO KCMUtils Declarative; do
         if [[ -f "${SYSROOT}/usr/lib/cmake/KF6${cmake_name}/KF6${cmake_name}Config.cmake" ]]; then
             log "  OK: KF6${cmake_name}"
         else

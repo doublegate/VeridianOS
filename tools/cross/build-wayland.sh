@@ -122,7 +122,9 @@ build_wayland_libs() {
     fi
 
     export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
-    export PKG_CONFIG_SYSROOT_DIR="${SYSROOT}"
+    # Do NOT set PKG_CONFIG_SYSROOT_DIR -- it double-prefixes paths like
+    # wayland-scanner which are absolute paths in .pc files
+    export PKG_CONFIG_SYSROOT_DIR=""
 
     # Point build-machine pkg-config to our host-built scanner so meson
     # finds the matching wayland-scanner version

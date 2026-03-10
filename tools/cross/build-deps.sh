@@ -16,7 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 BUILD_DIR="${PROJECT_ROOT}/target/cross-build/deps"
 SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
-TOOLCHAIN="${SCRIPT_DIR}/cmake-toolchain-veridian.cmake"
+TOOLCHAIN="${SCRIPT_DIR}/cmake-toolchain-veridian-deps.cmake"
 MESON_CROSS="${SCRIPT_DIR}/meson-cross-veridian.txt"
 JOBS="${JOBS:-$(nproc)}"
 CC="${SYSROOT}/bin/x86_64-veridian-musl-gcc"
@@ -215,9 +215,11 @@ build_libjpeg() {
         cmake "${src}" \
             -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
             -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
+            -DCMAKE_C_FLAGS="-O2 -fPIC" \
             -DENABLE_SHARED=OFF \
             -DENABLE_STATIC=ON \
-            -DWITH_TURBOJPEG=OFF && \
+            -DWITH_TURBOJPEG=OFF \
+            -DWITH_SIMD=OFF && \
         make -j"${JOBS}" && \
         make install)
     log "libjpeg-turbo: done."
