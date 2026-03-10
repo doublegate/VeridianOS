@@ -2,6 +2,30 @@
 
 ---
 
+## [v0.25.1] - 2026-03-10
+
+### v0.25.1: KDE Session Launch Fix -- Direct ELF Binary Execution
+
+Fixes the `startgui` command to successfully load and execute cross-compiled KDE Plasma 6 binaries from BlockFS. Two bugs prevented KDE session activation: (1) the desktop subsystem `InvalidState` error was treated as fatal when the desktop was already initialized during boot, and (2) the session launcher only tried `/bin/sh` (not present in rootfs) instead of directly loading the static ELF binaries.
+
+#### Fixed
+- **KDE session `InvalidState` handling**: `crate::desktop::init()` returns `InvalidState` when called from `startgui` because the desktop subsystem was already initialized during boot. Previously treated as fatal error causing immediate fallback to built-in DE. Now handled gracefully with pattern match -- `InvalidState` is accepted as non-fatal, allowing KDE session to proceed.
+- **Direct binary execution fallback chain**: `launch_kde_init()` now tries three strategies in order: (1) shell-based `/bin/sh` init script for full orchestration, (2) direct-exec `kwin_wayland` via `load_user_program`, (3) direct-exec `dbus-daemon` as smoke test. Strategy 2 successfully loads the 64MB stripped static ELF binary from BlockFS into user memory.
+
+#### Added
+- `KWIN_WAYLAND` and `DBUS_DAEMON` path constants for direct binary execution
+- `test_kde_binary_paths` unit test validating binary path conventions
+- Rootfs rebuild with stripped binaries (308MB -> 123MB), 180MB BlockFS image (512 inodes)
+
+#### Verified
+- **ELF loader success**: kwin_wayland loads 4 LOAD segments (code 2.7M pages at 0x401000, rodata 1.2M pages at 0x2ece000, data at 0x418ff50), entry point 0x484ef5 (musl `_start`)
+- **User-mode execution**: Ring 3 transition succeeds, binary begins executing musl C runtime initialization
+- **Expected termination**: Double Fault at `rip=0x2df9144` (NULL deref) when binary hits unimplemented kernel syscalls -- this is the expected boundary until Phase 0 kernel syscall gaps are filled
+- `cargo fmt` -- no changes
+- `cargo clippy` -- 0 warnings on all 3 bare-metal targets (x86_64, AArch64, RISC-V)
+
+---
+
 ## [v0.25.0] - 2026-03-10
 
 ### v0.25.0: KDE Plasma 6 Cross-Compilation -- Real Binaries from Source

@@ -91,7 +91,7 @@ All drivers and services run in user space with capability-controlled access to 
 
 ## Project Status
 
-**Version**: v0.25.0 | **All development phases complete (0-11)** | **81 releases published**
+**Version**: v0.25.1 | **All development phases complete (0-11)** | **82 releases published**
 
 | Metric | Value |
 | --- | --- |

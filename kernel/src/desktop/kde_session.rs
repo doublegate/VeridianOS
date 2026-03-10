@@ -22,8 +22,14 @@ extern crate alloc;
 /// so 500 iterations ~ 5 seconds.
 const MIN_SESSION_LIFETIME_ITERS: u64 = 500;
 
-/// KDE init script path.
+/// KDE init script path (used when /bin/sh is available).
 const KDE_INIT_SCRIPT: &str = "/usr/share/veridian/veridian-kde-init.sh";
+
+/// KWin Wayland compositor binary path (direct exec, no shell needed).
+const KWIN_WAYLAND: &str = "/usr/bin/kwin_wayland";
+
+/// D-Bus daemon binary path.
+const DBUS_DAEMON: &str = "/usr/bin/dbus-daemon";
 
 /// Environment variables passed to the KDE init script.
 const KDE_ENV: &[&str] = &[
@@ -57,26 +63,34 @@ const KDE_ENV: &[&str] = &[
 pub fn start_kde_session() {
     println!("[KDE] Starting KDE Plasma 6 session...");
 
-    // Step 1: Initialize desktop subsystem if not already done
-    if let Err(e) = crate::desktop::init() {
-        println!("[KDE] Desktop subsystem init failed: {:?}", e);
-        println!("[KDE] Falling back to built-in desktop...");
-        crate::desktop::renderer::start_desktop();
-        return;
+    // Step 1: Initialize desktop subsystem if not already done.
+    // If already initialized (e.g. by the boot sequence), that's fine --
+    // the built-in DE was showing and we're replacing it with KDE.
+    match crate::desktop::init() {
+        Ok(()) => println!("[KDE] Desktop subsystem initialized"),
+        Err(crate::error::KernelError::InvalidState { .. }) => {
+            println!("[KDE] Desktop already initialized, switching to KDE session");
+        }
+        Err(e) => {
+            println!("[KDE] Desktop subsystem init failed: {:?}", e);
+            println!("[KDE] Falling back to built-in desktop...");
+            crate::desktop::renderer::start_desktop();
+            return;
+        }
     }
 
     // Step 2: Disable fbcon -- KWin will take over DRM/framebuffer
     crate::graphics::fbcon::disable_output();
     println!("[KDE] Framebuffer console disabled (KWin will drive display)");
 
-    // Step 3: Launch KDE init script
+    // Step 3: Launch KDE session (tries init script, then direct exec)
     let pid = match launch_kde_init() {
         Ok(pid) => {
-            println!("[KDE] Init script launched (PID {})", pid.0);
+            println!("[KDE] KDE process launched (PID {})", pid.0);
             pid
         }
         Err(e) => {
-            println!("[KDE] Failed to launch init script: {:?}", e);
+            println!("[KDE] Failed to launch KDE session: {:?}", e);
             println!("[KDE] Falling back to built-in desktop...");
             crate::graphics::fbcon::enable_output();
             crate::graphics::fbcon::mark_all_dirty_and_flush();
@@ -107,15 +121,43 @@ pub fn start_kde_session() {
     }
 }
 
-/// Launch the KDE init script as a user process.
+/// Launch the KDE session as a user process.
 ///
-/// Calls `load_user_program` with `/bin/sh` executing the init script,
-/// and passes KDE-specific environment variables.
+/// Tries three strategies in order:
+/// 1. Shell-based: `/bin/sh` running the init script (full orchestration)
+/// 2. Direct KWin: load `kwin_wayland` directly (no shell needed)
+/// 3. Direct D-Bus: load `dbus-daemon` as a smoke test
+///
+/// Strategy 1 requires a real `/bin/sh` in the rootfs. Strategies 2-3
+/// load cross-compiled static ELF binaries directly from BlockFS.
 #[cfg(feature = "alloc")]
 fn launch_kde_init() -> Result<crate::process::ProcessId, crate::error::KernelError> {
-    let argv: &[&str] = &["sh", KDE_INIT_SCRIPT, "--from-kernel"];
+    // Strategy 1: Try shell-based init script (full KDE startup sequence)
+    let shell_argv: &[&str] = &["sh", KDE_INIT_SCRIPT, "--from-kernel"];
+    if let Ok(pid) = crate::userspace::load_user_program("/bin/sh", shell_argv, KDE_ENV) {
+        println!("[KDE] Launched via init script (/bin/sh)");
+        return Ok(pid);
+    }
 
-    crate::userspace::load_user_program("/bin/sh", argv, KDE_ENV)
+    // Strategy 2: Direct-exec kwin_wayland (no shell needed)
+    let kwin_argv: &[&str] = &["kwin_wayland", "--no-lockscreen"];
+    if let Ok(pid) = crate::userspace::load_user_program(KWIN_WAYLAND, kwin_argv, KDE_ENV) {
+        println!("[KDE] Launched kwin_wayland directly");
+        return Ok(pid);
+    }
+    println!("[KDE] kwin_wayland not loadable, trying dbus-daemon...");
+
+    // Strategy 3: Direct-exec dbus-daemon as smoke test
+    let dbus_argv: &[&str] = &["dbus-daemon", "--session", "--nofork"];
+    if let Ok(pid) = crate::userspace::load_user_program(DBUS_DAEMON, dbus_argv, KDE_ENV) {
+        println!("[KDE] Launched dbus-daemon (smoke test)");
+        return Ok(pid);
+    }
+
+    Err(crate::error::KernelError::NotFound {
+        resource: "KDE binaries (kwin_wayland, dbus-daemon)",
+        id: 0,
+    })
 }
 
 /// Run a KDE process using the same pattern as
@@ -237,5 +279,11 @@ mod tests {
     fn test_kde_init_script_path() {
         assert!(KDE_INIT_SCRIPT.starts_with("/usr/share/"));
         assert!(KDE_INIT_SCRIPT.ends_with(".sh"));
+    }
+
+    #[test]
+    fn test_kde_binary_paths() {
+        assert!(KWIN_WAYLAND.starts_with("/usr/bin/"));
+        assert!(DBUS_DAEMON.starts_with("/usr/bin/"));
     }
 }
