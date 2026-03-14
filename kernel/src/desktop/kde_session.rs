@@ -32,6 +32,21 @@ const KWIN_WAYLAND: &str = "/usr/bin/kwin_wayland";
 const DBUS_DAEMON: &str = "/usr/bin/dbus-daemon";
 
 /// Environment variables passed to the KDE init script.
+///
+/// Key notes for KWin DRM mode (KWin IS the Wayland compositor):
+/// - QT_QPA_PLATFORM must match the statically linked QPA plugin name
+///   ("wayland-org.kde.kwin.qpa"), NOT "veridian" or "wayland".
+/// - WAYLAND_DISPLAY must NOT be set -- KWin creates the Wayland display, it
+///   does not connect to one. Setting it causes KWin to try to connect as a
+///   client of a nonexistent compositor, which fails.
+/// - DISPLAY must NOT be set -- no X11 server running.
+/// - QT_QPA_EGLFS_INTEGRATION can hint to use KMS/DRM directly.
+/// - KWIN_DRM_USE_EGL=0 tells KWin DRM to skip EGL init (softpipe only).
+/// - KWIN_FORCE_OWN_QPA=1 bypasses the
+///   applicationFilePath().endsWith("kwin_wayland") check in
+///   KWinIntegrationPlugin::create().  Without /proc/self/exe support, Qt's
+///   applicationFilePath() returns an empty or unresolvable string and the KWin
+///   QPA plugin refuses to load.
 const KDE_ENV: &[&str] = &[
     "HOME=/root",
     "USER=root",
@@ -40,9 +55,23 @@ const KDE_ENV: &[&str] = &[
     "XDG_RUNTIME_DIR=/run/user/0",
     "XDG_SESSION_TYPE=wayland",
     "XDG_CURRENT_DESKTOP=KDE",
-    "WAYLAND_DISPLAY=wayland-0",
+    "XDG_SESSION_ID=1",
+    "XDG_SEAT=seat0",
+    "XDG_VTNR=1",
     "DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket",
-    "QT_QPA_PLATFORM=veridian",
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus",
+    "QT_QPA_PLATFORM=wayland-org.kde.kwin.qpa",
+    "KWIN_FORCE_OWN_QPA=1",
+    "KWIN_DRM_USE_EGL=0",
+    // Tell KWin's DRM backend to use /dev/dri/card0 directly, bypassing
+    // udev device enumeration (which requires a running udev daemon).
+    "KWIN_DRM_DEVICES=/dev/dri/card0",
+    // Force noop/direct session backend -- avoids logind D-Bus dependency.
+    // libseat noop backend opens DRM devices directly without seat management.
+    "LIBSEAT_BACKEND=noop",
+    // Skip libinput initialization -- avoids udev device enumeration for
+    // input devices which would fail without a running udev daemon.
+    "KWIN_WAYLAND_NO_LIBINPUT=1",
     "LANG=en_US.UTF-8",
 ];
 
@@ -82,6 +111,16 @@ pub fn start_kde_session() {
     // Step 2: Disable fbcon -- KWin will take over DRM/framebuffer
     crate::graphics::fbcon::disable_output();
     println!("[KDE] Framebuffer console disabled (KWin will drive display)");
+
+    // Step 2b: Pre-create a D-Bus system bus socket so that kwin's
+    // connect() call succeeds (returns 0) instead of returning -ENOENT.
+    // KWin uses D-Bus to query logind for session/seat info. Without a
+    // listening socket, connect() fails and KWin may leave its session
+    // object partially initialized, leading to a NULL dereference later.
+    // The socket accepts connections but no D-Bus daemon responds -- KWin
+    // handles D-Bus communication failures more gracefully than connect
+    // failures.
+    setup_dbus_stub_socket();
 
     // Step 3: Launch KDE session (tries init script, then direct exec)
     let pid = match launch_kde_init() {
@@ -139,8 +178,13 @@ fn launch_kde_init() -> Result<crate::process::ProcessId, crate::error::KernelEr
         return Ok(pid);
     }
 
-    // Strategy 2: Direct-exec kwin_wayland (no shell needed)
-    let kwin_argv: &[&str] = &["kwin_wayland", "--no-lockscreen"];
+    // Strategy 2: Direct-exec kwin_wayland.
+    // KWin auto-selects the DRM/KMS backend when run as a standalone compositor.
+    // The KWIN_DRM_DEVICES env var tells it which device to open, bypassing udev.
+    // NOTE: We intentionally omit --drm because KWin 6.3.5's DRM platform plugin
+    // may not be registered in the static binary. KWin auto-detection is more
+    // robust for statically linked builds.
+    let kwin_argv: &[&str] = &["kwin_wayland"];
     if let Ok(pid) = crate::userspace::load_user_program(KWIN_WAYLAND, kwin_argv, KDE_ENV) {
         println!("[KDE] Launched kwin_wayland directly");
         return Ok(pid);
@@ -241,6 +285,54 @@ fn get_iteration_counter() -> u64 {
     }
 }
 
+/// Create a stub D-Bus system bus socket at `/run/dbus/system_bus_socket`.
+///
+/// KWin connects to D-Bus to query logind for session/seat information.
+/// If `connect()` returns `-ENOENT` (no socket file), KWin's session
+/// initialization may leave internal pointers NULL, causing a crash later
+/// when the DRM backend tries to access session properties.
+///
+/// By pre-creating a bound+listening Unix domain socket at the expected
+/// path, `connect()` succeeds. KWin's D-Bus client will then fail at
+/// the protocol level (no daemon responds), but this failure is handled
+/// gracefully -- KWin falls back to a noop session.
+#[cfg(feature = "alloc")]
+fn setup_dbus_stub_socket() {
+    use crate::net::unix_socket;
+
+    // Create stub sockets for both the system bus and session bus.
+    // KWin uses the system bus for logind/session management, and KConfig
+    // uses the session bus for KConfigWatcher (config change notifications).
+    // Without listening sockets, connect() returns -ENOENT and Qt's D-Bus
+    // client may leave internal state inconsistent, causing NULL pointer
+    // crashes in KConfigWatcher's constructor.
+    let bus_paths = ["/run/dbus/system_bus_socket", "/run/user/0/bus"];
+
+    for path in &bus_paths {
+        let stub_id = match unix_socket::socket_create(unix_socket::UnixSocketType::Stream, 0) {
+            Ok(id) => id,
+            Err(_) => {
+                println!("[KDE] D-Bus stub ({}): create failed", path);
+                continue;
+            }
+        };
+
+        if unix_socket::socket_bind(stub_id, path).is_err() {
+            println!("[KDE] D-Bus stub ({}): bind failed", path);
+            continue;
+        }
+
+        match unix_socket::socket_listen(stub_id, 8) {
+            Ok(()) => {
+                println!("[KDE] D-Bus stub listening at {}", path);
+            }
+            Err(_) => {
+                println!("[KDE] D-Bus stub ({}): listen failed", path);
+            }
+        }
+    }
+}
+
 /// Stub for non-x86_64 architectures.
 #[cfg(not(all(feature = "alloc", target_arch = "x86_64")))]
 pub fn start_kde_session() {
@@ -259,14 +351,31 @@ mod tests {
 
     #[test]
     fn test_kde_env_has_required_vars() {
-        let has_display = KDE_ENV.iter().any(|e| e.starts_with("WAYLAND_DISPLAY="));
         let has_desktop = KDE_ENV
             .iter()
             .any(|e| e.starts_with("XDG_CURRENT_DESKTOP="));
-        let has_qpa = KDE_ENV.iter().any(|e| e.starts_with("QT_QPA_PLATFORM="));
-        assert!(has_display, "WAYLAND_DISPLAY must be set");
+        let has_qpa = KDE_ENV
+            .iter()
+            .any(|e| e == &"QT_QPA_PLATFORM=wayland-org.kde.kwin.qpa");
+        let has_runtime_dir = KDE_ENV.iter().any(|e| e.starts_with("XDG_RUNTIME_DIR="));
+        // WAYLAND_DISPLAY must NOT be set -- KWin IS the compositor, it creates the
+        // display
+        let has_wayland_display = KDE_ENV.iter().any(|e| e.starts_with("WAYLAND_DISPLAY="));
+        // DISPLAY must NOT be set -- no X11 server
+        let has_display = KDE_ENV.iter().any(|e| e.starts_with("DISPLAY="));
+        let has_force_qpa = KDE_ENV.iter().any(|e| e == &"KWIN_FORCE_OWN_QPA=1");
         assert!(has_desktop, "XDG_CURRENT_DESKTOP must be set");
-        assert!(has_qpa, "QT_QPA_PLATFORM must be set");
+        assert!(has_qpa, "QT_QPA_PLATFORM must be wayland-org.kde.kwin.qpa");
+        assert!(
+            has_force_qpa,
+            "KWIN_FORCE_OWN_QPA must be set (no /proc/self/exe)"
+        );
+        assert!(has_runtime_dir, "XDG_RUNTIME_DIR must be set");
+        assert!(
+            !has_wayland_display,
+            "WAYLAND_DISPLAY must NOT be set (KWin creates it)"
+        );
+        assert!(!has_display, "DISPLAY must NOT be set (no X11)");
     }
 
     #[test]

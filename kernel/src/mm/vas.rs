@@ -566,6 +566,21 @@ impl VirtualAddressSpace {
                     new_l4[phys_l4_idx] = boot_l4[phys_l4_idx];
                 }
             }
+
+            // Copy the kernel heap L4 entry. The bootloader maps the kernel
+            // heap at HEAP_START (0x444444440000, L4 index 136). Without this,
+            // kernel code running on the process's CR3 (interrupt handlers,
+            // syscalls) cannot access heap-allocated data structures (alloc,
+            // BTreeMap, Vec, etc.), causing page faults that escalate to
+            // double faults.
+            #[cfg(target_arch = "x86_64")]
+            {
+                let heap_start = crate::arch::x86_64::HEAP_START as u64;
+                let heap_l4_idx = ((heap_start >> 39) & 0x1FF) as usize;
+                if heap_l4_idx < 256 && boot_l4[heap_l4_idx].is_present() {
+                    new_l4[heap_l4_idx] = boot_l4[heap_l4_idx];
+                }
+            }
         }
 
         Ok(())
@@ -610,6 +625,16 @@ impl VirtualAddressSpace {
                 let phys_l4_idx = ((phys_offset >> 39) & 0x1FF) as usize;
                 if phys_l4_idx < 256 {
                     child_l4[phys_l4_idx] = parent_l4[phys_l4_idx];
+                }
+            }
+
+            // Copy the kernel heap L4 entry (HEAP_START, lower half).
+            #[cfg(target_arch = "x86_64")]
+            {
+                let heap_start = crate::arch::x86_64::HEAP_START as u64;
+                let heap_l4_idx = ((heap_start >> 39) & 0x1FF) as usize;
+                if heap_l4_idx < 256 {
+                    child_l4[heap_l4_idx] = parent_l4[heap_l4_idx];
                 }
             }
 

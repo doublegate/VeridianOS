@@ -502,6 +502,10 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
         // and load its contents into the VFS. This is how cross-compiled
         // user-space binaries get into the filesystem at boot.
         load_rootfs_from_disk();
+
+        // ProcFS natively supports /proc/sys/kernel/core_pattern,
+        // /proc/sys/kernel/random/boot_id, and /proc/self/{exe,maps}
+        // as virtual files. No re-creation needed after rootfs swap.
     }
 
     // Initialize services (process server, driver framework, etc.)
@@ -558,7 +562,14 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
     // Initialize graphics subsystem
     kprintln!("[BOOTSTRAP] Initializing graphics subsystem...");
     graphics::init().expect("Failed to initialize graphics");
-    kprintln!("[BOOTSTRAP] Graphics subsystem initialized");
+
+    // Initialize GPU acceleration subsystem (GEM, KMS, page flip) and
+    // populate KMS with a virtual DRM device backed by the UEFI GOP
+    // framebuffer. This provides /dev/dri/card0 ioctl support for KWin
+    // and other DRM clients.
+    graphics::gpu_accel::init();
+    graphics::gpu_accel::init_virtual_drm_device();
+    kprintln!("[BOOTSTRAP] Graphics subsystem initialized (DRM device ready)");
 
     // Initialize IRQ manager and timer wheel (needed by drivers and scheduler)
     #[cfg(feature = "alloc")]
@@ -832,6 +843,108 @@ fn mount_blockfs_root() {
             root.mkdir("dev", Permissions::default()).ok();
             root.mkdir("proc", Permissions::default()).ok();
             root.mkdir("tmp", Permissions::from_mode(0o777)).ok();
+            // /run hierarchy for XDG_RUNTIME_DIR and D-Bus sockets
+            if let Ok(run) = root
+                .lookup("run")
+                .or_else(|_| root.mkdir("run", Permissions::default()))
+            {
+                if let Ok(user) = run
+                    .lookup("user")
+                    .or_else(|_| run.mkdir("user", Permissions::default()))
+                {
+                    user.mkdir("0", Permissions::from_mode(0o700)).ok();
+                }
+                run.mkdir("dbus", Permissions::default()).ok();
+            }
+            // /etc/xdg for KDE/Qt config fallback searches
+            if let Ok(etc) = root.lookup("etc") {
+                if let Ok(xdg) = etc
+                    .lookup("xdg")
+                    .or_else(|_| etc.mkdir("xdg", Permissions::default()))
+                {
+                    // Create /etc/xdg/kwinrc so KWin finds its config.
+                    // QPlatformScreen=false disables QPlatformScreen creation
+                    // which avoids a NULL crash when no DRM outputs exist yet.
+                    // Backend is intentionally not set (default QPainter avoids
+                    // OpenGL/EGL dependencies).
+                    if let Ok(f) = xdg.create("kwinrc", Permissions::from_mode(0o644)) {
+                        f.write(
+                            0,
+                            b"[Compositing]\nBackend=QPainter\n\n[Wayland]\nInputMethod=\n",
+                        )
+                        .ok();
+                    }
+                }
+            }
+            // /sys/class/drm/ hierarchy for kwin DRM device discovery.
+            // kwin uses udev/sysfs to find DRM devices. Without these entries,
+            // kwin's DRM backend stays NULL and crashes on first access.
+            if let Ok(sys) = root
+                .lookup("sys")
+                .or_else(|_| root.mkdir("sys", Permissions::default()))
+            {
+                if let Ok(class) = sys
+                    .lookup("class")
+                    .or_else(|_| sys.mkdir("class", Permissions::default()))
+                {
+                    if let Ok(drm) = class
+                        .lookup("drm")
+                        .or_else(|_| class.mkdir("drm", Permissions::default()))
+                    {
+                        // card0 directory with dev file (major:minor) and
+                        // attributes that KWin's DRM backend reads during
+                        // device initialization (driver name, status, etc.)
+                        if let Ok(card0) = drm
+                            .lookup("card0")
+                            .or_else(|_| drm.mkdir("card0", Permissions::default()))
+                        {
+                            if let Ok(f) = card0.create("dev", Permissions::read_only()) {
+                                f.write(0, b"226:0\n").ok();
+                            }
+                            if let Ok(f) = card0.create("uevent", Permissions::read_only()) {
+                                f.write(
+                                    0,
+                                    b"MAJOR=226\nMINOR=0\nDEVNAME=dri/card0\nDEVTYPE=drm_minor\n",
+                                )
+                                .ok();
+                            }
+                            if let Ok(f) = card0.create("enabled", Permissions::read_only()) {
+                                f.write(0, b"enabled\n").ok();
+                            }
+                            if let Ok(f) = card0.create("status", Permissions::read_only()) {
+                                f.write(0, b"connected\n").ok();
+                            }
+                            // device/ subtree with driver info
+                            if let Ok(dev_dir) = card0
+                                .lookup("device")
+                                .or_else(|_| card0.mkdir("device", Permissions::default()))
+                            {
+                                if let Ok(f) = dev_dir.create("uevent", Permissions::read_only()) {
+                                    f.write(0, b"DRIVER=veridian-drm\nPCI_ID=1234:1111\n").ok();
+                                }
+                                // drm/card0/ back-reference for udev parent traversal
+                                if let Ok(drm_sub) = dev_dir
+                                    .lookup("drm")
+                                    .or_else(|_| dev_dir.mkdir("drm", Permissions::default()))
+                                {
+                                    drm_sub.mkdir("card0", Permissions::default()).ok();
+                                }
+                            }
+                        }
+                    }
+                    // /sys/class/input/ for evdev discovery
+                    class.mkdir("input", Permissions::default()).ok();
+                }
+                // /sys/devices/ stub for device enumeration
+                sys.mkdir("devices", Permissions::default()).ok();
+            }
+            // /root/.config for user-level config
+            if let Ok(root_home) = root
+                .lookup("root")
+                .or_else(|_| root.mkdir("root", Permissions::default()))
+            {
+                root_home.mkdir(".config", Permissions::default()).ok();
+            }
         }
     }
 
@@ -1435,7 +1548,68 @@ pub(crate) fn run_user_process(pid: crate::process::ProcessId) {
     // - CS/SS are valid Ring 3 selectors from the GDT
     // - pt_root is a valid L4 page table with kernel mappings preserved
     // - kernel_rsp_ptr points to the per-CPU kernel_rsp field
-    let kernel_rsp_ptr = crate::arch::x86_64::syscall::per_cpu_data_ptr() as u64;
+    // DEBUG: Print TSS stack addresses and IDT handler addresses before entering
+    // Ring 3.
+    crate::arch::x86_64::gdt::debug_print_tss_stacks();
+    unsafe {
+        let pf_addr = crate::arch::x86_64::gdt::debug_idt_handler_addr(14); // #PF = vector 14
+        let df_addr = crate::arch::x86_64::gdt::debug_idt_handler_addr(8); // #DF = vector 8
+        let gp_addr = crate::arch::x86_64::gdt::debug_idt_handler_addr(13); // #GP = vector 13
+        crate::arch::x86_64::idt::raw_serial_str(b"[IDT] PF_handler=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(pf_addr);
+        crate::arch::x86_64::idt::raw_serial_str(b" GP_handler=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(gp_addr);
+        crate::arch::x86_64::idt::raw_serial_str(b" DF_handler=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(df_addr);
+        crate::arch::x86_64::idt::raw_serial_str(b"\n");
+    }
+    // DEBUG: Verify IST stacks and handler code are mapped in the process
+    // page table (pt_root). Walk each critical kernel address through the
+    // process L4 to confirm it's present before entering Ring 3.
+    crate::arch::x86_64::gdt::debug_verify_ist_in_cr3(pt_root);
+
+    // IST write test and Ring 0 PF trigger test removed -- both confirmed
+    // IST stacks are properly mapped (PASS). The DF was caused by hardware
+    // interrupts (APIC timer, etc.) firing from Ring 3 without IST, falling
+    // back to TSS.RSP0 which was stale/unmapped in the process CR3. Fixed
+    // by adding IST to all hardware IRQ vectors (32, 33, 48, 49, 50).
+    // SAFETY: Reading TSS.RSP0 and writing to COM1 for diagnostics.
+    let tss_rsp0 = crate::arch::x86_64::gdt::get_kernel_stack();
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[BOOT] TSS_RSP0=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(tss_rsp0);
+        crate::arch::x86_64::idt::raw_serial_str(b" entry=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(entry_point);
+        crate::arch::x86_64::idt::raw_serial_str(b" usp=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(user_stack_ptr);
+        crate::arch::x86_64::idt::raw_serial_str(b" cr3=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(pt_root);
+        crate::arch::x86_64::idt::raw_serial_str(b"\n");
+    }
+
+    // Update TSS.RSP0 to the current boot stack. Hardware exceptions from
+    // Ring 3 (page faults, GPF, timer IRQ, etc.) load RSP from TSS.RSP0 for
+    // the privilege-level switch. enter_usermode_returnable will save the
+    // current RSP as per-CPU kernel_rsp (for SYSCALL), but TSS.RSP0 (for
+    // hardware interrupts) must also be updated.
+    //
+    // Read current RSP -- this is our boot stack which is guaranteed mapped.
+    let current_rsp: u64;
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) current_rsp, options(nomem, nostack));
+    }
+    crate::arch::x86_64::gdt::set_kernel_stack(current_rsp);
+
+    // Re-initialize FPU/AVX state before entering usermode.
+    // VEX-encoded instructions (AVX) in user binaries require CR4.OSXSAVE
+    // and XCR0 bits 0-2 (x87/SSE/AVX), otherwise they cause #UD.
+    // The boot-time init_fpu() in arch::init() runs early, but subsequent
+    // boot stages (MMU, KPTI, etc.) may not preserve all CR4 bits.
+    // This idempotent re-init ensures the state is correct.
+    crate::arch::x86_64::context::init_fpu();
+
+    let per_cpu = crate::arch::x86_64::syscall::per_cpu_data_ptr();
+    let kernel_rsp_ptr = per_cpu as u64;
     unsafe {
         crate::arch::x86_64::usermode::enter_usermode_returnable(
             entry_point,
@@ -1625,6 +1799,7 @@ pub fn boot_run_forked_child(
                     r13: ctx.r13,
                     r14: ctx.r14,
                     r15: ctx.r15,
+                    fs_base: ctx.tls_base,
                 };
                 (r, t.tid)
             }

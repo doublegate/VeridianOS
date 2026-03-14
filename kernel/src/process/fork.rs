@@ -130,6 +130,10 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
         }
     }
 
+    // Inherit Linux ABI flag via the bitmap so forked children continue
+    // using the same syscall ABI as their parent.
+    crate::syscall::linux_compat::inherit_linux_abi(current_process.pid.0, new_pid.0);
+
     // Inherit uid, gid, pgid, sid from parent
     // (ProcessBuilder doesn't copy these, so do it manually)
     // uid/gid are non-atomic, but the new_process is not yet visible

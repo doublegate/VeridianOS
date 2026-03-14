@@ -13,8 +13,58 @@ lazy_static! {
     static ref IDT: InterruptDescriptorTable = {
         let mut idt = InterruptDescriptorTable::new();
         idt.breakpoint.set_handler_fn(breakpoint_handler);
-        idt.page_fault.set_handler_fn(page_fault_handler);
-        idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
+        // Set IST on ALL exception vectors that can fire from Ring 3 to
+        // prevent DF escalation when TSS.RSP0 is stale/unmapped. Any
+        // exception without IST falls back to RSP0 for the privilege
+        // switch, which fails if the process CR3 doesn't map RSP0.
+        //
+        // SAFETY: GENERAL_IST_INDEX (2) is a valid IST index configured
+        // in the TSS. Shared across these low-frequency exception handlers.
+        unsafe {
+            idt.divide_error
+                .set_handler_fn(divide_error_handler)
+                .set_stack_index(crate::arch::x86_64::gdt::GENERAL_IST_INDEX);
+            idt.invalid_opcode
+                .set_handler_fn(invalid_opcode_handler)
+                .set_stack_index(crate::arch::x86_64::gdt::GENERAL_IST_INDEX);
+            idt.segment_not_present
+                .set_handler_fn(segment_not_present_handler)
+                .set_stack_index(crate::arch::x86_64::gdt::GENERAL_IST_INDEX);
+            idt.stack_segment_fault
+                .set_handler_fn(stack_segment_fault_handler)
+                .set_stack_index(crate::arch::x86_64::gdt::GENERAL_IST_INDEX);
+            idt.alignment_check
+                .set_handler_fn(alignment_check_handler)
+                .set_stack_index(crate::arch::x86_64::gdt::GENERAL_IST_INDEX);
+            idt.security_exception
+                .set_handler_fn(security_exception_handler)
+                .set_stack_index(crate::arch::x86_64::gdt::GENERAL_IST_INDEX);
+        }
+        // SAFETY: PAGE_FAULT_IST_INDEX (1) is a valid IST index configured in
+        // the TSS during GDT initialization. Using a dedicated IST stack for
+        // page faults is REQUIRED for Ring 3 fault handling: when a page fault
+        // occurs in user mode, the CPU normally loads RSP from TSS.RSP0 to
+        // switch to the kernel stack. If TSS.RSP0 is stale or the address is
+        // not mapped in the current process's CR3, the CPU cannot push the
+        // exception frame and escalates to a Double Fault. IST bypasses
+        // TSS.RSP0 entirely, loading the stack pointer from the TSS IST entry
+        // unconditionally.
+        unsafe {
+            idt.page_fault
+                .set_handler_fn(page_fault_handler)
+                .set_stack_index(crate::arch::x86_64::gdt::PAGE_FAULT_IST_INDEX);
+        }
+        // SAFETY: GENERAL_IST_INDEX (2) is a valid IST index configured in
+        // the TSS during GDT initialization. Using a dedicated IST stack for
+        // GPF is REQUIRED for Ring 3 fault handling: when a GPF occurs in
+        // user mode, the CPU normally loads RSP from TSS.RSP0. If TSS.RSP0
+        // is stale or unmapped in the current process's CR3, the CPU cannot
+        // push the exception frame and escalates to a Double Fault.
+        unsafe {
+            idt.general_protection_fault
+                .set_handler_fn(general_protection_fault_handler)
+                .set_stack_index(crate::arch::x86_64::gdt::GENERAL_IST_INDEX);
+        }
         // SAFETY: DOUBLE_FAULT_IST_INDEX is a valid IST index that was set up
         // during GDT initialization. Using a dedicated interrupt stack prevents
         // a triple fault when the kernel stack is corrupted.
@@ -23,16 +73,31 @@ lazy_static! {
                 .set_handler_fn(double_fault_handler)
                 .set_stack_index(crate::arch::x86_64::gdt::DOUBLE_FAULT_IST_INDEX);
         }
-        // Add timer interrupt handler (IRQ0 = interrupt 32)
-        idt[32].set_handler_fn(timer_interrupt_handler);
-        // Add keyboard interrupt handler (IRQ1 = interrupt 33)
-        idt[33].set_handler_fn(keyboard_interrupt_handler);
-        // Add APIC timer interrupt handler (vector 48, separate from PIC timer at 32)
-        idt[48].set_handler_fn(apic_timer_interrupt_handler);
-        // Add TLB shootdown IPI handler (vector 49)
-        idt[49].set_handler_fn(tlb_shootdown_handler);
-        // Add scheduler wake IPI handler (vector 50)
-        idt[50].set_handler_fn(sched_wake_handler);
+        // Hardware interrupt handlers all use IST to bypass TSS.RSP0 for
+        // Ring 3 delivery. Without IST, a timer/keyboard/IPI interrupt firing
+        // while user code is running loads RSP from TSS.RSP0. If RSP0 is stale
+        // or unmapped in the process's page tables, the CPU cannot push the
+        // interrupt frame and escalates to a Double Fault.
+        //
+        // SAFETY: HARDWARE_IRQ_IST_INDEX (3) is a valid IST index configured
+        // in the TSS during GDT initialization.
+        unsafe {
+            idt[32]
+                .set_handler_fn(timer_interrupt_handler)
+                .set_stack_index(crate::arch::x86_64::gdt::HARDWARE_IRQ_IST_INDEX);
+            idt[33]
+                .set_handler_fn(keyboard_interrupt_handler)
+                .set_stack_index(crate::arch::x86_64::gdt::HARDWARE_IRQ_IST_INDEX);
+            idt[48]
+                .set_handler_fn(apic_timer_interrupt_handler)
+                .set_stack_index(crate::arch::x86_64::gdt::HARDWARE_IRQ_IST_INDEX);
+            idt[49]
+                .set_handler_fn(tlb_shootdown_handler)
+                .set_stack_index(crate::arch::x86_64::gdt::HARDWARE_IRQ_IST_INDEX);
+            idt[50]
+                .set_handler_fn(sched_wake_handler)
+                .set_stack_index(crate::arch::x86_64::gdt::HARDWARE_IRQ_IST_INDEX);
+        }
         idt
     };
 }
@@ -71,6 +136,14 @@ extern "x86-interrupt" fn double_fault_handler(
         raw_serial_str(b" cs=0x");
         raw_serial_hex(cs as u64);
         raw_serial_str(b"\n");
+        // Print current CR3 and TSS.RSP0 for diagnosis
+        let cr3: u64;
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack));
+        raw_serial_str(b"  CR3=0x");
+        raw_serial_hex(cr3);
+        raw_serial_str(b" TSS_RSP0=0x");
+        raw_serial_hex(crate::arch::x86_64::gdt::get_kernel_stack());
+        raw_serial_str(b"\n");
     }
 
     loop {
@@ -82,15 +155,15 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
-    crate::perf::count_page_fault();
-    crate::trace!(
-        crate::perf::trace::TraceEventType::PageFault,
-        0, // CR2 not yet read; filled in after read below
-        error_code.bits()
-    );
+    // FIRST: Emit a raw serial byte to prove we reached the handler.
+    // This comes before ANY other operation to diagnose IST issues.
+    // SAFETY: Port I/O write to COM1 for diagnostic.
+    unsafe {
+        core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b'!', options(nomem, nostack));
+    }
 
-    // SAFETY: Read CR2 (faulting address) before any code that might trigger
-    // another page fault, which would overwrite CR2.
+    // SAFETY: Read CR2 FIRST — before any Rust function call that might
+    // trigger a secondary page fault and overwrite it.
     let cr2_val: u64 = unsafe {
         let val: u64;
         core::arch::asm!("mov {}, cr2", out(reg) val, options(nomem, nostack));
@@ -101,7 +174,10 @@ extern "x86-interrupt" fn page_fault_handler(
     let rip_val = stack_frame.instruction_pointer.as_u64();
     let was_user = ec & 4 != 0; // U/S bit
 
-    // Early diagnostic: raw serial before ANY other work to catch cascading faults
+    // Raw serial diagnostic BEFORE any Rust function calls (count_page_fault,
+    // trace!, current_process). Those calls use global state that may not be
+    // accessible from the IST/TSS stack and can trigger secondary faults
+    // escalating to Double Fault.
     // SAFETY: Port I/O writes to COM1 (0x3F8) for diagnostic serial output.
     unsafe {
         raw_serial_str(b"PF! cr2=0x");
@@ -110,19 +186,22 @@ extern "x86-interrupt" fn page_fault_handler(
         raw_serial_hex(ec);
         raw_serial_str(b" rip=0x");
         raw_serial_hex(rip_val);
-        // Print current PID to identify which process faulted
-        let pf_pid = crate::process::current_process()
-            .map(|p| p.pid.0)
-            .unwrap_or(0xDEAD);
-        raw_serial_str(b" pid=0x");
-        raw_serial_hex(pf_pid);
         raw_serial_str(b"\n");
     }
+
+    // Now safe to call Rust functions — we already have CR2 and diagnostics.
+    crate::perf::count_page_fault();
 
     // Attempt to resolve via demand paging framework.
     // Skip demand paging for NULL dereferences (addr < PAGE_SIZE) since no
     // valid mapping can exist there, and the demand paging code may GP fault
     // while iterating the VAS mappings from interrupt context.
+    //
+    // For user-mode faults, demand paging is attempted on the IST stack.
+    // The BTreeMap traversal in find_mapping() can trigger secondary faults
+    // in edge cases (lock contention, allocation from interrupt context).
+    // We mitigate this by checking cr2 >= PAGE_SIZE and relying on the
+    // demand paging code using only try_lock() internally.
     if cr2_val >= 0x1000 {
         let info = crate::mm::page_fault::from_x86_64(ec, cr2_val, rip_val);
         if let Ok(()) = crate::mm::page_fault::handle_page_fault(info) {
@@ -187,12 +266,16 @@ extern "x86-interrupt" fn page_fault_handler(
             }
         }
 
-        // Mark process as Zombie before returning to boot context.
-        // Only use atomic state operations (set_exit_code, set_state).
+        // Mark the faulting thread (or process) as Zombie before returning
+        // to boot context. Only use atomic state operations.
         // Do NOT iterate threads BTreeMap or look up parent via
-        // get_process() — those BTreeMap operations GP fault from
+        // get_process() -- those BTreeMap operations GP fault from
         // interrupt context on the TSS stack.
-        if let Some(process) = crate::process::current_process() {
+        // For CLONE_THREAD children, only mark the thread as Zombie
+        // so the parent and other threads survive.
+        if let Some(thread) = crate::process::current_thread() {
+            thread.set_state(crate::process::thread::ThreadState::Zombie);
+        } else if let Some(process) = crate::process::current_process() {
             process.set_exit_code(128 + 11); // SIGSEGV
             process.set_state(crate::process::pcb::ProcessState::Zombie);
         }
@@ -205,7 +288,6 @@ extern "x86-interrupt" fn page_fault_handler(
             // SAFETY: swapgs balances the GS base for boot_return_to_kernel.
             // boot_return context was verified by has_boot_return_context().
             unsafe {
-                raw_serial_str(b"[PF_KILL] boot_return\n");
                 core::arch::asm!("swapgs", options(nomem, nostack));
                 crate::arch::x86_64::usermode::boot_return_to_kernel();
             }
@@ -215,12 +297,60 @@ extern "x86-interrupt" fn page_fault_handler(
             x86_64::instructions::hlt();
         }
     } else {
-        // Kernel fault — unrecoverable. Print and halt.
-        println!(
-            "FATAL: kernel page fault at {:#x} ec={:#x} rip={:#x}",
-            cr2_val, ec, rip_val
-        );
-        println!("{:#?}", stack_frame);
+        // Kernel-mode fault.
+        //
+        // If the faulting address is in user space (< 0x0000_8000_0000_0000),
+        // this is a syscall handler that tried to read/write unmapped user
+        // memory. Instead of crashing the kernel, kill the process and return
+        // to boot context -- same as a user-mode SEGFAULT.
+        if cr2_val < 0x0000_8000_0000_0000 {
+            // SAFETY: Port I/O writes to COM1 for diagnostics.
+            unsafe {
+                raw_serial_str(b"KERN_PF_USER_ADDR pid=0x");
+                raw_serial_hex(
+                    crate::process::current_process()
+                        .map(|p| p.pid.0)
+                        .unwrap_or(0xDEAD),
+                );
+                raw_serial_str(b" cr2=0x");
+                raw_serial_hex(cr2_val);
+                raw_serial_str(b" rip=0x");
+                raw_serial_hex(rip_val);
+                raw_serial_str(b"\n");
+            }
+
+            // Kill the faulting thread and return to boot context.
+            // For CLONE_THREAD children, only mark the thread as Zombie
+            // (not the whole process) so the parent and other threads
+            // can continue running.
+            if let Some(thread) = crate::process::current_thread() {
+                thread.set_state(crate::process::thread::ThreadState::Zombie);
+            } else if let Some(process) = crate::process::current_process() {
+                // Fallback: no thread info, kill the process
+                process.set_exit_code(128 + 11); // SIGSEGV
+                process.set_state(crate::process::pcb::ProcessState::Zombie);
+            }
+            if crate::arch::x86_64::usermode::has_boot_return_context() {
+                // SAFETY: swapgs balances the GS base for boot_return_to_kernel.
+                unsafe {
+                    core::arch::asm!("swapgs", options(nomem, nostack));
+                    crate::arch::x86_64::usermode::boot_return_to_kernel();
+                }
+            }
+        }
+
+        // True kernel fault (accessing kernel-space address) — unrecoverable.
+        // Use raw serial ONLY to avoid println! triggering secondary faults.
+        // SAFETY: Port I/O writes to COM1 for diagnostics.
+        unsafe {
+            raw_serial_str(b"FATAL: kernel page fault at 0x");
+            raw_serial_hex(cr2_val);
+            raw_serial_str(b" ec=0x");
+            raw_serial_hex(ec);
+            raw_serial_str(b" rip=0x");
+            raw_serial_hex(rip_val);
+            raw_serial_str(b"\n");
+        }
         loop {
             x86_64::instructions::hlt();
         }
@@ -260,6 +390,43 @@ extern "x86-interrupt" fn general_protection_fault_handler(
         raw_serial_str(b" SS=0x");
         raw_serial_hex(core::ptr::read_volatile(frame_base.add(4)));
         raw_serial_str(b"\n");
+
+        // Also print CR2 and CR3 for diagnosis (CR2 may hold a stale
+        // page-fault address that helps identify cascading faults).
+        let cr2: u64;
+        let cr3: u64;
+        core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack));
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack));
+        raw_serial_str(b"CR2=0x");
+        raw_serial_hex(cr2);
+        raw_serial_str(b" CR3=0x");
+        raw_serial_hex(cr3);
+        raw_serial_str(b"\n");
+    }
+
+    // Check if the fault was from user mode (CS RPL = 3).
+    let cs = stack_frame.code_segment.0;
+    let was_user = (cs & 3) == 3;
+    if was_user {
+        // User-mode GPF: kill the process and return to boot context.
+        // SAFETY: Port I/O to COM1 for diagnostic output.
+        unsafe {
+            raw_serial_str(b"[GP_KILL] user-mode GPF, terminating process\n");
+        }
+
+        if let Some(process) = crate::process::current_process() {
+            process.set_exit_code(128 + 11); // SIGSEGV equivalent
+            process.set_state(crate::process::pcb::ProcessState::Zombie);
+        }
+
+        if crate::arch::x86_64::usermode::has_boot_return_context() {
+            // SAFETY: swapgs balances the GS base for boot_return_to_kernel.
+            unsafe {
+                raw_serial_str(b"[GP_KILL] boot_return\n");
+                core::arch::asm!("swapgs", options(nomem, nostack));
+                crate::arch::x86_64::usermode::boot_return_to_kernel();
+            }
+        }
     }
 
     loop {
@@ -359,5 +526,93 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     unsafe {
         use x86_64::instructions::port::Port;
         Port::<u8>::new(0x20).write(0x20);
+    }
+}
+
+// --- Exception handlers for all remaining vectors that can fire from Ring 3
+// --- These use raw serial output only (no spinlocks) and kill the user process
+// before returning to boot context, same pattern as the GPF handler.
+
+/// Generic exception kill: print vector name, kill process, boot_return.
+///
+/// # Safety
+/// Must only be called from exception handlers with valid stack frames.
+unsafe fn exception_kill_user(name: &[u8], stack_frame: &InterruptStackFrame) {
+    raw_serial_str(b"FATAL:");
+    raw_serial_str(name);
+    raw_serial_str(b" rip=0x");
+    raw_serial_hex(stack_frame.instruction_pointer.as_u64());
+    raw_serial_str(b" cs=0x");
+    raw_serial_hex(stack_frame.code_segment.0 as u64);
+    raw_serial_str(b" rsp=0x");
+    raw_serial_hex(stack_frame.stack_pointer.as_u64());
+    raw_serial_str(b"\n");
+
+    let cs = stack_frame.code_segment.0;
+    if (cs & 3) == 3 {
+        // User-mode fault: kill process and return to boot context.
+        if let Some(process) = crate::process::current_process() {
+            process.set_exit_code(128 + 11);
+            process.set_state(crate::process::pcb::ProcessState::Zombie);
+        }
+        if crate::arch::x86_64::usermode::has_boot_return_context() {
+            raw_serial_str(b"[EXC_KILL] boot_return\n");
+            core::arch::asm!("swapgs", options(nomem, nostack));
+            crate::arch::x86_64::usermode::boot_return_to_kernel();
+        }
+    }
+}
+
+extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
+    unsafe { exception_kill_user(b"#DE", &stack_frame) };
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
+
+extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
+    unsafe { exception_kill_user(b"#UD", &stack_frame) };
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
+
+extern "x86-interrupt" fn segment_not_present_handler(
+    stack_frame: InterruptStackFrame,
+    _error_code: u64,
+) {
+    unsafe { exception_kill_user(b"#NP", &stack_frame) };
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
+
+extern "x86-interrupt" fn stack_segment_fault_handler(
+    stack_frame: InterruptStackFrame,
+    _error_code: u64,
+) {
+    unsafe { exception_kill_user(b"#SS", &stack_frame) };
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
+
+extern "x86-interrupt" fn alignment_check_handler(
+    stack_frame: InterruptStackFrame,
+    _error_code: u64,
+) {
+    unsafe { exception_kill_user(b"#AC", &stack_frame) };
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
+
+extern "x86-interrupt" fn security_exception_handler(
+    stack_frame: InterruptStackFrame,
+    _error_code: u64,
+) {
+    unsafe { exception_kill_user(b"#SX", &stack_frame) };
+    loop {
+        x86_64::instructions::hlt();
     }
 }

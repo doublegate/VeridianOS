@@ -76,8 +76,8 @@ fn prot_to_mapping_type(prot: usize, shared: bool) -> MappingType {
 /// - `prot`: Protection flags (PROT_READ | PROT_WRITE | PROT_EXEC).
 /// - `flags`: Mapping flags (MAP_SHARED | MAP_PRIVATE | MAP_ANONYMOUS |
 ///   MAP_FIXED).
-/// - `fd_offset`: Packed fd (upper 32 bits) and offset (lower 32 bits) for
-///   file-backed mappings. Ignored for MAP_ANONYMOUS.
+/// - `fd_or_packed`: For Linux ABI this is the raw fd (arg5 = r8); for
+///   VeridianOS native ABI it may be packed fd(upper 32) + offset(lower 32).
 ///
 /// # Returns
 /// Address of the new mapping on success.
@@ -86,7 +86,7 @@ pub fn sys_mmap(
     length: usize,
     prot: usize,
     flags: usize,
-    fd_offset: usize,
+    fd_or_packed: usize,
 ) -> SyscallResult {
     // Validate length
     if length == 0 {
@@ -117,13 +117,37 @@ pub fn sys_mmap(
     }
 
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let caller_pid = proc.pid.0;
 
     let is_anonymous = flags & MAP_ANONYMOUS != 0;
-    let fd = if !is_anonymous { fd_offset >> 32 } else { 0 };
-    let offset = if !is_anonymous {
-        fd_offset & 0xFFFF_FFFF
+
+    // Extract fd and offset. Linux mmap has 6 args:
+    //   rdi=addr, rsi=len, rdx=prot, r10=flags, r8=fd, r9=offset
+    // Our syscall entry only passes 5 C params (arg5 = r8 = fd).
+    // The 6th arg (r9 = offset) is saved in the SyscallFrame on the stack.
+    // For Linux ABI processes, extract fd directly from arg5 and offset
+    // from the saved r9 register in the SyscallFrame.
+    let linux_abi = crate::syscall::linux_compat::is_linux_abi(caller_pid);
+    let (fd, offset) = if is_anonymous {
+        (0usize, 0usize)
+    } else if linux_abi {
+        // Linux ABI: fd_or_packed IS the fd; offset is in r9 on the stack.
+        let mmap_offset = {
+            #[cfg(target_arch = "x86_64")]
+            {
+                crate::arch::x86_64::syscall::get_syscall_frame()
+                    .map(|frame| frame.r9 as usize)
+                    .unwrap_or(0)
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                0usize
+            }
+        };
+        (fd_or_packed, mmap_offset)
     } else {
-        0
+        // VeridianOS native ABI: packed fd(upper 32) + offset(lower 32)
+        (fd_or_packed >> 32, fd_or_packed & 0xFFFF_FFFF)
     };
 
     let mapping_type = prot_to_mapping_type(prot, shared);
@@ -166,36 +190,73 @@ pub fn sys_mmap(
 
     // For file-backed mappings, read file contents into the mapped pages
     if !is_anonymous {
-        let file_table = proc.file_table.lock();
-        if let Some(file) = file_table.get(fd) {
-            // Read file data for the requested range.
-            // IMPORTANT: Read directly from the VFS node at the specified offset
-            // instead of using file.seek()+file.read(), which would corrupt the
-            // shared File position used by user-space stdio (fread/fseek).
-            let aligned_len = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-            let mut buf = alloc::vec![0u8; aligned_len];
-            let _bytes_read = file.node.read(offset, &mut buf).unwrap_or(0);
+        // Check if this is a DRM device mmap (for dumb buffer mapping).
+        // DRM MAP_DUMB returns an offset = (handle << 12). When user space
+        // calls mmap() on /dev/dri/card0 with that offset, we map the
+        // framebuffer physical memory directly instead of reading from VFS.
+        let is_drm_mmap = {
+            let file_table = proc.file_table.lock();
+            if let Some(file) = file_table.get(fd) {
+                file.path
+                    .as_ref()
+                    .map(|p| p.contains("dri/"))
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        };
 
-            // Write file data into the mapped region via physical memory.
-            // The pages are mapped in the process's page tables. We walk the
-            // page tables to find the physical frames and write through the
-            // kernel's physical memory window (phys_to_virt_addr).
-            let pt_root = memory_space.get_page_table();
-            if pt_root != 0 {
-                let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
-                for page_off in (0..aligned_len).step_by(PAGE_SIZE) {
-                    let vaddr = mapped_addr + page_off;
-                    if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64))
-                    {
-                        let phys_addr = frame.as_u64() << 12;
-                        let virt = crate::mm::phys_to_virt_addr(phys_addr);
-                        let copy_len = PAGE_SIZE.min(buf.len() - page_off);
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                buf[page_off..].as_ptr(),
-                                virt as *mut u8,
-                                copy_len,
-                            );
+        if is_drm_mmap {
+            // DRM dumb buffer mmap: map the framebuffer physical memory
+            // directly into user space. The offset from MAP_DUMB encodes the
+            // GEM handle (offset = handle << 12), but for our virtual DRM
+            // device all dumb buffers share the single UEFI GOP framebuffer.
+            //
+            // Unmap the pages allocated by the generic mmap above, then map
+            // the framebuffer physical region at the same virtual address.
+            let fb_phys = crate::graphics::framebuffer::get_phys_addr();
+            if fb_phys != 0 {
+                let aligned_len = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+                // Unmap the eagerly-allocated region (keyed by start address)
+                let _ = memory_space.unmap_region(VirtualAddress(mapped_addr as u64));
+                // Map the framebuffer physical region at the same address
+                memory_space
+                    .map_physical_region(fb_phys, aligned_len, VirtualAddress(mapped_addr as u64))
+                    .map_err(|_| SyscallError::OutOfMemory)?;
+            }
+        } else {
+            let file_table = proc.file_table.lock();
+            if let Some(file) = file_table.get(fd) {
+                // Read file data for the requested range.
+                // IMPORTANT: Read directly from the VFS node at the specified offset
+                // instead of using file.seek()+file.read(), which would corrupt the
+                // shared File position used by user-space stdio (fread/fseek).
+                let aligned_len = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+                let mut buf = alloc::vec![0u8; aligned_len];
+                let _bytes_read = file.node.read(offset, &mut buf).unwrap_or(0);
+
+                // Write file data into the mapped region via physical memory.
+                // The pages are mapped in the process's page tables. We walk the
+                // page tables to find the physical frames and write through the
+                // kernel's physical memory window (phys_to_virt_addr).
+                let pt_root = memory_space.get_page_table();
+                if pt_root != 0 {
+                    let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
+                    for page_off in (0..aligned_len).step_by(PAGE_SIZE) {
+                        let vaddr = mapped_addr + page_off;
+                        if let Ok((frame, _flags)) =
+                            mapper.translate_page(VirtualAddress(vaddr as u64))
+                        {
+                            let phys_addr = frame.as_u64() << 12;
+                            let virt = crate::mm::phys_to_virt_addr(phys_addr);
+                            let copy_len = PAGE_SIZE.min(buf.len() - page_off);
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    buf[page_off..].as_ptr(),
+                                    virt as *mut u8,
+                                    copy_len,
+                                );
+                            }
                         }
                     }
                 }

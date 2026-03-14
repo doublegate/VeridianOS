@@ -59,8 +59,14 @@ pub const EPOLL_CTL_MOD: u32 = 3;
 
 /// Event structure passed to/from user space (matches Linux struct
 /// epoll_event).
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
+///
+/// Linux's `struct epoll_event` is `__attribute__((packed))` so it uses
+/// 4-byte alignment (from the leading `u32 events` field) rather than the
+/// natural 8-byte alignment that the `u64 data` field would impose. We must
+/// match this layout to accept user-space pointers at 4-byte-aligned
+/// addresses.
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
 pub struct EpollEvent {
     /// Event flags (EPOLLIN, EPOLLOUT, etc.)
     pub events: u32,

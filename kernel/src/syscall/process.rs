@@ -216,7 +216,6 @@ pub fn sys_exit(exit_code: usize) -> SyscallResult {
     #[cfg(target_arch = "x86_64")]
     {
         let has_ctx = crate::arch::x86_64::usermode::has_boot_return_context();
-        crate::println!("[SYS_EXIT] code={}, boot_ctx={}", exit_code, has_ctx);
         if has_ctx {
             // Mark the process as Zombie and notify parent before returning
             // to the boot context. This is needed for nested child execution:

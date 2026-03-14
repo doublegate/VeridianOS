@@ -2261,6 +2261,82 @@ pub fn with_cursor<R, F: FnOnce(&mut HardwareCursor) -> R>(f: F) -> Option<R> {
 }
 
 // ===========================================================================
+// Virtual DRM device initialization
+// ===========================================================================
+
+/// Initialize a virtual DRM device backed by the UEFI GOP framebuffer.
+///
+/// Creates one CRTC, one encoder, and one connector with the 1280x800@60Hz
+/// mode matching the UEFI GOP display. This allows DRM clients (e.g., KWin)
+/// to discover display resources via standard DRM ioctls and use dumb
+/// buffers for rendering.
+pub fn init_virtual_drm_device() {
+    let fb_info = super::framebuffer::get_fb_info();
+    let (width, height) = fb_info
+        .map(|fb| (fb.width, fb.height))
+        .unwrap_or((1280, 800));
+
+    with_kms(|kms| {
+        // Add CRTC (id=1)
+        let crtc_id = kms.add_crtc();
+
+        // Add encoder (id=1, type=TMDS for HDMI, can drive CRTC 0)
+        let encoder_id = kms.add_encoder(EncoderType::Tmds, 0x1);
+
+        // Bind encoder to CRTC
+        kms.bind_encoder(encoder_id, crtc_id);
+
+        // Add connector (id=1, type=HDMI -- KWin's DRM backend may skip Virtual
+        // connectors)
+        let connector_id = kms.add_connector(ConnectorType::Hdmi);
+
+        // Connect encoder to connector
+        kms.connect_encoder(connector_id, encoder_id);
+
+        // Build display mode from actual framebuffer dimensions.
+        // Use the WXGA60 preset if dimensions match, otherwise build custom.
+        let mode = if width == 1280 && height == 800 {
+            DisplayMode::mode_wxga60()
+        } else if width == 1920 && height == 1080 {
+            DisplayMode::mode_1080p60()
+        } else if width == 1280 && height == 720 {
+            DisplayMode::mode_720p60()
+        } else {
+            // Custom mode: approximate timings for the given resolution
+            let htotal = width + width / 5; // ~120% of active
+            let vtotal = height + height / 20; // ~105% of active
+                                               // Pixel clock = htotal * vtotal * 60 / 1000 (in kHz)
+            let clock_khz = (htotal as u64)
+                .checked_mul(vtotal as u64)
+                .and_then(|v| v.checked_mul(60))
+                .map(|v| (v / 1000) as u32)
+                .unwrap_or(83500);
+            DisplayMode {
+                hdisplay: width,
+                vdisplay: height,
+                clock_khz,
+                hsync_start: width + width / 20,
+                hsync_end: width + width / 10,
+                htotal,
+                vsync_start: height + 3,
+                vsync_end: height + 9,
+                vtotal,
+                vrefresh_mhz: 60000,
+            }
+        };
+
+        // Set connector as connected with the display mode
+        kms.set_connector_status(connector_id, ConnectorStatus::Connected, vec![mode]);
+
+        // Set the CRTC as active with this mode
+        if let Some(crtc) = kms.crtcs.iter_mut().find(|c| c.crtc_id == crtc_id) {
+            crtc.mode = Some(mode);
+            crtc.active = true;
+        }
+    });
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 

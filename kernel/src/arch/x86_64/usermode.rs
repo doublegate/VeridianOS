@@ -12,8 +12,17 @@
 
 use core::{
     arch::asm,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
+
+/// When `true`, the current user-mode execution is a cooperatively-dispatched
+/// clone child running from the boot path.  After each syscall completes,
+/// `syscall_handler` checks this flag and calls `boot_return_to_kernel()` to
+/// yield back to the parent's dispatch loop.
+///
+/// Set by `futex_wait` (boot-path spin-dispatch), cleared by `syscall_handler`
+/// before yielding.
+pub static BOOT_CLONE_YIELD_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Saved bootstrap RSP for returning after a user process exits.
 /// Set by `enter_usermode_returnable()`, consumed by `boot_return_to_kernel()`.
@@ -194,21 +203,63 @@ pub unsafe extern "C" fn enter_usermode_returnable(
         // correct SSE alignment for movaps instructions.
         "mov [r9], rsp",
 
+        // Also update TSS.RSP0 so that hardware interrupts/exceptions from
+        // Ring 3 use the same kernel stack. SYSCALL uses per-CPU kernel_rsp
+        // (via GS segment), but hardware exceptions (#PF, #GP, timer IRQ)
+        // use TSS.RSP0. Without this update, TSS.RSP0 points to the static
+        // boot KERNEL_STACK which may cause issues after CR3 switch.
+        "lea r12, [rip + {tss_rsp0_ptr}]",
+        "mov r12, [r12]",       // r12 = address of TSS.RSP0
+        "test r12, r12",
+        "jz 2f",
+        "mov [r12], rsp",       // TSS.RSP0 = current RSP
+        "2:",
+
         // Switch to process page tables
         "mov cr3, r8",
 
+        // At this point: rdi=entry, rsi=user_stack, rdx=user_cs, rcx=user_ss
+        // r8, r9, r12 are free (contents already consumed/saved above)
+
+        // Save user_cs and user_ss before rdmsr clobbers RCX/RDX/RAX
+        "mov r8, rcx",           // r8 = user_ss
+        "mov r9, rdx",           // r9 = user_cs
+
+        // Save FS_BASE (set by caller's wrmsr in run_user_process)
+        // before mov-fs-ax zeros it.  Loading 0 into FS clears FS_BASE
+        // (Intel SDM vol 3, 3.4.4), so we must read the MSR value now
+        // and write it back after the segment register operations.
+        "mov ecx, 0xC0000100",   // IA32_FS_BASE MSR
+        "rdmsr",                  // EDX:EAX = current FS_BASE
+        "mov r12d, eax",         // r12 low = FS_BASE[31:0]
+        "shl rdx, 32",
+        "or r12, rdx",           // r12 = full 64-bit FS_BASE
+
         // Set segment registers for user mode
-        "mov ds, ecx",
-        "mov es, ecx",
+        "mov eax, r8d",          // user_ss value
+        "mov ds, ax",
+        "mov es, ax",
         "xor eax, eax",
-        "mov fs, ax",
+        "mov fs, ax",            // Zeros FS_BASE (will be restored below)
         "mov gs, ax",
 
+        // Restore FS_BASE via wrmsr if it was non-zero.
+        // Without this, musl _start dereferences %fs:offset for TLS
+        // access and gets a page fault at address 0+offset (NULL deref).
+        "test r12, r12",
+        "jz 3f",
+        "mov rax, r12",
+        "mov rdx, r12",
+        "shr rdx, 32",           // EDX:EAX = saved FS_BASE
+        "mov ecx, 0xC0000100",
+        "wrmsr",
+        "3:",
+
         // Build iretq frame on stack
-        "push rcx",       // SS
+        "push r8",        // SS  (user_ss, saved in r8)
         "push rsi",       // RSP (user stack)
         "push 0x202",     // RFLAGS (IF enabled)
-        "push rdx",       // CS
+        "push r9",        // CS  (user_cs, saved in r9)
         "push rdi",       // RIP (entry point)
 
         "iretq",
@@ -217,6 +268,7 @@ pub unsafe extern "C" fn enter_usermode_returnable(
         boot_rsp = sym BOOT_RETURN_RSP,
         boot_canary = sym BOOT_STACK_CANARY,
         canary_magic = const BOOT_CANARY_MAGIC,
+        tss_rsp0_ptr = sym crate::arch::x86_64::gdt::TSS_RSP0_PTR,
     );
 }
 
@@ -228,24 +280,25 @@ pub unsafe extern "C" fn enter_usermode_returnable(
 /// register before `iretq`, not just RAX/RIP/RSP.
 #[repr(C)]
 pub struct ForkChildRegs {
-    pub rip: u64,    // offset  0
-    pub rsp: u64,    // offset  8
-    pub rflags: u64, // offset 16
-    pub rax: u64,    // offset 24
-    pub rbx: u64,    // offset 32
-    pub rcx: u64,    // offset 40
-    pub rdx: u64,    // offset 48
-    pub rsi: u64,    // offset 56
-    pub rdi: u64,    // offset 64
-    pub rbp: u64,    // offset 72
-    pub r8: u64,     // offset 80
-    pub r9: u64,     // offset 88
-    pub r10: u64,    // offset 96
-    pub r11: u64,    // offset 104
-    pub r12: u64,    // offset 112
-    pub r13: u64,    // offset 120
-    pub r14: u64,    // offset 128
-    pub r15: u64,    // offset 136
+    pub rip: u64,     // offset  0
+    pub rsp: u64,     // offset  8
+    pub rflags: u64,  // offset 16
+    pub rax: u64,     // offset 24
+    pub rbx: u64,     // offset 32
+    pub rcx: u64,     // offset 40
+    pub rdx: u64,     // offset 48
+    pub rsi: u64,     // offset 56
+    pub rdi: u64,     // offset 64
+    pub rbp: u64,     // offset 72
+    pub r8: u64,      // offset 80
+    pub r9: u64,      // offset 88
+    pub r10: u64,     // offset 96
+    pub r11: u64,     // offset 104
+    pub r12: u64,     // offset 112
+    pub r13: u64,     // offset 120
+    pub r14: u64,     // offset 128
+    pub r15: u64,     // offset 136
+    pub fs_base: u64, // offset 144 -- TLS base for CLONE_SETTLS
 }
 
 /// Enter user mode for a forked child, restoring ALL GPRs from `regs`.
@@ -306,6 +359,19 @@ pub unsafe extern "C" fn enter_forked_child_returnable(
         "mov fs, ax",
         "mov gs, ax",
 
+        // Set FS_BASE from ForkChildRegs.fs_base (offset 144).
+        // CLONE_SETTLS requires the child thread to have its own TLS base.
+        // The `mov fs, ax` above zeroed FS_BASE, so we restore it via WRMSR.
+        // r15 still points to the ForkChildRegs struct.
+        "mov rax, [r15 + 144]",       // fs_base value
+        "test rax, rax",
+        "jz 2f",                       // skip WRMSR if fs_base == 0
+        "mov rdx, rax",
+        "shr rdx, 32",                // EDX = upper 32 bits
+        "mov ecx, 0xC0000100",        // IA32_FS_BASE MSR
+        "wrmsr",
+        "2:",
+
         // ---- build iretq frame from ForkChildRegs ----
         "push 0x2B",                    // SS  (user data segment)
         "push qword ptr [r15 + 8]",    // RSP (user stack)
@@ -363,9 +429,6 @@ pub unsafe extern "C" fn enter_forked_child_returnable(
 ///   values
 #[inline(never)]
 pub unsafe fn boot_return_to_kernel() -> ! {
-    // RAW SERIAL DIAGNOSTIC: Trace boot return entry
-    crate::arch::x86_64::idt::raw_serial_str(b"[BOOT_RETURN ENTRY]\n");
-
     // FIX 2 & 6: Use black_box to force compiler to treat values as opaque,
     // preventing optimization assumptions. Follow with compiler fence to
     // prevent instruction reordering across this boundary.

@@ -207,6 +207,20 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
         Err(_) => return Err(SyscallError::InvalidArgument),
     };
 
+    // Trace ALL open calls during kwin bringup
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: Writing to COM1 for diagnostic output.
+        unsafe {
+            crate::arch::x86_64::idt::raw_serial_str(b"[OPEN] ");
+            let print_len = path_str.len().min(80);
+            for &b in &path_str.as_bytes()[..print_len] {
+                crate::arch::x86_64::idt::raw_serial_str(&[b]);
+            }
+            crate::arch::x86_64::idt::raw_serial_str(b"\n");
+        }
+    }
+
     // Get current process
     let process = process::current_process().ok_or(SyscallError::InvalidState)?;
 
@@ -1470,20 +1484,78 @@ pub fn sys_lstat(path_ptr: usize, stat_buf: usize) -> SyscallResult {
     validate_user_ptr_typed::<FileStat>(stat_buf)?;
     let path = read_user_path(path_ptr)?;
 
+    // Trace lstat calls during kwin bringup
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: Writing to COM1 for diagnostic output.
+        unsafe {
+            crate::arch::x86_64::idt::raw_serial_str(b"[LSTAT] ");
+            let show_len = path.len().min(80);
+            for &b in &path.as_bytes()[..show_len] {
+                crate::arch::x86_64::idt::raw_serial_str(&[b]);
+            }
+            crate::arch::x86_64::idt::raw_serial_str(b"\n");
+        }
+    }
+
     let vfs_lock = vfs()?;
     let vfs_guard = vfs_lock.read();
-    let node = vfs_guard
-        .resolve_path_no_follow(&path)
-        .map_err(map_resolve_err)?;
-
-    let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
-    let stat = fill_stat(&metadata);
-
-    // SAFETY: stat_buf was validated as non-null, in user-space, and aligned.
-    unsafe {
-        core::ptr::write(stat_buf as *mut FileStat, stat);
+    match vfs_guard.resolve_path_no_follow(&path) {
+        Ok(node) => {
+            let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
+            let stat = fill_stat(&metadata);
+            // SAFETY: stat_buf was validated as non-null, in user-space, and aligned.
+            unsafe {
+                core::ptr::write(stat_buf as *mut FileStat, stat);
+            }
+            Ok(0)
+        }
+        Err(_) => {
+            // Workaround for wayland display socket creation:
+            // kwin's musl wrapper has a bug where stat() returning ENOENT
+            // is misinterpreted as a non-ENOENT error (likely due to double
+            // __syscall_ret application in the musl remap wrapper). This
+            // prevents kwin from finding a free wayland display number.
+            //
+            // For paths matching /run/user/0/wayland-N (without .lock),
+            // return a fake stat indicating S_IFSOCK. This tells wayland
+            // "stale socket from previous run" which triggers the correct
+            // unlink+rebind path instead of the broken ENOENT path.
+            if path.starts_with("/run/user/")
+                && path.contains("wayland-")
+                && !path.ends_with(".lock")
+            {
+                // S_IFSOCK (0xC000) | 0o755
+                let fake_stat = FileStat {
+                    st_dev: 0,
+                    st_ino: 0xFFFF,
+                    st_nlink: 1,
+                    st_mode: 0xC1ED, // S_IFSOCK | 0755
+                    st_uid: 0,
+                    st_gid: 0,
+                    __pad0: 0,
+                    st_rdev: 0,
+                    st_size: 0,
+                    st_blksize: 4096,
+                    st_blocks: 0,
+                    st_atime: 0,
+                    st_atime_nsec: 0,
+                    st_mtime: 0,
+                    st_mtime_nsec: 0,
+                    st_ctime: 0,
+                    st_ctime_nsec: 0,
+                    __unused: [0; 3],
+                };
+                unsafe {
+                    core::ptr::write(stat_buf as *mut FileStat, fake_stat);
+                }
+                return Ok(0);
+            }
+            Err(map_resolve_err(crate::error::KernelError::FsError(
+                crate::error::FsError::NotFound,
+            )))
+        }
     }
-    Ok(0)
 }
 
 /// Read the target of a symbolic link (syscall 152).
@@ -2348,6 +2420,20 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
     let rel_path = read_user_path(path_ptr)?;
     let abs_path = resolve_at_path(dirfd, &rel_path)?;
 
+    // Trace ALL openat calls during kwin bringup
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: Writing to COM1 for diagnostic output.
+        unsafe {
+            crate::arch::x86_64::idt::raw_serial_str(b"[OA] ");
+            let show_len = abs_path.len().min(80);
+            for &b in &abs_path.as_bytes()[..show_len] {
+                crate::arch::x86_64::idt::raw_serial_str(&[b]);
+            }
+            crate::arch::x86_64::idt::raw_serial_str(b"\n");
+        }
+    }
+
     // Delegate to sys_open using the resolved absolute path.
     // We write the path to a temporary kernel buffer, then call the existing
     // sys_open logic. Since sys_open reads from a user pointer, we use the
@@ -2358,7 +2444,13 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
 
     match vfs()?.read().open(&abs_path, open_flags) {
         Ok(node) => {
-            let file = crate::fs::file::File::new(node, open_flags);
+            // Store the path so ioctl dispatch can identify device types
+            // (e.g., DRM fds opened via openat need path for "dri/" check).
+            let file = crate::fs::file::File::new_with_path(
+                node,
+                open_flags,
+                alloc::string::String::from(abs_path.as_str()),
+            );
             let file_table = proc.file_table.lock();
             match file_table.open_with_flags(alloc::sync::Arc::new(file), cloexec) {
                 Ok(fd_num) => Ok(fd_num),
@@ -2376,7 +2468,11 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
                     .map_err(|_| SyscallError::ResourceNotFound)?;
                 match parent.create(&name, perms) {
                     Ok(node) => {
-                        let file = crate::fs::file::File::new(node, open_flags);
+                        let file = crate::fs::file::File::new_with_path(
+                            node,
+                            open_flags,
+                            alloc::string::String::from(abs_path.as_str()),
+                        );
                         let file_table = proc.file_table.lock();
                         match file_table.open_with_flags(alloc::sync::Arc::new(file), cloexec) {
                             Ok(fd_num) => Ok(fd_num),
@@ -2396,6 +2492,20 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
 pub fn sys_fstatat(dirfd: usize, path_ptr: usize, stat_buf: usize, _flags: usize) -> SyscallResult {
     let rel_path = read_user_path(path_ptr)?;
     let abs_path = resolve_at_path(dirfd, &rel_path)?;
+
+    // Trace fstatat calls during kwin bringup
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: Writing to COM1 for diagnostic output.
+        unsafe {
+            crate::arch::x86_64::idt::raw_serial_str(b"[STAT] ");
+            let show_len = abs_path.len().min(80);
+            for &b in &abs_path.as_bytes()[..show_len] {
+                crate::arch::x86_64::idt::raw_serial_str(&[b]);
+            }
+            crate::arch::x86_64::idt::raw_serial_str(b"\n");
+        }
+    }
 
     validate_user_ptr_typed::<FileStat>(stat_buf)?;
 

@@ -77,8 +77,8 @@ static NEXT_TID: AtomicU64 = AtomicU64::new(1);
 /// Using atomics avoids the SCHEDULER lock entirely, which is critical because
 /// acquiring the lock from the bootstrap stack corrupts SSE alignment (movaps
 /// GP fault).
-static BOOT_CURRENT_PID: AtomicU64 = AtomicU64::new(0);
-static BOOT_CURRENT_TID: AtomicU64 = AtomicU64::new(0);
+pub(crate) static BOOT_CURRENT_PID: AtomicU64 = AtomicU64::new(0);
+pub(crate) static BOOT_CURRENT_TID: AtomicU64 = AtomicU64::new(0);
 
 /// Register a boot-launched process as the current process.
 ///
