@@ -2393,6 +2393,7 @@ pub fn kernel_init_main() {
     run_security_tests(&mut passed, &mut failed);
     run_phase4_tests(&mut passed, &mut failed);
     run_display_tests(&mut passed, &mut failed);
+    run_usercopy_tests(&mut passed, &mut failed);
 
     // --- Summary ---
     print_summary(passed, failed);
@@ -2805,6 +2806,42 @@ fn run_display_tests(passed: &mut u32, failed: &mut u32) {
         #[cfg(not(target_arch = "x86_64"))]
         let ok = true; // No PS/2 keyboard on ARM/RISC-V
         report_test("keyboard_driver_ready", ok, passed, failed);
+    }
+}
+
+/// User-memory access safety and boot-stack integrity (tests 30-32).
+#[cfg(feature = "alloc")]
+fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
+    use crate::syscall::userspace::read_user_bytes;
+
+    kprintln!("[INIT] User-copy safety tests:");
+
+    // Test 30: a kernel-half address is rejected before any access.
+    {
+        let mut buf = [0u8; 8];
+        let ok = read_user_bytes(0xFFFF_8000_0000_0000, &mut buf).is_err();
+        report_test("usercopy_rejects_kernel_addr", ok, passed, failed);
+    }
+
+    // Test 31: a fault on an unmapped user page returns an error instead of
+    // aborting (x86_64 copy fixup; MEM-SEC-01 / SYS-SEC-01). The address is
+    // in the user half and mapped by nothing during boot.
+    {
+        #[cfg(target_arch = "x86_64")]
+        let ok = {
+            let mut buf = [0u8; 8];
+            read_user_bytes(0x0000_7FF0_0000_0000, &mut buf).is_err()
+        };
+        #[cfg(not(target_arch = "x86_64"))]
+        let ok = true; // no fault fixup on aarch64/riscv64 yet
+        report_test("usercopy_fault_returns_efault", ok, passed, failed);
+    }
+
+    // Test 32: the boot stack has not overflowed into the statics below it
+    // (aarch64/riscv64 canary; N-13).
+    {
+        let ok = crate::arch::boot_stack_intact();
+        report_test("boot_stack_canary_intact", ok, passed, failed);
     }
 }
 

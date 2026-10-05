@@ -122,12 +122,7 @@ pub unsafe fn copy_from_user<T>(user_ptr: usize) -> Result<T, SyscallError>
 where
     T: Copy,
 {
-    let size = core::mem::size_of::<T>();
-    validate_user_ptr(user_ptr as *const T, size)?;
-
-    // Use volatile read to prevent optimization issues
-    let value = ptr::read_volatile(user_ptr as *const T);
-    Ok(value)
+    read_user::<T>(user_ptr)
 }
 
 /// Copy data from kernel space to user space
@@ -138,12 +133,7 @@ pub unsafe fn copy_to_user<T>(user_ptr: usize, value: &T) -> Result<(), SyscallE
 where
     T: Copy,
 {
-    let size = core::mem::size_of::<T>();
-    validate_user_ptr(user_ptr as *const T, size)?;
-
-    // Use volatile write to prevent optimization issues
-    ptr::write_volatile(user_ptr as *mut T, *value);
-    Ok(())
+    write_user::<T>(user_ptr, *value)
 }
 
 /// Copy a byte slice from user space
@@ -151,10 +141,9 @@ where
 /// # Safety
 /// This function reads from user-provided pointers and must validate them
 pub unsafe fn copy_slice_from_user(user_ptr: usize, len: usize) -> Result<Vec<u8>, SyscallError> {
-    validate_user_ptr(user_ptr as *const u8, len)?;
-
-    let slice = slice::from_raw_parts(user_ptr as *const u8, len);
-    Ok(slice.to_vec())
+    let mut data = alloc::vec![0u8; len];
+    read_user_bytes(user_ptr, &mut data)?;
+    Ok(data)
 }
 
 /// Copy a byte slice to user space
@@ -162,11 +151,7 @@ pub unsafe fn copy_slice_from_user(user_ptr: usize, len: usize) -> Result<Vec<u8
 /// # Safety
 /// This function writes to user-provided pointers and must validate them
 pub unsafe fn copy_slice_to_user(user_ptr: usize, data: &[u8]) -> Result<(), SyscallError> {
-    validate_user_ptr(user_ptr as *const u8, data.len())?;
-
-    let dest = slice::from_raw_parts_mut(user_ptr as *mut u8, data.len());
-    dest.copy_from_slice(data);
-    Ok(())
+    write_user_bytes(user_ptr, data)
 }
 
 /// Copy a null-terminated string array from user space (like argv/envp)
@@ -252,21 +237,50 @@ use alloc::{string::String, vec::Vec};
 // uses unaligned accesses, because a user-supplied pointer carries no
 // alignment guarantee. An address of 0 is rejected.
 
+/// Byte copy where one side is user memory that has already been
+/// range-validated. On bare-metal x86_64 the copy is fault-tolerant: an
+/// unmapped user page yields EFAULT instead of a kernel fault.
+///
+/// # Safety
+///
+/// The kernel-side range must be valid for the access, and the user-side
+/// range must have passed [`validate_user_ptr`].
+unsafe fn raw_copy(dst: *mut u8, src: *const u8, len: usize) -> Result<(), SyscallError> {
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    {
+        // SAFETY: forwarded from this function's contract.
+        unsafe { crate::arch::x86_64::usercopy::copy_user(dst, src, len) }
+            .map_err(|()| SyscallError::UnmappedMemory)
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    {
+        // SAFETY: forwarded from this function's contract; user and kernel
+        // ranges never overlap.
+        unsafe { ptr::copy_nonoverlapping(src, dst, len) };
+        Ok(())
+    }
+}
+
 /// Read a `T` from user memory at `addr`.
 pub fn read_user<T: Copy>(addr: usize) -> Result<T, SyscallError> {
-    validate_user_ptr(addr as *const u8, core::mem::size_of::<T>())?;
-    // SAFETY: the whole range [addr, addr + size_of::<T>()) was validated as
-    // user memory above; read_unaligned imposes no alignment requirement.
-    Ok(unsafe { ptr::read_unaligned(addr as *const T) })
+    let size = core::mem::size_of::<T>();
+    validate_user_ptr(addr as *const u8, size)?;
+    let mut value = core::mem::MaybeUninit::<T>::uninit();
+    // SAFETY: the user range [addr, addr + size) was validated above and the
+    // destination is a local of exactly `size` bytes. Callers read plain-data
+    // ioctl/syscall structs, for which any bit pattern is a valid value.
+    unsafe {
+        raw_copy(value.as_mut_ptr() as *mut u8, addr as *const u8, size)?;
+        Ok(value.assume_init())
+    }
 }
 
 /// Write `value` to user memory at `addr`.
 pub fn write_user<T: Copy>(addr: usize, value: T) -> Result<(), SyscallError> {
-    validate_user_ptr(addr as *const u8, core::mem::size_of::<T>())?;
-    // SAFETY: the whole destination range was validated as user memory
-    // above; write_unaligned imposes no alignment requirement.
-    unsafe { ptr::write_unaligned(addr as *mut T, value) };
-    Ok(())
+    let size = core::mem::size_of::<T>();
+    validate_user_ptr(addr as *const u8, size)?;
+    // SAFETY: the user range was validated above; the source is `value`.
+    unsafe { raw_copy(addr as *mut u8, &value as *const T as *const u8, size) }
 }
 
 /// Write `items` to a user array at `addr`, contiguously.
@@ -276,12 +290,8 @@ pub fn write_user_slice<T: Copy>(addr: usize, items: &[T]) -> Result<(), Syscall
         return Ok(());
     }
     validate_user_ptr(addr as *const u8, bytes)?;
-    for (i, item) in items.iter().enumerate() {
-        // SAFETY: element i lies within the validated range
-        // [addr, addr + bytes); the write is unaligned-tolerant.
-        unsafe { ptr::write_unaligned((addr as *mut T).add(i), *item) };
-    }
-    Ok(())
+    // SAFETY: the user range was validated above; `items` is `bytes` long.
+    unsafe { raw_copy(addr as *mut u8, items.as_ptr() as *const u8, bytes) }
 }
 
 /// Read element `index` of a user array of `T` starting at `addr`.
@@ -301,10 +311,8 @@ pub fn read_user_bytes(addr: usize, dst: &mut [u8]) -> Result<(), SyscallError> 
         return Ok(());
     }
     validate_user_ptr(addr as *const u8, dst.len())?;
-    // SAFETY: the source range was validated as user memory above and cannot
-    // overlap `dst`, which is kernel memory.
-    unsafe { ptr::copy_nonoverlapping(addr as *const u8, dst.as_mut_ptr(), dst.len()) };
-    Ok(())
+    // SAFETY: the user range was validated above; `dst` is kernel memory.
+    unsafe { raw_copy(dst.as_mut_ptr(), addr as *const u8, dst.len()) }
 }
 
 /// Copy `src` into user memory at `addr`.
@@ -313,10 +321,8 @@ pub fn write_user_bytes(addr: usize, src: &[u8]) -> Result<(), SyscallError> {
         return Ok(());
     }
     validate_user_ptr(addr as *const u8, src.len())?;
-    // SAFETY: the destination range was validated as user memory above and
-    // cannot overlap `src`, which is kernel memory.
-    unsafe { ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()) };
-    Ok(())
+    // SAFETY: the user range was validated above; `src` is kernel memory.
+    unsafe { raw_copy(addr as *mut u8, src.as_ptr(), src.len()) }
 }
 
 /// Linux `_IOC` direction bit: user space writes the argument (kernel reads

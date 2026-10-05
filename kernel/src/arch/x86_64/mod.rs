@@ -25,6 +25,8 @@ pub mod rtc;
 pub mod serial;
 pub mod syscall;
 pub mod timer;
+#[cfg(target_os = "none")]
+pub(crate) mod usercopy;
 pub mod usermode;
 pub mod vga;
 
