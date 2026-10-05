@@ -422,6 +422,12 @@ pub fn current_cpu_id() -> u8 {
         // an illegal instruction (it was, and restarted boot -- N-13). The
         // logical CPU ID lives in `tp` instead: boot.S zeroes it on the BSP,
         // and secondary harts will set it when they are brought up.
+        //
+        // INVARIANT (N-14): `tp` is the user thread pointer in U-mode, so it
+        // is attacker-controlled on entry from user space. Any trap path
+        // from U-mode must swap the kernel `tp` back in (kept in sscratch
+        // while user code runs, as Linux does) before reaching code that
+        // calls this. There is no U-mode entry on riscv64 yet.
         // SAFETY: reading a general-purpose register has no side effects;
         // the kernel does not use `tp` for thread-local storage.
         unsafe {
