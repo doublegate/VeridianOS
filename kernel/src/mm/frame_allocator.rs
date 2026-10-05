@@ -226,9 +226,31 @@ struct BitmapAllocator {
 }
 
 impl BitmapAllocator {
+    /// Frames one bitmap can track.
+    const CAPACITY: usize = 2048 * 64;
+
+    /// Track `frame_count` frames starting at `start_frame`. Only those
+    /// frames start out free: bits past the end of the node stay 0 so they
+    /// are never handed out (N-01 -- they would lie beyond physical RAM).
     const fn new(start_frame: FrameNumber, frame_count: usize) -> Self {
+        let frame_count = if frame_count > Self::CAPACITY {
+            Self::CAPACITY
+        } else {
+            frame_count
+        };
+        let mut bitmap = [0u64; 2048];
+        let full_words = frame_count / 64;
+        let mut i = 0;
+        while i < full_words {
+            bitmap[i] = u64::MAX;
+            i += 1;
+        }
+        let tail_bits = frame_count % 64;
+        if tail_bits != 0 {
+            bitmap[full_words] = (1u64 << tail_bits) - 1;
+        }
         Self {
-            bitmap: Mutex::new([u64::MAX; 2048]),
+            bitmap: Mutex::new(bitmap),
             start_frame,
             total_frames: frame_count,
             free_frames: AtomicUsize::new(frame_count),
@@ -311,26 +333,30 @@ impl BitmapAllocator {
 
     /// Free previously allocated frames
     fn free(&self, frame: FrameNumber, count: usize) -> Result<()> {
-        let offset = (frame.as_u64() - self.start_frame.as_u64()) as usize;
-
-        if offset + count > self.total_frames {
+        // The range must lie entirely inside this node (a frame below the
+        // start used to underflow the offset).
+        let offset = frame
+            .as_u64()
+            .checked_sub(self.start_frame.as_u64())
+            .ok_or(FrameAllocatorError::InvalidFrame)? as usize;
+        let end = offset
+            .checked_add(count)
+            .ok_or(FrameAllocatorError::InvalidFrame)?;
+        if end > self.total_frames {
             return Err(FrameAllocatorError::InvalidFrame);
         }
 
         let mut bitmap = self.bitmap.lock();
 
-        // Mark frames as free
-        for i in 0..count {
-            let frame_bit = offset + i;
-            let word_idx = frame_bit / 64;
-            let bit_idx = frame_bit % 64;
-
-            // Check if already free (double free detection)
-            if bitmap[word_idx] & (1 << bit_idx) != 0 {
+        // Double-free detection: verify every frame is allocated before
+        // changing any bit, so a rejected free leaves the bitmap untouched.
+        for frame_bit in offset..end {
+            if bitmap[frame_bit / 64] & (1 << (frame_bit % 64)) != 0 {
                 return Err(FrameAllocatorError::InvalidFrame);
             }
-
-            bitmap[word_idx] |= 1 << bit_idx;
+        }
+        for frame_bit in offset..end {
+            bitmap[frame_bit / 64] |= 1 << (frame_bit % 64);
         }
 
         self.free_frames.fetch_add(count, Ordering::Release);
@@ -1198,6 +1224,54 @@ pub fn per_cpu_free_frame(frame: FrameNumber) -> Result<()> {
 #[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use super::*;
+
+    /// N-01: a node smaller than the bitmap must never hand out frames past
+    /// its own end (they would be beyond physical RAM).
+    #[test]
+    fn test_bitmap_allocator_respects_node_size() {
+        let start = 0x81400;
+        for count in [1usize, 63, 64, 65, 100, 27_648] {
+            let allocator = BitmapAllocator::new(FrameNumber::new(start), count);
+            for i in 0..count {
+                let frame = allocator.allocate(1).expect("frame within the node");
+                assert_eq!(frame.as_u64(), start + i as u64);
+            }
+            assert!(
+                allocator.allocate(1).is_err(),
+                "node of {} frames overran",
+                count
+            );
+            assert_eq!(allocator.free_count(), 0);
+        }
+    }
+
+    /// N-01: frees outside the node are rejected, including below its start
+    /// (which used to underflow the offset).
+    #[test]
+    fn test_bitmap_free_rejects_out_of_range() {
+        let allocator = BitmapAllocator::new(FrameNumber::new(1000), 100);
+        let frame = allocator.allocate(1).unwrap();
+        assert!(allocator.free(FrameNumber::new(999), 1).is_err());
+        assert!(allocator.free(FrameNumber::new(1100), 1).is_err());
+        assert!(allocator.free(frame, 101).is_err());
+        assert!(allocator.free(frame, 1).is_ok());
+    }
+
+    /// A double free detected part-way through must change nothing.
+    #[test]
+    fn test_bitmap_double_free_is_atomic() {
+        let allocator = BitmapAllocator::new(FrameNumber::new(0), 100);
+        let frame = allocator.allocate(2).unwrap();
+        allocator
+            .free(FrameNumber::new(frame.as_u64() + 1), 1)
+            .unwrap();
+        let before = allocator.free_count();
+        assert!(allocator.free(frame, 2).is_err());
+        assert_eq!(allocator.free_count(), before);
+        // The first frame is still allocated, so the next single-frame
+        // allocation returns the second (freed) frame, not the first.
+        assert_eq!(allocator.allocate(1).unwrap().as_u64(), frame.as_u64() + 1);
+    }
 
     #[test]
     fn test_bitmap_allocator() {
