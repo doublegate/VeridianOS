@@ -826,6 +826,15 @@ pub fn init() {
                     var.mkdir("tmp", Permissions::default()).ok();
                     var.mkdir("run", Permissions::default()).ok();
                     var.mkdir("cache", Permissions::default()).ok();
+                    // /var/lib/dbus/machine-id (D-Bus machine identifier)
+                    // Some libraries check this path before /etc/machine-id.
+                    if let Ok(lib) = var.mkdir("lib", Permissions::default()) {
+                        if let Ok(dbus) = lib.mkdir("dbus", Permissions::default()) {
+                            if let Ok(f) = dbus.create("machine-id", Permissions::read_only()) {
+                                f.write(0, b"a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6\n").ok();
+                            }
+                        }
+                    }
                 }
 
                 // /run subdirectories (XDG_RUNTIME_DIR, D-Bus sockets)
@@ -888,6 +897,13 @@ pub fn init() {
                             b"Welcome to VeridianOS - a capability-based microkernel OS\n",
                         )
                         .ok();
+                    }
+
+                    // /etc/machine-id (D-Bus/systemd machine identifier, 32 hex + newline)
+                    // Required by Qt/KDE/D-Bus for session tracking. Without this,
+                    // kwin_wayland crashes with a page fault when reading machine-id.
+                    if let Ok(f) = etc.create("machine-id", Permissions::read_only()) {
+                        f.write(0, b"a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6\n").ok();
                     }
 
                     // /etc/veridian/session.conf (default desktop session config)

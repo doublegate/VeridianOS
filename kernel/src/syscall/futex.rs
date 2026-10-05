@@ -653,8 +653,10 @@ fn boot_futex_spin(
                     // so the parent can continue.
                     return Err(SyscallError::WouldBlock);
                 }
-                // yield CPU briefly via hlt (APIC timer wakes us)
-                unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+                // Enable interrupts, halt until the APIC timer fires
+                // (advances UPTIME_MS), then disable interrupts again.
+                // Plain `hlt` with IF=0 (set by SFMASK) never wakes.
+                unsafe { core::arch::asm!("sti; hlt; cli", options(nomem, nostack)) };
                 continue;
             }
         };

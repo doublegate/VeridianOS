@@ -154,6 +154,21 @@ pub fn init() {
 
 /// Get current process
 pub fn current_process() -> Option<&'static Process> {
+    // Check boot-launched process atomics FIRST.
+    // During bootstrap and cooperative dispatch (boot_futex_spin), user
+    // processes run via enter_usermode_returnable() /
+    // enter_forked_child_returnable() without being set as the scheduler's
+    // current task.  The scheduler's current() returns the idle task (pid 0),
+    // which is the wrong process. BOOT_CURRENT_PID is explicitly set by the
+    // dispatch code and must take priority to ensure syscalls operate on the
+    // correct process context.
+    let boot_pid = BOOT_CURRENT_PID.load(Ordering::Acquire);
+    if boot_pid != 0 {
+        if let Some(proc) = table::get_process(ProcessId(boot_pid)) {
+            return Some(proc);
+        }
+    }
+
     // Get from current CPU's scheduler
     if let Some(task) = crate::sched::SCHEDULER.lock().current() {
         // SAFETY: `task` is a NonNull<Task> returned by the scheduler's
@@ -165,15 +180,6 @@ pub fn current_process() -> Option<&'static Process> {
                 return Some(proc);
             }
         }
-    }
-
-    // Fallback: check boot-launched process atomics.
-    // During bootstrap, user processes run via enter_usermode_returnable()
-    // without scheduler registration. The bootstrap wrapper sets these
-    // atomics so syscalls (fork, wait, etc.) can find the calling process.
-    let boot_pid = BOOT_CURRENT_PID.load(Ordering::Acquire);
-    if boot_pid != 0 {
-        return table::get_process(ProcessId(boot_pid));
     }
 
     None

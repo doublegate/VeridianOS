@@ -47,13 +47,23 @@ pub fn wrmsr(msr: u32, value: u64) {
 /// (0xFEE0_0000) and I/O APIC (0xFEC0_0000) are not identity-mapped,
 /// so we must add the physical memory offset to access them.
 ///
-/// Returns `None` if boot info or the physical memory offset is unavailable.
+/// Uses the cached physical memory offset (initialized during
+/// `try_enter_usermode`) rather than reading BOOT_INFO directly.
+/// This is safe to call from any context, including syscall handlers
+/// running with a user process's CR3, where BOOT_INFO (which resides
+/// in the bootloader's lower-half mapping) may not be accessible.
+///
+/// Returns `None` if the physical memory offset has not been initialized.
 pub fn phys_to_virt(phys: usize) -> Option<usize> {
-    // SAFETY: BOOT_INFO is a static mut written once during early boot
-    // (before any concurrency) and read-only afterwards. We are in
-    // single-threaded kernel init context.
-    #[allow(static_mut_refs)]
-    let boot_info = unsafe { crate::arch::x86_64::boot::BOOT_INFO.as_ref()? };
-    let offset = boot_info.physical_memory_offset.into_option()?;
+    let offset = super::usermode::phys_offset();
+    if offset == 0 {
+        // Fallback: try BOOT_INFO directly (only safe during early boot
+        // before user-mode setup, when the bootloader's page tables are
+        // still active).
+        #[allow(static_mut_refs)]
+        let boot_info = unsafe { crate::arch::x86_64::boot::BOOT_INFO.as_ref()? };
+        let offset = boot_info.physical_memory_offset.into_option()?;
+        return Some(offset as usize + phys);
+    }
     Some(offset as usize + phys)
 }

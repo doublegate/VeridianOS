@@ -320,9 +320,11 @@ impl VfsNode for DevNode {
             }
             // DRI device nodes: /dev/dri/card0, /dev/dri/renderD128
             "dri/card0" | "dri/renderD128" => {
-                // DRM devices are ioctl-driven; read() is not the primary interface.
-                // Return 0 (no data available for plain reads).
-                Ok(0)
+                // DRM read(): return queued page-flip completion events.
+                // kwin's render loop reads drm_event_vblank structs (32 bytes
+                // each) from the DRM fd after epoll_wait signals readability.
+                let bytes = crate::graphics::gpu_accel::read_drm_events(buffer);
+                Ok(bytes)
             }
             _ => {
                 // Dispatch read to registered device driver via driver framework
@@ -440,6 +442,24 @@ impl VfsNode for DevNode {
         Err(KernelError::OperationNotSupported {
             operation: "truncate device node",
         })
+    }
+
+    fn poll_readiness(&self) -> u16 {
+        match self.name.as_str() {
+            // DRM device nodes: only report POLLIN when page-flip events
+            // are pending. Always report POLLOUT (writes are ioctl-based).
+            // This prevents kwin from reading the DRM fd when no events
+            // are queued (which would return 0 bytes = EOF).
+            "dri/card0" | "dri/renderD128" => {
+                let mut events = 0x0004u16; // POLLOUT
+                if crate::graphics::gpu_accel::has_pending_drm_events() {
+                    events |= 0x0001; // POLLIN
+                }
+                events
+            }
+            // All other devices: default (always readable + writable)
+            _ => 0x0001 | 0x0004, // POLLIN | POLLOUT
+        }
     }
 }
 

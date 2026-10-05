@@ -288,6 +288,55 @@ const int **__ctype_toupper_loc(void) {
     return &_ctype_toupper_ptr;
 }
 
+/* --------------------------------------------------------------------------
+ * __newlocale / newlocale override
+ *
+ * libstdc++ (compiled against glibc) expects the locale_t returned by
+ * newlocale() to be a glibc __locale_struct, which has:
+ *   offset 0x68: const unsigned short *__ctype_b     (classification table)
+ *   offset 0x70: const int *__ctype_tolower           (tolower table)
+ *   offset 0x78: const int *__ctype_toupper           (toupper table)
+ *
+ * musl's locale_t is a completely different struct (6 pointers = 48 bytes).
+ * When libstdc++ reads offset 0x68, it gets garbage from .rodata strings
+ * that happen to follow musl's __c_locale in memory, causing a segfault.
+ *
+ * We provide a fake glibc-layout locale struct with the ctype tables at
+ * the right offsets.  Since this binary only uses the "C" locale, a single
+ * static instance suffices.
+ * -------------------------------------------------------------------------- */
+#include <locale.h>
+
+/* Fake glibc __locale_struct.  Must be at least 0x80 bytes.
+ * Layout: 13 __locale_data pointers (0x00-0x67), then 3 ctype pointers. */
+static const struct {
+    const void *__locales[13];         /* 0x00 - 0x67: dummy locale data ptrs */
+    const unsigned short *__ctype_b;   /* 0x68: classification table */
+    const int *__ctype_tolower;        /* 0x70: tolower table */
+    const int *__ctype_toupper;        /* 0x78: toupper table */
+} _glibc_c_locale = {
+    .__locales = { 0 },
+    .__ctype_b       = _ctype_b_table + 128,
+    .__ctype_tolower  = _ctype_tolower_table + 128,
+    .__ctype_toupper  = _ctype_toupper_table + 128,
+};
+
+/* Override musl's __newlocale.  For a static musl binary, all locale
+ * operations go through this entry point.  We always return our glibc-
+ * compatible C locale struct.  The mask and name arguments are ignored
+ * because kwin only ever uses the "C" locale in this context. */
+struct __locale_struct *__newlocale(int mask, const char *name,
+                                    struct __locale_struct *base) {
+    (void)mask; (void)name; (void)base;
+    return (struct __locale_struct *)(void *)&_glibc_c_locale;
+}
+
+/* Public alias -- musl declares newlocale with locale_t = struct __locale_struct* */
+struct __locale_struct *newlocale(int mask, const char *name,
+                                  struct __locale_struct *base) {
+    return __newlocale(mask, name, base);
+}
+
 /* glibc fortified I/O - just forward to standard versions */
 int __sprintf_chk(char *s, int flag, size_t slen, const char *fmt, ...) {
     va_list ap;
@@ -474,4 +523,87 @@ int pthread_rwlock_clockrdlock(pthread_rwlock_t *rwlock,
                                const struct timespec *abstime) {
     (void)clock_id;
     return pthread_rwlock_timedrdlock(rwlock, abstime);
+}
+
+/* --------------------------------------------------------------------------
+ * libseat shim -- minimal seat management for DRM device access
+ *
+ * KWin 6.x can optionally use libseat for DRM device management.  On
+ * VeridianOS there is no seatd or logind, so we provide a minimal
+ * implementation whose open_device() calls open() directly on the device
+ * path.  This allows KWin's LibSeatSession to function without a real
+ * seat management daemon.
+ *
+ * If kwin is compiled WITHOUT libseat, it falls back to its own
+ * NoopSession (which we also patch in build-kwin.sh to call open()).
+ * -------------------------------------------------------------------------- */
+#include <fcntl.h>
+#include <errno.h>
+
+struct libseat;
+struct libseat_seat_listener {
+    void (*enable_seat)(struct libseat *seat, void *data);
+    void (*disable_seat)(struct libseat *seat, void *data);
+};
+
+/* Internal state for our minimal seat implementation. */
+struct libseat_shim {
+    int dummy;
+    void *user_data;
+};
+
+static struct libseat_shim _seat_shim;
+
+struct libseat *libseat_open_seat(const struct libseat_seat_listener *listener,
+                                   void *data) {
+    (void)listener;
+    _seat_shim.user_data = data;
+    /* Enable seat immediately so KWin knows the session is active. */
+    if (listener && listener->enable_seat)
+        listener->enable_seat((struct libseat *)&_seat_shim, data);
+    return (struct libseat *)&_seat_shim;
+}
+
+int libseat_open_device(struct libseat *seat, const char *path, int *fd) {
+    (void)seat;
+    int f = open(path, O_RDWR | O_CLOEXEC);
+    if (f < 0)
+        return -1;
+    *fd = f;
+    return f;
+}
+
+int libseat_close_device(struct libseat *seat, int device_id) {
+    (void)seat;
+    close(device_id);
+    return 0;
+}
+
+int libseat_disable_seat(struct libseat *seat) {
+    (void)seat;
+    return 0;
+}
+
+int libseat_dispatch(struct libseat *seat, int timeout) {
+    (void)seat; (void)timeout;
+    return 0;
+}
+
+int libseat_get_fd(struct libseat *seat) {
+    (void)seat;
+    return -1;  /* no event fd needed -- seat is always active */
+}
+
+const char *libseat_seat_name(struct libseat *seat) {
+    (void)seat;
+    return "seat0";
+}
+
+int libseat_switch_session(struct libseat *seat, int session) {
+    (void)seat; (void)session;
+    return 0;
+}
+
+void libseat_close_seat(struct libseat *seat) {
+    (void)seat;
 }

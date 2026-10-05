@@ -89,6 +89,7 @@ const LINUX_ACCESS: usize = 21;
 const LINUX_PIPE: usize = 22;
 const LINUX_SELECT: usize = 23;
 const LINUX_SCHED_YIELD: usize = 24;
+const LINUX_MREMAP: usize = 25;
 const LINUX_MADVISE: usize = 28;
 const LINUX_DUP: usize = 32;
 const LINUX_DUP2: usize = 33;
@@ -116,6 +117,8 @@ const LINUX_WAIT4: usize = 61;
 const LINUX_KILL: usize = 62;
 const LINUX_UNAME: usize = 63;
 const LINUX_FCNTL: usize = 72;
+const LINUX_FSYNC: usize = 74;
+const LINUX_FDATASYNC: usize = 75;
 const LINUX_FTRUNCATE: usize = 77;
 const LINUX_GETCWD: usize = 79;
 const LINUX_CHDIR: usize = 80;
@@ -195,6 +198,7 @@ const LINUX_FSTATFS: usize = 138;
 const LINUX_STATFS: usize = 137;
 const LINUX_GETRUSAGE: usize = 98;
 const LINUX_CLONE3: usize = 435;
+const LINUX_FACCESSAT2: usize = 439;
 
 /// Attempt to translate a Linux x86_64 syscall number to a VeridianOS Syscall.
 ///
@@ -282,6 +286,8 @@ pub(crate) fn translate_linux_syscall(linux_num: usize) -> Option<Syscall> {
         LINUX_DUP => Some(Syscall::FileDup),
         LINUX_DUP2 => Some(Syscall::FileDup2),
         LINUX_FCNTL => Some(Syscall::FileFcntl),
+        LINUX_FSYNC => Some(Syscall::FsFsync),
+        LINUX_FDATASYNC => Some(Syscall::FsFsync), // treat same as fsync
         LINUX_FTRUNCATE => Some(Syscall::FileTruncate),
         LINUX_RENAME => Some(Syscall::FileRename),
         LINUX_MKDIR => Some(Syscall::DirMkdir),
@@ -532,12 +538,18 @@ pub(crate) fn handle_linux_stub(linux_num: usize) -> Option<SyscallResult> {
         LINUX_INOTIFY_INIT1 => Some(Err(super::SyscallError::NotImplemented)),
         // clone3: newer clone interface. Return ENOSYS so musl falls back to clone.
         LINUX_CLONE3 => Some(Err(super::SyscallError::NotImplemented)),
+        // faccessat2: like faccessat but with flags. Treat as access check that
+        // succeeds (file exists). Caller typically falls back if this fails.
+        LINUX_FACCESSAT2 => Some(Ok(0)),
         // fallocate: preallocate disk space. Not needed, return ENOSYS.
         LINUX_FALLOCATE => Some(Err(super::SyscallError::NotImplemented)),
         // fstatfs/statfs: filesystem info. Return ENOSYS (Qt handles gracefully).
         LINUX_FSTATFS | LINUX_STATFS => Some(Err(super::SyscallError::NotImplemented)),
         // getrusage: resource usage stats. Return ENOSYS.
         LINUX_GETRUSAGE => Some(Err(super::SyscallError::NotImplemented)),
+        // mremap: in-place remap not supported. Return ENOMEM so caller
+        // falls back to mmap+memcpy+munmap.
+        LINUX_MREMAP => Some(Err(super::SyscallError::OutOfMemory)),
         _ => None,
     }
 }

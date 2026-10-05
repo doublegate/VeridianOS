@@ -1813,6 +1813,8 @@ pub struct VblankEvent {
     pub timestamp_ns: u64,
     /// CRTC that generated this event
     pub crtc_id: u32,
+    /// User data from the page flip request (returned to user space)
+    pub user_data: u64,
 }
 
 /// Page flip request
@@ -1940,6 +1942,7 @@ impl PageFlipManager {
                     sequence: seq,
                     timestamp_ns,
                     crtc_id,
+                    user_data: flip.user_data,
                 });
 
                 completed_indices.push(i);
@@ -2260,6 +2263,62 @@ pub fn with_cursor<R, F: FnOnce(&mut HardwareCursor) -> R>(f: F) -> Option<R> {
     HARDWARE_CURSOR.lock().as_mut().map(f)
 }
 
+/// Check if there are pending DRM page-flip events waiting to be read.
+///
+/// Used by DRM device node poll_readiness() to report POLLIN only when
+/// events are queued, preventing spurious wakeups that confuse kwin's
+/// event loop.
+pub fn has_pending_drm_events() -> bool {
+    with_page_flip(|pf| !pf.vblank_events.is_empty()).unwrap_or(false)
+}
+
+/// Read pending DRM events into a user buffer as `drm_event_vblank` structs.
+///
+/// Each event is 32 bytes matching Linux's `struct drm_event_vblank`:
+///   u32 type (0x02 = DRM_EVENT_FLIP_COMPLETE)
+///   u32 length (32)
+///   u64 user_data
+///   u32 tv_sec
+///   u32 tv_usec
+///   u32 sequence
+///   u32 crtc_id (reserved/pad in upstream, we use for crtc_id)
+///
+/// Returns the number of bytes written to the buffer.
+pub fn read_drm_events(buffer: &mut [u8]) -> usize {
+    const DRM_EVENT_FLIP_COMPLETE: u32 = 0x02;
+    const EVENT_SIZE: usize = 32;
+
+    let events = match with_page_flip(|pf| pf.drain_events()) {
+        Some(events) => events,
+        None => return 0,
+    };
+
+    let mut offset = 0;
+    for event in &events {
+        if offset + EVENT_SIZE > buffer.len() {
+            break;
+        }
+
+        // Convert timestamp_ns to tv_sec / tv_usec
+        let tv_sec = (event.timestamp_ns / 1_000_000_000) as u32;
+        let tv_usec = ((event.timestamp_ns % 1_000_000_000) / 1_000) as u32;
+        let sequence = event.sequence as u32;
+
+        // Write drm_event_vblank struct
+        buffer[offset..offset + 4].copy_from_slice(&DRM_EVENT_FLIP_COMPLETE.to_ne_bytes());
+        buffer[offset + 4..offset + 8].copy_from_slice(&(EVENT_SIZE as u32).to_ne_bytes());
+        buffer[offset + 8..offset + 16].copy_from_slice(&event.user_data.to_ne_bytes());
+        buffer[offset + 16..offset + 20].copy_from_slice(&tv_sec.to_ne_bytes());
+        buffer[offset + 20..offset + 24].copy_from_slice(&tv_usec.to_ne_bytes());
+        buffer[offset + 24..offset + 28].copy_from_slice(&sequence.to_ne_bytes());
+        buffer[offset + 28..offset + 32].copy_from_slice(&event.crtc_id.to_ne_bytes());
+
+        offset += EVENT_SIZE;
+    }
+
+    offset
+}
+
 // ===========================================================================
 // Virtual DRM device initialization
 // ===========================================================================
@@ -2333,6 +2392,12 @@ pub fn init_virtual_drm_device() {
             crtc.mode = Some(mode);
             crtc.active = true;
         }
+    });
+
+    // Register the CRTC with the page flip manager so that page flip
+    // requests (from atomic commits with PAGE_FLIP_EVENT) are accepted.
+    with_page_flip(|pf| {
+        pf.register_crtc(1, 0); // CRTC id=1, no initial framebuffer
     });
 }
 

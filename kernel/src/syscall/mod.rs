@@ -166,6 +166,14 @@ static SYSCALL_RATE_LIMITER: SyscallRateLimiter = SyscallRateLimiter::new();
 static SYSCALL_COUNT: AtomicU64 = AtomicU64::new(0);
 static SYSCALL_ERRORS: AtomicU64 = AtomicU64::new(0);
 
+/// Last syscall number (for diagnostics in page fault handler).
+/// Written on every syscall entry, read from PF handler via raw atomic load.
+pub(crate) static LAST_SYSCALL_NUM: AtomicU64 = AtomicU64::new(0);
+/// Last syscall arg1 (for diagnostics).
+pub(crate) static LAST_SYSCALL_ARG1: AtomicU64 = AtomicU64::new(0);
+/// Last syscall arg2 (for diagnostics).
+pub(crate) static LAST_SYSCALL_ARG2: AtomicU64 = AtomicU64::new(0);
+
 // Import process syscalls module
 pub(crate) mod process;
 use self::process::*;
@@ -656,9 +664,12 @@ pub extern "C" fn syscall_handler(
     #[cfg(target_arch = "x86_64")]
     crate::arch::x86_64::kpti::on_syscall_entry();
 
-    // Track syscall count
+    // Track syscall count and last syscall info (for PF handler diagnostics)
     #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
     let count = SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
+    LAST_SYSCALL_NUM.store(syscall_num as u64, Ordering::Relaxed);
+    LAST_SYSCALL_ARG1.store(arg1 as u64, Ordering::Relaxed);
+    LAST_SYSCALL_ARG2.store(arg2 as u64, Ordering::Relaxed);
 
     // Diagnostic: print first 500 syscalls via raw serial for KDE bringup.
     // Uses unbuffered port I/O so output appears immediately regardless of
@@ -893,6 +904,18 @@ fn dispatch_native_abi(
     // Phase 1: Fix known musl remap bugs (specific number intercepts)
     // ---------------------------------------------------------------
 
+    // --- Raw Linux epoll_ctl (233) bypass fix ---
+    // Some code paths (e.g., statically linked Qt/KDE) may call epoll_ctl
+    // via raw syscall(233, ...) bypassing musl's __veridian_remap_syscall().
+    // VeridianOS 233 = InputRead, which silently fails. Intercept it here.
+    if syscall_num == 233 {
+        // epoll_ctl(epfd, op, fd, event_ptr): op is 1/2/3
+        if arg2 <= 3 {
+            return handle_syscall(Syscall::EpollCtl, arg1, arg2, arg3, arg4, arg5);
+        }
+        // Fall through to InputRead for genuine InputRead calls
+    }
+
     // --- epoll swap fix (Bug 1) ---
     // musl maps: Linux epoll_ctl(233) -> 262, Linux epoll_create1(281) -> 263
     // Correct:   epoll_ctl -> EpollCtl(263), epoll_create1 -> EpollCreate(262)
@@ -918,8 +941,22 @@ fn dispatch_native_abi(
         return handle_syscall(Syscall::EpollCtl, arg1, arg2, arg3, arg4, arg5);
     }
     if syscall_num == 263 {
-        // musl sent 263 meaning epoll_create1 (due to swap bug).
-        // Dispatch as EpollCreate.
+        // 263 can be EITHER:
+        // (a) musl's buggy remap of Linux epoll_create1(291) -> 263 (swap bug)
+        // (b) musl's buggy remap of Linux epoll_pwait(281) -> 263 (mislabeled as
+        // epoll_ctl)
+        //
+        // Disambiguate by argument patterns:
+        //   epoll_create1(flags): arg1 = 0 or O_CLOEXEC(0x80000), arg2 = 0
+        //   epoll_pwait(epfd, events_ptr, maxevents, timeout, sigmask, sigsetsize):
+        //     arg1 = epoll fd (small non-negative int)
+        //     arg2 = events pointer (large user-space address)
+        //     arg3 = maxevents (small positive int)
+        if arg2 > 4096 && arg2 < USER_SPACE_END {
+            // Looks like epoll_pwait (arg2 is a user-space pointer to events array)
+            return handle_syscall(Syscall::EpollWait, arg1, arg2, arg3, arg4, arg5);
+        }
+        // Looks like epoll_create1 (arg2 = 0, arg1 = flags)
         return handle_syscall(Syscall::EpollCreate, arg1, arg2, arg3, arg4, arg5);
     }
 
@@ -960,6 +997,22 @@ fn dispatch_native_abi(
         }
         // Looks like getpgid (pid as small int)
         return handle_syscall(Syscall::Getpgid, arg1, arg2, arg3, arg4, arg5);
+    }
+
+    // --- epoll_pwait passthrough (musl remap maps 281->263, but raw Linux 281
+    // also arrives from Qt/KDE C++ code or libstdc++ bypassing musl) ---
+    // Linux epoll_pwait(281) collides with VeridianOS GrantPty(281).
+    // epoll_pwait args: (epfd, events_ptr, maxevents, timeout, sigmask, sigsetsize)
+    //   arg1 = epoll fd (small non-negative int)
+    //   arg2 = events pointer (large user-space address)
+    // grantpt args: (master_fd) where arg2 is unused/0
+    if syscall_num == 281 {
+        if arg2 > 4096 && arg2 < USER_SPACE_END {
+            // Looks like epoll_pwait (arg2 is user-space events pointer)
+            return handle_syscall(Syscall::EpollWait, arg1, arg2, arg3, arg4, arg5);
+        }
+        // Looks like grantpt (arg2 = 0 or small)
+        return handle_syscall(Syscall::GrantPty, arg1, arg2, arg3, arg4, arg5);
     }
 
     // --- timerfd passthrough (not in musl remap, arrives as raw Linux 283/286/287)

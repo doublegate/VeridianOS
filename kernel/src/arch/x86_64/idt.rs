@@ -192,26 +192,75 @@ extern "x86-interrupt" fn page_fault_handler(
     // Now safe to call Rust functions — we already have CR2 and diagnostics.
     crate::perf::count_page_fault();
 
-    // Attempt to resolve via demand paging framework.
-    // Skip demand paging for NULL dereferences (addr < PAGE_SIZE) since no
-    // valid mapping can exist there, and the demand paging code may GP fault
-    // while iterating the VAS mappings from interrupt context.
+    // --- Kernel-mode fault at user address (fast path) ---
     //
-    // For user-mode faults, demand paging is attempted on the IST stack.
-    // The BTreeMap traversal in find_mapping() can trigger secondary faults
-    // in edge cases (lock contention, allocation from interrupt context).
-    // We mitigate this by checking cr2 >= PAGE_SIZE and relying on the
-    // demand paging code using only try_lock() internally.
-    if cr2_val >= 0x1000 {
+    // Handle this BEFORE demand paging. A kernel-mode fault (U/S bit clear)
+    // at a user-space address means a syscall handler tried to access
+    // unmapped user memory. We MUST NOT call current_process(),
+    // current_thread(), or handle_page_fault() here because:
+    //   - current_process() calls SCHEDULER.lock() which may already be held,
+    //     causing spinlock deadlock on the IST stack -> GP fault.
+    //   - handle_page_fault() calls current_process() + memory_space.lock() with
+    //     the same deadlock risk.
+    //
+    // Instead, print a diagnostic and return to boot context directly.
+    // The thread that caused the fault will not be marked Zombie (no safe
+    // way to do so without locks), but boot_return_to_kernel() restores
+    // the kernel to a known-good state.
+    if !was_user && cr2_val < 0x0000_8000_0000_0000 {
+        // SAFETY: Port I/O writes to COM1 for diagnostics.
+        unsafe {
+            raw_serial_str(b"KERN_PF_USER_ADDR cr2=0x");
+            raw_serial_hex(cr2_val);
+            raw_serial_str(b" rip=0x");
+            raw_serial_hex(rip_val);
+            // Print last syscall info (atomics, no locks needed)
+            raw_serial_str(b" sc=0x");
+            raw_serial_hex(
+                crate::syscall::LAST_SYSCALL_NUM.load(core::sync::atomic::Ordering::Relaxed),
+            );
+            raw_serial_str(b" a1=0x");
+            raw_serial_hex(
+                crate::syscall::LAST_SYSCALL_ARG1.load(core::sync::atomic::Ordering::Relaxed),
+            );
+            raw_serial_str(b" a2=0x");
+            raw_serial_hex(
+                crate::syscall::LAST_SYSCALL_ARG2.load(core::sync::atomic::Ordering::Relaxed),
+            );
+            raw_serial_str(b"\n");
+        }
+        if crate::arch::x86_64::usermode::has_boot_return_context() {
+            // SAFETY: swapgs balances the GS base for boot_return_to_kernel.
+            unsafe {
+                core::arch::asm!("swapgs", options(nomem, nostack));
+                crate::arch::x86_64::usermode::boot_return_to_kernel();
+            }
+        }
+        // No boot context -- halt (should not happen during normal syscall path).
+        loop {
+            x86_64::instructions::hlt();
+        }
+    }
+
+    // --- User-mode demand paging ---
+    //
+    // Only attempt demand paging for USER-MODE faults (U/S bit set in ec).
+    // Skip NULL dereferences (addr < PAGE_SIZE) since no valid mapping can
+    // exist there.
+    //
+    // The demand paging code uses try_lock() on process.memory_space to avoid
+    // deadlock from IST interrupt context.
+    if was_user && cr2_val >= 0x1000 {
         let info = crate::mm::page_fault::from_x86_64(ec, cr2_val, rip_val);
         if let Ok(()) = crate::mm::page_fault::handle_page_fault(info) {
-            // Fault resolved (demand page, CoW, or stack growth) — resume.
+            // Fault resolved (demand page, CoW, or stack growth) -- resume.
             return;
         }
     }
 
-    // Unresolvable fault — print diagnostics via raw serial, then halt or
-    // kill the process.
+    // --- Unresolvable fault ---
+    //
+    // Print diagnostics via raw serial, then halt or kill the process.
     // SAFETY: Writing to COM1 data register at I/O port 0x3F8 for diagnostics.
     unsafe {
         raw_serial_str(b"PF@0x");
@@ -230,13 +279,7 @@ extern "x86-interrupt" fn page_fault_handler(
         // Zombie and call boot_return_to_kernel directly.
         // SAFETY: Port I/O writes to COM1 (0x3F8) for diagnostic serial output.
         unsafe {
-            raw_serial_str(b"SEGFAULT pid=0x");
-            raw_serial_hex(
-                crate::process::current_process()
-                    .map(|p| p.pid.0)
-                    .unwrap_or(0xDEAD),
-            );
-            raw_serial_str(b" addr=0x");
+            raw_serial_str(b"SEGFAULT addr=0x");
             raw_serial_hex(cr2_val);
             raw_serial_str(b" rip=0x");
             raw_serial_hex(rip_val);
@@ -292,68 +335,26 @@ extern "x86-interrupt" fn page_fault_handler(
                 crate::arch::x86_64::usermode::boot_return_to_kernel();
             }
         }
-        // No boot context — halt.
+        // No boot context -- halt.
         loop {
             x86_64::instructions::hlt();
         }
-    } else {
-        // Kernel-mode fault.
-        //
-        // If the faulting address is in user space (< 0x0000_8000_0000_0000),
-        // this is a syscall handler that tried to read/write unmapped user
-        // memory. Instead of crashing the kernel, kill the process and return
-        // to boot context -- same as a user-mode SEGFAULT.
-        if cr2_val < 0x0000_8000_0000_0000 {
-            // SAFETY: Port I/O writes to COM1 for diagnostics.
-            unsafe {
-                raw_serial_str(b"KERN_PF_USER_ADDR pid=0x");
-                raw_serial_hex(
-                    crate::process::current_process()
-                        .map(|p| p.pid.0)
-                        .unwrap_or(0xDEAD),
-                );
-                raw_serial_str(b" cr2=0x");
-                raw_serial_hex(cr2_val);
-                raw_serial_str(b" rip=0x");
-                raw_serial_hex(rip_val);
-                raw_serial_str(b"\n");
-            }
+    }
 
-            // Kill the faulting thread and return to boot context.
-            // For CLONE_THREAD children, only mark the thread as Zombie
-            // (not the whole process) so the parent and other threads
-            // can continue running.
-            if let Some(thread) = crate::process::current_thread() {
-                thread.set_state(crate::process::thread::ThreadState::Zombie);
-            } else if let Some(process) = crate::process::current_process() {
-                // Fallback: no thread info, kill the process
-                process.set_exit_code(128 + 11); // SIGSEGV
-                process.set_state(crate::process::pcb::ProcessState::Zombie);
-            }
-            if crate::arch::x86_64::usermode::has_boot_return_context() {
-                // SAFETY: swapgs balances the GS base for boot_return_to_kernel.
-                unsafe {
-                    core::arch::asm!("swapgs", options(nomem, nostack));
-                    crate::arch::x86_64::usermode::boot_return_to_kernel();
-                }
-            }
-        }
-
-        // True kernel fault (accessing kernel-space address) — unrecoverable.
-        // Use raw serial ONLY to avoid println! triggering secondary faults.
-        // SAFETY: Port I/O writes to COM1 for diagnostics.
-        unsafe {
-            raw_serial_str(b"FATAL: kernel page fault at 0x");
-            raw_serial_hex(cr2_val);
-            raw_serial_str(b" ec=0x");
-            raw_serial_hex(ec);
-            raw_serial_str(b" rip=0x");
-            raw_serial_hex(rip_val);
-            raw_serial_str(b"\n");
-        }
-        loop {
-            x86_64::instructions::hlt();
-        }
+    // Kernel-mode fault at kernel address -- unrecoverable.
+    // Use raw serial ONLY to avoid println! triggering secondary faults.
+    // SAFETY: Port I/O writes to COM1 for diagnostics.
+    unsafe {
+        raw_serial_str(b"FATAL: kernel page fault at 0x");
+        raw_serial_hex(cr2_val);
+        raw_serial_str(b" ec=0x");
+        raw_serial_hex(ec);
+        raw_serial_str(b" rip=0x");
+        raw_serial_hex(rip_val);
+        raw_serial_str(b"\n");
+    }
+    loop {
+        x86_64::instructions::hlt();
     }
 }
 

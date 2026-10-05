@@ -73,6 +73,16 @@ const KDE_ENV: &[&str] = &[
     // input devices which would fail without a running udev daemon.
     "KWIN_WAYLAND_NO_LIBINPUT=1",
     "LANG=en_US.UTF-8",
+    // Override compiled-in sysroot paths for data-file lookups.
+    // The cross-compiled binary has --prefix=.../veridian-sysroot/usr baked in.
+    // These env vars tell libraries to use the real VFS paths instead.
+    "FONTCONFIG_FILE=/etc/fonts/fonts.conf",
+    "FONTCONFIG_PATH=/etc/fonts",
+    "XKB_DEFAULT_RULES=evdev",
+    "XKB_DEFAULT_MODEL=pc105",
+    "XKB_DEFAULT_LAYOUT=us",
+    // Tell libinput where to find device quirks (overrides compiled-in path).
+    "LIBINPUT_QUIRKS_DIR=/usr/share/libinput",
 ];
 
 /// Start a KDE Plasma 6 session.

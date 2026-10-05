@@ -117,6 +117,33 @@ build_kwin() {
     local src="${BUILD_DIR}/kwin-${KWIN_VER}"
     local bld="${BUILD_DIR}/kwin-build"
     log "Building KWin ${KWIN_VER}..."
+
+    # Patch NoopSession::openRestricted() to actually open the device.
+    # The upstream implementation returns -1 unconditionally, which prevents
+    # kwin from opening /dev/dri/card0 on systems without logind/consolekit.
+    # Our patch makes it call open() directly, matching the behavior needed
+    # for VeridianOS where DRM devices are opened via the VFS.
+    if grep -q 'return -1;' "${src}/src/core/session_noop.cpp" 2>/dev/null; then
+        log "Patching session_noop.cpp: openRestricted() -> direct open()"
+        sed -i '/^#include "session_noop.h"/a\
+#include <fcntl.h>\
+#include <unistd.h>' "${src}/src/core/session_noop.cpp"
+        sed -i 's|int NoopSession::openRestricted(const QString \&fileName)\n{\n    return -1;\n}|int NoopSession::openRestricted(const QString \&fileName)\n{\n    return open(fileName.toUtf8().constData(), O_RDWR | O_CLOEXEC);\n}|' "${src}/src/core/session_noop.cpp" 2>/dev/null || \
+        python3 -c "
+import re, sys
+f = '${src}/src/core/session_noop.cpp'
+txt = open(f).read()
+old = 'int NoopSession::openRestricted(const QString \&fileName)\n{\n    return -1;\n}'
+new = 'int NoopSession::openRestricted(const QString \&fileName)\n{\n    return open(fileName.toUtf8().constData(), O_RDWR | O_CLOEXEC);\n}'
+if old in txt:
+    txt = txt.replace(old, new)
+    open(f,'w').write(txt)
+    print('  patched via python3')
+else:
+    print('  already patched or pattern differs')
+"
+    fi
+
     rm -rf "${bld}"
     mkdir -p "${bld}"
     export PKG_CONFIG_LIBDIR="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"

@@ -539,8 +539,22 @@ static PHYS_OFFSET: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU6
 ///
 /// Used by kernel subsystems that need to convert physical addresses to
 /// virtual addresses after the initial user-mode setup.
-#[allow(dead_code)] // Helper for phys_to_virt below
-fn phys_offset() -> u64 {
+/// Initialize the cached physical memory offset.
+///
+/// Called once during bootstrap (before any user process runs) to cache
+/// the bootloader's physical memory offset. After this, `phys_offset()`
+/// and `msr::phys_to_virt()` can be called from any context without
+/// accessing BOOT_INFO (which may not be mapped in user page tables).
+pub(crate) fn init_phys_offset(offset: u64) {
+    PHYS_OFFSET.store(offset, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Returns the cached physical memory offset, or 0 if not yet initialized.
+///
+/// This is safe to call from any context (interrupt, syscall, IST) because
+/// it reads an atomic value in kernel BSS, unlike BOOT_INFO which may be
+/// unmapped when running with a user process's CR3.
+pub(crate) fn phys_offset() -> u64 {
     PHYS_OFFSET.load(core::sync::atomic::Ordering::Relaxed)
 }
 

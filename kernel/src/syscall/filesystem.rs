@@ -319,6 +319,29 @@ pub fn sys_close(fd: usize) -> SyscallResult {
     // Get current process
     let process = process::current_process().ok_or(SyscallError::InvalidState)?;
 
+    // Prevent premature closure of DRM device fds.
+    //
+    // KWin/Mesa close the DRM device fds (opened as /dev/dri/card0) during
+    // initialization -- likely Mesa's DRI driver cleanup after reading an
+    // empty /proc/self/maps. This breaks QSocketNotifier, which needs the
+    // DRM fd for page-flip event notification via epoll. On real Linux,
+    // /proc/self/maps returns valid memory mapping data so Mesa succeeds
+    // and doesn't close the DRM fds.
+    //
+    // Fix: return success without actually closing DRM device fds. The fd
+    // remains open in the file table so QSocketNotifier can register it
+    // for epoll monitoring and kwin's render loop receives page-flip events.
+    {
+        let file_table = process.file_table.lock();
+        if let Some(file) = file_table.get(fd) {
+            if let Some(ref p) = file.path {
+                if p.contains("dri/card0") || p.contains("dri/renderD128") {
+                    return Ok(0);
+                }
+            }
+        }
+    }
+
     // Remove from file table
     let file_table = process.file_table.lock();
     match file_table.close(fd) {
@@ -2271,11 +2294,30 @@ pub fn sys_truncate_path(path_ptr: usize, size: usize) -> SyscallResult {
 /// - `timeout_ms`: Timeout in milliseconds. 0 = non-blocking poll, negative (as
 ///   i32) = infinite wait, positive = wait up to N ms.
 pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult {
+    // Boot-path cooperative dispatch: when a child thread is dispatched from
+    // boot_futex_spin, the syscall handler yields back to the parent after
+    // each syscall. If we spin-loop here for the full timeout, the
+    // cooperative scheduler is blocked and no other threads can run. Treat
+    // the call as non-blocking (single poll pass) so the child yields
+    // promptly and the event loop makes progress across multiple dispatches.
+    #[cfg(target_arch = "x86_64")]
+    let in_boot_coop = crate::arch::x86_64::usermode::BOOT_CLONE_YIELD_PENDING
+        .load(core::sync::atomic::Ordering::Acquire);
+    #[cfg(not(target_arch = "x86_64"))]
+    let in_boot_coop = false;
+
     if nfds == 0 {
         // timeout_ms > 0 means sleep for that duration (like usleep via poll)
-        if (timeout_ms as i32) > 0 {
+        if (timeout_ms as i32) > 0 && !in_boot_coop {
             let start = crate::timer::get_uptime_ms();
             while crate::timer::get_uptime_ms() - start < timeout_ms as u64 {
+                // Enable interrupts briefly to let APIC timer advance
+                // UPTIME_MS (see epoll::epoll_wait for full rationale).
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
+                }
+                #[cfg(not(target_arch = "x86_64"))]
                 crate::sched::yield_cpu();
             }
         }
@@ -2287,13 +2329,17 @@ pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult
 
     validate_user_buffer(fds_ptr, nfds * core::mem::size_of::<PollFd>())?;
 
-    let timeout_i32 = timeout_ms as i32;
+    let timeout_i32 = if in_boot_coop {
+        0i32
+    } else {
+        timeout_ms as i32
+    };
     let start = crate::timer::get_uptime_ms();
     // Cap infinite wait to 30 seconds to prevent permanent hangs
     let max_wait_ms: u64 = if timeout_i32 < 0 {
         30_000
     } else {
-        timeout_ms as u64
+        timeout_i32 as u64
     };
 
     loop {
@@ -2329,8 +2375,31 @@ pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult
                     ready_count += 1;
                 }
             } else {
-                pollfd.revents = POLLNVAL;
-                ready_count += 1;
+                // fd not in file table -- check unix socket registry.
+                // Sockets are not yet VfsNode-backed, so they won't appear
+                // in the file table. Check the socket registry directly.
+                let sock_id = pollfd.fd as u64;
+                if crate::net::unix_socket::socket_exists(sock_id) {
+                    let readiness = crate::net::unix_socket::socket_poll_readiness(sock_id);
+                    if pollfd.events & POLLIN != 0 && readiness & 0x0001 != 0 {
+                        pollfd.revents |= POLLIN;
+                    }
+                    if pollfd.events & POLLOUT != 0 && readiness & 0x0004 != 0 {
+                        pollfd.revents |= POLLOUT;
+                    }
+                    if readiness & 0x0008 != 0 {
+                        pollfd.revents |= POLLERR;
+                    }
+                    if readiness & 0x0010 != 0 {
+                        pollfd.revents |= POLLHUP;
+                    }
+                    if pollfd.revents != 0 {
+                        ready_count += 1;
+                    }
+                } else {
+                    pollfd.revents = POLLNVAL;
+                    ready_count += 1;
+                }
             }
         }
         // Drop file_table lock before yielding
@@ -2345,6 +2414,16 @@ pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult
             return Ok(0);
         }
 
+        // Enable interrupts briefly so the APIC timer ISR can fire and
+        // advance UPTIME_MS.  Without this, the monotonic clock is frozen
+        // (SFMASK clears IF on syscall entry) and time-based fds such as
+        // timerfd never become readable.  See epoll::epoll_wait for the
+        // detailed rationale.
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
+        }
+        #[cfg(not(target_arch = "x86_64"))]
         crate::sched::yield_cpu();
     }
 }
