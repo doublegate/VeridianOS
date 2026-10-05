@@ -86,7 +86,7 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | SCHED-INC-02 | CONFIRMED, dead code | `sched/deadline.rs` | 33 tests, zero callers. | v0.27.0 | open |
 | SMP-PERF-01 | CONFIRMED | `sched/smp.rs`, `process/mod.rs` | See "Only CPU 0 runs" above. `current_process()` takes the global scheduler lock on every syscall. | v0.27.0 | open |
 | PROC-ARCH-01 | CONFIRMED | `mm/vas.rs:596-727` | Same root cause as MEM-PERF-03. | v0.27.0 | open |
-| SYS-PERF-01 | PARTIAL | `syscall/mod.rs:139-160` | Race confirmed. Impact overstated: the refill uses raw cycle counts, so the bucket refills to max on almost every syscall and is effectively never limiting. One global limiter, not per process. | v0.26.0 | open |
+| SYS-PERF-01 | PARTIAL | `syscall/mod.rs:139-160` | Race confirmed. Impact overstated: the refill uses raw cycle counts, so the bucket refills to max on almost every syscall and is effectively never limiting. One global limiter, not per process. | v0.26.0 | fixed (371aa62) |
 | SYS-PERF-02 | CONFIRMED, LATENT | `syscall/futex.rs:71` | Single global table. | v0.26.0 | open |
 | SYS-CONC-01 | CONFIRMED, LATENT | `syscall/futex.rs:425-439` | Non-atomic RMW; also ignores `FUTEX_OP_OPARG_SHIFT`, never wakes `uaddr2` waiters, and runs without the table lock. Syscalls run with interrupts off, so on one CPU nothing interleaves today. | v0.26.0 | open |
 | SYS-INC-01 | CONFIRMED, dead code | `syscall/linux_compat.rs:31-59` | 64-PID limit confirmed, but `set_linux_abi` has no callers (`userspace/loader.rs:118` says not to call it), so the bitmap is always empty. | v0.27.0 | open |
@@ -113,8 +113,8 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | NET-INC-01 | CONFIRMED | `net/tcp.rs:419-520` | Also: segments carry checksum 0 (see N-08). | v0.27.0 | open |
 | NET-INC-02 | CONFIRMED | `net/wireguard.rs`, `services/shell/commands/network.rs:770` | Not bound to the stack; the `wg` command uses an all-zero key seed. | v0.27.0 | open |
 | NET-ARCH-01 | CONFIRMED (worse) | `net/ip.rs:~249-263` | virtio-net registers as `eth1`, so on a virtio-net-only machine every IPv4 transmit is silently dropped. Routing table and gateway are ignored. | v0.26.0 | open |
-| NET-SEC-01 | CONFIRMED, different line | `net/udp.rs:303-311` | `from_bytes` is safe; the panic is in `process_packet`. | v0.26.0 | open |
-| NET-SEC-02 | CONFIRMED | `syscall/network_ext_syscalls.rs:29-36, 150-152` | | v0.26.0 | open |
+| NET-SEC-01 | CONFIRMED, different line | `net/udp.rs:303-311` | `from_bytes` is safe; the panic is in `process_packet`. | v0.26.0 | fixed (399929b) |
+| NET-SEC-02 | CONFIRMED | `syscall/network_ext_syscalls.rs:29-36, 150-152` | | v0.26.0 | fixed (399929b) |
 | DESK-ARCH-01 | CONFIRMED | `desktop/wayland/buffer.rs:25-154`, `desktop/wayland/mod.rs:424-452` | Also: pool size is client-controlled and unbounded; `write_data` panics on a bad offset (see N-09). | v0.26.0 | open |
 | VIRT-INC-01 | CONFIRMED | `virt/container.rs:117-121`, `virt/containers/oci.rs:429-439` | | v0.27.0 | open |
 
@@ -151,3 +151,27 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | W-1 | `bootstrap.rs` | Hardcoded `/home/parobek/Code/VeridianOS/target/veridian-sysroot` directory chain. | Now one `option_env!("VERIDIAN_SYSROOT")` constant (default: the path the shipped rootfs binaries were built with). Removed entirely once `tools/cross` builds with `--prefix=/usr`. |
 | W-2 | `syscall/filesystem.rs` `sys_close` | Silently refuses to close DRM fds (leak) to work around Mesa closing them after reading an empty `/proc/self/maps`. | `/proc/self/maps` now reports the real address space (`fs/procfs.rs`). The `sys_close` special case is removed once a KDE boot confirms Mesa no longer closes the fds. |
 | W-3 | `arch/x86_64/idt.rs` | Kernel-mode faults on user addresses no longer try demand paging, so a syscall touching a not-yet-faulted user page aborts. | Fixed with the user-copy fault fixup (MEM-SEC-01 / SYS-SEC-01). |
+
+### Security review of commit `a738914`
+
+A dedicated review of the committed KDE work found the following. Items marked *pre-existing*
+were already present at `52e2e6a`; the KDE work added more reachable surface to them. All are
+reachable from an unprivileged process and are fixed first in v0.26.0 Sprint A.
+
+| ID | Severity | Location | Issue | Status |
+|---|---|---|---|---|
+| W-4 | Critical | `syscall/filesystem.rs` `sys_ioctl`, `graphics/drm_ioctl.rs` | **Arbitrary kernel write.** `arg` is never validated before `drm_ioctl_dispatch`; handlers write through it and through nested user-supplied pointers (`unique_ptr`, `values_ptr`, `enum_blob_ptr`, `blob.data`, `props_ptr`, `*_id_ptr`, ...). Count checks run after the count is overwritten, so they never limit anything. *Pre-existing gate; new primitives.* | open |
+| W-5 | Critical | `graphics/drm_ioctl.rs` `handle_mode_atomic` | **Arbitrary kernel read.** ATOMIC reads `count_props_ptr`/`props_ptr`/`prop_values_ptr` raw; a kernel address in `prop_values_ptr` is stored as `crtc.fb_id` and read back through `GETCRTC`. `PAGE_FLIP` gives a second, constrained read via the event's `user_data`. | open |
+| W-6 | Critical | `syscall/memory.rs` DRM `mmap` | **Maps arbitrary physical memory, user-writable.** `length` is not bounded by the framebuffer, so a large mmap on a DRM fd exposes all RAM after it. *Pre-existing; PRIME fds and the real `fb_phys` make it more reachable.* | open |
+| W-7 | High | `syscall/filesystem.rs`, `syscall/memory.rs` | DRM handling is selected by `path.contains("dri/")`, so any file under a directory named `dri` reaches the DRM paths. *Pre-existing.* | open |
+| W-8 | High | `process/mod.rs` `current_process` | `BOOT_CURRENT_PID` (one global) now takes priority over the scheduler, so any task scheduled while it is set acts with the boot process's file table, address space and uid. `current_thread` still prefers the scheduler, so thread and process can disagree. | open |
+| W-9 | High | `graphics/drm_ioctl.rs`, `graphics/gpu_accel.rs`, `fs/devfs.rs` | No DRM master: `AUTH_MAGIC`/`SET_MASTER` always succeed. One global vblank event queue: any process can inject events (kwin dereferences `user_data`) or drain kwin's events; `read` drops events that do not fit. | open |
+| W-10 | Medium | `graphics/gpu_accel.rs` | Vblank event queue is unbounded (kernel heap exhaustion by looping `PAGE_FLIP`). | open |
+| W-11 | Medium | `graphics/drm_ioctl.rs` PRIME | Global 8-entry fd-to-handle table keyed by raw fd number across processes (overflow overwrites another process's entry); `FD_TO_HANDLE` never checks the fd belongs to the caller; PRIME fds can never be closed (W-2's `contains("dri/card0")` matches `dri/card0-prime`). | open |
+| W-12 | Medium | `arch/x86_64/idt.rs` | The `KERN_PF_USER_ADDR` path unwinds to the boot context while holding spinlocks (epoll registry, KMS, file table), no longer marks the task zombie, covers `cr2 < 0x1000` (hides kernel NULL dereferences), and runs `swapgs` unconditionally. | open |
+| W-13 | Medium | `sti; hlt; cli` in epoll, poll, nanosleep, timerfd, futex | Enables interrupts mid-syscall, so the timer IRQ can `schedule()` on the syscall stack (feeds W-8). `timerfd_read` ignores the boot cooperative mode and can stall boot for 30 s per call. | open |
+| W-14 | Low-Medium | `net/epoll.rs`, `syscall/filesystem.rs` poll | The Unix-socket readiness fallback treats any fd number as a global socket ID, ignoring ownership: cross-process readiness side channel. | open |
+| W-15 | Low | `syscall/linux_compat.rs` | `faccessat2` always returns success. `LINUX_FCHOWNAT` is defined as 269, which is faccessat's number. | open |
+| W-16 | Low | `syscall/mod.rs` epoll_wait | `max_events * size_of::<EpollEvent>()` is unchecked; in release builds it wraps to a small validated length while the slice keeps the huge count. *Pre-existing; now also reachable via the 263/281 heuristics.* | open |
+| W-17 | Low | `bootstrap.rs` | `fontconfig` cache directories are 0777 without the sticky bit (cache poisoning of files kwin/Qt parse). | open |
+| W-18 | Low | `fs/blockfs.rs` `link` | The same-filesystem check is an inode-number range test, so a hard link to a node from another filesystem with a colliding inode number links an arbitrary BlockFS inode. *Pre-existing.* | open |
