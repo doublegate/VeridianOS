@@ -8,10 +8,7 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-use core::{
-    ptr,
-    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use super::{
     capability::ProcessId,
@@ -221,110 +218,45 @@ impl AsyncChannel {
     }
 }
 
-/// Lock-free ring buffer implementation
+/// Bounded FIFO shared by producers and consumers.
+///
+/// This was a "lock-free" ring whose producers could both pass the size
+/// check and overwrite a live slot, and whose consumers could read a slot
+/// before it was written (IPC-SYNC-03); `capacity == 0` divided by zero.
+/// A spinlocked `VecDeque`, as `Endpoint` uses, is correct for any number of
+/// producers and consumers and needs no `unsafe`.
 struct RingBuffer<T> {
-    /// Buffer storage
-    buffer: *mut T,
-    /// Buffer capacity
+    items: spin::Mutex<alloc::collections::VecDeque<T>>,
     capacity: usize,
-    /// Write position
-    write_pos: AtomicUsize,
-    /// Read position
-    read_pos: AtomicUsize,
-    /// Number of items in buffer
-    size: AtomicUsize,
 }
 
 impl<T> RingBuffer<T> {
-    /// Create a new ring buffer
+    /// Create a buffer holding at most `capacity` items (0 = always full).
     fn new(capacity: usize) -> Self {
-        let layout =
-            core::alloc::Layout::array::<T>(capacity).expect("ring buffer capacity overflow");
-        // SAFETY: The layout is computed from Layout::array::<T>(capacity) which
-        // ensures proper size and alignment for an array of T elements. The alloc()
-        // call returns a pointer to uninitialized memory of the requested layout.
-        // If allocation fails (returns null), subsequent push/pop operations will
-        // cause undefined behavior -- in a production kernel, this should be checked.
-        // The returned pointer is cast to *mut T, which is valid because the layout
-        // guarantees correct alignment for T.
-        let buffer = unsafe { alloc::alloc::alloc(layout) as *mut T };
-
         Self {
-            buffer,
+            items: spin::Mutex::new(alloc::collections::VecDeque::with_capacity(capacity)),
             capacity,
-            write_pos: AtomicUsize::new(0),
-            read_pos: AtomicUsize::new(0),
-            size: AtomicUsize::new(0),
         }
     }
 
-    /// Push an item into the buffer
+    /// Push an item, or give it back if the buffer is full.
     fn push(&self, item: T) -> core::result::Result<(), T> {
-        let current_size = self.size.load(Ordering::Acquire);
-        if current_size >= self.capacity {
+        let mut items = self.items.lock();
+        if items.len() >= self.capacity {
             return Err(item);
         }
-
-        // Reserve a slot
-        let write_pos = self.write_pos.fetch_add(1, Ordering::Relaxed) % self.capacity;
-
-        // SAFETY: `write_pos` is computed modulo `self.capacity`, so it is always
-        // within bounds of the allocated buffer (0..capacity-1). The size check above
-        // ensures we are not writing past the buffer's logical capacity. `ptr::write`
-        // is used instead of assignment because the slot may contain uninitialized
-        // memory (never written) or previously-read memory (already consumed by pop).
-        // In either case, we must not run Drop on the old value, which ptr::write
-        // avoids. The buffer pointer is valid because it was allocated in `new()`.
-        unsafe {
-            ptr::write(self.buffer.add(write_pos), item);
-        }
-
-        // Update size
-        self.size.fetch_add(1, Ordering::Release);
-
+        items.push_back(item);
         Ok(())
     }
 
-    /// Pop an item from the buffer
+    /// Pop the oldest item.
     fn pop(&self) -> Option<T> {
-        loop {
-            let current_size = self.size.load(Ordering::Acquire);
-            if current_size == 0 {
-                return None;
-            }
-
-            // Try to decrement size
-            match self.size.compare_exchange_weak(
-                current_size,
-                current_size - 1,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    // Successfully reserved an item
-                    let read_pos = self.read_pos.fetch_add(1, Ordering::Relaxed) % self.capacity;
-
-                    // SAFETY: `read_pos` is computed modulo `self.capacity`, so it is
-                    // within bounds. The compare_exchange above successfully decremented
-                    // the size, guaranteeing a valid item exists at this slot (placed by
-                    // a prior push()). `ptr::read` is used to move the value out of the
-                    // buffer without dropping it in place -- ownership transfers to the
-                    // caller. The buffer pointer is valid from the allocation in `new()`.
-                    let item = unsafe { ptr::read(self.buffer.add(read_pos)) };
-
-                    return Some(item);
-                }
-                Err(_) => {
-                    // Retry
-                    core::hint::spin_loop();
-                }
-            }
-        }
+        self.items.lock().pop_front()
     }
 
     /// Get current size
     fn size(&self) -> usize {
-        self.size.load(Ordering::Relaxed)
+        self.items.lock().len()
     }
 
     /// Get capacity
@@ -332,40 +264,6 @@ impl<T> RingBuffer<T> {
         self.capacity
     }
 }
-
-impl<T> Drop for RingBuffer<T> {
-    fn drop(&mut self) {
-        // Clean up remaining items
-        while self.pop().is_some() {}
-
-        // Deallocate buffer
-        let layout = core::alloc::Layout::array::<T>(self.capacity)
-            .expect("ring buffer layout error in drop");
-        // SAFETY: The buffer was allocated in `new()` using `alloc::alloc::alloc`
-        // with the same layout (same capacity and type T). All remaining items have
-        // been drained by the pop() loop above, so no live T values remain in the
-        // buffer. The pointer has not been deallocated elsewhere. We have exclusive
-        // access via `&mut self` in the Drop impl.
-        unsafe {
-            alloc::alloc::dealloc(self.buffer as *mut u8, layout);
-        }
-    }
-}
-
-// SAFETY: RingBuffer<T> can be sent across threads if T: Send. The buffer is a
-// raw heap allocation owned entirely by the RingBuffer, and all T values stored
-// in it are owned by the buffer. Transferring the RingBuffer transfers
-// ownership of the contained T values.
-unsafe impl<T: Send> Send for RingBuffer<T> {}
-// SAFETY: RingBuffer<T> can be shared across threads if T: Send. Thread safety
-// is provided by atomic operations on write_pos, read_pos, and size, which
-// coordinate concurrent push/pop access. The size atomic with Acquire/Release
-// ordering ensures that a consumer sees fully written data from a producer.
-// NOTE: This implementation has a subtle race between concurrent pushers (or
-// concurrent poppers) since fetch_add on position does not coordinate with the
-// size check. In practice, this is used with single-producer/single-consumer
-// patterns.
-unsafe impl<T: Send> Sync for RingBuffer<T> {}
 
 /// Async channel statistics
 pub struct AsyncChannelStats {
@@ -447,6 +345,63 @@ mod tests {
         assert_eq!(buffer.pop(), Some(1));
         assert_eq!(buffer.pop(), Some(2));
         assert_eq!(buffer.pop(), None);
+    }
+
+    #[test]
+    fn test_ring_buffer_zero_capacity_is_full() {
+        let buffer = RingBuffer::<u64>::new(0);
+        assert_eq!(buffer.push(1), Err(1));
+        assert_eq!(buffer.pop(), None);
+    }
+
+    /// IPC-SYNC-03: with several producers and consumers, every item is
+    /// delivered exactly once and none is lost or duplicated.
+    #[test]
+    fn test_ring_buffer_mpmc_delivers_each_item_once() {
+        extern crate std;
+        use std::{sync::Arc, thread, vec::Vec};
+
+        const PER_PRODUCER: u64 = 2_000;
+        let buffer = Arc::new(RingBuffer::<u64>::new(64));
+        let producers: Vec<_> = (0..4u64)
+            .map(|p| {
+                let b = Arc::clone(&buffer);
+                thread::spawn(move || {
+                    for i in 0..PER_PRODUCER {
+                        let mut item = p * PER_PRODUCER + i;
+                        while let Err(back) = b.push(item) {
+                            item = back;
+                            std::thread::yield_now();
+                        }
+                    }
+                })
+            })
+            .collect();
+        let consumers: Vec<_> = (0..4)
+            .map(|_| {
+                let b = Arc::clone(&buffer);
+                thread::spawn(move || {
+                    let mut got = Vec::new();
+                    while got.len() < PER_PRODUCER as usize {
+                        match b.pop() {
+                            Some(v) => got.push(v),
+                            None => std::thread::yield_now(),
+                        }
+                    }
+                    got
+                })
+            })
+            .collect();
+        for p in producers {
+            p.join().unwrap();
+        }
+        let mut all: Vec<u64> = consumers
+            .into_iter()
+            .flat_map(|c| c.join().unwrap())
+            .collect();
+        all.sort_unstable();
+        assert_eq!(all, (0..4 * PER_PRODUCER).collect::<Vec<_>>());
+        assert_eq!(buffer.size(), 0);
     }
 
     #[test]
