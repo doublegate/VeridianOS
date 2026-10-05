@@ -335,19 +335,21 @@ mod tests {
         // Reset state
         EVENTFD_REGISTRY.lock().clear();
 
-        let id = eventfd_create(42, 0).unwrap() as u32;
+        // Non-blocking so the zero-counter read returns instead of yielding
+        // to the scheduler (a real context switch, unavailable on host).
+        let id = eventfd_create(42, EFD_NONBLOCK).unwrap() as u32;
         let val = eventfd_read(id).unwrap();
         assert_eq!(val, 42);
 
         // Counter should be 0 after read
-        assert!(eventfd_read(id).is_err());
+        assert_eq!(eventfd_read(id), Err(SyscallError::WouldBlock));
     }
 
     #[test]
     fn test_eventfd_semaphore_mode() {
         EVENTFD_REGISTRY.lock().clear();
 
-        let id = eventfd_create(3, EFD_SEMAPHORE).unwrap() as u32;
+        let id = eventfd_create(3, EFD_SEMAPHORE | EFD_NONBLOCK).unwrap() as u32;
 
         // Each read returns 1 and decrements
         assert_eq!(eventfd_read(id).unwrap(), 1);
@@ -355,7 +357,7 @@ mod tests {
         assert_eq!(eventfd_read(id).unwrap(), 1);
 
         // Now counter is 0
-        assert!(eventfd_read(id).is_err());
+        assert_eq!(eventfd_read(id), Err(SyscallError::WouldBlock));
     }
 
     #[test]

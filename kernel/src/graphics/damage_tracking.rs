@@ -398,6 +398,8 @@ pub(crate) fn with_tracker<R, F: FnOnce(&mut DamageTracker) -> R>(f: F) -> Optio
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
 
     #[test]

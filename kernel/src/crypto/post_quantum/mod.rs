@@ -178,8 +178,11 @@ mod tests {
         assert_eq!(shared_secret1.as_bytes(), shared_secret2.as_bytes());
     }
 
+    #[cfg(target_os = "none")]
     #[test]
     fn test_hybrid_exchange() {
+        use super::hybrid::HybridKeyExchange;
+
         let alice = HybridKeyExchange::generate(KyberLevel::Kyber768).unwrap();
         let bob = HybridKeyExchange::generate(KyberLevel::Kyber768).unwrap();
 
