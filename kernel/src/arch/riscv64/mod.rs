@@ -13,8 +13,49 @@ pub mod usermode;
 // Re-export context, PLIC, and timer from parent riscv module
 pub use super::riscv::{context, plic, timer};
 
+// Fatal supervisor trap vector. The kernel takes no supervisor traps on
+// purpose yet (interrupts stay disabled, SBI calls go to M-mode), so any trap
+// that does arrive is a kernel bug. Without a vector, stvec pointed at the
+// kernel entry and such a trap silently restarted boot over the old state
+// (N-13). Direct mode requires 4-byte alignment.
+core::arch::global_asm!(
+    ".section .text",
+    ".balign 4",
+    ".global veridian_riscv_fatal_trap",
+    "veridian_riscv_fatal_trap:",
+    "    csrr a0, scause",
+    "    csrr a1, sepc",
+    "    csrr a2, stval",
+    "    call {handler}",
+    "1:  j 1b",
+    handler = sym riscv_fatal_trap,
+);
+
+extern "C" {
+    fn veridian_riscv_fatal_trap();
+}
+
+/// Report an unexpected supervisor-mode trap and stop.
+extern "C" fn riscv_fatal_trap(scause: usize, sepc: usize, stval: usize) -> ! {
+    panic!(
+        "unexpected supervisor trap: scause={:#x} sepc={:#x} stval={:#x}",
+        scause, sepc, stval
+    );
+}
+
 /// Called from bootstrap on RISC-V via `crate::arch::init()`.
 pub fn init() {
+    // Install the fatal trap vector before anything else can trap.
+    // SAFETY: writing stvec only changes where supervisor traps go; the
+    // target is the 4-byte-aligned handler defined above (Direct mode).
+    unsafe {
+        core::arch::asm!(
+            "csrw stvec, {0}",
+            in(reg) veridian_riscv_fatal_trap as unsafe extern "C" fn() as usize,
+            options(nomem, nostack)
+        );
+    }
+
     // Initialize SBI (Supervisor Binary Interface)
     super::riscv::sbi::init();
 
