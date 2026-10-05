@@ -27,6 +27,9 @@ pub unsafe extern "C" fn _start_rust() -> ! {
     uart_write_str("[BOOT] Stack initialized and BSS cleared\n");
     uart_write_str("[BOOT] Preparing to enter kernel_main...\n");
 
+    // Arm boot-stack overflow detection before anything deep runs.
+    crate::arch::stack_canary::install();
+
     // Call kernel_main from main.rs
     extern "C" {
         fn kernel_main() -> !;

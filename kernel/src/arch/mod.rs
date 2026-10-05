@@ -23,6 +23,31 @@ pub mod riscv;
 #[cfg(target_arch = "riscv64")]
 pub mod riscv64;
 
+#[cfg(all(
+    any(target_arch = "aarch64", target_arch = "riscv64"),
+    target_os = "none"
+))]
+pub(crate) mod stack_canary;
+
+/// Whether the boot stack has never overflowed into its canary (always true
+/// where the bootloader provides the stack, e.g. x86_64).
+pub(crate) fn boot_stack_intact() -> bool {
+    #[cfg(all(
+        any(target_arch = "aarch64", target_arch = "riscv64"),
+        target_os = "none"
+    ))]
+    {
+        stack_canary::intact()
+    }
+    #[cfg(not(all(
+        any(target_arch = "aarch64", target_arch = "riscv64"),
+        target_os = "none"
+    )))]
+    {
+        true
+    }
+}
+
 #[cfg(target_arch = "riscv64")]
 pub use riscv64::*;
 

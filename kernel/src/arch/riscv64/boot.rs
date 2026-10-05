@@ -23,6 +23,9 @@ pub extern "C" fn _start_rust() -> ! {
         sbi_putchar(b'\n');
     }
 
+    // Arm boot-stack overflow detection before anything deep runs.
+    crate::arch::stack_canary::install();
+
     // Call the kernel main function from main.rs
     extern "C" {
         fn kernel_main() -> !;
