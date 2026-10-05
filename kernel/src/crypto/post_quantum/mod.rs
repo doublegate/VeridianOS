@@ -148,7 +148,6 @@ fn expand_seed(seed: &[u8], len: usize) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     // These tests require bare-metal PRNG initialization for deterministic results.
     // The simplified post-quantum implementations produce non-deterministic output

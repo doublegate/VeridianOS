@@ -10,10 +10,9 @@ use crate::{
     ipc::{
         capability::{IpcCapability, IpcPermissions, Permission},
         channel::{Channel, Endpoint},
-        message::{flags, permissions, LargeMessage, SmallMessage},
-        shared_memory::{CachePolicy, Permission as ZeroPermission, SharedRegion},
+        message::{flags, permissions, SmallMessage},
+        shared_memory::Permission as ZeroPermission,
     },
-    mm::VirtualAddress,
     process::ProcessId,
 };
 

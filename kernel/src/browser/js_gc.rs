@@ -288,7 +288,7 @@ fn estimate_object_size(obj: &JsObject) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use alloc::collections::BTreeMap;
+
     #[allow(unused_imports)]
     use alloc::vec;
 
@@ -508,7 +508,7 @@ mod tests {
 
     #[test]
     fn test_gc_collect_with_call_frame_locals() {
-        use super::super::{js_compiler::FunctionTemplate, js_vm::CallFrame};
+        use super::super::js_vm::CallFrame;
 
         let mut heap = GcHeap::new();
         let oid = heap.allocate(JsObject::new());

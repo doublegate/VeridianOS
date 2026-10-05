@@ -1047,7 +1047,7 @@ mod tests {
 
     #[test]
     fn test_bpb_parse_bad_signature() {
-        let mut image = vec![0u8; 512];
+        let image = vec![0u8; 512];
         let result = Bpb::parse(&image);
         assert!(result.is_err());
     }

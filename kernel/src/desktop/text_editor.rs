@@ -557,7 +557,6 @@ pub fn with_text_editor<R, F: FnOnce(&RwLock<TextEditor>) -> R>(f: F) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_char_insertion() {
