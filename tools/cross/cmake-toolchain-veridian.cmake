@@ -71,7 +71,25 @@ set(ENV{PKG_CONFIG_SYSROOT_DIR} "")
 # CMAKE_EXE_LINKER_FLAGS goes before cmake-generated libs (too early).
 # CMAKE_CXX_STANDARD_LIBRARIES goes after ALL cmake libs (correct for resolution).
 set(CMAKE_EXE_LINKER_FLAGS "-Wl,--allow-multiple-definition" CACHE STRING "Linker flags" FORCE)
-set(CMAKE_CXX_STANDARD_LIBRARIES "-Wl,--whole-archive ${VERIDIAN_SYSROOT}/usr/lib/libglibc_shim.a -Wl,--no-whole-archive -Wl,--start-group -lepoxy -lGLESv2 -lEGL -lgbm -ldrm -lglapi -lwayland-client -lwayland-server -lwayland-egl -lwayland-cursor -lffi -ludev -levdev -lexpat -lfreetype -lfontconfig -lsystemd -lcanberra -llcms2 -lxcvt -ldisplay-info -lz -lm -ldl -lpthread ${VERIDIAN_SYSROOT}/usr/lib/libwl_fixes_stub.a ${VERIDIAN_SYSROOT}/usr/lib/libkwin_stubs.a ${VERIDIAN_SYSROOT}/usr/lib/libgl_stubs.a ${VERIDIAN_SYSROOT}/usr/lib/libkf6_link_stubs.a -Wl,--end-group" CACHE STRING "Extra link libs for static" FORCE)
+# The link group is the full set KWin needs, but the same toolchain builds
+# every earlier phase too (Qt, KF6), when most of these do not exist yet.
+# Only libraries already present in the sysroot are added, so each phase
+# links against what has been built so far.
+set(_veridian_link_group "")
+foreach(_lib epoxy GLESv2 EGL gbm drm glapi wayland-client wayland-server
+             wayland-egl wayland-cursor ffi udev evdev expat freetype fontconfig
+             systemd canberra lcms2 xcvt display-info z)
+    if(EXISTS "${VERIDIAN_SYSROOT}/usr/lib/lib${_lib}.a")
+        string(APPEND _veridian_link_group " -l${_lib}")
+    endif()
+endforeach()
+string(APPEND _veridian_link_group " -lm -ldl -lpthread")
+foreach(_stub wl_fixes_stub kwin_stubs gl_stubs kf6_link_stubs)
+    if(EXISTS "${VERIDIAN_SYSROOT}/usr/lib/lib${_stub}.a")
+        string(APPEND _veridian_link_group " ${VERIDIAN_SYSROOT}/usr/lib/lib${_stub}.a")
+    endif()
+endforeach()
+set(CMAKE_CXX_STANDARD_LIBRARIES "-Wl,--whole-archive ${VERIDIAN_SYSROOT}/usr/lib/libglibc_shim.a -Wl,--no-whole-archive -Wl,--start-group${_veridian_link_group} -Wl,--end-group" CACHE STRING "Extra link libs for static" FORCE)
 set(CMAKE_C_STANDARD_LIBRARIES "${CMAKE_CXX_STANDARD_LIBRARIES}" CACHE STRING "Extra C link libs for static" FORCE)
 
 # Cross-compilation helpers: create Wayland::Scanner and KF6 stub targets.

@@ -68,7 +68,8 @@ build_host_qt() {
             -nomake tests \
             -dbus-linked \
             -gui \
-            -widgets && \
+            -widgets \
+            -- -DFEATURE_system_textmarkdownreader=OFF && \
         cmake --build . --parallel "${JOBS}" && \
         cmake --install .)
     log "Host Qt: done."
