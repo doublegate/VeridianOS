@@ -140,6 +140,50 @@ mod space_tests {
 mod manager_tests {
     use super::*;
 
+    /// IPC-INC-01: genuine endpoint tokens carry type/generation/flags in
+    /// their high bits, so they are >= 2^32. The fast path's old range
+    /// check rejected every one of them and accepted any smaller integer.
+    /// Send permission is now decided by the sender's capability space.
+    #[test]
+    fn test_send_permission_uses_capability_space() {
+        use alloc::sync::Arc;
+
+        let cap_space = space::CapabilitySpace::new();
+        let endpoint = object::ObjectRef::Endpoint {
+            endpoint: Arc::new(crate::ipc::Endpoint::new(ProcessId(7))),
+        };
+        let cap = manager::cap_manager()
+            .create_capability(endpoint, ipc_integration::IpcRights::SEND, &cap_space)
+            .unwrap();
+
+        assert!(
+            cap.to_u64() >= 0x1_0000_0000,
+            "genuine token {:#x}",
+            cap.to_u64()
+        );
+        assert!(ipc_integration::check_send_permission(cap, &cap_space).is_ok());
+
+        let forged = token::CapabilityToken::from_u64(0x1337_cafe);
+        assert!(ipc_integration::check_send_permission(forged, &cap_space).is_err());
+
+        let other_space = space::CapabilitySpace::new();
+        assert!(
+            ipc_integration::check_send_permission(cap, &other_space).is_err(),
+            "a token is only valid in the space that holds it"
+        );
+
+        let read_only = manager::cap_manager()
+            .create_capability(
+                object::ObjectRef::Endpoint {
+                    endpoint: Arc::new(crate::ipc::Endpoint::new(ProcessId(7))),
+                },
+                token::Rights::READ,
+                &cap_space,
+            )
+            .unwrap();
+        assert!(ipc_integration::check_send_permission(read_only, &cap_space).is_err());
+    }
+
     #[test]
     fn test_capability_creation() {
         let cap_space = space::CapabilitySpace::new();

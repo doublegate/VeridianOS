@@ -54,8 +54,17 @@ pub fn sync_send(msg: Message, target_endpoint: u64) -> Result<()> {
 
     match msg {
         Message::Small(small_msg) => {
-            // Try fast path first
-            match fast_send(&small_msg, target_endpoint) {
+            // Fast path only when a receiver is blocked on this endpoint:
+            // hand the message to *that* task. (fast_send takes a PID; this
+            // used to pass the endpoint id -- or, from sys_ipc_send, the raw
+            // capability value -- as the PID.)
+            let Some(receiver) = crate::sched::ipc_blocking::first_waiter(target_endpoint) else {
+                SYNC_STATS.slow_path_count.fetch_add(1, Ordering::Relaxed);
+                sync_send_slow_path(Message::Small(small_msg), target_endpoint)?;
+                update_latency_stats(start);
+                return Ok(());
+            };
+            match fast_send(&small_msg, receiver.0) {
                 Ok(()) => {
                     SYNC_STATS.fast_path_count.fetch_add(1, Ordering::Relaxed);
                     update_latency_stats(start);

@@ -308,6 +308,27 @@ pub(super) fn add_to_wait_queue(task: core::ptr::NonNull<Task>, endpoint: u64) {
         .push(WaitQueueTaskPtr(task));
 }
 
+/// PID of the first task blocked on `endpoint`, if any. Used by the IPC
+/// fast path to hand a message straight to a waiting receiver.
+#[cfg(feature = "alloc")]
+pub fn first_waiter(endpoint: u64) -> Option<ProcessId> {
+    let queues = wait_queues().lock();
+    queues
+        .get(&endpoint)?
+        .first()
+        .map(|&WaitQueueTaskPtr(task_ptr)| {
+            // SAFETY: as in remove_from_wait_queue: tasks in wait queues are
+            // valid and not deallocated; only the pid is read.
+            unsafe { task_ptr.as_ref().pid }
+        })
+}
+
+/// Without alloc there are no wait queues.
+#[cfg(not(feature = "alloc"))]
+pub fn first_waiter(_endpoint: u64) -> Option<ProcessId> {
+    None
+}
+
 /// Remove task from wait queue by PID
 #[cfg(feature = "alloc")]
 pub(super) fn remove_from_wait_queue(pid: ProcessId) -> Option<core::ptr::NonNull<Task>> {

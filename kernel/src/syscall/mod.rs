@@ -2444,48 +2444,35 @@ fn sys_ipc_send(
         return Err(e.into());
     }
 
+    // The capability names the destination endpoint. It used to be passed
+    // on as the endpoint id -- and from there as the receiver PID -- so a
+    // message went to whatever process had that number (IPC-INC-01).
+    let endpoint_id = match cap_space.lookup_entry(cap_token) {
+        Some((crate::cap::object::ObjectRef::Endpoint { endpoint }, _rights)) => endpoint.id(),
+        _ => return Err(SyscallError::InvalidCapability),
+    };
+    drop(cap_space);
+
     // Check if this is a small message (fast path)
     let message = if msg_size <= core::mem::size_of::<SmallMessage>() {
-        // Fast path for small messages
-        // SAFETY: msg_ptr was validated as non-zero above. The caller passes
-        // a user-space pointer to a SmallMessage. We read the entire struct
-        // by value. SmallMessage is Copy and repr(C), so the read is valid
-        // if the pointer is properly aligned and points to valid memory.
-        unsafe {
-            let small_msg = *(msg_ptr as *const SmallMessage);
-            Message::Small(small_msg)
-        }
+        let mut small_msg: SmallMessage = userspace::read_user(msg_ptr)?;
+        // The message carries the capability that was actually validated,
+        // never one the sender wrote into the struct.
+        small_msg.capability = capability as u64;
+        Message::Small(small_msg)
     } else {
-        // Large message path
-        // SAFETY: msg_ptr is non-zero (checked above) and msg_size > 0.
-        // The user-space buffer at msg_ptr is expected to contain msg_size
-        // bytes. We create a slice reference for the message data. The
-        // LargeMessage is constructed with the user-space address for
-        // later zero-copy transfer.
-        unsafe {
-            let _msg_slice = core::slice::from_raw_parts(msg_ptr as *const u8, msg_size);
-
-            // For now, create a large message with basic header
-            // In a real implementation, this would handle shared memory regions
-            let large_msg = crate::ipc::LargeMessage {
-                header: crate::ipc::message::MessageHeader::new(
-                    capability as u64,
-                    0,
-                    msg_size as u64,
-                ),
-                memory_region: crate::ipc::message::MemoryRegion::new(
-                    msg_ptr as u64,
-                    msg_size as u64,
-                ),
-                inline_data: [0; crate::ipc::message::SMALL_MESSAGE_MAX_SIZE],
-            };
-
-            Message::Large(large_msg)
-        }
+        // Large message path: the payload stays in user memory and is
+        // described by a region for later zero-copy transfer.
+        let large_msg = crate::ipc::LargeMessage {
+            header: crate::ipc::message::MessageHeader::new(capability as u64, 0, msg_size as u64),
+            memory_region: crate::ipc::message::MemoryRegion::new(msg_ptr as u64, msg_size as u64),
+            inline_data: [0; crate::ipc::message::SMALL_MESSAGE_MAX_SIZE],
+        };
+        Message::Large(large_msg)
     };
 
     // Perform the actual send using the IPC sync module
-    match sync_send(message, capability as u64) {
+    match sync_send(message, endpoint_id) {
         Ok(()) => Ok(0),
         Err(e) => Err(e.into()),
     }
