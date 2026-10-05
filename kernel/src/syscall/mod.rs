@@ -247,7 +247,7 @@ mod arch_prctl;
 mod futex;
 pub(crate) mod linux_compat;
 mod thread_clone;
-mod userspace;
+pub(crate) mod userspace;
 pub use futex::sys_futex_wake;
 pub use userspace::copy_to_user;
 

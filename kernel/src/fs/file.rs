@@ -147,6 +147,12 @@ pub struct File {
 }
 
 impl File {
+    /// Whether this file is a DRM device (a devfs node with the DRM major),
+    /// decided by the node itself rather than the path it was opened with.
+    pub fn is_drm_device(&self) -> bool {
+        matches!(self.node.device_id(), Some((major, _)) if major == crate::fs::devfs::DRM_MAJOR)
+    }
+
     /// Create a new file structure
     pub fn new(node: Arc<dyn VfsNode>, flags: OpenFlags) -> Self {
         let nb = flags.nonblock;
