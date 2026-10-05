@@ -113,6 +113,10 @@ fn gem_revoke(handle: u32, pid: u64) -> bool {
     GEM_ACCESS.lock().remove(&(handle, pid))
 }
 
+/// (framebuffer id, pid) pairs: the process that created each framebuffer,
+/// the only one allowed to remove it.
+static FB_OWNERS: spin::Mutex<BTreeSet<(u32, u64)>> = spin::Mutex::new(BTreeSet::new());
+
 /// PRIME exports: (exporting pid, fd) -> GEM handle. Keyed by process so a
 /// raw fd number names nothing in another process (W-11).
 static PRIME_EXPORTS: spin::Mutex<alloc::collections::BTreeMap<(u64, i32), u32>> =
@@ -125,6 +129,10 @@ pub(crate) fn prime_fd_closed(pid: u64, fd: i32) {
 
 /// Whether `pid` may mmap `length` bytes at `offset` of its DRM fd `fd`.
 ///
+/// Only the DRM master may map at all: every dumb buffer of this virtual
+/// device aliases the one scanout framebuffer, so mapping any of them gives
+/// read/write access to what is on screen.
+///
 /// Dumb buffers are mapped at the offset MAP_DUMB returned (`handle << 12`),
 /// which must name a handle the caller holds; a PRIME export is mapped at
 /// offset 0 of the caller's own export fd. Every dumb buffer of this virtual
@@ -132,6 +140,9 @@ pub(crate) fn prime_fd_closed(pid: u64, fd: i32) {
 /// exceed it -- otherwise the mapping would expose the physical memory that
 /// follows the framebuffer (W-6).
 pub(crate) fn may_mmap(pid: u64, fd: i32, offset: usize, length: usize) -> bool {
+    if !is_master(pid) {
+        return false;
+    }
     let Some(fb) = crate::graphics::framebuffer::get_fb_info() else {
         return false;
     };
@@ -617,7 +628,7 @@ pub(crate) fn drm_ioctl_dispatch(_fd: i32, request: u64, arg: *mut u8) -> Result
     let cmd = (request & 0xFF) as u32;
 
     // Log all DRM ioctls for debugging kwin bringup
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
         // SAFETY: Writing to COM1 I/O port for diagnostic output.
         unsafe {
@@ -628,6 +639,14 @@ pub(crate) fn drm_ioctl_dispatch(_fd: i32, request: u64, arg: *mut u8) -> Result
     }
 
     let pid = caller_pid();
+    // Every check below is keyed by PID; without a calling process there is
+    // nothing to authorize against, and PID 0 must never act as master or
+    // share GEM handles.
+    if pid == 0 {
+        return Err(KernelError::PermissionDenied {
+            operation: "DRM ioctl without a calling process",
+        });
+    }
 
     // Modesetting changes what is on screen for everyone, so it requires
     // the DRM master (claimed by the first process to modeset).
@@ -675,7 +694,7 @@ pub(crate) fn drm_ioctl_dispatch(_fd: i32, request: u64, arg: *mut u8) -> Result
         DRM_IOCTL_MODE_GETPROPERTY => handle_mode_get_property(arg),
         DRM_IOCTL_MODE_GETPROPBLOB => handle_mode_get_prop_blob(arg),
         DRM_IOCTL_MODE_ADDFB => handle_mode_add_fb(arg, pid),
-        DRM_IOCTL_MODE_RMFB => handle_mode_rm_fb(arg),
+        DRM_IOCTL_MODE_RMFB => handle_mode_rm_fb(arg, pid),
         DRM_IOCTL_MODE_PAGE_FLIP => handle_mode_page_flip(arg, pid),
         DRM_IOCTL_MODE_CREATE_DUMB => handle_mode_create_dumb(arg, pid),
         DRM_IOCTL_MODE_MAP_DUMB => handle_mode_map_dumb(arg, pid),
@@ -692,7 +711,7 @@ pub(crate) fn drm_ioctl_dispatch(_fd: i32, request: u64, arg: *mut u8) -> Result
         DRM_IOCTL_MODE_LIST_LESSEES => handle_mode_list_lessees(arg),
         _ => {
             // Log unhandled DRM ioctl for debugging
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_os = "none"))]
             {
                 // SAFETY: Writing to COM1 I/O port for diagnostic output.
                 unsafe {
@@ -1394,6 +1413,7 @@ fn handle_mode_add_fb(arg: *mut u8, pid: u64) -> Result<i32, KernelError> {
         operation: "KMS not initialized for ADDFB",
     })?;
 
+    FB_OWNERS.lock().insert((fb_id, pid));
     fb_arg.fb_id = fb_id;
     Ok(0)
 }
@@ -1425,12 +1445,13 @@ fn handle_mode_add_fb2(arg: *mut u8, pid: u64) -> Result<i32, KernelError> {
         operation: "KMS not initialized for ADDFB2",
     })?;
 
+    FB_OWNERS.lock().insert((fb_id, pid));
     fb_arg.fb_id = fb_id;
     Ok(0)
 }
 
 /// DRM_IOCTL_MODE_RMFB -- remove framebuffer
-fn handle_mode_rm_fb(arg: *mut u8) -> Result<i32, KernelError> {
+fn handle_mode_rm_fb(arg: *mut u8, pid: u64) -> Result<i32, KernelError> {
     if arg.is_null() {
         return Err(KernelError::OperationNotSupported {
             operation: "null arg for MODE_RMFB",
@@ -1439,6 +1460,12 @@ fn handle_mode_rm_fb(arg: *mut u8) -> Result<i32, KernelError> {
     // SAFETY: `arg` is the dispatcher's 8-aligned kernel bounce buffer.
     let rm_arg = unsafe { &*(arg as *const DrmModeRmFb) };
 
+    // Only the process that created a framebuffer may remove it.
+    if !FB_OWNERS.lock().remove(&(rm_arg.fb_id, pid)) {
+        return Err(KernelError::PermissionDenied {
+            operation: "framebuffer not owned by caller",
+        });
+    }
     gpu_accel::with_kms(|kms| {
         kms.destroy_framebuffer(rm_arg.fb_id);
     });
@@ -2151,6 +2178,38 @@ mod tests {
     #[test]
     fn may_mmap_requires_framebuffer_and_ownership() {
         assert!(!may_mmap(41, 5, 0x5000, 4096));
+    }
+
+    /// Dumb buffers alias the scanout framebuffer, so a non-master holding
+    /// its own handle still may not map it.
+    #[test]
+    fn may_mmap_requires_master() {
+        let handle = 0xDEAD_0002;
+        gem_grant(handle, 4242);
+        assert!(!is_master(4242));
+        assert!(!may_mmap(4242, 5, (handle as usize) << 12, 4096));
+        gem_revoke(handle, 4242);
+    }
+
+    /// No calling process: refused outright, never treated as master.
+    #[test]
+    fn dispatch_without_caller_is_refused() {
+        let mut buf = [0u64; 64];
+        // On the host test runner there is no current process (pid 0).
+        assert!(
+            drm_ioctl_dispatch(3, DRM_IOCTL_SET_MASTER as u64, buf.as_mut_ptr() as *mut u8)
+                .is_err()
+        );
+        assert!(!is_master(0));
+    }
+
+    #[test]
+    fn rm_fb_requires_creator() {
+        FB_OWNERS.lock().insert((0xF00D, 51));
+        let mut buf = bounce(DrmModeRmFb { fb_id: 0xF00D });
+        assert!(handle_mode_rm_fb(buf.as_mut_ptr() as *mut u8, 52).is_err());
+        assert!(handle_mode_rm_fb(buf.as_mut_ptr() as *mut u8, 51).is_ok());
+        assert!(handle_mode_rm_fb(buf.as_mut_ptr() as *mut u8, 51).is_err());
     }
 
     #[test]

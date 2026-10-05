@@ -754,6 +754,8 @@ pub extern "C" fn syscall_handler(
         if syscall_num == 271 {
             // ppoll(fds, nfds, timespec*, sigmask, sigsetsize)
             linux_compat::handle_ppoll(arg1, arg2, arg3)
+        } else if linux_compat::is_faccessat(syscall_num) {
+            sys_faccessat(arg1, arg2, arg3, arg4)
         } else if let Some(syscall) = linux_compat::translate_linux_syscall(syscall_num) {
             handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5)
         } else if let Some(result) = linux_compat::handle_linux_stub(syscall_num) {
@@ -1146,7 +1148,9 @@ fn dispatch_native_abi(
         Ok(syscall) => handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5),
         Err(_) => {
             // Not a valid VeridianOS number -- try Linux translation
-            if let Some(syscall) = linux_compat::translate_linux_syscall(syscall_num) {
+            if linux_compat::is_faccessat(syscall_num) {
+                sys_faccessat(arg1, arg2, arg3, arg4)
+            } else if let Some(syscall) = linux_compat::translate_linux_syscall(syscall_num) {
                 handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5)
             } else if let Some(result) = linux_compat::handle_linux_stub(syscall_num) {
                 result

@@ -13,7 +13,7 @@
 // called from user-space syscall paths. Will be exercised once the process
 // lifecycle is driven by real user-space programs.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -79,6 +79,25 @@ static NEXT_TID: AtomicU64 = AtomicU64::new(1);
 /// GP fault).
 pub(crate) static BOOT_CURRENT_PID: AtomicU64 = AtomicU64::new(0);
 pub(crate) static BOOT_CURRENT_TID: AtomicU64 = AtomicU64::new(0);
+/// The scheduler task (`sched::scheduler::RUNNING_TASK`) that registered the
+/// boot-launched process. The registration applies only while that task is
+/// still the one running: any other task the scheduler runs in the meantime
+/// keeps its own identity (W-8).
+static BOOT_DISPATCH_TASK: AtomicUsize = AtomicUsize::new(0);
+
+/// The boot-launched (pid, tid), if one is registered *and* we are running
+/// in the context that registered it. Lock-free (see above).
+fn boot_context() -> Option<(u64, u64)> {
+    let pid = BOOT_CURRENT_PID.load(Ordering::Acquire);
+    if pid == 0 {
+        return None;
+    }
+    let running = crate::sched::scheduler::RUNNING_TASK.load(Ordering::Acquire);
+    if running != BOOT_DISPATCH_TASK.load(Ordering::Acquire) {
+        return None;
+    }
+    Some((pid, BOOT_CURRENT_TID.load(Ordering::Acquire)))
+}
 
 /// Register a boot-launched process as the current process.
 ///
@@ -86,8 +105,12 @@ pub(crate) static BOOT_CURRENT_TID: AtomicU64 = AtomicU64::new(0);
 /// `enter_usermode_returnable()`. This allows `current_process()` and
 /// `current_thread()` to return the correct process/thread during syscalls.
 pub fn set_boot_current(pid: ProcessId, tid: ThreadId) {
-    BOOT_CURRENT_PID.store(pid.0, Ordering::Release);
+    BOOT_DISPATCH_TASK.store(
+        crate::sched::scheduler::RUNNING_TASK.load(Ordering::Acquire),
+        Ordering::Release,
+    );
     BOOT_CURRENT_TID.store(tid.0, Ordering::Release);
+    BOOT_CURRENT_PID.store(pid.0, Ordering::Release);
 }
 
 /// Clear the boot-launched process tracking.
@@ -97,6 +120,7 @@ pub fn set_boot_current(pid: ProcessId, tid: ThreadId) {
 pub fn clear_boot_current() {
     BOOT_CURRENT_PID.store(0, Ordering::Release);
     BOOT_CURRENT_TID.store(0, Ordering::Release);
+    BOOT_DISPATCH_TASK.store(0, Ordering::Release);
 }
 
 /// Allocate a new process ID
@@ -154,16 +178,13 @@ pub fn init() {
 
 /// Get current process
 pub fn current_process() -> Option<&'static Process> {
-    // Check boot-launched process atomics FIRST.
-    // During bootstrap and cooperative dispatch (boot_futex_spin), user
-    // processes run via enter_usermode_returnable() /
-    // enter_forked_child_returnable() without being set as the scheduler's
-    // current task.  The scheduler's current() returns the idle task (pid 0),
-    // which is the wrong process. BOOT_CURRENT_PID is explicitly set by the
-    // dispatch code and must take priority to ensure syscalls operate on the
-    // correct process context.
-    let boot_pid = BOOT_CURRENT_PID.load(Ordering::Acquire);
-    if boot_pid != 0 {
+    // A process launched directly by the boot/cooperative dispatcher
+    // (enter_usermode_returnable) is not the scheduler's current task -- the
+    // scheduler still reports the dispatching task. While that dispatching
+    // task is the one running, the registered boot process is the caller.
+    // This check takes no locks: taking the SCHEDULER lock on the bootstrap
+    // stack misaligns SSE state.
+    if let Some((boot_pid, _)) = boot_context() {
         if let Some(proc) = table::get_process(ProcessId(boot_pid)) {
             return Some(proc);
         }
@@ -197,6 +218,16 @@ pub fn get_current_process() -> Option<&'static Process> {
 
 /// Get current thread
 pub fn current_thread() -> Option<&'static Thread> {
+    // Same rule as current_process(), so the two never name different
+    // processes.
+    if let Some((boot_pid, boot_tid)) = boot_context() {
+        if let Some(process) = table::get_process(ProcessId(boot_pid)) {
+            if let Some(thread) = process.get_thread(ThreadId(boot_tid)) {
+                return Some(thread);
+            }
+        }
+    }
+
     // Get from current CPU's scheduler
     if let Some(task) = crate::sched::SCHEDULER.lock().current() {
         // SAFETY: `task` is a NonNull<Task> returned by the scheduler's
@@ -210,15 +241,6 @@ pub fn current_thread() -> Option<&'static Thread> {
                     return Some(thread);
                 }
             }
-        }
-    }
-
-    // Fallback: check boot-launched process atomics.
-    let boot_pid = BOOT_CURRENT_PID.load(Ordering::Acquire);
-    let boot_tid = BOOT_CURRENT_TID.load(Ordering::Acquire);
-    if boot_pid != 0 {
-        if let Some(process) = table::get_process(ProcessId(boot_pid)) {
-            return process.get_thread(ThreadId(boot_tid));
         }
     }
 
@@ -436,3 +458,32 @@ pub fn get_process_list() -> Option<alloc::vec::Vec<u64>> {
 }
 
 // get_process is already re-exported at the top of the module
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sched::scheduler::RUNNING_TASK;
+
+    /// W-8: a boot-launched registration applies only while the task that
+    /// registered it is running; any other scheduled task keeps its own
+    /// identity, and clearing removes it.
+    #[test]
+    fn boot_context_is_scoped_to_the_registering_task() {
+        let saved = RUNNING_TASK.load(Ordering::Acquire);
+
+        RUNNING_TASK.store(0x1000, Ordering::Release);
+        set_boot_current(ProcessId(77), ThreadId(78));
+        assert_eq!(boot_context(), Some((77, 78)));
+
+        RUNNING_TASK.store(0x2000, Ordering::Release); // another task runs
+        assert_eq!(boot_context(), None);
+
+        RUNNING_TASK.store(0x1000, Ordering::Release); // dispatcher resumes
+        assert_eq!(boot_context(), Some((77, 78)));
+
+        clear_boot_current();
+        assert_eq!(boot_context(), None);
+
+        RUNNING_TASK.store(saved, Ordering::Release);
+    }
+}

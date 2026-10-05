@@ -14,6 +14,13 @@ use core::{
 
 use spin::Mutex;
 
+/// Address of the task the scheduler is running (0 if none), readable
+/// without the scheduler lock. Used to tell whether code is still running in
+/// the context that registered a boot-launched process (see
+/// `process::set_boot_current`). Single value: only the BSP schedules today.
+pub(crate) static RUNNING_TASK: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 #[cfg(not(target_arch = "riscv64"))]
 use super::queue::READY_QUEUE;
 use super::{
@@ -25,7 +32,8 @@ use super::{
 
 /// Scheduler state
 pub struct Scheduler {
-    /// Currently running task
+    /// Currently running task. Write it only through [`Scheduler::set_current`]
+    /// so [`RUNNING_TASK`] stays in step.
     pub current: Option<TaskPtr>,
     /// Idle task
     pub idle_task: Option<TaskPtr>,
@@ -70,11 +78,18 @@ impl Scheduler {
         }
     }
 
+    /// Set the running task, publishing it to [`RUNNING_TASK`] as well.
+    pub(crate) fn set_current(&mut self, task: Option<TaskPtr>) {
+        self.current = task;
+        let addr = task.map_or(0, |t| t.as_ptr().as_ptr() as usize);
+        RUNNING_TASK.store(addr, Ordering::Release);
+    }
+
     /// Initialize scheduler with idle task
     pub fn init(&mut self, idle_task: NonNull<Task>) {
         let idle_ptr = TaskPtr::new(idle_task);
         self.idle_task = Some(idle_ptr);
-        self.current = Some(idle_ptr);
+        self.set_current(Some(idle_ptr));
 
         #[cfg(feature = "alloc")]
         if self.algorithm == SchedAlgorithm::Cfs || self.algorithm == SchedAlgorithm::Hybrid {
@@ -728,7 +743,7 @@ impl Scheduler {
                 // next's saved RIP. When this task resumes later,
                 // execution continues after this point with the correct
                 // self.current already set.
-                self.current = Some(next_ptr);
+                self.set_current(Some(next_ptr));
 
                 // Save current context and restore next context.
                 // This call does NOT return until this task is scheduled
@@ -777,7 +792,7 @@ impl Scheduler {
             }
 
             // Update current task
-            self.current = Some(next_ptr);
+            self.set_current(Some(next_ptr));
         }
 
         // Record context switch metrics and RCU quiescent state.

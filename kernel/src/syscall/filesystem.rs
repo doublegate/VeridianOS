@@ -1642,12 +1642,25 @@ pub fn sys_readlink(path_ptr: usize, buf: usize, bufsiz: usize) -> SyscallResult
 /// 0 if accessible, error otherwise.
 pub fn sys_access(path_ptr: usize, mode: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
+    access_path(&path, mode)
+}
 
+/// faccessat / faccessat2: `access` relative to a directory fd.
+///
+/// `flags` (AT_EACCESS, AT_SYMLINK_NOFOLLOW) are accepted; real and
+/// effective IDs are the same here and symlinks are always followed.
+pub fn sys_faccessat(dirfd: usize, path_ptr: usize, mode: usize, _flags: usize) -> SyscallResult {
+    let path = read_user_path(path_ptr)?;
+    let path = resolve_at_path(dirfd, &path)?;
+    access_path(&path, mode)
+}
+
+fn access_path(path: &str, mode: usize) -> SyscallResult {
     let vfs_lock = vfs()?;
     let vfs_guard = vfs_lock.read();
 
     // Check if the file exists (F_OK = 0)
-    let node = vfs_guard.resolve_path(&path).map_err(map_resolve_err)?;
+    let node = vfs_guard.resolve_path(path).map_err(map_resolve_err)?;
 
     // For non-zero mode, check permissions against metadata
     if mode != 0 {
