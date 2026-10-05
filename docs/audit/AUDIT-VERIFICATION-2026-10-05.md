@@ -130,7 +130,7 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 
 | ID | Location | Defect | Target | Status |
 |---|---|---|---|---|
-| N-01 | `mm/frame_allocator.rs:229-334` | Bitmap is initialised all-free for 131072 frames regardless of node size, and `allocate` never checks `total_frames`: on nodes under 512 MB it returns frames past the end of RAM (hits aarch64/riscv64 at the 128 MB default). `free()` can underflow and partially frees before detecting a double free. | v0.26.0 | open |
+| N-01 | `mm/frame_allocator.rs:229-334` | Bitmap is initialised all-free for 131072 frames regardless of node size, and `allocate` never checks `total_frames`: on nodes under 512 MB it returns frames past the end of RAM (hits aarch64/riscv64 at the 128 MB default). `free()` can underflow and partially frees before detecting a double free. | v0.26.0 | fixed (3f72251) |
 | N-02 | `sched/scheduler.rs:~1018` | `schedule_on_cpu` silently drops the task when `per_cpu(cpu)` is `None` (always, today). | v0.26.0 | open |
 | N-03 | `sched/task_management.rs:150-158` | `CLEANUP_QUEUE` is a function-local static nothing drains; dead tasks leak. | v0.26.0 | open |
 | N-04 | `cap/space.rs:163, 217, 251-266` | L2 index `(cap_id >> 8) as u16` truncates and aliases IDs >= 2^24; `remove()` takes the slot before comparing tokens, wiping a different capability. | v0.26.0 | open |
@@ -141,7 +141,7 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | N-09 | `desktop/wayland/mod.rs:424-452`, `desktop/wayland/buffer.rs:150-154` | Unbounded client-controlled `wl_shm` pool size; `write_data` panics when `offset > len`. | v0.26.0 | open |
 | N-10 | `drivers/virtio/blk.rs:488-495` | On timeout the request frame is freed while the device may still DMA into it. | v0.26.0 | open |
 | N-11 | `drivers/nvme.rs` | No completion phase tracking; timeouts return `Ok`; `num_blocks - 1` underflows. | v0.26.0 | open |
-| N-13 | riscv64 boot, after BOOTOK | Kernel statics read back as zero later in boot: HEAD panics with `[ALLOC] ERROR: Allocator not initialized (start=0)`, the WIP with `Driver framework not initialized` although its init logged success. Points to frames being handed out over kernel memory -- investigate with N-01 (the DMA pool zeroes 256 fresh frames shortly before). BOOTOK and 29/29 are unaffected because they print first. | v0.26.0 | open |
+| N-13 | riscv64 boot, after BOOTOK | Boot silently restarted from `_start` in Stage 6, so the second pass found singletons already initialised or zeroed (the various panics seen). Root cause: `current_cpu_id()` read the M-mode CSR `mhartid` from S-mode (illegal instruction) and no `stvec` was installed, so the trap jumped to the kernel entry. Separately, the hardcoded frame-pool start (0x80E00000) lay inside the grown kernel image (ends 0x81148000), so frames aliased the kernel heap and boot stack. BOOTOK and 29/29 print before Stage 6, which is why the boot check passed. | v0.26.0 | fixed (3067856) |
 | N-12 | test suite, CI | The host unit-test build did not compile (missing `alloc` imports in five test modules, `ScriptError` assertions stale since v0.17.1), and two eventfd/signalfd tests crashed the test binary by reaching the real scheduler from a blocking read. CI hid this because the coverage job -- the only job that runs host tests -- is `continue-on-error`. | v0.26.0 | fixed |
 
 ## Issues in the uncommitted KDE Ring-3 work (pre-commit review)
