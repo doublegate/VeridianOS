@@ -151,19 +151,30 @@ extern "x86-interrupt" fn double_fault_handler(
     }
 }
 
-/// Resolve a page fault through `mm::page_fault` (demand paging, CoW,
-/// stack growth) on a 16-byte-aligned stack.
+/// Resolve a page fault through `mm::page_fault` on a 16-byte-aligned
+/// stack: the full user-fault path (demand paging, CoW, stack growth, then
+/// SIGSEGV), or for `kernel_copy` the narrow, signal-free
+/// `resolve_user_copy_fault`.
 ///
 /// Exceptions that push an error code enter the handler with RSP 8 bytes
 /// off the alignment compiled code assumes, so deep Rust code reached from
 /// the handler can fault on an aligned SSE store (`movaps`) -- observed as a
 /// GP inside `handle_page_fault` when called for a kernel-mode user-copy
 /// fault. The trampoline realigns RSP before the call and restores it.
-fn demand_page_aligned(ec: u64, cr2: u64, rip: u64) -> bool {
-    extern "C" fn resolve(ec: u64, cr2: u64, rip: u64) -> u64 {
+fn resolve_fault_aligned(ec: u64, cr2: u64, rip: u64, kernel_copy: bool) -> bool {
+    extern "C" fn resolve_user(ec: u64, cr2: u64, rip: u64) -> u64 {
         let info = crate::mm::page_fault::from_x86_64(ec, cr2, rip);
         crate::mm::page_fault::handle_page_fault(info).is_ok() as u64
     }
+    extern "C" fn resolve_copy(ec: u64, cr2: u64, rip: u64) -> u64 {
+        let info = crate::mm::page_fault::from_x86_64(ec, cr2, rip);
+        crate::mm::page_fault::resolve_user_copy_fault(&info) as u64
+    }
+    let resolve: extern "C" fn(u64, u64, u64) -> u64 = if kernel_copy {
+        resolve_copy
+    } else {
+        resolve_user
+    };
     let resolved: u64;
     // SAFETY: r12 is callee-saved under the C ABI, so it survives the call
     // and restores the original RSP; `and rsp, -16` only moves RSP down into
@@ -174,7 +185,7 @@ fn demand_page_aligned(ec: u64, cr2: u64, rip: u64) -> bool {
             "and rsp, -16",
             "call {f}",
             "mov rsp, r12",
-            f = sym resolve,
+            f = in(reg) resolve,
             in("rdi") ec,
             in("rsi") cr2,
             in("rdx") rip,
@@ -238,7 +249,7 @@ extern "x86-interrupt" fn page_fault_handler(
     #[cfg(target_os = "none")]
     if !was_user && cr2_val < 0x0000_8000_0000_0000 {
         if let Some(fixup) = crate::arch::x86_64::usercopy::fixup_for(rip_val) {
-            if cr2_val >= 0x1000 && demand_page_aligned(ec, cr2_val, rip_val) {
+            if cr2_val >= 0x1000 && resolve_fault_aligned(ec, cr2_val, rip_val, true) {
                 return; // page now present: retry the copy instruction
             }
             // Redirect the saved RIP to the fixup stub of the routine that
@@ -317,7 +328,7 @@ extern "x86-interrupt" fn page_fault_handler(
     //
     // The demand paging code uses try_lock() on process.memory_space to avoid
     // deadlock from IST interrupt context.
-    if was_user && cr2_val >= 0x1000 && demand_page_aligned(ec, cr2_val, rip_val) {
+    if was_user && cr2_val >= 0x1000 && resolve_fault_aligned(ec, cr2_val, rip_val, false) {
         // Fault resolved (demand page, CoW, or stack growth) -- resume.
         return;
     }

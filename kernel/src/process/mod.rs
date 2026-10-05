@@ -206,6 +206,31 @@ pub fn current_process() -> Option<&'static Process> {
     None
 }
 
+/// Like [`current_process`], but never waits for the scheduler lock:
+/// returns `None` if it is held. For fault handlers that may run while the
+/// interrupted code holds that lock.
+pub fn try_current_process() -> Option<&'static Process> {
+    if let Some((boot_pid, _)) = boot_context() {
+        return table::get_process(ProcessId(boot_pid));
+    }
+    // The riscv64 scheduler has no try_lock; nothing on riscv64 calls this
+    // from a fault handler (the user-copy fixup is x86_64-only).
+    #[cfg(target_arch = "riscv64")]
+    {
+        current_process()
+    }
+    #[cfg(not(target_arch = "riscv64"))]
+    {
+        let sched = crate::sched::SCHEDULER.try_lock()?;
+        let task = sched.current()?;
+        // SAFETY: as in current_process(): the scheduler's current task
+        // pointer is valid while its lock is held; only the pid is read.
+        let pid = unsafe { task.as_ref().pid };
+        drop(sched);
+        table::get_process(pid)
+    }
+}
+
 /// Find process by ID
 pub fn find_process(pid: ProcessId) -> Option<&'static Process> {
     table::get_process(pid)
