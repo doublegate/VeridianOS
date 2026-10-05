@@ -400,6 +400,35 @@ build_mtdev() {
     log "mtdev: done."
 }
 
+# ── 10c. libudev stub (needed by libinput, KWin, Qt) ─────────────────
+# VeridianOS has no udev. musl-compat/libudev_stubs.c implements the API
+# with valid, empty objects; the header is the real systemd libudev.h
+# (declarations only) so every consumer compiles against the full API.
+# This used to be created only in the Plasma phase, after libinput needed
+# it, and so only worked against a sysroot that already had it.
+prepare_udev_stub() {
+    local header_src="${UDEV_HEADER:-/usr/include/libudev.h}"
+    [[ -f "${header_src}" ]] || die "libudev.h not found at ${header_src} (install systemd-libs headers or set UDEV_HEADER)"
+    install -D -m 0644 "${header_src}" "${SYSROOT}/usr/include/libudev.h"
+    if [[ ! -f "${SYSROOT}/usr/lib/libudev.a" ]]; then
+        log "Building libudev.a from musl-compat/libudev_stubs.c..."
+        local obj="${BUILD_DIR}/libudev_stubs.o"
+        "${CC}" -c -O2 -fPIC "${SCRIPT_DIR}/musl-compat/libudev_stubs.c" -o "${obj}"
+        ar rcs "${SYSROOT}/usr/lib/libudev.a" "${obj}"
+    fi
+    mkdir -p "${SYSROOT}/usr/lib/pkgconfig"
+    cat > "${SYSROOT}/usr/lib/pkgconfig/libudev.pc" << 'PC'
+prefix=/usr
+libdir=${prefix}/lib
+includedir=${prefix}/include
+Name: libudev
+Description: libudev stub for VeridianOS
+Version: 256
+Libs: -L${libdir} -ludev
+Cflags: -I${includedir}
+PC
+}
+
 # ── 11. libinput (meson, needs libevdev) ─────────────────────────────
 build_libinput() {
     if [[ -f "${SYSROOT}/usr/lib/libinput.a" ]]; then
@@ -418,6 +447,14 @@ build_libinput() {
         tar -xf "${tarball}" -C "${BUILD_DIR}"
     fi
     local src="${BUILD_DIR}/${dir}"
+    # libinput hardcodes shared_library('input'), which ignores
+    # --default-library=static and then fails linking its static tools
+    # against the .so. library() honours the default. Idempotent.
+    sed -i "s/^lib_libinput = shared_library('input',/lib_libinput = library('input',/" \
+        "${src}/meson.build"
+    grep -q "^lib_libinput = library('input'," "${src}/meson.build" \
+        || die "libinput: could not switch lib_libinput to library()"
+
     local bld="${BUILD_DIR}/libinput-build"
     log "Building libinput ${LIBINPUT_VER}..."
     rm -rf "${bld}"
@@ -512,6 +549,7 @@ main() {
     build_openssl
     build_libevdev
     build_mtdev
+    prepare_udev_stub
     build_libinput
     build_atspi || log "at-spi2-core: skipped (requires glib-2.0; optional for accessibility)"
 

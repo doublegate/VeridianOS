@@ -331,6 +331,17 @@ struct __locale_struct *__newlocale(int mask, const char *name,
     return (struct __locale_struct *)(void *)&_glibc_c_locale;
 }
 
+/* musl's freelocale() asks newlocale.o (via __loc_is_allocated) whether a
+ * locale came from the heap.  Defining it here keeps musl's newlocale.o --
+ * and its conflicting __newlocale -- out of every link: the C++ link line
+ * also carries -lc, and pulling newlocale.o for this one symbol produced a
+ * duplicate __newlocale (Mesa's libgallium).  Our __newlocale only ever
+ * returns the static C locale above, so nothing is heap-allocated. */
+int __loc_is_allocated(struct __locale_struct *loc) {
+    (void)loc;
+    return 0;
+}
+
 /* Public alias -- musl declares newlocale with locale_t = struct __locale_struct* */
 struct __locale_struct *newlocale(int mask, const char *name,
                                   struct __locale_struct *base) {
