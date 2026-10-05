@@ -299,8 +299,11 @@ pub fn process_packet(
     // Parse UDP header
     let header = UdpHeader::from_bytes(data)?;
 
-    // Validate length
-    if data.len() < header.length as usize {
+    // Validate length: it covers the header itself, so anything below the
+    // header size is malformed (and would make the payload slice below
+    // start past its end). Never trust it beyond the received bytes.
+    let length = header.length as usize;
+    if length < UdpHeader::SIZE || data.len() < length {
         return Err(KernelError::InvalidArgument {
             name: "udp_length",
             value: "mismatch",
@@ -403,6 +406,23 @@ pub struct UdpStats {
 mod tests {
     use super::*;
     use crate::net::Ipv4Address;
+
+    /// NET-SEC-01: a header length below the 8-byte header size used to
+    /// slice `data[8..length]` with start > end and panic the kernel.
+    #[test]
+    fn test_process_packet_rejects_length_below_header_size() {
+        let src = IpAddress::V4(Ipv4Address::new(10, 0, 2, 2));
+        let dst = IpAddress::V4(Ipv4Address::new(10, 0, 2, 15));
+        for declared in 0u16..8 {
+            let mut packet = UdpHeader::new(1234, 5678, 0).to_bytes();
+            packet[4..6].copy_from_slice(&declared.to_be_bytes());
+            assert!(
+                process_packet(src, dst, &packet).is_err(),
+                "length {} must be rejected",
+                declared
+            );
+        }
+    }
 
     #[test]
     fn test_udp_header() {

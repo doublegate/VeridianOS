@@ -74,6 +74,11 @@ impl Ipv4Header {
         bytes
     }
 
+    /// Length of this header in bytes (`ihl` counts 32-bit words).
+    pub fn header_len(&self) -> usize {
+        self.ihl as usize * 4
+    }
+
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, KernelError> {
         if bytes.len() < Self::MIN_SIZE {
             return Err(KernelError::InvalidArgument {
@@ -87,6 +92,12 @@ impl Ipv4Header {
             return Err(KernelError::InvalidArgument {
                 name: "ip_version",
                 value: "not_ipv4",
+            });
+        }
+        if (bytes[0] & 0x0F) < 5 {
+            return Err(KernelError::InvalidArgument {
+                name: "ip_ihl",
+                value: "below_minimum",
             });
         }
 
@@ -122,6 +133,25 @@ impl Ipv4Header {
 
         self.checksum = !(sum as u16);
     }
+}
+
+/// Parse a received IPv4 packet and return its header and payload.
+///
+/// The payload is bounded by the header's `total_length`, not by the
+/// buffer: link layers pad short frames (Ethernet to 60 bytes), and that
+/// padding is not part of the datagram. Rejects lengths that are smaller
+/// than the header or larger than the bytes actually received.
+pub fn split_packet(bytes: &[u8]) -> Result<(Ipv4Header, &[u8]), KernelError> {
+    let header = Ipv4Header::from_bytes(bytes)?;
+    let header_len = header.header_len();
+    let total_len = header.total_length as usize;
+    if header_len > bytes.len() || total_len < header_len || total_len > bytes.len() {
+        return Err(KernelError::InvalidArgument {
+            name: "ip_length",
+            value: "inconsistent",
+        });
+    }
+    Ok((header, &bytes[header_len..total_len]))
 }
 
 /// Routing table entry
@@ -299,7 +329,44 @@ pub fn init() -> Result<(), KernelError> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
+
     use super::*;
+
+    fn packet(ihl: u8, total_length: u16, payload: &[u8], padding: usize) -> Vec<u8> {
+        let mut header = Ipv4Header::new(
+            Ipv4Address([10, 0, 2, 2]),
+            Ipv4Address([10, 0, 2, 15]),
+            IpProtocol::Udp,
+        );
+        header.ihl = ihl;
+        header.total_length = total_length;
+        let mut bytes = Vec::from(header.to_bytes());
+        bytes.extend_from_slice(payload);
+        bytes.resize(bytes.len() + padding, 0);
+        bytes
+    }
+
+    #[test]
+    fn test_split_packet_excludes_link_padding() {
+        // A 4-byte payload in a minimum-size Ethernet frame arrives with
+        // padding; only `total_length` bytes belong to the datagram.
+        let bytes = packet(5, 24, &[1, 2, 3, 4], 22);
+        let (_, payload) = split_packet(&bytes).unwrap();
+        assert_eq!(payload, &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_split_packet_rejects_malformed_lengths() {
+        // IHL below the 5-word minimum header.
+        assert!(split_packet(&packet(4, 24, &[1, 2, 3, 4], 0)).is_err());
+        // total_length shorter than the header it describes.
+        assert!(split_packet(&packet(5, 19, &[1, 2, 3, 4], 0)).is_err());
+        // total_length longer than the bytes received.
+        assert!(split_packet(&packet(5, 100, &[1, 2, 3, 4], 0)).is_err());
+        // IHL claims options that were not received.
+        assert!(split_packet(&packet(15, 24, &[1, 2, 3, 4], 0)).is_err());
+    }
 
     #[test]
     fn test_ipv4_header() {

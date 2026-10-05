@@ -550,12 +550,16 @@ pub fn process_packet(
     let flags = TcpFlags::new(data[13]);
     let _window = u16::from_be_bytes([data[14], data[15]]);
 
-    // Extract payload
-    let payload = if data.len() > data_offset {
-        &data[data_offset..]
-    } else {
-        &[]
-    };
+    // The data offset covers the fixed header plus options; anything
+    // shorter than the fixed header, or longer than the segment, is
+    // malformed (RFC 9293 3.1).
+    if data_offset < TCP_HEADER_SIZE || data_offset > data.len() {
+        return Err(KernelError::InvalidArgument {
+            name: "tcp_data_offset",
+            value: "out_of_range",
+        });
+    }
+    let payload = &data[data_offset..];
 
     let mut connections = TCP_CONNECTIONS.lock();
     let remote = SocketAddr::new(src_addr, src_port);
@@ -639,6 +643,23 @@ pub struct TcpStats {
 mod tests {
     use super::*;
     use crate::net::Ipv4Address;
+
+    /// The data-offset field must cover at least the fixed 20-byte header
+    /// and no more than the bytes received.
+    #[test]
+    fn test_process_packet_rejects_bad_data_offset() {
+        let src = IpAddress::V4(Ipv4Address::new(10, 0, 2, 2));
+        let dst = IpAddress::V4(Ipv4Address::new(10, 0, 2, 15));
+        for words in [0u8, 4, 6, 15] {
+            let mut segment = [0u8; 20];
+            segment[12] = words << 4;
+            assert!(
+                process_packet(src, dst, &segment).is_err(),
+                "data offset of {} words must be rejected for a 20-byte segment",
+                words
+            );
+        }
+    }
 
     #[test]
     fn test_tcp_flags() {
