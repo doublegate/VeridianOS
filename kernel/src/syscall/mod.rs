@@ -115,48 +115,84 @@ fn validate_user_string_ptr(ptr: usize) -> Result<(), SyscallError> {
     validate_user_pointer(ptr, 1)
 }
 
-/// Syscall rate limiter using token bucket algorithm
+/// Syscall rate limiter using a token bucket.
+///
+/// Consumption is a single atomic `fetch_update` that never goes below zero,
+/// and the refill is claimed by one caller at a time through a CAS on
+/// `last_refill`, so concurrent syscalls can neither double-spend a token
+/// nor wrap the counter (SYS-PERF-01). Elapsed time is converted from
+/// hardware ticks to seconds before it becomes tokens.
 struct SyscallRateLimiter {
-    /// Tokens available (scaled by 1000 for precision)
+    /// Tokens available.
     tokens: AtomicU64,
-    /// Maximum tokens (burst capacity)
-    max_tokens: u64,
-    /// Last refill timestamp
+    /// Hardware timestamp up to which elapsed time has been credited.
     last_refill: AtomicU64,
 }
 
 impl SyscallRateLimiter {
+    /// Burst capacity.
+    const MAX_TOKENS: u64 = 100_000;
+    /// Sustained rate. The bucket is global and a denial fails *any*
+    /// syscall with WouldBlock, so a low rate would let one spinning process
+    /// starve every other process. Until limiting is per process, the rate
+    /// sits above what one CPU can issue (~50 ns per syscall under KVM), so
+    /// the limiter is correct but does not throttle normal workloads.
+    const REFILL_PER_SEC: u64 = 50_000_000;
+
     const fn new() -> Self {
+        Self::with_tokens(Self::MAX_TOKENS)
+    }
+
+    const fn with_tokens(tokens: u64) -> Self {
         Self {
-            tokens: AtomicU64::new(10_000), // Start with 10k tokens
-            max_tokens: 10_000,
+            tokens: AtomicU64::new(tokens),
             last_refill: AtomicU64::new(0),
         }
     }
 
     /// Check if a syscall is allowed (returns true if within rate limit)
     fn check(&self) -> bool {
-        // Refill tokens based on elapsed time
-        let now = crate::arch::timer::read_hw_timestamp();
-        let last = self.last_refill.load(Ordering::Relaxed);
-        let elapsed = now.saturating_sub(last);
+        self.check_at(
+            crate::arch::timer::read_hw_timestamp(),
+            crate::arch::timer::hw_ticks_per_second(),
+        )
+    }
 
-        // Refill ~1000 tokens per tick (generous rate)
-        if elapsed > 0 {
-            self.last_refill.store(now, Ordering::Relaxed);
-            let current = self.tokens.load(Ordering::Relaxed);
-            let new_tokens = core::cmp::min(current + elapsed, self.max_tokens);
-            self.tokens.store(new_tokens, Ordering::Relaxed);
-        }
+    /// [`check`](Self::check) with the clock supplied by the caller.
+    fn check_at(&self, now: u64, ticks_per_sec: u64) -> bool {
+        self.refill(now, ticks_per_sec);
+        self.tokens
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |t| t.checked_sub(1))
+            .is_ok()
+    }
 
-        // Try to consume a token
-        let current = self.tokens.load(Ordering::Relaxed);
-        if current > 0 {
-            self.tokens.fetch_sub(1, Ordering::Relaxed);
-            true
-        } else {
-            false
+    fn refill(&self, now: u64, ticks_per_sec: u64) {
+        if ticks_per_sec == 0 {
+            return;
         }
+        let last = self.last_refill.load(Ordering::Acquire);
+        let elapsed = now.saturating_sub(last) as u128;
+        let earned = elapsed * Self::REFILL_PER_SEC as u128 / ticks_per_sec as u128;
+        if earned == 0 {
+            // Leave last_refill alone so sub-token intervals accumulate.
+            return;
+        }
+        // Credit only the ticks that produced whole tokens, so the
+        // remainder is not lost; only the CAS winner adds the tokens.
+        let credited = (earned * ticks_per_sec as u128 / Self::REFILL_PER_SEC as u128) as u64;
+        if self
+            .last_refill
+            .compare_exchange(last, last + credited, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let earned = earned.min(Self::MAX_TOKENS as u128) as u64;
+        let _ = self
+            .tokens
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |t| {
+                Some(t.saturating_add(earned).min(Self::MAX_TOKENS))
+            });
     }
 }
 
@@ -3490,6 +3526,59 @@ fn sys_socket_pair(domain: usize, _sock_type: usize, result_ptr: usize) -> Sysca
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Rate limiter (SYS-PERF-01) ---
+
+    const HZ: u64 = 1_000_000_000;
+
+    #[test]
+    fn rate_limiter_never_wraps_below_zero() {
+        let limiter = SyscallRateLimiter::with_tokens(1);
+        assert!(limiter.check_at(0, HZ));
+        assert!(!limiter.check_at(0, HZ));
+        assert!(!limiter.check_at(0, HZ));
+        assert_eq!(limiter.tokens.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn rate_limiter_concurrent_consumers_take_each_token_once() {
+        extern crate std;
+        use std::{sync::Arc, thread, vec::Vec};
+
+        let limiter = Arc::new(SyscallRateLimiter::with_tokens(1_000));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let l = Arc::clone(&limiter);
+                thread::spawn(move || (0..1_000).filter(|_| l.check_at(0, HZ)).count())
+            })
+            .collect();
+        let granted: usize = handles.into_iter().map(|h| h.join().unwrap()).sum();
+        assert_eq!(granted, 1_000);
+        assert_eq!(limiter.tokens.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn rate_limiter_refills_by_elapsed_time_not_cycles() {
+        let limiter = SyscallRateLimiter::with_tokens(0);
+        limiter.check_at(0, HZ); // establishes the refill epoch
+                                 // 1 us at 1 GHz is 1000 ticks: that must yield REFILL_PER_SEC / 1e6
+                                 // tokens, not one token per tick.
+        let per_us = SyscallRateLimiter::REFILL_PER_SEC / 1_000_000;
+        let before = limiter.tokens.load(Ordering::Relaxed);
+        limiter.check_at(1_000, HZ);
+        let refilled = limiter.tokens.load(Ordering::Relaxed) + 1 - before;
+        assert_eq!(refilled, per_us, "tokens credited for 1us");
+        // Sub-token intervals accumulate instead of being dropped.
+        let limiter = SyscallRateLimiter::with_tokens(0);
+        let tick = HZ / SyscallRateLimiter::REFILL_PER_SEC; // ticks per token
+        limiter.check_at(0, HZ);
+        assert!(!limiter.check_at(tick / 2, HZ));
+        assert!(limiter.check_at(tick, HZ));
+        // A full second refills to the burst cap, no further.
+        limiter.check_at(2 * HZ, HZ);
+        assert!(limiter.tokens.load(Ordering::Relaxed) <= SyscallRateLimiter::MAX_TOKENS);
+        assert!(limiter.tokens.load(Ordering::Relaxed) >= SyscallRateLimiter::MAX_TOKENS - 1);
+    }
 
     // --- Syscall TryFrom tests ---
 
