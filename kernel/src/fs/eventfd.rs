@@ -330,9 +330,14 @@ impl Drop for EventFdNode {
 mod tests {
     use super::*;
 
+    /// The registry is a process-wide static: tests that reset it must not
+    /// run concurrently, or one test's reset removes another's instance.
+    static TEST_SERIAL: spin::Mutex<()> = spin::Mutex::new(());
+
     #[test]
     fn test_eventfd_create_and_read() {
         // Reset state
+        let _serial = TEST_SERIAL.lock();
         EVENTFD_REGISTRY.lock().clear();
 
         // Non-blocking so the zero-counter read returns instead of yielding
@@ -347,6 +352,7 @@ mod tests {
 
     #[test]
     fn test_eventfd_semaphore_mode() {
+        let _serial = TEST_SERIAL.lock();
         EVENTFD_REGISTRY.lock().clear();
 
         let id = eventfd_create(3, EFD_SEMAPHORE | EFD_NONBLOCK).unwrap() as u32;
@@ -362,6 +368,7 @@ mod tests {
 
     #[test]
     fn test_eventfd_write_accumulates() {
+        let _serial = TEST_SERIAL.lock();
         EVENTFD_REGISTRY.lock().clear();
 
         let id = eventfd_create(0, 0).unwrap() as u32;
@@ -374,6 +381,7 @@ mod tests {
 
     #[test]
     fn test_eventfd_close() {
+        let _serial = TEST_SERIAL.lock();
         EVENTFD_REGISTRY.lock().clear();
 
         let id = eventfd_create(0, 0).unwrap() as u32;
@@ -386,6 +394,7 @@ mod tests {
 
     #[test]
     fn test_eventfd_nonblock_on_empty() {
+        let _serial = TEST_SERIAL.lock();
         EVENTFD_REGISTRY.lock().clear();
 
         let id = eventfd_create(0, EFD_NONBLOCK).unwrap() as u32;
@@ -397,6 +406,7 @@ mod tests {
 
     #[test]
     fn test_eventfd_write_overflow() {
+        let _serial = TEST_SERIAL.lock();
         EVENTFD_REGISTRY.lock().clear();
 
         let id = eventfd_create(0, EFD_NONBLOCK).unwrap() as u32;
@@ -408,6 +418,7 @@ mod tests {
 
     #[test]
     fn test_eventfd_write_max_rejected() {
+        let _serial = TEST_SERIAL.lock();
         EVENTFD_REGISTRY.lock().clear();
 
         let id = eventfd_create(0, 0).unwrap() as u32;
