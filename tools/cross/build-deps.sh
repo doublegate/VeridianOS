@@ -51,7 +51,7 @@ fetch() {
     local tarball="${BUILD_DIR}/${name}.tar.gz"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading ${name}..."
-        curl -fsSL -o "${tarball}" -L "${url}" || wget -q -O "${tarball}" "${url}"
+        { curl -fsSL -o "${tarball}.part" "${url}" || wget -q -O "${tarball}.part" "${url}"; } && [[ -s "${tarball}.part" ]] && mv "${tarball}.part" "${tarball}" || { rm -f "${tarball}.part"; echo "download failed: ${url}" >&2; exit 1; }
     fi
     if [[ ! -d "${BUILD_DIR}/${dir}" ]]; then
         log "Extracting ${name}..."
@@ -287,7 +287,7 @@ build_sqlite() {
     local dir="sqlite-autoconf-${SQLITE_VER}"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading SQLite..."
-        curl -fsSL -o "${tarball}" "${url}" || wget -q -O "${tarball}" "${url}"
+        { curl -fsSL -o "${tarball}.part" "${url}" || wget -q -O "${tarball}.part" "${url}"; } && [[ -s "${tarball}.part" ]] && mv "${tarball}.part" "${tarball}" || { rm -f "${tarball}.part"; echo "download failed: ${url}" >&2; exit 1; }
     fi
     if [[ ! -d "${BUILD_DIR}/${dir}" ]]; then
         log "Extracting SQLite..."
@@ -320,7 +320,7 @@ build_openssl() {
     local dir="openssl-${OPENSSL_VER}"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading OpenSSL ${OPENSSL_VER}..."
-        curl -fsSL -o "${tarball}" -L "${url}" || wget -q -O "${tarball}" "${url}"
+        { curl -fsSL -o "${tarball}.part" "${url}" || wget -q -O "${tarball}.part" "${url}"; } && [[ -s "${tarball}.part" ]] && mv "${tarball}.part" "${tarball}" || { rm -f "${tarball}.part"; echo "download failed: ${url}" >&2; exit 1; }
     fi
     if [[ ! -d "${BUILD_DIR}/${dir}" ]]; then
         log "Extracting OpenSSL..."
@@ -358,7 +358,7 @@ build_libevdev() {
     local dir="libevdev-${LIBEVDEV_VER}"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading libevdev ${LIBEVDEV_VER}..."
-        curl -fsSL -o "${tarball}" -L "${url}" || wget -q -O "${tarball}" "${url}"
+        { curl -fsSL -o "${tarball}.part" "${url}" || wget -q -O "${tarball}.part" "${url}"; } && [[ -s "${tarball}.part" ]] && mv "${tarball}.part" "${tarball}" || { rm -f "${tarball}.part"; echo "download failed: ${url}" >&2; exit 1; }
     fi
     if [[ ! -d "${BUILD_DIR}/${dir}" ]]; then
         log "Extracting libevdev..."
@@ -440,7 +440,7 @@ build_libinput() {
     local dir="libinput-${LIBINPUT_VER}"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading libinput ${LIBINPUT_VER}..."
-        curl -fsSL -o "${tarball}" -L "${url}" || wget -q -O "${tarball}" "${url}"
+        { curl -fsSL -o "${tarball}.part" "${url}" || wget -q -O "${tarball}.part" "${url}"; } && [[ -s "${tarball}.part" ]] && mv "${tarball}.part" "${tarball}" || { rm -f "${tarball}.part"; echo "download failed: ${url}" >&2; exit 1; }
     fi
     if [[ ! -d "${BUILD_DIR}/${dir}" ]]; then
         log "Extracting libinput..."
@@ -485,7 +485,7 @@ build_atspi() {
     local dir="at-spi2-core-${ATSPI_VER}"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading at-spi2-core ${ATSPI_VER}..."
-        curl -fsSL -o "${tarball}" -L "${url}" || wget -q -O "${tarball}" "${url}"
+        { curl -fsSL -o "${tarball}.part" "${url}" || wget -q -O "${tarball}.part" "${url}"; } && [[ -s "${tarball}.part" ]] && mv "${tarball}.part" "${tarball}" || { rm -f "${tarball}.part"; echo "download failed: ${url}" >&2; exit 1; }
     fi
     if [[ ! -d "${BUILD_DIR}/${dir}" ]]; then
         log "Extracting at-spi2-core..."

@@ -21,7 +21,8 @@ JOBS="${JOBS:-$(nproc)}"
 
 QT_VER="6.8.3"
 QT_MAJOR="6.8"
-QT_BASE_URL="https://download.qt.io/official_releases/qt/${QT_MAJOR}/${QT_VER}/submodules"
+# archive/ is permanent; official_releases/ drops a version once it is superseded.
+QT_BASE_URL="https://download.qt.io/archive/qt/${QT_MAJOR}/${QT_VER}/submodules"
 
 log() { echo "[build-qt6] $*"; }
 die() { echo "[build-qt6] ERROR: $*" >&2; exit 1; }
@@ -33,7 +34,7 @@ fetch() {
     local tarball="${BUILD_DIR}/${name}.tar.xz"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading ${name}..."
-        curl -fsSL -o "${tarball}" "${url}" || wget -q -O "${tarball}" "${url}"
+        { curl -fsSL -o "${tarball}.part" "${url}" || wget -q -O "${tarball}.part" "${url}"; } && [[ -s "${tarball}.part" ]] && mv "${tarball}.part" "${tarball}" || { rm -f "${tarball}.part"; echo "download failed: ${url}" >&2; exit 1; }
     fi
     if [[ ! -d "${BUILD_DIR}/${dir}" ]]; then
         log "Extracting ${name}..."
