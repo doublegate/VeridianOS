@@ -157,6 +157,7 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | N-25 | `mm/page_table.rs` (riscv64) | satp written with MODE 8 (Sv39) for 4-level page tables (Sv48 = 9), with no `sfence.vma`; latent until RISC-V user mode. | v0.26.0 | fixed (MODE 9 + sfence.vma; Sv48 checked from device tree `mmu-type`) |
 | N-26 | kernel stacks | No guard pages: kernel stacks come from the direct map, so an overflow corrupts the adjacent frame silently. | v0.27.0 (C5) | open |
 | N-27 | `fs/file.rs` FileTable | `open` returned a `next_fd` counter but stored the file at `files.len()`; after `dup2` grew the table the two differed, so the returned fd named a different (or no) file. `F_DUPFD` (`dup_at_least`) could overwrite an occupied slot the same way. | v0.26.0 | fixed (append at the table length; counter removed; model test) |
+| N-28 | `arch/aarch64` | The MMU and caches are never enabled (no TCR/MAIR/TTBR1 setup; SCTLR_EL1 = 0). With all memory treated as Device memory, exclusive load/store is unreliable, which is why ramfs/tmpfs/devfs/pty/... use `fs::bare_lock`, an `UnsafeCell` wrapper that does not lock at all. Blocks AArch64 SMP and EL0. | v0.27.0 (C5) | open |
 
 ## Runtime verification status
 

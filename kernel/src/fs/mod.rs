@@ -61,6 +61,14 @@ pub enum NodeType {
     Symlink,
 }
 
+/// Serializes renames, as Linux's per-filesystem rename mutex does. Rename
+/// is the only operation that changes which directory contains which, so
+/// while this is held (a) the "not into its own subtree" check stays true
+/// until the move is done, and (b) no two renames can hold directory locks
+/// in conflicting orders. Every other operation takes directory locks only
+/// parent-before-child. Callers of `VfsNode::rename` must hold it.
+pub(crate) static RENAME_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
 /// Names that can never be a rename source or target.
 pub(crate) fn is_special_name(name: &str) -> bool {
     name.is_empty() || name == "." || name == ".."
@@ -254,7 +262,8 @@ pub trait VfsNode: Send + Sync {
     /// Move entry `old_name` of this directory to `new_name` in
     /// `new_parent` (same filesystem), replacing an existing entry there
     /// under POSIX rules. The node itself moves: nothing is copied, its
-    /// owner, mode and inode are kept (FS-PERF-03).
+    /// owner, mode and inode are kept (FS-PERF-03). The caller must hold
+    /// [`RENAME_LOCK`].
     fn rename(
         &self,
         _old_name: &str,
@@ -1342,6 +1351,22 @@ mod tests {
         rename_contract(&tmpfs::TmpFs::new(1 << 20));
         let bfs = blockfs::BlockFs::format(4096, 256).unwrap();
         rename_contract(&bfs);
+    }
+
+    #[test]
+    fn blockfs_rename_refuses_own_subtree() {
+        // Checked under the filesystem lock by walking "..", not only at
+        // the syscall layer.
+        let fs = blockfs::BlockFs::format(4096, 256).unwrap();
+        let root = fs.root();
+        let p = root.mkdir("p", Permissions::default()).unwrap();
+        let q = p.mkdir("q", Permissions::default()).unwrap();
+        let r = q.mkdir("r", Permissions::default()).unwrap();
+        assert!(root.rename("p", &r, "loop").is_err());
+        assert!(root.rename("p", &q, "loop").is_err());
+        assert!(root.lookup("p").is_ok(), "nothing moved");
+        // A legitimate move upwards still works.
+        q.rename("r", &root, "r").unwrap();
     }
 
     #[test]

@@ -1466,6 +1466,9 @@ pub(crate) fn require_open_access(
 /// mode and contents -- is moved, never copied, and a symlink at `new` is
 /// replaced rather than followed.
 fn rename_entry(old: &str, new: &str) -> SyscallResult {
+    // Held across the ancestry check and the move, so no concurrent rename
+    // can make the check stale.
+    let _rename = crate::fs::RENAME_LOCK.lock();
     require_may_remove(old)?;
     require_dir_write(new)?;
     // Replacing an existing `new` removes it, so the sticky rule applies.

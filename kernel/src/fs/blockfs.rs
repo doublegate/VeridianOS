@@ -1634,6 +1634,21 @@ impl BlockFsInner {
             self.unlink_from_dir(new_dir, new_name)?;
         }
 
+        if src_is_dir && old_dir != new_dir {
+            // Not into its own subtree: walk from the destination up the
+            // ".." chain under this lock (bounded, in case of corruption).
+            let mut at = new_dir;
+            for _ in 0..self.inode_table.len() {
+                if at == src.inode {
+                    return Err(KernelError::FsError(FsError::InvalidPath));
+                }
+                match self.find_dir_entry(at, "..") {
+                    Some((up, _, _)) if up.inode != at => at = up.inode,
+                    _ => break, // reached the root
+                }
+            }
+        }
+
         self.write_dir_entry(new_dir, src.inode, new_name, src.file_type)?;
         // Entries are cleared in place and never moved, so the source's
         // position found above is still valid.

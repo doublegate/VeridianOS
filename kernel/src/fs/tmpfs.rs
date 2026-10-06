@@ -390,12 +390,26 @@ impl VfsNode for TmpNode {
         }
 
         // Both parent maps stay locked for the whole operation (one lock if
-        // they are the same directory, otherwise in address order), so the
-        // entry checked is the entry moved and nothing changes in between.
+        // they are the same directory), so the entry checked is the entry
+        // moved. Lock order: with renames serialized by RENAME_LOCK, every
+        // other path locks parent before child, so if one directory is the
+        // other's parent it is locked first; otherwise by address.
         let same_dir = core::ptr::eq(self, np);
+        let self_first =
+            if np.parent_inode.load(core::sync::atomic::Ordering::Relaxed) == self.inode {
+                true
+            } else if self
+                .parent_inode
+                .load(core::sync::atomic::Ordering::Relaxed)
+                == np.inode
+            {
+                false
+            } else {
+                (self as *const TmpNode) < (np as *const TmpNode)
+            };
         let (mut src, mut dst) = if same_dir {
             (self.children.write(), None)
-        } else if (self as *const TmpNode) < (np as *const TmpNode) {
+        } else if self_first {
             let a = self.children.write();
             (a, Some(np.children.write()))
         } else {
@@ -448,8 +462,6 @@ impl VfsNode for TmpNode {
             Some(d) => d.insert(String::from(new_name), node.clone()),
             None => src.insert(String::from(new_name), node.clone()),
         };
-        drop(dst);
-        drop(src);
         if node.node_type == NodeType::Directory {
             node.parent_inode
                 .store(np.inode, core::sync::atomic::Ordering::Relaxed);
