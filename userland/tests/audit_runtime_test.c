@@ -17,9 +17,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 static int passed, total;
@@ -375,6 +377,102 @@ static void test_sockets(void)
     close(sv[1]);
 }
 
+/* --- Syscalls that wait for the clock (W-13). ------------------------- */
+static long elapsed_ms(const struct timespec *a, const struct timespec *b)
+{
+    return (b->tv_sec - a->tv_sec) * 1000 + (b->tv_nsec - a->tv_nsec) / 1000000;
+}
+
+static void test_timed_waits(void)
+{
+    struct timespec t0, t1, req = { 0, 100 * 1000000 };
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int ok = nanosleep(&req, NULL) == 0;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long slept = elapsed_ms(&t0, &t1);
+    static char why[48];
+    snprintf(why, sizeof(why), "slept %ld ms for 100", slept);
+    report("nanosleep_waits", ok && slept >= 90 && slept < 2000, why);
+
+    int p[2];
+    ok = pipe(p) == 0;
+    struct pollfd pf = { .fd = p[0], .events = POLLIN };
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int n = ok ? poll(&pf, 1, 150) : -1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long waited = elapsed_ms(&t0, &t1);
+    static char why_poll[64];
+    snprintf(why_poll, sizeof(why_poll), "poll returned %d after %ld ms (150)", n, waited);
+    report("poll_times_out", n == 0 && waited >= 140 && waited < 2000, why_poll);
+    if (ok) {
+        close(p[0]);
+        close(p[1]);
+    }
+}
+
+/* --- User address-space limit (mm::user_layout). ----------------------- */
+static void test_map_fixed_limits(void)
+{
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED;
+    /* Highest legitimate page: allowed. */
+    void *top = mmap((void *)0x7FFFFFFFE000UL, 4096, PROT_READ | PROT_WRITE, flags, -1, 0);
+    int ok_top = top == (void *)0x7FFFFFFFE000UL;
+    if (ok_top) {
+        *(volatile int *)top = 42;
+        ok_top = *(volatile int *)top == 42;
+        munmap(top, 4096);
+    }
+    /* Reserved top canonical page (SYSRET / Ryzen) and the kernel half:
+     * rejected. */
+    void *guard = mmap((void *)0x7FFFFFFFF000UL, 4096, PROT_READ, flags, -1, 0);
+    void *kern = mmap((void *)0xFFFF800000000000UL, 4096, PROT_READ, flags, -1, 0);
+    /* A range that starts below the limit but runs past it. */
+    void *span = mmap((void *)0x7FFFFFFFE000UL, 8192, PROT_READ, flags, -1, 0);
+    static char why[96];
+    snprintf(why, sizeof(why), "top=%p guard=%p kernel=%p span=%p", top, guard, kern, span);
+    report("map_fixed_user_limits",
+           ok_top && guard == MAP_FAILED && kern == MAP_FAILED && span == MAP_FAILED, why);
+}
+
+/* --- Directory rename (FS-PERF-03): the node moves, ".." follows. ----- */
+static void test_rename_directory(void)
+{
+    char buf[16] = {0};
+    struct stat parent, dotdot;
+    mkdir("/tmp/rd", 0755);
+    mkdir("/tmp/rd/a", 0755);
+    mkdir("/tmp/rd/b", 0755);
+    int ok = write_file("/tmp/rd/a/inner", "inside", 0644) == 0 &&
+             rename("/tmp/rd/a", "/tmp/rd/b/moved") == 0 &&
+             access("/tmp/rd/a", F_OK) != 0 &&
+             read_file("/tmp/rd/b/moved/inner", buf, sizeof(buf)) == 0 &&
+             strcmp(buf, "inside") == 0 &&
+             stat("/tmp/rd/b", &parent) == 0 &&
+             stat("/tmp/rd/b/moved/..", &dotdot) == 0 &&
+             parent.st_ino == dotdot.st_ino;
+    report("rename_directory_moves_subtree", ok, "contents or .. wrong after move");
+
+    errno = 0;
+    int r = rename("/tmp/rd/b", "/tmp/rd/b/moved/sub");
+    int e1 = errno;
+    static char why[80];
+    /* The same, spelled so a string-prefix check misses it. */
+    symlink("/tmp/rd/b", "/tmp/rd/blink");
+    errno = 0;
+    int r2 = rename("/tmp/rd/b", "/tmp/rd/./b/moved/sub");
+    int e2 = errno;
+    errno = 0;
+    int r3 = rename("/tmp/rd/b", "/tmp/rd/blink/moved/sub");
+    int e3 = errno;
+    errno = 0;
+    int r4 = rename("/tmp/rd/b", "/tmp/rd/b/moved/../moved/sub");
+    int e4 = errno;
+    snprintf(why, sizeof(why), "%d/%d %d/%d %d/%d %d/%d", r, e1, r2, e2, r3, e3, r4, e4);
+    report("rename_into_own_subtree_einval",
+           r != 0 && e1 == EINVAL && r2 != 0 && e2 == EINVAL && r3 != 0 && e3 == EINVAL && r4 != 0 && e4 == EINVAL,
+           why);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -392,6 +490,9 @@ int main(int argc, char **argv)
     test_sticky_dir();
     test_umask();
     test_sockets();
+    test_timed_waits();
+    test_map_fixed_limits();
+    test_rename_directory();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

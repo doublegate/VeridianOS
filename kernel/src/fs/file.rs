@@ -1,7 +1,7 @@
 //! File descriptors and file operations
 
 use alloc::{string::String, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 #[cfg(not(target_arch = "aarch64"))]
 use spin::RwLock;
@@ -290,14 +290,16 @@ pub struct FileTable {
     /// File descriptors
     files: RwLock<Vec<Option<FileEntry>>>,
 
-    /// Next available file descriptor
-    next_fd: RwLock<FileDescriptor>,
-
     /// Bit `n` (n < 3) set: fd `n` has no table entry but is still the
     /// implicit serial console that `sys_read`/`sys_write` fall back to.
     /// Allocation skips such fds, so the first `open` cannot shadow stdin
     /// or stdout (N-06); closing or `dup2`-ing over one clears its bit.
     console_fds: AtomicU8,
+
+    /// No allocatable fd lies below this (FS-ARCH-01): `open` scans from
+    /// here instead of from 0. Updated with the `files` write lock held;
+    /// every path that frees a slot lowers it, allocation raises it.
+    free_hint: AtomicUsize,
 }
 
 /// All three standard descriptors are the implicit console.
@@ -315,8 +317,8 @@ impl FileTable {
 
         Self {
             files: RwLock::new(files),
-            next_fd: RwLock::new(3),
             console_fds: AtomicU8::new(CONSOLE_FDS_ALL),
+            free_hint: AtomicUsize::new(3),
         }
     }
 }
@@ -333,6 +335,19 @@ impl FileTable {
     fn is_allocatable(&self, files: &[Option<FileEntry>], fd: FileDescriptor) -> bool {
         files[fd].is_none()
             && (fd >= 3 || self.console_fds.load(Ordering::Acquire) & (1 << fd) == 0)
+    }
+
+    /// Slot `fd` became free: the lowest free fd is now at most `fd`.
+    fn note_freed(&self, fd: FileDescriptor) {
+        self.free_hint.fetch_min(fd, Ordering::AcqRel);
+    }
+
+    /// Slot `fd` was just filled: if it was the hint, nothing below the
+    /// next slot is free.
+    fn note_filled(&self, fd: FileDescriptor) {
+        let _ = self
+            .free_hint
+            .compare_exchange(fd, fd + 1, Ordering::AcqRel, Ordering::Relaxed);
     }
 
     /// `fd` now refers to something other than the implicit console.
@@ -362,10 +377,6 @@ impl FileTable {
             file,
             cloexec: false,
         });
-        let mut next_fd = self.next_fd.write();
-        if *next_fd <= fd {
-            *next_fd = fd + 1;
-        }
         Ok(())
     }
 
@@ -381,24 +392,28 @@ impl FileTable {
         cloexec: bool,
     ) -> Result<FileDescriptor, KernelError> {
         let mut files = self.files.write();
-        let mut next_fd = self.next_fd.write();
 
         let entry = FileEntry { file, cloexec };
 
-        // Find the lowest free slot
-        if let Some(fd) = (0..files.len()).find(|&fd| self.is_allocatable(&files, fd)) {
+        // Find the lowest free slot, starting at the hint
+        let start = self.free_hint.load(Ordering::Acquire).min(files.len());
+        if let Some(fd) = (start..files.len()).find(|&fd| self.is_allocatable(&files, fd)) {
             files[fd] = Some(entry);
+            self.free_hint.store(fd + 1, Ordering::Release);
             return Ok(fd);
         }
 
-        // No empty slot, append new one
-        let fd = *next_fd;
+        // No empty slot: append. The new fd is the index it is stored at; a
+        // separate next-fd counter drifted from the table length once dup2
+        // grew the table, so open returned one fd and stored the file at
+        // another.
+        let fd = files.len();
         if fd >= 1024 {
             return Err(KernelError::FsError(FsError::TooManyOpenFiles));
         }
 
         files.push(Some(entry));
-        *next_fd += 1;
+        self.free_hint.store(fd + 1, Ordering::Release);
         Ok(fd)
     }
 
@@ -425,6 +440,7 @@ impl FileTable {
             // Closing the implicit console: valid, and frees the fd.
             let bit = 1u8 << fd;
             if self.console_fds.fetch_and(!bit, Ordering::AcqRel) & bit != 0 {
+                self.note_freed(fd);
                 return Ok(());
             }
         }
@@ -434,6 +450,7 @@ impl FileTable {
         }
 
         if let Some(entry) = files[fd].take() {
+            self.note_freed(fd);
             // Decrement reference count
             if entry.file.dec_ref() == 0 {
                 // Last reference, file will be dropped
@@ -476,7 +493,6 @@ impl FileTable {
         file.inc_ref();
 
         let mut files = self.files.write();
-        let mut next_fd = self.next_fd.write();
 
         let entry = FileEntry { file, cloexec };
 
@@ -484,28 +500,22 @@ impl FileTable {
         while files.len() <= min_fd {
             files.push(None);
         }
-        if *next_fd <= min_fd {
-            *next_fd = min_fd;
-        }
 
         // Find the lowest free slot >= min_fd
         if let Some(slot_fd) = (min_fd..files.len()).find(|&fd| self.is_allocatable(&files, fd)) {
             files[slot_fd] = Some(entry);
+            self.note_filled(slot_fd);
             return Ok(slot_fd);
         }
 
-        // No empty slot found in existing range; append new one
-        let new_fd = *next_fd;
+        // No free slot >= min_fd: append. (This used a separate counter
+        // that could point at an occupied slot, which was then overwritten.)
+        let new_fd = files.len();
         if new_fd >= 1024 {
             return Err(KernelError::FsError(FsError::TooManyOpenFiles));
         }
-
-        // Ensure vector has capacity up to new_fd
-        while files.len() <= new_fd {
-            files.push(None);
-        }
-        files[new_fd] = Some(entry);
-        *next_fd = new_fd + 1;
+        files.push(Some(entry));
+        self.note_filled(new_fd);
         Ok(new_fd)
     }
 
@@ -620,11 +630,12 @@ impl FileTable {
     pub fn close_on_exec(&self) {
         let mut files = self.files.write();
 
-        for slot in files.iter_mut() {
+        for (fd, slot) in files.iter_mut().enumerate() {
             if let Some(entry) = slot.as_ref() {
                 if entry.cloexec {
                     // Close this descriptor
                     if let Some(entry) = slot.take() {
+                        self.note_freed(fd);
                         entry.file.dec_ref();
                     }
                 }
@@ -642,7 +653,6 @@ impl FileTable {
     /// All file descriptors are duplicated with same flags
     pub fn clone_for_fork(&self) -> Self {
         let files = self.files.read();
-        let next_fd = *self.next_fd.read();
 
         let mut new_files = Vec::with_capacity(files.len());
         for slot in files.iter() {
@@ -659,8 +669,8 @@ impl FileTable {
 
         Self {
             files: RwLock::new(new_files),
-            next_fd: RwLock::new(next_fd),
             console_fds: AtomicU8::new(self.console_fds.load(Ordering::Acquire)),
+            free_hint: AtomicUsize::new(self.free_hint.load(Ordering::Acquire)),
         }
     }
 
@@ -673,6 +683,7 @@ impl FileTable {
                 entry.file.dec_ref();
             }
         }
+        self.free_hint.store(0, Ordering::Release);
     }
 }
 
@@ -683,6 +694,65 @@ mod tests {
 
     fn some_file() -> Arc<File> {
         Arc::new(File::new(RamFs::new().root(), OpenFlags::read_only()))
+    }
+
+    /// Reference: the lowest fd that is neither open nor still the console.
+    fn lowest_free(table: &FileTable) -> usize {
+        let files = table.files.read();
+        (0..)
+            .find(|&fd| fd >= files.len() || table.is_allocatable(&files, fd))
+            .unwrap()
+    }
+
+    #[test]
+    fn open_always_returns_lowest_free_fd() {
+        // FS-ARCH-01: the hint must never skip a free slot, whatever mix of
+        // close / dup2 / close-on-exec freed it.
+        let table = FileTable::new();
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        for step in 0..4000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let fd = (x >> 8) as usize % 40;
+            match x % 7 {
+                0 | 1 | 2 => {
+                    let want = lowest_free(&table);
+                    let got = table.open_with_flags(some_file(), x & 8 != 0).unwrap();
+                    assert_eq!(got, want, "step {}", step);
+                }
+                3 | 4 => {
+                    let _ = table.close(fd);
+                }
+                5 => {
+                    if table.get(fd % 8).is_some() {
+                        let _ = table.dup2(fd % 8, fd);
+                    }
+                }
+                6 if step % 3 == 0 => {
+                    // F_DUPFD: lowest free fd >= min, never an open one.
+                    if let Some(src) = table.get(fd % 8) {
+                        let before = table.count_open();
+                        let min = fd;
+                        let want = {
+                            let files = table.files.read();
+                            (min..)
+                                .find(|&f| f >= files.len() || table.is_allocatable(&files, f))
+                                .unwrap()
+                        };
+                        let got = table.dup_at_least(fd % 8, min, false).unwrap();
+                        assert_eq!(got, want, "dup step {}", step);
+                        assert_eq!(table.count_open(), before + 1, "overwrote a slot");
+                        assert!(Arc::ptr_eq(&table.get(got).unwrap(), &src));
+                    }
+                }
+                _ => {
+                    if step % 50 == 0 {
+                        table.close_on_exec();
+                    }
+                }
+            }
+        }
     }
 
     #[test]

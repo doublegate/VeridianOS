@@ -33,8 +33,9 @@ pub struct CpuInfo {
     pub nr_running: AtomicU32,
     /// Per-CPU scheduler
     pub scheduler: Mutex<Scheduler>,
-    /// Per-CPU ready queue
-    pub ready_queue: Mutex<ReadyQueue>,
+    /// Per-CPU ready queue, on the heap: a ReadyQueue is ~72 KiB and
+    /// CpuInfo is built on the stack (SCHED-PERF-03).
+    pub ready_queue: Mutex<alloc::boxed::Box<ReadyQueue>>,
     /// CPU vendor string
     #[cfg(feature = "alloc")]
     pub vendor: String,
@@ -66,7 +67,7 @@ pub struct CpuFeatures {
 
 impl CpuInfo {
     /// Create new CPU info
-    pub const fn new(id: u8) -> Self {
+    pub fn new(id: u8) -> Self {
         Self {
             id,
             online: AtomicBool::new(false),
@@ -75,7 +76,7 @@ impl CpuInfo {
             load: AtomicU8::new(0),
             nr_running: AtomicU32::new(0),
             scheduler: Mutex::new(Scheduler::new()),
-            ready_queue: Mutex::new(ReadyQueue::new()),
+            ready_queue: Mutex::new(ReadyQueue::new_boxed()),
             #[cfg(feature = "alloc")]
             vendor: String::new(),
             #[cfg(feature = "alloc")]
@@ -289,6 +290,17 @@ const MAX_LOAD_FACTOR: u32 = 10;
 static mut PER_CPU_DATA: [Option<PerCpuData>; MAX_CPUS] = [const { None }; MAX_CPUS];
 
 /// CPU topology
+/// Set once any secondary CPU is running; until then the current CPU is
+/// always the boot CPU (0).
+static SECONDARY_CPUS_ONLINE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Record that a secondary CPU has started. AP bring-up must call this
+/// before the AP runs any code that uses per-CPU state.
+pub fn mark_secondary_cpu_online() {
+    SECONDARY_CPUS_ONLINE.store(true, core::sync::atomic::Ordering::Release);
+}
+
 static CPU_TOPOLOGY: Mutex<CpuTopology> = Mutex::new(CpuTopology {
     total_cpus: 1,
     online_cpus: AtomicU8::new(1),
@@ -392,6 +404,12 @@ pub fn per_cpu(cpu_id: u8) -> Option<&'static PerCpuData> {
 
 /// Get current CPU ID
 pub fn current_cpu_id() -> u8 {
+    // Only the boot CPU runs until secondary CPUs are brought up. Asking
+    // the hardware is not free -- on x86_64 it is CPUID, a VM exit under
+    // KVM costing microseconds, on every per-CPU fast path.
+    if !SECONDARY_CPUS_ONLINE.load(core::sync::atomic::Ordering::Acquire) {
+        return 0;
+    }
     #[cfg(target_arch = "x86_64")]
     {
         // SAFETY: CPUID leaf 0x1 is an unprivileged read-only instruction.

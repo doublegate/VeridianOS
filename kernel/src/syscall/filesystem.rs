@@ -1466,6 +1466,9 @@ pub(crate) fn require_open_access(
 /// mode and contents -- is moved, never copied, and a symlink at `new` is
 /// replaced rather than followed.
 fn rename_entry(old: &str, new: &str) -> SyscallResult {
+    // Held across the ancestry check and the move, so no concurrent rename
+    // can make the check stale.
+    let _rename = crate::fs::RENAME_LOCK.lock();
     require_may_remove(old)?;
     require_dir_write(new)?;
     // Replacing an existing `new` removes it, so the sticky rule applies.
@@ -1482,28 +1485,50 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
     let src = vfs_guard
         .resolve_path_no_follow(old)
         .map_err(map_resolve_err)?;
+    let (old_parent_path, old_name) = split_path(old)?;
+    let (new_parent_path, new_name) = split_path(new)?;
+
     if src.node_type() == crate::fs::NodeType::Directory {
-        // Directory rename needs VfsNode::rename (FS-PERF-03).
-        return Err(SyscallError::NotImplemented);
+        // A directory cannot move into its own subtree (POSIX: EINVAL).
+        // Compared on canonical paths (symlinks, ".", ".." resolved): a
+        // string prefix test on the raw paths was bypassed by "/a/./b" or
+        // a symlink to the directory, which orphaned it as its own child.
+        let (_, old_parent_canon) = vfs_guard
+            .resolve_canonical(&old_parent_path, "/", true)
+            .map_err(map_resolve_err)?;
+        let src_canon = if old_parent_canon == "/" {
+            alloc::format!("/{}", old_name)
+        } else {
+            alloc::format!("{}/{}", old_parent_canon, old_name)
+        };
+        let (_, new_parent_canon) = vfs_guard
+            .resolve_canonical(&new_parent_path, "/", true)
+            .map_err(map_resolve_err)?;
+        if crate::fs::path_is_under(&new_parent_canon, &src_canon) {
+            return Err(SyscallError::InvalidArgument);
+        }
+        // Moving it to another parent rewrites its "..", which needs write
+        // permission on the directory itself.
+        if old_parent_path != new_parent_path {
+            let (uid, gid) = caller_creds();
+            let meta = src.metadata().map_err(|_| SyscallError::InvalidState)?;
+            if uid != 0 && !meta.permissions.can_write(uid, gid, meta.uid, meta.gid) {
+                return Err(SyscallError::PermissionDenied);
+            }
+        }
     }
 
-    let (new_parent, new_name) = split_path(new)?;
-    let parent = vfs_guard
-        .resolve_path(&new_parent)
+    let old_parent = vfs_guard
+        .resolve_path(&old_parent_path)
         .map_err(map_resolve_err)?;
-    if let Ok(existing) = vfs_guard.resolve_path_no_follow(new) {
-        if alloc::sync::Arc::ptr_eq(&existing, &src) {
-            return Ok(0); // same file: POSIX says do nothing
-        }
-        if existing.node_type() == crate::fs::NodeType::Directory {
-            return Err(SyscallError::IsADirectory);
-        }
-        parent.unlink(&new_name).map_err(super::map_kernel_error)?;
-    }
-    parent
-        .link(&new_name, src)
+    let new_parent = vfs_guard
+        .resolve_path(&new_parent_path)
+        .map_err(map_resolve_err)?;
+    // The node moves; nothing is copied, and a symlink at `new` is replaced
+    // rather than followed (FS-PERF-03).
+    old_parent
+        .rename(&old_name, &new_parent, &new_name)
         .map_err(super::map_kernel_error)?;
-    vfs_guard.unlink(old).map_err(super::map_kernel_error)?;
     Ok(0)
 }
 
@@ -2416,12 +2441,7 @@ pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult
             while crate::timer::get_uptime_ms() - start < timeout_ms as u64 {
                 // Enable interrupts briefly to let APIC timer advance
                 // UPTIME_MS (see epoll::epoll_wait for full rationale).
-                #[cfg(target_arch = "x86_64")]
-                unsafe {
-                    core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
-                }
-                #[cfg(not(target_arch = "x86_64"))]
-                crate::sched::yield_cpu();
+                crate::sched::wait_for_interrupt_in_syscall();
             }
         }
         return Ok(0);
@@ -2501,12 +2521,7 @@ pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult
         // (SFMASK clears IF on syscall entry) and time-based fds such as
         // timerfd never become readable.  See epoll::epoll_wait for the
         // detailed rationale.
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        crate::sched::yield_cpu();
+        crate::sched::wait_for_interrupt_in_syscall();
     }
 }
 

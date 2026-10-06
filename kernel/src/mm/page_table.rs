@@ -325,14 +325,20 @@ impl ActivePageTable {
 
         #[cfg(target_arch = "riscv64")]
         {
-            let satp = (8 << 60) | (self.l4_table.as_u64() >> 12); // Mode 8 = Sv48
-                                                                   // SAFETY: Writing the SATP CSR switches the active page table in S-mode.
-                                                                   // Mode 8 selects Sv48 (4-level paging). `self.l4_table` must contain a
-                                                                   // valid physical address of a root page table. The caller is responsible
-                                                                   // for ensuring the new page table maps all memory the kernel needs to
-                                                                   // continue executing. We are in S-mode so SATP is writable.
+            // MODE 9 = Sv48: these tables have four levels. (MODE 8 is Sv39,
+            // three levels; the value here used to be 8.)
+            if !crate::arch::riscv64::sv48_supported() {
+                panic!("RISC-V: page tables are 4-level (Sv48) but this hart lacks Sv48");
+            }
+            let satp = (9u64 << 60) | (self.l4_table.as_u64() >> 12);
+            // SAFETY: Writing satp switches the active page table in S-mode
+            // (MODE 9 = Sv48, 4-level). `self.l4_table` must be the physical
+            // address of a root table that maps everything the kernel needs to
+            // keep executing; the caller guarantees that.
+            // sfence.vma: the privileged spec requires it after a satp
+            // write so no stale translation from the old table is used.
             unsafe {
-                core::arch::asm!("csrw satp, {}", in(reg) satp);
+                core::arch::asm!("csrw satp, {}", "sfence.vma", in(reg) satp);
             }
         }
     }

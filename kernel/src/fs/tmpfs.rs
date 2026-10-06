@@ -25,7 +25,9 @@ struct TmpNode {
     children: RwLock<BTreeMap<String, Arc<TmpNode>>>,
     metadata: RwLock<Metadata>,
     inode: u64,
-    parent_inode: u64,
+    /// Parent directory inode (".."); changes when a rename moves this
+    /// directory.
+    parent_inode: core::sync::atomic::AtomicU64,
     /// Shared reference to the filesystem's total bytes used counter
     bytes_used: Arc<AtomicUsize>,
     /// Shared reference to the filesystem's size limit
@@ -56,7 +58,7 @@ impl TmpNode {
                 inode,
             }),
             inode,
-            parent_inode,
+            parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
             bytes_used,
             size_limit,
         }
@@ -85,7 +87,7 @@ impl TmpNode {
                 inode,
             }),
             inode,
-            parent_inode,
+            parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
             bytes_used,
             size_limit,
         }
@@ -116,7 +118,7 @@ impl TmpNode {
                 inode,
             }),
             inode,
-            parent_inode,
+            parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
             bytes_used,
             size_limit,
         }
@@ -217,7 +219,9 @@ impl VfsNode for TmpNode {
         entries.push(DirEntry {
             name: String::from(".."),
             node_type: NodeType::Directory,
-            inode: self.parent_inode,
+            inode: self
+                .parent_inode
+                .load(core::sync::atomic::Ordering::Relaxed),
         });
 
         for (name, child) in children.iter() {
@@ -358,6 +362,115 @@ impl VfsNode for TmpNode {
         metadata.modified = crate::arch::timer::get_timestamp_secs();
 
         Ok(())
+    }
+
+    fn rename(
+        &self,
+        old_name: &str,
+        new_parent: &Arc<dyn VfsNode>,
+        new_name: &str,
+    ) -> Result<(), KernelError> {
+        if self.node_type != NodeType::Directory {
+            return Err(KernelError::FsError(FsError::NotADirectory));
+        }
+        if super::is_special_name(old_name) || super::is_special_name(new_name) {
+            return Err(KernelError::FsError(FsError::InvalidPath));
+        }
+        let np = new_parent
+            .as_any()
+            .and_then(|a| a.downcast_ref::<TmpNode>())
+            .ok_or(KernelError::FsError(FsError::CrossDevice))?;
+        if np.node_type != NodeType::Directory {
+            return Err(KernelError::FsError(FsError::NotADirectory));
+        }
+        // Same tmpfs instance only: moving a file between two tmpfs mounts
+        // would carry its bytes past the destination's size limit.
+        if !Arc::ptr_eq(&self.bytes_used, &np.bytes_used) {
+            return Err(KernelError::FsError(FsError::CrossDevice));
+        }
+
+        // Both parent maps stay locked for the whole operation (one lock if
+        // they are the same directory), so the entry checked is the entry
+        // moved. Lock order: with renames serialized by RENAME_LOCK, every
+        // other path locks parent before child, so if one directory is the
+        // other's parent it is locked first; otherwise by address.
+        let same_dir = core::ptr::eq(self, np);
+        let self_first =
+            if np.parent_inode.load(core::sync::atomic::Ordering::Relaxed) == self.inode {
+                true
+            } else if self
+                .parent_inode
+                .load(core::sync::atomic::Ordering::Relaxed)
+                == np.inode
+            {
+                false
+            } else {
+                (self as *const TmpNode) < (np as *const TmpNode)
+            };
+        let (mut src, mut dst) = if same_dir {
+            (self.children.write(), None)
+        } else if self_first {
+            let a = self.children.write();
+            (a, Some(np.children.write()))
+        } else {
+            let b = np.children.write();
+            (self.children.write(), Some(b))
+        };
+
+        let node = src
+            .get(old_name)
+            .cloned()
+            .ok_or(KernelError::FsError(FsError::NotFound))?;
+        if core::ptr::eq(&*node, np) {
+            // A directory cannot become its own parent.
+            return Err(KernelError::FsError(FsError::InvalidPath));
+        }
+        let target = match dst.as_ref() {
+            Some(d) => d.get(new_name).cloned(),
+            None => src.get(new_name).cloned(),
+        };
+        if let Some(existing) = target {
+            if Arc::ptr_eq(&existing, &node) {
+                return Ok(()); // same node: POSIX says do nothing
+            }
+            let moving_dir = node.node_type == NodeType::Directory;
+            let existing_dir = existing.node_type == NodeType::Directory;
+            match (moving_dir, existing_dir) {
+                (true, false) => return Err(KernelError::FsError(FsError::NotADirectory)),
+                (false, true) => return Err(KernelError::FsError(FsError::IsADirectory)),
+                (true, true) => {
+                    // The source directory contains `old_name`, so it is not
+                    // empty (and is locked here, so it must not be re-read).
+                    if core::ptr::eq(&*existing, self) || !existing.children.read().is_empty() {
+                        return Err(KernelError::FsError(FsError::DirectoryNotEmpty));
+                    }
+                }
+                (false, false) => {}
+            }
+            if existing.node_type == NodeType::File {
+                let freed = existing.data.read().len();
+                let _ =
+                    self.bytes_used
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                            Some(used.saturating_sub(freed))
+                        });
+            }
+        }
+
+        src.remove(old_name);
+        match dst.as_mut() {
+            Some(d) => d.insert(String::from(new_name), node.clone()),
+            None => src.insert(String::from(new_name), node.clone()),
+        };
+        if node.node_type == NodeType::Directory {
+            node.parent_inode
+                .store(np.inode, core::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        Some(self)
     }
 
     fn link(&self, name: &str, target: Arc<dyn VfsNode>) -> Result<(), KernelError> {

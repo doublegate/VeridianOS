@@ -343,7 +343,7 @@ impl EnhancedElfLoader {
 
         // User stack typically starts at a high address and grows down
         // Use the process's configured stack pointer
-        let stack_top = 0x7FFF_FFFF_F000_u64; // Top of user stack (below kernel)
+        let stack_top = crate::mm::user_layout::USER_SPACE_END as u64; // top of user space
         let stack_size = 0x10000_u64; // 64KB stack
 
         // Map stack pages

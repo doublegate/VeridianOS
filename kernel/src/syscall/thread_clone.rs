@@ -34,7 +34,7 @@ const CLONE_CHILD_SETTID: usize = 0x0100_0000;
 /// strictly below this address.  The value matches the canonical user-space
 /// limit on x86_64; AArch64 and RISC-V use the same logical limit via
 /// `validate_user_ptr`.
-const USER_SPACE_END: usize = 0x0000_8000_0000_0000;
+use crate::mm::user_layout::USER_SPACE_END;
 
 /// Create a new thread sharing the current process's address space and
 /// resources, following the Linux `clone(2)` semantics for thread creation.
@@ -105,11 +105,11 @@ pub fn sys_thread_clone(
     if newsp == 0 {
         return Err(SyscallError::InvalidPointer);
     }
-    // Ensure the stack pointer is within the user-space address range.
-    // Kernel addresses (>= 0x0000_8000_0000_0000 on x86_64) must be
+    // Ensure the stack pointer is within the user-space address range (a
+    // stack top may equal the exclusive end). Kernel addresses must be
     // rejected to prevent a malicious caller from running a thread with
     // a kernel-space stack.
-    if newsp >= USER_SPACE_END {
+    if newsp > USER_SPACE_END {
         return Err(SyscallError::InvalidPointer);
     }
 

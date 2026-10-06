@@ -39,7 +39,7 @@ const MADT_LOCAL_APIC_NMI: u8 = 4;
 // Maximum supported entries
 // ---------------------------------------------------------------------------
 
-const MAX_CPUS: usize = 16;
+use crate::sched::smp::MAX_CPUS;
 const MAX_IO_APICS: usize = 4;
 const MAX_ISO: usize = 24;
 const MAX_MCFG_ENTRIES: usize = 4;

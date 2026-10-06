@@ -61,6 +61,25 @@ pub struct FpuState {
     pub xsave: [u8; 2048],
 }
 
+/// The active page table root. 0 in host unit tests, where reading CR3
+/// (a privileged instruction) would fault the test process.
+fn current_cr3() -> u64 {
+    #[cfg(target_os = "none")]
+    {
+        // SAFETY: Reading CR3 is always valid in kernel mode. It returns
+        // the current page table base address. No side effects.
+        unsafe {
+            let cr3: u64;
+            asm!("mov {}, cr3", out(reg) cr3);
+            cr3
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        0
+    }
+}
+
 impl X86_64Context {
     /// Create new context for a task
     pub fn new(entry_point: usize, stack_pointer: usize) -> Self {
@@ -104,13 +123,7 @@ impl X86_64Context {
             gs: 0x00,
 
             // Initialize with current CR3
-            // SAFETY: Reading CR3 is always valid in kernel mode. It returns
-            // the current page table base address. No side effects.
-            cr3: unsafe {
-                let mut cr3: u64;
-                asm!("mov {}, cr3", out(reg) cr3);
-                cr3
-            },
+            cr3: current_cr3(),
 
             // Will be allocated if FPU is used
             fpu_state: core::ptr::null_mut(),

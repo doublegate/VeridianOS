@@ -1,7 +1,18 @@
+.section .data
+.balign 8
+.global veridian_dtb_pa
+# Physical address of the device tree blob SBI firmware passes in a1.
+# Saved before anything else touches a1; .data so nothing clears it.
+veridian_dtb_pa:
+    .dword 0
+
 .section .text.boot
 .global _start
 
 _start:
+    la t0, veridian_dtb_pa
+    sd a1, 0(t0)
+
     # Use SBI console putchar (ecall) for output
     # SBI legacy extension: function ID 0x01 for putchar
     

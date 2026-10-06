@@ -2854,6 +2854,27 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
         let ok = crate::arch::boot_stack_intact();
         report_test("boot_stack_canary_intact", ok, passed, failed);
     }
+
+    // Test 34: the monotonic clock advances and the 1000 Hz timer interrupt
+    // is delivered (LAPIC on x86_64, EL1 virtual timer on AArch64,
+    // stimecmp/SBI on RISC-V). Before, uptime never advanced and AArch64 /
+    // RISC-V took no interrupts at all.
+    {
+        let start_ms = crate::timer::get_uptime_ms();
+        let start_ticks = crate::arch::timer::get_ticks();
+        let mut spins = 0u64;
+        while crate::timer::get_uptime_ms().saturating_sub(start_ms) < 50
+            && crate::arch::timer::get_ticks().wrapping_sub(start_ticks) < 5
+            && spins < 2_000_000_000
+        {
+            core::hint::spin_loop();
+            spins += 1;
+        }
+        let ticks = crate::arch::timer::get_ticks().wrapping_sub(start_ticks);
+        let elapsed = crate::timer::get_uptime_ms().saturating_sub(start_ms);
+        let ok = ticks >= 5 && elapsed < 50;
+        report_test("timer_interrupts_and_clock", ok, passed, failed);
+    }
 }
 
 #[cfg(not(feature = "alloc"))]

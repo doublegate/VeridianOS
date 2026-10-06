@@ -61,6 +61,19 @@ pub enum NodeType {
     Symlink,
 }
 
+/// Serializes renames, as Linux's per-filesystem rename mutex does. Rename
+/// is the only operation that changes which directory contains which, so
+/// while this is held (a) the "not into its own subtree" check stays true
+/// until the move is done, and (b) no two renames can hold directory locks
+/// in conflicting orders. Every other operation takes directory locks only
+/// parent-before-child. Callers of `VfsNode::rename` must hold it.
+pub(crate) static RENAME_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
+/// Names that can never be a rename source or target.
+pub(crate) fn is_special_name(name: &str) -> bool {
+    name.is_empty() || name == "." || name == ".."
+}
+
 /// File permissions (Unix-style)
 #[derive(Debug, Clone, Copy)]
 pub struct Permissions {
@@ -246,6 +259,20 @@ pub trait VfsNode: Send + Sync {
     /// Truncate the file to the specified size
     fn truncate(&self, size: usize) -> Result<(), KernelError>;
 
+    /// Move entry `old_name` of this directory to `new_name` in
+    /// `new_parent` (same filesystem), replacing an existing entry there
+    /// under POSIX rules. The node itself moves: nothing is copied, its
+    /// owner, mode and inode are kept (FS-PERF-03). The caller must hold
+    /// [`RENAME_LOCK`].
+    fn rename(
+        &self,
+        _old_name: &str,
+        _new_parent: &Arc<dyn VfsNode>,
+        _new_name: &str,
+    ) -> Result<(), KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotSupported))
+    }
+
     /// Create a hard link to this node
     fn link(&self, _name: &str, _target: Arc<dyn VfsNode>) -> Result<(), KernelError> {
         Err(KernelError::NotImplemented {
@@ -406,7 +433,7 @@ pub(crate) fn normalize_path(path: &str, cwd: &str) -> String {
 
 /// Whether normalized `path` is `mount` itself or lies below it, on a
 /// whole-component boundary.
-fn path_is_under(path: &str, mount: &str) -> bool {
+pub(crate) fn path_is_under(path: &str, mount: &str) -> bool {
     mount == "/"
         || path == mount
         || (path.starts_with(mount) && path.as_bytes().get(mount.len()) == Some(&b'/'))
@@ -1260,6 +1287,109 @@ pub fn append_file(path: &str, data: &[u8]) -> Result<usize, KernelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FS-PERF-03: the same rename behaviour on every filesystem that
+    /// implements it.
+    fn rename_contract(fs: &dyn Filesystem) {
+        let root = fs.root();
+        let a = root.mkdir("a", Permissions::default()).unwrap();
+        let b = root.mkdir("b", Permissions::default()).unwrap();
+        let f = a.create("f", Permissions::from_mode(0o640)).unwrap();
+        f.write(0, b"payload").unwrap();
+        let _ = f.chown(Some(1000), Some(100));
+        let inode = f.metadata().unwrap().inode;
+
+        // File across directories: same node, data, mode and owner.
+        a.rename("f", &b, "g").unwrap();
+        assert!(a.lookup("f").is_err());
+        let g = b.lookup("g").unwrap();
+        let meta = g.metadata().unwrap();
+        assert_eq!(meta.inode, inode);
+        assert_eq!(meta.permissions.to_mode(), 0o640);
+        let mut buf = [0u8; 7];
+        assert_eq!(g.read(0, &mut buf).unwrap(), 7);
+        assert_eq!(&buf, b"payload");
+
+        // Same-node rename is a no-op; replacing follows POSIX.
+        b.rename("g", &b, "g").unwrap();
+        let h = b.create("h", Permissions::default()).unwrap();
+        h.write(0, b"old").unwrap();
+        b.rename("g", &b, "h").unwrap(); // file replaces file
+        assert!(b.lookup("g").is_err());
+        let mut buf = [0u8; 7];
+        b.lookup("h").unwrap().read(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"payload");
+        let d = b.mkdir("d", Permissions::default()).unwrap();
+        assert!(b.rename("h", &b, "d").is_err(), "file over directory");
+        assert!(b.rename("d", &b, "h").is_err(), "directory over file");
+        d.create("x", Permissions::default()).unwrap();
+        let e = b.mkdir("e", Permissions::default()).unwrap();
+        assert!(b.rename("e", &b, "d").is_err(), "over non-empty directory");
+        assert!(b.rename(".", &b, "z").is_err());
+
+        // Directory across parents: contents follow, ".." points at the
+        // new parent.
+        b.rename("d", &a, "moved").unwrap();
+        let moved = a.lookup("moved").unwrap();
+        assert!(moved.lookup("x").is_ok());
+        let parent = moved
+            .readdir()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.name == "..")
+            .unwrap();
+        assert_eq!(parent.inode, a.metadata().unwrap().inode);
+        // An empty directory may replace an empty directory.
+        a.mkdir("empty", Permissions::default()).unwrap();
+        b.rename("e", &a, "empty").unwrap();
+        assert!(b.lookup("e").is_err());
+    }
+
+    #[test]
+    fn rename_on_ramfs_tmpfs_blockfs() {
+        rename_contract(&ramfs::RamFs::new());
+        rename_contract(&tmpfs::TmpFs::new(1 << 20));
+        let bfs = blockfs::BlockFs::format(4096, 256).unwrap();
+        rename_contract(&bfs);
+    }
+
+    #[test]
+    fn blockfs_rename_refuses_own_subtree() {
+        // Checked under the filesystem lock by walking "..", not only at
+        // the syscall layer.
+        let fs = blockfs::BlockFs::format(4096, 256).unwrap();
+        let root = fs.root();
+        let p = root.mkdir("p", Permissions::default()).unwrap();
+        let q = p.mkdir("q", Permissions::default()).unwrap();
+        let r = q.mkdir("r", Permissions::default()).unwrap();
+        assert!(root.rename("p", &r, "loop").is_err());
+        assert!(root.rename("p", &q, "loop").is_err());
+        assert!(root.lookup("p").is_ok(), "nothing moved");
+        // A legitimate move upwards still works.
+        q.rename("r", &root, "r").unwrap();
+    }
+
+    #[test]
+    fn rename_refuses_another_tmpfs_instance() {
+        // Moving data between tmpfs mounts would bypass the destination's
+        // size limit.
+        let (x, y) = (tmpfs::TmpFs::new(1 << 20), tmpfs::TmpFs::new(16));
+        x.root().create("big", Permissions::default()).unwrap();
+        assert!(x.root().rename("big", &y.root(), "big").is_err());
+        let d = x.root().mkdir("d", Permissions::default()).unwrap();
+        // A directory cannot become its own parent.
+        assert!(x.root().rename("d", &d, "d2").is_err());
+    }
+
+    #[test]
+    fn rename_refuses_other_filesystems() {
+        let (x, y) = (
+            ramfs::RamFs::new(),
+            blockfs::BlockFs::format(1024, 64).unwrap(),
+        );
+        x.root().create("f", Permissions::default()).unwrap();
+        assert!(x.root().rename("f", &y.root(), "f").is_err());
+    }
 
     #[test]
     fn permissions_mode_round_trip_includes_sticky() {

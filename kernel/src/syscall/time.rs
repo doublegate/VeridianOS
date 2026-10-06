@@ -101,20 +101,16 @@ struct Timeval {
 pub fn sys_clock_gettime(clock_id: usize, tp_ptr: usize) -> SyscallResult {
     validate_user_ptr_typed::<Timespec>(tp_ptr)?;
 
-    let uptime_ms = crate::timer::get_uptime_ms();
+    let now_ns = crate::timer::monotonic_ns();
+    let mono = Timespec {
+        tv_sec: (now_ns / 1_000_000_000) as i64,
+        tv_nsec: (now_ns % 1_000_000_000) as i64,
+    };
 
     let ts = match clock_id {
-        CLOCK_MONOTONIC => Timespec {
-            tv_sec: (uptime_ms / 1000) as i64,
-            tv_nsec: ((uptime_ms % 1000) * 1_000_000) as i64,
-        },
-        CLOCK_REALTIME => {
-            // Realtime = monotonic (no RTC yet, epoch starts at boot)
-            Timespec {
-                tv_sec: (uptime_ms / 1000) as i64,
-                tv_nsec: ((uptime_ms % 1000) * 1_000_000) as i64,
-            }
-        }
+        CLOCK_MONOTONIC => mono,
+        // Realtime = monotonic (no RTC-based epoch yet; starts at boot)
+        CLOCK_REALTIME => mono,
         _ => return Err(SyscallError::InvalidArgument),
     };
 
@@ -190,12 +186,7 @@ pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) -> SyscallResult {
         // Busy-wait with interrupt-enabled halts so APIC timer ISR can
         // advance UPTIME_MS (SFMASK clears IF on syscall entry).
         while crate::timer::get_uptime_ms() - start < sleep_ms {
-            #[cfg(target_arch = "x86_64")]
-            unsafe {
-                core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
-            }
-            #[cfg(not(target_arch = "x86_64"))]
-            crate::sched::yield_cpu();
+            crate::sched::wait_for_interrupt_in_syscall();
         }
     }
 

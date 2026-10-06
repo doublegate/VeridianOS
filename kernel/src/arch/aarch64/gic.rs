@@ -397,6 +397,26 @@ impl Gic {
 // Top-level public API
 // ---------------------------------------------------------------------------
 
+/// Acknowledge the highest-priority pending interrupt from IRQ context.
+///
+/// Reads GICC_IAR directly instead of through the `GIC` mutex: the CPU
+/// interface is banked per CPU, IAR/EOIR need no shared state, and an
+/// interrupt handler must never wait for a lock the interrupted code holds.
+/// Returns `None` for a spurious read (1023).
+pub fn acknowledge_raw() -> Option<u32> {
+    // SAFETY: GICC_BASE + GICC_IAR is the GICv2 CPU interface's IAR on the
+    // QEMU virt machine (mapped, as for all GIC accesses here).
+    let iar = unsafe { ptr::read_volatile((GICC_BASE + GICC_IAR) as *const u32) };
+    let id = iar & 0x3FF;
+    (id != GIC_SPURIOUS_IRQ).then_some(id)
+}
+
+/// Signal end of interrupt for `id` from IRQ context (see `acknowledge_raw`).
+pub fn end_of_interrupt_raw(id: u32) {
+    // SAFETY: as acknowledge_raw; EOIR takes the ID returned by IAR.
+    unsafe { ptr::write_volatile((GICC_BASE + GICC_EOIR) as *mut u32, id) };
+}
+
 /// Initialize the GICv2 controller.
 ///
 /// Configures both the distributor and the CPU interface for the QEMU virt

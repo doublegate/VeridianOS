@@ -80,39 +80,42 @@ impl PriorityQueue {
         }
     }
 
-    /// Remove specific task from queue
+    /// Number of queued tasks.
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Remove and return the first task (in queue order) for which `pred`
+    /// holds, leaving the others in place and in order.
+    pub fn take_first_where(&mut self, pred: impl Fn(&Task) -> bool) -> Option<NonNull<Task>> {
+        let target = (0..self.count)
+            .filter_map(|i| self.tasks[(self.head + i) % MAX_TASKS_PER_QUEUE])
+            .map(|t| t.as_ptr())
+            // SAFETY: queued tasks are valid while queued (scheduler
+            // invariant); `pred` only reads them.
+            .find(|t| pred(unsafe { t.as_ref() }))?;
+        self.remove(target);
+        Some(target)
+    }
+
+    /// Remove specific task from queue, keeping the others in order.
+    ///
+    /// Compacts in place (SCHED-PERF-03): the previous version built a
+    /// second 256-entry array on the stack and copied every task into it.
     pub fn remove(&mut self, target: NonNull<Task>) -> bool {
-        if self.is_empty() {
+        let Some(k) = (0..self.count).find(|&i| {
+            self.tasks[(self.head + i) % MAX_TASKS_PER_QUEUE].map(|t| t.as_ptr()) == Some(target)
+        }) else {
             return false;
+        };
+        for i in k..self.count - 1 {
+            self.tasks[(self.head + i) % MAX_TASKS_PER_QUEUE] =
+                self.tasks[(self.head + i + 1) % MAX_TASKS_PER_QUEUE];
         }
-
-        let mut found = false;
-        let mut new_tasks = [None; MAX_TASKS_PER_QUEUE];
-        let mut new_count = 0;
-
-        // Copy all tasks except target to new array
-        let mut idx = self.head;
-        for _ in 0..self.count {
-            if let Some(task) = self.tasks[idx] {
-                if task.as_ptr() != target {
-                    new_tasks[new_count] = Some(task);
-                    new_count += 1;
-                } else {
-                    found = true;
-                }
-            }
-            idx = (idx + 1) % MAX_TASKS_PER_QUEUE;
-        }
-
-        if found {
-            // Replace with new array
-            self.tasks = new_tasks;
-            self.head = 0;
-            self.tail = new_count;
-            self.count = new_count;
-        }
-
-        found
+        self.tail = (self.tail + MAX_TASKS_PER_QUEUE - 1) % MAX_TASKS_PER_QUEUE;
+        self.tasks[self.tail] = None;
+        self.count -= 1;
+        true
     }
 }
 
@@ -134,6 +137,8 @@ pub struct ReadyQueue {
     normal_bitmap: u32,
     /// Whether idle queue has tasks
     idle_flag: bool,
+    /// Tasks queued across all levels
+    len: usize,
 }
 
 impl ReadyQueue {
@@ -146,11 +151,42 @@ impl ReadyQueue {
             rt_bitmap: 0,
             normal_bitmap: 0,
             idle_flag: false,
+            len: 0,
         }
+    }
+
+    /// A new, empty queue built directly on the heap. `ReadyQueue` is ~72
+    /// KiB; `Box::new(ReadyQueue::new())` would build it on the stack first
+    /// (SCHED-PERF-03).
+    #[cfg(feature = "alloc")]
+    pub fn new_boxed() -> alloc::boxed::Box<Self> {
+        // SAFETY: every field of an empty ReadyQueue is all-zero bits: the
+        // indices, counts and bitmaps are 0, the bool is false and each
+        // Option<TaskPtr> (a NonNull wrapper) is None, which is the null
+        // niche. Checked by the `boxed_queue_is_empty` test.
+        unsafe { alloc::boxed::Box::<Self>::new_zeroed().assume_init() }
+    }
+
+    /// Tasks queued across all levels.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether no task is queued.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     /// Add task to appropriate queue
     pub fn enqueue(&mut self, task: NonNull<Task>) -> bool {
+        let added = self.enqueue_inner(task);
+        if added {
+            self.len += 1;
+        }
+        added
+    }
+
+    fn enqueue_inner(&mut self, task: NonNull<Task>) -> bool {
         // SAFETY: `task` is a valid NonNull<Task> provided by the scheduler.
         // We read sched_class and priority to determine which sub-queue to
         // use. The ReadyQueue is protected by a Mutex, ensuring exclusive
@@ -191,6 +227,14 @@ impl ReadyQueue {
 
     /// Dequeue highest priority task
     pub fn dequeue(&mut self) -> Option<NonNull<Task>> {
+        let task = self.dequeue_inner();
+        if task.is_some() {
+            self.len -= 1;
+        }
+        task
+    }
+
+    fn dequeue_inner(&mut self) -> Option<NonNull<Task>> {
         // Check real-time queues first
         if self.rt_bitmap != 0 {
             let idx = self.rt_bitmap.trailing_zeros() as usize;
@@ -226,8 +270,55 @@ impl ReadyQueue {
         None
     }
 
+    /// Remove and return the highest-priority task for which `pred` holds
+    /// (FIFO within a level), leaving all others where they are.
+    pub fn take_first_where(&mut self, pred: impl Fn(&Task) -> bool) -> Option<NonNull<Task>> {
+        let mut rt = self.rt_bitmap;
+        while rt != 0 {
+            let idx = rt.trailing_zeros() as usize;
+            rt &= !(1 << idx);
+            if let Some(t) = self.rt_queues[idx].take_first_where(&pred) {
+                if self.rt_queues[idx].is_empty() {
+                    self.rt_bitmap &= !(1 << idx);
+                }
+                self.len -= 1;
+                return Some(t);
+            }
+        }
+        let mut normal = self.normal_bitmap;
+        while normal != 0 {
+            let idx = normal.trailing_zeros() as usize;
+            normal &= !(1 << idx);
+            if let Some(t) = self.normal_queues[idx].take_first_where(&pred) {
+                if self.normal_queues[idx].is_empty() {
+                    self.normal_bitmap &= !(1 << idx);
+                }
+                self.len -= 1;
+                return Some(t);
+            }
+        }
+        if self.idle_flag {
+            if let Some(t) = self.idle_queue.take_first_where(&pred) {
+                if self.idle_queue.is_empty() {
+                    self.idle_flag = false;
+                }
+                self.len -= 1;
+                return Some(t);
+            }
+        }
+        None
+    }
+
     /// Remove specific task from queues
     pub fn remove(&mut self, task: NonNull<Task>) -> bool {
+        let removed = self.remove_inner(task);
+        if removed {
+            self.len -= 1;
+        }
+        removed
+    }
+
+    fn remove_inner(&mut self, task: NonNull<Task>) -> bool {
         // SAFETY: `task` is a valid NonNull<Task> provided by the caller
         // (e.g., migrate_task). We read sched_class and priority to find
         // the correct sub-queue for removal. The ReadyQueue Mutex ensures
@@ -278,6 +369,8 @@ pub struct CfsRunQueue {
     min_vruntime: u64,
     /// Total weight of all tasks
     total_weight: u64,
+    /// Number of queued tasks
+    len: usize,
 }
 
 #[cfg(feature = "alloc")]
@@ -288,6 +381,7 @@ impl CfsRunQueue {
             tasks: BTreeMap::new(),
             min_vruntime: 0,
             total_weight: 0,
+            len: 0,
         }
     }
 
@@ -306,6 +400,7 @@ impl CfsRunQueue {
                 .push(TaskPtr::new(task));
 
             self.total_weight += priority_to_weight(task_ref.priority);
+            self.len += 1;
         }
     }
 
@@ -327,6 +422,7 @@ impl CfsRunQueue {
             }
 
             if let Some(task) = task {
+                self.len -= 1;
                 // SAFETY: task is a TaskPtr that was stored in the CFS queue.
                 // We read its priority to update total_weight. The CFS queue
                 // Mutex ensures exclusive access.
@@ -344,6 +440,24 @@ impl CfsRunQueue {
         }
     }
 
+    /// Remove and return the task with the lowest vruntime for which `pred`
+    /// holds, leaving all others where they are.
+    pub fn take_first_where(&mut self, pred: impl Fn(&Task) -> bool) -> Option<NonNull<Task>> {
+        let target = self
+            .tasks
+            .values()
+            .flat_map(|v| v.iter().rev()) // dequeue() pops from the end
+            .map(|t| t.as_ptr())
+            // SAFETY: queued tasks are valid while queued; `pred` only reads.
+            .find(|t| pred(unsafe { t.as_ref() }))?;
+        // As dequeue() does: min_vruntime follows the queue's lowest key.
+        if let Some(&lowest) = self.tasks.keys().next() {
+            self.min_vruntime = self.min_vruntime.max(lowest);
+        }
+        self.remove(target);
+        Some(target)
+    }
+
     /// Remove specific task
     pub fn remove(&mut self, target: NonNull<Task>) -> bool {
         // SAFETY: `target` is a valid NonNull<Task> provided by the caller.
@@ -356,6 +470,7 @@ impl CfsRunQueue {
             if let Some(tasks) = self.tasks.get_mut(&vruntime) {
                 if let Some(pos) = tasks.iter().position(|&t| t.as_ptr() == target) {
                     tasks.remove(pos);
+                    self.len -= 1;
                     self.total_weight = self
                         .total_weight
                         .saturating_sub(priority_to_weight(task_ref.priority));
@@ -380,6 +495,11 @@ impl CfsRunQueue {
     /// Check if queue is empty
     pub fn is_empty(&self) -> bool {
         self.tasks.is_empty()
+    }
+
+    /// Number of queued tasks.
+    pub fn len(&self) -> usize {
+        self.len
     }
 }
 
@@ -448,15 +568,6 @@ pub(crate) static READY_QUEUE: Mutex<ReadyQueue> = Mutex::new(ReadyQueue::new())
 #[allow(static_mut_refs)]
 pub(crate) static mut READY_QUEUE_STATIC: ReadyQueue = ReadyQueue::new();
 
-/// Per-CPU ready queues for SMP
-#[cfg(feature = "smp")]
-pub(crate) static PER_CPU_QUEUES: [Mutex<ReadyQueue>; MAX_CPUS] =
-    [const { Mutex::new(ReadyQueue::new()) }; MAX_CPUS];
-
-/// Maximum number of CPUs supported
-#[cfg(feature = "smp")]
-pub(crate) const MAX_CPUS: usize = 64;
-
 /// Get the global ready queue (architecture-specific)
 #[cfg(target_arch = "riscv64")]
 #[allow(static_mut_refs)]
@@ -467,4 +578,70 @@ pub fn get_ready_queue() -> &'static mut ReadyQueue {
     // concurrent access during initialization. The 'static lifetime is
     // valid because the static lives for the kernel's lifetime.
     unsafe { &mut READY_QUEUE_STATIC }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+pub(crate) mod tests {
+    use alloc::{boxed::Box, string::String, vec::Vec};
+
+    use super::*;
+    use crate::process::{ProcessId, ThreadId};
+
+    pub(crate) fn task(n: u64) -> NonNull<Task> {
+        // Task::new prepares a context on the stack it is given, so give it
+        // real (leaked) memory; the task is never run.
+        let stack = Box::leak(alloc::vec![0u8; 4096].into_boxed_slice());
+        let stack_top = stack.as_ptr() as usize + stack.len();
+        let t = Box::new(Task::new(
+            ProcessId(n),
+            ThreadId(n),
+            String::from("t"),
+            0,
+            stack_top,
+            0,
+        ));
+        NonNull::from(Box::leak(t))
+    }
+
+    fn drain(q: &mut PriorityQueue) -> Vec<NonNull<Task>> {
+        core::iter::from_fn(|| q.dequeue()).collect()
+    }
+
+    #[test]
+    fn priority_queue_remove_keeps_order_across_wrap() {
+        let tasks: Vec<_> = (0..6).map(task).collect();
+        let mut q = PriorityQueue::new();
+        // Move head/tail to just before the end of the ring.
+        for _ in 0..MAX_TASKS_PER_QUEUE - 2 {
+            assert!(q.enqueue(tasks[0]));
+            q.dequeue();
+        }
+        for &t in &tasks {
+            assert!(q.enqueue(t));
+        }
+        assert!(q.remove(tasks[2]));
+        assert!(!q.remove(tasks[2]));
+        assert_eq!(q.len(), 5);
+        assert!(q.enqueue(tasks[2]));
+        assert_eq!(
+            drain(&mut q),
+            [tasks[0], tasks[1], tasks[3], tasks[4], tasks[5], tasks[2]]
+        );
+    }
+
+    #[test]
+    fn boxed_queue_is_empty_and_tracks_len() {
+        let mut q = ReadyQueue::new_boxed();
+        assert!(q.is_empty());
+        assert!(!q.has_ready_tasks());
+        assert!(q.dequeue().is_none());
+        let (a, b) = (task(1), task(2));
+        assert!(q.enqueue(a));
+        assert!(q.enqueue(b));
+        assert_eq!(q.len(), 2);
+        assert!(q.remove(a));
+        assert_eq!(q.len(), 1);
+        assert_eq!(q.dequeue(), Some(b));
+        assert!(q.is_empty());
+    }
 }

@@ -16,7 +16,7 @@
 
 use core::{
     ptr,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use spin::Mutex;
@@ -74,6 +74,10 @@ const LAPIC_TIMER_DIV: u32 = 0x3E0;
 
 /// LVT mask bit (bit 16) -- when set, the interrupt is masked.
 const LVT_MASK: u32 = 1 << 16;
+/// LVT Timer mode field (bits 17-18) = 0b10: TSC-deadline.
+const TIMER_MODE_TSC_DEADLINE: u32 = 0b10 << 17;
+/// IA32_TSC_DEADLINE MSR.
+const IA32_TSC_DEADLINE: u32 = 0x6E0;
 
 /// Spurious Vector Register software enable bit (bit 8).
 const SVR_ENABLE: u32 = 1 << 8;
@@ -324,6 +328,14 @@ impl LocalApic {
 
         // Setting the initial count starts the timer.
         self.write(LAPIC_TIMER_INIT_COUNT, initial_count);
+    }
+
+    /// Put the LVT Timer in TSC-deadline mode with the given vector. The
+    /// timer then fires when the TSC reaches the value written to
+    /// IA32_TSC_DEADLINE; writing 0 disarms it.
+    pub fn setup_deadline_timer(&self, vector: u8) {
+        self.write(LAPIC_TIMER_INIT_COUNT, 0);
+        self.write(LAPIC_LVT_TIMER, TIMER_MODE_TSC_DEADLINE | vector as u32);
     }
 
     /// Stop the APIC timer by zeroing the initial count and masking the LVT
@@ -761,6 +773,54 @@ static APIC_TICKS_PER_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::At
 /// Whether the APIC timer has been calibrated and started.
 static APIC_TIMER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Periodic APIC timer frequency, set by `start_timer`.
+static APIC_TIMER_HZ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1000);
+
+/// TSC-deadline mode: period in TSC ticks (0 = periodic LAPIC mode).
+static DEADLINE_PERIOD_TSC: AtomicU64 = AtomicU64::new(0);
+/// TSC-deadline mode: the deadline currently armed.
+static NEXT_DEADLINE_TSC: AtomicU64 = AtomicU64::new(0);
+
+/// Arm IA32_TSC_DEADLINE. Intel requires the LVT write that selected
+/// deadline mode to be ordered before this WRMSR (WRMSR to this MSR is not
+/// serializing), hence the fences, as in Linux.
+fn write_tsc_deadline(deadline: u64) {
+    // SAFETY: MFENCE/LFENCE only order memory and instruction execution.
+    unsafe { core::arch::asm!("mfence", "lfence", options(nostack, preserves_flags)) };
+    super::msr::wrmsr(IA32_TSC_DEADLINE, deadline);
+}
+
+/// Re-arm the next tick in TSC-deadline mode (no-op in periodic mode).
+/// Called from the timer interrupt. Deadlines advance by whole periods so
+/// the tick does not drift; if ticks were missed, skip to the next one in
+/// the future rather than firing a burst.
+pub fn rearm_deadline_timer() {
+    let period = DEADLINE_PERIOD_TSC.load(Ordering::Relaxed);
+    if period == 0 {
+        return;
+    }
+    let now = super::tsc::read();
+    let mut next = NEXT_DEADLINE_TSC
+        .load(Ordering::Relaxed)
+        .wrapping_add(period);
+    if next <= now {
+        next = now + period;
+    }
+    NEXT_DEADLINE_TSC.store(next, Ordering::Relaxed);
+    write_tsc_deadline(next);
+}
+
+/// Whether the timer runs in TSC-deadline mode.
+pub fn timer_uses_tsc_deadline() -> bool {
+    DEADLINE_PERIOD_TSC.load(Ordering::Relaxed) != 0
+}
+
+/// Milliseconds between APIC timer interrupts (at least 1).
+pub fn timer_period_ms() -> u64 {
+    let hz = APIC_TIMER_HZ.load(Ordering::Relaxed).max(1) as u64;
+    (1000 / hz).max(1)
+}
+
 /// Check whether the APIC timer is active.
 pub fn is_timer_active() -> bool {
     APIC_TIMER_ACTIVE.load(Ordering::Acquire)
@@ -871,6 +931,30 @@ pub fn calibrate_timer() -> KernelResult<u32> {
 /// Must be called after `calibrate_timer()`. The timer fires vector
 /// `APIC_TIMER_VECTOR` (48) which must be registered in the IDT.
 pub fn start_timer(freq_hz: u32) -> KernelResult<()> {
+    // Prefer TSC-deadline mode: the tick is then programmed in clock-source
+    // units, needs no LAPIC bus-clock calibration, and cannot drift from the
+    // TSC clock.
+    let tsc_hz = super::tsc::hz();
+    if super::tsc::deadline_mode_supported() && tsc_hz != 0 && freq_hz != 0 {
+        let period = tsc_hz / freq_hz as u64;
+        let state = APIC_STATE.lock();
+        let s = state
+            .as_ref()
+            .ok_or(KernelError::NotInitialized { subsystem: "APIC" })?;
+        s.local_apic.setup_deadline_timer(APIC_TIMER_VECTOR);
+        DEADLINE_PERIOD_TSC.store(period, Ordering::Relaxed);
+        let first = super::tsc::read() + period;
+        NEXT_DEADLINE_TSC.store(first, Ordering::Relaxed);
+        write_tsc_deadline(first);
+        APIC_TIMER_HZ.store(freq_hz, Ordering::Relaxed);
+        APIC_TIMER_ACTIVE.store(true, Ordering::Release);
+        println!(
+            "[APIC] Timer started: {}Hz, TSC-deadline mode, period={} TSC ticks",
+            freq_hz, period
+        );
+        return Ok(());
+    }
+
     let tpm = APIC_TICKS_PER_MS.load(core::sync::atomic::Ordering::Relaxed);
     if tpm == 0 {
         return Err(KernelError::NotInitialized {
@@ -901,6 +985,7 @@ pub fn start_timer(freq_hz: u32) -> KernelResult<()> {
     s.local_apic
         .setup_timer(APIC_TIMER_VECTOR, 0x03, initial_count as u32);
 
+    APIC_TIMER_HZ.store(freq_hz, Ordering::Relaxed);
     APIC_TIMER_ACTIVE.store(true, Ordering::Release);
 
     println!(

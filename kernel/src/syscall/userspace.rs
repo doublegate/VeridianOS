@@ -20,7 +20,7 @@ const MAX_ARGS: usize = 32768;
 
 /// User space memory range constants
 const USER_SPACE_START: usize = 0x0000_0000_0000_0000;
-const USER_SPACE_END: usize = 0x0000_7FFF_FFFF_FFFF; // 128TB
+use crate::mm::user_layout::USER_SPACE_END; // exclusive end
 const PAGE_SIZE: usize = 4096;
 
 /// Check if a user pointer is valid with comprehensive validation

@@ -549,6 +549,22 @@ impl VfsNode for BlockFsNode {
         Some(self)
     }
 
+    fn rename(
+        &self,
+        old_name: &str,
+        new_parent: &Arc<dyn VfsNode>,
+        new_name: &str,
+    ) -> Result<(), KernelError> {
+        let np = new_parent
+            .as_any()
+            .and_then(|a| a.downcast_ref::<BlockFsNode>())
+            .filter(|np| Arc::ptr_eq(&np.fs, &self.fs))
+            .ok_or(KernelError::FsError(FsError::CrossDevice))?;
+        self.fs
+            .write()
+            .rename_entry(self.inode_num, old_name, np.inode_num, new_name)
+    }
+
     fn link(&self, name: &str, target: Arc<dyn VfsNode>) -> Result<(), KernelError> {
         // A hard link can only name an inode of this same filesystem. The
         // inode number alone does not prove that (another filesystem can
@@ -1561,6 +1577,92 @@ impl BlockFsInner {
         }
 
         Ok(inode_num)
+    }
+
+    /// Point the directory entry at (`dir`, `block_idx`, `offset`) at
+    /// `inode` (0 deletes it). Link counts are the caller's business.
+    fn set_dir_entry_inode(&mut self, dir: u32, block_idx: usize, offset: usize, inode: u32) {
+        let block_num = self.inode_table[dir as usize].direct_blocks[block_idx];
+        self.materialize_block(block_num as usize);
+        self.block_data[block_num as usize][offset..offset + 4]
+            .copy_from_slice(&inode.to_le_bytes());
+        self.mark_dirty(block_num);
+    }
+
+    /// Rename `old_dir/old_name` to `new_dir/new_name` (FS-PERF-03).
+    ///
+    /// Every check runs before anything changes. An existing target is
+    /// replaced under POSIX rules (and freed if that was its last link);
+    /// the new entry is written before the old one is cleared, so a failure
+    /// (directory full) leaves the source in place. A directory moving to a
+    /// new parent gets its ".." repointed and the parents' link counts
+    /// adjusted.
+    fn rename_entry(
+        &mut self,
+        old_dir: u32,
+        old_name: &str,
+        new_dir: u32,
+        new_name: &str,
+    ) -> Result<(), KernelError> {
+        if super::is_special_name(old_name) || super::is_special_name(new_name) {
+            return Err(KernelError::FsError(FsError::InvalidPath));
+        }
+        let (src, src_block, src_off) = self
+            .find_dir_entry(old_dir, old_name)
+            .ok_or(KernelError::FsError(FsError::NotFound))?;
+        let src_is_dir = src.file_type == DiskDirEntry::FT_DIR;
+        if !self
+            .inode_table
+            .get(new_dir as usize)
+            .is_some_and(|i| i.is_dir())
+        {
+            return Err(KernelError::FsError(FsError::NotADirectory));
+        }
+
+        if let Some((dst, _, _)) = self.find_dir_entry(new_dir, new_name) {
+            if dst.inode == src.inode {
+                return Ok(()); // same inode: POSIX says do nothing
+            }
+            let dst_is_dir = dst.file_type == DiskDirEntry::FT_DIR;
+            match (src_is_dir, dst_is_dir) {
+                (true, false) => return Err(KernelError::FsError(FsError::NotADirectory)),
+                (false, true) => return Err(KernelError::FsError(FsError::IsADirectory)),
+                _ => {}
+            }
+            // Checks emptiness for a directory target, drops a link and
+            // frees the inode if it was the last one.
+            self.unlink_from_dir(new_dir, new_name)?;
+        }
+
+        if src_is_dir && old_dir != new_dir {
+            // Not into its own subtree: walk from the destination up the
+            // ".." chain under this lock (bounded, in case of corruption).
+            let mut at = new_dir;
+            for _ in 0..self.inode_table.len() {
+                if at == src.inode {
+                    return Err(KernelError::FsError(FsError::InvalidPath));
+                }
+                match self.find_dir_entry(at, "..") {
+                    Some((up, _, _)) if up.inode != at => at = up.inode,
+                    _ => break, // reached the root
+                }
+            }
+        }
+
+        self.write_dir_entry(new_dir, src.inode, new_name, src.file_type)?;
+        // Entries are cleared in place and never moved, so the source's
+        // position found above is still valid.
+        self.set_dir_entry_inode(old_dir, src_block, src_off, 0);
+
+        if src_is_dir && old_dir != new_dir {
+            if let Some((_, b, o)) = self.find_dir_entry(src.inode, "..") {
+                self.set_dir_entry_inode(src.inode, b, o, new_dir);
+            }
+            let old_parent = &mut self.inode_table[old_dir as usize];
+            old_parent.links_count = old_parent.links_count.saturating_sub(1);
+            self.inode_table[new_dir as usize].links_count += 1;
+        }
+        Ok(())
     }
 
     fn unlink_from_dir(&mut self, parent: u32, name: &str) -> Result<(), KernelError> {

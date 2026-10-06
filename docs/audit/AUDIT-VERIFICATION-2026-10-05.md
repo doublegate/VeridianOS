@@ -100,8 +100,8 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 |---|---|---|---|---|---|
 | FS-PERF-01 | PARTIAL | `fs/blockfs.rs:551, 586-589, 635-640, 991-1013` | Root cause misdescribed: BlockFS is RAM-resident with write-back, and `load_existing` reads *every* allocated block at mount (not only accessed blocks). `free_block` keeps the 4 KB `Vec`. | v0.26.0 | open |
 | FS-PERF-02 | CONFIRMED | `fs/mod.rs:726-737` | Mostly read-lock cache-line traffic rather than a convoy (writers are rare). | v0.26.0 | open |
-| FS-PERF-03 | CONFIRMED | `syscall/filesystem.rs:1699-1715` | Also non-atomic, drops metadata, fails for directories. `VfsNode` has no rename. | v0.26.0 | open |
-| FS-ARCH-01 | PARTIAL | `fs/file.rs:293-354` | Linear free-slot scan, bounded at 1024 -- minor. | v0.26.0 | open |
+| FS-PERF-03 | CONFIRMED | `syscall/filesystem.rs:1699-1715` | Also non-atomic, drops metadata, fails for directories. `VfsNode` has no rename. | v0.26.0 | fixed (native VfsNode::rename on ramfs/tmpfs/BlockFS incl. directories; runtime-tested) |
+| FS-ARCH-01 | PARTIAL | `fs/file.rs:293-354` | Linear free-slot scan, bounded at 1024 -- minor. | v0.26.0 | fixed (lowest-free hint; model-tested) |
 | FS-SEC-01 | CONFIRMED (worse) | `fs/mod.rs:486-628` | Prefix hijack confirmed; also no `..` normalisation before mount lookup, relative symlinks resolve from `/`, and MAC checks the unresolved path. | v0.26.0 | fixed (0256f96) |
 | FS-SEC-02 | CONFIRMED | `syscall/filesystem.rs:1724-1735, 2219-2247, 2737-2760` | No checks on chmod/fchmod/unlink/rename; chown/fchown are no-op successes. | v0.26.0 | fixed (0256f96, 62b0247) |
 | DRV-PERF-01 | PARTIAL, dead code | `services/desktop_ipc.rs:213-221` | Only a struct definition; nothing handles `UpdateWindowContent`. The copies that do happen are DESK-ARCH-01. | v0.26.0 | open |
@@ -150,6 +150,14 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | N-18 | `syscall/mod.rs` sendmsg/recvmsg | SCM_RIGHTS passed the sender's fd numbers (meaningless in the receiver), parsed `cmsghdr` with a 32-bit `cmsg_len` (never matches Linux LP64), trusted `cmsg_len` past the validated buffer, and **wrote the reply control message to an unvalidated user pointer** (arbitrary kernel write). | v0.26.0 | fixed (open files travel; Linux layout; bounds and pointer validated; runtime-tested) |
 | N-19 | `userland/libc` sockets | `socketpair` passed its result pointer in the wrong argument, `accept` left the kernel reading address arguments from stale registers, `msghdr`/`cmsghdr` did not match Linux LP64, and `sendmsg`/`recvmsg` were missing. | v0.26.0 | fixed |
 | N-20 | `syscall/mod.rs` INET accept | `accept` registers a fresh socket of the same kind instead of the accepted connection, so its state is lost. | v0.27.0 (NET-INC-01) | open |
+| N-21 | `timer/mod.rs` | `timer_tick` had no callers, so uptime stayed 0: every timed wait (nanosleep, poll/epoll/futex timeouts, timerfd) hung forever and CLOCK_MONOTONIC read 0. x86 TSC frequency was a hard-coded 2 GHz. | v0.26.0 | fixed (ADR 0001: architectural clock sources; runtime- and boot-tested) |
+| N-22 | `arch/aarch64`, `arch/riscv64` | AArch64 never set VBAR_EL1 (every exception went to address 0) and took no interrupts; RISC-V could not take any trap; the generic timer / stimecmp were never armed; the RISC-V device tree pointer was discarded. | v0.26.0 | fixed (vector tables, GIC/virtual timer, trap entry with Sstc/SBI timer; boot test 34) |
+| N-23 | `sync/once_lock.rs`, `timer/mod.rs` | The tick path took `GlobalState`'s outer lock, so a timer interrupt arriving while it was held deadlocked the CPU (hit during `timer::init` on first RISC-V interrupt). | v0.26.0 | fixed (`GlobalState::try_with_mut`) |
+| N-24 | `syscall/memory.rs` mmap | `MAP_FIXED` had no upper bound: a fixed mapping could be requested in the kernel half or the reserved top x86 page (SYSRET non-canonical return). Four inconsistent user-space limits elsewhere. | v0.26.0 | fixed (ADR 0002: one `mm::user_layout`; runtime-tested) |
+| N-25 | `mm/page_table.rs` (riscv64) | satp written with MODE 8 (Sv39) for 4-level page tables (Sv48 = 9), with no `sfence.vma`; latent until RISC-V user mode. | v0.26.0 | fixed (MODE 9 + sfence.vma; Sv48 checked from device tree `mmu-type`) |
+| N-26 | kernel stacks | No guard pages: kernel stacks come from the direct map, so an overflow corrupts the adjacent frame silently. | v0.27.0 (C5) | open |
+| N-27 | `fs/file.rs` FileTable | `open` returned a `next_fd` counter but stored the file at `files.len()`; after `dup2` grew the table the two differed, so the returned fd named a different (or no) file. `F_DUPFD` (`dup_at_least`) could overwrite an occupied slot the same way. | v0.26.0 | fixed (append at the table length; counter removed; model test) |
+| N-28 | `arch/aarch64` | The MMU and caches are never enabled (no TCR/MAIR/TTBR1 setup; SCTLR_EL1 = 0). With all memory treated as Device memory, exclusive load/store is unreliable, which is why ramfs/tmpfs/devfs/pty/... use `fs::bare_lock`, an `UnsafeCell` wrapper that does not lock at all. Blocks AArch64 SMP and EL0. | v0.27.0 (C5) | open |
 
 ## Runtime verification status
 
@@ -177,6 +185,14 @@ syscalls were always owned by root, and the umask was stored but never applied. 
 belong to the caller and take `mode & ~umask`; both are checked in the guest
 (`sticky_dir_protects_entries`, `umask_applied`).
 
+**Known residual (C5): a task waiting in a syscall keeps the CPU on x86_64.** A sleeping or
+polling syscall halts until its wait ends; neither the tick nor the syscall switches to another
+task. Preempting from the tick was the W-13 hazard. A voluntary yield was tried and breaks the user
+program, which runs nested in the boot context (it faulted as soon as the scheduler dispatched the
+init task). Other ready tasks therefore starve while one user program sleeps or polls with a long
+or infinite timeout. This resolves with the process model (C5), where user tasks are dispatched by
+the scheduler. AArch64 and RISC-V, which have no user mode yet, yield to ready tasks.
+
 **Known residual (tracked with W-13 / C5):** permission checks resolve a path, then the operation
 resolves it again by name (`require_may_remove` then `unlink`, `require_dir_write` then `create`).
 With one CPU and no preemption inside these syscalls the window cannot be raced today; it becomes
@@ -188,6 +204,8 @@ the check saw (an unlink-if-same-node primitive on `VfsNode`).
 | Finding | Fix |
 |---|---|
 | DHCP replies accepted from any host (fixed xid `0x12345678`, any source port, no hardware-address check) | xid from the CSPRNG per negotiation; only BOOTREPLY from port 67, addressed to our MAC, during an active negotiation; ACK must come from the selected server |
+| Closing a Unix socket dropped its queued messages under the socket-table lock; a queued socket file whose last reference that was closed its socket and re-took the lock (deadlock) | `socket_close` drops the socket after releasing the lock; regression test hangs without the fix |
+| Unix receive buffers charged only data bytes, so zero-length SCM_RIGHTS messages could pin unlimited files; a Unix socket queued in its own buffer formed a reference cycle that outlived every fd | messages are charged a fixed overhead plus a per-file cost; passing Unix socket fds is refused (EINVAL) until there is a cycle collector |
 | Ownership of a new directory set by re-resolving its path after `mkdir`: swapping in a hard link to a root-owned file in between handed the caller that file | `Vfs::mkdir` returns the created node, and ownership is set on that node (all six creation sites now use the node the creating call returned) |
 | virtio used-ring `id` trusted: `free_desc` indexed past the table in release builds; `u32` id truncated to `u16` | `poll_used` drops ids `>= size`; `free_desc` bounds-checks; TX reclaim frees only descriptors that are in flight |
 
@@ -216,7 +234,7 @@ reachable from an unprivileged process and are fixed first in v0.26.0 Sprint A.
 | W-10 | Medium | `graphics/gpu_accel.rs` | Vblank event queue is unbounded (kernel heap exhaustion by looping `PAGE_FLIP`). | fixed (DRM hardening) |
 | W-11 | Medium | `graphics/drm_ioctl.rs` PRIME | Global 8-entry fd-to-handle table keyed by raw fd number across processes (overflow overwrites another process's entry); `FD_TO_HANDLE` never checks the fd belongs to the caller; PRIME fds can never be closed (W-2's `contains("dri/card0")` matches `dri/card0-prime`). | fixed (DRM hardening) |
 | W-12 | Medium | `arch/x86_64/idt.rs` | The `KERN_PF_USER_ADDR` path unwinds to the boot context while holding spinlocks (epoll registry, KMS, file table), no longer marks the task zombie, covers `cr2 < 0x1000` (hides kernel NULL dereferences), and runs `swapgs` unconditionally. | partly fixed: user accessors return EFAULT (34db90c); direct dereferences still unwind |
-| W-13 | Medium | `sti; hlt; cli` in epoll, poll, nanosleep, timerfd, futex | Enables interrupts mid-syscall, so the timer IRQ can `schedule()` on the syscall stack (feeds W-8). `timerfd_read` ignores the boot cooperative mode and can stall boot for 30 s per call. | open |
+| W-13 | Medium | `sti; hlt; cli` in epoll, poll, nanosleep, timerfd, futex | Enables interrupts mid-syscall, so the timer IRQ can `schedule()` on the syscall stack (feeds W-8). `timerfd_read` ignores the boot cooperative mode and can stall boot for 30 s per call. | fixed (`sched::wait_for_interrupt_in_syscall`: the tick never schedules from a syscall halt; timerfd honours boot cooperative mode; runtime-tested) |
 | W-14 | Low-Medium | `net/epoll.rs`, `syscall/filesystem.rs` poll | The Unix-socket readiness fallback treats any fd number as a global socket ID, ignoring ownership: cross-process readiness side channel. | fixed (sockets are per-process fds; no global-id fallback; see N-17) |
 | W-15 | Medium | `syscall/linux_compat.rs` | `faccessat2` always returns success. `LINUX_FCHOWNAT` was 269 -- faccessat's number -- so every `faccessat()` was executed as `fchownat` (a no-op only because chown was unimplemented). | fixed (faccessat/faccessat2 enforce access; fchownat is 260) |
 | W-16 | Low | `syscall/mod.rs` epoll_wait | `max_events * size_of::<EpollEvent>()` is unchecked; in release builds it wraps to a small validated length while the slice keeps the huge count. *Pre-existing; now also reachable via the 263/281 heuristics.* | fixed (maxevents capped at INT_MAX / sizeof(epoll_event)) |
