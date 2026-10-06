@@ -1621,24 +1621,38 @@ ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags,
 /*
  * socketpair() -- create a pair of connected sockets (AF_UNIX only).
  *
- * Kernel syscall SYS_SOCKET_PAIR (228): (domain, result_ptr)
- * result_ptr points to a two-element u64 array; the kernel writes both
- * socket IDs.  We then copy those 64-bit IDs to the int sv[2] array.
- * type and protocol are not forwarded (kernel creates SOCK_STREAM AF_UNIX
- * pairs by default).
+ * Kernel syscall SYS_SOCKET_PAIR (228) takes the Linux argument order
+ * (domain, type, protocol, int sv[2]) and writes the two new fds into sv.
  */
 int socketpair(int domain, int type, int protocol, int sv[2])
 {
-    (void)type; (void)protocol;
-    unsigned long ids[2] = {0, 0};
-    long ret = veridian_syscall2(SYS_SOCKET_PAIR, domain, ids);
+    long ret = veridian_syscall4(SYS_SOCKET_PAIR, domain, type, protocol, sv);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;
     }
-    sv[0] = (int)ids[0];
-    sv[1] = (int)ids[1];
     return 0;
+}
+
+/* sendmsg()/recvmsg() -- data plus ancillary data (SCM_RIGHTS). */
+ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags)
+{
+    long ret = veridian_syscall3(SYS_SENDMSG, sockfd, msg, flags);
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
+    }
+    return (ssize_t)ret;
+}
+
+ssize_t recvmsg(int sockfd, struct msghdr *msg, int flags)
+{
+    long ret = veridian_syscall3(SYS_RECVMSG, sockfd, msg, flags);
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
+    }
+    return (ssize_t)ret;
 }
 
 int initgroups(const char *user, gid_t group)

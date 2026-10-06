@@ -90,23 +90,30 @@ struct iovec {
     size_t  iov_len;
 };
 
+/* Linux LP64 layout (as glibc): the kernel reads msg_iovlen and
+ * msg_controllen as size_t and cmsg_len as size_t. */
 struct msghdr {
     void         *msg_name;
     socklen_t     msg_namelen;
     struct iovec *msg_iov;
-    int           msg_iovlen;
+    size_t        msg_iovlen;
     void         *msg_control;
-    socklen_t     msg_controllen;
+    size_t        msg_controllen;
     int           msg_flags;
 };
 
 /* Control message header for ancillary data (used by sendmsg/recvmsg) */
 struct cmsghdr {
-    socklen_t cmsg_len;     /* Data byte count including header */
+    size_t    cmsg_len;     /* Data byte count including header */
     int       cmsg_level;   /* Originating protocol (SOL_SOCKET) */
     int       cmsg_type;    /* Protocol-specific type (SCM_RIGHTS) */
     /* followed by unsigned char cmsg_data[] */
 };
+
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L && !defined(__cplusplus)
+_Static_assert(sizeof(struct cmsghdr) == 16, "cmsghdr must match Linux LP64");
+_Static_assert(sizeof(struct msghdr) == 56, "msghdr must match Linux LP64");
+#endif
 
 /* Ancillary data types */
 #define SCM_RIGHTS  1   /* Transfer file descriptors */
