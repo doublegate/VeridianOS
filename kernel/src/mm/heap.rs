@@ -31,16 +31,18 @@ use super::VirtualAddress;
 // rootfs (~57MB TAR with BusyBox source + GCC toolchain) and Phase C native
 // compilation. The rootfs extracts to ~54MB of VFS content (cc1 alone is
 // 35MB). During exec, fs::read_file() creates a second 35MB copy of cc1
-// for ELF loading. BlockFS persistent storage uses ~128MB for in-memory
-// block cache. Combined with VFS metadata (~10MB), process structures,
-// and heap fragmentation from Phase B tests, 384MB was insufficient when
-// both BlockFS and native compilation are active.
+// for ELF loading. Combined with VFS metadata (~10MB), the BlockFS block
+// cache (below), process structures, and heap fragmentation from Phase B
+// tests, 384MB was insufficient when both BlockFS and native compilation
+// are active.
 // 1GB provides headroom for BlockFS cache, VFS, native compilation, and
 // the Rust toolchain rootfs (rustc+cargo+std ~400MB). Requires QEMU -m 4096M
 // minimum (typically -m 32768M for Phase 6.5 self-hosting).
 // AArch64/RISC-V keep 8MB since they have less RAM (128MB default). Their
-// bump allocator never frees, so the BlockFS block cache there is a fixed
-// 1 MiB pool of recycled buffers (fs/blockfs/cache.rs).
+// bump allocator never frees, so the BlockFS block cache recycles its
+// buffers. It keeps at most 1 MiB of clean blocks there (16 MiB on x86_64);
+// dirty blocks stay pinned until sync and can grow it past that
+// (fs/blockfs/cache.rs, ADR 0003).
 #[cfg(target_arch = "x86_64")]
 #[allow(static_mut_refs)]
 static mut HEAP_MEMORY: [u8; 1024 * 1024 * 1024] = [0; 1024 * 1024 * 1024];

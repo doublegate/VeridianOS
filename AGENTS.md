@@ -37,7 +37,7 @@ pkill -9 -f qemu-system; sleep 2; qemu-system-x86_64 ...
 
 ## VeridianOS Overview
 
-Next-generation microkernel OS in Rust. Capability-based security, user-space drivers, multi-arch (x86_64, AArch64, RISC-V). All phases (0-12) complete, v0.26.0. See CLAUDE.local.md for current state and `docs/audit/AUDIT-VERIFICATION-2026-10-05.md` for the open audit remediation checklist.
+Next-generation microkernel OS in Rust. Capability-based security, user-space drivers as the design goal (today they run in ring 0, critique C6; see docs/KNOWN-LIMITATIONS.md), multi-arch (x86_64, AArch64, RISC-V). All phases (0-12) complete, v0.26.0. See CLAUDE.local.md for current state and `docs/audit/AUDIT-VERIFICATION-2026-10-05.md` for the open audit remediation checklist.
 
 ## Essential Commands
 
@@ -153,7 +153,7 @@ cargo install bootimage cargo-xbuild cargo-watch cargo-expand cargo-audit cargo-
 
 ### Microkernel Design
 - **Core**: Memory management, scheduling, IPC, hardware abstraction
-- **User-space drivers**: Capability-controlled MMIO, interrupt forwarding, IOMMU DMA
+- **User-space drivers (design goal, C6)**: Capability-controlled MMIO, interrupt forwarding, IOMMU DMA. Today drivers run in ring 0 inside the kernel (docs/KNOWN-LIMITATIONS.md)
 - **Zero-copy IPC**: Shared memory mapping, <1us fast path
 - **Security**: 64-bit capability tokens, post-quantum ready (ML-KEM, ML-DSA)
 
