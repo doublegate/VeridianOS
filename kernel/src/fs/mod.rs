@@ -107,6 +107,26 @@ impl Permissions {
     }
 
     /// Create permissions from Unix mode bits
+    /// The permission bits as a POSIX mode (`0o777` mask), the inverse of
+    /// [`from_mode`](Self::from_mode).
+    pub fn to_mode(&self) -> u32 {
+        [
+            (self.owner_read, 0o400),
+            (self.owner_write, 0o200),
+            (self.owner_exec, 0o100),
+            (self.group_read, 0o040),
+            (self.group_write, 0o020),
+            (self.group_exec, 0o010),
+            (self.other_read, 0o004),
+            (self.other_write, 0o002),
+            (self.other_exec, 0o001),
+        ]
+        .iter()
+        .filter(|(set, _)| *set)
+        .map(|(_, bit)| bit)
+        .sum()
+    }
+
     pub fn from_mode(mode: u32) -> Self {
         Self {
             owner_read: (mode & 0o400) != 0,
@@ -1352,6 +1372,13 @@ mod tests {
         file.chown(Some(1000), Some(100)).unwrap();
         let meta = file.metadata().unwrap();
         assert_eq!((meta.uid, meta.gid), (1000, 100));
+    }
+
+    #[test]
+    fn permissions_mode_round_trip() {
+        for mode in [0o000, 0o600, 0o640, 0o755, 0o777, 0o421] {
+            assert_eq!(Permissions::from_mode(mode).to_mode(), mode);
+        }
     }
 
     // --- Permissions tests ---

@@ -913,15 +913,18 @@ const _: () = assert!(core::mem::size_of::<FileStat>() == 144);
 
 /// Helper: populate a FileStat from VFS metadata.
 fn fill_stat(metadata: &crate::fs::Metadata) -> FileStat {
-    let mode = match metadata.node_type {
-        crate::fs::NodeType::File => 0o100644,
-        crate::fs::NodeType::Directory => 0o040755,
-        crate::fs::NodeType::CharDevice => 0o020666,
-        crate::fs::NodeType::BlockDevice => 0o060666,
-        crate::fs::NodeType::Symlink => 0o120777,
-        crate::fs::NodeType::Pipe => 0o010644,
-        crate::fs::NodeType::Socket => 0o140755,
+    // File type bits plus the node's real permission bits; this used to
+    // report a fixed 0644/0755 for every file and directory.
+    let type_bits = match metadata.node_type {
+        crate::fs::NodeType::File => 0o100000,
+        crate::fs::NodeType::Directory => 0o040000,
+        crate::fs::NodeType::CharDevice => 0o020000,
+        crate::fs::NodeType::BlockDevice => 0o060000,
+        crate::fs::NodeType::Symlink => 0o120000,
+        crate::fs::NodeType::Pipe => 0o010000,
+        crate::fs::NodeType::Socket => 0o140000,
     };
+    let mode = type_bits | metadata.permissions.to_mode();
     let size = metadata.size as i64;
     FileStat {
         st_dev: 1,
