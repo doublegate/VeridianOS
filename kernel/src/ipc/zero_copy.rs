@@ -65,15 +65,19 @@ pub fn zero_copy_transfer(
     if region.get_mapping(from_pid).is_none() {
         return Err(IpcError::InvalidMemoryRegion);
     }
-    if !holds_share_capability(from_pid, region) {
-        return Err(IpcError::PermissionDenied);
-    }
+    let rights = share_rights(from_pid, region).ok_or(IpcError::PermissionDenied)?;
+    // The receiver gets no more than the sender holds.
+    let permission = if rights.contains(crate::cap::memory_integration::MemoryRights::WRITE) {
+        Permission::Write
+    } else {
+        Permission::Read
+    };
 
     let to_vaddr = match flags.transfer_type {
-        TransferType::Share => region.map(to_pid, None, Permission::Write)?,
+        TransferType::Share => region.map(to_pid, None, permission)?,
         TransferType::Move => {
             // Map first: if that fails the sender keeps the region.
-            let to_vaddr = region.map(to_pid, None, Permission::Write)?;
+            let to_vaddr = region.map(to_pid, None, permission)?;
             region.unmap(from_pid)?;
             to_vaddr
         }
@@ -98,28 +102,25 @@ pub fn zero_copy_transfer(
     Ok(to_vaddr)
 }
 
-/// Whether `pid` holds a memory capability for `region` (same physical
-/// base) carrying the SHARE right. The old check only asked whether both
-/// processes existed.
-fn holds_share_capability(pid: ProcessId, region: &SharedRegion) -> bool {
-    use crate::cap::{memory_integration::MemoryRights, ObjectRef};
+/// The rights `pid` holds on `region` (union over its memory capabilities
+/// for the region's physical base), if any of them carries SHARE. The old
+/// check only asked whether both processes existed.
+fn share_rights(pid: ProcessId, region: &SharedRegion) -> Option<crate::cap::Rights> {
+    use crate::cap::{memory_integration::MemoryRights, ObjectRef, Rights};
 
-    let Some(process) = crate::process::find_process(pid) else {
-        return false;
-    };
+    let process = crate::process::find_process(pid)?;
     let base = region.physical_base().as_usize();
     let space = process.capability_space.lock();
-    let mut found = false;
+    let mut rights = Rights::empty();
     let _ = space.iter_capabilities(|entry| {
         if let ObjectRef::Memory { base: b, .. } = entry.object {
-            if b == base && entry.rights.contains(MemoryRights::SHARE) {
-                found = true;
-                return false;
+            if b == base {
+                rights |= entry.rights;
             }
         }
         true
     });
-    found
+    rights.contains(MemoryRights::SHARE).then_some(rights)
 }
 
 /// Transfer flags for zero-copy operations
@@ -150,16 +151,16 @@ pub enum CachePolicy {
 /// Grant capability to perform zero-copy transfer.
 ///
 /// Creates a memory capability for `region` in the grantee's capability
-/// space. Only a holder of the region's SHARE right may grant it.
+/// space. Only a holder of the region's SHARE right may grant it, and only
+/// rights it holds itself.
 pub fn grant_transfer_capability(
     granter_pid: u64,
     grantee_pid: u64,
     region: &SharedRegion,
     permissions: Permission,
 ) -> Result<u64> {
-    if !holds_share_capability(ProcessId(granter_pid), region) {
-        return Err(IpcError::PermissionDenied);
-    }
+    let granter_rights =
+        share_rights(ProcessId(granter_pid), region).ok_or(IpcError::PermissionDenied)?;
     let grantee = crate::process::table::get_process(ProcessId(grantee_pid))
         .ok_or(IpcError::ProcessNotFound)?;
 
@@ -173,6 +174,11 @@ pub fn grant_transfer_capability(
     }
     if permissions.can_execute() {
         rights |= crate::cap::memory_integration::MemoryRights::EXECUTE;
+    }
+
+    // Rights can only be attenuated: never grant what the granter lacks.
+    if !granter_rights.contains(rights) {
+        return Err(IpcError::PermissionDenied);
     }
 
     let grantee_cap_space = grantee.capability_space.lock();
