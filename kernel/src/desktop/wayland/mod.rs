@@ -36,7 +36,7 @@ use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use spin::RwLock;
 
 use self::{
-    buffer::{Buffer, WlShmPool},
+    buffer::Buffer,
     protocol::{parse_message, WaylandError, WaylandMessage},
 };
 use crate::{error::KernelError, graphics::PixelFormat, sync::once_lock::GlobalState};
@@ -435,22 +435,21 @@ impl WaylandClient {
                     })
                     .unwrap_or(0);
 
-                let size = if msg.args.len() >= 3 {
-                    match &msg.args[2] {
-                        protocol::Argument::Uint(v) => *v,
-                        protocol::Argument::Int(v) => *v as u32,
-                        _ => 4096,
-                    }
-                } else {
-                    4096
+                // The size is client-controlled and becomes a kernel heap
+                // allocation: a negative or missing size is a protocol
+                // error, and register_client_pool enforces the limits (N-09).
+                let size = match msg.args.get(2) {
+                    Some(protocol::Argument::Uint(v)) => *v as usize,
+                    Some(protocol::Argument::Int(v)) if *v > 0 => *v as usize,
+                    _ => return Err(WaylandError::InvalidArgument),
                 };
 
                 if pool_obj_id > 0 {
                     // Allocate a real pool ID from the display
                     let real_pool_id = with_display(|d| d.alloc_pool_id()).unwrap_or(pool_obj_id);
 
-                    let pool = WlShmPool::new(real_pool_id, self.id, size as usize);
-                    buffer::register_pool(pool);
+                    buffer::register_client_pool(real_pool_id, self.id, size)
+                        .map_err(|_| WaylandError::InvalidArgument)?;
 
                     let mut objects = self.objects.write();
                     objects.insert(
@@ -959,8 +958,7 @@ pub fn create_shm_pool(client_id: u32, size: usize) -> Result<usize, KernelError
 
         // Allocate a real pool with backing memory
         let pool_id = d.alloc_pool_id();
-        let pool = WlShmPool::new(pool_id, client_id, size);
-        buffer::register_pool(pool);
+        buffer::register_client_pool(pool_id, client_id, size)?;
 
         let obj_id = client.create_object("wl_shm_pool");
 

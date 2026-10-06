@@ -16,6 +16,15 @@ use crate::{error::KernelError, graphics::PixelFormat};
 // WlShmPool -- shared memory pool
 // ---------------------------------------------------------------------------
 
+/// Largest single pool a client may create or grow to: room for a
+/// double-buffered 3840x2160 XRGB8888 surface with headroom. Pools are
+/// backed by kernel heap, so a client-chosen size is a kernel allocation
+/// (N-09).
+pub const MAX_POOL_SIZE: usize = 64 * 1024 * 1024;
+
+/// Total pool memory one client may hold across all its pools.
+pub const MAX_CLIENT_POOL_BYTES: usize = 128 * 1024 * 1024;
+
 /// A shared memory pool that backs one or more buffers.
 ///
 /// In a real Wayland compositor the pool would reference a client-provided
@@ -65,15 +74,21 @@ impl WlShmPool {
         stride: u32,
         format: PixelFormat,
     ) -> Result<u32, KernelError> {
-        // Validate that the described region fits inside the pool.
-        let end = offset as usize + (stride as usize) * (height as usize);
-        if end > self.size {
+        // Validate that the described region fits inside the pool. All
+        // three values are client-controlled, so the arithmetic is checked.
+        let end = (stride as usize)
+            .checked_mul(height as usize)
+            .and_then(|len| len.checked_add(offset as usize));
+        if end.is_none_or(|end| end > self.size) {
             return Err(KernelError::InvalidArgument {
                 name: "buffer region",
                 value: "exceeds pool size",
             });
         }
-        if stride < width * format.bpp() {
+        if width
+            .checked_mul(format.bpp())
+            .is_none_or(|row| stride < row)
+        {
             return Err(KernelError::InvalidArgument {
                 name: "stride",
                 value: "smaller than row width",
@@ -147,10 +162,15 @@ impl WlShmPool {
     /// Write raw bytes into the pool at a given offset.
     ///
     /// Used by the desktop renderer to populate background/window pixel data.
-    pub fn write_data(&mut self, offset: usize, data: &[u8]) {
-        let end = (offset + data.len()).min(self.data.len());
-        let src_len = end - offset;
-        self.data[offset..end].copy_from_slice(&data[..src_len]);
+    /// Bytes past the end of the pool are dropped; an offset at or past
+    /// the end writes nothing. Returns the number of bytes written.
+    pub fn write_data(&mut self, offset: usize, data: &[u8]) -> usize {
+        let Some(dst) = self.data.get_mut(offset..) else {
+            return 0;
+        };
+        let n = dst.len().min(data.len());
+        dst[..n].copy_from_slice(&data[..n]);
+        n
     }
 
     /// Resize the pool (wl_shm_pool.resize). Only growing is allowed.
@@ -159,6 +179,12 @@ impl WlShmPool {
             return Err(KernelError::InvalidArgument {
                 name: "pool size",
                 value: "cannot shrink",
+            });
+        }
+        if new_size > MAX_POOL_SIZE {
+            return Err(KernelError::InvalidArgument {
+                name: "pool size",
+                value: "exceeds MAX_POOL_SIZE",
             });
         }
         self.data.resize(new_size, 0);
@@ -225,6 +251,34 @@ pub fn register_pool(pool: WlShmPool) -> u32 {
         pools.insert(id, pool);
     }
     id
+}
+
+/// Register a pool created on behalf of a client, enforcing the per-pool
+/// and per-client size limits under the registry lock (N-09). Returns
+/// `Err` without allocating when a limit would be exceeded.
+pub fn register_client_pool(id: u32, client_id: u32, size: usize) -> Result<u32, KernelError> {
+    if size == 0 || size > MAX_POOL_SIZE {
+        return Err(KernelError::InvalidArgument {
+            name: "pool size",
+            value: "zero or exceeds MAX_POOL_SIZE",
+        });
+    }
+    let mut guard = SHM_POOLS.lock();
+    let pools = guard.as_mut().ok_or(KernelError::NotInitialized {
+        subsystem: "wl_shm pools",
+    })?;
+    let held: usize = pools
+        .values()
+        .filter(|p| p.client_id == client_id)
+        .map(|p| p.size)
+        .sum();
+    if held.saturating_add(size) > MAX_CLIENT_POOL_BYTES {
+        return Err(KernelError::ResourceExhausted {
+            resource: "wl_shm client pool memory",
+        });
+    }
+    pools.insert(id, WlShmPool::new(id, client_id, size));
+    Ok(id)
 }
 
 /// Execute a closure with mutable access to a specific pool.
@@ -311,6 +365,30 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_data_past_end_does_not_panic() {
+        let mut pool = WlShmPool::new(1, 1, 16);
+        assert_eq!(pool.write_data(32, &[1, 2, 3]), 0);
+        assert_eq!(pool.write_data(14, &[1, 2, 3, 4]), 2);
+    }
+
+    #[test]
+    fn create_buffer_rejects_overflowing_geometry() {
+        let mut pool = WlShmPool::new(1, 1, 4096);
+        assert!(pool
+            .create_buffer(0, u32::MAX, 1, u32::MAX, PixelFormat::Xrgb8888)
+            .is_err());
+        assert!(pool
+            .create_buffer(u32::MAX, 1, 1, 4, PixelFormat::Xrgb8888)
+            .is_err());
+    }
+
+    #[test]
+    fn resize_rejects_oversized_pool() {
+        let mut pool = WlShmPool::new(1, 1, 16);
+        assert!(pool.resize(MAX_POOL_SIZE + 1).is_err());
+    }
 
     #[test]
     fn test_pixel_format_bpp() {
