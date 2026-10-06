@@ -719,7 +719,14 @@ impl Vfs {
     /// Create a directory
     ///
     /// Checks MAC policy (Write access to file domain) before creating.
-    pub fn mkdir(&self, path: &str, permissions: Permissions) -> Result<(), KernelError> {
+    /// Create a directory and return its node. Callers that adjust the new
+    /// directory (ownership) must use this node, not look the path up again:
+    /// the name can be replaced in between.
+    pub fn mkdir(
+        &self,
+        path: &str,
+        permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
         // Parse the path once and use that single result both for the MAC
         // check and for the creation, so they cannot disagree: the parent
         // is resolved canonically (following symlinks) and the policy sees
@@ -746,8 +753,7 @@ impl Vfs {
             .unwrap_or(0);
         crate::security::mac::check_file_access(&target, crate::security::AccessType::Write, pid)?;
 
-        parent.mkdir(name, permissions)?;
-        Ok(())
+        parent.mkdir(name, permissions)
     }
 
     /// Remove a file or directory

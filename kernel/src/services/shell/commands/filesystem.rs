@@ -117,7 +117,7 @@ impl BuiltinCommand for MkdirCommand {
                 .read()
                 .mkdir(path, crate::fs::Permissions::default())
             {
-                Ok(()) => {}
+                Ok(_) => {}
                 Err(e) => return CommandResult::Error(format!("mkdir: {}: {}", path, e)),
             }
         }

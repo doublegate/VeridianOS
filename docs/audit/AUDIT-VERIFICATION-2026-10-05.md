@@ -173,11 +173,18 @@ syscalls were always owned by root, and the umask was stored but never applied. 
 belong to the caller and take `mode & ~umask`; both are checked in the guest
 (`sticky_dir_protects_entries`, `umask_applied`).
 
+**Known residual (tracked with W-13 / C5):** permission checks resolve a path, then the operation
+resolves it again by name (`require_may_remove` then `unlink`, `require_dir_write` then `create`).
+With one CPU and no preemption inside these syscalls the window cannot be raced today; it becomes
+reachable once SMP or in-syscall preemption lands, and the fix is operations that act on the node
+the check saw (an unlink-if-same-node primitive on `VfsNode`).
+
 ### Commit security review follow-ups
 
 | Finding | Fix |
 |---|---|
 | DHCP replies accepted from any host (fixed xid `0x12345678`, any source port, no hardware-address check) | xid from the CSPRNG per negotiation; only BOOTREPLY from port 67, addressed to our MAC, during an active negotiation; ACK must come from the selected server |
+| Ownership of a new directory set by re-resolving its path after `mkdir`: swapping in a hard link to a root-owned file in between handed the caller that file | `Vfs::mkdir` returns the created node, and ownership is set on that node (all six creation sites now use the node the creating call returned) |
 | virtio used-ring `id` trusted: `free_desc` indexed past the table in release builds; `u32` id truncated to `u16` | `poll_used` drops ids `>= size`; `free_desc` bounds-checks; TX reclaim frees only descriptors that are in flight |
 
 ## Issues in the uncommitted KDE Ring-3 work (pre-commit review)

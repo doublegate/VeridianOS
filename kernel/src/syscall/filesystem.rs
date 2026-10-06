@@ -662,10 +662,8 @@ pub fn sys_mkdir(path: usize, mode: usize) -> SyscallResult {
     let permissions = creation_perms(mode);
     let vfs_guard = vfs()?.read();
     match vfs_guard.mkdir(path_str, permissions) {
-        Ok(_) => {
-            if let Ok(node) = vfs_guard.resolve_path_no_follow(path_str) {
-                own_new_node(&node);
-            }
+        Ok(node) => {
+            own_new_node(&node);
             Ok(0)
         }
         Err(e) => Err(super::map_kernel_error(e)),
@@ -1410,6 +1408,10 @@ pub(crate) fn creation_perms(mode: usize) -> Permissions {
 /// A node created by a syscall belongs to the caller. Without this every
 /// new file was owned by root, so a user could not chmod, or remove from a
 /// sticky directory, what it had just created.
+///
+/// `node` must be the node the creating call returned. Looking the path up
+/// again would chown whatever is at that name by then -- a user could swap
+/// in a hard link to a root-owned file and take ownership of it.
 pub(crate) fn own_new_node(node: &alloc::sync::Arc<dyn crate::fs::VfsNode>) {
     let (uid, gid) = caller_creds();
     if uid != 0 || gid != 0 {
@@ -2734,12 +2736,10 @@ pub fn sys_mkdirat(dirfd: usize, path_ptr: usize, mode: usize) -> SyscallResult 
 
     let permissions = creation_perms(mode);
     let vfs_guard = vfs()?.read();
-    vfs_guard
+    let node = vfs_guard
         .mkdir(&abs_path, permissions)
         .map_err(|_| SyscallError::InvalidState)?;
-    if let Ok(node) = vfs_guard.resolve_path_no_follow(&abs_path) {
-        own_new_node(&node);
-    }
+    own_new_node(&node);
 
     Ok(0)
 }
