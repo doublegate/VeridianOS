@@ -81,6 +81,10 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
         }
     }
 
+    // The child inherited the parent's shared-region mappings; tell each
+    // region, so its mapping count includes the child.
+    register_inherited_regions(&new_process);
+
     // Clone capabilities
     {
         let current_caps = current_process.capability_space.lock();
@@ -332,6 +336,10 @@ pub fn cow_fork() -> Result<ProcessId, KernelError> {
         }
     }
 
+    // The child inherited the parent's shared-region mappings; tell each
+    // region, so its mapping count includes the child.
+    register_inherited_regions(&new_process);
+
     // Clone capabilities
     {
         let current_caps = current_process.capability_space.lock();
@@ -449,6 +457,53 @@ pub fn cow_fork() -> Result<ProcessId, KernelError> {
 
     println!("[PROCESS] cow_fork: created child PID {}", new_pid);
     Ok(new_pid)
+}
+
+/// Register each `MappingType::SharedRegion` mapping the child inherited
+/// with its region (keyed by the region's physical base, its first frame).
+///
+/// `clone_from` copies such a mapping's page-table entries to the same
+/// frames but nothing told the region, so the child was missing from its
+/// mapping count and `unregister_region` could consider a region the child
+/// still maps unused (review of the v0.26.0 stack, PR #13).
+#[cfg(feature = "alloc")]
+fn register_inherited_regions(child: &super::pcb::Process) {
+    use crate::{
+        ipc::shared_memory::{lookup_region, Permission},
+        mm::{vas::MappingType, PageFlags},
+    };
+
+    // Collect first: SharedRegion::map takes the region lock before the
+    // address-space lock, so never hold the latter while taking the former.
+    let inherited: Vec<_> = {
+        let space = child.memory_space.lock();
+        let mappings = space.mappings_ref().lock();
+        mappings
+            .values()
+            .filter(|m| m.mapping_type == MappingType::SharedRegion)
+            .filter_map(|m| {
+                let base = m.physical_frames.first()?.as_u64() * 4096;
+                Some((base, m.start, m.flags))
+            })
+            .collect()
+    };
+
+    for (base, start, flags) in inherited {
+        let Some(region) = lookup_region(base) else {
+            continue;
+        };
+        let write = flags.contains(PageFlags::WRITABLE);
+        let exec = !flags.contains(PageFlags::NO_EXECUTE);
+        let permissions = match (write, exec) {
+            (true, true) => Permission::ReadWriteExecute,
+            (true, false) => Permission::Write,
+            (false, true) => Permission::ReadExecute,
+            (false, false) => Permission::Read,
+        };
+        // Err only if the child is already registered, which a fresh child
+        // cannot be.
+        let _ = region.register_inherited(child.pid, start, permissions);
+    }
 }
 
 /// Collect user-space page mappings from a VAS for COW marking.
