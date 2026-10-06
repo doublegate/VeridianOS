@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### CI
+
+- **Antigravity PR reviewer.** Pull requests from this repository's own branches are reviewed by
+  `agy` on a self-hosted runner, following the VeridianOS rules in `.github/agy-review.md`. Writers
+  can request a review on demand by commenting `/agy-review`. Operations guide:
+  `.github/AGY-REVIEWER.md`.
+- **New `Reviewer Self-Test` job.** It runs the reviewer's self-test.
+- **Security Audit fixed.** The job runs a pinned prebuilt `cargo-audit` instead of building it
+  unlocked. That build had started failing on the pinned nightly.
+
 ---
 
 ## [v0.26.0] - 2026-10-06
