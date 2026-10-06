@@ -1072,6 +1072,7 @@ fi
 body_file="$(mktemp)"
 {
   printf '%s\n' "$MARKER"
+  printf '%s%s -->\n' "$AGY_REVIEWED_AT_PREFIX" "$(date -u +'%Y-%m-%d %H:%M UTC')"
   printf '## Antigravity review (Gemini via Ultra)\n\n'
   cat "$out_file"
   printf '%s' "$truncated"
@@ -1145,14 +1146,8 @@ if [ -n "$prior_id" ] && [ -s "$prior_body_file" ]; then
   prior_archive="$(agy_body_archive < "$prior_body_file")"
 
   archived_file="$(mktemp)"
-  {
-    printf '%s\n' "$AGY_ROUND_MARK"
-    printf '<details>\n<summary>Round reviewed at %s</summary>\n\n' \
-      "$(date -u +'%Y-%m-%d %H:%M UTC')"
-    printf '%s\n' "$prior_head"
-    printf '\n</details>\n'
-    printf '%s\n' "$prior_archive"
-  } > "$archived_file"
+  agy_assemble_archive "$prior_head" "$prior_archive" "$(date -u +'%Y-%m-%d %H:%M UTC')" \
+    > "$archived_file"
 
   # Drop the oldest rounds until the whole comment fits, and SAY SO. A silent truncation
   # here would look identical to "there were never any earlier rounds", which is the exact
