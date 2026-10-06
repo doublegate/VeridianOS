@@ -1583,7 +1583,10 @@ mod tests {
         let input = lines(&["if test 1 -eq 1; then", "  echo hello"]);
         let result = engine.parse_script(&input);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("without matching 'fi'"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("without matching 'fi'"));
     }
 
     // ---- while/do/done ----
@@ -1624,7 +1627,10 @@ mod tests {
         let input = lines(&["while true; do", "  echo loop"]);
         let result = engine.parse_script(&input);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("without matching 'done'"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("without matching 'done'"));
     }
 
     // ---- for/in/do/done ----
@@ -1742,7 +1748,10 @@ mod tests {
         let input = lines(&["case $x in", "  a) echo a ;;"]);
         let result = engine.parse_script(&input);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("without matching 'esac'"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("without matching 'esac'"));
     }
 
     // ---- Nested constructs ----

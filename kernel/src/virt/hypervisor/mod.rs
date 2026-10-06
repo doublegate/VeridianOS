@@ -174,6 +174,7 @@ pub fn get_stats() -> &'static HypervisorStats {
 mod tests {
     #[allow(unused_imports)]
     use alloc::vec;
+    use alloc::vec::Vec;
 
     use super::*;
 

@@ -126,3 +126,43 @@ to execute.
 - Only `frame_alloc_1` (per-CPU path) slightly exceeds its 2,000ns target at 2,215ns avg
 - All other operations significantly under target (1.5x-6.3x margin)
 - Results are consistent across two consecutive runs
+
+---
+
+## v0.26.0 Audit Remediation -- Before/After
+
+Tracks the in-kernel effect of the fixes listed in
+`docs/audit/AUDIT-VERIFICATION-2026-10-05.md`. The audit matrix's own figures come from
+host-side models (`tools/audit-models`), not from the kernel; the numbers here are the
+kernel's, from the `perf` shell command (1,000 iterations, 10 warmup, TSC timing).
+
+| Parameter | Value |
+|-----------|-------|
+| CPU | Intel Core i9-10850K @ 3.60GHz, guest `-cpu host`, 1 vCPU (only the BSP runs) |
+| QEMU | 11.1.1, KVM |
+| Host Kernel | 7.2.9-1-cachyos |
+| Rust Toolchain | nightly-2025-11-15 |
+| Build Mode | Debug (dev) |
+| Guest RAM | 2GB |
+
+**Baseline** (2026-10-05, commit `f007c76`; the v0.25.2 kernel plus the KDE Ring-3 work):
+
+| Benchmark | Min (ns) | Avg (ns) | Max (ns) | Target | After (avg ns) |
+|-----------|---------:|---------:|---------:|-------:|---------------:|
+| syscall_getpid | 46 | 49 | 68 | 500 | |
+| frame_alloc_1 (per-CPU) | 1,586 | 1,609 | 6,201 | 2,000 | |
+| frame_alloc_global | 790 | 806 | 859 | 4,000 | |
+| cap_validate | 31 | 33 | 36 | 100 | |
+| atomic_counter | 24 | 27 | 30 | 50 | |
+| ipc_stats_read | 29 | 30 | 34 | 100 | |
+| sched_current | 46 | 49 | 52 | 200 | |
+
+On a single CPU, with no contention possible, the per-CPU path is already 2.0x slower than
+the global allocator it is meant to speed up (1,609 vs 806 ns): every call takes the one
+mutex around all 16 caches, and a refill takes the global allocator lock while still holding
+it (MEM-PERF-01). The v0.21.0 run above showed the same inversion (2,215 vs 1,525 ns).
+
+Host-target unit tests at baseline: **4,284 passed, 0 failed**
+(`cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu`).
+The "Host-Target Tests" section above is out of date: the host build compiles, and
+`[INIT] Results: 29/29 passed` plus BOOTOK hold on all three architectures.

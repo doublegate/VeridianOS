@@ -434,8 +434,9 @@ mod tests {
     fn test_signalfd_deliver_and_read() {
         SIGNALFD_REGISTRY.lock().clear();
 
-        // Mask signal 2 (SIGINT)
-        let id = signalfd_create(-1, 0b10, 0).unwrap() as u32;
+        // Mask signal 2 (SIGINT). Non-blocking so empty reads return instead
+        // of yielding to the scheduler (a real context switch on host).
+        let id = signalfd_create(-1, 0b10, SFD_NONBLOCK).unwrap() as u32;
 
         // No signals yet
         assert!(signalfd_read(id).is_err());

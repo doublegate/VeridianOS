@@ -1,0 +1,13 @@
+[package]
+name = "audit-models"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Host-side std models backing the 2026-10 performance/quality audit (not kernel code)"
+license = "MIT OR Apache-2.0"
+
+# Standalone host tool: excluded from the kernel workspace.
+[workspace]
+
+[profile.release]
+opt-level = 3

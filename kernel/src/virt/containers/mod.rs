@@ -197,6 +197,7 @@ pub(crate) fn simple_sha256(data: &[u8]) -> [u8; 32] {
 mod tests {
     #[allow(unused_imports)]
     use alloc::vec;
+    use alloc::{string::String, vec::Vec};
 
     use super::*;
 

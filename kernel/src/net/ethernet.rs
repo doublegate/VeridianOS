@@ -118,27 +118,23 @@ pub fn dispatch_frame(data: &[u8], our_mac: &MacAddress) -> Result<(), KernelErr
             super::arp::process_arp_packet(frame.payload, our_mac)?;
         }
         ETHERTYPE_IPV4 => {
-            // Parse IP header to get protocol and addresses, then dispatch
-            if frame.payload.len() >= super::ip::Ipv4Header::MIN_SIZE {
-                let ip_header = super::ip::Ipv4Header::from_bytes(frame.payload)?;
-                let header_len = (ip_header.ihl as usize) * 4;
-                if frame.payload.len() >= header_len {
-                    let ip_payload = &frame.payload[header_len..];
-                    let src = super::IpAddress::V4(ip_header.source);
-                    let dst = super::IpAddress::V4(ip_header.destination);
+            // Parse IP header to get protocol and addresses, then dispatch.
+            // Malformed packets are dropped.
+            if let Ok((ip_header, ip_payload)) = super::ip::split_packet(frame.payload) {
+                let src = super::IpAddress::V4(ip_header.source);
+                let dst = super::IpAddress::V4(ip_header.destination);
 
-                    match ip_header.protocol {
-                        6 => {
-                            // TCP
-                            let _ = super::tcp::process_packet(src, dst, ip_payload);
-                        }
-                        17 => {
-                            // UDP
-                            let _ = super::udp::process_packet(src, dst, ip_payload);
-                        }
-                        _ => {
-                            // Unknown protocol, drop
-                        }
+                match ip_header.protocol {
+                    6 => {
+                        // TCP
+                        let _ = super::tcp::process_packet(src, dst, ip_payload);
+                    }
+                    17 => {
+                        // UDP
+                        let _ = super::udp::process_packet(src, dst, ip_payload);
+                    }
+                    _ => {
+                        // Unknown protocol, drop
                     }
                 }
             }

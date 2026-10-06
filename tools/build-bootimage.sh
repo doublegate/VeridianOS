@@ -98,12 +98,18 @@ cp -r "$BUILDER_SRC"/* "$BUILD_DIR/"
 # Remove the .cargo config that tried to override workspace settings
 rm -rf "$BUILD_DIR/.cargo"
 
-# Build the tool in isolation (requires nightly for bootloader build.rs)
-echo "Building bootimage-builder tool..."
+# Build the tool in isolation (requires nightly for bootloader build.rs).
+# BUILD_DIR is outside the repo, so rust-toolchain.toml does not apply there:
+# use the project's pinned channel explicitly. A floating `+nightly` broke
+# this build when bootloader's nested UEFI-stage `cargo install` stopped
+# compiling on newer nightlies.
+TOOLCHAIN="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$PROJECT_DIR/rust-toolchain.toml")"
+TOOLCHAIN="${TOOLCHAIN:-nightly}"
+echo "Building bootimage-builder tool (toolchain: $TOOLCHAIN)..."
 cd "$BUILD_DIR"
-if ! cargo +nightly build --release 2>&1; then
+if ! cargo "+$TOOLCHAIN" build --release 2>&1; then
     echo -e "${RED}Failed to build bootimage-builder${NC}"
-    echo "Make sure nightly Rust is installed: rustup install nightly"
+    echo "Make sure the toolchain is installed: rustup toolchain install $TOOLCHAIN"
     exit 1
 fi
 

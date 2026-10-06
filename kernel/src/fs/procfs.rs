@@ -111,7 +111,9 @@ impl VfsNode for ProcNode {
                     "core_pattern" => String::from("core\n"),
                     "boot_id" => String::from("00000000-0000-0000-0000-000000000001\n"),
                     "self/exe" => String::new(),
-                    "self/maps" => String::new(),
+                    "self/maps" => crate::process::current_process()
+                        .map(|p| generate_maps(p.pid.0))
+                        .unwrap_or_default(),
                     _ => String::new(),
                 }
             }
@@ -390,6 +392,67 @@ impl VfsNode for ProcNode {
     }
 }
 
+/// Format one `/proc/<pid>/maps` line in the Linux layout:
+/// `start-end perms offset dev inode [label]`.
+///
+/// Mappings are anonymous (offset 0, device 00:00, inode 0), so consumers
+/// such as Mesa and Qt that parse this file see well-formed private mappings.
+fn format_maps_line(
+    start: u64,
+    size: usize,
+    flags: crate::mm::PageFlags,
+    mapping_type: crate::mm::vas::MappingType,
+) -> String {
+    use crate::mm::{vas::MappingType, PageFlags};
+
+    let end = start.saturating_add(size as u64);
+    let write = if flags.contains(PageFlags::WRITABLE) {
+        'w'
+    } else {
+        '-'
+    };
+    let exec = if flags.contains(PageFlags::NO_EXECUTE) {
+        '-'
+    } else {
+        'x'
+    };
+    let label = match mapping_type {
+        MappingType::Stack => " [stack]",
+        MappingType::Heap => " [heap]",
+        _ => "",
+    };
+    format!(
+        "{:08x}-{:08x} r{}{}p 00000000 00:00 0{}\n",
+        start, end, write, exec, label
+    )
+}
+
+/// Generate `/proc/<pid>/maps` from the process's virtual address space.
+///
+/// Returns an empty string if the process does not exist or its address
+/// space lock is contended (the lock is never waited on from procfs).
+fn generate_maps(pid: u64) -> String {
+    let Some(process) = crate::process::get_process(crate::process::ProcessId(pid)) else {
+        return String::new();
+    };
+    let Some(space) = process.memory_space.try_lock() else {
+        return String::new();
+    };
+    let Some(mappings) = space.mappings_ref().try_lock() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for mapping in mappings.values() {
+        out.push_str(&format_maps_line(
+            mapping.start.as_u64(),
+            mapping.size,
+            mapping.flags,
+            mapping.mapping_type,
+        ));
+    }
+    out
+}
+
 /// Generate /proc/cpuinfo content with real CPUID data on x86_64.
 fn generate_cpuinfo() -> String {
     #[cfg(target_arch = "x86_64")]
@@ -578,5 +641,38 @@ impl Filesystem for ProcFs {
 
     fn sync(&self) -> Result<(), KernelError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mm::{vas::MappingType, PageFlags};
+
+    #[test]
+    fn maps_line_matches_linux_format() {
+        let flags = PageFlags::PRESENT | PageFlags::USER | PageFlags::NO_EXECUTE;
+        assert_eq!(
+            format_maps_line(0x40_0000, 0x2000, flags, MappingType::Data),
+            "00400000-00402000 r--p 00000000 00:00 0\n"
+        );
+    }
+
+    #[test]
+    fn maps_line_reports_write_exec_and_labels() {
+        let rw = PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
+        assert_eq!(
+            format_maps_line(0x7fff_f000_0000, 0x1000, rw, MappingType::Stack),
+            "7ffff0000000-7ffff0001000 rw-p 00000000 00:00 0 [stack]\n"
+        );
+        assert_eq!(
+            format_maps_line(0x1000, 0x1000, rw, MappingType::Heap),
+            "00001000-00002000 rw-p 00000000 00:00 0 [heap]\n"
+        );
+        let rx = PageFlags::PRESENT | PageFlags::USER;
+        assert_eq!(
+            format_maps_line(0x40_1000, 0x1000, rx, MappingType::Code),
+            "00401000-00402000 r-xp 00000000 00:00 0\n"
+        );
     }
 }

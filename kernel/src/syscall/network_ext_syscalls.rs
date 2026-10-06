@@ -27,7 +27,7 @@ pub(super) fn sys_net_sendto(
     // addr_len (Linux arg6) is not available due to 5-arg handler limit.
     // Infer from sa_family: AF_INET=16, AF_INET6=28, AF_UNIX=110. Default 128.
     let addr_len = if addr_ptr != 0 {
-        infer_sockaddr_len(addr_ptr)
+        infer_sockaddr_len(addr_ptr)?
     } else {
         0
     };
@@ -147,15 +147,19 @@ pub(super) fn sys_net_getsockopt(
 
 /// Infer sockaddr length from sa_family when the actual length is unavailable
 /// (e.g., sendto where arg6 is lost due to 5-arg handler limit).
-fn infer_sockaddr_len(addr_ptr: usize) -> usize {
-    // SAFETY: addr_ptr was checked non-null by the caller; read only 2 bytes.
-    let family = unsafe { *(addr_ptr as *const u16) };
-    match family {
+fn infer_sockaddr_len(addr_ptr: usize) -> Result<usize, SyscallError> {
+    // The family field is read before the full length is known, so it is
+    // validated on its own first (NET-SEC-02).
+    super::validate_user_buffer(addr_ptr, core::mem::size_of::<u16>())?;
+    // SAFETY: the two bytes at addr_ptr were validated as user memory above;
+    // read_unaligned because a user sockaddr carries no alignment guarantee.
+    let family = unsafe { core::ptr::read_unaligned(addr_ptr as *const u16) };
+    Ok(match family {
         2 => 16,  // AF_INET: sizeof(sockaddr_in)
         10 => 28, // AF_INET6: sizeof(sockaddr_in6)
         1 => 110, // AF_UNIX: sizeof(sockaddr_un)
         _ => 128, // Conservative default
-    }
+    })
 }
 
 /// Parse a sockaddr_in from user space.
@@ -206,4 +210,24 @@ pub(super) fn write_sockaddr(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// NET-SEC-02: the family must not be read from an address that fails
+    /// user-pointer validation (here, a kernel-half address).
+    #[test]
+    fn infer_sockaddr_len_rejects_kernel_pointer() {
+        assert!(infer_sockaddr_len(0xFFFF_8000_0000_1000).is_err());
+    }
+
+    #[test]
+    fn infer_sockaddr_len_maps_families() {
+        for (family, expected) in [(2u16, 16usize), (10, 28), (1, 110), (99, 128)] {
+            let addr = [family, 0u16];
+            assert_eq!(infer_sockaddr_len(addr.as_ptr() as usize), Ok(expected));
+        }
+    }
 }
