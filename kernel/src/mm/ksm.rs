@@ -282,6 +282,23 @@ impl KsmScanner {
     ///
     /// Returns `true` if the page was merged (caller should remap as COW).
     pub fn scan_page(&mut self, frame: FrameNumber, content: &[u8]) -> bool {
+        self.scan_page_with(frame, content, frame_content_equals)
+    }
+
+    /// [`scan_page`](Self::scan_page) with the content comparison supplied
+    /// by the caller: `same(candidate, content)` must return whether frame
+    /// `candidate` currently holds exactly `content`. A hash match alone is
+    /// never trusted -- merging two different pages on a 32-bit hash
+    /// collision would hand one process another's data (MEM-SEC-04).
+    pub fn scan_page_with(
+        &mut self,
+        frame: FrameNumber,
+        content: &[u8],
+        same: impl Fn(FrameNumber, &[u8]) -> bool,
+    ) -> bool {
+        let same_content = |candidate: FrameNumber| {
+            candidate.as_u64() == frame.as_u64() || same(candidate, content)
+        };
         if !self.is_enabled() {
             return false;
         }
@@ -295,17 +312,20 @@ impl KsmScanner {
         let hash = fnv1a_hash(content);
 
         // 1. Check stable tree for an existing merge target
-        if let Some(stable_idx) = self.find_stable_by_hash(hash) {
-            // Hash match in stable tree -- would do byte-for-byte
-            // comparison in production (requires reading the canonical
-            // page content).  For the framework, we trust the hash.
+        if let Some(stable_idx) = self
+            .find_stable_by_hash(hash)
+            .filter(|&i| same_content(self.stable[i].frame))
+        {
             self.stable[stable_idx].sharing_count += 1;
             self.stats_sharing.fetch_add(1, Ordering::Relaxed);
             return true;
         }
 
         // 2. Check unstable tree
-        if let Some(unstable_idx) = self.find_unstable_by_hash(hash) {
+        if let Some(unstable_idx) = self
+            .find_unstable_by_hash(hash)
+            .filter(|&i| same_content(self.unstable[i].frame))
+        {
             let entry = &mut self.unstable[unstable_idx];
 
             // Same hash as before -- content unchanged
@@ -436,13 +456,65 @@ impl KsmScanner {
     }
 }
 
+/// Whether physical frame `frame` holds exactly `content` (PAGE_SIZE
+/// bytes), read through the kernel's direct physical map.
+fn frame_content_equals(frame: FrameNumber, content: &[u8]) -> bool {
+    if content.len() != PAGE_SIZE {
+        return false;
+    }
+    let virt = crate::mm::phys_to_virt_addr(frame.as_u64() * PAGE_SIZE as u64);
+    // SAFETY: the scanner only tracks frames of mapped, present user pages;
+    // the direct map covers all of RAM, so the frame is readable for
+    // PAGE_SIZE bytes. The bytes are only compared, never retained.
+    let existing = unsafe { core::slice::from_raw_parts(virt as *const u8, PAGE_SIZE) };
+    existing == content
+}
+
 // =========================================================================
 // Tests
 // =========================================================================
 
 #[cfg(test)]
 mod tests {
+    use alloc::{collections::BTreeMap, vec::Vec};
+    use core::cell::RefCell;
+
     use super::*;
+
+    /// Fake physical memory: frame number -> current page content.
+    type Mem = RefCell<BTreeMap<u64, Vec<u8>>>;
+
+    /// Record `page` as frame `f`'s content, then scan it.
+    fn scan(scanner: &mut KsmScanner, mem: &Mem, f: u64, page: &[u8]) -> bool {
+        mem.borrow_mut().insert(f, page.to_vec());
+        scanner.scan_page_with(FrameNumber::new(f), page, |frame, content| {
+            mem.borrow()
+                .get(&frame.as_u64())
+                .is_some_and(|p| p.as_slice() == content)
+        })
+    }
+
+    #[test]
+    fn hash_collision_is_not_merged() {
+        // Two different pages forced into the same hash bucket: a stable
+        // entry whose frame holds other bytes must not absorb the page.
+        let mut scanner = KsmScanner::new();
+        scanner.init();
+        scanner.enable();
+        let mem = Mem::default();
+        let page = [7u8; PAGE_SIZE];
+        for _ in 0..3 {
+            scan(&mut scanner, &mem, 1, &page);
+        }
+        // Frame 1 is now stable for this hash; change what it holds.
+        mem.borrow_mut().insert(1, [8u8; PAGE_SIZE].to_vec());
+        let merged = scanner.scan_page_with(FrameNumber::new(2), &page, |frame, content| {
+            mem.borrow()
+                .get(&frame.as_u64())
+                .is_some_and(|p| p.as_slice() == content)
+        });
+        assert!(!merged);
+    }
 
     #[test]
     fn test_fnv1a_empty() {
@@ -511,9 +583,10 @@ mod tests {
     fn test_scan_page_disabled() {
         let mut scanner = KsmScanner::new();
         scanner.init();
+        let mem = Mem::default();
         // Scanner not enabled -- should return false
         let page = [0u8; PAGE_SIZE];
-        assert!(!scanner.scan_page(FrameNumber::new(1), &page));
+        assert!(!scan(&mut scanner, &mem, 1, &page));
     }
 
     #[test]
@@ -521,8 +594,9 @@ mod tests {
         let mut scanner = KsmScanner::new();
         scanner.init();
         scanner.enable();
+        let mem = Mem::default();
         let small = [0u8; 512];
-        assert!(!scanner.scan_page(FrameNumber::new(1), &small));
+        assert!(!scan(&mut scanner, &mem, 1, &small));
     }
 
     #[test]
@@ -530,6 +604,7 @@ mod tests {
         let mut scanner = KsmScanner::new();
         scanner.init();
         scanner.enable();
+        let mem = Mem::default();
 
         let mut page1 = [0u8; PAGE_SIZE];
         page1[0] = 1;
@@ -537,8 +612,8 @@ mod tests {
         page2[0] = 2;
 
         // First scan of each unique page -- goes to unstable
-        assert!(!scanner.scan_page(FrameNumber::new(1), &page1));
-        assert!(!scanner.scan_page(FrameNumber::new(2), &page2));
+        assert!(!scan(&mut scanner, &mem, 1, &page1));
+        assert!(!scan(&mut scanner, &mem, 2, &page2));
 
         let stats = scanner.get_stats();
         assert_eq!(stats.pages_scanned, 2);
@@ -551,16 +626,17 @@ mod tests {
         let mut scanner = KsmScanner::new();
         scanner.init();
         scanner.enable();
+        let mem = Mem::default();
 
         let page = [42u8; PAGE_SIZE];
 
         // Scan same content from frame 1 -- enters unstable tree
-        assert!(!scanner.scan_page(FrameNumber::new(1), &page));
+        assert!(!scan(&mut scanner, &mem, 1, &page));
         // Scan again (same hash) -- increments stable_count to 2
-        assert!(!scanner.scan_page(FrameNumber::new(1), &page));
+        assert!(!scan(&mut scanner, &mem, 1, &page));
         // Scan again -- stable_count reaches PROMOTION_THRESHOLD (3)
         // This promotes to stable tree
-        assert!(scanner.scan_page(FrameNumber::new(1), &page));
+        assert!(scan(&mut scanner, &mem, 1, &page));
 
         let stats = scanner.get_stats();
         assert_eq!(stats.pages_shared, 1);
@@ -572,16 +648,17 @@ mod tests {
         let mut scanner = KsmScanner::new();
         scanner.init();
         scanner.enable();
+        let mem = Mem::default();
 
         let page = [99u8; PAGE_SIZE];
 
         // Promote frame 1 through unstable -> stable
-        scanner.scan_page(FrameNumber::new(1), &page);
-        scanner.scan_page(FrameNumber::new(1), &page);
-        scanner.scan_page(FrameNumber::new(1), &page); // promotes
+        scan(&mut scanner, &mem, 1, &page);
+        scan(&mut scanner, &mem, 1, &page);
+        scan(&mut scanner, &mem, 1, &page); // promotes
 
         // Now scan frame 2 with same content -- should match stable tree
-        let merged = scanner.scan_page(FrameNumber::new(2), &page);
+        let merged = scan(&mut scanner, &mem, 2, &page);
         assert!(merged);
 
         let stats = scanner.get_stats();
@@ -593,16 +670,17 @@ mod tests {
         let mut scanner = KsmScanner::new();
         scanner.init();
         scanner.enable();
+        let mem = Mem::default();
 
         let page = [55u8; PAGE_SIZE];
 
         // Promote to stable
-        scanner.scan_page(FrameNumber::new(1), &page);
-        scanner.scan_page(FrameNumber::new(1), &page);
-        scanner.scan_page(FrameNumber::new(1), &page);
+        scan(&mut scanner, &mem, 1, &page);
+        scan(&mut scanner, &mem, 1, &page);
+        scan(&mut scanner, &mem, 1, &page);
 
         // Add a sharing page
-        scanner.scan_page(FrameNumber::new(2), &page);
+        scan(&mut scanner, &mem, 2, &page);
 
         let stats = scanner.get_stats();
         let sharing_before = stats.pages_sharing;

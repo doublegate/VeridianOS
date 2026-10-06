@@ -507,9 +507,15 @@ static void __format_ulong(char *buf, size_t size, size_t *pos,
                             unsigned long val, int base, int upper,
                             int width, int zero_pad, int left_align)
 {
-    char tmp[22]; /* enough for 64-bit in base 2 */
+    /* A 64-bit value has up to 64 digits (base 2). This used to be 22,
+     * which only fits base 8 and up (LIBC-SEC-02). */
+    char tmp[64];
     int len = 0;
-    const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+    const char *digits = upper ? "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                               : "0123456789abcdefghijklmnopqrstuvwxyz";
+
+    if (base < 2 || base > 36)
+        base = 10;
 
     if (val == 0) {
         tmp[len++] = '0';
@@ -1009,6 +1015,25 @@ int printf(const char *fmt, ...)
 /* Formatted input: minimal sscanf                                           */
 /* ========================================================================= */
 
+/*
+ * Copy the next numeric field of `s` (at most `width` chars, 0 = no limit)
+ * into `nb` so that strto*() cannot read past the field width. Returns the
+ * number of bytes copied.
+ */
+static size_t __scan_field(const char *s, size_t width, char *nb, size_t nbsize)
+{
+    size_t lim = nbsize - 1;
+    if (width && width < lim)
+        lim = width;
+    size_t n = 0;
+    while (n < lim && s[n] && !isspace((unsigned char)s[n])) {
+        nb[n] = s[n];
+        n++;
+    }
+    nb[n] = '\0';
+    return n;
+}
+
 int sscanf(const char *str, const char *fmt, ...)
 {
     va_list ap;
@@ -1034,6 +1059,21 @@ int sscanf(const char *str, const char *fmt, ...)
         }
         fmt++; /* skip '%' */
 
+        /* Assignment suppression and maximum field width (LIBC-SEC-03:
+         * neither was parsed, so "%31s" overflowed the caller's buffer and
+         * then misparsed the rest of the format). */
+        int suppress = 0;
+        if (*fmt == '*') {
+            suppress = 1;
+            fmt++;
+        }
+        size_t width = 0;
+        while (*fmt >= '0' && *fmt <= '9') {
+            if (width < 100000)
+                width = width * 10 + (size_t)(*fmt - '0');
+            fmt++;
+        }
+
         /* Parse length modifier. */
         int length = 0; /* 0=int, 1=long, 2=long long, -1=short, -2=char */
         if (*fmt == 'l') {
@@ -1049,13 +1089,17 @@ int sscanf(const char *str, const char *fmt, ...)
             fmt++;
         }
 
+        char nb[64];
         switch (*fmt) {
         case 'd':
         case 'i': {
             while (isspace((unsigned char)*s)) s++;
-            const char *prev = s;
-            long long val = strtoll(s, (char **)&s, 10);
-            if (s == prev) goto done_sscanf;
+            __scan_field(s, width, nb, sizeof(nb));
+            char *end;
+            long long val = strtoll(nb, &end, *fmt == 'i' ? 0 : 10);
+            if (end == nb) goto done_sscanf;
+            s += end - nb;
+            if (suppress) break;
             switch (length) {
             case 2:  *va_arg(ap, long long *) = val; break;
             case 1:  *va_arg(ap, long *) = (long)val; break;
@@ -1066,11 +1110,18 @@ int sscanf(const char *str, const char *fmt, ...)
             matched++;
             break;
         }
-        case 'u': {
+        case 'u':
+        case 'x':
+        case 'X':
+        case 'o': {
             while (isspace((unsigned char)*s)) s++;
-            const char *prev = s;
-            unsigned long long val = strtoull(s, (char **)&s, 10);
-            if (s == prev) goto done_sscanf;
+            int base = (*fmt == 'u') ? 10 : (*fmt == 'o') ? 8 : 16;
+            __scan_field(s, width, nb, sizeof(nb));
+            char *end;
+            unsigned long long val = strtoull(nb, &end, base);
+            if (end == nb) goto done_sscanf;
+            s += end - nb;
+            if (suppress) break;
             switch (length) {
             case 2:  *va_arg(ap, unsigned long long *) = val; break;
             case 1:  *va_arg(ap, unsigned long *) = (unsigned long)val; break;
@@ -1081,58 +1132,43 @@ int sscanf(const char *str, const char *fmt, ...)
             matched++;
             break;
         }
-        case 'x':
-        case 'X': {
-            while (isspace((unsigned char)*s)) s++;
-            if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
-                s += 2;
-            const char *prev = s;
-            unsigned long long val = strtoull(s, (char **)&s, 16);
-            if (s == prev) goto done_sscanf;
-            switch (length) {
-            case 2:  *va_arg(ap, unsigned long long *) = val; break;
-            case 1:  *va_arg(ap, unsigned long *) = (unsigned long)val; break;
-            default: *va_arg(ap, unsigned int *) = (unsigned int)val; break;
-            }
-            matched++;
-            break;
-        }
-        case 'o': {
-            while (isspace((unsigned char)*s)) s++;
-            const char *prev = s;
-            unsigned long long val = strtoull(s, (char **)&s, 8);
-            if (s == prev) goto done_sscanf;
-            switch (length) {
-            case 2:  *va_arg(ap, unsigned long long *) = val; break;
-            case 1:  *va_arg(ap, unsigned long *) = (unsigned long)val; break;
-            default: *va_arg(ap, unsigned int *) = (unsigned int)val; break;
-            }
-            matched++;
-            break;
-        }
         case 's': {
-            char *p = va_arg(ap, char *);
+            char *p = suppress ? NULL : va_arg(ap, char *);
             while (isspace((unsigned char)*s)) s++;
             if (!*s) goto done_sscanf;
-            while (*s && !isspace((unsigned char)*s))
-                *p++ = *s++;
-            *p = '\0';
-            matched++;
+            size_t n = 0;
+            while (*s && !isspace((unsigned char)*s) && (!width || n < width)) {
+                if (p)
+                    p[n] = *s;
+                n++;
+                s++;
+            }
+            if (p) {
+                p[n] = '\0';
+                matched++;
+            }
             break;
         }
         case 'c': {
-            char *p = va_arg(ap, char *);
-            if (*s) {
-                *p = *s++;
+            /* %Nc reads exactly N chars (default 1), no terminator. */
+            char *p = suppress ? NULL : va_arg(ap, char *);
+            size_t want = width ? width : 1;
+            size_t n = 0;
+            while (n < want && s[n])
+                n++;
+            if (n < want) goto done_sscanf;
+            if (p)
+                memcpy(p, s, n);
+            s += n;
+            if (p)
                 matched++;
-            } else {
-                goto done_sscanf;
-            }
             break;
         }
         case 'n': {
-            int *p = va_arg(ap, int *);
-            *p = (int)(s - str);
+            if (!suppress) {
+                int *p = va_arg(ap, int *);
+                *p = (int)(s - str);
+            }
             /* %n does not increment matched */
             break;
         }
@@ -1182,6 +1218,14 @@ int vfscanf(FILE *stream, const char *fmt, va_list ap)
         }
         fmt++; /* skip '%' */
 
+        /* Maximum field width (LIBC-SEC-03). */
+        size_t width = 0;
+        while (*fmt >= '0' && *fmt <= '9') {
+            if (width < 100000)
+                width = width * 10 + (size_t)(*fmt - '0');
+            fmt++;
+        }
+
         switch (*fmt) {
         case 'd': {
             int *p = va_arg(ap, int *);
@@ -1219,22 +1263,30 @@ int vfscanf(FILE *stream, const char *fmt, va_list ap)
                 ;
             if (c == EOF)
                 goto done_vfscanf;
+            size_t n = 0;
             while (c != EOF && !isspace(c)) {
-                *p++ = (char)c;
+                p[n++] = (char)c;
+                if (width && n >= width) {
+                    c = EOF; /* field full: leave the rest unread */
+                    break;
+                }
                 c = fgetc(stream);
             }
             if (c != EOF)
                 ungetc(c, stream);
-            *p = '\0';
+            p[n] = '\0';
             matched++;
             break;
         }
         case 'c': {
             char *p = va_arg(ap, char *);
-            int c = fgetc(stream);
-            if (c == EOF)
-                goto done_vfscanf;
-            *p = (char)c;
+            size_t want = width ? width : 1;
+            for (size_t n = 0; n < want; n++) {
+                int c = fgetc(stream);
+                if (c == EOF)
+                    goto done_vfscanf;
+                p[n] = (char)c;
+            }
             matched++;
             break;
         }

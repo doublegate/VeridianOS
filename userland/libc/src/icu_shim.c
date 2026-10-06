@@ -480,6 +480,11 @@ const char *ucnv_getAvailableName(int32_t n)
 /* Normalization (NFC passthrough)                                           */
 /* ========================================================================= */
 
+/* The public type is opaque; the shim only needs distinct instances. */
+struct UNormalizer2 {
+    int form;
+};
+
 static UNormalizer2 nfc_instance;
 static UNormalizer2 nfd_instance;
 static UNormalizer2 nfkc_instance;

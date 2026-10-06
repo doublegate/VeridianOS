@@ -105,6 +105,7 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
         for (key, value) in parent_env.iter() {
             child_env.insert(key.clone(), value.clone());
         }
+        *new_process.exe_path.lock() = current_process.exe_path.lock().clone();
     }
 
     // Inherit container membership from parent so forked children
@@ -353,6 +354,7 @@ pub fn cow_fork() -> Result<ProcessId, KernelError> {
         for (key, value) in parent_env.iter() {
             child_env.insert(key.clone(), value.clone());
         }
+        *new_process.exe_path.lock() = current_process.exe_path.lock().clone();
     }
 
     // Inherit pgid, sid

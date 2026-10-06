@@ -434,6 +434,7 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
     const LINUX_ENOSYS: isize = -38;
     const LINUX_ENOTEMPTY: isize = -39;
     const LINUX_ELOOP: isize = -40;
+    const LINUX_EXDEV: isize = -18;
     const LINUX_ENODATA: isize = -61;
     const LINUX_EIO: isize = -5;
     const LINUX_E2BIG: isize = -7;
@@ -471,6 +472,7 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
         SyscallError::ResourceLimitExceeded => LINUX_EMFILE,
         SyscallError::NotImplemented => LINUX_ENOSYS,
         SyscallError::SymlinkLoop => LINUX_ELOOP,
+        SyscallError::CrossDevice => LINUX_EXDEV,
     }
 }
 

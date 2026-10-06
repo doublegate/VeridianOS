@@ -19,6 +19,8 @@ enum ProcNodeType {
     SystemFile(String),
     /// Virtual subdirectory (e.g., /proc/sys, /proc/sys/kernel, /proc/self)
     SubDir(String),
+    /// /proc/self/exe: symlink to the calling process's executable
+    SelfExe,
 }
 
 /// ProcFS node
@@ -59,6 +61,19 @@ impl VfsNode for ProcNode {
                 NodeType::Directory
             }
             ProcNodeType::ProcessFile(_, _) | ProcNodeType::SystemFile(_) => NodeType::File,
+            ProcNodeType::SelfExe => NodeType::Symlink,
+        }
+    }
+
+    fn readlink(&self) -> Result<String, KernelError> {
+        match &self.node_type {
+            // It used to be an empty regular file: exec("/proc/self/exe"),
+            // which BusyBox uses to run its own applets, read zero bytes.
+            ProcNodeType::SelfExe => crate::process::current_process()
+                .map(|p| p.exe_path.lock().clone())
+                .filter(|path| !path.is_empty())
+                .ok_or(KernelError::FsError(FsError::NotFound)),
+            _ => Err(KernelError::FsError(FsError::NotASymlink)),
         }
     }
 
@@ -110,7 +125,6 @@ impl VfsNode for ProcNode {
                     // Qt/KDE compatibility files
                     "core_pattern" => String::from("core\n"),
                     "boot_id" => String::from("00000000-0000-0000-0000-000000000001\n"),
-                    "self/exe" => String::new(),
                     "self/maps" => crate::process::current_process()
                         .map(|p| generate_maps(p.pid.0))
                         .unwrap_or_default(),
@@ -188,6 +202,7 @@ impl VfsNode for ProcNode {
             ProcNodeType::Root | ProcNodeType::ProcessDir(_) | ProcNodeType::SubDir(_) => {
                 NodeType::Directory
             }
+            ProcNodeType::SelfExe => NodeType::Symlink,
             _ => NodeType::File,
         };
 
@@ -354,10 +369,13 @@ impl VfsNode for ProcNode {
                         _ => Err(KernelError::FsError(FsError::NotFound)),
                     },
                     "self" => match name {
-                        "exe" | "maps" => Ok(Arc::new(ProcNode::new_system_file(format!(
-                            "self/{}",
-                            name
-                        ))) as Arc<dyn VfsNode>),
+                        "exe" => Ok(Arc::new(ProcNode {
+                            node_type: ProcNodeType::SelfExe,
+                        }) as Arc<dyn VfsNode>),
+                        "maps" => Ok(
+                            Arc::new(ProcNode::new_system_file(format!("self/{}", name)))
+                                as Arc<dyn VfsNode>,
+                        ),
                         _ => Err(KernelError::FsError(FsError::NotFound)),
                     },
                     _ => Err(KernelError::FsError(FsError::NotFound)),

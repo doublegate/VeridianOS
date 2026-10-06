@@ -24,6 +24,8 @@ HOST_QT="${PROJECT_ROOT}/target/cross-build/qt6/host-qt"
 
 log() { echo "[build-kwin] $*"; }
 die() { echo "[build-kwin] ERROR: $*" >&2; exit 1; }
+# shellcheck source=lib/cmake-source-fixes.sh
+source "${SCRIPT_DIR}/lib/cmake-source-fixes.sh"
 
 mkdir -p "${BUILD_DIR}"
 
@@ -69,6 +71,7 @@ build_kdecoration() {
         "${src}/src/private/CMakeLists.txt"
     sed -i 's/add_library(kdecorations3 SHARED/add_library(kdecorations3 STATIC/' \
         "${src}/src/CMakeLists.txt"
+    relax_qt_test "${src}/CMakeLists.txt"
 
     rm -rf "${bld}"
     mkdir -p "${bld}"
@@ -123,26 +126,62 @@ build_kwin() {
     # kwin from opening /dev/dri/card0 on systems without logind/consolekit.
     # Our patch makes it call open() directly, matching the behavior needed
     # for VeridianOS where DRM devices are opened via the VFS.
-    if grep -q 'return -1;' "${src}/src/core/session_noop.cpp" 2>/dev/null; then
+    # (A multi-line sed used to "apply" this: sed cannot match across lines
+    # and exits 0 anyway, so the python fallback never ran and kwin was
+    # left unable to open the DRM device.)
+    if ! grep -q 'return open(fileName' "${src}/src/core/session_noop.cpp"; then
         log "Patching session_noop.cpp: openRestricted() -> direct open()"
         sed -i '/^#include "session_noop.h"/a\
 #include <fcntl.h>\
 #include <unistd.h>' "${src}/src/core/session_noop.cpp"
-        sed -i 's|int NoopSession::openRestricted(const QString \&fileName)\n{\n    return -1;\n}|int NoopSession::openRestricted(const QString \&fileName)\n{\n    return open(fileName.toUtf8().constData(), O_RDWR | O_CLOEXEC);\n}|' "${src}/src/core/session_noop.cpp" 2>/dev/null || \
-        python3 -c "
+        python3 - "${src}/src/core/session_noop.cpp" <<'PYEOF' || die "failed to patch session_noop.cpp"
 import re, sys
-f = '${src}/src/core/session_noop.cpp'
-txt = open(f).read()
-old = 'int NoopSession::openRestricted(const QString \&fileName)\n{\n    return -1;\n}'
-new = 'int NoopSession::openRestricted(const QString \&fileName)\n{\n    return open(fileName.toUtf8().constData(), O_RDWR | O_CLOEXEC);\n}'
-if old in txt:
-    txt = txt.replace(old, new)
-    open(f,'w').write(txt)
-    print('  patched via python3')
-else:
-    print('  already patched or pattern differs')
-"
+p = sys.argv[1]
+s = open(p).read()
+s, n = re.subn(
+    r"(int NoopSession::openRestricted\(const QString &fileName\)\s*\{\s*)return -1;",
+    r"\1return open(fileName.toUtf8().constData(), O_RDWR | O_CLOEXEC);",
+    s,
+)
+if n != 1:
+    sys.exit("openRestricted() body not found")
+open(p, "w").write(s)
+PYEOF
     fi
+    grep -q 'return open(fileName' "${src}/src/core/session_noop.cpp" || \
+        die "session_noop.cpp: openRestricted() not patched"
+
+    # Qt UiTools is only used by the KCMs and the Aurorae config UI, both
+    # disabled below (KWIN_BUILD_KCMS=OFF); qttools is not cross-built.
+    relax_qt_test "${src}/CMakeLists.txt"
+    python3 - "${src}/CMakeLists.txt" <<'PYEOF' || die "failed to drop UiTools from KWin"
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+s2 = re.sub(r"(find_package\(Qt6 [^)]*?)\n\s*UiTools(?=\s)", r"\1", s, count=1)
+if "UiTools" in re.search(r"find_package\(Qt6 [^)]*\)", s2).group(0):
+    sys.exit("UiTools still required")
+open(p, "w").write(s2)
+PYEOF
+    # libcanberra (event sounds) is REQUIRED but only the systembell plugin
+    # links it; VeridianOS has no libcanberra, so build without that plugin.
+    python3 - "${src}" <<'PYEOF' || die "failed to make Canberra optional in KWin"
+import sys
+src = sys.argv[1]
+for path, old, new in (
+    (src + "/CMakeLists.txt",
+     "find_package(Canberra REQUIRED)", "find_package(Canberra)"),
+    (src + "/src/plugins/CMakeLists.txt",
+     "add_subdirectory(systembell)\n",
+     "if(TARGET Canberra::Canberra)\n    add_subdirectory(systembell)\nendif()\n"),
+):
+    s = open(path).read()
+    if new in s:
+        continue
+    if s.count(old) != 1:
+        sys.exit("unexpected " + path)
+    open(path, "w").write(s.replace(old, new))
+PYEOF
 
     rm -rf "${bld}"
     mkdir -p "${bld}"

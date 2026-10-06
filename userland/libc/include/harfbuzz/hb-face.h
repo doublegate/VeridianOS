@@ -13,6 +13,7 @@
 #include <harfbuzz/hb-common.h>
 #include <harfbuzz/hb-blob.h>
 #include <harfbuzz/hb-set.h>
+#include <harfbuzz/hb-map.h>
 
 #ifdef __cplusplus
 extern "C" {

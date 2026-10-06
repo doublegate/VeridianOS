@@ -53,8 +53,8 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | MEM-ARCH-03 | PARTIAL, LATENT | `arch/aarch64/mod.rs:114-133`, `arch/riscv64/mod.rs:134-150` | Non-shareable `tlbi vae1`/`vmalle1` and local `sfence.vma`. `mm/page_table.rs:722` already uses the broadcast `tlbi vaae1is` form, so the code is inconsistent. SBI RFENCE is probed but `remote_sfence_vma` is not implemented. | v0.27.0 | open |
 | MEM-SEC-01 | CONFIRMED (page walk); PARTIAL (impact) | `mm/user_validation.rs:32-85`, `syscall/userspace.rs:51-146` | Walks raw physical addresses as pointers. Live caller: `net/zero_copy.rs:337`. Correction: a kernel-mode fault on a user address does **not** unconditionally halt -- both HEAD and the WIP recover via `boot_return_to_kernel`; neither returns `EFAULT`. | v0.26.0 | fixed on x86_64 (34db90c); aarch64/riscv64 pre-validate only |
 | MEM-SEC-02 | CONFIRMED, LATENT | `mm/vas.rs:425-441, 891, 947, 1019-1030, 1125-1137, ~1465` | `flush_with_shootdown` has zero callers and does not wait for acknowledgement. | v0.27.0 | open |
-| MEM-SEC-03 | CONFIRMED (aarch64/riscv64 only) | `simple_alloc_unsafe.rs:149-174`, `lib.rs:25-39` | x86_64 uses `LockedHeap` and is unaffected. The race needs concurrent allocators (latent until SMP or interrupt-context allocation). Additional issue: a second bump allocator (`LOCKED_ALLOCATOR`) is initialised over the same region. | v0.26.0 (CAS + align), v0.27.0 (real heap) | open |
-| MEM-SEC-04 | CONFIRMED, dead code | `mm/ksm.rs:296-327` | Hash-only merge in both trees. `KsmScanner` has no callers outside tests. | v0.26.0 | open |
+| MEM-SEC-03 | CONFIRMED (aarch64/riscv64 only) | `simple_alloc_unsafe.rs:149-174`, `lib.rs:25-39` | x86_64 uses `LockedHeap` and is unaffected. The race needs concurrent allocators (latent until SMP or interrupt-context allocation). Additional issue: a second bump allocator (`LOCKED_ALLOCATOR`) is initialised over the same region. | v0.26.0 (CAS + align), v0.27.0 (real heap) | partial (527fa54): CAS + alignment, duplicate allocator removed; real heap in v0.27.0 |
+| MEM-SEC-04 | CONFIRMED, dead code | `mm/ksm.rs:296-327` | Hash-only merge in both trees. `KsmScanner` has no callers outside tests. | v0.26.0 | fixed (df8f1e5) |
 
 ### IPC and capabilities
 
@@ -88,11 +88,11 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | PROC-ARCH-01 | CONFIRMED | `mm/vas.rs:596-727` | Same root cause as MEM-PERF-03. | v0.27.0 | open |
 | SYS-PERF-01 | PARTIAL | `syscall/mod.rs:139-160` | Race confirmed. Impact overstated: the refill uses raw cycle counts, so the bucket refills to max on almost every syscall and is effectively never limiting. One global limiter, not per process. | v0.26.0 | fixed (371aa62) |
 | SYS-PERF-02 | CONFIRMED, LATENT | `syscall/futex.rs:71` | Single global table. | v0.26.0 | open |
-| SYS-CONC-01 | CONFIRMED, LATENT | `syscall/futex.rs:425-439` | Non-atomic RMW; also ignores `FUTEX_OP_OPARG_SHIFT`, never wakes `uaddr2` waiters, and runs without the table lock. Syscalls run with interrupts off, so on one CPU nothing interleaves today. | v0.26.0 | open |
+| SYS-CONC-01 | CONFIRMED, LATENT | `syscall/futex.rs:425-439` | Non-atomic RMW; also ignores `FUTEX_OP_OPARG_SHIFT`, never wakes `uaddr2` waiters, and runs without the table lock. Syscalls run with interrupts off, so on one CPU nothing interleaves today. | v0.26.0 | fixed (ed89c26, a8937a2) |
 | SYS-INC-01 | CONFIRMED, dead code | `syscall/linux_compat.rs:31-59` | 64-PID limit confirmed, but `set_linux_abi` has no callers (`userspace/loader.rs:118` says not to call it), so the bitmap is always empty. | v0.27.0 | open |
 | SYS-SEC-01 | PARTIAL | `syscall/userspace.rs:51-146`, `arch/x86_64/idt.rs` | No `EFAULT` path and no fixup table: confirmed. The kernel does not halt on a user-address fault (see MEM-SEC-01). | v0.26.0 | fixed on x86_64 for the user accessors (34db90c); direct dereferences elsewhere remain |
 | PROC-SEC-01 | CONFIRMED | `process/table.rs:172-217` | `&'static` / `&'static mut` into boxed entries that `remove_process` drops. | v0.26.0 | open |
-| PROC-SEC-02 | CONFIRMED (worse) | `process/mod.rs:234-262`, `process/exit.rs:660-750` | Frees the running kernel stack, and also drops the `Thread` and then reads `thread.clear_tid`. | v0.26.0 | open |
+| PROC-SEC-02 | CONFIRMED (worse) | `process/mod.rs:234-262`, `process/exit.rs:660-750` | Frees the running kernel stack, and also drops the `Thread` and then reads `thread.clear_tid`. | v0.26.0 | fixed (479be43) |
 
 ### Filesystems, drivers, network, desktop, virtualisation
 
@@ -102,8 +102,8 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | FS-PERF-02 | CONFIRMED | `fs/mod.rs:726-737` | Mostly read-lock cache-line traffic rather than a convoy (writers are rare). | v0.26.0 | open |
 | FS-PERF-03 | CONFIRMED | `syscall/filesystem.rs:1699-1715` | Also non-atomic, drops metadata, fails for directories. `VfsNode` has no rename. | v0.26.0 | open |
 | FS-ARCH-01 | PARTIAL | `fs/file.rs:293-354` | Linear free-slot scan, bounded at 1024 -- minor. | v0.26.0 | open |
-| FS-SEC-01 | CONFIRMED (worse) | `fs/mod.rs:486-628` | Prefix hijack confirmed; also no `..` normalisation before mount lookup, relative symlinks resolve from `/`, and MAC checks the unresolved path. | v0.26.0 | open |
-| FS-SEC-02 | CONFIRMED | `syscall/filesystem.rs:1724-1735, 2219-2247, 2737-2760` | No checks on chmod/fchmod/unlink/rename; chown/fchown are no-op successes. | v0.26.0 | open |
+| FS-SEC-01 | CONFIRMED (worse) | `fs/mod.rs:486-628` | Prefix hijack confirmed; also no `..` normalisation before mount lookup, relative symlinks resolve from `/`, and MAC checks the unresolved path. | v0.26.0 | fixed (0256f96) |
+| FS-SEC-02 | CONFIRMED | `syscall/filesystem.rs:1724-1735, 2219-2247, 2737-2760` | No checks on chmod/fchmod/unlink/rename; chown/fchown are no-op successes. | v0.26.0 | fixed (0256f96, 62b0247) |
 | DRV-PERF-01 | PARTIAL, dead code | `services/desktop_ipc.rs:213-221` | Only a struct definition; nothing handles `UpdateWindowContent`. The copies that do happen are DESK-ARCH-01. | v0.26.0 | open |
 | DRV-PERF-02 | CONFIRMED | `fs/blockfs.rs:143-150`, `drivers/virtio/blk.rs:395, 484-496` | 8 requests per 4 KB block, each allocating and zeroing a frame and spinning up to 10M iterations. | v0.26.0 | open |
 | DRV-INC-01 | CONFIRMED (dangerous) | `drivers/nvme.rs:426, 472` | With a real controller, reads DMA to physical address 0. | v0.26.0 | open |
@@ -122,24 +122,24 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 
 | ID | Verdict | Location | Notes | Target | Status |
 |---|---|---|---|---|---|
-| LIBC-SEC-01 | CONFIRMED | `userland/libc/src/stdlib.c:82-191` | `pthread_create` exists, so multithreaded programs can race the allocator. | v0.26.0 | open |
-| LIBC-SEC-02 | PARTIAL, LATENT | `userland/libc/src/stdio.c:510` | Comment is false, but current callers use bases 8/10/16; octal `u64::MAX` is exactly 22 digits. | v0.26.0 | open |
-| LIBC-SEC-03 | CONFIRMED (worse) | `userland/libc/src/stdio.c:1036-1121` | Field widths are not parsed at all, so `%31s` misparses as well as overflowing. | v0.26.0 | open |
+| LIBC-SEC-01 | CONFIRMED | `userland/libc/src/stdlib.c:82-191` | `pthread_create` exists, so multithreaded programs can race the allocator. | v0.26.0 | fixed (1111da5) |
+| LIBC-SEC-02 | PARTIAL, LATENT | `userland/libc/src/stdio.c:510` | Comment is false, but current callers use bases 8/10/16; octal `u64::MAX` is exactly 22 digits. | v0.26.0 | fixed (1111da5) |
+| LIBC-SEC-03 | CONFIRMED (worse) | `userland/libc/src/stdio.c:1036-1121` | Field widths are not parsed at all, so `%31s` misparses as well as overflowing. | v0.26.0 | fixed (1111da5) |
 
 ## Findings not in the matrix
 
 | ID | Location | Defect | Target | Status |
 |---|---|---|---|---|
 | N-01 | `mm/frame_allocator.rs:229-334` | Bitmap is initialised all-free for 131072 frames regardless of node size, and `allocate` never checks `total_frames`: on nodes under 512 MB it returns frames past the end of RAM (hits aarch64/riscv64 at the 128 MB default). `free()` can underflow and partially frees before detecting a double free. | v0.26.0 | fixed (3f72251) |
-| N-02 | `sched/scheduler.rs:~1018` | `schedule_on_cpu` silently drops the task when `per_cpu(cpu)` is `None` (always, today). | v0.26.0 | open |
-| N-03 | `sched/task_management.rs:150-158` | `CLEANUP_QUEUE` is a function-local static nothing drains; dead tasks leak. | v0.26.0 | open |
+| N-02 | `sched/scheduler.rs:~1018` | `schedule_on_cpu` silently drops the task when `per_cpu(cpu)` is `None` (always, today). | v0.26.0 | fixed (ce60db1) |
+| N-03 | `sched/task_management.rs:150-158` | `CLEANUP_QUEUE` is a function-local static nothing drains; dead tasks leak. | v0.26.0 | fixed (479be43) |
 | N-04 | `cap/space.rs:163, 217, 251-266` | L2 index `(cap_id >> 8) as u16` truncates and aliases IDs >= 2^24; `remove()` takes the slot before comparing tokens, wiping a different capability. | v0.26.0 | fixed |
 | N-05 | `cap/manager.rs:52`, `cap/token.rs:241-279`, `cap/space.rs:409` | Three independent capability-ID allocators, all starting at 1. | v0.26.0 | fixed |
-| N-06 | `fs/file.rs:293-305` | `FileTable::new` leaves fds 0-2 as free slots, so the first `open` returns fd 0. | v0.26.0 | open |
+| N-06 | `fs/file.rs:293-305` | `FileTable::new` leaves fds 0-2 as free slots, so the first `open` returns fd 0. | v0.26.0 | fixed (bb2b682) |
 | N-07 | `mm/vas.rs:1419, 1478`, `mm/demand_paging.rs:265` | Unreachable CoW code paths (`vas.fork`, `vas.handle_page_fault`, `handle_cow_fault`). | v0.27.0 | open |
 | N-08 | `net/tcp.rs:226-247` | TCP segments are built with checksum 0. | v0.27.0 | open |
-| N-09 | `desktop/wayland/mod.rs:424-452`, `desktop/wayland/buffer.rs:150-154` | Unbounded client-controlled `wl_shm` pool size; `write_data` panics when `offset > len`. | v0.26.0 | open |
-| N-10 | `drivers/virtio/blk.rs:488-495` | On timeout the request frame is freed while the device may still DMA into it. | v0.26.0 | open |
+| N-09 | `desktop/wayland/mod.rs:424-452`, `desktop/wayland/buffer.rs:150-154` | Unbounded client-controlled `wl_shm` pool size; `write_data` panics when `offset > len`. | v0.26.0 | fixed (a7b885d) |
+| N-10 | `drivers/virtio/blk.rs:488-495` | On timeout the request frame is freed while the device may still DMA into it. | v0.26.0 | fixed (0dd6ead) |
 | N-11 | `drivers/nvme.rs` | No completion phase tracking; timeouts return `Ok`; `num_blocks - 1` underflows. | v0.26.0 | open |
 | N-13 | riscv64 boot, after BOOTOK | Boot silently restarted from `_start` in Stage 6, so the second pass found singletons already initialised or zeroed (the various panics seen). Root cause: `current_cpu_id()` read the M-mode CSR `mhartid` from S-mode (illegal instruction) and no `stvec` was installed, so the trap jumped to the kernel entry. Separately, the hardcoded frame-pool start (0x80E00000) lay inside the grown kernel image (ends 0x81148000), so frames aliased the kernel heap and boot stack. BOOTOK and 29/29 print before Stage 6, which is why the boot check passed. | v0.26.0 | fixed (3067856) |
 | N-14 | `sched/smp.rs` `current_cpu_id` (riscv64) | The logical CPU ID is read from `tp`, which is the user TLS pointer in U-mode. The future U-mode trap entry must restore the kernel `tp` from `sscratch` before any code calls `current_cpu_id`, or user code chooses its CPU identity. Latent: riscv64 has no U-mode entry yet. Raised by review of `3067856`. | v0.27.0 (with SMP/U-mode bring-up) | open |
@@ -151,7 +151,7 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 
 | ID | Location | Issue | Resolution |
 |---|---|---|---|
-| W-1 | `bootstrap.rs` | Hardcoded `/home/parobek/Code/VeridianOS/target/veridian-sysroot` directory chain. | Now one `option_env!("VERIDIAN_SYSROOT")` constant (default: the path the shipped rootfs binaries were built with). Removed entirely once `tools/cross` builds with `--prefix=/usr`. |
+| W-1 | `bootstrap.rs` | Hardcoded `/home/parobek/Code/VeridianOS/target/veridian-sysroot` directory chain. | `build.rs` passes `VERIDIAN_SYSROOT`, defaulting to `<repo>/target/veridian-sysroot` like `tools/cross` (b3e4b29). Removed entirely once `tools/cross` builds with `--prefix=/usr`. |
 | W-2 | `syscall/filesystem.rs` `sys_close` | Silently refuses to close DRM fds (leak) to work around Mesa closing them after reading an empty `/proc/self/maps`. | `/proc/self/maps` now reports the real address space (`fs/procfs.rs`). The `sys_close` special case is removed (DRM hardening commit). **Pending:** a KDE boot to confirm kwin keeps its DRM fds now that `/proc/self/maps` is populated -- the cross-compiled sysroot and KDE rootfs are not present on the build machine and must be rebuilt with `tools/cross/build-all-kde.sh`. |
 | W-3 | `arch/x86_64/idt.rs` | Kernel-mode faults on user addresses no longer try demand paging, so a syscall touching a not-yet-faulted user page aborts. | Fixed for the user accessors (34db90c): faults in the copy routine get demand paging, then EFAULT. |
 

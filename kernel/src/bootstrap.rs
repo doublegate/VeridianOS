@@ -1324,15 +1324,13 @@ fn mount_blockfs_root() {
             // path into the binaries. Libraries like xkbcommon, fontconfig,
             // and libinput search for data files at those compile-time
             // paths, so recreate the sysroot directory and symlink its `usr`
-            // back to `/usr`. Set VERIDIAN_SYSROOT at kernel build time to
-            // match the sysroot the rootfs binaries were built against; the
-            // default is the path the shipped v0.25 rootfs was built with.
-            // This goes away once tools/cross builds with --prefix=/usr.
+            // back to `/usr`. build.rs sets the path: VERIDIAN_SYSROOT if
+            // given at kernel build time, else <repo>/target/veridian-sysroot,
+            // the tools/cross default. It must match the sysroot the rootfs
+            // binaries were built against. This goes away once tools/cross
+            // builds with --prefix=/usr.
             {
-                const SYSROOT: &str = match option_env!("VERIDIAN_SYSROOT") {
-                    Some(path) => path,
-                    None => "/home/parobek/Code/VeridianOS/target/veridian-sysroot",
-                };
+                const SYSROOT: &str = env!("VERIDIAN_SYSROOT_PATH");
                 let mut current = root.clone();
                 for component in SYSROOT.split('/').filter(|c| !c.is_empty()) {
                     current = current
@@ -2835,6 +2833,16 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
         #[cfg(not(target_arch = "x86_64"))]
         let ok = true; // no fault fixup on aarch64/riscv64 yet
         report_test("usercopy_fault_returns_efault", ok, passed, failed);
+    }
+
+    // Test 33: the futex WAKE_OP atomic on an unmapped user word returns an
+    // error instead of faulting in the kernel (x86_64 cmpxchg fixup).
+    {
+        #[cfg(target_arch = "x86_64")]
+        let ok = crate::syscall::userspace::cmpxchg_user_u32(0x0000_7FF0_0000_0000, 0, 1).is_err();
+        #[cfg(not(target_arch = "x86_64"))]
+        let ok = true; // no fault fixup on aarch64/riscv64 yet
+        report_test("usercopy_cmpxchg_fault_returns_efault", ok, passed, failed);
     }
 
     // Test 32: the boot stack has not overflowed into the statics below it

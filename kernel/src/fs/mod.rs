@@ -107,6 +107,26 @@ impl Permissions {
     }
 
     /// Create permissions from Unix mode bits
+    /// The permission bits as a POSIX mode (`0o777` mask), the inverse of
+    /// [`from_mode`](Self::from_mode).
+    pub fn to_mode(&self) -> u32 {
+        [
+            (self.owner_read, 0o400),
+            (self.owner_write, 0o200),
+            (self.owner_exec, 0o100),
+            (self.group_read, 0o040),
+            (self.group_write, 0o020),
+            (self.group_exec, 0o010),
+            (self.other_read, 0o004),
+            (self.other_write, 0o002),
+            (self.other_exec, 0o001),
+        ]
+        .iter()
+        .filter(|(set, _)| *set)
+        .map(|(_, bit)| bit)
+        .sum()
+    }
+
     pub fn from_mode(mode: u32) -> Self {
         Self {
             owner_read: (mode & 0o400) != 0,
@@ -281,6 +301,12 @@ pub trait VfsNode: Send + Sync {
         Err(KernelError::NotImplemented { feature: "chmod" })
     }
 
+    /// Change the owner and/or group of this node; `None` leaves that id
+    /// unchanged. Permission checks are the caller's job.
+    fn chown(&self, _uid: Option<u32>, _gid: Option<u32>) -> Result<(), KernelError> {
+        Err(KernelError::NotImplemented { feature: "chown" })
+    }
+
     /// Poll readiness for I/O multiplexing (poll/epoll).
     ///
     /// Returns a bitmask of ready events using POLL* constants:
@@ -337,6 +363,57 @@ pub struct MountPoint {
     pub filesystem: Arc<dyn Filesystem>,
 }
 
+/// Make `path` absolute (relative to `cwd`) and remove `.`, `..` and empty
+/// components lexically. `..` at the root stays at the root. The result
+/// always starts with `/` and never ends with one (except `/` itself).
+pub(crate) fn normalize_path(path: &str, cwd: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    let joined = if path.starts_with('/') {
+        None
+    } else {
+        Some(cwd)
+    };
+    for component in joined
+        .into_iter()
+        .chain(core::iter::once(path))
+        .flat_map(|p| p.split('/'))
+    {
+        match component {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            c => parts.push(c),
+        }
+    }
+    let mut out = String::with_capacity(path.len() + 1);
+    for part in &parts {
+        out.push('/');
+        out.push_str(part);
+    }
+    if out.is_empty() {
+        out.push('/');
+    }
+    out
+}
+
+/// Whether normalized `path` is `mount` itself or lies below it, on a
+/// whole-component boundary.
+fn path_is_under(path: &str, mount: &str) -> bool {
+    mount == "/"
+        || path == mount
+        || (path.starts_with(mount) && path.as_bytes().get(mount.len()) == Some(&b'/'))
+}
+
+/// The part of normalized `path` below `mount` (empty for the mount root).
+fn path_relative_to_mount<'a>(path: &'a str, mount: &str) -> &'a str {
+    if mount == "/" {
+        path
+    } else {
+        &path[mount.len().min(path.len())..]
+    }
+}
+
 /// Virtual Filesystem Manager
 pub struct Vfs {
     /// Root filesystem
@@ -385,6 +462,7 @@ impl Vfs {
             return Err(KernelError::FsError(crate::error::FsError::NoRootFs));
         }
 
+        let path = normalize_path(&path, "/");
         if self.mounts.contains_key(&path) {
             return Err(KernelError::FsError(crate::error::FsError::AlreadyMounted));
         }
@@ -426,7 +504,7 @@ impl Vfs {
     /// Unmount a filesystem at the specified path
     pub fn unmount(&mut self, path: &str) -> Result<(), KernelError> {
         self.mounts
-            .remove(path)
+            .remove(&normalize_path(path, "/"))
             .ok_or(KernelError::FsError(crate::error::FsError::NotMounted))
             .map(|_| ())
     }
@@ -460,6 +538,30 @@ impl Vfs {
         self.resolve_path_inner(path, cwd, false, 0)
     }
 
+    /// The mount point (normalized path) that serves `path`.
+    pub fn mount_point_of(&self, path: &str) -> String {
+        let path = normalize_path(path, &self.cwd);
+        self.mounts
+            .keys()
+            .filter(|m| path_is_under(&path, m))
+            .max_by_key(|m| m.len())
+            .cloned()
+            .unwrap_or_else(|| String::from("/"))
+    }
+
+    /// Resolve a path, returning the node together with its canonical
+    /// absolute path (all `.`, `..` and followed symlinks removed). Access
+    /// checks must use this path: checking the path as written lets a
+    /// symlink or a `..` reach an object the policy meant to protect.
+    pub fn resolve_canonical(
+        &self,
+        path: &str,
+        cwd: &str,
+        follow_last: bool,
+    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
+        self.resolve_inner(path, cwd, follow_last, 0)
+    }
+
     /// Inner path resolution with configurable symlink behavior.
     ///
     /// - `follow_last`: if `true`, a symlink at the final component is
@@ -473,6 +575,22 @@ impl Vfs {
         follow_last: bool,
         symlink_depth: usize,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.resolve_inner(path, cwd, follow_last, symlink_depth)
+            .map(|(node, _)| node)
+    }
+
+    /// Resolution core (FS-SEC-01). The path is made absolute and its `.`
+    /// and `..` components are removed lexically *before* the mount table is
+    /// consulted, so `..` cannot stay pinned inside a mount, and the mount
+    /// is chosen by whole path components (longest match), so `/devices`
+    /// is not served by a filesystem mounted at `/dev`.
+    fn resolve_inner(
+        &self,
+        path: &str,
+        cwd: &str,
+        follow_last: bool,
+        symlink_depth: usize,
+    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
         if symlink_depth > SYMLINK_MAX_DEPTH {
             return Err(KernelError::FsError(crate::error::FsError::SymlinkLoop));
         }
@@ -482,119 +600,71 @@ impl Vfs {
             .as_ref()
             .ok_or(KernelError::FsError(crate::error::FsError::NoRootFs))?;
 
-        // Normalize path
-        let path: String = if path.starts_with('/') {
-            path.into()
-        } else if cwd.ends_with('/') {
-            format!("{}{}", cwd, path)
-        } else {
-            format!("{}/{}", cwd, path)
+        let path = normalize_path(path, cwd);
+
+        let mount = self
+            .mounts
+            .iter()
+            .filter(|(mount_path, _)| path_is_under(&path, mount_path))
+            .max_by_key(|(mount_path, _)| mount_path.len());
+        let (mount_path, start) = match mount {
+            Some((mount_path, fs)) => (mount_path.as_str(), fs.root()),
+            None => ("/", root_fs.root()),
         };
 
-        // Check if path is under a mount point
-        for (mount_path, fs) in self.mounts.iter().rev() {
-            if path.starts_with(mount_path) {
-                let relative_path = &path[mount_path.len()..];
-                return self.traverse_path(fs.root(), relative_path, follow_last, symlink_depth);
-            }
-        }
-
-        // Use root filesystem
-        self.traverse_path(root_fs.root(), &path, follow_last, symlink_depth)
+        self.traverse_path(start, mount_path, &path, follow_last, symlink_depth)
     }
 
-    /// Traverse a path from a starting node, with symlink resolution and
-    /// loop detection.
+    /// Walk the normalized absolute `path` from `node`, the root of the
+    /// filesystem mounted at `mount_path`.
     ///
-    /// When a path component resolves to a symlink node, its target is
-    /// read via `readlink()` and recursively resolved. For the **final**
-    /// component, symlink resolution is controlled by `follow_last`.
+    /// When a component is a symlink that must be followed, its target --
+    /// taken relative to the symlink's own directory unless absolute -- is
+    /// spliced in front of the remaining components and the result is
+    /// resolved from scratch, so mounts and `..` inside the target are
+    /// handled exactly like a path the caller wrote.
     fn traverse_path(
         &self,
         mut node: Arc<dyn VfsNode>,
+        mount_path: &str,
         path: &str,
         follow_last: bool,
-        mut symlink_depth: usize,
-    ) -> Result<Arc<dyn VfsNode>, KernelError> {
-        // Keep track of path components for parent traversal
-        let mut path_stack: Vec<Arc<dyn VfsNode>> = Vec::new();
-        path_stack.push(node.clone());
-
-        let components: Vec<&str> = path
-            .split('/')
-            .filter(|s| !s.is_empty() && *s != ".")
-            .collect();
-
+        symlink_depth: usize,
+    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
+        let relative = path_relative_to_mount(path, mount_path);
+        let components: Vec<&str> = relative.split('/').filter(|s| !s.is_empty()).collect();
         let last_idx = components.len().saturating_sub(1);
 
         for (idx, component) in components.iter().enumerate() {
+            node = node.lookup(component)?;
+
             let is_last = idx == last_idx;
+            if node.node_type() == NodeType::Symlink && (!is_last || follow_last) {
+                let target = node.readlink()?;
 
-            if *component == ".." {
-                // Go back to parent directory
-                if path_stack.len() > 1 {
-                    path_stack.pop();
-                    node = path_stack
-                        .last()
-                        .ok_or(KernelError::LegacyError {
-                            message: "internal error: path stack unexpectedly empty",
-                        })?
-                        .clone();
-                }
-                // If at root, stay at root
-            } else {
-                // Move forward to child
-                node = node.lookup(component)?;
-
-                // Check if the resolved node is a symlink
-                if node.node_type() == NodeType::Symlink {
-                    // For the final component, only follow if requested
-                    if !is_last || follow_last {
-                        symlink_depth += 1;
-                        if symlink_depth > SYMLINK_MAX_DEPTH {
-                            return Err(KernelError::FsError(crate::error::FsError::SymlinkLoop));
-                        }
-
-                        // Read the symlink target
-                        let target = node.readlink()?;
-
-                        // Resolve the target path recursively.
-                        // If the target is absolute, resolve from root.
-                        // If relative, resolve from the current directory
-                        // in the traversal (the parent of the symlink).
-                        if target.starts_with('/') {
-                            node = self.resolve_path_inner(
-                                &target,
-                                "/",
-                                // Intermediate symlinks (not the final
-                                // component of the *original* path) are
-                                // always followed. For the final component,
-                                // honour follow_last.
-                                !is_last || follow_last,
-                                symlink_depth,
-                            )?;
-                        } else {
-                            // Build the directory path of the current
-                            // traversal position (the parent of the
-                            // symlink) by collecting the path_stack.
-                            // The last entry on path_stack is the parent
-                            // directory (we haven't pushed the symlink
-                            // node yet).
-                            node = self.resolve_path_inner(
-                                &target,
-                                "/",
-                                !is_last || follow_last,
-                                symlink_depth,
-                            )?;
-                        }
+                // Absolute path of the directory holding the symlink.
+                let mut link_dir = String::from(mount_path);
+                for c in &components[..idx] {
+                    if !link_dir.ends_with('/') {
+                        link_dir.push('/');
                     }
+                    link_dir.push_str(c);
                 }
 
-                path_stack.push(node.clone());
+                let mut spliced = if target.starts_with('/') {
+                    target
+                } else {
+                    format!("{}/{}", link_dir, target)
+                };
+                for c in &components[idx + 1..] {
+                    spliced.push('/');
+                    spliced.push_str(c);
+                }
+                return self.resolve_inner(&spliced, "/", follow_last, symlink_depth + 1);
             }
         }
 
-        Ok(node)
+        Ok((node, String::from(path)))
     }
 
     /// Get current working directory
@@ -632,42 +702,43 @@ impl Vfs {
             .map(|p| p.pid.0)
             .unwrap_or(0);
 
-        crate::security::mac::check_file_access(path, access, pid)?;
-
-        self.resolve_path(path)
+        // MAC is checked on the canonical path, after `..` and symlinks are
+        // resolved, never on the path as written (FS-SEC-01).
+        let (node, canonical) = self.resolve_canonical(path, &self.cwd, true)?;
+        crate::security::mac::check_file_access(&canonical, access, pid)?;
+        Ok(node)
     }
 
     /// Create a directory
     ///
     /// Checks MAC policy (Write access to file domain) before creating.
     pub fn mkdir(&self, path: &str, permissions: Permissions) -> Result<(), KernelError> {
-        // Strip trailing slashes (e.g., "/tmp/foo/" -> "/tmp/foo")
-        let path = path.trim_end_matches('/');
-        if path.is_empty() {
+        // Parse the path once and use that single result both for the MAC
+        // check and for the creation, so they cannot disagree: the parent
+        // is resolved canonically (following symlinks) and the policy sees
+        // the path the directory is really created at. Normalizing also
+        // removes trailing slashes, `.` and `..`, so the final name is
+        // never one of those.
+        let path = normalize_path(path, &self.cwd);
+        if path == "/" {
             return Err(KernelError::FsError(crate::error::FsError::AlreadyExists));
         }
+        let pos = path.rfind('/').unwrap_or(0);
+        let (parent_path, name) = (&path[..pos.max(1)], &path[pos + 1..]);
+
+        let (parent, canonical_parent) = self.resolve_canonical(parent_path, "/", true)?;
+        let target = if canonical_parent == "/" {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", canonical_parent, name)
+        };
 
         // MAC check: creating a directory requires Write access
         let pid = crate::process::current_process()
             .map(|p| p.pid.0)
             .unwrap_or(0);
-        crate::security::mac::check_file_access(path, crate::security::AccessType::Write, pid)?;
+        crate::security::mac::check_file_access(&target, crate::security::AccessType::Write, pid)?;
 
-        // Split path into parent and name
-        let (parent_path, name) = if let Some(pos) = path.rfind('/') {
-            if pos == 0 {
-                ("/", &path[1..])
-            } else {
-                (&path[..pos], &path[pos + 1..])
-            }
-        } else {
-            return Err(KernelError::FsError(crate::error::FsError::InvalidPath));
-        };
-
-        // Get parent directory
-        let parent = self.resolve_path(parent_path)?;
-
-        // Create directory in parent
         parent.mkdir(name, permissions)?;
         Ok(())
     }
@@ -1185,6 +1256,131 @@ mod tests {
         vfs
     }
 
+    // --- Path resolution (FS-SEC-01) ---
+
+    #[test]
+    fn normalize_path_removes_dots() {
+        assert_eq!(normalize_path("/a/./b/../c/", "/"), "/a/c");
+        assert_eq!(normalize_path("../../x", "/a"), "/x");
+        assert_eq!(normalize_path("..", "/"), "/");
+        assert_eq!(normalize_path("b", "/a/"), "/a/b");
+        assert_eq!(normalize_path("", "/"), "/");
+    }
+
+    #[test]
+    fn mount_match_respects_component_boundary() {
+        assert!(path_is_under("/dev", "/dev"));
+        assert!(path_is_under("/dev/null", "/dev"));
+        assert!(!path_is_under("/devices", "/dev"));
+        assert!(path_is_under("/anything", "/"));
+    }
+
+    #[test]
+    fn sibling_with_mount_prefix_is_not_hijacked() {
+        // Before the fix "/devices" matched the "/dev" mount by prefix.
+        let mut vfs = make_vfs_with_root();
+        let root = vfs.root_fs.as_ref().unwrap().root();
+        root.mkdir("dev", Permissions::default()).unwrap();
+        let devices = root.mkdir("devices", Permissions::default()).unwrap();
+        devices.create("marker", Permissions::default()).unwrap();
+        vfs.mount(String::from("/dev"), Arc::new(ramfs::RamFs::new()))
+            .unwrap();
+        assert!(vfs.resolve_path("/devices/marker").is_ok());
+        assert!(vfs.resolve_path("/dev/marker").is_err());
+    }
+
+    #[test]
+    fn dotdot_leaves_a_mount() {
+        // Before the fix ".." at a mount root stayed inside the mount.
+        let mut vfs = make_vfs_with_root();
+        let root = vfs.root_fs.as_ref().unwrap().root();
+        root.mkdir("mnt", Permissions::default()).unwrap();
+        root.create("top", Permissions::default()).unwrap();
+        vfs.mount(String::from("/mnt"), Arc::new(ramfs::RamFs::new()))
+            .unwrap();
+        assert!(vfs.resolve_path("/mnt/../top").is_ok());
+    }
+
+    #[test]
+    fn relative_symlink_resolves_from_its_directory() {
+        // Before the fix a relative target was resolved from "/".
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs.as_ref().unwrap().root();
+        let a = root.mkdir("a", Permissions::default()).unwrap();
+        a.create("target", Permissions::default()).unwrap();
+        a.symlink("link", "target").unwrap();
+        let (_, canonical) = vfs.resolve_canonical("/a/link", "/", true).unwrap();
+        assert_eq!(canonical, "/a/target");
+    }
+
+    #[test]
+    fn canonical_path_follows_intermediate_symlink() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs.as_ref().unwrap().root();
+        let real = root.mkdir("real", Permissions::default()).unwrap();
+        real.create("f", Permissions::default()).unwrap();
+        root.symlink("alias", "/real").unwrap();
+        let (_, canonical) = vfs.resolve_canonical("/alias/f", "/", true).unwrap();
+        assert_eq!(canonical, "/real/f");
+        // Not following the last component returns the link itself.
+        let (node, canonical) = vfs.resolve_canonical("/alias", "/", false).unwrap();
+        assert_eq!(node.node_type(), NodeType::Symlink);
+        assert_eq!(canonical, "/alias");
+    }
+
+    #[test]
+    fn mkdir_parses_path_once() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs.as_ref().unwrap().root();
+        root.mkdir("real", Permissions::default()).unwrap();
+        root.symlink("alias", "/real").unwrap();
+        // Created where the parent really resolves, which is the path the
+        // MAC check now sees.
+        vfs.mkdir("/alias/sub/", Permissions::default()).unwrap();
+        assert!(vfs.resolve_path("/real/sub").is_ok());
+        // ".." is resolved, never created as an entry name.
+        assert!(vfs.mkdir("/real/..", Permissions::default()).is_err());
+    }
+
+    #[test]
+    fn symlink_loop_is_reported() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs.as_ref().unwrap().root();
+        root.symlink("loop", "/loop").unwrap();
+        assert!(vfs.resolve_path("/loop").is_err());
+    }
+
+    // --- chown (FS-SEC-02) ---
+
+    #[test]
+    fn ramfs_chown_updates_owner_and_keeps_unset_ids() {
+        let fs = ramfs::RamFs::new();
+        let file = fs.root().create("f", Permissions::default()).unwrap();
+        file.chown(Some(1000), None).unwrap();
+        let meta = file.metadata().unwrap();
+        assert_eq!((meta.uid, meta.gid), (1000, 0));
+        file.chown(None, Some(50)).unwrap();
+        let meta = file.metadata().unwrap();
+        assert_eq!((meta.uid, meta.gid), (1000, 50));
+    }
+
+    #[test]
+    fn blockfs_chown_rejects_ids_wider_than_disk_format() {
+        let fs = blockfs::BlockFs::format(1000, 100).unwrap();
+        let file = fs.root().create("f", Permissions::default()).unwrap();
+        assert!(file.chown(Some(70_000), None).is_err());
+        file.chown(Some(1000), Some(100)).unwrap();
+        let meta = file.metadata().unwrap();
+        assert_eq!((meta.uid, meta.gid), (1000, 100));
+    }
+
+    #[test]
+    fn permissions_mode_round_trip() {
+        for mode in [0o000, 0o600, 0o640, 0o755, 0o777, 0o421] {
+            assert_eq!(Permissions::from_mode(mode).to_mode(), mode);
+        }
+    }
+
     // --- Permissions tests ---
 
     #[test]
@@ -1489,10 +1685,13 @@ mod tests {
     }
 
     #[test]
-    fn test_mkdir_invalid_path() {
+    fn test_mkdir_relative_path_uses_cwd() {
+        // A relative path is resolved against the cwd like everywhere else
+        // in the VFS (it used to be rejected as invalid).
         let vfs = make_vfs_with_root();
-        let result = vfs.mkdir("no_slash", Permissions::default());
-        assert!(result.is_err());
+        vfs.mkdir("no_slash", Permissions::default()).unwrap();
+        assert!(vfs.resolve_path("/no_slash").is_ok());
+        assert!(vfs.mkdir("/", Permissions::default()).is_err());
     }
 
     #[test]

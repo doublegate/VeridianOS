@@ -4,10 +4,12 @@
  * Copyright (c) 2025-2026 VeridianOS Contributors
  * SPDX-License-Identifier: MIT OR Apache-2.0
  *
- * Error codes matching kernel/src/syscall/mod.rs SyscallError enum.
  * Syscall return values: >= 0 is success, < 0 is -errno.
+ *
+ * Values are the Linux x86_64 errno numbers: the kernel translates every
+ * syscall error with to_linux_errno() (musl expects Linux numbers), so
+ * this libc must use the same table. VeridianOS-only codes use 200+.
  */
-
 #ifndef VERIDIAN_ERRNO_H
 #define VERIDIAN_ERRNO_H
 
@@ -16,73 +18,73 @@ extern "C" {
 #endif
 
 /* ========================================================================= */
-/* Core Error Codes (matching SyscallError repr(i32))                        */
+/* Core Error Codes                                                          */
 /* ========================================================================= */
 
 /** Invalid system call number */
-#define ENOSYS              1   /* SyscallError::InvalidSyscall = -1 */
+#define ENOSYS              38
 
 /** Invalid argument */
-#define EINVAL              2   /* SyscallError::InvalidArgument = -2 */
+#define EINVAL              22
 
 /** Permission denied */
-#define EPERM               3   /* SyscallError::PermissionDenied = -3 */
+#define EPERM               1
 
 /** Resource not found (file, process, endpoint) */
-#define ENOENT              4   /* SyscallError::ResourceNotFound = -4 */
+#define ENOENT              2
 
 /** Out of memory */
-#define ENOMEM              5   /* SyscallError::OutOfMemory = -5 */
+#define ENOMEM              12
 
 /** Operation would block (non-blocking mode) */
-#define EAGAIN              6   /* SyscallError::WouldBlock = -6 */
+#define EAGAIN              11
 
 /** Operation interrupted by signal */
-#define EINTR               7   /* SyscallError::Interrupted = -7 */
+#define EINTR               4
 
 /** Invalid internal state */
-#define EILSEQ              8   /* SyscallError::InvalidState = -8 */
+#define EILSEQ              84
 
 /** Invalid pointer (null, misaligned, or out of bounds) */
-#define EFAULT              9   /* SyscallError::InvalidPointer = -9 */
+#define EFAULT              14
 
 /* ========================================================================= */
 /* Capability Error Codes                                                    */
 /* ========================================================================= */
 
 /** Invalid capability token */
-#define ECAPINVAL           10  /* SyscallError::InvalidCapability = -10 */
+#define ECAPINVAL           200
 
 /** Capability has been revoked */
-#define ECAPREVOKED         11  /* SyscallError::CapabilityRevoked = -11 */
+#define ECAPREVOKED         201
 
 /** Insufficient capability rights */
-#define ECAPRIGHTS          12  /* SyscallError::InsufficientRights = -12 */
+#define ECAPRIGHTS          202
 
 /** Capability not found */
-#define ECAPNOTFOUND        13  /* SyscallError::CapabilityNotFound = -13 */
+#define ECAPNOTFOUND        203
 
 /** Capability already exists */
-#define ECAPEXISTS          14  /* SyscallError::CapabilityAlreadyExists = -14 */
+#define ECAPEXISTS          204
 
 /** Invalid capability object */
-#define ECAPOBJECT          15  /* SyscallError::InvalidCapabilityObject = -15 */
+#define ECAPOBJECT          205
 
 /** Capability delegation denied */
-#define ECAPDELEG           16  /* SyscallError::CapabilityDelegationDenied = -16 */
+#define ECAPDELEG           206
 
 /* ========================================================================= */
 /* Extended Error Codes                                                      */
 /* ========================================================================= */
 
 /** Unmapped memory region */
-#define ENOMAPPING          17  /* SyscallError::UnmappedMemory = -17 */
+#define ENOMAPPING          207
 
 /** Access denied (kernel memory, etc.) */
-#define EACCES              18  /* SyscallError::AccessDenied = -18 */
+#define EACCES              13
 
 /** Target process not found */
-#define ESRCH               19  /* SyscallError::ProcessNotFound = -19 */
+#define ESRCH               3
 
 /* ========================================================================= */
 /* Additional POSIX Error Codes                                              */
@@ -95,185 +97,186 @@ extern "C" {
  */
 
 /** File exists */
-#define EEXIST              20
+#define EEXIST              17
 
 /** Bad file descriptor */
-#define EBADF               21
+#define EBADF               9
 
 /** I/O error */
-#define EIO                 22
+#define EIO                 5
 
 /** No such device or address */
-#define ENXIO               23
+#define ENXIO               6
 
 /** Argument list too long */
-#define E2BIG               24
+#define E2BIG               7
 
 /** Exec format error */
-#define ENOEXEC             25
+#define ENOEXEC             8
 
 /** No child processes */
-#define ECHILD              26
+#define ECHILD              10
 
 /** Device or resource busy */
-#define EBUSY               27
+#define EBUSY               16
 
 /** Not a directory */
-#define ENOTDIR             28
+#define ENOTDIR             20
 
 /** Is a directory */
-#define EISDIR              29
+#define EISDIR              21
 
 /** Too many open files */
-#define EMFILE              30
+#define EMFILE              24
 
 /** File table overflow */
-#define ENFILE              31
+#define ENFILE              23
 
 /** Not a typewriter (inappropriate ioctl) */
-#define ENOTTY              32
+#define ENOTTY              25
 
 /** Text file busy */
-#define ETXTBSY             33
+#define ETXTBSY             26
 
 /** File too large */
-#define EFBIG               34
+#define EFBIG               27
 
 /** No space left on device */
-#define ENOSPC              35
+#define ENOSPC              28
 
 /** Illegal seek */
-#define ESPIPE              36
+#define ESPIPE              29
 
 /** Read-only file system */
-#define EROFS               37
+#define EROFS               30
 
 /** Too many links */
-#define EMLINK              38
+#define EMLINK              31
 
 /** Broken pipe */
-#define EPIPE               39
+#define EPIPE               32
 
 /** Math argument out of domain */
-#define EDOM                40
+#define EDOM                33
 
 /** Math result not representable */
-#define ERANGE              41
+#define ERANGE              34
 
 /** Resource deadlock would occur */
-#define EDEADLK             42
+#define EDEADLK             35
 
 /** File name too long */
-#define ENAMETOOLONG        43
+#define ENAMETOOLONG        36
 
 /** No record locks available */
-#define ENOLCK              44
+#define ENOLCK              37
 
 /** Directory not empty */
-#define ENOTEMPTY           45
+#define ENOTEMPTY           39
 
 /** Too many symbolic links encountered */
-#define ELOOP               46
+#define ELOOP               40
 
 /** No message of desired type */
-#define ENOMSG              47
+#define ENOMSG              42
 
 /** Cross-device link */
-#define EXDEV               48
+#define EXDEV               18
 
 /** Connection refused */
-#define ECONNREFUSED        49
+#define ECONNREFUSED        111
 
 /** Connection reset by peer */
-#define ECONNRESET          50
+#define ECONNRESET          104
 
 /** No buffer space available */
-#define ENOBUFS             51
+#define ENOBUFS             105
 
 /** Protocol not supported */
-#define EPROTONOSUPPORT     52
+#define EPROTONOSUPPORT     93
 
 /** Operation not supported */
-#define ENOTSUP             53
+#define ENOTSUP             95
 #define EOPNOTSUPP          ENOTSUP
 
 /** Address already in use */
-#define EADDRINUSE          54
+#define EADDRINUSE          98
 
 /** Address not available */
-#define EADDRNOTAVAIL       55
+#define EADDRNOTAVAIL       99
 
 /** Network is unreachable */
-#define ENETUNREACH         56
+#define ENETUNREACH         101
 
 /** Connection timed out */
-#define ETIMEDOUT           57
+#define ETIMEDOUT           110
 
 /** Operation already in progress */
-#define EALREADY            58
+#define EALREADY            114
 
 /** Operation now in progress */
-#define EINPROGRESS         59
+#define EINPROGRESS         115
 
 /** Socket operation on non-socket */
-#define ENOTSOCK            60
+#define ENOTSOCK            88
 
 /** Destination address required */
-#define EDESTADDRREQ        61
+#define EDESTADDRREQ        89
 
 /** Message too long */
-#define EMSGSIZE            62
+#define EMSGSIZE            90
 
 /** Protocol wrong type for socket */
-#define EPROTOTYPE          63
+#define EPROTOTYPE          91
 
 /** Transport endpoint is not connected */
-#define ENOTCONN            64
+#define ENOTCONN            107
 
 /** Transport endpoint is already connected */
-#define EISCONN             65
+#define EISCONN             106
 
 /** Address family not supported */
-#define EAFNOSUPPORT        66
+#define EAFNOSUPPORT        97
 
 /** Connection aborted */
-#define ECONNABORTED        67
+#define ECONNABORTED        103
 
 /** No route to host */
-#define EHOSTUNREACH        68
+#define EHOSTUNREACH        113
 
 /** Network is down */
-#define ENETDOWN            69
+#define ENETDOWN            100
 
 /** Network dropped connection because of reset */
-#define ENETRESET           70
+#define ENETRESET           102
 
 /** Protocol not available */
-#define ENOPROTOOPT         71
+#define ENOPROTOOPT         92
 
 /** No such device */
-#define ENODEV              72
+#define ENODEV              19
 
 /** Value too large for defined data type */
-#define EOVERFLOW           73
+#define EOVERFLOW           75
 
 /** Protocol error */
-#define EPROTO              74
+#define EPROTO              71
 
 /** Operation canceled */
-#define ECANCELED           75
+#define ECANCELED           125
 
 /** Owner died */
-#define EOWNERDEAD          76
+#define EOWNERDEAD          130
 
 /** State not recoverable */
-#define ENOTRECOVERABLE     77
+#define ENOTRECOVERABLE     131
 
 /** Link has been severed */
-#define ENOLINK             78
+#define ENOLINK             67
 
 /** Resource limit exceeded (process table full, fd table full) */
-#define ERESOURCELIMIT      79  /* SyscallError::ResourceLimitExceeded = -79 */
+#define ERESOURCELIMIT      208
+#define ENODATA             61  /* No such attribute / no data (xattr) */
 
 /* ========================================================================= */
 /* POSIX-Compatible Aliases                                                  */

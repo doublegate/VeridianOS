@@ -342,6 +342,13 @@ int __loc_is_allocated(struct __locale_struct *loc) {
     return 0;
 }
 
+/* GNU gettext's catalog-change counter. KI18n bumps it to make gettext
+ * drop cached translations; its configure check only compiles (the cross
+ * try-compile target type is a static library), so it "finds" the symbol
+ * on musl too and every executable then fails to link. musl's gettext
+ * has no such cache, so a plain counter is the whole contract. */
+int _nl_msg_cat_cntr = 0;
+
 /* Public alias -- musl declares newlocale with locale_t = struct __locale_struct* */
 struct __locale_struct *newlocale(int mask, const char *name,
                                   struct __locale_struct *base) {

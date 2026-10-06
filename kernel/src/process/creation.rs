@@ -339,7 +339,20 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
         return exec_process(&interpreter, &new_argv, envp);
     }
 
+    // Validate the image before touching the current address space. exec
+    // must leave the caller intact when it fails; parsing after clear()
+    // meant a non-ELF file (e.g. the empty /proc/self/exe) destroyed the
+    // caller's mappings and the failed exec returned into nothing.
+    let elf_binary =
+        ElfLoader::new()
+            .parse(&file_data)
+            .map_err(|_| KernelError::InvalidArgument {
+                name: "elf",
+                value: "not a loadable ELF image",
+            })?;
+
     // Step 2: Clear current address space and load new program
+    *process.exe_path.lock() = resolved_path.clone();
     let entry_point = {
         let mut memory_space = process.memory_space.lock();
 
@@ -376,14 +389,6 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
 
     // Step 2b: Check for dynamic linking
     let (final_entry, aux_vector) = {
-        let loader = ElfLoader::new();
-        let elf_binary = loader
-            .parse(&file_data)
-            .map_err(|_| KernelError::InvalidArgument {
-                name: "elf",
-                value: "failed to parse ELF for dynamic linking check",
-            })?;
-
         if elf_binary.dynamic && elf_binary.interpreter.is_some() {
             // Dynamically linked -- load interpreter and build aux vector
             let dyn_info = crate::elf::dynamic::prepare_dynamic_linking(

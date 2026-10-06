@@ -24,43 +24,118 @@ unsafe impl Send for TaskPtr {}
 // SAFETY: Same as Send -- all access is synchronized via mutexes.
 unsafe impl Sync for TaskPtr {}
 
-/// Clean up dead tasks that have been marked for deferred deallocation
+/// Ticks to wait after a task or thread dies before freeing it, so that no
+/// CPU still running on its stack or holding its pointer is affected.
 #[cfg(feature = "alloc")]
-pub fn cleanup_dead_tasks() {
-    extern crate alloc;
-    use alloc::{boxed::Box, vec::Vec};
+const REAP_DELAY_TICKS: u64 = 100;
 
-    use spin::Lazy;
+/// Dead tasks awaiting deallocation, with the tick at which they may go.
+/// One module-level queue: `exit_task` used to push onto a function-local
+/// queue that nothing drained, so every dead task leaked (N-03).
+#[cfg(feature = "alloc")]
+static DEAD_TASKS: spin::Mutex<alloc::vec::Vec<(TaskPtr, u64)>> =
+    spin::Mutex::new(alloc::vec::Vec::new());
 
-    static CLEANUP_QUEUE: Lazy<spin::Mutex<Vec<(TaskPtr, u64)>>> =
-        Lazy::new(|| spin::Mutex::new(Vec::new()));
+/// Detached threads that exited and await reaping (PROC-SEC-02). A thread
+/// cannot free its own kernel stack while running on it, so it queues
+/// itself and the idle loop reaps it after the delay.
+#[cfg(feature = "alloc")]
+static DETACHED_THREADS: spin::Mutex<
+    alloc::vec::Vec<((crate::process::ProcessId, crate::process::ThreadId), u64)>,
+> = spin::Mutex::new(alloc::vec::Vec::new());
 
-    let current_tick = crate::arch::timer::get_ticks();
-    let mut queue = CLEANUP_QUEUE.lock();
-
-    // Find tasks that are ready to be cleaned up
+/// Remove and return the entries of `queue` whose deadline is `now` or
+/// earlier, keeping the rest.
+#[cfg(feature = "alloc")]
+fn take_expired<T>(queue: &mut alloc::vec::Vec<(T, u64)>, now: u64) -> alloc::vec::Vec<T> {
+    let mut expired = alloc::vec::Vec::new();
     let mut i = 0;
     while i < queue.len() {
-        let (TaskPtr(task_ptr), cleanup_tick) = queue[i];
-
-        if current_tick >= cleanup_tick {
-            // Remove from queue
-            queue.swap_remove(i);
-
-            // SAFETY: This task pointer was placed in the cleanup queue by
-            // `exit_task` after being removed from the scheduler. We waited
-            // at least 100 ticks (the cleanup delay) to ensure no other CPU
-            // holds a reference to this task. The pointer was originally
-            // created via `Box::leak` and is valid to reconstruct.
-            unsafe {
-                let task_box = Box::from_raw(task_ptr.as_ptr());
-                drop(task_box);
-            }
-
-            kprintln!("[SCHED] Cleaned up dead task");
+        if queue[i].1 <= now {
+            expired.push(queue.swap_remove(i).0);
         } else {
             i += 1;
         }
+    }
+    expired
+}
+
+/// Queue a dead task for deallocation once the reap delay has passed.
+///
+/// # Safety
+///
+/// `task` must come from `Box::leak`, be off every run and wait queue, and
+/// be referenced by nothing else once it is no longer the running task.
+#[cfg(feature = "alloc")]
+pub(crate) unsafe fn defer_task_free(task: core::ptr::NonNull<Task>) {
+    let deadline = crate::arch::timer::get_ticks() + REAP_DELAY_TICKS;
+    DEAD_TASKS.lock().push((TaskPtr(task), deadline));
+}
+
+/// Queue an exited detached thread for reaping once the delay has passed.
+#[cfg(feature = "alloc")]
+pub(crate) fn defer_thread_reap(pid: crate::process::ProcessId, tid: crate::process::ThreadId) {
+    let deadline = crate::arch::timer::get_ticks() + REAP_DELAY_TICKS;
+    DETACHED_THREADS.lock().push(((pid, tid), deadline));
+}
+
+/// Free dead tasks and reap detached threads whose reap delay has passed.
+#[cfg(feature = "alloc")]
+pub fn cleanup_dead_tasks() {
+    use alloc::boxed::Box;
+
+    let now = crate::arch::timer::get_ticks();
+    // Read the running task before taking a queue lock (lock order).
+    let running = super::SCHEDULER.lock().current();
+
+    let mut keep = alloc::vec::Vec::new();
+    let expired = take_expired(&mut DEAD_TASKS.lock(), now);
+    for TaskPtr(task_ptr) in expired {
+        if Some(task_ptr) == running {
+            // Still on this CPU (schedule() found nothing else to run):
+            // its stack is in use, so try again later.
+            keep.push((TaskPtr(task_ptr), now + REAP_DELAY_TICKS));
+            continue;
+        }
+        // SAFETY: `exit_task` queued this pointer (from `Box::leak`) after
+        // taking the task off the scheduler and the PID registry, and it is
+        // not the running task. The reap delay has passed, so no CPU still
+        // uses it.
+        drop(unsafe { Box::from_raw(task_ptr.as_ptr()) });
+    }
+    if !keep.is_empty() {
+        DEAD_TASKS.lock().extend(keep);
+    }
+
+    let threads = take_expired(&mut DETACHED_THREADS.lock(), now);
+    for (pid, tid) in threads {
+        // The process may already be gone (cleanup_process freed it).
+        if let Some(process) = crate::process::table::get_process(pid) {
+            let _ = crate::process::exit::cleanup_thread(process, tid);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod reap_tests {
+    use alloc::vec;
+
+    use super::take_expired;
+
+    #[test]
+    fn take_expired_splits_on_deadline() {
+        let mut q = vec![(1u32, 10u64), (2, 5), (3, 20), (4, 10)];
+        let mut got = take_expired(&mut q, 10);
+        got.sort_unstable();
+        assert_eq!(got, vec![1, 2, 4]);
+        assert_eq!(q, vec![(3, 20)]);
+    }
+
+    #[test]
+    fn take_expired_keeps_everything_before_deadline() {
+        let mut q = vec![(1u32, 10u64)];
+        assert!(take_expired(&mut q, 9).is_empty());
+        assert_eq!(q.len(), 1);
     }
 }
 

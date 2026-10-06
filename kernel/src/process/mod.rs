@@ -285,23 +285,23 @@ pub fn exit_thread(exit_code: i32) {
             thread.tid.0, exit_code
         );
 
+        // Handle CLONE_CHILD_CLEARTID first, while the thread is intact:
+        // clear *clear_tid and wake one futex waiter (best effort).
+        let clear_ptr = thread.clear_tid.load(core::sync::atomic::Ordering::Acquire);
+        if clear_ptr != 0 {
+            let _ = crate::syscall::userspace::write_user(clear_ptr, 0u32);
+            let _ = crate::syscall::sys_futex_wake(clear_ptr, 1, 0);
+        }
+
         // Mark thread as exited with state synchronization
         thread.set_exited(exit_code);
 
-        // If detached, clean up immediately (no join will occur)
+        // A detached thread is never joined, so it must be reaped -- but not
+        // here: cleanup_thread frees the kernel stack this code is running
+        // on and drops `thread` (PROC-SEC-02). Defer it to the idle loop.
+        #[cfg(feature = "alloc")]
         if thread.detached.load(core::sync::atomic::Ordering::Acquire) {
-            let _ = crate::process::exit::cleanup_thread(process, thread.tid);
-        }
-
-        // Handle CLONE_CHILD_CLEARTID: clear *clear_tid and futex wake
-        let clear_ptr = thread.clear_tid.load(core::sync::atomic::Ordering::Acquire);
-        if clear_ptr != 0 {
-            unsafe {
-                // Ignore copy_to_user errors here; best effort
-                let _ = crate::syscall::copy_to_user(clear_ptr, &0u32);
-            }
-            // Wake futex waiters on that address
-            let _ = crate::syscall::sys_futex_wake(clear_ptr, 1, 0);
+            crate::sched::load_balance::defer_thread_reap(process.pid, thread.tid);
         }
 
         // Never return - schedule another thread

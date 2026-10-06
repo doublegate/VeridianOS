@@ -289,6 +289,16 @@ impl DiskInode {
         }
     }
 
+    /// An unused inode-table slot. `new` starts at one link, which marks
+    /// the slot as in use, so a table filled with `new(0, 0, 0)` had no
+    /// allocatable inode at all.
+    pub fn free() -> Self {
+        Self {
+            links_count: 0,
+            ..Self::new(0, 0, 0)
+        }
+    }
+
     pub fn is_dir(&self) -> bool {
         (self.mode & 0x4000) != 0
     }
@@ -530,6 +540,11 @@ impl VfsNode for BlockFsNode {
         fs.chmod_inode(self.inode_num, permissions)
     }
 
+    fn chown(&self, uid: Option<u32>, gid: Option<u32>) -> Result<(), KernelError> {
+        let mut fs = self.fs.write();
+        fs.chown_inode(self.inode_num, uid, gid)
+    }
+
     fn link(&self, name: &str, target: Arc<dyn VfsNode>) -> Result<(), KernelError> {
         // Extract metadata BEFORE acquiring the write lock on BlockFsInner.
         // The target node may share the same Arc<RwLock<BlockFsInner>>, so
@@ -573,7 +588,7 @@ impl BlockFsInner {
         }
 
         let mut inode_table = Vec::new();
-        inode_table.resize(inode_count as usize, DiskInode::new(0, 0, 0));
+        inode_table.resize(inode_count as usize, DiskInode::free());
 
         // Initialize root directory (inode 0)
         // links_count = 2: one for itself (".") and one from the parent (root is its
@@ -1714,6 +1729,38 @@ impl BlockFsInner {
         inode.mode = type_bits | perm_bits;
         inode.ctime = crate::arch::timer::read_hw_timestamp() as u32;
 
+        Ok(())
+    }
+
+    /// Change an inode's owner and/or group. On-disk ids are 16-bit, so a
+    /// larger id is rejected rather than truncated.
+    fn chown_inode(
+        &mut self,
+        inode_num: u32,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    ) -> Result<(), KernelError> {
+        let to_u16 = |id: Option<u32>| -> Result<Option<u16>, KernelError> {
+            id.map(|v| {
+                u16::try_from(v).map_err(|_| KernelError::InvalidArgument {
+                    name: "owner id",
+                    value: "exceeds 16-bit BlockFS limit",
+                })
+            })
+            .transpose()
+        };
+        let (uid, gid) = (to_u16(uid)?, to_u16(gid)?);
+        let inode = self
+            .inode_table
+            .get_mut(inode_num as usize)
+            .ok_or(KernelError::FsError(FsError::NotFound))?;
+        if let Some(uid) = uid {
+            inode.uid = uid;
+        }
+        if let Some(gid) = gid {
+            inode.gid = gid;
+        }
+        inode.ctime = crate::arch::timer::read_hw_timestamp() as u32;
         Ok(())
     }
 

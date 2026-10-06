@@ -344,14 +344,6 @@ pub fn init() -> Result<(), crate::error::KernelError> {
                 crate::ALLOCATOR.init(heap_start, heap_size);
             }
 
-            // Initialize locked allocator for compatibility
-            {
-                let mut allocator = crate::get_allocator().lock();
-                // SAFETY: Same memory region, called once during boot.
-                unsafe {
-                    allocator.init(heap_start, heap_size);
-                }
-            }
             println!("[HEAP] RISC-V heap initialization complete");
         }
 
@@ -394,25 +386,6 @@ pub fn init() -> Result<(), crate::error::KernelError> {
             } else {
                 uart_write_str("[HEAP] WARNING: Allocator next=0\n");
             }
-
-            // Initialize locked allocator too (direct field access)
-            crate::LOCKED_ALLOCATOR
-                .inner
-                .start
-                .store(start_addr, Ordering::SeqCst);
-            crate::LOCKED_ALLOCATOR
-                .inner
-                .size
-                .store(heap_size, Ordering::SeqCst);
-            crate::LOCKED_ALLOCATOR
-                .inner
-                .next
-                .store(start_addr, Ordering::SeqCst);
-            crate::LOCKED_ALLOCATOR
-                .inner
-                .allocations
-                .store(0, Ordering::SeqCst);
-            core::sync::atomic::fence(Ordering::SeqCst);
 
             uart_write_str("[HEAP] AArch64 heap initialization complete\n");
         }

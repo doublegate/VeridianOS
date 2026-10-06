@@ -91,6 +91,12 @@ struct timespec {
     long    tv_nsec;    /* Nanoseconds [0, 999999999] */
 };
 
+/** Interval timer specification (timer_settime, timerfd_settime) */
+struct itimerspec {
+    struct timespec it_interval;    /* Period (0 = one-shot) */
+    struct timespec it_value;       /* Initial expiration */
+};
+
 /** Time value with microsecond precision (legacy) */
 struct timeval {
     time_t  tv_sec;     /* Seconds */

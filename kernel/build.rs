@@ -51,6 +51,20 @@ fn main() {
     println!("cargo:rerun-if-changed=src/arch/x86_64/link.ld");
     println!("cargo:rerun-if-changed=src/arch/aarch64/link.ld");
     println!("cargo:rerun-if-changed=src/arch/riscv64/link.ld");
-    // bootstrap.rs bakes the cross-compiled sysroot path via option_env!.
+    // bootstrap.rs recreates the cross-compiled sysroot path at boot, so it
+    // must match the sysroot the rootfs binaries were built against. The
+    // tools/cross scripts default to <repo>/target/veridian-sysroot; use the
+    // same default here, overridable with VERIDIAN_SYSROOT. (The fallback
+    // used to be the pre-reorganisation March path, which silently
+    // mismatched any rootfs rebuilt since.)
+    let sysroot = env::var("VERIDIAN_SYSROOT").unwrap_or_else(|_| {
+        kernel_dir
+            .parent()
+            .expect("kernel crate has a parent directory")
+            .join("target/veridian-sysroot")
+            .display()
+            .to_string()
+    });
+    println!("cargo:rustc-env=VERIDIAN_SYSROOT_PATH={}", sysroot);
     println!("cargo:rerun-if-env-changed=VERIDIAN_SYSROOT");
 }

@@ -676,7 +676,7 @@ int socket(int domain, int type, int protocol)
  *
  * Kernel args: (socket_id, addr_ptr, addr_len)
  */
-int connect(int sockfd, const void *addr, unsigned int addrlen)
+int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
     long ret = veridian_syscall3(SYS_SOCKET_CONNECT, sockfd, addr, addrlen);
     return (int)__sock_ret(ret);
@@ -687,7 +687,7 @@ int connect(int sockfd, const void *addr, unsigned int addrlen)
  *
  * Kernel args: (socket_id, addr_ptr, addr_len)
  */
-int bind(int sockfd, const void *addr, unsigned int addrlen)
+int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
     long ret = veridian_syscall3(SYS_SOCKET_BIND, sockfd, addr, addrlen);
     return (int)__sock_ret(ret);
@@ -713,7 +713,7 @@ int listen(int sockfd, int backlog)
  *
  * Kernel args: (socket_id)
  */
-int accept(int sockfd, void *addr, unsigned int *addrlen)
+int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
     long ret = veridian_syscall1(SYS_SOCKET_ACCEPT, sockfd);
     if (ret < 0) {

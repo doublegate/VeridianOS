@@ -303,7 +303,10 @@ build_qt_shadertools() {
         local host_bld="${BUILD_DIR}/host-qtshadertools-build"
         rm -rf "${host_bld}"
         mkdir -p "${host_bld}"
-        (cd "${host_bld}" && \
+        # Host build: drop the cross pkg-config search path exported by the
+        # cross steps above, or sysroot (musl) headers leak into host code.
+        (unset PKG_CONFIG_PATH PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR && \
+            cd "${host_bld}" && \
             cmake "${src}" \
                 -DCMAKE_PREFIX_PATH="${host_prefix}" \
                 -DCMAKE_INSTALL_PREFIX="${host_prefix}" \
@@ -361,7 +364,10 @@ build_qt_declarative() {
         local host_bld="${BUILD_DIR}/host-qtdeclarative-build"
         rm -rf "${host_bld}"
         mkdir -p "${host_bld}"
-        (cd "${host_bld}" && \
+        # Host build: drop the cross pkg-config search path exported by the
+        # cross steps above, or sysroot (musl) headers leak into host code.
+        (unset PKG_CONFIG_PATH PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR && \
+            cd "${host_bld}" && \
             cmake "${src}" \
                 -DCMAKE_PREFIX_PATH="${host_prefix}" \
                 -DCMAKE_INSTALL_PREFIX="${host_prefix}" \
@@ -377,6 +383,24 @@ build_qt_declarative() {
     log "Building QtDeclarative ${QT_VER}..."
     rm -rf "${bld}"
     mkdir -p "${bld}"
+
+    # Skip the target-side apps in tools/ (qml, qmleasing, qmlscene,
+    # svgtoqml, ...) when cross-compiling. They fail to link against static
+    # Mesa/udev, and their install rules sit in tools/cmake_install.cmake
+    # ahead of later CMake package configs (Qt6QmlModels etc.), so one
+    # failed link aborts the install and KF6 cannot find Qt6Quick. The
+    # build-time tools (qmltyperegistrar, qmlcachegen, ...) are outside this
+    # block and come from host-qt.
+    local tools_cml="${src}/tools/CMakeLists.txt"
+    local apps_if='if(NOT (ANDROID OR WASM OR IOS OR VISIONOS OR rtems))'
+    local apps_if_cross='if(NOT (ANDROID OR WASM OR IOS OR VISIONOS OR rtems OR CMAKE_CROSSCOMPILING))'
+    if ! grep -qF "${apps_if_cross}" "${tools_cml}"; then
+        [[ $(grep -cF "${apps_if}" "${tools_cml}") -eq 1 ]] || \
+            die "unexpected ${tools_cml}: cannot gate target apps"
+        python3 -c 'import sys; p, a, b = sys.argv[1:]; s = open(p).read(); open(p, "w").write(s.replace(a, b))' \
+            "${tools_cml}" "${apps_if}" "${apps_if_cross}"
+        grep -qF "${apps_if_cross}" "${tools_cml}" || die "failed to patch ${tools_cml}"
+    fi
 
     export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
     export PKG_CONFIG_SYSROOT_DIR=""
@@ -456,11 +480,85 @@ build_qt_svg() {
     log "QtSvg: done."
 }
 
+# Qt 5 compatibility module (QTextCodec, QRegExp, ...), required by KWin.
+build_qt_5compat() {
+    if [[ -f "${SYSROOT}/usr/lib/libQt6Core5Compat.a" ]]; then
+        log "Qt5Compat: already installed."
+        return 0
+    fi
+    fetch "qt5compat-everywhere-src-${QT_VER}" \
+        "${QT_BASE_URL}/qt5compat-everywhere-src-${QT_VER}.tar.xz" \
+        "qt5compat-everywhere-src-${QT_VER}"
+
+    local src="${BUILD_DIR}/qt5compat-everywhere-src-${QT_VER}"
+    local bld="${BUILD_DIR}/qt5compat-build"
+    local host_prefix="${BUILD_DIR}/host-qt"
+    log "Building Qt5Compat ${QT_VER}..."
+    rm -rf "${bld}"
+    mkdir -p "${bld}"
+
+    export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
+    export PKG_CONFIG_SYSROOT_DIR=""
+
+    (cd "${bld}" && \
+        cmake "${src}" \
+            -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
+            -DCMAKE_PREFIX_PATH="${SYSROOT}/usr" \
+            -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
+            -DQT_HOST_PATH:PATH="${host_prefix}" \
+            -DQT_HOST_PATH_CMAKE_DIR:PATH="${host_prefix}/lib/cmake" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_TESTING=OFF \
+            -DQT_BUILD_EXAMPLES=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" && \
+        cmake --build . --parallel "${JOBS}" && \
+        cmake --install .)
+    log "Qt5Compat: done."
+}
+
+# Qt Sensors (orientation sensor), required by KWin core.
+build_qt_sensors() {
+    if [[ -f "${SYSROOT}/usr/lib/libQt6Sensors.a" ]]; then
+        log "QtSensors: already installed."
+        return 0
+    fi
+    fetch "qtsensors-everywhere-src-${QT_VER}" \
+        "${QT_BASE_URL}/qtsensors-everywhere-src-${QT_VER}.tar.xz" \
+        "qtsensors-everywhere-src-${QT_VER}"
+
+    local src="${BUILD_DIR}/qtsensors-everywhere-src-${QT_VER}"
+    local bld="${BUILD_DIR}/qtsensors-build"
+    local host_prefix="${BUILD_DIR}/host-qt"
+    log "Building QtSensors ${QT_VER}..."
+    rm -rf "${bld}"
+    mkdir -p "${bld}"
+
+    export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
+    export PKG_CONFIG_SYSROOT_DIR=""
+
+    (cd "${bld}" && \
+        cmake "${src}" \
+            -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
+            -DCMAKE_PREFIX_PATH="${SYSROOT}/usr" \
+            -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
+            -DQT_HOST_PATH:PATH="${host_prefix}" \
+            -DQT_HOST_PATH_CMAKE_DIR:PATH="${host_prefix}/lib/cmake" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_TESTING=OFF \
+            -DQT_BUILD_EXAMPLES=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" && \
+        cmake --build . --parallel "${JOBS}" && \
+        cmake --install .)
+    log "QtSensors: done."
+}
+
 # ── Verify ────────────────────────────────────────────────────────────
 verify() {
     log "Verifying Qt 6 installation..."
     local errors=0
-    for lib in libQt6Core.a libQt6Gui.a libQt6Widgets.a libQt6DBus.a libQt6WaylandClient.a libQt6Qml.a libQt6Quick.a libQt6QmlModels.a libQt6ShaderTools.a libQt6Svg.a libQt6SvgWidgets.a; do
+    for lib in libQt6Core.a libQt6Gui.a libQt6Widgets.a libQt6DBus.a libQt6WaylandClient.a libQt6Qml.a libQt6Quick.a libQt6QmlModels.a libQt6ShaderTools.a libQt6Svg.a libQt6SvgWidgets.a libQt6Core5Compat.a libQt6Sensors.a; do
         if [[ -f "${SYSROOT}/usr/lib/${lib}" ]]; then
             local size
             size=$(stat -c%s "${SYSROOT}/usr/lib/${lib}" 2>/dev/null || echo "?")
@@ -471,7 +569,8 @@ verify() {
         fi
     done
     for tool in moc rcc uic; do
-        if [[ -f "${BUILD_DIR}/host-qt/bin/${tool}" ]]; then
+        # Qt 6 installs these in libexec/ (bin/ only holds user-facing tools).
+        if [[ -f "${BUILD_DIR}/host-qt/libexec/${tool}" || -f "${BUILD_DIR}/host-qt/bin/${tool}" ]]; then
             log "  OK: host ${tool}"
         else
             log "  MISSING: host ${tool}"
@@ -501,6 +600,8 @@ main() {
     build_qt_shadertools
     build_qt_declarative
     build_qt_svg
+    build_qt_5compat
+    build_qt_sensors
     build_host_qt_wayland
     build_qt_wayland
     verify
