@@ -126,6 +126,10 @@ pub mod bench;
 pub use mm::{FrameNumber, MemoryRegion, FRAME_SIZE};
 // Re-export scheduler items for tests
 pub use sched::{Priority, SchedClass, Task};
+// Re-exported so the `UserPod` compile_fail doctest can name the accessor;
+// `syscall` itself stays private.
+#[doc(hidden)]
+pub use syscall::userspace::{read_user, UserPod};
 #[cfg(test)]
 pub use test_framework::test_runner;
 pub use test_framework::{
