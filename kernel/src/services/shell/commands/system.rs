@@ -149,7 +149,7 @@ impl BuiltinCommand for HelpCommand {
             (
                 "Hardware",
                 &[
-                    "lspci", "lsusb", "lsblk", "acpi", "hwinfo", "mdadm", "iscsiadm",
+                    "lspci", "lsusb", "lsblk", "nvme", "acpi", "hwinfo", "mdadm", "iscsiadm",
                 ],
             ),
             (

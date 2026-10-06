@@ -106,7 +106,7 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | FS-SEC-02 | CONFIRMED | `syscall/filesystem.rs:1724-1735, 2219-2247, 2737-2760` | No checks on chmod/fchmod/unlink/rename; chown/fchown are no-op successes. | v0.26.0 | fixed (0256f96, 62b0247) |
 | DRV-PERF-01 | PARTIAL, dead code | `services/desktop_ipc.rs:213-221` | Only a struct definition; nothing handles `UpdateWindowContent`. The copies that do happen are DESK-ARCH-01. | v0.26.0 | open |
 | DRV-PERF-02 | CONFIRMED | `fs/blockfs.rs:143-150`, `drivers/virtio/blk.rs:395, 484-496` | 8 requests per 4 KB block, each allocating and zeroing a frame and spinning up to 10M iterations. | v0.26.0 | open |
-| DRV-INC-01 | CONFIRMED (dangerous) | `drivers/nvme.rs:426, 472` | With a real controller, reads DMA to physical address 0. | v0.26.0 | open |
+| DRV-INC-01 | CONFIRMED (dangerous) | `drivers/nvme.rs:426, 472` | With a real controller, reads DMA to physical address 0. | v0.26.0 | fixed (NVMe rewrite: frame-backed queues/PRPs, phase tags, timeouts return Err; verified by `nvme selftest`) |
 | DRV-SEC-01 | CONFIRMED | `drivers/virtio_net.rs:603-621` | Descriptor freed before the device is notified; no barrier; non-volatile ring indices. | v0.26.0 | fixed (c99fca9, 7f9a6d0; used-ring ids validated in the e1000 commit) |
 | DRV-SEC-02 | CONFIRMED (worse for e1000) | `drivers/virtio_net.rs:410-520`, `drivers/e1000.rs:88-212` | Virtual addresses used as DMA addresses. e1000 programs addresses of fields on a stack frame that has since been returned from. | v0.26.0 | fixed (virtio-net c99fca9; e1000 rewritten on frame-backed rings) |
 | NET-PERF-01 | CONFIRMED | `net/http.rs:539, 555, 572, 608, 609, 641, 647, 664, 670` | Nine sites; the feed buffer is also unbounded. | v0.26.0 | open |
@@ -140,7 +140,7 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | N-08 | `net/tcp.rs:226-247` | TCP segments are built with checksum 0. | v0.27.0 | open |
 | N-09 | `desktop/wayland/mod.rs:424-452`, `desktop/wayland/buffer.rs:150-154` | Unbounded client-controlled `wl_shm` pool size; `write_data` panics when `offset > len`. | v0.26.0 | fixed (a7b885d) |
 | N-10 | `drivers/virtio/blk.rs:488-495` | On timeout the request frame is freed while the device may still DMA into it. | v0.26.0 | fixed (0dd6ead) |
-| N-11 | `drivers/nvme.rs` | No completion phase tracking; timeouts return `Ok`; `num_blocks - 1` underflows. | v0.26.0 | open |
+| N-11 | `drivers/nvme.rs` | No completion phase tracking; timeouts return `Ok`; `num_blocks - 1` underflows. | v0.26.0 | fixed (NVMe rewrite) |
 | N-13 | riscv64 boot, after BOOTOK | Boot silently restarted from `_start` in Stage 6, so the second pass found singletons already initialised or zeroed (the various panics seen). Root cause: `current_cpu_id()` read the M-mode CSR `mhartid` from S-mode (illegal instruction) and no `stvec` was installed, so the trap jumped to the kernel entry. Separately, the hardcoded frame-pool start (0x80E00000) lay inside the grown kernel image (ends 0x81148000), so frames aliased the kernel heap and boot stack. BOOTOK and 29/29 print before Stage 6, which is why the boot check passed. | v0.26.0 | fixed (3067856) |
 | N-14 | `sched/smp.rs` `current_cpu_id` (riscv64) | The logical CPU ID is read from `tp`, which is the user TLS pointer in U-mode. The future U-mode trap entry must restore the kernel `tp` from `sscratch` before any code calls `current_cpu_id`, or user code chooses its CPU identity. Latent: riscv64 has no U-mode entry yet. Raised by review of `3067856`. | v0.27.0 (with SMP/U-mode bring-up) | open |
 | N-15 | `security/smep_smap.rs`, `bootstrap.rs` | SMEP/SMAP (announced in v0.11.0) are never enabled: `smep_smap::init()` is only called from `security::init()`, which bootstrap does not call (it initialises security modules individually). Enabling SMAP also requires `stac`/`clac` around every user access, i.e. moving the remaining direct dereferences onto the accessors first. | v0.27.0 | open |
@@ -162,6 +162,11 @@ threads (the scheduler has no ring-3 entry path for a new thread; planned for v0
 | PROC-SEC-02 | deferred reap queues | a detached thread exiting on a running system |
 
 Release notes for v0.26.0 must not claim either as runtime-verified.
+
+NVMe is verified on x86_64 with QEMU `-device nvme` by the `nvme selftest` shell command: it
+reads a host-written signature at LBA 0, does a two-page (PRP2) write/flush/read-back round trip
+on the last 8 KiB and restores it, and checks that out-of-range and empty requests are rejected.
+NVMe is not probed on AArch64/RISC-V (no PCI enumeration there).
 
 ### Commit security review follow-ups
 

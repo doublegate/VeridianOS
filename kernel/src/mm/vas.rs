@@ -67,6 +67,77 @@ pub unsafe fn create_mapper_from_root_pub(page_table_root: u64) -> PageMapper {
     unsafe { create_mapper_from_root(page_table_root) }
 }
 
+/// Whether `virt` is mapped in the hierarchy rooted at `root`, counting a
+/// 1 GiB or 2 MiB leaf as mapped. (`PageMapper` does not understand huge
+/// pages, which the bootloader's direct map uses.)
+#[cfg(target_arch = "x86_64")]
+fn is_mapped_any_size(root: u64, virt: u64) -> bool {
+    const PRESENT: u64 = 1;
+    const HUGE: u64 = 1 << 7;
+    const ADDR: u64 = 0x000F_FFFF_FFFF_F000;
+    let mut table = root & ADDR;
+    for (level, shift) in [(4, 39), (3, 30), (2, 21), (1, 12)] {
+        let index = ((virt >> shift) & 0x1FF) as usize;
+        // SAFETY: `table` is the physical address of a present page table
+        // (the root, or taken from a present non-leaf entry), reachable
+        // through the direct map; index < 512.
+        let entry = unsafe {
+            core::ptr::read_volatile((super::phys_to_virt_addr(table) as *const u64).add(index))
+        };
+        if entry & PRESENT == 0 {
+            return false;
+        }
+        if level == 1 || ((level == 3 || level == 2) && entry & HUGE != 0) {
+            return true;
+        }
+        table = entry & ADDR;
+    }
+    true
+}
+
+/// Make the physical range `[phys, phys + size)` -- device registers --
+/// reachable through the kernel direct map, uncached, and return the virtual
+/// address of `phys`.
+///
+/// The bootloader's direct map covers RAM and low MMIO but not 64-bit BARs
+/// placed far above RAM. Pages that are already mapped are left alone.
+/// Must run while the kernel page table is active and before other CPUs
+/// edit it (boot-time driver probing).
+#[cfg(target_arch = "x86_64")]
+pub fn map_mmio(phys: u64, size: usize) -> Result<usize, KernelError> {
+    let start = phys & !0xFFF;
+    let end = phys
+        .checked_add(size as u64)
+        .and_then(|e| e.checked_add(0xFFF))
+        .ok_or(KernelError::InvalidArgument {
+            name: "mmio range",
+            value: "overflows",
+        })?
+        & !0xFFF;
+    let root = (super::get_kernel_page_table() as u64) & !0xFFF;
+    // SAFETY: `root` is the active page table (CR3), reachable through the
+    // direct map; boot-time callers have exclusive use of it.
+    let mut mapper = unsafe { create_mapper_from_root(root) };
+    let mut alloc = VasFrameAllocator;
+    let flags =
+        PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE | PageFlags::WRITE_THROUGH;
+    let mut pa = start;
+    while pa < end {
+        let va = super::phys_to_virt_addr(pa);
+        if !is_mapped_any_size(root, va) {
+            mapper.map_page(
+                VirtualAddress(va),
+                FrameNumber::new(pa >> 12),
+                flags,
+                &mut alloc,
+            )?;
+            crate::arch::x86_64::tlb_flush_address(va);
+        }
+        pa += 4096;
+    }
+    Ok(super::phys_to_virt_addr(phys) as usize)
+}
+
 /// Free all user-space page table frames in a page table hierarchy.
 ///
 /// Walks the L4 table and for each **user-space** L4 entry (indices 0..256),

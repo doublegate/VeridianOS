@@ -619,6 +619,16 @@ impl PciBus {
         }
     }
 
+    /// Enable memory decoding and bus mastering for a device, which it
+    /// needs before it may DMA.
+    pub fn enable_bus_master(&self, location: PciLocation) {
+        // Write only the command half: the status half has write-1-to-clear
+        // bits, so writing back the value read would clear them.
+        let command = self.read_config_dword(location, 0x04) & 0xFFFF;
+        let command = command | (command_flags::MEMORY_SPACE | command_flags::BUS_MASTER) as u32;
+        self.write_config_dword(location, 0x04, command);
+    }
+
     /// Get device by location
     pub fn get_device(&self, location: PciLocation) -> Option<PciDevice> {
         self.devices.read().get(&location).cloned()

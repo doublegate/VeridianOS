@@ -534,6 +534,9 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
             }
             // Probe for known VirtIO drivers (GPU, Net, Sound)
             crate::drivers::pci::probe_known_drivers();
+            if let Err(_e) = crate::drivers::nvme::init() {
+                kprintln!("[BOOTSTRAP] NVMe init failed");
+            }
         }
 
         // blk::init() dispatches to PCI probe on x86_64, MMIO probe on
