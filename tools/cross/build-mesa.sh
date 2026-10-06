@@ -28,6 +28,7 @@ CXX="${SYSROOT}/bin/x86_64-veridian-musl-g++"
 
 LIBDRM_VER="2.4.123"
 MESA_VER="24.2.8"
+LIBEPOXY_VER="1.5.10"
 
 log() { echo "[build-mesa] $*"; }
 die() { echo "[build-mesa] ERROR: $*" >&2; exit 1; }
@@ -219,6 +220,12 @@ build_mesa() {
     find "${mesa_bld}/src/gbm/libgbm.so.1.0.0.p" -name '*.o' -print0 \
         | xargs -0 ar rcs "${tmp_gbm}"
 
+    # The public gl* entry points (glDisable, glViewport, ...) are in the
+    # es2api object, not in glapi: without it every GLES2 user fails to link.
+    local tmp_gles="${mesa_bld}/libGLESv2_base.a"
+    find "${mesa_bld}/src/mapi/es2api/libGLESv2.so.2.0.0.p" -name '*.o' -print0 \
+        | xargs -0 ar rcs "${tmp_gles}"
+
     # Step 2: Create combined gallium archive from all Mesa internal static libs
     # Also collect the DRI target objects (contains dri_loader_get_extensions)
     local tmp_dri="${mesa_bld}/libdri_target.a"
@@ -286,10 +293,12 @@ build_mesa() {
 
     _create_fat_archive "${SYSROOT}/usr/lib/libEGL.a" "${tmp_egl}"
     _create_fat_archive "${SYSROOT}/usr/lib/libgbm.a" "${tmp_gbm}"
-    # GLES2 is a glapi shim -- fat archive with gallium for link completeness
-    _create_fat_archive "${SYSROOT}/usr/lib/libGLESv2.a" "${SYSROOT}/usr/lib/libglapi.a"
+    # GLES2: the es2api entry points, plus gallium and glapi behind them
+    _create_fat_archive "${SYSROOT}/usr/lib/libGLESv2.a" "${tmp_gles}"
+    nm "${SYSROOT}/usr/lib/libGLESv2.a" 2>/dev/null | grep -q ' T glViewport$' || \
+        die "libGLESv2.a has no GLES2 entry points"
 
-    rm -f "${tmp_egl}" "${tmp_gbm}" "${tmp_dri}"
+    rm -f "${tmp_egl}" "${tmp_gbm}" "${tmp_gles}" "${tmp_dri}"
 
     # Remove .so files -- we want ONLY static archives in the sysroot
     rm -f "${SYSROOT}/usr/lib/libEGL.so"* \
@@ -370,6 +379,42 @@ verify() {
 }
 
 # ── Main ──────────────────────────────────────────────────────────────
+# ── libepoxy (GL function pointer manager, required by KWin) ─────────
+# EGL + GLES only: no GLX, no X11. Static, dispatching to the Mesa
+# archives above.
+build_libepoxy() {
+    if [[ -f "${SYSROOT}/usr/lib/libepoxy.a" ]]; then
+        log "libepoxy: already installed."
+        return 0
+    fi
+    fetch "libepoxy-${LIBEPOXY_VER}" \
+        "https://download.gnome.org/sources/libepoxy/${LIBEPOXY_VER%.*}/libepoxy-${LIBEPOXY_VER}.tar.xz" \
+        "libepoxy-${LIBEPOXY_VER}"
+
+    local src="${BUILD_DIR}/libepoxy-${LIBEPOXY_VER}"
+    local bld="${BUILD_DIR}/libepoxy-build"
+    local cross_file
+    cross_file="$(generate_meson_cross)"
+
+    log "Building libepoxy ${LIBEPOXY_VER}..."
+    rm -rf "${bld}"
+    mkdir -p "${bld}"
+    (cd "${bld}" && \
+        meson setup "${src}" \
+            --cross-file="${cross_file}" \
+            --prefix="${SYSROOT}/usr" \
+            --default-library=static \
+            -Dglx=no \
+            -Dx11=false \
+            -Degl=yes \
+            -Dtests=false \
+            -Ddocs=false && \
+        ninja -j"${JOBS}" && \
+        ninja install)
+    [[ -f "${SYSROOT}/usr/lib/libepoxy.a" ]] || die "libepoxy.a not installed"
+    log "libepoxy: done."
+}
+
 main() {
     log "=== Building Mesa softpipe for VeridianOS ==="
     log "Sysroot: ${SYSROOT}"
@@ -385,6 +430,7 @@ main() {
 
     build_libdrm
     build_mesa
+    build_libepoxy
     verify
 
     log "=== Mesa build complete ==="

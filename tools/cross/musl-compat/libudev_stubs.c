@@ -139,6 +139,40 @@ const char *udev_device_get_sysname(struct udev_device *dev) {
     return dev->sysname[0] ? dev->sysname : NULL;
 }
 
+/* No device database: there are no device symlinks or bound drivers to
+ * report, and no device can be found by subsystem + sysname. */
+struct udev_list_entry *udev_device_get_devlinks_list_entry(struct udev_device *dev) {
+    (void)dev;
+    return NULL;
+}
+
+const char *udev_device_get_driver(struct udev_device *dev) {
+    (void)dev;
+    return NULL;
+}
+
+struct udev_device *udev_device_new_from_subsystem_sysname(struct udev *udev,
+                                                           const char *subsystem,
+                                                           const char *sysname) {
+    (void)udev;
+    (void)subsystem;
+    (void)sysname;
+    return NULL;
+}
+
+/* Trailing digits of the sysname ("event3" -> "3"), as libudev does. */
+const char *udev_device_get_sysnum(struct udev_device *dev) {
+    if (!dev || !dev->sysname[0])
+        return NULL;
+    const char *end = dev->sysname;
+    while (*end)
+        end++;
+    const char *p = end;
+    while (p > dev->sysname && p[-1] >= '0' && p[-1] <= '9')
+        p--;
+    return p < end ? p : NULL;
+}
+
 const char *udev_device_get_devnode(struct udev_device *dev) {
     if (!dev)
         return NULL;
@@ -291,6 +325,26 @@ int udev_enumerate_add_match_sysname(struct udev_enumerate *en,
     if (!en)
         return -1;
     return 0; /* accepted (no-op) */
+}
+
+/* Used by Qt's QDeviceDiscovery (ID_INPUT_* properties). */
+int udev_enumerate_add_match_property(struct udev_enumerate *en,
+                                      const char *property, const char *value) {
+    (void)property;
+    (void)value;
+    if (!en)
+        return -1;
+    return 0; /* accepted (no-op) */
+}
+
+struct udev *udev_enumerate_get_udev(struct udev_enumerate *en) {
+    return en ? en->ctx : NULL;
+}
+
+int udev_enumerate_scan_subsystems(struct udev_enumerate *en) {
+    if (!en)
+        return -1;
+    return 0; /* success, but no subsystems found */
 }
 
 int udev_enumerate_scan_devices(struct udev_enumerate *en) {
