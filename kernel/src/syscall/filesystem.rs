@@ -720,35 +720,11 @@ pub fn sys_mkdir(path: usize, mode: usize) -> SyscallResult {
 /// # Arguments
 /// - path: Path to directory to remove
 pub fn sys_rmdir(path: usize) -> SyscallResult {
-    // Validate path pointer is in user space
-    validate_user_string_ptr(path)?;
-
-    // Get path string
-    // SAFETY: path was validated as non-null and in user-space above. We read
-    // bytes from the user-space pointer until null terminator or 4096-byte
-    // limit. The caller must provide a valid null-terminated string.
-    let path_bytes = unsafe {
-        let mut bytes = Vec::new();
-        let mut ptr = path as *const u8;
-
-        for _ in 0..4096 {
-            let byte = *ptr;
-            if byte == 0 {
-                break;
-            }
-            bytes.push(byte);
-            ptr = ptr.add(1);
-        }
-        bytes
-    };
-
-    let path_str = match core::str::from_utf8(&path_bytes) {
-        Ok(s) => s,
-        Err(_) => return Err(SyscallError::InvalidArgument),
-    };
+    let path_str = read_user_path(path)?;
+    require_dir_write(&path_str)?;
 
     // Remove directory through VFS
-    match vfs()?.read().unlink(path_str) {
+    match vfs()?.read().unlink(&path_str) {
         Ok(_) => Ok(0),
         Err(e) => Err(super::map_kernel_error(e)),
     }
@@ -1429,26 +1405,75 @@ fn send_signal_to_pgid(pgid: u64, signal: i32) -> SyscallResult {
 pub(crate) fn read_user_path(ptr: usize) -> Result<alloc::string::String, SyscallError> {
     validate_user_string_ptr(ptr)?;
 
-    // SAFETY: ptr was validated as non-null and in user-space above. We read
-    // bytes until null terminator or 4096-byte limit. The caller must provide
-    // a valid null-terminated string in mapped user memory.
-    let bytes = unsafe {
-        let mut v = Vec::new();
-        let mut p = ptr as *const u8;
-        for _ in 0..4096 {
-            let b = core::ptr::read_volatile(p);
+    // Copy through the fault-tolerant accessor in chunks that never cross a
+    // page boundary, so a path ending just before an unmapped page is read
+    // without touching that page, and an unmapped pointer is EFAULT rather
+    // than a kernel fault.
+    const PATH_MAX: usize = 4096;
+    const PAGE: usize = 4096;
+    let mut bytes = Vec::new();
+    let mut addr = ptr;
+    'copy: while bytes.len() < PATH_MAX {
+        let in_page = PAGE - (addr % PAGE);
+        let mut chunk = [0u8; 64];
+        let n = in_page.min(chunk.len()).min(PATH_MAX - bytes.len());
+        crate::syscall::userspace::read_user_bytes(addr, &mut chunk[..n])?;
+        for &b in &chunk[..n] {
             if b == 0 {
-                break;
+                break 'copy;
             }
-            v.push(b);
-            p = p.add(1);
+            bytes.push(b);
         }
-        v
-    };
+        addr += n;
+    }
 
     core::str::from_utf8(&bytes)
         .map(alloc::string::String::from)
         .map_err(|_| SyscallError::InvalidArgument)
+}
+
+/// Credentials of the calling process: (uid, gid). Kernel context, with no
+/// process, acts as root.
+fn caller_creds() -> (u32, u32) {
+    process::current_process().map_or((0, 0), |p| (p.uid, p.gid))
+}
+
+/// chmod-style operations: only the owner or root may change a node's
+/// mode (FS-SEC-02).
+fn require_owner_or_root(
+    node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
+) -> Result<(), SyscallError> {
+    let (uid, _) = caller_creds();
+    if uid == 0 {
+        return Ok(());
+    }
+    let meta = node.metadata().map_err(|_| SyscallError::InvalidState)?;
+    if meta.uid == uid {
+        Ok(())
+    } else {
+        Err(SyscallError::PermissionDenied)
+    }
+}
+
+/// Creating or removing a directory entry needs write and search
+/// permission on the directory holding it (FS-SEC-02).
+fn require_dir_write(path: &str) -> Result<(), SyscallError> {
+    let (uid, gid) = caller_creds();
+    if uid == 0 {
+        return Ok(());
+    }
+    let (parent, _) = split_path(path)?;
+    let dir = vfs()?
+        .read()
+        .resolve_path(&parent)
+        .map_err(map_resolve_err)?;
+    let meta = dir.metadata().map_err(|_| SyscallError::InvalidState)?;
+    let p = meta.permissions;
+    if p.can_write(uid, gid, meta.uid, meta.gid) && p.can_run(uid, gid, meta.uid, meta.gid) {
+        Ok(())
+    } else {
+        Err(SyscallError::PermissionDenied)
+    }
 }
 
 /// Stat a file by path (syscall 150).
@@ -1700,6 +1725,8 @@ fn access_path(path: &str, mode: usize) -> SyscallResult {
 pub fn sys_rename(old_ptr: usize, new_ptr: usize) -> SyscallResult {
     let old_path = read_user_path(old_ptr)?;
     let new_path = read_user_path(new_ptr)?;
+    require_dir_write(&old_path)?;
+    require_dir_write(&new_path)?;
 
     // Rename as copy + delete (VFS has no native rename)
     // Use the free-standing fs helpers which handle locking internally.
@@ -1724,6 +1751,7 @@ pub fn sys_rename(old_ptr: usize, new_ptr: usize) -> SyscallResult {
 /// 0 on success.
 pub fn sys_unlink(path_ptr: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
+    require_dir_write(&path)?;
 
     let vfs_lock = vfs()?;
     let vfs_guard = vfs_lock.read();
@@ -2172,6 +2200,7 @@ const AT_FDCWD: usize = (-100isize) as usize;
 pub fn sys_link(old_ptr: usize, new_ptr: usize) -> SyscallResult {
     let old_path = read_user_path(old_ptr)?;
     let new_path = read_user_path(new_ptr)?;
+    require_dir_write(&new_path)?;
 
     let vfs_lock = vfs()?;
     let vfs_guard = vfs_lock.read();
@@ -2223,6 +2252,7 @@ pub fn sys_chmod(path_ptr: usize, mode: usize) -> SyscallResult {
     let vfs_lock = vfs()?;
     let vfs_guard = vfs_lock.read();
     let node = vfs_guard.resolve_path(&path).map_err(map_resolve_err)?;
+    require_owner_or_root(&node)?;
 
     let perms = Permissions::from_mode(mode as u32);
     node.chmod(perms)
@@ -2236,6 +2266,7 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> SyscallResult {
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
     let file_table = proc.file_table.lock();
     let file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+    require_owner_or_root(&file.node)?;
 
     let perms = Permissions::from_mode(mode as u32);
     file.node
@@ -2610,6 +2641,7 @@ pub fn sys_fstatat(dirfd: usize, path_ptr: usize, stat_buf: usize, _flags: usize
 pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, _flags: usize) -> SyscallResult {
     let rel_path = read_user_path(path_ptr)?;
     let abs_path = resolve_at_path(dirfd, &rel_path)?;
+    require_dir_write(&abs_path)?;
 
     let vfs_lock = vfs()?;
     vfs_lock
@@ -2645,6 +2677,8 @@ pub fn sys_renameat(
     let new_rel = read_user_path(new_ptr)?;
     let old_abs = resolve_at_path(olddirfd, &old_rel)?;
     let new_abs = resolve_at_path(newdirfd, &new_rel)?;
+    require_dir_write(&old_abs)?;
+    require_dir_write(&new_abs)?;
 
     // Rename as copy + delete
     let data = crate::fs::read_file(&old_abs).map_err(|_| SyscallError::ResourceNotFound)?;
@@ -2732,30 +2766,46 @@ pub(crate) fn split_path(
 // Ownership and device node syscalls (197-200)
 // =========================================================================
 
-/// Change ownership of a file by path (syscall 197).
-///
-/// Stub: accepts but ignores — no real UID/GID enforcement yet.
-pub fn sys_chown(path_ptr: usize, uid: usize, gid: usize) -> SyscallResult {
-    let _path = read_user_path(path_ptr)?;
-    let _uid = uid as u32;
-    let _gid = gid as u32;
-    // No-op: accept but don't enforce ownership changes
+/// Map a chown id argument: `-1` (as u32) means "leave unchanged".
+fn chown_id(id: usize) -> Option<u32> {
+    let id = id as u32;
+    (id != u32::MAX).then_some(id)
+}
+
+/// Apply a chown to `node`. Only root may change ownership (FS-SEC-02);
+/// this used to be a no-op that reported success.
+fn chown_node(
+    node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    uid: usize,
+    gid: usize,
+) -> SyscallResult {
+    let (uid, gid) = (chown_id(uid), chown_id(gid));
+    if uid.is_none() && gid.is_none() {
+        return Ok(0);
+    }
+    if caller_creds().0 != 0 {
+        return Err(SyscallError::PermissionDenied);
+    }
+    node.chown(uid, gid).map_err(super::map_kernel_error)?;
     Ok(0)
 }
 
+/// Change ownership of a file by path (syscall 197).
+pub fn sys_chown(path_ptr: usize, uid: usize, gid: usize) -> SyscallResult {
+    let path = read_user_path(path_ptr)?;
+    let node = vfs()?.read().resolve_path(&path).map_err(map_resolve_err)?;
+    chown_node(&node, uid, gid)
+}
+
 /// Change ownership of a file by file descriptor (syscall 198).
-///
-/// Stub: accepts but ignores — no real UID/GID enforcement yet.
 pub fn sys_fchown(fd: usize, uid: usize, gid: usize) -> SyscallResult {
-    let _fd = fd;
-    let _uid = uid as u32;
-    let _gid = gid as u32;
-    // Verify fd is valid
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let file_table = proc.file_table.lock();
-    let _file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
-    // No-op: accept but don't enforce ownership changes
-    Ok(0)
+    let file = proc
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::InvalidArgument)?;
+    chown_node(&file.node, uid, gid)
 }
 
 /// Create a special or ordinary file (syscall 199).

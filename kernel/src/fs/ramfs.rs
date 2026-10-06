@@ -363,6 +363,18 @@ impl VfsNode for RamNode {
         metadata.modified = crate::arch::timer::get_timestamp_secs();
         Ok(())
     }
+
+    fn chown(&self, uid: Option<u32>, gid: Option<u32>) -> Result<(), KernelError> {
+        let mut metadata = self.metadata.write();
+        if let Some(uid) = uid {
+            metadata.uid = uid;
+        }
+        if let Some(gid) = gid {
+            metadata.gid = gid;
+        }
+        metadata.modified = crate::arch::timer::get_timestamp_secs();
+        Ok(())
+    }
 }
 
 /// Global inode counter
