@@ -23,12 +23,17 @@ extern "C" {
 /* ========================================================================= */
 
 struct stat {
+    /* Layout matches the kernel's FileStat, which is the Linux x86_64
+     * struct stat (144 bytes, st_nlink before st_mode) so musl-built
+     * programs work. The order used to be dev/ino/mode/nlink, so every
+     * field from st_mode on was read from the wrong offset. */
     dev_t       st_dev;     /* Device ID of file */
     ino_t       st_ino;     /* Inode number */
-    mode_t      st_mode;    /* File type and permission bits */
     nlink_t     st_nlink;   /* Number of hard links */
+    mode_t      st_mode;    /* File type and permission bits */
     uid_t       st_uid;     /* Owner user ID */
     gid_t       st_gid;     /* Owner group ID */
+    unsigned int __pad0;
     dev_t       st_rdev;    /* Device ID (for special files) */
     off_t       st_size;    /* File size in bytes */
     blksize_t   st_blksize; /* Preferred I/O block size */
@@ -36,7 +41,12 @@ struct stat {
     struct timespec st_atim; /* Last access time */
     struct timespec st_mtim; /* Last modification time */
     struct timespec st_ctim; /* Last status change time */
+    long        __unused[3];
 };
+
+#ifndef __cplusplus
+_Static_assert(sizeof(struct stat) == 144, "struct stat must match kernel FileStat");
+#endif
 
 /* POSIX compatibility: st_atime is shorthand for st_atim.tv_sec */
 #define st_atime st_atim.tv_sec

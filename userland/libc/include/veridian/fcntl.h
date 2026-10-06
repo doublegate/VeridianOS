@@ -22,24 +22,26 @@ extern "C" {
 /* ========================================================================= */
 
 /*
- * Access mode flags (mutually exclusive lower 2 bits).
- * These are bitmask flags, not Linux-style 0/1/2 values.
+ * Open flags use the Linux x86_64 ABI values. The kernel decodes them
+ * (OpenFlags::from_bits) because musl-built programs pass Linux values;
+ * this libc used its own encoding until 2026-10, which the kernel read as
+ * different modes (O_RDONLY as O_WRONLY, O_CREAT and O_CLOEXEC ignored).
  */
-#define O_RDONLY        0x0001  /* Open for reading only */
-#define O_WRONLY        0x0002  /* Open for writing only */
-#define O_RDWR          0x0003  /* Open for reading and writing */
-#define O_ACCMODE       0x0003  /* Mask for access mode bits */
+#define O_RDONLY        0x000000  /* Open for reading only */
+#define O_WRONLY        0x000001  /* Open for writing only */
+#define O_RDWR          0x000002  /* Open for reading and writing */
+#define O_ACCMODE       0x000003  /* Mask for access mode bits */
 
 /* Creation and status flags */
-#define O_CREAT         0x0100  /* Create file if it does not exist */
-#define O_TRUNC         0x0200  /* Truncate to zero length on open */
-#define O_APPEND        0x0400  /* Append on each write */
-#define O_EXCL          0x0800  /* Fail if file already exists (with O_CREAT) */
-#define O_NONBLOCK      0x1000  /* Non-blocking mode */
-#define O_CLOEXEC       0x2000  /* Close-on-exec flag */
-#define O_NOCTTY        0x4000  /* Do not become controlling terminal */
-#define O_DIRECTORY     0x8000  /* Must be a directory */
-#define O_NOFOLLOW     0x10000  /* Do not follow symlinks */
+#define O_CREAT         0x000040  /* Create file if it does not exist */
+#define O_EXCL          0x000080  /* Fail if file already exists (with O_CREAT) */
+#define O_NOCTTY        0x000100  /* Do not become controlling terminal */
+#define O_TRUNC         0x000200  /* Truncate to zero length on open */
+#define O_APPEND        0x000400  /* Append on each write */
+#define O_NONBLOCK      0x000800  /* Non-blocking mode */
+#define O_DIRECTORY     0x010000  /* Must be a directory */
+#define O_NOFOLLOW      0x020000  /* Do not follow symlinks */
+#define O_CLOEXEC       0x080000  /* Close-on-exec flag */
 
 /* Aliases */
 #define O_NDELAY        O_NONBLOCK
@@ -127,6 +129,22 @@ struct flock {
  * @return File descriptor on success, -1 on error.
  */
 int open(const char *pathname, int flags, ...);
+
+/* *at() directory-fd constants (same values as <veridian/syscall.h>). */
+#ifndef AT_FDCWD
+#define AT_FDCWD                (-100)
+#endif
+#ifndef AT_SYMLINK_NOFOLLOW
+#define AT_SYMLINK_NOFOLLOW     0x100
+#endif
+#ifndef AT_REMOVEDIR
+#define AT_REMOVEDIR            0x200
+#endif
+
+/**
+ * Open a file relative to directory fd `dirfd` (or AT_FDCWD).
+ */
+int openat(int dirfd, const char *pathname, int flags, ...);
 
 /**
  * Close a file descriptor.

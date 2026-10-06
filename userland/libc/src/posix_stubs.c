@@ -444,8 +444,8 @@ extern ssize_t read(int fd, void *buf, size_t count);
 extern int close(int fd);
 extern int strcmp(const char *s1, const char *s2);
 
-/* O_RDONLY flag value (matches veridian/fcntl.h -- NOT Linux 0). */
-#define __PW_O_RDONLY  0x0001
+/* O_RDONLY (Linux ABI value, as in veridian/fcntl.h). */
+#define __PW_O_RDONLY  0x0000
 
 /*
  * __parse_passwd_line: parse a single colon-delimited passwd line into *pw.

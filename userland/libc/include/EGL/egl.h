@@ -144,6 +144,9 @@ typedef unsigned int EGLBoolean;
 
 #define EGL_BACK_BUFFER                 0x3084
 #define EGL_SINGLE_BUFFER               0x3085
+/* eglGetCurrentSurface readdraw selectors (EGL 1.4, 3.7.4) */
+#define EGL_DRAW                        0x3059
+#define EGL_READ                        0x305A
 
 /* ========================================================================= */
 /* Context attributes                                                        */
