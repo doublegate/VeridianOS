@@ -169,9 +169,11 @@ impl Endpoint {
         // Block current process on this endpoint and yield CPU.
         // When a sender calls send_sync/send_async, it will wake us via
         // ipc_blocking::wake_up_process(). On wake, re-check the queue.
-        crate::sched::ipc_blocking::block_on_ipc(self.id);
+        crate::sched::ipc_blocking::block_on_ipc_unless(self.id, || {
+            !self.receive_queue.lock().is_empty()
+        });
 
-        // Woken up -- try to dequeue the message
+        // Woken up (or the message arrived while registering) -- dequeue it
         let mut queue = self.receive_queue.lock();
         if let Some(msg) = queue.pop_front() {
             Ok(msg)
