@@ -2837,6 +2837,16 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
         report_test("usercopy_fault_returns_efault", ok, passed, failed);
     }
 
+    // Test 33: the futex WAKE_OP atomic on an unmapped user word returns an
+    // error instead of faulting in the kernel (x86_64 cmpxchg fixup).
+    {
+        #[cfg(target_arch = "x86_64")]
+        let ok = crate::syscall::userspace::cmpxchg_user_u32(0x0000_7FF0_0000_0000, 0, 1).is_err();
+        #[cfg(not(target_arch = "x86_64"))]
+        let ok = true; // no fault fixup on aarch64/riscv64 yet
+        report_test("usercopy_cmpxchg_fault_returns_efault", ok, passed, failed);
+    }
+
     // Test 32: the boot stack has not overflowed into the statics below it
     // (aarch64/riscv64 canary; N-13).
     {

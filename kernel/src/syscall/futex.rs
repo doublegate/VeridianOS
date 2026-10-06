@@ -407,23 +407,20 @@ pub fn sys_futex_wake_op(
     // Reject a malformed encoding before touching user memory.
     wake_op_eval(encoded, 0)?;
 
-    // Fault the page in (or fail with EFAULT) through the fault-tolerant
-    // accessor before the atomic access below.
-    crate::syscall::userspace::read_user::<u32>(uaddr2)?;
-
     // Atomic read-modify-write of *uaddr2: other threads update it
     // concurrently; a volatile read + write lost updates (SYS-CONC-01).
-    // SAFETY: uaddr2 is a validated, 4-byte-aligned user address that was
-    // just successfully read; AtomicU32 has the same layout as u32.
-    let word = unsafe { core::sync::atomic::AtomicU32::from_ptr(uaddr2 as *mut u32) };
-    let old = word
-        .fetch_update(
-            core::sync::atomic::Ordering::SeqCst,
-            core::sync::atomic::Ordering::SeqCst,
-            |old| wake_op_eval(encoded, old).ok().map(|(new, _)| new),
-        )
-        .map_err(|_| SyscallError::InvalidArgument)?;
-    let (_, cmp_ok) = wake_op_eval(encoded, old)?;
+    // Both accesses go through the fault-tolerant accessors, so a
+    // read-only page, or one unmapped by another thread between the two,
+    // fails with EFAULT rather than faulting in the kernel.
+    let mut old = crate::syscall::userspace::read_user::<u32>(uaddr2)?;
+    let cmp_ok = loop {
+        let (new, cmp_ok) = wake_op_eval(encoded, old)?;
+        let found = crate::syscall::userspace::cmpxchg_user_u32(uaddr2, old, new)?;
+        if found == old {
+            break cmp_ok;
+        }
+        old = found;
+    };
 
     // Linux semantics: always wake up to `val` waiters on uaddr; if the
     // comparison held, also wake up to `val2` waiters on uaddr2.

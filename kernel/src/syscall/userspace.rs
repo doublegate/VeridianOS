@@ -261,6 +261,38 @@ unsafe fn raw_copy(dst: *mut u8, src: *const u8, len: usize) -> Result<(), Sysca
     }
 }
 
+/// Atomically compare-and-exchange the aligned 32-bit user word at `addr`:
+/// store `new` if it holds `old`. Returns the value found, which equals
+/// `old` iff the store happened. A fault (unmapped, or a read-only page)
+/// fails with `UnmappedMemory` instead of crashing the kernel.
+pub fn cmpxchg_user_u32(addr: usize, old: u32, new: u32) -> Result<u32, SyscallError> {
+    if addr & 0x3 != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    validate_user_ptr(addr as *const u8, core::mem::size_of::<u32>())?;
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    {
+        // SAFETY: `addr` is aligned and was validated as a user address.
+        unsafe { crate::arch::x86_64::usercopy::cmpxchg_user_u32(addr as *mut u32, old, new) }
+            .map_err(|()| SyscallError::UnmappedMemory)
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    {
+        // SAFETY: `addr` is aligned and validated; AtomicU32 has the layout
+        // of u32. Without a fault fixup on these targets, the page must
+        // already be mapped writable (the same assumption as raw_copy).
+        let word = unsafe { core::sync::atomic::AtomicU32::from_ptr(addr as *mut u32) };
+        Ok(word
+            .compare_exchange(
+                old,
+                new,
+                core::sync::atomic::Ordering::SeqCst,
+                core::sync::atomic::Ordering::SeqCst,
+            )
+            .unwrap_or_else(|found| found))
+    }
+}
+
 /// Read a `T` from user memory at `addr`.
 pub fn read_user<T: Copy>(addr: usize) -> Result<T, SyscallError> {
     let size = core::mem::size_of::<T>();

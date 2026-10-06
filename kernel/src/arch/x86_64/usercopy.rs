@@ -32,10 +32,34 @@ core::arch::global_asm!(
     "    ret",
 );
 
+// rdi = user word, esi = expected, edx = new, rcx = *mut u32 receiving the
+// value found. Returns 0 if the cmpxchg executed (whether or not it
+// swapped), -14 (EFAULT) if it faulted -- including a write to a present
+// but read-only page, which demand paging does not resolve.
+core::arch::global_asm!(
+    ".section .text",
+    ".global veridian_cmpxchg_user32",
+    "veridian_cmpxchg_user32:",
+    "    mov eax, esi",
+    ".global veridian_cmpxchg_user32_insn",
+    "veridian_cmpxchg_user32_insn:",
+    "    lock cmpxchg dword ptr [rdi], edx",
+    "    mov dword ptr [rcx], eax",
+    "    xor eax, eax",
+    "    ret",
+    ".global veridian_cmpxchg_user32_fixup",
+    "veridian_cmpxchg_user32_fixup:",
+    "    mov rax, -14",
+    "    ret",
+);
+
 extern "C" {
     fn veridian_copy_user(dst: *mut u8, src: *const u8, len: usize) -> isize;
     fn veridian_copy_user_insn();
     fn veridian_copy_user_fixup();
+    fn veridian_cmpxchg_user32(ptr: *mut u32, old: u32, new: u32, found: *mut u32) -> isize;
+    fn veridian_cmpxchg_user32_insn();
+    fn veridian_cmpxchg_user32_fixup();
 }
 
 /// Copy `len` bytes from `src` to `dst`, either of which may be a user
@@ -59,9 +83,32 @@ pub(crate) unsafe fn copy_user(dst: *mut u8, src: *const u8, len: usize) -> Resu
     }
 }
 
-/// Fixup address for a kernel-mode fault at `rip`, if `rip` is the
-/// fault-tolerant copy instruction.
+/// Atomically compare-and-exchange the 32-bit user word at `ptr`: if it
+/// holds `old`, store `new`. Returns the value found (equal to `old` iff
+/// the store happened), or `Err(())` if the access faulted.
+///
+/// # Safety
+///
+/// `ptr` must be 4-byte aligned and validated to lie in the user half.
+pub(crate) unsafe fn cmpxchg_user_u32(ptr: *mut u32, old: u32, new: u32) -> Result<u32, ()> {
+    let mut found = 0u32;
+    // SAFETY: forwarded from the caller's contract; `found` is a local.
+    match unsafe { veridian_cmpxchg_user32(ptr, old, new, &mut found) } {
+        0 => Ok(found),
+        _ => Err(()),
+    }
+}
+
+/// Fixup address for a kernel-mode fault at `rip`, if `rip` is one of the
+/// fault-tolerant user-access instructions.
 pub(crate) fn fixup_for(rip: u64) -> Option<u64> {
-    let insn = veridian_copy_user_insn as unsafe extern "C" fn() as usize as u64;
-    (rip == insn).then_some(veridian_copy_user_fixup as unsafe extern "C" fn() as usize as u64)
+    type Stub = unsafe extern "C" fn();
+    let table: [(Stub, Stub); 2] = [
+        (veridian_copy_user_insn, veridian_copy_user_fixup),
+        (veridian_cmpxchg_user32_insn, veridian_cmpxchg_user32_fixup),
+    ];
+    table
+        .iter()
+        .find(|(insn, _)| *insn as usize as u64 == rip)
+        .map(|(_, fixup)| *fixup as usize as u64)
 }
