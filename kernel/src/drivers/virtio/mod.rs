@@ -113,7 +113,12 @@ impl VirtioTransport {
     pub fn write_queue_address(&self, pfn: u32) {
         match self {
             Self::Pci(p) => p.write_queue_address(pfn),
-            Self::Mmio(_) => {} // mmio uses 64-bit phys addresses via write_queue_phys
+            // Legacy (v1) mmio uses the PFN; modern uses write_queue_phys.
+            Self::Mmio(m) => {
+                if m.is_legacy() {
+                    m.write_queue_pfn(pfn);
+                }
+            }
         }
     }
 
@@ -149,6 +154,54 @@ impl VirtioTransport {
         match self {
             Self::Pci(p) => p.read_device_config_u64(offset),
             Self::Mmio(m) => m.read_config_u64(offset as usize),
+        }
+    }
+
+    /// Read one byte of device-specific configuration space.
+    pub fn read_device_config_u8(&self, offset: u16) -> u8 {
+        match self {
+            Self::Pci(p) => p.read_device_config_u8(offset),
+            Self::Mmio(m) => m.read_config_u8(offset as usize),
+        }
+    }
+
+    /// Set the size of the selected queue. Legacy PCI queues have a fixed,
+    /// device-chosen size, so this only applies to MMIO.
+    pub fn set_queue_size(&self, size: u16) {
+        if let Self::Mmio(m) = self {
+            m.set_queue_size(size);
+        }
+    }
+
+    /// Accept VIRTIO_F_VERSION_1 if the device offers it. Modern (v2)
+    /// virtio-mmio devices expect it; legacy PCI has no high feature word.
+    /// Returns whether it was accepted, which changes e.g. the virtio-net
+    /// header size.
+    pub fn negotiate_version_1(&self) -> bool {
+        match self {
+            Self::Pci(_) => false,
+            Self::Mmio(m) => {
+                let offered = m.read_device_features_hi() & 1 != 0;
+                m.write_driver_features_hi(if offered { 1 } else { 0 });
+                offered
+            }
+        }
+    }
+
+    /// Reset the device, which stops it using any queue or buffer memory.
+    /// Required before freeing memory the device may still DMA into.
+    pub fn reset_device(&self) {
+        match self {
+            Self::Pci(p) => p.write_status(0),
+            Self::Mmio(m) => m.reset(),
+        }
+    }
+
+    /// Mark device initialization as failed.
+    pub fn set_failed(&self) {
+        match self {
+            Self::Pci(p) => p.write_status(status::FAILED),
+            Self::Mmio(m) => m.set_failed(),
         }
     }
 }

@@ -21,6 +21,7 @@ pub mod ipv6;
 pub mod kerberos;
 pub mod ldap;
 pub mod socket;
+pub mod socket_fd;
 pub mod tcp;
 pub mod udp;
 pub mod unix_socket;

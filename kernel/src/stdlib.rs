@@ -539,7 +539,7 @@ pub(crate) mod process {
     /// Get parent process ID
     pub(crate) fn getppid() -> u32 {
         crate::process::get_current_process()
-            .and_then(|p| p.parent)
+            .and_then(|p| p.parent())
             .map(|ppid| ppid.0 as u32)
             .unwrap_or(1) // Return init (PID 1) if no parent or no current
                           // process

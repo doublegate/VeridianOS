@@ -208,6 +208,8 @@ pub enum FsError {
     SymlinkLoop,
     /// No space left on device (ENOSPC)
     NoSpace,
+    /// Operation would cross filesystems (EXDEV)
+    CrossDevice,
 }
 
 /// Result type alias for kernel operations

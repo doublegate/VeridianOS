@@ -7,7 +7,7 @@
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
-use alloc::{boxed::Box, collections::BTreeMap, vec::Vec};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 
 use spin::Mutex;
 
@@ -18,10 +18,10 @@ use crate::{error::KernelError, println};
 /// Process table entry
 #[cfg(feature = "alloc")]
 pub struct ProcessEntry {
-    /// The process
-    pub process: Box<Process>,
-    /// Reference count (for safe access)
-    pub ref_count: usize,
+    /// The process. Shared ownership (PROC-SEC-01): lookups hand out
+    /// clones of this `Arc`, so a process stays alive while anyone still
+    /// uses it, even after `remove_process` takes it out of the table.
+    pub process: Arc<Process>,
 }
 
 /// Global process table
@@ -95,8 +95,7 @@ impl ProcessTable {
         entries.insert(
             pid,
             ProcessEntry {
-                process: Box::new(process),
-                ref_count: 1,
+                process: Arc::new(process),
             },
         );
 
@@ -135,7 +134,7 @@ impl ProcessTable {
 
     /// Remove a process from the table
     #[cfg(feature = "alloc")]
-    pub fn remove_process(&self, pid: ProcessId) -> Option<Box<Process>> {
+    pub fn remove_process(&self, pid: ProcessId) -> Option<Arc<Process>> {
         let mut entries = self.entries.lock();
 
         if let Some(entry) = entries.remove(&pid) {
@@ -167,19 +166,15 @@ impl ProcessTable {
         None
     }
 
-    /// Get a process by PID
+    /// Get a process by PID. The returned `Arc` keeps the process alive
+    /// independently of the table; the table used to hand out `&'static`
+    /// references into entries that `remove_process` then freed.
     #[cfg(feature = "alloc")]
-    pub fn get_process(&self, pid: ProcessId) -> Option<&'static Process> {
-        let entries = self.entries.lock();
-
-        entries.get(&pid).map(|entry| {
-            // SAFETY: The Process is stored in a BTreeMap behind a Mutex, giving
-            // it a stable heap address. Casting to *const and back to &'static
-            // extends the borrow lifetime beyond the lock. This is sound because
-            // processes are never moved or deallocated while references exist in
-            // the current kernel model.
-            unsafe { &*(entry.process.as_ref() as *const Process) }
-        })
+    pub fn get_process(&self, pid: ProcessId) -> Option<Arc<Process>> {
+        self.entries
+            .lock()
+            .get(&pid)
+            .map(|entry| entry.process.clone())
     }
 
     /// Get a process by PID (no-alloc version)
@@ -200,21 +195,6 @@ impl ProcessTable {
         }
 
         None
-    }
-
-    /// Get mutable access to a process
-    #[cfg(feature = "alloc")]
-    pub fn get_process_mut(&self, pid: ProcessId) -> Option<&'static mut Process> {
-        let mut entries = self.entries.lock();
-
-        entries.get_mut(&pid).map(|entry| {
-            // SAFETY: The Process is stored in a BTreeMap behind a Mutex, giving
-            // it a stable heap address. Casting to *mut and back to &'static mut
-            // extends the borrow lifetime. Sound because the Mutex prevents
-            // concurrent mutable access and processes are not moved while
-            // references exist.
-            unsafe { &mut *(entry.process.as_mut() as *mut Process) }
-        })
     }
 
     /// Check if a process exists
@@ -251,7 +231,7 @@ impl ProcessTable {
         let mut children = Vec::new();
 
         for (pid, entry) in entries.iter() {
-            if entry.process.parent == Some(parent_pid) {
+            if entry.process.parent() == Some(parent_pid) {
                 children.push(*pid);
             }
         }
@@ -311,14 +291,8 @@ pub fn init() {
 }
 
 /// Get a process by PID
-pub fn get_process(pid: ProcessId) -> Option<&'static Process> {
+pub fn get_process(pid: ProcessId) -> Option<Arc<Process>> {
     PROCESS_TABLE.get_process(pid)
-}
-
-/// Get mutable access to a process
-#[cfg(feature = "alloc")]
-pub fn get_process_mut(pid: ProcessId) -> Option<&'static mut Process> {
-    PROCESS_TABLE.get_process_mut(pid)
 }
 
 /// Add a process to the table
@@ -328,7 +302,7 @@ pub fn add_process(process: Process) -> Result<ProcessId, KernelError> {
 
 /// Remove a process from the table
 #[cfg(feature = "alloc")]
-pub fn remove_process(pid: ProcessId) -> Option<Box<Process>> {
+pub fn remove_process(pid: ProcessId) -> Option<Arc<Process>> {
     PROCESS_TABLE.remove_process(pid)
 }
 
@@ -340,4 +314,34 @@ pub fn process_exists(pid: ProcessId) -> bool {
 /// Get total number of processes
 pub fn process_count() -> usize {
     PROCESS_TABLE.count()
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod tests {
+    use alloc::string::String;
+
+    use super::*;
+    use crate::process::ProcessPriority;
+
+    #[test]
+    fn looked_up_process_outlives_removal() {
+        // PROC-SEC-01: get_process used to return a &'static into an entry
+        // that remove_process then freed.
+        let table = ProcessTable::new();
+        let pid = ProcessId(4242);
+        table
+            .add_process(Process::new(
+                pid,
+                None,
+                String::from("p"),
+                ProcessPriority::Normal,
+            ))
+            .unwrap();
+        let handle = table.get_process(pid).unwrap();
+        let removed = table.remove_process(pid).unwrap();
+        drop(removed);
+        assert!(table.get_process(pid).is_none());
+        assert_eq!(handle.pid, pid);
+        assert_eq!(handle.name, "p");
+    }
 }

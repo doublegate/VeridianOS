@@ -97,7 +97,7 @@ fn try_demand_page(info: &PageFaultInfo) -> Result<(), KernelError> {
     let process = crate::process::current_process().ok_or(KernelError::NotInitialized {
         subsystem: "process",
     })?;
-    try_demand_page_in(process, info)
+    try_demand_page_in(&process, info)
 }
 
 /// Resolve a fault the kernel took while copying to or from user memory
@@ -122,7 +122,7 @@ pub fn resolve_user_copy_fault(info: &PageFaultInfo) -> bool {
         was_user_mode: true,
         ..*info
     };
-    try_demand_page_in(process, &as_user).is_ok()
+    try_demand_page_in(&process, &as_user).is_ok()
 }
 
 fn try_demand_page_in(

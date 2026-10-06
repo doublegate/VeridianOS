@@ -52,18 +52,18 @@ use commands::{
     KlistCommand, KptiCommand, KubectlCommand, LdapsearchCommand, LsCommand, LsblkCommand,
     LscpuCommand, LsmodCommand, LsnsCommand, LspciCommand, LsusbCommand, MacCommand, MakeCommand,
     MdadmCommand, MkdirCommand, MkfsCommand, MountCommand, MvCommand, NatCommand, NdpCommand,
-    NetstatCommand, NfsmountCommand, NotifyCommand, NtpCommand, NumaCommand, PasswdCommand,
-    PerfCommand, Ping6Command, PingCommand, PkgCommand, PlayCommand, PoweroffCommand,
-    PrintfCommand, ProfilerCommand, PsCommand, PwdCommand, ReadCommand, RebootCommand, RmCommand,
-    RouteCommand, SchedCommand, ScreenshotCommand, ServiceCommand, SetCommand, Sha256sumCommand,
-    ShutdownCommand, SlabCommand, SmbclientCommand, SortCommand, SourceCommand, SsCommand,
-    SshCommand, SshdCommand, StartGuiCommand, StraceCommand, SuCommand, SudoCommand,
-    SuspendCommand, SyncCommand, SysctlCommand, TailCommand, TarCommand, TeeCommand, TestCommand,
-    ThemeCommand, TopCommand, TouchCommand, TpmCommand, TrCommand, TraceCommand, TrueCommand,
-    TypeCommand, UnaliasCommand, UnameCommand, UniqCommand, UnsetCommand, UptimeCommand,
-    UseraddCommand, UserdelCommand, VlanCommand, VmstatCommand, VmxCommand, VolumeCommand,
-    VpnCommand, WcCommand, WgCommand, WhichCommand, WhoamiCommand, WifiCommand, WinfoCommand,
-    XattrCommand,
+    NetstatCommand, NfsmountCommand, NotifyCommand, NtpCommand, NumaCommand, NvmeCommand,
+    PasswdCommand, PerfCommand, Ping6Command, PingCommand, PkgCommand, PlayCommand,
+    PoweroffCommand, PrintfCommand, ProfilerCommand, PsCommand, PwdCommand, ReadCommand,
+    RebootCommand, RmCommand, RouteCommand, SchedCommand, ScreenshotCommand, ServiceCommand,
+    SetCommand, Sha256sumCommand, ShutdownCommand, SlabCommand, SmbclientCommand, SortCommand,
+    SourceCommand, SsCommand, SshCommand, SshdCommand, StartGuiCommand, StraceCommand, SuCommand,
+    SudoCommand, SuspendCommand, SyncCommand, SysctlCommand, TailCommand, TarCommand, TeeCommand,
+    TestCommand, ThemeCommand, TopCommand, TouchCommand, TpmCommand, TrCommand, TraceCommand,
+    TrueCommand, TypeCommand, UnaliasCommand, UnameCommand, UniqCommand, UnsetCommand,
+    UptimeCommand, UseraddCommand, UserdelCommand, VlanCommand, VmstatCommand, VmxCommand,
+    VolumeCommand, VpnCommand, WcCommand, WgCommand, WhichCommand, WhoamiCommand, WifiCommand,
+    WinfoCommand, XattrCommand,
 };
 use spin::RwLock;
 pub use state::{get_shell, init, run_shell, try_get_shell};
@@ -778,6 +778,7 @@ impl Shell {
 
         // Hardware discovery commands
         builtins.insert("lsblk".into(), Box::new(LsblkCommand));
+        builtins.insert("nvme".into(), Box::new(NvmeCommand));
         builtins.insert("lspci".into(), Box::new(LspciCommand));
         builtins.insert("lsusb".into(), Box::new(LsusbCommand));
 
@@ -1028,6 +1029,13 @@ impl Shell {
 
         loop {
             let ch = Self::read_char();
+
+            // Feed received network frames into the stack while idle at
+            // the prompt (there is no network RX interrupt path yet).
+            #[cfg(feature = "alloc")]
+            if ch.is_none() {
+                crate::net::device::poll_rx();
+            }
 
             match ch {
                 Some(byte) => {

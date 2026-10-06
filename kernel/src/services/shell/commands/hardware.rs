@@ -138,6 +138,88 @@ impl BuiltinCommand for LsblkCommand {
 // Storage & RAID Commands
 // ============================================================================
 
+pub(in crate::services::shell) struct NvmeCommand;
+impl BuiltinCommand for NvmeCommand {
+    fn name(&self) -> &str {
+        "nvme"
+    }
+    fn description(&self) -> &str {
+        "List NVMe namespaces; 'nvme selftest' does a write/read-back round trip"
+    }
+
+    fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
+        use crate::{drivers::nvme, fs::blockdev::BlockDevice};
+
+        let count = nvme::controller_count();
+        if count == 0 {
+            crate::println!("nvme: no controllers");
+            return CommandResult::Success(1);
+        }
+        if args.first().map(String::as_str) != Some("selftest") {
+            for i in 0..count {
+                nvme::with_controller(i, |c| {
+                    crate::println!(
+                        "{}: {} blocks x {} bytes",
+                        c.name(),
+                        c.block_count(),
+                        c.block_size()
+                    );
+                });
+            }
+            return CommandResult::Success(0);
+        }
+
+        // Round trip on the last 8 KiB of nvme0n1, restoring the original
+        // contents afterwards. Spans two pages, so PRP2 is exercised.
+        let result = nvme::with_controller(0, |c| -> Result<(), crate::error::KernelError> {
+            let bs = c.block_size();
+            let mut first = alloc::vec![0u8; bs];
+            c.read_blocks(0, &mut first)?;
+            let sig: String = first[..32]
+                .iter()
+                .map(|&b| if b.is_ascii_graphic() { b as char } else { '.' })
+                .collect();
+            crate::println!("NVME-SELFTEST: lba0={}", sig);
+            let n = (8192 / bs) as u64;
+            let lba = c.block_count() - n;
+            let mut saved = alloc::vec![0u8; 8192];
+            c.read_blocks(lba, &mut saved)?;
+            let pattern: alloc::vec::Vec<u8> = (0..8192u32)
+                .map(|i| (i.wrapping_mul(31) ^ 0x5A) as u8)
+                .collect();
+            c.write_blocks(lba, &pattern)?;
+            c.flush()?;
+            let mut back = alloc::vec![0u8; 8192];
+            c.read_blocks(lba, &mut back)?;
+            let ok = back == pattern;
+            c.write_blocks(lba, &saved)?;
+            c.flush()?;
+            // Out-of-range access must fail, not wrap or underflow.
+            let mut one = alloc::vec![0u8; bs];
+            let oob = c.read_blocks(c.block_count(), &mut one).is_err();
+            let empty = c.read_blocks(0, &mut []).is_err();
+            crate::println!(
+                "NVME-SELFTEST: roundtrip={} oob_rejected={} empty_rejected={}",
+                ok,
+                oob,
+                empty
+            );
+            if ok && oob && empty {
+                crate::println!("NVME-SELFTEST: PASS");
+            }
+            Ok(())
+        });
+        match result {
+            Some(Ok(())) => CommandResult::Success(0),
+            Some(Err(e)) => {
+                crate::println!("nvme: selftest error: {:?}", e);
+                CommandResult::Success(1)
+            }
+            None => CommandResult::Success(1),
+        }
+    }
+}
+
 pub(in crate::services::shell) struct MdadmCommand;
 impl BuiltinCommand for MdadmCommand {
     fn name(&self) -> &str {

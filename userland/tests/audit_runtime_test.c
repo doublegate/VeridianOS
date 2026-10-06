@@ -2,18 +2,22 @@
  * audit_runtime_test -- in-guest checks for the v0.26 audit fixes that the
  * 33 boot tests never exercise: process and thread exit/reaping, the libc
  * allocator under threads, scanf field widths, fd numbering, rename and
- * permission enforcement for a non-root user.
+ * permission enforcement for a non-root user, sticky directories, sockets
+ * as per-process fds and SCM_RIGHTS.
  *
  * Run as root from a BusyBox shell: /bin/audit_runtime_test [threads]
  * Prints one "PASS <name>" or "FAIL <name>: <why>" line per check and a
  * final "AUDIT-RUNTIME: <passed>/<total>" summary.
  */
 
+#include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -238,6 +242,139 @@ static void test_nonroot_permissions(void)
     report("secret_mode_unchanged", ok, why_sec);
 }
 
+/* --- Sticky directories (W-17): /tmp-style 1777 dirs. ----------------- */
+static void test_sticky_dir(void)
+{
+    mkdir("/tmp/audit_sticky", 0777);
+    mkdir("/tmp/audit_open", 0777);
+    int setup = chmod("/tmp/audit_sticky", 01777) == 0 &&
+                chmod("/tmp/audit_open", 0777) == 0 &&
+                write_file("/tmp/audit_sticky/rootfile", "r", 0644) == 0 &&
+                write_file("/tmp/audit_open/rootfile", "r", 0644) == 0;
+    struct stat st;
+    int sticky_set = stat("/tmp/audit_sticky", &st) == 0 && (st.st_mode & 01000);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        int fails = 0;
+        if (setuid(1000) != 0)
+            _exit(100);
+        struct stat own;
+        if (write_file("/tmp/audit_sticky/mine", "m", 0644) != 0)
+            fails |= 1;
+        if (stat("/tmp/audit_sticky/mine", &own) != 0 || own.st_uid != 1000)
+            fails |= 16;                        /* creator owns new file */
+        if (unlink("/tmp/audit_sticky/mine") != 0)
+            fails |= 1;                         /* own entry: allowed */
+        if (unlink("/tmp/audit_sticky/rootfile") == 0)
+            fails |= 2;                         /* other's entry: EPERM */
+        if (rename("/tmp/audit_sticky/rootfile", "/tmp/audit_sticky/moved") == 0)
+            fails |= 4;                         /* rename away: EPERM */
+        if (unlink("/tmp/audit_open/rootfile") != 0)
+            fails |= 8;                         /* control: no sticky bit */
+        _exit(fails);
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    int code = WIFEXITED(status) ? WEXITSTATUS(status) : 255;
+    static char why[80];
+    snprintf(why, sizeof(why), "setup=%d sticky_bit=%d child exit %d (bitmask)",
+             setup, sticky_set, code);
+    report("sticky_dir_protects_entries", setup && sticky_set && code == 0, why);
+}
+
+/* --- umask is applied to new files. ---------------------------------- */
+static void test_umask(void)
+{
+    mode_t old = umask(022);
+    unlink("/tmp/audit_umask");
+    struct stat st;
+    int ok = write_file("/tmp/audit_umask", "u", 0666) == 0 &&
+             stat("/tmp/audit_umask", &st) == 0 && (st.st_mode & 0777) == 0644;
+    umask(old);
+    static char why[48];
+    snprintf(why, sizeof(why), "mode %o, expected 644", (unsigned)(st.st_mode & 0777));
+    report("umask_applied", ok, why);
+}
+
+/* --- Sockets are per-process fds; SCM_RIGHTS passes open files (W-14). */
+static void test_sockets(void)
+{
+    char buf[32] = {0};
+    int sv[2] = {-1, -1};
+    int filefd = open("/tmp/audit_sockfile", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    int ok = socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0 &&
+             sv[0] >= 3 && sv[1] >= 3 && sv[0] != sv[1] &&
+             filefd >= 0 && filefd != sv[0] && filefd != sv[1];
+    ok = ok && write(sv[0], "ping", 4) == 4 && read(sv[1], buf, sizeof(buf)) == 4 &&
+         memcmp(buf, "ping", 4) == 0;
+    ok = ok && send(sv[1], "pong", 4, 0) == 4 && recv(sv[0], buf, sizeof(buf), 0) == 4 &&
+         memcmp(buf, "pong", 4) == 0;
+    report("socketpair_fds_read_write", ok, "socketpair fds or data path wrong");
+
+    /* A process that does not hold the fd cannot reach the socket. */
+    pid_t pid = fork();
+    if (pid == 0) {
+        int fails = 0;
+        close(sv[0]);
+        close(sv[1]);
+        if (send(sv[0], "x", 1, 0) >= 0)
+            fails |= 1;
+        else if (errno != EBADF)
+            fails |= 2;
+        struct pollfd p = { .fd = sv[1], .events = POLLIN };
+        if (poll(&p, 1, 0) != 1 || !(p.revents & POLLNVAL))
+            fails |= 4;
+        _exit(fails);
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    int code = WIFEXITED(status) ? WEXITSTATUS(status) : 255;
+    static char why[64];
+    snprintf(why, sizeof(why), "child exit %d (bitmask)", code);
+    report("socket_unreachable_without_fd", code == 0, why);
+    ok = write(sv[0], "a", 1) == 1 && read(sv[1], buf, 1) == 1 && buf[0] == 'a';
+    report("socket_survives_child_close", ok, "parent's socket broken by child close");
+
+    /* SCM_RIGHTS: the receiver gets its own new fd for the sender's file. */
+    ok = write(filefd, "scm-payload", 11) == 11 && lseek(filefd, 0, SEEK_SET) == 0;
+    char one = 'f';
+    struct iovec iov = { .iov_base = &one, .iov_len = 1 };
+    union { char b[CMSG_SPACE(sizeof(int))]; struct cmsghdr align; } cs, cr;
+    memset(&cs, 0, sizeof(cs));
+    memset(&cr, 0, sizeof(cr));
+    struct msghdr m = { .msg_iov = &iov, .msg_iovlen = 1,
+                        .msg_control = cs.b, .msg_controllen = sizeof(cs.b) };
+    struct cmsghdr *c = CMSG_FIRSTHDR(&m);
+    c->cmsg_level = SOL_SOCKET;
+    c->cmsg_type = SCM_RIGHTS;
+    c->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(c), &filefd, sizeof(int));
+    ok = ok && sendmsg(sv[0], &m, 0) == 1;
+
+    char got = 0;
+    struct iovec riov = { .iov_base = &got, .iov_len = 1 };
+    struct msghdr r = { .msg_iov = &riov, .msg_iovlen = 1,
+                        .msg_control = cr.b, .msg_controllen = sizeof(cr.b) };
+    ok = ok && recvmsg(sv[1], &r, 0) == 1 && got == 'f';
+    int newfd = -1;
+    struct cmsghdr *rc = CMSG_FIRSTHDR(&r);
+    if (rc && rc->cmsg_level == SOL_SOCKET && rc->cmsg_type == SCM_RIGHTS)
+        memcpy(&newfd, CMSG_DATA(rc), sizeof(int));
+    memset(buf, 0, sizeof(buf));
+    ok = ok && newfd >= 0 && newfd != filefd && read(newfd, buf, 11) == 11 &&
+         memcmp(buf, "scm-payload", 11) == 0;
+    static char why_scm[64];
+    snprintf(why_scm, sizeof(why_scm), "newfd=%d filefd=%d read '%.11s'", newfd, filefd, buf);
+    report("scm_rights_passes_open_file", ok, why_scm);
+
+    if (newfd >= 0)
+        close(newfd);
+    close(filefd);
+    close(sv[0]);
+    close(sv[1]);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -252,6 +389,9 @@ int main(int argc, char **argv)
     test_fork_exit();
     test_rename();
     test_nonroot_permissions();
+    test_sticky_dir();
+    test_umask();
+    test_sockets();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

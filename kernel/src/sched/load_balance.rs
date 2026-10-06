@@ -111,7 +111,7 @@ pub fn cleanup_dead_tasks() {
     for (pid, tid) in threads {
         // The process may already be gone (cleanup_process freed it).
         if let Some(process) = crate::process::table::get_process(pid) {
-            let _ = crate::process::exit::cleanup_thread(process, tid);
+            let _ = crate::process::exit::cleanup_thread(&process, tid);
         }
     }
 }

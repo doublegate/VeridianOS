@@ -28,7 +28,6 @@ pub mod cwd;
 pub mod exit;
 pub mod fork;
 pub mod lifecycle;
-pub mod loader;
 pub mod memory;
 pub mod pcb;
 pub mod session;
@@ -177,7 +176,7 @@ pub fn init() {
 }
 
 /// Get current process
-pub fn current_process() -> Option<&'static Process> {
+pub fn current_process() -> Option<alloc::sync::Arc<Process>> {
     // A process launched directly by the boot/cooperative dispatcher
     // (enter_usermode_returnable) is not the scheduler's current task -- the
     // scheduler still reports the dispatching task. While that dispatching
@@ -209,7 +208,7 @@ pub fn current_process() -> Option<&'static Process> {
 /// Like [`current_process`], but never waits for the scheduler lock:
 /// returns `None` if it is held. For fault handlers that may run while the
 /// interrupted code holds that lock.
-pub fn try_current_process() -> Option<&'static Process> {
+pub fn try_current_process() -> Option<alloc::sync::Arc<Process>> {
     if let Some((boot_pid, _)) = boot_context() {
         return table::get_process(ProcessId(boot_pid));
     }
@@ -232,17 +231,17 @@ pub fn try_current_process() -> Option<&'static Process> {
 }
 
 /// Find process by ID
-pub fn find_process(pid: ProcessId) -> Option<&'static Process> {
+pub fn find_process(pid: ProcessId) -> Option<alloc::sync::Arc<Process>> {
     table::get_process(pid)
 }
 
 /// Get current process (alias for compatibility)
-pub fn get_current_process() -> Option<&'static Process> {
+pub fn get_current_process() -> Option<alloc::sync::Arc<Process>> {
     current_process()
 }
 
 /// Get current thread
-pub fn current_thread() -> Option<&'static Thread> {
+pub fn current_thread() -> Option<alloc::sync::Arc<Thread>> {
     // Same rule as current_process(), so the two never name different
     // processes.
     if let Some((boot_pid, boot_tid)) = boot_context() {

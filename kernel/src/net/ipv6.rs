@@ -1202,7 +1202,7 @@ pub fn send(
             let frame =
                 super::ethernet::construct_frame(sol_mac, src_mac, ETHERTYPE_IPV6, &ns_packet);
             let pkt = super::Packet::from_bytes(&frame);
-            super::device::with_device_mut("eth0", |dev| {
+            super::device::with_primary_device_mut(|dev| {
                 let _ = dev.transmit(&pkt);
             });
 
@@ -1220,7 +1220,7 @@ pub fn send(
     let src_mac = get_interface_mac();
     let frame = super::ethernet::construct_frame(dst_mac, src_mac, ETHERTYPE_IPV6, &packet);
     let pkt = super::Packet::from_bytes(&frame);
-    super::device::with_device_mut("eth0", |dev| {
+    super::device::with_primary_device_mut(|dev| {
         let _ = dev.transmit(&pkt);
     });
 
@@ -1284,7 +1284,7 @@ pub fn process_packet(data: &[u8]) -> Result<(), KernelError> {
 
 /// Get the MAC address of the primary network interface.
 fn get_interface_mac() -> MacAddress {
-    super::device::with_device("eth0", |dev| dev.mac_address()).unwrap_or(MacAddress::ZERO)
+    super::device::with_primary_device(|dev| dev.mac_address()).unwrap_or(MacAddress::ZERO)
 }
 
 // ============================================================================

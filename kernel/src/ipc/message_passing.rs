@@ -307,8 +307,11 @@ pub fn receive_from_endpoint(endpoint_id: EndpointId, blocking: bool) -> Result<
         queue.add_receiver(current_pid);
         drop(queue);
 
-        // Block the current process
-        sched::block_on_ipc(endpoint_id);
+        // Block the current process, unless a message arrived while we were
+        // registering (IPC-SYNC-01: the queue lock is already released).
+        crate::sched::ipc_blocking::block_on_ipc_unless(endpoint_id, || {
+            endpoint.queue.lock().has_messages()
+        });
 
         // When we wake up, try again
         receive_from_endpoint(endpoint_id, false)

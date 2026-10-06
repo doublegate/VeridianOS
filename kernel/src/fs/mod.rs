@@ -73,6 +73,9 @@ pub struct Permissions {
     pub other_read: bool,
     pub other_write: bool,
     pub other_exec: bool,
+    /// Sticky bit (S_ISVTX): in a directory, only an entry's owner, the
+    /// directory's owner or root may remove or rename the entry.
+    pub sticky: bool,
 }
 
 impl Permissions {
@@ -88,6 +91,7 @@ impl Permissions {
             other_read: true,
             other_write: false,
             other_exec: true,
+            sticky: false,
         }
     }
 
@@ -103,6 +107,7 @@ impl Permissions {
             other_read: true,
             other_write: false,
             other_exec: false,
+            sticky: false,
         }
     }
 
@@ -120,6 +125,7 @@ impl Permissions {
             (self.other_read, 0o004),
             (self.other_write, 0o002),
             (self.other_exec, 0o001),
+            (self.sticky, 0o1000),
         ]
         .iter()
         .filter(|(set, _)| *set)
@@ -138,6 +144,7 @@ impl Permissions {
             other_read: (mode & 0o004) != 0,
             other_write: (mode & 0o002) != 0,
             other_exec: (mode & 0o001) != 0,
+            sticky: (mode & 0o1000) != 0,
         }
     }
 
@@ -712,7 +719,14 @@ impl Vfs {
     /// Create a directory
     ///
     /// Checks MAC policy (Write access to file domain) before creating.
-    pub fn mkdir(&self, path: &str, permissions: Permissions) -> Result<(), KernelError> {
+    /// Create a directory and return its node. Callers that adjust the new
+    /// directory (ownership) must use this node, not look the path up again:
+    /// the name can be replaced in between.
+    pub fn mkdir(
+        &self,
+        path: &str,
+        permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
         // Parse the path once and use that single result both for the MAC
         // check and for the creation, so they cannot disagree: the parent
         // is resolved canonically (following symlinks) and the policy sees
@@ -739,8 +753,7 @@ impl Vfs {
             .unwrap_or(0);
         crate::security::mac::check_file_access(&target, crate::security::AccessType::Write, pid)?;
 
-        parent.mkdir(name, permissions)?;
-        Ok(())
+        parent.mkdir(name, permissions)
     }
 
     /// Remove a file or directory
@@ -876,7 +889,7 @@ pub fn init() {
                 root.mkdir("sbin", Permissions::default()).ok();
                 root.mkdir("sys", Permissions::default()).ok();
                 root.mkdir("run", Permissions::default()).ok();
-                root.mkdir("tmp", Permissions::from_mode(0o777)).ok();
+                root.mkdir("tmp", Permissions::from_mode(0o1777)).ok();
                 root.mkdir("usr", Permissions::default()).ok();
                 root.mkdir("var", Permissions::default()).ok();
             }
@@ -1247,6 +1260,13 @@ pub fn append_file(path: &str, data: &[u8]) -> Result<usize, KernelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permissions_mode_round_trip_includes_sticky() {
+        for mode in [0o1777, 0o755, 0o1700, 0o644, 0o0] {
+            assert_eq!(Permissions::from_mode(mode).to_mode(), mode);
+        }
+    }
 
     /// Helper: create a Vfs with a ramfs root filesystem already mounted.
     fn make_vfs_with_root() -> Vfs {

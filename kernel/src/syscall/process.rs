@@ -242,12 +242,12 @@ pub fn sys_exit(exit_code: usize) -> SyscallResult {
                 // Close all file descriptors (pipes, files, etc.) BEFORE
                 // marking as Zombie. This ensures pipe write_closed is set
                 // so parent reads get EOF.
-                crate::process::exit::cleanup_process(process);
+                crate::process::exit::cleanup_process(&process);
 
                 process.set_state(crate::process::pcb::ProcessState::Zombie);
 
                 // Wake parent if blocked in waitpid
-                if let Some(parent_pid) = process.parent {
+                if let Some(parent_pid) = process.parent() {
                     if let Some(parent) = crate::process::table::get_process(parent_pid) {
                         if parent.get_state() == crate::process::pcb::ProcessState::Blocked {
                             parent.set_state(crate::process::pcb::ProcessState::Ready);
@@ -337,7 +337,7 @@ pub fn sys_getpid() -> SyscallResult {
 /// Get the parent process ID
 pub fn sys_getppid() -> SyscallResult {
     if let Some(process) = current_process() {
-        if let Some(parent_pid) = process.parent {
+        if let Some(parent_pid) = process.parent() {
             Ok(parent_pid.0 as usize)
         } else {
             Ok(0) // Init process has no parent
@@ -426,7 +426,7 @@ pub fn sys_thread_join(tid: usize, retval_ptr: usize) -> SyscallResult {
                                                             // detached thread
                 }
                 // Thread has exited, clean it up
-                if crate::process::lifecycle::cleanup_thread(current, target_tid).is_err() {
+                if crate::process::lifecycle::cleanup_thread(&current, target_tid).is_err() {
                     return Err(SyscallError::InvalidState);
                 }
 
@@ -645,7 +645,7 @@ pub fn sys_setpriority(which: usize, who: usize, priority: usize) -> SyscallResu
 /// Get real user ID (SYS_GETUID = 170)
 pub fn sys_getuid() -> SyscallResult {
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    Ok(proc.uid as usize)
+    Ok(proc.uid() as usize)
 }
 
 /// Get effective user ID (SYS_GETEUID = 171)
@@ -659,7 +659,7 @@ pub fn sys_geteuid() -> SyscallResult {
 /// Get real group ID (SYS_GETGID = 172)
 pub fn sys_getgid() -> SyscallResult {
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    Ok(proc.gid as usize)
+    Ok(proc.gid() as usize)
 }
 
 /// Get effective group ID (SYS_GETEGID = 173)
@@ -673,7 +673,7 @@ pub fn sys_getegid() -> SyscallResult {
 /// may only "set" their uid to the current value (a no-op).
 pub fn sys_setuid(uid: usize) -> SyscallResult {
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    let current_uid = proc.uid;
+    let current_uid = proc.uid();
     let new_uid = uid as u32;
 
     // Non-root can only set uid to current value (no-op)
@@ -686,14 +686,9 @@ pub fn sys_setuid(uid: usize) -> SyscallResult {
         return Ok(0);
     }
 
-    // Root changing uid: get mutable reference via process table
-    let pid = proc.pid;
-    if let Some(proc_mut) = crate::process::table::get_process_mut(pid) {
-        proc_mut.uid = new_uid;
-        Ok(0)
-    } else {
-        Err(SyscallError::InvalidState)
-    }
+    // Root changing uid.
+    proc.set_uid(new_uid);
+    Ok(0)
 }
 
 /// Set group ID (SYS_SETGID = 175)
@@ -702,8 +697,8 @@ pub fn sys_setuid(uid: usize) -> SyscallResult {
 /// may only "set" their gid to the current value (a no-op).
 pub fn sys_setgid(gid: usize) -> SyscallResult {
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    let current_uid = proc.uid;
-    let current_gid = proc.gid;
+    let current_uid = proc.uid();
+    let current_gid = proc.gid();
     let new_gid = gid as u32;
 
     // Non-root can only set gid to current value (no-op)
@@ -716,14 +711,9 @@ pub fn sys_setgid(gid: usize) -> SyscallResult {
         return Ok(0);
     }
 
-    // Root changing gid: get mutable reference via process table
-    let pid = proc.pid;
-    if let Some(proc_mut) = crate::process::table::get_process_mut(pid) {
-        proc_mut.gid = new_gid;
-        Ok(0)
-    } else {
-        Err(SyscallError::InvalidState)
-    }
+    // Root changing gid.
+    proc.set_gid(new_gid);
+    Ok(0)
 }
 
 // ============================================================================

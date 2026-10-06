@@ -1108,7 +1108,7 @@ pub fn check_pending_signals() -> Result<bool, KernelError> {
 
     // Get next pending unblocked signal
     if let Some(signum) = process.get_next_pending_signal() {
-        deliver_signal(process, thread, signum)
+        deliver_signal(&process, &thread, signum)
     } else {
         Ok(false)
     }

@@ -65,7 +65,7 @@ fn fast_send(msg: &SmallMessage, target_pid: u64) -> Result<()> {
 
     // The sender must hold this capability, with SEND rights, in its own
     // capability space (IPC-INC-01).
-    validate_send_capability(msg.capability)?;
+    let endpoint_id = validate_send_capability(msg.capability)?;
 
     // Find target task via global registry (O(log n) lookup, no scheduler lock)
     #[cfg(feature = "alloc")]
@@ -112,14 +112,19 @@ fn fast_send(msg: &SmallMessage, target_pid: u64) -> Result<()> {
         None => return Err(IpcError::ProcessNotFound),
     };
 
+    // Check and claim the target under the scheduler lock, so its state
+    // cannot change between the check and the register write, and only
+    // transfer to a task blocked on *this* endpoint: one blocked on a
+    // futex, sleep or another endpoint must not get its registers
+    // overwritten (IPC-SYNC-02).
+    let sched_guard = crate::sched::scheduler::SCHEDULER.lock();
     // SAFETY: target_ptr is a valid NonNull<Task> from the task registry.
-    // We check its state and, if blocked, write to its ipc_regs array.
-    // The target is blocked (not running on any CPU), so there is no
-    // concurrent access to ipc_regs.
+    // We hold the scheduler lock and the target is blocked on this
+    // endpoint (not running), so nothing else accesses its ipc_regs.
     unsafe {
         let target = target_ptr.as_ptr();
 
-        if (*target).state == ProcessState::Blocked {
+        if (*target).state == ProcessState::Blocked && (*target).blocked_on == Some(endpoint_id) {
             // Direct transfer: copy message into target's IPC registers
             (*target).ipc_regs[IPC_REG_CAP] = msg.capability;
             (*target).ipc_regs[IPC_REG_OPCODE] = msg.opcode as u64;
@@ -129,9 +134,11 @@ fn fast_send(msg: &SmallMessage, target_pid: u64) -> Result<()> {
             (*target).ipc_regs[IPC_REG_DATA2] = msg.data[2];
             (*target).ipc_regs[IPC_REG_DATA3] = msg.data[3];
 
-            // Wake up receiver via scheduler
-            (*target).state = ProcessState::Ready;
-            crate::sched::ipc_blocking::wake_up_process(crate::process::ProcessId((*target).pid.0));
+            // Wake up receiver via scheduler. wake_up_process takes the
+            // scheduler lock itself, so release ours first.
+            let receiver = crate::process::ProcessId((*target).pid.0);
+            drop(sched_guard);
+            crate::sched::ipc_blocking::wake_up_process(receiver);
 
             // Update performance counters
             let elapsed = read_timestamp() - start;
@@ -225,13 +232,21 @@ pub fn fast_receive(endpoint: u64, timeout: Option<u64>) -> Result<SmallMessage>
 /// all rights for every process (IPC-INC-01, IPC-PERF-01). There is no
 /// cache: a cache entry would outlive revocation. Lookup cost is the
 /// capability space's to fix (CAP-PERF-01/02).
-fn validate_send_capability(cap: u64) -> Result<()> {
+fn validate_send_capability(cap: u64) -> Result<u64> {
     if cap == 0 {
         return Err(IpcError::InvalidCapability);
     }
     let process = crate::process::current_process().ok_or(IpcError::ProcessNotFound)?;
     let space = process.capability_space.lock();
-    crate::cap::ipc_integration::check_send_permission(CapabilityToken::from_u64(cap), &space)
+    let token = CapabilityToken::from_u64(cap);
+    crate::cap::ipc_integration::check_send_permission(token, &space)?;
+    // The endpoint the capability names: a direct transfer may only go to
+    // a receiver blocked on this endpoint (IPC-SYNC-02).
+    match space.lookup_entry(token) {
+        #[cfg(feature = "alloc")]
+        Some((crate::cap::object::ObjectRef::Endpoint { endpoint }, _)) => Ok(endpoint.id()),
+        _ => Err(IpcError::InvalidCapability),
+    }
 }
 
 /// Read message from the current task's IPC registers.

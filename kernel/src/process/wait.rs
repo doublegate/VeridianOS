@@ -282,7 +282,7 @@ pub fn sys_waitpid(pid: i64, options: WaitOptions) -> Result<(ProcessId, WaitSta
 pub fn notify_parent(child_pid: ProcessId, status: WaitStatus) {
     // Find the child's parent.
     let parent_pid = if let Some(child) = super::table::get_process(child_pid) {
-        child.parent
+        child.parent()
     } else {
         None
     };

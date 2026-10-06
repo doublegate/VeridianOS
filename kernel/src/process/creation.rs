@@ -155,7 +155,7 @@ pub fn create_process_with_options(
 
         // Add main thread to scheduler
         if let Some(thread) = process.get_thread(tid) {
-            create_scheduler_task(process, thread)?;
+            create_scheduler_task(&process, &thread)?;
         }
     }
 
@@ -495,7 +495,7 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
     }
 
     // Step 3: Setup new stack with arguments, environment, and aux vector
-    let stack_top = setup_exec_stack(process, argv, envp, aux_vector.as_deref())?;
+    let stack_top = setup_exec_stack(&process, argv, envp, aux_vector.as_deref())?;
 
     // Step 3b: Populate the process's env_vars BTreeMap from envp.
     // This makes environment variables available to kernel-side lookups

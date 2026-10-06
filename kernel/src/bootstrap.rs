@@ -534,6 +534,9 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
             }
             // Probe for known VirtIO drivers (GPU, Net, Sound)
             crate::drivers::pci::probe_known_drivers();
+            if let Err(_e) = crate::drivers::nvme::init() {
+                kprintln!("[BOOTSTRAP] NVMe init failed");
+            }
         }
 
         // blk::init() dispatches to PCI probe on x86_64, MMIO probe on
@@ -906,7 +909,7 @@ fn mount_blockfs_root() {
             // Create dirs if they don't exist (ok to fail with AlreadyExists)
             root.mkdir("dev", Permissions::default()).ok();
             root.mkdir("proc", Permissions::default()).ok();
-            root.mkdir("tmp", Permissions::from_mode(0o777)).ok();
+            root.mkdir("tmp", Permissions::from_mode(0o1777)).ok();
             // /run hierarchy for XDG_RUNTIME_DIR and D-Bus sockets
             if let Ok(run) = root
                 .lookup("run")
@@ -1315,7 +1318,7 @@ fn mount_blockfs_root() {
             // /tmp/fontconfig-cache -- directory for fontconfig cache files
             if let Ok(tmp) = root.lookup("tmp") {
                 tmp.lookup("fontconfig-cache")
-                    .or_else(|_| tmp.mkdir("fontconfig-cache", Permissions::from_mode(0o777)))
+                    .or_else(|_| tmp.mkdir("fontconfig-cache", Permissions::from_mode(0o1777)))
                     .ok();
             }
 
@@ -1355,7 +1358,7 @@ fn mount_blockfs_root() {
                     {
                         cache
                             .lookup("fontconfig")
-                            .or_else(|_| cache.mkdir("fontconfig", Permissions::from_mode(0o777)))
+                            .or_else(|_| cache.mkdir("fontconfig", Permissions::from_mode(0o1777)))
                             .ok();
                     }
                 }
@@ -1837,7 +1840,7 @@ fn boot_reap_orphan_zombies() {
         if proc.get_state() == ProcessState::Zombie {
             // Reap zombies that were reparented to init (PID 1) or whose
             // parent no longer exists. PID 0 and PID 1 are system processes.
-            let dominated_by_init_or_orphaned = match proc.parent {
+            let dominated_by_init_or_orphaned = match proc.parent() {
                 Some(parent_pid) => parent_pid.0 <= 1 || table::get_process(parent_pid).is_none(),
                 None => true,
             };

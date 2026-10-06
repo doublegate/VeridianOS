@@ -294,8 +294,12 @@ pub struct DhcpClient {
     /// Current state
     state: DhcpState,
 
-    /// Transaction ID
+    /// Transaction ID, fresh from the CSPRNG for every negotiation so an
+    /// off-path host cannot guess it.
     xid: u32,
+
+    /// Server chosen from the OFFER; the ACK must come from it.
+    server_id: Option<Ipv4Address>,
 
     /// Current configuration
     #[allow(dead_code)] // Read during DHCP lease renewal (Phase 6)
@@ -308,7 +312,8 @@ impl DhcpClient {
         Self {
             mac_address,
             state: DhcpState::Init,
-            xid: 0x12345678, // Would use random
+            xid: 0,
+            server_id: None,
             config: None,
         }
     }
@@ -357,6 +362,7 @@ impl DhcpClient {
         );
 
         // Send REQUEST for the offered IP
+        self.server_id = Some(server_id);
         let request = self.create_request(offered_ip, server_id);
         let request_bytes = request.to_bytes();
         send_dhcp_packet(&request_bytes);
@@ -376,6 +382,11 @@ impl DhcpClient {
         }
 
         let options = parse_dhcp_options(&packet.options);
+        // RFC 2131 requires the server identifier in every ACK; one without
+        // it, or from a server we did not select, is ignored.
+        if options.server_id.is_none() || options.server_id != self.server_id {
+            return Ok(());
+        }
 
         let ip = packet.yiaddr;
         let subnet = options
@@ -438,9 +449,10 @@ impl DhcpClient {
     pub fn process_response(&mut self, data: &[u8]) -> Result<(), KernelError> {
         let packet = DhcpPacket::from_bytes(data)?;
 
-        // Verify transaction ID matches
-        if packet.xid != self.xid {
-            return Ok(()); // Not for us
+        // Only replies to the negotiation in progress, addressed to our
+        // hardware address, are accepted.
+        if !self.accepts(&packet) {
+            return Ok(());
         }
 
         match packet.get_message_type() {
@@ -453,6 +465,15 @@ impl DhcpClient {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Whether `packet` is a server reply to our current negotiation.
+    fn accepts(&self, packet: &DhcpPacket) -> bool {
+        matches!(self.state, DhcpState::Selecting | DhcpState::Requesting)
+            && packet.op == DHCP_OP_BOOTREPLY
+            && packet.xid == self.xid
+            && packet.hlen == 6
+            && packet.chaddr[..6] == self.mac_address.0
     }
 
     /// Get current DHCP state
@@ -468,6 +489,8 @@ impl DhcpClient {
     /// Start DHCP negotiation -- sends DISCOVER via UDP broadcast.
     pub fn start(&mut self) -> Result<(), KernelError> {
         println!("[DHCP] Starting DHCP negotiation");
+        self.xid = crate::crypto::random::get_random().next_u32();
+        self.server_id = None;
 
         let discover = self.create_discover();
         let discover_bytes = discover.to_bytes();
@@ -556,11 +579,21 @@ static DHCP_CLIENT: spin::Mutex<Option<DhcpClient>> = spin::Mutex::new(None);
 /// Start DHCP on the primary interface.
 pub fn start_dhcp() -> Result<(), KernelError> {
     let mac =
-        super::device::with_device("eth0", |dev| dev.mac_address()).unwrap_or(MacAddress::ZERO);
+        super::device::with_primary_device(|dev| dev.mac_address()).unwrap_or(MacAddress::ZERO);
 
     let mut lock = DHCP_CLIENT.lock();
     let client = lock.get_or_insert_with(|| DhcpClient::new(mac));
     client.start()
+}
+
+/// Hand a datagram received on UDP port 68 to the DHCP client, if one is
+/// running. Nothing delivered these before, so negotiation never got past
+/// DISCOVER.
+pub fn handle_packet(data: &[u8]) -> Result<(), KernelError> {
+    match DHCP_CLIENT.lock().as_mut() {
+        Some(client) => client.process_response(data),
+        None => Ok(()),
+    }
 }
 
 /// Get current DHCP state for display.
@@ -587,6 +620,64 @@ mod tests {
         assert_eq!(packet.op, DHCP_OP_BOOTREQUEST);
         assert_eq!(packet.htype, DHCP_HTYPE_ETHERNET);
         assert_eq!(packet.hlen, 6);
+    }
+
+    #[test]
+    fn test_dhcp_accepts_only_matching_replies() {
+        let mac = MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+        let mut client = DhcpClient::new(mac);
+        client.xid = 0xA1B2_C3D4;
+
+        let mut reply = DhcpPacket::new(DhcpMessageType::Offer, mac, client.xid);
+        reply.op = DHCP_OP_BOOTREPLY;
+
+        // No negotiation in progress: nothing is accepted.
+        assert!(!client.accepts(&reply));
+
+        client.state = DhcpState::Selecting;
+        assert!(client.accepts(&reply));
+
+        let mut wrong_xid = DhcpPacket::new(DhcpMessageType::Offer, mac, 0x1234_5678);
+        wrong_xid.op = DHCP_OP_BOOTREPLY;
+        assert!(!client.accepts(&wrong_xid));
+
+        let other = MacAddress([0x02, 0, 0, 0, 0, 1]);
+        let mut wrong_mac = DhcpPacket::new(DhcpMessageType::Offer, other, client.xid);
+        wrong_mac.op = DHCP_OP_BOOTREPLY;
+        assert!(!client.accepts(&wrong_mac));
+
+        // A client request echoed back is not a server reply.
+        let request = DhcpPacket::new(DhcpMessageType::Request, mac, client.xid);
+        assert!(!client.accepts(&request));
+    }
+
+    #[test]
+    fn test_dhcp_ack_requires_selected_server() {
+        let mac = MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+        let mut client = DhcpClient::new(mac);
+        client.xid = 0x0BAD_F00D;
+        client.state = DhcpState::Requesting;
+        client.server_id = Some(Ipv4Address([10, 0, 2, 2]));
+
+        // ACK without a server identifier: ignored.
+        let mut ack = DhcpPacket::new(DhcpMessageType::Ack, mac, client.xid);
+        ack.op = DHCP_OP_BOOTREPLY;
+        ack.finalize();
+        client.process_ack(&ack).unwrap();
+        assert_eq!(client.state(), DhcpState::Requesting);
+
+        // ACK from a different server: ignored.
+        let mut rogue = DhcpPacket::new(DhcpMessageType::Ack, mac, client.xid);
+        rogue.op = DHCP_OP_BOOTREPLY;
+        rogue.add_option_ipv4(OPT_SERVER_ID, Ipv4Address([10, 0, 2, 99]));
+        rogue.finalize();
+        // The option is really there, so the rejection below is not vacuous.
+        assert_eq!(
+            parse_dhcp_options(&rogue.options).server_id,
+            Some(Ipv4Address([10, 0, 2, 99]))
+        );
+        client.process_ack(&rogue).unwrap();
+        assert_eq!(client.state(), DhcpState::Requesting);
     }
 
     #[test]

@@ -44,13 +44,13 @@ pub fn exit_process(exit_code: i32) {
         }
 
         // Clean up resources
-        cleanup_process(process);
+        cleanup_process(&process);
 
         // Mark process as zombie (parent needs to reap)
         process.set_state(ProcessState::Zombie);
 
         // Notify parent: send SIGCHLD and wake if blocked
-        if let Some(parent_pid) = process.parent {
+        if let Some(parent_pid) = process.parent() {
             if let Some(parent) = table::get_process(parent_pid) {
                 // Send SIGCHLD to parent (POSIX: delivered on child exit)
                 if let Err(_e) = parent.send_signal(signals::SIGCHLD as usize) {
@@ -373,7 +373,7 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
     match signal {
         signals::SIGKILL => {
             // SIGKILL always terminates immediately
-            force_terminate_process(process)?;
+            force_terminate_process(&process)?;
         }
         signals::SIGSTOP => {
             // SIGSTOP always stops immediately
@@ -382,7 +382,7 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
             println!("[PROCESS] Process {} stopped by SIGSTOP", pid.0);
 
             // Notify parent with SIGCHLD (POSIX: child stopped)
-            notify_parent_sigchld(process);
+            notify_parent_sigchld(&process);
         }
         _ => {
             // Handle based on action
@@ -393,7 +393,7 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
                 }
                 SignalAction::Terminate | SignalAction::CoreDump => {
                     // For default terminate/core dump actions, do it now
-                    force_terminate_process(process)?;
+                    force_terminate_process(&process)?;
                 }
                 SignalAction::Stop => {
                     process.set_state(ProcessState::Blocked);
@@ -401,7 +401,7 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
                     println!("[PROCESS] Process {} stopped by signal {}", pid.0, signal);
 
                     // Notify parent with SIGCHLD (POSIX: child stopped)
-                    notify_parent_sigchld(process);
+                    notify_parent_sigchld(&process);
                 }
                 SignalAction::Continue => {
                     if process.get_state() == ProcessState::Blocked {
@@ -410,7 +410,7 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
                         println!("[PROCESS] Process {} continued by signal {}", pid.0, signal);
 
                         // Notify parent with SIGCHLD (POSIX: child continued)
-                        notify_parent_sigchld(process);
+                        notify_parent_sigchld(&process);
                     }
                     process.clear_pending_signal(signal as usize);
                 }
@@ -430,7 +430,7 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
                 }
                 SignalAction::Default => {
                     // Should not reach here, but handle it as terminate
-                    force_terminate_process(process)?;
+                    force_terminate_process(&process)?;
                 }
             }
         }
@@ -449,7 +449,7 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
 /// unified notification path: `exit_process` and `kill_process` (for Stop
 /// and Continue actions) both funnel through here.
 fn notify_parent_sigchld(process: &Process) {
-    if let Some(parent_pid) = process.parent {
+    if let Some(parent_pid) = process.parent() {
         if let Some(parent) = table::get_process(parent_pid) {
             // Send SIGCHLD to parent (POSIX: delivered on child state change)
             if let Err(_e) = parent.send_signal(signals::SIGCHLD as usize) {
@@ -504,7 +504,7 @@ fn force_terminate_process(process: &Process) -> Result<(), KernelError> {
     process.set_state(ProcessState::Zombie);
 
     // Wake up parent if waiting
-    if let Some(parent_pid) = process.parent {
+    if let Some(parent_pid) = process.parent() {
         if let Some(parent) = table::get_process(parent_pid) {
             // Send SIGCHLD to parent
             if let Err(_e) = parent.send_signal(signals::SIGCHLD as usize) {
@@ -630,10 +630,10 @@ pub fn cleanup_process(process: &Process) {
     {
         let children: Vec<ProcessId> = process.children.lock().clone();
         if !children.is_empty() && process.get_state() != ProcessState::Zombie {
-            if let Some(init_process) = table::get_process_mut(ProcessId(1)) {
+            if let Some(init_process) = table::get_process(ProcessId(1)) {
                 for child_pid in children {
-                    if let Some(child) = table::get_process_mut(child_pid) {
-                        child.parent = Some(ProcessId(1));
+                    if let Some(child) = table::get_process(child_pid) {
+                        child.set_parent(Some(ProcessId(1)));
                         init_process.children.lock().push(child_pid);
                         println!("[PROCESS] Reparented process {} to init", child_pid);
                     }

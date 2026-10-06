@@ -206,7 +206,7 @@ pub fn find_process(pid: ProcessId) -> Option<&'static mut TaskProcessAdapter> {
     #[cfg(feature = "alloc")]
     {
         // Get the actual process from the process table
-        if let Some(process) = crate::process::table::get_process_mut(pid) {
+        if let Some(process) = crate::process::table::get_process(pid) {
             use alloc::boxed::Box;
 
             // Create a TaskProcessAdapter wrapper for the scheduler

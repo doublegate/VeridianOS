@@ -3,7 +3,23 @@
 //! Syscalls 250-255: sendto, recvfrom, getsockname, getpeername,
 //! setsockopt, getsockopt.
 
-use super::{SyscallError, SyscallResult};
+use super::{with_socket_fd, SyscallError, SyscallResult};
+use crate::net::socket_fd::SocketHandle;
+
+/// The socket behind `fd` in the caller's own file table.
+fn socket_handle(fd: usize) -> Result<SocketHandle, SyscallError> {
+    with_socket_fd(fd, |s| s.handle())
+}
+
+/// Write an AF_UNIX address with no path (`sun_family` only).
+fn write_unnamed_unix_addr(addr_ptr: usize, len_ptr: usize) -> SyscallResult {
+    // SAFETY: both pointers were validated by the caller (16 and 4 bytes).
+    unsafe {
+        core::ptr::write_unaligned(addr_ptr as *mut u16, 1); // AF_UNIX
+        *(len_ptr as *mut u32) = 2;
+    }
+    Ok(0)
+}
 
 /// Send data to a specific address (UDP-style).
 ///
@@ -45,7 +61,17 @@ pub(super) fn sys_net_sendto(
         None
     };
 
-    crate::net::socket::sendto(fd, data, dest.as_ref()).map_err(|_| SyscallError::IoError)
+    match socket_handle(fd)? {
+        SocketHandle::Inet(id) => {
+            crate::net::socket::sendto(id, data, dest.as_ref()).map_err(|_| SyscallError::IoError)
+        }
+        // send() is sendto() with no address; addressed Unix datagrams are
+        // not supported.
+        SocketHandle::Unix(_) if addr_ptr != 0 => Err(SyscallError::NotImplemented),
+        SocketHandle::Unix(_) => {
+            with_socket_fd(fd, |s| s.send(data, None))?.map_err(super::socket_err)
+        }
+    }
 }
 
 /// Receive data with sender address.
@@ -72,7 +98,19 @@ pub(super) fn sys_net_recvfrom(
     // within user-space.
     let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, buf_len) };
 
-    let (n, src_addr) = crate::net::socket::recvfrom(fd, buf).map_err(|_| SyscallError::IoError)?;
+    let (n, src_addr) = match socket_handle(fd)? {
+        SocketHandle::Inet(id) => {
+            crate::net::socket::recvfrom(id, buf).map_err(|_| SyscallError::IoError)?
+        }
+        // recv() is recvfrom() with no address; a Unix peer has none to
+        // report.
+        SocketHandle::Unix(_) => (
+            with_socket_fd(fd, |s| s.recv(buf))?
+                .map_err(super::socket_err)?
+                .0,
+            None,
+        ),
+    };
 
     if let (true, Some(addr)) = (addr_ptr != 0, src_addr) {
         write_sockaddr(addr_ptr, &addr)?;
@@ -86,7 +124,11 @@ pub(super) fn sys_net_getsockname(fd: usize, addr_ptr: usize, len_ptr: usize) ->
     super::validate_user_buffer(addr_ptr, 16)?;
     super::validate_user_buffer(len_ptr, core::mem::size_of::<u32>())?;
 
-    let addr = crate::net::socket::getsockname(fd).map_err(|_| SyscallError::BadFileDescriptor)?;
+    let id = match socket_handle(fd)? {
+        SocketHandle::Inet(id) => id,
+        SocketHandle::Unix(_) => return write_unnamed_unix_addr(addr_ptr, len_ptr),
+    };
+    let addr = crate::net::socket::getsockname(id).map_err(|_| SyscallError::BadFileDescriptor)?;
     write_sockaddr(addr_ptr, &addr)?;
 
     // Write actual address length
@@ -104,7 +146,11 @@ pub(super) fn sys_net_getpeername(fd: usize, addr_ptr: usize, len_ptr: usize) ->
     super::validate_user_buffer(addr_ptr, 16)?;
     super::validate_user_buffer(len_ptr, core::mem::size_of::<u32>())?;
 
-    let addr = crate::net::socket::getpeername(fd).map_err(|_| SyscallError::BadFileDescriptor)?;
+    let id = match socket_handle(fd)? {
+        SocketHandle::Inet(id) => id,
+        SocketHandle::Unix(_) => return write_unnamed_unix_addr(addr_ptr, len_ptr),
+    };
+    let addr = crate::net::socket::getpeername(id).map_err(|_| SyscallError::BadFileDescriptor)?;
     write_sockaddr(addr_ptr, &addr)?;
 
     // SAFETY: len_ptr validated by validate_user_buffer above as non-null and
@@ -127,8 +173,15 @@ pub(super) fn sys_net_setsockopt(
     if optval_ptr != 0 && optlen > 0 {
         super::validate_user_buffer(optval_ptr, optlen)?;
     }
-    crate::net::socket::setsockopt(fd, level as i32, optname as i32, optval_ptr, optlen)
-        .map_err(|_| SyscallError::InvalidArgument)
+    match socket_handle(fd)? {
+        SocketHandle::Inet(id) => {
+            crate::net::socket::setsockopt(id, level as i32, optname as i32, optval_ptr, optlen)
+                .map_err(|_| SyscallError::InvalidArgument)
+        }
+        // Unix sockets have no settable options yet; accept and ignore,
+        // as the INET path does for options it does not model.
+        SocketHandle::Unix(_) => Ok(0),
+    }
 }
 
 /// Get a socket option.
@@ -141,8 +194,13 @@ pub(super) fn sys_net_getsockopt(
     if optval_ptr != 0 {
         super::validate_user_buffer(optval_ptr, 4)?;
     }
-    crate::net::socket::getsockopt(fd, level as i32, optname as i32, optval_ptr)
-        .map_err(|_| SyscallError::InvalidArgument)
+    match socket_handle(fd)? {
+        SocketHandle::Inet(id) => {
+            crate::net::socket::getsockopt(id, level as i32, optname as i32, optval_ptr)
+                .map_err(|_| SyscallError::InvalidArgument)
+        }
+        SocketHandle::Unix(_) => Ok(0),
+    }
 }
 
 /// Infer sockaddr length from sa_family when the actual length is unavailable

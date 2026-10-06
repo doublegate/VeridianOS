@@ -1,11 +1,20 @@
 //! Intel E1000 (82540EM) Network Driver
 //!
-//! This driver supports the Intel E1000 Gigabit Ethernet controller,
-//! commonly found in QEMU and VirtualBox virtual machines.
+//! Supports the Intel E1000 Gigabit Ethernet controller found in QEMU and
+//! VirtualBox virtual machines.
+//!
+//! DMA rules (DRV-SEC-02): descriptor rings and packet buffers live in frames
+//! from the frame allocator and the NIC is only given their physical
+//! addresses. The previous driver kept rings and buffers inside the driver
+//! struct -- built on the stack and then moved -- and programmed their
+//! virtual addresses into the NIC, so the device wrote to arbitrary memory.
+//! Descriptor fields the device writes are accessed with volatile
+//! operations, and the device is reset before any DMA memory is freed.
 
-// Intel E1000 driver
+use alloc::vec::Vec;
 
 use crate::{
+    drivers::dma_frame::DmaFrame,
     error::KernelError,
     net::{
         device::{DeviceCapabilities, DeviceState, DeviceStatistics, NetworkDevice},
@@ -19,13 +28,9 @@ pub const E1000_DEVICE_ID: u16 = 0x100E;
 
 /// E1000 register offsets
 const REG_CTRL: usize = 0x0000; // Device Control
-#[allow(dead_code)] // E1000 hardware register per Intel spec
-const REG_STATUS: usize = 0x0008; // Device Status
 const REG_EEPROM: usize = 0x0014; // EEPROM Read
-#[allow(dead_code)] // E1000 hardware register per Intel spec
-const REG_CTRL_EXT: usize = 0x0018; // Extended Device Control
 const REG_ICR: usize = 0x00C0; // Interrupt Cause Read
-const REG_IMS: usize = 0x00D0; // Interrupt Mask Set
+const REG_IMC: usize = 0x00D8; // Interrupt Mask Clear
 const REG_RCTL: usize = 0x0100; // Receive Control
 const REG_TCTL: usize = 0x0400; // Transmit Control
 const REG_RDBAL: usize = 0x2800; // RX Descriptor Base Low
@@ -40,13 +45,29 @@ const REG_TDH: usize = 0x3810; // TX Descriptor Head
 const REG_TDT: usize = 0x3818; // TX Descriptor Tail
 const REG_MTA: usize = 0x5200; // Multicast Table Array
 
-/// Number of RX/TX descriptors
+/// CTRL: device reset.
+const CTRL_RST: u32 = 1 << 26;
+/// CTRL: set link up.
+const CTRL_SLU: u32 = 1 << 6;
+/// RCTL: enable, accept broadcast, strip CRC (2048-byte buffers).
+const RCTL_VALUE: u32 = (1 << 1) | (1 << 15) | (1 << 26);
+/// TCTL: enable, pad short packets, collision threshold.
+const TCTL_VALUE: u32 = (1 << 1) | (1 << 3) | (0x10 << 4);
+
+/// Number of RX/TX descriptors (ring lengths must be multiples of 128
+/// bytes, i.e. of 8 descriptors).
 const NUM_RX_DESC: usize = 32;
 const NUM_TX_DESC: usize = 8;
+/// Bytes per packet buffer (RCTL buffer size 2048).
+const BUF_SIZE: usize = 2048;
+/// Descriptor status: descriptor done.
+const STATUS_DD: u8 = 1;
+/// TX command: end of packet, insert FCS, report status.
+const TX_CMD: u8 = (1 << 0) | (1 << 1) | (1 << 3);
 
-/// Receive Descriptor
+/// Legacy receive descriptor (16 bytes).
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct RxDescriptor {
     addr: u64,
     length: u16,
@@ -56,9 +77,9 @@ struct RxDescriptor {
     special: u16,
 }
 
-/// Transmit Descriptor
+/// Legacy transmit descriptor (16 bytes).
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct TxDescriptor {
     addr: u64,
     length: u16,
@@ -69,254 +90,275 @@ struct TxDescriptor {
     special: u16,
 }
 
-/// E1000 Driver State
+/// E1000 driver state.
 pub struct E1000Driver {
     mmio_base: usize,
     mac_address: MacAddress,
-    rx_descriptors: [RxDescriptor; NUM_RX_DESC],
-    tx_descriptors: [TxDescriptor; NUM_TX_DESC],
-    rx_buffers: [[u8; 2048]; NUM_RX_DESC],
-    tx_buffers: [[u8; 2048]; NUM_TX_DESC],
+    /// One frame: RX descriptors at offset 0, TX descriptors after them.
+    rings: DmaFrame,
+    /// Packet buffers, two per frame: buffer `i` is half `i % 2` of frame
+    /// `i / 2`.
+    rx_frames: Vec<DmaFrame>,
+    tx_frames: Vec<DmaFrame>,
     rx_current: usize,
     tx_current: usize,
+    name: alloc::string::String,
     state: DeviceState,
     stats: DeviceStatistics,
 }
 
+// SAFETY: the driver is used only behind the network device registry lock;
+// the DMA memory it points at is owned by it.
+unsafe impl Send for E1000Driver {}
+
+const TX_RING_OFFSET: usize = NUM_RX_DESC * core::mem::size_of::<RxDescriptor>();
+
 impl E1000Driver {
-    /// Create a new E1000 driver instance
+    /// Initialize an E1000 whose registers are mapped at `mmio_base`.
     pub fn new(mmio_base: usize) -> Result<Self, KernelError> {
+        let rings = DmaFrame::alloc()?;
+        let rx_frames = (0..NUM_RX_DESC / 2)
+            .map(|_| DmaFrame::alloc())
+            .collect::<Result<Vec<_>, _>>()?;
+        let tx_frames = (0..NUM_TX_DESC / 2)
+            .map(|_| DmaFrame::alloc())
+            .collect::<Result<Vec<_>, _>>()?;
+
         let mut driver = Self {
             mmio_base,
             mac_address: MacAddress::ZERO,
-            rx_descriptors: [RxDescriptor {
-                addr: 0,
-                length: 0,
-                checksum: 0,
-                status: 0,
-                errors: 0,
-                special: 0,
-            }; NUM_RX_DESC],
-            tx_descriptors: [TxDescriptor {
-                addr: 0,
-                length: 0,
-                cso: 0,
-                cmd: 0,
-                status: 0,
-                css: 0,
-                special: 0,
-            }; NUM_TX_DESC],
-            rx_buffers: [[0u8; 2048]; NUM_RX_DESC],
-            tx_buffers: [[0u8; 2048]; NUM_TX_DESC],
+            rings,
+            rx_frames,
+            tx_frames,
             rx_current: 0,
             tx_current: 0,
+            name: crate::net::device::alloc_ethernet_name(),
             state: DeviceState::Down,
             stats: DeviceStatistics::default(),
         };
-
         driver.initialize()?;
         Ok(driver)
     }
 
-    /// Read from MMIO register
     fn read_reg(&self, offset: usize) -> u32 {
-        // SAFETY: Reading an E1000 MMIO register at mmio_base + offset. The mmio_base
-        // is the controller's BAR0 address from PCI configuration. read_volatile
-        // prevents the compiler from eliding or reordering this hardware register
-        // access.
+        // SAFETY: mmio_base maps the controller's BAR0 register window and
+        // `offset` is a register offset within it.
         unsafe { core::ptr::read_volatile((self.mmio_base + offset) as *const u32) }
     }
 
-    /// Write to MMIO register
     fn write_reg(&self, offset: usize, value: u32) {
-        // SAFETY: Writing an E1000 MMIO register. Same invariants as read_reg.
-        unsafe {
-            core::ptr::write_volatile((self.mmio_base + offset) as *mut u32, value);
-        }
+        // SAFETY: as read_reg.
+        unsafe { core::ptr::write_volatile((self.mmio_base + offset) as *mut u32, value) }
     }
 
-    /// Read MAC address from EEPROM
-    fn read_mac_address(&mut self) -> MacAddress {
-        let mut mac = [0u8; 6];
+    fn rx_desc(&self, i: usize) -> *mut RxDescriptor {
+        debug_assert!(i < NUM_RX_DESC);
+        (self.rings.virt + i * core::mem::size_of::<RxDescriptor>()) as *mut RxDescriptor
+    }
 
-        // Read from EEPROM words 0-2
+    fn tx_desc(&self, i: usize) -> *mut TxDescriptor {
+        debug_assert!(i < NUM_TX_DESC);
+        (self.rings.virt + TX_RING_OFFSET + i * core::mem::size_of::<TxDescriptor>())
+            as *mut TxDescriptor
+    }
+
+    /// (virtual, physical) address of buffer `i` within `frames`.
+    fn buffer(frames: &[DmaFrame], i: usize) -> (usize, u64) {
+        let f = &frames[i / 2];
+        let off = (i % 2) * BUF_SIZE;
+        (f.virt + off, f.phys + off as u64)
+    }
+
+    fn read_mac_address(&self) -> MacAddress {
+        let mut mac = [0u8; 6];
         for i in 0usize..3 {
             let word = self.eeprom_read(i as u8);
             mac[i * 2] = (word & 0xFF) as u8;
             mac[i * 2 + 1] = (word >> 8) as u8;
         }
-
         MacAddress(mac)
     }
 
-    /// Read from EEPROM
     fn eeprom_read(&self, addr: u8) -> u16 {
         self.write_reg(REG_EEPROM, 1 | ((addr as u32) << 8));
-
-        // Wait for read to complete
-        let mut result: u32;
-        loop {
-            result = self.read_reg(REG_EEPROM);
-            if (result & (1 << 4)) != 0 {
-                break;
+        // Bounded wait for the DONE bit.
+        for _ in 0..100_000 {
+            let result = self.read_reg(REG_EEPROM);
+            if result & (1 << 4) != 0 {
+                return ((result >> 16) & 0xFFFF) as u16;
             }
+            core::hint::spin_loop();
         }
-
-        ((result >> 16) & 0xFFFF) as u16
+        0
     }
 
-    /// Initialize the E1000 device
-    fn initialize(&mut self) -> Result<(), KernelError> {
-        // Read MAC address
-        self.mac_address = self.read_mac_address();
-
-        // Enable bus mastering and memory access
-        // (Would normally be done via PCI configuration space)
-
-        // Reset the device
-        self.write_reg(REG_CTRL, self.read_reg(REG_CTRL) | 0x04000000);
-
-        // Wait for reset
-        for _ in 0..1000 {
-            if (self.read_reg(REG_CTRL) & 0x04000000) == 0 {
+    /// Reset the controller: it stops all DMA.
+    fn reset(&self) {
+        self.write_reg(REG_IMC, 0xFFFF_FFFF);
+        self.write_reg(REG_RCTL, 0);
+        self.write_reg(REG_TCTL, 0);
+        self.write_reg(REG_CTRL, self.read_reg(REG_CTRL) | CTRL_RST);
+        for _ in 0..100_000 {
+            if self.read_reg(REG_CTRL) & CTRL_RST == 0 {
                 break;
             }
+            core::hint::spin_loop();
         }
+        self.write_reg(REG_IMC, 0xFFFF_FFFF);
+        self.read_reg(REG_ICR);
+    }
 
-        // Disable interrupts
-        self.write_reg(REG_IMS, 0);
-        self.read_reg(REG_ICR); // Clear pending interrupts
+    fn initialize(&mut self) -> Result<(), KernelError> {
+        self.reset();
+        self.write_reg(REG_CTRL, self.read_reg(REG_CTRL) | CTRL_SLU);
+        self.mac_address = self.read_mac_address();
 
-        // Initialize RX descriptors
+        // RX ring: every descriptor owns a buffer.
         for i in 0..NUM_RX_DESC {
-            self.rx_descriptors[i].addr = &self.rx_buffers[i] as *const _ as u64;
-            self.rx_descriptors[i].status = 0;
+            let (_, phys) = Self::buffer(&self.rx_frames, i);
+            // SAFETY: rx_desc(i) is within the ring frame owned by `self`.
+            unsafe {
+                core::ptr::write_volatile(
+                    self.rx_desc(i),
+                    RxDescriptor {
+                        addr: phys,
+                        length: 0,
+                        checksum: 0,
+                        status: 0,
+                        errors: 0,
+                        special: 0,
+                    },
+                );
+            }
         }
-
-        // Initialize TX descriptors
+        // TX ring: all descriptors start done (free).
         for i in 0..NUM_TX_DESC {
-            self.tx_descriptors[i].addr = &self.tx_buffers[i] as *const _ as u64;
-            self.tx_descriptors[i].status = 1; // DD bit set
-            self.tx_descriptors[i].cmd = 0;
+            let (_, phys) = Self::buffer(&self.tx_frames, i);
+            // SAFETY: tx_desc(i) is within the ring frame owned by `self`.
+            unsafe {
+                core::ptr::write_volatile(
+                    self.tx_desc(i),
+                    TxDescriptor {
+                        addr: phys,
+                        length: 0,
+                        cso: 0,
+                        cmd: 0,
+                        status: STATUS_DD,
+                        css: 0,
+                        special: 0,
+                    },
+                );
+            }
         }
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
-        // Set up RX ring
-        let rx_desc_addr = &self.rx_descriptors as *const _ as u64;
-        self.write_reg(REG_RDBAL, (rx_desc_addr & 0xFFFFFFFF) as u32);
-        self.write_reg(REG_RDBAH, (rx_desc_addr >> 32) as u32);
+        let rx_base = self.rings.phys;
+        self.write_reg(REG_RDBAL, rx_base as u32);
+        self.write_reg(REG_RDBAH, (rx_base >> 32) as u32);
         self.write_reg(REG_RDLEN, (NUM_RX_DESC * 16) as u32);
         self.write_reg(REG_RDH, 0);
+        // The NIC owns descriptors from head up to (not including) tail.
         self.write_reg(REG_RDT, (NUM_RX_DESC - 1) as u32);
 
-        // Set up TX ring
-        let tx_desc_addr = &self.tx_descriptors as *const _ as u64;
-        self.write_reg(REG_TDBAL, (tx_desc_addr & 0xFFFFFFFF) as u32);
-        self.write_reg(REG_TDBAH, (tx_desc_addr >> 32) as u32);
+        let tx_base = self.rings.phys + TX_RING_OFFSET as u64;
+        self.write_reg(REG_TDBAL, tx_base as u32);
+        self.write_reg(REG_TDBAH, (tx_base >> 32) as u32);
         self.write_reg(REG_TDLEN, (NUM_TX_DESC * 16) as u32);
         self.write_reg(REG_TDH, 0);
         self.write_reg(REG_TDT, 0);
 
-        // Enable receiver
-        self.write_reg(REG_RCTL, (1 << 1) | (1 << 2) | (1 << 15));
-
-        // Enable transmitter
-        self.write_reg(REG_TCTL, (1 << 1) | (1 << 3) | (0x10 << 4));
-
-        // Clear multicast table
         for i in 0..128 {
             self.write_reg(REG_MTA + i * 4, 0);
         }
+        self.write_reg(REG_RCTL, RCTL_VALUE);
+        self.write_reg(REG_TCTL, TCTL_VALUE);
 
+        let m = self.mac_address.0;
         println!(
             "[E1000] Initialized with MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-            self.mac_address.0[0],
-            self.mac_address.0[1],
-            self.mac_address.0[2],
-            self.mac_address.0[3],
-            self.mac_address.0[4],
-            self.mac_address.0[5]
+            m[0], m[1], m[2], m[3], m[4], m[5]
         );
-
-        // Device is now up
         self.state = DeviceState::Up;
-
         Ok(())
     }
 
-    /// Transmit a packet (raw implementation)
     fn transmit_raw(&mut self, packet: &[u8]) -> Result<(), KernelError> {
-        if packet.len() > 2048 {
+        if packet.is_empty() || packet.len() > BUF_SIZE {
             return Err(KernelError::InvalidArgument {
                 name: "packet_size",
-                value: "too_large",
+                value: "empty or too large",
             });
         }
-
         let idx = self.tx_current;
-        let desc = &mut self.tx_descriptors[idx];
-
-        // Wait for descriptor to be available
-        if (desc.status & 1) == 0 {
+        let desc = self.tx_desc(idx);
+        // SAFETY: desc is in our ring; the NIC sets DD when it is done.
+        let status = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*desc).status)) };
+        if status & STATUS_DD == 0 {
             self.stats.tx_dropped += 1;
             return Err(KernelError::WouldBlock);
         }
 
-        // Copy packet to TX buffer
-        self.tx_buffers[idx][..packet.len()].copy_from_slice(packet);
+        let (virt, phys) = Self::buffer(&self.tx_frames, idx);
+        // SAFETY: the buffer is BUF_SIZE bytes of our DMA memory and the NIC
+        // is done with it (DD set).
+        unsafe {
+            core::ptr::copy_nonoverlapping(packet.as_ptr(), virt as *mut u8, packet.len());
+            core::ptr::write_volatile(
+                desc,
+                TxDescriptor {
+                    addr: phys,
+                    length: packet.len() as u16,
+                    cso: 0,
+                    cmd: TX_CMD,
+                    status: 0,
+                    css: 0,
+                    special: 0,
+                },
+            );
+        }
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
-        // Set up descriptor
-        desc.length = packet.len() as u16;
-        desc.cmd = (1 << 0) | (1 << 1) | (1 << 3); // EOP | IFCS | RS
-        desc.status = 0;
-
-        // Update tail pointer
-        self.tx_current = (self.tx_current + 1) % NUM_TX_DESC;
+        self.tx_current = (idx + 1) % NUM_TX_DESC;
         self.write_reg(REG_TDT, self.tx_current as u32);
-
-        // Update statistics
         self.stats.tx_packets += 1;
         self.stats.tx_bytes += packet.len() as u64;
-
         Ok(())
     }
 
-    /// Receive a packet (raw implementation)
     fn receive_raw(&mut self) -> Result<Option<Packet>, KernelError> {
         let idx = self.rx_current;
-        let desc = &mut self.rx_descriptors[idx];
-
-        // Check if packet is available
-        if (desc.status & 1) == 0 {
+        let desc = self.rx_desc(idx);
+        // SAFETY: desc is in our ring; the NIC writes it (volatile read).
+        let d = unsafe { core::ptr::read_volatile(desc) };
+        if d.status & STATUS_DD == 0 {
             return Ok(None);
         }
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
-        // Check for errors
-        if desc.errors != 0 {
+        let packet = if d.errors != 0 {
             self.stats.rx_errors += 1;
-            // Reset descriptor
-            desc.status = 0;
-            self.rx_current = (self.rx_current + 1) % NUM_RX_DESC;
-            self.write_reg(REG_RDT, self.rx_current as u32);
-            return Ok(None);
-        }
+            None
+        } else {
+            // Device-reported length is untrusted: clamp to the buffer.
+            let len = (d.length as usize).min(BUF_SIZE);
+            let (virt, _) = Self::buffer(&self.rx_frames, idx);
+            // SAFETY: virt points to BUF_SIZE bytes of our DMA memory that the
+            // NIC has finished writing (DD set).
+            let data = unsafe { core::slice::from_raw_parts(virt as *const u8, len) };
+            self.stats.rx_packets += 1;
+            self.stats.rx_bytes += len as u64;
+            Some(Packet::from_bytes(data))
+        };
 
-        // Get packet data
-        let len = desc.length as usize;
-        let data = self.rx_buffers[idx][..len].to_vec();
-        let packet = Packet::from_bytes(&data);
-
-        // Update statistics
-        self.stats.rx_packets += 1;
-        self.stats.rx_bytes += len as u64;
-
-        // Reset descriptor
-        desc.status = 0;
-
-        // Update tail pointer
-        self.rx_current = (self.rx_current + 1) % NUM_RX_DESC;
-        self.write_reg(REG_RDT, self.rx_current as u32);
-
-        Ok(Some(packet))
+        // Give the descriptor back: clear its status and make it the new
+        // tail (the previous code advanced the tail past a descriptor it had
+        // not processed yet).
+        // SAFETY: desc is in our ring and we own it until RDT passes it back.
+        unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!((*desc).status), 0) };
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        self.write_reg(REG_RDT, idx as u32);
+        self.rx_current = (idx + 1) % NUM_RX_DESC;
+        Ok(packet)
     }
 
     /// Get MAC address
@@ -325,11 +367,16 @@ impl E1000Driver {
     }
 }
 
-// DeviceDriver trait implementation removed - using NetworkDevice trait instead
+impl Drop for E1000Driver {
+    fn drop(&mut self) {
+        // Stop all DMA before the rings and buffers are freed.
+        self.reset();
+    }
+}
 
 impl NetworkDevice for E1000Driver {
     fn name(&self) -> &str {
-        "eth0"
+        &self.name
     }
 
     fn mac_address(&self) -> MacAddress {
@@ -340,7 +387,7 @@ impl NetworkDevice for E1000Driver {
         DeviceCapabilities {
             max_transmission_unit: 1500,
             supports_vlan: false,
-            supports_checksum_offload: true,
+            supports_checksum_offload: false,
             supports_tso: false,
             supports_lro: false,
         }
@@ -353,23 +400,16 @@ impl NetworkDevice for E1000Driver {
     fn set_state(&mut self, state: DeviceState) -> Result<(), KernelError> {
         match state {
             DeviceState::Up => {
-                if self.state == DeviceState::Down {
-                    // Re-enable RX and TX
-                    self.write_reg(REG_RCTL, (1 << 1) | (1 << 2) | (1 << 15));
-                    self.write_reg(REG_TCTL, (1 << 1) | (1 << 3) | (0x10 << 4));
-                }
-                self.state = DeviceState::Up;
+                self.write_reg(REG_RCTL, RCTL_VALUE);
+                self.write_reg(REG_TCTL, TCTL_VALUE);
             }
             DeviceState::Down => {
-                // Disable RX and TX
                 self.write_reg(REG_RCTL, 0);
                 self.write_reg(REG_TCTL, 0);
-                self.state = DeviceState::Down;
             }
-            _ => {
-                self.state = state;
-            }
+            _ => {}
         }
+        self.state = state;
         Ok(())
     }
 
@@ -385,7 +425,6 @@ impl NetworkDevice for E1000Driver {
                 actual: "not_up",
             });
         }
-
         self.transmit_raw(packet.data())
     }
 
@@ -393,7 +432,6 @@ impl NetworkDevice for E1000Driver {
         if self.state != DeviceState::Up {
             return Ok(None);
         }
-
         self.receive_raw()
     }
 }
@@ -409,10 +447,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_e1000_constants() {
-        assert_eq!(E1000_VENDOR_ID, 0x8086);
-        assert_eq!(E1000_DEVICE_ID, 0x100E);
-        assert_eq!(NUM_RX_DESC, 32);
-        assert_eq!(NUM_TX_DESC, 8);
+    fn descriptor_layout_matches_hardware() {
+        assert_eq!(core::mem::size_of::<RxDescriptor>(), 16);
+        assert_eq!(core::mem::size_of::<TxDescriptor>(), 16);
+        // Ring lengths must be multiples of 128 bytes and fit in one frame.
+        assert_eq!((NUM_RX_DESC * 16) % 128, 0);
+        assert_eq!((NUM_TX_DESC * 16) % 128, 0);
+        assert!(TX_RING_OFFSET + NUM_TX_DESC * 16 <= crate::mm::FRAME_SIZE);
+        assert_eq!(NUM_RX_DESC % 2, 0);
+        assert_eq!(NUM_TX_DESC % 2, 0);
     }
 }

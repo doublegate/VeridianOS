@@ -715,7 +715,9 @@ int listen(int sockfd, int backlog)
  */
 int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-    long ret = veridian_syscall1(SYS_SOCKET_ACCEPT, sockfd);
+    /* No address buffers are passed: the kernel would otherwise read its
+     * address arguments from leftover register contents. */
+    long ret = veridian_syscall3(SYS_SOCKET_ACCEPT, sockfd, 0, 0);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;

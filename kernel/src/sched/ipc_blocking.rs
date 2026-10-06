@@ -16,6 +16,19 @@ pub fn yield_cpu() {
 
 /// Block current process on IPC
 pub fn block_on_ipc(endpoint: u64) {
+    block_on_ipc_unless(endpoint, || false);
+}
+
+/// Block the current task on `endpoint` unless `ready()` reports that what
+/// it waits for has already arrived (IPC-SYNC-01).
+///
+/// The task is marked Blocked and put on the endpoint's wait queue first,
+/// and `ready()` is checked afterwards, all under the scheduler lock. A
+/// sender that published before the check is seen by it; one that publishes
+/// after it finds the task on the wait queue and wakes it. Checking the
+/// queue and then blocking as two separate steps lost a wakeup whenever the
+/// message arrived in between. `ready` must not take the scheduler lock.
+pub fn block_on_ipc_unless(endpoint: u64, ready: impl Fn() -> bool) {
     let scheduler = scheduler::current_scheduler();
     let mut sched = scheduler.lock();
 
@@ -41,6 +54,23 @@ pub fn block_on_ipc(endpoint: u64) {
 
         // Add task to wait queue for this endpoint
         add_to_wait_queue(current_task, endpoint);
+
+        if ready() {
+            // Arrived while we were registering: undo and keep running.
+            // SAFETY: as above; the scheduler lock is still held.
+            unsafe {
+                let task_mut = current_task.as_ptr();
+                let _ = remove_from_wait_queue((*task_mut).pid);
+                (*task_mut).state = ProcessState::Running;
+                (*task_mut).blocked_on = None;
+                if let Some(thread_ptr) = (*task_mut).thread_ref {
+                    thread_ptr
+                        .as_ref()
+                        .set_state(crate::process::thread::ThreadState::Running);
+                }
+            }
+            return;
+        }
 
         // Record IPC block metric
         metrics::SCHEDULER_METRICS.record_ipc_block();
@@ -89,7 +119,7 @@ pub fn block_process(pid: ProcessId) {
         drop(sched);
 
         // Look up process in the process table and block all its threads
-        if let Some(process) = crate::process::table::get_process_mut(pid) {
+        if let Some(process) = crate::process::table::get_process(pid) {
             // Update process state
             process
                 .state
@@ -210,7 +240,7 @@ pub fn wake_up_process(pid: ProcessId) {
     // If still not found, try to look up in process table and create task if needed
     #[cfg(feature = "alloc")]
     {
-        if let Some(process) = crate::process::table::get_process_mut(pid) {
+        if let Some(process) = crate::process::table::get_process(pid) {
             // Update process state
             process
                 .state
