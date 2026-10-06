@@ -156,8 +156,9 @@ Times are from the in-kernel `perf` command (x86_64/KVM), now in calibrated nano
 #### Fixes from the release review
 
 The release was reviewed as nine stacked pull requests (#14, #7-#13, and #15 for the fixes).
-Copilot reviewed every part and the Antigravity reviewer reviewed most of them; CodeRabbit was
-rate-limited for most of the run. Every review thread was answered with the fixing commit or a
+Copilot reviewed parts 1-8. It was requested twice on part 9, which holds the fixes, but did not
+review it; CodeRabbit and the Antigravity reviewer did. The Antigravity reviewer covered every part,
+and CodeRabbit was rate-limited for most of the run. Every review thread was answered with the fixing commit or a
 reason, then resolved. Fixed:
 
 - **Syscall entry and user memory**
