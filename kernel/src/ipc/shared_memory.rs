@@ -9,17 +9,14 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-#[cfg(feature = "alloc")]
-use alloc::collections::BTreeMap;
-#[cfg(feature = "alloc")]
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use spin::Mutex;
 
 use super::{error::Result, IpcError};
 use crate::{
-    mm::{PageSize, PhysicalAddress, VirtualAddress},
+    mm::{PageFlags, PageSize, PhysicalAddress, VirtualAddress},
     process::ProcessId,
 };
 
@@ -91,6 +88,11 @@ pub enum CachePolicy {
 }
 
 /// Shared memory region descriptor
+///
+/// The region owns its physical frames and frees them when dropped. Every
+/// process that maps it gets a `MappingType::SharedRegion` mapping of those
+/// same frames, which its address space never frees (IPC-INC-02). Regions
+/// that processes share live in the registry below, which keeps them alive.
 #[derive(Debug)]
 pub struct SharedRegion {
     /// Unique region ID
@@ -103,7 +105,7 @@ pub struct SharedRegion {
     owner: ProcessId,
     /// Processes with access to this region
     mappings: Mutex<BTreeMap<ProcessId, RegionMapping>>,
-    /// Reference count
+    /// Number of active mappings
     ref_count: AtomicU32,
     /// Cache policy
     cache_policy: CachePolicy,
@@ -118,8 +120,6 @@ struct RegionMapping {
     virtual_base: VirtualAddress,
     /// Permissions for this mapping
     permissions: Permission,
-    /// Whether this mapping is active
-    active: bool,
 }
 
 impl SharedRegion {
@@ -133,14 +133,17 @@ impl SharedRegion {
     /// Create a new shared memory region backed by real physical frames.
     ///
     /// Allocates contiguous physical frames from the global frame allocator
-    /// to back the shared region. Returns `IpcError::OutOfMemory` if the
-    /// allocation fails.
+    /// and zeroes them (they are about to be mapped into user space).
+    /// Returns `IpcError::OutOfMemory` if the allocation fails.
     pub fn new_with_policy(
         owner: ProcessId,
         size: usize,
         cache_policy: CachePolicy,
         numa_node: Option<u32>,
     ) -> Result<Self> {
+        if size == 0 {
+            return Err(IpcError::InvalidMemoryRegion);
+        }
         // Round size up to page boundary
         let page_size = PageSize::Small as usize;
         let size = size.div_ceil(page_size) * page_size;
@@ -154,13 +157,20 @@ impl SharedRegion {
 
         let physical_base = PhysicalAddress::new(frame.as_u64() * page_size as u64);
 
+        // SAFETY: the frames were just allocated for this region and nothing
+        // else references them; the kernel's physical map covers them.
+        unsafe {
+            let virt = crate::mm::phys_to_virt_addr(physical_base.as_u64()) as *mut u8;
+            core::ptr::write_bytes(virt, 0, size);
+        }
+
         Ok(Self {
             id: REGION_COUNTER.fetch_add(1, Ordering::Relaxed),
             physical_base,
             size,
             owner,
             mappings: Mutex::new(BTreeMap::new()),
-            ref_count: AtomicU32::new(1),
+            ref_count: AtomicU32::new(0),
             cache_policy,
             numa_node,
         })
@@ -181,74 +191,100 @@ impl SharedRegion {
         self.physical_base
     }
 
-    /// Map region into a process address space
+    /// The owner process
+    pub fn owner(&self) -> ProcessId {
+        self.owner
+    }
+
+    fn frames(&self) -> Vec<crate::mm::FrameNumber> {
+        let first = self.physical_base.as_u64() / PageSize::Small as u64;
+        (0..(self.size / PageSize::Small as usize) as u64)
+            .map(|i| crate::mm::FrameNumber::new(first + i))
+            .collect()
+    }
+
+    /// Copy `data` into the region at `offset`.
+    pub fn write_at(&self, offset: usize, data: &[u8]) -> Result<()> {
+        if offset
+            .checked_add(data.len())
+            .is_none_or(|end| end > self.size)
+        {
+            return Err(IpcError::InvalidMemoryRegion);
+        }
+        // SAFETY: the region owns `size` contiguous bytes at physical_base,
+        // reachable through the kernel's physical map, for its lifetime, and
+        // `offset + data.len() <= size`. Processes mapping the region may write it
+        // concurrently; it holds plain bytes, so a racing write only mixes
+        // contents, as with any shared memory.
+        unsafe {
+            let dst = crate::mm::phys_to_virt_addr(self.physical_base.as_u64()) as *mut u8;
+            core::ptr::copy_nonoverlapping(data.as_ptr(), dst.add(offset), data.len());
+        }
+        Ok(())
+    }
+
+    /// Map region into a process address space and return where.
+    ///
+    /// Installs page-table entries for the region's own frames (it used to
+    /// only record the address, and the "zero-copy" paths that relied on it
+    /// mapped fresh zeroed frames). `at` must be page-aligned user space
+    /// that is not already mapped; `None` lets the address space choose.
+    /// Authorization is the caller's job (capability checks at the syscall
+    /// or transfer boundary).
     pub fn map(
         &self,
         process: ProcessId,
-        virtual_base: VirtualAddress,
+        at: Option<VirtualAddress>,
         permissions: Permission,
-    ) -> Result<()> {
-        // Verify the calling process has capability to map this region
-        if let Some(current_process) = crate::process::current_process() {
-            // Only owner or processes with proper capability can map
-            if current_process.pid != self.owner && current_process.pid != process {
-                // Would need to check for a memory capability here
-                // For now, only allow owner to map
-                return Err(IpcError::PermissionDenied);
-            }
-        }
-
-        // Check if process already has a mapping
+    ) -> Result<VirtualAddress> {
         let mut mappings = self.mappings.lock();
         if mappings.contains_key(&process) {
             return Err(IpcError::InvalidMemoryRegion);
         }
 
-        // Flush TLB for all pages in the mapped range so the CPU picks up
-        // the new mapping immediately.
-        let num_pages = self.size / (PageSize::Small as usize);
-        for i in 0..num_pages {
-            let page_addr = virtual_base.as_u64() + (i as u64) * (PageSize::Small as u64);
-            crate::arch::tlb_flush_address(page_addr);
+        let proc = crate::process::find_process(process).ok_or(IpcError::ProcessNotFound)?;
+        let mut flags = PageFlags::PRESENT | PageFlags::USER;
+        if permissions.can_write() {
+            flags |= PageFlags::WRITABLE;
         }
+        if !permissions.can_execute() {
+            flags |= PageFlags::NO_EXECUTE;
+        }
+        let virtual_base = proc
+            .memory_space
+            .lock()
+            .map_borrowed_frames(at, &self.frames(), flags)
+            .map_err(|_| IpcError::InvalidMemoryRegion)?;
 
         mappings.insert(
             process,
             RegionMapping {
                 virtual_base,
                 permissions,
-                active: true,
             },
         );
-
         self.ref_count.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+        Ok(virtual_base)
     }
 
-    /// Unmap region from a process and flush the TLB for the affected range.
+    /// Unmap region from a process. The page-table entries are removed and
+    /// flushed page by page; the frames stay with the region.
     pub fn unmap(&self, process: ProcessId) -> Result<()> {
-        let mut mappings = self.mappings.lock();
+        let mapping = self
+            .mappings
+            .lock()
+            .remove(&process)
+            .ok_or(IpcError::InvalidMemoryRegion)?;
+        self.ref_count.fetch_sub(1, Ordering::Relaxed);
 
-        if let Some(mapping) = mappings.get_mut(&process) {
-            if !mapping.active {
-                return Err(IpcError::InvalidMemoryRegion);
-            }
-
-            // Flush TLB for every page in the unmapped range so stale
-            // translations are invalidated.
-            let num_pages = self.size / (PageSize::Small as usize);
-            for i in 0..num_pages {
-                let page_addr =
-                    mapping.virtual_base.as_u64() + (i as u64) * (PageSize::Small as u64);
-                crate::arch::tlb_flush_address(page_addr);
-            }
-
-            mapping.active = false;
-            self.ref_count.fetch_sub(1, Ordering::Relaxed);
-            Ok(())
-        } else {
-            Err(IpcError::InvalidMemoryRegion)
+        // A process that already exited took its page tables with it.
+        if let Some(proc) = crate::process::find_process(process) {
+            proc.memory_space
+                .lock()
+                .unmap_region(mapping.virtual_base)
+                .map_err(|_| IpcError::InvalidMemoryRegion)?;
         }
+        Ok(())
     }
 
     /// Transfer ownership of region to another process.
@@ -265,52 +301,12 @@ impl SharedRegion {
 
     /// Get virtual address for a specific process
     pub fn get_mapping(&self, process: ProcessId) -> Option<VirtualAddress> {
-        self.mappings
-            .lock()
-            .get(&process)
-            .filter(|m| m.active)
-            .map(|m| m.virtual_base)
+        self.mappings.lock().get(&process).map(|m| m.virtual_base)
     }
 
-    /// Create a capability for this shared region
-    pub fn create_capability(&self, target_process: ProcessId, mode: TransferMode) -> u64 {
-        use crate::cap::{
-            token::{CapabilityFlags, CapabilityToken},
-            types::{Capability, CapabilityId, CapabilityPermissions, CapabilityType},
-        };
-
-        // Determine permissions based on transfer mode
-        let perms = match mode {
-            TransferMode::Move => {
-                CapabilityPermissions::READ
-                    | CapabilityPermissions::WRITE
-                    | CapabilityPermissions::GRANT
-            }
-            TransferMode::Share => CapabilityPermissions::READ | CapabilityPermissions::WRITE,
-            TransferMode::CopyOnWrite => CapabilityPermissions::READ,
-        };
-
-        // Create capability ID based on region ID and target process
-        let cap_id = CapabilityId(self.id ^ target_process.0);
-
-        // Create capability for shared memory region
-        let _cap = Capability::new(
-            cap_id,
-            CapabilityType::Memory,
-            perms,
-            self.physical_base.as_u64(),
-        );
-
-        // Create token with appropriate flags
-        let flags = match mode {
-            TransferMode::Move => CapabilityFlags::Read as u8 | CapabilityFlags::Write as u8,
-            TransferMode::Share => CapabilityFlags::Read as u8 | CapabilityFlags::Write as u8,
-            TransferMode::CopyOnWrite => CapabilityFlags::Read as u8,
-        };
-
-        let token = CapabilityToken::new(cap_id.0, 0, CapabilityType::Memory as u8, flags);
-
-        token.to_u64()
+    /// Number of processes mapping the region.
+    pub fn mapping_count(&self) -> u32 {
+        self.ref_count.load(Ordering::Relaxed)
     }
 
     /// Get the NUMA node for this region
@@ -331,6 +327,61 @@ impl SharedRegion {
     }
 }
 
+impl Drop for SharedRegion {
+    fn drop(&mut self) {
+        // Mappings borrow the frames; never free memory a process can still
+        // reach. Leaking is the safe failure.
+        if self.ref_count.load(Ordering::Relaxed) != 0 {
+            crate::kprintln!(
+                "[IPC] Shared region {} dropped while mapped; leaking its frames",
+                self.id
+            );
+            return;
+        }
+        let page_size = PageSize::Small as usize;
+        let first = crate::mm::FrameNumber::new(self.physical_base.as_u64() / page_size as u64);
+        let _ = crate::mm::FRAME_ALLOCATOR
+            .lock()
+            .free_frames(first, self.size / page_size);
+    }
+}
+
+// ── Region registry ─────────────────────────────────────────────────────────
+//
+// Regions shared through capabilities live here, keyed by physical base (the
+// identity a memory capability carries), so a mapping request can find the
+// region's frames. A region is removed only when no process maps it.
+
+static REGISTRY: Mutex<BTreeMap<u64, Arc<SharedRegion>>> = Mutex::new(BTreeMap::new());
+
+/// Register a region and return the shared handle.
+pub fn register_region(region: SharedRegion) -> Arc<SharedRegion> {
+    let region = Arc::new(region);
+    REGISTRY
+        .lock()
+        .insert(region.physical_base().as_u64(), region.clone());
+    region
+}
+
+/// The registered region whose physical base is `base`.
+pub fn lookup_region(base: u64) -> Option<Arc<SharedRegion>> {
+    REGISTRY.lock().get(&base).cloned()
+}
+
+/// Remove a registered region; refused while any process maps it. Its
+/// frames are freed when the last handle is dropped.
+pub fn unregister_region(base: u64) -> Result<()> {
+    let mut registry = REGISTRY.lock();
+    match registry.get(&base) {
+        None => Err(IpcError::InvalidMemoryRegion),
+        Some(region) if region.mapping_count() > 0 => Err(IpcError::ResourceBusy),
+        Some(_) => {
+            registry.remove(&base);
+            Ok(())
+        }
+    }
+}
+
 // MemoryRegion is defined in ipc::message -- re-use it here.
 pub use super::message::MemoryRegion;
 
@@ -344,166 +395,6 @@ impl MemoryRegion {
             cache_policy: region.cache_policy as u32,
         }
     }
-}
-
-/// Shared memory manager
-pub struct SharedMemoryManager {
-    /// All shared regions in the system
-    regions: Mutex<BTreeMap<u64, SharedRegion>>,
-    /// NUMA node memory tracking
-    numa_stats: Vec<AtomicU64>,
-}
-
-impl SharedMemoryManager {
-    /// Create a new shared memory manager
-    pub fn new(numa_nodes: usize) -> Self {
-        let mut numa_stats = Vec::with_capacity(numa_nodes);
-        for _ in 0..numa_nodes {
-            numa_stats.push(AtomicU64::new(0));
-        }
-
-        Self {
-            regions: Mutex::new(BTreeMap::new()),
-            numa_stats,
-        }
-    }
-
-    /// Create a new shared memory region
-    pub fn create_region(
-        &self,
-        owner: ProcessId,
-        size: usize,
-        cache_policy: CachePolicy,
-        numa_node: Option<u32>,
-    ) -> Result<u64> {
-        let region = SharedRegion::new_with_policy(owner, size, cache_policy, numa_node)?;
-        let id = region.id();
-
-        // Track NUMA allocation
-        if let Some(node) = numa_node {
-            if (node as usize) < self.numa_stats.len() {
-                self.numa_stats[node as usize].fetch_add(size as u64, Ordering::Relaxed);
-            }
-        }
-
-        self.regions.lock().insert(id, region);
-        Ok(id)
-    }
-
-    /// Get a shared region by ID
-    pub fn get_region(&self, id: u64) -> Option<u64> {
-        self.regions.lock().get(&id).map(|r| r.id)
-    }
-
-    /// Remove a shared region
-    pub fn remove_region(&self, id: u64) -> Result<()> {
-        let mut regions = self.regions.lock();
-        if let Some(region) = regions.remove(&id) {
-            // Check reference count
-            if region.ref_count.load(Ordering::Relaxed) > 0 {
-                // Still in use, put it back
-                regions.insert(id, region);
-                return Err(IpcError::ResourceBusy);
-            }
-
-            // Update NUMA stats
-            if let Some(node) = region.numa_node {
-                if (node as usize) < self.numa_stats.len() {
-                    self.numa_stats[node as usize].fetch_sub(region.size as u64, Ordering::Relaxed);
-                }
-            }
-
-            // Free physical frames backing this region
-            let page_size = PageSize::Small as usize;
-            let num_frames = region.size / page_size;
-            let frame_number =
-                crate::mm::FrameNumber::new(region.physical_base.as_u64() / page_size as u64);
-            if let Err(_e) = crate::mm::FRAME_ALLOCATOR
-                .lock()
-                .free_frames(frame_number, num_frames)
-            {
-                crate::kprintln!(
-                    "[IPC] Warning: Failed to free physical frames for shared memory region"
-                );
-            }
-
-            Ok(())
-        } else {
-            Err(IpcError::InvalidMemoryRegion)
-        }
-    }
-
-    /// Grant a process access to a shared region.
-    ///
-    /// Records a pending mapping for the target process.  The actual page-
-    /// table insertion happens when the process calls `sys_ipc_map_memory`.
-    pub fn share_with(&self, region_id: u64, target: ProcessId) -> Result<()> {
-        let regions = self.regions.lock();
-        let region = regions
-            .get(&region_id)
-            .ok_or(IpcError::InvalidMemoryRegion)?;
-
-        let mut mappings = region.mappings.lock();
-        if mappings.contains_key(&target) {
-            // Already shared with this process
-            return Ok(());
-        }
-
-        mappings.insert(
-            target,
-            RegionMapping {
-                virtual_base: VirtualAddress::new(0), // Assigned on map
-                permissions: Permission::Write,       // Write implies read (0b011)
-                active: false,                        // Not yet mapped in page tables
-            },
-        );
-        region.ref_count.fetch_add(1, Ordering::Relaxed);
-        Ok(())
-    }
-
-    /// Get NUMA memory usage statistics
-    pub fn numa_usage(&self, node: u32) -> Option<u64> {
-        self.numa_stats
-            .get(node as usize)
-            .map(|stat| stat.load(Ordering::Relaxed))
-    }
-}
-
-/// Zero-copy message transfer using shared memory.
-///
-/// Validates that the source process owns the region and the destination
-/// process has appropriate permissions, then remaps the physical pages
-/// into the destination's address space.  The source mapping is left
-/// intact (read-only downgrade could be added for move semantics).
-pub fn zero_copy_transfer(
-    region_id: u64,
-    from_process: ProcessId,
-    to_process: ProcessId,
-    manager: &SharedMemoryManager,
-) -> Result<()> {
-    // Look up the region in the manager
-    let regions = manager.regions.lock();
-    let region = regions.get(&region_id).ok_or(IpcError::EndpointNotFound)?;
-
-    // Validate that the source process owns the region
-    if region.owner != from_process {
-        return Err(IpcError::PermissionDenied);
-    }
-
-    // Validate that the destination process is a valid participant
-    // (either already mapped or has a pending grant)
-    let _to_proc =
-        crate::process::table::get_process(to_process).ok_or(IpcError::ProcessNotFound)?;
-
-    // Record the mapping for the destination process.
-    // The actual page-table remapping is performed lazily on first access
-    // via the page fault handler (demand-paging), or eagerly when the
-    // destination calls sys_ipc_map_memory.  Here we simply mark the
-    // region as shared with the target.
-    drop(regions);
-    manager.share_with(region_id, to_process)?;
-
-    Ok(())
 }
 
 #[cfg(all(test, not(target_os = "none")))]
@@ -535,17 +426,5 @@ mod tests {
                 .unwrap();
         assert_eq!(region.size(), 4096);
         assert_eq!(region.owner, ProcessId(1));
-    }
-
-    #[cfg(target_os = "none")]
-    #[test]
-    fn test_memory_manager() {
-        let manager = SharedMemoryManager::new(4);
-        let id = manager
-            .create_region(ProcessId(1), 8192, CachePolicy::WriteBack, Some(0))
-            .unwrap();
-
-        assert!(manager.get_region(id).is_some());
-        assert_eq!(manager.numa_usage(0), Some(8192));
     }
 }

@@ -1,10 +1,22 @@
-//! Zero-copy IPC implementation for large data transfers
+//! Zero-copy IPC for large data transfers
 //!
-//! Provides efficient data transfer between processes without copying by
-//! remapping pages and using shared memory regions.
-
-// Zero-copy IPC -- exercised for large data transfers
-#![allow(dead_code)]
+//! Hands a [`SharedRegion`] from one process to another by mapping the
+//! region's own physical frames into the receiver (IPC-INC-02, IPC-PERF-02).
+//! Nothing is copied and no frame changes owner: the region owns its frames
+//! and every process maps them without owning them.
+//!
+//! Before v0.26 the "map" step allocated a fresh zeroed frame per page, so a
+//! share shared nothing and a move lost the data; the capability check
+//! ignored the region; flag updates were no-ops; and every transfer flushed
+//! the whole TLB.
+//!
+//! Supported:
+//! - **Share**: the receiver maps the region too.
+//! - **Move**: the sender's mapping is removed, the receiver's added.
+//!
+//! **Copy-on-write is refused** (`IpcError::InvalidMessage`) until COW
+//! frame reference counting lands (v0.27); doing it by marking pages
+//! read-only without a COW fault path would only break the sender.
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -17,23 +29,7 @@ use super::{
     error::{IpcError, Result},
     shared_memory::{Permission, SharedRegion},
 };
-use crate::{
-    arch::entropy::read_timestamp,
-    mm::{PageFlags, PhysicalAddress, VirtualAddress},
-    process::ProcessId,
-};
-
-/// Per-process page table handle for IPC zero-copy transfers.
-///
-/// Wraps a process ID and uses the process's VAS to perform real
-/// page table operations (translate, map, unmap) via the frame
-/// allocator and page table infrastructure.
-struct ProcessPageTable {
-    /// The process this page table belongs to
-    pid: ProcessId,
-    /// Page table root physical address (cached from VAS)
-    root: u64,
-}
+use crate::{arch::entropy::read_timestamp, process::ProcessId};
 
 /// Statistics for zero-copy operations
 pub struct ZeroCopyStats {
@@ -50,60 +46,42 @@ static ZERO_COPY_STATS: ZeroCopyStats = ZeroCopyStats {
     remap_cycles: AtomicU64::new(0),
 };
 
+const PAGE_SIZE: usize = 4096;
+
 /// Zero-copy transfer of memory region between processes
 ///
-/// This function remaps pages from source to destination without copying data.
-/// It's optimized for large transfers where copying would be expensive.
+/// `from_pid` must map the region and hold a memory capability for it with
+/// the SHARE right. Returns the address the region now has in `to_pid`.
+/// Page-table changes flush the TLB per page; other address spaces' entries
+/// are not cached while they are not loaded.
 pub fn zero_copy_transfer(
     region: &SharedRegion,
     from_pid: ProcessId,
     to_pid: ProcessId,
     flags: TransferFlags,
-) -> Result<()> {
+) -> Result<crate::mm::VirtualAddress> {
     let start = read_timestamp();
 
-    // Validate processes have appropriate capabilities
-    if !validate_transfer_capability(from_pid, to_pid, region.id()) {
+    if region.get_mapping(from_pid).is_none() {
+        return Err(IpcError::InvalidMemoryRegion);
+    }
+    if !holds_share_capability(from_pid, region) {
         return Err(IpcError::PermissionDenied);
     }
 
-    // Get page table handles for both processes
-    let mut from_pt = get_process_page_table(from_pid)?;
-    let mut to_pt = get_process_page_table(to_pid)?;
+    let to_vaddr = match flags.transfer_type {
+        TransferType::Share => region.map(to_pid, None, Permission::Write)?,
+        TransferType::Move => {
+            // Map first: if that fails the sender keeps the region.
+            let to_vaddr = region.map(to_pid, None, Permission::Write)?;
+            region.unmap(from_pid)?;
+            to_vaddr
+        }
+        TransferType::Copy => return Err(IpcError::InvalidMessage),
+    };
 
-    // Calculate number of pages
     let num_pages = region.size().div_ceil(PAGE_SIZE);
-
-    // Perform the transfer
-    match flags.transfer_type {
-        TransferType::Move => transfer_move(
-            region,
-            from_pid,
-            to_pid,
-            &mut from_pt,
-            &mut to_pt,
-            num_pages,
-        )?,
-        TransferType::Share => transfer_share(
-            region,
-            from_pid,
-            to_pid,
-            &mut from_pt,
-            &mut to_pt,
-            num_pages,
-        )?,
-        TransferType::Copy => transfer_copy_on_write(
-            region,
-            from_pid,
-            to_pid,
-            &mut from_pt,
-            &mut to_pt,
-            num_pages,
-        )?,
-    }
-
-    // Update statistics
-    let elapsed = read_timestamp() - start;
+    let elapsed = read_timestamp().wrapping_sub(start);
     ZERO_COPY_STATS
         .pages_transferred
         .fetch_add(num_pages as u64, Ordering::Relaxed);
@@ -117,127 +95,31 @@ pub fn zero_copy_transfer(
         .remap_cycles
         .fetch_add(elapsed, Ordering::Relaxed);
 
-    // Flush TLBs on affected CPUs
-    flush_tlb_for_processes(&[from_pid, to_pid]);
-
-    Ok(())
+    Ok(to_vaddr)
 }
 
-/// Transfer ownership of pages (unmap from source, map to destination)
-fn transfer_move(
-    region: &SharedRegion,
-    from_pid: ProcessId,
-    to_pid: ProcessId,
-    from_pt: &mut ProcessPageTable,
-    to_pt: &mut ProcessPageTable,
-    num_pages: usize,
-) -> Result<()> {
-    let from_vaddr = region
-        .get_mapping(from_pid)
-        .ok_or(IpcError::InvalidMemoryRegion)?;
-    let to_vaddr = allocate_virtual_range(to_pt, region.size())?;
+/// Whether `pid` holds a memory capability for `region` (same physical
+/// base) carrying the SHARE right. The old check only asked whether both
+/// processes existed.
+fn holds_share_capability(pid: ProcessId, region: &SharedRegion) -> bool {
+    use crate::cap::{memory_integration::MemoryRights, ObjectRef};
 
-    for i in 0..num_pages {
-        let offset = i * PAGE_SIZE;
-        let from_page = from_vaddr.add(offset);
-        let to_page = to_vaddr.add(offset);
-
-        // Get physical address from source via VAS translation
-        let phys_addr = from_pt
-            .translate(from_page)
-            .ok_or(IpcError::InvalidMemoryRegion)?;
-
-        // Unmap from source
-        from_pt.unmap(from_page)?;
-
-        // Map to destination
-        to_pt.map(to_page, phys_addr, PageFlags::USER | PageFlags::WRITABLE)?;
-    }
-
-    // Update region mapping
-    region.unmap(from_pid)?;
-    region.map(to_pid, to_vaddr, Permission::Write)?;
-
-    Ok(())
-}
-
-/// Share pages between processes (map to both)
-fn transfer_share(
-    region: &SharedRegion,
-    from_pid: ProcessId,
-    to_pid: ProcessId,
-    from_pt: &mut ProcessPageTable,
-    to_pt: &mut ProcessPageTable,
-    num_pages: usize,
-) -> Result<()> {
-    let from_vaddr = region
-        .get_mapping(from_pid)
-        .ok_or(IpcError::InvalidMemoryRegion)?;
-    let to_vaddr = allocate_virtual_range(to_pt, region.size())?;
-
-    for i in 0..num_pages {
-        let offset = i * PAGE_SIZE;
-        let from_page = from_vaddr.add(offset);
-        let to_page = to_vaddr.add(offset);
-
-        // Get physical address from source via VAS translation
-        let phys_addr = from_pt
-            .translate(from_page)
-            .ok_or(IpcError::InvalidMemoryRegion)?;
-
-        // Map to destination (keep source mapping)
-        to_pt.map(to_page, phys_addr, PageFlags::USER | PageFlags::WRITABLE)?;
-
-        // Mark as shared in both page tables (set ACCESSED bit as a marker)
-        from_pt.update_flags(
-            from_page,
-            PageFlags::USER | PageFlags::WRITABLE | PageFlags::ACCESSED,
-        )?;
-        to_pt.update_flags(
-            to_page,
-            PageFlags::USER | PageFlags::WRITABLE | PageFlags::ACCESSED,
-        )?;
-    }
-
-    // Update region mapping
-    region.map(to_pid, to_vaddr, Permission::Write)?;
-
-    Ok(())
-}
-
-/// Copy-on-write transfer (share initially, copy on write)
-fn transfer_copy_on_write(
-    region: &SharedRegion,
-    from_pid: ProcessId,
-    to_pid: ProcessId,
-    from_pt: &mut ProcessPageTable,
-    to_pt: &mut ProcessPageTable,
-    num_pages: usize,
-) -> Result<()> {
-    let from_vaddr = region
-        .get_mapping(from_pid)
-        .ok_or(IpcError::InvalidMemoryRegion)?;
-    let to_vaddr = allocate_virtual_range(to_pt, region.size())?;
-
-    for i in 0..num_pages {
-        let offset = i * PAGE_SIZE;
-        let from_page = from_vaddr.add(offset);
-        let to_page = to_vaddr.add(offset);
-
-        // Get physical address from source via VAS translation
-        let phys_addr = from_pt
-            .translate(from_page)
-            .ok_or(IpcError::InvalidMemoryRegion)?;
-
-        // Map as read-only in both (triggers fault on write for COW)
-        from_pt.update_flags(from_page, PageFlags::USER)?;
-        to_pt.map(to_page, phys_addr, PageFlags::USER)?;
-    }
-
-    // Update region mapping
-    region.map(to_pid, to_vaddr, Permission::Read)?;
-
-    Ok(())
+    let Some(process) = crate::process::find_process(pid) else {
+        return false;
+    };
+    let base = region.physical_base().as_usize();
+    let space = process.capability_space.lock();
+    let mut found = false;
+    let _ = space.iter_capabilities(|entry| {
+        if let ObjectRef::Memory { base: b, .. } = entry.object {
+            if b == base && entry.rights.contains(MemoryRights::SHARE) {
+                found = true;
+                return false;
+            }
+        }
+        true
+    });
+    found
 }
 
 /// Transfer flags for zero-copy operations
@@ -254,7 +136,7 @@ pub enum TransferType {
     Move,
     /// Share pages (keep mapped in both)
     Share,
-    /// Copy-on-write (share until written)
+    /// Copy-on-write (not supported yet; refused)
     Copy,
 }
 
@@ -267,16 +149,17 @@ pub enum CachePolicy {
 
 /// Grant capability to perform zero-copy transfer.
 ///
-/// Creates a memory capability in the grantee's capability space that
-/// allows mapping the shared region with the specified permissions.
+/// Creates a memory capability for `region` in the grantee's capability
+/// space. Only a holder of the region's SHARE right may grant it.
 pub fn grant_transfer_capability(
     granter_pid: u64,
     grantee_pid: u64,
-    region_id: u64,
+    region: &SharedRegion,
     permissions: Permission,
 ) -> Result<u64> {
-    let _granter = crate::process::table::get_process(ProcessId(granter_pid))
-        .ok_or(IpcError::ProcessNotFound)?;
+    if !holds_share_capability(ProcessId(granter_pid), region) {
+        return Err(IpcError::PermissionDenied);
+    }
     let grantee = crate::process::table::get_process(ProcessId(grantee_pid))
         .ok_or(IpcError::ProcessNotFound)?;
 
@@ -292,12 +175,11 @@ pub fn grant_transfer_capability(
         rights |= crate::cap::memory_integration::MemoryRights::EXECUTE;
     }
 
-    // Create a memory capability in the grantee's capability space
     let grantee_cap_space = grantee.capability_space.lock();
     let attributes = crate::cap::object::MemoryAttributes::normal();
     let cap = crate::cap::memory_integration::create_memory_capability(
-        region_id as usize,
-        0, // size determined by region lookup at map time
+        region.physical_base().as_usize(),
+        region.size(),
         attributes,
         rights,
         &grantee_cap_space,
@@ -310,132 +192,14 @@ pub fn grant_transfer_capability(
 /// Batch zero-copy transfer for multiple regions
 #[cfg(feature = "alloc")]
 pub fn batch_zero_copy_transfer(
-    transfers: &[(SharedRegion, TransferFlags)],
+    transfers: &[(&SharedRegion, TransferFlags)],
     from_pid: ProcessId,
     to_pid: ProcessId,
-) -> Result<Vec<Result<()>>> {
-    let mut results = Vec::with_capacity(transfers.len());
-
-    // Validate processes exist before performing transfers
-    let _from_pt = get_process_page_table(from_pid)?;
-    let _to_pt = get_process_page_table(to_pid)?;
-
-    // Perform all transfers
-    for (region, flags) in transfers {
-        results.push(zero_copy_transfer(region, from_pid, to_pid, *flags));
-    }
-
-    // Single TLB flush for all transfers
-    flush_tlb_for_processes(&[from_pid, to_pid]);
-
-    Ok(results)
-}
-
-const PAGE_SIZE: usize = 4096;
-
-// ── ProcessPageTable operations ────────────────────────────────────────────
-//
-// These methods delegate to the real mm infrastructure (VAS, frame allocator,
-// page table walker) via the process table.
-
-impl ProcessPageTable {
-    /// Translate a virtual address to its backing physical address using the
-    /// process's VAS mappings.
-    fn translate(&self, vaddr: VirtualAddress) -> Option<PhysicalAddress> {
-        let process = crate::process::find_process(self.pid)?;
-        let vas = process.memory_space.lock();
-        crate::mm::translate_address(&vas, vaddr)
-    }
-
-    /// Map a physical address at the given virtual address in the process's
-    /// page table. This installs the mapping in the architecture page table
-    /// via the VAS `map_region` path and flushes the TLB for the new page.
-    fn map(
-        &mut self,
-        vaddr: VirtualAddress,
-        _paddr: PhysicalAddress,
-        flags: PageFlags,
-    ) -> Result<()> {
-        let process = crate::process::find_process(self.pid).ok_or(IpcError::ProcessNotFound)?;
-        let mut vas = process.memory_space.lock();
-
-        // Use map_page which allocates a physical frame and installs the
-        // mapping in the hardware page table, then flushes TLB.
-        vas.map_page(vaddr.as_usize(), flags)
-            .map_err(|_| IpcError::OutOfMemory)?;
-
-        Ok(())
-    }
-
-    /// Unmap a virtual address from the process's page table and flush TLB.
-    #[cfg(feature = "alloc")]
-    fn unmap(&mut self, vaddr: VirtualAddress) -> Result<()> {
-        let process = crate::process::find_process(self.pid).ok_or(IpcError::ProcessNotFound)?;
-        let vas = process.memory_space.lock();
-
-        vas.unmap_region(vaddr)
-            .map_err(|_| IpcError::InvalidMemoryRegion)?;
-
-        Ok(())
-    }
-
-    #[cfg(not(feature = "alloc"))]
-    fn unmap(&mut self, _vaddr: VirtualAddress) -> Result<()> {
-        Err(IpcError::OutOfMemory)
-    }
-
-    /// Update page flags for an existing mapping. Currently this is a best-
-    /// effort operation: we flush the TLB for the address so that the next
-    /// access will re-walk the page table with updated flags.
-    fn update_flags(&mut self, vaddr: VirtualAddress, _flags: PageFlags) -> Result<()> {
-        // Flush TLB for this address so the CPU picks up any flag changes
-        // that were applied at the PTE level.
-        crate::arch::tlb_flush_address(vaddr.as_u64());
-        Ok(())
-    }
-}
-
-/// Validate that the source process has the right to transfer to the
-/// destination process. Currently validates that both processes exist
-/// and that the source has a mapping for the region.
-fn validate_transfer_capability(from: ProcessId, to: ProcessId, _region: u64) -> bool {
-    // Both processes must exist
-    let from_exists = crate::process::find_process(from).is_some();
-    let to_exists = crate::process::find_process(to).is_some();
-    from_exists && to_exists
-}
-
-/// Look up a process by PID and construct a ProcessPageTable handle that
-/// wraps its VAS page table root.
-fn get_process_page_table(pid: ProcessId) -> Result<ProcessPageTable> {
-    let process = crate::process::find_process(pid).ok_or(IpcError::ProcessNotFound)?;
-    let vas = process.memory_space.lock();
-    let root = vas.get_page_table();
-    Ok(ProcessPageTable { pid, root })
-}
-
-/// Allocate a free virtual address range in the destination process's address
-/// space by delegating to the VAS mmap allocator.
-fn allocate_virtual_range(pt: &mut ProcessPageTable, size: usize) -> Result<VirtualAddress> {
-    let process = crate::process::find_process(pt.pid).ok_or(IpcError::ProcessNotFound)?;
-    let vas = process.memory_space.lock();
-
-    vas.mmap(size, crate::mm::vas::MappingType::Shared)
-        .map_err(|_| IpcError::OutOfMemory)
-}
-
-/// Flush TLB entries for all virtual addresses that may be cached for the
-/// given set of processes. Uses architecture-specific TLB invalidation.
-fn flush_tlb_for_processes(pids: &[ProcessId]) {
-    // If any process in the set is the currently-running process, we must
-    // do a full TLB flush since we cannot know which specific addresses
-    // were affected across the transfer.
-    if pids.is_empty() {
-        return;
-    }
-    // Full flush is the safe, conservative approach for cross-process
-    // page remapping.
-    crate::arch::tlb_flush_all();
+) -> Vec<Result<crate::mm::VirtualAddress>> {
+    transfers
+        .iter()
+        .map(|(region, flags)| zero_copy_transfer(region, from_pid, to_pid, *flags))
+        .collect()
 }
 
 /// Get zero-copy statistics

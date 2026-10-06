@@ -1,11 +1,20 @@
 //! IPC message format definitions
 //!
 //! This module defines the message structures used for IPC communication.
-//! Small messages (≤64 bytes) are passed via registers for optimal performance,
-//! while large messages use shared memory for zero-copy transfers.
+//! Messages come in three size tiers (IPC-ARCH-02):
+//!
+//! | Payload | Transport |
+//! |---|---|
+//! | up to 64 bytes | [`SmallMessage`], register-sized, copied by value |
+//! | up to [`MAX_BUFFERED_PAYLOAD`] | [`BufferedMessage`]: copied into a kernel buffer at send, out at receive |
+//! | larger | a shared region (`ipc::shared_memory`), mapped by both sides |
+//!
+//! [`LargeMessage`] only describes memory; the kernel never dereferences
+//! its address on another process's behalf.
 
 // Core IPC message types
 
+use alloc::vec::Vec;
 use core::mem::size_of;
 
 /// Maximum size for register-based small messages
@@ -166,13 +175,40 @@ impl LargeMessage {
     }
 }
 
-/// Unified message type that can represent both small and large messages
-#[derive(Debug, Clone, Copy)]
+/// Largest payload copied through the kernel (IPC-ARCH-02 middle tier).
+/// Bigger transfers go through a shared region.
+pub const MAX_BUFFERED_PAYLOAD: usize = 16 * 1024;
+
+/// A message whose payload was copied out of the sender's memory into a
+/// kernel buffer at send time, and is copied into the receiver's buffer at
+/// receive time.
+#[derive(Debug, Clone)]
+pub struct BufferedMessage {
+    /// Message header; `total_size` is the payload length
+    pub header: MessageHeader,
+    /// The payload (at most `MAX_BUFFERED_PAYLOAD` bytes)
+    pub payload: Vec<u8>,
+}
+
+impl BufferedMessage {
+    /// A message carrying `payload`, which must fit the buffered tier.
+    pub fn new(capability: u64, opcode: u32, payload: Vec<u8>) -> Option<Self> {
+        (payload.len() <= MAX_BUFFERED_PAYLOAD).then(|| Self {
+            header: MessageHeader::new(capability, opcode, payload.len() as u64),
+            payload,
+        })
+    }
+}
+
+/// Unified message type for all three size tiers
+#[derive(Debug, Clone)]
 pub enum Message {
     /// Small register-based message
     Small(SmallMessage),
     /// Large memory-based message
     Large(LargeMessage),
+    /// Medium message copied through a kernel buffer
+    Buffered(BufferedMessage),
 }
 
 impl Message {
@@ -191,6 +227,7 @@ impl Message {
         match self {
             Message::Small(msg) => msg.capability,
             Message::Large(msg) => msg.header.capability,
+            Message::Buffered(msg) => msg.header.capability,
         }
     }
 
@@ -199,6 +236,7 @@ impl Message {
         match self {
             Message::Small(msg) => msg.opcode,
             Message::Large(msg) => msg.header.opcode,
+            Message::Buffered(msg) => msg.header.opcode,
         }
     }
 
@@ -207,6 +245,7 @@ impl Message {
         match self {
             Message::Small(msg) => msg.flags,
             Message::Large(msg) => msg.header.flags,
+            Message::Buffered(msg) => msg.header.flags,
         }
     }
 
@@ -215,6 +254,7 @@ impl Message {
         match self {
             Message::Small(msg) => msg.flags = flags,
             Message::Large(msg) => msg.header.flags = flags,
+            Message::Buffered(msg) => msg.header.flags = flags,
         }
     }
 }
@@ -260,6 +300,26 @@ pub mod cache_policy {
 #[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use super::*;
+
+    /// IPC-ARCH-02: the buffered tier holds up to MAX_BUFFERED_PAYLOAD
+    /// bytes and carries them by value through the kernel.
+    #[test]
+    fn test_buffered_tier_bounds() {
+        let fits = BufferedMessage::new(7, 3, alloc::vec![0xAB; MAX_BUFFERED_PAYLOAD]).unwrap();
+        assert_eq!(fits.header.total_size, MAX_BUFFERED_PAYLOAD as u64);
+        assert!(BufferedMessage::new(7, 3, alloc::vec![0; MAX_BUFFERED_PAYLOAD + 1]).is_none());
+
+        let mut msg = Message::Buffered(fits);
+        assert_eq!(msg.capability(), 7);
+        assert_eq!(msg.opcode(), 3);
+        msg.set_flags(flags::IS_REPLY);
+        assert_eq!(msg.flags(), flags::IS_REPLY);
+        let copy = msg.clone();
+        match copy {
+            Message::Buffered(b) => assert!(b.payload.iter().all(|&x| x == 0xAB)),
+            _ => panic!("tier changed"),
+        }
+    }
 
     #[test]
     fn test_small_message_size() {

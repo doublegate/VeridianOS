@@ -285,7 +285,7 @@ impl MessageBatch {
     /// Create a new batch
     pub fn new() -> Self {
         Self {
-            messages: [None; 16],
+            messages: core::array::from_fn(|_| None),
             count: 0,
         }
     }
@@ -306,10 +306,8 @@ impl MessageBatch {
     where
         F: FnMut(Message),
     {
-        for i in 0..self.count {
-            if let Some(msg) = self.messages[i] {
-                f(msg);
-            }
+        for msg in self.messages.into_iter().take(self.count).flatten() {
+            f(msg);
         }
     }
 }
@@ -422,8 +420,8 @@ mod tests {
         let msg = Message::small(0x1234, 42);
 
         // Fill channel
-        assert!(channel.send_async(msg).is_ok());
-        assert!(channel.send_async(msg).is_ok());
+        assert!(channel.send_async(msg.clone()).is_ok());
+        assert!(channel.send_async(msg.clone()).is_ok());
 
         // Should be full
         assert_eq!(channel.send_async(msg), Err(IpcError::ChannelFull));

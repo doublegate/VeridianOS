@@ -1199,7 +1199,7 @@ fn handle_syscall(
     match syscall {
         // IPC system calls
         Syscall::IpcSend => sys_ipc_send(arg1, arg2, arg3, arg4),
-        Syscall::IpcReceive => sys_ipc_receive(arg1, arg2),
+        Syscall::IpcReceive => sys_ipc_receive(arg1, arg2, arg3),
         Syscall::IpcCall => sys_ipc_call(arg1, arg2, arg3, arg4, arg5),
         Syscall::IpcReply => sys_ipc_reply(arg1, arg2, arg3),
         Syscall::IpcCreateEndpoint => sys_ipc_create_endpoint(arg1),
@@ -2476,6 +2476,97 @@ fn write_scm_rights(
     true
 }
 
+/// Build a message from `len` bytes of user memory at `ptr`, choosing the
+/// size tier (IPC-ARCH-02): up to `SmallMessage` size by value (a short
+/// message is zero-padded), up to `MAX_BUFFERED_PAYLOAD` copied into a
+/// kernel buffer, larger refused (use a shared region). The payload is
+/// copied now, from the sender's address space; the old large path kept
+/// the sender's virtual address and the receiver later copied from that
+/// address in *its own* address space, into a buffer validated only for a
+/// `SmallMessage`.
+///
+/// `capability` replaces the capability field of a small message when given
+/// (send/call carry the validated capability, never one the sender wrote).
+fn message_from_user(
+    capability: Option<u64>,
+    ptr: usize,
+    len: usize,
+) -> Result<Message, SyscallError> {
+    use crate::ipc::message::{BufferedMessage, MAX_BUFFERED_PAYLOAD};
+
+    const SMALL: usize = core::mem::size_of::<SmallMessage>();
+    if len == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if len <= SMALL {
+        let mut bytes = [0u8; SMALL];
+        userspace::read_user_bytes(ptr, &mut bytes[..len])?;
+        // SAFETY: SmallMessage is repr(C) plain data (u64, u32, u32,
+        // [u64; 4]) without padding, so every byte pattern is a valid value;
+        // read_unaligned imposes no alignment on the stack buffer.
+        let mut msg: SmallMessage =
+            unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const SmallMessage) };
+        if let Some(cap) = capability {
+            msg.capability = cap;
+        }
+        return Ok(Message::Small(msg));
+    }
+    if len > MAX_BUFFERED_PAYLOAD {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let mut payload = alloc::vec![0u8; len];
+    userspace::read_user_bytes(ptr, &mut payload)?;
+    BufferedMessage::new(capability.unwrap_or(0), 0, payload)
+        .map(Message::Buffered)
+        .ok_or(SyscallError::InvalidArgument)
+}
+
+/// Bytes of a `repr(C)` plain-data value.
+fn pod_bytes<T: Copy>(value: &T) -> &[u8] {
+    // SAFETY: callers pass SmallMessage or MessageHeader, repr(C) structs of
+    // integers without padding, so all size_of::<T>() bytes are initialized.
+    unsafe {
+        core::slice::from_raw_parts(value as *const T as *const u8, core::mem::size_of::<T>())
+    }
+}
+
+/// Copy a received message into the user buffer at `buf` holding `cap`
+/// bytes, through the validated user-copy routines. Returns the message's
+/// full length; a buffered payload longer than the buffer is truncated
+/// (the caller sees the length it missed, as with MSG_TRUNC). A large-
+/// message descriptor's address belongs to the sender and is never read.
+fn message_to_user(msg: &Message, buf: usize, cap: usize) -> SyscallResult {
+    use crate::ipc::message::MessageHeader;
+
+    const HEADER: usize = core::mem::size_of::<MessageHeader>();
+    match msg {
+        Message::Small(small) => {
+            let bytes = pod_bytes(small);
+            if cap < bytes.len() {
+                return Err(SyscallError::InvalidArgument);
+            }
+            userspace::write_user_bytes(buf, bytes)?;
+            Ok(bytes.len())
+        }
+        Message::Buffered(m) => {
+            if cap < HEADER {
+                return Err(SyscallError::InvalidArgument);
+            }
+            userspace::write_user_bytes(buf, pod_bytes(&m.header))?;
+            let fits = m.payload.len().min(cap - HEADER);
+            userspace::write_user_bytes(buf + HEADER, &m.payload[..fits])?;
+            Ok(HEADER + m.payload.len())
+        }
+        Message::Large(m) => {
+            if cap < HEADER {
+                return Err(SyscallError::InvalidArgument);
+            }
+            userspace::write_user_bytes(buf, pod_bytes(&m.header))?;
+            Ok(HEADER)
+        }
+    }
+}
+
 /// IPC send system call
 ///
 /// # Arguments
@@ -2515,23 +2606,9 @@ fn sys_ipc_send(
     };
     drop(cap_space);
 
-    // Check if this is a small message (fast path)
-    let message = if msg_size <= core::mem::size_of::<SmallMessage>() {
-        let mut small_msg: SmallMessage = userspace::read_user(msg_ptr)?;
-        // The message carries the capability that was actually validated,
-        // never one the sender wrote into the struct.
-        small_msg.capability = capability as u64;
-        Message::Small(small_msg)
-    } else {
-        // Large message path: the payload stays in user memory and is
-        // described by a region for later zero-copy transfer.
-        let large_msg = crate::ipc::LargeMessage {
-            header: crate::ipc::message::MessageHeader::new(capability as u64, 0, msg_size as u64),
-            memory_region: crate::ipc::message::MemoryRegion::new(msg_ptr as u64, msg_size as u64),
-            inline_data: [0; crate::ipc::message::SMALL_MESSAGE_MAX_SIZE],
-        };
-        Message::Large(large_msg)
-    };
+    // The message carries the capability that was actually validated,
+    // never one the sender wrote into the struct.
+    let message = message_from_user(Some(capability as u64), msg_ptr, msg_size)?;
 
     // Perform the actual send using the IPC sync module
     match sync_send(message, endpoint_id) {
@@ -2545,9 +2622,16 @@ fn sys_ipc_send(
 /// # Arguments
 /// - endpoint: Endpoint to receive from
 /// - buffer: Buffer to receive message into
-fn sys_ipc_receive(endpoint: usize, buffer: usize) -> SyscallResult {
-    // Validate receive buffer can hold at least a SmallMessage
-    validate_user_buffer(buffer, core::mem::size_of::<SmallMessage>())?;
+/// - buffer_len: Its size in bytes (0 means `size_of::<SmallMessage>()`)
+///
+/// Returns the message length; see `message_to_user` for truncation.
+fn sys_ipc_receive(endpoint: usize, buffer: usize, buffer_len: usize) -> SyscallResult {
+    let buffer_len = if buffer_len == 0 {
+        core::mem::size_of::<SmallMessage>()
+    } else {
+        buffer_len
+    };
+    validate_user_buffer(buffer, buffer_len)?;
 
     // Get current process's capability space
     let current_process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
@@ -2562,57 +2646,10 @@ fn sys_ipc_receive(endpoint: usize, buffer: usize) -> SyscallResult {
     if let Err(e) = crate::cap::ipc_integration::check_receive_permission(cap_token, &cap_space) {
         return Err(e.into());
     }
+    drop(cap_space);
 
-    // Receive message using IPC sync module
-    match sync_receive(endpoint as u64) {
-        Ok(message) => {
-            // Copy message to user buffer
-            // SAFETY: buffer was validated as non-zero above. We write the
-            // received message to the user-space buffer. For SmallMessage,
-            // we write the struct directly. For LargeMessage, we copy the
-            // header and data. The caller is responsible for providing a
-            // buffer large enough to hold the message.
-            unsafe {
-                match message {
-                    Message::Small(small_msg) => {
-                        // Copy small message to buffer
-                        let dst = buffer as *mut SmallMessage;
-                        *dst = small_msg;
-                        Ok(core::mem::size_of::<SmallMessage>())
-                    }
-                    Message::Large(large_msg) => {
-                        // For large messages, copy the header and setup shared memory
-                        // In a real implementation, this would handle memory mapping
-                        let header_size =
-                            core::mem::size_of::<crate::ipc::message::MessageHeader>();
-                        let dst = buffer as *mut u8;
-
-                        // Copy header
-                        core::ptr::copy_nonoverlapping(
-                            &large_msg.header as *const _ as *const u8,
-                            dst,
-                            header_size,
-                        );
-
-                        // Copy data if it fits
-                        if large_msg.memory_region.size > 0
-                            && large_msg.memory_region.base_addr != 0
-                        {
-                            let data_dst = dst.add(header_size);
-                            core::ptr::copy_nonoverlapping(
-                                large_msg.memory_region.base_addr as *const u8,
-                                data_dst,
-                                large_msg.memory_region.size as usize,
-                            );
-                        }
-
-                        Ok(header_size + large_msg.memory_region.size as usize)
-                    }
-                }
-            }
-        }
-        Err(e) => Err(e.into()),
-    }
+    let message = sync_receive(endpoint as u64).map_err(SyscallError::from)?;
+    message_to_user(&message, buffer, buffer_len)
 }
 
 /// IPC call (send and wait for reply)
@@ -2623,117 +2660,19 @@ fn sys_ipc_call(
     recv_buf: usize,
     recv_size: usize,
 ) -> SyscallResult {
-    // Validate send and receive buffers are in user space
-    if send_size == 0 || recv_size == 0 {
+    if recv_size == 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    validate_user_buffer(send_msg, send_size)?;
     validate_user_buffer(recv_buf, recv_size)?;
 
-    // Create message from user buffer
-    let message = if send_size <= core::mem::size_of::<SmallMessage>() {
-        // SAFETY: send_msg was validated as non-zero above and send_size
-        // fits within SmallMessage. The pointer cast reads the struct by
-        // value. SmallMessage is Copy and repr(C).
-        unsafe {
-            let small_msg = *(send_msg as *const SmallMessage);
-            Message::Small(small_msg)
-        }
-    } else {
-        // Create large message
-        let large_msg = crate::ipc::LargeMessage {
-            header: crate::ipc::message::MessageHeader::new(capability as u64, 0, send_size as u64),
-            memory_region: crate::ipc::message::MemoryRegion::new(
-                send_msg as u64,
-                send_size as u64,
-            ),
-            inline_data: [0; crate::ipc::message::SMALL_MESSAGE_MAX_SIZE],
-        };
-        Message::Large(large_msg)
-    };
-
-    // Perform synchronous call
-    match sync_call(message, capability as u64) {
-        Ok(reply) => {
-            // Copy reply to receive buffer
-            // SAFETY: recv_buf was validated as non-zero and recv_size > 0
-            // above. We write the reply message to the user buffer, checking
-            // that recv_size is large enough for SmallMessage or the header.
-            // The caller must provide adequately sized buffers.
-            unsafe {
-                match reply {
-                    Message::Small(small_msg) => {
-                        if recv_size >= core::mem::size_of::<SmallMessage>() {
-                            let dst = recv_buf as *mut SmallMessage;
-                            *dst = small_msg;
-                            Ok(core::mem::size_of::<SmallMessage>())
-                        } else {
-                            Err(SyscallError::InvalidArgument)
-                        }
-                    }
-                    Message::Large(large_msg) => {
-                        let header_size =
-                            core::mem::size_of::<crate::ipc::message::MessageHeader>();
-                        if recv_size >= header_size {
-                            let dst = recv_buf as *mut u8;
-
-                            // Copy header
-                            core::ptr::copy_nonoverlapping(
-                                &large_msg.header as *const _ as *const u8,
-                                dst,
-                                header_size,
-                            );
-
-                            // Copy data
-                            let data_to_copy = core::cmp::min(
-                                large_msg.memory_region.size as usize,
-                                recv_size - header_size,
-                            );
-                            if data_to_copy > 0 && large_msg.memory_region.base_addr != 0 {
-                                let data_dst = dst.add(header_size);
-                                core::ptr::copy_nonoverlapping(
-                                    large_msg.memory_region.base_addr as *const u8,
-                                    data_dst,
-                                    data_to_copy,
-                                );
-                            }
-
-                            Ok(header_size + data_to_copy)
-                        } else {
-                            Err(SyscallError::InvalidArgument)
-                        }
-                    }
-                }
-            }
-        }
-        Err(e) => Err(e.into()),
-    }
+    let message = message_from_user(Some(capability as u64), send_msg, send_size)?;
+    let reply = sync_call(message, capability as u64).map_err(SyscallError::from)?;
+    message_to_user(&reply, recv_buf, recv_size)
 }
 
 /// IPC reply to a previous call
 fn sys_ipc_reply(caller: usize, msg_ptr: usize, msg_size: usize) -> SyscallResult {
-    // Validate reply message buffer
-    if msg_size == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
-    validate_user_buffer(msg_ptr, msg_size)?;
-
-    // Create reply message
-    let message = if msg_size <= core::mem::size_of::<SmallMessage>() {
-        // SAFETY: msg_ptr was validated as non-zero above and msg_size fits
-        // within SmallMessage. The pointer cast reads a Copy/repr(C) struct.
-        unsafe {
-            let small_msg = *(msg_ptr as *const SmallMessage);
-            Message::Small(small_msg)
-        }
-    } else {
-        let large_msg = crate::ipc::LargeMessage {
-            header: crate::ipc::message::MessageHeader::new(0, 0, msg_size as u64),
-            memory_region: crate::ipc::message::MemoryRegion::new(msg_ptr as u64, msg_size as u64),
-            inline_data: [0; crate::ipc::message::SMALL_MESSAGE_MAX_SIZE],
-        };
-        Message::Large(large_msg)
-    };
+    let message = message_from_user(None, msg_ptr, msg_size)?;
 
     // Send reply
     match sync_reply(message, caller as u64) {
@@ -2778,132 +2717,152 @@ fn sys_ipc_bind_endpoint(endpoint_id: usize, name_ptr: usize) -> SyscallResult {
     }
 }
 
+/// Largest IPC shared region (physically contiguous).
+const MAX_SHARED_REGION_BYTES: usize = 64 * 1024 * 1024;
+
 /// Share memory region via IPC
+///
+/// Creates a shared region of `size` bytes, initialized from the caller's
+/// buffer at `addr` (or zeroed when `addr` is 0), and returns a memory
+/// capability for it. The caller and any process it passes the capability
+/// to map the region with `sys_ipc_map_memory` and see the same frames.
 fn sys_ipc_share_memory(
     addr: usize,
     size: usize,
     permissions: usize,
     _target_pid: usize,
 ) -> SyscallResult {
-    use crate::ipc::shared_memory::{Permissions, SharedRegion};
+    use crate::{
+        cap::memory_integration::MemoryRights,
+        ipc::shared_memory::{self, Permissions, SharedRegion},
+    };
 
-    // Validate the shared region address is in user space
-    if size == 0 {
+    if size == 0 || size > MAX_SHARED_REGION_BYTES {
         return Err(SyscallError::InvalidArgument);
     }
-    validate_user_buffer(addr, size)?;
+    if addr != 0 {
+        validate_user_buffer(addr, size)?;
+    }
 
-    // Get current process and capability space
     let current_process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-    let cap_space = current_process.capability_space.lock();
 
     // Convert permissions to capability rights
-    let mut rights = crate::cap::memory_integration::MemoryRights::MAP
-        | crate::cap::memory_integration::MemoryRights::SHARE;
+    let mut rights = MemoryRights::MAP | MemoryRights::SHARE;
     if permissions & 0b001 != 0 {
-        rights |= crate::cap::memory_integration::MemoryRights::READ;
+        rights |= MemoryRights::READ;
     }
     if permissions & 0b010 != 0 {
-        rights |= crate::cap::memory_integration::MemoryRights::WRITE;
+        rights |= MemoryRights::WRITE;
     }
     if permissions & 0b100 != 0 {
-        rights |= crate::cap::memory_integration::MemoryRights::EXECUTE;
+        rights |= MemoryRights::EXECUTE;
     }
 
-    // Convert permissions bits to enum
     let perms = match permissions & 0b111 {
-        0b001 => Permissions::Read,
         0b011 => Permissions::Write,
         0b100 => Permissions::Execute,
         0b101 => Permissions::ReadExecute,
         0b111 => Permissions::ReadWriteExecute,
-        _ => Permissions::Read, // Default to read-only
+        _ => Permissions::Read,
     };
 
-    // Create shared region owned by current process
-    let region = match SharedRegion::new(current_process.pid, size, perms) {
-        Ok(region) => region,
-        Err(_) => return Err(SyscallError::OutOfMemory),
-    };
+    let region = SharedRegion::new(current_process.pid, size, perms)
+        .map_err(|_| SyscallError::OutOfMemory)?;
 
-    // Use the region's actual physical base address for the capability
-    let phys_addr = region.physical_base();
-    let attributes = crate::cap::object::MemoryAttributes::normal();
+    // Initial contents, copied a page at a time.
+    if addr != 0 {
+        let mut chunk = [0u8; 4096];
+        let mut offset = 0;
+        while offset < size {
+            let len = (size - offset).min(chunk.len());
+            userspace::read_user_bytes(addr + offset, &mut chunk[..len])?;
+            region
+                .write_at(offset, &chunk[..len])
+                .map_err(|_| SyscallError::InvalidArgument)?;
+            offset += len;
+        }
+    }
 
+    let base = region.physical_base().as_usize();
+    let region_size = region.size();
+    let _region = shared_memory::register_region(region);
+
+    let cap_space = current_process.capability_space.lock();
     match crate::cap::memory_integration::create_memory_capability(
-        phys_addr.as_usize(),
-        size,
-        attributes,
+        base,
+        region_size,
+        crate::cap::object::MemoryAttributes::normal(),
         rights,
         &cap_space,
     ) {
         Ok(cap) => Ok(cap.to_u64() as usize),
-        Err(_) => Err(SyscallError::OutOfMemory),
+        Err(_) => {
+            // Nobody can reach the region: drop it (frees its frames).
+            let _ = shared_memory::unregister_region(base as u64);
+            Err(SyscallError::OutOfMemory)
+        }
     }
 }
 
 /// Map shared memory from another process
+///
+/// Maps the shared region named by `capability` -- its own frames, so every
+/// process mapping it sees the same memory (IPC-INC-02) -- at `addr_hint`
+/// (page-aligned free user space) or, when 0, where the kernel chooses.
+/// Writable or executable mappings need the WRITE or EXECUTE right.
 fn sys_ipc_map_memory(capability: usize, addr_hint: usize, flags: usize) -> SyscallResult {
-    // Get current process and capability space
-    let current_process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-    let cap_space = current_process.capability_space.lock();
+    use crate::{
+        cap::memory_integration::MemoryRights,
+        ipc::shared_memory::{self, Permissions},
+    };
 
-    // Convert capability to token
+    let current_process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
     let cap_token = crate::cap::CapabilityToken::from_u64(capability as u64);
 
-    // Check map permission
-    if let Err(e) = crate::cap::memory_integration::check_map_permission(cap_token, &cap_space) {
-        return Err(match e {
-            crate::cap::CapError::InvalidCapability => SyscallError::InvalidArgument,
-            crate::cap::CapError::InsufficientRights => SyscallError::PermissionDenied,
-            _ => SyscallError::InvalidArgument,
-        });
-    }
+    let (object_ref, rights) = {
+        let cap_space = current_process.capability_space.lock();
+        if let Err(e) = crate::cap::memory_integration::check_map_permission(cap_token, &cap_space)
+        {
+            return Err(match e {
+                crate::cap::CapError::InvalidCapability => SyscallError::InvalidArgument,
+                crate::cap::CapError::InsufficientRights => SyscallError::PermissionDenied,
+                _ => SyscallError::InvalidArgument,
+            });
+        }
+        cap_space
+            .lookup_entry(cap_token)
+            .ok_or(SyscallError::InvalidArgument)?
+    };
 
-    // Convert flags to page flags
-    let mut page_flags = crate::mm::PageFlags::PRESENT | crate::mm::PageFlags::USER;
-    if flags & 0b010 != 0 {
-        page_flags |= crate::mm::PageFlags::WRITABLE;
-    }
-    if flags & 0b100 == 0 {
-        // If execute bit is not set, mark as no-execute
-        page_flags |= crate::mm::PageFlags::NO_EXECUTE;
-    }
-
-    // Look up the capability's backing object to get the physical region info
-    let (object_ref, _cap_rights) = cap_space
-        .lookup_entry(cap_token)
-        .ok_or(SyscallError::InvalidArgument)?;
-
-    let (base_phys, region_size) = match object_ref {
-        crate::cap::object::ObjectRef::Memory { base, size, .. } => (base, size),
+    let base_phys = match object_ref {
+        crate::cap::object::ObjectRef::Memory { base, .. } => base,
         _ => return Err(SyscallError::InvalidArgument),
     };
 
-    // Suppress unused-variable warning for page_flags (used by MappingType::Shared
-    // defaults)
-    let _ = page_flags;
-
-    // Determine the virtual address to map at
-    let vaddr = if addr_hint == 0 {
-        // Allocate in the user mmap region (above heap, below stack)
-        // Use a simple deterministic address based on physical address
-        0x4000_0000usize + (base_phys & 0x0FFF_FFFF)
-    } else {
-        addr_hint
+    let write = flags & 0b010 != 0;
+    let exec = flags & 0b100 != 0;
+    if (write && !rights.contains(MemoryRights::WRITE))
+        || (exec && !rights.contains(MemoryRights::EXECUTE))
+    {
+        return Err(SyscallError::PermissionDenied);
+    }
+    let perms = match (write, exec) {
+        (true, true) => Permissions::ReadWriteExecute,
+        (true, false) => Permissions::Write,
+        (false, true) => Permissions::ReadExecute,
+        (false, false) => Permissions::Read,
     };
 
-    // Map the physical pages into the process's address space
-    let memory_space = current_process.memory_space.lock();
-    if let Err(_e) = memory_space.map_region(
-        crate::mm::VirtualAddress::new(vaddr as u64),
-        region_size,
-        crate::mm::vas::MappingType::Shared,
-    ) {
-        return Err(SyscallError::OutOfMemory);
-    }
+    // Only shared regions can be mapped this way; this used to map fresh
+    // frames for any memory capability, at an unvalidated address.
+    let region =
+        shared_memory::lookup_region(base_phys as u64).ok_or(SyscallError::InvalidArgument)?;
+    let at = (addr_hint != 0).then(|| crate::mm::VirtualAddress::new(addr_hint as u64));
+    let vaddr = region
+        .map(current_process.pid, at, perms)
+        .map_err(|_| SyscallError::InvalidArgument)?;
 
-    Ok(vaddr)
+    Ok(vaddr.as_usize())
 }
 
 impl TryFrom<usize> for Syscall {

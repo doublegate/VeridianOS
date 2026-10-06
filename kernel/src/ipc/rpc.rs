@@ -143,7 +143,7 @@ impl RpcClient {
 
                     Ok(result)
                 }
-                Message::Large(_) => {
+                Message::Large(_) | Message::Buffered(_) => {
                     // For now, reject large responses in small calls
                     Err(RpcError {
                         request_id,
@@ -278,7 +278,7 @@ impl RpcServer {
 
                 Ok(())
             }
-            Message::Large(_) => {
+            Message::Large(_) | Message::Buffered(_) => {
                 // Large message RPC not yet implemented
                 Err(RpcError {
                     request_id: 0,
