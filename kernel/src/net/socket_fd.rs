@@ -150,3 +150,49 @@ impl VfsNode for SocketNode {
         Some(self)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec;
+
+    use super::*;
+    use crate::{
+        fs::file::{File, OpenFlags},
+        net::unix_socket::{self, ScmRights, UnixSocketType},
+    };
+
+    fn socket_file(id: u64) -> Arc<File> {
+        let node: Arc<dyn VfsNode> = Arc::new(SocketNode::new(SocketHandle::Unix(id)));
+        Arc::new(File::new(node, OpenFlags::read_write()))
+    }
+
+    #[test]
+    fn closing_socket_with_queued_socket_file_does_not_deadlock() {
+        let (a, b) = unix_socket::socketpair(UnixSocketType::Stream, 1).unwrap();
+        let (c, d) = unix_socket::socketpair(UnixSocketType::Stream, 1).unwrap();
+        let rights = ScmRights {
+            files: vec![socket_file(c)],
+        };
+        unix_socket::socket_send(a, b"x", Some(rights)).unwrap();
+        // The queued file is the last reference to `c`. Closing `b` drops
+        // it, and dropping it closes `c` -- which takes the socket table
+        // lock that socket_close used to still be holding.
+        unix_socket::socket_close(b).unwrap();
+        assert!(!unix_socket::socket_exists(c));
+        unix_socket::socket_close(a).unwrap();
+        unix_socket::socket_close(d).unwrap();
+    }
+
+    #[test]
+    fn empty_messages_count_against_the_buffer() {
+        let (a, b) = unix_socket::socketpair(UnixSocketType::Stream, 1).unwrap();
+        let mut sent = 0usize;
+        while unix_socket::socket_send(a, b"", None).is_ok() {
+            sent += 1;
+            assert!(sent < 1_000_000, "zero-length messages are not charged");
+        }
+        assert!(sent > 0);
+        unix_socket::socket_close(a).unwrap();
+        unix_socket::socket_close(b).unwrap();
+    }
+}

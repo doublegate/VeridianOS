@@ -88,6 +88,11 @@ impl core::fmt::Debug for ScmRights {
     }
 }
 
+/// Receive-buffer charge per message, on top of its data.
+const MSG_OVERHEAD: usize = 64;
+/// Receive-buffer charge per file carried by a message.
+const FILE_CHARGE: usize = 256;
+
 /// A message in the Unix socket buffer.
 #[derive(Debug, Clone)]
 pub struct UnixMessage {
@@ -97,6 +102,14 @@ pub struct UnixMessage {
     pub rights: Option<ScmRights>,
     /// Sender socket ID (for datagram mode).
     pub sender: u64,
+}
+
+impl UnixMessage {
+    /// What this message counts against the receiver's buffer limit.
+    pub fn charge(&self) -> usize {
+        let files = self.rights.as_ref().map_or(0, |r| r.files.len());
+        self.data.len() + MSG_OVERHEAD + files * FILE_CHARGE
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -385,19 +398,23 @@ pub fn socket_send(socket_id: u64, data: &[u8], rights: Option<ScmRights>) -> Ke
         });
     }
 
-    if peer.recv_buffer_used + data.len() > peer.recv_buffer_max {
-        return Err(KernelError::ResourceExhausted {
-            resource: "recv_buffer",
-        });
-    }
-
     let msg = UnixMessage {
         data: data.to_vec(),
         rights,
         sender: socket_id,
     };
+    // Charge the message, not just its bytes: otherwise zero-length
+    // messages carrying files could queue without limit.
+    let charge = msg.charge();
+    if peer.recv_buffer_used + charge > peer.recv_buffer_max {
+        // `msg` (and any files in it) is dropped after the lock below.
+        drop(sockets);
+        return Err(KernelError::ResourceExhausted {
+            resource: "recv_buffer",
+        });
+    }
     let len = data.len();
-    peer.recv_buffer_used += len;
+    peer.recv_buffer_used += charge;
     peer.recv_buffer.push_back(msg);
 
     Ok(len)
@@ -424,8 +441,10 @@ pub fn socket_recv(socket_id: u64, buf: &mut [u8]) -> KernelResult<(usize, Optio
 
     let copy_len = buf.len().min(msg.data.len());
     buf[..copy_len].copy_from_slice(&msg.data[..copy_len]);
-    socket.recv_buffer_used = socket.recv_buffer_used.saturating_sub(msg.data.len());
+    socket.recv_buffer_used = socket.recv_buffer_used.saturating_sub(msg.charge());
 
+    // The files are returned to the caller, so they are released (if
+    // unused) after this lock is dropped.
     Ok((copy_len, msg.rights))
 }
 
@@ -455,7 +474,8 @@ pub fn socketpair(socket_type: UnixSocketType, owner_pid: u64) -> KernelResult<(
 pub fn socket_close(socket_id: u64) -> KernelResult<()> {
     let mut sockets = UNIX_SOCKETS.lock();
 
-    if let Some(socket) = sockets.remove(&socket_id) {
+    let removed = sockets.remove(&socket_id);
+    if let Some(socket) = removed.as_ref() {
         // Remove path binding if any.
         if let Some(ref path) = socket.path {
             PATH_REGISTRY.lock().remove(path);
@@ -470,6 +490,11 @@ pub fn socket_close(socket_id: u64) -> KernelResult<()> {
             }
         }
     }
+    // Drop the socket -- and the files queued in its buffer -- only after
+    // the lock is released: the last reference to a queued socket file
+    // closes that socket, which takes this lock again.
+    drop(sockets);
+    drop(removed);
 
     Ok(())
 }
@@ -497,19 +522,19 @@ pub fn socket_sendto(socket_id: u64, data: &[u8], dest_path: &str) -> KernelResu
         id: dest_id,
     })?;
 
-    if dest.recv_buffer_used + data.len() > dest.recv_buffer_max {
-        return Err(KernelError::ResourceExhausted {
-            resource: "recv_buffer",
-        });
-    }
-
     let msg = UnixMessage {
         data: data.to_vec(),
         rights: None,
         sender: socket_id,
     };
+    let charge = msg.charge();
+    if dest.recv_buffer_used + charge > dest.recv_buffer_max {
+        return Err(KernelError::ResourceExhausted {
+            resource: "recv_buffer",
+        });
+    }
     let len = data.len();
-    dest.recv_buffer_used += len;
+    dest.recv_buffer_used += charge;
     dest.recv_buffer.push_back(msg);
 
     Ok(len)

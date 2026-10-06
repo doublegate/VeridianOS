@@ -2279,6 +2279,19 @@ fn files_for_fds(fds: &[u32]) -> Result<crate::net::unix_socket::ScmRights, Sysc
                 .ok_or(SyscallError::BadFileDescriptor)
         })
         .collect::<Result<alloc::vec::Vec<_>, _>>()?;
+    // A Unix socket queued (directly or via other sockets) in its own
+    // receive buffer keeps itself alive after every fd is closed -- the
+    // cycle Linux needs a garbage collector for. Without one, passing Unix
+    // sockets is refused, which rules such cycles out.
+    let passes_unix_socket = files.iter().any(|f| {
+        f.node
+            .as_any()
+            .and_then(|a| a.downcast_ref::<SocketNode>())
+            .is_some_and(|s| matches!(s.handle(), SocketHandle::Unix(_)))
+    });
+    if passes_unix_socket {
+        return Err(SyscallError::InvalidArgument);
+    }
     Ok(crate::net::unix_socket::ScmRights { files })
 }
 
