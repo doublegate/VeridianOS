@@ -75,19 +75,11 @@ impl RevocationList {
         self.epoch.load(Ordering::Acquire)
     }
 
-    /// Clear old revocations (garbage collection)
-    #[cfg(feature = "alloc")]
-    pub fn cleanup(&self, keep_recent: usize) {
-        let mut revoked = self.revoked.write();
-        if revoked.len() > keep_recent * 2 {
-            // Keep only the most recent revocations
-            let to_remove = revoked.len() - keep_recent;
-            let remove_list: Vec<_> = revoked.iter().take(to_remove).cloned().collect();
-            for item in remove_list {
-                revoked.remove(&item);
-            }
-        }
-    }
+    // There is deliberately no cleanup()/garbage collection. Dropping any
+    // entry makes that capability valid again for whoever still holds the
+    // token; the old cleanup() dropped the lowest ids first, so it
+    // resurrected long-lived low-numbered (system) capabilities (CAP-INC-01).
+    // An entry may only go once the capability is gone from every space.
 }
 
 /// Global revocation list

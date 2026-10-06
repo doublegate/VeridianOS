@@ -27,7 +27,8 @@ const L2_SIZE: usize = 256;
 
 /// Type alias for L2 tables to reduce complexity
 #[cfg(feature = "alloc")]
-type L2Tables = BTreeMap<u16, Box<[RwLock<Option<CapabilityEntry>>; L2_SIZE]>>;
+// Keyed by the full `id >> 8`: a u16 key aliased ids 2^24 apart (N-04).
+type L2Tables = BTreeMap<u64, Box<[RwLock<Option<CapabilityEntry>>; L2_SIZE]>>;
 
 /// A single capability entry in the capability space
 pub struct CapabilityEntry {
@@ -160,7 +161,7 @@ impl CapabilitySpace {
         // Slow path: check L2 tables
         #[cfg(feature = "alloc")]
         {
-            let l1_index = (cap_id >> 8) as u16;
+            let l1_index = (cap_id >> 8) as u64;
             let l2_index = cap_id & 0xFF;
 
             let l2_tables = self.l2_tables.read();
@@ -214,7 +215,7 @@ impl CapabilitySpace {
         // Slow path: insert into L2 table
         #[cfg(feature = "alloc")]
         {
-            let l1_index = (cap_id >> 8) as u16;
+            let l1_index = (cap_id >> 8) as u64;
             let l2_index = cap_id & 0xFF;
 
             let mut l2_tables = self.l2_tables.write();
@@ -250,12 +251,13 @@ impl CapabilitySpace {
         // Fast path: remove from L1 table
         if cap_id < L1_SIZE {
             let mut entry = self.l1_table[cap_id].write();
-            if let Some(cap_entry) = entry.take() {
-                if cap_entry.capability == cap {
-                    self.used.fetch_sub(1, Ordering::Relaxed);
-                    self.stats.total_caps.fetch_sub(1, Ordering::Relaxed);
-                    return Some(cap_entry.object);
-                }
+            // Only the exact token (same generation) removes the entry; a
+            // stale token must leave the live capability alone (N-04).
+            if entry.as_ref().is_some_and(|e| e.capability == cap) {
+                let cap_entry = entry.take()?;
+                self.used.fetch_sub(1, Ordering::Relaxed);
+                self.stats.total_caps.fetch_sub(1, Ordering::Relaxed);
+                return Some(cap_entry.object);
             }
             return None;
         }
@@ -263,18 +265,17 @@ impl CapabilitySpace {
         // Slow path: remove from L2 table
         #[cfg(feature = "alloc")]
         {
-            let l1_index = (cap_id >> 8) as u16;
+            let l1_index = (cap_id >> 8) as u64;
             let l2_index = cap_id & 0xFF;
 
             let l2_tables = self.l2_tables.read();
             if let Some(l2_table) = l2_tables.get(&l1_index) {
                 let mut entry = l2_table[l2_index].write();
-                if let Some(cap_entry) = entry.take() {
-                    if cap_entry.capability == cap {
-                        self.used.fetch_sub(1, Ordering::Relaxed);
-                        self.stats.total_caps.fetch_sub(1, Ordering::Relaxed);
-                        return Some(cap_entry.object);
-                    }
+                if entry.as_ref().is_some_and(|e| e.capability == cap) {
+                    let cap_entry = entry.take()?;
+                    self.used.fetch_sub(1, Ordering::Relaxed);
+                    self.stats.total_caps.fetch_sub(1, Ordering::Relaxed);
+                    return Some(cap_entry.object);
                 }
             }
         }
@@ -404,10 +405,11 @@ impl CapabilitySpace {
         rights: Rights,
         object: ObjectRef,
     ) -> Result<CapabilityId, KernelError> {
-        // Simple ID allocation - in real implementation this would use the global
-        // manager
-        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let id = super::manager::cap_manager().allocate_id().map_err(|_| {
+            KernelError::ResourceExhausted {
+                resource: "capability IDs",
+            }
+        })?;
 
         if id > 0xFFFF_FFFF_FFFF {
             return Err(KernelError::ResourceExhausted {
@@ -469,7 +471,7 @@ impl CapabilitySpace {
         // Slow path: check L2 tables
         #[cfg(feature = "alloc")]
         {
-            let l1_index = (cap_id >> 8) as u16;
+            let l1_index = (cap_id >> 8) as u64;
             let l2_index = cap_id & 0xFF;
 
             let l2_tables = self.l2_tables.read();
@@ -501,7 +503,7 @@ impl CapabilitySpace {
         // Slow path: check L2 tables
         #[cfg(feature = "alloc")]
         {
-            let l1_index = (cap_id >> 8) as u16;
+            let l1_index = (cap_id >> 8) as u64;
             let l2_index = cap_id & 0xFF;
 
             let l2_tables = self.l2_tables.read();

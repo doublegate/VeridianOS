@@ -73,6 +73,45 @@ mod space_tests {
         );
     }
 
+    /// N-04: L2 keys were `(id >> 8) as u16`, so ids 2^24 apart aliased the
+    /// same L2 slot and the second insert failed.
+    #[test]
+    fn test_l2_index_does_not_alias_large_ids() {
+        let cap_space = space::CapabilitySpace::new();
+        let obj = || object::ObjectRef::Process {
+            pid: ProcessId(1234),
+        };
+        let low = token::CapabilityToken::new(0x100, 0, 0, 0);
+        let high = token::CapabilityToken::new(0x1_0000_0100, 0, 0, 0);
+        assert!(cap_space.insert(low, obj(), token::Rights::READ).is_ok());
+        assert!(cap_space.insert(high, obj(), token::Rights::WRITE).is_ok());
+        assert_eq!(cap_space.lookup(low), Some(token::Rights::READ));
+        assert_eq!(cap_space.lookup(high), Some(token::Rights::WRITE));
+    }
+
+    /// N-04: remove() took the slot before comparing tokens, so removing
+    /// with a stale (wrong-generation) token deleted the live capability.
+    #[test]
+    fn test_remove_with_mismatched_token_keeps_entry() {
+        let cap_space = space::CapabilitySpace::new();
+        let obj = || object::ObjectRef::Process {
+            pid: ProcessId(1234),
+        };
+        for id in [42u64, 300] {
+            let live = token::CapabilityToken::new(id, 2, 0, 0);
+            let stale = token::CapabilityToken::new(id, 1, 0, 0);
+            cap_space.insert(live, obj(), token::Rights::READ).unwrap();
+            assert!(cap_space.remove(stale).is_none(), "id {}", id);
+            assert_eq!(
+                cap_space.lookup(live),
+                Some(token::Rights::READ),
+                "id {}",
+                id
+            );
+            assert!(cap_space.remove(live).is_some());
+        }
+    }
+
     #[test]
     fn test_capability_insertion_and_lookup() {
         let cap_space = space::CapabilitySpace::new();
