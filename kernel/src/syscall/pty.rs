@@ -91,7 +91,7 @@ pub fn sys_openpty(master_fd_ptr: usize, slave_fd_ptr: usize) -> SyscallResult {
 
     let slave_fd = file_table.open(slave_file).map_err(|_| {
         // Roll back the master fd on failure.
-        let _ = file_table.close(master_fd);
+        file_table.close_on_rollback(master_fd, "openpty");
         SyscallError::OutOfMemory
     })?;
 

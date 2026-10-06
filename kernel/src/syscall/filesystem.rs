@@ -2014,7 +2014,7 @@ pub fn sys_pipe2(pipe_fds_ptr: usize, flags: usize) -> SyscallResult {
         .open_with_flags(alloc::sync::Arc::new(write_file), cloexec)
         .map_err(|_| {
             // Clean up read fd on failure
-            let _ = file_table.close(read_fd);
+            file_table.close_on_rollback(read_fd, "pipe");
             SyscallError::OutOfMemory
         })?;
 

@@ -440,6 +440,16 @@ impl FileTable {
             .map(|entry| (entry.file.clone(), entry.cloexec))
     }
 
+    /// Close an fd this syscall installed a moment ago, while undoing a
+    /// failed operation. A failure means a broken invariant (the fd was
+    /// just created), so it is logged rather than discarded with `let _`
+    /// (agy review of the v0.26.0 stack, PR #15).
+    pub fn close_on_rollback(&self, fd: FileDescriptor, context: &str) {
+        if let Err(e) = self.close(fd) {
+            crate::println!("[FD] {}: rolling back fd {} failed: {:?}", context, fd, e);
+        }
+    }
+
     /// Close a file descriptor
     pub fn close(&self, fd: FileDescriptor) -> Result<(), KernelError> {
         let mut files = self.files.write();
