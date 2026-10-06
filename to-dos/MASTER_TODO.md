@@ -1,6 +1,6 @@
 # VeridianOS Master TODO List
 
-**Last Updated**: 2026-03-10 (All Phases (0-12) COMPLETE, v0.25.1)
+**Last Updated**: 2026-10-06 (v0.26.0: audit remediation P0 + P1)
 
 ## Project Overview Status
 
@@ -19,13 +19,47 @@
 - [x] **Phase 11: KDE Plasma 6 Default Desktop Integration** - COMPLETE (100%) v0.24.0 (March 2026)
 - [x] **Phase 12: KDE Plasma 6 Cross-Compilation** - COMPLETE (100%) v0.25.0 (March 2026)
 
-## Current Version: v0.25.1 (March 2026)
+## Current Version: v0.26.0 (October 2026)
+
+### v0.26.0: audit remediation (P0 + P1)
+
+Tracking checklist: `docs/audit/AUDIT-VERIFICATION-2026-10-05.md`.
+
+- **Fixed:** 86 findings.
+- **Deferred:** 2.
+- **Open:** 24, all targeted at v0.27 or later.
+
+What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
+
+### Roadmap after v0.26.0
+
+- [ ] **v0.27.0: process model and SMP (C5, X0).**
+  - Preemptible ring-3/EL0/U-mode tasks.
+  - User threads.
+  - Kernel stack guard pages (N-26).
+  - AArch64 MMU (N-28) and RISC-V U-mode.
+  - SMP bring-up and TLB shootdown.
+  - Copy-on-write fork.
+  - Huge pages, real AArch64/RISC-V heaps, priority inheritance, TCP completion, namespaces.
+- [ ] **v0.27.0 carry-overs from the v0.26 plan:**
+  - C1 CI job for the runtime suite.
+  - C2 build hygiene.
+  - C3 shared ABI crate.
+  - C4 lifetime cleanup.
+- [ ] **v0.28.0:** one Linux ABI with VeridianOS IPC in its own range (X1, fixes N-33), plus the
+  process, signal, time and file syscall tiers.
+- [ ] **v0.29.0 - v0.31.0:** the rest of the Linux/POSIX syscall surface, loader/vDSO/TTY/procfs,
+  and LTP and open_posix in CI. See `docs/compat/COMPATIBILITY-PLAN.md`.
+- [ ] **C6 (staged from v0.28):** move drivers, protocols and codecs out of the kernel.
+- [ ] **C7:** serve a native user-space Wayland client; frame-backed `wl_shm` (DRV-PERF-01,
+  DESK-ARCH-01).
 
 ### Build Status
-- **x86_64**: 0 errors, 0 warnings, Stage 6 BOOTOK, 29/29 tests
-- **AArch64**: 0 errors, 0 warnings, Stage 6 BOOTOK, 29/29 tests
-- **RISC-V**: 0 errors, 0 warnings, Stage 6 BOOTOK, 29/29 tests
-- **Host-target unit tests**: 4,095+ passing (Codecov integrated)
+- **x86_64**: 0 errors, 0 warnings, Stage 6 BOOTOK, 34/34 tests
+- **AArch64**: 0 errors, 0 warnings, Stage 6 BOOTOK, 34/34 tests
+- **RISC-V**: 0 errors, 0 warnings, Stage 6 BOOTOK, 34/34 tests
+- **Host-target unit tests**: 4,413 passing (Codecov integrated)
+- **In-guest runtime suite**: `audit_runtime_test` 18/18 and BusyBox 27/27 on the BlockFS root
 - **CI pipeline**: 11/11 jobs passing
 
 ### Code Quality Metrics
@@ -227,6 +261,7 @@ See [REMEDIATION_TODO.md](REMEDIATION_TODO.md) for 37 identified gaps from Phase
 
 | Version | Date | Summary |
 |---------|------|---------|
+| v0.26.0 | Oct 6, 2026 | Audit remediation P0+P1: security fixes, real clocks/timers/interrupts on all arches, per-CPU allocator, lazy BlockFS cache, capability hash table, routing, IPC data-path fixes, documentation corrected against the code |
 | v0.10.0 | Feb 28, 2026 | Phase 7 Wave 6: Virtualization (VMX/VMCS, EPT, containers), security (KPTI, demand paging, COW fork, TPM, Dilithium), performance (NUMA SRAT/SLIT, per-CPU queues, IPC batching, IOMMU) |
 | v0.9.0 | Feb 28, 2026 | Phase 7 Wave 5: Audio subsystem (mixer, VirtIO-Sound, WAV playback), video framework (TGA/QOI, scaling, media player) |
 | v0.8.0 | Feb 28, 2026 | Phase 7 Wave 4: zero-copy DMA networking, hardware NIC TX/RX rings, IPv6 dual-stack, command substitution, NVMe admin queue |

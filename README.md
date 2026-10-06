@@ -20,7 +20,7 @@
 
 **VeridianOS** is a research operating system written in Rust, focused on **correctness, isolation, and explicit architectural invariants**. It serves as **executable documentation of high-assurance systems design** -- exploring how capability-oriented architecture, strong isolation boundaries, and disciplined use of unsafe code produce systems that are _auditable, teachable, and resilient to failure_.
 
-The system implements a capability-based security model, zero-copy IPC with sub-microsecond latency, and runs on three architectures (x86_64, AArch64, RISC-V). It is self-hosting, ships a Wayland desktop environment, supports containerized and virtualized workloads, and includes formal verification infrastructure -- all while keeping the microkernel under 15K lines of trusted code.
+The system implements a capability-based security model, a message-passing IPC layer (implemented in the kernel; not yet reachable from user programs, see [Known Limitations](docs/KNOWN-LIMITATIONS.md)), and runs on three architectures (x86_64, AArch64, RISC-V). It is self-hosting, ships a Wayland desktop environment, supports containerized and virtualized workloads, and includes formal verification infrastructure -- all while keeping the microkernel under 15K lines of trusted code.
 
 VeridianOS intentionally prioritizes architectural clarity over feature velocity. Native APIs are capability-based; compatibility layers (POSIX, Wayland) are implemented as user-space libraries that translate to native interfaces, never as kernel-level compromises.
 
@@ -33,7 +33,7 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 - **Microkernel architecture** -- Minimal trusted computing base with all drivers and services in user space
 - **Written in Rust** -- Memory safety without garbage collection; strict unsafe code policy
 - **Capability-based security** -- 64-bit unforgeable tokens for all resource access with O(1) lookup, hierarchical delegation, and cascading revocation
-- **Zero-copy IPC** -- Synchronous and asynchronous channels with register-based fast path (<1us for messages <=64 bytes)
+- **IPC** -- Register-sized, kernel-buffered (up to 16 KiB) and shared-region message tiers, capability-checked. Not yet reachable from user programs: native syscalls 0-7 are routed to the Linux compatibility layer (audit N-33, fix planned for v0.28)
 - **Formal verification** -- 38 Kani proof harnesses and 6 TLA+ specifications covering boot chain, IPC, memory allocation, and capability invariants
 
 ### Platform
@@ -85,13 +85,13 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 <img src="images/veridian-architecture.png" alt="VeridianOS Architecture Diagram" width="100%" />
 </div>
 
-All drivers and services run in user space with capability-controlled access to hardware. The microkernel provides only memory management, scheduling, IPC, and the capability system. See [Architecture Overview](docs/ARCHITECTURE-OVERVIEW.md) for detailed design documentation and [Invariants](docs/INVARIANTS.md) for the authoritative list of architectural invariants.
+The design goal is a microkernel that provides only memory management, scheduling, IPC and the capability system, with drivers and services in user space under capability-controlled access to hardware. Today drivers, filesystems, the network stack and the desktop still run in the kernel; moving them out is planned work (critique C6 in the audit plan). See [Known Limitations](docs/KNOWN-LIMITATIONS.md). See [Architecture Overview](docs/ARCHITECTURE-OVERVIEW.md) for detailed design documentation and [Invariants](docs/INVARIANTS.md) for the authoritative list of architectural invariants.
 
 ---
 
 ## Project Status
 
-**Version**: v0.25.2 | **All development phases complete (0-12)** | **83 releases published**
+**Version**: v0.26.0 | **All development phases complete (0-12)** | **84 releases published**
 
 | Metric | Value |
 | --- | --- |
@@ -113,7 +113,7 @@ All drivers and services run in user space with capability-controlled access to 
 
 | Metric | Target | Achieved |
 | --- | --- | --- |
-| IPC latency | < 1us | < 1us (register-based fast path) |
+| IPC latency | < 1us | not measured: IPC is not reachable from user space yet (N-33); in-kernel helpers only |
 | Context switch | < 10us | < 10us |
 | Memory allocation | < 1us | < 500ns (slab allocator) |
 | Capability lookup | O(1) | O(1) (two-level cache) |

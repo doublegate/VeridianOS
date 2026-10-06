@@ -1,5 +1,7 @@
 # Architecture Overview
 
+> **Status (v0.26.0):** this chapter describes the design. Device drivers, filesystems, the network stack and the desktop currently run in the kernel, and IPC is not yet reachable from user programs. See [Known Limitations](https://github.com/doublegate/VeridianOS/blob/main/docs/KNOWN-LIMITATIONS.md).
+
 VeridianOS is designed as a modern microkernel operating system with a focus on security, modularity, and performance. This chapter provides a comprehensive overview of the system architecture.
 
 ## Architecture Goals
