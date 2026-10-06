@@ -100,7 +100,10 @@ pub fn listen(fd: usize, backlog: usize) -> Result<usize, SyscallError> {
 
 /// Accept a connection on a socket.
 pub fn accept(fd: usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall1(SYS_SOCKET_ACCEPT, fd) };
+    // The kernel takes (fd, addr, addrlen); pass NULLs explicitly so it
+    // does not read stale rsi/rdx as an address buffer.
+    // SAFETY: plain syscall; no user buffers are passed.
+    let ret = unsafe { syscall3(SYS_SOCKET_ACCEPT, fd, 0, 0) };
     syscall_result(ret)
 }
 
