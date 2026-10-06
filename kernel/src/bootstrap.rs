@@ -851,9 +851,9 @@ fn load_rootfs_from_disk() {
 
 /// Mount a pre-formatted BlockFS image as the persistent root filesystem.
 ///
-/// Reads superblock, bitmap, inode table, and all data blocks from the
-/// virtio-blk device. Replaces the initial RamFS via `swap_root()`, then
-/// re-mounts DevFS at `/dev` and ProcFS at `/proc`.
+/// Reads the superblock, bitmap and inode table from the virtio-blk device;
+/// data blocks are read on first use (FS-PERF-01). Replaces the initial RamFS
+/// via `swap_root()`, then re-mounts DevFS at `/dev` and ProcFS at `/proc`.
 #[cfg(feature = "alloc")]
 fn mount_blockfs_root() {
     use alloc::sync::Arc;

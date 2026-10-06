@@ -117,17 +117,9 @@ pub fn register_drivers() -> Result<(), KernelError> {
     // For non-x86_64 architectures, try VirtIO MMIO at known addresses
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     {
-        // QEMU virt boards have a fixed array of virtio-mmio slots and fill
-        // them from the highest address down, so scan every slot; the
-        // driver skips slots holding another device type. Only the first
-        // four were probed before, which missed a NIC in the usual slot.
-        #[cfg(target_arch = "aarch64")]
-        let virtio_bases = (0..32usize).map(|i| 0x0a00_0000 + i * 0x200);
-
-        #[cfg(target_arch = "riscv64")]
-        let virtio_bases = (0..8usize).map(|i| 0x1000_1000 + i * 0x1000);
-
-        for base in virtio_bases {
+        // Every virtio-mmio slot (QEMU fills them from the top); the driver
+        // skips slots holding another device type.
+        for base in crate::drivers::virtio::mmio::slots() {
             // VirtioNetDriver::new checks the slot holds a network device.
             if register_virtio_net(VirtioNetDriver::new(base)).is_ok() {
                 device_count += 1;

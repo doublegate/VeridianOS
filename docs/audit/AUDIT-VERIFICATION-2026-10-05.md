@@ -98,14 +98,14 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 
 | ID | Verdict | Location | Notes | Target | Status |
 |---|---|---|---|---|---|
-| FS-PERF-01 | PARTIAL | `fs/blockfs.rs:551, 586-589, 635-640, 991-1013` | Root cause misdescribed: BlockFS is RAM-resident with write-back, and `load_existing` reads *every* allocated block at mount (not only accessed blocks). `free_block` keeps the 4 KB `Vec`. | v0.26.0 | open |
+| FS-PERF-01 | PARTIAL | `fs/blockfs.rs:551, 586-589, 635-640, 991-1013` | Root cause misdescribed: BlockFS is RAM-resident with write-back, and `load_existing` reads *every* allocated block at mount (not only accessed blocks). `free_block` keeps the 4 KB `Vec`. | v0.26.0 | fixed (lazy CLOCK cache, dirty pinned until sync; ADR 0003; mount 738 ms -> 86 ms) |
 | FS-PERF-02 | CONFIRMED | `fs/mod.rs:726-737` | Mostly read-lock cache-line traffic rather than a convoy (writers are rare). | v0.26.0 | open |
 | FS-PERF-03 | CONFIRMED | `syscall/filesystem.rs:1699-1715` | Also non-atomic, drops metadata, fails for directories. `VfsNode` has no rename. | v0.26.0 | fixed (native VfsNode::rename on ramfs/tmpfs/BlockFS incl. directories; runtime-tested) |
 | FS-ARCH-01 | PARTIAL | `fs/file.rs:293-354` | Linear free-slot scan, bounded at 1024 -- minor. | v0.26.0 | fixed (lowest-free hint; model-tested) |
 | FS-SEC-01 | CONFIRMED (worse) | `fs/mod.rs:486-628` | Prefix hijack confirmed; also no `..` normalisation before mount lookup, relative symlinks resolve from `/`, and MAC checks the unresolved path. | v0.26.0 | fixed (0256f96) |
 | FS-SEC-02 | CONFIRMED | `syscall/filesystem.rs:1724-1735, 2219-2247, 2737-2760` | No checks on chmod/fchmod/unlink/rename; chown/fchown are no-op successes. | v0.26.0 | fixed (0256f96, 62b0247) |
 | DRV-PERF-01 | PARTIAL, dead code | `services/desktop_ipc.rs:213-221` | Only a struct definition; nothing handles `UpdateWindowContent`. The copies that do happen are DESK-ARCH-01. | v0.26.0 | open |
-| DRV-PERF-02 | CONFIRMED | `fs/blockfs.rs:143-150`, `drivers/virtio/blk.rs:395, 484-496` | 8 requests per 4 KB block, each allocating and zeroing a frame and spinning up to 10M iterations. | v0.26.0 | open |
+| DRV-PERF-02 | CONFIRMED | `fs/blockfs.rs:143-150`, `drivers/virtio/blk.rs:395, 484-496` | 8 requests per 4 KB block, each allocating and zeroing a frame and spinning up to 10M iterations. | v0.26.0 | fixed (one request per 4 KiB block on reused request frames; mount 3537 ms -> 738 ms) |
 | DRV-INC-01 | CONFIRMED (dangerous) | `drivers/nvme.rs:426, 472` | With a real controller, reads DMA to physical address 0. | v0.26.0 | fixed (NVMe rewrite: frame-backed queues/PRPs, phase tags, timeouts return Err; verified by `nvme selftest`) |
 | DRV-SEC-01 | CONFIRMED | `drivers/virtio_net.rs:603-621` | Descriptor freed before the device is notified; no barrier; non-volatile ring indices. | v0.26.0 | fixed (c99fca9, 7f9a6d0; used-ring ids validated in the e1000 commit) |
 | DRV-SEC-02 | CONFIRMED (worse for e1000) | `drivers/virtio_net.rs:410-520`, `drivers/e1000.rs:88-212` | Virtual addresses used as DMA addresses. e1000 programs addresses of fields on a stack frame that has since been returned from. | v0.26.0 | fixed (virtio-net c99fca9; e1000 rewritten on frame-backed rings) |
@@ -158,6 +158,7 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | N-26 | kernel stacks | No guard pages: kernel stacks come from the direct map, so an overflow corrupts the adjacent frame silently. | v0.27.0 (C5) | open |
 | N-27 | `fs/file.rs` FileTable | `open` returned a `next_fd` counter but stored the file at `files.len()`; after `dup2` grew the table the two differed, so the returned fd named a different (or no) file. `F_DUPFD` (`dup_at_least`) could overwrite an occupied slot the same way. | v0.26.0 | fixed (append at the table length; counter removed; model test) |
 | N-28 | `arch/aarch64` | The MMU and caches are never enabled (no TCR/MAIR/TTBR1 setup; SCTLR_EL1 = 0). With all memory treated as Device memory, exclusive load/store is unreliable, which is why ramfs/tmpfs/devfs/pty/... use `fs::bare_lock`, an `UnsafeCell` wrapper that does not lock at all. Blocks AArch64 SMP and EL0. | v0.27.0 (C5) | open |
+| N-29 | `drivers/virtio/mmio.rs` | The virtio-mmio probe checked only the first four slots, but QEMU fills them from the top, so AArch64/RISC-V never found a virtio-blk disk. Fixing the probe exposed that mounting the root image there exhausted the 8 MiB bump heap (every block was loaded at mount). | v0.26.0 | fixed (all slots probed; FS-PERF-01 lazy cache lets AArch64/RISC-V mount it) |
 
 ## Runtime verification status
 

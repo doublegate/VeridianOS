@@ -16,7 +16,6 @@
 )]
 
 use alloc::{
-    collections::BTreeSet,
     string::{String, ToString},
     sync::Arc,
     vec,
@@ -32,6 +31,9 @@ use spin::RwLock;
 use super::bare_lock::RwLock;
 use super::{DirEntry, Filesystem, Metadata, NodeType, Permissions, VfsNode};
 use crate::error::{FsError, KernelError};
+
+mod cache;
+use cache::{BlockCache, Disk};
 
 /// Block size (4KB)
 pub const BLOCK_SIZE: usize = 4096;
@@ -142,12 +144,8 @@ impl DiskBackend for VirtioBlockBackend {
             })?;
         let mut device = device_lock.lock();
 
-        let base_sector = block_num * SECTORS_PER_BLOCK as u64;
-        for i in 0..SECTORS_PER_BLOCK {
-            let sector = base_sector + i as u64;
-            let offset = i * 512;
-            device.read_block(sector, &mut buf[offset..offset + 512])?;
-        }
+        // One request per 4 KiB block (was eight 512-byte requests).
+        device.read_sectors(block_num * SECTORS_PER_BLOCK as u64, &mut buf[..BLOCK_SIZE])?;
 
         Ok(())
     }
@@ -166,12 +164,7 @@ impl DiskBackend for VirtioBlockBackend {
             })?;
         let mut device = device_lock.lock();
 
-        let base_sector = block_num * SECTORS_PER_BLOCK as u64;
-        for i in 0..SECTORS_PER_BLOCK {
-            let sector = base_sector + i as u64;
-            let offset = i * 512;
-            device.write_block(sector, &data[offset..offset + 512])?;
-        }
+        device.write_sectors(block_num * SECTORS_PER_BLOCK as u64, &data[..BLOCK_SIZE])?;
 
         Ok(())
     }
@@ -594,14 +587,18 @@ pub struct BlockFsInner {
     superblock: Superblock,
     block_bitmap: BlockBitmap,
     inode_table: Vec<DiskInode>,
-    block_data: Vec<Vec<u8>>, // In-memory block storage (RAM cache)
-    /// Set of block indices that have been modified since the last sync.
-    /// Used to track which blocks need to be written to the disk backend.
-    dirty_blocks: BTreeSet<usize>,
-    /// Optional disk backend for persistence. When `Some`, `sync()` writes
-    /// dirty blocks to this device. When `None`, BlockFS operates as a pure
-    /// RAM filesystem (all data lost on reboot).
+    /// Data blocks, loaded on first use and written back on eviction or
+    /// sync (FS-PERF-01). Locked separately so readers holding the
+    /// filesystem's read lock can still fill it.
+    cache: RwLock<BlockCache>,
+    /// Optional disk backend for persistence. When `None`, BlockFS operates
+    /// as a pure RAM filesystem (all data lost on reboot) and the cache
+    /// holds every block.
     disk: Option<Arc<Mutex<dyn DiskBackend>>>,
+    /// Device size in blocks, sampled when the backend is attached.
+    device_blocks: u64,
+    /// Whether the backend accepts writes, sampled when attached.
+    disk_writable: bool,
 }
 
 impl BlockFsInner {
@@ -628,19 +625,17 @@ impl BlockFsInner {
         root_inode.links_count = 2;
         inode_table[0] = root_inode;
 
-        // Initialize block storage (sparse -- blocks materialized on first write)
-        let mut block_data = Vec::with_capacity(block_count as usize);
-        for _ in 0..block_count {
-            block_data.push(Vec::new());
-        }
-
         let mut fs = Self {
             superblock,
             block_bitmap,
             inode_table,
-            block_data,
-            dirty_blocks: BTreeSet::new(),
+            cache: RwLock::new(BlockCache::new(
+                block_count as usize,
+                cache::DEFAULT_CAPACITY_BLOCKS,
+            )),
             disk: None,
+            device_blocks: 0,
+            disk_writable: false,
         };
 
         // Create "." and ".." entries in the root directory (both point to inode 0)
@@ -671,43 +666,49 @@ impl BlockFsInner {
         None
     }
 
+    /// Allocate a block. Its contents start as zeros and are dirty, so the
+    /// old bytes on the disk can never be read back through it.
     fn allocate_block(&mut self) -> Option<u32> {
         let block = self.block_bitmap.allocate_block()?;
+        if self.cache.get_mut().insert_zeroed(block).is_err() {
+            self.block_bitmap.free_block(block);
+            return None;
+        }
         self.superblock.free_blocks -= 1;
-        self.materialize_block(block as usize);
         Some(block)
     }
 
     fn free_block(&mut self, block: u32) {
         self.block_bitmap.free_block(block);
         self.superblock.free_blocks += 1;
-        // Freed blocks no longer need syncing (data is logically gone)
-        self.dirty_blocks.remove(&(block as usize));
+        // The data is logically gone: drop it without writing it back.
+        self.cache.get_mut().discard(block);
     }
 
-    /// Mark a block as dirty so it will be written to the disk backend on sync.
-    fn mark_dirty(&mut self, block_num: u32) {
-        self.dirty_blocks.insert(block_num as usize);
+    fn disk_view<'a>(&self, backend: Option<&'a dyn DiskBackend>) -> Option<Disk<'a>> {
+        backend.map(|backend| Disk {
+            backend,
+            device_blocks: self.device_blocks,
+            writable: self.disk_writable,
+        })
     }
 
-    /// Ensure the block at `idx` is materialized (has 4KB allocated).
-    /// Called before any write to a block. No-op if already materialized.
-    fn materialize_block(&mut self, idx: usize) {
-        if idx < self.block_data.len() && self.block_data[idx].is_empty() {
-            self.block_data[idx] = vec![0u8; BLOCK_SIZE];
-        }
+    /// Run `f` on a block's contents, reading it from the disk on a miss.
+    /// Unallocated blocks read as zeros.
+    fn with_block<R>(&self, idx: u32, f: impl FnOnce(&[u8]) -> R) -> Result<R, KernelError> {
+        let allocated = self.block_bitmap.is_allocated(idx);
+        let guard = self.disk.as_ref().map(|d| d.lock());
+        let view = self.disk_view(guard.as_deref());
+        self.cache.write().read(idx, allocated, view, f)
     }
 
-    /// Get a read-only reference to a block's data.
-    /// Returns a reference to the shared zero block for unmaterialized entries,
-    /// avoiding the need to allocate memory for blocks that have never been
-    /// written.
-    fn block_ref(&self, idx: usize) -> &[u8] {
-        if idx < self.block_data.len() && !self.block_data[idx].is_empty() {
-            &self.block_data[idx]
-        } else {
-            &ZERO_BLOCK
-        }
+    /// Mutable access to a block, which is marked dirty.
+    fn block_mut(&mut self, idx: u32) -> Result<&mut [u8], KernelError> {
+        let allocated = self.block_bitmap.is_allocated(idx);
+        let disk = self.disk.clone();
+        let guard = disk.as_ref().map(|d| d.lock());
+        let view = self.disk_view(guard.as_deref());
+        self.cache.get_mut().write(idx, allocated, view)
     }
 
     /// Sync all dirty blocks and metadata to the disk backend.
@@ -721,38 +722,25 @@ impl BlockFsInner {
         };
 
         let backend = disk.lock();
-        if backend.is_read_only() {
+        if !self.disk_writable {
             return Err(KernelError::FsError(FsError::ReadOnly));
         }
-
-        let device_blocks = backend.block_count();
-        let mut synced = 0usize;
+        let view = Disk {
+            backend: &*backend,
+            device_blocks: self.device_blocks,
+            writable: true,
+        };
 
         // Write all dirty data blocks
-        let dirty: Vec<usize> = self.dirty_blocks.iter().copied().collect();
-        for block_idx in &dirty {
-            if *block_idx >= self.block_data.len() {
-                continue; // Skip invalid indices
-            }
-            if (*block_idx as u64) >= device_blocks {
-                // Block beyond device capacity -- skip but warn
-                crate::println!(
-                    "[BLOCKFS] Warning: dirty block {} exceeds device capacity {}",
-                    block_idx,
-                    device_blocks
-                );
-                continue;
-            }
-            // Skip unmaterialized (sparse) blocks -- they contain only zeros
-            if self.block_data[*block_idx].is_empty() {
-                continue;
-            }
-            backend.write_block(*block_idx as u64, &self.block_data[*block_idx])?;
-            synced += 1;
+        let cache = self.cache.get_mut();
+        let mut synced = cache.flush(view)?;
+        for _block in cache.unwritable_dirty(view) {
+            crate::println!(
+                "[BLOCKFS] Warning: dirty block {} exceeds device capacity {}",
+                _block,
+                self.device_blocks
+            );
         }
-
-        // Clear dirty set after successful write
-        self.dirty_blocks.clear();
 
         // Update superblock write time and mount count
         self.superblock.write_time = crate::arch::timer::read_hw_timestamp();
@@ -766,32 +754,30 @@ impl BlockFsInner {
         Ok(synced)
     }
 
-    /// Load filesystem data from the disk backend into memory.
+    /// Make the disk backend the source of data blocks.
     ///
-    /// Reads all data blocks from disk into the in-memory `block_data` array.
-    /// This should be called after attaching a disk backend to populate the
-    /// in-memory cache with persisted data.
+    /// Clean cached blocks are dropped so the next access rereads them from
+    /// the disk; dirty ones are kept. Returns how many allocated blocks are
+    /// now served from the disk (they are read lazily, not here).
     fn load_from_disk(&mut self) -> Result<usize, KernelError> {
-        let disk = match self.disk {
-            Some(ref d) => d.clone(),
-            None => return Ok(0),
-        };
-
-        let backend = disk.lock();
-        let device_blocks = backend.block_count();
-        let fs_blocks = self.block_data.len() as u64;
-        let blocks_to_read = fs_blocks.min(device_blocks) as usize;
-        let mut loaded = 0usize;
-
-        for block_idx in 0..blocks_to_read {
-            if self.block_bitmap.is_allocated(block_idx as u32) {
-                self.materialize_block(block_idx);
-                backend.read_block(block_idx as u64, &mut self.block_data[block_idx])?;
-                loaded += 1;
-            }
+        if self.disk.is_none() {
+            return Ok(0);
         }
+        self.cache.get_mut().invalidate_clean();
+        let blocks = (self.superblock.block_count as u64).min(self.device_blocks) as u32;
+        Ok((self.superblock.first_data_block..blocks)
+            .filter(|&b| self.block_bitmap.is_allocated(b))
+            .count())
+    }
 
-        Ok(loaded)
+    /// Attach `backend`, sampling its size and writability once.
+    fn attach_disk(&mut self, backend: Arc<Mutex<dyn DiskBackend>>) {
+        {
+            let bk = backend.lock();
+            self.device_blocks = bk.block_count();
+            self.disk_writable = !bk.is_read_only();
+        }
+        self.disk = Some(backend);
     }
 
     // --- On-disk metadata serialization ---
@@ -1012,8 +998,13 @@ impl BlockFsInner {
 
     /// Load an existing BlockFS from a disk backend.
     ///
-    /// Reads superblock, bitmap, inode table, and all data blocks.
-    fn load_existing(backend: Arc<Mutex<dyn DiskBackend>>) -> Result<Self, KernelError> {
+    /// Reads the superblock, bitmap and inode table; data blocks are read
+    /// on first use.
+    fn load_existing(
+        backend: Arc<Mutex<dyn DiskBackend>>,
+        cache_blocks: usize,
+    ) -> Result<Self, KernelError> {
+        let started_ms = crate::timer::get_uptime_ms();
         let bk = backend.lock();
 
         // Read and validate superblock
@@ -1032,37 +1023,20 @@ impl BlockFsInner {
         let inode_table =
             Self::deserialize_inode_table(&*bk, superblock.inode_count, superblock.block_count)?;
 
-        // Allocate sparse in-memory block storage and read only allocated blocks
+        // Data blocks are read on first use (FS-PERF-01).
         let block_count = superblock.block_count as usize;
-        let mut block_data = Vec::with_capacity(block_count);
-        for _ in 0..block_count {
-            block_data.push(Vec::new()); // Empty -- sparse
-        }
-
-        // Only load blocks that are marked as allocated in the bitmap
-        let device_blocks = bk.block_count();
         let first_data = superblock.first_data_block as usize;
-        let mut loaded = 0usize;
-        for (i, block) in block_data
-            .iter_mut()
-            .enumerate()
-            .take(block_count)
-            .skip(first_data)
-        {
-            if (i as u64) >= device_blocks {
-                break;
-            }
-            if block_bitmap.is_allocated(i as u32) {
-                *block = vec![0u8; BLOCK_SIZE];
-                bk.read_block(i as u64, block)?;
-                loaded += 1;
-            }
-        }
+        let allocated = (first_data..block_count)
+            .filter(|&b| block_bitmap.is_allocated(b as u32))
+            .count();
 
         crate::println!(
-            "[BLOCKFS] Loaded {} allocated data blocks from disk (sparse, {} total)",
-            loaded,
-            block_count.saturating_sub(first_data)
+            "[BLOCKFS] Mounted in {} ms: {} of {} data blocks in use, read on demand ({} KiB \
+             cache)",
+            crate::timer::get_uptime_ms().saturating_sub(started_ms),
+            allocated,
+            block_count.saturating_sub(first_data),
+            cache_blocks * BLOCK_SIZE / 1024
         );
 
         drop(bk);
@@ -1071,10 +1045,12 @@ impl BlockFsInner {
             superblock,
             block_bitmap,
             inode_table,
-            block_data,
-            dirty_blocks: BTreeSet::new(),
-            disk: Some(backend),
+            cache: RwLock::new(BlockCache::new(block_count, cache_blocks)),
+            disk: None,
+            device_blocks: 0,
+            disk_writable: false,
         };
+        fs.attach_disk(backend);
 
         // Update mount count and time
         fs.superblock.mount_count += 1;
@@ -1086,69 +1062,65 @@ impl BlockFsInner {
     // --- Indirect block helpers ---
 
     /// Read a u32 block pointer from position `index` within an indirect block.
-    fn read_block_ptr(&self, indirect_block: u32, index: usize) -> u32 {
-        let block = self.block_ref(indirect_block as usize);
+    fn read_block_ptr(&self, indirect_block: u32, index: usize) -> Result<u32, KernelError> {
         let off = index * size_of::<u32>();
-        u32::from_le_bytes([block[off], block[off + 1], block[off + 2], block[off + 3]])
+        self.with_block(indirect_block, |block| {
+            u32::from_le_bytes([block[off], block[off + 1], block[off + 2], block[off + 3]])
+        })
     }
 
     /// Write a u32 block pointer at position `index` within an indirect block.
-    fn write_block_ptr(&mut self, indirect_block: u32, index: usize, value: u32) {
+    fn write_block_ptr(
+        &mut self,
+        indirect_block: u32,
+        index: usize,
+        value: u32,
+    ) -> Result<(), KernelError> {
         let off = index * size_of::<u32>();
-        let bytes = value.to_le_bytes();
-        self.materialize_block(indirect_block as usize);
-        self.block_data[indirect_block as usize][off..off + 4].copy_from_slice(&bytes);
-        self.mark_dirty(indirect_block);
+        self.block_mut(indirect_block)?[off..off + 4].copy_from_slice(&value.to_le_bytes());
+        Ok(())
     }
 
     /// Resolve a logical block index to a physical block number for reading.
     ///
     /// Returns `Some(physical_block)` if the block is allocated, `None` if it
     /// falls in a sparse hole or exceeds the addressing range.
-    fn resolve_block(&self, inode: &DiskInode, logical_block: usize) -> Option<u32> {
+    fn resolve_block(
+        &self,
+        inode: &DiskInode,
+        logical_block: usize,
+    ) -> Result<Option<u32>, KernelError> {
         if logical_block < DIRECT_BLOCKS {
             // Direct block
             let blk = inode.direct_blocks[logical_block];
-            if blk == 0 {
-                None
-            } else {
-                Some(blk)
-            }
+            Ok((blk != 0).then_some(blk))
         } else if logical_block < SINGLE_INDIRECT_MAX_BLOCKS {
             // Single indirect
             let indirect = inode.indirect_block;
             if indirect == 0 {
-                return None;
+                return Ok(None);
             }
             let idx = logical_block - DIRECT_BLOCKS;
-            let blk = self.read_block_ptr(indirect, idx);
-            if blk == 0 {
-                None
-            } else {
-                Some(blk)
-            }
+            let blk = self.read_block_ptr(indirect, idx)?;
+            Ok((blk != 0).then_some(blk))
         } else if logical_block < DOUBLE_INDIRECT_MAX_BLOCKS {
             // Double indirect
             let dbl_indirect = inode.double_indirect_block;
             if dbl_indirect == 0 {
-                return None;
+                return Ok(None);
             }
             let rel = logical_block - SINGLE_INDIRECT_MAX_BLOCKS;
             let l1_idx = rel / PTRS_PER_BLOCK;
             let l2_idx = rel % PTRS_PER_BLOCK;
-            let l1_block = self.read_block_ptr(dbl_indirect, l1_idx);
+            let l1_block = self.read_block_ptr(dbl_indirect, l1_idx)?;
             if l1_block == 0 {
-                return None;
+                return Ok(None);
             }
-            let blk = self.read_block_ptr(l1_block, l2_idx);
-            if blk == 0 {
-                None
-            } else {
-                Some(blk)
-            }
+            let blk = self.read_block_ptr(l1_block, l2_idx)?;
+            Ok((blk != 0).then_some(blk))
         } else {
             // Beyond double indirect range (triple indirect not implemented)
-            None
+            Ok(None)
         }
     }
 
@@ -1166,7 +1138,6 @@ impl BlockFsInner {
                 .ok_or(KernelError::ResourceExhausted { resource: "blocks" })?;
             self.inode_table[inode_num as usize].direct_blocks[logical_block] = new_blk;
             self.inode_table[inode_num as usize].blocks += 1;
-            self.mark_dirty(new_blk);
             Ok(new_blk)
         } else if logical_block < SINGLE_INDIRECT_MAX_BLOCKS {
             // Single indirect
@@ -1175,25 +1146,18 @@ impl BlockFsInner {
                 indirect = self
                     .allocate_block()
                     .ok_or(KernelError::ResourceExhausted { resource: "blocks" })?;
-                // Zero the new indirect block (already zeroed by block_data init,
-                // but be explicit for safety after reuse)
-                for byte in &mut self.block_data[indirect as usize] {
-                    *byte = 0;
-                }
-                self.mark_dirty(indirect);
                 self.inode_table[inode_num as usize].indirect_block = indirect;
                 self.inode_table[inode_num as usize].blocks += 1;
             }
             let idx = logical_block - DIRECT_BLOCKS;
-            let blk = self.read_block_ptr(indirect, idx);
+            let blk = self.read_block_ptr(indirect, idx)?;
             if blk != 0 {
                 return Ok(blk);
             }
             let new_blk = self
                 .allocate_block()
                 .ok_or(KernelError::ResourceExhausted { resource: "blocks" })?;
-            self.write_block_ptr(indirect, idx, new_blk);
-            self.mark_dirty(new_blk);
+            self.write_block_ptr(indirect, idx, new_blk)?;
             self.inode_table[inode_num as usize].blocks += 1;
             Ok(new_blk)
         } else if logical_block < DOUBLE_INDIRECT_MAX_BLOCKS {
@@ -1203,37 +1167,28 @@ impl BlockFsInner {
                 dbl_indirect = self
                     .allocate_block()
                     .ok_or(KernelError::ResourceExhausted { resource: "blocks" })?;
-                for byte in &mut self.block_data[dbl_indirect as usize] {
-                    *byte = 0;
-                }
-                self.mark_dirty(dbl_indirect);
                 self.inode_table[inode_num as usize].double_indirect_block = dbl_indirect;
                 self.inode_table[inode_num as usize].blocks += 1;
             }
             let rel = logical_block - SINGLE_INDIRECT_MAX_BLOCKS;
             let l1_idx = rel / PTRS_PER_BLOCK;
             let l2_idx = rel % PTRS_PER_BLOCK;
-            let mut l1_block = self.read_block_ptr(dbl_indirect, l1_idx);
+            let mut l1_block = self.read_block_ptr(dbl_indirect, l1_idx)?;
             if l1_block == 0 {
                 l1_block = self
                     .allocate_block()
                     .ok_or(KernelError::ResourceExhausted { resource: "blocks" })?;
-                for byte in &mut self.block_data[l1_block as usize] {
-                    *byte = 0;
-                }
-                self.mark_dirty(l1_block);
-                self.write_block_ptr(dbl_indirect, l1_idx, l1_block);
+                self.write_block_ptr(dbl_indirect, l1_idx, l1_block)?;
                 self.inode_table[inode_num as usize].blocks += 1;
             }
-            let blk = self.read_block_ptr(l1_block, l2_idx);
+            let blk = self.read_block_ptr(l1_block, l2_idx)?;
             if blk != 0 {
                 return Ok(blk);
             }
             let new_blk = self
                 .allocate_block()
                 .ok_or(KernelError::ResourceExhausted { resource: "blocks" })?;
-            self.write_block_ptr(l1_block, l2_idx, new_blk);
-            self.mark_dirty(new_blk);
+            self.write_block_ptr(l1_block, l2_idx, new_blk)?;
             self.inode_table[inode_num as usize].blocks += 1;
             Ok(new_blk)
         } else {
@@ -1266,12 +1221,13 @@ impl BlockFsInner {
             let logical_block = current_offset / BLOCK_SIZE;
             let block_offset = current_offset % BLOCK_SIZE;
 
-            match self.resolve_block(inode, logical_block) {
+            match self.resolve_block(inode, logical_block)? {
                 Some(block_num) => {
-                    let block = self.block_ref(block_num as usize);
                     let copy_len = (BLOCK_SIZE - block_offset).min(to_read - bytes_read);
-                    buffer[bytes_read..bytes_read + copy_len]
-                        .copy_from_slice(&block[block_offset..block_offset + copy_len]);
+                    let dst = &mut buffer[bytes_read..bytes_read + copy_len];
+                    self.with_block(block_num, |block| {
+                        dst.copy_from_slice(&block[block_offset..block_offset + copy_len])
+                    })?;
                     bytes_read += copy_len;
                     current_offset += copy_len;
                 }
@@ -1328,9 +1284,8 @@ impl BlockFsInner {
         let mut bytes_written = 0;
         for (i, (_, block_offset, copy_len)) in blocks_needed.iter().enumerate() {
             let block_num = block_numbers[i];
-            self.block_data[block_num as usize][*block_offset..*block_offset + *copy_len]
+            self.block_mut(block_num)?[*block_offset..*block_offset + *copy_len]
                 .copy_from_slice(&data[bytes_written..bytes_written + *copy_len]);
-            self.mark_dirty(block_num);
             bytes_written += *copy_len;
         }
 
@@ -1386,30 +1341,30 @@ impl BlockFsInner {
                 break;
             }
 
-            let block = self.block_ref(block_num as usize);
             let block_end = BLOCK_SIZE.min(dir_size - block_start);
-            let mut offset = 0;
+            self.with_block(block_num, |block| {
+                let mut offset = 0;
+                while offset + DIR_ENTRY_HEADER_SIZE <= block_end {
+                    let entry = self.read_dir_entry(block, offset);
+                    let rec_len = entry.rec_len as usize;
 
-            while offset + DIR_ENTRY_HEADER_SIZE <= block_end {
-                let entry = self.read_dir_entry(block, offset);
-                let rec_len = entry.rec_len as usize;
+                    // rec_len must be at least the header size and 4-byte aligned
+                    if rec_len < DIR_ENTRY_HEADER_SIZE || !rec_len.is_multiple_of(4) {
+                        break;
+                    }
 
-                // rec_len must be at least the header size and 4-byte aligned
-                if rec_len < DIR_ENTRY_HEADER_SIZE || !rec_len.is_multiple_of(4) {
-                    break;
+                    // Skip deleted entries (inode == 0) but still advance
+                    if entry.inode != 0 && entry.name_len > 0 {
+                        entries.push(DirEntry {
+                            name: String::from(entry.name_str()),
+                            node_type: entry.node_type(),
+                            inode: entry.inode as u64,
+                        });
+                    }
+
+                    offset += rec_len;
                 }
-
-                // Skip deleted entries (inode == 0) but still advance
-                if entry.inode != 0 && entry.name_len > 0 {
-                    entries.push(DirEntry {
-                        name: String::from(entry.name_str()),
-                        node_type: entry.node_type(),
-                        inode: entry.inode as u64,
-                    });
-                }
-
-                offset += rec_len;
-            }
+            })?;
         }
 
         Ok(entries)
@@ -1428,7 +1383,7 @@ impl BlockFsInner {
             }
         }
 
-        match self.find_dir_entry(dir_inode, name) {
+        match self.find_dir_entry(dir_inode, name)? {
             Some((entry, _, _)) => Ok(entry.inode),
             None => Err(KernelError::FsError(FsError::NotFound)),
         }
@@ -1449,7 +1404,7 @@ impl BlockFsInner {
         }
 
         // Check if the name already exists in the parent directory
-        if self.find_dir_entry(parent, name).is_some() {
+        if self.find_dir_entry(parent, name)?.is_some() {
             return Err(KernelError::FsError(FsError::AlreadyExists));
         }
 
@@ -1486,7 +1441,7 @@ impl BlockFsInner {
         }
 
         // Check if the name already exists in the parent directory
-        if self.find_dir_entry(parent, name).is_some() {
+        if self.find_dir_entry(parent, name)?.is_some() {
             return Err(KernelError::FsError(FsError::AlreadyExists));
         }
 
@@ -1552,7 +1507,7 @@ impl BlockFsInner {
                 value: "empty or too long",
             });
         }
-        if self.find_dir_entry(parent, name).is_some() {
+        if self.find_dir_entry(parent, name)?.is_some() {
             return Err(KernelError::FsError(FsError::AlreadyExists));
         }
 
@@ -1581,12 +1536,16 @@ impl BlockFsInner {
 
     /// Point the directory entry at (`dir`, `block_idx`, `offset`) at
     /// `inode` (0 deletes it). Link counts are the caller's business.
-    fn set_dir_entry_inode(&mut self, dir: u32, block_idx: usize, offset: usize, inode: u32) {
+    fn set_dir_entry_inode(
+        &mut self,
+        dir: u32,
+        block_idx: usize,
+        offset: usize,
+        inode: u32,
+    ) -> Result<(), KernelError> {
         let block_num = self.inode_table[dir as usize].direct_blocks[block_idx];
-        self.materialize_block(block_num as usize);
-        self.block_data[block_num as usize][offset..offset + 4]
-            .copy_from_slice(&inode.to_le_bytes());
-        self.mark_dirty(block_num);
+        self.block_mut(block_num)?[offset..offset + 4].copy_from_slice(&inode.to_le_bytes());
+        Ok(())
     }
 
     /// Rename `old_dir/old_name` to `new_dir/new_name` (FS-PERF-03).
@@ -1608,7 +1567,7 @@ impl BlockFsInner {
             return Err(KernelError::FsError(FsError::InvalidPath));
         }
         let (src, src_block, src_off) = self
-            .find_dir_entry(old_dir, old_name)
+            .find_dir_entry(old_dir, old_name)?
             .ok_or(KernelError::FsError(FsError::NotFound))?;
         let src_is_dir = src.file_type == DiskDirEntry::FT_DIR;
         if !self
@@ -1619,7 +1578,7 @@ impl BlockFsInner {
             return Err(KernelError::FsError(FsError::NotADirectory));
         }
 
-        if let Some((dst, _, _)) = self.find_dir_entry(new_dir, new_name) {
+        if let Some((dst, _, _)) = self.find_dir_entry(new_dir, new_name)? {
             if dst.inode == src.inode {
                 return Ok(()); // same inode: POSIX says do nothing
             }
@@ -1642,7 +1601,7 @@ impl BlockFsInner {
                 if at == src.inode {
                     return Err(KernelError::FsError(FsError::InvalidPath));
                 }
-                match self.find_dir_entry(at, "..") {
+                match self.find_dir_entry(at, "..")? {
                     Some((up, _, _)) if up.inode != at => at = up.inode,
                     _ => break, // reached the root
                 }
@@ -1652,11 +1611,11 @@ impl BlockFsInner {
         self.write_dir_entry(new_dir, src.inode, new_name, src.file_type)?;
         // Entries are cleared in place and never moved, so the source's
         // position found above is still valid.
-        self.set_dir_entry_inode(old_dir, src_block, src_off, 0);
+        self.set_dir_entry_inode(old_dir, src_block, src_off, 0)?;
 
         if src_is_dir && old_dir != new_dir {
-            if let Some((_, b, o)) = self.find_dir_entry(src.inode, "..") {
-                self.set_dir_entry_inode(src.inode, b, o, new_dir);
+            if let Some((_, b, o)) = self.find_dir_entry(src.inode, "..")? {
+                self.set_dir_entry_inode(src.inode, b, o, new_dir)?;
             }
             let old_parent = &mut self.inode_table[old_dir as usize];
             old_parent.links_count = old_parent.links_count.saturating_sub(1);
@@ -1676,7 +1635,7 @@ impl BlockFsInner {
 
         // Find the entry in the parent directory
         let (entry, block_idx, offset) = self
-            .find_dir_entry(parent, name)
+            .find_dir_entry(parent, name)?
             .ok_or(KernelError::FsError(FsError::NotFound))?;
 
         let target_inode = entry.inode;
@@ -1708,13 +1667,7 @@ impl BlockFsInner {
         };
 
         // Zero out the inode field in the on-disk entry to mark it deleted
-        self.materialize_block(block_num as usize);
-        let block = &mut self.block_data[block_num as usize];
-        block[offset] = 0;
-        block[offset + 1] = 0;
-        block[offset + 2] = 0;
-        block[offset + 3] = 0;
-        self.mark_dirty(block_num);
+        self.block_mut(block_num)?[offset..offset + 4].fill(0);
 
         // Decrement link count on the target inode
         if let Some(target) = self.inode_table.get_mut(target_inode as usize) {
@@ -1733,7 +1686,7 @@ impl BlockFsInner {
 
             // If links reach 0, free all data blocks
             if self.inode_table[target_inode as usize].links_count == 0 {
-                self.free_inode_blocks(target_inode);
+                self.free_inode_blocks(target_inode)?;
             }
         }
 
@@ -1775,10 +1728,10 @@ impl BlockFsInner {
             }
 
             // Free single-indirect blocks beyond the new size
-            self.truncate_single_indirect(inode_num, first_free_block);
+            self.truncate_single_indirect(inode_num, first_free_block)?;
 
             // Free double-indirect blocks beyond the new size
-            self.truncate_double_indirect(inode_num, first_free_block);
+            self.truncate_double_indirect(inode_num, first_free_block)?;
 
             // If truncating to non-zero size within a block, zero the tail
             if size > 0 {
@@ -1786,17 +1739,12 @@ impl BlockFsInner {
                 // Resolve using the inode (borrow scoped to avoid conflicts)
                 let phys_block = {
                     let inode = &self.inode_table[inode_num as usize];
-                    self.resolve_block(inode, tail_logical_block)
+                    self.resolve_block(inode, tail_logical_block)?
                 };
                 if let Some(block_num) = phys_block {
                     let zero_from = size % BLOCK_SIZE;
                     if zero_from > 0 {
-                        self.materialize_block(block_num as usize);
-                        let block = &mut self.block_data[block_num as usize];
-                        for byte in &mut block[zero_from..BLOCK_SIZE] {
-                            *byte = 0;
-                        }
-                        self.mark_dirty(block_num);
+                        self.block_mut(block_num)?[zero_from..BLOCK_SIZE].fill(0);
                     }
                 }
             }
@@ -1908,7 +1856,7 @@ impl BlockFsInner {
         }
 
         // Check that the name doesn't already exist
-        if self.find_dir_entry(dir_inode, name).is_some() {
+        if self.find_dir_entry(dir_inode, name)?.is_some() {
             return Err(KernelError::FsError(FsError::AlreadyExists));
         }
 
@@ -1940,17 +1888,21 @@ impl BlockFsInner {
 
     /// Free single-indirect data blocks at or beyond `first_free_block`.
     /// Also frees the indirect block itself if it becomes fully empty.
-    fn truncate_single_indirect(&mut self, inode_num: u32, first_free_block: usize) {
+    fn truncate_single_indirect(
+        &mut self,
+        inode_num: u32,
+        first_free_block: usize,
+    ) -> Result<(), KernelError> {
         let indirect = self.inode_table[inode_num as usize].indirect_block;
         if indirect == 0 {
-            return;
+            return Ok(());
         }
 
         // If all indirect entries are being freed
         if first_free_block <= DIRECT_BLOCKS {
             // Free every data block referenced by the indirect block
             for idx in 0..PTRS_PER_BLOCK {
-                let blk = self.read_block_ptr(indirect, idx);
+                let blk = self.read_block_ptr(indirect, idx)?;
                 if blk != 0 {
                     self.free_block(blk);
                     if self.inode_table[inode_num as usize].blocks > 0 {
@@ -1970,16 +1922,16 @@ impl BlockFsInner {
             let mut any_remain = false;
             for idx in 0..PTRS_PER_BLOCK {
                 if idx >= start_idx {
-                    let blk = self.read_block_ptr(indirect, idx);
+                    let blk = self.read_block_ptr(indirect, idx)?;
                     if blk != 0 {
                         self.free_block(blk);
-                        self.write_block_ptr(indirect, idx, 0);
+                        self.write_block_ptr(indirect, idx, 0)?;
                         if self.inode_table[inode_num as usize].blocks > 0 {
                             self.inode_table[inode_num as usize].blocks -= 1;
                         }
                     }
                 } else {
-                    let blk = self.read_block_ptr(indirect, idx);
+                    let blk = self.read_block_ptr(indirect, idx)?;
                     if blk != 0 {
                         any_remain = true;
                     }
@@ -1996,15 +1948,20 @@ impl BlockFsInner {
         }
         // If first_free_block >= SINGLE_INDIRECT_MAX_BLOCKS, nothing in the
         // single-indirect range needs freeing.
+        Ok(())
     }
 
     /// Free double-indirect data blocks at or beyond `first_free_block`.
     /// Also frees level-1 indirect blocks and the double-indirect block itself
     /// if they become fully empty.
-    fn truncate_double_indirect(&mut self, inode_num: u32, first_free_block: usize) {
+    fn truncate_double_indirect(
+        &mut self,
+        inode_num: u32,
+        first_free_block: usize,
+    ) -> Result<(), KernelError> {
         let dbl_indirect = self.inode_table[inode_num as usize].double_indirect_block;
         if dbl_indirect == 0 {
-            return;
+            return Ok(());
         }
 
         // Logical block range covered by double indirect:
@@ -2013,11 +1970,11 @@ impl BlockFsInner {
         if first_free_block <= SINGLE_INDIRECT_MAX_BLOCKS {
             // Free everything in double-indirect range
             for l1_idx in 0..PTRS_PER_BLOCK {
-                let l1_block = self.read_block_ptr(dbl_indirect, l1_idx);
+                let l1_block = self.read_block_ptr(dbl_indirect, l1_idx)?;
                 if l1_block != 0 {
                     // Free all data blocks in this L1 indirect block
                     for l2_idx in 0..PTRS_PER_BLOCK {
-                        let data_blk = self.read_block_ptr(l1_block, l2_idx);
+                        let data_blk = self.read_block_ptr(l1_block, l2_idx)?;
                         if data_blk != 0 {
                             self.free_block(data_blk);
                             if self.inode_table[inode_num as usize].blocks > 0 {
@@ -2046,7 +2003,7 @@ impl BlockFsInner {
             let mut any_l1_remain = false;
 
             for l1_idx in 0..PTRS_PER_BLOCK {
-                let l1_block = self.read_block_ptr(dbl_indirect, l1_idx);
+                let l1_block = self.read_block_ptr(dbl_indirect, l1_idx)?;
                 if l1_block == 0 {
                     continue;
                 }
@@ -2062,16 +2019,16 @@ impl BlockFsInner {
                 let mut any_l2_remain = false;
                 for l2_idx in 0..PTRS_PER_BLOCK {
                     if l2_idx >= l2_start {
-                        let data_blk = self.read_block_ptr(l1_block, l2_idx);
+                        let data_blk = self.read_block_ptr(l1_block, l2_idx)?;
                         if data_blk != 0 {
                             self.free_block(data_blk);
-                            self.write_block_ptr(l1_block, l2_idx, 0);
+                            self.write_block_ptr(l1_block, l2_idx, 0)?;
                             if self.inode_table[inode_num as usize].blocks > 0 {
                                 self.inode_table[inode_num as usize].blocks -= 1;
                             }
                         }
                     } else {
-                        let data_blk = self.read_block_ptr(l1_block, l2_idx);
+                        let data_blk = self.read_block_ptr(l1_block, l2_idx)?;
                         if data_blk != 0 {
                             any_l2_remain = true;
                         }
@@ -2081,7 +2038,7 @@ impl BlockFsInner {
                 if !any_l2_remain {
                     // Free the now-empty L1 indirect block
                     self.free_block(l1_block);
-                    self.write_block_ptr(dbl_indirect, l1_idx, 0);
+                    self.write_block_ptr(dbl_indirect, l1_idx, 0)?;
                     if self.inode_table[inode_num as usize].blocks > 0 {
                         self.inode_table[inode_num as usize].blocks -= 1;
                     }
@@ -2100,6 +2057,7 @@ impl BlockFsInner {
         }
         // If first_free_block >= DOUBLE_INDIRECT_MAX_BLOCKS, nothing in the
         // double-indirect range needs freeing.
+        Ok(())
     }
 
     // --- Helper methods for directory entry operations ---
@@ -2139,11 +2097,17 @@ impl BlockFsInner {
     ///
     /// Returns the entry, the direct block index, and the byte offset within
     /// that block where the entry starts. Returns None if not found.
-    fn find_dir_entry(&self, dir_inode: u32, name: &str) -> Option<(DiskDirEntry, usize, usize)> {
-        let inode = self.inode_table.get(dir_inode as usize)?;
+    fn find_dir_entry(
+        &self,
+        dir_inode: u32,
+        name: &str,
+    ) -> Result<Option<(DiskDirEntry, usize, usize)>, KernelError> {
+        let Some(inode) = self.inode_table.get(dir_inode as usize) else {
+            return Ok(None);
+        };
 
         if !inode.is_dir() {
-            return None;
+            return Ok(None);
         }
 
         let dir_size = inode.size as usize;
@@ -2159,27 +2123,31 @@ impl BlockFsInner {
                 break;
             }
 
-            let block = self.block_ref(block_num as usize);
             let block_end = BLOCK_SIZE.min(dir_size - block_start);
-            let mut offset = 0;
+            let found = self.with_block(block_num, |block| {
+                let mut offset = 0;
+                while offset + DIR_ENTRY_HEADER_SIZE <= block_end {
+                    let entry = self.read_dir_entry(block, offset);
+                    let rec_len = entry.rec_len as usize;
 
-            while offset + DIR_ENTRY_HEADER_SIZE <= block_end {
-                let entry = self.read_dir_entry(block, offset);
-                let rec_len = entry.rec_len as usize;
+                    if rec_len < DIR_ENTRY_HEADER_SIZE || !rec_len.is_multiple_of(4) {
+                        break;
+                    }
 
-                if rec_len < DIR_ENTRY_HEADER_SIZE || !rec_len.is_multiple_of(4) {
-                    break;
+                    if entry.inode != 0 && entry.name_len > 0 && entry.name_str() == name {
+                        return Some((entry, i, offset));
+                    }
+
+                    offset += rec_len;
                 }
-
-                if entry.inode != 0 && entry.name_len > 0 && entry.name_str() == name {
-                    return Some((entry, i, offset));
-                }
-
-                offset += rec_len;
+                None
+            })?;
+            if found.is_some() {
+                return Ok(found);
             }
         }
 
-        None
+        Ok(None)
     }
 
     /// Write a new directory entry into a directory inode's data blocks.
@@ -2268,8 +2236,7 @@ impl BlockFsInner {
             return Err(KernelError::FsError(FsError::IoError));
         }
 
-        self.materialize_block(block_num as usize);
-        let block = &mut self.block_data[block_num as usize];
+        let block = self.block_mut(block_num)?;
 
         // Write inode (4 bytes, little-endian)
         let inode_bytes = entry.inode.to_le_bytes();
@@ -2297,13 +2264,11 @@ impl BlockFsInner {
             *byte = 0;
         }
 
-        self.mark_dirty(block_num);
-
         Ok(())
     }
 
     /// Free all data blocks belonging to an inode (direct + indirect).
-    fn free_inode_blocks(&mut self, inode_num: u32) {
+    fn free_inode_blocks(&mut self, inode_num: u32) -> Result<(), KernelError> {
         // Free direct blocks
         for i in 0..DIRECT_BLOCKS {
             let block_num = self.inode_table[inode_num as usize].direct_blocks[i];
@@ -2315,11 +2280,12 @@ impl BlockFsInner {
 
         // Free single-indirect and double-indirect blocks (first_free_block=0 frees
         // all)
-        self.truncate_single_indirect(inode_num, 0);
-        self.truncate_double_indirect(inode_num, 0);
+        self.truncate_single_indirect(inode_num, 0)?;
+        self.truncate_double_indirect(inode_num, 0)?;
 
         self.inode_table[inode_num as usize].blocks = 0;
         self.inode_table[inode_num as usize].size = 0;
+        Ok(())
     }
 }
 
@@ -2402,11 +2368,20 @@ impl BlockFs {
 
     /// Open an existing BlockFS from a disk backend.
     ///
-    /// Reads the superblock, validates the magic number, and loads the bitmap,
-    /// inode table, and all data blocks into memory. The disk backend remains
-    /// attached for subsequent sync operations.
+    /// Reads the superblock, validates the magic number, and loads the bitmap
+    /// and inode table. Data blocks are read on first use into a bounded
+    /// cache (FS-PERF-01). The disk backend remains attached for subsequent
+    /// sync operations.
     pub fn open_existing(backend: Arc<Mutex<dyn DiskBackend>>) -> Result<Self, KernelError> {
-        let inner = BlockFsInner::load_existing(backend)?;
+        Self::open_existing_with_cache(backend, cache::DEFAULT_CAPACITY_BLOCKS)
+    }
+
+    /// `open_existing` with a cache of `cache_blocks` 4 KiB blocks.
+    pub(crate) fn open_existing_with_cache(
+        backend: Arc<Mutex<dyn DiskBackend>>,
+        cache_blocks: usize,
+    ) -> Result<Self, KernelError> {
+        let inner = BlockFsInner::load_existing(backend, cache_blocks)?;
         Ok(Self {
             inner: Arc::new(RwLock::new(inner)),
         })
@@ -2418,34 +2393,31 @@ impl BlockFs {
     /// to the device. Without a backend, BlockFS operates as a pure RAM
     /// filesystem.
     ///
-    /// If `load` is true, existing data is read from the disk into memory.
+    /// If `load` is true, the disk becomes the source of data blocks: clean
+    /// cached blocks are dropped and reread on demand. Otherwise memory is
+    /// treated as newer than the disk (every block written since creation
+    /// is still dirty) and the next sync writes it out.
     pub fn set_disk_backend(
         &self,
         backend: Arc<Mutex<dyn DiskBackend>>,
         load: bool,
     ) -> Result<(), KernelError> {
         let mut inner = self.inner.write();
-        inner.disk = Some(backend);
+        inner.attach_disk(backend);
 
         if load {
             let loaded = inner.load_from_disk()?;
-            crate::println!("[BLOCKFS] Loaded {} blocks from disk backend", loaded);
+            crate::println!("[BLOCKFS] {} blocks now served from disk backend", loaded);
         }
 
         Ok(())
     }
 
-    /// Detach the disk backend. Outstanding dirty blocks will NOT be flushed;
-    /// call `sync()` first if persistence is needed.
-    pub fn detach_disk_backend(&self) {
-        let mut inner = self.inner.write();
-        inner.disk = None;
-    }
-
     /// Get the number of dirty blocks pending sync.
     pub fn dirty_block_count(&self) -> usize {
         let inner = self.inner.read();
-        inner.dirty_blocks.len()
+        let count = inner.cache.read().dirty_count();
+        count
     }
 }
 
@@ -2568,5 +2540,145 @@ mod tests {
         assert!(!dir.metadata().unwrap().permissions.sticky);
         dir.chmod(Permissions::from_mode(0o1777)).unwrap();
         assert_eq!(dir.metadata().unwrap().permissions.to_mode(), 0o1777);
+    }
+
+    /// In-memory disk for persistence tests.
+    struct MemDisk {
+        blocks: Mutex<Vec<Vec<u8>>>,
+        writes: core::sync::atomic::AtomicUsize,
+    }
+
+    impl MemDisk {
+        fn new(n: usize) -> Arc<Self> {
+            Arc::new(Self {
+                blocks: Mutex::new(vec![vec![0u8; BLOCK_SIZE]; n]),
+                writes: core::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+        fn writes(&self) -> usize {
+            self.writes.load(core::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    impl DiskBackend for MemDisk {
+        fn read_block(&self, n: u64, buf: &mut [u8]) -> Result<(), KernelError> {
+            buf[..BLOCK_SIZE].copy_from_slice(&self.blocks.lock()[n as usize]);
+            Ok(())
+        }
+        fn write_block(&self, n: u64, data: &[u8]) -> Result<(), KernelError> {
+            self.writes
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            self.blocks.lock()[n as usize].copy_from_slice(&data[..BLOCK_SIZE]);
+            Ok(())
+        }
+        fn block_count(&self) -> u64 {
+            self.blocks.lock().len() as u64
+        }
+        fn is_read_only(&self) -> bool {
+            false
+        }
+    }
+
+    /// The filesystem owns its backend behind a mutex; this lets the test
+    /// keep a handle on the same disk.
+    struct Shared(Arc<MemDisk>);
+
+    impl DiskBackend for Shared {
+        fn read_block(&self, n: u64, buf: &mut [u8]) -> Result<(), KernelError> {
+            self.0.read_block(n, buf)
+        }
+        fn write_block(&self, n: u64, data: &[u8]) -> Result<(), KernelError> {
+            self.0.write_block(n, data)
+        }
+        fn block_count(&self) -> u64 {
+            self.0.block_count()
+        }
+        fn is_read_only(&self) -> bool {
+            false
+        }
+    }
+
+    fn backend(disk: &Arc<MemDisk>) -> Arc<Mutex<dyn DiskBackend>> {
+        Arc::new(Mutex::new(Shared(disk.clone())))
+    }
+
+    fn pattern(seed: u8, len: usize) -> Vec<u8> {
+        (0..len).map(|i| seed.wrapping_add((i / 7) as u8)).collect()
+    }
+
+    fn read_all(node: &Arc<dyn VfsNode>) -> Vec<u8> {
+        let mut buf = vec![0u8; node.metadata().unwrap().size];
+        let n = node.read(0, &mut buf).unwrap();
+        buf.truncate(n);
+        buf
+    }
+
+    /// FS-PERF-01: data larger than the cache survives sync and remount, and
+    /// nothing reaches the disk between syncs.
+    #[test]
+    fn lazy_cache_persists_through_remount() {
+        let disk = MemDisk::new(2048);
+        let fs = BlockFs::format(2048, 128).unwrap();
+        fs.set_disk_backend(backend(&disk), false).unwrap();
+        let root = fs.root();
+        let dir = root.mkdir("d", Permissions::default()).unwrap();
+        // 600 KiB: past the 12 direct blocks, through the single indirect.
+        let big = pattern(1, 600 * 1024);
+        dir.create("big", Permissions::default())
+            .unwrap()
+            .write(0, &big)
+            .unwrap();
+        for i in 0..20u8 {
+            let name = alloc::format!("f{}", i);
+            root.create(&name, Permissions::default())
+                .unwrap()
+                .write(0, &pattern(i, 5000))
+                .unwrap();
+        }
+        assert_eq!(disk.writes(), 0, "nothing is written before sync");
+        fs.sync().unwrap();
+        drop((root, dir, fs));
+
+        // Remount with a 4-block cache: every read now cycles the pool.
+        let fs = BlockFs::open_existing_with_cache(backend(&disk), 4).unwrap();
+        let root = fs.root();
+        let d = root.lookup("d").unwrap();
+        assert_eq!(read_all(&d.lookup("big").unwrap()), big);
+        for i in 0..20u8 {
+            let f = root.lookup(&alloc::format!("f{}", i)).unwrap();
+            assert_eq!(read_all(&f), pattern(i, 5000));
+        }
+        // 20 files plus "d"; readdir omits "." and "..".
+        assert_eq!(root.readdir().unwrap().len(), 21);
+        {
+            let inner = fs.inner.read();
+            let cache = inner.cache.read();
+            assert!(cache.slot_count() <= 4, "clean data stays within the bound");
+            assert!(cache.stats().evictions > 100);
+        }
+
+        // Changes after the last sync stay off the disk, then land on sync.
+        let before = disk.writes();
+        root.unlink("f3").unwrap();
+        d.lookup("big").unwrap().truncate(10_000).unwrap();
+        root.create("new", Permissions::default())
+            .unwrap()
+            .write(0, &pattern(9, 70_000))
+            .unwrap();
+        assert_eq!(disk.writes(), before, "dirty blocks are pinned until sync");
+        assert!(fs.dirty_block_count() > 0);
+        fs.sync().unwrap();
+        assert_eq!(fs.dirty_block_count(), 0);
+        drop((root, d, fs));
+
+        let fs = BlockFs::open_existing_with_cache(backend(&disk), 4).unwrap();
+        let root = fs.root();
+        assert!(root.lookup("f3").is_err());
+        assert_eq!(
+            read_all(&root.lookup("d").unwrap().lookup("big").unwrap()),
+            big[..10_000]
+        );
+        assert_eq!(read_all(&root.lookup("new").unwrap()), pattern(9, 70_000));
+        assert_eq!(read_all(&root.lookup("f4").unwrap()), pattern(4, 5000));
     }
 }
