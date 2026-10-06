@@ -1324,15 +1324,13 @@ fn mount_blockfs_root() {
             // path into the binaries. Libraries like xkbcommon, fontconfig,
             // and libinput search for data files at those compile-time
             // paths, so recreate the sysroot directory and symlink its `usr`
-            // back to `/usr`. Set VERIDIAN_SYSROOT at kernel build time to
-            // match the sysroot the rootfs binaries were built against; the
-            // default is the path the shipped v0.25 rootfs was built with.
-            // This goes away once tools/cross builds with --prefix=/usr.
+            // back to `/usr`. build.rs sets the path: VERIDIAN_SYSROOT if
+            // given at kernel build time, else <repo>/target/veridian-sysroot,
+            // the tools/cross default. It must match the sysroot the rootfs
+            // binaries were built against. This goes away once tools/cross
+            // builds with --prefix=/usr.
             {
-                const SYSROOT: &str = match option_env!("VERIDIAN_SYSROOT") {
-                    Some(path) => path,
-                    None => "/home/parobek/Code/VeridianOS/target/veridian-sysroot",
-                };
+                const SYSROOT: &str = env!("VERIDIAN_SYSROOT_PATH");
                 let mut current = root.clone();
                 for component in SYSROOT.split('/').filter(|c| !c.is_empty()) {
                     current = current
