@@ -242,6 +242,7 @@ STYLE_GUIDE="${STYLE_GUIDE:-.github/agy-review.md}"  # repo-relative; loaded if 
 LOG="${RUNNER_TEMP:-/tmp}/agy-review-${GITHUB_RUN_ID:-$$}.log"
 AGY_LOCK="${AGY_LOCK:-$HOME/.gemini/antigravity-cli/.agy-review.lock}"
 AGY_LOCK_WAIT="${AGY_LOCK_WAIT:-600}"      # seconds to wait for the agy lock before proceeding
+normalise_numeric_env AGY_LOCK_WAIT 600   # flock -w rejects a non-numeric value and aborts
 AGY_RETRIES="${AGY_RETRIES:-3}"            # attempts to get a usable agy response
 AGY_RETRY_DELAY="${AGY_RETRY_DELAY:-15}"   # base backoff seconds between retries (grows per attempt)
 # Both reach (( )) arithmetic: `08` would abort on an octal parse and `0` retries would skip every
@@ -1071,6 +1072,7 @@ fi
 body_file="$(mktemp)"
 {
   printf '%s\n' "$MARKER"
+  printf '%s%s -->\n' "$AGY_REVIEWED_AT_PREFIX" "$(date -u +'%Y-%m-%d %H:%M UTC')"
   printf '## Antigravity review (Gemini via Ultra)\n\n'
   cat "$out_file"
   printf '%s' "$truncated"
@@ -1144,14 +1146,8 @@ if [ -n "$prior_id" ] && [ -s "$prior_body_file" ]; then
   prior_archive="$(agy_body_archive < "$prior_body_file")"
 
   archived_file="$(mktemp)"
-  {
-    printf '%s\n' "$AGY_ROUND_MARK"
-    printf '<details>\n<summary>Round reviewed at %s</summary>\n\n' \
-      "$(date -u +'%Y-%m-%d %H:%M UTC')"
-    printf '%s\n' "$prior_head"
-    printf '\n</details>\n'
-    printf '%s\n' "$prior_archive"
-  } > "$archived_file"
+  agy_assemble_archive "$prior_head" "$prior_archive" "$(date -u +'%Y-%m-%d %H:%M UTC')" \
+    > "$archived_file"
 
   # Drop the oldest rounds until the whole comment fits, and SAY SO. A silent truncation
   # here would look identical to "there were never any earlier rounds", which is the exact
