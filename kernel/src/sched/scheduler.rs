@@ -63,6 +63,56 @@ pub enum SchedAlgorithm {
     Hybrid,
 }
 
+/// A run queue that `take_runnable` can rotate.
+trait RunQueue {
+    fn take(&mut self) -> Option<NonNull<Task>>;
+    fn put_back(&mut self, task: NonNull<Task>);
+    fn queued(&self) -> usize;
+}
+
+impl RunQueue for super::queue::ReadyQueue {
+    fn take(&mut self) -> Option<NonNull<Task>> {
+        self.dequeue()
+    }
+    fn put_back(&mut self, task: NonNull<Task>) {
+        // Cannot fail: the task's slot was freed by the dequeue.
+        let _ = self.enqueue(task);
+    }
+    fn queued(&self) -> usize {
+        self.len()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl RunQueue for super::queue::CfsRunQueue {
+    fn take(&mut self) -> Option<NonNull<Task>> {
+        self.dequeue()
+    }
+    fn put_back(&mut self, task: NonNull<Task>) {
+        self.enqueue(task);
+    }
+    fn queued(&self) -> usize {
+        self.len()
+    }
+}
+
+/// Dequeue the first task that can run on `cpu`, taking each queued task at
+/// most once (SCHED-PERF-02). Tasks that cannot run here are put back in
+/// order. Without the bound, a queue whose tasks were all pinned to other
+/// CPUs was rotated forever with its lock held.
+fn take_runnable<Q: RunQueue + ?Sized>(queue: &mut Q, cpu: u8) -> Option<NonNull<Task>> {
+    for _ in 0..queue.queued() {
+        let task = queue.take()?;
+        // SAFETY: tasks in a ready queue are valid while queued; only
+        // cpu_affinity is read.
+        if unsafe { task.as_ref() }.can_run_on(cpu) {
+            return Some(task);
+        }
+        queue.put_back(task);
+    }
+    None
+}
+
 impl Scheduler {
     /// Create new scheduler
     pub const fn new() -> Self {
@@ -237,6 +287,18 @@ impl Scheduler {
         }
     }
 
+    /// The global ready queue when per-CPU data is not set up.
+    fn global_take_runnable(cpu: u8) -> Option<NonNull<Task>> {
+        #[cfg(not(target_arch = "riscv64"))]
+        {
+            take_runnable(&mut *READY_QUEUE.lock(), cpu)
+        }
+        #[cfg(target_arch = "riscv64")]
+        {
+            take_runnable(super::queue::get_ready_queue(), cpu)
+        }
+    }
+
     /// Round-robin task selection
     fn pick_next_rr(&self) -> Option<NonNull<Task>> {
         let current_cpu = self.cpu_id;
@@ -244,60 +306,13 @@ impl Scheduler {
         // Try per-CPU queue first
         if let Some(cpu_data) = super::smp::per_cpu(self.cpu_id) {
             let mut queue = cpu_data.cpu_info.ready_queue.lock();
-
-            // Find a task that can run on this CPU
-            while let Some(task_ptr) = queue.dequeue() {
-                // SAFETY: task_ptr was just dequeued from the ready queue
-                // where it was stored as a valid NonNull<Task>. We read
-                // cpu_affinity via can_run_on to check compatibility. Tasks
-                // in the queue are not deallocated while enqueued.
-                unsafe {
-                    let task = task_ptr.as_ref();
-                    if task.can_run_on(current_cpu) {
-                        cpu_data.cpu_info.nr_running.fetch_sub(1, Ordering::Relaxed);
-                        cpu_data.cpu_info.update_load();
-                        return Some(task_ptr);
-                    }
-                    // Task can't run on this CPU, re-queue it
-                    queue.enqueue(task_ptr);
-                }
+            if let Some(task_ptr) = take_runnable(&mut **queue, current_cpu) {
+                cpu_data.cpu_info.nr_running.fetch_sub(1, Ordering::Relaxed);
+                cpu_data.cpu_info.update_load();
+                return Some(task_ptr);
             }
-        } else {
-            // Fallback to global queue
-            #[cfg(not(target_arch = "riscv64"))]
-            {
-                let mut queue = READY_QUEUE.lock();
-
-                while let Some(task_ptr) = queue.dequeue() {
-                    // SAFETY: Same as above -- task_ptr is valid from the
-                    // global ready queue.
-                    unsafe {
-                        let task = task_ptr.as_ref();
-                        if task.can_run_on(current_cpu) {
-                            return Some(task_ptr);
-                        }
-                        // Task can't run on this CPU, re-queue it
-                        queue.enqueue(task_ptr);
-                    }
-                }
-            }
-            #[cfg(target_arch = "riscv64")]
-            {
-                let queue = super::queue::get_ready_queue();
-
-                while let Some(task_ptr) = queue.dequeue() {
-                    // SAFETY: Same as above -- task_ptr is valid from the
-                    // RISC-V global ready queue.
-                    unsafe {
-                        let task = task_ptr.as_ref();
-                        if task.can_run_on(current_cpu) {
-                            return Some(task_ptr);
-                        }
-                        // Task can't run on this CPU, re-queue it
-                        queue.enqueue(task_ptr);
-                    }
-                }
-            }
+        } else if let Some(task_ptr) = Self::global_take_runnable(current_cpu) {
+            return Some(task_ptr);
         }
 
         // Work-stealing: try to steal from the busiest neighbor CPU
@@ -320,19 +335,12 @@ impl Scheduler {
             if let Some(victim_cpu) = best_cpu {
                 if let Some(victim_data) = super::smp::per_cpu(victim_cpu) {
                     let mut queue = victim_data.cpu_info.ready_queue.lock();
-                    if let Some(task_ptr) = queue.dequeue() {
-                        // SAFETY: task_ptr is valid from the victim's ready queue.
-                        unsafe {
-                            if task_ptr.as_ref().can_run_on(current_cpu) {
-                                victim_data
-                                    .cpu_info
-                                    .nr_running
-                                    .fetch_sub(1, Ordering::Relaxed);
-                                return Some(task_ptr);
-                            }
-                            // Can't run here, put it back
-                            queue.enqueue(task_ptr);
-                        }
+                    if let Some(task_ptr) = take_runnable(&mut **queue, current_cpu) {
+                        victim_data
+                            .cpu_info
+                            .nr_running
+                            .fetch_sub(1, Ordering::Relaxed);
+                        return Some(task_ptr);
                     }
                 }
             }
@@ -342,89 +350,20 @@ impl Scheduler {
         self.idle_task.map(|t| t.as_ptr())
     }
 
-    /// Priority-based task selection
+    /// Priority-based task selection. The ReadyQueue dequeues in priority
+    /// order, so the first runnable task is the highest-priority one.
     fn pick_next_priority(&self) -> Option<NonNull<Task>> {
         let current_cpu = self.cpu_id;
 
-        // Try per-CPU queue first
         if let Some(cpu_data) = super::smp::per_cpu(self.cpu_id) {
             let mut queue = cpu_data.cpu_info.ready_queue.lock();
-
-            // The ReadyQueue already maintains priority order with bitmaps
-            // Just dequeue the highest priority task that can run on this CPU
-            let mut requeue_count = 0;
-            let max_attempts = 10; // Prevent infinite loop
-
-            while requeue_count < max_attempts {
-                match queue.dequeue() {
-                    Some(task_ptr) => {
-                        // SAFETY: task_ptr was just dequeued from the per-CPU
-                        // ready queue where it was stored as a valid
-                        // NonNull<Task>. We read cpu_affinity via can_run_on.
-                        unsafe {
-                            let task = task_ptr.as_ref();
-                            if task.can_run_on(current_cpu) {
-                                cpu_data.cpu_info.nr_running.fetch_sub(1, Ordering::Relaxed);
-                                cpu_data.cpu_info.update_load();
-                                return Some(task_ptr);
-                            } else {
-                                // Task can't run on this CPU, re-queue it
-                                queue.enqueue(task_ptr);
-                                requeue_count += 1;
-                            }
-                        }
-                    }
-                    None => break, // No more tasks
-                }
+            if let Some(task_ptr) = take_runnable(&mut **queue, current_cpu) {
+                cpu_data.cpu_info.nr_running.fetch_sub(1, Ordering::Relaxed);
+                cpu_data.cpu_info.update_load();
+                return Some(task_ptr);
             }
-        } else {
-            // Fallback to global queue
-            #[cfg(not(target_arch = "riscv64"))]
-            {
-                let mut queue = READY_QUEUE.lock();
-
-                let mut requeue_count = 0;
-                let max_attempts = 10;
-
-                while requeue_count < max_attempts {
-                    match queue.dequeue() {
-                        // SAFETY: task_ptr is valid from the global ready queue.
-                        Some(task_ptr) => unsafe {
-                            let task = task_ptr.as_ref();
-                            if task.can_run_on(current_cpu) {
-                                return Some(task_ptr);
-                            } else {
-                                queue.enqueue(task_ptr);
-                                requeue_count += 1;
-                            }
-                        },
-                        None => break,
-                    }
-                }
-            }
-            #[cfg(target_arch = "riscv64")]
-            {
-                let queue = super::queue::get_ready_queue();
-
-                let mut requeue_count = 0;
-                let max_attempts = 10;
-
-                while requeue_count < max_attempts {
-                    match queue.dequeue() {
-                        // SAFETY: task_ptr is valid from RISC-V ready queue.
-                        Some(task_ptr) => unsafe {
-                            let task = task_ptr.as_ref();
-                            if task.can_run_on(current_cpu) {
-                                return Some(task_ptr);
-                            } else {
-                                queue.enqueue(task_ptr);
-                                requeue_count += 1;
-                            }
-                        },
-                        None => break,
-                    }
-                }
-            }
+        } else if let Some(task_ptr) = Self::global_take_runnable(current_cpu) {
+            return Some(task_ptr);
         }
 
         // No runnable task found, use idle task
@@ -434,85 +373,26 @@ impl Scheduler {
     /// CFS task selection
     #[cfg(feature = "alloc")]
     fn pick_next_cfs(&self) -> Option<NonNull<Task>> {
-        let current_cpu = self.cpu_id;
-
         if let Some(ref cfs) = self.cfs_queue {
-            let mut queue = cfs.lock();
-
-            // Find task with lowest vruntime that can run on this CPU
-            while let Some(task_ptr) = queue.dequeue() {
-                // SAFETY: task_ptr is valid from the CFS run queue. We read
-                // cpu_affinity to check if the task can run on this CPU.
-                unsafe {
-                    let task = task_ptr.as_ref();
-                    if task.can_run_on(current_cpu) {
-                        return Some(task_ptr);
-                    }
-                    // Task can't run on this CPU, re-queue it
-                    queue.enqueue(task_ptr);
-                }
+            if let Some(task_ptr) = take_runnable(&mut *cfs.lock(), self.cpu_id) {
+                return Some(task_ptr);
             }
         }
-
         self.idle_task.map(|t| t.as_ptr())
     }
 
-    /// Hybrid scheduler task selection
+    /// Hybrid scheduler task selection: the ready queue (real-time first),
+    /// then CFS.
     #[cfg(feature = "alloc")]
     fn pick_next_hybrid(&self) -> Option<NonNull<Task>> {
-        let current_cpu = self.cpu_id;
-
-        // Check real-time tasks first
-        {
-            #[cfg(not(target_arch = "riscv64"))]
-            {
-                let mut queue = READY_QUEUE.lock();
-                while let Some(task_ptr) = queue.dequeue() {
-                    // SAFETY: task_ptr is valid from the global ready queue.
-                    // We check affinity before returning it.
-                    unsafe {
-                        let task = task_ptr.as_ref();
-                        if task.can_run_on(current_cpu) {
-                            return Some(task_ptr);
-                        }
-                        // Task can't run on this CPU, re-queue it
-                        queue.enqueue(task_ptr);
-                    }
-                }
-            }
-            #[cfg(target_arch = "riscv64")]
-            {
-                let queue = super::queue::get_ready_queue();
-                while let Some(task_ptr) = queue.dequeue() {
-                    // SAFETY: Same as above for RISC-V ready queue.
-                    unsafe {
-                        let task = task_ptr.as_ref();
-                        if task.can_run_on(current_cpu) {
-                            return Some(task_ptr);
-                        }
-                        // Task can't run on this CPU, re-queue it
-                        queue.enqueue(task_ptr);
-                    }
-                }
-            }
+        if let Some(task_ptr) = Self::global_take_runnable(self.cpu_id) {
+            return Some(task_ptr);
         }
-
-        // Then check CFS queue
         if let Some(ref cfs) = self.cfs_queue {
-            let mut queue = cfs.lock();
-            while let Some(task_ptr) = queue.dequeue() {
-                // SAFETY: task_ptr is valid from the CFS queue.
-                unsafe {
-                    let task = task_ptr.as_ref();
-                    if task.can_run_on(current_cpu) {
-                        return Some(task_ptr);
-                    }
-                    // Task can't run on this CPU, re-queue it
-                    queue.enqueue(task_ptr);
-                }
+            if let Some(task_ptr) = take_runnable(&mut *cfs.lock(), self.cpu_id) {
+                return Some(task_ptr);
             }
         }
-
         self.idle_task.map(|t| t.as_ptr())
     }
 
@@ -1051,5 +931,39 @@ pub fn schedule_on_cpu(cpu_id: u8, task: NonNull<Task>) {
         READY_QUEUE.lock().enqueue(task);
         #[cfg(target_arch = "riscv64")]
         super::queue::get_ready_queue().enqueue(task);
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod tests {
+    use super::{super::queue::ReadyQueue, *};
+
+    fn pinned(n: u64, cpu: u8) -> NonNull<Task> {
+        let mut t = super::super::queue::tests::task(n);
+        // SAFETY: the task was just leaked by the helper and is unshared.
+        unsafe { t.as_mut().cpu_affinity = super::super::task::CpuSet::single(cpu) };
+        t
+    }
+
+    #[test]
+    fn take_runnable_rotates_each_task_at_most_once() {
+        let mut q = ReadyQueue::new_boxed();
+        let others = [pinned(1, 1), pinned(2, 1), pinned(3, 1)];
+        for &t in &others {
+            q.enqueue(t);
+        }
+        // Nothing can run on CPU 0: returns instead of looping forever, and
+        // leaves the queue as it was.
+        assert_eq!(take_runnable(&mut *q, 0), None);
+        assert_eq!(q.len(), 3);
+        let order: alloc::vec::Vec<_> = core::iter::from_fn(|| q.dequeue()).collect();
+        assert_eq!(order, others);
+
+        // A runnable task behind pinned ones is found.
+        let mine = pinned(4, 0);
+        q.enqueue(others[0]);
+        q.enqueue(mine);
+        assert_eq!(take_runnable(&mut *q, 0), Some(mine));
+        assert_eq!(q.len(), 1);
     }
 }

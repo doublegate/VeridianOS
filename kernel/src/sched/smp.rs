@@ -33,8 +33,9 @@ pub struct CpuInfo {
     pub nr_running: AtomicU32,
     /// Per-CPU scheduler
     pub scheduler: Mutex<Scheduler>,
-    /// Per-CPU ready queue
-    pub ready_queue: Mutex<ReadyQueue>,
+    /// Per-CPU ready queue, on the heap: a ReadyQueue is ~72 KiB and
+    /// CpuInfo is built on the stack (SCHED-PERF-03).
+    pub ready_queue: Mutex<alloc::boxed::Box<ReadyQueue>>,
     /// CPU vendor string
     #[cfg(feature = "alloc")]
     pub vendor: String,
@@ -66,7 +67,7 @@ pub struct CpuFeatures {
 
 impl CpuInfo {
     /// Create new CPU info
-    pub const fn new(id: u8) -> Self {
+    pub fn new(id: u8) -> Self {
         Self {
             id,
             online: AtomicBool::new(false),
@@ -75,7 +76,7 @@ impl CpuInfo {
             load: AtomicU8::new(0),
             nr_running: AtomicU32::new(0),
             scheduler: Mutex::new(Scheduler::new()),
-            ready_queue: Mutex::new(ReadyQueue::new()),
+            ready_queue: Mutex::new(ReadyQueue::new_boxed()),
             #[cfg(feature = "alloc")]
             vendor: String::new(),
             #[cfg(feature = "alloc")]

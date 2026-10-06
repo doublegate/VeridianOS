@@ -1334,8 +1334,9 @@ mod tests {
                     _ => x,
                 };
             }
-            let bits: alloc::vec::Vec<bool> =
-                (0..384).map(|i| words[i / 64] >> (i % 64) & 1 == 1).collect();
+            let bits: alloc::vec::Vec<bool> = (0..384)
+                .map(|i| words[i / 64] >> (i % 64) & 1 == 1)
+                .collect();
             for count in [1, 2, 3, 7, 31, 63, 64, 65, 100, 129, 200] {
                 assert_eq!(
                     find_run(&words, 0, 6, count),
