@@ -334,15 +334,21 @@ impl VirtQueue {
         // ring_idx is reduced modulo self.size, so it is always in bounds.
         // desc_head is asserted to be < self.size above.
         unsafe {
-            let avail = &mut *self.avail;
-            let ring_idx = avail.idx as usize % self.size as usize;
-            avail.ring[ring_idx] = desc_head;
+            // The device reads this ring: every access is volatile so the
+            // compiler can neither cache nor elide it (DRV-SEC-01).
+            let idx_ptr = core::ptr::addr_of_mut!((*self.avail).idx);
+            let idx = core::ptr::read_volatile(idx_ptr);
+            let ring_idx = idx as usize % self.size as usize;
+            core::ptr::write_volatile(
+                core::ptr::addr_of_mut!((*self.avail).ring[ring_idx]),
+                desc_head,
+            );
 
             // Write barrier: ensure the descriptor table writes and ring entry
             // write above are visible before we update the available index.
             atomic::fence(Ordering::Release);
 
-            avail.idx = avail.idx.wrapping_add(1);
+            core::ptr::write_volatile(idx_ptr, idx.wrapping_add(1));
         }
     }
 
@@ -357,16 +363,20 @@ impl VirtQueue {
         // before we read the index.
         atomic::fence(Ordering::Acquire);
 
-        // SAFETY: self.used points to valid VirtqUsed memory we own.
-        let used_idx = unsafe { (*self.used).idx };
+        // SAFETY: self.used points to valid VirtqUsed memory we own. The
+        // device writes it, so the reads are volatile.
+        let used_idx = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.used).idx)) };
 
         if self.last_used_idx == used_idx {
             return None;
         }
+        // Read the element only after observing the index.
+        atomic::fence(Ordering::Acquire);
 
         let ring_idx = self.last_used_idx as usize % self.size as usize;
         // SAFETY: ring_idx is modular-reduced to within [0, size).
-        let elem = unsafe { (*self.used).ring[ring_idx] };
+        let elem =
+            unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.used).ring[ring_idx])) };
 
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
 
@@ -376,8 +386,8 @@ impl VirtQueue {
     /// Check if any completions are pending without consuming them.
     pub fn has_used(&self) -> bool {
         atomic::fence(Ordering::Acquire);
-        // SAFETY: self.used is valid.
-        let used_idx = unsafe { (*self.used).idx };
+        // SAFETY: self.used is valid; the device writes it (volatile read).
+        let used_idx = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.used).idx)) };
         self.last_used_idx != used_idx
     }
 }

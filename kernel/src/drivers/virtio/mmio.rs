@@ -69,6 +69,11 @@ mod regs {
     pub const QUEUE_SEL: usize = 0x030;
     pub const QUEUE_NUM_MAX: usize = 0x034;
     pub const QUEUE_NUM: usize = 0x038;
+    /// Legacy (version 1) only: guest page size, queue alignment and the
+    /// queue's page frame number.
+    pub const GUEST_PAGE_SIZE: usize = 0x028;
+    pub const QUEUE_ALIGN: usize = 0x03c;
+    pub const QUEUE_PFN: usize = 0x040;
     pub const QUEUE_READY: usize = 0x044;
     pub const QUEUE_NOTIFY: usize = 0x050;
     pub const INTERRUPT_STATUS: usize = 0x060;
@@ -81,6 +86,8 @@ mod regs {
     pub const QUEUE_AVAIL_HIGH: usize = 0x094;
     pub const QUEUE_USED_LOW: usize = 0x0a0;
     pub const QUEUE_USED_HIGH: usize = 0x0a4;
+    /// Device-specific configuration space (virtio 1.x, 4.2.2).
+    pub const CONFIG: usize = 0x100;
 }
 
 /// Virtio-mmio status flags (same as PCI transport)
@@ -135,8 +142,13 @@ impl VirtioMmioTransport {
     }
 
     pub fn matches_blk(&self) -> bool {
+        self.matches_device(2) // 2 = block device
+    }
+
+    /// Whether a virtio-mmio device with the given device ID is present.
+    pub fn matches_device(&self, device_id: u32) -> bool {
         self.read32(regs::MAGIC) == 0x7472_6976 // "virt"
-            && self.read32(regs::DEVICE_ID) == 2 // 2 = block device
+            && self.read32(regs::DEVICE_ID) == device_id
     }
 
     pub fn begin_init(&self) {
@@ -147,6 +159,12 @@ impl VirtioMmioTransport {
     fn set_status(&self, bits: u32) {
         let cur = self.read32(regs::STATUS);
         self.write32(regs::STATUS, cur | bits);
+    }
+
+    /// Reset the device: it stops all DMA and forgets its queues.
+    pub fn reset(&self) {
+        self.write32(regs::STATUS, 0);
+        data_sync_barrier();
     }
 
     pub fn set_failed(&self) {
@@ -172,6 +190,18 @@ impl VirtioMmioTransport {
         self.write32(regs::DRIVER_FEATURES, features);
     }
 
+    /// Device feature bits 32..63 (VIRTIO_F_VERSION_1 is bit 32).
+    pub fn read_device_features_hi(&self) -> u32 {
+        self.write32(regs::DEVICE_FEATURES_SEL, 1);
+        self.read32(regs::DEVICE_FEATURES)
+    }
+
+    /// Accept driver feature bits 32..63.
+    pub fn write_driver_features_hi(&self, features: u32) {
+        self.write32(regs::DRIVER_FEATURES_SEL, 1);
+        self.write32(regs::DRIVER_FEATURES, features);
+    }
+
     pub fn select_queue(&self, idx: u16) {
         self.write32(regs::QUEUE_SEL, idx as u32);
     }
@@ -185,10 +215,32 @@ impl VirtioMmioTransport {
     }
 
     pub fn set_queue_ready(&self) {
-        self.write32(regs::QUEUE_READY, 1);
+        // Version 1 has no QUEUE_READY: a non-zero QUEUE_PFN activates it.
+        if !self.is_legacy() {
+            self.write32(regs::QUEUE_READY, 1);
+        }
+    }
+
+    /// Legacy (version 1) device: queues are addressed by page frame number.
+    pub fn is_legacy(&self) -> bool {
+        self.version() == 1
+    }
+
+    /// Legacy queue setup: 4 KiB pages and alignment (matching VirtQueue's
+    /// layout, whose used ring starts on a page boundary), then the PFN.
+    /// Modern-only registers are ignored by a legacy device, so without this
+    /// a legacy device never saw the rings at all.
+    pub fn write_queue_pfn(&self, pfn: u32) {
+        self.write32(regs::GUEST_PAGE_SIZE, 4096);
+        self.write32(regs::QUEUE_ALIGN, 4096);
+        self.write32(regs::QUEUE_PFN, pfn);
+        data_sync_barrier();
     }
 
     pub fn write_queue_phys(&self, desc: u64, avail: u64, used: u64) {
+        if self.is_legacy() {
+            return; // uses write_queue_pfn
+        }
         self.write32(regs::QUEUE_DESC_LOW, desc as u32);
         self.write32(regs::QUEUE_DESC_HIGH, (desc >> 32) as u32);
         self.write32(regs::QUEUE_AVAIL_LOW, avail as u32);
@@ -210,10 +262,19 @@ impl VirtioMmioTransport {
         }
     }
 
+    /// Read a 64-bit device config field. Config space starts at 0x100 in
+    /// both legacy and modern virtio-mmio; this used to read STATUS + 0x14
+    /// (0x84, QUEUE_DESC_HIGH) instead.
     pub fn read_config_u64(&self, offset: usize) -> u64 {
-        let lo = self.read32(regs::STATUS + 0x14 + offset) as u64; // config space follows status+0x14 in legacy mmio
-        let hi = self.read32(regs::STATUS + 0x18 + offset) as u64;
+        let lo = self.read32(regs::CONFIG + offset) as u64;
+        let hi = self.read32(regs::CONFIG + offset + 4) as u64;
         (hi << 32) | lo
+    }
+
+    /// Read one byte of device config space.
+    pub fn read_config_u8(&self, offset: usize) -> u8 {
+        // SAFETY: base + CONFIG + offset lies in the device's MMIO window.
+        unsafe { ptr::read_volatile((self.base + regs::CONFIG + offset) as *const u8) }
     }
 
     pub fn version(&self) -> u32 {
@@ -275,6 +336,9 @@ pub fn try_init_mmio_blk(
 
     let queue = crate::drivers::virtio::queue::VirtQueue::new(qmax)?;
     transport.set_queue_size(queue.size());
+    if transport.is_legacy() {
+        transport.write_queue_pfn(queue.pfn());
+    }
     transport.write_queue_phys(queue.phys_desc(), queue.phys_avail(), queue.phys_used());
     transport.set_queue_ready();
 
