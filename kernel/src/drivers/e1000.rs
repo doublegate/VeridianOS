@@ -12,6 +12,7 @@
 //! operations, and the device is reset before any DMA memory is freed.
 
 use alloc::vec::Vec;
+use core::mem::ManuallyDrop;
 
 use crate::{
     drivers::dma_frame::DmaFrame,
@@ -95,7 +96,9 @@ pub struct E1000Driver {
     mmio_base: usize,
     mac_address: MacAddress,
     /// One frame: RX descriptors at offset 0, TX descriptors after them.
-    rings: DmaFrame,
+    /// `ManuallyDrop` so `Drop` can leak it when the device did not leave
+    /// reset and may still DMA into it.
+    rings: ManuallyDrop<DmaFrame>,
     /// Packet buffers, two per frame: buffer `i` is half `i % 2` of frame
     /// `i / 2`.
     rx_frames: Vec<DmaFrame>,
@@ -127,7 +130,7 @@ impl E1000Driver {
         let mut driver = Self {
             mmio_base,
             mac_address: MacAddress::ZERO,
-            rings,
+            rings: ManuallyDrop::new(rings),
             rx_frames,
             tx_frames,
             rx_current: 0,
@@ -192,24 +195,30 @@ impl E1000Driver {
         0
     }
 
-    /// Reset the controller: it stops all DMA.
-    fn reset(&self) {
+    /// Reset the controller, which stops all DMA. Returns whether the
+    /// controller confirmed the reset by clearing `CTRL_RST`; on `false` the
+    /// device may still own the rings and buffers (review of the v0.26.0
+    /// stack, PR #10).
+    fn reset(&self) -> bool {
         self.write_reg(REG_IMC, 0xFFFF_FFFF);
         self.write_reg(REG_RCTL, 0);
         self.write_reg(REG_TCTL, 0);
         self.write_reg(REG_CTRL, self.read_reg(REG_CTRL) | CTRL_RST);
-        for _ in 0..100_000 {
-            if self.read_reg(REG_CTRL) & CTRL_RST == 0 {
-                break;
-            }
-            core::hint::spin_loop();
-        }
+        let done = poll_until_clear(|| self.read_reg(REG_CTRL), CTRL_RST, RESET_SPINS);
         self.write_reg(REG_IMC, 0xFFFF_FFFF);
         self.read_reg(REG_ICR);
+        done
     }
 
     fn initialize(&mut self) -> Result<(), KernelError> {
-        self.reset();
+        if !self.reset() {
+            // Programming rings into a controller that never left reset
+            // would hand it DMA addresses it may act on later.
+            return Err(KernelError::Timeout {
+                operation: "e1000 reset",
+                duration_ms: 0,
+            });
+        }
         self.write_reg(REG_CTRL, self.read_reg(REG_CTRL) | CTRL_SLU);
         self.mac_address = self.read_mac_address();
 
@@ -370,7 +379,19 @@ impl E1000Driver {
 impl Drop for E1000Driver {
     fn drop(&mut self) {
         // Stop all DMA before the rings and buffers are freed.
-        self.reset();
+        if self.reset() {
+            // SAFETY: the controller confirmed the reset, so it no longer
+            // DMAs into the rings; `rings` is never used after this.
+            unsafe { ManuallyDrop::drop(&mut self.rings) };
+        } else {
+            // The device did not leave reset and may still write the rings
+            // and packet buffers: leak them rather than hand the frames back
+            // to the allocator (dma_frame.rs contract). `rings` stays
+            // `ManuallyDrop` and is never dropped.
+            core::mem::forget(core::mem::take(&mut self.rx_frames));
+            core::mem::forget(core::mem::take(&mut self.tx_frames));
+            println!("[E1000] reset timed out; leaking its DMA frames");
+        }
     }
 }
 
@@ -437,6 +458,21 @@ impl NetworkDevice for E1000Driver {
 }
 
 /// Initialize E1000 driver
+/// Upper bound on `CTRL_RST` polls during a reset.
+const RESET_SPINS: usize = 100_000;
+
+/// Poll `read` until every bit of `mask` reads clear, at most `spins` times.
+/// Returns whether the bits cleared.
+fn poll_until_clear(mut read: impl FnMut() -> u32, mask: u32, spins: usize) -> bool {
+    for _ in 0..spins {
+        if read() & mask == 0 {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    false
+}
+
 pub fn init() -> Result<(), KernelError> {
     println!("[E1000] Intel E1000 network driver module loaded");
     Ok(())
@@ -456,5 +492,24 @@ mod tests {
         assert!(TX_RING_OFFSET + NUM_TX_DESC * 16 <= crate::mm::FRAME_SIZE);
         assert_eq!(NUM_RX_DESC % 2, 0);
         assert_eq!(NUM_TX_DESC % 2, 0);
+    }
+
+    #[test]
+    fn reset_poll_reports_timeout_when_bit_never_clears() {
+        assert!(!poll_until_clear(|| CTRL_RST, CTRL_RST, 1000));
+    }
+
+    #[test]
+    fn reset_poll_reports_success_when_bit_clears() {
+        let mut reads = 0;
+        let read = || {
+            reads += 1;
+            if reads < 5 {
+                CTRL_RST
+            } else {
+                0
+            }
+        };
+        assert!(poll_until_clear(read, CTRL_RST, 1000));
     }
 }
