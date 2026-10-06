@@ -115,6 +115,19 @@ fn validate_user_string_ptr(ptr: usize) -> Result<(), SyscallError> {
     validate_user_pointer(ptr, 1)
 }
 
+/// The sixth syscall argument, which the 5-argument handlers do not receive.
+/// On x86_64 it is r9, saved in the syscall frame; 0 elsewhere.
+fn syscall_arg6() -> usize {
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::arch::x86_64::syscall::get_syscall_frame().map_or(0, |frame| frame.r9 as usize)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        0
+    }
+}
+
 /// Syscall rate limiter using a token bucket.
 ///
 /// Consumption is a single atomic `fetch_update` that never goes below zero,
@@ -1487,9 +1500,11 @@ fn handle_syscall(
         Syscall::Futex => {
             // Linux ABI: futex(uaddr, op, val, timeout/val2, uaddr2, val3)
             // arg1=uaddr, arg2=op, arg3=val, arg4=timeout/val2, arg5=uaddr2
-            // arg6 (val3) not available (5-arg handler), default to 0.
-            // Mask off FUTEX_PRIVATE_FLAG (bit 7 = 128) -- VeridianOS is
-            // single-address-space per process, so private == shared.
+            // Linux futex(uaddr, op, val, timeout|val2, uaddr2, val3).
+            // val3 (arg6) is not a handler parameter; it is read from the
+            // saved syscall frame. Mask off FUTEX_PRIVATE_FLAG (bit 7 = 128)
+            // -- VeridianOS is single-address-space per process, so
+            // private == shared.
             let cmd = (arg2 as u32) & 0x7F;
             match cmd {
                 // FUTEX_WAIT: wait if *uaddr == val
@@ -1498,14 +1513,13 @@ fn handle_syscall(
                 1 => futex::sys_futex_wake(arg1, arg3, 0).map(|v| v as usize),
                 // FUTEX_REQUEUE: wake val waiters, requeue rest to uaddr2
                 3 => futex::sys_futex_requeue(arg1, arg3, arg5, 0).map(|v| v as usize),
-                // FUTEX_WAKE_OP: atomic op on uaddr2, then conditional wake
-                5 => futex::sys_futex_wake_op(arg1, arg3, arg5, 0, arg2).map(|v| v as usize),
-                // FUTEX_WAIT_BITSET: wait with bitset mask.
-                // Linux passes bitset as arg6 (val3), which is not available
-                // in our 5-arg handler. We pass arg5 (uaddr2) as aux, which
-                // sys_futex_wait interprets as the bitset for op==9. For musl
-                // this is acceptable since it primarily uses FUTEX_WAIT/WAKE.
-                9 => futex::sys_futex_wait(arg1, arg3 as u32, arg4, arg5, arg2).map(|v| v as usize),
+                // FUTEX_WAKE_OP(uaddr, val, val2 = arg4, uaddr2, encoded op = val3).
+                // Passing 0 for the encoded op meant "*uaddr2 = 0" on every call.
+                5 => futex::sys_futex_wake_op(arg1, arg3, arg5, arg4, syscall_arg6())
+                    .map(|v| v as usize),
+                // FUTEX_WAIT_BITSET: the bitset is val3 (arg6).
+                9 => futex::sys_futex_wait(arg1, arg3 as u32, arg4, syscall_arg6(), arg2)
+                    .map(|v| v as usize),
                 _ => Err(SyscallError::InvalidArgument),
             }
         }

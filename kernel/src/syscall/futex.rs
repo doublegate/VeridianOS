@@ -18,11 +18,12 @@ use crate::{
     syscall::{userspace::validate_user_ptr, SyscallError},
 };
 
-// Bit positions for FUTEX_WAKE_OP operation encoding (Linux-compatible)
-// op = oparg | (cmp << 28) | (op << 24)
-const FUTEX_OP_MASK: u32 = 0xF << 24;
-const FUTEX_CMP_MASK: u32 = 0xF << 28;
-const FUTEX_OPARG_MASK: u32 = 0xFFFF;
+// FUTEX_WAKE_OP operation encoding, exactly as Linux's FUTEX_OP():
+//   (op & 0xf) << 28 | (cmp & 0xf) << 24 | (oparg & 0xfff) << 12 | (cmparg &
+// 0xfff) oparg and cmparg are sign-extended 12-bit values; comparisons are
+// signed.
+/// `op` flag: the operand is `1 << oparg` rather than `oparg`.
+const FUTEX_OP_OPARG_SHIFT: u32 = 8;
 
 // Supported operations (subset)
 const FUTEX_OP_SET: u32 = 0; // *(int *)uaddr2 = oparg
@@ -371,90 +372,66 @@ pub fn sys_futex_dispatch(
         FUTEX_WAIT_BITSET => sys_futex_wait(uaddr, val as u32, uaddr2, val3, op),
         FUTEX_WAKE => sys_futex_wake(uaddr, val, uaddr2),
         FUTEX_REQUEUE => sys_futex_requeue(uaddr, val, uaddr2, val3),
-        FUTEX_WAKE_OP => sys_futex_wake_op(uaddr, val, uaddr2, val3, op),
+        // Native ABI has no separate val2: wake up to `val` on both words.
+        FUTEX_WAKE_OP => sys_futex_wake_op(uaddr, val, uaddr2, val, val3),
         _ => Err(SyscallError::InvalidArgument),
     }
 }
 
-/// Perform a `FUTEX_WAKE_OP` operation: atomically apply an arithmetic
-/// operation to `*uaddr2`, compare the old value against `cmparg`, and
-/// conditionally wake waiters on `uaddr`.
+/// Perform a `FUTEX_WAKE_OP` operation, with Linux semantics: atomically
+/// apply the encoded operation to `*uaddr2`, wake up to `val` waiters on
+/// `uaddr`, and -- if the encoded comparison holds for the *old* value of
+/// `*uaddr2` -- also wake up to `val2` waiters on `uaddr2`.
 ///
-/// The `op` parameter encodes both the arithmetic operation and the
-/// comparison in a packed format compatible with Linux:
-/// ```text
-/// op = oparg[15:0] | (op_code[3:0] << 24) | (cmp_code[3:0] << 28)
-/// ```
-///
-/// # Arguments
-///
-/// * `uaddr`  - Primary futex word to wake on (if comparison passes).
-/// * `wake`   - Maximum number of waiters to wake on `uaddr`.
-/// * `uaddr2` - Futex word to modify atomically.
-/// * `op`     - Packed operation + comparison + argument.
-/// * `_unused` - Reserved (unused).
+/// `encoded_op` is Linux's `FUTEX_OP(op, oparg, cmp, cmparg)`; see
+/// [`wake_op_eval`].
 ///
 /// # Returns
 ///
-/// `Ok(n)` where `n` is the number of waiters woken, or `Ok(0)` if the
-/// comparison failed.
+/// The total number of waiters woken.
 pub fn sys_futex_wake_op(
     uaddr: usize,
-    wake: usize,
+    val: usize,
     uaddr2: usize,
-    op: usize,
-    _unused: usize,
+    val2: usize,
+    encoded_op: usize,
 ) -> Result<isize, SyscallError> {
     // For safety, require alignment and same-process addresses.
     if uaddr == 0 || uaddr & 0x3 != 0 || uaddr2 == 0 || uaddr2 & 0x3 != 0 {
         return Err(SyscallError::InvalidArgument);
     }
-
     validate_user_ptr(uaddr as *const u32, core::mem::size_of::<u32>())?;
     validate_user_ptr(uaddr2 as *const u32, core::mem::size_of::<u32>())?;
 
-    // Decode op
-    let op_code = ((op as u32) & FUTEX_OP_MASK) >> 24;
-    let cmp_code = ((op as u32) & FUTEX_CMP_MASK) >> 28;
-    let oparg = (op as u32) & FUTEX_OPARG_MASK;
-    let cmparg = ((op >> 12) & FUTEX_OPARG_MASK as usize) as u32;
+    let encoded = encoded_op as u32;
+    // Reject a malformed encoding before touching user memory.
+    wake_op_eval(encoded, 0)?;
 
-    // SAFETY: `uaddr2` has been validated as a properly-aligned, mapped,
-    // user-space pointer.  Volatile read is required because another thread
-    // may concurrently modify this memory location.
-    let cur = unsafe { core::ptr::read_volatile(uaddr2 as *const u32) };
-    let new_val = match op_code {
-        FUTEX_OP_SET => oparg,
-        FUTEX_OP_ADD => cur.wrapping_add(oparg),
-        FUTEX_OP_OR => cur | oparg,
-        FUTEX_OP_ANDN => cur & !oparg,
-        FUTEX_OP_XOR => cur ^ oparg,
-        _ => return Err(SyscallError::InvalidArgument),
-    };
-    // SAFETY: Same validation as above.  Volatile write is required because
-    // other threads may be reading this memory concurrently (e.g. in a
-    // FUTEX_WAIT spin).
-    unsafe {
-        core::ptr::write_volatile(uaddr2 as *mut u32, new_val);
-    }
+    // Fault the page in (or fail with EFAULT) through the fault-tolerant
+    // accessor before the atomic access below.
+    crate::syscall::userspace::read_user::<u32>(uaddr2)?;
 
-    // Compare
-    let cmp_ok = match cmp_code {
-        FUTEX_CMP_EQ => cur == cmparg,
-        FUTEX_CMP_NE => cur != cmparg,
-        FUTEX_CMP_LT => cur < cmparg,
-        FUTEX_CMP_LE => cur <= cmparg,
-        FUTEX_CMP_GT => cur > cmparg,
-        FUTEX_CMP_GE => cur >= cmparg,
-        _ => false,
-    };
+    // Atomic read-modify-write of *uaddr2: other threads update it
+    // concurrently; a volatile read + write lost updates (SYS-CONC-01).
+    // SAFETY: uaddr2 is a validated, 4-byte-aligned user address that was
+    // just successfully read; AtomicU32 has the same layout as u32.
+    let word = unsafe { core::sync::atomic::AtomicU32::from_ptr(uaddr2 as *mut u32) };
+    let old = word
+        .fetch_update(
+            core::sync::atomic::Ordering::SeqCst,
+            core::sync::atomic::Ordering::SeqCst,
+            |old| wake_op_eval(encoded, old).ok().map(|(new, _)| new),
+        )
+        .map_err(|_| SyscallError::InvalidArgument)?;
+    let (_, cmp_ok) = wake_op_eval(encoded, old)?;
 
-    // If compare passes, wake (use match-any bitset for WAKE_OP)
+    // Linux semantics: always wake up to `val` waiters on uaddr; if the
+    // comparison held, also wake up to `val2` waiters on uaddr2.
+    let mut woken = sys_futex_wake(uaddr, val, FUTEX_WAIT_BITSET_MATCH_ANY as usize)?;
     if cmp_ok {
-        sys_futex_wake(uaddr, wake, FUTEX_WAIT_BITSET_MATCH_ANY as usize)
-    } else {
-        Ok(0)
+        woken += sys_futex_wake(uaddr2, val2, FUTEX_WAIT_BITSET_MATCH_ANY as usize)?;
     }
+    Ok(woken)
 }
 
 /// Perform a `FUTEX_REQUEUE` operation: wake up to `wake_count` threads on
@@ -819,4 +796,102 @@ fn boot_futex_spin(
     _deadline: Option<u64>,
 ) -> Result<isize, SyscallError> {
     Err(SyscallError::InvalidState)
+}
+
+/// Evaluate a FUTEX_WAKE_OP encoding against the old value of `*uaddr2`:
+/// returns the value to store and whether the comparison holds.
+fn wake_op_eval(encoded: u32, old: u32) -> Result<(u32, bool), SyscallError> {
+    let op = encoded >> 28;
+    let cmp = (encoded >> 24) & 0xF;
+    let mut oparg = ((encoded << 8) as i32) >> 20;
+    let cmparg = ((encoded << 20) as i32) >> 20;
+    if op & FUTEX_OP_OPARG_SHIFT != 0 {
+        if !(0..32).contains(&oparg) {
+            return Err(SyscallError::InvalidArgument);
+        }
+        oparg = (1u32 << oparg) as i32;
+    }
+    let old_s = old as i32;
+    let new = match op & !FUTEX_OP_OPARG_SHIFT {
+        FUTEX_OP_SET => oparg,
+        FUTEX_OP_ADD => old_s.wrapping_add(oparg),
+        FUTEX_OP_OR => old_s | oparg,
+        FUTEX_OP_ANDN => old_s & !oparg,
+        FUTEX_OP_XOR => old_s ^ oparg,
+        _ => return Err(SyscallError::InvalidArgument),
+    };
+    let cmp_ok = match cmp {
+        FUTEX_CMP_EQ => old_s == cmparg,
+        FUTEX_CMP_NE => old_s != cmparg,
+        FUTEX_CMP_LT => old_s < cmparg,
+        FUTEX_CMP_LE => old_s <= cmparg,
+        FUTEX_CMP_GT => old_s > cmparg,
+        FUTEX_CMP_GE => old_s >= cmparg,
+        _ => return Err(SyscallError::InvalidArgument),
+    };
+    Ok((new as u32, cmp_ok))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Linux's FUTEX_OP() macro.
+    const fn futex_op(op: u32, oparg: u32, cmp: u32, cmparg: u32) -> u32 {
+        ((op & 0xF) << 28) | ((cmp & 0xF) << 24) | ((oparg & 0xFFF) << 12) | (cmparg & 0xFFF)
+    }
+
+    /// SYS-CONC-01: the fields used to be read from the wrong bits (op and
+    /// cmp swapped, oparg and cmparg swapped).
+    #[test]
+    fn wake_op_decodes_linux_layout() {
+        // *uaddr2 += 5; wake uaddr2 if old > 1.
+        let enc = futex_op(FUTEX_OP_ADD, 5, FUTEX_CMP_GT, 1);
+        assert_eq!(wake_op_eval(enc, 3), Ok((8, true)));
+        assert_eq!(wake_op_eval(enc, 1), Ok((6, false)));
+        // *uaddr2 = 0; wake if old == 1 (glibc's pthread_cond_signal shape).
+        let enc = futex_op(FUTEX_OP_SET, 0, FUTEX_CMP_EQ, 1);
+        assert_eq!(wake_op_eval(enc, 1), Ok((0, true)));
+        assert_eq!(wake_op_eval(enc, 2), Ok((0, false)));
+        assert_eq!(
+            wake_op_eval(futex_op(FUTEX_OP_ANDN, 0b110, FUTEX_CMP_NE, 0), 0b111),
+            Ok((0b001, true))
+        );
+        assert_eq!(
+            wake_op_eval(futex_op(FUTEX_OP_XOR, 0xFF, FUTEX_CMP_LE, 0), 0x0F),
+            Ok((0xF0, false))
+        );
+    }
+
+    #[test]
+    fn wake_op_sign_extends_and_shifts() {
+        // oparg 0xFFF is -1: ADD -1 decrements.
+        assert_eq!(
+            wake_op_eval(futex_op(FUTEX_OP_ADD, 0xFFF, FUTEX_CMP_EQ, 0), 5),
+            Ok((4, false))
+        );
+        // cmparg 0xFFF is -1, compared signed.
+        assert_eq!(
+            wake_op_eval(futex_op(FUTEX_OP_SET, 0, FUTEX_CMP_LT, 0xFFF), u32::MAX - 1),
+            Ok((0, true))
+        );
+        // OPARG_SHIFT: OR (1 << 4).
+        let enc = futex_op(FUTEX_OP_OR | FUTEX_OP_OPARG_SHIFT, 4, FUTEX_CMP_GE, 0);
+        assert_eq!(wake_op_eval(enc, 1), Ok((17, true)));
+        let enc = futex_op(FUTEX_OP_SET | FUTEX_OP_OPARG_SHIFT, 31, FUTEX_CMP_EQ, 0);
+        assert_eq!(wake_op_eval(enc, 0), Ok((0x8000_0000, true)));
+    }
+
+    #[test]
+    fn wake_op_rejects_bad_encodings() {
+        assert!(wake_op_eval(futex_op(5, 0, FUTEX_CMP_EQ, 0), 0).is_err());
+        assert!(wake_op_eval(futex_op(FUTEX_OP_SET, 0, 6, 0), 0).is_err());
+        // Shift counts outside 0..32 (oparg is signed: 0xFFF = -1).
+        assert!(wake_op_eval(futex_op(FUTEX_OP_SET | FUTEX_OP_OPARG_SHIFT, 32, 0, 0), 0).is_err());
+        assert!(wake_op_eval(
+            futex_op(FUTEX_OP_SET | FUTEX_OP_OPARG_SHIFT, 0xFFF, 0, 0),
+            0
+        )
+        .is_err());
+    }
 }
