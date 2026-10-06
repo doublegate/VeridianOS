@@ -145,24 +145,47 @@ kernel's, from the `perf` shell command (1,000 iterations, 10 warmup, TSC timing
 | Build Mode | Debug (dev) |
 | Guest RAM | 2GB |
 
-**Baseline** (2026-10-05, commit `f007c76`; the v0.25.2 kernel plus the KDE Ring-3 work):
+**Units.** Until v0.26.0 every in-kernel benchmark converted TSC ticks to "ns" by dividing
+by 2, an assumed 2 GHz clock (`bench::cycles_to_ns`). This guest's TSC runs at 3600.18 MHz
+(PIT-calibrated, ADR 0001), so those figures, including every earlier table in this report,
+overstate times by 1.8x. The benchmarks now convert at the calibrated clock-source frequency.
+The baseline below has been converted to real nanoseconds (old value x 2 / 3.6) so that both
+columns use the same unit. Comparisons within one column were always valid.
 
-| Benchmark | Min (ns) | Avg (ns) | Max (ns) | Target | After (avg ns) |
-|-----------|---------:|---------:|---------:|-------:|---------------:|
-| syscall_getpid | 46 | 49 | 68 | 500 | |
-| frame_alloc_1 (per-CPU) | 1,586 | 1,609 | 6,201 | 2,000 | |
-| frame_alloc_global | 790 | 806 | 859 | 4,000 | |
-| cap_validate | 31 | 33 | 36 | 100 | |
-| atomic_counter | 24 | 27 | 30 | 50 | |
-| ipc_stats_read | 29 | 30 | 34 | 100 | |
-| sched_current | 46 | 49 | 52 | 200 | |
+**Baseline** (2026-10-05, commit `f007c76`; the v0.25.2 kernel plus the KDE Ring-3 work)
+against **after Sprint B** (2026-10-06, commit `e1a0784`):
 
-On a single CPU, with no contention possible, the per-CPU path is already 2.0x slower than
-the global allocator it is meant to speed up (1,609 vs 806 ns): every call takes the one
-mutex around all 16 caches, and a refill takes the global allocator lock while still holding
-it (MEM-PERF-01). The v0.21.0 run above showed the same inversion (2,215 vs 1,525 ns).
+| Benchmark | Baseline avg (ns) | After min / avg / max (ns) | Target | Change |
+|-----------|------------------:|---------------------------:|-------:|--------|
+| syscall_getpid | 27 | 25 / 46 / 13,986 | 500 | avg pulled up by one timer interrupt; min unchanged |
+| frame_alloc_1 (per-CPU) | 894 | 59 / 62 / 79 | 2,000 | 14x faster (MEM-PERF-01: per-CPU caches, batched refill) |
+| frame_alloc_global | 448 | 234 / 272 / 16,859 | 4,000 | 1.6x faster (MEM-PERF-02: word scans, hint, atomic stats) |
+| cap_lookup (new) | 202 | 91 / 93 / 112 | 100 | 2.2x faster (CAP-PERF-01 hash table); see below |
+| atomic_counter | 15 | 13 / 13 / 14 | 50 | unchanged (reference) |
+| ipc_stats_read | 17 | 17 / 19 / 21 | 100 | unchanged |
+| sched_current | 27 | 26 / 27 / 37 | 200 | unchanged |
 
-Host-target unit tests at baseline: **4,284 passed, 0 failed**
+- `cap_lookup` replaces `cap_validate`. The old benchmark compared two constants and measured
+  no capability code. Its baseline figure comes from the new benchmark run against the old
+  two-level table, which was temporarily restored for the measurement.
+- Per-CPU allocation is now faster than the global allocator, which it is meant to be. Before,
+  it was 2x slower (MEM-PERF-01).
+- The maxima are single interrupted iterations. 1,000 iterations run with the 1 kHz tick
+  enabled.
+
+Storage and network changes measured outside the `perf` command:
+
+| Measurement | Before | After |
+|---|---|---|
+| BlockFS root mount, 7,049 blocks in use (x86_64/KVM) | 3,537 ms | 86 ms (738 ms with virtio-blk batching alone) |
+| BlockFS root mount on AArch64 / RISC-V (TCG) | out-of-memory panic | 1.26 s / 4.3 s |
+
+At baseline, on a single CPU with no contention possible, the per-CPU path was 2.0x slower than
+the global allocator it is meant to speed up (894 vs 448 ns). Every call took the one mutex
+around all 16 caches, and a refill took the global allocator lock while still holding it
+(MEM-PERF-01). The v0.21.0 run above showed the same inversion, in the old units.
+
+Host-target unit tests at baseline: **4,284 passed, 0 failed**; after Sprint B: **4,413 passed, 0 failed**
 (`cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu`).
 The "Host-Target Tests" section above is out of date: the host build compiles, and
 `[INIT] Results: 29/29 passed` plus BOOTOK hold on all three architectures.

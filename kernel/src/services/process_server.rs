@@ -511,9 +511,8 @@ impl ProcessServer {
     // Helper functions
 
     fn get_system_time(&self) -> u64 {
-        // Read the hardware timestamp counter and convert to approximate
-        // microseconds (assumes 2 GHz clock: 1 cycle = 0.5 ns, 2000 cycles = 1 us).
-        crate::arch::entropy::read_timestamp() / 2000
+        // Microseconds since boot from the architectural clock source.
+        crate::arch::timer::monotonic_ns() / 1000
     }
 
     fn remove_from_session_and_group(&self, pid: ProcessId) {

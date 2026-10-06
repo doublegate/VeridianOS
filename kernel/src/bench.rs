@@ -63,14 +63,22 @@ impl BenchmarkResult {
 /// RISC-V (rdcycle).
 #[inline]
 pub fn read_timestamp() -> u64 {
-    crate::arch::entropy::read_timestamp()
+    // The architectural clock source (ADR 0001): the TSC on x86_64,
+    // CNTVCT_EL0 on AArch64, the `time` CSR on RISC-V. (RISC-V used to read
+    // `cycle`, whose rate nothing records.)
+    crate::arch::timer::read_hw_timestamp()
 }
 
-/// Convert cycles to nanoseconds (approximate)
-/// This assumes a 2GHz processor for now
+/// Convert `read_timestamp` ticks to nanoseconds at the clock source's
+/// frequency: the calibrated TSC rate, CNTFRQ_EL0, or the device-tree
+/// timebase. This used to divide by 2 on every architecture (an assumed
+/// 2 GHz), which overstated times by 1.8x on a 3.6 GHz TSC.
 pub fn cycles_to_ns(cycles: u64) -> u64 {
-    // 2GHz = 2 cycles per nanosecond
-    cycles / 2
+    let hz = crate::arch::timer::hw_ticks_per_second();
+    if hz == 0 {
+        return 0;
+    }
+    ((cycles as u128 * 1_000_000_000) / hz as u128) as u64
 }
 
 /// Run a benchmark function multiple times

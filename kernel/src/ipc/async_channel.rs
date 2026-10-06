@@ -15,7 +15,7 @@ use super::{
     error::{IpcError, Result},
     message::Message,
 };
-use crate::arch::entropy::read_timestamp;
+use crate::bench::read_timestamp;
 
 /// Maximum messages in async channel
 pub const ASYNC_CHANNEL_SIZE: usize = 256;
@@ -323,9 +323,8 @@ fn wake_process(pid: ProcessId) {
     crate::sched::ipc_blocking::wake_up_process(pid);
 }
 
-fn timestamp_to_ns(cycles: u64) -> u64 {
-    // Assume 2GHz CPU for now
-    cycles / 2
+fn timestamp_to_ns(ticks: u64) -> u64 {
+    crate::bench::cycles_to_ns(ticks)
 }
 
 #[cfg(all(test, not(target_os = "none")))]
