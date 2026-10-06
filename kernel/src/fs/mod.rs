@@ -521,12 +521,18 @@ impl MountTable {
     /// filesystem at `/dev`), and `..` leaves a mount the same way, by
     /// re-walking the shortened canonical path from the root. Every
     /// component that is not last must be a directory.
+    ///
+    /// With `creds = Some((uid, gid))` every directory searched -- for a
+    /// name or for `..` -- must grant that caller search (execute)
+    /// permission, as POSIX requires; otherwise the walk fails with
+    /// `PermissionDenied`. `None` is the kernel's own lookups, and root.
     fn resolve(
         &self,
         path: &str,
         cwd: &str,
         follow_last: bool,
         symlink_depth: usize,
+        creds: Option<(u32, u32)>,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
         use alloc::collections::VecDeque;
 
@@ -553,6 +559,14 @@ impl MountTable {
             // be a directory: "/a/file/.." is ENOTDIR, as in POSIX.
             if node.node_type() != NodeType::Directory {
                 return Err(KernelError::FsError(crate::error::FsError::NotADirectory));
+            }
+            if let Some((uid, gid)) = creds {
+                let meta = node.metadata()?;
+                if !meta.permissions.can_run(uid, gid, meta.uid, meta.gid) {
+                    return Err(KernelError::FsError(
+                        crate::error::FsError::PermissionDenied,
+                    ));
+                }
             }
             if component == ".." {
                 canon.pop();
@@ -609,6 +623,15 @@ impl MountTable {
         }
         Ok(node)
     }
+}
+
+/// The credentials whose search permission a path walk checks: the calling
+/// process's, or `None` (no check) for root and for kernel context with no
+/// current process.
+fn search_creds() -> Option<(u32, u32)> {
+    crate::process::current_process()
+        .map(|p| (p.uid(), p.gid()))
+        .filter(|&(uid, _)| uid != 0)
 }
 
 /// `/` followed by the components joined with `/`; `/` for none.
@@ -744,7 +767,8 @@ impl Vfs {
         cwd: &str,
         follow_last: bool,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
-        self.snapshot().resolve(path, cwd, follow_last, 0)
+        self.snapshot()
+            .resolve(path, cwd, follow_last, 0, search_creds())
     }
 
     /// Inner path resolution with configurable symlink behavior.
@@ -761,7 +785,7 @@ impl Vfs {
         symlink_depth: usize,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
         self.snapshot()
-            .resolve(path, cwd, follow_last, symlink_depth)
+            .resolve(path, cwd, follow_last, symlink_depth, search_creds())
             .map(|(node, _)| node)
     }
 
@@ -1522,6 +1546,40 @@ mod tests {
     }
 
     #[test]
+    fn walk_requires_search_permission_on_every_directory() {
+        // Review of the v0.26.0 stack, PR #9: the walk never checked the
+        // execute bit, so a mode-0700 directory hid nothing below it.
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let private = root
+            .mkdir("private", Permissions::from_mode(0o700))
+            .unwrap();
+        let open = private
+            .mkdir("open", Permissions::from_mode(0o755))
+            .unwrap();
+        open.create("f", Permissions::from_mode(0o644)).unwrap();
+        let table = vfs.snapshot();
+        let other = Some((1000, 1000));
+        // Root-owned 0700: another user cannot pass through it, even to a
+        // world-readable file, and not by ".." either.
+        assert!(matches!(
+            table.resolve("/private/open/f", "/", true, 0, other),
+            Err(KernelError::FsError(
+                crate::error::FsError::PermissionDenied
+            ))
+        ));
+        assert!(table.resolve("/private/..", "/", true, 0, other).is_err());
+        // The directory itself can still be named (its parent is searchable).
+        assert!(table.resolve("/private", "/", true, 0, other).is_ok());
+        // Kernel context and root are unaffected.
+        assert!(table.resolve("/private/open/f", "/", true, 0, None).is_ok());
+        // Execute without read is enough to pass through a directory.
+        let x_only = root.mkdir("xonly", Permissions::from_mode(0o711)).unwrap();
+        x_only.create("g", Permissions::from_mode(0o644)).unwrap();
+        assert!(table.resolve("/xonly/g", "/", true, 0, other).is_ok());
+    }
+
+    #[test]
     fn symlink_loop_is_detected() {
         let vfs = make_vfs_with_root();
         let root = vfs.root_fs().unwrap().root();
@@ -1784,7 +1842,7 @@ mod tests {
         let before = vfs.snapshot();
         vfs.unmount("/tmp").unwrap();
         // The old snapshot still sees the mount; new walks do not.
-        assert!(before.resolve("/tmp/f", "/", true, 0).is_ok());
+        assert!(before.resolve("/tmp/f", "/", true, 0, None).is_ok());
         assert!(vfs.resolve_path("/tmp/f").is_err());
         assert!(vfs.mounted("/tmp").is_none());
     }
