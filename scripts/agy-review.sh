@@ -79,10 +79,16 @@ AGY_ERROR_MAX_BYTES="${AGY_ERROR_MAX_BYTES:-2000}"
 # UNAVAILABLE` on line 3. That is the false positive the anchoring was supposed to
 # prevent, reintroduced by the very check meant to enforce it. The invariant is that a
 # backend failure IS the whole capture, so only the first line can carry it.
+# A tool notice from agy's own file viewer, returned as the whole answer when the model stopped
+# after a truncated read instead of writing a review. Observed on VeridianOS PR #15: the posted
+# "review" was only `_The output was truncated. To view the remaining content, please use the
+# ContentOffset parameter ..._`, under a green check. Same rules as the error line: line 1 of a
+# short capture.
+AGY_TOOL_NOTICE_RE='^[[:space:]_*]*The output was truncated\.'
 service_error_present() {
   [ -s "$1" ] || return 1
   [ "$(wc -c < "$1")" -le "$AGY_ERROR_MAX_BYTES" ] || return 1
-  head -n 1 "$1" | grep -qE "$AGY_ERROR_RE"
+  head -n 1 "$1" | grep -qE "$AGY_ERROR_RE|$AGY_TOOL_NOTICE_RE"
 }
 
 # True when the run must FAIL rather than post: the backend errored at least once and no review

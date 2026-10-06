@@ -268,6 +268,8 @@ trap 'rm -rf "$TMPD"' EXIT
 check "a bare backend 503 is caught" "MATCH" \
   "$(se 'Error: Eligibility check failed: UNAVAILABLE (code 503): The service is currently unavailable.')"
 check "RESOURCE_EXHAUSTED is caught" "MATCH" "$(se 'Error: RESOURCE_EXHAUSTED')"
+check "a bare truncated-output tool notice is caught" "MATCH" \
+  "$(se '_The output was truncated. To view the remaining content, please use the `ContentOffset` parameter with the exact line range._')"
 
 # The false positives the anchoring exists to avoid. A genuine review may quote a 503 while
 # reviewing retry logic, and aborting on that would be the very failure the OAuth guard's design
