@@ -2,10 +2,13 @@
 
 #![allow(unused_variables, unused_assignments)]
 
-use alloc::{format, string::String};
+use alloc::{format, string::String, vec::Vec};
 
 use super::pci_class_name;
-use crate::services::shell::{BuiltinCommand, CommandResult, Shell};
+use crate::{
+    error::KernelError,
+    services::shell::{BuiltinCommand, CommandResult, Shell},
+};
 
 pub(in crate::services::shell) struct LspciCommand;
 impl BuiltinCommand for LspciCommand {
@@ -171,53 +174,114 @@ impl BuiltinCommand for NvmeCommand {
 
         // Round trip on the last 8 KiB of nvme0n1, restoring the original
         // contents afterwards. Spans two pages, so PRP2 is exercised.
-        let result = nvme::with_controller(0, |c| -> Result<(), crate::error::KernelError> {
-            let bs = c.block_size();
-            let mut first = alloc::vec![0u8; bs];
-            c.read_blocks(0, &mut first)?;
-            let sig: String = first[..32]
-                .iter()
-                .map(|&b| if b.is_ascii_graphic() { b as char } else { '.' })
-                .collect();
-            crate::println!("NVME-SELFTEST: lba0={}", sig);
-            let n = (8192 / bs) as u64;
-            let lba = c.block_count() - n;
-            let mut saved = alloc::vec![0u8; 8192];
-            c.read_blocks(lba, &mut saved)?;
-            let pattern: alloc::vec::Vec<u8> = (0..8192u32)
-                .map(|i| (i.wrapping_mul(31) ^ 0x5A) as u8)
-                .collect();
-            c.write_blocks(lba, &pattern)?;
-            c.flush()?;
-            let mut back = alloc::vec![0u8; 8192];
-            c.read_blocks(lba, &mut back)?;
-            let ok = back == pattern;
-            c.write_blocks(lba, &saved)?;
-            c.flush()?;
-            // Out-of-range access must fail, not wrap or underflow.
-            let mut one = alloc::vec![0u8; bs];
-            let oob = c.read_blocks(c.block_count(), &mut one).is_err();
-            let empty = c.read_blocks(0, &mut []).is_err();
-            crate::println!(
-                "NVME-SELFTEST: roundtrip={} oob_rejected={} empty_rejected={}",
-                ok,
-                oob,
-                empty
-            );
-            if ok && oob && empty {
-                crate::println!("NVME-SELFTEST: PASS");
-            }
-            Ok(())
-        });
+        let result = nvme::with_controller(0, |c| block_selftest(c));
         match result {
-            Some(Ok(())) => CommandResult::Success(0),
+            Some(Ok(true)) => {
+                crate::println!("NVME-SELFTEST: PASS");
+                CommandResult::Success(0)
+            }
+            Some(Ok(false)) => {
+                crate::println!("NVME-SELFTEST: FAIL");
+                CommandResult::Success(1)
+            }
             Some(Err(e)) => {
                 crate::println!("nvme: selftest error: {:?}", e);
+                crate::println!("NVME-SELFTEST: FAIL");
                 CommandResult::Success(1)
             }
             None => CommandResult::Success(1),
         }
     }
+}
+
+/// Bytes the self-test overwrites at the end of the device: two pages, so
+/// NVMe PRP2 is exercised.
+const SELFTEST_SPAN: usize = 8192;
+
+/// Write a pattern over the last `SELFTEST_SPAN` bytes of `dev`, read it
+/// back, and restore the original contents, then check that out-of-range and
+/// empty reads are rejected. Returns whether every check passed.
+///
+/// The restore runs whenever the pattern write was attempted, even if a
+/// later step failed, because a failed or partial write may already have
+/// changed the blocks (review of the v0.26.0 stack, PR #10).
+fn block_selftest(dev: &mut dyn crate::fs::blockdev::BlockDevice) -> Result<bool, KernelError> {
+    let bs = dev.block_size();
+    if bs == 0 || bs > SELFTEST_SPAN || !SELFTEST_SPAN.is_multiple_of(bs) {
+        return Err(KernelError::InvalidArgument {
+            name: "block_size",
+            value: "must divide the 8 KiB self-test span",
+        });
+    }
+    let n = (SELFTEST_SPAN / bs) as u64;
+    let lba = dev
+        .block_count()
+        .checked_sub(n)
+        .ok_or(KernelError::InvalidArgument {
+            name: "block_count",
+            value: "smaller than the 8 KiB self-test span",
+        })?;
+
+    let mut first = alloc::vec![0u8; bs];
+    dev.read_blocks(0, &mut first)?;
+    let sig: String = first[..first.len().min(32)]
+        .iter()
+        .map(|&b| if b.is_ascii_graphic() { b as char } else { '.' })
+        .collect();
+    crate::println!("NVME-SELFTEST: lba0={}", sig);
+
+    let mut saved = alloc::vec![0u8; SELFTEST_SPAN];
+    dev.read_blocks(lba, &mut saved)?;
+    let pattern: Vec<u8> = (0..SELFTEST_SPAN as u32)
+        .map(|i| (i.wrapping_mul(31) ^ 0x5A) as u8)
+        .collect();
+
+    let roundtrip = pattern_roundtrip(dev, lba, &pattern);
+    let restore = dev.write_blocks(lba, &saved).and_then(|()| dev.flush());
+    let ok = match (roundtrip, restore) {
+        (Ok(ok), Ok(())) => ok,
+        (Err(e), Ok(())) => {
+            crate::println!("NVME-SELFTEST: round trip failed: {:?} (data restored)", e);
+            return Err(e);
+        }
+        (Ok(_), Err(e)) => {
+            crate::println!("NVME-SELFTEST: restore failed: {:?}", e);
+            return Err(e);
+        }
+        (Err(test), Err(restore)) => {
+            crate::println!(
+                "NVME-SELFTEST: round trip failed: {:?}; restore failed: {:?}",
+                test,
+                restore
+            );
+            return Err(test);
+        }
+    };
+
+    // Out-of-range access must fail, not wrap or underflow.
+    let mut one = alloc::vec![0u8; bs];
+    let oob = dev.read_blocks(dev.block_count(), &mut one).is_err();
+    let empty = dev.read_blocks(0, &mut []).is_err();
+    crate::println!(
+        "NVME-SELFTEST: roundtrip={} oob_rejected={} empty_rejected={}",
+        ok,
+        oob,
+        empty
+    );
+    Ok(ok && oob && empty)
+}
+
+/// Write `pattern` at `lba`, flush, and report whether it reads back intact.
+fn pattern_roundtrip(
+    dev: &mut dyn crate::fs::blockdev::BlockDevice,
+    lba: u64,
+    pattern: &[u8],
+) -> Result<bool, KernelError> {
+    dev.write_blocks(lba, pattern)?;
+    dev.flush()?;
+    let mut back = alloc::vec![0u8; pattern.len()];
+    dev.read_blocks(lba, &mut back)?;
+    Ok(back == pattern)
 }
 
 pub(in crate::services::shell) struct MdadmCommand;
@@ -463,5 +527,141 @@ impl BuiltinCommand for HwinfoCommand {
         crate::println!("Block devices: {}", blk_count);
 
         CommandResult::Success(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs::blockdev::BlockDevice;
+
+    /// In-memory disk with injectable failures.
+    struct FakeDisk {
+        bs: usize,
+        data: Vec<u8>,
+        writes: usize,
+        /// Fail every read issued after this many writes.
+        fail_reads_after_writes: Option<usize>,
+        /// Fail the write with this ordinal (0-based).
+        fail_write_n: Option<usize>,
+        /// Reads return zeros instead of the data.
+        corrupt_reads: bool,
+    }
+
+    impl FakeDisk {
+        fn new(bs: usize, blocks: usize) -> Self {
+            let data = (0..bs * blocks).map(|i| (i % 251) as u8).collect();
+            Self {
+                bs,
+                data,
+                writes: 0,
+                fail_reads_after_writes: None,
+                fail_write_n: None,
+                corrupt_reads: false,
+            }
+        }
+
+        fn io_err() -> KernelError {
+            KernelError::HardwareError {
+                device: "fake",
+                code: 1,
+            }
+        }
+    }
+
+    impl BlockDevice for FakeDisk {
+        fn name(&self) -> &str {
+            "fake"
+        }
+        fn block_size(&self) -> usize {
+            self.bs
+        }
+        fn block_count(&self) -> u64 {
+            (self.data.len() / self.bs) as u64
+        }
+        fn read_blocks(&self, start: u64, buf: &mut [u8]) -> Result<(), KernelError> {
+            if buf.is_empty() {
+                return Err(Self::io_err());
+            }
+            if self
+                .fail_reads_after_writes
+                .is_some_and(|n| self.writes > n)
+            {
+                return Err(Self::io_err());
+            }
+            let off = start as usize * self.bs;
+            let end = off.checked_add(buf.len()).ok_or(Self::io_err())?;
+            if end > self.data.len() {
+                return Err(Self::io_err());
+            }
+            if self.corrupt_reads && self.writes > 0 {
+                buf.fill(0);
+            } else {
+                buf.copy_from_slice(&self.data[off..end]);
+            }
+            Ok(())
+        }
+        fn write_blocks(&mut self, start: u64, buf: &[u8]) -> Result<(), KernelError> {
+            let n = self.writes;
+            self.writes += 1;
+            if self.fail_write_n == Some(n) {
+                return Err(Self::io_err());
+            }
+            let off = start as usize * self.bs;
+            let end = off + buf.len();
+            if end > self.data.len() {
+                return Err(Self::io_err());
+            }
+            self.data[off..end].copy_from_slice(buf);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn selftest_passes_and_leaves_data_unchanged() {
+        let mut d = FakeDisk::new(512, 64);
+        let before = d.data.clone();
+        assert_eq!(block_selftest(&mut d), Ok(true));
+        assert_eq!(d.data, before);
+    }
+
+    #[test]
+    fn selftest_restores_data_when_readback_fails() {
+        let mut d = FakeDisk::new(512, 64);
+        let before = d.data.clone();
+        // The pattern write is write 0; the read-back after it fails.
+        d.fail_reads_after_writes = Some(0);
+        assert!(block_selftest(&mut d).is_err());
+        assert_eq!(d.data, before, "pattern left on disk");
+    }
+
+    #[test]
+    fn selftest_reports_restore_failure() {
+        let mut d = FakeDisk::new(512, 64);
+        // Write 1 is the restore.
+        d.fail_write_n = Some(1);
+        assert!(block_selftest(&mut d).is_err());
+    }
+
+    #[test]
+    fn selftest_reports_mismatch_as_failure_not_success() {
+        let mut d = FakeDisk::new(512, 64);
+        d.corrupt_reads = true;
+        assert_eq!(block_selftest(&mut d), Ok(false));
+    }
+
+    #[test]
+    fn selftest_rejects_device_smaller_than_span_without_writing() {
+        let mut d = FakeDisk::new(512, 8);
+        d.data.truncate(512 * 8 - 512); // 7 blocks < 16
+        assert!(block_selftest(&mut d).is_err());
+        assert_eq!(d.writes, 0);
+    }
+
+    #[test]
+    fn selftest_rejects_block_size_larger_than_span() {
+        let mut d = FakeDisk::new(16384, 4);
+        assert!(block_selftest(&mut d).is_err());
+        assert_eq!(d.writes, 0);
     }
 }
