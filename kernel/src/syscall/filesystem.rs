@@ -178,34 +178,8 @@ use alloc::vec::Vec;
 /// # Returns
 /// File descriptor on success
 pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
-    // Validate path pointer is in user space
-    validate_user_string_ptr(path)?;
-
-    // Get path string from user space
-    // SAFETY: path was validated as non-null and in user-space above. We read
-    // time from the user-space pointer until we find a null terminator or
-    // reach the 4096-byte limit. The caller must provide a valid, null-
-    // terminated string in mapped user memory.
-    let path_bytes = unsafe {
-        let mut bytes = Vec::new();
-        let mut ptr = path as *const u8;
-
-        // Read until null terminator (max 4096 bytes)
-        for _ in 0..4096 {
-            let byte = *ptr;
-            if byte == 0 {
-                break;
-            }
-            bytes.push(byte);
-            ptr = ptr.add(1);
-        }
-        bytes
-    };
-
-    let path_str = match core::str::from_utf8(&path_bytes) {
-        Ok(s) => s,
-        Err(_) => return Err(SyscallError::InvalidArgument),
-    };
+    let path_owned = read_user_path(path)?;
+    let path_str = path_owned.as_str();
 
     // Trace ALL open calls during kwin bringup
     #[cfg(target_arch = "x86_64")]
@@ -231,32 +205,7 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
     // Open the file through VFS
     match vfs()?.read().open(path_str, open_flags) {
         Ok(node) => {
-            // Permission check: verify the caller has the required access.
-            // Root (uid 0) bypasses all permission checks.
-            if process.uid != 0 {
-                if let Ok(meta) = node.metadata() {
-                    let p = &meta.permissions;
-                    let is_owner = process.uid == meta.uid;
-                    let is_group = process.gid == meta.gid;
-
-                    if open_flags.read {
-                        let ok = (is_owner && p.owner_read)
-                            || (is_group && p.group_read)
-                            || p.other_read;
-                        if !ok {
-                            return Err(SyscallError::PermissionDenied);
-                        }
-                    }
-                    if open_flags.write || open_flags.append || open_flags.truncate {
-                        let ok = (is_owner && p.owner_write)
-                            || (is_group && p.group_write)
-                            || p.other_write;
-                        if !ok {
-                            return Err(SyscallError::PermissionDenied);
-                        }
-                    }
-                }
-            }
+            require_open_access(&node, &open_flags)?;
 
             // Handle O_TRUNC on existing files
             if open_flags.truncate {
@@ -282,6 +231,7 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
             if open_flags.create {
                 let perms = Permissions::from_mode(mode as u32);
                 let (parent_path, name) = split_path(path_str)?;
+                require_dir_write(path_str)?;
                 let vfs_guard = vfs()?.read();
                 let parent = match vfs_guard.resolve_path(&parent_path) {
                     Ok(p) => p,
@@ -1440,7 +1390,7 @@ fn caller_creds() -> (u32, u32) {
 
 /// chmod-style operations: only the owner or root may change a node's
 /// mode (FS-SEC-02).
-fn require_owner_or_root(
+pub(crate) fn require_owner_or_root(
     node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
 ) -> Result<(), SyscallError> {
     let (uid, _) = caller_creds();
@@ -1455,9 +1405,75 @@ fn require_owner_or_root(
     }
 }
 
+/// Check that the caller may open `node` with `flags`, using the POSIX
+/// owner/group/other precedence (the owner class uses only the owner bits).
+/// Fails closed when the metadata cannot be read.
+pub(crate) fn require_open_access(
+    node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    flags: &OpenFlags,
+) -> Result<(), SyscallError> {
+    let (uid, gid) = caller_creds();
+    if uid == 0 {
+        return Ok(());
+    }
+    let meta = node
+        .metadata()
+        .map_err(|_| SyscallError::PermissionDenied)?;
+    let p = meta.permissions;
+    if flags.read && !p.can_read(uid, gid, meta.uid, meta.gid) {
+        return Err(SyscallError::PermissionDenied);
+    }
+    if (flags.write || flags.append || flags.truncate) && !p.can_write(uid, gid, meta.uid, meta.gid)
+    {
+        return Err(SyscallError::PermissionDenied);
+    }
+    Ok(())
+}
+
+/// Rename `old` to `new` (absolute paths) by linking the existing node
+/// under the new name and removing the old entry. The node -- its owner,
+/// mode and contents -- is moved, never copied, and a symlink at `new` is
+/// replaced rather than followed.
+fn rename_entry(old: &str, new: &str) -> SyscallResult {
+    require_dir_write(old)?;
+    require_dir_write(new)?;
+
+    let vfs_lock = vfs()?;
+    let vfs_guard = vfs_lock.read();
+    if vfs_guard.mount_point_of(old) != vfs_guard.mount_point_of(new) {
+        return Err(SyscallError::CrossDevice);
+    }
+    let src = vfs_guard
+        .resolve_path_no_follow(old)
+        .map_err(map_resolve_err)?;
+    if src.node_type() == crate::fs::NodeType::Directory {
+        // Directory rename needs VfsNode::rename (FS-PERF-03).
+        return Err(SyscallError::NotImplemented);
+    }
+
+    let (new_parent, new_name) = split_path(new)?;
+    let parent = vfs_guard
+        .resolve_path(&new_parent)
+        .map_err(map_resolve_err)?;
+    if let Ok(existing) = vfs_guard.resolve_path_no_follow(new) {
+        if alloc::sync::Arc::ptr_eq(&existing, &src) {
+            return Ok(0); // same file: POSIX says do nothing
+        }
+        if existing.node_type() == crate::fs::NodeType::Directory {
+            return Err(SyscallError::IsADirectory);
+        }
+        parent.unlink(&new_name).map_err(super::map_kernel_error)?;
+    }
+    parent
+        .link(&new_name, src)
+        .map_err(super::map_kernel_error)?;
+    vfs_guard.unlink(old).map_err(super::map_kernel_error)?;
+    Ok(0)
+}
+
 /// Creating or removing a directory entry needs write and search
 /// permission on the directory holding it (FS-SEC-02).
-fn require_dir_write(path: &str) -> Result<(), SyscallError> {
+pub(crate) fn require_dir_write(path: &str) -> Result<(), SyscallError> {
     let (uid, gid) = caller_creds();
     if uid == 0 {
         return Ok(());
@@ -1723,23 +1739,9 @@ fn access_path(path: &str, mode: usize) -> SyscallResult {
 /// # Returns
 /// 0 on success.
 pub fn sys_rename(old_ptr: usize, new_ptr: usize) -> SyscallResult {
-    let old_path = read_user_path(old_ptr)?;
-    let new_path = read_user_path(new_ptr)?;
-    require_dir_write(&old_path)?;
-    require_dir_write(&new_path)?;
-
-    // Rename as copy + delete (VFS has no native rename)
-    // Use the free-standing fs helpers which handle locking internally.
-    let data = crate::fs::read_file(&old_path).map_err(|_| SyscallError::ResourceNotFound)?;
-    crate::fs::write_file(&new_path, &data).map_err(|_| SyscallError::InvalidState)?;
-
-    let vfs_lock = vfs()?;
-    vfs_lock
-        .read()
-        .unlink(&old_path)
-        .map_err(|_| SyscallError::InvalidState)?;
-
-    Ok(0)
+    let old_path = resolve_at_path(AT_FDCWD, &read_user_path(old_ptr)?)?;
+    let new_path = resolve_at_path(AT_FDCWD, &read_user_path(new_ptr)?)?;
+    rename_entry(&old_path, &new_path)
 }
 
 /// Remove a file (not a directory) (syscall 157).
@@ -2228,6 +2230,7 @@ pub fn sys_link(old_ptr: usize, new_ptr: usize) -> SyscallResult {
 pub fn sys_symlink(target_ptr: usize, link_ptr: usize) -> SyscallResult {
     let target = read_user_path(target_ptr)?;
     let link_path = read_user_path(link_ptr)?;
+    require_dir_write(&link_path)?;
 
     let vfs_lock = vfs()?;
     let vfs_guard = vfs_lock.read();
@@ -2555,6 +2558,9 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
 
     match vfs()?.read().open(&abs_path, open_flags) {
         Ok(node) => {
+            // openat had no permission check at all; musl routes every
+            // open() through it.
+            require_open_access(&node, &open_flags)?;
             // Store the path so ioctl dispatch can identify device types
             // (e.g., DRM fds opened via openat need path for "dri/" check).
             let file = crate::fs::file::File::new_with_path(
@@ -2573,6 +2579,7 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
             if open_flags.create {
                 let perms = Permissions::from_mode(mode as u32);
                 let (parent_path, name) = split_path(&abs_path)?;
+                require_dir_write(&abs_path)?;
                 let vfs_guard = vfs()?.read();
                 let parent = vfs_guard
                     .resolve_path(&parent_path)
@@ -2656,6 +2663,7 @@ pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, _flags: usize) -> SyscallResu
 pub fn sys_mkdirat(dirfd: usize, path_ptr: usize, mode: usize) -> SyscallResult {
     let rel_path = read_user_path(path_ptr)?;
     let abs_path = resolve_at_path(dirfd, &rel_path)?;
+    require_dir_write(&abs_path)?;
 
     let permissions = Permissions::from_mode(mode as u32);
     vfs()?
@@ -2673,22 +2681,9 @@ pub fn sys_renameat(
     newdirfd: usize,
     new_ptr: usize,
 ) -> SyscallResult {
-    let old_rel = read_user_path(old_ptr)?;
-    let new_rel = read_user_path(new_ptr)?;
-    let old_abs = resolve_at_path(olddirfd, &old_rel)?;
-    let new_abs = resolve_at_path(newdirfd, &new_rel)?;
-    require_dir_write(&old_abs)?;
-    require_dir_write(&new_abs)?;
-
-    // Rename as copy + delete
-    let data = crate::fs::read_file(&old_abs).map_err(|_| SyscallError::ResourceNotFound)?;
-    crate::fs::write_file(&new_abs, &data).map_err(|_| SyscallError::InvalidState)?;
-    vfs()?
-        .read()
-        .unlink(&old_abs)
-        .map_err(|_| SyscallError::InvalidState)?;
-
-    Ok(0)
+    let old_abs = resolve_at_path(olddirfd, &read_user_path(old_ptr)?)?;
+    let new_abs = resolve_at_path(newdirfd, &read_user_path(new_ptr)?)?;
+    rename_entry(&old_abs, &new_abs)
 }
 
 /// Read from a file descriptor at a given offset without changing position
@@ -2774,7 +2769,7 @@ fn chown_id(id: usize) -> Option<u32> {
 
 /// Apply a chown to `node`. Only root may change ownership (FS-SEC-02);
 /// this used to be a no-op that reported success.
-fn chown_node(
+pub(crate) fn chown_node(
     node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
     uid: usize,
     gid: usize,

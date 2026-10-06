@@ -518,6 +518,17 @@ impl Vfs {
         self.resolve_path_inner(path, cwd, false, 0)
     }
 
+    /// The mount point (normalized path) that serves `path`.
+    pub fn mount_point_of(&self, path: &str) -> String {
+        let path = normalize_path(path, &self.cwd);
+        self.mounts
+            .keys()
+            .filter(|m| path_is_under(&path, m))
+            .max_by_key(|m| m.len())
+            .cloned()
+            .unwrap_or_else(|| String::from("/"))
+    }
+
     /// Resolve a path, returning the node together with its canonical
     /// absolute path (all `.`, `..` and followed symlinks removed). Access
     /// checks must use this path: checking the path as written lets a

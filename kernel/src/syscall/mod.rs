@@ -618,6 +618,8 @@ pub enum SyscallError {
     NotATerminal = -32,
     BrokenPipe = -39,
     DirectoryNotEmpty = -45,
+    /// Rename or link across filesystems (EXDEV, errno 48).
+    CrossDevice = -48,
     /// Resource limit exceeded (process table full, fd table full, etc.)
     /// Maps to ERESOURCELIMIT (errno 79) in user space.
     /// For POSIX fork() EAGAIN semantics, prefer WouldBlock (errno 6).
@@ -1953,6 +1955,7 @@ fn sys_fchmodat(dirfd: usize, path_ptr: usize, mode: usize) -> SyscallResult {
     let node = vfs_guard
         .resolve_path(&abs_path)
         .map_err(filesystem::map_resolve_err)?;
+    filesystem::require_owner_or_root(&node)?;
     let perms = crate::fs::Permissions::from_mode(mode as u32);
     node.chmod(perms)
         .map_err(|_| SyscallError::InvalidArgument)?;
@@ -1970,14 +1973,24 @@ fn sys_fchmodat(dirfd: usize, path_ptr: usize, mode: usize) -> SyscallResult {
 fn sys_fchownat(
     dirfd: usize,
     path_ptr: usize,
-    _uid: usize,
-    _gid: usize,
-    _flags: usize,
+    uid: usize,
+    gid: usize,
+    flags: usize,
 ) -> SyscallResult {
+    const AT_SYMLINK_NOFOLLOW: usize = 0x100;
     let rel_path = filesystem::read_user_path(path_ptr)?;
-    let _abs_path = filesystem::resolve_at_path(dirfd, &rel_path)?;
-    // No-op: accept but don't enforce ownership changes (same as sys_chown)
-    Ok(0)
+    let abs_path = filesystem::resolve_at_path(dirfd, &rel_path)?;
+    let vfs_lock = filesystem::vfs()?;
+    let vfs_guard = vfs_lock.read();
+    let node = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        vfs_guard.resolve_path_no_follow(&abs_path)
+    } else {
+        vfs_guard.resolve_path(&abs_path)
+    }
+    .map_err(filesystem::map_resolve_err)?;
+    // Same rules as chown (root only); this used to report success and
+    // change nothing.
+    filesystem::chown_node(&node, uid, gid)
 }
 
 /// linkat syscall -- create hard link relative to directory fds.
@@ -1999,6 +2012,7 @@ fn sys_linkat(
     let new_rel = filesystem::read_user_path(newpath_ptr)?;
     let old_abs = filesystem::resolve_at_path(olddirfd, &old_rel)?;
     let new_abs = filesystem::resolve_at_path(newdirfd, &new_rel)?;
+    filesystem::require_dir_write(&new_abs)?;
 
     let vfs_lock = filesystem::vfs()?;
     let vfs_guard = vfs_lock.read();
@@ -2029,6 +2043,7 @@ fn sys_symlinkat(target_ptr: usize, newdirfd: usize, linkpath_ptr: usize) -> Sys
     let target = filesystem::read_user_path(target_ptr)?;
     let link_rel = filesystem::read_user_path(linkpath_ptr)?;
     let link_abs = filesystem::resolve_at_path(newdirfd, &link_rel)?;
+    filesystem::require_dir_write(&link_abs)?;
 
     let vfs_lock = filesystem::vfs()?;
     let vfs_guard = vfs_lock.read();
