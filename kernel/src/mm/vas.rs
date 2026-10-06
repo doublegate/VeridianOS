@@ -679,8 +679,72 @@ impl VirtualAddressSpace {
     /// entries directly (shared kernel mapping), and for each user-space page
     /// in the parent, allocates a new physical frame, copies the 4KB content,
     /// and maps it into this VAS's page tables with the same flags.
+    ///
+    /// On error the half-built copy is torn down (its private frames and user
+    /// page tables freed) and this VAS is left without a page table, so the
+    /// caller can simply drop the child.
     #[cfg(feature = "alloc")]
     pub fn clone_from(&mut self, other: &Self) -> Result<(), KernelError> {
+        let result = self.clone_from_inner(other);
+        if result.is_err() {
+            self.discard_partial_clone();
+        }
+        result
+    }
+
+    /// Undo a failed [`Self::clone_from`]: free the frames it deep-copied
+    /// and the user page tables it built, and clear the root.
+    ///
+    /// Only frames clone_from allocated are freed: borrowed mappings
+    /// (device memory, shared regions) and kernel-space entries belong to
+    /// the parent, as do the lower-half L4 entries copied from it.
+    #[cfg(feature = "alloc")]
+    fn discard_partial_clone(&mut self) {
+        use super::page_table::PageTable;
+
+        const KERNEL_SPACE_START: u64 = 0xFFFF_8000_0000_0000;
+
+        let root = self.page_table_root.swap(0, Ordering::AcqRel);
+        {
+            let mut mappings = self.mappings.lock();
+            let allocator = FRAME_ALLOCATOR.lock();
+            for (addr, mapping) in mappings.iter() {
+                if addr.0 < KERNEL_SPACE_START && mapping.owns_frames() {
+                    for &frame in &mapping.physical_frames {
+                        let _ = allocator.free_frames(frame, 1);
+                    }
+                }
+            }
+            mappings.clear();
+        }
+        if root == 0 {
+            return;
+        }
+
+        // SAFETY: `root` is the child's own L4 table, allocated by
+        // clone_from and never loaded into CR3, so nothing else uses it.
+        let l4 = unsafe { &mut *(super::phys_to_virt_addr(root) as *mut PageTable) };
+        // Unshare the lower-half entries clone_from copied from the parent
+        // so freeing the user tables below cannot free the parent's.
+        let phys_offset = super::PHYS_MEM_OFFSET.load(Ordering::Acquire);
+        if phys_offset != 0 {
+            let idx = ((phys_offset >> 39) & 0x1FF) as usize;
+            if idx < 256 {
+                l4[idx].clear();
+            }
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            let idx = ((crate::arch::x86_64::HEAP_START as u64 >> 39) & 0x1FF) as usize;
+            if idx < 256 {
+                l4[idx].clear();
+            }
+        }
+        free_user_page_table_frames(root);
+    }
+
+    #[cfg(feature = "alloc")]
+    fn clone_from_inner(&mut self, other: &Self) -> Result<(), KernelError> {
         use super::page_table::{PageTable, PageTableHierarchy, PAGE_TABLE_ENTRIES};
 
         // Step 1: Allocate a new L4 page table for the child
@@ -753,18 +817,27 @@ impl VirtualAddressSpace {
                 // Device memory and shared regions are mapped to the same
                 // frames in the child: copying a framebuffer or a region
                 // into private frames would silently stop sharing it.
+                //
+                // A map_page failure (page-table frame exhaustion; the tables
+                // are fresh, so "already mapped" cannot happen) fails the
+                // fork instead of leaving metadata for unmapped pages (review
+                // of the v0.26.0 stack, PR #13).
                 if !mapping.owns_frames() {
                     for (i, &frame) in mapping.physical_frames.iter().enumerate() {
                         let vaddr = VirtualAddress(mapping.start.0 + (i as u64) * 4096);
                         child_mapper
                             .map_page(vaddr, frame, mapping.flags, &mut alloc)
-                            .ok();
+                            .map_err(|_| KernelError::OutOfMemory {
+                                requested: 4096,
+                                available: 0,
+                            })?;
                     }
                     child_mappings.insert(*addr, mapping.clone());
                     continue;
                 }
 
                 let mut child_frames = Vec::with_capacity(num_pages);
+                let mut failure = None;
 
                 for i in 0..num_pages {
                     let vaddr = VirtualAddress(mapping.start.0 + (i as u64) * 4096);
@@ -776,14 +849,15 @@ impl VirtualAddressSpace {
                     };
 
                     // Allocate a new frame for the child
-                    let child_frame = {
-                        FRAME_ALLOCATOR
-                            .lock()
-                            .allocate_frames(1, None)
-                            .map_err(|_| KernelError::OutOfMemory {
+                    let child_frame = match FRAME_ALLOCATOR.lock().allocate_frames(1, None) {
+                        Ok(frame) => frame,
+                        Err(_) => {
+                            failure = Some(KernelError::OutOfMemory {
                                 requested: 4096,
                                 available: 0,
-                            })?
+                            });
+                            break;
+                        }
                     };
 
                     // Copy 4KB of content from parent frame to child frame.
@@ -799,17 +873,30 @@ impl VirtualAddressSpace {
                     }
 
                     // Map the child's frame at the same virtual address
-                    child_mapper
+                    if child_mapper
                         .map_page(vaddr, child_frame, flags, &mut alloc)
-                        .ok(); // Ignore errors for already-mapped pages
+                        .is_err()
+                    {
+                        let _ = FRAME_ALLOCATOR.lock().free_frames(child_frame, 1);
+                        failure = Some(KernelError::OutOfMemory {
+                            requested: 4096,
+                            available: 0,
+                        });
+                        break;
+                    }
 
                     child_frames.push(child_frame);
                 }
 
-                // Record the mapping with the child's physical frames
+                // Record the mapping with the child's physical frames. On
+                // failure this is the partial set, which clone_from's
+                // teardown then frees.
                 let mut child_mapping = mapping.clone();
                 child_mapping.physical_frames = child_frames;
                 child_mappings.insert(*addr, child_mapping);
+                if let Some(err) = failure {
+                    return Err(err);
+                }
             }
         }
 
