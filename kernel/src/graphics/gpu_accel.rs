@@ -2339,7 +2339,10 @@ pub fn has_pending_drm_events(owner_pid: u64) -> bool {
 /// Release the page-flip state a dying process owned. A no-op when the
 /// page flip manager was never initialized.
 pub fn purge_drm_owner(owner_pid: u64) {
-    let _ = with_page_flip(|pf| pf.purge_owner(owner_pid));
+    // `None` only means the page-flip manager was never initialized, in
+    // which case the process owned no page-flip state to purge; there is no
+    // error to report either way.
+    let _never_initialized = with_page_flip(|pf| pf.purge_owner(owner_pid)).is_none();
 }
 
 /// Read pending DRM events into a user buffer as `drm_event_vblank` structs.

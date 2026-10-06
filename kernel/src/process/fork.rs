@@ -501,8 +501,14 @@ fn register_inherited_regions(child: &super::pcb::Process) {
             (false, false) => Permission::Read,
         };
         // Err only if the child is already registered, which a fresh child
-        // cannot be.
-        let _ = region.register_inherited(child.pid, start, permissions);
+        // cannot be: logged, not dropped, if that invariant ever breaks.
+        if let Err(e) = region.register_inherited(child.pid, start, permissions) {
+            crate::println!(
+                "[FORK] pid {}: registering an inherited region failed: {:?}",
+                child.pid.0,
+                e
+            );
+        }
     }
 }
 

@@ -660,7 +660,7 @@ impl VirtualAddressSpace {
             // syscalls) cannot access heap-allocated data structures (alloc,
             // BTreeMap, Vec, etc.), causing page faults that escalate to
             // double faults.
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_os = "none"))]
             {
                 let heap_start = crate::arch::x86_64::HEAP_START as u64;
                 let heap_l4_idx = ((heap_start >> 39) & 0x1FF) as usize;
@@ -733,7 +733,7 @@ impl VirtualAddressSpace {
                 l4[idx].clear();
             }
         }
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
             let idx = ((crate::arch::x86_64::HEAP_START as u64 >> 39) & 0x1FF) as usize;
             if idx < 256 {
@@ -780,7 +780,7 @@ impl VirtualAddressSpace {
             }
 
             // Copy the kernel heap L4 entry (HEAP_START, lower half).
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_os = "none"))]
             {
                 let heap_start = crate::arch::x86_64::HEAP_START as u64;
                 let heap_l4_idx = ((heap_start >> 39) & 0x1FF) as usize;

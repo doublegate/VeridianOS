@@ -3549,7 +3549,15 @@ fn sys_socket_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) -> SyscallR
 fn finish_accept(new_fd: usize, addr_ptr: usize, addrlen_ptr: usize, peer: &[u8]) -> SyscallResult {
     if let Err(e) = copy_sockaddr_out(addr_ptr, addrlen_ptr, peer) {
         if let Some(p) = crate::process::current_process() {
-            let _ = p.file_table.lock().close(new_fd);
+            if let Err(close_err) = p.file_table.lock().close(new_fd) {
+                // The fd was installed a moment ago, so this is a broken
+                // invariant; log it rather than drop it.
+                crate::println!(
+                    "[NET] accept: closing fd {} failed: {:?}",
+                    new_fd,
+                    close_err
+                );
+            }
         }
         return Err(e);
     }
