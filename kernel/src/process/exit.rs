@@ -541,8 +541,8 @@ pub fn cleanup_process(process: &Process) {
     // Free kernel stack frames for all threads.
     //
     // Kernel stacks are allocated by ThreadBuilder::build() from the frame
-    // allocator but are NOT tracked in the VAS (they live in kernel space at
-    // KERNEL_STACK_REGION_BASE). Without this, every process exit leaks 16
+    // allocator but are NOT tracked in the VAS (they are used through the
+    // kernel's direct physical map). Without this, every process exit leaks 16
     // frames (64 KB) of kernel stack per thread -- 630 processes during
     // BusyBox compilation would leak ~40 MB.
     //

@@ -91,11 +91,6 @@ pub const DEFAULT_TLS_PAGES: usize = 1;
 /// Guard page count (1 page below each stack to detect overflow)
 pub const GUARD_PAGE_COUNT: usize = 1;
 
-/// Base virtual address for kernel thread stacks.
-/// Each thread gets its own region at KERNEL_STACK_REGION_BASE - (thread_index
-/// * region_size).
-const KERNEL_STACK_REGION_BASE: usize = 0xFFFF_E000_0000_0000;
-
 /// Base virtual address for user thread stacks.
 /// Grows downward from near the top of user address space.
 const USER_STACK_REGION_BASE: usize = 0x0000_7FFE_0000_0000;
@@ -861,13 +856,16 @@ impl ThreadBuilder {
         // gets a unique region. Each region includes a guard page below.
         let thread_index = tid.0 as usize;
 
-        // Kernel stack virtual address: each thread gets
-        // (kernel_stack_pages + GUARD_PAGE_COUNT) pages of virtual space
-        let kernel_region_size = (kernel_stack_pages + GUARD_PAGE_COUNT) * FRAME_SIZE;
-        let kernel_stack_base =
-            KERNEL_STACK_REGION_BASE - ((thread_index + 1) * kernel_region_size);
-        // Skip guard page at the bottom
-        let kernel_stack_usable_base = kernel_stack_base + (GUARD_PAGE_COUNT * FRAME_SIZE);
+        // Kernel stack virtual address: the frames' address in the kernel's
+        // direct physical map, which every address space shares. A per-thread
+        // address under KERNEL_STACK_REGION_BASE used to be computed here but
+        // was never mapped, so the first dispatch of any scheduler-run thread
+        // (pthread_create, clone) page-faulted on its own stack. The frames
+        // are contiguous (allocate_stack_frames) and are freed by frame
+        // number, so nothing else depends on the old address. There is no
+        // guard page below the stack yet.
+        let kernel_stack_usable_base =
+            crate::mm::phys_to_virt_addr(kernel_stack_phys as u64) as usize;
 
         // User stack virtual address: similar layout in user space
         let user_region_size = (user_stack_pages + GUARD_PAGE_COUNT) * FRAME_SIZE;
@@ -924,7 +922,7 @@ impl ThreadBuilder {
 
         crate::println!(
             "[THREAD] Allocated stacks for tid {}: user={:#x}..{:#x}, kernel={:#x}..{:#x} \
-             (phys={:#x}), guard pages installed",
+             (phys={:#x})",
             tid.0,
             user_stack_usable_base,
             user_stack_usable_base + user_stack_size,
