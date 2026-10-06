@@ -61,33 +61,6 @@ pub enum NodeType {
     Symlink,
 }
 
-/// POSIX rules for a rename that replaces `existing` with a node of type
-/// `moving`: a directory may only replace an empty directory, and a
-/// non-directory only a non-directory.
-pub(crate) fn check_rename_replace(
-    moving: NodeType,
-    existing: &dyn VfsNode,
-) -> Result<(), KernelError> {
-    use crate::error::FsError;
-    let existing_is_dir = existing.node_type() == NodeType::Directory;
-    match (moving == NodeType::Directory, existing_is_dir) {
-        (true, true) => {
-            let busy = existing
-                .readdir()?
-                .iter()
-                .any(|e| e.name != "." && e.name != "..");
-            if busy {
-                Err(KernelError::FsError(FsError::DirectoryNotEmpty))
-            } else {
-                Ok(())
-            }
-        }
-        (true, false) => Err(KernelError::FsError(FsError::NotADirectory)),
-        (false, true) => Err(KernelError::FsError(FsError::IsADirectory)),
-        (false, false) => Ok(()),
-    }
-}
-
 /// Names that can never be a rename source or target.
 pub(crate) fn is_special_name(name: &str) -> bool {
     name.is_empty() || name == "." || name == ".."
@@ -451,7 +424,7 @@ pub(crate) fn normalize_path(path: &str, cwd: &str) -> String {
 
 /// Whether normalized `path` is `mount` itself or lies below it, on a
 /// whole-component boundary.
-fn path_is_under(path: &str, mount: &str) -> bool {
+pub(crate) fn path_is_under(path: &str, mount: &str) -> bool {
     mount == "/"
         || path == mount
         || (path.starts_with(mount) && path.as_bytes().get(mount.len()) == Some(&b'/'))
@@ -1369,6 +1342,18 @@ mod tests {
         rename_contract(&tmpfs::TmpFs::new(1 << 20));
         let bfs = blockfs::BlockFs::format(4096, 256).unwrap();
         rename_contract(&bfs);
+    }
+
+    #[test]
+    fn rename_refuses_another_tmpfs_instance() {
+        // Moving data between tmpfs mounts would bypass the destination's
+        // size limit.
+        let (x, y) = (tmpfs::TmpFs::new(1 << 20), tmpfs::TmpFs::new(16));
+        x.root().create("big", Permissions::default()).unwrap();
+        assert!(x.root().rename("big", &y.root(), "big").is_err());
+        let d = x.root().mkdir("d", Permissions::default()).unwrap();
+        // A directory cannot become its own parent.
+        assert!(x.root().rename("d", &d, "d2").is_err());
     }
 
     #[test]

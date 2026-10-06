@@ -1487,8 +1487,21 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
 
     if src.node_type() == crate::fs::NodeType::Directory {
         // A directory cannot move into its own subtree (POSIX: EINVAL).
-        let old_slash = alloc::format!("{}/", old.trim_end_matches('/'));
-        if new.starts_with(&old_slash) {
+        // Compared on canonical paths (symlinks, ".", ".." resolved): a
+        // string prefix test on the raw paths was bypassed by "/a/./b" or
+        // a symlink to the directory, which orphaned it as its own child.
+        let (_, old_parent_canon) = vfs_guard
+            .resolve_canonical(&old_parent_path, "/", true)
+            .map_err(map_resolve_err)?;
+        let src_canon = if old_parent_canon == "/" {
+            alloc::format!("/{}", old_name)
+        } else {
+            alloc::format!("{}/{}", old_parent_canon, old_name)
+        };
+        let (_, new_parent_canon) = vfs_guard
+            .resolve_canonical(&new_parent_path, "/", true)
+            .map_err(map_resolve_err)?;
+        if crate::fs::path_is_under(&new_parent_canon, &src_canon) {
             return Err(SyscallError::InvalidArgument);
         }
         // Moving it to another parent rewrites its "..", which needs write

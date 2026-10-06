@@ -454,9 +454,23 @@ static void test_rename_directory(void)
 
     errno = 0;
     int r = rename("/tmp/rd/b", "/tmp/rd/b/moved/sub");
-    static char why[48];
-    snprintf(why, sizeof(why), "rename into own subtree: %d errno %d", r, errno);
-    report("rename_into_own_subtree_einval", r != 0 && errno == EINVAL, why);
+    int e1 = errno;
+    static char why[80];
+    /* The same, spelled so a string-prefix check misses it. */
+    symlink("/tmp/rd/b", "/tmp/rd/blink");
+    errno = 0;
+    int r2 = rename("/tmp/rd/b", "/tmp/rd/./b/moved/sub");
+    int e2 = errno;
+    errno = 0;
+    int r3 = rename("/tmp/rd/b", "/tmp/rd/blink/moved/sub");
+    int e3 = errno;
+    errno = 0;
+    int r4 = rename("/tmp/rd/b", "/tmp/rd/b/moved/../moved/sub");
+    int e4 = errno;
+    snprintf(why, sizeof(why), "%d/%d %d/%d %d/%d %d/%d", r, e1, r2, e2, r3, e3, r4, e4);
+    report("rename_into_own_subtree_einval",
+           r != 0 && e1 == EINVAL && r2 != 0 && e2 == EINVAL && r3 != 0 && e3 == EINVAL && r4 != 0 && e4 == EINVAL,
+           why);
 }
 
 int main(int argc, char **argv)

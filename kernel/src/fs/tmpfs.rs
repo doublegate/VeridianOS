@@ -383,25 +383,73 @@ impl VfsNode for TmpNode {
         if np.node_type != NodeType::Directory {
             return Err(KernelError::FsError(FsError::NotADirectory));
         }
-        let node = self
-            .children
-            .read()
+        // Same tmpfs instance only: moving a file between two tmpfs mounts
+        // would carry its bytes past the destination's size limit.
+        if !Arc::ptr_eq(&self.bytes_used, &np.bytes_used) {
+            return Err(KernelError::FsError(FsError::CrossDevice));
+        }
+
+        // Both parent maps stay locked for the whole operation (one lock if
+        // they are the same directory, otherwise in address order), so the
+        // entry checked is the entry moved and nothing changes in between.
+        let same_dir = core::ptr::eq(self, np);
+        let (mut src, mut dst) = if same_dir {
+            (self.children.write(), None)
+        } else if (self as *const TmpNode) < (np as *const TmpNode) {
+            let a = self.children.write();
+            (a, Some(np.children.write()))
+        } else {
+            let b = np.children.write();
+            (self.children.write(), Some(b))
+        };
+
+        let node = src
             .get(old_name)
             .cloned()
             .ok_or(KernelError::FsError(FsError::NotFound))?;
-        let existing = np.children.read().get(new_name).cloned();
-        if let Some(existing) = existing {
+        if core::ptr::eq(&*node, np) {
+            // A directory cannot become its own parent.
+            return Err(KernelError::FsError(FsError::InvalidPath));
+        }
+        let target = match dst.as_ref() {
+            Some(d) => d.get(new_name).cloned(),
+            None => src.get(new_name).cloned(),
+        };
+        if let Some(existing) = target {
             if Arc::ptr_eq(&existing, &node) {
                 return Ok(()); // same node: POSIX says do nothing
             }
-            super::check_rename_replace(node.node_type, &*existing)?;
-            // The parent's own unlink releases the replaced file's bytes.
-            np.unlink(new_name)?;
+            let moving_dir = node.node_type == NodeType::Directory;
+            let existing_dir = existing.node_type == NodeType::Directory;
+            match (moving_dir, existing_dir) {
+                (true, false) => return Err(KernelError::FsError(FsError::NotADirectory)),
+                (false, true) => return Err(KernelError::FsError(FsError::IsADirectory)),
+                (true, true) => {
+                    // The source directory contains `old_name`, so it is not
+                    // empty (and is locked here, so it must not be re-read).
+                    if core::ptr::eq(&*existing, self) || !existing.children.read().is_empty() {
+                        return Err(KernelError::FsError(FsError::DirectoryNotEmpty));
+                    }
+                }
+                (false, false) => {}
+            }
+            if existing.node_type == NodeType::File {
+                let freed = existing.data.read().len();
+                let _ =
+                    self.bytes_used
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                            Some(used.saturating_sub(freed))
+                        });
+            }
         }
-        self.children.write().remove(old_name);
-        np.children
-            .write()
-            .insert(String::from(new_name), node.clone());
+
+        src.remove(old_name);
+        match dst.as_mut() {
+            Some(d) => d.insert(String::from(new_name), node.clone()),
+            None => src.insert(String::from(new_name), node.clone()),
+        };
+        drop(dst);
+        drop(src);
         if node.node_type == NodeType::Directory {
             node.parent_inode
                 .store(np.inode, core::sync::atomic::Ordering::Relaxed);
