@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sched.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <signal.h>
@@ -82,6 +83,25 @@ typedef struct block_header {
 static block_header_t *free_list = NULL;
 
 /*
+ * The free list is shared by every thread, so all of its readers and
+ * writers hold this lock (LIBC-SEC-01). A test-and-set lock that yields
+ * when contended: critical sections are short and never block, and
+ * pthread.c's lock is private to that file.
+ */
+static int alloc_lock_word = 0;
+
+static void alloc_lock(void)
+{
+    while (__atomic_exchange_n(&alloc_lock_word, 1, __ATOMIC_ACQUIRE))
+        sched_yield();
+}
+
+static void alloc_unlock(void)
+{
+    __atomic_store_n(&alloc_lock_word, 0, __ATOMIC_RELEASE);
+}
+
+/*
  * Round size up to alignment boundary.
  */
 static inline size_t align_up(size_t n)
@@ -124,46 +144,43 @@ static void free_insert(block_header_t *blk)
     }
 }
 
-void *malloc(size_t size)
+/*
+ * Large allocation path: served directly from the OS via
+ * mmap(MAP_ANONYMOUS|MAP_PRIVATE). Touches no shared state, so no lock.
+ *
+ * Layout of the mmap'd region:
+ *   [ mmap_header_t (MMAP_HDR_SIZE bytes) ][ usable (size bytes) ]
+ *
+ * The mmap_header_t stores MMAP_MAGIC so that free() can detect
+ * this block without consulting the sbrk free list.  munmap()
+ * releases the entire mapping, giving the pages back to the kernel.
+ */
+static void *mmap_alloc(size_t size)
 {
-    if (size == 0)
+    size_t map_size = MMAP_HDR_SIZE + size;
+    /* Round up to a page boundary for clean munmap accounting. */
+    map_size = (map_size + 4095UL) & ~4095UL;
+
+    void *mem = mmap(NULL, map_size,
+                     PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS,
+                     -1, 0);
+    if (mem == MAP_FAILED) {
+        errno = ENOMEM;
         return NULL;
-
-    size = align_up(size);
-
-    /*
-     * Large allocation path: requests at or above MMAP_THRESHOLD are
-     * served directly from the OS via mmap(MAP_ANONYMOUS|MAP_PRIVATE).
-     *
-     * Layout of the mmap'd region:
-     *   [ mmap_header_t (MMAP_HDR_SIZE bytes) ][ usable (size bytes) ]
-     *
-     * The mmap_header_t stores MMAP_MAGIC so that free() can detect
-     * this block without consulting the sbrk free list.  munmap()
-     * releases the entire mapping, giving the pages back to the kernel.
-     */
-    if (size >= MMAP_THRESHOLD) {
-        size_t map_size = MMAP_HDR_SIZE + size;
-        /* Round up to a page boundary for clean munmap accounting. */
-        map_size = (map_size + 4095UL) & ~4095UL;
-
-        void *mem = mmap(NULL, map_size,
-                         PROT_READ | PROT_WRITE,
-                         MAP_PRIVATE | MAP_ANONYMOUS,
-                         -1, 0);
-        if (mem == MAP_FAILED) {
-            errno = ENOMEM;
-            return NULL;
-        }
-
-        mmap_header_t *hdr = (mmap_header_t *)mem;
-        hdr->magic    = MMAP_MAGIC;
-        hdr->map_size = map_size;
-
-        return (char *)mem + MMAP_HDR_SIZE;
     }
 
-    /* Small allocation path: first-fit search on the sbrk free list. */
+    mmap_header_t *hdr = (mmap_header_t *)mem;
+    hdr->magic    = MMAP_MAGIC;
+    hdr->map_size = map_size;
+
+    return (char *)mem + MMAP_HDR_SIZE;
+}
+
+/* Small allocation path: first-fit on the sbrk free list. Caller holds
+ * the allocator lock; `size` is already aligned. */
+static void *heap_alloc_locked(size_t size)
+{
     block_header_t *prev = NULL;
     block_header_t *cur = free_list;
 
@@ -223,6 +240,26 @@ void *malloc(size_t size)
     return (char *)blk + HEADER_SIZE;
 }
 
+
+void *malloc(size_t size)
+{
+    if (size == 0)
+        return NULL;
+    if (size > (size_t)-1 - MMAP_HDR_SIZE - 4096) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    size = align_up(size);
+    if (size >= MMAP_THRESHOLD)
+        return mmap_alloc(size);
+
+    alloc_lock();
+    void *p = heap_alloc_locked(size);
+    alloc_unlock();
+    return p;
+}
+
 void free(void *ptr)
 {
     if (!ptr)
@@ -244,7 +281,9 @@ void free(void *ptr)
     }
 
     block_header_t *blk = (block_header_t *)((char *)ptr - HEADER_SIZE);
+    alloc_lock();
     free_insert(blk);
+    alloc_unlock();
 }
 
 void *calloc(size_t count, size_t size)
@@ -298,6 +337,8 @@ void *realloc(void *ptr, size_t size)
     if (blk->size >= size)
         return ptr;     /* Current block is big enough. */
 
+    alloc_lock();
+
     /*
      * Try to grow in place by coalescing with an adjacent free block.
      * This avoids a copy when the next block in memory is free and
@@ -328,6 +369,7 @@ void *realloc(void *ptr, size_t size)
                     blk->size = size;
                     free_insert(rem);
                 }
+                alloc_unlock();
                 return ptr;     /* Grew in place -- no copy needed. */
             }
             break;
@@ -335,6 +377,7 @@ void *realloc(void *ptr, size_t size)
         fprev = fcur;
         fcur = fcur->next;
     }
+    alloc_unlock();
 
     /* Cannot grow in place.  Allocate, copy, free. */
     void *newp = malloc(size);
@@ -642,14 +685,49 @@ long long atoll(const char *nptr)
 
 void *aligned_alloc(size_t alignment, size_t size)
 {
-    /* Simple stub: malloc always aligns to 16 bytes. */
+    if (alignment == 0 || (alignment & (alignment - 1)) != 0) {
+        errno = EINVAL;
+        return NULL;
+    }
     if (alignment <= ALLOC_ALIGN)
         return malloc(size);
-    /* For larger alignments, over-allocate and align. */
-    void *p = malloc(size + alignment);
-    if (!p) return NULL;
-    unsigned long addr = (unsigned long)p;
-    unsigned long aligned = (addr + alignment - 1) & ~(alignment - 1);
+    if (size == 0)
+        return NULL;
+    if (size > (size_t)-1 / 2 || alignment > (size_t)-1 / 4) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    /*
+     * free() finds the header just before the pointer it is given, so the
+     * returned pointer must start a real block. Over-allocate from the
+     * heap (never mmap: that header cannot be moved), then split the
+     * misaligned prefix off as a block of its own and free it. The
+     * pointer used to be returned from inside a block, so free() read a
+     * header out of the caller's padding.
+     */
+    size = align_up(size);
+    alloc_lock();
+    char *raw = heap_alloc_locked(size + alignment + HEADER_SIZE);
+    if (!raw) {
+        alloc_unlock();
+        return NULL;
+    }
+    block_header_t *blk = (block_header_t *)(raw - HEADER_SIZE);
+    unsigned long addr = (unsigned long)raw;
+    if ((addr & (alignment - 1)) == 0) {
+        alloc_unlock();
+        return raw;
+    }
+    /* First aligned address leaving room for the prefix block's header. */
+    unsigned long aligned = (addr + HEADER_SIZE + alignment - 1) & ~(alignment - 1);
+    size_t gap = aligned - addr;            /* >= HEADER_SIZE, multiple of 16 */
+    block_header_t *ablk = (block_header_t *)(aligned - HEADER_SIZE);
+    ablk->size = blk->size - gap;
+    ablk->next = NULL;
+    blk->size = gap - HEADER_SIZE;
+    free_insert(blk);
+    alloc_unlock();
     return (void *)aligned;
 }
 
