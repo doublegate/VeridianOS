@@ -1087,7 +1087,14 @@ pub fn init() {
                     if let Ok(f) = etc.create("os-release", Permissions::default()) {
                         f.write(
                             0,
-                            b"NAME=\"VeridianOS\"\nVERSION=\"0.26.0\"\nID=veridian\nPRETTY_NAME=\"VeridianOS v0.26.0\"\n",
+                            concat!(
+                                "NAME=\"VeridianOS\"\nVERSION=\"",
+                                env!("CARGO_PKG_VERSION"),
+                                "\"\nID=veridian\nPRETTY_NAME=\"VeridianOS v",
+                                env!("CARGO_PKG_VERSION"),
+                                "\"\n"
+                            )
+                            .as_bytes(),
                         )
                         .ok();
                     }

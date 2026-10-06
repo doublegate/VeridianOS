@@ -564,7 +564,7 @@ impl BuiltinCommand for UnameCommand {
             parts.push("veridian");
         }
         if show_release {
-            parts.push("0.26.0");
+            parts.push(env!("CARGO_PKG_VERSION"));
         }
         if show_machine {
             #[cfg(target_arch = "x86_64")]

@@ -63,7 +63,9 @@ pub fn sys_uname(buf: usize) -> SyscallResult {
     // Field offsets: sysname=0, nodename=65, release=130, version=195, machine=260
     write_field(0, b"VeridianOS");
     write_field(UTSNAME_LENGTH, b"veridian");
-    write_field(UTSNAME_LENGTH * 2, b"0.5.0");
+    // The release is the crate version, set once in Cargo.toml (it said
+    // 0.5.0 for twenty releases).
+    write_field(UTSNAME_LENGTH * 2, env!("CARGO_PKG_VERSION").as_bytes());
     write_field(UTSNAME_LENGTH * 3, b"#1 SMP");
 
     #[cfg(target_arch = "x86_64")]
