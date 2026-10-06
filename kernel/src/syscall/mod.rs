@@ -760,7 +760,10 @@ pub extern "C" fn syscall_handler(
     // Rate limiting check
     if !SYSCALL_RATE_LIMITER.check() {
         SYSCALL_ERRORS.fetch_add(1, Ordering::Relaxed);
-        return SyscallError::WouldBlock as i32 as isize;
+        // Through the shared conversion like every other error: the raw
+        // VeridianOS value (-6) is not EAGAIN (-11) to musl (review of the
+        // v0.26.0 stack, PR #15).
+        return linux_compat::to_linux_errno(SyscallError::WouldBlock);
     }
 
     // Get caller PID for audit logging
@@ -1435,29 +1438,25 @@ fn handle_syscall(
             let fd = arg3 as i32;
             let event_ptr = arg4;
 
-            // Debug: trace epoll_ctl args
-            #[cfg(target_arch = "x86_64")]
-            unsafe {
-                crate::arch::x86_64::idt::raw_serial_str(b"[EPOLL_CTL] epfd=");
-                crate::arch::x86_64::idt::raw_serial_hex(epoll_fd as u64);
-                crate::arch::x86_64::idt::raw_serial_str(b" op=");
-                crate::arch::x86_64::idt::raw_serial_hex(op as u64);
-                crate::arch::x86_64::idt::raw_serial_str(b" fd=");
-                crate::arch::x86_64::idt::raw_serial_hex(fd as u64);
-                crate::arch::x86_64::idt::raw_serial_str(b" ev=");
-                crate::arch::x86_64::idt::raw_serial_hex(event_ptr as u64);
-                crate::arch::x86_64::idt::raw_serial_str(b"\n");
-            }
-
             let epoll_id = resolve_epoll_id(epoll_fd)?;
+            // struct epoll_event is packed (12 bytes on x86_64): copied
+            // field by field through the fault-tolerant reader rather than
+            // borrowed from user memory (review of the v0.26.0 stack).
             let event = if event_ptr != 0 {
-                validate_user_ptr_typed::<crate::net::epoll::EpollEvent>(event_ptr)?;
-                // SAFETY: event_ptr validated as aligned, non-null, and in user-space above.
-                Some(unsafe { &*(event_ptr as *const crate::net::epoll::EpollEvent) })
+                let mut raw = [0u8; 12];
+                userspace::read_user_bytes(event_ptr, &mut raw)?;
+                let mut events = [0u8; 4];
+                let mut data = [0u8; 8];
+                events.copy_from_slice(&raw[..4]);
+                data.copy_from_slice(&raw[4..]);
+                Some(crate::net::epoll::EpollEvent {
+                    events: u32::from_ne_bytes(events),
+                    data: u64::from_ne_bytes(data),
+                })
             } else {
                 None
             };
-            crate::net::epoll::epoll_ctl(epoll_id, op, fd, event)
+            crate::net::epoll::epoll_ctl(epoll_id, op, fd, event.as_ref())
                 .map(|_| 0)
                 .map_err(|_| SyscallError::InvalidArgument)
         }
@@ -2505,26 +2504,23 @@ fn write_scm_rights(
     msghdr_ptr: usize,
 ) -> bool {
     let needed = CMSGHDR_SIZE + fds.len() * 4;
-    if needed > control_len || validate_user_buffer(control_ptr, needed).is_err() {
+    if needed > control_len {
         return false;
     }
-    // SAFETY: [control_ptr, control_ptr + needed) was validated as user
-    // memory just above; unaligned writes because user memory has no
-    // alignment guarantee.
-    unsafe {
-        core::ptr::write_unaligned(control_ptr as *mut u64, needed as u64);
-        core::ptr::write_unaligned((control_ptr + 8) as *mut i32, SOL_SOCKET_LEVEL);
-        core::ptr::write_unaligned((control_ptr + 12) as *mut i32, SCM_RIGHTS_TYPE);
-        for (i, &fd) in fds.iter().enumerate() {
-            core::ptr::write_unaligned((control_ptr + CMSGHDR_SIZE + 4 * i) as *mut i32, fd as i32);
-        }
+    // Built in a kernel buffer and copied out with the fault-tolerant
+    // routine; the raw unaligned stores this replaces faulted in the kernel
+    // on an unmapped page (agy review of the v0.26.0 stack, PR #10).
+    let mut cmsg = alloc::vec::Vec::with_capacity(needed);
+    cmsg.extend_from_slice(&(needed as u64).to_ne_bytes());
+    cmsg.extend_from_slice(&SOL_SOCKET_LEVEL.to_ne_bytes());
+    cmsg.extend_from_slice(&SCM_RIGHTS_TYPE.to_ne_bytes());
+    for &fd in fds {
+        cmsg.extend_from_slice(&(fd as i32).to_ne_bytes());
     }
-    // SAFETY: msghdr_ptr was validated by the caller for the 56-byte
-    // msghdr; msg_controllen is the sixth usize-sized field.
-    unsafe {
-        core::ptr::write_unaligned((msghdr_ptr as *mut usize).add(5), needed);
-    }
-    true
+    // msg_controllen is the sixth usize-sized field of the 56-byte msghdr.
+    userspace::write_user_bytes(control_ptr, &cmsg).is_ok()
+        && userspace::write_user::<usize>(msghdr_ptr + 5 * core::mem::size_of::<usize>(), needed)
+            .is_ok()
 }
 
 /// Build a message from `len` bytes of user memory at `ptr`, choosing the
