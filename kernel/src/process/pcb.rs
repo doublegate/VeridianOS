@@ -137,6 +137,11 @@ pub struct Process {
     #[cfg(feature = "alloc")]
     pub env_vars: Mutex<alloc::collections::BTreeMap<String, String>>,
 
+    /// Absolute path of the running executable (target of /proc/self/exe).
+    /// Set by the loader and by a successful exec, inherited on fork.
+    #[cfg(feature = "alloc")]
+    pub exe_path: Mutex<String>,
+
     /// Signal handlers (signal number -> handler action)
     /// 0 = default, 1 = ignore, other values = handler address
     pub signal_handlers: Mutex<[u64; 32]>,
@@ -209,6 +214,8 @@ impl Process {
             pgid: AtomicU64::new(pid.0),
             sid: AtomicU64::new(pid.0),
             env_vars: Mutex::new(BTreeMap::new()),
+            #[cfg(feature = "alloc")]
+            exe_path: Mutex::new(String::new()),
             signal_handlers: Mutex::new([0u64; 32]),
             pending_signals: AtomicU64::new(0),
             signal_mask: AtomicU64::new(0),

@@ -197,7 +197,9 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
             #[cfg(not(target_arch = "x86_64"))]
             Err(SyscallError::InvalidState)
         }
-        Err(_e) => Err(SyscallError::ResourceNotFound),
+        // Report the real cause (not-found, bad image, out of memory);
+        // every failure used to surface as ENOENT.
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
