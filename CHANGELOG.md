@@ -11,8 +11,8 @@ v0.26.0 remediates the findings of the 2026-10-05 performance and quality audit
 
 Each finding was first re-verified against the code; the per-finding results are in
 `docs/audit/AUDIT-VERIFICATION-2026-10-05.md`. Verification found 34 defects the audit missed
-(N-01..N-34), and the bot review of the release found 20 more (N-35..N-54). The same file tracks all
-of them: 33 are fixed and 21 are open, each with its planned release.
+(N-01..N-34), and the bot review of the release found 22 more (N-35..N-56). The same file tracks all
+of them: 33 are fixed and 23 are open, each with its planned release.
 
 **Status:**
 
@@ -222,6 +222,10 @@ reason, then resolved. Fixed:
   - The TSS stacks are no longer `static mut`.
   - `sscanf` reads integers with long zero padding.
   - Two debug traces are gone from the epoll and exec paths.
+  - The key store and RPC registry each had two globals, so the one `init` filled was never the one
+    callers got; `LazyLock` could run its initializer twice under contention (a data race).
+  - The README's status and performance tables state measured figures and what is not measured,
+    instead of targets presented as results.
   - `open()` reports the real lookup error (EACCES, ENOTDIR, ELOOP) instead of ENOENT for all of
     them, and O_CREAT creates only a name that is missing.
   - Frees in `Drop` and rollback paths log a failure instead of discarding it.

@@ -168,18 +168,16 @@ impl Default for KeyStore {
     }
 }
 
-/// Global key store
-static GLOBAL_KEYSTORE: RwLock<Option<KeyStore>> = RwLock::new(None);
+/// Global key store. There is exactly one: `init` and `get_keystore` used
+/// to fill two different statics, so the store `init` created was never the
+/// one callers got (gemini-code-assist on PR #1).
+static KEYSTORE_STORAGE: OnceLock<KeyStore> = OnceLock::new();
 
 /// Initialize key store
 pub(crate) fn init() -> CryptoResult<()> {
-    let keystore = KeyStore::new();
-    *GLOBAL_KEYSTORE.write() = Some(keystore);
+    KEYSTORE_STORAGE.get_or_init(KeyStore::new);
     Ok(())
 }
-
-/// Global key store
-static KEYSTORE_STORAGE: OnceLock<KeyStore> = OnceLock::new();
 
 /// Get global key store
 pub(crate) fn get_keystore() -> &'static KeyStore {
@@ -191,6 +189,15 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+
+    #[test]
+    fn init_and_getter_share_one_store() {
+        init().unwrap();
+        assert!(core::ptr::eq(get_keystore(), get_keystore()));
+        let before = get_keystore() as *const KeyStore;
+        init().unwrap();
+        assert!(core::ptr::eq(before, get_keystore()));
+    }
 
     #[test]
     fn test_keystore_operations() {
