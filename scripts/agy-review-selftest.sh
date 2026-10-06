@@ -61,7 +61,7 @@ log() { :; }
 # otherwise extract EMPTY, and an empty guard sources fine and asserts nothing -- the same
 # absence-reads-as-agreement failure the markers were adopted to prevent.
 for guard in "service-error guard" "oauth guard" "ours-comment filter" "duration parser" \
-             "numeric env validation" "diff-size scaling"; do
+             "numeric env validation" "diff-size scaling" "truncation helpers"; do
   blk="$(extract_block "$guard")"
   [ -n "$blk" ] || { echo "FAIL: SELFTEST-EXTRACT block '$guard' is missing or empty" >&2; exit 1; }
   printf '%s\n' "$blk" | bash -n - 2>/dev/null \
@@ -301,11 +301,33 @@ check "an unfamiliar error signature is caught" "MATCH" \
 # REGRESSION, observed on VeridianOS PR #5: agy under `unbuffer` printed the auth failure in
 # lowercase, the case-sensitive guard missed it, and the error was posted as the review under a
 # green check. Any capitalisation of the word is the same failure.
-# A diff cut by the MAX_DIFF_BYTES cap must be disclosed to the MODEL, not only in the posted
-# comment: otherwise it reviews a prefix believing it has the whole change (Copilot review,
-# VeridianOS PR #5).
+# --- truncation: executed, not grepped (CodeRabbit review, VeridianOS PR #5) -----
+# A diff cut by MAX_DIFF_BYTES, a prompt cut by MAX_PROMPT_BYTES, and a review cut to fit the comment
+# limit must each leave the model -- or the reader -- a notice. These run the real helpers.
+printf '0123456789abcdefghij' > "$TMPD/diff"
+check "the diff cap cuts an oversized diff" "cut:5" \
+  "$(agy_cut_file "$TMPD/diff" 5 && echo "cut:$(wc -c < "$TMPD/diff")")"
+check "the diff cap leaves a small diff alone" "kept" \
+  "$(agy_cut_file "$TMPD/diff" 50 && echo cut || echo kept)"
+{ printf 'PROMPT\n--- UNIFIED DIFF ---\n'; cat "$TMPD/diff"; agy_diff_truncation_notice 5; } > "$TMPD/prompt"
 check "a truncated diff is disclosed in the prompt" "yes" \
-  "$(grep -q 'NOTE: TRUNCATED DIFF' "$SCRIPT_DIR/agy-review.sh" && grep -q '} >> "\$prompt_file"' "$SCRIPT_DIR/agy-review.sh" && echo yes || echo no)"
+  "$(grep -q 'NOTE: TRUNCATED DIFF' "$TMPD/prompt" && grep -q 'first 5 bytes' "$TMPD/prompt" && echo yes || echo no)"
+head -c 2000 /dev/zero | tr '\0' 'x' > "$TMPD/bigprompt"
+agy_diff_truncation_notice 5 >> "$TMPD/bigprompt"
+agy_cap_prompt "$TMPD/bigprompt" 600
+check "the prompt cap stays within its budget" "yes" \
+  "$([ "$(wc -c < "$TMPD/bigprompt")" -le 600 ] && echo yes || echo no)"
+check "the prompt cap's own notice survives the cut" "yes" \
+  "$(tail -n 4 "$TMPD/bigprompt" | grep -q 'NOTE: TRUNCATED PROMPT' && echo yes || echo no)"
+head -c 70000 /dev/zero | tr '\0' 'r' > "$TMPD/round"
+agy_cap_round "$TMPD/round" 1000
+check "an oversized review round is capped" "yes" \
+  "$([ "$(wc -c < "$TMPD/round")" -le 1000 ] && echo yes || echo no)"
+check "a capped review round says it was truncated" "yes" \
+  "$(grep -q 'Review truncated' "$TMPD/round" && echo yes || echo no)"
+# A failed jq step in the archive lookup must be logged, not swallowed.
+check "archive jq failures are logged" "no" \
+  "$(grep -n 'SELECT_OURS_JQ" 2>/dev/null' "$SCRIPT_DIR/agy-review.sh" >/dev/null && echo yes || echo no)"
 
 check "a lowercase error (agy under unbuffer) is caught" "MATCH" \
   "$(se 'error: Eligibility check failed: PERMISSION_DENIED (code 403): Request had insufficient authentication scopes.. Please log out (/logout) and log back in (/login).')"

@@ -26,9 +26,9 @@ is why this uses a self-hosted runner rather than GitHub's cloud runners.
 
 > **ToS caveat, stated plainly:** Google deliberately moved GitHub reviews to its
 > enterprise/API product. Automating a *consumer* Ultra subscription for CI-style
-> workloads is a gray area — the realistic downside is rate-limiting. Keep volume
-> modest (this template reviews on open + on demand, **not** on every push) to
-> stay within Ultra limits and out of trouble.
+> workloads is a gray area — the realistic downside is rate-limiting. This template
+> reviews on open, reopen, **every push** (`synchronize`) and on demand; remove
+> `synchronize` from the workflow if you need to keep volume lower.
 
 ---
 
@@ -162,7 +162,7 @@ project's.
 ```fish
 # from the target repo root
 grep -qxF '/.agy-review-work/' .gitignore 2>/dev/null
-  or cat /home/parobek/Code/Local_Only-Projects/antigravity-pr-review/gitignore.snippet >> .gitignore
+  or cat $TPL/gitignore.snippet >> .gitignore   # TPL: your checkout of this template
 ```
 
 ---
@@ -216,22 +216,24 @@ non-ephemeral, so untrusted code from a fork PR can persistently compromise the
 host. This template applies the standard mitigations, but the residual risk is
 yours to accept:
 
-- **Author-trust gate on auto-runs:** the `pull_request` job (open/reopen/push —
-  i.e. `synchronize`) only runs when the PR **author** is
-  `OWNER`/`MEMBER`/`COLLABORATOR` (`github.event.pull_request.author_association`).
-  An outside contributor's fork PR is never auto-run on your runner, so adding
-  `synchronize` (re-review on every push) does not widen the attack surface to
-  untrusted pushes.
-- **Author-trust gate on comments:** `/agy-review` only runs for a
-  `OWNER`/`MEMBER`/`COLLABORATOR` **commenter** (`author_association`), re-checked
-  in the script. A stranger cannot trigger execution by commenting — and the
-  commenter (not the PR author) is checked on purpose, so a maintainer can
-  deliberately review an external contributor's PR on demand.
-- **Stronger option — no fork execution at all:** if you also want to block a
-  *trusted member's* fork-sourced PR from auto-running, add
-  `github.event.pull_request.head.repo.full_name == github.repository` to the
-  `pull_request` branch of the `if:`. The author gate above already blocks
-  outside contributors; this closes the member-fork case too.
+- **Same-repository gate on auto-runs:** the `pull_request` job (open/reopen/push,
+  i.e. `synchronize`) runs only when the PR head is a branch **in this repository**
+  (`github.event.pull_request.head.repo.full_name == github.repository`). Pushing a
+  branch here already requires write access, so a fork PR, from an outside
+  contributor or a member, never schedules work on your runner, and adding
+  `synchronize` does not widen the attack surface to untrusted pushes.
+- **Write-access gate on comments:** `/agy-review` from a commenter whose
+  `author_association` is `OWNER`/`MEMBER`/`COLLABORATOR` passes the workflow's
+  cheap pre-filter, but that is not the permission check (a Triage-only user also
+  reports as COLLABORATOR). The authoritative check is `agy_has_write_access` in
+  `scripts/agy-review.sh`, which asks the permissions API for the commenter and
+  fails closed; the script also re-checks that the PR is not from a fork, because
+  the `issue_comment` payload has no head-repo field for the `if:` to gate on.
+- **First-install bootstrap:** on a repository whose default branch has no
+  reviewer yet, the workflow runs the PR head's scripts once, only for a same-repo
+  branch whose author has write access *at run time*. Remove the bootstrap steps
+  once the reviewer is on the default branch (they also trip CodeQL's
+  `actions/untrusted-checkout`).
 - **Least surface in the job:** review-only prompt, `--sandbox`, no repo secrets
   (built-in `GITHUB_TOKEN` only), temp files cleaned via an `EXIT` trap.
 

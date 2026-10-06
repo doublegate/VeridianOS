@@ -244,6 +244,11 @@ AGY_LOCK="${AGY_LOCK:-$HOME/.gemini/antigravity-cli/.agy-review.lock}"
 AGY_LOCK_WAIT="${AGY_LOCK_WAIT:-600}"      # seconds to wait for the agy lock before proceeding
 AGY_RETRIES="${AGY_RETRIES:-3}"            # attempts to get a usable agy response
 AGY_RETRY_DELAY="${AGY_RETRY_DELAY:-15}"   # base backoff seconds between retries (grows per attempt)
+# Both reach (( )) arithmetic: `08` would abort on an octal parse and `0` retries would skip every
+# attempt and report "no review output after 0 attempt(s)". Same validation as the other numerics.
+normalise_numeric_env AGY_RETRIES     3
+normalise_numeric_env AGY_RETRY_DELAY 15
+[ "$AGY_RETRIES" -ge 1 ] || AGY_RETRIES=1
 MARKER="<!-- antigravity-pr-review -->"
 
 # The comment body's format -- sentinels plus the split/trim helpers -- lives in a sourceable
@@ -379,7 +384,7 @@ log "reviewing ${REPO}#${PR}"
 
 # Remove every temp file on exit. Pre-declared so the trap is safe under `set -u` even if the
 # script exits before a given file is created.
-diff_file= diff_err= meta_file= prompt_file= out_file= raw= body_file= agy_diff_file= agy_work_dir=
+diff_file= diff_err= meta_file= prompt_file= out_file= raw= body_file= agy_diff_file= agy_work_dir= jq_err= prior_body_file= archived_file=
 # Set to 1 if agy printed its interactive OAuth login flow instead of a review (lapsed session);
 # gates the no-post abort below. Pre-declared so `${auth_failed:-0}` is set-u-safe on every path.
 auth_failed=0
@@ -420,7 +425,8 @@ cleanup() {
   # abort DURING cleanup -- temp files left behind, and a confusing error masking the real exit
   # cause. The pre-declaration stays and is still the actual guarantee; this is the cheap second
   # line for a function that only ever runs while something else is going wrong.
-  for f in "${diff_file:-}" "${diff_err:-}" "${meta_file:-}" "${out_file:-}" "${raw:-}" "${body_file:-}"; do
+  for f in "${diff_file:-}" "${diff_err:-}" "${meta_file:-}" "${out_file:-}" "${raw:-}" "${body_file:-}" \
+           "${jq_err:-}" "${prior_body_file:-}" "${archived_file:-}"; do
     [ -n "$f" ] && doomed+=("$f")
   done
   if [ -z "$keep_set" ]; then
@@ -599,8 +605,45 @@ truncated=""
 # limit. One minified-asset line in a diff can exceed the whole budget by itself, so "cut at a line
 # boundary" degenerates to either overshooting the cap or emitting nothing. Exact where the limit is
 # real, tolerant where the damage is already handled.
-if [ "$(wc -c < "$diff_file")" -gt "$MAX_DIFF_BYTES" ]; then
-  head -c "$MAX_DIFF_BYTES" "$diff_file" > "$diff_file.cut" && mv "$diff_file.cut" "$diff_file"
+# --- truncation helpers ---------------------------------------------------------
+# Every byte cap in this script goes through these, so the self-test can EXECUTE them rather than
+# grep for their text (CodeRabbit review, VeridianOS PR #5). A model that is handed a cut input must
+# be told so, and a notice appended before a later cut can be cut away -- so each cap that can hide
+# content writes its own notice AFTER cutting. Notices are plain ASCII: character count = bytes.
+# >>> SELFTEST-EXTRACT: truncation helpers
+# Cut file $1 to at most $2 bytes. Succeeds only when it actually cut.
+agy_cut_file() {
+  [ "$(wc -c < "$1")" -gt "$2" ] || return 1
+  head -c "$2" "$1" > "$1.cut" && mv "$1.cut" "$1"
+}
+# Prompt text telling the model the diff it was given stops after $1 bytes.
+agy_diff_truncation_notice() {
+  printf '\n--- NOTE: TRUNCATED DIFF ---\n'
+  printf 'The diff above is only the first %s bytes; everything after that was cut and you have NOT\n' "$1"
+  printf 'seen it. Say at the top of your review that it covers a truncated diff, and do not state or\n'
+  printf 'imply that the whole change was reviewed.\n'
+}
+# Cap prompt file $1 at $2 bytes, keeping room for a notice written after the cut.
+agy_cap_prompt() {
+  local notice=$'\n\n--- NOTE: TRUNCATED PROMPT ---\nThe prompt, including the diff, was cut at the argument-size limit; you have NOT seen\nthe rest. Say at the top of your review that it covers a truncated diff, and do not state or\nimply that the whole change was reviewed.\n'
+  agy_cut_file "$1" "$(( $2 - ${#notice} ))" || return 1
+  printf '%s' "$notice" >> "$1"
+}
+# Cap review output $1 at $2 bytes so the posted comment fits GitHub's limit, saying what was cut.
+agy_cap_round() {
+  local size notice
+  size="$(wc -c < "$1")"
+  [ "$size" -gt "$2" ] || return 1
+  notice="$(printf '\n\n> **Review truncated:** about %s bytes of this round were omitted to stay under GitHub'"'"'s comment size limit.' "$(( size - $2 + 200 ))")"
+  # -1: the trailing newline written below is part of the budget too.
+  agy_cut_file "$1" "$(( $2 - ${#notice} - 1 ))" || return 1
+  printf '%s\n' "$notice" >> "$1"
+}
+# <<< SELFTEST-EXTRACT
+
+diff_truncated=
+if agy_cut_file "$diff_file" "$MAX_DIFF_BYTES"; then
+  diff_truncated=1
   truncated=$'\n\n> Note: the diff exceeded '"${MAX_DIFF_BYTES}"$' bytes and was truncated for this review.'
   log "diff truncated to the ${MAX_DIFF_BYTES}-byte sanity cap"
 fi
@@ -693,21 +736,20 @@ fi
 # The sanity cap above may have cut the diff. The note in `$truncated` used to reach only the
 # posted comment, so the model was told it had the whole diff and could present a partial review
 # as complete. Say so in the prompt itself, whichever way the diff was delivered.
-if [ -n "$truncated" ]; then
-  {
-    printf '\n--- NOTE: TRUNCATED DIFF ---\n'
-    printf 'The diff above is only the first %s bytes; everything after that was cut and you have NOT\n' "$MAX_DIFF_BYTES"
-    printf 'seen it. Say at the top of your review that it covers a truncated diff, and do not state or\n'
-    printf 'imply that the whole change was reviewed.\n'
-  } >> "$prompt_file"
+if [ -n "$diff_truncated" ]; then
+  agy_diff_truncation_notice "$MAX_DIFF_BYTES" >> "$prompt_file"
 fi
 
 # --- guard the argv size (E2BIG) -----------------------------------------------
 # agy takes the prompt as a --print VALUE, so the whole prompt is one execve argument
 # and must stay under MAX_ARG_STRLEN (128 KiB). MAX_DIFF_BYTES bounds the diff, but the
 # boilerplate + style guide ride on top, so cap the assembled prompt as a hard backstop.
-if [ "$(wc -c < "$prompt_file")" -gt "$MAX_PROMPT_BYTES" ]; then
-  head -c "$MAX_PROMPT_BYTES" "$prompt_file" > "$prompt_file.cut" && mv "$prompt_file.cut" "$prompt_file"
+#
+# Cutting the tail also cuts whatever notice was appended there (the TRUNCATED DIFF note above),
+# and the model would never learn that its input was cut. So the cut leaves room for a notice of
+# its own, written AFTER the cut where nothing can remove it (agy review on VeridianOS PR #5).
+# The notice is plain ASCII, so its character count is its byte count.
+if agy_cap_prompt "$prompt_file" "$MAX_PROMPT_BYTES"; then
   truncated+=$'\n\n> Note: the review prompt was capped to '"${MAX_PROMPT_BYTES}"$' bytes (execve arg-size limit).'
   log "prompt capped to ${MAX_PROMPT_BYTES} bytes (execve arg-size ceiling)"
 fi
@@ -1011,6 +1053,18 @@ if ! have_text "$out_file"; then
 fi
 
 # --- assemble the comment body -------------------------------------------------
+# MAX_BODY_BYTES bounded only the archive, so a review longer than GitHub's comment limit failed to
+# post at all (CodeRabbit review, VeridianOS PR #5). Bound the new round too, leaving room for the
+# framing and some archive, and say what was cut. A byte cut can split a UTF-8 sequence: scrub it.
+if agy_cap_round "$out_file" "$(( MAX_BODY_BYTES - 4096 ))"; then
+  log "review output capped to fit the ${MAX_BODY_BYTES}-byte comment budget"
+  if command -v iconv >/dev/null 2>&1 \
+      && iconv -c -f UTF-8 -t UTF-8 "$out_file" > "$out_file.utf8" 2>/dev/null && [ -s "$out_file.utf8" ]; then
+    mv "$out_file.utf8" "$out_file"
+  else
+    rm -f "$out_file.utf8"
+  fi
+fi
 body_file="$(mktemp)"
 {
   printf '%s\n' "$MARKER"
@@ -1054,11 +1108,20 @@ prior_body_file="$(mktemp)"
 # (`gh api --slurp` does this too, but only on gh >= 2.42; this works on any version.)
 if prior_json="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate 2>/dev/null \
                   | jq -s 'add // []' 2>/dev/null)"; then
-  prior_id="$(printf '%s' "$prior_json" | jq -r --arg marker "$MARKER" "$SELECT_OURS_JQ" 2>/dev/null || true)"
+  # Both jq steps still fall back to a fresh post (losing the archive, never the review), but the
+  # failure is LOGGED: swallowing it made a broken filter indistinguishable from a first review,
+  # and the archive would vanish with nothing to say why (agy review on VeridianOS PR #5).
+  jq_err="$(mktemp)"
+  if ! prior_id="$(printf '%s' "$prior_json" | jq -r --arg marker "$MARKER" "$SELECT_OURS_JQ" 2>"$jq_err")"; then
+    log "warning: finding the previous review comment failed (jq: $(head -c 300 "$jq_err" | tr '\n' ' ')); posting a fresh review without the archive"
+    prior_id=""
+  fi
   if [ -n "$prior_id" ] && [ "$prior_id" != "null" ]; then
-    printf '%s' "$prior_json" \
-      | jq -r --argjson id "$prior_id" '.[] | select(.id == $id) | .body' > "$prior_body_file" 2>/dev/null \
-      || : > "$prior_body_file"
+    if ! printf '%s' "$prior_json" \
+        | jq -r --argjson id "$prior_id" '.[] | select(.id == $id) | .body' > "$prior_body_file" 2>"$jq_err"; then
+      log "warning: reading the previous review comment failed (jq: $(head -c 300 "$jq_err" | tr '\n' ' ')); posting a fresh review without the archive"
+      : > "$prior_body_file"
+    fi
   else
     prior_id=""
   fi

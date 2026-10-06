@@ -19,8 +19,9 @@ on:
 
 permissions:
   contents: read
+  # Creating and editing a PR's timeline comment needs Issues OR Pull requests write;
+  # pull-requests alone is enough, so `issues: write` is not granted (least privilege).
   pull-requests: write
-  issues: write
 
 jobs:
   review:
