@@ -533,6 +533,83 @@ static void test_unix_bind_connect(void)
     report("unix_bind_connect_by_path", ok, "bind/listen/connect/accept by path failed");
 }
 
+/* --- Socket API details fixed in review of the v0.26.0 stack (PR #10). -- */
+static void test_socket_api_details(void)
+{
+    int sv[2] = {-1, -1};
+    int type = 0;
+    socklen_t len = sizeof(type);
+    char buf[8];
+
+    /* socketpair honours the type: datagrams keep their boundaries. */
+    int ok = socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) == 0 && write(sv[0], "ab", 2) == 2 &&
+             write(sv[0], "cd", 2) == 2 && read(sv[1], buf, sizeof(buf)) == 2;
+    ok = ok && getsockopt(sv[0], SOL_SOCKET, SO_TYPE, &type, &len) == 0 && type == SOCK_DGRAM &&
+         len == sizeof(type);
+    if (sv[0] >= 0) { close(sv[0]); close(sv[1]); }
+    report("socketpair_dgram_type_and_so_type", ok, "datagram boundaries or SO_TYPE wrong");
+
+    /* An unknown option is ENOPROTOOPT, not a fake success. */
+    ok = socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0;
+    len = sizeof(type);
+    errno = 0;
+    ok = ok && getsockopt(sv[0], SOL_SOCKET, 0x7fff, &type, &len) == -1 && errno == ENOPROTOOPT;
+    report("getsockopt_unknown_is_enoprotoopt", ok, "unknown option did not fail with ENOPROTOOPT");
+
+    /* An empty stream send queues nothing, so the peer does not see EOF. */
+    ok = sv[0] >= 0 && send(sv[0], "", 0, 0) == 0 && write(sv[0], "z", 1) == 1 &&
+         read(sv[1], buf, sizeof(buf)) == 1 && buf[0] == 'z';
+    report("empty_stream_send_is_not_eof", ok, "an empty send reached the peer as EOF");
+
+    /* SCM_RIGHTS with fd -1 is EBADF. */
+    {
+        char data = 'x';
+        struct iovec iov = {&data, 1};
+        union { struct cmsghdr h; char b[CMSG_SPACE(sizeof(int))]; } ctl;
+        memset(&ctl, 0, sizeof(ctl));
+        struct msghdr m;
+        memset(&m, 0, sizeof(m));
+        m.msg_iov = &iov;
+        m.msg_iovlen = 1;
+        m.msg_control = ctl.b;
+        m.msg_controllen = sizeof(ctl.b);
+        struct cmsghdr *c = CMSG_FIRSTHDR(&m);
+        c->cmsg_level = SOL_SOCKET;
+        c->cmsg_type = SCM_RIGHTS;
+        c->cmsg_len = CMSG_LEN(sizeof(int));
+        int bad = -1;
+        memcpy(CMSG_DATA(c), &bad, sizeof(int));
+        errno = 0;
+        ok = sv[0] >= 0 && sendmsg(sv[0], &m, 0) == -1 && errno == EBADF;
+        report("sendmsg_bad_fd_is_ebadf", ok, "SCM_RIGHTS with fd -1 did not fail with EBADF");
+    }
+    if (sv[0] >= 0) { close(sv[0]); close(sv[1]); }
+
+    /* accept reports an AF_UNIX address and honours addrlen. */
+    struct sockaddr_un sa, peer;
+    memset(&sa, 0, sizeof(sa));
+    sa.sun_family = AF_UNIX;
+    strcpy(sa.sun_path, "/tmp/audit_accept.sock");
+    unlink(sa.sun_path);
+    int srv = socket(AF_UNIX, SOCK_STREAM, 0), cli = socket(AF_UNIX, SOCK_STREAM, 0);
+    socklen_t plen = sizeof(peer);
+    memset(&peer, 0x55, sizeof(peer));
+    ok = srv >= 0 && cli >= 0 && bind(srv, (struct sockaddr *)&sa, sizeof(sa)) == 0 &&
+         listen(srv, 1) == 0 && connect(cli, (struct sockaddr *)&sa, sizeof(sa)) == 0;
+    int setup_ok = ok;
+    errno = 0;
+    int conn = ok ? accept(srv, (struct sockaddr *)&peer, &plen) : -1;
+    int accept_errno = errno;
+    ok = ok && conn >= 0 && plen >= sizeof(sa_family_t) && peer.sun_family == AF_UNIX;
+    if (conn >= 0) close(conn);
+    if (srv >= 0) close(srv);
+    if (cli >= 0) close(cli);
+    static char why_acc[96];
+    snprintf(why_acc, sizeof(why_acc), "setup %d, accept %d (errno %d), addrlen %u, family %u",
+             setup_ok, conn, accept_errno, (unsigned)plen, (unsigned)peer.sun_family);
+    report("accept_reports_unix_address", ok, why_acc);
+}
+
 /* --- Search permission on directories (FS-SEC-02, review of the v0.26.0
  * stack): a non-root user cannot reach a file through a 0700 directory it
  * does not own, even when the file itself is world-readable. ---------- */
@@ -640,6 +717,7 @@ int main(int argc, char **argv)
     test_rename_directory();
     test_closed_stdio();
     test_unix_bind_connect();
+    test_socket_api_details();
     test_dir_search_permission();
     test_direction_flag();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
