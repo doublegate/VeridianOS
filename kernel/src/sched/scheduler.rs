@@ -1040,5 +1040,14 @@ pub fn schedule_on_cpu(cpu_id: u8, task: NonNull<Task>) {
         if cpu_data.cpu_info.is_idle() {
             super::smp::send_ipi(cpu_id, 0); // Wake up CPU
         }
+    } else {
+        // No per-CPU data for this CPU (true for every CPU until SMP
+        // bring-up): use the global queue rather than dropping the task,
+        // which would leave it never running again (N-02). Callers may hold
+        // the SCHEDULER lock, so this must not take it.
+        #[cfg(not(target_arch = "riscv64"))]
+        READY_QUEUE.lock().enqueue(task);
+        #[cfg(target_arch = "riscv64")]
+        super::queue::get_ready_queue().enqueue(task);
     }
 }
