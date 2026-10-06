@@ -1880,33 +1880,42 @@ impl PageFlipManager {
         self.vblank_timestamps.push((crtc_id, AtomicU64::new(0)));
     }
 
-    /// Request a page flip (swap back buffer to front on next vblank)
-    pub(crate) fn request_flip(&mut self, request: PageFlipRequest) -> bool {
-        // Check that CRTC is registered
-        let state_idx = self
-            .flip_states
-            .iter()
-            .position(|(id, _)| *id == request.crtc_id);
-        let state_idx = match state_idx {
-            Some(i) => i,
+    /// Whether `request_flip` would accept a flip on `crtc_id` for
+    /// `owner_pid` right now: the CRTC is registered, no flip is pending on
+    /// it, and the owner's event queue has room. Callers that must change
+    /// other state before flipping (the atomic commit) check this first, so
+    /// a refusal leaves nothing half-applied.
+    pub(crate) fn can_queue_flip(&self, crtc_id: u32, owner_pid: u64) -> bool {
+        let state = match self.flip_states.iter().find(|(id, _)| *id == crtc_id) {
+            Some((_, s)) => *s,
             None => return false,
         };
-
-        // Reject if a flip is already pending
-        if self.flip_states[state_idx].1 == FlipState::Pending {
+        if state == FlipState::Pending {
             return false;
         }
-
         // Refuse while the requester has a full queue of unread events, so a
         // process that never reads cannot grow kernel memory (W-10).
         let queued = self
             .vblank_events
             .iter()
-            .filter(|e| e.owner_pid == request.owner_pid)
+            .filter(|e| e.owner_pid == owner_pid)
             .count();
-        if queued >= MAX_PENDING_EVENTS_PER_OWNER {
+        queued < MAX_PENDING_EVENTS_PER_OWNER
+    }
+
+    /// Request a page flip (swap back buffer to front on next vblank)
+    pub(crate) fn request_flip(&mut self, request: PageFlipRequest) -> bool {
+        if !self.can_queue_flip(request.crtc_id, request.owner_pid) {
             return false;
         }
+        let state_idx = match self
+            .flip_states
+            .iter()
+            .position(|(id, _)| *id == request.crtc_id)
+        {
+            Some(i) => i,
+            None => return false,
+        };
 
         // Set back buffer and mark pending
         if let Some(back) = self
@@ -2026,6 +2035,26 @@ impl PageFlipManager {
             }
         });
         taken
+    }
+
+    /// Drop everything `owner_pid` left behind: its unread completion
+    /// events and its pending flips, and return the CRTCs those flips held
+    /// to `Idle` so the next master can flip them. Called when the process
+    /// exits; otherwise each departed DRM master leaves up to
+    /// `MAX_PENDING_EVENTS_PER_OWNER` events queued forever, and a reused
+    /// pid would read them (review of the v0.26.0 stack, PR #8).
+    pub(crate) fn purge_owner(&mut self, owner_pid: u64) {
+        self.vblank_events.retain(|e| e.owner_pid != owner_pid);
+        let flip_states = &mut self.flip_states;
+        self.pending_flips.retain(|f| {
+            if f.owner_pid != owner_pid {
+                return true;
+            }
+            if let Some(state) = flip_states.iter_mut().find(|(id, _)| *id == f.crtc_id) {
+                state.1 = FlipState::Idle;
+            }
+            false
+        });
     }
 
     /// Check if a flip is pending for a given CRTC
@@ -2305,6 +2334,12 @@ pub fn with_cursor<R, F: FnOnce(&mut HardwareCursor) -> R>(f: F) -> Option<R> {
 /// event loop.
 pub fn has_pending_drm_events(owner_pid: u64) -> bool {
     with_page_flip(|pf| pf.has_events_for(owner_pid)).unwrap_or(false)
+}
+
+/// Release the page-flip state a dying process owned. A no-op when the
+/// page flip manager was never initialized.
+pub fn purge_drm_owner(owner_pid: u64) {
+    let _ = with_page_flip(|pf| pf.purge_owner(owner_pid));
 }
 
 /// Read pending DRM events into a user buffer as `drm_event_vblank` structs.
@@ -2864,6 +2899,42 @@ mod tests {
         }
         assert_eq!(accepted, MAX_PENDING_EVENTS_PER_OWNER);
         assert_eq!(pfm.vblank_events.len(), MAX_PENDING_EVENTS_PER_OWNER);
+        // The predicate the atomic commit checks agrees with request_flip.
+        assert!(!pfm.can_queue_flip(1, 7));
+        assert!(pfm.can_queue_flip(1, 8));
+        assert!(!pfm.can_queue_flip(2, 8)); // unregistered CRTC
+    }
+
+    /// An exiting owner's events and pending flips are dropped, its CRTC
+    /// returns to Idle, and other owners are untouched (PR #8 review).
+    #[test]
+    fn test_page_flip_purge_owner() {
+        let mut pfm = PageFlipManager::new();
+        pfm.register_crtc(1, 10);
+        pfm.register_crtc(2, 10);
+        for i in 0..3 {
+            assert!(pfm.request_flip(flip(7, i)));
+            pfm.handle_vblank(1, i);
+        }
+        assert!(pfm.request_flip(flip(8, 0x88)));
+        pfm.handle_vblank(1, 9);
+        // Leave a flip by 7 pending on CRTC 2.
+        let mut pending = flip(7, 0x77);
+        pending.crtc_id = 2;
+        assert!(pfm.request_flip(pending));
+        assert!(pfm.is_flip_pending(2));
+
+        pfm.purge_owner(7);
+
+        assert!(!pfm.has_events_for(7));
+        assert!(pfm.pending_flips.iter().all(|f| f.owner_pid != 7));
+        assert!(!pfm.is_flip_pending(2));
+        let mut next = flip(8, 0x99);
+        next.crtc_id = 2;
+        assert!(pfm.request_flip(next));
+        let events = pfm.take_events_for(8, 16);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].user_data, 0x88);
     }
 
     /// Events that do not fit the reader's buffer stay queued.
