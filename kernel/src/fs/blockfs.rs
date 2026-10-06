@@ -1576,12 +1576,15 @@ impl BlockFsInner {
 
     /// Rename `old_dir/old_name` to `new_dir/new_name` (FS-PERF-03).
     ///
-    /// Every check runs before anything changes. An existing target is
-    /// replaced under POSIX rules (and freed if that was its last link);
-    /// the new entry is written before the old one is cleared, so a failure
-    /// (directory full) leaves the source in place. A directory moving to a
-    /// new parent gets its ".." repointed and the parents' link counts
-    /// adjusted.
+    /// Every check runs before anything changes, including the check that a
+    /// directory is not moved into its own subtree. An existing target is
+    /// replaced under POSIX rules by overwriting its directory slot in place
+    /// (so this works in a full directory), and only then is the old
+    /// target's link dropped (freeing it if that was the last one). With no
+    /// target, the new entry is written before the old one is cleared, so a
+    /// failure (directory full) leaves the source in place. A directory
+    /// moving to a new parent gets its ".." repointed and the parents' link
+    /// counts adjusted.
     fn rename_entry(
         &mut self,
         old_dir: u32,
@@ -1604,7 +1607,8 @@ impl BlockFsInner {
             return Err(KernelError::FsError(FsError::NotADirectory));
         }
 
-        if let Some((dst, _, _)) = self.find_dir_entry(new_dir, new_name)? {
+        let target = self.find_dir_entry(new_dir, new_name)?;
+        if let Some((dst, _, _)) = &target {
             if dst.inode == src.inode {
                 return Ok(()); // same inode: POSIX says do nothing
             }
@@ -1614,9 +1618,9 @@ impl BlockFsInner {
                 (false, true) => return Err(KernelError::FsError(FsError::IsADirectory)),
                 _ => {}
             }
-            // Checks emptiness for a directory target, drops a link and
-            // frees the inode if it was the last one.
-            self.unlink_from_dir(new_dir, new_name)?;
+            if dst_is_dir && !self.dir_is_empty(dst.inode)? {
+                return Err(KernelError::FsError(FsError::DirectoryNotEmpty));
+            }
         }
 
         if src_is_dir && old_dir != new_dir {
@@ -1634,10 +1638,20 @@ impl BlockFsInner {
             }
         }
 
-        self.write_dir_entry(new_dir, src.inode, new_name, src.file_type)?;
-        // Entries are cleared in place and never moved, so the source's
-        // position found above is still valid.
-        self.set_dir_entry_inode(old_dir, src_block, src_off, 0)?;
+        // All checks passed. Entries are changed in place and never moved,
+        // so the positions found above are still valid.
+        match target {
+            Some((dst, dst_block, dst_off)) => {
+                self.set_dir_entry_slot(new_dir, dst_block, dst_off, src.inode, src.file_type)?;
+                self.set_dir_entry_inode(old_dir, src_block, src_off, 0)?;
+                let dst_is_dir = dst.file_type == DiskDirEntry::FT_DIR;
+                self.drop_inode_link(dst.inode, dst_is_dir, new_dir)?;
+            }
+            None => {
+                self.write_dir_entry(new_dir, src.inode, new_name, src.file_type)?;
+                self.set_dir_entry_inode(old_dir, src_block, src_off, 0)?;
+            }
+        }
 
         if src_is_dir && old_dir != new_dir {
             if let Some((_, b, o)) = self.find_dir_entry(src.inode, "..")? {
@@ -1646,6 +1660,62 @@ impl BlockFsInner {
             let old_parent = &mut self.inode_table[old_dir as usize];
             old_parent.links_count = old_parent.links_count.saturating_sub(1);
             self.inode_table[new_dir as usize].links_count += 1;
+        }
+        Ok(())
+    }
+
+    /// Point the directory slot at (`dir`, `block_idx`, `offset`) at `inode`
+    /// with `file_type`, keeping its name and record length.
+    fn set_dir_entry_slot(
+        &mut self,
+        dir: u32,
+        block_idx: usize,
+        offset: usize,
+        inode: u32,
+        file_type: u8,
+    ) -> Result<(), KernelError> {
+        let block_num = self.inode_table[dir as usize].direct_blocks[block_idx];
+        let block = self.block_mut(block_num)?;
+        block[offset..offset + 4].copy_from_slice(&inode.to_le_bytes());
+        block[offset + 7] = file_type;
+        Ok(())
+    }
+
+    /// Whether directory `dir` holds nothing but "." and "..".
+    fn dir_is_empty(&self, dir: u32) -> Result<bool, KernelError> {
+        Ok(self
+            .readdir(dir)?
+            .iter()
+            .all(|e| e.name == "." || e.name == ".."))
+    }
+
+    /// Drop one link to `inode` whose directory entry in `parent` has just
+    /// been removed, and free its blocks if that was the last link. For a
+    /// directory, the parent also loses the link from its "..".
+    fn drop_inode_link(
+        &mut self,
+        inode: u32,
+        is_dir: bool,
+        parent: u32,
+    ) -> Result<(), KernelError> {
+        if let Some(target) = self.inode_table.get_mut(inode as usize) {
+            if target.links_count > 0 {
+                target.links_count -= 1;
+            }
+
+            // If unlinking a directory, also decrement parent link count (for "..")
+            if is_dir {
+                if let Some(p) = self.inode_table.get_mut(parent as usize) {
+                    if p.links_count > 0 {
+                        p.links_count -= 1;
+                    }
+                }
+            }
+
+            // If links reach 0, free all data blocks
+            if self.inode_table[inode as usize].links_count == 0 {
+                self.free_inode_blocks(inode)?;
+            }
         }
         Ok(())
     }
@@ -1668,15 +1738,8 @@ impl BlockFsInner {
         let is_dir = entry.file_type == DiskDirEntry::FT_DIR;
 
         // If unlinking a directory, check that it is empty (only "." and ".." entries)
-        if is_dir {
-            let child_entries = self.readdir(target_inode)?;
-            let non_dot_count = child_entries
-                .iter()
-                .filter(|e| e.name != "." && e.name != "..")
-                .count();
-            if non_dot_count > 0 {
-                return Err(KernelError::FsError(FsError::DirectoryNotEmpty));
-            }
+        if is_dir && !self.dir_is_empty(target_inode)? {
+            return Err(KernelError::FsError(FsError::DirectoryNotEmpty));
         }
 
         // Get the block number from the parent inode (scoped borrow)
@@ -1695,28 +1758,7 @@ impl BlockFsInner {
         // Zero out the inode field in the on-disk entry to mark it deleted
         self.block_mut(block_num)?[offset..offset + 4].fill(0);
 
-        // Decrement link count on the target inode
-        if let Some(target) = self.inode_table.get_mut(target_inode as usize) {
-            if target.links_count > 0 {
-                target.links_count -= 1;
-            }
-
-            // If unlinking a directory, also decrement parent link count (for "..")
-            if is_dir {
-                if let Some(p) = self.inode_table.get_mut(parent as usize) {
-                    if p.links_count > 0 {
-                        p.links_count -= 1;
-                    }
-                }
-            }
-
-            // If links reach 0, free all data blocks
-            if self.inode_table[target_inode as usize].links_count == 0 {
-                self.free_inode_blocks(target_inode)?;
-            }
-        }
-
-        Ok(())
+        self.drop_inode_link(target_inode, is_dir, parent)
     }
 
     fn truncate_inode(&mut self, inode_num: u32, size: usize) -> Result<(), KernelError> {
@@ -2640,6 +2682,75 @@ mod tests {
         let n = node.read(0, &mut buf).unwrap();
         buf.truncate(n);
         buf
+    }
+
+    /// A rename that is rejected must not have destroyed the target first
+    /// (review of the v0.26.0 stack, PR #11).
+    #[test]
+    fn rename_into_own_subtree_keeps_existing_target() {
+        let fs = BlockFs::format(1000, 100).unwrap();
+        let root = fs.root();
+        let a = root.mkdir("a", Permissions::default()).unwrap();
+        let b = a.mkdir("b", Permissions::default()).unwrap();
+        b.mkdir("x", Permissions::default()).unwrap();
+        assert_eq!(
+            root.rename("a", &b, "x"),
+            Err(KernelError::FsError(FsError::InvalidPath))
+        );
+        assert!(
+            b.lookup("x").is_ok(),
+            "target destroyed by a rejected rename"
+        );
+        assert!(root.lookup("a").is_ok());
+    }
+
+    /// Replacing an existing name reuses its slot, so it works even in a
+    /// directory that has no room for another entry.
+    #[test]
+    fn rename_over_existing_name_in_full_directory() {
+        let fs = BlockFs::format(1000, 400).unwrap();
+        let root = fs.root();
+        let full = root.mkdir("full", Permissions::default()).unwrap();
+        let name = |i: usize| alloc::format!("{:0>200}", i);
+        let mut n = 0;
+        loop {
+            match full.create(&name(n), Permissions::default()) {
+                Ok(_) => n += 1,
+                Err(KernelError::ResourceExhausted { .. }) => break,
+                Err(e) => panic!("unexpected {:?}", e),
+            }
+        }
+        assert!(n > 0);
+        // Top up the tail with minimum-size entries (names of 1-4 bytes).
+        let mut k = 0;
+        loop {
+            match full.create(&alloc::format!("q{}", k), Permissions::default()) {
+                Ok(_) => k += 1,
+                Err(KernelError::ResourceExhausted { .. }) => break,
+                Err(e) => panic!("unexpected {:?}", e),
+            }
+        }
+        let src = root.mkdir("src", Permissions::default()).unwrap();
+        src.create("s", Permissions::default())
+            .unwrap()
+            .write(0, b"payload")
+            .unwrap();
+        src.create("t", Permissions::default()).unwrap();
+
+        // A new name does not fit: the rename fails and the source stays.
+        assert!(src.rename("t", &full, "new").is_err());
+        assert!(src.lookup("t").is_ok());
+
+        // An existing name is overwritten in place.
+        let entries = full.readdir().unwrap().len();
+        src.rename("s", &full, &name(0)).unwrap();
+        assert!(src.lookup("s").is_err());
+        assert_eq!(read_all(&full.lookup(&name(0)).unwrap()), b"payload");
+        assert_eq!(
+            full.readdir().unwrap().len(),
+            entries,
+            "no entry added or lost"
+        );
     }
 
     /// A device smaller than the filesystem cannot hold every block the
