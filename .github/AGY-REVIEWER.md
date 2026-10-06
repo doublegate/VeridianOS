@@ -216,12 +216,20 @@ non-ephemeral, so untrusted code from a fork PR can persistently compromise the
 host. This template applies the standard mitigations, but the residual risk is
 yours to accept:
 
+- **Required: approval for every outside contributor.** For a `pull_request` event
+  GitHub runs the workflow file **from the PR's own branch**, so a fork can edit or
+  delete any `if:` in it and point a job at your runner. Only GitHub's approval gate
+  stops that. Set **Settings → Actions → General → Fork pull request workflows →
+  Require approval for all outside collaborators** (API:
+  `gh api -X PUT repos/OWNER/REPO/actions/permissions/fork-pr-contributor-approval
+  -f approval_policy=all_external_contributors`). The default,
+  `first_time_contributors`, runs a returning contributor's fork PR without asking.
+  Never approve a fork PR's workflows unless you have read its `.github/` changes.
 - **Same-repository gate on auto-runs:** the `pull_request` job (open/reopen/push,
-  i.e. `synchronize`) runs only when the PR head is a branch **in this repository**
-  (`github.event.pull_request.head.repo.full_name == github.repository`). Pushing a
-  branch here already requires write access, so a fork PR, from an outside
-  contributor or a member, never schedules work on your runner, and adding
-  `synchronize` does not widen the attack surface to untrusted pushes.
+  i.e. `synchronize`) is written to run only when the PR head is a branch **in this
+  repository** (`github.event.pull_request.head.repo.full_name == github.repository`).
+  That keeps an unmodified workflow off fork PRs, but it is not a security boundary,
+  for the reason above.
 - **Write-access gate on comments:** `/agy-review` from a commenter whose
   `author_association` is `OWNER`/`MEMBER`/`COLLABORATOR` passes the workflow's
   cheap pre-filter, but that is not the permission check (a Triage-only user also
@@ -237,11 +245,11 @@ yours to accept:
 - **Least surface in the job:** review-only prompt, `--sandbox`, no repo secrets
   (built-in `GITHUB_TOKEN` only), temp files cleaned via an `EXIT` trap.
 
-Recommended belt-and-suspenders on each repo: **Settings → Actions → General →
-Fork pull request workflows → require approval for all outside collaborators**,
-and don't click "approve and run" on a PR you don't trust. For zero residual
-exposure, use an **ephemeral** runner (re-registered per job) or keep this on
-private repos only.
+To reduce the remaining exposure, run each job on a **clean, disposable host** (a VM or
+container image recreated per job). Re-registering a runner on the same host is not enough,
+because the host's state survives. Making the repository private does not remove the risk either:
+if fork workflows are enabled for a private repository, anyone who can fork it can still reach the
+runner, so disable fork workflows there or gate them the same way.
 
 ---
 

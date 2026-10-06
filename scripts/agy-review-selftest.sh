@@ -88,7 +88,7 @@ FILTER="$(extract_filter)"
 # The script must actually USE the shared helper, or these checks test a file nothing runs.
 grep -q '_agy_comment_body.sh' "$SCRIPT_DIR/agy-review.sh" \
   || { echo "FAIL: agy-review.sh does not source _agy_comment_body.sh" >&2; exit 1; }
-for fn in agy_body_head agy_body_archive agy_drop_oldest_round; do
+for fn in agy_body_head agy_body_archive agy_drop_oldest_round agy_assemble_archive; do
   grep -q "$fn" "$SCRIPT_DIR/agy-review.sh" \
     || { echo "FAIL: agy-review.sh does not call $fn" >&2; exit 1; }
 done
@@ -225,7 +225,9 @@ check "a <details> INSIDE a round is not mistaken for a round boundary" \
 
 # The writer must actually EMIT the sentinel, or every archive is legacy-shaped and the trim
 # silently never fires -- the comment would then grow until the edit fails.
-if grep -q 'AGY_ROUND_MARK' "$SCRIPT_DIR/agy-review.sh"; then
+# It does so through agy_assemble_archive, whose output is checked to start with the mark.
+if grep -q 'agy_assemble_archive' "$SCRIPT_DIR/agy-review.sh" \
+   && [ "$(agy_assemble_archive X "" T | head -1)" = "$AGY_ROUND_MARK" ]; then
   echo "  ok    agy-review.sh emits the round sentinel"
 else
   echo "  FAIL  agy-review.sh never emits AGY_ROUND_MARK; the archive would never trim"
@@ -445,6 +447,65 @@ check "a review quoting the notice mid-line is not caught" "NOMATCH" \
 check "an empty capture is not a timeout" "NOMATCH" "$(pt '')"
 
 # --- no `exec` may redirect to /dev/null -------------------------------------------------
+# A legacy (markerless) archive behind a new round: trimming once must drop the LEGACY
+# history and keep the new round. Assembled bare, the only marker was the new round's, so the
+# cut landed on it and discarded everything while reporting one round dropped.
+legacy_combined="$(agy_assemble_archive "NEW" "$(printf '<details>\nLEGACY\n</details>')" "T0")"
+check "a legacy archive becomes one droppable round behind the new one" "NEW" \
+  "$(printf '%s\n' "$legacy_combined" | agy_drop_oldest_round | grep -x 'NEW\|LEGACY')"
+
+# The archived summary says when the round was REVIEWED (from the hidden line in its head),
+# falling back to an honest "archived at" for a head that predates the line.
+check "an archived round keeps its reviewed-at time" "1" \
+  "$(agy_assemble_archive "$(printf '%s2026-10-06 12:34 UTC -->\nBODY' "$AGY_REVIEWED_AT_PREFIX")" "" "LATER" \
+     | grep -c -F '<summary>Round reviewed at 2026-10-06 12:34 UTC</summary>')"
+check "a head without the line is labelled archived-at" "1" \
+  "$(agy_assemble_archive "BODY" "" "LATER" | grep -c -F '<summary>Round archived at LATER</summary>')"
+if grep -q 'AGY_REVIEWED_AT_PREFIX' "$SCRIPT_DIR/agy-review.sh"; then
+  echo "  ok    the posted head records its reviewed-at time"
+else
+  echo "  FAIL  agy-review.sh no longer writes the reviewed-at line"
+  fails=$((fails + 1))
+fi
+
+# The job timeout must exceed the script's worst case: lock wait + every attempt at its cap +
+# the linear backoff between attempts (delay x 1 + delay x 2 + ...). Read from the workflow
+# and the script's defaults, so changing either without the other fails here.
+wf="$SCRIPT_DIR/../.github/workflows/antigravity-review.yml"
+wf_val() { sed -n "s/^[[:space:]]*$1:[[:space:]]*[\"']\{0,1\}\([0-9][0-9]*\).*/\1/p;T;q" "$wf"; }
+sh_default() { sed -n "s/^$1=\"\${$1:-\([0-9][0-9]*\)}\".*/\1/p;T;q" "$SCRIPT_DIR/agy-review.sh"; }
+job_min="$(wf_val timeout-minutes)"
+max_s="$(wf_val AGY_PRINT_TIMEOUT_MAX_SECONDS)"; [ -n "$max_s" ] || max_s="$(sh_default AGY_PRINT_TIMEOUT_MAX_SECONDS)"
+lock_s="$(wf_val AGY_LOCK_WAIT)";               [ -n "$lock_s" ] || lock_s="$(sh_default AGY_LOCK_WAIT)"
+retries="$(wf_val AGY_RETRIES)";  [ -n "$retries" ] || retries="$(sh_default AGY_RETRIES)"
+delay="$(wf_val AGY_RETRY_DELAY)"; [ -n "$delay" ] || delay="$(sh_default AGY_RETRY_DELAY)"
+if [ -z "$job_min" ] || [ -z "$max_s" ] || [ -z "$lock_s" ] || [ -z "$retries" ] \
+   || [ -z "$delay" ]; then
+  echo "  FAIL  could not read the timeout budget (job=$job_min max=$max_s lock=$lock_s retries=$retries delay=$delay)"
+  fails=$((fails + 1))
+else
+  worst=$(( lock_s + retries * max_s + delay * retries * (retries - 1) / 2 ))
+  if [ "$worst" -lt $(( job_min * 60 - 120 )) ]; then
+    echo "  ok    worst case ${worst}s fits the ${job_min}-minute job timeout with 2 minutes to spare"
+  else
+    echo "  FAIL  worst case ${worst}s does not fit the ${job_min}-minute job timeout"
+    fails=$((fails + 1))
+  fi
+fi
+
+# Both helpers run under the caller's `set -euo pipefail`. A head or archive far larger than a
+# pipe buffer must neither abort them nor be misread (an early-exiting reader used to SIGPIPE
+# the writer). 300 KB of filler around the markers.
+big="$(head -c 300000 /dev/zero | tr '\0' 'x' | fold -w 100)"
+check "a huge head still yields its reviewed-at time under pipefail" "Round reviewed at T1" \
+  "$( (set -euo pipefail
+       agy_assemble_archive "$(printf '%sT1 -->\n%s' "$AGY_REVIEWED_AT_PREFIX" "$big")" "" "X") \
+       | grep -o 'Round reviewed at T1' | head -1)"
+check "a huge marked archive is not wrapped again under pipefail" "2" \
+  "$( (set -euo pipefail
+       agy_assemble_archive "NEW" "$(printf '%s\nOLD\n%s' "$AGY_ROUND_MARK" "$big")" "X") \
+       | grep -c -x -F "$AGY_ROUND_MARK")"
+
 # A redirection on a bare `exec` applies to the rest of the script. `exec 9>&- 2>/dev/null`
 # after the retry loop sent every later `log` line (stderr) to /dev/null, so a posted review, an
 # updated one and every failure looked identical in CI: nothing logged, green check.
