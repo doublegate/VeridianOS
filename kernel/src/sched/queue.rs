@@ -443,48 +443,69 @@ impl CfsRunQueue {
     /// Remove and return the task with the lowest vruntime for which `pred`
     /// holds, leaving all others where they are.
     pub fn take_first_where(&mut self, pred: impl Fn(&Task) -> bool) -> Option<NonNull<Task>> {
-        let target = self
+        // Remember the key the task is filed under: enqueue() clamps it to
+        // min_vruntime and the task's vruntime may have moved since, so
+        // looking it up again by vruntime can miss (review of the v0.26.0
+        // stack, PR #11).
+        let (key, target) = self
             .tasks
-            .values()
-            .flat_map(|v| v.iter().rev()) // dequeue() pops from the end
-            .map(|t| t.as_ptr())
+            .iter()
+            .flat_map(|(&k, v)| v.iter().rev().map(move |t| (k, t.as_ptr()))) // dequeue() pops from the end
             // SAFETY: queued tasks are valid while queued; `pred` only reads.
-            .find(|t| pred(unsafe { t.as_ref() }))?;
+            .find(|(_, t)| pred(unsafe { t.as_ref() }))?;
         // As dequeue() does: min_vruntime follows the queue's lowest key.
         if let Some(&lowest) = self.tasks.keys().next() {
             self.min_vruntime = self.min_vruntime.max(lowest);
         }
-        self.remove(target);
+        let removed = self.remove_at(key, target);
+        debug_assert!(removed, "task found by the scan must be under its key");
         Some(target)
     }
 
     /// Remove specific task
     pub fn remove(&mut self, target: NonNull<Task>) -> bool {
         // SAFETY: `target` is a valid NonNull<Task> provided by the caller.
-        // We read vruntime and priority to find and remove it from the BTreeMap.
-        // The CFS queue Mutex ensures exclusive access.
-        unsafe {
-            let task_ref = target.as_ref();
-            let vruntime = task_ref.vruntime;
-
-            if let Some(tasks) = self.tasks.get_mut(&vruntime) {
-                if let Some(pos) = tasks.iter().position(|&t| t.as_ptr() == target) {
-                    tasks.remove(pos);
-                    self.len -= 1;
-                    self.total_weight = self
-                        .total_weight
-                        .saturating_sub(priority_to_weight(task_ref.priority));
-
-                    if tasks.is_empty() {
-                        self.tasks.remove(&vruntime);
-                    }
-
-                    return true;
-                }
-            }
-
-            false
+        // We read vruntime to find its bucket. The CFS queue Mutex ensures
+        // exclusive access.
+        let vruntime = unsafe { target.as_ref().vruntime };
+        if self.remove_at(vruntime, target) {
+            return true;
         }
+        // The task is filed under the key it was enqueued with, which differs
+        // from its vruntime when enqueue() clamped it or when vruntime was
+        // charged while it was queued. Fall back to a scan for its bucket.
+        let key = self
+            .tasks
+            .iter()
+            .find(|(_, v)| v.iter().any(|t| t.as_ptr() == target))
+            .map(|(&k, _)| k);
+        match key {
+            Some(k) => self.remove_at(k, target),
+            None => false,
+        }
+    }
+
+    /// Remove `target` from the bucket filed under `key`, keeping `len` and
+    /// `total_weight` in step. Returns false if it is not in that bucket.
+    fn remove_at(&mut self, key: u64, target: NonNull<Task>) -> bool {
+        let Some(tasks) = self.tasks.get_mut(&key) else {
+            return false;
+        };
+        let Some(pos) = tasks.iter().position(|&t| t.as_ptr() == target) else {
+            return false;
+        };
+        tasks.remove(pos);
+        if tasks.is_empty() {
+            self.tasks.remove(&key);
+        }
+        self.len -= 1;
+        // SAFETY: `target` was queued, so it is a valid task; we only read
+        // its priority. The CFS queue Mutex ensures exclusive access.
+        let priority = unsafe { target.as_ref().priority };
+        self.total_weight = self
+            .total_weight
+            .saturating_sub(priority_to_weight(priority));
+        true
     }
 
     /// Update minimum vruntime
@@ -642,6 +663,56 @@ pub(crate) mod tests {
         assert!(q.remove(a));
         assert_eq!(q.len(), 1);
         assert_eq!(q.dequeue(), Some(b));
+        assert!(q.is_empty());
+    }
+
+    fn with_vruntime(n: u64, vruntime: u64) -> NonNull<Task> {
+        let mut t = task(n);
+        // SAFETY: the task was just leaked by `task` and is unshared.
+        unsafe { t.as_mut().vruntime = vruntime };
+        t
+    }
+
+    #[test]
+    fn cfs_take_first_where_removes_clamped_task() {
+        let mut q = CfsRunQueue::new();
+        q.enqueue(with_vruntime(1, 1000));
+        assert!(q.dequeue().is_some()); // min_vruntime = 1000
+                                        // Filed under the clamped key 1000, not its own vruntime 0.
+        let b = with_vruntime(2, 0);
+        q.enqueue(b);
+        assert_eq!(q.take_first_where(|_| true), Some(b));
+        assert_eq!(q.len(), 0);
+        assert!(q.is_empty());
+        assert_eq!(q.dequeue(), None);
+
+        // remove() finds it too, under the clamped key.
+        q.enqueue(b);
+        assert!(q.remove(b));
+        assert!(!q.remove(b));
+        assert!(q.is_empty());
+        assert_eq!(q.len(), 0);
+    }
+
+    #[test]
+    fn cfs_remove_after_vruntime_changed_while_queued() {
+        let mut q = CfsRunQueue::new();
+        let (a, c) = (with_vruntime(1, 10), with_vruntime(3, 30));
+        q.enqueue(a);
+        q.enqueue(c);
+        // The task's vruntime is charged while it sits in the queue.
+        // SAFETY: test-owned task; the queue only reads it.
+        unsafe { a.as_ptr().as_mut().unwrap().vruntime = 500 };
+        assert_eq!(q.take_first_where(|t| t.vruntime == 500), Some(a));
+        assert_eq!(q.len(), 1);
+        assert_eq!(q.dequeue(), Some(c));
+        assert!(q.is_empty());
+
+        q.enqueue(c);
+        // SAFETY: as above.
+        unsafe { c.as_ptr().as_mut().unwrap().vruntime = 7 };
+        assert!(q.remove(c));
+        assert_eq!(q.len(), 0);
         assert!(q.is_empty());
     }
 }
