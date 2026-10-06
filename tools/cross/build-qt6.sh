@@ -303,7 +303,10 @@ build_qt_shadertools() {
         local host_bld="${BUILD_DIR}/host-qtshadertools-build"
         rm -rf "${host_bld}"
         mkdir -p "${host_bld}"
-        (cd "${host_bld}" && \
+        # Host build: drop the cross pkg-config search path exported by the
+        # cross steps above, or sysroot (musl) headers leak into host code.
+        (unset PKG_CONFIG_PATH PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR && \
+            cd "${host_bld}" && \
             cmake "${src}" \
                 -DCMAKE_PREFIX_PATH="${host_prefix}" \
                 -DCMAKE_INSTALL_PREFIX="${host_prefix}" \
@@ -361,7 +364,10 @@ build_qt_declarative() {
         local host_bld="${BUILD_DIR}/host-qtdeclarative-build"
         rm -rf "${host_bld}"
         mkdir -p "${host_bld}"
-        (cd "${host_bld}" && \
+        # Host build: drop the cross pkg-config search path exported by the
+        # cross steps above, or sysroot (musl) headers leak into host code.
+        (unset PKG_CONFIG_PATH PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR && \
+            cd "${host_bld}" && \
             cmake "${src}" \
                 -DCMAKE_PREFIX_PATH="${host_prefix}" \
                 -DCMAKE_INSTALL_PREFIX="${host_prefix}" \
@@ -471,7 +477,8 @@ verify() {
         fi
     done
     for tool in moc rcc uic; do
-        if [[ -f "${BUILD_DIR}/host-qt/bin/${tool}" ]]; then
+        # Qt 6 installs these in libexec/ (bin/ only holds user-facing tools).
+        if [[ -f "${BUILD_DIR}/host-qt/libexec/${tool}" || -f "${BUILD_DIR}/host-qt/bin/${tool}" ]]; then
             log "  OK: host ${tool}"
         else
             log "  MISSING: host ${tool}"
