@@ -318,14 +318,20 @@ jobs:
         name: Security Audit
         runs-on: ubuntu-latest
         permissions:
-            checks: write
             contents: read
         steps:
             - uses: actions/checkout@v4
-            - name: Run cargo-audit
-              uses: rustsec/audit-check@v2
+            # Prebuilt, pinned cargo-audit. rustsec/audit-check ran an unlocked
+            # `cargo install cargo-audit` under this repo's pinned nightly, so a
+            # dependency raising its MSRV (kstring 2.0.5 needs rustc 1.96) broke
+            # the job with no change here. Bump the version deliberately.
+            - name: Install cargo-audit
+              uses: taiki-e/install-action@v2
               with:
-                  token: ${{ secrets.GITHUB_TOKEN }}
+                  tool: cargo-audit@0.22.2
+            - name: Run cargo-audit
+              # Honours .cargo/audit.toml (documented ignores).
+              run: cargo audit
 
     # Code coverage with Codecov
     coverage:
