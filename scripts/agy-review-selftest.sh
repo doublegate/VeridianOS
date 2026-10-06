@@ -472,8 +472,8 @@ fi
 # the linear backoff between attempts (delay x 1 + delay x 2 + ...). Read from the workflow
 # and the script's defaults, so changing either without the other fails here.
 wf="$SCRIPT_DIR/../.github/workflows/antigravity-review.yml"
-wf_val() { sed -n "s/^[[:space:]]*$1:[[:space:]]*[\"']\{0,1\}\([0-9][0-9]*\).*/\1/p" "$wf" | head -1; }
-sh_default() { sed -n "s/^$1=\"\${$1:-\([0-9][0-9]*\)}\".*/\1/p" "$SCRIPT_DIR/agy-review.sh" | head -1; }
+wf_val() { sed -n "s/^[[:space:]]*$1:[[:space:]]*[\"']\{0,1\}\([0-9][0-9]*\).*/\1/p;T;q" "$wf"; }
+sh_default() { sed -n "s/^$1=\"\${$1:-\([0-9][0-9]*\)}\".*/\1/p;T;q" "$SCRIPT_DIR/agy-review.sh"; }
 job_min="$(wf_val timeout-minutes)"
 max_s="$(wf_val AGY_PRINT_TIMEOUT_MAX_SECONDS)"; [ -n "$max_s" ] || max_s="$(sh_default AGY_PRINT_TIMEOUT_MAX_SECONDS)"
 lock_s="$(wf_val AGY_LOCK_WAIT)";               [ -n "$lock_s" ] || lock_s="$(sh_default AGY_LOCK_WAIT)"
@@ -492,6 +492,19 @@ else
     fails=$((fails + 1))
   fi
 fi
+
+# Both helpers run under the caller's `set -euo pipefail`. A head or archive far larger than a
+# pipe buffer must neither abort them nor be misread (an early-exiting reader used to SIGPIPE
+# the writer). 300 KB of filler around the markers.
+big="$(head -c 300000 /dev/zero | tr '\0' 'x' | fold -w 100)"
+check "a huge head still yields its reviewed-at time under pipefail" "Round reviewed at T1" \
+  "$( (set -euo pipefail
+       agy_assemble_archive "$(printf '%sT1 -->\n%s' "$AGY_REVIEWED_AT_PREFIX" "$big")" "" "X") \
+       | grep -o 'Round reviewed at T1' | head -1)"
+check "a huge marked archive is not wrapped again under pipefail" "2" \
+  "$( (set -euo pipefail
+       agy_assemble_archive "NEW" "$(printf '%s\nOLD\n%s' "$AGY_ROUND_MARK" "$big")" "X") \
+       | grep -c -x -F "$AGY_ROUND_MARK")"
 
 # A redirection on a bare `exec` applies to the rest of the script. `exec 9>&- 2>/dev/null`
 # after the retry loop sent every later `log` line (stderr) to /dev/null, so a posted review, an

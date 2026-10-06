@@ -113,10 +113,14 @@ AGY_REVIEWED_AT_PREFIX='<!-- agy-reviewed-at: '
 # "oldest round" cut at it and discarded the new round together with the whole legacy history.
 agy_assemble_archive() {
   local head="$1" archive="$2" fallback="$3" when label
-  # The line sits right under the marker; looking only at the first lines keeps this cheap
-  # for a 64 KB head.
-  when="$(printf '%s\n' "$head" | head -n 5 | awk -v p="$AGY_REVIEWED_AT_PREFIX" '
-    index($0, p) == 1 { s = substr($0, length(p) + 1); sub(/ -->$/, "", s); print s; exit }')"
+  # The line sits right under the marker, so only the first lines are read. Here-strings, not
+  # `printf | ...`: the caller runs under `set -o pipefail`, and a reader that stops early makes
+  # printf die of SIGPIPE on a head larger than the pipe buffer, which failed the substitution
+  # and aborted the script (agy review of #6).
+  when="$(awk -v p="$AGY_REVIEWED_AT_PREFIX" '
+    NR > 5 { exit }
+    index($0, p) == 1 { s = substr($0, length(p) + 1); sub(/ -->$/, "", s); print s; exit }' \
+    <<< "$head")"
   if [ -n "$when" ]; then
     label="Round reviewed at $when"
   else
@@ -127,7 +131,9 @@ agy_assemble_archive() {
   printf '%s\n' "$head"
   printf '\n</details>\n'
   [ -n "$archive" ] || return 0
-  if printf '%s\n' "$archive" | grep -qxF -- "$AGY_ROUND_MARK"; then
+  # Here-string for the same reason: `grep -q` stops at the first match, and the resulting
+  # SIGPIPE would make the test false for a large archive and wrap it again on every run.
+  if grep -qxF -- "$AGY_ROUND_MARK" <<< "$archive"; then
     printf '%s\n' "$archive"
   else
     printf '%s\n' "$AGY_ROUND_MARK"
