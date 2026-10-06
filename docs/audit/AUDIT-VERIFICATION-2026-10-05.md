@@ -101,7 +101,7 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | FS-PERF-01 | PARTIAL | `fs/blockfs.rs:551, 586-589, 635-640, 991-1013` | Root cause misdescribed: BlockFS is RAM-resident with write-back, and `load_existing` reads *every* allocated block at mount (not only accessed blocks). `free_block` keeps the 4 KB `Vec`. | v0.26.0 | open |
 | FS-PERF-02 | CONFIRMED | `fs/mod.rs:726-737` | Mostly read-lock cache-line traffic rather than a convoy (writers are rare). | v0.26.0 | open |
 | FS-PERF-03 | CONFIRMED | `syscall/filesystem.rs:1699-1715` | Also non-atomic, drops metadata, fails for directories. `VfsNode` has no rename. | v0.26.0 | open |
-| FS-ARCH-01 | PARTIAL | `fs/file.rs:293-354` | Linear free-slot scan, bounded at 1024 -- minor. | v0.26.0 | open |
+| FS-ARCH-01 | PARTIAL | `fs/file.rs:293-354` | Linear free-slot scan, bounded at 1024 -- minor. | v0.26.0 | fixed (lowest-free hint; model-tested) |
 | FS-SEC-01 | CONFIRMED (worse) | `fs/mod.rs:486-628` | Prefix hijack confirmed; also no `..` normalisation before mount lookup, relative symlinks resolve from `/`, and MAC checks the unresolved path. | v0.26.0 | fixed (0256f96) |
 | FS-SEC-02 | CONFIRMED | `syscall/filesystem.rs:1724-1735, 2219-2247, 2737-2760` | No checks on chmod/fchmod/unlink/rename; chown/fchown are no-op successes. | v0.26.0 | fixed (0256f96, 62b0247) |
 | DRV-PERF-01 | PARTIAL, dead code | `services/desktop_ipc.rs:213-221` | Only a struct definition; nothing handles `UpdateWindowContent`. The copies that do happen are DESK-ARCH-01. | v0.26.0 | open |
@@ -156,6 +156,7 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | N-24 | `syscall/memory.rs` mmap | `MAP_FIXED` had no upper bound: a fixed mapping could be requested in the kernel half or the reserved top x86 page (SYSRET non-canonical return). Four inconsistent user-space limits elsewhere. | v0.26.0 | fixed (ADR 0002: one `mm::user_layout`; runtime-tested) |
 | N-25 | `mm/page_table.rs` (riscv64) | satp written with MODE 8 (Sv39) for 4-level page tables (Sv48 = 9), with no `sfence.vma`; latent until RISC-V user mode. | v0.26.0 | fixed (MODE 9 + sfence.vma; Sv48 checked from device tree `mmu-type`) |
 | N-26 | kernel stacks | No guard pages: kernel stacks come from the direct map, so an overflow corrupts the adjacent frame silently. | v0.27.0 (C5) | open |
+| N-27 | `fs/file.rs` FileTable | `open` returned a `next_fd` counter but stored the file at `files.len()`; after `dup2` grew the table the two differed, so the returned fd named a different (or no) file. `F_DUPFD` (`dup_at_least`) could overwrite an occupied slot the same way. | v0.26.0 | fixed (append at the table length; counter removed; model test) |
 
 ## Runtime verification status
 
