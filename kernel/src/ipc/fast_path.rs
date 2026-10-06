@@ -53,8 +53,14 @@ const IPC_REG_DATA3: usize = 6; // Data word 3
 /// Copies the message directly into the target task's `ipc_regs` array
 /// if the target is blocked waiting for a message. This avoids all
 /// intermediate queuing and achieves sub-microsecond latency.
+///
+/// Not reachable from the syscall path: it checks that the sender holds a
+/// SEND capability, but not that `target_pid` is a *receiver* on that
+/// capability's endpoint, nor does it claim the target atomically
+/// (IPC-SYNC-01/02). `sync_send` uses the queued path until the wait-list
+/// rework provides both. Module-private so nothing new can depend on it.
 #[inline(always)]
-pub fn fast_send(msg: &SmallMessage, target_pid: u64) -> Result<()> {
+fn fast_send(msg: &SmallMessage, target_pid: u64) -> Result<()> {
     let start = read_timestamp();
 
     // The sender must hold this capability, with SEND rights, in its own
