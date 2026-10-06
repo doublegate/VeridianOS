@@ -195,7 +195,7 @@ pub struct ElfBinary {
     pub load_base: u64,
     pub load_size: usize,
     /// Offset of the program header table within the ELF file (e_phoff).
-    /// Used to compute AT_PHDR = load_base + phoff for the auxiliary vector.
+    /// AT_PHDR is derived from it by [`ElfBinary::phdr_vaddr`].
     pub phoff: u64,
     /// Number of program header entries (e_phnum).
     pub phnum: u16,
@@ -204,6 +204,59 @@ pub struct ElfBinary {
     pub segments: Vec<ElfSegment>,
     pub interpreter: Option<String>,
     pub dynamic: bool,
+}
+
+impl ElfBinary {
+    /// Virtual address of the program header table once loaded (AT_PHDR):
+    /// PT_PHDR's `p_vaddr` if present, otherwise the address of `e_phoff`
+    /// inside the PT_LOAD segment whose file range contains it. `None` if
+    /// the table is not part of any loaded segment.
+    ///
+    /// `load_base + e_phoff` (and plain `load_base`) assumed the lowest
+    /// PT_LOAD maps file offset 0, which a linker need not do (review of
+    /// the v0.26.0 stack, PR #14). Addresses are as linked: the loader
+    /// applies no load bias.
+    pub fn phdr_vaddr(&self) -> Option<u64> {
+        if let Some(p) = self
+            .segments
+            .iter()
+            .find(|s| s.segment_type == SegmentType::Phdr)
+        {
+            return Some(p.virtual_addr);
+        }
+        self.segments
+            .iter()
+            .find(|s| {
+                s.segment_type == SegmentType::Load
+                    && self.phoff >= s.file_offset
+                    && self.phoff - s.file_offset < s.file_size
+            })
+            .map(|s| s.virtual_addr + (self.phoff - s.file_offset))
+    }
+}
+
+/// Layout of the initial x86_64 (TLS variant II) TLS block for a PT_TLS
+/// segment of `memsz` bytes and alignment `p_align`: returns
+/// `(block_size, tcb_offset)`, where the TLS image starts at the block base
+/// and the TCB (the thread pointer, FS_BASE) sits at `tcb_offset`.
+///
+/// The thread pointer must be `p_align`-aligned and the image ends exactly
+/// at it, so the image size is rounded up to the alignment (at least 8,
+/// for the TCB self-pointer). Placing the TCB at `base + memsz` misaligned
+/// TLS whenever `memsz` was not a multiple of `p_align` (review of the
+/// v0.26.0 stack, PR #14). The block base is page-aligned, so an alignment
+/// that is not a power of two or exceeds a page is refused (`None`).
+pub fn tls_layout(memsz: usize, p_align: u64) -> Option<(usize, usize)> {
+    const TCB_SIZE: usize = 8; // the TCB self-pointer
+    let align = (p_align as usize).max(8);
+    if !align.is_power_of_two() || align > 4096 {
+        return None;
+    }
+    let aligned = memsz.checked_next_multiple_of(align)?;
+    let block_size = aligned
+        .checked_add(TCB_SIZE)?
+        .checked_next_multiple_of(16)?;
+    Some((block_size, aligned))
 }
 
 /// Dynamic linking information

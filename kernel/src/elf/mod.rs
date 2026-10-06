@@ -1487,6 +1487,102 @@ mod tests {
         assert_eq!(SegmentType::Other(99), SegmentType::Other(99));
         assert_ne!(SegmentType::Other(1), SegmentType::Other(2));
     }
+
+    // --- AT_PHDR and TLS layout ---
+
+    fn seg(segment_type: SegmentType, vaddr: u64, offset: u64, filesz: u64) -> ElfSegment {
+        ElfSegment {
+            segment_type,
+            virtual_addr: vaddr,
+            physical_addr: vaddr,
+            file_offset: offset,
+            file_size: filesz,
+            memory_size: filesz,
+            flags: 0,
+            alignment: 0x1000,
+        }
+    }
+
+    fn binary(phoff: u64, segments: Vec<ElfSegment>) -> ElfBinary {
+        let load_base = segments
+            .iter()
+            .filter(|s| s.segment_type == SegmentType::Load)
+            .map(|s| s.virtual_addr)
+            .min()
+            .unwrap_or(0);
+        ElfBinary {
+            entry_point: load_base,
+            load_base,
+            load_size: 0,
+            phoff,
+            phnum: segments.len() as u16,
+            phentsize: 56,
+            segments,
+            interpreter: None,
+            dynamic: false,
+        }
+    }
+
+    #[test]
+    fn phdr_vaddr_prefers_pt_phdr() {
+        let b = binary(
+            0x40,
+            vec![
+                seg(SegmentType::Phdr, 0x40_0040, 0x40, 0x1c0),
+                seg(SegmentType::Load, 0x40_0000, 0, 0x2000),
+            ],
+        );
+        assert_eq!(b.phdr_vaddr(), Some(0x40_0040));
+    }
+
+    #[test]
+    fn phdr_vaddr_uses_the_load_containing_phoff() {
+        // The lowest PT_LOAD does not map file offset 0, so load_base +
+        // e_phoff (0x40_1040) would be wrong.
+        let b = binary(
+            0x1040,
+            vec![
+                seg(SegmentType::Load, 0x40_0000, 0x3000, 0x1000),
+                seg(SegmentType::Load, 0x40_1000, 0x1000, 0x1000),
+            ],
+        );
+        assert_eq!(b.phdr_vaddr(), Some(0x40_1040));
+        let b = binary(
+            0x1040,
+            vec![
+                seg(SegmentType::Load, 0x40_0000, 0x0, 0x800),
+                seg(SegmentType::Load, 0x60_0000, 0x1000, 0x1000),
+            ],
+        );
+        assert_eq!(b.phdr_vaddr(), Some(0x60_0040));
+    }
+
+    #[test]
+    fn phdr_vaddr_none_when_not_loaded() {
+        let b = binary(0x5000, vec![seg(SegmentType::Load, 0x40_0000, 0, 0x1000)]);
+        assert_eq!(b.phdr_vaddr(), None);
+        // The end of a segment's file range is exclusive.
+        let b = binary(0x1000, vec![seg(SegmentType::Load, 0x40_0000, 0, 0x1000)]);
+        assert_eq!(b.phdr_vaddr(), None);
+    }
+
+    #[test]
+    fn tls_layout_honours_p_align() {
+        // memsz 0x13 at align 8: the image rounds up to 0x18.
+        assert_eq!(tls_layout(0x13, 8), Some((0x20, 0x18)));
+        // A 64-byte-aligned TLS segment puts the TCB on a 64-byte boundary.
+        let (block, tcb) = tls_layout(0x13, 64).unwrap();
+        assert_eq!(tcb, 64);
+        assert_eq!(block, 64 + 16);
+        assert_eq!(tls_layout(0x80, 64), Some((0x90, 0x80)));
+        // p_align 0 and 1 mean "no constraint": the TCB still needs 8.
+        assert_eq!(tls_layout(0x13, 0), Some((0x20, 0x18)));
+        assert_eq!(tls_layout(0x13, 1), Some((0x20, 0x18)));
+        assert_eq!(tls_layout(0, 0), Some((0x10, 0)));
+        // Not a power of two, or more than the page-aligned base can give.
+        assert_eq!(tls_layout(0x13, 24), None);
+        assert_eq!(tls_layout(0x13, 8192), None);
+    }
 }
 
 /// Execute an ELF binary

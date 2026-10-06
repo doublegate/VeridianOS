@@ -253,12 +253,15 @@ pub fn load_user_program(
         use crate::elf::dynamic::{AuxType, AuxVecEntry};
 
         // Build auxiliary vector from parsed ELF binary.
-        // AT_PHDR must point to the program header table in memory, which is
-        // at load_base + phoff (where phoff = e_phoff from the ELF header).
-        // musl's __init_libc iterates the program headers via AT_PHDR to find
-        // PT_TLS, PT_GNU_STACK, etc. Pointing at load_base (the ELF magic)
-        // instead of load_base+phoff causes musl to misparse and crash.
-        let phdr_addr = binary.load_base + binary.phoff;
+        // AT_PHDR must point to the program header table in memory: musl's
+        // __init_libc iterates the program headers via AT_PHDR to find
+        // PT_TLS, PT_GNU_STACK, etc., and misparses (then crashes) if it
+        // points anywhere else. phdr_vaddr() takes it from PT_PHDR or the
+        // PT_LOAD that holds e_phoff; load_base + e_phoff is only the
+        // fallback for a table outside every segment.
+        let phdr_addr = binary
+            .phdr_vaddr()
+            .unwrap_or(binary.load_base + binary.phoff);
 
         #[cfg(target_arch = "x86_64")]
         // SAFETY: raw_serial_str/raw_serial_hex write to COM1 I/O port for diagnostic output.
@@ -322,18 +325,25 @@ pub fn load_user_program(
             {
                 let tls_memsz = tls_seg.memory_size as usize;
                 let tls_filesz = tls_seg.file_size as usize;
-                // TLS block: tls_memsz (data+bss) + 8 (TCB self-pointer), aligned to 16
-                let tcb_size = 8usize;
-                let tls_block_size = ((tls_memsz + tcb_size) + 15) & !15;
+                // TLS block: the image (data+bss) rounded up to p_align, then
+                // the 8-byte TCB self-pointer at the p_align-aligned thread
+                // pointer. An alignment the page-aligned block cannot honour
+                // skips the setup; musl's __init_tls builds TLS itself.
+                let layout = crate::elf::tls_layout(tls_memsz, tls_seg.alignment);
 
                 let memory_space = process.memory_space.lock();
-                if let Ok(tls_base_vaddr) =
-                    memory_space.mmap(tls_block_size, crate::mm::vas::MappingType::Data)
-                {
+                if let Some((Ok(tls_base_vaddr), tcb_offset)) = layout.map(|(size, tcb)| {
+                    (
+                        memory_space.mmap(size, crate::mm::vas::MappingType::Data),
+                        tcb,
+                    )
+                }) {
                     let tls_base = tls_base_vaddr.as_usize();
-                    let tcb_addr = tls_base + tls_memsz;
+                    let tcb_addr = tls_base + tcb_offset;
 
-                    // Copy TLS init data from the ELF file buffer
+                    // Copy TLS init data from the ELF file buffer. Variant II
+                    // addresses the image at TP - round_up(memsz, p_align),
+                    // which is tls_base; any padding follows the image.
                     if tls_filesz > 0 {
                         let tls_file_offset = tls_seg.file_offset as usize;
                         if tls_file_offset + tls_filesz <= buffer.len() {
@@ -513,8 +523,14 @@ fn setup_auxiliary_vector(
         (AT_ENTRY, main_binary.entry_point),           // Main program entry
         (AT_PHNUM, main_binary.segments.len() as u64), // Number of program headers
         (AT_PHENT, 56),                                // Size of program header (Elf64_Phdr)
-        (AT_PHDR, main_binary.load_base),              // Program headers address
-        (AT_UID, 0),                                   // Root user
+        (
+            AT_PHDR,
+            main_binary
+                .phdr_vaddr()
+                .unwrap_or(main_binary.load_base + main_binary.phoff),
+        ), /* Program headers address (not the ELF
+                                                        * header at load_base) */
+        (AT_UID, 0), // Root user
         (AT_EUID, 0),
         (AT_GID, 0),
         (AT_EGID, 0),
