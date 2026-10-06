@@ -102,8 +102,10 @@ pub fn zero_copy_transfer(
     Ok(to_vaddr)
 }
 
-/// The rights `pid` holds on `region` (union over its memory capabilities
-/// for the region's physical base), if any of them carries SHARE. The old
+/// The rights `pid` may pass on for `region`: the union of its memory
+/// capabilities that themselves carry SHARE and cover the whole region.
+/// A capability without SHARE contributes nothing, so a non-shareable WRITE
+/// capability cannot ride along with a separate SHARE+READ one. The old
 /// check only asked whether both processes existed.
 fn share_rights(pid: ProcessId, region: &SharedRegion) -> Option<crate::cap::Rights> {
     use crate::cap::{memory_integration::MemoryRights, ObjectRef, Rights};
@@ -113,8 +115,8 @@ fn share_rights(pid: ProcessId, region: &SharedRegion) -> Option<crate::cap::Rig
     let space = process.capability_space.lock();
     let mut rights = Rights::empty();
     let _ = space.iter_capabilities(|entry| {
-        if let ObjectRef::Memory { base: b, .. } = entry.object {
-            if b == base {
+        if let ObjectRef::Memory { base: b, size, .. } = entry.object {
+            if b == base && size >= region.size() && entry.rights.contains(MemoryRights::SHARE) {
                 rights |= entry.rights;
             }
         }
