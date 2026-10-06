@@ -17,9 +17,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
-
 /// Maximum number of CPUs (matches smp::MAX_CPUS).
-const MAX_CPUS: usize = 16;
+use crate::sched::smp::MAX_CPUS;
 
 /// Number of hazard pointer slots per CPU.
 const SLOTS_PER_CPU: usize = 4;

@@ -212,6 +212,10 @@ pub struct FrameAllocatorStats {
 }
 
 /// Bitmap allocator for small allocations (<512 frames)
+///
+/// MEM-PERF-02: searches a word at a time (whole free words count 64 frames
+/// at once, partial words are walked with trailing_zeros/trailing_ones)
+/// starting from a roving hint, and sets/clears ranges with word masks.
 struct BitmapAllocator {
     /// Bitmap tracking free frames (1 = free, 0 = allocated)
     /// Reduced from 16384 to 2048 for bootloader 0.11 compatibility (128K
@@ -223,6 +227,76 @@ struct BitmapAllocator {
     total_frames: usize,
     /// Free frame count
     free_frames: AtomicUsize,
+    /// Word where the next search starts (just past the last allocation).
+    hint: AtomicUsize,
+}
+
+/// Call `f(word, mask)` for each bitmap word covering bits
+/// `[start, start + count)`, with the bits of that range set in `mask`.
+fn for_each_word_mask(start: usize, count: usize, mut f: impl FnMut(usize, u64)) {
+    let end = start + count;
+    let mut bit = start;
+    while bit < end {
+        let word = bit / 64;
+        let lo = bit % 64;
+        let hi = (end - word * 64).min(64);
+        let mask = if hi - lo == 64 {
+            u64::MAX
+        } else {
+            ((1u64 << (hi - lo)) - 1) << lo
+        };
+        f(word, mask);
+        bit = word * 64 + hi;
+    }
+}
+
+/// First run of `count` set bits within words `[lo, hi)` of `bitmap`;
+/// returns the bit index of its start.
+fn find_run(bitmap: &[u64], lo: usize, hi: usize, count: usize) -> Option<usize> {
+    let mut run = 0usize;
+    let mut run_start = 0usize;
+    for (i, &word) in bitmap.iter().enumerate().take(hi).skip(lo) {
+        if word == 0 {
+            run = 0;
+            continue;
+        }
+        if word == u64::MAX {
+            if run == 0 {
+                run_start = i * 64;
+            }
+            run += 64;
+            if run >= count {
+                return Some(run_start);
+            }
+            continue;
+        }
+        let mut pos = 0u32;
+        while pos < 64 {
+            let w = word >> pos;
+            if w == 0 {
+                run = 0;
+                break;
+            }
+            let zeros = w.trailing_zeros();
+            if zeros > 0 {
+                run = 0;
+                pos += zeros;
+                continue;
+            }
+            let ones = w.trailing_ones();
+            if run == 0 {
+                run_start = i * 64 + pos as usize;
+            }
+            run += ones as usize;
+            if run >= count {
+                return Some(run_start);
+            }
+            pos += ones;
+        }
+        // A run reaching bit 63 carries on into the next word; any other
+        // run was reset by the zero bit after it.
+    }
+    None
 }
 
 impl BitmapAllocator {
@@ -254,7 +328,13 @@ impl BitmapAllocator {
             start_frame,
             total_frames: frame_count,
             free_frames: AtomicUsize::new(frame_count),
+            hint: AtomicUsize::new(0),
         }
+    }
+
+    /// Number of bitmap words in use.
+    fn words(&self) -> usize {
+        self.total_frames.div_ceil(64)
     }
 
     /// Allocate contiguous frames
@@ -262,51 +342,58 @@ impl BitmapAllocator {
         if count == 0 || count >= BITMAP_BUDDY_THRESHOLD {
             return Err(FrameAllocatorError::InvalidSize);
         }
-
-        let mut bitmap = self.bitmap.lock();
-
-        // Find contiguous free frames
-        let mut consecutive = 0;
-        let mut start_bit = 0;
-
-        for (word_idx, word) in bitmap.iter_mut().enumerate() {
-            if *word == 0 {
-                consecutive = 0;
-                continue;
-            }
-
-            for bit in 0..64 {
-                if *word & (1 << bit) != 0 {
-                    if consecutive == 0 {
-                        // Mark the start of a new consecutive sequence
-                        start_bit = word_idx * 64 + bit;
-                    }
-                    consecutive += 1;
-                    if consecutive == count {
-                        // Found enough frames, allocate them
-                        let first_frame = start_bit;
-
-                        // Mark frames as allocated
-                        for i in 0..count {
-                            let frame_bit = first_frame + i;
-                            let word_idx = frame_bit / 64;
-                            let bit_idx = frame_bit % 64;
-                            bitmap[word_idx] &= !(1 << bit_idx);
-                        }
-
-                        self.free_frames.fetch_sub(count, Ordering::Release);
-
-                        return Ok(FrameNumber::new(
-                            self.start_frame.as_u64() + first_frame as u64,
-                        ));
-                    }
-                } else {
-                    consecutive = 0;
-                }
-            }
+        if self.free_frames.load(Ordering::Relaxed) < count {
+            return Err(FrameAllocatorError::OutOfMemory);
         }
 
-        Err(FrameAllocatorError::OutOfMemory)
+        let mut bitmap = self.bitmap.lock();
+        let words = self.words();
+        let hint = self.hint.load(Ordering::Relaxed).min(words);
+
+        // From the hint to the end, then from the start up to the hint (a
+        // run may straddle the hint, so the second pass overlaps it).
+        let found = find_run(&bitmap[..], hint, words, count).or_else(|| {
+            find_run(
+                &bitmap[..],
+                0,
+                (hint + count.div_ceil(64) + 1).min(words),
+                count,
+            )
+        });
+        let Some(first) = found else {
+            return Err(FrameAllocatorError::OutOfMemory);
+        };
+
+        for_each_word_mask(first, count, |w, mask| bitmap[w] &= !mask);
+        self.free_frames.fetch_sub(count, Ordering::Release);
+        self.hint.store((first + count) / 64, Ordering::Relaxed);
+        Ok(FrameNumber::new(self.start_frame.as_u64() + first as u64))
+    }
+
+    /// Allocate up to `out.len()` single frames (not necessarily
+    /// contiguous) under one lock acquisition; returns how many.
+    fn allocate_singles(&self, out: &mut [u64]) -> usize {
+        if out.is_empty() {
+            return 0;
+        }
+        let mut bitmap = self.bitmap.lock();
+        let words = self.words();
+        let hint = self.hint.load(Ordering::Relaxed).min(words);
+        let mut n = 0;
+        for w in (hint..words).chain(0..hint) {
+            while bitmap[w] != 0 && n < out.len() {
+                let bit = bitmap[w].trailing_zeros() as usize;
+                bitmap[w] &= !(1u64 << bit);
+                out[n] = self.start_frame.as_u64() + (w * 64 + bit) as u64;
+                n += 1;
+            }
+            if n == out.len() {
+                self.hint.store(w, Ordering::Relaxed);
+                break;
+            }
+        }
+        self.free_frames.fetch_sub(n, Ordering::Release);
+        n
     }
 
     /// Mark a specific frame as allocated (reserved) so it won't be handed out.
@@ -342,7 +429,7 @@ impl BitmapAllocator {
         let end = offset
             .checked_add(count)
             .ok_or(FrameAllocatorError::InvalidFrame)?;
-        if end > self.total_frames {
+        if end > self.total_frames || count == 0 {
             return Err(FrameAllocatorError::InvalidFrame);
         }
 
@@ -350,14 +437,14 @@ impl BitmapAllocator {
 
         // Double-free detection: verify every frame is allocated before
         // changing any bit, so a rejected free leaves the bitmap untouched.
-        for frame_bit in offset..end {
-            if bitmap[frame_bit / 64] & (1 << (frame_bit % 64)) != 0 {
-                return Err(FrameAllocatorError::InvalidFrame);
-            }
+        let mut already_free = false;
+        for_each_word_mask(offset, count, |w, mask| {
+            already_free |= bitmap[w] & mask != 0
+        });
+        if already_free {
+            return Err(FrameAllocatorError::InvalidFrame);
         }
-        for frame_bit in offset..end {
-            bitmap[frame_bit / 64] |= 1 << (frame_bit % 64);
-        }
+        for_each_word_mask(offset, count, |w, mask| bitmap[w] |= mask);
 
         self.free_frames.fetch_add(count, Ordering::Release);
         Ok(())
@@ -570,8 +657,9 @@ pub struct FrameAllocator {
     bitmap_allocators: [Option<BitmapAllocator>; MAX_NUMA_NODES],
     /// Buddy allocators for each NUMA node
     buddy_allocators: [Option<BuddyAllocator>; MAX_NUMA_NODES],
-    /// Statistics
-    stats: Mutex<FrameAllocatorStats>,
+    /// Total time spent allocating (ns). Atomic: allocation must not take
+    /// a lock just to update statistics (MEM-PERF-02).
+    allocation_time_ns: AtomicU64,
     /// Allocation counter
     allocation_count: AtomicU64,
     /// Reserved memory regions
@@ -588,13 +676,7 @@ impl FrameAllocator {
         Self {
             bitmap_allocators: [NONE_BITMAP; MAX_NUMA_NODES],
             buddy_allocators: [NONE_BUDDY; MAX_NUMA_NODES],
-            stats: Mutex::new(FrameAllocatorStats {
-                total_frames: 0,
-                free_frames: 0,
-                bitmap_allocations: 0,
-                buddy_allocations: 0,
-                allocation_time_ns: 0,
-            }),
+            allocation_time_ns: AtomicU64::new(0),
             allocation_count: AtomicU64::new(0),
             #[cfg(feature = "alloc")]
             reserved_regions: Mutex::new(Vec::new()),
@@ -613,6 +695,14 @@ impl FrameAllocator {
             }
         }
 
+        // Take the region's frames out of the bitmaps now, so bitmap
+        // allocations never have to consult the reserved list (MEM-PERF-02).
+        // The buddy path still checks it.
+        for frame in region.start.as_u64()..region.end.as_u64() {
+            for allocator in self.bitmap_allocators.iter().flatten() {
+                let _ = allocator.mark_used(FrameNumber::new(frame));
+            }
+        }
         reserved.push(region);
         Ok(())
     }
@@ -727,10 +817,8 @@ impl FrameAllocator {
         };
 
         let elapsed = crate::bench::read_timestamp() - start_time;
-        {
-            let mut stats = self.stats.lock();
-            stats.allocation_time_ns += crate::bench::cycles_to_ns(elapsed);
-        }
+        self.allocation_time_ns
+            .fetch_add(crate::bench::cycles_to_ns(elapsed), Ordering::Relaxed);
         self.allocation_count.fetch_add(1, Ordering::Relaxed);
 
         result
@@ -785,16 +873,8 @@ impl FrameAllocator {
                                 return Err(FrameAllocatorError::OutOfMemory);
                             }
                         }
-
-                        // Check if allocated frames are reserved
-                        #[cfg(feature = "alloc")]
-                        if self.is_reserved(frame, count) {
-                            // Try to free and continue searching
-                            let _ = allocator.free(frame, count);
-                        } else {
-                            return Ok(frame);
-                        }
-                        #[cfg(not(feature = "alloc"))]
+                        // Reserved frames were removed from the bitmap when
+                        // the region was added.
                         return Ok(frame);
                     }
                 }
@@ -804,18 +884,35 @@ impl FrameAllocator {
         // Try all nodes
         for allocator in self.bitmap_allocators.iter().flatten() {
             if let Ok(frame) = allocator.allocate(count) {
-                // Check if allocated frames are reserved
-                #[cfg(feature = "alloc")]
-                if self.is_reserved(frame, count) {
-                    // Try to free and continue searching
-                    let _ = allocator.free(frame, count);
-                    continue;
-                }
                 return Ok(frame);
             }
         }
 
         Err(FrameAllocatorError::OutOfMemory)
+    }
+
+    /// Allocate up to `out.len()` single frames (not necessarily contiguous)
+    /// with one pass over the bitmaps; returns how many were allocated.
+    /// Used to refill per-CPU caches.
+    pub fn allocate_single_frames(&self, out: &mut [u64]) -> usize {
+        let mut n = 0;
+        for allocator in self.bitmap_allocators.iter().flatten() {
+            n += allocator.allocate_singles(&mut out[n..]);
+            if n == out.len() {
+                return n;
+            }
+        }
+        // Bitmaps exhausted: fall back to the general path.
+        while n < out.len() {
+            match self.allocate_frames(1, None) {
+                Ok(f) => {
+                    out[n] = f.as_u64();
+                    n += 1;
+                }
+                Err(_) => break,
+            }
+        }
+        n
     }
 
     /// Allocate using buddy allocator with zone constraint
@@ -944,13 +1041,12 @@ impl FrameAllocator {
             total_frames += allocator.total_frames as u64;
         }
 
-        let stats = self.stats.lock();
         FrameAllocatorStats {
             total_frames,
             free_frames,
-            bitmap_allocations: stats.bitmap_allocations,
-            buddy_allocations: stats.buddy_allocations,
-            allocation_time_ns: stats.allocation_time_ns,
+            bitmap_allocations: 0,
+            buddy_allocations: 0,
+            allocation_time_ns: self.allocation_time_ns.load(Ordering::Relaxed),
         }
     }
 
@@ -1099,131 +1195,188 @@ impl PerCpuPageCache {
         self.count > Self::HIGH_WATERMARK
     }
 
-    /// Batch-refill from the global frame allocator.
-    /// Acquires the global lock once, filling up to BATCH_SIZE frames.
-    pub fn batch_refill(&mut self) {
-        let global = FRAME_ALLOCATOR.lock();
-        let to_refill = Self::BATCH_SIZE.min(Self::CAPACITY - self.count);
-        for _ in 0..to_refill {
-            match global.allocate_frames(1, None) {
-                Ok(frame) => {
-                    self.frames[self.count] = frame.as_u64();
-                    self.count += 1;
-                }
-                Err(_) => break,
-            }
-        }
-    }
-
-    /// Batch-drain excess frames back to the global allocator.
-    /// Acquires the global lock once, returning BATCH_SIZE frames.
-    pub fn batch_drain(&mut self) {
-        let global = FRAME_ALLOCATOR.lock();
-        let to_drain = Self::BATCH_SIZE.min(self.count);
-        for _ in 0..to_drain {
-            if self.count == 0 {
-                break;
-            }
-            self.count -= 1;
-            let frame = FrameNumber::new(self.frames[self.count]);
-            let _ = global.free_frames(frame, 1);
-        }
-    }
-
     /// Number of cached frames
     pub fn cached_count(&self) -> usize {
         self.count
     }
 }
 
-/// Per-CPU page caches (one per CPU, protected by per-CPU access pattern)
-///
-/// SAFETY: Each CPU accesses only its own index via `current_cpu_id()`.
-/// During bootstrap, only CPU 0 runs. After SMP bringup, each CPU
-/// initializes its own cache. No cross-CPU access occurs.
-static PER_CPU_PAGE_CACHES: Mutex<[PerCpuPageCache; 16]> =
-    Mutex::new([const { PerCpuPageCache::new() }; 16]);
+/// Per-CPU page caches: one lock per CPU, each on its own cache line, so
+/// CPUs never contend on (or false-share) another CPU's cache (MEM-PERF-01).
+/// The previous version put all CPUs' caches behind one global mutex.
+static PER_CPU_PAGE_CACHES: [crate::mm::cache_aligned::CacheAligned<Mutex<PerCpuPageCache>>;
+    crate::sched::smp::MAX_CPUS] =
+    [const { crate::mm::cache_aligned::CacheAligned::new(Mutex::new(PerCpuPageCache::new())) };
+        crate::sched::smp::MAX_CPUS];
+
+/// This CPU's page cache.
+fn this_cpu_cache() -> &'static Mutex<PerCpuPageCache> {
+    let cpu = crate::sched::smp::current_cpu_id() as usize;
+    &PER_CPU_PAGE_CACHES[cpu.min(crate::sched::smp::MAX_CPUS - 1)]
+}
 
 /// Allocate a single physical frame using the per-CPU cache.
 ///
-/// Fast path: no global lock contention for single-frame allocs.
-/// Falls back to global allocator if cache is empty and refill fails.
+/// Fast path: only this CPU's cache lock. On a miss, a batch of frames is
+/// taken from the global allocator in one bitmap pass into a stack buffer
+/// -- without holding the cache lock -- and the rest of the batch refills
+/// the cache.
 pub fn per_cpu_alloc_frame() -> Result<FrameNumber> {
-    let cpu_id = crate::sched::smp::current_cpu_id() as usize;
-
-    let mut caches = PER_CPU_PAGE_CACHES.lock();
-    let cache = &mut caches[cpu_id.min(15)];
-
-    // Try cache first
-    if let Some(frame) = cache.alloc_one() {
-        crate::trace!(
-            crate::perf::trace::TraceEventType::FrameAlloc,
-            frame.as_u64(),
-            cpu_id as u64
-        );
+    let cache = this_cpu_cache();
+    if let Some(frame) = cache.lock().alloc_one() {
         return Ok(frame);
     }
 
-    // Cache empty -- batch refill from global
-    cache.batch_refill();
-
-    // Try again after refill
-    if let Some(frame) = cache.alloc_one() {
-        crate::trace!(
-            crate::perf::trace::TraceEventType::FrameAlloc,
-            frame.as_u64(),
-            cpu_id as u64
-        );
-        return Ok(frame);
+    let mut batch = [0u64; PerCpuPageCache::BATCH_SIZE];
+    let n = FRAME_ALLOCATOR.lock().allocate_single_frames(&mut batch);
+    if n == 0 {
+        return Err(FrameAllocatorError::OutOfMemory);
     }
-
-    // Still empty -- fall back to direct global allocation
-    let frame = FRAME_ALLOCATOR.lock().allocate_frames(1, None)?;
+    let mut leftover = 0;
+    {
+        let mut c = cache.lock();
+        for i in 1..n {
+            let f = batch[i];
+            if !c.free_one(FrameNumber::new(f)) {
+                batch[1 + leftover] = f;
+                leftover += 1;
+            }
+        }
+    }
+    if leftover > 0 {
+        // The cache filled up meanwhile: return what did not fit.
+        let global = FRAME_ALLOCATOR.lock();
+        for &f in &batch[1..1 + leftover] {
+            let _ = global.free_frames(FrameNumber::new(f), 1);
+        }
+    }
+    let frame = FrameNumber::new(batch[0]);
     crate::trace!(
         crate::perf::trace::TraceEventType::FrameAlloc,
         frame.as_u64(),
-        cpu_id as u64
+        0u64
     );
     Ok(frame)
 }
 
 /// Free a single physical frame using the per-CPU cache.
 ///
-/// Fast path: no global lock contention for single-frame frees.
-/// Drains excess frames back to global if cache is full.
+/// Fast path: only this CPU's cache lock. Above the high watermark a batch
+/// is moved to a stack buffer under the cache lock and returned to the
+/// global allocator after it is released.
 pub fn per_cpu_free_frame(frame: FrameNumber) -> Result<()> {
-    let cpu_id = crate::sched::smp::current_cpu_id() as usize;
     crate::trace!(
         crate::perf::trace::TraceEventType::FrameFree,
         frame.as_u64(),
-        cpu_id as u64
+        0u64
     );
-
-    let mut caches = PER_CPU_PAGE_CACHES.lock();
-    let cache = &mut caches[cpu_id.min(15)];
-
-    // Try cache first
-    if cache.free_one(frame) {
-        // Drain excess if above high watermark
-        if cache.needs_drain() {
-            cache.batch_drain();
+    let cache = this_cpu_cache();
+    let mut batch = [0u64; PerCpuPageCache::BATCH_SIZE];
+    let mut n = 0;
+    let direct = {
+        let mut c = cache.lock();
+        let cached = c.free_one(frame);
+        if !cached || c.needs_drain() {
+            while n < batch.len() {
+                match c.alloc_one() {
+                    Some(f) => {
+                        batch[n] = f.as_u64();
+                        n += 1;
+                    }
+                    None => break,
+                }
+            }
         }
-        return Ok(());
+        !cached
+    };
+    if n > 0 || direct {
+        let global = FRAME_ALLOCATOR.lock();
+        for &f in &batch[..n] {
+            let _ = global.free_frames(FrameNumber::new(f), 1);
+        }
+        if direct {
+            return global.free_frames(frame, 1);
+        }
     }
-
-    // Cache full -- drain first, then retry
-    cache.batch_drain();
-    if cache.free_one(frame) {
-        return Ok(());
-    }
-
-    // Still full (shouldn't happen after drain) -- go direct
-    FRAME_ALLOCATOR.lock().free_frames(frame, 1)
+    Ok(())
 }
 
 #[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use super::*;
+
+    /// Naive reference: first run of `count` set bits in bits [0, nbits).
+    fn naive_run(bits: &[bool], count: usize) -> Option<usize> {
+        let mut run = 0;
+        for (i, &b) in bits.iter().enumerate() {
+            run = if b { run + 1 } else { 0 };
+            if run == count {
+                return Some(i + 1 - count);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn find_run_matches_naive_scan() {
+        // xorshift: deterministic patterns, including runs across words.
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..300 {
+            let mut words = [0u64; 6];
+            for w in words.iter_mut() {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                // Bias towards long runs of ones and zeros.
+                *w = match x % 4 {
+                    0 => u64::MAX,
+                    1 => 0,
+                    _ => x,
+                };
+            }
+            let bits: alloc::vec::Vec<bool> =
+                (0..384).map(|i| words[i / 64] >> (i % 64) & 1 == 1).collect();
+            for count in [1, 2, 3, 7, 31, 63, 64, 65, 100, 129, 200] {
+                assert_eq!(
+                    find_run(&words, 0, 6, count),
+                    naive_run(&bits, count),
+                    "words={:x?} count={}",
+                    words,
+                    count
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bitmap_alloc_free_masks_and_hint_wrap() {
+        let a = BitmapAllocator::new(FrameNumber::new(1000), 300);
+        // Contiguous run crossing a word boundary.
+        let f = a.allocate(100).unwrap();
+        assert_eq!(f.as_u64(), 1000);
+        let g = a.allocate(70).unwrap();
+        assert_eq!(g.as_u64(), 1100);
+        assert_eq!(a.free_count(), 130);
+        // Free the first run; the hint is past it, so the search wraps.
+        a.free(f, 100).unwrap();
+        assert!(a.free(f, 1).is_err(), "double free rejected");
+        let h = a.allocate(130).unwrap();
+        assert_eq!(h.as_u64(), 1170, "first fit from the hint");
+        let k = a.allocate(90).unwrap();
+        assert_eq!(k.as_u64(), 1000, "wrapped to the start");
+        assert_eq!(a.free_count(), 10);
+        assert!(a.allocate(11).is_err());
+        // Singles: the remaining 10 frames, none twice.
+        let mut out = [0u64; 16];
+        assert_eq!(a.allocate_singles(&mut out), 10);
+        let mut v = out[..10].to_vec();
+        v.sort_unstable();
+        v.dedup();
+        assert_eq!(v.len(), 10);
+        assert!(v.iter().all(|&f| (1090..1100).contains(&f)));
+        assert_eq!(a.free_count(), 0);
+        assert_eq!(a.allocate_singles(&mut out), 0);
+    }
 
     /// N-01: a node smaller than the bitmap must never hand out frames past
     /// its own end (they would be beyond physical RAM).

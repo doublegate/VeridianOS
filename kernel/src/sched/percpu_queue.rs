@@ -16,9 +16,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use spin::Mutex;
 
 use crate::process::ProcessId;
-
 /// Maximum CPUs supported (matches smp::MAX_CPUS).
-const MAX_CPUS: usize = 16;
+use crate::sched::smp::MAX_CPUS;
 
 /// Minimum queue depth before stealing is attempted.
 const STEAL_THRESHOLD: u32 = 2;
