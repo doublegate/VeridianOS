@@ -239,9 +239,12 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
                 Err(_) => Err(SyscallError::OutOfMemory),
             }
         }
-        Err(_) => {
-            // If O_CREAT is set, create the file in its parent directory
-            if open_flags.create {
+        Err(e) => {
+            // Only a missing name may be created; any other failure (EACCES
+            // from a directory without search permission, ENOTDIR, ELOOP)
+            // is reported as itself. Every failure used to read as ENOENT
+            // (review of the v0.26.0 stack, PR #15).
+            if open_flags.create && is_not_found(&e) {
                 let perms = creation_perms(mode);
                 let (parent_path, name) = split_path(path_str)?;
                 require_dir_write(path_str)?;
@@ -269,7 +272,7 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
                     Err(_) => Err(SyscallError::ResourceNotFound),
                 }
             } else {
-                Err(SyscallError::ResourceNotFound)
+                Err(map_resolve_err(e))
             }
         }
     }
@@ -972,6 +975,15 @@ fn fill_stat(metadata: &crate::fs::Metadata) -> FileStat {
 /// Map a `KernelError` from VFS path resolution to the most appropriate
 /// `SyscallError`, preserving important distinctions like ELOOP and
 /// ENOENT.
+/// Whether a lookup failed because the final name does not exist, the only
+/// failure O_CREAT may turn into a create.
+fn is_not_found(e: &crate::error::KernelError) -> bool {
+    matches!(
+        e,
+        crate::error::KernelError::FsError(crate::error::FsError::NotFound)
+    )
+}
+
 pub(crate) fn map_resolve_err(e: crate::error::KernelError) -> SyscallError {
     match e {
         crate::error::KernelError::FsError(crate::error::FsError::SymlinkLoop) => {
@@ -2645,9 +2657,9 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
                 Err(_) => Err(SyscallError::OutOfMemory),
             }
         }
-        Err(_) => {
-            // If O_CREAT, create the file
-            if open_flags.create {
+        Err(e) => {
+            // As in sys_open: create only a missing name, report the rest.
+            if open_flags.create && is_not_found(&e) {
                 let perms = creation_perms(mode);
                 let (parent_path, name) = split_path(&abs_path)?;
                 require_dir_write(&abs_path)?;
@@ -2672,7 +2684,7 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
                     Err(_) => Err(SyscallError::ResourceNotFound),
                 }
             } else {
-                Err(SyscallError::ResourceNotFound)
+                Err(map_resolve_err(e))
             }
         }
     }

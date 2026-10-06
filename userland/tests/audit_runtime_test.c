@@ -625,14 +625,23 @@ static void test_dir_search_permission(void)
             _exit(100);
         errno = 0;
         int fd = open("/tmp/audit_private/open", O_RDONLY);
+        int open_errno = errno; /* before stat() can overwrite it */
         int stat_ok = stat("/tmp/audit_private/open", &st) == 0;
-        _exit(fd < 0 && errno == EACCES && !stat_ok ? 0 : 1);
+        if (fd < 0 && open_errno == EACCES && !stat_ok)
+            _exit(0);
+        /* Encode what happened: bit 7 = open succeeded, bit 6 = stat
+         * succeeded, low bits = open's errno. */
+        _exit((fd >= 0 ? 0x80 : 0) | (stat_ok ? 0x40 : 0) | (open_errno & 0x3f));
     }
     int status = 0;
     int ok = pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
              WEXITSTATUS(status) == 0;
-    report("dir_search_permission_enforced", ok,
-           "a file under a 0700 directory was reachable as uid 1000");
+    static char why_dir[96];
+    snprintf(why_dir, sizeof(why_dir),
+             "uid 1000 under a 0700 dir: open %s (errno %d), stat %s",
+             (WEXITSTATUS(status) & 0x80) ? "succeeded" : "failed", WEXITSTATUS(status) & 0x3f,
+             (WEXITSTATUS(status) & 0x40) ? "succeeded" : "failed");
+    report("dir_search_permission_enforced", ok, why_dir);
 }
 
 /* --- The kernel ignores the caller's direction flag (review of the v0.26.0
