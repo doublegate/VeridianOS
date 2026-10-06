@@ -1702,6 +1702,12 @@ impl BlockFsInner {
             if target.links_count > 0 {
                 target.links_count -= 1;
             }
+            // Callers only drop a directory once it is empty, so it also
+            // loses its own "." link. Without this it stayed at one link
+            // and its inode and blocks were never freed (N-44).
+            if is_dir && target.links_count > 0 {
+                target.links_count -= 1;
+            }
 
             // If unlinking a directory, also decrement parent link count (for "..")
             if is_dir {
@@ -1712,9 +1718,12 @@ impl BlockFsInner {
                 }
             }
 
-            // If links reach 0, free all data blocks
+            // If links reach 0, free all data blocks and the inode itself
+            // (allocate_inode takes any zero-link inode and decrements
+            // free_inodes, so not counting it back here underflowed).
             if self.inode_table[inode as usize].links_count == 0 {
                 self.free_inode_blocks(inode)?;
+                self.superblock.free_inodes += 1;
             }
         }
         Ok(())
@@ -2705,6 +2714,36 @@ mod tests {
     }
 
     /// Replacing an existing name reuses its slot, so it works even in a
+    #[test]
+    fn removed_directories_and_files_return_their_inodes() {
+        // 16 inodes: creating and removing far more than that only works
+        // if every removal frees its inode. An empty directory kept its "."
+        // link and never reached zero links (N-44), and the final free
+        // never returned the inode to free_inodes, which then underflowed.
+        let fs = BlockFs::format(1000, 16).unwrap();
+        let root = fs.root();
+        for _ in 0..64 {
+            root.mkdir("d", Permissions::default()).unwrap();
+            root.unlink("d").unwrap();
+            root.create("f", Permissions::default())
+                .unwrap()
+                .write(0, b"x")
+                .unwrap();
+            root.unlink("f").unwrap();
+        }
+        let inner = fs.inner.read();
+        assert_eq!(inner.superblock.free_inodes, 15);
+        assert_eq!(
+            inner.superblock.free_blocks,
+            BlockFs::format(1000, 16)
+                .unwrap()
+                .inner
+                .read()
+                .superblock
+                .free_blocks
+        );
+    }
+
     /// directory that has no room for another entry.
     #[test]
     fn rename_over_existing_name_in_full_directory() {
