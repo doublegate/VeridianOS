@@ -384,7 +384,7 @@ log "reviewing ${REPO}#${PR}"
 
 # Remove every temp file on exit. Pre-declared so the trap is safe under `set -u` even if the
 # script exits before a given file is created.
-diff_file= diff_err= meta_file= prompt_file= out_file= raw= body_file= agy_diff_file= agy_work_dir= jq_err= prior_body_file= archived_file=
+diff_file= diff_err= meta_file= prompt_file= out_file= raw= body_file= agy_diff_file= agy_work_dir= jq_err= prior_body_file= archived_file= api_err=
 # Set to 1 if agy printed its interactive OAuth login flow instead of a review (lapsed session);
 # gates the no-post abort below. Pre-declared so `${auth_failed:-0}` is set-u-safe on every path.
 auth_failed=0
@@ -426,7 +426,7 @@ cleanup() {
   # cause. The pre-declaration stays and is still the actual guarantee; this is the cheap second
   # line for a function that only ever runs while something else is going wrong.
   for f in "${diff_file:-}" "${diff_err:-}" "${meta_file:-}" "${out_file:-}" "${raw:-}" "${body_file:-}" \
-           "${jq_err:-}" "${prior_body_file:-}" "${archived_file:-}"; do
+           "${jq_err:-}" "${prior_body_file:-}" "${archived_file:-}" "${api_err:-}"; do
     [ -n "$f" ] && doomed+=("$f")
   done
   if [ -z "$keep_set" ]; then
@@ -571,8 +571,11 @@ if ! gh pr diff "$PR" --repo "$REPO" > "$diff_file" 2>"$diff_err"; then
       # the path at the fragment. Either would fail silently into the `|| true` below,
       # which is exactly the class of bug this whole path exists to avoid.
       base_enc="$(jq -rn --arg v "$base_ref" '$v|@uri')"
+      compare_err="$(mktemp)"
       api_base="$(gh api "repos/${REPO}/compare/${base_enc}...${head_sha}" \
-                    --jq '.merge_base_commit.sha' 2>/dev/null || true)"
+                    --jq '.merge_base_commit.sha' 2>"$compare_err" || true)"
+      [ -n "$api_base" ] || log "compare API gave no merge base ($(head -c 300 "$compare_err" | tr '\n' ' '))"
+      rm -f "$compare_err"
       if [ -n "$api_base" ] && [ "$api_base" != "null" ]; then
         if git fetch --no-tags --quiet origin "$api_base" 2>/dev/null \
            || git fetch --no-tags --quiet --deepen=250 origin "${fetch_refspecs[@]}" 2>/dev/null; then
@@ -1098,6 +1101,9 @@ fi
 # costs only the archive, never the review.
 prior_id=""
 prior_body_file="$(mktemp)"
+# gh's stderr from the calls below. Each still falls back to a fresh post, but says WHY (expired
+# token, rate limit, 404), which a bare `2>/dev/null` threw away (agy review, VeridianOS PR #5).
+api_err="$(mktemp)"
 # `--paginate` emits one top-level JSON array PER PAGE, concatenated — not one merged array.
 # jq then runs the filter once per array, so `[ ... ] | first | .id` yields one id per page
 # that matches rather than one id overall. On a thread short enough to fit a single page that
@@ -1106,7 +1112,7 @@ prior_body_file="$(mktemp)"
 # silently degrades into a duplicate post — exactly on the long threads where the archive
 # matters most. `jq -s add` merges the pages into the single array the filter assumes.
 # (`gh api --slurp` does this too, but only on gh >= 2.42; this works on any version.)
-if prior_json="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate 2>/dev/null \
+if prior_json="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate 2>"$api_err" \
                   | jq -s 'add // []' 2>/dev/null)"; then
   # Both jq steps still fall back to a fresh post (losing the archive, never the review), but the
   # failure is LOGGED: swallowing it made a broken filter indistinguishable from a first review,
@@ -1126,7 +1132,7 @@ if prior_json="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate 2>/dev/
     prior_id=""
   fi
 else
-  log "warning: could not list PR comments; posting a fresh review without the archive"
+  log "warning: could not list PR comments ($(head -c 300 "$api_err" | tr '\n' ' ')); posting a fresh review without the archive"
 fi
 
 if [ -n "$prior_id" ] && [ -s "$prior_body_file" ]; then
@@ -1193,12 +1199,12 @@ if [ -n "$prior_id" ] && [ -s "$prior_body_file" ]; then
   # JSON string by construction, so no shell quoting or `-F` type-coercion can
   # reinterpret a body that happens to look like a number or a boolean.
   if jq -n --rawfile b "$body_file" '{body: $b}' \
-       | gh api -X PATCH "repos/${REPO}/issues/comments/${prior_id}" --input - >/dev/null 2>&1; then
+       | gh api -X PATCH "repos/${REPO}/issues/comments/${prior_id}" --input - >/dev/null 2>"$api_err"; then
     log "updated review comment ${prior_id} on ${REPO}#${PR} (earlier rounds archived in place)"
     rm -f "$prior_body_file"
     exit 0
   fi
-  log "warning: could not edit comment ${prior_id}; posting a fresh review instead"
+  log "warning: could not edit comment ${prior_id} ($(head -c 300 "$api_err" | tr '\n' ' ')); posting a fresh review instead"
 fi
 rm -f "$prior_body_file"
 
