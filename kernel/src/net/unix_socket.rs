@@ -70,10 +70,22 @@ pub enum UnixSocketState {
 }
 
 /// Ancillary data for SCM_RIGHTS file descriptor passing.
-#[derive(Debug, Clone)]
+///
+/// Carries the open files themselves, not the sender's fd numbers: an fd
+/// number means nothing in the receiver's table. The receiver installs each
+/// file in its own table and gets fresh fd numbers.
+#[derive(Clone)]
 pub struct ScmRights {
-    /// File descriptor numbers to pass.
-    pub fds: Vec<u32>,
+    /// Open files being passed.
+    pub files: Vec<alloc::sync::Arc<crate::fs::file::File>>,
+}
+
+impl core::fmt::Debug for ScmRights {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ScmRights")
+            .field("files", &self.files.len())
+            .finish()
+    }
 }
 
 /// A message in the Unix socket buffer.

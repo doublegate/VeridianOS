@@ -449,29 +449,8 @@ fn poll_fd_readiness(fd: i32) -> u32 {
     }
     drop(file_table);
 
-    // Fallback: check if this fd corresponds to a Unix socket.
-    // Sockets use their own ID registry (not yet VfsNode-backed),
-    // so they won't be in the process file table.
-    let sock_id = fd as u64;
-    if crate::net::unix_socket::socket_exists(sock_id) {
-        let readiness = crate::net::unix_socket::socket_poll_readiness(sock_id) as u32;
-        let mut ready = 0u32;
-        if readiness & 0x0001 != 0 {
-            ready |= EPOLLIN;
-        }
-        if readiness & 0x0004 != 0 {
-            ready |= EPOLLOUT;
-        }
-        if readiness & 0x0008 != 0 {
-            ready |= EPOLLERR;
-        }
-        if readiness & 0x0010 != 0 {
-            ready |= EPOLLHUP;
-        }
-        return ready;
-    }
-
-    // fd not found anywhere
+    // Not an open fd in this process. Sockets are fds now, so there is no
+    // global-socket-id fallback (W-14).
     EPOLLERR | EPOLLHUP
 }
 

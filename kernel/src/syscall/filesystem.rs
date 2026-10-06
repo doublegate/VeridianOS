@@ -2478,31 +2478,10 @@ pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult
                     ready_count += 1;
                 }
             } else {
-                // fd not in file table -- check unix socket registry.
-                // Sockets are not yet VfsNode-backed, so they won't appear
-                // in the file table. Check the socket registry directly.
-                let sock_id = pollfd.fd as u64;
-                if crate::net::unix_socket::socket_exists(sock_id) {
-                    let readiness = crate::net::unix_socket::socket_poll_readiness(sock_id);
-                    if pollfd.events & POLLIN != 0 && readiness & 0x0001 != 0 {
-                        pollfd.revents |= POLLIN;
-                    }
-                    if pollfd.events & POLLOUT != 0 && readiness & 0x0004 != 0 {
-                        pollfd.revents |= POLLOUT;
-                    }
-                    if readiness & 0x0008 != 0 {
-                        pollfd.revents |= POLLERR;
-                    }
-                    if readiness & 0x0010 != 0 {
-                        pollfd.revents |= POLLHUP;
-                    }
-                    if pollfd.revents != 0 {
-                        ready_count += 1;
-                    }
-                } else {
-                    pollfd.revents = POLLNVAL;
-                    ready_count += 1;
-                }
+                // Not an open fd in this process. Sockets are fds now, so
+                // there is no global-socket-id fallback (W-14).
+                pollfd.revents = POLLNVAL;
+                ready_count += 1;
             }
         }
         // Drop file_table lock before yielding
