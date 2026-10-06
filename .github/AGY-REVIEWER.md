@@ -245,8 +245,11 @@ yours to accept:
 - **Least surface in the job:** review-only prompt, `--sandbox`, no repo secrets
   (built-in `GITHUB_TOKEN` only), temp files cleaned via an `EXIT` trap.
 
-For zero residual exposure, use an **ephemeral** runner (re-registered per job) or keep
-this on private repos only.
+To reduce the remaining exposure, run each job on a **clean, disposable host** (a VM or
+container image recreated per job). Re-registering a runner on the same host is not enough,
+because the host's state survives. Making the repository private does not remove the risk either:
+if fork workflows are enabled for a private repository, anyone who can fork it can still reach the
+runner, so disable fork workflows there or gate them the same way.
 
 ---
 

@@ -478,8 +478,8 @@ job_min="$(wf_val timeout-minutes)"
 max_s="$(wf_val AGY_PRINT_TIMEOUT_MAX_SECONDS)"; [ -n "$max_s" ] || max_s="$(sh_default AGY_PRINT_TIMEOUT_MAX_SECONDS)"
 lock_s="$(wf_val AGY_LOCK_WAIT)";               [ -n "$lock_s" ] || lock_s="$(sh_default AGY_LOCK_WAIT)"
 retries="$(sh_default AGY_RETRIES)"; delay="$(sh_default AGY_RETRY_DELAY)"
-if [ -z "$job_min$max_s$lock_s$retries$delay" ] || [ -z "$job_min" ] || [ -z "$max_s" ] \
-   || [ -z "$lock_s" ] || [ -z "$retries" ] || [ -z "$delay" ]; then
+if [ -z "$job_min" ] || [ -z "$max_s" ] || [ -z "$lock_s" ] || [ -z "$retries" ] \
+   || [ -z "$delay" ]; then
   echo "  FAIL  could not read the timeout budget (job=$job_min max=$max_s lock=$lock_s retries=$retries delay=$delay)"
   fails=$((fails + 1))
 else
