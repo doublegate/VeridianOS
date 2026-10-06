@@ -2,8 +2,6 @@
 //!
 //! Safe functions for copying data between kernel and user space.
 
-use core::{slice, str};
-
 use super::SyscallError;
 
 /// Maximum string length we'll copy from user space
@@ -79,39 +77,41 @@ pub fn validate_user_ptr_compat(ptr: usize, size: usize) -> Result<(), SyscallEr
 /// Copy a null-terminated string from user space
 ///
 /// # Safety
-/// This function reads from user-provided pointers and must validate them
+/// Kept `unsafe` for its callers; the copy itself is fault-tolerant and
+/// validated (see [`read_user_cstr`]).
 pub unsafe fn copy_string_from_user(user_ptr: usize) -> Result<String, SyscallError> {
-    validate_user_ptr(user_ptr as *const u8, 1)?;
+    read_user_cstr(user_ptr, MAX_USER_STRING_LEN - 1)
+}
 
-    // Find string length by looking for null terminator
-    let mut len = 0;
-    let mut ptr = user_ptr as *const u8;
-
-    while len < MAX_USER_STRING_LEN {
-        // Validate each page as we cross boundaries
-        if len % 4096 == 0 {
-            validate_user_ptr(ptr, 1)?;
+/// Read a NUL-terminated UTF-8 string of at most `max_len` bytes (not
+/// counting the NUL) from user memory.
+///
+/// The string is read in chunks that never cross a page boundary, each
+/// through [`read_user_bytes`], so an unmapped page fails with EFAULT
+/// instead of faulting in the kernel, and nothing past the terminating
+/// NUL's page is touched. The previous readers dereferenced the user
+/// pointer directly (review of the v0.26.0 stack, PR #14). A string with
+/// no NUL within `max_len` bytes is `InvalidArgument`.
+pub fn read_user_cstr(addr: usize, max_len: usize) -> Result<String, SyscallError> {
+    const PAGE: usize = 4096;
+    let mut out: Vec<u8> = Vec::new();
+    let mut cursor = addr;
+    let mut chunk = [0u8; 256];
+    // max_len bytes of text plus the NUL.
+    while out.len() <= max_len {
+        let to_page_end = PAGE - (cursor % PAGE);
+        let want = to_page_end.min(chunk.len()).min(max_len + 1 - out.len());
+        read_user_bytes(cursor, &mut chunk[..want])?;
+        if let Some(nul) = chunk[..want].iter().position(|&b| b == 0) {
+            out.extend_from_slice(&chunk[..nul]);
+            return String::from_utf8(out).map_err(|_| SyscallError::InvalidArgument);
         }
-
-        let byte = ptr::read_volatile(ptr);
-        if byte == 0 {
-            break;
-        }
-
-        len += 1;
-        ptr = ptr.offset(1);
+        out.extend_from_slice(&chunk[..want]);
+        cursor = cursor
+            .checked_add(want)
+            .ok_or(SyscallError::InvalidPointer)?;
     }
-
-    if len >= MAX_USER_STRING_LEN {
-        return Err(SyscallError::InvalidArgument);
-    }
-
-    // Copy the string
-    let slice = slice::from_raw_parts(user_ptr as *const u8, len);
-    use alloc::string::String;
-    let string = String::from(str::from_utf8(slice).map_err(|_| SyscallError::InvalidArgument)?);
-
-    Ok(string)
+    Err(SyscallError::InvalidArgument)
 }
 
 /// Copy data from user space to kernel space
@@ -436,6 +436,29 @@ mod accessor_tests {
         assert_eq!(u32::from_ne_bytes(out), 7);
         write_user_bytes(base, b"abc").unwrap();
         assert_eq!(&buf[1..4], b"abc");
+    }
+
+    #[test]
+    fn read_user_cstr_reads_across_chunks_and_enforces_the_limit() {
+        // Longer than one 256-byte chunk, from a misaligned start.
+        let mut text = alloc::vec![b'x'; 700];
+        text.push(0);
+        let mut buf = alloc::vec![0u8; 1];
+        buf.extend_from_slice(&text);
+        let addr = buf.as_ptr() as usize + 1;
+        assert_eq!(read_user_cstr(addr, 700).unwrap().len(), 700);
+        // One byte over the limit: the NUL is never reached.
+        assert_eq!(
+            read_user_cstr(addr, 699),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert!(read_user_cstr(0, 10).is_err());
+        assert!(read_user_cstr(KERNEL_ADDR, 10).is_err());
+        let bad = [0xffu8, 0];
+        assert_eq!(
+            read_user_cstr(bad.as_ptr() as usize, 4),
+            Err(SyscallError::InvalidArgument)
+        );
     }
 
     /// Encode a Linux ioctl number: dir(2) | size(14) | type(8) | nr(8).

@@ -9,6 +9,27 @@
 use lazy_static::lazy_static;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
+/// Make the per-CPU block the active GS base, which is what
+/// `boot_return_to_kernel` expects (it was written for the state inside a
+/// syscall, and executes `swapgs` itself). An exception from user mode
+/// arrives with the user's GS active and needs a `swapgs`; a kernel-mode
+/// fault inside a syscall already has the per-CPU block and must not swap,
+/// or the next syscall reads its kernel stack through the user's GS (review
+/// of the v0.26.0 stack, PR #14).
+///
+/// # Safety
+///
+/// Ring 0 only, with interrupts disabled, immediately before
+/// `boot_return_to_kernel`.
+unsafe fn gs_to_syscall_state() {
+    let gs_base = x86_64::registers::model_specific::GsBase::read().as_u64();
+    if gs_base != crate::arch::x86_64::syscall::per_cpu_data_ptr() as u64 {
+        // SAFETY: the caller's contract; swapgs only exchanges the GS base
+        // MSRs.
+        unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) };
+    }
+}
+
 lazy_static! {
     static ref IDT: InterruptDescriptorTable = {
         let mut idt = InterruptDescriptorTable::new();
@@ -308,9 +329,11 @@ extern "x86-interrupt" fn page_fault_handler(
             raw_serial_str(b"\n");
         }
         if crate::arch::x86_64::usermode::has_boot_return_context() {
-            // SAFETY: swapgs balances the GS base for boot_return_to_kernel.
+            // SAFETY: GS is put in the state boot_return_to_kernel expects
+            // (per-CPU block active). A kernel-mode fault inside a syscall
+            // already has it, so an unconditional swapgs here inverted it.
             unsafe {
-                core::arch::asm!("swapgs", options(nomem, nostack));
+                gs_to_syscall_state();
                 crate::arch::x86_64::usermode::boot_return_to_kernel();
             }
         }
@@ -403,10 +426,10 @@ extern "x86-interrupt" fn page_fault_handler(
         // entry). boot_return_to_kernel expects the swapgs state from
         // syscall_entry. Do swapgs first to balance boot_return's swapgs.
         if crate::arch::x86_64::usermode::has_boot_return_context() {
-            // SAFETY: swapgs balances the GS base for boot_return_to_kernel.
+            // SAFETY: GS is put in the state boot_return_to_kernel expects;
             // boot_return context was verified by has_boot_return_context().
             unsafe {
-                core::arch::asm!("swapgs", options(nomem, nostack));
+                gs_to_syscall_state();
                 crate::arch::x86_64::usermode::boot_return_to_kernel();
             }
         }
@@ -496,10 +519,10 @@ extern "x86-interrupt" fn general_protection_fault_handler(
         }
 
         if crate::arch::x86_64::usermode::has_boot_return_context() {
-            // SAFETY: swapgs balances the GS base for boot_return_to_kernel.
+            // SAFETY: GS is put in the state boot_return_to_kernel expects.
             unsafe {
                 raw_serial_str(b"[GP_KILL] boot_return\n");
-                core::arch::asm!("swapgs", options(nomem, nostack));
+                gs_to_syscall_state();
                 crate::arch::x86_64::usermode::boot_return_to_kernel();
             }
         }
@@ -633,7 +656,7 @@ unsafe fn exception_kill_user(name: &[u8], stack_frame: &InterruptStackFrame) {
         }
         if crate::arch::x86_64::usermode::has_boot_return_context() {
             raw_serial_str(b"[EXC_KILL] boot_return\n");
-            core::arch::asm!("swapgs", options(nomem, nostack));
+            gs_to_syscall_state();
             crate::arch::x86_64::usermode::boot_return_to_kernel();
         }
     }
