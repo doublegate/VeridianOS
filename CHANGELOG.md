@@ -221,6 +221,11 @@ reason, then resolved. Fixed:
   - The TSS stacks are no longer `static mut`.
   - `sscanf` reads integers with long zero padding.
   - Two debug traces are gone from the epoll and exec paths.
+  - `open()` reports the real lookup error (EACCES, ENOTDIR, ELOOP) instead of ENOENT for all of
+    them, and O_CREAT creates only a name that is missing.
+  - Frees in `Drop` and rollback paths log a failure instead of discarding it.
+  - The version string shown by `uname`, `/etc/os-release`, the desktop and the shell comes from
+    `Cargo.toml`. `uname` had reported 0.5.0.
 - **Reviewer**
   - Fork pull requests from any outside contributor now need approval before a workflow runs, which
     is what protects the self-hosted runner.
