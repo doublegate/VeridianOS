@@ -52,6 +52,7 @@ pub(crate) fn boot_stack_intact() -> bool {
 pub use riscv64::*;
 
 // Common timer module
+pub mod fdt;
 pub mod timer;
 
 // Common context module

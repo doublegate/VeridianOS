@@ -13,26 +13,99 @@ pub mod usermode;
 // Re-export context, PLIC, and timer from parent riscv module
 pub use super::riscv::{context, plic, timer};
 
-// Fatal supervisor trap vector. The kernel takes no supervisor traps on
-// purpose yet (interrupts stay disabled, SBI calls go to M-mode), so any trap
-// that does arrive is a kernel bug. Without a vector, stvec pointed at the
-// kernel entry and such a trap silently restarted boot over the old state
-// (N-13). Direct mode requires 4-byte alignment.
+// Supervisor trap vector (Direct mode, 4-byte aligned).
+//
+// Kernel traps run on the interrupted kernel stack. sscratch is 0 while the
+// kernel runs; a trap from U-mode (where sscratch would hold the kernel
+// stack) is detected by the swap and treated as fatal until user mode is
+// supported on RISC-V. The caller-saved registers plus sepc/sstatus are
+// saved; the Rust handler preserves the callee-saved ones. The kernel uses
+// no floating point (project rule), so FP state is not saved.
+//
+// Supervisor timer interrupts are handled; any other trap is a kernel bug
+// and stops the system with scause/sepc/stval (before a vector existed,
+// such a trap silently restarted boot -- N-13).
 core::arch::global_asm!(
     ".section .text",
     ".balign 4",
-    ".global veridian_riscv_fatal_trap",
-    "veridian_riscv_fatal_trap:",
+    ".global veridian_riscv_trap",
+    "veridian_riscv_trap:",
+    "    csrrw sp, sscratch, sp",
+    "    bnez sp, 2f",
+    "    csrrw sp, sscratch, sp",
+    "    addi sp, sp, -144",
+    "    sd ra, 0(sp)",
+    "    sd t0, 8(sp)",
+    "    sd t1, 16(sp)",
+    "    sd t2, 24(sp)",
+    "    sd a0, 32(sp)",
+    "    sd a1, 40(sp)",
+    "    sd a2, 48(sp)",
+    "    sd a3, 56(sp)",
+    "    sd a4, 64(sp)",
+    "    sd a5, 72(sp)",
+    "    sd a6, 80(sp)",
+    "    sd a7, 88(sp)",
+    "    sd t3, 96(sp)",
+    "    sd t4, 104(sp)",
+    "    sd t5, 112(sp)",
+    "    sd t6, 120(sp)",
+    "    csrr t0, sepc",
+    "    sd t0, 128(sp)",
+    "    csrr t0, sstatus",
+    "    sd t0, 136(sp)",
     "    csrr a0, scause",
     "    csrr a1, sepc",
     "    csrr a2, stval",
     "    call {handler}",
-    "1:  j 1b",
-    handler = sym riscv_fatal_trap,
+    "    ld t0, 136(sp)",
+    "    csrw sstatus, t0",
+    "    ld t0, 128(sp)",
+    "    csrw sepc, t0",
+    "    ld ra, 0(sp)",
+    "    ld t0, 8(sp)",
+    "    ld t1, 16(sp)",
+    "    ld t2, 24(sp)",
+    "    ld a0, 32(sp)",
+    "    ld a1, 40(sp)",
+    "    ld a2, 48(sp)",
+    "    ld a3, 56(sp)",
+    "    ld a4, 64(sp)",
+    "    ld a5, 72(sp)",
+    "    ld a6, 80(sp)",
+    "    ld a7, 88(sp)",
+    "    ld t3, 96(sp)",
+    "    ld t4, 104(sp)",
+    "    ld t5, 112(sp)",
+    "    ld t6, 120(sp)",
+    "    addi sp, sp, 144",
+    "    sret",
+    "2:",
+    "    csrr a0, scause",
+    "    csrr a1, sepc",
+    "    csrr a2, stval",
+    "    call {fatal}",
+    "3:  j 3b",
+    handler = sym riscv_trap,
+    fatal = sym riscv_fatal_trap,
 );
 
 extern "C" {
-    fn veridian_riscv_fatal_trap();
+    fn veridian_riscv_trap();
+    static veridian_dtb_pa: u64;
+}
+
+/// scause: interrupt bit, and the supervisor timer interrupt code.
+const SCAUSE_INTERRUPT: usize = 1 << 63;
+const IRQ_S_TIMER: usize = 5;
+
+/// Rust side of the trap vector. Returns only for handled interrupts.
+extern "C" fn riscv_trap(scause: usize, sepc: usize, stval: usize) {
+    if scause == SCAUSE_INTERRUPT | IRQ_S_TIMER {
+        super::riscv::timer::handle_interrupt();
+        return;
+    }
+    riscv_fatal_trap(scause, sepc, stval)
 }
 
 /// Report an unexpected supervisor-mode trap and stop.
@@ -45,13 +118,15 @@ extern "C" fn riscv_fatal_trap(scause: usize, sepc: usize, stval: usize) -> ! {
 
 /// Called from bootstrap on RISC-V via `crate::arch::init()`.
 pub fn init() {
-    // Install the fatal trap vector before anything else can trap.
+    // Install the trap vector before anything else can trap. sscratch = 0
+    // marks "running in the kernel" for the vector's U-mode check.
     // SAFETY: writing stvec only changes where supervisor traps go; the
-    // target is the 4-byte-aligned handler defined above (Direct mode).
+    // target is the 4-byte-aligned vector defined above (Direct mode).
     unsafe {
         core::arch::asm!(
+            "csrw sscratch, zero",
             "csrw stvec, {0}",
-            in(reg) veridian_riscv_fatal_trap as unsafe extern "C" fn() as usize,
+            in(reg) veridian_riscv_trap as unsafe extern "C" fn() as usize,
             options(nomem, nostack)
         );
     }
@@ -65,27 +140,26 @@ pub fn init() {
         println!("[RISCV64] WARNING: PLIC initialization failed: {}", e);
     }
 
-    // IMPORTANT: Do NOT enable interrupts during early boot!
-    // There is no trap handler (stvec) set up yet, so any interrupt
-    // would cause the CPU to jump to address 0 and crash/reboot.
-    //
-    // The trap handler must be set up first before enabling interrupts.
-    // For now, keep interrupts disabled - WFI will still return on
-    // external events even with interrupts disabled.
-    // SAFETY: CSR writes to disable interrupts during early boot. csrci clears
-    // the SIE bit in sstatus (supervisor interrupt enable). csrw sie, zero clears
-    // all interrupt enable bits. Required because no trap handler (stvec) is
-    // registered yet - any interrupt would jump to address 0 and crash.
+    // Start from a clean slate: only sources enabled below are delivered.
+    // SAFETY: clears the supervisor interrupt enables; no side effects.
     unsafe {
-        // Ensure interrupts are DISABLED in sstatus
         core::arch::asm!("csrci sstatus, 2", options(nomem, nostack));
-
-        // Clear all interrupt enable bits in sie
-        // This prevents any interrupts from being delivered
         core::arch::asm!("csrw sie, zero", options(nomem, nostack));
     }
 
-    println!("[RISCV64] Architecture initialization complete (interrupts disabled)");
+    // Clock source and tick: timebase and Sstc from the device tree, then a
+    // 1000 Hz supervisor timer interrupt. External interrupts (PLIC) stay
+    // disabled.
+    // SAFETY: veridian_dtb_pa is written once by boot.S before Rust runs.
+    let dtb_pa = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(veridian_dtb_pa)) };
+    super::riscv::timer::init_from_device_tree(dtb_pa);
+    super::riscv::timer::start(1000);
+
+    // SAFETY: the trap vector is installed (above), so supervisor
+    // interrupts can be taken.
+    unsafe { core::arch::asm!("csrsi sstatus, 2", options(nomem, nostack)) };
+
+    println!("[RISCV64] Architecture initialization complete (timer interrupts on)");
 }
 
 /// Halt the CPU. Used by panic/shutdown paths via `crate::arch::halt()`.

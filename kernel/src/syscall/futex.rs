@@ -627,10 +627,9 @@ fn boot_futex_spin(
                     // so the parent can continue.
                     return Err(SyscallError::WouldBlock);
                 }
-                // Enable interrupts, halt until the APIC timer fires
-                // (advances UPTIME_MS), then disable interrupts again.
-                // Plain `hlt` with IF=0 (set by SFMASK) never wakes.
-                unsafe { core::arch::asm!("sti; hlt; cli", options(nomem, nostack)) };
+                // Halt until the APIC timer fires (advances UPTIME_MS)
+                // without letting it preempt this syscall (W-13).
+                crate::sched::wait_for_interrupt_in_syscall();
                 continue;
             }
         };

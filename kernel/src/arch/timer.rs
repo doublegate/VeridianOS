@@ -50,9 +50,12 @@ impl PlatformTimer for X86_64Timer {
 
     #[inline]
     fn ticks_per_second() -> u64 {
-        // Approximate TSC frequency -- 2 GHz is a reasonable default for QEMU.
-        // A proper implementation would calibrate against the PIT or HPET.
-        2_000_000_000
+        // Calibrated at boot (x86_64::tsc). The 2 GHz value only applies
+        // before calibration.
+        match crate::arch::x86_64::tsc::hz() {
+            0 => 2_000_000_000,
+            hz => hz,
+        }
     }
 
     fn set_timer(ticks: u64) {
@@ -97,10 +100,12 @@ impl PlatformTimer for AArch64Timer {
     #[inline]
     fn current_ticks() -> u64 {
         let cnt: u64;
-        // SAFETY: Reading CNTVCT_EL0 (virtual timer count) is a non-privileged
-        // AArch64 operation with no side effects.
+        // SAFETY: Reading CNTVCT_EL0 (virtual count) is side-effect free at
+        // EL1. The ISB keeps the read from being performed speculatively
+        // ahead of earlier instructions (as Linux's arch_timer does), so
+        // timestamps are ordered with the code around them.
         unsafe {
-            core::arch::asm!("mrs {}, CNTVCT_EL0", out(reg) cnt);
+            core::arch::asm!("isb", "mrs {}, CNTVCT_EL0", out(reg) cnt, options(nostack));
         }
         cnt
     }
@@ -148,8 +153,9 @@ impl PlatformTimer for RiscVTimer {
 
     #[inline]
     fn ticks_per_second() -> u64 {
-        // QEMU virt machine timebase frequency is 10 MHz.
-        10_000_000
+        // /cpus/timebase-frequency from the device tree (10 MHz on QEMU
+        // virt until it has been read).
+        crate::arch::riscv::timer::timebase_hz()
     }
 
     fn set_timer(ticks: u64) {
@@ -221,6 +227,24 @@ pub fn hw_ticks_per_second() -> u64 {
     }
 }
 
+/// Monotonic nanoseconds from the architectural clock source: the
+/// calibrated TSC on x86_64, CNTVCT_EL0 at CNTFRQ_EL0 on AArch64, the
+/// `time` CSR at the device-tree timebase on RISC-V.
+pub fn monotonic_ns() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::arch::x86_64::tsc::ns_since_boot()
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let tps = hw_ticks_per_second();
+        if tps == 0 {
+            return 0;
+        }
+        ((read_hw_timestamp() as u128 * 1_000_000_000) / tps as u128) as u64
+    }
+}
+
 /// Get the current timestamp in seconds since boot.
 ///
 /// Computed by dividing the raw hardware tick counter by the
@@ -235,18 +259,7 @@ pub fn get_timestamp_secs() -> u64 {
 
 /// Get the current timestamp in milliseconds since boot.
 pub fn get_timestamp_ms() -> u64 {
-    let tps = hw_ticks_per_second();
-    if tps == 0 {
-        return 0;
-    }
-    // Avoid overflow: (ticks * 1000) / tps  =>  ticks / (tps / 1000) when tps >=
-    // 1000
-    let ticks = read_hw_timestamp();
-    if tps >= 1000 {
-        ticks / (tps / 1000)
-    } else {
-        ticks * (1000 / tps)
-    }
+    monotonic_ns() / 1_000_000
 }
 
 /// Program the next timer interrupt.

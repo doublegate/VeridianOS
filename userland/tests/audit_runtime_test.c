@@ -20,6 +20,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 static int passed, total;
@@ -375,6 +376,39 @@ static void test_sockets(void)
     close(sv[1]);
 }
 
+/* --- Syscalls that wait for the clock (W-13). ------------------------- */
+static long elapsed_ms(const struct timespec *a, const struct timespec *b)
+{
+    return (b->tv_sec - a->tv_sec) * 1000 + (b->tv_nsec - a->tv_nsec) / 1000000;
+}
+
+static void test_timed_waits(void)
+{
+    struct timespec t0, t1, req = { 0, 100 * 1000000 };
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int ok = nanosleep(&req, NULL) == 0;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long slept = elapsed_ms(&t0, &t1);
+    static char why[48];
+    snprintf(why, sizeof(why), "slept %ld ms for 100", slept);
+    report("nanosleep_waits", ok && slept >= 90 && slept < 2000, why);
+
+    int p[2];
+    ok = pipe(p) == 0;
+    struct pollfd pf = { .fd = p[0], .events = POLLIN };
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int n = ok ? poll(&pf, 1, 150) : -1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long waited = elapsed_ms(&t0, &t1);
+    static char why_poll[64];
+    snprintf(why_poll, sizeof(why_poll), "poll returned %d after %ld ms (150)", n, waited);
+    report("poll_times_out", n == 0 && waited >= 140 && waited < 2000, why_poll);
+    if (ok) {
+        close(p[0]);
+        close(p[1]);
+    }
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -392,6 +426,7 @@ int main(int argc, char **argv)
     test_sticky_dir();
     test_umask();
     test_sockets();
+    test_timed_waits();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

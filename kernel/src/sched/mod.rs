@@ -86,6 +86,37 @@ pub use task_management::{create_task, create_task_from_thread, schedule_thread}
 pub use self::scheduler::should_preempt;
 // ---- Remaining items that stay in mod.rs ----
 
+/// Depth of "a syscall is polling and has interrupts enabled only to let
+/// the clock advance". While non-zero the timer tick must not call
+/// `schedule()`: it would switch tasks from interrupt context on the
+/// syscall's kernel stack (W-13). Single counter because only CPU 0 runs
+/// (per-CPU with SMP bring-up).
+static SYSCALL_WAIT_DEPTH: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Whether a syscall is inside `wait_for_interrupt_in_syscall`.
+pub fn in_syscall_wait() -> bool {
+    SYSCALL_WAIT_DEPTH.load(core::sync::atomic::Ordering::Acquire) != 0
+}
+
+/// From inside a syscall that polls for a condition (sleep, poll, epoll,
+/// timerfd, futex), wait for the next interrupt so the clock can advance,
+/// without letting the timer preempt the syscall. On x86_64 syscall entry
+/// clears IF, so a plain `hlt` would never wake.
+pub fn wait_for_interrupt_in_syscall() {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use core::sync::atomic::Ordering;
+        SYSCALL_WAIT_DEPTH.fetch_add(1, Ordering::AcqRel);
+        // SAFETY: enables interrupts for exactly one halt and disables them
+        // again; the timer handler sees SYSCALL_WAIT_DEPTH and only counts
+        // the tick, so no context switch happens on this stack.
+        unsafe { core::arch::asm!("sti; hlt; cli", options(nomem, nostack)) };
+        SYSCALL_WAIT_DEPTH.fetch_sub(1, Ordering::AcqRel);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    yield_cpu();
+}
+
 // Import ProcessState from process module (used by submodules via super::)
 pub(crate) use crate::process::ProcessState;
 // Use process module types (used by submodules via super::)

@@ -2416,12 +2416,7 @@ pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult
             while crate::timer::get_uptime_ms() - start < timeout_ms as u64 {
                 // Enable interrupts briefly to let APIC timer advance
                 // UPTIME_MS (see epoll::epoll_wait for full rationale).
-                #[cfg(target_arch = "x86_64")]
-                unsafe {
-                    core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
-                }
-                #[cfg(not(target_arch = "x86_64"))]
-                crate::sched::yield_cpu();
+                crate::sched::wait_for_interrupt_in_syscall();
             }
         }
         return Ok(0);
@@ -2501,12 +2496,7 @@ pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult
         // (SFMASK clears IF on syscall entry) and time-based fds such as
         // timerfd never become readable.  See epoll::epoll_wait for the
         // detailed rationale.
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        crate::sched::yield_cpu();
+        crate::sched::wait_for_interrupt_in_syscall();
     }
 }
 

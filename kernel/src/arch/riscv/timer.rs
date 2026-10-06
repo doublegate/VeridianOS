@@ -1,46 +1,52 @@
-//! RISC-V timer implementation
+//! RISC-V timer: clock source and timer interrupt.
+//!
+//! Clock source: the `time` CSR (`rdtime`, Zicntr), whose rate is the
+//! device tree's `/cpus/timebase-frequency` -- read from the DTB that SBI
+//! firmware passes in `a1` at entry. 10 MHz (QEMU virt) is used only if no
+//! DTB is available.
+//!
+//! Timer interrupt (supervisor timer interrupt, scause = interrupt | 5):
+//! with the Sstc extension the kernel writes `stimecmp` (CSR 0x14D)
+//! directly; without it, `sbi_set_timer` asks M-mode firmware to do it,
+//! which costs a trap to M-mode per tick. Linux prefers Sstc the same way.
+//! Sstc support is read from the first CPU node's `riscv,isa-extensions`
+//! or `riscv,isa` property.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::sbi;
 
+/// Timer interrupts taken.
 static TICKS: AtomicU64 = AtomicU64::new(0);
-static TIMER_INTERVAL: AtomicU64 = AtomicU64::new(0);
+/// Timebase (time CSR) frequency in Hz.
+static TIMEBASE_HZ: AtomicU64 = AtomicU64::new(10_000_000);
+/// Whether `stimecmp` is usable (Sstc).
+static SSTC: AtomicBool = AtomicBool::new(false);
+/// Tick period in timebase units (0 = not started).
+static PERIOD: AtomicU64 = AtomicU64::new(0);
+/// Tick period in milliseconds.
+static PERIOD_MS: AtomicU64 = AtomicU64::new(0);
+/// Deadline currently armed.
+static NEXT: AtomicU64 = AtomicU64::new(0);
 
-/// Get current timer ticks
+/// stimecmp CSR number (Sstc).
+const CSR_STIMECMP: usize = 0x14D;
+/// sie.STIE.
+const SIE_STIE: usize = 1 << 5;
+
+/// Get current timer ticks (interrupts taken).
 pub fn get_ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
-/// Increment timer ticks (called from timer interrupt).
-///
-/// Will be called from the RISC-V timer interrupt handler once a proper
-/// trap vector (stvec) is registered.
-#[allow(dead_code)] // Timer interrupt callback -- not yet wired
-pub fn tick() {
-    TICKS.fetch_add(1, Ordering::Relaxed);
+/// Timebase frequency in Hz.
+pub fn timebase_hz() -> u64 {
+    TIMEBASE_HZ.load(Ordering::Relaxed)
+}
 
-    // Schedule next timer interrupt
-    let interval = TIMER_INTERVAL.load(Ordering::Relaxed);
-    if interval > 0 {
-        // SAFETY: The rdtime instruction reads the RISC-V real-time counter CSR,
-        // which is always accessible in supervisor mode and produces no side effects.
-        // sbi::set_timer is a safe SBI ecall wrapper.
-        unsafe {
-            let time: u64;
-            core::arch::asm!("rdtime {}", out(reg) time);
-            let result = sbi::set_timer(time + interval);
-            if !result.is_ok() {
-                crate::println!(
-                    "[TIMER] Warning: SBI set_timer failed in tick handler: error {}",
-                    result.error
-                );
-            }
-        }
-    }
-
-    // Trigger scheduler tick
-    crate::sched::timer_tick();
+/// Whether timer deadlines are written to `stimecmp` (Sstc).
+pub fn uses_sstc() -> bool {
+    SSTC.load(Ordering::Relaxed)
 }
 
 /// Read current time value
@@ -54,41 +60,106 @@ pub fn read_time() -> u64 {
     time
 }
 
-/// Setup timer for periodic interrupts
-pub fn setup_timer(interval_ms: u32) {
-    // Timer frequency is platform-dependent, but typically 10 MHz for QEMU
-    // For QEMU virt machine, the timebase frequency is 10 MHz
-    const TIMER_FREQ: u64 = 10_000_000; // 10 MHz
-    let interval_cycles = (TIMER_FREQ * interval_ms as u64) / 1000;
-
-    // Store interval for use in tick handler
-    TIMER_INTERVAL.store(interval_cycles, Ordering::Relaxed);
-
-    // Read current time and set first timer interrupt
-    let current_time = read_time();
-    let next_time = current_time + interval_cycles;
-
-    // Use SBI to set timer
-    let result = sbi::set_timer(next_time);
-    if !result.is_ok() {
-        println!(
-            "[TIMER] WARNING: SBI set_timer failed with error {}",
-            result.error
-        );
+/// Read the timebase frequency and Sstc support from the device tree at
+/// physical address `dtb_pa` (0 if firmware passed none).
+pub fn init_from_device_tree(dtb_pa: u64) {
+    if dtb_pa == 0 {
+        crate::println!("[TIMER] No device tree: assuming a 10 MHz timebase, no Sstc");
+        return;
     }
-
-    // NOTE: Do NOT enable STIE here. There is no trap handler (stvec)
-    // registered yet, so enabling timer interrupts would cause the CPU
-    // to jump to address 0 when the timer fires, crashing/rebooting.
-    // Timer interrupts will be enabled once a proper trap handler is
-    // set up in a future phase.
-
-    println!(
-        "[TIMER] Configured RISC-V timer for {}ms intervals ({} cycles)",
-        interval_ms, interval_cycles
+    let base = crate::mm::phys_to_virt_addr(dtb_pa) as *const u8;
+    // SAFETY: firmware passes the DTB's physical address in a1; it is mapped
+    // (RISC-V runs with RAM identity-mapped) and at least a header long.
+    let header = unsafe { core::slice::from_raw_parts(base, 40) };
+    let Some(size) = crate::arch::fdt::Fdt::total_size(header) else {
+        crate::println!("[TIMER] Device tree has a bad header; keeping 10 MHz timebase");
+        return;
+    };
+    // SAFETY: the header's totalsize covers the blob firmware placed there.
+    let blob = unsafe { core::slice::from_raw_parts(base, size.min(16 << 20)) };
+    let Some(fdt) = crate::arch::fdt::Fdt::new(blob) else {
+        return;
+    };
+    if let Some(hz) = fdt.property_u64(&["cpus"], "timebase-frequency") {
+        if hz != 0 {
+            TIMEBASE_HZ.store(hz, Ordering::Relaxed);
+        }
+    }
+    let sstc = fdt
+        .property(&["cpus", "cpu"], "riscv,isa-extensions")
+        .is_some_and(|isa| crate::arch::fdt::isa_has_extension(isa, b"sstc"))
+        || fdt
+            .property(&["cpus", "cpu"], "riscv,isa")
+            .is_some_and(|isa| crate::arch::fdt::isa_has_extension(isa, b"sstc"));
+    SSTC.store(sstc, Ordering::Relaxed);
+    crate::println!(
+        "[TIMER] Timebase {} Hz from device tree, Sstc {}",
+        timebase_hz(),
+        if sstc {
+            "present (stimecmp)"
+        } else {
+            "absent (SBI set_timer)"
+        }
     );
-    println!(
-        "[TIMER] Current time: {}, Next interrupt: {}",
-        current_time, next_time
+}
+
+/// Program the next timer interrupt at absolute time `deadline`.
+fn arm(deadline: u64) {
+    if uses_sstc() {
+        // SAFETY: Sstc is present (device tree), so S-mode may write
+        // stimecmp; writing it also clears a pending timer interrupt.
+        unsafe {
+            core::arch::asm!("csrw {csr}, {v}", csr = const CSR_STIMECMP, v = in(reg) deadline,
+                options(nomem, nostack));
+        }
+    } else {
+        let _ = sbi::set_timer(deadline);
+    }
+}
+
+/// Start a periodic tick at `hz` and enable the supervisor timer interrupt.
+/// The trap vector must already be installed.
+pub fn start(hz: u32) {
+    let period = (timebase_hz() / hz.max(1) as u64).max(1);
+    PERIOD.store(period, Ordering::Relaxed);
+    PERIOD_MS.store((1000 / hz.max(1) as u64).max(1), Ordering::Relaxed);
+    let first = read_time() + period;
+    NEXT.store(first, Ordering::Relaxed);
+    arm(first);
+    // SAFETY: sets sie.STIE only; delivery still needs sstatus.SIE, which
+    // the caller sets once the trap vector is installed.
+    unsafe {
+        core::arch::asm!("csrs sie, {0}", in(reg) SIE_STIE, options(nomem, nostack));
+    }
+    crate::println!(
+        "[TIMER] Tick {} Hz ({} timebase ticks) via {}",
+        hz,
+        period,
+        if uses_sstc() { "stimecmp" } else { "SBI" }
     );
+}
+
+/// Handle a supervisor timer interrupt (called from the trap handler).
+///
+/// Re-arms by whole periods so the tick does not drift, skipping ticks that
+/// were missed rather than firing a burst. Only the clock and the timer
+/// wheel are advanced: preempting the interrupted kernel code from here is
+/// not supported yet.
+pub fn handle_interrupt() {
+    TICKS.fetch_add(1, Ordering::Relaxed);
+    let period = PERIOD.load(Ordering::Relaxed);
+    if period == 0 {
+        // Spurious: no tick configured. Push the deadline out so the
+        // interrupt stops pending.
+        arm(u64::MAX);
+        return;
+    }
+    let now = read_time();
+    let mut next = NEXT.load(Ordering::Relaxed).wrapping_add(period);
+    if next <= now {
+        next = now + period;
+    }
+    NEXT.store(next, Ordering::Relaxed);
+    arm(next);
+    crate::timer::timer_tick(PERIOD_MS.load(Ordering::Relaxed));
 }

@@ -27,9 +27,9 @@ pub fn init_with_bootstrap(bootstrap_task: NonNull<Task>) -> KernelResult<()> {
     kprintln!("[SCHED] Scheduler init complete");
 
     // Set up timer interrupt for preemption
-    kprintln!("[SCHED] About to setup preemption timer...");
-    setup_preemption_timer();
-    kprintln!("[SCHED] Preemption timer setup complete");
+    // The periodic tick is started by each architecture's init (LAPIC
+    // TSC-deadline/periodic on x86_64, the EL1 virtual timer on AArch64,
+    // stimecmp/SBI on RISC-V); see arch::*::timer.
 
     kprintln!("[SCHED] Scheduler initialized with bootstrap task");
 
@@ -48,32 +48,4 @@ pub fn init() {
     // scheduler. The idle task creation and PIT timer setup can hang or panic
     // during early boot.
     kprintln!("[SCHED] Scheduler initialized (minimal)");
-}
-
-/// Set up preemption timer
-fn setup_preemption_timer() {
-    #[cfg(target_arch = "x86_64")]
-    {
-        // Configure timer for 10ms tick (100Hz)
-        crate::arch::x86_64::timer::setup_timer(10);
-        kprintln!("[SCHED] x86_64 timer configured for preemptive scheduling");
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // Configure generic timer for 10ms tick
-        crate::arch::aarch64::timer::setup_timer(10);
-        kprintln!("[SCHED] AArch64 timer configured for preemptive scheduling");
-    }
-
-    #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-    {
-        // Configure RISC-V timer for 10ms tick.
-        // NOTE: setup_timer() configures the SBI timer but does NOT enable
-        // STIE (supervisor timer interrupt enable) because no trap handler
-        // (stvec) is registered yet. Enabling STIE without stvec causes
-        // the CPU to jump to address 0 on timer fire, rebooting the system.
-        crate::arch::riscv::timer::setup_timer(10);
-        kprintln!("[SCHED] RISC-V timer configured for preemptive scheduling");
-    }
 }

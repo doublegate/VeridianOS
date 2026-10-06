@@ -19,6 +19,12 @@ pub fn get_ticks() -> u64 {
 pub fn tick() {
     TICKS.fetch_add(1, Ordering::Relaxed);
 
+    // In TSC-deadline mode the timer is one-shot: arm the next tick first.
+    super::apic::rearm_deadline_timer();
+
+    // Advance kernel uptime and the timer wheel by one timer period.
+    crate::timer::timer_tick(super::apic::timer_period_ms());
+
     // Trigger scheduler tick. Use try_lock to avoid deadlock: if the
     // scheduler lock is already held (e.g., we interrupted mid-schedule),
     // skip the tick -- the holder will complete its scheduling decision.

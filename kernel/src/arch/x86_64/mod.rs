@@ -25,6 +25,7 @@ pub mod rtc;
 pub mod serial;
 pub mod syscall;
 pub mod timer;
+pub mod tsc;
 #[cfg(target_os = "none")]
 pub(crate) mod usercopy;
 pub mod usermode;
@@ -140,10 +141,28 @@ pub fn init() {
         Err(e) => println!("[ARCH] ACPI init skipped: {}", e),
     }
 
+    // Clock source: calibrate the TSC (interrupts are still off, which the
+    // PIT fallback needs).
+    let (tsc_hz, source) = tsc::init();
+    println!(
+        "[ARCH] TSC clock: {}.{:03} MHz from {:?}, invariant={}, tsc-deadline={}",
+        tsc_hz / 1_000_000,
+        (tsc_hz / 1_000) % 1_000,
+        source,
+        tsc::invariant(),
+        tsc::deadline_mode_supported()
+    );
+
     // Calibrate and start the APIC timer for preemptive scheduling.
     // Requires APIC to be initialized. Non-fatal: falls back to PIC timer
     // (which must be explicitly enabled elsewhere) if calibration fails.
-    if apic::is_initialized() {
+    // TSC-deadline mode needs no LAPIC calibration.
+    if apic::is_initialized() && tsc::deadline_mode_supported() && tsc_hz != 0 {
+        match apic::start_timer(1000) {
+            Ok(()) => println!("[ARCH] APIC timer started at 1000Hz"),
+            Err(e) => println!("[ARCH] APIC timer start failed: {}", e),
+        }
+    } else if apic::is_initialized() {
         println!("[ARCH] Calibrating APIC timer...");
         match apic::calibrate_timer() {
             Ok(tpm) => {

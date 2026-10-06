@@ -23,6 +23,13 @@ el2_entry:
     // Configure HCR_EL2 (RW=1 for AArch64)
     mov x0, #(1 << 31)
     msr hcr_el2, x0
+
+    // Generic timer: let EL1 use the physical counter/timer (CNTHCTL_EL2
+    // EL1PCTEN|EL1PCEN), and zero CNTVOFF_EL2 -- it has no defined reset
+    // value, and the virtual counter is CNTPCT - CNTVOFF.
+    mov x0, #3
+    msr cnthctl_el2, x0
+    msr cntvoff_el2, xzr
     
     // Configure SCTLR_EL1 (safe defaults)
     mov x0, #0x0

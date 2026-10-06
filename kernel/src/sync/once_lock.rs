@@ -242,6 +242,14 @@ impl<T> GlobalState<T> {
         lock.as_mut().map(f)
     }
 
+    /// Like `with_mut`, but never spins: returns `None` if the state is
+    /// uninitialized or currently locked. For interrupt handlers, which
+    /// must not wait for a lock the interrupted code may hold.
+    pub fn try_with_mut<R, F: FnOnce(&mut T) -> R>(&self, f: F) -> Option<R> {
+        let mut lock = self.inner.try_lock()?;
+        lock.as_mut().map(f)
+    }
+
     /// Try to get a reference (may fail if not initialized)
     pub fn try_get(&self) -> Option<spin::MutexGuard<Option<T>>> {
         let lock = self.inner.lock();

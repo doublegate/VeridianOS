@@ -58,8 +58,12 @@ static NEXT_TIMER_ID: AtomicU64 = AtomicU64::new(1);
 /// Global timer wheel instance, protected by a spin mutex.
 static TIMER_WHEEL: GlobalState<Mutex<TimerWheel>> = GlobalState::new();
 
-/// Monotonic uptime counter in milliseconds, updated on each tick.
+/// Monotonic uptime counter in milliseconds, advanced by [`timer_tick`].
 static UPTIME_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Milliseconds not yet applied to the timer wheel because its lock was
+/// held when a tick arrived.
+static PENDING_WHEEL_MS: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -298,6 +302,9 @@ pub(crate) fn init() -> KernelResult<()> {
 ///
 /// # Returns
 /// The [`TimerId`] of the newly created timer.
+///
+/// The callback runs in timer-interrupt context: it must not block, spin
+/// on a lock, or print.
 pub(crate) fn create_timer(
     mode: TimerMode,
     interval_ms: u64,
@@ -333,19 +340,42 @@ pub(crate) fn timer_tick(elapsed_ms: u64) {
     // Update monotonic uptime counter.
     UPTIME_MS.fetch_add(elapsed_ms, Ordering::Relaxed);
 
-    TIMER_WHEEL.with_mut(|wheel| {
-        let mut wheel = wheel.lock();
-        wheel.tick(elapsed_ms);
+    // Called from the timer interrupt: never spin on either lock around the
+    // wheel (the interrupted code may hold one -- e.g. while initializing
+    // or adding a timer). Carry the time over to the next tick instead.
+    PENDING_WHEEL_MS.fetch_add(elapsed_ms, Ordering::AcqRel);
+    TIMER_WHEEL.try_with_mut(|wheel| {
+        if let Some(mut wheel) = wheel.try_lock() {
+            wheel.tick(PENDING_WHEEL_MS.swap(0, Ordering::AcqRel));
+        }
     });
 }
 
-/// Return the monotonic uptime in milliseconds since [`init`] was called.
+/// Return the monotonic uptime in milliseconds.
 ///
-/// This counter is incremented by [`timer_tick`] and is independent of
-/// wall-clock time. It will not wrap for over 584 million years at
-/// millisecond granularity.
+/// Every timed wait in the kernel (nanosleep, poll/epoll timeouts, timerfd,
+/// futex timeouts) and CLOCK_MONOTONIC read this. Nothing used to advance
+/// it, so it stayed 0 and those waits never ended.
+///
+/// It is read from each architecture's clock source
+/// ([`crate::arch::timer::monotonic_ns`]), so it advances whether or not
+/// timer interrupts are running and does not drift with missed ticks. Host
+/// unit tests use the tick-driven counter instead.
 pub(crate) fn get_uptime_ms() -> u64 {
-    UPTIME_MS.load(Ordering::Relaxed)
+    monotonic_ns() / 1_000_000
+}
+
+/// Monotonic time in nanoseconds (CLOCK_MONOTONIC), at the clock source's
+/// resolution.
+pub(crate) fn monotonic_ns() -> u64 {
+    #[cfg(target_os = "none")]
+    {
+        crate::arch::timer::monotonic_ns()
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        UPTIME_MS.load(Ordering::Relaxed) * 1_000_000
+    }
 }
 
 /// Return the number of currently pending (active) timers.

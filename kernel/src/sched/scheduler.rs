@@ -553,8 +553,10 @@ impl Scheduler {
                     (*task_mut).time_slice -= 1;
                 }
 
-                // Check if time slice expired
-                if (*task_mut).time_slice == 0 && self.is_preemptible() {
+                // Check if time slice expired. Never preempt a syscall that
+                // is only halting for the clock (W-13).
+                if (*task_mut).time_slice == 0 && self.is_preemptible() && !super::in_syscall_wait()
+                {
                     (*task_mut).time_slice = DEFAULT_TIME_SLICE;
                     self.schedule();
                 }

@@ -9,6 +9,7 @@ pub mod bootstrap;
 pub mod context;
 pub mod direct_uart;
 pub mod entry;
+pub mod exceptions;
 pub mod gic;
 pub mod serial;
 pub mod timer;
@@ -24,6 +25,10 @@ pub fn init() {
         uart_write_str("[ARCH] Performing AArch64-specific initialization\n");
     }
 
+    // Exception vectors first: from here on an exception is reported
+    // instead of vectoring to address 0.
+    exceptions::install();
+
     // Initialize the GIC (Generic Interrupt Controller)
     if let Err(_e) = gic::init() {
         // SAFETY: uart_write_str performs a raw MMIO write to the PL011 UART.
@@ -32,6 +37,21 @@ pub fn init() {
             crate::arch::aarch64::direct_uart::uart_write_str(
                 "[ARCH] WARNING: GIC initialization failed\n",
             );
+        }
+        return;
+    }
+
+    // 1000 Hz tick on the EL1 virtual timer, then unmask IRQs.
+    match timer::start(1000) {
+        // SAFETY: the vector table and GIC are set up, so IRQs can be taken.
+        Ok(()) => unsafe { core::arch::asm!("msr daifclr, #2", "isb", options(nostack)) },
+        Err(_) => {
+            // SAFETY: raw PL011 write during single-threaded init.
+            unsafe {
+                crate::arch::aarch64::direct_uart::uart_write_str(
+                    "[ARCH] WARNING: timer start failed; IRQs stay masked\n",
+                );
+            }
         }
     }
 }

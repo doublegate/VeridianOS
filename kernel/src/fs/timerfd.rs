@@ -95,9 +95,7 @@ static NEXT_TIMERFD_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Get current monotonic time in nanoseconds from kernel uptime.
 fn monotonic_now_ns() -> u64 {
-    // Use the kernel's uptime counter (TSC-based on x86_64)
-    let uptime_ms = crate::timer::get_uptime_ms();
-    uptime_ms.saturating_mul(1_000_000)
+    crate::timer::monotonic_ns()
 }
 
 /// Create a new timerfd.
@@ -220,6 +218,15 @@ pub fn timerfd_read(tfd_id: u32) -> Result<u64, SyscallError> {
     let start = crate::timer::get_uptime_ms();
     const MAX_BLOCK_MS: u64 = 30_000;
 
+    // During boot-path cooperative dispatch a blocking read must not wait:
+    // the child has to yield back so the dispatcher can make progress (as
+    // nanosleep does). Otherwise each read could stall boot for 30 s (W-13).
+    #[cfg(target_arch = "x86_64")]
+    let in_boot_coop = crate::arch::x86_64::usermode::BOOT_CLONE_YIELD_PENDING
+        .load(core::sync::atomic::Ordering::Acquire);
+    #[cfg(not(target_arch = "x86_64"))]
+    let in_boot_coop = false;
+
     loop {
         let mut registry = TIMERFD_REGISTRY.lock();
         let instance = registry
@@ -227,7 +234,7 @@ pub fn timerfd_read(tfd_id: u32) -> Result<u64, SyscallError> {
             .ok_or(SyscallError::BadFileDescriptor)?;
 
         if !instance.armed {
-            if instance.nonblock {
+            if instance.nonblock || in_boot_coop {
                 return Err(SyscallError::WouldBlock);
             }
             // Timer not armed and blocking -- wait for it to be armed
@@ -236,12 +243,7 @@ pub fn timerfd_read(tfd_id: u32) -> Result<u64, SyscallError> {
                 return Err(SyscallError::WouldBlock);
             }
             // Enable interrupts so APIC timer advances UPTIME_MS
-            #[cfg(target_arch = "x86_64")]
-            unsafe {
-                core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
-            }
-            #[cfg(not(target_arch = "x86_64"))]
-            crate::sched::yield_cpu();
+            crate::sched::wait_for_interrupt_in_syscall();
             continue;
         }
 
@@ -268,7 +270,7 @@ pub fn timerfd_read(tfd_id: u32) -> Result<u64, SyscallError> {
             return Ok(count);
         }
 
-        if instance.nonblock {
+        if instance.nonblock || in_boot_coop {
             return Err(SyscallError::WouldBlock);
         }
 
@@ -278,12 +280,7 @@ pub fn timerfd_read(tfd_id: u32) -> Result<u64, SyscallError> {
             return Err(SyscallError::WouldBlock);
         }
         // Enable interrupts so APIC timer advances UPTIME_MS
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        crate::sched::yield_cpu();
+        crate::sched::wait_for_interrupt_in_syscall();
     }
 }
 
