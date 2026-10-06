@@ -221,24 +221,25 @@ fn infer_sockaddr_len(addr_ptr: usize) -> Result<usize, SyscallError> {
 }
 
 /// Parse a sockaddr_in from user space.
+///
+/// The bytes are copied out with the fault-handled user-copy routine and
+/// decoded from a local buffer: the user pointer need not be aligned, and
+/// dereferencing it as `*const u16`/`*const u32` was undefined behaviour on
+/// an unaligned address (review of the v0.26.0 stack, PR #7).
 fn parse_sockaddr(
     addr_ptr: usize,
     _addr_len: usize,
 ) -> Result<crate::net::SocketAddr, SyscallError> {
     // struct sockaddr_in { u16 family, u16 port_be, u32 addr_be, u8 zero[8] }
-    // SAFETY: addr_ptr was validated by the caller via validate_user_buffer.
-    let family = unsafe { *(addr_ptr as *const u16) };
+    let mut raw = [0u8; 8];
+    super::userspace::read_user_bytes(addr_ptr, &mut raw)?;
+    let family = u16::from_ne_bytes([raw[0], raw[1]]);
     if family != 2 {
         // AF_INET = 2
         return Err(SyscallError::InvalidArgument);
     }
-    // SAFETY: addr_ptr + 2 is within the validated sockaddr buffer.
-    let port_be = unsafe { *((addr_ptr + 2) as *const u16) };
-    // SAFETY: addr_ptr + 4 is within the validated sockaddr buffer.
-    let addr_be = unsafe { *((addr_ptr + 4) as *const u32) };
-
-    let port = u16::from_be(port_be);
-    let addr_bytes = addr_be.to_be_bytes();
+    let port = u16::from_be_bytes([raw[2], raw[3]]);
+    let addr_bytes = [raw[4], raw[5], raw[6], raw[7]];
 
     Ok(crate::net::SocketAddr {
         ip: crate::net::IpAddress::V4(crate::net::Ipv4Address(addr_bytes)),
@@ -246,33 +247,44 @@ fn parse_sockaddr(
     })
 }
 
-/// Write a SocketAddr as sockaddr_in to user space.
+/// Encode `addr` as a 16-byte `struct sockaddr_in`.
+fn sockaddr_in_bytes(addr: &crate::net::SocketAddr) -> [u8; 16] {
+    let ip = match &addr.ip {
+        crate::net::IpAddress::V4(v4) => v4.0,
+        _ => [0, 0, 0, 0],
+    };
+    let mut out = [0u8; 16];
+    out[0..2].copy_from_slice(&2u16.to_ne_bytes()); // AF_INET
+    out[2..4].copy_from_slice(&addr.port.to_be_bytes());
+    out[4..8].copy_from_slice(&ip);
+    out
+}
+
+/// Write a SocketAddr as sockaddr_in to user space, through the
+/// fault-handled user-copy routine (no unaligned raw stores).
 pub(super) fn write_sockaddr(
     addr_ptr: usize,
     addr: &crate::net::SocketAddr,
 ) -> Result<(), SyscallError> {
-    let bytes = match &addr.ip {
-        crate::net::IpAddress::V4(v4) => v4.0,
-        _ => [0, 0, 0, 0],
-    };
-
-    // struct sockaddr_in: family(2) + port_be(2) + addr_be(4) + zero(8)
-    // SAFETY: addr_ptr was validated by the caller via
-    // validate_user_buffer(addr_ptr, 16).
-    unsafe {
-        *(addr_ptr as *mut u16) = 2; // AF_INET
-        *((addr_ptr + 2) as *mut u16) = addr.port.to_be();
-        *((addr_ptr + 4) as *mut u32) = u32::from_be_bytes(bytes);
-        // Zero padding
-        core::ptr::write_bytes((addr_ptr + 8) as *mut u8, 0, 8);
-    }
-
-    Ok(())
+    super::userspace::write_user_bytes(addr_ptr, &sockaddr_in_bytes(addr))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sockaddr_in_encoding_matches_the_c_layout() {
+        let addr = crate::net::SocketAddr {
+            ip: crate::net::IpAddress::V4(crate::net::Ipv4Address([10, 0, 2, 15])),
+            port: 8080,
+        };
+        let b = sockaddr_in_bytes(&addr);
+        assert_eq!(u16::from_ne_bytes([b[0], b[1]]), 2);
+        assert_eq!(&b[2..4], &8080u16.to_be_bytes());
+        assert_eq!(&b[4..8], &[10, 0, 2, 15]);
+        assert!(b[8..].iter().all(|&z| z == 0));
+    }
 
     /// NET-SEC-02: the family must not be read from an address that fails
     /// user-pointer validation (here, a kernel-half address).

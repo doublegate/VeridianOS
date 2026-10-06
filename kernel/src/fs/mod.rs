@@ -1403,6 +1403,29 @@ mod tests {
     }
 
     #[test]
+    fn blockfs_rename_onto_own_hard_link_keeps_both() {
+        // Each BlockFS lookup returns a fresh node, so identity must be the
+        // inode number, not the Arc (review of the v0.26.0 stack, PR #9).
+        // POSIX: renaming one link onto another link of the same file does
+        // nothing.
+        let fs = blockfs::BlockFs::format(4096, 256).unwrap();
+        let root = fs.root();
+        let f = root.create("f", Permissions::default()).unwrap();
+        f.write(0, b"data").unwrap();
+        root.link("alias", root.lookup("f").unwrap()).unwrap();
+        root.rename("alias", &root, "f").unwrap();
+        root.rename("f", &root, "f").unwrap();
+        let mut buf = [0u8; 4];
+        root.lookup("f").unwrap().read(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"data");
+        assert!(root.lookup("alias").is_ok());
+        assert_eq!(
+            root.lookup("f").unwrap().metadata().unwrap().inode,
+            root.lookup("alias").unwrap().metadata().unwrap().inode
+        );
+    }
+
+    #[test]
     fn rename_refuses_another_tmpfs_instance() {
         // Moving data between tmpfs mounts would bypass the destination's
         // size limit.

@@ -36,6 +36,25 @@ Verdicts:
    in the kernel. Before/after kernel measurements for this remediation come from the
    in-kernel `perf` command and are recorded in `docs/PERFORMANCE-REPORT.md`.
 
+   **Reproducing the models.** The matrix's "Reproduction" commands (`rustc ...
+   tests/audit_benchmarks.rs`) no longer work, because the file moved. The matrix is kept
+   unchanged as the audited artifact, and the working commands are:
+
+   ```bash
+   cd tools/audit-models
+   cargo run --release                         # all models
+   cargo test --release -- --test-threads=1    # the same models as tests, serialized
+   ```
+
+   The tests run serialized because several of them time multi-threaded workloads. The
+   models were also made sound in review:
+   - the futex WAKE_OP race model uses relaxed atomics instead of racing volatile accesses
+     (which were a data race in Rust);
+   - the rate-limiter race is forced deterministically instead of sampled;
+   - the fork deep-copy and PTE loops keep their buffers observable (`black_box`).
+
+   Their figures remain illustrations, as stated above.
+
 ## Findings
 
 Paths are relative to `kernel/src/` unless they start with `userland/`.

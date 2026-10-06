@@ -117,7 +117,7 @@ qemu-system-riscv64 -M virt -m 256M -bios default \
 - **DO NOT** use `-drive` without explicit ID -- conflicts with pflash
 - **DO NOT** use `-cdrom` alongside `-drive` on same bus
 - **DO NOT** use `cargo run` for x86_64 -- wrong runner
-- **ALWAYS** `pkill -9 -f qemu-system; sleep 3` before re-running
+- **ALWAYS** run `pkill -9 -f qemu-system` as its own command (Rule #1), then `sleep 3` as a separate command, before re-running
 - **ALWAYS** use `-enable-kvm` for x86_64 (TCG is ~100x slower)
 
 **PS/2 keyboard**: Polling (ports 0x64/0x60). APIC replaces PIC so IRQ-based keyboard doesn't work. Input from both serial and keyboard.
@@ -168,8 +168,8 @@ Kernel: 0xFFFF_8000_0000_0000 - 0xFFFF_FFFF_FFFF_FFFF (128 TB)
 ### Project Structure
 ```
 kernel/src/{arch/, mm/, sched/, cap/, ipc/, syscall/, process/, perf/, desktop/, browser/}
-drivers/          # User-space driver processes
-services/         # System services (VFS, network, CRI/CNI/CSI)
+kernel/src/drivers/   # Device drivers (in the kernel today; user-space drivers are planned, critique C6)
+kernel/src/services/  # System services: shell, VFS glue, CRI/CNI/CSI (also in the kernel)
 userland/         # User applications and libraries
   libc/           # C library shims
   qt6/            # Qt 6 QPA plugin and shims

@@ -115,13 +115,18 @@ static void test_allocator(void)
 {
     pthread_t t[4];
     int ok = 1;
-    for (int i = 0; i < 4; i++)
-        if (pthread_create(&t[i], NULL, alloc_worker, (void *)(long)(i + 1)) != 0)
-            ok = 0;
+    int created = 0;
+    /* Join only the threads that were created: t[i] is unset after a
+     * failed pthread_create (review of the v0.26.0 stack, PR #9). */
     for (int i = 0; i < 4; i++) {
+        if (pthread_create(&t[created], NULL, alloc_worker, (void *)(long)(i + 1)) != 0)
+            ok = 0;
+        else
+            created++;
+    }
+    for (int i = 0; i < created; i++) {
         void *r = NULL;
-        pthread_join(t[i], &r);
-        if (r)
+        if (pthread_join(t[i], &r) != 0 || r)
             ok = 0;
     }
     report("malloc_threads_4x20000", ok, "allocation failed or thread error");
@@ -473,6 +478,24 @@ static void test_rename_directory(void)
            why);
 }
 
+/* --- A closed standard descriptor is closed (review of the v0.26.0 stack):
+ * write(2) after close(2) must fail with EBADF, not reach the serial
+ * console. Run in a child so the test's own stderr is untouched. ---------- */
+static void test_closed_stdio(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(2);
+        errno = 0;
+        ssize_t w = write(2, "x", 1);
+        _exit(w == -1 && errno == EBADF ? 0 : 1);
+    }
+    int status = 0;
+    int ok = pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
+             WEXITSTATUS(status) == 0;
+    report("closed_stderr_is_ebadf", ok, "write(2) after close(2) did not fail with EBADF");
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -493,6 +516,7 @@ int main(int argc, char **argv)
     test_timed_waits();
     test_map_fixed_limits();
     test_rename_directory();
+    test_closed_stdio();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

@@ -153,6 +153,19 @@ fn serial_try_read_byte() -> Option<u8> {
     }
 }
 
+/// Whether a read, write or terminal ioctl on standard descriptor `fd`
+/// (0-2) with no file-table entry may fall back to the serial console.
+/// Only while it is still the implicit console: after `close(fd)` the
+/// descriptor is closed and must fail with EBADF (review of the v0.26.0
+/// stack, PR #9). Without a process (kernel boot context) the console is
+/// always available.
+fn console_fallback_allowed(fd: usize) -> bool {
+    match process::current_process() {
+        Some(proc) => proc.file_table.lock().is_implicit_console(fd),
+        None => fd < 3,
+    }
+}
+
 /// Maximum buffer size for serial I/O fallback (64 KB).
 /// Prevents unbounded kernel-side loops for large writes.
 const SERIAL_IO_MAX_SIZE: usize = 64 * 1024;
@@ -327,6 +340,9 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
             }
         }
 
+        if !console_fallback_allowed(fd) {
+            return Err(SyscallError::BadFileDescriptor);
+        }
         // Fallback: read from serial UART, respecting terminal state.
         let read_count = count.min(SERIAL_IO_MAX_SIZE);
         // SAFETY: buffer is non-zero (checked above). We limit the size
@@ -510,6 +526,9 @@ pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
             }
         }
 
+        if !console_fallback_allowed(fd) {
+            return Err(SyscallError::BadFileDescriptor);
+        }
         // Fallback: write directly to serial UART
         let write_count = count.min(SERIAL_IO_MAX_SIZE);
         // SAFETY: buffer is non-zero (checked above). We limit the size
@@ -1184,6 +1203,14 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
     );
     if is_terminal_cmd && fd > 2 {
         return Err(SyscallError::NotATerminal);
+    }
+    // A closed standard descriptor is not a terminal; it is not open at all.
+    if is_terminal_cmd {
+        let has_entry =
+            process::current_process().is_some_and(|p| p.file_table.lock().get(fd).is_some());
+        if !has_entry && !console_fallback_allowed(fd) {
+            return Err(SyscallError::BadFileDescriptor);
+        }
     }
 
     match cmd {

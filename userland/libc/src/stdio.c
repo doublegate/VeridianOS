@@ -1236,14 +1236,16 @@ int vfscanf(FILE *stream, const char *fmt, va_list ap)
             if (c == EOF)
                 goto done_vfscanf;
 
-            /* Read digits into a small buffer. */
+            /* Read digits into a small buffer, honouring the field width
+             * (sign included): "%2d%d" splits "1234" into 12 and 34. */
             char numbuf[24];
             int ni = 0;
-            if (c == '-' || c == '+') {
+            int limit = (width > 0 && width < 23) ? (int)width : 23;
+            if ((c == '-' || c == '+') && ni < limit) {
                 numbuf[ni++] = (char)c;
                 c = fgetc(stream);
             }
-            while (c != EOF && c >= '0' && c <= '9' && ni < 23) {
+            while (c != EOF && c >= '0' && c <= '9' && ni < limit) {
                 numbuf[ni++] = (char)c;
                 c = fgetc(stream);
             }
