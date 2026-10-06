@@ -9,7 +9,7 @@
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
-use alloc::collections::BTreeMap;
+use alloc::{collections::BTreeMap, sync::Arc};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use spin::Mutex;
@@ -44,15 +44,15 @@ pub fn init() {
 pub struct IpcRegistry {
     /// Endpoint lookup table
     #[cfg(feature = "alloc")]
-    endpoints: BTreeMap<EndpointId, Endpoint>,
+    /// Endpoints are reference counted: a lookup hands out an `Arc`, so an
+    /// endpoint stays alive while in use even if it is removed meanwhile.
+    endpoints: BTreeMap<EndpointId, Arc<Endpoint>>,
     /// Channel lookup table
     #[cfg(feature = "alloc")]
     channels: BTreeMap<EndpointId, Channel>,
     /// Process to endpoints mapping
     #[cfg(feature = "alloc")]
     process_endpoints: BTreeMap<ProcessId, BTreeMap<EndpointId, IpcCapability>>,
-    /// Next endpoint ID
-    next_endpoint_id: AtomicU64,
     /// Statistics
     stats: RegistryStats,
 }
@@ -77,7 +77,6 @@ impl IpcRegistry {
             channels: BTreeMap::new(),
             #[cfg(feature = "alloc")]
             process_endpoints: BTreeMap::new(),
-            next_endpoint_id: AtomicU64::new(1),
             stats: RegistryStats {
                 endpoints_created: AtomicU64::new(0),
                 endpoints_destroyed: AtomicU64::new(0),
@@ -92,14 +91,17 @@ impl IpcRegistry {
     /// Create a new endpoint
     #[cfg(feature = "alloc")]
     pub fn create_endpoint(&mut self, owner: ProcessId) -> Result<(EndpointId, IpcCapability)> {
-        let endpoint_id = self.next_endpoint_id.fetch_add(1, Ordering::Relaxed);
+        // One ID source: the endpoint's own id (ENDPOINT_COUNTER) is the
+        // registry key. A separate registry counter used to make the two
+        // disagree.
         let endpoint = Endpoint::new(owner);
+        let endpoint_id = endpoint.id();
 
         // Create capability for the endpoint
         let capability = IpcCapability::new(endpoint_id, IpcPermissions::all());
 
         // Insert into tables
-        self.endpoints.insert(endpoint_id, endpoint);
+        self.endpoints.insert(endpoint_id, Arc::new(endpoint));
 
         // Add to process's endpoint list
         self.process_endpoints
@@ -156,7 +158,7 @@ impl IpcRegistry {
 
     /// Lookup an endpoint by ID
     #[cfg(feature = "alloc")]
-    pub fn lookup_endpoint(&self, id: EndpointId) -> Option<&Endpoint> {
+    pub fn lookup_endpoint(&self, id: EndpointId) -> Option<&Arc<Endpoint>> {
         self.stats
             .capability_lookups
             .fetch_add(1, Ordering::Relaxed);
@@ -404,25 +406,18 @@ pub fn remove_process_endpoints(owner: ProcessId) -> Result<usize> {
     })
 }
 
-/// Lookup an endpoint by ID
-pub fn lookup_endpoint(id: EndpointId) -> Result<&'static Endpoint> {
+/// Lookup an endpoint by ID.
+///
+/// Returns a reference-counted handle (IPC-SEC-01): this used to return a
+/// `&'static` into the registry's `BTreeMap`, which moves its values when
+/// nodes split or merge and drops them on removal, so any later insert or
+/// remove could leave the caller with a dangling reference.
+pub fn lookup_endpoint(id: EndpointId) -> Result<Arc<Endpoint>> {
     with_registry(|registry| {
-        // SAFETY: We cast the registry reference to a raw pointer and dereference
-        // it to obtain a &'static Endpoint. This is sound because:
-        // 1. The registry is heap-allocated via Box::leak and lives for the kernel's
-        //    lifetime, so the Endpoint data it contains also has 'static lifetime.
-        // 2. The Endpoint reference is derived from data owned by the registry's
-        //    BTreeMap, which persists as long as the entry is not removed.
-        // CAVEAT: If the endpoint is removed from the registry while a &'static
-        // reference is held, this becomes a dangling reference. Production code
-        // should use reference counting (Arc) to prevent use-after-free.
-        unsafe {
-            let registry_ptr = registry as *const IpcRegistry;
-            (*registry_ptr)
-                .lookup_endpoint(id)
-                .ok_or(IpcError::EndpointNotFound)
-                .map(|ep| &*(ep as *const Endpoint))
-        }
+        registry
+            .lookup_endpoint(id)
+            .cloned()
+            .ok_or(IpcError::EndpointNotFound)
     })
 }
 
@@ -463,6 +458,28 @@ mod tests {
         init();
         let result = create_endpoint(ProcessId(1));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn registry_key_is_the_endpoint_id() {
+        let mut registry = IpcRegistry::new();
+        let (id, _) = registry.create_endpoint(ProcessId(3)).unwrap();
+        assert_eq!(registry.lookup_endpoint(id).unwrap().id(), id);
+    }
+
+    #[test]
+    fn looked_up_endpoint_outlives_removal() {
+        // IPC-SEC-01: a lookup used to return a &'static into the map.
+        let mut registry = IpcRegistry::new();
+        let (id, _) = registry.create_endpoint(ProcessId(4)).unwrap();
+        let handle = registry.lookup_endpoint(id).unwrap().clone();
+        // Churn the map so nodes move, then remove the endpoint.
+        for _ in 0..64 {
+            registry.create_endpoint(ProcessId(5)).unwrap();
+        }
+        registry.remove_endpoint(id, ProcessId(4)).unwrap();
+        assert!(registry.lookup_endpoint(id).is_none());
+        assert_eq!(handle.id(), id);
     }
 
     #[test]
