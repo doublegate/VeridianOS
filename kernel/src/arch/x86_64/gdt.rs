@@ -14,6 +14,33 @@ pub const PAGE_FAULT_IST_INDEX: u16 = 1;
 pub const GENERAL_IST_INDEX: u16 = 2;
 pub const HARDWARE_IRQ_IST_INDEX: u16 = 3;
 
+/// Size of each TSS stack (RSP0 and the IST entries).
+const TSS_STACK_SIZE: usize = 4096 * 5;
+
+/// A stack the CPU switches to through the TSS. Only the CPU writes to it,
+/// and never through a Rust reference, so it is an `UnsafeCell` behind a
+/// plain `static` rather than a `static mut` (project rule: no new
+/// `static mut`; review of the v0.26.0 stack, PR #14).
+#[repr(C, align(16))]
+struct IstStack(core::cell::UnsafeCell<[u8; TSS_STACK_SIZE]>);
+
+// SAFETY: Rust code never reads or writes the stack memory; only its
+// address is taken, once, while the TSS is built. The CPU uses it as a
+// stack for exactly one CPU (the TSS is per CPU).
+unsafe impl Sync for IstStack {}
+
+impl IstStack {
+    const fn new() -> Self {
+        Self(core::cell::UnsafeCell::new([0; TSS_STACK_SIZE]))
+    }
+
+    /// The initial stack pointer: one past the highest byte (stacks grow
+    /// down), 16-byte aligned for the x86_64 ABI.
+    fn top(&'static self) -> VirtAddr {
+        VirtAddr::from_ptr(self.0.get()) + TSS_STACK_SIZE as u64
+    }
+}
+
 lazy_static! {
     static ref TSS: TaskStateSegment = {
         let mut tss = TaskStateSegment::new();
@@ -22,28 +49,14 @@ lazy_static! {
         // This is used when transitioning from user mode to kernel mode.
         // Must be 16-byte aligned for the x86_64 ABI (movaps et al.).
         tss.privilege_stack_table[0] = {
-            const STACK_SIZE: usize = 4096 * 5;
-            #[repr(align(16))]
-            #[allow(dead_code)] // Alignment wrapper -- field accessed via raw pointer
-            struct AlignedStack([u8; STACK_SIZE]);
-            static mut KERNEL_STACK: AlignedStack = AlignedStack([0; STACK_SIZE]);
-
-            let stack_ptr = &raw const KERNEL_STACK;
-            let stack_start = VirtAddr::from_ptr(stack_ptr);
-            stack_start + STACK_SIZE as u64
+            static KERNEL_STACK: IstStack = IstStack::new();
+            KERNEL_STACK.top()
         };
 
         // Set up the double fault stack (16-byte aligned)
         tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
-            const STACK_SIZE: usize = 4096 * 5;
-            #[repr(align(16))]
-            #[allow(dead_code)] // Alignment wrapper -- field accessed via raw pointer
-            struct AlignedStack([u8; STACK_SIZE]);
-            static mut STACK: AlignedStack = AlignedStack([0; STACK_SIZE]);
-
-            let stack_ptr = &raw const STACK;
-            let stack_start = VirtAddr::from_ptr(stack_ptr);
-            stack_start + STACK_SIZE as u64
+            static DF_STACK: IstStack = IstStack::new();
+            DF_STACK.top()
         };
 
         // Set up the page fault stack (16-byte aligned).
@@ -53,15 +66,8 @@ lazy_static! {
         // page fault escalates directly to a Double Fault because the CPU
         // cannot push the exception frame onto the RSP0 stack.
         tss.interrupt_stack_table[PAGE_FAULT_IST_INDEX as usize] = {
-            const STACK_SIZE: usize = 4096 * 5;
-            #[repr(align(16))]
-            #[allow(dead_code)] // Alignment wrapper -- field accessed via raw pointer
-            struct AlignedStack([u8; STACK_SIZE]);
-            static mut PF_STACK: AlignedStack = AlignedStack([0; STACK_SIZE]);
-
-            let stack_ptr = &raw const PF_STACK;
-            let stack_start = VirtAddr::from_ptr(stack_ptr);
-            stack_start + STACK_SIZE as u64
+            static PF_STACK: IstStack = IstStack::new();
+            PF_STACK.top()
         };
 
         // Set up the general exception stack (16-byte aligned).
@@ -70,15 +76,8 @@ lazy_static! {
         // switch. If RSP0 is stale or unmapped in the user process's
         // page tables, the exception delivery fails and escalates to DF.
         tss.interrupt_stack_table[GENERAL_IST_INDEX as usize] = {
-            const STACK_SIZE: usize = 4096 * 5;
-            #[repr(align(16))]
-            #[allow(dead_code)] // Alignment wrapper -- field accessed via raw pointer
-            struct AlignedStack([u8; STACK_SIZE]);
-            static mut GP_STACK: AlignedStack = AlignedStack([0; STACK_SIZE]);
-
-            let stack_ptr = &raw const GP_STACK;
-            let stack_start = VirtAddr::from_ptr(stack_ptr);
-            stack_start + STACK_SIZE as u64
+            static GP_STACK: IstStack = IstStack::new();
+            GP_STACK.top()
         };
 
         // Set up the hardware IRQ stack (16-byte aligned).
@@ -88,15 +87,8 @@ lazy_static! {
         // fails and escalates to a Double Fault. Using a dedicated IST stack
         // bypasses RSP0 entirely for these vectors.
         tss.interrupt_stack_table[HARDWARE_IRQ_IST_INDEX as usize] = {
-            const STACK_SIZE: usize = 4096 * 5;
-            #[repr(align(16))]
-            #[allow(dead_code)] // Alignment wrapper -- field accessed via raw pointer
-            struct AlignedStack([u8; STACK_SIZE]);
-            static mut IRQ_STACK: AlignedStack = AlignedStack([0; STACK_SIZE]);
-
-            let stack_ptr = &raw const IRQ_STACK;
-            let stack_start = VirtAddr::from_ptr(stack_ptr);
-            stack_start + STACK_SIZE as u64
+            static IRQ_STACK: IstStack = IstStack::new();
+            IRQ_STACK.top()
         };
         tss
     };
@@ -199,6 +191,8 @@ pub fn debug_print_tss_stacks() {
 pub fn debug_idt_handler_addr(vector: u8) -> u64 {
     // Read IDT base and limit from IDTR
     let mut idtr: [u8; 10] = [0; 10];
+    // SAFETY: sidt only stores the 10-byte IDTR image into `idtr`, a local
+    // buffer of exactly that size; it changes no processor state.
     unsafe {
         core::arch::asm!("sidt [{}]", in(reg) &mut idtr, options(nostack));
     }

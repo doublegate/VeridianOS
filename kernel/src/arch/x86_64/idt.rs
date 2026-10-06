@@ -663,6 +663,8 @@ unsafe fn exception_kill_user(name: &[u8], stack_frame: &InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
+    // SAFETY: called from this vector\'s own handler with the CPU-pushed
+    // stack frame, which is exception_kill_user\'s contract.
     unsafe { exception_kill_user(b"#DE", &stack_frame) };
     loop {
         x86_64::instructions::hlt();
@@ -670,6 +672,8 @@ extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame)
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
+    // SAFETY: called from this vector\'s own handler with the CPU-pushed
+    // stack frame, which is exception_kill_user\'s contract.
     unsafe { exception_kill_user(b"#UD", &stack_frame) };
     loop {
         x86_64::instructions::hlt();
@@ -680,6 +684,8 @@ extern "x86-interrupt" fn segment_not_present_handler(
     stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) {
+    // SAFETY: called from this vector\'s own handler with the CPU-pushed
+    // stack frame, which is exception_kill_user\'s contract.
     unsafe { exception_kill_user(b"#NP", &stack_frame) };
     loop {
         x86_64::instructions::hlt();
@@ -690,6 +696,8 @@ extern "x86-interrupt" fn stack_segment_fault_handler(
     stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) {
+    // SAFETY: called from this vector\'s own handler with the CPU-pushed
+    // stack frame, which is exception_kill_user\'s contract.
     unsafe { exception_kill_user(b"#SS", &stack_frame) };
     loop {
         x86_64::instructions::hlt();
@@ -700,6 +708,8 @@ extern "x86-interrupt" fn alignment_check_handler(
     stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) {
+    // SAFETY: called from this vector\'s own handler with the CPU-pushed
+    // stack frame, which is exception_kill_user\'s contract.
     unsafe { exception_kill_user(b"#AC", &stack_frame) };
     loop {
         x86_64::instructions::hlt();
@@ -710,6 +720,8 @@ extern "x86-interrupt" fn security_exception_handler(
     stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) {
+    // SAFETY: called from this vector\'s own handler with the CPU-pushed
+    // stack frame, which is exception_kill_user\'s contract.
     unsafe { exception_kill_user(b"#SX", &stack_frame) };
     loop {
         x86_64::instructions::hlt();

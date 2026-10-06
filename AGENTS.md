@@ -203,8 +203,10 @@ pub fn init() -> Result<(), Error> {
 pub fn with_manager<R, F: FnOnce(&Manager) -> R>(f: F) -> Option<R> { MANAGER.with(f) }
 // For mutation: GlobalState<RwLock<Manager>> with .with(|lock| { let mut m = lock.write(); f(&mut m) })
 ```
-120+ static mut eliminated. 7 justified remain (early boot, per-CPU, heap) with SAFETY docs:
-`PER_CPU_DATA`, `READY_QUEUE_STATIC`, `HEAP_MEMORY`, `BOOT_INFO`, `EARLY_SERIAL`, `KERNEL_STACK`/`STACK`
+120+ static mut eliminated. The justified ones left (early boot, per-CPU, heap) carry SAFETY docs:
+`PER_CPU_DATA`, `READY_QUEUE_STATIC`, `HEAP_MEMORY`, `BOOT_INFO`, `EARLY_SERIAL`. The TSS stacks
+became an `UnsafeCell` wrapper (`IstStack`, `arch/x86_64/gdt.rs`) in v0.26.0; new code must not add
+`static mut`.
 
 ### CI/CD Configuration
 - GitHub Actions: job consolidation, cargo caching, RUSTFLAGS="-D warnings", rustsec audit
