@@ -76,30 +76,6 @@ pub fn create_task(
 /// Exit current task
 #[allow(unused_variables)]
 pub fn exit_task(exit_code: i32) {
-    #[cfg(feature = "alloc")]
-    extern crate alloc;
-    #[cfg(feature = "alloc")]
-    use alloc::vec::Vec;
-
-    #[cfg(feature = "alloc")]
-    use spin::Lazy;
-
-    /// Wrapper to make NonNull<Task> Send/Sync for the cleanup queue.
-    ///
-    /// # Safety
-    ///
-    /// The cleanup queue is protected by a spin::Mutex, ensuring exclusive
-    /// access. Task pointers in the queue are only deallocated after a
-    /// sufficient tick delay to ensure no other CPU holds a reference.
-    #[derive(Clone, Copy)]
-    struct CleanupTaskPtr(core::ptr::NonNull<Task>);
-
-    // SAFETY: CleanupTaskPtr is only accessed under the CLEANUP_QUEUE mutex.
-    // Task memory outlives the queue entry due to the deferred cleanup delay.
-    unsafe impl Send for CleanupTaskPtr {}
-    // SAFETY: Same as Send -- all access synchronized via mutex.
-    unsafe impl Sync for CleanupTaskPtr {}
-
     let mut scheduler = super::SCHEDULER.lock();
 
     if let Some(current_task) = scheduler.current() {
@@ -143,20 +119,10 @@ pub fn exit_task(exit_code: i32) {
             // Clear current CPU assignment
             (*task_mut).current_cpu = None;
 
-            // Mark task for deferred cleanup
-            // We can't free immediately as other CPUs might have references
+            // Free the task later: this CPU is still running on its stack,
+            // and other CPUs may hold its pointer briefly (N-03).
             #[cfg(feature = "alloc")]
-            {
-                // Add to cleanup queue for deferred deallocation
-                static CLEANUP_QUEUE: Lazy<spin::Mutex<Vec<(CleanupTaskPtr, u64)>>> =
-                    Lazy::new(|| spin::Mutex::new(Vec::new()));
-
-                // Get current tick count for deferred cleanup
-                let cleanup_tick = crate::arch::timer::get_ticks() + 100; // Cleanup after 100 ticks
-                CLEANUP_QUEUE
-                    .lock()
-                    .push((CleanupTaskPtr(current_task), cleanup_tick));
-            }
+            super::load_balance::defer_task_free(current_task);
         }
 
         // Schedule another task

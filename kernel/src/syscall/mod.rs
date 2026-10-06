@@ -262,7 +262,6 @@ pub(crate) mod linux_compat;
 mod thread_clone;
 pub(crate) mod userspace;
 pub use futex::sys_futex_wake;
-pub use userspace::copy_to_user;
 
 // Import Phase 6 syscall modules
 mod graphics_syscalls;
