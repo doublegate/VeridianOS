@@ -622,11 +622,24 @@ impl PciBus {
     /// Enable memory decoding and bus mastering for a device, which it
     /// needs before it may DMA.
     pub fn enable_bus_master(&self, location: PciLocation) {
-        // Write only the command half: the status half has write-1-to-clear
-        // bits, so writing back the value read would clear them.
-        let command = self.read_config_dword(location, 0x04) & 0xFFFF;
-        let command = command | (command_flags::MEMORY_SPACE | command_flags::BUS_MASTER) as u32;
-        self.write_config_dword(location, 0x04, command);
+        self.set_command_flags(
+            location,
+            command_flags::MEMORY_SPACE | command_flags::BUS_MASTER,
+        );
+    }
+
+    /// Enable I/O-port decoding and bus mastering for a device whose
+    /// registers sit behind an I/O BAR (legacy virtio) and which DMAs.
+    pub fn enable_io_bus_master(&self, location: PciLocation) {
+        self.set_command_flags(
+            location,
+            command_flags::IO_SPACE | command_flags::BUS_MASTER,
+        );
+    }
+
+    fn set_command_flags(&self, location: PciLocation, flags: u16) {
+        let dword = self.read_config_dword(location, 0x04);
+        self.write_config_dword(location, 0x04, command_with_flags(dword, flags));
     }
 
     /// Get device by location
@@ -1025,5 +1038,33 @@ pub fn ecam_write_config(
         true
     } else {
         false
+    }
+}
+
+/// The command/status dword to write back to set `flags` in the command
+/// register. Only the command half is kept: the status half has
+/// write-1-to-clear bits, so writing back the value read would clear them.
+fn command_with_flags(dword: u32, flags: u16) -> u32 {
+    (dword & 0xFFFF) | flags as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_write_sets_flags_and_never_writes_status_back() {
+        // Status has W1C error bits set; command has I/O space only.
+        let dword = 0xF900_0001;
+        let out = command_with_flags(
+            dword,
+            command_flags::MEMORY_SPACE | command_flags::BUS_MASTER,
+        );
+        assert_eq!(out, 0x0000_0007);
+        let out = command_with_flags(
+            0x0000_0002,
+            command_flags::IO_SPACE | command_flags::BUS_MASTER,
+        );
+        assert_eq!(out, 0x0000_0007);
     }
 }
