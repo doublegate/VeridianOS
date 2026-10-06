@@ -104,13 +104,32 @@ fn bench_frame_alloc_global() -> BenchResult {
     )
 }
 
-/// Benchmark: capability range validation (fast path)
+/// Benchmark: capability lookup in a process capability space holding 64
+/// capabilities with globally allocated (spread) IDs, as real processes do.
+///
+/// Replaces `cap_validate`, which compared two constants (the removed
+/// IPC-INC-01 range check) and measured nothing.
 fn bench_capability_lookup() -> BenchResult {
-    run_bench("cap_validate", 1000, TARGET_CAP_LOOKUP_NS, || {
-        // Fast-path validation as done in IPC
-        let cap = black_box(42u64);
-        let valid = cap != 0 && cap < 0x1_0000_0000;
-        black_box(valid);
+    use crate::cap::{CapabilitySpace, CapabilityToken, ObjectRef, Rights};
+
+    let space = CapabilitySpace::new();
+    let tokens: alloc::vec::Vec<CapabilityToken> = (0..64u64)
+        .map(|i| CapabilityToken::new(1000 + i * 4099, 1, 0, 0))
+        .collect();
+    for (i, &t) in tokens.iter().enumerate() {
+        let _ = space.insert(
+            t,
+            ObjectRef::Process {
+                pid: crate::process::ProcessId(i as u64),
+            },
+            Rights::READ,
+        );
+    }
+    let mut i = 0usize;
+    run_bench("cap_lookup", 1000, TARGET_CAP_LOOKUP_NS, || {
+        let t = tokens[i & 63];
+        i = i.wrapping_add(7);
+        black_box(space.lookup(black_box(t)));
     })
 }
 

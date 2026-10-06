@@ -63,124 +63,43 @@ pub enum InheritanceResult {
     Failed(&'static str),
 }
 
+/// Copy one entry into `child` with `rights`, keeping its inheritance
+/// flags. Returns whether it was inserted.
+fn inherit_entry(child_space: &CapabilitySpace, entry: &CapabilityEntry, rights: Rights) -> bool {
+    let mut copy = CapabilityEntry::new(entry.capability, entry.object.clone(), rights);
+    copy.inheritance_flags = entry.inheritance_flags;
+    child_space.insert_entry(copy).is_ok()
+}
+
 /// Inherit capabilities from parent to child process
+///
+/// Every entry of the parent is considered, whatever its ID. (The old
+/// two-level table walk visited IDs below 256 and then "the L2 tables";
+/// with globally allocated IDs the policies diverged between the two.)
 pub fn inherit_capabilities(
     parent_space: &CapabilitySpace,
     child_space: &CapabilitySpace,
     policy: InheritancePolicy,
 ) -> Result<u32, KernelError> {
+    if policy == InheritancePolicy::None {
+        return Ok(0);
+    }
     let mut inherited_count = 0;
-    let mut _skipped_count = 0;
-
-    match policy {
-        InheritancePolicy::None => {
-            // No inheritance
-            Ok(0)
+    // A snapshot: the parent's lock is not held while the child is filled.
+    for entry in parent_space.entries() {
+        if !should_inherit(entry.capability, entry.inheritance_flags, policy) {
+            continue;
         }
-        InheritancePolicy::All => {
-            // Inherit all capabilities
-            #[cfg(feature = "alloc")]
-            {
-                // Iterate through parent's L1 table
-                for cap_id in 0..256 {
-                    if let Some(cap_entry) = get_capability_at(parent_space, cap_id) {
-                        if child_space
-                            .insert(
-                                cap_entry.capability,
-                                cap_entry.object.clone(),
-                                cap_entry.rights,
-                            )
-                            .is_ok()
-                        {
-                            inherited_count += 1;
-                        }
-                    }
-                }
-
-                // Handle L2 capabilities
-                inherited_count += inherit_l2_capabilities(parent_space, child_space, None);
-            }
-
-            #[cfg(not(feature = "alloc"))]
-            {
-                // Only L1 table available
-                for cap_id in 0..256 {
-                    if let Some(cap_entry) = get_capability_at(parent_space, cap_id) {
-                        if child_space
-                            .insert(
-                                cap_entry.capability,
-                                cap_entry.object.clone(),
-                                cap_entry.rights,
-                            )
-                            .is_ok()
-                        {
-                            inherited_count += 1;
-                        }
-                    }
-                }
-            }
-
-            Ok(inherited_count)
-        }
-        InheritancePolicy::Inheritable => {
-            // Only inherit capabilities marked as inheritable
-            #[cfg(feature = "alloc")]
-            {
-                // Check L1 table
-                for cap_id in 0..256 {
-                    if let Some(cap_entry) = get_capability_at(parent_space, cap_id) {
-                        if should_inherit(cap_entry.capability, cap_entry.inheritance_flags, policy)
-                        {
-                            if let Ok(()) = child_space.insert(
-                                cap_entry.capability,
-                                cap_entry.object.clone(),
-                                cap_entry.rights,
-                            ) {
-                                inherited_count += 1
-                            }
-                        } else {
-                            _skipped_count += 1;
-                        }
-                    }
-                }
-
-                // Handle L2 capabilities
-                inherited_count += inherit_l2_capabilities(
-                    parent_space,
-                    child_space,
-                    Some(InheritanceFlags::INHERITABLE),
-                );
-            }
-
-            Ok(inherited_count)
-        }
-        InheritancePolicy::Reduced => {
-            // Inherit with reduced rights (remove GRANT permission)
-            #[cfg(feature = "alloc")]
-            {
-                for cap_id in 0..256 {
-                    if let Some(cap_entry) = get_capability_at(parent_space, cap_id) {
-                        let reduced_rights = reduce_rights_for_inheritance(cap_entry.rights);
-                        if let Ok(()) = child_space.insert(
-                            cap_entry.capability,
-                            cap_entry.object.clone(),
-                            reduced_rights,
-                        ) {
-                            inherited_count += 1
-                        }
-                    }
-                }
-
-                inherited_count += inherit_l2_capabilities_reduced(parent_space, child_space);
-            }
-
-            Ok(inherited_count)
-        }
-        InheritancePolicy::Custom => {
-            // Apply custom filter - for now, same as Inheritable
-            inherit_capabilities(parent_space, child_space, InheritancePolicy::Inheritable)
+        let rights = if policy == InheritancePolicy::Reduced {
+            reduce_rights_for_inheritance(entry.rights)
+        } else {
+            entry.rights
+        };
+        if inherit_entry(child_space, &entry, rights) {
+            inherited_count += 1;
         }
     }
+    Ok(inherited_count)
 }
 
 /// Fork inheritance - copy all capabilities to child
@@ -201,37 +120,23 @@ pub fn exec_inherit_capabilities(
     old_space: &CapabilitySpace,
     new_space: &CapabilitySpace,
 ) -> Result<(), KernelError> {
-    // Filter by PRESERVE_EXEC: only inherit capabilities explicitly marked
-    // to survive exec. This is stricter than Inheritable policy.
-    #[cfg(feature = "alloc")]
-    {
-        let mut _inherited = 0u32;
-        for cap_id in 0..256 {
-            if let Some(entry) = old_space.get_entry(cap_id) {
-                // Only preserve capabilities with PRESERVE_EXEC flag
-                if (entry.inheritance_flags & InheritanceFlags::PRESERVE_EXEC) != 0 {
-                    let rights = if (entry.inheritance_flags & InheritanceFlags::REDUCE_RIGHTS) != 0
-                    {
-                        reduce_rights_for_inheritance(entry.rights)
-                    } else {
-                        entry.rights
-                    };
-                    if let Err(_e) =
-                        new_space.insert(entry.capability, entry.object.clone(), rights)
-                    {
-                        crate::println!(
-                            "[CAP] Warning: failed to inherit capability during exec: {:?}",
-                            _e
-                        );
-                    }
-                    _inherited += 1;
-                }
-            }
+    // Stricter than the Inheritable policy. Every entry is checked; this
+    // used to scan only IDs 0..256 and silently dropped the rest.
+    for entry in old_space.entries() {
+        if (entry.inheritance_flags & InheritanceFlags::PRESERVE_EXEC) == 0 {
+            continue;
         }
-    }
-    #[cfg(not(feature = "alloc"))]
-    {
-        inherit_capabilities(old_space, new_space, InheritancePolicy::Inheritable)?;
+        let rights = if (entry.inheritance_flags & InheritanceFlags::REDUCE_RIGHTS) != 0 {
+            reduce_rights_for_inheritance(entry.rights)
+        } else {
+            entry.rights
+        };
+        if !inherit_entry(new_space, &entry, rights) {
+            crate::println!(
+                "[CAP] Warning: failed to inherit capability {:#x} during exec",
+                entry.capability.id()
+            );
+        }
     }
     Ok(())
 }
@@ -346,77 +251,6 @@ pub fn inherit_for_syscall(
 }
 
 // Helper functions
-
-/// Get capability at specific index in L1 table
-fn get_capability_at(space: &CapabilitySpace, index: usize) -> Option<CapabilityEntry> {
-    space.get_entry(index)
-}
-
-/// Inherit L2 capabilities with optional flag filter
-#[cfg(feature = "alloc")]
-fn inherit_l2_capabilities(
-    parent_space: &CapabilitySpace,
-    child_space: &CapabilitySpace,
-    required_flag: Option<u32>,
-) -> u32 {
-    let mut inherited = 0;
-
-    let _ = parent_space.iter_capabilities(|cap_entry| {
-        // Skip L1 capabilities (already handled)
-        if cap_entry.capability.id() < 256 {
-            return true; // Continue iteration
-        }
-
-        // Check flag requirement
-        if let Some(flag) = required_flag {
-            if cap_entry.inheritance_flags & flag == 0 {
-                return true; // Skip this one
-            }
-        }
-
-        // Try to inherit
-        if let Ok(()) = child_space.insert(
-            cap_entry.capability,
-            cap_entry.object.clone(),
-            cap_entry.rights,
-        ) {
-            inherited += 1;
-        }
-
-        true // Continue iteration
-    });
-
-    inherited
-}
-
-/// Inherit L2 capabilities with reduced rights
-#[cfg(feature = "alloc")]
-fn inherit_l2_capabilities_reduced(
-    parent_space: &CapabilitySpace,
-    child_space: &CapabilitySpace,
-) -> u32 {
-    let mut inherited = 0;
-
-    let _ = parent_space.iter_capabilities(|cap_entry| {
-        // Skip L1 capabilities
-        if cap_entry.capability.id() < 256 {
-            return true;
-        }
-
-        let reduced_rights = reduce_rights_for_inheritance(cap_entry.rights);
-        if let Ok(()) = child_space.insert(
-            cap_entry.capability,
-            cap_entry.object.clone(),
-            reduced_rights,
-        ) {
-            inherited += 1;
-        }
-
-        true // Continue iteration
-    });
-
-    inherited
-}
 
 /// Delegate a capability to another process
 pub fn delegate_capability(

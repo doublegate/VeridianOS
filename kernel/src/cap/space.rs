@@ -1,8 +1,21 @@
 //! Capability space implementation
 //!
-//! Provides per-process capability tables with O(1) lookup.
+//! Per-process capability tables (CAP-PERF-01): one open-addressed hash
+//! table keyed by capability ID, under a single lock. Lookup is O(1) on
+//! average and memory is proportional to the capabilities a process holds;
+//! an empty space allocates nothing.
+//!
+//! The previous layout was a 256-slot L1 array plus 256-slot L2 arrays keyed
+//! by `id >> 8`. Capability IDs come from one global allocator, so nearly
+//! every capability landed in an L2 array of its own: about 14 KiB of
+//! mostly empty slots per capability, behind a map lock taken on every
+//! lookup, and the inheritance code that walked "the L1 range" missed most
+//! capabilities entirely.
 
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
+
+use spin::RwLock;
 
 use super::{
     object::ObjectRef,
@@ -10,25 +23,6 @@ use super::{
     types::CapabilityId,
 };
 use crate::error::KernelError;
-
-#[cfg(feature = "alloc")]
-extern crate alloc;
-
-#[cfg(feature = "alloc")]
-use alloc::{boxed::Box, collections::BTreeMap};
-
-use spin::RwLock;
-
-/// Size of L1 capability table (direct lookup)
-const L1_SIZE: usize = 256;
-
-/// Size of L2 capability tables
-const L2_SIZE: usize = 256;
-
-/// Type alias for L2 tables to reduce complexity
-#[cfg(feature = "alloc")]
-// Keyed by the full `id >> 8`: a u16 key aliased ids 2^24 apart (N-04).
-type L2Tables = BTreeMap<u64, Box<[RwLock<Option<CapabilityEntry>>; L2_SIZE]>>;
 
 /// A single capability entry in the capability space
 pub struct CapabilityEntry {
@@ -72,13 +66,22 @@ impl CapabilityEntry {
         self.inheritance_flags = flags;
         self
     }
+
+    /// A copy for another space: same capability, fresh usage count.
+    fn copy_for_new_space(&self) -> Self {
+        Self {
+            usage_count: AtomicU64::new(0),
+            ..self.clone()
+        }
+    }
 }
 
 /// Statistics for capability space
 #[derive(Default)]
 pub struct CapSpaceStats {
     pub total_caps: AtomicU64,
-    pub lookups: AtomicU64,
+    /// Lookups that found the capability (lookups = hits + misses; not
+    /// counted separately to keep a shared counter off the lookup path).
     pub hits: AtomicU64,
     pub misses: AtomicU64,
 }
@@ -86,14 +89,113 @@ pub struct CapSpaceStats {
 /// Default capability quota per process
 pub const DEFAULT_CAP_QUOTA: usize = 256;
 
+enum Slot {
+    Empty,
+    /// A removed entry; probes continue past it.
+    Tombstone,
+    Full(CapabilityEntry),
+}
+
+/// Open-addressed (linear probing) table keyed by capability ID. The
+/// capacity is zero or a power of two, and at most 3/4 of it is in use
+/// (live entries plus tombstones), so every probe meets an empty slot.
+#[derive(Default)]
+struct CapTable {
+    slots: Vec<Slot>,
+    full: usize,
+    tombstones: usize,
+}
+
+impl CapTable {
+    const MIN_CAPACITY: usize = 8;
+
+    fn home(&self, id: u64) -> usize {
+        // Fibonacci hashing: IDs are sequential, so spread them.
+        (id.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as usize & (self.slots.len() - 1)
+    }
+
+    /// Slot index of the entry with `id`.
+    fn find(&self, id: u64) -> Option<usize> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let mask = self.slots.len() - 1;
+        let mut i = self.home(id);
+        loop {
+            match &self.slots[i] {
+                Slot::Empty => return None,
+                Slot::Full(e) if e.capability.id() == id => return Some(i),
+                _ => i = (i + 1) & mask,
+            }
+        }
+    }
+
+    fn get(&self, id: u64) -> Option<&CapabilityEntry> {
+        match &self.slots[self.find(id)?] {
+            Slot::Full(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Insert an entry whose ID is not present.
+    fn insert_new(&mut self, entry: CapabilityEntry) {
+        if (self.full + self.tombstones + 1) * 4 > self.slots.len() * 3 {
+            // Rehash; doubles only when live entries need the room.
+            let needed = (self.full + 1) * 2;
+            self.rehash(needed.next_power_of_two().max(Self::MIN_CAPACITY));
+        }
+        let mask = self.slots.len() - 1;
+        let mut i = self.home(entry.capability.id());
+        loop {
+            match self.slots[i] {
+                Slot::Empty => break,
+                Slot::Tombstone => {
+                    self.tombstones -= 1;
+                    break;
+                }
+                Slot::Full(_) => i = (i + 1) & mask,
+            }
+        }
+        self.slots[i] = Slot::Full(entry);
+        self.full += 1;
+    }
+
+    fn rehash(&mut self, capacity: usize) {
+        let old = core::mem::take(&mut self.slots);
+        self.slots = (0..capacity).map(|_| Slot::Empty).collect();
+        self.full = 0;
+        self.tombstones = 0;
+        for slot in old {
+            if let Slot::Full(e) = slot {
+                self.insert_new(e);
+            }
+        }
+    }
+
+    fn remove_at(&mut self, i: usize) -> Option<CapabilityEntry> {
+        let Slot::Full(e) = core::mem::replace(&mut self.slots[i], Slot::Tombstone) else {
+            return None;
+        };
+        self.full -= 1;
+        self.tombstones += 1;
+        if self.full == 0 {
+            // Give the memory back once the space is empty.
+            *self = Self::default();
+        }
+        Some(e)
+    }
+
+    fn entries(&self) -> impl Iterator<Item = &CapabilityEntry> {
+        self.slots.iter().filter_map(|s| match s {
+            Slot::Full(e) => Some(e),
+            _ => None,
+        })
+    }
+}
+
 /// Per-process capability space
 pub struct CapabilitySpace {
-    /// Fast lookup table (L1) - for first 256 capabilities
-    l1_table: Box<[RwLock<Option<CapabilityEntry>>; L1_SIZE]>,
-
-    /// Second level tables (L2) - for capabilities beyond 256
-    #[cfg(feature = "alloc")]
-    l2_tables: RwLock<L2Tables>,
+    table: RwLock<CapTable>,
 
     /// Generation counter for this space
     generation: AtomicU8,
@@ -101,7 +203,8 @@ pub struct CapabilitySpace {
     /// Maximum number of capabilities allowed in this space
     quota: usize,
 
-    /// Number of capabilities currently in this space
+    /// Number of capabilities currently in this space (mirrors the table;
+    /// readable without the lock)
     used: AtomicUsize,
 
     /// Statistics
@@ -116,13 +219,8 @@ impl CapabilitySpace {
 
     /// Create a new capability space with a specific quota
     pub fn with_quota(quota: usize) -> Self {
-        // Initialize L1 table with None values
-        let l1_table = Box::new(core::array::from_fn(|_| RwLock::new(None)));
-
         Self {
-            l1_table,
-            #[cfg(feature = "alloc")]
-            l2_tables: RwLock::new(BTreeMap::new()),
+            table: RwLock::new(CapTable::default()),
             generation: AtomicU8::new(0),
             quota,
             used: AtomicUsize::new(0),
@@ -140,45 +238,35 @@ impl CapabilitySpace {
         self.quota
     }
 
+    /// Slots allocated by the table (for tests and diagnostics).
+    pub(crate) fn table_capacity(&self) -> usize {
+        self.table.read().slots.len()
+    }
+
+    /// Run `f` on the entry for exactly `cap` (same ID and generation),
+    /// counting the lookup.
+    fn with_exact<R>(
+        &self,
+        cap: CapabilityToken,
+        f: impl FnOnce(&CapabilityEntry) -> R,
+    ) -> Option<R> {
+        let table = self.table.read();
+        match table.get(cap.id()) {
+            Some(entry) if entry.capability == cap => {
+                self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                entry.usage_count.fetch_add(1, Ordering::Relaxed);
+                Some(f(entry))
+            }
+            _ => {
+                self.stats.misses.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
+    }
+
     /// O(1) lookup of capability
     pub fn lookup(&self, cap: CapabilityToken) -> Option<Rights> {
-        self.stats.lookups.fetch_add(1, Ordering::Relaxed);
-
-        let cap_id = cap.id() as usize;
-
-        // Fast path: check L1 table
-        if cap_id < L1_SIZE {
-            let entry = self.l1_table[cap_id].read();
-            if let Some(ref cap_entry) = *entry {
-                if cap_entry.capability == cap {
-                    self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                    cap_entry.usage_count.fetch_add(1, Ordering::Relaxed);
-                    return Some(cap_entry.rights);
-                }
-            }
-        }
-
-        // Slow path: check L2 tables
-        #[cfg(feature = "alloc")]
-        {
-            let l1_index = (cap_id >> 8) as u64;
-            let l2_index = cap_id & 0xFF;
-
-            let l2_tables = self.l2_tables.read();
-            if let Some(l2_table) = l2_tables.get(&l1_index) {
-                let entry = l2_table[l2_index].read();
-                if let Some(ref cap_entry) = *entry {
-                    if cap_entry.capability == cap {
-                        self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                        cap_entry.usage_count.fetch_add(1, Ordering::Relaxed);
-                        return Some(cap_entry.rights);
-                    }
-                }
-            }
-        }
-
-        self.stats.misses.fetch_add(1, Ordering::Relaxed);
-        None
+        self.with_exact(cap, |e| e.rights)
     }
 
     /// Insert a capability into the space
@@ -188,99 +276,45 @@ impl CapabilitySpace {
         object: ObjectRef,
         rights: Rights,
     ) -> Result<(), KernelError> {
-        // Check quota before inserting
-        if self.used.load(Ordering::Relaxed) >= self.quota {
+        self.insert_entry(CapabilityEntry::new(cap, object, rights))
+    }
+
+    /// Insert a complete entry (keeps its inheritance flags).
+    pub(crate) fn insert_entry(&self, entry: CapabilityEntry) -> Result<(), KernelError> {
+        let mut table = self.table.write();
+        // Checked under the lock, so concurrent inserts cannot overshoot.
+        if table.full >= self.quota {
             return Err(KernelError::ResourceExhausted {
                 resource: "capability quota",
             });
         }
-
-        let cap_id = cap.id() as usize;
-
-        // Fast path: insert into L1 table
-        if cap_id < L1_SIZE {
-            let mut entry = self.l1_table[cap_id].write();
-            if entry.is_some() {
-                return Err(KernelError::AlreadyExists {
-                    resource: "capability slot",
-                    id: cap_id as u64,
-                });
-            }
-            *entry = Some(CapabilityEntry::new(cap, object, rights));
-            self.used.fetch_add(1, Ordering::Relaxed);
-            self.stats.total_caps.fetch_add(1, Ordering::Relaxed);
-            return Ok(());
+        let id = entry.capability.id();
+        if table.find(id).is_some() {
+            return Err(KernelError::AlreadyExists {
+                resource: "capability slot",
+                id,
+            });
         }
-
-        // Slow path: insert into L2 table
-        #[cfg(feature = "alloc")]
-        {
-            let l1_index = (cap_id >> 8) as u64;
-            let l2_index = cap_id & 0xFF;
-
-            let mut l2_tables = self.l2_tables.write();
-
-            // Create L2 table if it doesn't exist
-            let l2_table = l2_tables
-                .entry(l1_index)
-                .or_insert_with(|| Box::new(core::array::from_fn(|_| RwLock::new(None))));
-
-            let mut entry = l2_table[l2_index].write();
-            if entry.is_some() {
-                return Err(KernelError::AlreadyExists {
-                    resource: "capability slot",
-                    id: cap_id as u64,
-                });
-            }
-            *entry = Some(CapabilityEntry::new(cap, object, rights));
-            self.used.fetch_add(1, Ordering::Relaxed);
-            self.stats.total_caps.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }
-
-        #[cfg(not(feature = "alloc"))]
-        Err(KernelError::ResourceExhausted {
-            resource: "L1 capability table",
-        })
+        table.insert_new(entry);
+        self.used.store(table.full, Ordering::Relaxed);
+        self.stats.total_caps.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Remove a capability from the space
     pub fn remove(&self, cap: CapabilityToken) -> Option<ObjectRef> {
-        let cap_id = cap.id() as usize;
-
-        // Fast path: remove from L1 table
-        if cap_id < L1_SIZE {
-            let mut entry = self.l1_table[cap_id].write();
-            // Only the exact token (same generation) removes the entry; a
-            // stale token must leave the live capability alone (N-04).
-            if entry.as_ref().is_some_and(|e| e.capability == cap) {
-                let cap_entry = entry.take()?;
-                self.used.fetch_sub(1, Ordering::Relaxed);
-                self.stats.total_caps.fetch_sub(1, Ordering::Relaxed);
-                return Some(cap_entry.object);
-            }
-            return None;
+        let mut table = self.table.write();
+        let i = table.find(cap.id())?;
+        // Only the exact token (same generation) removes the entry; a
+        // stale token must leave the live capability alone (N-04).
+        match &table.slots[i] {
+            Slot::Full(e) if e.capability == cap => {}
+            _ => return None,
         }
-
-        // Slow path: remove from L2 table
-        #[cfg(feature = "alloc")]
-        {
-            let l1_index = (cap_id >> 8) as u64;
-            let l2_index = cap_id & 0xFF;
-
-            let l2_tables = self.l2_tables.read();
-            if let Some(l2_table) = l2_tables.get(&l1_index) {
-                let mut entry = l2_table[l2_index].write();
-                if entry.as_ref().is_some_and(|e| e.capability == cap) {
-                    let cap_entry = entry.take()?;
-                    self.used.fetch_sub(1, Ordering::Relaxed);
-                    self.stats.total_caps.fetch_sub(1, Ordering::Relaxed);
-                    return Some(cap_entry.object);
-                }
-            }
-        }
-
-        None
+        let entry = table.remove_at(i)?;
+        self.used.store(table.full, Ordering::Relaxed);
+        self.stats.total_caps.fetch_sub(1, Ordering::Relaxed);
+        Some(entry.object)
     }
 
     /// Check if process has capability with specific rights
@@ -304,19 +338,15 @@ impl CapabilitySpace {
 
     /// Clear all capabilities
     pub fn clear(&self) {
-        // Clear L1 table
-        for i in 0..L1_SIZE {
-            *self.l1_table[i].write() = None;
-        }
-
-        // Clear L2 tables
-        #[cfg(feature = "alloc")]
-        {
-            self.l2_tables.write().clear();
-        }
-
+        *self.table.write() = CapTable::default();
         self.used.store(0, Ordering::Relaxed);
         self.stats.total_caps.store(0, Ordering::Relaxed);
+    }
+
+    /// Copies of every entry, taken under the lock and returned after it is
+    /// released, so callers may insert into any space (even this one).
+    pub fn entries(&self) -> Vec<CapabilityEntry> {
+        self.table.read().entries().cloned().collect()
     }
 
     /// Clone capabilities from another capability space
@@ -324,51 +354,21 @@ impl CapabilitySpace {
     /// Copies all capabilities from the source space to this space.
     /// Used during fork() to give child process same capabilities as parent.
     pub fn clone_from(&self, other: &Self) -> Result<(), KernelError> {
-        // Clear existing capabilities first
-        self.clear();
-
-        // Clone L1 table entries
-        for i in 0..L1_SIZE {
-            let source_entry = other.l1_table[i].read();
-            if let Some(ref entry) = *source_entry {
-                *self.l1_table[i].write() = Some(CapabilityEntry {
-                    capability: entry.capability,
-                    object: entry.object.clone(),
-                    rights: entry.rights,
-                    usage_count: AtomicU64::new(0),
-                    inheritance_flags: entry.inheritance_flags,
-                });
-                self.stats.total_caps.fetch_add(1, Ordering::Relaxed);
-            }
+        // Copy first, then publish: the two locks are never held together.
+        let copies: Vec<CapabilityEntry> = other
+            .table
+            .read()
+            .entries()
+            .map(CapabilityEntry::copy_for_new_space)
+            .collect();
+        let mut table = CapTable::default();
+        for entry in copies {
+            table.insert_new(entry);
         }
-
-        // Clone L2 table entries
-        #[cfg(feature = "alloc")]
-        {
-            let source_l2 = other.l2_tables.read();
-            let mut dest_l2 = self.l2_tables.write();
-
-            for (l1_index, source_table) in source_l2.iter() {
-                let new_table: Box<[RwLock<Option<CapabilityEntry>>; L2_SIZE]> =
-                    Box::new(core::array::from_fn(|_| RwLock::new(None)));
-
-                for j in 0..L2_SIZE {
-                    let source_entry = source_table[j].read();
-                    if let Some(ref entry) = *source_entry {
-                        *new_table[j].write() = Some(CapabilityEntry {
-                            capability: entry.capability,
-                            object: entry.object.clone(),
-                            rights: entry.rights,
-                            usage_count: AtomicU64::new(0),
-                            inheritance_flags: entry.inheritance_flags,
-                        });
-                        self.stats.total_caps.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-
-                dest_l2.insert(*l1_index, new_table);
-            }
-        }
+        let count = table.full;
+        *self.table.write() = table;
+        self.used.store(count, Ordering::Relaxed);
+        self.stats.total_caps.store(count as u64, Ordering::Relaxed);
 
         // Set generation to match source
         self.generation
@@ -428,99 +428,30 @@ impl CapabilitySpace {
         &self.stats
     }
 
-    /// Iterate over all capabilities (for inheritance)
-    #[cfg(feature = "alloc")]
+    /// Iterate over all capabilities until `f` returns false. `f` runs
+    /// under the space's read lock and must not modify this space; use
+    /// [`entries`](Self::entries) for that.
     pub fn iter_capabilities<F>(&self, mut f: F) -> Result<(), KernelError>
     where
         F: FnMut(&CapabilityEntry) -> bool,
     {
-        // Iterate L1 table
-        for i in 0..L1_SIZE {
-            let entry_guard = self.l1_table[i].read();
-            if let Some(ref entry) = *entry_guard {
-                if !f(entry) {
-                    return Ok(()); // Early exit if function returns false
-                }
+        let table = self.table.read();
+        for entry in table.entries() {
+            if !f(entry) {
+                break;
             }
         }
-
-        // Iterate L2 tables
-        let l2_tables = self.l2_tables.read();
-        for (_, l2_table) in l2_tables.iter() {
-            for i in 0..L2_SIZE {
-                let entry_guard = l2_table[i].read();
-                if let Some(ref entry) = *entry_guard {
-                    if !f(entry) {
-                        return Ok(()); // Early exit
-                    }
-                }
-            }
-        }
-
         Ok(())
     }
 
-    /// Get capability entry by ID (for inheritance)
+    /// Get capability entry by ID (any generation)
     pub fn get_entry(&self, cap_id: usize) -> Option<CapabilityEntry> {
-        // Fast path: check L1 table
-        if cap_id < L1_SIZE {
-            let entry = self.l1_table[cap_id].read();
-            return entry.clone();
-        }
-
-        // Slow path: check L2 tables
-        #[cfg(feature = "alloc")]
-        {
-            let l1_index = (cap_id >> 8) as u64;
-            let l2_index = cap_id & 0xFF;
-
-            let l2_tables = self.l2_tables.read();
-            if let Some(l2_table) = l2_tables.get(&l1_index) {
-                let entry = l2_table[l2_index].read();
-                return entry.clone();
-            }
-        }
-
-        None
+        self.table.read().get(cap_id as u64).cloned()
     }
 
     /// Lookup and get full capability entry
     pub fn lookup_entry(&self, cap: CapabilityToken) -> Option<(ObjectRef, Rights)> {
-        let cap_id = cap.id() as usize;
-
-        // Fast path: check L1 table
-        if cap_id < L1_SIZE {
-            let entry = self.l1_table[cap_id].read();
-            if let Some(ref cap_entry) = *entry {
-                if cap_entry.capability == cap {
-                    self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                    cap_entry.usage_count.fetch_add(1, Ordering::Relaxed);
-                    return Some((cap_entry.object.clone(), cap_entry.rights));
-                }
-            }
-        }
-
-        // Slow path: check L2 tables
-        #[cfg(feature = "alloc")]
-        {
-            let l1_index = (cap_id >> 8) as u64;
-            let l2_index = cap_id & 0xFF;
-
-            let l2_tables = self.l2_tables.read();
-            if let Some(l2_table) = l2_tables.get(&l1_index) {
-                let entry = l2_table[l2_index].read();
-                if let Some(ref cap_entry) = *entry {
-                    if cap_entry.capability == cap {
-                        self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                        cap_entry.usage_count.fetch_add(1, Ordering::Relaxed);
-                        return Some((cap_entry.object.clone(), cap_entry.rights));
-                    }
-                }
-            }
-        }
-
-        self.stats.misses.fetch_add(1, Ordering::Relaxed);
-        None
+        self.with_exact(cap, |e| (e.object.clone(), e.rights))
     }
 }
 

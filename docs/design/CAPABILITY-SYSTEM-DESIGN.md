@@ -8,7 +8,7 @@
 
 All capability system features fully implemented and benchmarked:
 - 64-bit packed capability tokens with generation counters
-- Two-level capability space with O(1) lookup
+- Per-process hash-table capability space with O(1) average lookup (CAP-PERF-01, v0.26.0)
 - Per-CPU capability cache for hot path performance
 - Hierarchical inheritance with configurable policies (fork/exec)
 - Cascading revocation via delegation tree tracking
@@ -119,50 +119,36 @@ bitflags! {
 ## Capability Space
 
 ### Per-Process Capability Table
+
+Each process has one open-addressed hash table keyed by capability ID, under
+a single `RwLock` (`kernel/src/cap/space.rs`):
+
 ```rust
 pub struct CapabilitySpace {
-    /// Fast lookup table (L1)
-    l1_table: Box<[Option<CapEntry>; L1_SIZE]>, // 256 entries
-    /// Second level tables (L2)
-    l2_tables: HashMap<u16, Box<[Option<CapEntry>; L2_SIZE]>>, // 256 entries each
-    /// Generation counter for revocation
+    /// Linear-probing table; capacity is 0 or a power of two, at most 3/4
+    /// used (live entries + tombstones). Empty spaces allocate nothing.
+    table: RwLock<CapTable>,
     generation: AtomicU8,
-    /// Statistics
+    quota: usize,          // enforced under the table lock
+    used: AtomicUsize,     // mirrors the table, readable without the lock
     stats: CapSpaceStats,
 }
-
-pub struct CapEntry {
-    /// The capability token
-    capability: Capability,
-    /// Object reference
-    object: ObjectRef,
-    /// Access rights
-    rights: Rights,
-    /// Usage count
-    usage_count: AtomicU64,
-}
-
-impl CapabilitySpace {
-    /// O(1) lookup in common case
-    pub fn lookup(&self, cap: Capability) -> Option<&CapEntry> {
-        let index = cap.id as usize;
-        
-        // Fast path: check L1 table
-        if index < L1_SIZE {
-            return self.l1_table[index].as_ref()
-                .filter(|entry| entry.capability == cap);
-        }
-        
-        // Slow path: check L2 table
-        let l1_index = (index >> 8) as u16;
-        let l2_index = (index & 0xFF) as usize;
-        
-        self.l2_tables.get(&l1_index)
-            .and_then(|table| table[l2_index].as_ref())
-            .filter(|entry| entry.capability == cap)
-    }
-}
 ```
+
+- **Lookup** hashes the ID (Fibonacci hashing, since IDs are sequential),
+  probes to the entry, and requires the full token (ID and generation) to
+  match. A stale-generation token never matches or removes the live entry.
+- **Memory** is proportional to the capabilities held. Capability IDs come
+  from one global allocator, so a process's IDs are widely spread. The
+  earlier layout (a 256-slot L1 array plus 256-slot L2 arrays keyed by
+  `id >> 8`) spent about 14 KiB per capability for that reason, and the
+  inheritance code that walked "the L1 range" missed most capabilities
+  (audit N-30).
+- **Iteration** for inheritance uses `entries()`, a snapshot taken under
+  the lock and returned after it is released, so a caller can fill another
+  space (or the same one) without holding two locks.
+- **ID allocation** (`IdAllocator`) is an atomic counter; the recycled-ID
+  set is locked only when it is non-empty (CAP-PERF-02).
 
 ### Object References
 ```rust
@@ -506,10 +492,17 @@ pub fn sys_capability(op: CapSyscall) -> Result<SyscallResult, SyscallError> {
 ## Performance Optimizations
 
 ### Fast Path Design
-1. L1 capability cache hit: ~10 cycles
-2. L1 capability table hit: ~20 cycles
-3. L2 capability table hit: ~50 cycles
-4. Full validation: ~100 cycles
+Measured with the in-kernel `perf` command (`cap_lookup`: a space holding 64
+capabilities with spread IDs; x86_64 under KVM, dev build, calibrated TSC):
+
+| Table | avg | max |
+|---|---|---|
+| Two-level L1/L2 (v0.25) | 364 ns | 1000 ns |
+| Hash table (v0.26) | 169 ns | 191 ns |
+
+The 100 ns target is not met in a dev build. The earlier `cap_validate`
+benchmark that reported a pass compared two constants and measured no
+capability code.
 
 ### Memory Layout
 - Cache-line aligned structures

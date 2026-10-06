@@ -72,8 +72,8 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | IPC-SEC-01 | CONFIRMED (worse) | `ipc/registry.rs:408-427` | Endpoints are stored by value in a `BTreeMap`, which moves values on node split/merge, so *any* insert can dangle the `&'static`. Live caller: `syscall/mod.rs:2686`. Endpoint IDs come from two different counters. | v0.26.0 | fixed (4f1666e) |
 | CAP-INC-01 | PARTIAL, LATENT | `cap/revocation.rs:80-90` | Logic bug confirmed, but `cleanup` has no callers and production checks use `cap_manager().is_valid()`, not `REVOCATION_LIST`. | v0.26.0 | fixed: cleanup() removed |
 | CAP-INC-02 | CONFIRMED, dead code | `cap/revocation.rs:288-342`, `cap/manager.rs:213-268, 295` | Derivation tree never populated; cascade rebuilds tokens without generation/type/flags; revocation is broadcast twice. | v0.27.0 | open |
-| CAP-PERF-01 | CONFIRMED | `cap/space.rs:146-266`, `cap/manager.rs:52-95` | As described. | v0.26.0 | open |
-| CAP-PERF-02 | CONFIRMED | `cap/space.rs:91, 223` | As described; also `IdAllocator::allocate` takes a write lock on every allocation. | v0.26.0 | open |
+| CAP-PERF-01 | CONFIRMED | `cap/space.rs:146-266`, `cap/manager.rs:52-95` | As described. | v0.26.0 | fixed (per-process open-addressed hash table, one lock, memory O(caps held); `cap_lookup` 364 -> 169 ns avg in a dev build; `IdAllocator` takes its lock only when recycled IDs exist) |
+| CAP-PERF-02 | CONFIRMED | `cap/space.rs:91, 223` | As described; also `IdAllocator::allocate` takes a write lock on every allocation. | v0.26.0 | fixed (with CAP-PERF-01) |
 
 ### Scheduler, process and syscalls
 
@@ -159,6 +159,7 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | N-27 | `fs/file.rs` FileTable | `open` returned a `next_fd` counter but stored the file at `files.len()`; after `dup2` grew the table the two differed, so the returned fd named a different (or no) file. `F_DUPFD` (`dup_at_least`) could overwrite an occupied slot the same way. | v0.26.0 | fixed (append at the table length; counter removed; model test) |
 | N-28 | `arch/aarch64` | The MMU and caches are never enabled (no TCR/MAIR/TTBR1 setup; SCTLR_EL1 = 0). With all memory treated as Device memory, exclusive load/store is unreliable, which is why ramfs/tmpfs/devfs/pty/... use `fs::bare_lock`, an `UnsafeCell` wrapper that does not lock at all. Blocks AArch64 SMP and EL0. | v0.27.0 (C5) | open |
 | N-29 | `drivers/virtio/mmio.rs` | The virtio-mmio probe checked only the first four slots, but QEMU fills them from the top, so AArch64/RISC-V never found a virtio-blk disk. Fixing the probe exposed that mounting the root image there exhausted the 8 MiB bump heap (every block was loaded at mount). | v0.26.0 | fixed (all slots probed; FS-PERF-01 lazy cache lets AArch64/RISC-V mount it) |
+| N-30 | `cap/inheritance.rs` | exec inheritance scanned only capability IDs 0..256. IDs come from one global allocator, so after the first 256 capabilities system-wide every `PRESERVE_EXEC` capability was dropped at exec. Inherited capabilities also lost their inheritance flags (reset to `INHERITABLE`). | v0.26.0 | fixed (every policy walks an `entries()` snapshot; flags are kept; tests) |
 
 ## Runtime verification status
 
