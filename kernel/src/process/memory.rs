@@ -20,8 +20,8 @@ pub mod layout {
     /// User space start
     pub const USER_SPACE_START: usize = 0x0000_0000_0001_0000;
 
-    /// User space end
-    pub const USER_SPACE_END: usize = 0x0000_7FFF_FFFF_0000;
+    /// User space end (exclusive; defined in mm::user_layout)
+    pub use crate::mm::user_layout::USER_SPACE_END;
 
     /// Default code segment start
     pub const CODE_START: usize = 0x0000_0000_0040_0000;

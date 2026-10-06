@@ -15,6 +15,7 @@ pub mod heap;
 pub mod ksm;
 pub mod page_fault;
 pub mod page_table;
+pub mod user_layout;
 pub mod user_validation;
 pub mod vas;
 pub mod vmm;

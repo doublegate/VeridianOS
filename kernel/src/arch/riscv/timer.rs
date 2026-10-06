@@ -63,21 +63,9 @@ pub fn read_time() -> u64 {
 /// Read the timebase frequency and Sstc support from the device tree at
 /// physical address `dtb_pa` (0 if firmware passed none).
 pub fn init_from_device_tree(dtb_pa: u64) {
-    if dtb_pa == 0 {
-        crate::println!("[TIMER] No device tree: assuming a 10 MHz timebase, no Sstc");
-        return;
-    }
-    let base = crate::mm::phys_to_virt_addr(dtb_pa) as *const u8;
-    // SAFETY: firmware passes the DTB's physical address in a1; it is mapped
-    // (RISC-V runs with RAM identity-mapped) and at least a header long.
-    let header = unsafe { core::slice::from_raw_parts(base, 40) };
-    let Some(size) = crate::arch::fdt::Fdt::total_size(header) else {
-        crate::println!("[TIMER] Device tree has a bad header; keeping 10 MHz timebase");
-        return;
-    };
-    // SAFETY: the header's totalsize covers the blob firmware placed there.
-    let blob = unsafe { core::slice::from_raw_parts(base, size.min(16 << 20)) };
-    let Some(fdt) = crate::arch::fdt::Fdt::new(blob) else {
+    // SAFETY: dtb_pa is what firmware passed in a1 (saved by boot.S).
+    let Some(fdt) = (unsafe { crate::arch::fdt::Fdt::from_phys(dtb_pa) }) else {
+        crate::println!("[TIMER] No usable device tree: assuming a 10 MHz timebase, no Sstc");
         return;
     };
     if let Some(hz) = fdt.property_u64(&["cpus"], "timebase-frequency") {

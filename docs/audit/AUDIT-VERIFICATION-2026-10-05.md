@@ -153,6 +153,9 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | N-21 | `timer/mod.rs` | `timer_tick` had no callers, so uptime stayed 0: every timed wait (nanosleep, poll/epoll/futex timeouts, timerfd) hung forever and CLOCK_MONOTONIC read 0. x86 TSC frequency was a hard-coded 2 GHz. | v0.26.0 | fixed (ADR 0001: architectural clock sources; runtime- and boot-tested) |
 | N-22 | `arch/aarch64`, `arch/riscv64` | AArch64 never set VBAR_EL1 (every exception went to address 0) and took no interrupts; RISC-V could not take any trap; the generic timer / stimecmp were never armed; the RISC-V device tree pointer was discarded. | v0.26.0 | fixed (vector tables, GIC/virtual timer, trap entry with Sstc/SBI timer; boot test 34) |
 | N-23 | `sync/once_lock.rs`, `timer/mod.rs` | The tick path took `GlobalState`'s outer lock, so a timer interrupt arriving while it was held deadlocked the CPU (hit during `timer::init` on first RISC-V interrupt). | v0.26.0 | fixed (`GlobalState::try_with_mut`) |
+| N-24 | `syscall/memory.rs` mmap | `MAP_FIXED` had no upper bound: a fixed mapping could be requested in the kernel half or the reserved top x86 page (SYSRET non-canonical return). Four inconsistent user-space limits elsewhere. | v0.26.0 | fixed (ADR 0002: one `mm::user_layout`; runtime-tested) |
+| N-25 | `mm/page_table.rs` (riscv64) | satp written with MODE 8 (Sv39) for 4-level page tables (Sv48 = 9), with no `sfence.vma`; latent until RISC-V user mode. | v0.26.0 | fixed (MODE 9 + sfence.vma; Sv48 checked from device tree `mmu-type`) |
+| N-26 | kernel stacks | No guard pages: kernel stacks come from the direct map, so an overflow corrupts the adjacent frame silently. | v0.27.0 (C5) | open |
 
 ## Runtime verification status
 

@@ -56,6 +56,24 @@ impl<'a> Fdt<'a> {
         })
     }
 
+    /// The blob firmware left at physical address `pa` (0 = none).
+    ///
+    /// # Safety
+    /// `pa` must be the address firmware passed for its device tree, mapped
+    /// by the kernel's direct map, and the blob must stay in place.
+    pub unsafe fn from_phys(pa: u64) -> Option<Fdt<'static>> {
+        if pa == 0 {
+            return None;
+        }
+        let base = crate::mm::phys_to_virt_addr(pa) as *const u8;
+        // SAFETY: the caller guarantees a mapped blob; 40 bytes is the
+        // fixed header, which is validated before anything else is read.
+        let header = unsafe { core::slice::from_raw_parts(base, 40) };
+        let size = Self::total_size(header)?.min(16 << 20);
+        // SAFETY: totalsize from the validated header covers the blob.
+        Fdt::new(unsafe { core::slice::from_raw_parts(base, size) })
+    }
+
     /// Total size of a blob from its header, if it is one (to build the
     /// slice from a raw pointer).
     pub fn total_size(header: &[u8]) -> Option<usize> {

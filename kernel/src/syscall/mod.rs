@@ -30,16 +30,16 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::{
-    ipc::{sync_call, sync_receive, sync_reply, sync_send, IpcError, Message, SmallMessage},
-    sched,
-};
-
 /// Maximum valid user-space address.
 ///
 /// On x86_64 this is the canonical upper bound of user space (128 TB).
 /// AArch64 and RISC-V use the same logical split for the QEMU virt machine.
-const USER_SPACE_END: usize = 0x0000_7FFF_FFFF_FFFF;
+/// Exclusive end of user space (see mm::user_layout for why).
+use crate::mm::user_layout::USER_SPACE_END;
+use crate::{
+    ipc::{sync_call, sync_receive, sync_reply, sync_send, IpcError, Message, SmallMessage},
+    sched,
+};
 
 /// Maximum allowed buffer size for syscall arguments (256 MB).
 const MAX_BUFFER_SIZE: usize = 256 * 1024 * 1024;

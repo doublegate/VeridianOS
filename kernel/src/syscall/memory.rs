@@ -110,10 +110,18 @@ pub fn sys_mmap(
         return Err(SyscallError::InvalidArgument);
     }
 
-    // MAP_FIXED requires a valid non-null, page-aligned address
+    // MAP_FIXED requires a page-aligned address whose whole (page-rounded)
+    // range is user space. Without the range check a fixed mapping could
+    // be placed in the kernel half or the reserved top page.
     let is_fixed = flags & MAP_FIXED != 0;
-    if is_fixed && (addr == 0 || addr & 0xFFF != 0) {
-        return Err(SyscallError::InvalidArgument);
+    if is_fixed {
+        let aligned_len = length
+            .checked_add(PAGE_SIZE - 1)
+            .ok_or(SyscallError::InvalidArgument)?
+            & !(PAGE_SIZE - 1);
+        if addr & 0xFFF != 0 || !crate::mm::user_layout::is_user_range(addr, aligned_len) {
+            return Err(SyscallError::InvalidArgument);
+        }
     }
 
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;

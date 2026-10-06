@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -409,6 +410,30 @@ static void test_timed_waits(void)
     }
 }
 
+/* --- User address-space limit (mm::user_layout). ----------------------- */
+static void test_map_fixed_limits(void)
+{
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED;
+    /* Highest legitimate page: allowed. */
+    void *top = mmap((void *)0x7FFFFFFFE000UL, 4096, PROT_READ | PROT_WRITE, flags, -1, 0);
+    int ok_top = top == (void *)0x7FFFFFFFE000UL;
+    if (ok_top) {
+        *(volatile int *)top = 42;
+        ok_top = *(volatile int *)top == 42;
+        munmap(top, 4096);
+    }
+    /* Reserved top canonical page (SYSRET / Ryzen) and the kernel half:
+     * rejected. */
+    void *guard = mmap((void *)0x7FFFFFFFF000UL, 4096, PROT_READ, flags, -1, 0);
+    void *kern = mmap((void *)0xFFFF800000000000UL, 4096, PROT_READ, flags, -1, 0);
+    /* A range that starts below the limit but runs past it. */
+    void *span = mmap((void *)0x7FFFFFFFE000UL, 8192, PROT_READ, flags, -1, 0);
+    static char why[96];
+    snprintf(why, sizeof(why), "top=%p guard=%p kernel=%p span=%p", top, guard, kern, span);
+    report("map_fixed_user_limits",
+           ok_top && guard == MAP_FAILED && kern == MAP_FAILED && span == MAP_FAILED, why);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -427,6 +452,7 @@ int main(int argc, char **argv)
     test_umask();
     test_sockets();
     test_timed_waits();
+    test_map_fixed_limits();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }
