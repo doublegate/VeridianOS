@@ -200,6 +200,40 @@ pub fn sys_thread_clone(
     }
     drop(current_ctx);
 
+    // Both TID writes happen before the thread joins the process and before
+    // its task exists: either can fault, and failing after the enqueue left
+    // a runnable child behind an error return (review of the v0.26.0 stack,
+    // PR #14). Here a failure only drops the unregistered `thread`.
+    //
+    // CLONE_PARENT_SETTID: write the child's TID into the parent's address
+    // space at `parent_tid_ptr`, so the parent can observe the TID
+    // immediately after clone returns.
+    if flags & CLONE_PARENT_SETTID != 0 {
+        // SAFETY: `parent_tid_ptr` was validated above via `validate_user_ptr`.
+        // `copy_to_user` performs its own bounds check as a defence-in-depth
+        // measure.  The write is a single u32 which is naturally aligned.
+        unsafe {
+            crate::syscall::userspace::copy_to_user(parent_tid_ptr, &(tid.0 as u32))
+                .map_err(|_| SyscallError::InvalidPointer)?;
+        }
+    }
+
+    // CLONE_CHILD_SETTID: write the child's TID into `child_tid_ptr`.
+    // TODO(tier7): On Linux this write happens in the *child's* address
+    // space after the child begins execution.  Because CLONE_VM is
+    // mandatory here (shared address space), writing from the parent
+    // context is equivalent.  For full fork() support (separate address
+    // spaces) this would need to be deferred to the child's first
+    // scheduling quantum.
+    if flags & CLONE_CHILD_SETTID != 0 {
+        // SAFETY: `child_tid_ptr` was validated above via `validate_user_ptr`.
+        // The pointer targets shared user memory (CLONE_VM is set).
+        unsafe {
+            crate::syscall::userspace::copy_to_user(child_tid_ptr, &(tid.0 as u32))
+                .map_err(|_| SyscallError::InvalidPointer)?;
+        }
+    }
+
     // Map user stack pages for the new thread
     {
         let mut vas = proc.memory_space.lock();
@@ -237,36 +271,6 @@ pub fn sys_thread_clone(
     // causing the parent to spin forever in futex_wait (pthread_create waits
     // for the child to write its TID).
     sched::SCHEDULER.lock().enqueue(task_ptr);
-
-    // CLONE_PARENT_SETTID: write the child's TID into the parent's address
-    // space at `parent_tid_ptr`.  This happens in the parent's context
-    // (before the child is scheduled) so the parent can observe the TID
-    // immediately after clone returns.
-    if flags & CLONE_PARENT_SETTID != 0 {
-        // SAFETY: `parent_tid_ptr` was validated above via `validate_user_ptr`.
-        // `copy_to_user` performs its own bounds check as a defence-in-depth
-        // measure.  The write is a single u32 which is naturally aligned.
-        unsafe {
-            crate::syscall::userspace::copy_to_user(parent_tid_ptr, &(tid.0 as u32))
-                .map_err(|_| SyscallError::InvalidPointer)?;
-        }
-    }
-
-    // CLONE_CHILD_SETTID: write the child's TID into `child_tid_ptr`.
-    // TODO(tier7): On Linux this write happens in the *child's* address
-    // space after the child begins execution.  Because CLONE_VM is
-    // mandatory here (shared address space), writing from the parent
-    // context is equivalent.  For full fork() support (separate address
-    // spaces) this would need to be deferred to the child's first
-    // scheduling quantum.
-    if flags & CLONE_CHILD_SETTID != 0 {
-        // SAFETY: `child_tid_ptr` was validated above via `validate_user_ptr`.
-        // The pointer targets shared user memory (CLONE_VM is set).
-        unsafe {
-            crate::syscall::userspace::copy_to_user(child_tid_ptr, &(tid.0 as u32))
-                .map_err(|_| SyscallError::InvalidPointer)?;
-        }
-    }
 
     // TODO(tier7): CLONE_CHILD_CLEARTID is registered via `builder.clear_tid()`
     // above.  On thread exit the kernel should:
