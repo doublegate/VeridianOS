@@ -63,13 +63,36 @@ struct FutexWaiter {
 }
 
 // SAFETY: FutexWaiter holds a NonNull<Task> that is only accessed while the
-// FUTEX_TABLE lock is held or by the scheduler after the waiter has been
+// futex bucket lock is held or by the scheduler after the waiter has been
 // dequeued.  Send/Sync are required so the BTreeMap can live in a static
 // Mutex, which is safe because all accesses are serialised by the spinlock.
 unsafe impl Send for FutexWaiter {}
 unsafe impl Sync for FutexWaiter {}
 
-static FUTEX_TABLE: Mutex<BTreeMap<FutexKey, Vec<FutexWaiter>>> = Mutex::new(BTreeMap::new());
+/// Waiters for one hash bucket.
+type FutexBucket = Mutex<BTreeMap<FutexKey, Vec<FutexWaiter>>>;
+
+/// Number of futex hash buckets (power of two).
+const FUTEX_BUCKETS: usize = 256;
+
+/// Futex waiters, hashed by (pid, uaddr) into independently locked,
+/// cache-line-aligned buckets (SYS-PERF-02): waits and wakes on unrelated
+/// futexes no longer serialize on one global lock.
+static FUTEX_TABLE: [crate::mm::cache_aligned::CacheAligned<FutexBucket>; FUTEX_BUCKETS] =
+    [const { crate::mm::cache_aligned::CacheAligned::new(Mutex::new(BTreeMap::new())) };
+        FUTEX_BUCKETS];
+
+/// Bucket index for a key: multiplicative hash of the word index and pid.
+fn bucket_index(key: FutexKey) -> usize {
+    let (pid, uaddr) = key;
+    let h = ((uaddr as u64) >> 2) ^ pid.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    (h.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 56) as usize % FUTEX_BUCKETS
+}
+
+/// The bucket holding `key`'s waiters.
+fn bucket(key: FutexKey) -> &'static FutexBucket {
+    &FUTEX_TABLE[bucket_index(key)]
+}
 
 /// Perform a `FUTEX_WAIT` or `FUTEX_WAIT_BITSET` operation.
 ///
@@ -109,12 +132,9 @@ pub fn sys_futex_wait(
     // Must reside in user space (single validation -- no duplicate call)
     validate_user_ptr(uaddr as *const u32, core::mem::size_of::<u32>())?;
 
-    // SAFETY: `uaddr` has been validated as a properly-aligned, mapped,
-    // user-space pointer to a u32.  We use `read_volatile` because another
-    // thread sharing this address space may concurrently modify the futex
-    // word; a non-volatile read could be elided or reordered by the compiler.
-    let cur = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
-    if cur != expected {
+    // Fast path: the word already differs. The authoritative check is
+    // repeated under the bucket lock below.
+    if crate::syscall::userspace::read_user::<u32>(uaddr)? != expected {
         return Err(SyscallError::WouldBlock);
     }
 
@@ -176,39 +196,39 @@ pub fn sys_futex_wait(
     }
 
     let task_ptr = {
+        // The value check and the enqueue happen under the bucket lock, which
+        // every waker of this futex also takes: a wake that changes the word
+        // either happens before the check (we return WouldBlock) or finds us
+        // queued. Checking before taking the lock lost wakeups in between.
+        let mut table = bucket(key).lock();
+        if crate::syscall::userspace::read_user::<u32>(uaddr)? != expected {
+            return Err(SyscallError::WouldBlock);
+        }
         let sched = crate::sched::scheduler::current_scheduler();
         let slock = sched.lock();
         let task = slock.current().ok_or(SyscallError::InvalidState)?;
         // SAFETY: We hold the scheduler lock, which guarantees exclusive
         // access to the current task's state field.  The pointer is valid
         // because it was obtained from the scheduler's active task list.
-        unsafe {
+        let prio = unsafe {
             (*task.as_ptr()).state = process::ProcessState::Blocked;
-        }
-        task
-    };
-
-    {
-        // SAFETY: We hold the scheduler lock above (now dropped), and the
-        // task pointer remains valid because the task is Blocked and cannot
-        // be freed while it is on a wait queue.  Reading priority is safe
-        // because we are the only thread that can modify our own task while
-        // it is in the Blocked state.
-        let prio = unsafe { (*task_ptr.as_ptr()).priority as u8 };
-        let mut table = FUTEX_TABLE.lock();
+            (*task.as_ptr()).priority as u8
+        };
+        drop(slock);
         table.entry(key).or_default().push(FutexWaiter {
-            task: task_ptr,
+            task,
             priority: prio,
             bitset: bitset_mask,
         });
-    }
+        task
+    };
 
     // reschedule
     sched::SCHEDULER.lock().schedule();
 
     // Helper to remove this waiter from the queue (used on timeout/interruption)
     let remove_self = |reason: SyscallError| -> Result<isize, SyscallError> {
-        let mut table = FUTEX_TABLE.lock();
+        let mut table = bucket(key).lock();
         if let Some(waiters) = table.get_mut(&key) {
             waiters.retain(|w| w.task != task_ptr);
             if waiters.is_empty() {
@@ -287,7 +307,7 @@ pub fn sys_futex_wake(
 
     let mut to_wake: Vec<core::ptr::NonNull<sched::task::Task>> = Vec::new();
     {
-        let mut table = FUTEX_TABLE.lock();
+        let mut table = bucket(key).lock();
         if let Some(waiters) = table.get_mut(&key) {
             // Sort by priority descending, then FIFO
             waiters.sort_by(|a, b| b.priority.cmp(&a.priority));
@@ -477,28 +497,40 @@ pub fn sys_futex_requeue(
     let mut to_move: Vec<FutexWaiter> = Vec::new();
 
     {
-        let mut table = FUTEX_TABLE.lock();
-        if let Some(waiters) = table.get_mut(&key1) {
+        // Both buckets are held while waiters move, taken in index order so
+        // two requeues in opposite directions cannot deadlock.
+        let (i1, i2) = (bucket_index(key1), bucket_index(key2));
+        let (mut first, mut second) = match i1.cmp(&i2) {
+            core::cmp::Ordering::Less => (FUTEX_TABLE[i1].lock(), Some(FUTEX_TABLE[i2].lock())),
+            core::cmp::Ordering::Greater => {
+                let hi = FUTEX_TABLE[i2].lock();
+                let lo = FUTEX_TABLE[i1].lock();
+                (lo, Some(hi))
+            }
+            core::cmp::Ordering::Equal => (FUTEX_TABLE[i1].lock(), None),
+        };
+        let src = &mut *first;
+        if let Some(waiters) = src.get_mut(&key1) {
             waiters.sort_by(|a, b| b.priority.cmp(&a.priority));
             let wc = core::cmp::min(wake_count, waiters.len());
-            for _ in 0..wc {
-                let w = waiters.remove(0);
+            for w in waiters.drain(..wc) {
                 to_wake.push(w.task);
                 woken += 1;
             }
             let rc = core::cmp::min(requeue_count, waiters.len());
-            for _ in 0..rc {
-                let w = waiters.remove(0);
-                to_move.push(w);
-                moved += 1;
-            }
+            to_move.extend(waiters.drain(..rc));
+            moved = to_move.len();
             if waiters.is_empty() {
-                table.remove(&key1);
+                src.remove(&key1);
             }
         }
 
         if moved > 0 {
-            table.entry(key2).or_default().extend(to_move);
+            let dst = match second.as_mut() {
+                Some(g) => &mut **g,
+                None => &mut *first,
+            };
+            dst.entry(key2).or_default().extend(to_move);
         }
     }
 
@@ -839,6 +871,24 @@ mod tests {
 
     /// SYS-CONC-01: the fields used to be read from the wrong bits (op and
     /// cmp swapped, oparg and cmparg swapped).
+    #[test]
+    fn futex_keys_spread_over_buckets() {
+        // Adjacent futex words of one process (a typical mutex array) and the
+        // same address in different processes land in many buckets.
+        let mut used = [false; FUTEX_BUCKETS];
+        for i in 0..1024usize {
+            used[bucket_index((7, 0x7000_0000 + i * 4))] = true;
+        }
+        assert!(used.iter().filter(|&&u| u).count() > FUTEX_BUCKETS * 3 / 4);
+        let mut used = [false; FUTEX_BUCKETS];
+        for pid in 0..1024u64 {
+            used[bucket_index((pid, 0x7000_0000))] = true;
+        }
+        assert!(used.iter().filter(|&&u| u).count() > FUTEX_BUCKETS * 3 / 4);
+        // Stable: the same key always maps to the same bucket.
+        assert_eq!(bucket_index((3, 0x1234)), bucket_index((3, 0x1234)));
+    }
+
     #[test]
     fn wake_op_decodes_linux_layout() {
         // *uaddr2 += 5; wake uaddr2 if old > 1.
