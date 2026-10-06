@@ -774,21 +774,19 @@ int setsockopt(int sockfd, int level, int optname,
 /*
  * getsockopt() -- get options on sockets.
  *
- * Kernel args: (fd, level, optname, optval_ptr)
- * The optlen pointer is not forwarded; the kernel writes a fixed 4-byte value.
+ * Kernel args: (fd, level, optname, optval_ptr, optlen_ptr)
+ * The kernel reads *optlen, copies at most that many bytes and stores the
+ * length it wrote back into *optlen.
  */
 int getsockopt(int sockfd, int level, int optname,
                void *optval, unsigned int *optlen)
 {
-    long ret = veridian_syscall4(SYS_NET_GETSOCKOPT,
-                                  sockfd, level, optname, optval);
+    long ret = veridian_syscall5(SYS_NET_GETSOCKOPT,
+                                  sockfd, level, optname, optval, optlen);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;
     }
-    /* Kernel writes 4 bytes; reflect that in *optlen if provided. */
-    if (optlen)
-        *optlen = 4;
     return 0;
 }
 

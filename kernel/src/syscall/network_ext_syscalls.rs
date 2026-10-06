@@ -178,22 +178,82 @@ pub(super) fn sys_net_setsockopt(
 }
 
 /// Get a socket option.
+///
+/// Linux ABI: `getsockopt(fd, level, optname, optval, optlen_ptr)`.
 pub(super) fn sys_net_getsockopt(
     fd: usize,
     level: usize,
     optname: usize,
     optval_ptr: usize,
+    optlen_ptr: usize,
 ) -> SyscallResult {
-    if optval_ptr != 0 {
-        super::validate_user_buffer(optval_ptr, 4)?;
-    }
     match socket_handle(fd)? {
         SocketHandle::Inet(id) => {
-            crate::net::socket::getsockopt(id, level as i32, optname as i32, optval_ptr)
-                .map_err(|_| SyscallError::InvalidArgument)
+            if optval_ptr != 0 {
+                super::validate_user_buffer(optval_ptr, 4)?;
+            }
+            let r = crate::net::socket::getsockopt(id, level as i32, optname as i32, optval_ptr)
+                .map_err(|_| SyscallError::InvalidArgument)?;
+            // The INET layer writes a 4-byte value.
+            if optlen_ptr != 0 {
+                super::userspace::write_user::<u32>(optlen_ptr, 4)?;
+            }
+            Ok(r)
         }
-        SocketHandle::Unix(_) => Ok(0),
+        // This used to report success without writing optval (review of
+        // the v0.26.0 stack, PR #10).
+        SocketHandle::Unix(id) => {
+            let ty =
+                crate::net::unix_socket::socket_type(id).ok_or(SyscallError::BadFileDescriptor)?;
+            let value = unix_sockopt(level, optname, ty)?.to_ne_bytes();
+            // As Linux: copy at most *optlen bytes and store the length
+            // copied. A NULL optlen is tolerated (the full int is written),
+            // matching the INET path, which never reads it.
+            let n = if optlen_ptr != 0 {
+                sockopt_copy_len(super::userspace::read_user::<u32>(optlen_ptr)?)?
+            } else {
+                value.len()
+            };
+            super::userspace::write_user_bytes(optval_ptr, &value[..n])?;
+            if optlen_ptr != 0 {
+                super::userspace::write_user::<u32>(optlen_ptr, n as u32)?;
+            }
+            Ok(0)
+        }
     }
+}
+
+const SOL_SOCKET: usize = 1;
+const SO_TYPE: usize = 3;
+const SO_ERROR: usize = 4;
+
+/// The `int` value of option (`level`, `optname`) on a Unix socket of type
+/// `ty`. Only SOL_SOCKET SO_ERROR (no pending error is tracked, so 0) and
+/// SO_TYPE are modelled; anything else is ENOPROTOOPT.
+fn unix_sockopt(
+    level: usize,
+    optname: usize,
+    ty: crate::net::unix_socket::UnixSocketType,
+) -> Result<i32, SyscallError> {
+    use crate::net::unix_socket::UnixSocketType;
+    match (level, optname) {
+        (SOL_SOCKET, SO_ERROR) => Ok(0),
+        (SOL_SOCKET, SO_TYPE) => Ok(match ty {
+            UnixSocketType::Stream => 1,   // SOCK_STREAM
+            UnixSocketType::Datagram => 2, // SOCK_DGRAM
+        }),
+        _ => Err(SyscallError::ProtocolOptionNotAvailable),
+    }
+}
+
+/// Bytes of an `int` option to copy for a caller's `*optlen` (a socklen_t
+/// read as signed, as Linux does): negative is EINVAL, larger is clamped.
+fn sockopt_copy_len(optlen: u32) -> Result<usize, SyscallError> {
+    let len = optlen as i32;
+    if len < 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    Ok((len as usize).min(core::mem::size_of::<i32>()))
 }
 
 /// Infer sockaddr length from sa_family when the actual length is unavailable
@@ -278,6 +338,41 @@ mod tests {
         assert_eq!(&b[2..4], &8080u16.to_be_bytes());
         assert_eq!(&b[4..8], &[10, 0, 2, 15]);
         assert!(b[8..].iter().all(|&z| z == 0));
+    }
+
+    /// getsockopt on a Unix socket answers SO_ERROR and SO_TYPE and fails
+    /// everything else with ENOPROTOOPT (review of the v0.26.0 stack,
+    /// PR #10).
+    #[test]
+    fn unix_sockopt_values() {
+        use crate::net::unix_socket::UnixSocketType;
+        assert_eq!(unix_sockopt(1, 4, UnixSocketType::Stream), Ok(0));
+        assert_eq!(unix_sockopt(1, 3, UnixSocketType::Stream), Ok(1));
+        assert_eq!(unix_sockopt(1, 3, UnixSocketType::Datagram), Ok(2));
+        assert_eq!(
+            unix_sockopt(1, 2, UnixSocketType::Stream),
+            Err(SyscallError::ProtocolOptionNotAvailable)
+        );
+        assert_eq!(
+            unix_sockopt(6, 4, UnixSocketType::Stream),
+            Err(SyscallError::ProtocolOptionNotAvailable)
+        );
+        assert_eq!(
+            super::super::linux_compat::to_linux_errno(SyscallError::ProtocolOptionNotAvailable),
+            -92
+        );
+    }
+
+    #[test]
+    fn sockopt_copy_len_truncates_like_linux() {
+        assert_eq!(sockopt_copy_len(8), Ok(4));
+        assert_eq!(sockopt_copy_len(4), Ok(4));
+        assert_eq!(sockopt_copy_len(1), Ok(1));
+        assert_eq!(sockopt_copy_len(0), Ok(0));
+        assert_eq!(
+            sockopt_copy_len(u32::MAX),
+            Err(SyscallError::InvalidArgument)
+        );
     }
 
     /// NET-SEC-02: the family must not be read from an address that fails

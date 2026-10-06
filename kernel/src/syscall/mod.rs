@@ -632,6 +632,8 @@ pub enum SyscallError {
     SymlinkLoop = -40,
     /// Socket operation on a descriptor that is not a socket (ENOTSOCK).
     NotASocket = -88,
+    /// Unknown or unsupported socket option (ENOPROTOOPT, errno 92).
+    ProtocolOptionNotAvailable = -92,
 }
 
 impl From<IpcError> for SyscallError {
@@ -1395,7 +1397,7 @@ fn handle_syscall(
         Syscall::NetGetSockName => sys_net_getsockname(arg1, arg2, arg3),
         Syscall::NetGetPeerName => sys_net_getpeername(arg1, arg2, arg3),
         Syscall::NetSetSockOpt => sys_net_setsockopt(arg1, arg2, arg3, arg4, arg5),
-        Syscall::NetGetSockOpt => sys_net_getsockopt(arg1, arg2, arg3, arg4),
+        Syscall::NetGetSockOpt => sys_net_getsockopt(arg1, arg2, arg3, arg4, arg5),
 
         // Resource limits (Phase 6.5)
         Syscall::GetRlimit => memory::sys_getrlimit(arg1, arg2),

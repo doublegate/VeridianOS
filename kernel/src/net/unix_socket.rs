@@ -457,6 +457,11 @@ pub fn socket_recv(socket_id: u64, buf: &mut [u8]) -> KernelResult<(usize, Optio
     Ok((copy_len, msg.rights))
 }
 
+/// The type of socket `socket_id`, if it exists.
+pub fn socket_type(socket_id: u64) -> Option<UnixSocketType> {
+    UNIX_SOCKETS.lock().get(&socket_id).map(|s| s.socket_type)
+}
+
 /// Create an anonymous connected socket pair (socketpair).
 ///
 /// Returns (socket_a_id, socket_b_id) where both sockets are connected.

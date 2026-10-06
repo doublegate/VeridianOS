@@ -440,6 +440,7 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
     const LINUX_E2BIG: isize = -7;
     const LINUX_EMFILE: isize = -24;
     const LINUX_ENOTSOCK: isize = -88;
+    const LINUX_ENOPROTOOPT: isize = -92;
 
     match err {
         SyscallError::InvalidSyscall => LINUX_ENOSYS,
@@ -475,6 +476,7 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
         SyscallError::SymlinkLoop => LINUX_ELOOP,
         SyscallError::CrossDevice => LINUX_EXDEV,
         SyscallError::NotASocket => LINUX_ENOTSOCK,
+        SyscallError::ProtocolOptionNotAvailable => LINUX_ENOPROTOOPT,
     }
 }
 

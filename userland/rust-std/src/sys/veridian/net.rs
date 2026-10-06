@@ -195,7 +195,12 @@ pub fn getsockopt(
     optname: usize,
     optval: *mut u8,
 ) -> Result<usize, SyscallError> {
-    let ret = unsafe { super::syscall4(SYS_NET_GETSOCKOPT, fd, level, optname, optval as usize) };
+    // The kernel takes an optlen pointer as the fifth argument; pass NULL
+    // explicitly rather than leaving whatever r8 holds.
+    // SAFETY: plain syscall; the kernel validates optval and treats a NULL
+    // optlen as "write the full int".
+    let ret =
+        unsafe { super::syscall5(SYS_NET_GETSOCKOPT, fd, level, optname, optval as usize, 0) };
     syscall_result(ret)
 }
 
