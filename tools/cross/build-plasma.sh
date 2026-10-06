@@ -30,6 +30,8 @@ PLASMA_URL_BASE="https://download.kde.org/stable/plasma/6.3.5"
 
 log() { echo "[build-plasma] $*"; }
 die() { echo "[build-plasma] ERROR: $*" >&2; exit 1; }
+# shellcheck source=lib/cmake-source-fixes.sh
+source "${SCRIPT_DIR}/lib/cmake-source-fixes.sh"
 
 mkdir -p "${BUILD_DIR}"
 
@@ -57,6 +59,7 @@ cmake_build() {
     export PKG_CONFIG_SYSROOT_DIR=""
 
     log "Building ${name}..."
+    relax_qt_test "${src}/CMakeLists.txt"
     rm -rf "${bld}"
     mkdir -p "${bld}"
     (cd "${bld}" && \
@@ -457,8 +460,12 @@ if(NOT TARGET Wayland::Scanner)
     )
     set(WaylandScanner_FOUND TRUE)
 endif()
-# Load KF6/Plasma stub targets
-include("${SYSROOT}/usr/lib/cmake/veridian-kf6-stubs.cmake")
+# Load KF6/Plasma stub targets when present. The toolchain injects this file
+# into every later CMake project (Qt modules included), so a missing stubs
+# file must not be an error.
+if(EXISTS "${SYSROOT}/usr/lib/cmake/veridian-kf6-stubs.cmake")
+    include("${SYSROOT}/usr/lib/cmake/veridian-kf6-stubs.cmake")
+endif()
 WSTEOF
 
     log "Stubs prepared."

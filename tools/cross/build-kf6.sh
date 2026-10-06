@@ -23,6 +23,8 @@ KF_URL_BASE="https://download.kde.org/stable/frameworks/${KF_MAJOR}"
 
 log() { echo "[build-kf6] $*"; }
 die() { echo "[build-kf6] ERROR: $*" >&2; exit 1; }
+# shellcheck source=lib/cmake-source-fixes.sh
+source "${SCRIPT_DIR}/lib/cmake-source-fixes.sh"
 
 mkdir -p "${BUILD_DIR}"
 
@@ -209,6 +211,72 @@ KF_COMMON_ARGS=(
 )
 
 # Helper: fetch + cmake_build a KF6 module by name
+# Source fixes for upstream static-build bugs, applied idempotently after
+# extraction. Each one drops a single known line, and fails loudly if the
+# upstream file no longer looks the way the fix expects.
+patch_kf_source() {
+    local mod="$1" src="$2"
+    relax_qt_test "${src}/CMakeLists.txt"
+    case "${mod}" in
+        KPackage)
+            # 6.12 installs kpackage_common_STATIC when BUILD_SHARED_LIBS is
+            # off, but nothing defines that target, so configure fails.
+            local f="${src}/src/kpackage/CMakeLists.txt"
+            local line='    install(TARGETS kpackage_common_STATIC EXPORT KF6PackageTargets ${KF_INSTALL_TARGETS_DEFAULT_ARGS})'
+            if grep -qF "${line}" "${f}"; then
+                python3 -c 'import sys; p, l = sys.argv[1:]; s = open(p).read(); open(p, "w").write(s.replace(l + "\n", ""))' \
+                    "${f}" "${line}"
+                ! grep -qF "${line}" "${f}" || die "failed to patch ${f}"
+            fi
+            ;;
+        KNotifications)
+            # 6.12 makes libcanberra REQUIRED; the sources already build
+            # without it (guarded by TARGET Canberra::Canberra), and the
+            # sysroot has no libcanberra (Canberra is disabled above).
+            local f="${src}/CMakeLists.txt"
+            if grep -qF 'find_package(Canberra REQUIRED)' "${f}"; then
+                python3 -c 'import sys; p = sys.argv[1]; s = open(p).read(); open(p, "w").write(s.replace("find_package(Canberra REQUIRED)", "find_package(Canberra)"))' "${f}"
+            fi
+            grep -qF 'find_package(Canberra)' "${f}" || die "failed to patch ${f}"
+            ;;
+        KIO)
+            # libmount is REQUIRED on Linux only for KMountPoint, whose code
+            # is guarded by HAVE_LIB_MOUNT; VeridianOS has no util-linux.
+            local f="${src}/CMakeLists.txt"
+            if grep -qF 'find_package(LibMount REQUIRED)' "${f}"; then
+                python3 -c 'import sys; p = sys.argv[1]; s = open(p).read(); open(p, "w").write(s.replace("find_package(LibMount REQUIRED)", "find_package(LibMount)"))' "${f}"
+            fi
+            grep -qF 'find_package(LibMount)' "${f}" || die "failed to patch ${f}"
+            ;;
+        Solid)
+            # libmount is marked REQUIRED for the Linux UDisks backend, but
+            # that backend builds without it (HAVE_LIBMOUNT), and VeridianOS
+            # has no util-linux. Make it OPTIONAL and skip the fstab backend,
+            # which cannot build without it.
+            local f="${src}/CMakeLists.txt"
+            python3 - "${f}" <<'PYEOF' || die "failed to patch ${f}"
+import sys
+p = sys.argv[1]
+s = open(p).read()
+# (old, new): libmount optional, and the fstab backend -- which includes
+# libmount.h unconditionally -- only built when libmount was found.
+for old, new in (
+    ("set_package_properties(LibMount PROPERTIES\n                           TYPE REQUIRED)",
+     "set_package_properties(LibMount PROPERTIES\n                           TYPE OPTIONAL)"),
+    ("    add_device_backend(udisks2)\n    add_device_backend(fstab)\n",
+     "    add_device_backend(udisks2)\n    if(LibMount_FOUND)\n        add_device_backend(fstab)\n    endif()\n"),
+):
+    if new in s:
+        continue
+    if s.count(old) != 1:
+        sys.exit("unexpected Solid CMakeLists.txt")
+    s = s.replace(old, new)
+open(p, "w").write(s)
+PYEOF
+            ;;
+    esac
+}
+
 build_kf_module() {
     local mod="$1"
     shift
@@ -217,6 +285,7 @@ build_kf_module() {
     lower=$(echo "${mod}" | tr '[:upper:]' '[:lower:]')
     local pkg="${lower}-${KF_VER}"
     fetch "${pkg}" "${KF_URL_BASE}/${pkg}.tar.xz" "${pkg}"
+    patch_kf_source "${mod}" "${BUILD_DIR}/${pkg}"
     cmake_build "${mod}" "${BUILD_DIR}/${pkg}" "${KF_COMMON_ARGS[@]}" "${extra[@]}"
 }
 
@@ -271,6 +340,9 @@ build_tier2() {
     build_kf_module KIconThemes
     # KWindowSystem: disable X11 & Wayland platform plugins (MODULE .so incompatible with static)
     build_kf_module KWindowSystem -DKWINDOWSYSTEM_X11=OFF -DKWINDOWSYSTEM_WAYLAND=OFF
+    # KIdleTime: required by KWin. No X11; its Wayland plugin talks to the
+    # compositor at runtime and is not needed to build KWin.
+    build_kf_module KIdleTime -DWITH_X11=OFF -DWITH_WAYLAND=OFF
     build_kf_module KGlobalAccel
     build_kf_module KPackage
     build_kf_module KCompletion
@@ -287,6 +359,10 @@ build_tier3() {
     build_kf_module KDeclarative || log "KDeclarative: skipped (optional for cross-build)"
     build_kf_module KXmlGui
     build_kf_module KBookmarks
+    # KIO requires KCrash and KDBusAddons, so they are built first here
+    # (build_tier4 then finds them already installed).
+    build_kf_module KCrash
+    build_kf_module KDBusAddons
     # KIO and KCMUtils have deep dependency chains
     build_kf_module KIO || log "KIO: skipped (optional for cross-build)"
     build_kf_module KCMUtils || log "KCMUtils: skipped (optional for cross-build)"
@@ -300,8 +376,13 @@ build_tier4() {
     # KDBusAddons: D-Bus utilities (depends on KCoreAddons)
     build_kf_module KDBusAddons
 
+    # Sonnet: spell-checking framework, required by KTextWidgets. Built for
+    # real (no spell-check backend in the sysroot, so it has no plugins);
+    # the March build used an untracked header-only stub instead.
+    build_kf_module Sonnet -DSONNET_NO_BACKENDS=ON
+
     # KTextWidgets: text editing widgets (depends on Completion, ConfigWidgets, I18n, Sonnet)
-    # Sonnet stub in sysroot provides headers-only target. TextToSpeech disabled.
+    # TextToSpeech disabled.
     build_kf_module KTextWidgets \
         -DWITH_TEXT_TO_SPEECH=OFF
 
