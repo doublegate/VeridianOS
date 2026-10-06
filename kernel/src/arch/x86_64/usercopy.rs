@@ -15,11 +15,14 @@
 
 // rdi = dst, rsi = src, rdx = len. Returns 0 on success, -14 (EFAULT) if
 // the copy faulted. `rep movsb` leaves rcx at the bytes remaining, which
-// the fixup does not need.
+// the fixup does not need. `cld` makes the copy run upwards whatever the
+// caller's DF: with DF set it would copy below both buffers (SFMASK also
+// clears DF on SYSCALL entry; this does not rely on it).
 core::arch::global_asm!(
     ".section .text",
     ".global veridian_copy_user",
     "veridian_copy_user:",
+    "    cld",
     "    mov rcx, rdx",
     ".global veridian_copy_user_insn",
     "veridian_copy_user_insn:",

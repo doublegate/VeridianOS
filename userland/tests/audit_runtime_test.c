@@ -3,7 +3,8 @@
  * 33 boot tests never exercise: process and thread exit/reaping, the libc
  * allocator under threads, scanf field widths, fd numbering, rename and
  * permission enforcement for a non-root user, sticky directories, sockets
- * as per-process fds and SCM_RIGHTS.
+ * as per-process fds and SCM_RIGHTS, directory search permission, and the
+ * direction flag across a system call.
  *
  * Run as root from a BusyBox shell: /bin/audit_runtime_test [threads]
  * Prints one "PASS <name>" or "FAIL <name>: <why>" line per check and a
@@ -199,7 +200,7 @@ static void test_rename(void)
              rename("/tmp/audit_src", "/tmp/audit_dst") == 0 &&
              read_file("/tmp/audit_dst", buf, sizeof(buf)) == 0 &&
              strcmp(buf, "moved") == 0 && access("/tmp/audit_src", F_OK) != 0;
-    struct stat st;
+    struct stat st = {0};
     int st_ok = stat("/tmp/audit_dst", &st) == 0;
     static char why_mv[96];
     snprintf(why_mv, sizeof(why_mv), "content/old-name ok=%d stat=%d mode=%o", ok, st_ok,
@@ -242,7 +243,7 @@ static void test_nonroot_permissions(void)
     snprintf(why, sizeof(why), "child exit code %d (bitmask of failures)", code);
     report("nonroot_open_chmod_chown_denied", code == 0, why);
 
-    struct stat st;
+    struct stat st = {0};
     int ok = stat("/tmp/audit_secret", &st) == 0 && (st.st_mode & 0777) == 0600;
     static char why_sec[64];
     snprintf(why_sec, sizeof(why_sec), "mode is %o, expected 600", (unsigned)(st.st_mode & 07777));
@@ -258,7 +259,7 @@ static void test_sticky_dir(void)
                 chmod("/tmp/audit_open", 0777) == 0 &&
                 write_file("/tmp/audit_sticky/rootfile", "r", 0644) == 0 &&
                 write_file("/tmp/audit_open/rootfile", "r", 0644) == 0;
-    struct stat st;
+    struct stat st = {0};
     int sticky_set = stat("/tmp/audit_sticky", &st) == 0 && (st.st_mode & 01000);
 
     pid_t pid = fork();
@@ -295,7 +296,7 @@ static void test_umask(void)
 {
     mode_t old = umask(022);
     unlink("/tmp/audit_umask");
-    struct stat st;
+    struct stat st = {0};
     int ok = write_file("/tmp/audit_umask", "u", 0666) == 0 &&
              stat("/tmp/audit_umask", &st) == 0 && (st.st_mode & 0777) == 0644;
     umask(old);
@@ -496,6 +497,91 @@ static void test_closed_stdio(void)
     report("closed_stderr_is_ebadf", ok, "write(2) after close(2) did not fail with EBADF");
 }
 
+/* --- Search permission on directories (FS-SEC-02, review of the v0.26.0
+ * stack): a non-root user cannot reach a file through a 0700 directory it
+ * does not own, even when the file itself is world-readable. ---------- */
+static void test_dir_search_permission(void)
+{
+    mkdir("/tmp/audit_private", 0700); /* root-owned */
+    write_file("/tmp/audit_private/open", "visible", 0644);
+    chmod("/tmp/audit_private", 0700);
+    pid_t pid = fork();
+    if (pid == 0) {
+        struct stat st = {0};
+        if (setuid(1000) != 0)
+            _exit(100);
+        errno = 0;
+        int fd = open("/tmp/audit_private/open", O_RDONLY);
+        int stat_ok = stat("/tmp/audit_private/open", &st) == 0;
+        _exit(fd < 0 && errno == EACCES && !stat_ok ? 0 : 1);
+    }
+    int status = 0;
+    int ok = pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
+             WEXITSTATUS(status) == 0;
+    report("dir_search_permission_enforced", ok,
+           "a file under a 0700 directory was reachable as uid 1000");
+}
+
+/* --- The kernel ignores the caller's direction flag (review of the v0.26.0
+ * stack): a system call made with DF set must not copy below the user
+ * buffer it validated. Before the fix the kernel ran with the user's DF; an
+ * RFLAGS probe in the syscall handler read 0x446 for this call. This check
+ * is a smoke test only: it also passed on the unfixed kernel, where DF was
+ * clear again by the time the wait path copied the status out (what clears
+ * it was not determined). ------------------------------------------------ */
+#define DF_GUARD 64
+#define VERIDIAN_SYS_WAIT 14 /* Syscall::ProcessWait */
+
+static long raw_syscall4_df(long nr, long a, long b, long c, long d)
+{
+#if defined(__x86_64__)
+    register long rax __asm__("rax") = nr;
+    register long rdi __asm__("rdi") = a;
+    register long rsi __asm__("rsi") = b;
+    register long rdx __asm__("rdx") = c;
+    register long r10 __asm__("r10") = d;
+    __asm__ volatile("std\n\tsyscall\n\tcld"
+                     : "+r"(rax)
+                     : "r"(rdi), "r"(rsi), "r"(rdx), "r"(r10)
+                     : "rcx", "r11", "memory", "cc");
+    return rax;
+#else
+    (void)nr; (void)a; (void)b; (void)c; (void)d;
+    return -1;
+#endif
+}
+
+static void test_direction_flag(void)
+{
+#if defined(__x86_64__)
+    /* The native wait call stores the status through the kernel's
+     * validated user copy (`rep movsb`). With DF set that copy ran
+     * downwards from the status address. Raw numbers are the native ABI;
+     * only 0-7 are translated as Linux numbers (N-33). */
+    unsigned char area[DF_GUARD + sizeof(int) + DF_GUARD];
+    memset(area, 0x55, sizeof(area));
+    /* Let the child become a zombie first, so the wait does not block: a
+     * blocked wait resumes through a context switch that restores RFLAGS
+     * and would hide the user's DF. */
+    pid_t pid = fork();
+    if (pid == 0)
+        _exit(42);
+    struct timespec nap = {0, 200 * 1000 * 1000};
+    nanosleep(&nap, NULL);
+    long r = raw_syscall4_df(VERIDIAN_SYS_WAIT, pid, (long)(area + DF_GUARD), 0, 0);
+    int status;
+    memcpy(&status, area + DF_GUARD, sizeof(status));
+    int guards = 1;
+    for (int i = 0; i < DF_GUARD; i++)
+        guards &= area[i] == 0x55 && area[DF_GUARD + sizeof(int) + i] == 0x55;
+    int ok = r == pid && guards && WIFEXITED(status) && WEXITSTATUS(status) == 42;
+    static char why[96];
+    snprintf(why, sizeof(why), "wait with DF set: ret %ld, guards %s, status 0x%x", r,
+             guards ? "intact" : "OVERWRITTEN", (unsigned)status);
+    report("syscall_ignores_user_direction_flag", ok, why);
+#endif
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -517,6 +603,8 @@ int main(int argc, char **argv)
     test_map_fixed_limits();
     test_rename_directory();
     test_closed_stdio();
+    test_dir_search_permission();
+    test_direction_flag();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }
