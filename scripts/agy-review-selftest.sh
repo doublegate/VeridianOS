@@ -298,6 +298,13 @@ check "a TIMEOUT error is caught (was not, before the guard stopped enumerating)
 check "an unfamiliar error signature is caught" "MATCH" \
   "$(se 'Error: something nobody has seen before')"
 
+# REGRESSION, observed on VeridianOS PR #5: agy under `unbuffer` printed the auth failure in
+# lowercase, the case-sensitive guard missed it, and the error was posted as the review under a
+# green check. Any capitalisation of the word is the same failure.
+check "a lowercase error (agy under unbuffer) is caught" "MATCH" \
+  "$(se 'error: Eligibility check failed: PERMISSION_DENIED (code 403): Request had insufficient authentication scopes.. Please log out (/logout) and log back in (/login).')"
+check "an all-caps ERROR: is caught" "MATCH" "$(se 'ERROR: backend unavailable')"
+
 # The size cap is what separates "the error IS the whole capture" from "a review mentions one".
 long="Error: UNAVAILABLE (code 503) $(head -c 3000 /dev/zero | tr '\0' 'x')"
 check "a long capture opening with an error is not caught" "NOMATCH" "$(se "$long")"

@@ -62,7 +62,11 @@ have_text() { [ -s "$1" ] && grep -q '[^[:space:]]' "$1"; }
 # are unchanged: the error must be on LINE 1, and the whole capture must be under
 # AGY_ERROR_MAX_BYTES. The load-bearing half is the LINE 1 anchor: a review does not *open*
 # with a bare "Error:" line, however short it is.
-AGY_ERROR_RE='^[[:space:]]*Error:'
+# Case-insensitive on the word itself: under `unbuffer` agy 1.2.x prints its eligibility failure
+# as lowercase `error: Eligibility check failed: PERMISSION_DENIED (code 403) ...`, and the
+# case-sensitive `Error:` let it through. Observed on VeridianOS PR #5: that line was posted as
+# the entire review and the `review` check went green in 14 seconds.
+AGY_ERROR_RE='^[[:space:]]*[Ee][Rr][Rr][Oo][Rr]:'
 # Secondary safety net, not the primary discriminator. A backend failure IS the whole capture and
 # is a couple of hundred bytes; the cap only ensures that if a review ever did open with an
 # "Error:" line, length alone keeps it from being discarded. Reviews shorter than this exist, so
