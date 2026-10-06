@@ -423,18 +423,9 @@ impl DhcpClient {
             );
         }
 
-        // Configure the IP layer with the obtained address
+        // Configure the IP layer with the obtained address; this also
+        // installs the connected and default routes.
         super::ip::set_interface_config(ip, subnet, gateway);
-
-        // Add default route via gateway
-        if let Some(gw) = gateway {
-            super::ip::add_route(super::ip::RouteEntry {
-                destination: Ipv4Address::new(0, 0, 0, 0),
-                netmask: Ipv4Address::new(0, 0, 0, 0),
-                gateway: Some(gw),
-                interface: 0,
-            });
-        }
 
         self.config = Some(config);
         self.state = DhcpState::Bound;

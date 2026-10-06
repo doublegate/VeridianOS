@@ -188,6 +188,8 @@ pub enum HttpError {
     InvalidChunkSize,
     /// Response body exceeds maximum allowed size.
     BodyTooLarge,
+    /// Status line plus headers exceed `MAX_HEADER_BYTES`.
+    HeadersTooLarge,
     /// Too many redirects followed.
     TooManyRedirects,
     /// Connection timed out.
@@ -429,25 +431,50 @@ pub enum ParseState {
     Complete,
 }
 
+/// Largest status line plus header block accepted (NET-PERF-01).
+pub const MAX_HEADER_BYTES: usize = 64 * 1024;
+
+/// Largest response body accepted (NET-PERF-01).
+pub const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// Where the chunked-body parser is.
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Chunk {
+    /// Expecting a chunk-size line.
+    Size,
+    /// Inside chunk data with this many bytes left.
+    Data(usize),
+    /// Expecting the CRLF that ends a chunk's data.
+    DataEnd,
+    /// After the zero-size chunk: trailer lines up to an empty line.
+    Trailer,
+}
+
 /// Incremental HTTP response parser.
 ///
 /// Feed bytes via `feed()`. When `state()` returns `ParseState::Complete`,
 /// call `take_response()` to extract the finished `HttpResponse`.
+///
+/// Input is consumed through a read cursor; the buffer is compacted once
+/// per `feed` instead of being reallocated for every line (NET-PERF-01).
+/// Header and body sizes are bounded by `MAX_HEADER_BYTES` and
+/// `MAX_BODY_BYTES`, so a peer cannot make the kernel buffer without limit.
 #[cfg(feature = "alloc")]
 pub struct ResponseParser {
     state: ParseState,
     buffer: Vec<u8>,
+    /// Start of the unconsumed bytes in `buffer`.
+    pos: usize,
+    /// Status line and header bytes consumed so far.
+    header_bytes: usize,
     version: String,
     status_code: u16,
     reason: String,
     headers: BTreeMap<String, String>,
     body: Vec<u8>,
     content_length: Option<usize>,
-    chunked: bool,
-    /// Remaining bytes in the current chunk (for chunked encoding).
-    chunk_remaining: usize,
-    /// Whether we have finished reading the chunk size line for this chunk.
-    chunk_size_parsed: bool,
+    chunk: Chunk,
 }
 
 #[cfg(feature = "alloc")]
@@ -464,15 +491,15 @@ impl ResponseParser {
         ResponseParser {
             state: ParseState::StatusLine,
             buffer: Vec::new(),
+            pos: 0,
+            header_bytes: 0,
             version: String::new(),
             status_code: 0,
             reason: String::new(),
             headers: BTreeMap::new(),
             body: Vec::new(),
             content_length: None,
-            chunked: false,
-            chunk_remaining: 0,
-            chunk_size_parsed: false,
+            chunk: Chunk::Size,
         }
     }
 
@@ -481,8 +508,34 @@ impl ResponseParser {
         &self.state
     }
 
+    fn pending(&self) -> &[u8] {
+        &self.buffer[self.pos..]
+    }
+
+    /// The next CRLF-terminated line, without consuming it. While reading
+    /// the head, an incomplete line longer than the header budget is an
+    /// error rather than a reason to keep buffering.
+    fn peek_line(&self, in_head: bool) -> Result<Option<usize>, HttpError> {
+        match find_crlf(self.pending()) {
+            Some(end) => {
+                if in_head && self.header_bytes + end + 2 > MAX_HEADER_BYTES {
+                    return Err(HttpError::HeadersTooLarge);
+                }
+                Ok(Some(end))
+            }
+            None if in_head && self.header_bytes + self.pending().len() > MAX_HEADER_BYTES => {
+                Err(HttpError::HeadersTooLarge)
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Feed bytes into the parser, advancing the state machine.
     pub fn feed(&mut self, data: &[u8]) -> Result<(), HttpError> {
+        if self.pos > 0 {
+            self.buffer.drain(..self.pos);
+            self.pos = 0;
+        }
         self.buffer.extend_from_slice(data);
 
         loop {
@@ -514,15 +567,12 @@ impl ResponseParser {
     /// Try to parse the status line from the buffer.
     /// Returns `true` if the status line was found and parsed.
     fn try_parse_status_line(&mut self) -> Result<bool, HttpError> {
-        let line_end = match find_crlf(&self.buffer) {
-            Some(pos) => pos,
-            None => return Ok(false),
+        let Some(line_end) = self.peek_line(true)? else {
+            return Ok(false);
         };
 
-        let line = match core::str::from_utf8(&self.buffer[..line_end]) {
-            Ok(s) => s,
-            Err(_) => return Err(HttpError::InvalidStatusLine),
-        };
+        let line = core::str::from_utf8(&self.pending()[..line_end])
+            .map_err(|_| HttpError::InvalidStatusLine)?;
 
         // Parse "HTTP/1.1 200 OK"
         let mut parts = line.splitn(3, ' ');
@@ -530,13 +580,15 @@ impl ResponseParser {
         let status_str = parts.next().ok_or(HttpError::InvalidStatusLine)?;
         let reason = parts.next().unwrap_or("");
 
-        self.version = String::from(version);
-        self.status_code = parse_u16(status_str).map_err(|_| HttpError::InvalidStatusLine)?;
-        self.reason = String::from(reason);
+        let version = String::from(version);
+        let status_code = parse_u16(status_str).map_err(|_| HttpError::InvalidStatusLine)?;
+        let reason = String::from(reason);
+        self.version = version;
+        self.status_code = status_code;
+        self.reason = reason;
 
-        // Consume the line + CRLF
-        let new_start = line_end + 2;
-        self.buffer = self.buffer[new_start..].to_vec();
+        self.pos += line_end + 2;
+        self.header_bytes += line_end + 2;
         self.state = ParseState::Headers;
         Ok(true)
     }
@@ -545,68 +597,69 @@ impl ResponseParser {
     /// Returns `true` when all headers have been consumed (empty line found).
     fn try_parse_headers(&mut self) -> Result<bool, HttpError> {
         loop {
-            let line_end = match find_crlf(&self.buffer) {
-                Some(pos) => pos,
-                None => return Ok(false),
+            let Some(line_end) = self.peek_line(true)? else {
+                return Ok(false);
             };
+            self.header_bytes += line_end + 2;
 
             if line_end == 0 {
                 // Empty line -- end of headers
-                self.buffer = self.buffer[2..].to_vec();
-                self.determine_body_mode();
+                self.pos += 2;
+                self.determine_body_mode()?;
                 return Ok(true);
             }
 
-            let line = match core::str::from_utf8(&self.buffer[..line_end]) {
-                Ok(s) => s,
-                Err(_) => return Err(HttpError::InvalidHeader),
-            };
+            let line = core::str::from_utf8(&self.pending()[..line_end])
+                .map_err(|_| HttpError::InvalidHeader)?;
 
             if let Some(colon_pos) = line.find(':') {
                 let name = to_lowercase(&line[..colon_pos]);
-                let value = line[colon_pos + 1..].trim_start();
-                self.headers.insert(name, String::from(value));
+                let value = String::from(line[colon_pos + 1..].trim_start());
+                self.headers.insert(name, value);
             }
 
-            let new_start = line_end + 2;
-            self.buffer = self.buffer[new_start..].to_vec();
+            self.pos += line_end + 2;
         }
     }
 
     /// Determine whether to read a fixed-length body or chunked body.
-    fn determine_body_mode(&mut self) {
+    fn determine_body_mode(&mut self) -> Result<(), HttpError> {
         // Check for chunked transfer encoding
         if let Some(te) = self.headers.get("transfer-encoding") {
             if to_lowercase(te).contains("chunked") {
-                self.chunked = true;
+                self.chunk = Chunk::Size;
                 self.state = ParseState::ChunkedBody;
-                return;
+                return Ok(());
             }
         }
 
         // Check for Content-Length
         if let Some(cl) = self.headers.get("content-length") {
             if let Ok(len) = parse_usize(cl) {
-                self.content_length = Some(len);
-                if len == 0 {
-                    self.state = ParseState::Complete;
-                } else {
-                    self.state = ParseState::Body;
+                if len > MAX_BODY_BYTES {
+                    return Err(HttpError::BodyTooLarge);
                 }
-                return;
+                self.content_length = Some(len);
+                self.state = if len == 0 {
+                    ParseState::Complete
+                } else {
+                    ParseState::Body
+                };
+                return Ok(());
             }
         }
 
         // No body indication -- treat as complete (e.g., HEAD response)
         self.state = ParseState::Complete;
+        Ok(())
     }
 
     /// Try to read a Content-Length body.
     fn try_parse_body(&mut self) {
         if let Some(expected) = self.content_length {
-            if self.buffer.len() >= expected {
-                self.body = self.buffer[..expected].to_vec();
-                self.buffer = self.buffer[expected..].to_vec();
+            if self.pending().len() >= expected {
+                self.body = self.pending()[..expected].to_vec();
+                self.pos += expected;
                 self.state = ParseState::Complete;
             }
             // else: need more data
@@ -614,62 +667,74 @@ impl ResponseParser {
     }
 
     /// Try to parse chunked transfer-encoded body.
-    /// Returns `true` when all chunks have been read (0-size terminator).
+    /// Returns `true` when all chunks have been read (0-size terminator and
+    /// trailer).
     fn try_parse_chunked(&mut self) -> Result<bool, HttpError> {
         loop {
-            if !self.chunk_size_parsed {
-                // Read chunk size line
-                let line_end = match find_crlf(&self.buffer) {
-                    Some(pos) => pos,
-                    None => return Ok(false),
-                };
-
-                let size_line = match core::str::from_utf8(&self.buffer[..line_end]) {
-                    Ok(s) => s,
-                    Err(_) => return Err(HttpError::InvalidChunkSize),
-                };
-
-                // Chunk size may have extensions after ';' -- ignore them
-                let size_str = match size_line.find(';') {
-                    Some(idx) => &size_line[..idx],
-                    None => size_line,
-                };
-
-                let chunk_size =
-                    parse_hex_usize(size_str.trim()).map_err(|_| HttpError::InvalidChunkSize)?;
-
-                self.buffer = self.buffer[line_end + 2..].to_vec();
-
-                if chunk_size == 0 {
-                    // Terminal chunk -- consume trailing CRLF if present
-                    if self.buffer.len() >= 2 && self.buffer[0] == b'\r' && self.buffer[1] == b'\n'
-                    {
-                        self.buffer = self.buffer[2..].to_vec();
+            match self.chunk {
+                Chunk::Size => {
+                    let Some(line_end) = self.peek_line(false)? else {
+                        if self.pending().len() > MAX_HEADER_BYTES {
+                            return Err(HttpError::InvalidChunkSize);
+                        }
+                        return Ok(false);
+                    };
+                    let size_line = core::str::from_utf8(&self.pending()[..line_end])
+                        .map_err(|_| HttpError::InvalidChunkSize)?;
+                    // Chunk size may have extensions after ';' -- ignore them
+                    let size_str = size_line.split(';').next().unwrap_or("");
+                    let chunk_size = parse_hex_usize(size_str.trim())
+                        .map_err(|_| HttpError::InvalidChunkSize)?;
+                    if chunk_size > MAX_BODY_BYTES - self.body.len() {
+                        return Err(HttpError::BodyTooLarge);
                     }
-                    self.state = ParseState::Complete;
-                    return Ok(true);
+                    self.pos += line_end + 2;
+                    self.chunk = if chunk_size == 0 {
+                        Chunk::Trailer
+                    } else {
+                        Chunk::Data(chunk_size)
+                    };
                 }
-
-                self.chunk_remaining = chunk_size;
-                self.chunk_size_parsed = true;
-            }
-
-            // Read chunk data
-            if self.buffer.len() < self.chunk_remaining {
-                return Ok(false);
-            }
-
-            self.body
-                .extend_from_slice(&self.buffer[..self.chunk_remaining]);
-            self.buffer = self.buffer[self.chunk_remaining..].to_vec();
-            self.chunk_remaining = 0;
-            self.chunk_size_parsed = false;
-
-            // Consume trailing CRLF after chunk data
-            if self.buffer.len() >= 2 && self.buffer[0] == b'\r' && self.buffer[1] == b'\n' {
-                self.buffer = self.buffer[2..].to_vec();
-            } else if self.buffer.len() < 2 {
-                return Ok(false);
+                Chunk::Data(remaining) => {
+                    let take = remaining.min(self.pending().len());
+                    if take == 0 {
+                        return Ok(false);
+                    }
+                    let start = self.pos;
+                    self.body
+                        .extend_from_slice(&self.buffer[start..start + take]);
+                    self.pos += take;
+                    self.chunk = if take == remaining {
+                        Chunk::DataEnd
+                    } else {
+                        Chunk::Data(remaining - take)
+                    };
+                }
+                Chunk::DataEnd => {
+                    let pending = self.pending();
+                    if pending.len() < 2 {
+                        return Ok(false);
+                    }
+                    if &pending[..2] != b"\r\n" {
+                        return Err(HttpError::InvalidChunkSize);
+                    }
+                    self.pos += 2;
+                    self.chunk = Chunk::Size;
+                }
+                Chunk::Trailer => {
+                    let Some(line_end) = self.peek_line(false)? else {
+                        if self.pending().len() > MAX_HEADER_BYTES {
+                            return Err(HttpError::HeadersTooLarge);
+                        }
+                        return Ok(false);
+                    };
+                    self.pos += line_end + 2;
+                    if line_end == 0 {
+                        self.state = ParseState::Complete;
+                        return Ok(true);
+                    }
+                    // Trailer fields are accepted and ignored.
+                }
             }
         }
     }
@@ -942,6 +1007,10 @@ fn parse_usize(s: &str) -> Result<usize, ()> {
 
 /// Parse a hexadecimal string as a `usize`.
 fn parse_hex_usize(s: &str) -> Result<usize, ()> {
+    // An empty size is malformed; reading it as 0 ended the body early.
+    if s.is_empty() {
+        return Err(());
+    }
     let mut val: usize = 0;
     for byte in s.bytes() {
         let digit = match byte {
@@ -1178,6 +1247,76 @@ mod tests {
         let resp = parser.take_response().unwrap();
         assert_eq!(resp.body, b"Hello World");
         assert_eq!(resp.body_as_str(), Some("Hello World"));
+    }
+
+    /// NET-PERF-01: every split point, down to one byte per feed. A CRLF
+    /// that ended a chunk arriving in the next feed used to be parsed as an
+    /// empty chunk size, read as 0, and silently truncated the body.
+    #[test]
+    fn test_chunked_byte_at_a_time() {
+        let wire: &[u8] = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+              5;ext=1\r\nHello\r\n6\r\n World\r\n0\r\nX-Trailer: t\r\n\r\n";
+        let mut parser = ResponseParser::new();
+        for b in wire {
+            assert_ne!(parser.state(), &ParseState::Complete);
+            parser.feed(core::slice::from_ref(b)).unwrap();
+        }
+        assert_eq!(parser.state(), &ParseState::Complete);
+        assert_eq!(parser.take_response().unwrap().body, b"Hello World");
+
+        for split in 1..wire.len() {
+            let mut parser = ResponseParser::new();
+            parser.feed(&wire[..split]).unwrap();
+            parser.feed(&wire[split..]).unwrap();
+            assert_eq!(parser.state(), &ParseState::Complete, "split at {}", split);
+            assert_eq!(parser.take_response().unwrap().body, b"Hello World");
+        }
+    }
+
+    #[test]
+    fn test_content_length_byte_at_a_time() {
+        let wire: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nHello World";
+        let mut parser = ResponseParser::new();
+        for b in wire {
+            parser.feed(core::slice::from_ref(b)).unwrap();
+        }
+        assert_eq!(parser.take_response().unwrap().body, b"Hello World");
+    }
+
+    #[test]
+    fn test_limits_bound_buffering() {
+        // Endless header without a line end.
+        let mut parser = ResponseParser::new();
+        parser.feed(b"HTTP/1.1 200 OK\r\nX: ").unwrap();
+        let filler = [b'a'; 4096];
+        let mut result = Ok(());
+        for _ in 0..(MAX_HEADER_BYTES / filler.len() + 1) {
+            result = parser.feed(&filler);
+            if result.is_err() {
+                break;
+            }
+        }
+        assert_eq!(result, Err(HttpError::HeadersTooLarge));
+
+        let mut parser = ResponseParser::new();
+        let big = alloc::format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            MAX_BODY_BYTES + 1
+        );
+        assert_eq!(parser.feed(big.as_bytes()), Err(HttpError::BodyTooLarge));
+
+        let mut parser = ResponseParser::new();
+        assert_eq!(
+            parser.feed(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nFFFFFFFF\r\n"),
+            Err(HttpError::BodyTooLarge)
+        );
+
+        // An empty chunk size is malformed, not a terminator.
+        let mut parser = ResponseParser::new();
+        assert_eq!(
+            parser.feed(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\r\n"),
+            Err(HttpError::InvalidChunkSize)
+        );
     }
 
     #[test]
