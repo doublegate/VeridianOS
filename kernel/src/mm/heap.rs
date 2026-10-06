@@ -40,9 +40,10 @@ use super::VirtualAddress;
 // minimum (typically -m 32768M for Phase 6.5 self-hosting).
 // AArch64/RISC-V keep 8MB since they have less RAM (128MB default). Their
 // bump allocator never frees, so the BlockFS block cache recycles its
-// buffers. It keeps at most 1 MiB of clean blocks there (16 MiB on x86_64);
-// dirty blocks stay pinned until sync and can grow it past that
-// (fs/blockfs/cache.rs, ADR 0003).
+// buffers. Its configured capacity is 1 MiB there (16 MiB on x86_64). That
+// is a target, not a hard limit: dirty blocks stay pinned until sync and can
+// grow the slot pool past it, and the slots are recycled rather than freed,
+// so the pool stays that large after a sync (fs/blockfs/cache.rs, ADR 0003).
 #[cfg(target_arch = "x86_64")]
 #[allow(static_mut_refs)]
 static mut HEAP_MEMORY: [u8; 1024 * 1024 * 1024] = [0; 1024 * 1024 * 1024];

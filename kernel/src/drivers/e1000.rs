@@ -106,6 +106,9 @@ pub struct E1000Driver {
     rx_current: usize,
     tx_current: usize,
     name: alloc::string::String,
+    /// Set when `initialize` saw the reset time out, so `Drop` leaks the
+    /// DMA memory instead of trusting a second, independent reset poll.
+    reset_failed: bool,
     state: DeviceState,
     stats: DeviceStatistics,
 }
@@ -136,6 +139,7 @@ impl E1000Driver {
             rx_current: 0,
             tx_current: 0,
             name: crate::net::device::alloc_ethernet_name(),
+            reset_failed: false,
             state: DeviceState::Down,
             stats: DeviceStatistics::default(),
         };
@@ -212,6 +216,7 @@ impl E1000Driver {
 
     fn initialize(&mut self) -> Result<(), KernelError> {
         if !self.reset() {
+            self.reset_failed = true;
             // Programming rings into a controller that never left reset
             // would hand it DMA addresses it may act on later.
             return Err(KernelError::Timeout {
@@ -378,8 +383,11 @@ impl E1000Driver {
 
 impl Drop for E1000Driver {
     fn drop(&mut self) {
-        // Stop all DMA before the rings and buffers are freed.
-        if self.reset() {
+        // Stop all DMA before the rings and buffers are freed. After a reset
+        // that already timed out the device is not trusted again: a second
+        // poll that happens to succeed proves nothing about the first
+        // (review of the v0.26.0 stack, PR #15).
+        if !self.reset_failed && self.reset() {
             // SAFETY: the controller confirmed the reset, so it no longer
             // DMAs into the rings; `rings` is never used after this.
             unsafe { ManuallyDrop::drop(&mut self.rings) };

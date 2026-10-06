@@ -505,7 +505,9 @@ mod accessor_tests {
         );
         assert!(read_user_cstr(0, 10).is_err());
         assert!(read_user_cstr(KERNEL_ADDR, 10).is_err());
-        let bad = [0xffu8, 0];
+        // The source covers max_len + 1 bytes: the reader copies that
+        // much in one chunk before it looks for the NUL.
+        let bad = [0xffu8, 0, 0, 0, 0];
         assert_eq!(
             read_user_cstr(bad.as_ptr() as usize, 4),
             Err(SyscallError::InvalidArgument)

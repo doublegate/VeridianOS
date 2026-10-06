@@ -81,10 +81,6 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
         }
     }
 
-    // The child inherited the parent's shared-region mappings; tell each
-    // region, so its mapping count includes the child.
-    register_inherited_regions(&new_process);
-
     // Clone capabilities
     {
         let current_caps = current_process.capability_space.lock();
@@ -260,6 +256,12 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
 
     // Mark as ready and add to scheduler
     if let Some(process) = table::get_process(new_pid) {
+        // The child inherited the parent's shared-region mappings; tell
+        // each region, so its mapping count includes the child. Only now,
+        // once nothing before the table insert can fail: a registration
+        // for a child that was then dropped kept the region busy forever
+        // (review of the v0.26.0 stack, PR #15).
+        register_inherited_regions(&process);
         process.set_state(ProcessState::Ready);
 
         if let Some(thread) = process.get_thread(new_tid) {
@@ -335,10 +337,6 @@ pub fn cow_fork() -> Result<ProcessId, KernelError> {
             }
         }
     }
-
-    // The child inherited the parent's shared-region mappings; tell each
-    // region, so its mapping count includes the child.
-    register_inherited_regions(&new_process);
 
     // Clone capabilities
     {
@@ -449,6 +447,8 @@ pub fn cow_fork() -> Result<ProcessId, KernelError> {
     table::add_process(new_process)?;
 
     if let Some(process) = table::get_process(new_pid) {
+        // After the insert, as in fork_process.
+        register_inherited_regions(&process);
         process.set_state(ProcessState::Ready);
         if let Some(thread) = process.get_thread(new_tid) {
             create_scheduler_task(&process, &thread)?;

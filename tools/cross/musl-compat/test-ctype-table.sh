@@ -16,6 +16,9 @@ trap 'rm -rf "$work"' EXIT
 # From the mask defines through the end of the _ctype_b_table initializer.
 awk '/^#define _GU /{on=1} on{print} on && /^};/{exit}' "$here/glibc_shim.c" > "$work/table.inc"
 grep -q '_ctype_b_table' "$work/table.inc" || { echo "FAIL: table not found in glibc_shim.c" >&2; exit 1; }
+# The range ends at the first "};": make sure that was the table's own end.
+grep -qF '[128 + 0x7F]' "$work/table.inc" \
+  || { echo "FAIL: extracted table is truncated (no entry for 0x7F)" >&2; exit 1; }
 
 cat > "$work/t.c" <<'C'
 #include <ctype.h>
