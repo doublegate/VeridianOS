@@ -52,6 +52,10 @@ const TIMER_WHEEL_SLOTS: usize = 256;
 /// roughly 48 KiB.
 const MAX_TIMERS: usize = 1024;
 
+/// Callbacks handed out per pass by `TimerWheel::take_due`; a fixed buffer
+/// so firing timers needs no heap allocation.
+const FIRE_BATCH: usize = 64;
+
 /// Monotonically increasing counter for assigning unique timer IDs.
 static NEXT_TIMER_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -114,6 +118,8 @@ struct Timer {
     callback: TimerCallback,
     /// Whether this timer is currently active.
     active: bool,
+    /// Expired, and its callback not yet handed out by `take_due`.
+    due: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +190,7 @@ impl TimerWheel {
             remaining_ms: interval_ms,
             callback,
             active: true,
+            due: false,
         });
 
         self.active_count += 1;
@@ -198,8 +205,12 @@ impl TimerWheel {
         for entry in self.timers.iter_mut() {
             if let Some(timer) = entry {
                 if timer.id == id {
+                    // An expired one-shot awaiting its callback was already
+                    // taken off the active count by advance().
+                    if timer.active {
+                        self.active_count = self.active_count.saturating_sub(1);
+                    }
                     *entry = None;
-                    self.active_count = self.active_count.saturating_sub(1);
                     return Ok(());
                 }
             }
@@ -213,55 +224,87 @@ impl TimerWheel {
 
     /// Advance all timers by `elapsed_ms` milliseconds.
     ///
-    /// Any timer whose remaining time reaches zero is fired (its callback
-    /// is invoked). One-shot timers are automatically removed after
-    /// firing; periodic timers are reloaded with their original interval.
-    fn tick(&mut self, elapsed_ms: u64) {
+    /// Every timer whose remaining time reaches zero is marked due. One-shot
+    /// timers stop counting as active; periodic timers are reloaded with
+    /// their interval. Nothing is fired here: [`Self::take_due`] hands the
+    /// due callbacks out in bounded batches so the caller can run them after
+    /// dropping the wheel lock.
+    fn advance(&mut self, elapsed_ms: u64) {
         // Advance the wheel position for bookkeeping.
         self.current_slot = (self.current_slot + elapsed_ms as usize) % TIMER_WHEEL_SLOTS;
 
-        // Collect IDs and callbacks of timers that need to fire so we can
-        // invoke callbacks outside the mutable borrow of self.timers.
-        // Use a fixed-size buffer to avoid heap allocation.
-        let mut fired: [(TimerId, TimerCallback); 64] = [(TimerId(0), noop_callback); 64];
-        let mut fired_count = 0usize;
+        for timer in self.timers.iter_mut().flatten() {
+            if !timer.active {
+                continue;
+            }
 
-        for entry in self.timers.iter_mut() {
-            if let Some(timer) = entry {
-                if !timer.active {
-                    continue;
-                }
-
-                if timer.remaining_ms <= elapsed_ms {
-                    // Timer expired -- record it for firing.
-                    if fired_count < fired.len() {
-                        fired[fired_count] = (timer.id, timer.callback);
-                        fired_count += 1;
+            if timer.remaining_ms <= elapsed_ms {
+                // A due timer fires once even if it expires again before
+                // its callback is collected.
+                timer.due = true;
+                match timer.mode {
+                    TimerMode::OneShot => {
+                        // The entry is freed when take_due() collects it.
+                        timer.active = false;
+                        self.active_count = self.active_count.saturating_sub(1);
                     }
-
-                    match timer.mode {
-                        TimerMode::OneShot => {
-                            // Remove one-shot timers.
-                            *entry = None;
-                            self.active_count = self.active_count.saturating_sub(1);
-                        }
-                        TimerMode::Periodic => {
-                            // Reload periodic timers, accounting for overshoot.
-                            let overshoot = elapsed_ms.saturating_sub(timer.remaining_ms);
-                            timer.remaining_ms = timer
-                                .interval_ms
-                                .saturating_sub(overshoot % timer.interval_ms);
-                        }
+                    TimerMode::Periodic => {
+                        // Reload periodic timers, accounting for overshoot.
+                        let overshoot = elapsed_ms.saturating_sub(timer.remaining_ms);
+                        timer.remaining_ms = timer
+                            .interval_ms
+                            .saturating_sub(overshoot % timer.interval_ms);
                     }
-                } else {
-                    timer.remaining_ms -= elapsed_ms;
                 }
+            } else {
+                timer.remaining_ms -= elapsed_ms;
             }
         }
+    }
 
-        // Fire callbacks after releasing the mutable borrow on timer entries.
-        for &(id, cb) in fired.iter().take(fired_count) {
-            (cb)(id);
+    /// Move up to `out.len()` due timers into `out`, clearing their due flag
+    /// and freeing collected one-shot entries. Returns how many were taken;
+    /// call again until it returns 0.
+    ///
+    /// The old tick() recorded at most 64 expirations per tick and silently
+    /// dropped the callbacks of the rest while still removing or reloading
+    /// them (review of the v0.26.0 stack, PR #11). Due timers past the batch
+    /// now simply stay due for the next call.
+    fn take_due(&mut self, out: &mut [(TimerId, TimerCallback)]) -> usize {
+        let mut n = 0;
+        for entry in self.timers.iter_mut() {
+            if n == out.len() {
+                break;
+            }
+            let Some(timer) = entry else { continue };
+            if !timer.due {
+                continue;
+            }
+            out[n] = (timer.id, timer.callback);
+            n += 1;
+            if timer.active {
+                timer.due = false;
+            } else {
+                *entry = None;
+            }
+        }
+        n
+    }
+
+    /// Advance by `elapsed_ms` and fire every due callback (host tests; the
+    /// kernel path is [`timer_tick`], which fires outside the lock).
+    #[cfg(test)]
+    fn tick(&mut self, elapsed_ms: u64) {
+        self.advance(elapsed_ms);
+        let mut batch = [(TimerId(0), noop_callback as TimerCallback); FIRE_BATCH];
+        loop {
+            let n = self.take_due(&mut batch);
+            if n == 0 {
+                break;
+            }
+            for &(id, cb) in &batch[..n] {
+                cb(id);
+            }
         }
     }
 
@@ -346,9 +389,26 @@ pub(crate) fn timer_tick(elapsed_ms: u64) {
     PENDING_WHEEL_MS.fetch_add(elapsed_ms, Ordering::AcqRel);
     TIMER_WHEEL.try_with_mut(|wheel| {
         if let Some(mut wheel) = wheel.try_lock() {
-            wheel.tick(PENDING_WHEEL_MS.swap(0, Ordering::AcqRel));
+            wheel.advance(PENDING_WHEEL_MS.swap(0, Ordering::AcqRel));
         }
     });
+
+    // Fire due callbacks in batches, each after both locks are dropped, so a
+    // callback that creates or cancels a timer does not spin on the lock its
+    // own caller holds. Anything left due (lock contended) fires next tick.
+    let mut batch = [(TimerId(0), noop_callback as TimerCallback); FIRE_BATCH];
+    loop {
+        let n = TIMER_WHEEL
+            .try_with_mut(|wheel| wheel.try_lock().map(|mut w| w.take_due(&mut batch)))
+            .flatten()
+            .unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        for &(id, cb) in &batch[..n] {
+            cb(id);
+        }
+    }
 }
 
 /// Return the monotonic uptime in milliseconds.
@@ -444,6 +504,52 @@ mod tests {
         wheel.tick(110);
         // Periodic timer should still be active.
         assert_eq!(wheel.pending_count(), 1);
+    }
+
+    static ONE_SHOT_FIRES: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+    static PERIODIC_FIRES: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+
+    fn count_one_shot(_id: TimerId) {
+        ONE_SHOT_FIRES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn count_periodic(_id: TimerId) {
+        PERIODIC_FIRES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn test_timer_wheel_fires_every_one_shot_past_a_batch() {
+        // More than one 64-entry batch expiring in the same tick (review of
+        // the v0.26.0 stack, PR #11): every callback must run exactly once.
+        let mut wheel = TimerWheel::new();
+        for _ in 0..100 {
+            wheel
+                .add_timer(TimerMode::OneShot, 10, count_one_shot)
+                .unwrap();
+        }
+        wheel.tick(10);
+        assert_eq!(ONE_SHOT_FIRES.load(Ordering::Relaxed), 100);
+        assert_eq!(wheel.pending_count(), 0);
+        assert!(wheel.timers.iter().all(|t| t.is_none()));
+        wheel.tick(10);
+        assert_eq!(ONE_SHOT_FIRES.load(Ordering::Relaxed), 100);
+    }
+
+    #[test]
+    fn test_timer_wheel_fires_every_periodic_past_a_batch() {
+        let mut wheel = TimerWheel::new();
+        for _ in 0..100 {
+            wheel
+                .add_timer(TimerMode::Periodic, 10, count_periodic)
+                .unwrap();
+        }
+        wheel.tick(10);
+        assert_eq!(PERIODIC_FIRES.load(Ordering::Relaxed), 100);
+        assert_eq!(wheel.pending_count(), 100);
+        wheel.tick(10);
+        assert_eq!(PERIODIC_FIRES.load(Ordering::Relaxed), 200);
     }
 
     #[test]
