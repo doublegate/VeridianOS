@@ -61,6 +61,38 @@ pub enum NodeType {
     Symlink,
 }
 
+/// POSIX rules for a rename that replaces `existing` with a node of type
+/// `moving`: a directory may only replace an empty directory, and a
+/// non-directory only a non-directory.
+pub(crate) fn check_rename_replace(
+    moving: NodeType,
+    existing: &dyn VfsNode,
+) -> Result<(), KernelError> {
+    use crate::error::FsError;
+    let existing_is_dir = existing.node_type() == NodeType::Directory;
+    match (moving == NodeType::Directory, existing_is_dir) {
+        (true, true) => {
+            let busy = existing
+                .readdir()?
+                .iter()
+                .any(|e| e.name != "." && e.name != "..");
+            if busy {
+                Err(KernelError::FsError(FsError::DirectoryNotEmpty))
+            } else {
+                Ok(())
+            }
+        }
+        (true, false) => Err(KernelError::FsError(FsError::NotADirectory)),
+        (false, true) => Err(KernelError::FsError(FsError::IsADirectory)),
+        (false, false) => Ok(()),
+    }
+}
+
+/// Names that can never be a rename source or target.
+pub(crate) fn is_special_name(name: &str) -> bool {
+    name.is_empty() || name == "." || name == ".."
+}
+
 /// File permissions (Unix-style)
 #[derive(Debug, Clone, Copy)]
 pub struct Permissions {
@@ -245,6 +277,19 @@ pub trait VfsNode: Send + Sync {
 
     /// Truncate the file to the specified size
     fn truncate(&self, size: usize) -> Result<(), KernelError>;
+
+    /// Move entry `old_name` of this directory to `new_name` in
+    /// `new_parent` (same filesystem), replacing an existing entry there
+    /// under POSIX rules. The node itself moves: nothing is copied, its
+    /// owner, mode and inode are kept (FS-PERF-03).
+    fn rename(
+        &self,
+        _old_name: &str,
+        _new_parent: &Arc<dyn VfsNode>,
+        _new_name: &str,
+    ) -> Result<(), KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotSupported))
+    }
 
     /// Create a hard link to this node
     fn link(&self, _name: &str, _target: Arc<dyn VfsNode>) -> Result<(), KernelError> {
@@ -1260,6 +1305,81 @@ pub fn append_file(path: &str, data: &[u8]) -> Result<usize, KernelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FS-PERF-03: the same rename behaviour on every filesystem that
+    /// implements it.
+    fn rename_contract(fs: &dyn Filesystem) {
+        let root = fs.root();
+        let a = root.mkdir("a", Permissions::default()).unwrap();
+        let b = root.mkdir("b", Permissions::default()).unwrap();
+        let f = a.create("f", Permissions::from_mode(0o640)).unwrap();
+        f.write(0, b"payload").unwrap();
+        let _ = f.chown(Some(1000), Some(100));
+        let inode = f.metadata().unwrap().inode;
+
+        // File across directories: same node, data, mode and owner.
+        a.rename("f", &b, "g").unwrap();
+        assert!(a.lookup("f").is_err());
+        let g = b.lookup("g").unwrap();
+        let meta = g.metadata().unwrap();
+        assert_eq!(meta.inode, inode);
+        assert_eq!(meta.permissions.to_mode(), 0o640);
+        let mut buf = [0u8; 7];
+        assert_eq!(g.read(0, &mut buf).unwrap(), 7);
+        assert_eq!(&buf, b"payload");
+
+        // Same-node rename is a no-op; replacing follows POSIX.
+        b.rename("g", &b, "g").unwrap();
+        let h = b.create("h", Permissions::default()).unwrap();
+        h.write(0, b"old").unwrap();
+        b.rename("g", &b, "h").unwrap(); // file replaces file
+        assert!(b.lookup("g").is_err());
+        let mut buf = [0u8; 7];
+        b.lookup("h").unwrap().read(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"payload");
+        let d = b.mkdir("d", Permissions::default()).unwrap();
+        assert!(b.rename("h", &b, "d").is_err(), "file over directory");
+        assert!(b.rename("d", &b, "h").is_err(), "directory over file");
+        d.create("x", Permissions::default()).unwrap();
+        let e = b.mkdir("e", Permissions::default()).unwrap();
+        assert!(b.rename("e", &b, "d").is_err(), "over non-empty directory");
+        assert!(b.rename(".", &b, "z").is_err());
+
+        // Directory across parents: contents follow, ".." points at the
+        // new parent.
+        b.rename("d", &a, "moved").unwrap();
+        let moved = a.lookup("moved").unwrap();
+        assert!(moved.lookup("x").is_ok());
+        let parent = moved
+            .readdir()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.name == "..")
+            .unwrap();
+        assert_eq!(parent.inode, a.metadata().unwrap().inode);
+        // An empty directory may replace an empty directory.
+        a.mkdir("empty", Permissions::default()).unwrap();
+        b.rename("e", &a, "empty").unwrap();
+        assert!(b.lookup("e").is_err());
+    }
+
+    #[test]
+    fn rename_on_ramfs_tmpfs_blockfs() {
+        rename_contract(&ramfs::RamFs::new());
+        rename_contract(&tmpfs::TmpFs::new(1 << 20));
+        let bfs = blockfs::BlockFs::format(4096, 256).unwrap();
+        rename_contract(&bfs);
+    }
+
+    #[test]
+    fn rename_refuses_other_filesystems() {
+        let (x, y) = (
+            ramfs::RamFs::new(),
+            blockfs::BlockFs::format(1024, 64).unwrap(),
+        );
+        x.root().create("f", Permissions::default()).unwrap();
+        assert!(x.root().rename("f", &y.root(), "f").is_err());
+    }
 
     #[test]
     fn permissions_mode_round_trip_includes_sticky() {

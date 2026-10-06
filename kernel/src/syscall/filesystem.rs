@@ -1482,28 +1482,37 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
     let src = vfs_guard
         .resolve_path_no_follow(old)
         .map_err(map_resolve_err)?;
+    let (old_parent_path, old_name) = split_path(old)?;
+    let (new_parent_path, new_name) = split_path(new)?;
+
     if src.node_type() == crate::fs::NodeType::Directory {
-        // Directory rename needs VfsNode::rename (FS-PERF-03).
-        return Err(SyscallError::NotImplemented);
+        // A directory cannot move into its own subtree (POSIX: EINVAL).
+        let old_slash = alloc::format!("{}/", old.trim_end_matches('/'));
+        if new.starts_with(&old_slash) {
+            return Err(SyscallError::InvalidArgument);
+        }
+        // Moving it to another parent rewrites its "..", which needs write
+        // permission on the directory itself.
+        if old_parent_path != new_parent_path {
+            let (uid, gid) = caller_creds();
+            let meta = src.metadata().map_err(|_| SyscallError::InvalidState)?;
+            if uid != 0 && !meta.permissions.can_write(uid, gid, meta.uid, meta.gid) {
+                return Err(SyscallError::PermissionDenied);
+            }
+        }
     }
 
-    let (new_parent, new_name) = split_path(new)?;
-    let parent = vfs_guard
-        .resolve_path(&new_parent)
+    let old_parent = vfs_guard
+        .resolve_path(&old_parent_path)
         .map_err(map_resolve_err)?;
-    if let Ok(existing) = vfs_guard.resolve_path_no_follow(new) {
-        if alloc::sync::Arc::ptr_eq(&existing, &src) {
-            return Ok(0); // same file: POSIX says do nothing
-        }
-        if existing.node_type() == crate::fs::NodeType::Directory {
-            return Err(SyscallError::IsADirectory);
-        }
-        parent.unlink(&new_name).map_err(super::map_kernel_error)?;
-    }
-    parent
-        .link(&new_name, src)
+    let new_parent = vfs_guard
+        .resolve_path(&new_parent_path)
+        .map_err(map_resolve_err)?;
+    // The node moves; nothing is copied, and a symlink at `new` is replaced
+    // rather than followed (FS-PERF-03).
+    old_parent
+        .rename(&old_name, &new_parent, &new_name)
         .map_err(super::map_kernel_error)?;
-    vfs_guard.unlink(old).map_err(super::map_kernel_error)?;
     Ok(0)
 }
 

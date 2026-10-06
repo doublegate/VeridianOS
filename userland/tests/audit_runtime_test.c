@@ -434,6 +434,31 @@ static void test_map_fixed_limits(void)
            ok_top && guard == MAP_FAILED && kern == MAP_FAILED && span == MAP_FAILED, why);
 }
 
+/* --- Directory rename (FS-PERF-03): the node moves, ".." follows. ----- */
+static void test_rename_directory(void)
+{
+    char buf[16] = {0};
+    struct stat parent, dotdot;
+    mkdir("/tmp/rd", 0755);
+    mkdir("/tmp/rd/a", 0755);
+    mkdir("/tmp/rd/b", 0755);
+    int ok = write_file("/tmp/rd/a/inner", "inside", 0644) == 0 &&
+             rename("/tmp/rd/a", "/tmp/rd/b/moved") == 0 &&
+             access("/tmp/rd/a", F_OK) != 0 &&
+             read_file("/tmp/rd/b/moved/inner", buf, sizeof(buf)) == 0 &&
+             strcmp(buf, "inside") == 0 &&
+             stat("/tmp/rd/b", &parent) == 0 &&
+             stat("/tmp/rd/b/moved/..", &dotdot) == 0 &&
+             parent.st_ino == dotdot.st_ino;
+    report("rename_directory_moves_subtree", ok, "contents or .. wrong after move");
+
+    errno = 0;
+    int r = rename("/tmp/rd/b", "/tmp/rd/b/moved/sub");
+    static char why[48];
+    snprintf(why, sizeof(why), "rename into own subtree: %d errno %d", r, errno);
+    report("rename_into_own_subtree_einval", r != 0 && errno == EINVAL, why);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -453,6 +478,7 @@ int main(int argc, char **argv)
     test_sockets();
     test_timed_waits();
     test_map_fixed_limits();
+    test_rename_directory();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

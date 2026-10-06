@@ -25,7 +25,9 @@ struct TmpNode {
     children: RwLock<BTreeMap<String, Arc<TmpNode>>>,
     metadata: RwLock<Metadata>,
     inode: u64,
-    parent_inode: u64,
+    /// Parent directory inode (".."); changes when a rename moves this
+    /// directory.
+    parent_inode: core::sync::atomic::AtomicU64,
     /// Shared reference to the filesystem's total bytes used counter
     bytes_used: Arc<AtomicUsize>,
     /// Shared reference to the filesystem's size limit
@@ -56,7 +58,7 @@ impl TmpNode {
                 inode,
             }),
             inode,
-            parent_inode,
+            parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
             bytes_used,
             size_limit,
         }
@@ -85,7 +87,7 @@ impl TmpNode {
                 inode,
             }),
             inode,
-            parent_inode,
+            parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
             bytes_used,
             size_limit,
         }
@@ -116,7 +118,7 @@ impl TmpNode {
                 inode,
             }),
             inode,
-            parent_inode,
+            parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
             bytes_used,
             size_limit,
         }
@@ -217,7 +219,9 @@ impl VfsNode for TmpNode {
         entries.push(DirEntry {
             name: String::from(".."),
             node_type: NodeType::Directory,
-            inode: self.parent_inode,
+            inode: self
+                .parent_inode
+                .load(core::sync::atomic::Ordering::Relaxed),
         });
 
         for (name, child) in children.iter() {
@@ -358,6 +362,55 @@ impl VfsNode for TmpNode {
         metadata.modified = crate::arch::timer::get_timestamp_secs();
 
         Ok(())
+    }
+
+    fn rename(
+        &self,
+        old_name: &str,
+        new_parent: &Arc<dyn VfsNode>,
+        new_name: &str,
+    ) -> Result<(), KernelError> {
+        if self.node_type != NodeType::Directory {
+            return Err(KernelError::FsError(FsError::NotADirectory));
+        }
+        if super::is_special_name(old_name) || super::is_special_name(new_name) {
+            return Err(KernelError::FsError(FsError::InvalidPath));
+        }
+        let np = new_parent
+            .as_any()
+            .and_then(|a| a.downcast_ref::<TmpNode>())
+            .ok_or(KernelError::FsError(FsError::CrossDevice))?;
+        if np.node_type != NodeType::Directory {
+            return Err(KernelError::FsError(FsError::NotADirectory));
+        }
+        let node = self
+            .children
+            .read()
+            .get(old_name)
+            .cloned()
+            .ok_or(KernelError::FsError(FsError::NotFound))?;
+        let existing = np.children.read().get(new_name).cloned();
+        if let Some(existing) = existing {
+            if Arc::ptr_eq(&existing, &node) {
+                return Ok(()); // same node: POSIX says do nothing
+            }
+            super::check_rename_replace(node.node_type, &*existing)?;
+            // The parent's own unlink releases the replaced file's bytes.
+            np.unlink(new_name)?;
+        }
+        self.children.write().remove(old_name);
+        np.children
+            .write()
+            .insert(String::from(new_name), node.clone());
+        if node.node_type == NodeType::Directory {
+            node.parent_inode
+                .store(np.inode, core::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        Some(self)
     }
 
     fn link(&self, name: &str, target: Arc<dyn VfsNode>) -> Result<(), KernelError> {
