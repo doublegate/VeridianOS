@@ -85,13 +85,13 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 <img src="images/veridian-architecture.png" alt="VeridianOS Architecture Diagram" width="100%" />
 </div>
 
-All drivers and services run in user space with capability-controlled access to hardware. The microkernel provides only memory management, scheduling, IPC, and the capability system. See [Architecture Overview](docs/ARCHITECTURE-OVERVIEW.md) for detailed design documentation and [Invariants](docs/INVARIANTS.md) for the authoritative list of architectural invariants.
+The design goal is a microkernel that provides only memory management, scheduling, IPC and the capability system, with drivers and services in user space under capability-controlled access to hardware. Today drivers, filesystems, the network stack and the desktop still run in the kernel; moving them out is planned work (critique C6 in the audit plan). See [Known Limitations](docs/KNOWN-LIMITATIONS.md). See [Architecture Overview](docs/ARCHITECTURE-OVERVIEW.md) for detailed design documentation and [Invariants](docs/INVARIANTS.md) for the authoritative list of architectural invariants.
 
 ---
 
 ## Project Status
 
-**Version**: v0.25.2 | **All development phases complete (0-12)** | **83 releases published**
+**Version**: v0.26.0 | **All development phases complete (0-12)** | **84 releases published**
 
 | Metric | Value |
 | --- | --- |

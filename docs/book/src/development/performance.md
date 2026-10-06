@@ -20,7 +20,7 @@ Measured with 7 in-kernel micro-benchmarks on QEMU x86_64 with KVM (i9-10850K):
 
 | Metric | Target | Achieved |
 |--------|--------|----------|
-| IPC Latency | <5us | <1us |
+| IPC Latency | <5us | not measured: IPC is not reachable from user space yet (see Known Limitations) |
 | Context Switch | <10us | <10us |
 | Memory Allocation | <1us | <1us |
 | Capability Lookup | O(1) | O(1) |

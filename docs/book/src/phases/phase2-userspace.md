@@ -100,7 +100,7 @@ capabilities = ["CAP_NET_ADMIN", "CAP_NET_RAW"]
 
 ### User-Space Drivers
 
-All drivers run in user space for isolation:
+In the design, all drivers run in user space for isolation (today they run in the kernel; see Known Limitations):
 
 ```rust
 pub trait Driver {

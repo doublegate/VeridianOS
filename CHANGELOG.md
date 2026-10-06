@@ -2,6 +2,158 @@
 
 ---
 
+## [v0.26.0] - 2026-10-06
+
+### v0.26.0: Audit Remediation -- Security, Stability and Performance (P0 + P1)
+
+v0.26.0 remediates the findings of the 2026-10-05 performance and quality audit
+(`docs/PERFORMANCE_AND_QUALITY_AUDIT_MATRIX.md`).
+
+Each finding was first re-verified against the code; the per-finding results are in
+`docs/audit/AUDIT-VERIFICATION-2026-10-05.md`. Verification also found 34 defects the audit missed
+(N-01..N-34), and the same file tracks all of them.
+
+**Status:**
+
+- **Fixed:** 86 findings.
+- **Deferred:** 2.
+- **Still open:** 24, all planned for v0.27 or later.
+
+**Effect:** many security holes close. Every architecture gets a working clock and timer interrupts,
+and allocators, scheduler, filesystem and networking are faster. Documentation now matches what the
+code does.
+
+**Compared with v0.25.2:** 234 files changed (+20,620 / -7,669). Host unit tests rise from 4,284 to
+4,413, in-kernel boot tests from 29 to 34 on all three architectures, and a new in-guest runtime
+suite (`audit_runtime_test`) runs 18 checks on the BlockFS root.
+
+#### Security (P0)
+
+- **User memory**
+  - x86_64 user copies return EFAULT instead of aborting the kernel.
+  - The fault resolver is narrowed, CR0.WP is enforced, and user pointers are checked against one
+    user address-space limit.
+  - `MAP_FIXED` is bounded.
+  - RISC-V runs Sv48 with `sfence.vma`.
+- **DRM:** closed an arbitrary kernel read/write and a physical-memory mmap, tightened DRM
+  authorization, scoped the boot PID and fixed `faccessat`.
+- **IPC**
+  - Fast-path sends are validated and delivered to the capability's own endpoint.
+  - Endpoints and processes are reference-counted (`Arc`), so freed objects are no longer used.
+  - Closed the lost-wakeup window.
+  - Replaced the unsound async ring.
+  - Fixed capability ID aliasing, stale-token removal and the revocation garbage collector.
+- **Filesystem**
+  - Paths resolve canonically before mount and MAC checks.
+  - chmod/chown/unlink/rename permissions are enforced, including sticky directories and the
+    creator's ownership and umask.
+  - Directory renames lock, and refuse to move a directory into its own subtree.
+- **Drivers**
+  - virtio-net, e1000 and NVMe now DMA from frame-backed memory rather than stack and heap
+    addresses.
+  - virtio used-ring IDs are bounds-checked.
+  - virtio-blk quarantines its request frame on timeout.
+  - NVMe has completion phase tracking and timeouts that report errors.
+- **Network**
+  - UDP and IP lengths are validated.
+  - Spoofed DHCP replies are rejected, and an ACK must carry the server identifier.
+  - Sockets are per-process file descriptors, and SCM_RIGHTS passes open files.
+  - Fixed a deadlock when closing a Unix socket.
+- **Processes and futexes**
+  - Detached threads and dead tasks are reaped.
+  - `FUTEX_WAKE_OP` is decoded like Linux and its user-memory atomic handles faults.
+  - A failed exec leaves the caller intact.
+- **Memory**
+  - The bitmap allocator stays within RAM.
+  - The AArch64/RISC-V bump allocator is atomic and aligned.
+  - KSM compares page contents before merging.
+  - Unmapping a device or shared mapping no longer frees its frames (N-32).
+- **libc:** the allocator is locked, `aligned_alloc` is fixed, and number and scanf field widths are
+  bounded.
+
+#### Clocks, timers and interrupts (ADR 0001)
+
+Before this release, no timed wait worked from user space and `CLOCK_MONOTONIC` read 0. Each
+architecture now has a real clock and tick:
+
+| Arch | Clock | Tick |
+|---|---|---|
+| x86_64 | TSC, calibrated from CPUID, the hypervisor leaf or the PIT | LAPIC in TSC-deadline or periodic mode |
+| AArch64 | CNTVCT_EL0 | EL1 virtual timer through GICv2, with a real exception vector table |
+| RISC-V | the `time` CSR | Sstc or SBI timer, with a trap entry and device-tree parsing |
+
+All three tick at 1000 Hz, and the tick never spins on a lock.
+
+#### Performance (P1)
+
+Times are from the in-kernel `perf` command (x86_64/KVM), now in calibrated nanoseconds; see
+`docs/PERFORMANCE-REPORT.md`.
+
+| Measurement | v0.25.2 | v0.26.0 |
+|---|---|---|
+| Per-CPU frame allocation | 894 ns | 62 ns |
+| Global frame allocation | 448 ns | 272 ns |
+| Capability lookup (new `cap_lookup` benchmark) | 202 ns | 93 ns |
+| BlockFS root mount | 3,537 ms | 86 ms |
+
+- **Memory:** frame caches really are per-CPU; the bitmap is scanned a word at a time with a hint.
+- **Scheduler:** bounded run-queue search, in-place removal, queues on the heap.
+- **Futex:** hashed per-bucket wait queues.
+- **Filesystem**
+  - BlockFS reads blocks lazily into a bounded cache, and dirty blocks stay in memory until sync
+    (ADR 0003).
+  - virtio-blk sends one request per 4 KiB block.
+  - Rename moves the node natively, including directories.
+  - Path lookups work on a mount-table snapshot instead of under a global lock.
+  - fd allocation keeps a lowest-free hint.
+- **Capabilities:** a per-process hash table whose memory follows the capabilities held, and a
+  lock-free ID allocator.
+- **Network**
+  - The HTTP parser uses a read cursor and size limits, and no longer silently truncates chunked
+    bodies (N-31).
+  - IPv4 picks the interface and next hop from the routing table by longest prefix.
+- **IPC**
+  - Shared regions map their own frames.
+  - A 16 KiB kernel-buffered message tier sits between register messages and shared regions.
+  - Rights can only be attenuated when shared.
+  - The receive path no longer overflows the caller's buffer (N-34).
+- **Benchmarks:** they convert time at the calibrated clock rate. Earlier figures assumed 2 GHz and
+  overstated times by 1.8x.
+
+#### Platform fixes
+
+- AArch64 and RISC-V now find virtio-blk and virtio-net in any MMIO slot, mount the BlockFS root and
+  complete DHCP.
+- Fixed a RISC-V boot-stack overflow and a silent Stage 6 restart (N-13).
+- The KDE cross-compilation pipeline builds from a clean checkout using the scripts alone.
+
+#### Documentation
+
+- **ADRs**
+  - 0001: clock sources and timer interrupts.
+  - 0002: user address-space layout.
+  - 0003: BlockFS block cache.
+- **Compatibility:** `docs/compat/LINUX-SYSCALL-COVERAGE.md`, generated against Linux v7.2 by
+  `tools/compat/syscall_coverage.py`, plus the Linux/POSIX compatibility plan for v0.27-v0.31 (`docs/compat/COMPATIBILITY-PLAN.md`).
+- **New `docs/KNOWN-LIMITATIONS.md`.**
+  - The README and mdBook no longer claim working IPC, user-space drivers or sub-microsecond IPC
+    latency.
+  - Native IPC syscalls 0-7 cannot be reached from user programs (N-33, fix planned for v0.28).
+- **Corrected design docs:** capability system, IPC, performance report.
+
+#### Known limitations and deferrals
+
+See `docs/KNOWN-LIMITATIONS.md`.
+
+- **Next release (v0.27, process model and SMP):** user threads, preemption in syscall waits, SMP,
+  the AArch64 MMU, kernel stack guards and copy-on-write.
+- **Deferred from this release:**
+  - Frame-backed `wl_shm` (DRV-PERF-01, DESK-ARCH-01).
+  - Critique items C2-C4: build hygiene, a shared ABI crate and lifetime cleanup.
+  - Under C1, the CI job for the runtime suite; this release delivers C1's documentation part.
+
+---
+
 ## [v0.25.2] - 2026-03-10
 
 ### v0.25.2: Documentation Audit -- Archive Reorganization, mdBook Refresh, and File Naming Standardization

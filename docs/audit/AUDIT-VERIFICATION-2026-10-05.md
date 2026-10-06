@@ -44,8 +44,8 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 
 | ID | Verdict | Location | Notes | Target | Status |
 |---|---|---|---|---|---|
-| MEM-PERF-01 | CONFIRMED, LATENT | `mm/frame_allocator.rs:1118-1155` | One `Mutex` wraps all 16 caches; refill/drain take `FRAME_ALLOCATOR` while holding it. Frees bypass the per-CPU path entirely (`vas.rs:1029,1757`). `MAX_CPUS` is defined five times with two values. | v0.26.0 | open |
-| MEM-PERF-02 | CONFIRMED | `mm/frame_allocator.rs:250-285, 703-707` | Bit-by-bit scan from word 0; `stats.lock()` per allocation; also a per-allocation `reserved_regions.lock()` the matrix missed. | v0.26.0 | open |
+| MEM-PERF-01 | CONFIRMED, LATENT | `mm/frame_allocator.rs:1118-1155` | One `Mutex` wraps all 16 caches; refill/drain take `FRAME_ALLOCATOR` while holding it. Frees bypass the per-CPU path entirely (`vas.rs:1029,1757`). `MAX_CPUS` is defined five times with two values. | v0.26.0 | fixed (f15a144: per-CPU caches each under their own lock, refill/drain through a stack batch; frame_alloc_1 894 -> 62 ns) |
+| MEM-PERF-02 | CONFIRMED | `mm/frame_allocator.rs:250-285, 703-707` | Bit-by-bit scan from word 0; `stats.lock()` per allocation; also a per-allocation `reserved_regions.lock()` the matrix missed. | v0.26.0 | fixed (f15a144: word scans with a roving hint, atomic stats, reserved regions pre-marked; frame_alloc_global 448 -> 272 ns) |
 | MEM-PERF-03 / MEM-INC-01 | CONFIRMED (worse) | `process/fork.rs:66-79`, `mm/vas.rs:596-727`, `mm/page_fault.rs:179` | Fork deep-copies every page *and* registers the parent's frames in a global CoW table keyed by frame number (the table is documented as keyed by virtual address). Nothing marks pages read-only and nothing removes the entries, so they accumulate. No `PageFlags::COW` bit and no per-frame refcount exist. | v0.27.0 | open |
 | MEM-INC-02 | CONFIRMED | `mm/heap.rs:91-311`, `mm/vmm.rs` | Slab allocator builds slabs and discards them; every call goes to the fallback. `vmm.rs` is declared but nothing references it. | v0.27.0 | open |
 | MEM-ARCH-01 | CONFIRMED, dead code | `mm/vas.rs:1791-1843`, `mm/page_table.rs:381` | `map_page` always installs an L1 entry. Correction: offsets past 4 KB are demand-paged, not faulted. `VirtualAddressSpace::map_huge_page` has no callers. | v0.27.0 | open |
@@ -80,14 +80,14 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | ID | Verdict | Location | Notes | Target | Status |
 |---|---|---|---|---|---|
 | SCHED-PERF-01 | PARTIAL, LATENT | `sched/queue.rs:432`, `sched/percpu_queue.rs` | Global queue confirmed; `percpu_queue.rs` is declared but unreferenced. No contention exists while one CPU runs. | v0.27.0 | open |
-| SCHED-PERF-02 | PARTIAL, LATENT | `sched/scheduler.rs:234-273, 428-439, 455-488` | Unbounded requeue in CFS, RR and hybrid pickers. Unreachable today (default algorithm is Priority; affinity never changes). | v0.26.0 | open |
-| SCHED-PERF-03 | CONFIRMED | `sched/queue.rs:84-116, 422-458`, `sched/smp.rs:78` | ~72 KB `ReadyQueue` built on the stack; `smp` builds add 4.6 MB of BSS; `remove` is O(N) with a 2 KB copy. | v0.26.0 | open |
+| SCHED-PERF-02 | PARTIAL, LATENT | `sched/scheduler.rs:234-273, 428-439, 455-488` | Unbounded requeue in CFS, RR and hybrid pickers. Unreachable today (default algorithm is Priority; affinity never changes). | v0.26.0 | fixed (89ceaf0, e777121: first runnable task taken in place, no requeue loop) |
+| SCHED-PERF-03 | CONFIRMED | `sched/queue.rs:84-116, 422-458`, `sched/smp.rs:78` | ~72 KB `ReadyQueue` built on the stack; `smp` builds add 4.6 MB of BSS; `remove` is O(N) with a 2 KB copy. | v0.26.0 | fixed (89ceaf0: in-place removal, heap-allocated queues, the 4.6 MB BSS gone) |
 | SCHED-INC-01 | CONFIRMED | `process/sync.rs:672-680` | `Task::priority_boost` exists and is honoured for preemption, but is never set; the ready queue indexes by base priority. `PiMutex` has no users and `sync.rs` has no tests. | v0.27.0 | open |
 | SCHED-INC-02 | CONFIRMED, dead code | `sched/deadline.rs` | 33 tests, zero callers. | v0.27.0 | open |
 | SMP-PERF-01 | CONFIRMED | `sched/smp.rs`, `process/mod.rs` | See "Only CPU 0 runs" above. `current_process()` takes the global scheduler lock on every syscall. | v0.27.0 | open |
 | PROC-ARCH-01 | CONFIRMED | `mm/vas.rs:596-727` | Same root cause as MEM-PERF-03. | v0.27.0 | open |
 | SYS-PERF-01 | PARTIAL | `syscall/mod.rs:139-160` | Race confirmed. Impact overstated: the refill uses raw cycle counts, so the bucket refills to max on almost every syscall and is effectively never limiting. One global limiter, not per process. | v0.26.0 | fixed (371aa62) |
-| SYS-PERF-02 | CONFIRMED, LATENT | `syscall/futex.rs:71` | Single global table. | v0.26.0 | open |
+| SYS-PERF-02 | CONFIRMED, LATENT | `syscall/futex.rs:71` | Single global table. | v0.26.0 | fixed (8300628: 256 hashed buckets, word re-checked under the bucket lock) |
 | SYS-CONC-01 | CONFIRMED, LATENT | `syscall/futex.rs:425-439` | Non-atomic RMW; also ignores `FUTEX_OP_OPARG_SHIFT`, never wakes `uaddr2` waiters, and runs without the table lock. Syscalls run with interrupts off, so on one CPU nothing interleaves today. | v0.26.0 | fixed (ed89c26, a8937a2) |
 | SYS-INC-01 | CONFIRMED, dead code | `syscall/linux_compat.rs:31-59` | 64-PID limit confirmed, but `set_linux_abi` has no callers (`userspace/loader.rs:118` says not to call it), so the bitmap is always empty. | v0.27.0 | open |
 | SYS-SEC-01 | PARTIAL | `syscall/userspace.rs:51-146`, `arch/x86_64/idt.rs` | No `EFAULT` path and no fixup table: confirmed. The kernel does not halt on a user-address fault (see MEM-SEC-01). | v0.26.0 | fixed on x86_64 for the user accessors (34db90c); direct dereferences elsewhere remain |

@@ -9,6 +9,12 @@ A claim elsewhere in the documentation that contradicts this page is wrong. Plea
 
 ## Kernel limitations
 
+### Drivers and services run in the kernel (C6, planned v0.28+)
+
+The microkernel design places drivers, filesystems, network protocols and the desktop in user-space
+processes. Today all of them run in ring 0. Moving them out, in risk order, is critique item C6 of
+the audit plan.
+
 ### IPC is not reachable from user programs (N-33, planned v0.28)
 
 The native IPC syscalls 0-7 are send, receive, call, reply, create endpoint, bind, share memory and
